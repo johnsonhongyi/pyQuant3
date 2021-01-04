@@ -1,0 +1,210 @@
+sina_real
+
+.//*[@id='wrap']/div[5]/table[1]/tbody/tr/td[1]/div
+
+
+ʵʱ:
+http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=50&sort=changepercent&asc=0&node=sh_a&symbol=
+count
+http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount?node=sh_a
+
+��ҵ��
+http://vip.stock.finance.sina.com.cn/mkt/#cyb_root
+
+����
+count cyb
+http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount?node=cyb 
+
+http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=40&sort=changepercent&asc=0&node=sh_a&symbol=&_s_r_a=init
+
+
+������ҵ:
+
+http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getSymbolGN?symbol=sz002399
+
+�����ȡ:
+http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=40&sort=changepercent&asc=0&node=gn_gqjl&symbol=&_s_r_a=sort
+http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=40&sort=changepercent&asc=0&node=new_dzxx&symbol=&_s_r_a=sort
+
+{http://vip.stock.finance.sina.com.cn/moneyflow/#sczjlx}
+板块:fenlei([1,2,3])
+http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_bkzj_bk?page=1&num=5&sort=netamount&asc=0&fenlei=0
+[{cate_type:"0",category:"new_dzxx",name:"电子信息",avg_price:"27.3694",avg_changeratio:"0.00761857",turnover:"270.983",inamount:"42631995842.0000",outamount:"38987397085.0300",netamount:"3644598756.9700",ratioamount:"0.0423856",ts_symbol:"sz300366",ts_name:"创意信息",ts_trade:"82.3400",ts_changeratio:"0.100067",ts_ratioamount:"0.562114"},{cate_type:"0",category:"new_sphy",name:"食品行业",avg_price:"18.4954",avg_changeratio:"0.00674775",turnover:"389.203",inamount:"11693597256.1400",outamount:"10012664611.6700",netamount:"1680932644.4700",ratioamount:"0.0718024",ts_symbol:"sz002330",ts_name:"得利斯",ts_trade:"18.4200",ts_changeratio:"0.0835294",ts_ratioamount:"0.447654"},{cate_type:"0",category:"new_fdc",name:"房地产",avg_price:"13.5463",avg_changeratio:"0.00578491",turnover:"200.675",inamount:"20583808168.4300",outamount:"19332276655.0400",netamount:"1251531513.3900",ratioamount:"0.0300049",ts_symbol:"sz000918",ts_name:"嘉凯城",ts_trade:"6.1600",ts_changeratio:"0.1",ts_ratioamount:"0.744574"},{cate_type:"0",category:"new_jzjc",name:"建筑建材",avg_price:"10.9773",avg_changeratio:"0.00035084",turnover:"127.499",inamount:"10347971462.0200",outamount:"9133094405.6600",netamount:"1214877056.3600",ratioamount:"0.06007",ts_symbol:"sz002482",ts_name:"广田股份",ts_trade:"30.7900",ts_changeratio:"0.100036",ts_ratioamount:"0.73724"},{cate_type:"0",category:"new_nlmy",name:"农林牧渔",avg_price:"16.4389",avg_changeratio:"0.0194115",turnover:"277.354",inamount:"7518790424.6100",outamount:"6414488919.8500",netamount:"1104301504.7600",ratioamount:"0.0752423",ts_symbol:"sh600189",ts_name:"吉林森工",ts_trade:"15.1700",ts_changeratio:"0.100073",ts_ratioamount:"0.886259"}]
+市场:([sh,sz])
+http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/MoneyFlow.ssl_bkzj_ssggzj?page=1&num=5&sort=netamount&asc=0&bankuai=&shichang=
+[{symbol:"sh600887",name:"伊利股份",trade:"18.5200",changeratio:"0.0445572",turnover:"775.647",amount:"8649387203.0000",inamount:"4597201257.9200",outamount:"3197680829.9600",netamount:"1399520427.9600",ratioamount:"0.161806",r0_in:"4374744457.7600",r0_out:"2995825387.7400",r0_net:"1378919070.0200",r3_in:"58544.0000",r3_out:"0.0000",r3_net:"58544.0000",r0_ratio:"0.159424",r3_ratio:"6.76857e-06",r0x_ratio:"74.3849"},{symbol:"sh600383",name:"金地集团",trade:"16.2900",changeratio:"0.0925553",turnover:"383.969",amount:"2792458362.0000",inamount:"1870028481.3600",outamount:"726324346.1700",netamount:"1143704135.1900",ratioamount:"0.409569",r0_in:"1608165351.0400",r0_out:"563518684.9600",r0_net:"1044646666.0800",r3_in:"3100627.4700",r3_out:"2295933.6800",r3_net:"804693.7900",r0_ratio:"0.374096",r3_ratio:"0.000288167",r0x_ratio:"76.1035"},{symbol:"sh600536",name:"中国软件",trade:"37.8800",changeratio:"0.0998839",turnover:"774.043",amount:"1394769899.0000",inamount:"1118245089.7200",outamount:"177154069.2800",netamount:"941091020.4400",ratioamount:"0.674729",r0_in:"922112269.6000",r0_out:"117355036.6400",r0_net:"804757232.9600",r3_in:"10335252.9200",r3_out:"2054324.4400",r3_net:"8280928.4800",r0_ratio:"0.576982",r3_ratio:"0.00593713",r0x_ratio:"80.1786"},{symbol:"sz002202",name:"金风科技",trade:"25.2700",changeratio:"0.100131",turnover:"918.651",amount:"4776095232.0000",inamount:"2663847029.0900",outamount:"1806136497.7200",netamount:"857710531.3700",ratioamount:"0.179584",r0_in:"2228584613.4100",r0_out:"1441892263.6400",r0_net:"786692349.7700",r3_in:"3280261.4400",r3_out:"2027600.4000",r3_net:"1252661.0400",r0_ratio:"0.164715",r3_ratio:"0.000262277",r0x_ratio:"58.7044"},{symbol:"sz000793",name:"华闻传媒",trade:"15.2700",changeratio:"0.100144",turnover:"796.505",amount:"2006829952.0000",inamount:"1379762479.5400",outamount:"569265674.7500",netamount:"810496804.7900",ratioamount:"0.403869",r0_in:"1062147711.7000",r0_out:"296352476.0900",r0_net:"765795235.6100",r3_in:"10660881.9600",r3_out:"8936689.6500",r3_net:"1724192.3100",r0_ratio:"0.381594",r3_ratio:"0.000859162",r0x_ratio:"75.2951"}]
+
+
+{symbol:"sh603936",code:"603936",name:"��������",trade:"14.05",pricechange:"1.280",changepercent:"10.023",buy:"14.05",sell:"0.00",settlement:"12.77",open:"14.05",high:"14.05",low:"14.05",volume:9315,amount:130876,ticktime:"15:03:08",per:24.78,pb:3.15,mktcap:235126.75,nmc:58799.25,turnoverratio:0.02226}
+
+http://stock.jrj.com.cn/tzzs/zdtwdj.shtml
+jrj:
+
+
+资金及实时
+http://qt.gtimg.cn/q=ff_sz000001
+现金流数据仍然采用腾讯接口：沪市：http://qt.gtimg.cn/q=ff_sh<int>，深市：http://qt.gtimg.cn/q=ff_sz<int>
+
+      例如平安银行的现金流数据http://qt.gtimg.cn/q=ff_sz000001：
+
+v_ff_sz000001="sz000001~21162.20~24136.40~-2974.20~-8.31~14620.87~11646.65~2974.22~
+8.31~35783.07~261502.0~261158.3~平安银行~20151029~20151028^37054.20^39358.20~
+20151027^39713.50^42230.70~20151026^82000.80^83689.90~20151023^81571.30^71743.10";
+
+          比较重要的：1-主力流入；2-主力流出；3-主力净流量；4-主力流入/主力总资金；5-散户流入；6-散户流出；7-散户净流量；8-散户流入/散户总资金；9-总资金流量；12-名字；13-日期
+
+
+http://stock.qq.com/zjlx/#
+var ggDataURL = {
+        'in':{
+                '1': ['http://stock.gtimg.cn/data/view/zldx.php?t=1','stock_fund_netin_10'],
+                '5': ['http://stock.gtimg.cn/data/view/zldx.php?t=2','stock_fund_netin_5days']
+             },
+        'out':{
+                '1': ['http://stock.gtimg.cn/data/view/zldx.php?t=1','stock_fund_netout_10'],
+                '5': ['http://stock.gtimg.cn/data/view/zldx.php?t=2','stock_fund_netout_5days']
+              }
+    },
+    ggTableHead = '\
+            <table width="770" border="0" cellpadding="0" cellspacing="0" class="data notborT">\
+              <thead>\
+                <tr align="center">\
+                <th width="40">序号</th>\
+                <td width="70">股票代码</td>\
+                <td width="70">股票名称</td>\
+                <td width="150">主力@ADD_SUB@仓额(万元)</td>\
+                <td width="170">主力@ADD_SUB@仓占@DANG@日成交比</td>\
+                <td width="60">最新价</td>\
+                <td width="60">涨跌幅</td>\
+                <td style="width:150px;">主力增减仓10日趋势</td>\
+                </tr>\
+              </thead>\
+           ',
+
+
+http://s1.dfcfw.com/js/index.js?rt=0.6858937390291169
+http://s1.dfcfw.com/js/zs399001.js?rt=0.6858937390291169
+all index
+sh zs000001
+sz=zs399001
+zxb zs399005
+cyb zs399006
+
+http://data.eastmoney.com/stock/tradedetail.html
+ 
+http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=40&sort=symbol&asc=1&node=new_stock&symbol=&_s_r_a=init
+
+'var zjlx_detail="1,BK0707,8161420,-7933677,28635070464,-25143861760,52979125760,-54192905984,58718659584,-60057660928,42739257600,-43677684480,227742.85,349120.87,-121378.02,-133900.13,-93842.69,1.24%,1.90%,-0.66%,-0.73%,-0.51%,2016-01-06 15:22:09"'
+'var quote_zjl={rank:["14.40亿元,90.60亿元,105亿元,1,1416.00亿元,2500亿元,-4.97亿元,134.97亿元,130亿元,1,1795.70亿元,3000亿元"],pages:1}'
+'var C1Cache={quotation:["0000011,上证指数,3361.84,285243224064,74.13,2.25%,1003|91|31|86,1535|194|62|185","3990012,深证成指,11724.88,414256857088,256.82,2.24%,1003|91|31|86,1535|194|62|185"]}'
+http://s1.dfcfw.com/js/zs399006.js?rt=0.3585179701661414
+var zjlx_detail={data:"0.0000,0.00,0.0000,0.00,0.0000,0.00,0.0000,0.00,0.0000,0.00,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000,0.0000",update:"9:31"};//Create:01-07 08:47:35
+1999999
+0399001
+0159915
+47#IFL0
+var zjlx_detail={data:"-41.0477,-15.73,-19.6081,-7.51,-21.4396,-8.21,8.8590,3.39,32.1887,12.33,0.0000,0.0000,40.1185,-59.7266,59.5364,-80.9761,83.3855,-74.5265,71.3338,-39.1451,214.2558,-194.6477",update:"11:22"};//Create:01-07 11:21:43
+var zjlx_detail={data:"-290.3445,-15.78,-160.2566,-8.71,-130.0879,-7.07,66.0468,3.59,224.2977,12.19,0.0000,0.0000,287.9916,-448.2482,433.4875,-563.5754,582.7210,-516.6742,535.3717,-311.0740,1551.5802,-1391.3236",update:"11:20"};//Create:01-07 11:19:39
+var zjlx_detail={data:"-117.1432,-14.65,-62.8869,-7.86,-54.2563,-6.78,27.3218,3.42,89.8214,11.23,0.0000,0.0000,133.3795,-196.2664,179.4354,-233.6916,237.3453,-210.0235,219.4168,-129.5953,636.1974,-573.3104",update:"11:30"};//Create:01-07 11:29:09
+
+var hq_str_sz399001="深证成指,11504.900,11724.880,10745.470,11504.900,10745.470,0.000,0.000,7166194968,107974925855.400,0,0.000,0,0.000,0,0.000,0,0.000,0,0.000,0,0.000,0,0.000,0,0.000,0,0.000,0,0.000,2016-01-07,11:35:56,00";
+
+var rzrqhuizong=["2016-01-12,上海,610486743606,21769602015,1687383077,612174126683","2016-01-12,深圳,432250707788,21556485360,661841749,432912549537","2016-01-12,两市合计,1042737451394,43326087375,2349224826,1045086676220"]
+
+sina:
+http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=40&sort=symbol&asc=1&node=new_stock&symbol=&_s_r_a=init
+node: new_stock
+
+
+code:999999 20000101 20070101 op:3 ra/days:-0.02/1683  start:2000-01-04
+code:999999 20000101 20040501
+999999 op:1 ra:0.23 days:113  start:2003-11-13
+999999 op:3 ra:-0.03 days:694  start:2001-06-14
+code:999999 20000101 20040501 op:3 ra/days:-0.03/1035  start:2000-01-04
+code:999999 20050601 20080101
+999999 op:6 ra:8.33 days:628  start:2005-06-06
+999999 op:3 ra:-0.33 days:54  start:2007-10-16
+code:999999 20050601 20080101 op:6 ra/days:8.77/631  start:2005-06-01
+code:999999 20050601 20090101
+999999 op:1 ra:0.27 days:873  start:2005-06-06
+999999 op:3 ra:-0.26 days:299  start:2007-10-16
+code:999999 20050601 20090101 op:1 ra/days:0.27/876  start:2005-06-01
+code:999999 20071001 20090101
+999999 op:0 ra:0.2 days:47  start:2008-10-28
+999999 op:3 ra:-0.26 days:299  start:2007-10-16
+code:999999 20071001 20090101 op:3 ra/days:-0.26/305  start:2007-10-08
+code:999999 20071001 20080101
+999999 op:6 ra:0.27 days:23  start:2007-11-28
+999999 op:3 ra:-0.33 days:54  start:2007-10-16
+code:999999 20071001 20080101 op:3 ra/days:-0.31/60  start:2007-10-08
+code:999999 20071001 20080701
+New low !!! start:2008-04-22
+999999 op:-3 ra:-0.56 days:47  start:2008-04-22
+999999 op:-3 ra:-0.3 days:174  start:2007-10-16
+Mlist:[]
+code:999999 20071001 20080701 op:-3 ra/days:-0.3/180  start:2007-10-08
+code:999999 20071001 20090101
+999999 op:0 ra:0.2 days:47  start:2008-10-28
+999999 op:3 ra:-0.26 days:299  start:2007-10-16
+code:999999 20071001 20090101 op:3 ra/days:-0.26/305  start:2007-10-08
+code:999999 20071001 20090701
+999999 op:6 ra:0.39 days:166  start:2008-10-28
+999999 op:3 ra:-0.17 days:418  start:2007-10-16
+code:999999 20071001 20090701 op:3 ra/days:-0.17/424  start:2007-10-08
+code:999999 20071001 20100101
+999999 op:3 ra:0.3 days:291  start:2008-10-28
+999999 op:3 ra:-0.09 days:543  start:2007-10-16
+code:999999 20071001 20100101 op:3 ra/days:-0.09/549  start:2007-10-08
+code:999999 20071001 20100601
+999999 op:1 ra:0.16 days:391  start:2008-10-28
+999999 op:3 ra:-0.06 days:643  start:2007-10-16
+code:999999 20071001 20100601 op:3 ra/days:-0.07/649  start:2007-10-08
+code:999999 20071001 20110101
+999999 op:3 ra:0.06 days:533  start:2008-10-28
+999999 op:3 ra:-0.05 days:785  start:2007-10-16
+code:999999 20071001 20110101 op:3 ra/days:-0.05/791  start:2007-10-08
+code:999999 20071001 20110701
+999999 op:3 ra:0.04 days:653  start:2008-10-28
+999999 op:3 ra:-0.04 days:905  start:2007-10-16
+code:999999 20071001 20110701 op:3 ra/days:-0.04/911  start:2007-10-08
+code:999999 20071001 20120101
+999999 op:3 ra:0.01 days:777  start:2008-10-28
+999999 op:-3 ra:-0.04 days:1029  start:2007-10-16
+code:999999 20071001 20120101 op:-3 ra/days:-0.04/1035  start:2007-10-08
+code:999999 20071001 20120701
+999999 op:-3 ra:-0.0 days:894  start:2008-10-28
+999999 op:1 ra:-0.03 days:1146  start:2007-10-16
+code:999999 20071001 20120701 op:3 ra/days:-0.03/1152  start:2007-10-08
+code:999999 20071001 20130101
+999999 op:-3 ra:-0.02 days:1020  start:2008-10-28
+999999 op:3 ra:-0.03 days:1272  start:2007-10-16
+code:999999 20071001 20130101 op:3 ra/days:-0.03/1278  start:2007-10-08
+code:999999 20071001 20130701
+999999 op:-3 ra:-0.02 days:1134  start:2008-10-28
+999999 op:-3 ra:-0.03 days:1386  start:2007-10-16
+code:999999 20071001 20130701 op:1 ra/days:-0.03/1392  start:2007-10-08
+code:999999 20071001 20140101
+999999 op:-3 ra:-0.02 days:1258  start:2008-10-28
+999999 op:3 ra:-0.03 days:1510  start:2007-10-16
+code:999999 20071001 20140101 op:3 ra/days:-0.03/1516  start:2007-10-08
+code:999999 20071001 20140701
+999999 op:-3 ra:-0.02 days:1378  start:2008-10-28
+999999 op:3 ra:-0.03 days:1630  start:2007-10-16
+code:999999 20071001 20140701 op:3 ra/days:-0.03/1636  start:2007-10-08
+code:999999 20071001 20150101
+999999 op:3 ra:-0.02 days:1503  start:2008-10-28
+999999 op:3 ra:-0.03 days:1755  start:2007-10-16
+code:999999 20071001 20150101 op:3 ra/days:-0.03/1761  start:2007-10-08
+code:999999 20071001 20150701
+999999 op:6 ra:0.0 days:1623  start:2008-10-28
+999999 op:3 ra:-0.01 days:1875  start:2007-10-16
+code:999999 20071001 20150701 op:3 ra/days:-0.02/1881  start:2007-10-08
+code:999999 20071001 20160101
+999999 op:6 ra:0.01 days:1747  start:2008-10-28
+999999 op:3 ra:-0.01 days:1999  start:2007-10-16
+code:999999 20071001 20160101 op:3 ra/days:-0.01/2005  start:2007-10-08
+code:999999 20071001 
+999999 op:6 ra:0.01 days:1799  start:2008-10-28
+999999 op:3 ra:-0.01 days:2051  start:2007-10-16
+code:999999 20071001  op:3 ra/days:-0.01/2057  start:2007-10-08
+code:
