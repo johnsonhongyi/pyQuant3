@@ -18,7 +18,7 @@ from trollius.coroutines import From
 # log = LoggerFactory.getLogger('Sina_data')
 log = LoggerFactory.log
 # log.setLevel(LoggerFactory.DEBUG)
-from . import tdx_hdf5_api as h5a
+from JSONData import tdx_hdf5_api as h5a
 from JSONData import realdatajson as rl
 
 

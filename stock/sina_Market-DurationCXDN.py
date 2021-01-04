@@ -7,8 +7,8 @@ import sys
 import time
 
 import pandas as pd
-from . import JohnsonUtil.johnson_cons as ct
-from . import singleAnalyseUtil as sl
+from JohnsonUtil import johnson_cons as ct
+import singleAnalyseUtil as sl
 from .JSONData import powerCompute as pct
 from .JSONData import stockFilter as stf
 from .JSONData import tdx_data_Day as tdd

@@ -17,7 +17,11 @@ import os
 import lxml.html
 import pandas as pd
 from lxml import etree
-from pandas.compat import StringIO
+# from pandas.compat import StringIO
+from io import StringIO
+# 而python2还是
+# from StringIO import StringIO
+
 sys.path.append("..")
 import JohnsonUtil.johnson_cons as ct
 from JohnsonUtil import LoggerFactory
