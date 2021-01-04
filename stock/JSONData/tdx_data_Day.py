@@ -17,7 +17,7 @@ from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import johnson_cons as ct
 import tushare as ts
-from . import sina_data
+from JSONData import sina_data
 # import numba as nb
 import datetime
 # import logbook
@@ -522,10 +522,10 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                     df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
                     if 'date' in df.columns:
                         df = df.set_index('date')
-                # df['ma5d'] = pd.rolling_mean(df.close, 5)
-                # df['ma10d'] = pd.rolling_mean(df.close, 10)
-                # df['ma20d'] = pd.rolling_mean(df.close, 26)
-                # # df['ma60d'] = pd.rolling_mean(df.close, 60)
+                # df['ma5d'] = pd.Series.rolling(df.close, 5)
+                # df['ma10d'] = pd.Series.rolling(df.close, 10)
+                # df['ma20d'] = pd.Series.rolling(df.close, 26)
+                # # df['ma60d'] = pd.Series.rolling(df.close, 60)
                 # df['hmax'] = df.high[-tdx_max_int:max_int_end].max()
                 # df['max5'] = df.close[-5:max_int_end].max()
                 # df['lmin'] = df.low[-tdx_max_int:max_int_end].min()
@@ -563,10 +563,10 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                 # write_tdx_sina_data_to_file(code, df=df)
 
 
-    # df['ma5d'] = pd.rolling_mean(df.close, 5)
-    # df['ma10d'] = pd.rolling_mean(df.close, 10)
-    # df['ma20d'] = pd.rolling_mean(df.close, 26)
-    # df['ma60d'] = pd.rolling_mean(df.close, 60)
+    # df['ma5d'] = pd.Series.rolling(df.close, 5)
+    # df['ma10d'] = pd.Series.rolling(df.close, 10)
+    # df['ma20d'] = pd.Series.rolling(df.close, 26)
+    # df['ma60d'] = pd.Series.rolling(df.close, 60)
 
     #hmax -5前max
     df['hmax'] = df.high[-tdx_max_int:-ct.tdx_max_int_end].max()
@@ -942,10 +942,10 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
         log.debug("now > 830 and <930 return")
         if isinstance(df, pd.DataFrame):
             df = df.sort_index(ascending=True)
-            df['ma5d'] = pd.rolling_mean(df.close, 5)
-            df['ma10d'] = pd.rolling_mean(df.close, 10)
-            df['ma20d'] = pd.rolling_mean(df.close, 26)
-            df['ma60d'] = pd.rolling_mean(df.close, 60)
+            df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
+            df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
+            df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
+            df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
             df = df.fillna(0)
             df = df.sort_index(ascending=False)
         return df
@@ -980,10 +980,10 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
                 vol_div = 10
             if dz.open.values == df.open[-1] and 'volume' in dz.columns and int(df.vol[-1] / vol_div) == int(dz.volume.values / vol_div):
                 df = df.sort_index(ascending=True)
-                df['ma5d'] = pd.rolling_mean(df.close, 5)
-                df['ma10d'] = pd.rolling_mean(df.close, 10)
-                df['ma20d'] = pd.rolling_mean(df.close, 26)
-                df['ma60d'] = pd.rolling_mean(df.close, 60)
+                df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
+                df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
+                df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
+                df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
                 df = df.fillna(0)
                 df = df.sort_index(ascending=False)
                 return df
@@ -1056,10 +1056,10 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
         # print df
     if len(df) > 0:
         df = df.sort_index(ascending=True)
-        df['ma5d'] = pd.rolling_mean(df.close, 5)
-        df['ma10d'] = pd.rolling_mean(df.close, 10)
-        df['ma20d'] = pd.rolling_mean(df.close, 26)
-        df['ma60d'] = pd.rolling_mean(df.close, 60)
+        df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
+        df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
+        df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
+        df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
     if end is None and writedm and len(df) > 0:
@@ -1176,10 +1176,10 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
     if cct.get_now_time_int() > 900 and cct.get_now_time_int() < 930 and len(df) > 0:
         log.debug("now > 830 and <930 return")
         df = df.sort_index(ascending=True)
-        df['ma5d'] = pd.rolling_mean(df.close, 5)
-        df['ma10d'] = pd.rolling_mean(df.close, 10)
-        df['ma20d'] = pd.rolling_mean(df.close, 26)
-        df['ma60d'] = pd.rolling_mean(df.close, 60)
+        df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
+        df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
+        df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
+        df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
         return df
@@ -1206,10 +1206,10 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
                 vol_div = 10
             if round(dz.open.values, 1) == round(df.open[-1], 1) and 'volume' in dz.columns and int(df.vol[-1] / vol_div) == int(dz.volume.values / vol_div):
                 df = df.sort_index(ascending=True)
-                df['ma5d'] = pd.rolling_mean(df.close, 5)
-                df['ma10d'] = pd.rolling_mean(df.close, 10)
-                df['ma20d'] = pd.rolling_mean(df.close, 26)
-                df['ma60d'] = pd.rolling_mean(df.close, 60)
+                df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
+                df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
+                df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
+                df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
                 df = df.fillna(0)
                 df = df.sort_index(ascending=False)
                 return df
@@ -1266,10 +1266,10 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
 
     if len(df) > 5:
         df = df.sort_index(ascending=True)
-        df['ma5d'] = pd.rolling_mean(df.close, 5)
-        df['ma10d'] = pd.rolling_mean(df.close, 10)
-        df['ma20d'] = pd.rolling_mean(df.close, 26)
-        df['ma60d'] = pd.rolling_mean(df.close, 60)
+        df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
+        df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
+        df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
+        df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
 
@@ -1939,10 +1939,10 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
         log.debug("c_name:%s df.name:%s" % (c_name, df.name[-1]))
     if len(df) > 0:
         df = df.sort_index(ascending=True)
-        df['ma5d'] = pd.rolling_mean(df.close, 5)
-        df['ma10d'] = pd.rolling_mean(df.close, 10)
-        df['ma20d'] = pd.rolling_mean(df.close, 26)
-        df['ma60d'] = pd.rolling_mean(df.close, 60)
+        df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
+        df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
+        df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
+        df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
         # df['ma5d'].fillna(0)
         # df['ma10d'].fillna(0)
         # df['ma20d'].fillna(0)
@@ -2696,13 +2696,13 @@ def compute_condition_up(df):
     return hop_df
 
 def compute_perd_df(dd,lastdays=3,resample ='d'):
-    np.seterr(divide='ignore',invalid='ignore')  #RuntimeWarning: invalid value encountered in greater
+    # np.seterr(divide='ignore',invalid='ignore')  #RuntimeWarning: invalid value encountered in greater
     df = dd[-(lastdays+1):].copy()
     df['perlastp'] = list(map(cct.func_compute_percd2020, df['open'], df['close'], df['high'], df['low'],df['open'].shift(1), 
                             df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper']))
     df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1))
     # df['perd'] = ((df['low'] - df['low'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1))
-    df = df.dropna()
+    # df = df.dropna()
     # df['red'] = ((df['close'] - df['open']) / df['close'] * 100).map(lambda x: round(x, 1))
     df['lastdu'] = ((df['high'] - df['low']) / df['close'] * 100).map(lambda x: round(x, 1))
     # df['perddu'] = ((df['high'] - df['low']) / df['low'] * 100).map(lambda x: round(x, 1))
@@ -2813,7 +2813,11 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # ra = round((df.close[-1]-dd.close.max())/df.close[-1]*100,1)
     # ra = round((df.close[-1]-close_idx_up)/df.close[-1]*100,1)
 
+    # import pdb;pdb.set_trace()
+
     ra = round((df.close[-1]-close_idx_up)/close_idx_up*100,1)
+    # import ipdb;ipdb.set_trace()  #python3
+
     if ra == 0.0:
         ra = round((df.close[-1]-df.close.min())/dd.close.min()*100,1)
     dd['ra'] = ra
@@ -2857,8 +2861,10 @@ def compute_ma_cross(dd,ma1='ma5d',ma2='ma10d',ratio=0.02):
     if len(temp) > 0:
         temp_close = temp.low
         if len(temp_close[temp_close >0]) >0:
-            idx_max = temp.close[:-1].argmax()
-            idx_min = temp_close[:-1].argmin()
+            # idx_max = temp.close[:-1].argmax()  #old
+            # idx_min = temp_close[:-1].argmin()  #old
+            idx_max = temp.close[:-1].idxmax()  #old
+            idx_min = temp_close[:-1].idxmin()  #old
         else:
             idx_min = -1
             idx_max = -1
@@ -2961,12 +2967,12 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         df = df.sort_index(ascending=True)
         if cct.get_work_day_status() and 915 < cct.get_now_time_int() < 1500:
             df = df[df.index < cct.get_today()]
-        # df['ma5d'] = pd.rolling_mean(df.close, 5)
+        # df['ma5d'] = pd.Series.rolling(df.close, 5)
 
 #        df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
-        df['ma5d'] = pd.rolling_mean(df.close, 5).apply(lambda x: round(x,1))
-        df['ma10d'] = pd.rolling_mean(df.close, 10).apply(lambda x: round(x,1))
-        df['ma20d'] = pd.rolling_mean(df.close, 26).apply(lambda x: round(x,1))
+        df['ma5d'] = pd.Series.rolling(df.close, 5).mean().apply(lambda x: round(x,1))
+        df['ma10d'] = pd.Series.rolling(df.close, 10).mean().apply(lambda x: round(x,1))
+        df['ma20d'] = pd.Series.rolling(df.close, 26).mean().apply(lambda x: round(x,1))
 
         df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma10d]
         df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma10d]
@@ -2974,6 +2980,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         df = df.fillna(0)
 
         dd = compute_ma_cross(df)
+
         dd = compute_upper_cross(df)
 
         df = compute_perd_df(df,lastdays=lastdays,resample=resample)

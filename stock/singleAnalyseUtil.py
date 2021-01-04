@@ -8,16 +8,16 @@ import types
 import pandas as pd
 import tushare as ts
 # print sys.path
-from . import JSONData.fundflowUtil as ffu
-from . import JohnsonUtil.johnson_cons as ct
-from . import JohnsonUtil.commonTips as cct
-from .JSONData import realdatajson as rd
-from .JSONData import powerCompute as pct
-from .JSONData import get_macd_kdj_rsi as getab
-from .JSONData import tdx_data_Day as tdd
-from .JSONData import sina_data
-from . import JohnsonUtil.emacount as ema
-from .JohnsonUtil import LoggerFactory
+from JSONData import fundflowUtil as ffu
+from JohnsonUtil import johnson_cons as ct
+from JohnsonUtil import commonTips as cct
+from JSONData import realdatajson as rd
+from JSONData import powerCompute as pct
+from JSONData import get_macd_kdj_rsi as getab
+from JSONData import tdx_data_Day as tdd
+from JSONData import sina_data
+from JohnsonUtil import emacount as ema
+from JohnsonUtil import LoggerFactory
 # log = LoggerFactory.getLogger("SingleSAU")
 # log.setLevel(LoggerFactory.DEBUG)
 

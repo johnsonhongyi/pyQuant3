@@ -228,8 +228,8 @@ def retry_post_data(root='http://upass.10jqka.com.cn/login', key='国企改革')
     # get_wencai_Market_url(url=None)
 
 
-import js2py
-import string
+# import js2py
+# import string
 
 
 def js2py_test(url):

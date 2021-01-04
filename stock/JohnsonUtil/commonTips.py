@@ -8,17 +8,18 @@ import re
 import sys
 import time
 import random
-from compiler.ast import flatten
-from multiprocessing.pool import ThreadPool, cpu_count
+# from compiler.ast import flatten
+from multiprocessing.pool import ThreadPool
+from multiprocessing import cpu_count
 
 import pandas as pd
 import trollius as asyncio
 from trollius.coroutines import From
 
-from . import LoggerFactory
-from .prettytable import PrettyTable
+import LoggerFactory
+from prettytable import PrettyTable
 
-from . import johnson_cons as ct
+import johnson_cons as ct
 import socket
 from configobj import ConfigObj
 import importlib
@@ -454,7 +455,7 @@ def get_terminal_Position(cmd=None, position=None, close=False, retry=False):
 log.info("close Python Launcher")
 
 
-from numba.decorators import autojit
+# from numba.decorators import autojit
 
 
 def run_numba(func):
@@ -1557,7 +1558,7 @@ def read_last_lines(filename, lines=1):
     block = ''
     nl_count = 0
     start = 0
-    fsock = file(filename, 'rU')
+    fsock = open(filename, 'rU')
     try:
         # seek to end
         fsock.seek(0, 2)
@@ -1679,12 +1680,14 @@ def code_to_tdx_blk(code):
 
 def get_config_value(fname, classtype, currvalue, limitvalue=1, xtype='limit', read=False):
     conf_ini = fname
+    currvalue = int(currvalue)
     # conf_ini = cct.get_work_path('stock','JSONData','count.ini')
     if os.path.exists(conf_ini):
         # log.info("file ok:%s"%conf_ini)
         config = ConfigObj(conf_ini, encoding='UTF8')
         if classtype in list(config.keys()):
-            if int(config[classtype][xtype]) > currvalue:
+
+            if int(float(config[classtype][xtype])) > currvalue:
                 ratio = float(config[classtype][xtype]) / limitvalue
                 if ratio < 1.2:
                     log.info("f_size:%s < read_limit:%s ratio:%0.2f" % (currvalue, config[classtype][xtype], ratio))
@@ -2983,7 +2986,7 @@ def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean
     return maindf
 
 if __name__ == '__main__':
-    print((get_index_fibl()))
+    print("a")
     GlobalValues()
     GlobalValues().setkey('key', 'GlobalValuesvalue')
     print(get_work_time())

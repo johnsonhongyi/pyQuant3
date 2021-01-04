@@ -6,9 +6,9 @@ Created on 2015-3-11
 import logging
 import sys,os
 # from logging.handlers import RotatingFileHandler
-from .LoggerFactoryMultiprocess import MultiprocessHandler
+from LoggerFactoryMultiprocess import MultiprocessHandler
 # sys.path.append("..")
-import ipykernel.iostream 
+# import ipykernel.iostream 
 # from logbook import StderrHandler
 # from commonTips import RamBaseDir as rbd
 # print sys.modules
