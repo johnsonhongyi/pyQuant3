@@ -2000,7 +2000,7 @@ def getSinaIndexdf():
 
 
 def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, filename='mnbk', table='top_now', trend=False):
-    print("initdx", end=' ')
+    print("initdx", end='')
     
     market_all = False
     m_mark = market.split(',')

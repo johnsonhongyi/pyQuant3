@@ -5,9 +5,9 @@ Created on 2015-3-11
 '''
 import logging
 import sys,os
+sys.path.append("..")
 # from logging.handlers import RotatingFileHandler
-from LoggerFactoryMultiprocess import MultiprocessHandler
-# sys.path.append("..")
+from JohnsonUtil.LoggerFactoryMultiprocess import MultiprocessHandler
 # import ipykernel.iostream 
 # from logbook import StderrHandler
 # from commonTips import RamBaseDir as rbd

@@ -9,8 +9,6 @@ import pandas as pd
 from pandas import HDFStore
 sys.path.append("..")
 from JohnsonUtil import LoggerFactory
-# from JohnsonUtil.commonTips import get_ramdisk_dir
-# print get_ramdisk_dir()
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import johnson_cons as ct
 import random
@@ -23,7 +21,6 @@ RAMDISK_KEY = 0
 INIT_LOG_Error = 0
 # Compress_Count = 1
 BaseDir = cct.get_ramdisk_dir()
-
 #import fcntl linux
 #lock：
 # fcntl.flock(f,fcntl.LOCK_EX)
@@ -152,7 +149,7 @@ class SafeHDFStore(HDFStore):
 #                time.sleep(probe_interval)
 #                return None
         # HDFStore.__init__(self, fname, *args, **kwargs)
-        HDFStore.__init__(self, fname, *args, **kwargs)
+        HDFStore.__init__(self, path=fname, *args, **kwargs)
         # if not os.path.exists(cct.get_ramdisk_path(cct.tdx_hd5_name)):
         #     if os.path.exists(cct.tdx_hd5_path):
         #         tdx_size = os.path.getsize(cct.tdx_hd5_path)
@@ -795,8 +792,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                     df=dd
             else:
                 log.error("%s is not find %s" % (fname, table))
-        else:
-            log.error("% / table is Init None:%s"(fname, table))
+        # else:
+        #     log.error("%s / table is Init None:%s"(fname, table))
 
     if df is not None and len(df) > 0:
         df=df.fillna(0)
@@ -941,6 +938,7 @@ if __name__ == "__main__":
     # fname = 'powerCompute.h5'
     for na in fname:
         with SafeHDFStore(na) as h5:
+            import ipdb;ipdb.set_trace()
             print(h5)
             if '/' + 'all' in list(h5.keys()):
                 print(h5['all'].loc['600007'])

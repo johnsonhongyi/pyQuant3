@@ -13,8 +13,9 @@ import requests
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import LoggerFactory
-import trollius as asyncio
-from trollius.coroutines import From
+# import trollius as asyncio
+# from trollius.coroutines import From
+import asyncio,aiohttp
 # log = LoggerFactory.getLogger('Sina_data')
 log = LoggerFactory.log
 # log.setLevel(LoggerFactory.DEBUG)
@@ -342,18 +343,37 @@ class Sina:
     #     fp.close()
     #     return data
 
-    @asyncio.coroutine
-    def get_stocks_by_range(self, index):
+    # @asyncio.coroutine
+    # def get_stocks_by_range_py2(self, index):
 
-        loop = asyncio.get_event_loop()
+    #     loop = asyncio.get_event_loop()
+    #     # response = yield From(loop.run_in_executor(None,self.get_url_data_R,
+    #     # (self.sina_stock_api + self.stock_list[index])))
+    #     response = yield From(loop.run_in_executor(None, requests.get, (self.sina_stock_api + self.stock_list[index])))
+    #     response.encoding = self.encoding
+    #     # response = yield (requests.get(self.sina_stock_api + self.stock_list[index]))
+    #     # log.debug("url:%s"%(self.sina_stock_api + self.stock_list[index]))
+    #     # log.debug("res_encoding:%s" % response.encoding[:10])
+    #     self.stock_data.append(response.text)
+    #     # Return(self.stock_data.append(response.text))
+
+    # https://github.com/jinrongxiaoe/easyquotation
+    async def get_stocks_by_range(self, index):
+
+        # loop = asyncio.get_event_loop()
         # response = yield From(loop.run_in_executor(None,self.get_url_data_R,
         # (self.sina_stock_api + self.stock_list[index])))
-        response = yield From(loop.run_in_executor(None, requests.get, (self.sina_stock_api + self.stock_list[index])))
+        # response = yield From(loop.run_in_executor(None, requests.get, (self.sina_stock_api + self.stock_list[index])))
+        # response = await aiohttp.ClientSession().get(self.sina_stock_api + self.stock_list[index])
+        response = await aiohttp.get(self.sina_stock_api + self.stock_list[index])
         response.encoding = self.encoding
+        data = await response.text()
         # response = yield (requests.get(self.sina_stock_api + self.stock_list[index]))
         # log.debug("url:%s"%(self.sina_stock_api + self.stock_list[index]))
         # log.debug("res_encoding:%s" % response.encoding[:10])
-        self.stock_data.append(response.text)
+        # await asyncio.as_completed(response)
+        self.stock_data.append(data)
+        # return data
         # Return(self.stock_data.append(response.text))
 
     def get_stock_data(self, retry_count=3, pause=0.01):
@@ -364,6 +384,7 @@ class Sina:
                       (len(self.stock_list[index])))
         if self.request_num == 0:
             threads.append(self.get_stocks_by_range(0))
+
         for _ in range(retry_count):
             time.sleep(pause)
             try:
@@ -372,10 +393,35 @@ class Sina:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
             loop.run_until_complete(asyncio.wait(threads))
+            # asyncio.run(asyncio.wait(threads))
+            loop.close()
             log.debug('get_stock_data_loop')
             return self.format_response_data()
 
         raise IOError(ct.NETWORK_URL_ERROR_MSG)
+
+
+    # def get_stock_data_py2(self, retry_count=3, pause=0.01):
+    #     threads = []
+    #     for index in range(self.request_num):
+    #         threads.append(self.get_stocks_by_range(index))
+    #         log.debug("url len:%s" %
+    #                   (len(self.stock_list[index])))
+    #     if self.request_num == 0:
+    #         threads.append(self.get_stocks_by_range(0))
+
+    #     for _ in range(retry_count):
+    #         time.sleep(pause)
+    #         try:
+    #             loop = asyncio.get_event_loop()
+    #         except RuntimeError:
+    #             loop = asyncio.new_event_loop()
+    #             asyncio.set_event_loop(loop)
+    #         loop.run_until_complete(asyncio.wait(threads))
+    #         log.debug('get_stock_data_loop')
+    #         return self.format_response_data()
+
+    #     raise IOError(ct.NETWORK_URL_ERROR_MSG)
 
     # def get_stock_data(self):
     #     threads = []

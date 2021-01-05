@@ -61,7 +61,11 @@ log = LoggerFactory.log
 #     for row in df.itertuples():
 #         table.add_row(row[1:])
 #     return str(table)
-
+sinaheader = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
+    'Host': 'vip.stock.finance.sina.com.cn',
+}
+    # 'Referer':'http://vip.stock.finance.sina.com.cn'
 
 def _parsing_Market_price_json(url):
     """
@@ -78,18 +82,23 @@ def _parsing_Market_price_json(url):
     # request = Request(ct.SINA_DAY_PRICE_URL%(ct.P_TYPE['http'], ct.DOMAINS['vsf'],
     #                              ct.PAGES['jv'], pageNum))
     # url='http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=20&sort=changepercent&asc=0&node=cyb&symbol='
-    text = cct.get_url_data_R(url)
+
+    text = cct.get_url_data_R(url,header=sinaheader)
     # text = cct.get_url_data(url)
 
     if text == 'null':
-        return None
-
+        return ''
+    elif text.find('IP') > 0:
+        log.error("IP error:%s"%(text))
+        return ''
     # text = text.replace('"{symbol', '{"symbol')
     # text = text.replace('{symbol', '{"symbol"')
+
     text = text.replace('changepercent', 'percent')
     text = text.replace('turnoverratio', 'ratio')
     # text.decode('unicode-escape')
-    js=json.loads(text,encoding='GBK')
+    # js=json.loads(text,encoding='GBK')
+    js=json.loads(text)
     # df = pd.DataFrame(pd.read_json(js, dtype={'code':object}),columns=ct.MARKET_COLUMNS)
     log.debug("Market json:%s"%js[0])
     df = pd.DataFrame(js,columns=ct.SINA_Market_COLUMNS)
@@ -126,7 +135,9 @@ def _parsing_Market_price_json(url):
 
 
     # df = df.drop('symbol', axis=1)
-    df = df.ix[df.volume >= 0]
+
+    # df = df.ix[df.volume >= 0]
+    df = df.loc[df.volume >= 0]
     # print type(df)
     # print df[-2:-1],len(df.index)
     # print df.loc['300208',['name']]
@@ -318,7 +329,7 @@ def getconfigBigCount(count=None,write=False):
     if os.path.exists(conf_ini):
         log.info("file ok:%s"%conf_ini)
         config = ConfigObj(conf_ini,encoding='UTF8')
-        if config['BigCount']['type2'] > 0:
+        if int(config['BigCount']['type2']) > 0:
             big_last= int(config['BigCount']['type2'])
             if logtime != 0:
                 if (time.time() - float(cct.get_config_value_ramfile(fname)) > float(ct.bigcount_logtime)):
@@ -469,21 +480,23 @@ def _parsing_sina_dd_price_json(url):
     #                              ct.PAGES['jv'], pageNum))
     # request = Request(url)
     # text = urlopen(request, timeout=10).read()
-    sinaheader = {'Referer':'http://vip.stock.finance.sina.com.cn'}
+
 
     text = cct.get_url_data(url,headers=sinaheader)
     # print(len(text))
     # return text
     
-    if len(text) < 10:
+    if len(text) < 10 :
         return ''
-
-
+    elif text.find('IP') > 0:
+        log.error("IP error:%s"%(text))
+        return ''
     #2020 new json
     text = text.replace('symbol', 'code')
     # text = text.replace('turnoverratio', 'ratio')
     # text.decode('unicode-escape')
-    js=json.loads(text,encoding='GBK')
+    # js=json.loads(text,encoding='GBK')
+    js=json.loads(text)
     # df = pd.DataFrame(pd.read_json(js, dtype={'code':object}),columns=ct.MARKET_COLUMNS)
     log.debug("parsing_sina_dd:%s"%js[0])
     df = pd.DataFrame(js,columns=ct.DAY_REAL_DD_COLUMNS)
@@ -511,7 +524,7 @@ def _parsing_sina_dd_price_json(url):
 
 
     df = df.drop('symbol', axis=1)
-    df = df.ix[df.volume > 0]
+    df = df.loc[df.volume > 0]
     # print ""
     # print df['name'][len(df.index)-1:],len(df.index)
     return df
@@ -558,7 +571,13 @@ def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.
     if len(url_list)>0:
         log.info("json_dd_url:%s"%url_list[0])
         for url in url_list:
-            df = df.append(_parsing_sina_dd_price_json(url))
+            # df = df.append(_parsing_sina_dd_price_json(url))
+            data = _parsing_sina_dd_price_json(url)
+            # if data is not None and not data.empty and len(data) > 0:
+            if len(data) > 5:
+                df = df.append(data)
+            # else:
+            #     log.error("data:%s"%(data))
 
 
 
