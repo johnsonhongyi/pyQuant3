@@ -1997,8 +1997,11 @@ def read_to_blocknew(p_name):
         flist_t = fout.readlines()
         flist = []
         for code in flist_t:
+            if isinstance(code,bytes):
+                code = code.decode()
             if len(code) <= 6 or len(code) > 12:
                 continue
+
             if code.endswith('\r\n'):
                 if len(code) <= 6:
                     # errstatus = True
@@ -2985,8 +2988,9 @@ def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean
             # log.info("col:%s %s" % (dif_co[:3], eval(("maindf.%s") % (dif_co[0]))[1]))
     return maindf
 
+print("abc")
 if __name__ == '__main__':
-    print("a")
+    print(get_index_fibl())
     GlobalValues()
     GlobalValues().setkey('key', 'GlobalValuesvalue')
     print(get_work_time())
