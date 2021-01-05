@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import sys
+sys.path.append("..")
 import time
 import random
 # from compiler.ast import flatten
@@ -13,13 +14,14 @@ from multiprocessing.pool import ThreadPool
 from multiprocessing import cpu_count
 
 import pandas as pd
-import trollius as asyncio
-from trollius.coroutines import From
+# import trollius as asyncio
+# from trollius.coroutines import From
+import asyncio
 
-import LoggerFactory
+from JohnsonUtil import LoggerFactory
 from prettytable import PrettyTable
 
-import johnson_cons as ct
+from JohnsonUtil import johnson_cons as ct
 import socket
 from configobj import ConfigObj
 import importlib
@@ -203,17 +205,17 @@ def get_os_system():
     else:
         return 'other'
 
-if get_os_system().find('win') >= 0:
-    import win_unicode_console
+# if get_os_system().find('win') >= 0:
+#     import win_unicode_console
 #     # https://github.com/Drekin/win-unicode-console
 #     win_unicode_console.enable(use_readline_hook=False)
 
-def set_default_encode(code='utf-8'):
-        import sys
-        importlib.reload(sys)
-        sys.setdefaultencoding(code)
-        print((sys.getdefaultencoding()))
-        print((sys.stdin.encoding,sys.stdout.encoding))
+# def set_default_encode(code='utf-8'):
+#         import sys
+#         importlib.reload(sys)
+#         sys.setdefaultencoding(code)
+#         print((sys.getdefaultencoding()))
+#         print((sys.stdin.encoding,sys.stdout.encoding))
         
 
 
@@ -584,8 +586,8 @@ def isMac():
     if get_sys_system().find('Darwin') == 0:
         return True
     else:
-        import codecs
-        sys.stdout = codecs.getwriter('utf-8')(sys.stdout)
+        # import codecs
+        # sys.stdout = codecs.getwriter('utf-8')(sys.stdout)
         return False
 
 
@@ -851,8 +853,8 @@ def cct_raw_input(sts):
 
     st = ''
     try:
-        if get_os_system().find('win') >= 0:
-            win_unicode_console.disable()
+        # if get_os_system().find('win') >= 0:
+        #     win_unicode_console.disable()
         # https://stackoverflow.com/questions/11068581/python-raw-input-odd-behavior-with-accents-containing-strings
         # st = win_unicode_console.raw_input.raw_input(sts)
         st = input(sts)
@@ -873,8 +875,8 @@ def cct_raw_input(sts):
         else:
             print("cct_ExceptionError:%s count:%s" % (e, count_Except))
             sys.exit()
-    if get_os_system().find('win') >= 0:
-        win_unicode_console.enable(use_readline_hook=False)
+    # if get_os_system().find('win') >= 0:
+    #     win_unicode_console.enable(use_readline_hook=False)
     return st
 
 # eval_rule = "[elem for elem in dir() if not elem.startswith('_') and not elem.startswith('ti')]"
@@ -1295,6 +1297,8 @@ def get_url_data_R(url, timeout=30,headers=None):
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0',
                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                    'Connection': 'keep-alive'}
+    else:
+        headers
     # else:
 
     #     headers = dict({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0',
@@ -1337,7 +1341,7 @@ def get_url_data_R(url, timeout=30,headers=None):
         sleep(120)
     else:
         log.info('Access successful.')
-    return data
+    return data.decode('utf-8')
 
 
 def get_url_data(url, retry_count=3, pause=0.05, timeout=30, headers=None):
@@ -1437,12 +1441,19 @@ def get_div_list(ls, n):
 def to_asyncio_run(urllist, cmd):
     results = []
 
-    # print "asyncio",
-    @asyncio.coroutine
-    def get_loop_cmd(cmd, url_s):
+    async def sync_to_async(val):
+        return val
+
+    async def get_loop_cmd(cmd, url_s):
         loop = asyncio.get_event_loop()
-        result = yield From(loop.run_in_executor(None, cmd, url_s))
+        # result = yield From(loop.run_in_executor(None, cmd, url_s))
+        # result = await cmd(url_s)
+        result = await sync_to_async(cmd(url_s))
         results.append(result)
+
+        # response = await aiohttp.get(self.sina_stock_api + self.stock_list[index])
+        # response.encoding = self.encoding
+        # data = await response.text()
 
     threads = []
     for url_s in urllist:
@@ -1469,6 +1480,18 @@ def to_mp_run(cmd, urllist):
     #     results=pool.apply_async(sl.get_multiday_ave_compare_silent_noreal,(code,60))
     # result=[]
     # results = pool.map(cmd, urllist)
+
+
+    # 这个东东是免费的哦：tqdm是一个用来生成进度条的优秀的库。这个协同程序就像asyncio.wait一样工作，不过会显示一个代表完成度的进度条。
+    # @asyncio.coroutine
+    # def wait_with_progress(coros):
+    #     for f in tqdm.tqdm(asyncio.as_completed(coros), total=len(coros)):
+    #     yield from f
+
+
+
+
+
     results = []
     for y in tqdm(pool.imap_unordered(cmd, urllist),unit='%',mininterval=ct.tqpm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
         results.append(y)
@@ -2988,7 +3011,6 @@ def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean
             # log.info("col:%s %s" % (dif_co[:3], eval(("maindf.%s") % (dif_co[0]))[1]))
     return maindf
 
-print("abc")
 if __name__ == '__main__':
     print(get_index_fibl())
     GlobalValues()

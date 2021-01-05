@@ -9,12 +9,12 @@ import time
 import pandas as pd
 from JohnsonUtil import johnson_cons as ct
 import singleAnalyseUtil as sl
-from .JSONData import powerCompute as pct
-from .JSONData import stockFilter as stf
-from .JSONData import tdx_data_Day as tdd
-from .JSONData import LineHistogram as lhg
-from .JohnsonUtil import LoggerFactory as LoggerFactory
-from .JohnsonUtil import commonTips as cct
+from JSONData import powerCompute as pct
+from JSONData import stockFilter as stf
+from JSONData import tdx_data_Day as tdd
+from JSONData import LineHistogram as lhg
+from JohnsonUtil import LoggerFactory as LoggerFactory
+from JohnsonUtil import commonTips as cct
 
 # from logbook import Logger,StreamHandler,SyslogHandler
 # from logbook import StderrHandler
@@ -355,8 +355,8 @@ if __name__ == "__main__":
                         now_count, len(top_all[top_all['buy'] > 0]),
                         len(top_now[top_now['volume'] <= 0]), goldstock)), end=' ')
 
-                    nhigh = top_temp[top_temp.close > top_temp.nhigh]
-                    nlow = top_temp[top_temp.close > top_temp.nlow]
+                    nhigh = top_temp[top_temp.close > top_temp.nhigh] if 'nhigh' in top_temp.columns.values else 0
+                    nlow = top_temp[top_temp.close > top_temp.nlow] if 'nlow' in top_temp.columns.values else 0
                     print("Rt:%0.1f dT:%s N:%s T:%s %s%% nh:%s nlow:%s" % (float(time.time() - time_Rt), cct.get_time_to_date(time_s), cct.get_now_time(), len(top_temp), round(len(top_temp) / float(ct.PowerCount) * 100, 1),len(nhigh),len(nlow)))
                     # top_end = stf.getBollFilter(df=top_end, boll=ct.bollFilter,duration=ct.PowerCountdl,filter=False)
                     if 'op' in top_temp.columns:
@@ -564,7 +564,7 @@ if __name__ == "__main__":
             else:
                 print("input error:%s" % (st))
         except (IOError, EOFError, Exception) as e:
-            print("Error", e)
+            print("Error:%s", e)
             import traceback
             traceback.print_exc()
             cct.sleeprandom(ct.duration_sleep_time / 2)

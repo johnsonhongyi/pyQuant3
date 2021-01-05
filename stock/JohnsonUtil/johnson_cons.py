@@ -12,7 +12,7 @@ Created on 2014/07/31
 @contact: jimmysoa@sina.cn
 """
 import sys
-import commonTips as cct
+from JohnsonUtil import commonTips as cct
 PY3 = (sys.version_info[0] >= 3)
 
 VERSION = '0.3.6'
