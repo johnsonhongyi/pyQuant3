@@ -364,16 +364,17 @@ class Sina:
         # response = yield From(loop.run_in_executor(None,self.get_url_data_R,
         # (self.sina_stock_api + self.stock_list[index])))
         # response = yield From(loop.run_in_executor(None, requests.get, (self.sina_stock_api + self.stock_list[index])))
-        # response = await aiohttp.ClientSession().get(self.sina_stock_api + self.stock_list[index])
-        response = await aiohttp.get(self.sina_stock_api + self.stock_list[index])
+        session = aiohttp.ClientSession()
+        response = await session.get(self.sina_stock_api + self.stock_list[index])
         response.encoding = self.encoding
-        data = await response.text()
+        result = await response.text()
+        await session.close()
+        # response = await aiohttp.get(self.sina_stock_api + self.stock_list[index])
         # response = yield (requests.get(self.sina_stock_api + self.stock_list[index]))
         # log.debug("url:%s"%(self.sina_stock_api + self.stock_list[index]))
         # log.debug("res_encoding:%s" % response.encoding[:10])
         # await asyncio.as_completed(response)
-        self.stock_data.append(data)
-        # return data
+        self.stock_data.append(result)
         # Return(self.stock_data.append(response.text))
 
     def get_stock_data(self, retry_count=3, pause=0.01):
