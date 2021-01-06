@@ -36,6 +36,93 @@ from JSONData import realdatajson as rl
 
 
 
+import sys
+from threading import Thread
+from PyQt5.QtWidgets import QApplication
+
+from pyqtconsole.console import PythonConsole
+
+app = QApplication([])
+console = PythonConsole()
+console.show()
+console.eval_in_thread()
+
+sys.exit(app.exec_())
+
+
+
+
+
+# from PyQt5.QtWidgets import QApplication, QWidget
+# a = QApplication([])
+# wi = QWidget()
+# wi.show()
+# wi.hide()
+# # w.raise_()
+import ipdb;ipdb.set_trace()
+
+
+import platform
+import sys
+
+from PyQt5 import QtCore, QtGui, QtWidgets
+
+
+class NativeMessenger(QtCore.QObject):
+    messageChanged = QtCore.pyqtSignal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        self.m_qin = QtCore.QFile()
+
+        self.m_qin.open(
+            sys.stdin.fileno(), QtCore.QIODevice.ReadOnly | QtCore.QIODevice.Unbuffered
+        )
+
+        if platform.system() == "Windows":
+            import win32api
+
+            if sys.platform == "win32":
+                import os
+                import msvcrt
+
+                if platform.python_implementation() == "PyPy":
+                    os.fdopen(fh.fileno(), "wb", 0)
+                else:
+                    msvcrt.setmode(sys.stdin.fileno(), os.O_BINARY)
+
+            self.m_notifier = QtCore.QWinEventNotifier(
+                win32api.GetStdHandle(win32api.STD_INPUT_HANDLE)
+            )
+
+        else:
+            self.m_notifier = QtCore.QSocketNotifier(
+                sys.stdin.fileno(), QtCore.QSocketNotifier.Read, self
+            )
+
+        self.m_notifier.activated.connect(self.readyRead)
+
+    @QtCore.pyqtSlot()
+    def readyRead(self):
+        line = self.m_qin.readLine().data().decode().strip()
+        self.messageChanged.emit(line)
+
+
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+
+    w = QtWidgets.QLabel(alignment=QtCore.Qt.AlignCenter)
+    w.resize(640, 480)
+    w.show()
+
+    messenger = NativeMessenger()
+    messenger.messageChanged.connect(w.setText)
+
+    sys.exit(app.exec_())
+
+import ipdb;ipdb.set_trace()
+
 
 
 import asyncio
@@ -128,7 +215,6 @@ b = pd.DataFrame(a)
 # ####普通格式存储：
 h5 = pd.HDFStore('G:\\test_s.h5','w')
 h5['all'] = b
-import ipdb;ipdb.set_trace()
 h5.close()
 
 
