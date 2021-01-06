@@ -943,18 +943,34 @@ if __name__ == "__main__":
     h5_fname = 'test_s.h5'
     h5_table = 'all'
     h5 = write_hdf_db(h5_fname, df, table=h5_table, index=False, baseCount=500, append=False, MultiIndex=False)
-    import ipdb;ipdb.set_trace()
-
+    fname=['test_s.h5','sina_data.h5', 'tdx_last_df', 'powerCompute.h5', 'get_sina_all_ratio']
     fname=['sina_data.h5', 'tdx_last_df', 'powerCompute.h5', 'get_sina_all_ratio']
     # fname=['test_s.h5','sina_data.h5', 'tdx_last_df', 'powerCompute.h5', 'get_sina_all_ratio']
-    fname=['test_s.h5']
+    # fname=['test_s.h5']
     # fname = 'powerCompute.h5'
+    from pandasgui import show,store
+    from pylab import plt, mpl
+    import threading
+    # from pyqtconsole.console import PythonConsole
+    # from PyQt5.QtWidgets import QApplication
+    # app = QApplication([])
+    # console = PythonConsole()
+    # console.show()
+    # console.eval_in_thread()
+    # sys.exit(app.exec_())
+    # store = store.Store()
+    # store.block = True
+    pandasguisettings={'block':'True'}
     for na in fname:
         with SafeHDFStore(na) as h5:
-            import ipdb;ipdb.set_trace()
+            # import ipdb;ipdb.set_trace()
             print(h5)
-            if '/' + 'all' in list(h5.keys()):
-                print(h5['all'].loc['600007'])
+            # th = threading.Thread(target=show(h5.all))
+            # th.start()
+
+            for key in list(h5.keys()):
+                show(h5[key],settings=pandasguisettings)
+                # print(h5['all'].loc['600007'])
         # h5.remove('high_10_y_20170620_all_15')
         # print h5
         # dd = h5['d_21_y_all']

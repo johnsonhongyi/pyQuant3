@@ -19,7 +19,7 @@ import pandas as pd
 import asyncio
 
 from JohnsonUtil import LoggerFactory
-from prettytable import PrettyTable
+from JohnsonUtil.prettytable import PrettyTable
 
 from JohnsonUtil import johnson_cons as ct
 import socket
