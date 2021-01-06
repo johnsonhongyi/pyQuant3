@@ -626,6 +626,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
         return None
     df=None
     dd=None
+    table = table.replace('/','') if table.find('/') >= 0 else table
+
     if code_l is not None:
         if table is not None:
 
@@ -792,6 +794,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                                  (fname, [time.time() - t_x for t_x in o_time]))
                 else:
                     df=dd
+
             else:
                 log.error("%s is not find %s" % (fname, table))
         # else:
@@ -944,7 +947,7 @@ if __name__ == "__main__":
     h5_table = 'all'
     h5 = write_hdf_db(h5_fname, df, table=h5_table, index=False, baseCount=500, append=False, MultiIndex=False)
     fname=['test_s.h5','sina_data.h5', 'tdx_last_df', 'powerCompute.h5', 'get_sina_all_ratio']
-    fname=['sina_data.h5', 'tdx_last_df', 'powerCompute.h5', 'get_sina_all_ratio']
+    fname=['tdx_last_df', 'powerCompute.h5', 'get_sina_all_ratio']
     # fname=['test_s.h5','sina_data.h5', 'tdx_last_df', 'powerCompute.h5', 'get_sina_all_ratio']
     # fname=['test_s.h5']
     # fname = 'powerCompute.h5'
@@ -961,15 +964,22 @@ if __name__ == "__main__":
     # store = store.Store()
     # store.block = True
     pandasguisettings={'block':'True'}
-    for na in fname:
-        with SafeHDFStore(na) as h5:
+    for h5_fname in fname:
+        h5keys=[]
+        with SafeHDFStore(h5_fname) as h5:
             # import ipdb;ipdb.set_trace()
-            print(h5)
+            print("name:",h5)
+            h5keys=list(h5.keys())
             # th = threading.Thread(target=show(h5.all))
             # th.start()
 
-            for key in list(h5.keys()):
-                show(h5[key],settings=pandasguisettings)
+
+        for key in h5keys:
+            print("key:",key)
+            h5 = load_hdf_db(h5_fname,table=key,timelimit=False)
+
+            # show(h5[key],settings=pandasguisettings)
+            show(h5,settings=pandasguisettings)
                 # print(h5['all'].loc['600007'])
         # h5.remove('high_10_y_20170620_all_15')
         # print h5
