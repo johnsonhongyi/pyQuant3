@@ -398,8 +398,6 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
             with SafeHDFStore(fname) as store:
                 if store is not None:
                     if '/' + table in list(store.keys()):
-                        import ipdb;ipdb.set_trace()
-
                         tmpdf=store[table]
                         tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
 
