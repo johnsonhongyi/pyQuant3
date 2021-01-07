@@ -229,9 +229,9 @@ def get_dfcfw_fund_HGT(url=ct.DFCFW_FUND_FLOW_HGT):
     if len(vol_l) == 1:
         data = vol_l[0].split(',')
         log.info("D0:%s" % data[0])
-        log.debug("hgt:%s" % re.findall(r'([\d.]+)([\u4e00-\u9fa5]+)', data[0].decode('utf8')))
-        dd['ggt'] = data[0].decode('utf8')
-        dd['hgt'] = data[6].decode('utf8')
+        log.debug("hgt:%s" % re.findall(r'([\d.]+)([\u4e00-\u9fa5]+)', data[0]))
+        dd['ggt'] = data[0]
+        dd['hgt'] = data[6]
         # dd['zzb']=data[1]
         # dd['sjlr']=data[2]
         # dd['sjzb']=data[3]
@@ -295,7 +295,7 @@ def get_dfcfw_fund_SHSZ(url=ct.DFCFW_ZS_SHSZ):
                         dd['zvol'] / (df.loc['399001', 'amount'] / 10000000) / radio_t, 1)
                     zvol_v = round(
                         svol_r * (df.loc['399001', 'amount'] / 10000000), 1)
-                    dd['allvol'] = "%s-%s-%s" % (dd['svol']+dd['zvol'], svol_v+zvol_v, round((svol_r+zvol_r)/2,1))
+                    dd['allvol'] = "%s-%s-%s" % (dd['svol']+dd['zvol'], round(svol_v,1)+round(zvol_v,1), round((svol_r+zvol_r)/2,1))
                     dd['svol'] = "%s-%s-%s" % ((dd['svol'], svol_v, svol_r))
                     dd['zvol'] = "%s-%s-%s" % ((dd['zvol'], zvol_v, zvol_r))
             # dd['zzb']=data[1]
@@ -553,7 +553,8 @@ def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
 
     # import pdb;pdb.set_trace()
     rzdata = rzdata.replace(':"-"',':0.1')
-    rz_dic = re.findall('{"tdate"[\D\d]+?}', rzdata.encode('utf8'))
+    # rz_dic = re.findall('{"tdate"[\D\d]+?}', rzdata.encode('utf8'))
+    rz_dic = re.findall('{"tdate"[\D\d]+?}', rzdata)
     
     rzdict=[eval(x) for x in rz_dic ]
     df=pd.DataFrame(rzdict,columns=ct.dfcfw_rzye_columns)

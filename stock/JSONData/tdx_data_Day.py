@@ -329,7 +329,8 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         no = num
         dt_list = []
         for i in range(no):
-            a = buf[i].split(',')
+            abuf = cct.decode_bytes_type(buf[i])
+            a = abuf.split(',')
             # 01/15/2016,27.57,28.15,26.30,26.97,714833.15,1946604544.000
             # da=a[0].split('/')
             if len(a) < 7:
@@ -399,12 +400,12 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         fileSize = os.path.getsize(file_path)
         if newstockdayl != 0:
             if fileSize < atomStockSize * newstockdayl:
-                return Series()
+                return pd.Series(dtype='float64')
         # else:
             # log.info("newsday=0:%s"(code))
         data = cct.read_last_lines(file_path, int(dl) + 3)
         data_l = data.split('\n')
-        dt_list = Series()
+        dt_list = pd.Series(dtype='float64')
         data_l.reverse()
         log.debug("day 1:%s" % data_l)
         for line in data_l:
@@ -446,7 +447,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         if df is None or len(df) == 0:
             fileSize = os.path.getsize(file_path)
             if fileSize < atomStockSize * newstockdayl:
-                return Series()
+                return pd.Series(dtype='float64')
             if start is None:
                 if dl is None:
                     dl = 60
@@ -920,7 +921,10 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
 #            ds['volume']=ds.volume.apply(lambda x: x * 100)
             if not 'amount' in ds.columns:
                 ds['amount'] = list(map(lambda x, y, z: round(
-                    (y + z) / 2 * x, 2), ds.volume, ds.high, ds.low))
+                    (y + z) / 2 * x, 1), ds.volume, ds.high, ds.low))
+            else:
+                ds['amount'] = ds['amount'].apply(lambda x: round(x , 1))
+
             ds = ds.loc[:, ['code', 'open', 'high',
                             'low', 'close', 'volume', 'amount']]
             # ds.rename(columns={'volume': 'amount'}, inplace=True)
@@ -1155,7 +1159,10 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
 #            ds['volume']=ds.volume.apply(lambda x: x * 100)
             if not 'amount' in ds.columns:
                 ds['amount'] = list(map(lambda x, y, z: round(
-                    (y + z) / 2 * x, 2), ds.volume, ds.high, ds.low))
+                    (y + z) / 2 * x, 1), ds.volume, ds.high, ds.low))
+            else:
+                ds['amount'] = ds['amount'].apply(lambda x: round(x , 1))
+
             ds = ds.loc[:, ['code', 'open', 'high',
                             'low', 'close', 'volume', 'amount']]
             # ds.rename(columns={'volume': 'amount'}, inplace=True)
@@ -1275,6 +1282,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
 
     if writedm and len(df) > 0:
         if cct.get_now_time_int() < 900 or cct.get_now_time_int() > 1505:
+            df['amount'] = df['amount'].apply(lambda x: round(x , 1))
             sta = write_tdx_sina_data_to_file(code, df=df)
     return df
 
@@ -1312,10 +1320,10 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f'):
         return None
 
     if not os.path.exists(file_path) and len(df) > 0:
-        fo = open(file_path, "w+")
+        fo = open(file_path, "wb+")
 #        return False
     else:
-        fo = open(file_path, "r+")
+        fo = open(file_path, "rb+")
 
     fsize = os.path.getsize(file_path)
     limitpo = fsize if fsize < 150 else 150
@@ -1339,7 +1347,7 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f'):
         line = True
         while line:
             tmpo = fo.tell()
-            line = fo.readline()
+            line = cct.decode_bytes_type(fo.readline())
             alist = line.split(',')
             if len(alist) >= 7:
                 if len(alist[0]) != 10:
@@ -1359,7 +1367,8 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f'):
             return False
         po = plist[-1]
         fo.seek(po)
-        dater = fo.read(10)
+        # dater = fo.read(10).decode('utf8')
+        dater = cct.decode_bytes_type(fo.read(10))
         if dater.startswith('\n') and len(dater) == 10:
             po = plist[-1] + 2
             fo.seek(po)
@@ -1375,7 +1384,10 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f'):
             df.rename(columns={'volume': 'vol'}, inplace=True)
         if not 'amount' in df.columns:
             df['amount'] = list(map(lambda x, y, z: round(
-                (y + z) / 2 * x, 2), df.vol, df.high, df.low))
+                (y + z) / 2 * x, 1), df.vol, df.high, df.low))
+        else:
+            df['amount'] = df['amount'].apply(lambda x: round(x , 1))
+
         w_t = time.time()
         wdata_list = []
         for date in df.index:
@@ -1391,8 +1403,8 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f'):
                 tvol = str(td.vol)
                 amount = str(td.amount)
                 tdata = tdate + ',' + topen + ',' + thigh + ',' + tlow + \
-                    ',' + tclose + ',' + tvol + ',' + amount + '\r\n'
-                wdata_list.append(tdata)
+                    ',' + tclose + ',' + tvol + ',' + amount + '\n'
+                wdata_list.append(tdata.encode('utf8'))
 #        import cStringIO
 #        b = cStringIO.StringIO()
 #        x=0
@@ -1429,10 +1441,10 @@ def write_tdx_sina_data_to_file(code, dm=None, df=None, dl=2, type='f'):
         return None
 
     if not os.path.exists(file_path) and len(df) > 0:
-        fo = open(file_path, "w+")
+        fo = open(file_path, "wb+")
 #        return False
     else:
-        fo = open(file_path, "r+")
+        fo = open(file_path, "rb+")
 
     fsize = os.path.getsize(file_path)
     limitpo = fsize if fsize < 150 else 150
@@ -1443,7 +1455,8 @@ def write_tdx_sina_data_to_file(code, dm=None, df=None, dl=2, type='f'):
         line = True
         while line:
             tmpo = fo.tell()
-            line = fo.readline()
+            # line = fo.readline().decode('utf8')
+            line = cct.decode_bytes_type(fo.readline())
             alist = line.split(',')
             if len(alist) >= 7:
                 if len(alist[0]) != 10:
@@ -1464,7 +1477,8 @@ def write_tdx_sina_data_to_file(code, dm=None, df=None, dl=2, type='f'):
             return False
         po = plist[-1]
         fo.seek(po)
-        dater = fo.read(10)
+        # dater = fo.read(10).decode('utf8')
+        dater = cct.decode_bytes_type(fo.read(10))
         if dater.startswith('\n') and len(dater) == 10:
             po = plist[-1] + 2
             fo.seek(po)
@@ -1491,8 +1505,8 @@ def write_tdx_sina_data_to_file(code, dm=None, df=None, dl=2, type='f'):
             tvol = str(round(td.vol, 2))
             amount = str(round(td.amount, 2))
             tdata = tdate + ',' + topen + ',' + thigh + ',' + tlow + \
-                ',' + tclose + ',' + tvol + ',' + amount + '\r\n'
-            w_data.append(tdata)
+                ',' + tclose + ',' + tvol + ',' + amount + '\n'
+            w_data.append(tdata.encode('utf8'))
         fo.writelines(w_data)
         fo.close()
         return True
@@ -1653,6 +1667,7 @@ def Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=30
     """
     h5_fname = h5_fname + '_' + str(dl)
     h5_table = h5_table + '_' + str(dl)
+    log.error("write hdf",h5_fname,h5_table)
     status = False
     if cct.get_work_day_status() and cct.get_now_time_int() > 1500:
         if market == 'all':
@@ -1700,6 +1715,8 @@ def Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=30
                 # df = df.drop(['name'], axis=1)
             df = df.set_index(['code', 'date'])
             df = df.astype(float)
+            import ipdb;ipdb.set_trace()
+
             status = h5a.write_hdf_db(h5_fname, df, table=h5_table, index=False, baseCount=500, append=False, MultiIndex=True)
             # search_Tdx_multi_data_duration(h5_fname, h5_table, df=None,code_l=code_list, start=None, end=None, freq=None, col=None, index='date',tail=1)
             if status is not None and status:
@@ -2001,7 +2018,7 @@ def getSinaIndexdf():
 
 def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, filename='mnbk', table='top_now', trend=False):
     print("initdx", end='')
-    
+
     market_all = False
     m_mark = market.split(',')
 
@@ -2061,6 +2078,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         if 'code' in df.columns:
             df = df.set_index('code')
         df = sina_data.Sina().get_stock_list_data(df.index.tolist())
+
     if 'code' in df.columns:
         df = df.set_index('code')
 
@@ -2124,8 +2142,9 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         dm = df
 
     # if cct.get_work_time() or (cct.get_now_time_int() > 915) :
-    dm['percent'] = list(map(lambda x, y: round(
-        (x - y) / y * 100, 2), dm.close.values, dm.llastp.values))
+
+    # dm['percent'] = list(map(lambda x, y: round((x - y) / y * 100, 2), dm.close.values, dm.llastp.values))
+    dm['percent'] = ((dm['close'] - dm['llastp']) / dm['llastp'] * 100).map(lambda x: round(x, 2))
     log.debug("dm percent:%s" % (dm[:1]))
     # dm['volume'] = map(lambda x: round(x / 100, 1), dm.volume.values)
     dm['trade'] = dm['close']
@@ -2504,7 +2523,7 @@ def get_duration_price_date(code=None, ptype='low', dt=None, df=None, dl=None, e
 
 
 def compute_power_tdx_df(tdx_df,dd):
-    if len(tdx_df) == 9:
+    if len(tdx_df) >= 9:
         # idxdf = tdx_df.red[tdx_df.red <0]
         # if len(idxdf) >1:
         #     idx = tdx_df.red[tdx_df.red <0].argmax()
@@ -2516,7 +2535,7 @@ def compute_power_tdx_df(tdx_df,dd):
         # trend = tdx_df[tdx_df.index >= idx]
         # fibl = len(trend)
         # idxh = tdx_df.high.argmax()
-        idxh = tdx_df.low.argmin()
+        idxh = tdx_df.low.idxmin()
         fibh = len(tdx_df[tdx_df.index >= idxh])
         # vratio = -1
         # if fibl > 1:
@@ -2707,6 +2726,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     df['lastdu'] = ((df['high'] - df['low']) / df['close'] * 100).map(lambda x: round(x, 1))
     # df['perddu'] = ((df['high'] - df['low']) / df['low'] * 100).map(lambda x: round(x, 1))
     dd['upperT'] = dd.close[ (dd.upper > 0) & (dd.high > dd.upper)].count()
+    df = df[~df.index.duplicated()]
     upperL = dd.close[ (dd.upper > 0) & (dd.close >= dd.upper)]
     top_10 = df[df.perd >9.9]
     if len(top_10) >0:
@@ -2826,7 +2846,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     if resample == 'd':
         df['perd'] = df['perd'].apply(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
 
-    dd['perd'] = df['perd']
+    dd['perd'] = df['perd'][~df.index.duplicated()]
     dd.fillna(ct.FILLNA,inplace=True)    #ct.FILLNA -101
 
     # print dataframe_mode_round(df.high)
@@ -2912,7 +2932,7 @@ def compute_ma_cross_old(dd,ma1='ma5d',ma2='ma10d',ratio=0.02):
     if len(temp) > 0:
         temp_close = temp.close - temp.ene
         if len(temp_close[temp_close >0]) >0:
-            idx_min = temp_close.argmax()
+            idx_min = temp_close.idxmax()
         else:
             idx_min = -1
 
@@ -3090,11 +3110,11 @@ def get_tdx_exp_low_or_high_price(code, dt=None, ptype='close', dl=None, end=Non
                     dd = dd.T[dt]
                     dd['date'] = dt
             else:
-                dd = Series()
+                dd = pd.Series(dtype='float64')
 
         else:
             log.warning("code:%s no < dt:NULL" % (code))
-            dd = Series()
+            dd = pd.Series(dtype='float64')
             # dd = Series(
             #     {'code': code, 'date': cct.get_today(), 'open': 0, 'high': 0, 'low': 0, 'close': 0, 'amount': 0,
             #      'vol': 0})
@@ -3229,11 +3249,11 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
                 #     if len(df.ma10d) > 0 and df[:1].ma10d.values[0] is not None and df[:1].ma10d.values[0] != 0:
                 #         dd['ma10d'] = round(float(df[:1].ma10d.values[0]), 2)
             else:
-                dd = Series()
+                dd = pd.Series(dtype='float64')
 
         else:
             log.debug("code:%s no < dt:NULL" % (code))
-            dd = Series()
+            dd = pd.Series(dtype='float64')
             # dd = Series(
             #     {'code': code, 'date': cct.get_today(), 'open': 0, 'high': 0, 'low': 0, 'close': 0, 'amount': 0,
             #      'vol': 0})
@@ -3315,7 +3335,7 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
 #         ofile.seek(-fileSize, 2)
 #         no = int(fileSize / e)
 #         if no < newstockdayl:
-#             return Series()
+#             return pd.Series(dtype='float64')
 #         # print no,b,day_cout,fileSize
 #         buf = ofile.read()
 #         ofile.close()
@@ -3357,7 +3377,7 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
 #             dd['date'] = dt
 #         else:
 #             log.warning("no < dt:NULL")
-#             dd = Series()
+#             dd = pd.Series(dtype='float64')
 #             # dd = Series(
 #             # {'code': code, 'date': cct.get_today(), 'open': 0, 'high': 0, 'low': 0, 'close': 0, 'amount': 0,
 #             # 'vol': 0})
@@ -4168,6 +4188,14 @@ if __name__ == '__main__':
     # code='000837'
     # code='000750'
     # code='000752'
+    Write_sina_to_tdx(market='all')
+    import ipdb;ipdb.set_trace()
+
+    print(write_tdx_tushare_to_file('300055'))
+    print(write_tdx_sina_data_to_file('300055'))
+    print(get_tdx_append_now_df_api_tofile('300055'))
+    import ipdb;ipdb.set_trace()
+
     code='000043'
     code='601699'
     code='600604'

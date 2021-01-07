@@ -364,11 +364,26 @@ class Sina:
         # response = yield From(loop.run_in_executor(None,self.get_url_data_R,
         # (self.sina_stock_api + self.stock_list[index])))
         # response = yield From(loop.run_in_executor(None, requests.get, (self.sina_stock_api + self.stock_list[index])))
-        session = aiohttp.ClientSession()
-        response = await session.get(self.sina_stock_api + self.stock_list[index])
-        response.encoding = self.encoding
-        result = await response.text()
-        await session.close()
+        # session = aiohttp.ClientSession(timeout=30)
+
+
+        # session = aiohttp.ClientSession()
+        # response = await session.get(self.sina_stock_api + self.stock_list[index])
+        # response.encoding = self.encoding
+        # result = await response.text()
+        # await session.close()
+
+        url = self.sina_stock_api + self.stock_list[index]
+        async with aiohttp.ClientSession() as session:
+                response = await session.get(url=url)
+                headers = response.headers
+                response.encoding = self.encoding
+                result = await response.text()
+                await session.close()
+                # print(u, headers)
+                # return headers
+
+
         # response = await aiohttp.get(self.sina_stock_api + self.stock_list[index])
         # response = yield (requests.get(self.sina_stock_api + self.stock_list[index]))
         # log.debug("url:%s"%(self.sina_stock_api + self.stock_list[index]))
@@ -395,7 +410,7 @@ class Sina:
                 asyncio.set_event_loop(loop)
             loop.run_until_complete(asyncio.wait(threads))
             # asyncio.run(asyncio.wait(threads))
-            loop.close()
+            # loop.close()
             log.debug('get_stock_data_loop')
             return self.format_response_data()
 
