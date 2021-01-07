@@ -1896,6 +1896,7 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             flist = []
             # errstatus=False
             for code in flist_t:
+                code = decode_bytes_type(code)
                 if len(code) <= 6 or len(code) > 12:
                     continue
                 if not code.endswith('\r\n'):
@@ -1914,7 +1915,7 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             fout.close()
             fout = open(p_name, 'wb+')
             for code in flist:
-                fout.write(code)
+                fout.write(code.encode('utf8'))
 
             # if not str(flist[-1]).endswith('\r\n'):
                 # print "File:%s end not %s"%(p_name[-7:],str(flist[-1]))
@@ -1930,6 +1931,7 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             # flist_t = file(p_name, mode='rb+', buffering=None)
             if len(flist_t) > 4:
                 # errstatus=False
+                code = decode_bytes_type(code)
                 for code in flist_t:
                     if not code.endswith('\r\n'):
                         if len(code) <= 6:
@@ -1957,14 +1959,14 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
                 # print flist
                 fout = open(p_name, 'wb+')
                 for code in flist:
-                    fout.write(code)
+                    fout.write(code.encode('utf8'))
             else:
                 # fout.close()
                 fout = open(p_name, 'wb+')
                 # index_list.reverse()
                 for i in index_list:
                     raw = (i) + '\r\n'
-                    fout.write(raw)
+                    fout.write(raw.encode('utf8'))
 
         counts = 0
         for i in data:
@@ -1977,7 +1979,7 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             raw = code_to_tdxblk(i) + '\r\n'
             if len(raw) > 8 and not raw in flist:
                 counts += 1
-                fout.write(raw)
+                fout.write(raw.encode('utf8'))
                 # raw = pack('IfffffII', t, i[2], i[3], i[4], i[5], i[6], i[7], i[8])
         fout.flush()
         fout.close()
