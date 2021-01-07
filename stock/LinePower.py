@@ -1,13 +1,13 @@
  # -*- coding:utf-8 -*-
  #
 import sys
-from .JSONData import powerCompute as pct
-from .JSONData import LineHistogram as lht
-from .JSONData import wencaiData as wcd
-from .JSONData import get_macd_kdj_rsi as getab
-from . import JohnsonUtil.johnson_cons as ct
-from .JohnsonUtil import commonTips as cct
-from .JohnsonUtil import LoggerFactory as LoggerFactory
+from JSONData import powerCompute as pct
+from JSONData import LineHistogram as lht
+from JSONData import wencaiData as wcd
+from JSONData import get_macd_kdj_rsi as getab
+from JohnsonUtil import johnson_cons as ct
+from JohnsonUtil import commonTips as cct
+from JohnsonUtil import LoggerFactory as LoggerFactory
 log = LoggerFactory.log
 import warnings
 warnings.filterwarnings("ignore",".*GUI is implemented.*")

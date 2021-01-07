@@ -14,15 +14,15 @@ import pandas as pd
 # import sys
 # print sys.path
 
-from . import JohnsonUtil.johnson_cons as ct
+from JohnsonUtil import johnson_cons as ct
+import singleAnalyseUtil as sl
+from JSONData import powerCompute as pct
+from JSONData import stockFilter as stf
 
-from .JSONData import tdx_data_Day as tdd
-from .JSONData import powerCompute as pct
-from .JSONData import stockFilter as stf
-# from JSONData import wencaiData as wcd
-from .JohnsonUtil import LoggerFactory
-from .JohnsonUtil import commonTips as cct
-from . import singleAnalyseUtil as sl
+from JSONData import tdx_data_Day as tdd
+from JSONData import LineHistogram as lhg
+from JohnsonUtil import LoggerFactory as LoggerFactory
+from JohnsonUtil import commonTips as cct
 
 # from logbook import Logger,StreamHandler,SyslogHandler
 # from logbook import StderrHandler
@@ -396,8 +396,8 @@ if __name__ == "__main__":
                         len(top_now[top_now['volume'] <= 0]), goldstock)), end=' ')
                     # print "Rt:%0.3f" % (float(time.time() - time_Rt))
 
-                    nhigh = top_temp[top_temp.close > top_temp.nhigh]
-                    nlow = top_temp[top_temp.close > top_temp.nlow]
+                    nhigh = top_temp[top_temp.close > top_temp.nhigh] if 'nhigh'  in top_temp.columns else []
+                    nlow = top_temp[top_temp.close > top_temp.nlow] if 'nlow'  in top_temp.columns else []
 
                     print("Rt:%0.1f dT:%s N:%s T:%s %s%% nh:%s nlow:%s" % (float(time.time() - time_Rt), cct.get_time_to_date(time_s), cct.get_now_time(), len(top_temp), round(len(top_temp) / float(ct.PowerCount) * 100, 1),len(nhigh),len(nlow)))
                     if 'op' in top_temp.columns:

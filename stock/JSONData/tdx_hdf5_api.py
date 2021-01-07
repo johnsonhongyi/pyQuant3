@@ -530,7 +530,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                                 # df[df.index.get_level_values('code') not in diff_code ]
                         h5.remove(table)
                         # h5[table]=df
-                        h5.put(table, df, format='table', append=False)
+                        h5.put(table, df, format='table', index=False, complib=complib, data_columns=True)
                         # h5.put(table, df, format='table',index=False, data_columns=True, append=False)
                     else:
                         if rewrite:
@@ -540,7 +540,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                 else:
                     if not MultiIndex:
                         # h5[table]=df
-                        h5.put(table, df, format='table', append=False)
+                        h5.put(table, df, format='table', index=False, complib=complib, data_columns=True)
                         # h5.put(table, df, format='table',index=False, data_columns=True, append=False)
                     else:
                         h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
@@ -963,6 +963,34 @@ if __name__ == "__main__":
     # sys.exit(app.exec_())
     # store = store.Store()
     # store.block = True
+
+
+
+#     Traceback (most recent call last):
+#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\singleAnalyseUtil.py", line 703, in <module>
+#     tdd.Write_market_all_day_mp('all')
+#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\JSONData\tdx_data_Day.py", line 1889, in Write_market_all_day_mp
+#     Write_sina_to_tdx(tdx_index_code_list, index=True)
+#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\JSONData\tdx_data_Day.py", line 1717, in Write_sina_to_tdx
+#     status = h5a.write_hdf_db(h5_fname, df, table=h5_table, index=False, baseCount=500, append=False, MultiIndex=True)
+#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\JSONData\tdx_hdf5_api.py", line 538, in write_hdf_db    h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
+#   File "C:\Users\Johnson\Anaconda2\envs\py39\lib\site-packages\pandas\io\pytables.py", line 1092, in put
+#     self._write_to_group(
+#   File "C:\Users\Johnson\Anaconda2\envs\py39\lib\site-packages\pandas\io\pytables.py", line 1742, in _write_to_group
+#     s.write(
+#   File "C:\Users\Johnson\Anaconda2\envs\py39\lib\site-packages\pandas\io\pytables.py", line 4678, in write    return super().write(obj=obj, data_columns=data_columns, **kwargs)
+#   File "C:\Users\Johnson\Anaconda2\envs\py39\lib\site-packages\pandas\io\pytables.py", line 4218, in write    table = self._create_axes(
+#   File "C:\Users\Johnson\Anaconda2\envs\py39\lib\site-packages\pandas\io\pytables.py", line 3951, in _create_axes
+#     new_table.validate(self)
+#   File "C:\Users\Johnson\Anaconda2\envs\py39\lib\site-packages\pandas\io\pytables.py", line 3292, in validate
+#     raise ValueError(
+# ValueError: invalid combination of [values_axes] on appending data [name->values_block_0,cname->values_block_0,dtype->bytes80,kind->string,shape->(2, 3)] vs current table [name->values_block_0,cname->values_block_0,dtype->b'string80',kind->string,shape->None]
+
+
+
+
+
+
     pandasguisettings={'block':'True'}
     for h5_fname in fname:
         h5keys=[]

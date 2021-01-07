@@ -26,14 +26,15 @@ import pandas as pd
 # from bs4 import BeautifulSoup
 # from pandas import DataFrame
 
-from . import JohnsonUtil.commonTips as cct
-from . import JohnsonUtil.johnson_cons as ct
-from . import singleAnalyseUtil as sl
+from JohnsonUtil import johnson_cons as ct
+import singleAnalyseUtil as sl
+from JSONData import powerCompute as pct
+from JSONData import stockFilter as stf
 
-from .JSONData import tdx_data_Day as tdd
-from .JSONData import powerCompute as pct
-from .JSONData import stockFilter as stf
-from .JohnsonUtil import LoggerFactory as LoggerFactory
+from JSONData import tdx_data_Day as tdd
+from JSONData import LineHistogram as lhg
+from JohnsonUtil import LoggerFactory as LoggerFactory
+from JohnsonUtil import commonTips as cct
 # cct.set_ctrl_handler()
 
 
@@ -429,8 +430,8 @@ if __name__ == "__main__":
                 top_end=stf.getBollFilter(
                     df=top_end, resample=resample, down=True)
 
-                nhigh = top_temp[top_temp.close > top_temp.nhigh]
-                nlow = top_temp[top_temp.close > top_temp.nlow]
+                nhigh = top_temp[top_temp.close > top_temp.nhigh] if 'nhigh'  in top_temp.columns else []
+                nlow = top_temp[top_temp.close > top_temp.nlow] if 'nlow'  in top_temp.columns else []
                 print("G:%s Rt:%0.1f dT:%s N:%s T:%s nh:%s nlow:%s" % (goldstock, float(time.time() - time_Rt), cct.get_time_to_date(time_s), cct.get_now_time(), len(top_temp),len(nhigh),len(nlow)))
 
                 top_temp=top_temp.sort_values(by=(market_sort_value),

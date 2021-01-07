@@ -3,7 +3,7 @@
 # %matplotlib inline
 import datetime
 import sys
-
+sys.path.append("..")
 import numpy as np
 import pandas as pd
 from statsmodels import api as sm
@@ -19,7 +19,7 @@ from pylab import plt, mpl
 from sklearn.linear_model import LinearRegression
 from statsmodels import regression
 
-from . import powerCompute as pct
+from JSONData import powerCompute as pct
 from JohnsonUtil import LoggerFactory as LoggerFactory
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import zoompan

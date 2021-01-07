@@ -150,8 +150,6 @@ def post_login2(root='http://upass.10jqka.com.cn/login', url=None):
         print("\t:")
         # cookie["session"]["u_name_wc"] = "mx_149958484"
 
-        import ipdb;ipdb.set_trace()
-
         if status == 200:
             # response = opener.open(url, data=headers)
             response = opener.open(url)
@@ -296,7 +294,9 @@ def get_wencai_Market_url(filter='国企改革', perpage=1, url=None, pct=False,
                    'Cookie': 'v=AZaxA_wZ09rYlOd-tO91dApK4U2ZN9pxLHsO1QD_gnkUwzj_aMcqgfwLXuTQ', }
         data = cct.get_url_data(url, retry_count=1, headers=headers)
 
-        if data is None or (len(data) < 10 or len(re.findall('系统判断您访问次数过多'.decode('utf8'), data))):
+        # if data is None or (len(data) < 10 or len(re.findall(u'系统判断您访问次数过多'.decode('utf8'), data))):
+
+        if data is None or (len(data) < 10 or len(re.findall('系统判断您访问次数过多', data))):
             wencai_count += 1
             cct.get_config_value_wencai(
                 config_ini, fname, currvalue=wencai_count, update=True)
@@ -391,8 +391,8 @@ def get_wencai_Market_url(filter='国企改革', perpage=1, url=None, pct=False,
                                     for key in list(y.keys()):
                                         if key in keylist:
                                             if key == 'URL':
-                                                urls = str(y[key]).replace(
-                                                    '\\', '').strip().decode('unicode-escape')
+                                                # urls = str(y[key]).replace('\\', '').strip().decode('unicode-escape')
+                                                urls = str(y[key]).replace('\\', '').strip()
                                                 if urls[-20] not in urllist:
                                                     urllist.append(urls[-20])
                                                     log.info(urls),
@@ -400,17 +400,18 @@ def get_wencai_Market_url(filter='国企改革', perpage=1, url=None, pct=False,
                                                 else:
                                                     break
                                             else:
-                                                urls = str(y[key]).decode(
-                                                    'unicode-escape')
+                                                # urls = str(y[key]).decode('unicode-escape')
+                                                urls = str(y[key])
                                                 key_t.append(urls)
 #                                                key_t.append(urls)
                                                 log.info(urls),
                                 # else:
                                     # print str(y).decode('unicode-escape'),
                         else:
-                            code_t.append(str(x).decode('unicode-escape'))
+                            # code_t.append(str(x).decode('unicode-escape'))
 #                            code_t.append(str(x))
-                            log.debug(str(x).decode('unicode-escape')),
+                            # log.debug(str(x).decode('unicode-escape')),
+                            log.debug(str(x)),
 #                            log.info(str(x)),
 #                    log.info( key_t)
                     if len(code_t) > 4:
@@ -511,7 +512,8 @@ def get_codelist_df(codelist):
         # print "ti:",time.time()-time_s
 #        cnamelist =[]
         for li in div_list:
-            cname = ",".join(x.encode('utf8') for x in li)
+            # cname = ",".join(x.encode('utf8') for x in li)
+            cname = ",".join(x for x in li)
 #            cnamelist.append(cname)
             wcdf_t = get_wencai_Market_url(cname, len(li))
             wcdf = wcdf.append(wcdf_t)
@@ -521,7 +523,9 @@ def get_codelist_df(codelist):
         print(("Wcai:%.2f" % (time.time() - time_s)), end=' ')
         # print results
     else:
-        cname = ",".join(x.encode('utf8') for x in codelist)
+
+        # cname = ",".join(x.encode('utf8') for x in codelist)   #python2
+        cname = ",".join(x for x in codelist)    #python3
         wcdf = get_wencai_Market_url(cname, len(codelist))
 #        wcdf = wcdf.append(wcdf_t)
     if len(wcdf) != len(codelist):

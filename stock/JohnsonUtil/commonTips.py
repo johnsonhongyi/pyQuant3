@@ -1277,6 +1277,15 @@ def get_work_time_ratio():
 
     return ratio_t
 
+
+def decode_bytes_type(data):
+    if isinstance(data,bytes):
+        try:
+            data = data.decode('utf8')
+        except:
+            data = data.decode('gbk')
+    return data
+    
 global ReqErrorCount
 ReqErrorCount = 1
 def get_url_data_R(url, timeout=30,headers=None):
@@ -1297,8 +1306,8 @@ def get_url_data_R(url, timeout=30,headers=None):
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0',
                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                    'Connection': 'keep-alive'}
-    else:
-        headers
+    # else:
+    #     headers = 
     # else:
 
     #     headers = dict({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0',
@@ -1341,7 +1350,15 @@ def get_url_data_R(url, timeout=30,headers=None):
         sleep(120)
     else:
         log.info('Access successful.')
-    return data.decode('utf-8')
+
+    if isinstance(data,bytes):
+        try:
+            data = data.decode('utf8')
+        except:
+            data = data.decode('gbk')
+
+    return data
+    # return data
 
 
 def get_url_data(url, retry_count=3, pause=0.05, timeout=30, headers=None):

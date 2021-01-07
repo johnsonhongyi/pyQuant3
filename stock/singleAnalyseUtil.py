@@ -20,6 +20,7 @@ from JohnsonUtil import emacount as ema
 from JohnsonUtil import LoggerFactory
 # log = LoggerFactory.getLogger("SingleSAU")
 # log.setLevel(LoggerFactory.DEBUG)
+from JSONData import stockFilter as stf
 
 try:
     from urllib.request import urlopen, Request
@@ -339,7 +340,7 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
                 # cumin_index[INDEX_LIST_TDX[code]]=cumin
                 int += 1
                 if int % 2 != 0:
-                    print("%s op:%s ra:%s d:%s fib:%s m5:%s  %s" % (code, f_print(3, op), f_print(5, ra), f_print(2, daysData[0]), f_print(3, fib), f_print(4, daysData[1]), st), end=' ')
+                    print("%s op:%s ra:%s d:%s fib:%s m5:%s  %s" % (code, f_print(3, op), f_print(5, ra), f_print(2, daysData[0]), f_print(3, fib), f_print(4, daysData[1]), st), end='')
                 else:
                     print("%s op:%s ra:%s d:%s fib:%s m5:%s " % (st, f_print(3, op), f_print(5, ra), f_print(2, daysData[0]), f_print(3, fib), f_print(4, daysData[1])))
 
@@ -611,7 +612,7 @@ if __name__ == '__main__':
     fibl = fibonacciCount(['999999', '399001', '399006'], dl=dl)
     percentDuration = 2
     cct.get_terminal_Position(position=sys.argv[0])
-    from .JSONData import stockFilter as stf
+
     blkname = '068.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
     while 1:

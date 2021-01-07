@@ -27,7 +27,7 @@ import JohnsonUtil.johnson_cons as ct
 from JohnsonUtil import LoggerFactory
 # from JSONData.prettytable import *
 from JohnsonUtil import commonTips as cct
-from . import tdx_hdf5_api as h5a
+from JSONData import tdx_hdf5_api as h5a
 
 try:
     from urllib.request import urlopen, Request
@@ -64,6 +64,8 @@ log = LoggerFactory.log
 sinaheader = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
     'Host': 'vip.stock.finance.sina.com.cn',
+    'Referer':'http://vip.stock.finance.sina.com.cn',
+    'Connection': 'keep-alive',
 }
     # 'Referer':'http://vip.stock.finance.sina.com.cn'
 
@@ -83,7 +85,7 @@ def _parsing_Market_price_json(url):
     #                              ct.PAGES['jv'], pageNum))
     # url='http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=20&sort=changepercent&asc=0&node=cyb&symbol='
 
-    text = cct.get_url_data_R(url,header=sinaheader)
+    text = cct.get_url_data_R(url,headers=sinaheader)
     # text = cct.get_url_data(url)
 
     if text == 'null':
@@ -524,7 +526,8 @@ def _parsing_sina_dd_price_json(url):
 
 
     df = df.drop('symbol', axis=1)
-    df = df.loc[df.volume > 0]
+    df['volume'] = df['volume'].apply(lambda x:round(float(x),1))
+    df = df.loc[ df.volume > 0]
     # print ""
     # print df['name'][len(df.index)-1:],len(df.index)
     return df

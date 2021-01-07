@@ -10,14 +10,15 @@ import time
 import pandas as pd
 # from bs4 import BeautifulSoup
 
-from . import JohnsonUtil.johnson_cons as ct
-from . import singleAnalyseUtil as sl
+from JohnsonUtil import johnson_cons as ct
+import singleAnalyseUtil as sl
+from JSONData import powerCompute as pct
+from JSONData import stockFilter as stf
 
-from .JSONData import tdx_data_Day as tdd
-from .JSONData import powerCompute as pct
-from .JSONData import stockFilter as stf
-from .JohnsonUtil import LoggerFactory as LoggerFactory
-from .JohnsonUtil import commonTips as cct
+from JSONData import tdx_data_Day as tdd
+from JSONData import LineHistogram as lhg
+from JohnsonUtil import LoggerFactory as LoggerFactory
+from JohnsonUtil import commonTips as cct
 
 
 # from logbook import StderrHandler

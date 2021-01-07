@@ -7,14 +7,14 @@ import sys
 import time
 
 import pandas as pd
-from . import JohnsonUtil.johnson_cons as ct
-from .JSONData import powerCompute as pct
-from .JSONData import stockFilter as stf
+from JohnsonUtil import johnson_cons as ct
+from JSONData import powerCompute as pct
+from JSONData import stockFilter as stf
 
-from .JSONData import tdx_data_Day as tdd
-from .JSONData import LineHistogram as lhg
-from .JohnsonUtil import commonTips as cct
-from .JohnsonUtil import LoggerFactory as LoggerFactory
+from JSONData import tdx_data_Day as tdd
+from JSONData import LineHistogram as lhg
+from JohnsonUtil import commonTips as cct
+from JohnsonUtil import LoggerFactory as LoggerFactory
 # from logbook import Logger,StreamHandler,SyslogHandler
 # from logbook import StderrHandler
 
