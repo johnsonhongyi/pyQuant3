@@ -1715,7 +1715,6 @@ def Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=30
                 # df = df.drop(['name'], axis=1)
             df = df.set_index(['code', 'date'])
             df = df.astype(float)
-            import ipdb;ipdb.set_trace()
 
             status = h5a.write_hdf_db(h5_fname, df, table=h5_table, index=False, baseCount=500, append=False, MultiIndex=True)
             # search_Tdx_multi_data_duration(h5_fname, h5_table, df=None,code_l=code_list, start=None, end=None, freq=None, col=None, index='date',tail=1)
