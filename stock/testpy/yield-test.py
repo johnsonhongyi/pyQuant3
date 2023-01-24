@@ -28,21 +28,21 @@ def main():
     while 1:
         try:
             status=True
-            input=input("input:")
+            input=eval(input("input:"))
             if input=='q':
                 sys.exit(0)
         except (KeyboardInterrupt) as e:
                     # print "key"
-                    print("KeyboardInterrupt:", e)
+                    print(("KeyboardInterrupt:", e))
                     if not status:
-                        input2=input("input:")
+                        input2=eval(input("input:"))
                         if input2=='q':
                             sys.exit(0)
         except:
             print("except")
             traceback.print_exc()
             info=sys.exc_info()  
-            print(info[0],":",info[1])  
+            print((info[0],":",info[1]))  
             sys.exit(0)
 
 # while 1:

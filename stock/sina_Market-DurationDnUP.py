@@ -12,7 +12,6 @@ from JohnsonUtil import johnson_cons as ct
 import singleAnalyseUtil as sl
 from JSONData import powerCompute as pct
 from JSONData import stockFilter as stf
-
 from JSONData import tdx_data_Day as tdd
 from JSONData import LineHistogram as lhg
 from JohnsonUtil import LoggerFactory as LoggerFactory
@@ -143,8 +142,10 @@ if __name__ == "__main__":
 
             time_Rt = time.time()
             # top_now = tdd.getSinaAlldf(market='all', vol=ct.json_countVol, vtype=ct.json_countType)
-            market_blk = '次新股'
-            top_now = tdd.getSinaAlldf(market=market_blk,filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
+            # market_blk = '次新股'
+            market_blk = 'all'
+            top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
+            # top_now = tdd.getSinaAlldf(market=market_blk,filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='all', vol=ct.json_countVol, vtype=ct.json_countType)
             
             now_count = len(top_now)
@@ -292,6 +293,10 @@ if __name__ == "__main__":
                         else:
                             top_dif = top_dif.sort_values(by=['dff', 'percent', 'ratio'], ascending=[1, 0, 1])
 
+
+                    #20210816 filter ma5d ma10d
+                    top_dif = top_dif[top_dif.close > top_dif.ma10d ]
+                    
                     # top_all=top_all.sort_values(by=['percent','dff','couts','ratio'],ascending=[0,0,1,1])
                     # print cct.format_for_print(top_dif[:10])
                     # top_dd = pd.concat([top_dif[:5],top_temp[:3],top_dif[-3:],top_temp[-3:]], axis=0)

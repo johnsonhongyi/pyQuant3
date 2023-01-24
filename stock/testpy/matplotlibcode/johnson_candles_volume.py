@@ -74,8 +74,8 @@ def plot_candlestick(frame, ylabel='BTC/USD', candle_width=1.0, freq='D'):
     # Make bar plots and color differently depending on up/down for the day
     pos = frame['open'] - frame['close'] < 0
     neg = frame['open'] - frame['close'] > 0
-    print(pos,neg)
-    print(dates[pos])
+    print((pos,neg))
+    print((dates[pos]))
     ax1.grid(True)
     # ax1.bar(dates[pos], volume[pos], color='g',
             # width=candle_width, align='center')
@@ -96,7 +96,7 @@ def plot_candlestick(frame, ylabel='BTC/USD', candle_width=1.0, freq='D'):
     # print frame.index.values[0],ticks
     # xt = [frame.index.values[i] for i in (np.append(ticks[:-1], len(frame) - 1))]
     # ax1.set_xticks(xt)
-    print(frame.index)
+    print((frame.index))
     ticks = ax1.get_xticks()
     # print xt
     # print ticks

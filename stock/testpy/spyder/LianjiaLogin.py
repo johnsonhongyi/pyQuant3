@@ -46,7 +46,7 @@ req.add_header("User-Agent", user_agent)
 # cookie ="t=*************************"#设定cookie的内容
 # request.add_header("Cookie", cookie)
 conn = opener.open(req)
-print("info",conn.info())
+print(("info",conn.info()))
 feeddata = conn.read()
 # print "first:",feeddata
 
@@ -102,7 +102,7 @@ pattern = re.compile(r'value=\"(LT-.*)\"')
 lt = pattern.findall(html_content)[0]
 pattern = re.compile(r'name="execution" value="(.*)"')
 execution = pattern.findall(html_content)[0]
-print("lt:%s ex:%s"%(lt,execution))
+print(("lt:%s ex:%s"%(lt,execution)))
 # print(cookie)
 # opener.open(lj_uuid_url)
 # print(cookie)
@@ -166,11 +166,11 @@ try:
     # print result.read()
     # print cookie
 except urllib.error.HTTPError as e:
-    print(e.getcode())
-    print(e.reason)
-    print(e.geturl())
+    print((e.getcode()))
+    print((e.reason))
+    print((e.geturl()))
     print("-------------------------!!!!!!!!!!!!!!!!!")
-    print(e.info())
+    print((e.info()))
     print((e.geturl()))
     # req = urllib2.Request(e.geturl())
     # result = opener.open(req)

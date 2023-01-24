@@ -57,7 +57,7 @@ def get_all_top():
     top = top[top['changepercent'] <10]
     # logging.info("top:", len(top['code']))
     list =top['code'].tolist()
-    print(len(list))
+    print((len(list)))
     return list
 # Make the Pool of workers
 # print cpu_count()
@@ -132,7 +132,7 @@ def mainrun(codes=None):
     endtime = datetime.datetime.now()
     interval=(endtime - starttime).seconds
     print("")
-    print("interval:",interval)
+    print(("interval:",interval))
     # print results
 
 
@@ -212,5 +212,5 @@ if __name__ == '__main__':
     endtime = datetime.datetime.now()
     interval=(endtime - starttime).seconds
     print("")
-    print("interval:",interval)
+    print(("interval:",interval))
     # print results

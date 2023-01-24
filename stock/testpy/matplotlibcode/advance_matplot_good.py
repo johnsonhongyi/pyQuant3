@@ -67,8 +67,8 @@ def graphData(stock,MA1,MA2):
         Use this to dynamically pull a stock:
     '''
     try:
-        print('Currently Pulling',stock)
-        print(str(datetime.datetime.fromtimestamp(int(time.time())).strftime('%Y-%m-%d %H:%M:%S')))
+        print(('Currently Pulling',stock))
+        print((str(datetime.datetime.fromtimestamp(int(time.time())).strftime('%Y-%m-%d %H:%M:%S'))))
         urlToVisit = 'http://chartapi.finance.yahoo.com/instrument/1.0/'+stock+'/chartdata;type=quote;range=10y/csv'
         stockFile =[]
         try:
@@ -80,9 +80,9 @@ def graphData(stock,MA1,MA2):
                     if 'values' not in eachLine:
                         stockFile.append(eachLine)
         except Exception as e:
-            print(str(e), 'failed to organize pulled data.')
+            print((str(e), 'failed to organize pulled data.'))
     except Exception as e:
-        print(str(e), 'failed to pull pricing data')
+        print((str(e), 'failed to pull pricing data'))
     try:   
         date, closep, highp, lowp, openp, volume = np.loadtxt(stockFile,delimiter=',', unpack=True,
                                                               converters={ 0: mdates.strpdate2num('%Y%m%d')})
@@ -203,7 +203,7 @@ def graphData(stock,MA1,MA2):
         # fig.savefig('example.png',facecolor=fig.get_facecolor())
            
     except Exception as e:
-        print('main loop',str(e))
+        print(('main loop',str(e)))
 
 # while True:
     # stock = raw_input('Stock to plot: ')

@@ -89,4 +89,4 @@ if __name__ == "__main__":
     # print file.__doc__
     file.seek(0)
     dfread = pd.io.parsers.read_csv(file, delimiter=',', header=None,encoding='gbk')
-    print(dfread.shape,dfread[:2])
+    print((dfread.shape,dfread[:2]))

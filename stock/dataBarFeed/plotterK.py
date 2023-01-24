@@ -260,7 +260,7 @@ class Subplot(object):
 
     def onBars(self, bars):
         dateTime = bars.getDateTime()
-        for cb, series in self.__callbacks.items():
+        for cb, series in list(self.__callbacks.items()):
             series.addValue(dateTime, cb(bars))
 
     def getSeries(self, name, defaultClass=LineMarker):

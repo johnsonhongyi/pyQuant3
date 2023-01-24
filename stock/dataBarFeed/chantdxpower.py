@@ -9,6 +9,7 @@ import JSONData.tdx_hdf5_api as h5a
 from JohnsonUtil import commonTips as cct
 import JohnsonUtil.johnson_cons as ct
 from JohnsonUtil import zoompan
+from JSONData import stockFilter as stf
 import my_chan2 as chan
 import matplotlib as mat
 import numpy as np
@@ -229,7 +230,7 @@ def show_chan_mpl_tdx(code, start_date=None, end_date=None, stock_days=60, resam
                 #                 'd' if cur_ji+1==5 else 'w' if cur_ji+1==6 else 'd'
 
             start_lastday = str(chanK.index[biIdx[-1]])[0:10]
-            print("次级别为:%s cur_ji:%s %s" % (resample, cur_ji, start_lastday))
+            print(("次级别为:%s cur_ji:%s %s" % (resample, cur_ji, start_lastday)))
             # print [chanK.index[x] for x in biIdx]
             k_data_c, cname = get_quotes_tdx(stock, start=start_lastday, end=end_date, dl=dl, resample=resample)
             # print k_data_c.index[0],k_data_c.index[-1]
@@ -444,7 +445,8 @@ def show_chan_mpl_tdx(code, start_date=None, end_date=None, stock_days=60, resam
     #          ResizeTool(), ResetTool(),\
     #          PanTool(dimensions=['width']), PreviewSaveTool()]
     if show_mpl:
-        fig = plt.figure(figsize=(10, 6))
+        # fig = plt.figure(figsize=(10, 6))
+        fig = plt.figure(figsize=(12, 8))
         ax1 = plt.subplot2grid((10, 1), (0, 0), rowspan=8, colspan=1)
         # ax1 = fig.add_subplot(2,1,1)
         # fig = plt.figure()
@@ -594,7 +596,7 @@ def show_chan_mpl_tdx(code, start_date=None, end_date=None, stock_days=60, resam
     # print ("kdh:%s"%(kdh.values))
     # log.debug("kdl_mode:%s kdh_mode%s chanKidx:%s" % (kdl_mode.values, kdh_mode.values, str(chanKIdx[-1])[:10]))
     log.info("time:%0.2f kdl_mode:%s kdh_mode%s chanKidx:%s" % (time.time()-time_s ,kdl_mode.values, kdh_mode.values, str(chanKIdx[-1])[:10]))
-    print(kdl_mode.values,np.median(kdl_mode.values), kdh_mode.values,np.median(kdh_modekdh_mode.values), str(chanKIdx[-1])[:10],start_dt)
+    print((kdl_mode.values,np.median(kdl_mode.values), kdh_mode.values,np.median(kdh_modekdh_mode.values), str(chanKIdx[-1])[:10],start_dt))
     # lkdl, lkdlidx = LIS(kdl)
     # lkdh, lkdhidx = LIS(kdh)
     # log.debug("Lkdl:%s Lkdh:%s" % (len(kdl) - len(lkdl), len(kdh) - len(lkdh)))
@@ -749,7 +751,7 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
         # cur_ji = 1 #当前级别
         # 符合k线根数大于4根 1日级别， 2 30分钟， 3 5分钟， 4 一分钟
         least_khl_num = get_least_khl_num(get_resample_ciji(resample), 1, init_num=least_init)
-        print("次级:%s %s st_data:%s k_data_dts:%s least_khl_num:%s" % (resample,len(k_data_dts) - k_data_dts.index(st_data), str(st_data)[:10], len(k_data_dts), least_khl_num))
+        print(("次级:%s %s st_data:%s k_data_dts:%s least_khl_num:%s" % (resample,len(k_data_dts) - k_data_dts.index(st_data), str(st_data)[:10], len(k_data_dts), least_khl_num)))
         
         if not recursion:
             # resample = 'd' if cur_ji + 1 == 2 else '5m' if cur_ji + 1 == 3 else \
@@ -764,7 +766,7 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
                 #                 'd' if cur_ji+1==5 else 'w' if cur_ji+1==6 else 'd'
 
             start_lastday = str(chanK.index[biIdx[-1]])[0:10]
-            print("次级别为:%s cur_ji:%s %s" % (resample, cur_ji, start_lastday))
+            print(("次级别为:%s cur_ji:%s %s" % (resample, cur_ji, start_lastday)))
             # print [chanK.index[x] for x in biIdx]
             k_data_c, cname = get_quotes_tdx(stock, start=start_lastday, end=end_date, dl=dl, resample=resample)
             # print k_data_c.index[0],k_data_c.index[-1]
@@ -932,7 +934,8 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
     #          ResizeTool(), ResetTool(),\
     #          PanTool(dimensions=['width']), PreviewSaveTool()]
     if show_mpl:
-        fig = plt.figure(figsize=(10, 6))
+        # fig = plt.figure(figsize=(10, 6))
+        fig = plt.figure(figsize=(12, 8))
         ax1 = plt.subplot2grid((10, 1), (0, 0), rowspan=8, colspan=1)
         # ax1 = fig.add_subplot(2,1,1)
         # fig = plt.figure()
@@ -1162,9 +1165,9 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
     
     if show_mpl:
         plt.plot(x_fenbi_seq, y_fenbi_seq)
-        quotes = quotes.round(2)
+        # quotes = quotes.round(2)
         # plt.legend([stock_code,cname], loc=0)
-        plt.legend([stock_code, cname, "Now:%s" % (quotes.close[-1]), 'kdl:%s' % (kdl_mode.values), 'kdh:%s' % (kdh_mode.values)], fontsize=12, loc=0)
+        plt.legend([stock_code, cname, "Now:%s" % (quotes.close[-1]), 'kdl:%s' % (kdl_mode.values[:4]), 'kdh:%s' % (kdh_mode.values[:4])], fontsize=12, loc=0)
         if len(kdl_mode) > 0:
             plt.axhline(y=np.median(kdl_mode.values), linewidth=2, color='green', linestyle="--")
         if len(kdh_mode) > 0:
@@ -1172,8 +1175,9 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
         plt.title(stock_code + " | " + cname + " | " + str(quotes.index[-1])[:10], fontsize=14)
 
         plt.plot(x_xd_seq, y_xd_seq)
+        #plt roll_mean windows  default 20
         if len(quotes) > windows:
-            roll_mean = pd.rolling_mean(quotes.close, window=windows)
+            roll_mean = pd.Series.rolling(quotes.close, window=windows).mean()
             plt.plot(roll_mean, 'r')
         zp = zoompan.ZoomPan()
         figZoom = zp.zoom_factory(ax1, base_scale=1.1)
@@ -1186,7 +1190,9 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
         # ax2 = plt.subplot(212, sharex=ax1)
         ax2 = plt.subplot2grid((10, 1), (8, 0), rowspan=2, colspan=1, sharex=ax1)
         # ax2.set_position(mat.transforms.Bbox([[0.125,0.1],[0.9,0.32]]))
-        volume = np.asarray(quotes.amount)
+        # amount is not full data
+        # volume = np.asarray(quotes.amount) 
+        volume = np.asarray(quotes.vol)
         pos = quotes['open'] - quotes['close'] < 0
         neg = quotes['open'] - quotes['close'] >= 0
         idx = quotes.reset_index().index
@@ -1860,7 +1866,7 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         # cur_ji = 1 #当前级别
         # 符合k线根数大于4根 1日级别， 2 30分钟， 3 5分钟， 4 一分钟
         least_khl_num = get_least_khl_num(get_resample_ciji(resample), 1, init_num=least_init)
-        print("次级:%s %s st_data:%s k_data_dts:%s least_khl_num:%s" % (resample,len(k_data_dts) - k_data_dts.index(st_data), str(st_data)[:10], len(k_data_dts), least_khl_num))
+        print(("次级:%s %s st_data:%s k_data_dts:%s least_khl_num:%s" % (resample,len(k_data_dts) - k_data_dts.index(st_data), str(st_data)[:10], len(k_data_dts), least_khl_num)))
        
         if not recursion:
             # resample = 'd' if cur_ji + 1 == 2 else '5m' if cur_ji + 1 == 3 else \
@@ -1877,7 +1883,7 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
                 start_lastday = str(chanK.index[biIdx[-1]])[0:10]
             else:
                 start_lastday = str(chanK.index[biIdx[-1]])
-            print("次级别为:%s cur_ji:%s %s" % (resample, cur_ji, start_lastday))
+            print(("次级别为:%s cur_ji:%s %s" % (resample, cur_ji, start_lastday)))
             # print [chanK.index[x] for x in biIdx]
 
             k_data_c, cname = get_quotes_tdx(stock, start=start_lastday, end=end_date, dl=dl, resample=resample)
@@ -1967,6 +1973,7 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
     # 2017-05-04  15.66  15.63  15.70  15.52   8343270  130330396
     # 2017-05-05  15.56  15.65  15.68  15.41  18384031  285966842
     # 2017-05-08  15.62  15.75  15.76  15.54  12598891  197310688
+    quotes=quotes.round(2)
 
     quotes= chan.parse2ChanK(quotes, quotes.values) if chanK_flag else quotes
     # print quotes[:1].index
@@ -2078,9 +2085,8 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         Ti=[]
         if len(T0) / x_jizhun > 12:
             x_jizhun=len(T0) / 12
-        for i in range( int(len(T0) / x_jizhun)):
+        for i in range(int(len(T0) / x_jizhun)):
             # print "len(T0)/x_jizhun:",len(T0)/x_jizhun
-
             a1=i * x_jizhun
             d=datetime.date.fromtimestamp(int(T1[int(a1)]))
             # print d
@@ -2097,11 +2103,11 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         Ti=[]
         if len(T0) / x_jizhun > 12:
             x_jizhun=len(T0) / 12
-        for i in range(len(T0) / x_jizhun):
+        for i in range(int(len(T0) / x_jizhun)):
             # print "len(T0)/x_jizhun:",len(T0)/x_jizhun
-            a=i * x_jizhun
+            a0=i * x_jizhun
 
-            d=str(T0[a])[11:16]
+            d=str(T0[a0])[11:16]
             # print d
             # T2=d.strftime('$%Y-%m-%d$')
             Ti.append(d)
@@ -2127,7 +2133,8 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
     #          ResizeTool(), ResetTool(),\
     #          PanTool(dimensions=['width']), PreviewSaveTool()]
     if show_mpl:
-        fig=plt.figure(figsize = (10, 6))
+        # fig=plt.figure(figsize = (10, 6))
+        fig=plt.figure(figsize = (12, 8))
         ax1=plt.subplot2grid((10, 1), (0, 0), rowspan = 8, colspan = 1)
         # ax1 = fig.add_subplot(2,1,1)
         # fig = plt.figure()
@@ -2377,10 +2384,10 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         plt.plot(x_fenbi_seq, y_fenbi_seq)
         # import ipdb;ipdb.set_trace()
         # quotes = quotes.apply(pd.Series.round)
-        quotes = quotes.round(2)
+        # quotes = quotes.round(2)
 
         # plt.legend([stock_code,cname], loc=0)
-        plt.legend([stock_code, cname, "Now:%s" % quotes.close[-1], 'kdl:%s' % (kdl_mode.values), 'kdh:%s' % (kdh_mode.values)], fontsize=12, loc=0)
+        plt.legend([stock_code, cname, "Now:%s" % quotes.close[-1], 'kdl:%s' % (kdl_mode.values[:4]), 'kdh:%s' % (kdh_mode.values[:4])], fontsize=12, loc=0)
         if len(kdl_mode) > 0:
             plt.axhline(y=np.median(kdl_mode.values), linewidth=2, color='red', linestyle="--")
         if len(kdh_mode) > 0:
@@ -2388,7 +2395,7 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         plt.title(stock_code + " | " + str(cname) + " | " + str(quotes.index[-1])[:10], fontsize=14)
         plt.plot(x_xd_seq, y_xd_seq)
         if len(quotes) > windows:
-            roll_mean=pd.rolling_mean(quotes.close, window=windows)
+            roll_mean=pd.Series.rolling(quotes.close, window=windows).mean()
             plt.plot(roll_mean, 'r')
         zp=zoompan.ZoomPan()
         figZoom=zp.zoom_factory(ax1, base_scale=1.1)
@@ -2430,7 +2437,8 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         # ax2 = plt.subplot(212, sharex=ax1)
         ax2=plt.subplot2grid((10, 1), (8, 0), rowspan=2, colspan=1, sharex=ax1)
         # ax2.set_position(mat.transforms.Bbox([[0.125,0.1],[0.9,0.32]]))
-        volume=np.asarray(quotes.amount)
+        # volume=np.asarray(quotes.amount)
+        volume=np.asarray(quotes.vol)
         pos=quotes['open'] - quotes['close'] < 0
         neg=quotes['open'] - quotes['close'] >= 0
         idx=quotes.reset_index().index
@@ -2472,14 +2480,14 @@ def parseArgmain():
         parser.add_argument('-v', action="store", dest="vtype", type=str, choices=['f', 'b'], default='f', help='Price Forward or back')
         parser.add_argument('-p', action="store", dest="ptype", type=str, choices=['high', 'low', 'close'], default='low', help='price type')
         parser.add_argument('-f', action="store", dest="filter", type=str, choices=['y', 'n'], default='y', help='find duration low')
-        parser.add_argument('-l', action="store", dest="dl", type=int, default=60, help='dl default=60')
+        parser.add_argument('-l', action="store", dest="dl", type=int, default=160, help='dl default=160')
         parser.add_argument('-da', action="store", dest="days", type=int, default=ct.Power_last_da, help='shift days')
         parser.add_argument('-m', action="store", dest="mpl", type=str, default='y', help='mpl show')
         parser.add_argument('-i', action="store", dest="line", type=str, choices=['y', 'n'], default='y', help='LineHis show')
         parser.add_argument('-w', action="store", dest="wencai", type=str, choices=['y', 'n'], default='n', help='WenCai Search')
-        parser.add_argument('-k', action="store", dest="chanK_flag", type=int, choices=[1, 0], default=0, help='WenCai Search')
+        parser.add_argument('-c', action="store", dest="chanK_flag", type=int, choices=[1, 0], default=0, help='chanK_flag')
         parser.add_argument('-le', action="store", dest="least", type=int, default=1, help='least_init 2')
-        parser.add_argument('-fb', action="store", dest="fb", type=int, choices=[1, 0], default=0, help='fb show')
+        parser.add_argument('-fb', action="store", dest="fb", type=int, choices=[1, 0], default=1, help='fb show')
         return parser
     except Exception as e:
         # print 'Eerror:',e
@@ -2532,13 +2540,14 @@ if __name__ == "__main__":
             # log.setLevel(LoggerFactory.INFO)
             # log.setLevel(LoggerFactory.ERROR)
             # log.setLevel(LoggerFactory.DEBUG)
-            if cct.get_os_system().find('win') >= 0:
-                import win_unicode_console
-                win_unicode_console.disable()
-            code=input("code:")
-            if cct.get_os_system().find('win') >= 0:
-                # import win_unicode_console
-                win_unicode_console.enable()
+            # if cct.get_os_system().find('win') >= 0:
+            #     import win_unicode_console
+            #     win_unicode_console.disable()
+            code=str(input("code:"))
+            # code=str(code)
+            # if cct.get_os_system().find('win') >= 0:
+            #     # import win_unicode_console
+            #     win_unicode_console.enable()
             # code == '000830'
             args=parser.parse_args(code.split())
             # print args
@@ -2567,6 +2576,19 @@ if __name__ == "__main__":
                 # ts=time.time()
                 # time.sleep(5)
                 # print "%0.5f"%(time.time()-ts)
+            elif code.startswith('w') or code.startswith('a'):
+                blkname = '077.blk'
+                block_path = tdd.get_tdx_dir_blocknew() + blkname
+                args=cct.writeArgmain().parse_args(code.split())
+                codew=stf.WriteCountFilter(pd.DataFrame(), writecount=args.dl)
+                if args.code == 'a':
+                    cct.write_to_blocknew(block_path, codew)
+                    # cct.write_to_blocknew(all_diffpath,codew)
+                # else:
+                #     cct.write_to_blocknew(block_path, codew, False)
+                    # cct.write_to_blocknew(all_diffpath,codew,False)
+                    print(("wri ok:%s" % block_path))
+
             elif code == 'q':
                 sys.exit(0)
 
@@ -2576,7 +2598,7 @@ if __name__ == "__main__":
                 pass
         except (KeyboardInterrupt) as e:
             # print "key"
-            print("KeyboardInterrupt:", e)
+            print(("KeyboardInterrupt:", e))
         except (IOError, EOFError, Exception) as e:
             # print "Error", e
             import traceback

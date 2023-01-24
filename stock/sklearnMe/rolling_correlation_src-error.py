@@ -12,7 +12,7 @@ n = 4
 rng = pd.date_range('1/1/2000 00:10:00', periods=n, freq='5min')
 patch = DataFrame(np.arange(n), columns=['a'], index=rng)
 
-print("X:",df,patch)
+print(("X:",df,patch))
 print()
 print('    *** Start corr example ***')
 # To avoid the automatic alignment between df and patch, 
@@ -25,7 +25,7 @@ df['corr'] = np.nan
 
 for i in range(df.shape[0]):
     window = df[i : i+patch.shape[0]]
-    print("w:",window)
+    print(("w:",window))
     # If slice has only two rows, I have a line between two points
     # When I corr with to points in patch, I start getting 
     # misleading values like 1 or -1

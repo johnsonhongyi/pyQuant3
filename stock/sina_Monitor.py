@@ -110,8 +110,21 @@ if __name__ == "__main__":
     blkname = '064.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
     lastpTDX_DF = pd.DataFrame()
-    # st_key_sort = '4'
-    st_key_sort = '8'
+    parserDuraton = cct.DurationArgmain()
+    duration_date = ct.duration_date_l
+    du_date = duration_date
+    if len(str(duration_date)) < 4:
+        # duration_date = tdd.get_duration_price_date('999999', dl=duration_date, end=end_date, ptype='dutype')
+        du_date = tdd.get_duration_Index_date('999999', dl=duration_date)
+        if cct.get_today_duration(du_date) <= 3:
+            duration_date = 5
+            print(("duaration: %s duration_date:%s" %
+                  (cct.get_today_duration(du_date), duration_date)))
+        log.info("duaration: %s duration_date:%s" %
+                 (cct.get_today_duration(du_date), duration_date))
+    st_key_sort = '4'
+    # st_key_sort = '3 1'
+    # st_key_sort = '8'
     resample = 'd'
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(
         st_key_sort)
@@ -132,10 +145,12 @@ if __name__ == "__main__":
                     st_key_sort.split()[0], cct.get_index_fibl())
             time_Rt = time.time()
             # top_now = tdd.getSinaAlldf(market='??,rzrq',filename='yqbk', vol=ct.json_countVol, vtype=ct.json_countType)
-            top_now = tdd.getSinaAlldf(
-                market='all', vol=ct.json_countVol, vtype=ct.json_countType)
+            # top_now = tdd.getSinaAlldf(
+                # market='all', vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='??',filename='yqbk', vol=ct.json_countVol, vtype=ct.json_countType,trend=False)
-
+            # market_blk = 'rzrq'
+            market_blk = 'all'
+            top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='rzrq', vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='??¹?060',filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
 
@@ -156,7 +171,7 @@ if __name__ == "__main__":
                     cct.get_terminal_Position(position=sys.argv[0])
                     time_Rt = time.time()
                     top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(
-                        top_now, resample=resample)
+                        top_now, dl=duration_date,resample=resample)
                 elif len(top_all) == 0 and len(lastpTDX_DF) > 0:
                     time_Rt = time.time()
                     top_all = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF)
@@ -235,6 +250,7 @@ if __name__ == "__main__":
                     #     top_all = top_all[(top_all.volume > ct.VolumeMinR) & (
                     #         top_all.volume < ct.VolumeMaxR)]
 
+                    
                 if st_key_sort.split()[0] in ['4','9'] and 915 < cct.get_now_time_int() < 930:
                 # if  915 < cct.get_now_time_int() < 930:
                     top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
@@ -251,7 +267,6 @@ if __name__ == "__main__":
                                            top_all['buy'].values, top_all['lastp'].values)))
                     # if len(top_all[top_all.lastbuy < 0]) > 0 or len(top_all[top_all.dff < -10]) >0 :
                     #     print top_all.loc['600313'].lastbuy,top_all.loc['600313'].buy,top_all.loc['600313'].lastp
-                    #     import ipdb;ipdb.set_trace()
                 else:
                     top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
                                           top_all['buy'].values, top_all['lastp'].values)))
@@ -267,7 +282,7 @@ if __name__ == "__main__":
                 # if cct.get_now_time_int() > 930 and 'llastp' in top_all.columns:
                 #     top_all = top_all[top_all.trade >= top_all.llastp * ct.changeRatio]
 
-                cct.set_console(width, height, title=[
+                cct.set_console(width, height, title=[du_date,
                                 'G:%s' % len(top_all), '%s ZXG' % (blkname)])
 
                 # if len(top_all[top_all.dff > 0]) == 0:
@@ -283,15 +298,24 @@ if __name__ == "__main__":
                 # '''
 
 
-
+                st_key_sort_status=['4','x2','3'] 
 
                 # if st_key_sort == '8':
-                if st_key_sort != '4':
+                # if st_key_sort.split()[0] != '4':
+
+                if st_key_sort.split()[0] not in st_key_sort_status:
                     top_temp=top_all.copy()
 
                 elif cct.get_now_time_int() > 830 and cct.get_now_time_int() <= 935:
-                    top_temp = top_all[(top_all.low >= top_all.lastl1d) & (
-                        top_all.lasth1d > top_all.lasth2d) & (top_all.close > top_all.lastp1d)]
+                    #lastl1d
+                    # top_temp = top_all[(top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.close > top_all.lastp1d)]
+                    #lastp1d TopR 1
+                    # top_temp = top_all[(top_all.low > top_all.lasth1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.close > top_all.lastp1d)]
+                    
+                    # 
+                    # top_temp = top_all[(top_all.close / top_all.hmax > 1.1) & (top_all.close / top_all.hmax < 1.5)] 
+                    top_temp = top_all[ (top_all.lastdu > 6 ) & (top_all.low > top_all.lasth1d) & (top_all.close > top_all.lastp1d) & (top_all.close >= top_all.hmax)]
+                    # top_now.loc['002761'].    
                     # top_temp =  top_all[( ((top_all.top10 >0) | (top_all.boll >0)) & (top_all.lastp1d > top_all.ma5d) & (top_all.close > top_all.lastp1d))]
                     # top_temp =  top_all[((top_all.lastp1d < top_all.ma5d) & (top_all.close > top_all.lastp1d))]
                     # top_temp =  top_all[((top_all.topR < 2) & (top_all.close > top_all.upper) & (top_all.close > top_all.lastp1d))]
@@ -310,10 +334,11 @@ if __name__ == "__main__":
                     # top_temp =  top_all[(top_all.boll >0)  & ((top_all.low > top_all.upper) | (top_all.low == top_all.open))]
                     # top_temp =  top_all[(top_all.boll >0)  & ((top_all.low > top_all.lastp1d) | (top_all.low == top_all.open))]
                     # top_temp =  top_all[(top_all.topR < 2) & (top_all.close >= top_all.nhigh) & ((top_all.low > top_all.lastp1d) | (top_all.low == top_all.open))]
-
+                    
                     if 'nlow' in top_all.columns:
 
-                        if st_key_sort == '4':
+                        # if st_key_sort == '4':
+                        if st_key_sort.split()[0]  in st_key_sort_status :
                             # ???
                             # top_temp = top_all[ (top_all.topR > 0) & ((top_all.close >= top_all.nclose)) & ((top_all.open > top_all.lastp1d)) & (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.open >= top_all.nlow) ]
 
@@ -332,11 +357,45 @@ if __name__ == "__main__":
 
                             # max5 < top_all.hmax ,??ת???
                             # top_temp = top_all[((top_all.max5 < top_all.hmax) & ((top_all.close > top_all.hmax) | (top_all.close > top_all.max5)) )]
-                            top_temp = top_all[ (top_all.max5 < top_all.hmax) & ((top_all.close > top_all.hmax) | (top_all.close > top_all.max5))
-                                        & (top_all.low > top_all.ma51d) 
-                                        & (((top_all.per1d > 0) | (top_all.lastp1d > top_all.ma10d))
-                                        & ((top_all.per2d > 0) | (top_all.lastp2d > top_all.ma10d))
-                                        & ((top_all.per3d > 0) | (top_all.lastp3d > top_all.ma10d)))]
+                            # top_temp = top_all[ (top_all.max5 < top_all.hmax) & ((top_all.close > top_all.hmax) | (top_all.close > top_all.max5))
+                            #             & (top_all.low > top_all.ma51d) 
+                            #             & (((top_all.per1d > 0) | (top_all.lastp1d > top_all.ma10d))
+                            #             & ((top_all.per2d > 0) | (top_all.lastp2d > top_all.ma10d))
+                            #             & ((top_all.per3d > 0) | (top_all.lastp3d > top_all.ma10d)))]
+
+                            #topR and nlow > lastp1d
+                            # top_temp = top_all[(top_all.low >= top_all.lasth1d) & (top_all.nlow > top_all.lastp1d) & (top_all.close > top_all.nclose) ]
+                            
+                           
+                            # top_temp = top_all[(top_all.close / top_all.hmax > 1.1) & (top_all.close / top_all.hmax < 1.5)] 
+                            # top_temp = top_all[(top_all.topU > 0) & (top_all.close > top_all.ene) & (top_all.low > top_all.lastl1d)] 
+                            # top_temp = top_all[(top_all.topU > 0) & (top_all.close > top_all.ene)] 
+                            
+
+                            #TopR跳空
+                            # top_temp = top_all[(top_all.topU > 0) & (top_all.close > top_all.ene)  & (top_all.topR > 0)]   #20210323
+                            
+                            # top_temp = top_all[ (top_all.topR > 0)] 
+                            # 20210803 mod ral
+                            # top_temp = top_all[top_all.close > top_all.ma20d]
+                            # top_temp = top_all[(top_all.close > top_all.ma20d) & (top_all.close > top_all.max5)]
+                            # top_temp = top_all[(top_all.close > top_all.ma20d) & (top_all.close >= top_all.ene)]
+                            
+                            #221018change
+                            # top_temp = top_all[(top_all.close > top_all.ma10d) & ((top_all.close >= top_all.hmax) | (top_all.up5 > 2) | (top_all.perc3d > 3)) ]
+                            #221018 振幅大于6 or 跳空 or 连涨 or upper or 大于hmax or 大于max5
+                            # top_temp = top_all[ ((top_all.lastdu > 6 ) & (top_all.perc3d > 2)) | (top_all.topU > 0) | (top_all.topR > 0) | (top_all.close > top_all.hmax) | (top_all.close > top_all.max5)]
+                            #20221229  当日跳空高开 or 前11日有跳空 or 当前价大于upper  
+                            top_temp = top_all[  ( (( top_all.open > top_all.lasth1d ) & ( top_all.low > top_all.lasth1d)) | (top_all.topR > 0) ) | ( (top_all.close > top_all.upper) ) & (((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | ((top_all.topR > 0) & (top_all.close > top_all.hmax)) )  ]
+                            # top_temp = top_all[ ((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | (top_all.topR > 0) | (top_all.close > top_all.hmax)  ]
+
+                            # & (top_all.close >= top_all.hmax) & (top_all.hmax >= top_all.max5) 
+                            #主升浪
+                            # top_temp = top_all[(top_all.topU > 0) & ( (top_all.close > top_all.max5) | (top_all.close > top_all.hmax) ) & (top_all.topR > 0)] 
+                            # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
+                            top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
+                            # top_temp[ (top_temp.index.str.contains('688'))][:1]
+                            # top_all[ (~top_all.index.str.contains('688'))  &(top_all.topU > 0)]  
 
                             # top_temp = top_all[ ((top_all.lastp1d > top_all.ma5d) & (top_all.lastp2d > top_all.ma5d) & (top_all.close > top_all.ma5d) \
                             # & (top_all.ma5d > top_all.ma10d)) & (top_all.open >= top_all.nlow) & ((top_all.lastp1d > top_all.ene) & (top_all.close >= top_all.ene)) ]
@@ -355,25 +414,72 @@ if __name__ == "__main__":
                             # top_temp = top_all[((top_all.max5 > top_all.hmax))]
 
                             # max5>hmax,low>last1d,per1d,2d,3d>-1,per1d >ma51d...
-                            top_temp=top_all[((top_all.max5 > top_all.hmax) & (top_all.ma5d > top_all.ma10d)) & (top_all.low > top_all.ma51d)
-                                                & (((top_all.per1d > 0) | (top_all.lastp1d > top_all.ma10d))
-                                                & ((top_all.per2d > 0) | (top_all.lastp2d > top_all.ma10d))
-                                                & ((top_all.per3d > 0) | (top_all.lastp3d > top_all.ma10d)))]
+                            # top_temp=top_all[((top_all.max5 > top_all.hmax) & (top_all.ma5d > top_all.ma10d)) & (top_all.low > top_all.ma51d)
+                            #                     & (((top_all.per1d > 0) | (top_all.lastp1d > top_all.ma10d))
+                            #                     & ((top_all.per2d > 0) | (top_all.lastp2d > top_all.ma10d))
+                            #                     & ((top_all.per3d > 0) | (top_all.lastp3d > top_all.ma10d)))]
+
+                            #topR and 
+                            # top_temp = top_all[(top_all.low > top_all.lasth1d) & (top_all.close > top_all.lastp1d) & (top_all.close > top_all.ma10d)]
+                            # top_temp = top_temp[~top_temp.name.str.contains('ST')]
+                            # top_temp = top_all[(top_all.topU > 0) & (top_all.close > top_all.ene) & (top_all.lastp1d > top_all.ene) & (top_all.topR > 0)] 
+                           
+                            #TopU > upper
+                            # top_temp = top_all[(top_all.topU > 0) & (top_all.close > top_all.ene)]   #20210323
+                            # top_temp = top_all[ (top_all.topR > 0)] 
+                            
+                            #221018
+                            # MA5 > ene and topU > upper
+                            # top_temp = top_all[(top_all.topU > 0) & (top_all.close > top_all.ene) & (top_all.ma5d > top_all.ene)  ] 
+                            #20221116 
+                            top_temp = top_all[ ( (( top_all.open > top_all.lasth1d ) & ( top_all.low > top_all.lasth1d)) | (top_all.topR > 0) ) | ( (top_all.close > top_all.upper) )  & (((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | ((top_all.topR > 0) & (top_all.close > top_all.hmax)) )  ]
+                            
+
+
+                            #221018 振幅大于6 or 跳空 or 连涨 or upper or 大于hmax or 大于max5
+                            # top_temp = top_all[ ((top_all.lastdu > 6 ) & (top_all.perc3d > 2)) | (top_all.topU > 0) | (top_all.topR > 0) | (top_all.close > top_all.hmax) | (top_all.close > top_all.max5)]
+
+                            #主升浪
+                            # top_temp = top_all[(top_all.topU > 0) & ( (top_all.close > top_all.max5) | (top_all.close > top_all.hmax) )] 
+
+                            # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
+                            top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
 
                             # ???ne??죬???Ϲ죬һ????գ?һ???ͣ
                         # top_temp = top_all[  (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.low >= top_all.nlow) & ((top_all.open >= top_all.nlow *0.998) & (top_all.open <= top_all.nlow*1.002)) ]
                         # top_temp = top_all[ (top_all.volume >= 1.2 ) & (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.low >= top_all.nlow) & ((top_all.open >= top_all.nlow *0.99) & (top_all.open <= top_all.nlow*1.01)) ]
                     else:
-                        top_temp=top_all[((top_all.close > top_all.ma51d)) & (
-                            top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d)]
+                        # top_temp=top_all[((top_all.close > top_all.ma51d)) & (
+                        #     top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d)]
+                    
+                        #TopR跳空
+                        # top_temp = top_all[(top_all.topU > 0) & (top_all.close > top_all.ene)  & (top_all.topR > 0)] 
+                        # top_temp = top_all[ (top_all.topR > 0)] 
+
+                        # MA5 > ene and topU > upper
+                        top_temp = top_all[(top_all.topU > 0) & (top_all.close > top_all.ene) & (top_all.ma5d > top_all.ene)  ] # & (top_all.topR > 0)] 
+
+                        # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
+                        top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
                         # top_temp = top_all[  (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.low >= top_all.nlow) & ((top_all.open >= top_all.nlow *0.998) & (top_all.open <= top_all.nlow*1.002)) ]
                         # top_temp = top_all[ (top_all.volume >= 1.2 ) & (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.close > top_all.lastp1d)]
                 else:
-                    top_temp=top_all.copy()
+
+                    if st_key_sort.split()[0] == '4':  #20210323   跳空缺口,max5 大于 hmax 或者 max5上轨
+                        # top_temp = top_all[(top_all.topR > 0) & ( (top_all.max5 > top_all.hmax) | (top_all.max5 > top_all.upper) )] 
+                        top_temp = top_all[ ( (top_all.topR > 0) ) |  ((top_all.close > top_all.ma20d) & (top_all.close >= top_all.ene))]
+
+                    else:
+
+                        top_temp=top_all.copy()
+                    # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
+
+                #clean 688 and st
+                if len(top_temp) > 0:                
+                    top_temp = top_temp[ (~top_temp.index.str.contains('688')) ]
 
 
-
-
+                    
                 if st_key_sort.split()[0] == 'x':
                     top_temp = top_temp[top_temp.topR != 0]
 
@@ -431,7 +537,7 @@ if __name__ == "__main__":
                     df=top_end, resample=resample, down=True)
 
                 nhigh = top_temp[top_temp.close > top_temp.nhigh] if 'nhigh'  in top_temp.columns else []
-                nlow = top_temp[top_temp.close > top_temp.nlow] if 'nlow'  in top_temp.columns else []
+                nlow = top_temp[top_temp.close > top_temp.nlow] if 'nhigh'  in top_temp.columns else []
                 print("G:%s Rt:%0.1f dT:%s N:%s T:%s nh:%s nlow:%s" % (goldstock, float(time.time() - time_Rt), cct.get_time_to_date(time_s), cct.get_now_time(), len(top_temp),len(nhigh),len(nlow)))
 
                 top_temp=top_temp.sort_values(by=(market_sort_value),
@@ -459,8 +565,8 @@ if __name__ == "__main__":
 
                 ct_MonitorMarket_Values=ct.get_Duration_format_Values(
                     ct_MonitorMarket_Values, replace='b1_v', dest='volume')
-                ct_MonitorMarket_Values=ct.get_Duration_format_Values(
-                    ct_MonitorMarket_Values, replace='fibl', dest='top10')
+                # ct_MonitorMarket_Values=ct.get_Duration_format_Values(
+                #     ct_MonitorMarket_Values, replace='fibl', dest='top10')
 
                 # ct_MonitorMarket_Values2=ct.get_Duration_format_Values(
                 #     ct_MonitorMarket_Values2, replace='b1_v', dest='volume')
@@ -481,7 +587,8 @@ if __name__ == "__main__":
                     # ct_MonitorMarket_Values2 = ct.get_Duration_format_Values(
                     #             ct_MonitorMarket_Values2, replace='df2', dest='high')
 
-
+                # loc ral
+                # top_temp[:5].loc[:,['name','ral']
 
 
                 # if st_key_sort == '1' or st_key_sort == '7':
@@ -601,6 +708,22 @@ if __name__ == "__main__":
                 cct.GlobalValues().setkey('lastbuylogtime', 1)
                 # cct.set_clear_logtime()
                 status=False
+            elif st.startswith('d') or st.startswith('dt'):
+                args = parserDuraton.parse_args(st.split()[1:])
+                if len(str(args.start)) > 0:
+                    if args.end:
+                        end_date = args.end
+                    duration_date = args.start.strip()
+                    if len(str(duration_date)) < 4:
+                        du_date = tdd.get_duration_Index_date(
+                            '999999', dl=int(duration_date))
+                        ct.PowerCountdl = int(duration_date)
+                    # set_duration_console(du_date)
+                    top_all = pd.DataFrame()
+                    time_s = time.time()
+                    status = False
+                    lastpTDX_DF = pd.DataFrame()
+
             elif st.startswith('w') or st.startswith('a'):
                 args=cct.writeArgmain().parse_args(st.split())
                 codew=stf.WriteCountFilter(top_temp, writecount=args.dl)

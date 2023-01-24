@@ -106,9 +106,9 @@ if __name__ == "__main__":
         cct.set_console(80, 19)
     parser = parseArgmain()
     parser.print_help()
-    if cct.get_os_system().find('win') >= 0:
-        import win_unicode_console
-        win_unicode_console.disable()
+    # if cct.get_os_system().find('win') >= 0:
+    #     import win_unicode_console
+    #     win_unicode_console.disable()
     while 1:
         try:
             # log.setLevel(LoggerFactory.INFO)
@@ -197,7 +197,7 @@ if __name__ == "__main__":
                 #         # candlestick_powercompute(code,start, end)
                 #         op, ra, st, days = pct.get_linear_model_status(code, start=start, end=end, filter=args.filter)
                 #         print "code:%s op:%s ra:%s  start:%s" % (code, op, ra, st)
-
+                
                 if args.mpl == 'y':
                     # from multiprocessing import Process
                     # p = Process(target=pct.get_linear_model_candles, args=(args.code,args.ptype,args.dtype, start, end,args.filter,df,args.dl,args.days,))

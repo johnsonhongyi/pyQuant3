@@ -113,9 +113,9 @@ class Bollinger_Bandit(strategy.BacktestingStrategy):
         
         bar = bars[self.__instrument]
         if len(self.__high) >1:
-            print(self.__close[-1],self.__high[-1],self.__open[-1],self.__close[-2])
+            print((self.__close[-1],self.__high[-1],self.__open[-1],self.__close[-2]))
         if self.__UpperBand is not None:
-            print(self.__UpperBand[-1])
+            print((self.__UpperBand[-1]))
         # filter datetime
         ###################################################################################        
         filterCon = len(self.__close) < max(self.__bollingerlength, self.__malength, self.__closelength)
@@ -178,28 +178,28 @@ class Bollinger_Bandit(strategy.BacktestingStrategy):
             if self.exitLongSignal():
                  self.__longPos.exitMarket()
             if self.__shortPos is not None:
-                print(11)
+                print((11))
                 self.info("intend long close")
-                print((self.__UpperBand[-1] - self.__LowerBand[-1]) / bar.getClose())
+                print(((self.__UpperBand[-1] - self.__LowerBand[-1]) / bar.getClose()))
                  
         elif self.__shortPos is not None:
             if self.exitShortSignal():
                 self.__shortPos.exitMarket()
                 self.info("intend short close")
-                print((self.__UpperBand[-1] - self.__LowerBand[-1]) / bar.getClose())
+                print(((self.__UpperBand[-1] - self.__LowerBand[-1]) / bar.getClose()))
                   
         else:
             if self.enterLongSignal():
                 shares = int(self.getBroker().getCash() * 0.2 / bars[self.__instrument].getPrice())
                 self.__longPos = self.enterLong(self.__instrument, shares)
                 self.info("intend long open")
-                print((self.__UpperBand[-1] - self.__LowerBand[-1]) / bar.getClose())
+                print(((self.__UpperBand[-1] - self.__LowerBand[-1]) / bar.getClose()))
               
             elif self.enterShortSignal():
                 shares = int(self.getBroker().getCash() * 0.2 / bars[self.__instrument].getPrice())
                 self.__shortPos = self.enterShort(self.__instrument, shares)
                 self.info("intend short open")
-                print((self.__UpperBand[-1] - self.__LowerBand[-1]) / bar.getClose())
+                print(((self.__UpperBand[-1] - self.__LowerBand[-1]) / bar.getClose()))
                  
     def enterLongSignal(self):
         if self.__enterLong1 and self.__enterLong2 and self.__enter:

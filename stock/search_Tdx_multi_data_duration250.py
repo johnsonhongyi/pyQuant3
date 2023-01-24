@@ -1,10 +1,10 @@
 import sys,logging
 stdout=sys.stdout
 sys.path.append('../../')
-from . import JSONData.tdx_data_Day as tdd
-from  .JSONData import sina_data 
-from  .JSONData import tdx_hdf5_api as h5a
-from .JohnsonUtil import commonTips as cct
+from JSONData import  tdx_data_Day as tdd
+from JSONData import sina_data 
+from JSONData import tdx_hdf5_api as h5a
+from JohnsonUtil import commonTips as cct
 import pandas as pd
 sys.stdout=stdout
 
@@ -22,10 +22,12 @@ def get_multi_date_duration(df,dt):
 def get_multi_code_count(df,col='code'):
     dd = df.reset_index()
     dd['couts'] = dd.groupby([col])[col].transform('count')
+    # dd = dd.sort_values(by='couts',ascending=0)
+    print('count dd.couts')
     dd = dd.set_index(['code', 'date'])
     return dd
 
-def get_roll_mean_all(single=True,tdx=False,app=True,duration=100):
+def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,ma_250_h=1.11):
     # df = tdd.search_Tdx_multi_data_duration('tdx_all_df_300', 'all_300', df=None,code_l=code_list, start=start, end=None, freq=None, col=None, index='date')
     block_path = tdd.get_tdx_dir_blocknew() + '060.blk'
 
@@ -52,6 +54,41 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100):
     # len(df.index.get_level_values('code').unique())
     # df = df[~df.index.duplicated(keep='first')]
     dfs = df
+
+    def get_groupby_mean_median_close(dfs):
+
+        groupd = dfs.groupby(level=[0])
+        df = groupd['close'].agg({'median':'median','mean':'mean'})
+        df['close'] = groupd.tail(1).reset_index().set_index(['code'])['close']
+        # dfs['mean'] = groupd['close'].agg('mean')
+        # dfs['median'] = groupd['close'].agg('median')
+        
+        # dfs = dfs.fillna(0)
+        # idx = pd.IndexSlice
+        # mask = ( (dfs['mean'] > dfs['median'])
+        #         & (dfs['close'] > dfs['mean'])
+        #         )
+        # df=dfs.loc[idx[mask, :]]
+        
+        df = df[(df['mean']>df['median'])  & (df['close'] > df['mean'])]
+
+        # dt_low = None
+        # if dl == 1:
+        #     dfs = groupd.tail(1)
+        #     print("dfs tail1")
+        # else:
+        #     dl = 30
+        #     dindex = tdd.get_tdx_Exp_day_to_df(
+        #         '999999', dl=dl).sort_index(ascending=False)
+        #     dt = tdd.get_duration_price_date('999999', df=dindex)
+        #     dt = dindex[dindex.index >= dt].index.values
+        #     dt_low = dt[-1]
+        #     dtlen = len(dt) if len(dt) >0 else 1
+        #     dfs = groupd.tail(dtlen)
+        #     print("dfs tail:%s dt:%s"%(dtlen,dt))
+        #     dfs = get_multi_date_duration(dfs,dt[-1])
+        return df
+
     groupd = dfs.groupby(level=[0])
     
     # rollma = ['5','10','60','100','200']
@@ -65,9 +102,20 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100):
 
     # import ipdb;ipdb.set_trace()
     # df.loc['300130'][:2]
+
+    # dfs['mean'] = groupd['close'].agg('mean')
+    # dfs['median'] = groupd['close'].agg('median')
+
     for da in rollma:
         cumdays=int(da)
-        dfs['ma%d'%cumdays] = groupd['close'].apply(pd.rolling_mean, cumdays)
+        dfs['ma%d'%cumdays] = groupd['close'].apply(pd.Series.rolling, cumdays)
+        if cumdays == 10:
+            dfs['upper'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 + 11.0 / 100) * x, 1))
+            dfs['lower'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 - 9.0 / 100) * x, 1))
+            dfs['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), dfs['upper'], dfs['lower']))
+        # df['upper'] = map(lambda x: round((1 + 11.0 / 100) * x, 1), df.ma10d)
+        # df['lower'] = map(lambda x: round((1 - 9.0 / 100) * x, 1), df.ma10d)
+        # df['ene'] = map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower)
         # dfs['amount%d'%cumdays] = groupd['amount'].apply(pd.rolling_mean, cumdays)
     # df.ix[df.index.levels[0]]
     #df.ix[df.index[len(df.index)-1][0]] #last row
@@ -79,9 +127,10 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100):
     # '''idx mask filter'''
     # '''
     dt_low = None
+    df_idx = None
     if single:
         dfs = groupd.tail(1)
-
+        print("dfs tail1")
     else:
         dl = 30
         dindex = tdd.get_tdx_Exp_day_to_df(
@@ -91,7 +140,15 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100):
         dt_low = dt[-1]
         dtlen = len(dt) if len(dt) >0 else 1
         dfs = groupd.tail(dtlen)
+        # import ipdb;ipdb.set_trace()
+        df_idx = get_groupby_mean_median_close(dfs)
+
+        print(("dfs tail:%s dt:%s"%(dtlen,dt)))
         dfs = get_multi_date_duration(dfs,dt[-1])
+
+        # groupd2 = dfs.groupby(level=[0])
+        # dfs['ma%d'%cumdays] = groupd['close'].apply(pd.rolling_mean, cumdays)
+
 
         # dfs.reset_index().groupby(['code'])['date'].transform('count')
         single = True
@@ -101,14 +158,39 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100):
     # mask = (dfs[('ma%s')%(rollma[0])] > dfs[('ma%s')%(rollma[1])]) & (dfs[('ma%s')%(rollma[-1])] > 0) & (dfs[('close')] > dfs[('ma%s')%(rollma[0])])  & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]) 
     # mask = (dfs[('ma%s')%(rollma[0])] > dfs[('ma%s')%(rollma[1])]) & (dfs[('ma%s')%(rollma[-1])] > 0) & (dfs[('close')] > dfs[('ma%s')%(rollma[1])])  & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]) 
     # mask = (dfs[('ma%s')%(rollma[0])] > dfs[('ma%s')%(rollma[1])]) & (dfs[('ma%s')%(rollma[-1])] > 0) &  (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]) 
-    import ipdb;ipdb.set_trace()
 
 
     # mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0) & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]) & (dfs[('close')] > dfs[('ma%s')%(rollma[0])]))
-    mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0) & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]) & (dfs[('close')] > dfs[('ma%s')%(rollma[0])]))
+
+    # mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0) 
+    #         & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_l) 
+    #         & (dfs[('close')] < dfs[('ma%s')%(rollma[-1])]*ma_250_h) 
+    #         & (dfs[('close')] > dfs[('ma%s')%(rollma[0])]))
+
+
+                # & (dfs['mean'] > dfs['median'])
+                # & (dfs['close'] > dfs['mean'])
+
+
+    if len(rollma) > 1:
+
+        mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0)
+                & (dfs[('ma%s')%(rollma[0])] > dfs[('ma%s')%(rollma[-1])])
+                & (dfs[('close')] > dfs[('ma%s')%(rollma[0])])
+                & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_h) 
+                & ((dfs[('close')] > dfs['ene']) | (dfs[('close')] > dfs['upper']) ) 
+                )
+    else:
+                mask = ( (dfs[('ma%s')%(rollma[0])] > 0) 
+                & (dfs[('close')] > dfs[('ma%s')%(rollma[0])])
+                & ((dfs[('close')] > dfs['ene']) | (dfs[('close')] > dfs['upper']) ) 
+                )
+
+
     # mask = ((dfs[('close')] > dfs[('ma%s')%(rollma[-1])])) 
     df=dfs.loc[idx[mask, :]]
     df = get_multi_code_count(df)
+    print((df.couts[:5]))
 
     # import ipdb;ipdb.set_trace()
     # df.sort_values(by='couts',ascending=0)
@@ -127,6 +209,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100):
 
     code_uniquelist=df.index.get_level_values('code').unique()
     code_select = code_uniquelist[random.randint(0,len(code_uniquelist)-1)]
+
     if app:
         print(round(time.time()-time_s,2),'s',df.index.get_level_values('code').unique().shape,code_select,df.loc[code_select][-1:])
 
@@ -136,6 +219,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100):
             # block_path = tdd.get_tdx_dir_blocknew() + '060.blk'
             # if cct.get_work_time():
             #     codew = df[df.date == cct.get_today()].index.tolist()
+
             if dt_low is not None:
                 groupd2 = df.groupby(level=[0])
                 df = groupd2.tail(1)
@@ -143,8 +227,14 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100):
                 # import ipdb;ipdb.set_trace()
 
                 # df = df[(df.date >= dt_low) & (df.date <= cct.get_today())]
-
+                dd = df[(df.date == dt_low)]
                 df = df[(df.date >= cct.last_tddate(1))]
+                # import ipdb;ipdb.set_trace()
+                print(("df:%s df_idx:%s"%(len(df),len(df_idx))))
+
+                if df_idx is not None and len(df_idx) > 0:
+                    df = df.loc[df_idx.index,:].dropna()
+                print(("Main Down dd :%s MainUP df:%s couts std:%0.1f "%(len(dd),len(df),df.couts.std())))
                 # print df.date.mode()[0]
                 df = df.sort_values(by='couts',ascending=1)
                 df = df[df.couts > df.couts.std()]
@@ -159,6 +249,12 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100):
                 df = df[(df.date >= cct.last_tddate(days=10)) & (df.date <= cct.get_today())]
                 codew = df.index.tolist()
 
+            top_temp = tdd.get_sina_datadf_cnamedf(codew,df) 
+            top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]  
+            codew = top_temp.index.tolist()
+
+            #clean st and 688
+
             if app:
                 hdf5_wri = cct.cct_raw_input("rewrite code [Y] or append [N]:")
                 if hdf5_wri == 'y' or hdf5_wri == 'Y':
@@ -167,11 +263,12 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100):
                     append_status=True
             else:
                 append_status=False
+
             if len(codew) > 10: 
                 cct.write_to_blocknew(block_path, codew, append_status,doubleFile=False,keep_last=0)
-                print("write:%s"%(len(codew)))
+                print("write:%s block_path:%s"%(len(codew),block_path))
             else:
-                print("write error:%s"%(len(codew)))
+                print("write error:%s block_path:%s"%(len(codew),block_path))
 
         # df['date'] = df['date'].apply(lambda x:(x.replace('-','')))
         # df['date'] = df['date'].astype(int)
@@ -185,6 +282,6 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100):
 if __name__ == '__main__':
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=250) ???
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=120) ???
-    get_roll_mean_all(single=False,tdx=True,app=True,duration=600)
+    get_roll_mean_all(single=False,tdx=True,app=True,duration=250,ma_250_l=1.02,ma_250_h=1.11)
     # get_roll_mean_all(single=True,tdx=True,app=True)
     # get_roll_mean_all(single=True,tdx=True,app=False)

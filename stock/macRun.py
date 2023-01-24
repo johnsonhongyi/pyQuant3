@@ -190,6 +190,23 @@ sleep 0.2;osascript -e 'tell application "Python Launcher" to quit';sleep 5;
 '''
 
 
+''' Triton samsung
+title:sina_Market-DurationDn.py
+target rect1:(-12, 661, 1401, 1116) rect2:(-12, 661, 1401, 1116)
+title:sina_Monitor-Market-LH.py
+target rect1:(577, 453, 1989, 873) rect2:(577, 453, 1989, 873)
+title:sina_Monitor-Market.py
+title:LinePower.py
+title:sina_Monitor.py
+target rect1:(69, 368, 1450, 828) rect2:(69, 368, 1450, 828)
+title:singleAnalyseUtil.py
+target rect1:(1056, 681, 2045, 1093) rect2:(1056, 681, 2045, 1093)
+title:sina_Market-DurationCXDN.py
+target rect1:(41, 453, 1490, 908) rect2:(41, 453, 1490, 908)
+title:sina_Market-DurationUP.py
+target rect1:(5, 529, 1360, 984) rect2:(5, 529, 1360, 984)
+'''
+
 
 cmdRun200_all_old = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
 open sina_Market-DurationDn.py;
@@ -239,6 +256,16 @@ closeterminal_window = '''osascript -e 'tell application "Terminal" to close win
 activate_terminal = '''  osascript -e 'tell application "Terminal" to activate (every window whose name contains "%s")' '''
 activate_terminal_argc = '''  osascript -e 'tell application "Terminal" to %s (every window whose name contains "%s")' '''
 
+
+# def varname(varname):
+#     return list(dict(varname=varname).keys())[0]
+
+loc = locals()
+def get_variable_name(variable):
+    for k,v in list(loc.items()):
+        if loc[k] is variable:
+            return k
+
 def doScript(scriptn):
     proc = subprocess.Popen(['osascript', '-'],
                             stdin=subprocess.PIPE,
@@ -267,13 +294,24 @@ def getPosition(cmd=None, position=None,close=False):
                 return cmd,position
 
 # positionKey = cct.terminal_positionKey
-basedir = cct.get_now_basedir()
+# basedir = cct.get_now_basedir()
+# import socket
+# hostname = socket.gethostname() 
 
-if basedir.find('vm') >= 0:
-    positionKey = cct.terminal_positionKey_VM
-else:
-    positionKey = cct.terminal_positionKey4K
+# if basedir.find('vm') >= 0:
+#     positionKey = cct.terminal_positionKey_VM
+# elif cct.get_os_system() == 'mac':
+#     positionKey = cct.terminal_positionKeyMac2021
+#     # positionKey = cct.terminal_positionKeyMac
+# else:
+#     positionKey = cct.terminal_positionKey4K
+#     # positionKey = cct.terminal_positionKey1K_triton
 
+# if hostname.find('R900') >=0:
+#     positionKey = cct.terminal_positionKey2K_R9000P
+
+positionKey = cct.get_system_postionKey()
+# print("position:%s"%(positionKey))
 
 def setPosition(cmd=None, position=None):
     count = doScript(scriptcount)
@@ -286,7 +324,7 @@ def setPosition(cmd=None, position=None):
             for key in positionKey:
                 # print "key:%s"%(key)
                 if title.lower().find(key.lower()) >= 0:
-                    print("find:",title,key, positionKey[key])
+                    print(("find:",title,key, positionKey[key]))
                     position = doScript(
                         script_set_position % ('set', str(n), positionKey[key]))
                     # print doScript(script_get_position % ('get', str(n)))
@@ -307,12 +345,12 @@ def setPosition(cmd=None, position=None):
         os.system(closeLaunch) 
         # getPosition('Johnson@',close=True)
         # getPosition('/Users/Johnson/Documents',close=True)
-        print(getPosition('Johnson — bash',close=True))
+        print((getPosition('Johnson — bash',close=True)))
         # print getPosition('Johnson',close=True)
         # print getPosition('Johnson — bash',close=True)
         # print getPosition('Johnson — bash',close=True)
         # print getPosition('Johnson',close=True)
-        print(getPosition('Johnson — python',close=True))
+        print((getPosition('Johnson — python',close=True)))
         # print getPosition('Johnson',close=True)
 # count = doScript(scriptcount        
 # os.system(cmdRun)
@@ -333,7 +371,7 @@ if cct.isMac():
         # print 'singleAnalyseUtil.py:',getPosition('singleAnalyseUtil.py')
         # print 'sina_Market-DurationDn.py:',getPosition('sina_Market-DurationDn.py')
         # # print 'sina_Monitor-Market-LH.py:',getPosition('sina_Monitor-Market-LH.py')
-        print("sina_Market-DurationUP.py:",getPosition('sina_Market-DurationUP.py'))
+        print(("sina_Market-DurationUP.py:",getPosition('sina_Market-DurationUP.py')))
         # # print 'sina_Market-DurationSH.py:',getPosition('sina_Market-DurationSH.py')
         # print 'sina_Market-DurationCXDN.py:',getPosition('sina_Market-DurationCXDN.py')
         # # print 'sina_Market-DurationCXUP.py:',getPosition('sina_Market-DurationCXUP.py')
@@ -342,9 +380,9 @@ if cct.isMac():
         # print 'sina_Monitor.py:',getPosition('sina_Monitor.py')
 
 
-        print(getPosition('LinePower.py'))
-        print(getPosition('Johnson',close=True))
-        print(getPosition('/Users/Johnson/Documents',close=True))
+        print((getPosition('LinePower.py')))
+        print((getPosition('Johnson',close=True)))
+        print((getPosition('/Users/Johnson/Documents',close=True)))
     else:
         setPosition(cmd=None, position=None)
         cct.get_terminal_Position(cct.clean_terminal[2],close=True)
@@ -355,11 +393,18 @@ if cct.isMac():
     # getPosition('Johnson —',close=True)
     # getPosition('Johnson — python',close=True)
     # getPosition('Johnson — osasc',close=True)
-    print(getPosition('Johnson — python',close=True))
+    print((getPosition('Johnson — python',close=True)))
 
 else:
     print("win")
-    positionKey = cct.terminal_positionKey_triton
+    #positionKey = cct.terminal_positionKey_triton
+    # if hostname.find('R900') >=0:
+
+    #     positionKey = cct.terminal_positionKey2K_R9000P
+    # else:
+    #     positionKey = cct.terminal_positionKey1K_triton
+
+
     for key in positionKey:
         print(("title:%s"%(key)))
         # cct.get_window_pos(key)
@@ -367,8 +412,11 @@ else:
     for key in positionKey:
         pos=positionKey[key].split(',')
         # cct.get_window_pos('sina_Market-DurationUP.py')
-        print("status:%s"%(cct.reset_window_pos(key,pos[0],pos[1],pos[2],pos[3])))
-
+        if len(pos) == 2:
+            print(("status:%s"%(cct.reset_window_pos(key,pos[0],pos[1]))))
+        else:
+            print(("status:%s"%(cct.reset_window_pos(key,pos[0],pos[1],pos[2],pos[3]))))
+# print("positionKey:%s"%(get_variable_name(positionKey)))
     # pos=cct.terminal_positionKey_triton['sina_Market-DurationDn.py'].split(',')
     # # print pos
     # # cct.get_window_pos('sina_Market-DurationUP.py')

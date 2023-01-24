@@ -18,7 +18,7 @@ def set_mouse_key():
         
         for id, (vk, modifiers) in list(HOTKEYS.items ()):
                 if not user32.RegisterHotKey (None, id, modifiers, vk):
-                        print("system key confliction,unable to register :", id, "\n")
+                        print(("system key confliction,unable to register :", id, "\n"))
         try:
                 msg = MSG ()
                 while user32.GetMessageA (byref (msg), None, 0, 0) != 0:

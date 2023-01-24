@@ -39,7 +39,7 @@ from functools import partial
 import multiprocessing
 
 def print_it(x=1,y=2):
-    print(x,y)
+    print((x,y))
 
 xs = [0,1,2,3,4,5,6]
 y = 0
@@ -97,8 +97,8 @@ finally:
     pass
 pool.close()
 pool.join()
-print("t:%s"%(time.time()-time_s))
-print(results[:10])
+print(("t:%s"%(time.time()-time_s)))
+print((results[:10]))
 # print(results) 
 #!/usr/bin/env python
 # import itertools

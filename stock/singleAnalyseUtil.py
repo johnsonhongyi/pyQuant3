@@ -340,7 +340,7 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
                 # cumin_index[INDEX_LIST_TDX[code]]=cumin
                 int += 1
                 if int % 2 != 0:
-                    print("%s op:%s ra:%s d:%s fib:%s m5:%s  %s" % (code, f_print(3, op), f_print(5, ra), f_print(2, daysData[0]), f_print(3, fib), f_print(4, daysData[1]), st), end='')
+                    print("%s op:%s ra:%s d:%s fib:%s m5:%s  %s" % (code, f_print(3, op), f_print(5, ra), f_print(2, daysData[0]), f_print(3, fib), f_print(4, daysData[1]), st), end=' ')
                 else:
                     print("%s op:%s ra:%s d:%s fib:%s m5:%s " % (st, f_print(3, op), f_print(5, ra), f_print(2, daysData[0]), f_print(3, fib), f_print(4, daysData[1])))
 
@@ -353,7 +353,9 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
 
     ffall = {}
     topTen_all = 0
+    topTen_all_st = 0
     crashTen_all = 0
+    crashTen_all_st = 0
     ffall['zlr'] = 0
     ffall['zzb'] = 0
 
@@ -363,7 +365,7 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
         df = sina_data.Sina().market(market)
         # count=len(df.index)
         # log.info("market:%s" % df[:1])
-        df = df.dropna()
+        df = df.dropna(how='all')
         df = df[df.close > 0]
         if 'percent' not in df.columns:
             df['percent'] = list(map(lambda x, y: round(
@@ -378,7 +380,10 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
             #     crash = df[df['percent'] < -changepercent]
             # else:
             top = df[df['percent'] > changepercent]
-            topTen = df[df['percent'] > 9.9]
+            topTen = df[df['percent'] > 9.9 ]
+            st = df[df.name.str.contains('ST')]
+            topTen_st = st[(st.b1_v > st.a1_v) & (st.a1_v == 0)]
+
             # dropcode = [ x for x in topTen.index.tolist() if x not in top_Ten_Dropcxg]
             # if len(dropcode) >0:
             #     topT_l = tdd.get_tdx_exp_all_LastDF_DL(dropcode, dt=ct.duration_date_l,newdays=10,showRunTime=False)
@@ -386,14 +391,19 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
             #         top_Ten_Dropcxg.extend(topT_l.index.tolist())
             crashTen = df[df['percent'] < -9.8]
             crash = df[df['percent'] < -changepercent]
+            crashTen_st = st[(st.a1_v > st.b1_v) & (st.b1_v == 0)]
         else:
             log.info("market No Percent:%s" % df[:1])
             top = '0'
             topTen = '0'
+            topTen_st = '0'
             crashTen = '0'
             crash = '0'
+            crashTen_st = '0'
         topTen_all += len(topTen)
+        topTen_all_st += len(topTen_st)
         crashTen_all += len(crashTen)
+        crashTen_all_st += len(crashTen_st)
         # top=df[ df['changepercent'] <6]
         # print("\033[1;31;40m您输入的帐号或密码错误！\033[0m")
         print((
@@ -454,11 +464,11 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
         top_min = []
 
     # topTen = str(len(topTen)) +'('+str(len(top_Ten_Dropcxg))+')' +'(H:'+str(len(top_Max))+')'
-    topTen = str(topTen_all) + '(' + str(len(topTen)) + ')' + \
+    topTen = str(topTen_all+topTen_all_st) + '(' + str(len(topTen)) + ')' + \
         '(H:' + str(len(top_Max)) + ')'
     # print "top_Ten_Dropcxg:%s",top_Ten_Dropcxg
     # crashTen = df[df['percent'] < -9.8]
-    crashTen = str(crashTen_all) + '(L:' + str(len(top_min)) + ')'
+    crashTen = str(crashTen_all+crashTen_all_st) + '(L:' + str(len(top_min)) + ')'
 
     crash = df[df['percent'] < -changepercent]
 
@@ -481,8 +491,10 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
               (f_print(4, zlr, 31), f_print(4, zzb, 31), f_print(4, zt))))
 
     ff = ffu.get_dfcfw_fund_SHSZ()
-    hgt = ffu.get_dfcfw_fund_HGT()
-    szt = ffu.get_dfcfw_fund_HGT(url=ct.DFCFW_FUND_FLOW_SZT)
+    # hgt = ffu.get_dfcfw_fund_HGT()
+    # szt = ffu.get_dfcfw_fund_HGT(url=ct.DFCFW_FUND_FLOW_SZT)
+    hgt = ffu.get_dfcfw_fund_HGSZ2021('bei')
+    szt = ffu.get_dfcfw_fund_HGSZ2021('nan')
     log.debug("shzs:%s hgt:%s" % (ff, hgt))
     # if len(ff) > 0:
     #     print ("\tSH: %s u:%s vo: %s sz: %s u:%s vo: %s" % (
@@ -503,7 +515,7 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
 
     if len(hgt) > 0:
         print(("\tSgt: %s Gst: %s Hgt: %s Ggt: %s SSVol:%s" %
-              (szt['hgt'], szt['ggt'], hgt['hgt'], hgt['ggt'], f_print(10, ff['allvol'], 31))))
+              (hgt['ggt'], szt['ggt'], hgt['hgt'], szt['hgt'], f_print(10, ff['allvol'], 31))))
     else:
         print(("\t%s Sgt: %s Gst: %s \tHgt: \t%s Ggt: " % (0, 0, 0, 0)))
 
@@ -661,9 +673,9 @@ if __name__ == '__main__':
                 log.debug('into get_work_time:%s' % (int_time))
                 if 915 < int_time < 926:
                     while 1:
-                        cct.sleeprandom(15)
+                        cct.sleeprandom(20)
                         break
-                elif int_time < 930:
+                elif 926 < int_time < 930:
                     while 1:
                         cct.sleep(60)
                         if cct.get_now_time_int() < 931:

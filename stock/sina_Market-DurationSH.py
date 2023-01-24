@@ -10,15 +10,15 @@ import time
 import pandas as pd
 
 from JohnsonUtil import johnson_cons as ct
-from JohnsonUtil import LoggerFactory as LoggerFactory
-from JohnsonUtil import commonTips as cct
 import singleAnalyseUtil as sl
 from JSONData import powerCompute as pct
 from JSONData import stockFilter as stf
-
 from JSONData import tdx_data_Day as tdd
 from JSONData import LineHistogram as lhg
-
+from JohnsonUtil import LoggerFactory as LoggerFactory
+from JohnsonUtil import commonTips as cct
+from JSONData import LineHistogram as lhg
+import search_Tdx_multi_data_duration250 as search250
 # from logbook import Logger,StreamHandler,SyslogHandler
 # from logbook import StderrHandler
 
@@ -117,7 +117,7 @@ if __name__ == "__main__":
         log.info("duaration: %s duration_date:%s" % (cct.get_today_duration(du_date), duration_date))
     set_duration_console(du_date)
 
-    from . import search_Tdx_multi_data_duration250 as search250
+
     search250.get_roll_mean_all(single=False, tdx=True, app=False)
 
     # all_diffpath = tdd.get_tdx_dir_blocknew() + '062.blk'

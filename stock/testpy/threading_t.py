@@ -31,7 +31,7 @@ class DownloadWorker(Thread):
         # while True:
             # Get the work from the queue and expand the tuple
         code = self.queue.get()
-        print("I am %s, set counter:%s" % (self.name, counter))
+        print(("I am %s, set counter:%s" % (self.name, counter)))
         # sl.get_multiday_ave_compare_silent(code)
         sl.get_multiday_ave_compare_silent_noreal(code)
         self.queue.task_done()
@@ -61,7 +61,7 @@ def main(codes):
     else:
         thread_n=len(codes)
     # Create 8 worker threads
-    print("thread is ::::",thread_n)
+    print(("thread is ::::",thread_n))
     print("")
     for x in range(thread_n):
         worker = DownloadWorker(queue)

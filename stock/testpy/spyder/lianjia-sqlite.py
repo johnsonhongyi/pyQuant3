@@ -186,7 +186,7 @@ def do_xiaoqu_spider(db_xq,region="昌平"):
     except Exception as e:
         print(e)
         return
-    print("soup",soup)
+    print(("soup",soup))
     d="d="+soup.find('div',{'class':'page-box house-lst-page-box'}).get('page-data')
     exec(d)
     total_pages=d['totalPage']
@@ -200,7 +200,7 @@ def do_xiaoqu_spider(db_xq,region="昌平"):
         t.start()
     for t in threads:
         t.join()
-    print("爬下了 %s 区全部的小区信息" % region)
+    print(("爬下了 %s 区全部的小区信息" % region))
 
 
 def chengjiao_spider(db_cj,url_page="http://bj.lianjia.com/chengjiao/pg1rs%E5%86%A0%E5%BA%AD%E5%9B%AD"):
@@ -305,7 +305,7 @@ def do_xiaoqu_chengjiao_spider(db_xq,db_cj):
     for xq in xq_list:
         xiaoqu_chengjiao_spider(db_cj,xq[0])
         count+=1
-        print('have spidered %d xiaoqu' % count)
+        print(('have spidered %d xiaoqu' % count))
     print('done')
 
 
@@ -356,7 +356,7 @@ def exception_spider(db_cj):
                 count+=1
             else:
                 print("wrong format")
-            print("have spidered %d exception url" % count)
+            print(("have spidered %d exception url" % count))
         excep_list=exception_read()
     print('all done ^_^')
 

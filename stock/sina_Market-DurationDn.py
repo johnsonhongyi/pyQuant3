@@ -8,13 +8,13 @@ import time
 
 import pandas as pd
 from JohnsonUtil import johnson_cons as ct
+import singleAnalyseUtil as sl
 from JSONData import powerCompute as pct
 from JSONData import stockFilter as stf
-
 from JSONData import tdx_data_Day as tdd
 from JSONData import LineHistogram as lhg
-from JohnsonUtil import commonTips as cct
 from JohnsonUtil import LoggerFactory as LoggerFactory
+from JohnsonUtil import commonTips as cct
 # from logbook import Logger,StreamHandler,SyslogHandler
 # from logbook import StderrHandler
 
@@ -292,6 +292,8 @@ if __name__ == "__main__":
                     goldstock = len(top_dif[
                                     (top_dif.buy >= top_dif.lhigh * 0.99) & (top_dif.buy >= top_dif.llastp * 0.99)])
                     ## goldstock=len(top_dif[top_dif.buy >(top_dif.high-top_dif.low)/2])
+                    top_dif = top_dif[ (top_dif.high >= top_dif.hmax ) | (top_dif.lasth1d >= top_dif.hmax) | (top_dif.lasth2d >= top_dif.hmax) ]
+                    #now close > lastTop10 (tdx_max_int_end) High
                     if ptype == 'low':
                         #                        top_dif = top_dif[top_dif.lvol > ct.LvolumeSize]
 
@@ -427,8 +429,8 @@ if __name__ == "__main__":
                         ct_Duration_format_Values, replace='op', dest='boll')
                     ct_Duration_format_Values = ct.get_Duration_format_Values(
                         ct_Duration_format_Values, replace='b1_v', dest='upper')
-                    ct_Duration_format_Values = ct.get_Duration_format_Values(
-                        ct_Duration_format_Values, replace='fibl', dest='top10')
+                    # ct_Duration_format_Values = ct.get_Duration_format_Values(
+                    #     ct_Duration_format_Values, replace='fibl', dest='top10')
                     ct_Duration_format_Values = ct.get_Duration_format_Values(
                         ct_Duration_format_Values, replace='perc1d', dest='perc3d')
 

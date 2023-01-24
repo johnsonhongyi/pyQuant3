@@ -42,6 +42,6 @@ if __name__ == '__main__':
     # print file.readline()
     lastchar = file.readline()[-1]
     trailing_newline = (lastchar == "\n")
-    print(trailing_newline,lastchar)
+    print((trailing_newline,lastchar))
     print(dl)
     

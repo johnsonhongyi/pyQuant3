@@ -40,7 +40,7 @@ def play_msg_warning_call(fname='busy.wav',retry=1):
     print(fname)
     # pyaudio.paCoreAudio = 5
     for x in range(retry):
-        print("run:%s"%(x))
+        print(("run:%s"%(x)))
         wf = wave.open(fp, 'rb')
         p = pyaudio.PyAudio()
 

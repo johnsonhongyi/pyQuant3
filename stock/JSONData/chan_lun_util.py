@@ -17,7 +17,7 @@ def Kplot(Open,High,Low,Close):
     ax1 = plt.axes([0,0,3,2])
 
     X=np.array(list(range(0, length)))
-    print("nan:%s"%(nan))
+    print(("nan:%s"%(nan)))
     pad_nan=X+nan
 
     #计算上 下影线
@@ -552,11 +552,11 @@ def run_test():
     merge_line_list = find_peak_and_bottom(k_line_list, "down")
     # fen_bi(merge_line_list)
     fenbi_result,final_result_array,fenbi_seq_list = fen_bi(merge_line_list)
-    print("1",fenbi_result)
-    print("2",final_result_array)
-    print("all:%s 3:%s"%(len(df),fenbi_seq_list[5]))
-    print(df.index[:2])
-    print(df.iloc[288,1:5][:5])
+    print(("1",fenbi_result))
+    print(("2",final_result_array))
+    print(("all:%s 3:%s"%(len(df),fenbi_seq_list[5])))
+    print((df.index[:2]))
+    print((df.iloc[288,1:5][:5]))
     # Kplot(Open, High, Low, Close)
 
     Kplot(df.open, df.high, df.low, df.close)

@@ -246,6 +246,6 @@ def Get_RSI(df):
 if __name__ == '__main__':
     df=ts.get_hist_data('601198')
     db = get_BBANDS_Status(df)
-    print(db[:1])
+    print((db[:1]))
     db = get_KDJ_Status(db)
-    print(db[:1])
+    print((db[:1]))

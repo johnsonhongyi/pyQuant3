@@ -350,13 +350,14 @@ if __name__ == "__main__":
                     # top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter,duration=ct.PowerCountdl, filter=True, percent=True, resample=resample)
                     top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=True, ma5d=False, dl=14, percent=False, resample=resample, ene=False,cuminTrend=False)
                     # top_end = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=False, ma5d=False, dl=14, percent=False, resample=resample, ene=False)
-
+                    top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
+                    
                     print(("N:%s K:%s %s G:%s" % (
                         now_count, len(top_all[top_all['buy'] > 0]),
                         len(top_now[top_now['volume'] <= 0]), goldstock)), end=' ')
 
-                    nhigh = top_temp[top_temp.close > top_temp.nhigh] if 'nhigh' in top_temp.columns.values else []
-                    nlow = top_temp[top_temp.close > top_temp.nlow] if 'nlow' in top_temp.columns.values else []
+                    nhigh = top_temp[top_temp.close > top_temp.nhigh] if 'nhigh'  in top_temp.columns else []
+                    nlow = top_temp[top_temp.close > top_temp.nlow] if 'nhigh'  in top_temp.columns else []
                     print("Rt:%0.1f dT:%s N:%s T:%s %s%% nh:%s nlow:%s" % (float(time.time() - time_Rt), cct.get_time_to_date(time_s), cct.get_now_time(), len(top_temp), round(len(top_temp) / float(ct.PowerCount) * 100, 1),len(nhigh),len(nlow)))
                     # top_end = stf.getBollFilter(df=top_end, boll=ct.bollFilter,duration=ct.PowerCountdl,filter=False)
                     if 'op' in top_temp.columns:
@@ -564,7 +565,7 @@ if __name__ == "__main__":
             else:
                 print("input error:%s" % (st))
         except (IOError, EOFError, Exception) as e:
-            print("Error:%s", e)
+            print("Error", e)
             import traceback
             traceback.print_exc()
             cct.sleeprandom(ct.duration_sleep_time / 2)

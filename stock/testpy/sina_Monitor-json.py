@@ -44,7 +44,7 @@ def downloadpage(url):
 def parsehtml(data):
     soup = BeautifulSoup(data)
     for x in soup.findAll('a'):
-        print(x.attrs['href'])
+        print((x.attrs['href']))
 
 
 def html_clean_content(soup):
@@ -81,9 +81,9 @@ if __name__ == "__main__":
         if len(data) >=1:
             # return []
             df = data[(data['kind'] == 'U')]['code'].value_counts()[:10]
-            print(len(data.index))
-            print("interval:", interval)
-            print(df[:10])
+            print((len(data.index)))
+            print(("interval:", interval))
+            print((df[:10]))
             for code in df.index:
                 code = re.findall('(\d+)', code)
                 if len(code) > 0:
@@ -102,7 +102,7 @@ if __name__ == "__main__":
             else:
                 for code in cd:
                     if code in code_a:
-                        print("duble:code%s", code)
+                        print(("duble:code%s", code))
                     else:
                         code_a.append(code)
             time.sleep(60)
@@ -111,6 +111,6 @@ if __name__ == "__main__":
 
         except (IOError, EOFError, KeyboardInterrupt) as e:
             # print "key"
-            print("expect:", e)
+            print(("expect:", e))
             status = not status
             code_a = []

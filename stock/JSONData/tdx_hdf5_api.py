@@ -9,6 +9,8 @@ import pandas as pd
 from pandas import HDFStore
 sys.path.append("..")
 from JohnsonUtil import LoggerFactory
+# from JohnsonUtil.commonTips import get_ramdisk_dir
+# print get_ramdisk_dir()
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import johnson_cons as ct
 import random
@@ -21,6 +23,7 @@ RAMDISK_KEY = 0
 INIT_LOG_Error = 0
 # Compress_Count = 1
 BaseDir = cct.get_ramdisk_dir()
+
 #import fcntl linux
 #lock：
 # fcntl.flock(f,fcntl.LOCK_EX)
@@ -149,7 +152,7 @@ class SafeHDFStore(HDFStore):
 #                time.sleep(probe_interval)
 #                return None
         # HDFStore.__init__(self, fname, *args, **kwargs)
-        HDFStore.__init__(self, path=fname, *args, **kwargs)
+        HDFStore.__init__(self, fname, *args, **kwargs)
         # if not os.path.exists(cct.get_ramdisk_path(cct.tdx_hd5_name)):
         #     if os.path.exists(cct.tdx_hd5_path):
         #         tdx_size = os.path.getsize(cct.tdx_hd5_path)
@@ -390,7 +393,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 
     if not MultiIndex:
         df['timel']=time.time()
-
+        
     if not rewrite:
         if df is not None and not df.empty and table is not None:
             # h5 = get_hdf5_file(fname,wr_mode='r')
@@ -530,7 +533,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                                 # df[df.index.get_level_values('code') not in diff_code ]
                         h5.remove(table)
                         # h5[table]=df
-                        h5.put(table, df, format='table', index=False, complib=complib, data_columns=True)
+                        h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
                         # h5.put(table, df, format='table',index=False, data_columns=True, append=False)
                     else:
                         if rewrite:
@@ -540,7 +543,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                 else:
                     if not MultiIndex:
                         # h5[table]=df
-                        h5.put(table, df, format='table', index=False, complib=complib, data_columns=True)
+                        h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
                         # h5.put(table, df, format='table',index=False, data_columns=True, append=False)
                     else:
                         h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
@@ -626,8 +629,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
         return None
     df=None
     dd=None
-    table = table.replace('/','') if table.find('/') >= 0 else table
-
     if code_l is not None:
         if table is not None:
 
@@ -642,7 +643,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                         log.error("AttributeError:%s %s"%(fname,e))
                         log.error("Remove File:%s"%(fname))
                     except Exception as e:
-                        print("Exception:%s name:%s"%(fname,e))
+                        print(("Exception:%s name:%s"%(fname,e)))
                     else:
                         pass
                     finally:
@@ -654,6 +655,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                         code_l=list(map((lambda x: str(1000000 - int(x))
                                       if x.startswith('0') else x), code_l))
                     dif_co=list(set(dd.index) & set(code_l))
+                    #len(set(dd.index) & set(code_l))
                     if len(code_l) > 0:
                         dratio=(float(len(code_l)) - float(len(dif_co))) / \
                             float(len(code_l))
@@ -762,7 +764,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                         log.error("Remove File:%s"%(fname))
                     except Exception as e:
                         log.error("Exception:%s %s"%(fname,e))
-                        print("Exception:%s name:%s"%(fname,e))
+                        print(("Exception:%s name:%s"%(fname,e)))
                     else:
                         pass
                     finally:
@@ -794,11 +796,10 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                                  (fname, [time.time() - t_x for t_x in o_time]))
                 else:
                     df=dd
-
             else:
                 log.error("%s is not find %s" % (fname, table))
-        # else:
-        #     log.error("%s / table is Init None:%s"(fname, table))
+        else:
+            log.error("% / table is Init None:%s"(fname, table))
 
     if df is not None and len(df) > 0:
         df=df.fillna(0)
@@ -939,76 +940,45 @@ if __name__ == "__main__":
     # import ipdb;ipdb.set_trace()
 
 
-    #write
+    sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
+    freq='30T'
+    startime = '09:25:00'
+    endtime = '15:01:00'
+    def readHdf5(fpath, root=None):
+        store = pd.HDFStore(fpath, "r")
+        (list(store.keys()))
+        if root is None:
+            root = list(store.keys())[0].replace("/", "")
+        df = store[root]
+        store.close()
+        return df
+
+    runcol=['low','high','close']
+    h5 = readHdf5(sina_MultiD_path)
+    h5.shape
+    mdf = cct.get_limit_multiIndex_freq(h5, freq=freq.upper(),  col='all', start=startime, end=endtime, code=None)
+
+    import ipdb;ipdb.set_trace()
+
+
 
     a = np.random.standard_normal((9000,4))
     df = pd.DataFrame(a)
     h5_fname = 'test_s.h5'
     h5_table = 'all'
     h5 = write_hdf_db(h5_fname, df, table=h5_table, index=False, baseCount=500, append=False, MultiIndex=False)
-    fname=['test_s.h5','sina_data.h5', 'tdx_last_df', 'powerCompute.h5', 'get_sina_all_ratio']
-    fname=['tdx_last_df', 'powerCompute.h5', 'get_sina_all_ratio']
+    import ipdb;ipdb.set_trace()
+
+    fname=['sina_data.h5', 'tdx_last_df', 'powerCompute.h5', 'get_sina_all_ratio']
     # fname=['test_s.h5','sina_data.h5', 'tdx_last_df', 'powerCompute.h5', 'get_sina_all_ratio']
-    # fname=['test_s.h5']
+    fname=['test_s.h5']
     # fname = 'powerCompute.h5'
-    from pandasgui import show,store
-    from pylab import plt, mpl
-    import threading
-    # from pyqtconsole.console import PythonConsole
-    # from PyQt5.QtWidgets import QApplication
-    # app = QApplication([])
-    # console = PythonConsole()
-    # console.show()
-    # console.eval_in_thread()
-    # sys.exit(app.exec_())
-    # store = store.Store()
-    # store.block = True
-
-
-
-#     Traceback (most recent call last):
-#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\singleAnalyseUtil.py", line 703, in <module>
-#     tdd.Write_market_all_day_mp('all')
-#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\JSONData\tdx_data_Day.py", line 1889, in Write_market_all_day_mp
-#     Write_sina_to_tdx(tdx_index_code_list, index=True)
-#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\JSONData\tdx_data_Day.py", line 1717, in Write_sina_to_tdx
-#     status = h5a.write_hdf_db(h5_fname, df, table=h5_table, index=False, baseCount=500, append=False, MultiIndex=True)
-#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\JSONData\tdx_hdf5_api.py", line 538, in write_hdf_db    h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
-#   File "C:\Users\Johnson\Anaconda2\envs\py39\lib\site-packages\pandas\io\pytables.py", line 1092, in put
-#     self._write_to_group(
-#   File "C:\Users\Johnson\Anaconda2\envs\py39\lib\site-packages\pandas\io\pytables.py", line 1742, in _write_to_group
-#     s.write(
-#   File "C:\Users\Johnson\Anaconda2\envs\py39\lib\site-packages\pandas\io\pytables.py", line 4678, in write    return super().write(obj=obj, data_columns=data_columns, **kwargs)
-#   File "C:\Users\Johnson\Anaconda2\envs\py39\lib\site-packages\pandas\io\pytables.py", line 4218, in write    table = self._create_axes(
-#   File "C:\Users\Johnson\Anaconda2\envs\py39\lib\site-packages\pandas\io\pytables.py", line 3951, in _create_axes
-#     new_table.validate(self)
-#   File "C:\Users\Johnson\Anaconda2\envs\py39\lib\site-packages\pandas\io\pytables.py", line 3292, in validate
-#     raise ValueError(
-# ValueError: invalid combination of [values_axes] on appending data [name->values_block_0,cname->values_block_0,dtype->bytes80,kind->string,shape->(2, 3)] vs current table [name->values_block_0,cname->values_block_0,dtype->b'string80',kind->string,shape->None]
-
-
-
-
-
-
-    pandasguisettings={'block':'True'}
-    for h5_fname in fname:
-        h5keys=[]
-        with SafeHDFStore(h5_fname) as h5:
-            # import ipdb;ipdb.set_trace()
-            print("name:",h5)
-            h5keys=list(h5.keys())
-            # th = threading.Thread(target=show(h5.all))
-            # th.start()
-
-
-        for key in h5keys:
-            print("key:",key)
-            h5 = load_hdf_db(h5_fname,table=key,timelimit=False)
-
-            # show(h5[key],settings=pandasguisettings)
-            show(h5,settings=pandasguisettings)
-                # print(h5['all'].loc['600007'])
+    for na in fname:
+        with SafeHDFStore(na) as h5:
+            import ipdb;ipdb.set_trace()
+            print(h5)
+            if '/' + 'all' in list(h5.keys()):
+                print((h5['all'].loc['600007']))
         # h5.remove('high_10_y_20170620_all_15')
         # print h5
         # dd = h5['d_21_y_all']

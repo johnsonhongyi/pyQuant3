@@ -114,7 +114,7 @@ def graphData(stock):
 
 
     except Exception as e:
-        print('main loop', str(e))
+        print(('main loop', str(e)))
 
 graphData('TSLA')
 

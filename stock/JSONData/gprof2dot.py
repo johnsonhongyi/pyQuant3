@@ -44,8 +44,8 @@ if sys.version_info[0] >= 3:
     xrange = range # No xrange in Python 3
 else:
     PYTHON_3 = False
-    def compat_iteritems(x): return iter(x.items())
-    def compat_itervalues(x): return iter(x.values())
+    def compat_iteritems(x): return iter(list(x.items()))
+    def compat_itervalues(x): return iter(list(x.values()))
     def compat_keys(x): return list(x.keys())
 
 

@@ -21,7 +21,7 @@ log = LoggerFactory.log
 # log.setLevel(LoggerFactory.DEBUG)
 from JSONData import tdx_hdf5_api as h5a
 from JSONData import realdatajson as rl
-
+import functools
 
 class StockCode:
 
@@ -37,6 +37,8 @@ class StockCode:
         if cct.creation_date_duration(self.stock_code_path) > 10:
             stock_codes = self.get_stock_codes(True)
             print(("days:%s %s update stock_codes.conf" % (cct.creation_date_duration(self.stock_code_path), len(stock_codes))))
+
+        
 
         self.stock_codes = None
 
@@ -123,12 +125,15 @@ class Sina:
         self.cname = False
         self.encoding = 'gbk'
 
+
         self.sinaheader = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
             'Host': 'vip.stock.finance.sina.com.cn',
             'Referer':'http://vip.stock.finance.sina.com.cn',
             'Connection': 'keep-alive',
             }
+
+
         # self.all
         # h5 = self.load_hdf_db(table='all', code_l=None, init=True)
         # if h5 is None:
@@ -250,7 +255,7 @@ class Sina:
         #     print i
         #     a += i
         #     print a
-        log.debug('all:%s' % len(self.stock_list))
+        log.debug('all:%s' % len(self.stock_list[:5]))
         # log.error('all:%s req:%s' %
         #           (len(self.stock_list), len(self.stock_list)))
         return self.get_stock_data()
@@ -264,6 +269,7 @@ class Sina:
         else:
             code = 0
         return code
+
     def get_code_cname(self,code):
         self.cname  = True
         dm = self.all
@@ -350,19 +356,36 @@ class Sina:
     #     fp.close()
     #     return data
 
+
+
+
     # @asyncio.coroutine
     # def get_stocks_by_range_py2(self, index):
 
+    #     # sinaheader = {
+    #     #     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
+    #     #     'Host': 'vip.stock.finance.sina.com.cn',
+    #     #     'Referer':'http://vip.stock.finance.sina.com.cn',
+    #     #     'Connection': 'keep-alive',
+    #     #     }
+            
     #     loop = asyncio.get_event_loop()
     #     # response = yield From(loop.run_in_executor(None,self.get_url_data_R,
     #     # (self.sina_stock_api + self.stock_list[index])))
-    #     response = yield From(loop.run_in_executor(None, requests.get, (self.sina_stock_api + self.stock_list[index])))
+
+    #     # response = yield From(loop.run_in_executor(None, requests.get, (self.sina_stock_api + self.stock_list[index])))
+
+    #     response = yield From(loop.run_in_executor(None, functools.partial(requests.get, (self.sina_stock_api + self.stock_list[index]) ,headers=self.sinaheader ))  )
+
     #     response.encoding = self.encoding
     #     # response = yield (requests.get(self.sina_stock_api + self.stock_list[index]))
     #     # log.debug("url:%s"%(self.sina_stock_api + self.stock_list[index]))
     #     # log.debug("res_encoding:%s" % response.encoding[:10])
+    #     if len(response.text) < 10:
+    #         log.error("response.text is None:%s"%(response.text))
     #     self.stock_data.append(response.text)
     #     # Return(self.stock_data.append(response.text))
+
 
     # https://github.com/jinrongxiaoe/easyquotation
     async def get_stocks_by_range(self, index):
@@ -428,11 +451,8 @@ class Sina:
     #     threads = []
     #     for index in range(self.request_num):
     #         threads.append(self.get_stocks_by_range(index))
-    #         log.debug("url len:%s" %
-    #                   (len(self.stock_list[index])))
     #     if self.request_num == 0:
     #         threads.append(self.get_stocks_by_range(0))
-
     #     for _ in range(retry_count):
     #         time.sleep(pause)
     #         try:
@@ -443,8 +463,8 @@ class Sina:
     #         loop.run_until_complete(asyncio.wait(threads))
     #         log.debug('get_stock_data_loop')
     #         return self.format_response_data()
-
     #     raise IOError(ct.NETWORK_URL_ERROR_MSG)
+
 
     # def get_stock_data(self):
     #     threads = []
@@ -524,8 +544,8 @@ class Sina:
 #                return h5
         self.stock_data = []
         self.url = self.sina_stock_api + ','.join(self.stock_codes)
-        log.info("stock_list:%s" % self.url[:20])
-        response = requests.get(self.url ,headers=self.sinaheader)
+        log.info("stock_list:%s" % self.url[:30])
+        response = requests.get(self.url,headers=self.sinaheader)
         response.encoding = self.encoding
         self.stock_data.append(response.text)
         self.dataframe = self.format_response_data(index)
@@ -579,9 +599,11 @@ class Sina:
                 self.stock_codes = [('sh%s' if stock_code.startswith(
                     ('5', '6', '9')) else 'sz%s') % stock_code for stock_code in ulist]
 
+            if len(self.stock_codes) == 0:
+                log.error("self.stock_codes is None:%s"%(self.stock_codes))
             self.url = self.sina_stock_api + ','.join(self.stock_codes)
             log.info("stock_list:%s" % self.url[:30])
-            response = requests.get(self.url ,headers=self.sinaheader)
+            response = requests.get(self.url,headers=self.sinaheader)
             response.encoding = self.encoding
             self.stock_data.append(response.text)
             self.dataframe = self.format_response_data(index)
@@ -669,6 +691,9 @@ class Sina:
                  'ticktime': (stock[32])})
 #        print list_s
         # df = pd.DataFrame.from_dict(stock_dict,columns=ct.SINA_Total_Columns)
+        if len(list_s) == 0:
+            log.error("Sina Url error:%s"%(self.sina_stock_api + ','.join(self.stock_codes[:2])))
+
         df = pd.DataFrame(list_s, columns=ct.SINA_Total_Columns)
         # if self.index_status and cct.get_work_time():
         # if self.index_status:
@@ -842,7 +867,7 @@ class Sina:
 def nanrankdata_len(x):
     time_s = time.time()
     df = get_tdx_stock_period_to_type(x, period_day='5T')
-    print('t:%0.2f' % (time.time() - time_s))
+    print(('t:%0.2f' % (time.time() - time_s)))
     return df
 
 if __name__ == "__main__":
@@ -865,21 +890,24 @@ if __name__ == "__main__":
     sina = Sina()
     # print len(df)
     # code='300107'
-    df =sina.all
-    import ipdb;ipdb.set_trace()
+    # print sina.get_cname_code('陕西黑猫')
+    # print sina.get_code_cname(['300107'])
+    print((sina.get_stock_code_data('300107').T))
 
+    df =sina.all
+    print((df[:10]))
     # print df.lastbuy[-5:].to_frame().T
-    print(sina.get_stock_list_data(['999999','399001','399006'],index=True).name)
-    df = sina.get_stock_code_data('999999',index=True)
-    print(df.name)
+    print((sina.get_stock_list_data(['999999','399001','399006'],index=True).name))
+    # df = sina.get_stock_code_data('999999',index=True)
+    print((df.name))
     import ipdb;ipdb.set_trace()
 
     df = Sina().market('cyb')
-    print(df.shape)
+    print((df.shape))
 
-    print(sina.get_stock_code_data('300107').T)
-    print(df[-5:][['open','close']].T)
-    print(df.columns)
+    print((sina.get_stock_code_data('300107').T))
+    print((df[-5:][['open','close']].T))
+    print((df.columns))
     # print df[-5:][['lastbuy','close']].T
 
 
@@ -889,9 +917,9 @@ if __name__ == "__main__":
     code_agg = '601939'
     dd = sina.get_stock_code_data([code_agg,'600050','002350', '601899',\
       '603363','000868','603917','600392','300713','000933','002505','603676'])
-    print(dd.T)
+    print((dd.T))
 
-    print(dd.loc[:, ['name','open','low','high','close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape)
+    print((dd.loc[:, ['name','open','low','high','close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape))
     # print dd.loc[code_agg].T
 
     # print df.columns
@@ -935,7 +963,7 @@ if __name__ == "__main__":
                 h5 = cct.get_limit_multiIndex_freq(h5, freq=freq, col=run_col, start=startime, end=endtime)
                 h5 = h5.groupby(level=[0]).tail(1)
             # h5 = h5.groupby(level=[0]).tail(1)
-            print("s:", round(time.time() - ts, 2), len(h5))
+            print(("s:", round(time.time() - ts, 2), len(h5)))
             if h5 is not None and len(h5) > 0:
                 h5 = h5.reset_index().set_index('code')
                 h5.rename(columns=now_func, inplace=True)
@@ -950,7 +978,7 @@ if __name__ == "__main__":
     h5_table = 'all_10'
     time_s = time.time()
     h5 = h5a.load_hdf_db(h5_fname, table=h5_table, code_l=None, timelimit=False, dratio_limit=0.12)
-    print('h5:', len(h5))
+    print(('h5:', len(h5)))
     if cct.get_work_time() and cct.get_now_time_int() <= 1000:
         run_col = ['low', 'high', 'close']
         startime = None
@@ -983,8 +1011,8 @@ if __name__ == "__main__":
         # tt = h5.groupby([h5.index.get_level_values(i) for i in [0]] + [pd.Grouper(freq='15T', level=-1, closed='right', label='right')]).mean()
         # print "tts:",round(time.time()-ts,2),len(tt)
 
-    print(dd.loc['600007', ['close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape)
-    print(dd.loc[:, ['close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape)
+    print((dd.loc['600007', ['close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape))
+    print((dd.loc[:, ['close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape))
     '''
     if df is not None and len(df) > 0:
         print df[:1]
@@ -1019,7 +1047,7 @@ if __name__ == "__main__":
     if df is not None and len(df) > 0 and code in df.index:
         df = compute_lastdays_percent(df=df.loc[code], step=1)
         # print df[df.index < '09:32:00']
-        print(df[-1:], round(time.time() - time_s, 1))
+        print((df[-1:], round(time.time() - time_s, 1)))
     # sys.exit(0)
     time_s = time.time()
     dd = pd.DataFrame()
@@ -1029,7 +1057,7 @@ if __name__ == "__main__":
         df = Sina().market(ma)
         # print df.loc['600581']
         # print len(sina.all)
-        print("market:%s %s" % (ma, len(df)))
+        print(("market:%s %s" % (ma, len(df))))
 
     h5_fname = 'sina_multi_index'
     dl = 30
@@ -1050,9 +1078,9 @@ if __name__ == "__main__":
 
         # df.ticktime = map(lambda x: int(x.replace(':', '')), df.ticktime)
         df.ticktime = list(map(lambda x, y: str(x) + ' ' + str(y), df.dt, df.ticktime))
-        print(df.ticktime[:3])
+        print((df.ticktime[:3]))
         df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S')
-        print(df.ticktime[:2])
+        print((df.ticktime[:2]))
         # sys.exit(0)
         # df = df.loc[:, ['open', 'high', 'low', 'close', 'llastp', 'volume', 'ticktime']]
         # df = df.loc[:, ['open', 'high', 'low', 'close', 'llastp', 'volume', 'ticktime']]
@@ -1080,7 +1108,7 @@ if __name__ == "__main__":
         # xcode = cct.code_to_symbol(code)
         # dd = pd.concat([dd, df], axis=0)
         # print df.loc[('600151')].index[-1]
-        print(".", len(df))
+        print((".", len(df)))
         # st.append(xcode,df)
         put_time = time.time()
         # st.put("df", df, format="table", append=True, data_columns=['code','date'])

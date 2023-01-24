@@ -3,7 +3,7 @@
 # %matplotlib inline
 import datetime
 import sys
-sys.path.append("..")
+
 import numpy as np
 import pandas as pd
 from statsmodels import api as sm
@@ -19,6 +19,7 @@ from pylab import plt, mpl
 from sklearn.linear_model import LinearRegression
 from statsmodels import regression
 
+sys.path.append("..")
 from JSONData import powerCompute as pct
 from JohnsonUtil import LoggerFactory as LoggerFactory
 from JohnsonUtil import commonTips as cct
@@ -28,6 +29,7 @@ from JohnsonUtil import zoompan
 log = LoggerFactory.log
 # log.setLevel(LoggerFactory.DEBUG)
 from JSONData import tdx_data_Day as tdd
+import matplotlib.ticker as mticker
 
 if cct.isMac():
     # mpl.rcParams['font.sans-serif'] = ['STHeiti']
@@ -182,15 +184,22 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
         # asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
         # print asset[:1].index[0] , df1[:1].index[0]
         if asset[:1].index[0] > df1[:1].index[0]:
-            asset1 = df1.loc[asset.index, ptype]
+            # asset1 = df1.loc[asset.index, ptype]
+            asset1 = df1.loc[(set(df1.index) & set(asset.index)), ptype].sort_index(ascending=True)
+
             startv = asset1[:1]
+
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
         else:
             df = df[df.index >= df1.index[0]]
             asset = df[ptype]
             asset = asset.dropna()
             dates = asset.index
-            asset1 = df1.loc[df.index, ptype]
+            aset=set(df1.index) & set(df.index)
+            # idx_list= map( lambda x: x, aset)
+            asset1 = df1.loc[aset, ptype]
+            # asset1 = df1.loc[(set(df1.index) & set(df.index)), ptype].sort_index(ascending=True)
+
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
 
     else:
@@ -210,7 +219,9 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
         if not dtype == 'd':
             df1 = tdd.get_tdx_stock_period_to_type(df1, dtype).sort_index(ascending=True)
         if len(asset) < len(df1):
-            asset1 = df1.loc[asset.index, ptype]
+            a_set = (set(df1.index) & set(asset.index))
+            asset1 = df1.loc[a_set, ptype].sort_index(ascending=True)
+            # df1.loc[(set(df1.index) & set(asset.index)), ptype].sort_index(ascending=True)
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
         else:
 
@@ -218,7 +229,9 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
             asset = df[ptype]
             asset = asset.dropna()
             dates = asset.index
-            asset1 = df1.loc[df.index, ptype]
+            # asset1 = df1.loc[df.index, ptype]
+            asset1 = df1.loc[(set(df1.index) & set(df.index)), ptype].sort_index(ascending=True)
+            # df1.loc[(set(df1.index) & set(asset.index)), ptype].sort_index(ascending=True)
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
     # print len(df),len(asset),len(df1),len(asset1)
 
@@ -247,14 +260,32 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
     # asset=asset.apply(lambda x:round( x/asset[:1],2))
     ax1.plot(asset)
     # ax1.plot(asset1,'-r', linewidth=2)
-    ticks = ax1.get_xticks()
     # start, end = ax1.get_xlim()
     # print start, end, len(asset)
     # print ticks, ticks[:-1]
     # (ticks[:-1] if len(asset) > end else np.append(ticks[:-1], len(asset) - 1))
+    xlabels = ax1.get_xticks()
+    # label_format = '{:,.1f}'
 
-    ax1.set_xticklabels([dates[int(i)] for i in (np.append(ticks[:-1], len(asset) - 1))],
-                        rotation=15)  # Label x-axis with dates
+    div_n = len(xlabels)
+    allc = len(dates)
+
+    if div_n > 0 and (div_n  > 8 or allc / div_n > 12):
+        div_n = int(allc / 8)
+
+    x_tick = list(range(0,len(dates), div_n))
+    ax1.set_xticks(x_tick)
+
+    new_xticks = [dates[d] for d in ax1.get_xticks()]
+
+    ax1.set_xticklabels(new_xticks, rotation=15)
+
+    # ax1.xaxis.set_major_locator(mticker.FixedLocator(xlabels)) #定位散点值
+    # ax1.set_xticklabels([dates[int(i)] for i in (np.append(xlabels[:-1], len(asset) - 1))],
+    #                     rotation=15)  # Label x-axis with dates
+    
+    # ax1.set_xticklabels([dates[int(i)] for i in (np.append(ticks[:-1], len(asset) - 1))],
+    #                     rotation=15)  # Label x-axis with dates
     # 拟合
     X = np.arange(len(asset))
     x = sm.add_constant(X)
@@ -316,8 +347,25 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
     if len(asset) > len(df1):
         ax3.plot(asset)
         plt.plot(distance)
-        ticks = ax3.get_xticks()
-        ax3.set_xticklabels([dates[int(i)] for i in (np.append(ticks[:-1], len(asset) - 1))], rotation=15)
+        # ticks = ax3.get_xticks()
+        xlabels = ax3.get_xticks()
+        # label_format = '{:,.1f}'
+
+        div_n = len(xlabels)
+        allc = len(dates)
+
+        if div_n > 0 and (div_n  > 8 or allc / div_n > 12):
+            div_n = int(allc / 8)
+
+        x_tick = list(range(0,len(dates), div_n))
+        ax3.set_xticks(x_tick)
+
+        new_xticks = [dates[d] for d in ax3.get_xticks()]
+
+        ax3.set_xticklabels(new_xticks, rotation=30, horizontalalignment='right')
+
+        # ax3.xaxis.set_major_locator(mticker.FixedLocator(xlabels)) #定位散点值
+        # ax3.set_xticklabels([dates[int(i)] for i in (np.append(xlabels[:-1], len(asset) - 1))], rotation=15)
         n = 5
         d = (-c_high + c_low) / n
         c = c_high
@@ -332,7 +380,24 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
     else:
         as3 = asset.apply(lambda x: round(x / asset[:1], 2))
         ax3.plot(as3)
-        ticks = ax3.get_xticks()
+        # ticks = ax3.get_xticks()
+        xlabels = ax3.get_xticks()
+        # label_format = '{:,.1f}'
+        div_n = len(xlabels)
+        allc = len(asset1)
+        asset1 = asset1.sort_index(ascending=True)
+
+        if div_n > 0 and (div_n  > 8 or allc / div_n > 12):
+            div_n = int(allc / 8)
+
+        x_tick = list(range(0,len(asset1), div_n))
+        ax3.set_xticks(x_tick)
+
+        new_xticks = [asset1.index[d] for d in ax3.get_xticks()]
+
+        ax3.set_xticklabels(new_xticks, rotation=15)
+
+        # ax3.xaxis.set_major_locator(mticker.FixedLocator(xlabels)) #定位散点值
         ax3.plot(asset1, '-r', linewidth=2)
 
         # show volume bar !!!
@@ -341,8 +406,10 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
         # ax3.plot(assvol, '-g', linewidth=0.5)
 
 
-        ax3.set_xticklabels([dates[int(i)] for i in (np.append(ticks[:-1], len(asset) - 1))], rotation=15)
+        # ax3.set_xticklabels([dates[int(i)] for i in (np.append(xlabels[:-1], len(asset) - 1))], rotation=30)
+        
         plt.grid(True)
+
         zp3 = zoompan.ZoomPan()
         figZoom = zp3.zoom_factory(ax3, base_scale=scale)
         figPan = zp3.pan_factory(ax3)
@@ -363,11 +430,29 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
         # plt.legend([code, code2], loc=0)
         plt.legend([cname, code2], loc=0)
 
-
+    # plt 3
     ax2 = fig.add_subplot(323)
+
     # ax2.plot(asset)
     # ticks = ax2.get_xticks()
-    ax2.set_xticklabels([dates[int(i)] for i in (np.append(ticks[:-1], len(asset) - 1))], rotation=15)
+    xlabels = ax2.get_xticks()
+    # label_format = '{:,.1f}'
+
+    div_n = len(xlabels)
+    allc = len(dates)
+
+    if div_n > 0 and (div_n  > 8 or allc / div_n > 12):
+        div_n = int(allc / 8)
+
+    x_tick = list(range(0,len(dates), div_n))
+    ax2.set_xticks(x_tick)
+
+    new_xticks = [dates[d] for d in ax2.get_xticks()]
+
+    ax2.set_xticklabels(new_xticks, rotation=15)
+
+    # ax2.xaxis.set_major_locator(mticker.FixedLocator(xlabels)) #定位散点值
+    # ax2.set_xticklabels([dates[int(i)] for i in (np.append(xlabels[:-1], len(asset) - 1))], rotation=15)
     # plt.plot(X, Y_hat, 'k', alpha=0.9)
     n = 5
     d = (-c_high + c_low) / n
@@ -448,7 +533,7 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
     # distance = (asset.values.T-Y_hat)[0]
     pd.Series(distance).plot(kind='hist', stacked=True, bins=100)
     # plt.plot((asset.iat[-1].T-Y_hat),'b',alpha=0.9)
-    plt.axvline(now_distanse, hold=None, label="1", color='red')
+    plt.axvline(now_distanse, label="1", color='red')
     # plt.axhline(now_distanse,hold=None,label="1",color='red')
     # plt.axvline(asset.iat[0],hold=None,label="1",color='red',linestyle="--")
     plt.xlabel('Undervalue ------------------------------------------> Overvalue', fontsize=12)
@@ -474,7 +559,7 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
     # print n, bins[:2]
     pd.Series(distance).plot(kind='hist', stacked=True, bins=100)
     # plt.plot((asset.iat[-1].T-Y_hat),'b',alpha=0.9)
-    plt.axvline(now_distanse, hold=None, label="1", color='red')
+    plt.axvline(now_distanse, label="1", color='red')
     # plt.axhline(now_distanse,hold=None,label="1",color='red')
     # plt.axvline(asset.iat[0],hold=None,label="1",color='red',linestyle="--")
     plt.xlabel('Undervalue ------------------------------------------> Overvalue', fontsize=14)
@@ -549,7 +634,9 @@ def get_linear_model_histogram(code, ptype='low', dtype='d', start=None, end=Non
         # asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
         # print asset[:1].index[0] , df1[:1].index[0]
         if asset[:1].index[0] > df1[:1].index[0]:
-            asset1 = df1.loc[asset.index, ptype]
+            # asset1 = df1.loc[asset.index, ptype]
+            asset1 = df1.loc[(set(df1.index) & set(asset.index)), ptype].sort_index(ascending=True)
+
             startv = asset1[:1]
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
         else:
@@ -557,7 +644,9 @@ def get_linear_model_histogram(code, ptype='low', dtype='d', start=None, end=Non
             asset = df[ptype]
             asset = asset.dropna()
             dates = asset.index
-            asset1 = df1.loc[df.index, ptype]
+            # asset1 = df1.loc[df.index, ptype]
+            asset1 = df1.loc[(set(df1.index) & set(df.index)), ptype].sort_index(ascending=True)
+
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
 
     else:
@@ -573,7 +662,10 @@ def get_linear_model_histogram(code, ptype='low', dtype='d', start=None, end=Non
         if not dtype == 'd':
             df1 = tdd.get_tdx_stock_period_to_type(df1, dtype).sort_index(ascending=True)
         if len(asset) < len(df1):
-            asset1 = df1.loc[asset.index, ptype]
+            # asset1 = df1.loc[asset.index, ptype]
+            asset1 = df1.loc[(set(df1.index) & set(df.asset)), ptype].sort_index(ascending=True)
+
+
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
         else:
 
@@ -581,7 +673,9 @@ def get_linear_model_histogram(code, ptype='low', dtype='d', start=None, end=Non
             asset = df[ptype]
             asset = asset.dropna()
             dates = asset.index
-            asset1 = df1.loc[df.index, ptype]
+            # asset1 = df1.loc[df.index, ptype]
+            asset1 = df1.loc[(set(df1.index) & set(df.index)), ptype].sort_index(ascending=True)
+
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
     # print len(df),len(asset),len(df1),len(asset1)
 
@@ -590,6 +684,7 @@ def get_linear_model_histogram(code, ptype='low', dtype='d', start=None, end=Non
         asset = asset[:-1]
         dates = asset.index
         asset1 = asset1[:-1]
+
         asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
 
     # 画出价格随时间变化的图像
@@ -608,12 +703,15 @@ def get_linear_model_histogram(code, ptype='low', dtype='d', start=None, end=Non
     # asset=asset.apply(lambda x:round( x/asset[:1],2))
     ax1.plot(asset)
     # ax1.plot(asset1,'-r', linewidth=2)
-    ticks = ax1.get_xticks()
+    # ticks = ax1.get_xticks()
+    xlabels = ax1.get_xticks()
+    # label_format = '{:,.1f}'
+    ax1.xaxis.set_major_locator(mticker.FixedLocator(xlabels)) #定位散点值
     # start, end = ax1.get_xlim()
     # print start, end, len(asset)
     # print ticks, ticks[:-1]
     # (ticks[:-1] if len(asset) > end else np.append(ticks[:-1], len(asset) - 1))
-    ax1.set_xticklabels([dates[int(i)] for i in (np.append(ticks[:-1], len(asset) - 1))],
+    ax1.set_xticklabels([dates[int(i)] for i in (np.append(xlabels[:-1], len(asset) - 1))],
                         rotation=15)  # Label x-axis with dates
     # 拟合
     X = np.arange(len(asset))
@@ -661,8 +759,11 @@ def get_linear_model_histogram(code, ptype='low', dtype='d', start=None, end=Non
     if len(asset) > len(df1):
         ax3.plot(asset)
         plt.plot(distance)
-        ticks = ax3.get_xticks()
-        ax3.set_xticklabels([dates[int(i)] for i in (np.append(ticks[:-1], len(asset) - 1))], rotation=15)
+        # ticks = ax3.get_xticks()
+        xlabels = ax3.get_xticks()
+        # label_format = '{:,.1f}'
+        ax3.xaxis.set_major_locator(mticker.FixedLocator(xlabels)) #定位散点值
+        ax3.set_xticklabels([dates[int(i)] for i in (np.append(xlabels[:-1], len(asset) - 1))], rotation=15)
         n = 5
         d = (-c_high + c_low) / n
         c = c_high
@@ -675,6 +776,7 @@ def get_linear_model_histogram(code, ptype='low', dtype='d', start=None, end=Non
         plt.ylabel('Price-center price', fontsize=14)
         plt.grid(True)
     else:
+
         as3 = asset.apply(lambda x: round(x / asset[:1], 2))
         ax3.plot(as3)
         ax3.plot(asset1, '-r', linewidth=2)
@@ -807,6 +909,7 @@ def Candlestick(ax, bars=None, quotes=None, width=0.5, colorup='k', colordown='r
 
     # set the ticks of the x axis only when starting a new day
     # (Also write the code to set a tick for every whole hour)
+
     div_n = len(ax.get_xticks())
     allc = len(bars.index)
     # lastd = bars.index[-1]
@@ -814,7 +917,9 @@ def Candlestick(ax, bars=None, quotes=None, width=0.5, colorup='k', colordown='r
         div_n = allc / 12
     ax.set_xticks(list(range(0, len(bars.index), div_n)))
     new_xticks = [bars.index[d] for d in ax.get_xticks()]
+    print(new_xticks)
     ax.set_xticklabels(new_xticks, rotation=30, horizontalalignment='right')
+
     # fig.autofmt_xdate()
     # ax.autoscale_view()
     #plot volume
@@ -890,7 +995,7 @@ if __name__ == "__main__":
     # # matplotlib.use('WXAgg')
     # #     plt.interactive(True)
     # matplotlib.use('QT5Agg') 
-    status=get_linear_model_histogramDouble('601198')
+    status=get_linear_model_histogramDouble('601198',dl='60')
     # plt.show()
     # print status
     # get_tdx_and_now_data('002399')
@@ -906,7 +1011,7 @@ if __name__ == "__main__":
     num_input = ''
     parser = parseArgmain()
     if len(sys.argv) == 2:
-        num_input = sys.argv[1]
+        num_input = str(sys.argv[1])
         args = parser.parse_args(num_input.split())
     elif len(sys.argv) > 2:
         num_input = sys.argv[1]
@@ -916,7 +1021,7 @@ if __name__ == "__main__":
     while 1:
         try:
             if not len(num_input) == 6:
-                num_input = input("please input code:")
+                num_input = str(input("please input code:"))
                 if len(num_input) > 0:
                     args = parser.parse_args(num_input.split())
                     num_input = args.code
@@ -935,7 +1040,7 @@ if __name__ == "__main__":
                     get_linear_model_histogramDouble(code, args.ptype, args.dtype, start, end, args.vtype, args.filter)
                     # candlestick_powercompute(code,start, end)
                     op, ra, st, days = pct.get_linear_model_status(code, start=start, end=end, filter=args.filter)
-                    print("code:%s op:%s ra:%s  start:%s" % (code, op, ra, st))
+                    print(("code:%s op:%s ra:%s  start:%s" % (code, op, ra, st)))
                     # p=multiprocessing.Process(target=get_linear_model_histogramDouble,args=(code, args.ptype, args.dtype, start, end,args.vtype,args.filter,))
                     # p.daemon = True
                     # p.start()
@@ -952,19 +1057,19 @@ if __name__ == "__main__":
                     # get_linear_model_histogramDouble(code, args.ptype, args.dtype, start, end, args.vtype)
                     # candlestick_powercompute(code,start, end)
                     op, ra, st, days = pct.get_linear_model_status(code, start=start, end=end, filter=args.filter)
-                    print("code:%s op:%s ra:%s  start:%s" % (code, op, ra, st))
+                    print(("code:%s op:%s ra:%s  start:%s" % (code, op, ra, st)))
                     # get_linear_model_status(code, dtype=args.dtype, start=start, end=end, filter=args.filter,dl=args.dl)
                 sys.exit(0)
 
         except (KeyboardInterrupt) as e:
-            print("KeyboardInterrupt:", e)
+            print(("KeyboardInterrupt:", e))
             st = cct.cct_raw_input("status:[go(g),clear(c),quit(q,e)]:")
             if st == 'q' or st == 'e':
                 sys.exit(0)
             else:
                 num_input = ''
         except (IOError, EOFError, Exception) as e:
-            print("Exception:", e)
+            print(("Exception:", e))
             import traceback
 
             traceback.print_exc()

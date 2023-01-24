@@ -18,7 +18,6 @@ from JohnsonUtil import johnson_cons as ct
 import singleAnalyseUtil as sl
 from JSONData import powerCompute as pct
 from JSONData import stockFilter as stf
-
 from JSONData import tdx_data_Day as tdd
 from JSONData import LineHistogram as lhg
 from JohnsonUtil import LoggerFactory as LoggerFactory
@@ -86,6 +85,7 @@ if __name__ == "__main__":
     type = ct.json_countType
     # cut_num=10000
     success = 0
+    st_key_sort = '4'
     top_all = pd.DataFrame()
     time_s = time.time()
     # delay_time = 7200

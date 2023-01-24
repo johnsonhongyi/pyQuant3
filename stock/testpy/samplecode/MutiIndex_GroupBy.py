@@ -11,6 +11,7 @@ import datetime as DT
 import datetime
 
 # https://stackoverflow.com/questions/15799162/resampling-within-a-pandas-multiindex
+# https://stackoverflow.com/questions/23966152/how-to-create-a-group-id-based-on-5-minutes-interval-in-pandas-timeseries
 
 def day8_to_day10(start,sep='-'):
     if start:
@@ -27,7 +28,7 @@ def get_today(sep='-'):
     return today
 
 
-multiIndex_func={'close': 'min', 'low': 'min', 'volume': 'sum'}
+multiIndex_func={'close': 'min', 'low': 'last', 'volume': 'sum'}
 def using_Grouper_eval(df, freq='5T', col='low', closed='right', label='right'):
     func ={}
     if isinstance(col, list):
@@ -37,7 +38,7 @@ def using_Grouper_eval(df, freq='5T', col='low', closed='right', label='right'):
     else:
         if col in list(multiIndex_func.keys()):
             func[col] = multiIndex_func[col]
-    print(col,func)
+    print((col,func))
     level_values = df.index.get_level_values
     return eval("(df.groupby([level_values(i) for i in [0]]+[pd.Grouper(freq=freq, level=-1,closed='%s',label='%s')]).agg(%s))" % (closed, label, func))
     # return (df.groupby([level_values(i) for i in [0]] +[pd.Grouper(freq=freq, level=-1)]).agg({'low':'min','close':'mean','volume':'sum'}))
@@ -55,7 +56,7 @@ def using_Grouper(df, freq='5T', col='low', closed='right', label='right'):
     else:
         if col in list(multiIndex_func.keys()):
             func[col] = multiIndex_func[col]
-    print(col,func)
+    print((col,func))
     level_values = df.index.get_level_values
     return (df.groupby([level_values(i) for i in [0]] + [pd.Grouper(freq=freq, level=-1, closed=closed, label=label)]).agg(func))
     # +[pd.Grouper(freq=freq, level=-1)])['low','close','volume'].agg(['min','mean','sum']))
@@ -179,13 +180,14 @@ def maxdrawdown(arr):
 
 import time
 tpp = '/Volumes/RamDisk/sina_MultiIndex_data.h5'
+tpp = 'G:\\sina_MultiIndex_data.h5'
 # tpp = '/Users/Johnson/Desktop/sina_MultiIndex_data-0717.h5'
 time_s = time.time()
 spp = pd.HDFStore(tpp)
 df = spp.all_10.copy()
 spp.close()
 # print (df).loc['600999'][:10]
-print("t0:%0.3f" % (time.time() - time_s))
+print(("t0:%0.3f" % (time.time() - time_s)))
 # starttime = '2017-07-01 09:25:00'
 # endtime = '2017-07-17 09:45:00'
 # df = select_multiIndex_index(df, index='ticktime', end=endtime)
@@ -193,25 +195,33 @@ time_s = time.time()
 # top_temp[:1][['high','nhigh','low','nlow','close','nclose','llastp']]
 
 # df = select_multiIndex_index(df, index='ticktime', start='2017-07-01 09:25:00',end='2017-07-17 09:45:00')
-df = select_multiIndex_index(df, index='ticktime', start=None,end=None)
-dd = using_Grouper(df, freq='5T')
-print("select1 count:%s :%0.3f" % (len(dd),time.time() - time_s))
+df = select_multiIndex_index(df, index='ticktime', start=None,end='11:30:00')
+
+dm = df.loc['000002'].groupby(pd.TimeGrouper('5Min'))['low'].last()
+print((df.iloc[:, 0:1].shape))
+print((dm[:10]))
+import ipdb;ipdb.set_trace()
+
+dd = using_Grouper(df, freq='30T',col='low')
+print(("select1 count:%s :%0.3f" % (len(dd),time.time() - time_s)))
 # print select_multiIndex_index(dd, start=endtime)[:2]
-print("sel:",df.loc['000002'][:2])
-print("5t",dd.loc['000002'][:5])
-print(df.loc['000001'][:2])
+print(("df sel:",df.loc['000002'][:5]))
+print(("dd 5t",dd.loc['000002'][:5]))
+print((dd.loc['000002'][-20:]))
+import ipdb;ipdb.set_trace()
+
 time_s = time.time()
 dz = df.groupby(level=[0]).min()
-print("5t_t2:1count:%s :%0.2f" % (len(dz),time.time() - time_s))
-print(".loc:",dz.loc['000001'])
+print(("5t_t2:1count:%s :%0.2f" % (len(dz),time.time() - time_s)))
+print((".loc:",dz.loc['000001']))
 time_s = time.time()
-df = using_Grouper_eval(df, freq='5T', col=['low','close'])
-print("5t_t2 count:%s :%0.2f" % (len(df),time.time() - time_s))
-print(df.loc['000001'][:2])
+dd = using_Grouper_eval(df, freq='30T', col=['low','close'])
+print(("30t_t2 count:%s :%0.2f" % (len(df),time.time() - time_s)))
+print((dd.loc['000001'][:10]))
 time_s = time.time()
 dd =  df.groupby(level=[0]).apply(lambda x: x[-1:])
-print("last_t3 count:%s :%0.2f" % (len(dd),time.time() - time_s))
-print(dd[:4])
+print(("last_t3 count:%s :%0.2f" % (len(dd),time.time() - time_s)))
+print((dd[:4]))
 
 
 def using_reset_index(df):

@@ -93,7 +93,7 @@ def kmeans(dataSet, k):
 
         # step 4: 更新样本中心
         print("clusterAssment before:")
-        print(clusterAssment[:2])
+        print((clusterAssment[:2]))
         for j in range(1, k + 1):
             # 骚操作
             pointsInCluster = dataSet[nonzero(clusterAssment[:, 0].A == j)[0]]
@@ -148,9 +148,9 @@ centroids, clusterAssment = kmeans(dataSet, k)
 print("center:")
 print(centroids)
 print("clusterAssment:")
-print(clusterAssment[:2])
+print((clusterAssment[:2]))
 print("cost:")
-print(getcost(clusterAssment))
+print((getcost(clusterAssment)))
 
 # step 3: 显示结果
 print("step 3: show the result...")

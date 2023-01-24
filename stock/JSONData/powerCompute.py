@@ -164,8 +164,8 @@ def Candlestick(ax, bars=None, quotes=None, width=0.5, colorup='k', colordown='r
 
         return lines, boxes
 
-    date = date2num(bars.index.to_datetime().to_pydatetime())
-    # date = date2num(pd.to_datetime(bars.index).to_pydatetime())
+    # date = date2num(bars.index.to_datetime().to_pydatetime())
+    date = date2num(pd.to_datetime(bars.index).to_pydatetime())
     openp = bars['open']
     closep = bars['close']
     highp = bars['high']
@@ -226,10 +226,11 @@ def Candlestick(ax, bars=None, quotes=None, width=0.5, colorup='k', colordown='r
     allc = len(bars.index)
     # lastd = bars.index[-1]
     if div_n > 0 and allc / div_n > 12:
-        div_n = allc / 12
+        div_n = int(allc / 12)
     ax.set_xticks(list(range(0, len(bars.index), div_n)))
     new_xticks = [bars.index[d] for d in ax.get_xticks()]
     ax.set_xticklabels(new_xticks, rotation=30, horizontalalignment='right')
+    
     # ax.set_xticklabels(new_xticks, rotation=30, horizontalalignment='right')
 
     # fig.autofmt_xdate()
@@ -292,12 +293,12 @@ def twoLineCompute(code, df=None, start=None, end=None, ptype='low'):
         log.info("period:%s" % period_type)
         df.index = pd.to_datetime(df.index)
         if ptype == 'high':
-            dfw = df[ptype].resample(period_type, how='max')
+            dfw = df[ptype].resample(period_type).max()
             # price=dfw.min()
             # idx = dfw[dfw == price].index.values[0]
             ##dd = dfw[dfw.index >= idx]
         else:
-            dfw = df[ptype].resample(period_type, how='min')
+            dfw = df[ptype].resample(period_type).min()
             # price=dfw.max()
             # idx = dfw[dfw == price].index.values[0]
             ##dd = dfw[dfw.index >= idx]
@@ -317,9 +318,9 @@ def twoLineCompute(code, df=None, start=None, end=None, ptype='low'):
         for x in nrange:
             # for x in np.arange(1, all, step):
             if ptype == 'high':
-                mlist = pd.rolling_max(dd, window=int(all / x)).unique()
+                mlist = pd.Series.rolling(dd, window=int(all / x)).max().unique()
             else:
-                mlist = pd.rolling_min(dd, window=int(all / x)).unique()
+                mlist = pd.Series.rolling(dd, window=int(all / x)).min().unique()
             if len(mlist) > 2:
                 if str(mlist[0]).strip() == ('nan'):
                     # if str(mlist[0]).find('nan') >0 :print "N"
@@ -810,7 +811,7 @@ def get_linear_model_candles(code, ptype='low', dtype='d', start=None, end=None,
     # pass
     # eval("df.%s"%ptype).ewm(span=20).mean().plot(style='k')
     eval("df.%s" % 'close').plot(style='k')
-    roll_mean = pd.rolling_mean(df.high, window=10)
+    roll_mean = pd.Series.rolling(df.high, window=10).mean()
     plt.plot(roll_mean, 'b')
     # print roll_mean[-1]
     # plt.legend(["MA:10"+str(roll_mean[-1]], fontsize=12,loc=2)
@@ -926,7 +927,7 @@ def get_linear_model_candles(code, ptype='low', dtype='d', start=None, end=None,
     yl = ax.get_ylim()
     ax2 = plt.subplot2grid((10, 1), (8, 0), rowspan=2, colspan=1,sharex=ax)
     # ax2.set_position(mat.transforms.Bbox([[0.125,0.1],[0.9,0.32]]))
-    volume = np.asarray(df.amount)
+    volume = np.asarray(df.vol)
     pos = df['open']-df['close']<0
     neg = df['open']-df['close']>=0
     if 'date' in df.columns:
@@ -1087,7 +1088,7 @@ def powerCompute_mp2(code,df=None,dm=None,dtype='d',statuslist=True,index=False,
 
     else:
         dd['op'] = 1
-        dd['ra'] = 1
+        # dd['ra'] = 1
         dd['fib'] = 1
         dd['fibl'] = 1
         dd['ldate'] = 1
@@ -1142,7 +1143,7 @@ def powerCompute_mp2(code,df=None,dm=None,dtype='d',statuslist=True,index=False,
             df.loc[code, 'ma10d'] = round(
                 float(tdx_df[:1].ma10d[0]), 2)
     dd['op'] = opl
-    dd['ra'] = ral
+    # dd['ra'] = ral
     dd['oph'] = oph
     dd['rah'] = rah
     dd['fib'] = fib
@@ -1236,7 +1237,7 @@ def powerCompute_mp(code,df=None,dm=None,dtype='d',statuslist=True,index=False,e
         # fib = 0
 
         dd['op'] = int(len(LIS(tdx_df.close)[1])/float(len(tdx_df.close))*10)
-        dd['ra'] = (vratio)
+        # dd['ra'] = (vratio)
         dd['fib'] = fibl
         dd['fibl'] = fibh
         dd['ldate'] = idx
@@ -1293,7 +1294,7 @@ def powerCompute_mp(code,df=None,dm=None,dtype='d',statuslist=True,index=False,e
 
     else:
         dd['op'] = -1
-        dd['ra'] = -1
+        # dd['ra'] = -1
         dd['fib'] = -1
         dd['fibl'] = -1
         dd['ldate'] = -1
@@ -1558,7 +1559,7 @@ def powerCompute_df(df, dtype='d', end=None, dl=ct.PowerCountdl, filter='y', tal
 
 
 def computeRolling_min(series):
-    pd.rolling_min(df.low, window=len(series) / 8).unique()
+    pd.Series.rolling(df.low, window=len(series) / 8).min().unique()
 
 
 def parseArgmain():

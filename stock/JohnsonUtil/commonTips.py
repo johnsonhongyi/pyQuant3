@@ -9,7 +9,7 @@ import sys
 sys.path.append("..")
 import time
 import random
-# from compiler.ast import flatten
+# from :.ast import flatten
 from multiprocessing.pool import ThreadPool
 from multiprocessing import cpu_count
 
@@ -17,6 +17,7 @@ import pandas as pd
 # import trollius as asyncio
 # from trollius.coroutines import From
 import asyncio
+
 
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil.prettytable import PrettyTable
@@ -30,7 +31,7 @@ from tqdm import tqdm
 # import win32MoveCom
 # log.setLevel(Log.DEBUG)
 # import numba as nb
-
+import numpy as np
 
 try:
     from urllib.request import urlopen, Request
@@ -114,7 +115,6 @@ def getcwd():
 
 
 def get_run_path_tdx(fp=None):
-    #path='c:\\users\\johnson\\anaconda2\\envs\\pytorch_gpu\\lib\\site-packages'
     # path ='c:\\users\\johnson\\anaconda2\\envs\\pytorch_gpu\\lib\\site-packages'
     root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant\\stock\\'
     path = getcwd()
@@ -125,11 +125,11 @@ def get_run_path_tdx(fp=None):
         # os_sep=get_os_path_sep()
         if fp is not None:
             path = path + fp + '.h5'
-        log.info("info:%s getcwd:%s"%(alist[0],path))
+        log.debug("info:%s getcwd:%s"%(alist[0],path))
     else:
         path  = root_path.split('stock')[0] + fp + '.h5'
-        log.error("error:%s cwd:%s"%(alist[0],path))
-
+        log.debug("error:%s cwd:%s"%(alist[0],path))
+    
     return path
 
 win10Lengend = r'D:\Program\gfzq'
@@ -212,16 +212,16 @@ def get_os_system():
         return 'other'
 
 # if get_os_system().find('win') >= 0:
-#     import win_unicode_console
+    # import win_unicode_console
 #     # https://github.com/Drekin/win-unicode-console
 #     win_unicode_console.enable(use_readline_hook=False)
 
-# def set_default_encode(code='utf-8'):
-#         import sys
-#         importlib.reload(sys)
-#         sys.setdefaultencoding(code)
-#         print((sys.getdefaultencoding()))
-#         print((sys.stdin.encoding,sys.stdout.encoding))
+def set_default_encode(code='utf-8'):
+        import sys
+        importlib.reload(sys)
+        sys.setdefaultencoding(code)
+        print((sys.getdefaultencoding()))
+        print((sys.stdin.encoding,sys.stdout.encoding))
         
 
 
@@ -295,43 +295,136 @@ end tell
 '''
 
 
+
 terminal_positionKey4K = {'sina_Market-DurationDn.py': '6, 633',
                         'sina_Market-DurationCXDN.py': '118, 504',
                         'sina_Market-DurationSH.py': '-29, 623',
-                        'sina_Market-DurationUP.py': '54, 560',
+                        'sina_Market-DurationUp.py': '54, 560',
                         'sina_Monitor-Market-LH.py': '666, 338',
                         'sina_Monitor-Market.py': '19, 179',
                         'sina_Monitor.py': '168, 421',
                         'singleAnalyseUtil.py': '1084, 765',
-                        'LinePower.py': '6, 216', }
+                        'LinePower.py': '6, 216', 
+                        'sina_Market-DurationDnUP.py': '6, 434,1400,440',}
 
+
+terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440',
+                        'sina_Market-DurationCXDN.py': '45, 248,1400,440',
+                        'sina_Market-DurationSH.py': '-29, 623,1400,440',
+                        'sina_Market-DurationUp.py': '340, 419,1400,440',
+                        'sina_Monitor-Market-LH.py': '567, 286,1400,420',
+                        'sina_Monitor-Market.py': '140, 63,1400,440',
+                        'sina_Monitor.py': '139, 34,1400,440',
+                        'singleAnalyseUtil.py': '759, 0,880,360',
+                        'LinePower.py': '6, 216,800,420',
+                        'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,}
+
+
+
+terminal_positionKey2K_R9000P = {'sina_Market-DurationDn.py': '-13, 601,1400,440',
+                        'sina_Market-DurationCXDN.py': '31, 301,1400,440',
+                        'sina_Market-DurationSH.py': '-29, 623,1400,440',
+                        'sina_Market-DurationUp.py': '92, 142,1400,440',
+                        'sina_Monitor-Market-LH.py': '666, 338,1400,420',
+                        'sina_Monitor-Market.py': '271, 39,1400,440',
+                        'sina_Monitor.py': '170, 7,1400,440',
+                        'singleAnalyseUtil.py': '833, 666,880,360',
+                        'LinePower.py': '6, 216,800,420', 
+                        'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,}
+
+
+''' R9000P 2.5K
+title:sina_Market-DurationDn.py
+target rect1:(6, 434, 1406, 874) rect2:(6, 434, 1406, 874)
+target rect1:(-13, 601, 1387, 1041) rect2:(-13, 601, 1387, 1041)
+title:sina_Monitor-Market-LH.py
+target rect1:(666, 338, 2067, 758) rect2:(666, 338, 2067, 758)
+title:sina_Monitor-Market.py
+title:LinePower.py
+title:sina_Monitor.py
+target rect1:(271, 39, 1671, 479) rect2:(271, 39, 1671, 479)
+title:singleAnalyseUtil.py
+target rect1:(833, 666, 1713, 1026) rect2:(833, 666, 1713, 1026)
+title:sina_Market-DurationCXDN.py
+target rect1:(31, 301 1445, 688) rect2:(45, 248, 1445, 688)
+title:sina_Market-DurationUp.py
+target rect1:(92, 142, 1492, 582) rect2:(92, 142, 1492, 582)
+'''
+
+
+
+# title:sina_Market-DurationDn.py
+# target rect1:(-4, 718, 1396, 1178) rect2:(-4, 718, 1396, 1178)
+# title:sina_Monitor-Market-LH.py
+# target rect1:(-25600, -25600, -25441, -25573) rect2:(-25600, -25600, -25441, -25573)
+# title:sina_Monitor-Market.py
+# title:LinePower.py
+# title:sina_Monitor.py
+# target rect1:(140, 63, 1540, 523) rect2:(140, 63, 1540, 523)
+# title:singleAnalyseUtil.py
+# target rect1:(554, 406, 1563, 799) rect2:(554, 406, 1563, 799)
+# title:sina_Market-DurationCXDN.py
+# target rect1:(40, 253, 1440, 713) rect2:(40, 253, 1440, 713)
+# title:sina_Market-DurationUp.py
+# target rect1:(91, 149, 1491, 609) rect2:(91, 149, 1491, 609)
 
 terminal_positionKey = {'sina_Market-DurationDn.py': '8, 801',
                         'sina_Market-DurationCXDN.py': '79, 734',
                         'sina_Market-DurationSH.py': '-29, 623',
-                        'sina_Market-DurationUP.py': '451, 703',
+                        'sina_Market-DurationUp.py': '451, 703',
                         'sina_Monitor-Market-LH.py': '666, 338',
                         'sina_Monitor-Market.py': '19, 179',
                         'sina_Monitor.py': '205, 659',
                         'singleAnalyseUtil.py': '328, 594',
-                        'LinePower.py': '6, 216', }
+                        'LinePower.py': '6, 216', 
+                        'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,}
 
 terminal_positionKey_all = {'sina_Market-DurationDn.py': '654, 680',
                         'sina_Market-DurationCXDN.py': '-16, 54',
                         'sina_Market-DurationSH.py': '-29, 623',
-                        'sina_Market-DurationUP.py': '-22, 89',
+                        'sina_Market-DurationUp.py': '-22, 89',
                         'sina_Monitor-Market-LH.py': '666, 338',
                         'sina_Monitor-Market.py': '19, 179',
                         'sina_Monitor.py': '28, 23',
                         'singleAnalyseUtil.py': '1095, 23',
+                        'LinePower.py': '6, 216',
+                        'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,}
+
+
+terminal_positionKeyMac2021_OLD = {'sina_Market-DurationDn.py': '186, 506',
+                        'sina_Market-DurationCXDN.py': '39, 126',
+                        'sina_Market-DurationSH.py': '-29, 623',
+                        'sina_Market-DurationUp.py': '0, 394',
+                        'sina_Monitor-Market-LH.py': '184, 239',
+                        'sina_Monitor-Market.py': '19, 179',
+                        'sina_Monitor.py': '116, 58',
+                        'singleAnalyseUtil.py': '594, 23',
                         'LinePower.py': '6, 216', }
 
+terminal_positionKeyMac2021 = {'sina_Market-DurationDn.py': '541, 530',
+                        'sina_Market-DurationCXDN.py': '0, 194',
+                        'sina_Market-DurationSH.py': '-29, 623',
+                        'sina_Market-DurationUp.py': '-13, 406',
+                        'sina_Monitor-Market-LH.py': '184, 239',
+                        'sina_Monitor-Market.py': '19, 179',
+                        'sina_Monitor.py': '27, 78',
+                        'singleAnalyseUtil.py': '630, 23',
+                        'LinePower.py': '6, 216', }
 
+"""
+('sina_Market-DurationDn.py', '541, 530\n')
+('sina_Monitor.py', '213, 46\n')
+('singleAnalyseUtil.py', '630, 23\n')
+('sina_Market-DurationCXDN.py', '-30, 85\n')
+('sina_Market-DurationUp.py', '-21, 418\n')
+('sina_Market-DurationUp.py', '-21, 418\n')
+
+"""
 
 terminal_positionKeyMac = {'sina_Market-DurationDn.py': '216, 490',
                         'sina_Market-DurationCXDN.py': '-16, 54',
                         'sina_Market-DurationSH.py': '-29, 623',
-                        'sina_Market-DurationUP.py': '-22, 89',
+                        'sina_Market-DurationUp.py': '-22, 89',
                         'sina_Monitor-Market-LH.py': '184, 239',
                         'sina_Monitor-Market.py': '19, 179',
                         'sina_Monitor.py': '28, 23',
@@ -341,24 +434,49 @@ terminal_positionKeyMac = {'sina_Market-DurationDn.py': '216, 490',
 terminal_positionKey_VM = {'sina_Market-DurationDn.py': '342, 397',
                         'sina_Market-DurationCXDN.py': '84, 222',
                         'sina_Market-DurationSH.py': '-29, 623',
-                        'sina_Market-DurationUP.py': '-12, 383',
+                        'sina_Market-DurationUp.py': '-12, 383',
                         'sina_Monitor-Market-LH.py': '666, 338',
                         'sina_Monitor-Market.py': '19, 179',
                         'sina_Monitor.py': '8, 30',
                         'singleAnalyseUtil.py': '615, 23',
                         'LinePower.py': '6, 216', }
 
-terminal_positionKey_triton = {'sina_Market-DurationDn.py': '-4, 718,1400,460',
+terminal_positionKey_triton = {'sina_Market-DurationDn.py': '47, 410, 1400, 460',
                         'sina_Market-DurationCXDN.py': '23, 634,1400,460',
                         'sina_Market-DurationSH.py': '-29, 623,1400,460',
-                        'sina_Market-DurationUP.py': '54, 574,1400,460',
+                        'sina_Market-DurationUp.py': '330, 464,1400,460',
                         'sina_Monitor-Market-LH.py': '603, 501, 1400, 420',
                         'sina_Monitor-Market.py': '19, 179,1400,460',
                         'sina_Monitor.py': '87, 489,1400,460',
                         'singleAnalyseUtil.py': '1074, 694,880,360',
                         'LinePower.py': '1031, 682,800,420', }
 
-terminal_positionKey = terminal_positionKey_VM
+
+
+
+def get_system_postionKey():
+    basedir = get_now_basedir()
+    import socket
+    hostname = socket.gethostname() 
+
+    if basedir.find('vm') >= 0:
+        positionKey = terminal_positionKey_VM
+    elif get_os_system() == 'mac':
+        positionKey = terminal_positionKeyMac2021
+        # positionKey = cct.terminal_positionKeyMac
+    else:
+        positionKey = terminal_positionKey4K
+        # positionKey = cct.terminal_positionKey1K_triton
+    if not isMac():
+        if hostname.find('R900') >=0:
+            positionKey = terminal_positionKey2K_R9000P
+        else:
+            positionKey = terminal_positionKey1K_triton
+    return positionKey
+
+
+    
+# terminal_positionKey = terminal_positionKey_VM
 
 script_set_position = '''tell application "Terminal"
     --activate
@@ -443,14 +561,15 @@ def get_terminal_Position(cmd=None, position=None, close=False, retry=False):
             # sleep(1, catch=True)
             position = position.split(os.sep)[-1]
             log.info("position Argv:%s" % (position))
+            positionKey = get_system_postionKey()
             if int(count) > 0:
-                if position in list(terminal_positionKey.keys()):
+                if position in list(positionKey.keys()):
                     log.info("count:%s" % (count))
                     for n in range(1, int(count) + 1):
                         title = cct_doScript(scriptname % ('get', str(object=n)))
                         if title.lower().find(position.lower()) >= 0:
-                            log.info("title find:%s po:%s" % (title, terminal_positionKey[position]))
-                            position = cct_doScript(script_set_position % ('set', str(n), terminal_positionKey[position]))
+                            log.info("title find:%s po:%s" % (title, positionKey[position]))
+                            position = cct_doScript(script_set_position % ('set', str(n), positionKey[position]))
                             break
                         else:
                             log.info("title not find:%s po:%s" % (title, position))
@@ -592,6 +711,7 @@ def isMac():
     if get_sys_system().find('Darwin') == 0:
         return True
     else:
+        #python2
         # import codecs
         # sys.stdout = codecs.getwriter('utf-8')(sys.stdout)
         return False
@@ -822,13 +942,19 @@ def set_console(width=80, height=15, color=3, title=None, closeTerminal=True):
         else:
             
             title= (os.path.basename(sys.argv[0]))
-            positionKey=capital_to_lower(terminal_positionKey_triton)
+            positionKey=capital_to_lower(get_system_postionKey())
+            # positionKey=capital_to_lower(terminal_positionKey1K_triton)
             if title.lower() in list(positionKey.keys()):
                 # log.error("title.lower() in positionKey.keys()")
-                pos=terminal_positionKey_triton[title].split(',')
+                if title.lower() in list(positionKey.keys()):
+                    pos=positionKey[title.lower()].split(',')
+                else:
+                    pos= '254, 674,1400,420'.split(',')
+                    log.error("pos is none")
                 log.info("pos:%s title:%s Position:%s"%(pos,title,GlobalValues().getkey('Position')))
-                # cct.get_window_pos('sina_Market-DurationUP.py')
+                # cct.get_window_pos('sina_Market-DurationUp.py')
                 # cct.reset_window_pos(key,pos[0],pos[1],pos[2],pos[3])
+
                 status=reset_window_pos(title,pos[0],pos[1],pos[2],pos[3])
                 log.debug("reset_window_pos-status:%s"%(status))
             else:
@@ -860,39 +986,62 @@ def cct_raw_input(sts):
     st = ''
     try:
         # if get_os_system().find('win') >= 0:
-        #     win_unicode_console.disable()
+            # win_unicode_console.disable()
         # https://stackoverflow.com/questions/11068581/python-raw-input-odd-behavior-with-accents-containing-strings
         # st = win_unicode_console.raw_input.raw_input(sts)
         st = input(sts)
-    except (KeyboardInterrupt) as e:
-        inputerr = cct_raw_input(" Break: ")
-        if inputerr == 'e' or inputerr == 'q':
-            sys.exit(0)
-        # raise Exception('raw interrupt')
-        if inputerr is not None and len(inputerr) > 0:
-            return inputerr
+        # issubclass(KeyboardInterrupt, BaseException)
+    except (KeyboardInterrupt, BaseException) as e:
+        # inputerr = cct_raw_input(" Break: ")
+        # if inputerr == 'e' or inputerr == 'q':
+        #     sys.exit(0)
+        # # raise Exception('raw interrupt')
+        # if inputerr is not None and len(inputerr) > 0:
+        #     return inputerr
+        # else:
+        #     return ''
+        count_Except = GlobalValues().getkey('Except_count')
+        if count_Except is not None and count_Except < 3:
+            count_Except = count_Except + 1
+            GlobalValues().setkey('Except_count', count_Except)
+            sys.exit()
+            # print "cct_raw_input:ExceptionError:%s count:%s" % (e, count_Except)
+            # st = cct_raw_input(sts)
         else:
-            return ''
+            # print "cct_ExceptionError:%s count:%s" % (e, count_Except)
+            GlobalValues().setkey('Except_count', 0)
+            # if get_os_system().find('win') >= 0:
+            #     win_unicode_console.enable(use_readline_hook=False)
+            # raise KeyboardInterrupt()
+            sys.exit()
+
     except (IOError, EOFError, Exception) as e:
         count_Except = GlobalValues().getkey('Except_count')
         if count_Except is not None and count_Except < 3:
-            GlobalValues().setkey('Except_count', count_Except + 1)
-            print("cct_raw_input:ExceptionError:%s count:%s" % (e, count_Except))
+            count_Except = count_Except + 1
+            GlobalValues().setkey('Except_count', count_Except)
+            sys.exit()
+            # print "cct_raw_input:ExceptionError:%s count:%s" % (e, count_Except)
+            # st = cct_raw_input(sts)
         else:
             print("cct_ExceptionError:%s count:%s" % (e, count_Except))
             sys.exit()
     # if get_os_system().find('win') >= 0:
-    #     win_unicode_console.enable(use_readline_hook=False)
+        # win_unicode_console.enable(use_readline_hook=False)
     return st
 
 # eval_rule = "[elem for elem in dir() if not elem.startswith('_') and not elem.startswith('ti')]"
 # eval_rule = "[elem for elem in dir() if not elem.startswith('_')]"
 eval_rule = "[elem for elem in dir() if elem.startswith('top') or elem.startswith('block') or elem.startswith('du') ]"
 
-# import readline
-# import rlcompleter, readline
-# readline.set_completer(completer.complete)
-# readline.parse_and_bind('tab:complete')
+
+
+#MacOS arrow keys history auto complete
+if isMac():
+    import readline
+    import rlcompleter, readline
+    # readline.set_completer(completer.complete)
+    readline.parse_and_bind('tab:complete')
 
 
 class MyCompleter(object):  # Custom completer
@@ -1083,7 +1232,7 @@ def last_tddate(days=1):
         # if days==0:
         # return str(lasd)
     lastday = today
-    for x in range(days):
+    for x in range(int(days)):
         # print x
         lastday = get_work_day(today)
         today = lastday
@@ -1291,6 +1440,8 @@ def decode_bytes_type(data):
         except:
             data = data.decode('gbk')
     return data
+
+
     
 global ReqErrorCount
 ReqErrorCount = 1
@@ -1312,8 +1463,6 @@ def get_url_data_R(url, timeout=30,headers=None):
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0',
                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                    'Connection': 'keep-alive'}
-    # else:
-    #     headers = 
     # else:
 
     #     headers = dict({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0',
@@ -1362,9 +1511,7 @@ def get_url_data_R(url, timeout=30,headers=None):
             data = data.decode('utf8')
         except:
             data = data.decode('gbk')
-
     return data
-    # return data
 
 
 def get_url_data(url, retry_count=3, pause=0.05, timeout=30, headers=None):
@@ -1443,7 +1590,7 @@ def get_div_list(ls, n):
         # print "K:",k
         ls_return = []
         z = 0
-        for i in range(0, (n - 1) * j, j):
+        for i in range(0, (int(n) - 1) * j, j):
             if z < k:
                 # if i==0:
                 #     z+=1
@@ -1460,6 +1607,27 @@ def get_div_list(ls, n):
         ls_return.append(ls[(n - 1) * j + k:])
         return ls_return
 
+
+def to_asyncio_run_py2(urllist, cmd):
+    results = []
+
+    # print "asyncio",
+    @asyncio.coroutine
+    def get_loop_cmd(cmd, url_s):
+        loop = asyncio.get_event_loop()
+        result = yield From(loop.run_in_executor(None, cmd, url_s))
+        results.append(result)
+
+    threads = []
+    for url_s in urllist:
+        threads.append(get_loop_cmd(cmd, url_s))
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    loop.run_until_complete(asyncio.wait(threads))
+    return results
 
 def to_asyncio_run(urllist, cmd):
     results = []
@@ -1489,7 +1657,6 @@ def to_asyncio_run(urllist, cmd):
     loop.run_until_complete(asyncio.wait(threads))
     return results
 
-
 def to_mp_run(cmd, urllist):
     # n_t=time.time()
     print("mp:%s" % len(urllist), end=' ')
@@ -1503,18 +1670,6 @@ def to_mp_run(cmd, urllist):
     #     results=pool.apply_async(sl.get_multiday_ave_compare_silent_noreal,(code,60))
     # result=[]
     # results = pool.map(cmd, urllist)
-
-
-    # 这个东东是免费的哦：tqdm是一个用来生成进度条的优秀的库。这个协同程序就像asyncio.wait一样工作，不过会显示一个代表完成度的进度条。
-    # @asyncio.coroutine
-    # def wait_with_progress(coros):
-    #     for f in tqdm.tqdm(asyncio.as_completed(coros), total=len(coros)):
-    #     yield from f
-
-
-
-
-
     results = []
     for y in tqdm(pool.imap_unordered(cmd, urllist),unit='%',mininterval=ct.tqpm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
         results.append(y)
@@ -1541,13 +1696,14 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
             pool = ThreadPool(1)
             # pool = ThreadPool(2)
             func = partial(cmd, **kwargs)
+            # TDXE:44.26  cpu 1   
             # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
             # results = pool.map(func, urllist)
             try:
                 for y in tqdm(pool.imap(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
                     results.append(y)
             except Exception as e:
-                print(e)
+                log.error("except:%s"%(e))
         else:
             pool = ThreadPool(cpu_count())
             # log.error("to_mp_run args is not None")
@@ -1558,17 +1714,18 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     # result = pool.apply_async(cmd, (code,) + args).get()
                     results.append(pool.apply_async(cmd, (code,) + args).get())
                 except Exception as e:
-                    print(e, code)
+                    log.error("except:%s code:%s"%(e,code))
     else:
         if len(kwargs) > 0 :
             pool = ThreadPool(1)
             func = partial(cmd, **kwargs)
+            # TDXE:40.63  cpu 1    cpu_count() 107.14
             # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
             # results = pool.map(func, urllist)
             try:
                 results = pool.map(func, urllist)
             except Exception as e:
-                print(e)
+                log.error("except:%s"%(e))
         else:
             pool = ThreadPool(cpu_count())
             for code in urllist:
@@ -1576,7 +1733,7 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     # result = pool.apply_async(cmd, (code,) + args).get()
                     results.append(pool.apply_async(cmd, (code,) + args).get())
                 except Exception as e:
-                    print(e, code)
+                    log.error("except:%s code:%s"%(e,code))
 
 
 
@@ -1726,13 +1883,12 @@ def code_to_tdx_blk(code):
 
 def get_config_value(fname, classtype, currvalue, limitvalue=1, xtype='limit', read=False):
     conf_ini = fname
-    currvalue = int(currvalue)
+    currvalue = int(float(currvalue))
     # conf_ini = cct.get_work_path('stock','JSONData','count.ini')
     if os.path.exists(conf_ini):
         # log.info("file ok:%s"%conf_ini)
         config = ConfigObj(conf_ini, encoding='UTF8')
         if classtype in list(config.keys()):
-
             if int(float(config[classtype][xtype])) > currvalue:
                 ratio = float(config[classtype][xtype]) / limitvalue
                 if ratio < 1.2:
@@ -1871,23 +2027,185 @@ def get_index_fibl(default=1):
 
 from collections import Counter,OrderedDict
 def counterCategory(df):
+    topSort = []
     if len(df) > 0:
         categoryl = df.category[:20].tolist()
         dicSort = []
         for i in categoryl:
             if isinstance(i, str):
                 dicSort.extend(i.split(';'))
+                # dicSort.extend([ 'u%s'%(co) for co in i.split(';')])
+                
         topSort = Counter(dicSort)
         top5 = OrderedDict(topSort.most_common(3))
         for i in list(top5.keys()):
             print(i,top5[i], end=' ')
         print('')
+    return topSort
 
 def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None):
     if keep_last is None:
         keep_last = ct.keep_lastnum
     # index_list = ['1999999','47#IFL0',  '0159915', '27#HSI']
-    index_list = ['1999999','47#IFL0', '0399001', '0159915']
+    index_list = ['1999999', '0399001', '0159915']
+    # index_list = ['1999999','47#IFL0', '0399001', '0159915']
+    # index_list = ['1999999','47#IFL0', '27#HSI',  '0399006']
+    # index_list = ['1999999','0399001','47#IFL0', '27#HSI',  '0159915']
+    # index_list = ['0399001', '1999999', '0159915']
+    # index_list = ['1999999', '27#HSI',  '0159915']
+
+    def writeBlocknew(p_name, data, append=True,keep_last=keep_last):
+        flist=[]
+        if append:
+            fout = open(p_name, 'rb+')
+            # fout = open(p_name)
+            flist_t = fout.readlines()
+            # flist_t = file(p_name, mode='rb+', buffering=None)
+            # flist = []
+            # errstatus=False
+            for code in flist_t:
+                if len(code) <= 6 or len(code) > 12:
+                    continue
+                if not code.endswith('\r\n'):
+                    if len(code) <= 6:
+                        # errstatus = True
+                        continue
+                    else:
+                        # errstatus = True
+                        code = code + '\r\n'
+                flist.append(code)
+            for co in index_list:
+                inx = (co) + '\r\n'
+                if inx not in flist:
+                    flist.insert(index_list.index(co), inx)
+            # if errstatus:
+            # fout.close()
+            # fout = open(p_name, 'wb+')
+            # for code in flist:
+            #     fout.write(code)
+
+            # if not str(flist[-1]).endswith('\r\n'):
+                # print "File:%s end not %s"%(p_name[-7:],str(flist[-1]))
+            # print "flist", flist
+        else:
+            if int(keep_last) > 0:
+                fout = open(p_name, 'rb+')
+                flist_t = fout.readlines()
+            else:
+                flist_t = []
+            # flist_t = file(p_name, mode='rb+', buffering=None)
+            if len(flist_t) > 4:
+                # errstatus=False
+                for code in flist_t:
+                    if not code.endswith('\r\n'):
+                        if len(code) <= 6:
+                            # errstatus = True
+                            continue
+                        else:
+                            # errstatus = True
+                            code = code + '\r\n'
+                    flist.append(code)
+                # if errstatus:
+                if int(keep_last) > 0:
+                    fout.close()
+                # if p_name.find('066.blk') > 0:
+                #     writecount = ct.writeblockbakNum
+                # else:
+                #     writecount = 9
+
+                writecount = keep_last
+                flist = flist[:writecount]
+
+                for co in index_list:
+                    inx = (co) + '\r\n'
+                    if inx not in flist:
+                        flist.insert(index_list.index(co), inx)
+                # print flist
+                # fout = open(p_name, 'wb+')
+                # for code in flist:
+                #     fout.write(code)
+            else:
+                # fout = open(p_name, 'wb+')
+                # index_list.reverse()
+                for i in index_list:
+                    raw = (i) + '\r\n'
+                    flist.append(raw)
+
+        counts = 0
+        for i in data:
+            # print type(i)
+            # if append and len(flist) > 0:
+            #     raw = code_to_tdxblk(i).strip() + '\r\n'
+            #     if len(raw) > 8 and not raw in flist:
+            #         fout.write(raw)
+            # else:
+            raw = code_to_tdxblk(i) + '\r\n'
+            if len(raw) > 8:
+                if not raw in flist:
+                    counts += 1
+                    flist.append(raw)
+                else:
+                    flist.remove(raw)
+                    flist.append(raw)
+
+        fout = open(p_name, 'wb+')
+        for code in flist:
+            fout.write(code)
+                # raw = pack('IfffffII', t, i[2], i[3], i[4], i[5], i[6], i[7], i[8])
+        fout.flush()
+        fout.close()
+        # if p_name.find('066.blk') >= 0:
+        if counts == 0:
+            if len(data) == 0:
+                log.error("counts and data is None:%s"%(p_name))
+            else:
+                print(("counts:0 data:%s :%s"%(len(data),p_name)))
+        else:
+            print("all write to %s:%s" % (p_name, counts))
+
+    blockNew = get_tdx_dir_blocknew() + 'zxg.blk'
+    blockNewStart = get_tdx_dir_blocknew() + '077.blk'
+    # writeBlocknew(blockNew, data)
+    p_data = ['zxg', '069', '068', '067', '061']
+    if len(p_name) < 5:
+        if p_name in p_data:
+            p_name = get_tdx_dir_blocknew() + p_name + '.blk'
+            print("p_name:%s" % (p_name))
+        else:
+            print('p_name is not ok')
+            return None
+
+    if p_name.find('061.blk') > 0 or p_name.find('062.blk') > 0 or p_name.find('063.blk') > 0:
+        writeBlocknew(p_name, data, append)
+        if doubleFile:
+            writeBlocknew(blockNew, data)
+            writeBlocknew(blockNewStart, data, append)
+        # print "write to :%s:%s"%(p_name,len(data))
+    elif p_name.find('064.blk') > 0:
+        writeBlocknew(p_name, data, append)
+        if doubleFile:
+            writeBlocknew(blockNew, data, append,keep_last=12)
+            writeBlocknew(blockNewStart, data, append)
+        # print "write to append:%s :%s :%s"%(append,p_name,len(data))
+    elif p_name.find('068.blk') > 0 or p_name.find('069.blk') > 0:
+
+        writeBlocknew(p_name, data, append)
+        # print "write to append:%s :%s :%s"%(append,p_name,len(data))
+
+    else:
+        writeBlocknew(p_name, data, append)
+        if doubleFile:
+            writeBlocknew(blockNew, data)
+            # writeBlocknew(blockNewStart, data[:ct.writeCount - 1])
+            writeBlocknew(blockNewStart, data, append)
+        # print "write to append:%s :%s :%s"%(append,p_name,len(data))
+
+def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=None):
+    if keep_last is None:
+        keep_last = ct.keep_lastnum
+    # index_list = ['1999999','47#IFL0',  '0159915', '27#HSI']
+    index_list = ['1999999', '0399001', '0159915']
+    # index_list = ['1999999','47#IFL0', '0399001', '0159915']
     # index_list = ['1999999','47#IFL0', '27#HSI',  '0399006']
     # index_list = ['1999999','0399001','47#IFL0', '27#HSI',  '0159915']
     # index_list = ['0399001', '1999999', '0159915']
@@ -1902,7 +2220,6 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             flist = []
             # errstatus=False
             for code in flist_t:
-                code = decode_bytes_type(code)
                 if len(code) <= 6 or len(code) > 12:
                     continue
                 if not code.endswith('\r\n'):
@@ -1921,7 +2238,7 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             fout.close()
             fout = open(p_name, 'wb+')
             for code in flist:
-                fout.write(code.encode('utf8'))
+                fout.write(code)
 
             # if not str(flist[-1]).endswith('\r\n'):
                 # print "File:%s end not %s"%(p_name[-7:],str(flist[-1]))
@@ -1937,7 +2254,6 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             # flist_t = file(p_name, mode='rb+', buffering=None)
             if len(flist_t) > 4:
                 # errstatus=False
-                code = decode_bytes_type(code)
                 for code in flist_t:
                     if not code.endswith('\r\n'):
                         if len(code) <= 6:
@@ -1965,14 +2281,13 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
                 # print flist
                 fout = open(p_name, 'wb+')
                 for code in flist:
-                    fout.write(code.encode('utf8'))
+                    fout.write(code)
             else:
-                # fout.close()
                 fout = open(p_name, 'wb+')
                 # index_list.reverse()
                 for i in index_list:
                     raw = (i) + '\r\n'
-                    fout.write(raw.encode('utf8'))
+                    fout.write(raw)
 
         counts = 0
         for i in data:
@@ -1985,7 +2300,7 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             raw = code_to_tdxblk(i) + '\r\n'
             if len(raw) > 8 and not raw in flist:
                 counts += 1
-                fout.write(raw.encode('utf8'))
+                fout.write(raw)
                 # raw = pack('IfffffII', t, i[2], i[3], i[4], i[5], i[6], i[7], i[8])
         fout.flush()
         fout.close()
@@ -1999,7 +2314,7 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             print("all write to %s:%s" % (p_name, counts))
 
     blockNew = get_tdx_dir_blocknew() + 'zxg.blk'
-    blockNewStart = get_tdx_dir_blocknew() + '066.blk'
+    blockNewStart = get_tdx_dir_blocknew() + '077.blk'
     # writeBlocknew(blockNew, data)
     p_data = ['zxg', '069', '068', '067', '061']
     if len(p_name) < 5:
@@ -2049,9 +2364,8 @@ def read_to_blocknew(p_name):
                 code = code.decode()
             if len(code) <= 6 or len(code) > 12:
                 continue
-
             if code.endswith('\r\n'):
-                if len(code) <= 6:
+                if len(code) <= 6 or code in index_list:
                     # errstatus = True
                     continue
                 else:
@@ -2060,7 +2374,7 @@ def read_to_blocknew(p_name):
                         code = tdxblk_to_code(code)
             else:
                 continue
-            if len(code) == 6:
+            if len(code) == 6 and code not in index_list:
                 flist.append(code)
         fout.close()
         return flist
@@ -2135,6 +2449,7 @@ def varnamestr(obj, namespace=globals()):
             return n
     return None
 
+# multiIndex_func = {'close': 'mean', 'low': 'min', 'high': 'max', 'volume': 'sum', 'open': 'first'}
 multiIndex_func = {'close': 'mean', 'low': 'min', 'high': 'max', 'volume': 'sum', 'open': 'first'}
 
 
@@ -2290,6 +2605,7 @@ def get_limit_multiIndex_Row(df, col=None, index='ticktime', start=None, end='10
 def get_limit_multiIndex_freq(df, freq='5T', col='low', index='ticktime', start=None, end='10:00:00', code=None):
     # quotes = cct.get_limit_multiIndex_freq(h5, freq=resample.upper(), col='all', start=start, end=end, code=code)
     # isinstance(spp.all_10.index[:1], pd.core.index.MultiIndex)
+
     if df is not None:
         dd = select_multiIndex_index(df, index=index, start=start, end=end, code=code)
         if code is not None:
@@ -2298,16 +2614,18 @@ def get_limit_multiIndex_freq(df, freq='5T', col='low', index='ticktime', start=
             df['high'] =  dd['close']
             df['low'] =  dd['close']
         else:
-            df = dd
+            df = dd.copy()
     else:
         log.error("df is None")
     # print df.loc['600007',['close','ticktime']]
     if freq is not None and col is not None:
-        # import pdb;pdb.set_trace()
         if col == 'all':
             vol0 = df.volume[0]
-            df.volume = df.volume - df.volume.shift(1)
-            df.volume[0] = vol0
+            df['volume'] = df.volume - df.volume.shift(1)
+            df['volume'][0] = vol0
+            # vol0 = df.loc[:, 'volume'][0]
+            # df.loc[:,'volume'] = df.volume - df.volume.shift(1)
+            # df.loc[:, 'volume'][0] = vol0
         df = using_Grouper(df, freq=freq, col=col)
         # print df.loc['600007',['close','low','high','ticktime']]
     else:
@@ -2321,17 +2639,17 @@ def get_limit_multiIndex_freq(df, freq='5T', col='low', index='ticktime', start=
 def get_stock_tdx_period_to_type(stock_data, type='w'):
     period_type = type
     stock_data.index = pd.to_datetime(stock_data.index)
-    period_stock_data = stock_data.resample(period_type, how='last')
+    period_stock_data = stock_data.resample(period_type).last()
     # 周数据的每日change连续相乘
     # period_stock_data['percent']=stock_data['percent'].resample(period_type,how=lambda x:(x+1.0).prod()-1.0)
     # 周数据open等于第一日
-    period_stock_data['open'] = stock_data['open'].resample(period_type, how='first')
+    period_stock_data['open'] = stock_data['open'].resample(period_type).first()
     # 周high等于Max high
-    period_stock_data['high'] = stock_data['high'].resample(period_type, how='max')
-    period_stock_data['low'] = stock_data['low'].resample(period_type, how='min')
+    period_stock_data['high'] = stock_data['high'].resample(period_type).max()
+    period_stock_data['low'] = stock_data['low'].resample(period_type).min()
     # volume等于所有数据和
-    period_stock_data['amount'] = stock_data['amount'].resample(period_type, how='sum')
-    period_stock_data['vol'] = stock_data['vol'].resample(period_type, how='sum')
+    period_stock_data['amount'] = stock_data['amount'].resample(period_type).sum()
+    period_stock_data['vol'] = stock_data['vol'].resample(period_type).sum()
     # 计算周线turnover,【traded_market_value】 流通市值【market_value】 总市值【turnover】 换手率，成交量/流通股本
     # period_stock_data['turnover']=period_stock_data['vol']/(period_stock_data['traded_market_value'])/period_stock_data['close']
     # 去除无交易纪录
@@ -2475,15 +2793,15 @@ def LineArgmain():
     return parser
 
 
-def negate_boolean_list(negate_list, idx=1):
-    cout_all = len(negate_list)
-    if idx < cout_all:
-        sort_negate_l = [key ^ 1 for key in negate_list[:idx]]
-        sort_negate_l.extend(negate_list[idx:])
-    else:
-        sort_negate_l = [key ^ 1 for key in negate_list]
+# def negate_boolean_list(negate_list, idx=1):
+#     cout_all = len(negate_list)
+#     if idx < cout_all:
+#         sort_negate_l = [key ^ 1 for key in negate_list[:idx]]
+#         sort_negate_l.extend(negate_list[idx:])
+#     else:
+#         sort_negate_l = [key ^ 1 for key in negate_list]
 
-    return sort_negate_l
+#     return sort_negate_l
 
 
 def sort_by_value(df, column='dff', file=None, count=5, num=5, asc=0):
@@ -2585,12 +2903,13 @@ def func_compute_percd(close, lastp, op, lasth, lastl, nowh, nowl):
 # import numba as nb
 # @numba.jit(nopython=True)
 # @nb.autojit
-def func_compute_percd2020( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,hmax=None):
+def func_compute_percd2020( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None):
     # down_zero, down_dn, percent_l = 0, 0, 2
      # (1 if ( ((c >= op) and ((c - lc)/lc*100 >= 0)) or (c >= op and c >=m5a) ) else down_dn)
     # df['vol'],df['vol'].shift(1),df['upper']
+
     initc = 0
-    if 0 < lastclose < 1000 and lasthigh != 1.0 and lastlow != 1.0 and lasthigh != 0 and lastlow != 0:
+    if  0 < lastclose < 1000 and lasthigh != 1.0 and lastlow != 1.0 and lasthigh != 0 and lastlow != 0:
 #        close = round(close, 1)
 #        lastp = round(lastp, 1)
 #        op = round(op, 1)
@@ -2602,13 +2921,29 @@ def func_compute_percd2020( open, close,high, low,lastopen, lastclose,lasthigh, 
         close_du = round((high - low)/low*100,1)
         # last_du = round((lasthigh - lastlow)/lastlow*100,1)
         # volratio = round((nowvol / lastvol),1)
+        vol_du = round((nowvol)/lastvol,1)
 
-        if percent > 1 and low > lastlow and high > lasthigh:
+        if open >= lastclose and close == high and close > ma5:
+            initc +=3
+            if close > ma5:
+                if close < ma5*1.1:
+                    initc +=3*vol_du
+                elif close < ma5*1.2:
+                    initc +=2*vol_du
+                else:
+                    initc+=2
+
+        elif percent > 2 and low > lastlow and high > lasthigh:
             initc +=2
-        elif percent > 2:
+
+        elif percent > 2 and close_du > 9 and vol_du > 2:
+            initc += 1*vol_du
+        elif percent > 2 :
             initc +=1
-        elif close > ma5 and close > ma10:
+        elif open > ma5 and open > ma10 :
             initc +=0.1
+            if  vol_du < 0.6:
+                initc +=0.1
         elif percent < -2 and low < lastlow and high < lasthigh:
             initc -=1
         elif percent < -5:
@@ -2617,10 +2952,164 @@ def func_compute_percd2020( open, close,high, low,lastopen, lastclose,lasthigh, 
             initc -=0.51
         # else:
             # initc -=1
+    elif  np.isnan(lastclose) :
+        if close > open:
+            initc +=1
+
+
+    return initc
+
+def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None):
+    initc = 0
+    percent_idx = 2
+    if  0 < lastclose  and lasthigh != 1.0 and lastlow != 1.0 and lasthigh != 0 and lastlow != 0:
+        percent = round((close - lastclose)/lastclose*100,1)
+        # now_du = round((high - low)/low*100,1)
+        close_du = round((high - low)/low*100,1)
+        # last_du = round((lasthigh - lastlow)/lastlow*100,1)
+        # volratio = round((nowvol / lastvol),1)
+        vol_du = round((nowvol)/lastvol,1)
+
+        # if idate == "2022-11-28":
+        #     import ipdb;ipdb.set_trace()
+
+        if (percent > 0 and (close_du > percent_idx or vol_du > 1.1)) or percent >= percent_idx or ma5 > ma10 or close > ma5:
+            initc +=1
+            # if  close_du > 5:
+            #     initc +=0.1
+        # elif percent < -percent_idx or (percent < 0 and close_du > 3):
+        elif percent < -percent_idx:
+            initc -=1
+            # if close > open:
+            #     #下跌中继,或者止跌信号
+            #     initc +=3
+            # if  close_du > 5:
+            #     initc -=0.1
+
+        # if percent >0 and open >= lastclose and close == high and close > ma5:
+        #     initc +=1
+        #     if close > ma5:
+        #         if close < ma5*1.1:
+        #             initc +=3*vol_du
+        #         elif close < ma5*1.2:
+        #             initc +=2*vol_du
+        #         else:
+        #             initc+=2
+
+        # elif percent > 3 and low >= lastlow and high > lasthigh:
+        #     initc +=2
+
+        # elif percent > 3 and close_du > 9 and vol_du > 2:
+        #     initc += 1*vol_du
+        # elif percent > 2 :
+        #     initc +=1
+        # elif percent > 0  and open > ma5 and open > ma10 :
+        #     initc +=1
+        #     if  vol_du < 0.6:
+        #         initc +=0.1
+        # elif low < lastlow and high < lasthigh:
+        #     initc -=1
+        # elif percent < -5 and low < lastlow:
+        #     initc -=2
+        # elif percent < 0 and close < ma5 and close < ma10:
+        #     initc -=0.51
+        # else:
+            # initc -=1
+    elif  np.isnan(lastclose) :
+        if close > open:
+            initc +=1
+        else:
+            initc -=1
+
+    # open, close,high, low,lastopen, lastclose,lasthigh, lastlow, 
+    # ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None
+
+    if close > lasthigh:
+        initc +=0.1
+        # if  ma5 > ma10:
+        #     initc +=0.1
+        # else:
+        #     initc -=0.11
+    elif close < lastlow:
+        initc -=0.1
 
     return initc
 
 
+def func_compute_percd2021_2022mod( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None):
+    # down_zero, down_dn, percent_l = 0, 0, 2
+     # (1 if ( ((c >= op) and ((c - lc)/lc*100 >= 0)) or (c >= op and c >=m5a) ) else down_dn)
+    # df['vol'],df['vol'].shift(1),df['upper']
+
+    initc = 0
+    if  0 < lastclose < 1000 and lasthigh != 1.0 and lastlow != 1.0 and lasthigh != 0 and lastlow != 0:
+#        close = round(close, 1)
+#        lastp = round(lastp, 1)
+#        op = round(op, 1)
+#        lastopen = round(lastopen, 1)
+#        lasth = round(lasth, 1)
+#        lastl = round(lastl, 1)
+        percent = round((close - lastclose)/lastclose*100,1)
+        # now_du = round((high - low)/low*100,1)
+        close_du = round((high - low)/low*100,1)
+        # last_du = round((lasthigh - lastlow)/lastlow*100,1)
+        # volratio = round((nowvol / lastvol),1)
+        vol_du = round((nowvol)/lastvol,1)
+
+        if percent > 1:
+            initc +=1
+            if  close_du > 5:
+                initc +=0.1
+        elif percent < -1:
+            initc -=1
+            if  close_du > 5:
+                initc -=0.1
+                
+        # if percent >0 and open >= lastclose and close == high and close > ma5:
+        #     initc +=1
+        #     if close > ma5:
+        #         if close < ma5*1.1:
+        #             initc +=3*vol_du
+        #         elif close < ma5*1.2:
+        #             initc +=2*vol_du
+        #         else:
+        #             initc+=2
+
+        # elif percent > 3 and low >= lastlow and high > lasthigh:
+        #     initc +=2
+
+        # elif percent > 3 and close_du > 9 and vol_du > 2:
+        #     initc += 1*vol_du
+        # elif percent > 2 :
+        #     initc +=1
+        # elif percent > 0  and open > ma5 and open > ma10 :
+        #     initc +=1
+        #     if  vol_du < 0.6:
+        #         initc +=0.1
+        # elif low < lastlow and high < lasthigh:
+        #     initc -=1
+        # elif percent < -5 and low < lastlow:
+        #     initc -=2
+        # elif percent < 0 and close < ma5 and close < ma10:
+        #     initc -=0.51
+        # else:
+            # initc -=1
+    elif  np.isnan(lastclose) :
+        if close > open:
+            initc +=1
+
+    # open, close,high, low,lastopen, lastclose,lasthigh, lastlow, 
+    # ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None
+    if close > ma5:
+        initc +=0.1
+        if  ma5 > ma10:
+            initc +=0.1
+        else:
+            initc -=0.11
+    else:
+        initc -=0.1
+
+    return initc
 
 # import numba as nb
 # @numba.jit(nopython=True)
@@ -3045,7 +3534,7 @@ if __name__ == '__main__':
     print(get_work_duration())
     print((random.randint(0, 30)))
     print(GlobalValues().getkey('key', defValue=None))
-    print(get_run_path_tdx(tdx_hd5_name))
+    print(get_run_path_tdx('aa'))
     print(get_ramdisk_path(tdx_hd5_name))
     print(get_today(sep='-'))
     from docopt import docopt

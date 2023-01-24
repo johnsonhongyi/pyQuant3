@@ -28,7 +28,7 @@ ax.set_ylim(yl[0] - (yl[1] - yl[0]) * pad, yl[1])
 # new_xticks.append(r.index[-1])
 # ax.set_xticklabels(new_xticks,rotation=15, horizontalalignment='right')
 div_n = len(ax.get_xticks())
-print("t_x:", div_n, len(r) % div_n)
+print(("t_x:", div_n, len(r) % div_n))
 
 ax.set_xticks(list(range(0, len(r.index), div_n)))
 new_xticks = [r.index[d] for d in ax.get_xticks()]
