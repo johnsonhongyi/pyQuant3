@@ -73,13 +73,13 @@ def graphData_candles(stock, MA1, MA2, start='2016-01-01'):
         Use this to dynamically pull a stock:
     '''
     try:
-        print('Currently Pulling', stock)
-        print(str(datetime.datetime.fromtimestamp(int(time.time())).strftime('%Y-%m-%d %H:%M:%S')))
+        print(('Currently Pulling', stock))
+        print((str(datetime.datetime.fromtimestamp(int(time.time())).strftime('%Y-%m-%d %H:%M:%S'))))
         # urlToVisit = 'http://chartapi.finance.yahoo.com/instrument/1.0/'+stock+'/chartdata;type=quote;range=10y/csv'
         bars = ts.get_hist_data(stock, start=start)
         stockFile = []
     except Exception as e:
-        print(str(e), 'failed to pull pricing data')
+        print((str(e), 'failed to pull pricing data'))
     try:
         bars = bars.sort_index(ascending=True)
         # bars.reset_index(inplace=True)
@@ -245,7 +245,7 @@ def graphData_candles(stock, MA1, MA2, start='2016-01-01'):
         # fig.savefig('example.png',facecolor=fig.get_facecolor())
 
     except Exception as e:
-        print('main loop', str(e))
+        print(('main loop', str(e)))
 
 
 def graphData_candles2(stock, MA1, MA2, start='2016-01-01'):
@@ -253,13 +253,13 @@ def graphData_candles2(stock, MA1, MA2, start='2016-01-01'):
         Use this to dynamically pull a stock:
     '''
     try:
-        print('Currently Pulling', stock)
-        print(str(datetime.datetime.fromtimestamp(int(time.time())).strftime('%Y-%m-%d %H:%M:%S')))
+        print(('Currently Pulling', stock))
+        print((str(datetime.datetime.fromtimestamp(int(time.time())).strftime('%Y-%m-%d %H:%M:%S'))))
         # urlToVisit = 'http://chartapi.finance.yahoo.com/instrument/1.0/'+stock+'/chartdata;type=quote;range=10y/csv'
         bars = ts.get_hist_data(stock, start=start)
         stockFile = []
     except Exception as e:
-        print(str(e), 'failed to pull pricing data')
+        print((str(e), 'failed to pull pricing data'))
     try:
         bars = bars.sort_index(ascending=True)
         # bars.reset_index(inplace=True)
@@ -290,22 +290,22 @@ def graphData_candles2(stock, MA1, MA2, start='2016-01-01'):
         # closep,
         # volume)
         SP = len(date[MA2 - 1:])
-        print("sp:", SP)
+        print(("sp:", SP))
         fig = plt.figure(facecolor='#07000d')
         ax1 = plt.subplot2grid((6, 4), (1, 0), rowspan=4,
                                colspan=4, axisbg='#07000d')
 
         div_n = len(ax1.get_xticks())
-        print("t_x:", div_n, len(bars) % div_n, len(bars), ax1.get_xticks())
+        print(("t_x:", div_n, len(bars) % div_n, len(bars), ax1.get_xticks()))
         ax1.set_xticks(list(range(0, len(date[-SP:]), div_n)))
         xticks = ax1.get_xticks()
-        print("xticks:", xticks, len(date[-SP:]))
+        print(("xticks:", xticks, len(date[-SP:])))
         new_xticks = [date[-SP:][d] for d in xticks]
         ax1.set_xticklabels(new_xticks, rotation=30,
                             horizontalalignment='center')
 
         idx_a = list(range(len(date[-SP:])))
-        print(len(idx_a), len(Av1[-SP:]))
+        print((len(idx_a), len(Av1[-SP:])))
 
         ax1.yaxis.label.set_color('w')
         ax1.xaxis.label.set_color("w")
@@ -437,7 +437,7 @@ def graphData_candles2(stock, MA1, MA2, start='2016-01-01'):
         # fig.savefig('example.png',facecolor=fig.get_facecolor())
 
     except Exception as e:
-        print('main loop', str(e))
+        print(('main loop', str(e)))
 
 # while True:
     # stock = raw_input('Stock to plot: ')

@@ -95,20 +95,20 @@ class VWAPMomentum(strategy.BacktestingStrategy):
             notional = shares * price
             
             if self.__count<30:
-                print(self.__count,element,shares,notional,self.getBroker().getCash(False),self.getBroker().getCash())
+                print((self.__count,element,shares,notional,self.getBroker().getCash(False),self.getBroker().getCash()))
             self.__notional = notional   #记录上一次的值
             #print vwap,self.__notional
             if price > vwap * (1 + self.__threshold) and notional < 1000000:
                 __order = self.marketOrder(element, 100)
                 self.addInfo(__order)  #添加交易信息
                 if(self.__count<30):
-                    print("buy %s at ￥%.2f" % (element,price))
+                    print(("buy %s at ￥%.2f" % (element,price)))
                 #self.info("buy %s at ￥%.2f" % (element,price))
             elif price < vwap * (1 - self.__threshold) and notional > 0:
                 __order = self.marketOrder(element, -100)  
                 self.addInfo(__order)   #添加交易信息
                 if(self.__count<30):
-                    print("sell %s at ￥%.2f" % (element,price))
+                    print(("sell %s at ￥%.2f" % (element,price)))
                 #self.info("sell %s at ￥%.2f" % (element,price))
 
 class turtle(strategy.BacktestingStrategy):

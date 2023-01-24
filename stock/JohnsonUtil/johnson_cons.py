@@ -35,6 +35,7 @@ per_redline = 0.5
 LvolumeSize = 12500
 VolumeMaxR = 5000
 VolumeMinR = 0.1
+upper_cross_days = 14
 PowerCount = 1000
 duration_diff = 6
 duration_date_l = 60
@@ -42,7 +43,7 @@ duration_date_up = 120
 duration_date_sort = duration_date_l
 # PowerCountdl = duration_date_l * 2 if duration_date_l < 20 else duration_date_l
 PowerCountdl = duration_date_l * 2 if duration_date_l < 20 else duration_date_l
-linePowerCountdl = 120
+linePowerCountdl = 160
 Power_Ma_Days = 6
 Power_last_da = 1
 wencai_end_time = 2400
@@ -51,7 +52,7 @@ writeCount = 5
 changeRatio = 0.975
 changeRatioUp = 1.025
 # duration_date = 10
-wencai_delay_time = 45
+wencai_delay_time = 180
 resample_dtype = 'd'
 sina_lastbuy_logtime = 3600
 bigcount_logtime = 360
@@ -68,7 +69,7 @@ open_time = 926
 sleep_time = 6
 tdx_max_int = 10
 tdx_max_int_start = 30
-tdx_max_int_end = 5
+tdx_max_int_end = 10
 wcd_limit_day = 30
 h5_limit_time = 180
 h5_power_limit_time = 36000
@@ -94,6 +95,27 @@ sort_value_key_perd = '2 1'
 # sort_value_key_perd = 'x1'
 # sort_value_key_perd = 'x1'
 idx_perd_1to_2 = 1
+'''
+sub-3211
+# Sublime Text 3
+127.0.0.1 license.sublimehq.com
+127.0.0.1 45.55.255.55
+127.0.0.1 45.55.41.223
+
+----- BEGIN LICENSE -----
+Member J2TeaM
+Single User License
+EA7E-1011316
+D7DA350E 1B8B0760 972F8B60 F3E64036
+B9B4E234 F356F38F 0AD1E3B7 0E9C5FAD
+FA0A2ABE 25F65BD8 D51458E5 3923CE80
+87428428 79079A01 AA69F319 A1AF29A4
+A684C2DC 0B1583D4 19CBD290 217618CD
+5653E0A0 BACE3948 BB2EE45E 422D2C87
+DD9AF44B 99C49590 D2DBDEE1 75860FD2
+8C8BB2AD B2ECE5A4 EFC08AF2 25A9B864
+------ END LICENSE ------
+'''
 # powerdiff = 'ra * fibl + rah*(abs(float(%s)-fibl))/fib +ma +kdj+rsi'
 '''
             ma  rsi  kdj  boll    ra   rah    df2  fibl  fib  macd  oph
@@ -164,7 +186,7 @@ Duration_percent_vol_key = [0,0, 0 , 0, 0, 1, 1, 0, 1, 1]
 # Duration_percent_per_ra=['percent','ra','dff','op','fib','fibl','ratio','volume','couts']
 # Duration_percent_per_ra_key=[0,0,0,0,1,1,1,1,1]
 
-Duration_percent_df2dff = ['top10', 'dff', 'percent',
+Duration_percent_df2dff = ['fibl', 'dff', 'percent',
                            'topR', 'fib', 'fibl', 'ra', 'ratio', 'volume', 'couts']
                            # 'op', 'fib', 'fibl', 'ra', 'ratio', 'volume', 'couts']
 Duration_percent_df2dff_key = [0, 0, 0, 0, 1, 1, 0, 1, 1, 1]
@@ -196,12 +218,18 @@ Duration_dff_percent = ['dff', 'percent', 'df2', 'ra',
 Duration_dff_percent_key = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
 
 Duration_ra_dff = ['ra', 'dff', 'couts', 'percent',
-                   'topR', 'fib', 'fibl', 'ratio', 'volume']
+                   'topR', 'fib', 'fibl', 'fib', 'volume']
                    # 'op', 'fib', 'fibl', 'ratio', 'volume']
 
 Duration_ra_dff_key = [0, 0, 0, 0, 0, 1, 1, 1, 1]
 
-Duration_sort_per_df2 = ['percent', 'b1_v','df2','ma', 'dff', 'ratio', 'volume']
+Duration_ral_dff = ['ral', 'dff', 'couts', 'percent',
+                   'topR', 'fib', 'fibl', 'fib', 'volume']
+                   # 'op', 'fib', 'fibl', 'ratio', 'volume']
+
+Duration_ral_dff_key = [0, 0, 0, 0, 0, 1, 1, 1, 1]
+
+Duration_sort_per_df2 = ['volume','percent', 'b1_v','df2','ma', 'dff', 'fib']
 Duration_sort_per_df2_key = [0, 0, 0, 0, 0, 0 , 0]
 
 # Duration_ra_goldop=['ra','percent','dff','boll','op','fib','fibl','ratio','volume','couts']
@@ -209,16 +237,16 @@ Duration_sort_per_df2_key = [0, 0, 0, 0, 0, 0 , 0]
 
 # Duration_sort_high_op = ['dff', 'date', 'fib', 'op',
 Duration_sort_high_op = ['dff', 'date', 'fib', 'topR',
-                         'fibl', 'ra', 'percent', 'ratio', 'volume', 'couts']
+                         'fibl', 'ra', 'percent', 'fib', 'volume', 'couts']
 Duration_sort_high_op_key = [0, 1, 1, 0, 1, 0, 0, 1, 1, 1]
 
 
-Monitor_sort_count = ['couts', 'dff', 'percent', 'ratio', 'volume']
+Monitor_sort_count = ['couts', 'dff', 'percent', 'volume','fib']
 Monitor_sort_count_key = [0, 0, 0, 0, 0]
 
 # Monitor_sort_op = ['fib', 'fibl', 'topR', 'dff', 'percent',  'ra', 'ratio']
 # Monitor_sort_op = ['fib', 'fibl', 'op', 'dff', 'percent',  'ra', 'ratio']
-Monitor_sort_op = ['fib', 'fibl', 'topR', 'dff', 'percent',  'ra', 'ratio']
+Monitor_sort_op = ['fib', 'fibl', 'topR', 'dff', 'percent',  'ra', 'fib']
 Monitor_sort_op_key = [1, 1, 0, 0, 0, 0, 1]
 
 
@@ -240,18 +268,21 @@ MonitorMarket_sort_op_key = [0, 0, 1, 0, 0, 0, 1, 1, 1]
 # MonitorMarket_format_buy=['name', 'buy', 'ma5d', 'boll','dff','df2','couts','percent', 'ra','op', 'ratio','ma','volume','date','category']
 
 Duration_format_buy = ['name', 'buy', 'boll', 'dff', 'df2', 'percent', 'per1d', 'perc3d',
-                       'ra', 'topR', 'ratio', 'couts',  'volume', 'fib','fibl', 'category']
+                       'ra', 'topR', 'fib', 'couts',  'volume', 'fib','fibl', 'category']
                        # 'ra', 'op', 'ratio', 'couts',  'volume', 'fib','fibl', 'category']
 Duration_format_trade = ['name', 'trade', 'boll', 'dff', 'df2',
-                         'percent', 'per1d',  'perc3d',  'ra', 'topR', 'ratio', 'couts', 'volume', 'fib','fibl', 'category']
+                         'percent', 'per1d',  'perc3d',  'ra', 'ral', 'topR', 'couts', 'volume', 'fib','fibl', 'category']
+                         # 'percent', 'per1d',  'perc3d',  'ra', 'topR', 'ratio', 'couts', 'volume', 'fib','fibl', 'category']
                          # 'percent', 'per1d',  'perc3d',  'ra', 'op', 'ratio', 'couts', 'volume', 'fib','fibl', 'category']
 
 
 Monitor_format_trade = ['name', 'trade', 'boll', 'dff', 'df2', 'couts',
-                        'percent', 'per1d', 'perc3d', 'ra', 'topR', 'ratio',  'volume', 'fib','fibl', 'category']
-                        # 'percent', 'per1d', 'perc3d', 'ra', 'op', 'ratio',  'volume', 'fib','fibl', 'category']
+                        'percent', 'per1d', 'perc3d', 'ra', 'ral', 'topR',  'volume', 'fib','fibl', 'category']
+                        # 'percent', 'per1d', 'perc3d', 'ra', 'topR', 'ratio',  'volume', 'fib','fibl', 'category']
+                        # mod ratio ->ral
 MonitorMarket_format_buy = ['name', 'buy', 'boll', 'dff', 'df2',
-                            'couts', 'percent', 'per1d', 'perc3d', 'ra', 'topR', 'ratio',  'volume', 'fib','fibl', 'category']
+                            'couts', 'percent', 'per1d', 'perc3d', 'ra', 'ral', 'topR',  'volume', 'fib','fibl', 'category']
+                            # 'couts', 'percent', 'per1d', 'perc3d', 'ra', 'topR', 'ratio',  'volume', 'fib','fibl', 'category']
                             # 'couts', 'percent', 'per1d', 'perc3d', 'ra', 'op', 'ratio',  'volume', 'fib','fibl', 'category']
 
 # Sina_Monitor_format =['name', 'trade', 'ma5d','boll','dff','df2','couts','percent', 'ra','op', 'fib','ratio','ma','volume','category']
@@ -264,7 +295,7 @@ columns_now = ['open', 'llastp', 'close', 'trade', 'high', 'low',
                'buy', 'sell', 'volume', 'turnover', 'b1_v', 'b1', 'b2_v', 'b2',
                                            'b3_v', 'b3', 'b4_v', 'b4', 'b5_v', 'b5', 'a1_v', 'a1', 'a2_v',
                                            'a2', 'a3_v', 'a3', 'a4_v', 'a4', 'a5_v', 'a5', 'percent',
-                                           'ratio', 'dff', 'couts', 'kind', 'prev_p']
+                                           'fib', 'dff', 'couts', 'kind', 'prev_p']
 # columns_now = [u'close', u'trade', u'high', u'low',\
 #                u'buy', u'sell', u'volume', u'b1_v', u'b1', u'b2_v', u'b2',\
 #                u'b3_v', u'b3', u'b4_v', u'b4', u'b5_v', u'b5', u'a1_v', u'a1', u'a2_v',\
@@ -460,7 +491,13 @@ http://dcfm.eastmoney.com/em_mutisvcexpandinterface/api/js/get?type=RZRQ_SUMMARY
 '''
 
 
-DFCFW_RZYE = "http://dcfm.eastmoney.com/em_mutisvcexpandinterface/api/js/get?type=RZRQ_SUMMARY_NJ&token=70f12f2f4f091e459a279469fe49eca5&st="
+DFCFW_RZYE_2022 = "http://dcfm.eastmoney.com/em_mutisvcexpandinterface/api/js/get?type=RZRQ_SUMMARY_NJ&token=70f12f2f4f091e459a279469fe49eca5&st="
+
+#mod 2022 firfox-调试器-来源data-center reg->"data":([\D\d]+.}])
+DFCFW_RZYE = 'https://datacenter-web.eastmoney.com/api/data/v1/get?callback=datatable9293024&reportName=RPTA_RZRQ_LSDB&columns=ALL&source=WEB&sortColumns=DIM_DATE&sortTypes=-1&pageNumber=1&pageSize=10&_=1650247619410'
+
+dfcfw_rzye_col2022 = ['DIM_DATE','H_RZYE', 'H_RQYL', 'RZYE']
+
 DFCFW_RZYE2 = "http://datacenter.eastmoney.com/api/data/get?type=RPTA_RZRQ_LSHJ&sty=ALL&source=WEB&st=DIM_DATE&sr=-1&p=1&ps=240"
 # http://data.eastmoney.com/rzrq/total/SZ.html
 DFCFW_RZYE2sh = "http://datacenter.eastmoney.com/api/data/get?type=RPTA_WEB_RZRQ_LSSH&sty=ALL&source=WEB&st=dim_date&sr=-1\
@@ -482,8 +519,14 @@ dfcfw_rzye_columns2 = ['DIM_DATE','RZYEZB', 'RQCHL10D', 'RQCHL3D', 'RQYE', 'RQMC
 TDX_Day_columns_all = ['code', 'date', 'open', 'high', 'low', 'close', 'vol','amount', 'ra', 'op', 'fib', 'ma5d', 'ma10d', 'ldate', 'hmax', 'lmin', 'cmean']
 TDX_Day_columns = ['code', 'date', 'open', 'high', 'low', 'close', 'vol','amount']
 
+
+
+
+# http://data.eastmoney.com/hsgtcg/gzcglist.html
+# http://push2.eastmoney.com/api/qt/kamt/get?fltt=2&fields1=f1,f3&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59&ut=b2884a393a59ad64002292a3e90d46a5&cb=jQuery112308976712127389186_1628752728202&_=1628752728203
 DFCFW_FUND_FLOW_HGT = "http://nufm.dfcfw.com/EM_Finance2014NumericApplication/JS.aspx?type=CT&cmd=0000011&sty=SHSTD&st=z&sr=&p=&ps=&cb=&js=var%20quote_zjl%3d{rank:[%28x%29],pages:%28pc%29}&token=beb0a0047196124721f56b0f0ff5a27c&jsName=quote_zjl&dt=1452070103085"
 DFCFW_FUND_FLOW_SZT = "http://nufm.dfcfw.com/EM_Finance2014NumericApplication/JS.aspx?type=CT&cmd=0000011&sty=SZSTD&st=z&sr=&p=&ps=&cb=&js=var%20quote_zjl%3d{rank:[%28x%29],pages:%28pc%29}&token=beb0a0047196124721f56b0f0ff5a27c&jsName=quote_zjl&dt=1452070103085"
+DFCFW_FUND_FLOW_HGSZT2021 = "http://push2.eastmoney.com/api/qt/kamt/get?fltt=2&fields1=f1,f3&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59&ut=b2884a393a59ad64002292a3e90d46a5&cb=jQuery112308976712127389186_1628752728202&_=1628752728203"
 DFCFW_ZS_SHSZ = "http://nufm2.dfcfw.com/EM_Finance2014NumericApplication/JS.aspx?type=CT&cmd=0000011,3990012&sty=DFPIU&st=z&sr=&p=&ps=&cb=&js=var%20C1Cache={quotation:[(x)]}&token=44c9d251add88e27b65ed86506f6e5da&0.6733153457793924"
 DFCFW_RZRQ_SHSZ = "http://datainterface.eastmoney.com/EM_DataCenter/js.aspx?type=FD&sty=SHSZSUM&fd=%s"
 # DFCFW_RZRQ_SHSZ="http://datainterface.eastmoney.com/EM_DataCenter/js.aspx?type=FD&sty=SHSZSUM&fd=%s&js=var%20rzrqhuizong=[%28x%29]"DFCFW_RZRQ_SHSZ="http://datainterface.eastmoney.com/EM_DataCenter/js.aspx?type=FD&sty=SHSZSUM&fd=%s&js=var%20rzrqhuizong=[%28x%29]"
@@ -632,21 +675,21 @@ INDEX_SYMBOL = {"399990": "sz399990", "000006": "sh000006", "399998": "sz399998"
 
 
 def RawMenuArgmain():
-    raw = 'status:[go(g),clear(c),[d 20150101 [l|h]|[y|n|pn|py],quit(q),W(a),sh]:'
+    raw = 'status:[go(g),clear(c),[d 20150101(dt 14)[l|h]|[y|n|pn|py],quit(q),W(a),sh]:'
     raw_input_menu = raw + "\n\tNow : %s" + \
-        "\n\t1:Sort By Percent\t2:Sort by per1d\t3:Sort By percd\t\t4:Sort By DFF\n\t5:Sort By Ra_dff\t6:Sort By top10\t7:Sort Per b1V\t\t8:Sort by Count" + \
-        "\n\t9:By fib\t\tx: by_topR\tx1:by boll_perc\nplease input:"
+        "\n\t1:Sort By Percent\t2:Sort by per1d\t3:Sort By percd\t\t4:Sort By DFF\n\t5:Sort By Ra_dff\t6:Sort By  fibl\t7:Sort Vol per\t\t8:Sort by Count" + \
+        "\n\t9:By fib\t\tx: by_topR\tx1:by boll_perc\t\tx2:by ral\nplease input:"
     return raw_input_menu
 
 # "Sort By Percent\t3:Sort By DFF\n\t2:Sort By OP\t\t4:Sort By Ra\nplease input:"
 
 Market_sort_idx = {'1': 'ct.Duration_percent_dff', '2': 'ct.Duration_sort_per1d', '3': 'ct.Duration_sort_per3d', '4': 'ct.Duration_dff_percent', '5': 'ct.Duration_ra_dff', '6': 'ct.Duration_percent_df2dff',
                    '7': 'ct.Duration_sort_per_df2', '8': 'ct.Monitor_sort_count', '9':'ct.Duration_percent_vol',
-                  'x': 'ct.Duration_percent_opboll', 'x1':'ct.Duration_percent_boll'}
+                  'x': 'ct.Duration_percent_opboll', 'x1':'ct.Duration_percent_boll','x2':'ct.Duration_ral_dff'}
 
 Market_sort_idx_perd = {'1': 'ct.Duration_percent_dff', '2': 'ct.Duration_sort_perd', '3': 'ct.Duration_sort_percd', '4': 'ct.Duration_dff_percent', '5': 'ct.Duration_ra_dff', '6': 'ct.Duration_percent_df2dff',
                         '7': 'ct.Duration_sort_per_df2', '8': 'ct.Monitor_sort_count','9':'ct.Duration_percent_vol',
-                  'x': 'ct.Duration_percent_opboll', 'x1':'ct.Duration_percent_boll'}
+                  'x': 'ct.Duration_percent_opboll', 'x1':'ct.Duration_percent_boll','x2':'ct.Duration_ral_dff'}
 
 # Market_sort_idx = {'1': 'ct.Duration_percent_dff', '2': 'ct.Duration_dff_percent', '3': 'ct.Duration_ra_dff', '4': 'ct.Duration_percent_df2dff',
 #                    '5': 'ct.Duration_sort_ma', '6': 'ct.Monitor_sort_count', '7': 'ct.Duration_sort_per_ratio', '8': 'ct.Duration_percent_vol'}
@@ -738,6 +781,14 @@ def get_Duration_format_Values(duration_format, column=None, replace='perc3d',de
 
 # print get_Duration_format_Values(Duration_format_buy,'percent')
 
+def isDigit(x):
+    #re def isdigit()
+    try:
+        float(x)
+        return True
+    except ValueError:
+        return False
+
 
 def get_market_sort_value_key(st, top_all=None, perd_d=3):
     st_l = st.split()
@@ -749,27 +800,30 @@ def get_market_sort_value_key(st, top_all=None, perd_d=3):
         market_sort_name = Market_sort_idx_perd[st].replace("ct.", '')
         if st in ['2', '3']:
             if len(st_l) > 1:
-                if st_l[1].isdigit():
+                if isDigit(st_l[1]):
                     # cct.GlobalValues()
                     cct.GlobalValues().setkey('market_key',st_l[0])
                     cct.GlobalValues().setkey('market_value', st_l[1])
             else:
+                # market_sort_value = get_Dynamic_Duration_perd(market_sort_name, '1')
                 cct.GlobalValues().setkey('market_key',st_l[0])
                 cct.GlobalValues().setkey('market_value', '1')
+                
             idx_value = eval(market_sort_name)[0]
             market_sort_value_key = eval(market_sort_name + '_key')
-            if st_count > 1 and st_l[1].isdigit():
+
+            if st_count > 1 and isDigit(st_l[1]):
                 idx_perd = st_l[1]
                 if top_all is not None and len(top_all) > 0:
                     if idx_value % idx_perd in top_all.columns:
-                        if st_count > 2 and st_l[2].isdigit():
+                        if st_count > 2 and isDigit(st_l[2]):
                             idx_perd = st_l[1:3]
                             if st == '3':
                                 idx_perd.reverse()
                         market_sort_value = get_Dynamic_Duration_perd(market_sort_name, idx_perd, top_all.columns)
                     else:
                         idx_k = None
-                        for inx in range(int(idx_perd) - 1, 1, -1):
+                        for inx in range(int(float(idx_perd)) - 1, 1, -1):
                             if idx_value % inx in top_all.columns:
                                 idx_k = inx
                                 break
@@ -778,34 +832,75 @@ def get_market_sort_value_key(st, top_all=None, perd_d=3):
                         else:
                             market_sort_value = get_Dynamic_Duration_perd(market_sort_name, '1')
                 else:
-                    if st_l[1] != 'f' and int(st_l[1]) <= perd_d:
-                        if st_count > 2 and st_l[2].isdigit():
+                    if st_l[1] != 'f' and int(float(st_l[1])) <= perd_d:
+                        if st_count > 2 and isDigit(st_l[2]):
                             idx_perd = st_l[1:3]
                             if st == '3':
                                 idx_perd.reverse()
                         market_sort_value = get_Dynamic_Duration_perd(market_sort_name, idx_perd)
                     else:
                         market_sort_value = get_Dynamic_Duration_perd(market_sort_name, '1')
-
-                if f_count == 2:
-                    market_sort_value_key = negate_boolean_list(market_sort_value_key)
-                    market_sort_value_key = negate_boolean_list(market_sort_value_key, idx=1, position=True)
-                elif f_count == 1:
-                    if 'd' in st_l:
-                        market_sort_value_key = negate_boolean_list(market_sort_value_key, idx=1, position=True)
-                    else:
-                        market_sort_value_key = negate_boolean_list(market_sort_value_key)
-
             else:
                 market_sort_value = get_Dynamic_Duration_perd(market_sort_name, '1')
-                if f_count == 2:
-                    market_sort_value_key = negate_boolean_list(market_sort_value_key)
+
+            if f_count == 2:
+                market_sort_value_key = negate_boolean_list(market_sort_value_key)
+                market_sort_value_key = negate_boolean_list(market_sort_value_key, idx=1, position=True)
+            elif f_count == 1:
+
+                if 'd' in st_l:
                     market_sort_value_key = negate_boolean_list(market_sort_value_key, idx=1, position=True)
-                elif f_count == 1:
-                    if 'd' in st_l:
-                        market_sort_value_key = negate_boolean_list(market_sort_value_key, idx=1, position=True)
-                    else:
-                        market_sort_value_key = negate_boolean_list(market_sort_value_key)
+                else:
+                    market_sort_value_key = negate_boolean_list(market_sort_value_key)
+
+
+        elif st in ['1','5','4','6','7','8','9','x','x1','x2']:
+
+            if len(st_l) > 1:
+                if isDigit(st_l[1]):
+                    # cct.GlobalValues()
+                    cct.GlobalValues().setkey('market_key',st_l[0])
+                    cct.GlobalValues().setkey('market_value', st_l[1])
+            else:
+                cct.GlobalValues().setkey('market_key',st_l[0])
+                cct.GlobalValues().setkey('market_value', '1')
+
+            idx_value = eval(market_sort_name)[0]
+            market_sort_value_key = eval(market_sort_name + '_key')
+            # cct.GlobalValues().setkey('market_key',None)
+            # cct.GlobalValues().setkey('market_value', None)
+            if f_count >= 2:
+                market_sort_value_key = negate_boolean_list(market_sort_value_key)
+                market_sort_value_key = negate_boolean_list(market_sort_value_key, idx=1, position=True)
+            elif f_count == 1:
+                if 'd' in st_l:
+                    market_sort_value_key = negate_boolean_list(market_sort_value_key, idx=1, position=True)
+                else:
+                    market_sort_value_key = negate_boolean_list(market_sort_value_key)
+            market_sort_value = eval(market_sort_name)
+            # if st_count > 1 and st_l[1].isDigit():
+            #     # idx_perd = st_l[1]
+            #     market_sort_value = eval(market_sort_name)
+            #     if f_count == 2:
+            #         market_sort_value_key = negate_boolean_list(market_sort_value_key)
+            #         market_sort_value_key = negate_boolean_list(market_sort_value_key, idx=1, position=True)
+            #     elif f_count == 1:
+            #         if 'd' in st_l:
+            #             market_sort_value_key = negate_boolean_list(market_sort_value_key, idx=1, position=True)
+            #         else:
+            #             market_sort_value_key = negate_boolean_list(market_sort_value_key)
+
+
+            # else:
+            #     market_sort_value = get_Dynamic_Duration_perd(market_sort_name, '1')
+            #     if f_count == 2:
+            #         market_sort_value_key = negate_boolean_list(market_sort_value_key)
+            #         market_sort_value_key = negate_boolean_list(market_sort_value_key, idx=1, position=True)
+            #     elif f_count == 1:
+            #         if 'd' in st_l:
+            #             market_sort_value_key = negate_boolean_list(market_sort_value_key, idx=1, position=True)
+            #         else:
+            #             market_sort_value_key = negate_boolean_list(market_sort_value_key)
         else:
             market_sort_value_key = eval(market_sort_name + '_key')
             cct.GlobalValues().setkey('market_key',None)
@@ -819,7 +914,7 @@ def get_market_sort_value_key(st, top_all=None, perd_d=3):
                 else:
                     market_sort_value_key = negate_boolean_list(market_sort_value_key)
             market_sort_value = eval(market_sort_name)
-    cct.GlobalValues().setkey('market_sort_value',market_sort_value[:1][0])
+        cct.GlobalValues().setkey('market_sort_value',market_sort_value[:1][0])
     return market_sort_value, market_sort_value_key
 
 

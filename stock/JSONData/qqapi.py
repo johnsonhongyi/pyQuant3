@@ -667,7 +667,7 @@ class Sina:
 def nanrankdata_len(x):
     time_s = time.time()
     df = get_tdx_stock_period_to_type(x, period_day='5T')
-    print('t:%0.2f' % (time.time() - time_s))
+    print(('t:%0.2f' % (time.time() - time_s)))
     return df
 
 if __name__ == "__main__":
@@ -697,7 +697,7 @@ if __name__ == "__main__":
     # sys.exit(0)
     code_agg = '603277'
     dd = sina.get_stock_code_data([code_agg, '000831', '300306', '600007'])
-    print(dd.loc[:, ['close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape)
+    print((dd.loc[:, ['close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape))
     # print df.columns
     # df = sina.all
     # print df.nlow[:5]
@@ -740,7 +740,7 @@ if __name__ == "__main__":
                 h5 = cct.get_limit_multiIndex_freq(h5, freq=freq, col=run_col, start=startime, end=endtime)
                 h5 = h5.groupby(level=[0]).tail(1)
             # h5 = h5.groupby(level=[0]).tail(1)
-            print("s:", round(time.time() - ts, 2), len(h5))
+            print(("s:", round(time.time() - ts, 2), len(h5)))
             if h5 is not None and len(h5) > 0:
                 h5 = h5.reset_index().set_index('code')
                 h5.rename(columns=now_func, inplace=True)
@@ -755,7 +755,7 @@ if __name__ == "__main__":
     h5_table = 'all_10'
     time_s = time.time()
     h5 = h5a.load_hdf_db(h5_fname, table=h5_table, code_l=None, timelimit=False, dratio_limit=0.12)
-    print('h5:', len(h5))
+    print(('h5:', len(h5)))
     if cct.get_work_time() and cct.get_now_time_int() <= 1000:
         run_col = ['low', 'high', 'close']
         startime = None
@@ -788,8 +788,8 @@ if __name__ == "__main__":
         # tt = h5.groupby([h5.index.get_level_values(i) for i in [0]] + [pd.Grouper(freq='15T', level=-1, closed='right', label='right')]).mean()
         # print "tts:",round(time.time()-ts,2),len(tt)
 
-    print(dd.loc['600007', ['close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape)
-    print(dd.loc[:, ['close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape)
+    print((dd.loc['600007', ['close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape))
+    print((dd.loc[:, ['close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape))
     '''
     if df is not None and len(df) > 0:
         print df[:1]
@@ -824,7 +824,7 @@ if __name__ == "__main__":
     if df is not None and len(df) > 0 and code in df.index:
         df = compute_lastdays_percent(df=df.loc[code], step=1)
         # print df[df.index < '09:32:00']
-        print(df[-1:], round(time.time() - time_s, 1))
+        print((df[-1:], round(time.time() - time_s, 1)))
     # sys.exit(0)
     time_s = time.time()
     dd = pd.DataFrame()
@@ -834,7 +834,7 @@ if __name__ == "__main__":
         df = Sina().market(ma)
         # print df.loc['600581']
         # print len(sina.all)
-        print("market:%s %s" % (ma, len(df)))
+        print(("market:%s %s" % (ma, len(df))))
 
     h5_fname = 'sina_multi_index'
     dl = 30
@@ -855,9 +855,9 @@ if __name__ == "__main__":
 
         # df.ticktime = map(lambda x: int(x.replace(':', '')), df.ticktime)
         df.ticktime = list(map(lambda x, y: str(x) + ' ' + str(y), df.dt, df.ticktime))
-        print(df.ticktime[:3])
+        print((df.ticktime[:3]))
         df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S')
-        print(df.ticktime[:2])
+        print((df.ticktime[:2]))
         # sys.exit(0)
         # df = df.loc[:, ['open', 'high', 'low', 'close', 'llastp', 'volume', 'ticktime']]
         # df = df.loc[:, ['open', 'high', 'low', 'close', 'llastp', 'volume', 'ticktime']]
@@ -885,7 +885,7 @@ if __name__ == "__main__":
         # xcode = cct.code_to_symbol(code)
         # dd = pd.concat([dd, df], axis=0)
         # print df.loc[('600151')].index[-1]
-        print(".", len(df))
+        print((".", len(df)))
         # st.append(xcode,df)
         put_time = time.time()
         # st.put("df", df, format="table", append=True, data_columns=['code','date'])

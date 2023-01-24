@@ -59,7 +59,7 @@ def main(plot):
     # Download the bars.
     # feed = yahoofinance.build_feed([instrument], 2011, 2015, ".")
     feed = ts.get_hist_data('601198')
-    print(type(feed))
+    print((type(feed)))
     # import sys;sys.exit(0)
 
     strat = BBands(feed, ptype, bBandsPeriod)
@@ -73,7 +73,7 @@ def main(plot):
         plt.getInstrumentSubplot(instrument).addDataSeries("lower", strat.getBollingerBands().getLowerBand())
   
     strat.run()
-    print("Sharpe ratio: %.2f" % sharpeRatioAnalyzer.getSharpeRatio(0.05))
+    print(("Sharpe ratio: %.2f" % sharpeRatioAnalyzer.getSharpeRatio(0.05)))
   
     if plot:
         plt.plot()

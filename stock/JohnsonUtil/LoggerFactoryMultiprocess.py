@@ -50,9 +50,9 @@ class MultiprocessHandler(logging.FileHandler):
                 os.makedirs(_dir)
         except Exception:
             print("创建文件夹失败")
-            print("文件夹路径：" + self.filePath)
+            print(("文件夹路径：" + self.filePath))
             pass
-
+        
         if codecs is None:
             encoding = None
 

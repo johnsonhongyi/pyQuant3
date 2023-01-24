@@ -300,17 +300,17 @@ def longsklearn(code='999999', ptype='f',dtype='d',start=None,end=None):
             uV.append(highp[i])
             uP.append(i)
     print(highp)
-    print("uV:%s" % uV[:1])
-    print("uP:%s" % uP[:1])
-    print("bV:%s" % bV[:1])
-    print("bP:%s" % bP[:1])
+    print(("uV:%s" % uV[:1]))
+    print(("uP:%s" % uP[:1]))
+    print(("bV:%s" % bV[:1]))
+    print(("bP:%s" % bP[:1]))
 
     sV, sP = LIS(uV)
     dV, dP = LIS(bV)
-    print("sV:%s" % sV[:1])
-    print("sP:%s" % sP[:1])
-    print("dV:%s" % dV[:1])
-    print("dP:%s" % dP[:1])
+    print(("sV:%s" % sV[:1]))
+    print(("sP:%s" % sP[:1]))
+    print(("dV:%s" % dV[:1]))
+    print(("dP:%s" % dP[:1]))
     sidx = []
     didx = []
     for i in range(len(sP)):
@@ -320,8 +320,8 @@ def longsklearn(code='999999', ptype='f',dtype='d',start=None,end=None):
         # idx.append(bP[p[i]])
         didx.append(bP[dP[i]])
 
-    print("sidx:%s"%sidx[:1])
-    print("didx:%s"%didx[:1])
+    print(("sidx:%s"%sidx[:1]))
+    print(("didx:%s"%didx[:1]))
 
     # plt.plot(closep)
     # plt.plot(idx,d,'ko')
@@ -353,7 +353,7 @@ def longsklearn(code='999999', ptype='f',dtype='d',start=None,end=None):
     # ax.plot(didx, dV, linewidth=1)
     # ax.plot(didx, dV, 'co')
     df['mean']=list(map(lambda h,l:(h+l)/2,df.high.values,df.low.values))
-    print(df['mean'][:1])
+    print((df['mean'][:1]))
     # d=df.mean
     dw=dw.set_index('date')
     # print dw[:2]

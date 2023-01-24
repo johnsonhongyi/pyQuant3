@@ -519,7 +519,7 @@ class thrSMA(strategy.BacktestingStrategy):
             if self.buyCon1() and self.buyCon2():
                 shares = int(self.getBroker().getCash() * 0.2 / bars[self.__instrument].getPrice())
                 self.__position = self.enterLong(self.__instrument, shares)
-                print(bars[self.__instrument].getDateTime(), bars[self.__instrument].getPrice())
+                print((bars[self.__instrument].getDateTime(), bars[self.__instrument].getPrice()))
                 self.info("buy %s" % (bars.getDateTime()))
 
 class turtle(strategy.BacktestingStrategy):
@@ -668,7 +668,7 @@ def turtle_test(code,start=None,plot=True,dl=60):
     for item in retAnalyzer.getCumulativeReturns():
         return_list.append(item)
 
-    print("Sharpe ratio: %.2f maxdown:%.2f%%  return:%.2f%%" %(sharp,maxdd*100,return_*100))
+    print(("Sharpe ratio: %.2f maxdown:%.2f%%  return:%.2f%%" %(sharp,maxdd*100,return_*100)))
     myStrategy.get_max_min()
     plt.plot()
 

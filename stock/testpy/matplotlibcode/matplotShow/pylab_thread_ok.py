@@ -264,7 +264,7 @@ if __name__ == '__main__':
     i=1
     main(i)
     while 1:
-        code = input("code:")
+        code = eval(input("code:"))
         if code == 'q':
             sys.exit(0)
         else:

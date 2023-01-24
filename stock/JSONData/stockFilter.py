@@ -84,12 +84,11 @@ def filterPowerCount(df, count=200, down=False, duration=2):
 
 def compute_perd_value(df, market_value=3, col='per'):
 
-    if market_value==None or market_value < '3':
+    if market_value==None or market_value < '2':
         market_value = 3
-    temp = df[df.columns[(df.columns >= '%s1d' % (col)) & (
-        df.columns <= '%s%sd' % (col, market_value))]]
-    df['%s%sd' % (col, market_value)] =  temp.T.sum().apply(lambda x: round(x, 1))
+    temp = df[df.columns[(df.columns >= '%s1d' % (col)) & (df.columns <= '%s%sd' % (col, market_value))]]
 
+    df['%s%sd' % (col, market_value)] = temp.T.sum().apply(lambda x: round(x, 1))
     return df
 
 
@@ -145,29 +144,74 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     sort_value = cct.GlobalValues().getkey('market_sort_value')
     market_key = cct.GlobalValues().getkey('market_key')
     market_value = cct.GlobalValues().getkey('market_value')
-
+    tdx_Index_Tdxdata = cct.GlobalValues().getkey('tdx_Index_Tdxdata')
+    # if market_key is not None:
+    #     market_dff = eval(ct.Market_sort_idx_perd[market_key])[0]
     # if int(market_value) > 1 and 930 < cct.get_now_time_int():
+    # print("market_value:%s market_key:%s"%(market_value,market_key))
+    if market_value != '1':
+        df= compute_perd_value(df, market_value, 'perc')
+        df= compute_perd_value(df, market_value, 'per')
+        if tdx_Index_Tdxdata is not None:
+            tdx_Index_Tdxdata = compute_perd_value(tdx_Index_Tdxdata,market_value,'perc')
+            tdx_Index_Tdxdata = compute_perd_value(tdx_Index_Tdxdata,market_value,'per')
+        if market_key == '3':
+            idx_k = tdx_Index_Tdxdata['perc%sd'%(int(float(market_value)))].max()
+        else:
 
-    df= compute_perd_value(df, market_value, 'perc')
-    df= compute_perd_value(df, market_value, 'per')
+            idx_k = int(float(market_value)) if market_value is not None else 1
+    else:
+        idx_k = int(float(market_value))
 
-    if sort_value != 'percent' and (market_key in ['2', '3'] and market_value not in ['1']):
+    # if sort_value <> 'percent' and (market_key in ['2', '3','5','4','6','x','x1','x2'] and market_value not in ['1']):
+    if (market_key in ['1','2', '3','5','4','6','7','8','9','x','x1','x2']) :
+    # if sort_value <> 'percent' and (market_key in ['2', '3','5','4','6','8','9','x','x1','x2']) :
+        # @['5','4','6','8','x','x1','x2'] johnson_cons
         # print("sort_value:%s,market_key:%s ,market_value:%s" %
         #       (sort_value, market_key, market_value))
         if market_key is not None and market_value is not None:
-            # if market_key == '3':
 
-            if market_key == '3':
-                market_value= int(market_value)
+            if market_key == '3' and market_value not in ['1']:
+                market_value= int(float(market_value))
                 log.info("stf market_key:%s" % (market_key))
                 idx_k= cct.get_col_in_columns(df, 'perc%sd', market_value)
+                # filter percd > idx
+                # df= df[(df[("perc%sd" % (idx_k))] >= idx_k) | (df[("perc%sd" % (idx_k))]< -idx_k)]
+                df= df[(df[("perc%sd" % (idx_k))] >= idx_k) ]
+
+            # elif market_key in ['5','6'] and market_value not in ['1']:
+            #     # market_value= int(market_value)
+            #     # filter percd > idx
+            #     idx_k = int(market_value)
+            #     df= df[ (df[("%s" % (sort_value))] <= idx_k) ]
+
+            elif market_key in ['x1','x','6'] and market_value not in ['1']:
+                # market_value= int(market_value)
+                # filter percd > idx
+                # idx_k = int(market_value)
+
+
+
+                # if market_key in ['x2','x']:
+                #     df= df[ (df[("%s" % (sort_value))] >= idx_k) ]
+                # else:
+                #     df= df[ (df[("%s" % (sort_value))] <= idx_k) ]
+
+                df= df[ (df[("%s" % (sort_value))] == idx_k) ]
 
                 # if int(market_value) > 1 and 930 < cct.get_now_time_int():
                 #     df= compute_perd_value(df, market_value, 'perc')
                 #     df= compute_perd_value(df, market_value, 'per')
 
-                df= df[(df[("perc%sd" % (idx_k))] >= idx_k) | (df[("perc%sd" % (idx_k))]< -idx_k)]
-                
+            elif market_key in ['x2','4','8','5','1','7','9'] and market_value not in ['1']:
+                # market_value= int(market_value)
+                # filter percd > idx
+                idx_k = int(float(market_value))
+                if market_key not in ['1','5','7']:
+                    df= df[ (df[("%s" % (sort_value))] <= idx_k) ]
+                else:
+                    df= df[ (df[("%s" % (sort_value))] >= idx_k) ]
+
             # elif market_key == '2':
             #     if int(market_value) > 1 and 915 < cct.get_now_time_int():
             #         # df['per%d'%(market_value)] = compute_perd_value(df,market_value)
@@ -240,6 +284,10 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                            set(['per1d', 'perlastp']))
 
             perc_col.remove('percent')
+
+            for co in perc_col:
+                df[co] = df[co].apply(lambda x: round(x, 2))
+
             # da, down_zero, down_dn, percent_l = 1, 0, 0, 2
             # da, down_zero, down_dn, percent_l = 1, 0, -1, 1
             # df['perc_n'] = map((lambda h, lh, l, ll, c, lc: (1 if (h - lh) > 0 else down_dn) + (1 if c - lc > 0 else down_dn) + (1 if (l - ll) > 0 else down_dn) + (2 if (c - lh) > 0 else down_zero) + (2 if (l - lc) > 0 else down_zero) + (0 if (h - lc) > 0 else down_dn)), df['high'], df['lasth%sd' % da], df['low'], df['lastl%sd' % da], df['close'],df['lastp%sd' % da])
@@ -266,27 +314,27 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
             #                                                                                               (nowd)], df['lastl%sd' % (nowd)], df['high'], df['low'], df['hmax'])
 
 
-            '''
+            
             idx_rnd = random.randint(0, len(df) - 10) if len(df) > 10 else 0
-            if not upper:
+            # if not upper:
                # if cct.get_work_time() or df.ix[idx_rnd].lastp1d <> df.ix[idx_rnd].close:
-               if cct.get_work_time() :
-                   nowd, per1d=1, 1
-                   if 'nlow' in df.columns:
-                       df['perc_n']=map(cct.func_compute_percd2020, df['open'], df['close'], df['nhigh'], df['nlow'], df['lasto%sd' % nowd], df['llastp'],
-                                         df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)])
-                   else:
-                       df['perc_n']=map(cct.func_compute_percd2020, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['llastp'],
-                                         df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)])
+            if cct.get_work_time() :
+               nowd, per1d=1, 1
+               if 'nlow' in df.columns:
+                   df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['nhigh'], df['nlow'], df['lasto%sd' % nowd], df['llastp'],
+                                     df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)]))
                else:
-                   nowd, per1d=1, 1
-                   # print  df['per%sd' % da+1], df['lastp%sd' % (da)], df['lasth%sd' % (da)], df['lastl%sd' % (da)], df['high'], df['low']
-                   df['perc_n']=map(cct.func_compute_percd2020, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['llastp'],
-                                         df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)])
+                   df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['llastp'],
+                                     df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)]))
+            else:
+               nowd, per1d=1, 1
+               # print  df['per%sd' % da+1], df['lastp%sd' % (da)], df['lasth%sd' % (da)], df['lastl%sd' % (da)], df['high'], df['low']
+               df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['llastp'],
+                                     df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)]))
 
             for co in perc_col:
-                df[co] = (df[co] + df['perc_n']).map(lambda x: int(x))
-            '''
+                df[co] = (df[co] + df['perc_n']).map(lambda x: round(x,1))
+            
 
             # for co in per_col:
             # df[co] = (df[co] + df['percent']).map(lambda x: int(x))
@@ -575,6 +623,11 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
 
     print(("bo:%0.1f" % (time.time() - time_s)), end=' ')
 
+    df['ral']=(list(map(lambda x, y: round(
+        (x + y) , 1) , df.percent, df.ral)))
+    # df['ra']=(map(lambda x, y: round(
+    #     (x + y) , 1) , df.percent, df.ra))
+    df['ra'] = df['ra'].apply(lambda x: int(x))
     return df
 
     # df = df[df.buy > df.cmean * ct.changeRatio]

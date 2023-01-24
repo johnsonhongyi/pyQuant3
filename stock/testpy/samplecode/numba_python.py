@@ -76,10 +76,10 @@ if __name__ == '__main__':
     # print "Timing Numba Function:"
     number = 1000
     ti = timeit.timeit(lambda :numba_resample(qs, xs, rands),number=number)
-    print("Timing numba_resample Function:",ti)
+    print(("Timing numba_resample Function:",ti))
     # %timeit python_resample(qs, xs, rands)
     ti = timeit.timeit(lambda :python_resample(qs, xs, rands),number=number)
-    print("Timing python_resample Function:",ti)
+    print(("Timing python_resample Function:",ti))
     ti = timeit.timeit(lambda :numpy_resample(qs, xs, rands),number=number)
-    print("Timing numpy_resample Function:",ti)
+    print(("Timing numpy_resample Function:",ti))
     # %timeit cython_resample(qs, xs, rands)

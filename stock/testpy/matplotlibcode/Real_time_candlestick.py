@@ -52,16 +52,16 @@ quotes = quotes_historical_yahoo('INTC', date1, date2)
 plot = Candleplot()
 plot.update(quotes)
 
-input('Hit return to add new data to old plot')
+eval(input('Hit return to add new data to old plot'))
 
 new_quotes = quotes_historical_yahoo('INTC', date2, date3)
 
 plot.update(new_quotes, clear=False)
 
-input('Hit return to replace old data with new')
+eval(input('Hit return to replace old data with new'))
 
 plot.update(new_quotes, clear=True)
 
-input('Finished')
+eval(input('Finished'))
 
 # Basically, I used plt.ion() to turn on interactive mode so that the plot can be updated while the program continues running. To update the data, there seem to be two options. (1) You can just call candlestick() again with the new data, which will add it to the plot without affecting the previously plotted data. This might be preferable for adding one or more new candles to the end; just pass a list containing the new candles. (2) Use ax.cla() (clear axis) to remove all the previous data before passing the new data. This would be preferable if you want a moving window, e.g. plot only the last 50 candles, since just adding new candles to the end will cause more and more candles to accumulate in the plot. Likewise if you want to update the last candle before it closes, you should clear the old data first. Clearing the axis will also clear some of the formatting, so functions should be set up to repeat the formatting of the axis after ax.cla() is called.

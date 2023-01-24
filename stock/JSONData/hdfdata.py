@@ -11,7 +11,7 @@ code='601608'
 # df=get_kdate_data('601608')
 df= ts.get_today_ticks('601608')
 # .sort_index(ascending=True).dropna()
-print(df[:1])
+print((df[:1]))
 store=pd.HDFStore('store.h5',mode='w',format='table', complevel=9, complib='blosc')
 # df.index=df.index.astype('datetime64')
 # store[code]=df
@@ -21,7 +21,7 @@ store=pd.HDFStore('store.h5',mode='w',format='table', complevel=9, complib='blos
 store.put('sz'+code,df)
 # h5f = pd.HDFStore('store.h5',mode='r')
 dd=store.select('sz'+code)
-print(dd[:5])
+print((dd[:5]))
 
 
 import sys

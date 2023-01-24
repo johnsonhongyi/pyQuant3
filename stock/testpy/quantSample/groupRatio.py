@@ -70,7 +70,7 @@ period = 30
 group_index = gen_item_group_index(len(data), period)
 # 把分组索引数据添加到股票数据里
 data['group_index'] = group_index
-print(len(data))
+print((len(data)))
 data.head().append(data.tail())
 
 
@@ -79,27 +79,27 @@ group = data.groupby('group_index').agg({
                                         'volume': 'sum',
                                         'low': 'min',
                                         'high': _ceiling_price})
-print(group.head())
+print((group.head()))
 
 # 添加每个分组的起始日期
 date_col = pd.DataFrame({"group_index": group_index, "date": idx})
 group['date'] = date_col.groupby('group_index').agg('first')
-print(group.head())
+print((group.head()))
 
 # 添加我们的波动指标 股票波动系数 = 最高价/最低价
 group['ripples_radio'] = group.high / group.low
-print(group.head())
+print((group.head()))
 
 
 # 降序排列。我们把分组的起始日期，交易量总和都列出来，也可以观察一下交易量和股票波动比的关系
 ripples = group.sort_values('ripples_radio', ascending=False)
-print(ripples.head())
+print((ripples.head()))
 
-print(ripples.head(10).ripples_radio.mean())
-print(ripples.tail(10).ripples_radio.mean())
+print((ripples.head(10).ripples_radio.mean()))
+print((ripples.tail(10).ripples_radio.mean()))
 ripples = group.sort_values('ripples_radio', ascending=False)
-print(ripples.head())
-print(ripples.tail())
+print((ripples.head()))
+print((ripples.tail()))
 # print stock_ripples_batch(basedir=data, period=20)
 # 按照日期分组
 # days = raw.groupby(level=0).agg(

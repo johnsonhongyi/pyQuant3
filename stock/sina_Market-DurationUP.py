@@ -13,7 +13,6 @@ from JohnsonUtil import johnson_cons as ct
 import singleAnalyseUtil as sl
 from JSONData import powerCompute as pct
 from JSONData import stockFilter as stf
-
 from JSONData import tdx_data_Day as tdd
 from JSONData import LineHistogram as lhg
 from JohnsonUtil import LoggerFactory as LoggerFactory
@@ -103,7 +102,7 @@ if __name__ == "__main__":
     # duration_date = ct.duration_date_up
     # duration_date = ct.duration_date_l
     # duration_date = 10
-    duration_date = 120
+    duration_date = 180
     # duration_date = 300
     du_date = duration_date
     # resample = ct.resample_dtype
@@ -131,7 +130,8 @@ if __name__ == "__main__":
     # market_sort_value, market_sort_value_key = ct.get_market_sort_value_key('1')
     # st_key_sort = '2'
     st_key_sort = ct.sort_value_key_perd23
-    market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(ct.sort_value_key_perd23)
+    # st_key_sort = 'x1 1.1'
+    market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort)
     st = None
     top_list = []
     while 1:
@@ -147,8 +147,8 @@ if __name__ == "__main__":
             market_blk = 'all'
             # market_blk = 'cyb'
             # market_blk = '060'
-            top_now = tdd.getSinaAlldf(
-                market=market_blk, filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
+            # top_now = tdd.getSinaAlldf(market=market_blk, filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
+            top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
             now_count = len(top_now)
             radio_t = cct.get_work_time_ratio()
             # top_now = top_now[top_now.buy > 0]
@@ -317,11 +317,24 @@ if __name__ == "__main__":
                     # top_all=top_all.sort_values(by=['percent','dff','couts','ratio'],ascending=[0,0,1,1])
                     # print cct.format_for_print(top_dif[:10])
                     # top_dd = pd.concat([top_dif[:5],top_temp[:3],top_dif[-3:],top_temp[-3:]], axis=0)
+
                     if percent_status == 'y' and (
                             cct.get_now_time_int() > 915 and cct.get_now_time_int() < 1505) and ptype == 'low':
-                        top_dif = top_dif[top_dif.percent >= 0]
-                        # top_temp = stf.filterPowerCount(top_dif,ct.PowerCount)
-                        top_temp = top_dif
+                        # top_dif = top_dif[top_dif.percent >= 0]
+                        # # top_temp = stf.filterPowerCount(top_dif,ct.PowerCount)
+                        # top_temp = top_dif
+
+
+                        #   topU: #high >= df.upper 'eneU': #close >= df.ene
+                        # 多头排列,topR 跳空,回踩在中轨上.
+                        #top_dif[(top_dif.close >top_dif.ma20d *0.98) & (top_dif.close < top_dif.ma20d *1.05) ][:10]
+                        #close 回调指20W附近
+
+                        # top_temp = top_dif[(top_dif.topU > 0) & (top_dif.eneU > 0)] 
+                        top_temp = top_dif.copy() 
+                        top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
+
+                        
                         top_end = top_dif[-5:].copy()
                         top_temp = pct.powerCompute_df(
                             top_temp, dl=ct.PowerCountdl, talib=True)
@@ -331,7 +344,14 @@ if __name__ == "__main__":
                     elif ptype == 'low':
 
                         # top_temp = top_dif[top_dif.topR >= 1]
-                        top_temp = top_dif.copy()
+                        # top_temp = top_dif.copy()
+                        # top_temp = top_dif[(top_dif.topU > 0) & (top_dif.eneU > 0)] 
+                        top_temp = top_dif.copy() 
+                        top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
+
+
+
+
                         # top_dif = top_dif[top_dif.percent >= 0]
                         # top_temp = stf.filterPowerCount(top_dif,ct.PowerCount)
                         # top_temp = top_dif[ ((top_dif.lastp0d >=9.8)  & (top_dif.lastp1d < 9) & (top_dif.lastp2d < 9) & (top_dif.lastp3d < 9) )  | ((top_dif.lastp0d <9)  & (top_dif.lastp1d < 9) & (top_dif.lastp2d < 9) & (top_dif.lastp3d < 9)) ][:100]
@@ -365,7 +385,8 @@ if __name__ == "__main__":
                     else:
                         # top_dif = top_dif[top_dif.percent >= 0]
                         top_end = top_dif[:5].copy()
-                        top_temp = top_dif[-ct.PowerCount:].copy()
+                        # top_temp = top_dif[-ct.PowerCount:].copy()
+                        top_temp = top_dif.copy()
                         top_temp = pct.powerCompute_df(
                             top_temp, dl=ct.PowerCountdl, talib=True)
                         top_end = pct.powerCompute_df(
@@ -382,11 +403,20 @@ if __name__ == "__main__":
                     top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl,
                                                  filter=False, ma5d=False, dl=14, percent=False, resample=resample, ene=False, top10=False)
 
+                    
+                    #20210816 filter ma5d ma10d
+                    # top_temp = top_temp[ (top_temp.close > top_temp.ma5d) & ((top_temp.close > top_temp.hmax))]
+                    top_temp = top_temp[ (top_temp.close > top_temp.ma5d) ]
+
+
                     print(("N:%s K:%s %s G:%s" % (
                         now_count, len(top_all[top_all['buy'] > 0]),
                         len(top_now[top_now['volume'] <= 0]), goldstock)), end=' ')
                     print("Rt:%0.1f dT:%s N:%s T:%s %s%%" % (float(time.time() - time_Rt), cct.get_time_to_date(time_s), cct.get_now_time(), len(top_temp), round(len(top_temp) / float(ct.PowerCount) * 100, 1)))
                     # top_end = stf.getBollFilter(df=top_end, boll=ct.bollFilter,duration=ct.PowerCountdl)
+                    
+
+
                     if 'op' in top_temp.columns:
                         if cct.get_now_time_int() > ct.checkfilter_end_timeDu and (int(duration_date) > int(ct.duration_date_sort) or int(duration_date) < 6):
                             top_temp = top_temp.sort_values(by=(market_sort_value),
@@ -420,8 +450,8 @@ if __name__ == "__main__":
 
                     ct_Duration_format_Values = ct.get_Duration_format_Values(
                         ct_Duration_format_Values, replace='b1_v', dest='volume')
-                    ct_Duration_format_Values = ct.get_Duration_format_Values(
-                        ct_Duration_format_Values, replace='fibl', dest='top10')
+                    # ct_Duration_format_Values = ct.get_Duration_format_Values(
+                    #     ct_Duration_format_Values, replace='fibl', dest='top10')
                     ct_Duration_format_Values = ct.get_Duration_format_Values(
                         ct_Duration_format_Values, replace='perc1d', dest='perc3d')
 

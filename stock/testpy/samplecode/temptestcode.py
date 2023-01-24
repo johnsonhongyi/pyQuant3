@@ -36,7 +36,7 @@ def New_Page_Info(new_page):
 
 def Spider(url):
     i = 0
-    print("downloading ", url)
+    print(("downloading ", url))
     myPage = requests.get(url).content.decode("gbk")
     # myPage = urllib2.urlopen(url).read().decode("gbk")
     myPageResults = Page_Info(myPage)
@@ -45,7 +45,7 @@ def Spider(url):
     StringListSave(save_path, filename, myPageResults)
     i += 1
     for item, url in myPageResults:
-        print("downloading ", url)
+        print(("downloading ", url))
         new_page = requests.get(url).content.decode("gbk")
         # new_page = urllib2.urlopen(url).read().decode("gbk")
         newPageResults = New_Page_Info(new_page)

@@ -40,10 +40,10 @@ def press_zoom(self, event):
 
 def is_just_outside(fig, event):
     x, y = event.x, event.y
-    print("x:", x, y)
+    print(("x:", x, y))
     for ax in fig.axes:
         xAxes, yAxes = ax.transAxes.inverted().transform([x, y])
-        print("xAxes:", xAxes, yAxes)
+        print(("xAxes:", xAxes, yAxes))
         # if (-0.02 < xAxes < 0) | (1 < xAxes < 1.02):
         #     print "just outside x-axis"
         # if (-0.02 < yAxes < 0) | (1 < yAxes < 1.02):

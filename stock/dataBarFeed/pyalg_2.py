@@ -84,7 +84,7 @@ def vwap(plot):
         #plt.getPortfolioSubplot().addDataSeries("vwap", strat.getVWAP()[instrument[-1]])
     ds = pyalg_utils.dataSet(strat)   #抽取交易数据集语句，若使用系统自带画图功能则不需要该项
     strat.run()
-    print("Sharpe ratio: %.2f" % sharpeRatioAnalyzer.getSharpeRatio(0.05))
+    print(("Sharpe ratio: %.2f" % sharpeRatioAnalyzer.getSharpeRatio(0.05)))
 
     if plot:
         plt.plot()

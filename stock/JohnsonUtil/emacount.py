@@ -140,9 +140,9 @@ if __name__ == '__main__':
     # print start_d
     data = getdata_ema_trend('601198', '10', 'd')
     ser = data.mean()
-    print(data.describe()['open']['mean'])
+    print((data.describe()['open']['mean']))
 
-    print(data.mean()['ma5'])
+    print((data.mean()['ma5']))
 
     # dz['2015-06-02']
     # 41.399999999999999

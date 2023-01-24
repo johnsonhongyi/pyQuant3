@@ -107,7 +107,7 @@ def get_sina_all_dd(vol='0', type='0', retry_count=3, pause=0.001):
             print((ct.DD_VOL_List[vol], ct.DD_TYPE_List[type]))
             # print(ct.SINA_DD_VRatio % (ct.P_TYPE['http'], ct.DOMAINS['vsf'], ct.PAGES['sinadd_all'],
                                               # ct.DD_VOL_List[vol], ct.DD_TYPE_List[type]))
-            print(ct.SINA_DD_VRatio % (ct.P_TYPE['http'], ct.DOMAINS['vsf'], ct.PAGES['sinadd_all'],ct.DD_VOL_List[vol], ct.DD_TYPE_List[type]))
+            print((ct.SINA_DD_VRatio % (ct.P_TYPE['http'], ct.DOMAINS['vsf'], ct.PAGES['sinadd_all'],ct.DD_VOL_List[vol], ct.DD_TYPE_List[type])))
             html = lxml.html.parse(ct.SINA_DD_VRatio % (ct.P_TYPE['http'], ct.DOMAINS['vsf'], ct.PAGES['sinadd_all'],
                                               ct.DD_VOL_List[vol], ct.DD_TYPE_List[type]))
             # else:

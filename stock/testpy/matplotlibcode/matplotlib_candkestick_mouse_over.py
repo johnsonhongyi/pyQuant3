@@ -48,10 +48,10 @@ def on_move(event):
             return abs(quote[0] - date_ordinal)
         quotes.sort(key=sorter)
 
-        print('on date %s the nearest 3 openings were %s at %s respectively' % \
+        print(('on date %s the nearest 3 openings were %s at %s respectively' % \
                         (date, 
                          ', '.join([str(quote[1]) for quote in quotes[:3]]),
-                         ', '.join([str(num2date(quote[0])) for quote in quotes[:3]])))
+                         ', '.join([str(num2date(quote[0])) for quote in quotes[:3]]))))
 
 
 on_move_id = fig.canvas.mpl_connect('motion_notify_event', on_move)

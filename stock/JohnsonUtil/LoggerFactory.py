@@ -8,6 +8,7 @@ import sys,os
 sys.path.append("..")
 # from logging.handlers import RotatingFileHandler
 from JohnsonUtil.LoggerFactoryMultiprocess import MultiprocessHandler
+# sys.path.append("..")
 # import ipykernel.iostream 
 # from logbook import StderrHandler
 # from commonTips import RamBaseDir as rbd

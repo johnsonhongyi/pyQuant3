@@ -51,11 +51,11 @@ if __name__=="__main__":
 
     readline.set_completer(t.listCompleter)
 
-    ans = input("Complete from list ")
+    ans = eval(input("Complete from list "))
     print(ans)
     
     readline.set_completer(t.pathCompleter)
-    ans = input("What file do you want? ")
+    ans = eval(input("What file do you want? "))
     print(ans)
     
 # readline.set_completer(completer.complete)

@@ -111,9 +111,9 @@ ind = np.arange(N)
 
 def format_date_date2num(x, pos=None):
     thisind = np.clip(int(x + 0.5), 0, N - 1)
-    print(x, pos, thisind, (df.index[thisind]))
+    print((x, pos, thisind, (df.index[thisind])))
     if not num2date(x).strftime('%Y-%m-%d') in dates:
-        print("empty date:%s" % (num2date(x).strftime('%Y-%m-%d')))
+        print(("empty date:%s" % (num2date(x).strftime('%Y-%m-%d'))))
         # return ''
     # return df.index[thisind].strftime('%Y-%m-%d')
     # return(df.index[thisind]).strftime('%Y-%m-%d')
@@ -121,8 +121,8 @@ def format_date_date2num(x, pos=None):
 
 
 def format_date(x, pos=None):
-    print(x, pos)
-    print(dates[x])
+    print((x, pos))
+    print((dates[x]))
     return dates[x]
 
 

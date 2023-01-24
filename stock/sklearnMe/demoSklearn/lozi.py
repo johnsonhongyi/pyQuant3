@@ -53,7 +53,7 @@ def draw_lozi(cx, cy, d):
     # 不显示横纵坐标
     # pl.gca().set_axis_off()
     # 刷新画布
-    print("time:", time.clock() - start)
+    print(("time:", time.clock() - start))
     # pl.ion()
     # pl.show()
     pl.draw()
@@ -63,7 +63,7 @@ def draw_lozi(cx, cy, d):
 def on_press(event):
     global g_size
     print(event)
-    print(dir(event))
+    print((dir(event)))
     newx = event.xdata
     newy = event.ydata
     print(newx)
@@ -76,15 +76,15 @@ def on_press(event):
     if event.button == 1:  # button ==1 代表鼠标左键按下， 是放大图像
         g_size /= 2
         # g_size =1
-        print("zoom out:%s" % g_size)
+        print(("zoom out:%s" % g_size))
     elif event.button == 3:  # button == 3 代表鼠标右键按下， 是缩小图像
         g_size *= 2
-        print("zoom in:%s" % g_size)
+        print(("zoom in:%s" % g_size))
 
     else:
-        print("other key:%s" % g_size)
+        print(("other key:%s" % g_size))
         return None
-    print("g_size:", g_size)
+    print(("g_size:", g_size))
 
     draw_lozi(newx, newy, g_size)
 

@@ -1,6 +1,6 @@
 from math import *
 from matplotlib import pyplot as plt
-print(plt.get_backend())
+print((plt.get_backend()))
 def main():
     x = list(range(-50, 51, 1))
     for pow in range(1,5):   # plot x^1, x^2, ..., x^4
@@ -10,7 +10,7 @@ def main():
         plt.draw()
         #plt.show()             #this plots correctly, but blocks execution.
         plt.show(block=False)   #this creates an empty frozen window.
-        _ = input("Press [enter] to continue.")
+        _ = eval(input("Press [enter] to continue."))
 
 
 # if __name__ == '__main__':
@@ -31,7 +31,7 @@ def main2():
         plt.plot(x, y)
         plt.draw()
         plt.pause(0.001)
-        input("Press [enter] to continue.")
+        eval(input("Press [enter] to continue."))
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -124,8 +124,8 @@ def run(niter=1000, doblit=True):
             fig.canvas.draw()
 
     plt.close(fig)
-    print("Blit = %s, average FPS: %.2f" % (
-        str(doblit), niter / (time.time() - tic)))
+    print(("Blit = %s, average FPS: %.2f" % (
+        str(doblit), niter / (time.time() - tic))))
 
 if __name__ == '__main__':
     # run(doblit=False)

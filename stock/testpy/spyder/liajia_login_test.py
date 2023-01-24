@@ -59,4 +59,4 @@ class LianjiaSpider(scrapy.Spider):
         if  response.body:
             yield scrapy.Request('http://user.lianjia.com',meta={'cookiejar': response.meta['cookiejar']},callback=self.parse_page)
     def parse_page(self, response):
-        print(response.body)
+        print((response.body))
