@@ -23,7 +23,8 @@ def parse2ChanKTMP_numba(k_data, k_values, in_chan=False,chan_kdf=True):
     dt_bf_n2 = 0
 
     def set_baohan_value(dt, value):
-        dfbao.set_value(dt, baohan_columns,  value)
+        # dfbao.set_value(dt, baohan_columns,  value)
+        dfbao.at[dt, baohan_columns] = value
         return dt
 
     def get_baohan_value(dt, highV):
@@ -70,7 +71,9 @@ def parse2ChanKTMP_numba(k_data, k_values, in_chan=False,chan_kdf=True):
                                           k_data['vol'][dt] + dfbao['vol'][dt_bf],
                                           k_data['amount'][dt] + dfbao['amount'][dt_bf]])
             if in_chan:
-                dfbao.set_value(dt, ['enddate'], 0)
+                # dfbao.set_value(dt, ['enddate'], 0)
+                dfbao.at[dt, 'enddate'] = 0
+
         dfbao = dfbao[dfbao['enddate'] != 0]
         print("t:%s"%(time.time()-time_s))
         return dfbao
@@ -90,7 +93,8 @@ def parse2ChanKTMP(k_data, k_values, in_chan=False,chan_kdf=True):
     dt_bf_n2 = 0
 
     def set_baohan_value(dt, value):
-        dfbao.set_value(dt, baohan_columns,  value)
+        # dfbao.set_value(dt, baohan_columns,  value)
+        dfbao.at[dt, baohan_columns] = value
         return dt
 
     def get_baohan_value(dt, highV):
@@ -134,7 +138,8 @@ def parse2ChanKTMP(k_data, k_values, in_chan=False,chan_kdf=True):
                                       k_data['vol'][dt] + dfbao['vol'][dt_bf],
                                       k_data['amount'][dt] + dfbao['amount'][dt_bf]])
         if in_chan:
-            dfbao.set_value(dt, ['enddate'], 0)
+            # dfbao.set_value(dt, ['enddate'], 0)
+            dfbao.at[dt, 'enddate'] = 0
     dfbao = dfbao[dfbao['enddate'] != 0]
     log.info("t:%s"%(time.time()-time_s))
     return dfbao

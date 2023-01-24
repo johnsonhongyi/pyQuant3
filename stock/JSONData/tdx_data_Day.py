@@ -4175,6 +4175,9 @@ if __name__ == '__main__':
     # log_level = LoggerFactory.DEBUG if args['-d']  else LoggerFactory.ERROR
     # log_level = LoggerFactory.DEBUG
     log.setLevel(log_level)
+    import ipdb;ipdb.set_trace()
+    # search_Tdx_multi_data_duration("D:\MacTools\WorkFile\WorkSpace\pyQuant3-OLD\tdx_all_df_300.h5")
+    df2= search_Tdx_multi_data_duration("tdx_all_df_300")
     # code='399001'
     # code='000862'
     # code='000859'
