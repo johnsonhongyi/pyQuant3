@@ -685,7 +685,7 @@ def get_quotes_tdx(code, start=None, end=None, dl=120, resample='d', show_name=T
     if not resample == 'd' and resample in tdd.resample_dtype:
         quotes = tdd.get_tdx_stock_period_to_type(quotes, period_day=resample)
     if str(quotes.index.dtype) != 'datetime64[ns]':
-        quotes.index = quotes.index.astype('datetime64')        
+        quotes.index = quotes.index.astype('datetime64[ns]')        
 
     if show_name:
         if 'name' in quotes.columns:
@@ -2078,10 +2078,11 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         Ti=[]
         if len(T0) / x_jizhun > 12:
             x_jizhun=len(T0) / 12
-        for i in range(len(T0) / x_jizhun):
+        for i in range( int(len(T0) / x_jizhun)):
             # print "len(T0)/x_jizhun:",len(T0)/x_jizhun
-            a=i * x_jizhun
-            d=datetime.date.fromtimestamp(T1[a])
+
+            a1=i * x_jizhun
+            d=datetime.date.fromtimestamp(int(T1[int(a1)]))
             # print d
             T2=d.strftime('$%Y-%m-%d$')
             Ti.append(T2)

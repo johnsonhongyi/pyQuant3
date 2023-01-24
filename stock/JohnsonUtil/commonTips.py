@@ -114,16 +114,22 @@ def getcwd():
 
 
 def get_run_path_tdx(fp=None):
+    #path='c:\\users\\johnson\\anaconda2\\envs\\pytorch_gpu\\lib\\site-packages'
+    # path ='c:\\users\\johnson\\anaconda2\\envs\\pytorch_gpu\\lib\\site-packages'
+    root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant\\stock\\'
     path = getcwd()
     alist = path.split('stock')
-    if len(alist) > 0:
+    # if len(alist) > 0:
+    if len(alist) > 0 and path.find('stock') >=0:
         path = alist[0]
         # os_sep=get_os_path_sep()
         if fp is not None:
             path = path + fp + '.h5'
+        log.info("info:%s getcwd:%s"%(alist[0],path))
     else:
-        print("error")
-        raise TypeError('log path error.')
+        path  = root_path.split('stock')[0] + fp + '.h5'
+        log.error("error:%s cwd:%s"%(alist[0],path))
+
     return path
 
 win10Lengend = r'D:\Program\gfzq'
@@ -3039,7 +3045,7 @@ if __name__ == '__main__':
     print(get_work_duration())
     print((random.randint(0, 30)))
     print(GlobalValues().getkey('key', defValue=None))
-    print(get_run_path_tdx('aa'))
+    print(get_run_path_tdx(tdx_hd5_name))
     print(get_ramdisk_path(tdx_hd5_name))
     print(get_today(sep='-'))
     from docopt import docopt

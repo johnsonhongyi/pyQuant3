@@ -122,6 +122,13 @@ class Sina:
         pd.options.mode.chained_assignment = None
         self.cname = False
         self.encoding = 'gbk'
+
+        self.sinaheader = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
+            'Host': 'vip.stock.finance.sina.com.cn',
+            'Referer':'http://vip.stock.finance.sina.com.cn',
+            'Connection': 'keep-alive',
+            }
         # self.all
         # h5 = self.load_hdf_db(table='all', code_l=None, init=True)
         # if h5 is None:
@@ -375,7 +382,7 @@ class Sina:
 
         url = self.sina_stock_api + self.stock_list[index]
         async with aiohttp.ClientSession() as session:
-                response = await session.get(url=url)
+                response = await session.get(url=url,headers=self.sinaheader)
                 headers = response.headers
                 response.encoding = self.encoding
                 result = await response.text()
@@ -518,7 +525,7 @@ class Sina:
         self.stock_data = []
         self.url = self.sina_stock_api + ','.join(self.stock_codes)
         log.info("stock_list:%s" % self.url[:20])
-        response = requests.get(self.url)
+        response = requests.get(self.url ,headers=self.sinaheader)
         response.encoding = self.encoding
         self.stock_data.append(response.text)
         self.dataframe = self.format_response_data(index)
@@ -574,7 +581,7 @@ class Sina:
 
             self.url = self.sina_stock_api + ','.join(self.stock_codes)
             log.info("stock_list:%s" % self.url[:30])
-            response = requests.get(self.url)
+            response = requests.get(self.url ,headers=self.sinaheader)
             response.encoding = self.encoding
             self.stock_data.append(response.text)
             self.dataframe = self.format_response_data(index)
@@ -859,6 +866,8 @@ if __name__ == "__main__":
     # print len(df)
     # code='300107'
     df =sina.all
+    import ipdb;ipdb.set_trace()
+
     # print df.lastbuy[-5:].to_frame().T
     print(sina.get_stock_list_data(['999999','399001','399006'],index=True).name)
     df = sina.get_stock_code_data('999999',index=True)
