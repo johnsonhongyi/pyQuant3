@@ -53,9 +53,9 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         # df['ma5d'] = pd.rolling_mean(df.close, 5)
 
 #        df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
-        df['ma5d'] = pd.rolling_mean(df.close, 5)
-        df['ma10d'] = pd.rolling_mean(df.close, 10)
-        df['ma20d'] = pd.rolling_mean(df.close, 26)
+        df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
+        df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
+        df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
 
         df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma10d]
         df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma10d]

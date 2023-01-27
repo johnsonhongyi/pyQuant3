@@ -58,7 +58,8 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     def get_groupby_mean_median_close(dfs):
 
         groupd = dfs.groupby(level=[0])
-        df = groupd['close'].agg({'median':'median','mean':'mean'})
+
+        df = groupd['close'].agg(['median','mean'])
         df['close'] = groupd.tail(1).reset_index().set_index(['code'])['close']
         # dfs['mean'] = groupd['close'].agg('mean')
         # dfs['median'] = groupd['close'].agg('median')
@@ -108,7 +109,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
     for da in rollma:
         cumdays=int(da)
-        dfs['ma%d'%cumdays] = groupd['close'].apply(pd.Series.rolling, cumdays)
+        dfs['ma%d'%cumdays] = groupd['close'].rolling(cumdays).mean().values
         if cumdays == 10:
             dfs['upper'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 + 11.0 / 100) * x, 1))
             dfs['lower'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 - 9.0 / 100) * x, 1))
@@ -228,12 +229,14 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
                 # df = df[(df.date >= dt_low) & (df.date <= cct.get_today())]
                 dd = df[(df.date == dt_low)]
-                df = df[(df.date >= cct.last_tddate(1))]
+                # df = df[(df.date >= cct.last_tddate(1))]
+                df = df[(df.date >= df.date.max())]
                 # import ipdb;ipdb.set_trace()
-                print(("df:%s df_idx:%s"%(len(df),len(df_idx))))
+                print(("df:%s %s df_idx:%s"%(len(df),df.index[:5],len(df_idx))))
 
-                if df_idx is not None and len(df_idx) > 0:
-                    df = df.loc[df_idx.index,:].dropna()
+                if df_idx is not None and len(df) > 0 and len(df_idx) > 0:
+                    idx_set_= set(df.index) & set(df_idx.index)
+                    df = df.loc[idx_set_,:].dropna()
                 print(("Main Down dd :%s MainUP df:%s couts std:%0.1f "%(len(dd),len(df),df.couts.std())))
                 # print df.date.mode()[0]
                 df = df.sort_values(by='couts',ascending=1)

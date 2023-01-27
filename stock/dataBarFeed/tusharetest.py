@@ -6,7 +6,7 @@ from pyalgotrade.technical import cross,highlow
 #from pyalgotrade.technical import vwap
 from pyalgotrade.stratanalyzer import sharpe
 from pandas import DataFrame
-from compiler.ast import flatten
+# from compiler.ast import flatten
 import numpy as np
 from pyalgotrade.broker.fillstrategy import DefaultStrategy
 from pyalgotrade.broker.backtesting import TradePercentage
@@ -604,7 +604,7 @@ from pyalgotrade.barfeed import yahoofeed
 from pyalgotrade.stratanalyzer import returns,sharpe,drawdown,trades
 from datetime import datetime
 from matplotlib.pyplot import plot
-from compiler.ast import flatten
+# from compiler.ast import flatten
 # import constant as ct
 import pandas as pd
 import json
