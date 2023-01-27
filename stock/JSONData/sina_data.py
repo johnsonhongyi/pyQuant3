@@ -21,7 +21,7 @@ log = LoggerFactory.log
 # log.setLevel(LoggerFactory.DEBUG)
 from JSONData import tdx_hdf5_api as h5a
 from JSONData import realdatajson as rl
-import functools
+# import functools
 
 class StockCode:
 

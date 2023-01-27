@@ -955,6 +955,8 @@ if __name__ == "__main__":
 
     runcol=['low','high','close']
     h5 = readHdf5(sina_MultiD_path)
+    import ipdb;ipdb.set_trace()
+    
     h5.shape
     mdf = cct.get_limit_multiIndex_freq(h5, freq=freq.upper(),  col='all', start=startime, end=endtime, code=None)
 
@@ -979,6 +981,7 @@ if __name__ == "__main__":
             print(h5)
             if '/' + 'all' in list(h5.keys()):
                 print((h5['all'].loc['600007']))
+                
         # h5.remove('high_10_y_20170620_all_15')
         # print h5
         # dd = h5['d_21_y_all']

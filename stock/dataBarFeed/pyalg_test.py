@@ -7,7 +7,7 @@ from pyalgotrade.technical import vwap
 from pyalgotrade.stratanalyzer import sharpe
 from pandas import DataFrame
 
-from compiler.ast import flatten
+# from compiler.ast import flatten
 import numpy as np
 
 class SMACrossOver(strategy.BacktestingStrategy):
@@ -173,14 +173,15 @@ class turtle(strategy.BacktestingStrategy):
             bar = bars[self.__instrument]
             # If a position was not opened, check if we should enter a long position.
             #如果不设定high的长度为3的话，可能取不到-3的值
-            if self.__position is None or not self.__position.isOpen() :  
-                #判定今天价比昨日的最高价高，昨天价比前天的最高价低
-                if self.__prices[-1]>self.__high[-2] and self.__prices[-2]<self.__high[-3]:
-                    shares = int(self.getBroker().getCash() * 0.9 / bars[self.__instrument].getPrice())
-                    # Enter a buy market order. The order is good till canceled.
-                    self.__position = self.enterLong(self.__instrument, shares, True)  #多种实现方式，为记录信息简要写于一处
-                  
-            # Check if we have to exit the position.
-            elif not self.__position.exitActive() and self.__prices[-1]<self.__low[-2] and self.__prices[-2]>self.__low[-3]:
-                self.__position.exitMarket()
+            if self.__high[-3] is not None:
+                if self.__position is None or not self.__position.isOpen() :  
+                    #判定今天价比昨日的最高价高，昨天价比前天的最高价低
+                    if self.__prices[-1]>self.__high[-2] and self.__prices[-2]<self.__high[-3]:
+                        shares = int(self.getBroker().getCash() * 0.9 / bars[self.__instrument].getPrice())
+                        # Enter a buy market order. The order is good till canceled.
+                        self.__position = self.enterLong(self.__instrument, shares, True)  #多种实现方式，为记录信息简要写于一处
+                      
+                # Check if we have to exit the position.
+                elif not self.__position.exitActive() and self.__prices[-1]<self.__low[-2] and self.__prices[-2]>self.__low[-3]:
+                    self.__position.exitMarket()
               

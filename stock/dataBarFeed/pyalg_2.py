@@ -13,7 +13,7 @@ from pyalgotrade.barfeed import yahoofeed
 from pyalgotrade.stratanalyzer import returns,sharpe,drawdown,trades
 from datetime import datetime
 from matplotlib.pyplot import plot 
-from compiler.ast import flatten
+# from compiler.ast import flatten
 import pyalg_test
 # import constant as ct
 import pandas as pd 
