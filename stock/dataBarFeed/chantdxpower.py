@@ -40,7 +40,7 @@ log = LoggerFactory.log
 # bokeh.plotting
 import time
 from numpy import nan
-from bokeh.models import ColumnDataSource, Rect, HoverTool, Range1d, LinearAxis, WheelZoomTool, PanTool, ResetTool, ResizeTool, PreviewSaveTool
+from bokeh.models import ColumnDataSource, Rect, HoverTool, Range1d, LinearAxis, WheelZoomTool, PanTool, ResetTool
 # ================需要修改的参数==============
 
 

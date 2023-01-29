@@ -441,7 +441,7 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
             # print (u" %s"%(f_print(2,cumin_index[market],31))),
             print(("%s %s%% %s%s" % (f_print(7, ff['close']), f_print(4, _percent, 31), f_print(1, '!' if ff['open'] > ff[
                 'lastp'] else '?'), f_print(2, '!!' if ff['close'] > ff['lastp'] else '??', 32))))
-        allTop = allTop.append(df.reset_index(), ignore_index=True)
+        allTop = pd.concat([allTop,df.reset_index()], ignore_index=True)
         allTop = allTop.drop_duplicates()
     df = allTop
     df = tdd.get_single_df_lastp_to_df(

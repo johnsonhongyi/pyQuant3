@@ -5,7 +5,7 @@ import time
 
 import numpy as np
 import pandas as pd
-import talib as ta
+import pandas_ta as ta
 import tushare as ts
 from . import tdx_data_Day as tdd
 from JohnsonUtil import LoggerFactory as LoggerFactory
@@ -225,11 +225,11 @@ def algoMultiTech(df, column='close', days=ct.Power_Ma_Days, op=0,lastday=ct.Pow
 def Get_BBANDS_algo(df,lastday=ct.Power_last_da):
     if isinstance(df, type(pd.DataFrame())):
         df = df.sort_index(ascending=True)
-        upperband, middleband, lowerband = ta.BBANDS(
-            np.array(df['close']), timeperiod=20, nbdevdn=2, matype=0)
+        df[['lowb%s'%dtype, 'midb%s'%dtype, 'upbb%s'%dtype,'bandwidth','percent']]  = ta.bbands(
+            df['close'], length=20, std=2, ddof=0)
     else:
-        upperband, middleband, lowerband = ta.BBANDS(
-            np.array(df), timeperiod=20, nbdevdn=2, matype=0)
+        df[['lowb%s'%dtype, 'midb%s'%dtype, 'upbb%s'%dtype,'bandwidth','percent']] = ta.bbands(
+            np.array(df), length=20, std=2, ddof=0)
     if len(df) > 1 + lastday:
         if lastday != 0:
             df = df[:-lastday]
@@ -311,11 +311,11 @@ def Get_BBANDS(df, dtype='d', days=ct.Power_Ma_Days,dl=ct.PowerCountdl,dm=None,l
     if len(df) < limitCount:
         return (df, 10)
     df = df.sort_index(ascending=True)
-    upperband, middleband, lowerband = ta.BBANDS(
-        np.array(df['close']), timeperiod=20, nbdevdn=2, matype=0)
-    df['upbb%s' % dtype] = pd.Series(upperband, index=df.index)
-    df['midb%s' % dtype] = pd.Series(middleband, index=df.index)
-    df['lowb%s' % dtype] = pd.Series(lowerband, index=df.index)
+    df[['lowb%s'%dtype, 'midb%s'%dtype, 'upbb%s'%dtype,'bandwidth','percent']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
+
+    # df['upbb%s' % dtype] = pd.Series(upperband, index=df.index)
+    # df['midb%s' % dtype] = pd.Series(middleband, index=df.index)
+    # df['lowb%s' % dtype] = pd.Series(lowerband, index=df.index)
     df = df.fillna(0)
     operate = 0
     log.debug('updbb:%s midb:%s close:%s' %
@@ -443,15 +443,15 @@ def Get_MACD_OP(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
         if lastday != 0:
             df = df[:-lastday]
 #    df=df.fillna(0)
-    macd, macdsignal, macdhist = ta.MACD(
-        np.array(df['close']), fastperiod=12, slowperiod=26, signalperiod=9)
-#    SignalMA5 = ta.MA(macdsignal, timeperiod=5, matype=0)
-#    SignalMA10 = ta.MA(macdsignal, timeperiod=10, matype=0)
-#    SignalMA20 = ta.MA(macdsignal, timeperiod=20, matype=0)
+    df[[ 'diff%s' % dtype,'ddea%s' % dtype, 'dea%s' % dtype]] = ta.macd(
+        df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
+#    SignalMA5 = ta.ma(macdsignal, timeperiod=5, matype=0)
+#    SignalMA10 = ta.ma(macdsignal, timeperiod=10, matype=0)
+#    SignalMA20 = ta.ma(macdsignal, timeperiod=20, matype=0)
     # 13-15 DIFF  DEA  DIFF-DEA
-    df['diff%s' % dtype] = pd.Series(macd, index=df.index)  # DIFF 13
-    df['dea%s' % dtype] = pd.Series(macdsignal, index=df.index)  # DEA  14
-    df['ddea%s' % dtype] = pd.Series(macdhist, index=df.index)  # DIFF-DEA  15
+    # df['diff%s' % dtype] = pd.Series(macd, index=df.index)  # DIFF 13
+    # df['dea%s' % dtype] = pd.Series(macdsignal, index=df.index)  # DEA  14
+    # df['ddea%s' % dtype] = pd.Series(macdhist, index=df.index)  # DIFF-DEA  15
 #    dflen = df.shape[0]
 #    MAlen = len(SignalMA5)
     operate = 0
@@ -479,15 +479,15 @@ def Get_MACD(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
     if len(df) < limitCount:
         return (df, 1)
 #    df=df.fillna(0)
-    macd, macdsignal, macdhist = ta.MACD(
-        np.array(df['close']), fastperiod=5, slowperiod=34, signalperiod=5)
-    SignalMA5 = ta.MA(macdsignal, timeperiod=5, matype=0)
-    SignalMA10 = ta.MA(macdsignal, timeperiod=10, matype=0)
-    SignalMA20 = ta.MA(macdsignal, timeperiod=20, matype=0)
+    df[[ 'diff%s' % dtype,'ddea%s' % dtype, 'dea%s' % dtype]] = ta.macd(
+        df['close'], fastperiod=5, slowperiod=34, signalperiod=5)
+    SignalMA5 = ta.ma("sma",df['dea%s' % dtype], length=5)
+    SignalMA10 = ta.ma("sma",df['dea%s' % dtype], length=10)
+    SignalMA20 = ta.ma("sma","sma",df['dea%s' % dtype], length=20)
     # 13-15 DIFF  DEA  DIFF-DEA
-    df['diff%s' % dtype] = pd.Series(macd, index=df.index)  # DIFF 13
-    df['dea%s' % dtype] = pd.Series(macdsignal, index=df.index)  # DEA  14
-    df['ddea%s' % dtype] = pd.Series(macdhist, index=df.index)  # DIFF-DEA  15
+    # df['diff%s' % dtype] = pd.Series(macd, index=df.index)  # DIFF 13
+    # df['dea%s' % dtype] = pd.Series(macdsignal, index=df.index)  # DEA  14
+    # df['ddea%s' % dtype] = pd.Series(macdhist, index=df.index)  # DIFF-DEA  15
     dflen = df.shape[0]
     MAlen = len(SignalMA5)
     operate = 0
@@ -563,19 +563,19 @@ def Get_KDJ(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
             df['ma20d'] = pd.rolling_mean(df.close, 20)
 
         df = df.sort_index(ascending=True)
-        slowk, slowd = ta.STOCH(np.array(df['high']), np.array(df['low']), np.array(
-            df['close']), fastk_period=9, slowk_period=3, slowk_matype=0, slowd_period=3, slowd_matype=0)
+        df[['slowk%s' % dtype,'slowd%s' % dtype]] = ta.stoch(df['high'], (df['low']),(
+            df['close']), k=9, d=3, slowk_matype=0, smooth_k=3)
 
-        slowkMA5 = ta.MA(slowk, timeperiod=5, matype=0)
-        slowkMA10 = ta.MA(slowk, timeperiod=10, matype=0)
-        slowkMA20 = ta.MA(slowk, timeperiod=20, matype=0)
-        slowdMA5 = ta.MA(slowd, timeperiod=5, matype=0)
-        slowdMA10 = ta.MA(slowd, timeperiod=10, matype=0)
-        slowdMA20 = ta.MA(slowd, timeperiod=20, matype=0)
+        slowkMA5 = ta.ma("sma",df['slowk%s' % dtype], length=5)
+        slowkMA10 = ta.ma("sma",df['slowk%s' % dtype], length=10)
+        slowkMA20 = ta.ma("sma",df['slowk%s' % dtype], length=20)
+        slowdMA5 = ta.ma("sma",df['slowd%s' % dtype], length=5)
+        slowdMA10 = ta.ma("sma",df['slowd%s' % dtype], length=10)
+        slowdMA20 = ta.ma("sma",df['slowd%s' % dtype], length=20)
 
         # 16-17 K,D
-        df['slowk%s' % dtype] = pd.Series(slowk, index=df.index)  # K
-        df['slowd%s' % dtype] = pd.Series(slowd, index=df.index)  # D
+        # df['slowk%s' % dtype] = pd.Series(slowk, index=df.index)  # K
+        # df['slowd%s' % dtype] = pd.Series(slowd, index=df.index)  # D
         dflen = df.shape[0]
         MAlen = len(slowkMA5)
         operate = 0
@@ -633,18 +633,18 @@ def Get_RSI(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
     if len(df) > 1 + lastday:
         if lastday != 0:
             df = df[:-lastday]
-    slowreal = ta.RSI(np.array(df['close']), timeperiod=14)
-    fastreal = ta.RSI(np.array(df['close']), timeperiod=5)
+    df['slowreal%s' % dtype] = ta.rsi(df['close'], length=14)
+    df['fastreal%s' % dtype] = ta.rsi(df['close'], length=5)
 
-    slowrealMA5 = ta.MA(slowreal, timeperiod=5, matype=0)
-    slowrealMA10 = ta.MA(slowreal, timeperiod=10, matype=0)
-    slowrealMA20 = ta.MA(slowreal, timeperiod=20, matype=0)
-    fastrealMA5 = ta.MA(fastreal, timeperiod=5, matype=0)
-    fastrealMA10 = ta.MA(fastreal, timeperiod=10, matype=0)
-    fastrealMA20 = ta.MA(fastreal, timeperiod=20, matype=0)
+    slowrealMA5 = ta.ma("sma",df['slowreal%s' % dtype], length=5)
+    slowrealMA10 = ta.ma("sma",df['slowreal%s' % dtype], length=10)
+    slowrealMA20 = ta.ma("sma",df['slowreal%s' % dtype], length=20)
+    fastrealMA5 = ta.ma("sma",df['fastreal%s' % dtype], length=5)
+    fastrealMA10 = ta.ma("sma",df['fastreal%s' % dtype], length=10)
+    fastrealMA20 = ta.ma("sma",df['fastreal%s' % dtype], length=20)
     # 18-19 慢速real，快速real
-    df['slowreal%s' % dtype] = pd.Series(slowreal, index=df.index)  # 慢速real 18
-    df['fastreal%s' % dtype] = pd.Series(fastreal, index=df.index)  # 快速real 19
+    # df['slowreal%s' % dtype] = pd.Series(slowreal, index=df.index)  # 慢速real 18
+    # df['fastreal%s' % dtype] = pd.Series(fastreal, index=df.index)  # 快速real 19
     dflen = df.shape[0]
     MAlen = len(slowrealMA5)
     operate = 0

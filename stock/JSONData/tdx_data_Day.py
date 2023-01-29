@@ -421,12 +421,12 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         fileSize = os.path.getsize(file_path)
         if newstockdayl != 0:
             if fileSize < atomStockSize * newstockdayl:
-                return Series()
+                return pd.Series([],dtype='float64')
         # else:
             # log.info("newsday=0:%s"(code))
         data = cct.read_last_lines(file_path, int(dl) + 3)
         data_l = data.split('\n')
-        dt_list = Series()
+        dt_list = pd.Series([],dtype='float64')
         data_l.reverse()
         log.debug("day 1:%s" % data_l)
         for line in data_l:
@@ -468,7 +468,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         if df is None or len(df) == 0:
             fileSize = os.path.getsize(file_path)
             if fileSize < atomStockSize * newstockdayl:
-                return Series()
+                return pd.Series([],dtype='float64')
             if start is None:
                 if dl is None:
                     dl = 60
@@ -959,7 +959,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
             ds.sort_index(ascending=True, inplace=True)
             # log.debug("ds:%s" % ds[:1])
             ds = ds.fillna(0)
-            df = df.append(ds)
+            df = pd.concat([df,ds])
             if write_tushare and ((len(ds) == 1 and ds.index.values[0] != cct.get_today()) or len(ds) > 1):
                 #                if index_status:
                 sta = write_tdx_tushare_to_file(code, df=df)
@@ -1198,7 +1198,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
             ds.rename(columns={'volume': 'vol'}, inplace=True)
             ds.sort_index(ascending=True, inplace=True)
             ds = ds.fillna(0)
-            df = df.append(ds)
+            df = dpd.concat([df,ds])
             if (len(ds) == 1 and ds.index.values[0] != cct.get_today()) or len(ds) > 1:
                 sta = write_tdx_tushare_to_file(code, df=df)
                 if sta:
@@ -3230,11 +3230,11 @@ def get_tdx_exp_low_or_high_price(code, dt=None, ptype='close', dl=None, end=Non
                     dd = dd.T[dt]
                     dd['date'] = dt
             else:
-                dd = Series()
+                dd = pd.Series([],dtype='float64')
 
         else:
             log.warning("code:%s no < dt:NULL" % (code))
-            dd = Series()
+            dd = pd.Series([],dtype='float64')
             # dd = Series(
             #     {'code': code, 'date': cct.get_today(), 'open': 0, 'high': 0, 'low': 0, 'close': 0, 'amount': 0,
             #      'vol': 0})
@@ -3369,11 +3369,11 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
                 #     if len(df.ma10d) > 0 and df[:1].ma10d.values[0] is not None and df[:1].ma10d.values[0] != 0:
                 #         dd['ma10d'] = round(float(df[:1].ma10d.values[0]), 2)
             else:
-                dd = Series()
+                dd = pd.Series([],dtype='float64')
 
         else:
             log.debug("code:%s no < dt:NULL" % (code))
-            dd = Series()
+            dd = pd.Series([],dtype='float64')
             # dd = Series(
             #     {'code': code, 'date': cct.get_today(), 'open': 0, 'high': 0, 'low': 0, 'close': 0, 'amount': 0,
             #      'vol': 0})
@@ -3455,7 +3455,7 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
 #         ofile.seek(-fileSize, 2)
 #         no = int(fileSize / e)
 #         if no < newstockdayl:
-#             return Series()
+#             return pd.Series([],dtype='float64')
 #         # print no,b,day_cout,fileSize
 #         buf = ofile.read()
 #         ofile.close()
@@ -3497,7 +3497,7 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
 #             dd['date'] = dt
 #         else:
 #             log.warning("no < dt:NULL")
-#             dd = Series()
+#             dd = pd.Series([],dtype='float64')
 #             # dd = Series(
 #             # {'code': code, 'date': cct.get_today(), 'open': 0, 'high': 0, 'low': 0, 'close': 0, 'amount': 0,
 #             # 'vol': 0})
