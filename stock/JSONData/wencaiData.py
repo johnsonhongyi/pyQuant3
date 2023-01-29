@@ -511,10 +511,11 @@ def get_codelist_df(codelist):
         # print "ti:",time.time()-time_s
 #        cnamelist =[]
         for li in div_list:
-            cname = ",".join(x.encode('utf8') for x in li)
+            # cname = ",".join(x.encode('utf8') for x in li)
+            cname = ",".join(x for x in li)
 #            cnamelist.append(cname)
             wcdf_t = get_wencai_Market_url(cname, len(li))
-            wcdf = wcdf.append(wcdf_t)
+            wcdf = pd.concat([wcdf,wcdf_t])
 #        results = cct.to_mp_run_async(get_wencai_Market_url, cnamelist,30)
 #        for res in results:
 #            wcdf = wcdf.append(res)

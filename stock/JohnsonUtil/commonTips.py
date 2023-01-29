@@ -613,7 +613,7 @@ def get_rzrq_code(market='all'):
         dfsh = dfsh.loc[:, ['code', 'name']]
         if market == 'sh':
             return dfsh
-        dd = dfsz.append(dfsh, ignore_index=True)
+        dd = pd.concat([dfsz,dfsh], ignore_index=True)
     elif market == 'cx':
         cxzx = base + 'cxgzx.csv'
         dfot = pd.read_csv(cxzx, dtype={'code': str}, sep='\t', encoding='gbk')
@@ -636,7 +636,7 @@ def get_tushare_market(market='zxb', renew=False, days=5):
             if days != 10:
                 initda = days * 2
                 df2 = ts.inst_tops(initda).loc[:, ['code', 'name']]
-                df = df.append(df2)
+                df = pd.concat([df,df2])
                 df.drop_duplicates('code', inplace=True)
         else:
             log.warn('market not found')
@@ -1585,7 +1585,7 @@ def get_div_list(ls, n):
         return [[i] for i in ls]
     else:
         # j = (ls_len / n) + 1
-        j = (ls_len / n)
+        j = int((ls_len / n))
         k = ls_len % n
         # print "K:",k
         ls_return = []

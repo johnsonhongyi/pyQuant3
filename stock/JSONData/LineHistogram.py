@@ -196,8 +196,9 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
             asset = asset.dropna()
             dates = asset.index
             aset=set(df1.index) & set(df.index)
+
             # idx_list= map( lambda x: x, aset)
-            asset1 = df1.loc[aset, ptype]
+            asset1 = df1.loc[[x for x in aset], ptype]
             # asset1 = df1.loc[(set(df1.index) & set(df.index)), ptype].sort_index(ascending=True)
 
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
@@ -230,7 +231,7 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
             asset = asset.dropna()
             dates = asset.index
             # asset1 = df1.loc[df.index, ptype]
-            asset1 = df1.loc[(set(df1.index) & set(df.index)), ptype].sort_index(ascending=True)
+            asset1 = df1.loc[ [x for x in (set(df1.index) & set(df.index))], ptype].sort_index(ascending=True)
             # df1.loc[(set(df1.index) & set(asset.index)), ptype].sort_index(ascending=True)
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
     # print len(df),len(asset),len(df1),len(asset1)
@@ -645,7 +646,7 @@ def get_linear_model_histogram(code, ptype='low', dtype='d', start=None, end=Non
             asset = asset.dropna()
             dates = asset.index
             # asset1 = df1.loc[df.index, ptype]
-            asset1 = df1.loc[(set(df1.index) & set(df.index)), ptype].sort_index(ascending=True)
+            asset1 = df1.loc[ [x for x in (set(df1.index) & set(df.index))], ptype].sort_index(ascending=True)
 
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
 
@@ -674,7 +675,7 @@ def get_linear_model_histogram(code, ptype='low', dtype='d', start=None, end=Non
             asset = asset.dropna()
             dates = asset.index
             # asset1 = df1.loc[df.index, ptype]
-            asset1 = df1.loc[(set(df1.index) & set(df.index)), ptype].sort_index(ascending=True)
+            asset1 = df1.loc[ [x for x in  (set(df1.index) & set(df.index))], ptype].sort_index(ascending=True)
 
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
     # print len(df),len(asset),len(df1),len(asset1)

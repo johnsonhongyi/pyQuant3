@@ -257,7 +257,8 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
     else:
         results = []
     if len(results)>0:
-        df = df.append(results, ignore_index=True)
+
+        df = pd.concat(results, ignore_index=True)
         # df['volume']= df['volume'].apply(lambda x:x/100)
         # print df.columns
         if 'ratio' in df.columns:
@@ -494,7 +495,8 @@ def _parsing_sina_dd_price_json(url):
     text = text.replace('symbol', 'code')
     # text = text.replace('turnoverratio', 'ratio')
     # text.decode('unicode-escape')
-    js=json.loads(text,encoding='GBK')
+    # js=json.loads(text,encoding='GBK')
+    js=json.loads(text)
     # df = pd.DataFrame(pd.read_json(js, dtype={'code':object}),columns=ct.MARKET_COLUMNS)
     log.debug("parsing_sina_dd:%s"%js[0])
     df = pd.DataFrame(js,columns=ct.DAY_REAL_DD_COLUMNS)
@@ -571,7 +573,7 @@ def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.
         for url in url_list:
             dd_l = _parsing_sina_dd_price_json(url)
             if len(dd_l) > 2:
-                df = df.append(dd_l)
+                df = pd.concat(dd_l)
             else:
                 log.error("_parsing_sina_dd_price_json is Null :%s"%(dd_l))
 
@@ -686,7 +688,7 @@ def _get_hists(symbols, start=None, end=None,
                                  ktype=ktype, retry_count=retry_count,
                                  pause=pause)
             data['code'] = symbol
-            df = df.append(data, ignore_index=True)
+            df = pd.concat(data, ignore_index=True)
         return df
     else:
         return None
@@ -998,9 +1000,9 @@ if __name__ == '__main__':
     # dz=get_sina_Market_json('sz_a')
     # ds=get_sina_Market_json('sh_a')
     dc = get_sina_Market_json('all')
-    # df=df.append(dz,ignore_index=True)
+    # df=df.concat(dz,ignore_index=True)
     # df=df.append(ds,ignore_index=True)
-    df = df.append(dc, ignore_index=True)
+    df = pd.concat([df,dc], ignore_index=True)
     # df=df[df['changepercent']<5]
     # df = df[df['changepercent'] > 0.2]
 
