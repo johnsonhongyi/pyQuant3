@@ -83,7 +83,8 @@ class GlobalValues:
 def format_for_print(df,header=True,widths=False):
 
     # alist = [x for x in set(df.columns.tolist())]
-    
+    if 'category' in df.columns:
+         df['category']=df['category'].apply(lambda x:x.replace('\r','').replace('\n',''))
     alist = df.columns.tolist()
     if header:
 
