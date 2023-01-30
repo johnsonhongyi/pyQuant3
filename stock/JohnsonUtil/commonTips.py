@@ -82,10 +82,14 @@ class GlobalValues:
 
 def format_for_print(df,header=True,widths=False):
 
+    # alist = [x for x in set(df.columns.tolist())]
+    
+    alist = df.columns.tolist()
     if header:
-        table = PrettyTable([''] + list(df.columns))
+
+        table = PrettyTable([''] + alist )
     else:
-        table = PrettyTable(field_names=[''] + list(df.columns),header=False)
+        table = PrettyTable(field_names=[''] + alist,header=False)
 
     for row in df.itertuples():
 
@@ -1146,9 +1150,9 @@ def sleep(timet, catch=True):
 def sleeprandom(timet):
     now_t = get_now_time_int()
     if now_t > 915 and now_t < 926:
-        sleeptime = random.randint(10 / 3, 5)
+        sleeptime = random.randint(int(10 / 3), 5)
     else:
-        sleeptime = random.randint(timet / 3, timet)
+        sleeptime = random.randint(int(timet / 3), int(timet))
     if get_work_duration():
         print("Error2sleep:%s" % (sleeptime))
         sleep(sleeptime, False)
@@ -2962,7 +2966,7 @@ def func_compute_percd2020( open, close,high, low,lastopen, lastclose,lasthigh, 
 def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None):
     initc = 0
     percent_idx = 2
-    if  0 < lastclose  and lasthigh != 1.0 and lastlow != 1.0 and lasthigh != 0 and lastlow != 0:
+    if  low > 0 and  lastclose > 0 and lastvol > 0 and lasthigh > 1.0 and lastlow > 1.0 and lasthigh > 0 and lastlow > 0:
         percent = round((close - lastclose)/lastclose*100,1)
         # now_du = round((high - low)/low*100,1)
         close_du = round((high - low)/low*100,1)

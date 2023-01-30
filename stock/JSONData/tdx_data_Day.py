@@ -1062,7 +1062,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
                     log.debug("app_api_dm.Index:%s df:%s" %
                               (dm_code.index.values, df.index[-1]))
                     df = df.drop(dm_code.index)
-                df = df.append(dm_code)
+                df = pd.concat([df,dm_code])
                 # df = df.astype(float)
             # df=pd.concat([df,dm],axis=0, ignore_index=True).set
         df['name'] = c_name
@@ -1292,7 +1292,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
                     log.debug("app_api_dm.Index:%s df:%s" %
                               (dm_code.index.values, df.index[-1]))
                     df = df.drop(dm_code.index)
-                df = df.append(dm_code)
+                df = pd.concat([df,dm_code])
             elif len(dm) != 0 and len(df) == 0:
                 df = dm_code
         else:
@@ -2014,7 +2014,7 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
                     log.debug("app_api_dm.Index:%s df:%s" %
                               (dm_code.index.values, df.index[-1]))
                     df = df.drop(dm_code.index)
-                df = df.append(dm_code)
+                df = pd.concat([df,dm_code])
 
             # print dm
             # df=pd.concat([df,dm],axis=0, ignore_index=True).set
@@ -3827,6 +3827,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
             # tdxdata = compute_top10_count(tdxdata)
 
             wcdf = wcd.get_wencai_data(top_all.name, 'wencai',days='N')
+            wcdf['category'] = wcdf['category'].apply(lambda x:x.replace('\r','').replace('\n',''))
             tdxdata = cct.combine_dataFrame(tdxdata, wcdf.loc[:, ['category']])
             # tdxdata = cct.combine_dataFrame(tdxdata, top_all.loc[:, ['name']])
             if cct.GlobalValues().getkey('tdx_Index_Tdxdata') is None:
@@ -3865,6 +3866,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
 
                 # wcdf = wcd.get_wencai_data(top_all.loc[tdx_diff.index,'name'], 'wencai',days='N')
                 wcdf = wcd.get_wencai_data(top_all.name, 'wencai',days='N')
+                wcdf['category'] = wcdf['category'].apply(lambda x:x.replace('\r','').replace('\n',''))
                 tdx_diff = cct.combine_dataFrame(tdx_diff, wcdf.loc[:, ['category']])
 
                 if newdays is None or newdays > 0:

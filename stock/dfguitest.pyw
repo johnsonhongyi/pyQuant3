@@ -222,7 +222,7 @@ while 1:
                         top_dif = top_dif[(top_dif.volume > ct.VolumeMinR) & (top_dif.volume < ct.VolumeMaxR)]
                     # top_dif = top_dif[top_dif.lvol > 12000]
                     if 'couts' in top_dif.columns.values:
-                        top_dif = top_dif.sort_values(by=['diff', 'percent', 'volume', 'couts', 'ratio'],
+                        top_dif = top_dif.sort_values(by=['diff', 'percent', 'volume', 'couts', 'fibl'],
                                                       ascending=[0, 0, 0, 1, 1])
                     else:
                         top_dif = top_dif.sort_values(by=['diff', 'percent', 'ratio'], ascending=[0, 0, 1])
@@ -231,7 +231,7 @@ while 1:
                     top_dif = top_dif[top_dif.lvol > ct.LvolumeSize]
                     top_dif['diff']=top_dif['diff'].apply(lambda x:x*2 if x < 0 else x )
                     if 'couts' in top_dif.columns.values:
-                        top_dif = top_dif.sort_values(by=['diff', 'percent', 'volume', 'couts', 'ratio'],
+                        top_dif = top_dif.sort_values(by=['diff', 'percent', 'volume', 'couts', 'fibl'],
                                                       ascending=[1, 0, 0, 1, 1])
                     else:
                         top_dif = top_dif.sort_values(by=['diff', 'percent', 'ratio'], ascending=[1, 0, 1])

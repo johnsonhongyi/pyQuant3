@@ -573,7 +573,7 @@ def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.
         for url in url_list:
             dd_l = _parsing_sina_dd_price_json(url)
             if len(dd_l) > 2:
-                df = pd.concat(dd_l)
+                df = pd.concat([df,dd_l])
             else:
                 log.error("_parsing_sina_dd_price_json is Null :%s"%(dd_l))
 
