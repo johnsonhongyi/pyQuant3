@@ -139,9 +139,9 @@ code
 powerdiff = 'float(ra)*float(fibl)*(float(%s)-float(fib))/10 +float(ma) +float(kdj)+float(rsi)'
 
 # Duration_sort_per_ratio = ['percent', 'ratio', 'op',
-Duration_sort_per_ratio = ['percent', 'ratio', 'topR',
-                           'fib', 'fibl', 'ra', 'percent', 'volume', 'couts']
-Duration_sort_per_ratio_key = [0, 1, 0, 1, 1, 0, 0, 1, 1]
+Duration_sort_per_ratio = ['percent', 'fibl', 'topR',
+                           'fib',  'ra', 'percent', 'volume', 'couts']
+Duration_sort_per_ratio_key = [0, 1, 0, 1,  0, 0, 1, 1]
 
 
 # Duration_sort_per1d = ['per1d', 'percent', 'per3d', 'ratio', 'op',
@@ -152,14 +152,14 @@ Duration_sort_per_ratio_key = [0, 1, 0, 1, 1, 0, 0, 1, 1]
 # Duration_sort_perd = ['per%sd', 'dff', 'perc%sd', 'percent', 'b1_v', 'ratio', 'op',
 # Duration_sort_perd = ['per%sd', 'perc%sd','percent','df2',   'dff', 'ratio', 'op',
 # Duration_sort_perd = ['per%sd','percent',   'dff', 'perc%sd','df2', 'ratio', 'op',
-Duration_sort_perd = ['per%sd','percent',   'dff', 'perc%sd','df2', 'ratio', 'topR',
+Duration_sort_perd = ['per%sd','percent',   'dff', 'perc%sd','df2', 'topR',
                       'fib', 'fibl', 'ra', 'volume', 'couts']
-Duration_sort_perd_key = [0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 1]
+Duration_sort_perd_key = [0, 0, 0, 0, 0,  0, 1, 1, 0, 1, 1]
 
 # Duration_sort_percd = ['perc%sd',   'dff', 'per%sd', 'percent', 'b1_v', 'ratio', 'op',
-Duration_sort_percd = ['perc%sd',   'dff', 'per%sd', 'percent', 'b1_v', 'ratio', 'topR',
+Duration_sort_percd = ['perc%sd',   'dff', 'per%sd', 'percent', 'b1_v', 'topR',
                        'fib', 'fibl', 'ra', 'percent', 'volume', 'couts']
-Duration_sort_percd_key = [0, 0,0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1]
+Duration_sort_percd_key = [0, 0,0, 0, 0, 0, 1, 1, 0, 0, 1, 1]
 
 # Duration_sort_percd = ['perc%sd', 'dff', 'per%sd', 'percent', 'b1_v', 'ratio', 'op',
 #                        'fib', 'fibl', 'ra', 'percent', 'volume', 'couts']
@@ -175,21 +175,21 @@ Duration_sort_percd_key = [0, 0,0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1]
 # Duration_percent_dff = ['percent','df2','per1d','b1_v', 'dff',  'op',
 # Duration_percent_dff = ['percent','per1d','df2','b1_v', 'dff',  'op',
 Duration_percent_dff = ['percent','per1d','df2','b1_v', 'dff',  'topR',
-                        'fib', 'fibl', 'ra', 'ratio', 'volume', 'couts']
-Duration_percent_dff_key = [0, 0,0, 0, 0, 0, 1, 1, 0, 1, 1, 1]
+                        'fib', 'fibl', 'ra', 'volume', 'couts']
+Duration_percent_dff_key = [0, 0,0, 0, 0, 0, 1, 1, 1, 1, 1]
 
 Duration_percent_vol = ['fib','dff','percent',
-                        'df2', 'topR', 'fib', 'volume', 'ra', 'ratio', 'couts']
+                        'df2', 'topR',  'volume', 'ra', 'couts']
                         # 'df2', 'op', 'fib', 'volume', 'ra', 'ratio', 'couts']
-Duration_percent_vol_key = [0,0, 0 , 0, 0, 1, 1, 0, 1, 1]
+Duration_percent_vol_key = [0,0, 0 , 0, 0, 1, 0,  1]
 
 # Duration_percent_per_ra=['percent','ra','dff','op','fib','fibl','ratio','volume','couts']
 # Duration_percent_per_ra_key=[0,0,0,0,1,1,1,1,1]
 
 Duration_percent_df2dff = ['fibl', 'dff', 'percent',
-                           'topR', 'fib', 'fibl', 'ra', 'ratio', 'volume', 'couts']
+                           'topR', 'fib',  'ra', 'volume', 'couts']
                            # 'op', 'fib', 'fibl', 'ra', 'ratio', 'volume', 'couts']
-Duration_percent_df2dff_key = [0, 0, 0, 0, 1, 1, 0, 1, 1, 1]
+Duration_percent_df2dff_key = [0, 0, 0, 0, 1,  0,  1, 1]
 
 # Duration_percent_opboll = ['op', 'boll', 'percent',
 #                          'dff', 'fib', 'fibl', 'ratio', 'volume', 'couts']
@@ -201,33 +201,33 @@ Duration_percent_df2dff_key = [0, 0, 0, 0, 1, 1, 0, 1, 1, 1]
 # Duration_percent_boll_key = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
 
 Duration_percent_opboll = ['topR', 'perc3d', 'percent',
-                         'dff', 'fib', 'fibl', 'ratio', 'volume', 'couts']
-Duration_percent_opboll_key = [0, 0, 0, 0, 1, 1, 1, 1, 1]
+                         'dff', 'fib', 'fibl', 'volume', 'couts']
+Duration_percent_opboll_key = [0, 0, 0, 0, 1, 1,  1, 1]
 
 
 
 Duration_percent_boll = ['boll','perc3d','ra', 'percent',
-                         'dff', 'fib', 'fibl', 'ratio', 'volume', 'couts']
+                         'dff', 'fib', 'fibl','volume', 'couts']
 
-Duration_percent_boll_key = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+Duration_percent_boll_key = [0, 0, 0, 0, 0, 1, 1,  1, 1]
 
 
 Duration_dff_percent = ['dff', 'percent', 'df2', 'ra',
-                        'topR', 'fib', 'fibl', 'ratio', 'volume', 'couts']
+                        'topR', 'fib', 'fibl',  'volume', 'couts']
                         # 'op', 'fib', 'fibl', 'ratio', 'volume', 'couts']
-Duration_dff_percent_key = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
+Duration_dff_percent_key = [0, 0, 0, 0, 0, 1, 1,  1, 1]
 
 Duration_ra_dff = ['ra', 'dff', 'couts', 'percent',
-                   'topR', 'fib', 'fibl', 'fib', 'volume']
+                   'topR', 'fib', 'fibl',  'volume']
                    # 'op', 'fib', 'fibl', 'ratio', 'volume']
 
-Duration_ra_dff_key = [0, 0, 0, 0, 0, 1, 1, 1, 1]
+Duration_ra_dff_key = [0, 0, 0, 0, 0, 1, 1,  1]
 
 Duration_ral_dff = ['ral', 'dff', 'couts', 'percent',
-                   'topR', 'fib', 'fibl', 'fib', 'volume']
+                   'topR', 'fib', 'fibl',  'volume']
                    # 'op', 'fib', 'fibl', 'ratio', 'volume']
 
-Duration_ral_dff_key = [0, 0, 0, 0, 0, 1, 1, 1, 1]
+Duration_ral_dff_key = [0, 0, 0, 0, 0, 1, 1,  1]
 
 Duration_sort_per_df2 = ['volume','percent', 'b1_v','df2','ma', 'dff', 'fib']
 Duration_sort_per_df2_key = [0, 0, 0, 0, 0, 0 , 0]
@@ -237,8 +237,8 @@ Duration_sort_per_df2_key = [0, 0, 0, 0, 0, 0 , 0]
 
 # Duration_sort_high_op = ['dff', 'date', 'fib', 'op',
 Duration_sort_high_op = ['dff', 'date', 'fib', 'topR',
-                         'fibl', 'ra', 'percent', 'fib', 'volume', 'couts']
-Duration_sort_high_op_key = [0, 1, 1, 0, 1, 0, 0, 1, 1, 1]
+                         'fibl', 'ra', 'percent', 'volume', 'couts']
+Duration_sort_high_op_key = [0, 1, 1, 0, 1, 0, 0,  1, 1]
 
 
 Monitor_sort_count = ['couts', 'dff', 'percent', 'volume','fib']
@@ -246,19 +246,19 @@ Monitor_sort_count_key = [0, 0, 0, 0, 0]
 
 # Monitor_sort_op = ['fib', 'fibl', 'topR', 'dff', 'percent',  'ra', 'ratio']
 # Monitor_sort_op = ['fib', 'fibl', 'op', 'dff', 'percent',  'ra', 'ratio']
-Monitor_sort_op = ['fib', 'fibl', 'topR', 'dff', 'percent',  'ra', 'fib']
-Monitor_sort_op_key = [1, 1, 0, 0, 0, 0, 1]
+Monitor_sort_op = ['fib', 'fibl', 'topR', 'dff', 'percent',  'ra']
+Monitor_sort_op_key = [1, 1, 0, 0, 0, 0]
 
 
-# MonitorMarket_sort_count=['dff', 'percent', 'volume', 'couts', 'ratio']
+# MonitorMarket_sort_count=['dff', 'percent', 'volume', 'couts', 'fibl']
 # MonitorMarket_sort_op=['fib','dff', 'op', 'ra', 'percent', 'ratio']
 #[1,0, 0, 0, 0, 1]
 # MonitorMarket_sort_op=['fib','op','dff','fibl','ra','percent','ratio','volume','couts']
 # MonitorMarket_sort_op_key=[1,0,0,1,0,0,1,1,1]
 # MonitorMarket_sort_op = ['dff', 'fib', 'fibl', 'op',
 MonitorMarket_sort_op = ['dff', 'fib', 'fibl', 'topR',
-                         'ra', 'percent', 'ratio', 'volume', 'couts']
-MonitorMarket_sort_op_key = [0, 0, 1, 0, 0, 0, 1, 1, 1]
+                         'ra', 'percent',  'volume', 'couts']
+MonitorMarket_sort_op_key = [0, 0, 1, 0, 0, 0, 1, 1]
 
 
 # edit 170620
@@ -268,7 +268,7 @@ MonitorMarket_sort_op_key = [0, 0, 1, 0, 0, 0, 1, 1, 1]
 # MonitorMarket_format_buy=['name', 'buy', 'ma5d', 'boll','dff','df2','couts','percent', 'ra','op', 'ratio','ma','volume','date','category']
 
 Duration_format_buy = ['name', 'buy', 'boll', 'dff', 'df2', 'percent', 'per1d', 'perc3d',
-                       'ra', 'topR', 'fib', 'couts',  'volume', 'fib','fibl', 'category']
+                       'ra', 'topR', 'fib', 'couts',  'volume', 'fibl', 'category']
                        # 'ra', 'op', 'ratio', 'couts',  'volume', 'fib','fibl', 'category']
 Duration_format_trade = ['name', 'trade', 'boll', 'dff', 'df2',
                          'percent', 'per1d',  'perc3d',  'ra', 'ral', 'topR', 'couts', 'volume', 'fib','fibl', 'category']

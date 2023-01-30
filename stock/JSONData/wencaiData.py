@@ -473,6 +473,7 @@ def get_wencai_Market_url(filter='国企改革', perpage=1, url=None, pct=False,
                                         x for x in sin_category.split(';')[:3])
                                     sin_category = sin_category[:15] if len(
                                         sin_category) > 15 else sin_category
+                                    sin_category = sin_category.replace('\r','').replace('\n','')
                                     code['category'] = sin_category
                                     singlelist_category.append(code)
                                     break
