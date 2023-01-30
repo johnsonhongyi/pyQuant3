@@ -122,4 +122,10 @@ all300.h5
 all300.h5
 sina_MultiIndex_data.h5
 tdx_all_df_300.h5
-jupyterAlgo/
+
+# jupyter 
+.ipynb_checkpoints
+.virtual_documents
+.vscode
+
+__pycache__
