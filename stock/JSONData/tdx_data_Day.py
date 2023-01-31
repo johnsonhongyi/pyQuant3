@@ -3146,6 +3146,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
                 df['lastv%sd' % da] = df['vol'][-da]
 
             df['lastp%sd' % da] = df['close'][-da]
+            df['lastv%sd' % da] = df['vol'][-da]
             # df['per%sd' % da] = df['close'].pct_change(da).apply(lambda x:round(x*100,1))
             # df['per%sd' % da] = df['perd'][-da:].sum()
             df['per%sd' % da] = df['perd'][-da]
