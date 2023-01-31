@@ -341,7 +341,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     # ofile = open(file_path, 'rb')
     if start is None and dl is None:
         ofile = open(file_path, 'rb')
-        buf = ofile.readlines().decode(errors="ignore")
+        buf = ofile.readlines()
         ofile.close()
         num = len(buf)
 #        no = num - 1

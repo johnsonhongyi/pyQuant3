@@ -603,11 +603,17 @@ def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
 
     rzdata = cct.get_url_data(url,timeout=10)
 
-    # rzdata = rzdata.replace(':"-"',':0.1')
-    rz_re = re.search("\[.*?\]",rzdata,flags=0)
+
+
 
     # rz_dic = re.findall('"data":([\D\d]+.}])', rzdata.encode('utf8'))[0]
-    # rz_dic = re.findall('{"DIM_DATE"[\D\d]+?}', rzdata)
+    # rz_dic = rz_dic.replace(';', '')
+
+    # rzdata = rzdata.replace(':"-"',':0.1')
+    # rz_dic = re.findall('{"H_RZYE":[\D\d]+?}', rzdata)
+
+    # #rzdata_dic=[eval(x) for x in rz_dic ]
+
 
     '''
     import json
@@ -633,11 +639,12 @@ def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
     print(len(ar2))
     '''
 
-    # rz_dic = rz_dic.replace(';', '')
+
 
     # ct.DFCFW_RZYE2sh
     # rzdata_dic=json.loads(rz_dic)
 
+    rz_re = re.search("\[.*?\]",rzdata,flags=0)
     rzdata_dic= json.loads(rz_re.group(0))
     
     df=pd.DataFrame(rzdata_dic,columns=ct.dfcfw_rzye_col2022)
