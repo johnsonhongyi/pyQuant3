@@ -799,7 +799,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
             else:
                 log.error("%s is not find %s" % (fname, table))
         else:
-            log.error("% / table is Init None:%s"(fname, table))
+            log.error("%s / table is Init None:%s"(fname, table))
 
     if df is not None and len(df) > 0:
         df=df.fillna(0)
@@ -825,7 +825,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
             log.debug("all:%s  drop:%s  dratio:%.2f"%(int(count_drop/100),int(len(df)/100),dratio))
             if dratio < 0.8:
                 log.error("MultiIndex drop_duplicates:%s %s dr:%s"%(count_drop,len(df),dratio))
-                if isinstance(df.index, pd.core.index.MultiIndex):
+                if isinstance(df.index, pd.MultiIndex):
                     write_hdf_db(fname, df, table=table, index=index, MultiIndex=True,rewrite=True)
 
     # df = df.drop_duplicates()

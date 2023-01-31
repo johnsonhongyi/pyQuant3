@@ -84,7 +84,7 @@ def format_for_print(df,header=True,widths=False):
 
     # alist = [x for x in set(df.columns.tolist())]
     if 'category' in df.columns:
-         df['category']=df['category'].apply(lambda x:x.replace('\r','').replace('\n',''))
+        df['category']=df['category'].apply(lambda x:str(x).replace('\r','').replace('\n',''))
     alist = df.columns.tolist()
     if header:
 
@@ -327,13 +327,14 @@ terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440'
 
 
 terminal_positionKey2K_R9000P = {'sina_Market-DurationDn.py': '-13, 601,1400,440',
-                        'sina_Market-DurationCXDN.py': '31, 301,1400,440',
+                        'sina_Market-DurationCXDN.py': '11, 249,1400,440',
                         'sina_Market-DurationSH.py': '-29, 623,1400,440',
-                        'sina_Market-DurationUp.py': '92, 142,1400,440',
-                        'sina_Monitor-Market-LH.py': '666, 338,1400,420',
+                        'sina_Market-DurationUp.py': '445, 503,1400,440',
+                        'sina_Monitor-Market-LH.py': '521, 332,1400,420',
                         'sina_Monitor-Market.py': '271, 39,1400,440',
-                        'sina_Monitor.py': '170, 7,1400,440',
-                        'singleAnalyseUtil.py': '833, 666,880,360',
+                        'sina_Monitor.py': '124, 29,1400,440',
+                        'chantdxpower.py': '53, 66,800,420', 
+                        'singleAnalyseUtil.py': '673, 0,880,360',
                         'LinePower.py': '6, 216,800,420', 
                         'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,}
 

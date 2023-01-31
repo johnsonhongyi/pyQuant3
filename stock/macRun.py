@@ -2,7 +2,7 @@
 # !/usr/bin/env python
 import subprocess
 import os,time
-from .JohnsonUtil import commonTips as cct
+from JohnsonUtil import commonTips as cct
 
 script = '''tell application "System Events"
     activate
@@ -404,7 +404,7 @@ else:
     # else:
     #     positionKey = cct.terminal_positionKey1K_triton
 
-
+    print("%s"%(positionKey))
     for key in positionKey:
         print(("title:%s"%(key)))
         # cct.get_window_pos(key)

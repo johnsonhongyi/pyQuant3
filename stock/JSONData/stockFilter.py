@@ -149,7 +149,10 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     #     market_dff = eval(ct.Market_sort_idx_perd[market_key])[0]
     # if int(market_value) > 1 and 930 < cct.get_now_time_int():
     # print("market_value:%s market_key:%s"%(market_value,market_key))
-    if market_value != '1':
+    # if market_key == '9':
+    #     import ipdb;ipdb.set_trace()
+
+    if market_value != '1' and market_value >= '2':
         df= compute_perd_value(df, market_value, 'perc')
         df= compute_perd_value(df, market_value, 'per')
         if tdx_Index_Tdxdata is not None:

@@ -341,7 +341,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     # ofile = open(file_path, 'rb')
     if start is None and dl is None:
         ofile = open(file_path, 'rb')
-        buf = ofile.readlines()
+        buf = ofile.readlines().decode(errors="ignore")
         ofile.close()
         num = len(buf)
 #        no = num - 1
@@ -1198,7 +1198,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
             ds.rename(columns={'volume': 'vol'}, inplace=True)
             ds.sort_index(ascending=True, inplace=True)
             ds = ds.fillna(0)
-            df = dpd.concat([df,ds])
+            df = pd.concat([df,ds])
             if (len(ds) == 1 and ds.index.values[0] != cct.get_today()) or len(ds) > 1:
                 sta = write_tdx_tushare_to_file(code, df=df)
                 if sta:
@@ -1354,7 +1354,7 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f'):
         fo = open(file_path, "w+")
 #        return False
     else:
-        fo = open(file_path, "r+")
+        fo = open(file_path, "rb+")
 
     fsize = os.path.getsize(file_path)
     limitpo = fsize if fsize < 150 else 150
@@ -1378,7 +1378,7 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f'):
         line = True
         while line:
             tmpo = fo.tell()
-            line = fo.readline()
+            line = fo.readline().decode(errors="ignore")
             alist = line.split(',')
             if len(alist) >= 7:
                 if len(alist[0]) != 10:
@@ -1398,11 +1398,11 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f'):
             return False
         po = plist[-1]
         fo.seek(po)
-        dater = fo.read(10)
+        dater = fo.read(10).decode(errors="ignore")
         if dater.startswith('\n') and len(dater) == 10:
             po = plist[-1] + 2
             fo.seek(po)
-            dater = fo.read(10)
+            dater = fo.read(10).decode(errors="ignore")
         df = df[df.index >= dater]
     if len(df) >= 1:
         if fsize == 0:
@@ -1435,7 +1435,7 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f'):
                 tdata = tdate + ',' + topen + ',' + thigh + ',' + tlow + \
                     ',' + tclose + ',' + tvol + ',' + amount + '\n'
                     # ',' + tclose + ',' + tvol + ',' + amount + '\r\n'
-                wdata_list.append(tdata)
+                wdata_list.append(tdata.encode())
 #        import cStringIO
 #        b = cStringIO.StringIO()
 #        x=0
@@ -1475,7 +1475,7 @@ def write_tdx_sina_data_to_file(code, dm=None, df=None, dl=2, type='f'):
         fo = open(file_path, "w+")
 #        return False
     else:
-        fo = open(file_path, "r+")
+        fo = open(file_path, "rb+")
 
     fsize = os.path.getsize(file_path)
     limitpo = fsize if fsize < 150 else 150
@@ -1486,7 +1486,7 @@ def write_tdx_sina_data_to_file(code, dm=None, df=None, dl=2, type='f'):
         line = True
         while line:
             tmpo = fo.tell()
-            line = fo.readline()
+            line = fo.readline().decode(errors="ignore")
             alist = line.split(',')
             if len(alist) >= 7:
                 if len(alist[0]) != 10:
@@ -1508,11 +1508,11 @@ def write_tdx_sina_data_to_file(code, dm=None, df=None, dl=2, type='f'):
             return False
         po = plist[-1]
         fo.seek(po)
-        dater = fo.read(10)
+        dater = fo.read(10).decode(errors="ignore")
         if dater.startswith('\n') and len(dater) == 10:
             po = plist[-1] + 2
             fo.seek(po)
-            dater = fo.read(10)
+            dater = fo.read(10).decode(errors="ignore")
         df = df[df.index >= dater]
 
     if len(df) >= 1:
@@ -1537,7 +1537,7 @@ def write_tdx_sina_data_to_file(code, dm=None, df=None, dl=2, type='f'):
             tdata = tdate + ',' + topen + ',' + thigh + ',' + tlow + \
                 ',' + tclose + ',' + tvol + ',' + amount + '\n'
                 # ',' + tclose + ',' + tvol + ',' + amount + '\r\n'
-            w_data.append(tdata)
+            w_data.append(tdata.encode())
         fo.writelines(w_data)
         fo.close()
         return True
@@ -2342,7 +2342,7 @@ def get_tdx_day_to_df(code):
         return ds
 
     ofile = open(file_path, 'rb')
-    buf = ofile.read()
+    buf = ofile.read().decode(errors="ignore")
     ofile.close()
     num = len(buf)
     no = int(num / 32)
@@ -4382,7 +4382,9 @@ if __name__ == '__main__':
     '''
 
 
-    # print get_tdx_append_now_df_api_tofile('300055')
+    get_tdx_append_now_df_api_tofile('000587')
+    import ipdb;ipdb.set_trace()
+
     code='000043'
     code='601699'
     code='600604'
