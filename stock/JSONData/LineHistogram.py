@@ -185,7 +185,7 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
         # print asset[:1].index[0] , df1[:1].index[0]
         if asset[:1].index[0] > df1[:1].index[0]:
             # asset1 = df1.loc[asset.index, ptype]
-            asset1 = df1.loc[(set(df1.index) & set(asset.index)), ptype].sort_index(ascending=True)
+            asset1 = df1.loc[[x for x in (set(df1.index) & set(asset.index))], ptype].sort_index(ascending=True)
 
             startv = asset1[:1]
 
@@ -220,7 +220,7 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
         if not dtype == 'd':
             df1 = tdd.get_tdx_stock_period_to_type(df1, dtype).sort_index(ascending=True)
         if len(asset) < len(df1):
-            a_set = (set(df1.index) & set(asset.index))
+            a_set = [x for x in (set(df1.index) & set(asset.index))]
             asset1 = df1.loc[a_set, ptype].sort_index(ascending=True)
             # df1.loc[(set(df1.index) & set(asset.index)), ptype].sort_index(ascending=True)
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))
@@ -636,7 +636,7 @@ def get_linear_model_histogram(code, ptype='low', dtype='d', start=None, end=Non
         # print asset[:1].index[0] , df1[:1].index[0]
         if asset[:1].index[0] > df1[:1].index[0]:
             # asset1 = df1.loc[asset.index, ptype]
-            asset1 = df1.loc[(set(df1.index) & set(asset.index)), ptype].sort_index(ascending=True)
+            asset1 = df1.loc[[x for x in (set(df1.index) & set(asset.index))], ptype].sort_index(ascending=True)
 
             startv = asset1[:1]
             asset1 = asset1.apply(lambda x: round(x / asset1[:1], 2))

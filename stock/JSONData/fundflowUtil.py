@@ -600,18 +600,45 @@ def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
 
     # rzdata = cct.get_url_data(url)
     # rzdata = cct.get_url_data_R(url,timeout=10)
+
     rzdata = cct.get_url_data(url,timeout=10)
 
-    rzdata = rzdata.replace(':"-"',':0.1')
+    # rzdata = rzdata.replace(':"-"',':0.1')
+    rz_re = re.search("\[.*?\]",rzdata,flags=0)
 
     # rz_dic = re.findall('"data":([\D\d]+.}])', rzdata.encode('utf8'))[0]
-    rz_dic = re.findall('{"tdate"[\D\d]+?}', rzdata)
+    # rz_dic = re.findall('{"DIM_DATE"[\D\d]+?}', rzdata)
+
+    '''
+    import json
+    import time,datetime
+    import os
+    import requests
+    import re
+     
+    session = requests.Session()
+    session.headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_11_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/50.0.2661.102 Safari/537.36'}
+    s1=session.get('http://data.eastmoney.com/kzz/')
+    a1=re.search("token=.*?&cmd",s1.text,flags=0)
+    token=a1.group(0).replace("token=","").replace("&cmd","")
+    time.sleep(0.1)
+    h1="http://dcfm.eastmoney.com/em_mutisvcexpandinterface/api/js/get?type=KZZ_LB2.0&token={0}&cmd=&st=STARTDATE&sr=-1&p=1&ps={1}&rt=52898794".format(token,"200")
+    s2=session.get(h1)
+    a2=re.search("\[.*?\]",s2.text,flags=0)
+    ar1=json.loads(a2.group(0))
+    ar2=[]
+    for q in ar1:
+        arr1={"BONDCODE":q["BONDCODE"],"SNAME":q["SNAME"],"STARTDATE":q["STARTDATE"],"CORRESCODE":q["CORRESCODE"],"CORRESNAME":q["CORRESNAME"],"SWAPSCODE":q["SWAPSCODE"],"SECURITYSHORTNAME":q["SECURITYSHORTNAME"],"GDYX_STARTDATE":q["GDYX_STARTDATE"]}
+        ar2.append(arr1)
+    print(len(ar2))
+    '''
 
     # rz_dic = rz_dic.replace(';', '')
 
     # ct.DFCFW_RZYE2sh
     # rzdata_dic=json.loads(rz_dic)
-    rzdata_dic=[eval(x) for x in rz_dic ]
+
+    rzdata_dic= json.loads(rz_re.group(0))
     
     df=pd.DataFrame(rzdata_dic,columns=ct.dfcfw_rzye_col2022)
    
@@ -665,7 +692,7 @@ def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
                             break
                         # print da
                     else:
-                        log.error("%s:None" % (yestoday))
+                        log.info("%s:None" % (yestoday))
                 rzrq_status = 0
             return data2
 
@@ -901,9 +928,10 @@ if __name__ == "__main__":
     log.setLevel(LoggerFactory.DEBUG)
     # print get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZRQ_SHSZ)
     # print get_dfcfw_rzrq_SHSZ2_()
+
     rzrq = get_dfcfw_rzrq_SHSZ()
     print(rzrq)
-    # import ipdb;ipdb.set_trace()
+    import ipdb;ipdb.set_trace()
     
     # rzrq2 = get_dfcfw_rzrq_SHSZ2()
     # print rzrq2

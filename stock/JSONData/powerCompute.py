@@ -670,7 +670,7 @@ def get_linear_model_status(code, df=None, dtype='d', type='m', start=None, end=
     #         return -10, -10, cct.get_today(), [len(df),df[:1]]
 
 def get_linear_model_candles(code, ptype='low', dtype='d', start=None, end=None, filter='n',
-                             df=None, dl=None, days=1, opa=False):
+                             df=None, dl=None, days=1, opa=False,roll_mean_days=26):
     if start is not None and filter == 'y':
         if code not in ['999999', '399006', '399001']:
             index_d, dl = tdd.get_duration_Index_date(dt=start)
@@ -811,7 +811,7 @@ def get_linear_model_candles(code, ptype='low', dtype='d', start=None, end=None,
     # pass
     # eval("df.%s"%ptype).ewm(span=20).mean().plot(style='k')
     eval("df.%s" % 'close').plot(style='k')
-    roll_mean = pd.Series.rolling(df.high, window=10).mean()
+    roll_mean = pd.Series.rolling(df.close, window=roll_mean_days).mean()
     plt.plot(roll_mean, 'b')
     # print roll_mean[-1]
     # plt.legend(["MA:10"+str(roll_mean[-1]], fontsize=12,loc=2)
@@ -838,7 +838,7 @@ def get_linear_model_candles(code, ptype='low', dtype='d', start=None, end=None,
     # plt.title(code + " | " + str(dates[-1])[:11], fontsize=14)
     fib = cct.getFibonacci(len(asset) * 5, len(asset))
     plt.legend(["Now:%s" % df.close[-1], "Hi:%s" % df.high[-1], "Lo:%0.2f" % (asset.iat[-1]), "day:%s" %
-                len(asset), "fib:%s" % (fib)], fontsize=12, loc=0)
+                len(asset), "fib:%s" % (fib),"Mean:%s"%(roll_mean_days)], fontsize=12, loc=0)
     plt.grid(True)
     if filter:
 
@@ -1136,12 +1136,15 @@ def powerCompute_mp2(code,df=None,dm=None,dtype='d',statuslist=True,index=False,
 
     # df.loc[code,'ma5'] = daysData[1].ma5d[0]
     # print tdx_df[:1].ma5d[0],daysData[1].ma5d[0]
-    if len(tdx_df) > 0 and 'ma5d' in tdx_df.columns:
+    if len(tdx_df) > 0 and 'ma20d' in tdx_df.columns:
         if tdx_df[:1].ma5d[0] is not None and tdx_df[:1].ma5d[0] != 0:
             df.loc[code, 'ma5d'] = round(float(tdx_df[:1].ma5d[0]), 2)
         if tdx_df[:1].ma10d[0] is not None and tdx_df[:1].ma10d[0] != 0:
             df.loc[code, 'ma10d'] = round(
                 float(tdx_df[:1].ma10d[0]), 2)
+        if tdx_df[:1].ma20d[0] is not None and tdx_df[:1].ma20d[0] != 0:
+            df.loc[code, 'ma20d'] = round(
+                float(tdx_df[:1].ma20d[0]), 2)
     dd['op'] = opl
     # dd['ra'] = ral
     dd['oph'] = oph

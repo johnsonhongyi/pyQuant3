@@ -708,7 +708,7 @@ def get_quotes_tdx(code, start=None, end=None, dl=120, resample='d', show_name=T
         raise Exception("Code:%s error, df is None%s" % (code))
     return quotes, cname
 
-def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, resample='d', show_mpl=True, least_init=2, chanK_flag=False, windows=20, power=True, fb_show=0,df=None):
+def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, resample='d', show_mpl=True, least_init=2, chanK_flag=False, windows=20, power=True, fb_show=0,df=None,roll_mean_days=20):
 
     stock_code = code  # 股票代码
     stock_frequency = '%sm'%resample if resample.isdigit() else resample
@@ -907,7 +907,7 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
     Ti = []
     if len(T0) / x_jizhun > 12:
         x_jizhun = len(T0) / 12
-    for i in range(len(T0) / x_jizhun):
+    for i in range(int(len(T0) / x_jizhun)):
         # print "len(T0)/x_jizhun:",len(T0)/x_jizhun
         a = i * x_jizhun
         d = datetime.date.fromtimestamp(T1[a])
@@ -1164,10 +1164,11 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
         return BiType_s, None if len(keydf) == 0 else str(keydf.index.values[0])[:10], len(keydf)
     
     if show_mpl:
+
         plt.plot(x_fenbi_seq, y_fenbi_seq)
         # quotes = quotes.round(2)
         # plt.legend([stock_code,cname], loc=0)
-        plt.legend([stock_code, cname, "Now:%s" % (quotes.close[-1]), 'kdl:%s' % (kdl_mode.values[:4]), 'kdh:%s' % (kdh_mode.values[:4])], fontsize=12, loc=0)
+        plt.legend([stock_code, cname, "Now:%s" % (quotes.close[-1]), 'kdl:%s' % (kdl_mode.values[:4]), 'kdh:%s' % (kdh_mode.values[:4]),'ma:%s'%(roll_mean_days)], fontsize=12, loc=0)
         if len(kdl_mode) > 0:
             plt.axhline(y=np.median(kdl_mode.values), linewidth=2, color='green', linestyle="--")
         if len(kdh_mode) > 0:
@@ -1176,9 +1177,6 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
 
         plt.plot(x_xd_seq, y_xd_seq)
         #plt roll_mean windows  default 20
-        if len(quotes) > windows:
-            roll_mean = pd.Series.rolling(quotes.close, window=windows).mean()
-            plt.plot(roll_mean, 'r')
         zp = zoompan.ZoomPan()
         figZoom = zp.zoom_factory(ax1, base_scale=1.1)
         figPan = zp.pan_factory(ax1)
@@ -1813,7 +1811,7 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
 #         plt.show(block=False)
 
 
-def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=True, least_init=3, chanK_flag=False, windows=20, fb_show=0):
+def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=True, least_init=3, chanK_flag=False, windows=20, fb_show=0,roll_mean_days=20):
    
     stock_code = code  # 股票代码
 
@@ -2223,7 +2221,6 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         # assvol = assvol.apply(lambda x: round(x / assvol[:1]*quotes.close[:1], 2))
         assvol=assvol.apply(lambda x: round(x / assvol[:1] + quotes.close[:1], 2))
         ax1.plot(assvol, '-g', linewidth=0.5)
-
         plt.grid(True)
         plt.setp(plt.gca().get_xticklabels(), rotation=30, horizontalalignment='right')
 
@@ -2387,16 +2384,14 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         # quotes = quotes.round(2)
 
         # plt.legend([stock_code,cname], loc=0)
-        plt.legend([stock_code, cname, "Now:%s" % quotes.close[-1], 'kdl:%s' % (kdl_mode.values[:4]), 'kdh:%s' % (kdh_mode.values[:4])], fontsize=12, loc=0)
+        plt.legend([stock_code, cname, "Now:%s" % quotes.close[-1], 'kdl:%s' % (kdl_mode.values[:4]), 'kdh:%s' % (kdh_mode.values[:4]),'ma:%s'%(roll_mean_days)], fontsize=12, loc=0)
         if len(kdl_mode) > 0:
             plt.axhline(y=np.median(kdl_mode.values), linewidth=2, color='red', linestyle="--")
         if len(kdh_mode) > 0:
             plt.axhline(y=np.median(kdh_mode.values), linewidth=2, color='green', linestyle="--")
         plt.title(stock_code + " | " + str(cname) + " | " + str(quotes.index[-1])[:10], fontsize=14)
         plt.plot(x_xd_seq, y_xd_seq)
-        if len(quotes) > windows:
-            roll_mean=pd.Series.rolling(quotes.close, window=windows).mean()
-            plt.plot(roll_mean, 'r')
+
         zp=zoompan.ZoomPan()
         figZoom=zp.zoom_factory(ax1, base_scale=1.1)
         figPan=zp.pan_factory(ax1)
@@ -2451,7 +2446,6 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         # plt.subplots_adjust(hspace=0.00, bottom=0.08)
         plt.xticks(rotation=15, horizontalalignment='center')
         # plt.bar(x_date_list,quotes.vol, label="Volume", color='b')
-
 
         # quotes['vol'].plot(kind='bar', ax=ax2, color='g', alpha=0.1)
         # ax2.set_ylim([0, ax2.get_ylim()[1] * 2])
@@ -2553,7 +2547,7 @@ if __name__ == "__main__":
             # print args
             # print str(args.days)
 
-            if not str(args.code) == 'None' and (re.match('[a-zA-Z]+',code) is not None  or re.match('[ \\u4e00 -\\u9fa5]+',code) == None ):
+            if str(args.code) != 'q' and str(args.code) != 'e' and not str(args.code) == 'None' and (re.match('[a-zA-Z]+',code) is not None  or re.match('[ \\u4e00 -\\u9fa5]+',code) == None ):
                 args.code = tdd.get_sina_data_cname(args.code)
 
                 # print "code:%s %s"%(code,args.code)
