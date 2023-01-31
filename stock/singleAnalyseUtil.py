@@ -796,12 +796,12 @@ if __name__ == '__main__':
             traceback.print_exc()
             # global except_count
             except_count += 1
-            if except_count < 4:
+            if except_count < 3:
                 cct.sleeprandom(ct.duration_sleep_time / 2)
             else:
                 print("except_count >3")
                 cct.sleeprandom(ct.duration_sleep_time * 2)
-                # sys.exit(0)
+                sys.exit(0)
         # finally:
         #     cct.sleeprandom(ct.duration_sleep_time/2)
             # raw_input("Except")

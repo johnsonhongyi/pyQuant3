@@ -1860,6 +1860,17 @@ def code_to_symbol(code):
         else:
             return 'sh%s' % code if code[:1] in ['5', '6', '9'] else 'sz%s' % code
 
+def code_to_symbol_ths(code):
+    """
+        生成symbol代码标志
+    """
+    if code in ct.INDEX_LABELS:
+        return ct.INDEX_LIST_TDX[code]
+    else:
+        if len(code) != 6:
+            return ''
+        else:
+            return '%s.SH' % code if code[:1] in ['5', '6', '9'] else '%s.SZ' % code
 
 def symbol_to_code(symbol):
     """
@@ -2072,7 +2083,7 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             for code in flist_t:
                 if len(code) <= 6 or len(code) > 12:
                     continue
-                if not code.endswith('\r\n'):
+                if not code.endswith(b'\r\n'):
                     if len(code) <= 6:
                         # errstatus = True
                         continue
@@ -2103,7 +2114,8 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             if len(flist_t) > 4:
                 # errstatus=False
                 for code in flist_t:
-                    if not code.endswith('\r\n'):
+
+                    if not code.endswith(b'\r\n'):
                         if len(code) <= 6:
                             # errstatus = True
                             continue
@@ -2156,6 +2168,8 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
 
         fout = open(p_name, 'wb+')
         for code in flist:
+            if not isinstance(code,bytes):
+                code = code.encode()
             fout.write(code)
                 # raw = pack('IfffffII', t, i[2], i[3], i[4], i[5], i[6], i[7], i[8])
         fout.flush()
@@ -2228,7 +2242,7 @@ def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=N
             for code in flist_t:
                 if len(code) <= 6 or len(code) > 12:
                     continue
-                if not code.endswith('\r\n'):
+                if not code.endswith(b'\r\n'):
                     if len(code) <= 6:
                         # errstatus = True
                         continue
@@ -2244,6 +2258,8 @@ def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=N
             fout.close()
             fout = open(p_name, 'wb+')
             for code in flist:
+                if not isinstance(code,bytes):
+                    code = code.encode()
                 fout.write(code)
 
             # if not str(flist[-1]).endswith('\r\n'):
@@ -2261,7 +2277,7 @@ def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=N
             if len(flist_t) > 4:
                 # errstatus=False
                 for code in flist_t:
-                    if not code.endswith('\r\n'):
+                    if not code.endswith(b'\r\n'):
                         if len(code) <= 6:
                             # errstatus = True
                             continue
@@ -2287,12 +2303,16 @@ def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=N
                 # print flist
                 fout = open(p_name, 'wb+')
                 for code in flist:
+                    if not isinstance(code,bytes):
+                        code = code.encode()
                     fout.write(code)
             else:
                 fout = open(p_name, 'wb+')
                 # index_list.reverse()
                 for i in index_list:
                     raw = (i) + '\r\n'
+                    if not isinstance(raw,bytes):
+                        raw = raw.encode()
                     fout.write(raw)
 
         counts = 0
@@ -2306,6 +2326,8 @@ def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=N
             raw = code_to_tdxblk(i) + '\r\n'
             if len(raw) > 8 and not raw in flist:
                 counts += 1
+                if not isinstance(raw,bytes):
+                    raw = raw.encode()
                 fout.write(raw)
                 # raw = pack('IfffffII', t, i[2], i[3], i[4], i[5], i[6], i[7], i[8])
         fout.flush()
@@ -2370,7 +2392,7 @@ def read_to_blocknew(p_name):
                 code = code.decode()
             if len(code) <= 6 or len(code) > 12:
                 continue
-            if code.endswith('\r\n'):
+            if code.endswith(b'\r\n'):
                 if len(code) <= 6 or code in index_list:
                     # errstatus = True
                     continue
@@ -3532,6 +3554,7 @@ def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean
     return maindf
 
 if __name__ == '__main__':
+    print(code_to_symbol_ths('000002'))
     print(get_index_fibl())
     GlobalValues()
     GlobalValues().setkey('key', 'GlobalValuesvalue')
