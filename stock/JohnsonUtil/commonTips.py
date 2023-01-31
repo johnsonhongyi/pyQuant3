@@ -2080,10 +2080,14 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             # flist_t = file(p_name, mode='rb+', buffering=None)
             # flist = []
             # errstatus=False
+            
+
             for code in flist_t:
+                if isinstance(code,bytes):
+                    code = code.decode()
                 if len(code) <= 6 or len(code) > 12:
                     continue
-                if not code.endswith(b'\r\n'):
+                if not code.endswith('\r\n'):
                     if len(code) <= 6:
                         # errstatus = True
                         continue
@@ -2114,8 +2118,9 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             if len(flist_t) > 4:
                 # errstatus=False
                 for code in flist_t:
-
-                    if not code.endswith(b'\r\n'):
+                    if isinstance(code,bytes):
+                        code = code.decode()
+                    if not code.endswith('\r\n'):
                         if len(code) <= 6:
                             # errstatus = True
                             continue
@@ -2231,7 +2236,7 @@ def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=N
     # index_list = ['0399001', '1999999', '0159915']
     # index_list = ['1999999', '27#HSI',  '0159915']
 
-    def writeBlocknew(p_name, data, append=True,keep_last=keep_last):
+    def writeBlocknew__(p_name, data, append=True,keep_last=keep_last):
         if append:
             fout = open(p_name, 'rb+')
             # fout = open(p_name)
@@ -2240,9 +2245,11 @@ def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=N
             flist = []
             # errstatus=False
             for code in flist_t:
+                if isinstance(code,bytes):
+                    code = code.decode()
                 if len(code) <= 6 or len(code) > 12:
                     continue
-                if not code.endswith(b'\r\n'):
+                if not code.endswith('\r\n'):
                     if len(code) <= 6:
                         # errstatus = True
                         continue
@@ -2277,7 +2284,9 @@ def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=N
             if len(flist_t) > 4:
                 # errstatus=False
                 for code in flist_t:
-                    if not code.endswith(b'\r\n'):
+                    if isinstance(code,bytes):
+                        code = code.decode()
+                    if not code.endswith('\r\n'):
                         if len(code) <= 6:
                             # errstatus = True
                             continue
@@ -2392,7 +2401,7 @@ def read_to_blocknew(p_name):
                 code = code.decode()
             if len(code) <= 6 or len(code) > 12:
                 continue
-            if code.endswith(b'\r\n'):
+            if code.endswith('\r\n'):
                 if len(code) <= 6 or code in index_list:
                     # errstatus = True
                     continue
@@ -2999,7 +3008,6 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
         vol_du = round((nowvol)/lastvol,1)
 
         # if idate == "2022-11-28":
-        #     import ipdb;ipdb.set_trace()
 
         if (percent > 0 and (close_du > percent_idx or vol_du > 1.1)) or percent >= percent_idx or ma5 > ma10 or close > ma5:
             initc +=1
@@ -3504,7 +3512,6 @@ def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean
                 if maindf.dtypes[co_t] != subdf.dtypes[co_t]:
                     # print maindf.dtypes[co_t] , subdf.dtypes[co_t]
                     # print maindf[co_t],subdf[co_t]
-                    # import ipdb;ipdb.set_trace()
                     # print co_t,maindf.dtypes[co_t]
                     subdf[co_t] = subdf[co_t].astype(maindf.dtypes[co_t])
                     # log.error("col to types:%s" % (maindf.dtypes[co_t]))
