@@ -2100,6 +2100,7 @@ def getSinaIndexdf():
 
 
 def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, filename='mnbk', table='top_now', trend=False):
+    ### Sina获取 Ratio 和tdx数据
     print("initdx", end=' ')
     
     market_all = False
@@ -2301,6 +2302,9 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     print(":%s b1>:%s it:%s" % (initTdxdata, len(top_now), round(time.time() - time_s, 1)), end=' ')
     if top_now is None or len(top_now) == 0:
         log.error("top_all is None :%s" % (top_now))
+    if not 'ratio' in top_now.columns:
+        top_now['ratio'] = 0
+
     return top_now
 
 
@@ -3976,14 +3980,23 @@ def get_tdx_exp_all_LastDF(codeList, dt=None, end=None, ptype='low', filter='n')
             log.info("LastDF:%s,%s" % (dt, dl))
         results = cct.to_mp_run_async(
             get_tdx_exp_low_or_high_price, codeList, dt=dt, ptype=ptype, dl=dl, end=end)
+      
         # print dt,ptype,dl,end
+        # results=[]
         # for code in codelist:
-        #     print code
-        #     print get_tdx_exp_low_or_high_price('600654', dt, ptype, dl,end)
+        #     print(code,)
+        #     result=get_tdx_exp_low_or_high_price(code, dt=dt, ptype=ptype, dl=dl, end=end)
+        #     results.append(result)
 
     else:
         results = cct.to_mp_run_async(
             get_tdx_Exp_day_to_df, codeList, type='f', start=None, end=None, dl=None, newdays=1)
+
+        # results=[]
+        # for code in codelist:
+        #     print(code,)
+        #     result=get_tdx_Exp_day_to_df(code, type='f', start=None, end=None, dl=None, newdays=1)
+        #     results.append(result)
 
     # print results
 #    df = pd.DataFrame(results, columns=ct.TDX_Day_columns)
@@ -3994,11 +4007,29 @@ def get_tdx_exp_all_LastDF(codeList, dt=None, end=None, ptype='low', filter='n')
     log.info("get_to_mp:%s" % (len(df)))
     log.info("TDXTime:%s" % (time.time() - time_t))
     if dt != None:
-        print(("TDXE:%0.2f" % (time.time() - time_t)), end=' ')
+        print(("DFTDXE:%0.2f" % (time.time() - time_t)), end=' ')
     return df
 
 
 def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='n', power=False, lastp=False, newdays=None, dl=None, resample='d', showRunTime=True):
+    """
+    Function: get_tdx_exp_all_LastDF_DL
+    Summary: TDX init Day by Mp
+    Examples: InsertHere
+    Attributes: 
+        @param (codeList):InsertHere
+        @param (dt) default=None: InsertHere
+        @param (end) default=None: InsertHere
+        @param (ptype) default='low': InsertHere
+        @param (filter) default='n': InsertHere
+        @param (power) default=False: InsertHere
+        @param (lastp) default=False: InsertHere
+        @param (newdays) default=None: InsertHere
+        @param (dl) default=None: InsertHere
+        @param (resample) default='d': InsertHere
+        @param (showRunTime) default=True: InsertHere
+    Returns: InsertHere
+    """
     time_t = time.time()
     # df = rl.get_sina_Market_json(market)
     # code_list = np.array(df.code)
@@ -4076,11 +4107,13 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
         if len(codeList) > 150:
             results = cct.to_mp_run_async(
                 get_tdx_exp_low_or_high_power, codeList, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample)
+                
                 # get_tdx_exp_low_or_high_power, codeList, dt, ptype, dl, end, power, lastp, newdays, resample)
-            # results=[]
+            
             # # codeList = ['300055','002443']
+            # results=[]
             # for code in codeList:
-            #    print code,
+            #    print(code,)
             #    results.append(get_tdx_exp_low_or_high_power(code, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample))
 
         else:
@@ -4122,7 +4155,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
         global initTdxdata
         if initTdxdata > 2:
             print("All_OUT:%s " % (initTdxdata), end=' ')
-        print(("TDXE:%0.2f" % (time.time() - time_t)), end=' ')
+        print(("DLTDXE:%0.2f" % (time.time() - time_t)), end=' ')
     return df
 
 
@@ -4383,7 +4416,7 @@ if __name__ == '__main__':
     '''
 
 
-    get_tdx_append_now_df_api_tofile('000587')
+    df=get_tdx_append_now_df_api_tofile('000587')
     import ipdb;ipdb.set_trace()
 
     code='000043'

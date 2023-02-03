@@ -1,10 +1,13 @@
  # -*- coding:utf-8 -*-
  #
 import sys
+import pandas as pd
 from JSONData import powerCompute as pct
 from JSONData import LineHistogram as lht
 from JSONData import wencaiData as wcd
 from JSONData import get_macd_kdj_rsi as getab
+from JSONData import tdx_data_Day as tdd
+from JSONData import stockFilter as stf
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import LoggerFactory as LoggerFactory
@@ -248,6 +251,19 @@ if __name__ == "__main__":
 
             elif code == 'h' or code == 'help':
                 parser.print_help()
+
+            elif code.startswith('w') or code.startswith('a'):
+                blkname = '077.blk'
+                block_path = tdd.get_tdx_dir_blocknew() + blkname
+                args=cct.writeArgmain().parse_args(code.split())
+                codew=stf.WriteCountFilter(pd.DataFrame(), writecount=args.dl)
+                if args.code == 'a':
+                    cct.write_to_blocknew(block_path, codew)
+                    # cct.write_to_blocknew(all_diffpath,codew)
+                # else:
+                #     cct.write_to_blocknew(block_path, codew, False)
+                    # cct.write_to_blocknew(all_diffpath,codew,False)
+                    print(("wri ok:%s" % block_path))
             else:
                 pass
 

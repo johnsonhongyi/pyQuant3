@@ -740,6 +740,26 @@ def check_chinese(checkstr):
 #   return "utf8"
 
 
+
+# from chardet import detect
+# # get file encoding type
+# def get_encoding_type(file):
+#     with open(file, 'rb') as f:
+#         rawdata = f.read()
+#     return detect(rawdata)['encoding']
+
+# open(current_file, 'r', encoding = get_encoding_type, errors='ignore')
+# str = unicode(str, errors='replace')
+# or
+# str = unicode(str, errors='ignore')
+
+# I had same problem with UnicodeDecodeError and i solved it with this line.
+# Don't know if is the best way but it worked for me.
+# str = str.decode('unicode_escape').encode('utf-8')
+
+
+
+
 def getCoding(strInput):
     '''
     获取编码格式
@@ -1670,7 +1690,7 @@ def to_mp_run(cmd, urllist):
     pool = ThreadPool(cpu_count())
     # pool = ThreadPool(2)
     # pool = ThreadPool(4)
-    # print cpu_count()
+    print(cpu_count())
     # pool = multiprocessing.Pool(processes=8)
     # for code in codes:
     #     results=pool.apply_async(sl.get_multiday_ave_compare_silent_noreal,(code,60))
@@ -1767,7 +1787,7 @@ def read_last_lines(filename, lines=1):
     block = ''
     nl_count = 0
     start = 0
-    fsock = open(filename, 'rU')
+    fsock = open(filename, 'rb')
     try:
         # seek to end
         fsock.seek(0, 2)
@@ -1779,9 +1799,15 @@ def read_last_lines(filename, lines=1):
             curpos -= (block_size + len(block))
             if curpos < 0:
                 curpos = 0
+            
+            # except:'gbk' codec can't decode byte 0xc5 in position 1021:
+            # tdx 4107: len(codeList) > 150: 
+
             fsock.seek(curpos)
             # read to end
             block = fsock.read()
+            if isinstance(block,bytes):
+                block = block.decode(errors="ignore")
             nl_count = block.count('\n') - block.count('\n\n')
             # nl_count_err = block.count('\n\n')
             # nl_count = nl_count - nl_count_err
@@ -3457,6 +3483,30 @@ def func_compute_percdS(close, lastp, op, lastopen,lasth, lastl, nowh, nowl,nowv
     return initc
 
 def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean=True):
+    '''
+
+    Function: combine_dataFrame
+
+    Summary: 合并DF,Clean:True Clean Maindf else Clean Subdf
+
+    Examples: @
+    Attributes: 
+
+        @param (maindf):maindf
+
+        @param (subdf):subdf
+
+        @param (col) default=None: InsertHere
+
+        @param (compare) default=None: InsertHere
+
+        @param (append) default=False: InsertHere
+
+        @param (clean) default=True: InsertHere
+
+    Returns: Maindf
+
+    '''
     times = time.time()
     if subdf is  None or len(subdf) == 0:
         return maindf
@@ -3482,6 +3532,8 @@ def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean
             subdf = subdf.set_index('code')
 
         no_index = maindf.drop([inx for inx in maindf.index if inx not in subdf.index], axis=0)
+        # 遍历Maindf中subdf没有的index并删除
+
 #        no_index = maindf.loc[subdf.index]
         # if col is not None and compare is not None:
         #     # if col in subdf.columns:
@@ -3496,7 +3548,14 @@ def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean
         #     sub_col = list(set(subdf.columns) - set())
 
         drop_sub_col = [col for col in no_index.columns if col in subdf.columns]
-        no_index = no_index.drop(drop_sub_col, axis=1)
+        #比较主从的col,两边都有的需要清理一个
+        if clean:
+            #Clean True时清理maindf的旧数据
+            no_index = no_index.drop(drop_sub_col, axis=1)
+        else:
+            #Clean False时清理subdf的数据
+            subdf = subdf.drop(drop_sub_col, axis=1)
+
         no_index = no_index.merge(subdf, left_index=True, right_index=True, how='left')
         maindf = maindf.drop([inx for inx in maindf.index if inx in subdf.index], axis=0)
         maindf = pd.concat([maindf, no_index], axis=0)
