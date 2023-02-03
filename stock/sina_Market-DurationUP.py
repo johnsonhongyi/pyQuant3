@@ -144,6 +144,7 @@ if __name__ == "__main__":
                     st_key_sort.split()[0], cct.get_index_fibl())
             # top_now = tdd.getSinaAlldf(market='060.blk', vol=ct.json_countVol, vtype=ct.json_countType)
             # market_blk = '次新股'
+            # market_blk = 'all'
             market_blk = 'all'
             # market_blk = 'cyb'
             # market_blk = '060'

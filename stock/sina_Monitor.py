@@ -153,7 +153,7 @@ if __name__ == "__main__":
             top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='rzrq', vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='??¹?060',filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
-
+            
             time_d = time.time()
             if time_d - time_s > delay_time:
                 status_change = True
@@ -274,7 +274,7 @@ if __name__ == "__main__":
                         top_all['dff2'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
                                                top_all['buy'].values, top_all['lastbuy'].values)))
                 top_all = top_all.sort_values(
-                    by=['dff', 'percent', 'volume', 'couts', 'ratio'], ascending=[0, 0, 0, 1, 1])
+                    by=['dff', 'percent', 'volume','ratio' ,'couts'], ascending=[0, 0, 0, 1,1])
 
 #                    by=ct.Monitor_sort_count, ascending=[0, 0, 0, 0, 1])
                 # top_all = top_all.sort_values(by=['dff', 'couts', 'volume', 'ratio'], ascending=[0, 0, 0, 1])
