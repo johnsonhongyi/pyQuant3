@@ -27,7 +27,11 @@ def get_multi_code_count(df,col='code'):
     dd = dd.set_index(['code', 'date'])
     return dd
 
-def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,ma_250_h=1.11):
+def multindex_iloc(df, index):
+    label = df.index.levels[0][index]
+    return df.iloc[df.index.get_loc(label)]
+
+def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,ma_250_h=1.11,resample ='d'):
     # df = tdd.search_Tdx_multi_data_duration('tdx_all_df_300', 'all_300', df=None,code_l=code_list, start=start, end=None, freq=None, col=None, index='date')
     block_path = tdd.get_tdx_dir_blocknew() + '060.blk'
 
@@ -35,6 +39,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
         print("It's Today Update")
         return True
     code_list = sina_data.Sina().market('all').index.tolist()
+    code_list.extend(['999999','399001','399006'])
     print("all code:",len(code_list))
     if duration < 300 :
         h5_fname = 'tdx_all_df' + '_' + str(300)
@@ -53,7 +58,6 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     # df.groupby(level=[0]),df.index.get_level_values(0)
     # len(df.index.get_level_values('code').unique())
     # df = df[~df.index.duplicated(keep='first')]
-    dfs = df
 
     def get_groupby_mean_median_close(dfs):
 
@@ -90,16 +94,39 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
         #     dfs = get_multi_date_duration(dfs,dt[-1])
         return df
 
+    # multiIndex_func = {'close': 'mean', 'low': 'min', 'high': 'max', 'volume': 'sum', 'open': 'first'}
+    # cct.using_Grouper(df, freq='W', col={'close': 'last'})
+# *** TypeError: Only valid with DatetimeIndex, TimedeltaIndex or PeriodIndex, but got an instance of 'Index'
+    # roll_dl = duration
+
+    if resample != 'd':
+        print("resample:%s"%(resample.upper()))
+        df = df.groupby(level=0).resample(resample, level=1).last()
+        df = df.dropna()
+        # r1 = len(df.loc['000001'])
+        # r2 = len(df.loc['999999'])
+        # roll_dl = r1 if r1 < r2 else r2
+
+    dfs = df.copy()
+
     groupd = dfs.groupby(level=[0])
+    # groupd.['close']
     
     # rollma = ['5','10','60','100','200']
     # rollma = ['5','10','250']
-    if duration < 300:
-        rollma = ['10']
-    else:
-        rollma = ['10','250']
+    # df.index.get_level_values('code')[0]
+    if resample.upper() == 'D' or resample.lower() == 'd':
+        if duration < 300:
+            rollma = ['10','200']
+        else:
+            rollma = ['10','250']
 
-    rollma.extend([str(duration)])
+    elif resample.upper() == 'W' or resample.lower() == 'w':
+        rollma = ['5','10']
+    else:
+        rollma = ['5','10']
+
+    # rollma.extend([str(duration)])
 
     # import ipdb;ipdb.set_trace()
     # df.loc['300130'][:2]
@@ -110,7 +137,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     for da in rollma:
         cumdays=int(da)
         dfs['ma%d'%cumdays] = groupd['close'].rolling(cumdays).mean().values
-        if cumdays == 10:
+        if cumdays == 10 :
             dfs['upper'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 + 11.0 / 100) * x, 1))
             dfs['lower'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 - 9.0 / 100) * x, 1))
             dfs['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), dfs['upper'], dfs['lower']))
@@ -122,7 +149,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     #df.ix[df.index[len(df.index)-1][0]] #last row
     # dfs = tdd.search_Tdx_multi_data_duration(df=dfs,code_l=code_list, start='20170918', end='20170918', freq=None, col=None, index='date')
 
-
+    dfs = dfs.dropna()
     # print dfs[:1],len(dfs)
     # groupd.agg({'low': 'min'})
     # '''idx mask filter'''
@@ -134,9 +161,11 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
         print("dfs tail1")
     else:
         dl = 30
+
         dindex = tdd.get_tdx_Exp_day_to_df(
-            '999999', dl=dl).sort_index(ascending=False)
+            '999999', dl=dl,resample=resample).sort_index(ascending=False)
         dt = tdd.get_duration_price_date('999999', df=dindex)
+
         dt = dindex[dindex.index >= dt].index.values
         dt_low = dt[-1]
         dtlen = len(dt) if len(dt) >0 else 1
@@ -190,6 +219,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
     # mask = ((dfs[('close')] > dfs[('ma%s')%(rollma[-1])])) 
     df=dfs.loc[idx[mask, :]]
+    
     df = get_multi_code_count(df)
     print((df.couts[:5]))
 
@@ -222,6 +252,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
             #     codew = df[df.date == cct.get_today()].index.tolist()
 
             if dt_low is not None:
+                
                 groupd2 = df.groupby(level=[0])
                 df = groupd2.tail(1)
                 df = df.reset_index().set_index('code')
@@ -235,7 +266,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                 print(("df:%s %s df_idx:%s"%(len(df),df.index[:5],len(df_idx))))
 
                 if df_idx is not None and len(df) > 0 and len(df_idx) > 0:
-                    idx_set_= set(df.index) & set(df_idx.index)
+                    idx_set_=[x for x in   df_idx.index if x in df.index]
                     df = df.loc[idx_set_,:].dropna()
                 print(("Main Down dd :%s MainUP df:%s couts std:%0.1f "%(len(dd),len(df),df.couts.std())))
                 # print df.date.mode()[0]
@@ -259,6 +290,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
             #clean st and 688
 
             if app:
+                print("Write blk:%s"%(block_path))
                 hdf5_wri = cct.cct_raw_input("rewrite code [Y] or append [N]:")
                 if hdf5_wri == 'y' or hdf5_wri == 'Y':
                     append_status=False
@@ -285,6 +317,6 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 if __name__ == '__main__':
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=250) ???
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=120) ???
-    get_roll_mean_all(single=False,tdx=True,app=True,duration=250,ma_250_l=1.02,ma_250_h=1.11)
+    get_roll_mean_all(single=False,tdx=True,app=True,duration=250,ma_250_l=1.02,ma_250_h=1.2,resample='w')
     # get_roll_mean_all(single=True,tdx=True,app=True)
     # get_roll_mean_all(single=True,tdx=True,app=False)

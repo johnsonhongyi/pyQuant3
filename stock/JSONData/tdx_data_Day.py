@@ -1600,17 +1600,22 @@ def Write_tdx_all_to_hdf(market, h5_fname='tdx_all_df', h5_table='all', dl=300, 
         time_s = time.time()
         # st=h5a.get_hdf5_file(f_name, wr_mode='w', complevel=9, complib='zlib',mutiindx=True)
         # for code in dfcode[:500]:
+        idx = 0
         for code in dfcode:
             # for code in dfcode:
             df = get_tdx_Exp_day_to_df(code, dl=dl, MultiIndex=True)
             # print df
             # (map(lambda x, y: y if int(x) == 0 else x, top_dif['buy'].values, top_dif['trade'].values))
             # print df.index
+            idx+=1
+            if idx%100 == 1:
+                print(".",end='')
             if len(df) > 0:
                 # df.index = map(lambda x: x.replace('-', '').replace('\n', ''), df.index)
                 df.index = [x.replace('\n', '') for x in df.index]
                 df.index = df.index.astype(str)
                 df.index.name = 'date'
+                df.index = pd.to_datetime(df.index)
                 if 'code' in df.columns:
                     df.code = df.code.astype(str)
 
@@ -4012,23 +4017,40 @@ def get_tdx_exp_all_LastDF(codeList, dt=None, end=None, ptype='low', filter='n')
 
 
 def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='n', power=False, lastp=False, newdays=None, dl=None, resample='d', showRunTime=True):
-    """
-    Function: get_tdx_exp_all_LastDF_DL
-    Summary: TDX init Day by Mp
-    Examples: InsertHere
-    Attributes: 
-        @param (codeList):InsertHere
-        @param (dt) default=None: InsertHere
-        @param (end) default=None: InsertHere
-        @param (ptype) default='low': InsertHere
-        @param (filter) default='n': InsertHere
-        @param (power) default=False: InsertHere
-        @param (lastp) default=False: InsertHere
-        @param (newdays) default=None: InsertHere
-        @param (dl) default=None: InsertHere
-        @param (resample) default='d': InsertHere
-        @param (showRunTime) default=True: InsertHere
-    Returns: InsertHere
+    """
+
+    Function: get_tdx_exp_all_LastDF_DL
+
+    Summary: TDX init Day by Mp
+
+    Examples: InsertHere
+
+    Attributes: 
+
+        @param (codeList):InsertHere
+
+        @param (dt) default=None: InsertHere
+
+        @param (end) default=None: InsertHere
+
+        @param (ptype) default='low': InsertHere
+
+        @param (filter) default='n': InsertHere
+
+        @param (power) default=False: InsertHere
+
+        @param (lastp) default=False: InsertHere
+
+        @param (newdays) default=None: InsertHere
+
+        @param (dl) default=None: InsertHere
+
+        @param (resample) default='d': InsertHere
+
+        @param (showRunTime) default=True: InsertHere
+
+    Returns: InsertHere
+
     """
     time_t = time.time()
     # df = rl.get_sina_Market_json(market)
@@ -4417,7 +4439,6 @@ if __name__ == '__main__':
 
 
     df=get_tdx_append_now_df_api_tofile('000587')
-    import ipdb;ipdb.set_trace()
 
     code='000043'
     code='601699'
@@ -4605,8 +4626,8 @@ if __name__ == '__main__':
 #    print write_tdx_tushare_to_file(code)
 
     while 1:
-        market = cct.cct_raw_input("write all TDXdata append [all,sh,sz,cyb,alla,q] :")
-        if market != 'q' :
+        market = cct.cct_raw_input("Single write all TDXdata append [all,sh,sz,cyb,alla,q,n] :")
+        if market != 'q' and market != 'n'  and len(market) != 0:
             if market in ['all', 'sh', 'sz', 'cyb', 'alla']:
                 if market != 'all':
                     Write_market_all_day_mp(market, rewrite=True)
@@ -4620,14 +4641,14 @@ if __name__ == '__main__':
             break
 
 
-    hdf5_wri = cct.cct_raw_input("write all Tdx data to Multi hdf_300[rw|y|n]:")
+    hdf5_wri = cct.cct_raw_input("Multi-300 write all Tdx data to Multi hdf_300[rw|y|n]:")
     if hdf5_wri == 'rw':
         Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300, rewrite=True)
     elif hdf5_wri == 'y':
         Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300)
 
 
-    hdf5_wri = cct.cct_raw_input("write all Tdx data to Multi hdf_900[rw|y|n]:")
+    hdf5_wri = cct.cct_raw_input("Multi-900 write all Tdx data to Multi hdf_900[rw|y|n]:")
     if hdf5_wri == 'rw':
         Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=900, rewrite=True)
     elif hdf5_wri == 'y':

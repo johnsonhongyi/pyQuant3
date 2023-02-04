@@ -799,7 +799,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
             else:
                 log.error("%s is not find %s" % (fname, table))
         else:
-            log.error("%s / table is Init None:%s"(fname, table))
+            log.error("%s / table is Init None:%s"%(fname, table))
 
     if df is not None and len(df) > 0:
         df=df.fillna(0)
