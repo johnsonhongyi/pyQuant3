@@ -3029,8 +3029,8 @@ def compute_ma_cross(dd,ma1='ma5d',ma2='ma10d',ratio=0.02):
         dd['ldate'] = temp.index[0]
     else:
 
-        temp = df[ df[ma1] > df[ma2]]
-        if len(temp) == len(df) and len(df) > 0:
+        temp = dd[ dd[ma1] > dd[ma2]]
+        if len(temp) == len(dd) and len(dd) > 0:
             fibl = len(dd[dd.index >= temp.index[0]])
             idx = round((dd.close[-1]/temp.close[0])*100-100,1)
             dd['op'] = idx
@@ -3049,7 +3049,7 @@ def compute_ma_cross_old(dd,ma1='ma5d',ma2='ma10d',ratio=0.02):
 
     df = dd[(dd[ma2] != 0)]
     # temp = df[ (df[ma1] > df[ma2] * (1-ratio))  & (df[ma1] < df[ma2] * (1+ratio)) ]
-    temp = df[ ((df.close > df.ene) & (df.close < df.upper)) & (df[ma1] > df[ma2] * (1-ratio))  & (df[ma1] < df[ma2] * (1+ratio))]
+    temp = dd[ ((dd.close > dd.ene) & (dd.close < df.upper)) & (dd[ma1] > dd[ma2] * (1-ratio))  & (dd[ma1] < dd[ma2] * (1+ratio))]
 
     if len(temp) > 0:
         temp_close = temp.close - temp.ene
@@ -3076,8 +3076,8 @@ def compute_ma_cross_old(dd,ma1='ma5d',ma2='ma10d',ratio=0.02):
         dd['ldate'] = temp.index[0]
     else:
 
-        temp = df[ df[ma1] > df[ma2]]
-        if len(temp) == len(df) and len(df) > 0:
+        temp = dd[ dd[ma1] > dd[ma2]]
+        if len(temp) == len(dd) and len(dd) > 0:
             fibl = len(dd[dd.index >= temp.index[0]])
             idx = round((dd.close[-1]/temp.close[0])*100-100,1)
             dd['op'] = idx
@@ -4498,8 +4498,6 @@ if __name__ == '__main__':
     # dm = get_sina_data_df(code)
     df2 = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
     # print get_tdx_append_now_df_api_tofile(code)
-
-    import ipdb;ipdb.set_trace()
 
     resample = 'w'
     # df2 = get_tdx_Exp_day_to_df(code,dl=160, end=None, newdays=0, resample='d',lastdays=12)
