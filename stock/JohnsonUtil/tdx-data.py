@@ -1,5 +1,5 @@
 #!/usr/bin/python
-# -*- encoding: gbk -*-
+# -*- encoding: utf8 -*-
 
 
 import io
@@ -16,11 +16,14 @@ from struct import *
 # from readths2 import *
 # 2010-09-02 by wanghp
 
-# 如果你的安装路径不同,请改这里
-basedir = r'/Users/Johnson/Documents/Johnson/WinTools/zd_pazq/T0002'
 
+# basedir = r'/Users/Johnson/Documents/Johnson/WinTools/zd_pazq/T0002'
+basedir = r'D:\MacTools\WinTools\new_tdx'
+# D:\MacTools\WinTools\new_tdx\vipdoc\sh\lday
+# exp_dir = basedir + r'\T0002\export'
 exp_dir = basedir + r'\T0002\export'
-blocknew = 'Z:\Documents\Johnson\WinTools\zd_pazq\T0002\blocknew'
+# blocknew = 'Z:\Documents\Johnson\WinTools\zd_pazq\T0002\blocknew'
+blocknew = 'D:\MacTools\WinTools\new_tdx\T0002\blocknew'
 # exp_dir    = basedir + r'\T0002\export_back'
 lc5_dir_sh = basedir + r'\Vipdoc\sh\fzline'
 # lc5_dir_sh =  r'D:\2965\ydzqwsjy\Vipdoc\sh\fzline'
@@ -28,17 +31,17 @@ lc5_dir_sz = basedir + r'\Vipdoc\sz\fzline'
 day_dir_sh = basedir + r'\Vipdoc\sh\lday'
 day_dir_sz = basedir + r'\Vipdoc\sz\lday'
 
-stkdict = {}  # 存储股票ID和上海市、深圳市的对照
+stkdict = {}  # 麓忙麓垄鹿脡脝卤ID潞脥脡脧潞拢脢脨隆垄脡卯脹脷脢脨碌脛露脭脮脮
 
 
 #############################################################
-# read 通达信分笔数据
+# read 脥篓麓茂脨脜路脰卤脢脢媒戮脻
 # example readfbtxt(readlines(),'20100831-600000.TXT')
-# 返回的data格式为
-# (stkid,datetime,price,amount,vol(股数),笔数,buy or sale) 的list
+# 路碌禄脴碌脛data赂帽脢陆脦陋
+# (stkid,datetime,price,amount,vol(鹿脡脢媒),卤脢脢媒,buy or sale) 碌脛list
 #############################################################
 def readfbtxt(p_lines, p_name):
-    """读通达信分笔数据 """
+    """露脕脥篓麓茂脨脜路脰卤脢脢媒戮脻 """
     data = []
     shortname = os.path.split(p_name)[1]
     shortname = os.path.splitext(shortname)[0]
@@ -58,12 +61,12 @@ def readfbtxt(p_lines, p_name):
         t = re.split('\s+', l)
         k = datetime.datetime(stky, stkm, stkd, int(t[0][0:2]), int(t[0][3:5]))
         p = float(t[1])  # price
-        vol = int(t[2]) * 100  # 股数
-        amt = p * vol  # 成交量
-        bscnt = 0  # 笔数
+        vol = int(t[2]) * 100  # 鹿脡脢媒
+        amt = p * vol  # 鲁脡陆禄脕驴
+        bscnt = 0  # 卤脢脢媒
         bstag = ''  # buy or sale
         try:
-            bscnt = int(t[3])  # 笔数
+            bscnt = int(t[3])  # 卤脢脢媒
             bstag = t[4]  # buy or sale
         except IndexError as e:
             pass
@@ -72,13 +75,13 @@ def readfbtxt(p_lines, p_name):
 
 
 #############################################################
-# 将分笔数据转化为分笔数据
-# p_data:传入参数 为readfbtxt所返回
-# data:  返回的数据格式为
-# [stkid,datetime,open,high,low,close,amt,vol(股)]
+# 陆芦路脰卤脢脢媒戮脻脳陋禄炉脦陋路脰卤脢脢媒戮脻
+# p_data:麓芦脠毛虏脦脢媒 脦陋readfbtxt脣霉路碌禄脴
+# data:  路碌禄脴碌脛脢媒戮脻赂帽脢陆脦陋
+# [stkid,datetime,open,high,low,close,amt,vol(鹿脡)]
 #############################################################
 def fbtxt2lc0(p_data):
-    """分笔数据转化为1分钟数据"""
+    """路脰卤脢脢媒戮脻脳陋禄炉脦陋1路脰脰脫脢媒戮脻"""
     data = []
     for i in p_data:
         t = i[1]  # datetime
@@ -88,13 +91,13 @@ def fbtxt2lc0(p_data):
 
 
 #############################################################
-# 将分笔数据转化为1分钟数据
-# p_data:传入参数 为readfbtxt所返回
-# data:  返回的数据格式为
-# [stkid,datetime,open,high,low,close,amt,vol(股)]
+# 陆芦路脰卤脢脢媒戮脻脳陋禄炉脦陋1路脰脰脫脢媒戮脻
+# p_data:麓芦脠毛虏脦脢媒 脦陋readfbtxt脣霉路碌禄脴
+# data:  路碌禄脴碌脛脢媒戮脻赂帽脢陆脦陋
+# [stkid,datetime,open,high,low,close,amt,vol(鹿脡)]
 #############################################################
 def fbtxt2lc1(p_data):
-    """分笔数据转化为1分钟数据"""
+    """路脰卤脢脢媒戮脻脳陋禄炉脦陋1路脰脰脫脢媒戮脻"""
     data = []
     for i in p_data:
         t = i[1]  # datetime
@@ -105,9 +108,9 @@ def fbtxt2lc1(p_data):
             if data[j][1] == t:
                 break
             j -= 1
-        if j < 0:  # 没有找到该时间
+        if j < 0:  # 脙禄脫脨脮脪碌陆赂脙脢卤录盲
             data.append([i[0], t, p, p, p, p, i[3], i[4]])
-        else:  # 找到该时间
+        else:  # 脮脪碌陆赂脙脢卤录盲
             if p > data[j][3]:  # high
                 data[j][3] = p
             if p < data[j][4]:  # low
@@ -115,17 +118,17 @@ def fbtxt2lc1(p_data):
             data[j][5] = p  # close
             data[j][6] += i[3]  # amout
             data[j][7] += i[4]  # vol
-    # data.sort(key = lambda x:x[1])  #以datetime 排序
+    # data.sort(key = lambda x:x[1])  #脪脭datetime 脜脜脨貌
     return data
 
 
 #############################################################
-# 一个时间对应的5分钟区间段
-# dt 传入参数 为一个datetime.datetime or datetime.time
-# 返回datetime 或time
+# 脪禄赂枚脢卤录盲露脭脫娄碌脛5路脰脰脫脟酶录盲露脦
+# dt 麓芦脠毛虏脦脢媒 脦陋脪禄赂枚datetime.datetime or datetime.time
+# 路碌禄脴datetime 禄貌time
 #############################################################
 def which5min(dt):
-    """5 分钟时间划分 """
+    """5 路脰脰脫脢卤录盲禄庐路脰 """
     if type(dt) != datetime.datetime and type(dt) != datetime.time:
         return None
     t = dt
@@ -241,18 +244,18 @@ def which5min(dt):
 
 
 #############################################################
-# 将1分钟数据转为5分钟数据
-# p_data:传入参数 为fbtxt2lc1所返回
-# data:  返回的数据格式为
-# [stkid,datetime,open,high,low,close,amt,vol(股)]
+# 陆芦1路脰脰脫脢媒戮脻脳陋脦陋5路脰脰脫脢媒戮脻
+# p_data:麓芦脠毛虏脦脢媒 脦陋fbtxt2lc1脣霉路碌禄脴
+# data:  路碌禄脴碌脛脢媒戮脻赂帽脢陆脦陋
+# [stkid,datetime,open,high,low,close,amt,vol(鹿脡)]
 #############################################################
 def lc1tolc5(p_data):
-    """1分钟数据转化为5分钟数据 """
+    """1路脰脰脫脢媒戮脻脳陋禄炉脦陋5路脰脰脫脢媒戮脻 """
     if len(p_data) <= 0:
         return None
     data = []
     for i in p_data:
-        t = which5min(i[1])  # 找对应5分钟的区段
+        t = which5min(i[1])  # 脮脪露脭脫娄5路脰脰脫碌脛脟酶露脦
         if t == None:
             raise ValueError('time out of range: %s' % i[1])
         lend = len(data)
@@ -261,9 +264,9 @@ def lc1tolc5(p_data):
             if data[j][1] == t:
                 break
             j -= 1
-        if j < 0:  # 没有找到该时间
+        if j < 0:  # 脙禄脫脨脮脪碌陆赂脙脢卤录盲
             data.append([i[0], t, i[2], i[3], i[4], i[5], i[6], i[7]])
-        else:  # 找到该时间
+        else:  # 脮脪碌陆赂脙脢卤录盲
             if i[3] > data[j][3]:  # high
                 data[j][3] = i[3]
             if i[4] < data[j][4]:  # low
@@ -271,19 +274,19 @@ def lc1tolc5(p_data):
             data[j][5] = i[5]  # close
             data[j][6] += i[6]  # amout
             data[j][7] += i[7]  # vol
-    # data.sort(key = lambda x:x[1])  #以datetime 排序
+    # data.sort(key = lambda x:x[1])  #脪脭datetime 脜脜脨貌
     return data
 
 
 #############################################################
-# read 5分钟数据
+# read 5路脰脰脫脢媒戮脻
 # example readlc5(r'E:\new_gxzq_v6\Vipdoc\sh\fzline\sh600000.lc5')
 #############################################################
 def readlc5(p_name):
-    """tdx 5min 数据
-       日期上低16位表示月日，高16位表示分钟
-       这个结构个人感觉就不如同花顺做的巧妙
-           在一个4字节中把 年 月 日 时 分 都记录下来了
+    """tdx 5min 脢媒戮脻
+       脠脮脝脷脡脧碌脥16脦禄卤铆脢戮脭脗脠脮拢卢赂脽16脦禄卤铆脢戮路脰脰脫
+       脮芒赂枚陆谩鹿鹿赂枚脠脣赂脨戮玫戮脥虏禄脠莽脥卢禄篓脣鲁脳枚碌脛脟脡脙卯
+           脭脷脪禄赂枚4脳脰陆脷脰脨掳脩 脛锚 脭脗 脠脮 脢卤 路脰 露录录脟脗录脧脗脌麓脕脣
     """
     f = open(p_name, 'rb')
     stkID = os.path.split(p_name)[1]
@@ -314,9 +317,9 @@ def readlc5(p_name):
 
 
 #############################################################
-# 构造通达信5min数据文件
-# data 结构
-# [stkID,(月,日,时,分),open,high,low,close,amt,vol,0]
+# 鹿鹿脭矛脥篓麓茂脨脜5min脢媒戮脻脦脛录镁
+# data 陆谩鹿鹿
+# [stkID,(脭脗,脠脮,脢卤,路脰),open,high,low,close,amt,vol,0]
 #############################################################
 def writelc5(p_name, data, addwrite=True):
     if addwrite:
@@ -333,8 +336,8 @@ def writelc5(p_name, data, addwrite=True):
 
 #############################################################
 # outlist
-# 将list 或者 tuple 输出
-# 递归垂直输出，格式不好
+# 陆芦list 禄貌脮脽 tuple 脢盲鲁枚
+# 碌脻鹿茅麓鹿脰卤脢盲鲁枚拢卢赂帽脢陆虏禄潞脙
 #############################################################
 def outlist(l):
     if type(l) != list and type(l) != tuple:
@@ -345,8 +348,8 @@ def outlist(l):
 
 
 #############################################################
-# outlist2 二层输出，对于上文中的data 实用
-# 传入参数 data，一个形如矩阵的list
+# outlist2 露镁虏茫脢盲鲁枚拢卢露脭脫脷脡脧脦脛脰脨碌脛data 脢碌脫脙
+# 麓芦脠毛虏脦脢媒 data拢卢脪禄赂枚脨脦脠莽戮脴脮贸碌脛list
 #############################################################
 def outlist2(p_data):
     for i in p_data:
@@ -356,24 +359,24 @@ def outlist2(p_data):
 
 
 #############################################################
-# 正数与二进制表示互相表示
+# 脮媒脢媒脫毛露镁陆酶脰脝卤铆脢戮禄楼脧脿卤铆脢戮
 #
 #############################################################
 # ------------------------------
-# -- i2bin 整数转为 2进制字符串
+# -- i2bin 脮没脢媒脳陋脦陋 2陆酶脰脝脳脰路没麓庐
 # ------------------------------
 def i2bin(x):
     result = ''
     x = int(x)
     while x > 0:
-        mod = x & 0x01  # 取2的余数
-        x = x >> 0x01  # 右移一位
+        mod = x & 0x01  # 脠隆2碌脛脫脿脢媒
+        x = x >> 0x01  # 脫脪脪脝脪禄脦禄
         result = str(mod) + result
     return result
 
 
 # ------------------------------
-# -- bin2i 2进制字符串 转为正数
+# -- bin2i 2陆酶脰脝脳脰路没麓庐 脳陋脦陋脮媒脢媒
 # ------------------------------
 def bin2i(bin):
     result = 0
@@ -385,7 +388,7 @@ def bin2i(bin):
 
 
 #############################################################
-# fill_stkdict 填充全局变量字典 stkdict
+# fill_stkdict 脤卯鲁盲脠芦戮脰卤盲脕驴脳脰碌盲 stkdict
 #
 #############################################################
 def fill_stkdict():
@@ -394,7 +397,7 @@ def fill_stkdict():
     for l in lsh:
         if len(l) <= 4:
             continue
-        l = string.lower(l)
+        l = l.lower()
         if l[-3:] != 'day':
             continue
         n = os.path.splitext(l)[0]
@@ -405,7 +408,7 @@ def fill_stkdict():
     for l in lsz:
         if len(l) <= 4:
             continue
-        l = string.lower(l)
+        l = l.lower()
         if l[-3:] != 'day':
             continue
         n = os.path.splitext(l)[0]
@@ -428,11 +431,11 @@ def getMarketByID(id):
 
 def writelcfiles(p_lines, p_name, lctype='lc5lc1', addfile=True):
     """
-写内容
-p_lines 文件行
-l_name  短文件名
-lctype  要转化生成的分钟类型 lc5 表示5分钟 lc1 表示1分钟 lc0表示分笔的
-addfile True表示追加文件 False 表示覆盖
+脨麓脛脷脠脻
+p_lines 脦脛录镁脨脨
+l_name  露脤脦脛录镁脙没
+lctype  脪陋脳陋禄炉脡煤鲁脡碌脛路脰脰脫脌脿脨脥 lc5 卤铆脢戮5路脰脰脫 lc1 卤铆脢戮1路脰脰脫 lc0卤铆脢戮路脰卤脢碌脛
+addfile True卤铆脢戮脳路录脫脦脛录镁 False 卤铆脢戮赂虏赂脟
     """
     data1 = readfbtxt(p_lines, p_name)
     if len(data1) == 0:
@@ -440,7 +443,7 @@ addfile True表示追加文件 False 表示覆盖
     data2 = fbtxt2lc1(data1)
     data3 = lc1tolc5(data2)
 
-    # lc5 5分钟文件
+    # lc5 5路脰脰脫脦脛录镁
     if 'lc5' in lctype:
         data = []
         for i in data3:
@@ -452,7 +455,7 @@ addfile True表示追加文件 False 表示覆盖
         stkID = data[0][0]
         mark = getMarketByID(stkID)
         if mark == '':
-            sys.stderr.write('不能确定它的市场：%s.请检查代码!\n' % stkID)
+            sys.stderr.write('虏禄脛脺脠路露篓脣眉碌脛脢脨鲁隆拢潞%s.脟毛录矛虏茅麓煤脗毛!\n' % stkID)
         else:
             fout = mark + stkID + '.lc5'
             if mark == 'sh':
@@ -474,7 +477,7 @@ addfile True表示追加文件 False 表示覆盖
         stkID = data[0][0]
         mark = getMarketByID(stkID)
         if mark == '':
-            sys.stderr.write('不能确定它的市场：%s.请检查代码!\n' % stkID)
+            sys.stderr.write('虏禄脛脺脠路露篓脣眉碌脛脢脨鲁隆拢潞%s.脟毛录矛虏茅麓煤脗毛!\n' % stkID)
         else:
             fout = mark + stkID + '.lc1'
             if mark == 'sh':
@@ -486,7 +489,7 @@ addfile True表示追加文件 False 表示覆盖
             # endif.
     # endif.
 
-    # lc0 分笔的K线文件
+    # lc0 路脰卤脢碌脛K脧脽脦脛录镁
     if 'lc0' in lctype:
         data0 = fbtxt2lc0(data1)
         data = []
@@ -499,7 +502,7 @@ addfile True表示追加文件 False 表示覆盖
         stkID = data[0][0]
         mark = getMarketByID(stkID)
         if mark == '':
-            sys.stderr.write('不能确定它的市场：%s.请检查代码!\n' % stkID)
+            sys.stderr.write('虏禄脛脺脠路露篓脣眉碌脛脢脨鲁隆拢潞%s.脟毛录矛虏茅麓煤脗毛!\n' % stkID)
         else:
             fout = mark + stkID + '.lc0'
             if mark == 'sh':
@@ -513,12 +516,16 @@ addfile True表示追加文件 False 表示覆盖
 
 
 def convert(p_stkid, p_type='txt', filterfunc=None):
+    
     if p_type == 'txt':  # txt file
+
         txtfiles = glob.glob(os.path.join(exp_dir, '*-' + p_stkid + '.txt'))
         if filterfunc:
             txtfiles = list(filter(filterfunc, txtfiles))
         txtfiles.sort()
         l_i = 0
+        import ipdb;ipdb.set_trace()
+
         for fname in txtfiles:
             sys.stderr.write('%s\n' % fname)
             try:
@@ -563,23 +570,23 @@ def convert(p_stkid, p_type='txt', filterfunc=None):
 
 
 #############################################################
-# usage 使用说明
+# usage 脢鹿脫脙脣碌脙梅
 #
 #############################################################
 
 def usage(p):
     print("""
 python %s [-t txt|zip] stkid [from] [to]
--t txt 表示从txt files 读取数据，否则从zip file 读取(这也是默认方式)
+-t txt zip file 
 for example :
-python %s 999999 20070101 20070302
-python %s -t txt 999999 20070101 20070302
+python %s 999999 20230101 20230302
+python %s -t txt 999999 20230101 20230202
     """ % (p, p, p))
 
 
 if __name__ == '__main__':
     """
-    python readtdxlc5.py 999999 20070101 20070131
+    python readtdxlc5.py 999999 20230101 20230131
     """
     argv = sys.argv[1:]
     try:
@@ -608,7 +615,7 @@ if __name__ == '__main__':
     except:
         pass
 
-    # 过滤函数
+    # 鹿媒脗脣潞炉脢媒
     def filfunc(x):
         if l_from == None and l_to == None:
             return True
@@ -620,14 +627,14 @@ if __name__ == '__main__':
         else:
             return ymd <= l_to
 
-    if l_type == 'txt':  # 从一般txt 文件
+    if l_type == 'txt':  # 麓脫脪禄掳茫txt 脦脛录镁
         convert(stkid, 'txt', filfunc)
     else:
         convert(stkid, 'zip', filfunc)
 
     mark = getMarketByID(stkid)
     if mark == '':
-        sys.stderr.write('不能确定它的市场：%s.请检查代码!\n' % stkid)
+        sys.stderr.write('虏禄脛脺脠路露篓脣眉碌脛脢脨鲁隆拢潞%s.脟毛录矛虏茅麓煤脗毛!\n' % stkid)
     else:
         os.system(
             'copy E:\\cwork\\guosen\\Vipdoc\\' + mark + '\\fzline\\' + mark + stkid + '.lc5 E:\\cwork\\my_yd\\Vipdoc\\' + mark + '\\fzline\\')
