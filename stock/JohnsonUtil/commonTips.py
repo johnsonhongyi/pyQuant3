@@ -52,7 +52,7 @@ perdall = "df[df.columns[(df.columns >= 'per1d') & (df.columns <= 'per%sd'%(ct.c
 perdallc = "df[df.columns[(df.columns >= 'perc1d') & (df.columns <= 'perc%sd'%(ct.compute_lastdays))]][:1]"
 perdalla = "df[df.columns[ ((df.columns >= 'per1d') & (df.columns <= 'per%sd'%(ct.compute_lastdays))) | ((df.columns >= 'du1d') & (df.columns <= 'du%sd'%(ct.compute_lastdays)))]][:1]"
 perdallu = "df[df.columns[ ((df.columns >= 'du1d') & (df.columns <= 'du%sd'%(ct.compute_lastdays)))]][:1]"
-
+root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\'
 
 
 class GlobalValues:
@@ -121,7 +121,7 @@ def getcwd():
 
 def get_run_path_tdx(fp=None):
     # path ='c:\\users\\johnson\\anaconda2\\envs\\pytorch_gpu\\lib\\site-packages'
-    root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant\\stock\\'
+    # root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\'
     path = getcwd()
     alist = path.split('stock')
     # if len(alist) > 0:
@@ -2660,7 +2660,7 @@ def get_limit_multiIndex_Row(df, col=None, index='ticktime', start=None, end='10
         func = from_list_to_dict(col, multiIndex_func)
         df = df.groupby(level=[0]).agg(func)
     else:
-        log.error('col is None')
+        log.info('col is None')
     return df
 
 
