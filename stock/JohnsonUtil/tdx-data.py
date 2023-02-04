@@ -584,62 +584,88 @@ python %s -t txt 999999 20230101 20230202
     """ % (p, p, p))
 
 
+import os
+import struct
+import pandas as pd
+ 
+def readTdxLdayFile(fname="D:\\MacTools\\WinTools\\new_tdx\\vipdoc\\sh\\lday\\sh601628.day"):
+    dataSet=[]
+    with open(fname,'rb') as fl:
+        buffer=fl.read() #读取数据到缓存
+        size=len(buffer)
+        rowSize=32 #通信达day数据，每32个字节一组数据
+        code=os.path.basename(fname).replace('.day','')
+        for i in range(0,size,rowSize): #步长为32遍历buffer
+            row=list( struct.unpack('IIIIIfII',buffer[i:i+rowSize]) )
+            row[1]=row[1]/100
+            row[2]=row[2]/100
+            row[3]=row[3]/100
+            row[4]=row[4]/100
+            row.pop() #移除最后无意义字段
+            row.insert(0,code)
+            dataSet.append(row)
+    data=pd.DataFrame(data=dataSet,columns=['code','tradeDate','open','high','low','close','amount','vol'])
+    print(data)
+ 
+readTdxLdayFile()
+
+
 if __name__ == '__main__':
     """
     python readtdxlc5.py 999999 20230101 20230131
     """
-    argv = sys.argv[1:]
-    try:
-        opts, args = getopt.getopt(argv, "ht:", ["help", "type="])
-    except getopt.GetoptError:
-        usage(sys.argv[0])
-        sys.exit(0)
-    l_type = 'zip'  # default type is zipfiles!
-    for opt, arg in opts:
-        if opt in ("-h", "--help"):
-            usage(sys.argv[0])
-            sys.exit(1)
-        elif opt in ("-t", "--type"):
-            l_type = arg
-    if len(args) < 1:
-        print('You must specified the stock No.!')
-        usage(sys.argv[0])
-        sys.exit(1)
+    # argv = sys.argv[1:]
+    # try:
+    #     opts, args = getopt.getopt(argv, "ht:", ["help", "type="])
+    # except getopt.GetoptError:
+    #     usage(sys.argv[0])
+    #     sys.exit(0)
+    # l_type = 'zip'  # default type is zipfiles!
+    # for opt, arg in opts:
+    #     if opt in ("-h", "--help"):
+    #         usage(sys.argv[0])
+    #         sys.exit(1)
+    #     elif opt in ("-t", "--type"):
+    #         l_type = arg
+    # if len(args) < 1:
+    #     print('You must specified the stock No.!')
+    #     usage(sys.argv[0])
+    #     sys.exit(1)
 
-    stkid = args[0]
-    l_from = None
-    l_to = None
-    try:
-        l_from = args[1]
-        l_to = args[2]
-    except:
-        pass
+    # stkid = args[0]
+    # l_from = None
+    # l_to = None
+    # try:
+    #     l_from = args[1]
+    #     l_to = args[2]
+    # except:
+    #     pass
 
-    # ¹ýÂËº¯Êý
-    def filfunc(x):
-        if l_from == None and l_to == None:
-            return True
-        ymd = os.path.splitext(os.path.split(x)[1])[0].split('-')[0]
-        if l_from and l_to:
-            return ymd >= l_from and ymd <= l_to
-        elif l_from:
-            return ymd >= l_from
-        else:
-            return ymd <= l_to
+    # # ¹ýÂËº¯Êý
+    # def filfunc(x):
+    #     if l_from == None and l_to == None:
+    #         return True
+    #     ymd = os.path.splitext(os.path.split(x)[1])[0].split('-')[0]
+    #     if l_from and l_to:
+    #         return ymd >= l_from and ymd <= l_to
+    #     elif l_from:
+    #         return ymd >= l_from
+    #     else:
+    #         return ymd <= l_to
 
-    if l_type == 'txt':  # ´ÓÒ»°ãtxt ÎÄ¼þ
-        convert(stkid, 'txt', filfunc)
-    else:
-        convert(stkid, 'zip', filfunc)
+    # if l_type == 'txt':  # ´ÓÒ»°ãtxt ÎÄ¼þ
+    #     convert(stkid, 'txt', filfunc)
+    # else:
+    #     convert(stkid, 'zip', filfunc)
 
-    mark = getMarketByID(stkid)
-    if mark == '':
-        sys.stderr.write('²»ÄÜÈ·¶¨ËüµÄÊÐ³¡£º%s.Çë¼ì²é´úÂë!\n' % stkid)
-    else:
-        os.system(
-            'copy E:\\cwork\\guosen\\Vipdoc\\' + mark + '\\fzline\\' + mark + stkid + '.lc5 E:\\cwork\\my_yd\\Vipdoc\\' + mark + '\\fzline\\')
-        os.system(
-            'copy E:\\cwork\\guosen\\Vipdoc\\' + mark + '\\fzline\\' + mark + stkid + '.lc1 E:\\cwork\\ydzqwsjy\\Vipdoc\\' + mark + '\\fzline\\' + mark + stkid + '.lc5')
+    # mark = getMarketByID(stkid)
+    # if mark == '':
+    #     sys.stderr.write('²»ÄÜÈ·¶¨ËüµÄÊÐ³¡£º%s.Çë¼ì²é´úÂë!\n' % stkid)
+    # else:
+    #     os.system(
+    #         'copy E:\\cwork\\guosen\\Vipdoc\\' + mark + '\\fzline\\' + mark + stkid + '.lc5 E:\\cwork\\my_yd\\Vipdoc\\' + mark + '\\fzline\\')
+    #     os.system(
+    #         'copy E:\\cwork\\guosen\\Vipdoc\\' + mark + '\\fzline\\' + mark + stkid + '.lc1 E:\\cwork\\ydzqwsjy\\Vipdoc\\' + mark + '\\fzline\\' + mark + stkid + '.lc5')
 
-        # data = readlc5(os.path.join(lc5_dir_sh,'sh601398.lc5'))
-        # outlist2(data)
+    #     # data = readlc5(os.path.join(lc5_dir_sh,'sh601398.lc5'))
+    #     # outlist2(data)
