@@ -235,6 +235,25 @@ def LIS_TDX_Cum(X):
 
 
 def write_all_kdata_to_file(code, f_path, df=None):
+    """
+
+    Function: write_all_kdata_to_file
+
+    Summary: InsertHere
+
+    Examples: InsertHere
+
+    Attributes: 
+
+        @param (code):InsertHere
+
+        @param (f_path):InsertHere
+
+        @param (df) default=None: InsertHere
+
+    Returns: InsertHere
+
+    """
     fsize = os.path.getsize(f_path)
     if fsize != 0:
         o_file = open(f_path, 'w+')
@@ -249,7 +268,7 @@ def write_all_kdata_to_file(code, f_path, df=None):
 def get_tdx_Exp_day_to_df_AllRead_(code, start=None, end=None, dl=None, newdays=None, type='f', wds=True, lastdays=3, resample='d', MultiIndex=False):
     """[summary]
 
-    [description]
+    [test ReadAllDf vs Readlines]
 
     Arguments:
         code {[type]} -- [description]
@@ -2059,6 +2078,7 @@ def Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=30
             print(("market:%s A:%s open:%s" % (mk, allcount, len(df))), end=' ')
             # code_list = df.index.tolist()
             # df = get_sina_data_df(code_list)
+
             df.index = df.index.astype(str)
             # df.ticktime = map(lambda x: int(x.replace(':', '')), df.ticktime)
             # df.ticktime = map(lambda x, y: str(x) + ' ' + str(y), df.dt, df.ticktime)
@@ -2069,6 +2089,8 @@ def Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=30
             # df = df.loc[:, ['open', 'high', 'low', 'close', 'llastp', 'volume', 'ticktime']]
             # ['code', 'date', 'open', 'high', 'low', 'close', 'vol','amount']
             df.rename(columns={'volume': 'vol', 'turnover': 'amount', 'dt': 'date'}, inplace=True)
+            #write py3 all hdf need datetime
+            df.date = pd.to_datetime(df.date)
             df = df.loc[:, ['date', 'open', 'high', 'low', 'close', 'vol', 'amount']]
             if 'code' not in df.columns:
                 df = df.reset_index()
@@ -4827,6 +4849,7 @@ if __name__ == '__main__':
     # 
     # dm = get_sina_data_df(code)
     # df2 = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
+
     df2 = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
     # print get_tdx_append_now_df_api_tofile(code)
 
@@ -4969,6 +4992,9 @@ if __name__ == '__main__':
         else:
             break
 
+    hdf5_wri_append = cct.cct_raw_input("Multi-300 append sina to Tdx data to Multi hdf_300[rw|y|n]:")
+    if hdf5_wri == 'y':
+        Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=300)
 
     hdf5_wri = cct.cct_raw_input("Multi-300 write all Tdx data to Multi hdf_300[rw|y|n]:")
     if hdf5_wri == 'rw':

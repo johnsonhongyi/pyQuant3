@@ -625,7 +625,7 @@ if __name__ == '__main__':
     percentDuration = 2
     cct.get_terminal_Position(position=sys.argv[0])
 
-    blkname = '068.blk'
+    blkname = '061.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
     while 1:
         try:
@@ -718,6 +718,9 @@ if __name__ == '__main__':
                                     top_temp, writecount='all')
                                 cct.write_to_blocknew(
                                     block_path, codew, append=False, doubleFile=False)
+                                # print("Now append sina to tdx 300 hdf:")
+                                # tdd.Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=300)
+                                # tdd.Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300)
                             break
                         else:
                             print(".")

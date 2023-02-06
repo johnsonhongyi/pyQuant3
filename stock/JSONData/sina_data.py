@@ -900,7 +900,6 @@ if __name__ == "__main__":
     print((sina.get_stock_list_data(['999999','399001','399006'],index=True).name))
     # df = sina.get_stock_code_data('999999',index=True)
     print((df.name))
-    import ipdb;ipdb.set_trace()
 
     df = Sina().market('cyb')
     print((df.shape))
