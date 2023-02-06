@@ -117,9 +117,9 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     # df.index.get_level_values('code')[0]
     if resample.upper() == 'D' or resample.lower() == 'd':
         if duration < 300:
-            rollma = ['10','200']
+            rollma = ['10','5','26','200']
         else:
-            rollma = ['10','250']
+            rollma = ['10','5','26','250']
 
     elif resample.upper() == 'W' or resample.lower() == 'w':
         rollma = ['5','10']
@@ -136,7 +136,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
     for da in rollma:
         cumdays=int(da)
-        dfs['ma%d'%cumdays] = groupd['close'].rolling(cumdays).mean().values
+        dfs['ma%d'%cumdays] = round(dfs['close'].rolling(cumdays).mean(),2)
         if cumdays == 10 :
             dfs['upper'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 + 11.0 / 100) * x, 1))
             dfs['lower'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 - 9.0 / 100) * x, 1))
