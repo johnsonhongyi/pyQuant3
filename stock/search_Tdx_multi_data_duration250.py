@@ -41,7 +41,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     code_list = sina_data.Sina().market('all').index.tolist()
     code_list.extend(['999999','399001','399006'])
     print("all code:",len(code_list))
-    if duration < 300 :
+    if duration <= 300 :
         h5_fname = 'tdx_all_df' + '_' + str(300)
         h5_table = 'all' + '_' + str(300)
     else:
@@ -50,7 +50,10 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     # df = tdd.search_Tdx_multi_data_duration('tdx_all_df_300', 'all_300', df=None,code_l=code_list, start='20150501', end=None, freq=None, col=None, index='date')
     df = tdd.search_Tdx_multi_data_duration(h5_fname, h5_table, df=None,code_l=code_list, start=None, end=None, freq=None, col=None, index='date')
     # df = tdd.search_Tdx_multi_data_duration(h5_fname, h5_table, df=None,code_l=code_list, start=None, end=None, freq=None, col=None, index='date',tail=1)
-
+    
+    #append data is end ,need re sort
+    df = df.reset_index().sort_values(by=['code','date'],ascending=[0,1]).set_index(['code','date'])
+    
     code_uniquelist=df.index.get_level_values('code').unique()
 
     code_select = code_uniquelist[random.randint(0,len(code_uniquelist)-1)]
@@ -317,6 +320,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 if __name__ == '__main__':
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=250) ???
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=120) ???
-    get_roll_mean_all(single=False,tdx=True,app=True,duration=250,ma_250_l=1.02,ma_250_h=1.2,resample='w')
+    get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='d')
+    # get_roll_mean_all(single=False,tdx=True,app=True,duration=250,ma_250_l=1.02,ma_250_h=1.2,resample='w')
     # get_roll_mean_all(single=True,tdx=True,app=True)
     # get_roll_mean_all(single=True,tdx=True,app=False)
