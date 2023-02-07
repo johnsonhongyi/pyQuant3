@@ -1953,6 +1953,9 @@ def Write_tdx_all_to_hdf(market, h5_fname='tdx_all_df', h5_table='all', dl=300, 
         for code in dfcode:
             # for code in dfcode:
             df = get_tdx_Exp_day_to_df(code, dl=dl, MultiIndex=True)
+
+            # df = df[1:] # 取消最新一天数据
+
             # print df
             # (map(lambda x, y: y if int(x) == 0 else x, top_dif['buy'].values, top_dif['trade'].values))
             # print df.index
@@ -1992,6 +1995,7 @@ def Write_tdx_all_to_hdf(market, h5_fname='tdx_all_df', h5_table='all', dl=300, 
                 # df.info()
                 # if 'code' in df.columns:
                 # df.drop(['code'],axis=1,inplace=True)
+
                 df = df.sort_index(ascending=True)
                 df = df.loc[:, ['code','open', 'high', 'low', 'close', 'vol', 'amount']]
                 df = df.reset_index()
@@ -2056,6 +2060,7 @@ def Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=30
     if cct.get_work_day_status() and cct.get_now_time_int() > 1500:
         if market == 'all':
             index = False
+            # mlist = ['sh', 'sz', 'cyb' ,'kcb']
             mlist = ['sh', 'sz', 'cyb']
         else:
             if index:
@@ -2079,18 +2084,26 @@ def Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=30
             # code_list = df.index.tolist()
             # df = get_sina_data_df(code_list)
 
+
+            # df.index = [x.replace('\n', '') for x in df.index]
+            # df.index = df.index.astype(str)
+            # df.index.name = 'date'
+            # df.index = pd.to_datetime(df.index)
+            # if 'code' in df.columns:
+            #     df.code = df.code.astype(str)
+
             df.index = df.index.astype(str)
             # df.ticktime = map(lambda x: int(x.replace(':', '')), df.ticktime)
             # df.ticktime = map(lambda x, y: str(x) + ' ' + str(y), df.dt, df.ticktime)
             # df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S')
-            df.dt = pd.to_datetime(df.dt, format='%Y-%m-%d')
             df.dt = df.dt.astype(str)
             df['dt'] = ([str(x)[:10] for x in df['dt']])
+
             # df = df.loc[:, ['open', 'high', 'low', 'close', 'llastp', 'volume', 'ticktime']]
             # ['code', 'date', 'open', 'high', 'low', 'close', 'vol','amount']
             df.rename(columns={'volume': 'vol', 'turnover': 'amount', 'dt': 'date'}, inplace=True)
             #write py3 all hdf need datetime
-            df.date = pd.to_datetime(df.date)
+            df['date'] = pd.to_datetime(df['date'])
             df = df.loc[:, ['date', 'open', 'high', 'low', 'close', 'vol', 'amount']]
             if 'code' not in df.columns:
                 df = df.reset_index()
@@ -4789,6 +4802,9 @@ if __name__ == '__main__':
     df = df.drop_duplicates()
     '''
 
+    # Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300, rewrite=True)
+    # import ipdb;ipdb.set_trace()
+
 
     # df=get_tdx_append_now_df_api_tofile('000587')
 
@@ -4992,9 +5008,14 @@ if __name__ == '__main__':
         else:
             break
 
-    hdf5_wri_append = cct.cct_raw_input("Multi-300 append sina to Tdx data to Multi hdf_300[rw|y|n]:")
-    if hdf5_wri == 'y':
-        Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=300)
+    hdf5_wri_append = cct.cct_raw_input("Single Multi-300 append sina to Tdx data to Multi hdf_300[y|n]:")
+    if hdf5_wri_append == 'y':
+        for inx in tdx_index_code_list:
+            get_tdx_append_now_df_api_tofile(inx)
+        print("Index Wri ok", end=' ')
+        Write_sina_to_tdx(tdx_index_code_list, index=True)
+        Write_sina_to_tdx(market='all')
+        # Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=300)
 
     hdf5_wri = cct.cct_raw_input("Multi-300 write all Tdx data to Multi hdf_300[rw|y|n]:")
     if hdf5_wri == 'rw':

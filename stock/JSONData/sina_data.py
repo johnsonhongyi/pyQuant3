@@ -296,7 +296,7 @@ class Sina:
             # self.stock_codes = [elem for elem in self.stock_codes if elem.startswith(('6','30','00'))]
             # print len(self.stock_codes)
             if market == 'sh':
-                self.stock_codes = [elem for elem in self.stock_codes if elem.startswith('60')]
+                self.stock_codes = [elem for elem in self.stock_codes if elem.startswith('60') or elem.startswith('688')]
                 self.stock_with_exchange_list = list(
                     [('sh%s') % stock_code for stock_code in self.stock_codes])
             elif market == 'sz':
@@ -305,6 +305,10 @@ class Sina:
                     [('sz%s') % stock_code for stock_code in self.stock_codes])
             elif market == 'cyb':
                 self.stock_codes = [elem for elem in self.stock_codes if elem.startswith('30')]
+                self.stock_with_exchange_list = list(
+                    [('sz%s') % stock_code for stock_code in self.stock_codes])
+            elif market == 'kcb':
+                self.stock_codes = [elem for elem in self.stock_codes if elem.startswith('688')]
                 self.stock_with_exchange_list = list(
                     [('sz%s') % stock_code for stock_code in self.stock_codes])
             self.stock_codes = list(set(self.stock_codes))
@@ -892,10 +896,19 @@ if __name__ == "__main__":
     # code='300107'
     # print sina.get_cname_code('陕西黑猫')
     # print sina.get_code_cname(['300107'])
-    print((sina.get_stock_code_data('300107').T))
+    # print((sina.get_stock_code_data('300107').T))
 
     df =sina.all
-    print((df[:10]))
+    print(len(df))
+
+
+    for ma in ['sh', 'sz', 'cyb', 'all']:
+        # for ma in ['sh']:
+        df = Sina().market(ma)
+        # print df.loc['600581']
+        # print len(sina.all)
+        print(("market:%s %s" % (ma, len(df))))
+
     # print df.lastbuy[-5:].to_frame().T
     print((sina.get_stock_list_data(['999999','399001','399006'],index=True).name))
     # df = sina.get_stock_code_data('999999',index=True)
