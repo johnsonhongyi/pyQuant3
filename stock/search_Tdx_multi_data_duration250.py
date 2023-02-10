@@ -62,10 +62,68 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     # len(df.index.get_level_values('code').unique())
     # df = df[~df.index.duplicated(keep='first')]
 
+    import numpy as np
+
+    def calculate_slope(data):
+        # Calculate the slope of the line that connects two points
+        slope = round((data[1] - data[0]) / (1), 2)
+        return slope
+
+
+    def detect_bull_bear(price_data, window=10):
+        # Calculate the slopes of the price data for the last `window` days
+        slopes = []
+        # try:
+        if len(price_data) > 20:
+            for i in range(len(price_data) - window, len(price_data) - 1):
+                        slope = calculate_slope([price_data[i], price_data[i + 1]])
+                        # print(slope)
+                        slopes.append(slope)
+
+            # Compare the current slope with the average slope of the last `window` days
+            avg_slope = round(np.mean(slopes), 2)
+            curr_slope = calculate_slope([price_data[-window], price_data[-1]])
+            # print(len(slopes), avg_slope, curr_slope)
+
+            # if curr_slope > avg_slope:
+            #     # return "Bullish"
+            #     return "Bull"
+            # else:
+            #     return "Bear"
+            return curr_slope
+        else:
+            return round((price_data[-1] - price_data[0])/(1),2)
+
+        # except Exception as e:
+
+        #     raise e
+    def regression_ratio(df,limit=30):
+        # Calculate the coefficients of the regression line
+        if isinstance(df,pd.Series):
+            Y = df.values[-limit:]
+            X = df.reset_index().index[-limit:]
+            
+        else:
+            X = df.index[-30:]
+            Y = df.close[-30:]
+
+        n = len(X)
+        sum_x = np.sum(X)
+        sum_y = np.sum(Y)
+        sum_xy = np.sum(X * Y)
+        sum_xx = np.sum(X * X)
+        # a = round((sum_y * sum_xx - sum_x * sum_xy) / (n * sum_xx - sum_x * sum_x),2)
+        b = round((n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x),2)
+        return b   
+
     def get_groupby_mean_median_close(dfs):
 
         groupd = dfs.groupby(level=[0])
+        ###detect_bull_bear
+        dd = groupd['close'].apply(detect_bull_bear)
 
+        ddr = groupd['close'].apply(regression_ratio)
+        
         df = groupd['close'].agg(['median','mean'])
         df['close'] = groupd.tail(1).reset_index().set_index(['code'])['close']
         # dfs['mean'] = groupd['close'].agg('mean')
