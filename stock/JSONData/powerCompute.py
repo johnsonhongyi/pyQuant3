@@ -813,6 +813,8 @@ def get_linear_model_candles(code, ptype='low', dtype='d', start=None, end=None,
     eval("df.%s" % 'close').plot(style='k')
     roll_mean = pd.Series.rolling(df.close, window=roll_mean_days).mean()
     plt.plot(roll_mean, 'b')
+    plt.plot(df[df.upper > 0].upper, 'g')
+    plt.plot(df[df.lower > 0].lower, 'r')
     # print roll_mean[-1]
     # plt.legend(["MA:10"+str(roll_mean[-1]], fontsize=12,loc=2)
 

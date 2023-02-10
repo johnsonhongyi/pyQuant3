@@ -217,6 +217,12 @@ class Sina:
 
                 h5 = self.combine_lastbuy(h5)
 
+                if h5 is not None and len(h5) > 0 and  'nclose' in h5.columns and 'nstd' in h5.columns:
+                    for co in ['nclose','nstd']:
+                        h5[co] = h5[co].apply(lambda x: round(x, 2))
+                if 'ticktime' in h5.columns:
+                    h5['ticktime'] = pd.to_datetime(h5['ticktime'])
+                        
                 if sina_time_status and l_time < 6:
                     log.info("open 915 hdf ok:%s" % (len(h5)))
                     return h5
@@ -851,6 +857,8 @@ class Sina:
             log.info("agg_df_all_time:%0.2f" % (time.time() - time_s))
             # top_temp[:1][['high','nhigh','low','nlow','close','nclose','llastp']]
 
+
+
         h5a.write_hdf_db(self.hdf_name, dd, self.table, index=index)
         log.info("wr end:%0.2f" % (time.time() - self.start_t))
         # print df['lastbuy','close'][-5:].to_frame().T
@@ -858,6 +866,13 @@ class Sina:
         # if 'lastbuy' in df.columns:
         #     print df[-5:][['lastbuy','close']].T
         dd = self.combine_lastbuy(dd)
+
+        if dd is not None and len(dd) > 0 and  'nclose' in dd.columns and 'nstd' in dd.columns:
+            for co in ['nclose','nstd']:
+                dd[co] = dd[co].apply(lambda x: round(x, 2))
+        if 'ticktime' in dd.columns:
+            dd['ticktime'] = pd.to_datetime(dd['ticktime'])
+            
         return dd
         # df = pd.DataFrame.from_dict(stock_dict, orient='columns',
         #                             columns=['name', 'open', 'close', 'now', 'high', 'low', 'buy', 'sell', 'turnover',

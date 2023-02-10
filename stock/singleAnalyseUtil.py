@@ -716,8 +716,10 @@ if __name__ == '__main__':
                                 top_temp = cct.GlobalValues().getkey('top_max')
                                 codew = stf.WriteCountFilter(
                                     top_temp, writecount='all')
-                                cct.write_to_blocknew(
-                                    block_path, codew, append=False, doubleFile=False)
+                                # cct.write_to_blocknew(
+                                #     block_path, codew, append=False, doubleFile=False)
+
+                                
                                 # print("Now append sina to tdx 300 hdf:")
                                 # tdd.Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=300)
                                 # tdd.Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300)

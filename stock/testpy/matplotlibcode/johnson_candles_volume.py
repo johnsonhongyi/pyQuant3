@@ -1,9 +1,10 @@
 # -*- coding:utf-8 -*-
 import matplotlib
-import matplotlib.finance as mpf
+import mplfinance as mpf
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.finance import candlestick2_ohlc
+# from mpl_finance import candlestick2_ohlc
+from mplfinance.original_flavor import candlestick_ohlc
 # from matplotlib.finance import volume_overlay3
 # from matplotlib.dates import num2date
 # from matplotlib.dates import date2num
@@ -110,8 +111,7 @@ def plot_candlestick(frame, ylabel='BTC/USD', candle_width=1.0, freq='D'):
     return (ax, ax1)
 
 
-r = ts.get_hist_data('sz', start='2016-01-01')
-r.sort_index(ascending=True, inplace=True)
+r = ts.get_hist_data('sz', start='2016-01-01').sort_index(ascending=True, inplace=True)
 plot_candlestick(r)
 
 import sys
