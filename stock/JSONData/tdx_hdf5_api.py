@@ -129,7 +129,7 @@ class SafeHDFStore(HDFStore):
                 # os.unlink(self._lock)
                 # os.remove(self._lock)
                 if self.countlock > 1:
-                    log.error("IOError Error:%s" % (e))
+                    log.debug("IOError Error:%s" % (e))
 
                 if self.countlock <= 8:
                     time.sleep(round(random.randint(3, 10) / 1.2, 2))

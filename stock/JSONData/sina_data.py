@@ -34,9 +34,9 @@ class StockCode:
         if not os.path.exists(self.stock_code_path) or os.path.getsize(self.stock_code_path) < 500:
             stock_codes = self.get_stock_codes(True)
             print(("create:%s counts:%s" % (self.stock_code_path, len(stock_codes))))
-        if cct.creation_date_duration(self.stock_code_path) > 10:
-            stock_codes = self.get_stock_codes(True)
-            print(("days:%s %s update stock_codes.conf" % (cct.creation_date_duration(self.stock_code_path), len(stock_codes))))
+        # if cct.creation_date_duration(self.stock_code_path) > 10:
+        #     stock_codes = self.get_stock_codes(True)
+        #     print(("days:%s %s update stock_codes.conf" % (cct.creation_date_duration(self.stock_code_path), len(stock_codes))))
 
         
 
@@ -47,6 +47,8 @@ class StockCode:
 
     def update_stock_codes(self):
         """获取所有股票 ID 到 all_stock_code 目录下"""
+        # 122.10.4.234 www.shdjt.com
+        # https://site.ip138.com/www.shdjt.com/
         all_stock_codes_url = 'http://www.shdjt.com/js/lib/astock.js'
         grep_stock_codes = re.compile('~(\d+)`')
         response = requests.get(all_stock_codes_url)
@@ -283,7 +285,7 @@ class Sina:
         if len(df) == 1:
             code = df.name[0]
         else:
-            code = 0
+            code = code
         return code
         
     def market(self, market):
@@ -786,7 +788,12 @@ class Sina:
             #spp.all_10.loc['600074'].lastbuy
             #spp.all_10.lastbuy.groupby(level=[0]).tail(1).reset_index().set_index('code')[-50:]
             dd = df.copy()
-            df = df.loc[:, ['close', 'high', 'low', 'llastp', 'volume', 'ticktime','lastbuy']]
+
+            if 'lastbuy' in df.columns:
+                df = df.loc[:, ['close', 'high', 'low', 'llastp', 'volume', 'ticktime','lastbuy']]
+            else:
+                df = df.loc[:, ['close', 'high', 'low', 'llastp', 'volume', 'ticktime']]
+                df['lastbuy'] = df['close']
             # df['muclose'] = df['close']
 
             if 'code' not in df.columns:
@@ -910,20 +917,23 @@ if __name__ == "__main__":
     # print len(df)
     # code='300107'
     # print sina.get_cname_code('陕西黑猫')
-    # print sina.get_code_cname(['300107'])
+    print(sina.get_code_cname('300107'))
+    import ipdb;ipdb.set_trace()
+
     # print((sina.get_stock_code_data('300107').T))
 
     df =sina.all
     print(len(df))
 
 
-    for ma in ['sh', 'sz', 'cyb', 'all']:
+    for ma in ['sh', 'sz', 'cyb', 'kcb','all']:
         # for ma in ['sh']:
         df = Sina().market(ma)
         # print df.loc['600581']
         # print len(sina.all)
         print(("market:%s %s" % (ma, len(df))))
 
+        
     # print df.lastbuy[-5:].to_frame().T
     print((sina.get_stock_list_data(['999999','399001','399006'],index=True).name))
     # df = sina.get_stock_code_data('999999',index=True)

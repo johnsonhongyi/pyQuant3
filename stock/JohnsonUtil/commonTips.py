@@ -3025,6 +3025,7 @@ def func_compute_percd2020( open, close,high, low,lastopen, lastclose,lasthigh, 
 def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None):
     initc = 0
     percent_idx = 2
+    vol_du_idx = 1.2
     if  low > 0 and  lastclose > 0 and lastvol > 0 and lasthigh > 1.0 and lastlow > 1.0 and lasthigh > 0 and lastlow > 0:
         percent = round((close - lastclose)/lastclose*100,1)
         # now_du = round((high - low)/low*100,1)
@@ -3035,7 +3036,7 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
 
         # if idate == "2022-11-28":
 
-        if (percent > 0 and (close_du > percent_idx or vol_du > 1.1)) or percent >= percent_idx or ma5 > ma10 or close > ma5:
+        if (percent > 0 and (close_du > percent_idx or vol_du > vol_du_idx)) or percent >= percent_idx or ma5 > ma10 or close > ma5:
             initc +=1
             # if  close_du > 5:
             #     initc +=0.1
