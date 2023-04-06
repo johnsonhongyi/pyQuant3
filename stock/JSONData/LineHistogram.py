@@ -173,6 +173,9 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
         else:
             code2 = '399001'
         df1 = tdd.get_tdx_append_now_df_api(code2, start, end).sort_index(ascending=True)
+        if 'name' not in df1.columns:
+            df1['name'] = tdd.get_sina_data_code(code2,index=True)
+
         # df1 = tdd.get_tdx_append_now_df(code2, ptype, start, end).sort_index(ascending=True)
         if not dtype == 'd':
             df1 = tdd.get_tdx_stock_period_to_type(df1, dtype).sort_index(ascending=True)
@@ -210,11 +213,14 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
             code2 = '399005'
         else:
             code2 = '399006'
+
         if code2.startswith('3990'):
             df1 = tdd.get_tdx_append_now_df_api(code2, start, end).sort_index(ascending=True)
             if len(df1) < int(len(df) / 4):
                 code2 = '399001'
                 df1 = tdd.get_tdx_append_now_df_api(code2, start, end).sort_index(ascending=True)
+            if 'name' not in df1.columns:
+                df1['name'] = tdd.get_sina_data_code(code2,index=True)
 
         # df1 = tdd.get_tdx_append_now_df(code2, ptype, start, end).sort_index(ascending=True)
         if not dtype == 'd':
@@ -429,7 +435,10 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
         else:
             cname = '-'
         # plt.legend([code, code2], loc=0)
-        plt.legend([cname, code2], loc=0)
+        if 'name' in df1.columns:
+            plt.legend([cname, df1.name.values[-1:][0]], loc=0)
+        else:
+            plt.legend([cname, code2], loc=0)
 
     # plt 3
     ax2 = fig.add_subplot(323)

@@ -97,34 +97,94 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
         # except Exception as e:
 
         #     raise e
-    def regression_ratio(df,limit=30):
+    def regression_ratio(df,limit=10):
         # Calculate the coefficients of the regression line
+
+        # date = df.index.get_level_values('date')[0]
+        # 获取最近10天的数据
+
+        # last_10_days = x.loc[date-pd.Timedelta(days=10):date-pd.Timedelta(days=1)]
+        # df = df.loc[df.index.get_level_values('date') <= date]
+
         if isinstance(df,pd.Series):
             Y = df.values[-limit:]
             X = df.reset_index().index[-limit:]
             
         else:
-            X = df.index[-30:]
-            Y = df.close[-30:]
+            X = df.index[-10:]
+            Y = df.close[-10:]
 
         n = len(X)
-        sum_x = np.sum(X)
-        sum_y = np.sum(Y)
-        sum_xy = np.sum(X * Y)
-        sum_xx = np.sum(X * X)
-        # a = round((sum_y * sum_xx - sum_x * sum_xy) / (n * sum_xx - sum_x * sum_x),2)
-        b = round((n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x),2)
+        if n < 2:
+            return 0
+        else:
+            sum_x = np.sum(X)
+            sum_y = np.sum(Y)
+            sum_xy = np.sum(X * Y)
+            sum_xx = np.sum(X * X)
+            # a = round((sum_y * sum_xx - sum_x * sum_xy) / (n * sum_xx - sum_x * sum_x),2)
+            b = round((n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x),2)
         return b   
+
+    # 自定义函数，生成每天的前十天的统计数据
+    def last_10_days_stats(x):
+        # 获取当前日期
+        # date = x.index.get_level_values('date')[0]
+        # 获取最近10天的数据
+
+        # last_10_days = x.loc[date-pd.Timedelta(days=10):date-pd.Timedelta(days=1)]
+        # last_10_days = x.loc[x.index.get_level_values('date') <= date]
+
+        # 计算统计数据
+        # return pd.Series({'last_10_days_min': last_10_days.min()})
+        return x.min()
+
+        # return pd.Series({'last_10_days_mean': last_10_days['close'].mean(),
+        #                   'last_10_days_max': last_10_days['close'].max(),
+        #                   'last_10_days_min': last_10_days['close'].min()})
+
+
+    def last_10_days_stats_outdate(x):
+        import ipdb;ipdb.set_trace()
+
+        last_10_days = x.iloc[-10:-1]
+        return pd.Series({"min": last_10_days.min()})
+
+    # def last_10_days_stats(df):
+    #     # 按照日期进行分组
+    #     grouped = df.groupby(level='date')
+        
+    #     # 计算每个日期前10天的统计数据
+    #     import ipdb;ipdb.set_trace()
+
+    #     stats = grouped.apply(lambda x: x.loc[x.index.get_level_values('date') - pd.Timedelta(days=10) : x.index.get_level_values('date') - pd.Timedelta(days=1)].close.agg(['mean', 'std']))
+        
+    #     # 将统计数据添加为新的列
+    #     df = pd.concat([df, stats.add_prefix('last_10_days_')], axis=1)
+        
+    #     return df
 
     def get_groupby_mean_median_close(dfs):
 
         groupd = dfs.groupby(level=[0])
         ###detect_bull_bear
-        dd = groupd['close'].apply(detect_bull_bear)
+        # dd= groupd['close'].rolling(20).apply(detect_bull_bear)
 
-        ddr = groupd['close'].apply(regression_ratio)
+        # df = groupd['close'].rolling(20).agg(['median','mean'])
         
-        df = groupd['close'].agg(['median','mean'])
+
+
+        # 应用自定义函数，生成每天的前十天的统计数据
+        dfsmin = groupd['close'].rolling(10).apply(last_10_days_stats)
+        time_s = time.time()
+        dfsr = groupd['close'].rolling(10).apply(regression_ratio)
+        dfsr.index =dfsr.to_frame().index.droplevel(1)
+        dfs['xratio'] = dfsr
+        print(time.time()-time_s)
+        import ipdb;ipdb.set_trace()
+
+
+
         df['close'] = groupd.tail(1).reset_index().set_index(['code'])['close']
         # dfs['mean'] = groupd['close'].agg('mean')
         # dfs['median'] = groupd['close'].agg('median')
@@ -161,6 +221,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     # roll_dl = duration
 
     if resample != 'd':
+
         print("resample:%s"%(resample.upper()))
         df = df.groupby(level=0).resample(resample, level=1).last()
         df = df.dropna()
@@ -378,7 +439,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 if __name__ == '__main__':
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=250) ???
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=120) ???
-    get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='d')
+    get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w')
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=250,ma_250_l=1.02,ma_250_h=1.2,resample='w')
     # get_roll_mean_all(single=True,tdx=True,app=True)
     # get_roll_mean_all(single=True,tdx=True,app=False)

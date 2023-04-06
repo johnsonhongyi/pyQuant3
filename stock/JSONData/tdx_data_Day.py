@@ -2427,7 +2427,10 @@ def get_sina_data_cname(cname,index=False):
 
 def get_sina_data_code(code,index=False):
     # index_status=False
-    cname = sina_data.Sina().get_code_cname(code)
+    if not index:
+        cname = sina_data.Sina().get_code_cname(code)
+    else:
+        cname = sina_data.Sina().get_stock_code_data(code,index=index).name[0]
     return cname
 
 def get_sina_datadf_cnamedf(code,df,index=False):
