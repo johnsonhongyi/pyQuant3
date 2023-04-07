@@ -2197,6 +2197,7 @@ def check_tdx_Exp_day_duration(market='all'):
     # duration_zero=[]
     # duration_other=[]
     df = sina_data.Sina().market(market)
+    df = df[df.high > 0]    
     for code in df.index:
         dd = get_tdx_Exp_day_to_df(code, dl=1) 
         duration = cct.get_today_duration(dd.date) if dd is not None and len(dd) > 5 else -1
