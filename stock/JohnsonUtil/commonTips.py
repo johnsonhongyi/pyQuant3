@@ -1010,6 +1010,8 @@ def cct_raw_input(sts):
         log.info("recursionlimit:%s"%(sys.getrecursionlimit()))
 
     st = ''
+    time_s = time.time()
+    count_Except = GlobalValues().getkey('Except_count')
     try:
         # if get_os_system().find('win') >= 0:
             # win_unicode_console.disable()
@@ -1026,7 +1028,7 @@ def cct_raw_input(sts):
         #     return inputerr
         # else:
         #     return ''
-        count_Except = GlobalValues().getkey('Except_count')
+        # count_Except = GlobalValues().getkey('Except_count')
         if count_Except is not None and count_Except < 3:
             count_Except = count_Except + 1
             GlobalValues().setkey('Except_count', count_Except)
@@ -1035,6 +1037,7 @@ def cct_raw_input(sts):
             # st = cct_raw_input(sts)
         else:
             # print "cct_ExceptionError:%s count:%s" % (e, count_Except)
+            log.error("count_Except > 2")
             GlobalValues().setkey('Except_count', 0)
             # if get_os_system().find('win') >= 0:
             #     win_unicode_console.enable(use_readline_hook=False)
@@ -1042,7 +1045,7 @@ def cct_raw_input(sts):
             sys.exit()
 
     except (IOError, EOFError, Exception) as e:
-        count_Except = GlobalValues().getkey('Except_count')
+        # count_Except = GlobalValues().getkey('Except_count')
         if count_Except is not None and count_Except < 3:
             count_Except = count_Except + 1
             GlobalValues().setkey('Except_count', count_Except)
@@ -1051,9 +1054,13 @@ def cct_raw_input(sts):
             # st = cct_raw_input(sts)
         else:
             print("cct_ExceptionError:%s count:%s" % (e, count_Except))
+            log.error("cct_ExceptionError:%s count:%s" % (e, count_Except))
             sys.exit()
     # if get_os_system().find('win') >= 0:
         # win_unicode_console.enable(use_readline_hook=False)
+    t1 = time.time() - time_s
+    if t1 < 1 and count_Except is not None and count_Except < 3:
+        st = 'no Input'
     return st
 
 # eval_rule = "[elem for elem in dir() if not elem.startswith('_') and not elem.startswith('ti')]"
@@ -1356,8 +1363,9 @@ def get_now_time_int():
 
 def get_work_time():
     # return True
-    now_t = str(get_now_time()).replace(':', '')
-    now_t = int(now_t)
+    # now_t = str(get_now_time()).replace(':', '')
+    # now_t = int(now_t)
+    now_t = get_now_time_int()
     if not get_work_day_status():
         return False
     if (now_t > 1132 and now_t < 1300) or now_t < 915 or now_t > 1502:
@@ -2090,7 +2098,7 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
     if keep_last is None:
         keep_last = ct.keep_lastnum
     # index_list = ['1999999','47#IFL0',  '0159915', '27#HSI']
-    index_list = ['1999999', '0399001', '0159915']
+    index_list = ['1999999', '0399001', '0159915','1880884','1880885']
     # index_list = ['1999999','47#IFL0', '0399001', '0159915']
     # index_list = ['1999999','47#IFL0', '27#HSI',  '0399006']
     # index_list = ['1999999','0399001','47#IFL0', '27#HSI',  '0159915']

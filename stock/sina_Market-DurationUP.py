@@ -272,7 +272,6 @@ if __name__ == "__main__":
                 # top_dif['volume'] = top_dif['volume'].apply(lambda x: round(x / radio_t, 1))
                 # log.debug("top_diff:vol")
                 #
-
                 if len(top_dif) == 0:
                     print("No G,DataFrame is Empty!!!!!!")
                 else:
@@ -347,7 +346,8 @@ if __name__ == "__main__":
                         # top_temp = top_dif[top_dif.topR >= 1]
                         # top_temp = top_dif.copy()
                         # top_temp = top_dif[(top_dif.topU > 0) & (top_dif.eneU > 0)] 
-                        top_temp = top_dif.copy() 
+                        # top_temp = top_dif.copy() 
+                        top_temp = top_dif[(top_dif.lastl1d >= top_dif.lastl2d)   & (top_dif.close >= top_dif.ma51d)  & (top_dif.ma51d >= top_dif.ma52d) & (top_dif.ma52d >= top_dif.ma53d)] 
                         top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
 
 
