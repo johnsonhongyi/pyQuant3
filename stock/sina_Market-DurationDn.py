@@ -95,7 +95,7 @@ if __name__ == "__main__":
     # delay_time = cct.get_delay_time()
     First = True
     # blkname = '062.blk'
-    blkname = '061.blk'
+    blkname = '063.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
     status_change = False
     lastpTDX_DF = pd.DataFrame()

@@ -2215,7 +2215,7 @@ def Write_market_all_day_mp(market='all', rewrite=False):
 
     """
     sh_index = '000002'
-    # dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
+    dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
     # log.error("Write_market_all_day_mp:%s"%(dd))
 
     duration_code=check_tdx_Exp_day_duration(market)
@@ -2229,7 +2229,7 @@ def Write_market_all_day_mp(market='all', rewrite=False):
     # if not rewrite and len(dd) > 0:
     if not rewrite:
         if len(duration_code) == 0:
-            print("Duration:%s is OK" % (duration))
+            print("Duration:%s is OK" % (len(duration_code)))
             # return False
         else:
             print("Write duration_code:%s " %(len(duration_code)))
@@ -2260,6 +2260,7 @@ def Write_market_all_day_mp(market='all', rewrite=False):
     if len(duration_code) == 0:
         dfs = search_Tdx_multi_data_duration(code_l=[sh_index],tail=1)
         mdate = dfs.reset_index().date.values
+        mdate = str(mdate[0])[:10] if len(mdate) > 0 else mdate
         if mdate == dd.date:
             print("Multi_data:%s %s all writed" % (sh_index,mdate))
             return True
@@ -2276,48 +2277,50 @@ def Write_market_all_day_mp(market='all', rewrite=False):
     # if len(index_ts) > 1:
     #     print "start:%s"%(start),
     results = []
-    for mk in mlist:
-        time_t = time.time()
-        df = sina_data.Sina().market(mk)
-        # log.error("Write_market_all_day_mp:%s"%(df.loc['000002',['open','close','dt','ticktime']] if '000002' in df.index.values else 'No 0002'))
-        # if dd.date == df.loc['000002','dt']:
-        #     log.error("Pls check sina_data.Sina().market data")
 
-        # df = getSinaAlldf(market=mk,trend=False)
-        # df = rl.get_sina_Market_json(mk)
-        # print df.loc['600581']
+    if len(duration_code) > 0:
+        for mk in mlist:
+            time_t = time.time()
+            df = sina_data.Sina().market(mk)
+            # log.error("Write_market_all_day_mp:%s"%(df.loc['000002',['open','close','dt','ticktime']] if '000002' in df.index.values else 'No 0002'))
+            # if dd.date == df.loc['000002','dt']:
+            #     log.error("Pls check sina_data.Sina().market data")
 
-        if df is None or len(df) < 10:
-            print("dsina_data f is None")
-            break
-        else:
-            # dt = df.dt.value_counts().index[0]
-            # df = df[((df.b1 > 0) | (df.a1 > 0)) & ( df.dt >= dt)]
-            df = df[((df.b1 > 0) | (df.a1 > 0))]
+            # df = getSinaAlldf(market=mk,trend=False)
+            # df = rl.get_sina_Market_json(mk)
+            # print df.loc['600581']
 
-        # code_list = df.index.tolist()
-        code_list = duration_code
-        dm = get_sina_data_df(code_list)
-        dm = dm[((dm.open > 0) | (dm.a1 > 0))]
-        print(("market:%s A:%s open_dm:%s" % (mk, len(df),len(dm))), end=' ')
+            if df is None or len(df) < 10:
+                print("dsina_data f is None")
+                break
+            else:
+                # dt = df.dt.value_counts().index[0]
+                # df = df[((df.b1 > 0) | (df.a1 > 0)) & ( df.dt >= dt)]
+                df = df[((df.b1 > 0) | (df.a1 > 0))]
 
-        log.info('code_list:%s df:%s' % (len(code_list), len(df)))
-    #        write_tdx_tushare_to_file(sh_index,index_ts)
-#        get_tdx_append_now_df_api2(code,dl=dl,dm=dz,newdays=5)
-        # get_tdx_append_now_df_api_tofile('603113', dm=None, newdays=1,
-        # start=None, end=None, type='f', df=None, dl=2, power=True)
-        if len(dm) > 0:
-            results = cct.to_mp_run_async(
-                # get_tdx_append_now_df_api_tofile, code_list, dm=dm, newdays=0)
-                get_tdx_append_now_df_api_tofile, code_list, dm, 0)
-        else:
-            print(("dm is not open sell:%s"%(code_list if len(code_list) <10 else len(code_list))))
-        # for code in code_list:
-        # print "code:%s "%(code),
-        # res=get_tdx_append_now_df_api_tofile(code,dm,5)
-        # print "status:%s\t"%(len(res)),
-        # results.append(res)
-        print("AllWrite:%s t:%s"%(len(duration_code),round(time.time() - time_t, 2)))
+            # code_list = df.index.tolist()
+            code_list = duration_code
+            dm = get_sina_data_df(code_list)
+            dm = dm[((dm.open > 0) | (dm.a1 > 0))]
+            print(("market:%s A:%s open_dm:%s" % (mk, len(df),len(dm))), end=' ')
+
+            log.info('code_list:%s df:%s' % (len(code_list), len(df)))
+        #        write_tdx_tushare_to_file(sh_index,index_ts)
+    #        get_tdx_append_now_df_api2(code,dl=dl,dm=dz,newdays=5)
+            # get_tdx_append_now_df_api_tofile('603113', dm=None, newdays=1,
+            # start=None, end=None, type='f', df=None, dl=2, power=True)
+            if len(dm) > 0:
+                results = cct.to_mp_run_async(
+                    # get_tdx_append_now_df_api_tofile, code_list, dm=dm, newdays=0)
+                    get_tdx_append_now_df_api_tofile, code_list, dm, 0)
+            else:
+                print(("dm is not open sell:%s"%(code_list if len(code_list) <10 else len(code_list))))
+            # for code in code_list:
+            # print "code:%s "%(code),
+            # res=get_tdx_append_now_df_api_tofile(code,dm,5)
+            # print "status:%s\t"%(len(res)),
+            # results.append(res)
+            print("AllWrite:%s t:%s"%(len(duration_code),round(time.time() - time_t, 2)))
 
 
 #    print "market:%s is succ result:%s"%(market,results),
@@ -4392,7 +4395,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
 
     Summary: TDX init Day by Mp
 
-    Examples: InsertHere
+    # Examples: InsertHere
 
     Attributes: 
 
@@ -4598,13 +4601,17 @@ def get_tdx_search_day_DF(market='cyb'):
     # print len(df),df[:1]
     # print "<2015-08-25",len(df[(df.date< '2015-08-25')])
     # print "06-25-->8-25'",len(df[(df.date< '2015-08-25')&(df.date >
-    # '2015-06-25')])
     print("t:", time.time() - time_t)
     return results
 
 def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=None):
+    """_周期转换周K,月K_
+
+    Returns:
+        _type_: _description_
+    """
+    
     period_type = period_day
-    # Ä¬ÈÏµÄindexÀàÐÍ:
     indextype = True if stock_data.index.dtype == 'datetime64[ns]' else False
     #
     # ×ª»»ÖÜ×îºóÒ»ÈÕ±äÁ¿
@@ -4644,9 +4651,7 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
             'amount'].resample(period_type).sum()
         period_stock_data['vol'] = stock_data[
             'vol'].resample(period_type).sum()
-    # ¼ÆËãÖÜÏßturnover,¡¾traded_market_value¡¿ Á÷Í¨ÊÐÖµ¡¾market_value¡¿ ×ÜÊÐÖµ¡¾turnover¡¿ »»ÊÖÂÊ£¬³É½»Á¿/Á÷Í¨¹É±¾
     # period_stock_data['turnover']=period_stock_data['vol']/(period_stock_data['traded_market_value'])/period_stock_data['close']
-    # È¥³ýÎÞ½»Ò×¼ÍÂ¼
     period_stock_data.index = stock_data['date'].resample(period_type).last().index
     # print period_stock_data.index[:1]
     if 'code' in period_stock_data.columns:
@@ -4671,8 +4676,6 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
 def usage(p=None):
     import timeit
 #     print """
-# python %s [-t txt|zip] stkid [from] [to]
-# -t txt ±íÊ¾´Ótxt files ¶ÁÈ¡Êý¾Ý£¬·ñÔò´Ózip file ¶ÁÈ¡(ÕâÒ²ÊÇÄ¬ÈÏ·½Ê½)
 # for example :
 # python %s 999999 20070101 20070302
 # python %s -t txt 999999 20070101 20070302

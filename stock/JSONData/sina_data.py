@@ -30,13 +30,14 @@ class StockCode:
         self.STOCK_CODE_PATH = 'stock_codes.conf'
         self.encoding = 'gbk'
         self.stock_code_path = self.stock_code_path()
+
         # print os.path.getsize(self.stock_code_path)
         if not os.path.exists(self.stock_code_path) or os.path.getsize(self.stock_code_path) < 500:
             stock_codes = self.get_stock_codes(True)
             print(("create:%s counts:%s" % (self.stock_code_path, len(stock_codes))))
-        # if cct.creation_date_duration(self.stock_code_path) > 10:
-        #     stock_codes = self.get_stock_codes(True)
-        #     print(("days:%s %s update stock_codes.conf" % (cct.creation_date_duration(self.stock_code_path), len(stock_codes))))
+        if cct.creation_date_duration(self.stock_code_path) > 30:
+            stock_codes = self.get_stock_codes(True)
+            print(("days:%s %s update stock_codes.conf" % (cct.creation_date_duration(self.stock_code_path), len(stock_codes))))
 
         
 

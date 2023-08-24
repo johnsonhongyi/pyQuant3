@@ -42,14 +42,14 @@ def evalcmd(dir_mo):
         cmd = (cct.cct_raw_input(": "))
         # cmd = (cct.cct_raw_input(dir_mo.append(":")))
         # if cmd == 'e' or cmd == 'q' or len(cmd) == 0:
-        if str(cmd) == 'e' or str(cmd) == 'q':
+        if str(cmd) in {'e', 'q'}:
             break
         elif len(cmd) == 0:
             # print ".",
             continue
         else:
             try:
-                if not cmd.find(' =') < 0:
+                if cmd.find(' =') >= 0:
                     exec(cmd)
                 else:
                     print(eval(cmd))
