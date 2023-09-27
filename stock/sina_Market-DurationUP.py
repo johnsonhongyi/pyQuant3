@@ -19,7 +19,7 @@ from JohnsonUtil import LoggerFactory as LoggerFactory
 from JohnsonUtil import commonTips as cct
 # from logbook import Logger,StreamHandler,SyslogHandler
 # from logbook import StderrHandler
-
+# from JohnsonUtil import inStockDb as inDb
 
 # def parseArgmain():
 # import argparse
@@ -129,7 +129,8 @@ if __name__ == "__main__":
     # market_sort_value, market_sort_value_key = ct.get_market_sort_value_key('3 2')
     # market_sort_value, market_sort_value_key = ct.get_market_sort_value_key('1')
     # st_key_sort = '2'
-    st_key_sort = ct.sort_value_key_perd23
+    # st_key_sort = ct.sort_value_key_perd23
+    st_key_sort = '1'
     # st_key_sort = 'x1 1.1'
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort)
     st = None
@@ -146,9 +147,12 @@ if __name__ == "__main__":
             # market_blk = '次新股'
             # market_blk = 'all'
             market_blk = 'all'
+            # market_blk = 'indb'
+
             # market_blk = 'cyb'
             # market_blk = '060'
             # top_now = tdd.getSinaAlldf(market=market_blk, filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
+            
             top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
             now_count = len(top_now)
             radio_t = cct.get_work_time_ratio()
