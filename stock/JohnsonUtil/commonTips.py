@@ -21,8 +21,9 @@ import asyncio
 
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil.prettytable import PrettyTable
-
 from JohnsonUtil import johnson_cons as ct
+from JohnsonUtil import inStockDb as inDb
+
 import socket
 from configobj import ConfigObj
 import importlib
@@ -2422,6 +2423,16 @@ def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=N
         # print "write to append:%s :%s :%s"%(append,p_name,len(data))
 
 
+def read_to_indb(days=20,duplicated=False):
+    df = inDb.selectlastDays(days)
+
+    if not duplicated :
+        df['couts']=df.groupby(['code'])['code'].transform('count')
+        df=df.sort_values(by='couts',ascending=0)
+        df=df.drop_duplicates('code')
+
+    return (df)
+
 def read_to_blocknew(p_name):
     index_list = ['1999999', '0399001', '47#IFL0', '27#HSI',  '0159915']
 
@@ -2571,10 +2582,18 @@ def select_multiIndex_index(df, index='ticktime', start=None, end=None, datev=No
     # df = df[df.index.duplicated()]
 
     # df = df.drop_duplicates('volume')
+
+    if len(str(df.index.get_level_values(1)[-1])) > 10:
+        index_date = str(df.index.get_level_values(1)[-1])[:10]
+    else:
+        index_date = None
     if index != 'date' and code is None:
         if start is not None and len(start) < 10:
             if datev is None:
-                start = get_today() + ' ' + start
+                if index_date != None:
+                    start = index_date + ' ' + start
+                else:
+                    start = get_today() + ' ' + start
             else:
                 start = day8_to_day10(datev) + ' ' + start
             if end is None:
@@ -2584,7 +2603,10 @@ def select_multiIndex_index(df, index='ticktime', start=None, end=None, datev=No
                 end = start
         if end is not None and len(end) < 10:
             if datev is None:
-                end = get_today() + ' ' + end
+                if index_date != None:
+                    end = index_date + ' ' + end
+                else:
+                    end = get_today() + ' ' + end
                 if start is None:
                     start = get_today(sep='-') + ' ' + '09:25:00'
             else:
@@ -2594,9 +2616,14 @@ def select_multiIndex_index(df, index='ticktime', start=None, end=None, datev=No
         else:
             if start is None:
                 if end is None:
-                    start = get_today(sep='-') + ' ' + '09:25:00'
-                    end = get_today(sep='-') + ' ' + '09:45:00'
-                    log.error("start and end is None to 930 and 945")
+                    if index_date != None:
+                        start = index_date + ' ' + '09:25:00'
+                        end = index_date + ' ' + '09:45:00'
+                        log.error("start and end is None to 930 and 945")
+                    else:
+                        start = get_today(sep='-') + ' ' + '09:25:00'
+                        end = get_today(sep='-') + ' ' + '09:45:00'
+                        log.error("start and end is None to 930 and 945")
                 else:
                     start = end
     else:
@@ -2605,7 +2632,10 @@ def select_multiIndex_index(df, index='ticktime', start=None, end=None, datev=No
 
     if code is not None:
         if start is None:
-            start = get_today(sep='-') + ' ' + '09:24:30'
+            if index_date != None:
+                start = index_date + ' ' + '09:24:30'
+            else:
+                start = get_today(sep='-') + ' ' + '09:24:30'
         else:
             start = day8_to_day10(start) + ' ' + '09:24:30'
         # df = df[(df.index.get_level_values('code') == code) & (df.index.get_level_values(index) > start)]
@@ -3629,6 +3659,56 @@ def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean
     return maindf
 
 if __name__ == '__main__':
+
+    '''
+    def readHdf5(fpath, root=None):
+        store = pd.HDFStore(fpath, "r")
+        print(store.keys())
+        if root is None:
+            root = store.keys()[0].replace("/", "")
+        df = store[root]
+        df = apply_col_toint(df)
+        store.close()
+        return df
+    def apply_col_toint(df, col=None):
+        if col is None:
+            co2int = ['boll', 'op', 'ratio', 'fib', 'fibl', 'df2']
+        # co2int.extend([co for co in df.columns.tolist()
+        #                if co.startswith('perc') and co.endswith('d')])
+            co2int.extend(['top10', 'topR'])
+        else:
+            co2int = col
+        co2int = [inx for inx in co2int if inx in df.columns]
+
+        for co in co2int:
+            df[co] = df[co].astype(int)
+
+        return df
+
+    sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
+    h5 = readHdf5(sina_MultiD_path)
+    print(sina_MultiD_path)
+    h5.shape
+    # h5[:1]
+    code_muti = '600519'
+    # h5.loc[code_muti][:2]
+
+    freq = 'D'
+    startime = '09:25:00'
+    endtime = '15:01:00'
+
+    time_ratio = get_work_time_ratio()
+    time_ratio
+    run_col = ['close', 'volume']
+    mdf = get_limit_multiIndex_freq(
+        h5, freq=freq.upper(),
+    col=run_col, start=startime, end=endtime, code=None)
+    mdf.shape
+    import ipdb;ipdb.set_trace()
+    '''
+    print(read_to_indb())
+    # import ipdb;ipdb.set_trace()
+
     print(code_to_symbol_ths('000002'))
     print(get_index_fibl())
     GlobalValues()

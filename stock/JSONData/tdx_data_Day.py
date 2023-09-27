@@ -2510,6 +2510,13 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         # df = sina_data.Sina().get_stock_code_data('999999,399001,399006',index=True)
         df = sina_data.Sina().get_stock_code_data(['999999', '399006', '399001'], index=True)
 
+    elif market.lower().find('indb') >=0 :
+            # blkname = '061.blk'
+
+        code_l = cct.read_to_indb().code.tolist()
+        
+        df = sina_data.Sina().get_stock_list_data(code_l)
+
     elif market.find('blk') > 0 or market.isdigit():
             # blkname = '061.blk'
 
