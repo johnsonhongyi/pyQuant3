@@ -206,7 +206,7 @@ Duration_percent_opboll_key = [0, 0, 0, 0, 1, 1,  1, 1]
 
 
 
-Duration_percent_boll = ['boll','perc3d','ra', 'percent',
+Duration_percent_boll = ['boll','df2','perc3d', 'percent',
                          'dff', 'fib', 'fibl','volume', 'couts']
 
 Duration_percent_boll_key = [0, 0, 0, 0, 0, 1, 1,  1, 1]
@@ -855,7 +855,7 @@ def get_market_sort_value_key(st, top_all=None, perd_d=3):
 
 
         elif st in ['1','5','4','6','7','8','9','x','x1','x2']:
-
+          
             if len(st_l) > 1:
                 if isDigit(st_l[1]):
                     # cct.GlobalValues()

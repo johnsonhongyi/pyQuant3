@@ -312,7 +312,7 @@ def Get_BBANDS(df, dtype='d', days=ct.Power_Ma_Days,dl=ct.PowerCountdl,dm=None,l
         return (df, 10)
     df = df.sort_index(ascending=True)
     df[['lowb%s'%dtype, 'midb%s'%dtype, 'upbb%s'%dtype,'bandwidth','percent']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
-
+    
     # df['upbb%s' % dtype] = pd.Series(upperband, index=df.index)
     # df['midb%s' % dtype] = pd.Series(middleband, index=df.index)
     # df['lowb%s' % dtype] = pd.Series(lowerband, index=df.index)
@@ -493,8 +493,6 @@ def Get_MACD(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
     operate = 0
     dd = df.dropna()
     print(dd[['diffd','dead','ddead']],dd.ddead.argmin())
-    import ipdb;ipdb.set_trace()
-
     # 2个数组 1.DIFF、DEA均为正，DIFF向上突破DEA，买入信号。 2.DIFF、DEA均为负，DIFF向下跌破DEA，卖出信号。
     # 待修改
     diff = df.loc[df.index[-1], 'diff%s' % dtype]
