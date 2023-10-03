@@ -4,6 +4,8 @@ REM E:
 D:
 cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock"
 rem cd stock
+start cmd /k python instock_Monitor.py
+ping -n 248 localhost > nul
 start cmd /k python sina_Market-DurationUP.py
 ping -n 20 localhost > nul
 start cmd /k python singleAnalyseUtil.py

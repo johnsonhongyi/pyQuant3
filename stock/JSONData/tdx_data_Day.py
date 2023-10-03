@@ -17,6 +17,7 @@ from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import johnson_cons as ct
 import tushare as ts
+import pandas_ta as ta
 from JSONData import sina_data
 # import numba as nb
 import datetime
@@ -2996,7 +2997,7 @@ def get_duration_price_date(code=None, ptype='low', dt=None, df=None, dl=None, e
 
 
 def compute_power_tdx_df(tdx_df,dd):
-    if len(tdx_df) == 9:
+    if len(tdx_df) >= 5:
         # idxdf = tdx_df.red[tdx_df.red <0]
         # if len(idxdf) >1:
         #     idx = tdx_df.red[tdx_df.red <0].argmax()
@@ -3195,7 +3196,8 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
         last_TopR_days = 5
 
     np.seterr(divide='ignore',invalid='ignore')  #RuntimeWarning: invalid value encountered in greater
-    df = dd[-(lastdays+1):].copy()
+    # df = dd[-(lastdays+1):].copy()
+    df = dd[-(last_TopR_days+1):].copy()
     df['perlastp'] = list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'],df['open'].shift(1), 
                             df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df.index))
    
@@ -3207,10 +3209,21 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # df['red'] = ((df['close'] - df['open']) / df['close'] * 100).map(lambda x: round(x, 1))
     df['lastdu'] = ((df['high'] - df['low']) / df['close'] * 100).map(lambda x: round(x, 1))
     # df['perddu'] = ((df['high'] - df['low']) / df['low'] * 100).map(lambda x: round(x, 1))
-    dd['upperT'] = dd.close[ (dd.upper > 0) & (dd.high > dd.upper)].count()
+    # dd['upperT'] = dd.close[ (dd.upper > 0) & (dd.high > dd.upper)].count()
+    dd['upperT'] = df.close[ (df.upper > 0) & (df.high > df.upper)].count()
     df = df[~df.index.duplicated()]
 
-    upperL = dd.close[ (dd.upper > 0) & (dd.close >= dd.upper)]
+    # upperL = dd.close[ (dd.upper > 0) & (dd.close >= dd.upper)]
+
+    # upperL = df.close[ (df.close > df.open) & (df.close > df.ene)]
+    # upperL = df.close[ (df.high > df.upper) & (df.close > df.ma5d*0.99) ]
+
+    upperL = df.close[ ((df.high > df.upper) | (df.upper > df.upper.shift(1)) ) & (df.close > df.ma5d*0.99) ]
+
+    # import ipdb;ipdb.set_trace()
+
+    # upperL = df.close[ (df.high > df.upper) & (df.close > df.ma5d) & (df.close > df.close.shift(1)) ]
+
     top_10 = df[df.perd >9.9]
     if len(top_10) >0:
         if len(top_10) == len(df[df.index >= top_10.index[0]]):
@@ -3220,18 +3233,20 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     else:
         top_ten = 0
 
-    if len(upperL) > 0:
-        cum_maxf, posf = LIS_TDX(upperL)
-        if len(upperL) == len(df[df.index >= upperL.index[0]]):
-            if len(cum_maxf) == len(upperL):
-                dd['upperL'] = len(upperL) + top_ten
-            else:
-                dd['upperL'] = top_ten
-        else:
-            dd['upperL'] = len(cum_maxf) 
+    # if len(upperL) > 0:
+    #     cum_maxf, posf = LIS_TDX(upperL)
+    #     if len(upperL) == len(df[df.index >= upperL.index[0]]):
+    #         if len(cum_maxf) == len(upperL):
+    #             dd['upperL'] = len(upperL) + top_ten
+    #         else:
+    #             dd['upperL'] = top_ten
+    #     else:
+    #         dd['upperL'] = len(cum_maxf) 
+    # else:
+    #     dd['upperL'] = top_ten
 
-    else:
-        dd['upperL'] = top_ten
+    dd['upperL'] = len(upperL) 
+
     # dd['upperL'] = df.close[df.low > df.upper].count()
     # dd['red'] = df.red[df.red > 0].count()
 
@@ -3474,8 +3489,10 @@ def compute_ma_cross_old(dd,ma1='ma5d',ma2='ma10d',ratio=0.02):
 def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
     # ct.compute_lastdays lastdays to 9
     if df is not None and len(df) > lastdays:
-        if resample != 'd':
+        # if cct.get_trade_date_status() == 'True' and resample != 'd' :
+        if resample != 'd' and cct.get_trade_date_status() == 'True':
             df = df[:-1]
+
             # print "df:",df[-1:]
         if len(df) > lastdays + 1:
             # 判断lastdays > 9 
@@ -3496,9 +3513,11 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         df['ma20d'] = pd.Series.rolling(df.close, 20).mean().apply(lambda x: round(x,2))
 
         if len(df) > 33:
-            df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma20d]
-            df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma20d]
-            df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
+            # df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma20d]
+            # df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma20d]
+            # df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
+            df[['lower', 'ene', 'upper','bandwidth','bollpect']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
+
         else:
             df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma10d]
             df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma10d]
@@ -4513,8 +4532,15 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             
             # # codeList = ['300055','002443']
             # results=[]
+            # from tqdm import tqdm
+            # for inx in tqdm(list(range(len(codeList))),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(codeList),ncols=ct.ncols):
+            #     code = codeList[inx]
+            #     print(code,)
+            #     results.append(get_tdx_exp_low_or_high_power(code, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample))
+                
+            # results=[]
             # for code in codeList:
-            #    print(code,)
+            # #    print(code,)
             #    results.append(get_tdx_exp_low_or_high_power(code, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample))
 
         else:
@@ -4611,6 +4637,123 @@ def get_tdx_search_day_DF(market='cyb'):
     print("t:", time.time() - time_t)
     return results
 
+period_type_dic={'w':'W-FRI','m':'BM'}
+
+def get_tdx_stock_period_to_type_in(df, period_day='W-FRI', periods=5, ncol=None, ratiodays=False):
+    """_周期转换周K,月K_
+
+    Returns:
+        _type_: _description_
+    """
+    #快速日期处理
+    #https://www.likecs.com/show-204682607.html
+    stock_data = df.copy()
+    period_type = period_type_dic[period_day.lower()]
+    if 'date' in stock_data.columns:
+        stock_data.set_index('date', inplace=True)
+    stock_data['date'] = stock_data.index
+    lastday = str(stock_data.date.values[-1])[:10]
+    lastday2 = str(stock_data.date.values[-2])[:10]
+    # duration_day = get_today_duration(lastday2,lastday)
+    # print("duration:%s"%(duration_day))
+    
+    # if duration_day > 3:
+    #     if 'date' in stock_data.columns:
+    #         stock_data = stock_data.drop(['date'], axis=1)
+    #     return stock_data.reset_index()
+    
+    # indextype = True if stock_data.index.dtype == 'datetime64[ns]' else False
+    # if cct.get_work_day_status() and 915 < cct.get_now_time_int() < 1500:
+    #     stock_data = stock_data[stock_data.index < cct.get_today()]
+
+    if stock_data.index.name == 'date':
+        stock_data.index = pd.to_datetime(stock_data.index, format='%Y-%m-%d')
+    elif 'date' in stock_data.columns:
+        stock_data.set_index('date', inplace=True)
+        stock_data.sort_index(ascending=True, inplace=True)
+        stock_data.index = pd.to_datetime(stock_data.index, format='%Y-%m-%d')
+    # else:
+    #     log.error("index.name not date,pls check:%s" % (stock_data[:1]))
+
+    period_stock_data = stock_data.resample(period_type).last()
+    # period_stock_data['percent']=stock_data['percent'].resample(period_type,how=lambda x:(x+1.0).prod()-1.0)
+    # print stock_data.index[0],stock_data.index[-1]
+    # period_stock_data.index =
+    # pd.DatetimeIndex(start=stock_data.index.values[0],end=stock_data.index.values[-1],freq='BM')
+
+    period_stock_data['open'] = stock_data[
+        'open'].resample(period_type).last()
+    period_stock_data['high'] = stock_data[
+        'high'].resample(period_type).max()
+    period_stock_data['low'] = stock_data[
+        'low'].resample(period_type).min()
+
+    lastWeek1 = str(period_stock_data['open'].index.values[-1])[:10]
+    lastweek2 = str(period_stock_data['open'].index.values[-2])[:10]
+    if ratiodays:
+        if period_day == 'W-FRI':
+            # print(lastWeek1,lastweek2,lastday,lastday2)
+            duratio = int(str(datetime.datetime.strptime(lastWeek1, '%Y-%m-%d').date() - datetime.datetime.strptime(lastday, '%Y-%m-%d').date())[0])
+            ratio_d =(5-(duratio%5))/5
+            # print("ratio_d:%s %s"%(ratio_d,lastday))
+        elif period_day.find('W') >= 0:
+            # print(lastWeek1,lastweek2,lastday,lastday2)
+            duratio = int(str(datetime.datetime.strptime(lastday, '%Y-%m-%d').date() - datetime.datetime.strptime(lastweek2, '%Y-%m-%d').date())[0])
+            ratio_d =(duratio)/5
+            # print("ratio_d:%s %s"%(ratio_d,lastday))
+        elif period_day == 'BM':
+            # daynow = '2023-04-26'
+            # lastday = '2023-04-23'
+            # print(lastWeek1,lastweek2,lastday,lastday2)
+            # print((str(datetime.datetime.strptime(lastWeek1, '%Y-%m-%d').date() - datetime.datetime.strptime(lastday, '%Y-%m-%d').date())[:2]))
+            duratio = int(str(datetime.datetime.strptime(lastday, '%Y-%m-%d').date() - datetime.datetime.strptime(lastweek2, '%Y-%m-%d').date())[:2])
+            ratio_d =(30-(duratio%30))/30
+            # print("ratio_d:%s %s dura:%s"%(ratio_d,lastday,duratio))
+        elif period_day.find('M') >= 0:
+            ratio_d = 1
+            
+    else:
+        ratio_d = 1
+        print(ratio_d)
+        
+    if ncol is not None:
+        for co in ncol:
+            period_stock_data[co] = stock_data[co].resample(period_type).sum()
+            if ratiodays:
+                period_stock_data[co] = period_stock_data[co].apply(lambda x: round(x / ratio_d, 1))
+                
+    # else:
+    period_stock_data['amount'] = stock_data[
+        'amount'].resample(period_type).sum()
+    period_stock_data['vol'] = stock_data[
+        'vol'].resample(period_type).sum()
+    if ratiodays:
+        period_stock_data['amount'] = period_stock_data['amount'].apply(lambda x: round(x / ratio_d, 1))
+        period_stock_data['vol'] = period_stock_data['vol'].apply(lambda x: round(x / ratio_d, 1))
+                
+    # period_stock_data['turnover']=period_stock_data['vol']/(period_stock_data['traded_market_value'])/period_stock_data['close']
+    period_stock_data.index = stock_data['date'].resample(period_type).last().index
+    # print period_stock_data.index[:1]
+    if 'code' in period_stock_data.columns:
+        period_stock_data = period_stock_data[period_stock_data['code'].notnull()]
+    period_stock_data = period_stock_data.dropna()
+    # period_stock_data.reset_index(inplace=True)
+    # period_stock_data.set_index('date',inplace=True)
+    # print period_stock_data.columns,period_stock_data.index.name
+    # and period_stock_data.index.dtype != 'datetime64[ns]')
+    
+    # if not indextype and period_stock_data.index.name == 'date':
+    #     # stock_data.index = pd.to_datetime(stock_data.index, format='%Y-%m-%d')
+    #     period_stock_data.index = [str(x)[:10] for x in period_stock_data.index]
+    #     period_stock_data.index.name = 'date'
+    # else:
+    #     if 'date' in period_stock_data.columns:
+    #         period_stock_data = period_stock_data.drop(['date'], axis=1)
+    
+    if 'date' in period_stock_data.columns:
+            period_stock_data = period_stock_data.drop(['date'], axis=1)
+    return period_stock_data.reset_index()
+
 def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=None):
     """_周期转换周K,月K_
 
@@ -4618,11 +4761,13 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
         _type_: _description_
     """
     
-    period_type = period_day
+
+    period_type = period_type_dic[period_day.lower()]
+
     indextype = True if stock_data.index.dtype == 'datetime64[ns]' else False
     #
-    # ×ª»»ÖÜ×îºóÒ»ÈÕ±äÁ¿
-    if cct.get_work_day_status() and 915 < cct.get_now_time_int() < 1500:
+    if 915 < cct.get_now_time_int() < 1500 and cct.get_trade_date_status() == 'True' and  cct.get_work_day_status():
+    # if cct.get_work_day_status() and 915 < cct.get_now_time_int() < 1500:
         stock_data = stock_data[stock_data.index < cct.get_today()]
     stock_data['date'] = stock_data.index
     if stock_data.index.name == 'date':
@@ -4659,6 +4804,7 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
         period_stock_data['vol'] = stock_data[
             'vol'].resample(period_type).sum()
     # period_stock_data['turnover']=period_stock_data['vol']/(period_stock_data['traded_market_value'])/period_stock_data['close']
+    
     period_stock_data.index = stock_data['date'].resample(period_type).last().index
     # print period_stock_data.index[:1]
     if 'code' in period_stock_data.columns:
@@ -4671,8 +4817,10 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
 
     if not indextype and period_stock_data.index.name == 'date':
         # stock_data.index = pd.to_datetime(stock_data.index, format='%Y-%m-%d')
-        period_stock_data.index = [str(x)[:10] for x in period_stock_data.index]
-        period_stock_data.index.name = 'date'
+        period_stock_data.index = period_stock_data.date
+        period_stock_data = period_stock_data.drop(['date'], axis=1)
+        # period_stock_data.index = [str(x)[:10] for x in period_stock_data.date]
+        # period_stock_data.index.name = 'date'
     else:
         if 'date' in period_stock_data.columns:
             period_stock_data = period_stock_data.drop(['date'], axis=1)
@@ -4768,7 +4916,16 @@ def python_resample(qs, xs, rands):
     # print timeit.timeit(lambda:cct.run_numba(python_resample(qs, xs,
     # rands)),number=number)
 
-
+def tdx_profile_test():
+    resample = 'd'
+    code='000002'
+    dl=60
+    time_s=time.time()
+    for i in range(10):
+        df = get_tdx_exp_low_or_high_power(code, dl=dl, end=None, ptype='low', power=False, resample=resample)
+        # print("time:%s"%( round((time.time()-time_s),2) ))
+    print("done")
+    # gui_test.py
 if __name__ == '__main__':
     import sys
     import timeit
@@ -4846,10 +5003,10 @@ if __name__ == '__main__':
     code='300346' #南大光电
     code='600499' #科达制造
     code='600438' #隆基绿能
-    code='002193' #如意集团
-    code='600536'  
+    code='000656' #如意集团
+    # code='002828'  
     # code='002176' #江特电机
-    # code='300436'
+    code='000625'
     # get_index_percd()
 
     # wri_index = cct.cct_raw_input("If append  Index 399001... data to tdx[y|n]:")
@@ -4872,25 +5029,28 @@ if __name__ == '__main__':
     # code='300216'
     # code = '002906'
     # code = '603486'
-    # code = '600786'
+    # code = '301073'
     # df2 = get_tdx_Exp_day_to_df(code,dl=10, end='20221116', newdays=0, resample='d')
     # df = get_tdx_Exp_day_to_df(code, dl=1)
-    # import ipdb;ipdb.set_trace()
     # 
     # dm = get_sina_data_df(code)
     # df2 = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
 
+    # df2 = get_tdx_Exp_day_to_df(code,dl=60, end='20230925', newdays=0, resample='d')
     df2 = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
     # print get_tdx_append_now_df_api_tofile(code)
+    print("code:%s boll:%s df2:%s"%(code,df2.boll[0],df2.df2[0]))
+    # import ipdb;ipdb.set_trace()
 
     resample = 'w'
-    # df2 = get_tdx_Exp_day_to_df(code,dl=160, end=None, newdays=0, resample='d',lastdays=12)
-    # df2 = get_tdx_Exp_day_to_df(code,dl=134, end=None, newdays=0, resample=resample,lastdays=1)
+    df2 = get_tdx_Exp_day_to_df(code,dl=180, end=None, newdays=0, resample=resample,lastdays=3)
+    print("code:%s boll:%s df2:%s"%(code,df2.boll[0],df2.df2[0]))
     # import ipdb;ipdb.set_trace()
+
+    # df2 = get_tdx_Exp_day_to_df(code,dl=134, end=None, newdays=0, resample=resample,lastdays=1)
 
     # get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, type='f', wds=True, lastdays=3, resample='d', MultiIndex=False)
     # df3 = compute_jump_du_count(df2, lastdays=9, resample='d')
-    # import ipdb;ipdb.set_trace()
 
     # df = get_tdx_exp_low_or_high_power(code, dl=30, newdays=0, resample=resample)
     # df3 =  get_tdx_exp_all_LastDF_DL([code],  dt=60, ptype='low', filter='y', power=ct.lastPower, resample=resample)
