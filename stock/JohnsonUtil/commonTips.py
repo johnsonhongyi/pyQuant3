@@ -648,7 +648,7 @@ terminal_positionKey4K = {'sina_Market-DurationDn.py': '6, 633',
                         'singleAnalyseUtil.py': '1084, 765',
                         'LinePower.py': '6, 216', 
                         'sina_Market-DurationDnUP.py': '6, 434,1400,440',
-                        'instock_Monitor':'154, 560',}
+                        'instock_Monitor':'24, 260,1360,440',}
 
 
 terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440',
@@ -661,7 +661,7 @@ terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440'
                         'singleAnalyseUtil.py': '759, 0,920,360',
                         'LinePower.py': '16, 186,800,420',
                         'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,
-                        'instock_Monitor':'24, 260,1330,440',}
+                        'instock_Monitor':'24, 260,1360,440',}
 
 
 
@@ -2325,18 +2325,24 @@ def get_config_value_ramfile(fname, currvalue=0, xtype='time', update=False,cfgf
                     save_date = None
             else:
                 save_date = None
-
-            if save_date != get_today():
-                if 'rewrite' in list(config[classtype].keys()):
-                    rewrite = int(config[classtype]['rewrite']) + 1
-                else:
-                    rewrite = 1
+                
+            if save_date is not None:
+                if save_date != get_today():
+                    if 'rewrite' in list(config[classtype].keys()):
+                        rewrite = int(config[classtype]['rewrite']) + 1
+                    else:
+                        rewrite = 1
+                    config[classtype] = {}
+                    config[classtype][xtype] = is_trade_date()
+                    config[classtype]['date'] = get_today()
+                    config[classtype]['rewrite'] = rewrite
+                    config.write()
+            else:
                 config[classtype] = {}
                 config[classtype][xtype] = is_trade_date()
                 config[classtype]['date'] = get_today()
-                config[classtype]['rewrite'] = rewrite
+                config[classtype]['rewrite'] = 1
                 config.write()
-                
         else:
             config = ConfigObj(conf_ini, encoding='UTF8')
             config[classtype] = {}
