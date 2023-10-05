@@ -111,7 +111,7 @@ if __name__ == "__main__":
     delay_time = cct.get_delay_time()
     # base_path = tdd.get_tdx_dir()
     # block_path = tdd.get_tdx_dir_blocknew() + '064.blk'
-    blkname = '064.blk'
+    blkname = '061.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
     lastpTDX_DF = pd.DataFrame()
     parserDuraton = cct.DurationArgmain()

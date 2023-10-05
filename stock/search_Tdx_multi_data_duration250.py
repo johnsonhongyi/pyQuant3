@@ -170,18 +170,18 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
         ###detect_bull_bear
         # dd= groupd['close'].rolling(20).apply(detect_bull_bear)
 
-        # df = groupd['close'].rolling(20).agg(['median','mean'])
+        df = groupd['close'].rolling(20).agg(['median','mean'])
         
 
+        # df=dfs.copy()
 
         # 应用自定义函数，生成每天的前十天的统计数据
-        dfsmin = groupd['close'].rolling(10).apply(last_10_days_stats)
-        time_s = time.time()
+        # dfsmin = groupd['close'].rolling(10).apply(last_10_days_stats)
+        # time_s = time.time()
         dfsr = groupd['close'].rolling(10).apply(regression_ratio)
         dfsr.index =dfsr.to_frame().index.droplevel(1)
-        dfs['xratio'] = dfsr
+        df['xratio'] = dfsr
         print(time.time()-time_s)
-        import ipdb;ipdb.set_trace()
 
 
 
@@ -424,6 +424,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
             if len(codew) > 10: 
                 cct.write_to_blocknew(block_path, codew, append_status,doubleFile=False,keep_last=0)
                 print("write:%s block_path:%s"%(len(codew),block_path))
+                print(top_temp.name.tolist())
             else:
                 print("write error:%s block_path:%s"%(len(codew),block_path))
 
