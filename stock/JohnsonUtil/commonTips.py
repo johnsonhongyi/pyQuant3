@@ -2640,14 +2640,14 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
     if p_name.find('061.blk') > 0 or p_name.find('062.blk') > 0 or p_name.find('063.blk') > 0:
         writeBlocknew(p_name, data, append)
         if doubleFile:
-            writeBlocknew(blockNew, data)
-            writeBlocknew(blockNewStart, data, append)
+            writeBlocknew(blockNew, data, append=True)
+            writeBlocknew(blockNewStart, data, append=True)
         # print "write to :%s:%s"%(p_name,len(data))
     elif p_name.find('064.blk') > 0:
         writeBlocknew(p_name, data, append)
         if doubleFile:
-            writeBlocknew(blockNew, data, append,keep_last=12)
-            writeBlocknew(blockNewStart, data, append)
+            writeBlocknew(blockNew, data, append=True,keep_last=12)
+            writeBlocknew(blockNewStart, data, append=True)
         # print "write to append:%s :%s :%s"%(append,p_name,len(data))
     elif p_name.find('068.blk') > 0 or p_name.find('069.blk') > 0:
 
@@ -2657,9 +2657,9 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
     else:
         writeBlocknew(p_name, data, append)
         if doubleFile:
-            writeBlocknew(blockNew, data)
+            writeBlocknew(blockNew, data,append=True)
             # writeBlocknew(blockNewStart, data[:ct.writeCount - 1])
-            writeBlocknew(blockNewStart, data, append)
+            writeBlocknew(blockNewStart, data, append=True)
         # print "write to append:%s :%s :%s"%(append,p_name,len(data))
 
 def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=None):
