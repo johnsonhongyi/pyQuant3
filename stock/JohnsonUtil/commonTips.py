@@ -9,7 +9,9 @@ import sys
 sys.path.append("..")
 import time
 import random
-# from :.ast import flatten
+# from compiler.ast import flatten  #py2
+import collections.abc              #py3
+
 from multiprocessing.pool import ThreadPool
 from multiprocessing import cpu_count
 
@@ -434,7 +436,8 @@ def fetch_stocks_trade_date():
         data = tool_trade_date_hist_sina()
         if data is None or len(data.index) == 0:
             return None
-        data_date = set(data['trade_date'].values.tolist())
+        # data_date = set(data['trade_date'].values.tolist())
+        data_date = (data['trade_date'].values.tolist())
         return data_date
     except Exception as e:
         print(f"stockfetch.fetch_stocks_trade_date处理异常：{e}")
@@ -648,7 +651,7 @@ terminal_positionKey4K = {'sina_Market-DurationDn.py': '6, 633',
                         'singleAnalyseUtil.py': '1084, 765',
                         'LinePower.py': '6, 216', 
                         'sina_Market-DurationDnUP.py': '6, 434,1400,440',
-                        'instock_Monitor':'24, 260,1360,440',}
+                        'instock_Monitor.py':'20, 260,1360,440',}
 
 
 terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440',
@@ -661,7 +664,7 @@ terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440'
                         'singleAnalyseUtil.py': '759, 0,920,360',
                         'LinePower.py': '16, 186,800,420',
                         'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,
-                        'instock_Monitor':'24, 260,1360,440',}
+                        'instock_Monitor.py':'20, 260,1360,440',}
 
 
 
@@ -713,38 +716,38 @@ target rect1:(92, 142, 1492, 582) rect2:(92, 142, 1492, 582)
 # title:sina_Market-DurationUp.py
 # target rect1:(91, 149, 1491, 609) rect2:(91, 149, 1491, 609)
 
-terminal_positionKey = {'sina_Market-DurationDn.py': '8, 801',
-                        'sina_Market-DurationCXDN.py': '79, 734',
-                        'sina_Market-DurationSH.py': '-29, 623',
-                        'sina_Market-DurationUp.py': '451, 703',
-                        'sina_Monitor-Market-LH.py': '666, 338',
-                        'sina_Monitor-Market.py': '19, 179',
-                        'sina_Monitor.py': '205, 659',
-                        'singleAnalyseUtil.py': '328, 594',
-                        'LinePower.py': '6, 216', 
-                        'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,}
+# terminal_positionKey = {'sina_Market-DurationDn.py': '8, 801',
+#                         'sina_Market-DurationCXDN.py': '79, 734',
+#                         'sina_Market-DurationSH.py': '-29, 623',
+#                         'sina_Market-DurationUp.py': '451, 703',
+#                         'sina_Monitor-Market-LH.py': '666, 338',
+#                         'sina_Monitor-Market.py': '19, 179',
+#                         'sina_Monitor.py': '205, 659',
+#                         'singleAnalyseUtil.py': '328, 594',
+#                         'LinePower.py': '6, 216', 
+#                         'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,}
 
-terminal_positionKey_all = {'sina_Market-DurationDn.py': '654, 680',
-                        'sina_Market-DurationCXDN.py': '-16, 54',
-                        'sina_Market-DurationSH.py': '-29, 623',
-                        'sina_Market-DurationUp.py': '-22, 89',
-                        'sina_Monitor-Market-LH.py': '666, 338',
-                        'sina_Monitor-Market.py': '19, 179',
-                        'sina_Monitor.py': '28, 23',
-                        'singleAnalyseUtil.py': '1095, 23',
-                        'LinePower.py': '6, 216',
-                        'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,}
+# terminal_positionKey_all = {'sina_Market-DurationDn.py': '654, 680',
+#                         'sina_Market-DurationCXDN.py': '-16, 54',
+#                         'sina_Market-DurationSH.py': '-29, 623',
+#                         'sina_Market-DurationUp.py': '-22, 89',
+#                         'sina_Monitor-Market-LH.py': '666, 338',
+#                         'sina_Monitor-Market.py': '19, 179',
+#                         'sina_Monitor.py': '28, 23',
+#                         'singleAnalyseUtil.py': '1095, 23',
+#                         'LinePower.py': '6, 216',
+#                         'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,}
 
 
-terminal_positionKeyMac2021_OLD = {'sina_Market-DurationDn.py': '186, 506',
-                        'sina_Market-DurationCXDN.py': '39, 126',
-                        'sina_Market-DurationSH.py': '-29, 623',
-                        'sina_Market-DurationUp.py': '0, 394',
-                        'sina_Monitor-Market-LH.py': '184, 239',
-                        'sina_Monitor-Market.py': '19, 179',
-                        'sina_Monitor.py': '116, 58',
-                        'singleAnalyseUtil.py': '594, 23',
-                        'LinePower.py': '6, 216', }
+# terminal_positionKeyMac2021_OLD = {'sina_Market-DurationDn.py': '186, 506',
+#                         'sina_Market-DurationCXDN.py': '39, 126',
+#                         'sina_Market-DurationSH.py': '-29, 623',
+#                         'sina_Market-DurationUp.py': '0, 394',
+#                         'sina_Monitor-Market-LH.py': '184, 239',
+#                         'sina_Monitor-Market.py': '19, 179',
+#                         'sina_Monitor.py': '116, 58',
+#                         'singleAnalyseUtil.py': '594, 23',
+#                         'LinePower.py': '6, 216', }
 
 terminal_positionKeyMac2021 = {'sina_Market-DurationDn.py': '541, 530',
                         'sina_Market-DurationCXDN.py': '0, 194',
@@ -766,15 +769,15 @@ terminal_positionKeyMac2021 = {'sina_Market-DurationDn.py': '541, 530',
 
 """
 
-terminal_positionKeyMac = {'sina_Market-DurationDn.py': '216, 490',
-                        'sina_Market-DurationCXDN.py': '-16, 54',
-                        'sina_Market-DurationSH.py': '-29, 623',
-                        'sina_Market-DurationUp.py': '-22, 89',
-                        'sina_Monitor-Market-LH.py': '184, 239',
-                        'sina_Monitor-Market.py': '19, 179',
-                        'sina_Monitor.py': '28, 23',
-                        'singleAnalyseUtil.py': '594, 23',
-                        'LinePower.py': '6, 216', }
+# terminal_positionKeyMac = {'sina_Market-DurationDn.py': '216, 490',
+#                         'sina_Market-DurationCXDN.py': '-16, 54',
+#                         'sina_Market-DurationSH.py': '-29, 623',
+#                         'sina_Market-DurationUp.py': '-22, 89',
+#                         'sina_Monitor-Market-LH.py': '184, 239',
+#                         'sina_Monitor-Market.py': '19, 179',
+#                         'sina_Monitor.py': '28, 23',
+#                         'singleAnalyseUtil.py': '594, 23',
+#                         'LinePower.py': '6, 216', }
 
 terminal_positionKey_VM = {'sina_Market-DurationDn.py': '342, 397',
                         'sina_Market-DurationCXDN.py': '84, 222',
@@ -786,15 +789,16 @@ terminal_positionKey_VM = {'sina_Market-DurationDn.py': '342, 397',
                         'singleAnalyseUtil.py': '615, 23',
                         'LinePower.py': '6, 216', }
 
-terminal_positionKey_triton = {'sina_Market-DurationDn.py': '47, 410, 1400, 460',
-                        'sina_Market-DurationCXDN.py': '23, 634,1400,460',
-                        'sina_Market-DurationSH.py': '-29, 623,1400,460',
-                        'sina_Market-DurationUp.py': '330, 464,1400,460',
-                        'sina_Monitor-Market-LH.py': '603, 501, 1400, 420',
-                        'sina_Monitor-Market.py': '19, 179,1400,460',
-                        'sina_Monitor.py': '87, 489,1400,460',
-                        'singleAnalyseUtil.py': '1074, 694,880,360',
-                        'LinePower.py': '1031, 682,800,420', }
+# terminal_positionKey_triton = {'sina_Market-DurationDn.py': '47, 410, 1400, 460',
+#                         'sina_Market-DurationCXDN.py': '23, 634,1400,460',
+#                         'sina_Market-DurationSH.py': '-29, 623,1400,460',
+#                         'sina_Market-DurationUp.py': '330, 464,1400,460',
+#                         'sina_Monitor-Market-LH.py': '603, 501, 1400, 420',
+#                         'sina_Monitor-Market.py': '19, 179,1400,460',
+#                         'sina_Monitor.py': '87, 489,1400,460',
+#                         'singleAnalyseUtil.py': '1074, 694,880,360',
+#                         'LinePower.py': '1031, 682,800,420',
+#                         'instock_Monitor.py':'24, 260,1360,440',}
 
 
 
@@ -1261,7 +1265,9 @@ def set_console(width=80, height=15, color=3, title=None, closeTerminal=True):
     # mode con cp select=936
     # os.system("mode con: cols=%s lines=%s"%(width,height))
     # print os.path.splitext(sys.argv[0])
+
     if title is None:
+        # title= (os.path.basename(sys.argv[0]))
         filename = (os.path.basename(sys.argv[0]))
     elif isinstance(title, list):
         filename = (os.path.basename(sys.argv[0]))
@@ -1298,7 +1304,7 @@ def set_console(width=80, height=15, color=3, title=None, closeTerminal=True):
     # else:
     #     GlobalValues().setkey('Position',1)
 
-    if closeTerminal and title is not None and (GlobalValues().getkey('Position') is None):
+    if closeTerminal and (GlobalValues().getkey('Position') is None):
         GlobalValues().setkey('Position',1)
 
         # get_terminal_Position(cmd=scriptquit, position=None, close=False)
@@ -1984,6 +1990,17 @@ def get_div_list(ls, n):
         return ls_return
 
 
+
+
+def flatten(x):
+    result = []
+    for el in x:
+        if isinstance(x, collections.abc.Iterable) and not isinstance(el, str):
+            result.extend(flatten(el))
+        else:
+            result.append(el)
+    return result
+
 def to_asyncio_run_py2(urllist, cmd):
     results = []
 
@@ -2058,6 +2075,96 @@ def to_mp_run(cmd, urllist):
     # print "time:MP", (time.time() - n_t)
     return results
 
+
+
+
+
+
+def to_mp_run_tqdm_err(cmd, urllist,*args,**kwargs):
+    #no work map tqdm
+    # n_t=time.time()
+    print("mp:%s" % len(urllist), end=' ')
+
+    # pool = ThreadPool(2)
+    # pool = ThreadPool(4)
+    print(cpu_count())
+    pool = ThreadPool(processes=6)
+    # for code in codes:
+    #     results=pool.apply_async(sl.get_multiday_ave_compare_silent_noreal,(code,60))
+
+    # def worker(cmd,urllisttq):
+    #     # for i in tqdm(range(100), desc=f'Worker {num}'):
+    #     func = partial(cmd, **kwargs)
+    #     resultstq = []   
+    #     for y in tqdm(pool.imap_unordered(func, urllisttq),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
+    #         resultstq.append(y)
+    #     return resultstq
+
+    # with multiprocessing.Pool(4) as p:
+    #     p.map(worker, [1, 2, 3, 4])
+
+
+    result=[]
+    # kwargs['cmd']=cmd
+    # workerfunc = partial(worker, **kwargs)
+    # results = pool.map(workerfunc, urllist)
+    # for y in tqdm(pool.imap_unordered(func, urllisttq),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
+    func = partial(cmd, **kwargs)
+    for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
+            result.append(y)
+
+
+    # results = []
+    # for y in tqdm(pool.imap_unordered(cmd, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
+    #     results.append(y)
+
+    # for code in urllist:
+    # result.append(pool.apply_async(cmd,(code,)))
+
+    pool.close()
+    pool.join()
+    # results = flatten(results)
+    # print "time:MP", (time.time() - n_t)
+    return results
+
+# from multiprocessing import Pool
+
+def imap_tqdm(function, iterable, processes, chunksize=5, desc=None, disable=False, **kwargs):
+    """
+    Run a function in parallel with a tqdm progress bar and an arbitrary number of arguments.
+    Results are always ordered and the performance should be the same as of Pool.map.
+    :param function: The function that should be parallelized.
+    :param iterable: The iterable passed to the function.
+    :param processes: The number of processes used for the parallelization.
+    :param chunksize: The iterable is based on the chunk size chopped into chunks and submitted to the process pool as separate tasks.
+    :param desc: The description displayed by tqdm in the progress bar.
+    :param disable: Disables the tqdm progress bar.
+    :param kwargs: Any additional arguments that should be passed to the function.
+    """ 
+    if kwargs:
+        function_wrapper = partial(_wrapper, function=function, **kwargs)
+    else:
+        function_wrapper = partial(_wrapper, function=function)
+
+    results = [None] * len(iterable)
+    # results = []
+    with ThreadPool(processes=processes) as p:
+        # with tqdm(desc=desc, total=len(iterable), disable=disable) as pbar:
+        with tqdm(desc=desc, total=len(iterable), disable=disable,mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols) as pbar:
+            for i, result in p.imap_unordered(function_wrapper, enumerate(iterable), chunksize=chunksize):
+                results[i] = result
+                # results.append(result)
+                pbar.update()
+
+    return results
+
+
+def _wrapper(enum_iterable, function, **kwargs):
+    i = enum_iterable[0]
+    result = function(enum_iterable[1], **kwargs)
+    return i, result
+
+
 from functools import partial
 def to_mp_run_async(cmd, urllist, *args,**kwargs):
     # n_t=time.time()
@@ -2066,17 +2173,45 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
 
     # n_t = time.time()
     results = []
+    # stock_list = []
+    # pool_count = (cpu_count()-2)
+    pool_count = 1
+    time_s = time.time()
 
+    # max_num = 850
+    # request_num = len(urllist) // max_num
+    # for range_start in range(request_num):
+    #     num_start = max_num * range_start
+    #     num_end = max_num * (range_start + 1)
+    #     request_list = urllist[num_start:num_end]
+    #     stock_list.append(request_list)
+    # # print len(self.stock_with_exchange_list), num_endzzzzzzzzzz
+    # if len(urllist) > num_end:
+    #     request_list = urllist[num_end:]
+    #     stock_list.append(request_list)
+    #     request_num += 1
+
+    # results=to_mp_run_tqdm(cmd,stock_list, *args,**kwargs)
+
+    # imap_tqdm
+    # func = partial(cmd, **kwargs)
+    # result = imap_tqdm(cmd, urllist,processes=pool_count,**kwargs)
+
+    # results = flatten(results)
+
+
+    # '''
+    
     if len(urllist) > 50:
         if len(kwargs) > 0 :
             pool = ThreadPool(1)
-            # pool = ThreadPool(2)
+            # pool = ThreadPool(12)
             func = partial(cmd, **kwargs)
             # TDXE:44.26  cpu 1   
             # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
             # results = pool.map(func, urllist)
             try:
-                for y in tqdm(pool.imap(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
+                for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
                     results.append(y)
             except Exception as e:
                 log.error("except:%s"%(e))
@@ -2091,6 +2226,7 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     results.append(pool.apply_async(cmd, (code,) + args).get())
                 except Exception as e:
                     log.error("except:%s code:%s"%(e,code))
+
     else:
         if len(kwargs) > 0 :
             pool = ThreadPool(1)
@@ -2110,11 +2246,10 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     results.append(pool.apply_async(cmd, (code,) + args).get())
                 except Exception as e:
                     log.error("except:%s code:%s"%(e,code))
-
-
-
     pool.close()
     pool.join()
+    # '''
+    print("time:%s"%(round(time.time()-time_s,2)),)
     return results
 
 
@@ -4109,9 +4244,8 @@ if __name__ == '__main__':
     import ipdb;ipdb.set_trace()
     '''
     print(read_to_indb())
-    # print(is_trade_date())
+    print(is_trade_date())
     print(get_trade_date_status())
-    # import ipdb;ipdb.set_trace()
 
     print(code_to_symbol_ths('000002'))
     print(get_index_fibl())
