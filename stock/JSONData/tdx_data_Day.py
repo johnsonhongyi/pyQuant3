@@ -4814,16 +4814,21 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
     # period_stock_data.set_index('date',inplace=True)
     # print period_stock_data.columns,period_stock_data.index.name
     # and period_stock_data.index.dtype != 'datetime64[ns]')
-
-    if not indextype and period_stock_data.index.name == 'date':
+    
+    if not indextype and period_stock_data.index.name == 'date' and 'date' in period_stock_data.columns:
         # stock_data.index = pd.to_datetime(stock_data.index, format='%Y-%m-%d')
+        # period_stock_data = period_stock_data.set_index('date')
+
         period_stock_data.index = period_stock_data.date
         period_stock_data = period_stock_data.drop(['date'], axis=1)
         # period_stock_data.index = [str(x)[:10] for x in period_stock_data.date]
         # period_stock_data.index.name = 'date'
     else:
         if 'date' in period_stock_data.columns:
+            # period_stock_data = period_stock_data.set_index('date')
+            # period_stock_data.index = period_stock_data.date
             period_stock_data = period_stock_data.drop(['date'], axis=1)
+
     # print period_stock_data
     return period_stock_data
 
