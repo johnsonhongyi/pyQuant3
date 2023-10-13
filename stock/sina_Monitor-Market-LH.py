@@ -131,6 +131,7 @@ if __name__ == "__main__":
     du_date = duration_date
     resample = ct.resample_dtype
     end_date = cct.last_tddate(days=3)
+    
     # all_diffpath = tdd.get_tdx_dir_blocknew() + '062.blk'
 
     if len(str(duration_date)) < 4:
@@ -160,7 +161,15 @@ if __name__ == "__main__":
 
             # top_now = tdd.getSinaAlldf(market='次新股',filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
             # market_blk = 'cyb'
-            market_blk = '077'
+            
+            # market_blk = '077'
+            # top_now = tdd.getSinaAlldf(market=market_blk, filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType,trend=False)
+            
+            market_blk = '近期异动'
+
+            top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
+
+            
             # market_blk = '央企'
             # top_now = tdd.getSinaAlldf(market='央企',filename='yqbk', vol=ct.json_countVol, vtype=ct.json_countType,trend=False)
 
@@ -170,7 +179,6 @@ if __name__ == "__main__":
 
             # top_now = tdd.getSinaAlldf(market='次新股,cyb', filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType,trend=False)
 
-            top_now = tdd.getSinaAlldf(market=market_blk, filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType,trend=False)
             # top_now = tdd.getSinaAlldf(market='次新股,zxb',filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
 
             # print top_now.loc['300208','name']

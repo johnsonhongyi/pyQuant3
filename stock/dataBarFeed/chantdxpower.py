@@ -420,7 +420,8 @@ def show_chan_mpl_tdx(code, start_date=None, end_date=None, stock_days=60, resam
         x_jizhun = len(T0) / 12
     for i in range(len(T0) / x_jizhun):
         # print "len(T0)/x_jizhun:",len(T0)/x_jizhun
-        a = i * x_jizhun
+
+        a = int(i * x_jizhun)
         d = datetime.date.fromtimestamp(T1[a])
         # print d
         T2 = d.strftime('$%Y-%m-%d$')
@@ -902,6 +903,7 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
     #             y_fenbi_seq.append(m_line_dto.low)
         return x_fenbi_seq, y_fenbi_seq
 
+
     # print  T0[-len(T0):].astype(dt.date)
     T1 = T0[-len(T0):].astype(datetime.date) / 1000000000
     Ti = []
@@ -909,7 +911,8 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
         x_jizhun = len(T0) / 12
     for i in range(int(len(T0) / x_jizhun)):
         # print "len(T0)/x_jizhun:",len(T0)/x_jizhun
-        a = i * x_jizhun
+
+        a = int(i * x_jizhun)
         d = datetime.date.fromtimestamp(T1[a])
         # print d
         T2 = d.strftime('$%Y-%m-%d$')
@@ -1811,7 +1814,7 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
 #         plt.show(block=False)
 
 
-def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=True, least_init=3, chanK_flag=False, windows=20, fb_show=0,roll_mean_days=20):
+def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=True, least_init=2, chanK_flag=False, windows=20, fb_show=0,roll_mean_days=20):
    
     stock_code = code  # 股票代码
 
@@ -2523,7 +2526,11 @@ if __name__ == "__main__":
     # code='600604'
     # show_chan_mpl_tdx(code, start_date=None, end_date=None, stock_days=60, resample='d', show_mpl=True, least_init=2, chanK_flag=False, windows=20, power=True, fb_show=0, df=None)
     # code = raw_input("code:")
+
+    # show_chan_mpl_power('300255', None, None, 60, 'd',show_mpl = False)
     # import ipdb;ipdb.set_trace()
+    # show_chan_mpl_fb('300255', None, None, 60, 'd',show_mpl = False)
+
     
     parser=parseArgmain()
     parser.print_help()

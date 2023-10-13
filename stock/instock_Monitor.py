@@ -718,6 +718,7 @@ if __name__ == "__main__":
             elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
                 st_l=st.split()
                 st_k=st_l[0]
+                
                 if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
                     st_key_sort=st
                     market_sort_value, market_sort_value_key=ct.get_market_sort_value_key(

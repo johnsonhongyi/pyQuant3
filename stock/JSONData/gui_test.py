@@ -249,5 +249,21 @@ def _wrapper(enum_iterable, function, **kwargs):
     return i, result
 
 
+# if __name__ == '__main__':
+#     result = imap_tqdm(_foo, range(500),processes=6)
+
+
+from multiprocessing import Pool
+from tqdm import tqdm
+import time
+
+def f(x):
+    time.sleep(0.01)
+    return x * x
+
+
 if __name__ == '__main__':
-    result = imap_tqdm(_foo, range(500),processes=6)
+    time_s = time.time()
+    with Pool(1) as p:
+        print(list((tqdm(p.imap(f, range(200)), total=10, desc='监视进度'))))
+    print("time:%s"%(round(time.time()-time_s,2)))

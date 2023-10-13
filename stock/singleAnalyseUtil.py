@@ -784,6 +784,10 @@ if __name__ == '__main__':
                 sys.exit(0)
             else:
                 print("input error:%s" % (st))
+                cct.sleep(10)
+                count_Except = GlobalValues().getkey('Except_count')
+                if count_Except is not None and count_Except > 3:
+                    raise KeyboardInterrupt("Stop Time")
                 # cct.sleep(0.5)
                 # if success > 3:
                 #     raw_input("Except")

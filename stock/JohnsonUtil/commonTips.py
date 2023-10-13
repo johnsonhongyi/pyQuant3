@@ -56,7 +56,7 @@ perdallc = "df[df.columns[(df.columns >= 'perc1d') & (df.columns <= 'perc%sd'%(c
 perdalla = "df[df.columns[ ((df.columns >= 'per1d') & (df.columns <= 'per%sd'%(ct.compute_lastdays))) | ((df.columns >= 'du1d') & (df.columns <= 'du%sd'%(ct.compute_lastdays)))]][:1]"
 perdallu = "df[df.columns[ ((df.columns >= 'du1d') & (df.columns <= 'du%sd'%(ct.compute_lastdays)))]][:1]"
 root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\'
-
+dfcf_path = 'D:\\MacTools\\WinTools\\eastmoney\\swc8\\config\\User\\6327113578970854\\StockwayStock.ini'
 
 class GlobalValues:
     # -*- coding: utf-8 -*-
@@ -651,30 +651,30 @@ terminal_positionKey4K = {'sina_Market-DurationDn.py': '6, 633',
                         'singleAnalyseUtil.py': '1084, 765',
                         'LinePower.py': '6, 216', 
                         'sina_Market-DurationDnUP.py': '6, 434,1400,440',
-                        'instock_Monitor.py':'20, 260,1360,440',}
+                        'instock_Monitor.py':'62, 86,1360,440',}
 
 
 terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440',
-                        'sina_Market-DurationCXDN.py': '45, 248,1400,440',
+                        'sina_Market-DurationCXDN.py': '-6, 311,1400,440',
                         'sina_Market-DurationSH.py': '-29, 623,1400,440',
                         'sina_Market-DurationUp.py': '340, 419,1400,440',
                         'sina_Monitor-Market-LH.py': '567, 286,1400,420',
                         'sina_Monitor-Market.py': '140, 63,1400,440',
-                        'sina_Monitor.py': '139, 34,1330,440',
+                        'sina_Monitor.py': '152, 1,1330,440',
                         'singleAnalyseUtil.py': '759, 0,920,360',
                         'LinePower.py': '16, 186,800,420',
                         'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,
-                        'instock_Monitor.py':'20, 260,1360,440',}
+                        'instock_Monitor.py':'62, 86,1360,440',}
 
 
 
 terminal_positionKey2K_R9000P = {'sina_Market-DurationDn.py': '-13, 601,1400,440',
-                        'sina_Market-DurationCXDN.py': '11, 249,1400,440',
+                        'sina_Market-DurationCXDN.py': '-6, 311,1400,440',
                         'sina_Market-DurationSH.py': '-29, 623,1400,440',
                         'sina_Market-DurationUp.py': '445, 503,1400,440',
                         'sina_Monitor-Market-LH.py': '521, 332,1400,420',
                         'sina_Monitor-Market.py': '271, 39,1400,440',
-                        'sina_Monitor.py': '124, 29,1400,440',
+                        'sina_Monitor.py': '152, 1,1400,440',
                         'chantdxpower.py': '53, 66,800,420', 
                         'singleAnalyseUtil.py': '673, 0,880,360',
                         'LinePower.py': '6, 216,800,420', 
@@ -1084,12 +1084,12 @@ def check_chinese(checkstr):
 
 
 
-# from chardet import detect
-# # get file encoding type
-# def get_encoding_type(file):
-#     with open(file, 'rb') as f:
-#         rawdata = f.read()
-#     return detect(rawdata)['encoding']
+from chardet import detect
+# get file encoding type
+def get_encoding_type(file):
+    with open(file, 'rb') as f:
+        rawdata = f.read()
+    return detect(rawdata)['encoding']
 
 # open(current_file, 'r', encoding = get_encoding_type, errors='ignore')
 # str = unicode(str, errors='replace')
@@ -1405,8 +1405,11 @@ def cct_raw_input(sts):
         # win_unicode_console.enable(use_readline_hook=False)
     t1 = time.time() - time_s
     if t1 < 1 and count_Except is not None and count_Except < 3:
+        time.sleep(3)
+        count_Except = count_Except + 1
+        GlobalValues().setkey('Except_count', count_Except)
         st = 'no Input'
-    return st
+    return st.strip()
 
 # eval_rule = "[elem for elem in dir() if not elem.startswith('_') and not elem.startswith('ti')]"
 # eval_rule = "[elem for elem in dir() if not elem.startswith('_')]"
@@ -2347,6 +2350,18 @@ def tdxblk_to_code(code):
         else:
             return code[1:] if code[:1] in ['1', '0'] else code
 
+def code_to_symbol_dfcf(code):
+    """
+        生成symbol代码标志
+    """
+    # if code in ct.INDEX_LABELS:
+    #     return ct.INDEX_LIST_TDX[code]
+    # else:
+    if len(code) != 6:
+        return ''
+    else:
+        return '1.%s' % code if code[:1] in ['5', '6', '9'] else '0.%s' % code
+
 
 def code_to_index(code):
     if not code.startswith('999') or not code.startswith('399'):
@@ -2632,6 +2647,53 @@ def counterCategory(df):
         print('')
     return topSort
 
+# def write_to_dfcfnew(p_name=dfcf_path):
+#     pass
+def write_to_blkdfcf(codel,conf_ini=dfcf_path):
+    import configparser
+    if not os.path.exists(conf_ini):
+        log.error('file is not exists:%s'%(conf_ini))
+    else:
+        cf = configparser.ConfigParser()  # 实例化 ConfigParser 对象
+        # cf.read("test.ini")
+        cf.read(conf_ini,encoding='UTF-16')
+        # cf.read(conf_ini,encoding='GB2312')
+        # return all section
+        secs = cf.sections()
+        # print('sections:', secs, type(secs))
+
+        opts = cf.options("\\SelfSelect")  # 获取db section下的 options，返回list
+        # print('options:', opts, type(opts))
+        # 获取db section 下的所有键值对，返回list 如下，每个list元素为键值对元组
+        kvs = cf.items("\\SelfSelect")
+        # print('db:', dict(kvs).keys())
+        # read by type
+        truer = cf.get("\\SelfSelect", "truer")
+        # print('truer:',truer)
+        truer_n = truer
+        idx = 0
+        if isinstance(codel, list):
+            for co in codel:
+                if code_to_symbol_dfcf(co) not in truer:
+                    idx+=1
+                    # print(idx)
+                    truer_n = code_to_symbol_dfcf(co)+','+truer_n
+                # else:
+                #     print("no change co")
+                    # truer_n = truer
+        else:
+            if code_to_symbol_dfcf(codel) not in truer:
+                    idx+=1
+                    truer_n = code_to_symbol_dfcf(codel)+','+truer
+            # else:
+            #     print("no change co")
+                    # truer_n = truer
+                    
+        print("truer add:",idx)
+        cf.set("\\SelfSelect", "truer", truer_n)
+        # print('instock:',cf.get("\\SelfSelect", "instock"))
+        cf.write(open(conf_ini,"w",encoding='UTF-16'))
+
 def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None):
     if keep_last is None:
         keep_last = ct.keep_lastnum
@@ -2796,6 +2858,7 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
             # writeBlocknew(blockNewStart, data[:ct.writeCount - 1])
             writeBlocknew(blockNewStart, data, append=True)
         # print "write to append:%s :%s :%s"%(append,p_name,len(data))
+    write_to_blkdfcf(data)
 
 def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=None):
     if keep_last is None:
