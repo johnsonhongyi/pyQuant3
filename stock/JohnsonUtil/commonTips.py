@@ -2431,6 +2431,7 @@ def get_config_value(fname, classtype, currvalue, limitvalue=1, xtype='limit', r
     if os.path.exists(conf_ini):
         # log.info("file ok:%s"%conf_ini)
         config = ConfigObj(conf_ini, encoding='UTF8')
+
         if classtype in list(config.keys()):
             if int(float(config[classtype][xtype])) > currvalue:
                 ratio = float(config[classtype][xtype]) / limitvalue
@@ -2440,7 +2441,7 @@ def get_config_value(fname, classtype, currvalue, limitvalue=1, xtype='limit', r
                     config[classtype][xtype] = limitvalue
                     config.write()
                     log.error("f_size:%s < read_limit:%s ratio < 2 ratio:%0.2f" % (currvalue, config[classtype][xtype], ratio))
-
+                    
             else:
 
                 log.error("file:%s f_size:%s > read_limit:%s" % (fname, currvalue, config[classtype][xtype]))
@@ -2452,7 +2453,6 @@ def get_config_value(fname, classtype, currvalue, limitvalue=1, xtype='limit', r
             config[classtype] = {}
             config[classtype][xtype] = limitvalue
             config.write()
-            return True
     else:
         config = ConfigObj(conf_ini, encoding='UTF8')
         config[classtype] = {}
