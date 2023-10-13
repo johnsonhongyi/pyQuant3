@@ -13,11 +13,14 @@ from pandas import Series
 from JSONData import tdx_hdf5_api as h5a
 from JSONData import realdatajson as rl
 from JSONData import wencaiData as wcd
+from JSONData import tdxbk
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import johnson_cons as ct
 import tushare as ts
 import pandas_ta as ta
+import talib as taa
+
 from JSONData import sina_data
 # import numba as nb
 import datetime
@@ -2476,11 +2479,12 @@ def getSinaIndexdf():
 
     return top_all
 
+tdxbkdict={'近期新高':'880865','近期异动':'880884'}
 
 def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, filename='mnbk', table='top_now', trend=False):
     ### Sina获取 Ratio 和tdx数据
     print("initdx", end=' ')
-    
+
     market_all = False
     m_mark = market.split(',')
     if len(m_mark) > 1:
@@ -2536,6 +2540,10 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     elif market in ['all']:
         df = sina_data.Sina().all
         market_all = True
+
+    elif market in tdxbkdict.keys():
+        df = tdxbk.get_tdx_gn_block_code(tdxbkdict[market])
+
     else:
         if filename == 'cxg':
             df = wcd.get_wcbk_df(filter=market, market=filename,
@@ -2546,7 +2554,9 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         if 'code' in df.columns:
             df = df.set_index('code')
         df = sina_data.Sina().get_stock_list_data(df.index.tolist())
-    if 'code' in df.columns:
+
+
+    if isinstance(df, pd.DataFrame) and 'code' in df.columns:
         df = df.set_index('code')
 
     if len(m_mark) > 1:
@@ -2556,8 +2566,10 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
             dfw = dfw.set_index('code')
         dfw = sina_data.Sina().get_stock_list_data(dfw.index.tolist())
         df = cct.combine_dataFrame(df,dfw,append=True)
+        codelist = df.index.astype(str).tolist()
+    
 
-    if trend:
+    if trend and isinstance(df, pd.DataFrame):
         code_l = cct.read_to_blocknew('060')
         if market == 'all':
             co_inx = [inx for inx in code_l if inx in df.index and str(inx).startswith(('6', '30', '00'))]
@@ -2575,10 +2587,15 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     # cct._write_to_csv(df,'codeall')
     # top_now = get_mmarket='all'arket_price_sina_dd_realTime(df, vol, type)
 #    df =  df.dropna()
+    
 
-    if len(df) > 0:
+    if isinstance(df, pd.DataFrame) and len(df) > 0:
         if 'code' in df.columns:
             df = df.set_index('code')
+        codelist = df.index.astype(str).tolist()
+
+    elif isinstance(df, list):
+        codelist = df
     else:
         if not market  in ['sz','sh']:
             market = 'all'
@@ -2593,10 +2610,12 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
 #        else:
 #            if 'buy' in df.columns:
 #                df = df[(df.buy > 0)]
-    if isinstance(df, pd.DataFrame):
-        codelist = df.index.astype(str).tolist()
-    else:
-        log.error("df isn't pd:%s" % (df))
+
+        if isinstance(df, pd.DataFrame):
+            codelist = df.index.astype(str).tolist()
+        else:
+            log.error("df isn't pd:%s" % (df))
+            
 #    h5_table = market if not cct.check_chinese(market) else filename
 #    h5 = top_hdf_api(fname=h5_fname,table=h5_table,df=None)
     h5_fname = 'tdx_now'
@@ -3017,12 +3036,12 @@ def compute_power_tdx_df(tdx_df,dd):
 
 
         # dd['op'] = int(len(LIS_TDX(tdx_df.close)[1])/float(len(tdx_df.close))*10)
-        # dd['ra'] = (vratio)
         # dd['fib'] = fibl
         dd['fibl'] = fibh
         # dd['ldate'] = idx
         dd['boll'] = dd.upperL[0]
-        dd['df2'] = dd.upperT[0]
+        # dd['df2'] = dd.upperT[0]
+        dd['ra'] = dd.upperT[0]
         dd['kdj'] = 1
         dd['macd'] = 1
         dd['rsi'] = 1
@@ -3031,7 +3050,7 @@ def compute_power_tdx_df(tdx_df,dd):
         dd['rah'] = 1
     else:
         dd['op'] = -1
-        # dd['ra'] = -1
+        dd['ra'] = -1
         dd['fib'] = -1
         dd['fibl'] = -1
         dd['ldate'] = -1
@@ -3039,7 +3058,7 @@ def compute_power_tdx_df(tdx_df,dd):
         dd['kdj'] = -1
         dd['macd'] = -1
         dd['rsi'] = -1
-        dd['df2'] = -1
+        # dd['df2'] = -1
         dd['ma'] = -1
         dd['oph'] = -1
         dd['rah'] = -1
@@ -3210,7 +3229,9 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     df['lastdu'] = ((df['high'] - df['low']) / df['close'] * 100).map(lambda x: round(x, 1))
     # df['perddu'] = ((df['high'] - df['low']) / df['low'] * 100).map(lambda x: round(x, 1))
     # dd['upperT'] = dd.close[ (dd.upper > 0) & (dd.high > dd.upper)].count()
+
     dd['upperT'] = df.close[ (df.upper > 0) & (df.high > df.upper)].count()
+
     df = df[~df.index.duplicated()]
 
     # upperL = dd.close[ (dd.upper > 0) & (dd.close >= dd.upper)]
@@ -3218,7 +3239,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # upperL = df.close[ (df.close > df.open) & (df.close > df.ene)]
     # upperL = df.close[ (df.high > df.upper) & (df.close > df.ma5d*0.99) ]
 
-    upperL = df.close[ ((df.high > df.upper) | (df.upper > df.upper.shift(1)) ) & (df.close > df.ma5d*0.99) ]
+    upperL = df.close[ ((df.high > df.upper) | (df.upper > df.upper.shift(1)) ) & (df.close >= df.ma5d*0.99) ]
 
     # import ipdb;ipdb.set_trace()
 
@@ -3233,19 +3254,31 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     else:
         top_ten = 0
 
-    # if len(upperL) > 0:
-    #     cum_maxf, posf = LIS_TDX(upperL)
-    #     if len(upperL) == len(df[df.index >= upperL.index[0]]):
-    #         if len(cum_maxf) == len(upperL):
-    #             dd['upperL'] = len(upperL) + top_ten
-    #         else:
-    #             dd['upperL'] = top_ten
-    #     else:
-    #         dd['upperL'] = len(cum_maxf) 
-    # else:
-    #     dd['upperL'] = top_ten
-
     dd['upperL'] = len(upperL) 
+
+
+    # LIS_TDX(df.truer)
+
+
+
+    # if len(df.truer) > 0:
+    #     cum_maxf, posf = LIS_TDX(df.truer)
+    #     if len(df.truer) == len(df[df.index >= upperL.index[0]]):
+    #         if len(cum_maxf) == len(upperL):
+    #             dd['upperT'] = len(upperL) + top_ten
+    #         else:
+    #             dd['upperT'] = top_ten
+    #     else:
+    #         dd['upperT'] = len(cum_maxf) 
+    # else:
+    #     dd['upperT'] = -1
+
+    # dd['upperT'] = round(df.truer.max(),1)
+
+    dd['df2'] = round(df.truer[2:].mean(),1)
+    # truer_idx = df[df.truer == df.truer.max()].index[0]
+    # dd['upperT'] = len(df[df.index <= truer_idx])
+
 
     # dd['upperL'] = df.close[df.low > df.upper].count()
     # dd['red'] = df.red[df.red > 0].count()
@@ -3341,10 +3374,16 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # ra = round((dd.close[-1]-dd.close.min())/dd.close.min()*100,1)
     # LIS_TDX_Cum(df2.ma5d[:10])
 
+
+    upper_dd = dd[(dd.upper > 0) & (dd.high > dd.upper)]
+    upper_start = upper_dd.high[0] if len(upper_dd) > 0 else dd.high.max()
     if resample == 'd' :
-        ral = round((dd.close[-1]-dd.high[:-1].max())/dd.high[:-1].max()*100,1)
+        ral = round((dd.close[-1]-upper_start)/upper_start*100,1)
+        # ral = round((dd.close[-1]-dd.high[:-1].max())/dd.high[:-1].max()*100,1)
     else:
-        ral = round((dd.close[-1]-dd.high.max())/dd.high.max()*100,1)
+        # ral = round((dd.close[-1]-dd.high.max())/dd.high.max()*100,1)
+        ral = round((dd.close[-1]-upper_start)/upper_start*100,1)
+
 
     # if ra == 0.0:
     #     ra = round((df.close[-1]-df.close.min())/dd.close.min()*100,1)
@@ -3490,8 +3529,9 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
     # ct.compute_lastdays lastdays to 9
     if df is not None and len(df) > lastdays:
         # if cct.get_trade_date_status() == 'True' and resample != 'd' :
-        if resample != 'd' and cct.get_trade_date_status() == 'True':
-            df = df[:-1]
+
+        # if resample != 'd' and cct.get_trade_date_status() == 'True':
+        #     df = df[:-1]
 
             # print "df:",df[-1:]
         if len(df) > lastdays + 1:
@@ -3511,6 +3551,8 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         df['ma5d'] = pd.Series.rolling(df.close, 5).mean().apply(lambda x: round(x,2))
         df['ma10d'] = pd.Series.rolling(df.close, 10).mean().apply(lambda x: round(x,2))
         df['ma20d'] = pd.Series.rolling(df.close, 20).mean().apply(lambda x: round(x,2))
+        # df['natr'] = ta.natr(df.high, df.low, df.close)
+        df['truer'] = ta.true_range(df.high, df.low, df.close)
 
         if len(df) > 33:
             # df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma20d]
@@ -3551,7 +3593,9 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
                 df['lasth%sd' % da] = df['high'][-da]
                 df['lastl%sd' % da] = df['low'][-da]
                 df['lastv%sd' % da] = df['vol'][-da]
+                df['truer%sd' % da] = df['truer'][-da]
 
+            df['truer%sd' % da] = df['truer'][-da]
             df['lastp%sd' % da] = df['close'][-da]
             df['lastv%sd' % da] = df['vol'][-da]
             # df['per%sd' % da] = df['close'].pct_change(da).apply(lambda x:round(x*100,1))
@@ -3569,7 +3613,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         df = compute_top10_count(df)
         df = compute_ma5d_count(df,madays='5')     #ma5dcum
         # df = compute_ma5d_count(df,madays='20')   #ma20dcum
-        df = compute_ma5d_ra(df,madays='5')   #ma5d ra
+        # df = compute_ma5d_ra(df,madays='5')   #ma5d ra
 
         df = df.reset_index()
     else:
@@ -4105,14 +4149,14 @@ def compute_jump_du_count(df,lastdays=ct.compute_lastdays,resample='d'):
 
     return codelist
 
-def compute_ma5d_ra(df,lastdays=ct.compute_lastdays,madays='5'):
-    # temp=df[df.columns[(df.columns >= 'ma%s1d'%(madays)) & (df.columns <= 'ma%s%sd'%(madays,lastdays))]][-1:]
-    temp=df.ma5d[-10:]
-    cum_min,ops=LIS_TDX_Cum(temp.sort_index(ascending=False).values)
-    #倒叙新低了几天
-    # sorted([20.57, 21.35, 22.04, 22.68, 22.92,23.1,23.2,23.4,23.5],reverse=True)
-    df['ra']=ops[-1]+1 if ops[-1] > 0 else 0
-    return df
+# def compute_ma5d_ra(df,lastdays=ct.compute_lastdays,madays='5'):
+#     # temp=df[df.columns[(df.columns >= 'ma%s1d'%(madays)) & (df.columns <= 'ma%s%sd'%(madays,lastdays))]][-1:]
+#     temp=df.ma5d[-10:]
+#     cum_min,ops=LIS_TDX_Cum(temp.sort_index(ascending=False).values)
+#     #倒叙新低了几天
+#     # sorted([20.57, 21.35, 22.04, 22.68, 22.92,23.1,23.2,23.4,23.5],reverse=True)
+#     df['ra']=ops[-1]+1 if ops[-1] > 0 else 0
+#     return df
 
 def compute_ma5d_count(df,lastdays=ct.compute_lastdays,madays='5'):
     # temp=df[df.columns[(df.columns >= 'ma%s1d'%(madays)) & (df.columns <= 'ma%s%sd'%(madays,lastdays))]][-1:]
@@ -5008,10 +5052,14 @@ if __name__ == '__main__':
     code='300346' #南大光电
     code='600499' #科达制造
     code='600438' #隆基绿能
-    code='000656' #如意集团
+    code='300798' #如意集团
     # code='002828'  
     # code='002176' #江特电机
-    code='000625'
+    code='601127'  #捷荣技术
+    # code='300826'  #测绘股份
+    # code='002251'  #步步高
+    # code='002512'  #达华智能
+
     # get_index_percd()
 
     # wri_index = cct.cct_raw_input("If append  Index 399001... data to tdx[y|n]:")
@@ -5045,7 +5093,7 @@ if __name__ == '__main__':
     df2 = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
     # print get_tdx_append_now_df_api_tofile(code)
     print("code:%s boll:%s df2:%s"%(code,df2.boll[0],df2.df2[0]))
-    # import ipdb;ipdb.set_trace()
+    import ipdb;ipdb.set_trace()
 
     resample = 'w'
     df2 = get_tdx_Exp_day_to_df(code,dl=180, end=None, newdays=0, resample=resample,lastdays=3)

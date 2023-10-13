@@ -356,7 +356,9 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
         df['fib']= 0
     # else:
 
-    co2int= ['boll', 'op', 'ratio', 'fib', 'fibl', 'df2']
+    co2int= ['boll', 'op', 'ratio', 'fib', 'fibl']
+    # co2int= ['boll', 'op', 'ratio', 'fib', 'fibl', 'df2']
+
     # co2int.extend([co for co in df.columns.tolist()
     #                if co.startswith('perc') and co.endswith('d')])
     co2int.extend(['top10', 'topR'])
@@ -628,9 +630,18 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
 
     df['ral']=(list(map(lambda x, y: round(
         (x + y) , 1) , df.percent, df.ral)))
+
     # df['ra']=(map(lambda x, y: round(
     #     (x + y) , 1) , df.percent, df.ra))
-    df['ra'] = df['ra'].apply(lambda x: int(x))
+    # df['ra'] = df['ra'].apply(lambda x: int(x))
+
+    df = df[(df.high > df.upper) | (df.lasth2d > df.upper) | (df.lasth1d > df.upper) | ((df.lasth2d > df.lasth1d) & (df.high > df.lasth2d)) ] 
+    # temp=df[df.columns[((df.columns >= 'truer1d') & (df.columns <= 'truer%sd'%(4)))]]
+    # if resample == 'd':
+    #     df = df[ (df.df2 > 0.8 )]
+    # else:
+    #     df = df[ (df.df2 > 1 )]
+
     return df
 
     # df = df[df.buy > df.cmean * ct.changeRatio]

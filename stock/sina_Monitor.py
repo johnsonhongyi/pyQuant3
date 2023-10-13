@@ -385,8 +385,14 @@ if __name__ == "__main__":
                             # top_temp = top_all[(top_all.close > top_all.ma10d) & ((top_all.close >= top_all.hmax) | (top_all.up5 > 2) | (top_all.perc3d > 3)) ]
                             #221018 振幅大于6 or 跳空 or 连涨 or upper or 大于hmax or 大于max5
                             # top_temp = top_all[ ((top_all.lastdu > 6 ) & (top_all.perc3d > 2)) | (top_all.topU > 0) | (top_all.topR > 0) | (top_all.close > top_all.hmax) | (top_all.close > top_all.max5)]
+                            
                             #20221229  当日跳空高开 or 前11日有跳空 or 当前价大于upper  
                             top_temp = top_all[  ( (( top_all.open > top_all.lasth1d ) & ( top_all.low > top_all.lasth1d)) | (top_all.topR > 0) ) | ( (top_all.close > top_all.upper) ) & (((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | ((top_all.topR > 0) & (top_all.close > top_all.hmax)) )  ]
+                            
+                            # top_temp = top_all[ ( top_all.lastp1d > top_all.ma5d ) & ( top_all.open >= top_all.low*0.998 ) & ( top_all.open <= top_all.low*1.01 ) ]
+
+
+
                             # top_temp = top_all[ ((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | (top_all.topR > 0) | (top_all.close > top_all.hmax)  ]
 
                             # & (top_all.close >= top_all.hmax) & (top_all.hmax >= top_all.max5) 
@@ -431,10 +437,12 @@ if __name__ == "__main__":
                             #221018
                             # MA5 > ene and topU > upper
                             # top_temp = top_all[(top_all.topU > 0) & (top_all.close > top_all.ene) & (top_all.ma5d > top_all.ene)  ] 
+                            
                             #20221116 
                             top_temp = top_all[ ( (( top_all.open > top_all.lasth1d ) & ( top_all.low > top_all.lasth1d)) | (top_all.topR > 0) ) | ( (top_all.close > top_all.upper) )  & (((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | ((top_all.topR > 0) & (top_all.close > top_all.hmax)) )  ]
                             
 
+                            
 
                             #221018 振幅大于6 or 跳空 or 连涨 or upper or 大于hmax or 大于max5
                             # top_temp = top_all[ ((top_all.lastdu > 6 ) & (top_all.perc3d > 2)) | (top_all.topU > 0) | (top_all.topR > 0) | (top_all.close > top_all.hmax) | (top_all.close > top_all.max5)]
