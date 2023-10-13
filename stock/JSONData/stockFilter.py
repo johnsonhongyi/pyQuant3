@@ -361,7 +361,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
 
     # co2int.extend([co for co in df.columns.tolist()
     #                if co.startswith('perc') and co.endswith('d')])
-    co2int.extend(['top10', 'topR'])
+    co2int.extend(['top10', 'topR','ra'])
     co2int= [inx for inx in co2int if inx in df.columns]
 
     for co in co2int:
