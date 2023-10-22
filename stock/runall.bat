@@ -18,7 +18,8 @@ rem )
 for %%i in ("%TDX%") do (
 set indexdx=%%~zi
 )
-if %indexdx% gtr 512000 (
+rem if %indexdx% gtr 512000 (
+if %indexdx% gtr 2048000 (
     ping -n 5 localhost > nul
 )else (
     ping -n 352 localhost > nul

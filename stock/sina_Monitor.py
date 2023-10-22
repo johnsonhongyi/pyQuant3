@@ -122,8 +122,8 @@ if __name__ == "__main__":
                   (cct.get_today_duration(du_date), duration_date)))
         log.info("duaration: %s duration_date:%s" %
                  (cct.get_today_duration(du_date), duration_date))
-    st_key_sort = '4'
-    # st_key_sort = '3 1'
+    # st_key_sort = '4'
+    st_key_sort = '3 1'
     # st_key_sort = '8'
     resample = 'd'
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(

@@ -1727,6 +1727,15 @@ def get_work_time():
             # sleep(random.randint(5, 120))
         return True
 
+def get_work_time_duration():
+    if get_trade_date_status() == 'False':
+        return False
+    now_t = get_now_time_int()
+    if  now_t < 915 or now_t > 1502:
+        return False
+    else:
+        return True
+
 
 def get_work_hdf_status():
     now_t = str(get_now_time()).replace(':', '')
@@ -3660,10 +3669,15 @@ def func_compute_percd2020( open, close,high, low,lastopen, lastclose,lasthigh, 
 
     return initc
 
-def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None):
+def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None,high4=None,max5=None,hmax=None,lastdu4=None):
     initc = 0
     percent_idx = 2
     vol_du_idx = 1.2
+    close_du = 0
+    vol_du = 0
+    top_max_up = 10
+    percent = round((close - lastclose)/lastclose*100,1)
+    
     if  low > 0 and  lastclose > 0 and lastvol > 0 and lasthigh > 1.0 and lastlow > 1.0 and lasthigh > 0 and lastlow > 0:
         percent = round((close - lastclose)/lastclose*100,1)
         # now_du = round((high - low)/low*100,1)
@@ -3674,7 +3688,7 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
 
         # if idate == "2022-11-28":
 
-        if (percent > 0 and (close_du > percent_idx or vol_du > vol_du_idx)) or percent >= percent_idx or ma5 > ma10 or close > ma5:
+        if (percent > percent_idx and low > lastlow and (close_du > percent_idx or vol_du > vol_du_idx)) or (high > lasthigh and (low > lastlow and close > ma5) ):
             initc +=1
             # if  close_du > 5:
             #     initc +=0.1
@@ -3734,7 +3748,56 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
     elif close < lastlow:
         initc -=0.1
 
-    return initc
+    if low > lastlow:
+        initc +=0.1
+        if high >lasthigh:
+            initc +=0.1
+            
+    if high > lasthigh and close > lasthigh and percent > 3 and ma5 > ma10:
+        initc +=2
+        if (open >= low or (open >lastclose and close > lasthigh)) and close >= high*0.92:
+            initc +=2
+            if lastclose >= lasthigh*0.98 or lastclose > (lasthigh + lastlow)/2:
+                initc +=2
+                if close_du > 5 and vol_du > 0.8 and vol_du < 2.2:
+                    initc +=5
+        elif low > lasthigh:
+            initc +=2
+        elif close == high:
+            initc +=1
+
+
+
+        if high4 is not None and close >= high4:
+
+            if lastdu4 is not None:
+                if lastdu4 < 1.1:
+                    initc +=10
+                elif lastdu4 > 1.1 and lastdu4 < 1.3:
+                    initc +=5
+                else:
+                    initc +=2
+
+            if max5 is not None and close > max5:
+                initc +=1
+                if hmax is not None and close > hmax:
+                    initc +=1
+                    lastMax = max(high4,max5,hmax)
+                    if close >= lastMax and lastclose < lastMax:
+                        if lastdu4 is not None:
+                            if lastdu4 < 1.1:
+                                initc +=top_max_up
+                            elif lastdu4 > 1.1 and lastdu4 < 1.3:
+                                initc +=5
+                            else:
+                                initc +=2
+                        else:
+                            initc +=5
+        if lasthigh < upper and high > upper:
+            initc +=top_max_up
+
+
+    return round(initc,1)
 
 
 def func_compute_percd2021_2022mod( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None):
