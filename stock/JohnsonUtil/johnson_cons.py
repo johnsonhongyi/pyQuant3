@@ -70,6 +70,7 @@ sleep_time = 6
 tdx_max_int = 10
 tdx_max_int_start = 30
 tdx_max_int_end = 10
+tdx_high_da = 4
 wcd_limit_day = 30
 h5_limit_time = 180
 h5_power_limit_time = 36000

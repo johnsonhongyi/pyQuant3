@@ -134,8 +134,8 @@ if __name__ == "__main__":
     #              (cct.get_today_duration(du_date), duration_date))
 
 
-    # st_key_sort = '4'
-    st_key_sort = 'x2'
+    st_key_sort = '4'
+    # st_key_sort = 'x2'
     # st_key_sort = '8'
     
     duration_date = 180

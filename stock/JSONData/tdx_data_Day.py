@@ -578,10 +578,14 @@ def get_tdx_Exp_day_to_df_AllRead_(code, start=None, end=None, dl=None, newdays=
 
     #hmax -5前max
     # df['hmax'] = df.high[-tdx_max_int:-ct.tdx_max_int_end].max()
-    df['hmax'] = df.close[:-ct.tdx_max_int_end].max()
+    # df['hmax'] = df.close[:-ct.tdx_max_int_end].max()
+
+    df['hmax'] = df.close[-ct.tdx_max_int_end:].max()
 
     # df['max5'] = df.close[-10:max_int_end].max()
-    df['max5'] = df.close[-10:-4].max()
+    df['max5'] = df.close[-10:-ct.tdx_high_da].max()
+    df['high4'] = df.high[-ct.tdx_high_da:].max()
+
     # df['lmin'] = df.low[-tdx_max_int:max_int_end].min()
     df['lmin'] = df.low[-ct.tdx_max_int_end:max_int_end].min()
     df['min5'] = df.low[-10:-4].min()
@@ -945,12 +949,23 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     # df['ma20d'] = pd.rolling_mean(df.close, 26)
     # df['ma60d'] = pd.rolling_mean(df.close, 60)
 
-    #hmax -5前max
+    #hmax -10 days max
     # df['hmax'] = df.high[-tdx_max_int:-ct.tdx_max_int_end].max()
-    df['hmax'] = df.close[:-ct.tdx_max_int_end].max()
+    # df['hmax'] = df.close[:-ct.tdx_max_int_end].max()
+    df = df.sort_index(ascending=True)
 
-    # df['max5'] = df.close[-10:max_int_end].max()
-    df['max5'] = df.close[-10:-4].max()
+    # df['max5'] = df.close[-10:-ct.tdx_high_da].max()
+    
+    if cct.get_work_time_duration():
+        df['max5'] = df.close[-10:].max()
+        df['hmax'] = df.close[-ct.tdx_max_int_end:].max()
+        df['high4'] = df.high[-ct.tdx_high_da:].max()
+    else:
+        df['max5'] = df.close[-10:max_int_end].max()
+        df['hmax'] = df.close[-ct.tdx_max_int_end:max_int_end].max()
+        df['high4'] = df.high[-ct.tdx_high_da-1:max_int_end].max()
+
+    df['lastdu4'] = round(max(df.high4[-1],df.max5[-1],df.hmax[-1],df.upper[-1])/min(df.high4[-1],df.max5[-1],df.hmax[-1],df.upper[-1]),2)
     # df['lmin'] = df.low[-tdx_max_int:max_int_end].min()
     df['lmin'] = df.low[-ct.tdx_max_int_end:max_int_end].min()
     df['min5'] = df.low[-10:-4].min()
@@ -2542,8 +2557,8 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         market_all = True
 
     elif market in tdxbkdict.keys():
-        df = tdxbk.get_tdx_gn_block_code(tdxbkdict[market])
-
+        codelist = tdxbk.get_tdx_gn_block_code(tdxbkdict[market])
+        df = sina_data.Sina().get_stock_list_data(codelist)
     else:
         if filename == 'cxg':
             df = wcd.get_wcbk_df(filter=market, market=filename,
@@ -3229,8 +3244,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     df['lastdu'] = ((df['high'] - df['low']) / df['close'] * 100).map(lambda x: round(x, 1))
     # df['perddu'] = ((df['high'] - df['low']) / df['low'] * 100).map(lambda x: round(x, 1))
     # dd['upperT'] = dd.close[ (dd.upper > 0) & (dd.high > dd.upper)].count()
-
-    dd['upperT'] = df.close[ (df.upper > 0) & (df.high > df.upper)].count()
+    dd['upperT'] = df.close[-5:][ (df.upper > 0) & (df.high > df.upper)].count()
 
     df = df[~df.index.duplicated()]
 
@@ -3403,8 +3417,8 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # print dataframe_mode_round(df.high)
     # print dataframe_mode_round(df.low)
 
-    dd['lastdu'] = df[-5:]['lastdu'].max()
-
+    # dd['lastdu'] = df[-4:]['lastdu'].max()
+    dd['lastdu'] = df[-ct.tdx_high_da:]['lastdu'].mean()
     dd['perlastp'] = df['perlastp']
     dd = compute_power_tdx_df(df, dd)
     
@@ -5056,6 +5070,8 @@ if __name__ == '__main__':
     # code='002828'  
     # code='002176' #江特电机
     code='601127'  #捷荣技术
+    code='000628'  #捷荣技术
+    # code='300290'  #捷荣技术
     # code='300826'  #测绘股份
     # code='002251'  #步步高
     # code='002512'  #达华智能
@@ -5090,14 +5106,15 @@ if __name__ == '__main__':
     # df2 = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
 
     # df2 = get_tdx_Exp_day_to_df(code,dl=60, end='20230925', newdays=0, resample='d')
-    df2 = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
+    df = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
+    # df = get_tdx_Exp_day_to_df(code,dl=60, end='2023-10-13', newdays=0, resample='d')
     # print get_tdx_append_now_df_api_tofile(code)
-    print("code:%s boll:%s df2:%s"%(code,df2.boll[0],df2.df2[0]))
+    print("code:%s boll:%s df2:%s"%(code,df.boll[0],df.df2[0]))
     import ipdb;ipdb.set_trace()
 
     resample = 'w'
-    df2 = get_tdx_Exp_day_to_df(code,dl=180, end=None, newdays=0, resample=resample,lastdays=3)
-    print("code:%s boll:%s df2:%s"%(code,df2.boll[0],df2.df2[0]))
+    df = get_tdx_Exp_day_to_df(code,dl=180, end=None, newdays=0, resample=resample,lastdays=3)
+    print("code:%s boll:%s df2:%s"%(code,df.boll[0],df.df2[0]))
     # import ipdb;ipdb.set_trace()
 
     # df2 = get_tdx_Exp_day_to_df(code,dl=134, end=None, newdays=0, resample=resample,lastdays=1)
@@ -5196,7 +5213,7 @@ if __name__ == '__main__':
     # code = '000916'
     # code = '600619'
 
-    df = get_tdx_exp_all_LastDF_DL([code],  dt=60, ptype='low', filter='y', power=ct.lastPower, resample=resample)
+    df = get_tdx_exp_all_LastDF_DL([code],end='2023-10-13',  dt=60, ptype='low', filter='y', power=ct.lastPower, resample=resample)
 
     # df = get_tdx_exp_low_or_high_power(code, dl=30, newdays=0, resample='d')
     # df = get_tdx_Exp_day_to_df(code, dl=60, newdays=0, resample='d')
