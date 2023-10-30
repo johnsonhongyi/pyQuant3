@@ -31,11 +31,11 @@ def multindex_iloc(df, index):
     label = df.index.levels[0][index]
     return df.iloc[df.index.get_loc(label)]
 
-def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,ma_250_h=1.11,resample ='d'):
+def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,ma_250_h=1.11,resample ='d',rewrite=False):
     # df = tdd.search_Tdx_multi_data_duration('tdx_all_df_300', 'all_300', df=None,code_l=code_list, start=start, end=None, freq=None, col=None, index='date')
     block_path = tdd.get_tdx_dir_blocknew() + '060.blk'
 
-    if not app and cct.get_file_size(block_path) > 100 and cct.creation_date_duration(block_path) == 0:
+    if not rewrite and not app and cct.get_file_size(block_path) > 100 and cct.creation_date_duration(block_path) == 0:
         print("It's Today Update")
         return True
     code_list = sina_data.Sina().market('all').index.tolist()
@@ -278,6 +278,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     # '''
     dt_low = None
     df_idx = None
+
     if single:
         dfs = groupd.tail(1)
         print("dfs tail1")
@@ -385,11 +386,22 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                 # df = df[(df.date >= cct.last_tddate(1))]
                 df = df[(df.date >= df.date.max())]
                 # import ipdb;ipdb.set_trace()
+                top_temp = tdd.get_sina_datadf_cnamedf( df.index.tolist(),df) 
+
                 print(("df:%s %s df_idx:%s"%(len(df),df.index[:5],len(df_idx))))
+                top_temp.date = top_temp.date.apply(lambda x: str(x)[:10])
+
+                top_temp['percent'] = ((top_temp['ma5'] - top_temp['ma10']) / top_temp['ma10'] * 100).map(lambda x: round(x, 2))
+                top_temp = top_temp.sort_values(by='percent',ascending=1)
+
+                if app:
+                    table, widths=cct.format_for_print(top_temp.loc[:,['percent' ,'close','amount','ma5' , 'ma10','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
+                    print(table)
 
                 if df_idx is not None and len(df) > 0 and len(df_idx) > 0:
                     idx_set_=[x for x in   df_idx.index if x in df.index]
                     df = df.loc[idx_set_,:].dropna()
+
                 print(("Main Down dd :%s MainUP df:%s couts std:%0.1f "%(len(dd),len(df),df.couts.std())))
                 # print df.date.mode()[0]
                 df = df.sort_values(by='couts',ascending=1)
@@ -406,6 +418,8 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                 codew = df.index.tolist()
 
             top_temp = tdd.get_sina_datadf_cnamedf(codew,df) 
+            top_temp['percent'] = ((top_temp['ma5'] - top_temp['ma10']) / top_temp['ma10'] * 100).map(lambda x: round(x, 2))
+            top_temp = top_temp.sort_values(by='percent',ascending=1)
             top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]  
             codew = top_temp.index.tolist()
 
@@ -440,7 +454,12 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 if __name__ == '__main__':
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=250) ???
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=120) ???
-    get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w')
+
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=250,ma_250_l=1.02,ma_250_h=1.2,resample='w')
     # get_roll_mean_all(single=True,tdx=True,app=True)
     # get_roll_mean_all(single=True,tdx=True,app=False)
+
+
+    get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w')
+
+    # get_roll_mean_all(single=False, tdx=True, app=False,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w',rewrite=True)

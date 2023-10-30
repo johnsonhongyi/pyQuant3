@@ -489,7 +489,8 @@ class Sina:
     #     return self.format_response_data()
 
     def combine_lastbuy(self,h5):
-        if not self.cname and cct.get_now_time_int() > 925:
+        # if not self.cname and cct.get_now_time_int() > 925:
+        if not self.cname and cct.get_work_time() and cct.get_now_time_int() > 925:
             h5_fname = 'sina_MultiIndex_data'
             h5_table = 'all' + '_' + str(ct.sina_limit_time)
             fname = 'sina_logtime'
@@ -569,12 +570,14 @@ class Sina:
     def get_stock_list_data(self, ulist, index=False):
 
         #        self.index_status = index
+        # ulist1 = [stock_code if stock_code.startswith(('0','3','5', '6', '9')) for stock_code in ulist]  # SyntaxError: invalid syntax
+        ulist = [stock_code  for stock_code in ulist if stock_code.startswith(('0','3','5', '6', '9'))]
         if index:
             ulist = self.set_stock_codes_index_init(ulist, index)
             h5 = None
         else:
             h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=ulist, index=index)
-            
+
         if h5 is not None and len(h5) >= len(ulist):
             log.info("hdf5 data:%s" % (len(h5)))
             h5 = self.combine_lastbuy(h5)

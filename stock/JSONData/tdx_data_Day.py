@@ -960,12 +960,17 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         df['max5'] = df.close[-10:].max()
         df['hmax'] = df.close[-ct.tdx_max_int_end:].max()
         df['high4'] = df.high[-ct.tdx_high_da:].max()
+        df['low4'] = df.low[-ct.tdx_high_da:].min()
+
     else:
         df['max5'] = df.close[-10:max_int_end].max()
         df['hmax'] = df.close[-ct.tdx_max_int_end:max_int_end].max()
         df['high4'] = df.high[-ct.tdx_high_da-1:max_int_end].max()
+        df['low4'] = df.low[-ct.tdx_high_da-1:max_int_end].min()
 
-    df['lastdu4'] = round(max(df.high4[-1],df.max5[-1],df.hmax[-1],df.upper[-1])/min(df.high4[-1],df.max5[-1],df.hmax[-1],df.upper[-1]),2)
+
+    # df['lastdu4'] = round(max(df.high4[-1],df.max5[-1],df.hmax[-1],df.upper[-1])/(df['low4'][-1]),2)
+    df['lastdu4'] = round((df.high4[-1])/(df['low4'][-1]),2)
     # df['lmin'] = df.low[-tdx_max_int:max_int_end].min()
     df['lmin'] = df.low[-ct.tdx_max_int_end:max_int_end].min()
     df['min5'] = df.low[-10:-4].min()
@@ -5098,7 +5103,7 @@ if __name__ == '__main__':
     # code='300216'
     # code = '002906'
     # code = '603486'
-    # code = '301073'
+    code = '603178'
     # df2 = get_tdx_Exp_day_to_df(code,dl=10, end='20221116', newdays=0, resample='d')
     # df = get_tdx_Exp_day_to_df(code, dl=1)
     # 

@@ -118,7 +118,8 @@ if __name__ == "__main__":
     set_duration_console(du_date)
 
 
-    search250.get_roll_mean_all(single=False, tdx=True, app=False)
+    # search250.get_roll_mean_all(single=False, tdx=True, app=False)
+    search250.get_roll_mean_all(single=False, tdx=True, app=False,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w')
 
     # all_diffpath = tdd.get_tdx_dir_blocknew() + '062.blk'
     parser = cct.MoniterArgmain()
@@ -136,8 +137,9 @@ if __name__ == "__main__":
                 
             # top_now = tdd.getSinaAlldf(market='060', vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='次新股',filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
-            market_blk = 'rzrq'
-            # market_blk = '060'
+            
+            # market_blk = 'rzrq'
+            market_blk = '060'
             # top_now = tdd.getSinaAlldf(market= market_blk , vol=ct.json_countVol, vtype=ct.json_countType,trend=True)
             # top_now = tdd.getSinaAlldf(market='次新股,060', filename='cxg' , vol=ct.json_countVol, vtype=ct.json_countType,trend=True)
             top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType,trend=False)
