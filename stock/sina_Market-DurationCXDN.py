@@ -16,6 +16,8 @@ from JSONData import LineHistogram as lhg
 from JohnsonUtil import LoggerFactory as LoggerFactory
 from JohnsonUtil import commonTips as cct
 
+import search_Tdx_multi_data_duration250 as search250
+
 # from logbook import Logger,StreamHandler,SyslogHandler
 # from logbook import StderrHandler
 
@@ -140,6 +142,9 @@ if __name__ == "__main__":
     # st_key_sort = '2 2'
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort)
     st = None
+
+    search250.get_roll_mean_all(single=False, tdx=True, app=False,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w')
+
     while 1:
         try:
             '''
@@ -163,7 +168,8 @@ if __name__ == "__main__":
             # top_now = tdd.getSinaAlldf(market=market_blk,filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
            
 
-            market_blk = '近期新高'
+            # market_blk = '近期新高'
+            market_blk = '060'
 
             top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
             
@@ -567,7 +573,7 @@ if __name__ == "__main__":
                 print("exit:%s" % (st))
                 sys.exit(0)
             else:
-                print("input error:%s" % (st))
+                print("input error:%s isdigit:%s" % (st,st.split()[0].isdigit()))
         except (IOError, EOFError, Exception) as e:
             print("Error", e)
             import traceback

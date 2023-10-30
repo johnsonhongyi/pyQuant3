@@ -52,9 +52,9 @@ start cmd /k python sina_Monitor-Market-LH.py
 rem ping -n 20 localhost > nul 
 start cmd /k python sina_Market-DurationDn.py
 ping -n 20 localhost > nul 
-start cmd /k python LinePower.py
-rem cd dataBarFeed\
-rem start cmd /k python chantdxpower.py
+rem start cmd /k python LinePower.py
+cd dataBarFeed\
+start cmd /k python chantdxpower.py
 ping -n 20 localhost > nul 
 cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\"
 python macRun.py

@@ -2681,6 +2681,7 @@ def write_to_blkdfcf(codel,conf_ini=dfcf_path):
         # print('truer:',truer)
         truer_n = truer
         idx = 0
+        
         if isinstance(codel, list):
             for co in codel:
                 if code_to_symbol_dfcf(co) not in truer:

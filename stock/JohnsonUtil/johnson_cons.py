@@ -187,10 +187,10 @@ Duration_percent_vol_key = [0,0, 0 , 0, 0, 1, 0,  1]
 # Duration_percent_per_ra=['percent','ra','dff','op','fib','fibl','ratio','volume','couts']
 # Duration_percent_per_ra_key=[0,0,0,0,1,1,1,1,1]
 
-Duration_percent_df2dff = ['fibl', 'dff', 'percent',
+Duration_percent_df2dff = ['fibl','per3d', 'dff', 'percent',
                            'topR', 'fib',  'ra', 'volume', 'couts']
                            # 'op', 'fib', 'fibl', 'ra', 'ratio', 'volume', 'couts']
-Duration_percent_df2dff_key = [0, 0, 0, 0, 1,  0,  1, 1]
+Duration_percent_df2dff_key = [0, 0, 0, 0, 0, 1,  0,  1, 1]
 
 # Duration_percent_opboll = ['op', 'boll', 'percent',
 #                          'dff', 'fib', 'fibl', 'ratio', 'volume', 'couts']
@@ -721,6 +721,7 @@ def negate_boolean_list(negate_list, idx=1, position=False):
 
 
 def get_Duration_format_Values(duration_format, column=None, replace='perc3d',dest='b1_v'):
+
     if column is not None and not isinstance(column, list) and column not in duration_format:
         # print('column:%s not in Values:%s'%(column,duration_format))
         return duration_format
@@ -736,6 +737,23 @@ def get_Duration_format_Values(duration_format, column=None, replace='perc3d',de
                 column = [column]
         if 'percent' in column:
             column.remove('percent')
+
+        # add mod per3d to per2d...
+        
+        # m_value = cct.GlobalValues().getkey('market_value')
+        # m_key = cct.GlobalValues().getkey('market_key')
+
+        # if m_value is not None and m_value > '1' and m_value <= '9':
+
+        #     per_idx = [column.index(x) for x in column if x.find('per') > -1 and x.find('perc') < 0 ]
+        #     if len(per_idx) == 1:
+        #         rep_v = 'per%sd'%(int(m_value))
+
+        #         column.remove(column[per_idx[0]])
+        #         column.append(rep_v)
+
+
+
 #        idx_list = eval(market_sort_value)[:]
 #        idx_key = [ idx_list.index(x) for x in perd_l if x in idx_list]
         idx_key = [column.index(x) for x in column if x.find('per') > -1]
@@ -748,9 +766,14 @@ def get_Duration_format_Values(duration_format, column=None, replace='perc3d',de
                 if (co != 0 or column[co] != replace) and (replace in column or column[co] not in duration_format):
                     if len(column) > 1 and column[co].find('per') > -1:
                         if column[co].find('perc') > -1:
+                          #判断替换
                             replace = 'perc3d'
                         else:
+                          #判断替换
+  
                             replace = 'per1d'
+
+
                     count = duration_format.count(replace)
                     idx = 1
                     for v in duration_format:
@@ -879,6 +902,22 @@ def get_market_sort_value_key(st, top_all=None, perd_d=3):
                 else:
                     market_sort_value_key = negate_boolean_list(market_sort_value_key)
             market_sort_value = eval(market_sort_name)
+
+            ##mod 6 2 per2d 
+            m_value = cct.GlobalValues().getkey('market_value')
+            m_key = cct.GlobalValues().getkey('market_key')
+
+            if m_key in ['6'] and m_value > '1' and m_value <= '9':
+                column = market_sort_value[:2]
+                per_idx = [column.index(x) for x in column if x.find('per') > -1 and x.find('perc') < 0 ]
+                if len(per_idx) == 1:
+
+                    rep_v = 'per%sd'%(int(float(m_value)))
+
+                    market_sort_value.remove(column[per_idx[0]])
+                    market_sort_value.insert(per_idx[0],rep_v)
+
+
             # if st_count > 1 and st_l[1].isDigit():
             #     # idx_perd = st_l[1]
             #     market_sort_value = eval(market_sort_name)
@@ -914,7 +953,11 @@ def get_market_sort_value_key(st, top_all=None, perd_d=3):
                     market_sort_value_key = negate_boolean_list(market_sort_value_key, idx=1, position=True)
                 else:
                     market_sort_value_key = negate_boolean_list(market_sort_value_key)
+
+
             market_sort_value = eval(market_sort_name)
+
+
         cct.GlobalValues().setkey('market_sort_value',market_sort_value[:1][0])
     return market_sort_value, market_sort_value_key
 
