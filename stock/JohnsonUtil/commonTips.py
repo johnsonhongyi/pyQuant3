@@ -664,7 +664,8 @@ terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440'
                         'singleAnalyseUtil.py': '759, 0,920,360',
                         'LinePower.py': '16, 186,800,420',
                         'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,
-                        'instock_Monitor.py':'62, 86,1360,440',}
+                        'instock_Monitor.py':'62, 86,1360,440',
+                        'chantdxpower.py':'86, 128, 1200, 480',}
 
 
 
@@ -1710,13 +1711,14 @@ def get_now_time_int():
     return int(now_t)
 
 
-def get_work_time():
+def get_work_time(now_t = None):
     # return True
     # now_t = str(get_now_time()).replace(':', '')
     # now_t = int(now_t)
     if get_trade_date_status() == 'False':
         return False
-    now_t = get_now_time_int()
+    if now_t == None:
+        now_t = get_now_time_int()
     if not get_work_day_status():
         return False
     if (now_t > 1132 and now_t < 1300) or now_t < 915 or now_t > 1502:
@@ -1761,7 +1763,7 @@ def get_work_duration():
 
 
 def get_work_time_ratio():
-    initx = 6.5
+    initx = 3.5
     stepx = 0.5
     init = 0
     initAll = 10
@@ -2441,7 +2443,7 @@ def get_config_value(fname, classtype, currvalue, limitvalue=1, xtype='limit', r
         # log.info("file ok:%s"%conf_ini)
         config = ConfigObj(conf_ini, encoding='UTF8')
 
-        if classtype in list(config.keys()):
+        if classtype in list(config.keys()) and xtype in config[classtype].keys():
             if int(float(config[classtype][xtype])) > currvalue:
                 ratio = float(config[classtype][xtype]) / limitvalue
                 if ratio < 1.2:
@@ -2704,7 +2706,7 @@ def write_to_blkdfcf(codel,conf_ini=dfcf_path):
         # print('instock:',cf.get("\\SelfSelect", "instock"))
         cf.write(open(conf_ini,"w",encoding='UTF-16'))
 
-def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None):
+def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None,dfcf=True):
     if keep_last is None:
         keep_last = ct.keep_lastnum
     # index_list = ['1999999','47#IFL0',  '0159915', '27#HSI']
@@ -2848,13 +2850,13 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
         writeBlocknew(p_name, data, append)
         if doubleFile:
             writeBlocknew(blockNew, data, append=True)
-            writeBlocknew(blockNewStart, data, append=True)
+            # writeBlocknew(blockNewStart, data, append=True)
         # print "write to :%s:%s"%(p_name,len(data))
     elif p_name.find('064.blk') > 0:
         writeBlocknew(p_name, data, append)
         if doubleFile:
             writeBlocknew(blockNew, data, append=True,keep_last=12)
-            writeBlocknew(blockNewStart, data, append=True)
+            # writeBlocknew(blockNewStart, data, append=True)
         # print "write to append:%s :%s :%s"%(append,p_name,len(data))
     elif p_name.find('068.blk') > 0 or p_name.find('069.blk') > 0:
 
@@ -2865,10 +2867,10 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
         writeBlocknew(p_name, data, append)
         if doubleFile:
             writeBlocknew(blockNew, data,append=True)
-            # writeBlocknew(blockNewStart, data[:ct.writeCount - 1])
-            writeBlocknew(blockNewStart, data, append=True)
+            # writeBlocknew(blockNewStart, data, append=True)
         # print "write to append:%s :%s :%s"%(append,p_name,len(data))
-    write_to_blkdfcf(data)
+    if dfcf:
+        write_to_blkdfcf(data)
 
 def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=None):
     if keep_last is None:
@@ -3769,31 +3771,46 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
 
 
 
-        if high4 is not None and close >= high4:
+        if high4 is not None and (close >= high4 or (get_work_time_duration() and high >high4)):
 
             if lastdu4 is not None:
-                if lastdu4 < 1.1:
+                if lastdu4 <= 1.05:
                     initc +=10
-                elif lastdu4 > 1.1 and lastdu4 < 1.3:
+                elif lastdu4 > 1.05 and lastdu4 <= 1.1:
+                    initc +=8
+                elif lastdu4 > 1.1 and lastdu4 <= 1.2:
                     initc +=5
+                elif lastdu4 > 1.2 and lastdu4 <= 1.3:
+                    initc +=3
                 else:
                     initc +=2
 
             if max5 is not None and close > max5:
-                initc +=1
+                initc +=3
                 if hmax is not None and close > hmax:
-                    initc +=1
+                    initc +=3
                     lastMax = max(high4,max5,hmax)
-                    if close >= lastMax and lastclose < lastMax:
+                    if close >= lastMax and lastclose < lastMax or (not get_work_time_duration() and high >=lastMax):
                         if lastdu4 is not None:
-                            if lastdu4 < 1.1:
-                                initc +=top_max_up
-                            elif lastdu4 > 1.1 and lastdu4 < 1.3:
+                            if lastdu4 <= 1.05:
+                                initc +=10
+                            elif lastdu4 > 1.05 and lastdu4 <= 1.1:
+                                initc +=8
+                            elif lastdu4 > 1.1 and lastdu4 <= 1.2:
                                 initc +=5
+                            elif lastdu4 > 1.2 and lastdu4 <= 1.3:
+                                initc +=3
                             else:
                                 initc +=2
                         else:
-                            initc +=5
+                            initc +=1
+                    else:
+                        initc +=3
+                    if close == high:
+                        initc +=2
+                    elif close >=high*0.99:
+                        initc +=2
+
         if lasthigh < upper and high > upper:
             initc +=top_max_up
 

@@ -579,8 +579,8 @@ def get_tdx_Exp_day_to_df_AllRead_(code, start=None, end=None, dl=None, newdays=
     #hmax -5前max
     # df['hmax'] = df.high[-tdx_max_int:-ct.tdx_max_int_end].max()
     # df['hmax'] = df.close[:-ct.tdx_max_int_end].max()
-
-    df['hmax'] = df.close[-ct.tdx_max_int_end:].max()
+    
+    df['hmax'] = df.close[-ct.tdx_max_int_end:-10].max()
 
     # df['max5'] = df.close[-10:max_int_end].max()
     df['max5'] = df.close[-10:-ct.tdx_high_da].max()
@@ -958,13 +958,14 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     
     if cct.get_work_time_duration():
         df['max5'] = df.close[-10:].max()
-        df['hmax'] = df.close[-ct.tdx_max_int_end:].max()
+        df['hmax'] = df.close[-ct.tdx_max_int_end:-10].max()
         df['high4'] = df.high[-ct.tdx_high_da:].max()
         df['low4'] = df.low[-ct.tdx_high_da:].min()
 
     else:
         df['max5'] = df.close[-10:max_int_end].max()
-        df['hmax'] = df.close[-ct.tdx_max_int_end:max_int_end].max()
+        # df['hmax'] = df.close[-ct.tdx_max_int_end:max_int_end].max()
+        df['hmax'] = df.close[-ct.tdx_max_int_end:-10].max()
         df['high4'] = df.high[-ct.tdx_high_da-1:max_int_end].max()
         df['low4'] = df.low[-ct.tdx_high_da-1:max_int_end].min()
 
@@ -2241,7 +2242,8 @@ def Write_market_all_day_mp(market='all', rewrite=False):
     sh_index = '000002'
     dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
     # log.error("Write_market_all_day_mp:%s"%(dd))
-
+    # #fix sleep not update sina.all
+    # df = sina_data.Sina().sina.all
     duration_code=check_tdx_Exp_day_duration(market)
     # import ipdb;ipdb.set_trace()
 
@@ -3606,7 +3608,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
             # df['lasth%sd' % da] = df['high'].shift(da-1)
             # df['lastl%sd' % da] = df['low'].shift(da-1)
             # df['lastv%sd' % da] = df['vol'].shift(da-1)
-            if da <=2:
+            if da <=4:
                 # df['lastp%sd' % da] = df['close'][-da]
                 df['lasto%sd' % da] = df['open'][-da]
                 df['lasth%sd' % da] = df['high'][-da]
@@ -3803,7 +3805,12 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
                     lowdate = dz[dz.close == lowp].index.values[-1]
                     # log.debug("low:%s" % lowdate)
 
-                lastvol = dz.vol[:lvoldays].min()
+
+                volmean = dz.vol[:lvoldays].tolist()
+                volmean.remove(min(volmean))    
+                volmean.remove(max(volmean))    
+                # lastvol = dz.vol[:lvoldays].min()
+                lastvol = round(sum(volmean) / len(volmean),1)
 
                 # log.debug("date:%s %s:%s" % (lowdate, ptype, lowp))
 
@@ -3831,6 +3838,7 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
                 # dd['vol'] = 
 
                 dd['lowvol'] = dtemp.vol.values[0]
+                #min vol date
                 dd['last6vol'] = lastvol
 
                 # if 'ma5d' in df.columns and 'ma10d' in df.columns:
@@ -4352,7 +4360,9 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
 
     # log.info('Top-merge_now:%s' % (top_all[:1]))
     top_all = top_all[top_all['llow'] > 0]
-
+    #20231110 add today topR
+    top_all['topR'] =  list(map(lambda x, y, z: (1.1 if y > z else x),top_all.topR, top_all.low, top_all.lasth1d))
+    
     if 'llastp' not in top_all.columns:
         log.error("why not llastp in topall:%s" % (top_all.columns))
 

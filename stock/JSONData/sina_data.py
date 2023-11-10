@@ -127,7 +127,7 @@ class Sina:
         pd.options.mode.chained_assignment = None
         self.cname = False
         self.encoding = 'gbk'
-
+        cct.get_config_value_ramfile(self.hdf_name,currvalue=time.time(),xtype='time')
 
         self.sinaheader = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
@@ -205,6 +205,10 @@ class Sina:
         # print "stocks:",len(self.stock_codes)
         self.stock_codes = [elem for elem in self.stock_codes if elem.startswith(('6', '30', '00'))]
         time_s = time.time()
+
+        logtime = cct.get_config_value_ramfile(self.hdf_name,currvalue=time.time(),xtype='time',update=True)
+        otime = int(time.strftime("%H:%M:%S",time.localtime(logtime))[:6].replace(':',''))
+
         h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=self.sina_limit_time)
         log.info("h5a stocksTime:%0.2f" % (time.time() - time_s))
         if h5 is not None and len(h5) > 0:
@@ -215,7 +219,8 @@ class Sina:
                 sina_limit_time = ct.sina_limit_time
                 sina_time_status = (cct.get_work_day_status() and 915 < cct.get_now_time_int() < 926)
 #                return_hdf_status = not cct.get_work_day_status() or (cct.get_work_day_status() and (cct.get_work_time() and l_time < sina_limit_time))
-                return_hdf_status = not cct.get_work_time() or (cct.get_work_time() and l_time < sina_limit_time)
+                # return_hdf_status = not cct.get_work_time() or (cct.get_work_time() and l_time < sina_limit_time)
+                return_hdf_status = (not cct.get_work_time()  and not cct.get_work_time(otime)) or (cct.get_work_time() and l_time < sina_limit_time)
                 log.info("915:%s sina_time:%0.2f limit:%s" % (sina_time_status, l_time, sina_limit_time))
 
                 h5 = self.combine_lastbuy(h5)
@@ -759,8 +764,10 @@ class Sina:
         h5_table = 'all' + '_' + str(ct.sina_limit_time)
         fname = 'sina_logtime'
         logtime = cct.get_config_value_ramfile(fname)
-
-        if cct.get_now_time_int() > 925 and not index and len(df) > 3000 and cct.get_work_time():
+        otime = int(time.strftime("%H:%M:%S",time.localtime(logtime))[:6].replace(':',''))
+        
+        # if cct.get_now_time_int() > 925 and not index and len(df) > 3000 and ( 924 < otime < 1500 or cct.get_work_time()):
+        if cct.get_now_time_int() > 925 and not index and len(df) > 3000 and ( cct.get_work_time(otime) or cct.get_work_time()):
             time_s = time.time()
             df.index = df.index.astype(str)
             df.ticktime = df.ticktime.astype(str)
@@ -813,7 +820,7 @@ class Sina:
             log.info("hdf5 class all :%s  time:%0.2f" % (len(df), time.time() - time_s))
 
 
-        if 'nlow' not in df.columns or 'nhigh' not in df.columns or (cct.get_work_time() and 924 < cct.get_now_time_int() <= 1501):
+        if 'nlow' not in df.columns or 'nhigh' not in df.columns or (cct.get_work_time() and 924 < cct.get_now_time_int() <= 1501) or (cct.get_work_time(otime)):
             # if 'nlow' not in df.columns or 'nhigh' not in df.columns or cct.get_work_time():
             h5 = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False)
 
