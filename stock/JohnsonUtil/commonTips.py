@@ -2472,7 +2472,7 @@ def get_config_value(fname, classtype, currvalue, limitvalue=1, xtype='limit', r
     return False
 
 
-def get_config_value_ramfile(fname, currvalue=0, xtype='time', update=False,cfgfile='h5config.txt'):
+def get_config_value_ramfile(fname, currvalue=0, xtype='time', update=False,cfgfile='h5config.txt',readonly=False):
     classtype = fname
     conf_ini = get_ramdisk_dir() + os.path.sep+ cfgfile
     if xtype == 'trade_date':
@@ -2516,10 +2516,28 @@ def get_config_value_ramfile(fname, currvalue=0, xtype='time', update=False,cfgf
         return config[classtype][xtype]    
 
     else:
+
         currvalue = int(currvalue)
         if os.path.exists(conf_ini):
             config = ConfigObj(conf_ini, encoding='UTF8')
-            if not update:
+
+            if not classtype in list(config.keys()):
+                if readonly:
+                    config[classtype] = {}
+                    config[classtype][xtype] = currvalue
+                    config.write()
+
+
+            elif readonly:
+                if xtype in config[classtype].keys() and xtype == 'time':
+                    save_value = int(config[classtype][xtype])
+                else:
+                    save_value = int(currvalue)
+                    config[classtype][xtype] = save_value
+                    config.write()
+                return int(save_value)
+
+            elif not update:
                 if classtype in list(config.keys()):
                     if not xtype in list(config[classtype].keys()):
                         config[classtype][xtype] = currvalue
@@ -2537,6 +2555,13 @@ def get_config_value_ramfile(fname, currvalue=0, xtype='time', update=False,cfgf
                     config[classtype] = {}
                     config[classtype][xtype] = 0
                     config.write()
+            elif not xtype in config[classtype].keys():
+                if update:
+                    config[classtype][xtype] = currvalue
+                    if xtype == 'time':
+                        config[classtype]['otime'] = time.strftime("%H:%M:%S",time.localtime(currvalue))
+                    config.write()
+
             else:
                 if xtype == 'time':
                     save_value = float(config[classtype][xtype])
