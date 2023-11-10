@@ -127,7 +127,7 @@ class Sina:
         pd.options.mode.chained_assignment = None
         self.cname = False
         self.encoding = 'gbk'
-        cct.get_config_value_ramfile(self.hdf_name,currvalue=time.time(),xtype='time')
+        # cct.get_config_value_ramfile(self.hdf_name,currvalue=time.time(),xtype='time')
 
         self.sinaheader = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
@@ -206,7 +206,8 @@ class Sina:
         self.stock_codes = [elem for elem in self.stock_codes if elem.startswith(('6', '30', '00'))]
         time_s = time.time()
 
-        logtime = cct.get_config_value_ramfile(self.hdf_name,currvalue=time.time(),xtype='time',update=True)
+        logtime = cct.get_config_value_ramfile(self.hdf_name,xtype='time',readonly=True)
+
         otime = int(time.strftime("%H:%M:%S",time.localtime(logtime))[:6].replace(':',''))
 
         h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=self.sina_limit_time)
@@ -878,6 +879,7 @@ class Sina:
 
 
         h5a.write_hdf_db(self.hdf_name, dd, self.table, index=index)
+        logtime = cct.get_config_value_ramfile(self.hdf_name,currvalue=time.time(),xtype='time',update=True)
         log.info("wr end:%0.2f" % (time.time() - self.start_t))
         # print df['lastbuy','close'][-5:].to_frame().T
         # print "logtime:",time.strftime("%H:%M:%S",time.localtime(logtime)),"time:",time.time() - float(logtime)
