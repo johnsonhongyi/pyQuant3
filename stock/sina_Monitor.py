@@ -231,8 +231,12 @@ if __name__ == "__main__":
                     log.debug("Second:vol/vol/:%s" % radio_t)
                     # top_dif['volume'] = top_dif['volume'].apply(lambda x: round(x / radio_t, 1))
                     log.debug("top_diff:vol")
-                    top_all['volume'] = (
-                        list(map(lambda x, y: round(x / y / radio_t, 1), top_all['volume'].values, top_all.lvol.values)))
+
+                    # top_all['lvolume'] = top_all['volume']
+                    #nvol -> volume
+                    top_all['volume'] = ( 
+                        list(map(lambda x, y: round(x / y / radio_t, 1), top_all['volume'].values, top_all.last6vol.values)))
+                        # list(map(lambda x, y: round(x / y / radio_t, 1), top_all['volume'].values, top_all.lvol.values)))
 
                     # if cct.get_now_time_int() > 915:
                     # top_all = top_all[top_all.open > top_all.lasth1d]
@@ -306,7 +310,7 @@ if __name__ == "__main__":
                 if st_key_sort.split()[0] not in st_key_sort_status:
                     top_temp=top_all.copy()
 
-                elif cct.get_now_time_int() > 830 and cct.get_now_time_int() <= 935:
+                elif cct.get_now_time_int() > 830 and cct.get_now_time_int() <= 950:
                     #lastl1d
                     # top_temp = top_all[(top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.close > top_all.lastp1d)]
                     #lastp1d TopR 1
@@ -314,7 +318,10 @@ if __name__ == "__main__":
                     
                     # 
                     # top_temp = top_all[(top_all.close / top_all.hmax > 1.1) & (top_all.close / top_all.hmax < 1.5)] 
-                    top_temp = top_all[ (top_all.lastdu > 6 ) & (top_all.low > top_all.lasth1d) & (top_all.close > top_all.lastp1d) & (top_all.close >= top_all.hmax)]
+                    if cct.get_now_time_int() > 920 and cct.get_now_time_int() <= 950:
+                        top_temp = top_all[ (top_all.topR == 1.1)]
+                    else:
+                        top_temp = top_all[ (top_all.lastdu > 6 ) & (top_all.low > top_all.lasth1d) & (top_all.close > top_all.lastp1d) & (top_all.close >= top_all.hmax)]
                     # top_now.loc['002761'].    
                     # top_temp =  top_all[( ((top_all.top10 >0) | (top_all.boll >0)) & (top_all.lastp1d > top_all.ma5d) & (top_all.close > top_all.lastp1d))]
                     # top_temp =  top_all[((top_all.lastp1d < top_all.ma5d) & (top_all.close > top_all.lastp1d))]
@@ -389,6 +396,11 @@ if __name__ == "__main__":
                             #20221229  当日跳空高开 or 前11日有跳空 or 当前价大于upper  
                             top_temp = top_all[  ( (( top_all.open > top_all.lasth1d ) & ( top_all.low > top_all.lasth1d)) | (top_all.topR > 0) ) | ( (top_all.close > top_all.upper) ) & (((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | ((top_all.topR > 0) & (top_all.close > top_all.hmax)) )  ]
                             
+                            
+                            #20231103  低于五日线,上传5日线,大于3
+                            # top_temp = top_all[ (top_all.boll > 0) & ( top_all.ra > 0)  & ( top_all.percent > 1) & ((( top_all.lasth1d < top_all.ma5d ) & ( top_all.close > top_all.ma5d)) | (( top_all.lastl1d >= top_all.ma20d ) & ( top_all.lastl1d <= top_all.ma20d * 1.01 )) & (top_all.close > top_all.ma20d) )]
+
+
                             # top_temp = top_all[ ( top_all.lastp1d > top_all.ma5d ) & ( top_all.open >= top_all.low*0.998 ) & ( top_all.open <= top_all.low*1.01 ) ]
 
 
@@ -441,6 +453,8 @@ if __name__ == "__main__":
                             #20221116 
                             top_temp = top_all[ ( (( top_all.open > top_all.lasth1d ) & ( top_all.low > top_all.lasth1d)) | (top_all.topR > 0) ) | ( (top_all.close > top_all.upper) )  & (((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | ((top_all.topR > 0) & (top_all.close > top_all.hmax)) )  ]
                             
+                            #20231103  低于五日线,上传5日线,大于3
+                            # top_temp = top_all[ (top_all.boll > 0) & ( top_all.ra > 0)  & ( top_all.percent > 1) & ((( top_all.lasth1d < top_all.ma5d ) & ( top_all.close > top_all.ma5d)) | (( top_all.lastl1d >= top_all.ma20d ) & ( top_all.lastl1d <= top_all.ma20d * 1.01 )) & (top_all.close > top_all.ma20d) )]
 
                             
 
@@ -454,7 +468,6 @@ if __name__ == "__main__":
                             top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
 
                             # ???ne??죬???Ϲ죬һ????գ?һ???ͣ
-                        # top_temp = top_all[  (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.low >= top_all.nlow) & ((top_all.open >= top_all.nlow *0.998) & (top_all.open <= top_all.nlow*1.002)) ]
                         # top_temp = top_all[ (top_all.volume >= 1.2 ) & (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.low >= top_all.nlow) & ((top_all.open >= top_all.nlow *0.99) & (top_all.open <= top_all.nlow*1.01)) ]
                     else:
                         # top_temp=top_all[((top_all.close > top_all.ma51d)) & (
@@ -465,12 +478,23 @@ if __name__ == "__main__":
                         # top_temp = top_all[ (top_all.topR > 0)] 
 
                         # MA5 > ene and topU > upper
+
                         top_temp = top_all[(top_all.topU > 0) & (top_all.close > top_all.ene) & (top_all.ma5d > top_all.ene)  ] # & (top_all.topR > 0)] 
+
+                        #20231103  低于五日线,上传5日线,大于3
+                        # top_temp = top_all[ (top_all.boll > 0) & ( top_all.ra > 0)  & ( top_all.percent > 1) & ((( top_all.lasth1d < top_all.ma5d ) & ( top_all.close > top_all.ma5d)) | (( top_all.lastl1d >= top_all.ma20d ) & ( top_all.lastl1d <= top_all.ma20d * 1.01 )) & (top_all.close > top_all.ma20d) )]
+
 
                         # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
                         top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
                         # top_temp = top_all[  (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.low >= top_all.nlow) & ((top_all.open >= top_all.nlow *0.998) & (top_all.open <= top_all.nlow*1.002)) ]
                         # top_temp = top_all[ (top_all.volume >= 1.2 ) & (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.close > top_all.lastp1d)]
+                    
+                    # top_temp = top_temp[ ((top_temp.close > top_temp.open*0.99) & (top_temp.low > top_temp.ene*0.99) & (top_temp.low < top_temp.ene*1.01) & (top_temp.lastl1d > top_temp.ene*0.99) & (top_temp.lastl2d > top_temp.ene*0.99) & (top_temp.lastl3d > top_temp.ene*0.99) & (top_temp.lastl4d > top_temp.ene*0.99)) & (top_temp.ma5d > top_temp.ene*0.98)  & (top_temp.volume < 1.1) ]  
+                    top_temp = top_temp[ ((top_temp.close > top_temp.open*0.99) & (top_temp.low > top_temp.ma5d*0.99) & (top_temp.low < top_temp.ma5d*1.01)) & ((top_temp.lastl1d > top_temp.upper*0.99) | (top_temp.lastl2d > top_temp.upper*0.99) | (top_temp.lastl3d > top_temp.upper*0.99) | (top_temp.lastl4d > top_temp.upper*0.99)) & (top_temp.ma5d > top_temp.ene*0.98)  & (top_temp.volume > 1) ]  
+                    # top_temp = top_temp[ ((top_temp.close > top_temp.upper*0.99) | (top_temp.lasth1d > top_temp.upper*0.99) | (top_temp.lasth2d > top_temp.upper*0.99) | (top_temp.lasth3d > top_temp.upper*0.99) | (top_temp.lasth4d > top_temp.upper*0.99)) & (top_temp.upper >= top_temp.ma5d)  & (top_temp.close > top_temp.ma5d) & (top_temp.volume < 1.1) ]  
+                    # top_temp = top_temp[ ((top_temp.low > top_temp.ene *0.99) & (top_temp.low < top_temp.ene *1.01))  & (top_temp.close > top_temp.ma5d) & (top_temp.volume < 1) ]  
+                    
                 else:
 
                     if st_key_sort.split()[0] == '4':  #20210323   跳空缺口,max5 大于 hmax 或者 max5上轨
@@ -480,11 +504,16 @@ if __name__ == "__main__":
                     else:
 
                         top_temp=top_all.copy()
+                        #20231103  低于五日线,上传5日线,大于3
+                        # top_temp = top_all[ (top_all.boll > 0) & ( top_all.ra > 0)  & ( top_all.percent > 1) & ((( top_all.lasth1d < top_all.ma5d ) & ( top_all.close > top_all.ma5d)) | (( top_all.lastl1d >= top_all.ma20d ) & ( top_all.lastl1d <= top_all.ma20d * 1.01 )) & (top_all.close > top_all.ma20d) )]
+
                     # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
+                    top_temp = top_temp[ (top_temp.close > top_temp.max5) | (top_temp.lastdu4 > 1.02)]
 
                 #clean 688 and st
                 if len(top_temp) > 0:                
                     top_temp = top_temp[ (~top_temp.index.str.contains('688')) ]
+
 
 
                     

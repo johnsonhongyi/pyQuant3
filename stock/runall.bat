@@ -13,16 +13,14 @@ IF NOT EXIST  G:\tdx_last_df.h5 (
 rem ELSE (
 rem	goto A
 rem )
-
+rem if %indexdx% gtr 512000 ( LEQ GEQ 
 
 for %%i in ("%TDX%") do (
 set indexdx=%%~zi
 )
-rem if %indexdx% gtr 512000 (
-if %indexdx% gtr 2048000 (
-    ping -n 5 localhost > nul
-)else (
-    ping -n 352 localhost > nul
+
+if %indexdx% LEQ  2048000 (
+  ping -n 352 localhost > nul
 )
 
 start cmd /k python singleAnalyseUtil.py

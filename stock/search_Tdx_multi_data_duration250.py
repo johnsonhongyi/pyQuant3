@@ -33,7 +33,12 @@ def multindex_iloc(df, index):
 
 def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,ma_250_h=1.11,resample ='d',rewrite=False):
     # df = tdd.search_Tdx_multi_data_duration('tdx_all_df_300', 'all_300', df=None,code_l=code_list, start=start, end=None, freq=None, col=None, index='date')
-    block_path = tdd.get_tdx_dir_blocknew() + '060.blk'
+    if resample.lower() == 'd':
+        block_path = tdd.get_tdx_dir_blocknew() + '061.blk'
+    elif resample.lower() == 'w':
+        block_path = tdd.get_tdx_dir_blocknew() + '060.blk'
+    else:
+        block_path = tdd.get_tdx_dir_blocknew() + '062.blk'
 
     if not rewrite and not app and cct.get_file_size(block_path) > 100 and cct.creation_date_duration(block_path) == 0:
         print("It's Today Update")
@@ -101,7 +106,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
         # Calculate the coefficients of the regression line
 
         # date = df.index.get_level_values('date')[0]
-        # 获取最近10天的数据
+        # ??????10??????
 
         # last_10_days = x.loc[date-pd.Timedelta(days=10):date-pd.Timedelta(days=1)]
         # df = df.loc[df.index.get_level_values('date') <= date]
@@ -126,16 +131,16 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
             b = round((n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x),2)
         return b   
 
-    # 自定义函数，生成每天的前十天的统计数据
+    # ?????????????????ʮ?????????
     def last_10_days_stats(x):
-        # 获取当前日期
+        # ?????ǰ??
         # date = x.index.get_level_values('date')[0]
-        # 获取最近10天的数据
+        # ??????10??????
 
         # last_10_days = x.loc[date-pd.Timedelta(days=10):date-pd.Timedelta(days=1)]
         # last_10_days = x.loc[x.index.get_level_values('date') <= date]
 
-        # 计算统计数据
+        # ?????????
         # return pd.Series({'last_10_days_min': last_10_days.min()})
         return x.min()
 
@@ -151,15 +156,12 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
         return pd.Series({"min": last_10_days.min()})
 
     # def last_10_days_stats(df):
-    #     # 按照日期进行分组
     #     grouped = df.groupby(level='date')
         
-    #     # 计算每个日期前10天的统计数据
     #     import ipdb;ipdb.set_trace()
 
     #     stats = grouped.apply(lambda x: x.loc[x.index.get_level_values('date') - pd.Timedelta(days=10) : x.index.get_level_values('date') - pd.Timedelta(days=1)].close.agg(['mean', 'std']))
         
-    #     # 将统计数据添加为新的列
     #     df = pd.concat([df, stats.add_prefix('last_10_days_')], axis=1)
         
     #     return df
@@ -175,7 +177,6 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
         # df=dfs.copy()
 
-        # 应用自定义函数，生成每天的前十天的统计数据
         # dfsmin = groupd['close'].rolling(10).apply(last_10_days_stats)
         # time_s = time.time()
         dfsr = groupd['close'].rolling(10).apply(regression_ratio)
@@ -233,18 +234,21 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
     groupd = dfs.groupby(level=[0])
     # groupd.['close']
-    
+    # https://stackoverflow.com/questions/50915213/using-pct-change-with-multiindex-groupby
+    dfs['percent'] = groupd['close'].apply(lambda x: round(x.pct_change()*100,2))
+    dfs['volchang'] = groupd['amount'].apply(lambda x: round(x.pct_change()*100,2))
+
     # rollma = ['5','10','60','100','200']
     # rollma = ['5','10','250']
     # df.index.get_level_values('code')[0]
     if resample.upper() == 'D' or resample.lower() == 'd':
         if duration < 300:
-            rollma = ['10','5','26','200']
+            rollma = ['20','5','26','200']
         else:
-            rollma = ['10','5','26','250']
+            rollma = ['20','5','26','250']
 
     elif resample.upper() == 'W' or resample.lower() == 'w':
-        rollma = ['5','10']
+        rollma = ['5','20']
     else:
         rollma = ['5','10']
 
@@ -259,10 +263,29 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     for da in rollma:
         cumdays=int(da)
         dfs['ma%d'%cumdays] = round(dfs['close'].rolling(cumdays).mean(),2)
-        if cumdays == 10 :
-            dfs['upper'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 + 11.0 / 100) * x, 1))
-            dfs['lower'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 - 9.0 / 100) * x, 1))
-            dfs['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), dfs['upper'], dfs['lower']))
+        if resample.lower() != 'm' and cumdays == 20 :
+            dfs['std'] = round(dfs['close'].rolling(cumdays).std(),2)
+            # dfs['upper'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 + 11.0 / 100) * x, 1))
+            # dfs['lower'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 - 9.0 / 100) * x, 1))
+            # dfs['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), dfs['upper'], dfs['lower']))
+            # dfs['upper'] = map(lambda x,y: round(x+ 2*y, 1),dfs['ma%d'%cumdays],dfs['std'])
+            # dfs['lower'] = map(lambda x,y: round(x-2*y, 1),dfs['ma%d'%cumdays],dfs['std'])
+            dfs['upper'] = round(dfs['ma%d'%cumdays]+dfs['std']*2,2)
+            dfs['lower'] = round(dfs['ma%d'%cumdays]-dfs['std']*2,2)
+            dfs['ene'] = dfs['ma%d'%cumdays]
+
+        elif cumdays == 10:
+            # dfs['upper'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 + 11.0 / 100) * x, 1))
+            # dfs['lower'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 - 9.0 / 100) * x, 1))
+            # dfs['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), dfs['upper'], dfs['lower']))
+            dfs['std'] = round(dfs['close'].rolling(cumdays).std(),2)
+            # dfs['upper'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 + 11.0 / 100) * x, 1))
+            # dfs['lower'] = dfs['ma%d'%cumdays].apply(lambda x: round((1 - 9.0 / 100) * x, 1))
+            # dfs['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), dfs['upper'], dfs['lower']))
+            dfs['upper'] = round(dfs['ma%d'%cumdays]+dfs['std']*2,2)
+            dfs['lower'] = round(dfs['ma%d'%cumdays]-dfs['std']*2,2)
+            dfs['ene'] = dfs['ma%d'%cumdays]
+
         # df['upper'] = map(lambda x: round((1 + 11.0 / 100) * x, 1), df.ma10d)
         # df['lower'] = map(lambda x: round((1 - 9.0 / 100) * x, 1), df.ma10d)
         # df['ene'] = map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower)
@@ -326,13 +349,59 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
 
     if len(rollma) > 1:
+        if resample.upper() == 'M' or resample.lower() == 'm' :
+            mask =  ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[0])] > dfs[('ma%s')%(rollma[0])].shift(1))
+                    & (dfs[('close')] >= dfs[('ma%s')%(rollma[0])])
+                    & (dfs[('low')] >= dfs[('close')].shift(1)*0.99)     
+                    & (dfs[('close')] > dfs[('close')].shift(1))
+                    & (dfs[('close')] > dfs[('close')].shift(2))
+                    & (dfs[('close')] > dfs[('close')].shift(3))
+                    & (dfs[('volchang')] > 10)
+                    & (dfs[('percent')] > 5)
+                    )
+        elif resample.upper() == 'W' or resample.lower() == 'w':
+            # mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0)
+            #         & (dfs[('ma%s')%(rollma[0])] > dfs[('ma%s')%(rollma[-1])])
+            #         & (dfs[('close')] > dfs[('ma%s')%(rollma[0])])
+            #         & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_h) 
+            #         & ((dfs[('close')] > dfs['ene']) | (dfs[('close')] > dfs['upper']) )   
+            #         & (dfs[('close')] > dfs[('close')].shift(1))
+            #         & (dfs[('close')] > dfs[('close')].shift(2))
+            #         & (dfs[('close')] > dfs[('close')].shift(3))
 
-        mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0)
-                & (dfs[('ma%s')%(rollma[0])] > dfs[('ma%s')%(rollma[-1])])
-                & (dfs[('close')] > dfs[('ma%s')%(rollma[0])])
-                & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_h) 
-                & ((dfs[('close')] > dfs['ene']) | (dfs[('close')] > dfs['upper']) ) 
-                )
+            mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0)
+                    & (dfs[('close')] > dfs[('ene')])
+                    & (dfs[('low')].shift(1) < dfs[('ene')])
+                    & (dfs[('close')] > dfs[('ma%s')%(rollma[0])] )
+                    & (dfs[('close')] > dfs[('close')].shift(1))
+                    & (dfs[('close')] > dfs[('close')].shift(2))
+                    & (dfs[('volchang')] > 10)
+                    & (dfs[('percent')] > 3)
+                    )
+        else:
+            # mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0)
+            #         & (dfs[('ma%s')%(rollma[0])] > dfs[('ma%s')%(rollma[-1])])
+            #         & (dfs[('close')] > dfs[('ma%s')%(rollma[0])])
+            #         & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_h) 
+            #         & ((dfs[('close')] > dfs['upper']) | (dfs[('close')].shift(1) > dfs['upper'].shift(1)) | (dfs[('close')].shift(2) > dfs['upper'].shift(2)))   
+            #         & (dfs[('close')] > dfs[('close')].shift(1))
+            #         )
+
+            mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0)
+                    & (dfs[('close')] > dfs[('ma5')])
+                    & (dfs[('close')] > dfs[('ene')])
+                    & (dfs[('ma5')] > dfs[('ene')])
+                    & (dfs[('low')].shift(1) < dfs[('ma5')].shift(1))
+                    & (dfs[('close')] > dfs[('close')].shift(1))
+                    & (dfs[('close')] > dfs[('close')].shift(2))
+                    & (dfs[('amount')] > dfs[('amount')].shift(1))
+                    & (dfs[('volchang')] > 10)
+                    & (dfs[('percent')] > 3)
+                    )
+                    # & (dfs[('close')] > dfs[('close')].shift(2))
+                    # & (dfs[('close')] > dfs[('close')].shift(3))
+                        # & (dfs[('low')] < dfs[('close')].shift(1))
+               
     else:
                 mask = ( (dfs[('ma%s')%(rollma[0])] > 0) 
                 & (dfs[('close')] > dfs[('ma%s')%(rollma[0])])
@@ -390,37 +459,63 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
                 print(("df:%s %s df_idx:%s"%(len(df),df.index[:5],len(df_idx))))
                 top_temp.date = top_temp.date.apply(lambda x: str(x)[:10])
-
-                top_temp['percent'] = ((top_temp['ma5'] - top_temp['ma10']) / top_temp['ma10'] * 100).map(lambda x: round(x, 2))
-                top_temp = top_temp.sort_values(by='percent',ascending=1)
+                percet = 'percma5w'
+                if resample.upper() == 'M' or resample.lower() == 'm':
+                    percet = 'percma5M'
+                    top_temp[percet] = ((top_temp['close'] - top_temp['ma5']) / top_temp['ma5'] * 100).map(lambda x: round(x, 2))
+                elif resample.upper() == 'D' or resample.lower() == 'd':
+                    percet = 'percma20d'
+                    top_temp[percet] = ((top_temp['close'] - top_temp['ma20']) / top_temp['ma20'] * 100).map(lambda x: round(x, 2))
+                else:
+                    percet = 'percma5w'
+                    top_temp[percet] = ((top_temp['close'] - top_temp['ma5']) / top_temp['ma5'] * 100).map(lambda x: round(x, 2))
+                
+                top_temp.loc[top_temp.percent >= 9.94, 'percent'] = 10
+                top_temp = top_temp.sort_values(by=['percent','volchang',percet],ascending=[0,1,1])
+                top_temp = top_temp[ (~top_temp.index.str.contains('688'))]  
 
                 if app:
-                    table, widths=cct.format_for_print(top_temp.loc[:,['percent' ,'close','amount','ma5' , 'ma10','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
+                    if resample.lower() == 'd' or resample.lower() == 'w' :
+                        table, widths=cct.format_for_print(top_temp.loc[:,[percet ,'close','percent','volchang','ma5' , 'ma20','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
+                    else:
+                        table, widths=cct.format_for_print(top_temp.loc[:,[percet ,'close','percent','volchang','ma5' , 'ma10','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
                     print(table)
 
                 if df_idx is not None and len(df) > 0 and len(df_idx) > 0:
                     idx_set_=[x for x in   df_idx.index if x in df.index]
                     df = df.loc[idx_set_,:].dropna()
 
-                print(("Main Down dd :%s MainUP df:%s couts std:%0.1f "%(len(dd),len(df),df.couts.std())))
+                print(("Main Down dd :%s MainUP df:%s couts std:%0.1f "%(len(dd),len(top_temp),top_temp.couts.std())))
                 # print df.date.mode()[0]
-                df = df.sort_values(by='couts',ascending=1)
-                df = df[df.couts > df.couts.std()]
-                # df = df[(df.date >= df.date.mode()[0]) & (df.date <= cct.get_today())]
-                codew = df.index.tolist()
+                # df = df.sort_values(by='couts',ascending=1)
+                # df = df[df.couts > df.couts.std()]
+                # # df = df[(df.date >= df.date.mode()[0]) & (df.date <= cct.get_today())]
+                # codew = df.index.tolist()
 
                 if app:
-                    print(round(time.time()-time_s,2),'groupd2',len(df))
+                    print(round(time.time()-time_s,2),'groupd2',len(top_temp))
 
             else:
                 df = df.reset_index().set_index('code')
                 df = df[(df.date >= cct.last_tddate(days=10)) & (df.date <= cct.get_today())]
-                codew = df.index.tolist()
+                # codew = df.index.tolist()
+                top_temp = df
 
-            top_temp = tdd.get_sina_datadf_cnamedf(codew,df) 
-            top_temp['percent'] = ((top_temp['ma5'] - top_temp['ma10']) / top_temp['ma10'] * 100).map(lambda x: round(x, 2))
-            top_temp = top_temp.sort_values(by='percent',ascending=1)
-            top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]  
+            # top_temp = tdd.get_sina_datadf_cnamedf(codew,df) 
+            # # top_temp['percent'] = ((top_temp['ma5'] - top_temp['ma10']) / top_temp['ma10'] * 100).map(lambda x: round(x, 2))
+            # if resample.upper() == 'M' or resample.lower() == 'm':
+            #     percet = 'percma5M'
+            #     top_temp[percet] = ((top_temp['close'] - top_temp['ma5']) / top_temp['ma5'] * 100).map(lambda x: round(x, 2))
+            # elif resample.upper() == 'D' or resample.lower() == 'd':
+            #     percet = 'percma20d'
+            #     top_temp[percet] = ((top_temp['close'] - top_temp['ma20']) / top_temp['ma20'] * 100).map(lambda x: round(x, 2))
+            # else:
+            #     percet = 'percma5w'
+            #     top_temp[percet] = ((top_temp['close'] - top_temp['ma5']) / top_temp['ma5'] * 100).map(lambda x: round(x, 2))
+            # top_temp = top_temp.sort_values(by=percet,ascending=1)
+
+            # # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]  
+            # top_temp = top_temp[ (~top_temp.index.str.contains('688'))]  
             codew = top_temp.index.tolist()
 
             #clean st and 688
@@ -432,15 +527,25 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                     append_status=False
                 else:
                     append_status=True
+                dfcf_wri = cct.cct_raw_input("write dfcf[Y]:")
+                if dfcf_wri == 'y' or dfcf_wri == 'Y':
+                    dfcf_status=True
+                else:
+                    dfcf_status=False
             else:
                 append_status=False
-
-            if len(codew) > 10: 
-                cct.write_to_blocknew(block_path, codew, append_status,doubleFile=False,keep_last=0)
+                dfcf_status=False
+                
+            if len(codew) > 0: 
+                cct.write_to_blocknew(block_path, codew, append_status,doubleFile=False,keep_last=0,dfcf=dfcf_status)
                 print("write:%s block_path:%s"%(len(codew),block_path))
                 print(top_temp.name.tolist())
             else:
+                # cct.write_to_blocknew(block_path, codew, append_status,doubleFile=False,keep_last=0,dfcf=dfcf_status)
                 print("write error:%s block_path:%s"%(len(codew),block_path))
+                # print("write:%s block_path:%s"%(len(codew),block_path))
+                # print(top_temp.name.tolist())
+
 
         # df['date'] = df['date'].apply(lambda x:(x.replace('-','')))
         # df['date'] = df['date'].astype(int)
@@ -460,6 +565,8 @@ if __name__ == '__main__':
     # get_roll_mean_all(single=True,tdx=True,app=False)
 
 
-    get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w')
+    # get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w')
+    get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.12,resample='d')
+    # get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='m')
 
     # get_roll_mean_all(single=False, tdx=True, app=False,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w',rewrite=True)
