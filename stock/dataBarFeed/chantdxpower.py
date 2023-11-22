@@ -16,6 +16,7 @@ import numpy as np
 import datetime
 import pandas as pd
 # import matplotlib.pyplot as plt
+
 from pylab import plt, mpl
 if cct.isMac():
     mpl.rcParams['font.sans-serif'] = ['SimHei']
@@ -509,6 +510,8 @@ def show_chan_mpl_tdx(code, start_date=None, end_date=None, stock_days=60, resam
         vertices_down = np.array([box_X, pad_box_down]).T
         vertices_even = np.array([box_X, pad_box_even]).T
 
+        vertices_ma = np.array([box_X, pad_box_up]).T
+
         handle_box_up = mat.patches.Polygon(vertices_up, color='r', zorder=1)
         handle_box_down = mat.patches.Polygon(vertices_down, color='g', zorder=1)
         handle_box_even = mat.patches.Polygon(vertices_even, color='k', zorder=1)
@@ -703,7 +706,8 @@ def get_quotes_tdx(code, start=None, end=None, dl=120, resample='d', show_name=T
     else:
         cname = '-'
     if quotes is not None and len(quotes) > 0:
-        quotes = quotes.loc[:, ['open', 'close', 'high', 'low', 'vol', 'amount']]
+        quotes = quotes.loc[:, ['open', 'close', 'high', 'low', 'vol','amount']]
+        # quotes = quotes.loc[:, ['open', 'close', 'high', 'low', 'vol', ,'ma20d','upper','lower']]
     else:
         # log.error("quotes is None check:%s"%(code))
         raise Exception("Code:%s error, df is None%s" % (code))
@@ -2006,11 +2010,15 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
     #     d = datetime.datetime.fromtimestamp(x_date/1000000000)
     #     print d.strftime("%Y-%m-%d %H:%M:%S.%f")
     # print x_date_list
-    k_data= quotes
+    # quotes.loc[:, ['open', 'close', 'high', 'low', 'vol', 'amount','ma20d','upper','lower']]
+    # quotes.loc[:, ['open', 'close', 'high', 'low', 'vol', 'amount']]
+    k_data= quotes.loc[:, ['open', 'close', 'high', 'low', 'vol', 'amount']]
     k_values= k_data.values
     # 缠论k线
 
     chanK = quotes if chanK_flag else chan.parse2ChanK(k_data, k_values, chan_kdf=chanK_flag)
+    
+    # chanK = cct.combine_dataFrame(chanK,quotes.loc[chanK.index,['ma20d','upper','lower']])
 
     fenTypes, fenIdx= chan.parse2ChanFen(chanK)
     # log.debug("code:%s fenTypes:%s fenIdx:%s k_data:%s" % (stock_code,fenTypes, fenIdx, len(k_data)))
@@ -2208,8 +2216,20 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         handle_line_up=mat.lines.Line2D(pad_X, line_up, color = 'k', linestyle = 'solid', zorder = 0)
         handle_line_down=mat.lines.Line2D(pad_X, line_down, color = 'k', linestyle = 'solid', zorder = 0)
 
+                # handle_box_ma = mat.patches.Polygon(vertices_up, color='r', zorder=1)
+        # handle_box_ma = mat.lines.Line2D(pad_X,quotes['ma20d'].values, color = 'g', alpha=1, zorder=1)
+        # ax2.bar(quotes['ma20d'], 'b',linewidth=0.1)
+        # ax2.bar(quotes[quotes.upper > 0].upper, 'g')
+        # ax2.bar(quotes[quotes.lower > 0].lower, 'r')
+
         ax1.add_line(handle_line_up)
         ax1.add_line(handle_line_down)
+        # ax1.add_line(handle_box_ma)
+        
+        # import ipdb;ipdb.set_trace()
+        # line1 = ax1.plot(quotes['close'], 'b',linewidth=10)
+        # print(len(line1))
+        # ax1.add_line(line1[0])
 
         v=[0, length, Open.min() - 0.5, Open.max() + 0.5]
         plt.axis(v)
@@ -2220,10 +2240,11 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
 
         ax1.set_xticklabels(Ti)
 
-        assvol=quotes['vol']
+        # assvol=quotes['vol']
         # assvol = assvol.apply(lambda x: round(x / assvol[:1]*quotes.close[:1], 2))
-        assvol=assvol.apply(lambda x: round(x / assvol[:1] + quotes.close[:1], 2))
-        ax1.plot(assvol, '-g', linewidth=0.5)
+        # ax1.plot(assvol, '-g', linewidth=5)
+        # ax1.legend()
+
         plt.grid(True)
         plt.setp(plt.gca().get_xticklabels(), rotation=30, horizontalalignment='right')
 
@@ -2394,6 +2415,8 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
             plt.axhline(y=np.median(kdh_mode.values), linewidth=2, color='green', linestyle="--")
         plt.title(stock_code + " | " + str(cname) + " | " + str(quotes.index[-1])[:10], fontsize=14)
         plt.plot(x_xd_seq, y_xd_seq)
+        # ma20d=quotes['ma20d'].apply(lambda x: round(x / quotes['ma20d'][:1] + quotes.close[:1], 2))
+
 
         zp=zoompan.ZoomPan()
         figZoom=zp.zoom_factory(ax1, base_scale=1.1)
@@ -2443,6 +2466,7 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
 
         ax2.bar(idx[pos.values], volume[pos.values], color='red', width=1, align='center')
         ax2.bar(idx[neg.values], volume[neg.values], color='green', width=1, align='center')
+
         yticks=ax2.get_yticks()
         ax2.set_yticks(yticks[::3])
         # plt.tight_layout()

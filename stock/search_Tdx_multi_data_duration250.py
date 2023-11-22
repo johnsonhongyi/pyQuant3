@@ -566,7 +566,7 @@ if __name__ == '__main__':
 
 
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w')
-    get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.12,resample='d')
-    # get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='m')
+    # get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.12,resample='d')
+    get_roll_mean_all(single=False,tdx=True,app=True,duration=900,ma_250_l=1.22,ma_250_h=1.2,resample='m')
 
     # get_roll_mean_all(single=False, tdx=True, app=False,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w',rewrite=True)

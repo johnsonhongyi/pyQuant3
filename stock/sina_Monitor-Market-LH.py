@@ -496,7 +496,7 @@ if __name__ == "__main__":
                         top_temp = top_temp[top_temp.per1d < 8]
 
                     top_dd = cct.combine_dataFrame(
-                        top_temp.loc[:, ct_MonitorMarket_Values][:9], top_temp2.loc[:, ct_MonitorMarket_Values2][:4], append=True, clean=True)
+                        top_temp.loc[:, ct_MonitorMarket_Values][:9], top_temp2.loc[:, ct_MonitorMarket_Values2][:4], append=False, clean=False)
 
                     # top_dd = pd.concat([top_temp.loc[:, ct_MonitorMarket_Values][:9], top_temp.loc[:, ct_MonitorMarket_Values][-4:]], axis=0)
 

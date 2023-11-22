@@ -82,8 +82,9 @@ h5_time_l_count = 6
 sina_dd_limit_time = 1200
 diffcode = 0.2
 dratio_limit = 0.05
-duration_sleep_time = 60
-compute_lastdays = 9
+duration_sleep_time = 6
+compute_lastdays = 15
+last_TopR_days = 15
 # sort_value_key_perd23 = '2 3 d f'
 # sort_value_key_perd23 = '3 3'
 sort_value_key_perd23 = '2 1'
@@ -207,10 +208,10 @@ Duration_percent_opboll_key = [0, 0, 0, 0, 1, 1,  1, 1]
 
 
 
-Duration_percent_boll = ['boll','df2','perc3d', 'percent',
-                         'dff', 'fib', 'fibl','volume', 'couts']
+Duration_percent_boll = ['boll','ra','volume','perc3d', 'percent',
+                         'dff', 'fib', 'fibl', 'couts']
 
-Duration_percent_boll_key = [0, 0, 0, 0, 0, 1, 1,  1, 1]
+Duration_percent_boll_key = [0, 0, 1, 0, 0, 1, 1,  1, 1]
 
 
 Duration_dff_percent = ['dff', 'percent', 'df2', 'ra',
@@ -679,7 +680,7 @@ def RawMenuArgmain():
     raw = 'status:[go(g),clear(c),[d 20150101(dt 14)[l|h]|[y|n|pn|py],quit(q),W(a),sh]:'
     raw_input_menu = raw + "\n\tNow : %s" + \
         "\n\t1:Sort By Percent\t2:Sort by per1d\t3:Sort By percd\t\t4:Sort By DFF\n\t5:Sort By Ra_dff\t6:Sort By  fibl\t7:Sort Vol per\t\t8:Sort by Count" + \
-        "\n\t9:By fib\t\tx: by_topR\tx1:by boll_perc\t\tx2:by ral\nplease input:"
+        "\n\t9:By fib\t\tx: by_topR\tx1:by boll_ra\t\tx2:by ral\nplease input:"
     return raw_input_menu
 
 # "Sort By Percent\t3:Sort By DFF\n\t2:Sort By OP\t\t4:Sort By Ra\nplease input:"
