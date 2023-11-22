@@ -130,3 +130,6 @@ tdx_all_df_300.h5
 
 __pycache__
 stock/jupyterAlgo/Quant2023/TradingTutorial
+#规范行尾换行符
+* text=auto
+*.ipynb text eol=lf
