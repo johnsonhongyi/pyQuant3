@@ -7,8 +7,9 @@ rem cd stock
 start cmd /k python instock_Monitor.py
 set TDX=G:\tdx_last_df.h5
 
+rem ping -n 352 localhost > nul
 IF NOT EXIST  G:\tdx_last_df.h5 (
-	ping -n 352 localhost > nul
+	TIMEOUT /T 200 /NOBREAK
 )
 rem ELSE (
 rem	goto A
@@ -20,11 +21,11 @@ set indexdx=%%~zi
 )
 
 if %indexdx% LEQ  2048000 (
-  ping -n 352 localhost > nul
+  TIMEOUT /T 200 /NOBREAK
 )
 
 start cmd /k python singleAnalyseUtil.py
-ping -n 20 localhost > nul
+TIMEOUT /T 20 /NOBREAK
 REM start python sina_Monitor.py 
 REM ping -n 15 localhost > nul
 
@@ -32,12 +33,12 @@ rem start cmd /k python sina_Monitor-GOLD.py
 rem ping -n 20 localhost > nul
 
 start cmd /k python sina_Monitor.py
-ping -n 20 localhost > nul
+TIMEOUT /T 20 /NOBREAK
 start cmd /k python sina_Market-DurationCXDN.py
-ping -n 20 localhost > nul
+TIMEOUT /T 20 /NOBREAKl
 
 start cmd /k python sina_Market-DurationUP.py
-ping -n 20 localhost > nul
+TIMEOUT /T 20 /NOBREAK
 
 rem start cmd /k python sina_Monitor-Market.py
 rem ping -n 20 localhost > nul
@@ -49,11 +50,11 @@ rem ping -n 20 localhost > nul
 start cmd /k python sina_Monitor-Market-LH.py
 rem ping -n 20 localhost > nul 
 start cmd /k python sina_Market-DurationDn.py
-ping -n 20 localhost > nul 
+TIMEOUT /T 20 /NOBREAK
 rem start cmd /k python LinePower.py
 cd dataBarFeed\
 start cmd /k python chantdxpower.py
-ping -n 20 localhost > nul 
+TIMEOUT /T 20 /NOBREAK
 cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\"
 python macRun.py
 rem pause

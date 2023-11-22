@@ -84,11 +84,33 @@ def filterPowerCount(df, count=200, down=False, duration=2):
 
 def compute_perd_value(df, market_value=3, col='per'):
 
-    if market_value==None or market_value < '2':
+    if market_value==None or int(market_value) < 2:
         market_value = 3
-    temp = df[df.columns[(df.columns >= '%s1d' % (col)) & (df.columns <= '%s%sd' % (col, market_value))]]
 
-    df['%s%sd' % (col, market_value)] = temp.T.sum().apply(lambda x: round(x, 1))
+    # temp = df[df.columns[(df.columns >= '%s1d' % (col)) & (df.columns <= '%s%sd' % (col, market_value))]]
+    # temp = df.loc[:,df.columns.str.contains( "%s\d{1,2}d$"%(col),regex= True)]
+
+    if int(market_value) < 10:
+        temp =df.loc[:,df.columns.str.contains( "%s[1-%s]d$"%(col,market_value),regex= True)]
+    else:
+        if int(market_value) <= ct.compute_lastdays:
+            _remainder = int(market_value)%10
+        else:
+            _remainder = int(ct.compute_lastdays)%10
+        # df.loc[:,df.columns.str.contains( "%s[0-9][0-%s]d$"%(col,_remainder),regex= True)][:1]
+        temp =df.loc[:,df.columns.str.contains( "%s([1-9]|1[0-%s])d$"%(col,_remainder),regex= True)]
+
+    # if  '%s%sd' % (col,market_value) == temp.T.index[-1]:
+    #     df['%s%sd' % (col, market_value)] = temp.T.sum().apply(lambda x: round(x, 1))
+    # else:
+    #     df[temp.T.index[-1]] = temp.T.sum().apply(lambda x: round(x, 1))
+    if col in ['lastv']:
+        # df['%s%sd' % (col, market_value)] = ((temp.T/temp.T.shift(-1)).sum()/(int(market_value)-1)).apply(lambda x:round(x,1))
+        df['%s%sd' % (col, market_value)] = ((temp.T/df.lowvol).sum()/(int(market_value))).apply(lambda x:round(x,1))
+        df['volume0'] = df['volume'] 
+        df['volume'] = df['%s%sd' % (col, market_value)]
+    else:
+        df['%s%sd' % (col, market_value)] = temp.T.sum().apply(lambda x: round(x, 1))
     return df
 
 
@@ -134,11 +156,11 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     
     if cct.get_now_time_int() > 1530:
         df['volume'] = (list(map(lambda x, y, z: round((x / y / radio_t) if z <
-                                                  9.9 else (x / y), 1), df.nvol.values, df.last6vol.values, df.percent.values)))
+                                                  9.9 else (x / y), 1), df.nvol.values, df.lowvol.values, df.percent.values)))
                                                   # 9.9 else (x / y), 1), df.nvol.values, df.ma5vol.values, df.percent.values)))
     else:
         df['volume'] = (list(map(lambda x, y, z: round((x / y / radio_t) if z <
-                                                  9.9 else (x / y), 1), df.nvol.values, df.last6vol.values, df.percent.values)))
+                                                  9.9 else (x / y), 1), df.nvol.values, df.lowvol.values, df.percent.values)))
     
 
     # df['volume'] = (map(lambda x, y,z: round((x / y / radio_t) if z < 9.9 else (x / y) , 1), df.nvol.values, df.ma5vol.values,df.percent.values))
@@ -152,9 +174,14 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     market_value = cct.GlobalValues().getkey('market_value')
     tdx_Index_Tdxdata = cct.GlobalValues().getkey('tdx_Index_Tdxdata')
 
-    if market_value != '1' and market_value >= '2':
+
+    if market_value != '1.1' and int(market_value) > ct.compute_lastdays:
+        market_value = ct.compute_lastdays
+
+    if market_value is not None and market_value != '1' and market_value != '1.1' and int(market_value) >= 2:
         df= compute_perd_value(df, market_value, 'perc')
         df= compute_perd_value(df, market_value, 'per')
+        df= compute_perd_value(df, market_value, 'lastv')
         if tdx_Index_Tdxdata is not None:
             tdx_Index_Tdxdata = compute_perd_value(tdx_Index_Tdxdata,market_value,'perc')
             tdx_Index_Tdxdata = compute_perd_value(tdx_Index_Tdxdata,market_value,'per')
@@ -184,23 +211,24 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     # else:
     #     upper = True
 
-    if not down:
-        if upper:
-            # upper_count = len( df[ ( ( df.buy > df.upper)| ( df.lastp0d > df.upper) | ( df.lastp1d > df.upper) | ( df.lastp2d > df.upper) | ( df.lastp3d > df.upper))])
-            # # ene_count = len(df[df.buy > df.upper])
-            # if upper_count > 30:
-            #     df = df[ (  ( df.buy > df.upper)| ( df.lastp0d > df.upper) | ( df.lastp1d > df.upper) | ( df.lastp2d > df.upper) | ( df.lastp3d > df.upper))]
-            # else:
-            #     df = df[ ( (( df.buy > df.ene ) ) | ( df.buy > df.upper)| ( df.lasth0d > df.upper) | ( df.lasth1d > df.upper) | ( df.lasth2d > df.upper) | ( df.lasth3d > df.upper))]
-            df = df[(df.low >= df.upper) | (df.close >= df.upper) | (df.per1d >= 9.5) | (
-                df.lastp1d == df.hmax) | ((df.lastp1d != df.hmax) & (df.high > df.hmax))]
-        else:
-            if 935 < cct.get_now_time_int() < 1400:
-                df = df[((df.buy > df.ene) | (df.llastp > df.ene) | (
-                    df.llastp >= df.max5) | (df.high >= df.max5) | (df.max5 >= df.upper))]
-            else:
-                df = df[((df.buy > df.ene) | (df.llastp > df.ene) | (
-                    df.llastp >= df.max5) | (df.high >= df.max5) | (df.max5 >= df.upper))]
+    # if not down:
+    #     if upper:
+    #         # upper_count = len( df[ ( ( df.buy > df.upper)| ( df.lastp0d > df.upper) | ( df.lastp1d > df.upper) | ( df.lastp2d > df.upper) | ( df.lastp3d > df.upper))])
+    #         # # ene_count = len(df[df.buy > df.upper])
+    #         # if upper_count > 30:
+    #         #     df = df[ (  ( df.buy > df.upper)| ( df.lastp0d > df.upper) | ( df.lastp1d > df.upper) | ( df.lastp2d > df.upper) | ( df.lastp3d > df.upper))]
+    #         # else:
+    #         #     df = df[ ( (( df.buy > df.ene ) ) | ( df.buy > df.upper)| ( df.lasth0d > df.upper) | ( df.lasth1d > df.upper) | ( df.lasth2d > df.upper) | ( df.lasth3d > df.upper))]
+    #         df = df[(df.low >= df.upper) | (df.close >= df.upper) | (df.per1d >= 9.5) | (
+    #             df.lastp1d == df.hmax) | ((df.lastp1d != df.hmax) & (df.high > df.hmax))]
+    #     else:
+    #         if 935 < cct.get_now_time_int() < 1400:
+    #             df = df[((df.buy > df.ene) | (df.llastp > df.ene) | (
+    #                 df.llastp >= df.max5) | (df.high >= df.max5) | (df.max5 >= df.upper))]
+    #         else:
+    #             df = df[((df.buy > df.ene) | (df.llastp > df.ene) | (
+    #                 df.llastp >= df.max5) | (df.high >= df.max5) | (df.max5 >= df.upper))]
+
 
     # df['cumins'] = round(cum_counts.index[0], 2)
     # df['cumine'] = round(cumdf[-1], 2)
@@ -269,7 +297,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
 
 
             # if cct.get_work_time() :
-
+            
             if cct.get_work_time_duration():
                 nowd, per1d=1, 1
                 if 'nlow' in df.columns:
@@ -363,14 +391,17 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                 # filter percd > idx
                 # idx_k = int(market_value)
 
-
-
                 # if market_key in ['x2','x']:
                 #     df= df[ (df[("%s" % (sort_value))] >= idx_k) ]
                 # else:
                 #     df= df[ (df[("%s" % (sort_value))] <= idx_k) ]
-
-                df= df[ (df[("%s" % (sort_value))] == idx_k) ]
+                
+                if market_value == '1.1' and market_key in [ 'x']:
+                    topRlist= [x+0.1 for x in range(1,int(df.topR.max())+1)]
+                    df = df[df.topR.isin(topRlist)]
+                    # df= df[ (df[("%s" % (sort_value))] == float(market_value))]
+                else:
+                    df= df[ (df[("%s" % (sort_value))] >= idx_k) ]
 
                 # if int(market_value) > 1 and 930 < cct.get_now_time_int():
                 #     df= compute_perd_value(df, market_value, 'perc')
@@ -397,7 +428,14 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
 
     # co2int.extend([co for co in df.columns.tolist()
     #                if co.startswith('perc') and co.endswith('d')])
-    co2int.extend(['top10', 'topR','ra'])
+    # co2int.extend(['top10', 'topR','ra'])
+    
+    # if market_value == '1.1' and market_key in [ 'x']: 
+    #     co2int.extend(['top10','ra'])
+    # else:
+    #     co2int.extend(['top10', 'topR','ra'])
+    co2int.extend(['top10','ra'])
+
     co2int= [inx for inx in co2int if inx in df.columns]
 
     for co in co2int:
@@ -418,7 +456,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     if cct.get_work_time() and 'b1_v' in df.columns and 'nvol' in df.columns:
         df= df[(df.b1_v > 0) | (df.nvol > 0)]
 
-    if (cct.get_now_time_int() > 915 and cct.get_now_time_int() < 926):
+    if (cct.get_work_time() and cct.get_now_time_int() > 915 and cct.get_now_time_int() < 926):
         df['b1_v']= df['volume']
     else:
         dd= df[df.percent < 10]

@@ -134,8 +134,8 @@ if __name__ == "__main__":
     #              (cct.get_today_duration(du_date), duration_date))
 
 
-    st_key_sort = '4'
-    # st_key_sort = '3 1'
+    # st_key_sort = '4'
+    st_key_sort = '3 2'
     # st_key_sort = 'x2'
     # st_key_sort = '8'
     
@@ -340,7 +340,7 @@ if __name__ == "__main__":
                     
                     # 
                     # top_temp = top_all[(top_all.close / top_all.hmax > 1.1) & (top_all.close / top_all.hmax < 1.5)] 
-                    top_temp = top_all[ (top_all.lastdu > 6 ) & (top_all.low > top_all.lasth1d) & (top_all.close > top_all.lastp1d) & (top_all.close >= top_all.hmax)]
+                    top_temp = top_all[ (top_all.lastdu > 3 ) & (((top_all.low > top_all.lasth1d) & (top_all.close > top_all.lastp1d)) | ((top_all.low > top_all.lasth2d) & (top_all.close > top_all.lastp2d))) & (top_all.close >= top_all.hmax)]
                     # top_now.loc['002761'].    
                     # top_temp =  top_all[( ((top_all.top10 >0) | (top_all.boll >0)) & (top_all.lastp1d > top_all.ma5d) & (top_all.close > top_all.lastp1d))]
                     # top_temp =  top_all[((top_all.lastp1d < top_all.ma5d) & (top_all.close > top_all.lastp1d))]
@@ -601,17 +601,13 @@ if __name__ == "__main__":
 
 
 
-                if 'nhigh' in top_all.columns:
-                    ct_MonitorMarket_Values = ct.get_Duration_format_Values(
-                        ct_MonitorMarket_Values, replace='df2', dest='nhigh')
-                    # ct_MonitorMarket_Values2 = ct.get_Duration_format_Values(
-                    #             ct_MonitorMarket_Values2, replace='df2', dest='nhigh')
-                else:
-                    ct_MonitorMarket_Values = ct.get_Duration_format_Values(
-                        ct_MonitorMarket_Values, replace='df2', dest='high')
+                # if 'nhigh' in top_all.columns:
+                #     ct_MonitorMarket_Values = ct.get_Duration_format_Values(
+                #         ct_MonitorMarket_Values, replace='df2', dest='nhigh')
+                # else:
+                #     ct_MonitorMarket_Values = ct.get_Duration_format_Values(
+                #         ct_MonitorMarket_Values, replace='df2', dest='high')
 
-                    # ct_MonitorMarket_Values2 = ct.get_Duration_format_Values(
-                    #             ct_MonitorMarket_Values2, replace='df2', dest='high')
 
                 # loc ral
                 # top_temp[:5].loc[:,['name','ral']

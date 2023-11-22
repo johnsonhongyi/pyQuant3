@@ -650,7 +650,7 @@ terminal_positionKey4K = {'sina_Market-DurationDn.py': '6, 633',
                         'sina_Monitor.py': '168, 421',
                         'singleAnalyseUtil.py': '1084, 765',
                         'LinePower.py': '6, 216', 
-                        'sina_Market-DurationDnUP.py': '6, 434,1400,440',
+                        'sina_Market-DurationDnUP.py': '41, 362,1400,440',
                         'instock_Monitor.py':'62, 86,1360,440',}
 
 
@@ -660,10 +660,10 @@ terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440'
                         'sina_Market-DurationUp.py': '340, 419,1400,440',
                         'sina_Monitor-Market-LH.py': '567, 286,1400,420',
                         'sina_Monitor-Market.py': '140, 63,1400,440',
-                        'sina_Monitor.py': '152, 1,1330,440',
+                        'sina_Monitor.py': '108, 0, 1400, 520',
                         'singleAnalyseUtil.py': '759, 0,920,360',
                         'LinePower.py': '16, 186,800,420',
-                        'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,
+                        'sina_Market-DurationDnUP.py': '41, 362,1400,480' ,
                         'instock_Monitor.py':'62, 86,1360,440',
                         'chantdxpower.py':'86, 128, 1200, 480',}
 
@@ -675,11 +675,11 @@ terminal_positionKey2K_R9000P = {'sina_Market-DurationDn.py': '-13, 601,1400,440
                         'sina_Market-DurationUp.py': '445, 503,1400,440',
                         'sina_Monitor-Market-LH.py': '521, 332,1400,420',
                         'sina_Monitor-Market.py': '271, 39,1400,440',
-                        'sina_Monitor.py': '152, 1,1400,440',
+                        'sina_Monitor.py': '108, 1, 1400, 520',
                         'chantdxpower.py': '53, 66,800,420', 
                         'singleAnalyseUtil.py': '673, 0,880,360',
                         'LinePower.py': '6, 216,800,420', 
-                        'sina_Market-DurationDnUP.py': '6, 434,1400,440' ,}
+                        'sina_Market-DurationDnUP.py': '41, 362,1400,480' ,}
 
 
 ''' R9000P 2.5K
@@ -1198,17 +1198,17 @@ def get_window_pos(targetTitle):
             # win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 330,678,600,600, win32con.SWP_SHOWWINDOW)
             # win32gui.MoveWindow(hwnd,1026, 699, 900, 360,True)  #108,19
 
-def reset_window_pos(targetTitle,posx=1026,posy=699,width=900,height=360):
+def reset_window_pos(targetTitle,posx=1026,posy=699,width=900,height=360,classsname='ConsoleWindowClass'):
 
     hWndList = []  
     win32gui.EnumWindows(lambda hWnd, param: param.append(hWnd), hWndList)
     status=0  
-    time.sleep(0.1)
+    # time.sleep(0.2)
     for hwnd in hWndList:
         clsname = win32gui.GetClassName(hwnd)
         title = win32gui.GetWindowText(hwnd)
         # log.error("title:%s"%(title))
-        if (title.find(targetTitle) == 0):    #调整目标窗口到坐标(600,300),大小设置为(600,600)
+        if (clsname == classsname  and title.find(targetTitle) == 0):    #调整目标窗口到坐标(600,300),大小设置为(600,600)
             rect1 = win32gui.GetWindowRect(hwnd)
             # rect2 = get_window_rect(hwnd)
             log.debug("targetTitle:%s rect1:%s rect2:%s"%(title,rect1,rect1))
@@ -2522,7 +2522,7 @@ def get_config_value_ramfile(fname, currvalue=0, xtype='time', update=False,cfgf
             config = ConfigObj(conf_ini, encoding='UTF8')
 
             if not classtype in list(config.keys()):
-                if readonly:
+                if not readonly:
                     config[classtype] = {}
                     config[classtype][xtype] = currvalue
                     config.write()
@@ -2685,7 +2685,7 @@ def counterCategory(df):
 
 # def write_to_dfcfnew(p_name=dfcf_path):
 #     pass
-def write_to_blkdfcf(codel,conf_ini=dfcf_path):
+def write_to_blkdfcf(codel,conf_ini=dfcf_path,blk='inboll1',append=True):
     import configparser
     if not os.path.exists(conf_ini):
         log.error('file is not exists:%s'%(conf_ini))
@@ -2704,11 +2704,11 @@ def write_to_blkdfcf(codel,conf_ini=dfcf_path):
         kvs = cf.items("\\SelfSelect")
         # print('db:', dict(kvs).keys())
         # read by type
-        truer = cf.get("\\SelfSelect", "truer")
+        truer = cf.get("\\SelfSelect", blk)
         # print('truer:',truer)
         truer_n = truer
         idx = 0
-        
+
         if isinstance(codel, list):
             for co in codel:
                 if code_to_symbol_dfcf(co) not in truer:
@@ -2726,8 +2726,8 @@ def write_to_blkdfcf(codel,conf_ini=dfcf_path):
             #     print("no change co")
                     # truer_n = truer
                     
-        print("truer add:",idx)
-        cf.set("\\SelfSelect", "truer", truer_n)
+        print("%s add:%s"%(blk,idx))
+        cf.set("\\SelfSelect", blk, truer_n)
         # print('instock:',cf.get("\\SelfSelect", "instock"))
         cf.write(open(conf_ini,"w",encoding='UTF-16'))
 
@@ -3704,8 +3704,14 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
     close_du = 0
     vol_du = 0
     top_max_up = 10
-    percent = round((close - lastclose)/lastclose*100,1)
-    
+
+    if np.isnan(lastclose):
+        percent = round((close - open)/open*100,1)
+        lastp = 0
+    else:
+        percent = round((close - lastclose)/lastclose*100,1)
+        lastp = round((lastclose - lastopen)/lastclose*100,1)
+
     if  low > 0 and  lastclose > 0 and lastvol > 0 and lasthigh > 1.0 and lastlow > 1.0 and lasthigh > 0 and lastlow > 0:
         percent = round((close - lastclose)/lastclose*100,1)
         # now_du = round((high - low)/low*100,1)
@@ -3760,85 +3766,108 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
             # initc -=1
     elif  np.isnan(lastclose) :
         if close > open:
-            initc +=1
+            initc +=percent
         else:
-            initc -=1
+            initc -=percent
 
     # open, close,high, low,lastopen, lastclose,lasthigh, lastlow, 
     # ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None
 
-    if close > lasthigh:
-        initc +=0.1
-        # if  ma5 > ma10:
-        #     initc +=0.1
-        # else:
-        #     initc -=0.11
-    elif close < lastlow:
-        initc -=0.1
+    if  np.isnan(lastclose):
+        if percent > 3 and close > ma5 and high > ma10:
+            initc +=2
+    else:
 
-    if low > lastlow:
-        initc +=0.1
-        if high >lasthigh:
+        if close > lasthigh:
             initc +=0.1
-            
-    if high > lasthigh and close > lasthigh and percent > 3 and ma5 > ma10:
-        initc +=2
-        if (open >= low or (open >lastclose and close > lasthigh)) and close >= high*0.92:
-            initc +=2
-            if lastclose >= lasthigh*0.98 or lastclose > (lasthigh + lastlow)/2:
+            # if  ma5 > ma10:
+            #     initc +=0.1
+            # else:
+            #     initc -=0.11
+        elif close < lastlow:
+            initc -=0.1
+
+        if low > lastlow:
+            initc +=0.1
+            if high >lasthigh:
+                initc +=0.1
+                
+        if high > lasthigh and close > lasthigh and percent > 3 and ma5 > ma10:
+
+            if lastp < -2:
+                initc +=12
+            else:
                 initc +=2
-                if close_du > 5 and vol_du > 0.8 and vol_du < 2.2:
-                    initc +=5
-        elif low > lasthigh:
-            initc +=2
-        elif close == high:
-            initc +=1
-
-
-
-        if high4 is not None and (close >= high4 or (get_work_time_duration() and high >high4)):
-
-            if lastdu4 is not None:
-                if lastdu4 <= 1.05:
-                    initc +=10
-                elif lastdu4 > 1.05 and lastdu4 <= 1.1:
-                    initc +=8
-                elif lastdu4 > 1.1 and lastdu4 <= 1.2:
-                    initc +=5
-                elif lastdu4 > 1.2 and lastdu4 <= 1.3:
-                    initc +=3
-                else:
+            if (open >= low or (open >lastclose and close > lasthigh)) and close >= high*0.92:
+                initc +=2
+                if lastclose >= lasthigh*0.98 or lastclose > (lasthigh + lastlow)/2:
                     initc +=2
+                    if close_du > 5 and vol_du > 0.8 and vol_du < 2.2:
+                        initc +=5
+            elif low > lasthigh:
+                initc +=2
+            elif close == high:
+                initc +=1
 
-            if max5 is not None and close > max5:
-                initc +=3
-                if hmax is not None and close > hmax:
+            if hmax is not None and high >= hmax:
+                # if idate == '300093':
+                #     import ipdb;ipdb.set_trace()
+
+                if high4 is not None and max5 is not None:
+                    if hmax > high4 and high4 > max5:
+                        initc +=10
+                else:
                     initc +=3
-                    lastMax = max(high4,max5,hmax)
-                    if close >= lastMax and lastclose < lastMax or (not get_work_time_duration() and high >=lastMax):
-                        if lastdu4 is not None:
-                            if lastdu4 <= 1.05:
-                                initc +=10
-                            elif lastdu4 > 1.05 and lastdu4 <= 1.1:
-                                initc +=8
-                            elif lastdu4 > 1.1 and lastdu4 <= 1.2:
-                                initc +=5
-                            elif lastdu4 > 1.2 and lastdu4 <= 1.3:
-                                initc +=3
-                            else:
-                                initc +=2
-                        else:
-                            initc +=1
-                    else:
+
+            if high4 is not None and (high >= high4 or (get_work_time_duration() and high >high4)):
+
+                if lastdu4 is not None:
+                    if lastdu4 <= 1.12:
+                        initc +=10
+                    elif lastdu4 > 1.12 and lastdu4 <= 1.21:
+                        initc +=8
+                    elif lastdu4 > 1.21 and lastdu4 <= 1.31:
+                        initc +=5
+                    elif lastdu4 > 1.31 and lastdu4 <= 1.5:
                         initc +=3
-                    if close == high:
-                        initc +=2
-                    elif close >=high*0.99:
+                    else:
                         initc +=2
 
-        if lasthigh < upper and high > upper:
-            initc +=top_max_up
+                if max5 is not None and high >= max5:
+                    initc +=5
+                    # if hmax is not None and close > hmax:
+                    #     initc +=3
+                    #     lastMax = max(high4,max5,hmax)
+                    #     if close >= lastMax and lastclose < lastMax or (not get_work_time_duration() and high >=lastMax):
+                    #         if lastdu4 is not None:
+                    #             if lastdu4 <= 1.05:
+                    #                 initc +=10
+                    #             elif lastdu4 > 1.05 and lastdu4 <= 1.1:
+                    #                 initc +=8
+                    #             elif lastdu4 > 1.1 and lastdu4 <= 1.2:
+                    #                 initc +=5
+                    #             elif lastdu4 > 1.2 and lastdu4 <= 1.3:
+                    #                 initc +=3
+                    #             else:
+                    #                 initc +=2
+                    #         else:
+                    #             initc +=1
+                    #     else:
+                    #         initc +=3
+                    #     if close == high:
+                    #         initc +=2
+                    #     elif close >=high*0.99:
+                    #         initc +=2
 
+            # if (lastclose <= upper and high >= upper) | ( ((lastclose >= upper) | (lastp >= 5))):
+            if (lastclose <= upper and high >= upper) | ( ((lastclose >= upper) | (lastp >= 5))):
+                initc +=percent
+                if high4 is not None and hmax is not None:
+                    lastMax = max(high4,max5,hmax)
+                    if lasthigh >= lastMax:
+                        initc += 5 + abs(lastp)
+                    if lastMax==hmax and high4 > max5 and high4 < hmax:
+                        initc += 5
 
     return round(initc,1)
 
@@ -4298,12 +4327,12 @@ def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean
             #Clean True时清理maindf的旧数据
             no_index = no_index.drop(drop_sub_col, axis=1)
         else:
-            #Clean False时清理subdf的数据
+            #Clean False时清理subdf columns的数据
             subdf = subdf.drop(drop_sub_col, axis=1)
-
-        no_index = no_index.merge(subdf, left_index=True, right_index=True, how='left')
-        maindf = maindf.drop([inx for inx in maindf.index if inx in subdf.index], axis=0)
-        maindf = pd.concat([maindf, no_index], axis=0)
+        if len(subdf.columns) > 0:
+            no_index = no_index.merge(subdf, left_index=True, right_index=True, how='left')
+            maindf = maindf.drop([inx for inx in maindf.index if inx in subdf.index], axis=0)
+            maindf = pd.concat([maindf, no_index], axis=0)
     else:
         #        if len(list(set(maindf.columns)-set()))
         #        if len(maindf) < len(subdf):

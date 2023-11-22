@@ -343,7 +343,8 @@ if __name__ == "__main__":
                                                             ascending=market_sort_value_key)
 
                     
-
+                    top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
+                    
                     if st_key_sort.split()[0] == 'x':
                         top_temp = top_temp[top_temp.topR != 0]
 
@@ -351,7 +352,9 @@ if __name__ == "__main__":
                         # top_temp = top_temp[top_temp['buy'] > top_temp['ma10d']]
                         # top_temp = top_temp[top_temp['ma5d'] > top_temp['ma10d']][:10]
                         # top_temp = top_temp[ (top_temp['ma5d'] > top_temp['ma10d']) & (top_temp['buy'] > top_temp['ma10d']) ][:10]
-                        top_dd =  cct.combine_dataFrame(top_temp[:10], top_end,append=True, clean=True)
+                        # top_dd =  cct.combine_dataFrame(top_temp[:10], top_end,append=True, clean=True)
+                        top_dd =  top_temp[:20]
+
                         # top_dd = top_dd.drop_duplicates()
                         ct_Duration_format_Values = ct.get_Duration_format_Values(ct.Duration_format_buy, market_sort_value[:])
                         top_dd = top_dd.loc[:, ct_Duration_format_Values]
@@ -360,12 +363,15 @@ if __name__ == "__main__":
                         # top_temp = top_temp[top_temp['ma5d'] > top_temp['ma10d']][:10]
                         # top_temp = top_temp[ (top_temp['ma5d'] > top_temp['ma10d']) & (top_temp['trade'] > top_temp['ma10d']) ][:10]
 
-                        top_dd =  cct.combine_dataFrame(top_temp[:10], top_end,append=True, clean=True)
+                        # top_dd =  cct.combine_dataFrame(top_temp[:10], top_end,append=True, clean=True)
+                        top_dd =  top_temp[:20]
+
                         # top_dd = top_dd.drop_duplicates()
                         ct_Duration_format_Values = ct.get_Duration_format_Values(ct.Duration_format_trade, market_sort_value[:])
                         top_dd = top_dd.loc[:, ct_Duration_format_Values]
 
                     print(cct.format_for_print(top_dd))
+                    cct.counterCategory(top_temp)
                 # if cct.get_now_time_int() < 930 or cct.get_now_time_int() > 1505 or (cct.get_now_time_int() > 1125 and cct.get_now_time_int() < 1505):
                 # print cct.format_for_print(top_dif[-10:])
                 # print top_all.loc['000025',:]

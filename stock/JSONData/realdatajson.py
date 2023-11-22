@@ -559,7 +559,7 @@ def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.
            if return_hdf_status:
                log.info("load hdf data:%s %s %s"%(h5_fname,h5_table,len(h5)))
                return h5
-
+    
     # ct._write_head()
     url_list = _get_sina_json_dd_url(vol, type, num)
     # print url_list
