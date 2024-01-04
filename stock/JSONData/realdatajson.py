@@ -847,7 +847,7 @@ def get_market_price_sina_dd_realTime(dp='',vol='0',type='0'):
 
     if len(dp)==0:
             dp=get_sina_Market_json()
-    if len(dp)>10:
+    if len(dp)>0:
         # df=df.dropna('index')
         # df=df.drop_duplicates('code')
         # dm=pd.merge(df,dp,on='name',how='left')
@@ -875,7 +875,7 @@ def get_market_price_sina_dd_realTime(dp='',vol='0',type='0'):
         
         df=get_sina_all_json_dd(vol,type)
 
-        if len(df)>5:
+        if len(df)>0:
 
             # print df[df.couts>0][:2]
             dm = cct.combine_dataFrame(dp,df)

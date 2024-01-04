@@ -22,15 +22,16 @@ def parseArgmain():
         parser.add_argument('code', type=str, nargs='?', help='999999')
         parser.add_argument('start', nargs='?', type=str, help='20150612')
         parser.add_argument('end', nargs='?', type=str, help='20160101')
-        parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['d', 'w', 'm'], default='d',help='DateType')
+        parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['d', 'w', 'm'], default='w',help='DateType')
         parser.add_argument('-v', action="store", dest="vtype", type=str, choices=['f', 'b'], default='f',help='Price Forward or back')
         parser.add_argument('-p', action="store", dest="ptype", type=str, choices=['high', 'low', 'close'], default='low',help='price type')
         parser.add_argument('-f', action="store", dest="filter", type=str, choices=['y', 'n'], default='y',help='find duration low')
         parser.add_argument('-l', action="store", dest="dl", type=int, default=ct.linePowerCountdl,help='dl default=%s'%(ct.linePowerCountdl))
-        parser.add_argument('-da', action="store", dest="days", type=int, default=ct.Power_last_da,help='days')
+        parser.add_argument('-s', action="store", dest="days", type=int, default=ct.Power_last_da,help='lastdays')
         parser.add_argument('-m', action="store", dest="mpl", type=str, default='y',help='mpl show')
         parser.add_argument('-i', action="store", dest="line", type=str, choices=['y', 'n'], default='y', help='LineHis show')
-        parser.add_argument('-w', action="store", dest="wencai", type=str, choices=['y', 'n'], default='n',help='WenCai Search')
+        parser.add_argument('-w', action="store", dest="wencai", type=str, choices=['y', 'n'], default='y',help='WenCai Search')
+        parser.add_argument('-n', action="store", dest="num", type=int, default=10,help='WenCai Show Num')
         return parser
     except Exception as e:
         # print 'Eerror:',e
@@ -89,6 +90,43 @@ class MyThread(Thread):
 #     res1 = t1.get_result()
 #     res2 = t2.get_result()
 #     print(res1 + res2)
+def search_ths_data(code):
+    fpath = r'./JohnsonUtil\wencai\同花顺板块行业.xls'
+    df = pd.read_excel(fpath)
+    # df = df.reset_index().set_index('股票代码')
+    df = df.set_index('股票代码')
+    # df = df.iloc[:,[1,2,4,5,6,7,8,9]]
+    df = df.iloc[:,[4,5,6,7,8]]
+    # return (df[df.index == cct.code_to_symbol_ths(code)])
+    data = df[df.index == cct.code_to_symbol_ths(code)]
+    # table, widths=cct.format_for_print(data, widths=True)
+    # table=cct.format_for_print2(data).get_string(header=False)
+    table =cct.format_for_print(data,header=False)
+    return table
+
+def show_ths_data(df):
+    # fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xls'
+    # df = pd.read_excel(fpath)
+    # df = df.reset_index().set_index('股票代码')
+    # df['股票代码'] = df['股票代码'].apply(lambda x:cct.symbol_to_code(x.replace('.','')))
+    # df = df.set_index('股票代码')
+    # df = df.iloc[:,[1,2,4,5,6,7,8,9]]
+
+    if '最新涨跌幅' in df.columns:
+        df['最新涨跌幅'] = df['最新涨跌幅'].apply(lambda x:str(round(float(x),2)))
+    for col in df.columns:
+        if df[col].dtype == 'float64':
+            df[col] = df[col].apply(lambda x: (round((x),2)))
+    df = df.iloc[:,[x for x in range(len(df.columns)-1)]]
+    
+    # return (df[df.index == cct.code_to_symbol_ths(code)])
+    data = df
+    # table, widths=cct.format_for_print(data, widths=True)
+    # table=cct.format_for_print2(data).get_string(header=False)
+    table =cct.format_for_print(data,header=True)
+    # table =cct.format_for_print(data,header=False)
+    return table
+
 
 if __name__ == "__main__":
     # print get_linear_model_status('600671', filter='y', dl=10, ptype='low')
@@ -112,20 +150,68 @@ if __name__ == "__main__":
     # if cct.get_os_system().find('win') >= 0:
     #     import win_unicode_console
     #     win_unicode_console.disable()
+    dd = pd.DataFrame()
     while 1:
         try:
             # log.setLevel(LoggerFactory.INFO)
             # log.setLevel(LoggerFactory.DEBUG)
             code = input("code:")
+            if len(code) == 0:
+                # code='最近两周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
+                # code='周线2连阳,最近三周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
+                code='日K,4连阳以上,4天涨幅排序,今天阳线'
+                code=['上周周线阳,最近三周振幅大于10,日K收盘价大于5日线,今日涨幅排序',\
+                    '最近3日内两天日线最高价大于boll上轨,连续两天最低价大于5日线,大于boll上轨天数排序,涨停股以封单除以流通股排序',\
+                    '月线收盘价大于20月线,最近3周内有周线收盘价大于boll上轨,连续两周最低价大于5周线,周线低点大于前一周,大于boll上轨天数排序',\
+                    '最近三日内最低价大于250日线,最近三日内放量上涨,三日内涨幅排序',\
+                    '日K,3连阳以上,3天涨幅排序,收盘价大于boll上轨',\
+                    '日K,3连阳以上,最高价大于30天前区间最高价,连续阳线天数排序倒叙']
+                for idx in range(len(code)):
+                    print("%s: %s"%(idx+1,code[idx]))
+                code='最近三日内最低价大于250日线,最近3日内涨停过,涨停股以当天封单除以流通股排序价'
+                print('run:%s'%(code))
             args = parser.parse_args(code.split())
             # if not code.lower() == 'q' and not code.lower() == 'quit' and not code.lower() == 'exit' and not code == 'q' and not code == 'e' and not str(args.code) == 'None' and (args.wencai == 'y' or re.match('[a-zA-Z]+',code) is not None  or re.match('[ \u4e00 -\u9fa5]+',code) == None ):
             # if not cct.get_os_system() == 'mac':
             #     import ipdb;ipdb.set_trace()
-
+            re_words = re.compile(u"[\u4e00-\u9fa5]+")
             if not code.lower() == 'q' and not code.lower() == 'quit' and not code.lower() == 'exit' and not code == 'q' and not code == 'e' \
-                and not str(args.code) == 'None' and (args.wencai == 'y' and (re.match('[a-zA-Z]+',code) is  None  and re.match(r"[\u4e00-\u9fa5]+",code) is not None ) ):
-                df  = wcd.get_wencai_Market_url(code,200,pct=False)
-                print(df.shape,df[:8])
+                and not str(args.code) == 'None' and (args.wencai == 'y' and ( len(re.findall(re_words, code)) >0  )  ):
+                # and not str(args.code) == 'None' and (args.wencai == 'y' and ( (re.match(r"[\u4e00-\u9fa5]+",code) is not None or re.match(r"[\u4e00-\u9fa5]+",code[1:]) is not None or re.match(r"[\u4e00-\u9fa5]+",code[2:]) is not None or re.match(r"[\u4e00-\u9fa5]+",code[-2:]) is not None) ) ):
+                # and not str(args.code) == 'None' and (args.wencai == 'y' and (re.match('[a-zA-Z]+',code) is  None  and (re.match(r"[\u4e00-\u9fa5]+",code) is not None or re.match(r"[\u4e00-\u9fa5]+",code[1:]) is not None or re.match(r"[\u4e00-\u9fa5]+",code[2:]) is not None or re.match(r"[\u4e00-\u9fa5]+",code[-2:]) is not None) ) ):
+                # df  = wcd.get_wencai_Market_url(code,200,pct=False)
+                import pywencai
+                import datetime
+                # df  = pywencai.get(query=code.split()[0], sort_order='asc')
+                df  = pywencai.get(query=code.split()[0])
+                # df = df[ ~ df.股票代码.str.startswith(('688','87','83')) ]
+                df['股票代码'] = df['股票代码'].apply(lambda x:cct.symbol_to_code(x.replace('.','')))
+                df = df[ df.股票代码.str.startswith(('30','60','00')) ]
+
+                df = df.set_index('股票代码')
+
+                # df = df.iloc[:,[0,1,2,3,4,5]]
+                current_date = datetime.date.today()
+                # 获取当前年份
+                current_year = current_date.year
+                # 获取上一年的日期
+                previous_year_date = current_date.replace(year=current_year - 1)
+                # 获取上一年的年份
+                previous_year = previous_year_date.year
+                df.columns=df.columns.str.replace('区间涨跌幅:前复权','')
+                df.columns=df.columns.str.replace(str(previous_year),'')
+                df.columns=df.columns.str.replace(str(current_year),'')
+                # df.iloc[:,[0,1,2,3,4,5,6]]
+                if '概念资讯' in df.columns:
+                    df.drop(['概念资讯'],axis=1,inplace=True)
+                # print(df.shape,df.columns)
+                dd=df.copy()
+                print(df.shape)
+                # print(df.shape,df.iloc[:8,[0,1,2,3,4,5]])
+                if len(df.columns) > 7:
+                    print(show_ths_data(df.iloc[:args.num,[0,1,2,3,4,5,6,7]]))
+                else:
+                    print(show_ths_data(df.iloc[:args.num,[x for x in range(len(df.columns)-1)]]))
                 if len(df) == 1:
                     if re.match('[ \\u4e00 -\\u9fa5]+',code) == None:
                         args.code = df.code.values[0]
@@ -147,6 +233,8 @@ if __name__ == "__main__":
                 start = cct.day8_to_day10(args.start)
                 end = cct.day8_to_day10(args.end)
                 df = None
+                print('ths:')
+                print((search_ths_data(args.code)))
                 if args.line == 'y' and args.mpl == 'y':
                     code = args.code
                     args.filter = 'n'
@@ -253,17 +341,28 @@ if __name__ == "__main__":
                 parser.print_help()
 
             elif code.startswith('w') or code.startswith('a'):
-                blkname = '077.blk'
-                block_path = tdd.get_tdx_dir_blocknew() + blkname
-                args=cct.writeArgmain().parse_args(code.split())
-                codew=stf.WriteCountFilter(pd.DataFrame(), writecount=args.dl)
-                if args.code == 'a':
-                    cct.write_to_blocknew(block_path, codew)
-                    # cct.write_to_blocknew(all_diffpath,codew)
-                # else:
-                #     cct.write_to_blocknew(block_path, codew, False)
-                    # cct.write_to_blocknew(all_diffpath,codew,False)
-                    print(("wri ok:%s" % block_path))
+
+                if len(dd) > 0:
+                    blkname = '077.blk'
+                    block_path = tdd.get_tdx_dir_blocknew() + blkname
+
+                    if args.num == 10:
+                        args=cct.writeArgmain().parse_args(code.split())
+                        writecount = args.dl
+                    else:
+                        writecount = args.num
+                    codew=stf.WriteCountFilter(dd, writecount=writecount)
+                    if args.code == 'a':
+                        cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=False,reappend=False)
+                        # cct.write_to_blocknew(block_path, codew)
+                        # cct.write_to_blocknew(all_diffpath,codew)
+                        print(("wri append ok:%s" % block_path))
+                    else:
+                        cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=False,reappend=False)
+                        # cct.write_to_blocknew(all_diffpath,codew,False)
+                        print(("wri all ok:%s" % block_path))
+                else:
+                    print("df is None,not Wri")
             else:
                 pass
 

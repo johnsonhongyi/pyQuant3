@@ -123,7 +123,7 @@ if __name__ == "__main__":
     # base_path = tdd.get_tdx_dir()
     # block_path = tdd.get_tdx_dir_blocknew() + '067.blk'
     # blkname = '067.blk'
-    blkname = '063.blk'
+    blkname = '066.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
     lastpTDX_DF = pd.DataFrame()
     parserDuraton = cct.DurationArgmain()
@@ -132,6 +132,16 @@ if __name__ == "__main__":
     resample = ct.resample_dtype
     end_date = cct.last_tddate(days=3)
     
+    from JohnsonUtil import inStockDb as inDb
+    # indf = inDb.showcount(inDb.selectlastDays(0))
+    indf = inDb.show_stock_pattern()
+
+    if len(indf) > 0 and cct.creation_date_duration(block_path) > 0:
+        cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
+    else:
+        if cct.creation_date_duration(block_path) > 0:
+            log.error("indb last1days is None")   
+
     # all_diffpath = tdd.get_tdx_dir_blocknew() + '062.blk'
 
     if len(str(duration_date)) < 4:
@@ -165,7 +175,9 @@ if __name__ == "__main__":
             # market_blk = '077'
             # top_now = tdd.getSinaAlldf(market=market_blk, filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType,trend=False)
             
-            market_blk = '近期异动'
+            # market_blk = '近期异动'
+            # tdxbkdict={'近期新高':'880865','近期异动':'880884'}
+            market_blk = '066'
 
             top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
 
@@ -197,7 +209,7 @@ if __name__ == "__main__":
             # print ("Buy>0:%s"%len(top_now[top_now['buy'] > 0])),
             # log.info("top_now['buy']:%s" % (top_now[:2]['buy']))
             # log.info("top_now.buy[:30]>0:%s" %len(top_now[:30][top_now[:30]['buy'] > 0]))
-            if len(top_now) > 10 or cct.get_work_time():
+            if len(top_now) > 1 or cct.get_work_time():
                 # if len(top_now) > 10 or len(top_now[:10][top_now[:10]['buy'] > 0]) > 3:
                 # if len(top_now) > 10 and not top_now[:1].buy.values == 0:
                 #     top_now=top_now[top_now['percent']>=0]

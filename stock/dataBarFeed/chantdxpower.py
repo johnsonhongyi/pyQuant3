@@ -75,6 +75,20 @@ show_mpl = True
 #                    frequency=stock_frequency,skip_paused=False,fq='pre')
 
 
+def search_ths_data(code):
+    fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xls'
+    df = pd.read_excel(fpath)
+    # df = df.reset_index().set_index('股票代码')
+    df = df.set_index('股票代码')
+    # df = df.iloc[:,[1,2,4,5,6,7,8,9]]
+    df = df.iloc[:,[4,5,6,7,8]]
+    # return (df[df.index == cct.code_to_symbol_ths(code)])
+    data = df[df.index == cct.code_to_symbol_ths(code)]
+    # table, widths=cct.format_for_print(data, widths=True)
+    # table=cct.format_for_print2(data).get_string(header=False)
+    table =cct.format_for_print(data,header=False)
+    return table
+
 def LIS(X):
     N = len(X)
     P = [0] * N
@@ -216,6 +230,8 @@ def show_chan_mpl_tdx(code, start_date=None, end_date=None, stock_days=60, resam
         # cur_ji = 1 #当前级别
         # 符合k线根数大于4根 1日级别， 2 30分钟， 3 5分钟， 4 一分钟
         least_khl_num = get_least_khl_num(get_resample_ciji(resample), 1, init_num=least_init)
+        print('ths:')
+        print((search_ths_data(code)))
         log.info ("次级:%s %s st_data:%s k_data_dts:%s least_khl_num:%s" % (resample,len(k_data_dts) - k_data_dts.index(st_data), str(st_data)[:10], len(k_data_dts), least_khl_num))
         start_dt =str(st_data)[:10]
         if not recursion:
@@ -756,6 +772,9 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
         # cur_ji = 1 #当前级别
         # 符合k线根数大于4根 1日级别， 2 30分钟， 3 5分钟， 4 一分钟
         least_khl_num = get_least_khl_num(get_resample_ciji(resample), 1, init_num=least_init)
+
+        print('ths:')
+        print((search_ths_data(code)))
         print(("次级:%s %s st_data:%s k_data_dts:%s least_khl_num:%s" % (resample,len(k_data_dts) - k_data_dts.index(st_data), str(st_data)[:10], len(k_data_dts), least_khl_num)))
         
         if not recursion:
@@ -1871,6 +1890,9 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         # cur_ji = 1 #当前级别
         # 符合k线根数大于4根 1日级别， 2 30分钟， 3 5分钟， 4 一分钟
         least_khl_num = get_least_khl_num(get_resample_ciji(resample), 1, init_num=least_init)
+
+        print('ths:')
+        print((search_ths_data(code)))
         print(("次级:%s %s st_data:%s k_data_dts:%s least_khl_num:%s" % (resample,len(k_data_dts) - k_data_dts.index(st_data), str(st_data)[:10], len(k_data_dts), least_khl_num)))
        
         if not recursion:
@@ -2497,11 +2519,11 @@ def parseArgmain():
         parser.add_argument('code', type=str, nargs='?', help='999999')
         parser.add_argument('start', nargs='?', type=str, help='20150612')
         parser.add_argument('end', nargs='?', type=str, help='20160101')
-        parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['1','3','5','10', '15', '30','60', 'd', 'w', 'm'], default='d', help='DateType')
+        parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['1','3','5','10', '15', '30','60', 'd', 'w', 'm'], default='w', help='DateType')
         parser.add_argument('-v', action="store", dest="vtype", type=str, choices=['f', 'b'], default='f', help='Price Forward or back')
         parser.add_argument('-p', action="store", dest="ptype", type=str, choices=['high', 'low', 'close'], default='low', help='price type')
         parser.add_argument('-f', action="store", dest="filter", type=str, choices=['y', 'n'], default='y', help='find duration low')
-        parser.add_argument('-l', action="store", dest="dl", type=int, default=160, help='dl default=160')
+        parser.add_argument('-l', action="store", dest="dl", type=int, default=300, help='dl default=300')
         parser.add_argument('-da', action="store", dest="days", type=int, default=ct.Power_last_da, help='shift days')
         parser.add_argument('-m', action="store", dest="mpl", type=str, default='y', help='mpl show')
         parser.add_argument('-i', action="store", dest="line", type=str, choices=['y', 'n'], default='y', help='LineHis show')

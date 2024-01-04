@@ -104,8 +104,19 @@ if __name__ == "__main__":
     # delay_time = cct.get_delay_time()
     First = True
     # blkname = '062.blk'
-    blkname = '061.blk'
+    blkname = '065.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
+
+    from JohnsonUtil import inStockDb as inDb
+    # indf = inDb.showcount(inDb.selectlastDays(0))
+    indf = inDb.show_macd_boll_up()
+    
+    if len(indf) > 0 and cct.creation_date_duration(block_path) > 0:
+        cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
+    else:
+        if cct.creation_date_duration(block_path) > 0:
+            log.error("indb last1days is None")   
+
     status_change = False
     lastpTDX_DF = pd.DataFrame()
     # dl=60
@@ -143,7 +154,7 @@ if __name__ == "__main__":
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort)
     st = None
 
-    search250.get_roll_mean_all(single=False, tdx=True, app=False,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w')
+    # search250.get_roll_mean_all(single=False, tdx=True, app=False,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w')
 
     while 1:
         try:
@@ -169,7 +180,9 @@ if __name__ == "__main__":
            
 
             # market_blk = '近期新高'
-            market_blk = '060'
+            # market_blk = '060'
+            # market_blk = '065'
+            market_blk = '077'
 
             top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
             
@@ -193,7 +206,7 @@ if __name__ == "__main__":
             else:
                 status_change = False
             # print ("Buy>0:%s" % len(top_now[top_now['buy'] > 0])),
-            if len(top_now) > 10 or cct.get_work_time():
+            if len(top_now) > 1 or cct.get_work_time():
                 time_Rt = time.time()
                 if len(top_all) == 0 and len(lastpTDX_DF) == 0:
                     cct.get_terminal_Position(position=sys.argv[0])

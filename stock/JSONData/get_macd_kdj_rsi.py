@@ -7,7 +7,9 @@ import numpy as np
 import pandas as pd
 import pandas_ta as ta
 import tushare as ts
-from . import tdx_data_Day as tdd
+import sys
+sys.path.append("..")
+from JSONData import tdx_data_Day as tdd
 from JohnsonUtil import LoggerFactory as LoggerFactory
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import commonTips as cct
@@ -483,7 +485,7 @@ def Get_MACD(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
         df['close'], fastperiod=5, slowperiod=34, signalperiod=5)
     SignalMA5 = ta.ma("sma",df['dea%s' % dtype], length=5)
     SignalMA10 = ta.ma("sma",df['dea%s' % dtype], length=10)
-    SignalMA20 = ta.ma("sma","sma",df['dea%s' % dtype], length=20)
+    SignalMA20 = ta.ma("sma",df['dea%s' % dtype], length=20)
     # 13-15 DIFF  DEA  DIFF-DEA
     # df['diff%s' % dtype] = pd.Series(macd, index=df.index)  # DIFF 13
     # df['dea%s' % dtype] = pd.Series(macdsignal, index=df.index)  # DEA  14
@@ -620,6 +622,10 @@ def Get_KDJ(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
             operate = algoMultiTech(df, column=cl, days=days, op=operate)
         df = df.sort_index(ascending=False)
     return (df, operate)
+
+#ASI
+def Get_Asi(df):
+    df['asi']
 
 
 # 通过RSI判断买入卖出
@@ -774,9 +780,9 @@ if __name__ == '__main__':
     import sys
     # print powerStd('600208',ptype='vol')
     code = '000993'
-    codel=['600917','300638','002695','601555','002486','600321','002437','399006','999999']
+    # codel=['600917','300638','002695','601555','002486','600321','002437','399006','999999']
     # codel = ['300661', '600212', '300153', '603580']
-    # codel=['600212']
+    codel=['000705']
     # dl = 21
     # for code in codel:
     #     df = tdd.get_tdx_append_now_df_api(
@@ -824,8 +830,8 @@ if __name__ == '__main__':
         print('bollcalgoMultiTech:', operate, end=' ')
         operate = algoMultiDay(df, column='close', days=days)
         print('ma:', operate, end=' ')
-        # dd, op = Get_MACD_OP(df, days=days)
-        dd, op = Get_MACD(df, days=days)
+        dd, op = Get_MACD_OP(df, days=days)
+        # dd, op = Get_MACD(df, days=days)
         print(' macd:%s' % (op), end=' ')
         dd, op = Get_RSI(df, days=days)
         print('RSI:%s' % (op), end=' ')
@@ -840,7 +846,9 @@ if __name__ == '__main__':
         if len(code) != 6:
             continue
         else:
-            df = tdd.get_tdx_append_now_df_api(code, dl=30)
+            df = tdd.get_tdx_append_now_df_api(code, dl=300)
+            df = tdd.get_tdx_stock_period_to_type(df)
+            
             # print df[:2]
             # print "len:",len(df)
             s = time.time()

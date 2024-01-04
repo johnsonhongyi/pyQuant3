@@ -161,7 +161,7 @@ if __name__ == "__main__":
             else:
                 status_change = False
             # print ("Buy>0:%s" % len(top_now[top_now['buy'] > 0])),
-            if len(top_now) > 10 or cct.get_work_time():
+            if len(top_now) > 1 or cct.get_work_time():
                 # time_Rt = time.time()
                 if len(top_all) == 0 and len(lastpTDX_DF) == 0:
                     cct.get_terminal_Position(position=sys.argv[0])

@@ -58,6 +58,20 @@ perdallu = "df[df.columns[ ((df.columns >= 'du1d') & (df.columns <= 'du%sd'%(ct.
 root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\'
 dfcf_path = 'D:\\MacTools\\WinTools\\eastmoney\\swc8\\config\\User\\6327113578970854\\StockwayStock.ini'
 
+win10Lengend = r'D:\Program\gfzq'
+win10Lixin = r'C:\zd_zszq'
+win10Triton = r'D:\MacTools\WinTools\new_tdx2'
+#东兴
+win10pazq = r'D:\MacTools\WinTools\new_tdx2'
+win7rootAsus = r'D:\Program Files\gfzq'
+win7rootXunji = r'E:\DOC\Parallels\WinTools\zd_pazq'
+win7rootList = [win10Triton,win10Lixin, win7rootAsus, win7rootXunji, win10Lengend]
+# macroot = r'/Users/Johnson/Documents/Johnson/WinTools/zd_pazq'
+macroot = r'/Users/Johnson/Documents/Johnson/WinTools/new_tdx'
+macroot_vm = r'/Volumes/VMware Shared Folders/MacTools/WinTools/new_tdx'
+xproot = r'E:\DOC\Parallels\WinTools\zd_pazq'
+
+
 class GlobalValues:
     # -*- coding: utf-8 -*-
 
@@ -114,7 +128,7 @@ def format_for_print2(df):
     table = PrettyTable(list(df.columns))
     for row in df.itertuples():
         table.add_row(row[1:])
-    return str(table)
+    return (table)
 
 
 from py_mini_racer import py_mini_racer
@@ -477,16 +491,7 @@ def get_run_path_tdx(fp=None):
     
     return path
 
-win10Lengend = r'D:\Program\gfzq'
-win10Lixin = r'C:\zd_zszq'
-win10Triton = r'D:\MacTools\WinTools\new_tdx'
-win7rootAsus = r'D:\Program Files\gfzq'
-win7rootXunji = r'E:\DOC\Parallels\WinTools\zd_pazq'
-win7rootList = [win10Triton,win10Lixin, win7rootAsus, win7rootXunji, win10Lengend]
-# macroot = r'/Users/Johnson/Documents/Johnson/WinTools/zd_pazq'
-macroot = r'/Users/Johnson/Documents/Johnson/WinTools/new_tdx'
-macroot_vm = r'/Volumes/VMware Shared Folders/MacTools/WinTools/new_tdx'
-xproot = r'E:\DOC\Parallels\WinTools\zd_pazq'
+
 tdx_hd5_name = r'tdx_all_df_%s' % (300)
 tdx_hd5_path = get_run_path_tdx(tdx_hd5_name)
 # win10_ramdisk_root = r'R:'
@@ -662,7 +667,7 @@ terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440'
                         'sina_Monitor-Market.py': '140, 63,1400,440',
                         'sina_Monitor.py': '108, 0, 1400, 520',
                         'singleAnalyseUtil.py': '759, 0,920,360',
-                        'LinePower.py': '16, 186,800,420',
+                        'LinePower.py': '16, 186, 1498, 420',
                         'sina_Market-DurationDnUP.py': '41, 362,1400,480' ,
                         'instock_Monitor.py':'62, 86,1360,440',
                         'chantdxpower.py':'86, 128, 1200, 480',}
@@ -1405,11 +1410,12 @@ def cct_raw_input(sts):
     # if get_os_system().find('win') >= 0:
         # win_unicode_console.enable(use_readline_hook=False)
     t1 = time.time() - time_s
-    if t1 < 1 and count_Except is not None and count_Except < 3:
-        time.sleep(3)
+    if t1 < 0.2 and count_Except is not None and count_Except < 3:
+        time.sleep(0.2)
         count_Except = count_Except + 1
         GlobalValues().setkey('Except_count', count_Except)
         st = 'no Input'
+    time.sleep(0.1)
     return st.strip()
 
 # eval_rule = "[elem for elem in dir() if not elem.startswith('_') and not elem.startswith('ti')]"
@@ -2180,7 +2186,77 @@ def _wrapper(enum_iterable, function, **kwargs):
 
 
 from functools import partial
+from multiprocessing import Pool
 def to_mp_run_async(cmd, urllist, *args,**kwargs):
+
+    # if len(urllist) > 150:
+    #     pool_count = (cpu_count()-2)
+    # else:
+    #     pool_count = 2
+    
+    if int(round(len(urllist)/100,0)) < 2:
+        cpu_co = 2
+    else:
+        cpu_co = int(round(len(urllist)/100,0))
+    pool_count = (cpu_count()-2) if cpu_co > (cpu_count()-2) else cpu_co
+    result = []  
+    time_s = time.time()
+    # func = partial(cmd, **kwargs)
+    if len(kwargs) > 0 :
+            # pool = ThreadPool(12)
+            func = partial(cmd, **kwargs)
+            # TDXE:44.26  cpu 1   
+            # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
+            # results = pool.map(func, urllist)
+            # try:
+            #     for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
+            #         results.append(y)
+            # except Exception as e:
+            #     log.error("except:%s"%(e))
+            try:
+                with Pool(processes=pool_count) as pool:
+                    data_count=len(urllist)
+                    progress_bar = tqdm(total=data_count)
+                    # print("mapping ...")
+                    # tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols)
+                    results = tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count)
+                    # print("running ...")
+
+                    result = tuple(results)  # fetch the lazy results
+                # print("done")
+            except Exception as e:
+                log.error("except:%s"%(e))
+
+    else:
+        # pool = ThreadPool(cpu_count())
+        # # log.error("to_mp_run args is not None")
+        # for inx in tqdm(list(range(len(urllist))),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
+        #     code = urllist[inx]
+        # # for code in urllist:
+        #     try:
+        #         # result = pool.apply_async(cmd, (code,) + args).get()
+        #         results.append(pool.apply_async(cmd, (code,) + args).get())
+        #     except Exception as e:
+        #         log.error("except:%s code:%s"%(e,code))
+        try:
+            with Pool(processes=pool_count) as pool:
+                data_count=len(urllist)
+                progress_bar = tqdm(total=data_count)
+                # print("mapping ...")
+                # tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols)
+                results = tqdm(pool.imap_unordered(cmd, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count)
+                # print("running ...")
+                result=tuple(results)  # fetch the lazy results
+                # print("done")
+            # log.error("no test")
+        except Exception as e:
+            log.error("except:%s"%(e))
+
+    print("time:%s"%(round(time.time()-time_s,2)),)
+    return result
+
+
+def to_mp_run_async_outdate2023(cmd, urllist, *args,**kwargs):
     # n_t=time.time()
     # print "mp_async:%s" % len(urllist),
     # print "a!!!!:",status
@@ -2472,7 +2548,7 @@ def get_config_value(fname, classtype, currvalue, limitvalue=1, xtype='limit', r
     return False
 
 
-def get_config_value_ramfile(fname, currvalue=0, xtype='time', update=False,cfgfile='h5config.txt',readonly=False):
+def get_config_value_ramfile(fname, currvalue=0, xtype='time', update=False,cfgfile='h5config.txt',readonly=False,int_time=False):
     classtype = fname
     conf_ini = get_ramdisk_dir() + os.path.sep+ cfgfile
     if xtype == 'trade_date':
@@ -2535,7 +2611,10 @@ def get_config_value_ramfile(fname, currvalue=0, xtype='time', update=False,cfgf
                     save_value = int(currvalue)
                     config[classtype][xtype] = save_value
                     config.write()
-                return int(save_value)
+                if int_time:
+                    return int(time.strftime("%H:%M:%S",time.localtime(save_value))[:6].replace(':',''))
+                else:
+                    return int(save_value)
 
             elif not update:
                 if classtype in list(config.keys()):
@@ -2549,7 +2628,10 @@ def get_config_value_ramfile(fname, currvalue=0, xtype='time', update=False,cfgf
                             time_dif = currvalue - float(config[classtype][xtype])
                         else:
                             time_dif = int(config[classtype][xtype])
-                        return time_dif
+                        if int_time:
+                            return int(time.strftime("%H:%M:%S",time.localtime(time_dif))[:6].replace(':',''))
+                        else:
+                            return time_dif
 
                 else:
                     config[classtype] = {}
@@ -2731,7 +2813,7 @@ def write_to_blkdfcf(codel,conf_ini=dfcf_path,blk='inboll1',append=True):
         # print('instock:',cf.get("\\SelfSelect", "instock"))
         cf.write(open(conf_ini,"w",encoding='UTF-16'))
 
-def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None,dfcf=True):
+def write_to_blocknew(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=True,reappend=True):
     if keep_last is None:
         keep_last = ct.keep_lastnum
     # index_list = ['1999999','47#IFL0',  '0159915', '27#HSI']
@@ -2742,7 +2824,7 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
     # index_list = ['0399001', '1999999', '0159915']
     # index_list = ['1999999', '27#HSI',  '0159915']
 
-    def writeBlocknew(p_name, data, append=True,keep_last=keep_last):
+    def writeBlocknew(p_name, data, append=True,keep_last=keep_last,reappend=True):
         flist=[]
         if append:
             fout = open(p_name, 'rb+')
@@ -2839,8 +2921,10 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
                     counts += 1
                     flist.append(raw)
                 else:
-                    flist.remove(raw)
-                    flist.append(raw)
+                    #if exist will remove and append
+                    if reappend:
+                        flist.remove(raw)
+                        flist.append(raw)
 
         fout = open(p_name, 'wb+')
         for code in flist:
@@ -2874,24 +2958,24 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=True, keep_last=None
     if p_name.find('061.blk') > 0 or p_name.find('062.blk') > 0 or p_name.find('063.blk') > 0:
         writeBlocknew(p_name, data, append)
         if doubleFile:
-            writeBlocknew(blockNew, data, append=True)
+            writeBlocknew(blockNew, data, append=True,reappend=reappend)
             # writeBlocknew(blockNewStart, data, append=True)
         # print "write to :%s:%s"%(p_name,len(data))
     elif p_name.find('064.blk') > 0:
-        writeBlocknew(p_name, data, append)
+        writeBlocknew(p_name, data, append,reappend=reappend)
         if doubleFile:
-            writeBlocknew(blockNew, data, append=True,keep_last=12)
+            writeBlocknew(blockNew, data, append=True,keep_last=12,reappend=reappend)
             # writeBlocknew(blockNewStart, data, append=True)
         # print "write to append:%s :%s :%s"%(append,p_name,len(data))
     elif p_name.find('068.blk') > 0 or p_name.find('069.blk') > 0:
 
-        writeBlocknew(p_name, data, append)
+        writeBlocknew(p_name, data, append,reappend=reappend)
         # print "write to append:%s :%s :%s"%(append,p_name,len(data))
 
     else:
-        writeBlocknew(p_name, data, append)
+        writeBlocknew(p_name, data, append,reappend=reappend)
         if doubleFile:
-            writeBlocknew(blockNew, data,append=True)
+            writeBlocknew(blockNew, data,append=True,reappend=reappend)
             # writeBlocknew(blockNewStart, data, append=True)
         # print "write to append:%s :%s :%s"%(append,p_name,len(data))
     if dfcf:
@@ -4444,7 +4528,7 @@ if __name__ == '__main__':
     print(read_to_indb())
     print(is_trade_date())
     print(get_trade_date_status())
-
+    print(get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date'))
     print(code_to_symbol_ths('000002'))
     print(get_index_fibl())
     GlobalValues()

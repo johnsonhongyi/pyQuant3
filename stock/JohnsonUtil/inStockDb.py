@@ -11,7 +11,8 @@ import datetime
 import sys
 
 # stdout=sys.stdout
-sys.path.append('../')
+# import commonTips as cct
+# sys.path.append('../')
 # from JohnsonUtil import commonTips as cct
 # from JSONData import tdx_data_Day as tdd
 
@@ -165,11 +166,11 @@ MYSQL_CONN_DBAPI = {'host': db_host, 'user': db_user, 'password': db_password, '
                     'charset': db_charset, 'port': db_port, 'autocommit': True}
 
 
-try:
-    with pymysql.connect(**MYSQL_CONN_DBAPI) as mydb:
-        mydb.cursor().execute(" select 1 ")
-except Exception as e:
-        logging.error("执行信息：数据库不存在，将创建。")
+# try:
+#     with pymysql.connect(**MYSQL_CONN_DBAPI) as mydb:
+#         mydb.cursor().execute(" select 1 ")
+# except Exception as e:
+#         logging.error("执行信息：数据库不存在，将创建。")
 
 
 import pandas as pd
@@ -180,7 +181,7 @@ warnings.filterwarnings('ignore')
 
 def panda_df(conn,sql):
     df = pd.read_sql(sql, conn)
-    print(df.shape)
+    print("inDb:",df.shape)
     return df
 
 from pandas import DataFrame as df
@@ -260,17 +261,146 @@ def selectlastDays(days=7):
     return dflast
 
 
-def showcount(dflast7d):
+def showcount(dflast7d,sort_date=False):
+
     df7multiIndex = dflast7d.reset_index().set_index(['code','date'])
     # print(df7multiIndex[:5])
     df7tail = df7multiIndex.groupby(level=[0]).tail(1)
     # df7tail.reset_index().code
-    df7tail =  df7tail.sort_values(by=['rate_1'],ascending=[0])
+    if sort_date:
+        df7tail= df7tail.reset_index().sort_values(by=['date','rate_1'],ascending=[0,0])
+    else:
+        df7tail =  df7tail.sort_values(by=['rate_1'],ascending=[0])
     return (df7tail)
 
+def show_macd_boll_up():
+    conn = pymysql.connect(**MYSQL_CONN_DBAPI)
+
+
+    lastday = last_tddate(1)
+    today_now = last_tddate(0)
+
+    mycursor = conn.cursor()
+
+    sql_select_code = f'''select date,code,name,close,macd,macds,macdh,kdjk,kdjd,kdjj,boll_ub,boll FROM cn_stock_indicators WHERE macd>0 AND macds >0 AND macdh >0 AND close >=boll_ub AND date=CURDATE()  '''
+    dflast = panda_df(conn,sql_select_code)
+    # dflast = []
+    while len(dflast) == 0:
+        for x in range(1, 7):
+            # print(last_tddate(x))
+            # sql_now = f'''SELECT {_selcolall} FROM `{_table_name}` WHERE `date` >= '{last_tddate(x)}' '''
+            sql_select_code_da = f'''select date,code,name,close,macd,macds,macdh,kdjk,kdjd,kdjj,boll_ub,boll FROM cn_stock_indicators WHERE macd>0 AND macds >0 AND macdh >0 AND close >=boll_ub AND date=CURRENT_DATE - INTERVAL %s DAY  '''%(x)
+            dflast = panda_df(conn,sql_select_code_da)
+            if len(dflast) > 0:
+                break
+    # mycursor.execute(sql_columns)
+    # mycursor.execute(sql_now)
+
+    # myresult = mycursor.fetchall()
+    # for x in myresult:
+    #   print(x)
+    conn.close()
+    return dflast
+def show_macd_boll_up7():
+    conn = pymysql.connect(**MYSQL_CONN_DBAPI)
+
+
+    lastday = last_tddate(1)
+    today_now = last_tddate(0)
+
+    mycursor = conn.cursor()
+
+    sql_select_code = f'''select date,code,name,close,macd,macds,macdh,kdjk,kdjd,kdjj,boll_ub,boll FROM cn_stock_indicators WHERE macd>0 AND macds >0 AND macdh >0 AND date>=CURRENT_DATE - INTERVAL 7 DAY AND close >=boll_ub '''
+    dd = panda_df(conn,sql_select_code)
+    # dflast = []
+    while len(dd) == 0:
+        for x in range(1, 7):
+            # print(last_tddate(x))
+            # sql_now = f'''SELECT {_selcolall} FROM `{_table_name}` WHERE `date` >= '{last_tddate(x)}' '''
+            sql_select_code_da = f'''select date,code,name,close,macd,macds,macdh,kdjk,kdjd,kdjj,boll_ub,boll FROM cn_stock_indicators WHERE macd>0 AND macds >0 AND macdh >0 AND date=CURRENT_DATE - INTERVAL %s DAY AND close >=boll_ub '''%(x)
+            dd = panda_df(conn,sql_select_code_da)
+            if len(dflast) > 0:
+                break
+    # mycursor.execute(sql_columns)
+    # mycursor.execute(sql_now)
+
+    # myresult = mycursor.fetchall()
+    # for x in myresult:
+    #   print(x)
+    conn.close()
+    dd['couts'] = dd.groupby(['code'])['code'].transform('count')
+
+    dd.date=dd.date.apply(lambda x:str(x))
+
+    if len(dd[(dd.couts > 1) & (dd.date>=today_now)]) == 0:
+        dd = dd[(dd.couts > 1) & (dd.date>=lastday)]
+    else:
+        dd = dd[(dd.couts > 1) & (dd.date>=today_now)]
+    return dd
+
+def show_stock_pattern(filter=True):
+    conn = pymysql.connect(**MYSQL_CONN_DBAPI)
+
+
+    lastday = last_tddate(1)
+    today_now = last_tddate(0)
+
+    mycursor = conn.cursor()
+
+    # sql_select_code = f'''select date,code,name,closing_marubozu,marubozu,long_line_candle FROM cn_stock_pattern WHERE (closing_marubozu=100 OR marubozu=100 OR long_line_candle=100) AND date>CURDATE() - INTERVAL 7 DAY ORDER BY date desc ;'''
+    sql_select_code = f'''select date,code,name,closing_marubozu,marubozu,long_line_candle FROM cn_stock_pattern WHERE (closing_marubozu=100) AND date>CURDATE() - INTERVAL 7 DAY ORDER BY date desc ;'''
+    dd = panda_df(conn,sql_select_code)
+
+    # while len(dd) == 0:
+    #     for x in range(1, 7):
+    #         # print(last_tddate(x))
+    #         # sql_now = f'''SELECT {_selcolall} FROM `{_table_name}` WHERE `date` >= '{last_tddate(x)}' '''
+    #         sql_select_code_da = f'''select date,code,name,close,macd,macds,macdh,kdjk,kdjd,kdjj,boll_ub,boll FROM cn_stock_indicators WHERE macd>0 AND macds >0 AND macdh >0 AND date=CURRENT_DATE - INTERVAL %s DAY AND close >=boll_ub '''%(x)
+    #         dd = panda_df(conn,sql_select_code_da)
+    #         if len(dflast) > 0:
+    #             break
+
+    # mycursor.execute(sql_columns)
+    # mycursor.execute(sql_now)
+
+    # myresult = mycursor.fetchall()
+    # for x in myresult:
+    #   print(x)
+    conn.close()
+    dd['couts'] = dd.groupby(['code'])['code'].transform('count')
+
+    dd.date=dd.date.apply(lambda x:str(x))
+    dd = dd.sort_values(by=['couts'],ascending=[0])
+    if len(dd[(dd.couts > 1) & (dd.date>=today_now)]) == 0:
+        dd = dd[((dd.couts > 1)  | ((dd.marubozu == 100) & (dd.long_line_candle == 100)) ) & (dd.date>=lastday) ]
+    else:
+        dd = dd[((dd.couts > 1)  | ((dd.marubozu == 100) & (dd.long_line_candle == 100)) ) & (dd.date>=today_now) ]
+    
+    
+    # if len(dd[dd.couts > dd.couts.mean()]) > 0:
+
+    #     dd = dd[dd.couts > dd.couts.mean()]
+    # else:
+    #     dd = dd[dd.couts > dd.couts.mean()]
+
+    if filter:
+        df_boll = show_macd_boll_up()
+        colist = [co for co in dd.code.values if co in df_boll.code.values]
+
+        return dd.set_index('code').loc[colist].reset_index()
+    else:
+        return dd
 
 if __name__ == '__main__':
     # print(selectlastDays(7)[selectlastDays(7).code == '600355'])
     # print(selectlastDays(0))
 
-    print(showcount(selectlastDays(7)))
+    # print(showcount(selectlastDays(1),sort_date=True))
+
+    print(show_macd_boll_up())
+    print(show_macd_boll_up7())
+    df=show_stock_pattern()
+    print(df)
+    # blkname = '066.blk'
+    # block_path = tdd.get_tdx_dir_blocknew() + blkname
+    # cct.write_to_blocknew(block_path, df.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
