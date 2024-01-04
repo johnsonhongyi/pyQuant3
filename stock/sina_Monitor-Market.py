@@ -121,7 +121,7 @@ if __name__ == "__main__":
             # print ("Buy>0:%s"%len(top_now[top_now['buy'] > 0])),
             log.info("top_now['buy']:%s" % (top_now[:2]['buy']))
             log.info("top_now.buy[:30]>0:%s" % len(top_now[:30][top_now[:30]['buy'] > 0]))
-            if len(top_now) > 10 or cct.get_work_time():
+            if len(top_now) > 1 or cct.get_work_time():
                 # if len(top_now) > 10 or len(top_now[:10][top_now[:10]['buy'] > 0]) > 3:
                 # if len(top_now) > 10 and not top_now[:1].buy.values == 0:
                 #     top_now=top_now[top_now['percent']>=0]

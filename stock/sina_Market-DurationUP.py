@@ -102,7 +102,9 @@ if __name__ == "__main__":
     # duration_date = ct.duration_date_up
     # duration_date = ct.duration_date_l
     # duration_date = 10
-    duration_date = 180
+    duration_date = ct.duration_date_week
+    # ct.duration_date_week -> 200
+    
     # duration_date = 300
     du_date = duration_date
     # resample = ct.resample_dtype
@@ -166,7 +168,7 @@ if __name__ == "__main__":
             else:
                 status_change = False
 
-            if len(top_now) > 10 or cct.get_work_time():
+            if len(top_now) > 1 or cct.get_work_time():
                 # time_Rt = time.time()
                 if len(top_all) == 0 and len(lastpTDX_DF) == 0:
                     cct.get_terminal_Position(position=sys.argv[0])

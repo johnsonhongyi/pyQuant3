@@ -2,7 +2,7 @@ import numpy as np
 import pyqtgraph as pg
 from pyqtgraph import QtCore, QtGui
 
-from .JSONData import tdx_data_Day as tdd
+from JSONData import tdx_data_Day as tdd
 
 
 # import pyqtgraph.examples

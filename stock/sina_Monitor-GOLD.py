@@ -169,7 +169,7 @@ if __name__ == "__main__":
 
             else:
                 status_change = False
-            if len(top_now) > 10 and len(top_now.columns) > 4:
+            if len(top_now) > 1 and len(top_now.columns) > 4:
                 # if 'percent' in top_now.columns.values:
                 #     top_now=top_now[top_now['percent']>0]
                 if 'trade' in top_now.columns:

@@ -40,10 +40,12 @@ PowerCount = 1000
 duration_diff = 6
 duration_date_l = 60
 duration_date_up = 120
+duration_date_week = 200
+
 duration_date_sort = duration_date_l
 # PowerCountdl = duration_date_l * 2 if duration_date_l < 20 else duration_date_l
 PowerCountdl = duration_date_l * 2 if duration_date_l < 20 else duration_date_l
-linePowerCountdl = 160
+linePowerCountdl = 300
 Power_Ma_Days = 6
 Power_last_da = 1
 wencai_end_time = 2400
@@ -178,7 +180,7 @@ Duration_sort_percd_key = [0, 0,0, 0, 0, 0, 1, 1, 0, 0, 1, 1]
 # Duration_percent_dff = ['percent','per1d','df2','b1_v', 'dff',  'op',
 Duration_percent_dff = ['percent','per1d','df2','b1_v', 'dff',  'topR',
                         'fib', 'fibl', 'ra', 'volume', 'couts']
-Duration_percent_dff_key = [0, 0,0, 0, 0, 0, 1, 1, 1, 1, 1]
+Duration_percent_dff_key = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
 
 Duration_percent_vol = ['fib','dff','percent',
                         'df2', 'topR',  'volume', 'ra', 'couts']

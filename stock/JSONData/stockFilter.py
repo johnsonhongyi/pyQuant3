@@ -397,8 +397,12 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                 #     df= df[ (df[("%s" % (sort_value))] <= idx_k) ]
                 
                 if market_value == '1.1' and market_key in [ 'x']:
+                    
                     topRlist= [x+0.1 for x in range(1,int(df.topR.max())+1)]
+                    topRlistTop= [x for x in range(1,int(df.topR.max())+1)]
+                    topRlist.extend(topRlistTop)
                     df = df[df.topR.isin(topRlist)]
+                    # df = df[ (df.close > df.lastp1d) & (df.lastp1d >= df.ma51d*0.99) & (df.lastp2d >= df.ma52d*0.99) & (df.lastp3d >= df.ma53d*0.99)]
                     # df= df[ (df[("%s" % (sort_value))] == float(market_value))]
                 else:
                     df= df[ (df[("%s" % (sort_value))] >= idx_k) ]
@@ -764,7 +768,8 @@ def WriteCountFilter(df, op='op', writecount=ct.writeCount, end=None, duration=1
     #     market_value_perd = int(market_value) * 10
     if str(writecount) != 'all':
         if end is None and int(writecount) > 0:
-            if int(writecount) < 101 and len(df) > 0 and 'percent' in df.columns:
+            # if int(writecount) < 101 and len(df) > 0 and 'percent' in df.columns:
+            if int(writecount) < 101 and len(df) > 0:
                 codel = df.index[:int(writecount)].tolist()
                 # market_value = cct.GlobalValues().getkey('market_value')
                 # market_key = cct.GlobalValues().getkey('market_key')

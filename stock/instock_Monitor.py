@@ -111,8 +111,21 @@ if __name__ == "__main__":
     delay_time = cct.get_delay_time()
     # base_path = tdd.get_tdx_dir()
     # block_path = tdd.get_tdx_dir_blocknew() + '064.blk'
-    blkname = '061.blk'
+    blkname = '063.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
+
+    from JohnsonUtil import inStockDb as inDb
+    # indf = inDb.showcount(inDb.selectlastDays(0))
+    indf = inDb.showcount(inDb.selectlastDays(2),sort_date=True)
+    if len(indf) == 0:
+        indf = inDb.showcount(inDb.selectlastDays(3),sort_date=True)
+
+    if len(indf) > 0 and cct.creation_date_duration(block_path) > 1:
+        cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
+    else:
+        if cct.creation_date_duration(block_path) > 1:
+            log.error("indb last1days is None")
+               
     lastpTDX_DF = pd.DataFrame()
     parserDuraton = cct.DurationArgmain()
     # The above code is a comment in Python. It is not doing anything in terms of code execution. It
@@ -135,13 +148,18 @@ if __name__ == "__main__":
 
 
     # st_key_sort = '4'
-    st_key_sort = '3 2'
+    st_key_sort = '1'
+    # st_key_sort = '3 2'
+    # st_key_sort = 'x 1.1'
     # st_key_sort = 'x2'
     # st_key_sort = '8'
     
-    duration_date = 180
+    # duration_date = ct.duration_date_week
+    duration_date = ct.duration_date_l
+    # ct.duration_date_week ->200
     du_date = duration_date
-    resample = 'w'
+    # resample = 'w'
+    resample = 'd'
 
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(
         st_key_sort)
@@ -166,11 +184,13 @@ if __name__ == "__main__":
                 # market='all', vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='??',filename='yqbk', vol=ct.json_countVol, vtype=ct.json_countType,trend=False)
             # market_blk = 'rzrq'
-            market_blk = 'all'
+            # market_blk = 'all'
+
+            market_blk = '063'
             top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='rzrq', vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='??¹?060',filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
-            
+
             time_d = time.time()
             if time_d - time_s > delay_time:
                 status_change = True
@@ -179,7 +199,8 @@ if __name__ == "__main__":
 
             else:
                 status_change = False
-            if len(top_now) > 10 and len(top_now.columns) > 4:
+
+            if len(top_now) > 1 and len(top_now.columns) > 4:
                # top_now = top_now[top_now.trade >= top_now.high * 0.98]
                # if 'percent' in top_now.columns.values:
                    # top_now = top_now[top_now['percent'] >= 0]
@@ -309,7 +330,7 @@ if __name__ == "__main__":
                 #     top_all = top_all[top_all.trade >= top_all.llastp * ct.changeRatio]
 
                 cct.set_console(width, height, title=[du_date,
-                                'G:%s' % len(top_all), '%s ZXG' % (blkname)])
+                                'G:%s' % len(top_all), 'zxg: %s' % (blkname+'-'+market_blk)])
 
                 # if len(top_all[top_all.dff > 0]) == 0:
                 #     top_all['dff'] = (map(lambda x, y: round((x - y) / y * 100, 1),
@@ -339,8 +360,9 @@ if __name__ == "__main__":
                     # top_temp = top_all[(top_all.low > top_all.lasth1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.close > top_all.lastp1d)]
                     
                     # 
-                    # top_temp = top_all[(top_all.close / top_all.hmax > 1.1) & (top_all.close / top_all.hmax < 1.5)] 
-                    top_temp = top_all[ (top_all.lastdu > 3 ) & (((top_all.low > top_all.lasth1d) & (top_all.close > top_all.lastp1d)) | ((top_all.low > top_all.lasth2d) & (top_all.close > top_all.lastp2d))) & (top_all.close >= top_all.hmax)]
+                    # top_temp = top_all[ (top_all.lastdu > 3 ) & (((top_all.low > top_all.lasth1d) & (top_all.close > top_all.lastp1d)) | ((top_all.low > top_all.lasth2d) & (top_all.close > top_all.lastp2d))) & (top_all.close >= top_all.hmax)]
+                    #20231221
+                    top_temp = top_all[ (top_all.close >= top_all.lastp2d) ]
                     # top_now.loc['002761'].    
                     # top_temp =  top_all[( ((top_all.top10 >0) | (top_all.boll >0)) & (top_all.lastp1d > top_all.ma5d) & (top_all.close > top_all.lastp1d))]
                     # top_temp =  top_all[((top_all.lastp1d < top_all.ma5d) & (top_all.close > top_all.lastp1d))]
@@ -412,8 +434,12 @@ if __name__ == "__main__":
                             #221018 振幅大于6 or 跳空 or 连涨 or upper or 大于hmax or 大于max5
                             # top_temp = top_all[ ((top_all.lastdu > 6 ) & (top_all.perc3d > 2)) | (top_all.topU > 0) | (top_all.topR > 0) | (top_all.close > top_all.hmax) | (top_all.close > top_all.max5)]
                             #20221229  当日跳空高开 or 前11日有跳空 or 当前价大于upper  
-                            top_temp = top_all[  ( (( top_all.open > top_all.lasth1d ) & ( top_all.low > top_all.lasth1d)) | (top_all.topR > 0) ) | ( (top_all.close > top_all.upper) ) & (((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | ((top_all.topR > 0) & (top_all.close > top_all.hmax)) )  ]
+                            # top_temp = top_all[  ( (( top_all.open > top_all.lasth1d ) & ( top_all.low > top_all.lasth1d)) | (top_all.topR > 0) ) | ( (top_all.close > top_all.upper) ) & (((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | ((top_all.topR > 0) & (top_all.close > top_all.hmax)) )  ]
                             # top_temp = top_all[ ((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | (top_all.topR > 0) | (top_all.close > top_all.hmax)  ]
+
+                            #20231221
+                            top_temp = top_all[ (top_all.close >= top_all.lastp2d) ]
+                            # top_temp = top_all[ ((top_all.close >= top_all.lastp1d) | ((top_all.low > top_all.lasth2d) & (top_all.close > top_all.lastp2d))) & (top_all.close >= top_all.hmax)]
 
                             # & (top_all.close >= top_all.hmax) & (top_all.hmax >= top_all.max5) 
                             #主升浪
@@ -458,9 +484,10 @@ if __name__ == "__main__":
                             # MA5 > ene and topU > upper
                             # top_temp = top_all[(top_all.topU > 0) & (top_all.close > top_all.ene) & (top_all.ma5d > top_all.ene)  ] 
                             #20221116 
-                            top_temp = top_all[ ( (( top_all.open > top_all.lasth1d ) & ( top_all.low > top_all.lasth1d)) | (top_all.topR > 0) ) | ( (top_all.close > top_all.upper) )  & (((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | ((top_all.topR > 0) & (top_all.close > top_all.hmax)) )  ]
+                            # top_temp = top_all[ ( (( top_all.open > top_all.lasth1d ) & ( top_all.low > top_all.lasth1d)) | (top_all.topR > 0) ) | ( (top_all.close > top_all.upper) )  & (((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | ((top_all.topR > 0) & (top_all.close > top_all.hmax)) )  ]
                             
-
+                            #20231221
+                            top_temp = top_all.copy()
 
                             #221018 振幅大于6 or 跳空 or 连涨 or upper or 大于hmax or 大于max5
                             # top_temp = top_all[ ((top_all.lastdu > 6 ) & (top_all.perc3d > 2)) | (top_all.topU > 0) | (top_all.topR > 0) | (top_all.close > top_all.hmax) | (top_all.close > top_all.max5)]
@@ -483,7 +510,10 @@ if __name__ == "__main__":
                         # top_temp = top_all[ (top_all.topR > 0)] 
 
                         # MA5 > ene and topU > upper
-                        top_temp = top_all[(top_all.topU > 0) & (top_all.close > top_all.ene) & (top_all.ma5d > top_all.ene)  ] # & (top_all.topR > 0)] 
+                        # top_temp = top_all[(top_all.topU > 0) & (top_all.close > top_all.ene) & (top_all.ma5d > top_all.ene)  ] # & (top_all.topR > 0)] 
+
+                        #20231221
+                        top_temp = top_all.copy()
 
                         # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
                         top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
@@ -491,13 +521,14 @@ if __name__ == "__main__":
                         # top_temp = top_all[ (top_all.volume >= 1.2 ) & (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.close > top_all.lastp1d)]
                 else:
 
-                    if st_key_sort.split()[0] == '4':  #20210323   跳空缺口,max5 大于 hmax 或者 max5上轨
-                        # top_temp = top_all[(top_all.topR > 0) & ( (top_all.max5 > top_all.hmax) | (top_all.max5 > top_all.upper) )] 
-                        top_temp = top_all[ ( (top_all.topR > 0) ) |  ((top_all.close > top_all.ma20d) & (top_all.close >= top_all.ene))]
+                    # if st_key_sort.split()[0] == '4':  #20210323   跳空缺口,max5 大于 hmax 或者 max5上轨
+                    #     # top_temp = top_all[(top_all.topR > 0) & ( (top_all.max5 > top_all.hmax) | (top_all.max5 > top_all.upper) )] 
+                    #     top_temp = top_all[ ( (top_all.topR > 0) ) |  ((top_all.close > top_all.ma20d) & (top_all.close >= top_all.ene))]
 
-                    else:
+                    # else:
 
-                        top_temp=top_all.copy()
+                    #     top_temp=top_all.copy()
+                    top_temp=top_all.copy() 
                     # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
 
                 #clean 688 and st
@@ -614,8 +645,8 @@ if __name__ == "__main__":
 
 
                 # if st_key_sort == '1' or st_key_sort == '7':
-                if st_key_sort == '1':
-                    top_temp=top_temp[top_temp.per1d < 8]
+                # if st_key_sort == '1':
+                #     top_temp=top_temp[top_temp.per1d < 8]
 
                 top_dd=cct.combine_dataFrame(
                     top_temp.loc[:, ct_MonitorMarket_Values][:10], top_temp2.loc[:, ct_MonitorMarket_Values][:5], append=True, clean=True)
@@ -983,9 +1014,9 @@ def get_tdx_stock_period_to_type(df, period_day='W-FRI', periods=5, ncol=None, r
     # print stock_data.index[0],stock_data.index[-1]
     # period_stock_data.index =
     # pd.DatetimeIndex(start=stock_data.index.values[0],end=stock_data.index.values[-1],freq='BM')
-
+    
     period_stock_data['open'] = stock_data[
-        'open'].resample(period_type).last()
+        'open'].resample(period_type).first()
     period_stock_data['high'] = stock_data[
         'high'].resample(period_type).max()
     period_stock_data['low'] = stock_data[

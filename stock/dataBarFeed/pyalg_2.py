@@ -33,7 +33,7 @@ def turtle_test(load_type = 'csv',dataString = 'pyalg'):
         #从dataFrame中加载，
 #        dat = pd.read_csv('000004.csv',encoding='gbk',sep='\t',index_col=0)
 #        dat['date']=dat['date'].apply(lambda x:x.replace('/','-'))
-        dat = ts.get_hist_data('000838',start='2016-01-01')
+        dat = ts.get_hist_data('002150',start='2020-01-01')
         feed = dataFramefeed.Feed()
         feed.addBarsFromDataFrame("orcl", dat)
     elif load_type == 'sql':

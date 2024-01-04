@@ -948,8 +948,11 @@ if __name__ == "__main__":
     # print p.stderr
     # import ipdb;ipdb.set_trace()
 
+    #pip install pandas==1.4.4
+    #OSError: [WinError 1] 函数不正确。: 'G:\\'   imdisk error 
 
     sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
+    # sina_MultiD_path = "D:\\RamDisk\\sina_MultiIndex_data.h5"
     freq='30T'
     startime = '09:25:00'
     endtime = '15:01:00'

@@ -253,7 +253,7 @@ def get_linear_model_histogramDouble(code, ptype='low', dtype='d', start=None, e
     # _, ax = plt.subplots()
     # fig = plt.figure()
     # plt.ion()
-    fig = plt.figure(figsize=(16, 10))
+    fig = plt.figure(figsize=(11, 7))
 
     # fig = plt.figure(figsize=(16, 10), dpi=72)
     # fig.autofmt_xdate() #(no fact)

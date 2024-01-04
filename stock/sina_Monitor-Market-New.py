@@ -119,7 +119,7 @@ if __name__ == "__main__":
             else:
                 status_change = False
             # print ("Buy>0:%s" % len(top_now[top_now['buy'] > 0])),
-            if len(top_now) > 10 or cct.get_work_time():
+            if len(top_now) > 1 or cct.get_work_time():
                 # if len(top_now) > 10 and len(top_now[:20][top_now[:20]['buy'] > 0]) > 3:
                 # if len(top_now) > 10 and not top_now[:1].buy.values == 0:
                 #     top_now=top_now[top_now['percent']>=0]

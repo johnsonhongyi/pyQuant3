@@ -124,11 +124,9 @@ if __name__ == "__main__":
                  (cct.get_today_duration(du_date), duration_date))
     # st_key_sort = '4'
     
-    if cct.get_work_time_duration() and  cct.get_now_time_int() < 950:
-        st_key_sort = 'x 1.1'
-    else:
-        st_key_sort = '3 1'
-    # st_key_sort = '4'
+
+    st_key_sort = 'x 1.1'
+    # st_key_sort = '3 1'
     # st_key_sort = '8'
     resample = 'd'
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(
@@ -145,6 +143,7 @@ if __name__ == "__main__":
             #     print len(df),
             # top_now = rl.get_sina_dd_count_price_realTime(df)
             # print len(top_now)
+            
             if st is None and st_key_sort in ['2', '3']:
                 st_key_sort = '%s %s' % (
                     st_key_sort.split()[0], cct.get_index_fibl())
@@ -167,7 +166,7 @@ if __name__ == "__main__":
 
             else:
                 status_change = False
-            if len(top_now) > 10 and len(top_now.columns) > 4:
+            if len(top_now) > 1 and len(top_now.columns) > 4:
                # top_now = top_now[top_now.trade >= top_now.high * 0.98]
                # if 'percent' in top_now.columns.values:
                    # top_now = top_now[top_now['percent'] >= 0]
@@ -292,7 +291,7 @@ if __name__ == "__main__":
                 #     top_all = top_all[top_all.trade >= top_all.llastp * ct.changeRatio]
 
                 cct.set_console(width, height, title=[du_date,
-                                'G:%s' % len(top_all), '%s ZXG' % (blkname)])
+                                'G:%s' % len(top_all), 'zxg: %s' % (blkname+'-'+market_blk)])
 
                 # if len(top_all[top_all.dff > 0]) == 0:
                 #     top_all['dff'] = (map(lambda x, y: round((x - y) / y * 100, 1),
@@ -645,8 +644,8 @@ if __name__ == "__main__":
 
 
                 # if st_key_sort == '1' or st_key_sort == '7':
-                if st_key_sort == '1':
-                    top_temp=top_temp[top_temp.per1d < 8]
+                # if st_key_sort == '1':
+                #     top_temp=top_temp[top_temp.per1d < 8]
 
                 top_dd=cct.combine_dataFrame(
                     top_temp.loc[:, ct_MonitorMarket_Values][:20], top_temp2.loc[:, ct_MonitorMarket_Values][:5], append=True, clean=True)
