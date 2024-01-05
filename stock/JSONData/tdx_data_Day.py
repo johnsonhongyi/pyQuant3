@@ -2353,10 +2353,11 @@ def Write_market_all_day_mp(market='all', rewrite=False):
     #        get_tdx_append_now_df_api2(code,dl=dl,dm=dz,newdays=5)
             # get_tdx_append_now_df_api_tofile('603113', dm=None, newdays=1,
             # start=None, end=None, type='f', df=None, dl=2, power=True)
+
             if len(dm) > 0:
                 results = cct.to_mp_run_async(
                     # get_tdx_append_now_df_api_tofile, code_list, dm=dm, newdays=0)
-                    get_tdx_append_now_df_api_tofile, code_list, dm, 0)
+                    get_tdx_append_now_df_api_tofile, code_list, dm=dm, newdays=0)
             else:
                 print(("dm is not open sell:%s"%(code_list if len(code_list) <10 else len(code_list))))
             # for code in code_list:
@@ -2369,10 +2370,12 @@ def Write_market_all_day_mp(market='all', rewrite=False):
 
 #    print "market:%s is succ result:%s"%(market,results),
 #    print "t:", time.time() - time_t,
+
     if market == 'all':
         #        write_tdx_tushare_to_file(sh_index,index_ts)
+        dm_index = sina_data.Sina().get_stock_list_data(tdx_index_code_list,index=True)
         for inx in tdx_index_code_list:
-            get_tdx_append_now_df_api_tofile(inx)
+            get_tdx_append_now_df_api_tofile(inx,dm=dm_index)
         print("")
         print("Index Wri 300 ok", end=' ')
         Write_sina_to_tdx(tdx_index_code_list, index=True)
@@ -4693,7 +4696,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             dl = dl + cct.get_today_duration(end, cct.get_today())
 #            print cct.get_today_duration(end,cct.get_today())
 
-        if len(codeList) > 0:
+        if len(codeList) > 120:
             results = cct.to_mp_run_async(
                 get_tdx_exp_low_or_high_power, codeList, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample)
                 

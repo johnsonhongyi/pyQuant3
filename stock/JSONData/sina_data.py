@@ -351,6 +351,7 @@ class Sina:
             # else:
             #     h5 = None
             time_s= time.time()
+            
             h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=self.sina_limit_time)
             # h5[:1].ticktime.values[0][-8:-3].replace(":",'')
             log.info("h5a market: %s stocksTime:%0.2f" % (market,time.time() - time_s))

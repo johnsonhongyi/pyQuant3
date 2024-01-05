@@ -687,6 +687,9 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                            l_time=np.mean(o_time)
                            return_hdf_status=(not cct.get_work_time()) or (
                                cct.get_work_time() and l_time < limit_time)
+                           
+                           # import ipdb;ipdb.set_trace()
+
                            # return_hdf_status = l_time < limit_time
                            # print return_hdf_status,l_time,limit_time
                            if return_hdf_status:

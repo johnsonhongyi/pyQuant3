@@ -780,10 +780,11 @@ if __name__ == "__main__":
                 args=cct.writeArgmain().parse_args(st.split())
                 codew=stf.WriteCountFilter(top_temp, writecount=args.dl)
                 if args.code == 'a':
-                    cct.write_to_blocknew(block_path, codew)
+                    cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=True,reappend=False)
+                    # cct.write_to_blocknew(block_path, codew)
                     # cct.write_to_blocknew(all_diffpath,codew)
                 else:
-                    cct.write_to_blocknew(block_path, codew, False)
+                    cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=True,reappend=False)
                     # cct.write_to_blocknew(all_diffpath,codew,False)
                 print("wri ok:%s" % block_path)
                 cct.sleeprandom(ct.duration_sleep_time / 2)
