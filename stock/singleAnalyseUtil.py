@@ -379,8 +379,14 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
             #     crashTen = df[df['percent'] < -9.8]
             #     crash = df[df['percent'] < -changepercent]
             # else:
+            cyb = df[df.index.str.startswith('30')]
+            kcb = df[df.index.str.startswith('68')]
             top = df[df['percent'] > changepercent]
-            topTen = df[df['percent'] > 9.9 ]
+            
+            if market == 'cyb':
+                topTen = df[df['percent'] > 19.8 ]    
+            else:
+                topTen = df[df['percent'] > 9.9 ]
             st = df[df.name.str.contains('ST')]
             topTen_st = st[(st.b1_v > st.a1_v) & (st.a1_v == 0)]
 
@@ -687,13 +693,13 @@ if __name__ == '__main__':
                             fibcount = 0
                             break
                 else:
-                    cct.sleep(60)
+                    cct.sleep(ct.single_duration_sleep_time)
             elif cct.get_work_duration():
                 log.debug('into work_duration:%s' % (int_time))
                 while 1:
                     if cct.get_work_duration():
                         print(".", end=' ')
-                        cct.sleep(60)
+                        cct.sleep(ct.single_duration_sleep_time)
                     else:
                         print("#")
                         cct.sleep(random.randint(0, 30))

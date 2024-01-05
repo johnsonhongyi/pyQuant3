@@ -347,7 +347,8 @@ def get_dfcfw_fund_SHSZ(url=ct.DFCFW_ZS_SHSZ):
                         dd['zvol'] / (df.loc['399001', 'amount'] / 10000000) / radio_t, 1)
                     zvol_v = round(
                         svol_r * (df.loc['399001', 'amount'] / 10000000), 1)
-                    dd['allvol'] = "%s-%s-%s" % (dd['svol']+dd['zvol'], round(svol_v+zvol_v,1), round((svol_r+zvol_r)/2,1))
+                    dd['allvol'] = "%s-%s-%s" % (round(dd['svol']+dd['zvol'],1), round(svol_v+zvol_v,1), round((svol_r+zvol_r)/2,1))
+                    # dd['allvol'] = "%s-%s-%s" % (dd['svol']+dd['zvol'], round(svol_v+zvol_v,1), round((svol_r+zvol_r)/2,1))
                     dd['svol'] = "%s-%s-%s" % ((dd['svol'], svol_v, svol_r))
                     dd['zvol'] = "%s-%s-%s" % ((dd['zvol'], zvol_v, zvol_r))
             # dd['zzb']=data[1]
@@ -383,7 +384,8 @@ def get_dfcfw_fund_SHSZ(url=ct.DFCFW_ZS_SHSZ):
                     dd['zvol'] / (df.loc['399001', 'amount'] / 100000000) / radio_t, 1)
                 zvol_v = round(
                     svol_r * (df.loc['399001', 'amount'] / 100000000), 1)
-                dd['allvol'] = "%s-%s-%s" % (dd['svol']+dd['zvol'], round(svol_v+zvol_v,1), round((svol_r+zvol_r)/2,1))
+
+                dd['allvol'] = "%s-%s-%s" % (round(dd['svol']+dd['zvol'],1), round(svol_v+zvol_v,1), round((svol_r+zvol_r)/2,1))
                 dd['svol'] = "%s-%s-%s" % ((dd['svol'], svol_v, svol_r))
                 dd['zvol'] = "%s-%s-%s" % ((dd['zvol'], zvol_v, zvol_r))
     return dd
