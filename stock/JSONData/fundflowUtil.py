@@ -599,7 +599,6 @@ def get_dfcfw_rzrq_SHSZ2_(url=ct.DFCFW_RZYE2):
 def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
     data = {}
     log.info("rzrq:%s"%(ct.DFCFW_RZYE))
-
     # rzdata = cct.get_url_data(url)
     # rzdata = cct.get_url_data_R(url,timeout=10)
 
@@ -670,13 +669,17 @@ def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
 
     df.rename(columns={'RZYE': 'all'}, inplace=True)
     df.rename(columns={'H_RZYE': 'sh'}, inplace=True)
-    df.rename(columns={'H_RQYL': 'sz'}, inplace=True)
+    # df.rename(columns={'H_RQYL': 'sz'}, inplace=True)
+    df.rename(columns={'S_RZYE': 'sz'}, inplace=True)
     df['DIM_DATE'] = df['DIM_DATE'].apply(lambda x:x[:10])
     df=df.set_index('DIM_DATE')
 
-    df['all'] = df['all'].apply(lambda x:round((x/1000/1000/100),2))
-    df['sh'] = df['sh'].apply(lambda x:round((x/1000/1000/100),2))
-    df['sz'] = df['sz'].apply(lambda x:round((x/1000/1000/1),2))
+    for co in df.columns:
+        df[co] = df[co].apply(lambda x:round((x/1000/1000/100),2))
+    # df['all'] = df['all'].apply(lambda x:round((x/1000/1000/100),2))
+    # df['sh'] = df['sh'].apply(lambda x:round((x/1000/1000/100),2))
+    # df['sz'] = df['sz'].apply(lambda x:round((x/1000/1000/1),2))
+
     # data=get_tzrq(url,today)
     # yestoday = cct.last_tddate(1)
     # log.debug(today)
@@ -688,16 +691,18 @@ def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
             da = 0
             i = 0
             data2 = ''
+
             while rzrq_status:
-                for x in range(1, 20):
+                for x in range(days, 20):
                     yestoday = cct.last_tddate(x)
                     # print("yestoday:%s"%(yestoday))
+
                     if yestoday in df.index:
                         data2 = df.loc[yestoday]
                         # log.info("yestoday:%s data:%s" % (yestoday, data2))
 
-                        days -=1
-                        if days == 0:
+                        # days -=1
+                        if (days - x) <= 0:
                             break
                         # print da
                     else:
@@ -715,10 +720,17 @@ def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
         data1 = get_days_data(1,df)
         data2 = get_days_data(2,df)
         # print data1
+
         data['all'] = round(data1.loc['all'], 2)
         data['sh'] = round(data1.loc['sh'], 2)
         data['sz'] = round(data1.loc['sz'], 2)
-        data['dff'] = round(data1.loc['all'] - data2.loc['all'], 2)
+        # data['dff'] = round(data1.loc['all'] - data2.loc['all'], 2)
+        shdff = (data1.loc['sh'] - data2.loc['sh'])
+        szdff = (data1.loc['sz'] - data2.loc['sz'])
+        shdff = shdff if not str(shdff) == 'nan' else 0
+        szdff = szdff if not str(szdff) == 'nan' else 0
+        
+        data['dff'] = round(shdff+szdff, 2)
         data['shrz'] = round(data1.loc['sh'] - data2.loc['sh'], 2)
         data['szrz'] = round(data1.loc['sz'] - data2.loc['sz'], 2)
     else:
