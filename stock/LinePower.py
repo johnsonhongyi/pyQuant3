@@ -22,7 +22,7 @@ def parseArgmain():
         parser.add_argument('code', type=str, nargs='?', help='999999')
         parser.add_argument('start', nargs='?', type=str, help='20150612')
         parser.add_argument('end', nargs='?', type=str, help='20160101')
-        parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['d', 'w', 'm'], default='w',help='DateType')
+        parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['d', 'w', 'm','3d'], default='w',help='DateType')
         parser.add_argument('-v', action="store", dest="vtype", type=str, choices=['f', 'b'], default='f',help='Price Forward or back')
         parser.add_argument('-p', action="store", dest="ptype", type=str, choices=['high', 'low', 'close'], default='low',help='price type')
         parser.add_argument('-f', action="store", dest="filter", type=str, choices=['y', 'n'], default='y',help='find duration low')
@@ -185,6 +185,9 @@ if __name__ == "__main__":
                 # df  = pywencai.get(query=code.split()[0], sort_order='asc')
                 df  = pywencai.get(query=code.split()[0])
                 # df = df[ ~ df.股票代码.str.startswith(('688','87','83')) ]
+                if not isinstance(df, pd.DataFrame):
+                    print("pls run update: pip install -U --no-deps pywencai")
+                    print("df is not ok:%s"%(df))
                 df['股票代码'] = df['股票代码'].apply(lambda x:cct.symbol_to_code(x.replace('.','')))
                 df = df[ df.股票代码.str.startswith(('30','60','00')) ]
 

@@ -35,6 +35,7 @@ from tqdm import tqdm
 # log.setLevel(Log.DEBUG)
 # import numba as nb
 import numpy as np
+import subprocess
 
 try:
     from urllib.request import urlopen, Request
@@ -95,6 +96,9 @@ class GlobalValues:
             return _global_dict[key]
         except KeyError:
             return defValue
+    def getkey_status(self, key):
+        # """ 定义一个全局变量 """
+        return (key in _global_dict.keys())
 
 
 def format_for_print(df,header=True,widths=False):
@@ -582,7 +586,16 @@ def set_default_encode(code='utf-8'):
 
 
           
-
+def isDigit(x):
+    #re def isdigit()
+    try:
+        if x == 'nan' or x is None:
+            return False
+        else:
+            float(x)
+            return True
+    except ValueError:
+        return False
 
 def get_ramdisk_dir():
     os_platform = get_sys_platform()
@@ -645,24 +658,46 @@ end tell
 '''
 
 
+# title:sina_Market-DurationDn.py
+# target rect1:(106, 586, 1433, 998) rect2:(106, 586, 1433, 998)
+# title:sina_Market-DurationCXDN.py
+# target rect1:(94, 313, 1421, 673) rect2:(94, 313, 1421, 673)
+# title:sina_Market-DurationSH.py
+# title:sina_Market-DurationUP.py
+# target rect1:(676, 579, 1996, 1017) rect2:(676, 579, 1996, 1017)
+# title:sina_Monitor-Market-LH.py
+# target rect1:(588, 343, 1936, 735) rect2:(588, 343, 1936, 735)
+# title:sina_Monitor-Market.py
+# title:sina_Monitor.py
+# target rect1:(259, 0, 1698, 439) rect2:(259, 0, 1698, 439)
+# title:singleAnalyseUtil.py
+# target rect1:(1036, 29, 1936, 389) rect2:(1036, 29, 1936, 389)
+# title:LinePower.py
+# target rect1:(123, 235, 1023, 595) rect2:(123, 235, 1023, 595)
+# title:sina_Market-DurationDnUP.py
+# title:instock_Monitor.py
+# target rect1:(229, 72, 1589, 508) rect2:(229, 72, 1589, 508)
 
-terminal_positionKey4K = {'sina_Market-DurationDn.py': '6, 633',
-                        'sina_Market-DurationCXDN.py': '118, 504',
-                        'sina_Market-DurationSH.py': '-29, 623',
-                        'sina_Market-DurationUp.py': '54, 560',
-                        'sina_Monitor-Market-LH.py': '666, 338',
-                        'sina_Monitor-Market.py': '19, 179',
-                        'sina_Monitor.py': '168, 421',
-                        'singleAnalyseUtil.py': '1084, 765',
-                        'LinePower.py': '6, 216', 
+
+terminal_positionKey4K = {'sina_Market-DurationDn.py': '106, 586,1400,440',
+                        'sina_Market-DurationCXDN.py': '94, 313,1400,440',
+                        'sina_Market-DurationSH.py': '-29, 623,1400,440',
+                        'sina_Market-DurationUP.py': '676, 579,1400,440',
+                        'sina_Monitor-Market-LH.py': '588, 343,1400,440',
+                        'sina_Monitor-Market.py': '19, 179,1400,440',
+                        'sina_Monitor.py': '259, 0,1400, 520',
+                        'singleAnalyseUtil.py': '1036, 29,920,360',
+                        'LinePower.py': '123, 235,1498, 420', 
                         'sina_Market-DurationDnUP.py': '41, 362,1400,440',
-                        'instock_Monitor.py':'62, 86,1360,440',}
+                        'instock_Monitor.py':'229, 72,1360,440',
+                        'chantdxpower.py':'155, 167, 1200, 480',}
+
 
 
 terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440',
                         'sina_Market-DurationCXDN.py': '-6, 311,1400,440',
                         'sina_Market-DurationSH.py': '-29, 623,1400,440',
-                        'sina_Market-DurationUp.py': '340, 419,1400,440',
+                        'sina_Market-DurationUP.py': '251, 445,1400,440',
                         'sina_Monitor-Market-LH.py': '567, 286,1400,420',
                         'sina_Monitor-Market.py': '140, 63,1400,440',
                         'sina_Monitor.py': '108, 0, 1400, 520',
@@ -677,7 +712,7 @@ terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440'
 terminal_positionKey2K_R9000P = {'sina_Market-DurationDn.py': '-13, 601,1400,440',
                         'sina_Market-DurationCXDN.py': '-6, 311,1400,440',
                         'sina_Market-DurationSH.py': '-29, 623,1400,440',
-                        'sina_Market-DurationUp.py': '445, 503,1400,440',
+                        'sina_Market-DurationUP.py': '445, 503,1400,440',
                         'sina_Monitor-Market-LH.py': '521, 332,1400,420',
                         'sina_Monitor-Market.py': '271, 39,1400,440',
                         'sina_Monitor.py': '108, 1, 1400, 520',
@@ -813,6 +848,7 @@ def get_system_postionKey():
     basedir = get_now_basedir()
     import socket
     hostname = socket.gethostname() 
+        # monitors = monitors if len(monitors) > 0 else False
 
     if basedir.find('vm') >= 0:
         positionKey = terminal_positionKey_VM
@@ -826,7 +862,17 @@ def get_system_postionKey():
         if hostname.find('R900') >=0:
             positionKey = terminal_positionKey2K_R9000P
         else:
+            proc = subprocess.Popen(['powershell', 'Get-WmiObject win32_desktopmonitor;'], stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+            res = proc.communicate()
+            # monitorsName = re.findall('(?s)\r\nName\s+:\s(.*?)\r\n', res[0].decode("gbk"))
+            monitorsName = re.findall('\r\nName\s+:\s(.*?)\r\n', res[0].decode("gbk"))
+            monitorsScreenWidth = re.findall('\r\nScreenWidth\s+:\s(.*?)\r\n', res[0].decode("gbk"))
             positionKey = terminal_positionKey1K_triton
+            for screenWidth in monitorsScreenWidth:
+                if screenWidth == '3840':
+                    positionKey = terminal_positionKey4K
+                    break
+
     return positionKey
 
 
@@ -867,7 +913,6 @@ def get_terminal_Position(cmd=None, position=None, close=False, retry=False):
 
     win_count = 0
     if get_os_system() == 'mac':
-        import subprocess
         def cct_doScript(scriptn):
             proc = subprocess.Popen(['osascript', '-'],
                                     stdin=subprocess.PIPE,
@@ -2249,7 +2294,16 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     # print("done")
                 except Exception as e:
                     log.error("except:%s"%(e))
-
+                    # log.error("except:results%s"%(results[-1]))
+                    import ipdb;ipdb.set_trace()
+                    
+                    results=[]
+                    for code in urllist:
+                        print("code:%s "%(code),)
+                        res=cmd(code,**kwargs)
+                        print("status:%s\t"%(len(res)),)
+                        results.append(res)
+                    result=results
         else:
             # pool = ThreadPool(cpu_count())
             # # log.error("to_mp_run args is not None")
@@ -3277,7 +3331,6 @@ def getFibonacci(num, days=None):
 
 def varname(p):
     import inspect
-    import re
     for line in inspect.getframeinfo(inspect.currentframe().f_back)[3]:
         m = re.search(r'\bvarname\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', line)
         if m:
@@ -3828,8 +3881,18 @@ def func_compute_percd2020( open, close,high, low,lastopen, lastclose,lasthigh, 
 
 
     return initc
-
-def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None,high4=None,max5=None,hmax=None,lastdu4=None):
+def get_col_market_value_df(df,col,market_value):
+    if int(market_value) < 10:
+        temp =df.loc[:,df.columns.str.contains( "%s[1-%s]d$"%(col,market_value),regex= True)]
+    else:
+        if int(market_value) <= ct.compute_lastdays:
+                _remainder = int(market_value)%10
+        else:
+            _remainder = int(ct.compute_lastdays)%10
+        # df.loc[:,df.columns.str.contains( "%s[0-9][0-%s]d$"%(col,_remainder),regex= True)][:1]
+        temp =df.loc[:,df.columns.str.contains( "%s([1-9]|1[0-%s])d$"%(col,_remainder),regex= True)]
+    return temp
+def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None,high4=None,max5=None,hmax=None,lastdu4=None,code=None):
     initc = 0
     percent_idx = 2
     vol_du_idx = 1.2
@@ -4000,6 +4063,45 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
                         initc += 5 + abs(lastp)
                     if lastMax==hmax and high4 > max5 and high4 < hmax:
                         initc += 5
+
+    if GlobalValues().getkey('percdf') is not None:
+        # if code == '601857':
+        #     import ipdb;ipdb.set_trace()
+        if code in GlobalValues().getkey('percdf').index:
+            lastdf = GlobalValues().getkey('percdf').loc[code]
+            if percent > 2:
+                if lastdf.lasth1d < lastdf.lasth2d < lastdf.lasth3d:
+                    if close > lastdf.lasth1d:
+                        initc += 30
+                        if lastdf.lasth3d < lastdf.lasth4d:
+                            initc += 30
+                            
+                            if lastdf.lasth4d < lastdf.lasth5d:
+                                initc += 30
+                                if lastdf.lasth5d < lastdf.lasth6d:
+                                    initc += 30
+                    if low < lastdf.ma51d and high > lastdf.ma51d:
+                        initc += 50
+                elif lastdf.lasth2d < lastdf.lasth3d < lastdf.lasth4d:
+                    if close > lastdf.lasth1d > lastdf.lasth2d:
+                        initc += 25
+                        if lastdf.lasth3d < lastdf.lasth4d:
+                            initc += 30
+                            if lastdf.lasth4d < lastdf.lasth5d:
+                                initc += 30
+                                if lastdf.lasth5d < lastdf.lasth6d:
+                                    initc += 30
+                    if low < lastdf.ma51d and high > lastdf.ma51d:
+                        initc += 50
+                                     
+                elif lastdf.lasth1d > lastdf.lasth2d > lastdf.lasth3d and lastdf.ma51d < lastdf.lastl1d < lastdf.ma51d*1.02 :
+                    initc += 50
+                    if lastdf.ma51d < lastdf.lastl1d < lastdf.ma51d*1.02:
+                        initc += 30
+
+        # else:
+        #     log.info("check lowest in percdf:%s"%(code))
+            # print("lowest:%s"%(code),end=' ')
 
     return round(initc,1)
 

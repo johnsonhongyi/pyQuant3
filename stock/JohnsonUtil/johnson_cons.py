@@ -832,6 +832,12 @@ def get_market_sort_value_key(st, top_all=None, perd_d=3):
                     # cct.GlobalValues()
                     cct.GlobalValues().setkey('market_key',st_l[0])
                     cct.GlobalValues().setkey('market_value', st_l[1])
+                    if st_count >= 3:
+                        if isDigit(st_l[2]):
+                            cct.GlobalValues().setkey('market_va_filter', st_l[2])
+                            st_l.remove(st_l[2])
+                            st_count=len(st_l)
+
             else:
                 # market_sort_value = get_Dynamic_Duration_perd(market_sort_name, '1')
                 cct.GlobalValues().setkey('market_key',st_l[0])
@@ -842,6 +848,7 @@ def get_market_sort_value_key(st, top_all=None, perd_d=3):
 
             if st_count > 1 and isDigit(st_l[1]):
                 idx_perd = st_l[1]
+
                 if top_all is not None and len(top_all) > 0:
                     if idx_value % idx_perd in top_all.columns:
                         if st_count > 2 and isDigit(st_l[2]):
@@ -969,6 +976,7 @@ def get_market_sort_value_key(st, top_all=None, perd_d=3):
 def get_Dynamic_Duration_perd(market_sort_value, idx_perd, columns=None):
     # idx_value = eval(market_sort_value)[0]
     # idx_value2 = eval(market_sort_value)[1]
+
     if not isinstance(idx_perd, list):
         idx_perd = [idx_perd, idx_perd_1to_2 if idx_perd == '1' else idx_perd]
     # idx_l = [idx_value % idx_perd[0]]

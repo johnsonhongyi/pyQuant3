@@ -641,10 +641,12 @@ if __name__ == '__main__':
                     fibcount = 0
                     fibl = fibonacciCount(
                         ['999999', '399001', '399006'], dl=dl)
-                if len(rzrq) == 0 or rzrq['sh'] == 0 or rzrq['sz'] == 0 or rzrq['all'] == 0:
+                    
+                if ( 920 < cct.get_now_time_int() and not cct.isDigit(rzrq['all'])) or (len(rzrq) == 0 or rzrq['sh'] == 0 or rzrq['sz'] == 0 or rzrq['all'] == 0):
                     # if rzrq['shrz'] == 0 or rzrq['szrz'] == 0 or rzrq['dff'] == 0 or rzrq['all'] == 0:
                     #     log.warn("rzrq 0")
                     rzrq = ffu.get_dfcfw_rzrq_SHSZ()
+
                 log.info('start get_hot_count')
                 get_hot_countNew(percentDuration, rzrq, fibl, fibc)
                 fibcount += 1
@@ -753,7 +755,7 @@ if __name__ == '__main__':
             # print "key"
             print("KeyboardInterrupt:", e)
 
-            st = cct.cct_raw_input("status:[go(g),clear(c),quit(q,e)]:")
+            st = cct.cct_raw_input("status:[go(g),clear(c),quit(q,e),wri(w)]:")
             if len(st) == 0:
                 status = False
             elif st.lower() == 'g' or st.lower() == 'go':
@@ -763,19 +765,44 @@ if __name__ == '__main__':
                 code = ''
             elif st.lower() == 'c' or st.lower() == 'C':
                 rzrq = {}
-            elif st.startswith('w') or st.startswith('a'):
-                args = cct.writeArgmain().parse_args(st.split())
-                top_temp = cct.GlobalValues().getkey('top_max')
-                codew = stf.WriteCountFilter(
-                    top_temp, writecount=args.dl)
-                if args.code == 'a':
-                    cct.write_to_blocknew(block_path, codew, doubleFile=False)
-                    # sl.write_to_blocknew(all_diffpath, codew)
-                else:
-                    cct.write_to_blocknew(
-                        block_path, codew, False, doubleFile=False)
-                    # sl.write_to_blocknew(all_diffpath, codew, False)
-                print(("wri ok:%s" % block_path))
+            # elif st.startswith('w') or st.startswith('a'):
+            #     args = cct.writeArgmain().parse_args(st.split())
+            #     top_temp = cct.GlobalValues().getkey('top_max')
+            #     codew = stf.WriteCountFilter(
+            #         top_temp, writecount=args.dl)
+            #     if args.code == 'a':
+            #         cct.write_to_blocknew(block_path, codew, doubleFile=False)
+            #         # sl.write_to_blocknew(all_diffpath, codew)
+            #     else:
+            #         cct.write_to_blocknew(
+            #             block_path, codew, False, doubleFile=False)
+            #         # sl.write_to_blocknew(all_diffpath, codew, False)
+            #     print(("wri ok:%s" % block_path))
+            elif st.startswith('w') or st.lower == 'w':
+                log.debug('into clean_duration:%s' % (int_time))
+                if (cct.get_now_time_int() > 1502 or cct.get_now_time_int() < 900):
+                    while 1:
+                        if cct.get_now_time_int() > 1502 and cct.get_now_time_int() < 1510:
+                            print(".", end=' ')
+                            cct.sleep(60)
+                        elif (cct.get_now_time_int() > 1502 or cct.get_now_time_int() < 900):
+                            print(".", end=' ')
+                            print("write dm to file")
+                            if cct.get_work_day_status():
+                                tdd.Write_market_all_day_mp('all')
+                                top_temp = cct.GlobalValues().getkey('top_max')
+                                codew = stf.WriteCountFilter(
+                                    top_temp, writecount='all')
+                                # cct.write_to_blocknew(
+                                #     block_path, codew, append=False, doubleFile=False)
+
+                                
+                                # print("Now append sina to tdx 300 hdf:")
+                                # tdd.Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=300)
+                                # tdd.Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300)
+                            break
+                        else:
+                            print(".")
 
             elif len(st) == 6:
                 status = True

@@ -223,7 +223,10 @@ class Sina:
         # else:
         #     h5 = None
 
-        h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=self.sina_limit_time)
+        if (cct.get_work_time(otime) and cct.get_work_time()) or (not cct.get_work_time(otime) and not cct.get_work_time() and ((otime >= 1500) or cct.get_now_time_int() < 1500 ) ):
+            h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=self.sina_limit_time)
+        else:
+            h5 = None
         log.info("h5a stocksTime:%0.2f" % (time.time() - time_s))
         if h5 is not None and len(h5) > 0:
             o_time = h5[h5.timel != 0].timel
@@ -553,7 +556,9 @@ class Sina:
                 # else:
                 #     h5['lastbuy'] = (list(map(lambda x, y: y if int(x) == 0 else x,
                 #                              h5['lastbuy'].values, h5['close'].values)))
-        print("lastb:%s"%(round((time.time()-time_s),1)), end=' ')
+        time_use=round((time.time()-time_s),1)
+        if time_use > 2:
+            print("lastb:%s"%(time_use), end=' ')
         return h5
 
     def set_stock_codes_index_init(self, code, index=False):
@@ -773,7 +778,7 @@ class Sina:
             # df['b1_v'] = ((df['b1_v']) / 100 / 10000).map(lambda x: round(x, 1) + 0.01)
             # df['b1_vv'] = map(lambda x: round(x / 100 / 10000, 1) + 0.01, df['b1_v'])
 
-        elif (cct.get_now_time_int() > 830 and cct.get_now_time_int() <= 915):
+        elif (cct.get_now_time_int() > 0 and cct.get_now_time_int() <= 915):
             #            df.rename(columns={'buy': 'close'}, inplace=True)
             df['buy'] = df['llastp']
             df['close'] = df['buy']
@@ -974,6 +979,7 @@ if __name__ == "__main__":
     # code='300107'
     # print sina.get_cname_code('陕西黑猫')
     print(sina.get_code_cname('300107'))
+    print((sina.get_stock_code_data('000017').T))
     import ipdb;ipdb.set_trace()
 
     # print((sina.get_stock_code_data('300107').T))
@@ -998,7 +1004,7 @@ if __name__ == "__main__":
     df = Sina().market('cyb')
     print((df.shape))
 
-    print((sina.get_stock_code_data('300107').T))
+    print((sina.get_stock_code_data('000017').T))
     print((df[-5:][['open','close']].T))
     print((df.columns))
     # print df[-5:][['lastbuy','close']].T
