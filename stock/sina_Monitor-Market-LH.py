@@ -137,7 +137,10 @@ if __name__ == "__main__":
     indf = inDb.show_stock_pattern()
 
     if len(indf) > 0 and cct.creation_date_duration(block_path) > 0:
-        cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
+        if cct.creation_date_duration(block_path) > 10:
+            cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
+        else:
+            cct.write_to_blocknew(block_path, indf.code.tolist(),append=True,doubleFile=False,keep_last=0,dfcf=False)
     else:
         if cct.creation_date_duration(block_path) > 0:
             log.error("indb last1days is None")   
@@ -579,7 +582,8 @@ if __name__ == "__main__":
             elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
                 st_l = st.split()
                 st_k = st_l[0]
-                if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
+                # if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
+                if st_k in list(ct.Market_sort_idx.keys()):
                     st_key_sort = st
                     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(
                         st_key_sort, top_all=top_all)

@@ -108,7 +108,7 @@ if __name__ == "__main__":
     # duration_date = 300
     du_date = duration_date
     # resample = ct.resample_dtype
-    resample = 'w'
+    resample = '3d'
     # resample = 'd'
     end_date = None
     ptype = 'low'
@@ -130,10 +130,10 @@ if __name__ == "__main__":
     # market_sort_value, market_sort_value_key = ct.get_market_sort_value_key('x1 d f')
     # market_sort_value, market_sort_value_key = ct.get_market_sort_value_key('3 2')
     # market_sort_value, market_sort_value_key = ct.get_market_sort_value_key('1')
-    # st_key_sort = '2'
     # st_key_sort = ct.sort_value_key_perd23
     # st_key_sort = '1'
-    st_key_sort = '3 2'
+    st_key_sort = '3 1'
+    # st_key_sort = '3 1'
     # st_key_sort = 'x1 1.1'
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort)
     st = None
@@ -460,8 +460,8 @@ if __name__ == "__main__":
                         ct_Duration_format_Values, replace='b1_v', dest='volume')
                     # ct_Duration_format_Values = ct.get_Duration_format_Values(
                     #     ct_Duration_format_Values, replace='fibl', dest='top10')
-                    ct_Duration_format_Values = ct.get_Duration_format_Values(
-                        ct_Duration_format_Values, replace='perc1d', dest='perc3d')
+                    # ct_Duration_format_Values = ct.get_Duration_format_Values(
+                    #     ct_Duration_format_Values, replace='perc1d', dest='perc3d')
 
 
                     # if 'nhigh' in top_all.columns:
@@ -533,7 +533,8 @@ if __name__ == "__main__":
             elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
                 st_l = st.split()
                 st_k = st_l[0]
-                if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
+                # if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
+                if st_k in list(ct.Market_sort_idx.keys()):
                     st_key_sort = st
                     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(
                         st_key_sort, top_all=top_all)

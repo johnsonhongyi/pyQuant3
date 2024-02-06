@@ -64,15 +64,17 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     def check_date_accurate(dfs):
         dd = dfs.reset_index().set_index('code')
         last3day = str(dd.loc['000002'].date[-3])[:10]
+        last1day = str(dd.loc['000002'].date[-1])[:10]
         dd=dd[dd['date'] > last3day]
         dd['couts'] = dd.groupby('code')['date'].transform('count')
-        return dd[dd.couts == 1]
+        return dd[(dd.couts == 1) &(dd.date != last1day)]
 
     if resample == 'd':
         checkdf = (check_date_accurate(df))
         for code in checkdf.index:
             # print('code:%s'%(code))
             tdd.get_tdx_append_now_df_api_tofile(code)
+
     #append data is end ,need re sort
     df = df.reset_index().sort_values(by=['code','date'],ascending=[0,1]).set_index(['code','date'])
 
@@ -81,7 +83,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     code_select = code_uniquelist[random.randint(0,len(code_uniquelist)-1)]
     print(round(time.time()-time_s,2),df.index.get_level_values('code').unique().shape,code_select,df.loc[code_select].shape)
 
-    print("lastDay:%s"%(df.loc['999999'].index[-1]))
+    print("!!!check lastDay!!!:%s close:%s"%(df.loc['999999'].index[-1],df.loc['999999'].close[-1]))
     # df.groupby(level=[0]),df.index.get_level_values(0)
     # len(df.index.get_level_values('code').unique())
     # df = df[~df.index.duplicated(keep='first')]
@@ -150,9 +152,9 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
             b = round((n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x),2)
         return b   
 
-    # ????????????????? Æ?????????
+    # ?????????????????ÂçÅ?????????
     def last_10_days_stats(x):
-        # ?????«∞??
+        # ?????Ââç??
         # date = x.index.get_level_values('date')[0]
         # ??????10??????
 
@@ -240,16 +242,25 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 # *** TypeError: Only valid with DatetimeIndex, TimedeltaIndex or PeriodIndex, but got an instance of 'Index'
     # roll_dl = duration
 
-    print("resample:%s"%(resample.upper()))
+    # print("resample:%s %s"%(resample.upper()))
+    print("resample:%s time:%s"%(resample.upper(),round(time.time()-time_s,2)))
 
     if resample != 'd':
-        df = df.groupby(level=0).resample(resample, level=1).last()
-        df = df.dropna()
+        time_sr = time.time()
+        dfs = df.groupby(level=0).resample(resample, level=1).last()
+        dfs['open'] = df.groupby(level=0)['open'].resample(resample, level=1).first()
+        dfs['high'] = df.groupby(level=0)['high'].resample(resample, level=1).max()
+        dfs['low'] = df.groupby(level=0)['low'].resample(resample, level=1).min()
+        dfs['vol'] = df.groupby(level=0)['vol'].resample(resample, level=1).sum()   
+        dfs = dfs.dropna()
         # r1 = len(df.loc['000001'])
         # r2 = len(df.loc['999999'])
         # roll_dl = r1 if r1 < r2 else r2
+        print("resample time:%s"%(round(time.time()-time_sr,2)))
 
-    dfs = df.copy()
+
+    else:
+        dfs = df.copy()
 
     groupd = dfs.groupby(level=[0])
     # groupd.['close']
@@ -332,7 +343,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
     # def Get_MACD_OP(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
     def Get_MACD_OP(df, dtype='d'):
-        # ≤Œ ˝12,26,9
+        # ÂèÇÊï∞12,26,9
         # if len(df) < limitCount:
         #     return (df, 1)
         # df = df.sort_index(ascending=True)
@@ -345,7 +356,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
         return df
 
     def Get_RSI_OP(df, dtype='d'):
-        # ≤Œ ˝12,26,9
+        # ÂèÇÊï∞12,26,9
         # if len(df) < limitCount:
         #     return (df, 1)
         # df = df.sort_index(ascending=True)
@@ -381,12 +392,13 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     # '''idx mask filter'''
     # '''
     dt_low = None
-    df_idx = None
+    df_idx = []
 
     if single:
         dfs = groupd.tail(1)
         print("dfs tail1")
     else:
+
         if resample.lower() != 'n':
             dl = 30
             dindex = tdd.get_tdx_Exp_day_to_df(
@@ -396,16 +408,18 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
             dt = dindex[dindex.index >= dt].index.values
             dt_low = dt[-1]
             dtlen = len(dt) if len(dt) >0 else 1
-            print("dtlen:%s"%(dtlen))
-            dfs = groupd.tail(dtlen)
+            print("dtlen:%s not use dt"%(dtlen))
+            dtlen = 6
+            dfs = groupd.tail(6)
         # import ipdb;ipdb.set_trace()
         # if dtlen == 1:
         #     dt = str(dfs.loc['999999'].index[0])[:10]
 
-            df_idx = get_groupby_mean_median_close(dfs)
+            #too slow
+            # df_idx = get_groupby_mean_median_close(dfs)
 
-            print(("dfs tail:%s dt:%s"%(dtlen,dt)))
-            dfs = get_multi_date_duration(dfs,dt[-1])
+            print(("dfs tail:%s dt:%s "%(dtlen,dt)))
+            dfs = get_multi_date_duration(dfs,None)
         # else:
         #     print("dtlen:30")
         #     dfs = groupd.tail(30)
@@ -448,12 +462,14 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
             #         & (dfs['high'].shift(1) > dfs[('high')].shift(1))
             #         )
             mask =  ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0)
-                    & (dfs[('close')] >= dfs[('ma%s')%(rollma[0])])
-                    & (dfs[('low')] > dfs[('ma%s')%(rollma[0])] * 0.98)
-                    & (dfs[('close')] >  dfs[('close')].shift(1)) 
-                    & (dfs[('close')] >  dfs[('close')].shift(2)) 
-                    & (dfs[('close')] >  dfs[('close')].shift(3)) 
+                    & (dfs[('close')] >= dfs[('high')]*0.92)
+                    & (dfs[('close')] >= dfs[('ma%s')%(rollma[1])])
+                    & (dfs[('low')] <= dfs[('ma%s')%(rollma[1])]*1.05)
+                    & (dfs[('low')] > dfs[('ma%s')%(rollma[0])] * 0.99)
+                    & (dfs[('close')].shift(1) >  dfs[('ma5')]) 
                     )
+                    # & (dfs[('high')] >=  dfs[('upper')].shift(1)) 
+                    # & (dfs[('close')].shift(3) >  dfs[('ma5d')].shift(3)) 
                     # & (dfs[('close')].shift(1) > dfs[('ma%s')%(rollma[0])].shift(1) * 0.98)
                     # & (dfs[('low')] > dfs[('low')].shift(1))
                     # & (dfs[('low')] >= dfs[('ma%s')%(rollma[0])].shift(1))
@@ -509,13 +525,20 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
             mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[1])] > 0)
                     & (dfs['upper'] > 0)
-                    & (dfs[('ma%s')%(rollma[0])] > dfs[('ma%s')%(rollma[1])])
+                    & ((dfs[('close')] >= dfs[('high')]*0.92) | (dfs[('close')] > dfs[('open')]))
+                    & (dfs[('close')] > dfs[('ma20')])
+                    & (dfs[('low')] <= dfs[('ma20')]*1.05)
                     & ((dfs[('high')] >= dfs['upper'].shift(1))  | (dfs[('high')].shift(1) >= dfs['upper'].shift(1)) | (dfs[('high')].shift(2) >= dfs[('upper')].shift(2)) | (dfs[('high')].shift(3) >= dfs[('upper')].shift(3)) | (dfs[('high')].shift(4) >= dfs[('upper')].shift(4)) | (dfs[('high')].shift(5) >= dfs[('upper')].shift(5)) | (dfs[('high')].shift(6) >= dfs[('upper')].shift(6)))
                     & ((dfs[('high')].shift(1) >= dfs['high'].shift(2)) | (  (dfs['close'].shift(1) > dfs[('upper')].shift(1)) & (dfs['low'].shift(1) > dfs['low'].shift(2)) ) )
-                    & (dfs[('percent')] > 0)
+                    & (dfs[('low')] >= dfs[('ma%s')%(rollma[0])])
                     )
+                    # & (dfs[('ma%s')%(rollma[0])] > dfs[('ma%s')%(rollma[1])])
+                    # & (dfs[('percent')] > 0)
                     # & (dfs[('low')] >= dfs[('ma%s')%(rollma[0])]*0.98)
                     # & (dfs[('low')] <= dfs[('ma%s')%(rollma[0])]*1.03)
+
+
+                    
         else:
             # mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0)
             #         & (dfs[('ma%s')%(rollma[0])] > dfs[('ma%s')%(rollma[-1])])
@@ -531,18 +554,17 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
             mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[1])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0) 
                     & (dfs[('upper')] > 0)
-                    & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_l)
-                    & (dfs[('close')] < dfs[('ma%s')%(rollma[-1])]*ma_250_h)  
-                    & (dfs[('close')] > dfs[('ma5')])
-                    & (dfs[('close')] > dfs[('ene')])
                     & (dfs[('ma5')] > dfs[('ene')])
                     & ((dfs[('high')] > dfs[('upper')]) | (dfs[('high')].shift(3) > dfs[('upper')].shift(3)) | (dfs[('high')].shift(5) > dfs[('upper')].shift(5)) | (dfs[('high')].shift(6) > dfs[('upper')].shift(6)) | (dfs[('high')].shift(7) > dfs[('upper')].shift(7)) | (dfs[('high')].shift(9) > dfs[('upper')].shift(9)) | (dfs[('high')].shift(10) > dfs[('upper')].shift(10)) | (dfs[('high')].shift(11) > dfs[('upper')].shift(11)) | (dfs[('high')].shift(12) > dfs[('upper')].shift(12)) )
-                    & (dfs[('low')] > dfs[('ma5')])
-                    & (dfs[('low')] > dfs[('low')].shift(1))
-                    & (dfs[('high')] > dfs[('high')].shift(1))
+                    & (dfs[('close')] > dfs[('ene')])
+                    & (dfs[('low')] <= dfs[('ma20')]*1.05)
                     & (dfs[('volchang')] > 10)
-                    & (dfs[('percent')] > 1)
+                    & (dfs[('percent')] > 2)
                     )
+                    # & (dfs[('low')] > dfs[('low')].shift(1))
+                    # & (dfs[('high')] > dfs[('high')].shift(1))
+                    # & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_l)
+                    # & (dfs[('close')] < dfs[('ma%s')%(rollma[-1])]*ma_250_h)  
                     # & (dfs[('close')] > dfs[('close')].shift(2))
                     # & (dfs[('close')] > dfs[('close')].shift(3))
                         # & (dfs[('low')] < dfs[('close')].shift(1))
@@ -570,7 +592,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     if len(df) == 0:
         import ipdb;ipdb.set_trace()
         print("df is None,check mask")
-
+        return False
 
     # import ipdb;ipdb.set_trace()
     # df.sort_values(by='couts',ascending=0)
@@ -645,9 +667,9 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
             
             if app:
                 if resample.lower() == 'd' or resample.lower() == 'w' :
-                    table, widths=cct.format_for_print(top_temp.loc[:,[percet ,'close','percent','volchang','ma5' , 'ma20','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
+                    table, widths=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma20','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
                 else:
-                    table, widths=cct.format_for_print(top_temp.loc[:,[percet ,'close','percent','volchang','ma5' , 'ma10','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
+                    table, widths=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma10','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
                 print(table)
 
             if df_idx is not None and len(df) > 0 and len(df_idx) > 0:
@@ -734,12 +756,13 @@ if __name__ == '__main__':
     # get_roll_mean_all(single=True,tdx=True,app=True)
     # get_roll_mean_all(single=True,tdx=True,app=False)
 
-    runWeek = cct.cct_raw_input("runWeek[Y/y]/[N/n]:")
-    if runWeek.lower() != 'n' :
-        get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w')
     runDay = cct.cct_raw_input("runDay[Y/y]/[N/n]:")
     if runDay.lower() != 'n':
         get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='d')
+
+    runWeek = cct.cct_raw_input("runWeek[Y/y]/[N/n]:")
+    if runWeek.lower() != 'n' :
+        get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w')
     runMon = cct.cct_raw_input("runMon[Y/y]/[N/n]:")
     if runMon.lower() != 'n' :
         get_roll_mean_all(single=False,tdx=True,app=True,duration=900,ma_250_l=1.02,ma_250_h=1.2,resample='m')

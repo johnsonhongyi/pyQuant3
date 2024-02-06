@@ -95,7 +95,7 @@ day_dir_sz = basedir + r'/Vipdoc/sz/lday/'
 exp_path = basedir + \
     "/T0002/export/".replace('/', path_sep).replace('\\', path_sep)
 day_path = {'sh': day_dir_sh, 'sz': day_dir_sz}
-resample_dtype = ['d', 'w', 'm']
+resample_dtype = ['d', 'w', 'm','3d']
 # http://www.douban.com/note/504811026/
 
 
@@ -957,6 +957,16 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     df = df.sort_index(ascending=True)
 
     # df['max5'] = df.close[-10:-ct.tdx_high_da].max()
+    perc_couts = df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:]
+    if len(perc_couts) > 1:
+        df['maxp'] = perc_couts.T[1:].values.max() 
+        fib_c  =(perc_couts.T.values > 2).sum()
+        df['fib'] =   fib_c
+        df['maxpcout'] =  fib_c
+    else:
+        df['maxp'] = 0
+        df['fib'] =   0
+        df['maxpcout'] =  0
 
     if cct.get_work_time_duration():
         df['max5'] = df.close[-6:-1].max()
@@ -992,7 +1002,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     df['cmean'] = round(df.close[-10:-ct.tdx_high_da].mean(), 2)
     df['hv'] = df.vol[-tdx_max_int:-ct.tdx_high_da].max()
     df['lv'] = df.vol[-tdx_max_int:-ct.tdx_high_da].min()
-
     df = df.fillna(0)
     df = df.sort_index(ascending=False)
     # if len(df) > 5:
@@ -1492,7 +1501,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
     return df
 
 
-def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=None, type='f', df=None, dl=5, power=True):
+def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=None, type='f', df=None, dl=10, power=True):
     #补数据power = false
     start = cct.day8_to_day10(start)
     end = cct.day8_to_day10(end)
@@ -1578,12 +1587,14 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
 #            ds['volume']=ds.volume.apply(lambda x: x * 100)
             if not 'amount' in ds.columns:
                 ds['amount'] = list(map(lambda x, y, z: round(
-                    (y + z) / 2 /100 * x, 1), ds.volume, ds.high, ds.low))
+                    (y + z) / 2  * x, 1), ds.volume, ds.high, ds.low))
+                    # (y + z) / 2 /100 * x, 1), ds.volume, ds.high, ds.low))
             else:
                 ds['amount'] = ds['amount'].apply(lambda x: round(x , 1))
 
             ds = ds.loc[:, ['code', 'open', 'high',
                             'low', 'close', 'volume', 'amount']]
+
             # ds.rename(columns={'volume': 'amount'}, inplace=True)
             ds.rename(columns={'volume': 'vol'}, inplace=True)
             ds.sort_index(ascending=True, inplace=True)
@@ -2101,7 +2112,7 @@ def Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=30
     h5_fname = h5_fname + '_' + str(dl)
     h5_table = h5_table + '_' + str(dl)
     status = False
-    if cct.get_work_day_status() and cct.get_now_time_int() > 1500:
+    if cct.get_work_day_status() and (cct.get_now_time_int() > 1500 or cct.get_now_time_int() < 900):
         if market == 'all':
             index = False
             # mlist = ['sh', 'sz', 'cyb' ,'kcb']
@@ -2360,11 +2371,13 @@ def Write_market_all_day_mp(market='all', rewrite=False):
                     get_tdx_append_now_df_api_tofile, code_list, dm=dm, newdays=0)
             else:
                 print(("dm is not open sell:%s"%(code_list if len(code_list) <10 else len(code_list))))
+
+            #debug
             # for code in code_list:
-            # print "code:%s "%(code),
-            # res=get_tdx_append_now_df_api_tofile(code,dm,5)
-            # print "status:%s\t"%(len(res)),
-            # results.append(res)
+            #     print("code:%s "%(code),)
+            #     res=get_tdx_append_now_df_api_tofile(code,dm=dm, newdays=0)
+            #     print("status:%s\t"%(len(res)),)
+            #     results.append(res)
             print("AllWrite:%s t:%s"%(len(duration_code),round(time.time() - time_t, 2)))
 
 
@@ -2466,7 +2479,7 @@ def get_sina_data_df(code,index=False):
     # index_status=False
 
     if isinstance(code, list):
-        if len(code) > 1:
+        if len(code) > 0:
             dm = sina_data.Sina().get_stock_list_data(code,index=index)
         else:
             dm=[]
@@ -3279,7 +3292,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     #                         df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df.index))
 
     df['perlastp'] = list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'],df['open'].shift(1), 
-                            df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4']))
+                            df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4'],df['code']))
     # df['high4'],df['max5'],df['hmax'],df['lastdu4']
     # df.high[-2:-1].max(),df.high[-3:-1].max(),df.high[-5:-1].max(),df.high[-2:-1].max()/df.low[-2:-1].min()
     #df['high'].rolling(2).max(),df['high'].rolling(3).max(),df['high'].rolling(5).max(),df['high'].rolling(2).max()/df['low'].rolling(2).min()
@@ -3676,7 +3689,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
             # df['lasth%sd' % da] = df['high'].shift(da-1)
             # df['lastl%sd' % da] = df['low'].shift(da-1)
             # df['lastv%sd' % da] = df['vol'].shift(da-1)
-            if da <=4:
+            if da <=6:
                 # df['lastp%sd' % da] = df['close'][-da]
                 df['lasto%sd' % da] = df['open'][-da]
                 df['lasth%sd' % da] = df['high'][-da]
@@ -4446,11 +4459,11 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     #20231110 add today topR
 
     if cct.get_trade_date_status() == 'False':
-        top_all['topR'] =  list(map(lambda x, y, z: (1.1 if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
+        top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
     # elif 915 < cct.get_now_time_int() < 1500:
     #     top_all['topR'] =  list(map(lambda x, y, z: (x + 1.1 if y > z else x),top_all.topR, top_all.low, top_all.lasth1d))
     elif cct.get_now_time_int() < 915:
-        top_all['topR'] =  list(map(lambda x, y, z: (1.1 if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
+        top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
     else:
         if (top_all['open'][-1] == top_all['lasto1d'][-1]) and (top_all['open'][0] == top_all['lasto1d'][0]):
             top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
@@ -4931,9 +4944,13 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
     Returns:
         _type_: _description_
     """
-    
 
-    period_type = period_type_dic[period_day.lower()]
+
+    if period_day.lower() in period_type_dic.keys():
+
+        period_type = period_type_dic[period_day.lower()]
+    else:
+        period_type = period_day
 
     indextype = True if stock_data.index.dtype == 'datetime64[ns]' else False
     #
@@ -4949,6 +4966,7 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
         stock_data.index = pd.to_datetime(stock_data.index, format='%Y-%m-%d')
     else:
         log.error("index.name not date,pls check:%s" % (stock_data[:1]))
+
 
     period_stock_data = stock_data.resample(period_type).last()
     # ÖÜÊý¾ÝµÄÃ¿ÈÕchangeÁ¬ÐøÏà³Ë
@@ -4987,6 +5005,8 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
     # print period_stock_data.columns,period_stock_data.index.name
     # and period_stock_data.index.dtype != 'datetime64[ns]')
     
+
+    # if period_day.lower() in period_type_dic.keys() and not indextype and period_stock_data.index.name == 'date' and 'date' in period_stock_data.columns:
     if not indextype and period_stock_data.index.name == 'date' and 'date' in period_stock_data.columns:
         # stock_data.index = pd.to_datetime(stock_data.index, format='%Y-%m-%d')
         # period_stock_data = period_stock_data.set_index('date')
@@ -5152,11 +5172,13 @@ if __name__ == '__main__':
 
     # Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300, rewrite=True)
     # import ipdb;ipdb.set_trace()
+    code='603603'
+
+    df=get_tdx_append_now_df_api_tofile(code)
+    import ipdb;ipdb.set_trace()
 
 
-    # df=get_tdx_append_now_df_api_tofile('000587')
-
-    code='000043'
+    code='000043'   
     code='601699'
     code='600604'
     code='002175'
@@ -5184,7 +5206,7 @@ if __name__ == '__main__':
     # code='002828'  
     # code='002176' #江特电机
     code='601127'  #捷荣技术
-    code='000628'  #捷荣技术
+    code='002620'  #捷荣技术
     # code='300290'  #捷荣技术
     # code='300826'  #测绘股份
     # code='002251'  #步步高
@@ -5214,8 +5236,38 @@ if __name__ == '__main__':
     # code = '603486'
     code = '002238'
     code = '002786'
-    code = '002086'
+    code = '002460'
+    code = '002620'
+    code = '001339'
     # code = '002865'
+
+    '''
+
+    Date              Open        High         Low       Close   Volume
+    2010-01-04   38.660000   39.299999   38.509998   39.279999  1293400   
+    2010-01-05   39.389999   39.520000   39.029999   39.430000  1261400   
+    2010-01-06   39.549999   40.700001   39.020000   40.250000  1879800   
+    2010-01-07   40.090000   40.349998   39.910000   40.090000   836400   
+    2010-01-08   40.139999   40.310001   39.720001   40.290001   654600   
+    2010-01-11   40.209999   40.520000   40.040001   40.290001   963600   
+    2010-01-12   40.160000   40.340000   39.279999   39.980000  1012800   
+    2010-01-13   39.930000   40.669998   39.709999   40.560001  1773400   
+    2010-01-14   40.490002   40.970001   40.189999   40.520000  1240600   
+    2010-01-15   40.570000   40.939999   40.099998   40.450001  1244200 
+    df = pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
+    logic = {'Open'  : 'first',
+             'High'  : 'max',
+             'Low'   : 'min',
+             'Close' : 'last',
+             'Volume': 'sum'}
+
+    dfw = df.resample('W').apply(logic)
+    # set the index to the beginning of the week
+    dfw.index = dfw.index - pd.tseries.frequencies.to_offset("6D")
+    '''
+    
+    # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
+
     # df2 = get_tdx_Exp_day_to_df(code,dl=10, end='20221116', newdays=0, resample='d')
     # df = get_tdx_Exp_day_to_df(code, dl=1)
     # 
@@ -5224,7 +5276,9 @@ if __name__ == '__main__':
 
     # df2 = get_tdx_Exp_day_to_df(code,dl=60, end='20230925', newdays=0, resample='d')
 
-    df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='d')
+    # df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='w')
+    df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='3d')
+    print(df.loc[:,df.columns[df.columns.str.contains('perc')]][:1].T)
     # df[(df.close > df.upper) & (df.upper > 0) ]
 
     # df = get_tdx_Exp_day_to_df(code,dl=60, end='2023-10-13', newdays=0, resample='d')
@@ -5254,7 +5308,7 @@ if __name__ == '__main__':
 
 
     # print df2.shape,df2.cumin
-    # print get_kdate_data('000859', start='2019-01-01', end='', ktype='D')
+    # print get_kdate_data('000859', start='2023-01-01', end='', ktype='D')
     # write_tdx_tushare_to_file(code)
    
     # df = get_tdx_Exp_day_to_df(code, dl=ct.PowerCountdl,end=None, newdays=0, resample='d')

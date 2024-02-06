@@ -90,6 +90,8 @@ def compute_perd_value(df, market_value=3, col='per'):
     # temp = df[df.columns[(df.columns >= '%s1d' % (col)) & (df.columns <= '%s%sd' % (col, market_value))]]
     # temp = df.loc[:,df.columns.str.contains( "%s\d{1,2}d$"%(col),regex= True)]
 
+
+
     if int(market_value) < 10:
         temp =df.loc[:,df.columns.str.contains( "%s[1-%s]d$"%(col,market_value),regex= True)]
     else:
@@ -99,6 +101,8 @@ def compute_perd_value(df, market_value=3, col='per'):
             _remainder = int(ct.compute_lastdays)%10
         # df.loc[:,df.columns.str.contains( "%s[0-9][0-%s]d$"%(col,_remainder),regex= True)][:1]
         temp =df.loc[:,df.columns.str.contains( "%s([1-9]|1[0-%s])d$"%(col,_remainder),regex= True)]
+    # temp = cct.get_col_market_value_df(df,col,market_value)
+
 
     # if  '%s%sd' % (col,market_value) == temp.T.index[-1]:
     #     df['%s%sd' % (col, market_value)] = temp.T.sum().apply(lambda x: round(x, 1))
@@ -173,7 +177,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     market_key = cct.GlobalValues().getkey('market_key')
     market_value = cct.GlobalValues().getkey('market_value')
     tdx_Index_Tdxdata = cct.GlobalValues().getkey('tdx_Index_Tdxdata')
-
+    market_va_filter = cct.GlobalValues().getkey('market_va_filter')
 
     if market_value != '1.1' and int(market_value) > ct.compute_lastdays:
         market_value = ct.compute_lastdays
@@ -294,18 +298,28 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
             # if not upper:
                # if cct.get_work_time() or df.ix[idx_rnd].lastp1d <> df.ix[idx_rnd].close:
 
+            if cct.GlobalValues().getkey('percdf') is None:
+                time_df =time.time()
+                filter_key = '6'
+                percdf = cct.get_col_market_value_df(df,'lasto',filter_key)
+                percdf = cct.combine_dataFrame(percdf,cct.get_col_market_value_df(df,'lasth',filter_key))
+                percdf = cct.combine_dataFrame(percdf,cct.get_col_market_value_df(df,'lastl',filter_key))
+                percdf = cct.combine_dataFrame(percdf,cct.get_col_market_value_df(df,'lastp','15'))
+                percdf = cct.combine_dataFrame(percdf,cct.get_col_market_value_df(df,'ma5','15'))
+                percdf = cct.combine_dataFrame(percdf,cct.get_col_market_value_df(df,'ma20','15'))
+                print("timecol:%s"%(round(time.time()-time_df,2)),end=' ')
+                cct.GlobalValues().setkey('percdf',percdf)
 
 
             # if cct.get_work_time() :
-            
             if cct.get_work_time_duration():
                 nowd, per1d=1, 1
                 if 'nlow' in df.columns:
-                    df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['nhigh'], df['nlow'], df['lasto%sd' % nowd], df['llastp'],
-                                     df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4']))
+                    df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['nhigh'], df['nlow'], df['lasto%sd' % nowd], df['lastp%sd' % (nowd)],
+                                     df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4'],df.index))
                 else:
-                    df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['llastp'],
-                                     df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4']))
+                    df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['lastp%sd' % (nowd)],
+                                     df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4'],df.index))
                 # for co in perc_col:
                 #     df[co] = (df[co] + df['perc_n']).map(lambda x: round(x,1))
                 if market_value == '0' and market_key == '3':
@@ -313,17 +327,17 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
 
             else:
 
-                if (df['open'][-1] == df['lasto1d'][-1]) and (df['open'][0] == df['lasto1d'][0]):
+                if (df['open'][3] == df['lasto1d'][3]) and (df['open'][0] == df['lasto1d'][0]):
                     nowd, per1d=2, 1
-                    df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['llastp'],
-                                         df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4']))
+                    df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['lastp%sd' % (nowd)],
+                                         df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4'],df.index))
                     
                     df['perc1d'] = df['perc_n']
                     perc_col.remove('perc1d')
                 else:
                     nowd, per1d=1, 1
-                    df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['llastp'],
-                                         df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4']))
+                    df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['lastp%sd' % (nowd)],
+                                         df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4'],df.index))
                     
                     if market_value == '0' and market_key == '3':
                         df['perc1d'] = df['perc_n']
@@ -377,14 +391,27 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                 idx_k= cct.get_col_in_columns(df, 'perc%sd', market_value)
                 # filter percd > idx
                 # df= df[(df[("perc%sd" % (idx_k))] >= idx_k) | (df[("perc%sd" % (idx_k))]< -idx_k)]
-                
-                df= df[(df[("perc%sd" % (idx_k))] >= idx_k) ]
+                if market_va_filter is not None:
+                    df= df[(df[("perc%sd" % (idx_k))] >= int(market_va_filter)) ]
+                    cct.GlobalValues().setkey('market_va_filter',None)
+                else:
+                    df= df[(df[("perc%sd" % (idx_k))] >= idx_k) ]
 
             # elif market_key in ['5','6'] and market_value not in ['1']:
             #     # market_value= int(market_value)
             #     # filter percd > idx
             #     idx_k = int(market_value)
             #     df= df[ (df[("%s" % (sort_value))] <= idx_k) ]
+            elif market_key == '2' and market_value not in ['1']:
+
+                market_value= int(float(market_value))
+                log.info("stf market_key:%s" % (market_key))
+                idx_k= cct.get_col_in_columns(df, 'per%sd', market_value)
+                # filter percd > idx
+                # df= df[(df[("perc%sd" % (idx_k))] >= idx_k) | (df[("perc%sd" % (idx_k))]< -idx_k)]
+                if market_va_filter is not None:
+                    df= df[(df[("per%sd" % (idx_k))] >= int(market_va_filter)) ]
+                    cct.GlobalValues().setkey('market_va_filter',None)
 
             elif market_key in ['x1','x','6'] and market_value not in ['1']:
                 # market_value= int(market_value)
