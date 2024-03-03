@@ -464,7 +464,7 @@ def fetch_stocks_trade_date():
 def is_trade_date(date=datetime.date.today()):
     trade_date = fetch_stocks_trade_date()
     if trade_date is None:
-        return False
+        return None
     if date in trade_date:
         return True
     else:
@@ -589,7 +589,7 @@ def set_default_encode(code='utf-8'):
 def isDigit(x):
     #re def isdigit()
     try:
-        if x == 'nan' or x is None:
+        if str(x) == 'nan' or x is None:
             return False
         else:
             float(x)
@@ -687,7 +687,7 @@ terminal_positionKey4K = {'sina_Market-DurationDn.py': '106, 586,1400,440',
                         'sina_Monitor-Market.py': '19, 179,1400,440',
                         'sina_Monitor.py': '259, 0,1400, 520',
                         'singleAnalyseUtil.py': '1036, 29,920,360',
-                        'LinePower.py': '123, 235,1498, 420', 
+                        'LinePower.py': '123, 235,760, 420', 
                         'sina_Market-DurationDnUP.py': '41, 362,1400,440',
                         'instock_Monitor.py':'229, 72,1360,440',
                         'chantdxpower.py':'155, 167, 1200, 480',}
@@ -695,17 +695,18 @@ terminal_positionKey4K = {'sina_Market-DurationDn.py': '106, 586,1400,440',
 
 
 terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440',
-                        'sina_Market-DurationCXDN.py': '-6, 311,1400,440',
+                        'sina_Market-DurationCXDN.py': '13, 310,1400,440',
                         'sina_Market-DurationSH.py': '-29, 623,1400,440',
                         'sina_Market-DurationUP.py': '251, 445,1400,440',
                         'sina_Monitor-Market-LH.py': '567, 286,1400,420',
                         'sina_Monitor-Market.py': '140, 63,1400,440',
                         'sina_Monitor.py': '108, 0, 1400, 520',
                         'singleAnalyseUtil.py': '759, 0,920,360',
-                        'LinePower.py': '16, 186, 1498, 420',
+                        'LinePower.py': '44, 186, 760, 420',
                         'sina_Market-DurationDnUP.py': '41, 362,1400,480' ,
                         'instock_Monitor.py':'62, 86,1360,440',
-                        'chantdxpower.py':'86, 128, 1200, 480',}
+                        'chantdxpower.py':'86, 128, 1200, 480',
+                        'ths-tdx-web.py':'76, 294, 600, 320',}
 
 
 
@@ -849,7 +850,7 @@ def get_system_postionKey():
     import socket
     hostname = socket.gethostname() 
         # monitors = monitors if len(monitors) > 0 else False
-
+        
     if basedir.find('vm') >= 0:
         positionKey = terminal_positionKey_VM
     elif get_os_system() == 'mac':
@@ -862,16 +863,11 @@ def get_system_postionKey():
         if hostname.find('R900') >=0:
             positionKey = terminal_positionKey2K_R9000P
         else:
-            proc = subprocess.Popen(['powershell', 'Get-WmiObject win32_desktopmonitor;'], stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
-            res = proc.communicate()
-            # monitorsName = re.findall('(?s)\r\nName\s+:\s(.*?)\r\n', res[0].decode("gbk"))
-            monitorsName = re.findall('\r\nName\s+:\s(.*?)\r\n', res[0].decode("gbk"))
-            monitorsScreenWidth = re.findall('\r\nScreenWidth\s+:\s(.*?)\r\n', res[0].decode("gbk"))
-            positionKey = terminal_positionKey1K_triton
-            for screenWidth in monitorsScreenWidth:
-                if screenWidth == '3840':
-                    positionKey = terminal_positionKey4K
-                    break
+            ScreenHeight,ScreenWidth = get_screen_resolution()
+            if ScreenWidth == '3840':
+                positionKey = terminal_positionKey4K
+            else:
+                positionKey = terminal_positionKey1K_triton
 
     return positionKey
 
@@ -1115,6 +1111,21 @@ def isMac():
         # import codecs
         # sys.stdout = codecs.getwriter('utf-8')(sys.stdout)
         return False
+
+def get_screen_resolution():
+    proc = subprocess.Popen(['powershell', 'Get-WmiObject win32_desktopmonitor;'], stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    res = proc.communicate()
+    # monitorsName = re.findall('(?s)\r\nName\s+:\s(.*?)\r\n', res[0].decode("gbk"))
+    # monitorsName = re.findall('\r\nName\s+:\s(.*?)\r\n', res[0].decode("gbk"))
+    # monitorScreenWidth = re.findall('\r\nScreenWidth\s+:\s(.*?)\r\n', res[0].decode("gbk"))
+    # monitorScreenHeight = re.findall('\r\nScreenHeight\s+:\s(.*?)\r\n', res[0].decode("gbk"))
+    # for screenWidth in monitorScreenWidth:
+    #     # if screenWidth == '3840':
+    #     if isDigit(screenWidth):
+    #         return screenWidth
+    # return 0
+    ScreenHeight,ScreenWidth = re.findall('\r\nScreenHeight\s+:\s(.*?)\r\nScreenWidth\s+:\s(.*?)\r\n', res[0].decode("gbk"))[-1]
+    return ScreenHeight,ScreenWidth 
 
 
 def check_chinese(checkstr):
@@ -2268,8 +2279,10 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
             cpu_co = 1
         else:
             cpu_co = int(round(len(urllist)/100,0))
+
         pool_count = (cpu_count()-2) if cpu_co > (cpu_count()-2) else cpu_co
-        # func = partial(cmd, **kwargs)
+        if  cpu_co > 1 and 1300 < get_now_time_int() < 1500:
+            pool_count = int(cpu_count() / 2)
         if len(kwargs) > 0 :
                 # pool = ThreadPool(12)
                 func = partial(cmd, **kwargs)
@@ -2666,16 +2679,18 @@ def get_config_value_ramfile(fname, currvalue=0, xtype='time', update=False,cfgf
                 save_date = None
                 
             if save_date is not None:
-                if save_date != get_today():
-                    if 'rewrite' in list(config[classtype].keys()):
-                        rewrite = int(config[classtype]['rewrite']) + 1
-                    else:
-                        rewrite = 1
-                    config[classtype] = {}
-                    config[classtype][xtype] = is_trade_date()
-                    config[classtype]['date'] = get_today()
-                    config[classtype]['rewrite'] = rewrite
-                    config.write()
+                if save_date != get_today() or update:
+                    trade_status= is_trade_date()
+                    if trade_status is not None or trade_status != 'None':
+                        if 'rewrite' in list(config[classtype].keys()):
+                            rewrite = int(config[classtype]['rewrite']) + 1
+                        else:
+                            rewrite = 1
+                        config[classtype] = {}
+                        config[classtype][xtype] = trade_status
+                        config[classtype]['date'] = get_today()
+                        config[classtype]['rewrite'] = rewrite
+                        config.write()
             else:
                 config[classtype] = {}
                 config[classtype][xtype] = is_trade_date()
@@ -2812,6 +2827,8 @@ def get_trade_date_status():
     trade_status = GlobalValues().getkey('is_trade_date')
     if  trade_status is None:
         trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date')
+        if trade_status is None or trade_status == 'None':
+            trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date',update=True)
         GlobalValues().setkey('is_trade_date',(trade_status))
         GlobalValues().setkey('trade_date',get_today())
     if trade_date is not None:
@@ -2915,7 +2932,7 @@ def write_to_blkdfcf(codel,conf_ini=dfcf_path,blk='inboll1',append=True):
         # print('instock:',cf.get("\\SelfSelect", "instock"))
         cf.write(open(conf_ini,"w",encoding='UTF-16'))
 
-def write_to_blocknew(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=True,reappend=True):
+def write_to_blocknew(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True):
     if keep_last is None:
         keep_last = ct.keep_lastnum
     # index_list = ['1999999','47#IFL0',  '0159915', '27#HSI']
@@ -3354,8 +3371,10 @@ def varnamestr(obj, namespace=globals()):
     return None
 
 # multiIndex_func = {'close': 'mean', 'low': 'min', 'high': 'max', 'volume': 'sum', 'open': 'first'}
-multiIndex_func = {'close': 'mean', 'low': 'min', 'high': 'max', 'volume': 'sum', 'open': 'first'}
+# multiIndex_func = {'close': 'mean', 'low': 'min', 'high': 'max', 'volume': 'sum', 'open': 'first'}
 
+#20240301
+multiIndex_func = {'close': 'mean', 'low': 'min', 'high': 'max', 'volume': 'last', 'open': 'first'}
 
 def using_Grouper_eval(df, freq='5T', col='low', closed='right', label='right'):
     func = {}
@@ -3892,6 +3911,221 @@ def get_col_market_value_df(df,col,market_value):
         # df.loc[:,df.columns.str.contains( "%s[0-9][0-%s]d$"%(col,_remainder),regex= True)][:1]
         temp =df.loc[:,df.columns.str.contains( "%s([1-9]|1[0-%s])d$"%(col,_remainder),regex= True)]
     return temp
+
+def func_compute_percd2024( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None,high4=None,max5=None,hmax=None,lastdu4=None,code=None):
+    initc = 0
+    percent_idx = 2
+    vol_du_idx = 1.2
+    close_du = 0
+    vol_du = 0
+    top_max_up = 10
+
+    if np.isnan(lastclose):
+        percent = round((close - open)/open*100,1)
+        lastp = 0
+    else:
+        percent = round((close - lastclose)/lastclose*100,1)
+        lastp = round((lastclose - lastopen)/lastclose*100,1)
+
+    if  low > 0 and  lastclose > 0 and lastvol > 0 and lasthigh > 1.0 and lastlow > 1.0 and lasthigh > 0 and lastlow > 0:
+        percent = round((close - lastclose)/lastclose*100,1)
+        # now_du = round((high - low)/low*100,1)
+        close_du = round((high - low)/low*100,1)
+        # last_du = round((lasthigh - lastlow)/lastlow*100,1)
+        # volratio = round((nowvol / lastvol),1)
+        vol_du = round((nowvol)/lastvol,1)
+
+        # if idate == "2022-11-28":
+
+        if (percent > percent_idx and low > lastlow and (close_du > percent_idx or vol_du > vol_du_idx)) or (high > lasthigh and (low > lastlow and close > ma5) ):
+            initc +=1
+            # if  close_du > 5:
+            #     initc +=0.1
+        # elif percent < -percent_idx or (percent < 0 and close_du > 3):
+        elif percent < -percent_idx:
+            initc -=1
+            # if close > open:
+            #     #下跌中继,或者止跌信号
+            #     initc +=3
+            # if  close_du > 5:
+            #     initc -=0.1
+
+        # if percent >0 and open >= lastclose and close == high and close > ma5:
+        #     initc +=1
+        #     if close > ma5:
+        #         if close < ma5*1.1:
+        #             initc +=3*vol_du
+        #         elif close < ma5*1.2:
+        #             initc +=2*vol_du
+        #         else:
+        #             initc+=2
+
+        # elif percent > 3 and low >= lastlow and high > lasthigh:
+        #     initc +=2
+
+        # elif percent > 3 and close_du > 9 and vol_du > 2:
+        #     initc += 1*vol_du
+        # elif percent > 2 :
+        #     initc +=1
+        # elif percent > 0  and open > ma5 and open > ma10 :
+        #     initc +=1
+        #     if  vol_du < 0.6:
+        #         initc +=0.1
+        # elif low < lastlow and high < lasthigh:
+        #     initc -=1
+        # elif percent < -5 and low < lastlow:
+        #     initc -=2
+        # elif percent < 0 and close < ma5 and close < ma10:
+        #     initc -=0.51
+        # else:
+            # initc -=1
+    elif  np.isnan(lastclose) :
+        if close > open:
+            initc +=percent
+        else:
+            initc -=percent
+
+    # open, close,high, low,lastopen, lastclose,lasthigh, lastlow, 
+    # ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None
+
+    if  np.isnan(lastclose):
+        if percent > 3 and close > ma5 and high > ma10:
+            initc +=2
+    else:
+
+        if close > lasthigh:
+            initc +=0.1
+            # if  ma5 > ma10:
+            #     initc +=0.1
+            # else:
+            #     initc -=0.11
+        elif close < lastlow:
+            initc -=0.1
+
+        if low > lastlow:
+            initc +=0.1
+            if high >lasthigh:
+                initc +=0.1
+                
+        if high > lasthigh and close > lasthigh and percent > 3 and ma5 > ma10:
+
+            if lastp < -2:
+                initc +=12
+            else:
+                initc +=2
+            if (open >= low or (open >lastclose and close > lasthigh)) and close >= high*0.92:
+                initc +=2
+                if lastclose >= lasthigh*0.98 or lastclose > (lasthigh + lastlow)/2:
+                    initc +=2
+                    if close_du > 5 and vol_du > 0.8 and vol_du < 2.2:
+                        initc +=5
+            elif low > lasthigh:
+                initc +=2
+            elif close == high:
+                initc +=1
+
+            if hmax is not None and high >= hmax:
+                # if idate == '300093':
+                #     import ipdb;ipdb.set_trace()
+
+                if high4 is not None and max5 is not None:
+                    if hmax > high4 and high4 > max5:
+                        initc +=10
+                else:
+                    initc +=3
+
+            if high4 is not None and (high >= high4 or (get_work_time_duration() and high >high4)):
+
+                if lastdu4 is not None:
+                    if lastdu4 <= 1.12:
+                        initc +=10
+                    elif lastdu4 > 1.12 and lastdu4 <= 1.21:
+                        initc +=8
+                    elif lastdu4 > 1.21 and lastdu4 <= 1.31:
+                        initc +=5
+                    elif lastdu4 > 1.31 and lastdu4 <= 1.5:
+                        initc +=3
+                    else:
+                        initc +=2
+
+                if max5 is not None and high >= max5:
+                    initc +=5
+                    # if hmax is not None and close > hmax:
+                    #     initc +=3
+                    #     lastMax = max(high4,max5,hmax)
+                    #     if close >= lastMax and lastclose < lastMax or (not get_work_time_duration() and high >=lastMax):
+                    #         if lastdu4 is not None:
+                    #             if lastdu4 <= 1.05:
+                    #                 initc +=10
+                    #             elif lastdu4 > 1.05 and lastdu4 <= 1.1:
+                    #                 initc +=8
+                    #             elif lastdu4 > 1.1 and lastdu4 <= 1.2:
+                    #                 initc +=5
+                    #             elif lastdu4 > 1.2 and lastdu4 <= 1.3:
+                    #                 initc +=3
+                    #             else:
+                    #                 initc +=2
+                    #         else:
+                    #             initc +=1
+                    #     else:
+                    #         initc +=3
+                    #     if close == high:
+                    #         initc +=2
+                    #     elif close >=high*0.99:
+                    #         initc +=2
+
+            # if (lastclose <= upper and high >= upper) | ( ((lastclose >= upper) | (lastp >= 5))):
+            if (lastclose <= upper and high >= upper) | ( ((lastclose >= upper) | (lastp >= 5))):
+                initc +=percent
+                if high4 is not None and hmax is not None:
+                    lastMax = max(high4,max5,hmax)
+                    if lasthigh >= lastMax:
+                        initc += 5 + abs(lastp)
+                    if lastMax==hmax and high4 > max5 and high4 < hmax:
+                        initc += 5
+
+    if GlobalValues().getkey('percdf') is not None:
+        # if code == '601857':
+        #     import ipdb;ipdb.set_trace()
+        if code in GlobalValues().getkey('percdf').index:
+            lastdf = GlobalValues().getkey('percdf').loc[code]
+            if percent > 2:
+                if lastdf.lasth1d < lastdf.lasth2d < lastdf.lasth3d:
+                    if close > lastdf.lasth1d:
+                        initc += 30
+                        if lastdf.lasth3d < lastdf.lasth4d:
+                            initc += 30
+                            
+                            if lastdf.lasth4d < lastdf.lasth5d:
+                                initc += 30
+                                if lastdf.lasth5d < lastdf.lasth6d:
+                                    initc += 30
+                    if low < lastdf.ma51d and high > lastdf.ma51d:
+                        initc += 50
+                elif lastdf.lasth2d < lastdf.lasth3d < lastdf.lasth4d:
+                    if close > lastdf.lasth1d > lastdf.lasth2d:
+                        initc += 25
+                        if lastdf.lasth3d < lastdf.lasth4d:
+                            initc += 30
+                            if lastdf.lasth4d < lastdf.lasth5d:
+                                initc += 30
+                                if lastdf.lasth5d < lastdf.lasth6d:
+                                    initc += 30
+                    if low < lastdf.ma51d and high > lastdf.ma51d:
+                        initc += 50
+                                     
+                elif lastdf.lasth1d > lastdf.lasth2d > lastdf.lasth3d and lastdf.ma51d < lastdf.lastl1d < lastdf.ma51d*1.02 :
+                    initc += 50
+                    if lastdf.ma51d < lastdf.lastl1d < lastdf.ma51d*1.02:
+                        initc += 30
+
+        # else:
+        #     log.info("check lowest in percdf:%s"%(code))
+            # print("lowest:%s"%(code),end=' ')
+
+    return round(initc,1)
+
+
 def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None,high4=None,max5=None,hmax=None,lastdu4=None,code=None):
     initc = 0
     percent_idx = 2
@@ -4675,8 +4909,12 @@ if __name__ == '__main__':
     mdf.shape
     import ipdb;ipdb.set_trace()
     '''
-    print(read_to_indb())
+    # rzrq['all']='nan'
     print(is_trade_date())
+    print(isDigit('nan None'))
+    import ipdb;ipdb.set_trace()
+    
+    print(read_to_indb())
     print(get_trade_date_status())
     print(get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date'))
     print(code_to_symbol_ths('000002'))

@@ -107,15 +107,16 @@ if __name__ == "__main__":
     blkname = '065.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
 
-    from JohnsonUtil import inStockDb as inDb
-    # indf = inDb.showcount(inDb.selectlastDays(0))
-    indf = inDb.show_macd_boll_up()
+
+    # from JohnsonUtil import inStockDb as inDb
+    # # indf = inDb.showcount(inDb.selectlastDays(0))
+    # indf = inDb.show_macd_boll_up()
     
-    if len(indf) > 0 and cct.creation_date_duration(block_path) > 0:
-        cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
-    else:
-        if cct.creation_date_duration(block_path) > 0:
-            log.error("indb last1days is None")   
+    # if len(indf) > 0 and cct.creation_date_duration(block_path) > 0:
+    #     cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
+    # else:
+    #     if cct.creation_date_duration(block_path) > 0:
+    #         log.error("indb last1days is None")   
 
     status_change = False
     lastpTDX_DF = pd.DataFrame()
@@ -149,7 +150,8 @@ if __name__ == "__main__":
     # market_sort_value, market_sort_value_key = ct.get_market_sort_value_key('1')
     # st_key_sort = '7'
     # st_key_sort = ct.sort_value_key_perd23
-    st_key_sort = '3 1'
+    # st_key_sort = '3 1'
+    st_key_sort = '4'
     # st_key_sort = '2 2'
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort)
     st = None
@@ -182,7 +184,8 @@ if __name__ == "__main__":
             # market_blk = '近期新高'
             # market_blk = '060'
             # market_blk = '065'
-            market_blk = '077'
+            # market_blk = '077'
+            market_blk = 'all'
 
             top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
             
@@ -344,7 +347,8 @@ if __name__ == "__main__":
                     if percent_status == 'y' and (
                             cct.get_now_time_int() > 935 or cct.get_now_time_int() < 900) and ptype == 'low':
                         top_dif = top_dif[top_dif.percent >= 0]
-                        top_temp = stf.filterPowerCount(top_dif,ct.PowerCount)
+                        # top_temp = stf.filterPowerCount(top_dif,ct.PowerCount)
+                        top_temp = top_dif.copy()
                         top_end = top_dif[-int((ct.PowerCount)/10):].copy()
                         top_temp = pct.powerCompute_df(top_temp, dl=ct.PowerCountdl, talib=True, newdays=newdays)
                         top_end = pct.powerCompute_df(top_end, dl=ct.PowerCountdl, talib=True, newdays=newdays)
@@ -352,7 +356,8 @@ if __name__ == "__main__":
                     # elif percent_status == 'y' and cct.get_now_time_int() > 935 and ptype == 'high' :
                     elif ptype == 'low':
                         # top_dif = top_dif[top_dif.percent >= 0]
-                        top_temp = stf.filterPowerCount(top_dif,ct.PowerCount)
+                        # top_temp = stf.filterPowerCount(top_dif,ct.PowerCount)
+                        top_temp = top_dif.copy()
                         top_end = top_dif[-5:].copy()
                         top_temp = pct.powerCompute_df(top_temp, dl=ct.PowerCountdl, talib=True, newdays=newdays)
                         top_end = pct.powerCompute_df(top_end, dl=ct.PowerCountdl, talib=True, newdays=newdays)
@@ -374,15 +379,45 @@ if __name__ == "__main__":
                     top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=True, ma5d=False, dl=14, percent=False, resample=resample, ene=False,cuminTrend=False)
                     # top_end = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=False, ma5d=False, dl=14, percent=False, resample=resample, ene=False)
                     top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
-                    
+
                     print(("N:%s K:%s %s G:%s" % (
                         now_count, len(top_all[top_all['buy'] > 0]),
                         len(top_now[top_now['volume'] <= 0]), goldstock)), end=' ')
 
                     nhigh = top_temp[top_temp.close > top_temp.nhigh] if 'nhigh'  in top_temp.columns else []
                     nlow = top_temp[top_temp.close > top_temp.nlow] if 'nhigh'  in top_temp.columns else []
-                    print("Rt:%0.1f dT:%s N:%s T:%s %s%% nh:%s nlow:%s" % (float(time.time() - time_Rt), cct.get_time_to_date(time_s), cct.get_now_time(), len(top_temp), round(len(top_temp) / float(ct.PowerCount) * 100, 1),len(nhigh),len(nlow)))
                     # top_end = stf.getBollFilter(df=top_end, boll=ct.bollFilter,duration=ct.PowerCountdl,filter=False)
+                    
+                    #query filter
+                    if cct.get_now_time_int() > 915:
+                        if len(top_temp[:2].query('close == lastp1d')) > 0:
+                            top_temp = top_temp.query('low > lastl2d and close > ma5d and low <= ma5d and ((lastp2d >= ma202d) and (lastp3d >= ma203d) and (lastp4d >=ma204d)) and ( (lasth2d >= lasth3d ) and  (lasth3d >= lasth4d ) and  (lasth4d >=lasth5d) ) ')
+                        else:
+                            if  cct.get_now_time_int() < 930:
+                                top_temp = top_temp.query('low > lastl1d and close > ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
+                                
+                            else:
+                                if 'nclose' in top_temp.columns:
+                                    top_nlow = top_temp.query('nlow == 0')
+                                    top_nlow['nlow']=top_temp.open*0.995
+                                    top_temp = cct.combine_dataFrame(top_temp,top_nlow)
+                                    # top_temp = top_temp.query('nclose >= open and open >= nlow and close >=nclose and high >= nhigh  and volume > 1.5')
+                                    #跳空,or低开高走
+                                    # df['max5'] = df.high[-6:-1].max()
+                                    # df['high4'] = df.high[-5:-1].max()
+                                    # df['low4'] = df.low[-5:-1].min()
+                                    # top_temp.query('close > lastp1d and close >=nclose and (low > lasth1d or (nclose >= open and open >= nlow and high >= nhigh  and volume > 1.5))')
+                                    # top_temp.query('(nhigh > lasth1d or (lastp1d < lastp2d and lastp2d < lastp3d) ) and close > lastp1d  and close > high4 and close >=nclose and (low > lasth1d or (nclose >= open and open >= nlow and high >= nhigh  and volume > 1.5))')
+
+                                    top_temp = top_temp.query('close > lastp1d and close > lastp1d   and close >=nclose and (low > lasth1d or (nclose >= open and open >= nlow and high >= nhigh  and volume > 1.5))')
+                                    # top_temp = top_temp.query('high > lasth1d and close > lastp1d   and close >=nclose and (low > lasth1d or (nclose >= open and open >= nlow and high >= nhigh  and volume > 1.5))')
+                                    # top_temp = top_temp.query('(low >= lastp1d and close > ma5d or (nclose > open and close >nclose) )   and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
+                                else:
+                                    top_temp = top_temp.query('close > lastl1d and nlow = low and close > ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
+
+                                # top_temp = top_temp.query('low > lastl1d and close > ma5d and low <= ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
+                    print("Rt:%0.1f dT:%s N:%s T:%s %s%% nh:%s nlow:%s" % (float(time.time() - time_Rt), cct.get_time_to_date(time_s), cct.get_now_time(), len(top_temp), round(len(top_temp) / float(ct.PowerCount) * 100, 1),len(nhigh),len(nlow)))
+
                     if 'op' in top_temp.columns:
                         # if ptype == 'low':
                         #     top_temp = top_temp.sort_values(by=ct.Duration_sort_op,
@@ -412,7 +447,7 @@ if __name__ == "__main__":
                             top_temp = top_temp.sort_values(by=(market_sort_value),
                                                             ascending=market_sort_value_key)
 
-                    
+
                     if st_key_sort.split()[0] == 'x':
                         top_temp = top_temp[top_temp.topR != 0]
 
@@ -558,10 +593,12 @@ if __name__ == "__main__":
                 args = cct.writeArgmain().parse_args(st.split())
                 codew = stf.WriteCountFilter(top_temp, duration=duration_date, writecount=args.dl, end=args.end)
                 if args.code == 'a':
-                    cct.write_to_blocknew(block_path, codew)
+                    # cct.write_to_blocknew(block_path, codew)
+                    cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=False,reappend=False)
                     # sl.write_to_blocknew(all_diffpath, codew)
                 else:
-                    cct.write_to_blocknew(block_path, codew, False)
+                    # cct.write_to_blocknew(block_path, codew, False)
+                    cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=False,reappend=False)
                     # sl.write_to_blocknew(all_diffpath, codew, False)
                 print("wri ok:%s" % block_path)
                 cct.sleeprandom(int(ct.duration_sleep_time / 2))
