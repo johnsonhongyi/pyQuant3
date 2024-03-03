@@ -580,7 +580,7 @@ if __name__ == "__main__":
                     print(("input error:%s" % (st)))
                 # raise KeyboardInterrupt("StopTime")
         except (KeyboardInterrupt) as e:
-            pass
+            cct.sleeprandom(60)
             # # from collections import Counter,OrderedDict
             # # categoryl = top_temp.category[:100].tolist()
             # # dicSort = []

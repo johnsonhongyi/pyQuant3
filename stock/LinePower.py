@@ -368,11 +368,12 @@ if __name__ == "__main__":
                 else:
                     print("df is None,not Wri")
             else:
-                pass
+                cct.sleeprandom(60)
 
         except (KeyboardInterrupt) as e:
             # print "key"
             print("KeyboardInterrupt:", e)
+            cct.sleeprandom(60)
         except (IOError, EOFError, Exception) as e:
             # print "Error", e
             import traceback
