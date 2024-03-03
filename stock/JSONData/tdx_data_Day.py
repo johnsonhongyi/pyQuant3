@@ -2576,9 +2576,12 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
 
     elif market.lower().find('indb') >=0 :
             # blkname = '061.blk'
-
-        code_l = cct.read_to_indb().code.tolist()
-        
+        indb =  cct.GlobalValues().getkey('indb')
+        if indb is None:    
+            code_l = cct.read_to_indb().code.tolist()
+            cct.GlobalValues().setkey('indb',code_l)
+        else:
+            code_l = indb
         df = sina_data.Sina().get_stock_list_data(code_l)
 
     elif market.find('blk') > 0 or market.isdigit():
@@ -3651,7 +3654,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
 #        df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
         df['ma5d'] = pd.Series.rolling(df.close, 5).mean().apply(lambda x: round(x,2))
         df['ma10d'] = pd.Series.rolling(df.close, 10).mean().apply(lambda x: round(x,2))
-        df['ma20d'] = pd.Series.rolling(df.close, 20).mean().apply(lambda x: round(x,2))
+        df['ma20d'] = pd.Series.rolling(df.close, 26).mean().apply(lambda x: round(x,2))
         # df['natr'] = ta.natr(df.high, df.low, df.close)
         df['truer'] = ta.true_range(df.high, df.low, df.close)
 
@@ -3692,13 +3695,15 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
             if da <=6:
                 # df['lastp%sd' % da] = df['close'][-da]
                 df['lasto%sd' % da] = df['open'][-da]
-                df['lasth%sd' % da] = df['high'][-da]
                 df['lastl%sd' % da] = df['low'][-da]
-                df['lastv%sd' % da] = df['vol'][-da]
+
+                # df['lastv%sd' % da] = df['vol'][-da]
                 df['truer%sd' % da] = df['truer'][-da]
 
-            df['truer%sd' % da] = df['truer'][-da]
+            # df['truer%sd' % da] = df['truer'][-da]
+            df['lasth%sd' % da] = df['high'][-da]
             df['lastp%sd' % da] = df['close'][-da]
+
             df['lastv%sd' % da] = df['vol'][-da]
             # df['per%sd' % da] = df['close'].pct_change(da).apply(lambda x:round(x*100,1))
             # df['per%sd' % da] = df['perd'][-da:].sum()
@@ -5172,10 +5177,10 @@ if __name__ == '__main__':
 
     # Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300, rewrite=True)
     # import ipdb;ipdb.set_trace()
-    code='603603'
-
-    df=get_tdx_append_now_df_api_tofile(code)
-    import ipdb;ipdb.set_trace()
+    
+    # code='603603'
+    # df=get_tdx_append_now_df_api_tofile(code)
+    # import ipdb;ipdb.set_trace()
 
 
     code='000043'   
@@ -5238,7 +5243,7 @@ if __name__ == '__main__':
     code = '002786'
     code = '002460'
     code = '002620'
-    code = '001339'
+    code = '000017'
     # code = '002865'
 
     '''
@@ -5277,7 +5282,8 @@ if __name__ == '__main__':
     # df2 = get_tdx_Exp_day_to_df(code,dl=60, end='20230925', newdays=0, resample='d')
 
     # df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='w')
-    df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='3d')
+    # df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='3d')
+    df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='d')
     print(df.loc[:,df.columns[df.columns.str.contains('perc')]][:1].T)
     # df[(df.close > df.upper) & (df.upper > 0) ]
 

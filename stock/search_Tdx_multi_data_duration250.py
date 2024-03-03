@@ -35,10 +35,10 @@ def multindex_iloc(df, index):
     label = df.index.levels[0][index]
     return df.iloc[df.index.get_loc(label)]
 
-def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,ma_250_h=1.11,resample ='d',rewrite=False):
+def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,ma_250_h=1.11,resample ='d',rewrite=False,runrule='1'):
     # df = tdd.search_Tdx_multi_data_duration('tdx_all_df_300', 'all_300', df=None,code_l=code_list, start=start, end=None, freq=None, col=None, index='date')
     time_s = time.time()
-    
+    block_path_upper = tdd.get_tdx_dir_blocknew() + '077.blk'
     if resample.lower() == 'd':
         block_path = tdd.get_tdx_dir_blocknew() + '061.blk'
     elif resample.lower() == 'w':
@@ -82,7 +82,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
     code_select = code_uniquelist[random.randint(0,len(code_uniquelist)-1)]
     print(round(time.time()-time_s,2),df.index.get_level_values('code').unique().shape,code_select,df.loc[code_select].shape)
-
+    lastday1 = df.loc['999999'].index[-1]
     print("!!!check lastDay!!!:%s close:%s"%(df.loc['999999'].index[-1],df.loc['999999'].close[-1]))
     # df.groupby(level=[0]),df.index.get_level_values(0)
     # len(df.index.get_level_values('code').unique())
@@ -552,15 +552,73 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
             #         & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_l) 
             #         & (dfs[('close')] < dfs[('ma%s')%(rollma[-1])]*ma_250_h) 
 
-            mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[1])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0) 
-                    & (dfs[('upper')] > 0)
-                    & (dfs[('ma5')] > dfs[('ene')])
-                    & ((dfs[('high')] > dfs[('upper')]) | (dfs[('high')].shift(3) > dfs[('upper')].shift(3)) | (dfs[('high')].shift(5) > dfs[('upper')].shift(5)) | (dfs[('high')].shift(6) > dfs[('upper')].shift(6)) | (dfs[('high')].shift(7) > dfs[('upper')].shift(7)) | (dfs[('high')].shift(9) > dfs[('upper')].shift(9)) | (dfs[('high')].shift(10) > dfs[('upper')].shift(10)) | (dfs[('high')].shift(11) > dfs[('upper')].shift(11)) | (dfs[('high')].shift(12) > dfs[('upper')].shift(12)) )
-                    & (dfs[('close')] > dfs[('ene')])
-                    & (dfs[('low')] <= dfs[('ma20')]*1.05)
-                    & (dfs[('volchang')] > 10)
-                    & (dfs[('percent')] > 2)
-                    )
+            #超跌反弹,20240220,蓝英装备
+            if runrule == '2':
+                mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[1])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0) 
+                        & (dfs[('lower')] > 0)
+                        & ((dfs[('high')] > dfs[('high')].shift(1)) & (dfs[('high')] > dfs[('high')].shift(2)) )
+                        & ((dfs[('close')] > dfs[('close')].shift(1)) & (dfs[('close')].shift(1) > dfs[('close')].shift(2)))
+                        & ((dfs[('low')] <= dfs[('ma%s')%(rollma[0])]*1.01) | (dfs[('low')].shift(1) <= dfs[('lower')]*1.05) | (dfs[('low')].shift(1) <= dfs[('lower')]*1.05)  )
+                        & ((dfs[('volchang')] < 100) & (dfs[('volchang')].shift(1) < 100) & (dfs[('volchang')].shift(2) < 100) )
+                        & ((dfs[('percent')] > 5) | (dfs[('percent')].shift(1) > 5) | (dfs[('percent')].shift(2) > 5))
+                        )
+            #适合大盘稳定,年线附近多头,一阳high4,high upper,追涨模型
+            elif runrule == '1':
+                mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[1])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0) 
+                        & (dfs[('upper')] > 0)
+                        & (dfs[('ma5')] > dfs[('ene')])
+                        & ((dfs[('high')] > dfs[('upper')]) | (dfs[('high')].shift(3) > dfs[('upper')].shift(3)) | (dfs[('high')].shift(5) > dfs[('upper')].shift(5)) | (dfs[('high')].shift(6) > dfs[('upper')].shift(6)) | (dfs[('high')].shift(7) > dfs[('upper')].shift(7)) | (dfs[('high')].shift(9) > dfs[('upper')].shift(9)) | (dfs[('high')].shift(10) > dfs[('upper')].shift(10)) | (dfs[('high')].shift(11) > dfs[('upper')].shift(11)) | (dfs[('high')].shift(12) > dfs[('upper')].shift(12)) )
+                        & (dfs[('close')] > dfs[('ene')])
+                        & (dfs[('low')] <= dfs[('ma20')]*1.05)
+                        & ((dfs[('volchang')] < 100) & (dfs[('volchang')].shift(1) < 100) & (dfs[('volchang')].shift(2) < 100) )
+                        & (dfs[('percent')] > 2)
+                        )
+            #新高连阳
+            elif runrule == '3':
+                mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[1])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0) 
+                        & (dfs[('lower')] > 0)
+                        & ((dfs[('high')] > dfs[('high')].shift(1)) & (dfs[('high')].shift(1) > dfs[('high')].shift(2)))
+                        & ((dfs[('close')] > dfs[('close')].shift(1)) & (dfs[('close')].shift(1) > dfs[('close')].shift(2)))
+                        & ((dfs[('percent')] > 2) & ((dfs[('percent')].shift(1) > 2) | (dfs[('percent')].shift(2) > 2)) )
+                        & ((dfs[('volchang')] < 100) & (dfs[('volchang')].shift(1) < 100) & (dfs[('volchang')].shift(2) < 100) )
+                        )
+                        # & ((dfs[('volchang')] < 60) | (dfs[('volchang')].shift(1) < 60) | (dfs[('volchang')].shift(2) < 100) )
+            #连阳,不新高
+            elif runrule == '4':
+                mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[1])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0) 
+                        & (dfs[('lower')] > 0)
+                        & ((dfs[('close')] >= dfs[('high')]*0.98) & (dfs[('close')].shift(1) >= dfs[('high')].shift(1)*0.98))
+                        & ((dfs[('high')] > dfs[('high')].shift(1)) | (dfs[('high')].shift(1) > dfs[('high')].shift(2)) | (dfs[('high')] > dfs[('high')].shift(2)) )
+                        & ((dfs[('close')] > dfs[('close')].shift(1)) & (dfs[('close')].shift(1) > dfs[('close')].shift(2)))
+                        & ((dfs[('percent')] > 2) & ((dfs[('percent')].shift(1) > 2) | (dfs[('percent')].shift(2) > 2)))
+                        & ((dfs[('volchang')] < 100) & (dfs[('volchang')].shift(1) < 100) & (dfs[('volchang')].shift(2) < 100) )
+                        )
+            #新高连阳高开高走
+            elif runrule == '5':
+                mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[1])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0) 
+                        & (dfs[('lower')] > 0)
+                        & ((dfs[('close')] >= dfs[('high')]*0.98) & (dfs[('close')].shift(1) >= dfs[('high')].shift(1)*0.98))
+                        & ((dfs[('high')] > dfs[('high')].shift(1)) & (dfs[('high')].shift(1) > dfs[('high')].shift(2)))
+                        & ((dfs[('close')] > dfs[('close')].shift(1)) & (dfs[('close')].shift(1) > dfs[('close')].shift(2)))
+                        & ((dfs[('percent')] > 2) & ((dfs[('percent')].shift(1) > 2) | (dfs[('percent')].shift(2) > 2)) )
+                        & ((dfs[('volchang')] < 100) & (dfs[('volchang')].shift(1) < 100) & (dfs[('volchang')].shift(2) < 100) )
+                        )
+                        # & ((dfs[('lower')] >= dfs[('close')].shift(1)) |  (dfs[('lower')] >= dfs[('close')].shift(2)))
+                        # & ((dfs[('volchang')] < 60) | (dfs[('volchang')].shift(1) < 60) | (dfs[('volchang')].shift(2) < 100) )
+                        # & ((dfs[('low')] <= dfs[('ma%s')%(rollma[0])]*1.01) | (dfs[('low')].shift(1) <= dfs[('lower')]*1.05) | (dfs[('low')].shift(1) <= dfs[('lower')]*1.05)  )
+            
+            #适合大盘稳定,年线附近多头,一阳high4,high upper,追涨模型,不限涨幅
+            elif runrule == '6':
+                mask = ( (dfs[('ma%s')%(rollma[0])] > 0) & (dfs[('ma%s')%(rollma[1])] > 0) & (dfs[('ma%s')%(rollma[-1])] > 0) 
+                        & (dfs[('upper')] > 0)
+                        & (dfs[('ma5')] > dfs[('ene')])
+                        & ((dfs[('high')] > dfs[('upper')]*0.98) | (dfs[('high')].shift(1) > dfs[('upper')].shift(1)*0.98)  | (dfs[('high')].shift(2) > dfs[('upper')].shift(2)*0.98) | (dfs[('high')].shift(3) > dfs[('upper')].shift(3)*0.98) | (dfs[('high')].shift(5) > dfs[('upper')].shift(5)*0.98) | (dfs[('high')].shift(6) > dfs[('upper')].shift(6)*0.98) | (dfs[('high')].shift(7) > dfs[('upper')].shift(7)*0.98) | (dfs[('high')].shift(9) > dfs[('upper')].shift(9)*0.98) | (dfs[('high')].shift(10) > dfs[('upper')].shift(10)*0.98) | (dfs[('high')].shift(11) > dfs[('upper')].shift(11)*0.98) | (dfs[('high')].shift(12) > dfs[('upper')].shift(12)*0.98) )
+                        & (dfs[('close')] > dfs[('ene')])
+                        & ((dfs[('volchang')] > 10) & (dfs[('volchang')].shift(1) < 100) & (dfs[('volchang')].shift(2) < 100) )
+                        & (dfs[('percent')] > 2)
+                        )      
+                        # & (dfs[('low')] <= dfs[('ma20')]*1.05)
+
                     # & (dfs[('low')] > dfs[('low')].shift(1))
                     # & (dfs[('high')] > dfs[('high')].shift(1))
                     # & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_l)
@@ -577,18 +635,30 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
 
     # mask = ((dfs[('close')] > dfs[('ma%s')%(rollma[-1])])) 
+    #
     mask_upper= ((dfs[('ma%s')%(rollma[0])] > 0)
                 & (dfs[('upper')] > 0)
                 & ( dfs[('high')] > dfs[('upper')])
                 )
+
     df_u = dfs.loc[idx[mask_upper, :]]
     df_u = get_multi_code_count(df_u)
     df_u = df_u.groupby(level=[0]).tail(1).reset_index().set_index('code')
-    print((df_u.couts[:5]))
+    df_u = df_u[df_u.date>=lastday1]
+    df_u = df_u[(~df_u.index.str.contains('688'))] 
+    df_u = df_u.sort_values(by=['percent','couts','volchang'],ascending=[0,1,1])
+    df_u = df_u[df_u.percent > 0]
+    codeupper = df_u.index.tolist()
+    print("resample:%s count upper:%s :%s"%(resample.upper(),len(df_u),df_u.couts[:5]))
 
 
+
+    
     df=dfs.loc[idx[mask, :]]
     
+    # print(df.loc['300293'])
+    # import ipdb;ipdb.set_trace()
+
     if len(df) == 0:
         import ipdb;ipdb.set_trace()
         print("df is None,check mask")
@@ -624,6 +694,10 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
             if dt_low is not None:
                 
+                # if runrule !=1 :
+                #     df = get_multi_code_count(df)
+                    # df = get_multi_code_count(df).groupby(level=[0]).tail(1)
+                df = get_multi_code_count(df)
                 groupd2 = df.groupby(level=[0])
                 df = groupd2.tail(1)
                 df = df.reset_index().set_index('code')
@@ -632,11 +706,15 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                 # df = df[(df.date >= dt_low) & (df.date <= cct.get_today())]
                 dd = df[(df.date == dt_low)]
                 # df = df[(df.date >= cct.last_tddate(1))]
-                df = df[(df.date >= df.date.max())]
-                # import ipdb;ipdb.set_trace()
+                df = df[(df.date >= df.date.max())]  # today
+                # df = df[(df.date >= df.date.max()) | (df.date >= cct.last_tddate())]  # lastday and today
+
 
 
             else:
+                #runrule?
+                df = get_multi_code_count(df)
+
                 groupd2 = df.groupby(level=[0])
                 df = groupd2.tail(1)
                 df = df.reset_index().set_index('code')
@@ -645,8 +723,13 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                 # codew = df.index.tolist()
 
             top_temp = tdd.get_sina_datadf_cnamedf( df.index.tolist(),df) 
-            top_temp = cct.combine_dataFrame(top_temp,df_u.couts)
-            top_temp = top_temp[top_temp.couts > 0]
+            # check df_upper 追涨模型
+            if runrule == '1':
+                top_temp = cct.combine_dataFrame(top_temp,df_u.couts)
+                top_temp = top_temp[top_temp.couts > 0]
+            # else:
+            #     top_temp = get_multi_code_count(top_temp).groupby(level=[0]).tail(1)
+                # top_temp['couts'] = 0
 
             print(("df:%s %s df_idx:%s"%(len(df),df.index[:5],len(df_idx))))
             top_temp.date = top_temp.date.apply(lambda x: str(x)[:10])
@@ -655,16 +738,20 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                 percet = 'percma5M'
                 top_temp[percet] = ((top_temp['close'] - top_temp['ma5']) / top_temp['ma5'] * 100).map(lambda x: round(x, 2))
             elif resample.upper() == 'D' or resample.lower() == 'd':
-                percet = 'percma20d'
-                top_temp[percet] = ((top_temp['close'] - top_temp['ma20']) / top_temp['ma20'] * 100).map(lambda x: round(x, 2))
+                percet = 'percma5d'
+                top_temp[percet] = ((top_temp['close'] - top_temp['ma5']) / top_temp['ma5'] * 100).map(lambda x: round(x, 2))
             else:
                 percet = 'percma5w'
                 top_temp[percet] = ((top_temp['close'] - top_temp['ma5']) / top_temp['ma5'] * 100).map(lambda x: round(x, 2))
             
             # top_temp.loc[top_temp.percent >= 9.94, 'percent'] = 10
-            top_temp = top_temp.sort_values(by=['percent','couts','volchang',percet],ascending=[0,1,1,1])
+            if runrule in ['2','3','4','5']:
+                top_temp = top_temp.sort_values(by=['couts','percent',percet,'volchang'],ascending=[0,0,0,1])
+                # top_temp = top_temp[top_temp.couts > 1]
+            else:
+                top_temp = top_temp.sort_values(by=['percent','couts','volchang',percet],ascending=[0,1,1,1])
             top_temp = top_temp[ (~top_temp.index.str.contains('688'))]  
-            
+            top_temp = top_temp[ (~top_temp.name.str.contains('ST'))]  
             if app:
                 if resample.lower() == 'd' or resample.lower() == 'w' :
                     table, widths=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma20','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
@@ -707,8 +794,10 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
 
 
 
-
-            codew = top_temp.index.tolist()
+            if len(top_temp) > 100:
+                codew = top_temp.index.tolist()[:100]
+            else:
+                codew = top_temp.index.tolist()
 
             #clean st and 688
 
@@ -724,6 +813,9 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                     dfcf_status=True
                 else:
                     dfcf_status=False
+
+
+
             else:
                 append_status=False
                 dfcf_status=False
@@ -731,7 +823,18 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
             if len(codew) > 0: 
                 cct.write_to_blocknew(block_path, codew, append_status,doubleFile=False,keep_last=0,dfcf=dfcf_status)
                 print("write:%s block_path:%s"%(len(codew),block_path))
-                print(top_temp.name.tolist())
+                print(top_temp.name.tolist()[:20])
+                if len(codeupper) > 0:
+                    print("upper Write blk:%s"%(block_path_upper))
+                    wri_upper = cct.cct_raw_input("upper Write blk[Y] or Exit [N]:")
+                    if wri_upper == 'y' or wri_upper == 'Y':
+                        upper_wri = cct.cct_raw_input("rewrite code [Y] or append [N]:")
+                        if upper_wri == 'y' or upper_wri == 'Y':
+                            append_status=False
+                        else:
+                            append_status=True
+                        cct.write_to_blocknew(block_path_upper, codeupper, append=append_status,doubleFile=False,keep_last=0,dfcf=False)
+                    # print("write:%s block_path:%s"%(len(codeupper),block_path_upper))
             else:
                 # cct.write_to_blocknew(block_path, codew, append_status,doubleFile=False,keep_last=0,dfcf=dfcf_status)
                 print("write error:%s block_path:%s"%(len(codew),block_path))
@@ -755,16 +858,21 @@ if __name__ == '__main__':
     # get_roll_mean_all(single=False,tdx=True,app=True,duration=250,ma_250_l=1.02,ma_250_h=1.2,resample='w')
     # get_roll_mean_all(single=True,tdx=True,app=True)
     # get_roll_mean_all(single=True,tdx=True,app=False)
+    runruledict={'1':'追涨','2':'超跌反弹','3':'连阳新高','4':'连阳','5':'高开高走','6':'追涨High',}
+    runrule = cct.cct_raw_input("runrule:追涨/1,超跌反弹/2,连阳新高/3,连阳/4,高开高走/5,追涨High/6:[1/2/3/4(默认)/5/6]: ")
 
+    if runrule is None or len(runrule) == 0:
+        runrule = '4'
+    print("runrule:%s"%(runruledict[runrule]))
     runDay = cct.cct_raw_input("runDay[Y/y]/[N/n]:")
     if runDay.lower() != 'n':
-        get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='d')
+        get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='d',runrule=runrule)
 
     runWeek = cct.cct_raw_input("runWeek[Y/y]/[N/n]:")
     if runWeek.lower() != 'n' :
-        get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w')
+        get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w',runrule=runrule)
     runMon = cct.cct_raw_input("runMon[Y/y]/[N/n]:")
     if runMon.lower() != 'n' :
-        get_roll_mean_all(single=False,tdx=True,app=True,duration=900,ma_250_l=1.02,ma_250_h=1.2,resample='m')
+        get_roll_mean_all(single=False,tdx=True,app=True,duration=900,ma_250_l=1.02,ma_250_h=1.2,resample='m',runrule=runrule)
 
     # get_roll_mean_all(single=False, tdx=True, app=False,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w',rewrite=True)

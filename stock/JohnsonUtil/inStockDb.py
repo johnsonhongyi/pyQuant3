@@ -243,13 +243,13 @@ def selectlastDays(days=7):
     mycursor = conn.cursor()
 
     dflast = panda_df(conn,sql_now)
-
+    # x = 0
     while len(dflast) == 0:
-        for x in range(1, 7):
+        for x in range(1, 20):
             # print(last_tddate(x))
             sql_now = f'''SELECT {_selcolall} FROM `{_table_name}` WHERE `date` >= '{last_tddate(x)}' '''
             dflast = panda_df(conn,sql_now)
-            if len(dflast) > 0:
+            if len(dflast) > 5:
                 break
     # mycursor.execute(sql_columns)
     # mycursor.execute(sql_now)
@@ -286,12 +286,43 @@ def show_macd_boll_up():
     dflast = panda_df(conn,sql_select_code)
     # dflast = []
     while len(dflast) == 0:
-        for x in range(1, 7):
+        for x in range(1, 20):
             # print(last_tddate(x))
             # sql_now = f'''SELECT {_selcolall} FROM `{_table_name}` WHERE `date` >= '{last_tddate(x)}' '''
             sql_select_code_da = f'''select date,code,name,close,macd,macds,macdh,kdjk,kdjd,kdjj,boll_ub,boll FROM cn_stock_indicators WHERE macd>0 AND macds >0 AND macdh >0 AND close >=boll_ub AND date=CURRENT_DATE - INTERVAL %s DAY  '''%(x)
             dflast = panda_df(conn,sql_select_code_da)
-            if len(dflast) > 0:
+            if len(dflast) > 3:
+                break
+    # mycursor.execute(sql_columns)
+    # mycursor.execute(sql_now)
+
+    # myresult = mycursor.fetchall()
+    # for x in myresult:
+    #   print(x)
+    conn.close()
+    return dflast
+
+def show_macd_boll():
+    conn = pymysql.connect(**MYSQL_CONN_DBAPI)
+
+
+    lastday = last_tddate(1)
+    today_now = last_tddate(0)
+
+    mycursor = conn.cursor()
+
+    sql_select_code = f'''select date,code,name,close,macd,macds,macdh,kdjk,kdjd,kdjj,boll_ub,boll FROM cn_stock_indicators WHERE macd>0 AND macds >0 AND macdh >0 AND close >boll   AND date=CURDATE()  '''
+    # sql_select_code = f'''select date,code,name,close,macd,macds,macdh,kdjk,kdjd,kdjj,boll_ub,boll FROM cn_stock_indicators WHERE macd>0 AND macds >0 AND macdh >0 AND close >boll   AND date >=CURRENT_DATE - INTERVAL 3 DAY '''
+    
+    dflast = panda_df(conn,sql_select_code)
+    # dflast = []
+    while len(dflast) == 0:
+        for x in range(1, 20):
+            # print(last_tddate(x))
+            # sql_now = f'''SELECT {_selcolall} FROM `{_table_name}` WHERE `date` >= '{last_tddate(x)}' '''
+            sql_select_code_da = f'''select date,code,name,close,macd,macds,macdh,kdjk,kdjd,kdjj,boll_ub,boll FROM cn_stock_indicators WHERE macd>0 AND macds >0 AND macdh >0 AND close >boll AND date=CURRENT_DATE - INTERVAL %s DAY  '''%(x)
+            dflast = panda_df(conn,sql_select_code_da)
+            if len(dflast) > 3:
                 break
     # mycursor.execute(sql_columns)
     # mycursor.execute(sql_now)
@@ -314,12 +345,12 @@ def show_macd_boll_up7():
     dd = panda_df(conn,sql_select_code)
     # dflast = []
     while len(dd) == 0:
-        for x in range(1, 7):
+        for x in range(1, 20):
             # print(last_tddate(x))
             # sql_now = f'''SELECT {_selcolall} FROM `{_table_name}` WHERE `date` >= '{last_tddate(x)}' '''
             sql_select_code_da = f'''select date,code,name,close,macd,macds,macdh,kdjk,kdjd,kdjj,boll_ub,boll FROM cn_stock_indicators WHERE macd>0 AND macds >0 AND macdh >0 AND date=CURRENT_DATE - INTERVAL %s DAY AND close >=boll_ub '''%(x)
             dd = panda_df(conn,sql_select_code_da)
-            if len(dflast) > 0:
+            if len(dd) > 3:
                 break
     # mycursor.execute(sql_columns)
     # mycursor.execute(sql_now)
@@ -397,6 +428,10 @@ if __name__ == '__main__':
 
     # print(showcount(selectlastDays(1),sort_date=True))
 
+    showcount(selectlastDays(2),sort_date=True)
+    # import ipdb;ipdb.set_trace()
+    # df = show_macd_boll()
+    print(df[:10])
     print(show_macd_boll_up())
     print(show_macd_boll_up7())
     df=show_stock_pattern()

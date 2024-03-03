@@ -690,24 +690,27 @@ def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
             # data=''
             da = 0
             i = 0
-            data2 = ''
+            if len(df) > days:            
+                data2 = df.loc[df.index[days-1]]
+            else:
+                data2 = ''
 
-            while rzrq_status:
-                for x in range(days, 20):
-                    yestoday = cct.last_tddate(x)
-                    # print("yestoday:%s"%(yestoday))
+            # while rzrq_status:
+            #     for x in range(days, 20):
+            #         yestoday = cct.last_tddate(x)
+            #         # print("yestoday:%s"%(yestoday))
 
-                    if yestoday in df.index:
-                        data2 = df.loc[yestoday]
-                        # log.info("yestoday:%s data:%s" % (yestoday, data2))
+            #         if yestoday in df.index:
+            #             data2 = df.loc[yestoday]
+            #             # log.info("yestoday:%s data:%s" % (yestoday, data2))
 
-                        # days -=1
-                        if (days - x) <= 0:
-                            break
-                        # print da
-                    else:
-                        log.info("%s:None" % (yestoday))
-                rzrq_status = 0
+            #             # days -=1
+            #             if (days - x) <= 0:
+            #                 break
+            #             # print da
+            #         else:
+            #             log.info("%s:None" % (yestoday))
+            #     rzrq_status = 0
             return data2
 
 
@@ -720,7 +723,7 @@ def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
         data1 = get_days_data(1,df)
         data2 = get_days_data(2,df)
         # print data1
-
+        
         data['all'] = round(data1.loc['all'], 2)
         data['sh'] = round(data1.loc['sh'], 2)
         data['sz'] = round(data1.loc['sz'], 2)

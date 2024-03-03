@@ -34,6 +34,10 @@ rem if %indexdx% gtr 512000 ( LEQ GEQ
 start cmd /k python singleAnalyseUtil.py
 TIMEOUT /T 20 /NOBREAK
 
+cd webTools/
+start cmd /k python ths-tdx-web.py
+cd ../
+TIMEOUT /T 5 /NOBREAK
 
 rem start cmd /k python sina_Monitor-GOLD.py
 rem ping -n 20 localhost > nul

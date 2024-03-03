@@ -641,8 +641,8 @@ if __name__ == '__main__':
                     fibcount = 0
                     fibl = fibonacciCount(
                         ['999999', '399001', '399006'], dl=dl)
-                    
-                if ( 920 < cct.get_now_time_int() and not cct.isDigit(rzrq['all'])) or (len(rzrq) == 0 or rzrq['sh'] == 0 or rzrq['sz'] == 0 or rzrq['all'] == 0):
+
+                if ( len(rzrq) > 0  and 850 < cct.get_now_time_int() and not cct.isDigit(rzrq['szrz'])) or (len(rzrq) == 0 or rzrq['sh'] == 0 or rzrq['sz'] == 0 or rzrq['szrz'] == 0):
                     # if rzrq['shrz'] == 0 or rzrq['szrz'] == 0 or rzrq['dff'] == 0 or rzrq['all'] == 0:
                     #     log.warn("rzrq 0")
                     rzrq = ffu.get_dfcfw_rzrq_SHSZ()

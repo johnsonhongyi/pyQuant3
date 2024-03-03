@@ -132,18 +132,18 @@ if __name__ == "__main__":
     resample = ct.resample_dtype
     end_date = cct.last_tddate(days=3)
     
-    from JohnsonUtil import inStockDb as inDb
-    # indf = inDb.showcount(inDb.selectlastDays(0))
-    indf = inDb.show_stock_pattern()
+    # from JohnsonUtil import inStockDb as inDb
+    # # indf = inDb.showcount(inDb.selectlastDays(0))
+    # indf = inDb.show_stock_pattern()
 
-    if len(indf) > 0 and cct.creation_date_duration(block_path) > 0:
-        if cct.creation_date_duration(block_path) > 10:
-            cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
-        else:
-            cct.write_to_blocknew(block_path, indf.code.tolist(),append=True,doubleFile=False,keep_last=0,dfcf=False)
-    else:
-        if cct.creation_date_duration(block_path) > 0:
-            log.error("indb last1days is None")   
+    # if len(indf) > 0 and cct.creation_date_duration(block_path) > 0:
+    #     if cct.creation_date_duration(block_path) > 10:
+    #         cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
+    #     else:
+    #         cct.write_to_blocknew(block_path, indf.code.tolist(),append=True,doubleFile=False,keep_last=0,dfcf=False)
+    # else:
+    #     if cct.creation_date_duration(block_path) > 0:
+    #         log.error("indb last1days is None")   
 
     # all_diffpath = tdd.get_tdx_dir_blocknew() + '062.blk'
 

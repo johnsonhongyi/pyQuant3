@@ -152,10 +152,10 @@ if __name__ == "__main__":
                     st_key_sort.split()[0], cct.get_index_fibl())
             
             time_Rt = time.time()
-            # market_blk = 'all'
+            market_blk = 'all'
             # market_blk = 'rzrq'
             # market_blk = '061'
-            market_blk = 'indb'
+            # market_blk = 'indb'
             
             top_now = tdd.getSinaAlldf(
                 market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType, trend=False)
