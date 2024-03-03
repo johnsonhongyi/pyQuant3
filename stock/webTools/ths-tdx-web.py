@@ -150,6 +150,17 @@ async def main():
         show_content.insert(0, data)
         show_tab(show_content)
 
+#cmd最小化,test error
+# import ctypes
+# ctypes.windll.user32.ShowWindow(ctypes.windll.kernel32.GetConsoleWindow(), 6)
+
+# @echo off
+
+# %1(start /min cmd.exe /c %0 :&exit)
+
+# #下面是自己的cmd命令，可以随便输入
+
+# ping www.baidu.com > baidu.txt
 
 if __name__ == '__main__':
     # search_ths_data('000006')
@@ -157,10 +168,15 @@ if __name__ == '__main__':
     # or open with iexplore
     # os.system('cmd /c start iexplore "http://127.0.0.1:8080/"')
     os.system('cmd /c start "" "http://127.0.0.1:8080/"')
+    os.system('cmd /c start python pywin32_mouse.py')
+    # cmd /c start /min  #cmd 最小化,程序窗口正常
+    # start "" firefox
+    # start "" chrome
     if cct.isMac():
         width, height = 80, 22
         cct.set_console(width, height)
     else:
         width, height = 80, 22
         cct.set_console(width, height)
+
     start_server(main, port=8080, debug=False)

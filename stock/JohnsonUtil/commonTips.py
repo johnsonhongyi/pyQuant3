@@ -706,7 +706,8 @@ terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440'
                         'sina_Market-DurationDnUP.py': '41, 362,1400,480' ,
                         'instock_Monitor.py':'62, 86,1360,440',
                         'chantdxpower.py':'86, 128, 1200, 480',
-                        'ths-tdx-web.py':'76, 294, 600, 320',}
+                        'ths-tdx-web.py':'70, 200, 600, 320',
+                        'pywin32_mouse.py':'70, 200, 220, 150',}
 
 
 
@@ -1426,6 +1427,7 @@ def cct_raw_input(sts):
         # st = win_unicode_console.raw_input.raw_input(sts)
         st = input(sts)
         # issubclass(KeyboardInterrupt, BaseException)
+    # except (KeyboardInterrupt, BaseException) as e:
     except (KeyboardInterrupt, BaseException) as e:
         # inputerr = cct_raw_input(" Break: ")
         # if inputerr == 'e' or inputerr == 'q':
@@ -1439,7 +1441,7 @@ def cct_raw_input(sts):
         if count_Except is not None and count_Except < 3:
             count_Except = count_Except + 1
             GlobalValues().setkey('Except_count', count_Except)
-            sys.exit()
+            # sys.exit()
             # print "cct_raw_input:ExceptionError:%s count:%s" % (e, count_Except)
             # st = cct_raw_input(sts)
         else:
@@ -1456,13 +1458,15 @@ def cct_raw_input(sts):
         if count_Except is not None and count_Except < 3:
             count_Except = count_Except + 1
             GlobalValues().setkey('Except_count', count_Except)
-            sys.exit()
+            # sys.exit()
             # print "cct_raw_input:ExceptionError:%s count:%s" % (e, count_Except)
             # st = cct_raw_input(sts)
         else:
             print("cct_ExceptionError:%s count:%s" % (e, count_Except))
             log.error("cct_ExceptionError:%s count:%s" % (e, count_Except))
             sys.exit()
+    # except ValueError as e:
+    #     raise Exception('Invalid Exception: {}'.format(e)) from None
     # if get_os_system().find('win') >= 0:
         # win_unicode_console.enable(use_readline_hook=False)
     t1 = time.time() - time_s
