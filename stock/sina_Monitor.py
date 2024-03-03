@@ -760,7 +760,67 @@ if __name__ == "__main__":
             #             time_s = time.time()
             #             break
             else:
-                raise KeyboardInterrupt("StopTime")
+                st=cct.cct_raw_input(ct.RawMenuArgmain() % (market_sort_value))
+
+                if len(st) == 0:
+                    status=False
+                elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
+                    st_l=st.split()
+                    st_k=st_l[0]
+                    # if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
+                    if st_k in list(ct.Market_sort_idx.keys()):
+                        st_key_sort=st
+                        market_sort_value, market_sort_value_key=ct.get_market_sort_value_key(
+                            st_key_sort, top_all=top_all)
+                    else:
+                        log.error("market_sort key error:%s" % (st))
+                        cct.sleeprandom(5)
+
+                elif st.lower() == 'g' or st.lower() == 'go':
+                    status=True
+                elif st.lower() == 'clear' or st.lower() == 'c':
+                    top_all=pd.DataFrame()
+                    cct.GlobalValues().setkey('lastbuylogtime', 1)
+                    # cct.set_clear_logtime()
+                    status=False
+                elif st.startswith('d') or st.startswith('dt'):
+                    args = parserDuraton.parse_args(st.split()[1:])
+                    if len(str(args.start)) > 0:
+                        if args.end:
+                            end_date = args.end
+                        duration_date = args.start.strip()
+                        if len(str(duration_date)) < 4:
+                            du_date = tdd.get_duration_Index_date(
+                                '999999', dl=int(duration_date))
+                            ct.PowerCountdl = int(duration_date)
+                        # set_duration_console(du_date)
+                        top_all = pd.DataFrame()
+                        time_s = time.time()
+                        status = False
+                        lastpTDX_DF = pd.DataFrame()
+
+                elif st.startswith('w') or st.startswith('a'):
+                    args=cct.writeArgmain().parse_args(st.split())
+                    codew=stf.WriteCountFilter(top_temp, writecount=args.dl)
+                    if args.code == 'a':
+                        cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=True,reappend=False)
+                        # cct.write_to_blocknew(block_path, codew)
+                        # cct.write_to_blocknew(all_diffpath,codew)
+                    else:
+                        cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=True,reappend=False)
+                        # cct.write_to_blocknew(all_diffpath,codew,False)
+                    print("wri ok:%s" % block_path)
+                    cct.sleeprandom(ct.duration_sleep_time / 2)
+                    # cct.sleep(5)
+                elif st.lower() == 'r':
+                    dir_mo=eval(cct.eval_rule)
+                    evalcmd(dir_mo)
+                elif st.startswith('q') or st.startswith('e'):
+                    print("exit:%s" % (st))
+                    sys.exit(0)
+                else:
+                    print("input error:%s" % (st))
+                # raise KeyboardInterrupt("StopTime")
 
         except (KeyboardInterrupt) as e:
             # print "key"
@@ -769,66 +829,66 @@ if __name__ == "__main__":
             # if success > 3:
             #     raw_input("Except")
             # st=raw_input("status:[go(g),clear(c),quit(q,e)]:")
-            st=cct.cct_raw_input(ct.RawMenuArgmain() % (market_sort_value))
+            # st=cct.cct_raw_input(ct.RawMenuArgmain() % (market_sort_value))
 
-            if len(st) == 0:
-                status=False
-            elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
-                st_l=st.split()
-                st_k=st_l[0]
-                # if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
-                if st_k in list(ct.Market_sort_idx.keys()):
-                    st_key_sort=st
-                    market_sort_value, market_sort_value_key=ct.get_market_sort_value_key(
-                        st_key_sort, top_all=top_all)
-                else:
-                    log.error("market_sort key error:%s" % (st))
-                    cct.sleeprandom(5)
+            # if len(st) == 0:
+            #     status=False
+            # elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
+            #     st_l=st.split()
+            #     st_k=st_l[0]
+            #     # if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
+            #     if st_k in list(ct.Market_sort_idx.keys()):
+            #         st_key_sort=st
+            #         market_sort_value, market_sort_value_key=ct.get_market_sort_value_key(
+            #             st_key_sort, top_all=top_all)
+            #     else:
+            #         log.error("market_sort key error:%s" % (st))
+            #         cct.sleeprandom(5)
 
-            elif st.lower() == 'g' or st.lower() == 'go':
-                status=True
-            elif st.lower() == 'clear' or st.lower() == 'c':
-                top_all=pd.DataFrame()
-                cct.GlobalValues().setkey('lastbuylogtime', 1)
-                # cct.set_clear_logtime()
-                status=False
-            elif st.startswith('d') or st.startswith('dt'):
-                args = parserDuraton.parse_args(st.split()[1:])
-                if len(str(args.start)) > 0:
-                    if args.end:
-                        end_date = args.end
-                    duration_date = args.start.strip()
-                    if len(str(duration_date)) < 4:
-                        du_date = tdd.get_duration_Index_date(
-                            '999999', dl=int(duration_date))
-                        ct.PowerCountdl = int(duration_date)
-                    # set_duration_console(du_date)
-                    top_all = pd.DataFrame()
-                    time_s = time.time()
-                    status = False
-                    lastpTDX_DF = pd.DataFrame()
+            # elif st.lower() == 'g' or st.lower() == 'go':
+            #     status=True
+            # elif st.lower() == 'clear' or st.lower() == 'c':
+            #     top_all=pd.DataFrame()
+            #     cct.GlobalValues().setkey('lastbuylogtime', 1)
+            #     # cct.set_clear_logtime()
+            #     status=False
+            # elif st.startswith('d') or st.startswith('dt'):
+            #     args = parserDuraton.parse_args(st.split()[1:])
+            #     if len(str(args.start)) > 0:
+            #         if args.end:
+            #             end_date = args.end
+            #         duration_date = args.start.strip()
+            #         if len(str(duration_date)) < 4:
+            #             du_date = tdd.get_duration_Index_date(
+            #                 '999999', dl=int(duration_date))
+            #             ct.PowerCountdl = int(duration_date)
+            #         # set_duration_console(du_date)
+            #         top_all = pd.DataFrame()
+            #         time_s = time.time()
+            #         status = False
+            #         lastpTDX_DF = pd.DataFrame()
 
-            elif st.startswith('w') or st.startswith('a'):
-                args=cct.writeArgmain().parse_args(st.split())
-                codew=stf.WriteCountFilter(top_temp, writecount=args.dl)
-                if args.code == 'a':
-                    cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=True,reappend=False)
-                    # cct.write_to_blocknew(block_path, codew)
-                    # cct.write_to_blocknew(all_diffpath,codew)
-                else:
-                    cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=True,reappend=False)
-                    # cct.write_to_blocknew(all_diffpath,codew,False)
-                print("wri ok:%s" % block_path)
-                cct.sleeprandom(ct.duration_sleep_time / 2)
-                # cct.sleep(5)
-            elif st.lower() == 'r':
-                dir_mo=eval(cct.eval_rule)
-                evalcmd(dir_mo)
-            elif st.startswith('q') or st.startswith('e'):
-                print("exit:%s" % (st))
-                sys.exit(0)
-            else:
-                print("input error:%s" % (st))
+            # elif st.startswith('w') or st.startswith('a'):
+            #     args=cct.writeArgmain().parse_args(st.split())
+            #     codew=stf.WriteCountFilter(top_temp, writecount=args.dl)
+            #     if args.code == 'a':
+            #         cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=True,reappend=False)
+            #         # cct.write_to_blocknew(block_path, codew)
+            #         # cct.write_to_blocknew(all_diffpath,codew)
+            #     else:
+            #         cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=True,reappend=False)
+            #         # cct.write_to_blocknew(all_diffpath,codew,False)
+            #     print("wri ok:%s" % block_path)
+            #     cct.sleeprandom(ct.duration_sleep_time / 2)
+            #     # cct.sleep(5)
+            # elif st.lower() == 'r':
+            #     dir_mo=eval(cct.eval_rule)
+            #     evalcmd(dir_mo)
+            # elif st.startswith('q') or st.startswith('e'):
+            #     print("exit:%s" % (st))
+            #     sys.exit(0)
+            # else:
+            #     print("input error:%s" % (st))
         except (IOError, EOFError) as e:
             print("IOError,EOFError", e)
             cct.sleeprandom(ct.duration_sleep_time / 2)

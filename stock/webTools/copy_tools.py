@@ -36,6 +36,7 @@ def broadcast_stock_code(stock_code,message_type='stock'):
         stock_code = stock_code['content']
         stock_code = stock_code.strip()
     if len(stock_code) == 6:
+        codex = int(stock_code)
         if str(message_type) == 'stock':
             if str(stock_code)[0] in ('0','3'):
                 codex = '6' + str(stock_code)

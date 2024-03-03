@@ -2590,7 +2590,8 @@ if __name__ == "__main__":
             # if cct.get_os_system().find('win') >= 0:
             #     import win_unicode_console
             #     win_unicode_console.disable()
-            code=str(input("code:"))
+            # code=str(input("code:"))
+            code=cct.cct_raw_input("code:")
             # code=str(code)
             # if cct.get_os_system().find('win') >= 0:
             #     # import win_unicode_console

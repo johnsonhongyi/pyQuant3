@@ -297,72 +297,131 @@ if __name__ == "__main__":
                         print(".")
                         break
             else:
-                raise KeyboardInterrupt("StopTime")
+                st = cct.cct_raw_input(ct.RawMenuArgmain() % (market_sort_value))
+
+                if len(st) == 0:
+                    status = False
+                elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
+                    st_l = st.split()
+                    st_k = st_l[0]
+                    if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
+                        st_key_sort = st
+                        market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort, top_all=top_all)
+                    else:
+                        log.error("market_sort key error:%s" % (st))
+                        cct.sleeprandom(5)
+
+                elif st.lower() == 'r':
+                    dir_mo = eval(cct.eval_rule)
+                    evalcmd(dir_mo)
+                elif st.lower() == 'g' or st.lower() == 'go':
+                    status = True
+                    for code in top_dif[:10].index:
+                        code = re.findall('(\d+)', code)
+                        if len(code) > 0:
+                            code = code[0]
+                            kind = sl.get_multiday_ave_compare_silent(code)
+                elif st.lower() == 'clear' or st.lower() == 'c':
+                    top_all = pd.DataFrame()
+                    status = False
+                elif st.startswith('w') or st.startswith('a'):
+                    args = cct.writeArgmain().parse_args(st.split())
+                    codew = stf.WriteCountFilter(top_temp, writecount=args.dl)
+                    if args.code == 'a':
+                        cct.write_to_blocknew(block_path, codew)
+                        # cct.write_to_blocknew(all_diffpath, codew)
+                    else:
+                        cct.write_to_blocknew(block_path, codew, False)
+                        # cct.write_to_blocknew(all_diffpath, codew, False)
+                    print("wri ok:%s" % block_path)
+                    cct.sleeprandom(ct.duration_sleep_time / 2)
+
+                elif st.startswith('sh'):
+                    code = st.split()[1]
+                    # lhg.get_linear_model_histogram(code, args.ptype, args.dtype, start, end, args.vtype, args.filter)
+                    lhg.get_linear_model_histogram(code, start=top_temp.loc[code, 'ldate'], vtype='close', filter='y')
+                    # raise KeyboardInterrupt()
+                    while 1:
+                        st = cct.cct_raw_input("code:")
+                        if len(str(st)) == 6:
+                            code = st
+                            lhg.get_linear_model_histogram(code, start=top_temp.loc[code, 'ldate'], vtype='close',
+                                                           filter='y')
+                        elif st.lower() == 'q':
+                            break
+                        else:
+                            pass
+                elif st.startswith('q') or st.startswith('e'):
+                    print("exit:%s" % (st))
+                    sys.exit(0)
+                else:
+                    print("input error:%s" % (st))
+                # raise KeyboardInterrupt("StopTime")
         except (KeyboardInterrupt) as e:
             # print "key"
-            # print "KeyboardInterrupt:", e
+            print("KeyboardInterrupt:", e)
             # cct.sleep(1)
             # if success > 3:
             #     raw_input("Except")
-            st = cct.cct_raw_input(ct.RawMenuArgmain() % (market_sort_value))
+            # st = cct.cct_raw_input(ct.RawMenuArgmain() % (market_sort_value))
 
-            if len(st) == 0:
-                status = False
-            elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
-                st_l = st.split()
-                st_k = st_l[0]
-                if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
-                    st_key_sort = st
-                    market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort, top_all=top_all)
-                else:
-                    log.error("market_sort key error:%s" % (st))
-                    cct.sleeprandom(5)
+            # if len(st) == 0:
+            #     status = False
+            # elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
+            #     st_l = st.split()
+            #     st_k = st_l[0]
+            #     if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
+            #         st_key_sort = st
+            #         market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort, top_all=top_all)
+            #     else:
+            #         log.error("market_sort key error:%s" % (st))
+            #         cct.sleeprandom(5)
 
-            elif st.lower() == 'r':
-                dir_mo = eval(cct.eval_rule)
-                evalcmd(dir_mo)
-            elif st.lower() == 'g' or st.lower() == 'go':
-                status = True
-                for code in top_dif[:10].index:
-                    code = re.findall('(\d+)', code)
-                    if len(code) > 0:
-                        code = code[0]
-                        kind = sl.get_multiday_ave_compare_silent(code)
-            elif st.lower() == 'clear' or st.lower() == 'c':
-                top_all = pd.DataFrame()
-                status = False
-            elif st.startswith('w') or st.startswith('a'):
-                args = cct.writeArgmain().parse_args(st.split())
-                codew = stf.WriteCountFilter(top_temp, writecount=args.dl)
-                if args.code == 'a':
-                    cct.write_to_blocknew(block_path, codew)
-                    # cct.write_to_blocknew(all_diffpath, codew)
-                else:
-                    cct.write_to_blocknew(block_path, codew, False)
-                    # cct.write_to_blocknew(all_diffpath, codew, False)
-                print("wri ok:%s" % block_path)
-                cct.sleeprandom(ct.duration_sleep_time / 2)
+            # elif st.lower() == 'r':
+            #     dir_mo = eval(cct.eval_rule)
+            #     evalcmd(dir_mo)
+            # elif st.lower() == 'g' or st.lower() == 'go':
+            #     status = True
+            #     for code in top_dif[:10].index:
+            #         code = re.findall('(\d+)', code)
+            #         if len(code) > 0:
+            #             code = code[0]
+            #             kind = sl.get_multiday_ave_compare_silent(code)
+            # elif st.lower() == 'clear' or st.lower() == 'c':
+            #     top_all = pd.DataFrame()
+            #     status = False
+            # elif st.startswith('w') or st.startswith('a'):
+            #     args = cct.writeArgmain().parse_args(st.split())
+            #     codew = stf.WriteCountFilter(top_temp, writecount=args.dl)
+            #     if args.code == 'a':
+            #         cct.write_to_blocknew(block_path, codew)
+            #         # cct.write_to_blocknew(all_diffpath, codew)
+            #     else:
+            #         cct.write_to_blocknew(block_path, codew, False)
+            #         # cct.write_to_blocknew(all_diffpath, codew, False)
+            #     print("wri ok:%s" % block_path)
+            #     cct.sleeprandom(ct.duration_sleep_time / 2)
 
-            elif st.startswith('sh'):
-                code = st.split()[1]
-                # lhg.get_linear_model_histogram(code, args.ptype, args.dtype, start, end, args.vtype, args.filter)
-                lhg.get_linear_model_histogram(code, start=top_temp.loc[code, 'ldate'], vtype='close', filter='y')
-                # raise KeyboardInterrupt()
-                while 1:
-                    st = cct.cct_raw_input("code:")
-                    if len(str(st)) == 6:
-                        code = st
-                        lhg.get_linear_model_histogram(code, start=top_temp.loc[code, 'ldate'], vtype='close',
-                                                       filter='y')
-                    elif st.lower() == 'q':
-                        break
-                    else:
-                        pass
-            elif st.startswith('q') or st.startswith('e'):
-                print("exit:%s" % (st))
-                sys.exit(0)
-            else:
-                print("input error:%s" % (st))
+            # elif st.startswith('sh'):
+            #     code = st.split()[1]
+            #     # lhg.get_linear_model_histogram(code, args.ptype, args.dtype, start, end, args.vtype, args.filter)
+            #     lhg.get_linear_model_histogram(code, start=top_temp.loc[code, 'ldate'], vtype='close', filter='y')
+            #     # raise KeyboardInterrupt()
+            #     while 1:
+            #         st = cct.cct_raw_input("code:")
+            #         if len(str(st)) == 6:
+            #             code = st
+            #             lhg.get_linear_model_histogram(code, start=top_temp.loc[code, 'ldate'], vtype='close',
+            #                                            filter='y')
+            #         elif st.lower() == 'q':
+            #             break
+            #         else:
+            #             pass
+            # elif st.startswith('q') or st.startswith('e'):
+            #     print("exit:%s" % (st))
+            #     sys.exit(0)
+            # else:
+            #     print("input error:%s" % (st))
         except (IOError, EOFError, Exception) as e:
             print("Error", e)
             import traceback
