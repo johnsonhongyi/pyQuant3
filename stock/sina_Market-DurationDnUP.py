@@ -519,7 +519,7 @@ if __name__ == "__main__":
                     print("input error:%s" % (st))
                 # raise KeyboardInterrupt("StopTime")
         except (KeyboardInterrupt) as e:
-            pass
+            cct.sleeprandom(60)
             # st = cct.cct_raw_input(ct.RawMenuArgmain() % (market_sort_value))
 
             # if len(st) == 0:

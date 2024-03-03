@@ -413,7 +413,7 @@ if __name__ == "__main__":
                                     # top_temp = top_temp.query('high > lasth1d and close > lastp1d   and close >=nclose and (low > lasth1d or (nclose >= open and open >= nlow and high >= nhigh  and volume > 1.5))')
                                     # top_temp = top_temp.query('(low >= lastp1d and close > ma5d or (nclose > open and close >nclose) )   and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
                                 else:
-                                    top_temp = top_temp.query('close > lastl1d and nlow = low and close > ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
+                                    top_temp = top_temp.query('close > lastl1d  and close > ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
 
                                 # top_temp = top_temp.query('low > lastl1d and close > ma5d and low <= ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
                     print("Rt:%0.1f dT:%s N:%s T:%s %s%% nh:%s nlow:%s" % (float(time.time() - time_Rt), cct.get_time_to_date(time_s), cct.get_now_time(), len(top_temp), round(len(top_temp) / float(ct.PowerCount) * 100, 1),len(nhigh),len(nlow)))
@@ -619,7 +619,7 @@ if __name__ == "__main__":
                     print("input error:%s isdigit:%s" % (st,st.split()[0].isdigit()))
                 # raise KeyboardInterrupt("StopTime")
         except (KeyboardInterrupt,EOFError,IOError, Exception) as e:
-            pass
+            cct.sleeprandom(60)
             # st = cct.cct_raw_input("status:[go(g),clear(c),[d 20150101 [l|h]|[y|n|pn|py],quit(q),W(a),sh]:")
             # print sys.getrecursionlimit()
             # st = cct.cct_raw_input(ct.RawMenuArgmain() % (market_sort_value))

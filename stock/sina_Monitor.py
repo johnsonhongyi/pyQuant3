@@ -825,6 +825,7 @@ if __name__ == "__main__":
         except (KeyboardInterrupt) as e:
             # print "key"
             print("KeyboardInterrupt:", e)
+            cct.sleeprandom(60)
             # cct.sleep(1)
             # if success > 3:
             #     raw_input("Except")
