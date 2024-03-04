@@ -700,7 +700,7 @@ terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440'
                         'sina_Market-DurationUP.py': '251, 445,1400,440',
                         'sina_Monitor-Market-LH.py': '567, 286,1400,420',
                         'sina_Monitor-Market.py': '140, 63,1400,440',
-                        'sina_Monitor.py': '108, 0, 1400, 520',
+                        'sina_Monitor.py': '109, 20, 1319, 520',
                         'singleAnalyseUtil.py': '759, 0,920,360',
                         'LinePower.py': '44, 186, 760, 420',
                         'sina_Market-DurationDnUP.py': '41, 362,1400,480' ,
@@ -1555,7 +1555,7 @@ def sleep(timet, catch=True):
         count_s = 0
         while loop_status:
             loop_status = 0
-            time.sleep(0.5)
+            time.sleep(0.2)
             # custom_sleep(0.5)
             t1 = time.time() - times
             duration = t1 - timet
@@ -1583,7 +1583,7 @@ def sleep(timet, catch=True):
             print("cct_raw_input:ExceptionError:%s count:%s" % (e, count_Except))
         else:
             print("cct_ExceptionError:%s count:%s" % (e, count_Except))
-            sys.exit(0)
+            # sys.exit(0)
 
     finally:
         log.info('cct_Exception finally loop_status:%s'%(loop_status))
