@@ -2590,8 +2590,7 @@ if __name__ == "__main__":
             # if cct.get_os_system().find('win') >= 0:
             #     import win_unicode_console
             #     win_unicode_console.disable()
-            # code=str(input("code:"))
-            code=cct.cct_raw_input("code:")
+            code=str(input("code:"))
             # code=str(code)
             # if cct.get_os_system().find('win') >= 0:
             #     # import win_unicode_console
@@ -2643,11 +2642,10 @@ if __name__ == "__main__":
             elif code == 'h' or code == 'help':
                 parser.print_help()
             else:
-                cct.sleeprandom(60)
+                pass
         except (KeyboardInterrupt) as e:
             # print "key"
             print(("KeyboardInterrupt:", e))
-            cct.sleeprandom(60)
         except (IOError, EOFError, Exception) as e:
             # print "Error", e
             import traceback

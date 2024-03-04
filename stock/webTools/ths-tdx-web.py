@@ -11,7 +11,7 @@ import win32api
 import win32con
 import win32gui
 from ths_link import send_code_message
-
+import time
 import pandas as pd
 import sys
 sys.path.append("..")
@@ -167,8 +167,18 @@ if __name__ == '__main__':
     import os
     # or open with iexplore
     # os.system('cmd /c start iexplore "http://127.0.0.1:8080/"')
-    os.system('cmd /c start "" "http://127.0.0.1:8080/"')
+    os.system('cmd /c start D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
+    time.sleep(1)
+    os.system('cmd /c start D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
+    time.sleep(1)
+    os.system('cmd /c start D:\\MacTools\\WinTools\\new_tdx2\\tdxw.exe')
+    time.sleep(5)
     os.system('cmd /c start python pywin32_mouse.py')
+    time.sleep(5)
+    os.system('cmd /c start python findSetWindowPos.py')
+    time.sleep(1)
+    os.system('cmd /c start "" "http://127.0.0.1:8080/"')
+
     # cmd /c start /min  #cmd 最小化,程序窗口正常
     # start "" firefox
     # start "" chrome

@@ -155,8 +155,7 @@ if __name__ == "__main__":
         try:
             # log.setLevel(LoggerFactory.INFO)
             # log.setLevel(LoggerFactory.DEBUG)
-            # code = input("code:")
-            code = cct.cct_raw_input("code:")
+            code = input("code:")
             if len(code) == 0:
                 # code='最近两周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
                 # code='周线2连阳,最近三周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
@@ -368,12 +367,11 @@ if __name__ == "__main__":
                 else:
                     print("df is None,not Wri")
             else:
-                cct.sleeprandom(60)
+                pass
 
         except (KeyboardInterrupt) as e:
             # print "key"
             print("KeyboardInterrupt:", e)
-            cct.sleeprandom(60)
         except (IOError, EOFError, Exception) as e:
             # print "Error", e
             import traceback

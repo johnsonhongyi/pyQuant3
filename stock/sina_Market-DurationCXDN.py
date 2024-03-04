@@ -413,7 +413,7 @@ if __name__ == "__main__":
                                     # top_temp = top_temp.query('high > lasth1d and close > lastp1d   and close >=nclose and (low > lasth1d or (nclose >= open and open >= nlow and high >= nhigh  and volume > 1.5))')
                                     # top_temp = top_temp.query('(low >= lastp1d and close > ma5d or (nclose > open and close >nclose) )   and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
                                 else:
-                                    top_temp = top_temp.query('close > lastl1d  and close > ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
+                                    top_temp = top_temp.query('close > lastl1d and nlow = low and close > ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
 
                                 # top_temp = top_temp.query('low > lastl1d and close > ma5d and low <= ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
                     print("Rt:%0.1f dT:%s N:%s T:%s %s%% nh:%s nlow:%s" % (float(time.time() - time_Rt), cct.get_time_to_date(time_s), cct.get_now_time(), len(top_temp), round(len(top_temp) / float(ct.PowerCount) * 100, 1),len(nhigh),len(nlow)))
@@ -540,165 +540,88 @@ if __name__ == "__main__":
                         print(".")
                         break
             else:
-                st = cct.cct_raw_input(ct.RawMenuArgmain() % (market_sort_value))
-                if len(st) == 0:
-                    status = False
-                elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
-                    st_l = st.split()
-                    st_k = st_l[0]
+                raise KeyboardInterrupt("StopTime")
+        except (KeyboardInterrupt) as e:
 
-                    if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
-                        st_key_sort = st
-                        market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort, top_all=top_all)
-                    else:
-                        log.error("market_sort key error:%s" % (st))
-                        cct.sleeprandom(5)
-                elif st.lower() == 'r':
-                    dir_mo = eval(cct.eval_rule)
-                    evalcmd(dir_mo)
-
-                elif st.lower() == 'g' or st.lower() == 'go':
-                    status = True
-                    for code in top_dd[:10].index:
-                        code = re.findall('(\d+)', code)
-                        if len(code) > 0:
-                            code = code[0]
-                            kind = sl.get_multiday_ave_compare_silent(code)
-                elif st.lower() == 'clear' or st.lower() == 'c':
-                    top_all = pd.DataFrame()
-                    time_s = time.time()
-                    cct.set_clear_logtime()
-                    status = False
-                elif st.startswith('d') or st.startswith('dt'):
-                    args = parserDuraton.parse_args(st.split()[1:])
-                    if len(str(args.start)) > 0:
-                        if args.end:
-                            end_date = args.end
-                        duration_date = args.start.strip()
-                        if len(str(duration_date)) < 4:
-                            du_date = tdd.get_duration_Index_date('999999', dl=int(duration_date))
-                            ct.PowerCountdl = int(duration_date)
-                        set_duration_console(du_date)
-                        top_all = pd.DataFrame()
-                        time_s = time.time()
-                        status = False
-                        lastpTDX_DF = pd.DataFrame()
-
-                elif st.startswith('w') or st.startswith('a'):
-                    args = cct.writeArgmain().parse_args(st.split())
-                    codew = stf.WriteCountFilter(top_temp, duration=duration_date, writecount=args.dl, end=args.end)
-                    if args.code == 'a':
-                        # cct.write_to_blocknew(block_path, codew)
-                        cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=False,reappend=False)
-                        # sl.write_to_blocknew(all_diffpath, codew)
-                    else:
-                        # cct.write_to_blocknew(block_path, codew, False)
-                        cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=False,reappend=False)
-                        # sl.write_to_blocknew(all_diffpath, codew, False)
-                    print("wri ok:%s" % block_path)
-                    cct.sleeprandom(int(ct.duration_sleep_time / 2))
-                elif st.startswith('sh'):
-                    while 1:
-                        input = input("code:")
-                        if len(input) >= 6:
-                            args = parser.parse_args(input.split())
-                            if len(str(args.code)) == 6:
-                                # print args.code
-                                if args.code in top_temp.index.values:
-                                    lhg.get_linear_model_histogram(args.code, start=top_temp.loc[args.code, 'date'],
-                                                                   end=args.end, vtype=args.vtype,
-                                                                   filter=args.filter)
-                        elif input.startswith('q'):
-                            break
-                        else:
-                            pass
-                elif st.startswith('q') or st.startswith('e'):
-                    print("exit:%s" % (st))
-                    sys.exit(0)
-                else:
-                    print("input error:%s isdigit:%s" % (st,st.split()[0].isdigit()))
-                # raise KeyboardInterrupt("StopTime")
-        except (KeyboardInterrupt,EOFError,IOError, Exception) as e:
-            cct.sleeprandom(60)
             # st = cct.cct_raw_input("status:[go(g),clear(c),[d 20150101 [l|h]|[y|n|pn|py],quit(q),W(a),sh]:")
             # print sys.getrecursionlimit()
-            # st = cct.cct_raw_input(ct.RawMenuArgmain() % (market_sort_value))
-            # if len(st) == 0:
-            #     status = False
-            # elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
-            #     st_l = st.split()
-            #     st_k = st_l[0]
+            st = cct.cct_raw_input(ct.RawMenuArgmain() % (market_sort_value))
+            if len(st) == 0:
+                status = False
+            elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
+                st_l = st.split()
+                st_k = st_l[0]
 
-            #     if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
-            #         st_key_sort = st
-            #         market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort, top_all=top_all)
-            #     else:
-            #         log.error("market_sort key error:%s" % (st))
-            #         cct.sleeprandom(5)
-            # elif st.lower() == 'r':
-            #     dir_mo = eval(cct.eval_rule)
-            #     evalcmd(dir_mo)
+                if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
+                    st_key_sort = st
+                    market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort, top_all=top_all)
+                else:
+                    log.error("market_sort key error:%s" % (st))
+                    cct.sleeprandom(5)
+            elif st.lower() == 'r':
+                dir_mo = eval(cct.eval_rule)
+                evalcmd(dir_mo)
 
-            # elif st.lower() == 'g' or st.lower() == 'go':
-            #     status = True
-            #     for code in top_dd[:10].index:
-            #         code = re.findall('(\d+)', code)
-            #         if len(code) > 0:
-            #             code = code[0]
-            #             kind = sl.get_multiday_ave_compare_silent(code)
-            # elif st.lower() == 'clear' or st.lower() == 'c':
-            #     top_all = pd.DataFrame()
-            #     time_s = time.time()
-            #     cct.set_clear_logtime()
-            #     status = False
-            # elif st.startswith('d') or st.startswith('dt'):
-            #     args = parserDuraton.parse_args(st.split()[1:])
-            #     if len(str(args.start)) > 0:
-            #         if args.end:
-            #             end_date = args.end
-            #         duration_date = args.start.strip()
-            #         if len(str(duration_date)) < 4:
-            #             du_date = tdd.get_duration_Index_date('999999', dl=int(duration_date))
-            #             ct.PowerCountdl = int(duration_date)
-            #         set_duration_console(du_date)
-            #         top_all = pd.DataFrame()
-            #         time_s = time.time()
-            #         status = False
-            #         lastpTDX_DF = pd.DataFrame()
+            elif st.lower() == 'g' or st.lower() == 'go':
+                status = True
+                for code in top_dd[:10].index:
+                    code = re.findall('(\d+)', code)
+                    if len(code) > 0:
+                        code = code[0]
+                        kind = sl.get_multiday_ave_compare_silent(code)
+            elif st.lower() == 'clear' or st.lower() == 'c':
+                top_all = pd.DataFrame()
+                time_s = time.time()
+                cct.set_clear_logtime()
+                status = False
+            elif st.startswith('d') or st.startswith('dt'):
+                args = parserDuraton.parse_args(st.split()[1:])
+                if len(str(args.start)) > 0:
+                    if args.end:
+                        end_date = args.end
+                    duration_date = args.start.strip()
+                    if len(str(duration_date)) < 4:
+                        du_date = tdd.get_duration_Index_date('999999', dl=int(duration_date))
+                        ct.PowerCountdl = int(duration_date)
+                    set_duration_console(du_date)
+                    top_all = pd.DataFrame()
+                    time_s = time.time()
+                    status = False
+                    lastpTDX_DF = pd.DataFrame()
 
-            # elif st.startswith('w') or st.startswith('a'):
-            #     args = cct.writeArgmain().parse_args(st.split())
-            #     codew = stf.WriteCountFilter(top_temp, duration=duration_date, writecount=args.dl, end=args.end)
-            #     if args.code == 'a':
-            #         # cct.write_to_blocknew(block_path, codew)
-            #         cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=False,reappend=False)
-            #         # sl.write_to_blocknew(all_diffpath, codew)
-            #     else:
-            #         # cct.write_to_blocknew(block_path, codew, False)
-            #         cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=False,reappend=False)
-            #         # sl.write_to_blocknew(all_diffpath, codew, False)
-            #     print("wri ok:%s" % block_path)
-            #     cct.sleeprandom(int(ct.duration_sleep_time / 2))
-            # elif st.startswith('sh'):
-            #     while 1:
-            #         input = input("code:")
-            #         if len(input) >= 6:
-            #             args = parser.parse_args(input.split())
-            #             if len(str(args.code)) == 6:
-            #                 # print args.code
-            #                 if args.code in top_temp.index.values:
-            #                     lhg.get_linear_model_histogram(args.code, start=top_temp.loc[args.code, 'date'],
-            #                                                    end=args.end, vtype=args.vtype,
-            #                                                    filter=args.filter)
-            #         elif input.startswith('q'):
-            #             break
-            #         else:
-            #             pass
-            # elif st.startswith('q') or st.startswith('e'):
-            #     print("exit:%s" % (st))
-            #     sys.exit(0)
-            # else:
-            #     print("input error:%s isdigit:%s" % (st,st.split()[0].isdigit()))
+            elif st.startswith('w') or st.startswith('a'):
+                args = cct.writeArgmain().parse_args(st.split())
+                codew = stf.WriteCountFilter(top_temp, duration=duration_date, writecount=args.dl, end=args.end)
+                if args.code == 'a':
+                    # cct.write_to_blocknew(block_path, codew)
+                    cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=False,reappend=False)
+                    # sl.write_to_blocknew(all_diffpath, codew)
+                else:
+                    # cct.write_to_blocknew(block_path, codew, False)
+                    cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=False,reappend=False)
+                    # sl.write_to_blocknew(all_diffpath, codew, False)
+                print("wri ok:%s" % block_path)
+                cct.sleeprandom(int(ct.duration_sleep_time / 2))
+            elif st.startswith('sh'):
+                while 1:
+                    input = input("code:")
+                    if len(input) >= 6:
+                        args = parser.parse_args(input.split())
+                        if len(str(args.code)) == 6:
+                            # print args.code
+                            if args.code in top_temp.index.values:
+                                lhg.get_linear_model_histogram(args.code, start=top_temp.loc[args.code, 'date'],
+                                                               end=args.end, vtype=args.vtype,
+                                                               filter=args.filter)
+                    elif input.startswith('q'):
+                        break
+                    else:
+                        pass
+            elif st.startswith('q') or st.startswith('e'):
+                print("exit:%s" % (st))
+                sys.exit(0)
+            else:
+                print("input error:%s isdigit:%s" % (st,st.split()[0].isdigit()))
         except (IOError, EOFError, Exception) as e:
             print("Error", e)
             import traceback
