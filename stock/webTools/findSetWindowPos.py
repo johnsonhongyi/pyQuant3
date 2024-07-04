@@ -5,10 +5,40 @@ from ctypes.wintypes import HWND, DWORD, RECT
 import time
 # dwmapi = ctypes.WinDLL("dwmapi")
 
+from mouseMonitor.displayDetction import  Display_Detection
 
 
-tdx_ths_position={'通达信':'659, 50, 878,793','东方财富':'268, 0, 1067, 833','同花顺':'0, 20,1075,864','Firefox': '626, 0, 878, 869'}
 
+#hide 'ths-tdx-web.py': '-32000,-32000,199,34','pywin32_mouse.py': '-32000,-32000,199,34'
+#triton 1.25 dpi
+# tdx_ths_position1536={'通达信': '659,72,878,793','东方财富': '268,0,1067,833','同花顺': '0,20,1075,864','Firefox': '100,67,629,779'}
+tdx_ths_position1536={'通达信': '449,40,1064,793','东方财富': '274,0,1067,833','同花顺': '54,92,1074,772','Firefox': '78,72,706,797','sina_Market-DurationDn.py': '-6,432,1326,423','sina_Market-DurationCXDN.py': '10,313,1329,438','sina_Market-DurationUP.py': '243,432,1323,438','sina_Monitor-Market-LH.py': '264,306,1307,407','sina_Monitor.py': '137,28,1319,520','singleAnalyseUtil.py': '647,0,895,358','LinePower.py': '26,150,761,407','instock_Monitor.py': '74,54,1319,439','chantdxpower.py': '33,115,649,407','ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '-25600,-25600,59,51'}
+
+# tdx_ths_position1920={'通达信': '787,214,1104,835','东方财富': '418,138,1142,885','同花顺': '22,184,1075,864','Firefox': '45,156,706,797','sina_Market-DurationDn.py': '-7,664,1305,423','sina_Market-DurationCXDN.py': '-7,326,1329,423','sina_Market-DurationUP.py': '606,664,1321,423','sina_Monitor-Market-LH.py': '662,318,1307,409','sina_Monitor.py': '109,20,1313,519','singleAnalyseUtil.py': '1001,0,897,359','LinePower.py': '29,103,761,407','instock_Monitor.py': '70,79,1313,391','chantdxpower.py': '-7,129,649,407','ths-tdx-web.py': '70,200,153,39','pywin32_mouse.py': '70,200,153,39'}
+tdx_ths_position1920={'通达信': '787,214,1104,835','东方财富': '418,138,1142,885','同花顺': '22,184,1075,864','Firefox': '45,156,706,797','sina_Market-DurationDn.py': '-7,664,1332,423','sina_Market-DurationCXDN.py': '-7,326,1329,423','sina_Market-DurationUP.py': '606,664,1321,423','sina_Monitor-Market-LH.py': '662,318,1307,409','sina_Monitor.py': '109,20,1313,519','singleAnalyseUtil.py': '1001,0,897,359','LinePower.py': '29,103,761,407','instock_Monitor.py': '70,79,1313,391','chantdxpower.py': '-7,129,649,407','ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '-32000,-32000,59,51'}
+
+
+
+# tdx_ths_positionDouble={'通达信': '-1334,37,878,828','东方财富': '21,249,1067,833','同花顺': '825,216,1075,864','Firefox': '-1925,37,602,831','sina_Market-DurationDn.py': '-1902,226,1306,438','sina_Market-DurationCXDN.py': '-1871,90,1329,438','sina_Market-DurationUP.py': '-1818,411,1323,438','sina_Monitor-Market-LH.py': '576,680,1307,407','sina_Monitor.py': '136,25,1321,519','singleAnalyseUtil.py': '949,0,897,359','LinePower.py': '55,233,761,407','instock_Monitor.py': '78,108,1319,439','chantdxpower.py': '108,232,649,407','ths-tdx-web.py': '88,250,313,199','pywin32_mouse.py': '88,250,217,151'}
+tdx_ths_positionDouble={'通达信': '-1502,37,1094,828','东方财富': '21,249,1067,833','同花顺': '825,216,1075,864','Firefox': '-1870,67,602,801','sina_Market-DurationDn.py': '-1926,222,1326,438','sina_Market-DurationCXDN.py': '-1897,122,1329,438','sina_Market-DurationUP.py': '-1701,432,1323,438','sina_Monitor-Market-LH.py': '576,680,1307,407','sina_Monitor.py': '150,27,1324,519','singleAnalyseUtil.py': '949,0,897,359','LinePower.py': '16,176,761,402','instock_Monitor.py': '97,83,1319,439','chantdxpower.py': '43,138,649,407','ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '-32000,-32000,59,51'}
+
+# tdx_ths_position={'通达信': '-1334,72,878,793','东方财富': '21,249,1067,833','同花顺': '-1553,19,1075,864','Firefox': '-1910,5,602,864','sina_Market-DurationDn.py': '-1902,226,1306,438','sina_Market-DurationCXDN.py': '-1871,90,1329,438','sina_Market-DurationUP.py': '-1818,411,1323,438','sina_Monitor-Market-LH.py': '576,680,1307,407','sina_Monitor.py': '136,25,1321,519','singleAnalyseUtil.py': '949,0,897,359','LinePower.py': '55,233,761,407','instock_Monitor.py': '78,108,1319,439','chantdxpower.py': '108,232,649,407','ths-tdx-web.py': '88,250,313,199','pywin32_mouse.py': '88,250,217,151'}
+
+# title:通达信金融终端V7.642 - [行情报价-Now090] pos: '1074,260,878,793'
+# title:东方财富终端 pos: '21,249,1067,833'
+# title:同花顺(v9.20.71) - 板块同列 pos: '-1553,19,1075,864'
+# title:TDX_THS_联动 Previewer — Mozilla Firefox pos: '-25984,-25600,159,27'
+# title:sina_Market-DurationDn.py 2023-11-30 dT:13:01 G:1975 zxg: 063.blk-all pos: '-1902,226,1306,438'
+# title:sina_Market-DurationCXDN.py 2023-11-30 dT:13:00 G:1975 zxg: 065.blk-all pos: '-1871,90,1329,438'
+# title:sina_Market-DurationUP.py 2023-05-08 dT:10:43 G:1934 zxg: 062.blk-all pos: '-1818,411,1323,438'
+# title:sina_Monitor-Market-LH.py 2023-11-30 dT:13:02 G:28 zxg: 066.blk-066 pos: '576,680,1307,407'
+# title:sina_Monitor.py 2023-11-30 G:4891 zxg: 064.blk-all pos: '136,25,1321,519'
+# title:singleAnalyseUtil.py B:93755-94172 V:0.8 ZL: -315.1 To:13 D:1371 Sh: -0.03%  Vr:3551.4-3543.9-0.8%  MR: -2.9 ZL: -315.1 pos: '949,0,897,359'
+# title:LinePower.py pos: '55,233,761,407'
+# title:instock_Monitor.py 60 G:54 zxg: 063.blk-063 pos: '78,108,1319,439'
+# title:chantdxpower.py pos: '108,232,649,407'
+# title:ths-tdx-web.py pos: '-25984,-25600,159,27'
+# title:pywin32_mouse.py pos: '88,250,217,151'
 
 def set_windows_hwnd_pos(hwnd,pos):
     # # 设置窗口标题
@@ -39,7 +69,7 @@ def set_windows_hwnd_pos(hwnd,pos):
     # 移动窗口
     # ctypes.windll.user32.SetWindowPos(hwnd, 0, x, y, top, bottom, 1)
 
-    ctypes.windll.user32.SetForegroundWindow(hwnd)
+    # ctypes.windll.user32.SetForegroundWindow(hwnd)
     pos = pos.split(',')
     x,y = int(pos[0]),int(pos[1])
     width,height = int(pos[2]),int(pos[3])
@@ -87,7 +117,7 @@ def set_windows_pos(title,pos):
     # 移动窗口
     # ctypes.windll.user32.SetWindowPos(hwnd, 0, x, y, top, bottom, 1)
 
-    ctypes.windll.user32.SetForegroundWindow(hwnd)
+    # ctypes.windll.user32.SetForegroundWindow(hwnd)
     pos = pos.split(',')
     x,y = int(pos[0]),int(pos[1])
     width,height = int(pos[2]),int(pos[3])
@@ -117,7 +147,8 @@ def check_zero(result, func, args):
     if not result:
         err = ctypes.get_last_error()
         if err:
-            raise ctypes.WinError(err)
+            # raise ctypes.WinError(err)
+            print(ctypes.WinError(err))
     return args
 
 if not hasattr(wintypes, 'LPDWORD'): # PY2
@@ -138,6 +169,10 @@ user32.EnumWindows.argtypes = (
 user32.IsWindowVisible.argtypes = (
     wintypes.HWND,) # _In_ hWnd
 
+user32.IsIconic.argtypes = (
+    wintypes.HWND,) # _In_ hWnd
+
+
 user32.GetForegroundWindow.argtypes = ()
 user32.GetForegroundWindow.restype = wintypes.HWND
 user32.ShowWindow.argtypes = wintypes.HWND,wintypes.BOOL
@@ -147,6 +182,7 @@ user32.GetWindowThreadProcessId.restype = wintypes.DWORD
 user32.GetWindowThreadProcessId.argtypes = (
   wintypes.HWND,     # _In_      hWnd
   wintypes.LPDWORD,) # _Out_opt_ lpdwProcessId
+
 
 user32.GetWindowTextLengthW.errcheck = check_zero
 user32.GetWindowTextLengthW.argtypes = (
@@ -177,6 +213,50 @@ def get_pos_dwmapi(hwnd):
     dwmapi.DwmGetWindowAttribute(HWND(hwnd), DWORD(DMWA_EXTENDED_FRAME_BOUNDS),
                                  ctypes.byref(rect), ctypes.sizeof(rect))
     return rect.left, rect.right, rect.top, rect.bottom
+
+
+def find_proc_windows(proc,visible=True):
+    '''Return a sorted list of visible windows.'''
+    SW_Normal = 1
+    SW_MAXIMIZE = 3
+    SW_MINIMIZE = 6
+    SW_Restore = 9
+    SW_Show = 5
+    result = []
+    @WNDENUMPROC
+    def enum_proc(hWnd, lParam):
+
+        if  visible:
+
+            if user32.IsWindowVisible(hWnd):
+                pid = wintypes.DWORD()
+                tid = user32.GetWindowThreadProcessId(
+                            hWnd, ctypes.byref(pid))
+                length = user32.GetWindowTextLengthW(hWnd) + 1
+                if (length == 1):return True
+                title = ctypes.create_unicode_buffer(length)
+                user32.GetWindowTextW(hWnd, title, length)
+                if len(title.value) > 0:
+                    if 10 > title.value.find(proc) >= 0:
+                        result.append(title.value)
+        else:
+            if user32.IsIconic(hWnd):return True;
+            pid = wintypes.DWORD()
+            tid = user32.GetWindowThreadProcessId(
+                        hWnd, ctypes.byref(pid))
+            length = user32.GetWindowTextLengthW(hWnd) + 1
+            if (length == 1):return True
+            title = ctypes.create_unicode_buffer(length)
+            user32.GetWindowTextW(hWnd, title, length)
+            #show IsIconic app
+            # if user32.IsIconic(hWnd):print("IsIconic:",title.value);
+            if len(title.value) > 0:
+                if title.value.find(proc) >= 0:
+                    result.append(title.value)
+
+        return True
+    user32.EnumWindows(enum_proc, 0)
+    return result
 
 
 def list_find_windows(proc):
@@ -220,7 +300,7 @@ def list_find_windows(proc):
     # return sorted(result)
 
 
-def set_proc_windows_position(proc):
+def set_proc_windows_position(proc,tdx_ths_position=tdx_ths_position1536):
     '''Return a sorted list of visible windows.'''
     SW_Normal = 1
     SW_MAXIMIZE = 3
@@ -244,7 +324,8 @@ def set_proc_windows_position(proc):
 
                 if isinstance(proc, list):
                     for tdx in proc:
-                        if title.value.find(tdx) >= 0:
+                        # if title.value.find(tdx) >= 0:
+                        if 10 > title.value.find(tdx) >= 0:
                             left, top, width, height = GetWindowRectFromName(hWnd)
                             if left < 0 and top < 0:
                                 # user32.ShowWindow(hWnd, SW_MAXIMIZE);
@@ -307,6 +388,7 @@ def list_user_windows():
     return (result)
 
 
+
 # private enum ShowWindowEnum{Hide = 0,
 # ShowNormal = 1,ShowMinimized = 2,ShowMaximized = 3,
 # Maximize = 3,ShowNormalNoActivate = 4,Show = 5,
@@ -327,7 +409,7 @@ def FindWindowRectFromName(title)-> tuple:
     hwnd = 0
     for win in list_hwnd:
         if win.title.find(title) >= 0:
-            print(win)
+            print("'%s': '%s,%s,%s,%s',"%(title,win.left,win.top,win.width,win.height),end='')
             hwnd = win.pid
             # break
 
@@ -346,17 +428,19 @@ def FindWindowRectFromName(title)-> tuple:
             return (left, top, width, height)
     return (0,0,0,0)
 
-def list_windows():
+def list_windows(all=False):
     '''Return a sorted list of visible windows.'''
     result = []
     @WNDENUMPROC
     def enum_proc(hWnd, lParam):
         # if user32.IsWindowVisible(hWnd):
-        if user32.IsWindowVisible(hWnd):
+        # if user32.IsIconic(hWnd):return True;
+        if all:
             pid = wintypes.DWORD()
             tid = user32.GetWindowThreadProcessId(
                         hWnd, ctypes.byref(pid))
             length = user32.GetWindowTextLengthW(hWnd) + 1
+            if (length == 1):return True
             title = ctypes.create_unicode_buffer(length)
             user32.GetWindowTextW(hWnd, title, length)
             # left, right, top, bottom = get_pos(hWnd)
@@ -364,6 +448,21 @@ def list_windows():
             left, top, width, height = GetWindowRectFromName(hWnd)
             # result.append(WindowInfo(pid.value, title.value,left, top, right, bottom))
             result.append(WindowInfo(pid.value, title.value,left, top, width, height))
+        else:
+            if user32.IsWindowVisible(hWnd):
+                pid = wintypes.DWORD()
+                tid = user32.GetWindowThreadProcessId(
+                            hWnd, ctypes.byref(pid))
+                length = user32.GetWindowTextLengthW(hWnd) + 1
+                if (length == 1):return True
+                title = ctypes.create_unicode_buffer(length)
+                user32.GetWindowTextW(hWnd, title, length)
+                # left, right, top, bottom = get_pos(hWnd)
+                # left, right, top, bottom = GetWindowRectFromName(hWnd)
+                left, top, width, height = GetWindowRectFromName(hWnd)
+                # result.append(WindowInfo(pid.value, title.value,left, top, right, bottom))
+                result.append(WindowInfo(pid.value, title.value,left, top, width, height))
+
             # print(pid.value, title.value,end='')
         return True
     user32.EnumWindows(enum_proc, 0)
@@ -397,10 +496,10 @@ if __name__ == '__main__':
     print('Process IDs:')
     # print(*list_pids(), sep='\n')
     print('\nWindows:')
-    # print(*list_windows(), sep='\n')
-    proc_title = ['通达信','东方财富','同花顺']
-    
-    proc_title =  [proc for proc in tdx_ths_position.keys()]
+    # print(*list_windows(all=False), sep='\n')
+
+    # result=find_proc_windows('联动精灵',visible=False)
+    # print(result)
 
     import sys
     sys.path.append("..")
@@ -408,7 +507,37 @@ if __name__ == '__main__':
     # from JohnsonUtil import LoggerFactory as LoggerFactory
     # from JohnsonUtil import johnson_cons as ct
     from JohnsonUtil import commonTips as cct
-    sina = [ title for title in cct.terminal_positionKey1K_triton.keys()]
+    
+    displaySet =Display_Detection()
+    displayNum = displaySet[0]
+    displayMainRes = displaySet[1][0]
+
+    if displaySet[0] > 1:
+
+
+        print("displaySet:%s"%(displaySet[0]))
+        proc_title =  [proc for proc in tdx_ths_positionDouble.keys()]
+        # proc_title =  [proc for proc in sorted(tdx_ths_positionDouble.keys(),reverse=False)]
+        positon = tdx_ths_positionDouble
+
+    else:
+        print("displaySet:%s %s"%(displaySet[0],displaySet[1][0]))
+
+        tdx_ths_position_eval = 'tdx_ths_position%s'%(displayMainRes)
+        print("positon:%s"%(tdx_ths_position_eval))
+        positon = eval(tdx_ths_position_eval)
+        proc_title =  [proc for proc in positon.keys()]
+        # proc_title =  [proc for proc in sorted(positon.keys(),reverse=False)]
+
+        # sina = [ title for title in cct.terminal_positionKey1K_triton.keys()]
+
+        # proc_title = ['通达信','东方财富','同花顺']
+        
+        # # proc_title =  [proc for proc in tdx_ths_position.keys()]
+        # proc_title =  [proc for proc in proc_title]
+
+    
+    # proc_title.extend(sina)
     # title = 'sina_Monitor'
     for title in proc_title:
         FindWindowRectFromName(title)
@@ -419,6 +548,13 @@ if __name__ == '__main__':
     #         print(win)
     #         set_windows_pos(win.title,tdx_ths_position[proc])
 
+    # proc_title = ['通达信','东方财富','同花顺']
+    # # proc_title =  [proc for proc in tdx_ths_position.keys()]
+    # proc_title =  [proc for proc in proc_title]
 
     # print("set pos")
-    # set_proc_windows_position(proc_title)
+    # set_proc_windows_position(sorted(proc_title,reverse=False),tdx_ths_position=positon)
+
+    set_proc_windows_position(proc_title,tdx_ths_position=positon)
+    # print(find_proc_windows('ths-tdx-web'))
+

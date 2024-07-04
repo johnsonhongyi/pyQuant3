@@ -492,13 +492,13 @@ if __name__ == "__main__":
                 while 1:
                     cct.sleep(ct.duration_sleep_time)
                     if cct.get_work_duration():
-                        print(("."), end=' ')
+                        print(".", end=' ')
                         cct.sleep(ct.duration_sleep_time)
                     else:
                         # top_all = pd.DataFrame()
                         cct.sleeprandom(60)
                         time_s = time.time()
-                        print (".")
+                        print(".")
                         break
             else:
                 raise KeyboardInterrupt("StopTime")

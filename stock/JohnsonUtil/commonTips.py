@@ -694,20 +694,20 @@ terminal_positionKey4K = {'sina_Market-DurationDn.py': '106, 586,1400,440',
 
 
 
-terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1400,440',
-                        'sina_Market-DurationCXDN.py': '13, 310,1400,440',
+terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1306,438',
+                        'sina_Market-DurationCXDN.py': '13, 310,1329,438',
                         'sina_Market-DurationSH.py': '-29, 623,1400,440',
-                        'sina_Market-DurationUP.py': '251, 445,1400,440',
-                        'sina_Monitor-Market-LH.py': '567, 286,1400,420',
+                        'sina_Market-DurationUP.py': '251, 445,1323,438',
+                        'sina_Monitor-Market-LH.py': '567, 286,1307,407',
                         'sina_Monitor-Market.py': '140, 63,1400,440',
                         'sina_Monitor.py': '109, 20, 1319, 520',
-                        'singleAnalyseUtil.py': '759, 0,920,360',
-                        'LinePower.py': '44, 186, 760, 420',
+                        'singleAnalyseUtil.py': '759, 0,897,359',
+                        'LinePower.py': '44, 186, 761,407',
                         'sina_Market-DurationDnUP.py': '41, 362,1400,480' ,
-                        'instock_Monitor.py':'62, 86,1360,440',
-                        'chantdxpower.py':'86, 128, 1200, 480',
-                        'ths-tdx-web.py':'70, 200, 600, 320',
-                        'pywin32_mouse.py':'70, 200, 220, 150',}
+                        'instock_Monitor.py':'62, 86,1319,439',
+                        'chantdxpower.py':'86, 128, 649,407',
+                        'ths-tdx-web.py':'70, 200, 159,27',
+                        'pywin32_mouse.py':'70, 200, 159,27',}
 
 
 
@@ -1125,7 +1125,11 @@ def get_screen_resolution():
     #     if isDigit(screenWidth):
     #         return screenWidth
     # return 0
-    ScreenHeight,ScreenWidth = re.findall('\r\nScreenHeight\s+:\s(.*?)\r\nScreenWidth\s+:\s(.*?)\r\n', res[0].decode("gbk"))[-1]
+    
+    if len(res) > 10:
+        ScreenHeight,ScreenWidth = re.findall('\r\nScreenHeight\s+:\s(.*?)\r\nScreenWidth\s+:\s(.*?)\r\n', res[0].decode("gbk"))[-1]
+    else:
+        ScreenHeight,ScreenWidth = '1080','1920'
     return ScreenHeight,ScreenWidth 
 
 
@@ -2306,8 +2310,17 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                         # tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols)
                         results = tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count)
                         # print("running ...")
-
                         result = tuple(results)  # fetch the lazy results
+
+                    #debug:
+                    # results=[]
+                    # for code in urllist:
+                    #     print("code:%s "%(code), end=' ')
+                    #     res=cmd(code,**kwargs)
+                    #     print("status:%s\t"%(len(res)), end=' ')
+                    #     results.append(res)
+                    # result=results
+
                     # print("done")
                 except Exception as e:
                     log.error("except:%s"%(e))
@@ -2316,9 +2329,9 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     
                     results=[]
                     for code in urllist:
-                        print("code:%s "%(code),)
+                        print("code:%s "%(code), end=' ')
                         res=cmd(code,**kwargs)
-                        print("status:%s\t"%(len(res)),)
+                        print("status:%s\t"%(len(res)), end=' ')
                         results.append(res)
                     result=results
         else:
@@ -4042,18 +4055,18 @@ def func_compute_percd2024( open, close,high, low,lastopen, lastclose,lasthigh, 
 
                 if lastdu4 is not None:
                     if lastdu4 <= 1.12:
-                        initc +=10
-                    elif lastdu4 > 1.12 and lastdu4 <= 1.21:
-                        initc +=8
-                    elif lastdu4 > 1.21 and lastdu4 <= 1.31:
-                        initc +=5
-                    elif lastdu4 > 1.31 and lastdu4 <= 1.5:
                         initc +=3
-                    else:
+                    elif lastdu4 > 1.12 and lastdu4 <= 1.21:
                         initc +=2
+                    elif lastdu4 > 1.21 and lastdu4 <= 1.31:
+                        initc +=2
+                    elif lastdu4 > 1.31 and lastdu4 <= 1.5:
+                        initc +=2
+                    else:
+                        initc +=1
 
                 if max5 is not None and high >= max5:
-                    initc +=5
+                    initc +=2
                     # if hmax is not None and close > hmax:
                     #     initc +=3
                     #     lastMax = max(high4,max5,hmax)
@@ -4084,9 +4097,10 @@ def func_compute_percd2024( open, close,high, low,lastopen, lastclose,lasthigh, 
                 if high4 is not None and hmax is not None:
                     lastMax = max(high4,max5,hmax)
                     if lasthigh >= lastMax:
-                        initc += 5 + abs(lastp)
+                        # initc += 5 + abs(lastp)
+                        initc += 2 + abs(lastp)
                     if lastMax==hmax and high4 > max5 and high4 < hmax:
-                        initc += 5
+                        initc += 1
 
     if GlobalValues().getkey('percdf') is not None:
         # if code == '601857':
@@ -4096,32 +4110,32 @@ def func_compute_percd2024( open, close,high, low,lastopen, lastclose,lasthigh, 
             if percent > 2:
                 if lastdf.lasth1d < lastdf.lasth2d < lastdf.lasth3d:
                     if close > lastdf.lasth1d:
-                        initc += 30
+                        initc += 3
                         if lastdf.lasth3d < lastdf.lasth4d:
-                            initc += 30
+                            initc += 2
                             
                             if lastdf.lasth4d < lastdf.lasth5d:
-                                initc += 30
+                                initc += 2
                                 if lastdf.lasth5d < lastdf.lasth6d:
-                                    initc += 30
+                                    initc += 2
                     if low < lastdf.ma51d and high > lastdf.ma51d:
-                        initc += 50
+                        initc += 3
                 elif lastdf.lasth2d < lastdf.lasth3d < lastdf.lasth4d:
                     if close > lastdf.lasth1d > lastdf.lasth2d:
-                        initc += 25
+                        initc += 2
                         if lastdf.lasth3d < lastdf.lasth4d:
-                            initc += 30
+                            initc += 2
                             if lastdf.lasth4d < lastdf.lasth5d:
-                                initc += 30
+                                initc += 2
                                 if lastdf.lasth5d < lastdf.lasth6d:
-                                    initc += 30
+                                    initc += 2
                     if low < lastdf.ma51d and high > lastdf.ma51d:
-                        initc += 50
+                        initc += 2
                                      
                 elif lastdf.lasth1d > lastdf.lasth2d > lastdf.lasth3d and lastdf.ma51d < lastdf.lastl1d < lastdf.ma51d*1.02 :
-                    initc += 50
+                    initc += 3
                     if lastdf.ma51d < lastdf.lastl1d < lastdf.ma51d*1.02:
-                        initc += 30
+                        initc += 2
 
         # else:
         #     log.info("check lowest in percdf:%s"%(code))
@@ -4145,6 +4159,7 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
         percent = round((close - lastclose)/lastclose*100,1)
         lastp = round((lastclose - lastopen)/lastclose*100,1)
 
+        
     if  low > 0 and  lastclose > 0 and lastvol > 0 and lasthigh > 1.0 and lastlow > 1.0 and lasthigh > 0 and lastlow > 0:
         percent = round((close - lastclose)/lastclose*100,1)
         # now_du = round((high - low)/low*100,1)
@@ -4916,6 +4931,7 @@ if __name__ == '__main__':
     # rzrq['all']='nan'
     print(is_trade_date())
     print(isDigit('nan None'))
+    print("指数的贡献度:",isDigit('指数的贡献度'))
     import ipdb;ipdb.set_trace()
     
     print(read_to_indb())

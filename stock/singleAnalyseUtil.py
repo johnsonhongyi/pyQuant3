@@ -1,6 +1,7 @@
 # -*- coding: UTF-8 -*-
 import datetime
 import random
+import os
 import sys
 import time
 import types
@@ -696,6 +697,7 @@ if __name__ == '__main__':
                             break
                 else:
                     cct.sleep(ct.single_duration_sleep_time)
+                    
             elif cct.get_work_duration():
                 log.debug('into work_duration:%s' % (int_time))
                 while 1:
@@ -754,7 +756,12 @@ if __name__ == '__main__':
         except (KeyboardInterrupt) as e:
             # print "key"
             print("KeyboardInterrupt:", e)
-
+            ramdisk_h5 = 'D:\\Ramdisk\\sina_MultiIndex_data.h5'
+            if  cct.creation_date_duration(ramdisk_h5) > 0:
+                os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-ramdisk_back.bat')
+                time.sleep(1)
+                os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-Restore.bat')
+                print("1-ramdisk_back is OK")
             st = cct.cct_raw_input("status:[go(g),clear(c),quit(q,e),wri(w)]:")
             if len(st) == 0:
                 status = False
@@ -818,7 +825,7 @@ if __name__ == '__main__':
             else:
                 print("input error:%s" % (st))
                 cct.sleep(10)
-                count_Except = GlobalValues().getkey('Except_count')
+                count_Except = cct.GlobalValues().getkey('Except_count')
                 if count_Except is not None and count_Except > 3:
                     raise KeyboardInterrupt("Stop Time")
                 # cct.sleep(0.5)

@@ -123,8 +123,8 @@ if __name__ == "__main__":
         log.info("duaration: %s duration_date:%s" %
                  (cct.get_today_duration(du_date), duration_date))
     
-    st_key_sort = '4'
-    # st_key_sort = 'x 1.1'
+    # st_key_sort = '4'
+    st_key_sort = 'x 1.1'
     # st_key_sort = '3 1'
     # st_key_sort = '8'
     resample = 'd'
@@ -256,7 +256,7 @@ if __name__ == "__main__":
                     # if cct.get_now_time_int() > 1030 and cct.get_now_time_int() < 1400:
                     #     top_all = top_all[(top_all.volume > ct.VolumeMinR) & (
                     #         top_all.volume < ct.VolumeMaxR)]
-
+                    
                 if st_key_sort.split()[0] in ['4','9'] and 915 < cct.get_now_time_int() < 930:
                 # if  915 < cct.get_now_time_int() < 930:
                     top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
