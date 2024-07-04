@@ -217,12 +217,25 @@ def setCut(str):
 def key_copy():
     # win32api.keybd_event(VK_CODE["esc"], 0, 0, 0)
     # time.sleep(0.01)
+    #old copy and new copy for win
+    # Well the old copy and paste bindings might help depending on your keyboard layout:
+    # cut: Ctrl+X or Shift+Delete
+    # copy: Ctrl+C or Ctrl+Insert
+    # paste: Ctrl+V or Shift+Insert
+
+    win32api.keybd_event(VK_CODE["ctrl"], 0, 0, 0)
+    time.sleep(0.01)
+    win32api.keybd_event(VK_CODE["ins"], 0, 0, 0)
+    win32api.keybd_event(VK_CODE["ins"], 0, win32con.KEYEVENTF_KEYUP, 0)
+    win32api.keybd_event(VK_CODE["ctrl"], 0, win32con.KEYEVENTF_KEYUP, 0)
+    
+    '''
     win32api.keybd_event(VK_CODE["ctrl"], 0, 0, 0)
     time.sleep(0.01)
     win32api.keybd_event(VK_CODE["c"], 0, 0, 0)
     win32api.keybd_event(VK_CODE["c"], 0, win32con.KEYEVENTF_KEYUP, 0)
     win32api.keybd_event(VK_CODE["ctrl"], 0, win32con.KEYEVENTF_KEYUP, 0)
- 
+    '''
  
 # ctrl+v
 def key_paste():
@@ -252,13 +265,31 @@ def ctrl_alt_a():
     win32api.keybd_event(VK_CODE["alt"], 0, win32con.KEYEVENTF_KEYUP, 0)
     win32api.keybd_event(VK_CODE["ctrl"], 0, win32con.KEYEVENTF_KEYUP, 0)
  
- 
+# import pyperclip
+
+# def get_selected_text():
+#     # 等待用户选中文本
+#     print("请选中文本...")
+#     selected_text = pyperclip.waitForNewPaste()
+
+#     # 将选中的文本复制到剪贴板
+#     pyperclip.copy(selected_text)
+#     print("已复制到剪贴板：", selected_text)
+#     return selected_text
+
+import win32gui
+
+def get_selected_text():
+    hwnd = win32gui.GetForegroundWindow()
+    #获取当前windowTextTitile
+    print(win32gui.GetWindowText(hwnd))
  
 if __name__ == "__main__":
     import time
-    time.sleep(10)
     # mouse_click(849, 425)
     # # str = 'hello'
     # # key_input(str)
     # mouse_click(707, 131)
-    key_copy()
+    time.sleep(5)
+    # key_copy()
+    get_selected_text()

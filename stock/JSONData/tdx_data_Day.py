@@ -995,15 +995,16 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
 
     
     # df['lastdu4'] = round(max(df.high4[-1],df.max5[-1],df.hmax[-1],df.upper[-1])/(df['low4'][-1]),2)
-    df['lastdu4'] = round((df.high4[-1])/(df['low4'][-1]),2)
-    # df['lmin'] = df.low[-tdx_max_int:max_int_end].min()
-    df['lmin'] = df.low[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
-    df['min5'] = df.low[-6:-1].min()
-    df['cmean'] = round(df.close[-10:-ct.tdx_high_da].mean(), 2)
-    df['hv'] = df.vol[-tdx_max_int:-ct.tdx_high_da].max()
-    df['lv'] = df.vol[-tdx_max_int:-ct.tdx_high_da].min()
-    df = df.fillna(0)
-    df = df.sort_index(ascending=False)
+    if len(df) > 10:
+        df['lastdu4'] = round((df.high4[-1])/(df['low4'][-1]),2)
+        # df['lmin'] = df.low[-tdx_max_int:max_int_end].min()
+        df['lmin'] = df.low[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
+        df['min5'] = df.low[-6:-1].min()
+        df['cmean'] = round(df.close[-10:-ct.tdx_high_da].mean(), 2)
+        df['hv'] = df.vol[-tdx_max_int:-ct.tdx_high_da].max()
+        df['lv'] = df.vol[-tdx_max_int:-ct.tdx_high_da].min()
+        df = df.fillna(0)
+        df = df.sort_index(ascending=False)
     # if len(df) > 5:
     #     df['hvdu'] = df.vol.tolist().index(df.hv[-1])+1
     #     df['hvhigh'] = df.high.tolist()[df.hvdu.values[0]-1]
@@ -1755,7 +1756,8 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f'):
         return None
 
     if not os.path.exists(file_path) and len(df) > 0:
-        fo = open(file_path, "w+")
+        # fo = open(file_path, "w+")
+        fo = open(file_path, "wb+")
 #        return False
     else:
         fo = open(file_path, "rb+")
@@ -1847,6 +1849,9 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f'):
 #            b.write(wdata_list[x])
 #            x += 1
 # fo.write(b.getvalue())
+
+        # import ipdb;ipdb.set_trace() 
+        #rb+ wb+ byte bug
         fo.writelines(wdata_list)
         fo.close()
         log.info("write_done:%0.3f" % (time.time() - w_t))
@@ -5244,6 +5249,7 @@ if __name__ == '__main__':
     code = '002460'
     code = '002620'
     code = '000017'
+    # code = '600890'
     # code = '002865'
 
     '''
@@ -5283,9 +5289,12 @@ if __name__ == '__main__':
 
     # df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='w')
     # df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='3d')
-    df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='d')
-    print(df.loc[:,df.columns[df.columns.str.contains('perc')]][:1].T)
+
+    df = get_tdx_Exp_day_to_df(code,dl=60, start='20230925',end=None, newdays=0, resample='d')
+    print(df)
+    # print(df.loc[:,df.columns[df.columns.str.contains('perc')]][:1].T)
     # df[(df.close > df.upper) & (df.upper > 0) ]
+    import ipdb;ipdb.set_trace()
 
     # df = get_tdx_Exp_day_to_df(code,dl=60, end='2023-10-13', newdays=0, resample='d')
     df2 = get_tdx_append_now_df_api_tofile(code)
@@ -5443,6 +5452,7 @@ if __name__ == '__main__':
         # Write_sina_to_tdx(tdx_index_code_list, index=True,dl=900)
         # Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=900)
         # Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=300)
+
 
     hdf5_wri = cct.cct_raw_input("Multi-300 write all Tdx data to Multi hdf_300[rw|y|n]:")
     if hdf5_wri == 'rw':

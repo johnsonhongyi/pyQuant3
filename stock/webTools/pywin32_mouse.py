@@ -174,19 +174,34 @@ VK_CODE = {
 
 def key_esc():
     win32api.keybd_event(VK_CODE["esc"], 0, 0, 0)
-    time.sleep(0.02)
+    time.sleep(0.01)
     win32api.keybd_event(VK_CODE["esc"], 0, win32con.KEYEVENTF_KEYUP, 0)
     # win32api.keybd_event(VK_CODE['spacebar'], 0,0,0)
     # win32api.keybd_event(VK_CODE['spacebar'],0 ,win32con.KEYEVENTF_KEYUP ,0)
 
 # ctrl+c
 def key_copy():
+
+    #old copy and new copy for win
+    # Well the old copy and paste bindings might help depending on your keyboard layout:
+    # cut: Ctrl+X or Shift+Delete
+    # copy: Ctrl+C or Ctrl+Insert
+    # paste: Ctrl+V or Shift+Insert
+
+    win32api.keybd_event(VK_CODE["ctrl"], 0, 0, 0)
+    time.sleep(0.01)
+    win32api.keybd_event(VK_CODE["ins"], 0, 0, 0)
+    win32api.keybd_event(VK_CODE["ins"], 0, win32con.KEYEVENTF_KEYUP, 0)
+    win32api.keybd_event(VK_CODE["ctrl"], 0, win32con.KEYEVENTF_KEYUP, 0)
+
+    '''
     win32api.keybd_event(VK_CODE["ctrl"], 0, 0, 0)
     time.sleep(0.01)
     win32api.keybd_event(VK_CODE["c"], 0, 0, 0)
     win32api.keybd_event(VK_CODE["c"], 0, win32con.KEYEVENTF_KEYUP, 0)
     win32api.keybd_event(VK_CODE["ctrl"], 0, win32con.KEYEVENTF_KEYUP, 0)
-
+    '''
+    
 # def get_content():
 #     content = pyperclip.paste()
 #     print("content:",content)

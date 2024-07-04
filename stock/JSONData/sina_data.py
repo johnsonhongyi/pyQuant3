@@ -559,6 +559,13 @@ class Sina:
         time_use=round((time.time()-time_s),1)
         if time_use > 2:
             print("lastb:%s"%(time_use), end=' ')
+
+        if 'lastbuy' in h5:
+            if h5.lastbuy[-1] < 0:
+                if h5.nclose[-1] > 0:
+                    h5.lastbuy = h5.nclose
+                else:
+                    h5.lastbuy = h5.close
         return h5
 
     def set_stock_codes_index_init(self, code, index=False):

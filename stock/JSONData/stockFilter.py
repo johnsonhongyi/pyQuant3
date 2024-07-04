@@ -441,9 +441,12 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
             elif market_key in ['x2','4','8','5','1','7','9'] and market_value not in ['1']:
                 # market_value= int(market_value)
                 # filter percd > idx
+
                 idx_k = int(float(market_value))
                 if market_key not in ['1','5','7']:
                     df= df[ (df[("%s" % (sort_value))] <= idx_k) ]
+                    if market_value == '10' and market_key in ['4']:
+                        df = df[df.percent < 8 ]
                 else:
                     df= df[ (df[("%s" % (sort_value))] >= idx_k) ]
 

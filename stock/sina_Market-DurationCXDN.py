@@ -151,7 +151,7 @@ if __name__ == "__main__":
     # st_key_sort = '7'
     # st_key_sort = ct.sort_value_key_perd23
     # st_key_sort = '3 1'
-    st_key_sort = '4'
+    st_key_sort = '4 10'
     # st_key_sort = '2 2'
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort)
     st = None
@@ -268,7 +268,7 @@ if __name__ == "__main__":
 
                 if cct.get_now_time_int() > 915:
                     top_dif = top_dif[top_dif.buy > 0]
-
+                    
                 if st_key_sort.split()[0] == '4' and 926 < cct.get_now_time_int() < 1455 and 'lastbuy' in top_dif.columns:
                     top_dif['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
                                           top_dif['buy'].values, top_dif['lastbuy'].values)))
@@ -389,6 +389,7 @@ if __name__ == "__main__":
                     # top_end = stf.getBollFilter(df=top_end, boll=ct.bollFilter,duration=ct.PowerCountdl,filter=False)
                     
                     #query filter
+
                     if cct.get_now_time_int() > 915:
                         if len(top_temp[:2].query('close == lastp1d')) > 0:
                             top_temp = top_temp.query('low > lastl2d and close > ma5d and low <= ma5d and ((lastp2d >= ma202d) and (lastp3d >= ma203d) and (lastp4d >=ma204d)) and ( (lasth2d >= lasth3d ) and  (lasth3d >= lasth4d ) and  (lasth4d >=lasth5d) ) ')
@@ -397,7 +398,7 @@ if __name__ == "__main__":
                                 top_temp = top_temp.query('low > lastl1d and close > ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
                                 
                             else:
-                                if 'nclose' in top_temp.columns:
+                                if 'nlow' in top_temp.columns:
                                     top_nlow = top_temp.query('nlow == 0')
                                     top_nlow['nlow']=top_temp.open*0.995
                                     top_temp = cct.combine_dataFrame(top_temp,top_nlow)
@@ -409,11 +410,16 @@ if __name__ == "__main__":
                                     # top_temp.query('close > lastp1d and close >=nclose and (low > lasth1d or (nclose >= open and open >= nlow and high >= nhigh  and volume > 1.5))')
                                     # top_temp.query('(nhigh > lasth1d or (lastp1d < lastp2d and lastp2d < lastp3d) ) and close > lastp1d  and close > high4 and close >=nclose and (low > lasth1d or (nclose >= open and open >= nlow and high >= nhigh  and volume > 1.5))')
 
-                                    top_temp = top_temp.query('close > lastp1d and close > lastp1d   and close >=nclose and (low > lasth1d or (nclose >= open and open >= nlow and high >= nhigh  and volume > 1.5))')
+                                    #240305 
+                                    top_temp = top_temp.query('close > ma20d and low <= ma20d and close > lastp1d and high > lasth2d  and open == nlow and low >=nlow or( open == low and close > nclose)')
+
+                                    #top_temp = top_temp.query('close > lastp1d and close > lastp1d   and close >=nclose and (low > lasth1d or (nclose >= open and open >= nlow and high >= nhigh  and volume > 1.5))')
                                     # top_temp = top_temp.query('high > lasth1d and close > lastp1d   and close >=nclose and (low > lasth1d or (nclose >= open and open >= nlow and high >= nhigh  and volume > 1.5))')
                                     # top_temp = top_temp.query('(low >= lastp1d and close > ma5d or (nclose > open and close >nclose) )   and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
                                 else:
-                                    top_temp = top_temp.query('close > lastl1d and nlow = low and close > ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
+                                    
+                                    top_temp = top_temp.query('close > ma20d and low <= ma20d and close > lastp1d and high > lasth2d  and open == nlow and low >=nlow or( open == low and close >= high*0.99 and close > open)')
+                                    #top_temp = top_temp.query('close > lastl1d and close > ma20d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
 
                                 # top_temp = top_temp.query('low > lastl1d and close > ma5d and low <= ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
                     print("Rt:%0.1f dT:%s N:%s T:%s %s%% nh:%s nlow:%s" % (float(time.time() - time_Rt), cct.get_time_to_date(time_s), cct.get_now_time(), len(top_temp), round(len(top_temp) / float(ct.PowerCount) * 100, 1),len(nhigh),len(nlow)))

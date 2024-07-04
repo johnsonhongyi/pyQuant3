@@ -28,7 +28,16 @@ import win32gui
 # https://stackoverflow.com/questions/101128/how-do-i-read-text-from-the-windows-clipboard-in-python
 
 
-
+def isDigit(x):
+    #re def isdigit()
+    try:
+        if str(x) == 'nan' or x is None:
+            return False
+        else:
+            float(x)
+            return True
+    except ValueError:
+        return False
 
 
 def broadcast_stock_code(stock_code,message_type='stock'):
@@ -137,6 +146,8 @@ async def get_clipboard_contents():
         await asyncio.sleep(0.5)
         content = pyperclip.paste()
         content = content.strip()
+        if not isDigit(content):
+            continue
         nowTime = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
 
         cur = {
@@ -161,6 +172,7 @@ async def get_clipboard_contents():
 
                 else:
                     continue
+
         else:
             continue
 
@@ -171,4 +183,5 @@ async def get_clipboard_contents():
 
 if __name__ == '__main__':
     # 让同花顺切换到股票代码
-    search_ths_data('000006')
+    # search_ths_data('000006')
+    pass

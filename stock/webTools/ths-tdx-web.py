@@ -4,6 +4,7 @@ from pywebio.output import *
 from pywebio.session import set_env
 from functools import partial
 from copy_tools import *
+from findSetWindowPos import find_proc_windows
 import asyncio
 import pyperclip
 
@@ -14,6 +15,8 @@ from ths_link import send_code_message
 import time
 import pandas as pd
 import sys
+
+
 sys.path.append("..")
 # from JSONData import tdx_data_Day as tdd
 # from JohnsonUtil import LoggerFactory as LoggerFactory
@@ -52,25 +55,25 @@ def search_ths_data(code):
         result = '未找到'
     return cname,result
 
-def broadcast_stock_code(stock_code,message_type='stock'):
-    if isinstance(stock_code, dict):
-        stock_code = stock_code['content']
-        stock_code = stock_code.strip()
-    if len(stock_code) == 6:
-        if str(message_type) == 'stock':
-            if str(stock_code)[0] in ('0','3'):
-                codex = '6' + str(stock_code)
-            elif str(stock_code)[0] == '6':
-                codex = '7' + str(stock_code)
-            else:
-                code = '4' + str(stock_code)
-        else:
-            codex = int(stock_code)
-        UWM_STOCK = win32api.RegisterWindowMessage('stock')
-        print(win32con.HWND_BROADCAST,UWM_STOCK,int(codex))
-        #系统广播
-        win32gui.PostMessage( win32con.HWND_BROADCAST,UWM_STOCK,int(codex),0)
-        send_code_message(stock_code)
+# def broadcast_stock_code(stock_code,message_type='stock'):
+#     if isinstance(stock_code, dict):
+#         stock_code = stock_code['content']
+#         stock_code = stock_code.strip()
+#     if len(stock_code) == 6:
+#         if str(message_type) == 'stock':
+#             if str(stock_code)[0] in ('0','3'):
+#                 codex = '6' + str(stock_code)
+#             elif str(stock_code)[0] == '6':
+#                 codex = '7' + str(stock_code)
+#             else:
+#                 code = '4' + str(stock_code)
+#         else:
+#             codex = int(stock_code)
+#         UWM_STOCK = win32api.RegisterWindowMessage('stock')
+#         print(win32con.HWND_BROADCAST,UWM_STOCK,int(codex))
+#         #系统广播
+#         win32gui.PostMessage( win32con.HWND_BROADCAST,UWM_STOCK,int(codex),0)
+#         send_code_message(stock_code)
 # broadcast_stock_code('399001')
 
 def edit_row(choice, row):
@@ -167,16 +170,26 @@ if __name__ == '__main__':
     import os
     # or open with iexplore
     # os.system('cmd /c start iexplore "http://127.0.0.1:8080/"')
-    os.system('cmd /c start D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
-    time.sleep(1)
-    os.system('cmd /c start D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
-    time.sleep(1)
-    os.system('cmd /c start D:\\MacTools\\WinTools\\new_tdx2\\tdxw.exe')
-    time.sleep(5)
-    os.system('cmd /c start python pywin32_mouse.py')
-    time.sleep(5)
-    os.system('cmd /c start python findSetWindowPos.py')
-    time.sleep(1)
+    
+    if not find_proc_windows('同花顺'):
+        os.system('cmd /c start D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
+        time.sleep(1)
+    if not find_proc_windows('东方财富'):
+        os.system('cmd /c start D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
+        time.sleep(1)
+    if not find_proc_windows('通达信'):
+        os.system('cmd /c start D:\\MacTools\\WinTools\\new_tdx2\\tdxw.exe')
+        time.sleep(5)
+    if not find_proc_windows('pywin32_mouse'):
+        os.system('start cmd /k python pywin32_mouse.py')
+        time.sleep(5)
+    if not find_proc_windows('findSetWindowPos'):
+        os.system('cmd /c start python findSetWindowPos.py')
+        time.sleep(2)
+    if not find_proc_windows('联动精灵',visible=False):
+        os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
+        time.sleep(3)
+    
     os.system('cmd /c start "" "http://127.0.0.1:8080/"')
 
     # cmd /c start /min  #cmd 最小化,程序窗口正常
@@ -188,5 +201,22 @@ if __name__ == '__main__':
     else:
         width, height = 80, 22
         cct.set_console(width, height)
+    # time.sleep(1)
+    # print(find_proc_windows('ths-tdx-web.py'))
+    status = find_proc_windows('ths-tdx-web')
+    try:
+        # status = find_proc_windows('ths-tdx-web')
 
-    start_server(main, port=8080, debug=False)
+        if len(status) == 0:
+            start_server(main, port=8080, debug=False)
+        else:
+            print("Find ths-tdx-web")
+    except Exception as e:
+        print(e)
+        # raise e
+    finally:
+        print("TryCatch:finally:")
+        if len(status) == 0:
+            start_server(main, port=8080, debug=False)
+        else:
+            print("ths-tdx-web Running")

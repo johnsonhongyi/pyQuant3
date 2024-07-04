@@ -859,10 +859,10 @@ if __name__ == '__main__':
     # get_roll_mean_all(single=True,tdx=True,app=True)
     # get_roll_mean_all(single=True,tdx=True,app=False)
     runruledict={'1':'追涨','2':'超跌反弹','3':'连阳新高','4':'连阳','5':'高开高走','6':'追涨High',}
-    runrule = cct.cct_raw_input("runrule:追涨/1,超跌反弹/2,连阳新高/3,连阳/4,高开高走/5,追涨High/6:[1/2/3/4(默认)/5/6]: ")
+    runrule = cct.cct_raw_input("runrule:追涨/1,超跌反弹/2,连阳新高/3,连阳/4,高开高走/5,追涨High/6:[1/2/3(默认)/4/5/6]: ")
 
     if runrule is None or len(runrule) == 0:
-        runrule = '4'
+        runrule = '3'
     print("runrule:%s"%(runruledict[runrule]))
     runDay = cct.cct_raw_input("runDay[Y/y]/[N/n]:")
     if runDay.lower() != 'n':
