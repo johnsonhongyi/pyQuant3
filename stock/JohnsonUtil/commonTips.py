@@ -4151,7 +4151,8 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
     close_du = 0
     vol_du = 0
     top_max_up = 10
-
+    if np.isnan(lastclose) or lastclose == 0:
+        return 0
     if np.isnan(lastclose):
         percent = round((close - open)/open*100,1)
         lastp = 0

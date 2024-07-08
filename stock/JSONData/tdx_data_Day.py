@@ -3900,8 +3900,9 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
 
 
                 volmean = dz.vol[:lvoldays].tolist()
-                volmean.remove(min(volmean))    
-                volmean.remove(max(volmean))    
+                if len(volmean) > 3:
+                    volmean.remove(min(volmean))    
+                    volmean.remove(max(volmean))    
                 # lastvol = dz.vol[:lvoldays].min()
                 lastvol = round(sum(volmean) / len(volmean),1)
 
@@ -5217,6 +5218,7 @@ if __name__ == '__main__':
     # code='002176' #江特电机
     code='601127'  #捷荣技术
     code='002620'  #捷荣技术
+    code='600240'  #捷荣技术
     # code='300290'  #捷荣技术
     # code='300826'  #测绘股份
     # code='002251'  #步步高
@@ -5248,7 +5250,7 @@ if __name__ == '__main__':
     code = '002786'
     code = '002460'
     code = '002620'
-    code = '000017'
+    code = '600240'
     # code = '600890'
     # code = '002865'
 
@@ -5290,7 +5292,8 @@ if __name__ == '__main__':
     # df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='w')
     # df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='3d')
 
-    df = get_tdx_Exp_day_to_df(code,dl=60, start='20230925',end=None, newdays=0, resample='d')
+    # df = get_tdx_Exp_day_to_df(code,dl=60, start='20230925',end=None, newdays=0, resample='d')
+    df = get_tdx_Exp_day_to_df(code,dl=60, start=None,end=None, newdays=0, resample='d')
     print(df)
     # print(df.loc[:,df.columns[df.columns.str.contains('perc')]][:1].T)
     # df[(df.close > df.upper) & (df.upper > 0) ]
@@ -5427,7 +5430,7 @@ if __name__ == '__main__':
 #    print write_tdx_tushare_to_file(code)
 
     while 1:
-        market = cct.cct_raw_input("Today check Duration Single write all TDXdata append [all,sh,sz,cyb,alla,q,n] :")
+        market = cct.cct_raw_input("1Day-Today check Duration Single write all TDXdata append [all,sh,sz,cyb,alla,q,n] :")
         if market != 'q' and market != 'n'  and len(market) != 0:
             if market in ['all', 'sh', 'sz', 'cyb', 'alla']:
                 if market != 'all':
@@ -5441,7 +5444,7 @@ if __name__ == '__main__':
         else:
             break
 
-    hdf5_wri_append = cct.cct_raw_input("Today No check Duration Single write Multi-300 append sina to Tdx data to Multi hdf_300[y|n]:")
+    hdf5_wri_append = cct.cct_raw_input("1Day-Today No check Duration Single write Multi-300 append sina to Tdx data to Multi hdf_300[y|n]:")
     if hdf5_wri_append == 'y':
         for inx in tdx_index_code_list:
             get_tdx_append_now_df_api_tofile(inx)
