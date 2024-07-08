@@ -66,8 +66,9 @@ cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\"
 python macRun.py
 
 cd webTools/
-rem start cmd /k python ths-tdx-web.py
+start cmd /k python ths-tdx-web.py
 cd ../
 rem pause
 rem start python LineHistogram.py
 TIMEOUT /T 100 /NOBREAK
+exit

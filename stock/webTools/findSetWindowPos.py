@@ -299,8 +299,16 @@ def list_find_windows(proc):
     return sorted(result)
     # return sorted(result)
 
-
-def set_proc_windows_position(proc,tdx_ths_position=tdx_ths_position1536):
+SW_Normal = 1
+SW_MAXIMIZE = 3
+SW_SHOWMINIMIZED = 2
+SW_MINIMIZE = 6
+SW_Restore = 9
+SW_Show = 5
+SW_HIDE = 0
+SW_SHOWMINNOACTIVE = 7
+# https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-showwindow
+def set_proc_windows_position(proc,tdx_ths_position=tdx_ths_position1536,SW_Positon=SW_Normal):
     '''Return a sorted list of visible windows.'''
     SW_Normal = 1
     SW_MAXIMIZE = 3
@@ -321,33 +329,45 @@ def set_proc_windows_position(proc,tdx_ths_position=tdx_ths_position1536):
             if len(title.value) > 0:
                 # print(title.value)
                 # left, right, top, bottom = get_pos(hWnd)
-
                 if isinstance(proc, list):
                     for tdx in proc:
                         # if title.value.find(tdx) >= 0:
                         if 10 > title.value.find(tdx) >= 0:
+
                             left, top, width, height = GetWindowRectFromName(hWnd)
                             if left < 0 and top < 0:
                                 # user32.ShowWindow(hWnd, SW_MAXIMIZE);
                                 time.sleep(0.1)
-                                user32.ShowWindow(hWnd, SW_Normal);
+                                # user32.ShowWindow(hWnd, SW_Normal);
+                                user32.ShowWindow(hWnd, SW_Positon);
                                 left, top, width, height = GetWindowRectFromName(hWnd)
                                 print(left, top, width, height)
 
                             if tdx in tdx_ths_position.keys():
                                 set_windows_hwnd_pos(hWnd,tdx_ths_position[tdx])
+
+                            # if SW_Positon != SW_Normal:
+                            #     user32.ShowWindow(hWnd, SW_Positon);
+
                 else:
                     if title.value.find(proc) >= 0:
+                        # print(title.value)
+
                         left, top, width, height = GetWindowRectFromName(hWnd)
+
                         if left < 0 and top < 0:
                             # user32.ShowWindow(hWnd, SW_MAXIMIZE);
                             time.sleep(0.1)
-                            user32.ShowWindow(hWnd, SW_Normal);
+                            user32.ShowWindow(hWnd, SW_Positon);
                             left, top, width, height = GetWindowRectFromName(hWnd)
                             print(left, top, width, height)
 
                         if proc in tdx_ths_position.keys():
                             set_windows_hwnd_pos(hWnd,tdx_ths_position[proc])
+
+                        if SW_Positon != SW_Normal:
+                            user32.ShowWindow(hWnd, SW_Positon);
+                            # ctypes.windll.user32.ShowWindow(hWnd, SW_Positon);
                     # print(title.value)
                         # left, top, width, height = GetWindowRectFromName(hWnd)
                         # if left < 0 and top < 0:
@@ -498,8 +518,16 @@ if __name__ == '__main__':
     print('\nWindows:')
     # print(*list_windows(all=False), sep='\n')
 
-    # result=find_proc_windows('联动精灵',visible=False)
-    # print(result)
+    result=find_proc_windows('联动精灵',visible=False)
+
+
+    print(result)
+
+    # import os
+    # os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
+
+    set_proc_windows_position('联动精灵',SW_Positon=SW_SHOWMINNOACTIVE)
+    set_proc_windows_position('联动精灵',SW_Positon=SW_HIDE)
 
     import sys
     sys.path.append("..")
@@ -556,5 +584,7 @@ if __name__ == '__main__':
     # set_proc_windows_position(sorted(proc_title,reverse=False),tdx_ths_position=positon)
 
     set_proc_windows_position(proc_title,tdx_ths_position=positon)
+
+
     # print(find_proc_windows('ths-tdx-web'))
 
