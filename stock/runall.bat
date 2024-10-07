@@ -18,10 +18,12 @@ for %%i in ("%TDX%") do (
 set indexdx=%%~zi
 )
 
-if %indexdx% LEQ  2048000 (
-  TIMEOUT /T 50 /NOBREAK
-)
+if "%indexdx%"=="" (set indexdx=2048)
 
+if not "%indexdx%"==""  if %indexdx% LEQ  2048000 (TIMEOUT /T 50 /NOBREAK)
+
+rem if not "%indexdx%"=="" (TIMEOUT /T 0 /NOBREAK) else (if %indexdx% LEQ  2048000 (TIMEOUT /T 50 /NOBREAK))
+rem if %indexdx% LEQ  2048000 (TIMEOUT /T 50 /NOBREAK)
 
 start cmd /k python instock_Monitor.py
 

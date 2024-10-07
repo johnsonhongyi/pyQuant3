@@ -642,6 +642,9 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     else:
         df = None
 
+    if dl is not None:
+        start = cct.last_tddate(dl)
+
     start = cct.day8_to_day10(start)
     end = cct.day8_to_day10(end)
     
@@ -955,8 +958,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     # df['hmax'] = df.high[-tdx_max_int:-ct.tdx_max_int_end].max()
     # df['hmax'] = df.close[:-ct.tdx_max_int_end].max()
     df = df.sort_index(ascending=True)
-
-    # df['max5'] = df.close[-10:-ct.tdx_high_da].max()
     perc_couts = df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:]
     if len(perc_couts) > 1:
         df['maxp'] = perc_couts.T[1:].values.max() 
@@ -5250,7 +5251,7 @@ if __name__ == '__main__':
     code = '002786'
     code = '002460'
     code = '002620'
-    code = '600240'
+    # code = '600240'
     # code = '600890'
     # code = '002865'
 
