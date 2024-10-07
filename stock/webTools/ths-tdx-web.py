@@ -278,7 +278,7 @@ if __name__ == '__main__':
     # print(find_proc_windows('ths-tdx-web.py'))
     try:
         # status = find_proc_windows('ths-tdx-web')
-        port_to_check = 1s080
+        port_to_check = 1080
         check_info, is_port_used = check_port_in_use(port_to_check)
         print(check_info)
         # print("端口是否使用:", is_port_used)
