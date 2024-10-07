@@ -216,8 +216,7 @@ def check_port_in_use(port):
     elif system == "Windows":
         local_ip = get_host_ip()
         print("system == Windows:%s"%(local_ip))
-        command = f"netstat -ano | findstr {local_ip}:{port}"
-
+        command = f'netstat -ano | findstr "{local_ip}:{port} 0.0.0.0:{port}"'
         output = subprocess.run(command, shell=True, capture_output=True, text=True)
         result = bool(output.stdout.strip())
         check_dict["Command_Line_netstat"] = result
@@ -279,12 +278,12 @@ if __name__ == '__main__':
     # print(find_proc_windows('ths-tdx-web.py'))
     try:
         # status = find_proc_windows('ths-tdx-web')
-        port_to_check = 8080
+        port_to_check = 1s080
         check_info, is_port_used = check_port_in_use(port_to_check)
         print(check_info)
         # print("端口是否使用:", is_port_used)
 
-        os.system('cmd /c start "" "http://127.0.0.1:8080/"')
+        os.system('cmd /c start "" "http://127.0.0.1:%s/"'%(port_to_check))
         # status = find_proc_windows('ths-tdx-web')
         # if len(status) == 0:
         if not is_port_used:

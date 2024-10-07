@@ -68,8 +68,8 @@ def add_data(new_data):
         old_data = json.load(f)
         if new_data['content'] not in [data['content'] for data in old_data]:
             old_data.insert(0, new_data)
-            if len(old_data) > 200:
-                old_data = old_data[:200]
+            if len(old_data) > 100:
+                old_data = old_data[:100]
             new_status = True
     if new_status:
         with open("history_data.json", "w", encoding="utf-8") as f:
