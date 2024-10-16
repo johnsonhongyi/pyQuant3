@@ -70,6 +70,10 @@ python macRun.py
 cd webTools/
 start cmd /k python ths-tdx-web.py
 cd ../
+
+rem C:
+rem cd "C:\Users\Johnson\Documents\TDX\55188\"
+rem start  "人气共振2.2.exe"
 rem pause
 rem start python LineHistogram.py
 TIMEOUT /T 100 /NOBREAK

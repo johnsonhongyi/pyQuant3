@@ -2171,8 +2171,10 @@ def to_mp_run_tqdm_err(cmd, urllist,*args,**kwargs):
 
     # pool = ThreadPool(2)
     # pool = ThreadPool(4)
-    print(cpu_count())
-    pool = ThreadPool(processes=6)
+    cpu_used = int(cpu_count()/2)
+    print(cpu_count(),cpu_use)
+
+    pool = ThreadPool(processes=cpu_used)
     # for code in codes:
     #     results=pool.apply_async(sl.get_multiday_ave_compare_silent_noreal,(code,60))
 
@@ -2287,8 +2289,9 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
             cpu_co = 1
         else:
             cpu_co = int(round(len(urllist)/100,0))
-
-        pool_count = (cpu_count()-2) if cpu_co > (cpu_count()-2) else cpu_co
+        cpu_used = int(cpu_count()/2)
+        pool_count = (cpu_used) if cpu_co > (cpu_used) else cpu_co
+        # pool_count = (cpu_count()-2) if cpu_co > (cpu_count()-2) else cpu_co
         if  cpu_co > 1 and 1300 < get_now_time_int() < 1500:
             pool_count = int(cpu_count() / 2)
         if len(kwargs) > 0 :
