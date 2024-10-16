@@ -12,15 +12,15 @@ from mouseMonitor.displayDetction import  Display_Detection
 #hide 'ths-tdx-web.py': '-32000,-32000,199,34','pywin32_mouse.py': '-32000,-32000,199,34'
 #triton 1.25 dpi
 # tdx_ths_position1536={'通达信': '659,72,878,793','东方财富': '268,0,1067,833','同花顺': '0,20,1075,864','Firefox': '100,67,629,779'}
-tdx_ths_position1536={'通达信': '449,40,1064,793','东方财富': '274,0,1067,833','同花顺': '54,92,1074,772','Firefox': '78,72,706,797','sina_Market-DurationDn.py': '-6,432,1326,423','sina_Market-DurationCXDN.py': '10,313,1329,438','sina_Market-DurationUP.py': '243,432,1323,438','sina_Monitor-Market-LH.py': '264,306,1307,407','sina_Monitor.py': '137,28,1319,520','singleAnalyseUtil.py': '647,0,895,358','LinePower.py': '26,150,761,407','instock_Monitor.py': '74,54,1319,439','chantdxpower.py': '33,115,649,407','ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '-25600,-25600,59,51'}
+tdx_ths_position1536={'人气综合排行榜2.2':'168,0,477,753','通达信': '449,40,1064,793','东方财富': '274,0,1067,833','同花顺': '54,92,1074,772','Firefox': '78,72,706,797','sina_Market-DurationDn.py': '-6,432,1326,423','sina_Market-DurationCXDN.py': '10,313,1329,438','sina_Market-DurationUP.py': '243,432,1323,438','sina_Monitor-Market-LH.py': '264,306,1307,407','sina_Monitor.py': '137,28,1319,520','singleAnalyseUtil.py': '647,0,895,358','LinePower.py': '26,150,761,407','instock_Monitor.py': '74,54,1319,439','chantdxpower.py': '33,115,649,407','ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '-25600,-25600,59,51'}
 
 # tdx_ths_position1920={'通达信': '787,214,1104,835','东方财富': '418,138,1142,885','同花顺': '22,184,1075,864','Firefox': '45,156,706,797','sina_Market-DurationDn.py': '-7,664,1305,423','sina_Market-DurationCXDN.py': '-7,326,1329,423','sina_Market-DurationUP.py': '606,664,1321,423','sina_Monitor-Market-LH.py': '662,318,1307,409','sina_Monitor.py': '109,20,1313,519','singleAnalyseUtil.py': '1001,0,897,359','LinePower.py': '29,103,761,407','instock_Monitor.py': '70,79,1313,391','chantdxpower.py': '-7,129,649,407','ths-tdx-web.py': '70,200,153,39','pywin32_mouse.py': '70,200,153,39'}
-tdx_ths_position1920={'通达信': '787,214,1104,835','东方财富': '418,138,1142,885','同花顺': '22,184,1075,864','Firefox': '45,156,706,797','sina_Market-DurationDn.py': '-7,664,1332,423','sina_Market-DurationCXDN.py': '-7,326,1329,423','sina_Market-DurationUP.py': '606,664,1321,423','sina_Monitor-Market-LH.py': '662,318,1307,409','sina_Monitor.py': '109,20,1313,519','singleAnalyseUtil.py': '1001,0,897,359','LinePower.py': '29,103,761,407','instock_Monitor.py': '70,79,1313,391','chantdxpower.py': '-7,129,649,407','ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '-32000,-32000,59,51'}
+tdx_ths_position1920={'人气综合排行榜2.2':'168,0,477,753','通达信': '787,214,1104,835','东方财富': '418,138,1142,885','同花顺': '22,184,1075,864','Firefox': '45,156,706,797','sina_Market-DurationDn.py': '-7,664,1332,423','sina_Market-DurationCXDN.py': '-7,326,1329,423','sina_Market-DurationUP.py': '606,664,1321,423','sina_Monitor-Market-LH.py': '662,318,1307,409','sina_Monitor.py': '109,20,1313,519','singleAnalyseUtil.py': '1001,0,897,359','LinePower.py': '29,103,761,407','instock_Monitor.py': '70,79,1313,391','chantdxpower.py': '-7,129,649,407','ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '-32000,-32000,59,51'}
 
 
 
 # tdx_ths_positionDouble={'通达信': '-1334,37,878,828','东方财富': '21,249,1067,833','同花顺': '825,216,1075,864','Firefox': '-1925,37,602,831','sina_Market-DurationDn.py': '-1902,226,1306,438','sina_Market-DurationCXDN.py': '-1871,90,1329,438','sina_Market-DurationUP.py': '-1818,411,1323,438','sina_Monitor-Market-LH.py': '576,680,1307,407','sina_Monitor.py': '136,25,1321,519','singleAnalyseUtil.py': '949,0,897,359','LinePower.py': '55,233,761,407','instock_Monitor.py': '78,108,1319,439','chantdxpower.py': '108,232,649,407','ths-tdx-web.py': '88,250,313,199','pywin32_mouse.py': '88,250,217,151'}
-tdx_ths_positionDouble={'通达信': '-1502,37,1094,828','东方财富': '21,249,1067,833','同花顺': '825,216,1075,864','Firefox': '-1870,67,602,801','sina_Market-DurationDn.py': '-1926,222,1326,438','sina_Market-DurationCXDN.py': '-1897,122,1329,438','sina_Market-DurationUP.py': '-1701,432,1323,438','sina_Monitor-Market-LH.py': '576,680,1307,407','sina_Monitor.py': '150,27,1324,519','singleAnalyseUtil.py': '949,0,897,359','LinePower.py': '16,176,761,402','instock_Monitor.py': '97,83,1319,439','chantdxpower.py': '43,138,649,407','ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '-32000,-32000,59,51'}
+tdx_ths_positionDouble={'人气综合排行榜2.2':'168,0,477,753','通达信': '-1502,37,1094,828','东方财富': '21,249,1067,833','同花顺': '825,216,1075,864','Firefox': '-1870,67,602,801','sina_Market-DurationDn.py': '-1926,222,1326,438','sina_Market-DurationCXDN.py': '-1897,122,1329,438','sina_Market-DurationUP.py': '-1701,432,1323,438','sina_Monitor-Market-LH.py': '576,680,1307,407','sina_Monitor.py': '150,27,1324,519','singleAnalyseUtil.py': '949,0,897,359','LinePower.py': '16,176,761,402','instock_Monitor.py': '97,83,1319,439','chantdxpower.py': '43,138,649,407','ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '-32000,-32000,59,51'}
 
 # tdx_ths_position={'通达信': '-1334,72,878,793','东方财富': '21,249,1067,833','同花顺': '-1553,19,1075,864','Firefox': '-1910,5,602,864','sina_Market-DurationDn.py': '-1902,226,1306,438','sina_Market-DurationCXDN.py': '-1871,90,1329,438','sina_Market-DurationUP.py': '-1818,411,1323,438','sina_Monitor-Market-LH.py': '576,680,1307,407','sina_Monitor.py': '136,25,1321,519','singleAnalyseUtil.py': '949,0,897,359','LinePower.py': '55,233,761,407','instock_Monitor.py': '78,108,1319,439','chantdxpower.py': '108,232,649,407','ths-tdx-web.py': '88,250,313,199','pywin32_mouse.py': '88,250,217,151'}
 
@@ -215,7 +215,7 @@ def get_pos_dwmapi(hwnd):
     return rect.left, rect.right, rect.top, rect.bottom
 
 
-def find_proc_windows(proc,visible=True):
+def find_proc_windows(proc,visible=True,fuzzysearch=True):
     '''Return a sorted list of visible windows.'''
     SW_Normal = 1
     SW_MAXIMIZE = 3
@@ -236,8 +236,9 @@ def find_proc_windows(proc,visible=True):
                 if (length == 1):return True
                 title = ctypes.create_unicode_buffer(length)
                 user32.GetWindowTextW(hWnd, title, length)
-                if len(title.value) > 0:
+                if len(title.value) > 0 and (fuzzysearch == True or len(title.value) == len(proc)):
                     if 10 > title.value.find(proc) >= 0:
+
                         result.append(title.value)
         else:
             if user32.IsIconic(hWnd):return True;
@@ -252,6 +253,7 @@ def find_proc_windows(proc,visible=True):
             # if user32.IsIconic(hWnd):print("IsIconic:",title.value);
             if len(title.value) > 0:
                 if title.value.find(proc) >= 0:
+
                     result.append(title.value)
 
         return True
@@ -517,6 +519,9 @@ if __name__ == '__main__':
     # print(*list_pids(), sep='\n')
     print('\nWindows:')
     # print(*list_windows(all=False), sep='\n')
+    # title = '人气综合排行榜2.2'
+    # result=find_proc_windows(title,fuzzysearch=False)
+    # FindWindowRectFromName(title)
 
     result=find_proc_windows('联动精灵',visible=False)
 
@@ -552,6 +557,7 @@ if __name__ == '__main__':
         print("displaySet:%s %s"%(displaySet[0],displaySet[1][0]))
 
         tdx_ths_position_eval = 'tdx_ths_position%s'%(displayMainRes)
+        
         print("positon:%s"%(tdx_ths_position_eval))
         positon = eval(tdx_ths_position_eval)
         proc_title =  [proc for proc in positon.keys()]

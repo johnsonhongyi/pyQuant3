@@ -1,3 +1,4 @@
+# -*- coding:utf-8 -*-
 from pywebio import start_server
 
 from pywebio.output import *
@@ -216,10 +217,12 @@ def check_port_in_use(port):
     elif system == "Windows":
         local_ip = get_host_ip()
         print("system == Windows:%s"%(local_ip))
-        command = f'netstat -ano | findstr "{local_ip}:{port} 0.0.0.0:{port}"'
+        # command = f'netstat -ano | findstr "{local_ip}:{port} 0.0.0.0:{port}"'
+        command = f'netstat -ano | findstr "0.0.0.0:{port}"'
         output = subprocess.run(command, shell=True, capture_output=True, text=True)
         result = bool(output.stdout.strip())
         check_dict["Command_Line_netstat"] = result
+        print("command:%s"%(command))
         is_port_in_use |= result  # 如果netstat检查结果显示端口被占用，更新标志位
     else:
         print("system == None")
@@ -240,14 +243,18 @@ if __name__ == '__main__':
     import os
     # or open with iexplore
     # os.system('cmd /c start iexplore "http://127.0.0.1:8080/"')
-    
+
+    if not find_proc_windows('人气综合排行榜2.2',fuzzysearch=False):
+        os.system('cmd /c start C:\\Users\\Johnson\\Documents\\TDX\\55188\\人气共振2.2.exe')
+        time.sleep(1)
     if not find_proc_windows('同花顺'):
         os.system('cmd /c start D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
         time.sleep(1)
     if not find_proc_windows('东方财富'):
         os.system('cmd /c start D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
         time.sleep(1)
-    if not find_proc_windows('通达信'):
+
+    if not find_proc_windows('通达信',fuzzysearch=True):
         os.system('cmd /c start D:\\MacTools\\WinTools\\new_tdx2\\tdxw.exe')
         time.sleep(5)
     if not find_proc_windows('pywin32_mouse'):
@@ -276,28 +283,32 @@ if __name__ == '__main__':
         cct.set_console(width, height)
     # time.sleep(1)
     # print(find_proc_windows('ths-tdx-web.py'))
-    try:
-        # status = find_proc_windows('ths-tdx-web')
-        port_to_check = 1080
-        check_info, is_port_used = check_port_in_use(port_to_check)
-        print(check_info)
-        # print("端口是否使用:", is_port_used)
+    while 1:
+        try:
+            # status = find_proc_windows('ths-tdx-web')
+            port_to_check = 1080
+            check_info, is_port_used = check_port_in_use(port_to_check)
+            print(check_info)
+            # print("端口是否使用:", is_port_used)
 
-        os.system('cmd /c start "" "http://127.0.0.1:%s/"'%(port_to_check))
-        # status = find_proc_windows('ths-tdx-web')
-        # if len(status) == 0:
-        if not is_port_used:
-            start_server(main, port=port_to_check, debug=False)
-        else:
-            print("Find ths-tdx-web")
-    except Exception as e:
-        print(e)
-        # raise e
-    finally:
-        print("TryCatch:finally:")
-        check_info, is_port_used = check_port_in_use(port_to_check)
+            # status = find_proc_windows('ths-tdx-web')
+            # if len(status) == 0:
+            if not is_port_used:
+                os.system('cmd /c start "" "http://127.0.0.1:%s/"'%(port_to_check))
+                start_server(main, port=port_to_check, debug=False)
+            else:
+                print("Find ths-tdx-web no run start_server")
+                time.sleep(30)
+        except Exception as e:
+            print(e)
+            # raise e
+        # finally:
+        #     print("TryCatch:finally:")
+        #     check_info, is_port_used = check_port_in_use(port_to_check)
 
-        if not is_port_used:
-            start_server(main, port=port_to_check, debug=False)
-        else:
-            print("ths-tdx-web already Running and Done")
+        #     if not is_port_used:
+        #         os.system('cmd /c start "" "http://127.0.0.1:%s/"'%(port_to_check))
+        #         start_server(main, port=port_to_check, debug=False)
+        #     else:
+        #         print("ths-tdx-web already Running and Done")
+        #         time.sleep(30)
