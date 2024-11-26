@@ -127,9 +127,8 @@ if __name__ == "__main__":
     duration_date = int(ct.duration_date_l)
     # duration_date = 30
     du_date = duration_date
-    # resample = ct.resample_dtype
-    resample = 'd'
-    newdays = 0
+    resample = ct.resample_dtype
+    # newdays = 0
     # print cct.last_tddate(2)
     # end_date = cct.last_tddate(days=ct.lastdays)
     end_date = None
@@ -370,7 +369,7 @@ if __name__ == "__main__":
 
                     cct.set_console(width, height,
                                     title=[du_date, 'dT:%s' % cct.get_time_to_date(time_s), 'G:%s' % goldstock,
-                                           'zxg: %s' % (blkname+'-'+market_blk)])
+                                           'zxg: %s' % (blkname+'-'+market_blk+' resample:'+resample)])
                     # print len(top_all),top_all.shape
                     top_all = tdd.get_powerdf_to_all(top_all, top_temp)
                     top_all = tdd.get_powerdf_to_all(top_all, top_end)

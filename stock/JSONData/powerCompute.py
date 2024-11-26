@@ -1371,12 +1371,18 @@ def powerCompute_mp(code,df=None,dm=None,dtype='d',statuslist=True,index=False,e
     # else:
     #     wencai_drop.append(code)
     #     log.warn("code not in wcdf:%s" % (code))
+    tdx_df, opmacd = getab.Get_MACD_OP(tdx_df, dtype='d',lastday=days)
+    dd['macd'] = opmacd
 
     return dd
 
 
 def powerCompute_df(df, dtype='d', end=None, dl=ct.PowerCountdl, filter='y', talib=False, newdays=None, days=0,index=False):
     if not index :
+        # df, opmacd = getab.Get_MACD_OP(df, dtype='d',lastday=days)
+        # df = getab.Get_MACD(df)
+        # df['macd'] = opmacd
+        # df[[ 'diff%s' % dtype,'ddea%s' % dtype, 'dea%s' % dtype]]
         return df
     ts = time.time()
     if isinstance(df, list):
@@ -1397,7 +1403,7 @@ def powerCompute_df(df, dtype='d', end=None, dl=ct.PowerCountdl, filter='y', tal
                      # 'boll', 'rah', 'df2','fib', 'fibl', 'macd', 'vstd', 'oph', 'lvolume']
     # [['ma' ,'rsi' ,'kdj' ,'boll', 'ra','rah', 'df2b' ,'fibl','fib' ,'macd' ,'oph']]
     # [['ma' ,'rsi' ,'kdj' ,'boll', 'ra',rah', 'df2b' ,'fibl','fib' ,'macd' ,'vstd', 'oph']]
-
+    
     h5 = h5a.load_hdf_db(h5_fname, h5_table, code_l=code_l, limit_time=ct.h5_power_limit_time)
 
     if not index and h5 is not None :
@@ -1495,7 +1501,6 @@ def powerCompute_df(df, dtype='d', end=None, dl=ct.PowerCountdl, filter='y', tal
         # else:
         #     results = cct.to_mp_run_async(
         #             powerCompute_mp,code_l, df=df,dm=dm, statuslist=True, index=index, end=end,dl=dl,wcdf=wcdf)
-        
         results = cct.to_mp_run_async(
                         powerCompute_mp,code_l, df=df,dm=dm, statuslist=True, index=index, end=end,dl=dl,wcdf=wcdf)
 

@@ -6,7 +6,7 @@ from pywebio.session import set_env
 from functools import partial
 # from copy_tools import broadcast_stock_code
 from copy_tools import *
-from findSetWindowPos import find_proc_windows
+from findSetWindowPos import find_proc_windows,find_proc_window_tasklist
 import asyncio
 import pyperclip
 
@@ -243,10 +243,23 @@ if __name__ == '__main__':
     import os
     # or open with iexplore
     # os.system('cmd /c start iexplore "http://127.0.0.1:8080/"')
+    # findproc = find_proc_windows('联动精灵',visible=False)
+    # find_proc_window_tasklist('link.exe')
+    # import ipdb;ipdb.set_trace()
 
-    if not find_proc_windows('人气综合排行榜2.2',fuzzysearch=False):
+    # if not find_proc_window_tasklist('link.exe'):
+    #     # os.system('cmd /c start /min D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
+    #     # os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
+    #     os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
+    #     time.sleep(3)
+
+    if not find_proc_windows('人气综合排行榜2.2',fuzzysearch=True):
         os.system('cmd /c start C:\\Users\\Johnson\\Documents\\TDX\\55188\\人气共振2.2.exe')
         time.sleep(1)
+    if not find_proc_windows('行业跟随',fuzzysearch=True):
+        os.system('cmd /c start C:\\Users\\Johnson\\Documents\\TDX\\55188\\竞价定行业1.1.exe')
+        time.sleep(1)
+
     if not find_proc_windows('同花顺'):
         os.system('cmd /c start D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
         time.sleep(1)
@@ -263,7 +276,9 @@ if __name__ == '__main__':
     if not find_proc_windows('findSetWindowPos'):
         os.system('cmd /c start python findSetWindowPos.py')
         time.sleep(2)
-    if not find_proc_windows('联动精灵',visible=False):
+    # if not find_proc_windows('联动精灵',visible=False):
+    
+    if not find_proc_window_tasklist('link.exe'):
         # os.system('cmd /c start /min D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
         # os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
         os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
@@ -282,7 +297,7 @@ if __name__ == '__main__':
         width, height = 80, 22
         cct.set_console(width, height)
     # time.sleep(1)
-    # print(find_proc_windows('ths-tdx-web.py'))
+    print(find_proc_windows('ths-tdx-web.py'))
     while 1:
         try:
             # status = find_proc_windows('ths-tdx-web')
@@ -297,7 +312,7 @@ if __name__ == '__main__':
                 os.system('cmd /c start "" "http://127.0.0.1:%s/"'%(port_to_check))
                 start_server(main, port=port_to_check, debug=False)
             else:
-                print("Find ths-tdx-web no run start_server")
+                print("Find %s no run start_server"%(find_proc_windows('ths-tdx-web.py')))
                 time.sleep(30)
         except Exception as e:
             print(e)

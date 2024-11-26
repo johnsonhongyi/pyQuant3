@@ -30,12 +30,12 @@ class StockCode:
         self.STOCK_CODE_PATH = 'stock_codes.conf'
         self.encoding = 'gbk'
         self.stock_code_path = self.stock_code_path()
-
+        self.exceptCount = cct.GlobalValues().getkey('exceptCount')
         # print os.path.getsize(self.stock_code_path)
-        if not os.path.exists(self.stock_code_path) or os.path.getsize(self.stock_code_path) < 500:
+        if self.exceptCount is None and not os.path.exists(self.stock_code_path) or os.path.getsize(self.stock_code_path) < 500:
             stock_codes = self.get_stock_codes(True)
             print(("create:%s counts:%s" % (self.stock_code_path, len(stock_codes))))
-        if cct.creation_date_duration(self.stock_code_path) > 30:
+        if self.exceptCount is None and cct.creation_date_duration(self.stock_code_path) > 30:
             stock_codes = self.get_stock_codes(True)
             print(("days:%s %s update stock_codes.conf" % (cct.creation_date_duration(self.stock_code_path), len(stock_codes))))
 
@@ -52,8 +52,18 @@ class StockCode:
         # https://site.ip138.com/www.shdjt.com/
         all_stock_codes_url = 'http://www.shdjt.com/js/lib/astock.js'
         grep_stock_codes = re.compile('~(\d+)`')
-        response = requests.get(all_stock_codes_url)
-        response.encoding = self.encoding
+        try:
+            response = requests.get(all_stock_codes_url)
+            response.encoding = self.encoding
+        except Exception as e:
+            if self.exceptCount is None:
+                cct.GlobalValues().setkey('exceptCount',1)
+                log.error("Exception:%s"%(e))
+            with open(self.stock_code_path) as f:
+                self.stock_codes = json.load(f)['stock']
+                return self.stock_codes
+            # raise e
+        
         stock_codes = grep_stock_codes.findall(response.text)
         stock_codes = list(set([elem for elem in stock_codes if elem.startswith(('6', '30', '00'))]))
         # df=rl.get_sina_Market_json('all')

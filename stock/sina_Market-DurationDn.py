@@ -358,7 +358,7 @@ if __name__ == "__main__":
 
                     cct.set_console(width, height,
                                     title=[du_date, 'dT:%s' % cct.get_time_to_date(time_s), 'G:%s' % goldstock,
-                                           'zxg: %s' % (blkname + '-' + market_blk)])
+                                           'zxg: %s' % (blkname + '-' + market_blk+' resample:'+resample)])
 
                     # top_all = tdd.get_powerdf_to_all(top_all, top_temp)
                     top_all = tdd.get_powerdf_to_all(top_all, top_end)

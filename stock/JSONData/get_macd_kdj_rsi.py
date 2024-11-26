@@ -6,6 +6,7 @@ import time
 import numpy as np
 import pandas as pd
 import pandas_ta as ta
+import talib as tl
 import tushare as ts
 import sys
 sys.path.append("..")
@@ -471,8 +472,43 @@ def Get_MACD_OP(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
 
 # 通过MACD判断买入卖出
 
-
 def Get_MACD(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
+    # 参数12,26,9
+    increasing = True
+    if not df.index.is_monotonic_increasing:
+        increasing = False
+        df = df.sort_index(ascending=True)
+    # if len(df) > 1 + lastday:
+    #     if lastday != 0:
+    #         df = df[:-lastday]
+    # if len(df) < limitCount:
+    #     return (df, 1)
+
+
+    # df=df.fillna(0)
+    # macd=DIF，signal=DEA，hist=BAR
+
+    # df[[ 'macd%s' % dtype,'ddea%s' % dtype, 'dea%s' % dtype]] = tl.MACD(
+    #     df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
+
+    df.loc[:, 'macdwhite'], df.loc[:, 'macdyellow'], df.loc[:, 'macd'] = tl.MACD(
+        df['close'], fastperiod=12, slowperiod=26, signalperiod=9) 
+    # data.loc[:, 'diff'], data.loc[:, 'dea'], data.loc[:, 'macd'] = tl.MACD(
+    #     data['close'].values, fastperiod=5, slowperiod=34, signalperiod=5)
+    #     # data['close'].values, fastperiod=12, slowperiod=26, signalperiod=9)
+    
+    df['macdwhite'] = round( df['macdwhite'], 2)
+    df['macdyellow'] = round( df['macdyellow'], 2)
+    df['macd'] = round( df['macd']*2, 2)
+    # data['diff'].values[np.isnan(data['diff'].values)] = 0.0
+    # data['dea'].values[np.isnan(data['dea'].values)] = 0.0
+    # data['macd'].values[np.isnan(data['macd'].values)] = 0.0
+
+    if not increasing:
+        df = df.sort_index(ascending=False)
+    return df
+
+def Get_MACD_o(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
     # 参数12,26,9
     df = df.sort_index(ascending=True)
     if len(df) > 1 + lastday:
@@ -482,7 +518,10 @@ def Get_MACD(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
         return (df, 1)
 #    df=df.fillna(0)
     df[[ 'diff%s' % dtype,'ddea%s' % dtype, 'dea%s' % dtype]] = ta.macd(
-        df['close'], fastperiod=5, slowperiod=34, signalperiod=5)
+        df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
+    # macd=DIF，signal=DEA，hist=BAR
+    # df[[ 'macd' % dtype,'signal' % dtype, 'hist' % dtype]] = ta.macd(
+    #     df['close'], fastperiod=5, slowperiod=26, signalperiod=5)
     SignalMA5 = ta.ma("sma",df['dea%s' % dtype], length=5)
     SignalMA10 = ta.ma("sma",df['dea%s' % dtype], length=10)
     SignalMA20 = ta.ma("sma",df['dea%s' % dtype], length=20)
@@ -494,7 +533,7 @@ def Get_MACD(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
     MAlen = len(SignalMA5)
     operate = 0
     dd = df.dropna()
-    print(dd[['diffd','dead','ddead']],dd.ddead.argmin())
+    # print(dd[['diffd','dead','ddead']],dd.ddead.argmin())
     # 2个数组 1.DIFF、DEA均为正，DIFF向上突破DEA，买入信号。 2.DIFF、DEA均为负，DIFF向下跌破DEA，卖出信号。
     # 待修改
     diff = df.loc[df.index[-1], 'diff%s' % dtype]
@@ -779,19 +818,27 @@ if __name__ == '__main__':
     #    code='300201'
     import sys
     # print powerStd('600208',ptype='vol')
-    code = '000993'
+    code = '603887'
+    code = '600600'
     # codel=['600917','300638','002695','601555','002486','600321','002437','399006','999999']
     # codel = ['300661', '600212', '300153', '603580']
-    codel=['000705']
+    # codel=['603887']
     # dl = 21
     # for code in codel:
     #     df = tdd.get_tdx_append_now_df_api(
     #         code, dl=dl).sort_index(ascending=True)
     # # print algoMultiDay(df, column='close')
     #     print "code:%s : %s" % (code, algoMultiDay_trends(df, column='close'))
-    dm = tdd.get_sina_data_df(code)
-    print("tt",Get_BBANDS(code,'d',5,ct.PowerCountdl,dm)) 
-    time_st=time.time()
+    # dm = tdd.get_sina_data_df(code)
+    dm2 = tdd.get_tdx_Exp_day_to_df(code)
+    # dm = tdd.get_tdx_power_now_df(code)
+    dm = tdd.get_tdx_power_now_df(code)
+    # print("tt",Get_BBANDS(code,'d',5,ct.PowerCountdl,dm)) 
+    # time_st=time.time()
+    macd = Get_MACD(dm)
+    macd2 = Get_MACD(dm2)
+
+    import ipdb;ipdb.set_trace()
 
     dm = tdd.get_sina_data_df(codel)
 

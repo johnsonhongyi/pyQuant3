@@ -2329,7 +2329,6 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     log.error("except:%s"%(e))
                     # log.error("except:results%s"%(results[-1]))
                     import ipdb;ipdb.set_trace()
-                    
                     results=[]
                     for code in urllist:
                         print("code:%s "%(code), end=' ')
@@ -2956,7 +2955,7 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=False, keep_last=Non
     if keep_last is None:
         keep_last = ct.keep_lastnum
     # index_list = ['1999999','47#IFL0',  '0159915', '27#HSI']
-    index_list = ['1999999', '0399001', '0159915','1880884','1880885']
+    index_list = ['1999999', '0399001', '0159915','2899050','1588000','1880884','1880885','1880818']
     # index_list = ['1999999','47#IFL0', '0399001', '0159915']
     # index_list = ['1999999','47#IFL0', '27#HSI',  '0399006']
     # index_list = ['1999999','0399001','47#IFL0', '27#HSI',  '0159915']

@@ -330,7 +330,7 @@ if __name__ == "__main__":
                 #     top_all = top_all[top_all.trade >= top_all.llastp * ct.changeRatio]
 
                 cct.set_console(width, height, title=[du_date,
-                                'G:%s' % len(top_all), 'zxg: %s' % (blkname+'-'+market_blk)])
+                                'G:%s' % len(top_all), 'zxg: %s' % (blkname+'-'+market_blk+' resample:'+resample)])
 
                 # if len(top_all[top_all.dff > 0]) == 0:
                 #     top_all['dff'] = (map(lambda x, y: round((x - y) / y * 100, 1),

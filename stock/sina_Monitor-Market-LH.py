@@ -422,7 +422,7 @@ if __name__ == "__main__":
                                             & (top_dif.buy >= top_dif.llastp * 0.99)])
 
                     cct.set_console(width, height,
-                                    title=[du_date,'dT:%s' % cct.get_time_to_date(time_s), 'G:%s' % len(top_dif), 'zxg: %s' % (blkname + '-' + market_blk)])
+                                    title=[du_date,'dT:%s' % cct.get_time_to_date(time_s), 'G:%s' % len(top_dif), 'zxg: %s' % (blkname+'-'+market_blk+' resample:'+resample)])
 
                     top_all = tdd.get_powerdf_to_all(top_all, top_temp)
                     # top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter,duration=ct.PowerCountdl)
