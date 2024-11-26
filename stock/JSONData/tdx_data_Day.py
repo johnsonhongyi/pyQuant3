@@ -18,6 +18,7 @@ from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import johnson_cons as ct
 import tushare as ts
+import talib as tl
 import pandas_ta as ta
 import talib as taa
 
@@ -237,6 +238,17 @@ def LIS_TDX_Cum(X):
 
     return S[::-1], pos[::-1]
 
+
+def get_ascending_is_monotonic_decreasing(df,increasing=True):
+    if not df.index.is_monotonic_increasing:
+        increasing = False
+        df = df.sort_index(ascending=True)
+
+    #return default increasing
+    # if not increasing:
+    #     df = df.sort_index(ascending=False)
+    # no ok
+    return df
 
 def write_all_kdata_to_file(code, f_path, df=None):
     """
@@ -593,7 +605,8 @@ def get_tdx_Exp_day_to_df_AllRead_(code, start=None, end=None, dl=None, newdays=
     df['cmean'] = round(df.close[-10:-ct.tdx_high_da].mean(), 2)
     df['hv'] = df.vol[-tdx_max_int:-ct.tdx_high_da].max()
     df['lv'] = df.vol[-tdx_max_int:-ct.tdx_high_da].min()
-
+    df['lastdu4'] = df['high4'][0] /df['low4'][0]
+    
     df = df.fillna(0)
     df = df.sort_index(ascending=False)
     # if len(df) > 5:
@@ -601,6 +614,70 @@ def get_tdx_Exp_day_to_df_AllRead_(code, start=None, end=None, dl=None, newdays=
     #     df['hvhigh'] = df.high.tolist()[df.hvdu.values[0]-1]
     #     df['lvdu'] = df.vol.tolist().index(df.lv[-1])+1
     #     df['lvlow'] = df.close.tolist()[df.lvdu.values[0]-1]
+
+    return df
+
+def custom_macd(prices, fastperiod=12, slowperiod=26, signalperiod=9):
+   """
+ 自定义的MACD计算函数，根据指定的计算方法计算EMA，然后基于这些EMA值计算MACD值。
+
+ :param prices: 价格数组。
+ :param fastperiod: 快速EMA的周期，默认为12。
+ :param slowperiod: 慢速EMA的周期，默认为26。
+ :param signalperiod: 信号线的周期，默认为9。
+ :return: 返回DIFF, DEA和MACD。
+   """
+   # 初始化EMA数组
+   ema_fast = np.zeros_like(prices)
+   ema_slow = np.zeros_like(prices)
+
+   # 计算EMA
+   for i in range(1, len(prices)):
+       if i == 1:  # 第二日的EMA计算
+            ema_fast[i] = prices[i - 1] + (prices[i] - prices[i - 1]) * 2 / (fastperiod + 1)
+            ema_slow[i] = prices[i - 1] + (prices[i] - prices[i - 1]) * 2 / (slowperiod + 1)
+       else:  # 第三日及以后的EMA计算
+            ema_fast[i] = ema_fast[i - 1] * (fastperiod - 1) / (fastperiod + 1) + prices[i] * 2 / (fastperiod + 1)
+            ema_slow[i] = ema_slow[i - 1] * (slowperiod - 1) / (slowperiod + 1) + prices[i] * 2 / (slowperiod + 1)
+
+   # 计算DIFF
+   diff = ema_fast - ema_slow
+
+   # 计算DEA
+   dea = np.zeros_like(prices)
+   for i in range(1, len(prices)):
+        dea[i] = ((signalperiod - 1) * dea[i - 1] + 2 * diff[i]) / (signalperiod + 1)
+   # 计算MACD
+   macd = 2 * (diff - dea)
+   return diff, dea, macd
+
+def get_tdx_macd(df):
+    if len(df) < 20:
+        return df
+    increasing = True
+    if not df.index.is_monotonic_increasing:
+        increasing = False
+        df = df.sort_index(ascending=True)
+
+
+
+    # df=df.fillna(0)
+    # macd=DIF，signal=DEA，hist=BAR
+    df.loc[:, 'macdwhite'], df.loc[:, 'macdyellow'], df.loc[:, 'macd'] = tl.MACD(
+        df['close'], fastperiod=12, slowperiod=26, signalperiod=9) 
+
+    df['macdwhite'] = round( df['macdwhite'], 2)
+    df['macdyellow'] = round( df['macdyellow'], 2)
+    df['macd'] = round( df['macd']*2, 2)
+    # data['diff'].values[np.isnan(data['diff'].values)] = 0.0
+    # data['dea'].values[np.isnan(data['dea'].values)] = 0.0
+    # data['macd'].values[np.isnan(data['macd'].values)] = 0.0
+    df['macdlast1'] = df.iloc[-1]['macd']
+    df['macdlast2'] = df.iloc[-2]['macd']
+    df['macdlast3'] = df.iloc[-3]['macd']
+
+    if not increasing:
+        df = df.sort_index(ascending=False)
 
     return df
 
@@ -706,7 +783,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         buf = ofile.readlines()
         ofile.close()
         num = len(buf)
-#        no = num - 1
         no = num
         dt_list = []
         for i in range(no):
@@ -969,19 +1045,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         df['fib'] =   0
         df['maxpcout'] =  0
 
-    if cct.get_work_time_duration():
-        df['max5'] = df.close[-6:-1].max()
-        df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
-        df['high4'] = df.high[-5:-1].max()
-        df['low4'] = df.low[-5:-1].min()
-
-    else:
-        df['max5'] = df.close[-6:-1].max()
-        # df['hmax'] = df.close[-ct.tdx_max_int_end:max_int_end].max()
-        df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
-        df['high4'] = df.high[-5:-1].max()
-        df['low4'] = df.low[-5:-1].min()
-
 
 
     '''
@@ -997,7 +1060,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     
     # df['lastdu4'] = round(max(df.high4[-1],df.max5[-1],df.hmax[-1],df.upper[-1])/(df['low4'][-1]),2)
     if len(df) > 10:
-        df['lastdu4'] = round((df.high4[-1])/(df['low4'][-1]),2)
+        # df['lastdu4'] = round((df.high4[-1])/(df['low4'][-1]),2)
         # df['lmin'] = df.low[-tdx_max_int:max_int_end].min()
         df['lmin'] = df.low[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
         df['min5'] = df.low[-6:-1].min()
@@ -1005,13 +1068,39 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         df['hv'] = df.vol[-tdx_max_int:-ct.tdx_high_da].max()
         df['lv'] = df.vol[-tdx_max_int:-ct.tdx_high_da].min()
         df = df.fillna(0)
-        df = df.sort_index(ascending=False)
+
+        # df = df.sort_index(ascending=False)
+        if not df.index.is_monotonic_increasing:
+            # increasing = False
+            df = df.sort_index(ascending=True)
+
+        if cct.get_work_time_duration():
+            df['max5'] = df.close[-6:-1].max()
+            df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
+            df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
+            df['high4'] = df.high[-5:-1].max()
+            df['low4'] = df.low[-5:-1].min()
+            df['lastdu4'] = df['high4'][0] /(df['low4'][0]+0.1)
+
+
+
+        else:
+            df['max5'] = df.close[-6:-1].max()
+            # df['hmax'] = df.close[-ct.tdx_max_int_end:max_int_end].max()
+            df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
+            df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
+            df['high4'] = df.high[-5:-1].max()
+            df['low4'] = df.low[-5:-1].min()
+            # print(df.high4[0],(df['low4'][0]))
+            df['lastdu4'] = df['high4'][0] /(df['low4'][0]+0.1)
+
     # if len(df) > 5:
     #     df['hvdu'] = df.vol.tolist().index(df.hv[-1])+1
     #     df['hvhigh'] = df.high.tolist()[df.hvdu.values[0]-1]
     #     df['lvdu'] = df.vol.tolist().index(df.lv[-1])+1
     #     df['lvlow'] = df.close.tolist()[df.lvdu.values[0]-1]
-
+    df = get_tdx_macd(df)
+    # df = df.sort_index(ascending=False)
     return df
     # add cumin[:10]
 
@@ -1280,14 +1369,15 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
         code_ts = code
 
     if not power:
-        return df
+
+        return get_tdx_macd(df)
 
     today = cct.get_today()
 
     if len(df) > 0:
         tdx_last_day = df.index[-1]
         if tdx_last_day == today:
-            return df
+            return get_tdx_macd(df)
     else:
         if start is not None:
             tdx_last_day = start
@@ -1364,7 +1454,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
                 sta = write_tdx_tushare_to_file(code, df=df)
                 if sta:
                     if today == ds.index[-1]:
-                        return df
+                        return get_tdx_macd(df)
 #                else:
 #                    sta=write_tdx_tushare_to_file(code,df=df)
 
@@ -1378,7 +1468,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
             df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
             df = df.fillna(0)
             df = df.sort_index(ascending=False)
-        return df
+        return get_tdx_macd(df)
     # else:
     #     # if dm is None and not write_tushare and cct.get_work_time() and cct.get_now_time_int() < 1505:
     #     if dm is None and not write_tushare and cct.get_work_time() and cct.get_now_time_int() < 1505:
@@ -1416,7 +1506,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
                 df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
                 df = df.fillna(0)
                 df = df.sort_index(ascending=False)
-                return df
+                return get_tdx_macd(df)
             else:
                 writedm = True
 
@@ -1500,7 +1590,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
             sta = write_tdx_sina_data_to_file(code, df=df)
 #            else:
 #                sta=write_tdx_sina_data_to_file(code,df=df)
-    return df
+    return get_tdx_macd(df)
 
 
 def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=None, type='f', df=None, dl=10, power=True):
@@ -2477,6 +2567,7 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
         # df['ma60d'].fillna(0)
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
+    df = get_tdx_macd(df)
     return df
 
 
@@ -3289,11 +3380,19 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # df = dd[-(lastdays+1):].copy()
 
     df = dd.copy()
-    df['max5'] = df['high'].rolling(5).max()
-    df['high4'] = df['high'].rolling(4).max()
-    df['low4'] = df['low'].rolling(4).min()
-    df['hmax'] = df['high'].rolling(10).max()
-    df['lastdu4'] = df['high'].rolling(4).max()/df['low'].rolling(4).min()
+    # df['max5'] = df['high'].rolling(5).max()
+    # df['high4'] = df['high'].rolling(4).max()
+    # df['low4'] = df['low'].rolling(4).min()
+    # df['hmax'] = df['high'].rolling(10).max()
+    # df['lastdu4'] = (df['high'].rolling(4).max()-df['low'].rolling(4).min())/df['low'].rolling(4).min()
+    df['max5'] = df.close[-6:-1].max()
+    df['hmax'] = df.high[-6:-1].max()
+    # df['hmax60'] = df.high[:-1].max()
+    df['high4'] = df.high[-5:-1].max()
+    df['low4'] = df.low[-5:-1].min()
+    # df['lastdu4'] = (df['high4'][0] -df['low4'][0]) /df['low4'][0]
+    df['lastdu4'] = df['high4'][0] /df['low4'][0]
+
     df['lastupper'] = len(df[(df.close > df.upper) & (df.upper > 0)])
         
     df = df[-(last_TopR_days+1):]
@@ -3311,13 +3410,15 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1))
     # df['perd'] = ((df['low'] - df['low'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1))
     df = df.dropna(subset=['perd'])
-    # df['red'] = ((df['close'] - df['open']) / df['close'] * 100).map(lambda x: round(x, 1))
+    df['red'] = ((df['close'] - df['open']) / df['close'] * 100).map(lambda x: round(x, 1))
     df['lastdu'] = ((df['high'] - df['low']) / df['close'] * 100).map(lambda x: round(x, 1))
     # df['perddu'] = ((df['high'] - df['low']) / df['low'] * 100).map(lambda x: round(x, 1))
     # dd['upperT'] = dd.close[ (dd.upper > 0) & (dd.high > dd.upper)].count()
 
     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.high > df.upper)].count()
-    upperT = df.close[-10:][ (df.upper > 0) & (df.close > df.upper)]
+    dfupper=df[-5:]
+    
+    upperT = dfupper.close[-10:][ (dfupper.upper > 0) & (dfupper.close > dfupper.upper)]
     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.close > df.upper)].apply(lambda x: round(x, 0)).median()
     dd['upperT'] = len(upperT)
     df = df[~df.index.duplicated()]
@@ -3328,7 +3429,8 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # upperL = df.close[ (df.high > df.upper) & (df.close > df.ma5d*0.99) ]
 
     # upperL = df.close[ ((df.high > df.upper) | (df.upper > df.upper.shift(1)) ) & (df.close >= df.ma5d*0.99) ]
-    upperL = df.close[ (df.high > df.upper) & (df.upper >0) ]
+    
+    upperL = dfupper.close[ (dfupper.high > dfupper.upper) & (dfupper.upper >0) ]
 
     # import ipdb;ipdb.set_trace()
 
@@ -3389,7 +3491,8 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
 
     # dd['upperL'] = df.close[df.low > df.upper].count()
-    # dd['red'] = df.red[df.red > 0].count()
+    
+    dd['red'] = df.red[df.red > 0].count()
 
     #old ra max
     # ra = round((df.close[-1]-dd.close.max())/df.close[-1]*100,1)
@@ -3658,6 +3761,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         # df['ma5d'] = pd.Series.rolling(df.close, 5)
 
 #        df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
+
         df['ma5d'] = pd.Series.rolling(df.close, 5).mean().apply(lambda x: round(x,2))
         df['ma10d'] = pd.Series.rolling(df.close, 10).mean().apply(lambda x: round(x,2))
         df['ma20d'] = pd.Series.rolling(df.close, 26).mean().apply(lambda x: round(x,2))
@@ -4358,7 +4462,6 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     # codelist = dm.index.tolist()
     # codelist.extend(tdx_index_code_list)
     # search_Tdx_multi_data_duration(cct.tdx_hd5_name, 'all_300',code_l=codelist, start=60, end=None, index='date')
-
     if lastpTDX_DF is None or len(lastpTDX_DF) == 0:
         # h5 = top_hdf_api(fname=h5_fname,table=market,df=None)
         h5 = h5a.load_hdf_db(h5_fname, table=h5_table,
@@ -4380,6 +4483,8 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
             log.info("no hdf data:%s %s" % (h5_fname, h5_table))
             # tdxdata = get_tdx_all_day_LastDF(codelist) '''only get lastp no
             print(("TDD:%s" % (len(codelist)),))
+            
+            # import ipdb;ipdb.set_trace()
 
             tdxdata = get_tdx_exp_all_LastDF_DL(
                 codelist, dt=dl, end=end, ptype=ptype, filter=filter, power=power, lastp=lastp, newdays=newdays, resample=resample)
@@ -4722,6 +4827,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
 #            print cct.get_today_duration(end,cct.get_today())
 
         if len(codeList) > 120:
+            
             results = cct.to_mp_run_async(
                 get_tdx_exp_low_or_high_power, codeList, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample)
                 
@@ -5250,7 +5356,7 @@ if __name__ == '__main__':
     code = '002238'
     code = '002786'
     code = '002460'
-    code = '002620'
+    code = '603887'
     # code = '600240'
     # code = '600890'
     # code = '002865'
@@ -5294,14 +5400,33 @@ if __name__ == '__main__':
     # df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='3d')
 
     # df = get_tdx_Exp_day_to_df(code,dl=60, start='20230925',end=None, newdays=0, resample='d')
+    #get_tdx_exp_all_LastDF_DL() get_tdx_exp_low_or_high_power
+    code='600602'
+    code='603038'
+    code='601360'
+    # code='600005'
+    # df2 = get_tdx_exp_low_or_high_power(code,dl=120,resample='d' )
     df = get_tdx_Exp_day_to_df(code,dl=60, start=None,end=None, newdays=0, resample='d')
-    print(df)
+    import ipdb;ipdb.set_trace()
+    
+    # import ipdb;ipdb.set_trace()
+
+    # df3 = get_tdx_exp_low_or_high_power(code,dl=60)
+    # print(df3.macd)
+    # df1 = get_tdx_Exp_day_to_df(code,dl=60, start=None,end=None, newdays=0, resample='d').sort_index(ascending=True)
+    # diff, dea, macd3 = custom_macd(df1.close)
+
+    # df = get_tdx_power_now_df(code,dl=60, start=None,end=None).sort_index(ascending=True)
+    # macd = df.ta.macd(fast=12,slow=26,signal=9)
+    # import ipdb;ipdb.set_trace()
+
     # print(df.loc[:,df.columns[df.columns.str.contains('perc')]][:1].T)
     # df[(df.close > df.upper) & (df.upper > 0) ]
-    import ipdb;ipdb.set_trace()
+    # import ipdb;ipdb.set_trace()
 
     # df = get_tdx_Exp_day_to_df(code,dl=60, end='2023-10-13', newdays=0, resample='d')
-    df2 = get_tdx_append_now_df_api_tofile(code)
+    df = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
+    # df2 = get_tdx_append_now_df_api_tofile(code)
     print("code:%s boll:%s df2:%s"%(code,df.boll[0],df.df2[0]))
     import ipdb;ipdb.set_trace()
 

@@ -324,7 +324,7 @@ if __name__ == "__main__":
 
                     cct.set_console(width, height,
                                     title=[du_date, 'dT:%s' % cct.get_time_to_date(time_s), 'G:%s' % goldstock,
-                                           'zxg: %s' % (blkname+'-'+market_blk)])
+                                           'zxg: %s' % (blkname+'-'+market_blk+' resample:'+resample)])
 
                     top_all = tdd.get_powerdf_to_all(top_all, top_temp)
                     top_all = tdd.get_powerdf_to_all(top_all, top_end)
@@ -423,6 +423,8 @@ if __name__ == "__main__":
                 st_k = st_l[0]
                 if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
                     st_key_sort = st
+                    import ipdb;ipdb.set_trace()
+                    
                     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort, top_all=top_all)
                 else:
                     log.error("market_sort key error:%s" % (st))

@@ -118,7 +118,7 @@ def compute_perd_value(df, market_value=3, col='per'):
     return df
 
 
-def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=True, ma5d=True, dl=14, percent=True, resample='d', ene=False, upper=False, down=False, indexdff=True, cuminTrend=False, top10=True):
+def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=True, ma5d=True, dl=14, percent=True, resample='d', ene=False, upper=False, down=False, indexdff=True, cuminTrend=False, top10=True,end=False):
 
     # drop_cxg = cct.GlobalValues().getkey('dropcxg')
     # if len(drop_cxg) >0:
@@ -444,9 +444,16 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
 
                 idx_k = int(float(market_value))
                 if market_key not in ['1','5','7']:
-                    df= df[ (df[("%s" % (sort_value))] <= idx_k) ]
+                    idx_k = int(cct.GlobalValues().getkey('market_value'))
                     if market_value == '10' and market_key in ['4']:
                         df = df[df.percent < 8 ]
+                    elif market_key in ['4']:
+                        df = df[df.dff >= idx_k ]
+                        if 'macd' in df.columns:
+                            # max5 hmax
+                            df = df.query('macd >= -0.02 and high >= max5 and close >= lastp1d')
+                    else:
+                        df= df[ (df[("%s" % (sort_value))] <= idx_k) ]
                 else:
                     df= df[ (df[("%s" % (sort_value))] >= idx_k) ]
 
@@ -749,7 +756,51 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     # if resample == 'd':
     #     df = df[ (df.df2 > 0.8 )]
     # else:
-    #     df = df[ (df.df2 > 1 )]
+    #     df = df[ (df.df2 > 1 )]   
+
+    #edit 20241022
+
+    if not end  and market_key in ['4','9']:
+        # import ipdb;ipdb.set_trace()
+        # df = df.query('low4 > 0')
+        # df['ra5'] = list(map(lambda x, y: round((x - y) / y * 100, 1), df.max5, df.low4))
+        # filter ma26d
+        # df.query('close > ma201d and low < ma201d and close > open and percent > 1')
+        # dfd = df.query('close > ma201d and high > high4 and lastp1d > ma201d and lastl1d < ma201d and close > lasth1d and close > open*0.998')        
+        # dfd = top_temp.query('low4 > ma201d and high >= lasth1d and high >lasth2d and high > lasth3d')
+        # block_path = tdd.get_tdx_dir_blocknew() + '060.blk'
+        # cct.write_to_blocknew(block_path, dfd.index.tolist(),append=False,keep_last=0)
+        if 930 < cct.get_now_time_int() < 1000:
+            # df = df.query('lasth1d > ma51d and  lasth1d > lasth2d and open > lastp and open <= low*1.01 and close >= (high+low)/2*0.99 and close < (high+low)/2*1.02')
+            df = df.query('macd > 0 and macdwhite >= macdyellow')
+            df = df.query('volume > 5')
+        elif 1000 < cct.get_now_time_int() < 1100:
+            df = df.query(' percent < 9.97 or 10.2 < percent < 19.95')
+            # df = df.query('volume > 3')
+
+            # dd.lasth1d,  dd.ma51d , dd.lasth1d , dd.lasth2d , dd.open ,dd.lastp
+            # and close < (high+low)/2*1.02
+
+            df = df.query('lasth1d > ma51d and lasth1d > lasth2d and open > lastp1d and open <= low*1.01 and close >= (high+low)/2*0.99 ')
+            df = df.query('macd >= -0.1 and macdwhite >= macdyellow*0.99')
+
+        elif 1100 < cct.get_now_time_int() < 1400:
+            # df = df.query('-5 < percent < 9.97 or 10.2 < percent < 19.95')
+            df = df.query(' percent < 9.97 or 10.2 < percent < 19.95')
+            df = df.query('lasth1d > ma51d and lasth1d > lasth2d and open > lastp and open <= low*1.01 and close >= (high+low)/2*0.99')
+            df = df.query('macd >= -0.1 and macdwhite >= macdyellow*0.99')
+            
+        elif 1400 < cct.get_now_time_int() < 1445:
+            # df = df.query('-5 < percent < 9.97 or 10.2 < percent < 19.95')
+            df = df.query('close >= (high+low)/2*0.99')
+        # df = df.query('macdwhite >  macdyellow and macdlast1 > macdlast2')
+        df = df.query('close > ma51d ')
+        
+
+        
+
+
+
 
     return df
 

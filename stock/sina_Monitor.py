@@ -125,6 +125,7 @@ if __name__ == "__main__":
     
     # st_key_sort = '4'
     st_key_sort = 'x 1.1'
+    st_key_sort_start = 0
     # st_key_sort = '3 1'
     # st_key_sort = '8'
     resample = 'd'
@@ -142,7 +143,15 @@ if __name__ == "__main__":
             #     print len(df),
             # top_now = rl.get_sina_dd_count_price_realTime(df)
             # print len(top_now)
-            
+
+            if st_key_sort_start == 0 and cct.get_now_time_int() > 915 :
+                st_key_sort = '4'
+                st_key_sort_start = 1
+                # st_key_sort = '3 1'
+                # st_key_sort = '8'
+                # resample = 'd'
+                market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(
+                    st_key_sort)
             if st is None and st_key_sort in ['2', '3']:
                 st_key_sort = '%s %s' % (
                     st_key_sort.split()[0], cct.get_index_fibl())
@@ -289,7 +298,7 @@ if __name__ == "__main__":
                 #     top_all = top_all[top_all.trade >= top_all.llastp * ct.changeRatio]
 
                 cct.set_console(width, height, title=[du_date,
-                                'G:%s' % len(top_all), 'zxg: %s' % (blkname+'-'+market_blk)])
+                                'G:%s' % len(top_all), 'zxg: %s' % (blkname+'-'+market_blk+' resample:'+resample)])
 
                 # if len(top_all[top_all.dff > 0]) == 0:
                 #     top_all['dff'] = (map(lambda x, y: round((x - y) / y * 100, 1),
@@ -602,7 +611,9 @@ if __name__ == "__main__":
 
                 # top_temp = stf.filterPowerCount(top_temp,ct.PowerCount,down=True)
 
-                top_end=top_all[-int((ct.PowerCount) / 10):].copy()
+                # top_end=top_all[-int((ct.PowerCount) / 10):].copy()
+                # top_end=top_all.sort_values(by=(market_sort_value),ascending=market_sort_value_key).percent[-int((ct.PowerCount) / 10):].copy()
+                top_end=top_all.sort_values(by=(['percent']),ascending=[0])[-int((ct.PowerCount) / 10):].copy()
                 top_temp=pct.powerCompute_df(top_temp, dl=ct.PowerCountdl)
                 top_end=pct.powerCompute_df(top_end, dl=ct.PowerCountdl)
                 goldstock=len(top_all[(
@@ -617,7 +628,7 @@ if __name__ == "__main__":
                 top_temp=stf.getBollFilter(
                     df=top_temp, resample=resample, down=True)
                 top_end=stf.getBollFilter(
-                    df=top_end, resample=resample, down=True)
+                    df=top_end, resample=resample, down=True,end=True)
 
                 nhigh = top_temp[top_temp.close > top_temp.nhigh] if 'nhigh'  in top_temp.columns else []
                 nlow = top_temp[top_temp.close > top_temp.nlow] if 'nhigh'  in top_temp.columns else []

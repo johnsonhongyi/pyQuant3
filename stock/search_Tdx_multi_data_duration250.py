@@ -561,6 +561,8 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                         & ((dfs[('low')] <= dfs[('ma%s')%(rollma[0])]*1.01) | (dfs[('low')].shift(1) <= dfs[('lower')]*1.05) | (dfs[('low')].shift(1) <= dfs[('lower')]*1.05)  )
                         & ((dfs[('volchang')] < 100) & (dfs[('volchang')].shift(1) < 100) & (dfs[('volchang')].shift(2) < 100) )
                         & ((dfs[('percent')] > 5) | (dfs[('percent')].shift(1) > 5) | (dfs[('percent')].shift(2) > 5))
+                        & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_l) 
+                        & (dfs[('close')] < dfs[('ma%s')%(rollma[-1])]*ma_250_h) 
                         )
             #适合大盘稳定,年线附近多头,一阳high4,high upper,追涨模型
             elif runrule == '1':
@@ -572,6 +574,8 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                         & (dfs[('low')] <= dfs[('ma20')]*1.05)
                         & ((dfs[('volchang')] < 100) & (dfs[('volchang')].shift(1) < 100) & (dfs[('volchang')].shift(2) < 100) )
                         & (dfs[('percent')] > 2)
+                        & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_l) 
+                        & (dfs[('close')] < dfs[('ma%s')%(rollma[-1])]*ma_250_h) 
                         )
             #新高连阳
             elif runrule == '3':
@@ -581,6 +585,8 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                         & ((dfs[('close')] > dfs[('close')].shift(1)) & (dfs[('close')].shift(1) > dfs[('close')].shift(2)))
                         & ((dfs[('percent')] > 2) & ((dfs[('percent')].shift(1) > 2) | (dfs[('percent')].shift(2) > 2)) )
                         & ((dfs[('volchang')] < 100) & (dfs[('volchang')].shift(1) < 100) & (dfs[('volchang')].shift(2) < 100) )
+                        & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_l) 
+                        & (dfs[('close')] < dfs[('ma%s')%(rollma[-1])]*ma_250_h) 
                         )
                         # & ((dfs[('volchang')] < 60) | (dfs[('volchang')].shift(1) < 60) | (dfs[('volchang')].shift(2) < 100) )
             #连阳,不新高
@@ -592,6 +598,8 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                         & ((dfs[('close')] > dfs[('close')].shift(1)) & (dfs[('close')].shift(1) > dfs[('close')].shift(2)))
                         & ((dfs[('percent')] > 2) & ((dfs[('percent')].shift(1) > 2) | (dfs[('percent')].shift(2) > 2)))
                         & ((dfs[('volchang')] < 100) & (dfs[('volchang')].shift(1) < 100) & (dfs[('volchang')].shift(2) < 100) )
+                        & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_l) 
+                        & (dfs[('close')] < dfs[('ma%s')%(rollma[-1])]*ma_250_h) 
                         )
             #新高连阳高开高走
             elif runrule == '5':
@@ -602,6 +610,8 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                         & ((dfs[('close')] > dfs[('close')].shift(1)) & (dfs[('close')].shift(1) > dfs[('close')].shift(2)))
                         & ((dfs[('percent')] > 2) & ((dfs[('percent')].shift(1) > 2) | (dfs[('percent')].shift(2) > 2)) )
                         & ((dfs[('volchang')] < 100) & (dfs[('volchang')].shift(1) < 100) & (dfs[('volchang')].shift(2) < 100) )
+                        & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_l) 
+                        & (dfs[('close')] < dfs[('ma%s')%(rollma[-1])]*ma_250_h) 
                         )
                         # & ((dfs[('lower')] >= dfs[('close')].shift(1)) |  (dfs[('lower')] >= dfs[('close')].shift(2)))
                         # & ((dfs[('volchang')] < 60) | (dfs[('volchang')].shift(1) < 60) | (dfs[('volchang')].shift(2) < 100) )
@@ -616,6 +626,8 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                         & (dfs[('close')] > dfs[('ene')])
                         & ((dfs[('volchang')] > 10) & (dfs[('volchang')].shift(1) < 100) & (dfs[('volchang')].shift(2) < 100) )
                         & (dfs[('percent')] > 2)
+                        & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_l) 
+                        & (dfs[('close')] < dfs[('ma%s')%(rollma[-1])]*ma_250_h) 
                         )      
                         # & (dfs[('low')] <= dfs[('ma20')]*1.05)
 
@@ -631,6 +643,8 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                 mask = ( (dfs[('ma%s')%(rollma[0])] > 0) 
                 & (dfs[('close')] > dfs[('ma%s')%(rollma[0])])
                 & ((dfs[('close')] > dfs['ene']) | (dfs[('close')] > dfs['upper']) ) 
+                & (dfs[('close')] > dfs[('ma%s')%(rollma[-1])]*ma_250_l) 
+                & (dfs[('close')] < dfs[('ma%s')%(rollma[-1])]*ma_250_h) 
                 )
 
 
@@ -866,13 +880,13 @@ if __name__ == '__main__':
     print("runrule:%s"%(runruledict[runrule]))
     runDay = cct.cct_raw_input("runDay[Y/y]/[N/n]:")
     if runDay.lower() != 'n':
-        get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='d',runrule=runrule)
+        get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.2,ma_250_h=1.5,resample='d',runrule=runrule)
 
     runWeek = cct.cct_raw_input("runWeek[Y/y]/[N/n]:")
     if runWeek.lower() != 'n' :
-        get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w',runrule=runrule)
+        get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.2,ma_250_h=1.5,resample='w',runrule=runrule)
     runMon = cct.cct_raw_input("runMon[Y/y]/[N/n]:")
     if runMon.lower() != 'n' :
-        get_roll_mean_all(single=False,tdx=True,app=True,duration=900,ma_250_l=1.02,ma_250_h=1.2,resample='m',runrule=runrule)
+        get_roll_mean_all(single=False,tdx=True,app=True,duration=900,ma_250_l=1.2,ma_250_h=1.5,resample='m',runrule=runrule)
 
     # get_roll_mean_all(single=False, tdx=True, app=False,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w',rewrite=True)

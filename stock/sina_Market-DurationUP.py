@@ -108,7 +108,7 @@ if __name__ == "__main__":
     # duration_date = 300
     du_date = duration_date
     # resample = ct.resample_dtype
-    resample = '3d'
+    resample = 'w'
     # resample = 'd'
     end_date = None
     ptype = 'low'
@@ -132,7 +132,7 @@ if __name__ == "__main__":
     # market_sort_value, market_sort_value_key = ct.get_market_sort_value_key('1')
     # st_key_sort = ct.sort_value_key_perd23
     # st_key_sort = '1'
-    st_key_sort = '3 1'
+    st_key_sort = '2 1'
     # st_key_sort = '3 1'
     # st_key_sort = 'x1 1.1'
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort)
@@ -402,7 +402,7 @@ if __name__ == "__main__":
 
                     cct.set_console(width, height,
                                     title=[du_date, 'dT:%s' % cct.get_time_to_date(time_s), 'G:%s' % goldstock,
-                                           'zxg: %s' % (blkname + '-' + market_blk)])
+                                           'zxg: %s' % (blkname + '-' + market_blk+' resample:'+resample)])
 
                     top_all = tdd.get_powerdf_to_all(top_all, top_temp)
                     top_all = tdd.get_powerdf_to_all(top_all, top_end)
