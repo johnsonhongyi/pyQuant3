@@ -59,7 +59,8 @@ perdallu = "df[df.columns[ ((df.columns >= 'du1d') & (df.columns <= 'du%sd'%(ct.
 root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\'
 dfcf_path = 'D:\\MacTools\\WinTools\\eastmoney\\swc8\\config\\User\\6327113578970854\\StockwayStock.ini'
 
-win10Lengend = r'D:\Program\gfzq'
+win10Lengend = r'D:\Quant\new_tdx2'
+# win10Lengend = r'D:\Program\gfzq'
 win10Lixin = r'C:\zd_zszq'
 win10Triton = r'D:\MacTools\WinTools\new_tdx2'
 #东兴
@@ -504,6 +505,12 @@ tdx_hd5_path = get_run_path_tdx(tdx_hd5_name)
 ramdisk_rootList = LoggerFactory.ramdisk_rootList
 path_sep = os.path.sep
 
+
+def check_file_exist(filepath):
+    filestatus=False
+    if os.path.exists(filepath):
+        filestatus = True
+    return filestatus
 
 def get_now_basedir(root_list=[macroot,macroot_vm]):
     basedir=''
@@ -1220,7 +1227,10 @@ def tran2GBK(strInput):
 
 def get_file_size(path_to_file):
     # filesize = os.path.getsize(path_to_file) / 1000 / 1000
-    filesize = os.path.getsize(path_to_file)
+    if os.path.exists(path_to_file):
+        filesize = os.path.getsize(path_to_file)
+    else:
+        filesize = 0
     return filesize
 
 def creation_date_duration(path_to_file):
@@ -1239,10 +1249,14 @@ def creation_date_duration(path_to_file):
     #         # We're probably on Linux. No easy way to get creation dates here,
     #         # so we'll settle for when its content was last modified.
     #         return stat.st_mtime
-    dt = os.path.getmtime(path_to_file)
-    dtm = datetime.date.fromtimestamp(dt)
-    today = datetime.date.today()
-    return (today - dtm).days
+    if os.path.exists(path_to_file):
+        dt = os.path.getmtime(path_to_file)
+        dtm = datetime.date.fromtimestamp(dt)
+        today = datetime.date.today()
+        duration = (today - dtm).days
+    else:
+        duration = 0
+    return duration
 
 if not isMac():
     import win32api,win32gui

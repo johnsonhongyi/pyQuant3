@@ -17,6 +17,7 @@ from ths_link import send_code_message
 import time
 import pandas as pd
 import sys
+import os
 
 
 sys.path.append("..")
@@ -232,6 +233,13 @@ def check_port_in_use(port):
     print(f"检查端口in_use:{is_port_in_use}")
     return check_dict, is_port_in_use
 
+
+def run_system_fpath(fpath):
+    if cct.check_file_exist(fpath): 
+        os.system('cmd /c start %s'%(fpath))
+    else:
+        print("fpath:%s isn't exist"%(fpath))
+
 # 示例
 # port_to_check = 8080
 # check_info, is_port_used = check_port_in_use(port_to_check)
@@ -240,7 +248,6 @@ def check_port_in_use(port):
 
 if __name__ == '__main__':
     # search_ths_data('000006')
-    import os
     # or open with iexplore
     # os.system('cmd /c start iexplore "http://127.0.0.1:8080/"')
     # findproc = find_proc_windows('联动精灵',visible=False)
@@ -254,21 +261,25 @@ if __name__ == '__main__':
     #     time.sleep(3)
 
     if not find_proc_windows('人气综合排行榜2.2',fuzzysearch=True):
-        os.system('cmd /c start C:\\Users\\Johnson\\Documents\\TDX\\55188\\人气共振2.2.exe')
+        # os.system('cmd /c start C:\\Users\\Johnson\\Documents\\TDX\\55188\\人气共振2.2.exe')
+        run_system_fpath("C:\\Users\\Johnson\\Documents\\TDX\\55188\\人气共振2.2.exe")
         time.sleep(1)
     if not find_proc_windows('行业跟随',fuzzysearch=True):
-        os.system('cmd /c start C:\\Users\\Johnson\\Documents\\TDX\\55188\\竞价定行业1.1.exe')
+        # os.system('cmd /c start C:\\Users\\Johnson\\Documents\\TDX\\55188\\竞价定行业1.1.exe')
+        run_system_fpath("C:\\Users\\Johnson\\Documents\\TDX\\55188\\竞价定行业1.1.exe")
         time.sleep(1)
 
     if not find_proc_windows('同花顺'):
-        os.system('cmd /c start D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
+        # os.system('cmd /c start D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
+        run_system_fpath('D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
         time.sleep(1)
     if not find_proc_windows('东方财富'):
-        os.system('cmd /c start D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
+        # os.system('cmd /c start D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
+        run_system_fpath('D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
         time.sleep(1)
 
     if not find_proc_windows('通达信',fuzzysearch=True):
-        os.system('cmd /c start D:\\MacTools\\WinTools\\new_tdx2\\tdxw.exe')
+        run_system_fpath('%s\\tdxw.exe'%(cct.get_tdx_dir()))
         time.sleep(5)
     if not find_proc_windows('pywin32_mouse'):
         os.system('start cmd /k python pywin32_mouse.py')

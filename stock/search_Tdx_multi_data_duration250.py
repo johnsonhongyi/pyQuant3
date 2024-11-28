@@ -38,6 +38,8 @@ def multindex_iloc(df, index):
 def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,ma_250_h=1.11,resample ='d',rewrite=False,runrule='1'):
     # df = tdd.search_Tdx_multi_data_duration('tdx_all_df_300', 'all_300', df=None,code_l=code_list, start=start, end=None, freq=None, col=None, index='date')
     time_s = time.time()
+    if not cct.check_file_exist(cct.tdx_hd5_path):
+        print('%s not ok'%(cct.tdx_hd5_path))
     block_path_upper = tdd.get_tdx_dir_blocknew() + '077.blk'
     if resample.lower() == 'd':
         block_path = tdd.get_tdx_dir_blocknew() + '061.blk'
