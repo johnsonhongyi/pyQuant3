@@ -383,8 +383,8 @@ if __name__ == "__main__":
                         now_count, len(top_all[top_all['buy'] > 0]),
                         len(top_now[top_now['volume'] <= 0]), goldstock)), end=' ')
 
-                    nhigh = top_temp[top_temp.close > top_temp.nhigh] if 'nhigh'  in top_temp.columns else []
-                    nlow = top_temp[top_temp.close > top_temp.nlow] if 'nhigh'  in top_temp.columns else []
+                    nhigh = top_temp[top_temp.close >= top_temp.nhigh] if 'nhigh'  in top_temp.columns else []
+                    nlow = top_temp[top_temp.close >= top_temp.nlow] if 'nhigh'  in top_temp.columns else []
                     # top_end = stf.getBollFilter(df=top_end, boll=ct.bollFilter,duration=ct.PowerCountdl,filter=False)
                     
                     #query filter
