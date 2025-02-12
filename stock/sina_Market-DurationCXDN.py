@@ -397,6 +397,7 @@ if __name__ == "__main__":
                                 top_temp = top_temp.query('low > lastl1d and close > ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
                                 
                             else:
+
                                 if 'nlow' in top_temp.columns:
                                     top_nlow = top_temp.query('nlow == 0')
                                     top_nlow['nlow']=top_temp.open*0.995
@@ -417,7 +418,7 @@ if __name__ == "__main__":
                                     # top_temp = top_temp.query('(low >= lastp1d and close > ma5d or (nclose > open and close >nclose) )   and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
                                 else:
                                     
-                                    top_temp = top_temp.query('close > ma20d and low <= ma20d and close > lastp1d and high > lasth2d  and open == nlow and low >=nlow or( open == low and close >= high*0.99 and close > open)')
+                                    top_temp = top_temp.query('close > ma20d and low <= ma20d and close > lastp1d and high > lasth2d  or( open == low and close >= high*0.99 and close > open)')
                                     #top_temp = top_temp.query('close > lastl1d and close > ma20d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')
 
                                 # top_temp = top_temp.query('low > lastl1d and close > ma5d and low <= ma5d and ((lastp1d >= ma201d) and (lastp2d >= ma202d) and (lastp3d >=ma203d)) and ( (lasth1d >= lasth2d ) and  (lasth2d >= lasth3d ) and  (lasth3d >=lasth4d) ) ')

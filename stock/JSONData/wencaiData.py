@@ -295,7 +295,8 @@ def get_wencai_Market_url(filter='国企改革', perpage=1, url=None, pct=False,
                    'Cookie': 'v=AZaxA_wZ09rYlOd-tO91dApK4U2ZN9pxLHsO1QD_gnkUwzj_aMcqgfwLXuTQ', }
         data = cct.get_url_data(url, retry_count=1, headers=headers)
 
-        if data is None or (len(data) < 10 or len(re.findall('系统判断您访问次数过多'.decode('utf8'), data))):
+        # if data is None or (len(data) < 10 or len(re.findall('系统判断您访问次数过多'.decode('utf8'), data))):
+        if data is None or (len(data) < 10 or len(re.findall('系统判断您访问次数过多', data))):
             wencai_count += 1
             cct.get_config_value_wencai(
                 config_ini, fname, currvalue=wencai_count, update=True)

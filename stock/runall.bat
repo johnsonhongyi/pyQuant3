@@ -42,8 +42,8 @@ rem start cmd /k python sina_Monitor-GOLD.py
 rem ping -n 20 localhost > nul
 
 
-start cmd /k python sina_Market-DurationCXDN.py
-TIMEOUT /T 20 /NOBREAK
+rem start cmd /k python sina_Market-DurationCXDN.py
+rem TIMEOUT /T 20 /NOBREAK
 
 start cmd /k python sina_Market-DurationUP.py
 TIMEOUT /T 20 /NOBREAK
@@ -57,7 +57,8 @@ rem start cmd /k python sina_Market-DurationUp.py
 rem ping -n 20 localhost > nul 
 start cmd /k python sina_Monitor-Market-LH.py
 rem ping -n 20 localhost > nul 
-start cmd /k python sina_Market-DurationDn.py
+rem 20250212
+rem start cmd /k python sina_Market-DurationDn.py
 TIMEOUT /T 20 /NOBREAK
 start cmd /k python LinePower.py
 TIMEOUT /T 5 /NOBREAK

@@ -103,7 +103,7 @@ async def get_content():
 
 def show_tab(show_content):
     # head = [["Time", "type", 'Content', 'Actions']]
-    head = [["Name", 'Code', 'Actions', "概念"]]
+    head = [["Index","Name", 'Code', 'Actions','Date', "概念"]]
     all_data = []
     txt_data = []
     img_data = []
@@ -111,7 +111,7 @@ def show_tab(show_content):
     for idx, data in enumerate(show_content, 1):
         cname,result = search_ths_data(data["content"])
         # cur = [data["create_time"], data["type"],
-        cur = [cname,
+        cur = [idx,cname,
                data["content"] if data["type"] == "text" else put_image(open(data["content"], 'rb').read()),
                put_buttons(
                    [
@@ -120,7 +120,7 @@ def show_tab(show_content):
                            "value": data,
                        }
                     ], onclick=partial(broadcast_stock_code))
-               ,result]
+               ,data['create_time'][:10],result]
                    # ], onclick=partial(edit_row, row=idx))]
         all_data.append(cur)
         if data["type"] == "text":
@@ -272,18 +272,19 @@ if __name__ == '__main__':
     if not find_proc_windows('同花顺'):
         # os.system('cmd /c start D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
         run_system_fpath('D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
-        time.sleep(1)
+        time.sleep(6)
     if not find_proc_windows('东方财富'):
         # os.system('cmd /c start D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
         run_system_fpath('D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
-        time.sleep(1)
+        time.sleep(6)
 
     if not find_proc_windows('通达信',fuzzysearch=True):
         run_system_fpath('%s\\tdxw.exe'%(cct.get_tdx_dir()))
-        time.sleep(5)
+        time.sleep(8)
     if not find_proc_windows('pywin32_mouse'):
         os.system('start cmd /k python pywin32_mouse.py')
         time.sleep(5)
+    time.sleep(5)
     if not find_proc_windows('findSetWindowPos'):
         os.system('cmd /c start python findSetWindowPos.py')
         time.sleep(2)
@@ -312,7 +313,7 @@ if __name__ == '__main__':
     while 1:
         try:
             # status = find_proc_windows('ths-tdx-web')
-            port_to_check = 1080
+            port_to_check = 8080
             check_info, is_port_used = check_port_in_use(port_to_check)
             print(check_info)
             # print("端口是否使用:", is_port_used)

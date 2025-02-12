@@ -135,7 +135,7 @@ def executeSqlCount(sql, params=()):
         else:
             return 0
 
-db_host = "192.168.50.60"  # 数据库服务主机
+db_host = "192.168.1.60"  # 数据库服务主机
 db_user = "root"  # 数据库访问用户
 db_password = "mariadb"  # 数据库访问密码
 db_database = "instockdb"  # 数据库名称

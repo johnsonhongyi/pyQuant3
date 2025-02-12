@@ -3394,7 +3394,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     df['lastdu4'] = df['high4'][0] /df['low4'][0]
 
     df['lastupper'] = len(df[(df.close > df.upper) & (df.upper > 0)])
-        
+    
     df = df[-(last_TopR_days+1):]
     # df['perlastp'] = list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'],df['open'].shift(1), 
     #                         df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df.index))
@@ -3597,11 +3597,15 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
         ral = round((dd.close[-1]-upper_start)/upper_start*100,1)
 
 
+    df_ma20d=dd[-20:]
+    ma20d_upper = len(df_ma20d.query('low > ma20d'))
+
     # if ra == 0.0:
     #     ra = round((df.close[-1]-df.close.min())/dd.close.min()*100,1)
 
     # dd['ra'] = ra
-    dd['ral'] = ral
+    # dd['ral'] = ral
+    dd['ral'] = ma20d_upper
 
     cum_maxf, posf = LIS_TDX(dd.high[-5:])
     dd['up5'] = len(posf)
@@ -5407,7 +5411,6 @@ if __name__ == '__main__':
     # code='600005'
     # df2 = get_tdx_exp_low_or_high_power(code,dl=120,resample='d' )
     df = get_tdx_Exp_day_to_df(code,dl=60, start=None,end=None, newdays=0, resample='d')
-    import ipdb;ipdb.set_trace()
     
     # import ipdb;ipdb.set_trace()
 
@@ -5428,7 +5431,6 @@ if __name__ == '__main__':
     df = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
     # df2 = get_tdx_append_now_df_api_tofile(code)
     print("code:%s boll:%s df2:%s"%(code,df.boll[0],df.df2[0]))
-    import ipdb;ipdb.set_trace()
 
     resample = 'w'
     df = get_tdx_Exp_day_to_df(code,dl=180, end=None, newdays=0, resample=resample,lastdays=3)

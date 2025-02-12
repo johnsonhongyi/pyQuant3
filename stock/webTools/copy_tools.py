@@ -27,6 +27,12 @@ import win32gui
 # win32clipboard
 # https://stackoverflow.com/questions/101128/how-do-i-read-text-from-the-windows-clipboard-in-python
 
+from datetime import date
+ 
+# 获取当前日期
+def get_today():
+    current_date = date.today().strftime('%Y-%m-%d')
+    return current_date
 
 def isDigit(x):
     #re def isdigit()
@@ -68,8 +74,8 @@ def add_data(new_data):
         old_data = json.load(f)
         if new_data['content'] not in [data['content'] for data in old_data]:
             old_data.insert(0, new_data)
-            if len(old_data) > 100:
-                old_data = old_data[:100]
+            if len(old_data) > 200:
+                old_data = old_data[:200]
             new_status = True
     if new_status:
         with open("history_data.json", "w", encoding="utf-8") as f:
@@ -148,7 +154,8 @@ async def get_clipboard_contents():
         content = content.strip()
         if not isDigit(content):
             continue
-        nowTime = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+        # nowTime = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+        nowTime = date.today().strftime('%Y-%m-%d')
 
         cur = {
             "type": "text",
