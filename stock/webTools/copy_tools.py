@@ -150,6 +150,13 @@ async def get_clipboard_contents():
 
     while 1:
         await asyncio.sleep(0.5)
+        
+        # try:
+        #     content = pyperclip.paste()
+        # except pyperclip.PyerclipException:
+        #     # raise e
+        #     content 
+
         content = pyperclip.paste()
         content = content.strip()
         if not isDigit(content):
@@ -164,7 +171,7 @@ async def get_clipboard_contents():
             "hash": hashlib.md5(content.encode("utf8")).hexdigest()
         }
 
-        if len(content) == 6:
+        if len(content) == 6 and (content.startswith(('00','1','30')) or content.startswith(('5', '6', '9'))):
             if content:
                 cur = get_text(cur)
             else:

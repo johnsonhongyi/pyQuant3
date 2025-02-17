@@ -246,6 +246,32 @@ def run_system_fpath(fpath):
 # print(check_info)
 # print("端口是否使用:", is_port_used)
 
+# import win32api
+# import win32con
+# import win32gui
+# import platform
+# import time
+import win32api
+import win32con
+import win32gui
+
+WM_POWERBROADCAST = 0x218
+PBT_APMRESUMEAUTOMATIC = 0x0012  # 系统唤醒事件
+
+def wnd_proc(hwnd, msg, wparam, lparam):
+    if msg == WM_POWERBROADCAST:
+        if wparam == PBT_APMRESUMEAUTOMATIC:
+            print("系统从睡眠中唤醒")
+    return True
+
+def register_power_listener():
+    hwnd = win32gui.CreateWindowEx(
+        0, "STATIC", "PowerMonitor", 0, 0, 0, 0, 0, 0, 0, 0, None)
+    win32gui.SetWindowLong(hwnd, win32con.GWL_WNDPROC, wnd_proc)
+    print("正在监听唤醒事件...")
+    while True:
+        win32gui.PumpWaitingMessages()
+
 if __name__ == '__main__':
     # search_ths_data('000006')
     # or open with iexplore
@@ -310,7 +336,33 @@ if __name__ == '__main__':
         cct.set_console(width, height)
     # time.sleep(1)
     print(find_proc_windows('ths-tdx-web.py'))
+    if platform.system() == 'Windows':
+        def window_proc(hwnd, msg, wparam, lparam):
+            if msg == win32con.WM_POWERBROADCAST:
+                if wparam == win32con.PBT_APMRESUMEAUTOMATIC:
+                    print("System has woken up from sleep/hibernation.")
+                    # Add your actions here
+                return 0
+            return win32gui.DefWindowProc(hwnd, msg, wparam, lparam)
+
+        # wc = win32gui.WNDCLASS()
+        # wc.hInstance = win32api.GetModuleHandle(None)
+        # wc.lpszClassName = "WakeUpHandler"
+        # wc.lpfnWndProc = window_proc
+        # class_atom = win32gui.RegisterClass(wc)
+        # hwnd = win32gui.CreateWindow(class_atom, "WakeUpHandler", 0, 0, 0, 0, 0, 0, 0, wc.hInstance, None)
+
+        # # GUID for system resume
+        # GUID_SYSTEM_RESUME = "{05fb411a-b8e2-4dca-b9d5-eae426bad8ca}"
+        
+        # # Register for system resume notifications
+        # notification_handle = win32api.RegisterPowerSettingNotification(
+        #     hwnd, GUID_SYSTEM_RESUME, win32con.DEVICE_NOTIFY_WINDOW_HANDLE
+        # )
+        print("Listening for system wake-up events...")
+        
     while 1:
+
         try:
             # status = find_proc_windows('ths-tdx-web')
             port_to_check = 8080
