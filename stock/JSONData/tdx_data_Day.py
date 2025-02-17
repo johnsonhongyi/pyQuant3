@@ -2642,12 +2642,19 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     ### Sina获取 Ratio 和tdx数据
     print("initdx", end=' ')
     market_all = False
-    m_mark = market.split(',')
-    if len(m_mark) > 1:
-        m_0 = m_mark[0]
-        market = m_mark[1]
+    if not isinstance(market, list):
+        m_mark = market.split(',')
 
-    if market == 'rzrq':
+        if len(m_mark) > 1:
+            m_0 = m_mark[0]
+            market = m_mark[1]
+    else:
+        m_mark=[]
+    if isinstance(market, list):
+        code_l = market 
+        df = sina_data.Sina().get_stock_list_data(code_l)
+
+    elif market == 'rzrq':
 
         df = cct.get_rzrq_code()
         code_l = cct.read_to_blocknew('068')

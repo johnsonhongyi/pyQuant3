@@ -116,15 +116,16 @@ if __name__ == "__main__":
 
     from JohnsonUtil import inStockDb as inDb
     # indf = inDb.showcount(inDb.selectlastDays(0))
-    indf = inDb.showcount(inDb.selectlastDays(2),sort_date=True)
-    if len(indf) == 0:
-        indf = inDb.showcount(inDb.selectlastDays(3),sort_date=True)
 
-    if len(indf) > 0 and cct.creation_date_duration(block_path) > 1:
-        cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
-    else:
-        if cct.creation_date_duration(block_path) > 1:
-            log.error("indb last1days is None")
+    # indf = inDb.showcount(inDb.selectlastDays(2),sort_date=True)
+    # if len(indf) == 0:
+    #     indf = inDb.showcount(inDb.selectlastDays(3),sort_date=True)
+
+    # if len(indf) > 0 and cct.creation_date_duration(block_path) > 1:
+    #     cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
+    # else:
+    #     if cct.creation_date_duration(block_path) > 1:
+    #         log.error("indb last1days is None")
                
     lastpTDX_DF = pd.DataFrame()
     parserDuraton = cct.DurationArgmain()
@@ -186,8 +187,25 @@ if __name__ == "__main__":
             # market_blk = 'rzrq'
             # market_blk = 'all'
 
+
+            indf = inDb.showcount(inDb.selectlastDays(2),sort_date=True)
+            if len(indf) == 0:
+                indf = inDb.showcount(inDb.selectlastDays(3),sort_date=True)
+                
+            if len(indf) > 0 and cct.creation_date_duration(block_path) > 1:
+                cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
+            else:
+                if cct.creation_date_duration(block_path) > 1:
+                    log.error("indb last1days is None")
+
+            # if len(indf) > 0 and cct.creation_date_duration(block_path) > 1:
+            #     cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
+            # else:
+            #     if cct.creation_date_duration(block_path) > 1:
+            #         log.error("indb last1days is None")
+
             market_blk = '063'
-            top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
+            top_now = tdd.getSinaAlldf(market=indf.code.tolist(), vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='rzrq', vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='??¹?060',filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
 
