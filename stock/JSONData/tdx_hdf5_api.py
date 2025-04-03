@@ -603,7 +603,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 #    return None
 
 
-def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, limit_time=ct.h5_limit_time, dratio_limit=ct.dratio_limit,MultiIndex=False):
+def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, limit_time=ct.h5_limit_time, dratio_limit=ct.dratio_limit,MultiIndex=False,showtable=False):
     """[summary]
 
     [load hdf ]
@@ -766,6 +766,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                 #             print ("%s fname:%s"%(e,fname))
                 #             cct.sleep(ct.sleep_time)
                 if store is not None:
+                    if showtable:
+                        print(f"keys:{store.keys()}")
                     try:
                         if '/' + table in list(store.keys()):
                             dd=store[table]
@@ -953,6 +955,20 @@ if __name__ == "__main__":
 
     #pip install pandas==1.4.4
     #OSError: [WinError 1] 函数不正确。: 'G:\\'   imdisk error 
+
+    def get_tdx_all_from_h5(showtable=True):
+        #sina_monitor
+        h5_fname = 'tdx_last_df'
+        resample='d'
+        dl='60'
+        filter='y'
+        h5_table = 'low' + '_' + resample + '_' + str(dl) + '_' + filter + '_' + 'all'
+        h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
+        return h5
+
+    get_tdx_all_from_h5()
+
+
 
     sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
     # sina_MultiD_path = "D:\\RamDisk\\sina_MultiIndex_data.h5"

@@ -68,6 +68,7 @@ class StockCode:
         stock_codes = list(set([elem for elem in stock_codes if elem.startswith(('6', '30', '00'))]))
         # df=rl.get_sina_Market_json('all')
         # stock_codes = df.index.tolist()
+        # '301397'
         with open(self.stock_code_path, 'w') as f:
             f.write(json.dumps(dict(stock=stock_codes)))
         return stock_codes
@@ -232,7 +233,6 @@ class Sina:
         #     h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=self.sina_limit_time)
         # else:
         #     h5 = None
-
         if (cct.get_work_time(otime) and cct.get_work_time()) or (not cct.get_work_time(otime) and not cct.get_work_time() and ((otime >= 1500) or cct.get_now_time_int() < 1500 ) ):
             h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=self.sina_limit_time)
         else:
@@ -995,9 +995,12 @@ if __name__ == "__main__":
     # print len(df)
     # code='300107'
     # print sina.get_cname_code('陕西黑猫')
+    print((sina.get_stock_code_data('301397').T))
+
+    print(sina.get_code_cname('301397'))
+
     print(sina.get_code_cname('300107'))
     print((sina.get_stock_code_data('000017').T))
-    import ipdb;ipdb.set_trace()
 
     # print((sina.get_stock_code_data('300107').T))
 

@@ -28,6 +28,25 @@ INDEX_LIST_TDX = {'sh': 'sh999999', 'sz': 'sz399001', 'hs300': 'sz399300',
 DD_VOL_List = {'0': '40000', '1': '100000',
                '2': '100000', '3': '200000', '4': '1000000'}
 # LvolumeSize = 125000
+
+            # "4周新高" : "top_temp.query('close > high4 and lastp1d < hmax and low > lastl1d and lastl1d < ma51d and close >lastp2d')",\
+            # "5周新高" : "top_temp.query('close > max5 and lastp1d < hmax and low > lastl1d and lastl1d < ma51d and close >lastp2d ')",\
+
+codeQuery= {"放量上涨": "top_temp.query('lastv1d > lastv2d and lastv1d/last6vol > 1.5 and close > ma51d and percent > 0')",\
+            "4周新高" : "top_temp.query('high > high4 and lasth1d > lasth2d and lasth2d > lasth3d and low <= ma5d*1.02 and percent > 0')",\
+            "5周新高" : "top_temp.query('high > high4 and lasth1d > lasth2d and lasth2d > lasth3d and lasth3d > lasth4d and percent > 0')",\
+            "K线2连阳"   : "top_temp.query('close > lastp1d and  lastp1d > lastp2d and close >ma51d and topR > 0 and percent > 0')",\
+            "K线连阳"    : "top_temp.query('high > lasth1d and  lasth1d > lasth2d and lasth2d > lasth3d and low >=ma51d')",\
+            "开盘主升"    : "top_temp.query('open > low*0.999 and open <= low  and high > high4 and close > lastp1d and topR > 0')",\
+            "主升5个点"    : "top_temp.query('open > low*0.999 and open <= low and  close > open  and low <= ma51d*1.01 and close > 1.05*lastp1d and topR > 0')",\
+            "高开高走"    : "top_temp.query('open > low*0.999 and open <= low and open > lastp1d and topR > 0')",\
+            "K线反包"    : "top_temp.query('close > ma51d and close > lastp1d and  lastp1d < lastp2d and topR > 0')"}
+
+def codeQuery_show(idxkey,columns_format):
+    code=codeQuery[idxkey]
+    cmd=f"cct.format_for_print_show({code}.sort_values('dff', ascending=False),{columns_format})"
+    return(cmd)
+
 tqdm_mininterval=2
 FILLNA = -101
 ncols = 120
@@ -38,9 +57,10 @@ VolumeMinR = 0.1
 upper_cross_days = 14
 PowerCount = 1000
 duration_diff = 6
-duration_date_l = 60
+duration_date_l = 80
 duration_date_up = 120
 duration_date_week = 200
+duration_date_month = 600
 
 duration_date_sort = duration_date_l
 # PowerCountdl = duration_date_l * 2 if duration_date_l < 20 else duration_date_l
@@ -71,7 +91,7 @@ open_time = 926
 sleep_time = 6
 tdx_max_int = 10
 tdx_max_int_start = 30
-tdx_max_int_end = 30
+tdx_max_int_end = 90
 tdx_high_da = 4
 wcd_limit_day = 30
 h5_limit_time = 180

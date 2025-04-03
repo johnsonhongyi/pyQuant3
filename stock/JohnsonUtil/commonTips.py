@@ -128,6 +128,11 @@ def format_for_print(df,header=True,widths=False):
             return str(table)
         return str(table),table.get_widths()
 
+def format_for_print_show(df,columns_format=None):
+    if columns_format is None:
+        columns_format = ct.Monitor_format_trade
+    table = format_for_print(df.loc[:, columns_format])
+    return table
 
 def format_for_print2(df):
     table = PrettyTable(list(df.columns))
@@ -704,14 +709,14 @@ terminal_positionKey4K = {'sina_Market-DurationDn.py': '106, 586,1400,440',
 terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1306,438',
                         'sina_Market-DurationCXDN.py': '13, 310,1329,438',
                         'sina_Market-DurationSH.py': '-29, 623,1400,440',
-                        'sina_Market-DurationUP.py': '251, 445,1323,438',
                         'sina_Monitor-Market-LH.py': '567, 286,1307,407',
                         'sina_Monitor-Market.py': '140, 63,1400,440',
                         'sina_Monitor.py': '109, 20, 1319, 520',
-                        'singleAnalyseUtil.py': '759, 0,897,359',
+                        'singleAnalyseUtil.py': '1046, 11,897,359',
                         'LinePower.py': '44, 186, 761,407',
-                        'sina_Market-DurationDnUP.py': '41, 362,1400,480' ,
-                        'instock_Monitor.py':'62, 86,1319,439',
+                        'sina_Market-DurationDnUP.py': '600,319,1323,520',
+                        'sina_Market-DurationUP.py': '251, 445,1323,560',
+                        'instock_Monitor.py':'62, 86,1400, 359',
                         'chantdxpower.py':'86, 128, 649,407',
                         'ths-tdx-web.py':'70, 200, 159,27',
                         'pywin32_mouse.py':'70, 200, 159,27',}
@@ -2298,7 +2303,7 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
     result = []  
     time_s = time.time()
 
-    if len(urllist) > 100:
+    if len(urllist) > 200:
         if int(round(len(urllist)/100,0)) < 2:
             cpu_co = 1
         else:
