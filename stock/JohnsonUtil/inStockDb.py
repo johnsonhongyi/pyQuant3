@@ -244,6 +244,7 @@ def selectlastDays(days=7):
 
     dflast = panda_df(conn,sql_now)
     # x = 0
+
     while len(dflast) == 0:
         for x in range(1, 20):
             # print(last_tddate(x))
@@ -257,6 +258,7 @@ def selectlastDays(days=7):
     # myresult = mycursor.fetchall()
     # for x in myresult:
     #   print(x)
+    dflast['couts']=dflast.groupby(['code'])['code'].transform('count')
     conn.close()
     return dflast
 
@@ -428,7 +430,7 @@ if __name__ == '__main__':
 
     # print(showcount(selectlastDays(1),sort_date=True))
 
-    showcount(selectlastDays(2),sort_date=True)
+    showcount(selectlastDays(14),sort_date=True)
     # import ipdb;ipdb.set_trace()
     # df = show_macd_boll()
     print(df[:10])

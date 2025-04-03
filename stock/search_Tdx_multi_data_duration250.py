@@ -885,10 +885,28 @@ if __name__ == '__main__':
         get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.2,ma_250_h=1.5,resample='d',runrule=runrule)
 
     runWeek = cct.cct_raw_input("runWeek[Y/y]/[N/n]:")
+
+
     if runWeek.lower() != 'n' :
+        runrule = None
+        runruledict={'1':'追涨','2':'超跌反弹','3':'连阳新高','4':'连阳','5':'高开高走','6':'追涨High',}
+        runrule = cct.cct_raw_input("runrule:追涨/1,超跌反弹/2,连阳新高/3,连阳/4,高开高走/5,追涨High/6:[1/2/3(默认)/4/5/6]: ")
+
+        if runrule is None or len(runrule) == 0:
+            runrule = '3'
+        print("runrule:%s"%(runruledict[runrule]))
+
         get_roll_mean_all(single=False,tdx=True,app=True,duration=300,ma_250_l=1.2,ma_250_h=1.5,resample='w',runrule=runrule)
     runMon = cct.cct_raw_input("runMon[Y/y]/[N/n]:")
     if runMon.lower() != 'n' :
+        runrule = None
+        runruledict={'1':'追涨','2':'超跌反弹','3':'连阳新高','4':'连阳','5':'高开高走','6':'追涨High',}
+        runrule = cct.cct_raw_input("runrule:追涨/1,超跌反弹/2,连阳新高/3,连阳/4,高开高走/5,追涨High/6:[1/2/3(默认)/4/5/6]: ")
+
+        if runrule is None or len(runrule) == 0:
+            runrule = '3'
+        print("runrule:%s"%(runruledict[runrule]))
+
         get_roll_mean_all(single=False,tdx=True,app=True,duration=900,ma_250_l=1.2,ma_250_h=1.5,resample='m',runrule=runrule)
 
     # get_roll_mean_all(single=False, tdx=True, app=False,duration=300,ma_250_l=1.02,ma_250_h=1.2,resample='w',rewrite=True)

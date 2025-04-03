@@ -663,6 +663,7 @@ def get_tdx_macd(df):
 
     # df=df.fillna(0)
     # macd=DIF，signal=DEA，hist=BAR
+    #macdwhite -> macd macdyellow-> dif macd=>dea ??
     df.loc[:, 'macdwhite'], df.loc[:, 'macdyellow'], df.loc[:, 'macd'] = tl.MACD(
         df['close'], fastperiod=12, slowperiod=26, signalperiod=9) 
 
@@ -3776,6 +3777,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         df['ma5d'] = pd.Series.rolling(df.close, 5).mean().apply(lambda x: round(x,2))
         df['ma10d'] = pd.Series.rolling(df.close, 10).mean().apply(lambda x: round(x,2))
         df['ma20d'] = pd.Series.rolling(df.close, 26).mean().apply(lambda x: round(x,2))
+        df['ma60d'] = pd.Series.rolling(df.close, 60).mean().apply(lambda x: round(x,2))
         # df['natr'] = ta.natr(df.high, df.low, df.close)
         df['truer'] = ta.true_range(df.high, df.low, df.close)
 
@@ -3831,6 +3833,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
             df['per%sd' % da] = df['perd'][-da]
             df['ma5%sd' % da] = df['ma5d'][-da]
             df['ma20%sd' % da] = df['ma20d'][-da]
+            df['ma60%sd' % da] = df['ma60d'][-da]
             # df['du%sd' % da] = df['perd'][-da] - df['lastdu'][-da]
             # df['per%sd' % da] = df['perd'].shift(da-1)
             df['perc%sd' % da] = df['perlastp'][-da]
@@ -4837,7 +4840,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             dl = dl + cct.get_today_duration(end, cct.get_today())
 #            print cct.get_today_duration(end,cct.get_today())
 
-        if len(codeList) > 120:
+        if len(codeList) > 400:
             
             results = cct.to_mp_run_async(
                 get_tdx_exp_low_or_high_power, codeList, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample)
@@ -5535,6 +5538,7 @@ if __name__ == '__main__':
     code = '000557'
     code = '002175'
     # code = '300707'
+    # resample = '3d'
     resample = 'd'
     # code = '000001'
     # code = '000916'
@@ -5543,7 +5547,7 @@ if __name__ == '__main__':
     df = get_tdx_exp_all_LastDF_DL([code],end='2023-10-13',  dt=60, ptype='low', filter='y', power=ct.lastPower, resample=resample)
 
     # df = get_tdx_exp_low_or_high_power(code, dl=30, newdays=0, resample='d')
-    # df = get_tdx_Exp_day_to_df(code, dl=60, newdays=0, resample='d')
+    df = get_tdx_Exp_day_to_df(code, dl=60, newdays=0, resample=resample)
 
     print("day_to_df:", df[:1][['per1d','per2d','per3d']])
 

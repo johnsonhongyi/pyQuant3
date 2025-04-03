@@ -179,10 +179,10 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     tdx_Index_Tdxdata = cct.GlobalValues().getkey('tdx_Index_Tdxdata')
     market_va_filter = cct.GlobalValues().getkey('market_va_filter')
 
-    if market_value != '1.1' and int(market_value) > ct.compute_lastdays:
+    if market_value != '1.1' and int(float(market_value)) > ct.compute_lastdays:
         market_value = ct.compute_lastdays
 
-    if market_value is not None and market_value != '1' and market_value != '1.1' and int(market_value) >= 2:
+    if market_value is not None and market_value != '1' and market_value != '1.1' and int(float(market_value)) >= 2:
         df= compute_perd_value(df, market_value, 'perc')
         df= compute_perd_value(df, market_value, 'per')
         df= compute_perd_value(df, market_value, 'lastv')

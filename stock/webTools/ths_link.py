@@ -16,13 +16,19 @@ user32 = windll.user32
 def ths_prc_hwnd():
     pl = psutil.pids()
     for pid in pl:
-        # 进程id 获取进程名 转化为小写
-        if psutil.Process(pid).name().lower() == 'hexin.exe':
-            # isinstance() 函数来判断一个对象是否是一个已知的类型 pid 是 int类型
-            if isinstance(pid, int):
-                # 打开一个已存在的进程对象hexin.exe，并返回进程的句柄
-                ths_process_hwnd = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, int(pid))  # 申请内存所在的进程句柄
-                return ths_process_hwnd
+        try:
+            # 进程id 获取进程名 转化为小写
+            if psutil.Process(pid).name().lower() == 'hexin.exe':
+                # isinstance() 函数来判断一个对象是否是一个已知的类型 pid 是 int类型
+                if isinstance(pid, int):
+                    # 打开一个已存在的进程对象hexin.exe，并返回进程的句柄
+                    ths_process_hwnd = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, int(pid))  # 申请内存所在的进程句柄
+                    return ths_process_hwnd
+        except psutil.NoSuchProcess:  # Catch the error caused by the process no longer existing
+            print(f"NoSuchProcess with pid: {pid}")
+            # pass  # Ignore it
+        else:
+            pass
 
 
 def bytes_16(dec_num, code):

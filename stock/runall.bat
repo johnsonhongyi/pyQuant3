@@ -55,7 +55,9 @@ rem ping -n 20 localhost > nul
 rem start cmd /k python sina_Monitor-Market-LH.py
 rem start cmd /k python sina_Market-DurationUp.py
 rem ping -n 20 localhost > nul 
-start cmd /k python sina_Monitor-Market-LH.py
+
+
+rem start cmd /k python sina_Monitor-Market-LH.py
 rem ping -n 20 localhost > nul 
 rem 20250212
 rem start cmd /k python sina_Market-DurationDn.py
@@ -72,10 +74,14 @@ cd webTools/
 start cmd /k python ths-tdx-web.py
 cd ../
 
+start cmd /k python sina_Market-DurationDnUP.py
+TIMEOUT /T 200 /NOBREAK
 rem C:
 rem cd "C:\Users\Johnson\Documents\TDX\55188\"
 rem start  "人气共振2.2.exe"
 rem pause
 rem start python LineHistogram.py
 TIMEOUT /T 100 /NOBREAK
+python macRun.py
+
 exit

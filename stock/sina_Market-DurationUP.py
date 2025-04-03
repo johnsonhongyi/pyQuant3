@@ -26,6 +26,7 @@ from JohnsonUtil import commonTips as cct
 # parser = argparse.ArgumentParser()
 # parser.add_argument('dt', type=str, nargs='?', help='20150612')
 # return parser
+
 def evalcmd(dir_mo):
     end = True
     import readline
@@ -35,10 +36,61 @@ def evalcmd(dir_mo):
     while end:
         # cmd = (cct.cct_raw_input(" ".join(dir_mo)+": "))
         cmd = (cct.cct_raw_input(": "))
+        code=ct.codeQuery
+        if len(cmd) == 0:
+            # code='最近两周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
+            # code='周线2连阳,最近三周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
+            # code='日K,4连阳以上,4天涨幅排序,今天阳线'
+            # code={"周线4周新高" : "top_temp.query('close > high4 and lastp1d < hmax and low > lastl1d and lastl1d < ma51d and close >lastp2d')",\
+            #       "周线5周新高" : "top_temp.query('close > max5 and lastp1d < hmax and low > lastl1d and lastl1d < ma51d and close >lastp2d')",\
+            #       "周线2连阳"   : "top_temp.query('close > lastp1d and  lastp1d > lastp2d and close >ma51d')",\
+            #       "周线连阳"    : "top_temp.query('high > lasth1d and  lasth1d > lasth2d and low >=ma51d')",\
+            #       "周线反包"    : "top_temp.query('close > lastp1d and  lastp1d < lastp2d and close >ma51d')"}
+            for idx in range(len(code.keys())):
+                id_key = list(code.keys())[idx]
+                print("%s: %s %s"%(idx+1,id_key,code[id_key]))
+            # for key in code.keys():
+            #     print("%s: %s"%(key,code[key]))
+
+            list(code.keys())
+            initkey= list(code.keys())[0]
+            print(f"{initkey}: {code[initkey]}")
+            # cmd=code[initkey]
+            cct.GlobalValues().setkey('tempdf',code[initkey])
+            cmd=ct.codeQuery_show(initkey,ct_Duration_format_Values)
+        
+        elif len(cmd) == 1 and cmd.isdigit() and int(cmd) < len(code.keys())+1:
+            # idx = int(cmd)+1 if int(cmd) == 0 else int(cmd)
+            idx = int(cmd) - 1
+            # print(f"idx:{idx}")
+            idxkey =  list(code.keys())[idx]
+            print(f"{idxkey}: {code[idxkey]}")
+            # cmd = code[idxkey]
+            cct.GlobalValues().setkey('tempdf',code[idxkey])
+            cmd=ct.codeQuery_show(idxkey,ct_Duration_format_Values)
         # cmd = (cct.cct_raw_input(dir_mo.append(":")))
         # if cmd == 'e' or cmd == 'q' or len(cmd) == 0:
         if cmd == 'e' or cmd == 'q':
             break
+        elif cmd.startswith('w') or cmd.startswith('a'):
+            if cct.GlobalValues().getkey('tempdf') is not None:
+                tempdf = eval(cct.GlobalValues().getkey('tempdf')).sort_values('dff', ascending=False)
+            else:
+                continue
+            args = cct.writeArgmain().parse_args(cmd.split())
+            codew = stf.WriteCountFilter(
+                tempdf, 'ra', writecount=args.dl)
+            if args.code == 'a':
+                cct.write_to_blocknew(block_path, codew)
+                # sl.write_to_blocknew(all_diffpath, codew)
+            else:
+                # codew = stf.WriteCountFilter(top_temp)
+                cct.write_to_blocknew(block_path, codew, False)
+                # sl.write_to_blocknew(all_diffpath, codew, False)
+            print("wri ok:%s" % block_path)
+            # cct.GlobalValues().setkey('tempdf',None)
+            cct.sleeprandom(ct.duration_sleep_time / 10)
+
         elif len(cmd) == 0:
             continue
         else:
@@ -92,6 +144,7 @@ if __name__ == "__main__":
     # delay_time = cct.get_delay_time()
     First = True
     blkname = '062.blk'
+    # global block_path
     block_path = tdd.get_tdx_dir_blocknew() + blkname
     status_change = False
     lastpTDX_DF = pd.DataFrame()
@@ -442,7 +495,7 @@ if __name__ == "__main__":
                         # top_temp = top_temp[ (top_temp['ma5d'] > top_temp['ma10d']) & (top_temp['buy'] > top_temp['ma10d']) ][:10]
 
                         top_dd = cct.combine_dataFrame(
-                            top_temp[:10], top_end, append=True, clean=True)
+                            top_temp[:20], top_end, append=True, clean=True)
                         # top_dd = top_dd.drop_duplicates()
                         ct_Duration_format_Values = ct.get_Duration_format_Values(
                             ct.Duration_format_buy, market_sort_value[:])
@@ -451,7 +504,7 @@ if __name__ == "__main__":
                         # top_temp = top_temp[top_temp['trade'] > top_temp['ma10d']]
 
                         top_dd = cct.combine_dataFrame(
-                            top_temp[:10], top_end, append=True, clean=True)
+                            top_temp[:20], top_end, append=True, clean=True)
                         # top_dd = top_dd.drop_duplicates()
                         ct_Duration_format_Values = ct.get_Duration_format_Values(
                             ct.Duration_format_trade, market_sort_value[:])
@@ -479,7 +532,7 @@ if __name__ == "__main__":
                     # print cct.format_for_print(top_dd)
                     # table,widths = cct.format_for_print(top_dd[:9],widths=True)
                     table, widths = cct.format_for_print(
-                        top_dd.loc[[col for col in top_dd[:9].index if col in top_temp[:10].index]], widths=True)
+                        top_dd.loc[[col for col in top_dd[:19].index if col in top_temp[:20].index]], widths=True)
 
                     print(table)
                     cct.counterCategory(top_temp)
