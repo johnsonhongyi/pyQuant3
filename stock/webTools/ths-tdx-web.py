@@ -288,7 +288,7 @@ if __name__ == '__main__':
 
     if not find_proc_windows('人气综合排行榜2.2',fuzzysearch=True):
         # os.system('cmd /c start C:\\Users\\Johnson\\Documents\\TDX\\55188\\人气共振2.2.exe')
-        run_system_fpath("C:\\Users\\Johnson\\Documents\\TDX\\55188\\人气共振2.2.exe")
+        run_system_fpath("C:\\Users\\Johnson\\Documents\\TDX\\55188\\人气共振2.22.exe")
         time.sleep(1)
     if not find_proc_windows('行业跟随',fuzzysearch=True):
         # os.system('cmd /c start C:\\Users\\Johnson\\Documents\\TDX\\55188\\竞价定行业1.1.exe')
@@ -304,8 +304,14 @@ if __name__ == '__main__':
         run_system_fpath('D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
         time.sleep(6)
 
-    if not find_proc_windows('通达信',fuzzysearch=True):
+
+    if not find_proc_windows('通达信金融终端',fuzzysearch=True):
         run_system_fpath('%s\\tdxw.exe'%(cct.get_tdx_dir()))
+        time.sleep(8)
+
+    if not find_proc_windows('东兴证券',fuzzysearch=True):
+        run_system_fpath('%s\\tdxw.exe'%('D:\\MacTools\\WinTools\\zd_dxzq'))
+        # run_system_fpath('%s\\tdxw.exe'%(cct.win10dxzq.))
         time.sleep(8)
     if not find_proc_windows('pywin32_mouse'):
         os.system('start cmd /k python pywin32_mouse.py')

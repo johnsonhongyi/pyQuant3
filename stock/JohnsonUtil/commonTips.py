@@ -65,6 +65,8 @@ win10Lixin = r'C:\zd_zszq'
 win10Triton = r'D:\MacTools\WinTools\new_tdx2'
 #东兴
 win10pazq = r'D:\MacTools\WinTools\new_tdx2'
+win10dxzq = r'D:\MacTools\WinTools\zd_dxzq'
+
 win7rootAsus = r'D:\Program Files\gfzq'
 win7rootXunji = r'E:\DOC\Parallels\WinTools\zd_pazq'
 win7rootList = [win10Triton,win10Lixin, win7rootAsus, win7rootXunji, win10Lengend]
@@ -1115,6 +1117,15 @@ def get_tdx_dir_blocknew():
     blocknew_path = get_tdx_dir() + r'/T0002/blocknew/'.replace('/', path_sep).replace('\\', path_sep)
     return blocknew_path
 
+def get_tdx_dir_blocknew_dxzq(block_path):
+
+    blocknew_path = get_tdx_dir_blocknew()
+    if block_path.find(blocknew_path) > -1:
+        blkname = block_path.split('\\')[-1]
+        blocknew_path = win10dxzq + r'/T0002/blocknew/'.replace('/', path_sep).replace('\\', path_sep) + blkname
+    else:
+        log.error("not find blkname{block_path}")
+    return blocknew_path
 
 def isMac():
     if get_sys_system().find('Darwin') == 0:
@@ -2970,7 +2981,16 @@ def write_to_blkdfcf(codel,conf_ini=dfcf_path,blk='inboll1',append=True):
         # print('instock:',cf.get("\\SelfSelect", "instock"))
         cf.write(open(conf_ini,"w",encoding='UTF-16'))
 
+
 def write_to_blocknew(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True):
+    # fname=p_name
+    # writename=r'D:\MacTools\WinTools\zd_dxzq\T0002'
+    blocknew_path=get_tdx_dir_blocknew_dxzq(p_name)
+    write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True)
+    write_to_blocknew_2025(blocknew_path, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True)
+
+
+def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True):
     if keep_last is None:
         keep_last = ct.keep_lastnum
     # index_list = ['1999999','47#IFL0',  '0159915', '27#HSI']
@@ -4951,6 +4971,7 @@ if __name__ == '__main__':
     import ipdb;ipdb.set_trace()
     '''
     # rzrq['all']='nan'
+    print(get_tdx_dir_blocknew_dxzq(r'D:\MacTools\WinTools\new_tdx2\T0002\blocknew\090.blk'))
     print(is_trade_date())
     print(isDigit('nan None'))
     print("指数的贡献度:",isDigit('指数的贡献度'))
