@@ -64,13 +64,13 @@ def evalcmd(dir_mo):
             #     print("%s: %s"%(key,code[key]))
 
             list(code.keys())
-            initkey= list(code.keys())[0]
+            initkey= list(code.keys())[1]
             print(f"{initkey}: {code[initkey]}")
             # cmd=code[initkey]
             cct.GlobalValues().setkey('tempdf',code[initkey])
             cmd=ct.codeQuery_show(initkey,ct_MonitorMarket_Values)
         
-        elif len(cmd) == 1 and cmd.isdigit() and int(cmd) < len(code.keys())+1:
+        elif len(cmd) <= 2 and cmd.isdigit() and int(cmd) < len(code.keys())+1:
             # idx = int(cmd)+1 if int(cmd) == 0 else int(cmd)
             idx = int(cmd) - 1
             # print(f"idx:{idx}")
