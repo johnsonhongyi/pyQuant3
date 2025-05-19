@@ -10,8 +10,10 @@ def broadcast_stock_code(stock_code,message_type='stock'):
             codex = '6' + str(stock_code)
         elif str(stock_code)[0] == '6':
             codex = '7' + str(stock_code)
+        # elif str(stock_code)[0] == '9':
+        #     codex = '2' + str(stock_code)
         else:
-            code = '4' + str(stock_code)
+            codex = '4' + str(stock_code)
     else:
         codex = int(stock_code)
     UWM_STOCK = win32api.RegisterWindowMessage('stock')
@@ -21,5 +23,6 @@ def broadcast_stock_code(stock_code,message_type='stock'):
 
 
 if __name__ == '__main__':
-    # broadcast_stock_code('stock','000001')
-    broadcast_stock_code('399001')
+    # broadcast_stock_code('999999')
+    # broadcast_stock_code('000001')
+    broadcast_stock_code('833171')

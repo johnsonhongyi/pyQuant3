@@ -32,6 +32,9 @@ def ths_prc_hwnd():
 
 
 def bytes_16(dec_num, code):
+    # num=ord(char)   # 将ASCII字符转换为对应的整数
+    # ord('?') -> 63  chr(63) -> ? bytes_16(63, code) ->b'?833171'
+    # char=chr(num) # 将整数转换为对应的ASCII字符
     ascii_char = chr(dec_num)  # 将整数转换为对应的ASCII字符
     codex = ascii_char + str(code)
     # 将Python字符串转换为bytes类型
@@ -46,6 +49,7 @@ def ths_convert_code(code):
     :return:
     '''
     # 上海，深圳股票判断;
+
     if str(code)[0] == '6':
         # 将16进制数转换为整数
         dec_num = int('11', 16)
@@ -60,10 +64,25 @@ def ths_convert_code(code):
         # 将16进制数转换为整数
         dec_num = int('23', 16)
         bytes_codex = bytes_16(dec_num, code)
+    # 12开头的可转债
+    elif str(code).startswith('15'):
+        # 将16进制数转换为整数
+        dec_num = int('24', 16)
+        bytes_codex = bytes_16(dec_num, code)
+
+        # 12开头的可转债
+    elif str(code).startswith('8') or str(code).startswith('92') or str(code).startswith('43'):
+        # 将16进制数转换为整数
+        # ord('?') -> 63  chr(63) -> ? bytes_16(63, code) ->b'?833171'
+        # char=chr(num) # 将整数转换为对应的ASCII字符
+        # (base16 - > int) ('%x' % 63) -> '3f'
+        dec_num = int('97', 16)
+        bytes_codex = bytes_16(dec_num, code)
     else:
         # 将16进制数转换为整数
         dec_num = int('21', 16)
         bytes_codex = bytes_16(dec_num, code)
+
     return bytes_codex
 
 
@@ -83,4 +102,5 @@ def send_code_message(code, exe='hexin.exe'):
 
 if __name__ == '__main__':
     # 让同花顺切换到股票代码
-    send_code_message('000006', 'hexin.exe')
+    send_code_message('159531', 'hexin.exe')
+    # send_code_message('833171', 'hexin.exe')

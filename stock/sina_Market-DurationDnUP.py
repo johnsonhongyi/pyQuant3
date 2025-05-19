@@ -396,7 +396,7 @@ if __name__ == "__main__":
                                                             ascending=market_sort_value_key)
 
                     
-                    top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
+                    # top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
                     
                     if st_key_sort.split()[0] == 'x':
                         top_temp = top_temp[top_temp.topR != 0]
@@ -476,8 +476,6 @@ if __name__ == "__main__":
                 st_k = st_l[0]
                 if st_k in list(ct.Market_sort_idx.keys()) and len(top_all) > 0:
                     st_key_sort = st
-                    import ipdb;ipdb.set_trace()
-                    
                     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort, top_all=top_all)
                 else:
                     log.error("market_sort key error:%s" % (st))

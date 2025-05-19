@@ -18,9 +18,10 @@ import numpy as np
 import subprocess
 log = LoggerFactory.log
 import gc
-global RAMDISK_KEY, INIT_LOG_Error
+global RAMDISK_KEY, INIT_LOG_Error,Debug_is_not_find
 RAMDISK_KEY = 0
 INIT_LOG_Error = 0
+Debug_is_not_find = 0
 # Compress_Count = 1
 BaseDir = cct.get_ramdisk_dir()
 
@@ -811,6 +812,11 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                 else:
                     df=dd
             else:
+                # global Debug_is_not_find
+                # if Debug_is_not_find < 4:
+                #     Debug_is_not_find +=1
+                # else:
+                #     import ipdb;ipdb.set_trace()
                 log.error("%s is not find %s" % (fname, table))
         else:
             log.error("%s / table is Init None:%s"%(fname, table))

@@ -592,12 +592,17 @@ def get_tdx_Exp_day_to_df_AllRead_(code, start=None, end=None, dl=None, newdays=
     # df['hmax'] = df.high[-tdx_max_int:-ct.tdx_max_int_end].max()
     # df['hmax'] = df.close[:-ct.tdx_max_int_end].max()
 
-    df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
+    # df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
+    df['hmax'] = df.close[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
 
     # df['max5'] = df.close[-10:max_int_end].max()
 
-    df['max5'] = df.high[-6:-1].max()
-    df['high4'] = df.high[-5:-1].max()
+    # df['max5'] = df.high[-6:-1].max()
+    # df['high4'] = df.high[-5:-1].max()
+    # df['low4'] = df.low[-5:-1].min()
+
+    df['max5'] = df.close[-6:-1].max()
+    df['high4'] = df.close[-5:-1].max()
     df['low4'] = df.low[-5:-1].min()
     # df['lmin'] = df.low[-tdx_max_int:max_int_end].min()
     df['lmin'] = df.low[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
@@ -649,10 +654,10 @@ def custom_macd(prices, fastperiod=12, slowperiod=26, signalperiod=9):
         dea[i] = ((signalperiod - 1) * dea[i - 1] + 2 * diff[i]) / (signalperiod + 1)
    # 计算MACD
    macd = 2 * (diff - dea)
-   return diff, dea, macd
+   return diff, dea, macdmmm
 
 def get_tdx_macd(df):
-    if len(df) < 20:
+    if len(df) < 10:
         return df
     increasing = True
     if not df.index.is_monotonic_increasing:
@@ -1077,9 +1082,13 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
 
         if cct.get_work_time_duration():
             df['max5'] = df.close[-6:-1].max()
-            df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
-            df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
-            df['high4'] = df.high[-5:-1].max()
+            df['hmax'] = df.close[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
+            df['hmax60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
+            df['high4'] = df.close[-5:-1].max()
+
+            # df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
+            # df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
+            # df['high4'] = df.high[-5:-1].max()
             df['low4'] = df.low[-5:-1].min()
             df['lastdu4'] = df['high4'][0] /(df['low4'][0]+0.1)
 
@@ -1088,9 +1097,13 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         else:
             df['max5'] = df.close[-6:-1].max()
             # df['hmax'] = df.close[-ct.tdx_max_int_end:max_int_end].max()
-            df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
-            df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
-            df['high4'] = df.high[-5:-1].max()
+            df['hmax'] = df.close[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
+            df['hmax60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
+            df['high4'] = df.close[-5:-1].max()
+
+            # df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
+            # df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
+            # df['high4'] = df.high[-5:-1].max()
             df['low4'] = df.low[-5:-1].min()
             # print(df.high4[0],(df['low4'][0]))
             df['lastdu4'] = df['high4'][0] /(df['low4'][0]+0.1)
@@ -2799,7 +2812,9 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     dm['percent'] = ((dm['close'] - dm['llastp']) / dm['llastp'] * 100).map(lambda x: round(x, 2))
     log.debug("dm percent:%s" % (dm[:1]))
     # dm['volume'] = map(lambda x: round(x / 100, 1), dm.volume.values)
-    dm['trade'] = dm['close']
+    # dm['trade'] = dm['close'] if dm['b1'] ==0 else dm['b1']
+    dm['trade'] = list(map(lambda x, y: x if int(x) > 0 else y, dm.b1, dm.close))
+    dm['buy'] = list(map(lambda x, y: x if int(x) > 0 else y, dm.b1, dm.buy))
 
     if market != 'index':
         if cct.get_now_time_int() > 915 and cct.get_now_time_int() < 926:
@@ -3394,9 +3409,10 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # df['hmax'] = df['high'].rolling(10).max()
     # df['lastdu4'] = (df['high'].rolling(4).max()-df['low'].rolling(4).min())/df['low'].rolling(4).min()
     df['max5'] = df.close[-6:-1].max()
-    df['hmax'] = df.high[-6:-1].max()
+    # df['hmax'] = df.high[-6:-1].max()
+    df['hmax'] = df.close[-6:-1].max()
     # df['hmax60'] = df.high[:-1].max()
-    df['high4'] = df.high[-5:-1].max()
+    df['high4'] = df.close[-5:-1].max()
     df['low4'] = df.low[-5:-1].min()
     # df['lastdu4'] = (df['high4'][0] -df['low4'][0]) /df['low4'][0]
     df['lastdu4'] = df['high4'][0] /df['low4'][0]
@@ -5417,11 +5433,14 @@ if __name__ == '__main__':
     #get_tdx_exp_all_LastDF_DL() get_tdx_exp_low_or_high_power
     code='600602'
     code='603038'
-    code='601360'
+    code='833171'
+    code='688652'
     # code='600005'
     # df2 = get_tdx_exp_low_or_high_power(code,dl=120,resample='d' )
-    df = get_tdx_Exp_day_to_df(code,dl=60, start=None,end=None, newdays=0, resample='d')
-    
+    # df = get_tdx_Exp_day_to_df(code,dl=60, start=None,end=None, newdays=0, resample='d')
+    df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_month, start=None,end=None, newdays=0, resample='m')
+    import ipdb;ipdb.set_trace()
+
     # import ipdb;ipdb.set_trace()
 
     # df3 = get_tdx_exp_low_or_high_power(code,dl=60)

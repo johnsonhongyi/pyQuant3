@@ -661,7 +661,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     df_u = get_multi_code_count(df_u)
     df_u = df_u.groupby(level=[0]).tail(1).reset_index().set_index('code')
     df_u = df_u[df_u.date>=lastday1]
-    df_u = df_u[(~df_u.index.str.contains('688'))] 
+    # df_u = df_u[(~df_u.index.str.contains('688'))] 
     df_u = df_u.sort_values(by=['percent','couts','volchang'],ascending=[0,1,1])
     df_u = df_u[df_u.percent > 0]
     codeupper = df_u.index.tolist()
@@ -766,7 +766,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                 # top_temp = top_temp[top_temp.couts > 1]
             else:
                 top_temp = top_temp.sort_values(by=['percent','couts','volchang',percet],ascending=[0,1,1,1])
-            top_temp = top_temp[ (~top_temp.index.str.contains('688'))]  
+            # top_temp = top_temp[ (~top_temp.index.str.contains('688'))]  
             top_temp = top_temp[ (~top_temp.name.str.contains('ST'))]  
             if app:
                 if resample.lower() == 'd' or resample.lower() == 'w' :

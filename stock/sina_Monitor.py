@@ -162,7 +162,12 @@ if __name__ == "__main__":
     block_path = tdd.get_tdx_dir_blocknew() + blkname
     lastpTDX_DF = pd.DataFrame()
     parserDuraton = cct.DurationArgmain()
-    duration_date = ct.duration_date_l
+    # resample = '3d'
+    # global resample
+    cct.GlobalValues().setkey('resample','3d')
+    # resample = cct.GlobalValues().getkey('resample')
+    duration_date = ct.duration_date_l  #80dat
+    duration_date = 60
     du_date = duration_date
     if len(str(duration_date)) < 4:
         # duration_date = tdd.get_duration_price_date('999999', dl=duration_date, end=end_date, ptype='dutype')
@@ -179,7 +184,7 @@ if __name__ == "__main__":
     st_key_sort_start = 0
     # st_key_sort = '3 1'
     # st_key_sort = '8'
-    resample = '3d'
+
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(
         st_key_sort)
     # st_key_sort = '9'
@@ -194,6 +199,7 @@ if __name__ == "__main__":
             #     print len(df),
             # top_now = rl.get_sina_dd_count_price_realTime(df)
             # print len(top_now)
+            resample = cct.GlobalValues().getkey('resample')
 
             if st_key_sort_start == 0 and cct.get_now_time_int() > 915 :
                 st_key_sort = '4'
@@ -497,7 +503,7 @@ if __name__ == "__main__":
                             #主升浪
                             # top_temp = top_all[(top_all.topU > 0) & ( (top_all.close > top_all.max5) | (top_all.close > top_all.hmax) ) & (top_all.topR > 0)] 
                             # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
-                            top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
+                            # top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
                             # top_temp[ (top_temp.index.str.contains('688'))][:1]
                             # top_all[ (~top_all.index.str.contains('688'))  &(top_all.topU > 0)]  
 
@@ -585,7 +591,7 @@ if __name__ == "__main__":
 
 
                         # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
-                        top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
+                        # top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
                         # top_temp = top_all[  (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.low >= top_all.nlow) & ((top_all.open >= top_all.nlow *0.998) & (top_all.open <= top_all.nlow*1.002)) ]
                         # top_temp = top_all[ (top_all.volume >= 1.2 ) & (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.close > top_all.lastp1d)]
                     
@@ -617,8 +623,8 @@ if __name__ == "__main__":
                     top_temp = top_temp[ (top_temp.close > top_temp.max5) | (top_temp.lastdu4 > 1.02)]
 
                 #clean 688 and st
-                if len(top_temp) > 0:                
-                    top_temp = top_temp[ (~top_temp.index.str.contains('688')) ]
+                # if len(top_temp) > 0:                
+                #     top_temp = top_temp[ (~top_temp.index.str.contains('688')) ]
 
 
                 # top_temp = top_temp[ (top_temp.low >= top_temp.df2*0.985) & (top_temp.low <= top_temp.df2*1.02)]
@@ -854,7 +860,7 @@ if __name__ == "__main__":
                 cct.GlobalValues().setkey('lastbuylogtime', 1)
                 # cct.set_clear_logtime()
                 status=False
-            elif st.startswith('d') or st.startswith('dt'):
+            elif st.startswith('dd') or st.startswith('dt'):
                 args = parserDuraton.parse_args(st.split()[1:])
                 if len(str(args.start)) > 0:
                     if args.end:
@@ -868,6 +874,19 @@ if __name__ == "__main__":
                     top_all = pd.DataFrame()
                     time_s = time.time()
                     status = False
+                    lastpTDX_DF = pd.DataFrame()
+            elif st.startswith('3d') or st.startswith('d') or st.startswith('5d'):
+                if st.startswith('3d'):
+                    cct.GlobalValues().setkey('resample','3d')
+                    top_all = pd.DataFrame()
+                    lastpTDX_DF = pd.DataFrame()
+                elif st.startswith('d'):
+                    cct.GlobalValues().setkey('resample','d')
+                    top_all = pd.DataFrame()
+                    lastpTDX_DF = pd.DataFrame()
+                elif st.startswith('5d'):
+                    cct.GlobalValues().setkey('resample','w')
+                    top_all = pd.DataFrame()
                     lastpTDX_DF = pd.DataFrame()
 
             elif st.startswith('w') or st.startswith('a'):

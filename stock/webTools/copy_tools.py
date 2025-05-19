@@ -16,6 +16,7 @@ pre_hash = None
 import win32api
 # import win32con
 import win32gui
+import time
 
 # import pandas as pd
 # import sys
@@ -57,8 +58,10 @@ def broadcast_stock_code(stock_code,message_type='stock'):
                 codex = '6' + str(stock_code)
             elif str(stock_code)[0] == '6':
                 codex = '7' + str(stock_code)
+            # elif str(stock_code)[0] == '9':
+            #     codex = '2' + str(stock_code)
             else:
-                code = '4' + str(stock_code)
+                codex = '4' + str(stock_code)
         else:
             codex = int(stock_code)
         UWM_STOCK = win32api.RegisterWindowMessage('stock')
@@ -67,6 +70,7 @@ def broadcast_stock_code(stock_code,message_type='stock'):
         win32gui.PostMessage( win32con.HWND_BROADCAST,UWM_STOCK,int(codex),0)
         send_code_message(stock_code)
 # broadcast_stock_code('399001')
+# broadcast_stock_code('833171')
 
 def add_data(new_data):
     new_status=False
@@ -151,13 +155,14 @@ async def get_clipboard_contents():
     while 1:
         await asyncio.sleep(0.5)
         
-        # try:
-        #     content = pyperclip.paste()
-        # except pyperclip.PyerclipException:
-        #     # raise e
-        #     content 
+        try:
+            content = pyperclip.paste()
+        except pyperclip.PyperclipWindowsException as e:
+            # print(e)
+            time.sleep(1)
+            continue 
 
-        content = pyperclip.paste()
+        # content = pyperclip.paste()
         content = content.strip()
         if not isDigit(content):
             continue
@@ -171,7 +176,7 @@ async def get_clipboard_contents():
             "hash": hashlib.md5(content.encode("utf8")).hexdigest()
         }
 
-        if len(content) == 6 and (content.startswith(('00','1','30')) or content.startswith(('5', '6', '9'))):
+        if len(content) == 6 and (content.startswith(('00','1','30')) or content.startswith(('5', '6', '8','9'))):
             if content:
                 cur = get_text(cur)
             else:
