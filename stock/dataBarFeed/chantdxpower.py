@@ -2596,7 +2596,10 @@ if __name__ == "__main__":
             #     # import win_unicode_console
             #     win_unicode_console.enable()
             # code == '000830'
+            if len(code) == 0:
+                code = '999999' 
             args=parser.parse_args(code.split())
+
             # print args
             # print str(args.days)
 

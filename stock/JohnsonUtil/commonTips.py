@@ -714,7 +714,7 @@ terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '62, 416,1306,438'
                         'sina_Monitor-Market-LH.py': '567, 286,1307,407',
                         'sina_Monitor-Market.py': '140, 63,1400,440',
                         'sina_Monitor.py': '109, 20, 1319, 520',
-                        'singleAnalyseUtil.py': '1046, 11,897,359',
+                        'singleAnalyseUtil.py': '1082, 15,897,359',
                         'LinePower.py': '44, 186, 761,407',
                         'sina_Market-DurationDnUP.py': '600,319,1323,520',
                         'sina_Market-DurationUP.py': '251, 445,1323,560',
@@ -2635,7 +2635,14 @@ def code_to_symbol(code):
         if len(code) != 6:
             return ''
         else:
-            return 'sh%s' % code if code[:1] in ['5', '6', '9'] else 'sz%s' % code
+            # return 'sh%s' % code if code[:1] in ['5', '6', '9'] else 'sz%s' % code
+            if  code[:1] in ['5', '6', '9']:
+                code = 'sh%s' % code
+            elif  code[:1] in ['8']:
+                code = 'bj%s' % code
+            else:
+                code = 'sz%s' % code
+            return code
 
 def code_to_symbol_ths(code):
     """
@@ -2647,7 +2654,14 @@ def code_to_symbol_ths(code):
         if len(code) != 6:
             return ''
         else:
-            return '%s.SH' % code if code[:1] in ['5', '6', '9'] else '%s.SZ' % code
+            if  code[:1] in ['5', '6', '9']:
+                code = '%s.SH' % code
+            elif  code[:1] in ['8']:
+                code = '%s.BJ' % code
+            else:
+                code = '%s.SZ' % code
+            return code
+            # return '%s.SH' % code if code[:1] in ['5', '6', '9'] else '%s.SZ' % code
 
 def symbol_to_code(symbol):
     """

@@ -238,9 +238,9 @@ if __name__ == "__main__":
             # market_blk = 'all'
 
 
-            indf = inDb.showcount(inDb.selectlastDays(5),sort_date=True)
+            indf = inDb.showcount(inDb.selectlastDays(10),sort_date=True)
             if len(indf) == 0:
-                indf = inDb.showcount(inDb.selectlastDays(5),sort_date=True)
+                indf = inDb.showcount(inDb.selectlastDays(10),sort_date=True)
                 
             if len(indf) > 0 and cct.creation_date_duration(block_path) > 1:
                 cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
@@ -514,7 +514,7 @@ if __name__ == "__main__":
                             #主升浪
                             # top_temp = top_all[(top_all.topU > 0) & ( (top_all.close > top_all.max5) | (top_all.close > top_all.hmax) ) & (top_all.topR > 0)] 
                             # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
-                            top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
+                            # top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
                             # top_temp[ (top_temp.index.str.contains('688'))][:1]
                             # top_all[ (~top_all.index.str.contains('688'))  &(top_all.topU > 0)]  
 
@@ -585,7 +585,7 @@ if __name__ == "__main__":
                         top_temp = top_all.copy()
 
                         # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
-                        top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
+                        # top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
                         # top_temp = top_all[  (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.low >= top_all.nlow) & ((top_all.open >= top_all.nlow *0.998) & (top_all.open <= top_all.nlow*1.002)) ]
                         # top_temp = top_all[ (top_all.volume >= 1.2 ) & (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.close > top_all.lastp1d)]
                 else:
@@ -601,8 +601,8 @@ if __name__ == "__main__":
                     # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
 
                 #clean 688 and st
-                if len(top_temp) > 0:                
-                    top_temp = top_temp[ (~top_temp.index.str.contains('688')) ]
+                # if len(top_temp) > 0:                
+                #     top_temp = top_temp[ (~top_temp.index.str.contains('688')) ]
 
 
                     

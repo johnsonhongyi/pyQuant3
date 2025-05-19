@@ -31,9 +31,11 @@ DD_VOL_List = {'0': '40000', '1': '100000',
 
             # "4周新高" : "top_temp.query('close > high4 and lastp1d < hmax and low > lastl1d and lastl1d < ma51d and close >lastp2d')",\
             # "5周新高" : "top_temp.query('close > max5 and lastp1d < hmax and low > lastl1d and lastl1d < ma51d and close >lastp2d ')",\
+            # "HMax日新高" : "top_temp.query('close >hmax and low > ma10d and lasth1d > lasth2d and lastl1d > lastl2d and close < hmax*1.2')",\
+            # "HMax日新高" : "top_temp.query('close > hmax and low > ma10d and lasth1d > lasth2d and lastp1d < hmax')",\
 
 codeQuery= {"放量上涨": "top_temp.query('lastv1d > lastv2d and lastv1d/last6vol > 1.5 and close > ma51d and percent > 0')",\
-            "HMax日新高" : "top_temp.query('close >hmax and low > ma10d and lasth1d > lasth2d and lastl1d > lastl2d and close < hmax*1.2')",\
+            "HMax日新高" : "top_temp.query('high >hmax and low > ma10d and lastp1d < hmax and ((lasth1d > high4) or (high > max5))')",\
             "4周Max高" : "top_temp.query('high > high4 and high > hmax and lasth1d > lasth2d and lasth2d > lasth3d and low <= ma5d*1.02 and percent > 0')",\
             "4周新高" : "top_temp.query('high > high4 and lasth1d > lasth2d and lasth2d > lasth3d and low <= ma5d*1.02 and percent > 0')",\
             "5周新高" : "top_temp.query('high > max5 and lasth1d > lasth2d and lasth2d > lasth3d and lasth3d > lasth4d and percent > 0')",\
@@ -101,13 +103,15 @@ h5_power_limit_time = 36000
 cxg_limit_days = 20
 newdays_limit_days = 30
 big_H5_Size_limit = 50
-sina_limit_time = 20
+sina_limit_time = 30
+# sina_limit_time = 20
 h5_time_l_count = 6
 sina_dd_limit_time = 1200
 diffcode = 0.2
 dratio_limit = 0.05
 duration_sleep_time = 30
-single_duration_sleep_time = 120
+single_duration_sleep_time = 180
+# single_duration_sleep_time = 120
 compute_lastdays = 15
 last_TopR_days = 15
 # sort_value_key_perd23 = '2 3 d f'

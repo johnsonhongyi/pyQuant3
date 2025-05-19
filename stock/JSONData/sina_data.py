@@ -353,6 +353,10 @@ class Sina:
                 self.stock_codes = [elem for elem in self.stock_codes if elem.startswith('688')]
                 self.stock_with_exchange_list = list(
                     [('sz%s') % stock_code for stock_code in self.stock_codes])
+            elif market == 'bz':
+                self.stock_codes = [elem for elem in self.stock_codes if elem.startswith('8')]
+                self.stock_with_exchange_list = list(
+                    [('bj%s') % stock_code for stock_code in self.stock_codes])
             self.stock_codes = list(set(self.stock_codes))
 
             # _sina_data_time = cct.get_config_value_ramfile(self.hdf_name,xtype='time',readonly=True,int_time=True)
@@ -601,8 +605,9 @@ class Sina:
 
         else:
             code_l = code
-            self.stock_codes = [('sh%s' if stock_code.startswith(
-                ('5', '6', '9')) else 'sz%s') % stock_code for stock_code in code_l]
+            # self.stock_codes = [('sh%s' if stock_code.startswith(
+            #     ('5', '6', '9')) else 'sz%s') % stock_code for stock_code in code_l]
+            self.stock_codes = [cct.code_to_symbol(stock_code) for stock_code in code_l]
         return code_l
 
     def get_stock_code_data(self, code, index=False):
@@ -638,7 +643,7 @@ class Sina:
 
         #        self.index_status = index
         # ulist1 = [stock_code if stock_code.startswith(('0','3','5', '6', '9')) for stock_code in ulist]  # SyntaxError: invalid syntax
-        ulist = [stock_code  for stock_code in ulist if stock_code.startswith(('0','3','5', '6', '9'))]
+        ulist = [stock_code  for stock_code in ulist if stock_code.startswith(('0','3','5', '6','8', '9'))]
         if index:
             ulist = self.set_stock_codes_index_init(ulist, index)
             h5 = None
@@ -654,8 +659,10 @@ class Sina:
         if len(ulist) > self.max_num:
             # print "a"
             self.stock_list = []
+            # self.stock_with_exchange_list = list(
+            #     [('sh%s' if stock_code.startswith(('5', '6', '9')) else 'sz%s') % stock_code for stock_code in ulist])
             self.stock_with_exchange_list = list(
-                [('sh%s' if stock_code.startswith(('5', '6', '9')) else 'sz%s') % stock_code for stock_code in ulist])
+                [ cct.code_to_symbol(stock_code)  for stock_code in ulist])
             self.request_num = len(
                 self.stock_with_exchange_list) // self.max_num
             for range_start in range(self.request_num):
@@ -679,8 +686,7 @@ class Sina:
                 #     map(lambda stock_code: ('sh%s' if stock_code.startswith(('5', '6', '9')) else 'sz%s') % stock_code,
                 #         ulist))
                 # print self.stock_codes
-                self.stock_codes = [('sh%s' if stock_code.startswith(
-                    ('5', '6', '9')) else 'sz%s') % stock_code for stock_code in ulist]
+                self.stock_codes = [ cct.code_to_symbol(stock_code)  for stock_code in ulist]
 
             if len(self.stock_codes) == 0:
                 log.error("self.stock_codes is None:%s"%(self.stock_codes))
@@ -995,7 +1001,7 @@ if __name__ == "__main__":
     # print len(df)
     # code='300107'
     # print sina.get_cname_code('陕西黑猫')
-    print((sina.get_stock_code_data('301397').T))
+    print((sina.get_stock_code_data('002190').T))
 
     print(sina.get_code_cname('301397'))
 
