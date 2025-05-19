@@ -164,7 +164,7 @@ if __name__ == "__main__":
     parserDuraton = cct.DurationArgmain()
     # resample = '3d'
     # global resample
-    cct.GlobalValues().setkey('resample','3d')
+    cct.GlobalValues().setkey('resample','d')
     # resample = cct.GlobalValues().getkey('resample')
     duration_date = ct.duration_date_l  #80dat
     duration_date = 60
