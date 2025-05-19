@@ -2999,10 +2999,10 @@ def write_to_blkdfcf(codel,conf_ini=dfcf_path,blk='inboll1',append=True):
 def write_to_blocknew(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True):
     # fname=p_name
     # writename=r'D:\MacTools\WinTools\zd_dxzq\T0002'
-    blocknew_path=get_tdx_dir_blocknew_dxzq(p_name)
     write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True)
-    write_to_blocknew_2025(blocknew_path, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True)
-
+    if not isMac():
+        blocknew_path=get_tdx_dir_blocknew_dxzq(p_name)
+        write_to_blocknew_2025(blocknew_path, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True)   
 
 def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True):
     if keep_last is None:
