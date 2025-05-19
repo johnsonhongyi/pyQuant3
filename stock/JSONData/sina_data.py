@@ -142,10 +142,17 @@ class Sina:
 
         self.sinaheader = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
-            'Host': 'vip.stock.finance.sina.com.cn',
-            'Referer':'http://vip.stock.finance.sina.com.cn',
+            'referer': 'http://finance.sina.com.cn',
             'Connection': 'keep-alive',
             }
+            # 'Host': 'vip.stock.finance.sina.com.cn',
+            # 'Referer':'http://vip.stock.finance.sina.com.cn',
+            # import requests
+            # gudaima = "sh000001" #股票代码
+            # headers = {'referer': 'http://finance.sina.com.cn'}
+            # resp = requests.get('http://hq.sinajs.cn/list=' + gudaima, headers=headers, timeout=6)
+            # data = resp.text
+            # print(data)
 
         # self.lastbuydf = pd.DataFrame()
         # self.all
