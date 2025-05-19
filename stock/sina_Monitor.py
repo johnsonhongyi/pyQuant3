@@ -38,7 +38,7 @@ from JohnsonUtil import commonTips as cct
 # cct.set_ctrl_handler()
 
 
-def evalcmd(dir_mo):
+def evalcmd(dir_mo,workstatus=True):
     end = True
     import readline
     import rlcompleter
@@ -47,7 +47,7 @@ def evalcmd(dir_mo):
     while end:
         # cmd = (cct.cct_raw_input(" ".join(dir_mo)+": "))
         cmd = (cct.cct_raw_input(": "))
-        code=ct.codeQuery
+        code=ct.codeQuery if workstatus else ct.codeQuery_work_false
         if len(cmd) == 0:
             # code='最近两周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
             # code='周线2连阳,最近三周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
@@ -68,7 +68,7 @@ def evalcmd(dir_mo):
             print(f"{initkey}: {code[initkey]}")
             # cmd=code[initkey]
             cct.GlobalValues().setkey('tempdf',code[initkey])
-            cmd=ct.codeQuery_show(initkey,ct_MonitorMarket_Values)
+            cmd=ct.codeQuery_show(initkey,ct_MonitorMarket_Values,workstatus)
         
         elif len(cmd) <= 2 and cmd.isdigit() and int(cmd) < len(code.keys())+1:
             # idx = int(cmd)+1 if int(cmd) == 0 else int(cmd)
@@ -78,7 +78,7 @@ def evalcmd(dir_mo):
             print(f"{idxkey}: {code[idxkey]}")
             # cmd = code[idxkey]
             cct.GlobalValues().setkey('tempdf',code[idxkey])
-            cmd=ct.codeQuery_show(idxkey,ct_MonitorMarket_Values)
+            cmd=ct.codeQuery_show(idxkey,ct_MonitorMarket_Values,workstatus)
         # cmd = (cct.cct_raw_input(dir_mo.append(":")))
         # if cmd == 'e' or cmd == 'q' or len(cmd) == 0:
         if cmd == 'e' or cmd == 'q':
@@ -904,7 +904,10 @@ if __name__ == "__main__":
                 # cct.sleep(5)
             elif st.lower() == 'r':
                 dir_mo=eval(cct.eval_rule)
-                evalcmd(dir_mo)
+                if len(top_temp) > 0 and top_temp.lastp1d[0] == top_temp.close[0]:
+                    evalcmd(dir_mo,workstatus=False)
+                else:
+                    evalcmd(dir_mo)
             elif st.startswith('q') or st.startswith('e'):
                 print("exit:%s" % (st))
                 sys.exit(0)

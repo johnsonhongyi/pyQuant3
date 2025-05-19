@@ -46,8 +46,20 @@ codeQuery= {"放量上涨": "top_temp.query('lastv1d > lastv2d and lastv1d/last6
             "高开高走"    : "top_temp.query('open > low*0.999 and open <= low and open > lastp1d and topR > 0')",\
             "K线反包"    : "top_temp.query('close > ma51d and close > lastp1d and  lastp1d < lastp2d and topR > 0')"}
 
-def codeQuery_show(idxkey,columns_format):
-    code=codeQuery[idxkey]
+codeQuery_work_false= {"放量上涨": "top_temp.query('lastv1d > lastv2d and lastv1d/last6vol > 1.5 and close > ma51d and percent > 0')",\
+            "HMax日新高" : "top_temp.query('high >hmax and low > ma10d and lastp2d < hmax and ((lasth2d > high4) or (high >= max5))')",\
+            "4周Max高" : "top_temp.query('high > high4 and high > hmax and lasth2d > lasth3d and lasth3d > lasth4d and low <= ma5d*1.02 and percent > 0')",\
+            "4周新高" : "top_temp.query('high > high4 and lasth2d > lasth3d and lasth3d > lasth4d and low <= ma5d*1.02 and percent > 0')",\
+            "5周新高" : "top_temp.query('high > max5 and lasth2d > lasth3d and lasth3d > lasth4d and lasth4d > lasth5d and percent > 0')",\
+            "K线2连阳"   : "top_temp.query('close > lastp2d and  lastp2d > lastp3d and close >ma51d and topR > 0 and percent > 0')",\
+            "K线3连阳"    : "top_temp.query('high > lasth2d and  lasth2d > lasth3d and lasth3d > lasth4d and low >=ma51d')",\
+            "K线4连阳"    : "top_temp.query('low > lastl2d and  lasth2d >= lasth3d and lasth4d >= lasth4d and lasth4d >= lasth5d and low >=ma51d')",\
+            "开盘主升"    : "top_temp.query('open > low*0.999 and open <= low  and high > high4 and close > lastp2d')",\
+            "高开高走"    : "top_temp.query('open > low*0.999 and open <= low and open > lastp2d and topR > 0')",\
+            "K线反包"    : "top_temp.query('close > ma51d and close > lastp2d and  lastp2d < lastp3d and topR > 0')"}
+
+def codeQuery_show(idxkey,columns_format,workstatus):
+    code=codeQuery[idxkey] if workstatus else codeQuery_work_false[idxkey]
     cmd=f"cct.format_for_print_show({code}.sort_values('dff', ascending=False),{columns_format})"
     return(cmd)
 
