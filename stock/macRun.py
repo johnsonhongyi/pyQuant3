@@ -101,10 +101,14 @@ osascript -e
 #                'LinePower.py':'40, 497',}
 
 # os.system("osascript -e '%s'"%(cmd))
-rcmd = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant/stock;python2 %s"'
+rcmd = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant3/stock;/Users/Johnson/anaconda/envs/py3.9/bin/python3 %s"'
+
+# rcmd2 = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant/stock;python2 %s"'
 
 rproc = ['sina_Market-DurationDn.py' ,'singleAnalyseUtil.py','sina_Market-DurationCXDN.py','sina_Monitor.py','sina_Market-DurationUP.py']               
-cmdRun_launch = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
+# cmdRun_launch = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
+
+cmdRun_launch = '''cd /Users/Johnson/Documents/Quant/pyQuant3/stock;
 open sina_Market-DurationDn.py;
 sleep 0.2;osascript -e 'tell application "Python Launcher" to quit';sleep 15;
 open singleAnalyseUtil.py;
@@ -132,7 +136,8 @@ osascript -e '%s';sleep 15;
 osascript -e '%s';sleep 5;
 '''%(rcmd%(rproc[0]),rcmd%(rproc[1]),rcmd%(rproc[2]),rcmd%(rproc[3]),rcmd%(rproc[4]))
 
-cmdRun200_launch = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
+# cmdRun200_launch = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
+cmdRun200_launch = '''cd /Users/Johnson/Documents/Quant/pyQuant3/stock;
 open sina_Market-DurationDn.py;
 sleep 0.2;osascript -e 'tell application "Python Launcher" to quit';sleep 200;
 open singleAnalyseUtil.py;
@@ -151,7 +156,8 @@ sleep 0.2;osascript -e 'tell application "Python Launcher" to quit';sleep 5;
 # sys.exit(0)
 
 
-cmdRun_dnup = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
+# cmdRun_dnup = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
+cmdRun_dnup = '''cd /Users/Johnson/Documents/Quant/pyQuant3/stock;
 open sina_Market-DurationDn.py;
 sleep 0.1;osascript -e 'tell application "Python Launcher" to quit';sleep 210;
 open singleAnalyseUtil.py;
@@ -172,7 +178,8 @@ open sina_Market-DurationDnUP.py;
 sleep 0.1;osascript -e 'tell application "Python Launcher" to quit';sleep 5;
 '''
 
-cmdRun_all = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
+# cmdRun_all = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
+cmdRun_all = '''cd /Users/Johnson/Documents/Quant/pyQuant3/stock;
 open sina_Market-DurationDn.py;
 sleep 0.2;osascript -e 'tell application "Python Launcher" to quit';sleep 15;
 open singleAnalyseUtil.py;
@@ -208,7 +215,8 @@ target rect1:(5, 529, 1360, 984) rect2:(5, 529, 1360, 984)
 '''
 
 
-cmdRun200_all_old = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
+# cmdRun200_all_old = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
+cmdRun200_all_old = '''cd /Users/Johnson/Documents/Quant/pyQuant3/stock;
 open sina_Market-DurationDn.py;
 sleep 0.2;osascript -e 'tell application "Python Launcher" to quit';sleep 200;
 open singleAnalyseUtil.py;
@@ -270,13 +278,15 @@ def doScript(scriptn):
     proc = subprocess.Popen(['osascript', '-'],
                             stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE)
-    stdout_output = proc.communicate(scriptn)[0]
+    # python2 str ->byte
+    # stdout_output = proc.communicate(scriptn[0]   
+    stdout_output = proc.communicate(scriptn.encode('utf-8'))[0]
     # print stdout_output, type(proc)
-    return stdout_output
+    return stdout_output.decode('utf-8')
 
 def getPosition(cmd=None, position=None,close=False):
     count = doScript(scriptcount)
-    if count > 0:
+    if int(count) > 0:
         for n in range(1, int(count)+1):
             title = doScript(scriptname % ('get', str(object=n)))
             # if close:

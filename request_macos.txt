@@ -1,0 +1,33 @@
+numpy==1.21.6
+pandas==1.4.4
+tushare==1.2.89  #replace 3.9.13
+configobj== 5.0.8
+tqdm==4.64.1
+statsmodels==0.13.2
+docopt==0.6.2
+#tables
+#trollius
+#win-unicode-console==0.5
+#pywin32==302
+# python pywin32_postinstall.py  --install
+matplotlib==3.5.2
+pyreadline==2.1
+aiohttp==3.8.3
+pandas-ta==0.3.14b0
+ipdb== 0.13.11
+pymysql
+py_mini_racer
+pywebio==1.8.3
+pyperclip==1.8.2
+#macos
+sqlalchemy==2.0.40
+TA-Lib==0.5.1
+scikit-learn
+#conda install -n py3.9 -c conda-forge pytables   #pip install --upgrade tables
+#pip install --no-deps pywencai==0.12.2
+#conda install nodejs==18.18.2 error https://nodejs.org/en/download/prebuilt-installer
+#ta-lib==0.5.1 need https://github.com/cgohlke/talib-build/releases
+#pytables:  https://www.lfd.uci.edu/~gohlke/pythonlibs/#ta-lib
+#trollius
+#prettytable
+#sklearn==0.0.post1
