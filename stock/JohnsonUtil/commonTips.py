@@ -928,9 +928,9 @@ def get_terminal_Position(cmd=None, position=None, close=False, retry=False):
             proc = subprocess.Popen(['osascript', '-'],
                                     stdin=subprocess.PIPE,
                                     stdout=subprocess.PIPE)
-            stdout_output = proc.communicate(scriptn)[0]
+            stdout_output = proc.communicate(scriptn.encode('utf8'))[0]
             # print stdout_output, type(proc)
-            return stdout_output
+            return stdout_output.decode('utf-8')
 
         if cmd is not None and cmd.find("Python Launcher") >= 0:
             cct_doScript(cmd)
@@ -939,7 +939,7 @@ def get_terminal_Position(cmd=None, position=None, close=False, retry=False):
         count = cct_doScript(scriptcount)
         if position is None:
             close_list = []
-            if count > 0 and cmd is not None:
+            if int(count) > 0 and cmd is not None:
                 log.info("count:%s" % (count))
                 for n in range(1, int(count) + 1):
                     title = cct_doScript(scriptname % ('get', str(object=n)))
