@@ -96,7 +96,7 @@ def evalcmd(dir_mo,workstatus=True):
                 # sl.write_to_blocknew(all_diffpath, codew)
             else:
                 # codew = stf.WriteCountFilter(top_temp)
-                cct.write_to_blocknew(block_path, codew, False)
+                cct.write_to_blocknew(block_path, codew, append=False)
                 # sl.write_to_blocknew(all_diffpath, codew, False)
             print("wri ok:%s" % block_path)
             # cct.GlobalValues().setkey('tempdf',None)
