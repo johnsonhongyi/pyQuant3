@@ -25,7 +25,7 @@ tdx_ths_position1536={'Edge': '64,123,910,886','Firefox': '343,79,1436,931','交
 # tdx_ths_position1920={'行业跟随1': '29,220,677,404','人气综合排行榜2.2':'168,0,477,753','通达信': '787,214,1104,835','东方财富': '418,138,1142,885','同花顺': '22,184,1075,864','Firefox': '45,156,706,797','sina_Market-DurationDn.py': '-7,664,1332,423','sina_Market-DurationCXDN.py': '-7,326,1329,423','sina_Market-DurationUP.py': '606,664,1321,423','sina_Monitor-Market-LH.py': '662,318,1307,409','sina_Monitor.py': '109,20,1313,519','singleAnalyseUtil.py': '1001,0,897,359','LinePower.py': '29,103,761,407','instock_Monitor.py': '70,79,1313,391','chantdxpower.py': '-7,129,649,407','ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '-32000,-32000,59,51'}
 # 4K LG
 tdx_ths_position1920={'Edge': '64,123,910,886','Firefox': '343,79,1436,931','交易信号监控': '1335,180,566,389','行业跟随1': '29,220,677,404','人气综合排行榜2.2':'168,0,477,753','通达信金融终端': '30,246,1216,828',\
-        '东方财富': '655,261,1266,804','同花顺': '198,119,1634,785',\
+        '东方财富': '655,261,1266,804','同花顺': '198,119,1659,785',\
         'sina_Market-DurationDn.py': '-7,664,1332,423','sina_Market-DurationCXDN.py': '-7,326,1329,423',\
         'sina_Market-DurationUP.py': '606,664,1321,423','sina_Monitor-Market-LH.py': '662,318,1307,409',\
         'sina_Monitor.py': '109,20,1313,519','singleAnalyseUtil.py': '1001,0,897,359','LinePower.py': '29,103,761,407',\
@@ -611,7 +611,7 @@ if __name__ == '__main__':
     # print(find_proc_windows('Firefox',fuzzysearch=True))
     print(find_proc_windows('Microsoft\u200b Edge',fuzzysearch=True))
 
-    proc_title = ['Microsoft\u200b Edge','Firefox','交易信号监控','instock_Monitor','sina_Market-DurationDnUP','singleAnalyseUtil','人气综合排行榜2.22','行业跟随1.0','东兴证券','通达信金融终端','东方财富','同花顺']
+    proc_title = ['同花顺','Microsoft\u200b Edge','Firefox','交易信号监控','instock_Monitor','sina_Market-DurationDnUP','singleAnalyseUtil','人气综合排行榜2.22','行业跟随1.0','东兴证券','通达信金融终端','东方财富']
     for title in proc_title:
         FindWindowRectFromName(title)
     print('\n')

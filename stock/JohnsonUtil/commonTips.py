@@ -104,7 +104,7 @@ class GlobalValues:
         return (key in _global_dict.keys())
 
 
-def format_for_print(df,header=True,widths=False):
+def format_for_print(df,header=True,widths=False,showCount=False):
 
     # alist = [x for x in set(df.columns.tolist())]
     if 'category' in df.columns:
@@ -121,6 +121,11 @@ def format_for_print(df,header=True,widths=False):
         table.add_row(row)
 
     if not widths:
+        # print(f'showCount:{showCount}')
+        if showCount:
+            count = f'Count:{len(df)}'
+            table = str(table)
+            table = table + f'\n{count}'
         return str(table)
     else:
         if isinstance(widths,list):
@@ -130,10 +135,15 @@ def format_for_print(df,header=True,widths=False):
             return str(table)
         return str(table),table.get_widths()
 
-def format_for_print_show(df,columns_format=None):
+def format_for_print_show(df,columns_format=None,showCount=False):
     if columns_format is None:
         columns_format = ct.Monitor_format_trade
-    table = format_for_print(df.loc[:, columns_format])
+    # if showCount:
+    #     # print(f'Count:{len(df)}')
+    #     count_string = (f'Count:{len(df)}')
+    #     table = format_for_print(df.loc[:, columns_format],count=count_string)
+    # else:
+    table = format_for_print(df.loc[:, columns_format],showCount=showCount)
     return table
 
 def format_for_print2(df):
@@ -2999,10 +3009,10 @@ def write_to_blkdfcf(codel,conf_ini=dfcf_path,blk='inboll1',append=True):
 def write_to_blocknew(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True):
     # fname=p_name
     # writename=r'D:\MacTools\WinTools\zd_dxzq\T0002'
-    write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True)
+    write_to_blocknew_2025(p_name, data, append=append, doubleFile=doubleFile, keep_last=keep_last,dfcf=dfcf,reappend=reappend)
     if not isMac():
         blocknew_path=get_tdx_dir_blocknew_dxzq(p_name)
-        write_to_blocknew_2025(blocknew_path, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True)   
+        write_to_blocknew_2025(blocknew_path, data, append=append, doubleFile=doubleFile, keep_last=keep_last,dfcf=dfcf,reappend=reappend)   
 
 def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True):
     if keep_last is None:
