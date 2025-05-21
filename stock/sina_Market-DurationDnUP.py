@@ -176,7 +176,7 @@ if __name__ == "__main__":
     parser = cct.MoniterArgmain()
     parserDuraton = cct.DurationArgmain()
     
-    st_key_sort = '2'
+    st_key_sort = '3 1'
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort)
     st = None
 
