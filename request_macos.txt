@@ -25,6 +25,7 @@ TA-Lib==0.5.1
 scikit-learn
 #conda install -n py3.9 -c conda-forge pytables   #pip install --upgrade tables
 #pip install --no-deps pywencai==0.12.2
+pywencai==0.12.2 --no-deps
 #conda install nodejs==18.18.2 error https://nodejs.org/en/download/prebuilt-installer
 #ta-lib==0.5.1 need https://github.com/cgohlke/talib-build/releases
 #pytables:  https://www.lfd.uci.edu/~gohlke/pythonlibs/#ta-lib
