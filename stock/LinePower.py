@@ -91,7 +91,7 @@ class MyThread(Thread):
 #     res2 = t2.get_result()
 #     print(res1 + res2)
 def search_ths_data(code):
-    fpath = r'./JohnsonUtil\wencai\同花顺板块行业.xls'
+    fpath = r'./JohnsonUtil\wencai\同花顺板块行业.xls'.replace('\\',cct.get_os_path_sep())
     df = pd.read_excel(fpath)
     # df = df.reset_index().set_index('股票代码')
     df = df.set_index('股票代码')

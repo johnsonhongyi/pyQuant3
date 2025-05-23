@@ -1,3 +1,5 @@
+#pip freeze > requirements.txt
+#xlrd
 numpy==1.21.6
 pandas==1.4.4
 tushare==1.2.89  #replace 3.9.13
@@ -19,8 +21,9 @@ pymysql
 py_mini_racer
 pywebio==1.8.3
 pyperclip==1.8.2
+pywencai==0.12.2 --no-deps
 #pip install --no-deps pywencai==0.12.2
-#conda install nodejs==18.18.2 error https://nodejs.org/en/download/prebuilt-installer
+#py2.7  conda install nodejs==18.18.2 error https://nodejs.org/en/download/prebuilt-installer
 #ta-lib==0.5.1 need https://github.com/cgohlke/talib-build/releases
 #pytables:  https://www.lfd.uci.edu/~gohlke/pythonlibs/#ta-lib
 #conda install -n py39 -c conda-forge pytables   #pip install --upgrade tables
