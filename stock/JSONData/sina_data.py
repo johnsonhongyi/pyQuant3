@@ -797,6 +797,7 @@ class Sina:
         # df = df.drop('close', axis=1)
         dt = df.dt.value_counts().index[0]
         df = df[(df.dt >= dt)]
+
         df.rename(columns={'close': 'llastp'}, inplace=True)
         df['b1_vv'] = df['b1_v']
         if (cct.get_now_time_int() > 915 and cct.get_now_time_int() < 926):
@@ -810,7 +811,7 @@ class Sina:
 
         elif (cct.get_now_time_int() > 0 and cct.get_now_time_int() <= 915):
             #            df.rename(columns={'buy': 'close'}, inplace=True)
-            df['buy'] = df['llastp']
+            df['buy'] = df['now']
             df['close'] = df['buy']
             df['low'] = df['buy']
             # df['b1_v'] = ((df['b1_v']) / df['volume'] * 100).map(lambda x: round(x, 1))

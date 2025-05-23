@@ -757,12 +757,18 @@ if __name__ == '__main__':
         except (KeyboardInterrupt) as e:
             # print "key"
             print("KeyboardInterrupt:", e)
-            ramdisk_h5 = 'D:\\Ramdisk\\sina_MultiIndex_data.h5'
-            if  cct.get_work_day_status() and cct.creation_date_duration(ramdisk_h5) > 0:
-                os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-ramdisk_back.bat')
-                time.sleep(1)
-                os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-Restore.bat')
-                print("1-ramdisk_back is OK")
+            if cct.isMac():
+                ramdisk_h5 = '/Volumes/RamDisk/sina_MultiIndex_data.h5'
+                if  cct.get_work_day_status() and cct.get_now_time_int() > 1500 and cct.creation_date_duration(ramdisk_h5) == 0:
+                    os.system('/bin/sh /Users/Johnson/saveRamdisk.sh')
+                    time.sleep(1)
+            else:
+                ramdisk_h5 = 'D:\\Ramdisk\\sina_MultiIndex_data.h5'
+                if  cct.get_work_day_status() and cct.creation_date_duration(ramdisk_h5) > 0:
+                    os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-ramdisk_back.bat')
+                    time.sleep(1)
+                    os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-Restore.bat')
+                    print("1-ramdisk_back is OK")
             st = cct.cct_raw_input("status:[go(g),clear(c),quit(q,e),wri(w)]:")
             if len(st) == 0:
                 status = False

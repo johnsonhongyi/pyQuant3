@@ -2329,11 +2329,11 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
             cpu_co = 1
         else:
             cpu_co = int(round(len(urllist)/100,0))
-        cpu_used = int(cpu_count()/2)
+        cpu_used = int(cpu_count()/2) - 1 
         pool_count = (cpu_used) if cpu_co > (cpu_used) else cpu_co
         # pool_count = (cpu_count()-2) if cpu_co > (cpu_count()-2) else cpu_co
         if  cpu_co > 1 and 1300 < get_now_time_int() < 1500:
-            pool_count = int(cpu_count() / 2)
+            pool_count = int(cpu_count() / 2) - 1
         if len(kwargs) > 0 :
                 # pool = ThreadPool(12)
                 func = partial(cmd, **kwargs)
@@ -2416,7 +2416,7 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
             except Exception as e:
                 log.error("except:%s"%(e))
         else:
-            pool = ThreadPool(cpu_count())
+            pool = ThreadPool(int(cpu_count())/ 2 - 1 if int(cpu_count()) > 2 else 2)
             for code in urllist:
                 try:
                     # result = pool.apply_async(cmd, (code,) + args).get()

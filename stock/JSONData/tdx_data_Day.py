@@ -2813,9 +2813,10 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     log.debug("dm percent:%s" % (dm[:1]))
     # dm['volume'] = map(lambda x: round(x / 100, 1), dm.volume.values)
     # dm['trade'] = dm['close'] if dm['b1'] ==0 else dm['b1']
-    dm['trade'] = list(map(lambda x, y: x if int(x) > 0 else y, dm.b1, dm.close))
+    
+    dm['trade'] = list(map(lambda x, y: x if int(x) > 0 else y, dm.now, dm.b1))
 
-    dm['buy'] = list(map(lambda x, y: x if int(x) > 0 else y, dm.close, dm.b1))
+    dm['buy'] = list(map(lambda x, y: x if int(x) > 0 else y, dm.now, dm.b1))
 
     if market != 'index':
         if cct.get_now_time_int() > 915 and cct.get_now_time_int() < 926:
