@@ -1283,6 +1283,29 @@ def creation_date_duration(path_to_file):
     else:
         duration = 0
     return duration
+def filepath_datetime(path_to_file):
+    """
+    Try to get the date that a file was created, falling back to when it was
+    last modified if that isn't possible.
+    See http://stackoverflow.com/a/39501288/1709587 for explanation.
+    """
+    # if platform.system() == 'Windows':
+    #     return os.path.getctime(path_to_file)
+    # else:
+    #     stat = os.stat(path_to_file)
+    #     try:
+    #         return stat.st_birthtime
+    #     except AttributeError:
+    #         # We're probably on Linux. No easy way to get creation dates here,
+    #         # so we'll settle for when its content was last modified.
+    #         return stat.st_mtime
+    if os.path.exists(path_to_file):
+        dt = os.path.getmtime(path_to_file)
+        dtm = datetime.date.fromtimestamp(dt)
+    else:
+        dtm = datetime.datetime.now().timestamp()
+    return dtm
+
 
 if not isMac():
     import win32api,win32gui
