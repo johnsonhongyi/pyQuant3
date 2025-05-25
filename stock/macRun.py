@@ -132,7 +132,7 @@ osascript -e '%s';sleep 10;
 osascript -e '%s';sleep 10;
 '''%(rcmd%(rproc[0]),rcmd%(rproc[1]),rcmd%(rproc[2]),rcmd%(rproc[3]),rcmd%(rproc[4]),rcmd%(rproc[5]))
 
-cmdRun200 = '''osascript -e '%s';sleep 200;
+cmdRun200 = '''osascript -e '%s';sleep 230;
 osascript -e '%s';sleep 25;
 osascript -e '%s';sleep 25;
 osascript -e '%s';sleep 260;

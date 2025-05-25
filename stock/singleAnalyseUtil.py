@@ -758,8 +758,10 @@ if __name__ == '__main__':
             # print "key"
             print("KeyboardInterrupt:", e)
             if cct.isMac():
-                ramdisk_h5 = '/Volumes/RamDisk/sina_MultiIndex_data.h5'
-                if  cct.get_work_day_status() and cct.get_now_time_int() > 1500 and cct.creation_date_duration(ramdisk_h5) == 0:
+                # ramdisk_h5 = '/Volumes/RamDisk/sina_MultiIndex_data.h5'
+                ramdisk_h5 = '/Users/Johnson/Downloads/Temp/Ramdisk/sina_MultiIndex_data.h5'
+                # if  cct.get_work_day_status() and cct.get_now_time_int() > 1500 and cct.creation_date_duration(ramdisk_h5) == 0:
+                if  cct.creation_date_duration(ramdisk_h5) > 0:
                     os.system('/bin/sh /Users/Johnson/saveRamdisk.sh')
                     time.sleep(1)
             else:
