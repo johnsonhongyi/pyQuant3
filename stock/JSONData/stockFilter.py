@@ -851,7 +851,7 @@ def WriteCountFilter(df, op='op', writecount=ct.writeCount, end=None, duration=1
     # market_key = cct.GlobalValues().getkey('market_key')
     # if market_key == '2':
     #     market_value_perd = int(market_value) * 10
-    if str(writecount) != 'all':
+    if str(writecount) != 'all' and cct.isDigit(writecount):
         if end is None and int(writecount) > 0:
             # if int(writecount) < 101 and len(df) > 0 and 'percent' in df.columns:
             if int(writecount) < 101 and len(df) > 0:

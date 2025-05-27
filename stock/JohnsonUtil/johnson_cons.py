@@ -35,12 +35,12 @@ DD_VOL_List = {'0': '40000', '1': '100000',
             # "HMax日新高" : "top_temp.query('close > hmax and low > ma10d and lasth1d > lasth2d and lastp1d < hmax')",\
 
 codeQuery= {"放量上涨": "top_temp.query('lastv1d > lastv2d and lastv1d/last6vol > 1.5 and close > ma51d and percent > 0')",\
-            "HMax日新高" : "top_temp.query('high >hmax and low > ma10d and lastp1d < hmax and ((lasth1d > high4) or (high > max5))')",\
+            "HMax日新高" : "top_temp.query('low > ma10d  and ((lasth1d > high4) or (high > max5)) and high4==max5 and max5 >=hmax*0.9 and topR > 1')",\
             "3周连阳趋势" : " top_temp.query('boll>0 and perc1d >=0 and perc2d >=0 and perc3d >= 0 and ma51d > ma201d and lastl1d < ma51d*1.05 and perc1d >= perc2d')",\
             "4周新高" : "top_temp.query('high > high4 and lasth1d > lasth2d and lasth2d > lasth3d and low <= ma5d*1.02 and percent > 0')",\
             "5周新高" : "top_temp.query('high > max5 and lasth1d > lasth2d and lasth2d > lasth3d and lasth3d > lasth4d and percent > 0')",\
             "K线2连阳": "top_temp.query('close > lastp1d and  lastp1d > lastp2d and  lasth1d > lasth2d  and lastl1d > lastl2d and lastp1d > lastp2d \
-                        and low > ma51d and (topR > 0 and perc1d > 1) and percent > 0')",\
+                        and low > ma51d and (topR > 0 and perc1d > 1) and high4==max5 and max5 >=hmax*0.9 and topR > 1')",\
             "K线3连阳": "top_temp.query('close > lastp1d and  lastp1d > lastp2d and  lasth1d > lasth2d  and lastl1d > lastl2d and lastp1d > lastp2d \
                         and  lasth2d > lasth3d  and lastl2d > lastl3d  and low >ma51d and (topR > 0 or (perc1d > 1 and perc2d > 0)) and percent > 0')",\
             "K线4连阳": "top_temp.query('close > lastp1d and  lastp1d > lastp2d and  lasth1d > lasth2d  and lastl1d > lastl2d and lastp1d > lastp2d \
@@ -54,12 +54,12 @@ codeQuery= {"放量上涨": "top_temp.query('lastv1d > lastv2d and lastv1d/last6
             # "K线4连阳"    : "top_temp.query('low > lastl1d and  lasth1d >= lasth2d and lasth2d >= lasth3d and lasth3d >= lasth4d and low >=ma51d')",\
 
 codeQuery_work_false= {"放量上涨": "top_temp.query('lastv1d > lastv2d and lastv1d/last6vol > 1.5 and close > ma51d and percent > 0')",\
-            "HMax日新高" : "top_temp.query('high >hmax and low > ma10d and lastp2d < hmax and ((lasth2d > high4) or (high >= max5))')",\
+            "HMax日新高" : "top_temp.query('low > ma10d  and ((lasth1d > high4) or (high > max5)) and high4==max5 and max5 >=hmax*0.9 and topR > 1')",\
             "3周连阳趋势" : " top_temp.query('boll>0 and perc1d >=0 and perc2d >=0 and perc3d >= 0 and ma51d > ma201d and lastl1d < ma51d*1.05 and perc1d >= perc2d')",\
             "4周新高" : "top_temp.query('high > high4 and lasth2d > lasth3d and lasth3d > lasth4d and low <= ma5d*1.02 and percent > 0')",\
             "5周新高" : "top_temp.query('high > max5 and lasth2d > lasth3d and lasth3d > lasth4d and lasth4d > lasth5d and percent > 0')",\
             "K线2连阳": "top_temp.query('close > lastp2d and  lastp2d > lastp3d and  lasth2d > lasth3d  and lastl2d > lastl3d and lastp2d > lastp3d \
-                        and low > ma52d and (topR > 0 and perc1d > 1) and percent > 0')",\
+                        and low > ma52d and (topR > 0 and perc1d > 1) and high4==max5 and max5 >=hmax*0.9 and topR > 1')",\
             "K线3连阳": "top_temp.query('close > lastp2d and  lastp2d > lastp3d and  lasth2d > lasth3d  and lastl2d > lastl3d and lastp2d > lastp3d \
                         and  lasth3d > lasth4d  and lastl3d > lastl4d  and low >ma51d and (topR > 0 or (perc1d > 1 and perc2d > 0)) and percent > 0')",\
             "K线4连阳": "top_temp.query('close > lastp2d and  lastp2d > lastp3d and  lasth2d > lasth3d  and lastl2d > lastl3d and lastp2d > lastp3d \
