@@ -115,7 +115,7 @@ def get_code_file_path(code, type='f'):
     return file_path
 
 
-def get_kdate_data(code, start='', end='', ktype='D', index=False):
+def get_kdate_data(code, start='', end='', ktype='D', index=False,ascending=False):
     '''
         write get_k_data to tdx volume *100
     '''
@@ -139,7 +139,7 @@ def get_kdate_data(code, start='', end='', ktype='D', index=False):
                            ktype=ktype, index=index)
     if len(df) > 0:
         df.set_index('date', inplace=True)
-        df.sort_index(ascending=False, inplace=True)
+        df.sort_index(ascending=ascending, inplace=True)
         lastdy = df.index[0]
         if cct.get_work_hdf_status() and cct.get_today_duration(lastdy) == 0:
             df.drop(lastdy, axis=0, inplace=True)
@@ -1828,10 +1828,25 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
     return df
 
 
-def write_tdx_tushare_to_file(code, df=None, start=None, type='f'):
+def write_tdx_tushare_to_file(code, df=None, start=None, type='f',rewrite=False):
     #    st=time.time()
     #    pname = 'sdata/SH601998.txt'
+    # rewritefile = False
+    if type == 'f':
+        file_path = exp_path + 'forwardp' + path_sep + code_u.upper() + ".txt"
+    elif type == 'b':
+        file_path = exp_path + 'backp' + path_sep + code_u.upper() + ".txt"
+    else:
+        return None
+
+    #add 250527 johnson
+    if rewrite:
+        o_file = open(f_path, 'w+')
+        o_file.truncate()
+        o_file.close()
+
     if df is None:
+        # df = get_tdx_Exp_day_to_df(code, newdays=0)
         ldatedf = get_tdx_Exp_day_to_df(code, dl=1, newdays=0)
         if len(ldatedf) > 0:
             lastd = ldatedf.date
@@ -1848,23 +1863,26 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f'):
                 return False
             df = get_tdx_append_now_df_api(
                 code, start=start, write_tushare=False, newdays=0)
+    # else:
+    #     ldatedf = get_tdx_Exp_day_to_df(code, newdays=0)
+    #     if len(ldatedf) < 10 and len(df) > 50:
+    #         rewritefile = True
 
     if len(df) == 0:
         return False
     code_u = cct.code_to_symbol(code)
     log.debug("code:%s code_u:%s" % (code, code_u))
-    if type == 'f':
-        file_path = exp_path + 'forwardp' + path_sep + code_u.upper() + ".txt"
-    elif type == 'b':
-        file_path = exp_path + 'backp' + path_sep + code_u.upper() + ".txt"
-    else:
-        return None
+
 
     if not os.path.exists(file_path) and len(df) > 0:
         # fo = open(file_path, "w+")
         fo = open(file_path, "wb+")
 #        return False
     else:
+        # if rewritefile:
+        #     os.remove(file_path)
+        #     fo = open(file_path, "wb+")
+        # else:
         fo = open(file_path, "rb+")
 
     fsize = os.path.getsize(file_path)
@@ -3960,8 +3978,7 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
     if dt is not None or dl is not None:
         # log.debug("dt:%s dl:%s"%(dt,dl))
         df = get_tdx_Exp_day_to_df(code, start=dt, dl=dl, end=end, newdays=newdays, resample=resample).sort_index(ascending=False)
-
-        if df is not None and len(df) > 0:
+        if df is not None and len(df) > 5:
             # if power:
             #     from JSONData import powerCompute as pct
             #     dtype = resample
@@ -4083,6 +4100,10 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
 
         else:
             log.debug("code:%s no < dt:NULL" % (code))
+            # df = get_tdx_append_now_df_api_tofile(code)
+            df = get_kdate_data(code, start='', end='', ktype='D',ascending=False)
+            if len(df) > 30:
+                write_tdx_tushare_to_file(code, df=df, start=None, type='f',rewrite=True)
             dd = pd.Series([],dtype='float64')
             # dd = Series(
             #     {'code': code, 'date': cct.get_today(), 'open': 0, 'high': 0, 'low': 0, 'close': 0, 'amount': 0,
@@ -4882,8 +4903,9 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             results = []
             ts = time.time()
             for code in codeList:
+                # print(f'codeList:{len(codeList)}code:{code} :dt')
                 results.append(get_tdx_exp_low_or_high_power(code, dt, ptype, dl, end, power, lastp, newdays, resample))
-            print("time:%s"%(round(time.time()-ts,2)),)
+            print("tdxdataT:%s"%(round(time.time()-ts,2)),)
 #        print round(time.time()-ts,2),
         # print dt,ptype,dl,end
         # for code in codelist:
@@ -4896,7 +4918,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
         #     get_tdx_Exp_day_to_df, codeList, type='f', start=None, end=None, dl=None, newdays=1)
         results=[]
         for code in codeList:
-           print(code)
+           # print(code)
            results.append(get_tdx_Exp_day_to_df, codeList, type='f', start=None, end=None, dl=None, newdays=1)
     # print results
 #    df = pd.DataFrame(results, columns=ct.TDX_Day_columns)
@@ -5437,11 +5459,21 @@ if __name__ == '__main__':
     code='603038'
     code='833171'
     code='688652'
+    code='301287'
+    code_l=['301287', '603091', '605167']
+    # df = get_kdate_data(code,ascending=True)
+    # dd = get_tdx_Exp_day_to_df('600602')
+    # tmp_df = get_kdate_data(code, start='', end='', ktype='D')
+    # if len(tmp_df) > 0:
+    #     write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
+
+    # df = get_tdx_append_now_df_api_tofile('301287')
+    df=get_tdx_exp_all_LastDF_DL(code_l, dt='80',filter='y', resample='d')
+    print(df)
     # code='600005'
     # df2 = get_tdx_exp_low_or_high_power(code,dl=120,resample='d' )
     # df = get_tdx_Exp_day_to_df(code,dl=60, start=None,end=None, newdays=0, resample='d')
     df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_month, start=None,end=None, newdays=0, resample='m')
-    import ipdb;ipdb.set_trace()
 
     # import ipdb;ipdb.set_trace()
 
