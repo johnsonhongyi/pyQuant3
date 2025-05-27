@@ -1832,6 +1832,9 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f',rewrite=False)
     #    st=time.time()
     #    pname = 'sdata/SH601998.txt'
     # rewritefile = False
+    
+    code_u = cct.code_to_symbol(code)
+    log.debug("tushare code:%s code_u:%s" % (code, code_u))
     if type == 'f':
         file_path = exp_path + 'forwardp' + path_sep + code_u.upper() + ".txt"
     elif type == 'b':
@@ -1841,7 +1844,7 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f',rewrite=False)
 
     #add 250527 johnson
     if rewrite:
-        o_file = open(f_path, 'w+')
+        o_file = open(file_path, 'w+')
         o_file.truncate()
         o_file.close()
 
@@ -1870,8 +1873,6 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f',rewrite=False)
 
     if len(df) == 0:
         return False
-    code_u = cct.code_to_symbol(code)
-    log.debug("code:%s code_u:%s" % (code, code_u))
 
 
     if not os.path.exists(file_path) and len(df) > 0:
