@@ -178,6 +178,7 @@ if __name__ == "__main__":
     #         log.error("indb last1days is None")
                
     lastpTDX_DF = pd.DataFrame()
+    indf = pd.DataFrame()
     parserDuraton = cct.DurationArgmain()
     # The above code is a comment in Python. It is not doing anything in terms of code execution. It
     # is used to provide information or explanations about the code to other developers or to remind
@@ -210,13 +211,15 @@ if __name__ == "__main__":
     # ct.duration_date_week ->200
     du_date = duration_date
     # resample = 'w'
-    resample = '3d'
+    # resample = '3d'
+    cct.GlobalValues().setkey('resample','d')
 
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(
         st_key_sort)
     # st_key_sort = '9'
     # st_key_sort = '7'
     # st_key_sort = ct.sort_value_key_perd23
+    instocklastDays = 3
     st = None
     while 1:
         try:
@@ -226,6 +229,8 @@ if __name__ == "__main__":
             #     print len(df),
             # top_now = rl.get_sina_dd_count_price_realTime(df)
             # print len(top_now)
+            resample = cct.GlobalValues().getkey('resample')
+
             if st is None and st_key_sort in ['2', '3']:
                 st_key_sort = '%s %s' % (
                     st_key_sort.split()[0], cct.get_index_fibl())
@@ -236,11 +241,12 @@ if __name__ == "__main__":
             # top_now = tdd.getSinaAlldf(market='??',filename='yqbk', vol=ct.json_countVol, vtype=ct.json_countType,trend=False)
             # market_blk = 'rzrq'
             # market_blk = 'all'
-
-
-            indf = inDb.showcount(inDb.selectlastDays(10),sort_date=True)
+            
             if len(indf) == 0:
-                indf = inDb.showcount(inDb.selectlastDays(10),sort_date=True)
+                indf = inDb.showcount(inDb.selectlastDays(instocklastDays),sort_date=True)
+            
+            if len(indf) == 0:
+                indf = inDb.showcount(inDb.selectlastDays(instocklastDays + 2),sort_date=True)
                 
             if len(indf) > 0 and cct.creation_date_duration(block_path) > 1:
                 cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
@@ -314,7 +320,8 @@ if __name__ == "__main__":
                 # top_all[(top_all.upperT > 3) & (top_all.top10 >2) &(top_all.close > top_all.upper*0.98) & (top_all.close < top_all.upper *1.05) &(top_all.lastp1d > top_all.upper)].name
                 # cct.write_to_blocknew(block_path, dd.index.tolist())
                 # writecode = "cct.write_to_blocknew(block_path, dd.index.tolist())"
-
+                
+                # time_Rt = time.time()
                 top_bak = top_all.copy()
                 if cct.get_trade_date_status() == 'True':
                     for co in ['boll','df2']:
@@ -431,7 +438,8 @@ if __name__ == "__main__":
                     # 
                     # top_temp = top_all[ (top_all.lastdu > 3 ) & (((top_all.low > top_all.lasth1d) & (top_all.close > top_all.lastp1d)) | ((top_all.low > top_all.lasth2d) & (top_all.close > top_all.lastp2d))) & (top_all.close >= top_all.hmax)]
                     #20231221
-                    top_temp = top_all[ (top_all.close >= top_all.lastp2d) ]
+                    top_temp = top_all.copy()
+                    # top_temp = top_all[ (top_all.close >= top_all.lastp2d) ]
                     # top_now.loc['002761'].    
                     # top_temp =  top_all[( ((top_all.top10 >0) | (top_all.boll >0)) & (top_all.lastp1d > top_all.ma5d) & (top_all.close > top_all.lastp1d))]
                     # top_temp =  top_all[((top_all.lastp1d < top_all.ma5d) & (top_all.close > top_all.lastp1d))]
@@ -507,7 +515,9 @@ if __name__ == "__main__":
                             # top_temp = top_all[ ((top_all.lastdu > 3 ) & (top_all.low <= top_all.ma5d * 1.03) & (top_all.low >= top_all.ma5d *0.98))  | (top_all.topR > 0) | (top_all.close > top_all.hmax)  ]
 
                             #20231221
-                            top_temp = top_all[ (top_all.close >= top_all.lastp2d) ]
+                            top_temp = top_all.copy()
+                            # top_temp = top_all[ (top_all.close >= top_all.lastp2d) ]
+
                             # top_temp = top_all[ ((top_all.close >= top_all.lastp1d) | ((top_all.low > top_all.lasth2d) & (top_all.close > top_all.lastp2d))) & (top_all.close >= top_all.hmax)]
 
                             # & (top_all.close >= top_all.hmax) & (top_all.hmax >= top_all.max5) 
@@ -557,6 +567,7 @@ if __name__ == "__main__":
                             
                             #20231221
                             top_temp = top_all.copy()
+                            # top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
 
                             #221018 振幅大于6 or 跳空 or 连涨 or upper or 大于hmax or 大于max5
                             # top_temp = top_all[ ((top_all.lastdu > 6 ) & (top_all.perc3d > 2)) | (top_all.topU > 0) | (top_all.topR > 0) | (top_all.close > top_all.hmax) | (top_all.close > top_all.max5)]
@@ -565,7 +576,6 @@ if __name__ == "__main__":
                             # top_temp = top_all[(top_all.topU > 0) & ( (top_all.close > top_all.max5) | (top_all.close > top_all.hmax) )] 
 
                             # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
-                            top_temp = top_temp[ (~top_temp.index.str.contains('688'))]
 
                             # ???ne??죬???Ϲ죬һ????գ?һ???ͣ
                         # top_temp = top_all[  (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.low >= top_all.nlow) & ((top_all.open >= top_all.nlow *0.998) & (top_all.open <= top_all.nlow*1.002)) ]
@@ -831,7 +841,15 @@ if __name__ == "__main__":
                 cct.GlobalValues().setkey('lastbuylogtime', 1)
                 # cct.set_clear_logtime()
                 status=False
-            elif st.startswith('d') or st.startswith('dt'):
+            elif st.startswith('in') or st.startswith('i'):
+                days = st.split()[1] if len(st.split()) > 1 else None
+                if days is not None and days.isdigit():
+                    top_all = pd.DataFrame()
+                    indf = top_all = pd.DataFrame()
+                    instocklastDays = days
+                else:
+                    log.error(f'{st} not find digit days')
+            elif st.startswith('dd') or st.startswith('dt'):
                 args = parserDuraton.parse_args(st.split()[1:])
                 if len(str(args.start)) > 0:
                     if args.end:
@@ -845,6 +863,20 @@ if __name__ == "__main__":
                     top_all = pd.DataFrame()
                     time_s = time.time()
                     status = False
+                    lastpTDX_DF = pd.DataFrame()
+
+            elif st.startswith('3d') or st.startswith('d') or st.startswith('5d'):
+                if st.startswith('3d'):
+                    cct.GlobalValues().setkey('resample','3d')
+                    top_all = pd.DataFrame()
+                    lastpTDX_DF = pd.DataFrame()
+                elif st.startswith('d'):
+                    cct.GlobalValues().setkey('resample','d')
+                    top_all = pd.DataFrame()
+                    lastpTDX_DF = pd.DataFrame()
+                elif st.startswith('5d'):
+                    cct.GlobalValues().setkey('resample','w')
+                    top_all = pd.DataFrame()
                     lastpTDX_DF = pd.DataFrame()
 
             elif st.startswith('w') or st.startswith('a'):
