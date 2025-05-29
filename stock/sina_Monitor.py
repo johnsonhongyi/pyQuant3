@@ -96,7 +96,7 @@ def evalcmd(dir_mo,workstatus=True):
                 # sl.write_to_blocknew(all_diffpath, codew)
             else:
                 # codew = stf.WriteCountFilter(top_temp)
-                cct.write_to_blocknew(block_path, codew, append=False)
+                cct.write_to_blocknew(block_path, codew, append=False,keep_last=0)
                 # sl.write_to_blocknew(all_diffpath, codew, False)
             print("wri ok:%s" % block_path)
             # cct.GlobalValues().setkey('tempdf',None)
@@ -164,7 +164,7 @@ if __name__ == "__main__":
     parserDuraton = cct.DurationArgmain()
     # resample = '3d'
     # global resample
-    cct.GlobalValues().setkey('resample','d')
+    cct.GlobalValues().setkey('resample','3d')
     # resample = cct.GlobalValues().getkey('resample')
     duration_date = ct.duration_date_l  #80dat
     duration_date = 60
