@@ -96,7 +96,7 @@ day_dir_sz = basedir + r'/Vipdoc/sz/lday/'
 exp_path = basedir + \
     "/T0002/export/".replace('/', path_sep).replace('\\', path_sep)
 day_path = {'sh': day_dir_sh, 'sz': day_dir_sz}
-resample_dtype = ['d', 'w', 'm','3d']
+resample_dtype = ['d', 'w', 'm','3d','5d']
 # http://www.douban.com/note/504811026/
 
 
@@ -424,7 +424,8 @@ def get_tdx_Exp_day_to_df_AllRead_(code, start=None, end=None, dl=None, newdays=
             df = df.set_index('date')
             df = df.sort_index(ascending=True)
             if not MultiIndex:
-                if not resample == 'd' and resample in resample_dtype:
+                # if not resample == 'd' and resample in resample_dtype:
+                if not resample == 'd':
                     df = get_tdx_stock_period_to_type(df, period_day=resample)
 
             if resample == 'd' and df.close[-5:].max() > df.open[-5:].min() * 1.6:
@@ -536,7 +537,8 @@ def get_tdx_Exp_day_to_df_AllRead_(code, start=None, end=None, dl=None, newdays=
                 df = df.set_index('date')
             df = df.sort_index(ascending=True)
             if not MultiIndex:
-                if not resample == 'd' and resample in resample_dtype:
+                # if not resample == 'd' and resample in resample_dtype:
+                if not resample == 'd':
                     df = get_tdx_stock_period_to_type(df, period_day=resample)
                     df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
                     if 'date' in df.columns:
@@ -731,13 +733,15 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     start = cct.day8_to_day10(start)
     end = cct.day8_to_day10(end)
     
-    if dl is not None:
-        if dl < 70:
-            tdx_max_int = dl
-        else:
-            tdx_max_int = ct.tdx_max_int_start
-    else:
-        tdx_max_int = ct.tdx_max_int
+    # if dl is not None:
+    #     if dl < 70:
+    #         tdx_max_int = dl
+    #     else:
+    #         tdx_max_int = ct.tdx_max_int_start
+    # else:
+    #     tdx_max_int = ct.tdx_max_int
+
+    tdx_max_int = ct.tdx_max_int
     # max_int_end = -1 if int(tdx_max_int) > 10 else None
     # max_int_end = -1 if int(tdx_max_int) > 10 else None
     max_int_end = -1 
@@ -834,7 +838,8 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             df = df.set_index('date')
             df = df.sort_index(ascending=True)
             if not MultiIndex:
-                if not resample == 'd' and resample in resample_dtype:
+                # if not resample == 'd' and resample in resample_dtype:
+                if not resample == 'd':
                     df = get_tdx_stock_period_to_type(df, period_day=resample)
 
             if resample == 'd' and df.close[-5:].max() > df.open[-5:].min() * 1.6:
@@ -985,7 +990,8 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                 df = df.set_index('date')
             df = df.sort_index(ascending=True)
             if not MultiIndex:
-                if not resample == 'd' and resample in resample_dtype:
+                # if not resample == 'd' and resample in resample_dtype:
+                if not resample == 'd':
                     df = get_tdx_stock_period_to_type(df, period_day=resample)
                     df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
                     if 'date' in df.columns:
@@ -1083,6 +1089,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         if cct.get_work_time_duration():
             df['max5'] = df.close[-6:-1].max()
             df['hmax'] = df.close[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
+            df['hmaxvol'] = df.vol[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
             df['hmax60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
             df['high4'] = df.close[-5:-1].max()
 
@@ -5460,10 +5467,11 @@ if __name__ == '__main__':
     code='603038'
     code='833171'
     code='688652'
-    code='301287'
+    code='000546'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
-    # dd = get_tdx_Exp_day_to_df('600602')
+    # dd = get_tdx_Exp_day_to_df(code,resample='2d')
+
     # tmp_df = get_kdate_data(code, start='', end='', ktype='D')
     # if len(tmp_df) > 0:
     #     write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
