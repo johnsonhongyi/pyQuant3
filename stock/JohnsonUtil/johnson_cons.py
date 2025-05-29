@@ -34,7 +34,7 @@ DD_VOL_List = {'0': '40000', '1': '100000',
             # "HMax日新高" : "top_temp.query('close >hmax and low > ma10d and lasth1d > lasth2d and lastl1d > lastl2d and close < hmax*1.2')",\
             # "HMax日新高" : "top_temp.query('close > hmax and low > ma10d and lasth1d > lasth2d and lastp1d < hmax')",\
 
-codeQuery= {"放量上涨": "top_temp.query('lastv1d > lastv2d and lastv1d/last6vol > 1.5 and close > ma51d and percent > 0')",\
+codeQuery= {"放量上涨": "top_temp.query('close > df2  and low > ene and close > lastp1d and volume > 3 and boll > 1')",\
             "HMax日新高" : "top_temp.query('low > ma10d  and ((lasth1d > high4) or (high > max5)) and high4==max5 and max5 >=hmax*0.9 and topR > 1')",\
             "3周连阳趋势" : " top_temp.query('boll>0 and perc1d >=0 and perc2d >=0 and perc3d >= 0 and ma51d > ma201d and lastl1d < ma51d*1.05 and perc1d >= perc2d')",\
             "4周新高" : "top_temp.query('high > high4 and lasth1d > lasth2d and lasth2d > lasth3d and low <= ma5d*1.02 and percent > 0')",\
@@ -53,7 +53,7 @@ codeQuery= {"放量上涨": "top_temp.query('lastv1d > lastv2d and lastv1d/last6
             # "4周Max高" : "top_temp.query('high > high4 and high > hmax and lasth1d > lasth2d and lasth2d > lasth3d and low <= ma5d*1.02 and percent > 0')",\
             # "K线4连阳"    : "top_temp.query('low > lastl1d and  lasth1d >= lasth2d and lasth2d >= lasth3d and lasth3d >= lasth4d and low >=ma51d')",\
 
-codeQuery_work_false= {"放量上涨": "top_temp.query('lastv1d > lastv2d and lastv1d/last6vol > 1.5 and close > ma51d and percent > 0')",\
+codeQuery_work_false= {"放量上涨": "top_temp.query('close > df2  and low > ene and close > lastp2d and volume > 3 and boll > 1')",\
             "HMax日新高" : "top_temp.query('low > ma10d  and ((lasth1d > high4) or (high > max5)) and high4==max5 and max5 >=hmax*0.9 and topR > 1')",\
             "3周连阳趋势" : " top_temp.query('boll>0 and perc1d >=0 and perc2d >=0 and perc3d >= 0 and ma51d > ma201d and lastl1d < ma51d*1.05 and perc1d >= perc2d')",\
             "4周新高" : "top_temp.query('high > high4 and lasth2d > lasth3d and lasth3d > lasth4d and low <= ma5d*1.02 and percent > 0')",\
