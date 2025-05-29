@@ -3044,7 +3044,7 @@ def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_las
     if keep_last is None:
         keep_last = ct.keep_lastnum
     # index_list = ['1999999','47#IFL0',  '0159915', '27#HSI']
-    index_list = ['1999999', '0399001', '0159915','2899050','1588000','1880884','1880885','1880818']
+    index_list = ['1999999', '0399001', '0159915','2899050','1588000','1880884','1880885','1880818','1880774']
     # index_list = ['1999999','47#IFL0', '0399001', '0159915']
     # index_list = ['1999999','47#IFL0', '27#HSI',  '0399006']
     # index_list = ['1999999','0399001','47#IFL0', '27#HSI',  '0159915']
@@ -3191,7 +3191,7 @@ def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_las
     elif p_name.find('064.blk') > 0:
         writeBlocknew(p_name, data, append,reappend=reappend)
         if doubleFile:
-            writeBlocknew(blockNew, data, append=True,keep_last=12,reappend=reappend)
+            writeBlocknew(blockNew, data, append=True,keep_last=9,reappend=reappend)
             # writeBlocknew(blockNewStart, data, append=True)
         # print "write to append:%s :%s :%s"%(append,p_name,len(data))
     elif p_name.find('068.blk') > 0 or p_name.find('069.blk') > 0:
