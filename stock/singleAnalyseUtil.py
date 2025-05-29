@@ -523,7 +523,7 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
 
     if len(hgt) > 0:
         print(("\tSgt: %s Gst: %s Hgt: %s Ggt: %s SSVol:%s" %
-              (hgt['ggt'], szt['ggt'], hgt['hgt'], szt['hgt'], f_print(10, ff['allvol'], 31))))
+              (hgt['ggt'], szt['ggt'], hgt['hgt'], szt['hgt'], f_print(10, ff['allvol'], 32))))
     else:
         print(("\t%s Sgt: %s Gst: %s \tHgt: \t%s Ggt: " % (0, 0, 0, 0)))
 
