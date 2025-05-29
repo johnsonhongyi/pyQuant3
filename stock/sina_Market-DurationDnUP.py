@@ -87,8 +87,9 @@ def evalcmd(dir_mo,workstatus=True):
                             break
                         else:
                             idx+=1
-
-                    if  checkcmd == 'y':
+                    if  checkcmd == 'q':
+                        break
+                    elif  checkcmd == 'y':
                         hdf_wri = cct.cct_raw_input("to write Y or N:")
                         if hdf_wri == 'y':
                             cmdlist=cmd.split()
@@ -108,6 +109,24 @@ def evalcmd(dir_mo,workstatus=True):
                             continue
                 else:
                     continue
+
+                        
+            if len(tempdf) >  0:
+                args = cct.writeArgmain().parse_args(cmd.split())
+                codew = stf.WriteCountFilter(
+                    tempdf, 'ra', writecount=args.dl)
+                if args.code == 'a':
+                    cct.write_to_blocknew(block_path, codew)
+                    # sl.write_to_blocknew(all_diffpath, codew)
+                else:
+                    # codew = stf.WriteCountFilter(top_temp)
+                    cct.write_to_blocknew(block_path, codew, append=False,keep_last=0)
+                    # sl.write_to_blocknew(all_diffpath, codew, False)
+                print("wri ok:%s" % block_path)
+                # cct.GlobalValues().setkey('tempdf',None)
+                cct.sleeprandom(ct.duration_sleep_time / 10)
+            else:
+                print(f'tempdf is None cmd:{cmd}')
             
         elif len(cmd) == 0:
             continue

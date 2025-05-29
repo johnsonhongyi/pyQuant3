@@ -98,8 +98,9 @@ def evalcmd(dir_mo,workstatus=True):
                             break
                         else:
                             idx+=1
-
-                    if  checkcmd == 'y':
+                    if  checkcmd == 'q':
+                        break
+                    elif  checkcmd == 'y':
                         hdf_wri = cct.cct_raw_input("to write Y or N:")
                         if hdf_wri == 'y':
                             cmdlist=cmd.split()
