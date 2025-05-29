@@ -72,24 +72,43 @@ def evalcmd(dir_mo,workstatus=True):
         # if cmd == 'e' or cmd == 'q' or len(cmd) == 0:
         if cmd == 'e' or cmd == 'q':
             break
-        elif cmd.startswith('w') or cmd.startswith('a'):
-            if cct.GlobalValues().getkey('tempdf') is not None:
+       
+        elif cmd.startswith('w') or cmd.startswith('a') or cmd.startswith('rw') or cmd.startswith('ra'):
+            if not cmd.startswith('r') and cct.GlobalValues().getkey('tempdf') is not None:
                 tempdf = eval(cct.GlobalValues().getkey('tempdf')).sort_values('dff', ascending=False)
             else:
-                continue
-            args = cct.writeArgmain().parse_args(cmd.split())
-            codew = stf.WriteCountFilter(
-                tempdf, 'ra', writecount=args.dl)
-            if args.code == 'a':
-                cct.write_to_blocknew(block_path, codew)
-                # sl.write_to_blocknew(all_diffpath, codew)
-            else:
-                # codew = stf.WriteCountFilter(top_temp)
-                cct.write_to_blocknew(block_path, codew, False)
-                # sl.write_to_blocknew(all_diffpath, codew, False)
-            print("wri ok:%s" % block_path)
-            # cct.GlobalValues().setkey('tempdf',None)
-            cct.sleeprandom(ct.duration_sleep_time / 10)
+                if cmd.startswith('rw') or cmd.startswith('ra'):
+                    historyLen=readline.get_current_history_length()
+                    idx=1
+                    while 1:
+                        cmd2 = readline.get_history_item(historyLen-idx)
+                        print(f'cmd : {cmd2}',end=' ')
+                        checkcmd=cct.cct_raw_input(" is OK ? Y or N or q:")
+                        if checkcmd == 'y' or checkcmd == 'q' or idx > historyLen-2:
+                            break
+                        else:
+                            idx+=1
+
+                    if  checkcmd == 'y':
+                        hdf_wri = cct.cct_raw_input("to write Y or N:")
+                        if hdf_wri == 'y':
+                            cmdlist=cmd.split()
+                            if cmd.startswith('rw'):
+                                cmd_ = 'w '
+                            else:
+                                cmd_ = 'a '
+                            tempdf = eval(cmd2).sort_values('dff', ascending=False)
+                            if len(cmdlist) > 1:
+                                # ' '.join([aa.split()[i] for i in range(1,len(aa.split()))])
+                                cmd =cmd_ + ' '.join([cmd.split()[i] for i in range(1,len(cmd.split()))])
+                                print(f'cmd:{cmd}')
+                            else:
+                                cmd = cmd_
+                        else:
+                            print("return shell")
+                            continue
+                else:
+                    continue
 
         elif len(cmd) == 0:
             continue

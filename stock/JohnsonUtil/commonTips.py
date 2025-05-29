@@ -102,7 +102,9 @@ class GlobalValues:
     def getkey_status(self, key):
         # """ 定义一个全局变量 """
         return (key in _global_dict.keys())
-
+    def getlist(self):
+        # """ 定义一个全局变量 """
+        return (_global_dict.keys())
 
 def format_for_print(df,header=True,widths=False,showCount=False):
 
@@ -5025,6 +5027,10 @@ if __name__ == '__main__':
     print(is_trade_date())
     print(isDigit('nan None'))
     print("指数的贡献度:",isDigit('指数的贡献度'))
+
+    GlobalValues()
+    GlobalValues().setkey('key', 'GlobalValuesvalue')
+    print(GlobalValues().getlist())
     import ipdb;ipdb.set_trace()
     
     print(read_to_indb())
