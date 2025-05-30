@@ -4555,6 +4555,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
             if not cmd.startswith('r') and GlobalValues().getkey('tempdf') is not None:
                 tempdf = eval(GlobalValues().getkey('tempdf')).sort_values(orderby, ascending=False)
             else:
+                checkcmd = 'q'
                 if cmd.startswith('rw') or cmd.startswith('ra'):
                     historyLen=readline.get_current_history_length()
                     idx=1
@@ -4571,26 +4572,32 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                             break
                         else:
                             idx+=1
-                        if  checkcmd == 'q':
-                            break
-                        elif  checkcmd == 'y':
-                            hdf_wri = cct_raw_input("to write Y or N:")
-                            if hdf_wri == 'y':
-                                cmdlist=cmd.split()
-                                if cmd.startswith('rw'):
-                                    cmd_ = 'w '
-                                else:
-                                    cmd_ = 'a '
-                                tempdf = eval(cmd2).sort_values(orderby, ascending=False)
-                                if len(cmdlist) > 1:
-                                    # ' '.join([aa.split()[i] for i in range(1,len(aa.split()))])
-                                    cmd =cmd_ + ' '.join([cmd.split()[i] for i in range(1,len(cmd.split()))])
-                                    print(f'cmd:{cmd}')
-                                else:
-                                    cmd = cmd_
+
+                    if  checkcmd == 'q':
+                        print(f'checkcmd:{cmd} quit')
+                        continue
+                    elif  checkcmd == 'y':
+                        # hdf_wri = cct_raw_input("to write Y or N:")
+                        # if hdf_wri == 'y':
+                        cmdlist=cmd.split()
+                        if cmd.startswith('rw'):
+                            cmd_ = 'w '
                         else:
-                            print("return shell")
-                            continue
+                            cmd_ = 'a '
+
+                        tempdf = eval(cmd2).sort_values(orderby, ascending=False)
+                        if isinstance(tempdf,pd.DataFrame()):
+                            GlobalValues().setkey('tempdf',cmd2)
+
+                        if len(cmdlist) > 1:
+                            # ' '.join([aa.split()[i] for i in range(1,len(aa.split()))])
+                            cmd =cmd_ + ' '.join([cmd.split()[i] for i in range(1,len(cmd.split()))])
+                            print(f'cmd:{cmd}')
+                        else:
+                            cmd = cmd_
+                    else:
+                        print("return shell")
+                        continue
                 else:
                     continue
                     
@@ -4615,6 +4622,10 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
             continue
         else:
             try:
+                if cmd.startswith('tempdf'):
+                    if GlobalValues().getkey('tempdf') is not None:
+                        tempdf = eval(GlobalValues().getkey('tempdf')).sort_values(orderby, ascending=False)
+                        # print((eval(cmd)))
 
                 if not cmd.find(' =') < 0:
                     # cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby='percent')
@@ -4622,17 +4633,15 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                     # print(cmd)
                     # exec(cmd)
                     exec(cmd)
-                elif cmd.startswith('tempdf'):
-                    if GlobalValues().getkey('tempdf') is not None:
-                        tempdf = eval(GlobalValues().getkey('tempdf')).sort_values(orderby, ascending=False)
-                        print((eval(cmd)))
 
                 else:
-                    if cmd.split('.')[-1].startswith('query') or cmd.split('.')[-1].startswith('sort'):
-                        if cmd.find('format_for_print_show') < 0 and (cmd.rfind('.') < 10 and \
-                            len(cmd) > 10 and  cmd.split('.')[-1] not in top_temp.columns):
+                    if (cmd.startswith('tempdf') or cmd.startswith('top_temp')) and  cmd.find('sort') < 0:
+                        if cmd.split('.')[-1] not in list(dir(top_temp)) and cmd.find('format_for_print_show') < 0  and  cmd.split('.')[-1] not in top_temp.columns:
+                            tempdf = eval(cmd)
+                            if isinstance(tempdf,pd.DataFrame):
+                                GlobalValues().setkey('tempdf',cmd)
                             cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby=orderby)
-                    print((eval(cmd)))
+                    print((eval(cmd)))  
 
                 print('')
             except Exception as e:
