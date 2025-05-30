@@ -315,10 +315,11 @@ if __name__ == '__main__':
         run_system_fpath('%s\\tdxw.exe'%(cct.get_tdx_dir()))
         time.sleep(8)
 
-    if not find_proc_windows('东兴证券',fuzzysearch=True):
-        run_system_fpath('%s\\tdxw.exe'%('D:\\MacTools\\WinTools\\zd_dxzq'))
-        # run_system_fpath('%s\\tdxw.exe'%(cct.win10dxzq.))
-        time.sleep(8)
+    # if not find_proc_windows('东兴证券',fuzzysearch=True):
+    #     run_system_fpath('%s\\tdxw.exe'%('D:\\MacTools\\WinTools\\zd_dxzq'))
+    #     # run_system_fpath('%s\\tdxw.exe'%(cct.win10dxzq.))
+    #     time.sleep(8)
+    
     if not find_proc_windows('pywin32_mouse'):
         os.system('start cmd /k python pywin32_mouse.py')
         time.sleep(5)
