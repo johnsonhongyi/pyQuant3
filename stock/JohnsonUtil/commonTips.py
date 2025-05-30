@@ -4452,6 +4452,174 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
 
     return round(initc,1)
 
+def WriteCountFilter_cct(df, op='op', writecount=5, end=None, duration=10):
+    codel = []
+    # market_value = cct.GlobalValues().getkey('market_value')
+    # market_key = cct.GlobalValues().getkey('market_key')
+    # if market_key == '2':
+    #     market_value_perd = int(market_value) * 10
+    if str(writecount) != 'all' and isDigit(writecount):
+        if end is None and int(writecount) > 0:
+            # if int(writecount) < 101 and len(df) > 0 and 'percent' in df.columns:
+            if int(writecount) < 101 and len(df) > 0:
+                codel = df.index[:int(writecount)].tolist()
+                # market_value = cct.GlobalValues().getkey('market_value')
+                # market_key = cct.GlobalValues().getkey('market_key')
+                # if market_key == '2':
+                #     # market_value_perd = int(market_value) * 9.8
+                #     market_value_perd = 9.8
+                #     dd=df[ df['per%sd'%(market_value)] > market_value_perd ]
+                #     df_list=dd.index.tolist()
+                #     for co in df_list:
+                #         if co not in codel:
+                #             codel.append(co)
+            else:
+                if len(str(writecount)) >= 4:
+                    codel.append(str(writecount).zfill(6))
+                else:
+                    print("writeCount DF is None or Wri:%s" % (writecount))
+        else:
+            if end is None:
+                writecount = int(writecount)
+                if writecount > 0:
+                    writecount -= 1
+                codel.append(df.index.tolist()[writecount])
+            else:
+                writecount, end = int(writecount), int(end)
+
+                if writecount > end:
+                    writecount, end = end, writecount
+                if end < -1:
+                    end += 1
+                    codel = df.index.tolist()[writecount:end]
+                elif end == -1:
+                    codel = df.index.tolist()[writecount::]
+                else:
+                    if writecount > 0 and end > 0:
+                        writecount -= 1
+                        end -= 1
+                    codel = df.index.tolist()[writecount:end]
+    else:
+        if df is not None and len(df) > 0:
+            codel = df.index.tolist()
+    return codel
+
+
+def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None):
+    end = True
+    import readline
+    import rlcompleter
+    # readline.set_completer(cct.MyCompleter(dir_mo).complete)
+    readline.parse_and_bind('tab:complete')
+    tempdf=[]
+    while end:
+        # cmd = (cct.cct_raw_input(" ".join(dir_mo)+": "))
+        cmd = (cct_raw_input(": "))
+        code=ct.codeQuery if workstatus else ct.codeQuery_work_false
+        if len(cmd) == 0:
+            # code='最近两周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
+            # code='周线2连阳,最近三周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
+            # code='日K,4连阳以上,4天涨幅排序,今天阳线'
+            # code={"4周新高" : "top_temp.query('close > high4 and lastp1d < hmax and low > lastl1d and lastl1d < ma51d and close >lastp2d')",\
+            #       "5周新高" : "top_temp.query('close > max5 and lastp1d < hmax and low > lastl1d and lastl1d < ma51d and close >lastp2d')",\
+            #       "K线2连阳"   : "top_temp.query('close > lastp1d and  lastp1d > lastp2d and close >ma51d')",\
+            #       "K线连阳"    : "top_temp.query('high > lasth1d and  lasth1d > lasth2d and low >=ma51d')",\
+            #       "K线反包"    : "top_temp.query('close > lastp1d and  lastp1d < lastp2d and close >ma51d')"}
+            for idx in range(len(code.keys())):
+                id_key = list(code.keys())[idx]
+                print("%s: %s %s"%(idx+1,id_key,code[id_key]))
+            # for key in code.keys():
+            #     print("%s: %s"%(key,code[key]))
+
+            list(code.keys())
+            initkey= list(code.keys())[1]
+            print(f"{initkey}: {code[initkey]}")
+            # cmd=code[initkey]
+            GlobalValues().setkey('tempdf',code[initkey])
+            cmd=ct.codeQuery_show_cct(initkey,Market_Values,workstatus)
+        
+        elif len(cmd) <= 2 and cmd.isdigit() and int(cmd) < len(code.keys())+1:
+            # idx = int(cmd)+1 if int(cmd) == 0 else int(cmd)
+            idx = int(cmd) - 1
+            # print(f"idx:{idx}")
+            idxkey =  list(code.keys())[idx]
+            print(f"{idxkey}: {code[idxkey]}")
+            # cmd = code[idxkey]
+            GlobalValues().setkey('tempdf',code[idxkey])
+            cmd=ct.codeQuery_show_cct(idxkey,Market_Values,workstatus)
+        # cmd = (cct.cct_raw_input(dir_mo.append(":")))
+        # if cmd == 'e' or cmd == 'q' or len(cmd) == 0:
+        if cmd == 'e' or cmd == 'q':
+            break
+        elif cmd.startswith('w') or cmd.startswith('a') or cmd.startswith('rw') or cmd.startswith('ra'):
+            if not cmd.startswith('r') and GlobalValues().getkey('tempdf') is not None:
+                tempdf = eval(GlobalValues().getkey('tempdf')).sort_values('dff', ascending=False)
+            else:
+                if cmd.startswith('rw') or cmd.startswith('ra'):
+                    historyLen=readline.get_current_history_length()
+                    idx=1
+                    while 1:
+                        cmd2 = readline.get_history_item(historyLen-idx)
+                        print(f'cmd : {cmd2}',end=' ')
+                        checkcmd=cct_raw_input(" is OK ? Y or N or q:")
+                        if checkcmd == 'y' or checkcmd == 'q' or idx > historyLen-2:
+                            break
+                        else:
+                            idx+=1
+                    if  checkcmd == 'q':
+                        break
+                    elif  checkcmd == 'y':
+                        hdf_wri = cct_raw_input("to write Y or N:")
+                        if hdf_wri == 'y':
+                            cmdlist=cmd.split()
+                            if cmd.startswith('rw'):
+                                cmd_ = 'w '
+                            else:
+                                cmd_ = 'a '
+                            tempdf = eval(cmd2).sort_values('dff', ascending=False)
+                            if len(cmdlist) > 1:
+                                # ' '.join([aa.split()[i] for i in range(1,len(aa.split()))])
+                                cmd =cmd_ + ' '.join([cmd.split()[i] for i in range(1,len(cmd.split()))])
+                                print(f'cmd:{cmd}')
+                            else:
+                                cmd = cmd_
+                        else:
+                            print("return shell")
+                            continue
+                else:
+                    continue
+                    
+            if len(tempdf) >  0:
+                args = writeArgmain().parse_args(cmd.split())
+                codew = WriteCountFilter_cct(
+                    tempdf, 'ra', writecount=args.dl)
+                if args.code == 'a':
+                    write_to_blocknew(block_path, codew)
+                    # sl.write_to_blocknew(all_diffpath, codew)
+                else:
+                    # codew = stf.WriteCountFilter(top_temp)
+                    write_to_blocknew(block_path, codew, append=False,keep_last=0)
+                    # sl.write_to_blocknew(all_diffpath, codew, False)
+                print("wri ok:%s" % block_path)
+                # cct.GlobalValues().setkey('tempdf',None)
+                sleeprandom(ct.duration_sleep_time / 10)
+            else:
+                print(f'tempdf is None cmd:{cmd}')
+            
+        elif len(cmd) == 0:
+            continue
+        else:
+            try:
+                if not cmd.find(' =') < 0:
+                    exec(cmd)
+                else:
+                    print((eval(cmd)))
+                print('')
+            except Exception as e:
+                print(e)
+                # evalcmd(dir_mo)
+                # break
+
 
 def func_compute_percd2021_2022mod( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None):
     # down_zero, down_dn, percent_l = 0, 0, 2
