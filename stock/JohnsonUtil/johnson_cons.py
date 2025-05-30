@@ -75,6 +75,11 @@ def codeQuery_show(idxkey,columns_format,workstatus):
     cmd=f"cct.format_for_print_show({code}.sort_values('dff', ascending=False),{columns_format},showCount=True)"
     return(cmd)
 
+def codeQuery_show_cct(idxkey,columns_format,workstatus):
+    code=codeQuery[idxkey] if workstatus else codeQuery_work_false[idxkey]
+    cmd=f"format_for_print_show({code}.sort_values('dff', ascending=False),{columns_format},showCount=True)"
+    return(cmd)
+
 tqdm_mininterval=2
 FILLNA = -101
 ncols = 120

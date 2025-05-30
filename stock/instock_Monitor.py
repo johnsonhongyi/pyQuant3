@@ -42,120 +42,7 @@ from JohnsonUtil import commonTips as cct
 # cct.set_ctrl_handler()
 
 
-def evalcmd(dir_mo,workstatus=True):
-    end = True
-    import readline
-    import rlcompleter
-    # readline.set_completer(cct.MyCompleter(dir_mo).complete)
-    readline.parse_and_bind('tab:complete')
-    while end:
-        # cmd = (cct.cct_raw_input(" ".join(dir_mo)+": "))
-        cmd = (cct.cct_raw_input(": "))
-        code=ct.codeQuery if workstatus else ct.codeQuery_work_false
-        if len(cmd) == 0:
-            # code='最近两周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
-            # code='周线2连阳,最近三周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
-            # code='日K,4连阳以上,4天涨幅排序,今天阳线'
-            # code={"4周新高" : "top_temp.query('close > high4 and lastp1d < hmax and low > lastl1d and lastl1d < ma51d and close >lastp2d')",\
-            #       "5周新高" : "top_temp.query('close > max5 and lastp1d < hmax and low > lastl1d and lastl1d < ma51d and close >lastp2d')",\
-            #       "K线2连阳"   : "top_temp.query('close > lastp1d and  lastp1d > lastp2d and close >ma51d')",\
-            #       "K线连阳"    : "top_temp.query('high > lasth1d and  lasth1d > lasth2d and low >=ma51d')",\
-            #       "K线反包"    : "top_temp.query('close > lastp1d and  lastp1d < lastp2d and close >ma51d')"}
-            for idx in range(len(code.keys())):
-                id_key = list(code.keys())[idx]
-                print("%s: %s %s"%(idx+1,id_key,code[id_key]))
-            # for key in code.keys():
-            #     print("%s: %s"%(key,code[key]))
 
-            list(code.keys())
-            initkey= list(code.keys())[1]
-            print(f"{initkey}: {code[initkey]}")
-            # cmd=code[initkey]
-            cct.GlobalValues().setkey('tempdf',code[initkey])
-            cmd=ct.codeQuery_show(initkey,ct_MonitorMarket_Values,workstatus)
-        
-        elif len(cmd) <= 2 and cmd.isdigit() and int(cmd) < len(code.keys())+1:
-            # idx = int(cmd)+1 if int(cmd) == 0 else int(cmd)
-            idx = int(cmd) - 1
-            # print(f"idx:{idx}")
-            idxkey =  list(code.keys())[idx]
-            print(f"{idxkey}: {code[idxkey]}")
-            # cmd = code[idxkey]
-            cct.GlobalValues().setkey('tempdf',code[idxkey])
-            cmd=ct.codeQuery_show(idxkey,ct_MonitorMarket_Values,workstatus)
-        # cmd = (cct.cct_raw_input(dir_mo.append(":")))
-        # if cmd == 'e' or cmd == 'q' or len(cmd) == 0:
-        if cmd == 'e' or cmd == 'q':
-            break
-            
-        elif cmd.startswith('w') or cmd.startswith('a') or cmd.startswith('rw') or cmd.startswith('ra'):
-            if not cmd.startswith('r') and cct.GlobalValues().getkey('tempdf') is not None:
-                tempdf = eval(cct.GlobalValues().getkey('tempdf')).sort_values('dff', ascending=False)
-            else:
-                if cmd.startswith('rw') or cmd.startswith('ra'):
-                    historyLen=readline.get_current_history_length()
-                    idx=1
-                    while 1:
-                        cmd2 = readline.get_history_item(historyLen-idx)
-                        print(f'cmd : {cmd2}',end=' ')
-                        checkcmd=cct.cct_raw_input(" is OK ? Y or N or q:")
-                        if checkcmd == 'y' or checkcmd == 'q' or idx > historyLen-2:
-                            break
-                        else:
-                            idx+=1
-                    if  checkcmd == 'q':
-                        break
-                    elif  checkcmd == 'y':
-                        hdf_wri = cct.cct_raw_input("to write Y or N:")
-                        if hdf_wri == 'y':
-                            cmdlist=cmd.split()
-                            if cmd.startswith('rw'):
-                                cmd_ = 'w '
-                            else:
-                                cmd_ = 'a '
-                            tempdf = eval(cmd2).sort_values('dff', ascending=False)
-                            if len(cmdlist) > 1:
-                                # ' '.join([aa.split()[i] for i in range(1,len(aa.split()))])
-                                cmd =cmd_ + ' '.join([cmd.split()[i] for i in range(1,len(cmd.split()))])
-                                print(f'cmd:{cmd}')
-                            else:
-                                cmd = cmd_
-                        else:
-                            print("return shell")
-                            continue
-                else:
-                    continue
-                    
-            if len(tempdf) >  0:
-                args = cct.writeArgmain().parse_args(cmd.split())
-                codew = stf.WriteCountFilter(
-                    tempdf, 'ra', writecount=args.dl)
-                if args.code == 'a':
-                    cct.write_to_blocknew(block_path, codew)
-                    # sl.write_to_blocknew(all_diffpath, codew)
-                else:
-                    # codew = stf.WriteCountFilter(top_temp)
-                    cct.write_to_blocknew(block_path, codew, append=False,keep_last=0)
-                    # sl.write_to_blocknew(all_diffpath, codew, False)
-                print("wri ok:%s" % block_path)
-                # cct.GlobalValues().setkey('tempdf',None)
-                cct.sleeprandom(ct.duration_sleep_time / 10)
-            else:
-                print(f'tempdf is None cmd:{cmd}')
-
-        elif len(cmd) == 0:
-            continue
-        else:
-            try:
-                if not cmd.find(' =') < 0:
-                    exec(cmd)
-                else:
-                    print((eval(cmd)))
-                print('')
-            except Exception as e:
-                print(e)
-                # evalcmd(dir_mo)
-                # break
 
 
 if __name__ == "__main__":
@@ -176,10 +63,10 @@ if __name__ == "__main__":
     log.setLevel(log_level)
 
     if cct.isMac():
-        width, height = 176, 22
+        width, height = 160, 22
         cct.set_console(width, height)
     else:
-        width, height = 176, 22
+        width, height = 160, 22
         cct.set_console(width, height)
         # cct.terminal_positionKey_triton
 
@@ -932,9 +819,9 @@ if __name__ == "__main__":
             elif st.lower() == 'r':
                 dir_mo=eval(cct.eval_rule)
                 if len(top_temp) > 0 and top_temp.lastp1d[0] == top_temp.close[0]:
-                    evalcmd(dir_mo,workstatus=False)
+                    cct.evalcmd(dir_mo,workstatus=False,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path)
                 else:
-                    evalcmd(dir_mo)
+                    cct.evalcmd(dir_mo,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path)
 
             elif st.startswith('q') or st.startswith('e'):
                 print("exit:%s" % (st))
