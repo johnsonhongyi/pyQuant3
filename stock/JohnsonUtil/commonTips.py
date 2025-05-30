@@ -4505,7 +4505,7 @@ def WriteCountFilter_cct(df, op='op', writecount=5, end=None, duration=10):
     return codel
 
 
-def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None):
+def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None,orderby='percent'):
     end = True
     import readline
     import rlcompleter
@@ -4536,7 +4536,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
             print(f"{initkey}: {code[initkey]}")
             # cmd=code[initkey]
             GlobalValues().setkey('tempdf',code[initkey])
-            cmd=ct.codeQuery_show_cct(initkey,Market_Values,workstatus)
+            cmd=ct.codeQuery_show_cct(initkey,Market_Values,workstatus,orderby)
         
         elif len(cmd) <= 2 and cmd.isdigit() and int(cmd) < len(code.keys())+1:
             # idx = int(cmd)+1 if int(cmd) == 0 else int(cmd)
@@ -4546,20 +4546,23 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
             print(f"{idxkey}: {code[idxkey]}")
             # cmd = code[idxkey]
             GlobalValues().setkey('tempdf',code[idxkey])
-            cmd=ct.codeQuery_show_cct(idxkey,Market_Values,workstatus)
+            cmd=ct.codeQuery_show_cct(idxkey,Market_Values,workstatus,orderby)
         # cmd = (cct.cct_raw_input(dir_mo.append(":")))
         # if cmd == 'e' or cmd == 'q' or len(cmd) == 0:
         if cmd == 'e' or cmd == 'q':
             break
         elif cmd.startswith('w') or cmd.startswith('a') or cmd.startswith('rw') or cmd.startswith('ra'):
             if not cmd.startswith('r') and GlobalValues().getkey('tempdf') is not None:
-                tempdf = eval(GlobalValues().getkey('tempdf')).sort_values('dff', ascending=False)
+                tempdf = eval(GlobalValues().getkey('tempdf')).sort_values(orderby, ascending=False)
             else:
                 if cmd.startswith('rw') or cmd.startswith('ra'):
                     historyLen=readline.get_current_history_length()
                     idx=1
                     while 1:
                         cmd2 = readline.get_history_item(historyLen-idx)
+                        if len(cmd2) < 20:
+                            idx+=1
+                            continue
                         print(f'cmd : {cmd2}',end=' ')
                         checkcmd=cct_raw_input(" is OK ? Y or N or q:")
                         if checkcmd == 'y' or checkcmd == 'q' or idx > historyLen-2:
@@ -4576,7 +4579,9 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                                 cmd_ = 'w '
                             else:
                                 cmd_ = 'a '
-                            tempdf = eval(cmd2).sort_values('dff', ascending=False)
+                            import ipdb;ipdb.set_trace()
+
+                            tempdf = eval(cmd2).sort_values(orderby, ascending=False)
                             if len(cmdlist) > 1:
                                 # ' '.join([aa.split()[i] for i in range(1,len(aa.split()))])
                                 cmd =cmd_ + ' '.join([cmd.split()[i] for i in range(1,len(cmd.split()))])
@@ -4611,8 +4616,14 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
         else:
             try:
                 if not cmd.find(' =') < 0:
+                    # cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby='percent')
+                    # import ipdb;ipdb.set_trace()
+                    # print(cmd)
+                    # exec(cmd)
                     exec(cmd)
                 else:
+                    if cmd.find('format_for_print_show') < 0 and cmd.rfind('.') < 10:
+                        cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby=orderby)
                     print((eval(cmd)))
                 print('')
             except Exception as e:
