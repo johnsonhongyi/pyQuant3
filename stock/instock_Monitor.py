@@ -144,7 +144,7 @@ if __name__ == "__main__":
     # st_key_sort = '9'
     # st_key_sort = '7'
     # st_key_sort = ct.sort_value_key_perd23
-    instocklastDays = 3
+    instocklastDays = 10
     st = None
     while 1:
         try:
