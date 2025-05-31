@@ -1,7 +1,11 @@
 top_all.query(' low < (ma51d*7+ma201d*3)/8.9 and  low > (ma51d*7+ma201d*3)/10 ')
 top_all.query(' low < (ma51d*7+ma201d*3)/8.9 and  low > (ma51d*7+ma201d*3)/9 ')
 top_all.query('lastl1d > ma51d and lastl2d >ma52d and percent > 0')
-top_temp.query('lastp1d > lastp2d and lastp2d >lastp3d')
 top_temp.query('lastp1d > lastp2d >lastp3d')
 top_temp.query('lastp1d > lastp2d >lastp3d >lastp4d')
-top_temp.query('lastp1d > lastp2d >lastp3d >lastp4d').sort_values('percent', ascending=False)
+top_temp.query('lastp1d > lastp2d >lastp3d >lastp4d') 
+top_temp.query('lastp1d > lastp2d >lastp3d >lastp4d').per2d[:10]
+top_temp.query('lastp1d > lastp2d >lastp3d >lastp4d')[-10:]
+top_all.query('lastl1d > ma51d and lastl2d >ma52d and percent > 0') 
+
+
