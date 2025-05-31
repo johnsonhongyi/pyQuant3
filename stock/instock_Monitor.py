@@ -819,9 +819,9 @@ if __name__ == "__main__":
             elif st.lower() == 'r':
                 dir_mo=eval(cct.eval_rule)
                 if len(top_temp) > 0 and top_temp.lastp1d[0] == top_temp.close[0]:
-                    cct.evalcmd(dir_mo,workstatus=False,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path)
+                    cct.evalcmd(dir_mo,workstatus=False,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=top_all)
                 else:
-                    cct.evalcmd(dir_mo,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path)
+                    cct.evalcmd(dir_mo,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=top_all)
 
             elif st.startswith('q') or st.startswith('e'):
                 print("exit:%s" % (st))

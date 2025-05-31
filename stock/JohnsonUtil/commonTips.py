@@ -4505,7 +4505,7 @@ def WriteCountFilter_cct(df, op='op', writecount=5, end=None, duration=10):
     return codel
 
 
-def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None,orderby='percent'):
+def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None,orderby='percent',top_all=None):
     end = True
     import readline
     import rlcompleter
@@ -4586,7 +4586,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                             cmd_ = 'a '
 
                         tempdf = eval(cmd2).sort_values(orderby, ascending=False)
-                        if isinstance(tempdf,pd.DataFrame()):
+                        if isinstance(tempdf,pd.DataFrame):
                             GlobalValues().setkey('tempdf',cmd2)
 
                         if len(cmdlist) > 1:
@@ -4635,8 +4635,9 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                     exec(cmd)
 
                 else:
-                    if (cmd.startswith('tempdf') or cmd.startswith('top_temp')) and  cmd.find('sort') < 0:
-                        if cmd.split('.')[-1] not in list(dir(top_temp)) and cmd.find('format_for_print_show') < 0  and  cmd.split('.')[-1] not in top_temp.columns:
+                    # if (cmd.startswith('tempdf') or cmd.startswith('top_temp')) and  cmd.find('sort') < 0:
+                    if (cmd.startswith('tempdf') or cmd.startswith('top_temp') or cmd.startswith('top_all')) and  cmd.split('.')[-1] not in top_temp.columns:
+                        if cmd.split('.')[-1] not in list(dir(top_temp)) and cmd.find('format_for_print_show') < 0:
                             tempdf = eval(cmd)
                             if isinstance(tempdf,pd.DataFrame):
                                 GlobalValues().setkey('tempdf',cmd)
