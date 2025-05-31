@@ -4637,7 +4637,9 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                 else:
                     # if (cmd.startswith('tempdf') or cmd.startswith('top_temp')) and  cmd.find('sort') < 0:
                     if (cmd.startswith('tempdf') or cmd.startswith('top_temp') or cmd.startswith('top_all')) and  cmd.split('.')[-1] not in top_temp.columns:
-                        if cmd.split('.')[-1] not in list(dir(top_temp)) and cmd.find('format_for_print_show') < 0:
+                        # if cmd.split('.')[-1] not in list(dir(top_temp)) and cmd.find('format_for_print_show') < 0:
+                        if re.findall(r'^[a-z]*', cmd.split('.')[-1])[0] not in list(dir(top_temp)) and cmd.find('format_for_print_show') < 0:
+                        
                             tempdf = eval(cmd)
                             if isinstance(tempdf,pd.DataFrame):
                                 GlobalValues().setkey('tempdf',cmd)
