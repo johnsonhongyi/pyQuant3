@@ -272,7 +272,7 @@ if __name__ == "__main__":
 
 
                     #20210816 filter ma5d ma10d
-                    top_dif = top_dif[top_dif.close > top_dif.ma10d ]
+                    top_dif = top_dif[top_dif.close >= top_dif.ma10d ]
                     
                     # top_all=top_all.sort_values(by=['percent','dff','couts','ratio'],ascending=[0,0,1,1])
                     # print cct.format_for_print(top_dif[:10])
@@ -408,9 +408,9 @@ if __name__ == "__main__":
             elif st.lower() == 'r':
                 dir_mo=eval(cct.eval_rule)
                 if len(top_temp) > 0 and top_temp.lastp1d[0] == top_temp.close[0]:
-                    cct.evalcmd(dir_mo,workstatus=False,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path)
+                    cct.evalcmd(dir_mo,workstatus=False,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=top_all)
                 else:
-                    cct.evalcmd(dir_mo,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path)
+                    cct.evalcmd(dir_mo,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=top_all)
             elif st.lower() == 'g' or st.lower() == 'go':
                 status = True
                 for code in top_dd[:10].index:
