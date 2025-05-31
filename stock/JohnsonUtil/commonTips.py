@@ -4658,10 +4658,10 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                     exec(cmd)
 
                 else:
+                    check_s = re.findall(r'^[a-z]*', cmd.split('.')[-1])[0] 
                     # if (cmd.startswith('tempdf') or cmd.startswith('top_temp')) and  cmd.find('sort') < 0:
                     if (cmd.startswith('tempdf') or cmd.startswith('top_temp') or cmd.startswith('top_all')) and  cmd.split('.')[-1] not in top_temp.columns:
                         # if cmd.split('.')[-1] not in list(dir(top_temp)) and cmd.find('format_for_print_show') < 0:
-                        check_s = re.findall(r'^[a-z]*', cmd.split('.')[-1])[0] 
                         if (check_s == 'query' or  check_s not in list(dir(top_temp))) and cmd.find('format_for_print_show') < 0:
                         
                             tempdf = eval(cmd)
@@ -4669,6 +4669,12 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                                 GlobalValues().setkey('tempdf',cmd)
                             write_evalcmd2file(evalcmdfpath,cmd)
                             cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby=orderby)
+                    elif  check_s  != orderby and cmd.find('sort_values') < 0 and check_s  in list(dir(top_temp)):
+                        cut_tail = cmd.split('.')[-1]
+                        # cmd_head = cmd.replace(cut_tail,'')
+                        cmd_head = cmd[:cmd.rfind('lastp1d')]
+                        cmd = f"{cmd_head}sort_values('{orderby}', ascending=False).{cut_tail}"  
+
                     print((eval(cmd))) 
                 print('')
             except Exception as e:
