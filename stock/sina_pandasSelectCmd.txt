@@ -1,0 +1,2 @@
+top_all.query(' low < (ma51d*7+ma201d*3)/8.9 and  low > (ma51d*7+ma201d*3)/10 ')
+top_all.query(' low < (ma51d*7+ma201d*3)/8.9 and  low > (ma51d*7+ma201d*3)/9 ')

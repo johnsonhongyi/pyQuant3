@@ -76,6 +76,12 @@ macroot_vm = r'/Volumes/VMware Shared Folders/MacTools/WinTools/new_tdx'
 xproot = r'E:\DOC\Parallels\WinTools\zd_pazq'
 
 
+def get_os_path_sep():
+    return os.path.sep
+
+    
+evalcmdfpath = r'./sina_pandasSelectCmd.txt'.replace('\\',get_os_path_sep())
+
 class GlobalValues:
     # -*- coding: utf-8 -*-
 
@@ -1677,9 +1683,6 @@ def get_cpu_count():
     return cpu_count()
 
 
-def get_os_path_sep():
-    return os.path.sep
-
 
 def day8_to_day10(start, sep='-'):
     if start:
@@ -3030,6 +3033,26 @@ def write_to_blkdfcf(codel,conf_ini=dfcf_path,blk='inboll1',append=True):
         # print('instock:',cf.get("\\SelfSelect", "instock"))
         cf.write(open(conf_ini,"w",encoding='UTF-16'))
 
+def read_unicode_file(file_path):
+    with open(file_path, 'r', encoding='utf-8') as file:
+        contents = file.readlines()
+        return contents
+
+def write_unicode_file(file_path, contents):
+    with open(file_path, 'w', encoding='utf-8') as file:
+        file.writelines(contents)        
+
+def write_evalcmd2file(file_path,content):
+    if not os.path.exists(file_path):
+        write_unicode_file(file_path,content+'\n')
+        # with open("history_data.json", "w+", encoding="utf-8") as f:
+        #     f.write("[]")
+    else:
+        contents=read_unicode_file(file_path)
+        if content+'\n' not in contents:
+            contents.append(content+'\n')
+        write_unicode_file(file_path, contents)
+    return True
 
 def write_to_blocknew(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True):
     # fname=p_name
@@ -4638,14 +4661,15 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                     # if (cmd.startswith('tempdf') or cmd.startswith('top_temp')) and  cmd.find('sort') < 0:
                     if (cmd.startswith('tempdf') or cmd.startswith('top_temp') or cmd.startswith('top_all')) and  cmd.split('.')[-1] not in top_temp.columns:
                         # if cmd.split('.')[-1] not in list(dir(top_temp)) and cmd.find('format_for_print_show') < 0:
-                        if re.findall(r'^[a-z]*', cmd.split('.')[-1])[0] not in list(dir(top_temp)) and cmd.find('format_for_print_show') < 0:
+                        check_s = re.findall(r'^[a-z]*', cmd.split('.')[-1])[0] 
+                        if (check_s == 'query' or  check_s not in list(dir(top_temp))) and cmd.find('format_for_print_show') < 0:
                         
                             tempdf = eval(cmd)
                             if isinstance(tempdf,pd.DataFrame):
                                 GlobalValues().setkey('tempdf',cmd)
+                            write_evalcmd2file(evalcmdfpath,cmd)
                             cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby=orderby)
-                    print((eval(cmd)))  
-
+                    print((eval(cmd))) 
                 print('')
             except Exception as e:
                 print(e)
