@@ -4672,7 +4672,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                     elif  check_s  != orderby and cmd.find('sort_values') < 0 and check_s  in list(dir(top_temp)):
                         cut_tail = cmd.split('.')[-1]
                         # cmd_head = cmd.replace(cut_tail,'')
-                        cmd_head = cmd[:cmd.rfind('lastp1d')]
+                        cmd_head = cmd[:cmd.rfind(cut_tail)]
                         cmd = f"{cmd_head}sort_values('{orderby}', ascending=False).{cut_tail}"  
 
                     print((eval(cmd))) 
