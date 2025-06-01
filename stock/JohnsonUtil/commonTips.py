@@ -3043,6 +3043,7 @@ def write_unicode_file(file_path, contents):
         file.writelines(contents)        
 
 def write_evalcmd2file(file_path,content):
+    content = content.strip()
     if not os.path.exists(file_path):
         write_unicode_file(file_path,content+'\n')
         # with open("history_data.json", "w+", encoding="utf-8") as f:
@@ -4608,6 +4609,18 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                         else:
                             cmd_ = 'a '
 
+                        cmd2_list = cmd2.split()
+                        if len(cmd2_list) > 1:
+                            orderby_t = cmd2_list[-1]
+                            # if orderby_t in list(dir(top_temp)):
+                            if orderby_t in top_temp.columns:
+                                orderby = orderby_t
+                                # doubleCmd = True
+                                cmd2 = cmd2[:cmd2.rfind(orderby_t)]
+                            elif re.findall(r'^[a-z\d]*', orderby_t)[0] == orderby_t:
+                                # doubleCmd = True
+                                cmd2 = cmd2[:cmd2.rfind(orderby_t)]
+
                         tempdf = eval(cmd2).sort_values(orderby, ascending=False)
                         if isinstance(tempdf,pd.DataFrame):
                             GlobalValues().setkey('tempdf',cmd2)
@@ -4685,10 +4698,11 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                             tempdf = eval(cmd)
                             if isinstance(tempdf,pd.DataFrame):
                                 GlobalValues().setkey('tempdf',cmd)
-                            if doubleCmd:
-                                write_evalcmd2file(evalcmdfpath,cmd+orderby_t)
-                            else:
-                                write_evalcmd2file(evalcmdfpath,cmd)
+                            if cmd.find('query') > 0:
+                                if doubleCmd:
+                                    write_evalcmd2file(evalcmdfpath,cmd+orderby_t)
+                                else:
+                                    write_evalcmd2file(evalcmdfpath,cmd)
                             cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby=orderby)
                     elif  check_s  != orderby and cmd.find('sort_values') < 0 and (check_s  in list(dir(top_temp)) or check_s in top_temp.columns) :
                         cut_tail = cmd.split('.')[-1]

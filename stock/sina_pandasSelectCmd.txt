@@ -7,5 +7,9 @@ top_temp.query('lastp1d > lastp2d >lastp3d >lastp4d')
 top_temp.query('lastp1d > lastp2d >lastp3d >lastp4d').per2d[:10]
 top_temp.query('lastp1d > lastp2d >lastp3d >lastp4d')[-10:]
 top_all.query('lastl1d > ma51d and lastl2d >ma52d and percent > 0') 
-
+top_temp.query('lastp1d > lastp2d >lastp3d >lastp4d and percent >0')
+top_all.query('lastp1d > lastp2d >lastp3d >lastp4d')
+top_all.query('lastp1d > lastp2d >lastp3d >lastp4d') 
+top_temp.query('high > max5 and lasth1d >ma51d and lasth2d > ma52d and lasth3d > ma53d')
+top_temp.query('high > max5 and lasth1d >ma51d and lasth2d > ma52d and lasth3d > ma53d and lastv1d > lastv2d*2')
 
