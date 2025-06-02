@@ -3050,7 +3050,7 @@ def write_evalcmd2file(file_path,content):
         #     f.write("[]")
     else:
         contents=read_unicode_file(file_path)
-        if content+'\n' not in contents:
+        if len(content) > 0 and content+'\n' not in contents:
             contents.append(content+'\n')
         write_unicode_file(file_path, contents)
     return True
@@ -4691,24 +4691,25 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
 
                     
                     # if (cmd.startswith('tempdf') or cmd.startswith('top_temp')) and  cmd.find('sort') < 0:
-                    if (cmd.startswith('tempdf') or cmd.startswith('top_temp') or cmd.startswith('top_all')) and  check_s not in top_temp.columns:
-                        # if cmd.split('.')[-1] not in list(dir(top_temp)) and cmd.find('format_for_print_show') < 0:
-                        if (check_s == 'query' or  check_s not in list(dir(top_temp))) and cmd.find('format_for_print_show') < 0:
-                        
-                            tempdf = eval(cmd)
-                            if isinstance(tempdf,pd.DataFrame):
-                                GlobalValues().setkey('tempdf',cmd)
-                            if cmd.find('query') > 0:
-                                if doubleCmd:
-                                    write_evalcmd2file(evalcmdfpath,cmd+orderby_t)
-                                else:
-                                    write_evalcmd2file(evalcmdfpath,cmd)
-                            cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby=orderby)
-                    elif  check_s  != orderby and cmd.find('sort_values') < 0 and (check_s  in list(dir(top_temp)) or check_s in top_temp.columns) :
-                        cut_tail = cmd.split('.')[-1]
-                        # cmd_head = cmd.replace(cut_tail,'')
-                        cmd_head = cmd[:cmd.rfind(cut_tail)]
-                        cmd = f"{cmd_head}sort_values('{orderby}', ascending=False).{cut_tail}"  
+                    if (cmd.find('.loc') > 0 and cmd.find(':') > 0) or (cmd.find('.loc') < 0 and (cmd.startswith('tempdf') or cmd.startswith('top_temp') or cmd.startswith('top_all'))) and  check_s not in top_temp.columns:
+                        if (cmd.startswith('tempdf') or cmd.startswith('top_temp') or cmd.startswith('top_all')) and  check_s not in top_temp.columns:
+                            # if cmd.split('.')[-1] not in list(dir(top_temp)) and cmd.find('format_for_print_show') < 0:
+                            if (check_s == 'query' or  check_s not in list(dir(top_temp))) and cmd.find('format_for_print_show') < 0:
+                            
+                                tempdf = eval(cmd)
+                                if isinstance(tempdf,pd.DataFrame):
+                                    GlobalValues().setkey('tempdf',cmd)
+                                if cmd.find('query') > 0:
+                                    if doubleCmd:
+                                        write_evalcmd2file(evalcmdfpath,cmd+orderby_t)
+                                    else:
+                                        write_evalcmd2file(evalcmdfpath,cmd)
+                                cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby=orderby)
+                        elif  check_s  != orderby and cmd.find('sort_values') < 0 and (check_s  in list(dir(top_temp)) or check_s in top_temp.columns) :
+                            cut_tail = cmd.split('.')[-1]
+                            # cmd_head = cmd.replace(cut_tail,'')
+                            cmd_head = cmd[:cmd.rfind(cut_tail)]
+                            cmd = f"{cmd_head}sort_values('{orderby}', ascending=False).{cut_tail}"  
 
                     print((eval(cmd))) 
                 print('')

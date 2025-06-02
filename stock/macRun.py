@@ -102,6 +102,7 @@ osascript -e
 
 # os.system("osascript -e '%s'"%(cmd))
 rcmd = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant3/stock;/Users/Johnson/anaconda/envs/py3.9/bin/python3 %s"'
+rcmdnatclip = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/share_controller/webTools/natclip/natclip;/Users/Johnson/anaconda/envs/py3.9/bin/python3 %s"'
 
 # rcmd2 = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant/stock;python2 %s"'
 
@@ -347,15 +348,23 @@ def setPosition(cmd=None, position=None):
             # position = doScript(scriptposition % ('get', str(n)))
             # print positio
     else:
+        cmd_natclip='''osascript -e '%s';sleep 10;'''%(rcmdnatclip%('main.py'))
+        print('new run natclip')
+        os.system(f'{cmd_natclip}')
+        # osascript -e 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant3/stock;/Users/Johnson/anaconda/envs/py3.9/bin/python3 sina_Market-DurationDnUP.py"';
+        # osascript -e 
         if os.path.exists(cct.get_ramdisk_path('tdx_last_df')): 
             f_size = os.path.getsize(cct.get_ramdisk_path('tdx_last_df')) / 1000 / 1000
         else:
             f_size = 0 
         if f_size > 2:
             print("run Cmd")
+            print(cmdRun)
             os.system(cmdRun)
         else:
             print("run Cmd200")
+            # natclip='''cd /Users/Johnson/Documents/Quant/share_controller/webTools/natclip/natclip;open main.py;'''
+            # os.system(f'osascript -e {natclip};sleep 3;')
             os.system(cmdRun200)
         setPosition(cmd=None, position=None)
         os.system(closeLaunch) 
