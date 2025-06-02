@@ -4687,9 +4687,8 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                             cmd = cmd[:cmd.rfind(orderby_t)]
                             
                     check_all = cmd.split('.')[-1]
-                    check_s = re.findall(r'^[a-z\d]*', check_all)[0]
+                    check_s = re.findall(r'^[a-zA-Z\d]*', check_all)[0]
 
-                    
                     # if (cmd.startswith('tempdf') or cmd.startswith('top_temp')) and  cmd.find('sort') < 0:
                     if (cmd.find('.loc') > 0 and cmd.find(':') > 0) or (cmd.find('.loc') < 0 and (cmd.startswith('tempdf') or cmd.startswith('top_temp') or cmd.startswith('top_all'))) and  check_s not in top_temp.columns:
                         if (cmd.startswith('tempdf') or cmd.startswith('top_temp') or cmd.startswith('top_all')) and  check_s not in top_temp.columns:

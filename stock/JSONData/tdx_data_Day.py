@@ -3680,7 +3680,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     return dd
 
 
-def compute_upper_cross(dd,ma1='upper',ma2='ma5d',ratio=0.02):    
+def compute_upper_cross(dd,ma1='upper',ma2='ma5d',ratio=0.02,resample='d'):    
     df = dd[(dd[ma1] != 0)]
     df = df[-ct.upper_cross_days:]
     # temp = df[ (df[ma1] > df[ma2] * (1-ratio))  & (df[ma1] < df[ma2] * (1+ratio)) ]
@@ -3698,11 +3698,25 @@ def compute_upper_cross(dd,ma1='upper',ma2='ma5d',ratio=0.02):
     return dd
 
 
-def compute_ma_cross(dd,ma1='ma5d',ma2='ma10d',ratio=0.02):
+def compute_ma_cross(dd,ma1='ma5d',ma2='ma10d',ratio=0.02,resample='d'):
     #low
+
     temp = dd
     # temp = df[ (df[ma1] > df[ma2] * (1-ratio))  & (df[ma1] < df[ma2] * (1+ratio)) ]
     # temp = df[ ((df.close > df.ene) & (df.close < df.upper)) & (df[ma1] > df[ma2] * (1-ratio))  & (df[ma1] < df[ma2] * (1+ratio))]
+    # temp default: temp.sort_index(ascending=False)
+    if not temp.index.is_monotonic_increasing:
+        increasing = False
+        temp = temp.sort_index(ascending=True)
+        
+    if resample == 'm':
+        temp = temp[-10:]
+    elif resample == 'w':
+        temp = temp[-30:]
+    elif resample == '3d':
+        temp = temp[-60:]
+    else:
+        temp = temp[-90:]
 
     if len(temp) > 0:
         temp_close = temp.low
@@ -3837,8 +3851,8 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
             df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
         df = df.fillna(0)
 
-        dd = compute_ma_cross(df)
-        dd = compute_upper_cross(df)
+        dd = compute_ma_cross(df,resample=resample)
+        dd = compute_upper_cross(df,resample=resample)
 
         df = compute_perd_df(df,lastdays=lastdays,resample=resample)
         df['vchange'] = ((df['vol'] - df['vol'].shift(1)) / df['vol'].shift(1) * 100).map(lambda x: round(x, 1))
@@ -5467,10 +5481,12 @@ if __name__ == '__main__':
     code='603038'
     code='833171'
     code='688652'
-    code='000546'
+    code='300204'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
-    # dd = get_tdx_Exp_day_to_df(code,resample='2d')
+    dd = get_tdx_Exp_day_to_df(code,resample='d')
+    dd = compute_ma_cross(dd,resample='d')
+    print(dd.ldate[:2])
 
     # tmp_df = get_kdate_data(code, start='', end='', ktype='D')
     # if len(tmp_df) > 0:
@@ -5478,7 +5494,7 @@ if __name__ == '__main__':
 
     # df = get_tdx_append_now_df_api_tofile('301287')
     df=get_tdx_exp_all_LastDF_DL(code_l, dt='80',filter='y', resample='d')
-    print(df)
+    print(df[:2])
     # code='600005'
     # df2 = get_tdx_exp_low_or_high_power(code,dl=120,resample='d' )
     # df = get_tdx_Exp_day_to_df(code,dl=60, start=None,end=None, newdays=0, resample='d')
