@@ -484,15 +484,15 @@ def Get_MACD(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
         increasing = True
         df = df.sort_index(ascending=False)
 
-    id_cout = len(df)
     limit = 36
     if id_cout < limit:
-        temp_df = df.iloc[0]
+        # temp_df = df.iloc[0]
         runtimes = limit-id_cout
         df = df.reset_index()
-        for t in range(runtimes):
-            df.loc[df.shape[0]] = temp_df
-
+        # for t in range(runtimes):
+        #     df.loc[df.shape[0]] = temp_df
+        temp = df.loc[np.repeat(df.index[-1], runtimes)]
+        df = df.append(temp)
     df=df.sort_index(ascending=False)
     # if len(df) > 1 + lastday:
     #     if lastday != 0:

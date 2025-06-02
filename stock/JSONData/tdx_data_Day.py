@@ -670,12 +670,13 @@ def get_tdx_macd(df):
     id_cout = len(df)
     limit = 36
     if id_cout < limit:
-        temp_df = df.iloc[0]
+        # temp_df = df.iloc[0]
         runtimes = limit-id_cout
         df = df.reset_index()
-        for t in range(runtimes):
-            df.loc[df.shape[0]] = temp_df
-
+        # for t in range(runtimes):
+        #     df.loc[df.shape[0]] = temp_df
+        temp = df.loc[np.repeat(df.index[-1], runtimes)]
+        df = df.append(temp)
     df=df.sort_index(ascending=False)
     # if  increasing:
     #     df = df.sort_index(ascending=increasing)
@@ -702,7 +703,7 @@ def get_tdx_macd(df):
 
     if increasing is not None:
         df = df.sort_index(ascending=increasing)
-
+        
     return df
 
 def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, type='f', wds=True, lastdays=3, resample='d', MultiIndex=False):
