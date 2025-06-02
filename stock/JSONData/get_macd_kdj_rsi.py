@@ -474,10 +474,26 @@ def Get_MACD_OP(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
 
 def Get_MACD(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
     # 参数12,26,9
-    increasing = True
-    if not df.index.is_monotonic_increasing:
-        increasing = False
-        df = df.sort_index(ascending=True)
+    # increasing = True
+    # if not df.index.is_monotonic_increasing:
+    #     increasing = False
+    #     df = df.sort_index(ascending=True)
+
+    increasing = None
+    if  df.index.is_monotonic_increasing:
+        increasing = True
+        df = df.sort_index(ascending=False)
+
+    id_cout = len(df)
+    limit = 36
+    if id_cout < limit:
+        temp_df = df.iloc[0]
+        runtimes = limit-id_cout
+        df = df.reset_index()
+        for t in range(runtimes):
+            df.loc[df.shape[0]] = temp_df
+
+    df=df.sort_index(ascending=False)
     # if len(df) > 1 + lastday:
     #     if lastday != 0:
     #         df = df[:-lastday]
@@ -491,21 +507,27 @@ def Get_MACD(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
     # df[[ 'macd%s' % dtype,'ddea%s' % dtype, 'dea%s' % dtype]] = tl.MACD(
     #     df['close'], fastperiod=12, slowperiod=26, signalperiod=9)
 
-    df.loc[:, 'macdwhite'], df.loc[:, 'macdyellow'], df.loc[:, 'macd'] = tl.MACD(
+    df.loc[:, 'macddif'], df.loc[:, 'macddea'], df.loc[:, 'macd'] = tl.MACD(
         df['close'], fastperiod=12, slowperiod=26, signalperiod=9) 
     # data.loc[:, 'diff'], data.loc[:, 'dea'], data.loc[:, 'macd'] = tl.MACD(
     #     data['close'].values, fastperiod=5, slowperiod=34, signalperiod=5)
     #     # data['close'].values, fastperiod=12, slowperiod=26, signalperiod=9)
     
-    df['macdwhite'] = round( df['macdwhite'], 2)
-    df['macdyellow'] = round( df['macdyellow'], 2)
+    df['macddif'] = round( df['macddif'], 2)
+    df['macddea'] = round( df['macddea'], 2)
     df['macd'] = round( df['macd']*2, 2)
     # data['diff'].values[np.isnan(data['diff'].values)] = 0.0
     # data['dea'].values[np.isnan(data['dea'].values)] = 0.0
     # data['macd'].values[np.isnan(data['macd'].values)] = 0.0
 
-    if not increasing:
-        df = df.sort_index(ascending=False)
+    if df.index.name != 'date':
+        df=df[-id_cout:].set_index('date')
+    else:
+        df=df[-id_cout:]
+        
+    if increasing is not None:
+        df = df.sort_index(ascending=increasing)
+
     return df
 
 def Get_MACD_o(df, dtype='d', days=ct.Power_Ma_Days,lastday=ct.Power_last_da):
