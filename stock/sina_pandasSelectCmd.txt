@@ -29,3 +29,11 @@ top_all.query('high > max5 and lasth2d < upper and high > upper')
 top_all.query('high > max5 and lasth2d < upper and high > upper and max5==high4')
 top_temp.query('high > max5 and lasth2d < upper and high > upper and max5==high4')
 top_temp.query('high > max5 and lasth2d < upper and high > upper and max5==high4').topU
+top_temp.query('close > ma201d')
+top_temp.query('close > ma201d')[:20]
+top_temp.query('close > ma201d and close < ma201d*1.1')
+top_temp.query('close > ma201d and close < ma201d*1.1 and close > df2')
+top_temp.query('close > ma201d and close < ma201d*1.1 and close > df2 and low >df2')
+top_temp.query('close > ma201d and close < ma201d*1.1 and close > df2 and low >df2 and low < ma201d*1.1')
+top_temp.query('close > ma201d and close < ma201d*1.1 and close > df2 and low >df2 and low < ma51d*1.1')
+top_temp.query('close > ma201d and close < ma201d*1.1 and close > df2 and low >df2 and low < df2*1.1')

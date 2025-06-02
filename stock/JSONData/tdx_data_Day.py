@@ -3679,6 +3679,30 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     
     return dd
 
+def resample_dataframe_recut(temp,resample='d',increasing=True,check=False):
+
+    ascending=None
+
+    if not temp.index.is_monotonic_increasing:
+        log.info(f'increasing is False')
+        ascending=False
+        temp = temp.sort_index(ascending=True)
+
+    # else:
+    #     ascending=False
+        
+    if resample == 'm':
+        temp = temp[-10:]
+    elif resample == 'w':
+        temp = temp[-30:]
+    elif resample == '3d':
+        temp = temp[-60:]
+    else:
+        temp = temp[-90:]
+
+    if ascending is not None:
+        temp = temp.sort_index(ascending=ascending)   
+    return temp
 
 def compute_upper_cross(dd,ma1='upper',ma2='ma5d',ratio=0.02,resample='d'):    
     df = dd[(dd[ma1] != 0)]
@@ -3705,18 +3729,8 @@ def compute_ma_cross(dd,ma1='ma5d',ma2='ma10d',ratio=0.02,resample='d'):
     # temp = df[ (df[ma1] > df[ma2] * (1-ratio))  & (df[ma1] < df[ma2] * (1+ratio)) ]
     # temp = df[ ((df.close > df.ene) & (df.close < df.upper)) & (df[ma1] > df[ma2] * (1-ratio))  & (df[ma1] < df[ma2] * (1+ratio))]
     # temp default: temp.sort_index(ascending=False)
-    if not temp.index.is_monotonic_increasing:
-        increasing = False
-        temp = temp.sort_index(ascending=True)
-        
-    if resample == 'm':
-        temp = temp[-10:]
-    elif resample == 'w':
-        temp = temp[-30:]
-    elif resample == '3d':
-        temp = temp[-60:]
-    else:
-        temp = temp[-90:]
+
+    temp=resample_dataframe_recut(temp,resample=resample)
 
     if len(temp) > 0:
         temp_close = temp.low
@@ -3997,6 +4011,7 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
     :return:Series or df
     '''
     # dt = cct.day8_to_day10(dt)
+    
     if dt is not None or dl is not None:
         # log.debug("dt:%s dl:%s"%(dt,dl))
         df = get_tdx_Exp_day_to_df(code, start=dt, dl=dl, end=end, newdays=newdays, resample=resample).sort_index(ascending=False)
@@ -4026,6 +4041,9 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
             #     df['fib'] = fib
             #     df['fibl'] = fibl
             #     df['ldate'] = stl
+
+            df=resample_dataframe_recut(df,resample=resample)
+
             if lastp:
                 dd = df[:1]
                 dt = dd.index.values[0]
@@ -5484,9 +5502,10 @@ if __name__ == '__main__':
     code='300204'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
-    dd = get_tdx_Exp_day_to_df(code,resample='d')
-    dd = compute_ma_cross(dd,resample='d')
-    print(dd.ldate[:2])
+    # dd = get_tdx_Exp_day_to_df(code,resample='d')
+    # dd = compute_ma_cross(dd,resample='d')
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
+    print(df2.ldate[:2])
 
     # tmp_df = get_kdate_data(code, start='', end='', ktype='D')
     # if len(tmp_df) > 0:
