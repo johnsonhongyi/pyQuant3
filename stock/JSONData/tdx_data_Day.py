@@ -659,23 +659,34 @@ def custom_macd(prices, fastperiod=12, slowperiod=26, signalperiod=9):
    return diff, dea, macdmmm
 
 def get_tdx_macd(df):
+
     if len(df) < 10:
         return df
-    increasing = True
-    if not df.index.is_monotonic_increasing:
-        increasing = False
-        df = df.sort_index(ascending=True)
+    increasing = None
+    if  df.index.is_monotonic_increasing:
+        increasing = True
+        df = df.sort_index(ascending=False)
 
+    id_cout = len(df)
+    limit = 36
+    if id_cout < limit:
+        temp_df = df.iloc[0]
+        runtimes = limit-id_cout
+        df = df.reset_index()
+        for t in range(runtimes):
+            df.loc[df.shape[0]] = temp_df
 
-
+    df=df.sort_index(ascending=False)
+    # if  increasing:
+    #     df = df.sort_index(ascending=increasing)
     # df=df.fillna(0)
     # macd=DIF，signal=DEA，hist=BAR
-    #macdwhite -> macd macdyellow-> dif macd=>dea ??
-    df.loc[:, 'macdwhite'], df.loc[:, 'macdyellow'], df.loc[:, 'macd'] = tl.MACD(
+    #macddif -> macd macddea-> dif macd=>dea ??
+    df.loc[:, 'macddif'], df.loc[:, 'macddea'], df.loc[:, 'macd'] = tl.MACD(
         df['close'], fastperiod=12, slowperiod=26, signalperiod=9) 
 
-    df['macdwhite'] = round( df['macdwhite'], 2)
-    df['macdyellow'] = round( df['macdyellow'], 2)
+    df['macddif'] = round( df['macddif'], 2)
+    df['macddea'] = round( df['macddea'], 2)
     df['macd'] = round( df['macd']*2, 2)
     # data['diff'].values[np.isnan(data['diff'].values)] = 0.0
     # data['dea'].values[np.isnan(data['dea'].values)] = 0.0
@@ -684,8 +695,13 @@ def get_tdx_macd(df):
     df['macdlast2'] = df.iloc[-2]['macd']
     df['macdlast3'] = df.iloc[-3]['macd']
 
-    if not increasing:
-        df = df.sort_index(ascending=False)
+    if df.index.name != 'date':
+        df=df[-id_cout:].set_index('date')
+    else:
+        df=df[-id_cout:]
+
+    if increasing is not None:
+        df = df.sort_index(ascending=increasing)
 
     return df
 
@@ -5505,6 +5521,7 @@ if __name__ == '__main__':
     # dd = get_tdx_Exp_day_to_df(code,resample='d')
     # dd = compute_ma_cross(dd,resample='d')
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
+    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_l,resample='d' )
     print(df2.ldate[:2])
 
     # tmp_df = get_kdate_data(code, start='', end='', ktype='D')

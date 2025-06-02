@@ -772,7 +772,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
         # cct.write_to_blocknew(block_path, dfd.index.tolist(),append=False,keep_last=0)
         if 930 < cct.get_now_time_int() < 1000:
             # df = df.query('lasth1d > ma51d and  lasth1d > lasth2d and open > lastp and open <= low*1.01 and close >= (high+low)/2*0.99 and close < (high+low)/2*1.02')
-            df = df.query('macd > -0.1 and macdwhite >= macdyellow*0.99')
+            df = df.query('macd > -0.1 and macddif >= macddea*0.99')
             df = df.query('low >= ma201d')
             df = df.query('volume > 5')
         elif 1000 < cct.get_now_time_int() < 1100:
@@ -784,20 +784,20 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
 
             # df = df.query('lasth1d > ma51d and lasth1d > lasth2d and open > lastp1d and open <= low*1.01 and close >= (high+low)/2*0.99 ')
             df = df.query('low >= ma201d')
-            df = df.query('macd >= -0.1 and macdwhite >= macdyellow*0.99')
+            df = df.query('macd >= -0.1 and macddif >= macddea*0.99')
 
         elif 1100 < cct.get_now_time_int() < 1400:
             # df = df.query('-5 < percent < 9.97 or 10.2 < percent < 19.95')
             df = df.query(' percent < 9.97 or 10.2 < percent < 19.95')
             # df = df.query('lasth1d > ma51d and lasth1d > lasth2d and open > lastp and open <= low*1.01 and close >= (high+low)/2*0.99')
             df = df.query('low >= ma201d')
-            df = df.query('macd >= -0.1 and macdwhite >= macdyellow*0.99')
+            df = df.query('macd >= -0.1 and macddif >= macddea*0.99')
             
         elif 1400 < cct.get_now_time_int() < 1445:
             # df = df.query('-5 < percent < 9.97 or 10.2 < percent < 19.95')
             # df = df.query('close >= (high+low)/2*0.99')
             df = df.query('close >= lasth1d')
-        # df = df.query('macdwhite >  macdyellow and macdlast1 > macdlast2')
+        # df = df.query('macddif >  macddea and macdlast1 > macdlast2')
         df = df.query('close > ma201d ')
         
 
