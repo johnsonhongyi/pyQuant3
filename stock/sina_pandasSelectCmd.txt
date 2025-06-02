@@ -23,4 +23,9 @@ top_all.query('high > max5 and lasth1d >ma51d and (per1d > 0 and  per2d > 0 and 
 top_all.query('high > max5 and lasth1d >ma51d and per1d > 0 and  per2d > 0 and per3d > 0 and per4d >0 and percent >0')
 top_temp.query('high > max5 and lasth1d >ma51d and per1d > 0 and  per2d > 0 and per3d > 0 and per4d >0 and percent >0')
 top_temp.query('high > max5 and lasth1d >ma51d and per1d > 0 and  per2d > 0 and per3d > 0 and per4d >0 ')
-top_temp.query('high > max5 and lasth1d >ma51d and per1d > 0 and  per2d > 0 and per3d > 0 and per4d >0 ').loc[:,['lastp','close']] 
+top_temp.query('high > max5 and lasth1d >ma51d and per1d > 0 and  per2d > 0 and per3d > 0 and per4d >0 ').loc[:,['lastp','close']] top_all.query('high > max5 and lastp2d < upper')
+top_all.query('high > max5 and lasth2d < upper')
+top_all.query('high > max5 and lasth2d < upper and high > upper')
+top_all.query('high > max5 and lasth2d < upper and high > upper and max5==high4')
+top_temp.query('high > max5 and lasth2d < upper and high > upper and max5==high4')
+top_temp.query('high > max5 and lasth2d < upper and high > upper and max5==high4').topU
