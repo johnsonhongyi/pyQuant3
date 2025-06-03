@@ -1341,20 +1341,24 @@ def reset_window_pos(targetTitle,posx=1026,posy=699,width=900,height=360,classsn
     win32gui.EnumWindows(lambda hWnd, param: param.append(hWnd), hWndList)
     status=0  
     # time.sleep(0.2)
-    for hwnd in hWndList:
-        clsname = win32gui.GetClassName(hwnd)
-        title = win32gui.GetWindowText(hwnd)
-        # log.error("title:%s"%(title))
-        if (clsname == classsname  and title.find(targetTitle) == 0):    #调整目标窗口到坐标(600,300),大小设置为(600,600)
-            rect1 = win32gui.GetWindowRect(hwnd)
-            # rect2 = get_window_rect(hwnd)
-            log.debug("targetTitle:%s rect1:%s rect2:%s"%(title,rect1,rect1))
-            # win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 330,678,600,600, win32con.SWP_SHOWWINDOW)
-            # win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 330,678,600,600, win32con.SWP_SHOWWINDOW)
-            win32gui.MoveWindow(hwnd,int(posx), int(posy), int(width), int(height),True)  #108,19
-            status +=1
+    try:
+        for hwnd in hWndList:
+            clsname = win32gui.GetClassName(hwnd)
+            title = win32gui.GetWindowText(hwnd)
+            # log.error("title:%s"%(title))
+            if (clsname == classsname  and title.find(targetTitle) == 0):    #调整目标窗口到坐标(600,300),大小设置为(600,600)
+                rect1 = win32gui.GetWindowRect(hwnd)
+                # rect2 = get_window_rect(hwnd)
+                # log.debug("targetTitle:%s rect1:%s rect2:%s"%(title,rect1,rect1))
+                # win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 330,678,600,600, win32con.SWP_SHOWWINDOW)
+                # win32gui.SetWindowPos(hwnd, win32con.HWND_TOPMOST, 330,678,600,600, win32con.SWP_SHOWWINDOW)
+                win32gui.MoveWindow(hwnd,int(posx), int(posy), int(width), int(height),True)  #108,19
+                status +=1
 
-    return status
+    except Exception as e:
+        print(f'Exception:{e}')
+    finally:
+        pass
 
 def set_ctrl_handler():
     # os.environ['FOR_DISABLE_CONSOLE_CTRL_HANDLER'] = '1'
