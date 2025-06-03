@@ -200,7 +200,7 @@ if __name__ == "__main__":
     parserDuraton = cct.DurationArgmain()
     # resample = '3d'
     # global resample
-    cct.GlobalValues().setkey('resample','3d')
+    cct.GlobalValues().setkey('resample','d')
     # resample = cct.GlobalValues().getkey('resample')
     duration_date = ct.duration_date_l  #80dat
     duration_date = 60
@@ -237,7 +237,7 @@ if __name__ == "__main__":
             # print len(top_now)
             resample = cct.GlobalValues().getkey('resample')
 
-            if st_key_sort_start == 0 and cct.get_now_time_int() > 915 :
+            if st_key_sort_start == 0 and cct.get_now_time_int() > 945 :
                 st_key_sort = '4'
                 st_key_sort_start = 1
                 # st_key_sort = '3 1'
