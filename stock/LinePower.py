@@ -160,9 +160,9 @@ if __name__ == "__main__":
     # sys.exit()
     import re
     if cct.isMac():
-        cct.set_console(80, 19)
+        cct.set_console(145, 19)
     else:
-        cct.set_console(80, 19)
+        cct.set_console(145, 19)
     parser = parseArgmain()
     parser.print_help()
     # if cct.get_os_system().find('win') >= 0:

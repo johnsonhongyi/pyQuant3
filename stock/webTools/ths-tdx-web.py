@@ -135,6 +135,7 @@ def show_tab(show_content):
             file_data.append(cur)
 
     with use_scope('content', clear=True):
+        put_button("Refresh", onclick=lambda: run_js('window.location.reload()'))
         put_tabs([
             {'title': '全部', 'content': put_table(head + all_data)},
             {'title': '文本', 'content': put_table(head + txt_data)},
@@ -149,6 +150,7 @@ async def main():
     """TDX_THS_联动 Previewer"""
     set_env(output_animation=False)
     put_markdown('## 历史剪切板')
+    # put_button("Refresh", onclick=lambda: run_js('window.location.reload()'))
     if not os.path.exists("history_data.json"):
         with open("history_data.json", "w+", encoding="utf-8") as f:
             f.write("[]")

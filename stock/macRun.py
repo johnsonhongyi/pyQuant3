@@ -348,9 +348,11 @@ def setPosition(cmd=None, position=None):
             # position = doScript(scriptposition % ('get', str(n)))
             # print positio
     else:
-        cmd_natclip='''osascript -e '%s';sleep 10;'''%(rcmdnatclip%('main.py'))
-        print('new run natclip')
-        os.system(f'{cmd_natclip}')
+
+        #pd auto to win clip
+        # cmd_natclip='''osascript -e '%s';sleep 10;'''%(rcmdnatclip%('main.py'))
+        # print('new run natclip')
+        # os.system(f'{cmd_natclip}')
         # osascript -e 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant3/stock;/Users/Johnson/anaconda/envs/py3.9/bin/python3 sina_Market-DurationDnUP.py"';
         # osascript -e 
         if os.path.exists(cct.get_ramdisk_path('tdx_last_df')): 
