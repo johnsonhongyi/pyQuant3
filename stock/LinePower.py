@@ -186,7 +186,8 @@ if __name__ == "__main__":
                     '日K,3连阳以上,最高价大于30天前区间最高价,连续阳线天数排序倒叙']
                 for idx in range(len(code)):
                     print("%s: %s"%(idx+1,code[idx]))
-                code='最近三日内最低价大于250日线,最近3日内涨停过,涨停股以当天封单除以流通股排序价'
+                # code='最近三日内最低价大于250日线,最近3日内涨停过,涨停股以当天封单除以流通股排序价's
+                code='今日涨停股票'
                 print('run:%s'%(code))
             args = parser.parse_args(code.split())
             # if not code.lower() == 'q' and not code.lower() == 'quit' and not code.lower() == 'exit' and not code == 'q' and not code == 'e' and not str(args.code) == 'None' and (args.wencai == 'y' or re.match('[a-zA-Z]+',code) is not None  or re.match('[ \u4e00 -\u9fa5]+',code) == None ):
@@ -274,6 +275,8 @@ if __name__ == "__main__":
                     # print(show_ths_data(df.iloc[:20,[x for x in range(len(df.columns)-1)]]))
                     print(show_ths_data(df.iloc[:,[x for x in range(len(df.columns)-1)]]))
                     print(f'Count:{df.shape} and Date:{date_list}')
+                    if '涨停原因类别' in df.columns:
+                        cct.counterCategory(df,'涨停原因类别')
 
                     if len(df) == 1:
                         if re.match('[ \\u4e00 -\\u9fa5]+',code) == None:

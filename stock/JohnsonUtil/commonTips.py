@@ -2968,14 +2968,17 @@ def get_index_fibl(default=1):
     return default
 
 from collections import Counter,OrderedDict
-def counterCategory(df):
+def counterCategory(df,col='category'):
     topSort = []
     if len(df) > 0:
-        categoryl = df.category[:20].tolist()
+        categoryl = df[col][:50].tolist()
         dicSort = []
         for i in categoryl:
             if isinstance(i, str):
-                dicSort.extend(i.split(';'))
+                if col == 'category':
+                    dicSort.extend(i.split(';'))
+                else:
+                    dicSort.extend(i.split('+'))
                 # dicSort.extend([ 'u%s'%(co) for co in i.split(';')])
                 
         topSort = Counter(dicSort)
