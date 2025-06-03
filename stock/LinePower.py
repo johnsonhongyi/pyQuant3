@@ -118,8 +118,25 @@ def show_ths_data(df):
         if df[col].dtype == 'float64':
             df[col] = df[col].apply(lambda x: (round((x),2)))
     range_count= len(df.columns) if len(df.columns) < 7 else 7
-    df = df.iloc[:,[x for x in range(range_count-1)]]
-    
+
+    # '股票简称', '最新价', '最新涨跌幅','首次涨停时间[20250603]' 0,1,2,4 ,7,8,11,13,15'连续涨停天数','涨停原因类别','停封单量占成交量比'
+    # '停封单量占成交量比','涨停开板次数'
+    # ['股票简称', '最新价', '最新涨跌幅', '涨停[20250603]', '首次涨停时间[20250603]', '最终涨停时间[20250603]', 
+    # '涨停明细数据[20250603]', '连续涨停天数[20250603]', '涨停原因类别[20250603]', '涨停封单量[20250603]', '涨停封单额[20250603]',
+    # '涨停封单量占成交量比[20250603]', '涨停封单量占流通a股比[20250603]', '涨停开板次数[20250603]', # 'a股市值(不含限售股)[20250603]', 
+    # '几天几板[20250603]', '涨停类型[20250603]', 'market_code', 'code']
+
+    columns_str = ''.join(x for x in df.columns)
+    if columns_str.find('停封单量占成交量比') > 0:
+        df = df.iloc[:,[0,1,2,4 ,7,8,11,13,15]]
+    else:
+        df = df.iloc[:,[x for x in range(range_count-1)]]
+
+    if f'涨停封单量' in df.columns:
+        df[f'涨停封单量'] = df[f'涨停封单量'].apply(lambda x: (round(float(x)/10000,1)))
+    df.columns=df.columns.str.replace('涨停封单量占成交量比','封单占比')
+    df.columns=df.columns.str.replace('涨停开板次数','开板')
+    df.columns=df.columns.str.replace('连续涨停天数','连涨')
     # return (df[df.index == cct.code_to_symbol_ths(code)])
     data = df
     # table, widths=cct.format_for_print(data, widths=True)
@@ -189,59 +206,75 @@ if __name__ == "__main__":
                     print("pls run update: pip install -U --no-deps pywencai")
                     print("df is not ok:%s"%(df))
                 else:    
-                    if code=='今日涨停' and len(df.columns) == 19:
-                        df['股票代码'] = df['股票代码'].apply(lambda x:cct.symbol_to_code(x.replace('.','')))
-                        df = df[ df.股票代码.str.startswith(('30','60','00')) ]
+                    # if  len(df.columns) == 19:
+                    #     df['股票代码'] = df['股票代码'].apply(lambda x:cct.symbol_to_code(x.replace('.','')))
+                    #     df = df[ df.股票代码.str.startswith(('30','60','00')) ]
 
-                        df = df.set_index('股票代码')
+                    #     df = df.set_index('股票代码')
 
-                        # df = df.iloc[:,[0,1,2,3,4,5]]
-                        current_date = datetime.date.today()
-                        # 获取当前年份
-                        current_year = current_date.year
-                        # 获取上一年的日期
-                        previous_year_date = current_date.replace(year=current_year - 1)
-                        # 获取上一年的年份
-                        previous_year = previous_year_date.year
-                        df.columns=df.columns.str.replace('区间涨跌幅:前复权','')
-                        df.columns=df.columns.str.replace(str(previous_year),'')
-                        df.columns=df.columns.str.replace(str(current_year),'')
-                        # df.iloc[:,[0,1,2,3,4,5,6]]
-                        if '概念资讯' in df.columns:
-                            df.drop(['概念资讯'],axis=1,inplace=True)
+                    #     # df = df.iloc[:,[0,1,2,3,4,5]]
+                    #     current_date = datetime.date.today()
+                    #     # 获取当前年份
+                    #     current_year = current_date.year
+                    #     # 获取上一年的日期
+                    #     previous_year_date = current_date.replace(year=current_year - 1)
+                    #     # 获取上一年的年份
+                    #     previous_year = previous_year_date.year
+                    #     df.columns=df.columns.str.replace('区间涨跌幅:前复权','')
+                    #     df.columns=df.columns.str.replace(str(previous_year),'')
+                    #     df.columns=df.columns.str.replace(str(current_year),'')
+                    #     # df.iloc[:,[0,1,2,3,4,5,6]]
+                    #     if '概念资讯' in df.columns:
+                    #         df.drop(['概念资讯'],axis=1,inplace=True)
 
-                    else:
+                    # else:
                         # df = df[ ~ df.股票代码.str.startswith(('688','87','83')) ]
-                        df['股票代码'] = df['股票代码'].apply(lambda x:cct.symbol_to_code(x.replace('.','')))
-                        df = df[ df.股票代码.str.startswith(('30','60','00')) ]
+                    df['股票代码'] = df['股票代码'].apply(lambda x:cct.symbol_to_code(x.replace('.','')))
+                    df = df[ df.股票代码.str.startswith(('30','60','00')) ]
 
-                        df = df.set_index('股票代码')
+                    df = df.set_index('股票代码')
 
-                        # df = df.iloc[:,[0,1,2,3,4,5]]
-                        current_date = datetime.date.today()
-                        # 获取当前年份
-                        current_year = current_date.year
-                        # 获取上一年的日期
-                        previous_year_date = current_date.replace(year=current_year - 1)
-                        # 获取上一年的年份
-                        previous_year = previous_year_date.year
-                        df.columns=df.columns.str.replace('区间涨跌幅:前复权','')
-                        df.columns=df.columns.str.replace(str(previous_year),'')
-                        df.columns=df.columns.str.replace(str(current_year),'')
-                        # df.iloc[:,[0,1,2,3,4,5,6]]
-                        if '概念资讯' in df.columns:
-                            df.drop(['概念资讯'],axis=1,inplace=True)
+                    # df = df.iloc[:,[0,1,2,3,4,5]]
+                    current_date = datetime.date.today()
+                    # 获取当前年份
+                    current_year = current_date.year
+                    # 获取上一年的日期
+                    previous_year_date = current_date.replace(year=current_year - 1)
+                    # 获取上一年的年份
+                    previous_year = previous_year_date.year
+                    df.columns=df.columns.str.replace('区间涨跌幅:前复权','')
+                    df.columns=df.columns.str.replace(str(previous_year),'')
+                    df.columns=df.columns.str.replace(str(current_year),'')
+                    # df.iloc[:,[0,1,2,3,4,5,6]]
+                    if '概念资讯' in df.columns:
+                        df.drop(['概念资讯'],axis=1,inplace=True)
                     # print(df.shape,df.columns)
                     
                     dd=df.copy()
-                    print(df.shape)
+
+                    # columns_strNew = ''.join(x for x in df.columns).replace(']','').replace('[','')
+                    def replace_date(df):
+                        df.columns=df.columns.str.replace(f'-','')
+                        df.columns=df.columns.str.replace(f'[','')
+                        df.columns=df.columns.str.replace(f']','')
+                        columns_strNew = ''.join(x for x in df.columns)
+                        date_list = list(set(re.findall(r'\d+',columns_strNew)))
+                        # date_now = re.findall(r'\[\d+\]',columns_strNew)[0])
+                        for date_now in date_list:
+                            df.columns=df.columns.str.replace(f'{date_now}','')
+                        return df,date_list
+        
+                    df,date_list = replace_date(df)
                     # print(df.shape,df.iloc[:8,[0,1,2,3,4,5]])
-                    if len(df.columns) > 7:
-                        # print(show_ths_data(df.iloc[:args.num,[0,1,2,3,4,5,6,7]]))
-                        print(show_ths_data(df.iloc[:20,[0,1,2,3,4,5,6,7]]))
-                    else:
-                        # print(show_ths_data(df.iloc[:args.num,[x for x in range(len(df.columns)-1)]]))
-                        print(show_ths_data(df.iloc[:20,[x for x in range(len(df.columns)-1)]]))
+                    # if len(df.columns) > 7:
+                    #     # print(show_ths_data(df.iloc[:args.num,[0,1,2,3,4,5,6,7]]))
+                    #     print(show_ths_data(df.iloc[:20,[0,1,2,3,4,5,6,7]]))
+                    # else:
+                    #     # print(show_ths_data(df.iloc[:args.num,[x for x in range(len(df.columns)-1)]]))
+                    # print(show_ths_data(df.iloc[:20,[x for x in range(len(df.columns)-1)]]))
+                    print(show_ths_data(df.iloc[:,[x for x in range(len(df.columns)-1)]]))
+                    print(f'Count:{df.shape} and Date:{date_list}')
+
                     if len(df) == 1:
                         if re.match('[ \\u4e00 -\\u9fa5]+',code) == None:
                             args.code = df.code.values[0]
