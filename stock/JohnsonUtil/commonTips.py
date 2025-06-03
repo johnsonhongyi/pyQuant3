@@ -3681,7 +3681,8 @@ def get_limit_multiIndex_Row(df, col=None, index='ticktime', start=None, end='10
 def get_limit_multiIndex_freq(df, freq='5T', col='low', index='ticktime', start=None, end='10:00:00', code=None):
     # quotes = cct.get_limit_multiIndex_freq(h5, freq=resample.upper(), col='all', start=start, end=end, code=code)
     # isinstance(spp.all_10.index[:1], pd.core.index.MultiIndex)
-
+    import ipdb;ipdb.set_trace()
+    
     if df is not None:
         dd = select_multiIndex_index(df, index=index, start=start, end=end, code=code)
         if code is not None:

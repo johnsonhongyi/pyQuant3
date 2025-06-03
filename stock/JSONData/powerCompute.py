@@ -834,7 +834,7 @@ def get_linear_model_candles(code, ptype='low', dtype='d', start=None, end=None,
             cname = '-'
         # plt.title(code + " | " + str(dates[-1])[:11] + " | " + "MA:%0.2f" % (roll_mean[-1]), fontsize=12)
         plt.title(cname + " " + code + " | " +
-            str(dates[-1])[:11] + " | " + "MA:%0.2f" % (roll_mean[-1]),
+            str(dates[-1])[:11] + " | " + "MA:%0.2f" % (roll_mean[-1]) + "dtype:%s" %(dtype),
             fontsize=12)
 
     # plt.title(code + " | " + str(dates[-1])[:11], fontsize=14)

@@ -274,7 +274,7 @@ def get_wencai_Market_url(filter='国企改革', perpage=1, url=None, pct=False,
             config_ini, fname, currvalue=time_s, xtype='time', update=False)
         if duratime < ct.wencai_delay_time:
             sleep_t = ct.wencai_delay_time - duratime
-            log.error('timelimit:%s' % (sleep_t))
+            log.info('timelimit:%s' % (sleep_t))
             # time.sleep(sleep_t)
         else:
             log.info("duratime:%s", duratime)
@@ -294,7 +294,7 @@ def get_wencai_Market_url(filter='国企改革', perpage=1, url=None, pct=False,
                    'Connection': 'keep-alive',
                    'Cookie': 'v=AZaxA_wZ09rYlOd-tO91dApK4U2ZN9pxLHsO1QD_gnkUwzj_aMcqgfwLXuTQ', }
         data = cct.get_url_data(url, retry_count=1, headers=headers)
-
+        
         # if data is None or (len(data) < 10 or len(re.findall('系统判断您访问次数过多'.decode('utf8'), data))):
         if data is None or (len(data) < 10 or len(re.findall('系统判断您访问次数过多', data))):
             wencai_count += 1
@@ -498,7 +498,260 @@ def get_wencai_Market_url(filter='国企改革', perpage=1, url=None, pct=False,
             if len(df) == 0:
                 log.error('df 0 filter:%s df is None:%s' % (filter.decode('utf8'),url.decode('utf8')))
         else:
-            log.error('count is 0')
+            log.info('count is 0')
+
+    return df
+
+def get_wencai_Market_url_2025(filter='国企改革', perpage=1, url=None, pct=False, monitor=False,):
+    urllist = []
+    if len(filter) == 0 :
+         log.error('filter is %s'%(filter))
+         return pd.DataFrame()
+    if len(filter) > 2 and len(filter.split(',')) < 2:
+    # if isinstance(filter.split(','), str):
+        filter = '题材是%s'%(filter)
+    global null, wencai_count, pct_status
+    if pct is not None:
+        pct_status = pct
+    df = pd.DataFrame()
+
+    # if ((pct_status) or  ( pct_status and not(925 < cct.get_now_time_int() < ct.wencai_end_time)) ) and url == None and cct.get_config_value_wencai(config_ini,fname) < 1:
+    
+    if wencai_count < 1 and (monitor or ((pct_status) or (not pct_status and (925 < cct.get_now_time_int() < ct.wencai_end_time))) and url == None and cct.get_config_value_wencai(config_ini, fname) < 1):
+        time_s = time.time()
+        duratime = cct.get_config_value_wencai(
+            config_ini, fname, currvalue=time_s, xtype='time', update=False)
+        import ipdb;ipdb.set_trace()
+        
+        if duratime < ct.wencai_delay_time:
+            sleep_t = ct.wencai_delay_time - duratime
+            log.info('timelimit:%s' % (sleep_t))
+            # time.sleep(sleep_t)
+        else:
+            log.info("duratime:%s", duratime)
+
+
+            duratime = cct.get_config_value_wencai(
+                config_ini, fname, currvalue=time.time(), xtype='time', update=True)
+            # wencairoot = 'http://www.iwencai.com/stockpick/search?typed=0&preParams=&ts=1&f=1&qs=result_original&selfsectsn=&querytype=&searchfilter=&tid=stockpick&w=%s'
+            wencairoot = 'http://www.iwencai.com/stockpick/search?typed=1&preParams=&ts=1&f=1&qs=result_rewrite&selfsectsn=&querytype=stock&searchfilter=&tid=stockpick&w=%s'
+            url = wencairoot % (filter)
+            log.debug("url:%s" % (url))
+            # url = ct.get_url_data_R % (market)
+
+            cache_root = "http://www.iwencai.com/stockpick/cache?token=%s&p=1&perpage=%s&showType="
+            cache_ends = "[%22%22,%22%22,%22onTable%22,%22onTable%22,%22onTable%22,%22onTable%22,%22onTable%22,%22onTable%22,%22onTable%22,%22onTable%22]"
+    #        url="http://www.iwencai.com/stockpick/search?typed=0&preParams=&ts=1&f=1&qs=result_original&selfsectsn=&querytype=&searchfilter=&tid=stockpick&w=%E6%9C%89%E8%89%B2+%E7%85%A4%E7%82%AD"
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 6.2; rv:16.0) Gecko/20100101 Firefox/16.0',
+                       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                       'Connection': 'keep-alive',
+                       'Cookie': 'v=AZaxA_wZ09rYlOd-tO91dApK4U2ZN9pxLHsO1QD_gnkUwzj_aMcqgfwLXuTQ', }
+            data = cct.get_url_data(url, retry_count=1, headers=headers)
+
+            # if data is None or (len(data) < 10 or len(re.findall('系统判断您访问次数过多'.decode('utf8'), data))):
+            if data is None or (len(data) < 10 or len(re.findall('系统判断您访问次数过多', data))):
+                wencai_count += 1
+                cct.get_config_value_wencai(
+                    config_ini, fname, currvalue=wencai_count, update=True)
+                # log.error("acces deny:%s %s"%('系统判断您访问次数过多',data))
+                log.error("acces deny:%s %s" % ('系统判断您访问次数过多', url))
+                return df
+            # print data
+            # count = re.findall('(\d+)', data, re.S)
+            # "token":"dcf3d42bbeeb32718a243a19a616c217"
+            # log.info("data:%s"%(data.decode('unicode-escape')))
+            # log.info("data:%s"%(data))
+            # count = re.findall('token":"([\D\d].*)"', data, re.S)
+            count = re.findall('token":"([\D\d]+?)"', data, re.S)
+            codelist = []
+            grep_stock_codes = re.compile('"(\d{6})\.S')
+            # response = requests.get(all_stock_codes_url)
+            # stock_codes = grep_stock_codes.findall(response.text)
+            # print data
+            log.info("net time:%s" % (time.time() - time_s))
+
+            if len(count) == 1:
+                cacheurl = cache_root % (count[0], perpage)
+                cacheurl = cacheurl + cache_ends
+                headers['Referer'] = cacheurl
+                log.info(cacheurl)
+                time_s = time.time()
+
+                if perpage > 1000:
+                    html = cct.get_url_data(
+                        cacheurl, retry_count=1, headers=headers, timeout=20)
+                else:
+                    html = cct.get_url_data(
+                        cacheurl, retry_count=1, headers=headers, timeout=10)
+                # js2py_test(cacheurl)
+
+                # count = re.findall('"(\d{6})\.S', data, re.S)
+                # count = re.findall('result":(\[[\D\d]+\]),"oriColPos', data, re.S)
+                # count = re.findall('result":(\[[\D\d]+\]),"oriIndexID', data, re.S)
+    #            html = data.decode('unicode-escape')
+    #            html = data.decode('unicode-escape')
+
+                # href = re.findall('(http:\/\/[\D\d]+)";', html, re.S)
+                # if len(href) >0:
+                #     html = cct.get_url_data(href[0])
+
+                count = re.findall(
+                    '(\[\["[0-9]{6}\.S[HZ][\D\d]+\]\]),"oriIndexID', html, re.S)
+                # dr = re.compile(r'<[^>]+>',re.S)
+                # json_d = dr.sub('',html)
+                # jsobj = json.loads(json_d)
+                # atext = jsobj['data']['data']['tableTempl']
+                # alist = atext.split('\n\n\n\n\n')
+                # blist = alist.split('\n\n\n')
+
+                # count = grep_stock_codes.findall(data,re.S)
+                if len(count) == 0:
+                    log.info("count: len:%s url:%s" % (len(count), url))
+
+                log.info(time.time() - time_s)
+                singlecode = []
+                singlelist = []
+                singlelist_category = []
+
+                # print "count:",count
+                # import ipdb;ipdb.set_trace()
+                if len(count) > 0:
+                    # import ast
+                    # result = eval(count[0].replace('null','None'))
+                    result = eval(count[0])
+                    # result = ast.literal_eval(count[0])
+                    # import json
+                    # obj = json.loads(data)
+                    # print "obj:",obj
+                    # print result,len(result)
+                    # print result[1]
+                    urllist = []
+                    dlist = []
+                    key_t = []
+
+                    for xcode in result:
+                        # print xcode
+                        code_t = []
+                        for x in xcode:
+                            # print x
+                            if isinstance(x, list):
+                                # print "list:",x
+                                key_t = []
+                                for y in x:
+                                    if isinstance(y, dict):
+                                        # pass
+                                        keylist = ['URL', 'PageRawTitle']
+                                        for key in list(y.keys()):
+                                            if key in keylist:
+                                                if key == 'URL':
+                                                    urls = str(y[key]).replace(
+                                                        '\\', '').strip().decode('unicode-escape')
+                                                    if urls[-20] not in urllist:
+                                                        urllist.append(urls[-20])
+                                                        log.info(urls),
+    #                                                    log.info( urls)
+                                                    else:
+                                                        break
+                                                else:
+                                                    urls = str(y[key]).decode(
+                                                        'unicode-escape')
+                                                    key_t.append(urls)
+    #                                                key_t.append(urls)
+                                                    log.info(urls),
+                                    # else:
+                                        # print str(y).decode('unicode-escape'),
+                            else:
+                                code_t.append(str(x).decode('unicode-escape'))
+    #                            code_t.append(str(x))
+                                log.debug(str(x).decode('unicode-escape')),
+    #                            log.info(str(x)),
+    #                    log.info( key_t)
+                        if len(code_t) > 4:
+                            code = code_t[0]
+                            name = code_t[1]
+                            trade = code_t[2]
+                            trade = '0' if trade == '--' else trade
+                            percent = code_t[3]
+                            percent = '0' if percent == '--' else percent
+
+                            # index = code_t[4]
+                            category = ";".join(
+                                x for x in code_t[4].split(';')[:3])
+                            category = category[:15] if len(
+                                category) > 15 else category
+                            if len(key_t) > 0:
+                                # print key_t[0]
+                                title1 = key_t[0]
+                                if len(key_t) > 1:
+                                    title2 = key_t[1]
+                                else:
+                                    title2 = None
+                                dlist.append({'code': code, 'name': name, 'trade': trade, 'percent': percent,
+                                              'category': category, 'tilte1': title1, 'tilte2': title2})
+                            else:
+                                dlist.append(
+                                    {'code': code, 'name': name, 'trade': trade, 'percent': percent, 'category': category})
+                        # print ''
+                    # df = pd.DataFrame(dt_list, columns=ct.TDX_Day_columns)
+                    # df = pd.DataFrame(dlist, columns=['category','code','name','trade','percent','tilte1','tilte2'])
+                        else:
+                            if len(code_t) > 0 and code_t[0].endswith(('SZ', 'SH')):
+                                singlecode.append(code_t[0].split('.')[0])
+                                singlelist.append({'code': code_t[0].split(
+                                    '.')[0], 'name': code_t[1], 'trade': code_t[2], 'percent': code_t[3]})
+                    if len(singlecode) > 0:
+                        # codestring = '300377%2C300363%2C300360'
+                        codestring = string.join(singlecode, '%2C')
+                        wencaisingleroot = 'http://www.iwencai.com/diag/block-detail?pid=8153&codes=%s'
+                        end_root = '&codeType=stock&info=%7B%22view%22%3A%7B%22nolazy%22%3A1%2C%22parseArr%22%3A%7B%22_v%22%3A%22new%22%2C%22dateRange%22%3A%5B%5D%2C%22staying%22%3A%5B%5D%2C%22queryCompare%22%3A%5B%5D%2C%22comparesOfIndex%22%3A%5B%5D%7D%2C%22asyncParams%22%3A%7B%22tid%22%3A137%7D%7D%7D'
+                        wencaisingleurl = wencaisingleroot % (
+                            codestring) + end_root
+                        html_json = cct.get_url_data(
+                            wencaisingleurl, retry_count=1, headers=headers, timeout=10)
+                        dr = re.compile(r'<[^>]+>', re.S)
+                        json_d = dr.sub('', html_json)
+                        jsobj = json.loads(json_d)
+                        # import ipdb;ipdb.set_trace()
+                        atext = jsobj['data']['data']['tableTempl']
+                        alist = atext.split('\n\n\n\n\n')
+                        alist_data = alist[1:]
+                        for al in alist_data:
+                            blist = al.split('\n\n\n')
+                            if len(blist) > 0:
+                                sin_category = blist[-1].replace(
+                                    '\u66f4\u591a', '')
+                                for code in singlelist:
+                                    if code['code'] == blist[0].split('\n')[-1]:
+                                        sin_category = ";".join(
+                                            x for x in sin_category.split(';')[:3])
+                                        sin_category = sin_category[:15] if len(
+                                            sin_category) > 15 else sin_category
+                                        sin_category = sin_category.replace('\r','').replace('\n','')
+                                        code['category'] = sin_category
+                                        singlelist_category.append(code)
+                                        break
+                    if len(dlist) == 0:
+                        if len(singlelist_category) > 0:
+                            dlist = singlelist_category
+                    df = pd.DataFrame(dlist, columns=[
+                                      'code', 'name', 'trade', 'percent', 'category', 'tilte1', 'tilte2'])
+                    # if len(dlist) > 0 and 'tilte1' in (dlist[0].keys()) :
+                    #     df = pd.DataFrame(dlist, columns=['code','name','trade','percent','category','tilte1','tilte2'])
+                    # else:
+                    #     df = pd.DataFrame(dlist, columns=['code','name','trade','percent','category'])
+                    df['code'] = ([x[:6] for x in df['code']])
+                    if len(df) > 0:
+                        df.percent = df.percent.astype(float)
+                        df = df.sort_values(by='percent', ascending=[0])
+                    # df = df.set_index('code')
+                    # print type(count[0])
+                    # print type(list(count[0]))
+                    # print count[0].decode('unicode-escape')
+
+                    if len(df) == 0:
+                        log.error('df 0 filter:%s df is None:%s' % (filter.decode('utf8'),url.decode('utf8')))
+            else:
+                log.info('count is 0')
 
     return df
 

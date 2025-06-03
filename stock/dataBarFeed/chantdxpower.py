@@ -75,6 +75,7 @@ show_mpl = True
 #                    frequency=stock_frequency,skip_paused=False,fq='pre')
 
 
+
 def search_ths_data(code):
     fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xls'.replace('\\',cct.get_os_path_sep())
     df = pd.read_excel(fpath)
@@ -288,7 +289,7 @@ def show_chan_mpl_tdx(code, start_date=None, end_date=None, stock_days=60, resam
 
         if df is None:
 
-            if resample in ['d', 'w', 'm']:
+            if resample in ct.Resample_LABELS:
                 quotes = tdd.get_tdx_append_now_df_api(code=code, start=start, end=end, dl=dl).sort_index(ascending=True)
             else:
                 h5_fname = 'sina_MultiIndex_data'
@@ -685,7 +686,7 @@ def show_chan_mpl_tdx(code, start_date=None, end_date=None, stock_days=60, resam
 def get_quotes_tdx(code, start=None, end=None, dl=120, resample='d', show_name=True,df=None):
 
     if df is None:
-        if resample in ['d', 'w', 'm']:
+        if resample in ct.Resample_LABELS:
             quotes = tdd.get_tdx_append_now_df_api(code=code, start=start, end=end, dl=dl).sort_index(ascending=True)
         else:
             h5_fname = 'sina_MultiIndex_data'
@@ -1178,8 +1179,8 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
     log.debug("笔值  :%s" % ([str(x) for x in (y_xd_seq)][:-2]))
     # Y_hat = X * b + a
 
-    if len(x_xd_seq) == 0 or resample not in ['d','w','m']:
-        if resample in ['d','w','m']:
+    if len(x_xd_seq) == 0 or resample not in ct.Resample_LABELS:
+        if resample in ct.Resample_LABELS:
             st_data=str(chanK['enddate'][biIdx[len(biIdx) - 1]])[:10]
         else:
             st_data=str(chanK['enddate'][biIdx[len(biIdx) - 1]])
@@ -1840,7 +1841,6 @@ def show_chan_mpl_power(code, start_date=None, end_date=None, stock_days=60, res
 def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=True, least_init=2, chanK_flag=False, windows=20, fb_show=0,roll_mean_days=20):
    
     stock_code = code  # 股票代码
-
     stock_frequency = '%sm'%resample if resample.isdigit() else resample
     resample = '%sT'%resample if resample.isdigit() else resample
     log.info('resample:%s'%(resample))
@@ -1860,7 +1860,7 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
     # chanK_flag = True  # True 看缠论K线， False 看k线
     show_mpl = show_mpl
 
-    def con2Cxianduan(stock, k_data, chanK, frsBiType, biIdx, end_date, cur_ji=1, recursion=False, dl=None, chanK_flag=False, least_init=3,resample='d'):
+    def con2Cxianduan(stock, k_data, chanK, frsBiType, biIdx, end_date, cur_ji=1, recursion=False, dl=None, chanK_flag=False, least_init=3,resample=resample):
         max_k_num = 4
         if cur_ji >= 6 or len(biIdx) == 0 or recursion:
             return biIdx
@@ -1906,7 +1906,7 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
                 # frequency = 'd' if cur_ji+1==2 else '5m' if cur_ji+1==3 else \
                 #                 'd' if cur_ji+1==5 else 'w' if cur_ji+1==6 else 'd'
 
-            if resample in ['d','w','m']:    
+            if resample in ct.Resample_LABELS:    
                 start_lastday = str(chanK.index[biIdx[-1]])[0:10]
             else:
                 start_lastday = str(chanK.index[biIdx[-1]])
@@ -2111,7 +2111,7 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
         return x_fenbi_seq, y_fenbi_seq
 
     # print  T0[-len(T0):].astype(dt.date)
-    if resample in ['d' ,'w','m']:
+    if resample in ct.Resample_LABELS:
         T1=T0[-len(T0):].astype(datetime.date) / 1000000000
         Ti=[]
         if len(T0) / x_jizhun > 12:
@@ -2405,7 +2405,7 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
     #             y_fenbi_seq.append(m_line_dto.low)
 
     #  在原图基础上添加分笔蓝线
-    if resample in ['d','w','m']:
+    if resample in ct.Resample_LABELS:
         print(("线段   :%s x_xd:%s" % (x_xd_seq, [str(quotes.index[x])[:10] for x in x_xd_seq])))
     else:
         if len(x_xd_seq) > 0:
@@ -2413,8 +2413,8 @@ def show_chan_mpl_fb(code, start_date, end_date, stock_days, resample, show_mpl=
     
     print(("笔值  :%s" % ([str(x) for x in (y_xd_seq)][:-2])))
 
-    if len(biIdx) > 0 and (len(x_xd_seq) == 0 or resample not in ['d','w','m']):
-        if resample in ['d','w','m']:
+    if len(biIdx) > 0 and (len(x_xd_seq) == 0 or resample not in ct.Resample_LABELS):
+        if resample in ct.Resample_LABELS:
             st_data=str(chanK['enddate'][biIdx[len(biIdx) - 1]])[:10]
         else:
             st_data=str(chanK['enddate'][biIdx[len(biIdx) - 1]])
@@ -2519,7 +2519,7 @@ def parseArgmain():
         parser.add_argument('code', type=str, nargs='?', help='999999')
         parser.add_argument('start', nargs='?', type=str, help='20150612')
         parser.add_argument('end', nargs='?', type=str, help='20160101')
-        parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['1','3','5','10', '15', '30','60', 'd', 'w', 'm'], default='d', help='DateType')
+        parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['5','30','60', 'd', '3d','w', 'm'], default='d', help='DateType')
         parser.add_argument('-v', action="store", dest="vtype", type=str, choices=['f', 'b'], default='f', help='Price Forward or back')
         parser.add_argument('-p', action="store", dest="ptype", type=str, choices=['high', 'low', 'close'], default='low', help='price type')
         parser.add_argument('-f', action="store", dest="filter", type=str, choices=['y', 'n'], default='y', help='find duration low')
