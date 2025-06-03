@@ -668,7 +668,7 @@ def get_tdx_macd(df):
         df = df.sort_index(ascending=False)
 
     id_cout = len(df)
-    limit = 36
+    limit = 39
     if id_cout < limit:
         # temp_df = df.iloc[0]
         runtimes = limit-id_cout
@@ -695,6 +695,9 @@ def get_tdx_macd(df):
     df['macdlast1'] = df.iloc[-1]['macd']
     df['macdlast2'] = df.iloc[-2]['macd']
     df['macdlast3'] = df.iloc[-3]['macd']
+    df['macdlast4'] = df.iloc[-4]['macd']
+    df['macdlast5'] = df.iloc[-5]['macd']
+    df['macdlast6'] = df.iloc[-6]['macd']
 
     if df.index.name != 'date':
         df=df[-id_cout:].set_index('date')
@@ -5522,6 +5525,8 @@ if __name__ == '__main__':
     # dd = get_tdx_Exp_day_to_df(code,resample='d')
     # dd = compute_ma_cross(dd,resample='d')
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
+    # import ipdb;ipdb.set_trace()
+    
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_l,resample='d' )
     print(df2.ldate[:2])
 
