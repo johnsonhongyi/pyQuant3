@@ -22,7 +22,7 @@ def parseArgmain():
         parser.add_argument('code', type=str, nargs='?', help='999999')
         parser.add_argument('start', nargs='?', type=str, help='20150612')
         parser.add_argument('end', nargs='?', type=str, help='20160101')
-        parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['d', 'w', 'm','3d'], default='w',help='DateType')
+        parser.add_argument('-d', action="store", dest="dtype", type=str, nargs='?', choices=['d', 'w', 'm','3d','2d'], default='w',help='DateType')
         parser.add_argument('-v', action="store", dest="vtype", type=str, choices=['f', 'b'], default='f',help='Price Forward or back')
         parser.add_argument('-p', action="store", dest="ptype", type=str, choices=['high', 'low', 'close'], default='low',help='price type')
         parser.add_argument('-f', action="store", dest="filter", type=str, choices=['y', 'n'], default='y',help='find duration low')
@@ -117,7 +117,8 @@ def show_ths_data(df):
     for col in df.columns:
         if df[col].dtype == 'float64':
             df[col] = df[col].apply(lambda x: (round((x),2)))
-    df = df.iloc[:,[x for x in range(len(df.columns)-1)]]
+    range_count= len(df.columns) if len(df.columns) < 7 else 7
+    df = df.iloc[:,[x for x in range(range_count-1)]]
     
     # return (df[df.index == cct.code_to_symbol_ths(code)])
     data = df
@@ -184,49 +185,75 @@ if __name__ == "__main__":
                 import datetime
                 # df  = pywencai.get(query=code.split()[0], sort_order='asc')
                 df  = pywencai.get(query=code.split()[0])
-                # df = df[ ~ df.股票代码.str.startswith(('688','87','83')) ]
                 if not isinstance(df, pd.DataFrame):
                     print("pls run update: pip install -U --no-deps pywencai")
                     print("df is not ok:%s"%(df))
-                df['股票代码'] = df['股票代码'].apply(lambda x:cct.symbol_to_code(x.replace('.','')))
-                df = df[ df.股票代码.str.startswith(('30','60','00')) ]
+                else:    
+                    if code=='今日涨停' and len(df.columns) == 19:
+                        df['股票代码'] = df['股票代码'].apply(lambda x:cct.symbol_to_code(x.replace('.','')))
+                        df = df[ df.股票代码.str.startswith(('30','60','00')) ]
 
-                df = df.set_index('股票代码')
+                        df = df.set_index('股票代码')
 
-                # df = df.iloc[:,[0,1,2,3,4,5]]
-                current_date = datetime.date.today()
-                # 获取当前年份
-                current_year = current_date.year
-                # 获取上一年的日期
-                previous_year_date = current_date.replace(year=current_year - 1)
-                # 获取上一年的年份
-                previous_year = previous_year_date.year
-                df.columns=df.columns.str.replace('区间涨跌幅:前复权','')
-                df.columns=df.columns.str.replace(str(previous_year),'')
-                df.columns=df.columns.str.replace(str(current_year),'')
-                # df.iloc[:,[0,1,2,3,4,5,6]]
-                if '概念资讯' in df.columns:
-                    df.drop(['概念资讯'],axis=1,inplace=True)
-                # print(df.shape,df.columns)
-                dd=df.copy()
-                print(df.shape)
-                # print(df.shape,df.iloc[:8,[0,1,2,3,4,5]])
-                if len(df.columns) > 7:
-                    print(show_ths_data(df.iloc[:args.num,[0,1,2,3,4,5,6,7]]))
-                else:
-                    print(show_ths_data(df.iloc[:args.num,[x for x in range(len(df.columns)-1)]]))
-                if len(df) == 1:
-                    if re.match('[ \\u4e00 -\\u9fa5]+',code) == None:
-                        args.code = df.code.values[0]
-                    start = cct.day8_to_day10(args.start)
-                    end = cct.day8_to_day10(args.end)
-                    args.filter = 'y'
-                    for ptype in ['low', 'high']:
-                        op, ra, st, days = pct.get_linear_model_status(args.code,df=None, dtype=args.dtype, start=start, end=end,
-                                                                   days=args.days, ptype=ptype, filter=args.filter,
-                                                                   dl=args.dl)
-                        # print "%s op:%s ra:%s days:%s  start:%s" % (args.code, op, str(ra), str(days[0]), st)
-                        print("op:%s ra:%s days:%s  start:%s" % (op, str(ra), str(days[0]), st))
+                        # df = df.iloc[:,[0,1,2,3,4,5]]
+                        current_date = datetime.date.today()
+                        # 获取当前年份
+                        current_year = current_date.year
+                        # 获取上一年的日期
+                        previous_year_date = current_date.replace(year=current_year - 1)
+                        # 获取上一年的年份
+                        previous_year = previous_year_date.year
+                        df.columns=df.columns.str.replace('区间涨跌幅:前复权','')
+                        df.columns=df.columns.str.replace(str(previous_year),'')
+                        df.columns=df.columns.str.replace(str(current_year),'')
+                        # df.iloc[:,[0,1,2,3,4,5,6]]
+                        if '概念资讯' in df.columns:
+                            df.drop(['概念资讯'],axis=1,inplace=True)
+
+                    else:
+                        # df = df[ ~ df.股票代码.str.startswith(('688','87','83')) ]
+                        df['股票代码'] = df['股票代码'].apply(lambda x:cct.symbol_to_code(x.replace('.','')))
+                        df = df[ df.股票代码.str.startswith(('30','60','00')) ]
+
+                        df = df.set_index('股票代码')
+
+                        # df = df.iloc[:,[0,1,2,3,4,5]]
+                        current_date = datetime.date.today()
+                        # 获取当前年份
+                        current_year = current_date.year
+                        # 获取上一年的日期
+                        previous_year_date = current_date.replace(year=current_year - 1)
+                        # 获取上一年的年份
+                        previous_year = previous_year_date.year
+                        df.columns=df.columns.str.replace('区间涨跌幅:前复权','')
+                        df.columns=df.columns.str.replace(str(previous_year),'')
+                        df.columns=df.columns.str.replace(str(current_year),'')
+                        # df.iloc[:,[0,1,2,3,4,5,6]]
+                        if '概念资讯' in df.columns:
+                            df.drop(['概念资讯'],axis=1,inplace=True)
+                    # print(df.shape,df.columns)
+                    
+                    dd=df.copy()
+                    print(df.shape)
+                    # print(df.shape,df.iloc[:8,[0,1,2,3,4,5]])
+                    if len(df.columns) > 7:
+                        # print(show_ths_data(df.iloc[:args.num,[0,1,2,3,4,5,6,7]]))
+                        print(show_ths_data(df.iloc[:20,[0,1,2,3,4,5,6,7]]))
+                    else:
+                        # print(show_ths_data(df.iloc[:args.num,[x for x in range(len(df.columns)-1)]]))
+                        print(show_ths_data(df.iloc[:20,[x for x in range(len(df.columns)-1)]]))
+                    if len(df) == 1:
+                        if re.match('[ \\u4e00 -\\u9fa5]+',code) == None:
+                            args.code = df.code.values[0]
+                        start = cct.day8_to_day10(args.start)
+                        end = cct.day8_to_day10(args.end)
+                        args.filter = 'y'
+                        for ptype in ['low', 'high']:
+                            op, ra, st, days = pct.get_linear_model_status(args.code,df=None, dtype=args.dtype, start=start, end=end,
+                                                                       days=args.days, ptype=ptype, filter=args.filter,
+                                                                       dl=args.dl)
+                            # print "%s op:%s ra:%s days:%s  start:%s" % (args.code, op, str(ra), str(days[0]), st)
+                            print("op:%s ra:%s days:%s  start:%s" % (op, str(ra), str(days[0]), st))
 
 
             elif len(str(args.code)) == 6:

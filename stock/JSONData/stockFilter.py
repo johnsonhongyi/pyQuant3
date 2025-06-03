@@ -254,6 +254,8 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
             #     df.loc[((df.percent >= 9.97) & (df.percent < 10.1)), 'percent'] = 10
 
             # df.loc[df.per1d >= 9.99, 'per1d'] = 10
+            # df.query('9.94 < percent < 10.1')=10
+            df.loc[((df.percent >= 9.94) & (df.percent < 10.1)), 'percent'] = 10
             df['percent'] = df['percent'].apply(lambda x: round(x, 2))
             # time_ss = time.time()
             perc_col = [co for co in df.columns if co.find('perc') == 0]

@@ -17,6 +17,7 @@ PY3 = (sys.version_info[0] >= 3)
 
 VERSION = '0.3.6'
 K_LABELS = ['D', 'W', 'M']
+Resample_LABELS=['d','3d','w','m']
 K_MIN_LABELS = ['5', '15', '30', '60']
 K_TYPE = {'D': 'akdaily', 'W': 'akweekly', 'M': 'akmonthly'}
 INDEX_LABELS = ['sh', 'sz', 'hs300', 'sz50', 'cyb', 'zxb']
@@ -111,7 +112,7 @@ writeCount = 5
 changeRatio = 0.975
 changeRatioUp = 1.025
 # duration_date = 10
-wencai_delay_time = 180
+wencai_delay_time = 1800
 resample_dtype = 'd'
 sina_lastbuy_logtime = 1800
 bigcount_logtime = 360
