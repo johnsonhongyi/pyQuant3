@@ -334,14 +334,14 @@ if __name__ == "__main__":
                     # log.info("df:%s" % top_all[:1])
                     ratio_t = cct.get_work_time_ratio(resample=resample)
                     log.debug("Second:vol/vol/:%s" % ratio_t)
-                    # top_dif['volume'] = top_dif['volume'].apply(lambda x: round(x / radio_t, 1))
+                    # top_dif['volume'] = top_dif['volume'].apply(lambda x: round(x / ratio_t, 1))
                     log.debug("top_diff:vol")
 
                     # top_all['lvolume'] = top_all['volume']
                     #nvol -> volume
                     top_all['volume'] = ( 
                         list(map(lambda x, y: round(x / y / ratio_t, 1), top_all['volume'].values, top_all.last6vol.values)))
-                        # list(map(lambda x, y: round(x / y / radio_t, 1), top_all['volume'].values, top_all.lvol.values)))
+                        # list(map(lambda x, y: round(x / y / ratio_t, 1), top_all['volume'].values, top_all.lvol.values)))
 
                     # if cct.get_now_time_int() > 915:
                     # top_all = top_all[top_all.open > top_all.lasth1d]

@@ -276,8 +276,8 @@ if __name__ == "__main__":
                     # top_all = top_all[top_all['llow'] > 0]
                     # log.info("df:%s" % top_all[:1])
                     ratio_t = cct.get_work_time_ratio(resample=resample)
-                    log.debug("Second:vol/vol/:%s" % radio_t)
-                    # top_dif['volume'] = top_dif['volume'].apply(lambda x: round(x / radio_t, 1))
+                    log.debug("Second:vol/vol/:%s" % ratio_t)
+                    # top_dif['volume'] = top_dif['volume'].apply(lambda x: round(x / ratio_t, 1))
                     log.debug("top_diff:vol")
                     top_all['volume'] = (
                         list(map(lambda x, y: round(x / y / ratio_t, 1), top_all['volume'].values, top_all.last6vol.values)))

@@ -236,7 +236,7 @@ if __name__ == "__main__":
                 # top_dif = top_dif[top_dif.buy > top_dif.llastp]
                 # top_dif = top_dif[top_dif.buy > top_dif.lhigh]
                 # log.debug('dif2:%s' % len(top_dif))
-                # top_dif['volume'] = top_dif['volume'].apply(lambda x: round(x / radio_t, 1))
+                # top_dif['volume'] = top_dif['volume'].apply(lambda x: round(x / ratio_t, 1))
                 # log.debug("top_diff:vol")
                 # top_dif = top_dif[top_dif.volume > 1]
 
