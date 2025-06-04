@@ -1904,7 +1904,7 @@ def get_work_duration():
         return False
 
 
-def get_work_time_ratio():
+def get_work_time_ratio(resample='d'):
     initx = 3.5
     stepx = 0.5
     init = 0
@@ -1967,6 +1967,13 @@ def get_work_time_ratio():
         d2 = datetime.datetime.strptime(ymd + hm2, '%Y:%m:%d:%H:%M')
         ds = float((d1 - d2).seconds)
         ratio_t = round((ds + 7200) / all_work_time, 3)
+
+    if resample == '3d':
+        ratio_t /= 3 
+    elif resample == 'w':
+        ratio_t /= 5
+    elif resample == 'm':
+        ratio_t /= 20
 
     return ratio_t
 

@@ -135,7 +135,7 @@ if __name__ == "__main__":
             
             top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
             now_count = len(top_now)
-            radio_t = cct.get_work_time_ratio()
+            radio_t = cct.get_work_time_ratio(resample=resample)
             # top_now = top_now[top_now.buy > 0]
             time_d = time.time()
             if time_d - time_s > delay_time:

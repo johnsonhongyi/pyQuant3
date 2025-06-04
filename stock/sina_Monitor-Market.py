@@ -201,7 +201,7 @@ if __name__ == "__main__":
                     log.debug("Second:vol/vol/:%s" % radio_t)
                     # top_dif['volume'] = top_dif['volume'].apply(lambda x: round(x / radio_t, 1))
                     top_dif['volume'] = (
-                        list(map(lambda x, y: round(x / y / radio_t, 1), top_dif['volume'].values, top_dif['lvol'].values)))
+                        list(map(lambda x, y: round(x / y / radio_t, 1), top_dif['volume'].values, top_dif['last6vol'].values)))
                     # top_dif = top_dif[top_dif.volume > 0.5]
 
                     # if cct.get_now_time_int() > 1030 and cct.get_now_time_int() < 1400:
