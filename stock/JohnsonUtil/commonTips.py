@@ -2996,49 +2996,50 @@ def counterCategory(df,col='category'):
 #     pass
 def write_to_blkdfcf(codel,conf_ini=dfcf_path,blk='inboll1',append=True):
     import configparser
-    if not os.path.exists(conf_ini):
-        log.error('file is not exists:%s'%(conf_ini))
-    else:
-        cf = configparser.ConfigParser()  # 实例化 ConfigParser 对象
-        # cf.read("test.ini")
-        cf.read(conf_ini,encoding='UTF-16')
-        # cf.read(conf_ini,encoding='GB2312')
-        # return all section
-        secs = cf.sections()
-        # print('sections:', secs, type(secs))
+    if not isMac():
+        if not os.path.exists(conf_ini):
+            log.error('file is not exists:%s'%(conf_ini))
+        else:
+            cf = configparser.ConfigParser()  # 实例化 ConfigParser 对象
+            # cf.read("test.ini")
+            cf.read(conf_ini,encoding='UTF-16')
+            # cf.read(conf_ini,encoding='GB2312')
+            # return all section
+            secs = cf.sections()
+            # print('sections:', secs, type(secs))
 
-        opts = cf.options("\\SelfSelect")  # 获取db section下的 options，返回list
-        # print('options:', opts, type(opts))
-        # 获取db section 下的所有键值对，返回list 如下，每个list元素为键值对元组
-        kvs = cf.items("\\SelfSelect")
-        # print('db:', dict(kvs).keys())
-        # read by type
-        truer = cf.get("\\SelfSelect", blk)
-        # print('truer:',truer)
-        truer_n = truer
-        idx = 0
+            opts = cf.options("\\SelfSelect")  # 获取db section下的 options，返回list
+            # print('options:', opts, type(opts))
+            # 获取db section 下的所有键值对，返回list 如下，每个list元素为键值对元组
+            kvs = cf.items("\\SelfSelect")
+            # print('db:', dict(kvs).keys())
+            # read by type
+            truer = cf.get("\\SelfSelect", blk)
+            # print('truer:',truer)
+            truer_n = truer
+            idx = 0
 
-        if isinstance(codel, list):
-            for co in codel:
-                if code_to_symbol_dfcf(co) not in truer:
-                    idx+=1
-                    # print(idx)
-                    truer_n = code_to_symbol_dfcf(co)+','+truer_n
+            if isinstance(codel, list):
+                for co in codel:
+                    if code_to_symbol_dfcf(co) not in truer:
+                        idx+=1
+                        # print(idx)
+                        truer_n = code_to_symbol_dfcf(co)+','+truer_n
+                    # else:
+                    #     print("no change co")
+                        # truer_n = truer
+            else:
+                if code_to_symbol_dfcf(codel) not in truer:
+                        idx+=1
+                        truer_n = code_to_symbol_dfcf(codel)+','+truer
                 # else:
                 #     print("no change co")
-                    # truer_n = truer
-        else:
-            if code_to_symbol_dfcf(codel) not in truer:
-                    idx+=1
-                    truer_n = code_to_symbol_dfcf(codel)+','+truer
-            # else:
-            #     print("no change co")
-                    # truer_n = truer
-                    
-        print("%s add:%s"%(blk,idx))
-        cf.set("\\SelfSelect", blk, truer_n)
-        # print('instock:',cf.get("\\SelfSelect", "instock"))
-        cf.write(open(conf_ini,"w",encoding='UTF-16'))
+                        # truer_n = truer
+                        
+            print("%s add:%s"%(blk,idx))
+            cf.set("\\SelfSelect", blk, truer_n)
+            # print('instock:',cf.get("\\SelfSelect", "instock"))
+            cf.write(open(conf_ini,"w",encoding='UTF-16'))
 
 def read_unicode_file(file_path):
     with open(file_path, 'r', encoding='utf-8') as file:

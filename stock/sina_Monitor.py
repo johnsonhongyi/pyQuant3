@@ -215,8 +215,8 @@ if __name__ == "__main__":
         log.info("duaration: %s duration_date:%s" %
                  (cct.get_today_duration(du_date), duration_date))
     
-    # st_key_sort = '4'
-    st_key_sort = 'x 1.1'
+    st_key_sort = '4'
+    # st_key_sort = 'x 1.1'
     st_key_sort_start = 0
     # st_key_sort = '3 1'
     # st_key_sort = '8'
