@@ -1720,7 +1720,7 @@ def get_today(sep='-'):
     # print workdays
     # days = rrule.rrule(rrule.DAILY, start, until=end, byweekday=workdays)
     # return days
-    return days.count() - holidays
+    # return days.count() - holidays
 
 
 def get_work_day_status():
@@ -1732,7 +1732,14 @@ def get_work_day_status():
     else:
         return False
     # return str(today)
+def get_work_day_idx():
+    today = datetime.datetime.today().date()
+    day_n = int(today.strftime("%w"))
 
+    if 0 < day_n < 6:
+        return day_n
+    else:
+        return 5
 
 def last_tddate(days=1):
     # today = datetime.datetime.today().date() + datetime.timedelta(-days)
@@ -1968,10 +1975,12 @@ def get_work_time_ratio(resample='d'):
         ds = float((d1 - d2).seconds)
         ratio_t = round((ds + 7200) / all_work_time, 3)
 
+    # work_day = get_work_day_idx() 
+    # work_day = work_day-3 if work_day > 2 else work_day
     if resample == '3d':
         ratio_t /= 3 
     elif resample == 'w':
-        ratio_t /= 5
+        ratio_t /= 5 
     elif resample == 'm':
         ratio_t /= 20
 
@@ -5304,6 +5313,7 @@ if __name__ == '__main__':
     import ipdb;ipdb.set_trace()
     '''
     # rzrq['all']='nan'
+
     print(get_tdx_dir_blocknew_dxzq(r'D:\MacTools\WinTools\new_tdx2\T0002\blocknew\090.blk'))
     print(is_trade_date())
     print(isDigit('nan None'))
