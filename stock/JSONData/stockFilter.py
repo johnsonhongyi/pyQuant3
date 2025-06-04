@@ -376,7 +376,17 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     # print("market_value:%s market_key:%s"%(market_value,market_key))
     # if market_key == '9':
     #     import ipdb;ipdb.set_trace()
-    # if 915 < cct.get_now_time_int() < 1530:
+    if market_key == '1' or market_key == '4':
+        # if cct.get_now_time_int() < 1530:
+        filterlastday = 'lasth1d'
+        filterma51d = 'ma51d'
+        if len(df) > 0 and df.lastp1d[0] == df.close[0]:
+            filterlastday = 'lasth2d'
+            filterma51d = 'ma52d'
+        if 'nlow' in df.columns:
+            df = df.query(f'(low >=nlow and low > {filterma51d}) or low >= {filterlastday}')
+        else:
+            df = df.query(f'(open == low and low > {filterma51d}) or low >= {filterlastday}')
 
     df['topR']=list(map(lambda x, y: round( x + 1 if x > 1 and y > 0 else x , 1), df.topR, df.percent))
 

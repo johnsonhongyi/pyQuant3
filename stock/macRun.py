@@ -377,7 +377,7 @@ def setPosition(cmd=None, position=None):
         # print getPosition('Johnson — bash',close=True)
         # print getPosition('Johnson — bash',close=True)
         # print getPosition('Johnson',close=True)
-        print((getPosition('Johnson — python',close=True)))
+        print((getPosition('Johnson — python3',close=True)))
         # print getPosition('Johnson',close=True)
 # count = doScript(scriptcount        
 # os.system(cmdRun)
@@ -420,7 +420,10 @@ if cct.isMac():
     # getPosition('Johnson —',close=True)
     # getPosition('Johnson — python',close=True)
     # getPosition('Johnson — osasc',close=True)
-    print((getPosition('Johnson — python',close=True)))
+    print(f'will close Johnson — python3')
+    time.sleep(30)
+    print((getPosition('Johnson — python3',close=True)))
+    print((getPosition('Johnson',close=True)))
 
 else:
     print("win")
