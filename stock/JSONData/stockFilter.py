@@ -154,7 +154,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
         # df = df[df.df2 > 1]
     # else:
         # df = df[df.df2 > 0]
-    radio_t = cct.get_work_time_ratio()
+    radio_t = cct.get_work_time_ratio(resample=resample)
     df['lvolr%s' % (resample)] = df['volume']
     # df['volume'] = (map(lambda x, y: round(x / y / radio_t, 1), df.nvol.values, df.lvolume.values))
     
