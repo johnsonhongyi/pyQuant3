@@ -4114,9 +4114,11 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
 
 
                 volmean = dz.vol[:lvoldays].tolist()
-                if len(volmean) > 3:
+                
+                if len(volmean) > 5:
                     volmean.remove(min(volmean))    
-                    volmean.remove(max(volmean))    
+                    volmean.remove(max(volmean))  
+
                 # lastvol = dz.vol[:lvoldays].min()
                 lastvol = round(sum(volmean) / len(volmean),1)
 

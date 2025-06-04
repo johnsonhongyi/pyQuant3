@@ -164,7 +164,7 @@ if __name__ == "__main__":
 
 #            top_now = tdd.getSinaAlldf(market=u'次新股',filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
             now_count = len(top_now)
-            radio_t = cct.get_work_time_ratio()
+            ratio_t = cct.get_work_time_ratio(resample=resample)
             # top_now = top_now[top_now.buy > 0]
             time_d = time.time()
             if time_d - time_s > delay_time:
@@ -261,7 +261,7 @@ if __name__ == "__main__":
                 # log.debug("top_dif.low > 0:%s" % (len(top_dif)))
                 # top_dif.loc['600610','volume':'lvol']
                 top_dif['volume'] = (
-                    list(map(lambda x, y: round(x / y / radio_t, 1), top_dif.volume.values, top_dif.lvol.values)))
+                    list(map(lambda x, y: round(x / y / ratio_t, 1), top_dif.volume.values, top_dif.last6vol.values)))
 
                 # if 'op' in top_dif.columns:
                 #     top_dif=top_dif[top_dif.op >12]
