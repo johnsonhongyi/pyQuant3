@@ -1,6 +1,0 @@
-> /Users/Johnson/Documents/Quant/pyQuant3/stock/JSONData/tdx_data_Day.py(672)get_tdx_macd()
-    671 
---> 672     id_cout = len(df)
-    673     limit = 36
-
-ipdb> df.loc[np.repeat(df.index[0], 3)].reset_index(drop=True)
