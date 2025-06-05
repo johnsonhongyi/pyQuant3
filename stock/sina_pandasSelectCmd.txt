@@ -78,3 +78,10 @@ top_temp.query('percent >= 4 and high > max5 and high >hmax and per1d >=10 and p
 top_temp.query('percent >= 4 and high > max5 and high >hmax and per1d >=10')
 首阳启动:top_temp.query('percent >= 4 and high > max5 and high >hmax and lastp1d < ma51d*1.05')
 
+top_temp.query('lastp1d > hmax and lastl1d < hmax')
+top_temp.query('lastp1d > lastp2d and lasth1d > upper')
+top_temp.query('per1d < 3 and per2d < 3 and per3d <3')
+top_temp.query('per1d < 3 and per2d < 3 and per3d <3 and lastp1d > lastp2d')
+top_temp.query('per1d < 3 and per2d < 3 and per3d <3 and lastp1d > lastp2d and lastp2d > lastp3d')
+top_temp.query('per1d < 3 and per2d < 3 and per3d <3 and lastp1d > lastp2d and lastp2d > lastp3d and lastl1d < ma51d')
+top_temp.query('lastp1d > high4 and per1d < 3 and per2d < 3 and per3d <3 and lastp1d > lastp2d and lastp2d > lastp3d and lastl1d < ma51d')
