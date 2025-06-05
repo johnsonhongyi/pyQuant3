@@ -65,7 +65,7 @@ def broadcast_stock_code(stock_code,message_type='stock'):
         else:
             codex = int(stock_code)
         UWM_STOCK = win32api.RegisterWindowMessage('stock')
-        print(win32con.HWND_BROADCAST,UWM_STOCK,int(codex))
+        print(win32con.HWND_BROADCAST,UWM_STOCK,str(codex))
         #系统广播
         win32gui.PostMessage( win32con.HWND_BROADCAST,UWM_STOCK,int(codex),0)
         send_code_message(stock_code)

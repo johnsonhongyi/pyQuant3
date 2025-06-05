@@ -36,6 +36,7 @@ from tqdm import tqdm
 # import numba as nb
 import numpy as np
 import subprocess
+import a_trade_calendar
 
 try:
     from urllib.request import urlopen, Request
@@ -124,7 +125,7 @@ def format_for_print(df,header=True,widths=False,showCount=False):
     else:
         table = PrettyTable(field_names=[''] + alist,header=False)
 
-    for row in df.itertuples():
+    for row in df[:50].itertuples():
 
         table.add_row(row)
 
@@ -1267,6 +1268,19 @@ def get_file_size(path_to_file):
         filesize = 0
     return filesize
 
+
+
+def get_day_istrade_date(dt=None):
+    sep='-'
+    if dt is None:
+        TODAY = datetime.date.today()
+        fstr = "%Y" + sep + "%m" + sep + "%d"
+        dt = TODAY.strftime(fstr)
+    is_trade_date = a_trade_calendar.is_trade_date(dt)
+
+    return(is_trade_date)
+
+
 def creation_date_duration(path_to_file):
     """
     Try to get the date that a file was created, falling back to when it was
@@ -1291,6 +1305,7 @@ def creation_date_duration(path_to_file):
     else:
         duration = 0
     return duration
+
 def filepath_datetime(path_to_file):
     """
     Try to get the date that a file was created, falling back to when it was
