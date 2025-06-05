@@ -135,7 +135,7 @@ def show_tab(show_content):
             file_data.append(cur)
 
     with use_scope('content', clear=True):
-        put_button("Refresh", onclick=lambda: run_js('window.location.reload()'))
+        # put_button("Refresh", onclick=lambda: run_js('window.location.reload()'))
         put_tabs([
             {'title': '全部', 'content': put_table(head + all_data)},
             {'title': '文本', 'content': put_table(head + txt_data)},
