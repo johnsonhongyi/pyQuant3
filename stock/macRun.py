@@ -327,6 +327,15 @@ def getPosition(cmd=None, position=None,close=False):
 # if hostname.find('R900') >=0:
 #     positionKey = cct.terminal_positionKey2K_R9000P
 
+# https://pypi.org/project/a-trade-calendar/
+# def get_today_trade_date(sep='-'):
+#     TODAY = datetime.date.today()
+#     fstr = "%Y" + sep + "%m" + sep + "%d"
+#     today = TODAY.strftime(fstr)
+#     is_trade_date = a_trade_calendar.is_trade_date(today)
+#     return(is_trade_date)
+
+
 positionKey = cct.get_system_postionKey()
 # print("position:%s"%(positionKey))
 
@@ -411,6 +420,15 @@ if cct.isMac():
         print((getPosition('Johnson',close=True)))
         print((getPosition('/Users/Johnson/Documents',close=True)))
     else:
+        if cct.get_day_istrade_date():
+            cmd_ls = f'ls -al {cct.get_ramdisk_dir()}{os.sep}'
+            rm_ramdisk = f'/bin/rm  -f {cct.get_ramdisk_dir()}{os.sep}*'
+            result = subprocess.getoutput(cmd_ls)
+            # print(result,rm_ramdisk)
+            if cct.creation_date_duration(cct.get_ramdisk_path('tdx_last_df')) > 0:
+                if result.find('stock') > 0:
+                    os.system(rm_ramdisk)
+
         setPosition(cmd=None, position=None)
         cct.get_terminal_Position(cct.clean_terminal[2],close=True)
     cct.get_terminal_Position(cct.clean_terminal[1],close=True)

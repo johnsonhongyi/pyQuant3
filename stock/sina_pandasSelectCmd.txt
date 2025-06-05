@@ -69,3 +69,12 @@ top_temp.query('(macdlast4 < macdlast5 and lastp4d > lastp5d) and lasth1d >lasth
 top_temp.query('(macdlast4 < macdlast5 and lastp4d > lastp5d) and lasth1d >lasth2d and macdlast1 > macdlast2 and per1d >0 and percent >0')
 top_temp.query('(macdlast4 < macdlast5 and lastp4d > lastp5d) and lasth1d >lasth2d and macdlast1 > macdlast2 and per1d >0 and percent >0')[:10]
 top_temp.query('(macdlast4 < macdlast5 and lastp4d > lastp5d) and lasth1d >lasth2d and macdlast1 > macdlast2 and per1d >0 and percent >0')[:20]
+top_temp.query('percent >= 9')
+top_temp.query('percent >= 4')
+top_temp.query('percent >= 4 and high > max5')
+top_temp.query('percent >= 4 and high > max5 and high >high4')
+top_temp.query('percent >= 4 and high > max5 and high >hmax')
+top_temp.query('percent >= 4 and high > max5 and high >hmax and per1d >=10 and per2d >=10')
+top_temp.query('percent >= 4 and high > max5 and high >hmax and per1d >=10')
+首阳启动:top_temp.query('percent >= 4 and high > max5 and high >hmax and lastp1d < ma51d*1.05')
+
