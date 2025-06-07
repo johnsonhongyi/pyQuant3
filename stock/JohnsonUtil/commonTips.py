@@ -144,9 +144,29 @@ def format_for_print(df,header=True,widths=False,showCount=False):
             return str(table)
         return str(table),table.get_widths()
 
-def format_for_print_show(df,columns_format=None,showCount=False):
+def format_replce_list(lst, old='volume', new='maxp'):
+        lst_n = [new if x==old else x for x in lst]
+        return lst_n
+
+
+def list_replace(lst, old=1, new=10):
+    """replace list elements (inplace)"""
+    i = -1
+    try:
+        while True:
+            i = lst.index(old, i + 1)
+            lst[i] = new
+    except ValueError:
+        pass
+
+
+def format_for_print_show(df,columns_format=None,showCount=False,col=None):
     if columns_format is None:
         columns_format = ct.Monitor_format_trade
+    if col is not None and col not in columns_format:
+        # columns_format.remove('volume')
+        # columns_format.append(col)
+        columns_format = format_replce_list(columns_format,old='volume',new=col)
     # if showCount:
     #     # print(f'Count:{len(df)}')
     #     count_string = (f'Count:{len(df)}')

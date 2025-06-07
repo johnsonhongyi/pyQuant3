@@ -103,11 +103,11 @@ def codeQuery_show(idxkey,columns_format,workstatus):
 
 def codeQuery_show_cct(idxkey,columns_format,workstatus,orderby='dff'):
     code=codeQuery[idxkey] if workstatus else codeQuery_work_false[idxkey]
-    cmd=f"format_for_print_show({code}.sort_values('{orderby}', ascending=False),{columns_format},showCount=True)"
+    cmd=f"format_for_print_show({code}.sort_values('{orderby}', ascending=False),{columns_format},showCount=True,col='{orderby}')"
     return(cmd)
 
 def codeQuery_show_single(cmd,columns_format,orderby='dff'):
-    cmd=f"format_for_print_show({cmd}.sort_values('{orderby}', ascending=False),{columns_format},showCount=True)"
+    cmd=f"format_for_print_show({cmd}.sort_values('{orderby}', ascending=False),{columns_format},showCount=True,col='{orderby}')"
     return(cmd)
 
 tqdm_mininterval=2
