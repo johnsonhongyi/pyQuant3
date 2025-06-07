@@ -119,8 +119,6 @@ top_all.query('open >= low and close >= lastp1d and close > nclose and low >=nlo
 top_all.query('open >= low and close >= lastp1d and close > nclose and low >=nlow and percent >1 and lasth1d >lasth2d and lastl1d < ma51d and lastp2d >ma51d and lastl1d < upper and lastp1d > upper and high > hmax')
 top_all.query('open >= low and close >= lastp1d and close > nclose and low >=nlow')
 top_all.query('open >= low and close >= lastp1d and close > nclose and low >=nlow')[:10]
-top_temp.query('eneU > 10')
-top_temp.query('eneU > 5')
 top_temp.query('eneU > 3')
-top_temp.query('maxp >0')
 top_temp.query('maxp > 10')
+top_temp.query('maxp < 10')
