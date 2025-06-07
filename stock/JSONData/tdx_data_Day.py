@@ -1067,10 +1067,11 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     df = df.sort_index(ascending=True)
     perc_couts = df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:]
     per_couts = df.loc[:,df.columns[df.columns.str.contains('per[0-9]{1}d', regex=True, case=False)]][-1:]
+
     if len(perc_couts.T) > 2:
         if resample == 'd':
             df['maxp'] = perc_couts.T[1:].values.max() 
-            fib_c  =(perc_couts.T.values > 2).sum()
+            fib_c  =(per_couts.T.values > 2).sum()
         else:
             df['maxp'] = perc_couts.T[:3].values.max() 
             fib_c  =(per_couts.T[:3].values > 10).sum()
@@ -5529,13 +5530,13 @@ if __name__ == '__main__':
     code='603038'
     code='833171'
     code='688652'
-    code='301209'
+    code='002152'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     # dd = get_tdx_Exp_day_to_df(code,resample='d')
     # dd = compute_ma_cross(dd,resample='d')
-    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_l,resample='d' )
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_l,resample='d' )
+    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
     print(f'df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
     print(f'ldate:{df2.ldate[:2]}')
