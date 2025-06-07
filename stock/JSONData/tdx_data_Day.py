@@ -660,17 +660,15 @@ def custom_macd(prices, fastperiod=12, slowperiod=26, signalperiod=9):
    return diff, dea, macdmmm
 
 def get_tdx_macd(df):
-
     if len(df) < 10:
         return df
     increasing = None
-    if  df.index.is_monotonic_increasing:
-        increasing = True
-        df = df.sort_index(ascending=False)
-
     id_cout = len(df)
     limit = 39
     if id_cout < limit:
+        if  df.index.is_monotonic_increasing:
+            increasing = True
+            df = df.sort_index(ascending=False)
         # temp_df = df.iloc[0]
         runtimes = limit-id_cout
         df = df.reset_index()
@@ -678,7 +676,7 @@ def get_tdx_macd(df):
         #     df.loc[df.shape[0]] = temp_df
         temp = df.loc[np.repeat(df.index[-1], runtimes)]
         df = df.append(temp)
-    df=df.sort_index(ascending=False)
+        df=df.sort_index(ascending=False)
     # if  increasing:
     #     df = df.sort_index(ascending=increasing)
     # df=df.fillna(0)
@@ -1068,7 +1066,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     # df['hmax'] = df.close[:-ct.tdx_max_int_end].max()
     df = df.sort_index(ascending=True)
     perc_couts = df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:]
-    if len(perc_couts) > 1:
+    if len(perc_couts.T) > 5:
         df['maxp'] = perc_couts.T[1:].values.max() 
         fib_c  =(perc_couts.T.values > 2).sum()
         df['fib'] =   fib_c
@@ -5531,8 +5529,9 @@ if __name__ == '__main__':
     # df = get_kdate_data(code,ascending=True)
     # dd = get_tdx_Exp_day_to_df(code,resample='d')
     # dd = compute_ma_cross(dd,resample='d')
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='w' )
-    # import ipdb;ipdb.set_trace()
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
+    print(f'macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
     
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_l,resample='d' )
     print(df2.ldate[:2])

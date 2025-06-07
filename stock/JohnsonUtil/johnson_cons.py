@@ -28,6 +28,31 @@ INDEX_LIST_TDX = {'sh': 'sh999999', 'sz': 'sz399001', 'hs300': 'sz399300',
                   'sz50': 'sh000016', 'zxb': 'sz399005', 'cyb': 'sz399006'}
 DD_VOL_List = {'0': '40000', '1': '100000',
                '2': '100000', '3': '200000', '4': '1000000'}
+
+'''
+topU: 长周期站上upper
+eneU: 中规上方数量
+ene: ->boll
+maxp:15周期的波动幅度
+fib:15周期大于2的    —>maxpcout
+boll:近期upper
+月线回归支撑区域+macd:
+top_temp.query('macd >-1 and macddif < macddea and macdlast2 < macdlast3 and low < df2*1.2 and close > df2').loc[:,['macddif','macddea']]
+20250603:
+300678     中科信息
+002223     鱼跃医疗
+002898    *ST赛隆
+600269    XD赣粤高
+600449     宁夏建材
+002395     双象股份
+600721     百花医药
+300254     仟源医药
+601518     吉林高速
+601006     大秦铁路
+600422     昆药集团
+601298      青岛港
+
+'''
 # LvolumeSize = 125000
 
             # "4周新高" : "top_temp.query('close > high4 and lastp1d < hmax and low > lastl1d and lastl1d < ma51d and close >lastp2d')",\
@@ -95,10 +120,10 @@ VolumeMinR = 0.1
 upper_cross_days = 14
 PowerCount = 1000
 duration_diff = 6
-duration_date_l = 80
+duration_date_l = 60
 duration_date_up = 120
 duration_date_week = 200
-duration_date_month = 600
+duration_date_month = 300
 
 duration_date_sort = duration_date_l
 # PowerCountdl = duration_date_l * 2 if duration_date_l < 20 else duration_date_l
@@ -146,7 +171,7 @@ dratio_limit = 0.09
 duration_sleep_time = 30
 single_duration_sleep_time = 180
 # single_duration_sleep_time = 120
-compute_lastdays = 15
+compute_lastdays = 9
 last_TopR_days = 15
 # sort_value_key_perd23 = '2 3 d f'
 # sort_value_key_perd23 = '3 3'
