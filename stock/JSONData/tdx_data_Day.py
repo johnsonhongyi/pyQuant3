@@ -2432,7 +2432,6 @@ def Write_market_all_day_mp(market='all', rewrite=False):
     # df = sina_data.Sina().sina.all
     duration_code=check_tdx_Exp_day_duration(market)
 
-
     # print dt,dd.date
     if market == 'alla':
         rewrite = True
@@ -4689,23 +4688,25 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
 
     top_all = top_all[top_all['llow'] > 0]
     #20231110 add today topR
+    #20250607 mod today topR
 
-    if cct.get_trade_date_status() == 'False':
-        top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
-    # elif 915 < cct.get_now_time_int() < 1500:
-    #     top_all['topR'] =  list(map(lambda x, y, z: (x + 1.1 if y > z else x),top_all.topR, top_all.low, top_all.lasth1d))
-    elif cct.get_now_time_int() < 915:
-        top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
-    else:
-        if (top_all['open'][-1] == top_all['lasto1d'][-1]) and (top_all['open'][0] == top_all['lasto1d'][0]):
+    if cct.get_day_istrade_date():
+        if cct.get_trade_date_status() == 'False':
+            top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
+        # elif 915 < cct.get_now_time_int() < 1500:
+        #     top_all['topR'] =  list(map(lambda x, y, z: (x + 1.1 if y > z else x),top_all.topR, top_all.low, top_all.lasth1d))
+        elif cct.get_now_time_int() < 915:
             top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
         else:
-            top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth1d))
+            if (top_all['open'][-1] == top_all['lasto1d'][-1]) and (top_all['open'][0] == top_all['lasto1d'][0]):
+                top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
+            else:
+                top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth1d))
 
-    # if cct.get_work_time_duration():
-    #     top_all['topR'] =  list(map(lambda x, y, z: (x + 1.1 if y > z else x),top_all.topR, top_all.low, top_all.lasth1d))
-    # else:
-    #     top_all['topR'] =  list(map(lambda x, y, z: (x + 1.1 if y > z else x),top_all.topR, top_all.low, top_all.lasth2d))
+        if cct.get_work_time_duration():
+            top_all['topR'] =  list(map(lambda x, y, z: (x + 1.1 if y > z else x),top_all.topR, top_all.low, top_all.lasth1d))
+        else:
+            top_all['topR'] =  list(map(lambda x, y, z: (x + 1.1 if y > z else x),top_all.topR, top_all.low, top_all.lasth2d))
     
     if 'llastp' not in top_all.columns:
         log.error("why not llastp in topall:%s" % (top_all.columns))
@@ -5521,12 +5522,12 @@ if __name__ == '__main__':
     code='603038'
     code='833171'
     code='688652'
-    code='300204'
+    code='601858'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     # dd = get_tdx_Exp_day_to_df(code,resample='d')
     # dd = compute_ma_cross(dd,resample='d')
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='w' )
     # import ipdb;ipdb.set_trace()
     
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_l,resample='d' )

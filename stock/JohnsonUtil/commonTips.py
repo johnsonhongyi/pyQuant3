@@ -497,6 +497,16 @@ def is_trade_date(date=datetime.date.today()):
     else:
         return False
 
+def get_day_istrade_date(dt=None):
+    #2025
+    sep='-'
+    if dt is None:
+        TODAY = datetime.date.today()
+        fstr = "%Y" + sep + "%m" + sep + "%d"
+        dt = TODAY.strftime(fstr)
+    is_trade_date = a_trade_calendar.is_trade_date(dt)
+
+    return(is_trade_date)
 
 
 def getcwd():
@@ -1270,15 +1280,6 @@ def get_file_size(path_to_file):
 
 
 
-def get_day_istrade_date(dt=None):
-    sep='-'
-    if dt is None:
-        TODAY = datetime.date.today()
-        fstr = "%Y" + sep + "%m" + sep + "%d"
-        dt = TODAY.strftime(fstr)
-    is_trade_date = a_trade_calendar.is_trade_date(dt)
-
-    return(is_trade_date)
 
 
 def creation_date_duration(path_to_file):
@@ -1775,6 +1776,7 @@ def last_tddate(days=1):
         else:
             lastd = today + datetime.timedelta(-1)
             log.debug("2-6:%s" % lastd)
+        # is_trade_date()
         return lastd
         # if days==0:
         # return str(lasd)

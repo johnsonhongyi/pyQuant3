@@ -714,15 +714,15 @@ if __name__ == '__main__':
 
             else:
                 log.debug('into clean_duration:%s' % (int_time))
-                if (cct.get_now_time_int() > 1502 and cct.get_now_time_int() < 2400):
+                if (cct.get_now_time_int() > 1501 and cct.get_now_time_int() < 2400):
                     while 1:
-                        if cct.get_now_time_int() > 1502 and cct.get_now_time_int() < 1503:
+                        if cct.get_now_time_int() > 1501 and cct.get_now_time_int() < 1503:
                             print(".", end=' ')
                             cct.sleep(60)
                         elif cct.get_now_time_int() < 2400:
                             print(".", end=' ')
                             print("write dm to file")
-                            if cct.get_work_day_status():
+                            if (cct.get_work_day_status() and cct.get_now_time_int() > 1502) :
                                 tdd.Write_market_all_day_mp('all')
                                 top_temp = cct.GlobalValues().getkey('top_max')
                                 codew = stf.WriteCountFilter(
@@ -737,6 +737,23 @@ if __name__ == '__main__':
                             break
                         else:
                             print(".")
+                else:
+                    if  not cct.get_work_day_status() :
+                        print(".", end=' ')
+                        print("write dm to file")
+                        tdd.Write_market_all_day_mp('all')
+                        top_temp = cct.GlobalValues().getkey('top_max')
+                        codew = stf.WriteCountFilter(
+                            top_temp, writecount='all')
+                        # cct.write_to_blocknew(
+                        #     block_path, codew, append=False, doubleFile=False)
+
+                        
+                        # print("Now append sina to tdx 300 hdf:")
+                        # tdd.Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=300)
+                        # tdd.Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300)
+                        break
+
 
                 raise KeyboardInterrupt("Stop Time")
                 # st = cct.cct_raw_input("status:[go(g),clear(c),quit(q,e)]:")
