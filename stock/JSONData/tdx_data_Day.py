@@ -604,6 +604,7 @@ def get_tdx_Exp_day_to_df_AllRead_(code, start=None, end=None, dl=None, newdays=
     # df['low4'] = df.low[-5:-1].min()
 
     df['max5'] = df.close[-6:-1].max()
+    df['max10'] = df.close[-10:-1].max()
     df['high4'] = df.close[-5:-1].max()
     df['low4'] = df.low[-5:-1].min()
     # df['lmin'] = df.low[-tdx_max_int:max_int_end].min()
@@ -1108,6 +1109,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
 
         if cct.get_work_time_duration():
             df['max5'] = df.close[-6:-1].max()
+            df['max10'] = df.close[-10:-1].max()
             df['hmax'] = df.close[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
             df['hmaxvol'] = df.vol[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
             df['hmax60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
@@ -1123,6 +1125,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
 
         else:
             df['max5'] = df.close[-6:-1].max()
+            df['max10'] = df.close[-10:-1].max()
             # df['hmax'] = df.close[-ct.tdx_max_int_end:max_int_end].max()
             df['hmax'] = df.close[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
             df['hmax60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
@@ -3456,6 +3459,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # df['hmax'] = df['high'].rolling(10).max()
     # df['lastdu4'] = (df['high'].rolling(4).max()-df['low'].rolling(4).min())/df['low'].rolling(4).min()
     df['max5'] = df.close[-6:-1].max()
+    df['max10'] = df.close[-10:-1].max()
     # df['hmax'] = df.high[-6:-1].max()
     df['hmax'] = df.close[-6:-1].max()
     # df['hmax60'] = df.high[:-1].max()
