@@ -35,6 +35,7 @@ eneU : 中规上方数量
 ene : ->boll
 maxp :15周期的波动幅度
 fib :15周期大于2的    —>maxpcout
+fibl : tdx_df[idx_date:].query('high > high.shift(1)*0.998')
 boll :近期upper
 red : 阳K
 lastdu4 : 4天振幅

@@ -42,6 +42,7 @@ global initTdxdata, initTushareCsv
 initTdxdata = 0
 initTushareCsv = 0
 atomStockSize = 50
+latest_trade_date = cct.latest_trade_date
 # tdx_index_code_list = ['999999', '399001']
 tdx_index_code_list = ['999999', '399006', '399005', '399001']
 # win7rootAsus = r'D:\Program Files\gfzq'
@@ -861,7 +862,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                 if not resample == 'd':
                     df = get_tdx_stock_period_to_type(df, period_day=resample)
 
-            if resample == 'd' and df.close[-5:].max() > df.open[-5:].min() * 1.6:
+            if resample == 'd' and (cct.get_today_duration(df.index[-1]) > 3 or df.close[-5:].max() > df.open[-5:].min() * 1.6):
 
                 tdx_err_code = cct.GlobalValues().getkey('tdx_err_code')
                 if tdx_err_code is None:
@@ -1067,7 +1068,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     df = df.sort_index(ascending=True)
     perc_couts = df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:]
     per_couts = df.loc[:,df.columns[df.columns.str.contains('per[0-9]{1}d', regex=True, case=False)]][-1:]
-
+    
     if len(perc_couts.T) > 2:
         if resample == 'd':
             df['maxp'] = perc_couts.T[1:].values.max() 
@@ -3266,8 +3267,17 @@ def compute_power_tdx_df(tdx_df,dd):
         # trend = tdx_df[tdx_df.index >= idx]
         # fibl = len(trend)
         # idxh = tdx_df.high.argmax()
-        idxh = tdx_df.low.idxmin()
-        fibh = len(tdx_df[tdx_df.index >= idxh])
+        idxl = tdx_df.low.idxmin()
+        idxh = tdx_df.low.idxmax()
+        idxl_date=tdx_df.index.tolist().index(idxl)
+        idxh_date=tdx_df.index.tolist().index(idxh)
+
+        # tdx_df.query('low == low.min() and high == high.min()')  # highest lowest
+        # tdx_df[idxh_date:].query('high > high.shift(1)*0.998')   #low highest 
+        # fibh = len(tdx_df[tdx_df.index >= idxh])
+        # fibh = len(tdx_df[idx_date:].query('percent > 0'))
+
+        fibh = len(tdx_df[idxl_date:].query('high > high.shift(1)*0.998 or close > close.shift(1)'))
         # vratio = -1
         # if fibl > 1:
         #     vratio = round(((trend.close[-1] - trend.close[0])/trend.close[0]*100)/fibl,1)
@@ -3773,10 +3783,10 @@ def compute_ma_cross(dd,ma1='ma5d',ma2='ma10d',ratio=0.02,resample='d'):
             idx_max = -1
 
         if idx_min != -1:
-            fibl = len(dd[dd.index >= idx_min])
+            # fibl = len(dd[dd.index >= idx_min])
             idx = round((dd.close[-1]/temp.close[temp.index == idx_min])*100-100,1)
         else:
-            fibl = -1
+            # fibl = -1
             idx = round((dd.close[-1]/temp.close[-1])*100-100,1)
         # if len(temp) == len(df):
         #     fibl = len(dd[dd.index >= temp.index[0]])
@@ -3785,17 +3795,17 @@ def compute_ma_cross(dd,ma1='ma5d',ma2='ma10d',ratio=0.02,resample='d'):
         #     fibl = len(dd[dd.index >= temp.index[-1]])
         #     idx = round((dd.close[-1]/temp.close[-1])*100-100,1)
         dd['op'] = idx
-        dd['fib'] = fibl
+        # dd['fib'] = fibl
         # dd['ra'] = round(idx/fibl,1)
         dd['ldate'] = temp.index[0]
     else:
 
         temp = dd[ dd[ma1] > dd[ma2]]
         if len(temp) == len(dd) and len(dd) > 0:
-            fibl = len(dd[dd.index >= temp.index[0]])
+            # fibl = len(dd[dd.index >= temp.index[0]])
             idx = round((dd.close[-1]/temp.close[0])*100-100,1)
             dd['op'] = idx
-            dd['fib'] = fibl
+            # dd['fib'] = fibl
             # dd['ra'] = round(idx/fibl,1)
             dd['ldate'] = temp.index[0]
         else:
@@ -3820,10 +3830,10 @@ def compute_ma_cross_old(dd,ma1='ma5d',ma2='ma10d',ratio=0.02):
             idx_min = -1
 
         if idx_min != -1:
-            fibl = len(dd[dd.index >= idx_min])
+            # fibl = len(dd[dd.index >= idx_min])
             idx = round((dd.close[-1]/temp.close[temp.index == idx_min])*100-100,1)
         else:
-            fibl = -1
+            # fibl = -1
             idx = round((dd.close[-1]/temp.close[-1])*100-100,1)
         # if len(temp) == len(df):
         #     fibl = len(dd[dd.index >= temp.index[0]])
@@ -3832,17 +3842,17 @@ def compute_ma_cross_old(dd,ma1='ma5d',ma2='ma10d',ratio=0.02):
         #     fibl = len(dd[dd.index >= temp.index[-1]])
         #     idx = round((dd.close[-1]/temp.close[-1])*100-100,1)
         dd['op'] = idx
-        dd['fib'] = fibl
+        # dd['fib'] = fibl
         # dd['ra'] = round(idx/fibl,1)
         dd['ldate'] = temp.index[0]
     else:
 
         temp = dd[ dd[ma1] > dd[ma2]]
         if len(temp) == len(dd) and len(dd) > 0:
-            fibl = len(dd[dd.index >= temp.index[0]])
+            # fibl = len(dd[dd.index >= temp.index[0]])
             idx = round((dd.close[-1]/temp.close[0])*100-100,1)
             dd['op'] = idx
-            dd['fib'] = fibl
+            # dd['fib'] = fibl
             # dd['ra'] = round(idx/fibl,1)
             dd['ldate'] = temp.index[0]
         else:
@@ -3906,7 +3916,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         df['vchange'] = ((df['vol'] - df['vol'].shift(1)) / df['vol'].shift(1) * 100).map(lambda x: round(x, 1))
         df = df.fillna(0)
         df['vcra'] = len(df[df.vchange > vc_radio])
-        df['ma5vol'] = df.vol[-df.fib[0]]
+        # df['ma5vol'] = df.vol[-df.fib[0]]
         # df['ma5vol'] = df.vol[-df.fib[0]]
         df['vcall'] = df['vchange'].max()
         # df['vchange'] = df['vchange'][-1]
@@ -4730,6 +4740,9 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     for col in ['boll','dff','df2','ra','ral','fib','fibl']:
         if col in top_all.columns:
             top_all[col] = top_all[col].astype(int)
+            
+    # top_all = top_all.fillna(0)         
+    # tdxdata = tdxdata.fillna(0)            
 
     for col in ['boll','dff','df2','ra','ral','fib','fibl']:
         if col in tdxdata.columns:
@@ -5546,7 +5559,8 @@ if __name__ == '__main__':
     code='603038'
     code='833171'
     code='688652'
-    code='603017'
+    code='301260'
+    code='603518'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
 
@@ -5557,7 +5571,8 @@ if __name__ == '__main__':
     # print(f'check col is Null:{cct.select_dataFrame_isNull(df[-10:])}')
     # df2 = get_tdx_stock_period_to_type(df, dtype).sort_index(ascending=True)
 
-    # dd = get_tdx_Exp_day_to_df(code,resample='w')
+    dd = get_tdx_Exp_day_to_df(code,resample='d')
+
     # # dd = compute_ma_cross(dd,resample='d')
     # print(get_tdx_stock_period_to_type(dd)[-5:])
 
@@ -5571,6 +5586,7 @@ if __name__ == '__main__':
     print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
     print(df.loc[:,df.columns[df.columns.str.contains('per[0-9]{1}d', regex=True, case=False)]][-1:])
     print(f'macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    import ipdb;ipdb.set_trace()
 
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_l,resample='d' )
 
