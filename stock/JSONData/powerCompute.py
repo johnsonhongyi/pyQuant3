@@ -411,6 +411,7 @@ def get_linear_model_status(code, df=None, dtype='d', type='m', start=None, end=
 
     index_d = None
     days = days if days != 0 else 1
+    
     if start is not None and end is None and filter == 'y':
         # if code not in ['999999','399006','399001']:
         # index_d,dl=tdd.get_duration_Index_date(dt=start)
@@ -694,6 +695,7 @@ def get_linear_model_candles(code, ptype='low', dtype='d', start=None, end=None,
         start = df.index.values[0]
     else:
         df = df.sort_index(ascending=True)
+
     if not dtype == 'd':
         df = tdd.get_tdx_stock_period_to_type(
             df, dtype).sort_index(ascending=True)

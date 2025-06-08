@@ -5164,6 +5164,11 @@ def func_compute_percdS(close, lastp, op, lastopen,lasth, lastl, nowh, nowl,nowv
 
     return initc
 
+
+def select_dataFrame_isNull(df):
+    is_null = df.isnull().stack()[lambda x: x].index.tolist() 
+    return(is_null)
+
 def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean=True):
     '''
 

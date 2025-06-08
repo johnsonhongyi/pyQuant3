@@ -684,7 +684,7 @@ def get_tdx_macd(df):
     #macddif -> macd macddea-> dif macd=>dea ??
     df.loc[:, 'macddif'], df.loc[:, 'macddea'], df.loc[:, 'macd'] = tl.MACD(
         df['close'], fastperiod=12, slowperiod=26, signalperiod=9) 
-
+    df = df.fillna(0)
     df['macddif'] = round( df['macddif'], 2)
     df['macddea'] = round( df['macddea'], 2)
     df['macd'] = round( df['macd']*2, 2)
@@ -1638,7 +1638,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
             sta = write_tdx_sina_data_to_file(code, df=df)
 #            else:
 #                sta=write_tdx_sina_data_to_file(code,df=df)
-    return get_tdx_macd(df)
+    return df
 
 
 def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=None, type='f', df=None, dl=10, power=True):
@@ -5530,11 +5530,21 @@ if __name__ == '__main__':
     code='603038'
     code='833171'
     code='688652'
-    code='002152'
+    code='603017'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
-    # dd = get_tdx_Exp_day_to_df(code,resample='d')
+
+
+    # start = cct.last_tddate(120)
+    # dtype = 'w'
+    # df=get_tdx_append_now_df_api(code, start=start, end=None).sort_index(ascending=True)
+    # print(f'check col is Null:{cct.select_dataFrame_isNull(df[-10:])}')
+    # df2 = get_tdx_stock_period_to_type(df, dtype).sort_index(ascending=True)
+
+    dd = get_tdx_Exp_day_to_df(code,resample='w')
     # dd = compute_ma_cross(dd,resample='d')
+    print(get_tdx_stock_period_to_type(dd)[-5:])
+
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_l,resample='d' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
