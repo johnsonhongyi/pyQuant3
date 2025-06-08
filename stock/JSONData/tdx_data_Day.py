@@ -3465,7 +3465,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     df['max5'] = df.close[-6:-1].max()
     df['max10'] = df.close[-10:-1].max()
     # df['hmax'] = df.high[-6:-1].max()
-    df['hmax'] = df.close[-6:-1].max()
+    df['hmax'] = df.close[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
     # df['hmax60'] = df.high[:-1].max()
     df['high4'] = df.close[-5:-1].max()
     df['low4'] = df.low[-5:-1].min()
@@ -3890,6 +3890,9 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
             df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma10d]
             df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma10d]
             df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
+        df['upper'] = df['upper'].apply(lambda x: round(x,1))   
+        df['lower'] = df['lower'].apply(lambda x: round(x,1))   
+        df['ene'] =  df['ene'].apply(lambda x: round(x,1))  
         df = df.fillna(0)
 
         dd = compute_ma_cross(df,resample=resample)
@@ -3930,6 +3933,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
             # df['per%sd' % da] = df['close'].pct_change(da).apply(lambda x:round(x*100,1))
             # df['per%sd' % da] = df['perd'][-da:].sum()
             df['per%sd' % da] = df['perd'][-da]
+            df['upper%s' % da] = df['upper'][-da]
             df['ma5%sd' % da] = df['ma5d'][-da]
             df['ma20%sd' % da] = df['ma20d'][-da]
             df['ma60%sd' % da] = df['ma60d'][-da]
@@ -5541,11 +5545,12 @@ if __name__ == '__main__':
     # print(f'check col is Null:{cct.select_dataFrame_isNull(df[-10:])}')
     # df2 = get_tdx_stock_period_to_type(df, dtype).sort_index(ascending=True)
 
-    dd = get_tdx_Exp_day_to_df(code,resample='w')
-    # dd = compute_ma_cross(dd,resample='d')
-    print(get_tdx_stock_period_to_type(dd)[-5:])
+    # dd = get_tdx_Exp_day_to_df(code,resample='w')
+    # # dd = compute_ma_cross(dd,resample='d')
+    # print(get_tdx_stock_period_to_type(dd)[-5:])
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_l,resample='d' )
+    
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
     print(f'df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')

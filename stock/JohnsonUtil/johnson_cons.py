@@ -36,6 +36,15 @@ ene: ->boll
 maxp:15周期的波动幅度
 fib:15周期大于2的    —>maxpcout
 boll:近期upper
+red : 阳K
+lastdu4 : 4天振幅
+truer:
+high4:
+low4:
+max5:
+max10:
+
+tdx_max_int_end = 60 -> hmax
 月线回归支撑区域+macd:
 top_temp.query('macd >-1 and macddif < macddea and macdlast2 < macdlast3 and low < df2*1.2 and close > df2').loc[:,['macddif','macddea']]
 20250603:
@@ -154,7 +163,7 @@ open_time = 926
 sleep_time = 6
 tdx_max_int = 10
 tdx_max_int_start = 30
-tdx_max_int_end = 90
+tdx_max_int_end = 60
 tdx_high_da = 3
 wcd_limit_day = 30
 h5_limit_time = 180
