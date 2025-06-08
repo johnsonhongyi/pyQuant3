@@ -293,9 +293,16 @@ if __name__ == "__main__":
 
 
             elif len(str(args.code)) == 6:
+
                 if args.start is not None and len(args.start) <= 4:
                     args.dl = int(args.start)
                     args.start = None
+                
+                if args.dtype in ['m']:
+                    args.dl = ct.duration_date_month * 2
+                elif args.dtype in ['w']:
+                    args.dl = ct.duration_date_week
+
                 start = cct.day8_to_day10(args.start)
                 end = cct.day8_to_day10(args.end)
                 df = None
