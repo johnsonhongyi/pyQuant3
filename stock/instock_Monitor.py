@@ -281,7 +281,7 @@ if __name__ == "__main__":
                     log.debug("top_diff:vol")
                     top_all['volume'] = (
                         list(map(lambda x, y: round(x / y / ratio_t, 1), top_all['volume'].values, top_all.last6vol.values)))
-
+                    
                     # if cct.get_now_time_int() > 915:
                     # top_all = top_all[top_all.open > top_all.lasth1d]
                     # top_all = top_all[top_all.low > top_all.llow * ct.changeRatio]
