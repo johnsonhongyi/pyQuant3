@@ -30,21 +30,39 @@ DD_VOL_List = {'0': '40000', '1': '100000',
                '2': '100000', '3': '200000', '4': '1000000'}
 
 '''
-topU: 长周期站上upper
-eneU: 中规上方数量
-ene: ->boll
-maxp:15周期的波动幅度
-fib:15周期大于2的    —>maxpcout
-boll:近期upper
+topU : 长周期站上upper
+eneU : 中规上方数量
+ene : ->boll
+maxp :15周期的波动幅度
+fib :15周期大于2的    —>maxpcout
+boll :近期upper
 red : 阳K
 lastdu4 : 4天振幅
-truer:
-high4:
-low4:
-max5:
-max10:
+truer :
+high4 :
+low4 :
+max5 :
+max10 :
+top0 :  15日内一字涨跌停
+top15 :  最后15日统计高开高走站上upper
+top10 :  涨停数
+hv : 大量:
+lv : 地量
+lmin : 60 低点  -60:-3
+tdx_max_int_end = 60 -> hmax  60:-3
+macdlast6 :
+macddif :
+macddea :
+ma5d :
+ma10d :
+ma20d :
+ma60d :
+ral : 最近20日 low > ma20d:
+up5 : LIS 5日
+vchange :  量比:
+vcra : 大于1的cout
+vcall : 最大的量变
 
-tdx_max_int_end = 60 -> hmax
 月线回归支撑区域+macd:
 top_temp.query('macd >-1 and macddif < macddea and macdlast2 < macdlast3 and low < df2*1.2 and close > df2').loc[:,['macddif','macddea']]
 20250603:
@@ -133,7 +151,7 @@ duration_date_l = 60
 duration_date_up = 120
 duration_date_week = 200
 duration_date_month = 300
-
+ddtop0 = 15  #最后15日统计高开高走站上upper
 duration_date_sort = duration_date_l
 # PowerCountdl = duration_date_l * 2 if duration_date_l < 20 else duration_date_l
 PowerCountdl = duration_date_l * 2 if duration_date_l < 20 else duration_date_l

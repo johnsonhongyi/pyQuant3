@@ -3593,7 +3593,10 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     # https://blog.csdn.net/xingbuxing_py/article/details/89323460
     # print(len(dd),dd.code[0])  #fix np.seterr(divide='ignore',invalid='ignore') 
-    top0 = dd[(dd['low'] == dd['high']) & (dd['low'] != 0)]  #一字涨停
+
+    top15 = dd[-ct.ddtop0:].query('low >= open*0.992 and close > open and high > upper')
+    top0 = dd[-ct.ddtop0:].query('low == high and low != 0')
+    # top0 = dd[(dd['low'] == dd['high']) & (dd['low'] != 0)]  #一字涨停
 
 
     ''' 旧的跳空未计算回补
@@ -3628,6 +3631,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # fill_day_down = hop_df[ (hop_df.fill_day.notnull() ) & (hop_df.hop == 'down') ] if len(hop_df) > 0  else pd.DataFrame()
 
     dd['top0'] = len(top0)
+    dd['top15'] = len(top15)
 
     # if len(fill_day_down) > 0 and len(fill_day_up) > 0:
 
@@ -3685,7 +3689,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # dd['ra'] = ra
     # dd['ral'] = ral
     dd['ral'] = ma20d_upper
-
+    
     cum_maxf, posf = LIS_TDX(dd.high[-5:])
     dd['up5'] = len(posf)
 
@@ -4722,6 +4726,14 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     
     if 'llastp' not in top_all.columns:
         log.error("why not llastp in topall:%s" % (top_all.columns))
+
+    for col in ['boll','dff','df2','ra','ral','fib','fibl']:
+        if col in top_all.columns:
+            top_all[col] = top_all[col].astype(int)
+
+    for col in ['boll','dff','df2','ra','ral','fib','fibl']:
+        if col in tdxdata.columns:
+            tdxdata[col] = tdxdata[col].astype(int)
 
     if lastpTDX_DF is None:
         return top_all, tdxdata
