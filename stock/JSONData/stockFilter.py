@@ -757,8 +757,9 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
 
     print(("bo:%0.1f" % (time.time() - time_s)), end=' ')
 
-    df['ral']=(list(map(lambda x, y: round(
-        (x + y) , 1) , df.percent, df.ral)))
+    #250608 remove
+    # df['ral']=(list(map(lambda x, y: round(
+    #     (x + y) , 1) , df.percent, df.ral)))
 
     # df['ra']=(map(lambda x, y: round(
     #     (x + y) , 1) , df.percent, df.ra))
@@ -815,10 +816,8 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
         df = df.query('close > ma201d ')
         
 
-        
-
-
-
+    # for col in ['boll','dff','df2','ra','ral','fib','fibl']:
+    #     df[col] = df[col].astype(int)
 
     return df
 
