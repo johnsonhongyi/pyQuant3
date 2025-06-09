@@ -73,7 +73,7 @@ win7rootAsus = r'D:\Program Files\gfzq'
 win7rootXunji = r'E:\DOC\Parallels\WinTools\zd_pazq'
 win7rootList = [win10Triton,win10Lixin, win7rootAsus, win7rootXunji, win10Lengend]
 # macroot = r'/Users/Johnson/Documents/Johnson/WinTools/zd_pazq'
-macroot = r'/Users/Johnson/Documents/Johnson/WinTools/new_tdx'
+macroot = r'/Users/Johnson/Documents/Johnson/WinTools/new_tdx2'
 macroot_vm = r'/Volumes/VMware Shared Folders/MacTools/WinTools/new_tdx'
 xproot = r'E:\DOC\Parallels\WinTools\zd_pazq'
 

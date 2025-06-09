@@ -3500,8 +3500,8 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # df['perd'] = ((df['low'] - df['low'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1))
     df = df.dropna(subset=['perd'])
 
-    red_cout = df.query('(high > high.shift(1) and low > low.shift(1)) or (close > upper and close > low*1.05) or (low >= open*0.992 and close == high)')
-    green_cout = df.query('(low < low.shift(1) and high < high.shift(1)) or (high <= open*1.1 and close == low)')
+    red_cout = df.query('(high > high.shift(1) and low > low.shift(1)) or (close > upper and close > low*1.05) or (low >= open*0.992 and close >= open)')
+    green_cout = df.query('(low < low.shift(1) and high < high.shift(1)) or (close < open)')
 
     # df['red'] = ((df['close'] - df['open']) / df['close'] * 100).map(lambda x: round(x, 1))
     df['lastdu'] = ((df['high'] - df['low']) / df['close'] * 100).map(lambda x: round(x, 1))
@@ -3548,7 +3548,8 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     #     dd['df2'] = upperL.apply(lambda x: round(x, 0)).median()
     # else:
     #     dd['df2'] = dd.upper[-5:].apply(lambda x: round(x, 0)).median()
-    df['percent'] =((df.close - df.open)/df.open*100).apply(lambda x:int(x) if x < 10 else 10)  
+    # df['percent'] =((df.close - df.open)/df.open*100).apply(lambda x:int(x) if x < 10 else 10)  
+    df['percent'] =((df.close - df.close.shift(1))/df.close.shift(1)*100).apply(lambda x:int(x) if x < 30 else 0)
     # dd['df2'] = df[df.lastdu == df.lastdu.max()].close.values[0]
 
     dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0],1)
@@ -3584,7 +3585,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
 
     # dd['upperL'] = df.close[df.low > df.upper].count()
-    
+
     dd['red'] = len(red_cout)
     dd['gren'] = len(green_cout)
 
@@ -5569,6 +5570,7 @@ if __name__ == '__main__':
     code='002082'
     code='002250'
     code='601868'
+    code='600358'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
 
