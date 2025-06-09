@@ -3130,7 +3130,8 @@ def write_to_blocknew(p_name, data, append=True, doubleFile=False, keep_last=Non
         blocknew_path=get_tdx_dir_blocknew_dxzq(p_name)
         write_to_blocknew_2025(blocknew_path, data, append=append, doubleFile=doubleFile, keep_last=keep_last,dfcf=dfcf,reappend=reappend)   
     else:
-        blocknew_path=p_name.replace('new_tdx','new_tdx2')
+        # blocknew_path=p_name.replace('new_tdx','new_tdx2')
+        blocknew_path=p_name.replace('new_tdx2','new_tdx')
         write_to_blocknew_2025(blocknew_path, data, append=append, doubleFile=doubleFile, keep_last=keep_last,dfcf=dfcf,reappend=reappend)   
 
 def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_last=None,dfcf=False,reappend=True):
