@@ -161,3 +161,4 @@ top_all.query('lasth2d > upper2 and lasth1d > upper and lastl2d < upper2 and las
 top_all.query('lasth2d > upper2 and lasth1d > upper and lastl2d < upper2 and lasth3d > upper3')
 top_all.query('lasth2d > upper2 and lasth1d > upper and lastl2d < upper2 and lasth3d > upper3 ')
 top_temp.query('lasth2d > upper2 and lasth1d > upper and lastl2d < upper2 and lasth3d > upper3 ')
+top_all.query('lasth2d > upper2 and lasth1d > upper and lastl2d < upper2 and lasth3d > upper3 and red > 3')

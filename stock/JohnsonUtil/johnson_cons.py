@@ -30,6 +30,7 @@ DD_VOL_List = {'0': '40000', '1': '100000',
                '2': '100000', '3': '200000', '4': '1000000'}
 
 '''
+top_temp.loc[:,top_temp.columns.str.contains( "per\d{1,2}d$",regex= True)]
 topU : 长周期站上upper
 eneU : 中规上方数量
 ene : ->boll
@@ -37,7 +38,8 @@ maxp :15周期的波动幅度
 fib :15周期大于2的    —>maxpcout
 fibl : tdx_df[idx_date:].query('high > high.shift(1)*0.998')
 boll :近期upper
-red : 阳K
+red : 主升阳K
+green : 主降绿K
 lastdu4 : 4天振幅
 truer :
 high4 :
