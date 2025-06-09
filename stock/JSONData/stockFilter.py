@@ -440,12 +440,15 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                 #     df= df[ (df[("%s" % (sort_value))] <= idx_k) ]
                 
                 if market_value == '1.1' and market_key in [ 'x']:
-                    topRlist= [x+0.1 for x in range(1,int(df.topR.max())+1)]
-                    topRlistTop= [x for x in range(1,int(df.topR.max())+1)]
-                    topRlist.extend(topRlistTop)
+                    df['topR']=list(map(lambda x, op,lastp: round( x + 1 if op > lastp  else x, 1), df.topR,df.open,df.per1d))
+                    topr_up = list(set(df.topR.tolist()))
+                    topRlist = list(set(map(lambda x: x  if x > 0 else 0, topr_up)))
+                    topRlist.remove(0)
+                    # topRlist= [x+0.1 for x in range(1,int(df.topR.max())+1)]
+                    # topRlistTop= [x for x in range(1,int(df.topR.max())+1)]
+                    # topRlist.extend(topRlistTop)
                     df = df[df.topR.isin(topRlist)]
                     # df['topR']=list(map(lambda x, y: round( x + 1 if y > 0 else x, 1), df.topR, df.per1d))
-                    df['topR']=list(map(lambda x, y: round( x - 1 if x > 1 and y < 0 else x, 1), df.topR, df.per1d))
                     # df = df[ (df.close > df.lastp1d) & (df.lastp1d >= df.ma51d*0.99) & (df.lastp2d >= df.ma52d*0.99) & (df.lastp3d >= df.ma53d*0.99)]
                     # df= df[ (df[("%s" % (sort_value))] == float(market_value))]
                 else:

@@ -4740,7 +4740,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     for col in ['boll','dff','df2','ra','ral','fib','fibl']:
         if col in top_all.columns:
             top_all[col] = top_all[col].astype(int)
-            
+    top_all['topR']=top_all['topR'].apply(lambda x:round(x,1))
     # top_all = top_all.fillna(0)         
     # tdxdata = tdxdata.fillna(0)            
 
