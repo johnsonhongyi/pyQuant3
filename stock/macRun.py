@@ -337,7 +337,7 @@ def getPosition(cmd=None, position=None,close=False):
 
 
 positionKey = cct.get_system_postionKey()
-# print("position:%s"%(positionKey))
+print("position:%s"%(positionKey))
 
 def setPosition(cmd=None, position=None):
     count = doScript(scriptcount)
@@ -407,18 +407,19 @@ if cct.isMac():
         # print 'singleAnalyseUtil.py:',getPosition('singleAnalyseUtil.py')
         # print 'sina_Market-DurationDn.py:',getPosition('sina_Market-DurationDn.py')
         # # print 'sina_Monitor-Market-LH.py:',getPosition('sina_Monitor-Market-LH.py')
-        print(("sina_Market-DurationUP.py:",getPosition('sina_Market-DurationUP.py')))
+        print((getPosition('sina_Market-DurationUP.py')))
+        print((getPosition('sina_Market-DurationDnUP.py')))
         # # print 'sina_Market-DurationSH.py:',getPosition('sina_Market-DurationSH.py')
         # print 'sina_Market-DurationCXDN.py:',getPosition('sina_Market-DurationCXDN.py')
         # # print 'sina_Market-DurationCXUP.py:',getPosition('sina_Market-DurationCXUP.py')
         # # print 'sina_Market-DurationDnUP.py:',getPosition('sina_Market-DurationDnUP.py')
         # # print 'sina_Monitor-GOLD.py:',getPosition('sina_Monitor-GOLD.py')
         # print 'sina_Monitor.py:',getPosition('sina_Monitor.py')
-
-
         print((getPosition('LinePower.py')))
         print((getPosition('Johnson',close=True)))
         print((getPosition('/Users/Johnson/Documents',close=True)))
+        setPosition(cmd=None, position=None)
+        
     else:
         if cct.get_day_istrade_date():
             cmd_ls = f'ls -al {cct.get_ramdisk_dir()}{os.sep}'
@@ -442,7 +443,7 @@ if cct.isMac():
     time.sleep(30)
     print((getPosition('Johnson — python3',close=True)))
     print((getPosition('Johnson',close=True)))
-
+    doScript(scriptquit)
 else:
     print("win")
     #positionKey = cct.terminal_positionKey_triton
