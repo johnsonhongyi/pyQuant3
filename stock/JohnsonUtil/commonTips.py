@@ -863,12 +863,13 @@ target rect1:(92, 142, 1492, 582) rect2:(92, 142, 1492, 582)
 terminal_positionKeyMac2021 = {'sina_Market-DurationDn.py': '541, 530',
                         'sina_Market-DurationCXDN.py': '0, 194',
                         'sina_Market-DurationSH.py': '-29, 623',
-                        'sina_Market-DurationUp.py': '-13, 406',
                         'sina_Monitor-Market-LH.py': '184, 239',
+                        'sina_Market-DurationUP.py': '-13, 406',
+                        'sina_Market-DurationDnUP.py' :'171, 361',
                         'sina_Monitor-Market.py': '19, 179',
-                        'sina_Monitor.py': '27, 78',
+                        'sina_Monitor.py': '60, 53',
                         'singleAnalyseUtil.py': '630, 23',
-                        'LinePower.py': '6, 216', }
+                        'LinePower.py': '1, 216', }
 
 """
 ('sina_Market-DurationDn.py', '541, 530\n')
