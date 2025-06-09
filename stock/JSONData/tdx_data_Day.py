@@ -3610,7 +3610,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # https://blog.csdn.net/xingbuxing_py/article/details/89323460
     # print(len(dd),dd.code[0])  #fix np.seterr(divide='ignore',invalid='ignore') 
 
-    top15 = dd[-ct.ddtop0:].query('low >= open*0.992 and close > open and high > upper')
+    top15 = dd[-ct.ddtop0:].query('(low >= open*0.992 or open > open.shift(1)) and close > open and ((high > upper or high > high.shift(1)) and close > close.shift(1)*1.04)')
     top0 = dd[-ct.ddtop0:].query('low == high and low != 0')
     # top0 = dd[(dd['low'] == dd['high']) & (dd['low'] != 0)]  #一字涨停
 
@@ -5570,7 +5570,8 @@ if __name__ == '__main__':
     code='002082'
     code='002250'
     code='601868'
-    code='600358'
+    code='002639'
+    # code='002177'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
 
@@ -5586,10 +5587,10 @@ if __name__ == '__main__':
     # # dd = compute_ma_cross(dd,resample='d')
     # print(get_tdx_stock_period_to_type(dd)[-5:])
 
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_l,resample='d' )
-    
+    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_l,resample='d' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='3d' )
     print(f'df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
     print(f'ldate:{df2.ldate[:2]}')
     df = df2.to_frame().T
