@@ -215,8 +215,8 @@ if __name__ == "__main__":
         log.info("duaration: %s duration_date:%s" %
                  (cct.get_today_duration(du_date), duration_date))
     
-    st_key_sort = '4'
-    # st_key_sort = 'x 1.1'
+    # st_key_sort = '4'
+    st_key_sort = 'x 1.1'
     st_key_sort_start = 0
     # st_key_sort = '3 1'
     # st_key_sort = '8'
@@ -237,7 +237,7 @@ if __name__ == "__main__":
             # print len(top_now)
             resample = cct.GlobalValues().getkey('resample')
 
-            if st_key_sort_start == 0 and cct.get_now_time_int() > 945 :
+            if st_key_sort_start == 0 and cct.get_now_time_int() > 950 :
                 st_key_sort = '4'
                 st_key_sort_start = 1
                 # st_key_sort = '3 1'
