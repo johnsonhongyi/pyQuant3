@@ -238,13 +238,15 @@ if __name__ == "__main__":
             resample = cct.GlobalValues().getkey('resample')
 
             if st_key_sort_start == 0 and cct.get_now_time_int() > 950 :
-                st_key_sort = '4'
+                # st_key_sort = '4'
+                st_key_sort = '1'
                 st_key_sort_start = 1
                 # st_key_sort = '3 1'
                 # st_key_sort = '8'
                 # resample = 'd'
                 market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(
                     st_key_sort)
+
             if st is None and st_key_sort in ['2', '3']:
                 st_key_sort = '%s %s' % (
                     st_key_sort.split()[0], cct.get_index_fibl())
@@ -668,7 +670,7 @@ if __name__ == "__main__":
                 if st_key_sort.split()[0] in ['x','3','4']:
                     top_temp = top_temp[top_temp.boll != 0]
 
-
+              
                 # '''
 
                 # if cct.get_now_time_int() > 830 and cct.get_now_time_int() <= 935:
@@ -717,11 +719,20 @@ if __name__ == "__main__":
                 # top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=False)
                 # top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=False, ma5d=False, dl=14, percent=False, resample='d')
                 # top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=True, ma5d=True, dl=14, percent=False, resample=resample)
+                if st_key_sort in ['1']:
+
+                    if 1530 > cct.get_now_time_int() > 950:
+                        top_temp = top_all.query('lastp1d > high4  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2 and close > upper and not name.str.contains("ST")')
+                    elif 935 < cct.get_now_time_int() < 950:
+                        top_temp = top_all.query('per1d > 5 and low >= lastp1d and not name.str.contains("ST")')
                 
                 top_temp=stf.getBollFilter(
-                    df=top_temp, resample=resample, down=True)
+                    # df=top_temp, resample=resample, down=True)
+                    df=top_temp, resample=resample, down=False)
                 top_end=stf.getBollFilter(
-                    df=top_end, resample=resample, down=True,end=True)
+                    # df=top_end, resample=resample, down=True,end=True)
+                    df=top_end, resample=resample, down=False,end=True)
+
 
                 nhigh = top_temp[top_temp.close > top_temp.nhigh] if 'nhigh'  in top_temp.columns else []
                 nlow = top_temp[top_temp.close > top_temp.nlow] if 'nhigh'  in top_temp.columns else []
@@ -929,11 +940,11 @@ if __name__ == "__main__":
                 args=cct.writeArgmain().parse_args(st.split())
                 codew=stf.WriteCountFilter(top_temp, writecount=args.dl)
                 if args.code == 'a':
-                    cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=True,reappend=False)
+                    cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=True,reappend=True)
                     # cct.write_to_blocknew(block_path, codew)
                     # cct.write_to_blocknew(all_diffpath,codew)
                 else:
-                    cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=True,reappend=False)
+                    cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=True,reappend=True)
                     # cct.write_to_blocknew(all_diffpath,codew,False)
                 print("wri ok:%s" % block_path)
                 cct.sleeprandom(ct.duration_sleep_time / 2)

@@ -452,7 +452,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                     # df = df[ (df.close > df.lastp1d) & (df.lastp1d >= df.ma51d*0.99) & (df.lastp2d >= df.ma52d*0.99) & (df.lastp3d >= df.ma53d*0.99)]
                     # df= df[ (df[("%s" % (sort_value))] == float(market_value))]
                 else:
-                    df= df[ (df[("%s" % (sort_value))] >= idx_k) ]
+                    df= df[ (df[("%s" % (sort_value))] <= idx_k) ]
 
                 # if int(market_value) > 1 and 930 < cct.get_now_time_int():
                 #     df= compute_perd_value(df, market_value, 'perc')
