@@ -205,3 +205,31 @@ top_all.query('ral >  3 and lasth2d < upper and high > upper and high >max5 and 
 top_all.query('ral >  3 and lasth2d < upper and close > upper and high >max5 and high > hmax  ')
 top_all.query('ral >  3 and lasth2d < upper and close > upper and high >max5 and high > hmax and topR >0')
 top_all.query('ral >  3 and lasth2d < upper and close > upper and high >max5 and high > hmax and fib>0')
+top_all.query('dff < 30')
+top_all.query('dff > 30')
+top_all.query('lastp1d > max5 and open > lasth1d')
+top_temp.query('lastp1d > max5 and open > lasth1d')
+top_all.query('lastp1d > high4 and open > lasth1d')
+top_all.query('lastp1d > high4 and lastp1d >hmax and open > lasth1d')
+top_all.query('lastp1d > high4 and lastp1d >hmax*0.95 and open > lasth1d')
+top_all.query('lastp1d > high4  and open > lasth1d')
+top_all.query('lastp1d > high4  and open > lasth1d and lasth1d > upper1')
+top_all.query('lastp1d > high4  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2')
+top_all.query('lastp1d > high4  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2 and close > upper')
+top_all.query('index.str.contains("st")')
+top_all.query('not index.str.contains("st")')
+top_all.query('lastp1d > high4  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2 and close > upper and not index.str.contains("st")')
+top_all.query('lastp1d > high4  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2 and close > upper and not index.str.contains("ST")')
+top_all.query('lastp1d > high4  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2 and close > upper and not name.str.contains("ST")')
+top_all.query('lastp1d > high4  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2 and close > upper and low > lastl1d and not name.str.contains("ST")')
+top_all.query('lastp1d > high4  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2 and close > upper and low < lastl1d and not name.str.contains("ST")')
+top_all.query('lastp1d > max5  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2 and close > upper and low > lastl1d and not name.str.contains("ST")')
+top_all.query('high > hmax and lastp1d > high4  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2 and close > upper and low > lastl1d and not name.str.contains("ST")')
+top_all.query('per1d > 6 and low >= lastp1d')
+top_all.query('per1d > 5 and low >= lastp1d')
+top_all.query('per1d > 5 and low >= lastp1d and not name.str.contains("ST")')
+提取全部Per%d 求和排序
+top_all.loc[top_all.filter(regex="per\d{1,2}d$").sum(axis=1).sort_values(ascending=False).index]
+提取全部Per%d 求和排序近三天
+top_all.loc[top_all.filter(regex="per[1-3]d$").sum(axis=1).sort_values(ascending=False).index][:10]
+

@@ -1,0 +1,26 @@
+
+pandas:tips
+columns.str.contains( "per\d{1,2}d$",regex= True)
+top_all.filter(regex="per\d{1,2}d$")
+top_all.filter(regex='^per|^perc')
+top_all.filter(regex="per\d{1,2}d$").max(axis=1)
+print(df.loc[:,df.columns[df.columns.str.contains('per[0-9]{1}d', regex=True, case=False)]][-1:])
+
+提取全部Per%d 求和排序
+top_all.loc[top_all.filter(regex="per\d{1,2}d$").sum(axis=1).sort_values(ascending=False).index]
+提取全部Per%d 求和排序近三天
+top_all.loc[top_all.filter(regex="per[1-3]d$").sum(axis=1).sort_values(ascending=False).index][:10]
+
+top_all.filter(regex="per\d{1,2}d$").max(axis=1) .argsort()[::-1]
+
+复盘逻辑:
+
+氛围:
+2 3 f  下跌情况
+2 3 上涨龙头
+
+找寻:
+2 2   两联后收高
+
+跳空:
+x 1.1
