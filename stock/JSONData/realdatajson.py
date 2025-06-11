@@ -151,6 +151,7 @@ def _get_sina_Market_url(market='sh_a', count=None, num='1000'):
         # print url
         data = cct.get_url_data(url,timeout=10)
         # print data
+        log.debug(f'url:{url}')
         count = re.findall('(\d+)', data, re.S)
         urllist = []
 
@@ -213,13 +214,18 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
                 log.info("load hdf data:%s %s %s"%(h5_fname,h5_table,len(h5)))
                 dd = None
                 if market == 'all':
-                    co_inx = [inx for inx in h5.index if str(inx).startswith(('6','30','00'))]
+                    co_inx = [inx for inx in h5.index if str(inx).startswith(('6','30','00','688','43','83','87','92'))]
                 elif market == 'sh':
                     co_inx = [inx for inx in h5.index if str(inx).startswith(('6'))]
                 elif market == 'sz':
                     co_inx = [inx for inx in h5.index if str(inx).startswith(('00'))]
                 elif market == 'cyb':
                     co_inx = [inx for inx in h5.index if str(inx).startswith(('30'))]
+                elif market == 'kcb':
+                    co_inx = [inx for inx in h5.index if str(inx).startswith(('688'))]
+                elif market == 'bj':  
+                #elem.startswith('43') or elem.startswith('83') or elem.startswith('87') or elem.startswith('92')
+                    co_inx = [inx for inx in h5.index if str(inx).startswith(('43','83','87','92'))]
                 else:
                     log.error('market is not Find:%s'%(market))
                     codel = cct.read_to_blocknew(market)

@@ -184,7 +184,7 @@ if __name__ == "__main__":
             # market_blk = '060'
             # market_blk = '065'
             # market_blk = '077'
-            market_blk = 'all'
+            market_blk = 'bj'
 
             top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
             

@@ -35,7 +35,7 @@ class StockCode:
         if self.exceptCount is None and not os.path.exists(self.stock_code_path) or os.path.getsize(self.stock_code_path) < 500:
             stock_codes = self.get_stock_codes(True)
             print(("create:%s counts:%s" % (self.stock_code_path, len(stock_codes))))
-        if self.exceptCount is None and cct.creation_date_duration(self.stock_code_path) > 30:
+        if self.exceptCount is None and cct.creation_date_duration(self.stock_code_path) > 60:
             stock_codes = self.get_stock_codes(True)
             print(("days:%s %s update stock_codes.conf" % (cct.creation_date_duration(self.stock_code_path), len(stock_codes))))
 
@@ -65,10 +65,14 @@ class StockCode:
             # raise e
         
         stock_codes = grep_stock_codes.findall(response.text)
-        stock_codes = list(set([elem for elem in stock_codes if elem.startswith(('6', '30', '00'))]))
+        stock_codes = list(set([elem for elem in stock_codes if elem.startswith(('6', '30', '00','688','43','83','87','92'))]))
         # df=rl.get_sina_Market_json('all')
         # stock_codes = df.index.tolist()
         # '301397'
+        import akshare as ak
+        stock_info_bj_name_code_df = ak.stock_info_bj_name_code()
+        bj_list = stock_info_bj_name_code_df['证券代码'].tolist()
+        stock_codes.extend(bj_list)
         with open(self.stock_code_path, 'w') as f:
             f.write(json.dumps(dict(stock=stock_codes)))
         return stock_codes
@@ -224,7 +228,7 @@ class Sina:
         self.stock_codes = self.stockcode.get_stock_codes()
         self.load_stock_codes()
         # print "stocks:",len(self.stock_codes)
-        self.stock_codes = [elem for elem in self.stock_codes if elem.startswith(('6', '30', '00'))]
+        self.stock_codes = [elem for elem in self.stock_codes if elem.startswith(('6', '30', '00','688','43','83','87','92'))]
         time_s = time.time()
 
         logtime = cct.get_config_value_ramfile(self.hdf_name,xtype='time',readonly=True)
@@ -281,8 +285,10 @@ class Sina:
         # self.stock_with_exchange_list = list(
             # map(lambda stock_code: ('sh%s' if stock_code.startswith(('5', '6', '9')) else 'sz%s') % stock_code,
             # self.stock_codes))
+        # self.stock_with_exchange_list = list(
+        #     [('sh%s' if stock_code.startswith(('6')) else 'sz%s') % stock_code for stock_code in self.stock_codes])
         self.stock_with_exchange_list = list(
-            [('sh%s' if stock_code.startswith(('6')) else 'sz%s') % stock_code for stock_code in self.stock_codes])
+            [cct.code_to_symbol(stock_code) for stock_code in self.stock_codes])
         self.stock_list = []
         self.request_num = len(self.stock_with_exchange_list) // self.max_num
         for range_start in range(self.request_num):
@@ -360,8 +366,9 @@ class Sina:
                 self.stock_codes = [elem for elem in self.stock_codes if elem.startswith('688')]
                 self.stock_with_exchange_list = list(
                     [('sz%s') % stock_code for stock_code in self.stock_codes])
-            elif market == 'bz':
-                self.stock_codes = [elem for elem in self.stock_codes if elem.startswith('8')]
+            elif market == 'bj':
+                # self.stock_codes = [elem for elem in self.stock_codes if elem.startswith('43') or elem.startswith('83') or elem.startswith('87') or elem.startswith('92')]
+                self.stock_codes = [elem for elem in self.stock_codes if elem.startswith(('43','83','87','92'))]
                 self.stock_with_exchange_list = list(
                     [('bj%s') % stock_code for stock_code in self.stock_codes])
             self.stock_codes = list(set(self.stock_codes))
@@ -1009,13 +1016,13 @@ if __name__ == "__main__":
     # print len(df)
     # code='300107'
     # print sina.get_cname_code('陕西黑猫')
-    print((sina.get_stock_code_data('300502').turnover))
-    print((sina.get_stock_code_data('002190').T))
+    # print((sina.get_stock_code_data('300502').turnover))
+    # print((sina.get_stock_code_data('002190').T))
 
-    print(sina.get_code_cname('301397'))
+    # print(sina.get_code_cname('301397'))
 
-    print(sina.get_code_cname('300107'))
-    print((sina.get_stock_code_data('000017').T))
+    # print(sina.get_code_cname('300107'))
+    # print((sina.get_stock_code_data('000017').T))
 
     # print((sina.get_stock_code_data('300107').T))
 
@@ -1023,7 +1030,7 @@ if __name__ == "__main__":
     print(len(df))
 
 
-    for ma in ['sh', 'sz', 'cyb', 'kcb','all']:
+    for ma in ['bj','sh', 'sz', 'cyb', 'kcb','all']:
         # for ma in ['sh']:
         df = Sina().market(ma)
         # print df.loc['600581']

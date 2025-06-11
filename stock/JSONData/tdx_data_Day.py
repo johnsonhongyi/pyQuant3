@@ -429,7 +429,7 @@ def get_tdx_Exp_day_to_df_AllRead_(code, start=None, end=None, dl=None, newdays=
                 if not resample == 'd':
                     df = get_tdx_stock_period_to_type(df, period_day=resample)
 
-            if resample == 'd' and df.close[-5:].max() > df.open[-5:].min() * 1.6:
+            if resample == 'd' and df.close[-3:].max() > df.open[-3:].min() * 1.6:
 
                 tdx_err_code = cct.GlobalValues().getkey('tdx_err_code')
                 if tdx_err_code is None:
@@ -558,7 +558,7 @@ def get_tdx_Exp_day_to_df_AllRead_(code, start=None, end=None, dl=None, newdays=
 
             # dratio = (dl - len(df)) / float(dl)
 
-            if resample == 'd'  and df.close[-5:].max() > df.open[-5:].min() * 1.6:
+            if resample == 'd'  and df.close[-3:].max() > df.open[-3:].min() * 1.6:
 
                 tdx_err_code = cct.GlobalValues().getkey('tdx_err_code')
                 if tdx_err_code is None:
@@ -862,8 +862,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                 if not resample == 'd':
                     df = get_tdx_stock_period_to_type(df, period_day=resample)
 
-            if resample == 'd' and (cct.get_today_duration(df.index[-1]) > 3 or df.close[-5:].max() > df.open[-5:].min() * 1.6):
-
+            if resample == 'd' and (cct.get_today_duration(df.index[-1]) > 3 or df.close[-3:].max() > df.open[-3:].min() * 1.6):
                 tdx_err_code = cct.GlobalValues().getkey('tdx_err_code')
                 if tdx_err_code is None:
                     tdx_err_code = [code]
@@ -1029,7 +1028,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                 # df['lv'] = df.vol[-tdx_max_int:max_int_end].min()
 
             dratio = (dl - len(df)) / float(dl)
-            if resample == 'd' and dratio < 0.2 and df.close[-5:].max() > df.open[-5:].min() * 1.6:
+            if resample == 'd' and dratio < 0.2 and df.close[-3:].max() > df.open[-3:].min() * 1.6:
 
                 tdx_err_code = cct.GlobalValues().getkey('tdx_err_code')
                 if tdx_err_code is None:
@@ -1066,6 +1065,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     # df['hmax'] = df.high[-tdx_max_int:-ct.tdx_max_int_end].max()
     # df['hmax'] = df.close[:-ct.tdx_max_int_end].max()
     df = df.sort_index(ascending=True)
+    # if isinstance(df,pd.DataFrame):
     perc_couts = df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:]
     per_couts = df.loc[:,df.columns[df.columns.str.contains('per[0-9]{1}d', regex=True, case=False)]][-1:]
     
@@ -2710,10 +2710,14 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     print("initdx", end=' ')
     market_all = False
     if not isinstance(market, list):
-        m_mark = market.split(',')
-
+        # m_mark = market.split(',')
+        m_mark = market.split('+')
         if len(m_mark) > 1:
-            m_0 = m_mark[0]
+            # m_0 = m_mark[0]
+            if len(m_mark[0]) > 12:
+                m_0 = eval(m_mark[0])
+            else:
+                m_0 = (m_mark[0])
             market = m_mark[1]
     else:
         m_mark=[]
@@ -2767,7 +2771,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         #     df = wcd.get_wcbk_df(filter=market, market=filename,
         #                      perpage=1000, days=ct.wcd_limit_day)
         # df = pd.read_csv(block_path,dtype={'code':str},encoding = 'gbk')
-    elif market in ['sh', 'sz', 'cyb']:
+    elif market in ['bj','kcb','sh', 'sz', 'cyb']:
         df = rl.get_sina_Market_json(market)
         # df = sina_data.Sina().market(market)
     elif market in ['all']:
@@ -2793,11 +2797,16 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         df = df.set_index('code')
 
     if len(m_mark) > 1:
-        dfw = wcd.get_wcbk_df(filter=m_0, market=filename,
-                             perpage=1000, days=ct.wcd_limit_day,monitor=True)
-        if 'code' in dfw.columns:
-            dfw = dfw.set_index('code')
-        dfw = sina_data.Sina().get_stock_list_data(dfw.index.tolist())
+        dfw_codel=[]
+        if not isinstance(m_0,list):
+            dfw = wcd.get_wcbk_df(filter=m_0, market=filename,
+                                 perpage=1000, days=ct.wcd_limit_day,monitor=True)
+            if 'code' in dfw.columns:
+                dfw = dfw.set_index('code')
+            dfw_codel = dfw.index.tolist()
+        else:
+            dfw_codel = m_0
+        dfw = sina_data.Sina().get_stock_list_data(dfw_codel)
         df = cct.combine_dataFrame(df,dfw,append=True)
         codelist = df.index.astype(str).tolist()
     
@@ -5570,7 +5579,8 @@ if __name__ == '__main__':
     code='002082'
     code='002250'
     code='601868'
-    code='002639'
+    code='837748'
+    code='920799'
     # code='002177'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
@@ -5581,7 +5591,6 @@ if __name__ == '__main__':
     # df=get_tdx_append_now_df_api(code, start=start, end=None).sort_index(ascending=True)
     # print(f'check col is Null:{cct.select_dataFrame_isNull(df[-10:])}')
     # df2 = get_tdx_stock_period_to_type(df, dtype).sort_index(ascending=True)
-
     dd = get_tdx_Exp_day_to_df(code,resample='d')
 
     # # dd = compute_ma_cross(dd,resample='d')

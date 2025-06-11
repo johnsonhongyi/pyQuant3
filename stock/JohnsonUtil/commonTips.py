@@ -2737,9 +2737,11 @@ def code_to_symbol(code):
             return ''
         else:
             # return 'sh%s' % code if code[:1] in ['5', '6', '9'] else 'sz%s' % code
-            if  code[:1] in ['5', '6', '9']:
+            # if  code[:1] in ['5', '6', '9']:
+            if  code[:1] in ['5', '6']:
                 code = 'sh%s' % code
-            elif  code[:1] in ['8']:
+            elif  code[:2] in ['43','83','87','92']:
+                # startswith('43','83','87','92')
                 code = 'bj%s' % code
             else:
                 code = 'sz%s' % code
@@ -2757,7 +2759,8 @@ def code_to_symbol_ths(code):
         else:
             if  code[:1] in ['5', '6', '9']:
                 code = '%s.SH' % code
-            elif  code[:1] in ['8']:
+            # elif  code[:1] in ['8']:
+            elif  code[:2] in ['43','83','87','92']:
                 code = '%s.BJ' % code
             else:
                 code = '%s.SZ' % code
@@ -4606,7 +4609,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
     if len(top_all) > 0 and top_all.dff[0] == 0:
         top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top_all['buy'].values, top_all['lastp'].values)))
         top_all['volume'] = (list(map(lambda x, y: round(x / y, 1), top_all['volume'].values, top_all.last6vol.values)))
-        top_all = cct.combine_dataFrame(top_all, top_temp.loc[:,['b1_v','a1_v']], col=None, compare=None, append=False)
+        top_all = combine_dataFrame(top_all, top_temp.loc[:,['b1_v','a1_v']], col=None, compare=None, append=False)
     readline.parse_and_bind('tab:complete')
     tempdf=[]
     while end:
