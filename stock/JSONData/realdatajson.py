@@ -940,7 +940,7 @@ if __name__ == '__main__':
     print("getconfigBigCount:",getconfigBigCount(count=None, write=False))
 
     df = get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, pause=0.001)
-    print(df[:1])
+    print(f'300502 ratio:{df.loc["300502"].ratio}')
     for mk in ['sh','sz','cyb']:
         df=get_sina_Market_json(mk,num=100)
         # print df.loc['600581']
