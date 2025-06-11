@@ -4606,6 +4606,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
     if len(top_all) > 0 and top_all.dff[0] == 0:
         top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top_all['buy'].values, top_all['lastp'].values)))
         top_all['volume'] = (list(map(lambda x, y: round(x / y, 1), top_all['volume'].values, top_all.last6vol.values)))
+        top_all = cct.combine_dataFrame(top_all, top_temp.loc[:,['b1_v','a1_v']], col=None, compare=None, append=False)
     readline.parse_and_bind('tab:complete')
     tempdf=[]
     while end:

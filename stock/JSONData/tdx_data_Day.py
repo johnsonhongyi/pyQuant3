@@ -4711,10 +4711,10 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
                 tdxdata = pd.concat([tdxdata, tdx_diff], axis=0)
 
                 # tdxdata = cct.combine_dataFrame(tdxdata, top_all.loc[:, ['name']])
-
+                
     top_all = cct.combine_dataFrame(
         top_all, tdxdata, col=None, compare=None, append=False)
-
+    # cct.combine_dataFrame(top_all, tdxdata, col=['b1_v','a1_v'], compare=None, append=False).query('9 <percent < 10.2 ')
 
     # log.info('Top-merge_now:%s' % (top_all[:1]))
 
