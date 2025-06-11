@@ -686,8 +686,16 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                        if len(dd) > 0:
                            # if len(dd) > 0 and (not cct.get_work_time() or len(o_time) <= ct.h5_time_l_count):
                            l_time=np.mean(o_time)
-                           return_hdf_status=(not cct.get_work_time()) or (
-                               cct.get_work_time() and l_time < limit_time)
+                           if 'ticktime' in dd.columns and 'kind' not in dd.columns:
+                               # len(dd) ,len(dd.query('ticktime >= "15:00:00"'))
+                               return_hdf_status=(not cct.get_work_time() and len(dd) == len(dd.query('ticktime >= "15:00:00"'))) or (cct.get_work_time() and l_time < limit_time)
+                           else:  
+                               return_hdf_status=not cct.get_work_time() or (
+                                   cct.get_work_time() and l_time < limit_time)
+
+
+                           # return_hdf_status=(not cct.get_work_time()) or (
+                           #     cct.get_work_time() and l_time < limit_time)
                            
                            # import ipdb;ipdb.set_trace()
 
@@ -797,8 +805,13 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                 # return_hdf_status = not cct.get_work_day_status()  or not
                 # cct.get_work_time() or (cct.get_work_day_status() and
                 # (cct.get_work_time() and l_time < limit_time))
-                            return_hdf_status=not cct.get_work_time() or (
-                                cct.get_work_time() and l_time < limit_time)
+
+                            if 'ticktime' in dd.columns and 'kind' not in dd.columns:
+                                # len(dd) ,len(dd.query('ticktime >= "15:00:00"'))
+                                return_hdf_status=(not cct.get_work_time() and len(dd) == len(dd.query('ticktime >= "15:00:00"'))) or (cct.get_work_time() and l_time < limit_time)
+                            else:  
+                                return_hdf_status=not cct.get_work_time() or (
+                                    cct.get_work_time() and l_time < limit_time)
                             log.info("return_hdf_status:%s time:%0.2f" %
                                      (return_hdf_status, l_time))
                             if return_hdf_status:

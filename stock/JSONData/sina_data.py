@@ -145,14 +145,14 @@ class Sina:
             'referer': 'http://finance.sina.com.cn',
             'Connection': 'keep-alive',
             }
-            # 'Host': 'vip.stock.finance.sina.com.cn',
-            # 'Referer':'http://vip.stock.finance.sina.com.cn',
-            # import requests
-            # gudaima = "sh000001" #股票代码
-            # headers = {'referer': 'http://finance.sina.com.cn'}
-            # resp = requests.get('http://hq.sinajs.cn/list=' + gudaima, headers=headers, timeout=6)
-            # data = resp.text
-            # print(data)
+        # # 'Host': 'vip.stock.finance.sina.com.cn',
+        # # 'Referer':'http://vip.stock.finance.sina.com.cn',
+        # import requests
+        # gudaima = "sz300502" #股票代码
+        # headers = {'referer': 'http://finance.sina.com.cn'}
+        # resp = requests.get('http://hq.sinajs.cn/list=' + gudaima, headers=headers, timeout=6)
+        # data = resp.text
+        # print(data.split(','))
 
         # self.lastbuydf = pd.DataFrame()
         # self.all
@@ -761,7 +761,7 @@ class Sina:
                  'buy': float(stock[7]),
                  'sell': float(stock[8]),
                  'volume': int(stock[9]),
-                 'turnover': float(stock[10]),
+                 'turnover': round(float(stock[10])/1000/1000/100,1),  #交易额/亿
                  # 'amount': float(stock[10]),
                  'b1_v': int(stock[11]),
                  'b1': float(stock[12]),
@@ -1009,6 +1009,7 @@ if __name__ == "__main__":
     # print len(df)
     # code='300107'
     # print sina.get_cname_code('陕西黑猫')
+    print((sina.get_stock_code_data('300502').turnover))
     print((sina.get_stock_code_data('002190').T))
 
     print(sina.get_code_cname('301397'))

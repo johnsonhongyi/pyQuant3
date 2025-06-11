@@ -30,6 +30,8 @@ DD_VOL_List = {'0': '40000', '1': '100000',
                '2': '100000', '3': '200000', '4': '1000000'}
 
 '''
+turnover : 成交额
+
 top_temp.loc[:,top_temp.columns.str.contains( "per\d{1,2}d$",regex= True)]
 topU : 长周期站上upper
 eneU : 中规上方数量
