@@ -386,9 +386,11 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
             top = df[df['percent'] > changepercent]
             
             if market == 'cyb':
-                topTen = df[df['percent'] > 19.8 ]    
+                # topTen = df[df['percent'] > 19.8 ]    
+                topTen = df.query('b1_v > a1_v and b1_v > 0 and percent > 19')    
             else:
-                topTen = df[df['percent'] > 9.9 ]
+                topTen = df.query('b1_v > a1_v and b1_v > 0 and percent > 9')    
+                # topTen = df[df['percent'] > 9.9 ]
             st = df[df.name.str.contains('ST')]
             topTen_st = st[(st.b1_v > st.a1_v) & (st.a1_v == 0)]
 
@@ -397,7 +399,8 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
             #     topT_l = tdd.get_tdx_exp_all_LastDF_DL(dropcode, dt=ct.duration_date_l,newdays=10,showRunTime=False)
             #     if isinstance(topT_l, pd.DataFrame):
             #         top_Ten_Dropcxg.extend(topT_l.index.tolist())
-            crashTen = df[df['percent'] < -9.8]
+            # crashTen = df[df['percent'] < -9.8]
+            crashTen = df.query('b1_v < a1_v and a1_v > 0 and percent < -9')    
             crash = df[df['percent'] < -changepercent]
             crashTen_st = st[(st.a1_v > st.b1_v) & (st.b1_v == 0)]
         else:

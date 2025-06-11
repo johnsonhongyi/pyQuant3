@@ -186,7 +186,7 @@ open_time = 926
 sleep_time = 6
 tdx_max_int = 10
 tdx_max_int_start = 30
-tdx_max_int_end = 60
+tdx_max_int_end = 30
 tdx_high_da = 3
 wcd_limit_day = 30
 h5_limit_time = 180
@@ -530,7 +530,8 @@ JSON_Market_Center_RealURL = "http://vip.stock.finance.sina.com.cn/quotes_servic
 JSON_Market_Center_CountURL = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount?node=%s"
 # SINA_DAY_PRICE_URL =                                      '%s%s/quotes_service/api/%s/Market_Center.getHQNodeData?num=80&sort=changepercent&asc=0&node=hs_a&symbol=&_s_r_a=page&page=%s'
 # http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?num=80&sort=changepercent&asc=0&node=hs_a&symbol=&_s_r_a=page&page=1
-SINA_Market_KEY = {'sh': 'sh_a', 'sz': 'sz_a', 'cyb': 'cyb'}
+SINA_Market_KEY = {'sh': 'sh_a', 'sz': 'sz_a', 'cyb': 'cyb','kcb':'kcb','bj':'hs_bjs'}
+# https://vip.stock.finance.sina.com.cn/mkt/#bjs_root web开发者工具
 SINA_Market_COLUMNS = ['code', 'name', 'trade', 'buy', 'percent',
                        'open', 'high', 'low', 'volume', 'ticktime', 'ratio']
 # SINA_Total_Columns_Clean = ['code', 'name', 'trade', 'buy','bid1','bid1_volume','ask1',
