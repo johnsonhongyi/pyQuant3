@@ -1199,6 +1199,35 @@ def get_write_wencai_market_to_csv(df=None, market='wcbk', renew=False, days=60)
             df['category'] = df['category'].apply(lambda x:str(x).replace('\n',''))
     return df
 
+def search_ths_data(code):
+
+    df_ths = cct.GlobalValues().getkey('df_ths')
+    if df_ths is None:
+        fpath = r'.././JohnsonUtil\wencai\同花顺板块行业.xls'
+        df_ths = pd.read_excel(fpath)
+        df_ths = df_ths.loc[:,['股票代码','股票简称','所属概念', '所属同花顺行业']]
+        cct.GlobalValues().setkey('df_ths',df_ths)
+        df = df_ths
+    else:
+        df = df_ths
+    # df = df.reset_index().set_index('股票代码')
+    # df = df.set_index('股票代码')
+    # # df = df.iloc[:,[1,2,4,5,6,7,8,9]]
+    # df = df.iloc[:,[4,5,6,7,8]]
+    # # return (df[df.index == cct.code_to_symbol_ths(code)])
+    # data = df[df.index == cct.code_to_symbol_ths(code)]
+    # # table, widths=cct.format_for_print(data, widths=True)
+    # # table=cct.format_for_print2(data).get_string(header=False)
+    # table =cct.format_for_print(data,header=False)
+    df_code = df.query("股票代码 == @cct.code_to_symbol_ths(@code)")
+    if len(df_code) == 1:
+        cname = df_code.股票简称.values[0]
+        result = df_code.所属概念.values[0]
+    else:
+        cname = '未找到'
+        result = '未找到'
+    return cname,result
+
 
 def get_wcbk_df(filter='混改', market='nybk', perpage=1000, days=120, monitor=False):
     fpath = get_wencai_filepath(market)
@@ -1213,6 +1242,22 @@ def get_wcbk_df(filter='混改', market='nybk', perpage=1000, days=120, monitor=
     if 'code' in df.columns:
         df = df.set_index('code')
     return df
+    
+def get_wcbk_df_old(filter='混改', market='nybk', perpage=1000, days=120, monitor=False):
+    fpath = get_wencai_filepath(market)
+    # import pdb; pdb.set_trace()
+
+    if os.path.exists(fpath) and os.path.getsize(fpath) > 200 and 0 <= cct.creation_date_duration(fpath) <= days:
+        df = get_write_wencai_market_to_csv(
+            None, market, renew=True, days=days)
+    else:
+        df = get_wencai_Market_url(filter, perpage, monitor=monitor)
+        df = get_write_wencai_market_to_csv(df, market, renew=True, days=days)
+    if 'code' in df.columns:
+        df = df.set_index('code')
+    return df
+
+
 
 
 def wencaisinglejson():
