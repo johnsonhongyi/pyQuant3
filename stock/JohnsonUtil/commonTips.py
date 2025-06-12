@@ -4558,7 +4558,13 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
         #     import ipdb;ipdb.set_trace()
         if code in GlobalValues().getkey('percdf').index:
             lastdf = GlobalValues().getkey('percdf').loc[code]
-            if percent > 2 and len(lastdf) > 0:
+            # if code == '920445':
+            #     print(f'{code}lastdf:{lastdf.T}')
+            #     import ipdb;ipdb.set_trace()
+            # if isinstance(lastdf,pd.DataFrame):
+            #     lastdf = lastdf.reset_index().drop_duplicates('code').set_index('code')
+            #     log.error(f'code:{code} count:{lastdf.shape}')
+            if percent > 2 and len(lastdf) > 0 and  isinstance(lastdf,pd.Series):
                 if lastdf.lasth1d < lastdf.lasth2d < lastdf.lasth3d:
                     if close > lastdf.lasth1d:
                         initc += 30
@@ -4588,7 +4594,7 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
                     if lastdf.ma51d < lastdf.lastl1d < lastdf.ma51d*1.02:
                         initc += 30
             else:
-                log.info(f'lastdf is None :{code}')
+                log.warn(f'lastdf is None :{code}')
         # else:
         #     log.info("check lowest in percdf:%s"%(code))
             # print("lowest:%s"%(code),end=' ')

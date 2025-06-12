@@ -62,18 +62,19 @@ log = LoggerFactory.log
 #         table.add_row(row[1:])
 #     return str(table)
 
+sinaheader = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
+    'Host': 'vip.stock.finance.sina.com.cn',
+    'Referer':'http://vip.stock.finance.sina.com.cn',
+    'Connection': 'keep-alive',
+}
+
 # sinaheader = {
 #     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
-#     'Host': 'vip.stock.finance.sina.com.cn',
-#     'Referer':'http://vip.stock.finance.sina.com.cn',
+#     'referer': 'http://finance.sina.com.cn',
 #     'Connection': 'keep-alive',
 # }
 
-sinaheader = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
-    'referer': 'http://finance.sina.com.cn',
-    'Connection': 'keep-alive',
-}
 def _parsing_Market_price_json(url):
     """
            处理当日行情分页数据，格式为json

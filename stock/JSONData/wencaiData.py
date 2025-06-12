@@ -16,6 +16,7 @@ import os
 import time
 
 import pandas as pd
+# import modin.pandas as pd  #modin-0.15.3 pip install  modin[dask]==0.15.3 15s
 sys.path.append("..")
 # import JohnsonUtil.johnson_cons as ct
 from JohnsonUtil import LoggerFactory
@@ -1214,7 +1215,7 @@ def get_ths_data():
 
     df_ths = cct.GlobalValues().getkey('df_ths')
     if df_ths is None:
-        fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xls'
+        fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xlsx'
         df_ths = pd.read_excel(fpath)
         df_ths = df_ths.loc[:,['股票代码','股票简称','所属概念', '所属同花顺行业']]
         cct.GlobalValues().setkey('df_ths',df_ths)
@@ -1240,7 +1241,7 @@ def search_ths_data(code):
     if df_ths is None:
         # fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xls'
         root_cwd = cct.getcwd().split('stock')[0]
-        fpath = f'{root_cwd}stock\\JohnsonUtil\\wencai\\同花顺板块行业.xls'.replace('\\',cct.get_os_path_sep())
+        fpath = f'{root_cwd}stock\\JohnsonUtil\\wencai\\同花顺板块行业.xlsx'.replace('\\',cct.get_os_path_sep())
         df_ths = pd.read_excel(fpath)
         df_ths = df_ths.loc[:,['股票代码','股票简称','所属概念', '所属同花顺行业']]
         df_ths["code"] = df_ths["股票代码"].map(lambda x: x.split('.')[0])
@@ -1261,13 +1262,13 @@ def search_ths_data(code):
     # # table=cct.format_for_print2(data).get_string(header=False)
     # table =cct.format_for_print(data,header=False)
 
-    # if isinstance(code,list):
-    #     # code_ths=[cct.code_to_symbol_ths(co) for co in code_l]
-
-    # else:
-    #     # df_code = df.query("股票代码 == @cct.code_to_symbol_ths(@code)")
+    if isinstance(code,list):
+        # code_ths=[cct.code_to_symbol_ths(co) for co in code_l]
+        comm_code = list(set(code) & set(df.index.tolist()))
+    else:
+        # df_code = df.query("股票代码 == @cct.code_to_symbol_ths(@code)")
+        comm_code = code
         
-    comm_code = list(set(code) & set(df.index.tolist()))
     return df.loc[comm_code]
 
 def get_wcbk_df(filter='混改', market='nybk', perpage=1000, days=120, monitor=False):
@@ -1317,16 +1318,18 @@ if __name__ == '__main__':
     # print sina_json_Big_Count()
     # print getconfigBigCount(write=True)
     # sys.exit(0)
-    log.setLevel(LoggerFactory.DEBUG)
-    post_login()
+    # log.setLevel(LoggerFactory.DEBUG)
+    # post_login()
     # wencaisinglejson()
     # print get_wencai_Market_url(filter='国企改革',perpage=1000,pct=True)
     # print get_wencai_Market_url(filter='国企改革',perpage=1000,pct=False)
 #    df = get_wencai_Market_url('湖南发展,天龙集团,浙报传媒,中珠医疗,多喜爱',500)
 #    type='TMT'
 #    type='国企改革'
-    search_ths_data('000002')
-
+    time_s=time.time()
+    print(search_ths_data('000002'))
+    time_d=time.time()
+    print(f'tims:{time_d-time_s}')
     df = get_wencai_Market_url('OLED',200)
     # df = get_wencai_Market_url('赢时胜,博腾股份,炬华科技',500,single=True)
 
