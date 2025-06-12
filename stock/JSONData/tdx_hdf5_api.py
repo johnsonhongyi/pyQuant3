@@ -524,9 +524,11 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                 # df = df.drop(col,axis=1)
 #                    df[co] = df[co].apply()
 #                    recordStringInHDF5(h5file, h5file.root, 'mrtamb',u'\u266b Hey Mr. Tambourine Man \u266b')
-
+    
         with SafeHDFStore(fname) as h5:
             df=df.fillna(0)
+            # df=cct.reduce_memory_usage(df)
+            log.info(f'df.shape:{df.shape}')
             if h5 is not None:
                 if '/' + table in list(h5.keys()):
                     if not MultiIndex:
@@ -686,16 +688,17 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                        if len(dd) > 0:
                            # if len(dd) > 0 and (not cct.get_work_time() or len(o_time) <= ct.h5_time_l_count):
                            l_time=np.mean(o_time)
-                           if 'ticktime' in dd.columns and 'kind' not in dd.columns:
-                               # len(dd) ,len(dd.query('ticktime >= "15:00:00"'))
-                               return_hdf_status=(not cct.get_work_time() and len(dd) == len(dd.query('ticktime >= "15:00:00"'))) or (cct.get_work_time() and l_time < limit_time)
-                           else:  
-                               return_hdf_status=not cct.get_work_time() or (
-                                   cct.get_work_time() and l_time < limit_time)
+
+                           # if 'ticktime' in dd.columns and 'kind' not in dd.columns:
+                           #     # len(dd) ,len(dd.query('ticktime >= "15:00:00"'))
+                           #     return_hdf_status=(not cct.get_work_time() and len(dd) == len(dd.query('ticktime >= "15:00:00"'))) or (cct.get_work_time() and l_time < limit_time)
+                           # else:  
+                           #     return_hdf_status=not cct.get_work_time() or (
+                           #         cct.get_work_time() and l_time < limit_time)
 
 
-                           # return_hdf_status=(not cct.get_work_time()) or (
-                           #     cct.get_work_time() and l_time < limit_time)
+                           return_hdf_status=(not cct.get_work_time()) or (
+                               cct.get_work_time() and l_time < limit_time)
                            
                            # import ipdb;ipdb.set_trace()
 
@@ -806,12 +809,16 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                 # cct.get_work_time() or (cct.get_work_day_status() and
                 # (cct.get_work_time() and l_time < limit_time))
 
-                            if 'ticktime' in dd.columns and 'kind' not in dd.columns:
-                                # len(dd) ,len(dd.query('ticktime >= "15:00:00"'))
-                                return_hdf_status=(not cct.get_work_time() and len(dd) == len(dd.query('ticktime >= "15:00:00"'))) or (cct.get_work_time() and l_time < limit_time)
-                            else:  
-                                return_hdf_status=not cct.get_work_time() or (
-                                    cct.get_work_time() and l_time < limit_time)
+                            # if 'ticktime' in dd.columns and 'kind' not in dd.columns:
+                            #     # len(dd) ,len(dd.query('ticktime >= "15:00:00"'))
+                            #     return_hdf_status=(not cct.get_work_time() and len(dd) == len(dd.query('ticktime >= "15:00:00"'))) or (cct.get_work_time() and l_time < limit_time)
+                            # else:  
+                            #     return_hdf_status=not cct.get_work_time() or (
+                            #         cct.get_work_time() and l_time < limit_time)
+
+                            return_hdf_status=not cct.get_work_time() or (
+                                cct.get_work_time() and l_time < limit_time)
+
                             log.info("return_hdf_status:%s time:%0.2f" %
                                      (return_hdf_status, l_time))
                             if return_hdf_status:
@@ -863,7 +870,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
 
     # df = df.drop_duplicates()
 
-    return df
+    return  cct.reduce_memory_usage(df)
 
 # def load_hdf_db_old_outdate(fname,table='all',code_l=None,timelimit=True,index=False,limit_time=ct.h5_limit_time):
 #     time_t = time.time()

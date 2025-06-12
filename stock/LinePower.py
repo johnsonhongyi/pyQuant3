@@ -426,12 +426,12 @@ if __name__ == "__main__":
                         writecount = args.num
                     codew=stf.WriteCountFilter(dd, writecount=writecount)
                     if args.code == 'a':
-                        cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=False,reappend=False)
+                        cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=False,reappend=True)
                         # cct.write_to_blocknew(block_path, codew)
                         # cct.write_to_blocknew(all_diffpath,codew)
                         print(("wri append ok:%s" % block_path))
                     else:
-                        cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=False,reappend=False)
+                        cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=False,reappend=True)
                         # cct.write_to_blocknew(all_diffpath,codew,False)
                         print(("wri all ok:%s" % block_path))
                 else:

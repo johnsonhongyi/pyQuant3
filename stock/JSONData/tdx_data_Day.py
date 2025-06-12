@@ -2955,7 +2955,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     if isinstance(top_now,pd.DataFrame) and not 'ratio' in top_now.columns:
         top_now['ratio'] = 0
 
-    return top_now
+    return cct.reduce_memory_usage(top_now)
 
 
 def get_tdx_day_to_df(code):
@@ -4760,8 +4760,9 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     for col in ['boll','dff','df2','ra','ral','fib','fibl']:
         if col in tdxdata.columns:
             tdxdata[col] = tdxdata[col].astype(int)
-
+    top_all = cct.reduce_memory_usage(top_all)       
     if lastpTDX_DF is None:
+        tdxdata = cct.reduce_memory_usage(tdxdata)
         return top_all, tdxdata
     else:
         return top_all
