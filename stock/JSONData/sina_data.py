@@ -657,13 +657,12 @@ class Sina:
 
         #        self.index_status = index
         # ulist1 = [stock_code if stock_code.startswith(('0','3','5', '6', '9')) for stock_code in ulist]  # SyntaxError: invalid syntax
-        ulist = [stock_code  for stock_code in ulist if stock_code.startswith(('0','3','5', '6','8', '9'))]
+        ulist = [stock_code  for stock_code in ulist if stock_code.startswith(('0','3','4','5', '6','8', '9'))]
         if index:
             ulist = self.set_stock_codes_index_init(ulist, index)
             h5 = None
         else:
             h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=ulist, index=index)
-
         if h5 is not None and len(h5) >= len(ulist):
             log.info("hdf5 data:%s" % (len(h5)))
             h5 = self.combine_lastbuy(h5)
@@ -768,7 +767,8 @@ class Sina:
                  'buy': float(stock[7]),
                  'sell': float(stock[8]),
                  'volume': int(stock[9]),
-                 'turnover': round(float(stock[10])/1000/1000/100,1),  #交易额/亿
+                 'turnover': float(stock[10]),  #交易额/亿
+                 # 'turnover': round(float(stock[10])/1000/1000/100,1),  #交易额/亿
                  # 'amount': float(stock[10]),
                  'b1_v': int(stock[11]),
                  'b1': float(stock[12]),
@@ -1046,7 +1046,9 @@ if __name__ == "__main__":
     df = Sina().market('cyb')
     print((df.shape))
 
-    print((sina.get_stock_code_data('000017').T))
+    # print((sina.get_stock_code_data('000017').T))
+    # import ipdb;ipdb.set_trace()
+    print((sina.get_stock_code_data('430017').T))
     print((df[-5:][['open','close']].T))
     print((df.columns))
     # print df[-5:][['lastbuy','close']].T

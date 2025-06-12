@@ -62,14 +62,18 @@ log = LoggerFactory.log
 #         table.add_row(row[1:])
 #     return str(table)
 
+# sinaheader = {
+#     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
+#     'Host': 'vip.stock.finance.sina.com.cn',
+#     'Referer':'http://vip.stock.finance.sina.com.cn',
+#     'Connection': 'keep-alive',
+# }
+
 sinaheader = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
-    'Host': 'vip.stock.finance.sina.com.cn',
-    'Referer':'http://vip.stock.finance.sina.com.cn',
+    'referer': 'http://finance.sina.com.cn',
     'Connection': 'keep-alive',
 }
-
-
 def _parsing_Market_price_json(url):
     """
            处理当日行情分页数据，格式为json
@@ -243,7 +247,7 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
         for m in ['sh_a','sz_a']:
             mlist=_get_sina_Market_url(m, num=num)
             for l in mlist:url_list.append(l)
-        # print url_list
+        # print(url_list)
     else:
         url_list=_get_sina_Market_url(ct.SINA_Market_KEY[market], num=num)
         # print url_list
@@ -939,8 +943,8 @@ if __name__ == '__main__':
     # _parsing_Market_price_json(urltemp)
     # import ipdb;ipdb.set_trace()
 
-    df = get_sina_all_json_dd(1,0,num=10000)
-    print(len(df))
+    # df = get_sina_all_json_dd(1,0,num=10000)
+    # print(len(df))
 
 
     print("getconfigBigCount:",getconfigBigCount(count=None, write=False))

@@ -2530,12 +2530,12 @@ def Write_market_all_day_mp(market='all', rewrite=False):
 
             if len(dm) > 0:
                 results = cct.to_mp_run_async(
-                    # get_tdx_append_now_df_api_tofile, code_list, dm=dm, newdays=0)
                     get_tdx_append_now_df_api_tofile, code_list, dm=dm, newdays=0)
+
             else:
                 print(("dm is not open sell:%s"%(code_list if len(code_list) <10 else len(code_list))))
 
-            #debug
+            # #debug
             # for code in code_list:
             #     print("code:%s "%(code),)
             #     res=get_tdx_append_now_df_api_tofile(code,dm=dm, newdays=0)
@@ -5580,11 +5580,14 @@ if __name__ == '__main__':
     code='601868'
     code='837748'
     code='920799'
+    code='430017'
     # code='002177'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
-
-
+    
+    df = get_tdx_append_now_df_api_tofile(code)
+    import ipdb;ipdb.set_trace()
+    
     # start = cct.last_tddate(120)
     # dtype = 'w'
     # df=get_tdx_append_now_df_api(code, start=start, end=None).sort_index(ascending=True)
