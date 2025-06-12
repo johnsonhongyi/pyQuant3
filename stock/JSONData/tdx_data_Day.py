@@ -4671,8 +4671,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
             # aa.T[aa.T >=10].count()
             # df['top1']=aa.T[aa.T >=10].count()
             # tdxdata = compute_top10_count(tdxdata)
-
-            wcdf = wcd.get_wencai_data(top_all.name, 'wencai',days='N')
+            wcdf = wcd.get_wencai_data(top_all.name)
             wcdf['category'] = wcdf['category'].apply(lambda x:x.replace('\r','').replace('\n',''))
             tdxdata = cct.combine_dataFrame(tdxdata, wcdf.loc[:, ['category']])
             # tdxdata = cct.combine_dataFrame(tdxdata, top_all.loc[:, ['name']])
@@ -4709,9 +4708,8 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
                 tdx_diff.rename(columns={'amount': 'lamount'}, inplace=True)
                 # tdx_diff.rename(columns={'cumin': 'df2'}, inplace=True)
                 # tdx_diff = compute_top10_count(tdx_diff)
-
                 # wcdf = wcd.get_wencai_data(top_all.loc[tdx_diff.index,'name'], 'wencai',days='N')
-                wcdf = wcd.get_wencai_data(top_all.name, 'wencai',days='N')
+                wcdf = wcd.get_wencai_data(top_all.name)
                 wcdf['category'] = wcdf['category'].apply(lambda x:x.replace('\r','').replace('\n',''))
                 tdx_diff = cct.combine_dataFrame(tdx_diff, wcdf.loc[:, ['category']])
 

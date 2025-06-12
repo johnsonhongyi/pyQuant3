@@ -521,8 +521,6 @@ def get_wencai_Market_url_2025(filter='国企改革', perpage=1, url=None, pct=F
         time_s = time.time()
         duratime = cct.get_config_value_wencai(
             config_ini, fname, currvalue=time_s, xtype='time', update=False)
-        import ipdb;ipdb.set_trace()
-        
         if duratime < ct.wencai_delay_time:
             sleep_t = ct.wencai_delay_time - duratime
             log.info('timelimit:%s' % (sleep_t))
@@ -1032,8 +1030,20 @@ def get_codelist_df(codelist):
         log.warn("wcdf:%s" % (len(wcdf)))
     return wcdf
 
+def get_wencai_data(dm):
+     #    if isinstance(codelist,list):
+    # global wencai_count
+    # global pct_status
+    # pct_status = pct
 
-def get_wencai_data(dm, market='wencai', days=120, pct=True):
+    if len(dm) > 1:
+        df = search_ths_data(dm.index.tolist())
+        if df is not None and len(df) > 0:
+            # df['category'] = df['category'].apply(lambda x:str(x).replace('\n',''))
+            df['category'] = df['category'].apply(lambda x:str(x)[:16])
+    return df
+
+def get_wencai_data_old(dm, market='wencai', days=120, pct=True):
     #    if isinstance(codelist,list):
     global wencai_count
     global pct_status
@@ -1199,11 +1209,12 @@ def get_write_wencai_market_to_csv(df=None, market='wcbk', renew=False, days=60)
             df['category'] = df['category'].apply(lambda x:str(x).replace('\n',''))
     return df
 
-def search_ths_data(code):
+
+def get_ths_data():
 
     df_ths = cct.GlobalValues().getkey('df_ths')
     if df_ths is None:
-        fpath = r'.././JohnsonUtil\wencai\同花顺板块行业.xls'
+        fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xls'
         df_ths = pd.read_excel(fpath)
         df_ths = df_ths.loc[:,['股票代码','股票简称','所属概念', '所属同花顺行业']]
         cct.GlobalValues().setkey('df_ths',df_ths)
@@ -1219,15 +1230,44 @@ def search_ths_data(code):
     # # table, widths=cct.format_for_print(data, widths=True)
     # # table=cct.format_for_print2(data).get_string(header=False)
     # table =cct.format_for_print(data,header=False)
-    df_code = df.query("股票代码 == @cct.code_to_symbol_ths(@code)")
-    if len(df_code) == 1:
-        cname = df_code.股票简称.values[0]
-        result = df_code.所属概念.values[0]
-    else:
-        cname = '未找到'
-        result = '未找到'
-    return cname,result
 
+    # df_code = df.query("股票代码 == @cct.code_to_symbol_ths(@code)")
+
+    return df
+
+def search_ths_data(code):
+    df_ths = cct.GlobalValues().getkey('df_ths')
+    if df_ths is None:
+        # fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xls'
+        fpath = f'{cct.getcwd()}\\JohnsonUtil\\wencai\\同花顺板块行业.xls'
+        df_ths = pd.read_excel(fpath)
+        df_ths = df_ths.loc[:,['股票代码','股票简称','所属概念', '所属同花顺行业']]
+        df_ths["code"] = df_ths["股票代码"].map(lambda x: x.split('.')[0])
+        df_ths.rename(columns={'所属概念': 'category'}, inplace=True)
+        # df_ths['category'] = df_ths['category'].apply(lambda x:str(x)[:15])
+        df_ths = df_ths.set_index('code')
+        cct.GlobalValues().setkey('df_ths',df_ths)
+        df = df_ths
+    else:
+        df = df_ths
+    # df = df.reset_index().set_index('股票代码')
+    # df = df.set_index('股票代码')
+    # # df = df.iloc[:,[1,2,4,5,6,7,8,9]]
+    # df = df.iloc[:,[4,5,6,7,8]]
+    # # return (df[df.index == cct.code_to_symbol_ths(code)])
+    # data = df[df.index == cct.code_to_symbol_ths(code)]
+    # # table, widths=cct.format_for_print(data, widths=True)
+    # # table=cct.format_for_print2(data).get_string(header=False)
+    # table =cct.format_for_print(data,header=False)
+
+    # if isinstance(code,list):
+    #     # code_ths=[cct.code_to_symbol_ths(co) for co in code_l]
+
+    # else:
+    #     # df_code = df.query("股票代码 == @cct.code_to_symbol_ths(@code)")
+        
+    
+    return df.loc[code]
 
 def get_wcbk_df(filter='混改', market='nybk', perpage=1000, days=120, monitor=False):
     fpath = get_wencai_filepath(market)
