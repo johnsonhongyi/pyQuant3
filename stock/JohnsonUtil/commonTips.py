@@ -99,6 +99,8 @@ class GlobalValues:
 
     def setkey(self, key, value):
         # """ 定义一个全局变量 """
+        if isinstance(value,pd.DataFrame):
+            value = reduce_memory_usage(value)
         _global_dict[key] = value
 
     def getkey(self, key, defValue=None):
@@ -3467,6 +3469,50 @@ def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=N
             writeBlocknew(blockNewStart, data, append)
         # print "write to append:%s :%s :%s"%(append,p_name,len(data))
 
+def reduce_memory_usage(df, verbose=True):
+    numerics = ["int8", "int16", "int32", "int64", "float16", "float32", "float64"]
+    if df is not None:
+        start_mem = df.memory_usage().sum() / 1024 ** 2
+        for col in df.columns:
+            col_type = df[col].dtypes
+            if col_type in numerics:
+                c_min = df[col].min()
+                c_max = df[col].max()
+                if str(col_type)[:3] == "int":
+                    if c_min > np.iinfo(np.int8).min and c_max < np.iinfo(np.int8).max:
+                        df[col] = df[col].astype(np.int8)
+                    elif c_min > np.iinfo(np.int16).min and c_max < np.iinfo(np.int16).max:
+                        df[col] = df[col].astype(np.int16)
+                    elif c_min > np.iinfo(np.int32).min and c_max < np.iinfo(np.int32).max:
+                        df[col] = df[col].astype(np.int32)
+                    elif c_min > np.iinfo(np.int64).min and c_max < np.iinfo(np.int64).max:
+                        df[col] = df[col].astype(np.int64)
+                else:
+                    if (
+                        c_min > np.finfo(np.float16).min
+                        and c_max < np.finfo(np.float16).max
+                    ):
+                        df[col] = df[col].astype(np.float16)
+                        df[col] = df[col].apply(lambda x:round(x,1))
+                    elif (
+                        c_min > np.finfo(np.float32).min
+                        and c_max < np.finfo(np.float32).max
+                    ):
+                        df[col] = df[col].astype(np.float32)
+                        df[col] = df[col].apply(lambda x:round(x,1))
+
+                    else:
+                        df[col] = df[col].astype(np.float64)
+                        df[col] = df[col].apply(lambda x:round(x,1))
+                        
+        end_mem = df.memory_usage().sum() / 1024 ** 2
+        if verbose:
+            log.info(
+                "Mem. usage decreased to {:.2f} Mb ({:.1f}% reduction)".format(
+                    end_mem, 100 * (start_mem - end_mem) / start_mem
+                )
+            )
+    return df
 
 def read_to_indb(days=20,duplicated=False):
     df = inDb.selectlastDays(days)
@@ -4512,7 +4558,7 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
         #     import ipdb;ipdb.set_trace()
         if code in GlobalValues().getkey('percdf').index:
             lastdf = GlobalValues().getkey('percdf').loc[code]
-            if percent > 2:
+            if percent > 2 and len(lastdf) > 0:
                 if lastdf.lasth1d < lastdf.lasth2d < lastdf.lasth3d:
                     if close > lastdf.lasth1d:
                         initc += 30
@@ -4541,7 +4587,8 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
                     initc += 50
                     if lastdf.ma51d < lastdf.lastl1d < lastdf.ma51d*1.02:
                         initc += 30
-
+            else:
+                log.info(f'lastdf is None :{code}')
         # else:
         #     log.info("check lowest in percdf:%s"%(code))
             # print("lowest:%s"%(code),end=' ')

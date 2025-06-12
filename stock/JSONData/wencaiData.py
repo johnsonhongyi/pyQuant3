@@ -1239,7 +1239,8 @@ def search_ths_data(code):
     df_ths = cct.GlobalValues().getkey('df_ths')
     if df_ths is None:
         # fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xls'
-        fpath = f'{cct.getcwd()}\\JohnsonUtil\\wencai\\同花顺板块行业.xls'
+        root_cwd = cct.getcwd().split('stock')[0]
+        fpath = f'{root_cwd}stock\\JohnsonUtil\\wencai\\同花顺板块行业.xls'.replace('\\',cct.get_os_path_sep())
         df_ths = pd.read_excel(fpath)
         df_ths = df_ths.loc[:,['股票代码','股票简称','所属概念', '所属同花顺行业']]
         df_ths["code"] = df_ths["股票代码"].map(lambda x: x.split('.')[0])
@@ -1266,8 +1267,8 @@ def search_ths_data(code):
     # else:
     #     # df_code = df.query("股票代码 == @cct.code_to_symbol_ths(@code)")
         
-    
-    return df.loc[code]
+    comm_code = list(set(code) & set(df.index.tolist()))
+    return df.loc[comm_code]
 
 def get_wcbk_df(filter='混改', market='nybk', perpage=1000, days=120, monitor=False):
     fpath = get_wencai_filepath(market)
@@ -1324,6 +1325,7 @@ if __name__ == '__main__':
 #    df = get_wencai_Market_url('湖南发展,天龙集团,浙报传媒,中珠医疗,多喜爱',500)
 #    type='TMT'
 #    type='国企改革'
+    search_ths_data('000002')
 
     df = get_wencai_Market_url('OLED',200)
     # df = get_wencai_Market_url('赢时胜,博腾股份,炬华科技',500,single=True)
