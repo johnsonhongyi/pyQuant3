@@ -5,7 +5,7 @@ D:
 cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock"
 
 start cmd /k python sina_Monitor.py
-TIMEOUT /T 20 /NOBREAK
+TIMEOUT /T 200 /NOBREAK
 
 set TDX=G:\tdx_last_df.h5
 
@@ -18,9 +18,9 @@ for %%i in ("%TDX%") do (
 set indexdx=%%~zi
 )
 
-if "%indexdx%"=="" (set indexdx=2048)
+if "%indexdx%"=="" (set indexdx=4096)
 
-if not "%indexdx%"==""  if %indexdx% LEQ  2048000 (TIMEOUT /T 50 /NOBREAK)
+if not "%indexdx%"==""  if %indexdx% LEQ  4096000 (TIMEOUT /T 50 /NOBREAK)
 
 rem if not "%indexdx%"=="" (TIMEOUT /T 0 /NOBREAK) else (if %indexdx% LEQ  2048000 (TIMEOUT /T 50 /NOBREAK))
 rem if %indexdx% LEQ  2048000 (TIMEOUT /T 50 /NOBREAK)
