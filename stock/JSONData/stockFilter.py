@@ -309,8 +309,9 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                 percdf = cct.combine_dataFrame(percdf,cct.get_col_market_value_df(df,'lastp','15'))
                 percdf = cct.combine_dataFrame(percdf,cct.get_col_market_value_df(df,'ma5','15'))
                 percdf = cct.combine_dataFrame(percdf,cct.get_col_market_value_df(df,'ma20','15'))
-                print("timecol:%s"%(round(time.time()-time_df,2)),end=' ')
+                percdf = percdf.reset_index().drop_duplicates('code').set_index('code')
                 cct.GlobalValues().setkey('percdf',percdf)
+                print("timecol:%s"%(round(time.time()-time_df,2)),end=' ')
 
 
             # if cct.get_work_time() :

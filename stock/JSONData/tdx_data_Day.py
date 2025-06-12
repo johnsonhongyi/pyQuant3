@@ -4595,6 +4595,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     codelist = top_all.index.tolist()
     # append INDEX tdxdata
     codelist.extend(tdx_index_code_list)
+    codelist = list(set(codelist))
     # tdx_index_data = get_append_lastp_to_df()tdd.get_append_lastp_to_df(
     #                         top_now, lastpTDX_DF=None, dl=duration_date, checknew=True, resample=resample)
 
