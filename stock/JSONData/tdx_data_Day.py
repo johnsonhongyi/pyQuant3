@@ -5595,7 +5595,7 @@ if __name__ == '__main__':
     # print(f'check col is Null:{cct.select_dataFrame_isNull(df[-10:])}')
     # df2 = get_tdx_stock_period_to_type(df, dtype).sort_index(ascending=True)
     dd = get_tdx_Exp_day_to_df(code,resample='d')
-
+    
     # # dd = compute_ma_cross(dd,resample='d')
     # print(get_tdx_stock_period_to_type(dd)[-5:])
 
