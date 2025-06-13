@@ -870,6 +870,7 @@ terminal_positionKeyMac2021 = {'sina_Market-DurationDn.py': '541, 530',
                         'sina_Market-DurationDnUP.py' :'171, 361',
                         'sina_Monitor-Market.py': '19, 179',
                         'sina_Monitor.py': '60, 53',
+                        'instock_Monitor.py':'18, 119',
                         'singleAnalyseUtil.py': '630, 23',
                         'LinePower.py': '1, 216', }
 
