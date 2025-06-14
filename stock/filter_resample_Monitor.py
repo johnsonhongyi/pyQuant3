@@ -186,6 +186,7 @@ if __name__ == "__main__":
             #         log.error("indb last1days is None")
 
             market_blk = '090'
+            market_blk = 'all'
             # market_blk = 'bj'
             top_now = tdd.getSinaAlldf(market=f'{indf.code.tolist()}+{market_blk}', vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
@@ -209,11 +210,16 @@ if __name__ == "__main__":
                 if len(top_all) == 0 and len(lastpTDX_DF) == 0:
                     cct.get_terminal_Position(position=sys.argv[0])
                     time_Rt = time.time()
-                    top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(
-                        top_now, dl=duration_date,resample=resample)
+                    top_all_d, lastpTDX_DF_d = tdd.get_append_lastp_to_df(top_now, dl=ct.duration_date_day,resample='d')
+                    top_all_3d, lastpTDX_DF_3d = tdd.get_append_lastp_to_df(top_now, dl=ct.duration_date_day,resample='3d')
+                    top_all_w, lastpTDX_DF_w = tdd.get_append_lastp_to_df(top_now, dl=ct.duration_date_week,resample='w')
+                    top_all_m, lastpTDX_DF_m = tdd.get_append_lastp_to_df(top_now, dl=ct.duration_date_month,resample='m')
                 elif len(top_all) == 0 and len(lastpTDX_DF) > 0:
                     time_Rt = time.time()
-                    top_all = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF)
+                    top_all_d = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF_d)
+                    top_all_3d = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF_3d)
+                    top_all_w = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF_w)
+                    top_all_m = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF_m)
                     # dd=dd.fillna(0)
                 else:
                     # for symbol in top_now.index:
@@ -235,70 +241,27 @@ if __name__ == "__main__":
                     #                                                                    'prev_p']]
                     #     else:
                     #         top_all.append(top_now.loc[symbol])
-                    top_all = cct.combine_dataFrame(
-                        top_all, top_now, col='couts', compare='dff')
+                    top_all_d = cct.combine_dataFrame(top_all_d, top_now, col='couts', compare='dff')
+                    top_all_3d = cct.combine_dataFrame(top_all_d3, top_now, col='couts', compare='dff')
+                    top_all_w = cct.combine_dataFrame(top_all_w, top_now, col='couts', compare='dff')
+                    top_all_m = cct.combine_dataFrame(top_all_m, top_now, col='couts', compare='dff')
+                top_all = top_all_d
 
-                # top_all=top_all.sort_values(by=['dff','percent','couts'],ascending=[0,0,1])
-                # top_all=top_all.sort_values(by=['dff','ratio','percent','couts'],ascending=[0,1,0,1])
-                # top_all=top_all.sort_values(by=['dff','percent','couts','ratio'],ascending=[0,0,1,1])
 
-                # top_all[(top_all.upperT > 3) & (top_all.top10 >2) &(top_all.close > top_all.upper*0.98) & (top_all.close < top_all.upper *1.05)]
-                # top_all[(top_all.upperT > 3) & (top_all.top10 >2) &(top_all.close > top_all.upper*0.98) & (top_all.close < top_all.upper *1.05) &(top_all.lastp1d > top_all.upper)].name
-                # cct.write_to_blocknew(block_path, dd.index.tolist())
-                # writecode = "cct.write_to_blocknew(block_path, dd.index.tolist())"
-                
-                # time_Rt = time.time()
-                top_bak = top_all.copy()
                 if cct.get_trade_date_status() == 'True':
                     for co in ['boll','df2']:
                          # df['dff'] = list(map(lambda x, y, z: round((x + (y if z > 20 else 3 * y)), 1), df.dff.values, df.volume.values, df.ratio.values))
                         top_all[co] = list(map(lambda x, y,m , z: (z + (1 if ( x > y ) else 0 )), top_all.close.values,top_all.upper.values, top_all.llastp.values,top_all[co].values))
                     # top_bak[top_all.boll != top_bak.boll].boll   top_all[top_all.boll != top_bak.boll].boll
 
-                top_all = top_all[ (top_all.df2 > 0) & (top_all.boll > 0)]
-
-                # market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort, top_all=top_all)
                 codelist = top_all.index.tolist()
                 if len(codelist) > 0:
-                    # log.info('toTDXlist:%s' % len(codelist))
-                    # tdxdata = tdd.get_tdx_all_day_LastDF(codelist)
-                    # log.debug("TdxLastP: %s %s" % (len(tdxdata), tdxdata.columns.values))
-                    # tdxdata.rename(columns={'low': 'llow'}, inplace=True)
-                    # tdxdata.rename(columns={'high': 'lhigh'}, inplace=True)
-                    # tdxdata.rename(columns={'close': 'lastp'}, inplace=True)
-                    # tdxdata.rename(columns={'vol': 'lvol'}, inplace=True)
-                    # tdxdata = tdxdata.loc[:, ['llow', 'lhigh', 'lastp', 'lvol', 'date']]
-                    # # data.drop('amount',axis=0,inplace=True)
-                    # log.debug("TDX Col:%s" % tdxdata.columns.values)
-                    # # df_now=top_all.merge(data,on='code',how='left')
-                    # # df_now=pd.merge(top_all,data,left_index=True,right_index=True,how='left')
-                    # top_all = top_all.merge(tdxdata, left_index=True, right_index=True, how='left')
-                    # log.info('Top-merge_now:%s' % (top_all[:1]))
-                    # top_all = top_all[top_all['llow'] > 0]
-                    # log.info("df:%s" % top_all[:1])
                     ratio_t = cct.get_work_time_ratio(resample=resample)
                     log.debug("Second:vol/vol/:%s" % ratio_t)
-                    # top_dif['volume'] = top_dif['volume'].apply(lambda x: round(x / ratio_t, 1))
                     log.debug("top_diff:vol")
                     top_all['volume'] = (
                         list(map(lambda x, y: round(x / y / ratio_t, 1), top_all['volume'].values, top_all.last6vol.values)))
                     
-                    # if cct.get_now_time_int() > 915:
-                    # top_all = top_all[top_all.open > top_all.lasth1d]
-                    # top_all = top_all[top_all.low > top_all.llow * ct.changeRatio]
-                    # top_all = top_all[top_all.trade > top_all.lhigh * ct.changeRatio]
-
-                    # if cct.get_now_time_int() > 915 and cct.get_now_time_int() <= 926:
-                    #     top_all['percent'] = (map(lambda x, y: round(
-                    #         (x - y) / y * 100, 1) if int(y) > 0 else 0, top_all.trade, top_all.llastp))
-
-                    # top_all = top_all[top_all.prev_p >= top_all.lhigh]
-                    # top_all = top_all.loc[:,
-                    # ['name', 'percent', 'ma5d','dff', 'couts', 'volume', 'trade', 'prev_p', 'ratio']]
-                    # if cct.get_now_time_int() > 1030 and cct.get_now_time_int() < 1400:
-                    #     top_all = top_all[(top_all.volume > ct.VolumeMinR) & (
-                    #         top_all.volume < ct.VolumeMaxR)]
-
                     
                 if st_key_sort.split()[0] in ['4','9'] and 915 < cct.get_now_time_int() < 930:
                 # if  915 < cct.get_now_time_int() < 930:
@@ -308,14 +271,11 @@ if __name__ == "__main__":
                                            top_all['buy'].values, top_all['lastp'].values)))
                
                 elif st_key_sort.split()[0] in ['4','9'] and 926 < cct.get_now_time_int() < 1455 and 'lastbuy' in top_all.columns:
-                # elif 926 < cct.get_now_time_int() < 1455 and 'lastbuy' in top_all.columns:
 
                     top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
                                           top_all['buy'].values, top_all['lastbuy'].values)))
                     top_all['dff2'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
                                            top_all['buy'].values, top_all['lastp'].values)))
-                    # if len(top_all[top_all.lastbuy < 0]) > 0 or len(top_all[top_all.dff < -10]) >0 :
-                    #     print top_all.loc['600313'].lastbuy,top_all.loc['600313'].buy,top_all.loc['600313'].lastp
                 else:
                     top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
                                           top_all['buy'].values, top_all['lastp'].values)))
@@ -325,38 +285,18 @@ if __name__ == "__main__":
                 top_all = top_all.sort_values(
                     by=['dff', 'percent', 'volume','ratio' ,'couts'], ascending=[0, 0, 0, 1,1])
 
-#                    by=ct.Monitor_sort_count, ascending=[0, 0, 0, 0, 1])
-                # top_all = top_all.sort_values(by=['dff', 'couts', 'volume', 'ratio'], ascending=[0, 0, 0, 1])
-                # top_all=top_all.sort_values(by=['percent','dff','couts','ratio'],ascending=[0,0,1,1])
-                # if cct.get_now_time_int() > 930 and 'llastp' in top_all.columns:
-                #     top_all = top_all[top_all.trade >= top_all.llastp * ct.changeRatio]
-
                 cct.set_console(width, height, title=[du_date,
                                 'G:%s' % len(top_all), 'zxg: %s' % (blkname+'-'+market_blk+' resample:'+resample)])
 
-                # if len(top_all[top_all.dff > 0]) == 0:
-                #     top_all['dff'] = (map(lambda x, y: round((x - y) / y * 100, 1),
-
-                # top_temp = top_all[ ((top_all.lastdu > 5) & (top_all.lastdu < 15)) & (top_all.fib > 1) & ( (top_all.volume > 1.2) & (top_all.volume < 3)) & (top_all.vchange < 120) &( (top_all.op > 0) & (top_all.op < 80))]
-                # top_temp = top_all[(top_all.top10 >0) & (top_all.topR >0) &(top_all.boll >1) &(top_all.df2 >1)]
-
-                # top_temp = top_all[(top_all.fib >= 1) & ((top_all.lastdu > 5) | ((top_all.vchange > 30) & (top_all.vchange < 100)))]
-                # top_temp = top_all.copy()
-                # top_temp =  top_all[(top_all.boll < 1) &(top_all.df2 >0) &(top_all.close > top_all.max5)]
-
-                # '''
 
 
                 st_key_sort_status=['4','x2','3'] 
 
-                # if st_key_sort == '8':
-                # if st_key_sort.split()[0] != '4':
 
                 if st_key_sort.split()[0] not in st_key_sort_status:
                     top_temp=top_all.copy()
 
                 elif cct.get_now_time_int() > 830 and cct.get_now_time_int() <= 935:
-                    #lastl1d
                     # top_temp = top_all[(top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.close > top_all.lastp1d)]
                     #lastp1d TopR 1
                     # top_temp = top_all[(top_all.low > top_all.lasth1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.close > top_all.lastp1d)]
@@ -390,7 +330,6 @@ if __name__ == "__main__":
 
                         # if st_key_sort == '4':
                         if st_key_sort.split()[0]  in st_key_sort_status :
-                            # ???
                             # top_temp = top_all[ (top_all.topR > 0) & ((top_all.close >= top_all.nclose)) & ((top_all.open > top_all.lastp1d)) & (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.open >= top_all.nlow) ]
 
                             # top_temp = top_all[ ((top_all.lastp1d > top_all.ma5d) & (top_all.lastp2d > top_all.ma5d) & (top_all.close > top_all.ma5d) & (top_all.ma5d > top_all.ma10d)) & ((top_all.close >= top_all.nclose)) & ((top_all.open > top_all.lastp1d)) & (top_all.low >= top_all.lastl1d) & (top_all.lasth1d > top_all.lasth2d) & (top_all.open >= top_all.nlow) ]
@@ -536,6 +475,10 @@ if __name__ == "__main__":
                     top_temp=top_all.copy() 
                     # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
 
+                code_m = top_all_m.query('lasth1d > lasth2d')
+                code_w = top_all_m.query('lasth1d > lasth2d')
+                code_3d = top_all_m.query('lasth1d > lasth2d')
+                code_d = top_all_m.query('lasth1d > lasth2d')
                 #clean 688 and st
                 # if len(top_temp) > 0:                
                 #     top_temp = top_temp[ (~top_temp.index.str.contains('688')) ]
@@ -677,9 +620,6 @@ if __name__ == "__main__":
                         if len(code) > 0:
                             code=code[0]
                             kind=sl.get_multiday_ave_compare_silent(code)
-                top_all=top_bak
-                del top_bak
-                gc.collect()
 
             else:
                 print("no data")
@@ -820,9 +760,10 @@ if __name__ == "__main__":
             elif st.lower() == 'r':
                 dir_mo=eval(cct.eval_rule)
                 if len(top_temp) > 0 and top_temp.lastp1d[0] == top_temp.close[0]:
-                    cct.evalcmd(dir_mo,workstatus=False,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=top_all)
+                    cct.evalcmd(dir_mo,workstatus=False,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=top_all,top_all_3d=top_all_3d,top_all_w=top_all_w,top_all_m=top_all_m)
                 else:
-                    cct.evalcmd(dir_mo,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=top_all)
+                    cct.evalcmd(dir_mo,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=top_all,top_all_3d=top_all_3d,top_all_w=top_all_w,top_all_m=top_all_m)
+
 
             elif st.startswith('q') or st.startswith('e'):
                 print("exit:%s" % (st))
