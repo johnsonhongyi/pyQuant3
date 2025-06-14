@@ -29,6 +29,22 @@ INDEX_LIST_TDX = {'sh': 'sh999999', 'sz': 'sz399001', 'hs300': 'sz399300',
 DD_VOL_List = {'0': '40000', '1': '100000',
                '2': '100000', '3': '200000', '4': '1000000'}
 
+
+
+# duration_date_l = 60
+duration_date_day = 60
+duration_date_up = 120
+duration_date_week = 200
+duration_date_month = 300
+
+Resample_LABELS_Days = {'d':duration_date_day,'3d':duration_date_up,
+                      'w':duration_date_week,'m':duration_date_month}
+
+# duration_date_day = 60
+# duration_date_up = 120
+# duration_date_week = 200
+# duration_date_month = 300
+
 '''
 turnover : 成交额
 
@@ -158,14 +174,11 @@ VolumeMinR = 0.1
 upper_cross_days = 14
 PowerCount = 1000
 duration_diff = 6
-duration_date_l = 60
-duration_date_up = 120
-duration_date_week = 200
-duration_date_month = 300
+
 ddtop0 = 15  #最后15日统计高开高走站上upper
-duration_date_sort = duration_date_l
-# PowerCountdl = duration_date_l * 2 if duration_date_l < 20 else duration_date_l
-PowerCountdl = duration_date_l * 2 if duration_date_l < 20 else duration_date_l
+duration_date_sort = duration_date_day
+# PowerCountdl = duration_date_day * 2 if duration_date_day < 20 else duration_date_day
+PowerCountdl = duration_date_day * 2 if duration_date_day < 20 else duration_date_day
 linePowerCountdl = 120
 Power_Ma_Days = 6
 Power_last_da = 1

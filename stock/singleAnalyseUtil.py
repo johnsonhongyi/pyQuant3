@@ -396,7 +396,7 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
 
             # dropcode = [ x for x in topTen.index.tolist() if x not in top_Ten_Dropcxg]
             # if len(dropcode) >0:
-            #     topT_l = tdd.get_tdx_exp_all_LastDF_DL(dropcode, dt=ct.duration_date_l,newdays=10,showRunTime=False)
+            #     topT_l = tdd.get_tdx_exp_all_LastDF_DL(dropcode, dt=ct.duration_date_day,newdays=10,showRunTime=False)
             #     if isinstance(topT_l, pd.DataFrame):
             #         top_Ten_Dropcxg.extend(topT_l.index.tolist())
             # crashTen = df[df['percent'] < -9.8]

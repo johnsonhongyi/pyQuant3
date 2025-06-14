@@ -127,7 +127,7 @@ if __name__ == "__main__":
     block_path = tdd.get_tdx_dir_blocknew() + blkname
     lastpTDX_DF = pd.DataFrame()
     parserDuraton = cct.DurationArgmain()
-    duration_date = ct.duration_date_l
+    duration_date = ct.duration_date_day
     du_date = duration_date
     resample = ct.resample_dtype
     end_date = cct.last_tddate(days=3)

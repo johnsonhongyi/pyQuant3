@@ -109,7 +109,7 @@ if __name__ == "__main__":
     # is used to provide information or explanations about the code to other developers or to remind
     # oneself about the purpose of the code.
 
-    # duration_date = ct.duration_date_l
+    # duration_date = ct.duration_date_day
     # du_date = duration_date
     # resample = 'd'
 
@@ -132,7 +132,7 @@ if __name__ == "__main__":
     # st_key_sort = '8'
     
     # duration_date = ct.duration_date_week
-    duration_date = ct.duration_date_l
+    duration_date = ct.duration_date_day
     # ct.duration_date_week ->200
     du_date = duration_date
     # resample = 'w'

@@ -2693,7 +2693,7 @@ def getSinaIndexdf():
     # tdxdata = get_tdx_exp_all_LastDF_DL(
     #             dm.index.tolist(), dt=30,power=True)
 
-    top_all, lastpTDX_DF = get_append_lastp_to_df(dm, None, dl=ct.duration_date_l, power=ct.lastPower)
+    top_all, lastpTDX_DF = get_append_lastp_to_df(dm, None, dl=ct.duration_date_day, power=ct.lastPower)
 
     if 'lvolume' not in top_all.columns:
         top_all.rename(columns={'lvol': 'lvolume'}, inplace=True)
@@ -5599,7 +5599,7 @@ if __name__ == '__main__':
     # # dd = compute_ma_cross(dd,resample='d')
     # print(get_tdx_stock_period_to_type(dd)[-5:])
 
-    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_l,resample='d' )
+    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='3d' )
@@ -5611,7 +5611,7 @@ if __name__ == '__main__':
     print(f'macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
     import ipdb;ipdb.set_trace()
 
-    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_l,resample='d' )
+    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
 
     # tmp_df = get_kdate_data(code, start='', end='', ktype='D')
     # if len(tmp_df) > 0:
