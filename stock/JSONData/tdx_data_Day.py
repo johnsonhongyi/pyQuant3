@@ -2926,7 +2926,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
             dm = cct.combine_dataFrame(dm, df.loc[:, ['name']])
         log.info("dm combine_df ratio:%s %s" % (len(dm), len(df))),
         dm = dm.fillna(0)
-        
+    dm = dm.query('b1_v > 0 or a1_v > 0')  
     if market != 'index' and (cct.get_now_time_int() > 935 or not cct.get_work_time()):
         top_now = rl.get_market_price_sina_dd_realTime(dm, vol, vtype)
     else:
