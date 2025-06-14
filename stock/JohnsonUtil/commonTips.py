@@ -3470,7 +3470,7 @@ def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=N
             writeBlocknew(blockNewStart, data, append)
         # print "write to append:%s :%s :%s"%(append,p_name,len(data))
 
-def reduce_memory_usage(df, verbose=True):
+def reduce_memory_usage(df, verbose=False):
     numerics = ["int8", "int16", "int32", "int64", "float16", "float32", "float64"]
     if df is not None:
         start_mem = df.memory_usage().sum() / 1024 ** 2
@@ -3508,7 +3508,7 @@ def reduce_memory_usage(df, verbose=True):
                         
         end_mem = df.memory_usage().sum() / 1024 ** 2
         if verbose:
-            log.info(
+            print(
                 "Mem. usage decreased to {:.2f} Mb ({:.1f}% reduction)".format(
                     end_mem, 100 * (start_mem - end_mem) / start_mem
                 )
@@ -4655,15 +4655,18 @@ def WriteCountFilter_cct(df, op='op', writecount=5, end=None, duration=10):
     return codel
 
 
-def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None,orderby='percent',top_all=None):
+def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None,orderby='percent',top_all=None,top_all_3d=None,top_all_w=None,top_all_m=None):
     end = True
     import readline
     import rlcompleter
     # readline.set_completer(cct.MyCompleter(dir_mo).complete)
-    if len(top_all) > 0 and top_all.dff[0] == 0:
-        top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top_all['buy'].values, top_all['lastp'].values)))
-        top_all['volume'] = (list(map(lambda x, y: round(x / y, 1), top_all['volume'].values, top_all.last6vol.values)))
-        top_all = combine_dataFrame(top_all, top_temp.loc[:,['b1_v','a1_v']], col=None, compare=None, append=False)
+    for top in [top_all,top_all_3d,top_all_w,top_all_m]:
+        if top is not None and len(top) > 0:
+            if  top.dff[0] == 0:
+                top['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top['buy'].values, top['lastp'].values)))
+            if 'b1_v' not in top.columns:
+                top['volume'] = (list(map(lambda x, y: round(x / y, 1), top['volume'].values, top.last6vol.values)))
+                top = combine_dataFrame(top, top_temp.loc[:,['b1_v','a1_v']], col=None, compare=None, append=False)
     readline.parse_and_bind('tab:complete')
     tempdf=[]
     while end:
