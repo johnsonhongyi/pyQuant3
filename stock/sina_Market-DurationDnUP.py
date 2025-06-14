@@ -76,7 +76,7 @@ if __name__ == "__main__":
     newdays = 30
     # op, ra, duration_date, days = pct.get_linear_model_status('999999', filter='y', dl=dl, ptype=ptype, days=1)
 #    duration_date = ct.duration_date
-    # duration_date = ct.duration_date_l
+    # duration_date = ct.duration_date_day
     duration_date = ct.duration_date_month
     du_date = duration_date
     # resample = ct.resample_dtype

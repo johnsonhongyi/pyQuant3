@@ -37,7 +37,7 @@ def search_ths_data(code):
 
     df_ths = cct.GlobalValues().getkey('df_ths')
     if df_ths is None:
-        fpath = r'.././JohnsonUtil\wencai\同花顺板块行业.xls'
+        fpath = r'.././JohnsonUtil\wencai\同花顺板块行业.xlsx'
         df_ths = pd.read_excel(fpath)
         df_ths = df_ths.loc[:,['股票代码','股票简称','所属概念', '所属同花顺行业']]
         cct.GlobalValues().setkey('df_ths',df_ths)

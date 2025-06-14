@@ -185,8 +185,8 @@ if __name__ == "__main__":
             #     if cct.creation_date_duration(block_path) > 1:
             #         log.error("indb last1days is None")
 
-            # market_blk = '063'
-            market_blk = 'bj'
+            market_blk = '090'
+            # market_blk = 'bj'
             top_now = tdd.getSinaAlldf(market=f'{indf.code.tolist()}+{market_blk}', vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='rzrq', vol=ct.json_countVol, vtype=ct.json_countType)

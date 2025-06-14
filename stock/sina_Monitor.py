@@ -202,7 +202,7 @@ if __name__ == "__main__":
     # global resample
     cct.GlobalValues().setkey('resample','d')
     # resample = cct.GlobalValues().getkey('resample')
-    duration_date = ct.duration_date_l  #80dat
+    duration_date = ct.duration_date_day  #80dat
     duration_date = 60
     du_date = duration_date
     if len(str(duration_date)) < 4:

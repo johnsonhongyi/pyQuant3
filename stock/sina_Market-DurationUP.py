@@ -77,7 +77,7 @@ if __name__ == "__main__":
     # op, ra, duration_date, days = pct.get_linear_model_status('999999', filter='y', dl=dl, ptype=ptype, days=1)
     # duration_date = int(ct.duration_date * 1.5)
     # duration_date = ct.duration_date_up
-    # duration_date = ct.duration_date_l
+    # duration_date = ct.duration_date_day
     # duration_date = 10
     duration_date = ct.duration_date_week
     # ct.duration_date_week -> 200

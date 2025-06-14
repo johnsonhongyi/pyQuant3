@@ -156,3 +156,5 @@ top_all.query('open > high4 and (low > open*0.99 or low > lasth1d) and open > la
 top_all.query('open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d and b1_v > 0')
 top_all.query('open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d and a1_v > 0')
 top_all.query('open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d and a1_v > 0 and close >nclose')
+top_all.query('lasth1d > upper1')
+top_all.query('lasth1d > upper1 and lasth2d < upper2')
