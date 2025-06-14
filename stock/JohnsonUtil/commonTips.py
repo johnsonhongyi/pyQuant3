@@ -4654,18 +4654,30 @@ def WriteCountFilter_cct(df, op='op', writecount=5, end=None, duration=10):
             codel = df.index.tolist()
     return codel
 
+Resample_top = {'d':'top_all','3d':'top_all_3d',
+                      'w':'top_all_w','m':'top_all_m'}
 
 def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None,orderby='percent',top_all=None,top_all_3d=None,top_all_w=None,top_all_m=None):
     end = True
     import readline
     import rlcompleter
     # readline.set_completer(cct.MyCompleter(dir_mo).complete)
-    for top in [top_all,top_all_3d,top_all_w,top_all_m]:
+    for top_key in Resample_top.keys():
+        top = eval(Resample_top[top_key])
         if top is not None and len(top) > 0:
             if  top.dff[0] == 0:
                 top['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top['buy'].values, top['lastp'].values)))
+            if  top.volume[0] > 100 and top.volume[-1] > 100:
+                if top_key == 'd':
+                    ratio_t = 1 
+                elif top_key == '3d':
+                    ratio_t = 1.5 
+                elif top_key == 'w':
+                    ratio_t = 2.5 
+                elif top_key == 'm':
+                    ratio_t = 10
+                top['volume'] = (list(map(lambda x, y: round(x / y*ratio_t, 1), top['volume'].values, top.last6vol.values)))
             if 'b1_v' not in top.columns:
-                top['volume'] = (list(map(lambda x, y: round(x / y, 1), top['volume'].values, top.last6vol.values)))
                 top = combine_dataFrame(top, top_temp.loc[:,['b1_v','a1_v']], col=None, compare=None, append=False)
     readline.parse_and_bind('tab:complete')
     tempdf=[]
