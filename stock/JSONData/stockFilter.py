@@ -244,7 +244,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     else:
         # top10 = df[ (df.percent >= 9.99) & (df.b1_v > df.a1_v)]
 
-        if resample in ['d','w'] and len(df) > 0:
+        if resample in ['d','w'] and len(df) > 2:
             # if not top10 or (cct.get_now_time_int() < 950 or cct.get_now_time_int() > 1502):
             #     df.loc[((df.b1_v > df.a1_v) & (df.percent > 9)), 'percent'] = 10.1
             #     df.loc[((df.percent >= 9.97) & (df.percent < 10.1)), 'percent'] = 10
@@ -329,8 +329,9 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                     perc_col.remove('perc1d')
 
             else:
-
-                if (df['open'][3] == df['lasto1d'][3]) and (df['open'][0] == df['lasto1d'][0]):
+                
+                # if len(df) > 3:
+                if (df['open'][1] == df['lasto1d'][1]) and (df['open'][0] == df['lasto1d'][0]):
                     nowd, per1d=2, 1
                     df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['lastp%sd' % (nowd)],
                                          df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4'],df.index))
