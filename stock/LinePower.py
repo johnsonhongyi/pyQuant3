@@ -146,7 +146,7 @@ def show_ths_data(df):
                 col_list.append(col)
         col_list.append(reindex_col)
         df = df[col_list]
-        width = 30   
+        width = 36   
     # return (df[df.index == cct.code_to_symbol_ths(code)])
     data = df
     # table, widths=cct.format_for_print(data, widths=True)
