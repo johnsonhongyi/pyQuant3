@@ -137,11 +137,21 @@ def show_ths_data(df):
     df.columns=df.columns.str.replace('涨停封单量占成交量比','封单占比')
     df.columns=df.columns.str.replace('涨停开板次数','开板')
     df.columns=df.columns.str.replace('连续涨停天数','连涨')
+    reindex_col = '概念解析'
+    width=0
+    if reindex_col in df.columns:
+        col_list = []
+        for col in df.columns:
+            if col != reindex_col:
+                col_list.append(col)
+        col_list.append(reindex_col)
+        df = df[col_list]
+        width = 30   
     # return (df[df.index == cct.code_to_symbol_ths(code)])
     data = df
     # table, widths=cct.format_for_print(data, widths=True)
     # table=cct.format_for_print2(data).get_string(header=False)
-    table =cct.format_for_print(data,header=True)
+    table =cct.format_for_print(data,header=True,width=width)
     # table =cct.format_for_print(data,header=False)
     return table
 
@@ -244,6 +254,7 @@ if __name__ == "__main__":
                     # 获取上一年的年份
                     previous_year = previous_year_date.year
                     df.columns=df.columns.str.replace('区间涨跌幅:前复权','')
+                    df.columns=df.columns.str.replace(':','-')
                     df.columns=df.columns.str.replace(str(previous_year),'')
                     df.columns=df.columns.str.replace(str(current_year),'')
                     # df.iloc[:,[0,1,2,3,4,5,6]]
@@ -273,6 +284,7 @@ if __name__ == "__main__":
                     # else:
                     #     # print(show_ths_data(df.iloc[:args.num,[x for x in range(len(df.columns)-1)]]))
                     # print(show_ths_data(df.iloc[:20,[x for x in range(len(df.columns)-1)]]))
+
                     print(show_ths_data(df.iloc[:,[x for x in range(len(df.columns)-1)]]))
                     print(f'Count:{df.shape} and Date:{date_list}')
                     if '涨停原因类别' in df.columns:

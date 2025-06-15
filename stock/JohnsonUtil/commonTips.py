@@ -116,7 +116,10 @@ class GlobalValues:
         # """ 定义一个全局变量 """
         return (_global_dict.keys())
 
-def format_for_print(df,header=True,widths=False,showCount=False):
+from textwrap import fill
+from JohnsonUtil.prettytable import ALL as ALL
+
+def format_for_print(df,header=True,widths=False,showCount=False,width=0):
 
     # alist = [x for x in set(df.columns.tolist())]
     if 'category' in df.columns:
@@ -128,9 +131,28 @@ def format_for_print(df,header=True,widths=False,showCount=False):
     else:
         table = PrettyTable(field_names=[''] + alist,header=False)
 
-    for row in df[:50].itertuples():
+    for row in df[:50].itertuples():  
+        if width > 0:
+            # col = df.columns.tolist()
+            # co_count = len(df.columns)
 
-        table.add_row(row)
+            # row_str =f'{str(row.Index)},'
+            # row_str =f'{str(row.Index)},'
+            # # row_str = ''
+            # for idx in range(0,len(row)-1):
+            #     print(f'idx:{row[idx]}')
+            #     # row_str +=f'{str(getattr(row,col[idx]))},'
+            #     row_str +=f'{row[idx]},'
+            # # row_str +='%s,'%(fill(str(getattr(row,col[-1])).replace(',',';').replace('，',';'),width=width))
+            # row_str +='%s,'%(fill(str(row[-1]).replace(',',';').replace('，',';'),width=width))
+            # # log.info(f'row_str:{row_str}')
+            # # print(row_str.split(','))
+            # table.add_row(row_str.split(','))
+
+            table.add_row(row)
+
+        else:
+            table.add_row(row)
 
     if not widths:
         # print(f'showCount:{showCount}')

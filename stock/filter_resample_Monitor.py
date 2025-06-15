@@ -210,6 +210,8 @@ if __name__ == "__main__":
                 if len(top_all) == 0 and len(lastpTDX_DF) == 0:
                     cct.get_terminal_Position(position=sys.argv[0])
                     time_Rt = time.time()
+                    import ipdb;ipdb.set_trace()
+                    
                     top_all_d, lastpTDX_DF_d = tdd.get_append_lastp_to_df(top_now, dl=ct.duration_date_day,resample='d')
                     top_all_3d, lastpTDX_DF_3d = tdd.get_append_lastp_to_df(top_now, dl=ct.duration_date_day,resample='3d')
                     top_all_w, lastpTDX_DF_w = tdd.get_append_lastp_to_df(top_now, dl=ct.duration_date_week,resample='w')
