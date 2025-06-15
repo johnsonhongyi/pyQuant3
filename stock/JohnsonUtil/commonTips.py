@@ -135,7 +135,6 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0):
         if width > 0:
             # col = df.columns.tolist()
             # co_count = len(df.columns)
-
             # row_str =f'{str(row.Index)},'
             # row_str =f'{str(row.Index)},'
             # # row_str = ''
@@ -149,7 +148,12 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0):
             # # print(row_str.split(','))
             # table.add_row(row_str.split(','))
 
-            table.add_row(row)
+            row_str = f''
+            for idx in range(0,len(row)-1):
+                row_str+=f'row[{idx}],'
+            row_str+=f'fill(str(row[-1]),width=width)'
+            log.debug(f'row_str:{row_str}')
+            table.add_row(eval(row_str))
 
         else:
             table.add_row(row)
