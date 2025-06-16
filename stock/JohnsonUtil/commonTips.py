@@ -1806,11 +1806,11 @@ def get_work_day_status():
 def get_work_day_idx():
     today = datetime.datetime.today().date()
     day_n = int(today.strftime("%w"))
-
-    if 0 < day_n < 6:
-        return day_n
-    else:
-        return 5
+    # if 0 < day_n < 6:
+    #     return day_n
+    # else:
+    #     return 5
+    return day_n
 
 def last_tddate(days=1):
     # today = datetime.datetime.today().date() + datetime.timedelta(-days)
@@ -5468,7 +5468,7 @@ if __name__ == '__main__':
     import ipdb;ipdb.set_trace()
     '''
     # rzrq['all']='nan'
-
+    print(f'get_work_day_idx:{get_work_day_idx()}')
     print(get_tdx_dir_blocknew_dxzq(r'D:\MacTools\WinTools\new_tdx2\T0002\blocknew\090.blk'))
     print(is_trade_date())
     print(isDigit('nan None'))
