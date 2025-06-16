@@ -689,7 +689,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                            # if len(dd) > 0 and (not cct.get_work_time() or len(o_time) <= ct.h5_time_l_count):
                            l_time=np.mean(o_time)
                            
-                           if 'ticktime' in dd.columns and 'kind' not in dd.columns:
+                           if len(code_l)/len(dd) > 0.95 and 'ticktime' in dd.columns and 'kind' not in dd.columns:
                                # len(dd) ,len(dd.query('ticktime >= "15:00:00"'))
                                dratio=(float(len(dd)) - float(len(dd.query('ticktime >= "15:00:00"')))) / float(len(dd))
                                return_hdf_status=(not cct.get_work_time() and  dratio < dratio_limit)  or (cct.get_work_time() and l_time < limit_time)
