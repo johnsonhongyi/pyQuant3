@@ -1661,7 +1661,8 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f',rewrite=False)
                 tvol = str(td.vol)
                 amount = str(td.amount)
                 tdata = tdate + ',' + topen + ',' + thigh + ',' + tlow + \
-                    ',' + tclose + ',' + tvol + ',' + amount + '\n'
+                    ',' + tclose + ',' + tvol + ',' + amount + '\r\n'
+                    # ',' + tclose + ',' + tvol + ',' + amount + '\n'
                     # ',' + tclose + ',' + tvol + ',' + amount + '\r\n'
                 wdata_list.append(tdata.encode())
 #        import cStringIO
@@ -1766,7 +1767,8 @@ def write_tdx_sina_data_to_file(code, dm=None, df=None, dl=2, type='f'):
             tvol = str(round(td.vol, 2))
             amount = str(round(td.amount, 2))
             tdata = tdate + ',' + topen + ',' + thigh + ',' + tlow + \
-                ',' + tclose + ',' + tvol + ',' + amount + '\n'
+                ',' + tclose + ',' + tvol + ',' + amount + '\r\n'
+                # ',' + tclose + ',' + tvol + ',' + amount + '\n'
                 # ',' + tclose + ',' + tvol + ',' + amount + '\r\n'
             w_data.append(tdata.encode())
         fo.writelines(w_data)
