@@ -101,8 +101,8 @@ osascript -e
 #                'LinePower.py':'40, 497',}
 
 # os.system("osascript -e '%s'"%(cmd))
-rcmd = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant3/stock;/Users/Johnson/anaconda/envs/py3.9/bin/python3 %s"'
-rcmdnatclip = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/share_controller/webTools/natclip/natclip;/Users/Johnson/anaconda/envs/py3.9/bin/python3 %s"'
+rcmd = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant3/stock;/usr/local/bin/python %s"'
+rcmdnatclip = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/share_controller/webTools/natclip/natclip;/usr/local/bin/python %s"'
 
 # rcmd2 = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant/stock;python2 %s"'
 
@@ -362,7 +362,7 @@ def setPosition(cmd=None, position=None):
         # cmd_natclip='''osascript -e '%s';sleep 10;'''%(rcmdnatclip%('main.py'))
         # print('new run natclip')
         # os.system(f'{cmd_natclip}')
-        # osascript -e 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant3/stock;/Users/Johnson/anaconda/envs/py3.9/bin/python3 sina_Market-DurationDnUP.py"';
+        # osascript -e 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant3/stock;/usr/local/bin/python sina_Market-DurationDnUP.py"';
         # osascript -e 
         if os.path.exists(cct.get_ramdisk_path('tdx_last_df')): 
             f_size = os.path.getsize(cct.get_ramdisk_path('tdx_last_df')) / 1000 / 1000
@@ -386,7 +386,7 @@ def setPosition(cmd=None, position=None):
         # print getPosition('Johnson — bash',close=True)
         # print getPosition('Johnson — bash',close=True)
         # print getPosition('Johnson',close=True)
-        print((getPosition('Johnson — python3',close=True)))
+        print((getPosition('Johnson — python',close=True)))
         # print getPosition('Johnson',close=True)
 # count = doScript(scriptcount        
 # os.system(cmdRun)
@@ -426,9 +426,19 @@ if cct.isMac():
             rm_ramdisk = f'/bin/rm  -f {cct.get_ramdisk_dir()}{os.sep}*'
             result = subprocess.getoutput(cmd_ls)
             # print(result,rm_ramdisk)
-            if cct.creation_date_duration(cct.get_ramdisk_path('tdx_last_df')) > 0:
-                if result.find('stock') > 0:
-                    os.system(rm_ramdisk)
+            work_day_idx = cct.get_work_day_idx()
+            if 1 < work_day_idx < 6:
+                if cct.creation_date_duration(cct.get_ramdisk_path('tdx_last_df')) > 0:
+                    if result.find('stock') > 0:
+                        os.system(rm_ramdisk)
+                print(f'Day is Work:{work_day_idx},check 1 day')
+
+            else:
+                if cct.creation_date_duration(cct.get_ramdisk_path('tdx_last_df')) > 1:
+                    if result.find('stock') > 0:
+                        os.system(rm_ramdisk)
+                print(f'Day is Work:{work_day_idx},,check 2 day')
+
 
         setPosition(cmd=None, position=None)
         cct.get_terminal_Position(cct.clean_terminal[2],close=True)
@@ -439,9 +449,9 @@ if cct.isMac():
     # getPosition('Johnson —',close=True)
     # getPosition('Johnson — python',close=True)
     # getPosition('Johnson — osasc',close=True)
-    print(f'will close Johnson — python3')
+    print(f'will close Johnson — python')
     time.sleep(30)
-    print((getPosition('Johnson — python3',close=True)))
+    print((getPosition('Johnson — python',close=True)))
     print((getPosition('Johnson',close=True)))
     doScript(scriptquit)
 else:

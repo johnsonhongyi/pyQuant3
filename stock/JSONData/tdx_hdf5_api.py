@@ -994,7 +994,8 @@ if __name__ == "__main__":
         h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
         return h5
 
-    get_tdx_all_from_h5()
+    h5=get_tdx_all_from_h5()
+    import ipdb;ipdb.set_trace()
 
 
 
