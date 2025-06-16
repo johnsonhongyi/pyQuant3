@@ -2039,6 +2039,7 @@ def search_Tdx_multi_data_duration(fname='tdx_all_df_300', table='all_300', df=N
     # h5_table = h5_table + '_' + str(dl)
 
     tdx_hd5_name = cct.tdx_hd5_name
+    # print(f'tdx_hd5_name:{tdx_hd5_name}')
     if df is None and fname == tdx_hd5_name:
         df = cct.GlobalValues().getkey(tdx_hd5_name)
         
@@ -2070,7 +2071,10 @@ def search_Tdx_multi_data_duration(fname='tdx_all_df_300', table='all_300', df=N
         return h51.groupby(level=[0]).tail(tail)
 # code_list = ['000001','399006','999999']
 # code_list = sina_data.Sina().all.index.tolist()
+# print(f'code_list:{len(code_list)}')
 # df = search_Tdx_multi_data_duration('tdx_all_df_300', 'all_300', df=None,code_l=code_list, start=20170101, end=None, freq=None, col=None, index='date')
+# import ipdb;ipdb.set_trace()
+
 # print df.index.get_level_values('code').unique().shape
 # print df.loc['600310']
 

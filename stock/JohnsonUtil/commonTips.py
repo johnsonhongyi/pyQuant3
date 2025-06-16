@@ -58,7 +58,7 @@ perdall = "df[df.columns[(df.columns >= 'per1d') & (df.columns <= 'per%sd'%(ct.c
 perdallc = "df[df.columns[(df.columns >= 'perc1d') & (df.columns <= 'perc%sd'%(ct.compute_lastdays))]][:1]"
 perdalla = "df[df.columns[ ((df.columns >= 'per1d') & (df.columns <= 'per%sd'%(ct.compute_lastdays))) | ((df.columns >= 'du1d') & (df.columns <= 'du%sd'%(ct.compute_lastdays)))]][:1]"
 perdallu = "df[df.columns[ ((df.columns >= 'du1d') & (df.columns <= 'du%sd'%(ct.compute_lastdays)))]][:1]"
-root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\'
+root_path=['D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\','/Users/Johnson/Documents/Quant/pyQuant3/stock']
 dfcf_path = 'D:\\MacTools\\WinTools\\eastmoney\\swc8\\config\\User\\6327113578970854\\StockwayStock.ini'
 
 win10Lengend = r'D:\Quant\new_tdx2'
@@ -561,11 +561,28 @@ def get_day_istrade_date(dt=None):
 
     return(is_trade_date)
 
+def check_file_exist(filepath):
+    filestatus=False
+    if os.path.exists(filepath):
+        filestatus = True
+    return filestatus
+
 
 def getcwd():
     dirname, filename = os.path.split(os.path.abspath(sys.argv[0]))
     return dirname
 
+def get_sys_system():
+    return platform.system()
+
+def isMac():
+    if get_sys_system().find('Darwin') == 0:
+        return True
+    else:
+        #python2
+        # import codecs
+        # sys.stdout = codecs.getwriter('utf-8')(sys.stdout)
+        return False
 
 def get_run_path_tdx(fp=None):
     # path ='c:\\users\\johnson\\anaconda2\\envs\\pytorch_gpu\\lib\\site-packages'
@@ -580,9 +597,15 @@ def get_run_path_tdx(fp=None):
             path = path + fp + '.h5'
         log.debug("info:%s getcwd:%s"%(alist[0],path))
     else:
-        path  = root_path.split('stock')[0] + fp + '.h5'
+        if isMac():
+            path  = root_path[1].split('stock')[0] + fp + '.h5'
+            if not check_file_exist(path):
+                log.error(f'path not find : {path}')
+        else:
+            path  = root_path[0].split('stock')[0] + fp + '.h5'
+            if not check_file_exist(path):
+                log.error(f'path not find : {path}')
         log.debug("error:%s cwd:%s"%(alist[0],path))
-    
     return path
 
 
@@ -595,11 +618,7 @@ ramdisk_rootList = LoggerFactory.ramdisk_rootList
 path_sep = os.path.sep
 
 
-def check_file_exist(filepath):
-    filestatus=False
-    if os.path.exists(filepath):
-        filestatus = True
-    return filestatus
+
 
 def get_now_basedir(root_list=[macroot,macroot_vm]):
     basedir=''
@@ -640,8 +659,7 @@ def get_sys_platform():
     return platform.platform()
 
 
-def get_sys_system():
-    return platform.system()
+
 
 def get_os_system():
     os_sys = get_sys_system()
@@ -1211,14 +1229,7 @@ def get_tdx_dir_blocknew_dxzq(block_path):
         log.error("not find blkname{block_path}")
     return blocknew_path
 
-def isMac():
-    if get_sys_system().find('Darwin') == 0:
-        return True
-    else:
-        #python2
-        # import codecs
-        # sys.stdout = codecs.getwriter('utf-8')(sys.stdout)
-        return False
+
 
 def get_screen_resolution():
     proc = subprocess.Popen(['powershell', 'Get-WmiObject win32_desktopmonitor;'], stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
@@ -3828,8 +3839,6 @@ def get_limit_multiIndex_Row(df, col=None, index='ticktime', start=None, end='10
 def get_limit_multiIndex_freq(df, freq='5T', col='low', index='ticktime', start=None, end='10:00:00', code=None):
     # quotes = cct.get_limit_multiIndex_freq(h5, freq=resample.upper(), col='all', start=start, end=end, code=code)
     # isinstance(spp.all_10.index[:1], pd.core.index.MultiIndex)
-    import ipdb;ipdb.set_trace()
-    
     if df is not None:
         dd = select_multiIndex_index(df, index=index, start=start, end=end, code=code)
         if code is not None:
