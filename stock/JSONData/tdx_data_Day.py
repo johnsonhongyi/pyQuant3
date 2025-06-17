@@ -3227,10 +3227,12 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # else:
     #     dd['df2'] = dd.upper[-5:].apply(lambda x: round(x, 0)).median()
     # df['percent'] =((df.close - df.open)/df.open*100).apply(lambda x:int(x) if x < 10 else 10)  
-    df['percent'] =((df.close - df.close.shift(1))/df.close.shift(1)*100).apply(lambda x:int(x) if x < 30 else 0)
+    # df['percent'] =((df.close - df.close.shift(1))/df.close.shift(1)*100).apply(lambda x:int(x) if x < 30 else 0)
+    df['percent'] =((df.close - df.close.shift(1))/df.close.shift(1)*100).apply(lambda x:int(x) if x < 200 else 0)
     # dd['df2'] = df[df.lastdu == df.lastdu.max()].close.values[0]
-
-    dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0],1)
+    dd['percmax'] = df.percent.max()
+    # dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0],1)
+    dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0] if len(df.query('high > upper')) == 0 else df.query('high > upper').close[0],1)
 
     # if len(upperT) > 0:
     #     dd['df2'] = len(dd) - dd.index.tolist().index(upperT.index[-1])
@@ -5230,7 +5232,7 @@ if __name__ == '__main__':
     code='300084'
     # code='837748'
     # code='920799'
-    code='430017'
+    code='920088'
     # code='002177'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
@@ -5242,17 +5244,17 @@ if __name__ == '__main__':
     # df=get_tdx_append_now_df_api(code, start=start, end=None).sort_index(ascending=True)
     # print(f'check col is Null:{cct.select_dataFrame_isNull(df[-10:])}')
     # df2 = get_tdx_stock_period_to_type(df, dtype).sort_index(ascending=True)
-    dd = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='3d')
-    print(f'ral:{dd.ral}')
-    import ipdb;ipdb.set_trace()
+    # dd = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='d')
+    # print(f'ral:{dd.ral}')
+    # import ipdb;ipdb.set_trace()
 
     # # dd = compute_ma_cross(dd,resample='d')
     # print(get_tdx_stock_period_to_type(dd)[-5:])
 
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
-    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
+    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )
     print(f'df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
     print(f'ldate:{df2.ldate[:2]}')
     df = df2.to_frame().T

@@ -46,8 +46,8 @@ Resample_LABELS_Days = {'d':duration_date_day,'3d':duration_date_day,
 # duration_date_month = 300
 
 '''
+percmax: 10 days ct.compute_lastdays+1
 turnover : 成交额
-
 top_temp.loc[:,top_temp.columns.str.contains( "per\d{1,2}d$",regex= True)]
 topU : 长周期站上upper
 eneU : 中规上方数量

@@ -4695,7 +4695,7 @@ def WriteCountFilter_cct(df, op='op', writecount=5, end=None, duration=10):
 Resample_top = {'d':'top_all','3d':'top_all_3d',
                       'w':'top_all_w','m':'top_all_m'}
 
-def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None,orderby='percent',top_all=None,top_all_3d=None,top_all_w=None,top_all_m=None):
+def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None,orderby='percent',top_all=None,top_all_3d=None,top_all_w=None,top_all_m=None,resample='d'):
     end = True
     import readline
     import rlcompleter
@@ -4703,8 +4703,9 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
     for top_key in Resample_top.keys():
         top = eval(Resample_top[top_key])
         if top is not None and len(top) > 0:
-            if  top.dff[0] == 0:
-                top['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top['buy'].values, top['lastp'].values)))
+            if  top.dff[0] == 0 or top.close[0] == top.lastp1d[0]:
+                top['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top['buy'].values, top['df2'].values)))
+                top['percent'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top['buy'].values, top['lastp2d'].values)))
             if  top.volume[0] > 100 and top.volume[-1] > 100:
                 if top_key == 'd':
                     ratio_t = 1 
