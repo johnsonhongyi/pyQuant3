@@ -428,13 +428,13 @@ if cct.isMac():
             # print(result,rm_ramdisk)
             work_day_idx = cct.get_work_day_idx()
             if 1 < work_day_idx < 6:
-                if cct.creation_date_duration(cct.get_ramdisk_path('tdx_last_df')) > 0:
+                if cct.creation_date_duration(cct.get_ramdisk_path('tdx_last_df')) > 1:
                     if result.find('stock') > 0:
                         os.system(rm_ramdisk)
                 print(f'Day is Work:{work_day_idx},check 1 day')
 
             else:
-                if cct.creation_date_duration(cct.get_ramdisk_path('tdx_last_df')) > 1:
+                if cct.creation_date_duration(cct.get_ramdisk_path('tdx_last_df')) > 2:
                     if result.find('stock') > 0:
                         os.system(rm_ramdisk)
                 print(f'Day is Work:{work_day_idx},,check 2 day')
