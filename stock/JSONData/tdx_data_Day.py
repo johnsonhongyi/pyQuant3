@@ -4440,6 +4440,8 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
             tdxdata[col] = tdxdata[col].astype(int)
     top_all = cct.reduce_memory_usage(top_all)       
     if lastpTDX_DF is None:
+        tdx_code = [co for co in codelist if co in tdxdata.index]
+        tdxdata = tdxdata.loc[tdx_code]
         tdxdata = cct.reduce_memory_usage(tdxdata)
         return top_all, tdxdata
     else:

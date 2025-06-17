@@ -3534,17 +3534,17 @@ def reduce_memory_usage(df, verbose=False):
                         and c_max < np.finfo(np.float16).max
                     ):
                         df[col] = df[col].astype(np.float16)
-                        df[col] = df[col].apply(lambda x:round(x,1))
+                        df[col] = df[col].apply(lambda x:round(x,2))
                     elif (
                         c_min > np.finfo(np.float32).min
                         and c_max < np.finfo(np.float32).max
                     ):
                         df[col] = df[col].astype(np.float32)
-                        df[col] = df[col].apply(lambda x:round(x,1))
+                        df[col] = df[col].apply(lambda x:round(x,2))
 
                     else:
                         df[col] = df[col].astype(np.float64)
-                        df[col] = df[col].apply(lambda x:round(x,1))
+                        df[col] = df[col].apply(lambda x:round(x,2))
                         
         end_mem = df.memory_usage().sum() / 1024 ** 2
         if verbose:
