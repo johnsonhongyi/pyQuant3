@@ -2133,7 +2133,7 @@ def get_url_data_R(url, timeout=15,headers=None):
         # print data.encoding
         data = ''
         log.error('socket timed out error:%s - URL %s ' % (e, url))
-        if e.find('HTTP Error 456') > 0:
+        if str(e).find('HTTP Error 456') > 0:
             return data
         sleeprandom(30)
     except Exception as e:
