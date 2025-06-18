@@ -590,7 +590,7 @@ class Sina:
 
         if 'lastbuy' in h5:
             if h5.lastbuy[-1] < 0:
-                if h5.nclose[-1] > 0:
+                if 'nclose' in h5.columns and h5.nclose[-1] > 0:
                     h5.lastbuy = h5.nclose
                 else:
                     h5.lastbuy = h5.close
@@ -1029,6 +1029,7 @@ if __name__ == "__main__":
     df =sina.all
     print(len(df))
 
+    import ipdb;ipdb.set_trace()
 
     for ma in ['bj','sh', 'sz', 'cyb', 'kcb','all']:
         # for ma in ['sh']:
