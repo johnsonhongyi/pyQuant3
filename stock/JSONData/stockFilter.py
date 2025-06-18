@@ -445,7 +445,8 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                     df['topR']=list(map(lambda x, op,lastp: round( x + 1 if op > lastp  else x, 1), df.topR,df.open,df.per1d))
                     topr_up = list(set(df.topR.tolist()))
                     topRlist = list(set(map(lambda x: x  if x > 0 else 0, topr_up)))
-                    topRlist.remove(0)
+                    if 0 in topRlist:
+                        topRlist.remove(0)
                     # topRlist= [x+0.1 for x in range(1,int(df.topR.max())+1)]
                     # topRlistTop= [x for x in range(1,int(df.topR.max())+1)]
                     # topRlist.extend(topRlistTop)
