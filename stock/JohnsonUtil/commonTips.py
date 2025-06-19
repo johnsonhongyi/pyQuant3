@@ -2730,7 +2730,15 @@ def code_to_tdxblk(code):
         if len(code) != 6:
             return ''
         else:
-            return '1%s' % code if code[:1] in ['5', '6'] else '0%s' % code
+            # return '1%s' % code if code[:1] in ['5', '6'] else '0%s' % code
+            if  code[:1] in ['5', '6']:
+                code = '1%s' % code
+            elif  code[:2] in ['43','83','87','92']:
+                # startswith('43','83','87','92')
+                code = '2%s' % code
+            else:
+                code = '0%s' % code
+            return code
 
 
 def tdxblk_to_code(code):
@@ -2833,7 +2841,15 @@ def code_to_tdx_blk(code):
         if len(code) != 6:
             return ''
         else:
-            return '1%s' % code if code[:1] in ['5', '6'] else '0%s' % code
+            if  code[:1] in ['5', '6']:
+                code = '1%s' % code
+            elif  code[:2] in ['43','83','87','92']:
+                # startswith('43','83','87','92')
+                code = '2%s' % code
+            else:
+                code = '0%s' % code
+            return code
+            # return '1%s' % code if code[:1] in ['5', '6'] else '0%s' % code
 
 
 def get_config_value(fname, classtype, currvalue, limitvalue=1, xtype='limit', read=False):
