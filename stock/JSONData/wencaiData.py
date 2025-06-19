@@ -1211,37 +1211,37 @@ def get_write_wencai_market_to_csv(df=None, market='wcbk', renew=False, days=60)
     return df
 
 
-def get_ths_data():
+# def get_ths_data():
 
-    df_ths = cct.GlobalValues().getkey('df_ths')
-    if df_ths is None:
-        fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xlsx'
-        df_ths = pd.read_excel(fpath)
-        df_ths = df_ths.loc[:,['股票代码','股票简称','所属概念', '所属同花顺行业']]
-        cct.GlobalValues().setkey('df_ths',df_ths)
-        df = df_ths
-    else:
-        df = df_ths
-    # df = df.reset_index().set_index('股票代码')
-    # df = df.set_index('股票代码')
-    # # df = df.iloc[:,[1,2,4,5,6,7,8,9]]
-    # df = df.iloc[:,[4,5,6,7,8]]
-    # # return (df[df.index == cct.code_to_symbol_ths(code)])
-    # data = df[df.index == cct.code_to_symbol_ths(code)]
-    # # table, widths=cct.format_for_print(data, widths=True)
-    # # table=cct.format_for_print2(data).get_string(header=False)
-    # table =cct.format_for_print(data,header=False)
+#     df_ths = cct.GlobalValues().getkey('df_ths')
+#     if df_ths is None:
+#         fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xlsx'
+#         df_ths = pd.read_excel(fpath)
+#         df_ths = df_ths.loc[:,['股票代码','股票简称','所属概念', '所属同花顺行业']]
+#         cct.GlobalValues().setkey('df_ths',df_ths)
+#         df = df_ths
+#     else:
+#         df = df_ths
+#     # df = df.reset_index().set_index('股票代码')
+#     # df = df.set_index('股票代码')
+#     # # df = df.iloc[:,[1,2,4,5,6,7,8,9]]
+#     # df = df.iloc[:,[4,5,6,7,8]]
+#     # # return (df[df.index == cct.code_to_symbol_ths(code)])
+#     # data = df[df.index == cct.code_to_symbol_ths(code)]
+#     # # table, widths=cct.format_for_print(data, widths=True)
+#     # # table=cct.format_for_print2(data).get_string(header=False)
+#     # table =cct.format_for_print(data,header=False)
 
-    # df_code = df.query("股票代码 == @cct.code_to_symbol_ths(@code)")
-
-    return df
+#     # df_code = df.query("股票代码 == @cct.code_to_symbol_ths(@code)")
+#     return df
 
 def search_ths_data(code):
     df_ths = cct.GlobalValues().getkey('df_ths')
     if df_ths is None:
         # fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xls'
-        root_cwd = cct.getcwd().split('stock')[0]
+        root_cwd = cct.get_run_path_stock()
         fpath = f'{root_cwd}stock\\JohnsonUtil\\wencai\\同花顺板块行业.xlsx'.replace('\\',cct.get_os_path_sep())
+        # print(f'fpath:{fpath}')
         df_ths = pd.read_excel(fpath)
         df_ths = df_ths.loc[:,['股票代码','股票简称','所属概念', '所属同花顺行业']]
         df_ths["code"] = df_ths["股票代码"].map(lambda x: x.split('.')[0])
