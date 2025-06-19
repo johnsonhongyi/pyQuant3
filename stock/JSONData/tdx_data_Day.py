@@ -727,15 +727,16 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     # df['hmax'] = df.close[:-ct.tdx_max_int_end].max()
     df = df.sort_index(ascending=True)
     # if isinstance(df,pd.DataFrame):
-    perc_couts = df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:]
-    per_couts = df.loc[:,df.columns[df.columns.str.contains('per[0-9]{1}d', regex=True, case=False)]][-1:]
+    # perc_couts = df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:]
+    # perc_couts = df.loc[:,df.columns[df.columns.str.contains('perc[1-9]{1}d', regex=True, case=False)]][-1:]
+    per_couts = df.loc[:,df.columns[df.columns.str.contains('per[1-9]{1}d', regex=True, case=False)]][-1:]
     
-    if len(perc_couts.T) > 2:
+    if len(per_couts.T) > 2:
         if resample == 'd':
-            df['maxp'] = perc_couts.T[1:].values.max() 
+            df['maxp'] = per_couts.T[1:].values.max()   #per[2-9]
             fib_c  =(per_couts.T.values > 2).sum()
         else:
-            df['maxp'] = perc_couts.T[:3].values.max() 
+            df['maxp'] = per_couts.T[:3].values.max() 
             fib_c  =(per_couts.T[:3].values > 10).sum()
         df['fib'] =   fib_c
         df['maxpcout'] =  fib_c
@@ -3231,7 +3232,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # df['percent'] =((df.close - df.close.shift(1))/df.close.shift(1)*100).apply(lambda x:int(x) if x < 30 else 0)
     df['percent'] =((df.close - df.close.shift(1))/df.close.shift(1)*100).apply(lambda x:int(x) if x < 200 else 0)
     # dd['df2'] = df[df.lastdu == df.lastdu.max()].close.values[0]
-    dd['percmax'] = df.percent.max()
+    dd['percmax'] = df.percent[:-1].max()
     # dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0],1)
     dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0] if len(df.query('high > upper')) == 0 else df.query('high > upper').close[0],1)
 
@@ -5233,7 +5234,7 @@ if __name__ == '__main__':
     code='300084'
     # code='837748'
     # code='920799'
-    code='920088'
+    code='002268'
     # code='002177'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
@@ -5252,9 +5253,9 @@ if __name__ == '__main__':
     # # dd = compute_ma_cross(dd,resample='d')
     # print(get_tdx_stock_period_to_type(dd)[-5:])
 
-    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
+    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )
     print(f'df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
     print(f'ldate:{df2.ldate[:2]}')
