@@ -231,3 +231,5 @@ top_all.query('open > high4 and open > lasth2d and open > lasth3d and open > las
 top_all.query('open > high4 and open > lasth2d and open > lasth3d and open > lasth4d and open > upper2 and  ((open-lastp2d)/lastp2d*100) > maxp')
 top_all.query('open > high4 and open > lasth2d and open > lasth3d and open > lasth4d and open > upper2 and  ((close-lastp2d)/lastp2d*100) > maxp')
 top_all.query('open > high4 and open > lasth1d and open > lasth2d and open > lasth3d and open > upper1 and  ((close-lastp1d)/lastp1d*100) > maxp')
+top_all.query('close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1 and  ((close-lastp1d)/lastp1d*100) > maxp')
+top_all.query('close > high4 and close > lasth2d and close > lasth3d and close > lasth4d and close > upper2 and  ((close-lastp2d)/lastp2d*100) > maxp')

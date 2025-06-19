@@ -584,6 +584,31 @@ def isMac():
         # sys.stdout = codecs.getwriter('utf-8')(sys.stdout)
         return False
 
+def get_run_path_stock(fp=None):
+    # path ='c:\\users\\johnson\\anaconda2\\envs\\pytorch_gpu\\lib\\site-packages'
+    # root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\'
+    path = getcwd()
+    alist = path.split('stock')
+    # if len(alist) > 0:
+    if len(alist) > 0 and path.find('stock') >=0:
+        path = alist[0]
+        # os_sep=get_os_path_sep()
+        if fp is not None:
+            path = path + fp
+        log.debug("info:%s getcwd:%s"%(alist[0],path))
+    else:
+        if isMac():
+            path  = root_path[1].split('stock')[0]
+            if not check_file_exist(path):
+                log.error(f'path not find : {path}')
+        else:
+            path  = root_path[0].split('stock')[0]
+            if not check_file_exist(path):
+                log.error(f'path not find : {path}')
+        log.debug("error:%s cwd:%s"%(alist[0],path))
+    return path
+
+
 def get_run_path_tdx(fp=None):
     # path ='c:\\users\\johnson\\anaconda2\\envs\\pytorch_gpu\\lib\\site-packages'
     # root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\'
