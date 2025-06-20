@@ -357,7 +357,7 @@ def get_hdf5_file(fpath, wr_mode='r', complevel=9, complib='blosc', mutiindx=Fal
     # return store
 
 
-def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False):
+def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False,showtable=False):
     """[summary]
 
     [description]
@@ -410,6 +410,8 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
             tmpdf=[]
             with SafeHDFStore(fname) as store:
                 if store is not None:
+                    if showtable:
+                        print(f"keys:{store.keys()}")
                     if '/' + table in list(store.keys()):
                         tmpdf=store[table]
                         tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
@@ -646,6 +648,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
 
             with SafeHDFStore(fname) as store:
                 if store is not None:
+                    if showtable:
+                        print(f"keys:{store.keys()}")
                     try:
                         if '/' + table in list(store.keys()):
                             dd=store[table]

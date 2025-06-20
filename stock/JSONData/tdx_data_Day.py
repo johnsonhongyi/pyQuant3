@@ -4271,7 +4271,7 @@ def get_index_percd(codeList=tdx_index_code_list, dt=60, end=None, ptype='low', 
     return tdxdata
 
 
-def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=None, ptype='low', filter='y', power=True, lastp=False, newdays=None, checknew=True, resample='d'):
+def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=None, ptype='low', filter='y', power=True, lastp=False, newdays=None, checknew=True, resample='d',showtable=False):
 
     codelist = top_all.index.tolist()
     # append INDEX tdxdata
@@ -4302,7 +4302,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     if lastpTDX_DF is None or len(lastpTDX_DF) == 0:
         # h5 = top_hdf_api(fname=h5_fname,table=market,df=None)
         h5 = h5a.load_hdf_db(h5_fname, table=h5_table,
-                             code_l=codelist, timelimit=False)
+                             code_l=codelist, timelimit=False,showtable=showtable)
 
         if h5 is not None and not h5.empty:
             #            o_time = h5[h5.time <> 0].time
