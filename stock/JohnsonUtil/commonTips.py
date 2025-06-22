@@ -119,7 +119,7 @@ class GlobalValues:
 from textwrap import fill
 from JohnsonUtil.prettytable import ALL as ALL
 
-def format_for_print(df,header=True,widths=False,showCount=False,width=0):
+def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=False):
 
     # alist = [x for x in set(df.columns.tolist())]
     if 'category' in df.columns:
@@ -164,6 +164,10 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0):
             count = f'Count:{len(df)}'
             table = str(table)
             table = table + f'\n{count}'
+            if table:
+                if 'category' in df.columns:
+                    topSort=counterCategory(df,'category',table=table)
+                    table = table + f'\n{topSort}'
         return str(table)
     else:
         if isinstance(widths,list):
@@ -189,7 +193,7 @@ def list_replace(lst, old=1, new=10):
         pass
 
 
-def format_for_print_show(df,columns_format=None,showCount=False,col=None):
+def format_for_print_show(df,columns_format=None,showCount=False,col=None,table=False):
     if columns_format is None:
         columns_format = ct.Monitor_format_trade
     if col is not None and col not in columns_format:
@@ -201,7 +205,7 @@ def format_for_print_show(df,columns_format=None,showCount=False,col=None):
     #     count_string = (f'Count:{len(df)}')
     #     table = format_for_print(df.loc[:, columns_format],count=count_string)
     # else:
-    table = format_for_print(df.loc[:, columns_format],showCount=showCount)
+    table = format_for_print(df.loc[:, columns_format],showCount=showCount,table=table)
     return table
 
 def format_for_print2(df):
@@ -3118,7 +3122,7 @@ def get_index_fibl(default=1):
     return default
 
 from collections import Counter,OrderedDict
-def counterCategory(df,col='category'):
+def counterCategory(df,col='category',table=False):
     topSort = []
     if len(df) > 0:
         categoryl = df[col][:50].tolist()
@@ -3132,10 +3136,20 @@ def counterCategory(df,col='category'):
                 # dicSort.extend([ 'u%s'%(co) for co in i.split(';')])
                 
         topSort = Counter(dicSort)
-        top5 = OrderedDict(topSort.most_common(3))
-        for i in list(top5.keys()):
-            print(i,top5[i], end=' ')
-        print('')
+        if not table:
+            top5 = OrderedDict(topSort.most_common(5))
+            for i in list(top5.keys()):
+                if len(i) > 2:
+                    print(f'{i}:{top5[i]}', end=' ')
+            print('')
+        else:
+            table_row=f''
+            top5 = OrderedDict(topSort.most_common(5))
+            for i in list(top5.keys()):
+                if len(i) > 2:
+                    table_row +=f'{i}:{top5[i]} '
+            table_row +='\n'
+            topSort = table_row 
     return topSort
 
 # def write_to_dfcfnew(p_name=dfcf_path):
