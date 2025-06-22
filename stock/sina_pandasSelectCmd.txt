@@ -283,3 +283,4 @@ top_all.query('lastp1d > lastp2d >lastp3d and lasth1d > lasth2d >lasth3d and hig
 top_all.query('lastp1d > lastp2d >lastp3d and lasth1d > lasth2d >lasth3d and high > high4 and max5 >high4')
 top_all.query('lastp1d > lastp2d >lastp3d and lasth1d > lasth2d >lasth3d and high > high4 and max5 >high4 and high > lasth1d')
 top_temp.query('high > max5 and lasth1d > lasth2d and lasth2d > lasth3d and lasth3d > lasth4d and percent > 0')
+top_all.query(f'close > lastp1d and ral > 10 and fib > 0 and boll > 0 and close > lastp2d and percent > per2d and percent > lastdu4 and close >high4 and close > max5 and (low > open*0.99 or (per1d > 4 and low >= lastp1d))')
