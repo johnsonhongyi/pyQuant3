@@ -251,3 +251,16 @@ top_all.query('lasth1d  >lasth2d  and lastp1d > ma51d and lastp1d > lastp2d*0.99
 top_all.query('lasth1d  >lasth2d  and lastp1d > ma51d and lastp1d > lastp2d*0.99 and lasth2d > lasth3d and lastp2d < upper2')
 top_all.query('lasth1d  >lasth2d  and lastp1d > ma51d and lastp1d > lastp2d*0.99 and lasth2d > lasth3d and lastp2d < upper2 and lasth1d >upper')
 top_all.query('lasth1d  >lasth2d  and lastp1d > ma51d and lastp1d > lastp2d*0.99 and lasth2d > lasth3d and lastp2d < upper2 and lasth1d >upper')[-50:]
+top_all.query('close > lastp2d')
+top_all.query('close > lastp2d and percent > per2d')
+top_all.query('close > lastp2d and percent > per2d')[-10:]
+top_all.query('close > lastp2d and percent > per2d and percent > lastdu4')
+top_all.query('close > lastp2d and percent > per2d and percent > lastdu4 ')
+top_all.query('close > lastp2d and percent > per2d and percent > lastdu4 and close >high4')
+top_all.query('close > lastp2d and percent > per2d and percent > lastdu4 and close >high4 and close > max5')
+top_all.query('close > lastp2d and percent > per2d and percent > lastdu4 and close >high4 and close > max5 and low > open*0.99')
+top_all.query('close > lastp2d and percent > per2d and percent > lastdu4 and close >high4 and close > max5 and (low > open*0.99 or (lasth1d > hmax and low > lastp1d))')
+top_all.query('close > lastp2d and percent > per2d and percent > lastdu4 and close >high4 and close > max5 and (low > open*0.99 or (lasth1d > hmax and low >= lastp1d))')
+top_all.query('close > lastp2d and percent > per2d and percent > lastdu4 and close >high4 and close > max5 and (low > open*0.99 or (per1d > 5 and low >= lastp1d))')
+top_all.query('close > lastp2d and percent > per2d and percent > lastdu4 and close >high4 and close > max5 and (low > open*0.99 or (per1d > 4 and low >= lastp1d))')
+top_all.query('close > lastp2d and percent > per2d and percent > lastdu4 and close >high4 and close > max5 and (low > open*0.99 or (per1d > 4 and low >= lastp1d)) and lastv1d > lastv2d')
