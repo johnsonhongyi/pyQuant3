@@ -435,7 +435,7 @@ if __name__ == "__main__":
                         # top_temp = top_temp[ (top_temp['ma5d'] > top_temp['ma10d']) & (top_temp['buy'] > top_temp['ma10d']) ][:10]
 
                         top_dd = cct.combine_dataFrame(
-                            top_temp[:20], top_end, append=True, clean=True)
+                            top_temp[:ct.format_limit], top_end, append=True, clean=True)
                         # top_dd = top_dd.drop_duplicates()
                         ct_MonitorMarket_Values = ct.get_Duration_format_Values(
                             ct.Duration_format_buy, market_sort_value[:])
@@ -444,7 +444,7 @@ if __name__ == "__main__":
                         # top_temp = top_temp[top_temp['trade'] > top_temp['ma10d']]
 
                         top_dd = cct.combine_dataFrame(
-                            top_temp[:20], top_end, append=True, clean=True)
+                            top_temp[:ct.format_limit], top_end, append=True, clean=True)
                         # top_dd = top_dd.drop_duplicates()
                         ct_MonitorMarket_Values = ct.get_Duration_format_Values(
                             ct.Duration_format_trade, market_sort_value[:])
@@ -472,7 +472,7 @@ if __name__ == "__main__":
                     # print cct.format_for_print(top_dd)
                     # table,widths = cct.format_for_print(top_dd[:9],widths=True)
                     table, widths = cct.format_for_print(
-                        top_dd.loc[[col for col in top_dd[:19].index if col in top_temp[:20].index]], widths=True)
+                        top_dd.loc[[col for col in top_dd[:ct.format_limit].index if col in top_temp[:ct.format_limit].index]], widths=True)
 
                     print(table)
                     cct.counterCategory(top_temp)

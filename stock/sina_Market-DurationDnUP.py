@@ -334,7 +334,7 @@ if __name__ == "__main__":
                         # top_temp = top_temp[top_temp['ma5d'] > top_temp['ma10d']][:10]
                         # top_temp = top_temp[ (top_temp['ma5d'] > top_temp['ma10d']) & (top_temp['buy'] > top_temp['ma10d']) ][:10]
                         # top_dd =  cct.combine_dataFrame(top_temp[:10], top_end,append=True, clean=True)
-                        top_dd =  top_temp[:20]
+                        top_dd =  top_temp[:ct.format_limit]
 
                         # top_dd = top_dd.drop_duplicates()
                         ct_MonitorMarket_Values = ct.get_Duration_format_Values(ct.Duration_format_buy, market_sort_value[:])
@@ -345,7 +345,7 @@ if __name__ == "__main__":
                         # top_temp = top_temp[ (top_temp['ma5d'] > top_temp['ma10d']) & (top_temp['trade'] > top_temp['ma10d']) ][:10]
 
                         # top_dd =  cct.combine_dataFrame(top_temp[:10], top_end,append=True, clean=True)
-                        top_dd =  top_temp[:20]
+                        top_dd =  top_temp[:ct.format_limit]
 
                         # top_dd = top_dd.drop_duplicates()
                         ct_MonitorMarket_Values = ct.get_Duration_format_Values(ct.Duration_format_trade, market_sort_value[:])

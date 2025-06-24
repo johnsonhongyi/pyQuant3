@@ -124,6 +124,31 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=F
     # alist = [x for x in set(df.columns.tolist())]
     if 'category' in df.columns:
         df['category']=df['category'].apply(lambda x:str(x).replace('\r','').replace('\n',''))
+        topSort=counterCategory(df,'category',table=True).split()
+        topSort.reverse()
+        top_dic={}
+        for x in topSort:
+            top_dic[x.split(':')[0]]=x
+            # top_dic[x.split(':')[0]]=x.replace(':','')
+        # top_key = [x.split(':')[0] for x in topSort]
+        # top_value = [x.replace(':','') for x in topSort]
+        # sorted_top_dic = dict(sorted(top_dic.items(), key=lambda item: item[1], reverse=False))
+        for idx in df.index:
+            ca_list = df.loc[idx].category.split(';')
+            ca_listB = ca_list.copy()
+            for key in top_dic:
+                if key in ca_list:
+                    if ca_listB.index(key) != 0:
+                        element_to_move = ca_listB.pop(ca_listB.index(key))
+                        ca_listB.insert(0, top_dic[key])
+
+            if ca_listB !=  ca_list:
+                ca_listC=[('' if c.find(':') > 0 else ' ')+c for c in ca_listB]
+                # ca_listD= [x for x in ca_listC if x.find(':') > 0]
+                # list_to_str = "".join([for x in ca_listB if x.find(':') else x+''])
+                list_to_str = "".join(ca_listC)
+                df.loc[idx,'category']=list_to_str
+
     alist = df.columns.tolist()
     if header:
 
@@ -131,7 +156,7 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=F
     else:
         table = PrettyTable(field_names=[''] + alist,header=False)
 
-    for row in df[:50].itertuples():  
+    for row in df[:ct.format_limit_show].itertuples():  
         if width > 0:
             # col = df.columns.tolist()
             # co_count = len(df.columns)
@@ -3122,10 +3147,10 @@ def get_index_fibl(default=1):
     return default
 
 from collections import Counter,OrderedDict
-def counterCategory(df,col='category',table=False):
+def counterCategory(df,col='category',table=False,limit=30):
     topSort = []
     if len(df) > 0:
-        categoryl = df[col][:50].tolist()
+        categoryl = df[col][:limit].tolist()
         dicSort = []
         for i in categoryl:
             if isinstance(i, str):

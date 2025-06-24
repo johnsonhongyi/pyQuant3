@@ -174,7 +174,8 @@ VolumeMinR = 0.1
 upper_cross_days = 14
 PowerCount = 1000
 duration_diff = 6
-
+format_limit=30
+format_limit_show=20
 ddtop0 = 15  #最后15日统计高开高走站上upper
 duration_date_sort = duration_date_day
 # PowerCountdl = duration_date_day * 2 if duration_date_day < 20 else duration_date_day
