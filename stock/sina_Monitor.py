@@ -835,12 +835,12 @@ if __name__ == "__main__":
                 #     top_temp=top_temp[top_temp.per1d < 8]
 
                 top_dd=cct.combine_dataFrame(
-                    top_temp.loc[:, ct_MonitorMarket_Values][:20], top_temp2.loc[:, ct_MonitorMarket_Values][:5], append=True, clean=True)
+                    top_temp.loc[:, ct_MonitorMarket_Values][:ct.format_limit], top_temp2.loc[:, ct_MonitorMarket_Values][:5], append=True, clean=True)
                 # print cct.format_for_print(top_dd)
 
                 # table,widths = cct.format_for_print(top_dd[:10],widths=True)
                 table, widths=cct.format_for_print(
-                    top_dd.loc[[col for col in top_dd[:19].index if col in top_temp[:20].index]], widths=True)
+                    top_dd.loc[[col for col in top_dd[:ct.format_limit].index if col in top_temp[:ct.format_limit].index]], widths=True)
 
                 print(table)
                 cct.counterCategory(top_temp)
