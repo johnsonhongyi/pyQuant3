@@ -171,10 +171,10 @@ if __name__ == "__main__":
     log.setLevel(log_level)
 
     if cct.isMac():
-        width, height = 163, 30
+        width, height = 166, 30
         cct.set_console(width, height)
     else:
-        width, height = 163, 30
+        width, height = 166, 30
         cct.set_console(width, height)
         # cct.terminal_positionKey_triton
 

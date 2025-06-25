@@ -122,7 +122,7 @@ from JohnsonUtil.prettytable import ALL as ALL
 def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=False,limit_show=20):
 
     # alist = [x for x in set(df.columns.tolist())]
-    if 'category' in df.columns:
+    if 'category' in df.columns and len(df) > 0:
         df['category']=df['category'].apply(lambda x:str(x).replace('\r','').replace('\n',''))
         topSort=counterCategory(df,'category',table=True).split()
         topSort.reverse()
@@ -148,7 +148,8 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=F
                 # list_to_str = "".join([for x in ca_listB if x.find(':') else x+''])
                 list_to_str = "".join(ca_listC)
                 df.loc[idx,'category']=list_to_str
-
+    else:
+        print('df is None')
     alist = df.columns.tolist()
     if header:
 

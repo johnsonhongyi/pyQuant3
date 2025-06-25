@@ -3136,25 +3136,32 @@ def compute_condition_up(df):
 
 
 def compute_condition_up_add_up(df,condition_up):
-    
+
     if len(condition_up) == 1:
         idx_date = condition_up.jop_date[0]
         idx_close = df.loc[idx_date,'close']
         df2 = df[df.index >= idx_date]
         condition_up2 = df2.query(f'high > high.shift(1) and close > close.shift(1)*0.99 and close >= {idx_close}')  #1跳空新高收高
+        # condition_up2 = df.query(f'low > low.shift(1) and high > high.shift(1) and close > high.shift(1)*0.999 and high > upper')  #2跳空新高收高
+        condition_up3 = df2.query('(close - close.shift(1))/close.shift(1)*100 > 6 and close >= high*0.99')
+        condition_up2 = pd.concat([condition_up2,condition_up3],axis=0)
     elif len(condition_up) > 1:
         # idx_date = condition_up.index[0]
         # idx_close = condition_up.close[0]
 
-        # idx_date = condition_up.jop_date[0]
-        # idx_close = df.loc[idx_date,'close']
+        idx_date = condition_up.jop_date[0]
+        idx_close = df.loc[idx_date,'close']
         # df2 = df[df.index >= idx_date]
         # condition_up2 = df2.query(f'high > high.shift(1) and close > close.shift(1)*0.99 and close >= {idx_close}')  #1跳空新高收高
         # condition_up2 = df2.query(f'low > low.shift(1) and high > high.shift(1) and close > close.shift(1) and close > {idx_close}')  #2跳空新高收高
         # condition_up2 = df.query(f'low > low.shift(1) and high > high.shift(1) and close > high.shift(1)*0.999')  #2跳空新高收高
         condition_up2 = df.query(f'low > low.shift(1) and high > high.shift(1) and close > high.shift(1)*0.999 and high > upper')  #2跳空新高收高
+        condition_up3 = df.query('(close - close.shift(1))/close.shift(1)*100 > 6 and close >= high*0.99')
+        
+        condition_up2 = pd.concat([condition_up2,condition_up3],axis=0)
     else:
         condition_up2 = pd.DataFrame()
+        # condition_up3 = pd.DataFrame()
 
     return condition_up2
 
@@ -3200,10 +3207,21 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1))
     # df['perd'] = ((df['low'] - df['low'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1))
-    df = df.dropna(subset=['perd'])
+    # df = df.dropna(subset=['perd'])
+    # idx_close = df.query('perd == perd.max()')[:1].close
+    idx_close_temp = df.query('high > upper')
 
-    red_cout = df.query('(high > high.shift(1) and low > low.shift(1)) or (close > upper and close > low*1.05) or (low >= open*0.992 and close >= open)')
-    green_cout = df.query('(low < low.shift(1) and high < high.shift(1)) or (close < open)')
+    idx_close = idx_close_temp.close[0] if len(idx_close_temp) > 0 else df[df.perd == df.perd.max()].close[0]
+    idx_date_temp = df.query('high > upper')
+    idx_date  = idx_date_temp.index[0] if len(idx_date_temp) > 0 else df[df.high == df.high.max()].index[0]
+    # idx_top = df[df.high]
+    # red_cout = df.query('(high > high.shift(1) and low > low.shift(1)) or (close > upper and close > low*1.05) or (low >= open*0.992 and close >= open)')
+
+    red_cout = eval(f"df.query('close >={idx_close}  and ((high > high.shift(1) and low > low.shift(1) and close > close.shift(1)) or (close > upper and close > low*1.05) or (low >= open*0.992 and close >= open ))')")
+    df2 = df[df.index >= idx_date]
+    green_cout = df2.query('(low < low.shift(1) and high < high.shift(1)) or (close < open)')
+    
+    # df = df.dropna(subset=['perd'])
 
     # df['red'] = ((df['close'] - df['open']) / df['close'] * 100).map(lambda x: round(x, 1))
     df['lastdu'] = ((df['high'] - df['low']) / df['close'] * 100).map(lambda x: round(x, 1))
@@ -3242,6 +3260,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     dd['upperL'] = len(upperL) 
 
+
     # dd['df2'] = round(df.truer[2:].mean(),1)
 
     # if len(upperT) > 1:
@@ -3257,6 +3276,8 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     dd['percmax'] = df.percent[:-1].max()
     # dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0],1)
     dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0] if len(df.query('high > upper')) == 0 else df.query('high > upper').close[0],1)
+    
+    df = df.dropna(subset=['perd'])
 
     # if len(upperT) > 0:
     #     dd['df2'] = len(dd) - dd.index.tolist().index(upperT.index[-1])
@@ -3357,8 +3378,9 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # if len(fill_day_down) > 0 and len(fill_day_up) > 0:
 
     # if len(condition_up) >= len(condition_down) :
+
     if len(condition_up) > 0 :
-        dd['topR'] = len(condition_up)+len(condition_up2)
+        dd['topR'] = len(condition_up)+len(condition_up2)-dd.gren.values[-1]
         dd['topD'] = len(condition_down)
     else:
         dd['topR'] = 0
@@ -5261,10 +5283,10 @@ if __name__ == '__main__':
     # code='837748'
     # code='920799'
     code='002268'
-    code='600110'
     # code='603212'
     code='002670'
-    # code='002177'
+    code='600110'
+    code='002235'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
