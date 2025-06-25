@@ -56,8 +56,8 @@ maxp :15周期的波动幅度
 fib :15周期大于2的    —>maxpcout
 fibl : tdx_df[idx_date:].query('high > high.shift(1)*0.998')
 boll :近期upper
-red : 主升阳K
-green : 主降绿K
+red : 主升阳K 连阳启动的大阳线后
+green : 主降绿K 低点下移
 lastdu4 : 4天振幅
 truer :
 high4 :
@@ -83,7 +83,7 @@ up5 : LIS 5日
 vchange :  量比:
 vcra : 大于1的cout
 vcall : 最大的量变
-
+# https://github.com/maxiaof/github-hosts
 月线回归支撑区域+macd:
 top_temp.query('macd >-1 and macddif < macddea and macdlast2 < macdlast3 and low < df2*1.2 and close > df2').loc[:,['macddif','macddea']]
 20250603:
@@ -348,7 +348,7 @@ Duration_percent_opboll_key = [0, 0, 0, 0, 1, 1,  1, 1]
 
 
 
-Duration_percent_boll = ['boll','ra','volume','perc3d', 'percent',
+Duration_percent_boll = ['boll','per1d','volume','perc3d', 'percent',
                          'dff', 'fib', 'fibl', 'couts']
 
 Duration_percent_boll_key = [0, 0, 1, 0, 0, 1, 1,  1, 1]
@@ -821,7 +821,7 @@ def RawMenuArgmain():
     raw = 'status:[go(g),clear(c),[d 20150101(dt 14)[l|h]|[y|n|pn|py],quit(q),W(a),sh]:'
     raw_input_menu = raw + "\n\tNow : %s" + \
         "\n\t1:Sort By Percent\t2:Sort by per1d\t3:Sort By percd\t\t4:Sort By DFF\n\t5:Sort By Ra_dff\t6:Sort By  fibl\t7:Sort Vol per\t\t8:Sort by Count" + \
-        "\n\t9:By fib\t\tx: by_topR\tx1:by boll_ra\t\tx2:by ral\nplease input:"
+        "\n\t9:By fib\t\tx: by_topR\tx1:by boll_perd\t\tx2:by ral\nplease input:"
     return raw_input_menu
 
 # "Sort By Percent\t3:Sort By DFF\n\t2:Sort By OP\t\t4:Sort By Ra\nplease input:"
