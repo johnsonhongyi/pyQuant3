@@ -955,6 +955,8 @@ if __name__ == "__main__":
 
     rzrq = get_dfcfw_rzrq_SHSZ()
     print(rzrq)
+    ff = get_dfcfw_fund_SHSZ()
+
     import ipdb;ipdb.set_trace()
     
     # rzrq2 = get_dfcfw_rzrq_SHSZ2()
