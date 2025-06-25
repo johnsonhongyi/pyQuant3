@@ -161,7 +161,7 @@ def codeQuery_show_cct(idxkey,columns_format,workstatus,orderby='dff'):
     return(cmd)
 
 def codeQuery_show_single(cmd,columns_format,orderby='dff',table=True):
-    cmd=f"format_for_print_show({cmd}.sort_values('{orderby}', ascending=False),{columns_format},showCount=True,col='{orderby}',table='{table}')"
+    cmd=f"format_for_print_show({cmd}.sort_values('{orderby}', ascending=False),{columns_format},showCount=True,col='{orderby}',table='{table},')"
     return(cmd)
 
 tqdm_mininterval=2
