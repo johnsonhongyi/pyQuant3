@@ -390,9 +390,9 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
         else:
             df = df.query(f'(open == low and low > {filterma51d}) or low >= {filterlastday}')
 
-    df['topR']=list(map(lambda x, y: round( x + 1 if x > 1 and y > 0 else x , 1), df.topR, df.percent))
+    # df['topR']=list(map(lambda x, y,z: round( x + 1 if x > 1 and y > 0 else x , 1), df.topR, df.percent))
 
-    df['topR']=list(map(lambda x, y: round( x - 1 if x > 1 and y < 0 else x , 1), df.topR, df.percent))
+    # df['topR']=list(map(lambda x, y,z: round( x - 1 if x > 1 and y < 0 else x , 1), df.topR, df.percent))
 
     # if sort_value <> 'percent' and (market_key in ['2', '3','5','4','6','x','x1','x2'] and market_value not in ['1']):
     if (market_key in ['1','2', '3','5','4','6','7','8','9','x','x1','x2']) :
@@ -442,7 +442,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                 #     df= df[ (df[("%s" % (sort_value))] <= idx_k) ]
                 
                 if market_value == '1.1' and market_key in [ 'x']:
-                    df['topR']=list(map(lambda x, op,lastp: round( x + 1 if op > lastp  else x, 1), df.topR,df.open,df.per1d))
+                    df['topR']=list(map(lambda x, op,lastp,close: round( x + 1 if close >= op > lastp  else x, 1), df.topR,df.open,df.per1d,df.close))
                     topr_up = list(set(df.topR.tolist()))
                     topRlist = list(set(map(lambda x: x  if x > 0 else 0, topr_up)))
                     if 0 in topRlist:

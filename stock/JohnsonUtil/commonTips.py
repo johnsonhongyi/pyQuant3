@@ -119,7 +119,7 @@ class GlobalValues:
 from textwrap import fill
 from JohnsonUtil.prettytable import ALL as ALL
 
-def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=False):
+def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=False,limit_show=20):
 
     # alist = [x for x in set(df.columns.tolist())]
     if 'category' in df.columns:
@@ -156,7 +156,7 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=F
     else:
         table = PrettyTable(field_names=[''] + alist,header=False)
 
-    for row in df[:ct.format_limit_show].itertuples():  
+    for row in df[:limit_show].itertuples():  
         if width > 0:
             # col = df.columns.tolist()
             # co_count = len(df.columns)
@@ -230,7 +230,7 @@ def format_for_print_show(df,columns_format=None,showCount=False,col=None,table=
     #     count_string = (f'Count:{len(df)}')
     #     table = format_for_print(df.loc[:, columns_format],count=count_string)
     # else:
-    table = format_for_print(df.loc[:, columns_format],showCount=showCount,table=table)
+    table = format_for_print(df.loc[:, columns_format],showCount=showCount,table=table,limit_show=50)
     return table
 
 def format_for_print2(df):

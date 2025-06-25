@@ -3057,9 +3057,8 @@ def compute_condition_up_sample(df):
     return hop_df
 
 def compute_condition_up(df):
-    condition_up = df[df['low'] > df['high'].shift()]        #向上跳空缺口
-    condition_down = df[df['high'] < df['low'].shift()]      #向下跳空缺口
-
+    condition_up = df[df['low'] > df['high'].shift(1)]        #向上跳空缺口
+    condition_down = df[df['high'] < df['low'].shift(1)]      #向下跳空缺口
     df['hop'] = np.nan
     # df.loc[condition_up,'hop_up'] = -1
     # df.loc[condition_down,'hop_down'] =1
@@ -3133,8 +3132,31 @@ def compute_condition_up(df):
     hop_df = pd.DataFrame(hop_record)
     # hop_df[hop_df.fill_day <> '']         #已经回补
     # hop_df.fill_day.isnull()  #没有回补
-
     return hop_df
+
+
+def compute_condition_up_add_up(df,condition_up):
+    
+    if len(condition_up) == 1:
+        idx_date = condition_up.jop_date[0]
+        idx_close = df.loc[idx_date,'close']
+        df2 = df[df.index >= idx_date]
+        condition_up2 = df2.query(f'high > high.shift(1) and close > close.shift(1)*0.99 and close >= {idx_close}')  #1跳空新高收高
+    elif len(condition_up) > 1:
+        # idx_date = condition_up.index[0]
+        # idx_close = condition_up.close[0]
+
+        # idx_date = condition_up.jop_date[0]
+        # idx_close = df.loc[idx_date,'close']
+        # df2 = df[df.index >= idx_date]
+        # condition_up2 = df2.query(f'high > high.shift(1) and close > close.shift(1)*0.99 and close >= {idx_close}')  #1跳空新高收高
+        # condition_up2 = df2.query(f'low > low.shift(1) and high > high.shift(1) and close > close.shift(1) and close > {idx_close}')  #2跳空新高收高
+        # condition_up2 = df.query(f'low > low.shift(1) and high > high.shift(1) and close > high.shift(1)*0.999')  #2跳空新高收高
+        condition_up2 = df.query(f'low > low.shift(1) and high > high.shift(1) and close > high.shift(1)*0.999 and high > upper')  #2跳空新高收高
+    else:
+        condition_up2 = pd.DataFrame()
+
+    return condition_up2
 
 def compute_perd_df(dd,lastdays=3,resample ='d'):
     if resample == 'd':
@@ -3320,9 +3342,10 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     #计算回补
     # last_TopR_days -> 15
-    hop_df = compute_condition_up(dd[-15:].copy())
+    hop_df = compute_condition_up(dd[-15:])
     # condition_up = hop_df[hop_df.hop == 'up']
     condition_up = hop_df[(hop_df.fill_day.isnull() ) & (hop_df.hop == 'up')]   if len(hop_df) > 0  else pd.DataFrame()
+    condition_up2 = compute_condition_up_add_up(dd[-15:],hop_df)
     # condition_down = hop_df[hop_df.hop == 'down']
     condition_down = hop_df[ (hop_df.fill_day.isnull() ) & (hop_df.hop == 'down')] if len(hop_df) > 0  else pd.DataFrame()
     # fill_day_up = hop_df[( hop_df.fill_day.notnull() ) & (hop_df.hop == 'up')] if len(hop_df) > 0  else pd.DataFrame()
@@ -3333,11 +3356,12 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     # if len(fill_day_down) > 0 and len(fill_day_up) > 0:
 
-    if len(condition_up) >= len(condition_down) :
-        dd['topR'] = len(condition_up)
+    # if len(condition_up) >= len(condition_down) :
+    if len(condition_up) > 0 :
+        dd['topR'] = len(condition_up)+len(condition_up2)
         dd['topD'] = len(condition_down)
     else:
-        dd['topR'] = -len(condition_down)
+        dd['topR'] = 0
         dd['topD'] = len(condition_down)
 
     if len(condition_up) > 0 and len(condition_down) > 0:
@@ -3846,8 +3870,8 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
                 # log.debug("date:%s %s:%s" % (lowdate, ptype, lowp))
 
                 # log.debug("date:%s %s:%s" % (dt, ptype, lowp))
-                dtemp = df[df.index == lowdate].copy()
-                dd = df[:1].copy()
+                dtemp = df[df.index == lowdate]
+                dd = df[:1]
 
                 # if ptype == 'high':
                 #     lowp = dz.low.min()
@@ -5235,6 +5259,9 @@ if __name__ == '__main__':
     # code='837748'
     # code='920799'
     code='002268'
+    code='600110'
+    # code='603212'
+    code='002670'
     # code='002177'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
