@@ -4470,7 +4470,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
                 top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth1d))
 
         if cct.get_work_time_duration():
-            top_all['topR'] =  list(map(lambda x, y, z,open,high,close: (x + 1.1 if (y > z or (z < op*0.99 and high > z)) else x),top_all.topR, top_all.low, top_all.lasth1d,top_all.open,top_all.high,top_all.close))
+            top_all['topR'] =  list(map(lambda x, y, z,op,high,close: (x + 1.1 if (y > z or (z < op*0.99 and high > z)) else x),top_all.topR, top_all.low, top_all.lasth1d,top_all.open,top_all.high,top_all.close))
         else:
             if (top_all['open'][-1] == top_all['lasto1d'][-1]) and (top_all['open'][0] == top_all['lasto1d'][0]):
                 top_all['topR'] =  list(map(lambda x, y, z,op,high,close: (x + 1.1 if ( (y > z and high > z) or (z < op*0.99 and high > z and close > z)) else x),top_all.topR, top_all.low, top_all.lasth2d,top_all.open,top_all.high,top_all.close))
