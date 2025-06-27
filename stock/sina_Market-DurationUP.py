@@ -306,14 +306,14 @@ if __name__ == "__main__":
                         if 915 < cct.get_now_time_int() < 1445:
                             # top_temp = top_all.query('(lasth1d > upper and lasto1d*0.996 < lastp1d < lasto1d*1.003 and lastl1d <ma201d*1.1 and low > lastp1d*0.999 and close > upper) or (b1_v < 1 and lastp1d > high4  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2 and close > upper and close >lastp1d and not name.str.contains("ST"))')
                             # top_temp = top_all.query('open > high4 and (low > open*0.99 or low > lasth2d) and open > lasth2d and a1_v > 0')
-                            top_temp =  top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5) and a1_v > 0) or  open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d and a1_v > 0')
+                            top_temp =  top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5) and 3 < bandwidth < 10 and a1_v > 0) or  open > high4 and (low > open*0.999 or low > lasth1d) and open > lasth1d and a1_v > 0')
                         else:
                             top_temp = top_all.query('open > high4 and (low > open*0.99 or low > lasth2d) and open > lasth2d')
                     else:
                         if 915 <= cct.get_now_time_int() < 1445:
-                            top_temp = top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5) and a1_v > 0 ) or  open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d and a1_v > 0')
+                            top_temp = top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5) and 3 < bandwidth < 10 and a1_v > 0 ) or  open > high4 and (low > open*0.999 or low > lasth1d) and open > lasth1d and a1_v > 0')
                         else:
-                            top_temp = top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5) ) or  open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d ')
+                            top_temp = top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5) ) or  open > high4 and (low > open*0.999 or low > lasth1d) and open > lasth1d ')
 
                     top_end = top_temp[-5:].copy()
                     top_temp = pct.powerCompute_df(

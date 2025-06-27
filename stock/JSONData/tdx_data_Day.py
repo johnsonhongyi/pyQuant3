@@ -42,7 +42,6 @@ global initTdxdata, initTushareCsv
 initTdxdata = 0
 initTushareCsv = 0
 atomStockSize = 50
-latest_trade_date = cct.latest_trade_date
 # tdx_index_code_list = ['999999', '399001']
 tdx_index_code_list = ['999999', '399006', '399005', '399001']
 # win7rootAsus = r'D:\Program Files\gfzq'
@@ -1330,7 +1329,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
     if not power:
         return df
 
-    if dm is not None:
+    if dm is not None and code in dm.index:
         today = dm.dt.loc[code]
     else:
         today = cct.get_today()
@@ -1440,8 +1439,10 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
         writedm = True
     if df is not None and len(df) > 0:
         if df.index.values[-1] == today:
-            if dm is not None and not isinstance(dm, Series):
+            if dm is not None and not isinstance(dm, Series) and code in dm.index:
                 dz = dm.loc[code].to_frame().T
+            else:
+                return df
             if index_status:
                 vol_div = 1000
             else:
@@ -2079,25 +2080,27 @@ def search_Tdx_multi_data_duration(fname='tdx_all_df_300', table='all_300', df=N
 # print df.index.get_level_values('code').unique().shape
 # print df.loc['600310']
 
-duration_zero=[]
-duration_other=[]
+# duration_zero=[]
+# duration_other=[]
 
 def check_tdx_Exp_day_duration(market='all'):
-    # duration_zero=[]
-    # duration_other=[]
+    duration_zero=[]
+    duration_other=[]
     df = sina_data.Sina().market(market)
     df = df[df.high > 0]    
     for code in df.index:
         dd = get_tdx_Exp_day_to_df(code, dl=1) 
-        duration = cct.get_today_duration(dd.date) if dd is not None and len(dd) > 5 else -1
+        duration = cct.get_today_duration(dd.date,tdx=True) if dd is not None and len(dd) > 5 else -1
         if duration == 0:
             duration_zero.append(code)
         elif duration > 0 and duration < 60:
             duration_other.append(code)
+    duration_zero =list(set(duration_zero))
+    duration_other = list(set(duration_other))
     print(("duration_zero:%s duration_other:%s"%(len(duration_zero),len(duration_other))))
     return duration_other
 
-def Write_market_all_day_mp(market='all', rewrite=False):
+def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
     """
     rewrite True: history date ?
     rewrite False: Now Sina date
@@ -2211,7 +2214,21 @@ def Write_market_all_day_mp(market='all', rewrite=False):
             #     res=get_tdx_append_now_df_api_tofile(code,dm=dm, newdays=0)
             #     print("status:%s\t"%(len(res)),)
             #     results.append(res)
-            print("AllWrite:%s t:%s"%(len(duration_code),round(time.time() - time_t, 2)))
+            if recheck:
+                duration_code=check_tdx_Exp_day_duration(market)
+                if len(duration_code) > 0 and recheck: 
+                    if len(duration_code) < 30:
+                        print(f'recheck duration_code:{len(duration_code)} to write')
+                    else:
+                        print(f'recheck duration_code write:{len(duration_code)}: {duration_code}')
+
+                    results = cct.to_mp_run_async(
+                        get_tdx_append_now_df_api_tofile, duration_code, dm=dm, newdays=0)
+                    print(("market:%s A:%s open_dm:%s" % (mk, len(df),len(dm))), end=' ')
+
+        if recheck:
+            recheck = False
+        print("AllWrite:%s t:%s"%(len(duration_code),round(time.time() - time_t, 2)))
 
 
 #    print "market:%s is succ result:%s"%(market,results),
@@ -3140,10 +3157,10 @@ def compute_condition_up_add_up(df,condition_up):
     if len(condition_up) == 1:
         idx_date = condition_up.jop_date[0]
         idx_close = df.loc[idx_date,'close']
-        df2 = df[df.index >= idx_date]
-        condition_up2 = df2.query(f'high > high.shift(1) and close > close.shift(1)*0.99 and close >= {idx_close}')  #1跳空新高收高
-        # condition_up2 = df.query(f'low > low.shift(1) and high > high.shift(1) and close > high.shift(1)*0.999 and high > upper')  #2跳空新高收高
-        condition_up3 = df2.query('(close - close.shift(1))/close.shift(1)*100 > 6 and close >= high*0.99')
+        # df2 = df[df.index >= idx_date]
+        # condition_up2 = df2.query(f'high > high.shift(1) and close > close.shift(1)*0.99 and close >= {idx_close}')  #1跳空新高收高
+        condition_up2 = df.query(f'low > low.shift(1) and high > high.shift(1) and close > high.shift(1)*0.999 and high > upper')  #2跳空新高收高
+        condition_up3 = df.query('(close - close.shift(1))/close.shift(1)*100 > 4 and close >= high*0.99')
         condition_up2 = pd.concat([condition_up2,condition_up3],axis=0)
     elif len(condition_up) > 1:
         # idx_date = condition_up.index[0]
@@ -3245,7 +3262,6 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     
     upperL = dfupper.close[ (dfupper.high > dfupper.upper) & (dfupper.upper >0) ]
 
-    # import ipdb;ipdb.set_trace()
 
     # upperL = df.close[ (df.high > df.upper) & (df.close > df.ma5d) & (df.close > df.close.shift(1)) ]
 
@@ -3363,6 +3379,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     #计算回补
     # last_TopR_days -> 15
+
     hop_df = compute_condition_up(dd[-15:])
     # condition_up = hop_df[hop_df.hop == 'up']
     condition_up = hop_df[(hop_df.fill_day.isnull() ) & (hop_df.hop == 'up')]   if len(hop_df) > 0  else pd.DataFrame()
@@ -5161,7 +5178,7 @@ if __name__ == '__main__':
     # check_tdx_Exp_day_duration('all')
     # print("use time:%s"%(time.time()-time_s))
     # import ipdb;ipdb.set_trace()
-    # write_to_all()
+    write_to_all()
     # code='399001'
     # code='000862'
     # code='000859'
@@ -5286,7 +5303,7 @@ if __name__ == '__main__':
     # code='603212'
     code='002670'
     code='600110'
-    code='002235'
+    code='001236'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
@@ -5303,6 +5320,8 @@ if __name__ == '__main__':
 
     # # dd = compute_ma_cross(dd,resample='d')
     # print(get_tdx_stock_period_to_type(dd)[-5:])
+    df = get_tdx_append_now_df_api_tofile('001236')
+    # df = get_tdx_append_now_df_api('001236')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
@@ -5315,6 +5334,8 @@ if __name__ == '__main__':
     print(df.loc[:,df.columns[df.columns.str.contains('per[0-9]{1}d', regex=True, case=False)]][-1:])
     print(f'macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
     import ipdb;ipdb.set_trace()
+    # write_to_all()
+    
 
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
 

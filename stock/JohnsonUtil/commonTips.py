@@ -48,9 +48,11 @@ requests.adapters.DEFAULT_RETRIES = 0
 # sys.path.append("..")
 # print sys.path
 # from JSONData import tdx_data_Day as tdd
-global initGlobalValue,latest_trade_date
+global initGlobalValue
+global last_trade_date,is_trade_date_today
+
+
 initGlobalValue = 0
-latest_trade_date = a_trade_calendar.get_latest_trade_date()
 # clean_terminal = ["Python Launcher", 'Johnson — -bash', 'Johnson — python']
 clean_terminal = ["Python Launcher", 'Johnson — -bash', 'Johnson — python']
 writecode = "cct.write_to_blocknew(block_path, dd.index.tolist())"
@@ -122,32 +124,67 @@ from JohnsonUtil.prettytable import ALL as ALL
 def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=False,limit_show=20):
 
     # alist = [x for x in set(df.columns.tolist())]
-    if 'category' in df.columns and len(df) > 0:
-        df['category']=df['category'].apply(lambda x:str(x).replace('\r','').replace('\n',''))
-        topSort=counterCategory(df,'category',table=True).split()
-        topSort.reverse()
-        top_dic={}
-        for x in topSort:
-            top_dic[x.split(':')[0]]=x
-            # top_dic[x.split(':')[0]]=x.replace(':','')
-        # top_key = [x.split(':')[0] for x in topSort]
-        # top_value = [x.replace(':','') for x in topSort]
-        # sorted_top_dic = dict(sorted(top_dic.items(), key=lambda item: item[1], reverse=False))
-        for idx in df.index:
-            ca_list = df.loc[idx].category.split(';')
-            ca_listB = ca_list.copy()
-            for key in top_dic:
-                if key in ca_list:
-                    if ca_listB.index(key) != 0:
-                        element_to_move = ca_listB.pop(ca_listB.index(key))
-                        ca_listB.insert(0, top_dic[key])
+    # cat_col = ['涨停原因类别','category']
+    cat_col = ['category']
+    for col in cat_col:
+        if col == '涨停原因类别':
+            sep_ = '+'
+        else:
+            sep_ = ';'
 
-            if ca_listB !=  ca_list:
-                ca_listC=[('' if c.find(':') > 0 else ' ')+c for c in ca_listB]
-                # ca_listD= [x for x in ca_listC if x.find(':') > 0]
-                # list_to_str = "".join([for x in ca_listB if x.find(':') else x+''])
-                list_to_str = "".join(ca_listC)
-                df.loc[idx,'category']=list_to_str
+        if col in df.columns and len(df) > 0:
+            df[col]=df[col].apply(lambda x:str(x).replace('\r','').replace('\n',''))
+            topSort=counterCategory(df,col,table=True).split()
+            topSort.reverse()
+            top_dic={}
+            for x in topSort:
+                top_dic[x.split(sep_)[0]]=x
+                # top_dic[x.split(':')[0]]=x.replace(':','')
+            # top_key = [x.split(':')[0] for x in topSort]
+            # top_value = [x.replace(':','') for x in topSort]
+            # sorted_top_dic = dict(sorted(top_dic.items(), key=lambda item: item[1], reverse=False))
+            for idx in df.index:
+                ca_list = df.loc[idx][col].split(sep_)
+                ca_listB = ca_list.copy()
+                for key in top_dic:
+                    if key in ca_list:
+                        if ca_listB.index(key) != 0:
+                            element_to_move = ca_listB.pop(ca_listB.index(key))
+                            ca_listB.insert(0, top_dic[key])
+
+                if ca_listB !=  ca_list:
+                    ca_listC=[('' if c.find(sep_) > 0 else ' ')+c for c in ca_listB]
+                    # ca_listD= [x for x in ca_listC if x.find(':') > 0]
+                    # list_to_str = "".join([for x in ca_listB if x.find(':') else x+''])
+                    list_to_str = "".join(ca_listC)
+                    df.loc[idx,col]=list_to_str
+
+    # if 'category' in df.columns and len(df) > 0:
+    #     df['category']=df['category'].apply(lambda x:str(x).replace('\r','').replace('\n',''))
+    #     topSort=counterCategory(df,'category',table=True).split()
+    #     topSort.reverse()
+    #     top_dic={}
+    #     for x in topSort:
+    #         top_dic[x.split(':')[0]]=x
+    #         # top_dic[x.split(':')[0]]=x.replace(':','')
+    #     # top_key = [x.split(':')[0] for x in topSort]
+    #     # top_value = [x.replace(':','') for x in topSort]
+    #     # sorted_top_dic = dict(sorted(top_dic.items(), key=lambda item: item[1], reverse=False))
+    #     for idx in df.index:
+    #         ca_list = df.loc[idx].category.split(';')
+    #         ca_listB = ca_list.copy()
+    #         for key in top_dic:
+    #             if key in ca_list:
+    #                 if ca_listB.index(key) != 0:
+    #                     element_to_move = ca_listB.pop(ca_listB.index(key))
+    #                     ca_listB.insert(0, top_dic[key])
+
+    #         if ca_listB !=  ca_list:
+    #             ca_listC=[('' if c.find(':') > 0 else ' ')+c for c in ca_listB]
+    #             # ca_listD= [x for x in ca_listC if x.find(':') > 0]
+    #             # list_to_str = "".join([for x in ca_listB if x.find(':') else x+''])
+    #             list_to_str = "".join(ca_listC)
+    #             df.loc[idx,'category']=list_to_str
     else:
         print('df is None')
     alist = df.columns.tolist()
@@ -568,17 +605,26 @@ def fetch_stocks_trade_date():
     return None
 
 def is_trade_date(date=datetime.date.today()):
-    trade_date = fetch_stocks_trade_date()
-    if trade_date is None:
-        return None
-    if date in trade_date:
-        return True
+    trade_status = GlobalValues().getkey('is_trade_date')
+    if trade_status is None:
+        trade_date = fetch_stocks_trade_date()
+        if trade_date is None:
+            return None
+        if date in trade_date:
+            return True
+        else:
+            return False
     else:
-        return False
+        return trade_status
 
 
-def get_latest_trade_date():
-    return(a_trade_calendar.get_latest_trade_date())
+
+def get_last_trade_date():
+    today = datetime.date.today().strftime('%Y-%m-%d')
+    return(a_trade_calendar.get_pre_trade_date(today))
+
+is_trade_date_today = is_trade_date()
+last_trade_date = get_last_trade_date()
 
 def get_day_istrade_date(dt=None):
     #2025
@@ -1963,12 +2009,17 @@ def testdf2(df):
         pass
 
 
-def get_today_duration(datastr, endday=None):
+def get_today_duration(datastr, endday=None,tdx=False):
+    # import ipdb;ipdb.set_trace()
     if datastr is not None and len(datastr) > 6:
         if endday:
             today = datetime.datetime.strptime(day8_to_day10(endday), '%Y-%m-%d').date()
         else:
-            today = datetime.date.today()
+            if tdx and is_trade_date_today and get_now_time_int() < 1505 and datastr == last_trade_date:
+                return 0 
+                # today = last_trade_date
+            else:
+                today = datetime.date.today()
         # if get_os_system() == 'mac':
         #     # last_day = datetime.datetime.strptime(datastr, '%Y/%m/%d').date()
         #     last_day = datetime.datetime.strptime(datastr, '%Y-%m-%d').date()
@@ -5564,7 +5615,8 @@ if __name__ == '__main__':
     # rzrq['all']='nan'
     print(f'get_work_day_idx:{get_work_day_idx()}')
     print(get_tdx_dir_blocknew_dxzq(r'D:\MacTools\WinTools\new_tdx2\T0002\blocknew\090.blk'))
-    print(is_trade_date())
+    print(f'is_trade_date():{is_trade_date()}')
+    print(f'is_trade_date:{is_trade_date_today}')
     print(isDigit('nan None'))
     print("指数的贡献度:",isDigit('指数的贡献度'))
 
