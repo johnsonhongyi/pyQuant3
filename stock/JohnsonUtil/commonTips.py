@@ -2015,7 +2015,7 @@ def get_today_duration(datastr, endday=None,tdx=False):
         if endday:
             today = datetime.datetime.strptime(day8_to_day10(endday), '%Y-%m-%d').date()
         else:
-            if tdx and is_trade_date_today and get_now_time_int() < 1500 and datastr == last_trade_date:
+            if tdx and ((is_trade_date_today and get_now_time_int() < 1500) or not is_trade_date_today) and datastr == last_trade_date:
                 return 0 
                 # today = last_trade_date
             else:
