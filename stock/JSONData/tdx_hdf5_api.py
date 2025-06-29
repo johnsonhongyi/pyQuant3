@@ -411,7 +411,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
             with SafeHDFStore(fname) as store:
                 if store is not None:
                     if showtable:
-                        print(f"keys:{store.keys()}")
+                        print(f"fname: {(fname)} keys:{store.keys()}")
                     if '/' + table in list(store.keys()):
                         tmpdf=store[table]
                         tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
@@ -649,7 +649,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
             with SafeHDFStore(fname) as store:
                 if store is not None:
                     if showtable:
-                        print(f"keys:{store.keys()}")
+                        print(f"fname: {(fname)} keys:{store.keys()}")
                     try:
                         if '/' + table in list(store.keys()):
                             dd=store[table]

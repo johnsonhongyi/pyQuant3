@@ -725,7 +725,7 @@ if __name__ == '__main__':
                         elif cct.get_now_time_int() < 2400:
                             print(".", end=' ')
                             print("write dm to file")
-                            if (cct.get_work_day_status() and cct.get_now_time_int() > 1502) :
+                            if (cct.get_work_day_status() and cct.get_now_time_int() > 1502) or not cct.get_work_day_status():
                                 tdd.Write_market_all_day_mp('all')
                                 top_temp = cct.GlobalValues().getkey('top_max')
                                 codew = stf.WriteCountFilter(
