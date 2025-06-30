@@ -158,13 +158,13 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     df['lvolr%s' % (resample)] = df['volume']
     # df['volume'] = (map(lambda x, y: round(x / y / radio_t, 1), df.nvol.values, df.lvolume.values))
     
-    if cct.get_now_time_int() > 1530:
-        df['volume'] = (list(map(lambda x, y, z: round((x / y / radio_t) if z <
-                                                  9.9 else (x / y), 1), df.nvol.values, df.lowvol.values, df.percent.values)))
-                                                  # 9.9 else (x / y), 1), df.nvol.values, df.ma5vol.values, df.percent.values)))
-    else:
-        df['volume'] = (list(map(lambda x, y, z: round((x / y / radio_t) if z <
-                                                  9.9 else (x / y), 1), df.nvol.values, df.lowvol.values, df.percent.values)))
+    # if cct.get_now_time_int() > 1530:
+    #     df['volume'] = (list(map(lambda x, y, z: round((x / y / radio_t) if z <
+    #                                               9.9 else (x / y), 1), df.nvol.values, df.lowvol.values, df.percent.values)))
+    #                                               # 9.9 else (x / y), 1), df.nvol.values, df.ma5vol.values, df.percent.values)))
+    # else:
+    #     df['volume'] = (list(map(lambda x, y, z: round((x / y / radio_t) if z <
+                                                  # 9.9 else (x / y), 1), df.nvol.values, df.lowvol.values, df.percent.values)))
     
 
     # df['volume'] = (map(lambda x, y,z: round((x / y / radio_t) if z < 9.9 else (x / y) , 1), df.nvol.values, df.ma5vol.values,df.percent.values))

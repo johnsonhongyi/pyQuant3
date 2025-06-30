@@ -186,7 +186,7 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=F
     #             list_to_str = "".join(ca_listC)
     #             df.loc[idx,'category']=list_to_str
     else:
-        print('df is None')
+        log.info('df is None')
     alist = df.columns.tolist()
     if header:
 
