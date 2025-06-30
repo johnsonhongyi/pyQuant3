@@ -833,19 +833,28 @@ if __name__ == "__main__":
                     status = False
                     lastpTDX_DF = pd.DataFrame()
 
-            elif st.startswith('3d') or st.startswith('d') or st.startswith('5d'):
+            elif st.startswith('3d') or st.startswith('d') or st.startswith('5d') or st.startswith('m'):
                 if st.startswith('3d'):
                     cct.GlobalValues().setkey('resample','3d')
+                    duration_date = ct.Resample_LABELS_Days[cct.GlobalValues().getkey('resample')]
                     top_all = pd.DataFrame()
                     lastpTDX_DF = pd.DataFrame()
                 elif st.startswith('d'):
                     cct.GlobalValues().setkey('resample','d')
+                    duration_date = ct.Resample_LABELS_Days[cct.GlobalValues().getkey('resample')]
                     top_all = pd.DataFrame()
                     lastpTDX_DF = pd.DataFrame()
                 elif st.startswith('5d'):
                     cct.GlobalValues().setkey('resample','w')
+                    duration_date = ct.Resample_LABELS_Days[cct.GlobalValues().getkey('resample')]
                     top_all = pd.DataFrame()
                     lastpTDX_DF = pd.DataFrame()
+                elif st.startswith('m'):
+                    cct.GlobalValues().setkey('resample','m')
+                    duration_date = ct.Resample_LABELS_Days[cct.GlobalValues().getkey('resample')]
+                    top_all = pd.DataFrame()
+                    lastpTDX_DF = pd.DataFrame()
+                    
 
             elif st.startswith('w') or st.startswith('a'):
                 args=cct.writeArgmain().parse_args(st.split())
