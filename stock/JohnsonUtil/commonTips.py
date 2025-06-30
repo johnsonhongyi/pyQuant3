@@ -3685,6 +3685,12 @@ def reduce_memory_usage(df, verbose=False):
                     end_mem, 100 * (start_mem - end_mem) / start_mem
                 )
             )
+        else:
+            log.debug(
+                "Mem. usage decreased to {:.2f} Mb ({:.1f}% reduction)".format(
+                    end_mem, 100 * (start_mem - end_mem) / start_mem
+                )
+            )
     return df
 
 def read_to_indb(days=20,duplicated=False):
