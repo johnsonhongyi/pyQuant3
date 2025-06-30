@@ -737,7 +737,7 @@ if __name__ == "__main__":
                             # top_temp =  top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5)) or  open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d')
                             
                             # top_temp =   top_all.query('close > df2 and close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1 and  ((close-lastp1d)/lastp1d*100) > maxp')
-                            top_temp =   top_all.query('close > df2 and close > high4 and close > lasth2d and close > lasth3d and close > lasth4d and close > upper2 and  ((close-lastp2d)/lastp2d*100) > maxp ')
+                            top_temp =   top_all.query('close > upper1 and close > df2 and close > high4 and close > lasth2d and close > lasth3d and close > lasth4d and close > upper2 and  ((close-lastp2d)/lastp2d*100) > maxp and close > hmax*0.99 and close > max5')
                             
                             # top_temp =   top_all.query('open > high4 and open > lasth1d and open > lasth2d and open > lasth3d and open > upper1 and  ((close-lastp1d)/lastp1d*100) > maxp')
                         elif 945 <= cct.get_now_time_int() < 1015:
@@ -747,7 +747,7 @@ if __name__ == "__main__":
                             # top_temp =  top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5)) or  open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d')
                             
                             # top_temp =   top_all.query('close > df2 and close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1 and  ((close-lastp1d)/lastp1d*100) > maxp')
-                            top_temp =   top_all.query('close > df2 and close > high4 and close > lasth2d and close > lasth3d and close > lasth4d and close > upper2 and  ((close-lastp2d)/lastp2d*100) > maxp and a1_v > 0')
+                            top_temp =   top_all.query('close > df2 and close > high4 and close > lasth2d and close > lasth3d and close > lasth4d and close > upper2 and  ((close-lastp2d)/lastp2d*100) > maxp and a1_v > 0 and close > hmax*0.99 and close > max5')
 
                             # top_temp =   top_all.query('close > high4 and close > lasth2d and close > lasth3d and close > lasth4d and close > upper2 and  ((close-lastp2d)/lastp2d*100) > maxp')
                             # top_temp =   top_all.query('open > high4 and open > lasth2d and open > lasth3d and open > lasth4d and open > upper2 and  ((close-lastp2d)/lastp2d*100) > maxp')
@@ -764,10 +764,14 @@ if __name__ == "__main__":
                             # top_temp = top_all.query('(lasth1d > upper and lasto1d*0.996 < lastp1d < lasto1d*1.003 and lastl1d <ma201d*1.1 and low > lastp1d*0.999 and close > upper) or (b1_v < 1 and lastp1d > high4  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2 and close > upper and close >lastp1d and not name.str.contains("ST"))')
                             # top_temp = top_all.query('open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d and a1_v > 0')
                             # top_temp =   top_all.query('close > df2 and close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1 and  ((close-lastp1d)/lastp1d*100) > maxp')
-                            top_temp =   top_all.query('close > df2 and close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1 and  ((close-lastp1d)/lastp1d*100) > maxp and 3 < bandwidth < 10')
+                            top_temp =   top_all.query('close > upper1 and close > df2 and close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1 and  ((close-lastp1d)/lastp1d*100) > maxp and 3 < bandwidth < 10 and close > hmax*0.99 and close > max5 ')
                             
                             # top_temp = top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5) ) or  open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d ')
-                        elif 945 <= cct.get_now_time_int() < 1430 :
+                        elif 945 <= cct.get_now_time_int() < 1015:
+
+                            top_temp =   top_all.query('close > df2 and close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1 and  ((close-lastp1d)/lastp1d*100) > maxp and 3 < bandwidth < 10 and a1_v > 0 and close > hmax*0.99 and close > max5 ')
+                            
+                        elif 1015 <= cct.get_now_time_int() < 1430 :
                             # top_temp = top_all.query('(lasto1d*0.996 < lastp1d < lasto1d*1.003 and  lastl1d <ma201d*1.1 and low > lastp1d*0.999) or (b1_v < 1 and per1d > 5 and low >= lastp1d and not name.str.contains("ST"))')
                             # top_temp = top_all.query('(ral > 2 and fib > 1 and lasto1d*0.99 < lastp1d < lasto1d*1.1 and  lastl1d <ma201d*1.1 and low > lasth1d) or ((open > lastp1d*1.03 or per1d > 5 or open > hmax) and low >= lastp1d*0.998 and not name.str.contains("ST"))')
                             # top_temp = top_all.query('((lasth1d > hmax and lasth2d < hmax ) or(lasth2d > upper and close >upper ) ) and lastl1d < upper and high >upper and percent > 1')
