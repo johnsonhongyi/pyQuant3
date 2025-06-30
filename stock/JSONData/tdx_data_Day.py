@@ -5323,7 +5323,8 @@ if __name__ == '__main__':
     df = get_tdx_append_now_df_api_tofile('001236')
     # df = get_tdx_append_now_df_api('001236')
 
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
+    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='3d' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )

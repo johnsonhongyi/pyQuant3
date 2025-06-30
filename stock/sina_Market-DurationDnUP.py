@@ -80,7 +80,8 @@ if __name__ == "__main__":
     duration_date = ct.duration_date_month
     du_date = duration_date
     # resample = ct.resample_dtype
-    resample = 'm'
+    # resample = 'm'
+    cct.GlobalValues().setkey('resample','m')
     # print cct.last_tddate(2)
     # end_date = cct.last_tddate(days=ct.lastdays)
     end_date = None
@@ -114,6 +115,8 @@ if __name__ == "__main__":
             # top_all = top_now
             # top_now.to_hdf("testhdf5", 'marketDD', format='table', complevel=9)
             '''
+            resample = cct.GlobalValues().getkey('resample')
+
             if st is None:
                 st_key_sort = '%s %s'%(st_key_sort.split()[0],cct.get_index_fibl())
 
@@ -481,7 +484,7 @@ if __name__ == "__main__":
                 top_all = pd.DataFrame()
                 time_s = time.time()
                 status = False
-            elif st.startswith('d') or st.startswith('dt'):
+            elif st.startswith('dd') or st.startswith('dt'):
                 # dl = st.split()
                 # if len(dl) == 2:
                 #     dt = dl[1]
@@ -525,6 +528,27 @@ if __name__ == "__main__":
                     top_all = pd.DataFrame()
                     time_s = time.time()
                     status = False
+                    lastpTDX_DF = pd.DataFrame()
+            elif st.startswith('3d') or st.startswith('d') or st.startswith('5d') or st.startswith('m'):
+                if st.startswith('3d'):
+                    cct.GlobalValues().setkey('resample','3d')
+                    duration_date = ct.Resample_LABELS_Days[cct.GlobalValues().getkey('resample')]
+                    top_all = pd.DataFrame()
+                    lastpTDX_DF = pd.DataFrame()
+                elif st.startswith('d'):
+                    cct.GlobalValues().setkey('resample','d')
+                    duration_date = ct.Resample_LABELS_Days[cct.GlobalValues().getkey('resample')]
+                    top_all = pd.DataFrame()
+                    lastpTDX_DF = pd.DataFrame()
+                elif st.startswith('5d'):
+                    cct.GlobalValues().setkey('resample','w')
+                    duration_date = ct.Resample_LABELS_Days[cct.GlobalValues().getkey('resample')]
+                    top_all = pd.DataFrame()
+                    lastpTDX_DF = pd.DataFrame()
+                elif st.startswith('m'):
+                    cct.GlobalValues().setkey('resample','m')
+                    duration_date = ct.Resample_LABELS_Days[cct.GlobalValues().getkey('resample')]
+                    top_all = pd.DataFrame()
                     lastpTDX_DF = pd.DataFrame()
 
             elif st.startswith('w') or st.startswith('a'):
