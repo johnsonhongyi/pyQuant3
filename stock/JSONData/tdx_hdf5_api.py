@@ -395,7 +395,6 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 #        return False
     df=df.fillna(0)
     df=df[~df.index.duplicated(keep='first')]
-
     code_subdf=df.index.tolist()
     global RAMDISK_KEY
     if not RAMDISK_KEY < 1:
@@ -529,7 +528,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
     
         with SafeHDFStore(fname) as h5:
             df=df.fillna(0)
-            # df=cct.reduce_memory_usage(df)
+            df=cct.reduce_memory_usage(df,verbose=False)
             log.info(f'df.shape:{df.shape}')
             if h5 is not None:
                 if '/' + table in list(h5.keys()):
