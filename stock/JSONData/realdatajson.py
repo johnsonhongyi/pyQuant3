@@ -107,7 +107,7 @@ def _parsing_Market_price_json(url):
     # js=json.loads(text,encoding='GBK')
     # df = pd.DataFrame(pd.read_json(js, dtype={'code':object}),columns=ct.MARKET_COLUMNS)
     js=json.loads(text)
-    log.debug("Market json:%s"%js[0])
+    log.debug("Market json:%s count:%s"%(js[0],len(js)))
     df = pd.DataFrame(js,columns=ct.SINA_Market_COLUMNS)
 
 

@@ -46,11 +46,13 @@ Resample_LABELS_Days = {'d':duration_date_day,'3d':duration_date_up,
 # duration_date_month = 300
 
 '''
+ex:top_all.query(' 10 < bandwidth  < 20 and high > hmax and percmax > 5 and topR >0')
 percmax: 10 days ct.compute_lastdays+1
 turnover : 成交额
 top_temp.loc[:,top_temp.columns.str.contains( "per\d{1,2}d$",regex= True)]
 topU : 长周期站上upper
 eneU : 中规上方数量
+ top_all.query('close > high4 and lasth1d < high4 and lastp1d < upper1 and high > upper1 and low > open*0.99')
 ene : ->boll
 maxp :15周期的波动幅度
 fib :15周期大于2的    —>maxpcout
@@ -60,6 +62,7 @@ red : 主升阳K 连阳启动的大阳线后
 green : 主降绿K 低点下移
 lastdu4 : 4天振幅
 truer :
+hmax: close highest
 high4 :
 low4 :
 max5 :

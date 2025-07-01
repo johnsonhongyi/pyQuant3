@@ -620,8 +620,8 @@ if __name__ == "__main__":
                             
                             
                         else:
-                            top_temp = top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5)) or open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d')
-
+                            # top_temp = top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5)) or open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d')
+                            top_temp = top_all.query('close > df2 and close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1 and  ((close-lastp1d)/lastp1d*100) > maxp')
 
                 top_end=top_all[-int((ct.PowerCount) / 10):].copy()
                 top_temp=pct.powerCompute_df(top_temp, dl=ct.PowerCountdl)
