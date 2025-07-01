@@ -2570,12 +2570,14 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
         else:
             cpu_co = int(round(len(urllist)/100,0))
         cpu_used = int(cpu_count()/2) - 1 
+        log.debug(f'count:{len(urllist)} cpu_co:{cpu_co}')
         pool_count = (cpu_used) if cpu_co > (cpu_used) else cpu_co
         # pool_count = (cpu_count()-2) if cpu_co > (cpu_count()-2) else cpu_co
         if  cpu_co > 1 and 1300 < get_now_time_int() < 1500:
             pool_count = int(cpu_count() / 2) - 1
         if len(kwargs) > 0 :
                 # pool = ThreadPool(12)
+                log.debug(f'cmd:{cmd} kwargs:{kwargs}')
                 func = partial(cmd, **kwargs)
                 # TDXE:44.26  cpu 1   
                 # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
@@ -2590,6 +2592,7 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                         data_count=len(urllist)
                         progress_bar = tqdm(total=data_count)
                         # print("mapping ...")
+                        log.debug(f'data_count:{data_count}')
                         # tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols)
                         results = tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count)
                         # print("running ...")

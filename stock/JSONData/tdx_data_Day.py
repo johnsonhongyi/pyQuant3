@@ -2741,7 +2741,7 @@ def get_duration_Index_date(code='999999', dt=None, ptype='low', dl=None, power=
                 code, power=power).sort_index(ascending=False)
             dt = get_duration_price_date(code, dt=dt, ptype=ptype, df=df)
             dt = df[df.index <= dt].index.values[changedays]
-            log.info("LastDF:%s,%s" % (dt, dl))
+            log.info("code:%s LastDF:%s,%s" % (code,dt, dl))
         else:
             if len(str(dt)) == 8:
                 dt = cct.day8_to_day10(dt)
@@ -4721,8 +4721,8 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             # dt = get_duration_price_date('999999', dt=dt,ptype=ptype,df=df)
             # dt = df[df.index <= dt].index.values[0]
 #            dt=get_duration_Index_date('999999',dl=dt)
+            log.info("Codelist:%s LastDF:%s,%s" % (len(codeList),dt, dl))
             dt = None
-            log.info("LastDF:%s,%s" % (dt, dl))
         else:
             if len(str(dt)) == 8:
                 dt = cct.day8_to_day10(dt)
