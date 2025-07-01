@@ -163,8 +163,8 @@ def codeQuery_show_cct(idxkey,columns_format,workstatus,orderby='dff'):
     cmd=f"format_for_print_show({code}.sort_values('{orderby}', ascending=False),{columns_format},showCount=True,col='{orderby}')"
     return(cmd)
 
-def codeQuery_show_single(cmd,columns_format,orderby='dff',table=True):
-    cmd=f"format_for_print_show({cmd}.sort_values('{orderby}', ascending=False),{columns_format},showCount=True,col='{orderby}',table='{table},')"
+def codeQuery_show_single(cmd,columns_format,orderby='dff',table=True,noformat=False):
+    cmd=f"format_for_print_show({cmd}.sort_values('{orderby}', ascending=False),{columns_format},showCount=True,col='{orderby}',table='{table}',noformat='{noformat}')"
     return(cmd)
 
 tqdm_mininterval=2

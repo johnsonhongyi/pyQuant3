@@ -2352,13 +2352,17 @@ def get_sina_data_code(code,index=False):
         cname = sina_data.Sina().get_stock_code_data(code,index=index).name[0]
     return cname
 
-def get_sina_datadf_cnamedf(code,df,index=False):
+def get_sina_datadf_cnamedf(code,df,index=False,categorylimit=16):
     # index_status=False
     dm = get_sina_data_df(code)
+    # ths = wcd.search_ths_data(code)
+    ths = wcd.get_wencai_data(df,categorylimit=categorylimit)
     if 'close' not in df.columns:
         dd = cct.combine_dataFrame(df,dm.loc[:,['close','name']])
     else:
         dd = cct.combine_dataFrame(df,dm['name'])
+    if ths is not None and 'category' in ths.columns:
+        dd = cct.combine_dataFrame(dd,ths['category'])
     # cname = sina_data.Sina().get_code_cname(code)
     return dd
 

@@ -1031,7 +1031,7 @@ def get_codelist_df(codelist):
         log.warn("wcdf:%s" % (len(wcdf)))
     return wcdf
 
-def get_wencai_data(dm):
+def get_wencai_data(dm,categorylimit=16):
      #    if isinstance(codelist,list):
     # global wencai_count
     # global pct_status
@@ -1041,7 +1041,7 @@ def get_wencai_data(dm):
         df = search_ths_data(dm.index.tolist())
         if df is not None and len(df) > 0:
             # df['category'] = df['category'].apply(lambda x:str(x).replace('\n',''))
-            df['category'] = df['category'].apply(lambda x:str(x)[:16])
+            df['category'] = df['category'].apply(lambda x:str(x)[:categorylimit])
     return df
 
 def get_wencai_data_old(dm, market='wencai', days=120, pct=True):
@@ -1235,7 +1235,7 @@ def get_write_wencai_market_to_csv(df=None, market='wcbk', renew=False, days=60)
 #     # df_code = df.query("股票代码 == @cct.code_to_symbol_ths(@code)")
 #     return df
 
-def search_ths_data(code):
+def search_ths_data(code,category=False):
     df_ths = cct.GlobalValues().getkey('df_ths')
     if df_ths is None:
         # fpath = r'../JohnsonUtil\wencai\同花顺板块行业.xls'
@@ -1268,7 +1268,8 @@ def search_ths_data(code):
     else:
         # df_code = df.query("股票代码 == @cct.code_to_symbol_ths(@code)")
         comm_code = code
-        
+    # if category:
+    #     df=df.loc[:,['category']]
     return df.loc[comm_code]
 
 def get_wcbk_df(filter='混改', market='nybk', perpage=1000, days=120, monitor=False):
