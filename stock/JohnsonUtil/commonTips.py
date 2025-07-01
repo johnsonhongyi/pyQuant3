@@ -256,7 +256,7 @@ def list_replace(lst, old=1, new=10):
         pass
 
 
-def format_for_print_show(df,columns_format=None,showCount=False,col=None,table=False):
+def format_for_print_show(df,columns_format=None,showCount=False,col=None,table=False,noformat=False):
     if columns_format is None:
         columns_format = ct.Monitor_format_trade
     if col is not None and col not in columns_format:
@@ -268,7 +268,10 @@ def format_for_print_show(df,columns_format=None,showCount=False,col=None,table=
     #     count_string = (f'Count:{len(df)}')
     #     table = format_for_print(df.loc[:, columns_format],count=count_string)
     # else:
-    table = format_for_print(df.loc[:, columns_format],showCount=showCount,table=table,limit_show=50)
+    if noformat:
+        table = format_for_print(df,showCount=showCount,table=table,limit_show=50)
+    else:
+        table = format_for_print(df.loc[:, columns_format],showCount=showCount,table=table,limit_show=50)
     return table
 
 def format_for_print2(df):
@@ -4836,14 +4839,14 @@ def WriteCountFilter_cct(df, op='op', writecount=5, end=None, duration=10):
 Resample_top = {'d':'top_all','3d':'top_all_3d',
                       'w':'top_all_w','m':'top_all_m'}
 
-def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None,orderby='percent',top_all=None,top_all_3d=None,top_all_w=None,top_all_m=None,resample='d'):
+def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None,orderby='percent',top_all=None,top_all_3d=None,top_all_w=None,top_all_m=None,resample='d',noformat=False):
     end = True
     import readline
     import rlcompleter
     # readline.set_completer(cct.MyCompleter(dir_mo).complete)
     for top_key in Resample_top.keys():
         top = eval(Resample_top[top_key])
-        if top is not None and len(top) > 0:
+        if top is not None and len(top) > 0 and 'lastp1d' in top.columns:
             if  top.dff[0] == 0 or top.close[0] == top.lastp1d[0]:
                 top['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top['buy'].values, top['df2'].values)))
                 top['percent'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top['buy'].values, top['lastp2d'].values)))
@@ -5032,7 +5035,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                                         write_evalcmd2file(evalcmdfpath,cmd+orderby_t)
                                     else:
                                         write_evalcmd2file(evalcmdfpath,cmd)
-                                cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby=orderby)
+                                cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby=orderby,noformat=noformat)
                         elif  check_s  != orderby and cmd.find('sort_values') < 0 and (check_s  in list(dir(top_temp)) or check_s in top_temp.columns) :
                             cut_tail = cmd.split('.')[-1]
                             # cmd_head = cmd.replace(cut_tail,'')

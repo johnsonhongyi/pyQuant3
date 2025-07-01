@@ -738,7 +738,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                     df = df[(df.date >= cct.last_tddate(days=10)) & (df.date <= cct.get_today())]
                 # codew = df.index.tolist()
 
-            top_temp = tdd.get_sina_datadf_cnamedf( df.index.tolist(),df) 
+            top_temp = tdd.get_sina_datadf_cnamedf( df.index.tolist(),df,categorylimit=16) 
             # check df_upper 追涨模型
             if runrule == '1':
                 top_temp = cct.combine_dataFrame(top_temp,df_u.couts)
@@ -767,12 +767,15 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
             else:
                 top_temp = top_temp.sort_values(by=['percent','couts','volchang',percet],ascending=[0,1,1,1])
             # top_temp = top_temp[ (~top_temp.index.str.contains('688'))]  
-            top_temp = top_temp[ (~top_temp.name.str.contains('ST'))]  
+            # top_temp = top_temp[ (~top_temp.name.str.contains('ST'))]  
+
             if app:
                 if resample.lower() == 'd' or resample.lower() == 'w' :
-                    table, widths=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma20','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
+                    # table, widths=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma20','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
+                    table=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma20','upper','lower','ene','couts','name','category']], widths=False,showCount=True,table=True,limit_show=30)
                 else:
-                    table, widths=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma10','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
+                    # table, widths=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma10','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
+                    table=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma10','upper','lower','ene','couts','name','category']], widths=False,showCount=True,table=True,limit_show=30)
                 print(table)
 
             if df_idx is not None and len(df) > 0 and len(df_idx) > 0:
@@ -816,19 +819,39 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                 codew = top_temp.index.tolist()
 
             #clean st and 688
-
+            write_status = False
             if app:
                 print("Write blk:%s"%(block_path))
-                hdf5_wri = cct.cct_raw_input("rewrite code [Y] or append [N]:")
-                if hdf5_wri == 'y' or hdf5_wri == 'Y':
-                    append_status=False
-                else:
-                    append_status=True
-                dfcf_wri = cct.cct_raw_input("write dfcf[Y]:")
-                if dfcf_wri == 'y' or dfcf_wri == 'Y':
-                    dfcf_status=True
-                else:
-                    dfcf_status=False
+                while 1:
+                    hdf5_wri = cct.cct_raw_input("EVALcmdVAL [R] or rewrite code [Y] or append [N] or quit [Q]:")
+                    if hdf5_wri.lower() == 'r':
+                        dir_mo=eval(cct.eval_rule)
+                        if len(top_temp) > 0 :
+                            print(f'date:{top_temp.date[0]}')
+                            temp_d = top_temp.loc[:,['open', 'high', 'low', 'close', 'percent','volchang', 'ma5', 'ma20', 'std', 'upper', 'lower', 'ene', 'ma26','ma250', 'couts','name', 'category', 'percma5d']]
+                            df_u_d = df_u.loc[:,['open', 'high', 'low', 'close', 'percent','volchang', 'ma5', 'ma20', 'std', 'upper', 'lower', 'ene', 'ma26','ma250', 'couts']]
+                            cct.evalcmd(dir_mo,workstatus=False,Market_Values=['name','close','high','percent','volchang','ma5' , 'ma20','upper','lower','ene','couts','category'],top_temp=temp_d,block_path=block_path,top_all=df_u_d,resample=resample,noformat=True)
+                        # else:
+                        #     cct.evalcmd(dir_mo,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=df_u,resample=resample)
+
+                    elif hdf5_wri == 'y' or hdf5_wri == 'Y':
+                        append_status=False
+                        write_status = True
+                    elif hdf5_wri == 'n' or hdf5_wri == 'N':
+                        append_status=True
+                        write_status = True
+                    elif hdf5_wri == 'w' or hdf5_wri == 'W':
+                        continue
+                    elif hdf5_wri == 'q' or hdf5_wri == 'Q':
+                        break
+                    if write_status:
+                        dfcf_wri = cct.cct_raw_input("write dfcf[Y]:")
+                        if dfcf_wri == 'y' or dfcf_wri == 'Y':
+                            dfcf_status=True
+                            break
+                        else:
+                            dfcf_status=False
+                            break
 
 
 
@@ -836,7 +859,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                 append_status=False
                 dfcf_status=False
                 
-            if len(codew) > 0: 
+            if write_status and len(codew) > 0: 
                 cct.write_to_blocknew(block_path, codew, append_status,doubleFile=False,keep_last=0,dfcf=dfcf_status)
                 print("write:%s block_path:%s"%(len(codew),block_path))
                 print(top_temp.name.tolist()[:20])
@@ -853,7 +876,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
                     # print("write:%s block_path:%s"%(len(codeupper),block_path_upper))
             else:
                 # cct.write_to_blocknew(block_path, codew, append_status,doubleFile=False,keep_last=0,dfcf=dfcf_status)
-                print("write error:%s block_path:%s"%(len(codew),block_path))
+                print(f"write_status :{write_status}: count:{len(codew)}  block_path:{block_path}")
                 # print("write:%s block_path:%s"%(len(codew),block_path))
                 # print(top_temp.name.tolist())
 

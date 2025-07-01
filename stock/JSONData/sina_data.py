@@ -806,7 +806,7 @@ class Sina:
         df = df[(df.dt >= dt)]
 
         df.rename(columns={'close': 'llastp'}, inplace=True)
-        df['b1_vv'] = df['b1_v']
+        df['b1_vv'] = df['b1_v'].map(lambda x: int(x/100/10000))
         if (cct.get_now_time_int() > 915 and cct.get_now_time_int() < 926):
             #            df.rename(columns={'buy': 'close'}, inplace=True)
             df['close'] = df['buy']
@@ -1028,7 +1028,7 @@ if __name__ == "__main__":
 
     df =sina.all
     print(len(df))
-
+    print(f"df.loc['002786']: {df.loc['002786']}")
     import ipdb;ipdb.set_trace()
 
     for ma in ['bj','sh', 'sz', 'cyb', 'kcb','all']:
