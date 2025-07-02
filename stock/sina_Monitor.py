@@ -215,7 +215,7 @@ if __name__ == "__main__":
         log.info("duaration: %s duration_date:%s" %
                  (cct.get_today_duration(du_date), duration_date))
     
-    # st_key_sort = '4'
+    # st_key_sort = '1'
     st_key_sort = 'x 1.1'
     st_key_sort_start = 0
     # st_key_sort = '3 1'
@@ -719,6 +719,8 @@ if __name__ == "__main__":
                 # top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=False)
                 # top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=False, ma5d=False, dl=14, percent=False, resample='d')
                 # top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=True, ma5d=True, dl=14, percent=False, resample=resample)
+                # import ipdb;ipdb.set_trace()
+
                 if st_key_sort in ['1']:
                     if 945 < cct.get_now_time_int() < 1445:
                         top_all = top_all[ (~top_all.index.str.contains('^43|^83|^87|^92'))]   
@@ -730,7 +732,9 @@ if __name__ == "__main__":
 
                     if len(top_all) > 0 and top_all.lastp1d[0] == top_all.close[0]:
 
-                        if 915 < cct.get_now_time_int() < 945:
+                        if 500 < cct.get_now_time_int() < 915:
+                            top_temp = top_all.query('close > high4 and (low > close*0.99 or low > lasth2d) and close > lasth2d')
+                        elif 915 <= cct.get_now_time_int() < 945:
                             # top_temp = top_all.query('(lasth1d > upper and lasto1d*0.996 < lastp1d < lasto1d*1.003 and lastl1d <ma201d*1.1 and low > lastp1d*0.999 and close > upper) or (b1_v < 1 and lastp1d > high4  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2 and close > upper and close >lastp1d and not name.str.contains("ST"))')
                             # top_temp = top_all.query('open > high4 and (low > open*0.99 or low > lasth2d) and open > lasth2d and a1_v > 0')
                             # top_temp =  top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5) and a1_v > 0) or  open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d and a1_v > 0')
