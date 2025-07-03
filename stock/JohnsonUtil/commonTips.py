@@ -132,7 +132,7 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=F
         else:
             sep_ = ';'
 
-        if col in df.columns and len(df) > 0:
+        if col in df.columns and len(df) > 1:
             df[col]=df[col].apply(lambda x:str(x).replace('\r','').replace('\n',''))
             topSort=counterCategory(df,col,table=True).split()
             topSort.reverse()
@@ -3414,6 +3414,7 @@ def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_las
                     flist.append(raw)
 
         counts = 0
+        idx = 0
         for i in data:
             # print type(i)
             # if append and len(flist) > 0:
@@ -3429,6 +3430,10 @@ def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_las
                 else:
                     #if exist will remove and append
                     if reappend:
+                        if idx == 0:
+                            idx +=1
+                            raw2 = code_to_tdxblk('562530') + '\r\n'
+                            flist.append(raw2)
                         flist.remove(raw)
                         flist.append(raw)
 
@@ -5036,7 +5041,13 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                                         write_evalcmd2file(evalcmdfpath,cmd+orderby_t)
                                     else:
                                         write_evalcmd2file(evalcmdfpath,cmd)
-                                cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby=orderby,noformat=noformat)
+                                try:
+                                    cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby=orderby,noformat=noformat)
+                                except Exception as e:
+                                    print("Exception:", e)
+                                    import traceback
+                                    traceback.print_exc()
+                                    raise e
                         elif  check_s  != orderby and cmd.find('sort_values') < 0 and (check_s  in list(dir(top_temp)) or check_s in top_temp.columns) :
                             cut_tail = cmd.split('.')[-1]
                             # cmd_head = cmd.replace(cut_tail,'')
