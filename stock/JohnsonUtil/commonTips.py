@@ -269,7 +269,8 @@ def format_for_print_show(df,columns_format=None,showCount=False,col=None,table=
     #     table = format_for_print(df.loc[:, columns_format],count=count_string)
     # else:
     if noformat:
-        table = format_for_print(df,showCount=showCount,table=table,limit_show=50)
+        # table = format_for_print(df,showCount=showCount,table=table,limit_show=50)
+        table = format_for_print(df.loc[:, columns_format],showCount=showCount,table=table,limit_show=50)
     else:
         table = format_for_print(df.loc[:, columns_format],showCount=showCount,table=table,limit_show=50)
     return table
