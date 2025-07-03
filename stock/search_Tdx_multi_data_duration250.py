@@ -772,10 +772,10 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
             if app:
                 if resample.lower() == 'd' or resample.lower() == 'w' :
                     # table, widths=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma20','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
-                    table=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma20','upper','lower','ene','couts','name','category']], widths=False,showCount=True,table=True,limit_show=30)
+                    table=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma20','upper','lower','ene','couts','name','category']], widths=False,showCount=True,ctable=True,limit_show=30)
                 else:
                     # table, widths=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma10','upper','lower','ene','couts','name']][:100 if len(top_temp) > 100 else len(top_temp)], widths=True)
-                    table=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma10','upper','lower','ene','couts','name','category']], widths=False,showCount=True,table=True,limit_show=30)
+                    table=cct.format_for_print(top_temp.loc[:,[percet ,'close','high','percent','volchang','ma5' , 'ma10','upper','lower','ene','couts','name','category']], widths=False,showCount=True,ctable=True,limit_show=30)
                 print(table)
 
             if df_idx is not None and len(df) > 0 and len(df_idx) > 0:
