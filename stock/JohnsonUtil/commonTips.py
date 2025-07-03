@@ -3425,6 +3425,14 @@ def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_las
             raw = code_to_tdxblk(i) + '\r\n'
             if len(raw) > 8:
                 if not raw in flist:
+                    if idx == 0 and counts == 0:
+                        idx +=1
+                        raw2 = code_to_tdxblk('562530') + '\r\n'
+                        if not raw2 in flist:
+                            flist.append(raw2)
+                        else:
+                            flist.remove(raw2)
+                            flist.append(raw2)
                     counts += 1
                     flist.append(raw)
                 else:
@@ -3433,7 +3441,12 @@ def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_las
                         if idx == 0:
                             idx +=1
                             raw2 = code_to_tdxblk('562530') + '\r\n'
-                            flist.append(raw2)
+                            if not raw2 in flist:
+                                flist.append(raw2)
+                            else:
+                                flist.remove(raw2)
+                                flist.append(raw2)
+
                         flist.remove(raw)
                         flist.append(raw)
 
@@ -4890,7 +4903,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
             #     print("%s: %s"%(key,code[key]))
 
             list(code.keys())
-            initkey= list(code.keys())[1]
+            initkey= list(code.keys())[11]
             print(f"{initkey}: {code[initkey]}")
             # cmd=code[initkey]
             GlobalValues().setkey('tempdf',code[initkey])
