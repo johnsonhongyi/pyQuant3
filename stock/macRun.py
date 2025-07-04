@@ -495,6 +495,7 @@ else:
         print(("title:%s"%(key)))
         # cct.get_window_pos(key)
         cct.get_window_pos(key)
+        cct.get_window_pos(key.replace('py','exe'))
     for key in positionKey:
         pos=positionKey[key].split(',')
         # cct.get_window_pos('sina_Market-DurationUP.py')
