@@ -418,7 +418,6 @@ def setPosition(cmd=None, position=None):
 # count = doScript(scriptcount        
 # os.system(cmdRun)
 # getPosition('Johnson@',close=True)
-import ipdb;ipdb.set_trace()
 
 if cct.isMac():
     count = doScript(scriptcount)
