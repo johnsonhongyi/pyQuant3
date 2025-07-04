@@ -18,9 +18,7 @@ from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import johnson_cons as ct
 import tushare as ts
-import talib as tl
 import pandas_ta as ta
-import talib as taa
 
 from JSONData import sina_data
 # import numba as nb
@@ -50,7 +48,8 @@ tdx_index_code_list = ['999999', '399006', '399005', '399001']
 # win7rootList = [win7rootAsus,win7rootXunji,win10Lengend]
 # macroot = r'/Users/Johnson/Documents/Johnson/WinTools/zd_pazq'
 # xproot = r'E:\DOC\Parallels\WinTools\zd_pazq'
-
+import warnings
+warnings.filterwarnings("ignore")
 
 def get_tdx_dir():
     return cct.get_tdx_dir()
@@ -330,15 +329,27 @@ def get_tdx_macd(df):
         df = df.reset_index()
         # for t in range(runtimes):
         #     df.loc[df.shape[0]] = temp_df
-        temp = df.loc[np.repeat(df.index[-1], runtimes)]
-        df = df.append(temp)
+
+        temp = df.loc[np.repeat(df.index[-1], runtimes)].reset_index(drop=True)
+        # df = df.append(temp)
+        df = pd.concat([df, temp], axis=0)
+
         df=df.sort_index(ascending=False)
     # if  increasing:
     #     df = df.sort_index(ascending=increasing)
     # df=df.fillna(0)
     # macd=DIF，signal=DEA，hist=BAR
     #macddif -> macd macddea-> dif macd=>dea ??
-    df.loc[:, 'macddif'], df.loc[:, 'macddea'], df.loc[:, 'macd'] = tl.MACD(
+    # df.loc[:, 'macddif'], df.loc[:, 'macddea'], df.loc[:, 'macd'] = ta.macd(
+    # df[['macd','macddif','macddea']] = ta.macd(
+
+    # MACD (macddif) Signal Line (macddea) MACD Histogram->MACD - Signal_Line
+    # macddif (MACD line), macddea (Signal Line), and the MACD Histogram
+    # MACD_12_26_9  MACDh_12_26_9  MACDs_12_26_9
+    # MACD Line (MACD_12_26_9, macd): Indicates the momentum.
+    # Signal Line (MACDs_12_26_9, macddea): Provides buy/sell signals when crossed by the MACD line.
+    # Histogram (MACDh_12_26_9, macddif): Shows the divergence or convergence between the MACD line and the Signal line, indicating 
+    df[['macd','macddif','macddea']] = ta.macd(
         df['close'], fastperiod=12, slowperiod=26, signalperiod=9) 
     df = df.fillna(0)
     df['macddif'] = round( df['macddif'], 2)
@@ -2388,9 +2399,8 @@ def getSinaIndexdf():
 
     if 'lvolume' not in top_all.columns:
         top_all.rename(columns={'lvol': 'lvolume'}, inplace=True)
-    from JSONData import powerCompute as pct
-
-    top_all = pct.powerCompute_df(top_all.index.tolist(), dl=ct.PowerCountdl, talib=True, filter='y', index=True)
+    # from JSONData import powerCompute as pct
+    # top_all = pct.powerCompute_df(top_all.index.tolist(), dl=ct.PowerCountdl, talib=True, filter='y', index=True)
 
     return top_all
 
@@ -2440,15 +2450,15 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         # df = sina_data.Sina().get_stock_code_data('999999,399001,399006',index=True)
         df = sina_data.Sina().get_stock_code_data(['999999', '399006', '399001'], index=True)
 
-    elif market.lower().find('indb') >=0 :
-            # blkname = '061.blk'
-        indb =  cct.GlobalValues().getkey('indb')
-        if indb is None:    
-            code_l = cct.read_to_indb().code.tolist()
-            cct.GlobalValues().setkey('indb',code_l)
-        else:
-            code_l = indb
-        df = sina_data.Sina().get_stock_list_data(code_l)
+    # elif market.lower().find('indb') >=0 :
+    #         # blkname = '061.blk'
+    #     indb =  cct.GlobalValues().getkey('indb')
+    #     if indb is None:    
+    #         code_l = cct.read_to_indb().code.tolist()
+    #         cct.GlobalValues().setkey('indb',code_l)
+    #     else:
+    #         code_l = indb
+    #     df = sina_data.Sina().get_stock_list_data(code_l)
 
     elif market.find('blk') > 0 or market.isdigit():
             # blkname = '061.blk'
@@ -3078,9 +3088,11 @@ def compute_condition_up_sample(df):
     return hop_df
 
 def compute_condition_up(df):
-    condition_up = df[df['low'] > df['high'].shift(1)]        #向上跳空缺口
-    condition_down = df[df['high'] < df['low'].shift(1)]      #向下跳空缺口
-    df['hop'] = np.nan
+    condition_up = df[df['low'] > df['high'].shift(1)]       #向上跳空缺口
+    condition_down = df[df['high'] < df['low'].shift(1)]
+          #向下跳空缺口
+    # df = df.assign(hop=np.nan)
+
     # df.loc[condition_up,'hop_up'] = -1
     # df.loc[condition_down,'hop_down'] =1
 
@@ -3685,10 +3697,9 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         # df['vchange'] = df['vchange'][-1]
 
         # df['meann'] = ((df['high'] + df['low']) / 2).map(lambda x: round(x, 1))
-
+        df_temp = {}
+        # df = df.assign(hop=np.nan)s
         for da in range(1, lastdays + 1, 1):
-
-
             # df['lastp%sd' % da] = df['close'].shift(da-1)
             # df['lasto%sd' % da] = df['open'].shift(da-1)
             # df['lasth%sd' % da] = df['high'].shift(da-1)
@@ -3696,28 +3707,55 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
             # df['lastv%sd' % da] = df['vol'].shift(da-1)
             if da <=6:
                 # df['lastp%sd' % da] = df['close'][-da]
-                df['lasto%sd' % da] = df['open'][-da]
-                df['lastl%sd' % da] = df['low'][-da]
+            #     df.loc[:,'lasto%sd' % da] = df['open'][-da]
+            #     df.loc[:,'lastl%sd' % da] = df['low'][-da]
+            #     # df['lastv%sd' % da] = df['vol'][-da]
+            #     df.loc[:,'truer%sd' % da] = df['truer'][-da]
 
+            # # df['truer%sd' % da] = df['truer'][-da]
+            # df.loc[:,'lasth%sd' % da] = df['high'][-da]
+            # df.loc[:,'lastp%sd' % da] = df['close'][-da]
+
+            # df.loc[:,'lastv%sd' % da] = df['vol'][-da]
+            # # df['per%sd' % da] = df['close'].pct_change(da).apply(lambda x:round(x*100,1))
+            # # df['per%sd' % da] = df['perd'][-da:].sum()
+            # df.loc[:,'per%sd' % da] = df['perd'][-da]
+            # df.loc[:,'upper%s' % da] = df['upper'][-da]
+            # df.loc[:,'ma5%sd' % da] = df['ma5d'][-da]
+            # df.loc[:,'ma20%sd' % da] = df['ma20d'][-da]
+            # df.loc[:,'ma60%sd' % da] = df['ma60d'][-da]
+            # # df['du%sd' % da] = df['perd'][-da] - df['lastdu'][-da]
+            # # df['per%sd' % da] = df['perd'].shift(da-1)
+            # df.loc[:,'perc%sd' % da] = df['perlastp'][-da]
+
+
+                df_temp['lasto%sd' % da] = df['open'][-da]
+                df_temp['lastl%sd' % da] = df['low'][-da]
                 # df['lastv%sd' % da] = df['vol'][-da]
-                df['truer%sd' % da] = df['truer'][-da]
+                df_temp['truer%sd' % da] = df['truer'][-da]
 
             # df['truer%sd' % da] = df['truer'][-da]
-            df['lasth%sd' % da] = df['high'][-da]
-            df['lastp%sd' % da] = df['close'][-da]
+            df_temp['lasth%sd' % da] = df['high'][-da]
+            df_temp['lastp%sd' % da] = df['close'][-da]
 
-            df['lastv%sd' % da] = df['vol'][-da]
+            df_temp['lastv%sd' % da] = df['vol'][-da]
             # df['per%sd' % da] = df['close'].pct_change(da).apply(lambda x:round(x*100,1))
             # df['per%sd' % da] = df['perd'][-da:].sum()
-            df['per%sd' % da] = df['perd'][-da]
-            df['upper%s' % da] = df['upper'][-da]
-            df['ma5%sd' % da] = df['ma5d'][-da]
-            df['ma20%sd' % da] = df['ma20d'][-da]
-            df['ma60%sd' % da] = df['ma60d'][-da]
+            df_temp['per%sd' % da] = df['perd'][-da]
+            df_temp['upper%s' % da] = df['upper'][-da]
+            df_temp['ma5%sd' % da] = df['ma5d'][-da]
+            df_temp['ma20%sd' % da] = df['ma20d'][-da]
+            df_temp['ma60%sd' % da] = df['ma60d'][-da]
             # df['du%sd' % da] = df['perd'][-da] - df['lastdu'][-da]
             # df['per%sd' % da] = df['perd'].shift(da-1)
-            df['perc%sd' % da] = df['perlastp'][-da]
+            df_temp['perc%sd' % da] = df['perlastp'][-da]
 
+        df_repeat = pd.DataFrame([df_temp]).loc[np.repeat(0, len(df))].reset_index(drop=True)
+        df = pd.concat([df.reset_index(), df_repeat], axis=1)
+        df = df.set_index('date').sort_index(ascending=True)
+
+        # new_row_df = pd.DataFrame([df_temp]) 
+        # df = pd.concat([df, new_row_df], ignore_index=True)
             # df['perc%sd' % da] = (df['perlastp'][-da:].sum())
         # df['lastv9m'] = df['vol'][-lastdays:].mean()
             # df['mean%sd' % da] = df['meann'][-da]
@@ -5064,6 +5102,7 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
     return period_stock_data
 
 
+'''
 def usage(p=None):
     import timeit
 #     print """
@@ -5116,7 +5155,7 @@ def usage(p=None):
             codelist, dt=duration_date, ptype=ptype), number=run)
         # strip_tx = timeit.timeit(lambda : get_tdx_exp_all_LastDF(codelist, dt=duration_date, ptype=ptype), number=run)
         print(("ex Read:", strip_tx))
-
+'''
 
 def write_to_all():
     st = cct.cct_raw_input("will to Write Y or N:")
@@ -5138,19 +5177,18 @@ def python_resample(qs, xs, rands):
                 break
     return results
 
-    import timeit
-
-    n = 100
-    xs = np.arange(n, dtype=np.float64)
-    qs = np.array([1.0 / n, ] * n)
-    rands = np.random.rand(n)
-    from numba.decorators import autojit
-    print(timeit.timeit(lambda: python_resample(qs, xs, rands), number=number))
-    # print timeit.timeit(lambda:cct.run_numba(python_resample(qs, xs,
-    # rands)),number=number)
-    print(timeit.timeit(lambda: autojit(lambda: python_resample(qs, xs, rands)), number=number))
-    # print timeit.timeit(lambda:cct.run_numba(python_resample(qs, xs,
-    # rands)),number=number)
+    # import timeit
+    # n = 100
+    # xs = np.arange(n, dtype=np.float64)
+    # qs = np.array([1.0 / n, ] * n)
+    # rands = np.random.rand(n)
+    # from numba.decorators import autojit
+    # print(timeit.timeit(lambda: python_resample(qs, xs, rands), number=number))
+    # # print timeit.timeit(lambda:cct.run_numba(python_resample(qs, xs,
+    # # rands)),number=number)
+    # print(timeit.timeit(lambda: autojit(lambda: python_resample(qs, xs, rands)), number=number))
+    # # print timeit.timeit(lambda:cct.run_numba(python_resample(qs, xs,
+    # # rands)),number=number)
 
 def tdx_profile_test():
     resample = 'd'
@@ -5163,8 +5201,8 @@ def tdx_profile_test():
     print("done")
     # gui_test.py
 if __name__ == '__main__':
-    import sys
-    import timeit
+    # import sys
+    # import timeit
     from docopt import docopt
     log = LoggerFactory.log
     args = docopt(cct.sina_doc, version='sina_cxdn')

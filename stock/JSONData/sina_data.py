@@ -20,7 +20,8 @@ import asyncio,aiohttp
 log = LoggerFactory.log
 # log.setLevel(LoggerFactory.DEBUG)
 from JSONData import tdx_hdf5_api as h5a
-from JSONData import realdatajson as rl
+from akshare import stock_info_bj_name_code
+# pip install --no-deps akshare
 # import functools
 
 class StockCode:
@@ -69,8 +70,7 @@ class StockCode:
         # df=rl.get_sina_Market_json('all')
         # stock_codes = df.index.tolist()
         # '301397'
-        import akshare as ak
-        stock_info_bj_name_code_df = ak.stock_info_bj_name_code()
+        stock_info_bj_name_code_df = stock_info_bj_name_code()
         bj_list = stock_info_bj_name_code_df['证券代码'].tolist()
         stock_codes.extend(bj_list)
         with open(self.stock_code_path, 'w') as f:

@@ -10,11 +10,8 @@ import time
 import pandas as pd
 
 from JohnsonUtil import johnson_cons as ct
-import singleAnalyseUtil as sl
-from JSONData import powerCompute as pct
 from JSONData import stockFilter as stf
 from JSONData import tdx_data_Day as tdd
-from JSONData import LineHistogram as lhg
 from JohnsonUtil import LoggerFactory as LoggerFactory
 from JohnsonUtil import commonTips as cct
 # from logbook import Logger,StreamHandler,SyslogHandler
@@ -319,10 +316,10 @@ if __name__ == "__main__":
                             top_temp = top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5) ) or  open > high4 and (low > open*0.999 or low > lasth1d) and open > lasth1d ')
 
                     top_end = top_temp[-5:].copy()
-                    top_temp = pct.powerCompute_df(
-                        top_temp, dl=ct.PowerCountdl, talib=True)
-                    top_end = pct.powerCompute_df(
-                        top_end, dl=ct.PowerCountdl, talib=True)
+                    # top_temp = pct.powerCompute_df(
+                    #     top_temp, dl=ct.PowerCountdl, talib=True)
+                    # top_end = pct.powerCompute_df(
+                    #     top_end, dl=ct.PowerCountdl, talib=True)
                     
                     # if percent_status == 'y' and (
                     #         cct.get_now_time_int() > 915 and cct.get_now_time_int() < 1505) and ptype == 'low':
@@ -485,12 +482,12 @@ if __name__ == "__main__":
                 # print top_all.loc['000025',:]
                 # print "staus",status
 
-                if status:
-                    for code in top_dd[:10].index:
-                        code = re.findall('(\d+)', code)
-                        if len(code) > 0:
-                            code = code[0]
-                            kind = sl.get_multiday_ave_compare_silent(code)
+                # if status:
+                #     for code in top_dd[:10].index:
+                #         code = re.findall('(\d+)', code)
+                #         if len(code) > 0:
+                #             code = code[0]
+                #             kind = sl.get_multiday_ave_compare_silent(code)
                             # print top_all[top_all.low.values==0]
 
                             # else:
@@ -545,13 +542,13 @@ if __name__ == "__main__":
                 else:
                     cct.evalcmd(dir_mo,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=top_all,resample=resample)
 
-            elif st.lower() == 'g' or st.lower() == 'go':
-                status = True
-                for code in top_dd[:10].index:
-                    code = re.findall('(\d+)', code)
-                    if len(code) > 0:
-                        code = code[0]
-                        kind = sl.get_multiday_ave_compare_silent(code)
+            # elif st.lower() == 'g' or st.lower() == 'go':
+            #     status = True
+            #     for code in top_dd[:10].index:
+            #         code = re.findall('(\d+)', code)
+            #         if len(code) > 0:
+            #             code = code[0]
+            #             kind = sl.get_multiday_ave_compare_silent(code)
             elif st.lower() == 'clear' or st.lower() == 'c':
                 top_all = pd.DataFrame()
                 time_s = time.time()

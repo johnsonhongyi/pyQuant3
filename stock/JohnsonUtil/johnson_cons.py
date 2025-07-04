@@ -46,6 +46,7 @@ Resample_LABELS_Days = {'d':duration_date_day,'3d':duration_date_up,
 # duration_date_month = 300
 
 '''
+# python -m nuitka --show-memory --show-progress --follow-import-to=JohnsonUtil,JSONData --lto=yes   instock_Monitor.py
 # top_all.query('topR >0').loc[:,['name','boll','ral','ra','fib','fibl','bandwidth','ma5d','topR']]
 .loc[:,['name','boll','ral','ra','fib','fibl','bandwidth','ma5d','topR' ,’red','df2','topU','eneU','maxp','hmax','high4','max5']]
 # top_all.query('top10 > 0 and (per1d > 8 or per2d > 8 or per3d > 8) and close > hmax and lasth2d <hmax and maxp < 10')

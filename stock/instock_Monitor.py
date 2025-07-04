@@ -27,16 +27,13 @@ import sys
 import time
 
 import pandas as pd
-# from bs4 import BeautifulSoup
 # from pandas import DataFrame
 
 from JohnsonUtil import johnson_cons as ct
 import singleAnalyseUtil as sl
-from JSONData import powerCompute as pct
 from JSONData import stockFilter as stf
 
 from JSONData import tdx_data_Day as tdd
-from JSONData import LineHistogram as lhg
 from JohnsonUtil import LoggerFactory as LoggerFactory
 from JohnsonUtil import commonTips as cct
 # cct.set_ctrl_handler()
@@ -89,7 +86,8 @@ if __name__ == "__main__":
     blkname = '063.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
 
-    from JohnsonUtil import inStockDb as inDb
+    # from JohnsonUtil import inStockDb as inDb
+    
     # indf = inDb.showcount(inDb.selectlastDays(0))
 
     # indf = inDb.showcount(inDb.selectlastDays(2),sort_date=True)
@@ -624,8 +622,8 @@ if __name__ == "__main__":
                             top_temp = top_all.query('close > df2 and close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1 and  ((close-lastp1d)/lastp1d*100) > maxp')
 
                 top_end=top_all[-int((ct.PowerCount) / 10):].copy()
-                top_temp=pct.powerCompute_df(top_temp, dl=ct.PowerCountdl)
-                top_end=pct.powerCompute_df(top_end, dl=ct.PowerCountdl)
+                # top_temp=pct.powerCompute_df(top_temp, dl=ct.PowerCountdl)
+                # top_end=pct.powerCompute_df(top_end, dl=ct.PowerCountdl)
                 goldstock=len(top_all[(
                     top_all.buy >= top_all.lhigh * 0.99) & (top_all.buy >= top_all.llastp * 0.99)])
 

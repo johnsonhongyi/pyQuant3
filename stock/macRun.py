@@ -3,6 +3,21 @@
 import subprocess
 import os,time
 from JohnsonUtil import commonTips as cct
+from JohnsonUtil import LoggerFactory as LoggerFactory
+
+
+from docopt import docopt
+log = LoggerFactory.log
+args = docopt(cct.sina_doc, version='SinaMarket')
+
+if args['-d'] == 'debug':
+    log_level = LoggerFactory.DEBUG
+elif args['-d'] == 'info':
+    log_level = LoggerFactory.INFO
+else:
+    log_level = LoggerFactory.ERROR
+log.setLevel(log_level)
+
 
 script = '''tell application "System Events"
     activate
@@ -102,6 +117,7 @@ osascript -e
 
 # os.system("osascript -e '%s'"%(cmd))
 rcmd = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant3/stock;/usr/local/bin/python %s"'
+rcmd_bin = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant3/stock;./%s"'
 rcmdnatclip = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/share_controller/webTools/natclip/natclip;/usr/local/bin/python %s"'
 
 # rcmd2 = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant/stock;python2 %s"'
@@ -139,7 +155,8 @@ osascript -e '%s';sleep 35;
 osascript -e '%s';sleep 300;
 osascript -e '%s';sleep 15;
 osascript -e '%s';sleep 5;
-'''%(rcmd%(rproc[0]),rcmd%(rproc[1]),rcmd%(rproc[2]),rcmd%(rproc[3]),rcmd%(rproc[4]),rcmd%(rproc[5]))
+'''%(rcmd_bin%(rproc[0]),rcmd%(rproc[1]),rcmd_bin%(rproc[2]),rcmd_bin%(rproc[3]),rcmd%(rproc[4]),rcmd_bin%(rproc[5]))
+# '''%(rcmd%(rproc[0]),rcmd%(rproc[1]),rcmd%(rproc[2]),rcmd%(rproc[3]),rcmd%(rproc[4]),rcmd%(rproc[5]))
 
 # cmdRun200_launch = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
 
@@ -292,17 +309,21 @@ def doScript(scriptn):
     return stdout_output.decode('utf-8')
 
 def getPosition(cmd=None, position=None,close=False):
+    # cmd = cmd.replace('.py','')
+    # cmd = cmd.replace('.py','.bin')
     count = doScript(scriptcount)
     if int(count) > 0:
         for n in range(1, int(count)+1):
             title = doScript(scriptname % ('get', str(object=n)))
             # if close:
                 # print "close:%s"%(title),
-            if title.lower().find(cmd.lower()) >= 0:
+            # if title.lower().find(cmd.lower()) >= 0  or  title.lower().find(cmd.replace('.py','').lower()) >= 0:
+            if title.lower().find(cmd.lower()) >= 0 or title.lower().find(cmd.replace('.py','.bin').lower()) >= 0:
                 # print "win:%s get_title:%s "%(n,title)
                 # print "get:%s"%(n)
                 # position = doScript(
                     # script_set_position % ('set', str(n), positionKey[key]))
+                # print(f'script_get_position:{script_get_position % ('get', str(n))}')
                 position=doScript(script_get_position % ('get', str(n)))
                 # position = doScript(scriptposition % ('get', str(n)))
                 if close:
@@ -340,19 +361,23 @@ positionKey = cct.get_system_postionKey()
 print("position:%s"%(positionKey))
 
 def setPosition(cmd=None, position=None):
+    if cmd is not None:
+        cmd = cmd.replace('.py','.bin')
     count = doScript(scriptcount)
     # print count
     if int(count) > 3:
         doScript(scriptquit)
         for n in range(1, int(count)+1):
-            # print "n:%s"%(n)
+            # log.debug("n:%s"%(n))
             title = doScript(scriptname % ('get', str(object=n)))
+            log.debug("n:%s title:%s"%(n,title))
             for key in positionKey:
-                # print "key:%s"%(key)
-                if title.lower().find(key.lower()) >= 0:
-                    print(("find:",title,key, positionKey[key]))
-                    position = doScript(
-                        script_set_position % ('set', str(n), positionKey[key]))
+                log.debug("key:%s  n:%s title:%s"%(key,n,title))
+                if title.lower().find(key.lower()) >= 0 or title.lower().find(key.replace('.py','.bin').lower()) >=0:
+                # if title.lower().find(key.lower()) >= 0 :
+                    print(f"find:{title} key:{key} position:{positionKey[key]}")
+                    # print(f'script_set_position:{script_set_position % ("set", str(n), positionKey[key])}')
+                    position = doScript(script_set_position %("set", str(n), positionKey[key]))
                     # print doScript(script_get_position % ('get', str(n)))
             # position = doScript(scriptposition % ('get', str(n)))
             # print positio
@@ -407,15 +432,15 @@ if cct.isMac():
         # print 'singleAnalyseUtil.py:',getPosition('singleAnalyseUtil.py')
         # print 'sina_Market-DurationDn.py:',getPosition('sina_Market-DurationDn.py')
         # # print 'sina_Monitor-Market-LH.py:',getPosition('sina_Monitor-Market-LH.py')
-        print((getPosition('sina_Market-DurationUP.py')))
-        print((getPosition('sina_Market-DurationDnUP.py')))
+        print((getPosition('sina_Market-DurationUP')))
+        print((getPosition('sina_Market-DurationDnUP')))
         # # print 'sina_Market-DurationSH.py:',getPosition('sina_Market-DurationSH.py')
         # print 'sina_Market-DurationCXDN.py:',getPosition('sina_Market-DurationCXDN.py')
         # # print 'sina_Market-DurationCXUP.py:',getPosition('sina_Market-DurationCXUP.py')
         # # print 'sina_Market-DurationDnUP.py:',getPosition('sina_Market-DurationDnUP.py')
         # # print 'sina_Monitor-GOLD.py:',getPosition('sina_Monitor-GOLD.py')
         # print 'sina_Monitor.py:',getPosition('sina_Monitor.py')
-        print((getPosition('LinePower.py')))
+        print((getPosition('LinePower')))
         print((getPosition('Johnson',close=True)))
         print((getPosition('/Users/Johnson/Documents',close=True)))
         setPosition(cmd=None, position=None)

@@ -16,27 +16,25 @@ status_dict = {"mid": "normal", "buy": "up", "sell": "down"}
 url_real_sina = "http://finance.sina.com.cn/realstock/"
 url_real_sina_top = "http://vip.stock.finance.sina.com.cn/mkt/#stock_sh_up"
 url_real_east = "http://quote.eastmoney.com/sz000004.html"
-import gc
-import random
+# import gc
+# import random
 import re
 import sys
 import time
-
+import traceback
 import pandas as pd
 # from bs4 import BeautifulSoup
 # from pandas import DataFrame
 
 from JohnsonUtil import johnson_cons as ct
-import singleAnalyseUtil as sl
-from JSONData import powerCompute as pct
 from JSONData import stockFilter as stf
-
 from JSONData import tdx_data_Day as tdd
-from JSONData import LineHistogram as lhg
 from JohnsonUtil import LoggerFactory as LoggerFactory
 from JohnsonUtil import commonTips as cct
-# cct.set_ctrl_handler()
 
+# cct.set_ctrl_handler()
+import warnings
+warnings.filterwarnings("ignore")
 
 # def evalcmd_(dir_mo,workstatus=True):
 #     end = True
@@ -314,7 +312,7 @@ if __name__ == "__main__":
                 # top_all[(top_all.upperT > 3) & (top_all.top10 >2) &(top_all.close > top_all.upper*0.98) & (top_all.close < top_all.upper *1.05) &(top_all.lastp1d > top_all.upper)].name
                 # cct.write_to_blocknew(block_path, dd.index.tolist())
                 # writecode = "cct.write_to_blocknew(block_path, dd.index.tolist())"
-                top_bak = top_all
+                # top_bak = top_all
                 # market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort, top_all=top_all)
                 codelist = top_all.index.tolist()
                 if len(codelist) > 0:
@@ -709,8 +707,8 @@ if __name__ == "__main__":
                 # top_end=top_all[-int((ct.PowerCount) / 10):].copy()
                 # top_end=top_all.sort_values(by=(market_sort_value),ascending=market_sort_value_key).percent[-int((ct.PowerCount) / 10):].copy()
                 top_end=top_all.sort_values(by=(['percent']),ascending=[0])[-int((ct.PowerCount) / 10):].copy()
-                top_temp=pct.powerCompute_df(top_temp, dl=ct.PowerCountdl)
-                top_end=pct.powerCompute_df(top_end, dl=ct.PowerCountdl)
+                # top_temp=pct.powerCompute_df(top_temp, dl=ct.PowerCountdl)
+                # top_end=pct.powerCompute_df(top_end, dl=ct.PowerCountdl)
                 goldstock=len(top_all[(
                     top_all.buy >= top_all.lhigh * 0.99) & (top_all.buy >= top_all.llastp * 0.99)])
 
@@ -878,15 +876,15 @@ if __name__ == "__main__":
 
                 # print cct.format_for_print(top_all[:10])
                 # print "staus",status
-                if status:
-                    for code in top_all[:10].index:
-                        code=re.findall('(\d+)', code)
-                        if len(code) > 0:
-                            code=code[0]
-                            kind=sl.get_multiday_ave_compare_silent(code)
-                top_all=top_bak
-                del top_bak
-                gc.collect()
+                # if status:
+                #     for code in top_all[:10].index:
+                #         code=re.findall('(\d+)', code)
+                #         if len(code) > 0:
+                #             code=code[0]
+                #             kind=sl.get_multiday_ave_compare_silent(code)
+                # top_all=top_bak
+                # del top_bak
+                # gc.collect()
 
             else:
                 print("no data")
@@ -1054,7 +1052,6 @@ if __name__ == "__main__":
             # raw_input("Except")
         except Exception as e:
             print("other Error", e)
-            import traceback
             traceback.print_exc()
             cct.sleeprandom(ct.duration_sleep_time / 2)
             # sl.get_code_search_loop()
