@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 *.h5
 *.exe
+*.cmd
 # C extensions
 #*.so
 

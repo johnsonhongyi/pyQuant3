@@ -498,6 +498,7 @@ else:
     for key in positionKey:
         pos=positionKey[key].split(',')
         # cct.get_window_pos('sina_Market-DurationUP.py')
+        key = key.replace('py','exe')
         if len(pos) == 2:
             print(("status:%s"%(cct.reset_window_pos(key,pos[0],pos[1]))))
         else:

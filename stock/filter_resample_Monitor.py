@@ -1,7 +1,3 @@
-#!/usr/local/bin/python
-# -*- coding: utf-8 -*-
-
-
 # -*- coding:utf-8 -*-
 # !/usr/bin/env python
 
@@ -20,7 +16,6 @@ status_dict = {"mid": "normal", "buy": "up", "sell": "down"}
 url_real_sina = "http://finance.sina.com.cn/realstock/"
 url_real_sina_top = "http://vip.stock.finance.sina.com.cn/mkt/#stock_sh_up"
 url_real_east = "http://quote.eastmoney.com/sz000004.html"
-import gc
 import random
 import re
 import sys
@@ -31,12 +26,9 @@ import pandas as pd
 # from pandas import DataFrame
 
 from JohnsonUtil import johnson_cons as ct
-import singleAnalyseUtil as sl
-from JSONData import powerCompute as pct
 from JSONData import stockFilter as stf
 
 from JSONData import tdx_data_Day as tdd
-from JSONData import LineHistogram as lhg
 from JohnsonUtil import LoggerFactory as LoggerFactory
 from JohnsonUtil import commonTips as cct
 # cct.set_ctrl_handler()
@@ -526,8 +518,8 @@ if __name__ == "__main__":
                 # top_temp = stf.filterPowerCount(top_temp,ct.PowerCount,down=True)
 
                 top_end=top_all[-int((ct.PowerCount) / 10):].copy()
-                top_temp=pct.powerCompute_df(top_temp, dl=ct.PowerCountdl)
-                top_end=pct.powerCompute_df(top_end, dl=ct.PowerCountdl)
+                # top_temp=pct.powerCompute_df(top_temp, dl=ct.PowerCountdl)
+                # top_end=pct.powerCompute_df(top_end, dl=ct.PowerCountdl)
                 goldstock=len(top_all[(
                     top_all.buy >= top_all.lhigh * 0.99) & (top_all.buy >= top_all.llastp * 0.99)])
 
@@ -615,12 +607,12 @@ if __name__ == "__main__":
 
                 # print cct.format_for_print(top_all[:10])
                 # print "staus",status
-                if status:
-                    for code in top_all[:10].index:
-                        code=re.findall('(\d+)', code)
-                        if len(code) > 0:
-                            code=code[0]
-                            kind=sl.get_multiday_ave_compare_silent(code)
+                # if status:
+                #     for code in top_all[:10].index:
+                #         code=re.findall('(\d+)', code)
+                #         if len(code) > 0:
+                #             code=code[0]
+                #             kind=sl.get_multiday_ave_compare_silent(code)
 
             else:
                 print("no data")
