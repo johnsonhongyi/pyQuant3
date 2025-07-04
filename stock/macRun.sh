@@ -18,6 +18,9 @@ sleep 2
 echo "instock_Monitor.py"
 python -m nuitka --show-memory --show-progress --follow-import-to=JohnsonUtil,JSONData --remove-output --lto=yes instock_Monitor.py
 sleep 2
+echo "filter_resample_Monitor.py"
+python -m nuitka --show-memory --show-progress --follow-import-to=JohnsonUtil,JSONData --remove-output --lto=yes filter_resample_Monitor.py
+sleep 2
 echo "dataBarFeed/chantdxpower.py "
 python -m nuitka --show-memory --show-progress --follow-import-to=JohnsonUtil,JSONData --remove-output --lto=yes dataBarFeed/chantdxpower.py 
 sleep 2
