@@ -4,10 +4,25 @@ REM E:
 D:
 cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock"
 
-start cmd /k python sina_Monitor.py
-TIMEOUT /T 200 /NOBREAK
+rem start cmd /k python sina_Monitor.py
+start cmd /k  sina_Monitor.exe
+
+IF NOT EXIST  G:\tdx_last_df.h5 (
+    TIMEOUT /T 200 /NOBREAK
+)
+
+for %%i in ("%TDX%") do (
+set indexdx=%%~zi
+)
+
+if "%indexdx%"=="" (set indexdx=4096)
+
+if not "%indexdx%"==""  if %indexdx% LEQ  4096000 (TIMEOUT /T 50 /NOBREAK)
+
 
 set TDX=G:\tdx_last_df.h5
+
+TIMEOUT /T 5 /NOBREAK
 
 rem ping -n 352 localhost > nul
 IF NOT EXIST  G:\tdx_last_df.h5 (
@@ -25,7 +40,8 @@ if not "%indexdx%"==""  if %indexdx% LEQ  4096000 (TIMEOUT /T 50 /NOBREAK)
 rem if not "%indexdx%"=="" (TIMEOUT /T 0 /NOBREAK) else (if %indexdx% LEQ  2048000 (TIMEOUT /T 50 /NOBREAK))
 rem if %indexdx% LEQ  2048000 (TIMEOUT /T 50 /NOBREAK)
 
-start cmd /k python instock_Monitor.py
+rem start cmd /k python instock_Monitor.py
+start cmd /k  instock_Monitor.exe
 
 rem ELSE (
 rem	goto A
@@ -33,7 +49,8 @@ rem )
 rem if %indexdx% gtr 512000 ( LEQ GEQ 
 
 
-start cmd /k python singleAnalyseUtil.py
+rem start cmd /k python singleAnalyseUtil.py
+start cmd /k singleAnalyseUtil.exe
 TIMEOUT /T 20 /NOBREAK
 
 
@@ -45,7 +62,8 @@ rem ping -n 20 localhost > nul
 rem start cmd /k python sina_Market-DurationCXDN.py
 rem TIMEOUT /T 20 /NOBREAK
 
-start cmd /k python sina_Market-DurationUP.py
+rem start cmd /k python sina_Market-DurationUP.py
+start cmd /k sina_Market-DurationUP.exe
 TIMEOUT /T 20 /NOBREAK
 
 rem start cmd /k python sina_Monitor-Market.py
@@ -62,10 +80,12 @@ rem ping -n 20 localhost > nul
 rem 20250212
 rem start cmd /k python sina_Market-DurationDn.py
 TIMEOUT /T 20 /NOBREAK
-start cmd /k python LinePower.py
+rem start cmd /k python LinePower.py
+start cmd /k  LinePower.exe
 TIMEOUT /T 5 /NOBREAK
 cd dataBarFeed\
-start cmd /k python chantdxpower.py
+rem start cmd /k python chantdxpower.py
+start cmd /k  chantdxpower.exe
 TIMEOUT /T 20 /NOBREAK
 cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\"
 python macRun.py
@@ -74,7 +94,8 @@ cd webTools/
 start cmd /k python ths-tdx-web.py
 cd ../
 
-start cmd /k python sina_Market-DurationDnUP.py
+rem start cmd /k python sina_Market-DurationDnUP.py
+start cmd /k  sina_Market-DurationDnUP.exe
 TIMEOUT /T 200 /NOBREAK
 rem C:
 rem cd "C:\Users\Johnson\Documents\TDX\55188\"

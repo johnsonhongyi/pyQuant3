@@ -46,7 +46,14 @@ Resample_LABELS_Days = {'d':duration_date_day,'3d':duration_date_up,
 # duration_date_month = 300
 
 '''
-# python -m nuitka --show-memory --show-progress --follow-import-to=JohnsonUtil,JSONData --lto=yes   instock_Monitor.py
+# python -m nuitka --show-memory --show-progress --follow-import-to=JohnsonUtil,JSONData --lto=yes --disable-ccache  instock_Monitor.py 
+# win10 --pgo-python error C2440: “=”: 无法从“void *”转换为“const char **”
+# win10:  winlibs-x86_64-posix-seh-gcc-15.1.0-mingw-w64ucrt-13.0.0-r2.zip
+# https://github.com/brechtsanders/winlibs_mingw/releases
+# https://blog.csdn.net/weixin_49001740/article/details/122724265  path -->: D:\\mingw64\\bin
+# pip install --upgrade pip setuptools==57.5.0 wheel   
+# pip install --nodeps python-core
+
 # top_all.query('topR >0').loc[:,['name','boll','ral','ra','fib','fibl','bandwidth','ma5d','topR']]
 .loc[:,['name','boll','ral','ra','fib','fibl','bandwidth','ma5d','topR' ,’red','df2','topU','eneU','maxp','hmax','high4','max5']]
 # top_all.query('top10 > 0 and (per1d > 8 or per2d > 8 or per3d > 8) and close > hmax and lasth2d <hmax and maxp < 10')

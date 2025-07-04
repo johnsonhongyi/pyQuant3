@@ -1618,14 +1618,17 @@ def set_console(width=80, height=15, color=3, title=None, closeTerminal=True):
     if title is None:
         # title= (os.path.basename(sys.argv[0]))
         filename = (os.path.basename(sys.argv[0]))
+        log.debug(f'filename:{filename}')
     elif isinstance(title, list):
         filename = (os.path.basename(sys.argv[0]))
         for cname in title:
             # print cname
             filename = filename + ' ' + str(cname)
+            log.debug(f'filename:{filename}')
             # print filename
     else:
         filename = (os.path.basename(sys.argv[0])) + ' ' + title
+        log.debug(f'filename:{filename}')
 
     if isMac():
         # os.system('printf "\033]0;%s\007"'%(filename))
@@ -1637,6 +1640,7 @@ def set_console(width=80, height=15, color=3, title=None, closeTerminal=True):
     else:
         # os.system('title=%s' % sys.argv[0])
         os.system('title=%s' % filename)
+        log.debug(f'filename:{filename}')
         # win32MoveCom.reset_window_pos(title,width=width,height=height)
         # os.system("mode con cols=%s lines=25"%(width))   #windowsfg
         # os.system("mode con cols=%s lines=%s"%(width,height))   #windowsfg
@@ -1664,10 +1668,15 @@ def set_console(width=80, height=15, color=3, title=None, closeTerminal=True):
             title= (os.path.basename(sys.argv[0]))
             positionKey=capital_to_lower(get_system_postionKey())
             # positionKey=capital_to_lower(terminal_positionKey1K_triton)
-            if title.lower() in list(positionKey.keys()):
+            log.debug(f'positionKey:{positionKey}')
+            if title.lower() in list(positionKey.keys()) or title.replace('exe','py').lower() in list(positionKey.keys()):
                 # log.error("title.lower() in positionKey.keys()")
-                if title.lower() in list(positionKey.keys()):
-                    pos=positionKey[title.lower()].split(',')
+                log.debug(f'title:{title.lower()}')
+                if title.lower() in list(positionKey.keys()) or title.replace('exe','py').lower() in list(positionKey.keys()):
+                    if title.find('.exe') >=0:
+                        pos=positionKey[title.replace('exe','py').lower()].split(',')
+                    else:
+                        pos=positionKey[title.lower()].split(',') 
                 else:
                     pos= '254, 674,1400,420'.split(',')
                     log.error("pos is none")
