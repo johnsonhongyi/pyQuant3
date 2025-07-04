@@ -641,9 +641,10 @@ def is_trade_date(date=datetime.date.today()):
 
 
 
-def get_last_trade_date():
-    today = datetime.date.today().strftime('%Y-%m-%d')
-    return(a_trade_calendar.get_pre_trade_date(today))
+def get_last_trade_date(dt=None):
+    if dt is None:
+        dt = datetime.date.today().strftime('%Y-%m-%d')
+    return(a_trade_calendar.get_pre_trade_date(dt))
 
 def get_day_istrade_date(dt=None):
     #2025
@@ -1961,31 +1962,78 @@ def last_tddate(days=1):
     # today = datetime.datetime.today().date() + datetime.timedelta(-days)
     if days is None:
         return days
-    today = datetime.datetime.today().date()
-    log.debug("today:%s " % (today))
-    # return str(today)
-
-    def get_work_day(today):
-        day_n = int(today.strftime("%w"))
-        if day_n == 0:
-            lastd = today + datetime.timedelta(-2)
-            log.debug("0:%s" % lastd)
-        elif day_n == 1:
-            lastd = today + datetime.timedelta(-3)
-            log.debug("1:%s" % lastd)
+    dt = GlobalValues().getkey(f'last_tddate-{days}')
+    if dt is None:
+        today = datetime.date.today()
+        if days == 1:
+        # dt = today + datetime.timedelta(days-1)
+            dt = today.strftime('%Y-%m-%d')
+            dt = get_last_trade_date(dt)
+            GlobalValues().setkey(f'last_tddate-{days}',dt)
+            log.debug(f'setkey:last_tddate-{days} : {dt}')
         else:
-            lastd = today + datetime.timedelta(-1)
-            log.debug("2-6:%s" % lastd)
-        # is_trade_date()
-        return lastd
-        # if days==0:
-        # return str(lasd)
-    lastday = today
-    for x in range(int(days)):
-        # print x
-        lastday = get_work_day(today)
-        today = lastday
-    return str(lastday)
+            dt = (today + datetime.timedelta(-(days-1))).strftime('%Y-%m-%d')
+            # dt = datetime.date.today().strftime('%Y-%m-%d')
+            dt = get_last_trade_date(dt)
+            GlobalValues().setkey(f'last_tddate-{days}',dt)
+            log.debug(f'setkey:last_tddate-{days} : {dt}')
+
+    return dt
+    # today = datetime.datetime.today().date()
+    # log.debug("today:%s " % (today))
+    # # return str(today)
+
+    # def get_work_day(today):
+    #     day_n = int(today.strftime("%w"))
+    #     if day_n == 0:
+    #         lastd = today + datetime.timedelta(-2)
+    #         log.debug("0:%s" % lastd)
+    #     elif day_n == 1:
+    #         lastd = today + datetime.timedelta(-3)
+    #         log.debug("1:%s" % lastd)
+    #     else:
+    #         lastd = today + datetime.timedelta(-1)
+    #         log.debug("2-6:%s" % lastd)
+    #     # is_trade_date()
+    #     return lastd
+    #     # if days==0:
+    #     # return str(lasd)
+    # lastday = today
+    # for x in range(int(days)):
+    #     # print x
+    #     lastday = get_work_day(today)
+    #     today = lastday
+    # return str(lastday)
+
+# def last_tddate(days=1):
+#     # today = datetime.datetime.today().date() + datetime.timedelta(-days)
+#     if days is None:
+#         return days
+#     today = datetime.datetime.today().date()
+#     log.debug("today:%s " % (today))
+#     # return str(today)
+
+#     def get_work_day(today):
+#         day_n = int(today.strftime("%w"))
+#         if day_n == 0:
+#             lastd = today + datetime.timedelta(-2)
+#             log.debug("0:%s" % lastd)
+#         elif day_n == 1:
+#             lastd = today + datetime.timedelta(-3)
+#             log.debug("1:%s" % lastd)
+#         else:
+#             lastd = today + datetime.timedelta(-1)
+#             log.debug("2-6:%s" % lastd)
+#         # is_trade_date()
+#         return lastd
+#         # if days==0:
+#         # return str(lasd)
+#     lastday = today
+#     for x in range(int(days)):
+#         # print x
+#         lastday = get_work_day(today)
+#         today = lastday
+#     return str(lastday)
 
     '''
     oday = lasd - datetime.timedelta(days)
@@ -4384,14 +4432,21 @@ def func_compute_percd2020( open, close,high, low,lastopen, lastclose,lasthigh, 
     return initc
 def get_col_market_value_df(df,col,market_value):
     if int(market_value) < 10:
-        temp =df.loc[:,df.columns.str.contains( "%s[1-%s]d$"%(col,market_value),regex= True)]
+        re_str = "%s[1-%s]d$"%(col,market_value)
+        temp = df.filter(regex=re_str, axis=1)
+        # temp =df.loc[:,df.columns.str.contains( "%s[1-%s]d$"%(col,market_value),regex= True)]
+        # temp =df.loc[:,df.columns.str.contains( "%s[1-%s]d$"%(col,market_value),regex= True)]
     else:
         if int(market_value) <= ct.compute_lastdays:
                 _remainder = int(market_value)%10
         else:
             _remainder = int(ct.compute_lastdays)%10
         # df.loc[:,df.columns.str.contains( "%s[0-9][0-%s]d$"%(col,_remainder),regex= True)][:1]
-        temp =df.loc[:,df.columns.str.contains( "%s([1-9]|1[0-%s])d$"%(col,_remainder),regex= True)]
+        # temp =df.loc[:,df.columns.str.contains( "%s([1-9]|1[0-%s])d$"%(col,_remainder),regex= True)]
+        re_str = "%s([1-9]|1[0-%s])d$"%(col,_remainder)
+        temp = df.filter(regex=re_str, axis=1)
+        # temp =df.loc[:,df.columns.str.contains(re_str,regex= True)]
+
     return temp
 
 def func_compute_percd2024( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None,high4=None,max5=None,hmax=None,lastdu4=None,code=None):
@@ -5678,6 +5733,8 @@ if __name__ == '__main__':
     import ipdb;ipdb.set_trace()
     '''
     # rzrq['all']='nan'
+    # print(get_last_trade_date('2025-06-01'))
+
     print(f'get_work_day_idx:{get_work_day_idx()}')
     print(get_tdx_dir_blocknew_dxzq(r'D:\MacTools\WinTools\new_tdx2\T0002\blocknew\090.blk'))
     print(f'is_trade_date():{is_trade_date()}')

@@ -4808,7 +4808,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             results = []
             ts = time.time()
             for code in codeList:
-                # print(f'codeList:{len(codeList)}code:{code} :dt')
+                log.debug(f'codeList:{len(codeList)}: idx:{codeList.index(code)} code:{code} :dt')
                 results.append(get_tdx_exp_low_or_high_power(code, dt, ptype, dl, end, power, lastp, newdays, resample))
             print("tdxdataT:%s"%(round(time.time()-ts,2)),)
 #        print round(time.time()-ts,2),
