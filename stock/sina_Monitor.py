@@ -33,8 +33,8 @@ from JohnsonUtil import LoggerFactory as LoggerFactory
 from JohnsonUtil import commonTips as cct
 
 # cct.set_ctrl_handler()
-import warnings
-warnings.filterwarnings("ignore")
+# import warnings
+# warnings.filterwarnings("ignore")
 
 # def evalcmd_(dir_mo,workstatus=True):
 #     end = True
