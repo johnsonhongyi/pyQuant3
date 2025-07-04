@@ -98,7 +98,10 @@ Desktop.ini
 
 # Recycle Bin used on file shares
 $RECYCLE.BIN/
-
+*.nuitka-pgo
+*.build/
+*.profraw
+*.bin
 # Windows Installer files
 *.cab
 *.msi

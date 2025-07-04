@@ -19,12 +19,13 @@ import pandas as pd
 # import trollius as asyncio
 # from trollius.coroutines import From
 import asyncio
+import argparse
 
 
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil.prettytable import PrettyTable
 from JohnsonUtil import johnson_cons as ct
-from JohnsonUtil import inStockDb as inDb
+# from JohnsonUtil import inStockDb as inDb
 
 import socket
 from configobj import ConfigObj
@@ -37,6 +38,9 @@ from tqdm import tqdm
 import numpy as np
 import subprocess
 import a_trade_calendar
+# from py_mini_racer import py_mini_racer
+from textwrap import fill
+from JohnsonUtil.prettytable import ALL as ALL
 
 try:
     from urllib.request import urlopen, Request
@@ -118,8 +122,7 @@ class GlobalValues:
         # """ 定义一个全局变量 """
         return (_global_dict.keys())
 
-from textwrap import fill
-from JohnsonUtil.prettytable import ALL as ALL
+
 
 def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=False,limit_show=20):
 
@@ -282,7 +285,6 @@ def format_for_print2(df):
     return (table)
 
 
-from py_mini_racer import py_mini_racer
 hk_js_decode = """
 function d(t) {
     var e, i, n, r, a, o, s, l = (arguments,
@@ -573,62 +575,75 @@ function d(t) {
 }
 """
 
-def tool_trade_date_hist_sina() -> pd.DataFrame:
-    """
-    交易日历-历史数据
-    https://finance.sina.com.cn/realstock/company/klc_td_sh.txt
-    :return: 交易日历
-    :rtype: pandas.DataFrame
-    """
-    url = "https://finance.sina.com.cn/realstock/company/klc_td_sh.txt"
-    r = requests.get(url)
-    js_code = py_mini_racer.MiniRacer()
-    js_code.eval(hk_js_decode)
-    dict_list = js_code.call(
-        "d", r.text.split("=")[1].split(";")[0].replace('"', "")
-    )  # 执行js解密代码
-    temp_df = pd.DataFrame(dict_list)
-    temp_df.columns = ["trade_date"]
-    temp_df["trade_date"] = pd.to_datetime(temp_df["trade_date"]).dt.date
-    temp_list = temp_df["trade_date"].to_list()
-    temp_list.append(datetime.date(1992, 5, 4))  # 是交易日但是交易日历缺失该日期
-    temp_list.sort()
-    temp_df = pd.DataFrame(temp_list, columns=["trade_date"])
-    return temp_df
+# def tool_trade_date_hist_sina() -> pd.DataFrame:
+#     """
+#     交易日历-历史数据
+#     https://finance.sina.com.cn/realstock/company/klc_td_sh.txt
+#     :return: 交易日历
+#     :rtype: pandas.DataFrame
+#     """
+#     url = "https://finance.sina.com.cn/realstock/company/klc_td_sh.txt"
+#     r = requests.get(url)
+#     js_code = py_mini_racer.MiniRacer()
+#     js_code.eval(hk_js_decode)
+#     dict_list = js_code.call(
+#         "d", r.text.split("=")[1].split(";")[0].replace('"', "")
+#     )  # 执行js解密代码
+#     temp_df = pd.DataFrame(dict_list)
+#     temp_df.columns = ["trade_date"]
+#     temp_df["trade_date"] = pd.to_datetime(temp_df["trade_date"]).dt.date
+#     temp_list = temp_df["trade_date"].to_list()
+#     temp_list.append(datetime.date(1992, 5, 4))  # 是交易日但是交易日历缺失该日期
+#     temp_list.sort()
+#     temp_df = pd.DataFrame(temp_list, columns=["trade_date"])
+#     return temp_df
 
-def fetch_stocks_trade_date():
-    try:
-        data = tool_trade_date_hist_sina()
-        if data is None or len(data.index) == 0:
-            return None
-        # data_date = set(data['trade_date'].values.tolist())
-        data_date = (data['trade_date'].values.tolist())
-        return data_date
-    except Exception as e:
-        print(f"stockfetch.fetch_stocks_trade_date处理异常：{e}")
-    return None
+# def fetch_stocks_trade_date():
+#     try:
+#         data = tool_trade_date_hist_sina()
+#         if data is None or len(data.index) == 0:
+#             return None
+#         # data_date = set(data['trade_date'].values.tolist())
+#         data_date = (data['trade_date'].values.tolist())
+#         return data_date
+#     except Exception as e:
+#         print(f"stockfetch.fetch_stocks_trade_date处理异常：{e}")
+#     return None
+
+# def is_trade_date_old(date=datetime.date.today()):
+#     trade_status = GlobalValues().getkey('is_trade_date')
+#     if trade_status is None:
+#         trade_date = fetch_stocks_trade_date()
+#         if trade_date is None:
+#             return None
+#         if date in trade_date:
+#             return True
+#         else:
+#             return False
+#     else:
+#         return trade_status
 
 def is_trade_date(date=datetime.date.today()):
-    trade_status = GlobalValues().getkey('is_trade_date')
+    date = date.strftime('%Y-%m-%d')
+    if date == get_today():
+        trade_status = GlobalValues().getkey('is_trade_date')
     if trade_status is None:
-        trade_date = fetch_stocks_trade_date()
-        if trade_date is None:
-            return None
-        if date in trade_date:
-            return True
-        else:
-            return False
-    else:
-        return trade_status
+        # trade_date = fetch_stocks_trade_date()
+        # if trade_date is None:
+        #     return None
+        # if date in trade_date:
+        #     return True
+        # else:
+        #     return False
+        trade_status = get_day_istrade_date(date)
+        GlobalValues().setkey('is_trade_date',trade_status)
+    return trade_status
 
 
 
 def get_last_trade_date():
     today = datetime.date.today().strftime('%Y-%m-%d')
     return(a_trade_calendar.get_pre_trade_date(today))
-
-is_trade_date_today = is_trade_date()
-last_trade_date = get_last_trade_date()
 
 def get_day_istrade_date(dt=None):
     #2025
@@ -640,6 +655,11 @@ def get_day_istrade_date(dt=None):
     is_trade_date = a_trade_calendar.is_trade_date(dt)
 
     return(is_trade_date)
+
+
+is_trade_date_today = get_day_istrade_date()
+last_trade_date = get_last_trade_date()
+
 
 def check_file_exist(filepath):
     filestatus=False
@@ -790,7 +810,7 @@ def get_os_system():
 #     win_unicode_console.enable(use_readline_hook=False)
 
 def set_default_encode(code='utf-8'):
-        import sys
+        # import sys
         importlib.reload(sys)
         sys.setdefaultencoding(code)
         print((sys.getdefaultencoding()))
@@ -3168,12 +3188,12 @@ def get_trade_date_status():
         trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date')
         if trade_status is None or trade_status == 'None':
             trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date',update=True)
-        GlobalValues().setkey('is_trade_date',(trade_status))
+        GlobalValues().setkey('is_trade_date',trade_status)
         GlobalValues().setkey('trade_date',get_today())
     if trade_date is not None:
         if trade_date != get_today():
             trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date')
-            GlobalValues().setkey('is_trade_date',(trade_status))
+            GlobalValues().setkey('is_trade_date',trade_status)
             GlobalValues().setkey('trade_date',get_today())
     
     # lag error: trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date')
@@ -3718,15 +3738,15 @@ def reduce_memory_usage(df, verbose=False):
             )
     return df
 
-def read_to_indb(days=20,duplicated=False):
-    df = inDb.selectlastDays(days)
+# def read_to_indb(days=20,duplicated=False):
+#     df = inDb.selectlastDays(days)
 
-    if not duplicated :
-        df['couts']=df.groupby(['code'])['code'].transform('count')
-        df=df.sort_values(by='couts',ascending=0)
-        df=df.drop_duplicates('code')
+#     if not duplicated :
+#         df['couts']=df.groupby(['code'])['code'].transform('count')
+#         df=df.sort_values(by='couts',ascending=0)
+#         df=df.drop_duplicates('code')
 
-    return (df)
+#     return (df)
 
 def read_to_blocknew(p_name):
     index_list = ['1999999', '0399001', '47#IFL0', '27#HSI',  '0159915']
@@ -3801,29 +3821,29 @@ def getFibonacci(num, days=None):
     # return fib
 
 
-def varname(p):
-    import inspect
-    for line in inspect.getframeinfo(inspect.currentframe().f_back)[3]:
-        m = re.search(r'\bvarname\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', line)
-        if m:
-            return m.group(1)
+# def varname(p):
+#     import inspect
+#     for line in inspect.getframeinfo(inspect.currentframe().f_back)[3]:
+#         m = re.search(r'\bvarname\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)', line)
+#         if m:
+#             return m.group(1)
 
 
-def varnamestr(obj, namespace=globals()):
-    # namestr(a, globals())
-    if isinstance(namespace, dict):
-        n_list = [name for name in namespace if namespace[name] is obj]
-    else:
-        log.error("namespce not dict")
-        return None
-        # n_list = [name for name in namespace if id(name) == id(obj)]
+# def varnamestr(obj, namespace=globals()):
+#     # namestr(a, globals())
+#     if isinstance(namespace, dict):
+#         n_list = [name for name in namespace if namespace[name] is obj]
+#     else:
+#         log.error("namespce not dict")
+#         return None
+#         # n_list = [name for name in namespace if id(name) == id(obj)]
 
-    for n in n_list:
-        if n.startswith('_'):
-            continue
-        else:
-            return n
-    return None
+#     for n in n_list:
+#         if n.startswith('_'):
+#             continue
+#         else:
+#             return n
+#     return None
 
 # multiIndex_func = {'close': 'mean', 'low': 'min', 'high': 'max', 'volume': 'sum', 'open': 'first'}
 # multiIndex_func = {'close': 'mean', 'low': 'min', 'high': 'max', 'volume': 'sum', 'open': 'first'}
@@ -4092,7 +4112,6 @@ def MoniterArgmain():
 def writeArgmain():
     # from ConfigParser import ConfigParser
     # import shlex
-    import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('code', type=str, nargs='?', help='w or a or all')
     parser.add_argument('dl', nargs='?', type=str, help='1,5,10', default=ct.writeCount)
@@ -5662,7 +5681,7 @@ if __name__ == '__main__':
     print(GlobalValues().getlist())
     import ipdb;ipdb.set_trace()
     
-    print(read_to_indb())
+    # print(read_to_indb())
     print(get_trade_date_status())
     print(get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date'))
     print(code_to_symbol_ths('000002'))

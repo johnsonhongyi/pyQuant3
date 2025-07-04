@@ -14,11 +14,8 @@ import re
 import sys
 import time
 import os
-import lxml.html
 import pandas as pd
-from lxml import etree
 # from pandas.compat import StringIO
-from io import StringIO
 # 而python2还是
 # from StringIO import StringIO
 
@@ -648,31 +645,31 @@ def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.
         print(("Url None json-df:%0.2f "%((time.time() - start_t))), end=' ')
         return ''
 
-def _today_ticks(symbol, tdate, pageNo, retry_count, pause):
-    ct._write_console()
-    for _ in range(retry_count):
-        time.sleep(pause)
-        try:
-            html = lxml.html.parse(ct.TODAY_TICKS_URL % (ct.P_TYPE['http'],
-                                                         ct.DOMAINS['vsf'], ct.PAGES['t_ticks'],
-                                                         symbol, tdate, pageNo
-                                                         ))
-            res = html.xpath('//table[@id=\"datatbl\"]/tbody/tr')
-            if ct.PY3:
-                sarr = [etree.tostring(node).decode('utf-8') for node in res]
-            else:
-                sarr = [etree.tostring(node) for node in res]
-            sarr = ''.join(sarr)
-            sarr = '<table>%s</table>' % sarr
-            sarr = sarr.replace('--', '0')
-            df = pd.read_html(StringIO(sarr), parse_dates=False)[0]
-            df.columns = ct.TODAY_TICK_COLUMNS
-            df['pchange'] = df['pchange'].map(lambda x: x.replace('%', ''))
-        except Exception as e:
-            print(e)
-        else:
-            return df
-    raise IOError(ct.NETWORK_URL_ERROR_MSG)
+# def _today_ticks(symbol, tdate, pageNo, retry_count, pause):
+#     ct._write_console()
+#     for _ in range(retry_count):
+#         time.sleep(pause)
+#         try:
+#             html = lxml.html.parse(ct.TODAY_TICKS_URL % (ct.P_TYPE['http'],
+#                                                          ct.DOMAINS['vsf'], ct.PAGES['t_ticks'],
+#                                                          symbol, tdate, pageNo
+#                                                          ))
+#             res = html.xpath('//table[@id=\"datatbl\"]/tbody/tr')
+#             if ct.PY3:
+#                 sarr = [etree.tostring(node).decode('utf-8') for node in res]
+#             else:
+#                 sarr = [etree.tostring(node) for node in res]
+#             sarr = ''.join(sarr)
+#             sarr = '<table>%s</table>' % sarr
+#             sarr = sarr.replace('--', '0')
+#             df = pd.read_html(StringIO(sarr), parse_dates=False)[0]
+#             df.columns = ct.TODAY_TICK_COLUMNS
+#             df['pchange'] = df['pchange'].map(lambda x: x.replace('%', ''))
+#         except Exception as e:
+#             print(e)
+#         else:
+#             return df
+#     raise IOError(ct.NETWORK_URL_ERROR_MSG)
 
 
 def _get_index_url(index, code, qt):

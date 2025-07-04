@@ -3,11 +3,7 @@ import sys
 sys.path.append("..")
 from JohnsonUtil import commonTips as cct
 import JohnsonUtil.johnson_cons as ct
-from JSONData import powerCompute as pct
 # from JSONData import tdx_data_Day as tdd
-from JSONData import get_macd_kdj_rsi as getab
-from JSONData import tdx_data_Day as tdd
-import pandas as pd
 from JohnsonUtil import LoggerFactory
 log = LoggerFactory.log
 import time

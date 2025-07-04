@@ -89,7 +89,7 @@ if __name__ == "__main__":
     blkname = '063.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
 
-    from JohnsonUtil import inStockDb as inDb
+    # from JohnsonUtil import inStockDb as inDb
     # indf = inDb.showcount(inDb.selectlastDays(0))
 
     # indf = inDb.showcount(inDb.selectlastDays(2),sort_date=True)
@@ -167,17 +167,17 @@ if __name__ == "__main__":
             # market_blk = 'rzrq'
             # market_blk = 'all'
             
-            if len(indf) == 0:
-                indf = inDb.showcount(inDb.selectlastDays(instocklastDays),sort_date=True)
+            # if len(indf) == 0:
+            #     indf = inDb.showcount(inDb.selectlastDays(instocklastDays),sort_date=True)
             
-            if len(indf) == 0:
-                indf = inDb.showcount(inDb.selectlastDays(instocklastDays + 2),sort_date=True)
+            # if len(indf) == 0:
+            #     indf = inDb.showcount(inDb.selectlastDays(instocklastDays + 2),sort_date=True)
                 
-            if len(indf) > 0 and cct.creation_date_duration(block_path) > 1:
-                cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
-            else:
-                if cct.creation_date_duration(block_path) > 1:
-                    log.error("indb last1days is None")
+            # if len(indf) > 0 and cct.creation_date_duration(block_path) > 1:
+            #     cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
+            # else:
+            #     if cct.creation_date_duration(block_path) > 1:
+            #         log.error("indb last1days is None")
 
             # if len(indf) > 0 and cct.creation_date_duration(block_path) > 1:
             #     cct.write_to_blocknew(block_path, indf.code.tolist(),append=False,doubleFile=False,keep_last=0,dfcf=False)
@@ -188,7 +188,8 @@ if __name__ == "__main__":
             market_blk = '090'
             market_blk = 'all'
             # market_blk = 'bj'
-            top_now = tdd.getSinaAlldf(market=f'{indf.code.tolist()}+{market_blk}', vol=ct.json_countVol, vtype=ct.json_countType)
+            # top_now = tdd.getSinaAlldf(market=f'{indf.code.tolist()}+{market_blk}', vol=ct.json_countVol, vtype=ct.json_countType)
+            top_now = tdd.getSinaAlldf(market=f'{market_blk}', vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='rzrq', vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='??¹?060',filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
