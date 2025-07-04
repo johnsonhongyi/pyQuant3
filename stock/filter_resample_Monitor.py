@@ -235,7 +235,7 @@ if __name__ == "__main__":
                     #     else:
                     #         top_all.append(top_now.loc[symbol])
                     top_all_d = cct.combine_dataFrame(top_all_d, top_now, col='couts', compare='dff')
-                    top_all_3d = cct.combine_dataFrame(top_all_d3, top_now, col='couts', compare='dff')
+                    top_all_3d = cct.combine_dataFrame(top_all_3d, top_now, col='couts', compare='dff')
                     top_all_w = cct.combine_dataFrame(top_all_w, top_now, col='couts', compare='dff')
                     top_all_m = cct.combine_dataFrame(top_all_m, top_now, col='couts', compare='dff')
                 top_all = top_all_d
