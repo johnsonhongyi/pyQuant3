@@ -315,8 +315,8 @@ def custom_macd(prices, fastperiod=12, slowperiod=26, signalperiod=9):
    return diff, dea, macdmmm
 
 def get_tdx_macd(df):
-    if len(df) < 10:
-        log.debug(f'code:{df.code[0]} df count < 10:{len(df)}')
+    if len(df) < 6:
+        log.debug(f'code:{df.code[0]} df count < 6:{len(df)}')
         return df
     increasing = None
     id_cout = len(df)
@@ -324,8 +324,9 @@ def get_tdx_macd(df):
     # if df.index.name != 'date':
     #     df=df.set_index('date')
     
-    if 'macd' in df.columns:
-        log.debug(f'macd is ok:{df.macd[-3:]}')
+    if 'macd' in df.columns and 'macdlast6' in df.columns:
+        log.debug(f'macd is exists macd:{df.macd[-2:]}  macdlast6:{df.macdlast6[-2:]}')
+        # return df
 
     if id_cout < limit:
         if  df.index.is_monotonic_increasing:
@@ -847,7 +848,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             # print(df.high4[0],(df['low4'][0]))
             df['lastdu4'] = df['high4'][0] /(df['low4'][0]+0.1)
 
-    df = get_tdx_macd(df)
+    # df = get_tdx_macd(df)
     df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
     if 'date' in df.columns:
         df = df.set_index('date')
@@ -3556,19 +3557,24 @@ def resample_dataframe_recut(temp,resample='d',increasing=True,check=False):
         temp = temp.sort_index(ascending=ascending)   
     return temp
 
-def compute_upper_cross(dd,ma1='upper',ma2='ma5d',ratio=0.02,resample='d'):    
-    df = dd[(dd[ma1] != 0)]
-    df = df[-ct.upper_cross_days:]
-    # temp = df[ (df[ma1] > df[ma2] * (1-ratio))  & (df[ma1] < df[ma2] * (1+ratio)) ]
-    # temp = df[(df.low > df.upper)]
-    temp = df[(df.high >= df.upper)]
-    # if len(temp) >0 and  temp.index[-1] == df.index[-1]:
-    #     dd['topU'] = len(temp)
-    # else:
-    #     dd['topU'] = 0
-    dd['topU'] = len(temp) 
-    #high >= df.upper
-    dd['eneU'] = len(df[(df.close >= df.ene)])
+def compute_upper_cross(dd,ma1='upper',ma2='ma5d',ratio=0.02,resample='d'): 
+    if ma1 in dd.columns:
+        df = dd[(dd[ma1] != 0)]
+        df = df[-ct.upper_cross_days:]
+        # temp = df[ (df[ma1] > df[ma2] * (1-ratio))  & (df[ma1] < df[ma2] * (1+ratio)) ]
+        # temp = df[(df.low > df.upper)]
+        temp = df[(df.high >= df.upper)]
+        # if len(temp) >0 and  temp.index[-1] == df.index[-1]:
+        #     dd['topU'] = len(temp)
+        # else:
+        #     dd['topU'] = 0
+        dd['topU'] = len(temp) 
+        #high >= df.upper
+        dd['eneU'] = len(df[(df.close >= df.ene)])
+    else:
+        dd['topU'] = 0 
+        #high >= df.upper
+        dd['eneU'] = 0
     #close >= df.ene
     
     return dd
@@ -3720,7 +3726,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         # df['lower'] = df['lower'].apply(lambda x: round(x,1))   
         # df['ene'] =  df['ene'].apply(lambda x: round(x,1))  
         # df = df.fillna(0)
-
+        df = get_tdx_macd(df)
         dd = compute_ma_cross(df,resample=resample)
         dd = compute_upper_cross(df,resample=resample)
 
@@ -5360,8 +5366,9 @@ if __name__ == '__main__':
     # df2 = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
 
     # df2 = get_tdx_Exp_day_to_df(code,dl=60, end='20230925', newdays=0, resample='d')
+    code='920068'
+    df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='w')
 
-    # df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='w')
     # df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='3d')
 
     # df = get_tdx_Exp_day_to_df(code,dl=60, start='20230925',end=None, newdays=0, resample='d')

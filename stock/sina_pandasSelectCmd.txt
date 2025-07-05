@@ -452,3 +452,5 @@ top_all.query('top10 > 0 and lasth3d < lasth2d < lasth1d and lastl3d <  lastl2d 
 top_temp.query('top10 > 0 and lasth3d > lasth2d > lasth1d and lastl3d >  lastl2d > lastl1d and open > lastl1d and close > lastp1d')
 top_all.query('top10 > 0 and lasth3d > lasth2d > lasth1d and lastl3d >  lastl2d > lastl1d and open > lastl1d and close > lastp1d')
 top_temp.query('top10 > 0 and lasth3d < lasth2d < lasth1d and lastl3d <  lastl2d < lastl1d and lasto2d > lasth3d and lasto1d > lasth2d and low > ma5d')
+top_all.query('bandwidth >3')
+top_all.query('3 <bandwidth')

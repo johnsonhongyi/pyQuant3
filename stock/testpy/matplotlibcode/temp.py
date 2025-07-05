@@ -1,10 +1,10 @@
-import datetime
+# import datetime
 
-import matplotlib.pyplot as plt
-import numpy as np
-import tushare as ts
-from matplotlib.dates import num2date, date2num
-from matplotlib.finance import candlestick_ohlc
+# import matplotlib.pyplot as plt
+# import numpy as np
+# import tushare as ts
+# from matplotlib.dates import num2date, date2num
+# from matplotlib.finance import candlestick_ohlc
 
 # Create sample data for 5 days. Five columns: time, opening, close, high, low
 # jaar = 2007
@@ -33,6 +33,115 @@ from matplotlib.finance import candlestick_ohlc
 # p3, = ax.plot([2,3,1], label="line 3")
 
 
+import multiprocessing as mp
+import traceback
+
+def worker_with_exception_handling(item):
+    try:
+        # Simulate an operation that might raise an exception
+        if item == 5:
+            raise ValueError(f"Error processing item {item}")
+        return f"Processed item {item}: Result {item * 2}"
+    except Exception as e:
+        return {"error": True, "message": str(e), "traceback": traceback.format_exc()}
+
+if __name__ == '__main__':
+    print("start")
+    with mp.Pool() as pool:
+        for result in pool.imap_unordered(worker_with_exception_handling, range(10)):
+            if isinstance(result, dict) and result.get("error"):
+                print(f"Caught error: {result['message']}")
+                # Optionally log the traceback for debugging
+                # print(result['traceback'])
+            else:
+                print(result)
+
+import sys
+sys.exit(0)
+
+import os
+import traceback
+# import multiprocessing as mp
+from tqdm import tqdm
+import time
+from multiprocessing import Pool
+# try:
+#     with Pool(processes=pool_count) as pool:
+#         data_count=len(urllist)
+#         progress_bar = tqdm(total=data_count)
+#         # print("mapping ...")
+#         log.debug(f'data_count:{data_count}')
+#         # tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols)
+#         results = tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count)
+#         # print("running ...")
+#         result = tuple(results)  # fetch the lazy results
+
+#     #debug:
+#     # results=[]
+#     # for code in urllist:
+#     #     print("code:%s "%(code), end=' ')
+#     #     res=cmd(code,**kwargs)
+#     #     print("status:%s\t"%(len(res)), end=' ')
+#     #     results.append(res)
+#     # result=results
+
+#     # print("done")
+# except Exception as e:
+#     log.error("except:%s"%(e))
+#     traceback.print_exc()
+#     # log.error("except:results%s"%(results[-1]))
+#     import ipdb;ipdb.set_trace()
+#     results=[]
+#     for code in urllist:
+#         print(f"code:{code},count:{len(urllist)} idx:{urllist.index(code)}", end=' ')
+#         res=cmd(code,**kwargs)
+#         print("status:%s\t"%(len(res)), end=' ')
+#         results.append(res)
+#     result=results
+
+def main():
+    work_items = [i for i in range(20)]
+    data_count=len(work_items)
+    print(f'data_count:{data_count} work_items:{work_items}')
+    # pool = mp.Pool(1)
+    with Pool(processes=2) as pool:
+    # pool = ThreadPool(2)
+        progress_bar = tqdm(total=data_count)
+        results = tqdm(pool.imap_unordered(process_file_exc, work_items),unit='%',mininterval=2,unit_scale=True,ncols=5, total=data_count)
+        # for result in pool.imap_unordered(process_file_exc, work_items):
+        for result in results:
+            if isinstance(result, Exception):
+                print("Got exception: {}".format(result))
+            else:
+                print("Got OK result: {}".format(result))
+
+
+def process_file_exc(work_item):
+    try:
+        print('111111111')
+        time.sleep(1)
+        return process_file(work_item)
+    except Exception as ex:
+        print("Err on item {}".format(work_item)+ os.linesep + traceback.format_exc())
+        return Exception("Err on item {}".format(work_item)
+                         + os.linesep + traceback.format_exc())
+
+
+def process_file(work_item):
+    print('process_file:{work_item}')
+    if work_item == 9:
+        # this will raise ZeroDivisionError exception
+        # return work_item / 0
+        raise Exception("code is None")
+    print("{} * 2 == {}".format(work_item, work_item * 2))
+    return "{} * 2 == {}".format(work_item, work_item * 2)
+
+
+if __name__ == '__main__':
+    main()
+
+import sys
+sys.exit(0)
 bars = ts.get_hist_data('sh', start="2015-01-01").sort_index(ascending=True)
 
 date = date2num(bars.index.to_datetime().to_pydatetime())

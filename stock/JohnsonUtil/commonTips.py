@@ -27,6 +27,7 @@ from JohnsonUtil.prettytable import PrettyTable
 from JohnsonUtil import johnson_cons as ct
 # from JohnsonUtil import inStockDb as inDb
 
+import traceback
 import socket
 from configobj import ConfigObj
 import importlib
@@ -2084,7 +2085,6 @@ def testdf2(df):
 
 
 def get_today_duration(datastr, endday=None,tdx=False):
-    # import ipdb;ipdb.set_trace()
     if datastr is not None and len(datastr) > 6:
         if endday:
             today = datetime.datetime.strptime(day8_to_day10(endday), '%Y-%m-%d').date()
@@ -2607,7 +2607,7 @@ def _wrapper(enum_iterable, function, **kwargs):
 
 from functools import partial
 from multiprocessing import Pool
-def to_mp_run_async(cmd, urllist, *args,**kwargs):
+def to_mp_run_async_old2025(cmd, urllist, *args,**kwargs):
     # https://stackoverflow.com/questions/68065937/how-to-show-progress-bar-tqdm-while-using-multiprocessing-in-python
     #other  apply the as_completed 
     '''
@@ -2680,30 +2680,20 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     #     print("status:%s\t"%(len(res)), end=' ')
                     #     results.append(res)
                     # result=results
-
-                    # print("done")
                 except Exception as e:
                     log.error("except:%s"%(e))
+                    traceback.print_exc()
                     # log.error("except:results%s"%(results[-1]))
                     import ipdb;ipdb.set_trace()
                     results=[]
                     for code in urllist:
-                        print("code:%s "%(code), end=' ')
+                        print(f"code:{code},count:{len(urllist)} idx:{urllist.index(code)}", end=' ')
                         res=cmd(code,**kwargs)
                         print("status:%s\t"%(len(res)), end=' ')
                         results.append(res)
                     result=results
         else:
-            # pool = ThreadPool(cpu_count())
-            # # log.error("to_mp_run args is not None")
-            # for inx in tqdm(list(range(len(urllist))),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
-            #     code = urllist[inx]
-            # # for code in urllist:
-            #     try:
-            #         # result = pool.apply_async(cmd, (code,) + args).get()
-            #         results.append(pool.apply_async(cmd, (code,) + args).get())
-            #     except Exception as e:
-            #         log.error("except:%s code:%s"%(e,code))
+
             try:
                 with Pool(processes=pool_count) as pool:
                     data_count=len(urllist)
@@ -2714,12 +2704,9 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     # print("running ...")
                     result=tuple(results)  # fetch the lazy results
                     # print("done")
-                # log.error("no test")
             except Exception as e:
                 log.error("except:%s"%(e))
 
-        # print("time:%s"%(round(time.time()-time_s,2)),)
-        # return result
 
     else:
         if len(kwargs) > 0 :
@@ -2743,9 +2730,139 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
         pool.close()
         pool.join()
         result=results
-    # '''
     print("time:%s"%(round(time.time()-time_s,2)),)
     return result
+
+
+def process_file_exc(func=None,code=None):
+    # partialfunc=GlobalValues().getkey('partialfunc')
+    try:
+        # if func is None:
+        #     return Exception("func is None code: {}".format(code))
+        return func(code)
+    except Exception as ex:
+        # print("Exception on code: {}".format(code)+ os.linesep + traceback.format_exc())
+        return Exception("Exception on code {}".format(code)+ os.linesep + traceback.format_exc())
+
+
+
+def to_mp_run_async(cmd, urllist, *args,**kwargs):
+    # https://stackoverflow.com/questions/68065937/how-to-show-progress-bar-tqdm-while-using-multiprocessing-in-python
+    result = []  
+    time_s = time.time()
+    # func = partial(cmd, **kwargs)
+    # module = importlib.import_module(cmd)
+    # https://stackoverflow.com/questions/72766345/attributeerror-cant-pickle-local-object-in-multiprocessing
+
+    if len(urllist) > 200:
+        if int(round(len(urllist)/100,0)) < 2:
+            cpu_co = 1
+        else:
+            cpu_co = int(round(len(urllist)/100,0))
+        cpu_used = int(cpu_count()/2) - 1 
+        log.debug(f'count:{len(urllist)} cpu_co:{cpu_co}')
+        pool_count = (cpu_used) if cpu_co > (cpu_used) else cpu_co
+        # pool_count = (cpu_count()-2) if cpu_co > (cpu_count()-2) else cpu_co
+        if  cpu_co > 1 and 1300 < get_now_time_int() < 1500:
+            pool_count = int(cpu_count() / 2) - 1
+        if len(kwargs) > 0 :
+                # pool = ThreadPool(12)
+                log.debug(f'cmd:{cmd} kwargs:{kwargs}')
+                func = partial(cmd, **kwargs)
+                partialfunc = partial(process_file_exc, func)
+                # GlobalValues().setkey('partialfunc',func)
+                # partialfunc=GlobalValues().getkey('partialfunc')
+                # print(f"func getkey:{partialfunc('000002')}")
+
+                # TDXE:44.26  cpu 1   
+                # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
+                # results = pool.map(func, urllist)
+                # try:
+                #     for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
+                #         results.append(y)
+                # except Exception as e:
+                #     log.error("except:%s"%(e))
+                try:
+                    with Pool(processes=pool_count) as pool:
+                        data_count=len(urllist)
+                        progress_bar = tqdm(total=data_count)
+                        # print("mapping ...")
+
+                        log.debug(f'data_count:{data_count}')
+                        # tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols)
+                        results = tqdm(pool.imap_unordered(partialfunc, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count)
+                        # print("running ...")
+                        # result = tuple(results)  # fetch the lazy results
+                        result = []
+                        for data in results:
+                            if isinstance(data, Exception):
+                                print("Got exception: {}".format(data))
+                            else:
+                                # print("Got OK result: {}".format(result))
+                                result.append(data)
+
+                    #debug:
+                    # results=[]
+                    # for code in urllist:
+                    #     print("code:%s "%(code), end=' ')
+                    #     res=cmd(code,**kwargs)
+                    #     print("status:%s\t"%(len(res)), end=' ')
+                    #     results.append(res)
+                    # result=results
+                except Exception as e:
+                    log.error("except:%s"%(e))
+                    traceback.print_exc()
+                    # log.error("except:results%s"%(results[-1]))
+                    import ipdb;ipdb.set_trace()
+                    results=[]
+                    for code in urllist:
+                        print(f"code:{code},count:{len(urllist)} idx:{urllist.index(code)}", end=' ')
+                        res=cmd(code,**kwargs)
+                        print("status:%s\t"%(len(res)), end=' ')
+                        results.append(res)
+                    result=results
+        else:
+
+            try:
+                with Pool(processes=pool_count) as pool:
+                    data_count=len(urllist)
+                    progress_bar = tqdm(total=data_count)
+                    # print("mapping ...")
+                    # tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols)
+                    results = tqdm(pool.imap_unordered(cmd, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count)
+                    # print("running ...")
+                    result=tuple(results)  # fetch the lazy results
+                    # print("done")
+            except Exception as e:
+                log.error("except:%s"%(e))
+
+
+    else:
+        if len(kwargs) > 0 :
+            pool = ThreadPool(1)
+            func = partial(cmd, **kwargs)
+            # TDXE:40.63  cpu 1    cpu_count() 107.14
+            # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
+            # results = pool.map(func, urllist)
+            try:
+                results = pool.map(func, urllist)
+            except Exception as e:
+                log.error("except:%s"%(e))
+        else:
+            pool = ThreadPool(int(cpu_count())/ 2 - 1 if int(cpu_count()) > 2 else 2)
+            for code in urllist:
+                try:
+                    # result = pool.apply_async(cmd, (code,) + args).get()
+                    results.append(pool.apply_async(cmd, (code,) + args).get())
+                except Exception as e:
+                    log.error("except:%s code:%s"%(e,code))
+        pool.close()
+        pool.join()
+        result=results
+    print("time:%s"%(round(time.time()-time_s,2)),)
+    return result
+
+
 
 def to_mp_run_async_outdate2023(cmd, urllist, *args,**kwargs):
     # n_t=time.time()
@@ -4838,7 +4955,6 @@ def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, 
             lastdf = GlobalValues().getkey('percdf').loc[code]
             # if code == '920445':
             #     print(f'{code}lastdf:{lastdf.T}')
-            #     import ipdb;ipdb.set_trace()
             # if isinstance(lastdf,pd.DataFrame):
             #     lastdf = lastdf.reset_index().drop_duplicates('code').set_index('code')
             #     log.error(f'code:{code} count:{lastdf.shape}')
@@ -4961,7 +5077,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
     tempdf=[]
     while end:
         # cmd = (cct.cct_raw_input(" ".join(dir_mo)+": "))
-        cmd = (cct_raw_input(": "))
+        cmd = (cct_raw_input(": ")).strip()
         code=ct.codeQuery if workstatus else ct.codeQuery_work_false
         if len(cmd) == 0:
             # code='最近两周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
@@ -5050,6 +5166,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
 
                         if len(cmdlist) > 1:
                             # ' '.join([aa.split()[i] for i in range(1,len(aa.split()))])
+                            log.debug(f'cmd:{cmd}')
                             cmd =cmd_ + ' '.join([cmd.split()[i] for i in range(1,len(cmd.split()))])
                             print(f'cmd:{cmd}')
                         else:
@@ -5134,9 +5251,8 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                                     cmd = ct.codeQuery_show_single(cmd,Market_Values,orderby=orderby,noformat=noformat)
                                 except Exception as e:
                                     print("Exception:", e)
-                                    import traceback
                                     traceback.print_exc()
-                                    raise e
+                                    # raise e
                         elif  check_s  != orderby and cmd.find('sort_values') < 0 and (check_s  in list(dir(top_temp)) or check_s in top_temp.columns) :
                             cut_tail = cmd.split('.')[-1]
                             # cmd_head = cmd.replace(cut_tail,'')
@@ -5723,7 +5839,6 @@ if __name__ == '__main__':
         h5, freq=freq.upper(),
     col=run_col, start=startime, end=endtime, code=None)
     mdf.shape
-    import ipdb;ipdb.set_trace()
     '''
     # rzrq['all']='nan'
     # print(get_last_trade_date('2025-06-01'))
