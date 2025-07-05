@@ -316,25 +316,38 @@ def custom_macd(prices, fastperiod=12, slowperiod=26, signalperiod=9):
 
 def get_tdx_macd(df):
     if len(df) < 10:
+        log.debug(f'code:{df.code[0]} df count < 10:{len(df)}')
         return df
     increasing = None
     id_cout = len(df)
     limit = 39
+    # if df.index.name != 'date':
+    #     df=df.set_index('date')
+    
+    if 'macd' in df.columns:
+        log.debug(f'macd is ok:{df.macd[-3:]}')
+
     if id_cout < limit:
         if  df.index.is_monotonic_increasing:
             increasing = True
             df = df.sort_index(ascending=False)
+        else:
+            increasing = False
+
         # temp_df = df.iloc[0]
+
         runtimes = limit-id_cout
         df = df.reset_index()
         # for t in range(runtimes):
         #     df.loc[df.shape[0]] = temp_df
-
         temp = df.loc[np.repeat(df.index[-1], runtimes)].reset_index(drop=True)
         # df = df.append(temp)
         df = pd.concat([df, temp], axis=0)
 
+        df = df.reset_index(drop=True)
+
         df=df.sort_index(ascending=False)
+
     # if  increasing:
     #     df = df.sort_index(ascending=increasing)
     # df=df.fillna(0)
@@ -349,6 +362,22 @@ def get_tdx_macd(df):
     # MACD Line (MACD_12_26_9, macd): Indicates the momentum.
     # Signal Line (MACDs_12_26_9, macddea): Provides buy/sell signals when crossed by the MACD line.
     # Histogram (MACDh_12_26_9, macddif): Shows the divergence or convergence between the MACD line and the Signal line, indicating 
+    
+    if len(df) > 33:
+            # df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma20d]
+            # df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma20d]
+            # df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
+            df[['lower', 'ene', 'upper','bandwidth','bollpect']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
+
+    else:
+        df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma10d]
+        df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma10d]
+        df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
+
+    df['upper'] = df['upper'].apply(lambda x: round(x,1))   
+    df['lower'] = df['lower'].apply(lambda x: round(x,1))   
+    df['ene'] =  df['ene'].apply(lambda x: round(x,1))  
+
     df[['macd','macddif','macddea']] = ta.macd(
         df['close'], fastperiod=12, slowperiod=26, signalperiod=9) 
     df = df.fillna(0)
@@ -615,7 +644,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                 if dl is None:
                     dl = int(cct.get_today_duration(start) * 5 / 7)
                     log.debug("start:%s dl:%s" % (start, dl))
-            inxdl = int(dl) if int(dl) > 3 else int(dl) + 2
+            inxdl = int(dl)+2 if int(dl) > 3 else int(dl) + 2
             data = cct.read_last_lines(file_path, inxdl)
             dt_list = []
             data_l = data.split('\n')
@@ -671,19 +700,22 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         elif start is not None:
             df = df[df.date >= start]
 
-        if not MultiIndex and resample == 'd':
-            df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
-
         if len(df) > 0:
 
             if 'date' in df.columns:
                 df = df.set_index('date')
+
+            # if not MultiIndex and resample == 'd':
+            #     df = get_tdx_macd(df)
+            #     df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
+
             df = df.sort_index(ascending=True)
             if not MultiIndex:
                 # if not resample == 'd' and resample in resample_dtype:
                 if not resample == 'd':
                     df = get_tdx_stock_period_to_type(df, period_day=resample)
-                    df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
+                    # df = get_tdx_macd(df)
+                    # df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
                     if 'date' in df.columns:
                         df = df.set_index('date')
                 # df['ma5d'] = pd.rolling_mean(df.close, 5)
@@ -815,12 +847,15 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             # print(df.high4[0],(df['low4'][0]))
             df['lastdu4'] = df['high4'][0] /(df['low4'][0]+0.1)
 
+    df = get_tdx_macd(df)
+    df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
+    if 'date' in df.columns:
+        df = df.set_index('date')
     # if len(df) > 5:
     #     df['hvdu'] = df.vol.tolist().index(df.hv[-1])+1
     #     df['hvhigh'] = df.high.tolist()[df.hvdu.values[0]-1]
     #     df['lvdu'] = df.vol.tolist().index(df.lv[-1])+1
     #     df['lvlow'] = df.close.tolist()[df.lvdu.values[0]-1]
-    df = get_tdx_macd(df)
     # df = df.sort_index(ascending=False)
     return df
     # add cumin[:10]
@@ -1314,11 +1349,12 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
     return df
 
 
-def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=None, type='f', df=None, dl=10, power=True):
+def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=None, type='f', df=None, dl=30, power=True):
     #补数据power = false
     start = cct.day8_to_day10(start)
     end = cct.day8_to_day10(end)
     if df is None:
+        log.debug(f'df is none get dl:{dl}')
         df = get_tdx_Exp_day_to_df(
             code, start=start, end=end, dl=dl, newdays=newdays).sort_index(ascending=True)
     else:
@@ -3124,7 +3160,7 @@ def compute_condition_up(df):
         duration = df.index[df.index > i] #跳空后的数据日
 
         for j in duration:
-
+            log.debug(f"j:{j}: low :{df['low'].at[j]}")
             if df['low'].at[j] <= ex_hop_price:
                 fill_data = j
                 fill_day = len(df.index[(df.index > i) & (df.index <= j)])
@@ -3669,20 +3705,21 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         # df['natr'] = ta.natr(df.high, df.low, df.close)
         df['truer'] = ta.true_range(df.high, df.low, df.close)
 
-        if len(df) > 33:
-            # df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma20d]
-            # df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma20d]
-            # df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
-            df[['lower', 'ene', 'upper','bandwidth','bollpect']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
+        # if len(df) > 33:
+        #     # df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma20d]
+        #     # df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma20d]
+        #     # df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
+        #     df[['lower', 'ene', 'upper','bandwidth','bollpect']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
 
-        else:
-            df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma10d]
-            df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma10d]
-            df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
-        df['upper'] = df['upper'].apply(lambda x: round(x,1))   
-        df['lower'] = df['lower'].apply(lambda x: round(x,1))   
-        df['ene'] =  df['ene'].apply(lambda x: round(x,1))  
-        df = df.fillna(0)
+        # else:
+        #     df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma10d]
+        #     df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma10d]
+        #     df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
+
+        # df['upper'] = df['upper'].apply(lambda x: round(x,1))   
+        # df['lower'] = df['lower'].apply(lambda x: round(x,1))   
+        # df['ene'] =  df['ene'].apply(lambda x: round(x,1))  
+        # df = df.fillna(0)
 
         dd = compute_ma_cross(df,resample=resample)
         dd = compute_upper_cross(df,resample=resample)
@@ -5220,7 +5257,6 @@ if __name__ == '__main__':
     # check_tdx_Exp_day_duration('all')
     # print("use time:%s"%(time.time()-time_s))
     # import ipdb;ipdb.set_trace()
-    write_to_all()
     # code='399001'
     # code='000862'
     # code='000859'
@@ -5359,6 +5395,9 @@ if __name__ == '__main__':
     # dd = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='d')
     # print(f'ral:{dd.ral}')
     # import ipdb;ipdb.set_trace()
+
+
+    # write_to_all()
 
     # # dd = compute_ma_cross(dd,resample='d')
     # print(get_tdx_stock_period_to_type(dd)[-5:])

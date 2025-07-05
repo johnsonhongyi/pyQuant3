@@ -646,6 +646,22 @@ def get_last_trade_date(dt=None):
         dt = datetime.date.today().strftime('%Y-%m-%d')
     return(a_trade_calendar.get_pre_trade_date(dt))
 
+def get_lastdays_trade_date(days=10):
+    if days is None:
+        dt = get_last_trade_date()
+    else:
+        today = datetime.date.today()
+        dt = (today + datetime.timedelta(-(days+1))).strftime('%Y-%m-%d')
+        duration = a_trade_calendar.get_trade_count(dt,get_today())
+        if duration > days:
+            for da in range(1,duration-days+1):
+                dt =  a_trade_calendar.get_next_trade_date(dt)
+        elif duration < days:
+            for da in range(1,days-duration+1):
+                dt =  a_trade_calendar.get_pre_trade_date(dt)
+    return(dt)
+
+
 def get_day_istrade_date(dt=None):
     #2025
     sep='-'
@@ -1960,52 +1976,28 @@ def get_work_day_idx():
     return day_n
 
 def last_tddate(days=1):
-    # today = datetime.datetime.today().date() + datetime.timedelta(-days)
-    if days is None:
-        return days
-    dt = GlobalValues().getkey(f'last_tddate-{days}')
-    if dt is None:
-        today = datetime.date.today()
-        if days == 1:
-        # dt = today + datetime.timedelta(days-1)
-            dt = today.strftime('%Y-%m-%d')
-            dt = get_last_trade_date(dt)
-            GlobalValues().setkey(f'last_tddate-{days}',dt)
-            log.debug(f'setkey:last_tddate-{days} : {dt}')
-        else:
-            dt = (today + datetime.timedelta(-(days-1))).strftime('%Y-%m-%d')
-            # dt = datetime.date.today().strftime('%Y-%m-%d')
-            dt = get_last_trade_date(dt)
-            GlobalValues().setkey(f'last_tddate-{days}',dt)
-            log.debug(f'setkey:last_tddate-{days} : {dt}')
-
-    return dt
-    # today = datetime.datetime.today().date()
-    # log.debug("today:%s " % (today))
-    # # return str(today)
-
-    # def get_work_day(today):
-    #     day_n = int(today.strftime("%w"))
-    #     if day_n == 0:
-    #         lastd = today + datetime.timedelta(-2)
-    #         log.debug("0:%s" % lastd)
-    #     elif day_n == 1:
-    #         lastd = today + datetime.timedelta(-3)
-    #         log.debug("1:%s" % lastd)
+    # # today = datetime.datetime.today().date() + datetime.timedelta(-days)
+    # if days is None:
+    #     return days
+    # dt = GlobalValues().getkey(f'last_tddate-{days}')
+    # if dt is None:
+    #     today = datetime.date.today()
+    #     if days == 1:
+    #     # dt = today + datetime.timedelta(days-1)
+    #         dt = today.strftime('%Y-%m-%d')
+    #         dt = get_last_trade_date(dt)
+    #         GlobalValues().setkey(f'last_tddate-{days}',dt)
+    #         log.debug(f'setkey:last_tddate-{days} : {dt}')
     #     else:
-    #         lastd = today + datetime.timedelta(-1)
-    #         log.debug("2-6:%s" % lastd)
-    #     # is_trade_date()
-    #     return lastd
-    #     # if days==0:
-    #     # return str(lasd)
-    # lastday = today
-    # for x in range(int(days)):
-    #     # print x
-    #     lastday = get_work_day(today)
-    #     today = lastday
-    # return str(lastday)
+    #         # dt = (today + datetime.timedelta(-(days-1))).strftime('%Y-%m-%d')
+    #         # # dt = datetime.date.today().strftime('%Y-%m-%d')
+    #         # dt = get_last_trade_date(dt)
+    #         dt = get_lastdays_trade_date(days)
+    #         GlobalValues().setkey(f'last_tddate-{days}',dt)
+    #         log.debug(f'setkey:last_tddate-{days} : {dt}')
 
+    return get_lastdays_trade_date(days)
+   
 # def last_tddate(days=1):
 #     # today = datetime.datetime.today().date() + datetime.timedelta(-days)
 #     if days is None:
@@ -5735,7 +5727,8 @@ if __name__ == '__main__':
     '''
     # rzrq['all']='nan'
     # print(get_last_trade_date('2025-06-01'))
-
+    # import ipdb;ipdb.set_trace()
+    get_lastdays_trade_date(1)
     print(f'get_work_day_idx:{get_work_day_idx()}')
     print(get_tdx_dir_blocknew_dxzq(r'D:\MacTools\WinTools\new_tdx2\T0002\blocknew\090.blk'))
     print(f'is_trade_date():{is_trade_date()}')
