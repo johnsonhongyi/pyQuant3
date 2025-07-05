@@ -298,7 +298,7 @@ if __name__ == "__main__":
                     # top_all=top_all.sort_values(by=['percent','dff','couts','ratio'],ascending=[0,0,1,1])
                     # print cct.format_for_print(top_all[:10])
                     # top_dd = pd.concat([top_all[:5],top_temp[:3],top_all[-3:],top_temp[-3:]], axis=0)
-
+                    
                     if len(top_all) > 0 and top_all.lastp1d[0] == top_all.close[0]:
 
                         if 915 < cct.get_now_time_int() < 1445:
