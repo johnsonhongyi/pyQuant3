@@ -81,8 +81,13 @@ truer :
 hmax: close highest
 high4 :
 low4 :
-max5 :
-max10 :
+max5 : 5日 -1
+max10 : 10日 -1
+hmaxvol:
+hmax60:        60:-3
+low60:
+low10:       -1      
+llowvol:
 top0 :  15日内一字涨跌停
 top15 :  最后15日统计高开高走站上upper
 top10 :  涨停数
