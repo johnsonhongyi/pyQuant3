@@ -177,7 +177,7 @@ if __name__ == "__main__":
             #     if cct.creation_date_duration(block_path) > 1:
             #         log.error("indb last1days is None")
 
-            market_blk = '090'
+            # market_blk = '090'
             market_blk = 'all'
             # market_blk = 'bj'
             # top_now = tdd.getSinaAlldf(market=f'{indf.code.tolist()}+{market_blk}', vol=ct.json_countVol, vtype=ct.json_countType)
@@ -196,9 +196,6 @@ if __name__ == "__main__":
                 status_change = False
 
             if len(top_now) > 1 and len(top_now.columns) > 4:
-               # top_now = top_now[top_now.trade >= top_now.high * 0.98]
-               # if 'percent' in top_now.columns.values:
-                   # top_now = top_now[top_now['percent'] >= 0]
 
                 if len(top_all) == 0 and len(lastpTDX_DF) == 0:
                     cct.get_terminal_Position(position=sys.argv[0])
@@ -215,29 +212,11 @@ if __name__ == "__main__":
                     top_all_m = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF_m)
                     # dd=dd.fillna(0)
                 else:
-                    # for symbol in top_now.index:
-                    #     if symbol in top_all.index:
-                    #         count_n = top_now.loc[symbol, 'couts']
-                    #         count_a = top_all.loc[symbol, 'couts']
-                    #         top_now.loc[symbol, 'dff'] = count_n - count_a
-                    #         if status_change:
-                    #             # top_all.loc[symbol] = top_now.loc[symbol]
-                    #             top_all.loc[symbol, ['name', 'percent', 'dff', 'couts', 'trade', 'high', 'open', 'low', 'ratio', 'volume',
-                    #                                  'prev_p']] = top_now.loc[symbol, ['name', 'percent', 'dff', 'couts', 'trade', 'high', 'open', 'low', 'ratio', 'volume',
-                    #                                                                    'prev_p']]
-                    #         else:
-                    #             top_all.loc[symbol, ['percent', 'dff']] = top_now.loc[
-                    #                 symbol, ['percent', 'dff']]
-                    #             # top_all.loc[symbol, 'trade':] = top_now.loc[symbol, 'trade':]
-                    #             top_all.loc[symbol, ['trade', 'high', 'open', 'low', 'ratio', 'volume',
-                    #                                  'prev_p']] = top_now.loc[symbol, ['trade', 'high', 'open', 'low', 'ratio', 'volume',
-                    #                                                                    'prev_p']]
-                    #     else:
-                    #         top_all.append(top_now.loc[symbol])
                     top_all_d = cct.combine_dataFrame(top_all_d, top_now, col='couts', compare='dff')
                     top_all_3d = cct.combine_dataFrame(top_all_3d, top_now, col='couts', compare='dff')
                     top_all_w = cct.combine_dataFrame(top_all_w, top_now, col='couts', compare='dff')
                     top_all_m = cct.combine_dataFrame(top_all_m, top_now, col='couts', compare='dff')
+
                 top_all = top_all_d
 
 
@@ -469,14 +448,14 @@ if __name__ == "__main__":
                     # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
 
                 code_m = top_all_m.query('lasth1d > lasth2d')
-                code_w = top_all_m.query('lasth1d > lasth2d')
-                code_3d = top_all_m.query('lasth1d > lasth2d')
-                code_d = top_all_m.query('lasth1d > lasth2d')
+                code_w = top_all_w.query('lasth1d > lasth2d')
+                code_3d = top_all_3d.query('lasth1d > lasth2d')
+                code_d = top_all_d.query('lasth1d > lasth2d')
                 #clean 688 and st
                 # if len(top_temp) > 0:                
                 #     top_temp = top_temp[ (~top_temp.index.str.contains('688')) ]
-
-
+                print(f'code_d:{len(code_d)}, code_3d:{len(code_3d)}, code_w:{len(code_w)}, code_w:{len(code_m)}')
+                code_select = set()
                     
                 if st_key_sort.split()[0] == 'x':
                     top_temp = top_temp[top_temp.topR != 0]
@@ -785,8 +764,8 @@ if __name__ == "__main__":
             # <A HREF = "www.sina.com.cn"> Sina </a>
             # """)
 
-sys.exit(0)
 
+'''
 import logging
 import numpy as np
 import talib as tl
@@ -1306,5 +1285,5 @@ def check_volume(code_name, data, date=None, threshold=60):
     #     return True
     # else:
     #     return False
-
+'''
 
