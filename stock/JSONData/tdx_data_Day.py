@@ -321,7 +321,7 @@ def get_tdx_macd(df):
         df['ene'] = 0
         df['bandwidth'] = 0
         df['bollpect'] = 0
-        log.error(f'code:{df[-1:]} df count < 6:{len(df)}')
+        log.debug(f'code:{df[-1:]} df count < 6:{len(df)}')
         return df
     increasing = None
     id_cout = len(df)

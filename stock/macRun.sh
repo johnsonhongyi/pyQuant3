@@ -31,5 +31,5 @@ ls -alh dataBarFeed/chantdxpower.*
 #do something here
 endTime=`date +%s`
 sumTime=$(( $endTime - $startTime ))
-minT=`expr $endTime / 60`
+minT=`expr $sumTime / 60`
 echo "Total run $sumTime seconds min: $minT min"
