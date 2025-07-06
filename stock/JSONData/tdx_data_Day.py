@@ -315,8 +315,13 @@ def custom_macd(prices, fastperiod=12, slowperiod=26, signalperiod=9):
    return diff, dea, macdmmm
 
 def get_tdx_macd(df):
-    if len(df) < 6:
-        log.debug(f'code:{df.code[0]} df count < 6:{len(df)}')
+    if len(df) < 10:
+        df['upper'] = 0
+        df['lower'] = 0
+        df['ene'] = 0
+        df['bandwidth'] = 0
+        df['bollpect'] = 0
+        log.error(f'code:{df.code[0]} df count < 6:{len(df)}')
         return df
     increasing = None
     id_cout = len(df)
@@ -374,6 +379,8 @@ def get_tdx_macd(df):
         df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma10d]
         df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma10d]
         df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
+        df['bandwidth'] = 0
+        df['bollpect'] = 0
 
     df['upper'] = df['upper'].apply(lambda x: round(x,1))   
     df['lower'] = df['lower'].apply(lambda x: round(x,1))   
@@ -760,10 +767,8 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                 # write_tdx_sina_data_to_file(code, df=df)
 
 
-    # df['ma5d'] = pd.rolling_mean(df.close, 5)
-    # df['ma10d'] = pd.rolling_mean(df.close, 10)
-    # df['ma20d'] = pd.rolling_mean(df.close, 26)
-    # df['ma60d'] = pd.rolling_mean(df.close, 60)
+    df = get_tdx_macd(df)
+    df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
 
     #hmax -10 days max
     # df['hmax'] = df.high[-tdx_max_int:-ct.tdx_max_int_end].max()
@@ -824,6 +829,10 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             df['hmaxvol'] = df.vol[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
             df['hmax60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
             df['high4'] = df.close[-5:-1].max()
+            
+            df['llowvol'] = df.vol[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
+            df['low10'] = df.close[-10:-1].min()
+            df['low60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].min()
 
             # df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
             # df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
@@ -841,6 +850,9 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             df['hmax60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
             df['high4'] = df.close[-5:-1].max()
 
+            df['llowvol'] = df.vol[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
+            df['low10'] = df.close[-10:-1].min()
+            df['low60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].min()
             # df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
             # df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
             # df['high4'] = df.high[-5:-1].max()
@@ -848,8 +860,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             # print(df.high4[0],(df['low4'][0]))
             df['lastdu4'] = df['high4'][0] /(df['low4'][0]+0.1)
 
-    # df = get_tdx_macd(df)
-    df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
     if 'date' in df.columns:
         df = df.set_index('date')
     # if len(df) > 5:
@@ -1350,7 +1360,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
     return df
 
 
-def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=None, type='f', df=None, dl=30, power=True):
+def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=None, type='f', df=None, dl=10, power=True):
     #补数据power = false
     start = cct.day8_to_day10(start)
     end = cct.day8_to_day10(end)
@@ -3545,9 +3555,9 @@ def resample_dataframe_recut(temp,resample='d',increasing=True,check=False):
     #     ascending=False
         
     if resample == 'm':
-        temp = temp[-10:]
-    elif resample == 'w':
         temp = temp[-30:]
+    elif resample == 'w':
+        temp = temp[-40:]
     elif resample == '3d':
         temp = temp[-60:]
     else:
@@ -3691,7 +3701,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
             # print "df:",df[-1:]
         if len(df) > lastdays + 1:
             # 判断lastdays > 9 
-            lastdays = len(df) - 1
+            lastdays = len(df) - 2
             lastdays = lastdays if lastdays < ct.compute_lastdays else ct.compute_lastdays
         else:
             lastdays = len(df) - 1
@@ -3726,7 +3736,8 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         # df['lower'] = df['lower'].apply(lambda x: round(x,1))   
         # df['ene'] =  df['ene'].apply(lambda x: round(x,1))  
         # df = df.fillna(0)
-        df = get_tdx_macd(df)
+        # df = get_tdx_macd(df)
+
         dd = compute_ma_cross(df,resample=resample)
         dd = compute_upper_cross(df,resample=resample)
 
