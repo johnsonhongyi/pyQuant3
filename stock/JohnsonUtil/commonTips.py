@@ -138,6 +138,7 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=F
 
         if col in df.columns and len(df) > 1:
             df[col]=df[col].apply(lambda x:str(x).replace('\r','').replace('\n',''))
+            log.debug(f'topSort:{counterCategory(df,col,table=True)}')
             topSort=counterCategory(df,col,table=True).split()
             topSort.reverse()
             top_dic={}
@@ -147,7 +148,8 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=F
             # top_key = [x.split(':')[0] for x in topSort]
             # top_value = [x.replace(':','') for x in topSort]
             # sorted_top_dic = dict(sorted(top_dic.items(), key=lambda item: item[1], reverse=False))
-            for idx in df.index:
+            for idx in df.index[:limit_show]:
+                log.debug(f'idx:{idx} idx df.loc[idx][col]: {df.loc[idx][col]}')
                 ca_list = df.loc[idx][col].split(sep_)
                 ca_listB = ca_list.copy()
                 for key in top_dic:
@@ -5251,6 +5253,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                 else:
                     
                     doubleCmd=False
+                    log.debug(f'cmd.split():{cmd}')
                     cmd_list = cmd.split()
                     if len(cmd_list) > 1:
                         orderby_t = cmd_list[-1]

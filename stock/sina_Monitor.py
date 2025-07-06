@@ -275,7 +275,7 @@ if __name__ == "__main__":
                 if len(top_all) == 0 and len(lastpTDX_DF) == 0:
                     cct.get_terminal_Position(position=sys.argv[0])
                     time_Rt = time.time()
-                    top_all_d, lastpTDX_DF_d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['d'],resample='d')
+                    top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['d'],resample='d')
                     # top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl=duration_date,resample=resample)
                 elif len(top_all) == 0 and len(lastpTDX_DF) > 0:
                     time_Rt = time.time()
