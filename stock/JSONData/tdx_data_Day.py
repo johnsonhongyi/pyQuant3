@@ -321,7 +321,7 @@ def get_tdx_macd(df):
         df['ene'] = 0
         df['bandwidth'] = 0
         df['bollpect'] = 0
-        log.error(f'code:{df.code[0]} df count < 6:{len(df)}')
+        log.error(f'code:{df[-1:]} df count < 6:{len(df)}')
         return df
     increasing = None
     id_cout = len(df)
@@ -5378,7 +5378,8 @@ if __name__ == '__main__':
 
     # df2 = get_tdx_Exp_day_to_df(code,dl=60, end='20230925', newdays=0, resample='d')
     code='920068'
-    df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='w')
+    code='600705'
+    df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'], end=None, newdays=0, resample='w')
 
     # df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='3d')
 
@@ -5399,7 +5400,7 @@ if __name__ == '__main__':
     # code='603212'
     code='002670'
     code='600110'
-    code='001236'
+    code='601028'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
