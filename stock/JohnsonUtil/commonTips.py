@@ -2739,6 +2739,7 @@ def process_file_exc(func=None,code=None):
     try:
         # if func is None:
         #     return Exception("func is None code: {}".format(code))
+        # log.debug(f'code:{code},func:{func}')
         return func(code)
     except Exception as ex:
         # print("Exception on code: {}".format(code)+ os.linesep + traceback.format_exc())
@@ -2759,12 +2760,14 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
             cpu_co = 1
         else:
             cpu_co = int(round(len(urllist)/100,0))
-        cpu_used = int(cpu_count()/2) - 1 
-        log.debug(f'count:{len(urllist)} cpu_co:{cpu_co}')
+        # cpu_used = int(cpu_count()/2)  + 1
+        cpu_used = int(cpu_count()) - 2
         pool_count = (cpu_used) if cpu_co > (cpu_used) else cpu_co
+        log.debug(f'count:{len(urllist)} pool_count:{pool_count} cpu_co:{cpu_co}')
         # pool_count = (cpu_count()-2) if cpu_co > (cpu_count()-2) else cpu_co
         if  cpu_co > 1 and 1300 < get_now_time_int() < 1500:
-            pool_count = int(cpu_count() / 2) - 1
+            # pool_count = int(cpu_count() / 2) + 1
+            pool_count = int(cpu_count()) - 3
         if len(kwargs) > 0 :
                 # pool = ThreadPool(12)
                 log.debug(f'cmd:{cmd} kwargs:{kwargs}')
@@ -2782,33 +2785,28 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                 #         results.append(y)
                 # except Exception as e:
                 #     log.error("except:%s"%(e))
+
                 try:
-                    with Pool(processes=pool_count) as pool:
-                        data_count=len(urllist)
-                        progress_bar = tqdm(total=data_count)
-                        # print("mapping ...")
+                    data_count=len(urllist)
+                    progress_bar = tqdm(total=data_count)
+                    log.debug(f'data_count:{data_count},mininterval:{ct.tqdm_mininterval},ncols={ct.ncols}')
+                    from tqdm.contrib.concurrent import process_map
+                    # from multiprocessing import Manager
+                    # manager = Manager()
+                    # shared_list = manager.list()
+                    # https://stackoverflow.com/questions/67957266/python-tqdm-process-map-append-list-shared-between-processes
 
-                        log.debug(f'data_count:{data_count}')
-                        # tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols)
-                        results = tqdm(pool.imap_unordered(partialfunc, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count)
-                        # print("running ...")
-                        # result = tuple(results)  # fetch the lazy results
-                        result = []
-                        for data in results:
-                            if isinstance(data, Exception):
-                                print("Got exception: {}".format(data))
-                            else:
-                                # print("Got OK result: {}".format(result))
-                                result.append(data)
+                    # tqdm.monitor_interval = 0
+                    results = process_map(partialfunc, urllist, unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count,max_workers=pool_count)
 
-                    #debug:
-                    # results=[]
-                    # for code in urllist:
-                    #     print("code:%s "%(code), end=' ')
-                    #     res=cmd(code,**kwargs)
-                    #     print("status:%s\t"%(len(res)), end=' ')
-                    #     results.append(res)
-                    # result=results
+                    result = []
+                    for data in results:
+                        if isinstance(data, Exception):
+                            print("Got exception: {}".format(data))
+                        else:
+                            # print("Got OK result: {}".format(result))
+                            result.append(data)
+                            
                 except Exception as e:
                     log.error("except:%s"%(e))
                     traceback.print_exc()
@@ -2821,6 +2819,45 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                         print("status:%s\t"%(len(res)), end=' ')
                         results.append(res)
                     result=results
+                
+                '''
+                try:
+                    with Pool(processes=pool_count) as pool:
+                        data_count=len(urllist)
+                        progress_bar = tqdm(total=data_count)
+                        # print("mapping ...")
+
+                        log.debug(f'data_count:{data_count},mininterval:{ct.tqdm_mininterval},ncols={ct.ncols}')
+                        # tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols)
+                        print(f"{os.getpid()=}")
+                        # results = tqdm(pool.imap_unordered(partialfunc, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count)
+                        
+                        # from tqdm.contrib.concurrent import process_map
+                        # tqdm.monitor_interval = 0
+                        # results = process_map(partialfunc, urllist, unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count,max_workers=pool_count)
+
+                        # print("running ...")
+                        # result = tuple(results)  # fetch the lazy results
+                        result = []
+                        for data in results:
+                            if isinstance(data, Exception):
+                                print("Got exception: {}".format(data))
+                            else:
+                                # print("Got OK result: {}".format(result))
+                                result.append(data)
+
+                        pool.close()
+                        pool.join()
+                '''
+                    #debug:
+                    # results=[]
+                    # for code in urllist:
+                    #     print("code:%s "%(code), end=' ')
+                    #     res=cmd(code,**kwargs)
+                    #     print("status:%s\t"%(len(res)), end=' ')
+                    #     results.append(res)
+                    # result=results
+                
         else:
 
             try:

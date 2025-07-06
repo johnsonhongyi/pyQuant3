@@ -3547,7 +3547,7 @@ def resample_dataframe_recut(temp,resample='d',increasing=True,check=False):
     ascending=None
 
     if not temp.index.is_monotonic_increasing:
-        log.info(f'increasing is False')
+        # log.info(f'increasing is False')
         ascending=False
         temp = temp.sort_index(ascending=True)
 
