@@ -627,9 +627,11 @@ function d(t) {
 #         return trade_status
 
 def is_trade_date(date=datetime.date.today()):
-    date = date.strftime('%Y-%m-%d')
-    if date == get_today():
-        trade_status = GlobalValues().getkey('is_trade_date')
+    trade_status = None
+    if isinstance(date, datetime.date):
+        date = date.strftime('%Y-%m-%d')
+        if date == get_today():
+            trade_status = GlobalValues().getkey('is_trade_date')
     if trade_status is None:
         # trade_date = fetch_stocks_trade_date()
         # if trade_date is None:
@@ -672,6 +674,9 @@ def get_day_istrade_date(dt=None):
         TODAY = datetime.date.today()
         fstr = "%Y" + sep + "%m" + sep + "%d"
         dt = TODAY.strftime(fstr)
+    else:
+        if isinstance(dt, datetime.date):
+            dt = dt.strftime('%Y-%m-%d')
     is_trade_date = a_trade_calendar.is_trade_date(dt)
 
     return(is_trade_date)
@@ -2316,6 +2321,7 @@ def get_url_data_R(url, timeout=15,headers=None):
         data = ''
         log.error('socket timed out error:%s - URL %s ' % (e, url))
         if str(e).find('HTTP Error 456') > 0:
+            sleeprandom(10)
             return data
         sleeprandom(30)
     except Exception as e:

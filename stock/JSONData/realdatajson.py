@@ -89,6 +89,7 @@ def _parsing_Market_price_json(url):
     # url='http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=20&sort=changepercent&asc=0&node=cyb&symbol='
     text = cct.get_url_data_R(url,headers=sinaheader)
     # text = cct.get_url_data(url)
+    log.deubg(f'url:{url},text:{text[:10]}')
 
     if text == 'null':
         return None
@@ -492,6 +493,7 @@ def _parsing_sina_dd_price_json(url):
     # sinaheader = {'Referer':'http://vip.stock.finance.sina.com.cn'}
 
     text = cct.get_url_data(url,headers=sinaheader)
+    log.debug(f'url:{url}')
     # print(len(text))
     # return text
     
@@ -948,6 +950,8 @@ if __name__ == '__main__':
     print("getconfigBigCount:",getconfigBigCount(count=None, write=False))
 
     df = get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, pause=0.001)
+    import ipdb;ipdb.set_trace()
+
     print(f'300502 ratio:{df.loc["300502"].ratio}')
     for mk in ['sh','sz','cyb']:
         df=get_sina_Market_json(mk,num=100)
@@ -960,15 +964,14 @@ if __name__ == '__main__':
     # print df[:1]
     # _get_sina_json_dd_url()
     print("Big_Count:",sina_json_Big_Count())
-    import ipdb;ipdb.set_trace()
 
     # print getconfigBigCount(write=True)
     # sys.exit(0)
     # post_login()
     # get_wencai_Market_url(filter='热门股')
-    df = get_sina_Market_json('all')
+    # df = get_sina_Market_json('all')
     # print df[df.code == '600581']
-    print(df[:1],df.shape)
+    # print(df[:1],df.shape)
     # sys.exit()
     top_now = get_market_price_sina_dd_realTime(df, '2', type)
     print(top_now[:1])
