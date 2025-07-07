@@ -89,7 +89,7 @@ def _parsing_Market_price_json(url):
     # url='http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=20&sort=changepercent&asc=0&node=cyb&symbol='
     text = cct.get_url_data_R(url,headers=sinaheader)
     # text = cct.get_url_data(url)
-    log.deubg(f'url:{url},text:{text[:10]}')
+    log.debug(f'url:{url},text:{text[:10]}')
 
     if text == 'null':
         return None

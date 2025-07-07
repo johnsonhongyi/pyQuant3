@@ -47,6 +47,8 @@ try:
     from urllib.request import urlopen, Request
 except ImportError:
     from urllib.request import urlopen, Request
+
+import urllib.error
 import requests
 requests.adapters.DEFAULT_RETRIES = 0
 # sys.path.append("..")
@@ -2320,10 +2322,11 @@ def get_url_data_R(url, timeout=15,headers=None):
         # print data.encoding
         data = ''
         log.error('socket timed out error:%s - URL %s ' % (e, url))
-        if str(e).find('HTTP Error 456') > 0:
+        if str(e).find('HTTP Error 456') >= 0:
             sleeprandom(10)
             return data
         sleeprandom(30)
+        return data
     except Exception as e:
         data = ''
         log.error('url Exception Error:%s - URL %s ' % (e, url))
@@ -2339,6 +2342,36 @@ def get_url_data_R(url, timeout=15,headers=None):
             data = data.decode('gbk')
     return data
 
+# import urllib.request
+# import urllib.error
+# import time
+
+def urlopen_with_retry(url, max_retries=3, initial_delay=1):
+    """
+    Opens a URL with retry logic and exponential backoff.
+    """
+    for attempt in range(max_retries):
+        try:
+            response = urlopen(url, timeout=10) # Set a timeout
+            return response
+        except (urllib.error.URLError, urllib.error.HTTPError) as e:
+            print(f"Attempt {attempt + 1} failed for {url}: {e}")
+            if attempt < max_retries - 1:
+                delay = initial_delay * (2 ** attempt)
+                print(f"Retrying in {delay} seconds...")
+                time.sleep(delay)
+            else:
+                print(f"Max retries reached for {url}.")
+                raise # Re-raise the last exception if all retries fail
+
+    # # Usage example
+    # try:
+    #     data = urlopen_with_retry("http://www.example.com")
+    #     print("Successfully opened URL.")
+    #     # Process data
+    #     # ...
+    # except Exception as e:
+    #     print(f"Failed to open URL after retries: {e}")
 
 def get_url_data(url, retry_count=3, pause=0.05, timeout=30, headers=None):
     #    headers = {'User-Agent':'Mozilla/5.0 (Windows; U; Windows NT 6.1; en-US; rv:1.9.1.6) Gecko/20091201 Firefox/3.5.6'}
