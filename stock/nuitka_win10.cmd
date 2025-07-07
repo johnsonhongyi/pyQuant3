@@ -50,8 +50,9 @@ if %ms% lss 0 (
 set "ms0=100%ms%"
 set "ms0=%ms0:~-3%"
 set /a "minutes=((%seconds%/60))"
-set /a "sec1=((%seconds%%60))"
+set /a "sec1=((%seconds% %60))"
 echo time cost: %minutes% min %sec1% s cost:seconds %seconds%.%ms0% s
+echo time cost: %minutes% min %sec1% s cost:seconds %seconds%.%ms0% s >> NuitkaTime.txt
 
 rem set /a "seconds=952"
 rem set /a "minutes=((%seconds%/60))"
