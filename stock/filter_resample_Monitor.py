@@ -9,19 +9,19 @@
 # reload(sys)
 #
 # sys.setdefaultencoding('utf-8')
-url_s = "http://vip.stock.finance.sina.com.cn/quotes_service/view/cn_bill_all.php?num=100&page=1&sort=ticktime&asc=0&volume=0&type=1"
-url_b = "http://vip.stock.finance.sina.com.cn/quotes_service/view/cn_bill_all.php?num=100&page=1&sort=ticktime&asc=0&volume=100000&type=0"
-# status_dict = {u"???": "normal", u"??": "up", u"??": "down"}
-status_dict = {"mid": "normal", "buy": "up", "sell": "down"}
-url_real_sina = "http://finance.sina.com.cn/realstock/"
-url_real_sina_top = "http://vip.stock.finance.sina.com.cn/mkt/#stock_sh_up"
-url_real_east = "http://quote.eastmoney.com/sz000004.html"
+# url_s = "http://vip.stock.finance.sina.com.cn/quotes_service/view/cn_bill_all.php?num=100&page=1&sort=ticktime&asc=0&volume=0&type=1"
+# url_b = "http://vip.stock.finance.sina.com.cn/quotes_service/view/cn_bill_all.php?num=100&page=1&sort=ticktime&asc=0&volume=100000&type=0"
+# # status_dict = {u"???": "normal", u"??": "up", u"??": "down"}
+# status_dict = {"mid": "normal", "buy": "up", "sell": "down"}
+# url_real_sina = "http://finance.sina.com.cn/realstock/"
+# url_real_sina_top = "http://vip.stock.finance.sina.com.cn/mkt/#stock_sh_up"
+# url_real_east = "http://quote.eastmoney.com/sz000004.html"
 import random
 import re
 import sys
 import time
 
-import pandas as pd
+from pandas import DataFrame 
 # from bs4 import BeautifulSoup
 # from pandas import DataFrame
 
@@ -72,7 +72,7 @@ if __name__ == "__main__":
     type = ct.json_countType
     cut_num = 1000000
     success = 0
-    top_all = pd.DataFrame()
+    top_all = DataFrame()
     time_s = time.time()
     # delay_time = 7200
     delay_time = cct.get_delay_time()
@@ -94,8 +94,8 @@ if __name__ == "__main__":
     #     if cct.creation_date_duration(block_path) > 1:
     #         log.error("indb last1days is None")
                
-    lastpTDX_DF = pd.DataFrame()
-    indf = pd.DataFrame()
+    lastpTDX_DF = DataFrame()
+    indf = DataFrame()
     parserDuraton = cct.DurationArgmain()
     # The above code is a comment in Python. It is not doing anything in terms of code execution. It
     # is used to provide information or explanations about the code to other developers or to remind
@@ -140,24 +140,12 @@ if __name__ == "__main__":
     st = None
     while 1:
         try:
-            # df = rl.get_sina_all_json_dd(vol, type)
-            # if len(df) > cut_num:
-            #     df = df[:cut_num]
-            #     print len(df),
-            # top_now = rl.get_sina_dd_count_price_realTime(df)
-            # print len(top_now)
             resample = cct.GlobalValues().getkey('resample')
 
             if st is None and st_key_sort in ['2', '3']:
                 st_key_sort = '%s %s' % (
                     st_key_sort.split()[0], cct.get_index_fibl())
             time_Rt = time.time()
-            # top_now = tdd.getSinaAlldf(market='??,rzrq',filename='yqbk', vol=ct.json_countVol, vtype=ct.json_countType)
-            # top_now = tdd.getSinaAlldf(
-                # market='all', vol=ct.json_countVol, vtype=ct.json_countType)
-            # top_now = tdd.getSinaAlldf(market='??',filename='yqbk', vol=ct.json_countVol, vtype=ct.json_countType,trend=False)
-            # market_blk = 'rzrq'
-            # market_blk = 'all'
             
             # if len(indf) == 0:
             #     indf = inDb.showcount(inDb.selectlastDays(instocklastDays),sort_date=True)
@@ -177,20 +165,16 @@ if __name__ == "__main__":
             #     if cct.creation_date_duration(block_path) > 1:
             #         log.error("indb last1days is None")
 
-            # market_blk = '090'
             market_blk = 'all'
             # market_blk = 'bj'
             # top_now = tdd.getSinaAlldf(market=f'{indf.code.tolist()}+{market_blk}', vol=ct.json_countVol, vtype=ct.json_countType)
             top_now = tdd.getSinaAlldf(market=f'{market_blk}', vol=ct.json_countVol, vtype=ct.json_countType)
-            # top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
-            # top_now = tdd.getSinaAlldf(market='rzrq', vol=ct.json_countVol, vtype=ct.json_countType)
-            # top_now = tdd.getSinaAlldf(market='??¹?060',filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
 
             time_d = time.time()
             if time_d - time_s > delay_time:
                 status_change = True
                 time_s = time.time()
-                top_all = pd.DataFrame()
+                top_all = DataFrame()
 
             else:
                 status_change = False
@@ -447,20 +431,22 @@ if __name__ == "__main__":
                     top_temp=top_all.copy() 
                     # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
 
-                code_m = top_all_m.query('lasth1d > lasth2d')
-                code_w = top_all_w.query('lasth1d > lasth2d')
-                code_3d = top_all_3d.query('lasth1d > lasth2d')
-                code_d = top_all_d.query('lasth1d > lasth2d')
+                tm_code = top_all_m.query('lasth1d > lasth2d')
+                tw_code = top_all_w.query('lasth1d > lasth2d')
+                t3d_code = top_all_3d.query('lasth1d > lasth2d')
+                td_code = top_all_d.query('lasth1d > lasth2d')
                 #clean 688 and st
                 # if len(top_temp) > 0:                
+                code_f =  list(set(tm_code.index) & set(tw_code.index) & set(t3d_code.index)  & set(td_code.index))
                 #     top_temp = top_temp[ (~top_temp.index.str.contains('688')) ]
-                print(f'code_d:{len(code_d)}, code_3d:{len(code_3d)}, code_w:{len(code_w)}, code_w:{len(code_m)}')
-                code_select = set()
+                print(f'code_f:{len(code_f)},code_d:{len(td_code)}, code_3d:{len(t3d_code)}, code_w:{len(tw_code)}, code_w:{len(tm_code)}')
                     
                 if st_key_sort.split()[0] == 'x':
                     top_temp = top_temp[top_temp.topR != 0]
 
 
+                if len(code_f) > 10:
+                    top_temp = top_all.loc[code_f]
                 # '''
 
                 # if cct.get_now_time_int() > 830 and cct.get_now_time_int() <= 935:
@@ -599,7 +585,7 @@ if __name__ == "__main__":
             int_time=cct.get_now_time_int()
             if cct.get_work_time():
                 if int_time < ct.open_time:
-                    top_all=pd.DataFrame()
+                    top_all=DataFrame()
                     cct.sleep(ct.sleep_time)
                 elif int_time < 930:
                     cct.sleep((930 - int_time) * 55)
@@ -613,7 +599,7 @@ if __name__ == "__main__":
                         print(".", end=' ')
                         cct.sleep(ct.duration_sleep_time)
                     else:
-                        # top_all = pd.DataFrame()
+                        # top_all = DataFrame()
                         cct.sleeprandom(60)
                         time_s=time.time()
                         print(".")
@@ -628,7 +614,7 @@ if __name__ == "__main__":
             #                 cct.sleep(60)
             #                 print ".",
             #             else:
-            #                 top_all = pd.DataFrame()
+            #                 top_all = DataFrame()
             #                 time_s = time.time()
             #                 print "."
             #                 break
@@ -643,7 +629,7 @@ if __name__ == "__main__":
             #         else:
             #             print "."
             #             cct.sleeprandom(60)
-            #             top_all = pd.DataFrame()
+            #             top_all = DataFrame()
             #             time_s = time.time()
             #             break
             else:
@@ -675,15 +661,15 @@ if __name__ == "__main__":
             elif st.lower() == 'g' or st.lower() == 'go':
                 status=True
             elif st.lower() == 'clear' or st.lower() == 'c':
-                top_all=pd.DataFrame()
+                top_all=DataFrame()
                 cct.GlobalValues().setkey('lastbuylogtime', 1)
                 # cct.set_clear_logtime()
                 status=False
             elif st.startswith('in') or st.startswith('i'):
                 days = st.split()[1] if len(st.split()) > 1 else None
                 if days is not None and days.isdigit():
-                    top_all = pd.DataFrame()
-                    indf = top_all = pd.DataFrame()
+                    top_all = DataFrame()
+                    indf = top_all = DataFrame()
                     instocklastDays = days
                 else:
                     log.error(f'{st} not find digit days')
@@ -698,24 +684,24 @@ if __name__ == "__main__":
                             '999999', dl=int(duration_date))
                         ct.PowerCountdl = int(duration_date)
                     # set_duration_console(du_date)
-                    top_all = pd.DataFrame()
+                    top_all = DataFrame()
                     time_s = time.time()
                     status = False
-                    lastpTDX_DF = pd.DataFrame()
+                    lastpTDX_DF = DataFrame()
 
             elif st.startswith('3d') or st.startswith('d') or st.startswith('5d'):
                 if st.startswith('3d'):
                     cct.GlobalValues().setkey('resample','3d')
-                    top_all = pd.DataFrame()
-                    lastpTDX_DF = pd.DataFrame()
+                    top_all = DataFrame()
+                    lastpTDX_DF = DataFrame()
                 elif st.startswith('d'):
                     cct.GlobalValues().setkey('resample','d')
-                    top_all = pd.DataFrame()
-                    lastpTDX_DF = pd.DataFrame()
+                    top_all = DataFrame()
+                    lastpTDX_DF = DataFrame()
                 elif st.startswith('5d'):
                     cct.GlobalValues().setkey('resample','w')
-                    top_all = pd.DataFrame()
-                    lastpTDX_DF = pd.DataFrame()
+                    top_all = DataFrame()
+                    lastpTDX_DF = DataFrame()
 
             elif st.startswith('w') or st.startswith('a'):
                 args=cct.writeArgmain().parse_args(st.split())
