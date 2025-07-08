@@ -220,7 +220,6 @@ if __name__ == "__main__":
                     
                     
                 if st_key_sort.split()[0] in ['4','9'] and 915 < cct.get_now_time_int() < 930:
-                # if  915 < cct.get_now_time_int() < 930:
                     top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
                                           top_all['buy'].values, top_all['llastp'].values)))
                     top_all['dff2'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
@@ -445,8 +444,72 @@ if __name__ == "__main__":
                     top_temp = top_temp[top_temp.topR != 0]
 
 
+
+                if st_key_sort in ['1']:
+                    # if 915 < cct.get_now_time_int() < 1445:
+                    #     top_all = top_all[ (~top_all.index.str.contains('^43|^83|^87|^92'))]   
+                    if 'lastbuy' in top_all.columns:
+                        top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
+                                              top_all['buy'].values, top_all['lastbuy'].values)))
+                        top_all['dff2'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
+                                               top_all['buy'].values, top_all['lastp'].values)))
+
+                    if len(top_all) > 0 and top_all.lastp1d[0] == top_all.close[0]:
+                        top_temp = top_all.query('low > lastl2d and low > ma201d and lasth2d > lasth3d')
+                        # top_temp = top_all.query('low > lastl2d and low > ma201d and lasth2d > lasth3d and a1_v > 0')
+
+                        # if 500 < cct.get_now_time_int() < 915:
+                        #     top_temp = top_all.query('close > high4 and (low > close*0.99 or low > lasth2d) and close > lasth2d')
+                        # elif 915 <= cct.get_now_time_int() < 945:
+                        #     top_temp =   top_all.query('close > upper1 and close > df2 and close > high4 and close > lasth2d and close > lasth3d and close > lasth4d and close > upper2 and  ((close-lastp2d)/lastp2d*100) > maxp and close > hmax*0.99 and close > max5 and volume > 5')
+                            
+                        # elif 945 <= cct.get_now_time_int() < 1015:
+                        #     # top_temp =   top_all.query('close > df2 and close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1 and  ((close-lastp1d)/lastp1d*100) > maxp')
+                        #     top_temp =   top_all.query('close > df2 and close > high4 and close > lasth2d and close > lasth3d and close > lasth4d and close > upper2 and  ((close-lastp2d)/lastp2d*100) > maxp and a1_v > 0 and close > hmax*0.99 and close > max5 and volume > 3')
+
+                        # elif 1015 <= cct.get_now_time_int() < 1430 :
+                        #     top_temp = top_all.query('(low >= open and close > lastp2d and (per2d > 5 or per3d >5) and a1_v > 0) or  open > high4 and (low > open*0.99 or low > lasth2d) and open > lasth2d and a1_v > 0')
+                        # else:
+                        #     top_temp = top_all.query('open > high4 and (low > open*0.99 or low > lasth2d) and open > lasth2d')
+                    else:
+
+                        if 915 < cct.get_now_time_int() < 945:
+
+                            top_temp = top_all.query('low > lastl1d and low > ma201d and lasth1d > lasth2d and close > upper')
+
+                        #     #高开高走
+                        #     top_temp = top_all.query('close > upper1 and close > df2 and close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1    and close > hmax*0.99 and close > max5 and volume > 5 and ((((close-lastp1d)/lastp1d*100) > maxp and 3 < bandwidth < 10) )')
+                        #     #高开高走,前日大涨高开,开盘最低价 
+                        #     # top_temp = top_all.query('close > upper1 and close > df2 and close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1    and close > hmax*0.99 and close > max5 and volume > 4.5 and ((((close-lastp1d)/lastp1d*100) > maxp and 3 < bandwidth < 10) or (per1d > 8 and open > lasth1d and close >= open and low >open*0.999))')
+                        #         # top_all.query('close > upper1 and close > df2 and close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1    and open > hmax*0.99 and open > max5 and volume > 5 and ((((close-lastp1d)/lastp1d*100) > maxp and 3 < bandwidth < 10) or (per1d > 8))')
+                        #     # top_temp = top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5) ) or  open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d ')
+                        elif 945 <= cct.get_now_time_int() < 1015:
+                            
+                            top_temp = top_all.query('low > lastl1d and low > ma201d and lasth1d > lasth2d and close > upper and a1_v > 0')
+
+                        #     #高开高走,前日大涨高开,回踩前日低点 
+                        #     top_temp = top_all.query('close > upper1 and close > df2 and close > high4 and close > lasth1d and close > lasth2d and close > lasth3d and close > upper1    and close > hmax*0.99 and close > max5 and volume > 4.5 and ((((close-lastp1d)/lastp1d*100) > maxp and 3 < bandwidth < 10) or (per1d > 8 and close > lasth1d  and low >lasth1d)) and a1_v > 0 ')
+
+                        elif 1015 <= cct.get_now_time_int() < 1430 :
+
+                            top_temp = top_all.query('low > lastl1d and low > ma201d and lasth1d > lasth2d and close > upper and a1_v > 0')
+
+                        #     # top_temp = top_all.query('(close > df2 and low >= open and close > lastp1d and (per1d > 5 or per2d >5)  and a1_v > 0) or  open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d and a1_v > 0')
+                        #     top_temp = top_all.query('(close > df2 and low >= open and close > lastp1d and (per1d > 5 or per2d >5) and 3 < bandwidth < 10 ) or  (open > high4 and (low > open*0.999 or low > lasth1d and low > upper) and open > lasth1d) and a1_v > 0')
+                        else:
+
+                            top_temp = top_all.query('low > lastl1d and low > ma201d and lasth1d > lasth2d and close > upper')
+
+
+                        #     # top_temp = top_all.query('open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d')
+                        #     top_temp = top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5) ) or  open > high4 and (low > open*0.999 or low > lasth1d) and open > lasth1d ')
+
+
                 if len(code_f) > 10:
-                    top_temp = top_all.loc[code_f]
+                    code_select = list(set(top_temp.index.tolist()) & set(code_f))
+                    if len(code_select) > 10:
+                        top_temp = top_temp.loc[code_select]
+
                 # '''
 
                 # if cct.get_now_time_int() > 830 and cct.get_now_time_int() <= 935:
