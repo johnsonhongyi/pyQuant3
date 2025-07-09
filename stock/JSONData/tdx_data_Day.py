@@ -4569,7 +4569,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     top_all = top_all[top_all['llow'] > 0]
     #20231110 add today topR
     #20250607 mod today topR
-    if cct.get_day_istrade_date():
+    if cct.get_day_istrade_date() and len(top_all) > 2:
         if cct.get_trade_date_status() == 'False':
             top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
         # elif 915 < cct.get_now_time_int() < 1500:
