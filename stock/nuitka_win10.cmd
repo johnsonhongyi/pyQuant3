@@ -36,7 +36,7 @@ echo "dataBarFeed/chantdxpower.py "
 python -m nuitka --show-memory --show-progress --follow-import-to=JohnsonUtil,JSONData --remove-output --lto=yes dataBarFeed/chantdxpower.py 
 sleep 2
 move /Y chantdxpower.* dataBarFeed/
-ls -alh dataBarFeed/chantdxpower.*
+dir dataBarFeed\chantdxpowe*.*
 rem # rem start python LineHistogram.py
 set "te=%time%"
 echo ==========time cost end  %te%==========
@@ -47,10 +47,11 @@ if %ms% lss 0 (
   set /a "ms=(1000%ms%)"
   set /a "seconds=(%seconds%-1)"
 )
+
 set "ms0=100%ms%"
 set "ms0=%ms0:~-3%"
 set /a "minutes=((%seconds%/60))"
-set /a "sec1=((%seconds% %60))"
+set /a "sec1=((%seconds% %%60))"
 echo time cost: %minutes% min %sec1% s cost:seconds %seconds%.%ms0% s
 echo time cost: %minutes% min %sec1% s cost:seconds %seconds%.%ms0% s >> NuitkaTime.txt
 
