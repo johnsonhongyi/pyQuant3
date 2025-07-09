@@ -1,5 +1,4 @@
 # -*- encoding: utf-8 -*-
-
 import json
 import os
 import re
@@ -852,7 +851,8 @@ class Sina:
 
         # if cct.get_now_time_int() > 925 and not index and len(df) > 3000 and ( 924 < otime < 1500 or cct.get_work_time()):
 
-        if cct.get_now_time_int() > 925 and not index and len(df) > 3000 and ( cct.get_work_time(otime) or cct.get_work_time()):
+        # if cct.is_trade_date() and cct.get_now_time_int() > 925 and (not index and len(df) > 3000 and ( cct.get_work_time(otime) or cct.get_work_time())):
+        if cct.get_now_time_int() > 925 and (not index and len(df) > 3000 and ( cct.get_work_time(otime) or cct.get_work_time())):
             time_s = time.time()
             df.index = df.index.astype(str)
             df.ticktime = df.ticktime.astype(str)
@@ -906,7 +906,7 @@ class Sina:
             log.info("hdf5 class all :%s  time:%0.2f" % (len(df), time.time() - time_s))
 
 
-        if 'nlow' not in df.columns or 'nhigh' not in df.columns or (cct.get_work_time() and 924 < cct.get_now_time_int() <= 1501) or (cct.get_work_time(otime)):
+        if ('nlow' not in df.columns or 'nhigh' not in df.columns) and  (cct.get_work_time() and 924 < cct.get_now_time_int() <= 1501):
             # if 'nlow' not in df.columns or 'nhigh' not in df.columns or cct.get_work_time():
             h5 = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False)
 
