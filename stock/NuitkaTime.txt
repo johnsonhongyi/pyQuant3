@@ -2,3 +2,4 @@ time cost: 14 min  s cost:seconds 852.996 s
 time cost: 16 min  s cost:seconds 963.992 s 
 time cost: 16 min  s cost:seconds 961.021 s 
 Total run 2452 seconds min: 40 min
+Total run 2613 seconds min: 43 min
