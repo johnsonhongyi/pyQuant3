@@ -433,7 +433,7 @@ if __name__ == "__main__":
                 tm_code = top_all_m.query('lasth1d > lasth2d')
                 tw_code = top_all_w.query('lasth1d > lasth2d')
                 t3d_code = top_all_3d.query('lasth1d > lasth2d')
-                td_code = top_all_d.query('lasth1d > lasth2d')
+                td_code = top_all_d.query('(lasth1d > lasth2d and lasth1d > high4 and high > max5) or (high >= lasth1d > lasth2d > lasth3d and percent >3 and low < ma20d and close > ma20d)')
                 #clean 688 and st
                 # if len(top_temp) > 0:                
                 code_f =  list(set(tm_code.index) & set(tw_code.index) & set(t3d_code.index)  & set(td_code.index))

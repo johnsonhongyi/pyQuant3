@@ -3135,6 +3135,7 @@ def compute_condition_up_sample(df):
     return hop_df
 
 def compute_condition_up(df):
+
     condition_up = df[df['low'] > df['high'].shift(1)]       #向上跳空缺口
     condition_down = df[df['high'] < df['low'].shift(1)]
           #向下跳空缺口
@@ -3217,20 +3218,26 @@ def compute_condition_up(df):
 
 def compute_condition_up_add_up(df,condition_up):
 
-    if len(condition_up) == 1:
-        idx_date = condition_up.jop_date[0]
-        idx_close = df.loc[idx_date,'close']
+    co_up = condition_up.query('hop == "up" and @pd.isnull(fill_day)')
+    if len(co_up) == 1 :
+        idx_date = co_up.jop_date.values[0]
+        if idx_date  in df.index:
+            idx_close = df.loc[idx_date,'close']
+        else:
+            idx_close = df.close[0]
         # df2 = df[df.index >= idx_date]
         # condition_up2 = df2.query(f'high > high.shift(1) and close > close.shift(1)*0.99 and close >= {idx_close}')  #1跳空新高收高
         condition_up2 = df.query(f'low > low.shift(1) and high > high.shift(1) and close > high.shift(1)*0.999 and high > upper')  #2跳空新高收高
         condition_up3 = df.query('(close - close.shift(1))/close.shift(1)*100 > 4 and close >= high*0.99')
         condition_up2 = pd.concat([condition_up2,condition_up3],axis=0)
-    elif len(condition_up) > 1:
+    elif len(co_up) > 1:
         # idx_date = condition_up.index[0]
         # idx_close = condition_up.close[0]
-
-        idx_date = condition_up.jop_date[0]
-        idx_close = df.loc[idx_date,'close']
+        idx_date = co_up.jop_date.values[0]
+        if idx_date in df.index:
+            idx_close = df.loc[idx_date,'close']
+        else:
+            idx_close = df.close[0]
         # df2 = df[df.index >= idx_date]
         # condition_up2 = df2.query(f'high > high.shift(1) and close > close.shift(1)*0.99 and close >= {idx_close}')  #1跳空新高收高
         # condition_up2 = df2.query(f'low > low.shift(1) and high > high.shift(1) and close > close.shift(1) and close > {idx_close}')  #2跳空新高收高
@@ -3446,9 +3453,12 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     hop_df = compute_condition_up(dd[-15:])
     # condition_up = hop_df[hop_df.hop == 'up']
     condition_up = hop_df[(hop_df.fill_day.isnull() ) & (hop_df.hop == 'up')]   if len(hop_df) > 0  else pd.DataFrame()
-    condition_up2 = compute_condition_up_add_up(dd[-15:],hop_df)
-    # condition_down = hop_df[hop_df.hop == 'down']
     condition_down = hop_df[ (hop_df.fill_day.isnull() ) & (hop_df.hop == 'down')] if len(hop_df) > 0  else pd.DataFrame()
+    c_up=len(condition_up)
+    c_down=len(condition_down)
+
+    condition_up2 = compute_condition_up_add_up(dd[-6:],hop_df) if c_up > 0 else pd.DataFrame()
+    # condition_down = hop_df[hop_df.hop == 'down']
     # fill_day_up = hop_df[( hop_df.fill_day.notnull() ) & (hop_df.hop == 'up')] if len(hop_df) > 0  else pd.DataFrame()
     # fill_day_down = hop_df[ (hop_df.fill_day.notnull() ) & (hop_df.hop == 'down') ] if len(hop_df) > 0  else pd.DataFrame()
 
@@ -3459,27 +3469,29 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     # if len(condition_up) >= len(condition_down) :
 
-    if len(condition_up) > 0 :
-        dd['topR'] = len(condition_up)+len(condition_up2)-dd.gren.values[-1]
+    if c_up > 0 :
+        # dd['topR'] = c_up + len(condition_up2) - dd.gren.values[-1]
+        dd['topR'] = c_up + len(condition_up2)
         dd['topD'] = len(condition_down)
     else:
-        dd['topR'] = 0
-        dd['topD'] = len(condition_down)
 
-    if len(condition_up) > 0 and len(condition_down) > 0:
-        if condition_up.jop_date.values[-1] > condition_down.jop_date.values[-1]:
-            close_idx_up = dd[dd.index == condition_up.jop_date.values[0]].low[0]
-        else:
-            close_idx_up = dd[dd.index == condition_down.jop_date.values[0]].high[0]
-            dd['topR'] = -len(condition_down)
-    else:
-        if len(condition_up) > 0:
-            close_idx_up = dd[dd.index == condition_up.jop_date.values[0]].low[0] 
-            # close_idx_up = dd[dd.index == condition_up.jop_date.values[0]].low[0] if len(condition_up) > 0 else dd.close.max()
-        elif len(condition_down) > 0:
-            close_idx_up = dd[dd.index == condition_down.jop_date.values[0]].high[0] 
-        else:
-            close_idx_up = dd.close.min()
+        dd['topR'] = -c_down if c_down > 0 else 0
+        dd['topD'] = c_down
+
+    # if len(condition_up) > 0 and len(condition_down) > 0:
+    #     if condition_up.jop_date.values[-1] > condition_down.jop_date.values[-1]:
+    #         close_idx_up = dd[dd.index == condition_up.jop_date.values[0]].low[0]
+    #     else:
+    #         close_idx_up = dd[dd.index == condition_down.jop_date.values[0]].high[0]
+    #         dd['topR'] = -len(condition_down)
+    # else:
+    #     if len(condition_up) > 0:
+    #         close_idx_up = dd[dd.index == condition_up.jop_date.values[0]].low[0] 
+    #         # close_idx_up = dd[dd.index == condition_up.jop_date.values[0]].low[0] if len(condition_up) > 0 else dd.close.max()
+    #     elif len(condition_down) > 0:
+    #         close_idx_up = dd[dd.index == condition_down.jop_date.values[0]].high[0] 
+    #     else:
+    #         close_idx_up = dd.close.min()
 
 
     # ra = round((df.close[-1]-dd.close.max())/df.close[-1]*100,1)
@@ -5400,7 +5412,8 @@ if __name__ == '__main__':
     # code='603212'
     code='002670'
     code='600110'
-    code='601028'
+    code='600744'
+    code='300926'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
@@ -5422,13 +5435,14 @@ if __name__ == '__main__':
     # print(get_tdx_stock_period_to_type(dd)[-5:])
     df = get_tdx_append_now_df_api_tofile('001236')
     # df = get_tdx_append_now_df_api('001236')
-
+    print(f'topR:{df.topR[0]}')
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='3d' )
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
+
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )
-    print(f'df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
+    print(f'topR:{df2.topR} df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
     print(f'ldate:{df2.ldate[:2]}')
     df = df2.to_frame().T
     print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
