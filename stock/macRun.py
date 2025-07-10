@@ -123,7 +123,7 @@ rcmdnatclip = 'tell application "Terminal" to do script "cd /Users/Johnson/Docum
 # rcmd2 = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant/stock;python2 %s"'
 
 # rproc = ['sina_Monitor.py','instock_Monitor.py' ,'singleAnalyseUtil.py','sina_Market-DurationUP.py','LinePower.py','sina_Market-DurationDnUP.py']               
-rproc = ['sina_Monitor.bin','instock_Monitor.bin' ,'singleAnalyseUtil.bin','sina_Market-DurationUP.bin','LinePower.bin','sina_Market-DurationDnUP.bin']               
+rproc = ['sina_Monitor.bin','instock_Monitor.bin' ,'sina_Market-DurationUP.bin','LinePower.bin','sina_Market-DurationDnUP.bin','singleAnalyseUtil.bin']               
 
 # rproc = ['sina_Market-DurationDn.py' ,'singleAnalyseUtil.py','sina_Market-DurationCXDN.py','sina_Monitor.py','sina_Market-DurationUP.py']               
 # cmdRun_launch = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
@@ -151,10 +151,10 @@ osascript -e '%s';sleep 10;
 '''%(rcmd_bin%(rproc[0]),rcmd_bin%(rproc[1]),rcmd_bin%(rproc[2]),rcmd_bin%(rproc[3]),rcmd_bin%(rproc[4]),rcmd_bin%(rproc[5]))
 # '''%(rcmd%(rproc[0]),rcmd%(rproc[1]),rcmd%(rproc[2]),rcmd%(rproc[3]),rcmd%(rproc[4]),rcmd%(rproc[5]))
 
-cmdRun200 = '''osascript -e '%s';sleep 350;
+cmdRun200 = '''osascript -e '%s';sleep 400;
 osascript -e '%s';sleep 35;
 osascript -e '%s';sleep 35;
-osascript -e '%s';sleep 300;
+osascript -e '%s';sleep 350;
 osascript -e '%s';sleep 15;
 osascript -e '%s';sleep 5;
 '''%(rcmd_bin%(rproc[0]),rcmd_bin%(rproc[1]),rcmd_bin%(rproc[2]),rcmd_bin%(rproc[3]),rcmd_bin%(rproc[4]),rcmd_bin%(rproc[5]))
