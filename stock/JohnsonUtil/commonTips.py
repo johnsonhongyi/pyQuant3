@@ -131,122 +131,127 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=F
 
     # alist = [x for x in set(df.columns.tolist())]
     # cat_col = ['涨停原因类别','category']
-    cat_col = ['category']
-    for col in cat_col:
-        if col == '涨停原因类别':
-            sep_ = '+'
+    try:
+        cat_col = ['category']
+        for col in cat_col:
+            if col == '涨停原因类别':
+                sep_ = '+'
+            else:
+                sep_ = ';'
+
+            if col in df.columns and len(df) > 1:
+                df[col]=df[col].apply(lambda x:str(x).replace('\r','').replace('\n',''))
+                log.debug(f'topSort:{counterCategory(df,col,table=True)}')
+                topSort=counterCategory(df,col,table=True).split()
+                topSort.reverse()
+                top_dic={}
+                for x in topSort:
+                    top_dic[x.split(sep_)[0]]=x
+                    # top_dic[x.split(':')[0]]=x.replace(':','')
+                # top_key = [x.split(':')[0] for x in topSort]
+                # top_value = [x.replace(':','') for x in topSort]
+                # sorted_top_dic = dict(sorted(top_dic.items(), key=lambda item: item[1], reverse=False))
+                for idx in df.index[:limit_show]:
+                    log.debug(f'idx:{idx} idx df.loc[idx][col]: {df.loc[idx][col]}')
+                    ca_list = df.loc[idx][col].split(sep_)
+                    ca_listB = ca_list.copy()
+                    for key in top_dic:
+                        if key in ca_list:
+                            if ca_listB.index(key) != 0:
+                                element_to_move = ca_listB.pop(ca_listB.index(key))
+                                ca_listB.insert(0, top_dic[key])
+
+                    if ca_listB !=  ca_list:
+                        ca_listC=[('' if c.find(sep_) > 0 else ' ')+c for c in ca_listB]
+                        # ca_listD= [x for x in ca_listC if x.find(':') > 0]
+                        # list_to_str = "".join([for x in ca_listB if x.find(':') else x+''])
+                        list_to_str = "".join(ca_listC)
+                        df.loc[idx,col]=list_to_str
+
+        # if 'category' in df.columns and len(df) > 0:
+        #     df['category']=df['category'].apply(lambda x:str(x).replace('\r','').replace('\n',''))
+        #     topSort=counterCategory(df,'category',table=True).split()
+        #     topSort.reverse()
+        #     top_dic={}
+        #     for x in topSort:
+        #         top_dic[x.split(':')[0]]=x
+        #         # top_dic[x.split(':')[0]]=x.replace(':','')
+        #     # top_key = [x.split(':')[0] for x in topSort]
+        #     # top_value = [x.replace(':','') for x in topSort]
+        #     # sorted_top_dic = dict(sorted(top_dic.items(), key=lambda item: item[1], reverse=False))
+        #     for idx in df.index:
+        #         ca_list = df.loc[idx].category.split(';')
+        #         ca_listB = ca_list.copy()
+        #         for key in top_dic:
+        #             if key in ca_list:
+        #                 if ca_listB.index(key) != 0:
+        #                     element_to_move = ca_listB.pop(ca_listB.index(key))
+        #                     ca_listB.insert(0, top_dic[key])
+
+        #         if ca_listB !=  ca_list:
+        #             ca_listC=[('' if c.find(':') > 0 else ' ')+c for c in ca_listB]
+        #             # ca_listD= [x for x in ca_listC if x.find(':') > 0]
+        #             # list_to_str = "".join([for x in ca_listB if x.find(':') else x+''])
+        #             list_to_str = "".join(ca_listC)
+        #             df.loc[idx,'category']=list_to_str
         else:
-            sep_ = ';'
+            log.info('df is None')
+        alist = df.columns.tolist()
+        if header:
 
-        if col in df.columns and len(df) > 1:
-            df[col]=df[col].apply(lambda x:str(x).replace('\r','').replace('\n',''))
-            log.debug(f'topSort:{counterCategory(df,col,table=True)}')
-            topSort=counterCategory(df,col,table=True).split()
-            topSort.reverse()
-            top_dic={}
-            for x in topSort:
-                top_dic[x.split(sep_)[0]]=x
-                # top_dic[x.split(':')[0]]=x.replace(':','')
-            # top_key = [x.split(':')[0] for x in topSort]
-            # top_value = [x.replace(':','') for x in topSort]
-            # sorted_top_dic = dict(sorted(top_dic.items(), key=lambda item: item[1], reverse=False))
-            for idx in df.index[:limit_show]:
-                log.debug(f'idx:{idx} idx df.loc[idx][col]: {df.loc[idx][col]}')
-                ca_list = df.loc[idx][col].split(sep_)
-                ca_listB = ca_list.copy()
-                for key in top_dic:
-                    if key in ca_list:
-                        if ca_listB.index(key) != 0:
-                            element_to_move = ca_listB.pop(ca_listB.index(key))
-                            ca_listB.insert(0, top_dic[key])
-
-                if ca_listB !=  ca_list:
-                    ca_listC=[('' if c.find(sep_) > 0 else ' ')+c for c in ca_listB]
-                    # ca_listD= [x for x in ca_listC if x.find(':') > 0]
-                    # list_to_str = "".join([for x in ca_listB if x.find(':') else x+''])
-                    list_to_str = "".join(ca_listC)
-                    df.loc[idx,col]=list_to_str
-
-    # if 'category' in df.columns and len(df) > 0:
-    #     df['category']=df['category'].apply(lambda x:str(x).replace('\r','').replace('\n',''))
-    #     topSort=counterCategory(df,'category',table=True).split()
-    #     topSort.reverse()
-    #     top_dic={}
-    #     for x in topSort:
-    #         top_dic[x.split(':')[0]]=x
-    #         # top_dic[x.split(':')[0]]=x.replace(':','')
-    #     # top_key = [x.split(':')[0] for x in topSort]
-    #     # top_value = [x.replace(':','') for x in topSort]
-    #     # sorted_top_dic = dict(sorted(top_dic.items(), key=lambda item: item[1], reverse=False))
-    #     for idx in df.index:
-    #         ca_list = df.loc[idx].category.split(';')
-    #         ca_listB = ca_list.copy()
-    #         for key in top_dic:
-    #             if key in ca_list:
-    #                 if ca_listB.index(key) != 0:
-    #                     element_to_move = ca_listB.pop(ca_listB.index(key))
-    #                     ca_listB.insert(0, top_dic[key])
-
-    #         if ca_listB !=  ca_list:
-    #             ca_listC=[('' if c.find(':') > 0 else ' ')+c for c in ca_listB]
-    #             # ca_listD= [x for x in ca_listC if x.find(':') > 0]
-    #             # list_to_str = "".join([for x in ca_listB if x.find(':') else x+''])
-    #             list_to_str = "".join(ca_listC)
-    #             df.loc[idx,'category']=list_to_str
-    else:
-        log.info('df is None')
-    alist = df.columns.tolist()
-    if header:
-
-        table = PrettyTable([''] + alist )
-    else:
-        table = PrettyTable(field_names=[''] + alist,header=False)
-
-    for row in df[:limit_show].itertuples():  
-        if width > 0:
-            # col = df.columns.tolist()
-            # co_count = len(df.columns)
-            # row_str =f'{str(row.Index)},'
-            # row_str =f'{str(row.Index)},'
-            # # row_str = ''
-            # for idx in range(0,len(row)-1):
-            #     print(f'idx:{row[idx]}')
-            #     # row_str +=f'{str(getattr(row,col[idx]))},'
-            #     row_str +=f'{row[idx]},'
-            # # row_str +='%s,'%(fill(str(getattr(row,col[-1])).replace(',',';').replace('，',';'),width=width))
-            # row_str +='%s,'%(fill(str(row[-1]).replace(',',';').replace('，',';'),width=width))
-            # # log.info(f'row_str:{row_str}')
-            # # print(row_str.split(','))
-            # table.add_row(row_str.split(','))
-
-            row_str = f''
-            for idx in range(0,len(row)-1):
-                row_str+=f'row[{idx}],'
-            row_str+=f'fill(str(row[-1]),width=width)'
-            log.debug(f'row_str:{row_str}')
-            table.add_row(eval(row_str))
-
+            table = PrettyTable([''] + alist )
         else:
-            table.add_row(row)
+            table = PrettyTable(field_names=[''] + alist,header=False)
 
-    if not widths:
-        # print(f'showCount:{showCount}')
-        if showCount:
-            count = f'Count:{len(df)}'
-            table = str(table)
-            table = table + f'\n{count}'
-            if table:
-                if 'category' in df.columns:
-                    topSort=counterCategory(df,'category',table=table)
-                    table = table + f'\n{topSort}'
-        return str(table)
-    else:
-        if isinstance(widths,list):
-            table.set_widths(widths)
-            # table.get_string()
-            # print table.get_widths()
+        for row in df[:limit_show].itertuples():  
+            if width > 0:
+                # col = df.columns.tolist()
+                # co_count = len(df.columns)
+                # row_str =f'{str(row.Index)},'
+                # row_str =f'{str(row.Index)},'
+                # # row_str = ''
+                # for idx in range(0,len(row)-1):
+                #     print(f'idx:{row[idx]}')
+                #     # row_str +=f'{str(getattr(row,col[idx]))},'
+                #     row_str +=f'{row[idx]},'
+                # # row_str +='%s,'%(fill(str(getattr(row,col[-1])).replace(',',';').replace('，',';'),width=width))
+                # row_str +='%s,'%(fill(str(row[-1]).replace(',',';').replace('，',';'),width=width))
+                # # log.info(f'row_str:{row_str}')
+                # # print(row_str.split(','))
+                # table.add_row(row_str.split(','))
+
+                row_str = f''
+                for idx in range(0,len(row)-1):
+                    row_str+=f'row[{idx}],'
+                row_str+=f'fill(str(row[-1]),width=width)'
+                log.debug(f'row_str:{row_str}')
+                table.add_row(eval(row_str))
+
+            else:
+                table.add_row(row)
+
+        if not widths:
+            # print(f'showCount:{showCount}')
+            if showCount:
+                count = f'Count:{len(df)}'
+                table = str(table)
+                table = table + f'\n{count}'
+                if table:
+                    if 'category' in df.columns:
+                        topSort=counterCategory(df,'category',table=table)
+                        table = table + f'\n{topSort}'
             return str(table)
+        else:
+            if isinstance(widths,list):
+                table.set_widths(widths)
+                # table.get_string()
+                # print table.get_widths()
+                return str(table)
         return str(table),table.get_widths()
+
+    except Exception as ex:
+        # print("Exception on code: {}".format(code)+ os.linesep + traceback.format_exc())
+        return Exception("Exception on format_for_print {}".format(len(df))+ os.linesep + traceback.format_exc())    
 
 def format_replce_list(lst, old='volume', new='maxp'):
         lst_n = [new if x==old else x for x in lst]
@@ -5156,6 +5161,9 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
     while end:
         # cmd = (cct.cct_raw_input(" ".join(dir_mo)+": "))
         cmd = (cct_raw_input(": ")).strip()
+        if len(top_temp) == 0:
+            workstatus = False
+            top_temp = top_all
         code=ct.codeQuery if workstatus else ct.codeQuery_work_false
         if len(cmd) == 0:
             # code='最近两周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
