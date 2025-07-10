@@ -684,9 +684,9 @@ if __name__ == '__main__':
             int_time = cct.get_now_time_int()
             if cct.get_work_time():
                 log.debug('into get_work_time:%s' % (int_time))
-                if 915 < int_time < 926:
+                if 920 < int_time < 926:
                     while 1:
-                        cct.sleeprandom(20)
+                        cct.sleeprandom(60)
                         break
                 elif 926 < int_time < 930:
                     while 1:
@@ -884,7 +884,7 @@ if __name__ == '__main__':
             else:
                 print("except_count >3")
                 cct.sleeprandom(ct.duration_sleep_time * 2)
-                sys.exit(0)
+                # sys.exit(0)
         # finally:
         #     cct.sleeprandom(ct.duration_sleep_time/2)
             # raw_input("Except")
