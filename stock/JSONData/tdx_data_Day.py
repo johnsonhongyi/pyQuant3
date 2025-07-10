@@ -4581,26 +4581,27 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     top_all = top_all[top_all['llow'] > 0]
     #20231110 add today topR
     #20250607 mod today topR
+
     if cct.get_day_istrade_date() and len(top_all) > 2:
         if cct.get_trade_date_status() == 'False':
-            top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
+            top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if x > 0 and y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
         # elif 915 < cct.get_now_time_int() < 1500:
         #     top_all['topR'] =  list(map(lambda x, y, z: (x + 1.1 if y > z else x),top_all.topR, top_all.low, top_all.lasth1d))
         elif cct.get_now_time_int() < 915:
-            top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
+            top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if x > 0 and y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
         else:
             if (top_all['open'][-1] == top_all['lasto1d'][-1]) and (top_all['open'][0] == top_all['lasto1d'][0]):
-                top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
+                top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if x > 0 and y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
             else:
-                top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if y >= z else x),top_all.topR, top_all.low, top_all.lasth1d))
+                top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if x > 0 and y >= z else x),top_all.topR, top_all.low, top_all.lasth1d))
 
         if cct.get_work_time_duration():
-            top_all['topR'] =  list(map(lambda x, y, z,op,high,close: (x + 1.1 if (y > z or (z < op*0.99 and high > z)) else x),top_all.topR, top_all.low, top_all.lasth1d,top_all.open,top_all.high,top_all.close))
+            top_all['topR'] =  list(map(lambda x, y, z,op,high,close: (x + 1.1 if x > 0 and (y > z or (z < op*0.99 and high > z)) else x),top_all.topR, top_all.low, top_all.lasth1d,top_all.open,top_all.high,top_all.close))
         else:
             if (top_all['open'][-1] == top_all['lasto1d'][-1]) and (top_all['open'][0] == top_all['lasto1d'][0]):
-                top_all['topR'] =  list(map(lambda x, y, z,op,high,close: (x + 1.1 if ( (y > z and high > z) or (z < op*0.99 and high > z and close > z)) else x),top_all.topR, top_all.low, top_all.lasth2d,top_all.open,top_all.high,top_all.close))
+                top_all['topR'] =  list(map(lambda x, y, z,op,high,close: (x + 1.1 if x > 0 and ( (y > z and high > z) or (z < op*0.99 and high > z and close > z)) else x),top_all.topR, top_all.low, top_all.lasth2d,top_all.open,top_all.high,top_all.close))
             else: 
-                top_all['topR'] =  list(map(lambda x, y, z,op,high,close: (x + 1.1 if ( (y > z and high > z) or (z < op*0.99 and high > z and close > z))  else x),top_all.topR, top_all.low, top_all.lasth1d,top_all.open,top_all.high,top_all.close))
+                top_all['topR'] =  list(map(lambda x, y, z,op,high,close: (x + 1.1 if x > 0 and ( (y > z and high > z) or (z < op*0.99 and high > z and close > z))  else x),top_all.topR, top_all.low, top_all.lasth1d,top_all.open,top_all.high,top_all.close))
     
     if 'llastp' not in top_all.columns:
         log.error("why not llastp in topall:%s" % (top_all.columns))
@@ -5413,7 +5414,7 @@ if __name__ == '__main__':
     code='002670'
     code='600110'
     code='600744'
-    code='300926'
+    code='688717'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     

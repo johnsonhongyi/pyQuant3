@@ -438,7 +438,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                 #     df= df[ (df[("%s" % (sort_value))] <= idx_k) ]
                 
                 if market_value == '1.1' and market_key in [ 'x']:
-                    df['topR']=list(map(lambda x, op,lastp,close: round( x + 1 if close >= op > lastp  else x, 1), df.topR,df.open,df.per1d,df.close))
+                    df['topR']=list(map(lambda x, op,lastp,close: round( x + 1 if x > 0 and close >= op > lastp  else x, 1), df.topR,df.open,df.per1d,df.close))
                     topr_up = list(set(df.topR.tolist()))
                     topRlist = list(set(map(lambda x: x  if x > 0 else 0, topr_up)))
                     if 0 in topRlist:
