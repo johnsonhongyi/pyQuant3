@@ -2519,12 +2519,16 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         #     df = wcd.get_wcbk_df(filter=market, market=filename,
         #                      perpage=1000, days=ct.wcd_limit_day)
         # df = pd.read_csv(block_path,dtype={'code':str},encoding = 'gbk')
-    elif market in ['bj','kcb','sh', 'sz', 'cyb']:
+    elif market in ['kcb','sh', 'sz', 'cyb']:
         df = rl.get_sina_Market_json(market)
         # df = sina_data.Sina().market(market)
-    elif market in ['all']:
+    elif market in ['all','bj']:
         df = sina_data.Sina().all
-        market_all = True
+        if market in ['bj']:
+            co_inx = [inx for inx in df.index if str(inx).startswith(('43','83','87','92'))]
+            df = df.loc[co_inx]
+        else:
+            market_all = True
 
     elif market in tdxbkdict.keys():
         codelist = tdxbk.get_tdx_gn_block_code(tdxbkdict[market])
@@ -5258,13 +5262,13 @@ def python_resample(qs, xs, rands):
     # # rands)),number=number)
 
 def tdx_profile_test():
-    resample = 'd'
+    resample = 'w'
     code='000002'
-    dl=60
+    dl=ct.Resample_LABELS_Days[resample]
     time_s=time.time()
-    for i in range(10):
+    for i in range(100):
         df = get_tdx_exp_low_or_high_power(code, dl=dl, end=None, ptype='low', power=False, resample=resample)
-        # print("time:%s"%( round((time.time()-time_s),2) ))
+    print("time:%s"%( round((time.time()-time_s),2) ))
     print("done")
     # gui_test.py
 if __name__ == '__main__':
@@ -5283,6 +5287,20 @@ if __name__ == '__main__':
     # log_level = LoggerFactory.DEBUG if args['-d']  else LoggerFactory.ERROR
     # log_level = LoggerFactory.DEBUG
     log.setLevel(log_level)
+    # tdx_profile_test()
+    # pyprof2calltree -k -i tdx.profile
+    # # import cProfile
+    # from cProfile import Profile
+    # prof = Profile()
+    # prof.enable()
+    # # ... 执行代码 ...
+    # prof.run('tdx_profile_test()')
+
+    # prof.disable()
+    # stats = prof.getstats()
+    # cct.timeit_time(get_tdx_exp_low_or_high_power('000002', dl=60, end=None, ptype='low', power=False, resample='d'),num=5)
+    # import ipdb;ipdb.set_trace()
+    # sys.exit()
     # time_s=time.time()
     # check_tdx_Exp_day_duration('all')
     # print("use time:%s"%(time.time()-time_s))

@@ -1728,7 +1728,7 @@ def set_console(width=80, height=15, color=3, title=None, closeTerminal=True):
 
 def timeit_time(cmd, num=5):
     import timeit
-    time_it = timeit.timeit(lambda: cmd, number=num)
+    time_it = timeit.timeit(lambda: (cmd), number=num)
     print(("timeit:%s" % time_it))
 
 
