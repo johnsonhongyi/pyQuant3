@@ -84,6 +84,8 @@ class SafeHDFStore(HDFStore):
             self.write_status = True
             if os.path.exists(self.fname):
                 self.h5_size_org = os.path.getsize(self.fname) / 1000 / 1000
+            else:
+                self.mode = 'w'
             self.run(self.fname,self.mode)
         # ptrepack --chunkshape=auto --propindexes --complevel=9 --complib=blosc in.h5 out.h5
         # subprocess.call(["ptrepack", "-o", "--chunkshape=auto", "--propindexes", --complevel=9,", ",--complib=blosc,infilename, outfilename])
