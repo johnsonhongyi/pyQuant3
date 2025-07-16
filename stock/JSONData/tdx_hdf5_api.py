@@ -43,24 +43,24 @@ BaseDir = cct.get_ramdisk_dir()
 class SafeHDFStore(HDFStore):
     # def __init__(self, *args, **kwargs):
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self,filename,mode='r',*args, **kwargs):
         self.probe_interval = kwargs.pop("probe_interval", 2)
-        lock = cct.get_ramdisk_path(args[0], lock=True)
+        lock = cct.get_ramdisk_path(filename, lock=True)
         baseDir = BaseDir
-        self.fname_o = args[0]
+        self.fname_o = filename
         self.basedir = baseDir
         self.config_ini = baseDir + os.path.sep+ 'h5config.txt'
         self.multiIndexsize = False
-        if args[0] == cct.tdx_hd5_name or args[0].find('tdx_all_df') >=0:
+        if filename == cct.tdx_hd5_name or filename.find('tdx_all_df') >=0:
             self.multiIndexsize = True
-            self.fname = cct.get_run_path_tdx(args[0])
+            self.fname = cct.get_run_path_tdx(filename)
             self.basedir = self.fname.split(self.fname_o)[0]
             log.info("tdx_hd5:%s"%(self.fname))
         else:
-            self.fname = cct.get_ramdisk_path(args[0])
+            self.fname = cct.get_ramdisk_path(filename)
             self.basedir = self.fname.split(self.fname_o)[0]
             log.info("ramdisk_hd5:%s"%(self.fname))
-
+        self.mode = mode
         self._lock = lock
         self.countlock = 0
         self.write_status = False
@@ -84,7 +84,7 @@ class SafeHDFStore(HDFStore):
             self.write_status = True
             if os.path.exists(self.fname):
                 self.h5_size_org = os.path.getsize(self.fname) / 1000 / 1000
-            self.run(self.fname)
+            self.run(self.fname,self.mode)
         # ptrepack --chunkshape=auto --propindexes --complevel=9 --complib=blosc in.h5 out.h5
         # subprocess.call(["ptrepack", "-o", "--chunkshape=auto", "--propindexes", --complevel=9,", ",--complib=blosc,infilename, outfilename])
         # os.system()
@@ -117,14 +117,17 @@ class SafeHDFStore(HDFStore):
         #     f.truncate()
         #     f.write(model.output())'''
 
-    def run(self, fname, *args, **kwargs):
+    def run(self, fname,mode='r',*args, **kwargs):
         while True:
             try:
-                self._flock = os.open(
-                    self._lock, os.O_CREAT | os.O_EXCL)
-                    # self._lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                log.info("SafeHDF:%s lock:%s" % (self._lock, self._flock))
+                if mode == 'w':
+                    self._flock = os.open(
+                        self._lock, os.O_CREAT | os.O_EXCL)
+                        # self._lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                    log.info("SafeHDF:%s lock:%s" % (self._lock, self._flock))
                 break
+                # else:
+                #     break
             # except FileExistsError:
 #            except FileExistsError as e:
             except (IOError, EOFError, Exception) as e:
@@ -157,7 +160,7 @@ class SafeHDFStore(HDFStore):
 #                time.sleep(probe_interval)
 #                return None
         # HDFStore.__init__(self, fname, *args, **kwargs)
-        HDFStore.__init__(self, fname, *args, **kwargs)
+        HDFStore.__init__(self, fname, mode=mode,*args, **kwargs)
         # if not os.path.exists(cct.get_ramdisk_path(cct.tdx_hd5_name)):
         #     if os.path.exists(cct.tdx_hd5_path):
         #         tdx_size = os.path.getsize(cct.tdx_hd5_path)
@@ -173,7 +176,8 @@ class SafeHDFStore(HDFStore):
     def __exit__(self, *args, **kwargs):
         if self.write_status:
             HDFStore.__exit__(self, *args, **kwargs)
-            os.close(self._flock)
+            if self.mode == 'w':
+                os.close(self._flock)
             h5_size = os.path.getsize(self.fname) / 1000 / 1000
             new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit)
             # global Compress_Count
@@ -407,7 +411,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
         if df is not None and not df.empty and table is not None:
             # h5 = get_hdf5_file(fname,wr_mode='r')
             tmpdf=[]
-            with SafeHDFStore(fname) as store:
+            with SafeHDFStore(fname,'r') as store:
                 if store is not None:
                     if showtable:
                         print(f"fname: {(fname)} keys:{store.keys()}")
@@ -526,7 +530,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 #                    df[co] = df[co].apply()
 #                    recordStringInHDF5(h5file, h5file.root, 'mrtamb',u'\u266b Hey Mr. Tambourine Man \u266b')
     
-        with SafeHDFStore(fname) as h5:
+        with SafeHDFStore(fname,'w') as h5:
             df=df.fillna(0)
             df=cct.reduce_memory_usage(df,verbose=False)
             log.info(f'df.shape:{df.shape}')
@@ -645,7 +649,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
     if code_l is not None:
         if table is not None:
 
-            with SafeHDFStore(fname) as store:
+            with SafeHDFStore(fname,'r') as store:
                 if store is not None:
                     if showtable:
                         print(f"fname: {(fname)} keys:{store.keys()}")
@@ -773,7 +777,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
     else:
         # h5 = get_hdf5_file(fname,wr_mode='r')
         if table is not None:
-            with SafeHDFStore(fname) as store:
+            with SafeHDFStore(fname,'r') as store:
                 # if store is not None:
                 #     if '/' + table in store.keys():
                 #         try:
