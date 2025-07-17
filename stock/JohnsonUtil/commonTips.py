@@ -2378,7 +2378,7 @@ def urlopen_with_retry(url, max_retries=3, initial_delay=1):
     # except Exception as e:
     #     print(f"Failed to open URL after retries: {e}")
 
-def get_url_data(url, retry_count=3, pause=0.05, timeout=30, headers=None):
+def get_url_data(url, retry_count=2, pause=0.05, timeout=30, headers=None):
     #    headers = {'User-Agent':'Mozilla/5.0 (Windows; U; Windows NT 6.1; en-US; rv:1.9.1.6) Gecko/20091201 Firefox/3.5.6'}
     # sina'Referer':'http://vip.stock.finance.sina.com.cn'
 
@@ -2407,7 +2407,7 @@ def get_url_data(url, retry_count=3, pause=0.05, timeout=30, headers=None):
         except (socket.timeout, socket.error) as e:
             data = ''
             log.error('socket timed out error:%s - URL %s ' % (e, url))
-            if e.find('HTTP Error 456') > 0:
+            if str(e).find('HTTP Error 456') >= 0:
                 return data
             if ReqErrorCount < 3:
                 ReqErrorCount +=1
@@ -5181,7 +5181,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
             #     print("%s: %s"%(key,code[key]))
 
             list(code.keys())
-            initkey= list(code.keys())[11]
+            initkey= list(code.keys())[ct.initkey]
             print(f"{initkey}: {code[initkey]}")
             # cmd=code[initkey]
             GlobalValues().setkey('tempdf',code[initkey])
