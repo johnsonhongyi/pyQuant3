@@ -552,6 +552,8 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                     else:
                         if rewrite:
                             h5.remove(table)
+                        elif len(h5) < 1:
+                            h5.remove(table)
                         h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
                         # h5.append(table, df, format='table', append=True,data_columns=True, dropna=None)
                 else:
