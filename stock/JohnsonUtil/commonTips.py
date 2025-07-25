@@ -3943,7 +3943,9 @@ def reduce_memory_usage(df, verbose=False):
         start_mem = df.memory_usage().sum() / 1024 ** 2
         for col in df.columns:
             col_type = df[col].dtypes
-            if col_type in numerics:
+            if isinstance(df.index, pd.MultiIndex) and col in ['volume','vol'] and col_type in numerics and str(col_type)[:3] == "int":
+                df[col] = df[col].astype(np.int64)
+            elif col_type in numerics:
                 c_min = df[col].min()
                 c_max = df[col].max()
                 if str(col_type)[:3] == "int":
