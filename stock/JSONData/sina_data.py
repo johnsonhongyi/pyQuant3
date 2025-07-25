@@ -243,6 +243,7 @@ class Sina:
         #     h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=self.sina_limit_time)
         # else:
         #     h5 = None
+
         if (cct.get_work_time(otime) and cct.get_work_time()) or (not cct.get_work_time(otime) and not cct.get_work_time() and ((otime >= 1500) or cct.get_now_time_int() < 1500 ) ):
             h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=self.sina_limit_time)
         else:
@@ -250,6 +251,7 @@ class Sina:
         log.info("h5a stocksTime:%0.2f" % (time.time() - time_s))
         if h5 is not None and len(h5) > 0:
             o_time = h5[h5.timel != 0].timel
+            # o_time = o_time[0] if isinstance(o_time, pd.Series) else o_time
             ticktime = int(h5[h5.ticktime != 0].ticktime[0][-8:-3].replace(":",''))
             if len(o_time) > 0 and ((self.get_int_time(o_time[0]) >= 1500 and ticktime >= 1500) or (self.get_int_time(o_time[0]) < 1500 and ticktime < 1500) ):
                 o_time = o_time[0]
