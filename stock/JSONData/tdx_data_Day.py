@@ -3461,7 +3461,9 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     c_up=len(condition_up)
     c_down=len(condition_down)
 
-    condition_up2 = compute_condition_up_add_up(dd[-6:],hop_df) if c_up > 0 else pd.DataFrame()
+    # condition_up2 = compute_condition_up_add_up(dd[-6:],hop_df) if c_up > 0 else pd.DataFrame()
+    
+
     # condition_down = hop_df[hop_df.hop == 'down']
     # fill_day_up = hop_df[( hop_df.fill_day.notnull() ) & (hop_df.hop == 'up')] if len(hop_df) > 0  else pd.DataFrame()
     # fill_day_down = hop_df[ (hop_df.fill_day.notnull() ) & (hop_df.hop == 'down') ] if len(hop_df) > 0  else pd.DataFrame()
@@ -3475,8 +3477,9 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     if c_up > 0 :
         # dd['topR'] = c_up + len(condition_up2) - dd.gren.values[-1]
-        dd['topR'] = c_up + len(condition_up2)
-        dd['topD'] = len(condition_down)
+        # dd['topR'] = c_up + len(condition_up2)
+        dd['topR'] = c_up
+        dd['topD'] = c_down
     else:
 
         dd['topR'] = -c_down if c_down > 0 else 0
@@ -5432,7 +5435,7 @@ if __name__ == '__main__':
     code='002670'
     code='600110'
     code='600744'
-    code='688717'
+    code='600111'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
@@ -5452,15 +5455,22 @@ if __name__ == '__main__':
 
     # # dd = compute_ma_cross(dd,resample='d')
     # print(get_tdx_stock_period_to_type(dd)[-5:])
-    df = get_tdx_append_now_df_api_tofile('001236')
+    # df = get_tdx_append_now_df_api_tofile('001236')
     # df = get_tdx_append_now_df_api('001236')
-    print(f'topR:{df.topR[0]}')
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
 
-    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
-    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
-    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )
+    print(f'topR-d:{df2.topR}')
+
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
+    print(f'topR-m:{df2.topR}')
+
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
+    print(f'topR-W:{df2.topR}')
+
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )
+    print(f'topR-3d:{df2.topR}')
+
     print(f'topR:{df2.topR} df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
     print(f'ldate:{df2.ldate[:2]}')
     df = df2.to_frame().T
