@@ -141,7 +141,7 @@ https://www.bilibili.com/opus/655159336464547863
 initkey = 4
 codeQuery= {"放量上涨": "top_temp.query('close > df2  and low > ene and close > lastp1d and volume > 3 and boll > 1')",\
             "HMax日新高" : "top_temp.query('low > ma10d  and ((lasth1d > high4) or (high > max5)) and high4==max5 and max5 >=hmax*0.9 and topR > 1')",\
-            "3周连阳趋势" : " top_temp.query('boll>0 and perc1d >=0 and perc2d >=0 and perc3d >= 0 and ma51d > ma201d and lastl1d < ma51d*1.05 and perc1d >= perc2d')",\
+            "3周连阳趋势" : " top_temp.query('boll>0 and perc1d >=0 and perc2d >=0 and perc3d >= 0 and ma51d > ma201d  and perc1d >= perc2d')",\
             "4周新高" : "top_temp.query('high > high4 and lasth1d > lasth2d and lasth2d > lasth3d and low <= ma5d*1.02 and percent > 0')",\
             "5周新高" : "top_temp.query('high > max5 and lasth1d > lasth2d and lasth2d > lasth3d and lasth3d > lasth4d and percent > 0 and low > upper')",\
             "K线2连阳": "top_temp.query('close > lastp1d and  lastp1d > lastp2d and  lasth1d > lasth2d  and lastl1d > lastl2d and lastp1d > lastp2d \
@@ -162,7 +162,7 @@ codeQuery= {"放量上涨": "top_temp.query('close > df2  and low > ene and clos
 
 codeQuery_work_false= {"放量上涨": "top_temp.query('close > df2  and low > ene and close > lastp2d and volume > 3 and boll > 1')",\
             "HMax日新高" : "top_temp.query('low > ma10d  and ((lasth1d > high4) or (high > max5)) and high4==max5 and max5 >=hmax*0.9 and topR > 1')",\
-            "3周连阳趋势" : " top_temp.query('boll>0 and perc1d >=0 and perc2d >=0 and perc3d >= 0 and ma51d > ma201d and lastl1d < ma51d*1.05 and perc1d >= perc2d')",\
+            "3周连阳趋势" : " top_temp.query('boll>0 and perc1d >=0 and perc2d >=0 and perc3d >= 0 and ma51d > ma201d  and perc1d >= perc2d')",\
             "4周新高" : "top_temp.query('high > high4 and lasth2d > lasth3d and lasth3d > lasth4d and low <= ma5d*1.02 and percent > 0')",\
             "5周新高" : "top_temp.query('high > max5 and lasth2d > lasth3d and lasth3d > lasth4d and lasth4d > lasth5d and percent > 0 and and low > upper')",\
             "K线2连阳": "top_temp.query('close > lastp2d and  lastp2d > lastp3d and  lasth2d > lasth3d  and lastl2d > lastl3d and lastp2d > lastp3d \
@@ -247,7 +247,7 @@ sina_limit_time = 30
 h5_time_l_count = 6
 sina_dd_limit_time = 1200
 diffcode = 0.2
-dratio_limit = 0.09
+dratio_limit = 0.25
 duration_sleep_time = 30
 single_duration_sleep_time = 180
 # single_duration_sleep_time = 120
@@ -310,7 +310,7 @@ powerdiff = 'float(ra)*float(fibl)*(float(%s)-float(fib))/10 +float(ma) +float(k
 
 # Duration_sort_per_ratio = ['percent', 'ratio', 'op',
 Duration_sort_per_ratio = ['percent', 'fibl', 'topR',
-                           'fib',  'ra', 'percent', 'volume', 'couts']
+                           'red',  'ra', 'percent', 'volume', 'couts']
 Duration_sort_per_ratio_key = [0, 1, 0, 1,  0, 0, 1, 1]
 
 
@@ -323,12 +323,12 @@ Duration_sort_per_ratio_key = [0, 1, 0, 1,  0, 0, 1, 1]
 # Duration_sort_perd = ['per%sd', 'perc%sd','percent','df2',   'dff', 'ratio', 'op',
 # Duration_sort_perd = ['per%sd','percent',   'dff', 'perc%sd','df2', 'ratio', 'op',
 Duration_sort_perd = ['per%sd','percent',   'dff', 'perc%sd','df2', 'topR',
-                      'fib', 'fibl', 'ra', 'volume', 'couts']
+                      'red', 'fibl', 'ra', 'volume', 'couts']
 Duration_sort_perd_key = [0, 0, 0, 0, 0,  0, 1, 1, 0, 1, 1]
 
 # Duration_sort_percd = ['perc%sd',   'dff', 'per%sd', 'percent', 'b1_v', 'ratio', 'op',
 Duration_sort_percd = ['perc%sd',   'dff', 'per%sd', 'percent', 'b1_v', 'topR',
-                       'fib', 'fibl', 'ra', 'percent', 'volume', 'couts']
+                       'red', 'fibl', 'ra', 'percent', 'volume', 'couts']
 Duration_sort_percd_key = [0, 0,0, 0, 0, 0, 1, 1, 0, 0, 1, 1]
 
 # Duration_sort_percd = ['perc%sd', 'dff', 'per%sd', 'percent', 'b1_v', 'ratio', 'op',
@@ -345,10 +345,10 @@ Duration_sort_percd_key = [0, 0,0, 0, 0, 0, 1, 1, 0, 0, 1, 1]
 # Duration_percent_dff = ['percent','df2','per1d','b1_v', 'dff',  'op',
 # Duration_percent_dff = ['percent','per1d','df2','b1_v', 'dff',  'op',
 Duration_percent_dff = ['percent','per1d','df2','b1_v', 'dff',  'topR',
-                        'fib', 'fibl', 'ra', 'volume', 'couts']
+                        'red', 'fibl', 'ra', 'volume', 'couts']
 Duration_percent_dff_key = [0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
 
-Duration_percent_vol = ['fib','dff','percent',
+Duration_percent_vol = ['red','dff','percent',
                         'df2', 'topR',  'volume', 'ra', 'couts']
                         # 'df2', 'op', 'fib', 'volume', 'ra', 'ratio', 'couts']
 Duration_percent_vol_key = [0,0, 0 , 0, 0, 1, 0,  1]
@@ -357,7 +357,7 @@ Duration_percent_vol_key = [0,0, 0 , 0, 0, 1, 0,  1]
 # Duration_percent_per_ra_key=[0,0,0,0,1,1,1,1,1]
 
 Duration_percent_df2dff = ['fibl','per3d', 'dff', 'percent',
-                           'topR', 'fib',  'ra', 'volume', 'couts']
+                           'topR', 'red',  'ra', 'volume', 'couts']
                            # 'op', 'fib', 'fibl', 'ra', 'ratio', 'volume', 'couts']
 Duration_percent_df2dff_key = [0, 0, 0, 0, 0, 1,  0,  1, 1]
 
@@ -371,35 +371,35 @@ Duration_percent_df2dff_key = [0, 0, 0, 0, 0, 1,  0,  1, 1]
 # Duration_percent_boll_key = [0, 0, 0, 0, 0, 1, 1, 1, 1, 1]
 
 Duration_percent_opboll = ['topR', 'perc3d', 'percent',
-                         'dff', 'fib', 'fibl', 'volume', 'couts']
+                         'dff', 'red', 'fibl', 'volume', 'couts']
 Duration_percent_opboll_key = [0, 0, 0, 0, 1, 1,  1, 1]
 
 
 
 Duration_percent_boll = ['boll','per1d','volume','perc3d', 'percent',
-                         'dff', 'fib', 'fibl', 'couts']
+                         'dff', 'red', 'fibl', 'couts']
 
 Duration_percent_boll_key = [0, 0, 1, 0, 0, 1, 1,  1, 1]
 
 
 Duration_dff_percent = ['dff', 'percent', 'df2', 'ra',
-                        'topR', 'fib', 'fibl',  'volume', 'couts']
+                        'topR', 'red', 'fibl',  'volume', 'couts']
                         # 'op', 'fib', 'fibl', 'ratio', 'volume', 'couts']
 Duration_dff_percent_key = [0, 0, 0, 0, 0, 1, 1,  1, 1]
 
 Duration_ra_dff = ['ra', 'dff', 'couts', 'percent',
-                   'topR', 'fib', 'fibl',  'volume']
+                   'topR', 'red', 'fibl',  'volume']
                    # 'op', 'fib', 'fibl', 'ratio', 'volume']
 
 Duration_ra_dff_key = [0, 0, 0, 0, 0, 1, 1,  1]
 
 Duration_ral_dff = ['ral', 'dff', 'couts', 'percent',
-                   'topR', 'fib', 'fibl',  'volume']
+                   'topR', 'red', 'fibl',  'volume']
                    # 'op', 'fib', 'fibl', 'ratio', 'volume']
 
 Duration_ral_dff_key = [0, 0, 0, 0, 0, 1, 1,  1]
 
-Duration_sort_per_df2 = ['volume','percent', 'b1_v','df2','ma', 'dff', 'fib']
+Duration_sort_per_df2 = ['volume','percent', 'b1_v','df2','ma', 'dff', 'red']
 Duration_sort_per_df2_key = [0, 0, 0, 0, 0, 0 , 0]
 
 # Duration_ra_goldop=['ra','percent','dff','boll','op','fib','fibl','ratio','volume','couts']
@@ -411,12 +411,12 @@ Duration_sort_high_op = ['dff', 'date', 'fib', 'topR',
 Duration_sort_high_op_key = [0, 1, 1, 0, 1, 0, 0,  1, 1]
 
 
-Monitor_sort_count = ['couts', 'dff', 'percent', 'volume','fib']
+Monitor_sort_count = ['couts', 'dff', 'percent', 'volume','red']
 Monitor_sort_count_key = [0, 0, 0, 0, 0]
 
 # Monitor_sort_op = ['fib', 'fibl', 'topR', 'dff', 'percent',  'ra', 'ratio']
 # Monitor_sort_op = ['fib', 'fibl', 'op', 'dff', 'percent',  'ra', 'ratio']
-Monitor_sort_op = ['fib', 'fibl', 'topR', 'dff', 'percent',  'ra']
+Monitor_sort_op = ['red', 'fibl', 'topR', 'dff', 'percent',  'ra']
 Monitor_sort_op_key = [1, 1, 0, 0, 0, 0]
 
 
@@ -426,7 +426,7 @@ Monitor_sort_op_key = [1, 1, 0, 0, 0, 0]
 # MonitorMarket_sort_op=['fib','op','dff','fibl','ra','percent','ratio','volume','couts']
 # MonitorMarket_sort_op_key=[1,0,0,1,0,0,1,1,1]
 # MonitorMarket_sort_op = ['dff', 'fib', 'fibl', 'op',
-MonitorMarket_sort_op = ['dff', 'fib', 'fibl', 'topR',
+MonitorMarket_sort_op = ['dff', 'red', 'fibl', 'topR',
                          'ra', 'percent',  'volume', 'couts']
 MonitorMarket_sort_op_key = [0, 0, 1, 0, 0, 0, 1, 1]
 
@@ -438,20 +438,20 @@ MonitorMarket_sort_op_key = [0, 0, 1, 0, 0, 0, 1, 1]
 # MonitorMarket_format_buy=['name', 'buy', 'ma5d', 'boll','dff','df2','couts','percent', 'ra','op', 'ratio','ma','volume','date','category']
 
 Duration_format_buy = ['name', 'buy', 'boll', 'dff', 'df2', 'percent', 'per1d', 'perc3d',
-                       'ra', 'topR', 'fib', 'couts',  'volume', 'fibl', 'category']
+                       'ra', 'topR', 'red', 'couts',  'volume', 'fibl', 'category']
                        # 'ra', 'op', 'ratio', 'couts',  'volume', 'fib','fibl', 'category']
 Duration_format_trade = ['name', 'trade', 'boll', 'dff', 'df2',
-                         'percent', 'per1d',  'perc3d',  'ra', 'ral', 'topR', 'couts', 'volume', 'fib','fibl', 'category']
+                         'percent', 'per1d',  'perc3d',  'ra', 'ral', 'topR', 'couts', 'volume', 'red','fibl', 'category']
                          # 'percent', 'per1d',  'perc3d',  'ra', 'topR', 'ratio', 'couts', 'volume', 'fib','fibl', 'category']
                          # 'percent', 'per1d',  'perc3d',  'ra', 'op', 'ratio', 'couts', 'volume', 'fib','fibl', 'category']
 
 
 Monitor_format_trade = ['name', 'trade', 'boll', 'dff', 'df2', 'couts',
-                        'percent', 'per1d', 'perc3d', 'ra', 'ral', 'topR',  'volume', 'fib','fibl', 'category']
+                        'percent', 'per1d', 'perc3d', 'ra', 'ral', 'topR',  'volume', 'red','fibl', 'category']
                         # 'percent', 'per1d', 'perc3d', 'ra', 'topR', 'ratio',  'volume', 'fib','fibl', 'category']
                         # mod ratio ->ral
 MonitorMarket_format_buy = ['name', 'buy', 'boll', 'dff', 'df2',
-                            'couts', 'percent', 'per1d', 'perc3d', 'ra', 'ral', 'topR',  'volume', 'fib','fibl', 'category']
+                            'couts', 'percent', 'per1d', 'perc3d', 'ra', 'ral', 'topR',  'volume', 'red','fibl', 'category']
                             # 'couts', 'percent', 'per1d', 'perc3d', 'ra', 'topR', 'ratio',  'volume', 'fib','fibl', 'category']
                             # 'couts', 'percent', 'per1d', 'perc3d', 'ra', 'op', 'ratio',  'volume', 'fib','fibl', 'category']
 
@@ -465,7 +465,7 @@ columns_now = ['open', 'llastp', 'close', 'trade', 'high', 'low',
                'buy', 'sell', 'volume', 'turnover', 'b1_v', 'b1', 'b2_v', 'b2',
                                            'b3_v', 'b3', 'b4_v', 'b4', 'b5_v', 'b5', 'a1_v', 'a1', 'a2_v',
                                            'a2', 'a3_v', 'a3', 'a4_v', 'a4', 'a5_v', 'a5', 'percent',
-                                           'fib', 'dff', 'couts', 'kind', 'prev_p']
+                                           'red', 'dff', 'couts', 'kind', 'prev_p']
 # columns_now = [u'close', u'trade', u'high', u'low',\
 #                u'buy', u'sell', u'volume', u'b1_v', u'b1', u'b2_v', u'b2',\
 #                u'b3_v', u'b3', u'b4_v', u'b4', u'b5_v', u'b5', u'a1_v', u'a1', u'a2_v',\
@@ -687,7 +687,7 @@ dfcfw_rzye_columns = ['tdate','rzye_h','rzye_s','rzye_hs','ltsz_h','ltsz_s','lts
 dfcfw_rzye_columns2sh = ['DIM_DATE','RZYEZB', 'RQCHL10D', 'RQYE', 'RQMCL', 'RZCHE5D', 'RZCHE3D', 'RZMRE5D', 'XOB_MARKET_0001', 'RQJMG', 'RZYE', 'RZCHE', 'NEW', 'ZDF', 'RZCHE10D', 'RZJME3D', 'RZJME5D', 'RQMCL5D', 'SCDM',  'RZJME10D', 'RQJMG10D', 'RQYL', 'RQCHL', 'RQJMG5D', 'RZRQYECZ', 'LTSZ', 'RQMCL10D', 'RZMRE', 'RZMRE10D', 'RQJMG3D', 'RZRQYE', 'RQCHL5D', 'RQCHL3D', 'ZDF3D', 'ZDF10D', 'RZJME', 'ZDF5D', 'RZMRE3D', 'RQMCL3D']
 dfcfw_rzye_columns2 = ['DIM_DATE','RZYEZB', 'RQCHL10D', 'RQCHL3D', 'RQYE', 'RQMCL', 'RQYL', 'RZCHE5D', 'RZCHE', 'RZCHE3D', 'RZMRE5D', 'RQJMG', 'ZDF10D', 'RZYE', 'LTSZ', 'RQJMG10D', 'NEW', 'RQMCL10D', 'ZDF', 'RQMCL5D', 'RZMRE10D', 'RZRQYECZ', 'RQJMG3D', 'RZMRE', 'RQCHL5D', 'RZJME3D', 'RZJME5D', 'ZDF3D', 'RZCHE10D', 'RQJMG5D', 'RZJME', 'ZDF5D', 'RQCHL', 'RZMRE3D', 'RQMCL3D', 'RZRQYE', 'RZJME10D']
 # TDX_Day_columns=['code','date','open','high','low','close','vol','amount']
-TDX_Day_columns_all = ['code', 'date', 'open', 'high', 'low', 'close', 'vol','amount', 'ra', 'op', 'fib', 'ma5d', 'ma10d', 'ldate', 'hmax', 'lmin', 'cmean']
+TDX_Day_columns_all = ['code', 'date', 'open', 'high', 'low', 'close', 'vol','amount', 'ra', 'op', 'red', 'ma5d', 'ma10d', 'ldate', 'hmax', 'lmin', 'cmean']
 TDX_Day_columns = ['code', 'date', 'open', 'high', 'low', 'close', 'vol','amount']
 
 
@@ -849,7 +849,7 @@ def RawMenuArgmain():
     raw = 'status:[go(g),clear(c),[d 20150101(dt 14)[l|h]|[y|n|pn|py],quit(q),W(a),sh]:'
     raw_input_menu = raw + "\n\tNow : %s" + \
         "\n\t1:Sort By Percent\t2:Sort by per1d\t3:Sort By percd\t\t4:Sort By DFF\n\t5:Sort By Ra_dff\t6:Sort By  fibl\t7:Sort Vol per\t\t8:Sort by Count" + \
-        "\n\t9:By fib\t\tx: by_topR\tx1:by boll_perd\t\tx2:by ral\nplease input:"
+        "\n\t9:By red\t\tx: by_topR\tx1:by boll_perd\t\tx2:by ral\nplease input:"
     return raw_input_menu
 
 # "Sort By Percent\t3:Sort By DFF\n\t2:Sort By OP\t\t4:Sort By Ra\nplease input:"

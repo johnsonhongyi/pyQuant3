@@ -3308,7 +3308,15 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # idx_top = df[df.high]
     # red_cout = df.query('(high > high.shift(1) and low > low.shift(1)) or (close > upper and close > low*1.05) or (low >= open*0.992 and close >= open)')
 
-    red_cout = eval(f"df.query('close >={idx_close}  and ((high > high.shift(1) and low > low.shift(1) and close > close.shift(1)) or (close > upper and close > low*1.05) or (low >= open*0.992 and close >= open ))')")
+    # red_cout = eval(f"df.query('close >={idx_close}  and ((high > high.shift(1) and low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > low*1.05) or (low >= open*0.992 and close >= open ))')")
+    # print(f'count:{len(df)}')
+    # print(idx_close)
+    if resample == 'd':
+        red_cout = eval(f"df.query('close >={idx_close}  and high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
+    else:
+        red_cout = eval(f"df[-5:].query('high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
+    log.debug('red_cout:%s idx_close:%s'%(red_cout,idx_close))
+    # red_cout = eval(f"df.query('close >={idx_close}  and high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
     df2 = df[df.index >= idx_date]
     green_cout = df2.query('(low < low.shift(1) and high < high.shift(1)) or (close < open)')
     
@@ -4613,14 +4621,20 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     if 'llastp' not in top_all.columns:
         log.error("why not llastp in topall:%s" % (top_all.columns))
 
-    for col in ['boll','dff','df2','ra','ral','fib','fibl']:
+    # co2int.extend(['top10','ra'])
+    # co2int= [inx for inx in co2int if inx in df.columns]
+    # for co in co2int:
+    #     df[co]= df[co].astype(int)
+
+    co2int = ['boll','dff','df2','ra','ral','fib','fibl','op', 'ratio','red','top10','ra']    
+    for col in co2int:
         if col in top_all.columns:
             top_all[col] = top_all[col].astype(int)
     top_all['topR']=top_all['topR'].apply(lambda x:round(x,1))
     # top_all = top_all.fillna(0)         
     # tdxdata = tdxdata.fillna(0)            
 
-    for col in ['boll','dff','df2','ra','ral','fib','fibl']:
+    for col in co2int:
         if col in tdxdata.columns:
             tdxdata[col] = tdxdata[col].astype(int)
     top_all = cct.reduce_memory_usage(top_all)       
@@ -5436,6 +5450,8 @@ if __name__ == '__main__':
     code='600110'
     code='600744'
     code='600111'
+    code='600392'
+    code='601138'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
@@ -5460,18 +5476,18 @@ if __name__ == '__main__':
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
 
-    print(f'topR-d:{df2.topR}')
+    print(f'topR-d:{df2.topR} red:{df2.red}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
-    print(f'topR-m:{df2.topR}')
+    print(f'topR-m:{df2.topR} red:{df2.red}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
-    print(f'topR-W:{df2.topR}')
+    print(f'topR-W:{df2.topR} red:{df2.red}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )
-    print(f'topR-3d:{df2.topR}')
+    print(f'topR-3d:{df2.topR} red:{df2.red}')
 
-    print(f'topR:{df2.topR} df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
+    print(f'topR:{df2.topR} red:{df2.red} df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
     print(f'ldate:{df2.ldate[:2]}')
     df = df2.to_frame().T
     print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
