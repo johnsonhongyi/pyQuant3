@@ -164,7 +164,7 @@ codeQuery_work_false= {"放量上涨": "top_temp.query('close > df2  and low > e
             "HMax日新高" : "top_temp.query('low > ma10d  and ((lasth1d > high4) or (high > max5)) and high4==max5 and max5 >=hmax*0.9 and topR > 1')",\
             "3周连阳趋势" : " top_temp.query('boll>0 and perc1d >=0 and perc2d >=0 and perc3d >= 0 and ma51d > ma201d  and perc1d >= perc2d')",\
             "4周新高" : "top_temp.query('high > high4 and lasth2d > lasth3d and lasth3d > lasth4d and low <= ma5d*1.02 and percent > 0')",\
-            "5周新高" : "top_temp.query('high > max5 and lasth2d > lasth3d and lasth3d > lasth4d and lasth4d > lasth5d and percent > 0 and and low > upper')",\
+            "5周新高" : "top_temp.query('high > max5 and lasth2d > lasth3d and lasth3d > lasth4d and lasth4d > lasth5d and percent > 0 and low > upper')",\
             "K线2连阳": "top_temp.query('close > lastp2d and  lastp2d > lastp3d and  lasth2d > lasth3d  and lastl2d > lastl3d and lastp2d > lastp3d \
                         and low > ma52d and (topR > 0 and perc1d > 1) and high4==max5 and max5 >=hmax*0.9 and topR > 1')",\
             "K线3连阳": "top_temp.query('close > lastp2d and  lastp2d > lastp3d and  lasth2d > lasth3d  and lastl2d > lastl3d and lastp2d > lastp3d \
