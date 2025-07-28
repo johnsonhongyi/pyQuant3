@@ -483,7 +483,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
             #         df= compute_perd_value(df, market_value, 'perc')
 
 
-    co2int= ['boll', 'op', 'ratio', 'fib', 'fibl']
+    co2int= ['boll', 'op', 'ratio', 'fib', 'fibl','red','gren']
     # co2int= ['boll', 'op', 'ratio', 'fib', 'fibl', 'df2']
 
     # co2int.extend([co for co in df.columns.tolist()
