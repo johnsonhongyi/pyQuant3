@@ -632,3 +632,13 @@ top_all.query('lasth1d > lasth2d and lastl1d > lastl2d and lasth2d > lasth3d  an
 top_all.query('low > 2*(high+low+open+2*close)/5-high')
 top_all.query('low < (2*(high+low+open+2*close)/5-high)*1.02 ' )
 top_all.query('low > (2*(high+low+open+2*close)/5-high)*1.02 ')
+top_all.query('lasth1d > upper1 and lasth2d > upper2 and lasth3d > upper3 and lastl1d > lastl2d > lastl3d ')
+top_all.query('lasth1d > upper1 and lasth2d > upper2 and lasth3d > upper3 and lastl1d > lastl2d > lastl3d')
+top_all.query('lasth1d > upper1 and lasth2d > upper2 and lastl1d > lastl2d > lastl3d')
+top_all.query('lasth1d > upper1 and lasth2d > upper2 and lastl1d > lastl2d > lastl3d')[-50:]
+top_all.query('lasth1d > upper1 and lasth2d > upper2 and lastl1d > lastl2d > lastl3d and close > lasth2d')[-50:]
+top_all.query('lasth1d > upper1 and lasth2d > upper2 and lastl1d > lastl2d > lastl3d and close > lasth2d')
+top_all.query('lasth1d > upper1 and lasth2d < upper2 and lastl1d > lastl2d > lastl3d and close > lasth2d')
+top_all.query('lasth1d > upper1 and lasth2d < upper2 and lastl1d > lastl2d > lastl3d and close > lasth2d and high > high4')
+top_all.query('lasth1d > upper1 and lasth2d < upper2 and lastl1d > lastl2d > lastl3d and close > lasth2d and high > max5')
+top_all.query('lasth1d > upper1 and lasth2d < upper2 and lastl1d > lastl2d > lastl3d and close > lasth2d and high > hmax')

@@ -2800,17 +2800,17 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
     # func = partial(cmd, **kwargs)
     # module = importlib.import_module(cmd)
     # https://stackoverflow.com/questions/72766345/attributeerror-cant-pickle-local-object-in-multiprocessing
-    log.debug(f'urllist:{len(urllist)}')
     urllist = list(set(urllist))
-    if len(urllist) > 200:
-        if int(round(len(urllist)/100,0)) < 2:
+    data_count =len(urllist)
+    if data_count > 200:
+        if int(round(data_count/100,0)) < 2:
             cpu_co = 1
         else:
-            cpu_co = int(round(len(urllist)/100,0))
+            cpu_co = int(round(data_count/100,0))
         # cpu_used = int(cpu_count()/2)  + 1
         cpu_used = int(cpu_count()) - 2
         pool_count = (cpu_used) if cpu_co > (cpu_used) else cpu_co
-        log.debug(f'count:{len(urllist)} pool_count:{pool_count} cpu_co:{cpu_co}')
+        log.debug(f'count:{data_count} pool_count:{pool_count} cpu_co:{cpu_co}')
         # pool_count = (cpu_count()-2) if cpu_co > (cpu_count()-2) else cpu_co
         if  cpu_co > 1 and 1300 < get_now_time_int() < 1500:
             # pool_count = int(cpu_count() / 2) + 1
@@ -2825,16 +2825,15 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                 # print(f"func getkey:{partialfunc('000002')}")
 
                 # TDXE:44.26  cpu 1   
-                # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
+                # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=data_count,ncols=5):
                 # results = pool.map(func, urllist)
                 # try:
-                #     for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
+                #     for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=data_count,ncols=ct.ncols):
                 #         results.append(y)
                 # except Exception as e:
                 #     log.error("except:%s"%(e))
 
                 try:
-                    data_count=len(urllist)
                     progress_bar = tqdm(total=data_count)
                     log.debug(f'data_count:{data_count},mininterval:{ct.tqdm_mininterval},ncols={ct.ncols}')
                     from tqdm.contrib.concurrent import process_map
@@ -2845,7 +2844,6 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
 
                     # tqdm.monitor_interval = 0
                     results = process_map(partialfunc, urllist, unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count,max_workers=pool_count)
-
                     result = []
                     # for data in results:
                     #     if isinstance(data, Exception):
@@ -2866,7 +2864,8 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                             if len(data) > 10 and len(data.index) == index_couts:
                                 result.append(data)
                             else:
-                                log.error(f'idx:{idx} is None,last code:{result[-1].code} resultCount:{len(result)}')
+                                # log.error(f'idx:{idx} is None,last code:{result[-1].code} resultCount:{len(result)}')
+                                log.error(f'idx:{idx} is None, code:{urllist[idx]} CountAll:{data_count} resultCount:{len(result)}')
 
                     # result = list(set(result))
                     log.debug(f'result:{len(result)}')
@@ -2878,7 +2877,7 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     import ipdb;ipdb.set_trace()
                     results=[]
                     for code in urllist:
-                        print(f"code:{code},count:{len(urllist)} idx:{urllist.index(code)}", end=' ')
+                        print(f"code:{code},count:{data_count} idx:{urllist.index(code)}", end=' ')
                         res=cmd(code,**kwargs)
                         print("status:%s\t"%(len(res)), end=' ')
                         results.append(res)
@@ -5200,9 +5199,9 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
             # for key in code.keys():
             #     print("%s: %s"%(key,code[key]))
 
-            list(code.keys())
+            # list(code.keys())
             initkey= list(code.keys())[ct.initkey]
-            print(f"{initkey}: {code[initkey]}")
+            print(f"index:{ct.initkey+1}:{initkey}: {code[initkey]}")
             # cmd=code[initkey]
             GlobalValues().setkey('tempdf',code[initkey])
             cmd=ct.codeQuery_show_cct(initkey,Market_Values,workstatus,orderby)
