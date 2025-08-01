@@ -766,7 +766,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
 
                 # write_tdx_sina_data_to_file(code, df=df)
 
-
     if 'macd' not in df.columns:
         df = get_tdx_macd(df)
     if 'perc9d' not in df.columns:
@@ -3834,7 +3833,9 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
             df_temp['perc%sd' % da] = df['perlastp'][-da]
 
         df_repeat = pd.DataFrame([df_temp]).loc[np.repeat(0, len(df))].reset_index(drop=True)
+
         df = pd.concat([df.reset_index(), df_repeat], axis=1)
+        df = df.loc[:,~df.columns.duplicated()]
         df = df.set_index('date').sort_index(ascending=True)
 
         # new_row_df = pd.DataFrame([df_temp]) 
@@ -5454,6 +5455,7 @@ if __name__ == '__main__':
     code='600111'
     code='600392'
     code='688189'
+    code='601028'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
