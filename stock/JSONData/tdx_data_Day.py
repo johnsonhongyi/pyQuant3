@@ -2633,7 +2633,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     dm['buy'] = list(map(lambda x, y: x if int(x) > 0 else y, dm.now, dm.b1))
 
     if market != 'index':
-        if cct.get_now_time_int() > 900 and cct.get_now_time_int() < 926:
+        if cct.get_now_time_int() > 920 and cct.get_now_time_int() < 926:
             # print dm[dm.code=='000001'].b1
             # print dm[dm.code=='000001'].a1
             # print dm[dm.code=='000001'].a1_v
@@ -2650,7 +2650,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
             # dm['b1_v'] = map(lambda x, y: round(x / y * 100, 1), dm['b1_v'], dm['volume'])
 
         else:
-            dm = dm[(dm.buy > 0) | (dm.b1 > 0) | (dm.a1 > 0)]
+            # dm = dm[(dm.buy > 0) | (dm.b1 > 0) | (dm.a1 > 0)]
             dm['b1_v'] = ((dm['b1_v']) / dm['volume'] * 100).map(lambda x: round(x, 1))
 
     # print 'ratio' in dm.columns
