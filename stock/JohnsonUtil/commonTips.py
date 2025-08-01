@@ -2800,7 +2800,8 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
     # func = partial(cmd, **kwargs)
     # module = importlib.import_module(cmd)
     # https://stackoverflow.com/questions/72766345/attributeerror-cant-pickle-local-object-in-multiprocessing
-
+    log.debug(f'urllist:{len(urllist)}')
+    urllist = list(set(urllist))
     if len(urllist) > 200:
         if int(round(len(urllist)/100,0)) < 2:
             cpu_co = 1
@@ -2852,6 +2853,8 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                         else:
                             # print("Got OK result: {}".format(result))
                             result.append(data)
+                    result = list(set(result))
+                    log.debug(f'result:{len(result)}')
                             
                 except Exception as e:
                     log.error("except:%s"%(e))
