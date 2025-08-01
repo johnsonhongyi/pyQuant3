@@ -2861,7 +2861,8 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                             print("Got exception: {}".format(data))
                         else:
                             # print("Got OK result: {}".format(result))
-                            if len(data) > 10 and len(data.index) == index_couts:
+                            # if len(data) > 0 and len(data.index) == index_couts:
+                            if len(data) > 0:
                                 result.append(data)
                             else:
                                 # log.error(f'idx:{idx} is None,last code:{result[-1].code} resultCount:{len(result)}')
