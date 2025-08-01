@@ -570,7 +570,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                 if not resample == 'd':
                     df = get_tdx_stock_period_to_type(df, period_day=resample)
 
-            if resample == 'd' and (cct.get_today_duration(df.index[-1]) > 3 or df.close[-3:].max() > df.open[-3:].min() * 1.6):
+            if resample == 'd' and (cct.get_today_duration(df.index[-1]) > 20 or df.close[-3:].max() / df.open[-3:].min() > 1.9):
                 tdx_err_code = cct.GlobalValues().getkey('tdx_err_code')
                 if tdx_err_code is None:
                     tdx_err_code = [code]
@@ -738,7 +738,8 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                 # df['lv'] = df.vol[-tdx_max_int:max_int_end].min()
 
             dratio = (dl - len(df)) / float(dl)
-            if resample == 'd' and dratio < 0.2 and df.close[-3:].max() > df.open[-3:].min() * 1.6:
+
+            if resample == 'd' and dratio < 0.2 and df.close[-3:].max() / df.open[-3:].min() > 1.9:
 
                 tdx_err_code = cct.GlobalValues().getkey('tdx_err_code')
                 if tdx_err_code is None:
