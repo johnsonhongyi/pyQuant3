@@ -2853,7 +2853,7 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                         else:
                             # print("Got OK result: {}".format(result))
                             result.append(data)
-                    result = list(set(result))
+                    # result = list(set(result))
                     log.debug(f'result:{len(result)}')
                             
                 except Exception as e:
