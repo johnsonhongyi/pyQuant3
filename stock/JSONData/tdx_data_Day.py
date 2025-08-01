@@ -690,7 +690,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                     continue
                     # if dt is not None and tdate < dt:
                     #     break
-
             df = pd.DataFrame(dt_list, columns=ct.TDX_Day_columns)
             df = df[~df.date.duplicated()]
 
@@ -767,8 +766,10 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                 # write_tdx_sina_data_to_file(code, df=df)
 
 
-    df = get_tdx_macd(df)
-    df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
+    if 'macd' not in df.columns:
+        df = get_tdx_macd(df)
+    if 'perc9d' not in df.columns:
+        df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
 
     #hmax -10 days max
     # df['hmax'] = df.high[-tdx_max_int:-ct.tdx_max_int_end].max()
@@ -3938,7 +3939,7 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
     :return:Series or df
     '''
     # dt = cct.day8_to_day10(dt)
-    
+
     if dt is not None or dl is not None:
         # log.debug("dt:%s dl:%s"%(dt,dl))
         df = get_tdx_Exp_day_to_df(code, start=dt, dl=dl, end=end, newdays=newdays, resample=resample).sort_index(ascending=False)
@@ -4872,7 +4873,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             dl = dl + cct.get_today_duration(end, cct.get_today())
 #            print cct.get_today_duration(end,cct.get_today())
 
-        if len(codeList) > 400:
+        if len(codeList) > 200:
             
             results = cct.to_mp_run_async(
                 get_tdx_exp_low_or_high_power, codeList, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample)
@@ -5426,8 +5427,8 @@ if __name__ == '__main__':
 
     # df2 = get_tdx_Exp_day_to_df(code,dl=60, end='20230925', newdays=0, resample='d')
     code='920068'
-    code='600705'
-    df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'], end=None, newdays=0, resample='w')
+    # code='600705'
+    # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'], end=None, newdays=0, resample='w')
 
     # df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='3d')
 
@@ -5451,7 +5452,7 @@ if __name__ == '__main__':
     code='600744'
     code='600111'
     code='600392'
-    code='601138'
+    code='688189'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
@@ -5475,6 +5476,7 @@ if __name__ == '__main__':
     # df = get_tdx_append_now_df_api('001236')
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
+    import ipdb;ipdb.set_trace()
 
     print(f'topR-d:{df2.topR} red:{df2.red}')
 

@@ -2847,12 +2847,27 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     results = process_map(partialfunc, urllist, unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count,max_workers=pool_count)
 
                     result = []
-                    for data in results:
+                    # for data in results:
+                    #     if isinstance(data, Exception):
+                    #         print("Got exception: {}".format(data))
+                    #     else:
+                    #         # print("Got OK result: {}".format(result))
+                    #         if len(data) > 10:
+                    #             result.append(data)
+                    #         else:
+                    #             log.error(f'data is None,last code:{result[-1].code}')
+                    index_couts = len(results[0].index) if len(results[0]) > 10 else len(results[1].index)
+                    log.debug(f'index_couts:{index_couts}')
+                    for idx, data in enumerate(results):
                         if isinstance(data, Exception):
                             print("Got exception: {}".format(data))
                         else:
                             # print("Got OK result: {}".format(result))
-                            result.append(data)
+                            if len(data) > 10 and len(data.index) == index_couts:
+                                result.append(data)
+                            else:
+                                log.error(f'idx:{idx} is None,last code:{result[-1].code} resultCount:{len(result)}')
+
                     # result = list(set(result))
                     log.debug(f'result:{len(result)}')
                             
