@@ -391,16 +391,17 @@ def get_tdx_macd(df):
     df = df.fillna(0)
     df['macddif'] = round( df['macddif'], 2)
     df['macddea'] = round( df['macddea'], 2)
-    df['macd'] = round( df['macd']*2, 2)
     # data['diff'].values[np.isnan(data['diff'].values)] = 0.0
     # data['dea'].values[np.isnan(data['dea'].values)] = 0.0
     # data['macd'].values[np.isnan(data['macd'].values)] = 0.0
+    df['macd'] = df['macd'].apply(lambda x:round(x,2))
     df['macdlast1'] = df.iloc[-1]['macd']
     df['macdlast2'] = df.iloc[-2]['macd']
     df['macdlast3'] = df.iloc[-3]['macd']
     df['macdlast4'] = df.iloc[-4]['macd']
     df['macdlast5'] = df.iloc[-5]['macd']
-    df['macdlast6'] = df.iloc[-6]['macd']
+    df['macdlast6'] = df.iloc[-6]['macd']   
+    df['macd'] = df.iloc[-1]['macd']
 
     if df.index.name != 'date':
         df=df[-id_cout:].set_index('date')
@@ -3054,7 +3055,7 @@ def compute_power_tdx_df(tdx_df,dd):
         # dd['df2'] = dd.upperT[0]
         dd['ra'] = dd.upperT[0]
         dd['kdj'] = 1
-        dd['macd'] = 1
+        # dd['macd'] = 1
         dd['rsi'] = 1
         dd['ma'] = 1
         dd['oph'] = 1
@@ -3067,7 +3068,7 @@ def compute_power_tdx_df(tdx_df,dd):
         dd['ldate'] = -1
         dd['boll'] = -1
         dd['kdj'] = -1
-        dd['macd'] = -1
+        # dd['macd'] = -1
         dd['rsi'] = -1
         # dd['df2'] = -1
         dd['ma'] = -1
@@ -3312,10 +3313,12 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # red_cout = eval(f"df.query('close >={idx_close}  and ((high > high.shift(1) and low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > low*1.05) or (low >= open*0.992 and close >= open ))')")
     # print(f'count:{len(df)}')
     # print(idx_close)
+
     if resample == 'd':
-        red_cout = eval(f"df.query('close >={idx_close}  and high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
+        # red_cout = eval(f"df.query('close >={idx_close}  and high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
+        red_cout = eval(f"df.query('high > high.shift(1) or (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
     else:
-        red_cout = eval(f"df[-5:].query('high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
+        red_cout = eval(f"df.query('high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.03) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.03 ))')")
     log.debug('red_cout:%s idx_close:%s'%(red_cout,idx_close))
     # red_cout = eval(f"df.query('close >={idx_close}  and high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
     df2 = df[df.index >= idx_date]
@@ -5455,7 +5458,7 @@ if __name__ == '__main__':
     code='600111'
     code='600392'
     code='688189'
-    code='601028'
+    code='603256'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
@@ -5479,18 +5482,17 @@ if __name__ == '__main__':
     # df = get_tdx_append_now_df_api('001236')
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
-    import ipdb;ipdb.set_trace()
 
-    print(f'topR-d:{df2.topR} red:{df2.red}')
-
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
-    print(f'topR-m:{df2.topR} red:{df2.red}')
-
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
-    print(f'topR-W:{df2.topR} red:{df2.red}')
+    print(f'topR-d:{df2.topR} red:{df2.red} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )
-    print(f'topR-3d:{df2.topR} red:{df2.red}')
+    print(f'topR-3d:{df2.topR} red:{df2.red} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
+    print(f'topR-W:{df2.topR} red:{df2.red} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
+    print(f'topR-m:{df2.topR} red:{df2.red} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     print(f'topR:{df2.topR} red:{df2.red} df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
     print(f'ldate:{df2.ldate[:2]}')
