@@ -430,16 +430,23 @@ if __name__ == "__main__":
                     top_temp=top_all.copy() 
                     # top_temp = top_temp[ (~top_temp.index.str.contains('688')) & (~top_temp.name.str.contains('ST'))]
 
-                tm_code = top_all_m.query('lasth1d > lasth2d and red > 2 and macdlast1 > 0')
-                tw_code = top_all_w.query('lasth1d > lasth2d and red > 2 and macdlast1 > 0')
-                t3d_code = top_all_3d.query('lasth1d > lasth2d and red > 2 and macdlast1 > 0')
-                td_code = top_all_d.query('(macdlast1 > 0 and lasth1d > lasth2d and lasth1d > high4 and high > max5) or (high >= lasth1d > lasth2d > lasth3d and percent >3 and low < ma20d and close > ma20d) or (red >5)')
+                # tm_code = top_all_m.query('lasth1d > lasth2d and red > 2 and macdlast1 > 0')
+                # tw_code = top_all_w.query('lasth1d > lasth2d and red > 2 and macdlast1 > 0')
+                # t3d_code = top_all_3d.query('lasth1d > lasth2d and red > 2 and macdlast1 > 0')
+
+                t3d_code = top_all_3d.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')
+                tw_code = top_all_w.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')
+                tm_code = top_all_m.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')
+
+                # td_code = top_all_d.query('close > upper and ((macdlast1 > 0 and lasth1d > lasth2d and lasth1d > high4 and high > max5) or (high >= lasth1d > lasth2d > lasth3d and percent >3 and low < ma20d and close > ma20d) or (red >5))')
+                td_code = top_all_d.query('boll >=fibl > 1 and red > 3 and close > lastp2d and high > upper')
                 #clean 688 and st
                 # if len(top_temp) > 0:                
-                code_f =  list(set(tm_code.index) & set(tw_code.index) & set(t3d_code.index)  & set(td_code.index))
+                # code_f =  list(set(tm_code.index) & set(tw_code.index) & set(t3d_code.index)  & set(td_code.index))
+                code_f =  list(set(t3d_code.index) & set(tw_code.index)  & set(td_code.index))
                 #     top_temp = top_temp[ (~top_temp.index.str.contains('688')) ]
-
-                print(f'code_f:{len(code_f)},code_d:{len(td_code)}, code_3d:{len(t3d_code)}, code_w:{len(tw_code)}, code_w:{len(tm_code)}')
+                # len(t3d_code),len(tw_code),len(tm_code)
+                print(f'code_f:{len(code_f)},code_d:{len(td_code)}, code_3d:{len(t3d_code)}, code_w:{len(tw_code)}, code_m:{len(tm_code)}')
                     
                 if st_key_sort.split()[0] == 'x':
                     top_temp = top_temp[top_temp.topR != 0]
