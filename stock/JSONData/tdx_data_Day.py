@@ -3332,11 +3332,12 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # dd['upperT'] = dd.close[ (dd.upper > 0) & (dd.high > dd.upper)].count()
 
     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.high > df.upper)].count()
-    dfupper=df[-5:]
+    dfupper=df[-10:]
     
     upperT = dfupper.close[-10:][ (dfupper.upper > 0) & (dfupper.close > dfupper.upper)]
     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.close > df.upper)].apply(lambda x: round(x, 0)).median()
-    dd['upperT'] = len(upperT)
+    upperLIS, posLIS = LIS_TDX(upperT) if len(upperT) > 0 else ([],[])
+    dd['upperT'] = len(posLIS) 
     df = df[~df.index.duplicated()]
 
     # upperL = dd.close[ (dd.upper > 0) & (dd.close >= dd.upper)]
@@ -3345,7 +3346,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # upperL = df.close[ (df.high > df.upper) & (df.close > df.ma5d*0.99) ]
 
     # upperL = df.close[ ((df.high > df.upper) | (df.upper > df.upper.shift(1)) ) & (df.close >= df.ma5d*0.99) ]
-    
+
     upperL = dfupper.close[ (dfupper.high > dfupper.upper) & (dfupper.upper >0) ]
 
 
@@ -3553,8 +3554,8 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     dd['ral'] = ma20d_upper
     
-    cum_maxf, posf = LIS_TDX(dd.high[-5:])
-    dd['up5'] = len(posf)
+    # cum_maxf, posf = LIS_TDX(dd.high[-5:])
+    # dd['up5'] = len(posf)
 
     if resample == 'd':
         df['perd'] = df['perd'].apply(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
@@ -5458,7 +5459,7 @@ if __name__ == '__main__':
     code='600111'
     code='600392'
     code='688189'
-    code='603256'
+    code='300486'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
@@ -5483,16 +5484,16 @@ if __name__ == '__main__':
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
 
-    print(f'topR-d:{df2.topR} red:{df2.red} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-d:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )
-    print(f'topR-3d:{df2.topR} red:{df2.red} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-3d:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
-    print(f'topR-W:{df2.topR} red:{df2.red} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-W:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
-    print(f'topR-m:{df2.topR} red:{df2.red} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-m:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     print(f'topR:{df2.topR} red:{df2.red} df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
     print(f'ldate:{df2.ldate[:2]}')
