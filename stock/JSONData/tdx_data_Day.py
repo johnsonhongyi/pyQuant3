@@ -4639,7 +4639,9 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
             top_all[col] = top_all[col].astype(int)
     top_all['topR']=top_all['topR'].apply(lambda x:round(x,1))
     # top_all = top_all.fillna(0)         
-    # tdxdata = tdxdata.fillna(0)            
+    # tdxdata = tdxdata.fillna(0)
+    if  top_all.dff[0] == 0 or top_all.close[0] == top_all.lastp1d[0]:            
+        top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top_all['buy'].values, top_all['df2'].values)))
 
     for col in co2int:
         if col in tdxdata.columns:
