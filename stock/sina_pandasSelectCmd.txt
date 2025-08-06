@@ -697,3 +697,5 @@ top_all.query('boll >=fibl > 1 and red > 3 and close > lastp2d and high > upper'
 top_all.query('boll >=fibl > 1 and red > 2 and close > lastp2d and high > upper')[-50:]
 top_all.query('boll >=fibl > 1 and red > 2 and close > lastp2d and ma10d < low  < ma10d *1.02 ')
 top_all.query('boll >=fibl > 1 and red > 2 and close > lastp2d and high > upper')
+top_all.query('boll >=fibl-1 > 1 and red > 2 and close > lastp2d and high > upper')
+top_all.query('boll >=fibl-1 > 3 and red > 2 and close > lastp2d and high > upper')

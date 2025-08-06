@@ -5461,7 +5461,7 @@ if __name__ == '__main__':
     code='600111'
     code='600392'
     code='688189'
-    code='300486'
+    code='002536'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
@@ -5486,16 +5486,16 @@ if __name__ == '__main__':
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
 
-    print(f'topR-d:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-d:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl}  macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )
-    print(f'topR-3d:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-3d:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
-    print(f'topR-W:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-W:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
-    print(f'topR-m:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-m:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     print(f'topR:{df2.topR} red:{df2.red} df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
     print(f'ldate:{df2.ldate[:2]}')
