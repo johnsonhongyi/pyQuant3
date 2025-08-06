@@ -64,7 +64,7 @@ rem TIMEOUT /T 20 /NOBREAK
 
 rem start cmd /k python sina_Market-DurationUP.py
 start cmd /k sina_Market-DurationUP.exe
-TIMEOUT /T 20 /NOBREAK
+TIMEOUT /T 230 /NOBREAK
 
 rem start cmd /k python sina_Monitor-Market.py
 rem ping -n 20 localhost > nul
@@ -79,7 +79,7 @@ rem start cmd /k python sina_Monitor-Market-LH.py
 rem ping -n 20 localhost > nul 
 rem 20250212
 rem start cmd /k python sina_Market-DurationDn.py
-TIMEOUT /T 20 /NOBREAK
+rem TIMEOUT /T 20 /NOBREAK
 rem start cmd /k python LinePower.py
 start cmd /k  LinePower.exe
 TIMEOUT /T 5 /NOBREAK
