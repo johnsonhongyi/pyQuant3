@@ -47,11 +47,11 @@ rem ELSE (
 rem	goto A
 rem )
 rem if %indexdx% gtr 512000 ( LEQ GEQ 
-
+TIMEOUT /T 10 /NOBREAK
 
 rem start cmd /k python singleAnalyseUtil.py
 start cmd /k singleAnalyseUtil.exe
-TIMEOUT /T 20 /NOBREAK
+TIMEOUT /T 5 /NOBREAK
 
 
 
@@ -64,7 +64,16 @@ rem TIMEOUT /T 20 /NOBREAK
 
 rem start cmd /k python sina_Market-DurationUP.py
 start cmd /k sina_Market-DurationUP.exe
-TIMEOUT /T 230 /NOBREAK
+
+for %%i in ("%TDX%") do (
+set indexdx=%%~zi
+)
+
+if "%indexdx%"=="" (set indexdx=4096000)
+
+if not "%indexdx%"==""  if %indexdx% LEQ  10000000 (TIMEOUT /T 250 /NOBREAK)
+
+TIMEOUT /T 10 /NOBREAK
 
 rem start cmd /k python sina_Monitor-Market.py
 rem ping -n 20 localhost > nul
@@ -96,7 +105,14 @@ cd ../
 
 rem start cmd /k python sina_Market-DurationDnUP.py
 start cmd /k  sina_Market-DurationDnUP.exe
-TIMEOUT /T 200 /NOBREAK
+
+for %%i in ("%TDX%") do (
+set indexdx=%%~zi
+)
+
+if "%indexdx%"=="" (set indexdx=4096000)
+if not "%indexdx%"==""  if %indexdx% LEQ  15000000 (TIMEOUT /T 250 /NOBREAK)
+TIMEOUT /T 10 /NOBREAK
 rem C:
 rem cd "C:\Users\Johnson\Documents\TDX\55188\"
 rem start  "人气共振2.2.exe"
