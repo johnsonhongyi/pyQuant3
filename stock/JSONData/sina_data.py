@@ -249,6 +249,7 @@ class Sina:
         else:
             h5 = None
         log.info("h5a stocksTime:%0.2f" % (time.time() - time_s))
+
         if h5 is not None and len(h5) > 0:
             o_time = h5[h5.timel != 0].timel
             # o_time = o_time[0] if isinstance(o_time, pd.Series) else o_time
@@ -563,7 +564,7 @@ class Sina:
         # if not self.cname and cct.get_now_time_int() > 925:
         time_s= time.time()
         # if cct.get_now_time_int() > 925:
-        if not self.cname and cct.get_work_time() and cct.get_now_time_int() > 925:
+        if not self.cname and cct.get_work_time() and cct.get_now_time_int() > 925 or ('nclose' in h5.columns and len(h5.query('nclose != -2')) == 0):
             h5_fname = 'sina_MultiIndex_data'
             h5_table = 'all' + '_' + str(ct.sina_limit_time)
             fname = 'sina_logtime'
@@ -571,7 +572,6 @@ class Sina:
             # if logtime <> 0 and not cct.get_work_time():
             h5 = h5.fillna(0)
             if logtime != 0:
-
                 if 'lastbuy' not in h5.columns or len(h5[h5.lastbuy < 0]) > 0:
                     if  cct.GlobalValues().getkey('lastbuydf')  is None:
                         h5_a = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False)
@@ -582,6 +582,43 @@ class Sina:
                             # h5['lastbuy'] = (map(lambda x, y: y if int(x) == 0 else x,h5['lastbuy'].values, h5['llastp'].values))
                     else:
                         h5 = cct.combine_dataFrame(h5,cct.GlobalValues().getkey('lastbuydf'))
+                if 'nclose' in h5.columns and len(h5.query('nclose != -2')) == 0:
+                     h5_a = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False)
+                     if h5_a is not None and len(h5_a) > len(h5):
+                         if cct.get_work_time() and cct.get_now_time_int() <= 945:
+                             run_col = ['low', 'high', 'close']
+                             startime = '09:24:00'
+                             # endtime = '10:00:00'
+                             endtime = '09:45:00'
+                             h5 = self.get_col_agg_df(h5_a, h5, run_col, all_func, startime, endtime)
+                             startime = '09:24:00'
+                             # endtime = '10:00:00'
+                             endtime = '09:45:00'
+                             run_col = {'close': 'std'}
+                             h5 = self.get_col_agg_df(h5_a, h5, run_col, run_col, startime, endtime)
+                             h5.rename(columns={'std': 'nstd'}, inplace=True)
+                             if h5 is not None and len(h5) > 0 and  'nclose' in h5.columns and 'nstd' in h5.columns:
+                                 for co in ['nclose','nstd']:
+                                     h5[co] = h5[co].apply(lambda x: round(x, 2))
+
+                         else:
+                             run_col = ['low','high']
+                             startime = '09:24:00'
+                             # endtime = '10:00:00'
+                             endtime = '09:45:00'
+                             h5 = self.get_col_agg_df(h5_a, h5, run_col, all_func, startime, endtime)
+                             # run_col = ['high']
+                             # startime = '09:24:00'
+                             # endtime = '10:30:00'
+                             # dd = self.get_col_agg_df(h5, dd, run_col, all_func, startime, endtime)
+                             startime = '09:24:00'
+                             endtime = '15:01:00'
+                             run_col = ['close']
+                             # h5 = cct.get_limit_multiIndex_Group(h5, freq='15T', col=run_col,start=startime, end=endtime)
+                             # time_s=time.time()
+                             h5 = self.get_col_agg_df(h5_a, h5, run_col, all_func, startime, endtime)
+
+                     # h5 = cct.combine_dataFrame(h5,lastbuycol)
                 # else:
                 #     h5['lastbuy'] = (list(map(lambda x, y: y if int(x) == 0 else x,
                 #                              h5['lastbuy'].values, h5['close'].values)))
@@ -908,10 +945,10 @@ class Sina:
             log.info("hdf5 class all :%s  time:%0.2f" % (len(df), time.time() - time_s))
 
 
-        if ('nlow' not in df.columns or 'nhigh' not in df.columns) and  (cct.get_work_time() and 924 < cct.get_now_time_int() <= 1501):
+        # if ('nlow' not in df.columns or 'nhigh' not in df.columns) and  (cct.get_work_time() and 924 < cct.get_now_time_int() <= 1501):
+        if ('nlow' not in df.columns or 'nhigh' not in df.columns) and  ((cct.get_work_time() and 924 < cct.get_now_time_int() <= 1501)  or  cct.get_now_time_int() > 1500 ):
             # if 'nlow' not in df.columns or 'nhigh' not in df.columns or cct.get_work_time():
             h5 = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False)
-
             time_s = time.time()
             if cct.get_work_time() and cct.get_now_time_int() <= 945:
                 run_col = ['low', 'high', 'close']
@@ -962,7 +999,6 @@ class Sina:
 
             log.info("agg_df_all_time:%0.2f" % (time.time() - time_s))
             # top_temp[:1][['high','nhigh','low','nlow','close','nclose','llastp']]
-
 
 
         h5a.write_hdf_db(self.hdf_name, dd, self.table, index=index)
@@ -1031,7 +1067,6 @@ if __name__ == "__main__":
     df =sina.all
     print(len(df))
     print(f"df.loc['002786']: {df.loc['002786']}")
-    import ipdb;ipdb.set_trace()
 
     for ma in ['bj','sh', 'sz', 'cyb', 'kcb','all']:
         # for ma in ['sh']:
@@ -1059,13 +1094,15 @@ if __name__ == "__main__":
 
     # df = sina.get_stock_code_data('000001',index=True).set_index('code')
     # df= sina.get_stock_code_data('999999,399001',index=True)
-    sys.exit(0)
     code_agg = '601939'
     dd = sina.get_stock_code_data([code_agg,'600050','002350', '601899',\
       '603363','000868','603917','600392','300713','000933','002505','603676'])
     print((dd.T))
 
     print((dd.loc[:, ['name','open','low','high','close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape))
+
+    sys.exit(0)
+    
     # print dd.loc[code_agg].T
 
     # print df.columns
@@ -1121,10 +1158,13 @@ if __name__ == "__main__":
         return dd
     h5_fname = 'sina_MultiIndex_data'
     # h5_fname = 'sina_multi_index'
-    h5_table = 'all_10'
+    # h5_table = 'all_10'
+    h5_table = 'all' + '_' + str(ct.sina_limit_time)
     time_s = time.time()
+
     h5 = h5a.load_hdf_db(h5_fname, table=h5_table, code_l=None, timelimit=False, dratio_limit=0.12)
     print(('h5:', len(h5)))
+    
     if cct.get_work_time() and cct.get_now_time_int() <= 1000:
         run_col = ['low', 'high', 'close']
         startime = None
