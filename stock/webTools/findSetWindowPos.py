@@ -22,9 +22,9 @@ tdx_ths_position4K1536={'Edge': '64,123,910,886','Firefox': '343,79,1436,931','�
         'pywin32_mouse.py': '-25600,-25600,59,51'}
 
 # tdx_ths_position1536={'Edge': '27,72,910,798','Firefox': '343,79,1436,931','交易信号监控': '1335,180,566,389',\
-tdx_ths_position1536={'Edge': '-25600,-25600,159,27','交易信号监控': '1335,180,566,389','东兴证券': '51,205,1083,717',\
+tdx_ths_position1536={'Edge': '25,143,814,718','交易信号监控': '1335,180,566,389','东兴证券': '51,205,1083,717',\
         '行业跟随1': '29,220,677,404','人气综合排行榜2.2': '168,0,477,753','通达信金融终端': '191,41,1258,815',\
-        '东方财富': '-25600,-25600,800,600','同花顺': '-25600,-25600,645,400','sina_Market-DurationDn.exe': '-6,432,1326,423',\
+        '东方财富': '407,72,1113,790','同花顺': '62,92,1145,772','sina_Market-DurationDn.exe': '-6,432,1326,423',\
         'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationUp.exe': '-6,432,1323,438','sina_Monitor-Market-LH.exe': '264,306,1307,407',\
         'sina_Monitor.exe': '109,20,1319,520','singleAnalyseUtil.exe': '683,16,897,359','LinePower.exe': '9,216,761,407',\
         'instock_Monitor.exe': '32,86,1400,359','chantdxpower.exe': '86,128,649,407','ths-tdx-web.exe': '70,200,59,51',\
@@ -574,22 +574,23 @@ def FindWindowRectFromName(title)-> tuple:
     hwnd = 0
     for win in list_hwnd:
         if win.title.find(title) >= 0:
-            print("'%s': '%s,%s,%s,%s',"%(title,win.left,win.top,win.width,win.height),end='')
-            hwnd = win.pid
-            # break
-
-            #需要前置步骤showwindow
-            # hwnd = user32.GetForegroundWindow()
-            # user32.ShowWindow(hwnd, SW_MINIMIZE);
-            # import time 
-            # time.sleep(0.5)
-            # user32.ShowWindow(hwnd, SW_Normal);
-
-            left, top, width, height = GetWindowRectFromName(hwnd)
-            # print(hwnd)
-            # print(rect)
-            # return (left, top, width, height)
-            return (win.left,win.top,win.width,win.height)
+            if not (win.left < 0 and win.top) < 0:
+                print("'%s': '%s,%s,%s,%s',"%(title,win.left,win.top,win.width,win.height),end='')
+                hwnd = win.pid
+                # break
+                #需要前置步骤showwindow
+                # hwnd = user32.GetForegroundWindow()
+                # user32.ShowWindow(hwnd, SW_MINIMIZE);
+                # import time 
+                # time.sleep(0.5)
+                # user32.ShowWindow(hwnd, SW_Normal);
+                left, top, width, height = GetWindowRectFromName(hwnd)
+                # print(hwnd)
+                # print(rect)
+                # return (left, top, width, height)
+                return (win.left,win.top,win.width,win.height)
+            # else:
+            #     print('title:%s'%(win.title))
     return (0,0,0,0)
 
 def list_windows(all=False):
