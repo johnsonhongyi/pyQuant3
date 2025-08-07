@@ -709,3 +709,4 @@ top_temp.query('boll>0 and perc1d >=0 and perc2d >=0 and perc3d >= 0 and ma51d >
 top_temp.query('boll>0 and perc1d >=0 and perc2d >=0 and perc3d >= 0 and ma51d > ma201d  and perc1d >= perc2d and high > hmax and lasth2d < hmax')
 top_temp.query('boll>0 and perc1d >=0 and perc2d >=0 and perc3d >= 0 and ma51d > ma201d  and perc1d >= perc2d and high > hmax and lasth2d < hmax and lasth1d > upper')
 top_temp.query('boll>0 and perc1d >=0 and perc2d >=0 and perc3d >= 0 and ma51d > ma201d  and perc1d >= perc2d and high > hmax and lasth2d < hmax and lasth1d > upper and lasth3d < upper3')
+top_all.query('boll >=fibl > 1 and red > 2 and close > lastp2d and high > upper and lasth1d < upper1')
