@@ -5322,19 +5322,42 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                     doubleCmd=False
                     log.debug(f'cmd.split():{cmd}')
                     cmd_list = cmd.split()
+                    # if len(cmd_list) > 1:
+                    #     orderby_t = cmd_list[-1]
+                    #     # if orderby_t in list(dir(top_temp)):
+                    #     if orderby_t in top_temp.columns:
+                    #         orderby = orderby_t
+                    #         # doubleCmd = True
+                    #         cmd = cmd[:cmd.rfind(orderby_t)]
+                    #     elif re.findall(r'^[a-z\d]*', orderby_t)[0] == orderby_t:
+                    #         # doubleCmd = True
+                    #         cmd = cmd[:cmd.rfind(orderby_t)]
+
+                    category_search = False
+
                     if len(cmd_list) > 1:
                         orderby_t = cmd_list[-1]
-                        # if orderby_t in list(dir(top_temp)):
-                        if orderby_t in top_temp.columns:
-                            orderby = orderby_t
-                            # doubleCmd = True
-                            cmd = cmd[:cmd.rfind(orderby_t)]
-                        elif re.findall(r'^[a-z\d]*', orderby_t)[0] == orderby_t:
-                            # doubleCmd = True
-                            cmd = cmd[:cmd.rfind(orderby_t)]
-                            
-                    check_all = cmd.split('.')[-1]
-                    check_s = re.findall(r'^[a-zA-Z\d]*', check_all)[0]
+                        re_words = re.compile(u"[\u4e00-\u9fa5]+")
+                        if len(re.findall(re_words, orderby_t)) > 0:
+                            category_search = True
+                            search_key = f'category.str.contains("{cmd_list[-1]}")'
+                            cmd2 = cmd
+                            cmd = cmd[:cmd.rfind(orderby_t)].replace("')",f" and {search_key}')")
+                        else: 
+                            if orderby_t in top_temp.columns:
+                                orderby = orderby_t
+                                # doubleCmd = True
+                                cmd = cmd[:cmd.rfind(orderby_t)]
+                            elif re.findall(r'^[a-z\d]*', orderby_t)[0] == orderby_t:
+                                # doubleCmd = True
+                                cmd = cmd[:cmd.rfind(orderby_t)]
+
+                    if category_search:
+                        check_all = cmd.split('.')[-3]
+                        check_s = re.findall(r'^[a-zA-Z\d]*', check_all)[0]
+                    else:
+                        check_all = cmd.split('.')[-1]
+                        check_s = re.findall(r'^[a-zA-Z\d]*', check_all)[0]
 
                     # if (cmd.startswith('tempdf') or cmd.startswith('top_temp')) and  cmd.find('sort') < 0:
                     if (cmd.find('.loc') > 0 and cmd.find(':') > 0) or (cmd.find('.loc') < 0 and (cmd.startswith('tempdf') or cmd.startswith('top_temp') or cmd.startswith('top_all'))) and  check_s not in top_temp.columns:
