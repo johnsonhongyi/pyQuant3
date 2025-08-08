@@ -433,17 +433,25 @@ if __name__ == "__main__":
                 # tm_code = top_all_m.query('lasth1d > lasth2d and red > 2 and macdlast1 > 0')
                 # tw_code = top_all_w.query('lasth1d > lasth2d and red > 2 and macdlast1 > 0')
                 # t3d_code = top_all_3d.query('lasth1d > lasth2d and red > 2 and macdlast1 > 0')
-
-                t3d_code = top_all_3d.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')
-                tw_code = top_all_w.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')
-                tm_code = top_all_m.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')
-
+                query_rule = cct.GlobalValues().getkey('filter-rule')
+                if query_rule is None:
+                    t3d_code = top_all_3d.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')
+                    tw_code = top_all_w.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')
+                    tm_code = top_all_m.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')
+                    td_code = top_all_d.query('boll >=fibl > 1 and red > 3 and close > lastp2d and high > upper')
+                    code_f =  list(set(t3d_code.index) & set(tw_code.index)  & set(tm_code.index))
+                else:
+                    t3d_code = eval(f'top_all_3d.query{query_rule}')
+                    tw_code = eval(f'top_all_w.query{query_rule}')
+                    tm_code = eval(f'top_all_m.query{query_rule}')
+                    td_code = eval(f'top_all_d.query{query_rule}')
+                    code_f =  list(set(t3d_code.index) & set(tw_code.index)  & set(tm_code.index))
                 # td_code = top_all_d.query('close > upper and ((macdlast1 > 0 and lasth1d > lasth2d and lasth1d > high4 and high > max5) or (high >= lasth1d > lasth2d > lasth3d and percent >3 and low < ma20d and close > ma20d) or (red >5))')
-                td_code = top_all_d.query('boll >=fibl > 1 and red > 3 and close > lastp2d and high > upper')
+                    # td_code = top_all_d.query('boll >=fibl > 1 and red > 3 and close > lastp2d and high > upper')
                 #clean 688 and st
                 # if len(top_temp) > 0:                
                 # code_f =  list(set(tm_code.index) & set(tw_code.index) & set(t3d_code.index)  & set(td_code.index))
-                code_f =  list(set(t3d_code.index) & set(tw_code.index)  & set(td_code.index))
+                
                 #     top_temp = top_temp[ (~top_temp.index.str.contains('688')) ]
                 # len(t3d_code),len(tw_code),len(tm_code)
                 print(f'code_f:{len(code_f)},code_d:{len(td_code)}, code_3d:{len(t3d_code)}, code_w:{len(tw_code)}, code_m:{len(tm_code)}')
@@ -514,9 +522,9 @@ if __name__ == "__main__":
 
 
                 if len(code_f) > 10:
-                    code_select = list(set(top_temp.index.tolist()) & set(code_f))
+                    code_select = list(set(top_all.index.tolist()) & set(code_f))
                     if len(code_select) > 10:
-                        top_temp = top_temp.loc[code_select]
+                        top_temp = top_all.loc[code_select]
 
                 # '''
 
@@ -792,8 +800,14 @@ if __name__ == "__main__":
                     cct.evalcmd(dir_mo,workstatus=False,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=top_all,top_all_3d=top_all_3d,top_all_w=top_all_w,top_all_m=top_all_m)
                 else:
                     cct.evalcmd(dir_mo,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=top_all,top_all_3d=top_all_3d,top_all_w=top_all_w,top_all_m=top_all_m)
-
-
+            elif st.lower() == 'rr':
+                rule = cct.cct_raw_input("filter-rule:")
+                if rule.find('top_all') >= 0 or rule.find('top_temp') >= 0:
+                    rule_query = rule.replace('top_all.query','').replace('top_temp.query','')
+                    cct.GlobalValues().setkey('filter-rule',rule_query)
+                    print(f'set rule:{rule}')
+                else:
+                    print(f'rule not find top_all query or top_temp query')
             elif st.startswith('q') or st.startswith('e'):
                 print("exit:%s" % (st))
                 sys.exit(0)

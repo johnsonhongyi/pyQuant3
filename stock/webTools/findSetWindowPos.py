@@ -83,9 +83,9 @@ tdx_ths_position3072_old={'Edge': '27,72,910,798','交易信号监控': '1335,18
 #双屏显示全部
 tdx_ths_position3072={'Edge': '25,72,913,798','交易信号监控': '-541,-107,566,389','东兴证券': '51,205,1083,717',\
         '行业跟随1': '-677,68,677,404','人气综合排行榜2.2': '1059,0,477,753','通达信金融终端': '191,41,1258,815',\
-        '东方财富': '-1131,-195,1058,634','同花顺': '-1514,-160,995,598','sina_Market-DurationDn.exe': '-6,432,1326,423',\
+        '东方财富': '-1131,-195,1098,634','同花顺': '-1514,-160,995,598','sina_Market-DurationDn.exe': '-6,432,1326,423',\
         'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUp.exe': '-6,432,1323,438','sina_Market-DurationUp.exe': '243,432,1323,438',\
-        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '137,28,1319,520','singleAnalyseUtil.exe': '-889,-404,895,358',\
+        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '137,28,1319,520','singleAnalyseUtil.exe': '-889,-426,895,358',\
         'LinePower.exe': '-6,186,761,407','instock_Monitor.exe': '74,54,1319,439','chantdxpower.exe': '-1507,-426,649,273',\
         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-25600,-25602,59,51',}
 
@@ -574,7 +574,7 @@ def FindWindowRectFromName(title)-> tuple:
     hwnd = 0
     for win in list_hwnd:
         if win.title.find(title) >= 0:
-            if not (win.left < 0 and win.top) < 0:
+            if not (win.left < -10000 and win.top < -10000 ):
                 print("'%s': '%s,%s,%s,%s',"%(title,win.left,win.top,win.width,win.height),end='')
                 hwnd = win.pid
                 # break
