@@ -5335,14 +5335,14 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
 
                     category_search = False
 
-                    if len(cmd_list) > 1:
+                    if len(cmd_list) > 1 and cmd.find('category') < 0:
                         orderby_t = cmd_list[-1]
                         re_words = re.compile(u"[\u4e00-\u9fa5]+")
                         if len(re.findall(re_words, orderby_t)) > 0:
                             category_search = True
                             search_key = f'category.str.contains("{cmd_list[-1]}")'
-                            cmd2 = cmd
                             cmd = cmd[:cmd.rfind(orderby_t)].replace("')",f" and {search_key}')")
+                            print(f'cmd: {cmd}')
                         else: 
                             if orderby_t in top_temp.columns:
                                 orderby = orderby_t
