@@ -587,13 +587,13 @@ class Sina:
                      if h5_a is not None and len(h5_a) > len(h5):
                          if cct.get_work_time() and cct.get_now_time_int() <= 945:
                              run_col = ['low', 'high', 'close']
-                             startime = '09:24:00'
+                             startime = '09:25:00'
                              # endtime = '10:00:00'
-                             endtime = '09:45:00'
+                             endtime = '09:35:00'
                              h5 = self.get_col_agg_df(h5_a, h5, run_col, all_func, startime, endtime)
-                             startime = '09:24:00'
+                             startime = '09:25:00'
                              # endtime = '10:00:00'
-                             endtime = '09:45:00'
+                             endtime = '09:35:00'
                              run_col = {'close': 'std'}
                              h5 = self.get_col_agg_df(h5_a, h5, run_col, run_col, startime, endtime)
                              h5.rename(columns={'std': 'nstd'}, inplace=True)
@@ -603,15 +603,15 @@ class Sina:
 
                          else:
                              run_col = ['low','high']
-                             startime = '09:24:00'
+                             startime = '09:25:00'
                              # endtime = '10:00:00'
-                             endtime = '09:45:00'
+                             endtime = '09:35:00'
                              h5 = self.get_col_agg_df(h5_a, h5, run_col, all_func, startime, endtime)
                              # run_col = ['high']
-                             # startime = '09:24:00'
+                             # startime = '09:25:00'
                              # endtime = '10:30:00'
                              # dd = self.get_col_agg_df(h5, dd, run_col, all_func, startime, endtime)
-                             startime = '09:24:00'
+                             startime = '09:25:00'
                              endtime = '15:01:00'
                              run_col = ['close']
                              # h5 = cct.get_limit_multiIndex_Group(h5, freq='15T', col=run_col,start=startime, end=endtime)
@@ -952,13 +952,13 @@ class Sina:
             time_s = time.time()
             if cct.get_work_time() and cct.get_now_time_int() <= 945:
                 run_col = ['low', 'high', 'close']
-                startime = '09:24:00'
+                startime = '09:25:00'
                 # endtime = '10:00:00'
-                endtime = '09:45:00'
+                endtime = '09:35:00'
                 dd = self.get_col_agg_df(h5, dd, run_col, all_func, startime, endtime)
-                startime = '09:24:00'
+                startime = '09:25:00'
                 # endtime = '10:00:00'
-                endtime = '09:45:00'
+                endtime = '09:35:00'
                 run_col = {'close': 'std'}
                 dd = self.get_col_agg_df(h5, dd, run_col, run_col, startime, endtime)
                 dd.rename(columns={'std': 'nstd'}, inplace=True)
@@ -968,17 +968,17 @@ class Sina:
 
             else:
                 run_col = ['low','high']
-                startime = '09:24:00'
+                startime = '09:25:00'
                 # endtime = '10:00:00'
-                endtime = '09:45:00'
+                endtime = '09:35:00'
                 dd = self.get_col_agg_df(h5, dd, run_col, all_func, startime, endtime)
 
                 # run_col = ['high']
-                # startime = '09:24:00'
+                # startime = '09:25:00'
                 # endtime = '10:30:00'
                 # dd = self.get_col_agg_df(h5, dd, run_col, all_func, startime, endtime)
 
-                startime = '09:24:00'
+                startime = '09:25:00'
                 endtime = '15:01:00'
                 run_col = ['close']
                 # h5 = cct.get_limit_multiIndex_Group(h5, freq='15T', col=run_col,start=startime, end=endtime)
@@ -1169,13 +1169,13 @@ if __name__ == "__main__":
         run_col = ['low', 'high', 'close']
         startime = None
         # endtime = '10:00:00'
-        endtime = '09:45:00'
+        endtime = '09:35:00'
         dd = get_col_agg_df_Test(h5, dd, run_col, all_func, startime, endtime)
     else:
         run_col = ['low', 'high']
         startime = None
         # endtime = '10:00:00'
-        endtime = '09:45:00'
+        endtime = '09:35:00'
         dd = get_col_agg_df_Test(h5, dd, run_col, all_func, startime, endtime)
 
         startime = '09:30:00'

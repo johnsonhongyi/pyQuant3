@@ -833,3 +833,6 @@ top_all.query('boll > 3 and lastp1d > lastp2d and category.str.contains("飞机"
 top_all.query('boll >=fibl > 1 and red > 2 and close > lastp2d and high > upper and category.str.contains("专精特新")')
 top_all.query('boll >=fibl > 1 and red > 2 and close > lastp2d and high > upper ')
 top_all.query('boll >=fibl > 1 and red > 2 and close > lastp2d and high > upper  and category.str.contains("专精特新")')
+top_all.query('boll >=fibl > 1 and red > 2 and close > lastp2d and high > upper and lasth2d < upper2')
+top_all.query('boll >=fibl > 1 and red > 2 and close > lastp2d and high > upper and lasth2d < upper2 and per1d > 5')
+top_all.query('boll >=fibl > 1 and red > 2 and per1d > 5')
