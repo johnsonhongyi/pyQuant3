@@ -715,6 +715,8 @@ if __name__ == "__main__":
                 # import ipdb;ipdb.set_trace()
 
                 if st_key_sort in ['1']:
+                    if 'nlow' in top_all.columns and 'nclose' in top_all.columns:
+                        top_all = top_all.query('open >= nlow and close >=nclose')
                     if 945 < cct.get_now_time_int() < 1445:
                         top_all = top_all[ (~top_all.index.str.contains('^43|^83|^87|^92'))]   
                     if 'lastbuy' in top_all.columns:

@@ -462,8 +462,10 @@ if __name__ == "__main__":
 
 
                 if st_key_sort in ['1']:
+                    # if 'nlow' in top_all.columns and 'nclose' in top_all.columns:
+                    #     top_all = top_all.query('open >= nlow and close >=nclose')
                     # if 915 < cct.get_now_time_int() < 1445:
-                    #     top_all = top_all[ (~top_all.index.str.contains('^43|^83|^87|^92'))]   
+                    #     top_all = top_all[ (~top_all.index.str.contains('^43|^83|^87|^92'))]
                     if 'lastbuy' in top_all.columns:
                         top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
                                               top_all['buy'].values, top_all['lastbuy'].values)))

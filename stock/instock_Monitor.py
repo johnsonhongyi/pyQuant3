@@ -579,6 +579,8 @@ if __name__ == "__main__":
                 # top_temp = stf.filterPowerCount(top_temp,ct.PowerCount,down=True)
                 
                 if st_key_sort in ['1']:
+                    # if 'nlow' in top_all.columns and 'nclose' in top_all.columns:
+                    #     top_all = top_all.query('open >= nlow and close >=nclose')
                     if len(top_all) > 0 and top_all.lastp1d[0] == top_all.close[0]:
 
                         if 935 < cct.get_now_time_int() < 950:
