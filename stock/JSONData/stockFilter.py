@@ -381,10 +381,12 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
         if len(df) > 0 and df.lastp1d[0] == df.close[0]:
             filterlastday = 'lasth2d'
             filterma51d = 'ma52d'
-        if 'nlow' in df.columns:
-            df = df.query(f'(low >=nlow and low > {filterma51d}) or low >= {filterlastday}')
-        else:
-            df = df.query(f'(open == low and low > {filterma51d}) or low >= {filterlastday}')
+
+        #edit 250810
+        # if 'nlow' in df.columns:
+        #     df = df.query(f'(low >=nlow and low > {filterma51d}) or low >= {filterlastday}')
+        # else:
+        #     df = df.query(f'(open == low and low > {filterma51d}) or low >= {filterlastday}')
 
     # df['topR']=list(map(lambda x, y,z: round( x + 1 if x > 1 and y > 0 else x , 1), df.topR, df.percent))
 
