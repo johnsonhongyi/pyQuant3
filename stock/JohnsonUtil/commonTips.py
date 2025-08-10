@@ -632,7 +632,7 @@ function d(t) {
 #             return False
 #     else:
 #         return trade_status
-def read_ini(inifile='filter.ini'):
+def read_ini(inifile='filter.ini',setrule=None):
     from configobj import ConfigObj
     baser = getcwd().split('stock')[0]
     base = baser + 'stock' + path_sep
@@ -679,12 +679,14 @@ def read_ini(inifile='filter.ini'):
         # print(f"Database Host: {db_host}")
         # print(f"Enabled Modules: {enabled_modules}")
         # print(f"Debug Mode: {debug_mode}")
-
-        # --- Updating a config file ---
-        # read_config['General']['version'] = '1.0.1'
-        # read_config['Database']['password'] = 'new_secure_pass'
-        # read_config.write()
-        # print(f"\nConfig file '{config_file_path}' updated successfully.")
+        if setrule is not None:
+            read_config['General']['filter_rule'] = setrule
+            read_config['General'][f'filter_rule{get_today("")}'] = rule
+            # --- Updating a config file ---
+            # read_config['General']['version'] = '1.0.1'
+            # read_config['Database']['password'] = 'new_secure_pass'
+            read_config.write()
+            print(f"Config file '{config_file_path}' updated successfully.")
     if rule.find('top_all') >= 0 or rule.find('top_temp') >= 0:
         rule = rule.replace('top_all.query','').replace('top_temp.query','')
     return rule
@@ -6029,6 +6031,7 @@ if __name__ == '__main__':
     # rzrq['all']='nan'
     # print(get_last_trade_date('2025-06-01'))
     # import ipdb;ipdb.set_trace()
+    print(get_today(''))
     get_lastdays_trade_date(1)
     print(f'get_work_day_idx:{get_work_day_idx()}')
     print(get_tdx_dir_blocknew_dxzq(r'D:\MacTools\WinTools\new_tdx2\T0002\blocknew\090.blk'))
