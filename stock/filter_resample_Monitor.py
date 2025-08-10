@@ -117,7 +117,7 @@ if __name__ == "__main__":
 
 
     # st_key_sort = '4'
-    st_key_sort = '1'
+    st_key_sort = '4'
     # st_key_sort = '3 2'
     # st_key_sort = 'x 1.1'
     # st_key_sort = 'x2'
@@ -574,11 +574,10 @@ if __name__ == "__main__":
                 # top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=False)
                 # top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=False, ma5d=False, dl=14, percent=False, resample='d')
                 # top_temp = stf.getBollFilter(df=top_temp, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=True, ma5d=True, dl=14, percent=False, resample=resample)
-                
                 top_temp=stf.getBollFilter(
-                    df=top_temp, resample=resample, down=True)
+                    df=top_temp, resample=resample, down=False)
                 top_end=stf.getBollFilter(
-                    df=top_end, resample=resample, down=True)
+                    df=top_end, resample=resample, down=False)
 
                 nhigh = top_temp[top_temp.close > top_temp.nhigh] if 'nhigh'  in top_temp.columns else []
                 nlow = top_temp[top_temp.close > top_temp.nlow] if 'nhigh'  in top_temp.columns else []
