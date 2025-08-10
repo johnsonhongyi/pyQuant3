@@ -632,6 +632,62 @@ function d(t) {
 #             return False
 #     else:
 #         return trade_status
+def read_ini(inifile='filter.ini'):
+    from configobj import ConfigObj
+    baser = getcwd().split('stock')[0]
+    base = baser + 'stock' + path_sep
+    config_file_path = base + inifile
+    if not os.path.exists(config_file_path):
+        # Define the path for the config file
+        # --- Writing a config file ---
+        config = ConfigObj()
+        config.filename = config_file_path
+
+        # Add sections and options
+        config['General'] = {}
+        rule = "top_all.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')"
+        config['General']['filter_rule'] = rule
+        # config['General']['version'] = '1.0.0'
+
+        # config['Database'] = {}
+        # config['Database']['host'] = 'localhost'
+        # config['Database']['port'] = '5432'
+        # config['Database']['username'] = 'admin'
+        # config['Database']['password'] = 'secure_pass'
+
+        # # Add a section with list values and a root-level option
+        # config['Features'] = {}
+        # config['Features']['enabled_modules'] = ['logging', 'analytics', 'reporting']
+        # config['debug_mode'] = 'True' # Root-level option
+
+        # Write the config object to the file
+        config.write()
+        print(f"Config file '{config_file_path}' created successfully.")
+
+    else:
+        # --- Reading a config file ---
+        read_config = ConfigObj(config_file_path)
+        # Access values like a dictionary
+        rule = read_config['General']['filter_rule']
+
+        # db_host = read_config['Database']['host']
+        # enabled_modules = read_config['Features']['enabled_modules']
+        # debug_mode = read_config['debug_mode']
+
+        # print(f"\nRead from config file:")
+        # print(f"Application Name: {app_name}")
+        # print(f"Database Host: {db_host}")
+        # print(f"Enabled Modules: {enabled_modules}")
+        # print(f"Debug Mode: {debug_mode}")
+
+        # --- Updating a config file ---
+        # read_config['General']['version'] = '1.0.1'
+        # read_config['Database']['password'] = 'new_secure_pass'
+        # read_config.write()
+        # print(f"\nConfig file '{config_file_path}' updated successfully.")
+    if rule.find('top_all') >= 0 or rule.find('top_temp') >= 0:
+        rule = rule.replace('top_all.query','').replace('top_temp.query','')
+    return rule
 
 def is_trade_date(date=datetime.date.today()):
     trade_status = None
