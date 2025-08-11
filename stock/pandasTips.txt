@@ -1,5 +1,8 @@
 
 pandas:tips
+
+top_temp.loc[:,top_temp.columns.str.contains( "per\d{1,2}d$",regex= True)]
+
 columns.str.contains( "per\d{1,2}d$",regex= True)
 top_all.filter(regex="per\d{1,2}d$")
 top_all.filter(regex='^per|^perc')
@@ -9,9 +12,18 @@ print(df.loc[:,df.columns[df.columns.str.contains('per[0-9]{1}d', regex=True, ca
 提取全部Per%d 求和排序
 top_all.loc[top_all.filter(regex="per\d{1,2}d$").sum(axis=1).sort_values(ascending=False).index]
 提取全部Per%d 求和排序近三天
+top_all.loc[top_all.filter(regex="per[1-3]d$")]
 top_all.loc[top_all.filter(regex="per[1-3]d$").sum(axis=1).sort_values(ascending=False).index][:10]
 
 top_all.filter(regex="per\d{1,2}d$").max(axis=1) .argsort()[::-1]
+
+
+top_all.query('lasth1d > upper and lasth2d > upper and lasth3d > upper')
+top_all.query('(per1d > 9.8 or per2d > 9.8 or per3d > 9.8) and close > upper')
+
+top_all.query('per1d > per2d > per3d and high > upper and (lastp1d < upper or lastp2d < upper2 or lastp3d < upper3)')
+
+top_all.query('per1d > per2d > per3d and high > upper and (lastp1d < upper or lastp2d < upper2 or lastp3d < upper3) and lasth1d > lasth2d ')
 
 复盘逻辑:
 

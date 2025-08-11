@@ -501,7 +501,7 @@ if __name__ == "__main__":
                     top_dd = top_dd.loc[:, ct_Duration_format_Values]
                     # ct_Duration_format_Values = ct.get_Duration_format_Values(ct_Duration_format_Values,replace='op',dest='upper')
                     # top_dd[col for col in top_dd.index if col in top_temp[:10].index]
-                    table,widths = cct.format_for_print(top_dd.loc[[col for col in top_dd[:9].index if col in top_temp[:10].index]],widths=True)
+                    table,widths = cct.format_for_print(top_dd.loc[[col for col in top_dd[:10].index if col in top_temp[:10].index]],widths=True)
                     print(table)
                     # cct.counterCategory(top_temp)
                     print(cct.format_for_print(top_dd[-4:],header=False,widths=widths))

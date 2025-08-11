@@ -393,7 +393,7 @@ if __name__ == "__main__":
                     top_dd = top_dd.loc[:, ct_Duration_format_Values]
                     # print cct.format_for_print(top_dd)
                     # table,widths = cct.format_for_print(top_dd[:9],widths=True)
-                    table,widths = cct.format_for_print(top_dd.loc[[col for col in top_dd[:9].index if col in top_temp[:10].index]],widths=True)
+                    table,widths = cct.format_for_print(top_dd.loc[[col for col in top_dd[:10].index if col in top_temp[:10].index]],widths=True)
                     
                     print(table)
                     cct.counterCategory(top_temp)

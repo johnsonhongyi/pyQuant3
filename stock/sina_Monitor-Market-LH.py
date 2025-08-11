@@ -518,7 +518,7 @@ if __name__ == "__main__":
                     # print cct.format_for_print(topdd)
                     # table,widths = cct.format_for_print(top_dd[:9],widths=True)
                     table, widths = cct.format_for_print(
-                        top_dd.loc[[col for col in top_dd[:9].index if col in top_temp[:10].index]], widths=True)
+                        top_dd.loc[[col for col in top_dd[:10].index if col in top_temp[:10].index]], widths=True)
 
                     print(table)
                     cct.counterCategory(top_temp)
