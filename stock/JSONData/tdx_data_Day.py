@@ -2527,7 +2527,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     elif market in ['all','bj']:
         df = sina_data.Sina().all
         if market in ['bj']:
-            co_inx = [inx for inx in df.index if str(inx).startswith(('43','83','87','92'))]
+            co_inx = [inx for inx in df.index if str(inx).startswith(('43','83','87','92','688'))]
             df = df.loc[co_inx]
         else:
             market_all = True

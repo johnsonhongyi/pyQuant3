@@ -71,7 +71,7 @@ set indexdx=%%~zi
 
 if "%indexdx%"=="" (set indexdx=4096000)
 
-if not "%indexdx%"==""  if %indexdx% LEQ  10000000 (TIMEOUT /T 250 /NOBREAK)
+if not "%indexdx%"==""  if %indexdx% LEQ  10000000 (TIMEOUT /T 200 /NOBREAK)
 
 TIMEOUT /T 10 /NOBREAK
 
@@ -84,6 +84,7 @@ rem start cmd /k python sina_Market-DurationUp.py
 rem ping -n 20 localhost > nul 
 
 
+
 rem start cmd /k python sina_Monitor-Market-LH.py
 rem ping -n 20 localhost > nul 
 rem 20250212
@@ -91,7 +92,7 @@ rem start cmd /k python sina_Market-DurationDn.py
 rem TIMEOUT /T 20 /NOBREAK
 rem start cmd /k python LinePower.py
 start cmd /k  LinePower.exe
-TIMEOUT /T 5 /NOBREAK
+TIMEOUT /T 10 /NOBREAK
 cd dataBarFeed\
 rem start cmd /k python chantdxpower.py
 start cmd /k  chantdxpower.exe
@@ -104,6 +105,7 @@ start cmd /k python ths-tdx-web.py
 cd ../
 
 rem start cmd /k python sina_Market-DurationDnUP.py
+
 start cmd /k  sina_Market-DurationDnUP.exe
 
 for %%i in ("%TDX%") do (
@@ -111,14 +113,26 @@ set indexdx=%%~zi
 )
 
 if "%indexdx%"=="" (set indexdx=4096000)
-if not "%indexdx%"==""  if %indexdx% LEQ  15000000 (TIMEOUT /T 250 /NOBREAK)
+if not "%indexdx%"==""  if %indexdx% LEQ  20000000 (TIMEOUT /T 250 /NOBREAK)
 TIMEOUT /T 10 /NOBREAK
+
+
+start cmd /k  filter_resample_Monitor.exe
+
+for %%i in ("%TDX%") do (
+set indexdx=%%~zi
+)
+if "%indexdx%"=="" (set indexdx=4096000)
+if not "%indexdx%"==""  if %indexdx% LEQ  28000000 (TIMEOUT /T 100 /NOBREAK)
+TIMEOUT /T 5 /NOBREAK
+
 rem C:
 rem cd "C:\Users\Johnson\Documents\TDX\55188\"
 rem start  "人气共振2.2.exe"
 rem pause
 rem start python LineHistogram.py
-TIMEOUT /T 100 /NOBREAK
-python macRun.py
+TIMEOUT /T 20 /NOBREAK
+cd webTools/
+python findSetWindowPos.py
 
 exit

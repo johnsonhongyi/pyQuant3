@@ -119,7 +119,7 @@ if __name__ == "__main__":
 
 
     # st_key_sort = '4'
-    st_key_sort = '1'
+    st_key_sort = '7'
     # st_key_sort = '3 2'
     # st_key_sort = 'x 1.1'
     # st_key_sort = 'x2'
@@ -698,7 +698,7 @@ if __name__ == "__main__":
 
                 # table,widths = cct.format_for_print(top_dd[:10],widths=True)
                 table, widths=cct.format_for_print(
-                    top_dd.loc[[col for col in top_dd[:9].index if col in top_temp[:10].index]], widths=True)
+                    top_dd.loc[[col for col in top_dd[:10].index if col in top_temp[:10].index]], widths=True)
 
                 print(table)
                 cct.counterCategory(top_temp)

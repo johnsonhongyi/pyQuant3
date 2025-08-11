@@ -455,6 +455,9 @@ if __name__ == "__main__":
                 tm_code = eval(f'top_all_m.query{query_rule}')
                 td_code = eval(f'top_all_d.query{query_rule}')
                 code_f =  list(set(t3d_code.index) & set(tw_code.index)  & set(tm_code.index))
+                if 'nlow' in top_all.columns and 'nclose' in top_all.columns:
+                    top_all = top_all.query('open >= nlow and close >=nclose')
+                # code_f =  list(set(t3d_code.index) & set(t3d_code.index) & set(tw_code.index)  & set(tm_code.index))
                 # td_code = top_all_d.query('close > upper and ((macdlast1 > 0 and lasth1d > lasth2d and lasth1d > high4 and high > max5) or (high >= lasth1d > lasth2d > lasth3d and percent >3 and low < ma20d and close > ma20d) or (red >5))')
                     # td_code = top_all_d.query('boll >=fibl > 1 and red > 3 and close > lastp2d and high > upper')
                 #clean 688 and st
@@ -649,7 +652,7 @@ if __name__ == "__main__":
 
                 # table,widths = cct.format_for_print(top_dd[:10],widths=True)
                 table, widths=cct.format_for_print(
-                    top_dd.loc[[col for col in top_dd[:9].index if col in top_temp[:10].index]], widths=True)
+                    top_dd.loc[[col for col in top_dd[:10].index if col in top_temp[:10].index]], widths=True)
 
                 print(table)
                 cct.counterCategory(top_temp)

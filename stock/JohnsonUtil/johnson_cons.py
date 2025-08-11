@@ -65,6 +65,7 @@ top_all.query('top10 > 0 and lasth3d > lasth2d > lasth1d and lastl3d >  lastl2d 
 ex:top_all.query(' 10 < bandwidth  < 20 and high > hmax and percmax > 5 and topR >0')
 percmax: 10 days ct.compute_lastdays+1
 turnover : 成交额
+pandasTips.txt
 top_temp.loc[:,top_temp.columns.str.contains( "per\d{1,2}d$",regex= True)]
 topU : 长周期站上upper
 eneU : 中规上方数量
