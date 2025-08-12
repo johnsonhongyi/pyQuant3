@@ -14,11 +14,11 @@ cd D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock
 echo "sina_Monitor.py"
 python -m nuitka --show-memory --show-progress --follow-import-to=JohnsonUtil,JSONData --remove-output --lto=yes sina_Monitor.py
 sleep 2
-echo "sina_Market-DurationUp.py"
-python -m nuitka --show-memory --show-progress --follow-import-to=JohnsonUtil,JSONData --remove-output --lto=yes sina_Market-DurationUp.py
+echo "sina_Market-DurationUP.py"
+python -m nuitka --show-memory --show-progress --follow-import-to=JohnsonUtil,JSONData --remove-output --lto=yes sina_Market-DurationUP.py
 sleep 2
-echo "sina_Market-DurationDnUp.py"
-python -m nuitka --show-memory --show-progress --follow-import-to=JohnsonUtil,JSONData --remove-output --lto=yes sina_Market-DurationDnUp.py
+echo "sina_Market-DurationDnUP.py"
+python -m nuitka --show-memory --show-progress --follow-import-to=JohnsonUtil,JSONData --remove-output --lto=yes sina_Market-DurationDnUP.py
 sleep 2
 echo "LinePower.py"
 python -m nuitka --show-memory --show-progress --follow-import-to=JohnsonUtil,JSONData --remove-output --lto=yes LinePower.py

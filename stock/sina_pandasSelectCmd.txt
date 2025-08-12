@@ -939,3 +939,5 @@ top_all.query('per1d > per2d > per3d and high > upper and (lastp1d < upper or la
 top_all.query('per1d > per2d >per3d')
 top_all.query('per1d > 5')
 top_all.query('percent > 5')
+top_all.query('lastdu4 < 10')
+top_all.query('lastdu4 < 10 and percent > lastdu4')

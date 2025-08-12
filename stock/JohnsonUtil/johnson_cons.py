@@ -357,7 +357,7 @@ Duration_percent_vol_key = [0,0, 0 , 0, 0, 1, 0,  1]
 # Duration_percent_per_ra=['percent','ra','dff','op','fib','fibl','ratio','volume','couts']
 # Duration_percent_per_ra_key=[0,0,0,0,1,1,1,1,1]
 
-Duration_percent_df2dff = ['fibl','red','per3d', 'dff', 'percent',
+Duration_percent_df2dff = ['lastdu4','red','per3d', 'dff', 'percent',
                            'topR',  'ra', 'volume', 'couts']
                            # 'op', 'fib', 'fibl', 'ra', 'ratio', 'volume', 'couts']
 Duration_percent_df2dff_key = [0, 0, 0, 0, 0, 1,  0,  1, 1]
@@ -439,20 +439,20 @@ MonitorMarket_sort_op_key = [0, 0, 1, 0, 0, 0, 1, 1]
 # MonitorMarket_format_buy=['name', 'buy', 'ma5d', 'boll','dff','df2','couts','percent', 'ra','op', 'ratio','ma','volume','date','category']
 
 Duration_format_buy = ['name', 'buy', 'boll', 'dff', 'df2', 'percent', 'per1d', 'perc3d',
-                       'ra', 'topR', 'red', 'couts',  'volume', 'fibl', 'category']
+                       'ra', 'topR', 'red', 'couts',  'volume', 'lastdu4', 'category']
                        # 'ra', 'op', 'ratio', 'couts',  'volume', 'fib','fibl', 'category']
 Duration_format_trade = ['name', 'trade', 'boll', 'dff', 'df2',
-                         'percent', 'per1d',  'perc3d',  'ra', 'ral', 'topR', 'couts', 'volume', 'red','fibl', 'category']
+                         'percent', 'per1d',  'perc3d',  'ra', 'ral', 'topR', 'couts', 'volume', 'red','lastdu4', 'category']
                          # 'percent', 'per1d',  'perc3d',  'ra', 'topR', 'ratio', 'couts', 'volume', 'fib','fibl', 'category']
                          # 'percent', 'per1d',  'perc3d',  'ra', 'op', 'ratio', 'couts', 'volume', 'fib','fibl', 'category']
 
 
 Monitor_format_trade = ['name', 'trade', 'boll', 'dff', 'df2', 'couts',
-                        'percent', 'per1d', 'perc3d', 'ra', 'ral', 'topR',  'volume', 'red','fibl', 'category']
+                        'percent', 'per1d', 'perc3d', 'ra', 'ral', 'topR',  'volume', 'red','lastdu4', 'category']
                         # 'percent', 'per1d', 'perc3d', 'ra', 'topR', 'ratio',  'volume', 'fib','fibl', 'category']
                         # mod ratio ->ral
 MonitorMarket_format_buy = ['name', 'buy', 'boll', 'dff', 'df2',
-                            'couts', 'percent', 'per1d', 'perc3d', 'ra', 'ral', 'topR',  'volume', 'red','fibl', 'category']
+                            'couts', 'percent', 'per1d', 'perc3d', 'ra', 'ral', 'topR',  'volume', 'red','lastdu4', 'category']
                             # 'couts', 'percent', 'per1d', 'perc3d', 'ra', 'topR', 'ratio',  'volume', 'fib','fibl', 'category']
                             # 'couts', 'percent', 'per1d', 'perc3d', 'ra', 'op', 'ratio',  'volume', 'fib','fibl', 'category']
 
@@ -849,7 +849,7 @@ INDEX_SYMBOL = {"399990": "sz399990", "000006": "sh000006", "399998": "sz399998"
 def RawMenuArgmain():
     raw = 'status:[go(g),clear(c),[d 20150101(dt 14)[l|h]|[y|n|pn|py],quit(q),W(a),sh]:'
     raw_input_menu = raw + "\n\tNow : %s" + \
-        "\n\t1:Sort By Percent\t2:Sort by per1d\t3:Sort By percd\t\t4:Sort By DFF\n\t5:Sort By Ra_dff\t6:Sort By  fibl\t7:Sort Vol per\t\t8:Sort by Count" + \
+        "\n\t1:Sort By Percent\t2:Sort by per1d\t3:Sort By percd\t\t4:Sort By DFF\n\t5:Sort By Ra_dff\t6:Sort By  lastdu\t7:Sort Vol per\t\t8:Sort by Count" + \
         "\n\t9:By red\t\tx: by_topR\tx1:by boll_perd\t\tx2:by ral\nplease input:"
     return raw_input_menu
 

@@ -809,6 +809,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
 
     
     # df['lastdu4'] = round(max(df.high4[-1],df.max5[-1],df.hmax[-1],df.upper[-1])/(df['low4'][-1]),2)
+
     if len(df) > 10:
         # df['lastdu4'] = round((df.high4[-1])/(df['low4'][-1]),2)
         # df['lmin'] = df.low[-tdx_max_int:max_int_end].min()
@@ -840,7 +841,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             # df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
             # df['high4'] = df.high[-5:-1].max()
             df['low4'] = df.low[-5:-1].min()
-            df['lastdu4'] = df['high4'][0] /(df['low4'][0]+0.1)
+            df['lastdu4'] = (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
 
 
 
@@ -860,7 +861,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             # df['high4'] = df.high[-5:-1].max()
             df['low4'] = df.low[-5:-1].min()
             # print(df.high4[0],(df['low4'][0]))
-            df['lastdu4'] = df['high4'][0] /(df['low4'][0]+0.1)
+            df['lastdu4'] = (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
 
     if 'date' in df.columns:
         df = df.set_index('date')
@@ -3282,7 +3283,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     df['high4'] = df.close[-5:-1].max()
     df['low4'] = df.low[-5:-1].min()
     # df['lastdu4'] = (df['high4'][0] -df['low4'][0]) /df['low4'][0]
-    df['lastdu4'] = df['high4'][0] /df['low4'][0]
+    df['lastdu4'] = (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
 
     df['lastupper'] = len(df[(df.close > df.upper) & (df.upper > 0)])
     
@@ -5461,7 +5462,7 @@ if __name__ == '__main__':
     code='600111'
     code='600392'
     code='688189'
-    code='002536'
+    code='300304'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
@@ -5486,16 +5487,16 @@ if __name__ == '__main__':
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
 
-    print(f'topR-d:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl}  macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-d:{df2.topR} red:{df2.red} lastdu:{df2.lastdu} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl}  macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )
-    print(f'topR-3d:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-3d:{df2.topR} red:{df2.red} lastdu:{df2.lastdu} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
-    print(f'topR-W:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-W:{df2.topR} red:{df2.red} lastdu:{df2.lastdu} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
-    print(f'topR-m:{df2.topR} red:{df2.red} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-m:{df2.topR} red:{df2.red} lastdu:{df2.lastdu} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     print(f'topR:{df2.topR} red:{df2.red} df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
     print(f'ldate:{df2.ldate[:2]}')
