@@ -314,7 +314,7 @@ def getPosition(cmd=None, position=None,close=False):
     # cmd = cmd.replace('.py','')
     # cmd = cmd.replace('.py','.bin')
     count = doScript(scriptcount)
-    if int(count) > 0:
+    if len(count) > 0 and int(count) > 0:
         for n in range(1, int(count)+1):
             title = doScript(scriptname % ('get', str(object=n)))
             # if close:
@@ -367,7 +367,7 @@ def setPosition(cmd=None, position=None):
         cmd = cmd.replace('.py','.bin')
     count = doScript(scriptcount)
     # print count
-    if int(count) > 3:
+    if len(count) > 0 and int(count) > 3:
         doScript(scriptquit)
         for n in range(1, int(count)+1):
             # log.debug("n:%s"%(n))
@@ -423,7 +423,7 @@ if cct.isMac():
     count = doScript(scriptcount)
     # print count
     # count = 2
-    if int(count) > 2:
+    if len(count) > 0 and int(count) > 2:
         # print getPosition('Johnson@bogon',close=True)
         # print getPosition('cd \'/Users/Johnson/Documents/Quant/pyQuant/stock/\'')
         # print getPosition('cd \'/Users/Johnson/Documents')

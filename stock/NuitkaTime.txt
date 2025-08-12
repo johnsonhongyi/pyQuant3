@@ -30,3 +30,4 @@ time cost: 16 min 30 s cost:seconds 990.997 s
 time cost: 18 min 5 s cost:seconds 1085.983 s 
 time cost: 16 min 27 s cost:seconds 987.998 s 
 time cost: 17 min 38 s cost:seconds 1058.008 s 
+Total run 2492 seconds min: 41 min
