@@ -2,12 +2,93 @@
 <nuitka-compilation-report nuitka_version="2.7.11" nuitka_commercial_version="not installed" mode="accelerated" completion="error exit message (1)" exit_message="Failed unexpectedly in Scons C backend compilation.">
   <module name="JSONData" kind="CompiledPythonPackage" usage="import" reason="Module is exact match of 'JSONData' instructed by user to follow to." source_path="${cwd}\JSONData\__init__.py">
     <optimization-time pass="1" time="0.01" micro_passes="3" />
-    <optimization-time pass="2" time="0.01" micro_passes="1" />
+    <optimization-time pass="2" time="0.00" micro_passes="1" />
     <module_usages />
   </module>
+  <module name="JSONData.fundflowUtil" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JSONData' instructed by user to follow to." source_path="${cwd}\JSONData\fundflowUtil.py">
+    <optimization-time pass="1" time="1.31" micro_passes="6" max_branch_merge="294" merged_total="9702" />
+    <optimization-time pass="2" time="0.20" micro_passes="1" max_branch_merge="294" merged_total="1594" />
+    <module_usages>
+      <module_usage name="re" finding="excluded" line="3" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="sys" finding="absolute" line="4" />
+      <module_usage name="time" finding="absolute" line="5" />
+      <module_usage name="JohnsonUtil.commonTips" finding="absolute" line="7" />
+      <module_usage name="JohnsonUtil.johnson_cons" finding="absolute" line="8" />
+      <module_usage name="JohnsonUtil.LoggerFactory" finding="absolute" line="9" />
+      <module_usage name="JSONData.tdx_data_Day" finding="absolute" line="10" />
+      <module_usage name="JSONData.sina_data" finding="absolute" line="11" />
+      <module_usage name="traceback" finding="excluded" line="936" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+    </module_usages>
+  </module>
+  <module name="JSONData.get_macd_kdj_rsi" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JSONData' instructed by user to follow to." source_path="${cwd}\JSONData\get_macd_kdj_rsi.py">
+    <optimization-time pass="1" time="1.82" micro_passes="7" max_branch_merge="185" merged_total="14213" />
+    <optimization-time pass="2" time="0.28" micro_passes="1" max_branch_merge="165" merged_total="1960" />
+    <module_usages>
+      <module_usage name="datetime" finding="excluded" line="2" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="os" finding="excluded" line="3" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="time" finding="absolute" line="4" />
+      <module_usage name="numpy" finding="absolute" line="6" />
+      <module_usage name="pandas" finding="absolute" line="7" />
+      <module_usage name="pandas_ta" finding="absolute" line="8" />
+      <module_usage name="talib" finding="absolute" line="9" />
+      <module_usage name="tushare" finding="absolute" line="10" />
+      <module_usage name="sys" finding="absolute" line="11" />
+      <module_usage name="JSONData" finding="absolute" line="13" />
+      <module_usage name="JSONData.tdx_data_Day" finding="relative" line="13" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="14" />
+      <module_usage name="JohnsonUtil.LoggerFactory" finding="relative" line="14" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="15" />
+      <module_usage name="JohnsonUtil.johnson_cons" finding="relative" line="15" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="16" />
+      <module_usage name="JohnsonUtil.commonTips" finding="relative" line="16" />
+      <module_usage name="math" finding="absolute" line="17" />
+    </module_usages>
+  </module>
+  <module name="JSONData.powerCompute" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JSONData' instructed by user to follow to." source_path="${cwd}\JSONData\powerCompute.py">
+    <optimization-time pass="1" time="3.51" micro_passes="7" max_branch_merge="307" merged_total="18556" />
+    <optimization-time pass="2" time="0.41" micro_passes="1" max_branch_merge="268" merged_total="2525" />
+    <module_usages>
+      <module_usage name="sys" finding="absolute" line="2" />
+      <module_usage name="numpy" finding="absolute" line="5" />
+      <module_usage name="pandas" finding="absolute" line="6" />
+      <module_usage name="statsmodels" finding="absolute" line="7" />
+      <module_usage name="statsmodels.regression" finding="relative" line="7" />
+      <module_usage name="statsmodels.api" finding="absolute" line="8" />
+      <module_usage name="pylab" finding="absolute" line="9" />
+      <module_usage name="matplotlib.dates" finding="absolute" line="10" />
+      <module_usage name="matplotlib.lines" finding="absolute" line="11" />
+      <module_usage name="matplotlib" finding="absolute" line="12" />
+      <module_usage name="matplotlib.transforms" finding="relative" line="12" />
+      <module_usage name="matplotlib.patches" finding="absolute" line="13" />
+      <module_usage name="datetime" finding="excluded" line="14" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="JohnsonUtil" finding="absolute" line="15" />
+      <module_usage name="JohnsonUtil.commonTips" finding="relative" line="15" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="16" />
+      <module_usage name="JohnsonUtil.johnson_cons" finding="relative" line="16" />
+      <module_usage name="JSONData" finding="absolute" line="17" />
+      <module_usage name="JSONData.tdx_data_Day" finding="relative" line="17" />
+      <module_usage name="JSONData" finding="absolute" line="18" />
+      <module_usage name="JSONData.get_macd_kdj_rsi" finding="relative" line="18" />
+      <module_usage name="JSONData" finding="absolute" line="19" />
+      <module_usage name="JSONData.wencaiData" finding="relative" line="19" />
+      <module_usage name="JSONData" finding="absolute" line="20" />
+      <module_usage name="JSONData.tdx_hdf5_api" finding="relative" line="20" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="21" />
+      <module_usage name="JohnsonUtil.zoompan" finding="relative" line="21" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="22" />
+      <module_usage name="JohnsonUtil.LoggerFactory" finding="relative" line="22" />
+      <module_usage name="time" finding="absolute" line="23" />
+      <module_usage name="tqdm" finding="absolute" line="26" />
+      <module_usage name="tqdm.tqdm" finding="not-found" line="26" />
+      <module_usage name="win32api" finding="excluded" line="32" exclusion_reason="Extension modules cannot be inspected." />
+      <module_usage name="_thread" finding="absolute" line="33" />
+      <module_usage name="argparse" finding="excluded" line="1580" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="timeit" finding="excluded" line="1603" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+    </module_usages>
+  </module>
   <module name="JSONData.realdatajson" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JSONData' instructed by user to follow to." source_path="${cwd}\JSONData\realdatajson.py">
-    <optimization-time pass="1" time="1.76" micro_passes="7" max_branch_merge="203" merged_total="9967" />
-    <optimization-time pass="2" time="0.29" micro_passes="1" max_branch_merge="174" merged_total="1367" />
+    <optimization-time pass="1" time="1.62" micro_passes="7" max_branch_merge="203" merged_total="9967" />
+    <optimization-time pass="2" time="0.20" micro_passes="1" max_branch_merge="174" merged_total="1367" />
     <module_usages>
       <module_usage name="json" finding="excluded" line="11" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
       <module_usage name="math" finding="absolute" line="12" />
@@ -32,8 +113,8 @@
     </module_usages>
   </module>
   <module name="JSONData.sina_data" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JSONData' instructed by user to follow to." source_path="${cwd}\JSONData\sina_data.py">
-    <optimization-time pass="1" time="1.75" micro_passes="5" max_branch_merge="358" merged_total="11488" />
-    <optimization-time pass="2" time="0.32" micro_passes="1" max_branch_merge="334" merged_total="2174" />
+    <optimization-time pass="1" time="1.94" micro_passes="5" max_branch_merge="358" merged_total="11488" />
+    <optimization-time pass="2" time="0.31" micro_passes="1" max_branch_merge="334" merged_total="2174" />
     <module_usages>
       <module_usage name="json" finding="excluded" line="2" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
       <module_usage name="os" finding="excluded" line="3" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
@@ -59,8 +140,8 @@
     </module_usages>
   </module>
   <module name="JSONData.stockFilter" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JSONData' instructed by user to follow to." source_path="${cwd}\JSONData\stockFilter.py">
-    <optimization-time pass="1" time="1.46" micro_passes="5" max_branch_merge="1119" merged_total="8854" />
-    <optimization-time pass="2" time="0.28" micro_passes="1" max_branch_merge="993" merged_total="1699" />
+    <optimization-time pass="1" time="1.50" micro_passes="5" max_branch_merge="1119" merged_total="8854" />
+    <optimization-time pass="2" time="0.25" micro_passes="1" max_branch_merge="993" merged_total="1699" />
     <module_usages>
       <module_usage name="sys" finding="absolute" line="2" />
       <module_usage name="JohnsonUtil" finding="absolute" line="4" />
@@ -73,8 +154,8 @@
     </module_usages>
   </module>
   <module name="JSONData.tdx_data_Day" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JSONData' instructed by user to follow to." source_path="${cwd}\JSONData\tdx_data_Day.py">
-    <optimization-time pass="1" time="11.71" micro_passes="7" max_branch_merge="730" merged_total="68146" />
-    <optimization-time pass="2" time="1.31" micro_passes="1" max_branch_merge="719" merged_total="9601" />
+    <optimization-time pass="1" time="9.66" micro_passes="7" max_branch_merge="742" merged_total="68272" />
+    <optimization-time pass="2" time="1.28" micro_passes="1" max_branch_merge="731" merged_total="9619" />
     <module_usages>
       <module_usage name="os" finding="excluded" line="5" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
       <module_usage name="sys" finding="absolute" line="6" />
@@ -110,17 +191,17 @@
       <module_usage name="ntpath" finding="excluded" line="516" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
       <module_usage name="ntpath" finding="excluded" line="598" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
       <module_usage name="ntpath" finding="excluded" line="646" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
-      <module_usage name="urllib.request" finding="absolute" line="1177" />
-      <module_usage name="urllib.error" finding="absolute" line="1177" />
-      <module_usage name="urllib.parse" finding="absolute" line="1177" />
-      <module_usage name="ntpath" finding="excluded" line="1649" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
-      <module_usage name="ntpath" finding="excluded" line="1652" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
-      <module_usage name="ntpath" finding="excluded" line="1774" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="urllib.request" finding="absolute" line="1178" />
+      <module_usage name="urllib.error" finding="absolute" line="1178" />
+      <module_usage name="urllib.parse" finding="absolute" line="1178" />
+      <module_usage name="ntpath" finding="excluded" line="1650" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="ntpath" finding="excluded" line="1653" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="ntpath" finding="excluded" line="1775" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
     </module_usages>
   </module>
   <module name="JSONData.tdx_hdf5_api" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JSONData' instructed by user to follow to." source_path="${cwd}\JSONData\tdx_hdf5_api.py">
-    <optimization-time pass="1" time="1.38" micro_passes="5" max_branch_merge="373" merged_total="8169" />
-    <optimization-time pass="2" time="0.24" micro_passes="1" max_branch_merge="287" merged_total="1525" />
+    <optimization-time pass="1" time="1.28" micro_passes="5" max_branch_merge="373" merged_total="8169" />
+    <optimization-time pass="2" time="0.21" micro_passes="1" max_branch_merge="287" merged_total="1525" />
     <module_usages>
       <module_usage name="os" finding="excluded" line="5" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
       <module_usage name="sys" finding="absolute" line="6" />
@@ -144,7 +225,7 @@
     </module_usages>
   </module>
   <module name="JSONData.tdxbk" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JSONData' instructed by user to follow to." source_path="${cwd}\JSONData\tdxbk.py">
-    <optimization-time pass="1" time="0.24" micro_passes="5" max_branch_merge="33" merged_total="1353" />
+    <optimization-time pass="1" time="0.20" micro_passes="5" max_branch_merge="33" merged_total="1353" />
     <optimization-time pass="2" time="0.04" micro_passes="1" max_branch_merge="25" merged_total="263" />
     <module_usages>
       <module_usage name="struct" finding="excluded" line="1" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
@@ -153,8 +234,8 @@
     </module_usages>
   </module>
   <module name="JSONData.wencaiData" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JSONData' instructed by user to follow to." source_path="${cwd}\JSONData\wencaiData.py">
-    <optimization-time pass="1" time="4.66" micro_passes="8" max_branch_merge="232" merged_total="17984" />
-    <optimization-time pass="2" time="0.54" micro_passes="1" max_branch_merge="203" merged_total="2181" />
+    <optimization-time pass="1" time="3.99" micro_passes="8" max_branch_merge="232" merged_total="17984" />
+    <optimization-time pass="2" time="0.46" micro_passes="1" max_branch_merge="203" merged_total="2181" />
     <module_usages>
       <module_usage name="json" finding="excluded" line="11" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
       <module_usage name="math" finding="absolute" line="12" />
@@ -201,8 +282,8 @@
     <module_usages />
   </module>
   <module name="JohnsonUtil.LoggerFactory" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JohnsonUtil' instructed by user to follow to." source_path="${cwd}\JohnsonUtil\LoggerFactory.py">
-    <optimization-time pass="1" time="0.30" micro_passes="6" max_branch_merge="42" merged_total="1503" />
-    <optimization-time pass="2" time="0.04" micro_passes="1" max_branch_merge="36" merged_total="219" />
+    <optimization-time pass="1" time="0.26" micro_passes="6" max_branch_merge="42" merged_total="1571" />
+    <optimization-time pass="2" time="0.03" micro_passes="1" max_branch_merge="36" merged_total="219" />
     <module_usages>
       <module_usage name="logging" finding="excluded" line="6" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
       <module_usage name="sys" finding="absolute" line="7" />
@@ -215,8 +296,8 @@
     </module_usages>
   </module>
   <module name="JohnsonUtil.LoggerFactoryMultiprocess" kind="CompiledPythonModule" usage="import" reason="Module is package content of 'JohnsonUtil' instructed by user to follow to." source_path="${cwd}\JohnsonUtil\LoggerFactoryMultiprocess.py">
-    <optimization-time pass="1" time="0.18" micro_passes="5" max_branch_merge="47" merged_total="1143" />
-    <optimization-time pass="2" time="0.04" micro_passes="1" max_branch_merge="39" merged_total="214" />
+    <optimization-time pass="1" time="0.17" micro_passes="5" max_branch_merge="47" merged_total="1143" />
+    <optimization-time pass="2" time="0.03" micro_passes="1" max_branch_merge="39" merged_total="214" />
     <module_usages>
       <module_usage name="os" finding="excluded" line="2" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
       <module_usage name="re" finding="excluded" line="3" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
@@ -229,8 +310,8 @@
     </module_usages>
   </module>
   <module name="JohnsonUtil.commonTips" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JohnsonUtil' instructed by user to follow to." source_path="${cwd}\JohnsonUtil\commonTips.py">
-    <optimization-time pass="1" time="10.55" micro_passes="7" max_branch_merge="281" merged_total="65570" />
-    <optimization-time pass="2" time="1.50" micro_passes="1" max_branch_merge="229" merged_total="9033" />
+    <optimization-time pass="1" time="10.56" micro_passes="7" max_branch_merge="281" merged_total="65502" />
+    <optimization-time pass="2" time="1.18" micro_passes="1" max_branch_merge="229" merged_total="9033" />
     <module_usages>
       <module_usage name="argparse" finding="excluded" line="3" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
       <module_usage name="datetime" finding="excluded" line="4" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
@@ -302,9 +383,17 @@
       <module_usage name="rlcompleter" finding="excluded" line="5217" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
     </module_usages>
   </module>
+  <module name="JohnsonUtil.emacount" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JohnsonUtil' instructed by user to follow to." source_path="${cwd}\JohnsonUtil\emacount.py">
+    <optimization-time pass="1" time="0.08" micro_passes="5" max_branch_merge="35" merged_total="497" />
+    <optimization-time pass="2" time="0.02" micro_passes="1" max_branch_merge="33" merged_total="96" />
+    <module_usages>
+      <module_usage name="datetime" finding="excluded" line="1" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="tushare" finding="absolute" line="3" />
+    </module_usages>
+  </module>
   <module name="JohnsonUtil.johnson_cons" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JohnsonUtil' instructed by user to follow to." source_path="${cwd}\JohnsonUtil\johnson_cons.py">
-    <optimization-time pass="1" time="0.91" micro_passes="6" max_branch_merge="262" merged_total="5388" />
-    <optimization-time pass="2" time="0.16" micro_passes="1" max_branch_merge="224" merged_total="890" />
+    <optimization-time pass="1" time="0.89" micro_passes="6" max_branch_merge="262" merged_total="5388" />
+    <optimization-time pass="2" time="0.14" micro_passes="1" max_branch_merge="224" merged_total="890" />
     <module_usages>
       <module_usage name="sys" finding="absolute" line="14" />
       <module_usage name="JohnsonUtil" finding="absolute" line="15" />
@@ -312,7 +401,7 @@
     </module_usages>
   </module>
   <module name="JohnsonUtil.prettytable" kind="CompiledPythonModule" usage="import" reason="Module is package content of 'JohnsonUtil' instructed by user to follow to." source_path="${cwd}\JohnsonUtil\prettytable.py">
-    <optimization-time pass="1" time="3.17" micro_passes="7" max_branch_merge="215" merged_total="19527" />
+    <optimization-time pass="1" time="3.33" micro_passes="7" max_branch_merge="215" merged_total="19527" />
     <optimization-time pass="2" time="0.42" micro_passes="1" max_branch_merge="215" merged_total="2568" />
     <module_usages>
       <module_usage name="copy" finding="excluded" line="37" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
@@ -330,53 +419,95 @@
       <module_usage name="platform" finding="excluded" line="93" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
     </module_usages>
   </module>
-  <module name="__main__" kind="PythonMainModule" usage="root_module" reason="Root module" source_path="${cwd}\filter_resample_Monitor.py">
-    <optimization-time pass="1" time="6.33" micro_passes="6" max_branch_merge="730" merged_total="8910" />
-    <optimization-time pass="2" time="0.70" micro_passes="1" max_branch_merge="645" merged_total="1440" />
+  <module name="JohnsonUtil.zoompan" kind="CompiledPythonModule" usage="import fromlist" reason="Module is package content of 'JohnsonUtil' instructed by user to follow to." source_path="${cwd}\JohnsonUtil\zoompan.py">
+    <optimization-time pass="1" time="0.20" micro_passes="5" max_branch_merge="74" merged_total="1328" />
+    <optimization-time pass="2" time="0.03" micro_passes="1" max_branch_merge="74" merged_total="228" />
     <module_usages>
-      <module_usage name="site" finding="excluded" line="1" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
-      <module_usage name="random" finding="excluded" line="19" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
-      <module_usage name="re" finding="excluded" line="20" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
-      <module_usage name="sys" finding="absolute" line="21" />
-      <module_usage name="time" finding="absolute" line="22" />
-      <module_usage name="pandas" finding="absolute" line="24" />
-      <module_usage name="pandas.DataFrame" finding="not-found" line="24" />
-      <module_usage name="JohnsonUtil" finding="absolute" line="28" />
-      <module_usage name="JohnsonUtil.johnson_cons" finding="relative" line="28" />
-      <module_usage name="JSONData" finding="absolute" line="29" />
-      <module_usage name="JSONData.stockFilter" finding="relative" line="29" />
-      <module_usage name="JSONData" finding="absolute" line="31" />
-      <module_usage name="JSONData.tdx_data_Day" finding="relative" line="31" />
-      <module_usage name="JohnsonUtil" finding="absolute" line="32" />
-      <module_usage name="JohnsonUtil.LoggerFactory" finding="relative" line="32" />
-      <module_usage name="JohnsonUtil" finding="absolute" line="33" />
-      <module_usage name="JohnsonUtil.commonTips" finding="relative" line="33" />
-      <module_usage name="docopt" finding="absolute" line="45" />
-      <module_usage name="traceback" finding="excluded" line="841" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="numpy" finding="absolute" line="2" />
+      <module_usage name="matplotlib.pyplot" finding="absolute" line="3" />
     </module_usages>
   </module>
-  <module name="__parents_main__" kind="CompiledPythonModule" usage="plugins" reason="Auto enable multiprocessing freeze support" source_path="${cwd}\filter_resample_Monitor.py">
-    <optimization-time pass="1" time="1.24" micro_passes="5" max_branch_merge="730" merged_total="3449" />
-    <optimization-time pass="2" time="0.02" micro_passes="1" max_branch_merge="15" merged_total="41" />
+  <module name="__main__" kind="PythonMainModule" usage="root_module" reason="Root module" source_path="${cwd}\singleAnalyseUtil.py">
+    <optimization-time pass="1" time="7.28" micro_passes="7" max_branch_merge="332" merged_total="12264" />
+    <optimization-time pass="2" time="0.32" micro_passes="1" max_branch_merge="279" merged_total="1697" />
     <module_usages>
-      <module_usage name="random" finding="excluded" line="19" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
-      <module_usage name="re" finding="excluded" line="20" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
-      <module_usage name="sys" finding="absolute" line="21" />
-      <module_usage name="time" finding="absolute" line="22" />
-      <module_usage name="pandas" finding="absolute" line="24" />
-      <module_usage name="pandas.DataFrame" finding="not-found" line="24" />
-      <module_usage name="JohnsonUtil" finding="absolute" line="28" />
-      <module_usage name="JohnsonUtil.johnson_cons" finding="relative" line="28" />
-      <module_usage name="JSONData" finding="absolute" line="29" />
-      <module_usage name="JSONData.stockFilter" finding="relative" line="29" />
-      <module_usage name="JSONData" finding="absolute" line="31" />
-      <module_usage name="JSONData.tdx_data_Day" finding="relative" line="31" />
-      <module_usage name="JohnsonUtil" finding="absolute" line="32" />
-      <module_usage name="JohnsonUtil.LoggerFactory" finding="relative" line="32" />
-      <module_usage name="JohnsonUtil" finding="absolute" line="33" />
-      <module_usage name="JohnsonUtil.commonTips" finding="relative" line="33" />
-      <module_usage name="sys" finding="absolute" line="1382" />
-      <module_usage name="multiprocessing.spawn" finding="absolute" line="1385" />
+      <module_usage name="site" finding="excluded" line="1" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="datetime" finding="excluded" line="2" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="random" finding="excluded" line="3" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="os" finding="excluded" line="4" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="sys" finding="absolute" line="5" />
+      <module_usage name="time" finding="absolute" line="6" />
+      <module_usage name="types" finding="excluded" line="7" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="pandas" finding="absolute" line="9" />
+      <module_usage name="tushare" finding="absolute" line="10" />
+      <module_usage name="JSONData" finding="absolute" line="12" />
+      <module_usage name="JSONData.fundflowUtil" finding="relative" line="12" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="13" />
+      <module_usage name="JohnsonUtil.johnson_cons" finding="relative" line="13" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="14" />
+      <module_usage name="JohnsonUtil.commonTips" finding="relative" line="14" />
+      <module_usage name="JSONData" finding="absolute" line="15" />
+      <module_usage name="JSONData.realdatajson" finding="relative" line="15" />
+      <module_usage name="JSONData" finding="absolute" line="16" />
+      <module_usage name="JSONData.powerCompute" finding="relative" line="16" />
+      <module_usage name="JSONData" finding="absolute" line="17" />
+      <module_usage name="JSONData.get_macd_kdj_rsi" finding="relative" line="17" />
+      <module_usage name="JSONData" finding="absolute" line="18" />
+      <module_usage name="JSONData.tdx_data_Day" finding="relative" line="18" />
+      <module_usage name="JSONData" finding="absolute" line="19" />
+      <module_usage name="JSONData.sina_data" finding="relative" line="19" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="20" />
+      <module_usage name="JohnsonUtil.emacount" finding="relative" line="20" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="21" />
+      <module_usage name="JohnsonUtil.LoggerFactory" finding="relative" line="21" />
+      <module_usage name="JSONData" finding="absolute" line="24" />
+      <module_usage name="JSONData.stockFilter" finding="relative" line="24" />
+      <module_usage name="urllib.request" finding="absolute" line="27" />
+      <module_usage name="urllib.request" finding="absolute" line="29" />
+      <module_usage name="readline" finding="absolute" line="50" />
+      <module_usage name="docopt" finding="absolute" line="594" />
+      <module_usage name="traceback" finding="excluded" line="878" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+    </module_usages>
+  </module>
+  <module name="__parents_main__" kind="CompiledPythonModule" usage="plugins" reason="Auto enable multiprocessing freeze support" source_path="${cwd}\singleAnalyseUtil.py">
+    <optimization-time pass="1" time="1.78" micro_passes="7" max_branch_merge="332" merged_total="9860" />
+    <optimization-time pass="2" time="0.19" micro_passes="1" max_branch_merge="279" merged_total="1178" />
+    <module_usages>
+      <module_usage name="datetime" finding="excluded" line="2" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="random" finding="excluded" line="3" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="os" finding="excluded" line="4" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="sys" finding="absolute" line="5" />
+      <module_usage name="time" finding="absolute" line="6" />
+      <module_usage name="types" finding="excluded" line="7" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
+      <module_usage name="pandas" finding="absolute" line="9" />
+      <module_usage name="tushare" finding="absolute" line="10" />
+      <module_usage name="JSONData" finding="absolute" line="12" />
+      <module_usage name="JSONData.fundflowUtil" finding="relative" line="12" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="13" />
+      <module_usage name="JohnsonUtil.johnson_cons" finding="relative" line="13" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="14" />
+      <module_usage name="JohnsonUtil.commonTips" finding="relative" line="14" />
+      <module_usage name="JSONData" finding="absolute" line="15" />
+      <module_usage name="JSONData.realdatajson" finding="relative" line="15" />
+      <module_usage name="JSONData" finding="absolute" line="16" />
+      <module_usage name="JSONData.powerCompute" finding="relative" line="16" />
+      <module_usage name="JSONData" finding="absolute" line="17" />
+      <module_usage name="JSONData.get_macd_kdj_rsi" finding="relative" line="17" />
+      <module_usage name="JSONData" finding="absolute" line="18" />
+      <module_usage name="JSONData.tdx_data_Day" finding="relative" line="18" />
+      <module_usage name="JSONData" finding="absolute" line="19" />
+      <module_usage name="JSONData.sina_data" finding="relative" line="19" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="20" />
+      <module_usage name="JohnsonUtil.emacount" finding="relative" line="20" />
+      <module_usage name="JohnsonUtil" finding="absolute" line="21" />
+      <module_usage name="JohnsonUtil.LoggerFactory" finding="relative" line="21" />
+      <module_usage name="JSONData" finding="absolute" line="24" />
+      <module_usage name="JSONData.stockFilter" finding="relative" line="24" />
+      <module_usage name="urllib.request" finding="absolute" line="27" />
+      <module_usage name="urllib.request" finding="absolute" line="29" />
+      <module_usage name="readline" finding="absolute" line="50" />
+      <module_usage name="sys" finding="absolute" line="904" />
+      <module_usage name="multiprocessing.spawn" finding="absolute" line="907" />
     </module_usages>
   </module>
   <module name="multiprocessing" kind="UncompiledPythonPackage" usage="import path parent" reason="Multiprocessing plugin needs this to monkey patch it." source_path="${sys.prefix}\lib\multiprocessing\__init__.py">
@@ -397,7 +528,7 @@
     </module_usages>
   </module>
   <module name="multiprocessing-preLoad" kind="CompiledPythonModule" usage="plugins" reason="Monkey patching &quot;multiprocessing&quot; load environment." source_path="${sys.prefix}\lib\multiprocessing\multiprocessing-preLoad.py">
-    <optimization-time pass="1" time="0.02" micro_passes="3" max_branch_merge="2" merged_total="14" />
+    <optimization-time pass="1" time="0.01" micro_passes="3" max_branch_merge="2" merged_total="14" />
     <optimization-time pass="2" time="0.01" micro_passes="1" max_branch_merge="2" merged_total="4" />
     <module_usages>
       <module_usage name="sys" finding="absolute" line="1" />
@@ -406,7 +537,7 @@
   </module>
   <module name="multiprocessing.connection" kind="UncompiledPythonModule" usage="import" reason="Multiprocessing plugin needs this to monkey patch it." source_path="${sys.prefix}\lib\multiprocessing\connection.py">
     <optimization-time pass="1" time="2.61" micro_passes="6" max_branch_merge="69" merged_total="10846" />
-    <optimization-time pass="2" time="0.00" />
+    <optimization-time pass="2" time="0.01" />
     <module_usages>
       <module_usage name="io" finding="excluded" line="12" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
       <module_usage name="os" finding="excluded" line="13" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
@@ -573,7 +704,7 @@
   </module>
   <module name="multiprocessing.pool" kind="UncompiledPythonModule" usage="import" reason="Multiprocessing plugin needs this to monkey patch it." source_path="${sys.prefix}\lib\multiprocessing\pool.py">
     <optimization-time pass="1" time="2.88" micro_passes="7" max_branch_merge="122" merged_total="12812" />
-    <optimization-time pass="2" time="0.01" />
+    <optimization-time pass="2" time="0.00" />
     <module_usages>
       <module_usage name="collections" finding="excluded" line="16" exclusion_reason="Not following into stdlib unless standalone or requested to follow into stdlib." />
       <module_usage name="itertools" finding="absolute" line="17" />
@@ -807,90 +938,103 @@
     </module_usages>
   </module>
   <performance>
-    <memory_usage name="after_launch" value="53837824" />
-    <memory_usage name="optimization/1/__main__" value="58441728" />
-    <memory_usage name="optimization/1/JohnsonUtil.commonTips" value="106762240" />
-    <memory_usage name="optimization/1/JohnsonUtil.prettytable" value="115707904" />
-    <memory_usage name="optimization/1/multiprocessing.pool" value="119533568" />
-    <memory_usage name="optimization/1/multiprocessing.dummy" value="123912192" />
-    <memory_usage name="optimization/1/multiprocessing.dummy.connection" value="123912192" />
-    <memory_usage name="optimization/1/multiprocessing.connection" value="123912192" />
-    <memory_usage name="optimization/1/multiprocessing.resource_sharer" value="123912192" />
-    <memory_usage name="optimization/1/multiprocessing.process" value="123912192" />
-    <memory_usage name="optimization/1/multiprocessing.context" value="123912192" />
-    <memory_usage name="optimization/1/multiprocessing.popen_spawn_win32" value="126603264" />
-    <memory_usage name="optimization/1/multiprocessing.forkserver" value="126603264" />
-    <memory_usage name="optimization/1/multiprocessing.resource_tracker" value="126603264" />
-    <memory_usage name="optimization/1/multiprocessing.spawn" value="126603264" />
-    <memory_usage name="optimization/1/multiprocessing.sharedctypes" value="126603264" />
-    <memory_usage name="optimization/1/multiprocessing.heap" value="126603264" />
-    <memory_usage name="optimization/1/multiprocessing.queues" value="126603264" />
-    <memory_usage name="optimization/1/multiprocessing.synchronize" value="126603264" />
-    <memory_usage name="optimization/1/multiprocessing.managers" value="126603264" />
-    <memory_usage name="optimization/1/multiprocessing.shared_memory" value="126603264" />
-    <memory_usage name="optimization/1/multiprocessing.reduction" value="126603264" />
-    <memory_usage name="optimization/1/multiprocessing.util" value="126603264" />
-    <memory_usage name="optimization/1/multiprocessing" value="126603264" />
-    <memory_usage name="optimization/1/__parents_main__" value="126603264" />
-    <memory_usage name="optimization/1/multiprocessing-postLoad" value="123817984" />
-    <memory_usage name="optimization/1/multiprocessing-preLoad" value="123817984" />
-    <memory_usage name="optimization/1/JohnsonUtil.LoggerFactory" value="123817984" />
-    <memory_usage name="optimization/1/JohnsonUtil.LoggerFactoryMultiprocess" value="124223488" />
-    <memory_usage name="optimization/1/JSONData.tdx_data_Day" value="124334080" />
-    <memory_usage name="optimization/1/JSONData.sina_data" value="138571776" />
-    <memory_usage name="optimization/1/JSONData.tdxbk" value="138579968" />
-    <memory_usage name="optimization/1/JSONData.wencaiData" value="138842112" />
-    <memory_usage name="optimization/1/JSONData.realdatajson" value="142491648" />
-    <memory_usage name="optimization/1/JSONData.tdx_hdf5_api" value="143425536" />
-    <memory_usage name="optimization/1/JSONData.stockFilter" value="145334272" />
-    <memory_usage name="optimization/1/JSONData" value="148770816" />
-    <memory_usage name="optimization/1/JohnsonUtil.johnson_cons" value="148770816" />
-    <memory_usage name="optimization/1/JohnsonUtil" value="149823488" />
-    <memory_usage name="optimization/2/__main__" value="149823488" />
-    <memory_usage name="optimization/2/JohnsonUtil.commonTips" value="145686528" />
-    <memory_usage name="optimization/2/JohnsonUtil.prettytable" value="147546112" />
-    <memory_usage name="optimization/2/multiprocessing.pool" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.dummy" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.dummy.connection" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.connection" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.resource_sharer" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.process" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.context" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.popen_spawn_win32" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.forkserver" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.resource_tracker" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.spawn" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.sharedctypes" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.heap" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.queues" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.synchronize" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.managers" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.shared_memory" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.reduction" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing.util" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing" value="147554304" />
-    <memory_usage name="optimization/2/__parents_main__" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing-postLoad" value="147554304" />
-    <memory_usage name="optimization/2/multiprocessing-preLoad" value="147554304" />
-    <memory_usage name="optimization/2/JohnsonUtil.LoggerFactory" value="147554304" />
-    <memory_usage name="optimization/2/JohnsonUtil.LoggerFactoryMultiprocess" value="147554304" />
-    <memory_usage name="optimization/2/JSONData.tdx_data_Day" value="147554304" />
-    <memory_usage name="optimization/2/JSONData.sina_data" value="148103168" />
-    <memory_usage name="optimization/2/JSONData.tdxbk" value="148156416" />
-    <memory_usage name="optimization/2/JSONData.wencaiData" value="148156416" />
-    <memory_usage name="optimization/2/JSONData.realdatajson" value="148418560" />
-    <memory_usage name="optimization/2/JSONData.tdx_hdf5_api" value="148488192" />
-    <memory_usage name="optimization/2/JSONData.stockFilter" value="148488192" />
-    <memory_usage name="optimization/2/JSONData" value="150589440" />
-    <memory_usage name="optimization/2/JohnsonUtil.johnson_cons" value="150589440" />
-    <memory_usage name="optimization/2/JohnsonUtil" value="150593536" />
-    <memory_usage name="before_c_code_generation" value="150597632" />
-    <memory_usage name="before_running_scons" value="169017344" />
+    <memory_usage name="after_launch" value="53882880" />
+    <memory_usage name="optimization/1/__main__" value="59961344" />
+    <memory_usage name="optimization/1/JSONData.stockFilter" value="114446336" />
+    <memory_usage name="optimization/1/JohnsonUtil.LoggerFactory" value="115032064" />
+    <memory_usage name="optimization/1/JohnsonUtil.LoggerFactoryMultiprocess" value="115044352" />
+    <memory_usage name="optimization/1/JohnsonUtil.emacount" value="115126272" />
+    <memory_usage name="optimization/1/JSONData.sina_data" value="115126272" />
+    <memory_usage name="optimization/1/JSONData.tdx_hdf5_api" value="116207616" />
+    <memory_usage name="optimization/1/JSONData.tdx_data_Day" value="116469760" />
+    <memory_usage name="optimization/1/JSONData.tdxbk" value="129564672" />
+    <memory_usage name="optimization/1/JSONData.wencaiData" value="129564672" />
+    <memory_usage name="optimization/1/JSONData.get_macd_kdj_rsi" value="130363392" />
+    <memory_usage name="optimization/1/JSONData.powerCompute" value="132636672" />
+    <memory_usage name="optimization/1/JohnsonUtil.zoompan" value="136179712" />
+    <memory_usage name="optimization/1/JSONData.realdatajson" value="136179712" />
+    <memory_usage name="optimization/1/JohnsonUtil.commonTips" value="136396800" />
+    <memory_usage name="optimization/1/JohnsonUtil.prettytable" value="156397568" />
+    <memory_usage name="optimization/1/multiprocessing.pool" value="157446144" />
+    <memory_usage name="optimization/1/multiprocessing.dummy" value="159862784" />
+    <memory_usage name="optimization/1/multiprocessing.dummy.connection" value="159862784" />
+    <memory_usage name="optimization/1/multiprocessing.connection" value="159862784" />
+    <memory_usage name="optimization/1/multiprocessing.resource_sharer" value="159862784" />
+    <memory_usage name="optimization/1/multiprocessing.process" value="159862784" />
+    <memory_usage name="optimization/1/multiprocessing.context" value="159862784" />
+    <memory_usage name="optimization/1/multiprocessing.popen_spawn_win32" value="162426880" />
+    <memory_usage name="optimization/1/multiprocessing.forkserver" value="162426880" />
+    <memory_usage name="optimization/1/multiprocessing.resource_tracker" value="162426880" />
+    <memory_usage name="optimization/1/multiprocessing.spawn" value="162426880" />
+    <memory_usage name="optimization/1/multiprocessing.sharedctypes" value="162426880" />
+    <memory_usage name="optimization/1/multiprocessing.heap" value="162426880" />
+    <memory_usage name="optimization/1/multiprocessing.queues" value="162426880" />
+    <memory_usage name="optimization/1/multiprocessing.synchronize" value="162426880" />
+    <memory_usage name="optimization/1/multiprocessing.managers" value="162426880" />
+    <memory_usage name="optimization/1/multiprocessing.shared_memory" value="162426880" />
+    <memory_usage name="optimization/1/multiprocessing.reduction" value="162426880" />
+    <memory_usage name="optimization/1/multiprocessing.util" value="162426880" />
+    <memory_usage name="optimization/1/multiprocessing" value="162426880" />
+    <memory_usage name="optimization/1/__parents_main__" value="162426880" />
+    <memory_usage name="optimization/1/multiprocessing-postLoad" value="162975744" />
+    <memory_usage name="optimization/1/multiprocessing-preLoad" value="162975744" />
+    <memory_usage name="optimization/1/JohnsonUtil.johnson_cons" value="162975744" />
+    <memory_usage name="optimization/1/JohnsonUtil" value="162975744" />
+    <memory_usage name="optimization/1/JSONData.fundflowUtil" value="162975744" />
+    <memory_usage name="optimization/1/JSONData" value="163504128" />
+    <memory_usage name="optimization/2/__main__" value="163504128" />
+    <memory_usage name="optimization/2/JSONData.stockFilter" value="163504128" />
+    <memory_usage name="optimization/2/JohnsonUtil.LoggerFactory" value="163778560" />
+    <memory_usage name="optimization/2/JohnsonUtil.LoggerFactoryMultiprocess" value="163778560" />
+    <memory_usage name="optimization/2/JohnsonUtil.emacount" value="163778560" />
+    <memory_usage name="optimization/2/JSONData.sina_data" value="163778560" />
+    <memory_usage name="optimization/2/JSONData.tdx_hdf5_api" value="163778560" />
+    <memory_usage name="optimization/2/JSONData.tdx_data_Day" value="163778560" />
+    <memory_usage name="optimization/2/JSONData.tdxbk" value="163778560" />
+    <memory_usage name="optimization/2/JSONData.wencaiData" value="163778560" />
+    <memory_usage name="optimization/2/JSONData.get_macd_kdj_rsi" value="164040704" />
+    <memory_usage name="optimization/2/JSONData.powerCompute" value="164040704" />
+    <memory_usage name="optimization/2/JohnsonUtil.zoompan" value="164302848" />
+    <memory_usage name="optimization/2/JSONData.realdatajson" value="164302848" />
+    <memory_usage name="optimization/2/JohnsonUtil.commonTips" value="164302848" />
+    <memory_usage name="optimization/2/JohnsonUtil.prettytable" value="164528128" />
+    <memory_usage name="optimization/2/multiprocessing.pool" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.dummy" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.dummy.connection" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.connection" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.resource_sharer" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.process" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.context" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.popen_spawn_win32" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.forkserver" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.resource_tracker" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.spawn" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.sharedctypes" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.heap" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.queues" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.synchronize" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.managers" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.shared_memory" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.reduction" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing.util" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing" value="164794368" />
+    <memory_usage name="optimization/2/__parents_main__" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing-postLoad" value="164794368" />
+    <memory_usage name="optimization/2/multiprocessing-preLoad" value="164794368" />
+    <memory_usage name="optimization/2/JohnsonUtil.johnson_cons" value="164794368" />
+    <memory_usage name="optimization/2/JohnsonUtil" value="165056512" />
+    <memory_usage name="optimization/2/JSONData.fundflowUtil" value="165056512" />
+    <memory_usage name="optimization/2/JSONData" value="165056512" />
+    <memory_usage name="before_c_code_generation" value="165056512" />
+    <memory_usage name="before_running_scons" value="189505536" />
   </performance>
-  <data_composer blob_size="414109" total="6413">
+  <data_composer blob_size="442200" total="8042">
     <module_data filename="__bytecode.const" blob_name=".bytecode" blob_size="222263" input_size="223919" />
     <module_data filename="__constants.const" blob_name="" blob_size="874" input_size="2176" />
     <module_data filename="module.JSONData.const" blob_name="JSONData" blob_size="248" input_size="402" />
+    <module_data filename="module.JSONData.fundflowUtil.const" blob_name="JSONData.fundflowUtil" blob_size="5075" input_size="8624" />
+    <module_data filename="module.JSONData.get_macd_kdj_rsi.const" blob_name="JSONData.get_macd_kdj_rsi" blob_size="4177" input_size="7202" />
+    <module_data filename="module.JSONData.powerCompute.const" blob_name="JSONData.powerCompute" blob_size="10281" input_size="16259" />
     <module_data filename="module.JSONData.realdatajson.const" blob_name="JSONData.realdatajson" blob_size="6085" input_size="9882" />
     <module_data filename="module.JSONData.sina_data.const" blob_name="JSONData.sina_data" blob_size="6670" input_size="11562" />
     <module_data filename="module.JSONData.stockFilter.const" blob_name="JSONData.stockFilter" blob_size="3288" input_size="6514" />
@@ -902,10 +1046,12 @@
     <module_data filename="module.JohnsonUtil.LoggerFactoryMultiprocess.const" blob_name="JohnsonUtil.LoggerFactoryMultiprocess" blob_size="2071" input_size="3192" />
     <module_data filename="module.JohnsonUtil.commonTips.const" blob_name="JohnsonUtil.commonTips" blob_size="42674" input_size="59820" />
     <module_data filename="module.JohnsonUtil.const" blob_name="JohnsonUtil" blob_size="257" input_size="411" />
-    <module_data filename="module.JohnsonUtil.johnson_cons.const" blob_name="JohnsonUtil.johnson_cons" blob_size="35805" input_size="45608" />
+    <module_data filename="module.JohnsonUtil.emacount.const" blob_name="JohnsonUtil.emacount" blob_size="968" input_size="1619" />
+    <module_data filename="module.JohnsonUtil.johnson_cons.const" blob_name="JohnsonUtil.johnson_cons" blob_size="35822" input_size="45625" />
     <module_data filename="module.JohnsonUtil.prettytable.const" blob_name="JohnsonUtil.prettytable" blob_size="20767" input_size="28364" />
-    <module_data filename="module.__main__.const" blob_name="__main__" blob_size="4450" input_size="8987" />
-    <module_data filename="module.__parents_main__.const" blob_name="__parents_main__" blob_size="704" input_size="1260" />
+    <module_data filename="module.JohnsonUtil.zoompan.const" blob_name="JohnsonUtil.zoompan" blob_size="1651" input_size="2709" />
+    <module_data filename="module.__main__.const" blob_name="__main__" blob_size="6179" input_size="11585" />
+    <module_data filename="module.__parents_main__.const" blob_name="__parents_main__" blob_size="4766" input_size="8832" />
     <module_data filename="module.multiprocessing-postLoad.const" blob_name="multiprocessing-postLoad" blob_size="411" input_size="739" />
     <module_data filename="module.multiprocessing-preLoad.const" blob_name="multiprocessing-preLoad" blob_size="252" input_size="484" />
   </data_composer>
@@ -915,7 +1061,7 @@
     <option value="--follow-import-to=JohnsonUtil,JSONData" />
     <option value="--remove-output" />
     <option value="--lto=yes" />
-    <option value="filter_resample_Monitor.py" />
+    <option value="singleAnalyseUtil.py" />
   </command_line>
   <plugins>
     <plugin name="anti-bloat" user_enabled="no" />
@@ -944,5 +1090,5 @@
       <path value="${sys.prefix}\lib\site-packages\Pythonwin" />
     </search_path>
   </python>
-  <output run_filename="${cwd}\filter_resample_Monitor.cmd" />
+  <output run_filename="${cwd}\singleAnalyseUtil.cmd" />
 </nuitka-compilation-report>

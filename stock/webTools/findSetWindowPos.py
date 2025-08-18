@@ -17,18 +17,25 @@ tdx_ths_position4K1536={'Edge': '64,123,910,886','Firefox': '343,79,1436,931','�
         '通达信金融终端': '233,0,1213,866','东方财富': '202,0,1187,833','同花顺': '79,74,1145,772',\
         'sina_Market-DurationDn.py': '-6,432,1326,423','sina_Market-DurationCXDN.py': '10,313,1329,438',\
         'sina_Market-DurationUp.py': '243,432,1323,438','sina_Monitor-Market-LH.py': '264,306,1307,407',\
-        'sina_Monitor.py': '137,28,1319,520','singleAnalyseUtil.py': '647,0,895,358','LinePower.py': '26,150,761,407',\
+        'sina_Monitor.py': '137,28,1319,560','singleAnalyseUtil.py': '647,0,895,358','LinePower.py': '26,150,761,407',\
         'instock_Monitor.py': '74,54,1319,439','chantdxpower.py': '33,115,649,407','ths-tdx-web.py': '70,200,59,51',\
         'pywin32_mouse.py': '-25600,-25600,59,51'}
 
-# tdx_ths_position1536={'Edge': '27,72,910,798','Firefox': '343,79,1436,931','交易信号监控': '1335,180,566,389',\
 tdx_ths_position1536={'Edge': '25,143,814,718','交易信号监控': '1335,180,566,389','东兴证券': '51,205,1083,717',\
         '行业跟随1': '29,220,677,404','人气综合排行榜2.2': '168,0,477,753','通达信金融终端': '191,41,1258,815',\
-        '东方财富': '407,72,1113,790','同花顺': '62,92,1145,772','sina_Market-DurationDn.exe': '-6,432,1326,423',\
-        'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationUp.exe': '-6,432,1323,438','sina_Market-DurationDnUp': '274,350,1322,520',\
-        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '109,20,1319,520','singleAnalyseUtil.exe': '683,16,897,359',\
-        'LinePower.exe': '9,216,761,407','instock_Monitor.exe': '32,86,1400,359','chantdxpower.exe': '86,128,649,407',\
-        'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-25600,-25600,59,51',}
+        '东方财富': '407,72,1113,790','同花顺': '62,92,1189,772','sina_Market-DurationDn.exe': '-6,432,1326,423',\
+        'sina_Market-DurationCXDN.exe': '10,313,1359,438','sina_Market-DurationUP': '-6,432,1353,438','sina_Market-DurationDnUP': '278,406,1352,464',\
+        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '109,20,1356,520','singleAnalyseUtil.exe': '683,16,897,359',\
+        'LinePower.exe': '9,216,761,407','instock_Monitor.exe': '32,86,1400,359','filter_resample_Monitor.exe': '241,233,1338,550',\
+        'chantdxpower.exe': '86,128,649,407','ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-25600,-25600,59,51',\
+        }
+# tdx_ths_position1536={'Edge': '25,143,814,718','交易信号监控': '1335,180,566,389','东兴证券': '51,205,1083,717',\
+#         '行业跟随1': '29,220,677,404','人气综合排行榜2.2': '168,0,477,753','通达信金融终端': '191,41,1258,815',\
+#         '东方财富': '407,72,1113,790','同花顺': '62,92,1145,772','sina_Market-DurationDn.exe': '-6,432,1326,423',\
+#         'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationUp.exe': '-6,432,1323,438','sina_Market-DurationDnUp': '274,350,1322,560',\
+#         'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '109,20,1319,580','singleAnalyseUtil.exe': '683,16,897,359',\
+#         'LinePower.exe': '9,216,761,407','instock_Monitor.exe': '32,86,1400,359','filter_resample_Monitor.py': '290,236,1348,550','chantdxpower.exe': '86,128,649,407',\
+#         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-25600,-25600,59,51',}
 
 # tdx_ths_position1920={'通达信': '787,214,1104,835','东方财富': '418,138,1142,885','同花顺': '22,184,1075,864','Firefox': '45,156,706,797','sina_Market-DurationDn.py': '-7,664,1305,423','sina_Market-DurationCXDN.py': '-7,326,1329,423','sina_Market-DurationUp.py': '606,664,1321,423','sina_Monitor-Market-LH.py': '662,318,1307,409','sina_Monitor.py': '109,20,1313,519','singleAnalyseUtil.py': '1001,0,897,359','LinePower.py': '29,103,761,407','instock_Monitor.py': '70,79,1313,391','chantdxpower.py': '-7,129,649,407','ths-tdx-web.py': '70,200,153,39','pywin32_mouse.py': '70,200,153,39'}
 
@@ -40,7 +47,7 @@ tdx_ths_position1920={'Edge': '64,123,910,886','交易信号监控': '1335,180,5
         '东方财富': '655,261,1266,804','同花顺': '198,119,1659,785','东兴证券': '52,52,1283,704',\
         'sina_Market-DurationDn.py': '-7,664,1332,423','sina_Market-DurationCXDN.py': '-7,326,1329,423',\
         'sina_Market-DurationUp.py': '606,664,1321,423','sina_Monitor-Market-LH.py': '662,318,1307,409',\
-        'sina_Monitor.py': '109,20,1313,519','singleAnalyseUtil.py': '1001,0,897,359','LinePower.py': '29,103,761,407',\
+        'sina_Monitor.py': '109,20,1356,519','singleAnalyseUtil.py': '1001,0,897,359','LinePower.py': '29,103,761,407',\
         'instock_Monitor.py': '70,79,1313,391','chantdxpower.py': '-7,129,649,407','ths-tdx-web.py': '70,200,59,51',\
         'pywin32_mouse.py': '-32000,-32000,59,51'}
 
@@ -58,7 +65,7 @@ tdx_ths_positionDouble={'Edge': '64,123,910,886','交易信号监控': '1335,180
             'sina_Market-DurationUp.py': '-1701,432,1323,438','sina_Monitor-Market-LH.py': '576,680,1307,407',\
             'sina_Monitor.py': '150,27,1324,519','singleAnalyseUtil': '-6,727,897,359','LinePower.py': '16,176,761,402',\
             'instock_Monitor.py': '657,31,1400,359','chantdxpower.py': '43,138,649,407','ths-tdx-web.py': '70,200,59,51',\
-            'sina_Market-DurationDnUP': '600,523,1326,520','pywin32_mouse.py': '-32000,-32000,59,51'}
+            'sina_Market-DurationDnUP': '600,523,1326,560','pywin32_mouse.py': '-32000,-32000,59,51'}
 
 
 # tdx_ths_position3072={'Edge': '27,72,910,798','Firefox': '343,79,1436,931','交易信号监控': '1335,180,566,389',\
@@ -68,7 +75,7 @@ tdx_ths_position3072_old={'Edge': '27,72,910,798','交易信号监控': '1335,18
         '通达信金融终端': '191,41,1258,815','东方财富': '122,50,1187,806','同花顺': '79,74,1145,772',\
         'sina_Market-DurationDn.py': '-6,432,1326,423','sina_Market-DurationCXDN.py': '10,313,1329,438',\
         'sina_Market-DurationUp.py': '243,432,1323,438','sina_Monitor-Market-LH.py': '264,306,1307,407',\
-        'sina_Monitor.py': '137,28,1319,520','singleAnalyseUtil.py': '647,0,895,358','LinePower.py': '26,150,761,407',\
+        'sina_Monitor.py': '137,28,1319,560','singleAnalyseUtil.py': '647,0,895,358','LinePower.py': '26,150,761,407',\
         'instock_Monitor.py': '74,54,1319,439','chantdxpower.py': '33,115,649,407','ths-tdx-web.py': '70,200,59,51',\
         'pywin32_mouse.py': '-25600,-25600,59,51'}
 
@@ -83,9 +90,9 @@ tdx_ths_position3072_old={'Edge': '27,72,910,798','交易信号监控': '1335,18
 #双屏显示全部
 tdx_ths_position3072={'Edge': '25,72,913,798','交易信号监控': '-541,-107,566,389','东兴证券': '51,205,1083,717',\
         '行业跟随1': '-677,68,677,404','人气综合排行榜2.2': '1059,0,477,753','通达信金融终端': '191,41,1258,815',\
-        '东方财富': '-1131,-195,1098,634','同花顺': '-1514,-160,995,598','sina_Market-DurationDn.exe': '-6,432,1326,423',\
-        'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUp.exe': '-6,432,1323,438','sina_Market-DurationUp.exe': '243,432,1323,438',\
-        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '137,28,1319,520','singleAnalyseUtil.exe': '-889,-426,895,358',\
+        '东方财富': '-1131,-195,1098,634','同花顺': '-1514,-160,995,598','sina_Market-DurationDn.exe': '-6,432,1356,423',\
+        'sina_Market-DurationCXDN.exe': '10,313,1359,438','sina_Market-DurationDnUP.exe': '-6,432,1353,438','sina_Market-DurationUP.exe': '243,432,1323,438',\
+        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '137,28,1319,580','singleAnalyseUtil.exe': '-889,-426,895,358',\
         'LinePower.exe': '-6,186,761,407','instock_Monitor.exe': '74,54,1319,439','chantdxpower.exe': '-1507,-426,649,273',\
         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-25600,-25602,59,51',}
 
@@ -94,16 +101,16 @@ tdx_ths_position3072={'Edge': '25,72,913,798','交易信号监控': '-541,-107,5
 # tdx_ths_position3456ths={'Edge': '25,72,913,798','交易信号监控': '975,193,566,389','东兴证券': '51,205,1083,717',\
 #         '行业跟随1': '29,220,677,404','人气综合排行榜2.2': '152,53,477,753','通达信金融终端': '191,41,1258,815',\
 #         '东方财富': '-1878,-172,1174,699','同花顺': '-1189,-67,1145,614','sina_Market-DurationDn.exe': '-6,432,1326,423',\
-#         'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUp.exe': '-6,432,1323,438','sina_Market-DurationUp.exe': '219,432,1323,438',\
+#         'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUP.exe': '-6,432,1323,438','sina_Market-DurationUP.exe': '219,432,1323,438',\
 #         'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '137,28,1319,520','singleAnalyseUtil.exe': '-869,-524,897,359',\
 #         'LinePower.exe': '-6,170,761,407','instock_Monitor.exe': '74,54,1319,439','chantdxpower.exe': '25,98,649,407',\
 #         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-25600,-25602,59,51',}
 
 tdx_ths_position3456={'Edge': '25,72,913,798','交易信号监控': '-526,-296,566,389','东兴证券': '51,205,1083,717',\
         '行业跟随1': '-1439,-533,677,404','人气综合排行榜2.2': '-1890,-533,477,753','通达信金融终端': '191,41,1258,815',\
-        '东方财富': '-1878,-172,1174,699','同花顺': '-1145,-140,1145,667','sina_Market-DurationDn.exe': '-6,432,1326,423',\
-        'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUp.exe': '-6,411,1323,438','sina_Market-DurationUp.exe': '219,417,1323,438',\
-        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '110,22,1319,520','singleAnalyseUtil.exe': '-869,-524,897,359',\
+        '东方财富': '-1878,-172,1174,699','同花顺': '-1145,-140,1145,667','sina_Market-DurationDn.exe': '-6,432,1356,423',\
+        'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUP.exe': '-6,411,1353,438','sina_Market-DurationUP.exe': '219,417,1323,438',\
+        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '110,22,1319,580','singleAnalyseUtil.exe': '-869,-524,897,359',\
         'LinePower.exe': '-5,136,761,407','instock_Monitor.exe': '69,54,1319,439','chantdxpower.exe': '25,98,649,407',\
         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51',}
 
@@ -671,7 +678,7 @@ if __name__ == '__main__':
     # print(find_proc_windows('Firefox',fuzzysearch=True))
     print(find_proc_windows('Microsoft\u200b Edge',fuzzysearch=True))
 
-    proc_title = ['同花顺','Microsoft\u200b Edge','Firefox','交易信号监控','instock_Monitor','sina_Market-DurationDnUp','sina_Market-DurationUp','singleAnalyseUtil','人气综合排行榜2.22','行业跟随1.0','东兴证券','通达信金融终端','东方财富']
+    proc_title = ['sina_Market-DurationUP','sina_Market-DurationDnUP','sina_Monitor','filter_resample_Monitor','同花顺','Microsoft\u200b Edge','Firefox','交易信号监控','instock_Monitor','sina_Market-DurationDnUp','sina_Market-DurationUp','singleAnalyseUtil','人气综合排行榜2.22','行业跟随1.0','东兴证券','通达信金融终端','东方财富']
     for title in proc_title:
         FindWindowRectFromName(title)
     print('\n')

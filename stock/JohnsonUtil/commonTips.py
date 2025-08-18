@@ -1028,16 +1028,16 @@ terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '48, 506,1306,438'
                         'sina_Market-DurationSH.py': '-29, 623,1400,440',
                         'sina_Monitor-Market-LH.py': '567, 286,1307,407',
                         'sina_Monitor-Market.py': '140, 63,1400,440',
-                        'sina_Monitor.py': '109, 20, 1319, 520',
+                        'sina_Monitor.py': '109, 20, 1319, 560',
                         'singleAnalyseUtil.py': '1046, 20,897,359',
                         'LinePower.py': '9, 216, 761,407',
-                        'sina_Market-DurationDnUP.py': '602,518,1323,520',
-                        'sina_Market-DurationUP.py': '48, 506,1323,560',
+                        'sina_Market-DurationDnUP.py': '602,518,1352,464',
+                        'sina_Market-DurationUP.py': '48, 506,1353,438',
                         'instock_Monitor.py':'32, 86,1400, 359',
                         'chantdxpower.py':'86, 128, 649,407',
                         'ths-tdx-web.py':'70, 200, 159,27',
                         'pywin32_mouse.py':'70, 200, 159,27',
-                        'filter_resample_Monitor.py':'549, 244,1323,560'}
+                        'filter_resample_Monitor.py':'549, 244,1338,560'}
 
 
 
@@ -1047,7 +1047,7 @@ terminal_positionKey2K_R9000P = {'sina_Market-DurationDn.py': '-13, 601,1400,440
                         'sina_Market-DurationUP.py': '445, 503,1400,440',
                         'sina_Monitor-Market-LH.py': '521, 332,1400,420',
                         'sina_Monitor-Market.py': '271, 39,1400,440',
-                        'sina_Monitor.py': '108, 1, 1400, 520',
+                        'sina_Monitor.py': '108, 1, 1400, 560',
                         'chantdxpower.py': '53, 66,800,420', 
                         'singleAnalyseUtil.py': '673, 0,880,360',
                         'LinePower.py': '6, 216,800,420', 
@@ -2924,7 +2924,7 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                                 result.append(data)
                             else:
                                 # log.error(f'idx:{idx} is None,last code:{result[-1].code} resultCount:{len(result)}')
-                                log.error(f'idx:{idx} is None, code:{urllist[idx]} CountAll:{data_count} resultCount:{len(result)}')
+                                log.error(f'idx:{idx} is None, code: {urllist[idx]} CountAll:{data_count} resultCount:{len(result)}')
 
                     # result = list(set(result))
                     log.debug(f'result:{len(result)}')
@@ -5243,6 +5243,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
             workstatus = False
             top_temp = top_all
         code=ct.codeQuery if workstatus else ct.codeQuery_work_false
+        index_status = False
         if len(cmd) == 0:
             # code='最近两周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
             # code='周线2连阳,最近三周振幅大于10,日K收盘价大于5日线,今日涨幅排序'
@@ -5252,6 +5253,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
             #       "K线2连阳"   : "top_temp.query('close > lastp1d and  lastp1d > lastp2d and close >ma51d')",\
             #       "K线连阳"    : "top_temp.query('high > lasth1d and  lasth1d > lasth2d and low >=ma51d')",\
             #       "K线反包"    : "top_temp.query('close > lastp1d and  lastp1d < lastp2d and close >ma51d')"}
+            index_status = True
             for idx in range(len(code.keys())):
                 id_key = list(code.keys())[idx]
                 print("%s: %s %s"%(idx+1,id_key,code[id_key]))
@@ -5264,16 +5266,17 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
             # cmd=code[initkey]
             GlobalValues().setkey('tempdf',code[initkey])
             cmd=ct.codeQuery_show_cct(initkey,Market_Values,workstatus,orderby)
-        
+            # print(" ".join(list(code.keys())))
         elif len(cmd) <= 2 and cmd.isdigit() and int(cmd) < len(code.keys())+1:
             # idx = int(cmd)+1 if int(cmd) == 0 else int(cmd)
+            index_status = True
             idx = int(cmd) - 1
             # print(f"idx:{idx}")
-            idxkey =  list(code.keys())[idx]
-            print(f"{idxkey}: {code[idxkey]}")
+            initkey =  list(code.keys())[idx]
+            print(f"{initkey}: {code[initkey]}")
             # cmd = code[idxkey]
-            GlobalValues().setkey('tempdf',code[idxkey])
-            cmd=ct.codeQuery_show_cct(idxkey,Market_Values,workstatus,orderby)
+            GlobalValues().setkey('tempdf',code[initkey])
+            cmd=ct.codeQuery_show_cct(initkey,Market_Values,workstatus,orderby)
         # cmd = (cct.cct_raw_input(dir_mo.append(":")))
         # if cmd == 'e' or cmd == 'q' or len(cmd) == 0:
         if cmd == 'e' or cmd == 'q':
@@ -5448,6 +5451,21 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                             cmd = f"{cmd_head}sort_values('{orderby}', ascending=False).{cut_tail}"  
 
                     print((eval(cmd))) 
+                if index_status:
+                    idx = 0
+                    cut_d = 7
+                    for idx_k in range(len(code.keys())):
+                        id_key = list(code.keys())[idx_k]
+                        idx+=1
+                        if idx >cut_d and idx%cut_d == 1:
+                            # print("\t\t",end='')
+                            print("%s:%s "%(idx_k+1,id_key))
+                        else:
+                            print("%s:%s "%(idx_k+1,id_key),end="")
+                        # if idx%4 == 0:
+                        #     print(f'\\')
+                    print(f"{initkey}: {code[initkey]}")
+
                 print('')
             except Exception as e:
                 print(e)
