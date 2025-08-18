@@ -504,6 +504,8 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         tmp_df = get_kdate_data(code, start='', end='', ktype='D')
         if len(tmp_df) > 0:
             write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
+            log.error(f'{code_u}  file not exists: {file_path}')
+            return ds
         else:
             if initTdxdata == 0:
                 log.error("file_path:not exists code:%s" % (code))
