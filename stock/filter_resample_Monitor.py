@@ -55,10 +55,10 @@ if __name__ == "__main__":
     log.setLevel(log_level)
 
     if cct.isMac():
-        width, height = 166, 25
+        width, height = 186, 32
         cct.set_console(width, height)
     else:
-        width, height = 166, 25
+        width, height = 186, 32
         cct.set_console(width, height)
         # cct.terminal_positionKey_triton
 
@@ -456,7 +456,7 @@ if __name__ == "__main__":
                 td_code = eval(f'top_all_d.query{query_rule}')
                 code_f =  list(set(t3d_code.index) & set(tw_code.index)  & set(tm_code.index))
                 if 'nlow' in top_all.columns and 'nclose' in top_all.columns:
-                    top_all = top_all.query('open >= nlow and close >=nclose')
+                    top_all = top_all.query('open >= nlow or close >=nclose')
                 # code_f =  list(set(t3d_code.index) & set(t3d_code.index) & set(tw_code.index)  & set(tm_code.index))
                 # td_code = top_all_d.query('close > upper and ((macdlast1 > 0 and lasth1d > lasth2d and lasth1d > high4 and high > max5) or (high >= lasth1d > lasth2d > lasth3d and percent >3 and low < ma20d and close > ma20d) or (red >5))')
                     # td_code = top_all_d.query('boll >=fibl > 1 and red > 3 and close > lastp2d and high > upper')
@@ -535,7 +535,7 @@ if __name__ == "__main__":
                         #     top_temp = top_all.query('(low >= open and close > lastp1d and (per1d > 5 or per2d >5) ) or  open > high4 and (low > open*0.999 or low > lasth1d) and open > lasth1d ')
 
 
-                if len(code_f) > 10:
+                if len(code_f) > 0:
                     code_select = list(set(top_all.index.tolist()) & set(code_f))
                     if len(code_select) > 10:
                         top_temp = top_all.loc[code_select]
@@ -647,12 +647,12 @@ if __name__ == "__main__":
                 #     top_temp=top_temp[top_temp.per1d < 8]
 
                 top_dd=cct.combine_dataFrame(
-                    top_temp.loc[:, ct_MonitorMarket_Values][:10], top_temp2.loc[:, ct_MonitorMarket_Values][:5], append=True, clean=True)
+                    top_temp.loc[:, ct_MonitorMarket_Values][:15], top_temp2.loc[:, ct_MonitorMarket_Values][:5], append=True, clean=True)
                 # print cct.format_for_print(top_dd)
 
                 # table,widths = cct.format_for_print(top_dd[:10],widths=True)
                 table, widths=cct.format_for_print(
-                    top_dd.loc[[col for col in top_dd[:10].index if col in top_temp[:10].index]], widths=True)
+                    top_dd.loc[[col for col in top_dd[:15].index if col in top_temp[:15].index]], widths=True)
 
                 print(table)
                 cct.counterCategory(top_temp)

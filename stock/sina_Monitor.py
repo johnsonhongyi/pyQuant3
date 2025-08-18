@@ -169,10 +169,10 @@ if __name__ == "__main__":
     log.setLevel(log_level)
 
     if cct.isMac():
-        width, height = 166, 30
+        width, height = 176, 32
         cct.set_console(width, height)
     else:
-        width, height = 166, 30
+        width, height = 176, 32
         cct.set_console(width, height)
         # cct.terminal_positionKey_triton
 
@@ -198,7 +198,7 @@ if __name__ == "__main__":
     parserDuraton = cct.DurationArgmain()
     # resample = '3d'
     # global resample
-    cct.GlobalValues().setkey('resample','d')
+    cct.GlobalValues().setkey('resample','3d')
     # resample = cct.GlobalValues().getkey('resample')
     # duration_date = ct.duration_date_day  #80dat
     duration_date = ct.Resample_LABELS_Days[cct.GlobalValues().getkey('resample')]
@@ -408,6 +408,7 @@ if __name__ == "__main__":
                 # if st_key_sort.split()[0] != '4':
                 # import ipdb;ipdb.set_trace()
                 top_temp=top_all.copy()
+
                 if st_key_sort.split()[0] not in st_key_sort_status or cct.get_trade_date_status() == 'False':
                     pass
 
@@ -717,7 +718,7 @@ if __name__ == "__main__":
 
                 if st_key_sort in ['1']:
                     if 'nlow' in top_all.columns and 'nclose' in top_all.columns:
-                        top_all = top_all.query('open >= nlow and close >=nclose')
+                        top_all = top_all.query('open >= nlow or close >=nclose')
                     if 945 < cct.get_now_time_int() < 1445:
                         top_all = top_all[ (~top_all.index.str.contains('^43|^83|^87|^92'))]   
                     if 'lastbuy' in top_all.columns:

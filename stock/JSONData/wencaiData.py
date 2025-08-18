@@ -1328,7 +1328,7 @@ if __name__ == '__main__':
 #    type='TMT'
 #    type='国企改革'
     time_s=time.time()
-    print(search_ths_data('000002'))
+    print(search_ths_data('601162'))
     time_d=time.time()
     print(f'tims:{time_d-time_s}')
     df = get_wencai_Market_url('OLED',200)
