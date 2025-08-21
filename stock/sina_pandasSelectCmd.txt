@@ -1172,3 +1172,5 @@ top_all.query('lastp1d*0.98 < lasto1d < lastp1d*1.1 and lastp2d*0.98 < lasto2d <
 top_all.query('lastp1d*0.98 < lasto1d < lastp1d*1.1 and lastp2d*0.98 < lasto2d < lastp2d*1.1 and lastp3d*0.98 < lasto3d < lastp3d*1.1 and lastp1d > upper1')
 top_all.query('lastp1d*0.98 < lasto1d < lastp1d*1.1 and lastp2d*0.98 < lasto2d < lastp2d*1.1 and lastp1d > upper1 and lastp1d > lastp2d')
 top_all.query('lastp1d*0.98 < lasto1d < lastp1d*1.1 and lastp1d > upper1 and lastp1d > lastp2d and open > lastp1d')
+top_all.query('high > lasth1d')
+top_all.query('high > lasth1d and category.str.contains("大飞机")')
