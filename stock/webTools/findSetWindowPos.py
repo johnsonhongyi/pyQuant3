@@ -63,7 +63,7 @@ tdx_ths_positionDouble={'Edge': '64,123,910,886','交易信号监控': '1335,180
             '通达信金融终端': '30,246,1216,828','东方财富': '-1250,1257,1115,832','同花顺': '825,216,1075,864',\
             'sina_Market-DurationDn.py': '-1926,222,1326,438','sina_Market-DurationCXDN.py': '-1897,122,1329,438',\
             'sina_Market-DurationUp.py': '-1701,432,1323,438','sina_Monitor-Market-LH.py': '576,680,1307,407',\
-            'sina_Monitor.py': '150,27,1324,519','singleAnalyseUtil': '-6,727,897,359','LinePower.py': '16,176,761,402',\
+            'sina_Monitor.py': '150,27,1350,519','singleAnalyseUtil': '-6,727,897,359','LinePower.py': '16,176,761,402',\
             'instock_Monitor.py': '657,31,1400,359','chantdxpower.py': '43,138,649,407','ths-tdx-web.py': '70,200,59,51',\
             'sina_Market-DurationDnUP': '600,523,1326,560','pywin32_mouse.py': '-32000,-32000,59,51'}
 
@@ -75,7 +75,7 @@ tdx_ths_position3072_old={'Edge': '27,72,910,798','交易信号监控': '1335,18
         '通达信金融终端': '191,41,1258,815','东方财富': '122,50,1187,806','同花顺': '79,74,1145,772',\
         'sina_Market-DurationDn.py': '-6,432,1326,423','sina_Market-DurationCXDN.py': '10,313,1329,438',\
         'sina_Market-DurationUp.py': '243,432,1323,438','sina_Monitor-Market-LH.py': '264,306,1307,407',\
-        'sina_Monitor.py': '137,28,1319,560','singleAnalyseUtil.py': '647,0,895,358','LinePower.py': '26,150,761,407',\
+        'sina_Monitor.py': '137,28,1350,560','singleAnalyseUtil.py': '647,0,895,358','LinePower.py': '26,150,761,407',\
         'instock_Monitor.py': '74,54,1319,439','chantdxpower.py': '33,115,649,407','ths-tdx-web.py': '70,200,59,51',\
         'pywin32_mouse.py': '-25600,-25600,59,51'}
 
@@ -90,10 +90,10 @@ tdx_ths_position3072_old={'Edge': '27,72,910,798','交易信号监控': '1335,18
 #双屏显示全部
 tdx_ths_position3072={'Edge': '25,72,913,798','交易信号监控': '-541,-107,566,389','东兴证券': '51,205,1083,717',\
         '行业跟随1': '-677,68,677,404','人气综合排行榜2.2': '1059,0,477,753','通达信金融终端': '191,41,1258,815',\
-        '东方财富': '-1131,-195,1098,634','同花顺': '-1514,-160,995,598','sina_Market-DurationDn.exe': '-6,432,1356,423',\
-        'sina_Market-DurationCXDN.exe': '10,313,1359,438','sina_Market-DurationDnUP.exe': '-6,432,1353,438','sina_Market-DurationUP.exe': '243,432,1323,438',\
-        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '137,28,1319,580','singleAnalyseUtil.exe': '-889,-426,895,358',\
-        'LinePower.exe': '-6,186,761,407','instock_Monitor.exe': '74,54,1319,439','chantdxpower.exe': '-1507,-426,649,273',\
+        '东方财富': '-1154,-247,1098,634','同花顺': '-1514,-160,995,598','sina_Market-DurationDn.exe': '-6,432,1356,423',\
+        'sina_Market-DurationCXDN.exe': '10,313,1359,438','sina_Market-DurationDnUP.exe': '-6,432,1353,438','sina_Market-DurationUP.exe': '230,432,1336,438',\
+        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '137,28,1350,520','singleAnalyseUtil.exe': '-889,-426,895,358',\
+        'LinePower.exe': '-6,186,761,407','instock_Monitor.exe': '74,54,1340,439','chantdxpower.exe': '-1507,-426,649,273',\
         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-25600,-25602,59,51',}
 
 
@@ -110,7 +110,7 @@ tdx_ths_position3456={'Edge': '25,72,913,798','交易信号监控': '-526,-296,5
         '行业跟随1': '-1439,-533,677,404','人气综合排行榜2.2': '-1890,-533,477,753','通达信金融终端': '191,41,1258,815',\
         '东方财富': '-1878,-172,1174,699','同花顺': '-1145,-140,1145,667','sina_Market-DurationDn.exe': '-6,432,1356,423',\
         'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUP.exe': '-6,411,1353,438','sina_Market-DurationUP.exe': '219,417,1323,438',\
-        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '110,22,1319,580','singleAnalyseUtil.exe': '-869,-524,897,359',\
+        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '110,22,1350,520','singleAnalyseUtil.exe': '-869,-524,897,359',\
         'LinePower.exe': '-5,136,761,407','instock_Monitor.exe': '69,54,1319,439','chantdxpower.exe': '25,98,649,407',\
         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51',}
 
