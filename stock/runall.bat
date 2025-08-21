@@ -12,6 +12,8 @@ TIMEOUT /T 5 /NOBREAK
 IF NOT EXIST  G:\tdx_last_df.h5 (
     TIMEOUT /T 200 /NOBREAK
 )
+set TDX=G:\tdx_last_df.h5
+
 
 for %%i in ("%TDX%") do (
 set indexdx=%%~zi
@@ -22,7 +24,7 @@ if "%indexdx%"=="" (set indexdx=4096)
 if not "%indexdx%"==""  if %indexdx% LEQ  4096000 (TIMEOUT /T 200 /NOBREAK)
 
 
-set TDX=G:\tdx_last_df.h5
+
 
 TIMEOUT /T 5 /NOBREAK
 

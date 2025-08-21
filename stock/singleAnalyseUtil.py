@@ -633,7 +633,7 @@ if __name__ == '__main__':
     dl = 60
     fibc = 3
     fibl = fibonacciCount(['999999', '399001', '399006'], dl=dl)
-    percentDuration = 0.5
+    percentDuration = 0.1
     cct.get_terminal_Position(position=sys.argv[0])
 
     blkname = '061.blk'

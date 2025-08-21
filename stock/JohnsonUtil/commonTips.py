@@ -2865,14 +2865,14 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
             cpu_co = 1
         else:
             cpu_co = int(round(data_count/100,0))
-        # cpu_used = int(cpu_count()/2)  + 1
-        cpu_used = int(cpu_count()) - 2
+        cpu_used = int(cpu_count()/2)  + 1
+        # cpu_used = int(cpu_count()) - 2
         pool_count = (cpu_used) if cpu_co > (cpu_used) else cpu_co
         log.debug(f'count:{data_count} pool_count:{pool_count} cpu_co:{cpu_co}')
         # pool_count = (cpu_count()-2) if cpu_co > (cpu_count()-2) else cpu_co
         if  cpu_co > 1 and 1300 < get_now_time_int() < 1500:
-            # pool_count = int(cpu_count() / 2) + 1
-            pool_count = int(cpu_count()) - 3
+            pool_count = int(cpu_count() / 2) + 1
+            # pool_count = int(cpu_count()) - 3
         if len(kwargs) > 0 :
                 # pool = ThreadPool(12)
                 log.debug(f'cmd:{cmd} kwargs:{kwargs}')
@@ -4436,6 +4436,14 @@ def MoniterArgmain():
 #     # print arg_t.dl
 #     return arg_t
 
+def writeArgmain_block():
+    # from ConfigParser import ConfigParser
+    # import shlex
+    parser = argparse.ArgumentParser()
+    parser.add_argument('code', type=str, nargs='?', help='w or a or all')
+    parser.add_argument('dl', nargs='?', type=str, help='1,5,10', default=ct.writeCount)
+    parser.add_argument('blk', nargs='?', type=str, help='064,065', default=None)
+    return parser
 
 def writeArgmain():
     # from ConfigParser import ConfigParser
@@ -5345,9 +5353,11 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                     continue
                     
             if len(tempdf) >  0:
-                args = writeArgmain().parse_args(cmd.split())
+                args = writeArgmain_block().parse_args(cmd.split())
                 codew = WriteCountFilter_cct(
                     tempdf, 'ra', writecount=args.dl)
+                if args.blk is not None:
+                    block_path = get_tdx_dir_blocknew() + f'{args.blk}.blk'
                 if args.code == 'a':
                     write_to_blocknew(block_path, codew)
                     # sl.write_to_blocknew(all_diffpath, codew)
