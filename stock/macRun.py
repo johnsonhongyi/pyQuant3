@@ -118,12 +118,14 @@ osascript -e
 # os.system("osascript -e '%s'"%(cmd))
 rcmd = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant3/stock;/usr/local/bin/python %s"'
 rcmd_bin = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant3/stock;./%s"'
+rcmd_bin = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant3/stock;/usr/local/bin/python %s"'
 rcmdnatclip = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/share_controller/webTools/natclip/natclip;/usr/local/bin/python %s"'
 
 # rcmd2 = 'tell application "Terminal" to do script "cd /Users/Johnson/Documents/Quant/pyQuant/stock;python2 %s"'
 
 # rproc = ['sina_Monitor.py','instock_Monitor.py' ,'singleAnalyseUtil.py','sina_Market-DurationUP.py','LinePower.py','sina_Market-DurationDnUP.py']               
 rproc = ['sina_Monitor.bin','instock_Monitor.bin' ,'sina_Market-DurationUP.bin','LinePower.bin','sina_Market-DurationDnUP.bin','singleAnalyseUtil.bin']               
+rproc = ['sina_Monitor.py','instock_Monitor.py' ,'sina_Market-DurationUP.py','LinePower.py','sina_Market-DurationDnUP.py','singleAnalyseUtil.py']               
 
 # rproc = ['sina_Market-DurationDn.py' ,'singleAnalyseUtil.py','sina_Market-DurationCXDN.py','sina_Monitor.py','sina_Market-DurationUP.py']               
 # cmdRun_launch = '''cd /Users/Johnson/Documents/Quant/pyQuant/stock;
@@ -311,8 +313,6 @@ def doScript(scriptn):
     return stdout_output.decode('utf-8')
 
 def getPosition(cmd=None, position=None,close=False):
-    # cmd = cmd.replace('.py','')
-    # cmd = cmd.replace('.py','.bin')
     count = doScript(scriptcount)
     if int(count) > 0:
         for n in range(1, int(count)+1):
@@ -360,10 +360,15 @@ def getPosition(cmd=None, position=None,close=False):
 
 
 positionKey = cct.get_system_postionKey()
+if rcmd_bin.find('python') > 0:
+    nuitka_status = False
+else:
+    nuitka_status = True
+
 print("position:%s"%(positionKey))
 
 def setPosition(cmd=None, position=None):
-    if cmd is not None:
+    if cmd is not None and nuitka_status:
         cmd = cmd.replace('.py','.bin')
     count = doScript(scriptcount)
     # print count
