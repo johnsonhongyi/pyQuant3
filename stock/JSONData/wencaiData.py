@@ -1040,8 +1040,10 @@ def get_wencai_data(dm,categorylimit=16):
     if len(dm) > 1:
         df = search_ths_data(dm.index.tolist())
         if df is not None and len(df) > 0:
-            # df['category'] = df['category'].apply(lambda x:str(x).replace('\n',''))
-            df['category'] = df['category'].apply(lambda x:str(x)[:categorylimit])
+            for co in ['融资融券','专精特新']:
+                df['category'] = df['category'].apply(lambda x:x.replace(co,''))
+        #     # df['category'] = df['category'].apply(lambda x:str(x).replace('\n',''))
+        #     df['category'] = df['category'].apply(lambda x:str(x)[:categorylimit])
     return df
 
 def get_wencai_data_old(dm, market='wencai', days=120, pct=True):
@@ -1246,6 +1248,7 @@ def search_ths_data(code,category=False):
         df_ths = df_ths.loc[:,['股票代码','股票简称','所属概念', '所属同花顺行业']]
         df_ths["code"] = df_ths["股票代码"].map(lambda x: x.split('.')[0])
         df_ths.rename(columns={'所属概念': 'category'}, inplace=True)
+        df_ths.rename(columns={'所属同花顺行业': 'hangye'}, inplace=True)
         # df_ths['category'] = df_ths['category'].apply(lambda x:str(x)[:15])
         df_ths = df_ths.set_index('code')
         cct.GlobalValues().setkey('df_ths',df_ths)

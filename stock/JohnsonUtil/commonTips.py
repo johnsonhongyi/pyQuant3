@@ -197,6 +197,7 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=F
         else:
             log.info('df is None')
         alist = df.columns.tolist()
+        df['category'] = df['category'].apply(lambda x:str(x)[:16])
         if header:
 
             table = PrettyTable([''] + alist )
@@ -5403,15 +5404,19 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                     #     elif re.findall(r'^[a-z\d]*', orderby_t)[0] == orderby_t:
                     #         # doubleCmd = True
                     #         cmd = cmd[:cmd.rfind(orderby_t)]
-
+                    re_words = re.compile(u"[\u4e00-\u9fa5]+")
+                    if len(cmd_list) == 1 and len(re.findall(re_words, cmd)) > 0:
+                        cmd = f'top_all {cmd}'
+                        cmd_list = cmd.split()
                     category_search = False
 
                     if len(cmd_list) > 1 and cmd.find('category') < 0:
                         orderby_t = cmd_list[-1]
-                        re_words = re.compile(u"[\u4e00-\u9fa5]+")
                         if len(re.findall(re_words, orderby_t)) > 0:
                             category_search = True
                             search_key = f'category.str.contains("{cmd_list[-1]}")'
+                            if cmd.find('query') < 0:
+                                cmd = f"{cmd_list[0]}.query('close > 0') {orderby_t}"
                             cmd = cmd[:cmd.rfind(orderby_t)].replace("')",f" and {search_key}')")
                             print(f'cmd: {cmd}')
                         else: 
@@ -5898,6 +5903,9 @@ def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean
 
     '''
     times = time.time()
+    if maindf is None or len(maindf) < 1:
+        log.error(f'maindf is None:{maindf}')
+        return maindf
     if subdf is  None or len(subdf) == 0:
         return maindf
 
