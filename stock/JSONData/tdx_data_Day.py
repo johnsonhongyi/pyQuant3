@@ -2420,12 +2420,14 @@ def get_sina_datadf_cnamedf(code,df,index=False,categorylimit=16):
     dm = get_sina_data_df(code)
     # ths = wcd.search_ths_data(code)
     ths = wcd.get_wencai_data(df,categorylimit=categorylimit)
+    import ipdb;ipdb.set_trace()
+
     if 'close' not in df.columns:
         dd = cct.combine_dataFrame(df,dm.loc[:,['close','name']])
     else:
         dd = cct.combine_dataFrame(df,dm['name'])
     if ths is not None and 'category' in ths.columns:
-        dd = cct.combine_dataFrame(dd,ths['category'])
+        dd = cct.combine_dataFrame(dd,ths,loc[:['category','hangye']])
     # cname = sina_data.Sina().get_code_cname(code)
     return dd
 
@@ -4551,7 +4553,8 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
             # tdxdata = compute_top10_count(tdxdata)
             wcdf = wcd.get_wencai_data(top_all.name)
             wcdf['category'] = wcdf['category'].apply(lambda x:x.replace('\r','').replace('\n',''))
-            tdxdata = cct.combine_dataFrame(tdxdata, wcdf.loc[:, ['category']])
+            # wcdf['hangye'] = wcdf['hangye'].apply(lambda x:x.replace('\r','').replace('\n',''))
+            tdxdata = cct.combine_dataFrame(tdxdata, wcdf.loc[:, ['category','hangye']])
             # tdxdata = cct.combine_dataFrame(tdxdata, top_all.loc[:, ['name']])
             if cct.GlobalValues().getkey('tdx_Index_Tdxdata') is None:
                 if tdx_index_code_list[0] in tdxdata.index:
@@ -4643,7 +4646,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     top_all['topR']=top_all['topR'].apply(lambda x:round(x,1))
     # top_all = top_all.fillna(0)         
     # tdxdata = tdxdata.fillna(0)
-    if  top_all.dff[0] == 0 or top_all.close[0] == top_all.lastp1d[0]:            
+    if ('dff' in top_all.columns and top_all.dff[0] == 0) or top_all.close[0] == top_all.lastp1d[0]:            
         top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top_all['buy'].values, top_all['df2'].values)))
 
     for col in co2int:
