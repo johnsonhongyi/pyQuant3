@@ -843,7 +843,8 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             # df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
             # df['high4'] = df.high[-5:-1].max()
             df['low4'] = df.low[-5:-1].min()
-            df['lastdu4'] = (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
+            df['lastdu4'] = ((df['high'] - df['low']) / df['close'] * 100).map(lambda x: round(x, 1))
+             # (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
 
 
 
@@ -863,7 +864,8 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             # df['high4'] = df.high[-5:-1].max()
             df['low4'] = df.low[-5:-1].min()
             # print(df.high4[0],(df['low4'][0]))
-            df['lastdu4'] = (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
+            df['lastdu4'] = ((df['high'] - df['low']) / df['close'] * 100).map(lambda x: round(x, 1))
+            # df['lastdu4'] = (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
 
     if 'date' in df.columns:
         df = df.set_index('date')
@@ -2420,14 +2422,12 @@ def get_sina_datadf_cnamedf(code,df,index=False,categorylimit=16):
     dm = get_sina_data_df(code)
     # ths = wcd.search_ths_data(code)
     ths = wcd.get_wencai_data(df,categorylimit=categorylimit)
-    import ipdb;ipdb.set_trace()
-
     if 'close' not in df.columns:
         dd = cct.combine_dataFrame(df,dm.loc[:,['close','name']])
     else:
         dd = cct.combine_dataFrame(df,dm['name'])
     if ths is not None and 'category' in ths.columns:
-        dd = cct.combine_dataFrame(dd,ths,loc[:['category','hangye']])
+        dd = cct.combine_dataFrame(dd,ths.loc[:,['category','hangye']])
     # cname = sina_data.Sina().get_code_cname(code)
     return dd
 
@@ -3321,9 +3321,9 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     if resample == 'd':
         # red_cout = eval(f"df.query('close >={idx_close}  and high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
-        red_cout = eval(f"df.query('high > high.shift(1) or (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
+        red_cout = eval(f"df.query('close > ma5d or high > high.shift(1) or (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
     else:
-        red_cout = eval(f"df.query('high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.03) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.03 ))')")
+        red_cout = eval(f"df.query('close > ma5d or high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.03) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.03 ))')")
     log.debug('red_cout:%s idx_close:%s'%(red_cout,idx_close))
     # red_cout = eval(f"df.query('close >={idx_close}  and high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
     df2 = df[df.index >= idx_date]
@@ -3573,6 +3573,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     # dd['lastdu'] = df[-4:]['lastdu'].max()
     dd['lastdu'] = df[-ct.tdx_high_da:]['lastdu'].mean()
+    dd['lastdu'] = dd['lastdu'] .apply(lambda x:round(x,1))
     dd['perlastp'] = df['perlastp']
 
     dd = compute_power_tdx_df(df, dd)
@@ -5133,7 +5134,7 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
         period_type = period_day
 
     indextype = True if stock_data.index.dtype == 'datetime64[ns]' else False
-    #
+    
     if 915 < cct.get_now_time_int() < 1500 and cct.get_trade_date_status() == 'True' and  cct.get_work_day_status():
     # if cct.get_work_day_status() and 915 < cct.get_now_time_int() < 1500:
         stock_data = stock_data[stock_data.index < cct.get_today()]
@@ -5146,7 +5147,6 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
         stock_data.index = pd.to_datetime(stock_data.index, format='%Y-%m-%d')
     else:
         log.error("index.name not date,pls check:%s" % (stock_data[:1]))
-
 
     period_stock_data = stock_data.resample(period_type).last()
     # ÖÜÊý¾ÝµÄÃ¿ÈÕchangeÁ¬ÐøÏà³Ë
@@ -5401,7 +5401,7 @@ if __name__ == '__main__':
     code = '002238'
     code = '002786'
     code = '002460'
-    code = '603887'
+    code = '300085'
     # code = '600240'
     # code = '600890'
     # code = '002865'
@@ -5433,7 +5433,9 @@ if __name__ == '__main__':
     
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
 
-    # df2 = get_tdx_Exp_day_to_df(code,dl=10, end='20221116', newdays=0, resample='d')
+    df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='w' )
+    print(df[-10:])
+    print(f'3d per1d:{df.per1d[0]}  per2d:{df.per2d[0]}  per3d:{df.per3d[0]}  per4d:{df.per4d[0]}  per5d:{df.per5d[0]}  ')
     # df = get_tdx_Exp_day_to_df(code, dl=1)
     # 
     # dm = get_sina_data_df(code)
@@ -5467,7 +5469,7 @@ if __name__ == '__main__':
     code='600111'
     code='600392'
     code='688189'
-    code='300304'
+    code='300085'
     code_l=['301287', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
@@ -5491,7 +5493,7 @@ if __name__ == '__main__':
     # df = get_tdx_append_now_df_api('001236')
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
-
+    print(f'code:{code}')
     print(f'topR-d:{df2.topR} red:{df2.red} lastdu:{df2.lastdu} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl}  macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )

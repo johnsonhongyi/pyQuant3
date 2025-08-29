@@ -7,14 +7,106 @@ import time
 
 from mouseMonitor.displayDetction import  Display_Detection
 
+import re
+import win32gui
+def find_window_by_title(target_title: str):
+    """
+    Finds a window by a partial match of its title.
+    Returns a list of (handle, title) tuples for all matching windows.
+    """
+    found_windows = []
+    def enum_handler(hwnd, _):
+        if win32gui.IsWindowVisible(hwnd):
+            title = win32gui.GetWindowText(hwnd)
+            # Use a case-insensitive regex search for the target title
+            if re.search(target_title, title, re.IGNORECASE):
+                found_windows.append((hwnd, title))
+    
+    win32gui.EnumWindows(enum_handler, None)
+    return found_windows
 
+# # Example usage: Find all windows with "Chrome" in their title
+# target = "AutoHotKey"
+# target = "通达信金融终端"
+# matching_windows = find_window_by_title(target)
+# print(matching_windows)
+
+def find_window_by_title_safe(target_title: str):
+    """
+    通过对目标标题使用 re.escape()，安全地查找包含空格和括号的窗口。
+    """
+    found_windows = []
+    # 使用 re.escape() 自动转义所有特殊字符
+    escaped_title = re.escape(target_title)
+    # 使用正则表达式匹配，并忽略大小写
+    title_pattern = re.compile(escaped_title, re.IGNORECASE)
+
+    def enum_handler(hwnd, _):
+        if win32gui.IsWindowVisible(hwnd):
+            window_title = win32gui.GetWindowText(hwnd)
+            # 使用编译后的模式进行搜索
+            if title_pattern.search(window_title):
+                found_windows.append((hwnd, window_title))
+    
+    win32gui.EnumWindows(enum_handler, None)
+    return found_windows
+
+# # 示例：查找标题为 "Visual Studio Code (Admin)" 的窗口
+# target = "通达信金融终端(开心果交易版) 副屏二"
+# target = "AutoHotKey"
+# matching_windows = find_window_by_title_safe(target)
+
+# if matching_windows:
+#     print(f"找到 {len(matching_windows)} 个包含 '{target}' 的窗口:")
+#     for hwnd, title in matching_windows:
+#         print(f"  句柄: {hex(hwnd)}, 标题: \"{title}\"")
+# else:
+#     print(f"未找到包含 '{target}' 的窗口。")
+
+import psutil
+def find_processes_by_name_background(process_name: str):
+    """
+    根據程序名稱查找所有正在運行的程序。
+    返回一個匹配的 psutil.Process 對象列表。
+    """
+    matching_processes = []
+    # 使用 re.escape() 自动转义所有特殊字符
+    escaped_title = re.escape(process_name)
+    # 使用正则表达式匹配，并忽略大小写
+    title_pattern = re.compile(escaped_title, re.IGNORECASE)
+
+    for proc in psutil.process_iter(['name', 'pid']):
+        try:
+
+            # if proc.info['name'].lower() == process_name.lower():
+            if title_pattern.search(proc.info['name']):
+                # found_windows.append((hwnd, proc))
+                matching_processes.append(proc)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    return matching_processes
+
+# # 示例：查找所有名為 "notepad.exe" 的程序
+# target_name = "AutoHotKey"
+# found_procs = find_processes_by_name(target_name)
+
+# if found_procs:
+#     print(f"找到 {len(found_procs)} 個名為 '{target_name}' 的程序:")
+#     for proc in found_procs:
+#         print(f"  PID: {proc.pid}, Name: {proc.name()}, 狀態: {proc.status()}")
+# else:
+#     print(f"未找到名為 '{target_name}' 的程序。")
+
+# import os,sys
+# sys.path.append("..")
+# from JohnsonUtil import commonTips as cct
 
 #hide 'ths-tdx-web.py': '-32000,-32000,199,34','pywin32_mouse.py': '-32000,-32000,199,34'
 #triton 1.25 dpi
 # tdx_ths_position1536={'通达信': '659,72,878,793','东方财富': '268,0,1067,833','同花顺': '0,20,1075,864','Firefox': '100,67,629,779'}
 tdx_ths_position4K1536={'Edge': '64,123,910,886','Firefox': '343,79,1436,931','交易信号监控': '1335,180,566,389',\
         '东兴证券': '51,205,1083,717','行业跟随1': '29,220,677,404','人气综合排行榜2.2':'168,0,477,753',\
-        '通达信金融终端': '233,0,1213,866','东方财富': '202,0,1187,833','同花顺': '79,74,1145,772',\
+        '通达信金融终端(开心果交易版) 副屏一': '984,-815,1258,815','通达信金融终端(开心果交易版)V2025': '233,0,1213,866','东方财富': '202,0,1187,833','同花顺': '79,74,1145,772',\
         'sina_Market-DurationDn.py': '-6,432,1326,423','sina_Market-DurationCXDN.py': '10,313,1329,438',\
         'sina_Market-DurationUp.py': '243,432,1323,438','sina_Monitor-Market-LH.py': '264,306,1307,407',\
         'sina_Monitor.py': '137,28,1319,560','singleAnalyseUtil.py': '647,0,895,358','LinePower.py': '26,150,761,407',\
@@ -22,7 +114,7 @@ tdx_ths_position4K1536={'Edge': '64,123,910,886','Firefox': '343,79,1436,931','�
         'pywin32_mouse.py': '-25600,-25600,59,51'}
 
 tdx_ths_position1536={'Edge': '25,143,814,718','交易信号监控': '1335,180,566,389','东兴证券': '51,205,1083,717',\
-        '行业跟随1': '29,220,677,404','人气综合排行榜2.2': '168,0,477,753','通达信金融终端': '191,41,1258,815',\
+        '行业跟随1': '29,220,677,404','人气综合排行榜2.2': '168,0,477,753','通达信金融终端(开心果交易版) 副屏一': '984,-815,1258,815','通达信金融终端(开心果交易版)V2025': '191,41,1258,815',\
         '东方财富': '407,72,1113,790','同花顺': '62,92,1189,772','sina_Market-DurationDn.exe': '-6,432,1326,423',\
         'sina_Market-DurationCXDN.exe': '10,313,1359,438','sina_Market-DurationUP': '-6,432,1353,438','sina_Market-DurationDnUP': '278,406,1352,464',\
         'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '109,20,1356,520','singleAnalyseUtil.exe': '683,16,897,359',\
@@ -43,7 +135,7 @@ tdx_ths_position1536={'Edge': '25,143,814,718','交易信号监控': '1335,180,5
 # 4K LG
 # tdx_ths_position1920={'Edge': '64,123,910,886','Firefox': '343,79,1436,931','交易信号监控': '1335,180,566,389',\
 tdx_ths_position1920={'Edge': '64,123,910,886','交易信号监控': '1335,180,566,389',\
-        '行业跟随1': '29,220,677,404','人气综合排行榜2.2':'168,0,477,753','通达信金融终端': '30,246,1385,828',\
+        '行业跟随1': '29,220,677,404','人气综合排行榜2.2':'168,0,477,753','通达信金融终端(开心果交易版) 副屏一': '984,-815,1258,815','通达信金融终端(开心果交易版)V2025': '30,246,1385,828',\
         '东方财富': '655,261,1266,804','同花顺': '198,119,1659,785','东兴证券': '52,52,1283,704',\
         'sina_Market-DurationDn.py': '-7,664,1332,423','sina_Market-DurationCXDN.py': '-7,326,1329,423',\
         'sina_Market-DurationUp.py': '606,664,1321,423','sina_Monitor-Market-LH.py': '662,318,1307,409',\
@@ -60,7 +152,7 @@ tdx_ths_position1920={'Edge': '64,123,910,886','交易信号监控': '1335,180,5
 # tdx_ths_positionDouble={'Edge': '64,123,910,886','Firefox': '343,79,1436,931','交易信号监控': '1335,180,566,389','行业跟随1.0':'-676,1257,677,404',\
 tdx_ths_positionDouble={'Edge': '64,123,910,886','交易信号监控': '1335,180,566,389','行业跟随1.0':'-676,1257,677,404',\
             '东兴证券': '-1536,1257,1100,842','人气综合排行榜2.22': '-477,1357,478,753',\
-            '通达信金融终端': '30,246,1216,828','东方财富': '-1250,1257,1115,832','同花顺': '825,216,1075,864',\
+            '通达信金融终端(开心果交易版) 副屏一': '984,-815,1258,815','通达信金融终端(开心果交易版)V2025': '30,246,1216,828','东方财富': '-1250,1257,1115,832','同花顺': '825,216,1075,864',\
             'sina_Market-DurationDn.py': '-1926,222,1326,438','sina_Market-DurationCXDN.py': '-1897,122,1329,438',\
             'sina_Market-DurationUp.py': '-1701,432,1323,438','sina_Monitor-Market-LH.py': '576,680,1307,407',\
             'sina_Monitor.py': '150,27,1350,519','singleAnalyseUtil': '-6,727,897,359','LinePower.py': '16,176,761,402',\
@@ -72,7 +164,7 @@ tdx_ths_positionDouble={'Edge': '64,123,910,886','交易信号监控': '1335,180
 #startTEST
 tdx_ths_position3072_old={'Edge': '27,72,910,798','交易信号监控': '1335,180,566,389',\
         '东兴证券': '51,205,1083,717','行业跟随1': '29,220,677,404','人气综合排行榜2.2':'168,0,477,753',\
-        '通达信金融终端': '191,41,1258,815','东方财富': '122,50,1187,806','同花顺': '79,74,1145,772',\
+        '通达信金融终端(开心果交易版)V2025': '191,41,1258,815','东方财富': '122,50,1187,806','同花顺': '79,74,1145,772',\
         'sina_Market-DurationDn.py': '-6,432,1326,423','sina_Market-DurationCXDN.py': '10,313,1329,438',\
         'sina_Market-DurationUp.py': '243,432,1323,438','sina_Monitor-Market-LH.py': '264,306,1307,407',\
         'sina_Monitor.py': '137,28,1350,560','singleAnalyseUtil.py': '647,0,895,358','LinePower.py': '26,150,761,407',\
@@ -89,7 +181,7 @@ tdx_ths_position3072_old={'Edge': '27,72,910,798','交易信号监控': '1335,18
 
 #双屏显示全部
 tdx_ths_position3072={'Edge': '25,72,913,798','交易信号监控': '-541,-107,566,389','东兴证券': '51,205,1083,717',\
-        '行业跟随1': '-677,68,677,404','人气综合排行榜2.2': '1059,0,477,753','通达信金融终端': '191,41,1258,815',\
+        '行业跟随1': '-677,68,677,404','人气综合排行榜2.2': '1059,0,477,753','通达信金融终端(开心果交易版) 副屏一': '984,-815,1258,815','通达信金融终端(开心果交易版)V2025': '191,41,1258,815',\
         '东方财富': '-1154,-247,1098,634','同花顺': '-1514,-160,995,598','sina_Market-DurationDn.exe': '-6,432,1356,423',\
         'sina_Market-DurationCXDN.exe': '10,313,1359,438','sina_Market-DurationDnUP.exe': '-6,432,1353,438','sina_Market-DurationUP.exe': '230,432,1336,438',\
         'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '137,28,1350,520','singleAnalyseUtil.exe': '-889,-426,895,358',\
@@ -97,7 +189,7 @@ tdx_ths_position3072={'Edge': '25,72,913,798','交易信号监控': '-541,-107,5
         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-25600,-25602,59,51',}
 
 tdx_ths_position3840={'Edge': '25,72,913,798','交易信号监控': '-541,-107,566,389','东兴证券': '51,205,1083,717',\
-        '行业跟随1': '-677,68,677,404','人气综合排行榜2.2': '1059,0,477,753','通达信金融终端': '191,41,1258,815',\
+        '行业跟随1': '-677,68,677,404','人气综合排行榜2.2': '1059,0,477,753','通达信金融终端(开心果交易版) 副屏一': '984,-815,1258,815','通达信金融终端(开心果交易版)V2025': '191,41,1258,815',\
         '东方财富': '-1154,-247,1098,634','同花顺': '-1514,-160,995,598','sina_Market-DurationDn.exe': '-6,432,1356,423',\
         'sina_Market-DurationCXDN.exe': '10,313,1359,438','sina_Market-DurationDnUP.exe': '-6,432,1353,438','sina_Market-DurationUP.exe': '230,432,1336,438',\
         'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '137,28,1350,520','singleAnalyseUtil.exe': '-889,-426,895,358',\
@@ -123,8 +215,8 @@ tdx_ths_position3840={'Edge': '25,72,913,798','交易信号监控': '-541,-107,5
 #         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51',}
 
 
-tdx_ths_position3456={'Edge': '25,66,913,798','交易信号监控': '1361,-872,566,389','东兴证券': '51,205,1083,717',\
-        '行业跟随1': '-1439,-533,677,404','人气综合排行榜2.2': '47,41,478,753','通达信金融终端': '225,24,1258,815',\
+tdx_ths_position3456={'Edge': '25,66,913,798','交易信号监控': '1335,180,566,389','东兴证券': '51,205,1083,717',\
+        '行业跟随1': '-1439,-533,677,404','人气综合排行榜2.2': '47,41,478,753','通达信金融终端(开心果交易版) 副屏一': '984,-815,1258,815','通达信金融终端(开心果交易版)V2025': '225,24,1258,815',\
         '东方财富': '482,-788,1440,790','同花顺': '0,-785,1440,785','sina_Market-DurationDn.exe': '-6,432,1356,423',\
         'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUP.exe': '-6,411,1353,438','sina_Market-DurationUP.exe': '198,417,1344,438',\
         'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '-7,-1080,1345,519','singleAnalyseUtil.exe': '1057,-1080,897,359',\
@@ -132,15 +224,68 @@ tdx_ths_position3456={'Edge': '25,66,913,798','交易信号监控': '1361,-872,5
         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51',}
 
 #samsung and triton500
-tdx_ths_position4644={'Edge': '50,70,914,800','交易信号监控': '2549,-738,566,389','东兴证券': '51,205,1083,717',\
-        '行业跟随1': '2535,-1012,677,404','人气综合排行榜2.2': '18,84,478,753','通达信金融终端': '234,21,1258,815',\
+tdx_ths_position4644_noPos={'Edge': '50,70,914,800','交易信号监控': '2549,-738,566,389','东兴证券': '51,205,1083,717',\
+        '行业跟随1': '2535,-1012,677,404','人气综合排行榜2.2': '18,84,478,753','通达信金融终端(开心果交易版) 副屏一': '984,-815,1258,704',\
+        '通达信金融终端(开心果交易版) 副屏二': '984,-859,1258,704','通达信金融终端(开心果交易版) 副屏三': '984,-815,1199,704','通达信金融终端(开心果交易版)V2025': '234,21,1258,815',\
         '东方财富': '1670,-770,1440,790','同花顺': '1188,-770,1440,785','sina_Market-DurationDn.exe': '-6,432,1356,423',\
         'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUP.exe': '-6,411,1353,438','sina_Market-DurationUP.exe': '198,417,1344,438',\
-        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '1181,-1080,1345,519','singleAnalyseUtil.exe': '2195,-1080,897,359',\
-        'LinePower.exe': '-6,136,761,407','instock_Monitor.exe': '69,54,1319,439','chantdxpower.exe': '25,98,649,407',\
+        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '1210,-1080,1345,519','singleAnalyseUtil.exe': '2196,-1080,897,359',\
+        'LinePower.exe': '-6,136,761,407','instock_Monitor.exe': '69,54,1338,439','chantdxpower.exe': '25,98,649,407',\
         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51',}
 
-# tdx_ths_position={'通达信金融终端': '-1334,72,878,793','东方财富': '21,249,1067,833','同花顺': '-1553,19,1075,864','Firefox': '-1910,5,602,864','sina_Market-DurationDn.py': '-1902,226,1306,438','sina_Market-DurationCXDN.py': '-1871,90,1329,438','sina_Market-DurationUP.py': '-1818,411,1323,438','sina_Monitor-Market-LH.py': '576,680,1307,407','sina_Monitor.py': '136,25,1321,519','singleAnalyseUtil.py': '949,0,897,359','LinePower.py': '55,233,761,407','instock_Monitor.py': '78,108,1319,439','chantdxpower.py': '108,232,649,407','ths-tdx-web.py': '88,250,313,199','pywin32_mouse.py': '88,250,217,151'}
+tdx_ths_position4644={'Edge': '50,70,914,800','交易信号监控': '2549,-738,566,389','东兴证券': '51,205,1083,717',\
+        '行业跟随1': '2535,-1012,677,404','人气综合排行榜2.2': '18,84,478,753','通达信金融终端(开心果交易版) 副屏一': '1260,-829,1174,655',\
+        '通达信金融终端(开心果交易版) 副屏二': '1303,-649,1150,620','通达信金融终端(开心果交易版) 副屏三': '1004,-734,1199,704','通达信金融终端(开心果交易版)V2025': '234,21,1258,815',\
+        '东方财富': '1670,-770,1440,790','同花顺': '1188,-770,1440,785','sina_Market-DurationDn.exe': '-6,432,1356,423',\
+        'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUP.exe': '-6,411,1353,438','sina_Market-DurationUP.exe': '198,417,1344,438',\
+        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '1210,-1080,1345,519','singleAnalyseUtil.exe': '2196,-1080,897,359',\
+        'LinePower.exe': '-6,136,761,407','instock_Monitor.exe': '69,54,1338,439','chantdxpower.exe': '25,98,649,407',\
+        'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51',}
+
+#LG + samsung  + triton
+tdx_ths_position5376_Triton={'Edge': '1013,-793,914,800','交易信号监控': '1361,-896,566,389','东兴证券': '51,205,1083,717',\
+        '行业跟随1': '-1059,-622,677,404','人气综合排行榜2.2': '-1922,-622,478,753','通达信金融终端(开心果交易版) 副屏一': '984,-815,1258,815','通达信金融终端(开心果交易版)V2025': '234,21,1258,815',\
+        '东方财富': '-1486,-408,1103,652','同花顺': '0,-785,1440,785','sina_Market-DurationDn.exe': '-6,432,1356,423',\
+        '通达信金融终端(开心果交易版) 副屏二': '984,-815,1258,815','通达信金融终端(开心果交易版) 副屏三': '984,-815,1199,704','sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUP.exe': '-6,411,1353,438','sina_Market-DurationUP.exe': '198,417,1344,438',\
+        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '-7,-1080,1353,521','singleAnalyseUtil.exe': '1007,-1080,897,359',\
+        'LinePower.exe': '-6,136,761,407','instock_Monitor.exe': '69,54,1333,439','chantdxpower.exe': '25,98,649,407',\
+        'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51',}
+
+
+# tdx_ths_position5376={'Edge': '1013,-793,914,800','交易信号监控': '1361,-896,566,389','东兴证券': '51,205,1083,717',\
+#         '行业跟随1': '-1059,-622,677,404','人气综合排行榜2.2': '-1923,-622,478,753','通达信金融终端(开心果交易版)V2025': '-1606,-553,1216,794',\
+#         '东方财富': '185,98,1238,768','同花顺': '0,-785,1440,785','sina_Market-DurationDn.exe': '-6,432,1356,423',\
+#         'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUP.exe': '-6,411,1353,438','sina_Market-DurationUP.exe': '198,417,1344,438',\
+#         'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '-7,-1080,1353,521','singleAnalyseUtil.exe': '1007,-1080,897,359',\
+#         'LinePower.exe': '-6,136,761,407','instock_Monitor.exe': '69,54,1333,439','chantdxpower.exe': '25,98,649,407',\
+#         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51',}
+
+tdx_ths_position5376_src={'Edge': '1013,-793,914,800','交易信号监控': '1361,-935,566,389','东兴证券': '51,205,1083,717',\
+        '行业跟随1': '-1059,-622,677,404','人气综合排行榜2.2': '-1922,-622,478,753','通达信金融终端(开心果交易版) 副屏一': '-31,-875,1153,652','通达信金融终端(开心果交易版) 副屏二': '-98,-26,1170,760','通达信金融终端(开心果交易版) 副屏三': '-1894,-407,1130,639','通达信金融终端(开心果交易版)V2025': '-1595,-561,1216,794',\
+        '东方财富': '158,98,1353,768','同花顺': '29,-785,1440,785','sina_Market-DurationDn.exe': '-6,432,1356,423',\
+        'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUP.exe': '-6,374,1353,438','sina_Market-DurationUP.exe': '119,329,1394,439',\
+        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '32,-1080,1353,521','singleAnalyseUtil.exe': '992,-1080,897,359',\
+        'LinePower.exe': '-1588,-622,761,407','instock_Monitor.exe': '69,54,1346,439','chantdxpower.exe': '-1926,-159,649,407',\
+        'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51',}
+
+tdx_ths_position5376={'Edge': '1013,-793,914,800','交易信号监控': '1361,-935,566,389','东兴证券': '51,205,1083,717',\
+        '行业跟随1': '-1059,-622,677,404','人气综合排行榜2.2': '-1922,-622,478,753','通达信金融终端(开心果交易版) 副屏一': '-37,-891,1153,652',\
+        '通达信金融终端(开心果交易版) 副屏二': '-43,-27,1170,760','通达信金融终端(开心果交易版) 副屏三': '-1894,-407,1130,639','通达信金融终端(开心果交易版)V2025': '-1711,-560,1216,794',\
+        '东方财富': '64,98,1353,768','同花顺': '29,-785,1440,785','sina_Market-DurationDn.exe': '-6,432,1356,423',\
+        'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUP.exe': '-6,374,1353,438','sina_Market-DurationUP.exe': '119,329,1394,439',\
+        'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '32,-1080,1353,521','singleAnalyseUtil.exe': '992,-1080,897,359',\
+        'LinePower.exe': '-1588,-622,761,407','instock_Monitor.exe': '16,82,1346,439','chantdxpower.exe': '-1926,-159,649,407',\
+        'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51',}
+        
+# tdx_ths_position5376={'Edge': '1013,-793,914,800','交易信号监控': '1361,-896,566,389','东兴证券': '51,205,1083,717',\
+#         '行业跟随1': '-1059,-622,677,404','人气综合排行榜2.2': '-1922,-622,478,753','通达信金融终端(开心果交易版)V2025': '234,21,1258,815',\
+#         '东方财富': '-1457,-408,1074,652','同花顺': '0,-785,1440,785','sina_Market-DurationDn.exe': '-6,432,1356,423',\
+#         'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUP.exe': '-6,411,1353,438','sina_Market-DurationUP.exe': '198,417,1344,438',\
+#         'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '-7,-1080,1345,519','singleAnalyseUtil.exe': '1007,-1080,897,359',\
+#         'LinePower.exe': '-6,136,761,407','instock_Monitor.exe': '69,54,1333,439','chantdxpower.exe': '25,98,649,407',\
+#         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51',}
+        
+# tdx_ths_position={'通达信金融终端(开心果交易版)V2025': '-1334,72,878,793','东方财富': '21,249,1067,833','同花顺': '-1553,19,1075,864','Firefox': '-1910,5,602,864','sina_Market-DurationDn.py': '-1902,226,1306,438','sina_Market-DurationCXDN.py': '-1871,90,1329,438','sina_Market-DurationUP.py': '-1818,411,1323,438','sina_Monitor-Market-LH.py': '576,680,1307,407','sina_Monitor.py': '136,25,1321,519','singleAnalyseUtil.py': '949,0,897,359','LinePower.py': '55,233,761,407','instock_Monitor.py': '78,108,1319,439','chantdxpower.py': '108,232,649,407','ths-tdx-web.py': '88,250,313,199','pywin32_mouse.py': '88,250,217,151'}
 
 # title:通达信金融终端V7.642 - [行情报价-Now090] pos: '1074,260,878,793'
 # title:东方财富终端 pos: '21,249,1067,833'
@@ -383,6 +528,7 @@ def find_proc_window_tasklist(procname,debug=False):
     # return check_dict, is_port_in_use
     return result
 
+
 def find_proc_windows(proc,visible=True,fuzzysearch=True):
     '''Return a sorted list of visible windows.'''
     SW_Normal = 1
@@ -393,7 +539,6 @@ def find_proc_windows(proc,visible=True,fuzzysearch=True):
     result = []
     @WNDENUMPROC
     def enum_proc(hWnd, lParam):
-
         if  visible:
 
             if user32.IsWindowVisible(hWnd):
@@ -402,6 +547,7 @@ def find_proc_windows(proc,visible=True,fuzzysearch=True):
                             hWnd, ctypes.byref(pid))
                 length = user32.GetWindowTextLengthW(hWnd) + 1
                 if (length == 1):return True
+                # print(f'length:{length}')
                 title = ctypes.create_unicode_buffer(length)
                 user32.GetWindowTextW(hWnd, title, length)
                 #debug
@@ -411,7 +557,6 @@ def find_proc_windows(proc,visible=True,fuzzysearch=True):
                     # print(f'find:{title.value}')
                     # if 10 > title.value.find(proc) >= 0:
                     if title.value.find(proc) >= 0:
-
                         result.append(title.value)
         else:
             if user32.IsIconic(hWnd):return True;
@@ -420,13 +565,13 @@ def find_proc_windows(proc,visible=True,fuzzysearch=True):
                         hWnd, ctypes.byref(pid))
             length = user32.GetWindowTextLengthW(hWnd) + 1
             if (length == 1):return True
+            # print(f'length:{length}')
             title = ctypes.create_unicode_buffer(length)
             user32.GetWindowTextW(hWnd, title, length)
             #show IsIconic app
             # if user32.IsIconic(hWnd):print("IsIconic:",title.value);
             if len(title.value) > 0:
                 if title.value.find(proc) >= 0:
-
                     result.append(title.value)
 
         return True
@@ -689,6 +834,11 @@ def list_pids():
             return sorted(pids[:length])
         length *= 2
 
+def run_system_fpath(fpath):
+    if cct.check_file_exist(fpath): 
+        os.system('cmd /c start %s'%(fpath))
+    else:
+        print("fpath:%s isn't exist"%(fpath))
 
 if __name__ == '__main__':
     print('Process IDs:')
@@ -702,14 +852,19 @@ if __name__ == '__main__':
     # print(find_proc_windows('交易信号监控',fuzzysearch=True))
     # print(find_proc_windows('通达信金融终端',fuzzysearch=True))
     # print(find_proc_windows('Firefox',fuzzysearch=True))
-    print(find_proc_windows('Microsoft\u200b Edge',fuzzysearch=True))
+    # print(find_proc_windows('Microsoft\u200b Edge',fuzzysearch=True))
+    # print(find_proc_windows('通达信金融终端(开心果交易版) 副屏一',fuzzysearch=True))
+    # print(find_proc_windows('通达信金融终端(开心果交易版)V2025',fuzzysearch=True))
 
-    proc_title = ['sina_Market-DurationUP','sina_Market-DurationDnUP','sina_Monitor','filter_resample_Monitor','同花顺','Microsoft\u200b Edge','Firefox','交易信号监控','instock_Monitor','sina_Market-DurationDnUp','sina_Market-DurationUp','singleAnalyseUtil','人气综合排行榜2.22','行业跟随1.0','东兴证券','通达信金融终端','东方财富']
+
+    print(find_window_by_title_safe('Microsoft\u200b Edge'))
+    print(find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏一'))
+    print(find_window_by_title_safe('通达信金融终端(开心果交易版)V2025'))
+
+    proc_title = ['通达信金融终端(开心果交易版) 副屏一','通达信金融终端(开心果交易版) 副屏二','通达信金融终端(开心果交易版) 副屏三','通达信金融终端(开心果交易版)V2025','sina_Market-DurationUP','sina_Market-DurationDnUP','sina_Monitor','filter_resample_Monitor','同花顺','Microsoft\u200b Edge','Firefox','交易信号监控','instock_Monitor','sina_Market-DurationDnUp','sina_Market-DurationUp','singleAnalyseUtil','人气综合排行榜2.22','行业跟随1.0','东兴证券','通达信金融终端','东方财富']
     for title in proc_title:
         FindWindowRectFromName(title)
     print('\n')
-
-    # import ipdb;ipdb.set_trace()
     # title = '人气综合排行榜2.2'
     # title = '行业跟随1'
     # result=find_proc_windows(title,fuzzysearch=False)
@@ -717,25 +872,66 @@ if __name__ == '__main__':
     # import ipdb;ipdb.set_trace()
     # set_proc_windows_position(title,tdx_ths_position=positon)
 
+    # if not find_proc_windows('同花顺'):
+    #     # os.system('cmd /c start D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
+    #     run_system_fpath('D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
+    #     time.sleep(6)
+    # if not find_proc_windows('东方财富'):
+    #     # os.system('cmd /c start D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
+    #     run_system_fpath('D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
+    #     time.sleep(6)
 
-    tasklist = ['Edge','行业跟随1.0','link.exe']
+
+    # if not find_proc_windows('通达信金融终端',fuzzysearch=True):
+    #     run_system_fpath('%s\\tdxw.exe'%(cct.get_tdx_dir()))
+    #     time.sleep(8)
+
+    tasklist = ['通达信金融终端(开心果交易版) 副屏一','通达信金融终端(开心果交易版) 副屏二','通达信金融终端(开心果交易版) 副屏三','Edge','行业跟随1.0','link.exe']
     for task in tasklist:
-        result1 = find_proc_window_tasklist(task)
+        result1 = (find_window_by_title_safe(task))
         # result1 = find_proc_window_tasklist('通达信')
-        print("find_proc_window_tasklist:%s %s"%(task,result1))
+        print("find_proc_window_tasklist:%s"%(result1))
+        # time.sleep(0.2)
+
+
+    import copy_tools as cptools #open_tdx_mscreen,set_tdx_screen_show
+    active_window = cptools.ahk.active_window
+
+    # if find_proc_windows('通达信金融终端',fuzzysearch=True):
+    if find_window_by_title_safe('通达信金融终端'):
+        # if not (find_proc_windows('通达信金融终端(开心果交易版) 副屏一',fuzzysearch=True)):
+        if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏一')):
+            print('start : 通达信金融终端(开心果交易版) 副屏')
+            print(cptools.open_tdx_mscreen(1))
+        if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏二')):
+            print(cptools.open_tdx_mscreen(2))
+        if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏三')):
+            print(cptools.open_tdx_mscreen(3))
+
+        cptools.set_tdx_screen_show()
+        time.sleep(5)
     
-    result=find_proc_windows('联动精灵',visible=False)
+    active_window.activate()
+
+
+    
+    # result=find_proc_windows('联动精灵',visible=False)
+    result=find_window_by_title_safe('联动精灵')
     print(result)
 
-    result2=find_proc_windows('人气综合排行榜2.22',visible=False)
+    # result2=find_proc_windows('人气综合排行榜2.22',visible=False)
+    result2=find_window_by_title_safe('人气综合排行榜2.22')
     print(result2)
 
 
     # import os
     # os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
 
-    set_proc_windows_position('联动精灵',SW_Positon=SW_SHOWMINNOACTIVE)
-    set_proc_windows_position('联动精灵',SW_Positon=SW_HIDE)
+    # set_proc_windows_position('联动精灵',SW_Positon=SW_Restore)
+    
+    # set_proc_windows_position('联动精灵',SW_Positon=SW_SHOWMINNOACTIVE)
+    # set_proc_windows_position('联动精灵',SW_Positon=SW_Normal)
+    # set_proc_windows_position('联动精灵',SW_Positon=SW_HIDE)    # Hide no restore
 
     import sys
     sys.path.append("..")
@@ -756,12 +952,17 @@ if __name__ == '__main__':
         proc_title =  [proc for proc in tdx_ths_positionDouble.keys()]
         # proc_title =  [proc for proc in sorted(tdx_ths_positionDouble.keys(),reverse=False)]
         # positon = tdx_ths_positionDouble
-        displayRes = displaySet[1][0] + displaySet[2][0]
+        displayRes = 0 
+        # displayRes = displaySet[1][0] + displaySet[2][0]
+        for i in range(1, displaySet[0]+1 ):
+            displayRes = displayRes + displaySet[i][0]
+            print(f'i:{i} displayRes;{displayRes} , displaySet[{i}][0]: {displaySet[i][0]}')
         # tdx_ths_position_eval = 'tdx_ths_position%s'%(displayMainRes)
         print(f"displayMainRes:{displayMainRes} displayRes:{displayRes} displaySet: {displaySet[0]}, 1: {displaySet[1][0]} 2: {displaySet[2][0]}")
         tdx_ths_position_eval = 'tdx_ths_position%s'%(displayRes)
         positon = eval(tdx_ths_position_eval)
         proc_title =  [proc for proc in positon.keys()]
+        print(f'proc_title:{proc_title}')
         print("positionDouble:%s  "%(tdx_ths_position_eval))
 
     else:
@@ -772,6 +973,8 @@ if __name__ == '__main__':
         print("positon:%s  "%(tdx_ths_position_eval))
         positon = eval(tdx_ths_position_eval)
         proc_title =  [proc for proc in positon.keys()]
+        print(f'proc_title:{proc_title}')
+        
         # proc_title =  [proc for proc in sorted(positon.keys(),reverse=False)]
 
         # sina = [ title for title in cct.terminal_positionKey1K_triton.keys()]
@@ -782,6 +985,8 @@ if __name__ == '__main__':
         # proc_title =  [proc for proc in proc_title]
 
     
+    # set_proc_windows_position(tasklist,tdx_ths_position=positon)
+
     # proc_title.extend(sina)
     # title = 'sina_Monitor'
     #set position

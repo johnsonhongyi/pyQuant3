@@ -29,7 +29,10 @@ import time
 # https://stackoverflow.com/questions/101128/how-do-i-read-text-from-the-windows-clipboard-in-python
 
 from datetime import date
- 
+from ahk import AHK
+import time
+ahk = AHK()
+
 # 获取当前日期
 def get_today():
     current_date = date.today().strftime('%Y-%m-%d')
@@ -46,6 +49,110 @@ def isDigit(x):
     except ValueError:
         return False
 
+def send_code_dfcf(code):
+    applist=['东方财富']
+    for window in ahk.list_windows():
+        for app in applist:
+            if window.title.find(app) >= 0:
+                window.activate()
+                time.sleep(0.3)
+                print(f'class_name:{window.get_class()}')
+                print(f'title:{window.title}')
+                # Some more attributes
+                # print(f'text:{window.text}')
+                # print(window.text)           # window text -- or .get_text()
+                print(window.get_position()) # (x, y, width, height)
+                print(window.id)             # the ahk_id of the window
+                print(window.pid)            # process ID -- or .get_pid()
+                print(window.process_path)   # or .get_process_path()
+                print('....................\n\n')
+                # ahk.setKeyDelay(50)
+                # window.activate()
+                time.sleep(0.3)
+                ahk.send(code)
+                time.sleep(0.6)
+                ahk.send('{Enter}')
+
+def open_tdx_mscreen(sc=1):
+    # #If WinActive("ahk_class TdxW_MainFrame_Class")
+    # {
+    #     SendMessage,0x111,33819,0,,ahk_class TdxW_MainFrame_Class
+    # }
+    # ;打开副屏一,二,三,一键四屏
+
+    # ;SendMessage,0x111,3356,0,,ahk_class TdxW_MainFrame_Class
+    # ;SendMessage,0x111,3357,0,,ahk_class TdxW_MainFrame_Class
+    # ;SendMessage,0x111,3358,0,,ahk_class TdxW_MainFrame_Class
+    sc = str(sc)
+    screen = {'1':'3356','2':'3357','3':'3358','4':'3361'}
+    window = ahk.find_window_by_class('TdxW_MainFrame_Class')
+    if window:
+        # 3. 如果窗口找到，获取其句柄
+        hwnd = window.id
+        print(f"找到窗口，句柄为：{hwnd}")
+        window.activate()
+        time.sleep(0.2)
+        # 4. 构造 AHK 脚本字符串
+        # 使用 f-string 插入句柄，确保 SendMessage 发送到正确的窗口
+        ahk_script = f"""
+            SendMessage, 0x111, {screen[sc]}, 0, , ahk_class TdxW_MainFrame_Class
+        """
+        # 5. 运行 AHK 脚本发送消息
+        result = ahk.run_script(ahk_script)
+        print(f"脚本执行结果：{result}")
+        time.sleep(0.5)
+        window.activate()
+    else:
+        print("未找到匹配 'ahk_class TdxW_MainFrame_Class' 的窗口。")
+        return False
+    return True
+
+appdict = {'通达信金融终端(开心果交易版) 副屏三':'个股联动', '通达信金融终端(开心果交易版) 副屏一':'上证指数','通达信金融终端(开心果交易版) 副屏二':'科创50ETF'}
+runkey = {'龙头战法':'ggld','上证指数':'03','科创50ETF':'090 588000'}
+# applist = []
+
+def set_tdx_screen_show(appdict=appdict,check=True):
+    for window in ahk.list_windows():
+        # print(window.__doc__)
+        for app in appdict.keys():
+            if window.title.find(app) >= 0:
+                check_status = False
+                print(f'class_name:{window.get_class()}')
+                # print(f'title:{window.title}')
+                if window.title.find(appdict[app]) < 0:
+                    # Some more attributes
+                    # print(f'text:{window.text}')
+                    # print(window.text)           # window text -- or .get_text()
+                    # print(window.get_position()) # (x, y, width, height)
+                    # print(window.id)             # the ahk_id of the window
+                    # print(window.pid)            # process ID -- or .get_pid()
+                    # print(window.process_path)   # or .get_process_path()
+                    print(f'Not Find title:{window.title} Run {runkey[appdict[app]].split()}....................')
+                    if appdict[app] in runkey.keys():
+                        for inputKey in runkey[appdict[app]].split():
+                            window.activate()
+                            # ahk.setKeyDelay(50)
+                            time.sleep(0.3)
+                            ahk.send(inputKey)
+                            print(f'key:{inputKey}')
+                            # ahk.win_get(title=f'ahk_pid {window.pid}')
+                            # print(f'{window.pid} title:{window.text}')
+                            time.sleep(0.3)
+                            ahk.send('{Enter}')
+                            time.sleep(0.5)
+                            if len(runkey[appdict[app]].split()) > 1:
+                                # ahk.send('{Enter}')
+                                time.sleep(0.5)
+                        # if len(runkey[appdict[app]].split()) > 1:
+                        if check and check_status:
+                            check_status =False
+                            print(f'check:{app} : {appdict[app]}')
+                            set_tdx_screen_show({app:appdict[app]},check=False)
+
+                    else:
+                        print(f'not find {app} {appdict[app]} in {runkey.keys()}')
+                else:
+                    print(f'Find title:{window.title} {appdict[app]}')
 
 def broadcast_stock_code(stock_code,message_type='stock'):
     if isinstance(stock_code, dict):
@@ -164,6 +271,9 @@ async def get_clipboard_contents():
 
         # content = pyperclip.paste()
         content = content.strip()
+        if len(content.split()) > 1:
+            if  isDigit(content.split()[0]):
+                content = content.split()[0]
         if not isDigit(content):
             continue
         # nowTime = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')

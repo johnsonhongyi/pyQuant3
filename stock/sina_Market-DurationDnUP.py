@@ -239,7 +239,12 @@ if __name__ == "__main__":
                 # top_all['volume'] = top_all['volume'].apply(lambda x: round(x / ratio_t, 1))
                 # log.debug("top_allf:vol")
                 # top_all = top_all[top_all.volume > 1]
-
+                search_key = cct.GlobalValues().getkey('search_key')
+                if search_key is None:  
+                    search_key = cct.read_ini(inifile='filter.ini',category='durationDnUP')
+                if search_key is not None:
+                    search_query = f'category.str.contains("{search_key}")'
+                    top_all = top_all.query(f"{search_query}")
                 if len(top_all) == 0:
                     print("No G,DataFrame is Empty!!!!!!")
                 else:
@@ -310,6 +315,7 @@ if __name__ == "__main__":
                     top_all = tdd.get_powerdf_to_all(top_all, top_temp)
                     top_all = tdd.get_powerdf_to_all(top_all, top_end)
                     if st_key_sort in ['1']:
+                        top_all = top_all.query('lastp2d < upper2 and lastp3d < upper3 and lastp4d < upper4 and high > upper and high > high4')
                         # if 'nlow' in top_all.columns and 'nclose' in top_all.columns:
                         #     top_all = top_all.query('open >= nlow and close >=nclose')
                         if 945 < cct.get_now_time_int() < 1445:
@@ -457,6 +463,11 @@ if __name__ == "__main__":
 
             if len(st) == 0:
                 status = False
+            elif len(cct.re_find_chinese(st)) > 0:
+                cct.GlobalValues().setkey('search_key', st.strip())
+            elif st == 'None' or st.lower() == 'no' :
+                cct.GlobalValues().setkey('search_key', None)
+                top_all = pd.DataFrame()
             elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
                 st_l = st.split()
                 st_k = st_l[0]

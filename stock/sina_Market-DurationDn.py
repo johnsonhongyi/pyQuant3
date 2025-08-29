@@ -237,7 +237,12 @@ if __name__ == "__main__":
                 top_dif = top_all.copy()
                 # market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(
                 #     st_key_sort, top_all=top_all)
-
+                search_key = cct.GlobalValues().getkey('search_key')
+                if search_key is None:  
+                    search_key = cct.read_ini(inifile='filter.ini',category='durationDn')
+                if search_key is not None:
+                    search_query = f'category.str.contains("{search_key}")'
+                    top_dif = top_all.query(f"{search_query}")
                 if 'trade' in top_dif.columns:
                     top_dif['buy'] = (
                         list(map(lambda x, y: y if int(x) == 0 else x, top_dif['buy'].values, top_dif['trade'].values)))
@@ -515,6 +520,10 @@ if __name__ == "__main__":
             st = cct.cct_raw_input(ct.RawMenuArgmain() % (market_sort_value))
             if len(st) == 0:
                 status = False
+            elif len(cct.re_find_chinese(st)) > 0:
+                cct.GlobalValues().setkey('search_key', st.strip())
+            elif st == 'None' or st.lower() == 'no' :
+                cct.GlobalValues().setkey('search_key', None)
             elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
                 st_l = st.split()
                 st_k = st_l[0]
