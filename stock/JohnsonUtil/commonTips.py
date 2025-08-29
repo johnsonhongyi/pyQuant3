@@ -197,7 +197,8 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=F
         else:
             log.info('df is None')
         alist = df.columns.tolist()
-        df['category'] = df['category'].apply(lambda x:str(x)[:16])
+        if 'category' in df.columns:
+            df['category'] = df['category'].apply(lambda x:str(x)[:16])
         if header:
 
             table = PrettyTable([''] + alist )
@@ -633,7 +634,7 @@ function d(t) {
 #             return False
 #     else:
 #         return trade_status
-def read_ini(inifile='filter.ini',setrule=None):
+def read_ini(inifile='filter.ini',setrule=None,category='General'):
     from configobj import ConfigObj
     baser = getcwd().split('stock')[0]
     base = baser + 'stock' + path_sep
@@ -645,9 +646,14 @@ def read_ini(inifile='filter.ini',setrule=None):
         config.filename = config_file_path
 
         # Add sections and options
-        config['General'] = {}
-        rule = "top_all.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')"
-        config['General']['filter_rule'] = rule
+        if category == 'General':
+            config[category] = {}
+            rule = "top_all.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')"
+            config[category]['filter_rule'] = rule
+        else:
+            config[category] = {}
+            rule = None
+            config[category]['filter_rule'] = rule
         # config['General']['version'] = '1.0.0'
 
         # config['Database'] = {}
@@ -669,8 +675,14 @@ def read_ini(inifile='filter.ini',setrule=None):
         # --- Reading a config file ---
         read_config = ConfigObj(config_file_path)
         # Access values like a dictionary
-        rule = read_config['General']['filter_rule']
-
+        if category in read_config.keys():
+            rule = read_config[category]['filter_rule']
+        else:
+            read_config[category] = {}
+            rule = 'None'
+            read_config[category]['filter_rule'] = rule
+            read_config.write()
+            # print(f"Config file '{config_file_path}' init None")
         # db_host = read_config['Database']['host']
         # enabled_modules = read_config['Features']['enabled_modules']
         # debug_mode = read_config['debug_mode']
@@ -681,8 +693,8 @@ def read_ini(inifile='filter.ini',setrule=None):
         # print(f"Enabled Modules: {enabled_modules}")
         # print(f"Debug Mode: {debug_mode}")
         if setrule is not None:
-            read_config['General']['filter_rule'] = setrule
-            read_config['General'][f'filter_rule{get_today("")}'] = rule
+            read_config[category]['filter_rule'] = setrule
+            read_config[category][f'filter_rule{get_today("")}'] = rule
             # --- Updating a config file ---
             # read_config['General']['version'] = '1.0.1'
             # read_config['Database']['password'] = 'new_secure_pass'
@@ -690,6 +702,8 @@ def read_ini(inifile='filter.ini',setrule=None):
             print(f"Config file '{config_file_path}' updated successfully.")
     if rule.find('top_all') >= 0 or rule.find('top_temp') >= 0:
         rule = rule.replace('top_all.query','').replace('top_temp.query','')
+    if rule == 'None':
+        rule = None
     return rule
 
 def is_trade_date(date=datetime.date.today()):
@@ -3671,6 +3685,7 @@ def write_to_blocknew_2025(p_name, data, append=True, doubleFile=False, keep_las
         keep_last = ct.keep_lastnum
     # index_list = ['1999999','47#IFL0',  '0159915', '27#HSI']
     index_list = ['1999999', '0399001', '0159915','2899050','1588000','1880884','1880885','1880818','1880774']
+    # index_list = ['1999999', '0399001', '0159915','2899050','1588000','1880884','1880885','1880818','1880774']
     # index_list = ['1999999','47#IFL0', '0399001', '0159915']
     # index_list = ['1999999','47#IFL0', '27#HSI',  '0399006']
     # index_list = ['1999999','0399001','47#IFL0', '27#HSI',  '0159915']
@@ -5219,6 +5234,11 @@ def WriteCountFilter_cct(df, op='op', writecount=5, end=None, duration=10):
 
 Resample_top = {'d':'top_all','3d':'top_all_3d',
                       'w':'top_all_w','m':'top_all_m'}
+                      
+def re_find_chinese(cmd):
+    re_words = re.compile(u"[\u4e00-\u9fa5]+")
+    result = re.findall(re_words, cmd)
+    return result
 
 def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),block_path=None,orderby='percent',top_all=None,top_all_3d=None,top_all_w=None,top_all_m=None,resample='d',noformat=False):
     end = True
@@ -5282,7 +5302,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
             idx = int(cmd) - 1
             # print(f"idx:{idx}")
             initkey =  list(code.keys())[idx]
-            print(f"{initkey}: {code[initkey]}")
+            print(f"\n{initkey}: {code[initkey]}")
             # cmd = code[idxkey]
             GlobalValues().setkey('tempdf',code[initkey])
             cmd=ct.codeQuery_show_cct(initkey,Market_Values,workstatus,orderby)
@@ -5479,7 +5499,7 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                             print("%s:%s "%(idx_k+1,id_key),end="")
                         # if idx%4 == 0:
                         #     print(f'\\')
-                    print(f"{initkey}: {code[initkey]}")
+                    print(f"\n{initkey}: {code[initkey]}")
 
                 print('')
             except Exception as e:
@@ -6066,7 +6086,8 @@ if __name__ == '__main__':
     '''
     # rzrq['all']='nan'
     # print(get_last_trade_date('2025-06-01'))
-    # import ipdb;ipdb.set_trace()
+    import ipdb;ipdb.set_trace()
+    query_rule = read_ini(inifile='filter.ini',category='sina_Monitor')
     print(get_today(''))
     get_lastdays_trade_date(1)
     print(f'get_work_day_idx:{get_work_day_idx()}')

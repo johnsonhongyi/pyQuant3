@@ -5,7 +5,7 @@ from pywebio.output import *
 from pywebio.session import set_env
 from functools import partial
 from copy_tools import *
-from findSetWindowPos import find_proc_windows,find_proc_window_tasklist
+from findSetWindowPos import find_processes_by_name_background,find_window_by_title_safe,find_proc_window_tasklist
 import asyncio
 import pyperclip
 
@@ -294,55 +294,76 @@ if __name__ == '__main__':
 
 
 
-    if not find_proc_windows('人气综合排行榜2.2',fuzzysearch=True):
+    if not find_window_by_title_safe('人气综合排行榜2.2'):
         # os.system('cmd /c start C:\\Users\\Johnson\\Documents\\TDX\\55188\\人气共振2.2.exe')
         run_system_fpath("C:\\Users\\Johnson\\Documents\\TDX\\55188\\人气共振2.22.exe")
         time.sleep(1)
-    if not find_proc_windows('行业跟随',fuzzysearch=True):
+    if not find_window_by_title_safe('行业跟随'):
         # os.system('cmd /c start C:\\Users\\Johnson\\Documents\\TDX\\55188\\竞价定行业1.1.exe')
         run_system_fpath("C:\\Users\\Johnson\\Documents\\TDX\\55188\\竞价定行业1.1.exe")
         time.sleep(1)
 
-    if not find_proc_windows('同花顺'):
+    if not find_window_by_title_safe('同花顺'):
         # os.system('cmd /c start D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
         run_system_fpath('D:\\MacTools\\WinTools\\同花顺\\hexin.exe')
         time.sleep(6)
-    if not find_proc_windows('东方财富'):
+    if not find_window_by_title_safe('东方财富'):
         # os.system('cmd /c start D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
         run_system_fpath('D:\\MacTools\\WinTools\\eastmoney\\swc8\\mainfree.exe')
         time.sleep(6)
 
 
-    if not find_proc_windows('通达信金融终端',fuzzysearch=True):
+    if not find_window_by_title_safe('通达信金融终端'):
         run_system_fpath('%s\\tdxw.exe'%(cct.get_tdx_dir()))
         time.sleep(8)
 
-    # if not find_proc_windows('东兴证券',fuzzysearch=True):
+    # if not find_proc_windows('东兴证券'):
     #     run_system_fpath('%s\\tdxw.exe'%('D:\\MacTools\\WinTools\\zd_dxzq'))
     #     # run_system_fpath('%s\\tdxw.exe'%(cct.win10dxzq.))
     #     time.sleep(8)
     
-    if not find_proc_windows('pywin32_mouse'):
+    if not find_window_by_title_safe('pywin32_mouse'):
         os.system('start cmd /k python pywin32_mouse.py')
         time.sleep(5)
 
-    if not find_proc_windows('交易信号监控',fuzzysearch=True):
+    if not find_window_by_title_safe('交易信号监控'):
         # os.system('cmd /c start /min D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
         # os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
         os.system('cmd /c start D:\\MacTools\\OrderMonitor\\OrderMon.exe')
 
     time.sleep(5)
-    if not find_proc_windows('findSetWindowPos'):
+
+    if not (find_processes_by_name_background('AutoHotkey')):
+        run_system_fpath('D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\ahk\\tdx-dfcf.ahk')
+        run_system_fpath('D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\ahk\\ths-code.ahk')
+    else:
+        print('find AutoHotkey')
+    if not find_window_by_title_safe('findSetWindowPos'):
+
         os.system('cmd /c start python findSetWindowPos.py')
         time.sleep(2)
     # if not find_proc_windows('联动精灵',visible=False):
     
+    if find_window_by_title_safe('通达信金融终端'): 
+        if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏一')):
+            print('start : 通达信金融终端(开心果交易版) 副屏一')
+            print(cptools.open_tdx_mscreen(1))
+        if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏二')):
+            print('start : 通达信金融终端(开心果交易版) 副屏二')
+            print(cptools.open_tdx_mscreen(2))
+        if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏三')):
+            print('start : 通达信金融终端(开心果交易版) 副屏三')
+            print(cptools.open_tdx_mscreen(3))
+    else:
+        set_tdx_screen_show()
 
-
+    time.sleep(6)
     # if not find_proc_window_tasklist('link.exe'):
     #     # os.system('cmd /c start /min D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
     #     # os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
-    #     os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
+    #     # os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
+    #     run_system_fpath('D:\\JohnsonProgram\\联动精灵\\link.exe')
+
 
     #     time.sleep(3)
     
@@ -358,7 +379,7 @@ if __name__ == '__main__':
         width, height = 80, 22
         cct.set_console(width, height)
     # time.sleep(1)
-    print(find_proc_windows('ths-tdx-web.py'))
+    print(('ths-tdx-web.py'))
     if platform.system() == 'Windows':
         def window_proc(hwnd, msg, wparam, lparam):
             if msg == win32con.WM_POWERBROADCAST:
@@ -401,7 +422,7 @@ if __name__ == '__main__':
                 start_edge += 1
             else:
                 port_to_check +=1
-                print("Find %s no run start_server"%(find_proc_windows('ths-tdx-web.py')))
+                print("Find %s no run start_server"%(find_window_by_title_safe('ths-tdx-web.py')))
                 time.sleep(30)
         except Exception as e:
             time.sleep(6)

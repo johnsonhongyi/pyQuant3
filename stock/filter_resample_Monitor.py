@@ -537,7 +537,7 @@ if __name__ == "__main__":
 
                 if len(code_f) > 0:
                     code_select = list(set(top_all.index.tolist()) & set(code_f))
-                    if len(code_select) > 10:
+                    if len(code_select) > 0:
                         top_temp = top_all.loc[code_select]
 
                 # '''
@@ -590,11 +590,17 @@ if __name__ == "__main__":
                     df=top_temp, resample=resample, down=False)
                 top_end=stf.getBollFilter(
                     df=top_end, resample=resample, down=False)
+                
+                search_key = cct.GlobalValues().getkey('search_key')
+                if search_key is None:  
+                    search_key = cct.read_ini(inifile='filter.ini',category='filterResample')
+                if search_key is not None:
+                    search_query = f'category.str.contains("{search_key}")'
+                    top_temp = top_temp.query(f"{search_query}")
 
                 nhigh = top_temp[top_temp.close > top_temp.nhigh] if 'nhigh'  in top_temp.columns else []
                 nlow = top_temp[top_temp.close > top_temp.nlow] if 'nhigh'  in top_temp.columns else []
                 print("G:%s Rt:%0.1f dT:%s N:%s T:%s nh:%s nlow:%s" % (goldstock, float(time.time() - time_Rt), cct.get_time_to_date(time_s), cct.get_now_time(), len(top_temp),len(nhigh),len(nlow)))
-
                 top_temp=top_temp.sort_values(by=(market_sort_value),
                                                 ascending=market_sort_value_key)
                 ct_MonitorMarket_Values=ct.get_Duration_format_Values(
@@ -738,6 +744,10 @@ if __name__ == "__main__":
 
             if len(st) == 0:
                 status=False
+            elif len(cct.re_find_chinese(st)) > 0:
+                cct.GlobalValues().setkey('search_key', st.strip())
+            elif st == 'None' or st.lower() == 'no' :
+                cct.GlobalValues().setkey('search_key', None)
             elif (len(st.split()[0]) == 1 and st.split()[0].isdigit()) or st.split()[0].startswith('x'):
                 st_l=st.split()
                 st_k=st_l[0]

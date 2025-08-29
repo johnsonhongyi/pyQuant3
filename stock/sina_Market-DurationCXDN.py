@@ -242,6 +242,12 @@ if __name__ == "__main__":
                     top_all = cct.combine_dataFrame(top_all, top_now, col=None)
 
                 top_dif = top_all.copy()
+                search_key = cct.GlobalValues().getkey('search_key')
+                if search_key is None:  
+                    search_key = cct.read_ini(inifile='filter.ini',category='cxdn')
+                if search_key is not None:
+                    search_query = f'category.str.contains("{search_key}")'
+                    top_dif = top_all.query(f"{search_query}")
                 # if cct.get_now_time_int() > 915 and cct.get_now_time_int() <= 926:
                 #     top_dif =  top_all[(top_all.topR < 2) & (top_all.open > top_all.lastp1d)]
                 #     # top_all[(top_all.low >= top_all.nlow)& (top_all.high > top_all.nhigh)]
