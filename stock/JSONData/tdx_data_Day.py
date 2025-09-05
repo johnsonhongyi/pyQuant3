@@ -2714,7 +2714,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         log.error("top_all is None :%s" % (top_now))
     if isinstance(top_now,pd.DataFrame) and not 'ratio' in top_now.columns:
         top_now['ratio'] = 0
-
+    top_now = top_now.query('open != 0 and close != 0')
     return cct.reduce_memory_usage(top_now)
 
 
@@ -5401,7 +5401,7 @@ if __name__ == '__main__':
     code = '002238'
     code = '002786'
     code = '002460'
-    code = '300085'
+    code = '600190'
     # code = '600240'
     # code = '600890'
     # code = '002865'
@@ -5433,7 +5433,7 @@ if __name__ == '__main__':
     
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
 
-    df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='w' )
+    df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='3d' )
     print(df[-10:])
     print(f'3d per1d:{df.per1d[0]}  per2d:{df.per2d[0]}  per3d:{df.per3d[0]}  per4d:{df.per4d[0]}  per5d:{df.per5d[0]}  ')
     # df = get_tdx_Exp_day_to_df(code, dl=1)

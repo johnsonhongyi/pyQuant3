@@ -71,14 +71,14 @@ def ths_convert_code(code):
         dec_num = int('24', 16)
         bytes_codex = bytes_16(dec_num, code)
 
-        # 12开头的可转债
-    elif str(code).startswith('8') or str(code).startswith('92') or str(code).startswith('43'):
-        # 将16进制数转换为整数
-        # ord('?') -> 63  chr(63) -> ? bytes_16(63, code) ->b'?833171'
-        # char=chr(num) # 将整数转换为对应的ASCII字符
-        # (base16 - > int) ('%x' % 63) -> '3f'
-        dec_num = int('97', 16)
-        bytes_codex = bytes_16(dec_num, code)
+    #     # 12开头的可转债
+    # elif str(code).startswith('8') or str(code).startswith('92') or str(code).startswith('43'):
+    #     # 将16进制数转换为整数
+    #     # ord('?') -> 63  chr(63) -> ? bytes_16(63, code) ->b'?833171'
+    #     # char=chr(num) # 将整数转换为对应的ASCII字符
+    #     # (base16 - > int) ('%x' % 63) -> '3f'
+    #     dec_num = int('97', 16)
+    #     bytes_codex = bytes_16(dec_num, code)
     else:
         # 将16进制数转换为整数
         dec_num = int('21', 16)

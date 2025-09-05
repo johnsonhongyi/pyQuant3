@@ -5,7 +5,7 @@ from pywebio.output import *
 from pywebio.session import set_env
 from functools import partial
 from copy_tools import *
-from findSetWindowPos import find_processes_by_name_background,find_window_by_title_safe,find_proc_window_tasklist
+from findSetWindowPos import find_window_by_title_background,find_window_by_title_safe,find_proc_window_tasklist
 import asyncio
 import pyperclip
 
@@ -333,31 +333,41 @@ if __name__ == '__main__':
 
     time.sleep(5)
 
-    if not (find_processes_by_name_background('AutoHotkey')):
+    if not (find_window_by_title_background('AutoHotkey')):
         run_system_fpath('D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\ahk\\tdx-dfcf.ahk')
-        run_system_fpath('D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\ahk\\ths-code.ahk')
+        # run_system_fpath('D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\ahk\\ths-code.ahk')
     else:
         print('find AutoHotkey')
-    if not find_window_by_title_safe('findSetWindowPos'):
 
+    if not find_window_by_title_safe('findSetWindowPos'):
         os.system('cmd /c start python findSetWindowPos.py')
         time.sleep(2)
     # if not find_proc_windows('联动精灵',visible=False):
     
     if find_window_by_title_safe('通达信金融终端'): 
-        if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏一')):
-            print('start : 通达信金融终端(开心果交易版) 副屏一')
-            print(cptools.open_tdx_mscreen(1))
-        if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏二')):
-            print('start : 通达信金融终端(开心果交易版) 副屏二')
-            print(cptools.open_tdx_mscreen(2))
+        # if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏一')):
+        #     print('start : 通达信金融终端(开心果交易版) 副屏一')
+        #     print(open_tdx_mscreen(1))
+        # if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏二')):
+        #     print('start : 通达信金融终端(开心果交易版) 副屏二')
+        #     print(open_tdx_mscreen(2))
         if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏三')):
             print('start : 通达信金融终端(开心果交易版) 副屏三')
-            print(cptools.open_tdx_mscreen(3))
+            print(open_tdx_mscreen(3))
     else:
         set_tdx_screen_show()
 
     time.sleep(6)
+    if not find_window_by_title_background('开盘啦板块竞价'): 
+        run_system_fpath('C:\\Users\\Johnson\\Documents\\TDX\\55188\\开盘啦板块竞价.exe')
+        time.sleep(2)
+    if not find_window_by_title_background('异动联动'): 
+        run_system_fpath('C:\\Users\\Johnson\\Documents\\TDX\\55188\\异动联动.exe')
+        time.sleep(2)
+    
+    if not find_window_by_title_background('涨停采集工具共享版'): 
+        run_system_fpath('C:\\Users\\Johnson\\Documents\\TDX\\55188\\涨停采集工具共享版.exe')
+        time.sleep(2)
     # if not find_proc_window_tasklist('link.exe'):
     #     # os.system('cmd /c start /min D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
     #     # os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')

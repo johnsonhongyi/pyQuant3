@@ -110,7 +110,7 @@ cd ../
 
 rem start cmd /k python sina_Market-DurationDnUP.py
 
-start cmd /k  sina_Market-DurationDnUP.exe
+rem start cmd /k  sina_Market-DurationDnUP.exe
 
 for %%i in ("%TDX%") do (
 set indexdx=%%~zi

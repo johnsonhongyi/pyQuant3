@@ -1,0 +1,268 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import pandas as pd
+import random
+import time
+import concurrent.futures
+from datetime import datetime
+import json
+import os
+
+# 全局变量
+root = None
+stock_tree = None
+context_menu = None
+code_entry = None
+monitor_windows = {}
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+MONITOR_LIST_FILE = "monitor_list.json"
+loaddf = pd.DataFrame()  # 存储股票异动数据的DataFrame
+
+# --- 数据持久化函数 ---
+def save_monitor_list():
+    monitor_list = [item['stock_info'] for item in monitor_windows.values()]
+    with open(MONITOR_LIST_FILE, "w") as f:
+        json.dump(monitor_list, f)
+    print(f"监控列表已保存到 {MONITOR_LIST_FILE}")
+
+def load_monitor_list():
+    if os.path.exists(MONITOR_LIST_FILE):
+        with open(MONITOR_LIST_FILE, "r") as f:
+            try:
+                loaded_list = json.load(f)
+                if isinstance(loaded_list, list) and all(isinstance(item, (list, tuple)) for item in loaded_list):
+                    return [list(item) for item in loaded_list]
+                return []
+            except (json.JSONDecodeError, TypeError):
+                return []
+    return []
+
+# --- 模拟数据和函数 ---
+def _get_stock_data_from_source(stock_code):
+    time.sleep(1)
+    price = random.uniform(10, 100)
+    change = random.uniform(-5, 5)
+    return pd.Series({"Price": price, "Change": change})
+
+def _get_stock_changes(selected_type=None, stock_code=None):
+    """获取股票异动数据"""
+    global loaddf
+    
+    # 模拟从 Eastmoney API 获取数据
+    # 这个模拟返回之前到现在的全部数据
+    time.sleep(1)
+    
+    # 构造模拟数据
+    # 假设每次调用都返回一些新的和一些旧的数据
+    old_data = loaddf.copy()
+    
+    new_data = {
+        '时间': [datetime.now().strftime("%H:%M:%S")],
+        '代码': [stock_code],
+        '简称': [f'股票{stock_code}'],
+        '板块': [selected_type],
+        '相关信息': [f"{random.uniform(0, 1):.6f},{random.uniform(10, 20):.2f},{random.uniform(0, 1):.6f}"]
+    }
+    
+    # 模拟东财API返回的全部数据
+    api_df = pd.concat([old_data, pd.DataFrame(new_data)], ignore_index=True)
+    
+    # 使用 pd.concat 合并全局 loaddf 和新获取的 api_df
+    loaddf = pd.concat([loaddf, api_df], ignore_index=True)
+    
+    # 去除重复数据，保留最新的数据
+    loaddf.drop_duplicates(subset=['代码', '板块'], keep='last', inplace=True)
+    
+    print(f"为 {stock_code} ({selected_type}) 获取了新的异动数据，并更新了 loaddf。")
+
+def _get_stock_info_by_code(stock_code):
+    if stock_code == "600000":
+        return ["600000", "股票A", "银行", "12.34", "0.56"]
+    elif stock_code == "600001":
+        return ["600001", "股票B", "钢铁", "25.45", "-1.23"]
+    else:
+        return [stock_code, f"未知{stock_code}", "未知", "0.00", "0.00"]
+
+def generate_stock_data():
+    stocks = [
+        ("600000", "股票A", "银行"),
+        ("600001", "股票B", "钢铁"),
+        ("000001", "股票C", "银行"),
+        ("000002", "股票D", "地产"),
+    ]
+    data = []
+    for code, name, sector in stocks:
+        price = random.uniform(10, 100)
+        change = random.uniform(-5, 5)
+        data.append([code, name, sector, f"{price:.2f}", f"{change:.2f}"])
+    return data
+
+# --- 子窗口监控逻辑 ---
+def refresh_stock_data(window_info, tree, item_id):
+    stock_info = window_info['stock_info']
+    stock_code = stock_info
+    window = window_info['toplevel']
+    
+    future = executor.submit(_get_stock_data_from_source, stock_code)
+    future.add_done_callback(lambda f: update_monitor_tree(f, tree, window_info, item_id))
+
+def update_monitor_tree(future, tree, window_info, item_id):
+    stock_info = window_info['stock_info']
+    window = window_info['toplevel']
+    stock_code, stock_name, *rest = stock_info
+
+    try:
+        data = future.result()
+        if data is not None and window.winfo_exists():
+            now = datetime.now().strftime('%H:%M:%S')
+            tree.item(item_id, values=(
+                now, stock_code, stock_name, rest, f"{data['Price']:.2f}", f"{data['Change']:.2f}"
+            ))
+    except Exception as e:
+        if window.winfo_exists():
+            tree.item(item_id, values=(
+                datetime.now().strftime('%H:%M:%S'), stock_code, stock_name, rest, "错误", str(e)
+            ))
+            
+    if window.winfo_exists():
+        window.after(5000, lambda: refresh_stock_data(window_info, tree, item_id))
+
+def on_close_monitor(window_info):
+    stock_info = window_info['stock_info']
+    stock_code = stock_info
+    window = window_info['toplevel']
+    if stock_code in monitor_windows:
+        del monitor_windows[stock_code]
+        save_monitor_list()
+    window.destroy()
+
+def create_monitor_window(stock_info):
+    stock_code, stock_name, *rest = stock_info
+    
+    monitor_win = tk.Toplevel(root)
+    monitor_win.title(f"监控: {stock_name} ({stock_code})")
+    monitor_win.geometry("500x150")
+    
+    window_info = {'stock_info': stock_info, 'toplevel': monitor_win}
+    
+    def on_click_monitor_window(event):
+        global code_entry
+        code_entry.delete(0, tk.END)
+        code_entry.insert(0, stock_code)
+
+    monitor_win.bind("<Button-1>", on_click_monitor_window)
+    
+    columns = ("时间", "代码", "名称", "板块", "现价", "变动")
+    monitor_tree = ttk.Treeview(monitor_win, columns=columns, show="headings")
+    monitor_tree.column("时间", width=80, anchor=tk.CENTER, stretch=False)
+    monitor_tree.column("代码", width=60, anchor=tk.CENTER, stretch=False)
+    monitor_tree.column("名称", width=80, anchor=tk.CENTER, stretch=False)
+    monitor_tree.column("板块", width=80, anchor=tk.CENTER, stretch=False)
+    monitor_tree.column("现价", width=60, anchor=tk.CENTER, stretch=False)
+    monitor_tree.column("变动", width=60, anchor=tk.CENTER, stretch=False)
+    for col in columns:
+        monitor_tree.heading(col, text=col)
+    monitor_tree.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
+    
+    item_id = monitor_tree.insert("", "end", values=("加载中...", "", "", "", "", ""))
+    
+    refresh_stock_data(window_info, monitor_tree, item_id)
+    monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(window_info))
+    
+    return window_info
+
+# --- 主窗口逻辑 ---
+def add_selected_stock():
+    try:
+        selected_item = stock_tree.selection()
+        if not selected_item:
+            messagebox.showwarning("警告", "请选择一个股票代码。")
+            return
+
+        stock_info = list(stock_tree.item(selected_item, "values"))
+        stock_code = stock_info
+        
+        if stock_code in monitor_windows:
+            messagebox.showwarning("警告", f"{stock_code} 的监控窗口已打开。")
+            return
+
+        window_info = create_monitor_window(stock_info)
+        monitor_windows[stock_code] = window_info
+        save_monitor_list()
+
+    except IndexError:
+        messagebox.showwarning("警告", "请选择一个股票代码。")
+
+def show_context_menu(event):
+    try:
+        item = stock_tree.identify_row(event.y)
+        if item:
+            stock_tree.selection_set(item)
+            context_menu.post(event.x_root, event.y_root)
+    except Exception:
+        pass
+
+def load_initial_data():
+    stock_tree.delete(*stock_tree.get_children())
+    data = generate_stock_data()
+    for row in data:
+        stock_tree.insert("", "end", values=row)
+
+def on_main_window_close():
+    save_monitor_list()
+    for win_info in list(monitor_windows.values()):
+        win_info['toplevel'].destroy()
+    executor.shutdown(wait=False)
+    root.destroy()
+    
+def update_code_entry(stock_code):
+    global code_entry
+    code_entry.delete(0, tk.END)
+    code_entry.insert(0, stock_code)
+
+def setup_main_window():
+    global root, stock_tree, context_menu, code_entry
+
+    root = tk.Tk()
+    root.title("单文件监控")
+    root.geometry("600x400")
+    
+    entry_frame = ttk.Frame(root)
+    entry_frame.pack(fill=tk.X, padx=10, pady=5)
+    
+    ttk.Label(entry_frame, text="股票代码:").pack(side=tk.LEFT, padx=5)
+    code_entry = ttk.Entry(entry_frame)
+    code_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    columns = ("代码", "简称", "板块", "现价", "变动")
+    stock_tree = ttk.Treeview(root, columns=columns, show="headings")
+    stock_tree.column("代码", width=80, anchor=tk.CENTER, stretch=False)
+    stock_tree.column("简称", width=120, anchor=tk.CENTER, stretch=False)
+    stock_tree.column("板块", width=120, anchor=tk.CENTER, stretch=False)
+    stock_tree.column("现价", width=80, anchor=tk.CENTER, stretch=False)
+    stock_tree.column("变动", width=80, anchor=tk.CENTER, stretch=False)
+    for col in columns:
+        stock_tree.heading(col, text=col)
+    stock_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+    stock_tree.bind("<Button-3>", show_context_menu)
+
+    context_menu = tk.Menu(root, tearoff=0)
+    context_menu.add_command(label="添加到监控", command=add_selected_stock)
+
+    load_initial_data()
+    
+    # initial_monitor_list = load_monitor_list()
+    # if initial_monitor_list:
+    #     for stock_info in initial_monitor_list:
+    #         stock_code = stock_info
+    #         if stock_code not in monitor_windows:
+    #             window_info = create_monitor_window(stock_info)
+    #             monitor_windows[stock_code] = window_info
+
+    root.protocol("WM_DELETE_WINDOW", on_main_window_close)
+    root.mainloop()
+
+if __name__ == "__main__":
+    setup_main_window()
