@@ -634,11 +634,12 @@ function d(t) {
 #             return False
 #     else:
 #         return trade_status
-def read_ini(inifile='filter.ini',setrule=None,category='General'):
+def read_ini(inifile='filter.ini',setrule=None,category='General',filterkey='filter_rule'):
     from configobj import ConfigObj
     baser = getcwd().split('stock')[0]
     base = baser + 'stock' + path_sep
     config_file_path = base + inifile
+    setrule = setrule.strip() if setrule is not None else None
     if not os.path.exists(config_file_path):
         # Define the path for the config file
         # --- Writing a config file ---
@@ -649,11 +650,11 @@ def read_ini(inifile='filter.ini',setrule=None,category='General'):
         if category == 'General':
             config[category] = {}
             rule = "top_all.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')"
-            config[category]['filter_rule'] = rule
+            config[category][filterkey] = rule
         else:
             config[category] = {}
             rule = None
-            config[category]['filter_rule'] = rule
+            config[category][filterkey] = rule
         # config['General']['version'] = '1.0.0'
 
         # config['Database'] = {}
@@ -676,11 +677,17 @@ def read_ini(inifile='filter.ini',setrule=None,category='General'):
         read_config = ConfigObj(config_file_path)
         # Access values like a dictionary
         if category in read_config.keys():
-            rule = read_config[category]['filter_rule']
+            if filterkey in read_config[category].keys():
+                rule = read_config[category][filterkey]
+            else:
+                read_config[category][filterkey] = {}
+                rule = 'None'
+                read_config[category][filterkey] = rule
+                read_config.write()
         else:
             read_config[category] = {}
             rule = 'None'
-            read_config[category]['filter_rule'] = rule
+            read_config[category][filterkey] = rule
             read_config.write()
             # print(f"Config file '{config_file_path}' init None")
         # db_host = read_config['Database']['host']
@@ -692,9 +699,10 @@ def read_ini(inifile='filter.ini',setrule=None,category='General'):
         # print(f"Database Host: {db_host}")
         # print(f"Enabled Modules: {enabled_modules}")
         # print(f"Debug Mode: {debug_mode}")
-        if setrule is not None:
-            read_config[category]['filter_rule'] = setrule
-            read_config[category][f'filter_rule{get_today("")}'] = rule
+        if setrule is not None and setrule != 'default':
+            read_config[category][filterkey] = setrule
+            if rule is not None and rule != 'None':
+                read_config[category][f'{filterkey}{get_today("")}'] = rule
             # --- Updating a config file ---
             # read_config['General']['version'] = '1.0.1'
             # read_config['Database']['password'] = 'new_secure_pass'
@@ -704,6 +712,8 @@ def read_ini(inifile='filter.ini',setrule=None,category='General'):
         rule = rule.replace('top_all.query','').replace('top_temp.query','')
     if rule == 'None':
         rule = None
+    if setrule == 'default':
+        rule = (f' category:{category} key:{read_config[category].keys()}\n{read_config[category][filterkey]}')
     return rule
 
 def is_trade_date(date=datetime.date.today()):
@@ -2803,7 +2813,7 @@ def to_mp_run_async_old2025(cmd, urllist, *args,**kwargs):
                     log.error("except:%s"%(e))
                     traceback.print_exc()
                     # log.error("except:results%s"%(results[-1]))
-                    import ipdb;ipdb.set_trace()
+                    # import ipdb;ipdb.set_trace()
                     results=[]
                     for code in urllist:
                         print(f"code:{code},count:{len(urllist)} idx:{urllist.index(code)}", end=' ')
@@ -2948,7 +2958,7 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     log.error("except:%s"%(e))
                     traceback.print_exc()
                     # log.error("except:results%s"%(results[-1]))
-                    import ipdb;ipdb.set_trace()
+                    # import ipdb;ipdb.set_trace()
                     results=[]
                     for code in urllist:
                         print(f"code:{code},count:{data_count} idx:{urllist.index(code)}", end=' ')

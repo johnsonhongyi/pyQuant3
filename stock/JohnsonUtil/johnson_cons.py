@@ -147,7 +147,7 @@ codeQuery= {"放量上涨": "top_temp.query('close > df2  and low > ene and clos
             "连阳加速": "top_all.query('lasth1d > lasth2d > lasth3d and lastl1d > lastl2d > lastl3d and lasto1d > lastp2d and lasto2d > lastp3d and lastl1d >= lastp2d*0.99 and lastl2d >= lastp3d*0.99 and close > upper')",\
             "HMax日新高" : "top_temp.query('low > ma10d  and ((lasth1d > high4) or (high > max5)) and high4==max5 and max5 >=hmax*0.9 and topR > 1')",\
             "HMax新高" : "top_all.query('high > hmax and lasth1d < hmax and lasth2d < hmax')",\
-            "3周连阳趋势" : "top_all.query('lasth2d > upper2 and lasth3d > upper3 and lasth4d > upper4 and lastp2d > lastp3d > lastp4d and lasth3d > lasth4d > lasth5d')",\
+            "3周连阳趋势" : "top_all.query('lasth1d > upper1 and lasth2d > upper2 and lasth3d > upper3 and lastp1d > lastp2d > lastp3d and close > lastp1d and close >= open')",\
             "4周新高" : "top_all.query('per1d > 3 and per2d >0 and per3d > 0 and per4d >0 and per5d >0 and percent > 0')",\
             "boll共振" : "top_all.query('boll >=fibl > 1 and red > 2 and close > lastp2d and high > upper')",\
             "K线2连阳新upper": "top_all.query('lasth1d > upper1 and lasth2d < upper2 and lastl1d > lastl2d > lastl3d and close > lasth2d')",\
@@ -156,7 +156,7 @@ codeQuery= {"放量上涨": "top_temp.query('close > df2  and low > ene and clos
             "K线4连阳": "top_temp.query('close > lastp1d and  lastp1d > lastp2d and  lasth1d > lasth2d  and lastl1d > lastl2d and lastp1d > lastp2d and  lasth2d > lasth3d  and lastl2d > lastl3d  and  lasth3d > lasth4d  and lastl3d > lastl4d and low >ma51d and (topR > 0 or (per1d > 1 and per2d > 0 and per3d > 0)) ')",\
             "开盘主升"    : "top_temp.query('open > low*0.999 and open <= low  and high > high4 and close > lastp1d')",\
             "高开高走"    : "top_temp.query('open > low*0.999 and open <= low and open > lastp1d and topR > 0')",\
-            "K线反包"    : "top_temp.query('close > ma51d and close > lastp1d and  lastp1d < lastp2d and topR > 0')",\
+            "K线反包"    : "top_temp.query('close > ma51d and close > lastp1d and  lastp1d < lastp2d')",\
             "K线3新高" :  "top_all.query('top10 > 0 and lasth3d < lasth2d < lasth1d and lastl3d <  lastl2d < lastl1d and lasto2d > lasth3d and lasto1d > lasth2d and low > ma5d')",\
             "K线3新低" :  "top_all.query('top10 > 0 and lasth3d > lasth2d > lasth1d and lastl3d >  lastl2d > lastl1d and open > lastl1d and low > open*0.999 and close > lastp1d')"}
             # "4周Max高" : "top_temp.query('high > high4 and high > hmax and lasth1d > lasth2d and lasth2d > lasth3d and low <= ma5d*1.02 and percent > 0')",\
@@ -168,7 +168,7 @@ codeQuery_work_false= {"放量上涨": "top_temp.query('close > df2  and low > e
             "连阳加速": "top_all.query('lasth1d > lasth2d > lasth3d and lastl1d > lastl2d > lastl3d and lasto1d > lastp2d and lasto2d > lastp3d and lastl1d >= lastp2d*0.99 and lastl2d >= lastp3d*0.99 and close > upper')",\
             "HMax日新高" : "top_temp.query('low > ma10d  and ((lasth1d > high4) or (high > max5)) and high4==max5 and max5 >=hmax*0.9 and topR > 1')",\
             "HMax新高" : "top_all.query('high > hmax and lasth2d < hmax and lasth3d < hmax')",\
-            "3周连阳趋势" : "top_all.query('lasth1d > upper1 and lasth2d > upper2 and lasth3d > upper3 and lastp1d > lastp2d > lastp3d and lasth2d > lasth3d > lasth4d')",\
+            "3周连阳趋势" : "top_all.query('lasth2d > upper2 and lasth3d > upper3 and lasth4d > upper4 and lastp2d > lastp3d > lastp4d  and close > lastp2d and close >= open')",\
             "4周新高" : "top_all.query('per1d > 3 and per2d >0 and per3d > 0 and per4d >0 and per5d >0 and percent > 0')",\
             "boll共振" : "top_all.query('boll >=fibl > 1 and red > 2 and close > lastp2d and high > upper')",\
             "K线2连阳新upper": "top_all.query('lasth1d > upper1 and lasth2d < upper2 and lastl1d > lastl2d > lastl3d and close > lasth2d')",\
@@ -177,7 +177,7 @@ codeQuery_work_false= {"放量上涨": "top_temp.query('close > df2  and low > e
             "K线4连阳": "top_temp.query('close > lastp2d and  lastp2d > lastp3d and  lasth2d > lasth3d  and lastl2d > lastl3d and lastp2d > lastp3d and  lasth3d > lasth4d  and lastl3d > lastl4d  and  lasth4d > lasth5d  and lastl4d > lastl5d and low >ma51d and (topR > 0 or (per2d > 1 and per3d > 0 and per4d > 0)) ')",\
             "开盘主升"    : "top_temp.query('open > low*0.999 and open <= low  and high > high4 and close > lastp2d')",\
             "高开高走"    : "top_temp.query('open > low*0.999 and open <= low and open > lastp2d and topR > 0')",\
-            "K线反包"    : "top_temp.query('close > ma51d and close > lastp2d and  lastp2d < lastp3d and topR > 0')",\
+            "K线反包"    : "top_temp.query('close > ma51d and close > lastp2d and  lastp2d < lastp3d')",\
             "K线3新高" :  "top_all.query('top10 > 0 and lasth4d < lasth3d < lasth2d and lastl4d <  lastl3d < lastl2d and lasto3d > lasth4d and lasto2d > lasth3d and low > ma5d')",\
             "K线3新低" :  "top_all.query('top10 > 0 and lasth4d > lasth3d > lasth2d and lastl4d >  lastl3d > lastl2d and open > lastl2d and low > open*0.999 and close > lastp2d')"}
 def codeQuery_show(idxkey,columns_format,workstatus):

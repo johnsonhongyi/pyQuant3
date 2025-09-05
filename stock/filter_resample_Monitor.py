@@ -436,7 +436,7 @@ if __name__ == "__main__":
                 query_rule = cct.GlobalValues().getkey('filter_rule')
                 if query_rule is None:
                     query_rule = cct.read_ini(inifile='filter.ini')
-                    if len(top_all) > 0 and top_all.lastp1d[0] == top_all.close[0]:
+                    if len(top_all) > 0 and top_all.lastp1d[0] == top_all.close[0] and top_all.lastp1d[-1] == top_all.close[-1]:
                         if query_rule.find('last') > 0:
                             query_rule = query_rule.replace('1d','2d')
                     # t3d_code = top_all_3d.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')
@@ -484,7 +484,7 @@ if __name__ == "__main__":
                         top_all['dff2'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
                                                top_all['buy'].values, top_all['lastp'].values)))
 
-                    if len(top_all) > 0 and top_all.lastp1d[0] == top_all.close[0]:
+                    if len(top_all) > 0 and top_all.lastp1d[0] == top_all.close[0] and top_all.lastp1d[-1] == top_all.close[-1]:
                         top_temp = top_all.query('low > lastl2d and low > ma201d and lasth2d > lasth3d')
                         # top_temp = top_all.query('low > lastl2d and low > ma201d and lasth2d > lasth3d and a1_v > 0')
 
@@ -824,8 +824,17 @@ if __name__ == "__main__":
                 else:
                     cct.evalcmd(dir_mo,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=top_all,top_all_3d=top_all_3d,top_all_w=top_all_w,top_all_m=top_all_m)
             elif st.lower() == 'rr':
+                print(f"defaultRule: top_all.query{cct.read_ini(inifile='filter.ini',setrule='default')}")
                 rule = cct.cct_raw_input("filter_rule:")
+                # if len(rule.split()) > 1:
+                #     filterkey = rule.split()[1]
+                # else:
+                #     filterkey = 'filter_rule'
+                # query_rule = cct.GlobalValues().getkey(filterkey)
+
+                filterkey = 'filter_rule'
                 query_rule = cct.GlobalValues().getkey('filter_rule')
+
                 if rule.lower().startswith('w') and  query_rule is not None:
                     cct.read_ini(inifile='filter.ini',setrule=f'top_all.query{query_rule}')
                 else:
@@ -835,7 +844,8 @@ if __name__ == "__main__":
                         print(f'set rule:{rule}')
                     else:
                         print(f'rule not find top_all query or top_temp query')
-                        print(f"defaultRule: top_all.query{cct.read_ini(inifile='filter.ini')}")
+                        print(f"defaultRule: top_all.query{cct.read_ini(inifile='filter.ini',setrule='default')}")
+                        # print(f"defaultRule: top_all.query{cct.read_ini(inifile='filter.ini',setrule='default',category='sina_Monitor')}")
 
             elif st.startswith('q') or st.startswith('e'):
                 print("exit:%s" % (st))

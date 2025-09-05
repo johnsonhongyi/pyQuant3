@@ -65,7 +65,7 @@ class StockCode:
             # raise e
         
         stock_codes = grep_stock_codes.findall(response.text)
-        stock_codes = list(set([elem for elem in stock_codes if elem.startswith(('6', '30', '00','688','43','83','87','92'))]))
+        stock_codes = list(set([elem for elem in stock_codes if elem.startswith(('60', '30', '00','688','43','83','87','92'))]))
         # df=rl.get_sina_Market_json('all')
         # stock_codes = df.index.tolist()
         # '301397'
@@ -589,7 +589,7 @@ class Sina:
                              run_col = ['low', 'high', 'close']
                              startime = '09:25:00'
                              # endtime = '10:00:00'
-                             endtime = '09:35:00'
+                             endtime = '10:00:00'
                              h5 = self.get_col_agg_df(h5_a, h5, run_col, all_func, startime, endtime)
                              startime = '09:25:00'
                              # endtime = '10:00:00'
@@ -605,14 +605,14 @@ class Sina:
                              run_col = ['low','high']
                              startime = '09:25:00'
                              # endtime = '10:00:00'
-                             endtime = '09:35:00'
+                             endtime = '10:00:00'
                              h5 = self.get_col_agg_df(h5_a, h5, run_col, all_func, startime, endtime)
                              # run_col = ['high']
                              # startime = '09:25:00'
                              # endtime = '10:30:00'
                              # dd = self.get_col_agg_df(h5, dd, run_col, all_func, startime, endtime)
                              startime = '09:25:00'
-                             endtime = '15:01:00'
+                             endtime = '15:00:00'
                              run_col = ['close']
                              # h5 = cct.get_limit_multiIndex_Group(h5, freq='15T', col=run_col,start=startime, end=endtime)
                              # time_s=time.time()

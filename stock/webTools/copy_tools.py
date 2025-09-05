@@ -108,7 +108,7 @@ def open_tdx_mscreen(sc=1):
     return True
 
 appdict = {'通达信金融终端(开心果交易版) 副屏三':'个股联动', '通达信金融终端(开心果交易版) 副屏一':'上证指数','通达信金融终端(开心果交易版) 副屏二':'科创50ETF'}
-runkey = {'龙头战法':'ggld','上证指数':'03','科创50ETF':'090 588000'}
+runkey = {'个股联动':'ggld','上证指数':'03','科创50ETF':'090 588000'}
 # applist = []
 
 def set_tdx_screen_show(appdict=appdict,check=True):
@@ -161,9 +161,9 @@ def broadcast_stock_code(stock_code,message_type='stock'):
     if len(stock_code) == 6:
         codex = int(stock_code)
         if str(message_type) == 'stock':
-            if str(stock_code)[0] in ('0','3'):
+            if str(stock_code)[0] in ['0','3','1']:
                 codex = '6' + str(stock_code)
-            elif str(stock_code)[0] == '6':
+            elif str(stock_code)[0] in ['6','5']:
                 codex = '7' + str(stock_code)
             # elif str(stock_code)[0] == '9':
             #     codex = '2' + str(stock_code)
@@ -196,6 +196,7 @@ def add_data(new_data):
 def get_text(cur):
     if pre_hash != cur["hash"]:
         broadcast_stock_code(cur)
+        # send_code_dfcf(cur)
     return cur
 
 

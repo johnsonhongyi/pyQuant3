@@ -45,3 +45,12 @@ time cost: 18 min 8 s cost:seconds 1088.004 s
 time cost: 16 min 38 s cost:seconds 998.028 s 
 time cost: 20 min 8 s cost:seconds 1208.993 s 
 time cost: 19 min 16 s cost:seconds 1156.011 s 
+time cost: 21 min 11 s cost:seconds 1271.951 s 
+time cost: 18 min 22 s cost:seconds 1102.070 s 
+time cost: 17 min 35 s cost:seconds 1055.030 s 
+time cost: 17 min 43 s cost:seconds 1063.966 s 
+time cost: 16 min 42 s cost:seconds 1002.072 s 
+time cost: 17 min 27 s cost:seconds 1047.002 s 
+time cost: 20 min 37 s cost:seconds 1237.067 s 
+time cost: 17 min 42 s cost:seconds 1062.068 s 
+time cost: 18 min 33 s cost:seconds 1113.040 s 

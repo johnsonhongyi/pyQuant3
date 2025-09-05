@@ -5,8 +5,8 @@
 
 ;#If WinActive("ahk_class Afx:006C0000:b:00010005:00000006:00010C2F") || WinActive("ahk_class #32770")
 #If WinActive("ahk_exe hexin.exe")
-;MButton::
-#z::
+MButton::
+;#z::
 
 #If WinActive("ahk_exe hexin.exe")
 {
