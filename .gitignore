@@ -5,6 +5,9 @@ __pycache__/
 *.h5
 *.exe
 *.cmd
+*.csv
+*.txt
+*.json
 # C extensions
 #*.so
 
@@ -12,6 +15,7 @@ __pycache__/
 .Python
 env/
 build/
+dist/
 develop-eggs/
 dist/
 downloads/
