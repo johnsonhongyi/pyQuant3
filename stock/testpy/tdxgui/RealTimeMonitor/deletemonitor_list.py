@@ -269,69 +269,141 @@
 
 
 
+# import tkinter as tk
+# from tkinter import ttk
+
+# # --- Function for the Sub Window ---
+# def create_sub_window(parent_window):
+#     """Creates and returns the sub window and its entry widget."""
+#     sub_window = tk.Toplevel(parent_window)
+#     sub_window.title("Sub Window")
+#     sub_window.geometry("300x200")
+    
+#     code_entry = ttk.Entry(sub_window, width=40)
+#     code_entry.pack(pady=20)
+    
+#     return sub_window, code_entry
+
+# # --- Function to Handle Data Sending ---
+# def send_to_subwindow(search_entry, sub_window, code_entry, event=None):
+#     """Sends text from the search entry to the sub window's code entry."""
+#     # Check if the subwindow exists before trying to update it.
+#     if sub_window and sub_window.winfo_exists():
+#         search_text = search_entry.get()
+#         code_entry.delete(0, tk.END)
+#         code_entry.insert(0, search_text)
+
+# # --- Main Application Logic ---
+# def main():
+#     """Initializes the main application window and its components."""
+#     root = tk.Tk()
+#     root.title("Main Window")
+#     root.geometry("500x400")
+    
+#     # These will be initialized later when the subwindow is opened.
+#     sub_window = None
+#     code_entry = None
+
+#     # Function to open the subwindow and store its widgets.
+#     def open_subwindow():
+#         nonlocal sub_window, code_entry
+#         if not sub_window or not sub_window.winfo_exists():
+#             sub_window, code_entry = create_sub_window(root)
+
+#     # Function that wraps the sender to pass the correct arguments.
+#     def handle_key_press(event):
+#         # We must check if the sub_window and code_entry are available
+#         # before calling the sender function.
+#         if sub_window and code_entry:
+#             send_to_subwindow(search_entry, sub_window, code_entry, event)
+
+#     # --- Main Window Widgets ---
+#     search_frame = ttk.Frame(root)
+#     search_frame.pack(pady=10)
+    
+#     ttk.Label(search_frame, text="Search:").pack(side="left", padx=5)
+#     search_entry = ttk.Entry(search_frame)
+#     search_entry.pack(side="left", padx=5)
+    
+#     # Bind the entry's change event to the wrapping function.
+#     search_entry.bind("<KeyRelease>", handle_key_press)
+    
+#     open_btn = ttk.Button(root, text="Open Sub Window", command=open_subwindow)
+#     open_btn.pack(pady=10)
+    
+#     root.mainloop()
+
+# if __name__ == "__main__":
+#     main()
+
+
 import tkinter as tk
 from tkinter import ttk
+import pandas as pd
 
-# --- Function for the Sub Window ---
-def create_sub_window(parent_window):
-    """Creates and returns the sub window and its entry widget."""
-    sub_window = tk.Toplevel(parent_window)
-    sub_window.title("Sub Window")
-    sub_window.geometry("300x200")
+# 假设这是你的 DataFrame，并用作全域变量
+df = pd.DataFrame([
+    ("14:55:01", "000001", "平安银行", "大笔买入", "资金流入"),
+    ("14:58:30", "600000", "浦发银行", "竞价上涨", "涨幅超3%"),
+    ("14:59:15", "000002", "万科A", "向上缺口", "股价创60日新高"),
+    ("14:56:45", "601398", "工商银行", "快速反弹", "股价反弹"),
+], columns=["时间", "代码", "名称", "异动类型", "相关信息"])
+
+# 设置一个变量来追踪每列的排序方向
+sort_directions = {}
+
+def load_df_to_treeview(tree, dataframe):
+    """
+    将 DataFrame 的内容加载到 Treeview 中。
+    """
+    tree.delete(*tree.get_children())
     
-    code_entry = ttk.Entry(sub_window, width=40)
-    code_entry.pack(pady=20)
+    for row in dataframe.itertuples(index=False):
+        tree.insert("", "end", values=row)
+
+def sort_treeview(tree, col_name):
+    """
+    点击列标题时，使用 DataFrame 排序并更新 Treeview。
+    """
+    global df
+    import ipdb;ipdb.set_trace()
     
-    return sub_window, code_entry
-
-# --- Function to Handle Data Sending ---
-def send_to_subwindow(search_entry, sub_window, code_entry, event=None):
-    """Sends text from the search entry to the sub window's code entry."""
-    # Check if the subwindow exists before trying to update it.
-    if sub_window and sub_window.winfo_exists():
-        search_text = search_entry.get()
-        code_entry.delete(0, tk.END)
-        code_entry.insert(0, search_text)
-
-# --- Main Application Logic ---
-def main():
-    """Initializes the main application window and its components."""
+    # 获取当前排序方向，如果未设置则默认为 False (升序)
+    reverse_sort = sort_directions.get(col_name, False)
+    
+    # --- 核心逻辑修改部分 ---
+    if col_name == '时间':
+        # 如果点击的是“时间”列，强制按增序排序（reverse=False）
+        df.sort_values(by=col_name, ascending=True, inplace=True)
+        # 强制更新排序方向为 True，以便下一次点击时为降序
+        sort_directions[col_name] = True
+    else:
+        # 其他列正常切换排序方向
+        df.sort_values(by=col_name, ascending=not reverse_sort, inplace=True)
+        # 更新排序方向
+        sort_directions[col_name] = not reverse_sort
+    
+    # 重新加载排序后的 DataFrame 到 Treeview
+    load_df_to_treeview(tree, df)
+    
+def create_main_window():
     root = tk.Tk()
-    root.title("Main Window")
-    root.geometry("500x400")
-    
-    # These will be initialized later when the subwindow is opened.
-    sub_window = None
-    code_entry = None
+    root.title("Treeview DataFrame 排序示例")
 
-    # Function to open the subwindow and store its widgets.
-    def open_subwindow():
-        nonlocal sub_window, code_entry
-        if not sub_window or not sub_window.winfo_exists():
-            sub_window, code_entry = create_sub_window(root)
+    columns = ["时间", "代码", "名称", "异动类型", "相关信息"]
+    
+    stock_tree = ttk.Treeview(root, columns=columns, show='headings')
+    
+    for col in columns:
+        stock_tree.heading(col, text=col, command=lambda c=col: sort_treeview(stock_tree, c))
+        stock_tree.column(col, width=120, anchor=tk.CENTER)
 
-    # Function that wraps the sender to pass the correct arguments.
-    def handle_key_press(event):
-        # We must check if the sub_window and code_entry are available
-        # before calling the sender function.
-        if sub_window and code_entry:
-            send_to_subwindow(search_entry, sub_window, code_entry, event)
+    # 首次加载数据
+    load_df_to_treeview(stock_tree, df)
 
-    # --- Main Window Widgets ---
-    search_frame = ttk.Frame(root)
-    search_frame.pack(pady=10)
-    
-    ttk.Label(search_frame, text="Search:").pack(side="left", padx=5)
-    search_entry = ttk.Entry(search_frame)
-    search_entry.pack(side="left", padx=5)
-    
-    # Bind the entry's change event to the wrapping function.
-    search_entry.bind("<KeyRelease>", handle_key_press)
-    
-    open_btn = ttk.Button(root, text="Open Sub Window", command=open_subwindow)
-    open_btn.pack(pady=10)
-    
+    stock_tree.pack(fill=tk.BOTH, expand=True)
     root.mainloop()
 
 if __name__ == "__main__":
-    main()
+    create_main_window()
+
