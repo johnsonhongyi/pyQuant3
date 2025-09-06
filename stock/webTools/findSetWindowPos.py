@@ -896,6 +896,11 @@ if __name__ == '__main__':
     # result3=find_proc_windows('行业跟随1.0',visible=True)
     # print(result3)
     print(FindWindowRectFromName('股票异动数据监控'))
+    print(f"ths-tdx-web.py: {find_window_by_title_safe('ths-tdx-web.py')}")
+
+
+    print(FindWindowRectFromName('ths-tdx-web.py'))
+    
     print(FindWindowRectFromName('开盘啦竞价板块观察1.0'))
     # print(find_proc_windows('股票异动数据监控',fuzzysearch=True))
 
@@ -915,6 +920,7 @@ if __name__ == '__main__':
     else:
         print(f'not find 涨停采集工具共享版 :{result}')
     
+    # print(f'ths-tdx-web.py: {find_window_by_title_safe('ths-tdx-web.py')}')
     print(find_window_by_title_safe('Microsoft\u200b Edge'))
     print(find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏一'))
     print(find_window_by_title_safe('通达信金融终端(开心果交易版)V2025'))

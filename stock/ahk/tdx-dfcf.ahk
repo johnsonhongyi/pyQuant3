@@ -50,12 +50,13 @@ CheckClipboard()
     
     ; \b((60|30|00)\d{4}|(688|43|83|87|92)\d{3})\b
     ; 简化为：匹配指定前缀，后跟3或4个数字，总共6位
-    if RegExMatch(Clipboard, "\b((?:60|30|00|43|83|87|92)\d{4}|(?:688)\d{3})\b", found_match)
+    if RegExMatch(Clipboard, "\b((?:60|30|00|43|83|87|92)\d{4}|(?:688|200)\d{3})\b", found_match)
     {
         ; 找到匹配，将提取的6位数字存储到变量中
         six_digits := found_match1
         
         ; 提示用户已找到6位数字
+        
         ;MsgBox, 0x40,, 剪贴板中检测到6位数字: %six_digits%
         
         ; 你可以在这里添加其他操作，例如：
@@ -64,7 +65,7 @@ CheckClipboard()
         ;SendAllTDX(six_digits)
         ; 获取当前活动窗口 → 保存句柄
         WinGet, activeWinID, ID, A
-
+        Sleep, 100
         SendDFCF(six_digits)
         Sleep, 100
         ; 返回之前的窗口
@@ -106,18 +107,18 @@ SendDFCF(stockCode) {
         WinWaitActive
         ; 模拟打开搜索框（假设 Ctrl+F 可用）
         ;Send, ^f
-        Sleep, 50
+        Sleep, 80
 
         ; 直接输入股票代码
         ;SetKeyDelay 1000
-        SetKeyDelay, 50
+        SetKeyDelay, 80
         ;SendInput, %stockCode%
         Send, %stockCode%
-        Sleep, 80
+        Sleep, 100
         Send, {Enter}
         ;MsgBox %stockCode%
     } else {
-        MsgBox, ❌ 找不到东方财富终端窗口。
+        ;MsgBox, ❌ 找不到东方财富终端窗口。
     }
 
     return
@@ -145,7 +146,7 @@ SendAllTDX(stockCode) {
         Send, {Enter}
         ;MsgBox %stockCode%
     } else {
-        MsgBox, ❌ 找不到东方财富终端窗口。
+        ;MsgBox, ❌ 找不到东方财富终端窗口。
     }
 
     ; 激活同花顺
