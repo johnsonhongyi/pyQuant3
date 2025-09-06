@@ -101,31 +101,6 @@ def get_pids_values(pname):
     # print(pids)
     return pids
 
-# def find_window_by_title_background(process_name: str):
-#     #find AutoHotkeyU64.exe 不如 get_pids_values
-#     """
-#     根據程序名稱查找所有正在運行的程序。
-#     返回一個匹配的 psutil.Process 對象列表。
-#     """
-#     # matching_processes = []
-#     find_pid = 0
-#     # 使用 re.escape() 自动转义所有特殊字符
-#     escaped_title = re.escape(process_name)
-#     # 使用正则表达式匹配，并忽略大小写
-#     title_pattern = re.compile(escaped_title, re.IGNORECASE)
-
-#     for proc in psutil.process_iter(['name', 'pid']):
-#         try:
-
-#             # if proc.info['name'].lower() == process_name.lower():
-#             if title_pattern.search(proc.info['name']):
-#                 # found_windows.append((hwnd, proc))
-#                 # matching_processes.append(proc)
-#                 return proc.pid
-
-#         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-#             pass
-#     return find_pid
 
 def find_window_by_title_safe(target_title: str):
     # find ths-tdx-web.py
@@ -1945,17 +1920,6 @@ def on_window_focus(event):
     bring_both_to_front(root)
 
 is_already_triggered = False
-# --- 协调函数（与上面相同） ---
-# def find_and_bring_to_front(monitor_id=None):
-#     """
-#     根据ID找到窗口并拉到最前。
-#     """
-#     monitor_list = [win['stock_info'] for win in monitor_windows.values()]
-#     # for mon in monitor_list
-#     if monitor_id in monitor_windows and monitor_windows[monitor_id].winfo_exists():
-#         bring_both_to_front(root, monitor_windows[monitor_id])
-#     else:
-#         print(f"窗口 {monitor_id} 不存在或已关闭。")
 
 # def bring_both_to_front(main_window, monitor_window):
 def bring_both_to_front(main_window):
@@ -2010,37 +1974,6 @@ def sort_treeview(tree, col, reverse):
     # 重新加载排序后的 DataFrame 到 Treeview
     load_df_to_treeview(tree, viewdf)
 
-
-# def save_window_position(window):
-#     """
-#     保存窗口的位置和大小到配置文件。
-#     """
-#     # 获取窗口的几何信息，格式为 "WIDTHxHEIGHT+X+Y"
-#     geometry = window.geometry()
-    
-#     # 转换为字典以便保存为JSON
-#     config = {"geometry": geometry}
-    
-#     with open(CONFIG_FILE, "w") as f:
-#         json.dump(config, f)
-#     print(f"窗口配置已保存: {geometry}")
-
-# def load_window_position(window):
-#     """
-#     从配置文件加载窗口的位置和大小。
-#     """
-#     if os.path.exists(CONFIG_FILE):
-#         with open(CONFIG_FILE, "r") as f:
-#             try:
-#                 config = json.load(f)
-#                 geometry = config.get("geometry")
-#                 if geometry:
-#                     window.geometry(geometry)
-#                     print(f"窗口位置已恢复: {geometry}")
-#             except json.JSONDecodeError:
-#                 print("配置文件损坏，无法加载。")
-#     else:
-#         print("未找到配置文件，使用默认窗口位置。")
 
 
 
@@ -2103,27 +2036,6 @@ def on_close_monitor(window_info):
         update_window_position(stock_code) # 确保保存最后的配置
         window.destroy()
 
-    # if not WINDOWS_BY_ID: # 如果所有窗口都已关闭
-    #     print("所有窗口已关闭。正在保存配置并退出...")
-    #     save_window_positions()
-    #     root.quit()
-
-# def on_main_window_close():
-#     """处理主窗口关闭事件"""
-#     if messagebox.askyesno("确认", "确定要退出程序吗?"):
-#         save_monitor_list() # 确保在主程序关闭时保存列表
-#         """处理主窗口关闭事件"""
-#         for win_info in list(monitor_windows.values()):
-#             # 修正：访问内部字典的 'toplevel' 键
-#             # save_window_position(win_info['toplevel'])
-#             win_info['toplevel'].destroy()
-#         # save_window_position(root)
-#         executor.shutdown(wait=False)
-#         root.destroy()
-#     # for win in list(monitor_windows.values()):
-#     #     win.destroy()
-#     # executor.shutdown(wait=False)
-#     # root.destroy()
 
 def on_closing(window, window_id):
     """在窗口关闭时调用。"""
@@ -2140,13 +2052,6 @@ def on_closing(window, window_id):
         save_window_positions()
         # root.quit()
 
-    # """处理主窗口关闭事件"""  on_close_monitor 已处理
-    # for win_info in list(monitor_windows.values()):
-    #     # 修正：访问内部字典的 'toplevel' 键
-    #     # save_window_position(win_info['toplevel'])
-    #     import ipdb;ipdb.set_trace()
-    #     win_info['toplevel'].destroy()
-    # save_window_position(root)
     executor.shutdown(wait=False)
     # root.destroy()
     root.quit()
@@ -2185,73 +2090,7 @@ def update_position_window(window, window_id, is_main=False):
     return window
 
 
-'''
-    data = [(tree.set(k, col), k) for k in tree.get_children('')]
-    
-    # 2. 根据值进行排序
-    # 这里假设数据是可比较的（如字符串或数字）
-    data.sort(key=lambda t: t, reverse=reverse)
-    
-    # 3. 重新排列Treeview中的项目
-    for index, (value, iid) in enumerate(data):
-        tree.move(iid, '', index)
-        
-    # 4. 更新列标题，切换排序方向
-    tree.heading(col, command=lambda: sort_treeview(tree, col, not reverse))
-'''
 
-# def create_popup_window(stock_info,parent=None):
-#     # 创建新的 Toplevel 窗口（弹出窗口）
-#     global sub_window,sub_monitor_tree
-#     if len(stock_info) > 4:
-#         stock_info = stock_info[1:]
-#     stock_code, stock_name, *rest = stock_info
-
-#     if parent:
-#         sub_window = tk.Toplevel(parent)
-#     else:
-#         sub_window = tk.Toplevel(root)
-#     sub_window.title("详细信息")
-
-
-#     """创建并配置子窗口，使用Treeview显示数据"""
-#     """Creates a new monitor window with a Treeview."""
-#     sub_window.resizable(True, True)
-#     sub_window.geometry("420x300") # 设置合适的初始大小
-#     # monitor_win.title(f"Monitoring: {stock_name} ({stock_code})")
-
-
-#     sub_window.title(f"详情: {stock_name} ({stock_code})")
-#     tree_frame = ttk.Frame(sub_window)
-#     tree_frame.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
-
-#     window_info = {'stock_info': stock_info, 'toplevel': sub_window}
-
-#     columns = ("时间", "代码", "名称", "板块", "相关信息")
-#     sub_monitor_tree = ttk.Treeview(sub_window, columns=columns, show="headings")
-#     # 调整列宽以适应内容，减小间距
-#     # monitor_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
-#     sub_monitor_tree.column("时间", width=60, anchor=tk.CENTER, stretch=False)
-#     sub_monitor_tree.column("代码", width=60, anchor=tk.CENTER, stretch=False)
-#     sub_monitor_tree.column("名称", width=60, anchor=tk.CENTER, stretch=False)
-#     sub_monitor_tree.column("板块", width=80, anchor=tk.CENTER, stretch=False)
-#     sub_monitor_tree.column("相关信息", width=160, anchor=tk.CENTER, stretch=False)
-
-#     for col in columns:
-#         sub_monitor_tree.heading(col, text=col)
-
-#     sub_item_id = sub_monitor_tree.insert("", "end", values=("加载中...", "", "", "", "", ""))
-
-#     sub_monitor_tree.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
-#     # refresh_stock_data(window_info, sub_monitor_tree, sub_item_id)
-#     return sub_window
-
-# def setup_main_window():
-#     """设置主窗口和UI元素"""
-#     global root, tree, context_menu
-#     # 创建主窗口
-# MONITOR_LIST_FILE = "monitor_list.txt"
-# global code_entry
 
 root = tk.Tk()
 root.title("股票异动数据监控")
@@ -2414,12 +2253,6 @@ vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree.yview)
 hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=tree.xview)
 tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
-# 配置列
-# tree.heading("时间", text="时间", anchor=tk.CENTER, command=lambda c=col: sort_treeview(tree, c, False))
-# tree.heading("代码", text="代码", anchor=tk.CENTER, command=lambda c=col: sort_treeview(tree, c, False))
-# tree.heading("名称", text="名称", anchor=tk.CENTER, command=lambda c=col: sort_treeview(tree, c, False))
-# tree.heading("异动类型", text="异动类型", anchor=tk.CENTER, command=lambda c=col: sort_treeview(tree, c, False))
-# tree.heading("相关信息", text="相关信息", anchor=tk.W, command=lambda c=col: sort_treeview(tree, c, False))
 for col in columns:
     tree.heading(col, text=col, command=lambda c=col: sort_treeview(tree, c, False))
     if col in ['涨幅', '价格', '量','count']:
@@ -2430,14 +2263,6 @@ for col in columns:
         tree.column(col, width=60, anchor=tk.CENTER, minwidth=30)
     # tree.column(col, width=120, anchor=tk.CENTER)
 
-# 增大列宽
-# tree.column("时间", width=120, anchor=tk.CENTER, minwidth=100)
-# tree.column("代码", width=100, anchor=tk.CENTER, minwidth=80)
-# tree.column("名称", width=120, anchor=tk.CENTER, minwidth=100)
-# tree.column("异动类型", width=120, anchor=tk.CENTER, minwidth=120)
-# tree.column("涨幅", width=80, anchor=tk.W, minwidth=80)
-# tree.column("价格", width=80, anchor=tk.W, minwidth=80)
-# tree.column("量", width=80, anchor=tk.W, minwidth=80)
 
 # 布局
 tree.grid(row=0, column=0, sticky="nsew")
@@ -2450,14 +2275,6 @@ tree_frame.grid_columnconfigure(0, weight=1)
 # 绑定选择事件
 tree.bind("<<TreeviewSelect>>", on_tree_select)
 
-# # ... (创建 stock_tree 实例) ...
-# stock_tree = ttk.Treeview(root, columns=columns, show='headings')
-
-# # 将排序函数绑定到每列
-# for col in columns:
-#     # 初始排序方向设置为 False (升序)
-#     stock_tree.heading(col, text=col, command=lambda c=col: sort_treeview(stock_tree, c, False))
-#     stock_tree.column(col, width=88, anchor=tk.CENTER)
 
 
 # 状态栏
@@ -2493,16 +2310,6 @@ schedule_worktime_task()
 if get_now_time_int() > 1530 and not date_write_is_processed:
     start_async_save()
 
-# root = tk.Tk()
-# root.title("单文件监控")
-# root.geometry("600x400")
-
-# columns = ("代码", "简称", "现价", "竞价涨幅")
-# stock_tree = ttk.Treeview(root, columns=columns, show="headings")
-# for col in columns:
-#     stock_tree.heading(col, text=col, anchor=tk.CENTER)
-#     stock_tree.column(col, width=120, anchor=tk.CENTER)
-# stock_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=10, pady=10)
 
 tree.bind("<Button-3>", show_context_menu)
 
@@ -2519,14 +2326,6 @@ update_position_window(root,"main")
 # load_initial_data()
 # 自动加载并开启监控窗口
 initial_monitor_list = load_monitor_list()
-# if initial_monitor_list:
-#     for stock_info in initial_monitor_list:
-#         if isinstance(stock_info, list):
-#             stock_code = stock_info[0]
-#             stock_code = stock_info[0]
-#             if stock_code not in monitor_windows:
-#                 monitor_win = create_monitor_window(stock_info)
-#                 monitor_windows[stock_code] = monitor_win
 if initial_monitor_list:
     for stock_info in initial_monitor_list:
         if isinstance(stock_info, list) and stock_info:
@@ -2552,6 +2351,3 @@ root.bind("<FocusIn>", on_window_focus)
 root.bind("<Configure>", lambda event: update_window_position("main"))
 root.protocol("WM_DELETE_WINDOW", lambda: on_closing(root, "main"))
 root.mainloop()
-
-# if __name__ == "__main__":
-#     setup_main_window()
