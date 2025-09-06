@@ -108,7 +108,7 @@
 
 
 
-
+'''
 import tkinter as tk
 import tkinter.ttk as ttk
 import json
@@ -270,3 +270,179 @@ if __name__ == "__main__":
     main_window.deiconify()
 
     root.mainloop()
+'''
+
+
+
+import tkinter as tk
+import tkinter.ttk as ttk
+import json
+import os
+import threading
+
+# --- 配置和数据存储 ---
+CONFIG_FILE = "window_config.json"
+WINDOW_GEOMETRIES = {}
+WINDOWS_BY_ID = {}
+save_timer = None
+
+def load_window_positions():
+    global WINDOW_GEOMETRIES
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r") as f:
+            try:
+                WINDOW_GEOMETRIES = json.load(f)
+            except (json.JSONDecodeError, FileNotFoundError):
+                pass
+    return WINDOW_GEOMETRIES
+
+def save_window_positions():
+    global WINDOW_GEOMETRIES, save_timer
+    if save_timer:
+        save_timer.cancel()
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(WINDOW_GEOMETRIES, f)
+    except IOError:
+        pass
+
+def schedule_save_positions():
+    global save_timer
+    if save_timer:
+        save_timer.cancel()
+    save_timer = threading.Timer(1.0, save_window_positions)
+    save_timer.start()
+
+def update_window_position(window_id):
+    window = WINDOWS_BY_ID.get(window_id)
+    if window and window.winfo_exists():
+        WINDOW_GEOMETRIES[window_id] = window.geometry()
+        schedule_save_positions()
+
+# --- 自定义标题栏功能 ---
+def move_window(event):
+    window = event.widget.winfo_toplevel()
+    window.geometry(f'+{event.x_root}+{event.y_root}')
+
+def create_custom_title_bar(window, title_text, height=35):
+    window.overrideredirect(True)
+    title_bar = tk.Frame(window, bg='white', height=height, relief='flat')
+    title_bar.pack(fill='x', side='top')
+    title_bar.bind("<B1-Motion>", move_window)
+    
+    title_label = tk.Label(title_bar, text=title_text, bg='white', font=('Segoe UI', 12, 'bold'), fg='#333333')
+    title_label.pack(side='left', padx=10)
+    
+    close_button = tk.Button(title_bar, text='✕', command=window.destroy, bg='white', fg='#555555', relief='flat', font=('Arial', 10), bd=0)
+    close_button.pack(side='right')
+    close_button.bind("<Enter>", lambda e: close_button.config(bg='#E81123', fg='white'))
+    close_button.bind("<Leave>", lambda e: close_button.config(bg='white', fg='#555555'))
+
+    content_frame = tk.Frame(window, bg='white')
+    content_frame.pack(fill='both', expand=True)
+    
+    return content_frame
+
+# --- 整合 Treeview 和 PanedWindow 的窗口创建函数 ---
+def create_monitored_window(root, window_id, is_main=False):
+    if is_main:
+        window = root
+        title_text = "主窗口 (清爽界面)"
+    else:
+        window = tk.Toplevel(root)
+        title_text = f"子窗口 - {window_id}"
+    
+    WINDOWS_BY_ID[window_id] = window
+    
+    content_frame = create_custom_title_bar(window, title_text, height=35)
+    
+    # 加载窗口位置
+    if window_id in WINDOW_GEOMETRIES:
+        window.geometry(WINDOW_GEOMETRIES[window_id])
+    else:
+        if is_main:
+            window.geometry("800x600+100+100")
+        else:
+            window.geometry("600x400+200+200")
+    
+    window.bind("<Configure>", lambda event: update_window_position(window_id))
+    window.protocol("WM_DELETE_WINDOW", lambda: on_closing(window, window_id))
+
+    # --- 在内容区域添加 PanedWindow ---
+    paned_window = ttk.PanedWindow(content_frame, orient=tk.HORIZONTAL)
+    paned_window.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+    
+    style = ttk.Style()
+    style.configure("TPanedwindow", background='white')
+    
+    left_frame = ttk.Frame(paned_window, style="TPanedwindow")
+    paned_window.add(left_frame, weight=1)
+    
+    right_frame = ttk.Frame(paned_window, style="TPanedwindow")
+    paned_window.add(right_frame, weight=2)
+    
+    tree_frame = ttk.Frame(left_frame, padding=(0, 5, 0, 0))
+    tree_frame.pack(fill=tk.BOTH, expand=True)
+
+    # 美化 Treeview
+    style.theme_use("clam") # 使用一个更现代的ttk主题
+    style.configure("Treeview", background="#f0f0f0", foreground="#333333", fieldbackground="#f0f0f0", font=('Segoe UI', 10), borderwidth=0)
+    style.map('Treeview', background=[('selected', '#0078d7')])
+    
+    tree_view = ttk.Treeview(tree_frame, columns=("size", "date"))
+    tree_view.heading("#0", text="文件/目录", anchor=tk.W)
+    tree_view.heading("size", text="大小")
+    tree_view.heading("date", text="修改日期")
+    tree_view.column("#0", stretch=tk.YES)
+    tree_view.column("size", width=100)
+    tree_view.column("date", width=150)
+    
+    vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=tree_view.yview)
+    tree_view.configure(yscrollcommand=vsb.set)
+    
+    tree_view.pack(side="left", fill="both", expand=True)
+    vsb.pack(side="right", fill="y")
+    
+    tree_view.insert('', 'end', text="目录 A", open=True)
+    tree_view.insert('', 'end', text="目录 B", open=False)
+    tree_view.insert('I001', 'end', text="文件 A1", values=("1.2MB", "2023-01-01"))
+    
+    # --- 在右侧 Frame 中添加一些内容 ---
+    label_text = "这里是右侧内容区\n\n示例：一个清爽的界面。"
+    tk.Label(right_frame, text=label_text, bg='white', fg='#555555', font=('Segoe UI', 11), padx=20, pady=20).pack(expand=True)
+
+    button_frame = ttk.Frame(content_frame)
+    button_frame.pack(side='bottom', pady=5)
+    
+    ttk.Button(button_frame, text="创建新窗口", command=lambda: create_additional_window(root)).pack()
+
+    return window, content_frame
+
+def on_closing(window, window_id):
+    if window.winfo_exists():
+        del WINDOWS_BY_ID[window_id]
+        update_window_position(window_id)
+        window.destroy()
+
+    if not WINDOWS_BY_ID:
+        save_window_positions()
+        root.quit()
+
+def create_additional_window(root):
+    new_window_id = f"toplevel_{len(WINDOWS_BY_ID)}"
+    create_monitored_window(root, new_window_id)
+
+# 主程序入口
+if __name__ == "__main__":
+    root = tk.Tk()
+    root.withdraw()
+    
+    load_window_positions()
+    
+    main_window, _ = create_monitored_window(root, "main", is_main=True)
+    main_window.deiconify()
+
+    root.mainloop()
+
+
+
