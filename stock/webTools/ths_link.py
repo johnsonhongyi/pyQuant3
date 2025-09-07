@@ -4,7 +4,25 @@ import psutil
 import win32api
 import exehandle
 
-
+import os
+import json
+codelist = []
+ths_code=[]
+filename= "code_ths_other.json"
+# 检查文件是否存在
+# ths_code = ["603268", "603843","603813"]
+if os.path.exists(filename):
+    print(f"{filename} exists, loading...")
+    with open(filename, "r", encoding="utf-8") as f:
+        codelist = json.load(f)['stock']
+        ths_code = [co for co in codelist if co.startswith('603')]
+    print("Loaded:", len(ths_code))
+else:
+    print(f"{filename} not found, creating...")
+    data = {"stock": ths_code}
+    with open(filename, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+        
 
 FAGE_READWRITE = 0x04  # 偏移地址：0x04的意思就是：在空间上偏移4个内存单元
 PROCESS_ALL_ACCESS = 0x001F0FFF
@@ -31,6 +49,27 @@ def ths_prc_hwnd():
         else:
             pass
 
+# --------------------------
+# 股票代码转换
+# --------------------------
+def ths_convert_code1(code: str) -> bytes:
+    code = str(code).zfill(6)
+    if code.startswith('6'):
+        prefix = 0x11
+    elif code.startswith('11'):
+        prefix = 0x13
+    elif code.startswith('12'):
+        prefix = 0x23
+    elif code.startswith('15'):
+        prefix = 0x24
+    else:
+        prefix = 0x21
+
+    b1 = (int(code[0]) << 4) | int(code[1])
+    b2 = (int(code[2]) << 4) | int(code[3])
+    b3 = (int(code[4]) << 4) | int(code[5])
+    return bytes([prefix, b1, b2, b3])
+
 
 def bytes_16(dec_num, code):
     # num=ord(char)   # 将ASCII字符转换为对应的整数
@@ -43,6 +82,8 @@ def bytes_16(dec_num, code):
     return bytes_codex
 
 
+
+# ths_code = ["603268", "603843","603813"]
 def ths_convert_code(code):
     '''
     代码转换
@@ -51,9 +92,12 @@ def ths_convert_code(code):
     '''
     # 上海，深圳股票判断;
 
+
     if str(code)[0] == '6':
         # 将16进制数转换为整数
         dec_num = int('11', 16)
+        if code in ths_code:
+            dec_num = 0x16
         bytes_codex = bytes_16(dec_num, code)
     # 11开头的可转债
     elif str(code).startswith('11'):
@@ -71,20 +115,13 @@ def ths_convert_code(code):
         dec_num = int('24', 16)
         bytes_codex = bytes_16(dec_num, code)
 
-    #     # 12开头的可转债
-    # elif str(code).startswith('8') or str(code).startswith('92') or str(code).startswith('43'):
-    #     # 将16进制数转换为整数
-    #     # ord('?') -> 63  chr(63) -> ? bytes_16(63, code) ->b'?833171'
-    #     # char=chr(num) # 将整数转换为对应的ASCII字符
-    #     # (base16 - > int) ('%x' % 63) -> '3f'
-    #     dec_num = int('97', 16)
-    #     bytes_codex = bytes_16(dec_num, code)
     else:
         # 将16进制数转换为整数
         dec_num = int('21', 16)
         bytes_codex = bytes_16(dec_num, code)
 
     return bytes_codex
+
 
 
 def send_code_message(code, exe='hexin.exe'):
@@ -95,13 +132,22 @@ def send_code_message(code, exe='hexin.exe'):
     argv_address = kernel32.VirtualAllocEx(ths_process_hwnd, 0, 8, VIRTUAL_MEN, FAGE_READWRITE)
     bytes_str = ths_convert_code(code)
     # 用kerne132.WriteProcessMemory在目标进程内存空间写入数据
-    kernel32.WriteProcessMemory(ths_process_hwnd, argv_address, bytes_str, 7, None)
+    kernel32.WriteProcessMemory(ths_process_hwnd, argv_address, bytes_str, 8, None)
     # 同花顺窗口句柄
     ths_handle = exehandle.get_handle(exe)
+    print(f"THS ths_handle: {ths_handle} process: {ths_process_hwnd} 发送成功code:{code} bytes_str:{bytes_str} bytes_str.hex():{bytes_str.hex()}")
     win32api.SendMessage(ths_handle, int(1168), 0, argv_address)
 
 
 if __name__ == '__main__':
     # 让同花顺切换到股票代码
-    send_code_message('159531', 'hexin.exe')
+    # send_code_message('159531', 'hexin.exe')
+    # send_code_message('603268', 'hexin.exe')
+    send_code_message('603813', 'hexin.exe')
+    # time.sleep(0.5)
+    send_code_message('603839', 'hexin.exe')
+    # send_code_message('603855', 'hexin.exe')
+    send_code_message('603843', 'hexin.exe')
+
+
     # send_code_message('833171', 'hexin.exe')

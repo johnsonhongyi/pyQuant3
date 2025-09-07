@@ -51,23 +51,6 @@ GetWindowText = ctypes.windll.user32.GetWindowTextW
 GetWindowTextLength = ctypes.windll.user32.GetWindowTextLengthW
 IsWindowVisible = ctypes.windll.user32.IsWindowVisible
 
-codelist = []
-ths_code=[]
-filename= "code_ths_other.json"
-# 检查文件是否存在
-# ths_code = ["603268", "603843","603813"]
-if os.path.exists(filename):
-    print(f"{filename} exists, loading...")
-    with open(filename, "r", encoding="utf-8") as f:
-        codelist = json.load(f)['stock']
-        ths_code = [co for co in codelist if co.startswith('603')]
-    print("Loaded:", len(ths_code))
-else:
-    print(f"{filename} not found, creating...")
-    data = {"stock": ths_code}
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
-
 
 def get_pids(pname):
     # print(pname)
@@ -148,34 +131,12 @@ VIRTUAL_MEN = (0x1000 | 0x2000)
 kernel32 = ctypes.windll.kernel32
 user32 = ctypes.windll.user32
 
-def check_pid(pname,srcpid):
-    pid = get_pids(pname)
-    return pid == srcpid
-
-def check_pids_all():
-    # ['mainfree.exe','hexin.exe']
-    tdxpname='tdxw.exe'
-    thspname='hexin.exe'
-    dfcfpname='mainfree.exe'
-    global tdx_pid, ths_pid,dfcf_pid
-    if not check_pid(tdxpname,tdx_pid):
-        tdx_pid = get_pids(tdxpname)
-        print(f'tdx_pid:{tdx_pid}')
-        find_tdx_window()
-    if not check_pid(dfcfpname,dfcf_pid):
-        global dfcf_process_hwnd
-        dfcf_pid = get_pids('mainfree.exe')
-        print(f'dfcf_pid:{dfcf_pid}')
-        dfcf_process_hwnd = get_handle('mainfree.exe')
-    if not check_pid(thspname,ths_pid):
-        global ths_process_hwnd,ths_prc_hwnd
-        ths_pid = get_pids(thspname)
-        print(f'ths_pid:{ths_pid}')
-        find_ths_window()
 
 
-def ths_prc_hwnd(procname='hexin.exe'):
-    global ths_process_hwnd
+def ths_prc_hwnd(procname='hexin.exe',process_hwnd=0):
+    if process_hwnd == 0:
+        global ths_process_hwnd
+        process_hwnd = ths_process_hwnd
     pl = psutil.pids()
     for pid in pl:
         try:
@@ -184,14 +145,14 @@ def ths_prc_hwnd(procname='hexin.exe'):
                 # isinstance() 函数来判断一个对象是否是一个已知的类型 pid 是 int类型
                 if isinstance(pid, int):
                     # 打开一个已存在的进程对象hexin.exe，并返回进程的句柄
-                    ths_process_hwnd = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, int(pid))  # 申请内存所在的进程句柄
-                    return ths_process_hwnd
+                    process_hwnd = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, int(pid))  # 申请内存所在的进程句柄
+                    return process_hwnd
         except psutil.NoSuchProcess:  # Catch the error caused by the process no longer existing
             print(f"NoSuchProcess with pid: {pid}")
             # pass  # Ignore it
         else:
             pass
-    return ths_process_hwnd
+    return process_hwnd
 
 def bytes_16(dec_num, code):
     # num=ord(char)   # 将ASCII字符转换为对应的整数
@@ -204,10 +165,6 @@ def bytes_16(dec_num, code):
     return bytes_codex
 
 
-
-
-# ths_code = ["603268", "603843","603813"]
-
 def ths_convert_code(code):
     '''
     代码转换
@@ -219,8 +176,6 @@ def ths_convert_code(code):
     if str(code)[0] == '6':
         # 将16进制数转换为整数
         dec_num = int('11', 16)
-        if code in ths_code:
-            dec_num = 0x16
         bytes_codex = bytes_16(dec_num, code)
     # 11开头的可转债
     elif str(code).startswith('11'):
@@ -254,16 +209,16 @@ def ths_convert_code(code):
     return bytes_codex
 
 def send_code_clipboard(stock_code,retry=True):
-    global dfcf_process_hwnd,ahk_process_hwnd,thsweb_process_hwnd,dfcf_pid
+    global dfcf_process_hwnd,ahk_process_hwnd,thsweb_process_hwnd
     status = "未找到DC"
-    if  dfcf_process_hwnd != 0 and (ahk_process_hwnd != 0 or thsweb_process_hwnd !=0):
+    if dfcf_process_hwnd != 0 and (ahk_process_hwnd != 0 or thsweb_process_hwnd !=0):
         status = f" DC-> 成功"
         print(f"已找到DFCF: {dfcf_process_hwnd} 发送成功")
         pyperclip.copy(stock_code)
         print(f"hwnd:{dfcf_process_hwnd} Stock code {stock_code} copied to clipboard!")
     else:
         if retry:
-            dfcf_pid = get_pids('mainfree.exe')
+            # ths_prc_hwnd('mainfree.exe',process_hwnd=dfcf_process_hwnd)
             dfcf_process_hwnd = get_handle('mainfree.exe')
             # ahk_process_hwnd = find_window_by_title_background('AutoHotkey')
             ahk_process_hwnd = get_pids_values('AutoHotkey')
@@ -285,13 +240,13 @@ def send_code_message(code,retry=True):
 
     if ths_process_hwnd != 0 and ths_window_handle != 0:
         status = f"THS-> 成功"
+        print(f"已找到THS: {ths_window_handle} process: {ths_process_hwnd} 发送成功")
         argv_address = kernel32.VirtualAllocEx(ths_process_hwnd, 0, 8, VIRTUAL_MEN, FAGE_READWRITE)
         bytes_str = ths_convert_code(code)
         # 用kerne132.WriteProcessMemory在目标进程内存空间写入数据
         kernel32.WriteProcessMemory(ths_process_hwnd, argv_address, bytes_str, 7, None)
     # # 同花顺窗口句柄
-        print(f"已找到THS: {ths_window_handle} process: {ths_process_hwnd} 发送成功 bytes_str:{bytes_str}")
-        # ths_window_handle = get_handle(exe)
+    # ths_handle = get_handle(exe)
         result = win32api.SendMessage(ths_window_handle, int(1168), 0, argv_address)
     else:
         if retry:
@@ -338,9 +293,6 @@ tdx_window_handle = 0
 ths_window_handle = 0
 ths_process_hwnd = 0
 dfcf_process_hwnd = 0
-tdx_pid = 0
-dfcf_pid = 0
-ths_pid = 0
 thsweb_process_hwnd = 0
 ahk_process_hwnd = 0
 # 這個變數將用於存放載入的DataFrame
@@ -409,8 +361,7 @@ def get_work_time(now_t = None):
 def find_ths_window(exe='hexin.exe'):
     global ths_window_handle
     global ths_process_hwnd
-    global ths_pid
-    ths_pid = get_pids('hexin.exe')
+    
     # 同花顺进程句柄
     ths_process_hwnd = ths_prc_hwnd()
     # 用kerne132.VirtualAllocEx在目标进程开辟内存空间(用于存放数据)
@@ -431,8 +382,8 @@ def find_ths_window(exe='hexin.exe'):
 
 def find_tdx_window():
     """查找通达信窗口"""
-    global tdx_window_handle,tdx_pid
-    tdx_pid = get_pids('tdxw.exe')
+    global tdx_window_handle
+
     def enum_windows_callback(hwnd, lparam):
         global tdx_window_handle
 
@@ -500,24 +451,18 @@ def generate_stock_code(stock_code):
 
 def send_to_tdx(stock_code):
     """发送股票代码到通达信"""
-    tdx_state = tdx_var.get()
-    ths_state = ths_var.get()
-    dfcf_state = dfcf_var.get()
-    if not tdx_state and not ths_state and not dfcf_state:
-        status = '未发送'
-    else:
-        if not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
-            messagebox.showerror("错误", "请输入有效的6位股票代码")
-            return
+    if not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
+        messagebox.showerror("错误", "请输入有效的6位股票代码")
+        return
 
-        # 生成股票代码
-        generated_code = generate_stock_code(stock_code)
+    # 生成股票代码
+    generated_code = generate_stock_code(stock_code)
 
-        # 更新状态
-        root.title(f"股票异动数据监控 + 通达信联动 - 正在发送...")
+    # 更新状态
+    root.title(f"股票异动数据监控 + 通达信联动 - 正在发送...")
 
-        # 在新线程中执行发送操作，避免UI卡顿
-        threading.Thread(target=_send_to_tdx_thread, args=(stock_code, generated_code)).start()
+    # 在新线程中执行发送操作，避免UI卡顿
+    threading.Thread(target=_send_to_tdx_thread, args=(stock_code, generated_code)).start()
 
 
 def _send_to_tdx_thread(stock_code, generated_code,retry=True):
@@ -576,8 +521,7 @@ def _send_to_tdx_thread(stock_code, generated_code,retry=True):
                 status = f'{status} : {dfcfstatus}' 
 
             # root.after(5, _update_ui_after_send, status)
-        if not tdx_state and not ths_state and not dfcf_state:
-            status = '未发送'
+
     except Exception as e:
         status = f"发送失败: {str(e)}"
 
@@ -778,10 +722,8 @@ def save_dataframe(df=None):
     #             df = loaded_df
     #     return df
     while not start_init:
-        # if not get_day_is_trade_day():
-        if not get_work_time():
-            # print("not workday don't run  save_dataframe...")
-            print("get_work_time don't run  save_dataframe...")
+        if not get_day_is_trade_day():
+            print("not workday don't run  save_dataframe...")
             return
         time.sleep(5)
         print('wait init background 完成...')
@@ -1102,13 +1044,10 @@ def populate_treeview(data=None):
         data = process_full_dataframe(data)
 
     viewdf = data.copy()
-    uniq_state =uniq_var.get()
-    if data is not None and not data.empty and uniq_state:
-        data = data.drop_duplicates(subset=['代码'])
+
 
     if data is not None and not data.empty:
         data = data[['时间', '代码', '名称','count', '板块', '涨幅', '价格', '量']]
-        uniq_state =uniq_var.get()
 
         for index, row in data.iterrows():
             tree.insert("", "end", values=list(row))
@@ -1325,39 +1264,6 @@ def check_readldf_exist():
         return True
     else:
         return False
-
-
-
-def schedule_checkpid_task():
-    """
-    每隔5分钟执行一次的任务。
-    """
-    
-    # next_execution_time = get_next_weekday_time(9, 35)
-
-    # now = datetime.now()
-    # delay_ms = int((next_execution_time - now).total_seconds() * 1000)
-
-    # print(f"下一次checkpid_task任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
-
-    # 使用 root.after() 调度任务，在回调函数中使用 lambda 包装，
-    # 确保在任务完成后再次调用自身进行重新调度。
-    # root.after(delay_ms, lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
-    # if get_day_is_trade_day():
-        # if get_work_time():
-    current_time = datetime.now().strftime("%H:%M:%S")
-    print(f"自动更新任务checkpid_task执行于: {current_time}")
-    # 在这里添加你的具体任务逻辑
-
-    save_thread = threading.Thread(target=check_pids_all)
-    save_thread.start()
-    # 5分钟后再次调用此函数
-    root.after(3 * 60 * 1000, schedule_checkpid_task)
-    # else:
-    #     # root.after(delay_ms, lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
-    #     root.after(delay_ms, lambda: [schedule_checkpid_task])
-
-
 
 def schedule_worktime_task():
     """
@@ -1684,8 +1590,6 @@ def refresh_stock_data(window_info, tree, item_id):
 
 def update_monitor_tree(future, tree, window_info, item_id):
     """回调函数，更新子窗口的Treeview"""
-    # global start_init
-
     stock_info = window_info['stock_info']
     window = window_info['toplevel']
     stock_code, stock_name, *rest = stock_info
@@ -1699,13 +1603,10 @@ def update_monitor_tree(future, tree, window_info, item_id):
                 # 应用解析函数并扩展列
                 data = process_full_dataframe(data)
 
-                # data = data[['时间', '代码', '名称', '板块', '涨幅', '价格', '量']]
-                data = data[['时间', '板块', '涨幅', '价格', '量']]
+                data = data[['时间', '代码', '名称', '板块', '涨幅', '价格', '量']]
 
 
             # Clear existing data first
-            # print(start_init)
-            # if get_work_time() or start_init == 0:
             tree.delete(*tree.get_children())
             for index, row in data.iterrows():
                 tree.insert("", "end", values=list(row))
@@ -1741,14 +1642,13 @@ def create_monitor_window(stock_info):
     monitor_win.resizable(True, True)
     # monitor_win.title(f"Monitoring: {stock_name} ({stock_code})")
     monitor_win.title(f"监控: {stock_name} ({stock_code})")
-    monitor_win.geometry("320x165") # 设置合适的初始大小
+    monitor_win.geometry("400x165") # 设置合适的初始大小
     tree_frame = ttk.Frame(monitor_win)
     tree_frame.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
 
     window_info = {'stock_info': stock_info, 'toplevel': monitor_win}
     monitor_win.bind("<Button-1>", lambda event: update_code_entry(stock_code))
-    columns =  ('时间', '异动类型', '涨幅', '价格', '量')
-    # columns =  ('时间', '代码', '名称', '异动类型', '涨幅', '价格', '量')
+    columns =  ('时间', '代码', '名称', '异动类型', '涨幅', '价格', '量')
     monitor_tree = ttk.Treeview(monitor_win, columns=columns, show="headings")
     
     for col in columns:
@@ -1895,15 +1795,15 @@ def update_code_entry(stock_code):
 # 设置一个变量来追踪每列的排序方向
 sort_directions = {}
 
-# def load_df_to_treeview(tree, dataframe):
-#     """
-#     将 DataFrame 的内容加载到 Treeview 中。
-#     """
-#     tree.delete(*tree.get_children())
-#     if '相关信息'  in dataframe.columns:
-#         dataframe.drop(columns=['相关信息'], inplace=True)
-#     for row in dataframe.itertuples(index=False):
-#         tree.insert("", "end", values=row)
+def load_df_to_treeview(tree, dataframe):
+    """
+    将 DataFrame 的内容加载到 Treeview 中。
+    """
+    tree.delete(*tree.get_children())
+    if '相关信息'  in dataframe.columns:
+        dataframe.drop(columns=['相关信息'], inplace=True)
+    for row in dataframe.itertuples(index=False):
+        tree.insert("", "end", values=row)
 
 def on_window_focus(event):
     """
@@ -1956,11 +1856,6 @@ def sort_treeview(tree, col, reverse):
     # 1. 获取所有项目，并以元组 (value, iid) 形式存储
     # tree.set(k, col) 获取指定项目的指定列的值
     global viewdf
-    data = viewdf.copy()
-    # uniq_state =uniq_var.get()
-    # if data is not None and not data.empty and uniq_state:
-    #     data = data.drop_duplicates(subset=['代码'])
-
     if col == '异动类型':
         col = "板块"
     # 获取当前排序方向，如果未设置则默认为 False (升序)
@@ -1969,20 +1864,17 @@ def sort_treeview(tree, col, reverse):
     # --- 核心逻辑修改部分 ---
     if col == '时间':
         # 如果点击的是“时间”列，强制按增序排序（reverse=False）
-        data.sort_values(by=col, ascending=not reverse_sort, inplace=True)
+        viewdf.sort_values(by=col, ascending=not reverse_sort, inplace=True)
         # 强制更新排序方向为 True，以便下一次点击时为降序
         sort_directions[col] = not reverse_sort
     else:
         # 其他列正常切换排序方向
-        data.sort_values(by=[col,'时间'], ascending=[not reverse_sort,True], inplace=True)
+        viewdf.sort_values(by=[col,'时间'], ascending=[not reverse_sort,True], inplace=True)
         # 更新排序方向
         sort_directions[col] = not reverse_sort
-
-    if '相关信息'  in data.columns:
-        data.drop(columns=['相关信息'], inplace=True)
+    
     # 重新加载排序后的 DataFrame 到 Treeview
-    # load_df_to_treeview(tree, data)
-    populate_treeview(data)
+    load_df_to_treeview(tree, viewdf)
 
 
 
@@ -2090,7 +1982,7 @@ def update_position_window(window, window_id, is_main=False):
     #     if is_main:
     #         window.geometry("400x300+100+100")
     #     else:
-            window.geometry("300x160+385+130")
+            window.geometry("400x165+385+130")
     
     window.bind("<Configure>", lambda event: update_window_position(window_id))
     # window.protocol("WM_DELETE_WINDOW", lambda: on_closing(window, window_id))
@@ -2107,6 +1999,10 @@ root.title("股票异动数据监控")
 # root.geometry("1200x700")  # 增大窗口初始大小
 root.geometry("750x550")
 root.minsize(720,500)    # 设置最小尺寸限制
+
+# 创建顶部工具栏
+toolbar = tk.Frame(root, bg="#f0f0f0", padx=5, pady=5)
+toolbar.pack(fill=tk.X)
 
 root.resizable(True, True)
 # root.protocol("WM_DELETE_WINDOW", on_closing)
@@ -2129,22 +2025,7 @@ style.configure("Treeview.Heading",
 )
 style.map("Treeview", background=[('selected', '#3478bf')])
 
-# 创建顶部工具栏
-toolbar = tk.Frame(root, bg="#f0f0f0", padx=5, pady=5)
-toolbar.pack(fill=tk.X)
 
-
-
-# # 删除按钮
-# delete_btn = tk.Button(toolbar, text="删除选中记录", command=delete_selected_records,
-#                        font=('Microsoft YaHei', 10), bg="#d9534f", fg="white",
-#                        padx=10, pady=3, relief="flat")
-# delete_btn.pack(side=tk.LEFT, padx=5)
-
-
-# # --- 日期選擇器和選項框的 Frame ---
-# date_options_frame = tk.Frame(toolbar)
-# date_options_frame.pack(side=tk.LEFT, padx=10)
 
 # 刷新按钮
 refresh_btn = tk.Button(toolbar, text="↻ 刷新数据", command=refresh_data, 
@@ -2152,14 +2033,26 @@ refresh_btn = tk.Button(toolbar, text="↻ 刷新数据", command=refresh_data,
                        padx=10, pady=3, relief="flat")
 refresh_btn.pack(side=tk.LEFT, padx=5)
 
+# 删除按钮
+delete_btn = tk.Button(toolbar, text="删除选中记录", command=delete_selected_records,
+                       font=('Microsoft YaHei', 10), bg="#d9534f", fg="white",
+                       padx=10, pady=3, relief="flat")
+delete_btn.pack(side=tk.LEFT, padx=5)
+
+
+# # --- 日期選擇器和選項框的 Frame ---
+# date_options_frame = tk.Frame(toolbar)
+# date_options_frame.pack(side=tk.LEFT, padx=10)
+
 # --- 日期選擇器 ---
 # 添加一个Label作为日期选择器的说明
 date_label = tk.Label(toolbar, text="选择日期:", font=('Microsoft YaHei', 10), bg=toolbar['bg'])
 date_label.pack(side=tk.LEFT, padx=(10, 5))
 
 # 创建DateEntry并放置在删除按钮右侧
-date_entry = DateEntry(toolbar, width=12, background='darkblue', foreground='white', borderwidth=2,
+date_entry = DateEntry(toolbar, width=12, background='darkblue', foreground='white', borderwidth=1,
                        font=('Microsoft YaHei', 10))
+# date_entry = DateEntry(toolbar,width=12)
 date_entry.pack(side=tk.LEFT, padx=5)
 
 # 绑定日期选择事件
@@ -2169,42 +2062,18 @@ date_entry.bind("<<DateEntrySelected>>", on_date_selected)
 tdx_var = tk.BooleanVar(value=True)
 ths_var = tk.BooleanVar(value=False)
 dfcf_var = tk.BooleanVar(value=False)
-uniq_var = tk.BooleanVar(value=False)
 
-# tdx_checkbutton = tk.Checkbutton(toolbar, text="联动TDX", variable=tdx_var, 
-#                                  command=update_linkage_status)
-# tdx_checkbutton.pack(side=tk.LEFT, padx=5)
-
-# ths_checkbutton = tk.Checkbutton(toolbar, text="联动THS", variable=ths_var, 
-#                                  command=update_linkage_status)
-# ths_checkbutton.pack(side=tk.LEFT, padx=5)
-
-# dfcf_checkbutton = tk.Checkbutton(toolbar, text="联动DC", variable=dfcf_var, 
-#                                  command=update_linkage_status)
-# dfcf_checkbutton.pack(side=tk.LEFT, padx=5)
-
-# Uniq_checkbutton = tk.Checkbutton(toolbar, text="Uniq", variable=Uniq_var, 
-#                                  command=update_linkage_status)
-# Uniq_checkbutton.pack(side=tk.LEFT, padx=5)
-linkage_frame = tk.Frame(toolbar, bg=toolbar['bg'])
-linkage_frame.pack(side=tk.LEFT, padx=10)
-
-tdx_checkbutton = tk.Checkbutton(linkage_frame, text="联动TDX", variable=tdx_var,
+tdx_checkbutton = tk.Checkbutton(toolbar, text="联动TDX", variable=tdx_var, 
                                  command=update_linkage_status)
 tdx_checkbutton.pack(side=tk.LEFT, padx=5)
 
-ths_checkbutton = tk.Checkbutton(linkage_frame, text="联动THS", variable=ths_var,
+ths_checkbutton = tk.Checkbutton(toolbar, text="联动THS", variable=ths_var, 
                                  command=update_linkage_status)
 ths_checkbutton.pack(side=tk.LEFT, padx=5)
 
-dfcf_checkbutton = tk.Checkbutton(linkage_frame, text="联动DC", variable=dfcf_var,
-                                  command=update_linkage_status)
+dfcf_checkbutton = tk.Checkbutton(toolbar, text="联动DC", variable=dfcf_var, 
+                                 command=update_linkage_status)
 dfcf_checkbutton.pack(side=tk.LEFT, padx=5)
-
-uniq_checkbutton = tk.Checkbutton(linkage_frame, text="Uniq", variable=uniq_var,
-                                  command=update_linkage_status)
-uniq_checkbutton.pack(side=tk.LEFT, padx=5)
-toolbar.pack(fill=tk.X, padx=5, pady=5)
 
 # 创建异动类型选择框架
 type_frame = tk.LabelFrame(root, text="异动类型选择", font=('Microsoft YaHei', 9), 
@@ -2340,7 +2209,6 @@ status_label.pack(pady=5)
 # 首次调用任务，启动定时循环
 check_readldf_exist()
 schedule_worktime_task()
-schedule_checkpid_task()
 # 运行主循环
 # root.mainloop()
 

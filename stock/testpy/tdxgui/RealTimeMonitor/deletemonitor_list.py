@@ -366,7 +366,6 @@ def sort_treeview(tree, col_name):
     点击列标题时，使用 DataFrame 排序并更新 Treeview。
     """
     global df
-    import ipdb;ipdb.set_trace()
     
     # 获取当前排序方向，如果未设置则默认为 False (升序)
     reverse_sort = sort_directions.get(col_name, False)

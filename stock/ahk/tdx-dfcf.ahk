@@ -8,6 +8,7 @@
 
 global custom_copy_triggered := false
 
+
 ; 设置 OnClipboardChange 函数，当剪贴板内容变化时，调用 CheckClipboard()
 ;OnClipboardChange("CheckClipboard")
 OnClipboardChange("HandleClipboardChange")
@@ -50,14 +51,24 @@ CheckClipboard()
     
     ; \b((60|30|00)\d{4}|(688|43|83|87|92)\d{3})\b
     ; 简化为：匹配指定前缀，后跟3或4个数字，总共6位
-    if RegExMatch(Clipboard, "\b((?:60|30|00|43|83|87|92)\d{4}|(?:688|200)\d{3})\b", found_match)
+    ; 匹配以 60/30/00/43/83/87/92 开头的6位，或者 688/200 开头的6位
+
+    ;"603268 bytes_str:b'\x11603268' bytes_str.hex():11363033323638"
+    ;"发送成功code:603268 bytes_str:b'\x11603268' bytes_str.hex():11363033323638"
+    ;RegExMatch(Clipboard, "(?<!\d)((?:60|30|00|43|83|87|92)\d{4}|(?:688|200)\d{3})(?!\d)", found_match)
+
+    ;if RegExMatch(Clipboard, "\b((?:60|30|00|43|83|87|92)\d{4}|(?:688|200)\d{3})\b", found_match)
+    ;if RegExMatch(Clipboard, "(?<!\d)((?:60|30|00|43|83|87|92)\d{4}|(?:688|200)\d{3})(?!\d)", found_match)
+
+    if RegExMatch(Clipboard, "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", found_match)
+
     {
         ; 找到匹配，将提取的6位数字存储到变量中
-        six_digits := found_match1
+        six_digits := found_match
         
         ; 提示用户已找到6位数字
         
-        ;MsgBox, 0x40,, 剪贴板中检测到6位数字: %six_digits%
+        MsgBox, 0x40,, 剪贴板中检测到6位数字: %six_digits%
         
         ; 你可以在这里添加其他操作，例如：
         ; Send, %six_digits% ; 自动发送数字
@@ -439,3 +450,21 @@ SetTitleMatchMode 2
     return
 }
 
+/*
+Clipboard := "603268 bytes_str:b'\x11603268'"
+RegExMatch(Clipboard, "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", found_match)
+MsgBox % found_match  ; 输出 603268 ✅
+
+Clipboard := "6032681 bytes_str:b'\x11603268'"
+RegExMatch(Clipboard, "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", found_match)
+MsgBox % found_match  ; 不匹配 ❌
+
+Clipboard := "发送成功code:603268"
+RegExMatch(Clipboard, "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", found_match)
+MsgBox % found_match  ; 不匹配 ❌
+
+Clipboard := "688001abc"
+RegExMatch(Clipboard, "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", found_match)
+MsgBox % found_match  ; 输出 688001 ✅
+
+*/
