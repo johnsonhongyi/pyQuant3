@@ -504,7 +504,7 @@ def send_to_tdx(stock_code):
     ths_state = ths_var.get()
     dfcf_state = dfcf_var.get()
     if not tdx_state and not ths_state and not dfcf_state:
-        status = '未发送'
+        root.title(f"股票异动数据监控")
     else:
         if not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
             messagebox.showerror("错误", "请输入有效的6位股票代码")
@@ -575,9 +575,6 @@ def _send_to_tdx_thread(stock_code, generated_code,retry=True):
             else: 
                 status = f'{status} : {dfcfstatus}' 
 
-            # root.after(5, _update_ui_after_send, status)
-        if not tdx_state and not ths_state and not dfcf_state:
-            status = '未发送'
     except Exception as e:
         status = f"发送失败: {str(e)}"
 
@@ -1253,14 +1250,16 @@ def on_date_selected(event):
         messagebox.showerror("錯誤", f"載入文件時發生錯誤: {e}")
         print(f"載入文件時發生錯誤: {e}")
 
+# def update_linkage_status():
+#     """處理tdx和ths選中狀態變化的函數"""
+#     tdx_state = tdx_var.get()
+#     ths_state = ths_var.get()
+#     dfcf_state = dfcf_var.get()
+#     print(f"tdx 联动: {tdx_state}")
+#     print(f"ths 联动: {ths_state}")
+#     print(f"dfcf_state 联动: {dfcf_state}")
 def update_linkage_status():
-    """處理tdx和ths選中狀態變化的函數"""
-    tdx_state = tdx_var.get()
-    ths_state = ths_var.get()
-    dfcf_state = dfcf_var.get()
-    print(f"tdx 联动: {tdx_state}")
-    print(f"ths 联动: {ths_state}")
-    print(f"dfcf_state 联动: {dfcf_state}")
+    print(f"TDX: {tdx_var.get()}, THS: {ths_var.get()}, DC: {dfcf_var.get()}, Uniq: {uniq_var.get()}")
 
 def daily_task():
     """
@@ -1270,9 +1269,6 @@ def daily_task():
     # save_dataframe()
     start_async_save()
     # 在这里添加你的具体任务，例如：
-    # crawl_data()
-    # update_gui()
-    # ...
 
 
 
@@ -1308,7 +1304,7 @@ def check_readldf_exist():
     global loaded_df,realdatadf
     date_str = get_today()
 
-    if not get_day_is_trade_day():
+    if not get_day_is_trade_day() or (get_day_is_trade_day() and not get_work_time()):
         date_str = get_last_weekday_before()
     # 3. 建立檔名（這裡儲存為 CSV）
     selected_type  = type_var.get()
@@ -1364,9 +1360,7 @@ def schedule_worktime_task():
     每隔5分钟执行一次的任务。
     """
 
-    
     next_execution_time = get_next_weekday_time(9, 35)
-
     now = datetime.now()
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
 
@@ -1380,14 +1374,19 @@ def schedule_worktime_task():
             current_time = datetime.now().strftime("%H:%M:%S")
             print(f"自动更新任务get_stock_changes_background执行于: {current_time}")
             # 在这里添加你的具体任务逻辑
-
+            status_label3.config(text=f"更新在{current_time[:-3]}执行")
             save_thread = threading.Thread(target=get_stock_changes_background)
             save_thread.start()
             # 5分钟后再次调用此函数
             root.after(5 * 60 * 1000, schedule_worktime_task)
+        else:
+            status_label3.config(text=f"更新在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
+            root.after(delay_ms, lambda: [schedule_worktime_tasks])
     else:
         # root.after(delay_ms, lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
+        status_label3.config(text=f"更新在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
         root.after(delay_ms, lambda: [schedule_worktime_tasks])
+
 
 
 
@@ -1404,12 +1403,11 @@ def schedule_workday_task(root, target_hour, target_minute):
     调度任务在下一个工作日的指定时间执行。
     """
     next_execution_time = get_next_weekday_time(target_hour, target_minute)
-    
     now = datetime.now()
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
+    print(f"下一次保存任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
 
-    print(f"下一次任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
-
+    status_label2.config(text=f"任务在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
     # 使用 root.after() 调度任务，在回调函数中使用 lambda 包装，
     # 确保在任务完成后再次调用自身进行重新调度。
     root.after(delay_ms, lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
@@ -1753,7 +1751,8 @@ def create_monitor_window(stock_info):
     
     for col in columns:
         monitor_tree.heading(col, text=col)
-        if col in ['涨幅', '价格', '量']:
+        # if col in ['涨幅', '价格', '量']:
+        if col in ['涨幅', '量']:
             monitor_tree.column(col, width=30, anchor=tk.CENTER, minwidth=20)
         elif col in ['异动类型']:
             monitor_tree.column(col, width=60, anchor=tk.CENTER, minwidth=40)
@@ -2024,6 +2023,40 @@ def schedule_save_positions():
 
 def update_window_position(window_id):
     """更新单个窗口的位置到全局字典。"""
+    width = radio_container.winfo_width()
+    # print(f'width:{width}')
+    if width <= 1:
+        cols = 5  # 初始化时默认5列
+    else:
+        # 估算每个按钮的宽度，包括 padx
+        btn_width = 110  
+        # 计算列数，约束最少5列，最多10列
+        cols = width // btn_width
+        # print(f'cols:{cols}')
+        if cols < 5:
+            cols = 5
+        elif cols > 11:
+            cols = 11
+
+    # 清空布局
+    for btn in buttons:
+        btn.grid_forget()
+
+    # 重新布局
+    for i, btn in enumerate(buttons):
+        row, col = divmod(i, cols)
+        btn.grid(row=row, column=col, sticky=tk.W, padx=5, pady=3)
+
+    # 列权重
+    for c in range(cols):
+        radio_container.grid_columnconfigure(c, weight=1)
+
+
+    # # 调整容器高度为行数 * 按钮高度
+    # btn_height = 25  # 按钮高度估算
+    # rows = (len(buttons) + cols - 1) // cols
+    # radio_container.config(height=rows * btn_height)
+
     window = WINDOWS_BY_ID.get(window_id)
     if window and window.winfo_exists():
         # print(f'update_window_position: {window_id}')
@@ -2106,7 +2139,7 @@ root = tk.Tk()
 root.title("股票异动数据监控")
 # root.geometry("1200x700")  # 增大窗口初始大小
 root.geometry("750x550")
-root.minsize(720,500)    # 设置最小尺寸限制
+root.minsize(500,200)    # 设置最小尺寸限制
 
 root.resizable(True, True)
 # root.protocol("WM_DELETE_WINDOW", on_closing)
@@ -2129,9 +2162,7 @@ style.configure("Treeview.Heading",
 )
 style.map("Treeview", background=[('selected', '#3478bf')])
 
-# 创建顶部工具栏
-toolbar = tk.Frame(root, bg="#f0f0f0", padx=5, pady=5)
-toolbar.pack(fill=tk.X)
+
 
 
 
@@ -2146,24 +2177,29 @@ toolbar.pack(fill=tk.X)
 # date_options_frame = tk.Frame(toolbar)
 # date_options_frame.pack(side=tk.LEFT, padx=10)
 
+'''
+# 创建顶部工具栏
+toolbar = tk.Frame(root, bg="#f0f0f0", padx=5, pady=5)
+toolbar.pack(fill=tk.X)
 # 刷新按钮
 refresh_btn = tk.Button(toolbar, text="↻ 刷新数据", command=refresh_data, 
                        font=('Microsoft YaHei', 10), bg="#5b9bd5", fg="white",
                        padx=10, pady=3, relief="flat")
 refresh_btn.pack(side=tk.LEFT, padx=5)
-
 # --- 日期選擇器 ---
 # 添加一个Label作为日期选择器的说明
 date_label = tk.Label(toolbar, text="选择日期:", font=('Microsoft YaHei', 10), bg=toolbar['bg'])
 date_label.pack(side=tk.LEFT, padx=(10, 5))
-
 # 创建DateEntry并放置在删除按钮右侧
 date_entry = DateEntry(toolbar, width=12, background='darkblue', foreground='white', borderwidth=2,
                        font=('Microsoft YaHei', 10))
 date_entry.pack(side=tk.LEFT, padx=5)
-
 # 绑定日期选择事件
 date_entry.bind("<<DateEntrySelected>>", on_date_selected)
+
+# 容器
+check_frame = tk.Frame(toolbar, bg=toolbar['bg'])
+check_frame.pack(fill=tk.X, padx=5)
 
 # --- tdx 和 ths 聯動屬性框 ---
 tdx_var = tk.BooleanVar(value=True)
@@ -2171,41 +2207,260 @@ ths_var = tk.BooleanVar(value=False)
 dfcf_var = tk.BooleanVar(value=False)
 uniq_var = tk.BooleanVar(value=False)
 
-# tdx_checkbutton = tk.Checkbutton(toolbar, text="联动TDX", variable=tdx_var, 
-#                                  command=update_linkage_status)
-# tdx_checkbutton.pack(side=tk.LEFT, padx=5)
+# 容器
+check_frame = tk.Frame(toolbar, bg=toolbar['bg'])
+check_frame.pack(fill=tk.X, padx=5)
 
-# ths_checkbutton = tk.Checkbutton(toolbar, text="联动THS", variable=ths_var, 
-#                                  command=update_linkage_status)
-# ths_checkbutton.pack(side=tk.LEFT, padx=5)
+checkbuttons = [
+    ("联动TDX", tdx_var),
+    ("联动THS", ths_var),
+    ("联动DC", dfcf_var),
+    ("Uniq", uniq_var),
+]
 
-# dfcf_checkbutton = tk.Checkbutton(toolbar, text="联动DC", variable=dfcf_var, 
-#                                  command=update_linkage_status)
-# dfcf_checkbutton.pack(side=tk.LEFT, padx=5)
+button_widgets = []
+for text, var in checkbuttons:
+    btn = tk.Checkbutton(check_frame, text=text, variable=var,
+                         command=update_linkage_status, 
+                         font=('Microsoft YaHei', 9),  # 小字体
+                         bg=toolbar['bg'],
+                         padx=2, pady=1)              # 缩小间距
+    button_widgets.append(btn)
 
-# Uniq_checkbutton = tk.Checkbutton(toolbar, text="Uniq", variable=Uniq_var, 
-#                                  command=update_linkage_status)
-# Uniq_checkbutton.pack(side=tk.LEFT, padx=5)
-linkage_frame = tk.Frame(toolbar, bg=toolbar['bg'])
-linkage_frame.pack(side=tk.LEFT, padx=10)
+def relayout(event=None):
+    width = check_frame.winfo_width()
+    btn_width = 75  # 估算每个按钮宽度
+    cols = max(1, width // btn_width)
 
-tdx_checkbutton = tk.Checkbutton(linkage_frame, text="联动TDX", variable=tdx_var,
-                                 command=update_linkage_status)
-tdx_checkbutton.pack(side=tk.LEFT, padx=5)
+    for btn in button_widgets:
+        btn.grid_forget()
 
-ths_checkbutton = tk.Checkbutton(linkage_frame, text="联动THS", variable=ths_var,
-                                 command=update_linkage_status)
-ths_checkbutton.pack(side=tk.LEFT, padx=5)
+    for i, btn in enumerate(button_widgets):
+        row, col = divmod(i, cols)
+        btn.grid(row=row, column=col, sticky="w", padx=2, pady=1)
 
-dfcf_checkbutton = tk.Checkbutton(linkage_frame, text="联动DC", variable=dfcf_var,
-                                  command=update_linkage_status)
-dfcf_checkbutton.pack(side=tk.LEFT, padx=5)
+    for c in range(cols):
+        check_frame.grid_columnconfigure(c, weight=1)
 
-uniq_checkbutton = tk.Checkbutton(linkage_frame, text="Uniq", variable=uniq_var,
-                                  command=update_linkage_status)
-uniq_checkbutton.pack(side=tk.LEFT, padx=5)
-toolbar.pack(fill=tk.X, padx=5, pady=5)
+check_frame.bind("<Configure>", relayout)
+'''
 
+'''
+# Toolbar container
+toolbar = tk.Frame(root, bg="#f0f0f0", padx=5, pady=5)
+toolbar.pack(fill=tk.X)
+
+# Frame for buttons and date
+frame_left = tk.Frame(toolbar, bg="#f0f0f0")
+frame_left.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+# Refresh button
+refresh_btn = tk.Button(frame_left, text="↻ Refresh", command=refresh_data,
+                        font=('Microsoft YaHei', 10), bg="#5b9bd5", fg="white",
+                        padx=10, pady=3, relief="flat")
+refresh_btn.pack(side=tk.LEFT, padx=5)
+
+# Date label and entry
+date_label = tk.Label(frame_left, text="Date:", font=('Microsoft YaHei', 10), bg="#f0f0f0")
+date_label.pack(side=tk.LEFT, padx=(10, 2))
+date_entry = DateEntry(frame_left, width=12, background='darkblue', foreground='white', borderwidth=2,
+                       font=('Microsoft YaHei', 10))
+date_entry.pack(side=tk.LEFT, padx=2)
+date_entry.bind("<<DateEntrySelected>>", on_date_selected)
+
+# Frame for linkage checkbuttons
+frame_right = tk.Frame(toolbar, bg="#f0f0f0")
+frame_right.pack(side=tk.RIGHT)
+
+# Variables
+tdx_var = tk.BooleanVar(value=True)
+ths_var = tk.BooleanVar(value=False)
+dfcf_var = tk.BooleanVar(value=False)
+uniq_var = tk.BooleanVar(value=False)
+
+# Checkbuttons
+tdx_cb = tk.Checkbutton(frame_right, text="TDX", variable=tdx_var, command=update_linkage_status, bg="#f0f0f0")
+tdx_cb.pack(side=tk.LEFT, padx=5)
+ths_cb = tk.Checkbutton(frame_right, text="THS", variable=ths_var, command=update_linkage_status, bg="#f0f0f0")
+ths_cb.pack(side=tk.LEFT, padx=5)
+dfcf_cb = tk.Checkbutton(frame_right, text="DC", variable=dfcf_var, command=update_linkage_status, bg="#f0f0f0")
+dfcf_cb.pack(side=tk.LEFT, padx=5)
+uniq_cb = tk.Checkbutton(frame_right, text="Uniq", variable=uniq_var, command=update_linkage_status, bg="#f0f0f0")
+uniq_cb.pack(side=tk.LEFT, padx=5)
+'''
+
+# Toolbar
+toolbar = tk.Frame(root, bg="#f0f0f0", padx=2, pady=2)
+toolbar.pack(fill=tk.X)
+
+# Left frame: Refresh + Date
+frame_left = tk.Frame(toolbar, bg="#f0f0f0")
+frame_left.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+refresh_btn = tk.Button(frame_left, text="↻ Refresh", command=refresh_data,
+                        font=('Microsoft YaHei', 10), bg="#5b9bd5", fg="white",
+                        padx=5, pady=2, relief="flat")
+refresh_btn.pack(side=tk.LEFT, padx=2)
+
+date_label = tk.Label(frame_left, text="Date:", font=('Microsoft YaHei', 10), bg="#f0f0f0")
+date_label.pack(side=tk.LEFT, padx=2)
+
+date_entry = DateEntry(frame_left, width=10, background='darkblue', foreground='white', borderwidth=1,
+                       font=('Microsoft YaHei', 9))
+date_entry.pack(side=tk.LEFT, padx=2)
+date_entry.bind("<<DateEntrySelected>>", on_date_selected)
+
+# Right frame: Checkbuttons
+frame_right = tk.Frame(toolbar, bg="#f0f0f0")
+frame_right.pack(side=tk.RIGHT, padx=2, pady=2)
+
+# Variables
+tdx_var = tk.BooleanVar(value=True)
+ths_var = tk.BooleanVar(value=False)
+dfcf_var = tk.BooleanVar(value=False)
+uniq_var = tk.BooleanVar(value=False)
+
+checkbuttons_info = [
+    ("TDX", tdx_var),
+    ("THS", ths_var),
+    ("DC", dfcf_var),
+    ("Uniq", uniq_var)
+]
+
+# Pack Checkbuttons horizontally
+for text, var in checkbuttons_info:
+    cb = tk.Checkbutton(frame_right, text=text, variable=var, command=update_linkage_status,
+                        bg="#f0f0f0", font=('Microsoft YaHei', 9), padx=2, pady=2)
+    cb.pack(side=tk.LEFT, padx=2)
+
+# Frame
+type_frame = tk.LabelFrame(root, text="异动类型选择", font=('Microsoft YaHei', 9),
+                           padx=3, pady=3, bg="#f9f9f9")
+# type_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+type_frame.pack(fill=tk.X,padx=3, pady=3)
+
+# stock_types list
+stock_types = [
+    "火箭发射", "快速反弹", "大笔买入", "封涨停板", "打开跌停板", "有大买盘", 
+    "竞价上涨", "高开5日线", "向上缺口", "60日新高", "60日大幅上涨", "加速下跌", 
+    "高台跳水", "大笔卖出", "封跌停板", "打开涨停板", "有大卖盘", "竞价下跌", 
+    "低开5日线", "向下缺口", "60日新低", "60日大幅下跌"
+]
+
+'''
+# Radio variable
+type_var = tk.StringVar(value="")
+
+# Container
+radio_container = tk.Frame(type_frame, bg="#f9f9f9")
+radio_container.pack(fill=tk.BOTH, expand=True)
+
+
+# Store buttons
+buttons = []
+for i, stock_type in enumerate(stock_types):
+    btn = tk.Radiobutton(
+        radio_container, 
+        text=stock_type, 
+        variable=type_var, 
+        value=stock_type,
+        command=search_by_type,
+        font=('Microsoft YaHei', 8),
+        bg="#f9f9f9",
+        activebackground="#e6f3ff",
+        padx=5, pady=2
+    )
+    btn.grid(row=i // 7, column=i % 7, sticky=tk.W, padx=5, pady=3)  # 🔑 先显示
+    buttons.append(btn)
+
+def update_layout(event=None):
+    width = radio_container.winfo_width()
+    if width <= 1:
+        return
+    btn_width = 110
+    cols = max(1, width // btn_width)
+
+    for btn in buttons:
+        btn.grid_forget()
+
+    for i, btn in enumerate(buttons):
+        row, col = divmod(i, cols)
+        btn.grid(row=row, column=col, sticky=tk.W, padx=5, pady=3)
+
+    for c in range(cols):
+        radio_container.grid_columnconfigure(c, weight=1)
+
+root.bind("<Configure>", update_layout)
+'''
+
+# Radio variable
+type_var = tk.StringVar(value="")
+
+# Container
+# radio_container = tk.Frame(type_frame, bg="#f9f9f9")
+# radio_container.pack(padx=0, pady=0)  # 不使用 fill=BOTH
+# radio_container.pack_propagate(False)  # 禁止自动扩展
+radio_container = tk.Frame(type_frame, bg="#f9f9f9")
+# radio_container.pack(fill=tk.X)
+radio_container.pack(fill=tk.BOTH, expand=True)
+
+# Store buttons
+buttons = []
+for stock_type in stock_types:
+    btn = tk.Radiobutton(
+        radio_container, 
+        text=stock_type, 
+        variable=type_var, 
+        value=stock_type,
+        command=search_by_type,
+        font=('Microsoft YaHei', 8),
+        bg="#f9f9f9",
+        activebackground="#e6f3ff",
+        padx=5, pady=2
+    )
+    buttons.append(btn)
+
+# 初始显示，避免初始化宽度问题
+for i, btn in enumerate(buttons):
+    btn.grid(row=i, column=0, sticky=tk.W, padx=5, pady=3)
+
+# def update_layout(event=None):
+#     width = radio_container.winfo_width()
+#     print(f'width:{width}')
+#     if width <= 1:
+#         cols = 5  # 初始化时默认5列
+#     else:
+#         # 估算每个按钮的宽度，包括 padx
+#         btn_width = 110  
+#         # 计算列数，约束最少5列，最多10列
+#         cols = width // btn_width
+#         print(f'cols:{cols}')
+#         if cols < 5:
+#             cols = 5
+#         elif cols > 10:
+#             cols = 10
+
+#     # 清空布局
+#     for btn in buttons:
+#         btn.grid_forget()
+
+#     # 重新布局
+#     for i, btn in enumerate(buttons):
+#         row, col = divmod(i, cols)
+#         btn.grid(row=row, column=col, sticky=tk.W, padx=5, pady=3)
+
+#     # 列权重
+#     for c in range(cols):
+#         radio_container.grid_columnconfigure(c, weight=1)
+
+
+
+# 绑定窗口大小变化
+# 初始化布局
+# root.after(100, update_layout)
+
+
+'''
 # 创建异动类型选择框架
 type_frame = tk.LabelFrame(root, text="异动类型选择", font=('Microsoft YaHei', 9), 
                           padx=10, pady=10, bg="#f9f9f9")
@@ -2246,6 +2501,9 @@ for i, stock_type in enumerate(stock_types):
         pady=2
     )
     btn.grid(row=row, column=col, sticky=tk.W, padx=5, pady=3)
+'''
+
+
 
 # 创建搜索框和按钮
 search_frame = tk.Frame(root, bg="#f0f0f0", padx=10, pady=10)
@@ -2268,7 +2526,6 @@ clear_btn = tk.Button(search_frame, text="清空",
                      font=('Microsoft YaHei', 9), 
                      padx=10, pady=2)
 clear_btn.pack(side=tk.LEFT, padx=5)
-
                      # command=lambda: [type_var.set(""), code_entry.delete(0, tk.END), search_by_type()],
 clear_btn = tk.Button(search_frame, text="清除筛选", 
                      command=lambda: [type_var.set(""), search_by_type()],
@@ -2291,8 +2548,11 @@ tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
 
 for col in columns:
     tree.heading(col, text=col, command=lambda c=col: sort_treeview(tree, c, False))
-    if col in ['涨幅', '价格', '量','count']:
+    # if col in ['涨幅', '价格', '量','count']:
+    if col in ['涨幅', '量','count']:
         tree.column(col, width=30, anchor=tk.CENTER, minwidth=20)
+    elif col in ['价格']:
+        tree.column(col, width=40, anchor=tk.CENTER, minwidth=30)
     elif col in ['异动类型']:
         tree.column(col, width=100, anchor=tk.CENTER, minwidth=60)
     else:
@@ -2313,30 +2573,82 @@ tree.bind("<<TreeviewSelect>>", on_tree_select)
 
 
 
-# 状态栏
-status_var = tk.StringVar(value="就绪 | 等待操作...")
-status_bar = ttk.Label(root, textvariable=status_var, relief=tk.SUNKEN, anchor=tk.W, padding=(5, 2))
-status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-
 # 添加键盘快捷键
 root.bind("<F5>", lambda event: refresh_data())
 root.bind("<Control-r>", lambda event: refresh_data())
 
-# 初始加载数据
-root.after(100, lambda: populate_treeview())
+
+# 顶部说明标签
+# tk.Label(root, text=f"每日任务设置在 {target_hour:02d}:{target_minute:02d} 执行。").pack(pady=5)
+
+# # 底部容器，用于状态栏和任务状态并排显示
+# bottom_frame = tk.Frame(root)
+# bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+# # 状态栏 (左边)
+# status_var = tk.StringVar(value="就绪 | 等待操作...")
+# status_label1 = ttk.Label(bottom_frame, textvariable=status_var, relief=tk.SUNKEN, anchor=tk.W, padding=(5,2))
+# status_label1.pack(side=tk.LEFT, fill=tk.X,expand=True)  # expand=True 让它占据剩余空间
+
+# status_labe2 = ttk.Label(bottom_frame, text=f"每日任务在{target_hour:02d}:{target_minute:02d}执行", font=('Microsoft YaHei', 10))
+# status_labe2.pack(side=tk.RIGHT, padx=5)
+
+# # 任务状态标签 (右边)
+# status_labe3 = ttk.Label(bottom_frame, text="更新5分钟执行一次", font=('Microsoft YaHei', 10))
+# status_labe3.pack(side=tk.RIGHT, padx=5)
 
 # 设置你希望任务每天执行的时间（例如：每天 23:00）
 target_hour = 15
 target_minute = 5
 
-tk.Label(root, text=f"程序正在运行，每日任务已设置在 {target_hour:02d}:{target_minute:02d} 执行。").pack(pady=10)
+
+# 底部容器
+bottom_frame = tk.Frame(root, bg="#f0f0f0")
+bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+# 左边状态栏
+left_frame = tk.Frame(bottom_frame, bg="#f0f0f0")
+left_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+status_var = tk.StringVar(value="Ready | Waiting...")
+status_label1 = tk.Label(left_frame, textvariable=status_var, relief=tk.SUNKEN, anchor=tk.W, bg="#f0f0f0", padx=5, pady=2)
+status_label1.pack(fill=tk.X, expand=True)
+
+# 右边任务状态
+right_frame = tk.Frame(bottom_frame, bg="#f0f0f0")
+right_frame.pack(side=tk.RIGHT)
+
+status_label2 = tk.Label(right_frame, text=f"Daily task at {target_hour:02d}:{target_minute:02d}", font=('Microsoft YaHei', 10), bg="#f0f0f0")
+# status_label2 = tk.Label(right_frame, textvariable=status2_var, font=('Microsoft YaHei', 10), bg="#f0f0f0")
+status_label2.pack(side=tk.LEFT, padx=5)
+
+status_label3 = tk.Label(right_frame, text="Update every 5 minutes", font=('Microsoft YaHei', 10), bg="#f0f0f0")
+status_label3.pack(side=tk.LEFT, padx=5)
+
+
+
+# tk.Label(root, text=f"程序正在运行，每日任务已设置在 {target_hour:02d}:{target_minute:02d} 执行。").pack(pady=5)
+# # 状态栏
+# status_var = tk.StringVar(value="就绪 | 等待操作...")
+# status_bar = ttk.Label(root, textvariable=status_var, relief=tk.SUNKEN, anchor=tk.W, padding=(5, 2))
+# # status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+
+# # 创建一个标签来显示任务状态
+# status_label = ttk.Label(root, text="更新任务，每5分钟执行一次。", font=('Microsoft YaHei', 10))
+# status_label.pack(pady=5)
+
+# 状态栏
+# status_var = tk.StringVar(value="就绪 | 等待操作...")
+# status_bar = ttk.Label(bottom_frame, textvariable=status_var, relief=tk.SUNKEN, anchor=tk.W, padding=(5, 2))
+# status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+# 初始加载数据
+root.after(100, lambda: populate_treeview())
 
 # 启动定时任务调度
 schedule_workday_task(root, target_hour, target_minute)
 
-# 创建一个标签来显示任务状态
-status_label = ttk.Label(root, text="更新任务，每5分钟执行一次。", font=('Microsoft YaHei', 10))
-status_label.pack(pady=5)
 # 首次调用任务，启动定时循环
 check_readldf_exist()
 schedule_worktime_task()
