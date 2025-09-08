@@ -66,97 +66,94 @@
 
 
 
-import tkinter as tk
-from tkinter import ttk, messagebox
-from tkcalendar import DateEntry
-import pandas as pd
-import os
-import datetime
+# import tkinter as tk
+# from tkinter import ttk, messagebox
+# from tkcalendar import DateEntry
+# import pandas as pd
+# import os
+# import datetime
 
-# --- 假設的函數 ---
-def refresh_data():
-    """刷新數據的函數"""
-    print("刷新数据...")
+# # --- 假設的函數 ---
+# def refresh_data():
+#     """刷新數據的函數"""
+#     print("刷新数据...")
 
-def delete_selected_records():
-    """刪除選中記錄的函數"""
-    print("删除选中记录...")
+# def delete_selected_records():
+#     """刪除選中記錄的函數"""
+#     print("删除选中记录...")
 
-def handle_date_selection(event):
-    """處理日期選擇事件的函數"""
-    selected_date = date_entry.get_date()
-    print(f"选择了日期: {selected_date}")
-    # 在這裡觸發數據載入或篩選
-    # ...
+# def handle_date_selection(event):
+#     """處理日期選擇事件的函數"""
+#     selected_date = date_entry.get_date()
+#     print(f"选择了日期: {selected_date}")
+#     # 在這裡觸發數據載入或篩選
+#     # ...
 
-def update_linkage_status():
-    """處理tdx和ths選中狀態變化的函數"""
-    tdx_state = tdx_var.get()
-    ths_state = ths_var.get()
+# def update_linkage_status():
+#     """處理tdx和ths選中狀態變化的函數"""
+#     tdx_state = tdx_var.get()
+#     ths_state = ths_var.get()
     
-    print(f"tdx 联动: {tdx_state}")
-    print(f"ths 联动: {ths_state}")
+#     print(f"tdx 联动: {tdx_state}")
+#     print(f"ths 联动: {ths_state}")
     
-    # 在這裡根據 tdx_state 和 ths_state 執行相應的聯動邏輯
-    # 例如：如果 tdx 被選中，就發送命令給通達信
-    # if tdx_state:
-    #     send_to_tdx()
-    # if ths_state:
-    #     send_to_ths()
+#     # 在這裡根據 tdx_state 和 ths_state 執行相應的聯動邏輯
+#     # 例如：如果 tdx 被選中，就發送命令給通達信
+#     # if tdx_state:
+#     #     send_to_tdx()
+#     # if ths_state:
+#     #     send_to_ths()
 
 
-# --- 創建主窗口 ---
-root = tk.Tk()
-root.title("工具列範例")
+# # --- 創建主窗口 ---
+# root = tk.Tk()
+# root.title("工具列範例")
 
-# --- 創建工具列 Frame ---
-toolbar = tk.Frame(root)
-toolbar.pack(side=tk.TOP, fill=tk.X, pady=5, padx=5)
+# # --- 創建工具列 Frame ---
+# toolbar = tk.Frame(root)
+# toolbar.pack(side=tk.TOP, fill=tk.X, pady=5, padx=5)
 
-# --- 刷新按鈕 ---
-refresh_btn = tk.Button(toolbar, text="↻ 刷新数据", command=refresh_data, 
-                       font=('Microsoft YaHei', 10), bg="#5b9bd5", fg="white",
-                       padx=10, pady=3, relief="flat")
-refresh_btn.pack(side=tk.LEFT, padx=5)
+# # --- 刷新按鈕 ---
+# refresh_btn = tk.Button(toolbar, text="↻ 刷新数据", command=refresh_data, 
+#                        font=('Microsoft YaHei', 10), bg="#5b9bd5", fg="white",
+#                        padx=10, pady=3, relief="flat")
+# refresh_btn.pack(side=tk.LEFT, padx=5)
 
-# --- 刪除按鈕 ---
-delete_btn = tk.Button(toolbar, text="删除选中记录", command=delete_selected_records,
-                       font=('Microsoft YaHei', 10), bg="#d9534f", fg="white",
-                       padx=10, pady=3, relief="flat")
-delete_btn.pack(side=tk.LEFT, padx=5)
+# # --- 刪除按鈕 ---
+# delete_btn = tk.Button(toolbar, text="删除选中记录", command=delete_selected_records,
+#                        font=('Microsoft YaHei', 10), bg="#d9534f", fg="white",
+#                        padx=10, pady=3, relief="flat")
+# delete_btn.pack(side=tk.LEFT, padx=5)
 
-# --- 日期選擇器和選項框的 Frame ---
-date_options_frame = tk.Frame(toolbar)
-date_options_frame.pack(side=tk.LEFT, padx=10)
+# # --- 日期選擇器和選項框的 Frame ---
+# date_options_frame = tk.Frame(toolbar)
+# date_options_frame.pack(side=tk.LEFT, padx=10)
 
-# 添加一个Label作为日期选择器的说明
-date_label = tk.Label(date_options_frame, text="日期:", font=('Microsoft YaHei', 10))
-date_label.pack(side=tk.LEFT, padx=(0, 5))
+# # 添加一个Label作为日期选择器的说明
+# date_label = tk.Label(date_options_frame, text="日期:", font=('Microsoft YaHei', 10))
+# date_label.pack(side=tk.LEFT, padx=(0, 5))
 
-# 创建 DateEntry
-date_entry = DateEntry(date_options_frame, width=12, background='darkblue', foreground='white', borderwidth=2,
-                       font=('Microsoft YaHei', 10))
-date_entry.pack(side=tk.LEFT)
-date_entry.bind("<<DateEntrySelected>>", handle_date_selection)
+# # 创建 DateEntry
+# date_entry = DateEntry(date_options_frame, width=12, background='darkblue', foreground='white', borderwidth=2,
+#                        font=('Microsoft YaHei', 10))
+# date_entry.pack(side=tk.LEFT)
+# date_entry.bind("<<DateEntrySelected>>", handle_date_selection)
 
-# --- tdx 和 ths 聯動屬性框 ---
-tdx_var = tk.BooleanVar()
-ths_var = tk.BooleanVar()
+# # --- tdx 和 ths 聯動屬性框 ---
+# tdx_var = tk.BooleanVar()
+# ths_var = tk.BooleanVar()
 
-tdx_checkbutton = tk.Checkbutton(date_options_frame, text="联动tdx", variable=tdx_var, 
-                                 command=update_linkage_status)
-tdx_checkbutton.pack(side=tk.LEFT, padx=5)
+# tdx_checkbutton = tk.Checkbutton(date_options_frame, text="联动tdx", variable=tdx_var, 
+#                                  command=update_linkage_status)
+# tdx_checkbutton.pack(side=tk.LEFT, padx=5)
 
-ths_checkbutton = tk.Checkbutton(date_options_frame, text="联动ths", variable=ths_var, 
-                                 command=update_linkage_status)
-ths_checkbutton.pack(side=tk.LEFT, padx=5)
-
-
-# --- 運行主循環 ---
-root.mainloop()
+# ths_checkbutton = tk.Checkbutton(date_options_frame, text="联动ths", variable=ths_var, 
+#                                  command=update_linkage_status)
+# ths_checkbutton.pack(side=tk.LEFT, padx=5)
 
 
-
+# # --- 運行主循環 ---
+# root.mainloop()
 
 
 
@@ -165,7 +162,10 @@ root.mainloop()
 
 
 
-'''
+
+
+
+
 import tkinter as tk
 from tkinter import ttk
 
@@ -267,4 +267,3 @@ stock_tree.bind("<<TreeviewSelect>>", on_table_select)
 refresh_all_data()
 
 root.mainloop()
-'''
