@@ -1353,16 +1353,16 @@ def check_readldf_exist():
     #     if not os.path.exists(filename):
     #         start_async_save()
     #         return
-
+    
     if not get_day_is_trade_day() or (get_day_is_trade_day() and (get_now_time_int() < 923) or get_now_time_int() >1530 ):
-        if  not (get_day_is_trade_day() and get_now_time_int() >1530):
+        if  not get_day_is_trade_day() or (get_day_is_trade_day() and (get_now_time_int() >1530  or get_now_time_int() < 923)):
             date_str = get_last_weekday_before()
     # 3. 建立檔名（這裡儲存為 CSV）
     selected_type  = type_var.get()
     # filename = f"dfcf_{selected_type}_{date_str}.csv"
     filename = f"datacsv\\dfcf_{date_str}.csv.bz2"
     # --- 核心檢查邏輯 ---
-    if not get_work_time() and get_now_time_int() > 1530 and  os.path.exists(filename):
+    if not get_work_time() and (get_now_time_int() >1530  or get_now_time_int() < 923) and  os.path.exists(filename):
         # messagebox.showinfo("文件已存在", f"文件 '{filename}' 已存在，放棄寫入。")
         date_entry.set_date(date_str)
         print(f"文件 '{filename}' 已存在，放棄寫入,已加载")
@@ -1641,7 +1641,7 @@ def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_
         else:
             temp_df = realdatadf
             # print(f'temp_df = realdatadf')
-        if not get_work_time() and get_now_time_int() > 1530:
+        if not get_work_time() and (get_now_time_int() >1530  or get_now_time_int() < 923):
             # if realdatadf is not None and len(realdatadf) > 5000:
             #     print(f'set realdatadf to loaded_df now time is no worktime:{get_now_time_int()}')
             #     loaded_df = realdatadf
