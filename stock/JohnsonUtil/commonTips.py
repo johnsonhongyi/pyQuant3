@@ -1048,12 +1048,12 @@ terminal_positionKey4K = {'sina_Market-DurationDn.py': '106, 586,1400,440',
 
 
 
-terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '48, 506,1306,438',
-                        'sina_Market-DurationCXDN.py': '13, 310,1329,438',
+terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '48, 506,1356,438',
+                        'sina_Market-DurationCXDN.py': '13, 310,1356,438',
                         'sina_Market-DurationSH.py': '-29, 623,1400,440',
-                        'sina_Monitor-Market-LH.py': '567, 286,1307,407',
+                        'sina_Monitor-Market-LH.py': '567, 286,1356,407',
                         'sina_Monitor-Market.py': '140, 63,1400,440',
-                        'sina_Monitor.py': '109, 20, 1319, 560',
+                        'sina_Monitor.py': '109, 20, 1356, 560',
                         'singleAnalyseUtil.py': '1046, 20,897,359',
                         'LinePower.py': '9, 216, 761,407',
                         'sina_Market-DurationDnUP.py': '602,518,1352,464',
@@ -1062,7 +1062,7 @@ terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '48, 506,1306,438'
                         'chantdxpower.py':'86, 128, 649,407',
                         'ths-tdx-web.py':'70, 200, 159,27',
                         'pywin32_mouse.py':'70, 200, 159,27',
-                        'filter_resample_Monitor.py':'549, 244,1338,560'}
+                        'filter_resample_Monitor.py':'549, 244,1356,560'}
 
 
 

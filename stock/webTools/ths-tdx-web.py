@@ -344,20 +344,20 @@ if __name__ == '__main__':
         time.sleep(2)
     # if not find_proc_windows('联动精灵',visible=False):
     
-    if find_window_by_title_safe('通达信金融终端'): 
-        # if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏一')):
-        #     print('start : 通达信金融终端(开心果交易版) 副屏一')
-        #     print(open_tdx_mscreen(1))
-        # if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏二')):
-        #     print('start : 通达信金融终端(开心果交易版) 副屏二')
-        #     print(open_tdx_mscreen(2))
-        if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏三')):
-            print('start : 通达信金融终端(开心果交易版) 副屏三')
-            print(open_tdx_mscreen(3))
-    else:
-        set_tdx_screen_show()
+    # if find_window_by_title_safe('通达信金融终端'): 
+    #     # if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏一')):
+    #     #     print('start : 通达信金融终端(开心果交易版) 副屏一')
+    #     #     print(open_tdx_mscreen(1))
+    #     # if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏二')):
+    #     #     print('start : 通达信金融终端(开心果交易版) 副屏二')
+    #     #     print(open_tdx_mscreen(2))
+    #     if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏三')):
+    #         print('start : 通达信金融终端(开心果交易版) 副屏三')
+    #         print(open_tdx_mscreen(3))
+    # else:
+    #     set_tdx_screen_show()
 
-    time.sleep(6)
+    # time.sleep(6)
     if not find_window_by_title_background('开盘啦板块竞价'): 
         run_system_fpath('C:\\Users\\Johnson\\Documents\\TDX\\55188\\开盘啦板块竞价.exe')
         time.sleep(2)

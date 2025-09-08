@@ -68,7 +68,7 @@ CheckClipboard()
         
         ; 提示用户已找到6位数字
         
-        MsgBox, 0x40,, 剪贴板中检测到6位数字: %six_digits%
+        ;MsgBox, 0x40,, 剪贴板中检测到6位数字: %six_digits%
         
         ; 你可以在这里添加其他操作，例如：
         ; Send, %six_digits% ; 自动发送数字
