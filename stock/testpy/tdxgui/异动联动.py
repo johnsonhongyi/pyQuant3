@@ -53,19 +53,20 @@ IsWindowVisible = ctypes.windll.user32.IsWindowVisible
 
 codelist = []
 ths_code=[]
-filename= "code_ths_other.json"
+code_ths= "code_ths_other.json"
 # 检查文件是否存在
 # ths_code = ["603268", "603843","603813"]
-if os.path.exists(filename):
-    print(f"{filename} exists, loading...")
-    with open(filename, "r", encoding="utf-8") as f:
+if os.path.exists(code_ths):
+    print(f"{code_ths} exists, loading...")
+    with open(code_ths, "r", encoding="utf-8") as f:
         codelist = json.load(f)['stock']
-        ths_code = [co for co in codelist if co.startswith('603')]
+        # ths_code = [co for co in codelist if co.startswith('60')]
+        ths_code = [co for co in codelist]
     print("Loaded:", len(ths_code))
 else:
-    print(f"{filename} not found, creating...")
+    print(f"{code_ths} not found, creating...")
     data = {"stock": ths_code}
-    with open(filename, "w", encoding="utf-8") as f:
+    with open(code_ths, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
 
@@ -238,6 +239,14 @@ def ths_convert_code(code):
         dec_num = int('24', 16)
         bytes_codex = bytes_16(dec_num, code)
 
+    elif str(code).startswith('90'):
+        # 将16进制数转换为整数
+        dec_num = int('12', 16)
+        bytes_codex = bytes_16(dec_num, code)
+    elif str(code).startswith('20'):
+        # 将16进制数转换为整数
+        dec_num = int('22', 16)
+        bytes_codex = bytes_16(dec_num, code)
     #     # 12开头的可转债
     # elif str(code).startswith('8') or str(code).startswith('92') or str(code).startswith('43'):
     #     # 将16进制数转换为整数
@@ -777,7 +786,7 @@ def save_dataframe(df=None):
     #             df = loaded_df
     #     return df
     date_str = get_today()
-    filename = f"dfcf_{date_str}.csv.bz2"
+    filename = f"datacsv\\dfcf_{date_str}.csv.bz2"
     # --- 核心檢查邏輯 ---
     if get_now_time_int() > 1505 and  os.path.exists(filename):
         print(f'{filename} exists,return')
@@ -801,7 +810,7 @@ def save_dataframe(df=None):
         # 3. 建立檔名（這裡儲存為 CSV）
         selected_type  = type_var.get()
         # filename = f"dfcf_{selected_type}_{date_str}.csv"
-        filename = f"dfcf_{date_str}.csv.bz2"
+        filename = f"datacsv\\dfcf_{date_str}.csv.bz2"
         date_write_is_processed = True
         
         # --- 核心檢查邏輯 ---
@@ -1245,7 +1254,7 @@ def on_date_selected(event):
         date_str = selected_date_obj.strftime("%Y-%m-%d")
         selected_type  = type_var.get()
         # filename = f"dfcf_{selected_type}_{date_str}.csv"
-        filename = f"dfcf_{date_str}.csv.bz2"
+        filename = f"datacsv\\dfcf_{date_str}.csv.bz2"
 
         print(f"嘗試載入文件: {filename}")
 
@@ -1256,7 +1265,7 @@ def on_date_selected(event):
             loaded_df = pd.read_csv(filename, encoding='utf-8-sig', compression="bz2")
             # loaded_df['代码'] = loaded_df['代码'].apply(lambda x:str(x))
             loaded_df['代码'] = loaded_df["代码"].astype(str).str.zfill(6)
-            loaded_df = filter_stocks(loaded_df,selected_type)
+            # loaded_df = filter_stocks(loaded_df,selected_type)
             # 這裡可以根據需要更新 Treeview 或其他UI
             populate_treeview(loaded_df)
             
@@ -1340,24 +1349,26 @@ def check_readldf_exist():
     global loaded_df,realdatadf
     date_str = get_today()
     # if get_day_is_trade_day() and get_now_time_int() > 1510:
-    #     filename = f"dfcf_{date_str}.csv.bz2"
+    #     filename = f"datacsv\\dfcf_{date_str}.csv.bz2"
     #     if not os.path.exists(filename):
     #         start_async_save()
     #         return
 
     if not get_day_is_trade_day() or (get_day_is_trade_day() and (get_now_time_int() < 923) or get_now_time_int() >1530 ):
-        date_str = get_last_weekday_before()
+        if  not (get_day_is_trade_day() and get_now_time_int() >1530):
+            date_str = get_last_weekday_before()
     # 3. 建立檔名（這裡儲存為 CSV）
     selected_type  = type_var.get()
     # filename = f"dfcf_{selected_type}_{date_str}.csv"
-    filename = f"dfcf_{date_str}.csv.bz2"
+    filename = f"datacsv\\dfcf_{date_str}.csv.bz2"
     # --- 核心檢查邏輯 ---
-    if not get_work_time() and  os.path.exists(filename):
+    if not get_work_time() and get_now_time_int() > 1530 and  os.path.exists(filename):
         # messagebox.showinfo("文件已存在", f"文件 '{filename}' 已存在，放棄寫入。")
+        date_entry.set_date(date_str)
         print(f"文件 '{filename}' 已存在，放棄寫入,已加载")
         loaded_df = pd.read_csv(filename, encoding='utf-8-sig', compression="bz2")
         loaded_df['代码'] = loaded_df["代码"].astype(str).str.zfill(6)
-        loaded_df = filter_stocks(loaded_df,selected_type)
+        # loaded_df = filter_stocks(loaded_df,selected_type)
         realdatadf = loaded_df
         return True
     else:
@@ -1440,7 +1451,8 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
             root.after(delay_ms, lambda: [schedule_worktime_tasks(tree)])
     else:
         # root.after(delay_ms, lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
-        status_label3.config(text=f"更新在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
+        print(f"自动更新任务get_stock_changes_background执行于:在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
+        status_label3.config(text=f"更新{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}")
         root.after(delay_ms, lambda: [schedule_worktime_tasks(tree)])
 
 
@@ -1463,7 +1475,7 @@ def schedule_workday_task(root, target_hour, target_minute):
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
     print(f"下一次保存任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
 
-    status_label2.config(text=f"任务在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
+    status_label2.config(text=f"存档-{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}")
     # 使用 root.after() 调度任务，在回调函数中使用 lambda 包装，
     # 确保在任务完成后再次调用自身进行重新调度。
     root.after(delay_ms, lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
@@ -2005,6 +2017,8 @@ def update_code_entry(stock_code):
         return
     if stock_code:
         stock_code = stock_code.zfill(6)
+        selected_item = tree.selection()
+        send_to_tdx(stock_code)
     code_entry.delete(0, tk.END)
     code_entry.insert(0, stock_code)
 
@@ -2156,6 +2170,7 @@ def save_window_positions():
     if save_timer:
         save_timer.cancel()
     # 确保文件写入在程序退出前完成
+    save_monitor_list()
     print(f'save:{WINDOW_GEOMETRIES}')
     try:
         with open(CONFIG_FILE, "w") as f:
@@ -2169,7 +2184,7 @@ def schedule_save_positions():
     global save_timer
     if save_timer:
         save_timer.cancel()
-    save_timer = threading.Timer(1.0, save_window_positions) # 延迟1秒保存
+    save_timer = threading.Timer(600, save_window_positions) # 延迟1秒保存
     save_timer.start()
 
 def update_window_position(window_id):
@@ -2212,7 +2227,7 @@ def update_window_position(window_id):
     if window and window.winfo_exists():
         # print(f'update_window_position: {window_id}')
         WINDOW_GEOMETRIES[window_id] = window.geometry()
-        # schedule_save_positions()
+        schedule_save_positions()
 
 def on_close_monitor(window_info):
     """处理子窗口关闭事件"""
@@ -2494,8 +2509,8 @@ type_frame.pack(fill=tk.X,padx=3, pady=3)
 
 # stock_types list
 stock_types = [
-    "火箭发射", "快速反弹", "大笔买入", "封涨停板", "打开跌停板", "有大买盘", 
-    "竞价上涨", "高开5日线", "向上缺口", "60日新高", "60日大幅上涨", "加速下跌", 
+    "火箭发射","高开5日线","向上缺口","封涨停板", "60日新高", "快速反弹",   
+    "大笔买入","竞价上涨",  "60日大幅上涨", "加速下跌", "打开跌停板", "有大买盘",
     "高台跳水", "大笔卖出", "封跌停板", "打开涨停板", "有大卖盘", "竞价下跌", 
     "低开5日线", "向下缺口", "60日新低", "60日大幅下跌"
 ]

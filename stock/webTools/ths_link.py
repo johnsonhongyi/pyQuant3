@@ -8,19 +8,20 @@ import os
 import json
 codelist = []
 ths_code=[]
-filename= "code_ths_other.json"
+code_ths= "code_ths_other.json"
 # 检查文件是否存在
 # ths_code = ["603268", "603843","603813"]
-if os.path.exists(filename):
-    print(f"{filename} exists, loading...")
-    with open(filename, "r", encoding="utf-8") as f:
+if os.path.exists(code_ths):
+    print(f"{code_ths} exists, loading...")
+    with open(code_ths, "r", encoding="utf-8") as f:
         codelist = json.load(f)['stock']
-        ths_code = [co for co in codelist if co.startswith('603')]
+        # ths_code = [co for co in codelist if co.startswith('60')]
+        ths_code = [co for co in codelist]
     print("Loaded:", len(ths_code))
 else:
-    print(f"{filename} not found, creating...")
+    print(f"{code_ths} not found, creating...")
     data = {"stock": ths_code}
-    with open(filename, "w", encoding="utf-8") as f:
+    with open(code_ths, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
         
 
@@ -96,6 +97,7 @@ def ths_convert_code(code):
     if str(code)[0] == '6':
         # 将16进制数转换为整数
         dec_num = int('11', 16)
+        print(f'code:{code}, {ths_code}')
         if code in ths_code:
             dec_num = 0x16
         bytes_codex = bytes_16(dec_num, code)
@@ -114,12 +116,19 @@ def ths_convert_code(code):
         # 将16进制数转换为整数
         dec_num = int('24', 16)
         bytes_codex = bytes_16(dec_num, code)
-
+    elif str(code).startswith('90'):
+        # 将16进制数转换为整数
+        dec_num = int('12', 16)
+        bytes_codex = bytes_16(dec_num, code)
+    elif str(code).startswith('20'):
+        # 将16进制数转换为整数
+        dec_num = int('22', 16)
+        bytes_codex = bytes_16(dec_num, code)
     else:
         # 将16进制数转换为整数
         dec_num = int('21', 16)
         bytes_codex = bytes_16(dec_num, code)
-
+    print(f'dec_num:{dec_num} bytes_codex:{bytes_codex}')
     return bytes_codex
 
 
@@ -131,6 +140,7 @@ def send_code_message(code, exe='hexin.exe'):
     # 在指定进程的虚拟地址空间中保留、提交或更改内存区域的状态。 函数将它分配的内存初始化为零。
     argv_address = kernel32.VirtualAllocEx(ths_process_hwnd, 0, 8, VIRTUAL_MEN, FAGE_READWRITE)
     bytes_str = ths_convert_code(code)
+    print(f'bytes_str:{bytes_str}')
     # 用kerne132.WriteProcessMemory在目标进程内存空间写入数据
     kernel32.WriteProcessMemory(ths_process_hwnd, argv_address, bytes_str, 8, None)
     # 同花顺窗口句柄
@@ -143,11 +153,15 @@ if __name__ == '__main__':
     # 让同花顺切换到股票代码
     # send_code_message('159531', 'hexin.exe')
     # send_code_message('603268', 'hexin.exe')
-    send_code_message('603813', 'hexin.exe')
+    # send_code_message('920056', 'hexin.exe')
+    # send_code_message('920445', 'hexin.exe')
+    send_code_message('600753', 'hexin.exe')
+    # send_code_message("600421", 'hexin.exe')
+    # send_code_message("900901", 'hexin.exe')
     # time.sleep(0.5)
-    send_code_message('603839', 'hexin.exe')
+    # send_code_message('603839', 'hexin.exe')
     # send_code_message('603855', 'hexin.exe')
-    send_code_message('603843', 'hexin.exe')
+    # send_code_message('603843', 'hexin.exe')
 
 
     # send_code_message('833171', 'hexin.exe')
