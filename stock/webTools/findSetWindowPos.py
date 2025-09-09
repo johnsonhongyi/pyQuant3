@@ -275,16 +275,17 @@ tdx_ths_position4644nodfcf={'Edge': '891,-905,704,912','交易信号监控': '25
 #         '股票异动数据监控': '2058,-967,750,550','开盘啦竞价板块观察1.0': '914,-1052,898,265','股票异动数据监控': '2058,-967,750,550',\
 # }
 
-tdx_ths_position4644={'Edge': '1911,-793,914,800','交易信号监控': '1232,84,566,389','东兴证券': '51,205,1083,717',\
+tdx_ths_position4644={'Edge': '2154,-858,654,852','交易信号监控': '1232,84,566,389','东兴证券': '51,205,1083,717',\
         '行业跟随1': '861,0,677,404','人气综合排行榜2.2': '-2,0,478,753','通达信金融终端(开心果交易版) 副屏一': '1260,-829,1174,655',\
-        '通达信金融终端(开心果交易版) 副屏二': '1303,-649,1150,620','通达信金融终端(开心果交易版) 副屏三': '1004,-734,1199,704','通达信金融终端(开心果交易版)V2025': '209,60,1216,794',\
+        '通达信金融终端(开心果交易版) 副屏二': '1303,-649,1150,620','通达信金融终端(开心果交易版) 副屏三': '856,-743,1199,704','通达信金融终端(开心果交易版)V2025': '209,60,1216,794',\
         '东方财富': '1449,-858,1354,790','同花顺': '927,-785,1440,785','sina_Market-DurationDn.exe': '-6,432,1356,423',\
         'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUP.exe': '-6,411,1353,438','sina_Market-DurationUP.exe': '119,329,1394,439',\
         'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '946,-1080,1353,521','singleAnalyseUtil.exe': '1890,-1080,897,359',\
         'LinePower.exe': '750,33,761,407','instock_Monitor.exe': '16,82,1346,439','chantdxpower.exe': '-6,463,649,407',\
         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51','开盘啦竞价板块观察1.0': '891,-1043,898,265',\
-        '股票异动数据监控': '2023,-785,516,744','开盘啦竞价板块观察1.0': '891,-1043,898,265','股票异动数据监控': '2023,-785,516,744',\
+        '股票异动数据监控': '2270,-1022,516,979','开盘啦竞价板块观察1.0': '891,-1043,898,265','股票异动数据监控': '2270,-1022,516,979',\
 }
+
 
 #LG + samsung  + triton
 tdx_ths_position5376_Triton={'Edge': '1013,-793,914,800','交易信号监控': '1361,-896,566,389','东兴证券': '51,205,1083,717',\
@@ -968,22 +969,22 @@ if __name__ == '__main__':
         # time.sleep(0.2)
 
 
-    import copy_tools as cptools #open_tdx_mscreen,set_tdx_screen_show
+    # import copy_tools as cptools #open_tdx_mscreen,set_tdx_screen_show
     # active_window = cptools.ahk.active_window
 
-    # if find_proc_windows('通达信金融终端',fuzzysearch=True):
-    if find_window_by_title_safe('通达信金融终端'):
-        # if not (find_proc_windows('通达信金融终端(开心果交易版) 副屏一',fuzzysearch=True)):
-        # if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏一')):
-        #     print('start : 通达信金融终端(开心果交易版) 副屏')
-        #     print(cptools.open_tdx_mscreen(1))
-        # if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏二')):
-        #     print(cptools.open_tdx_mscreen(2))
-        if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏三')):
-            print(cptools.open_tdx_mscreen(3))
+    # # if find_proc_windows('通达信金融终端',fuzzysearch=True):
+    # if find_window_by_title_safe('通达信金融终端'):
+    #     # if not (find_proc_windows('通达信金融终端(开心果交易版) 副屏一',fuzzysearch=True)):
+    #     # if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏一')):
+    #     #     print('start : 通达信金融终端(开心果交易版) 副屏')
+    #     #     print(cptools.open_tdx_mscreen(1))
+    #     # if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏二')):
+    #     #     print(cptools.open_tdx_mscreen(2))
+    #     if not (find_window_by_title_safe('通达信金融终端(开心果交易版) 副屏三')):
+    #         print(cptools.open_tdx_mscreen(3))
 
-        cptools.set_tdx_screen_show()
-        time.sleep(5)
+    #     cptools.set_tdx_screen_show()
+    #     time.sleep(5)
     
     # active_window.activate()
 
