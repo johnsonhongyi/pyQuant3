@@ -1,3 +1,124 @@
+#单参数版本:
+# def load_window_positions():
+#     """从配置文件加载所有窗口的位置，保证位置合法"""
+#     global WINDOW_GEOMETRIES
+#     if os.path.exists(CONFIG_FILE):
+#         try:
+#             with open(CONFIG_FILE, "r") as f:
+#                 WINDOW_GEOMETRIES = json.load(f)
+#                 print("所有窗口配置已加载。")
+#         except (json.JSONDecodeError, FileNotFoundError):
+#             print("配置文件损坏或不存在，使用默认位置。")
+#     else:
+#         print("未找到配置文件，使用默认位置。")
+
+#     # 确保每个位置在当前屏幕范围内
+#     screen_width = tk.Tk().winfo_screenwidth()
+#     screen_height = tk.Tk().winfo_screenheight()
+
+#     for win_name, geom in WINDOW_GEOMETRIES.items():
+#         x = geom.get("x", 100)
+#         y = geom.get("y", 100)
+#         width = geom.get("width", 800)
+#         height = geom.get("height", 600)
+
+#         if x < 0 or x + width > screen_width:
+#             x = max(0, min(x, screen_width - width))
+#         if y < 0 or y + height > screen_height:
+#             y = max(0, min(y, screen_height - height))
+
+#         geom["x"] = x
+#         geom["y"] = y
+#         geom["width"] = width
+#         geom["height"] = height
+
+#     return WINDOW_GEOMETRIES
+
+# def save_window_positions(windows: dict):
+#     """保存所有窗口的位置"""
+#     global WINDOW_GEOMETRIES, save_timer
+#     if save_timer:
+#         save_timer.cancel()
+
+#     for win_name, window in windows.items():
+#         WINDOW_GEOMETRIES[win_name] = {
+#             "x": window.winfo_x(),
+#             "y": window.winfo_y(),
+#             "width": window.winfo_width(),
+#             "height": window.winfo_height()
+#         }
+
+#     try:
+#         with open(CONFIG_FILE, "w") as f:
+#             json.dump(WINDOW_GEOMETRIES, f)
+#         print("所有窗口配置已保存。")
+#     except IOError as e:
+#         print(f"写入配置文件时出错: {e}")
+
+#都传参数版本:
+# def load_window_positions(root_windows: dict):
+#     """从配置文件加载所有窗口的位置，保证窗口在可见屏幕内"""
+#     global WINDOW_GEOMETRIES
+#     if os.path.exists(CONFIG_FILE):
+#         try:
+#             with open(CONFIG_FILE, "r") as f:
+#                 WINDOW_GEOMETRIES = json.load(f)
+#                 print("所有窗口配置已加载。")
+#         except (json.JSONDecodeError, FileNotFoundError):
+#             print("配置文件损坏或不存在，使用默认窗口位置。")
+#     else:
+#         print("未找到配置文件，使用默认位置。")
+
+#     # 遍历已注册窗口，设置位置
+#     screen_width = root_windows['root'].winfo_screenwidth()
+#     screen_height = root_windows['root'].winfo_screenheight()
+
+#     for win_name, window in root_windows.items():
+#         if win_name not in WINDOW_GEOMETRIES:
+#             continue
+#         geom = WINDOW_GEOMETRIES[win_name]
+#         x = geom.get("x", 100)
+#         y = geom.get("y", 100)
+#         width = geom.get("width", 800)
+#         height = geom.get("height", 600)
+
+#         # 保证窗口在可见屏幕内
+#         if x < 0 or x + width > screen_width:
+#             x = max(0, min(x, screen_width - width))
+#         if y < 0 or y + height > screen_height:
+#             y = max(0, min(y, screen_height - height))
+
+#         window.geometry(f"{width}x{height}+{x}+{y}")
+
+# def save_window_positions(root_windows: dict):
+#     """将所有窗口的位置和大小保存到配置文件"""
+#     global WINDOW_GEOMETRIES, save_timer
+#     if save_timer:
+#         save_timer.cancel()
+
+#     # 遍历窗口获取位置
+#     for win_name, window in root_windows.items():
+#         WINDOW_GEOMETRIES[win_name] = {
+#             "x": window.winfo_x(),
+#             "y": window.winfo_y(),
+#             "width": window.winfo_width(),
+#             "height": window.winfo_height()
+#         }
+
+#     try:
+#         with open(CONFIG_FILE, "w") as f:
+#             json.dump(WINDOW_GEOMETRIES, f)
+#         print("所有窗口配置已保存。")
+#     except IOError as e:
+#         print(f"写入配置文件时出错: {e}")
+
+
+
+
+
+
+
+
 # import tkinter as tk
 # from tkinter import ttk, messagebox
 # import pandas as pd
