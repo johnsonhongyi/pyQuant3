@@ -42,8 +42,15 @@ last_updated_time = None # 记录上次更新时间
 realdatadf_lock = threading.Lock() # 为 loaddf 创建一个全局锁
 update_interval_minutes = 10
 start_init = 0
+scheduled_task = None
 viewdf = pd.DataFrame()
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+# 停止信号
+stop_event = threading.Event()
+worker_thread = None   # 保存后台线程
+after_tasks = {}
+screen_width = 0
+screen_height = 0
 
 EnumWindows = ctypes.windll.user32.EnumWindows
 EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
@@ -53,21 +60,217 @@ IsWindowVisible = ctypes.windll.user32.IsWindowVisible
 
 codelist = []
 ths_code=[]
-code_ths= "code_ths_other.json"
+code_file_name= "code_ths_other.json"
 # 检查文件是否存在
 # ths_code = ["603268", "603843","603813"]
-if os.path.exists(code_ths):
-    print(f"{code_ths} exists, loading...")
-    with open(code_ths, "r", encoding="utf-8") as f:
-        codelist = json.load(f)['stock']
-        # ths_code = [co for co in codelist if co.startswith('60')]
-        ths_code = [co for co in codelist]
-    print("Loaded:", len(ths_code))
-else:
-    print(f"{code_ths} not found, creating...")
-    data = {"stock": ths_code}
-    with open(code_ths, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+def get_ths_code():
+    global ths_code,code_file_name
+    if os.path.exists(code_file_name):
+        print(f"{code_file_name} exists, loading...")
+        with open(code_file_name, "r", encoding="utf-8") as f:
+            codelist = json.load(f)['stock']
+            # ths_code = [co for co in codelist if co.startswith('60')]
+            ths_code = [co for co in codelist]
+        print("Loaded:", len(ths_code))
+    else:
+        print(f"{code_file_name} not found, creating...")
+        data = {"stock": ths_code}
+        with open(code_file_name, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+
+def get_monitors_info():
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long)
+        ]
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.c_long),
+            ("rcMonitor", RECT),
+            ("rcWork", RECT),
+            ("dwFlags", ctypes.c_long)
+        ]
+
+    monitors = []
+
+    def monitor_enum_proc(hMonitor, hdcMonitor, lprcMonitor, dwData):
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        ctypes.windll.user32.GetMonitorInfoW(hMonitor, ctypes.byref(info))
+        rc = info.rcMonitor
+        monitors.append({
+            "left": rc.left,
+            "top": rc.top,
+            "right": rc.right,
+            "bottom": rc.bottom,
+            "width": rc.right - rc.left,
+            "height": rc.bottom - rc.top
+        })
+        return 1  # 继续枚举
+
+    MonitorEnumProc = ctypes.WINFUNCTYPE(ctypes.c_int,
+                                         ctypes.c_ulong,
+                                         ctypes.c_ulong,
+                                         ctypes.POINTER(RECT),
+                                         ctypes.c_double)
+
+    ctypes.windll.user32.EnumDisplayMonitors(0, 0, MonitorEnumProc(monitor_enum_proc), 0)
+
+    # 组合桌面
+    if monitors:
+        all_left = min(m['left'] for m in monitors)
+        all_top = min(m['top'] for m in monitors)
+        all_right = max(m['right'] for m in monitors)
+        all_bottom = max(m['bottom'] for m in monitors)
+        combined = {
+            "left": all_left,
+            "top": all_top,
+            "right": all_right,
+            "bottom": all_bottom,
+            "width": all_right - all_left,
+            "height": all_bottom - all_top
+        }
+    else:
+        combined = None
+
+    # return {
+    #     "monitors": monitors,
+    #     "combined": combined
+    # }
+    return combined['width'],combined['height']
+
+# 使用示例
+screen_width,screen_height, = get_monitors_info()
+
+def schedule_task(name, delay_ms, func, *args):
+    """带唯一名称的任务调度（重复调度会覆盖旧任务）"""
+
+    # 如果已存在同名任务 -> 先取消
+    if name in after_tasks:
+        root.after_cancel(after_tasks[name]["id"])
+        after_tasks.pop(name, None)
+
+    def wrapper():
+        try:
+            func(*args)
+        finally:
+            # 执行完后清理
+            after_tasks.pop(name, None)
+
+    task_id = root.after(delay_ms, wrapper)
+    after_tasks[name] = {
+        "id": task_id,
+        "created": time.time(),
+        "delay": delay_ms,
+        "target": time.time() + delay_ms / 1000.0,
+        "func": func,
+        "args": args
+    }
+    return task_id
+
+def cancel_task(name):
+    if name in after_tasks:
+        root.after_cancel(after_tasks[name]["id"])
+        print(f"任务 {name} 已取消")
+        after_tasks.pop(name, None)
+
+def show_tasks():
+    print("当前任务列表:")
+    for name, info in after_tasks.items():
+        print(
+            f"  Name={name}, ID={info['id']}, "
+            f"目标时间={time.strftime('%H:%M:%S', time.localtime(info['target']))}, "
+            f"函数={info['func'].__name__}"
+        )
+    # root.after(2000, show_tasks)
+
+
+# def schedule_task(name, delay_ms, func, *args):
+#     """调度任务并记录任务信息"""
+#     task_id = root.after(delay_ms, func, *args)
+#     after_tasks[task_id] = {
+#         "name": name,
+#         "created": time.time(),
+#         "delay": delay_ms,
+#         "target": time.time() + delay_ms / 1000.0,
+#         "func": func,
+#         "args": args
+#     }
+#     return task_id
+
+# def cancel_task(task_id):
+#     """取消任务"""
+#     if task_id in after_tasks:
+#         root.after_cancel(task_id)
+#         print(f"任务 {after_tasks[task_id]['name']} 已取消")
+#         after_tasks.pop(task_id, None)
+
+# def show_tasks():
+#     """打印当前任务列表"""
+#     print("当前任务列表:")
+#     for task_id, info in after_tasks.items():
+#         print(
+#             f"  ID={task_id}, Name={info['name']}, "
+#             f"目标时间={time.strftime('%H:%M:%S', time.localtime(info['target']))}, "
+#             f"函数={info['func'].__name__}"
+#         )
+#     # root.after(1000, show_tasks)  # 每秒刷新显示一次任务表
+
+
+# --------------------
+# 启动线程
+# --------------------
+def start_worker(worker_task,param=None):
+    global worker_thread, stop_event
+    if worker_thread is not None and worker_thread.is_alive():
+        print("Worker running, stopping first...")
+        # stop_worker(lambda: actually_start_worker(param))  # 停止完成后再启动
+        stop_worker(lambda: actually_start_worker(worker_task,param))  # 停止完成后再启动
+    else:
+        actually_start_worker(worker_task,param)
+
+def actually_start_worker(worker_task,param=None):
+    global worker_thread, stop_event
+    stop_event.clear()
+    worker_thread = threading.Thread(target=worker_task, args=(param,), daemon=True)
+    worker_thread.start()
+    print("Worker started!")
+
+# --------------------
+# 停止线程
+# --------------------
+def stop_worker(callback=None):
+    """
+    停止线程，并在停止完成后执行 callback（可启动新任务）
+    """
+    global worker_thread, stop_event
+    if worker_thread is None or not worker_thread.is_alive():
+        if callback:
+            callback()
+        return
+
+    stop_event.set()  # 通知线程退出
+    time.sleep(0.2)
+
+    # 使用 after 定时检查线程状态，不阻塞 GUI
+    def check_stop():
+        global worker_thread
+        if worker_thread is not None and worker_thread.is_alive():
+            root.after(100, check_stop)  # 每100ms检查一次
+        else:
+            print("Worker stopped")
+            worker_thread = None
+            stop_event.clear()
+            if callback:
+                callback()
+
+    check_stop()
+
+
 
 
 def get_pids(pname):
@@ -835,7 +1038,7 @@ def save_dataframe(df=None):
             loaded_df = all_df
         # loaded_df['代码'] = loaded_df['代码'].apply(lambda x:str(x))
         loaded_df['代码'] = loaded_df["代码"].astype(str).str.zfill(6)
-        loaded_df = filter_stocks(loaded_df,selected_type)
+        # loaded_df = filter_stocks(loaded_df,selected_type)
 
         return loaded_df
 
@@ -936,7 +1139,9 @@ def process_full_dataframe(df):
     處理原始 DataFrame，解析相關信息並計算出現次數。
     """
     # 步驟1: 應用解析函數並擴展列
-    if df is not None and len(df) > 0:
+    # df = df[["时间", "代码", "名称", "板块", "相关信息"]]
+    if df is not None and not df.empty:
+        df = df.copy()
         parsed_data = df.apply(parse_related_info, axis=1, result_type='expand')
         df[['涨幅', '价格', '量']] = parsed_data
 
@@ -947,12 +1152,13 @@ def process_full_dataframe(df):
         df['count'] = df.groupby('代码')['代码'].transform('count')
 
         df = df[['时间', '代码', '名称','count', '板块','相关信息', '涨幅', '价格', '量']]
+    return df
+
     # # 步驟4: 刪除原始的“相关信息”和“板块”列
     # df.drop(columns=['相关信息', '板块'], inplace=True)
 
     # 步驟5: 重新排序列
     # return df[['时间', '代码', '名称', 'count', '异动类型', '涨幅', '价格', '量']]
-    return df
            
 
 def get_stock_changes(selected_type=None, stock_code=None):
@@ -1101,19 +1307,6 @@ def populate_treeview(data=None):
         #     data = get_stock_changes_time()
 
     if '涨幅' not in data.columns:
-        # # 应用解析函数并扩展列
-        # parsed_data = data.apply(parse_related_info, axis=1, result_type='expand')
-        # data[['涨幅', '价格', '量']] = parsed_data
-
-        # # 使用 fillna(0.0) 填充 NaN 值
-        # data[['涨幅', '价格', '量']] = data[['涨幅', '价格', '量']].fillna(0.0)
-
-        # # 删除原始的“相关信息”和“板块”列 清理
-        # # temp_df.drop(columns=['相关信息', '板块'], inplace=True)
-
-        # # 重新排序和组织列
-        # data = data[['时间', '代码', '名称', '板块','相关信息', '涨幅', '价格', '量']]
-        # # data = data[['时间', '代码', '名称', '板块', '涨幅', '价格', '量']]
         data = process_full_dataframe(data)
 
     viewdf = data.copy()
@@ -1124,7 +1317,7 @@ def populate_treeview(data=None):
     if data is not None and not data.empty:
         if 'count'  not in data.columns:
             data['count'] = data.groupby('代码')['代码'].transform('count')
-        data = data[['时间', '代码', '名称','count', '板块', '涨幅', '价格', '量']]
+        # data = data[['时间', '代码', '名称','count', '板块', '涨幅', '价格', '量']]
 
         # for index, row in data.iterrows():
         #     tree.insert("", "end", values=list(row))
@@ -1140,18 +1333,42 @@ def populate_treeview(data=None):
 
     # 强制刷新一次
     # tree.update_idletasks()
+def contains_chinese(s: str) -> bool:
+    return any('\u4e00' <= ch <= '\u9fff' for ch in s)
 
+def is_all_chinese(s: str) -> bool:
+    return all('\u4e00' <= ch <= '\u9fff' for ch in s)
 
 def search_by_code():
     """按代码搜索"""
     code = code_entry.get().strip()
     selected_type = type_var.get()
 
+    if code.isdigit():  # 输入是数字
+        if len(code) == 6:
+            # 4位数字，模糊匹配前四位
+            # result = df[df["代码"].str.startswith(code)]
+            data = _get_stock_changes(stock_code=code)
+        # elif len(code) == 6:
+        #     # 6位数字，精确匹配
+        #     result = df[df["代码"] == code]
+        else:
+            # 其他长度也可以模糊匹配
+            df = _get_stock_changes()
+            data = df[df["代码"].str.contains(code)]
+
+    # else:
+    #     # 非数字，模糊匹配名称
+    #     if is_all_chinese(code):
+    #         df = _get_stock_changes()
+    #         data = df[df["名称"].str.contains(code, case=False, na=False)]
+
+
     if code:
         # type_var.set("")
         status_var.set(f"搜索代码: {code}")
         # root.update()
-        data = _get_stock_changes(stock_code=code)
+        # data = _get_stock_changes(stock_code=code)
         # data = get_stock_changes(stock_code=code)
         # data = get_stock_changes_time(stock_code=code)
         populate_treeview(data)
@@ -1175,11 +1392,25 @@ def search_by_type():
 
 def refresh_data():
     """刷新数据"""
-    global loaded_df,viewdf
-    global date_write_is_processed
+
+    global loaded_df,viewdf,realdatadf,start_init,scheduled_task
+    global date_write_is_processed,worker_thread,last_updated_time
+
     # if not date_write_is_processed:
-    loaded_df = None
-    viewdf = pd.DataFrame()
+    if loaded_df is not None and not loaded_df.empty:
+        date_entry.set_date(get_today())
+        if scheduled_task:
+            root.after_cancel(scheduled_task)
+            time.sleep(0.2)
+        show_tasks()
+        loaded_df = None
+        start_init = 0
+        viewdf = pd.DataFrame()
+        realdatadf = pd.DataFrame()
+        print('start refresh_data get_stock_changes_background')
+        start_worker(schedule_worktime_task(tree))
+        last_updated_time = None
+
     status_var.set("刷新中...")
     # root.update()
     current_type = type_var.get()
@@ -1221,6 +1452,8 @@ def on_code_entry_change(event=None):
     if len(code) == 6:  # 仅当输入长度等于6时触发联动
          # _get_stock_changes(stock_code=code)
         send_to_tdx(code)
+    else:
+        search_by_code()
 
 def delete_selected_records():
     """删除选中的记录"""
@@ -1246,7 +1479,7 @@ def on_date_selected(event):
     # update_data_for_date(selected_date)
     # --- 假設的DataFrame ---
     # 這個變數將用於存放載入的DataFrame
-    global loaded_df
+    global loaded_df,last_updated_time
     
     try:
         # 1. 獲取日期並建立檔名
@@ -1260,6 +1493,8 @@ def on_date_selected(event):
 
         # 2. 檢查檔案是否存在
         if os.path.exists(filename):
+            stop_worker()
+            last_updated_time = None
             # 檔案存在，載入到 DataFrame
             # loaded_df = pd.read_csv(filename, encoding='utf-8-sig')
             loaded_df = pd.read_csv(filename, encoding='utf-8-sig', compression="bz2")
@@ -1303,7 +1538,8 @@ def update_linkage_status():
     if not dfcf_state:
         global dfcf_process_hwnd
         dfcf_process_hwnd = 0
-
+    if uniq_var.get() or not uniq_var.get():
+        show_tasks()
     print(f"TDX: {tdx_var.get()}, THS: {ths_var.get()}, DC: {dfcf_var.get()}, Uniq: {uniq_var.get()},Sub: {sub_var.get()}")
 
 def daily_task():
@@ -1374,7 +1610,20 @@ def check_readldf_exist():
     else:
         return False
 
+def schedule_get_ths_code_task():
+    """
+    每隔5分钟执行一次的任务。
+    """
+    
+    current_time = datetime.now().strftime("%H:%M:%S")
+    print(f"自动更新任务get_ths_code执行于: {current_time}")
+    # 在这里添加你的具体任务逻辑
 
+    save_thread = threading.Thread(target=get_ths_code)
+    save_thread.start()
+    # 5分钟后再次调用此函数
+    # root.after(3 * 60 * 1000, schedule_checkpid_task)
+    schedule_task('get_ths_code_task',5 * 60 * 1000,schedule_get_ths_code_task)
 
 def schedule_checkpid_task():
     """
@@ -1400,7 +1649,9 @@ def schedule_checkpid_task():
     save_thread = threading.Thread(target=check_pids_all)
     save_thread.start()
     # 5分钟后再次调用此函数
-    root.after(3 * 60 * 1000, schedule_checkpid_task)
+    # root.after(3 * 60 * 1000, schedule_checkpid_task)
+    schedule_task('checkpid_task',3 * 60 * 1000,lambda: schedule_checkpid_task)
+
     # else:
     #     # root.after(delay_ms, lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
     #     root.after(delay_ms, lambda: [schedule_checkpid_task])
@@ -1411,8 +1662,8 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
     """
     每隔5分钟执行一次的任务。
     """
-    global start_init,loaded_df
-    next_execution_time = get_next_weekday_time(9, 35)
+    global start_init,loaded_df,scheduled_task,last_updated_time
+    next_execution_time = get_next_weekday_time(9, 25)
     now = datetime.now()
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
 
@@ -1420,16 +1671,16 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
     # 使用 root.after() 调度任务，在回调函数中使用 lambda 包装，
     # 确保在任务完成后再次调用自身进行重新调度。
     # root.after(delay_ms, lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
-    
     if loaded_df is None and (get_day_is_trade_day() or start_init == 0):
-        print(f"下一次background任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
         if get_work_time() or 1130 < get_now_time_int() < 1300 or start_init == 0:
             current_time = datetime.now().strftime("%H:%M:%S")
             print(f"自动更新任务get_stock_changes_background执行于: {current_time}")
             # 在这里添加你的具体任务逻辑
             status_label3.config(text=f"更新在{current_time[:-3]}执行")
-            save_thread = threading.Thread(target=get_stock_changes_background)
-            save_thread.start()
+            # save_thread = threading.Thread(target=get_stock_changes_background)
+            # save_thread.start()
+            # start_worker(get_stock_changes_background)
+            actually_start_worker(get_stock_changes_background)
 
             # global last_updated_time
             # if last_updated_time:
@@ -1445,15 +1696,20 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
             #     futurebackground.add_done_callback(lambda f: update_background_tree(f,tree))
 
             # 5分钟后再次调用此函数
-            root.after(5 * 60 * 1000, lambda: schedule_worktime_task(tree))
+            schedule_task('worktime_task',5 * 60 * 1000,lambda: schedule_worktime_task(tree))
+            # scheduled_task = root.after(5 * 60 * 1000, lambda: schedule_worktime_task(tree))
         else:
             status_label3.config(text=f"更新在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
-            root.after(delay_ms, lambda: [schedule_worktime_tasks(tree)])
+            # scheduled_task = root.after(delay_ms, lambda: [schedule_worktime_tasks(tree)])
+            schedule_task('worktime_task',delay_ms,lambda: schedule_worktime_task(tree))
     else:
+        print(f"下一次background任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
         # root.after(delay_ms, lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
         print(f"自动更新任务get_stock_changes_background执行于:在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
         status_label3.config(text=f"更新{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}")
-        root.after(delay_ms, lambda: [schedule_worktime_tasks(tree)])
+        # scheduled_task = root.after(delay_ms, lambda: [schedule_worktime_tasks(tree)])
+        schedule_task('worktime_task',delay_ms,lambda: schedule_worktime_task(tree))
+
 
 
 
@@ -1478,7 +1734,9 @@ def schedule_workday_task(root, target_hour, target_minute):
     status_label2.config(text=f"存档-{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}")
     # 使用 root.after() 调度任务，在回调函数中使用 lambda 包装，
     # 确保在任务完成后再次调用自身进行重新调度。
-    root.after(delay_ms, lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
+    # root.after(delay_ms, lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
+    schedule_task('worksaveday_task',delay_ms,lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
+
 
 # # --- 子窗口监控逻辑 ---
 # def refresh_stock_data(window, stock_code, label):
@@ -1547,7 +1805,7 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
     global realdatadf, last_updated_time
     global loaded_df,start_init
     global date_write_is_processed
-    global viewdf
+    global viewdf,stop_event
     current_time = datetime.now()
     start_time=time.time()
     
@@ -1558,15 +1816,21 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
     # 使用 with realdatadf_lock 确保只有一个线程可以进入此关键区域
     if loaded_df is None  and (len(realdatadf) == 0 or get_work_time() or (not date_write_is_processed and get_now_time_int() > 1505)):
         with realdatadf_lock:
+
             # 检查是否需要从API获取数据
             if last_updated_time is None or current_time - last_updated_time >= timedelta(minutes=update_interval_minutes):
                 print(f"时间间隔已到，正在从API获取新数据...")
                 last_updated_time = current_time
                 # 模拟从 Eastmoney API 获取数据
-                time.sleep(0.1)
+                time.sleep(0.2)
                 for symbol in symbol_map.keys():
                     # 构造模拟数据
                     # 假设每次调用都返回一些新的和一些旧的数据
+                    if stop_event.is_set():
+                        print(f'backgroundworker线程停止运行')
+                        last_updated_time = None
+                        realdatadf = pd.DataFrame()
+                        break
                     old_data = realdatadf.copy()
                     # new_data = {
                     #     '时间': [datetime.now().strftime("%H:%M:%S")],
@@ -1590,8 +1854,8 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
                     print(f"为 ({symbol}) 获取了新的异动数据，并更新了 realdatadf")
                     time.sleep(5)
                 print(f"time:{time.time() - start_time}全部更新 获取了新的异动数据，并更新了realdatadf:{len(realdatadf)}")
-                current_time = datetime.now()
-                last_updated_time = current_time
+                # current_time = datetime.now()
+                # last_updated_time = current_time
                 print(f"realdatadf 已更新:{time.strftime('%H:%M:%S')} {len(realdatadf)}")
                 # import ipdb;ipdb.set_trace()
                 root.after(2000, populate_treeview,realdatadf)
@@ -1744,8 +2008,13 @@ def refresh_stock_data(window_info, tree, item_id):
 def fast_insert(tree, dataframe):
     # 暂停绘制
     # tree.tk.call(tree, "configure", "-displaycolumns", "{}")
-    if dataframe is not None:
+    if dataframe is not None and not dataframe.empty:
         # 批量插入
+        if 'count' in dataframe.columns and dataframe[dataframe['count'] > 0].empty:
+            print(f'fast_insert:count retry process_full_dataframe:{dataframe[:1]}')
+            dataframe = process_full_dataframe(dataframe) 
+
+        dataframe = dataframe[['时间', '代码', '名称','count', '板块', '涨幅', '价格', '量']]
         for row in dataframe.itertuples(index=False, name=None):
             values = list(row)
             tree.tk.call(tree, "insert", "", "end", "-values", values)
@@ -1808,10 +2077,10 @@ def update_monitor_tree(future, tree, window_info, item_id):
     stock_info = window_info['stock_info']
     window = window_info['toplevel']
     stock_code, stock_name, *rest = stock_info
-
+    data=None
     try:
         data = future.result()
-        if data is not None and len(data) > 0 and window.winfo_exists():
+        if data is not None and not data.empty and window.winfo_exists():
             data = data[data['代码'] ==  stock_code].set_index('时间').reset_index()
 
             if '涨幅' not in data.columns:
@@ -1836,7 +2105,7 @@ def update_monitor_tree(future, tree, window_info, item_id):
             print(f"Error fetching data for {stock_code}: {e}")
             tree.insert("", "end", values=[f"Error:{e}"]) 
     if window.winfo_exists():
-        if data is not None and len(data) > 0:
+        if data is not None:
             wait_time = int(random.uniform(30000, 60000))
             # print(f"data is OK wait {wait_time/1000}秒:{stock_code}")
             window.after(wait_time, lambda: refresh_stock_data(window_info, tree, item_id))
@@ -2034,9 +2303,10 @@ def load_df_to_treeview(tree, dataframe):
     # 暂停界面更新
     # tree.configure(displaycolumns=tree["displaycolumns"])  # 强制冻结刷新
 
-    if '相关信息'  in dataframe.columns:
-        dataframe.drop(columns=['相关信息'], inplace=True)
-    dataframe = dataframe[['时间', '代码', '名称','count', '板块', '涨幅', '价格', '量']]
+    # if '相关信息'  in dataframe.columns:
+    #     dataframe.drop(columns=['相关信息'], inplace=True)
+    # dataframe = dataframe[['时间', '代码', '名称','count', '板块', '涨幅', '价格', '量']]
+
     # for row in dataframe.itertuples(index=False):
     #     tree.insert("", "end", values=row)
     fast_insert(tree,dataframe)
@@ -2065,6 +2335,26 @@ def load_df_to_treeview(tree, dataframe):
 #     # 4. 最后统一刷新
 #     tree.update_idletasks()
 
+# def safe_drop_down(event):
+#     widget = event.widget
+#     if isinstance(widget, DateEntry):
+#         print('判断下拉是否已经打开')
+#         print(f'{hasattr(date_entry, "_top_cal")} ,{not date_entry._top_cal.winfo_exists()}')
+#         if not hasattr(date_entry, "_top_cal") or not date_entry._top_cal.winfo_exists():
+#         # if not hasattr(widget, "_top_cal") or widget._top_cal is None or not widget._top_cal.winfo_exists():
+#             print('没有下拉,正在打开')
+#             widget.drop_down()  # 只有未展开才下拉
+
+def safe_drop_down(date_entry):
+    # 只在没有弹出日历时才下拉
+    print( hasattr(date_entry, "_top_cal") , not date_entry._top_cal.winfo_exists())
+    if  hasattr(date_entry, "_top_cal") or not date_entry._top_cal.winfo_exists():
+        date_entry.drop_down()
+        # 调整日历位置到 DateEntry 下方
+        print('没有下拉,正在打开')
+        x = date_entry.winfo_rootx()
+        y = date_entry.winfo_rooty() + date_entry.winfo_height()
+        date_entry._top_cal.geometry(f"+{x}+{y}")
 
 def on_window_focus(event):
     """
@@ -2079,7 +2369,15 @@ def on_window_focus(event):
     # else:
     #     # 否则，可能是子控件被点击了
     #     print(f"A child widget ({event.widget}) was clicked, not the root.")
+
+    # if isinstance(event.widget, DateEntry) or "calendar" in str(event.widget).lower():
+    #     print("Window DateEntry got focus")
+    #     safe_drop_down(date_entry)
+    #     return  # 避免干扰 DateEntry 下拉
+
+    # print("Window got focus:", event.widget)
     sub_state = sub_var.get()
+    # print(f'window_focus:{sub_state} event.widget:{event.widget}')
     if sub_state:
         bring_both_to_front(root)
 
@@ -2140,15 +2438,14 @@ def sort_treeview(tree, col, reverse):
         # 更新排序方向
         sort_directions[col] = not reverse_sort
 
-    if '相关信息'  in data.columns:
-        data.drop(columns=['相关信息'], inplace=True)
+    # if '相关信息'  in data.columns:
+    #     data.drop(columns=['相关信息'], inplace=True)
     # 重新加载排序后的 DataFrame 到 Treeview
     if 'count'  not in data.columns:
+        data = process_full_dataframe(data)
         data['count'] = data.groupby('代码')['代码'].transform('count')
     load_df_to_treeview(tree, data)
     # populate_treeview(data)
-
-
 
 
 def load_window_positions():
@@ -2279,16 +2576,32 @@ def update_position_window(window, window_id, is_main=False):
     #     window = tk.Toplevel(root)
     
     # window.title(f"窗口 - {window_id}")
-
+    global screen_width,screen_height
     WINDOWS_BY_ID[window_id] = window
     # print(f'update_position_window1: {window_id} : {WINDOW_GEOMETRIES}')
     if window_id in WINDOW_GEOMETRIES:
-        # print(f'update_position_window2: {window_id} : {WINDOW_GEOMETRIES[window_id]}')
-        window.geometry(WINDOW_GEOMETRIES[window_id])
+        wsize = WINDOW_GEOMETRIES[window_id].split('+')
+        if len(wsize) == 3:
+            subw_width = int(wsize[1])
+            subw_height = int(wsize[2])
+            # print(f'update_position: {window_id}: {subw_width} {subw_height} screen_width:{screen_width} screen_height :{screen_height}' )
+            if subw_width > screen_width or subw_height > screen_height:
+                if is_main:
+                    window.geometry("750x550+385+130")
+                else:
+                    window.geometry("300x160+385+130")
+            else:
+                window.geometry(WINDOW_GEOMETRIES[window_id])
+        else:
+            print(f'WINDOW_GEOMETRIES is error:{WINDOW_GEOMETRIES[window_id]}  will init win')
+            if is_main:
+                window.geometry("750x550+385+130")
+            else:
+                window.geometry("300x160+385+130")
     else:
         if is_main:
-            window.geometry("750x550+385+130")
-    #     else:
+            window.geometry("520x800+385+130")
+        else:
             window.geometry("300x160+385+130")
     
     window.bind("<Configure>", lambda event: update_window_position(window_id))
@@ -2328,7 +2641,7 @@ style.configure("Treeview.Heading",
 )
 style.map("Treeview", background=[('selected', '#3478bf')])
 
-
+style.configure('TCombobox', arrowsize=16)
 
 
 
@@ -2471,10 +2784,13 @@ refresh_btn.pack(side=tk.LEFT, padx=2)
 date_label = tk.Label(frame_left, text="Date:", font=('Microsoft YaHei', 10), bg="#f0f0f0")
 date_label.pack(side=tk.LEFT, padx=2)
 
-date_entry = DateEntry(frame_left, width=10, background='darkblue', foreground='white', borderwidth=1,
-                       font=('Microsoft YaHei', 9))
+date_entry = DateEntry(frame_left, width=12, background='darkblue', foreground='white', borderwidth=1,
+                       font=('Microsoft YaHei', 10))
 date_entry.pack(side=tk.LEFT, padx=2)
 date_entry.bind("<<DateEntrySelected>>", on_date_selected)
+# date_entry._top_cal.overrideredirect(False)
+# date_entry._top_cal.attributes("-topmost", True)
+# date_entry.bind("<Button-1>", lambda e: safe_drop_down(e))
 
 # Right frame: Checkbuttons
 frame_right = tk.Frame(toolbar, bg="#f0f0f0")
@@ -2496,11 +2812,16 @@ checkbuttons_info = [
 ]
 
 # Pack Checkbuttons horizontally
+# for text, var in checkbuttons_info:
+#     cb = tk.Checkbutton(frame_right, text=text, variable=var, command=update_linkage_status,
+#                         bg="#f0f0f0", font=('Microsoft YaHei', 9), padx=2, pady=2)
+#     cb.pack(side=tk.LEFT, padx=2)
 for text, var in checkbuttons_info:
     cb = tk.Checkbutton(frame_right, text=text, variable=var, command=update_linkage_status,
-                        bg="#f0f0f0", font=('Microsoft YaHei', 9), padx=2, pady=2)
-    cb.pack(side=tk.LEFT, padx=2)
-
+                        bg="#f0f0f0", font=('Microsoft YaHei', 9),
+                        padx=0, pady=0,  # 内部填充设为0
+                        bd=0, highlightthickness=0)  # 边框也设为0
+    cb.pack(side=tk.LEFT, padx=1)  # 外部间距减小到1像素
 # Frame
 type_frame = tk.LabelFrame(root, text="异动类型选择", font=('Microsoft YaHei', 9),
                            padx=3, pady=3, bg="#f9f9f9")
@@ -2510,7 +2831,7 @@ type_frame.pack(fill=tk.X,padx=3, pady=3)
 # stock_types list
 stock_types = [
     "火箭发射","高开5日线","向上缺口","封涨停板", "60日新高", "快速反弹",   
-    "大笔买入","竞价上涨",  "60日大幅上涨", "加速下跌", "打开跌停板", "有大买盘",
+    "大笔买入","竞价上涨",  "60日大幅上涨", "有大买盘","加速下跌", "打开跌停板", 
     "高台跳水", "大笔卖出", "封跌停板", "打开涨停板", "有大卖盘", "竞价下跌", 
     "低开5日线", "向下缺口", "60日新低", "60日大幅下跌"
 ]
@@ -2683,6 +3004,7 @@ tk.Label(search_frame, text="股票代码搜索:", font=('Microsoft YaHei', 9),
 code_entry = tk.Entry(search_frame, width=10, font=('Microsoft YaHei', 9))
 code_entry.pack(side=tk.LEFT, padx=5)
 code_entry.bind("<KeyRelease>", on_code_entry_change)
+# code_entry.bind("<Return>", on_code_entry_change)
 
 search_btn = tk.Button(search_frame, text="搜索", command=search_by_code, 
                       font=('Microsoft YaHei', 9), bg="#5b9bd5", fg="white",
@@ -2814,12 +3136,16 @@ status_label3.pack(side=tk.LEFT, padx=5)
 # 初始加载数据
 root.after(100, lambda: populate_treeview())
 
+
 # 启动定时任务调度
 schedule_workday_task(root, target_hour, target_minute)
 
 # 首次调用任务，启动定时循环
 check_readldf_exist()
 schedule_worktime_task(tree)
+
+# 启动定时任务调度
+schedule_get_ths_code_task()
 # schedule_checkpid_task()
 # 运行主循环
 # root.mainloop()
@@ -2861,7 +3187,9 @@ if initial_monitor_list:
                 monitor_windows[stock_code] = monitor_win
 
 # 绑定 <FocusIn> 事件
-root.bind("<FocusIn>", on_window_focus)
+# root.bind("<FocusIn>", on_window_focus)
+# root.bind_class("Toplevel", "<FocusIn>", on_window_focus)
+root.bind("<FocusIn>", on_window_focus, add="+")
 # root.bind("Double-Button-3", on_window_focus)
 # monitor_window.bind("<FocusIn>", on_window_focus)
 # root.protocol("WM_DELETE_WINDOW", on_main_window_close)

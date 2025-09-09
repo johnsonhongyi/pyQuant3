@@ -227,7 +227,7 @@ SetTitleMatchMode 2
 
     #If WinActive("ahk_class TdxW_MainFrame_Class")
     {
-        SendMessage,0x111,33819,0,,ahk_class TdxW_MainFrame_Class
+        ;SendMessage,0x111,33819,0,,ahk_class TdxW_MainFrame_Class
         ;联动精灵  5208115txwd   1q2w3e4r!!!
         ;打开副屏一,二,三,一键四屏
         ;if !WinExist("ahk_class TdxW_SecondFrame_Class")
