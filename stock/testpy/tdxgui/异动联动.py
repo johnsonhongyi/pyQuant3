@@ -1333,13 +1333,28 @@ def populate_treeview(data=None):
 
     # 强制刷新一次
     # tree.update_idletasks()
+def check_string_type(s: str) -> str:
+    if not s:  # 空字符串
+        # return "empty"
+        return False
+    if re.fullmatch(r"[A-Za-z]+", s):
+        return True
+    elif all('\u4e00' <= ch <= '\u9fff' for ch in s):
+        # return "only chinese"
+        return True
+    elif any('\u4e00' <= ch <= '\u9fff' for ch in s) and re.search(r"[A-Za-z]", s):
+        # return "mixed"
+        return True
+    else:
+        return False
+
 def contains_chinese(s: str) -> bool:
     return any('\u4e00' <= ch <= '\u9fff' for ch in s)
 
 def is_all_chinese(s: str) -> bool:
     return all('\u4e00' <= ch <= '\u9fff' for ch in s)
 
-def search_by_code():
+def search_by_code(event=None):
     """按代码搜索"""
     code = code_entry.get().strip()
     selected_type = type_var.get()
@@ -1357,11 +1372,11 @@ def search_by_code():
             df = _get_stock_changes()
             data = df[df["代码"].str.contains(code)]
 
-    # else:
-    #     # 非数字，模糊匹配名称
-    #     if is_all_chinese(code):
-    #         df = _get_stock_changes()
-    #         data = df[df["名称"].str.contains(code, case=False, na=False)]
+    else:
+        # 非数字，模糊匹配名称
+        if check_string_type(code):
+            df = _get_stock_changes()
+            data = df[df["名称"].str.contains(code, case=False, na=False)]
 
 
     if code:
@@ -1452,8 +1467,8 @@ def on_code_entry_change(event=None):
     if len(code) == 6:  # 仅当输入长度等于6时触发联动
          # _get_stock_changes(stock_code=code)
         send_to_tdx(code)
-    else:
-        search_by_code()
+    # else:
+    #     search_by_code()
 
 def delete_selected_records():
     """删除选中的记录"""
@@ -1589,8 +1604,8 @@ def check_readldf_exist():
     #     if not os.path.exists(filename):
     #         start_async_save()
     #         return
-    
-    if not get_day_is_trade_day() or (get_day_is_trade_day() and (get_now_time_int() < 923) or get_now_time_int() >1530 ):
+
+    if not get_day_is_trade_day() or (get_day_is_trade_day() and (get_now_time_int() < 923)):
         if  not get_day_is_trade_day() or (get_day_is_trade_day() and (get_now_time_int() >1530  or get_now_time_int() < 923)):
             date_str = get_last_weekday_before()
     # 3. 建立檔名（這裡儲存為 CSV）
@@ -2587,7 +2602,7 @@ def update_position_window(window, window_id, is_main=False):
             # print(f'update_position: {window_id}: {subw_width} {subw_height} screen_width:{screen_width} screen_height :{screen_height}' )
             if subw_width > screen_width or subw_height > screen_height:
                 if is_main:
-                    window.geometry("750x550+385+130")
+                    window.geometry("520x800+385+130")
                 else:
                     window.geometry("300x160+385+130")
             else:
@@ -2595,7 +2610,7 @@ def update_position_window(window, window_id, is_main=False):
         else:
             print(f'WINDOW_GEOMETRIES is error:{WINDOW_GEOMETRIES[window_id]}  will init win')
             if is_main:
-                window.geometry("750x550+385+130")
+                window.geometry("520x800+385+130")
             else:
                 window.geometry("300x160+385+130")
     else:
@@ -3004,7 +3019,7 @@ tk.Label(search_frame, text="股票代码搜索:", font=('Microsoft YaHei', 9),
 code_entry = tk.Entry(search_frame, width=10, font=('Microsoft YaHei', 9))
 code_entry.pack(side=tk.LEFT, padx=5)
 code_entry.bind("<KeyRelease>", on_code_entry_change)
-# code_entry.bind("<Return>", on_code_entry_change)
+code_entry.bind("<Return>", search_by_code)
 
 search_btn = tk.Button(search_frame, text="搜索", command=search_by_code, 
                       font=('Microsoft YaHei', 9), bg="#5b9bd5", fg="white",
