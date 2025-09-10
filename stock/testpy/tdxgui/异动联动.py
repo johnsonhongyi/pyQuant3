@@ -15,6 +15,7 @@ import re
 import win32gui
 import win32process
 import win32api
+import win32con
 import threading
 import concurrent.futures
 import pyperclip
@@ -147,7 +148,7 @@ def get_monitors_info():
 
 # 使用示例
 screen_width,screen_height, = get_monitors_info()
-
+print(screen_width,screen_height)
 def schedule_task(name, delay_ms, func, *args):
     """带唯一名称的任务调度（重复调度会覆盖旧任务）"""
 
@@ -2126,67 +2127,51 @@ def update_monitor_tree(data, tree, window_info, item_id):
 
 
 
-def create_monitor_window(stock_info):
+# def create_monitor_window(stock_info):
 
-    if stock_info[0].find(':') > 0 and len(stock_info) > 4:
-        stock_info = stock_info[1:]
-    stock_code, stock_name, *rest = stock_info
-
-
-    """创建并配置子窗口，使用Treeview显示数据"""
-    monitor_win = tk.Toplevel(root)
-    monitor_win.resizable(True, True)
-    # monitor_win.title(f"Monitoring: {stock_name} ({stock_code})")
-    monitor_win.title(f"监控: {stock_name} ({stock_code})")
-    monitor_win.geometry("320x165") # 设置合适的初始大小
-    tree_frame = ttk.Frame(monitor_win)
-    tree_frame.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
-
-    window_info = {'stock_info': stock_info, 'toplevel': monitor_win}
-    monitor_win.bind("<Button-1>", lambda event: update_code_entry(stock_code))
-    columns =  ('时间', '异动类型', '涨幅', '价格', '量')
-    # columns =  ('时间', '代码', '名称', '异动类型', '涨幅', '价格', '量')
-    monitor_tree = ttk.Treeview(monitor_win, columns=columns, show="headings")
-    
-    for col in columns:
-        monitor_tree.heading(col, text=col)
-        # if col in ['涨幅', '价格', '量']:
-        if col in ['涨幅', '量']:
-            monitor_tree.column(col, width=30, anchor=tk.CENTER, minwidth=20)
-        elif col in ['异动类型']:
-            monitor_tree.column(col, width=60, anchor=tk.CENTER, minwidth=40)
-        else:
-            monitor_tree.column(col, width=40, anchor=tk.CENTER, minwidth=30)
-
-    item_id = monitor_tree.insert("", "end", values=("加载ing...", "", "", "", "", ""))
-
-    monitor_tree.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
-    update_position_window(monitor_win,stock_code)
-
-    refresh_stock_data(window_info, monitor_tree, item_id)
-    # refresh_stock_data(window_info, monitor_tree, item_id)
-    monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(window_info))
-    monitor_win.bind("<FocusIn>", on_monitor_window_focus)
-    # monitor_win.bind("Double-Button-3", on_window_focus)
-    return window_info
+#     if stock_info[0].find(':') > 0 and len(stock_info) > 4:
+#         stock_info = stock_info[1:]
+#     stock_code, stock_name, *rest = stock_info
 
 
-# def create_monitor_window(stock_code, stock_name):
-#     """创建并配置子窗口"""
+#     """创建并配置子窗口，使用Treeview显示数据"""
 #     monitor_win = tk.Toplevel(root)
-#     monitor_win.title(f"监控: {stock_name}")
-#     monitor_win.geometry("300x150")
+#     monitor_win.resizable(True, True)
+#     # monitor_win.title(f"Monitoring: {stock_name} ({stock_code})")
+#     monitor_win.title(f"监控: {stock_name} ({stock_code})")
+#     monitor_win.geometry("320x165") # 设置合适的初始大小
+#     tree_frame = ttk.Frame(monitor_win)
+#     tree_frame.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
 
-#     label = ttk.Label(monitor_win, text="正在获取数据...", anchor=tk.CENTER)
-#     label.pack(expand=True, fill=tk.BOTH, padx=10, pady=10)
+#     window_info = {'stock_info': stock_info, 'toplevel': monitor_win}
+#     monitor_win.bind("<Button-1>", lambda event: update_code_entry(stock_code))
+#     columns =  ('时间', '异动类型', '涨幅', '价格', '量')
+#     # columns =  ('时间', '代码', '名称', '异动类型', '涨幅', '价格', '量')
+#     monitor_tree = ttk.Treeview(monitor_win, columns=columns, show="headings")
+    
+#     for col in columns:
+#         monitor_tree.heading(col, text=col)
+#         # if col in ['涨幅', '价格', '量']:
+#         if col in ['涨幅', '量']:
+#             monitor_tree.column(col, width=30, anchor=tk.CENTER, minwidth=20)
+#         elif col in ['异动类型']:
+#             monitor_tree.column(col, width=60, anchor=tk.CENTER, minwidth=40)
+#         else:
+#             monitor_tree.column(col, width=40, anchor=tk.CENTER, minwidth=30)
 
-#     # 启动刷新
-#     refresh_stock_data(monitor_win, stock_code, label)
-    
-#     # 捕捉窗口关闭事件
-#     monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(monitor_win, stock_code))
-    
-#     return monitor_win
+#     item_id = monitor_tree.insert("", "end", values=("加载ing...", "", "", "", "", ""))
+
+#     monitor_tree.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
+#     update_position_window(monitor_win,stock_code)
+
+#     refresh_stock_data(window_info, monitor_tree, item_id)
+#     # refresh_stock_data(window_info, monitor_tree, item_id)
+#     monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(window_info))
+#     monitor_win.bind("<FocusIn>", on_monitor_window_focus)
+#     # monitor_win.bind("Double-Button-3", on_window_focus)
+#     return window_info
+
+
 
 
 # --- 主窗口逻辑 ---  (lag)
@@ -2429,7 +2414,7 @@ def bring_both_to_front(main_window):
         # 修正：访问内部字典的 'toplevel' 键
         # win_info['toplevel'].destroy()
 
-        print(f'bring_both_to_front:{win_info["stock_info"]}')
+        # print(f'bring_both_to_front:{win_info["stock_info"]}')
         if  win_info['toplevel'] and win_info['toplevel'].winfo_exists():
             win_info['toplevel'].lift()
             win_info['toplevel'].attributes('-topmost', 1)
@@ -2444,7 +2429,7 @@ def bring_monitor_to_front():
         # 修正：访问内部字典的 'toplevel' 键
         # win_info['toplevel'].destroy()
 
-        print(f'bring_both_to_front:{win_info["stock_info"]}')
+        # print(f'bring_both_to_front:{win_info["stock_info"]}')
         if  win_info['toplevel'] and win_info['toplevel'].winfo_exists():
             win_info['toplevel'].lift()
             win_info['toplevel'].attributes('-topmost', 1)
@@ -2523,7 +2508,9 @@ def schedule_save_positions():
     global save_timer
     if save_timer:
         save_timer.cancel()
-    save_timer = threading.Timer(600, save_window_positions) # 延迟1秒保存
+    print('save_monitor_list,schedule_save_positions save')
+    save_timer = threading.Timer(0, save_monitor_list) # 延迟1秒保存
+    save_timer = threading.Timer(1, save_window_positions) # 延迟1秒保存
     save_timer.start()
 
 def update_window_position(window_id):
@@ -2566,22 +2553,25 @@ def update_window_position(window_id):
     if window and window.winfo_exists():
         # print(f'update_window_position: {window_id}')
         WINDOW_GEOMETRIES[window_id] = window.geometry()
-        schedule_save_positions()
+        # schedule_save_positions()
 
 def on_close_monitor(window_info):
     """处理子窗口关闭事件"""
+
     stock_info = window_info['stock_info']
     stock_code = stock_info[0] # 使用 stock_info 中的第一个元素作为股票代码
     window = window_info['toplevel']
     if stock_code in monitor_windows.keys():
         del monitor_windows[stock_code]
-        save_monitor_list()
+        # save_monitor_list()
+        schedule_save_positions()
     # window.destroy()
     """在窗口关闭时调用。"""
 
-    if window.winfo_exists():
+    if window.winfo_exists() and stock_code in WINDOWS_BY_ID.keys() :
         del WINDOWS_BY_ID[stock_code]
-        update_window_position(stock_code) # 确保保存最后的配置
+        del WINDOW_GEOMETRIES[stock_code]
+        # update_window_position(stock_code) # 清楚记录确保保存最后的配置 
         window.destroy()
 
 
@@ -2610,49 +2600,250 @@ def on_closing(window, window_id):
 #     new_window_id = f"toplevel_{len(WINDOWS_BY_ID)}"
 #     create_window(root, new_window_id)
 
+
+
+def init_screen_size(root):
+    global screen_width, screen_height
+    screen_width = root.winfo_screenwidth()
+    screen_height = root.winfo_screenheight()
+
+
 def update_position_window(window, window_id, is_main=False):
-    """创建一个新窗口，并加载其位置。"""
-    # if is_main:
-    #     window = root
-    # else:
-    #     window = tk.Toplevel(root)
-    
-    # window.title(f"窗口 - {window_id}")
-    global screen_width,screen_height
+    """创建一个新窗口，并加载其位置（自动平铺）"""
+    global WINDOWS_BY_ID, WINDOW_GEOMETRIES, NEXT_OFFSET, OFFSET_STEP, screen_width, screen_height
     WINDOWS_BY_ID[window_id] = window
-    # print(f'update_position_window1: {window_id} : {WINDOW_GEOMETRIES}')
-    if window_id in WINDOW_GEOMETRIES:
+
+    if window_id in WINDOW_GEOMETRIES.keys():
+        # 有历史配置，直接使用
         wsize = WINDOW_GEOMETRIES[window_id].split('+')
         if len(wsize) == 3:
             subw_width = int(wsize[1])
             subw_height = int(wsize[2])
-            # print(f'update_position: {window_id}: {subw_width} {subw_height} screen_width:{screen_width} screen_height :{screen_height}' )
+            # print(subw_width , screen_width , subw_height , screen_height)
             if subw_width > screen_width or subw_height > screen_height:
-                if is_main:
-                    window.geometry("520x800+385+130")
-                else:
-                    window.geometry("300x160+385+130")
+                place_new_window(window, is_main)
             else:
                 window.geometry(WINDOW_GEOMETRIES[window_id])
         else:
-            print(f'WINDOW_GEOMETRIES is error:{WINDOW_GEOMETRIES[window_id]}  will init win')
-            if is_main:
-                window.geometry("520x800+385+130")
-            else:
-                window.geometry("300x160+385+130")
+            place_new_window(window, is_main)
     else:
-        if is_main:
-            window.geometry("520x800+385+130")
-        else:
-            window.geometry("300x160+385+130")
-    
+        # 没有配置，使用默认 + 自动平铺
+        place_new_window(window, is_main)
+
     window.bind("<Configure>", lambda event: update_window_position(window_id))
-    # window.protocol("WM_DELETE_WINDOW", lambda: on_closing(window, window_id))
-    
-    # tk.Label(window, text=f"这是窗口: {window_id}", padx=20, pady=20).pack()
-    
     return window
 
+
+# -----------------------------
+# 动态平铺函数
+# -----------------------------
+import win32api
+import win32con
+
+# -----------------------------
+# 初始化显示器信息（程序启动时调用一次）
+# -----------------------------
+MONITORS = []  # 全局缓存
+
+def get_all_monitors():
+    """返回所有显示器的边界列表 [(left, top, right, bottom), ...]"""
+    monitors = []
+    for handle_tuple in win32api.EnumDisplayMonitors():
+        info = win32api.GetMonitorInfo(handle_tuple[0])
+        monitors.append(info["Monitor"])  # (left, top, right, bottom)
+    return monitors
+
+# 双屏幕,上屏新建
+def init_monitors():
+    """扫描所有显示器并缓存信息"""
+    global MONITORS
+    MONITORS = get_all_monitors()  # 返回 [(left, top, right, bottom), ...]
+    if not MONITORS:
+        # 至少保留主屏幕
+        MONITORS = [(0, 0, screen_width, screen_height)]
+    print(f"Detected {len(MONITORS)} monitor(s).")
+
+
+def clamp_window_to_screens(x, y, w, h, monitors):
+    """保证窗口在可见显示器范围内"""
+    for left, top, right, bottom in monitors:
+        if left <= x < right and top <= y < bottom:
+            x = max(left, min(x, right - w))
+            y = max(top, min(y, bottom - h))
+            return x, y
+    # 如果完全不在任何显示器内，放到主屏幕左上角
+    x, y = monitors[0][0], monitors[0][1]
+    return x, y
+
+# -----------------------------
+# 修改 place_new_window 使用全局缓存
+# -----------------------------
+def place_new_window(window, window_id, win_width=300, win_height=160, margin=10):
+    """放置窗口，如果已有存储位置就用，否则垂直平铺"""
+    global WINDOW_GEOMETRIES, WINDOWS_BY_ID, MONITORS
+    WINDOWS_BY_ID[window_id] = window  # 必须保留
+
+    monitors = MONITORS  # 使用全局缓存
+
+    if window_id in WINDOW_GEOMETRIES:
+        # 使用已有存储位置
+        geom = WINDOW_GEOMETRIES[window_id]
+        try:
+            _, x_part, y_part = geom.split('+')
+            x, y = int(x_part), int(y_part)
+        except Exception:
+            x, y = 100, 100
+        # 校正窗口位置到可见屏幕
+        x, y = clamp_window_to_screens(x, y, win_width, win_height, monitors)
+        WINDOWS_BY_ID[window_id] = window
+        window.geometry(f"{win_width}x{win_height}+{x}+{y}")
+    else:
+        # 垂直平铺
+        used_positions = []
+        for w in WINDOWS_BY_ID.values():
+            try:
+                geom = w.geometry()
+                parts = geom.split('+')
+                if len(parts) == 3:
+                    used_positions.append((int(parts[1]), int(parts[2])))
+            except:
+                continue
+
+        # 从主显示器左上角开始
+        left, top, right, bottom = monitors[0]
+        x, y = left + margin, top + margin
+        step_y = win_height + margin
+        step_x = win_width + margin
+        max_y = bottom - win_height - margin
+
+        while (x, y) in used_positions:
+            y += step_y
+            if y > max_y:
+                y = top + margin
+                x += step_x
+                if x + win_width > right:
+                    x = left + margin
+
+        window.geometry(f"{win_width}x{win_height}+{x}+{y}")
+
+    # 保留更新位置回调
+    window.bind("<Configure>", lambda e: update_window_position(window_id))
+
+
+'''
+
+# 全局缓存显示器信息
+MONITORS = []
+
+def init_monitors():
+    """扫描所有显示器并缓存信息"""
+    global MONITORS
+    MONITORS = get_all_monitors()  # 返回 [(left, top, right, bottom), ...]
+    if not MONITORS:
+        # 至少保留主屏幕
+        MONITORS = [(0, 0, screen_width, screen_height)]
+    print(f"Detected {len(MONITORS)} monitor(s): {MONITORS}")
+
+def clamp_window_to_screens(x, y, win_width, win_height):
+    """保证窗口在任意显示器可见"""
+    global MONITORS
+    if not MONITORS:
+        # 没有检测到显示器，退回主屏
+        MONITORS = [(0, 0, screen_width, screen_height)]
+
+    # 找到第一个显示器（可以改成查找包含 x,y 的显示器）
+    mon_left, mon_top, mon_right, mon_bottom = MONITORS[0]
+
+    # 限制 x,y
+    x = max(mon_left, min(x, mon_right - win_width))
+    y = max(mon_top, min(y, mon_bottom - win_height))
+    return x, y
+
+def place_new_window(window, window_id, win_width=300, win_height=160, margin=10):
+    global WINDOWS_BY_ID, WINDOW_GEOMETRIES, MONITORS
+    WINDOWS_BY_ID[window_id] = window
+
+    if window_id in WINDOW_GEOMETRIES:
+        # 使用已有位置
+        geom = WINDOW_GEOMETRIES[window_id]
+        try:
+            _, x_part, y_part = geom.split('+')
+            x, y = int(x_part), int(y_part)
+        except:
+            x, y = 100, 100
+        x, y = clamp_window_to_screens(x, y, win_width, win_height)
+        WINDOWS_BY_ID[window_id] = window
+        window.geometry(f"{win_width}x{win_height}+{x}+{y}")
+    else:
+        # 垂直平铺
+        used_positions = []
+        for w in WINDOWS_BY_ID.values():
+            try:
+                parts = w.geometry().split('+')
+                if len(parts) == 3:
+                    used_positions.append((int(parts[1]), int(parts[2])))
+            except:
+                continue
+
+        mon_left, mon_top, mon_right, mon_bottom = MONITORS[0]
+        x, y = mon_left + margin, mon_top + margin
+        step_y = win_height + margin
+        step_x = win_width + margin
+        max_y = mon_bottom - win_height - margin
+
+        while (x, y) in used_positions:
+            y += step_y
+            if y > max_y:
+                y = mon_top + margin
+                x += step_x
+                if x + win_width > mon_right:
+                    x = mon_left + margin
+
+        window.geometry(f"{win_width}x{win_height}+{x}+{y}")
+
+    window.bind("<Configure>", lambda e: update_window_position(window_id))
+'''
+
+
+# -----------------------------
+# 创建监控子窗口
+# -----------------------------
+def create_monitor_window(stock_info):
+    if stock_info[0].find(':') > 0 and len(stock_info) > 4:
+        stock_info = stock_info[1:]
+    stock_code, stock_name, *rest = stock_info
+
+    monitor_win = tk.Toplevel(root)
+    monitor_win.resizable(True, True)
+    monitor_win.title(f"监控: {stock_name} ({stock_code})")
+
+    tree_frame = ttk.Frame(monitor_win)
+    tree_frame.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
+
+    window_info = {'stock_info': stock_info, 'toplevel': monitor_win}
+    columns = ('时间', '异动类型', '涨幅', '价格', '量')
+    monitor_tree = ttk.Treeview(monitor_win, columns=columns, show="headings")
+    
+    for col in columns:
+        monitor_tree.heading(col, text=col)
+        if col in ['涨幅', '量']:
+            monitor_tree.column(col, width=30, anchor=tk.CENTER, minwidth=20)
+        elif col in ['异动类型']:
+            monitor_tree.column(col, width=60, anchor=tk.CENTER, minwidth=40)
+        else:
+            monitor_tree.column(col, width=40, anchor=tk.CENTER, minwidth=30)
+
+    item_id = monitor_tree.insert("", "end", values=("加载ing...", "", "", "", ""))
+
+    monitor_tree.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
+    place_new_window(monitor_win, stock_code)
+
+    refresh_stock_data(window_info, monitor_tree, item_id)
+    monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(window_info))
+    monitor_win.bind("<FocusIn>", on_monitor_window_focus)
+    monitor_win.bind("<Button-1>", lambda event: update_code_entry(stock_code))
+
+    return window_info
 
 
 
@@ -3211,10 +3402,11 @@ update_position_window(root,"main")
 
 process_queue(root)
 
-
+init_monitors()
 # load_initial_data()
 # 自动加载并开启监控窗口
 initial_monitor_list = load_monitor_list()
+# print(initial_monitor_list)
 if initial_monitor_list:
     for stock_info in initial_monitor_list:
         if isinstance(stock_info, list) and stock_info:
