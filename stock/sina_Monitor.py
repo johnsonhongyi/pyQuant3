@@ -728,8 +728,8 @@ if __name__ == "__main__":
                                               top_all['buy'].values, top_all['lastbuy'].values)))
                         top_all['dff2'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
                                                top_all['buy'].values, top_all['lastp'].values)))
-
-                    if len(top_all) > 0 and top_all.lastp1d[0] == top_all.close[0] and top_all.lastp1d[-1] == top_all.close[-1]:
+                    _top_all = top_all[top_all.close > 10]
+                    if len(_top_all) > 0 and _top_all.lastp1d[0] == _top_all.close[0] and _top_all.lastp1d[-1] == _top_all.close[-1]:
                         print('initf_false ',end='')
                         if cct.GlobalValues().getkey('initfilter_false') is None:
                             initfilter_false = cct.read_ini(inifile='filter.ini',category='sina_Monitor',filterkey='initfilter_false')

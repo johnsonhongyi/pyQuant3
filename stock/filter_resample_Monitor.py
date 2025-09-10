@@ -434,9 +434,10 @@ if __name__ == "__main__":
                 # tw_code = top_all_w.query('lasth1d > lasth2d and red > 2 and macdlast1 > 0')
                 # t3d_code = top_all_3d.query('lasth1d > lasth2d and red > 2 and macdlast1 > 0')
                 query_rule = cct.GlobalValues().getkey('filter_rule')
+                 _top_all = top_all[top_all.close > 10]
                 if query_rule is None:
                     query_rule = cct.read_ini(inifile='filter.ini')
-                    if len(top_all) > 0 and top_all.lastp1d[0] == top_all.close[0] and top_all.lastp1d[-1] == top_all.close[-1]:
+                    if len(_top_all) > 0 and _top_all.lastp1d[0] == _top_all.close[0] and _top_all.lastp1d[-1] == _top_all.close[-1]:
                         if query_rule.find('last') > 0:
                             query_rule = query_rule.replace('1d','2d')
                     # t3d_code = top_all_3d.query('boll >=fibl > 1 and red > 1 and close > lastp2d and high > upper')
@@ -484,7 +485,7 @@ if __name__ == "__main__":
                         top_all['dff2'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
                                                top_all['buy'].values, top_all['lastp'].values)))
 
-                    if len(top_all) > 0 and top_all.lastp1d[0] == top_all.close[0] and top_all.lastp1d[-1] == top_all.close[-1]:
+                    if len(_top_all) > 0 and _top_all.lastp1d[0] == _top_all.close[0] and _top_all.lastp1d[-1] == _top_all.close[-1]:
                         top_temp = top_all.query('low > lastl2d and low > ma201d and lasth2d > lasth3d')
                         # top_temp = top_all.query('low > lastl2d and low > ma201d and lasth2d > lasth3d and a1_v > 0')
 

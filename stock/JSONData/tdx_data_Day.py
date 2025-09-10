@@ -5401,7 +5401,7 @@ if __name__ == '__main__':
     code = '002238'
     code = '002786'
     code = '002460'
-    code = '600190'
+    # code = '600190'
     # code = '600240'
     # code = '600890'
     # code = '002865'
@@ -5435,6 +5435,7 @@ if __name__ == '__main__':
 
     df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='3d' )
     print(df[-10:])
+    print(f'df lastp1d:{df[:2].lastp1d}')
     print(f'3d per1d:{df.per1d[0]}  per2d:{df.per2d[0]}  per3d:{df.per3d[0]}  per4d:{df.per4d[0]}  per5d:{df.per5d[0]}  ')
     # df = get_tdx_Exp_day_to_df(code, dl=1)
     # 
@@ -5493,6 +5494,7 @@ if __name__ == '__main__':
     # df = get_tdx_append_now_df_api('001236')
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
+    print(f'df2 lastp1d:{df2.lastp1d}')
     print(f'code:{code}')
     print(f'topR-d:{df2.topR} red:{df2.red} lastdu:{df2.lastdu} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl}  macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
