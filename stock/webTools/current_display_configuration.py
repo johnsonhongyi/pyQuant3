@@ -71,7 +71,8 @@ def get_current_display_configuration():
 def save_display_configuration(filename="display_config.json"):
     """
     保存当前显示器配置到 JSON 文件。
-    """
+    """
+
     monitor = get_monitor_details()
     filename = f'{monitor}_monitor{filename}'
     try:
@@ -136,7 +137,8 @@ def save_display_configuration(filename="display_config.json"):
 def restore_display_configuration(filename="display_config.json"):
     """
     从 JSON 文件恢复显示器配置。
-    """
+    """
+
     monitor = get_monitor_details()
     filename = f'{monitor}_monitor{filename}'
 
@@ -227,5 +229,5 @@ def get_monitor_details():
 if __name__ == "__main__":
     monitor = get_monitor_details()
     print(f'monitor Count:{monitor}')
-    save_display_configuration()
+    # save_display_configuration()
     # restore_display_configuration()
