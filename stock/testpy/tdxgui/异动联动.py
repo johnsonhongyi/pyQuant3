@@ -19,6 +19,7 @@ import threading
 import concurrent.futures
 import pyperclip
 import random
+import queue
 # 全局变量
 # root = None
 # stock_tree = None
@@ -45,6 +46,7 @@ start_init = 0
 scheduled_task = None
 viewdf = pd.DataFrame()
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+result_queue = queue.Queue()
 # 停止信号
 stop_event = threading.Event()
 worker_thread = None   # 保存后台线程
@@ -1181,8 +1183,8 @@ def get_stock_changes(selected_type=None, stock_code=None):
         '_': int(time.time() * 1000)
     }
 
-    if selected_type is None:
-        selected_type  = type_var.get()
+    # if selected_type is None:
+    #     selected_type  = type_var.get()
 
     if selected_type:
         if selected_type in symbol_map:
@@ -1469,6 +1471,27 @@ def on_code_entry_change(event=None):
         send_to_tdx(code)
     # else:
     #     search_by_code()
+# 右键点击：先粘贴，再触发回车
+# def right_click_paste(event):
+#     code_entry.event_generate("<<Paste>>")
+#     # 等待粘贴完成后触发 <Return>
+#     root.after(50, lambda: code_entry.event_generate("<Return>"))
+def right_click_paste(event):
+    try:
+        text = root.clipboard_get()   # 从系统剪贴板获取内容
+    except tk.TclError:
+        return  # 剪贴板为空或不是文本
+    
+    match = re.search(r"\d{6}", text)
+    if match:
+        stock_code = match.group(0)
+        code_entry.delete(0, tk.END)       # 清空输入框
+        code_entry.insert(0, stock_code)   # 插入股票代码
+        # 如果需要自动回车，可以模拟触发回车事件
+        code_entry.event_generate("<Return>")
+    else:
+        # 如果没有匹配，就按正常粘贴
+        code_entry.event_generate("<<Paste>>")
 
 def delete_selected_records():
     """删除选中的记录"""
@@ -1925,7 +1948,7 @@ def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_
             #     print(f'set realdatadf to loaded_df now time is no worktime:{get_now_time_int()}')
             #     loaded_df = realdatadf
             # else:
-            temp_df = get_stock_changes()
+            temp_df = get_stock_changes(selected_type=selected_type)
     else:
         # print(f'loaddf:{len(loaddf)} or realdatadf:{len(realdatadf)} or not worktime:{get_now_time_int()}')
         temp_df = get_stock_changes(selected_type=selected_type, stock_code=stock_code)
@@ -1966,60 +1989,6 @@ def _get_stock_changes(selected_type=None, stock_code=None):
 #     # print(f'start async_refresh_stock_data {window_info["stock_info"][0]} :{now}')
 #     threading.Thread(target=refresh_stock_data, args=(window_info, tree, item_id)).start()
 
-def refresh_stock_data(window_info, tree, item_id):
-    """Asynchronously fetches and updates the stock data in the treeview."""
-    # global start_inits
-    # if start_init != 0:
-    # global loaded_df,realdatadf
-    stock_info = window_info['stock_info']
-    stock_code = stock_info[0] # 使用 stock_info 中的第一个元素作为股票代码
-    window = window_info['toplevel']
-    # if loaded_df is None and len(realdatadf) == 0:
-    #     return
-    time.sleep(0.5)
-    now = datetime.now().strftime('%H:%M:%S')
-    # print(f'start refresh_stock_data {window_info["stock_info"][0]} :{now}')
-    future = executor.submit(_get_stock_changes, None,stock_code)
-    # future.add_done_callback(lambda f: update_tree_data(f, tree, window, stock_code))
-    future.add_done_callback(lambda f: update_monitor_tree(f, tree, window_info, item_id))
-    # print(f'start update_monitor_tree {window_info["stock_info"][0]} :{now}')
-    
-
-    # future.add_done_callback(lambda f: update_tree_data(f, tree, window, stock_code))
-    # time.sleep(10)
-# def _refresh_stock_data(stock_info,sub_window):
-#     global sub_monitor_tree,sub_item_id
-#     window_info = {'stock_info': stock_info, 'toplevel': sub_window}
-#     refresh_stock_data(window_info, sub_monitor_tree, sub_item_id)
-
-# --- 关键优化部分 ---
-# def update_tree_data_(future, tree, window, stock_info):
-#     """回调函数，更新子窗口的Treeview"""
-#     try:
-#         data = future.result()
-#         if data is not None and window.winfo_exists():
-#             now = datetime.now().strftime('%H:%M:%S')
-#             data = data[data['代码'] ==  stock_code].set_index('时间').reset_index()
-#             # 找到 Treeview 的第一行，先进行检查
-#             item_id = tree.get_children()
-
-#             if item_id: # 检查是否非空
-#                 tree.item(item_id[0], values=(data[0],data[1],data[2],data[3],data[4]))
-#             else:
-#                 # 如果 Treeview 为空，则插入新行
-#                 # tree.insert("", "end", values=(now, stock_info[0], stock_info[1], stock_info[2], f"{data['Price']:.2f}", f"{data['Change']:.2f}"))
-#                 tree.insert("", "end", values=(data[0],data[1],data[2],data[3],data[4]))
-
-#     except Exception as e:
-#         if window.winfo_exists():
-#             item_id = tree.get_children()
-#             if item_id:
-#                 tree.item(item_id[0], values=(datetime.now().strftime('%H:%M:%S'), stock_info[0], stock_info[1], stock_info[2], "错误", str(e)))
-#             else:
-#                 tree.insert("", "end", values=(datetime.now().strftime('%H:%M:%S'), stock_info[0], stock_info[1], stock_info[2], "错误", str(e)))
-            
-#     if window.winfo_exists():
-#         window.after(5000, lambda: refresh_stock_data(window, stock_info, tree))
 def fast_insert(tree, dataframe):
     # 暂停绘制
     # tree.tk.call(tree, "configure", "-displaycolumns", "{}")
@@ -2044,91 +2013,108 @@ def fast_insert(tree, dataframe):
         # 强制刷新一次
         tree.update_idletasks()
 
-# def update_background_tree(futurebackground,tree):
-#     """回调函数，更新子窗口的Treeview"""
-#     # global start_init
-#     global viewdf 
-#     try:
-#         print(f"background_tree start: {time.strftime('%H:%M:%S')}")
-#         data = futurebackground.result()
-#         if data is not None and len(data) > 0:
-#             if '涨幅' not in data.columns:
-#                 data = process_full_dataframe(data)
-#             viewdf = data.copy()
-#             uniq_state =uniq_var.get()
-#             if uniq_state and data is not None and not data.empty:
-#                 data = data.drop_duplicates(subset=['代码'])
-
-#             if data is not None and not data.empty:
-#                 if 'count'  not in data.columns:
-#                     data['count'] = data.groupby('代码')['代码'].transform('count')
-#                 data = data[['时间', '代码', '名称','count', '板块', '涨幅', '价格', '量']]
-#                 # for index, row in data.iterrows():
-#                 #     tree.insert("", "end", values=list(row))
-
-#                 # print(f'background_tree insert1: {len(data)} {time.strftime("%H:%M:%S")}')
-#                 fast_insert(tree,data)
-#                 # print(f'background_tree insert2: {len(data)} {time.strftime("%H:%M:%S")}')
-                
-#                 # print(f"background_tree 已加载 {len(data)} 条记录 | 更新于: {time.strftime('%H:%M:%S')}")
-#                 # status_var.set(f"bg已加载 {len(data)} 条记录 | 更新于: {time.strftime('%H:%M:%S')}")
-#             else:
-#                 status_var.set("无数据")
-#                 tree.insert("", "end", values=("无数据", "", "", "", ""))
-
-#             # 强制刷新一次
-#             # tree.update_idletasks()
-#     except Exception as e:
-#             print(f"Error fetching data for : {e}")
-#             tree.insert("", "end", values=[f"Error:{e}"]) 
 
 
+def refresh_stock_data(window_info, tree, item_id):
+    """提交后台任务"""
+    stock_code = window_info['stock_info'][0]
 
+    def task():
+        try:
+            data = _get_stock_changes(None, stock_code)  # 你的数据获取函数
+            result_queue.put(("data", data, tree, window_info, item_id))
+        except Exception as e:
+            result_queue.put(("error", e, tree, window_info, item_id))
 
-def update_monitor_tree(future, tree, window_info, item_id):
-    """回调函数，更新子窗口的Treeview"""
-    # global start_init
+    threading.Thread(target=task, daemon=True).start()
 
-    stock_info = window_info['stock_info']
-    window = window_info['toplevel']
-    stock_code, stock_name, *rest = stock_info
-    data=None
+def process_queue(window):
+    """主线程轮询队列，更新 Tkinter UI"""
     try:
-        data = future.result()
-        if data is not None and not data.empty and window.winfo_exists():
-            data = data[data['代码'] ==  stock_code].set_index('时间').reset_index()
+        while True:
+            msg_type, payload, tree, window_info, item_id = result_queue.get_nowait()
 
-            if '涨幅' not in data.columns:
-                # 应用解析函数并扩展列
-                data = process_full_dataframe(data)
+            if msg_type == "data":
+                update_monitor_tree(payload, tree, window_info, item_id)
+            elif msg_type == "error":
+                handle_error(payload, tree, window_info, item_id)
 
-            data = data[['时间', '板块', '涨幅', '价格', '量']]
+    except queue.Empty:
+        pass
+    finally:
+        # 每隔 200ms 再检查一次
+        window.after(200, lambda: process_queue(window))
 
+# ---------------------------
+# 主线程 UI 更新函数
+# ---------------------------
+def update_monitor_tree(data, tree, window_info, item_id):
+    """更新子窗口的 Treeview"""
+    stock_info = window_info['stock_info']
+    stock_code, stock_name, *rest = stock_info
+    window = window_info['toplevel']
 
-            # Clear existing data first
-            # print(start_init)
-            # if get_work_time() or start_init == 0:
-            tree.delete(*tree.get_children())
-            for index, row in data.iterrows():
-                tree.insert("", "end", values=list(row))
+    if not window or not window.winfo_exists():
+        return  # 窗口已关闭
 
-    except Exception as e:
-        if window.winfo_exists():
-            # tree.item(item_id, values=(
-            #     datetime.now().strftime('%H:%M:%S'), stock_code, stock_name, rest, "错误", str(e)
-            # ))
-            print(f"Error fetching data for {stock_code}: {e}")
-            tree.insert("", "end", values=[f"Error:{e}"]) 
-    if window.winfo_exists():
-        if data is not None:
-            wait_time = int(random.uniform(30000, 60000))
-            # print(f"data is OK wait {wait_time/1000}秒:{stock_code}")
-            window.after(wait_time, lambda: refresh_stock_data(window_info, tree, item_id))
-        else:
-            tree.delete(*tree.get_children())
-            # tree.insert("", "end", values=("等待5秒后台处理ing...", "", "", "", "", ""))
-            # print(f"data is None wait 5秒:{stock_code}")
-            window.after(5000, lambda: refresh_stock_data(window_info, tree, item_id))
+    if data is not None and not data.empty:
+        # 只保留当前股票
+        data = data[data['代码'] == stock_code].set_index('时间').reset_index()
+        if '涨幅' not in data.columns:
+            data = process_full_dataframe(data)
+
+        data = data[['时间', '板块', '涨幅', '价格', '量']]
+        tree.delete(*tree.get_children())
+        for _, row in data.iterrows():
+            tree.insert("", "end", values=list(row))
+
+        # 随机间隔再次刷新
+        wait_time = int(random.uniform(30000, 60000))
+        window.after(wait_time, lambda: refresh_stock_data(window_info, tree, item_id))
+    else:
+        # 如果没有数据，清空并短间隔重试
+        tree.delete(*tree.get_children())
+        window.after(5000, lambda: refresh_stock_data(window_info, tree, item_id))
+
+# def refresh_stock_data(window_info, tree, item_id):
+#     """Asynchronously fetches and updates the stock data in the treeview."""
+#     stock_info = window_info['stock_info']
+#     stock_code = stock_info[0] # 使用 stock_info 中的第一个元素作为股票代码
+#     window = window_info['toplevel']
+#     time.sleep(0.5)
+#     now = datetime.now().strftime('%H:%M:%S')
+#     future = executor.submit(_get_stock_changes, None,stock_code)
+#     future.add_done_callback(lambda f: update_monitor_tree(f, tree, window_info, item_id))
+    
+# def update_monitor_tree(future, tree, window_info, item_id):
+#     """回调函数，更新子窗口的Treeview"""
+#     stock_info = window_info['stock_info']
+#     window = window_info['toplevel']
+#     stock_code, stock_name, *rest = stock_info
+#     data=None
+#     try:
+#         data = future.result()
+#         if data is not None and not data.empty and window.winfo_exists():
+#             data = data[data['代码'] ==  stock_code].set_index('时间').reset_index()
+#             if '涨幅' not in data.columns:
+#                 # 应用解析函数并扩展列
+#                 data = process_full_dataframe(data)
+#             data = data[['时间', '板块', '涨幅', '价格', '量']]
+#             tree.delete(*tree.get_children())
+#             for index, row in data.iterrows():
+#                 tree.insert("", "end", values=list(row))
+
+#     except Exception as e:
+#         if window.winfo_exists():
+#             print(f"Error fetching data for {stock_code}: {e}")
+#             tree.insert("", "end", values=[f"Error:{e}"]) 
+#     if window.winfo_exists():
+#         if data is not None:
+#             wait_time = int(random.uniform(30000, 60000))
+#             window.after(wait_time, lambda: refresh_stock_data(window_info, tree, item_id))
+#         else:
+#             tree.delete(*tree.get_children())
+#             window.after(5000, lambda: refresh_stock_data(window_info, tree, item_id))
 
 
 # def on_close_monitor(window, stock_code):
@@ -2180,7 +2166,7 @@ def create_monitor_window(stock_info):
     refresh_stock_data(window_info, monitor_tree, item_id)
     # refresh_stock_data(window_info, monitor_tree, item_id)
     monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(window_info))
-    monitor_win.bind("<FocusIn>", on_window_focus)
+    monitor_win.bind("<FocusIn>", on_monitor_window_focus)
     # monitor_win.bind("Double-Button-3", on_window_focus)
     return window_info
 
@@ -2371,6 +2357,32 @@ def safe_drop_down(date_entry):
         y = date_entry.winfo_rooty() + date_entry.winfo_height()
         date_entry._top_cal.geometry(f"+{x}+{y}")
 
+
+def on_monitor_window_focus(event):
+    """
+    当任意窗口获得焦点时，协调两个窗口到最前。
+    """
+    # bring_both_to_front(main_root, monitor_window)
+    # 检查是哪个控件被点击了，例如，只有点击root时才执行
+
+    # if event.widget is root:
+    #     print("Root window was right-double-clicked!")
+    #     # 执行你的 on_window_focus 逻辑
+    # else:
+    #     # 否则，可能是子控件被点击了
+    #     print(f"A child widget ({event.widget}) was clicked, not the root.")
+
+    # if isinstance(event.widget, DateEntry) or "calendar" in str(event.widget).lower():
+    #     print("Window DateEntry got focus")
+    #     safe_drop_down(date_entry)
+    #     return  # 避免干扰 DateEntry 下拉
+
+    # print("Window got focus:", event.widget)
+    # sub_state = sub_var.get()
+    # # print(f'window_focus:{sub_state} event.widget:{event.widget}')
+    # if sub_state:
+    bring_monitor_to_front()
+
 def on_window_focus(event):
     """
     当任意窗口获得焦点时，协调两个窗口到最前。
@@ -2411,6 +2423,21 @@ def bring_both_to_front(main_window):
     # monitor_list = [win['stock_info'] for win in monitor_windows.values()]
     monitor_list = [win['toplevel'] for win in monitor_windows.values()]
 
+    # for win_info in monitor_list:
+    for win_info in list(monitor_windows.values()):
+
+        # 修正：访问内部字典的 'toplevel' 键
+        # win_info['toplevel'].destroy()
+
+        print(f'bring_both_to_front:{win_info["stock_info"]}')
+        if  win_info['toplevel'] and win_info['toplevel'].winfo_exists():
+            win_info['toplevel'].lift()
+            win_info['toplevel'].attributes('-topmost', 1)
+            win_info['toplevel'].attributes('-topmost', 0)
+        # is_already_triggered = True
+
+def bring_monitor_to_front():
+    monitor_list = [win['toplevel'] for win in monitor_windows.values()]
     # for win_info in monitor_list:
     for win_info in list(monitor_windows.values()):
 
@@ -3020,6 +3047,8 @@ code_entry = tk.Entry(search_frame, width=10, font=('Microsoft YaHei', 9))
 code_entry.pack(side=tk.LEFT, padx=5)
 code_entry.bind("<KeyRelease>", on_code_entry_change)
 code_entry.bind("<Return>", search_by_code)
+# code_entry.bind("<Button-3>", lambda event: code_entry.event_generate("<<Paste>>"))
+code_entry.bind("<Button-3>", right_click_paste)
 
 search_btn = tk.Button(search_frame, text="搜索", command=search_by_code, 
                       font=('Microsoft YaHei', 9), bg="#5b9bd5", fg="white",
@@ -3179,6 +3208,8 @@ context_menu.add_command(label="添加到监控", command=add_selected_stock)
 #初始化窗口位置
 load_window_positions()
 update_position_window(root,"main")
+
+process_queue(root)
 
 
 # load_initial_data()
