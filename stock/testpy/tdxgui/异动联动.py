@@ -1871,21 +1871,9 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
                         realdatadf = pd.DataFrame()
                         break
                     old_data = realdatadf.copy()
-                    # new_data = {
-                    #     '时间': [datetime.now().strftime("%H:%M:%S")],
-                    #     '代码': [stock_code],
-                    #     '简称': [f'股票{stock_code}'],
-                    #     '板块': [selected_type],
-                    #     '相关信息': [f"{random.uniform(0, 1):.6f},{random.uniform(10, 20):.2f},{random.uniform(0, 1):.6f}"]
-                    # }
-                    
-                    # 模拟东财API返回的全部数据
                     temp_df = get_stock_changes(selected_type=symbol)
                     if len(temp_df) < 10:
                         continue
-                    # api_df = pd.concat([old_data, pd.DataFrame(new_data)], ignore_index=True)
-                    
-                    # 使用 pd.concat 合并全局 realdatadf 和新获取的 api_df
                     realdatadf = pd.concat([realdatadf, temp_df], ignore_index=True)
                     
                     # 去除重复数据，保留最新的数据
@@ -1893,13 +1881,8 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
                     print(f"为 ({symbol}) 获取了新的异动数据，并更新了 realdatadf")
                     time.sleep(5)
                 print(f"time:{time.time() - start_time}全部更新 获取了新的异动数据，并更新了realdatadf:{len(realdatadf)}")
-                # current_time = datetime.now()
-                # last_updated_time = current_time
                 print(f"realdatadf 已更新:{time.strftime('%H:%M:%S')} {len(realdatadf)}")
-                # import ipdb;ipdb.set_trace()
-                root.after(2000, populate_treeview,realdatadf)
-                # populate_treeview(realdatadf)
-
+                # root.after(2000, populate_treeview,realdatadf)
             else:
                 print(f"{current_time - last_updated_time}:未到更新时间，返回内存realdatadf数据。")
     if start_init == 0:
@@ -2421,20 +2404,51 @@ def bring_both_to_front(main_window):
             win_info['toplevel'].attributes('-topmost', 0)
         # is_already_triggered = True
 
-def bring_monitor_to_front():
-    monitor_list = [win['toplevel'] for win in monitor_windows.values()]
-    # for win_info in monitor_list:
-    for win_info in list(monitor_windows.values()):
+def get_monitor_index_for_window(window):
+    """根据窗口位置找到所属显示器索引"""
+    if not MONITORS:
+        return 0
+    try:
+        geom = window.geometry()
+        _, x_part, y_part = geom.split("+")
+        x, y = int(x_part), int(y_part)
+    except Exception:
+        return 0
 
-        # 修正：访问内部字典的 'toplevel' 键
-        # win_info['toplevel'].destroy()
+    for idx, (left, top, right, bottom) in enumerate(MONITORS):
+        if left <= x <= right and top <= y <= bottom:
+            return idx
+    return 0  # 默认主屏
+        
 
-        # print(f'bring_both_to_front:{win_info["stock_info"]}')
-        if  win_info['toplevel'] and win_info['toplevel'].winfo_exists():
-            win_info['toplevel'].lift()
-            win_info['toplevel'].attributes('-topmost', 1)
-            win_info['toplevel'].attributes('-topmost', 0)
-        # is_already_triggered = True
+def bring_monitor_to_front(active_window):
+    """只把和 active_window 在同一屏幕的窗口带到前面"""
+    target_monitor = get_monitor_index_for_window(active_window)
+
+    for win_info in monitor_windows.values():
+        win = win_info.get("toplevel")
+        if win and win.winfo_exists():
+            monitor_idx = get_monitor_index_for_window(win)
+            if monitor_idx == target_monitor:
+                win.lift()
+                win.attributes("-topmost", 1)
+                win.attributes("-topmost", 0)
+
+
+# def bring_monitor_to_front():
+#     monitor_list = [win['toplevel'] for win in monitor_windows.values()]
+#     # for win_info in monitor_list:
+#     for win_info in list(monitor_windows.values()):
+
+#         # 修正：访问内部字典的 'toplevel' 键
+#         # win_info['toplevel'].destroy()
+
+#         # print(f'bring_both_to_front:{win_info["stock_info"]}')
+#         if  win_info['toplevel'] and win_info['toplevel'].winfo_exists():
+#             win_info['toplevel'].lift()
+#             win_info['toplevel'].attributes('-topmost', 1)
+#             win_info['toplevel'].attributes('-topmost', 0)
+#         # is_already_triggered = True
 
 def sort_treeview(tree, col, reverse):
     """
@@ -2730,79 +2744,6 @@ def place_new_window(window, window_id, win_width=300, win_height=160, margin=10
     window.bind("<Configure>", lambda e: update_window_position(window_id))
 
 
-'''
-
-# 全局缓存显示器信息
-MONITORS = []
-
-def init_monitors():
-    """扫描所有显示器并缓存信息"""
-    global MONITORS
-    MONITORS = get_all_monitors()  # 返回 [(left, top, right, bottom), ...]
-    if not MONITORS:
-        # 至少保留主屏幕
-        MONITORS = [(0, 0, screen_width, screen_height)]
-    print(f"Detected {len(MONITORS)} monitor(s): {MONITORS}")
-
-def clamp_window_to_screens(x, y, win_width, win_height):
-    """保证窗口在任意显示器可见"""
-    global MONITORS
-    if not MONITORS:
-        # 没有检测到显示器，退回主屏
-        MONITORS = [(0, 0, screen_width, screen_height)]
-
-    # 找到第一个显示器（可以改成查找包含 x,y 的显示器）
-    mon_left, mon_top, mon_right, mon_bottom = MONITORS[0]
-
-    # 限制 x,y
-    x = max(mon_left, min(x, mon_right - win_width))
-    y = max(mon_top, min(y, mon_bottom - win_height))
-    return x, y
-
-def place_new_window(window, window_id, win_width=300, win_height=160, margin=10):
-    global WINDOWS_BY_ID, WINDOW_GEOMETRIES, MONITORS
-    WINDOWS_BY_ID[window_id] = window
-
-    if window_id in WINDOW_GEOMETRIES:
-        # 使用已有位置
-        geom = WINDOW_GEOMETRIES[window_id]
-        try:
-            _, x_part, y_part = geom.split('+')
-            x, y = int(x_part), int(y_part)
-        except:
-            x, y = 100, 100
-        x, y = clamp_window_to_screens(x, y, win_width, win_height)
-        WINDOWS_BY_ID[window_id] = window
-        window.geometry(f"{win_width}x{win_height}+{x}+{y}")
-    else:
-        # 垂直平铺
-        used_positions = []
-        for w in WINDOWS_BY_ID.values():
-            try:
-                parts = w.geometry().split('+')
-                if len(parts) == 3:
-                    used_positions.append((int(parts[1]), int(parts[2])))
-            except:
-                continue
-
-        mon_left, mon_top, mon_right, mon_bottom = MONITORS[0]
-        x, y = mon_left + margin, mon_top + margin
-        step_y = win_height + margin
-        step_x = win_width + margin
-        max_y = mon_bottom - win_height - margin
-
-        while (x, y) in used_positions:
-            y += step_y
-            if y > max_y:
-                y = mon_top + margin
-                x += step_x
-                if x + win_width > mon_right:
-                    x = mon_left + margin
-
-        window.geometry(f"{win_width}x{win_height}+{x}+{y}")
-
-    window.bind("<Configure>", lambda e: update_window_position(window_id))
-'''
 
 
 # -----------------------------
@@ -2817,13 +2758,40 @@ def create_monitor_window(stock_info):
     monitor_win.resizable(True, True)
     monitor_win.title(f"监控: {stock_name} ({stock_code})")
 
+    # 在这里创建并配置 style
+    style = ttk.Style()
+    # 创建一个名为 'Thin.Vertical.TScrollbar' 的新样式
+    # arrowsize 用于控制滚动条的宽度。较小的值会使滚轮变窄。
+    # 默认值通常在16-20之间，这里设为较小的10
+    style.configure('Thin.Vertical.TScrollbar', arrowsize=8)
+
+
+    # tree_frame = ttk.Frame(monitor_win)
+    # tree_frame.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
+    # ======================================================
+    # 核心修正：创建 frame 来包裹 Treeview
+    # ======================================================
     tree_frame = ttk.Frame(monitor_win)
-    tree_frame.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
+    # 将这个 Frame 放置到 Toplevel 窗口中，并让它占据所有空间
+    tree_frame.pack(expand=True, fill=tk.BOTH, padx=5, pady=5) 
+
 
     window_info = {'stock_info': stock_info, 'toplevel': monitor_win}
     columns = ('时间', '异动类型', '涨幅', '价格', '量')
-    monitor_tree = ttk.Treeview(monitor_win, columns=columns, show="headings")
+    monitor_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
     
+    # 将自订的瘦滚轮样式应用到垂直滚轮
+    vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=monitor_tree.yview, style='Thin.Vertical.TScrollbar')
+    # hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=monitor_tree.xview)
+    monitor_tree.configure(yscrollcommand=vsb.set, xscrollcommand=None)
+    # # ======================================================
+    # # 使用 grid 布局来放置 Treeview 和滚动条在 tree_container_frame 中
+    # # = =====================================================
+    vsb.pack(side=tk.RIGHT, fill=tk.Y, in_=tree_frame)
+    # hsb.pack(side=tk.BOTTOM, fill=tk.X, in_=tree_container_frame)
+    monitor_tree.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, in_=tree_frame)
+
+
     for col in columns:
         monitor_tree.heading(col, text=col)
         if col in ['涨幅', '量']:
@@ -2835,14 +2803,15 @@ def create_monitor_window(stock_info):
 
     item_id = monitor_tree.insert("", "end", values=("加载ing...", "", "", "", ""))
 
-    monitor_tree.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
+    # monitor_tree.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
     place_new_window(monitor_win, stock_code)
 
     refresh_stock_data(window_info, monitor_tree, item_id)
     monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(window_info))
-    monitor_win.bind("<FocusIn>", on_monitor_window_focus)
+    # monitor_win.bind("<FocusIn>", on_monitor_window_focus)
+    monitor_win.bind("<FocusIn>", lambda e, w=monitor_win: bring_monitor_to_front(w))
     monitor_win.bind("<Button-1>", lambda event: update_code_entry(stock_code))
-
+    # monitor_win.bind("<Button-1>", lambda e, w=monitor_win: bring_monitor_to_front(w))
     return window_info
 
 
@@ -2878,128 +2847,6 @@ style.configure('TCombobox', arrowsize=16)
 
 
 
-# # 删除按钮
-# delete_btn = tk.Button(toolbar, text="删除选中记录", command=delete_selected_records,
-#                        font=('Microsoft YaHei', 10), bg="#d9534f", fg="white",
-#                        padx=10, pady=3, relief="flat")
-# delete_btn.pack(side=tk.LEFT, padx=5)
-
-
-# # --- 日期選擇器和選項框的 Frame ---
-# date_options_frame = tk.Frame(toolbar)
-# date_options_frame.pack(side=tk.LEFT, padx=10)
-
-'''
-# 创建顶部工具栏
-toolbar = tk.Frame(root, bg="#f0f0f0", padx=5, pady=5)
-toolbar.pack(fill=tk.X)
-# 刷新按钮
-refresh_btn = tk.Button(toolbar, text="↻ 刷新数据", command=refresh_data, 
-                       font=('Microsoft YaHei', 10), bg="#5b9bd5", fg="white",
-                       padx=10, pady=3, relief="flat")
-refresh_btn.pack(side=tk.LEFT, padx=5)
-# --- 日期選擇器 ---
-# 添加一个Label作为日期选择器的说明
-date_label = tk.Label(toolbar, text="选择日期:", font=('Microsoft YaHei', 10), bg=toolbar['bg'])
-date_label.pack(side=tk.LEFT, padx=(10, 5))
-# 创建DateEntry并放置在删除按钮右侧
-date_entry = DateEntry(toolbar, width=12, background='darkblue', foreground='white', borderwidth=2,
-                       font=('Microsoft YaHei', 10))
-date_entry.pack(side=tk.LEFT, padx=5)
-# 绑定日期选择事件
-date_entry.bind("<<DateEntrySelected>>", on_date_selected)
-
-# 容器
-check_frame = tk.Frame(toolbar, bg=toolbar['bg'])
-check_frame.pack(fill=tk.X, padx=5)
-
-# --- tdx 和 ths 聯動屬性框 ---
-tdx_var = tk.BooleanVar(value=True)
-ths_var = tk.BooleanVar(value=False)
-dfcf_var = tk.BooleanVar(value=False)
-uniq_var = tk.BooleanVar(value=False)
-
-# 容器
-check_frame = tk.Frame(toolbar, bg=toolbar['bg'])
-check_frame.pack(fill=tk.X, padx=5)
-
-checkbuttons = [
-    ("联动TDX", tdx_var),
-    ("联动THS", ths_var),
-    ("联动DC", dfcf_var),
-    ("Uniq", uniq_var),
-]
-
-button_widgets = []
-for text, var in checkbuttons:
-    btn = tk.Checkbutton(check_frame, text=text, variable=var,
-                         command=update_linkage_status, 
-                         font=('Microsoft YaHei', 9),  # 小字体
-                         bg=toolbar['bg'],
-                         padx=2, pady=1)              # 缩小间距
-    button_widgets.append(btn)
-
-def relayout(event=None):
-    width = check_frame.winfo_width()
-    btn_width = 75  # 估算每个按钮宽度
-    cols = max(1, width // btn_width)
-
-    for btn in button_widgets:
-        btn.grid_forget()
-
-    for i, btn in enumerate(button_widgets):
-        row, col = divmod(i, cols)
-        btn.grid(row=row, column=col, sticky="w", padx=2, pady=1)
-
-    for c in range(cols):
-        check_frame.grid_columnconfigure(c, weight=1)
-
-check_frame.bind("<Configure>", relayout)
-'''
-
-'''
-# Toolbar container
-toolbar = tk.Frame(root, bg="#f0f0f0", padx=5, pady=5)
-toolbar.pack(fill=tk.X)
-
-# Frame for buttons and date
-frame_left = tk.Frame(toolbar, bg="#f0f0f0")
-frame_left.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-# Refresh button
-refresh_btn = tk.Button(frame_left, text="↻ Refresh", command=refresh_data,
-                        font=('Microsoft YaHei', 10), bg="#5b9bd5", fg="white",
-                        padx=10, pady=3, relief="flat")
-refresh_btn.pack(side=tk.LEFT, padx=5)
-
-# Date label and entry
-date_label = tk.Label(frame_left, text="Date:", font=('Microsoft YaHei', 10), bg="#f0f0f0")
-date_label.pack(side=tk.LEFT, padx=(10, 2))
-date_entry = DateEntry(frame_left, width=12, background='darkblue', foreground='white', borderwidth=2,
-                       font=('Microsoft YaHei', 10))
-date_entry.pack(side=tk.LEFT, padx=2)
-date_entry.bind("<<DateEntrySelected>>", on_date_selected)
-
-# Frame for linkage checkbuttons
-frame_right = tk.Frame(toolbar, bg="#f0f0f0")
-frame_right.pack(side=tk.RIGHT)
-
-# Variables
-tdx_var = tk.BooleanVar(value=True)
-ths_var = tk.BooleanVar(value=False)
-dfcf_var = tk.BooleanVar(value=False)
-uniq_var = tk.BooleanVar(value=False)
-
-# Checkbuttons
-tdx_cb = tk.Checkbutton(frame_right, text="TDX", variable=tdx_var, command=update_linkage_status, bg="#f0f0f0")
-tdx_cb.pack(side=tk.LEFT, padx=5)
-ths_cb = tk.Checkbutton(frame_right, text="THS", variable=ths_var, command=update_linkage_status, bg="#f0f0f0")
-ths_cb.pack(side=tk.LEFT, padx=5)
-dfcf_cb = tk.Checkbutton(frame_right, text="DC", variable=dfcf_var, command=update_linkage_status, bg="#f0f0f0")
-dfcf_cb.pack(side=tk.LEFT, padx=5)
-uniq_cb = tk.Checkbutton(frame_right, text="Uniq", variable=uniq_var, command=update_linkage_status, bg="#f0f0f0")
-uniq_cb.pack(side=tk.LEFT, padx=5)
-'''
 
 # Toolbar
 toolbar = tk.Frame(root, bg="#f0f0f0", padx=2, pady=2)

@@ -315,34 +315,36 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                 nowd, per1d=1, 1
                 if 'nlow' in df.columns:
                     df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['nhigh'], df['nlow'], df['lasto%sd' % nowd], df['lastp%sd' % (nowd)],
-                                     df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4'],df.index))
-                else:
+                                     df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df['high4'],df['max5'],df['hmax'],df['lastdu4'],df.index,df.index))
+                else:                                                
                     df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['lastp%sd' % (nowd)],
-                                     df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4'],df.index))
+                                     df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df['high4'],df['max5'],df['hmax'],df['lastdu4'],df.index,df.index))
                 # for co in perc_col:
                 #     df[co] = (df[co] + df['perc_n']).map(lambda x: round(x,1))
                 if market_value == '0' and market_key == '3':
+                    df['perc1d'] = df['perc_n']
                     perc_col.remove('perc1d')
 
             else:
                 
                 # if len(df) > 3:
-                if (df['open'][1] == df['lasto1d'][1]) and (df['open'][0] == df['lasto1d'][0]):
+                _top_all = df[df.close > 10]
+
+                if (_top_all['open'][1] == _top_all['lasto1d'][1]) and (_top_all['open'][0] == _top_all['lasto1d'][0]):
                     nowd, per1d=2, 1
                     df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['lastp%sd' % (nowd)],
-                                         df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4'],df.index))
-                    
+                                         df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df['high4'],df['max5'],df['hmax'],df['lastdu4'],df.index,df.index))
+                                            
                     df['perc1d'] = df['perc_n']
                     perc_col.remove('perc1d')
                 else:
                     nowd, per1d=1, 1
                     df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['lastp%sd' % (nowd)],
-                                         df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4'],df.index))
+                                         df['lasth%sd' % (nowd)], df['lastl%sd' % (nowd)], df['ma5d'], df['ma10d'], df['nvol'] / radio_t, df['lastv%sd' % (nowd)],df['upper'],df['high4'],df['max5'],df['hmax'],df['lastdu4'],df.index,df.index))
                     
                     if market_value == '0' and market_key == '3':
                         df['perc1d'] = df['perc_n']
                         perc_col.remove('perc1d')
-                              
             #add now func_compute_percd2021
 
             for co in perc_col:

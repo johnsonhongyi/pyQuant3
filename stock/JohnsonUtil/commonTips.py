@@ -4969,7 +4969,161 @@ def func_compute_percd2024( open, close,high, low,lastopen, lastclose,lasthigh, 
     return round(initc,1)
 
 
-def func_compute_percd2021( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,idate=None,high4=None,max5=None,hmax=None,lastdu4=None,code=None):
+def func_compute_percd2021(open, close, high, low, last_open, last_close, last_high, last_low, ma5, ma10, now_vol, last_vol, upper, high4, max5, hmax, lastdu4, code, idate=None):
+    """
+    根据一系列股票交易行为计算综合得分。
+
+    Args:
+        open (float): 今日开盘价
+        close (float): 今日收盘价
+        high (float): 今日最高价
+        low (float): 今日最低价
+        last_open (float): 昨日开盘价 (虽然未使用，但参数保留以匹配顺序)
+        last_close (float): 昨日收盘价
+        last_high (float): 昨日最高价
+        last_low (float): 昨日最低价
+        ma5 (float): 5日移动平均线
+        ma10 (float): 10日移动平均线
+        now_vol (float): 今日成交量
+        last_vol (float): 昨日成交量
+        upper (float): 布林线上轨值
+        high4 (float): 4日前的最高价
+        max5 (float): 5日前的最高价
+        hmax (float): 历史最高价
+        lastdu4 (float): 前4日的涨幅
+        code (str): 股票代码
+        idate (str): 日期 (可选)
+
+    Returns:
+        float: 综合得分
+    """
+    init_c = 0.0
+    
+    # 参数有效性检查
+    if np.isnan(last_close) or last_close == 0:
+        return 0
+    if np.isnan(last_vol) or last_vol == 0:
+        return 0
+
+    percent_change = (close - last_close) / last_close * 100
+    vol_ratio = now_vol / last_vol
+    
+    # ====================
+    # 加分项（积极信号）
+    # ====================
+    
+    # 收盘价大于前日收盘价
+    if close > last_close:
+        init_c += 1.0
+    
+    # 最高价大于前日最高价
+    if high > last_high:
+        init_c += 1.0
+        
+    # 收最高价（收盘价等于最高价）
+    if close == high:
+        init_c += 5.0
+        if vol_ratio > 2: # 配合放量涨停给更高分
+            init_c += 5.0
+
+    # 最低价大于前日最低价
+    if low > last_low:
+        init_c += 1.0
+
+    # 收盘价突破布林线上轨
+    if last_close <= upper and close > upper:
+        init_c += 10.0
+        if open > last_high and close > open:
+            init_c += 10.0
+    elif close >= upper:
+        init_c += 5.0
+        
+    # 成交量温和上涨
+    if 1.0 < vol_ratio < 2.0:
+        init_c += 2.0
+    
+    # 大于high4加权重分
+    if high > high4:
+        init_c += 3.0
+    
+    # 一个大阳线，大于前几日
+    if percent_change > 3 and close >= high * 0.95:
+        if high > max5 and high > high4:
+            init_c += 5.0
+            
+    # 历史高点突破
+    if hmax is not None and high >= hmax:
+        init_c += 20.0 # 突破历史高点给最高分
+
+    # 每日高开高走，无价格重叠 (low > last_high)
+    if low > last_high:
+        init_c += 20.0 # 强势跳空，权重最高
+        if close > open:
+            init_c += 5.0
+            
+    # 开盘价就是最低价 (open == low) 加分
+    if open == low:
+        if open < last_close and open >= ma5 and close > open:
+            init_c += 15.0 # 低开高走且开盘在 ma5 之上，强启动
+        elif close > open:
+            init_c += 8.0 # 只要是开盘即最低的上涨，都加分
+        if vol_ratio > 2: # 配合放量再加分
+            init_c += 5.0
+    
+    # 大幅上涨（加分权重）
+    if percent_change > 5:
+        init_c += 8.0
+    
+    # ====================
+    # 减分项（消极信号）
+    # ====================
+
+    # 收盘价小于前日收盘价
+    if close < last_close:
+        init_c -= 1.0
+        
+    # 最低价小于前日最低价（创新低）
+    if low < last_low:
+        init_c -= 3.0
+        
+    # 放量下跌（下跌且成交量大于昨日）
+    if close < last_close and now_vol > last_vol:
+        init_c -= 8.0 # 权重更高
+    
+    # 下破 ma5 减分
+    if last_close >= ma5 and close < ma5:
+        init_c -= 5.0
+    
+    # 下破 ma10 减分
+    if last_close >= ma10 and close < ma10:
+        init_c -= 8.0
+
+    # 高开低走 (open > close) 减分
+    if open > close:
+        init_c -= 5.0
+        if close < ma5 or close < ma10:
+            init_c -= 5.0
+            
+    # 开盘价就是最高价 (open == high) 减分
+    if open == high:
+        init_c -= 10.0 # 当天走势疲弱，最高分时减分
+    
+    # 大幅下跌（减分权重）
+    if percent_change < -5:
+        init_c -= 8.0
+
+    # ====================
+    # 原始代码中关于 lastdu4 的逻辑 (保持不变)
+    # ====================
+    if high > high4 and lastdu4 is not None:
+        if lastdu4 <= 1.12:
+            init_c += 10
+        elif 1.12 < lastdu4 <= 1.21:
+            init_c += 8
+
+    return init_c
+    
+def func_compute_percd2021_nogoogle( open, close,high, low,lastopen, lastclose,lasthigh, lastlow, ma5,ma10,nowvol=None,lastvol=None,upper=None,high4=None,max5=None,hmax=None,lastdu4=None,code=None,idate=None):
     initc = 0
     percent_idx = 2
     vol_du_idx = 1.2
@@ -6096,7 +6250,8 @@ if __name__ == '__main__':
     '''
     # rzrq['all']='nan'
     # print(get_last_trade_date('2025-06-01'))
-    import ipdb;ipdb.set_trace()
+    st_key_sort='3 0 f'
+    print(ct.get_market_sort_value_key(st_key_sort))
     query_rule = read_ini(inifile='filter.ini',category='sina_Monitor')
     print(get_today(''))
     get_lastdays_trade_date(1)

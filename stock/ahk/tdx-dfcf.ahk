@@ -7,7 +7,6 @@ global ClipSaved := Clipboard
 global custom_copy_triggered := false
 global AutoSendToDFCF := true   ; <<< 开关：true=复制即推送，false=只提示不推送
 
-; ================================
 ; 通用通知函数
 ; ================================
 Notify(msg, type:="tray", duration:=3) {
@@ -30,6 +29,7 @@ Notify(msg, type:="tray", duration:=3) {
         SoundBeep, 750, duration*1000
     }
 }
+
 
 ; ================================
 ; 剪贴板变化监控
@@ -137,12 +137,13 @@ MButton::
         }
 
         ; 恢复原来剪贴板
-        Clipboard := ClipBackup
-        Sleep, 50  ; 给系统一点时间
+        ;Clipboard := ClipBackup
+        ;Sleep, 50  ; 给系统一点时间
 
         ; 通过消息号获取股票代码
         ;SendMessage,0x111,33819,0,,ahk_class TdxW_MainFrame_Class
-        RegExMatch(ClipSaved,  "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", stockCode)
+        ;RegExMatch(ClipSaved,  "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", stockCode)
+        RegExMatch(ClipSaved, "\d{6}", stockCode)
         if (stockCode != "") {
             Notify("热键触发代码: " . stockCode, "tooltip", 1)
         }

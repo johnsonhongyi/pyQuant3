@@ -119,8 +119,8 @@ if __name__ == "__main__":
 
 
     # st_key_sort = '4'
-    st_key_sort = '7'
-    # st_key_sort = '3 2'
+    # st_key_sort = '7'
+    st_key_sort = '3 0'
     # st_key_sort = 'x 1.1'
     # st_key_sort = 'x2'
     # st_key_sort = '8'

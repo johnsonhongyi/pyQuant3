@@ -998,6 +998,14 @@ def get_market_sort_value_key(st, top_all=None, perd_d=3):
             if len(st_l) > 1:
                 if isDigit(st_l[1]):
                     # cct.GlobalValues()
+                    if st_l[1] == '0':
+                        new_l = []
+                        for x in range(0,st_count):
+                            if x == 1:
+                                new_l.append('1')
+                            else:
+                                new_l.append(st_l[x])
+                        st_l = new_l
                     cct.GlobalValues().setkey('market_key',st_l[0])
                     cct.GlobalValues().setkey('market_value', st_l[1])
                     if st_count >= 3:
@@ -1157,7 +1165,10 @@ def get_Dynamic_Duration_perd(market_sort_value, idx_perd, columns=None):
 #        idx_key = [ idx_list.index(x) for x in idx_list if x.find('per') > -1 ]
     for i, idx in enumerate(idx_perd):
         idx_value = eval(market_sort_value)[idx_key[i]]
-        idx_perd = int(idx)
+        if idx == 0:
+            idx_perd = 1
+        else:
+            idx_perd = int(idx)
         if idx_perd > 1 or i == 0:
             if idx_perd > 1 and columns is not None and len(columns) > 0:
                 idx_k = idx_perd
