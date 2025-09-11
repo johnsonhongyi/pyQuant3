@@ -3296,7 +3296,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     #                         df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df.index))
 
     df['perlastp'] = list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'],df['open'].shift(1), 
-                            df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df.index,df['high4'],df['max5'],df['hmax'],df['lastdu4'],df['code']))
+                            df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df['high4'],df['max5'],df['hmax'],df['lastdu4'],df['code'],df.index))
     # df['high4'],df['max5'],df['hmax'],df['lastdu4']
     # df.high[-2:-1].max(),df.high[-3:-1].max(),df.high[-5:-1].max(),df.high[-2:-1].max()/df.low[-2:-1].min()
     #df['high'].rolling(2).max(),df['high'].rolling(3).max(),df['high'].rolling(5).max(),df['high'].rolling(2).max()/df['low'].rolling(2).min()
@@ -5400,7 +5400,7 @@ if __name__ == '__main__':
     # code='399001'
     code = '002238'
     code = '002786'
-    code = '002460'
+    code = '600863'
     # code = '600190'
     # code = '600240'
     # code = '600890'
@@ -5433,8 +5433,8 @@ if __name__ == '__main__':
     
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
 
-    df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='3d' )
-    print(df[-10:])
+    df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='d' )
+    print(df[-3:],df[-1:].perc1d,df[-1:].perc2d,df[-1:].perc3d)
     print(f'df lastp1d:{df[:2].lastp1d}')
     print(f'3d per1d:{df.per1d[0]}  per2d:{df.per2d[0]}  per3d:{df.per3d[0]}  per4d:{df.per4d[0]}  per5d:{df.per5d[0]}  ')
     # df = get_tdx_Exp_day_to_df(code, dl=1)

@@ -117,8 +117,8 @@ if __name__ == "__main__":
 
 
     # st_key_sort = '4'
-    st_key_sort = '4'
-    # st_key_sort = '3 2'
+    # st_key_sort = '4'
+    st_key_sort = '3 0'
     # st_key_sort = 'x 1.1'
     # st_key_sort = 'x2'
     # st_key_sort = '8'
@@ -434,7 +434,7 @@ if __name__ == "__main__":
                 # tw_code = top_all_w.query('lasth1d > lasth2d and red > 2 and macdlast1 > 0')
                 # t3d_code = top_all_3d.query('lasth1d > lasth2d and red > 2 and macdlast1 > 0')
                 query_rule = cct.GlobalValues().getkey('filter_rule')
-                 _top_all = top_all[top_all.close > 10]
+                _top_all = top_all[top_all.close > 10]
                 if query_rule is None:
                     query_rule = cct.read_ini(inifile='filter.ini')
                     if len(_top_all) > 0 and _top_all.lastp1d[0] == _top_all.close[0] and _top_all.lastp1d[-1] == _top_all.close[-1]:
@@ -455,7 +455,8 @@ if __name__ == "__main__":
                 tw_code = eval(f'top_all_w.query{query_rule}')
                 tm_code = eval(f'top_all_m.query{query_rule}')
                 td_code = eval(f'top_all_d.query{query_rule}')
-                code_f =  list(set(t3d_code.index) & set(tw_code.index)  & set(tm_code.index))
+                # code_f =  list(set(t3d_code.index) & set(tw_code.index)  & set(tm_code.index))
+                code_f =  list(set(tw_code.index)  & set(tm_code.index))
                 if 'nlow' in top_all.columns and 'nclose' in top_all.columns:
                     top_all = top_all.query('open >= nlow or close >=nclose')
                 # code_f =  list(set(t3d_code.index) & set(t3d_code.index) & set(tw_code.index)  & set(tm_code.index))
