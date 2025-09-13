@@ -309,7 +309,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                 cct.GlobalValues().setkey('percdf',percdf)
                 print("timecol:%s"%(round(time.time()-time_df,2)),end=' ')
 
-
+                
             # if cct.get_work_time() :
             if cct.get_work_time_duration():
                 nowd, per1d=1, 1

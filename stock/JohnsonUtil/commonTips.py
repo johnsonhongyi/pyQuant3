@@ -1730,7 +1730,6 @@ def set_console(width=80, height=15, color=3, title=None, closeTerminal=True):
     # mode con cp select=936
     # os.system("mode con: cols=%s lines=%s"%(width,height))
     # print os.path.splitext(sys.argv[0])
-
     if title is None:
         # title= (os.path.basename(sys.argv[0]))
         filename = (os.path.basename(sys.argv[0]))
@@ -6252,6 +6251,7 @@ if __name__ == '__main__':
     # print(get_last_trade_date('2025-06-01'))
     st_key_sort='3 0 f'
     print(ct.get_market_sort_value_key(st_key_sort))
+    import ipdb;ipdb.set_trace()
     query_rule = read_ini(inifile='filter.ini',category='sina_Monitor')
     print(get_today(''))
     get_lastdays_trade_date(1)

@@ -241,8 +241,8 @@ if __name__ == "__main__":
                 # top_all[(top_all.upperT > 3) & (top_all.top10 >2) &(top_all.close > top_all.upper*0.98) & (top_all.close < top_all.upper *1.05) &(top_all.lastp1d > top_all.upper)].name
                 # cct.write_to_blocknew(block_path, dd.index.tolist())
                 # writecode = "cct.write_to_blocknew(block_path, dd.index.tolist())"
-                if len(top_all)/len(top_now) > 1.5:
-                    import ipdb;ipdb.set_trace()
+                # if len(top_all)/len(top_now) > 1.5:
+                #     import ipdb;ipdb.set_trace()
                      
                 # time_Rt = time.time()
                 top_bak = top_all.copy()
@@ -636,7 +636,7 @@ if __name__ == "__main__":
                         top_all['dff2'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
                                                top_all['buy'].values, top_all['lastp'].values)))
 
-                     _top_all = top_all[top_all.close > 10]
+                    _top_all = top_all[top_all.close > 10]
                     if len(_top_all) > 0 and _top_all.lastp1d[0] == _top_all.close[0] and _top_all.lastp1d[-1] == _top_all.close[-1]:
                         print('initf_false ',end='')
                         if cct.GlobalValues().getkey('initfilter_false') is None:
