@@ -23,6 +23,7 @@ import pandas_ta as ta
 from JSONData import sina_data
 # import numba as nb
 import datetime
+import talib
 # import logbook
 
 # log=logbook.Logger('TDX_day')
@@ -1236,10 +1237,10 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
         log.debug("now > 830 and <930 return")
         if isinstance(df, pd.DataFrame):
             df = df.sort_index(ascending=True)
-            df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
-            df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
-            df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
-            df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
+            df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
+            df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
+            df['ma20d'] = talib.SMA(df['close'], timeperiod=20)
+            df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
             df = df.fillna(0)
             df = df.sort_index(ascending=False)
         return get_tdx_macd(df)
@@ -1274,10 +1275,10 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
                 vol_div = 10
             if dz.open.values[0] == df.open[-1] and 'volume' in dz.columns and int(df.vol[-1] / vol_div) == int(dz.volume.values / vol_div):
                 df = df.sort_index(ascending=True)
-                df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
-                df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
-                df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
-                df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
+                df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
+                df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
+                df['ma20d'] = talib.SMA(df['close'], timeperiod=20)
+                df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
                 df = df.fillna(0)
                 df = df.sort_index(ascending=False)
                 return get_tdx_macd(df)
@@ -1350,10 +1351,15 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
         # print df
     if len(df) > 0:
         df = df.sort_index(ascending=True)
-        df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
-        df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
-        df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
-        df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
+        # df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
+        # df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
+        # df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
+        # df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
+        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
+        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
+        df['ma20d'] = talib.SMA(df['close'], timeperiod=20)
+        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+
         # df[['lower', 'ene', 'upper','bandwidth','bollpect']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
         # df = df.dropna()
         df = df.fillna(0)
@@ -1482,10 +1488,10 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
     if cct.get_now_time_int() > 900 and cct.get_now_time_int() < 930 and len(df) > 0:
         log.debug("now > 830 and <930 return")
         df = df.sort_index(ascending=True)
-        df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
-        df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
-        df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
-        df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
+        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
+        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
+        df['ma20d'] = talib.SMA(df['close'], timeperiod=20)
+        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
         return df
@@ -1515,10 +1521,10 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
 
             if round(dz.open.values[0], 1) == round(df.open[-1], 1) and 'volume' in dz.columns and int(df.vol[-1] / vol_div) == int(dz.volume.values / vol_div):
                 df = df.sort_index(ascending=True)
-                df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
-                df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
-                df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
-                df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
+                df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
+                df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
+                df['ma20d'] = talib.SMA(df['close'], timeperiod=20)
+                df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
                 df = df.fillna(0)
                 df = df.sort_index(ascending=False)
                 return df
@@ -1577,10 +1583,10 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
 
     if len(df) > 5:
         df = df.sort_index(ascending=True)
-        df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
-        df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
-        df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
-        df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
+        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
+        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
+        df['ma20d'] = talib.SMA(df['close'], timeperiod=20)
+        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
 
@@ -2376,10 +2382,10 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
         log.debug("c_name:%s df.name:%s" % (c_name, df.name[-1]))
     if len(df) > 0:
         df = df.sort_index(ascending=True)
-        df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
-        df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
-        df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
-        df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
+        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
+        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
+        df['ma20d'] = talib.SMA(df['close'], timeperiod=20)
+        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
         # df['ma5d'].fillna(0)
         # df['ma10d'].fillna(0)
         # df['ma20d'].fillna(0)
@@ -3297,6 +3303,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     df['perlastp'] = list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'],df['open'].shift(1), 
                             df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df['high4'],df['max5'],df['hmax'],df['lastdu4'],df['code'],df.index))
+    
     # df['high4'],df['max5'],df['hmax'],df['lastdu4']
     # df.high[-2:-1].max(),df.high[-3:-1].max(),df.high[-5:-1].max(),df.high[-2:-1].max()/df.low[-2:-1].min()
     #df['high'].rolling(2).max(),df['high'].rolling(3).max(),df['high'].rolling(5).max(),df['high'].rolling(2).max()/df['low'].rolling(2).min()
@@ -3752,10 +3759,10 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
 
 #        df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
 
-        df['ma5d'] = pd.Series.rolling(df.close, 5).mean().apply(lambda x: round(x,2))
-        df['ma10d'] = pd.Series.rolling(df.close, 10).mean().apply(lambda x: round(x,2))
-        df['ma20d'] = pd.Series.rolling(df.close, 26).mean().apply(lambda x: round(x,2))
-        df['ma60d'] = pd.Series.rolling(df.close, 60).mean().apply(lambda x: round(x,2))
+        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
+        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
+        df['ma20d'] = talib.SMA(df['close'], timeperiod=20)
+        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
         # df['natr'] = ta.natr(df.high, df.low, df.close)
         df['truer'] = ta.true_range(df.high, df.low, df.close)
 
@@ -5434,7 +5441,8 @@ if __name__ == '__main__':
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
 
     df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='d' )
-    print(df[-3:],df[-1:].perc1d,df[-1:].perc2d,df[-1:].perc3d)
+    print(df[-3:],df[-1:])
+    print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
     print(f'df lastp1d:{df[:2].lastp1d}')
     print(f'3d per1d:{df.per1d[0]}  per2d:{df.per2d[0]}  per3d:{df.per3d[0]}  per4d:{df.per4d[0]}  per5d:{df.per5d[0]}  ')
     # df = get_tdx_Exp_day_to_df(code, dl=1)

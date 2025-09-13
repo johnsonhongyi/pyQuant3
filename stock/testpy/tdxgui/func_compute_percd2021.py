@@ -732,15 +732,15 @@ def process_stock_data_with_score(code):
     df.rename(columns={'vol': 'volume'}, inplace=True)
     
     # 计算技术指标
-    df['ma5'] = talib.SMA(df['close'], timeperiod=5)
-    df['ma10'] = talib.SMA(df['close'], timeperiod=10)
-    df['upper'], _, _ = talib.BBANDS(df['close'], timeperiod=20)
-    df['hmax'] = df['high'].cummax() # 累计最高价
-    df['high4'] = df['high'].shift(4)
-    df['max5'] = df['high'].shift(5)
+    # df['ma5'] = talib.SMA(df['close'], timeperiod=5)
+    # df['ma10'] = talib.SMA(df['close'], timeperiod=10)
+    # df['upper'], _, _ = talib.BBANDS(df['close'], timeperiod=20)
+    # df['hmax'] = df['high'].cummax() # 累计最高价
+    # df['high4'] = df['high'].shift(4)
+    # df['max5'] = df['high'].shift(5)
     
-    # 避免除以0或NaN
-    df['lastdu4'] = (df['high'].shift(1) - df['low'].shift(4)) / df['low'].shift(4).replace(0, np.nan) + 1
+    # # 避免除以0或NaN
+    # df['lastdu4'] = (df['high'].shift(1) - df['low'].shift(4)) / df['low'].shift(4).replace(0, np.nan) + 1
 
     # 使用 list(map) 调用 func_compute_percd2021
     df['optimized_score'] = list(map(
@@ -753,8 +753,8 @@ def process_stock_data_with_score(code):
         df['close'].shift(1), # last_close
         df['high'].shift(1), # last_high
         df['low'].shift(1), # last_low
-        df['ma5'],
-        df['ma10'],
+        df['ma5d'],
+        df['ma10d'],
         df['volume'],
         df['volume'].shift(1),
         df['upper'],
@@ -790,4 +790,5 @@ if __name__ == "__main__":
     stock_code = '600376'
     stock_code = '837174'
     stock_code = '600007'
+    stock_code = '600863'
     run_example(stock_code)

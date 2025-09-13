@@ -187,7 +187,6 @@ def open_alert_config(stock_code):
         tk.Button(frame, text="▼", width=2,
                   command=make_adjust_fn(var, default, delta=-0.01)).pack(side="left")
 
-
         entries[key] = (enabled, var)
 
     def save_rule():

@@ -57,3 +57,5 @@ time cost: 18 min 33 s cost:seconds 1113.040 s
 time cost: 12 min 3 s cost:seconds 723.909 s 
 time cost: 10 min 17 s cost:seconds 617.053 s 
 time cost: 14 min 36 s cost:seconds 876.983 s 
+time cost: 13 min 38 s cost:seconds 818.025 s 
+time cost: 17 min 47 s cost:seconds 1067.933 s 

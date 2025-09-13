@@ -169,10 +169,10 @@ if __name__ == "__main__":
     log.setLevel(log_level)
 
     if cct.isMac():
-        width, height = 176, 32
+        width, height = 166, 32
         cct.set_console(width, height)
     else:
-        width, height = 176, 32
+        width, height = 166, 32
         cct.set_console(width, height)
         # cct.terminal_positionKey_triton
 
@@ -222,6 +222,7 @@ if __name__ == "__main__":
 
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(
         st_key_sort)
+
     # st_key_sort = '9'
     # st_key_sort = '7'
     # st_key_sort = ct.sort_value_key_perd23
@@ -238,7 +239,7 @@ if __name__ == "__main__":
 
             if st_key_sort_start == 0 and 1500 > cct.get_now_time_int() > 950 :
                 # st_key_sort = '4'
-                st_key_sort = '1'
+                # st_key_sort = '1'
                 st_key_sort_start = 1
                 # st_key_sort = '3 1'
                 # st_key_sort = '8'
