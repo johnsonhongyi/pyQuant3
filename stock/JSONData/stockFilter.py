@@ -346,9 +346,9 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                         df['perc1d'] = df['perc_n']
                         perc_col.remove('perc1d')
             #add now func_compute_percd2021
-
-            for co in perc_col:
-                df[co] = (df[co] + df['perc_n']).map(lambda x: round(x,1))
+            
+            # for co in perc_col:
+            #     df[co] = (df[co] + df['perc_n']).map(lambda x: round(x,1))
             
 
             # for co in per_col:
@@ -402,7 +402,6 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
         #       (sort_value, market_key, market_value))
 
         if market_key is not None and market_value is not None:
-
             if market_key == '3' and market_value not in ['1']:
                 market_value= int(float(market_value))
                 log.info("stf market_key:%s" % (market_key))
@@ -412,8 +411,8 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                 if market_va_filter is not None:
                     df= df[(df[("perc%sd" % (idx_k))] >= int(market_va_filter)) ]
                     cct.GlobalValues().setkey('market_va_filter',None)
-                else:
-                    df= df[(df[("perc%sd" % (idx_k))] >= idx_k) ]
+                # else:
+                #     df= df[(df[("perc%sd" % (idx_k))] >= idx_k) ]
 
             # elif market_key in ['5','6'] and market_value not in ['1']:
             #     # market_value= int(market_value)
