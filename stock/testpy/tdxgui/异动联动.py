@@ -1689,7 +1689,9 @@ def open_archive_loader():
 
     # 加载按钮
     ttk.Button(win, text="加载", command=lambda: load_archive(selected_file.get())).pack(pady=5)
-
+    # 按 Esc 关闭窗口
+    win.bind("<Escape>", lambda event: win.destroy())
+    
 # --- 数据持久化函数 ---
 def save_monitor_list():
     """保存当前的监控股票列表到文件"""
@@ -2266,7 +2268,7 @@ def on_closing(window, window_id):
 
     save_monitor_list() # 确保在主程序关闭时保存列表
     for win_id in WINDOWS_BY_ID.keys():
-        print(f'win_id:{win_id}')
+        # print(f'win_id:{win_id}')
         update_window_position(win_id) # 确保保存最后的配置
 
     if window.winfo_exists():
