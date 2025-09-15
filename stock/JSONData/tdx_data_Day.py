@@ -829,43 +829,43 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             df = df.sort_index(ascending=True)
 
         if cct.get_work_time_duration():
-            df['max5'] = df.close[-6:-1].max()
-            df['max10'] = df.close[-10:-1].max()
-            df['hmax'] = df.close[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
+            df['max5'] =  df['close'].shift(1).rolling(window=5).max()
+            df['max10'] = df['close'].shift(1).rolling(window=10).max()
+            df['hmax'] = df['close'].shift(1).rolling(window=30).max()
             df['hmaxvol'] = df.vol[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
-            df['hmax60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
-            df['high4'] = df.close[-5:-1].max()
+            df['hmax60'] = df['close'].shift(1).rolling(window=60).max()
+            df['high4'] =  df['close'].shift(1).rolling(window=4).max()
             
             df['llowvol'] = df.vol[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
-            df['low10'] = df.close[-10:-1].min()
+            df['low10'] = df['low'].shift(1).rolling(window=10).min()
             df['low60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].min()
 
             # df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
             # df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
             # df['high4'] = df.high[-5:-1].max()
-            df['low4'] = df.low[-5:-1].min()
-            df['lastdu4'] = ((df['high'] - df['low']) / df['close'] * 100).map(lambda x: round(x, 1))
+            df['low4'] = df['low'].shift(1).rolling(window=4).min()
+            df['lastdu4'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
              # (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
 
 
 
         else:
-            df['max5'] = df.close[-6:-1].max()
-            df['max10'] = df.close[-10:-1].max()
+            df['max5'] = df['close'].shift(1).rolling(window=5).max()
+            df['max10'] = df['close'].shift(1).rolling(window=10).max()
             # df['hmax'] = df.close[-ct.tdx_max_int_end:max_int_end].max()
-            df['hmax'] = df.close[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
-            df['hmax60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
-            df['high4'] = df.close[-5:-1].max()
+            df['hmax'] = df['close'].shift(1).rolling(window=30).max()
+            df['hmax60'] = df['close'].shift(1).rolling(window=60).max()
+            df['high4'] =  df['close'].shift(1).rolling(window=4).max()
 
-            df['llowvol'] = df.vol[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
-            df['low10'] = df.close[-10:-1].min()
+            df['llowvol'] = df['vol'].shift(1).rolling(window=30).max()
+            df['low10'] = df['low'].shift(1).rolling(window=10).min()
             df['low60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].min()
             # df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
             # df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
             # df['high4'] = df.high[-5:-1].max()
-            df['low4'] = df.low[-5:-1].min()
+            df['low4'] = df['low'].shift(1).rolling(window=4).min()
             # print(df.high4[0],(df['low4'][0]))
-            df['lastdu4'] = ((df['high'] - df['low']) / df['close'] * 100).map(lambda x: round(x, 1))
+            df['lastdu4'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
             # df['lastdu4'] = (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
 
     if 'date' in df.columns:
@@ -3285,13 +3285,13 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # df['low4'] = df['low'].rolling(4).min()
     # df['hmax'] = df['high'].rolling(10).max()
     # df['lastdu4'] = (df['high'].rolling(4).max()-df['low'].rolling(4).min())/df['low'].rolling(4).min()
-    df['max5'] = df.close[-6:-1].max()
-    df['max10'] = df.close[-10:-1].max()
+    df['max5'] = df['close'].shift(1).rolling(window=5).max()
+    df['max10'] = df['close'].shift(1).rolling(window=10).max()
     # df['hmax'] = df.high[-6:-1].max()
-    df['hmax'] = df.close[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
+    df['hmax'] = df['close'].shift(1).rolling(window=30).max()
     # df['hmax60'] = df.high[:-1].max()
-    df['high4'] = df.close[-5:-1].max()
-    df['low4'] = df.low[-5:-1].min()
+    df['high4'] =  df['close'].shift(1).rolling(window=4).max()
+    df['low4'] = df['low'].shift(1).rolling(window=4).min()
     # df['lastdu4'] = (df['high4'][0] -df['low4'][0]) /df['low4'][0]
     df['lastdu4'] = (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
 
@@ -3301,14 +3301,15 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # df['perlastp'] = list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'],df['open'].shift(1), 
     #                         df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df.index))
 
-    df['perlastp'] = list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'],df['open'].shift(1), 
-                            df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df['high4'],df['max5'],df['hmax'],df['lastdu4'],df['code'],df.index))
+    # df['perlastp'] = list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'],df['open'].shift(1), 
+    #                         df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df['high4'],df['max5'],df['hmax'],df['lastdu4'],df['code'],df.index))
     
     # df['high4'],df['max5'],df['hmax'],df['lastdu4']
     # df.high[-2:-1].max(),df.high[-3:-1].max(),df.high[-5:-1].max(),df.high[-2:-1].max()/df.low[-2:-1].min()
     #df['high'].rolling(2).max(),df['high'].rolling(3).max(),df['high'].rolling(5).max(),df['high'].rolling(2).max()/df['low'].rolling(2).min()
 
-    df['perlastp'] = df['perlastp'].apply(lambda x: round(x, 2))
+    df['perlastp'] = cct.func_compute_percd2021_vectorized(df)
+    df['perlastp'] = df['perlastp'].apply(lambda x: round(x, 1))
 
     df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1))
     # df['perd'] = ((df['low'] - df['low'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1))
@@ -3339,7 +3340,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # df = df.dropna(subset=['perd'])
 
     # df['red'] = ((df['close'] - df['open']) / df['close'] * 100).map(lambda x: round(x, 1))
-    df['lastdu'] = ((df['high'] - df['low']) / df['close'] * 100).map(lambda x: round(x, 1))
+    df['lastdu'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
     # df['perddu'] = ((df['high'] - df['low']) / df['low'] * 100).map(lambda x: round(x, 1))
     # dd['upperT'] = dd.close[ (dd.upper > 0) & (dd.high > dd.upper)].count()
 
@@ -3579,8 +3580,8 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # print dataframe_mode_round(df.low)
 
     # dd['lastdu'] = df[-4:]['lastdu'].max()
-    dd['lastdu'] = df[-ct.tdx_high_da:]['lastdu'].mean()
-    dd['lastdu'] = dd['lastdu'] .apply(lambda x:round(x,1))
+    # dd['lastdu'] = df[-ct.tdx_high_da:]['lastdu'].mean()
+    # dd['lastdu'] = dd['lastdu'] .apply(lambda x:round(x,1))
     dd['perlastp'] = df['perlastp']
 
     dd = compute_power_tdx_df(df, dd)
@@ -5439,6 +5440,10 @@ if __name__ == '__main__':
     '''
     
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
+    code='837174'
+    # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'], end=None, newdays=0, resample='d')
+    # print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
+    # import ipdb;ipdb.set_trace()
 
     df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='d' )
     print(df[-3:],df[-1:])
@@ -5451,9 +5456,7 @@ if __name__ == '__main__':
     # df2 = get_tdx_Exp_day_to_df(code,dl=60, end=None, newdays=0, resample='d')
 
     # df2 = get_tdx_Exp_day_to_df(code,dl=60, end='20230925', newdays=0, resample='d')
-    code='920068'
-    # code='600705'
-    # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'], end=None, newdays=0, resample='w')
+
 
     # df = get_tdx_Exp_day_to_df(code,dl=200, end=None, newdays=0, resample='3d')
 

@@ -169,6 +169,61 @@ def get_monitors_info():
 
     return combined['width'],combined['height']
 
+
+
+def get_monitor_by_point(x, y):
+    """返回包含坐标(x,y)的屏幕信息字典"""
+    monitors = []
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long)
+        ]
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.c_long),
+            ("rcMonitor", RECT),
+            ("rcWork", RECT),
+            ("dwFlags", ctypes.c_long)
+        ]
+
+    def monitor_enum_proc(hMonitor, hdcMonitor, lprcMonitor, dwData):
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        ctypes.windll.user32.GetMonitorInfoW(hMonitor, ctypes.byref(info))
+        rc = info.rcMonitor
+        monitors.append({
+            "left": rc.left,
+            "top": rc.top,
+            "right": rc.right,
+            "bottom": rc.bottom,
+            "width": rc.right - rc.left,
+            "height": rc.bottom - rc.top
+        })
+        return 1
+
+    MonitorEnumProc = ctypes.WINFUNCTYPE(ctypes.c_int,
+                                         ctypes.c_ulong,
+                                         ctypes.c_ulong,
+                                         ctypes.POINTER(RECT),
+                                         ctypes.c_double)
+    ctypes.windll.user32.EnumDisplayMonitors(0, 0, MonitorEnumProc(monitor_enum_proc), 0)
+
+    for m in monitors:
+        if m['left'] <= x < m['right'] and m['top'] <= y < m['bottom']:
+            return m
+    # 如果没有匹配，返回主屏幕
+    if monitors:
+        return monitors[0]
+    else:
+        # fallback
+        width, height = get_monitors_info()
+        return {"left": 0, "top": 0, "width": width, "height": height}
+
+
 # 使用示例
 screen_width,screen_height, = get_monitors_info()
 print(screen_width,screen_height)
@@ -232,6 +287,16 @@ def actually_start_worker(worker_task,param=None):
     worker_thread = threading.Thread(target=worker_task, args=(param,), daemon=True)
     worker_thread.start()
     print("Worker started!")
+    check_worker_done()
+    return worker_task
+
+def check_worker_done():
+    global worker_thread,realdatadf
+    if worker_thread.is_alive():
+        root.after(2000, check_worker_done)  # 200ms 后再检查
+    else:
+        print("Worker finished!")
+        populate_treeview(realdatadf)  # 在主线程安全更新 UI
 
 # --------------------
 # 停止线程
@@ -971,7 +1036,7 @@ def process_full_dataframe(df):
         
 def get_stock_changes(selected_type=None, stock_code=None):
     """获取股票异动数据"""
-    global realdatadf, last_updated_time
+    global realdatadf, last_updated_time,symbol_map
     current_time = datetime.now()
     url = "https://push2ex.eastmoney.com/getAllStockChanges?"
     reversed_symbol_map = {v: k for k, v in symbol_map.items()}
@@ -1395,7 +1460,7 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
             print(f"自动更新任务get_stock_changes_background执行于: {current_time}")
             # 在这里添加你的具体任务逻辑
             status_label3.config(text=f"更新在{current_time[:-3]}执行")
-            actually_start_worker(get_stock_changes_background)
+            scheduled_task = actually_start_worker(get_stock_changes_background)
             # 5分钟后再次调用此函数
             schedule_task('worktime_task',5 * 60 * 1000,lambda: schedule_worktime_task(tree))
         else:
@@ -1509,6 +1574,7 @@ def rearrange_monitors_per_screen():
 
 def archive_monitor_list():
     """归档监控文件，避免空或重复存档"""
+
     if not os.path.exists(MONITOR_LIST_FILE):
         print("⚠ monitor_list.json 不存在，跳过归档")
         return
@@ -1520,7 +1586,7 @@ def archive_monitor_list():
         print(f"⚠ 无法读取监控文件: {e}")
         return
 
-    if not content:
+    if not content or content in ("[]", "{}"):
         print("⚠ monitor_list.json 内容为空，跳过归档")
         return
 
@@ -1534,7 +1600,7 @@ def archive_monitor_list():
         try:
             with open(last_file, "r", encoding="utf-8") as f:
                 last_content = f.read().strip()
-            if len(last_content) == 0 or content == last_content:
+            if not content or content in ("[]", "{}") or content == last_content:
                 print("⚠ 内容与上一次存档相同，跳过归档")
                 return
         except Exception as e:
@@ -1643,11 +1709,11 @@ def save_monitor_list():
     else:
         print('no window find')
 
-    archive_monitor_list()
-
     with open(MONITOR_LIST_FILE, "w") as f:
             json.dump(mo_list, f)
     print(f"监控列表已保存到 {MONITOR_LIST_FILE}")
+
+    archive_monitor_list()
 
 def load_monitor_list():
     """从文件加载监控股票列表"""
@@ -1682,6 +1748,9 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
         realdatadf = pd.DataFrame()
         loaded_df = None
         viewdf = pd.DataFrame()
+        start_init = 0
+        date_entry.set_date(get_today())
+
     # 使用 with realdatadf_lock 确保只有一个线程可以进入此关键区域
     if loaded_df is None  and (len(realdatadf) == 0 or get_work_time() or (not date_write_is_processed and get_now_time_int() > 1505)):
         with realdatadf_lock:
@@ -1717,7 +1786,8 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
     if start_init == 0:
         time.sleep(6)
         start_init = 1
-
+    if not get_work_time() and get_now_time_int() > 1505:
+        start_async_save()
     return realdatadf
 
 def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_minutes=update_interval_minutes):
@@ -1928,15 +1998,47 @@ def add_selected_stock_popup_window():
     except IndexError:
         messagebox.showwarning("警告", "请选择一个股票代码。")
 
+# def show_context_menu(event):
+#     """显示右键菜单"""
+#     try:
+#         item = tree.identify_row(event.y)
+#         if item:
+#             tree.selection_set(item)
+#             context_menu.post(event.x_root, event.y_root)
+#     except Exception:
+#         pass
+
 def show_context_menu(event):
     """显示右键菜单"""
+    parent_win = event.widget.winfo_toplevel()
     try:
         item = tree.identify_row(event.y)
-        if item:
-            tree.selection_set(item)
-            context_menu.post(event.x_root, event.y_root)
-    except Exception:
-        pass
+        if not item:
+            return
+
+        tree.selection_set(item)
+        values = tree.item(item, "values")  # ✅ 修正这里
+        if not values:
+            return
+
+        stock_code, stock_name = values[1], values[2]  # 代码、名称
+        stock_info = values[1:]
+
+        context_menu = tk.Menu(root, tearoff=0)
+        context_menu.add_command(label="添加到监控", command=add_selected_stock)
+        context_menu.add_command(label="打开报警中心", command=open_alert_center)
+        context_menu.add_command(label="添加报警规则",
+            command=lambda: open_alert_editor(stock_code,new=True, stock_info=stock_info,parent_win=parent_win,
+                x_root=event.x_root,
+                y_root=event.y_root))
+        context_menu.add_command( label="编辑报警规则",
+            command=lambda: open_alert_editor(stock_code,new=False, stock_info=stock_info,parent_win=parent_win,
+                x_root=event.x_root,
+                y_root=event.y_root))
+
+        context_menu.post(event.x_root, event.y_root)
+    except Exception as e:
+        print(f"[右键菜单异常] {e}")
 
 def update_code_entry(stock_code):
     """更新主窗口的 Entry"""
@@ -1980,7 +2082,7 @@ def on_monitor_window_focus(event):
     """
     当任意窗口获得焦点时，协调两个窗口到最前。
     """
-    bring_monitor_to_front()
+    bring_monitor_to_front(event)
 
 def on_window_focus(event):
     """
@@ -1991,7 +2093,7 @@ def on_window_focus(event):
         bring_both_to_front(root)
     global alert_window
     if get_work_time()  and alert_window and alert_window.winfo_exists():
-        print(f'bring_both_to_front alert_window')
+        # print(f'bring_both_to_front alert_window')
         alert_window.lift()
         alert_window.attributes('-topmost', 1)
         alert_window.attributes('-topmost', 0)
@@ -2033,7 +2135,9 @@ def get_monitor_index_for_window(window):
 
 def bring_monitor_to_front(active_window):
     """只把和 active_window 在同一屏幕的窗口带到前面"""
+
     global alert_moniter_bring_front
+    #没有监控中心是开启多窗口级联
     if not alert_moniter_bring_front:
         target_monitor = get_monitor_index_for_window(active_window)
 
@@ -2103,7 +2207,7 @@ def save_window_positions():
     if save_timer:
         save_timer.cancel()
     # 确保文件写入在程序退出前完成
-    save_monitor_list()
+    # save_monitor_list()
     print(f'save:{WINDOW_GEOMETRIES}')
     try:
         with open(CONFIG_FILE, "w") as f:
@@ -2124,36 +2228,10 @@ def schedule_save_positions():
 
 def update_window_position(window_id):
     """更新单个窗口的位置到全局字典。"""
-    width = radio_container.winfo_width()
-    if width <= 1:
-        cols = 5  # 初始化时默认5列
-    else:
-        # 估算每个按钮的宽度，包括 padx
-        btn_width = 110  
-        # 计算列数，约束最少5列，最多10列
-        cols = width // btn_width
-        # print(f'cols:{cols}')
-        if cols < 5:
-            cols = 5
-        elif cols > 11:
-            cols = 11
-
-    # 清空布局
-    for btn in buttons:
-        btn.grid_forget()
-
-    # 重新布局
-    for i, btn in enumerate(buttons):
-        row, col = divmod(i, cols)
-        btn.grid(row=row, column=col, sticky=tk.W, padx=5, pady=3)
-
-    # 列权重
-    for c in range(cols):
-        radio_container.grid_columnconfigure(c, weight=1)
-
     window = WINDOWS_BY_ID.get(window_id)
     if window and window.winfo_exists():
         WINDOW_GEOMETRIES[window_id] = window.geometry()
+
 
 
 def on_close_alert_monitor(window):
@@ -2177,7 +2255,8 @@ def on_close_monitor(window_info):
 
     if window.winfo_exists() and stock_code in WINDOWS_BY_ID.keys() :
         del WINDOWS_BY_ID[stock_code]
-        del WINDOW_GEOMETRIES[stock_code]
+        if stock_code in WINDOW_GEOMETRIES.keys():
+            del WINDOW_GEOMETRIES[stock_code]
         window.destroy()
 
 
@@ -2186,9 +2265,12 @@ def on_closing(window, window_id):
     executor.shutdown(wait=False)
 
     save_monitor_list() # 确保在主程序关闭时保存列表
+    for win_id in WINDOWS_BY_ID.keys():
+        print(f'win_id:{win_id}')
+        update_window_position(win_id) # 确保保存最后的配置
+
     if window.winfo_exists():
         del WINDOWS_BY_ID[window_id]
-        update_window_position(window_id) # 确保保存最后的配置
         window.destroy()
 
     save_window_positions()
@@ -2221,7 +2303,7 @@ def update_position_window(window, window_id, is_main=False):
         # 没有配置，使用默认 + 自动平铺
         place_new_window(window, window_id)
 
-    window.bind("<Configure>", lambda event: update_window_position(window_id))
+    # window.bind("<Configure>", lambda event: update_window_position(window_id))
     return window
 
 
@@ -2314,7 +2396,7 @@ def place_new_window(window, window_id, win_width=300, win_height=160, margin=10
         window.geometry(f"{win_width}x{win_height}+{x}+{y}")
 
     # 保留更新位置回调
-    window.bind("<Configure>", lambda e: update_window_position(window_id))
+    # window.bind("<Configure>", lambda e: update_window_position(window_id))
 
 
 
@@ -2343,7 +2425,7 @@ def create_monitor_window(stock_info):
     vol     = rest[5] if len(rest) >= 6 else default_values["vol"]
 
     # 构造 stock_info 完整列表
-    stock_info = [stock_code, stock_name, 0, 0, percent, price, vol]
+    stock_info = [stock_code, stock_name, 0, 0 ,  percent , price ,vol]
 
     monitor_win = tk.Toplevel(root)
     monitor_win.resizable(True, True)
@@ -2386,14 +2468,63 @@ def create_monitor_window(stock_info):
     refresh_stock_data(window_info, monitor_tree, item_id)
 
     monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(window_info))
-    monitor_win.bind("<FocusIn>", lambda e, w=monitor_win: bring_monitor_to_front(w))
+    monitor_win.bind("<FocusIn>", lambda e, w=monitor_win: on_monitor_window_focus(w))
     monitor_win.bind("<Button-1>", lambda event: update_code_entry(stock_code))
 
     # === 右键菜单加报警规则 ===
-    def show_menu(event, stock_info):
-        menu = tk.Menu(monitor_win, tearoff=0)
-        menu.add_command(label="设置报警规则", command=lambda: open_alert_editor(stock_info))
-        menu.post(event.x_root, event.y_root)
+    # def show_menu(event, stock_info):
+    #     menu = tk.Menu(monitor_win, tearoff=0)
+    #     menu.add_command(label="设置报警规则", command=lambda : open_alert_editor(stock_info))
+    #     menu.post(event.x_root, event.y_root)
+    def show_menu(event,stock_info):
+        """
+        在Treeview上處理右鍵點擊事件的函式。
+        """
+        # sel = alert_tree.selection()
+        # if not sel: return
+        # vals = alert_tree.item(sel[0], "values")
+        # code = vals[1]
+        # 1. 根據右鍵點擊的座標，找出對應的Treeview項目
+        parent_win = event.widget.winfo_toplevel()
+        iid = monitor_tree.identify_row(event.y)
+        
+        # 2. 如果點擊在某個項目上
+        if iid:
+            # 3. 確保點擊的項目被選中
+            monitor_tree.selection_set(iid)
+            # 4. 取得當前選中的項目ID（此時它應該是iid）
+            selected_item_id = monitor_tree.selection()[0]
+            
+            # # 5. 獲取該項目的值，例如股票代號
+            stock_info = monitor_tree.item(selected_item_id, "values")
+            # stock_code = item_values[0] # 假設股票代號是第一欄
+            # stock_info = stock_info[1:]
+            # print(f'stock_info:{stock_info}')
+
+            if len(stock_info) == 5:
+                _ ,_ , percent, price , vol = stock_info
+                stock_info =  (stock_code,stock_name,0,0 , percent, price , vol) 
+            else:
+                stock_info = (stock_code,) + stock_info[1:]
+            # 6. 建立右鍵選單
+            print(f'stock_info:{stock_info}')
+            menu = tk.Menu(root, tearoff=0)
+            
+            # 7. 动态地為選單命令綁定函式和參數
+            menu.add_command(label="設定警報規則", command=lambda: open_alert_editor(stock_info,parent_win=parent_win,
+                x_root=event.x_root,
+                y_root=event.y_root))
+            # 8. 顯示選單
+            menu.post(event.x_root, event.y_root)
+        else:
+            # 如果點擊在空白處，清除選中狀態
+            # tree.selection_remove(tree.selection())
+            menu = tk.Menu(monitor_win, tearoff=0)
+            menu.add_command(label="設定警報規則", command=lambda: open_alert_editor(stock_infoparent_win=parent_win,
+                x_root=event.x_root,
+                y_root=event.y_root))
+            menu.post(event.x_root, event.y_root)
+
     monitor_win.bind("<Button-3>", lambda event: show_menu(event, stock_info))
 
     # === 保存窗口信息到全局字典 ===
@@ -2520,6 +2651,15 @@ def open_editor_from_combobox(selected_code):
         # 提示用户选择一个股票代码
         auto_close_message("提示", "请先选择一个股票代码。")
 
+
+def init_alert_window():
+    width, height = 620,360
+    screen_w = root.winfo_screenwidth()
+    screen_h = root.winfo_screenheight()
+    x = (screen_w - width) // 2
+    y = (screen_h - height) // 2
+    return width, height, x, y
+
 # ------------------------
 # 报警中心窗口
 # ------------------------
@@ -2543,7 +2683,15 @@ def open_alert_center():
     alert_window = tk.Toplevel(root)
     alert_window.title("报警中心")
     alert_window.geometry("720x360")
+    # 获取之前保存的位置，如果没有则居中
+    # pos = load_alert_window_position()  # 返回 (x, y, w, h) 或 None
+    # if pos is None:
+    #     w, h, x, y = init_alert_window()
+    # else:
+    #     x, y, w, h = pos
+    w, h, x, y = init_alert_window()
 
+    alert_window.geometry(f"{w}x{h}+{x}+{y}")
     # 上方快速规则入口
     top_frame = ttk.Frame(alert_window)
     top_frame.pack(fill="x", padx=5, pady=5)
@@ -2551,6 +2699,7 @@ def open_alert_center():
     tk.Label(top_frame, text="股票代码:").pack(side="left")
     stock_var = tk.StringVar()
     vlist = list(monitor_windows.keys())
+
     stock_list_for_combo  = [tuple(monitor_windows[co]['stock_info'][:2])  for co in vlist]
     if stock_code and stock_code not in monitor_windows.keys():
         stock_list_for_combo.append((stock_code,stock_name))
@@ -2558,12 +2707,22 @@ def open_alert_center():
     else:
         stock_entry = ttk.Combobox(top_frame, textvariable=stock_var, values=stock_list_for_combo, width=10)
 
+    def show_context_menu(event, stock_code):
+        parent_win = event.widget.winfo_toplevel()
+        menu = tk.Menu(parent_win, tearoff=0)
+        menu.add_command(
+            label="添加/编辑规则",
+            command=lambda: open_alert_editor(stock_code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root)
+        )
+        menu.post(event.x_root, event.y_root)
 
     # 设置 combobox 的初始值
     if stock_code:
         stock_var.set(f'{stock_code} {stock_name}')
     stock_entry.pack(side="left", padx=5)
-
+    # if isinstance(stock_info, (list, tuple)) and len(stock_code) >= 7:
+    #     tk.Button(top_frame, text="添加/编辑规则", command=lambda: open_alert_editor(stock_info)).pack(side="left", padx=5)
+    # else:
     tk.Button(top_frame, text="添加/编辑规则", command=lambda: open_alert_editor(stock_var.get())).pack(side="left", padx=5)
 
     # 报警列表
@@ -2624,16 +2783,18 @@ def open_alert_center():
     # 右键菜单 → 编辑 / 新增 / 删除规则
     def show_menu(event):
         sel = alert_tree.selection()
+        parent_win = event.widget.winfo_toplevel()
         if not sel: return
         vals = alert_tree.item(sel[0], "values")
         code = vals[1]
-
         menu = tk.Menu(alert_window, tearoff=0)
-        menu.add_command(label="编辑规则", command=lambda: open_alert_editor(code))
-        menu.add_command(label="新增规则", command=lambda: open_alert_editor(code, new=True))
-        menu.add_command(label="删除规则", command=lambda: delete_alert_rule(code))
+        menu.add_command(label="编辑规则", command=lambda: open_alert_editor(code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root))
+        menu.add_command(label="新增规则", command=lambda: open_alert_editor(code, new=True, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root))
+        menu.add_command(label="删除规则", command=lambda: delete_alert_rule(code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root))
         menu.post(event.x_root, event.y_root)
     alert_tree.bind("<Button-3>", show_menu)
+    # 按 Esc 关闭窗口
+    alert_window.bind("<Escape>", lambda  event: on_close_alert_monitor(alert_window))
 
 default_deltas = {
     "价格": 0.1,   # 价格变动 0.1 元触发
@@ -2651,27 +2812,46 @@ def get_alert_status(stock_code):
     return "关闭"
 
 
-def open_alert_editor(stock_code, new=False):
+def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_root=None, y_root=None):
     global alerts_rules,alert_window
-    
     # ------------------ 数据处理 ------------------
     # 简化数据获取，使其能正常运行
-    price, percent, vol = 5.0, 1.0, 1
-    if not stock_code == '':
-        try:
+    # --- 1. 准备规则 ---
+    # orig_rules = alerts_rules.get(code, [])
+    orig_rules = alerts_rules.copy()
 
-            if not isinstance(stock_code, (list, tuple)) and len(stock_code.split()) == 2:
+    price, percent, vol = 5.0, 1.0, 1
+    if new and stock_info is not None:
+        if stock_code in alerts_rules:
+            del alerts_rules[stock_code]
+        # print(f'stock_info:{stock_info}')
+        code, name, *_ , percent,price, vol = stock_info
+
+    elif not stock_code == '':
+        try:
+            if stock_info is not None:
+                code, name, *_ , percent,price, vol = stock_info
+            elif not isinstance(stock_code, (list, tuple)) and len(stock_code.split()) == 2:
                 code,name = stock_code.split()
+                if code in monitor_windows.keys():
+                    stock_info = monitor_windows.get(code, {}).get('stock_info', [code, 0, 0, 0, 1, 5, 1])
+                    _, _, _, _, percent,price, vol = stock_info
+                    print(f'price : {price},percent:{percent}, vol:{vol}')
+            elif isinstance(stock_code, (list, tuple)) and len(stock_code) == 5:
+                code, _ , percent,price, vol = stock_code
+                print(f'price : {price},percent:{percent}, vol:{vol}')
+
             elif isinstance(stock_code, (list, tuple)) and len(stock_code) >= 7:
-                code, name, *_ , percent, price, vol = stock_code
+                code, name, *_ , percent,price, vol = stock_code
             else:
                 code = stock_code
                 stock_info = monitor_windows.get(code, {}).get('stock_info', [code, 0, 0, 0, 1, 5, 1])
-                code, name, _, _, percent, price, vol = stock_info
-            if code in monitor_windows.keys():
-                stock_info = monitor_windows.get(code, {}).get('stock_info', [code, 0, 0, 0, 1, 5, 1])
-                _, _, _, _, percent, price, vol = stock_info
-            if int(vol) == 0:
+                code, name, _, _, percent,price,vol = stock_info
+                if percent == 0 or price == 0:
+                    if code in monitor_windows.keys():
+                        stock_info = monitor_windows.get(code, {}).get('stock_info', [code, 0, 0, 0, 1, 5, 1])
+                        _, _, _, _, percent,price, vol = stock_info
+            if float(vol) == 0.0:
                 vol = 0.8
         except (ValueError, IndexError):
             # 处理可能的解包错误
@@ -2681,10 +2861,123 @@ def open_alert_editor(stock_code, new=False):
         return
     # -------------------------------------------------------------
     send_to_tdx(code)
+
+
+    if parent_win is None:
+        parent_win = root  # 默认主窗口
+
+
     editor = tk.Toplevel(root)
     editor.title(f"设置报警规则 -{name} {code}")
-    editor.geometry("500x300")
-    
+    # editor.geometry("500x300")
+    # 固定窗口尺寸
+    win_width, win_height = 500, 300
+    # # 1. 如果右键事件传入，优先使用鼠标位置
+    # if event is not None:
+    #     x = event.x_root
+    #     y = event.y_root
+    # else:
+    #     # 2. 否则在父窗口附近
+    #     parent_x = parent_window.winfo_x()
+    #     parent_y = parent_window.winfo_y()
+    #     parent_w = parent_window.winfo_width()
+    #     parent_h = parent_window.winfo_height()
+    #     x = parent_x + parent_w // 3
+    #     y = parent_y + parent_h // 3
+
+    # # 3. 获取屏幕尺寸
+    # screen_w = editor.winfo_screenwidth()
+    # screen_h = editor.winfo_screenheight()
+
+    # # 4. 避免窗口超出屏幕
+    # if x + width > screen_w:
+    #     x = screen_w - width - 10
+    # if y + height > screen_h:
+    #     y = screen_h - height - 10
+
+    # editor.geometry(f"{width}x{height}+{x}+{y}")
+
+    # screen_width, screen_height = get_monitors_info()
+
+    # # 默认位置：屏幕中心
+    # x = (screen_width - win_width) // 2
+    # y = (screen_height - win_height) // 2
+
+    # # 优先使用右键位置
+    # if x_root is not None and y_root is not None:
+    #     x = x_root
+    #     y = y_root
+    # # 如果 parent_win 传入，则在父窗口右下角附近打开
+    # elif parent_win is not None:
+    #     parent_win.update_idletasks()
+    #     px = parent_win.winfo_x()
+    #     py = parent_win.winfo_y()
+    #     pw = parent_win.winfo_width()
+    #     ph = parent_win.winfo_height()
+    #     x = px + pw // 2 - win_width // 2
+    #     y = py + ph // 2 - win_height // 2
+
+    # # 超出屏幕边界自动调整
+    # if x + win_width > screen_width:
+    #     x = screen_width - win_width
+    # if y + win_height > screen_height:
+    #     y = screen_height - win_height
+    # if x < 0:
+    #     x = 0
+    # if y < 0:
+    #     y = 0
+
+    screen_width, screen_height = get_monitors_info()
+
+    # 默认位置：屏幕中心
+    x = (screen_width - win_width) // 2
+    y = (screen_height - win_height) // 2
+
+    # 优先使用右键位置
+    if x_root is not None and y_root is not None:
+        x = x_root
+        y = y_root
+
+        # 如果鼠标右侧空间不足，窗口翻到左侧
+        if x + win_width > screen_width:
+            x = max(0, x_root - win_width)
+    # 如果 parent_win 传入，则在父窗口右下角附近打开
+    elif parent_win is not None:
+        parent_win.update_idletasks()
+        px = parent_win.winfo_x()
+        py = parent_win.winfo_y()
+        pw = parent_win.winfo_width()
+        ph = parent_win.winfo_height()
+        # x = px + pw // 2 - win_width // 2
+        # y = py + ph // 2 - win_height // 2
+        if px <= 1 or py <= 1:  # 未渲染
+            x = (screen_width - win_width) // 2
+            y = (screen_height - win_height) // 2
+        else:
+            x = px + pw//2 - win_width//2
+            y = py + ph//2 - win_height//2
+
+    # 超出屏幕边界自动调整
+    if x + win_width > screen_width:
+        x = screen_width - win_width
+    if y + win_height > screen_height:
+        y = screen_height - win_height
+    if x < 0:
+        x = 0
+    if y < 0:
+        y = 0
+
+
+    #    # 防止超出屏幕
+    # x = max(0, min(x, screen_width - win_width))
+    # y = max(0, min(y, screen_height - win_height))
+
+    editor.geometry(f"{win_width}x{win_height}+{x}+{y}")
+    editor.title(f"设置报警规则 - {name} {code}")
+
+    editor.focus_force()
+    editor.grab_set()
+
     # 统一风格
     style = ttk.Style()
     style.configure("TButton", padding=5)
@@ -2697,9 +2990,9 @@ def open_alert_editor(stock_code, new=False):
         has_alert_history = any(a['stock_code'] == code for a in alerts_history)
         
         rules = [
-            {"field": "价格", "op": ">=", "value": price, "enabled": not has_alert_history, "delta": default_deltas["价格"]},
-            {"field": "涨幅", "op": ">=", "value": percent, "enabled": not has_alert_history, "delta": default_deltas["涨幅"]},
-            {"field": "量", "op": ">=", "value": vol, "enabled": not has_alert_history, "delta": default_deltas["量"]},
+            {"field": "价格", "op": ">=", "value": float(price), "enabled": not has_alert_history, "delta": default_deltas["价格"]},
+            {"field": "涨幅", "op": ">=", "value": float(percent), "enabled": not has_alert_history, "delta": default_deltas["涨幅"]},
+            {"field": "量", "op": ">=", "value": float(vol), "enabled": not has_alert_history, "delta": default_deltas["量"]},
         ]
         alerts_rules[code] = rules
 
@@ -2710,13 +3003,18 @@ def open_alert_editor(stock_code, new=False):
     entries = []
 
     def validate_float(P):
+        if P == "":  # 允许空
+            return True
+        # 允许类似 "-", "2.", "-3."
+        P = P.replace("．", ".")  # 替换全角点
         try:
-            if P == "":
-                return True
             float(P)
             return True
         except ValueError:
             return False
+        # if re.match(r"^-?\d*\.?\d*$", P):
+        #     return True
+        # return False
 
     vcmd = rules_frame.register(validate_float)
 
@@ -2747,17 +3045,125 @@ def open_alert_editor(stock_code, new=False):
 
         # 值输入
         val_var = tk.DoubleVar(value=value)
-        ttk.Spinbox(rules_frame, textvariable=val_var, from_=-100, to=100000,
+        # val_var = tk.StringVar(value=value)
+        ttk.Spinbox(rules_frame, textvariable=val_var, from_=-100, to=100,
                     increment=0.1, width=10,validate="key",validatecommand=(vcmd, "%P")).grid(row=row, column=3, padx=2)
 
-        # 百分比调整按钮
-        ttk.Button(rules_frame, text="-1%", command=make_adjust_fn(val_var, -0.02), width=4).grid(row=row, column=4)
-        ttk.Button(rules_frame, text="+1%", command=make_adjust_fn(val_var, 0.02), width=4).grid(row=row, column=5)
+
+        def get_limit_price(stock_code, last_close):
+            """
+            stock_code: '600001', '300123', '688888'
+            last_close: 昨日收盘价
+            返回 (涨停价, 跌停价)
+            """
+            code = str(stock_code)
+            pct_up = 0.1  # 默认 10%
+            
+            if code.startswith('688') or code.startswith('8'):  # 科创板 / 8开头
+                pct_up = 0.2
+            elif code.startswith('300'):  # 创业板
+                pct_up = 0.1
+            elif code.startswith('430'):  # 北交所
+                pct_up = 0.3
+
+            # 计算涨跌停
+            limit_up = round(last_close * (1 + pct_up), 2)
+            limit_down = round(last_close * (1 - pct_up), 2)
+            return limit_up, limit_down
+
+
+        # 根据字段设置按钮文本和增量
+        if field_var.get() == "价格":
+            plus_delta, minus_delta = 0.01, -0.01  # 百分比
+            plus_text, minus_text = "+1%", "-1%"
+        elif field_var.get() == "涨幅":
+            plus_delta, minus_delta = 1, -1
+            plus_text, minus_text = "+1", "-1"
+        elif field_var.get() == "量":
+            plus_delta, minus_delta = 0.5, -0.5
+            plus_text, minus_text = "+0.5", "-0.5"
+
+        # 调整函数
+        def make_adjust_fn(val_var, delta, is_percent=False):
+            def fn():
+                try:
+                    val = float(val_var.get())
+                    if is_percent:
+                        val = round(val * (1 + delta), 2)
+                    else:
+                        val = round(val + delta, 2)
+                    val_var.set(val)
+                except:
+                    pass
+            return fn
+
+        # 创建按钮
+        ttk.Button(rules_frame, text=minus_text, width=5,
+                   command=make_adjust_fn(val_var, minus_delta, field_var.get()=="价格")).grid(row=row, column=4)
+        ttk.Button(rules_frame, text=plus_text, width=5,
+                   command=make_adjust_fn(val_var, plus_delta, field_var.get()=="价格")).grid(row=row, column=5)
+
+        # # 调整按钮逻辑
+        # def make_adjust_fn(var):
+        #     def _inc():
+        #         try:
+        #             val = float(var.get())
+        #         except:
+        #             val = 0.0
+        #         if field_var.get() == "价格":
+        #             var.set(round(val * 1.01, 2))  # 价格按 1% 增加
+        #         elif field_var.get() == "涨幅":
+        #             var.set(round(val + 1, 2))     # 涨幅 +1
+        #         elif field_var.get() == "量":
+        #             var.set(round(val + 0.5, 2))   # 量 +0.5
+        #     return _inc
+
+        # def make_adjust_fn_minus(var):
+        #     def _dec():
+        #         try:
+        #             val = float(var.get())
+        #         except:
+        #             val = 0.0
+        #         if field_var.get() == "价格":
+        #             var.set(round(val * 0.99, 2))  # 价格按 1% 减少
+        #         elif field_var.get() == "涨幅":
+        #             var.set(round(val - 1, 2))     # 涨幅 -1
+        #         elif field_var.get() == "量":
+        #             var.set(round(val - 0.5, 2))   # 量 -0.5
+        #     return _dec
+
+        # ttk.Button(rules_frame, text="-", command=make_adjust_fn_minus(val_var), width=4).grid(row=row, column=4)
+        # ttk.Button(rules_frame, text="+", command=make_adjust_fn(val_var), width=4).grid(row=row, column=5)
+
+        '''
+        # 根据字段决定调整幅度
+        if field == "量":
+            step = 0.5
+            text_minus = "-0.5"
+            text_plus = "+0.5"
+        elif field == "涨幅":
+            step = 0.1
+            text_minus = "-0.1"
+            text_plus = "+0.1"
+        else:  # 默认价格
+            step = 0.01  # 1%
+            text_minus = "-1%"
+            text_plus = "+1%"
+
+        # 百分比/步进调整按钮
+        ttk.Button(rules_frame, text=text_minus, command=make_adjust_fn(val_var, -step), width=4).grid(row=row, column=4)
+        ttk.Button(rules_frame, text=text_plus,  command=make_adjust_fn(val_var, step),  width=4).grid(row=row, column=5)
+        '''
+        # # 百分比调整按钮
+        # ttk.Button(rules_frame, text="-1%", command=make_adjust_fn(val_var, -0.02), width=4).grid(row=row, column=4)
+        # ttk.Button(rules_frame, text="+1%", command=make_adjust_fn(val_var, 0.02), width=4).grid(row=row, column=5)
 
         # delta 输入
         delta_var = tk.DoubleVar(value=delta)
-        ttk.Spinbox(rules_frame, textvariable=delta_var, from_=0.01, to=100000,
+        # delta_var = tk.StringVar(value=delta)
+        ttk.Spinbox(rules_frame, textvariable=delta_var, from_=-10.01, to=100,
                     increment=0.1, width=8,validate="key",validatecommand=(vcmd, "%P")).grid(row=row, column=6, padx=5)
+        # ttk.Entry(rules_frame, textvariable=delta_var, width=10,validate="key", validatecommand=(vcmd, "%P")).grid(row=row, column=3, padx=2)
 
         entries.append({
             "field_var": field_var,
@@ -2783,7 +3189,21 @@ def open_alert_editor(stock_code, new=False):
         toast_message(alert_window, f"{code} 报警规则已保存")
         editor.destroy()
 
+    def del_rule():
 
+        if code in alerts_rules:
+            print(f"删除规则: {alerts_rules[code]}")
+            del alerts_rules[code]
+
+        # 删除 entries 里的控件（逐一销毁 UI）
+        for entry in entries:
+            for widget in entry.get("widgets", []):  # widgets 存放该行的 Spinbox/Button/Checkbutton 等
+                widget.destroy()
+        entries.clear()
+        save_alerts()
+        toast_message(alert_window, f"{code} 所有规则已删除")
+        # 关闭规则编辑窗口
+        editor.destroy()
     # 渲染已有规则
     for rule in rules:
         add_rule(
@@ -2794,7 +3214,11 @@ def open_alert_editor(stock_code, new=False):
             delta=rule.get("delta", default_deltas.get(rule.get("field", "价格"), 0.5))
         )
 
-        
+    def cancel_rule():
+        global alerts_rules
+        # print(f'alerts_rules:{alerts_rules.get(code, [])} orig_rules:{orig_rules.get(code, [])}')
+        alerts_rules = orig_rules
+        editor.destroy()
     # 控制按钮区域
 
     button_frame = ttk.Frame(editor, padding=(10, 5))
@@ -2802,8 +3226,12 @@ def open_alert_editor(stock_code, new=False):
     
     ttk.Button(button_frame, text="保存", command=save_rule).pack(side=tk.LEFT, padx=5)
     ttk.Button(button_frame, text="添加规则", command=lambda: add_rule()).pack(side=tk.LEFT, padx=5)
-    ttk.Button(button_frame, text="取消", command=editor.destroy).pack(side=tk.RIGHT, padx=5)
-
+    ttk.Button(button_frame, text="删除规则", command=lambda: del_rule()).pack(side=tk.RIGHT, padx=5)
+    ttk.Button(button_frame, text="取消", command=lambda: cancel_rule()).pack(side=tk.RIGHT, padx=5)
+    editor.protocol("WM_DELETE_WINDOW", lambda: cancel_rule())
+    # 按 Esc 关闭窗口
+    editor.bind("<Escape>", lambda event: cancel_rule())
+    # alert_window.protocol("WM_DELETE_WINDOW", lambda: on_close_alert_monitor(alert_window))
 
 
 def refresh_alert_rules_ui(stock_code):
@@ -3022,6 +3450,8 @@ def refresh_all_stock_data():
         data = loaded_df.copy()  # 每只股票：code, price, change, volume
     elif realdatadf is not None and not realdatadf.empty:
         data = realdatadf.copy()
+    else:
+        data = _get_stock_changes()
     if '涨幅' not in data.columns:
         data = process_full_dataframe(data)
     data = get_latest_valid_data(data)
@@ -3237,6 +3667,33 @@ for i, btn in enumerate(buttons):
     btn.grid(row=i, column=0, sticky=tk.W, padx=5, pady=3)
 
 
+width = radio_container.winfo_width()
+if width <= 1:
+    cols = 5  # 初始化时默认5列
+else:
+    # 估算每个按钮的宽度，包括 padx
+    btn_width = 110  
+    # 计算列数，约束最少5列，最多10列
+    cols = width // btn_width
+    # print(f'cols:{cols}')
+    if cols < 5:
+        cols = 5
+    elif cols > 11:
+        cols = 11
+
+# 清空布局
+for btn in buttons:
+    btn.grid_forget()
+
+# 重新布局
+for i, btn in enumerate(buttons):
+    row, col = divmod(i, cols)
+    btn.grid(row=row, column=col, sticky=tk.W, padx=5, pady=3)
+
+# 列权重
+for c in range(cols):
+    radio_container.grid_columnconfigure(c, weight=1)
+        
 # 创建搜索框和按钮
 search_frame = tk.Frame(root, bg="#f0f0f0", padx=10, pady=10)
 search_frame.pack(fill=tk.X, padx=10)
@@ -3396,6 +3853,6 @@ refresh_all_stock_data()
 bind_hotkeys(root)
 
 root.bind("<FocusIn>", on_window_focus, add="+")
-root.bind("<Configure>", lambda event: update_window_position("main"))
+# root.bind("<Configure>", lambda event: update_window_position("main"))
 root.protocol("WM_DELETE_WINDOW", lambda: on_closing(root, "main"))
 root.mainloop()

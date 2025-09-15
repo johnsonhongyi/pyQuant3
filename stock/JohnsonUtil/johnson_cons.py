@@ -142,6 +142,7 @@ https://www.bilibili.com/opus/655159336464547863
                         # and low > ma52d and (topR > 0 and per1d > 1) and high4==max5 and max5 >=hmax*0.9 and topR > 1')",\
 initkey = 6
 codeQuery= {"放量上涨": "top_temp.query('close > df2  and low > ene and close > lastp1d and volume > 3 and boll > 1')",\
+            "percd": "top_temp.filter(regex=r'^perc\d+d$')",\
             "上轨十字": "top_all.query('lastp1d*0.98 < lasto1d < lastp1d*1.1 and lastp1d > upper1 and lastp1d > lastp2d')",\
             "二日十字": "top_all.query('lastp1d*0.98 < lasto1d < lastp1d*1.1 and lastp2d*0.98 < lasto2d < lastp2d*1.1 and lastp1d > upper1 and lastp1d > lastp2d')",\
             "连阳加速": "top_all.query('lasth1d > lasth2d > lasth3d and lastl1d > lastl2d > lastl3d and lasto1d > lastp2d and lasto2d > lastp3d and lastl1d >= lastp2d*0.99 and lastl2d >= lastp3d*0.99 and close > upper')",\
@@ -163,6 +164,7 @@ codeQuery= {"放量上涨": "top_temp.query('close > df2  and low > ene and clos
             # "K线4连阳"    : "top_temp.query('low > lastl1d and  lasth1d >= lasth2d and lasth2d >= lasth3d and lasth3d >= lasth4d and low >=ma51d')",\
 
 codeQuery_work_false= {"放量上涨": "top_temp.query('close > df2  and low > ene and close > lastp2d and volume > 3 and boll > 1')",\
+                        "percd": "top_temp.filter(regex=r'^perc\d+d$')",\
                         "上轨十字": "top_all.query('lastp1d*0.98 < lasto1d < lastp1d*1.1 and lastp1d > upper1 and lastp1d > lastp2d')",\
             "二日十字": "top_all.query('lastp1d*0.98 < lasto1d < lastp1d*1.1 and lastp2d*0.98 < lasto2d < lastp2d*1.1 and lastp1d > upper1 and lastp1d > lastp2d')",\
             "连阳加速": "top_all.query('lasth1d > lasth2d > lasth3d and lastl1d > lastl2d > lastl3d and lasto1d > lastp2d and lasto2d > lastp3d and lastl1d >= lastp2d*0.99 and lastl2d >= lastp3d*0.99 and close > upper')",\
@@ -253,7 +255,7 @@ dratio_limit = 0.25
 duration_sleep_time = 30
 single_duration_sleep_time = 180
 # single_duration_sleep_time = 120
-compute_lastdays = 9
+compute_lastdays = 12
 last_TopR_days = 15
 # sort_value_key_perd23 = '2 3 d f'
 # sort_value_key_perd23 = '3 3'
@@ -997,7 +999,8 @@ def get_market_sort_value_key(st, top_all=None, perd_d=3):
         if st in ['2', '3']:
             if len(st_l) > 1:
                 if isDigit(st_l[1]):
-                    # cct.GlobalValues()
+                    cct.GlobalValues().setkey('market_key',st_l[0])
+                    cct.GlobalValues().setkey('market_value', st_l[1])
                     if st_l[1] == '0':
                         new_l = []
                         for x in range(0,st_count):
@@ -1006,8 +1009,6 @@ def get_market_sort_value_key(st, top_all=None, perd_d=3):
                             else:
                                 new_l.append(st_l[x])
                         st_l = new_l
-                    cct.GlobalValues().setkey('market_key',st_l[0])
-                    cct.GlobalValues().setkey('market_value', st_l[1])
                     if st_count >= 3:
                         if isDigit(st_l[2]):
                             cct.GlobalValues().setkey('market_va_filter', st_l[2])

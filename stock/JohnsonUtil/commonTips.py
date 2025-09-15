@@ -4968,7 +4968,221 @@ def func_compute_percd2024( open, close,high, low,lastopen, lastclose,lasthigh, 
     return round(initc,1)
 
 
-def func_compute_percd2021(open, close, high, low, last_open, last_close, last_high, last_low, ma5, ma10, now_vol, last_vol, upper, high4, max5, hmax, lastdu4, code, idate=None):
+
+def func_compute_percd2021_vectorized(dd):
+    """
+    向量化计算股票综合评分，逻辑对应 func_compute_percd2021
+    假设 df 中包含以下列：
+    ['open', 'close', 'high', 'low', 'last_open', 'last_close', 'last_high', 'last_low',
+     'ma5d', 'ma10d', 'vol', 'last_vol', 'upper', 'high4', 'max5', 'hmax', 'lastdu4', 'code']
+    """
+
+    df = dd.copy()
+    df['last_open']  = df['open'].shift(1)
+    df['last_close'] = df['close'].shift(1)
+    df['last_high']  = df['high'].shift(1)
+    df['last_low']   = df['low'].shift(1)
+    df['last_vol']   = df['vol'].shift(1)
+    score = pd.Series(0.0, index=df.index)
+
+    # 基础数据
+    percent_change = (df['close'] - df['last_close']) / df['last_close'] * 100
+    vol_ratio = df['vol'] / df['last_vol']
+    valid_mask = (~df['last_close'].isna()) & (df['last_close'] != 0) & (~df['last_vol'].isna()) & (df['last_vol'] != 0)
+    score.loc[~valid_mask] = 0.0
+
+    # ====================
+    # 1️⃣ 刚启动强势股（安全拉升）
+    # ====================
+    mask_outer = valid_mask & (df['high'] > df['high4']) & (percent_change > 5) & (df['last_close'] < df['high4'])
+    mask_inner = mask_outer & (df['high'] >= df['open']) & (df['open'] > df['last_close']) & \
+                 (df['close'] > df['last_close']) & (df['close'] >= df['high']*0.99) & \
+                 ((df['high'] < df['hmax']) | (df['last_high'] < df['hmax']))
+
+    # 市场前缀加分
+    for prefix, high_score, low_score in [('6',25,20), ('0',25,20), ('3',35,20), ('688',35,18), ('8',35,18)]:
+        mask = mask_inner & df['code'].astype(str).str.startswith(prefix)
+        score.loc[mask & (percent_change >= 5)] += high_score
+        score.loc[mask & (percent_change < 5)] += low_score
+
+    mask_other = mask_inner & ~(df['code'].astype(str).str.startswith(('6','0','3','688','8')))
+    score.loc[mask_other] += 15.0
+
+    # 外层非高开高走安全启动加分
+    score.loc[mask_outer] += 15.0
+
+    # ====================
+    # 2️⃣ 收盘价突破与高点
+    # ====================
+    score.loc[valid_mask & (df['close'] > df['last_close'])] += 1.0
+    score.loc[valid_mask & (df['high'] > df['last_high'])] += 1.0
+    score.loc[valid_mask & (df['close'] >= df['high']*0.998)] += 5.0
+    score.loc[valid_mask & (vol_ratio > 2) & (df['close'] >= df['high']*0.998)] += 5.0
+    score.loc[valid_mask & (df['low'] > df['last_low'])] += 1.0
+    score.loc[valid_mask & (df['last_close'] <= df['upper']) & (df['close'] > df['upper'])] += 10.0
+    score.loc[valid_mask & (df['open'] > df['last_high']) & (df['close'] > df['open']) &
+              (df['last_close'] <= df['upper']) & (df['close'] > df['upper'])] += 10.0
+    score.loc[valid_mask & (df['close'] >= df['upper'])] += 5.0
+    score.loc[valid_mask & (1.0 < vol_ratio) & (vol_ratio < 2.0)] += 2.0
+    score.loc[valid_mask & (df['high'] > df['high4'])] += 3.0
+    score.loc[valid_mask & (percent_change > 3) & (df['close'] >= df['high']*0.95) &
+              (df['high'] > df['max5']) & (df['high'] > df['high4'])] += 5.0
+    score.loc[valid_mask & (df['hmax'].notna()) & (df['high'] >= df['hmax'])] += 20.0
+    score.loc[valid_mask & (df['low'] > df['last_high'])] += 20.0
+    score.loc[valid_mask & (df['low'] > df['last_high']) & (df['close'] > df['open'])] += 5.0
+
+    # ====================
+    # 低开高走 & 放量 & MA5
+    # ====================
+    mask_low_open = valid_mask & (df['open'] == df['low'])
+    score.loc[mask_low_open & (df['open'] < df['last_close']) & (df['open'] >= df['ma5d']) & (df['close'] > df['open'])] += 15.0
+    score.loc[mask_low_open & (df['close'] > df['open'])] += 8.0
+    score.loc[mask_low_open & (vol_ratio > 2)] += 5.0
+    score.loc[valid_mask & (percent_change > 5)] += 8.0
+
+    # ====================
+    # 3️⃣ 减分项
+    # ====================
+    score.loc[valid_mask & (df['close'] < df['last_close'])] -= 1.0
+    score.loc[valid_mask & (df['low'] < df['last_low'])] -= 3.0
+    score.loc[valid_mask & (df['close'] < df['last_close']) & (df['vol'] > df['last_vol'])] -= 8.0
+    score.loc[valid_mask & (df['last_close'] >= df['ma5d']) & (df['close'] < df['ma5d'])] -= 5.0
+    score.loc[valid_mask & (df['last_close'] >= df['ma10d']) & (df['close'] < df['ma10d'])] -= 8.0
+    score.loc[valid_mask & (df['open'] > df['close'])] -= 5.0
+    score.loc[valid_mask & (df['open'] > df['close']) & ((df['close'] < df['ma5d']) | (df['close'] < df['ma10d']))] -= 5.0
+    score.loc[valid_mask & (df['open'] == df['high'])] -= 10.0
+    score.loc[valid_mask & (percent_change < -5)] -= 8.0
+
+    # ====================
+    # 4️⃣ lastdu4 波动幅度辅助加分
+    # ====================
+    mask_du4_1 = valid_mask & (df['high'] > df['high4']) & (df['lastdu4'] <= 15)
+    mask_du4_2 = valid_mask & (df['high'] > df['high4']) & (df['lastdu4'] > 15) & (df['lastdu4'] <= 40)
+    score.loc[mask_du4_1] += 30
+    score.loc[mask_du4_2] += 18
+
+    return score
+
+def func_compute_percd2021(open, close, high, low,
+                           last_open, last_close, last_high, last_low,
+                           ma5, ma10, now_vol, last_vol,
+                           upper, high4, max5, hmax,
+                           lastdu4, code, idate=None):
+    init_c = 0.0
+    if np.isnan(last_close) or last_close == 0 or np.isnan(last_vol) or last_vol == 0:
+        return 0
+
+    percent_change = (close - last_close) / last_close * 100
+    vol_ratio = now_vol / last_vol
+
+    # ====================
+    # 1️⃣ 刚启动强势股（安全拉升）
+    # ====================
+    if high > high4 and percent_change > 5 and last_close < high4:
+        if high >= open > last_close and close > last_close and close >= high*0.99 and (high < hmax or last_high < hmax):
+            if str(code).startswith(('6','0')):
+                if percent_change >= 5:
+                    init_c += 25.0
+                else:
+                    init_c += 20.0
+            elif str(code).startswith('3'):
+                if percent_change >= 6:
+                    init_c += 35.0
+                else:
+                    init_c += 20.0
+            elif str(code).startswith(('688','8')):
+                if percent_change >= 5:
+                    init_c += 35.0
+                else:
+                    init_c += 20.0
+            else:
+                init_c += 15.0
+            if vol_ratio < 2:
+                init_c += 15.0
+            else:
+                init_c += 2.0
+        else:
+            init_c += 15.0
+
+    # ====================
+    # 2️⃣ 收盘价突破与高点
+    # ====================
+    if close > last_close:
+        init_c += 1.0
+    if high > last_high:
+        init_c += 1.0
+    if close >= high*0.998:
+        init_c += 5.0
+        if vol_ratio > 2:
+            init_c += 5.0
+    if low > last_low:
+        init_c += 1.0
+    if last_close <= upper and close > upper:
+        init_c += 10.0
+        if open > last_high and close > open:
+            init_c += 10.0
+    elif close >= upper:
+        init_c += 5.0
+    if 1.0 < vol_ratio < 2.0:
+        init_c += 2.0
+    if high > high4:
+        init_c += 3.0
+    if percent_change > 3 and close >= high * 0.95 and high > max5 and high > high4:
+        init_c += 5.0
+    if hmax is not None and high >= hmax:
+        init_c += 20.0
+    if low > last_high:
+        init_c += 20.0
+        if close > open:
+            init_c += 5.0
+
+    # ====================
+    # 低开高走 & 放量 & MA5
+    # ====================
+    if open == low:
+        if open < last_close and open >= ma5 and close > open:
+            init_c += 15.0
+        if close > open:
+            init_c += 8.0
+        if vol_ratio > 2:
+            init_c += 5.0
+    if percent_change > 5:
+        init_c += 8.0
+
+    # ====================
+    # 3️⃣ 减分项
+    # ====================
+    if close < last_close:
+        init_c -= 1.0
+    if low < last_low:
+        init_c -= 3.0
+    if close < last_close and now_vol > last_vol:
+        init_c -= 8.0
+    if last_close >= ma5 and close < ma5:
+        init_c -= 5.0
+    if last_close >= ma10 and close < ma10:
+        init_c -= 8.0
+    if open > close:
+        init_c -= 5.0
+        if close < ma5 or close < ma10:
+            init_c -= 5.0
+    if open == high:
+        init_c -= 10.0
+    if percent_change < -5:
+        init_c -= 8.0
+
+    # ====================
+    # 4️⃣ lastdu4 波动幅度辅助加分
+    # ====================
+    if high > high4 and lastdu4 is not None:
+        if lastdu4 <= 15:
+            init_c += 30
+        elif 15 < lastdu4 <=40:
+            init_c += 18
+
+    return init_c
+
+def func_compute_percd2021_google(open, close, high, low, last_open, last_close, last_high, last_low, ma5, ma10, now_vol, last_vol, upper, high4, max5, hmax, lastdu4, code, idate=None):
     """
     根据一系列股票交易行为计算综合得分。
 
@@ -5468,7 +5682,10 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
             print(f"\n{initkey}: {code[initkey]}")
             # cmd = code[idxkey]
             GlobalValues().setkey('tempdf',code[initkey])
-            cmd=ct.codeQuery_show_cct(initkey,Market_Values,workstatus,orderby)
+            if code[initkey].find('filter') > 0:
+                cmd = code[initkey]
+            else:
+                cmd=ct.codeQuery_show_cct(initkey,Market_Values,workstatus,orderby)
         # cmd = (cct.cct_raw_input(dir_mo.append(":")))
         # if cmd == 'e' or cmd == 'q' or len(cmd) == 0:
         if cmd == 'e' or cmd == 'q':
@@ -5559,7 +5776,6 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
             continue
         else:
             try:
-
                 if cmd.startswith('tempdf'):
                     if GlobalValues().getkey('tempdf') is not None:
                         tempdf = eval(GlobalValues().getkey('tempdf')).sort_values(orderby, ascending=False)
@@ -5571,7 +5787,8 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                     # print(cmd)
                     # exec(cmd)
                     exec(cmd)
-
+                elif  cmd.find('filter') > 0:
+                    print((eval(cmd))) 
                 else:
                     
                     doubleCmd=False
@@ -5619,6 +5836,8 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                         check_s = re.findall(r'^[a-zA-Z\d]*', check_all)[0]
 
                     # if (cmd.startswith('tempdf') or cmd.startswith('top_temp')) and  cmd.find('sort') < 0:
+                    
+
                     if (cmd.find('.loc') > 0 and cmd.find(':') > 0) or (cmd.find('.loc') < 0 and (cmd.startswith('tempdf') or cmd.startswith('top_temp') or cmd.startswith('top_all'))) and  check_s not in top_temp.columns:
                         if orderby not in ['topR','percent']and orderby in top_temp.columns:
                             top_temp[orderby] = top_temp[orderby].astype(int)
