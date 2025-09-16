@@ -1,3 +1,5 @@
+import os
+import sys
 import requests
 import pandas as pd
 import tkinter as tk
@@ -9,7 +11,6 @@ from datetime import datetime, timedelta
 from ctypes import wintypes
 import ctypes
 from tkcalendar import DateEntry
-import os ,sys# 導入 os 模組
 import psutil
 import re
 import win32gui
@@ -21,6 +22,7 @@ import concurrent.futures
 import pyperclip
 import random
 import queue
+import importlib.util
 # 全局变量
 monitor_windows = {}  # 存储监控窗口实例
 
@@ -60,7 +62,9 @@ screen_height = 0
 
 ALERT_COOLDOWN = 5 * 60  # 冷却时间，单位秒
 last_alert_times = {}  # 记录每个股票每条规则上次报警时间
-
+sina_data_last_updated_time = None
+sina_data_df = None
+pytables_status = None
 EnumWindows = ctypes.windll.user32.EnumWindows
 EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
 GetWindowText = ctypes.windll.user32.GetWindowTextW
@@ -90,7 +94,78 @@ MONITOR_LIST_FILE =  os.path.join(BASE_DIR, "monitor_list.json")
 CONFIG_FILE =  os.path.join(BASE_DIR, "window_config.json")
 ALERTS_FILE =  os.path.join(BASE_DIR, "alerts.json")
 ARCHIVE_DIR = os.path.join(BASE_DIR, "archives")
+DARACSV_DIR = os.path.join(BASE_DIR, "datacsv")
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
+os.makedirs(DARACSV_DIR, exist_ok=True)
+def check_hdf5():
+    # 检查 tables 是否可用
+    global pytables_status
+    # 检查 PyTables
+    tables_available = importlib.util.find_spec("tables") is not None
+    if not tables_available:
+        print("缺少 PyTables，HDFStore 功能将被禁用。")
+
+    # 检查 MKL
+    mkl_available = False
+    pytables_status = True
+
+    def detect_blas_backend():
+        import numpy.__config__ as np_config
+        config = {}
+        for name in dir(np_config):
+            if name.endswith("_info"):
+                try:
+                    value = getattr(np_config, name)
+                    if value and "NOT AVAILABLE" not in str(value):
+                        config[name] = value
+                except Exception:
+                    pass
+        
+        if any("mkl" in k.lower() for k in config.keys()):
+            return "MKL"
+        elif any("openblas" in k.lower() for k in config.keys()):
+            return "OpenBLAS"
+        elif any("blis" in k.lower() for k in config.keys()):
+            return "BLIS"
+        else:
+            return "Unknown"
+
+    # def list_blas_libraries():
+    #     import numpy as np
+    #     blas_libraries = []
+    #     # 遍历 numpy.__config__ 的所有属性
+    #     for attr in dir(np.__config__):
+    #         if attr.endswith("_info"):
+    #             try:
+    #                 info = getattr(np.__config__, attr)
+    #                 if isinstance(info, dict) and "libraries" in info:
+    #                     blas_libraries.extend(info["libraries"])
+    #             except Exception:
+    #                 pass
+    #     return blas_libraries
+
+    # print("BLAS/LAPACK libraries:", list_blas_libraries())
+    # def check_blas():
+    #     import numpy as np
+    #     import ctypes.util 
+    #     # for name in list(np.__config__.blas_opt_info.get("libraries", [])):
+    #     #     print("BLAS library:", name)
+
+    #     # 进一步检查动态库
+    #     for dll in ctypes.util.find_library("mkl_rt"), ctypes.util.find_library("openblas"):
+    #         print("Found DLL:", dll)
+    # check_blas()
+
+
+    if detect_blas_backend() == 'Unknown':
+        print("MKL 不可用，NumPy 可能会慢一些，但程序仍可运行。")
+        # pytables_status = False
+    # 使用条件判断执行后续代码
+    if tables_available and mkl_available:
+        pytables_status = True
+    else:
+        print("跳过 HDFStore 操作")
+    print(f"BLAS backend:{detect_blas_backend()} pytables_status:{pytables_status}")
 
 
 def get_ths_code():
@@ -590,9 +665,33 @@ loaded_df = None
 date_write_is_processed = False
 
 
+
+def minutes_to_time(target_int):
+    """
+    target_int: 整数，HHMM格式，例如 1300 表示 13:00
+    返回当前时间距离目标时间的分钟数（正数表示还没到，负数表示已过）
+    """
+    now = datetime.now()
+    target_hour = target_int // 100
+    target_minute = target_int % 100
+    target_time = datetime.combine(now.date(), datetime.min.time()) + timedelta(hours=target_hour, minutes=target_minute)
+
+    delta = target_time - now
+    return delta.total_seconds() / 60  # 分钟数（浮点）
+    
+
+# 示例
+print(minutes_to_time(1300))
+
+
 def get_now_time_int():
     now_t = datetime.now().strftime("%H%M")
     return int(now_t)
+
+def get_now_time_int_sec():
+    now_t = datetime.now().strftime("%H:%M:%S")
+    return (now_t)
+
 
 def get_last_weekday_before(target_date=datetime.today().date()):
     """
@@ -888,11 +987,59 @@ def get_dfcf_all_data():
 def start_async_save(df=None):
     """启动一个新线程来保存DataFrame"""
     # 创建并启动新线程
-    print("正在启动save_dataframe后台保存任务...")
-    # save_thread = executor.submit(save_dataframe)
-    save_thread = threading.Thread(target=save_dataframe)
+    # print("正在启动save_dataframe后台保存任务...")
+    # # save_thread = executor.submit(save_dataframe)
+    # save_thread = threading.Thread(target=save_dataframe)
+    # save_thread.start()
+    """后台线程保存 DataFrame"""
+    print("正在启动 save_dataframe 后台保存任务...")
+    
+    def save_wrapper():
+        try:
+            save_dataframe()  # 确保 save_dataframe 内部可以安全在后台线程运行
+        except Exception as e:
+            print("保存出错:", e)
+    
+    save_thread = threading.Thread(target=save_wrapper, daemon=True)
     save_thread.start()
 
+
+def schedule_daily_archive(root, hour=15, minute=5, archive_file=None):
+    """每日固定时间执行存档任务，仅工作日"""
+    
+    def archive_func():
+        start_async_save()
+
+    def next_archive_time():
+        """计算下一次存档时间，跳过周末"""
+        now = datetime.now()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        
+        # 如果已经过今天目标时间或今天是周末，则找下一个工作日
+        while target <= now or target.weekday() >= 5:  # 5=周六,6=周日
+            target += timedelta(days=1)
+            target = target.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        return target
+
+    def check_and_schedule():
+        now = datetime.now()
+        next_time = next_archive_time()
+        delay = (next_time - now).total_seconds() * 1000  # 毫秒
+        print(f"下一次存档时间: {next_time}, 延迟 {int(delay)} ms")
+        root.after(int(delay), run_archive)
+
+    def run_archive():
+        archive_func()
+        # 执行完成后再次调度下一次
+        check_and_schedule()
+
+    # 启动时检查文件是否存在，不存在立即存档（仅工作日）
+    # if not os.path.exists(archive_file) and datetime.datetime.now().weekday() < 5:
+    #     archive_func()
+    archive_func()
+
+    # 第一次调度
+    check_and_schedule()
 
 # --- 儲存 DataFrame 的函數 ---
 def save_dataframe(df=None):
@@ -1690,8 +1837,9 @@ def open_archive_loader():
     # 加载按钮
     ttk.Button(win, text="加载", command=lambda: load_archive(selected_file.get())).pack(pady=5)
     # 按 Esc 关闭窗口
-    win.bind("<Escape>", lambda event: win.destroy())
-    
+    win.bind("<Escape>", lambda : win.destroy())
+    win.after(10*1000,  lambda  :win.destroy())
+
 # --- 数据持久化函数 ---
 def save_monitor_list():
     """保存当前的监控股票列表到文件"""
@@ -1788,8 +1936,8 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
     if start_init == 0:
         time.sleep(6)
         start_init = 1
-    if not get_work_time() and get_now_time_int() > 1505:
-        start_async_save()
+    # if not get_work_time() and get_now_time_int() > 1505:
+    #     start_async_save()
     return realdatadf
 
 def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_minutes=update_interval_minutes):
@@ -1820,6 +1968,36 @@ def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_
         temp_df = get_stock_changes(selected_type=selected_type, stock_code=stock_code)
 
     return temp_df
+
+
+
+def _get_sina_data_realtime(stock_code=None):
+    global sina_data_last_updated_time,sina_data_df
+    global pytables_status
+    basedir = "G:" + os.sep
+    fname = os.path.join(basedir, "sina_data.h5")             # 原始 HDF5
+    table = "all"
+    current_time = datetime.now()
+    df = None
+    if pytables_status:
+        if sina_data_last_updated_time is None or current_time - sina_data_last_updated_time >= timedelta(minutes=3):
+            sina_data = read_hdf_table(fname,table)
+            if sina_data is not None and not sina_data.empty:
+                sina_data_last_updated_time = current_time
+                sina_data_df = sina_data.copy()
+                if stock_code is not None:
+                    df = sina_data.loc[stock_code]
+                else:
+                    df = sina_data
+        else:
+            if sina_data_df is not None and not sina_data_df.empty:
+                if stock_code is not None:
+                    df = sina_data_df.loc[stock_code]
+                else:
+                    df = sina_data_df
+
+    return df
+    # return None
 
 def _get_stock_changes(selected_type=None, stock_code=None):
     """获取股票异动数据"""
@@ -1866,43 +2044,141 @@ def fast_insert(tree, dataframe):
 def refresh_stock_data(window_info, tree, item_id):
     """提交后台任务"""
     stock_code = window_info['stock_info'][0]
-
     def task():
         try:
             data = _get_stock_changes(None, stock_code)  # 你的数据获取函数
             result_queue.put(("data", data, tree, window_info, item_id))
         except Exception as e:
             result_queue.put(("error", e, tree, window_info, item_id))
-
     threading.Thread(target=task, daemon=True).start()
 
-def process_queue(window):
-    """主线程轮询队列，更新 Tkinter UI"""
-    try:
-        while True:
-            msg_type, payload, tree, window_info, item_id = result_queue.get_nowait()
+# 控制更新节流
+UPDATE_INTERVAL = 30  # 秒，更新UI最小间隔
+last_update_time = 0
+message_cache = []  # 缓存队列
 
+def process_queue(window):
+    global last_update_time, message_cache
+    global refresh_registry
+    # 1. 收集队列中所有消息
+    while True:
+        try:
+            msg = result_queue.get_nowait()
+            message_cache.append(msg)
+        except queue.Empty:
+            break
+
+    now = time.time()
+    # 2. 如果达到更新间隔，批量处理缓存
+    if message_cache and (now - last_update_time >= UPDATE_INTERVAL):
+        for msg_type, payload, tree, window_info, item_id in message_cache:
             if msg_type == "data":
                 update_monitor_tree(payload, tree, window_info, item_id)
             elif msg_type == "error":
                 handle_error(payload, tree, window_info, item_id)
 
-    except queue.Empty:
-        pass
-    finally:
-        window.after(200, lambda: process_queue(window))
+        message_cache.clear()
+        last_update_time = now
 
+    # 3. 定时再次轮询
+    # print(f'process_queue:0.5S')
+    window.after(500, lambda: process_queue(window))  # 0.5秒轮询一次队列
+
+
+# 保存每个 stock_code/item_id 的刷新状态
+refresh_registry = {}  # {(tree, window_info, item_id): {"after_id": None}}
 # ---------------------------
 # 主线程 UI 更新函数
 # ---------------------------
 def update_monitor_tree(data, tree, window_info, item_id):
     """更新子窗口的 Treeview"""
+    global start_init,refresh_registry
+
     stock_info = window_info['stock_info']
     stock_code, stock_name, *rest = stock_info
     window = window_info['toplevel']
 
+    # print(refresh_registry.keys())
+    # 如果已经有 active after，说明下一次刷新已经安排好了，直接返回
+    # if refresh_registry[key]["after_id"] is not None:
+    #     return
+
+    # def schedule_next(delay_ms):
+    #     # 如果已有定时器，取消它（防止重复）
+    #     if refresh_registry[key]["after_id"]:
+    #         # tree.after_cancel(refresh_registry[key]["after_id"])
+    #         try:
+    #             tree.after_cancel(refresh_registry[key]["after_id"])
+    #         except Exception:
+    #             pass  # 任务可能已执行完或被取消
+    #         refresh_registry[key]["after_id"] = None
+    #     # 启动下一次刷新
+    #     refresh_registry[key]["after_id"] = tree.after(delay_ms, lambda: refresh_stock_data(window_info, tree, item_id))
+
+    # 更新最新一行
+    def update_latest_row(new_row):
+        children = tree.get_children()
+        if children:
+            # 获取最后一行的 item id
+            # last_item = children[-1]
+            # tree.item(last_item, values=new_row)
+             # 插入到最上面一行
+            tree.insert("", 0, values=new_row) 
+        else:
+            tree.insert("", tk.END, values=new_row)
+
+    def schedule_next(delay_ms,key, tree, window_info, item_id):
+        now = time.time()
+        
+        # 如果已有任务且还没到期，直接返回
+        if refresh_registry[key]["execute_at"] > now:
+            # print('refresh_registry not run time')
+            return
+        execute_at = now + delay_ms / 1000  # 转为秒
+        dt=datetime.fromtimestamp(execute_at).strftime("%Y-%m-%d %H:%M:%S")
+        # print(f"[{item_id}] {stock_code} 更新刷新任务，安排下一次执行:{dt}")
+        refresh_registry[key]["execute_at"] = execute_at
+        # 取消旧任务（可能已经执行完也没关系）
+        if refresh_registry[key]["after_id"]:
+            try:
+                tree.after_cancel(refresh_registry[key]["after_id"])
+            except Exception:
+                pass
+
+        # 安排下一次刷新
+        def task():
+            try:
+                refresh_stock_data(window_info, tree, item_id)
+            finally:
+                # 执行完成后清理状态
+                refresh_registry[key]["after_id"] = None
+                refresh_registry[key]["execute_at"] = 0
+
+        refresh_registry[key]["after_id"] = tree.after(delay_ms, task)
+
+
+
+
+    # print(f'update_monitor_tree:{stock_code} {stock_name} {price},{percent},{amount} {get_now_time_int_sec()} ')
     if not window or not window.winfo_exists():
         return  # 窗口已关闭
+
+    key = (id(tree), id(window_info), item_id)
+     # 如果已经有刷新任务在调度中，就不再创建新的
+    if key not in refresh_registry:
+        refresh_registry[key] = {"after_id": None , "execute_at": 0 }
+
+    now = datetime.now()
+    next_execution_time = get_next_weekday_time(9, 25)
+    delay_ms = int((next_execution_time - now).total_seconds() * 1000)
+    dd  = _get_sina_data_realtime(stock_code)
+    price,percent,amount = 0,0,0
+    if dd is not None:
+        price = dd.close
+        percent = round((dd.close - dd.llastp) / dd.llastp *100,1)
+        amount = round(dd.turnover/100/10000/100,1)
+        print(f'sina_data:{stock_code}, {price},{percent},{amount}')
+
 
     if data is not None and not data.empty:
         # 只保留当前股票
@@ -1911,31 +2187,50 @@ def update_monitor_tree(data, tree, window_info, item_id):
         if '涨幅' not in data.columns:
             data = process_full_dataframe(data)
         if not get_work_time():
-            _data = data[data['量'] > 0 ]
-            if _data is not None and not _data.empty:   
-                check_alert(stock_code, _data[:1]['价格'].values[0], _data[:1]['涨幅'].values[0], _data[:1]['量'].values[0])
+            if dd is not None:
+                print(f'sina_data:{stock_code}, {price},{percent},{amount}')
+                check_alert(stock_code, price,percent,amount)
+            else:
+                _data = data[data['量'] > 0 ]
+                if _data is not None and not _data.empty:   
+                    check_alert(stock_code, _data[:1]['价格'].values[0], _data[:1]['涨幅'].values[0], _data[:1]['量'].values[0])
         else:
-            check_alert(stock_code, data[:1]['价格'].values[0], data[:1]['涨幅'].values[0], data[:1]['量'].values[0])
+            if dd is not None:
+                print(f'sina_data:{stock_code}, {price},{percent},{amount}')
+                check_alert(stock_code, price,percent,amount)
+            else:
+                check_alert(stock_code, data[:1]['价格'].values[0], data[:1]['涨幅'].values[0], data[:1]['量'].values[0])
         
         data = data[['时间', '板块', '涨幅', '价格', '量']]
         tree.delete(*tree.get_children())
         for _, row in data.iterrows():
             tree.insert("", "end", values=list(row))
 
+        if dd is not None:
+            row = [dd.ticktime.strftime("%H:%M:%S") ,"新浪" , percent ,price,amount]
+            update_latest_row(row)
         # 随机间隔再次刷新
-        wait_time = int(random.uniform(30000, 60000))
-        window.after(wait_time, lambda: refresh_stock_data(window_info, tree, item_id))
+        # wait_time = int(random.uniform(30000, 60000))
+        # window.after(wait_time, lambda: refresh_stock_data(window_info, tree, item_id))
+
     else:
         # 如果没有数据，清空并短间隔重试
         tree.delete(*tree.get_children())
-        next_execution_time = get_next_weekday_time(9, 30)
-        now = datetime.now()
-        delay_ms = int((next_execution_time - now).total_seconds() * 1000)
-        if (get_day_is_trade_day() and get_now_time_int() < 1505) or get_work_time():
-            # print(f'start flush_alerts')
-            window.after(5000, lambda: refresh_stock_data(window_info, tree, item_id))
+
+    if  get_work_time() :
+        # print(f'start flush_alerts')
+        if  not 1130 < get_now_time_int() < 1300:
+            # print(f'update_monitor_tree worktime next_update:{30} S')
+            # tree.after(30000, lambda: refresh_stock_data(window_info, tree, item_id))
+            schedule_next(30000,key, tree, window_info, item_id)
         else:
-            window.after(delay_ms, lambda: refresh_stock_data(window_info, tree, item_id))
+            next_time =  int(minutes_to_time(1300)) 
+            # print(f'update_monitor_tree next_update:{next_time} Min')
+            schedule_next(next_time*1000,key, tree, window_info, item_id)
+    else:
+        print(f'update_monitor_tree next_update:{next_execution_time}')
+        schedule_next(delay_ms,key, tree, window_info, item_id)
+            # window.after(delay_ms, lambda: refresh_stock_data(window_info, tree, item_id))
 
 # --- 主窗口逻辑 ---  (lag)
 def add_selected_stock():
@@ -2238,13 +2533,36 @@ def update_window_position(window_id):
 
 def on_close_alert_monitor(window):
     """处理子窗口关闭事件"""
-    global alert_moniter_bring_front,alert_window
+    global alert_moniter_bring_front,alert_window,alert_tree
     alert_moniter_bring_front = False
-    
-    if window.winfo_exists():
+    try:
+        if window and window.winfo_exists():
+            window.destroy()
+            # 立即处理待办事件，避免半销毁导致的白屏
+            try:
+                window.update_idletasks()
+            except tk.TclError:
+                # 某些平台上 destroy 后调用 update 可能抛错，忽略它
+                pass
+    except tk.TclError:
+        # 只捕获 tkinter 相关错误
+        pass
+    finally:
         alert_window = None
-        window.destroy()
+        alert_tree = None
 
+
+    # try:
+    #     if win and win.winfo_exists():
+    #             win.destroy()
+    #     except:
+    #         pass
+    #     alert_window = None
+
+    # if window and window.winfo_exists():
+    #     window.destroy()
+    #     window.update_idletasks()  # 让销毁立即生效
+    # alert_window = None
 
 def on_close_monitor(window_info):
     """处理子窗口关闭事件"""
@@ -2481,7 +2799,8 @@ def create_monitor_window(stock_info):
     def show_menu(event,stock_info):
         """
         在Treeview上處理右鍵點擊事件的函式。
-        """
+        """
+
         # sel = alert_tree.selection()
         # if not sel: return
         # vals = alert_tree.item(sel[0], "values")
@@ -2662,10 +2981,16 @@ def init_alert_window():
     y = (screen_h - height) // 2
     return width, height, x, y
 
+
+default_deltas = {
+    "价格": 0.1,   # 价格变动 0.1 元触发
+    "涨幅": 0.2,   # 涨幅变动 0.2% 触发
+    "量": 100      # 成交量增加 100 手触发
+}
+
 # ------------------------
 # 报警中心窗口
 # ------------------------
-alert_window = None
 def open_alert_center():
     global alert_window, alert_tree
     global alert_moniter_bring_front
@@ -2682,6 +3007,7 @@ def open_alert_center():
     if alert_window and alert_window.winfo_exists():
         alert_window.lift()
         return
+
     alert_window = tk.Toplevel(root)
     alert_window.title("报警中心")
     alert_window.geometry("720x360")
@@ -2749,11 +3075,11 @@ def open_alert_center():
             alert_tree.column(c, width=40, anchor="center")
     alert_tree.pack(expand=True, fill="both")
 
-    refresh_alert_center()
-    alert_window.protocol("WM_DELETE_WINDOW", lambda: on_close_alert_monitor(alert_window))
+
 
     # 双击报警 → 聚焦监控窗口
     def on_double_click(event):
+        global code_entry
         sel = alert_tree.selection()
         if not sel:
             return
@@ -2764,6 +3090,8 @@ def open_alert_center():
 
         # 先发送 TDX 查询
         send_to_tdx(code)
+        code_entry.delete(0, tk.END)
+        code_entry.insert(0, code)
 
         if code in monitor_windows.keys():
             win = monitor_windows[code]['toplevel']
@@ -2796,13 +3124,15 @@ def open_alert_center():
         menu.post(event.x_root, event.y_root)
     alert_tree.bind("<Button-3>", show_menu)
     # 按 Esc 关闭窗口
-    alert_window.bind("<Escape>", lambda  event: on_close_alert_monitor(alert_window))
+    alert_window.bind("<Escape>", lambda  : on_close_alert_monitor(alert_window))
+    # 1小时后自动关闭（3600*1000 毫秒）
+    alert_window.protocol("WM_DELETE_WINDOW", lambda: on_close_alert_monitor(alert_window))
+    alert_window.after(25*1000,  lambda  :on_close_alert_monitor(alert_window))
+    # 强制渲染一次，避免白屏
+    alert_window.update_idletasks()
 
-default_deltas = {
-    "价格": 0.1,   # 价格变动 0.1 元触发
-    "涨幅": 0.2,   # 涨幅变动 0.2% 触发
-    "量": 100      # 成交量增加 100 手触发
-}
+    # 延迟刷新（100ms 后执行，避免卡初始化）
+    alert_window.after(100, refresh_alert_center)
 
 
 def get_alert_status(stock_code):
@@ -2813,6 +3143,53 @@ def get_alert_status(stock_code):
         return "开启"
     return "关闭"
 
+
+def calc_alert_window_position(win_width, win_height, x_root=None, y_root=None, parent_win=None):
+    """
+    根据鼠标/父窗口位置，计算报警窗口在多屏环境下的显示位置
+    """
+    # 默认取主屏
+    screen = get_monitor_by_point(0, 0)
+    x = screen["left"] + (screen["width"] - win_width) // 2
+    y = screen["top"] + (screen["height"] - win_height) // 2
+
+    # --- 鼠标右键优先 ---
+    if x_root is not None and y_root is not None:
+        screen = get_monitor_by_point(x_root, y_root)
+        x = x_root
+        y = y_root
+        if x + win_width > screen["right"]:
+            x = max(screen["left"], x_root - win_width)
+        if y + win_height > screen["bottom"]:
+            y = max(screen["top"], y_root - win_height)
+
+    # --- 父窗口位置 ---
+    elif parent_win is not None:
+        parent_win.update_idletasks()
+        px = parent_win.winfo_x()
+        py = parent_win.winfo_y()
+        pw = parent_win.winfo_width()
+        ph = parent_win.winfo_height()
+
+        screen = get_monitor_by_point(px, py)
+        if px <= 1 or py <= 1:  # 未渲染时 fallback
+            x = screen["left"] + (screen["width"] - win_width) // 2
+            y = screen["top"] + (screen["height"] - win_height) // 2
+        else:
+            x = px + pw // 2 - win_width // 2
+            y = py + ph // 2 - win_height // 2
+
+    # --- 边界检查 ---
+    if x + win_width > screen["right"]:
+        x = screen["right"] - win_width
+    if y + win_height > screen["bottom"]:
+        y = screen["bottom"] - win_height
+    if x < screen["left"]:
+        x = screen["left"]
+    if y < screen["top"]:
+        y = screen["top"]
+
+    return x, y
 
 def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_root=None, y_root=None):
     global alerts_rules,alert_window
@@ -2934,7 +3311,7 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     # 默认位置：屏幕中心
     x = (screen_width - win_width) // 2
     y = (screen_height - win_height) // 2
-
+    print(f'x :{x} y: {y}')
     # 优先使用右键位置
     if x_root is not None and y_root is not None:
         x = x_root
@@ -2943,6 +3320,7 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
         # 如果鼠标右侧空间不足，窗口翻到左侧
         if x + win_width > screen_width:
             x = max(0, x_root - win_width)
+        print(f'x :{x} y: {y}')
     # 如果 parent_win 传入，则在父窗口右下角附近打开
     elif parent_win is not None:
         parent_win.update_idletasks()
@@ -2958,6 +3336,7 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
         else:
             x = px + pw//2 - win_width//2
             y = py + ph//2 - win_height//2
+        print(f'x :{x} y: {y}')
 
     # 超出屏幕边界自动调整
     if x + win_width > screen_width:
@@ -2969,6 +3348,11 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     if y < 0:
         y = 0
 
+    print(f'x :{x} y: {y}')
+
+    x , y = calc_alert_window_position(win_width, win_height, x_root=x_root, y_root=y_root, parent_win=parent_win)
+
+    print(f'calc_alert_window_position x :{x} y: {y}')
 
     #    # 防止超出屏幕
     # x = max(0, min(x, screen_width - win_width))
@@ -3398,7 +3782,7 @@ def flush_alerts():
     """定时刷新报警缓冲区，将 alerts_buffer 写入报警中心"""
     global alerts_buffer, alerts_history
 
-    next_execution_time = get_next_weekday_time(9, 25)
+    next_execution_time = get_next_weekday_time(9, 20)
     now = datetime.now()
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
 
@@ -3443,38 +3827,67 @@ def get_latest_valid_data(df):
 def refresh_all_stock_data():
     # 假设 get_all_stock_data 返回 DataFrame 或 dict
     global loaded_df,realdatadf
-    global alerts_buffer,start_init 
-    next_execution_time = get_next_weekday_time(9, 30)
+    global alerts_buffer,start_init,alerts_rules 
+    next_execution_time = get_next_weekday_time(9, 20)
     now = datetime.now()
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
+    sina_realtime_status = False
+    df = _get_sina_data_realtime()
+    if df is not None and not not df.empty:
+        data = df
+        sina_realtime_status = True
+        for stock_code, row in data.iterrows():
+            if stock_code  in alerts_rules:
+                price = row.close
+                name = row['name']
+                percent = round((row.close - row.llastp) / row.llastp *100,1)
+                amount = round(row.turnover/100/10000/100,1)
+                print(f'sina_data-check_alert:{stock_code} {name}')
+                check_alert(stock_code, price, percent, amount , name)
 
-    if loaded_df is not None and not loaded_df.empty:
+    elif loaded_df is not None and not loaded_df.empty:
         data = loaded_df.copy()  # 每只股票：code, price, change, volume
     elif realdatadf is not None and not realdatadf.empty:
         data = realdatadf.copy()
     else:
         data = _get_stock_changes()
-    if '涨幅' not in data.columns:
-        data = process_full_dataframe(data)
-    data = get_latest_valid_data(data)
-    for _, row in data.iterrows():
-        stock_code = row["代码"]
-        # if stock_code == '603083':
-        #     import ipdb;ipdb.set_trace()
-        name = row["名称"]
-        price = row["价格"]
-        change = row["涨幅"]
-        volume = row["量"]
-        # 调用你的报警检查
-        check_alert(stock_code, price, change, volume,name)
+
+        if '涨幅' not in data.columns:
+            data = process_full_dataframe(data)
+        data = get_latest_valid_data(data)
+        for _, row in data.iterrows():
+            stock_code = row["代码"]
+            if stock_code  in alerts_rules:
+                # if stock_code == '603083':
+                #     import ipdb;ipdb.set_trace()
+                name = row["名称"]
+                price = row["价格"]
+                change = row["涨幅"]
+                volume = row["量"]
+                # 调用你的报警检查
+                if not sina_realtime_status:
+                    check_alert(stock_code, price, change, volume,name)
 
     # 刷新报警中心显示
     flush_alerts()
     # 10 分钟后再次执行
-    if (get_day_is_trade_day() and get_now_time_int() < 1505) or get_work_time() or (start_init == 0 ):
-        root.after(10*60*1000, refresh_all_stock_data)
+    if  get_work_time() :
+        # print(f'start flush_alerts')
+        if  not 1130 < get_now_time_int() < 1300:
+            root.after(60*1000, refresh_all_stock_data)
+        else:
+            next_time =  int(minutes_to_time(1300)) 
+            print(f'refresh_all_stock_data next_update:{next_time} Min')
+            root.after(next_time*1000, refresh_all_stock_data)
+
     else:
+        print(f'refresh_all_stock_data next_update work:{delay_ms/1000/60/60} hour')
         root.after(delay_ms, refresh_all_stock_data)
+
+    # if (get_day_is_trade_day() and get_now_time_int() < 1505) or get_work_time() or (start_init == 0 ):
+    #     root.after(60*1000, refresh_all_stock_data)
+    # else:
+    #     root.after(delay_ms, refresh_all_stock_data)
 
 def refresh_alert_centerlist():
     """刷新报警中心UI"""
@@ -3549,6 +3962,42 @@ def bind_hotkeys(root):
     """绑定快捷键"""
     root.bind("<F6>", lambda e: rearrange_monitors_per_screen())
     print("✅ 已绑定 F6：一键重排列窗口")
+
+
+def read_hdf_table(fname, key='all', columns=None):
+    """
+    精简读取 PyTables HDF5 文件的表格数据，只读，返回 DataFrame。
+    
+    Parameters
+    ----------
+    fname : str
+        HDF5 文件路径
+    key : str
+        表名（HDF5 group key）
+    columns : list, optional
+        指定列读取，默认读取全部
+    
+    Returns
+    -------
+    pd.DataFrame
+        表格数据
+    """
+    try:
+        df = pd.read_hdf(fname, key=key, columns=columns)
+        return df
+    except FileNotFoundError:
+        print(f"文件不存在: {fname}")
+        return None
+    except KeyError:
+        print(f"表不存在: {key}")
+        return None
+    except Exception as e:
+        print(f"HDF读取出错: {e}")
+        return None
+
+
+#check hdf status
+check_hdf5()
 
 init_monitors()
 root = tk.Tk()
@@ -3816,9 +4265,9 @@ schedule_worktime_task(tree)
 # 启动定时任务调度
 schedule_get_ths_code_task()
 
-if get_now_time_int() > 1530 and not date_write_is_processed:
-    start_async_save()
-
+# if get_now_time_int() > 1530 and not date_write_is_processed:
+#     start_async_save()
+schedule_daily_archive(root, hour=15, minute=5, archive_file=None)
 
 tree.bind("<Button-3>", show_context_menu)
 
