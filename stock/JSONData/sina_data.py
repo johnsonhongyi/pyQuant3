@@ -367,7 +367,7 @@ class Sina:
             elif market == 'kcb':
                 self.stock_codes = [elem for elem in self.stock_codes if elem.startswith('688')]
                 self.stock_with_exchange_list = list(
-                    [('sz%s') % stock_code for stock_code in self.stock_codes])
+                    [('sh%s') % stock_code for stock_code in self.stock_codes])
             elif market == 'bj':
                 # self.stock_codes = [elem for elem in self.stock_codes if elem.startswith('43') or elem.startswith('83') or elem.startswith('87') or elem.startswith('92')]
                 self.stock_codes = [elem for elem in self.stock_codes if elem.startswith(('43','83','87','92'))]
@@ -840,6 +840,7 @@ class Sina:
         # if self.index_status:
         # if cct.get_work_time() or (cct.get_now_time_int() > 915) :
         # df = df.drop('close', axis=1)
+        # print(df.dt.value_counts())
         dt = df.dt.value_counts().index[0]
         df = df[(df.dt >= dt)]
 
@@ -1099,7 +1100,8 @@ if __name__ == "__main__":
       '603363','000868','603917','600392','300713','000933','002505','603676'])
     print((dd.T))
 
-    print((dd.loc[:, ['name','open','low','high','close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape))
+    print((dd.loc[:, ['name','open','low','high','close', 'ticktime']], dd.shape))
+    # print((dd.loc[:, ['name','open','low','high','close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape))
 
     sys.exit(0)
     

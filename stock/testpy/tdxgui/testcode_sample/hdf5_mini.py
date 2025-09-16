@@ -227,7 +227,7 @@ def load_hdf_db1(
 import pandas as pd
 import time, os, numpy as np
 
-def load_hdf_db(
+def load_hdf_db_code_col(
     fname,
     table="all",
     code=None,             # 单个 code
@@ -367,6 +367,124 @@ def write_hdf_with_code(fname, table, df, index=True, complib='zlib', complevel=
     )
     print(f"Wrote table {table} to {fname}, rows: {len(df_reset)}")
 
+def write_hdf_db_optimized(
+    fname,
+    df,
+    table='all',
+    index=False,
+    complib='blosc',
+    append=True,
+    MultiIndex=False,
+    rewrite=False,
+    showtable=False,
+    data_columns=['code']
+):
+    """
+    HDF5 写入函数优化版，默认 data_columns=['code']
+
+    支持：
+    - MultiIndex / 普通索引
+    - 自动去重、填充
+    - rewrite / append 模式
+    """
+    import pandas as pd, time, os
+
+    if df is None or df.empty:
+        return False
+
+    # 处理 index
+    if not MultiIndex and 'code' in df.columns:
+        df = df.set_index('code')
+
+    # 去重 / 填充
+    df = df.fillna(0)
+    df = df[~df.index.duplicated(keep='last')]
+
+    # 内存优化
+    df = cct.reduce_memory_usage(df, verbose=False)
+
+    with SafeHDFStore(fname) as h5:
+        if h5 is None:
+            log.error("HDFStore open failed: %s" % fname)
+            return False
+
+        if rewrite and '/' + table in h5.keys():
+            h5.remove(table)
+
+        kwargs = dict(
+            format='table',
+            append=append,
+            complib=complib,
+            data_columns=data_columns,
+            index=not MultiIndex
+        )
+
+        h5.put(table, df, **kwargs)
+        h5.flush()
+        if showtable:
+            print(f"HDF5 write done: {fname}, keys: {h5.keys()}")
+
+    return True
+
+
+def load_hdf_db_optimized(
+    fname,
+    table='all',
+    code_l=None,
+    columns=None,
+    timelimit=False,
+    index=False,
+    MultiIndex=False,
+    showtable=False
+):
+    """
+    HDF5 读取优化版
+
+    支持：
+    - code_l 筛选（利用 data_columns=['code']）
+    - columns 列选择
+    - MultiIndex / 普通索引
+    - 保持兼容旧表（无 data_columns）
+    """
+    import pandas as pd, time, os
+
+    df = None
+
+    if not os.path.exists(fname):
+        log.error("HDF5 file not found: %s" % fname)
+        return None
+
+    with SafeHDFStore(fname, mode='r') as store:
+        if store is None:
+            return None
+        keys = store.keys()
+        if showtable:
+            print(f"keys: {keys}")
+        if '/' + table not in keys:
+            log.error("table %s not found in %s" % (table, fname))
+            return None
+
+        storer = store.get_storer(table)
+
+        # 判断表是否有 code 列
+        has_code_column = 'code' in (storer.data_columns or [])
+
+        # code_l 选择
+        if code_l is not None and has_code_column:
+            df = store.select(table, where=pd.Index(code_l, name='code'))
+        else:
+            df = store[table]
+
+        # 列选择
+        if columns is not None:
+            df = df[columns]
+
+    # 填充 / 去重
+    if df is not None and not df.empty:
+        df = df.fillna(0)
+        df = df[~df.index.duplicated(keep='last')]
+
+    return cct.reduce_memory_usage(df)
 
 
 if __name__ == '__main__':
@@ -389,40 +507,47 @@ if __name__ == '__main__':
     # # store = SafeHDFStore(filename)
     # h5_fname = 'sina_MultiIndex_data'
     # h5_table = 'all' + '_' + str(30)
-    # time_s = time.time()
-
-    # sina_fname="G:\\sina_data.h5"
-    # sina_table='all' 
+    
+    time_s = time.time()
+    sina_fname="G:\\sina_data.h5"
+    sina_table='all' 
 
     # # h5 = load_hdf_db(sina_fname, table=sina_table, code_l=None, timelimit=False, dratio_limit=0.12)
     # h5 = load_hdf_db(sina_fname, table=sina_table,code='000002')
-    # print(f'sina_fname time:{time.time() - time_s}')
-    # print(f'h5:{h5[:3]}')
+    h5 = load_hdf_db1(sina_fname, table=sina_table)
+    h5 = load_hdf_db_optimized(sina_fname, table=sina_table)
+    print(f'sina_fname time:{time.time() - time_s}')
+    print(f'h5:{h5[:3]}')
 
-    # sina_MultiIndex_fname="G:\\sina_MultiIndex_data.h5"
-    sina_MultiIndex_fname="G:\\sina_MultiIndex_data_columns.h5"
-    # # store = SafeHDFStore(filename)
-    sina_MultiIndex_table = 'all' + '_' + str(30)
-    time_s = time.time()
-    # # h5_realTime = load_hdf_db(sina_MultiIndex_fname, table=sina_MultiIndex_table, code_l=None, timelimit=False, dratio_limit=0.12)
-    h5_realTime = load_hdf_db(sina_MultiIndex_fname, table=sina_MultiIndex_table,code_l=['000002','002739','600699'])
-    print(f'sina_MultiIndex_fname time:{time.time() - time_s}')
-    print(f'h5_realTime:{h5_realTime}')
-    import ipdb;ipdb.set_trace()
-    
-    # print(f'sina_MultiIndex_fname:{h5_realTime[:10]}')
+    # # sina_MultiIndex_fname="G:\\sina_MultiIndex_data.h5"
+    # sina_MultiIndex_fname="G:\\sina_MultiIndex_data_columns.h5"
+    # # # store = SafeHDFStore(filename)
+    # sina_MultiIndex_table = 'all' + '_' + str(30)
+    # time_s = time.time()
+    # # # h5_realTime = load_hdf_db(sina_MultiIndex_fname, table=sina_MultiIndex_table, code_l=None, timelimit=False, dratio_limit=0.12)
+    # h5_realTime = load_hdf_db(sina_MultiIndex_fname, table=sina_MultiIndex_table,code_l=['000002','002739','600699'])
+    # print(f'sina_MultiIndex_fname time:{time.time() - time_s}')
+    # print(f'h5_realTime:{h5_realTime}')
     # import ipdb;ipdb.set_trace()
+
+    # # print(f'sina_MultiIndex_fname:{h5_realTime[:10]}')
+    # # import ipdb;ipdb.set_trace()
 
 
 
     # --- 示例 ---
     basedir = os.path.join("G:",os.sep )
-    fname = os.path.join(basedir, "sina_MultiIndex_data.h5")
-    table = 'all_30'
+    # fname = os.path.join(basedir, "sina_MultiIndex_data.h5")
+    fname = os.path.join(basedir, "sina_data.h5")
+    # table = 'all_30'
+    table = 'all'
+
 
     # 读取数据
-    # df = load_hdf_db(fname, table=table, MultiIndex=True)
+    df = load_hdf_db(fname, table=table, MultiIndex=False)
+    import ipdb;ipdb.set_trace()
 
-    fname_data_col = os.path.join(basedir, "sina_MultiIndex_data_columns.h5") 
+    # fname_data_col = os.path.join(basedir, "sina_MultiIndex_data_columns.h5") 
+    fname_data_col = os.path.join(basedir, "sina_data_columns.h5") 
     # 写入 HDF5，带 code data_column
-    # write_hdf_with_code(fname_data_col, table, df)
+    write_hdf_with_code(fname_data_col, table, df)

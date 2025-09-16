@@ -1,39 +1,36 @@
 @echo off
-chcp 65001 >nul
-echo ä½ å¥½ï¼Œä¸–ç•Œ
-@echo off
 REM ===================================================
-REM pyQuant3 stock å¯åŠ¨è„šæœ¬ï¼Œä¿ç•™åŽŸæœ‰é€»è¾‘ï¼Œé€æ­¥è¿è¡Œ
-REM ç¬¬ä¸€ä¸ªç¨‹åºç«‹å³å¯åŠ¨ï¼ŒåŽç»­ä¾èµ–æ–‡ä»¶æ£€æµ‹å†é¡ºåºå¯åŠ¨
+REM pyQuant3 stock Æô¶¯½Å±¾£¬±£ÁôÔ­ÓÐÂß¼­£¬Öð²½ÔËÐÐ
+REM µÚÒ»¸ö³ÌÐòÁ¢¼´Æô¶¯£¬ºóÐøÒÀÀµÎÄ¼þ¼ì²âÔÙË³ÐòÆô¶¯
 REM ===================================================
 
-REM è®¾ç½®å·¥ä½œç›®å½•
+REM ÉèÖÃ¹¤×÷Ä¿Â¼
 D:
 cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock"
 set WORKDIR=%CD%
-echo å½“å‰ç›®å½•: %WORKDIR%
+echo µ±Ç°Ä¿Â¼: %WORKDIR%
 
 REM ============================
-REM å¯åŠ¨ç¬¬ä¸€ä¸ªç¨‹åº sina_Monitor
+REM Æô¶¯µÚÒ»¸ö³ÌÐò sina_Monitor
 REM ============================
 if exist "%WORKDIR%\sina_Monitor.exe" (
-    echo å¯åŠ¨ EXE: sina_Monitor.exe
+    echo Æô¶¯ EXE: sina_Monitor.exe
     start cmd /k  "%WORKDIR%\sina_Monitor.exe"
 ) else if exist "%WORKDIR%\sina_Monitor.py" (
-    echo å¯åŠ¨ Python: sina_Monitor.py
+    echo Æô¶¯ Python: sina_Monitor.py
     start cmd /k  python "%WORKDIR%\sina_Monitor.py"
 ) else (
-    echo ERROR: æ‰¾ä¸åˆ° sina_Monitor.exe æˆ– sina_Monitor.py
+    echo ERROR: ÕÒ²»µ½ sina_Monitor.exe »ò sina_Monitor.py
 )
 
 REM ============================
-REM ç­‰å¾…ä¾èµ–æ–‡ä»¶å‡†å¤‡å¥½
+REM µÈ´ýÒÀÀµÎÄ¼þ×¼±¸ºÃ
 REM ============================
 set TDX=G:\tdx_last_df.h5
 
 :WAIT_TDX
 if not exist "%TDX%" (
-    echo ç­‰å¾…æ–‡ä»¶ç”Ÿæˆ: %TDX%
+    echo µÈ´ýÎÄ¼þÉú³É: %TDX%
     timeout /t 10 /nobreak >nul
     goto WAIT_TDX
 )
@@ -42,64 +39,64 @@ for %%i in ("%TDX%") do set indexdx=%%~zi
 if "%indexdx%"=="" set indexdx=4096
 
 if not "%indexdx%"=="" if %indexdx% LEQ 4096000 (
-    echo æ–‡ä»¶å¤§å° %indexdx% ä¸è¶³ï¼Œç­‰å¾…...
+    echo ÎÄ¼þ´óÐ¡ %indexdx% ²»×ã£¬µÈ´ý...
     timeout /t 10 /nobreak >nul
     goto WAIT_TDX
 )
-echo æ–‡ä»¶å‡†å¤‡å°±ç»ªï¼Œå¤§å°: %indexdx%
+echo ÎÄ¼þ×¼±¸¾ÍÐ÷£¬´óÐ¡: %indexdx%
 
 REM ============================
-REM å¯åŠ¨åŽç»­ç¨‹åº
+REM Æô¶¯ºóÐø³ÌÐò
 REM ============================
 
-REM ä¾æ¬¡å¯åŠ¨ exe æˆ– py æ–‡ä»¶ï¼Œä¿æŒå»¶è¿Ÿ
+REM ÒÀ´ÎÆô¶¯ exe »ò py ÎÄ¼þ£¬±£³ÖÑÓ³Ù
 set PROGRAMS=instock_Monitor singleAnalyseUtil sina_Market-DurationUP LinePower filter_resample_Monitor
 
 for %%P in (%PROGRAMS%) do (
     if exist "%WORKDIR%\%%P.exe" (
-        echo å¯åŠ¨ EXE: %%P.exe
+        echo Æô¶¯ EXE: %%P.exe
         start cmd /k  "%WORKDIR%\%%P.exe"
     ) else if exist "%WORKDIR%\%%P.py" (
-        echo å¯åŠ¨ Python: %%P.py
+        echo Æô¶¯ Python: %%P.py
         start cmd /k  python "%WORKDIR%\%%P.py"
     ) else (
-        echo ERROR: æ‰¾ä¸åˆ° %%P.exe æˆ– %%P.py
+        echo ERROR: ÕÒ²»µ½ %%P.exe »ò %%P.py
     )
     timeout /t 5 /nobreak >nul
 )
 
-REM dataBarFeed ç›®å½•å¯åŠ¨ chantdxpower
+REM dataBarFeed Ä¿Â¼Æô¶¯ chantdxpower
 cd dataBarFeed
 if exist "chantdxpower.exe" (
-    echo å¯åŠ¨ EXE: chantdxpower.exe
+    echo Æô¶¯ EXE: chantdxpower.exe
     start cmd /k  "chantdxpower.exe"
 ) else if exist "chantdxpower.py" (
-    echo å¯åŠ¨ Python: chantdxpower.py
+    echo Æô¶¯ Python: chantdxpower.py
     start cmd /k  python "chantdxpower.py"
 ) else (
-    echo ERROR: æ‰¾ä¸åˆ° chantdxpower.exe æˆ– chantdxpower.py
+    echo ERROR: ÕÒ²»µ½ chantdxpower.exe »ò chantdxpower.py
 )
 cd /d "%WORKDIR%"
 timeout /t 5 /nobreak >nul
 
-REM webTools ç›®å½•å¯åŠ¨ ths-tdx-web
+REM webTools Ä¿Â¼Æô¶¯ ths-tdx-web
 cd webTools
 if exist "ths-tdx-web.exe" (
-    echo å¯åŠ¨ EXE: ths-tdx-web.exe
+    echo Æô¶¯ EXE: ths-tdx-web.exe
     start cmd /k  "ths-tdx-web.exe"
 ) else if exist "ths-tdx-web.py" (
-    echo å¯åŠ¨ Python: ths-tdx-web.py
+    echo Æô¶¯ Python: ths-tdx-web.py
     start cmd /k  python "ths-tdx-web.py"
 ) else (
-    echo ERROR: æ‰¾ä¸åˆ° ths-tdx-web.exe æˆ– ths-tdx-web.py
+    echo ERROR: ÕÒ²»µ½ ths-tdx-web.exe »ò ths-tdx-web.py
 )
 cd /d "%WORKDIR%"
 timeout /t 5 /nobreak >nul
 
-REM æœ€åŽå¯åŠ¨ macRun.py
-echo å¯åŠ¨ macRun.py
+REM ×îºóÆô¶¯ macRun.py
+echo Æô¶¯ macRun.py
 python macRun.py
 timeout /t 2 /nobreak >nul
 
-echo æ‰€æœ‰ç¨‹åºå¯åŠ¨å®Œæˆ
+echo ËùÓÐ³ÌÐòÆô¶¯Íê³É
 pause

@@ -5,7 +5,7 @@
 
 global ClipSaved := Clipboard
 global custom_copy_triggered := false
-global AutoSendToDFCF := true   ; <<< 开关：true=复制即推送，false=只提示不推送
+global AutoSendToDFCF := False   ; <<< 开关：true=复制即推送，false=只提示不推送
 
 ; 通用通知函数
 ; ================================
