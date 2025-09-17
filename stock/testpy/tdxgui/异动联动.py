@@ -70,7 +70,7 @@ EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.POINTER(ctypes.c_int)
 GetWindowText = ctypes.windll.user32.GetWindowTextW
 GetWindowTextLength = ctypes.windll.user32.GetWindowTextLengthW
 IsWindowVisible = ctypes.windll.user32.IsWindowVisible
-
+date_entry = None
 codelist = []
 ths_code=[]
 
@@ -366,6 +366,7 @@ def actually_start_worker(worker_task,param=None):
     return worker_task
 
 def check_worker_done():
+    #检查任务结束更新视图
     global worker_thread,realdatadf
     if worker_thread.is_alive():
         root.after(2000, check_worker_done)  # 200ms 后再检查
@@ -1614,6 +1615,12 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
             status_label3.config(text=f"更新在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
             schedule_task('worktime_task',delay_ms,lambda: schedule_worktime_task(tree))
     else:
+        # if get_work_time() :
+        #     status_label3.config(text=f"更新在{current_time[:-3]}执行")
+        #     scheduled_task = actually_start_worker(get_stock_changes_background)
+        #     # 5分钟后再次调用此函数
+        #     schedule_task('worktime_task',5 * 60 * 1000,lambda: schedule_worktime_task(tree))
+        # else:
         print(f"下一次background任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
         print(f"自动更新任务get_stock_changes_background执行于:在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
         status_label3.config(text=f"更新{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}")
@@ -1795,7 +1802,8 @@ def load_archive(selected_file):
 
     # 覆盖当前的监控文件
     shutil.copy2(archive_file, MONITOR_LIST_FILE)
-    messagebox.showinfo("成功", f"已加载存档: {selected_file}")
+    # messagebox.showinfo("成功", f"已加载存档: {selected_file}")
+    toast_message(None,f"成功已加载存档: {selected_file}")
 
     # 重新加载监控数据
     initial_monitor_list = load_monitor_list()
@@ -1838,7 +1846,7 @@ def open_archive_loader():
     ttk.Button(win, text="加载", command=lambda: load_archive(selected_file.get())).pack(pady=5)
     # 按 Esc 关闭窗口
     win.bind("<Escape>", lambda : win.destroy())
-    win.after(10*1000,  lambda  :win.destroy())
+    win.after(6*1000,  lambda  :win.destroy())
 
 # --- 数据持久化函数 ---
 def save_monitor_list():
@@ -1890,7 +1898,7 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
     global realdatadf, last_updated_time
     global loaded_df,start_init
     global date_write_is_processed
-    global viewdf,stop_event
+    global viewdf,stop_event,date_entry
     current_time = datetime.now()
     start_time=time.time()
     
@@ -1899,6 +1907,7 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
         loaded_df = None
         viewdf = pd.DataFrame()
         start_init = 0
+        last_updated_time = 0
         date_entry.set_date(get_today())
 
     # 使用 with realdatadf_lock 确保只有一个线程可以进入此关键区域
@@ -2085,6 +2094,33 @@ def process_queue(window):
     window.after(500, lambda: process_queue(window))  # 0.5秒轮询一次队列
 
 
+def parse_datetime(dt_str):
+    """
+    自动识别带日期或仅时分秒的字符串
+    """
+    try:
+        # 尝试完整日期时间
+        return datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        try:
+            # 尝试仅时分秒，返回今天日期拼接
+            today = datetime.today().strftime("%Y-%m-%d")
+            return datetime.strptime(f"{today} {dt_str}", "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            raise ValueError(f"无法解析时间: {dt_str}")
+
+def format_time(dt_str):
+    """
+    解析日期时间或仅时间字符串，统一返回 H:M:S 格式
+    """
+    try:
+        # 尝试完整日期时间
+        dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        # 尝试仅时分秒
+        dt = datetime.strptime(dt_str, "%H:%M:%S")
+    return dt.strftime("%H:%M:%S")
+
 # 保存每个 stock_code/item_id 的刷新状态
 refresh_registry = {}  # {(tree, window_info, item_id): {"after_id": None}}
 # ---------------------------
@@ -2207,7 +2243,11 @@ def update_monitor_tree(data, tree, window_info, item_id):
             tree.insert("", "end", values=list(row))
 
         if dd is not None:
-            row = [dd.ticktime.strftime("%H:%M:%S") ,"新浪" , percent ,price,amount]
+            # stime = str(dd.ticktime)
+            # dt = datetime.strptime(stime, "%Y-%m-%d %H:%M:%S")
+            # time_str = dt.strftime("%H:%M:%S")
+            time_str = format_time(dd.ticktime)
+            row = [time_str,"新浪" , percent ,price,amount]
             update_latest_row(row)
         # 随机间隔再次刷新
         # wait_time = int(random.uniform(30000, 60000))
@@ -2579,22 +2619,59 @@ def on_close_monitor(window_info):
             del WINDOW_GEOMETRIES[stock_code]
         window.destroy()
 
-
 def on_closing(window, window_id):
     """在窗口关闭时调用。"""
-    executor.shutdown(wait=False)
-
-    save_monitor_list() # 确保在主程序关闭时保存列表
-    for win_id in WINDOWS_BY_ID.keys():
-        # print(f'win_id:{win_id}')
-        update_window_position(win_id) # 确保保存最后的配置
-
+    
+    # 1. 停止后台线程
+    executor.shutdown(wait=False)  # 或 wait=True，根据线程安全性
+    
+    # 2. 保存监控列表和窗口位置（建议放线程里异步保存）
+    try:
+        save_monitor_list()
+        for win_id in list(WINDOWS_BY_ID.keys()):
+            win = WINDOWS_BY_ID.get(window_id)
+            if hasattr(win, "_after_id"):
+                win.after_cancel(win._after_id)
+            update_window_position(win_id) # 确保保存最后的配置
+        save_window_positions()
+    except Exception as e:
+        print("保存失败:", e)
+    
+    # 3. 取消定时器
+    if hasattr(window, "_after_id"):
+        window.after_cancel(window._after_id)
+    
+    # 4. 销毁窗口并移除记录
     if window.winfo_exists():
         del WINDOWS_BY_ID[window_id]
         window.destroy()
-
-    save_window_positions()
+    
+    # 5. 退出主循环
     root.quit()
+
+
+# def on_closing(window, window_id):
+#     """在窗口关闭时调用。"""
+#     # executor.shutdown(wait=False)
+#     executor.shutdown(wait=True)
+
+#     save_monitor_list() # 确保在主程序关闭时保存列表
+#     for win_id in WINDOWS_BY_ID.keys():
+#         # print(f'win_id:{win_id}')
+#         win = WINDOWS_BY_ID.get(window_id)
+#         if hasattr(win, "_after_id"):
+#             win.after_cancel(win._after_id)
+#         update_window_position(win_id) # 确保保存最后的配置
+
+#     if hasattr(window, "_after_id"):
+#         window.after_cancel(window._after_id)
+
+#     if window.winfo_exists():
+#         del WINDOWS_BY_ID[window_id]
+#         window.destroy()
+
+#     save_window_positions()
+#     root.quit()
 
 def init_screen_size(root):
     global screen_width, screen_height
@@ -2897,15 +2974,13 @@ def flash_title(win, code, name):
     # 5 秒后恢复
     win.after(5000, lambda: win.title(f"监控: {name} ({code})"))
 
-
 def toast_message(parent=None, text="", duration=2000, bg="#333", fg="#fff"):
     """在主窗口右下角显示一条提示信息，自动淡出"""
-    # 创建顶层窗口
     if parent is None:
         parent = tk.Tk()
         parent.withdraw()
     win = tk.Toplevel(parent)
-    win.overrideredirect(True)  # 去掉边框
+    win.overrideredirect(True)
     win.config(bg=bg)
 
     # 文本标签
@@ -2923,17 +2998,53 @@ def toast_message(parent=None, text="", duration=2000, bg="#333", fg="#fff"):
     win.update()
     win.attributes("-topmost", False)
 
-    # 自动淡出
-    def fade_out():
-        alpha = 1.0
-        while alpha > 0:
-            alpha -= 0.05
+    # 自动淡出（用 after 循环，主线程安全）
+    def fade(alpha=1.0):
+        if alpha <= 0:
+            win.destroy()
+        else:
             win.attributes("-alpha", alpha)
-            win.update()
-            win.after(50)
-        win.destroy()
+            win.after(50, fade, alpha - 0.05)
 
-    win.after(duration, lambda: threading.Thread(target=fade_out).start())
+    # 延迟 duration 毫秒后开始淡出
+    win.after(duration, fade)
+
+# def toast_message(parent=None, text="", duration=2000, bg="#333", fg="#fff"):
+#     """在主窗口右下角显示一条提示信息，自动淡出"""
+#     # 创建顶层窗口
+#     if parent is None:
+#         parent = tk.Tk()
+#         parent.withdraw()
+#     win = tk.Toplevel(parent)
+#     win.overrideredirect(True)  # 去掉边框
+#     win.config(bg=bg)
+
+#     # 文本标签
+#     label = tk.Label(win, text=text, bg=bg, fg=fg, font=("Microsoft YaHei", 11))
+#     label.pack(ipadx=15, ipady=8)
+
+#     # 放在主窗口右下角
+#     parent.update_idletasks()
+#     x = parent.winfo_x() + parent.winfo_width() - win.winfo_reqwidth() - 20
+#     y = parent.winfo_y() + parent.winfo_height() - win.winfo_reqheight() - 40
+#     win.geometry(f"+{x}+{y}")
+
+#     # 窗口置顶
+#     win.attributes("-topmost", True)
+#     win.update()
+#     win.attributes("-topmost", False)
+
+#     # 自动淡出
+#     def fade_out():
+#         alpha = 1.0
+#         while alpha > 0:
+#             alpha -= 0.05
+#             win.attributes("-alpha", alpha)
+#             win.update()
+#             win.after(50)
+#         win.destroy()
+
+#     win.after(duration, lambda: threading.Thread(target=fade_out).start())
 
 
 def auto_close_message(title, message, timeout=2000):
@@ -3025,32 +3136,67 @@ def open_alert_center():
     top_frame.pack(fill="x", padx=5, pady=5)
 
     tk.Label(top_frame, text="股票代码:").pack(side="left")
+
+    # stock_var = tk.StringVar()
+    # vlist = list(monitor_windows.keys())
+
+    # stock_list_for_combo  = [tuple(monitor_windows[co]['stock_info'][:2])  for co in vlist]
+    # if stock_code and stock_code not in monitor_windows.keys():
+    #     stock_list_for_combo.append((stock_code,stock_name))
+    #     stock_entry = ttk.Combobox(top_frame, textvariable=stock_var, values=stock_list_for_combo, width=10)
+    # else:
+    #     stock_entry = ttk.Combobox(top_frame, textvariable=stock_var, values=stock_list_for_combo, width=10)
+
+    # def show_context_menu(event, stock_code):
+    #     parent_win = event.widget.winfo_toplevel()
+    #     menu = tk.Menu(parent_win, tearoff=0)
+    #     menu.add_command(
+    #         label="添加/编辑规则",
+    #         command=lambda: open_alert_editor(stock_code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root)
+    #     )
+    #     menu.post(event.x_root, event.y_root)
+
+    # -------------------------
+    # 股票选择 Combobox 初始化
+    # -------------------------
     stock_var = tk.StringVar()
     vlist = list(monitor_windows.keys())
 
-    stock_list_for_combo  = [tuple(monitor_windows[co]['stock_info'][:2])  for co in vlist]
-    if stock_code and stock_code not in monitor_windows.keys():
-        stock_list_for_combo.append((stock_code,stock_name))
-        stock_entry = ttk.Combobox(top_frame, textvariable=stock_var, values=stock_list_for_combo, width=10)
-    else:
-        stock_entry = ttk.Combobox(top_frame, textvariable=stock_var, values=stock_list_for_combo, width=10)
+    # 统一 values 为字符串 "code name"
+    stock_list_for_combo = [f"{co} {monitor_windows[co]['stock_info'][1]}" for co in vlist]
 
-    def show_context_menu(event, stock_code):
+    # 如果选中的股票不在监控窗口中，加入列表
+    if stock_code and stock_code not in monitor_windows.keys():
+        stock_list_for_combo.append(f"{stock_code} {stock_name}")
+
+    # 创建 Combobox，限制宽度避免拉伸
+    stock_entry = ttk.Combobox(top_frame, textvariable=stock_var, values=stock_list_for_combo, width=15)
+
+    # 设置初始值
+    if stock_code:
+        stock_var.set(f"{stock_code} {stock_name}")
+    elif stock_list_for_combo:
+        stock_var.set(stock_list_for_combo[0])  # 默认选第一个
+
+    stock_entry.pack(side="left", padx=5)
+
+    # 右键菜单或双击触发编辑规则
+    def show_context_menu(event):
+        selected = stock_var.get()
+        if not selected:
+            return
+        # 取 code 部分（前6-7位数字）
+        code = selected.split()[0]
         parent_win = event.widget.winfo_toplevel()
         menu = tk.Menu(parent_win, tearoff=0)
         menu.add_command(
             label="添加/编辑规则",
-            command=lambda: open_alert_editor(stock_code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root)
+            command=lambda: open_alert_editor(code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root)
         )
         menu.post(event.x_root, event.y_root)
 
-    # 设置 combobox 的初始值
-    if stock_code:
-        stock_var.set(f'{stock_code} {stock_name}')
-    stock_entry.pack(side="left", padx=5)
-    # if isinstance(stock_info, (list, tuple)) and len(stock_code) >= 7:
-    #     tk.Button(top_frame, text="添加/编辑规则", command=lambda: open_alert_editor(stock_info)).pack(side="left", padx=5)
-    # else:
+    # stock_entry.bind("<Button-3>", show_context_menu)
+
     tk.Button(top_frame, text="添加/编辑规则", command=lambda: open_alert_editor(stock_var.get())).pack(side="left", padx=5)
 
     # 报警列表

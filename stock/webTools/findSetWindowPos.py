@@ -1078,16 +1078,44 @@ if __name__ == '__main__':
     idx = 0
     idx_status=0
 
-    #py to exe
     proc_title = [proc.replace('.py','.exe') if not proc.startswith('py') else proc for proc in proc_title]
+
     positon_exe = {}
     for key in positon.keys():
         value = positon[key]
         positon_exe[key.replace('.py','.exe') if not key.startswith('py') else key] = value
 
+    # py2exe
+    # proc_title_exe = [name for proc in proc_title for name in (proc, proc.replace('.py', '.exe') if proc.endswith('.py') else proc)]
+    # for key, value in positon.items():
+    #     # 保留原始 .py 键
+    #     positon_exe[key] = value
+    #     # 生成对应的 .exe 键（如果不是以 py 开头）
+    #     exe_key = key.replace('.py', '.exe') if not key.startswith('py') else key
+    #     positon_exe[exe_key] = value
+
+    # exe2py
+    # proc_title_new = [p2 for proc in proc_title for p2 in ([proc, proc.replace('.exe', '.py')] if proc.endswith('.exe') else [proc])]
+    # proc_title_new = []
+    # for proc in proc_title:
+    #     if proc.endswith('.exe'):
+    #         proc_title_new.append(proc)            # 保留 .exe
+    #         proc_title_new.append(proc.replace('.exe', '.py'))  # 生成对应 .py
+    #     else:
+    #         proc_title_new.append(proc)            # 非 .exe 保留原名
+
+    # positon_exe = {}
+    # for key, value in positon.items():
+    #     positon_exe[key] = value  # 保留原 key
+    #     if key.endswith('.py'):
+    #         positon_exe[key.replace('.py', '.exe')] = value  # 添加对应 .exe
+
+
+
     positon = positon_exe
     appendProc = ['开盘啦竞价板块观察1.0','股票异动数据监控']
-    proc_title.extend(appendProc)
+    proc_title.extend(appendProc)   # good src 
+    # proc_title_new.extend(appendProc)
     # positon = positon_exe | appendProc   #dict
     #new dict
     # for title in proc_title:

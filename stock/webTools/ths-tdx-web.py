@@ -361,7 +361,8 @@ if __name__ == '__main__':
     if not find_window_by_title_background('开盘啦板块竞价'): 
         run_system_fpath('C:\\Users\\Johnson\\Documents\\TDX\\55188\\开盘啦板块竞价.exe')
         time.sleep(2)
-    if not find_window_by_title_background('异动联动'): 
+    
+    if not find_window_by_title_background('异动联动.exe'): 
         run_system_fpath('C:\\Users\\Johnson\\Documents\\TDX\\55188\\异动联动.exe')
         time.sleep(2)
     

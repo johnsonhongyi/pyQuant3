@@ -8,7 +8,7 @@ import os
 import json
 codelist = []
 ths_code=[]
-code_ths= "code_ths_other.json"
+code_ths= "..\\testpy\\tdxgui\\code_ths_other.json"
 # 检查文件是否存在
 # ths_code = ["603268", "603843","603813"]
 if os.path.exists(code_ths):

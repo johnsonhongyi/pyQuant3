@@ -40,182 +40,382 @@ BaseDir = cct.get_ramdisk_dir()
 #     fh.flush()
 #     os.fsync(fh.fileno())
 
+
 class SafeHDFStore(HDFStore):
-    # def __init__(self, *args, **kwargs):
-
     def __init__(self, *args, **kwargs):
-        self.probe_interval = kwargs.pop("probe_interval", 2)
-        lock = cct.get_ramdisk_path(args[0], lock=True)
-        baseDir = BaseDir
-        self.fname_o = args[0]
-        self.basedir = baseDir
-        self.config_ini = baseDir + os.path.sep+ 'h5config.txt'
-        self.multiIndexsize = False
-        if args[0] == cct.tdx_hd5_name or args[0].find('tdx_all_df') >=0:
-            self.multiIndexsize = True
-            self.fname = cct.get_run_path_tdx(args[0])
-            self.basedir = self.fname.split(self.fname_o)[0]
-            log.info("tdx_hd5:%s"%(self.fname))
-        else:
-            self.fname = cct.get_ramdisk_path(args[0])
-            self.basedir = self.fname.split(self.fname_o)[0]
-            log.info("ramdisk_hd5:%s"%(self.fname))
+        import time, random, os, subprocess
 
-        self._lock = lock
+        # -------------------------
+        # 基础初始化
+        # -------------------------
+        self.probe_interval = kwargs.pop("probe_interval", 2)
+        self.fname_o = args[0]
+        baseDir = BaseDir
+        self.basedir = baseDir
+        self.config_ini = os.path.join(baseDir, 'h5config.txt')
+        self.multiIndexsize = False
+
+        if self.fname_o == cct.tdx_hd5_name or 'tdx_all_df' in self.fname_o:
+            self.multiIndexsize = True
+            self.fname = cct.get_run_path_tdx(self.fname_o)
+            self.basedir = self.fname.split(self.fname_o)[0]
+            log.info(f"tdx_hd5:{self.fname}")
+        else:
+            self.fname = cct.get_ramdisk_path(self.fname_o)
+            self.basedir = self.fname.split(self.fname_o)[0]
+            log.info(f"ramdisk_hd5:{self.fname}")
+
+        # -------------------------
+        # 初始化锁
+        # -------------------------
+        self._lock = cct.get_ramdisk_path(self.fname_o, lock=True)
         self.countlock = 0
         self.write_status = False
         self.complevel = 9
         self.complib = 'zlib'
-        # self.ptrepack_cmds = "ptrepack --chunkshape=auto --propindexes --complevel=9 --complib=%s %s %s"
         self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s"
-        if self.multiIndexsize:
-            self.big_H5_Size_limit = ct.big_H5_Size_limit * 6
-        else:
-            self.big_H5_Size_limit = ct.big_H5_Size_limit
+        self.big_H5_Size_limit = ct.big_H5_Size_limit * 6 if self.multiIndexsize else ct.big_H5_Size_limit
         self.h5_size_org = 0
-        # self.pt_lock_file = self.fname + '.txt'
+
         global RAMDISK_KEY
         if not os.path.exists(baseDir):
             if RAMDISK_KEY < 1:
-                log.error("NO RamDisk Root:%s" % (baseDir))
+                log.error(f"NO RamDisk Root:{baseDir}")
                 RAMDISK_KEY += 1
+
         else:
             self.temp_file = self.fname + '_tmp'
-            self.write_status = True
             if os.path.exists(self.fname):
-                self.h5_size_org = os.path.getsize(self.fname) / 1000 / 1000
-            self.run(self.fname)
-        # ptrepack --chunkshape=auto --propindexes --complevel=9 --complib=blosc in.h5 out.h5
-        # subprocess.call(["ptrepack", "-o", "--chunkshape=auto", "--propindexes", --complevel=9,", ",--complib=blosc,infilename, outfilename])
-        # os.system()
+                self.h5_size_org = os.path.getsize(self.fname) / 1_000_000
 
-    '''def read_write_pt_File(self, f_size, mode='a+'):
-        with open(self.pt_lock_file, mode) as f:
-            f.seek(0)
-            read_limit = f.read()
-            limit_now = ((f_size / 10 + 1) * self.big_H5_Size_limit)
-            # log.info("big_size:%s read_limit:%s" % (self.big_H5_Size_limit, f_size))
-            if read_limit is not None and len(read_limit) > 0:
-                if int(read_limit) > f_size:
-                    log.info("f_size:%s < read_limit:%s" % (self.big_H5_Size_limit, f_size))
-                    return False
-                else:
-                    f.seek(0)
-                    log.error("f_size:%s > read_limit:%s" % (self.big_H5_Size_limit, f_size))
-                    f.truncate()
-                    f.write(str(limit_now))
-                    return True
+            # -------------------------
+            # 处理 mode，防止重复传入
+            # -------------------------
+            mode = kwargs.pop("mode", "r")
+
+            if mode == "r":
+                self._wait_for_unlock(timeout=30, interval=1)
+                super().__init__(self.fname, **kwargs)
             else:
-                f.seek(0)
-                f.write(str(limit_now))
-                return False
-        # with open(fname, mode) as f:
-        #     f.seek(0)
-        #     model.input(f.read())
-        #     model.compute()
-        #     f.seek(0)
-        #     f.truncate()
-        #     f.write(model.output())'''
+                self._acquire_lock()
+                super().__init__(self.fname, **kwargs)
+                self.write_status = True
 
-    def run(self, fname, *args, **kwargs):
+    # -------------------------
+    # 等待锁释放
+    # -------------------------
+    def _wait_for_unlock(self, timeout=30, interval=1):
+        start = time.time()
+        while os.path.exists(self._lock):
+            if time.time() - start > timeout:
+                raise TimeoutError(f"等待锁超时: {self._lock}")
+            time.sleep(interval)
+
+    # -------------------------
+    # 获取锁
+    # -------------------------
+    def _acquire_lock(self):
         while True:
             try:
-                self._flock = os.open(
-                    self._lock, os.O_CREAT | os.O_EXCL)
-                    # self._lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                log.info("SafeHDF:%s lock:%s" % (self._lock, self._flock))
+                self._flock = open(self._lock, "w")
+                log.info(f"SafeHDF locked: {self._lock}")
                 break
-            # except FileExistsError:
-#            except FileExistsError as e:
-            except (IOError, EOFError, Exception) as e:
-                # except (IOError, OSError) as e:
-                # time.sleep(probe_interval)
-                # import ipdb;ipdb.set_trace()
-                # os.unlink(self._lock)
-                # os.remove(self._lock)
+            except Exception as e:
                 if self.countlock > 1:
-                    log.debug("IOError Error:%s" % (e))
-
+                    log.debug(f"Lock IOError: {e}")
                 if self.countlock <= 8:
-                    time.sleep(round(random.randint(3, 10) / 1.2, 2))
-                    # time.sleep(random.randint(0,5))
+                    time.sleep(round(random.randint(3, 10)/1.2, 2))
                     self.countlock += 1
                 else:
-                    # os.close(self._flock)
-                    # os.unlink(self._lock)
                     os.remove(self._lock)
-                    # time.sleep(random.randint(15, 30))
-                    log.error("count10 remove lock")
-            except WindowsError:
-                log.error('WindowsError')
-            finally:
-                pass
+                    log.error("Lock removed after multiple attempts")
 
-#            except (Exception) as e:
-#                print ("Exception Error:%s"%(e))
-#                log.info("safeHDF Except:%s"%(e))
-#                time.sleep(probe_interval)
-#                return None
-        # HDFStore.__init__(self, fname, *args, **kwargs)
-        HDFStore.__init__(self, fname, *args, **kwargs)
-        # if not os.path.exists(cct.get_ramdisk_path(cct.tdx_hd5_name)):
-        #     if os.path.exists(cct.tdx_hd5_path):
-        #         tdx_size = os.path.getsize(cct.tdx_hd5_path)
-
-        # HDFStore.__init__(self,fname,complevel=self.complevel,complib=self.complib, **kwargs)
-        # HDFStore.__init__(self,fname,format="table",complevel=self.complevel,complib=self.complib, **kwargs)
-        # ptrepack --complib=zlib --complevel 9 --overwrite sina_data.h5 out.h5
-
+    # -------------------------
+    # 上下文管理
+    # -------------------------
     def __enter__(self):
-        if self.write_status:
-            return self
+        return self
 
     def __exit__(self, *args, **kwargs):
         if self.write_status:
-            HDFStore.__exit__(self, *args, **kwargs)
-            os.close(self._flock)
-            h5_size = os.path.getsize(self.fname) / 1000 / 1000
+            super().__exit__(*args, **kwargs)
+            self._flock.close()
+            if os.path.exists(self._lock):
+                os.remove(self._lock)
+
+            h5_size = os.path.getsize(self.fname) / 1_000_000
             new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit)
-            # global Compress_Count
-           # if Compress_Count == 1 and self.h5_size_org > self.big_H5_Size_limit:
-#                cct.get_config_value(self.config_ini,self.fname_o,h5_size,new_limit)
-               # log.info("Compress_Count init:%s h5_size_org:%s" % (Compress_Count, self.h5_size_org))
-            log.info("fname:%s h5_size:%s big:%s" % (self.fname,h5_size, self.big_H5_Size_limit))
-            # if  h5_size >= self.big_H5_Size_limit:
-            if cct.get_config_value(self.config_ini,self.fname_o,h5_size,new_limit):
-                time_pt=time.time()
+            log.info(f"fname:{self.fname} h5_size:{h5_size} big:{self.big_H5_Size_limit}")
+
+            if cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
                 if os.path.exists(self.fname) and os.path.exists(self.temp_file):
-                    log.error("remove tmpfile is exists:%s"%(self.temp_file))
                     os.remove(self.temp_file)
                 os.rename(self.fname, self.temp_file)
-                if cct.get_os_system() == 'mac':
-                    p=subprocess.Popen(self.ptrepack_cmds % (
-                        self.complib, self.temp_file, self.fname), shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                else:
-                    back_path = os.getcwd()
-                    os.chdir(self.basedir)
-                    # if os.getcwd()+"\\" == self.basedir:
-                    log.info('current path is: %s after change dir' %os.getcwd())
-                    pt_cmd = self.ptrepack_cmds % (self.complib, self.temp_file.split(self.basedir)[1], self.fname.split(self.basedir)[1])
-                    p=subprocess.Popen(pt_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+                back_path = os.getcwd()
+                os.chdir(self.basedir)
+                pt_cmd = self.ptrepack_cmds % (
+                    self.complib,
+                    self.temp_file.split(self.basedir)[1],
+                    self.fname.split(self.basedir)[1]
+                )
+                p = subprocess.Popen(pt_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
                 p.wait()
-                # ptrepack --chunkshape=auto --complevel=9 --complib=zlib tdx_all_df_300.h5_tmp tdx_all_df_300.h5
                 if p.returncode != 0:
-                    # p.communicate()
-                    # log.error("ptrepack hdf Error:%s for tmp_file:%s Er:%s" % (self.fname,self.temp_file,p.stderr))
-                    log.error("ptrepack hdf Error:%s src%s  tofile:%s Er:%s" % (p.communicate(),self.temp_file,self.fname,p.stdout.read().decode("gbk")))
-                    # return -1
-                    # if os.path.exists(self.temp_file):
-                    #     os.remove(self.temp_file)
+                    log.error(f"ptrepack hdf Error: {p.communicate()} src {self.temp_file} -> {self.fname}")
                 else:
                     if os.path.exists(self.temp_file):
                         os.remove(self.temp_file)
-                    # log.error("fname:%s h5_size:%sM Limit:%s t:%.1f" % (self.fname, h5_size, new_limit , time_pt - time.time()))
                 os.chdir(back_path)
 
-            if os.path.exists(self._lock):
-                os.remove(self._lock)
-            # gc.collect()
+
+# class SafeHDFStore1(HDFStore):
+#     def __init__(self, *args, **kwargs):
+#         self.probe_interval = kwargs.pop("probe_interval", 2)
+#         self.fname_o = args[0]
+#         baseDir = BaseDir
+#         self.basedir = baseDir
+#         self.config_ini = os.path.join(baseDir, 'h5config.txt')
+#         self.multiIndexsize = False
+#         self.write_status = False
+#         self.complevel = 9
+#         self.complib = 'zlib'
+#         self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s"
+#         self.h5_size_org = 0
+#         global RAMDISK_KEY
+
+#         # 判断文件类型
+#         if self.fname_o == cct.tdx_hd5_name or 'tdx_all_df' in self.fname_o:
+#             self.multiIndexsize = True
+#             self.fname = cct.get_run_path_tdx(self.fname_o)
+#             self.basedir = self.fname.split(self.fname_o)[0]
+#             log.info("tdx_hd5:%s" % self.fname)
+#         else:
+#             self.fname = cct.get_ramdisk_path(self.fname_o)
+#             self.basedir = self.fname.split(self.fname_o)[0]
+#             log.info("ramdisk_hd5:%s" % self.fname)
+
+#         # 锁文件
+#         self._lock = cct.get_ramdisk_path(self.fname_o, lock=True)
+#         self.temp_file = self.fname + '_tmp'
+
+#         # HDF5 大小限制
+#         self.big_H5_Size_limit = ct.big_H5_Size_limit * 6 if self.multiIndexsize else ct.big_H5_Size_limit
+
+#         # 检查 baseDir 是否存在
+#         if not os.path.exists(baseDir):
+#             if RAMDISK_KEY < 1:
+#                 log.error("NO RamDisk Root:%s" % baseDir)
+#                 RAMDISK_KEY += 1
+
+#         if os.path.exists(self.fname):
+#             self.h5_size_org = os.path.getsize(self.fname) / 1_000_000
+
+#         # 根据 mode 判断是读还是写
+#         mode = kwargs.get("mode", "r")
+#         if mode == "r":
+#             self._wait_for_unlock(timeout=30, interval=1)
+#             super().__init__(self.fname, *args, **kwargs)
+#         else:
+#             self._acquire_lock()
+#             super().__init__(self.fname, *args, **kwargs)
+#             self.write_status = True
+
+#     def _wait_for_unlock(self, timeout=30, interval=1):
+#         start = time.time()
+#         while os.path.exists(self._lock):
+#             if time.time() - start > timeout:
+#                 raise TimeoutError(f"等待锁超时: {self._lock}")
+#             time.sleep(interval)
+
+#     def _acquire_lock(self, timeout=30, interval=0.5):
+#         start = time.time()
+#         while True:
+#             try:
+#                 self._flock = open(self._lock, "w")
+#                 log.info("SafeHDF acquired lock: %s" % self._lock)
+#                 break
+#             except Exception as e:
+#                 log.debug("Lock acquire error: %s" % e)
+#                 time.sleep(interval)
+#                 if time.time() - start > timeout:
+#                     raise TimeoutError(f"获取锁失败: {self._lock}")
+
+#     def __enter__(self):
+#         return self
+
+#     def __exit__(self, *args, **kwargs):
+#         if self.write_status:
+#             super().__exit__(*args, **kwargs)
+#             # 关闭锁文件并删除
+#             if hasattr(self, "_flock") and not self._flock.closed:
+#                 self._flock.close()
+#             if os.path.exists(self._lock):
+#                 os.remove(self._lock)
+
+#             # 检查 HDF5 文件大小是否需要压缩
+#             h5_size = os.path.getsize(self.fname) / 1_000_000
+#             new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit)
+#             log.info("fname:%s h5_size:%s big:%s" % (self.fname, h5_size, self.big_H5_Size_limit))
+
+#             if cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
+#                 if os.path.exists(self.fname) and os.path.exists(self.temp_file):
+#                     log.error("remove tmpfile exists: %s" % self.temp_file)
+#                     os.remove(self.temp_file)
+#                 os.rename(self.fname, self.temp_file)
+#                 back_path = os.getcwd()
+#                 os.chdir(self.basedir)
+#                 pt_cmd = self.ptrepack_cmds % (self.complib, os.path.basename(self.temp_file), os.path.basename(self.fname))
+#                 p = subprocess.Popen(pt_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+#                 p.wait()
+#                 stdout, _ = p.communicate()
+#                 if p.returncode != 0:
+#                     log.error("ptrepack hdf Error: %s, tmp: %s -> %s, output: %s" % (
+#                         p.returncode, self.temp_file, self.fname, stdout.decode("gbk", errors="ignore")))
+#                 else:
+#                     if os.path.exists(self.temp_file):
+#                         os.remove(self.temp_file)
+#                 os.chdir(back_path)
+
+
+
+
+
+# class SafeHDFStore_Me(HDFStore):
+#     # def __init__(self, *args, **kwargs):
+
+#     def __init__(self, *args, **kwargs):
+#         self.probe_interval = kwargs.pop("probe_interval", 2)
+#         lock = cct.get_ramdisk_path(args[0], lock=True)
+#         baseDir = BaseDir
+#         self.fname_o = args[0]
+#         self.basedir = baseDir
+#         self.config_ini = baseDir + os.path.sep+ 'h5config.txt'
+#         self.multiIndexsize = False
+#         if args[0] == cct.tdx_hd5_name or args[0].find('tdx_all_df') >=0:
+#             self.multiIndexsize = True
+#             self.fname = cct.get_run_path_tdx(args[0])
+#             self.basedir = self.fname.split(self.fname_o)[0]
+#             log.info("tdx_hd5:%s"%(self.fname))
+#         else:
+#             self.fname = cct.get_ramdisk_path(args[0])
+#             self.basedir = self.fname.split(self.fname_o)[0]
+#             log.info("ramdisk_hd5:%s"%(self.fname))
+
+#         self._lock = lock
+#         self.countlock = 0
+#         self.write_status = False
+#         self.complevel = 9
+#         self.complib = 'zlib'
+#         # self.ptrepack_cmds = "ptrepack --chunkshape=auto --propindexes --complevel=9 --complib=%s %s %s"
+#         self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s"
+#         if self.multiIndexsize:
+#             self.big_H5_Size_limit = ct.big_H5_Size_limit * 6
+#         else:
+#             self.big_H5_Size_limit = ct.big_H5_Size_limit
+#         self.h5_size_org = 0
+#         # self.pt_lock_file = self.fname + '.txt'
+#         global RAMDISK_KEY
+#         if not os.path.exists(baseDir):
+#             if RAMDISK_KEY < 1:
+#                 log.error("NO RamDisk Root:%s" % (baseDir))
+#                 RAMDISK_KEY += 1
+#         else:
+#             self.temp_file = self.fname + '_tmp'
+#             self.write_status = True
+#             if os.path.exists(self.fname):
+#                 self.h5_size_org = os.path.getsize(self.fname) / 1000 / 1000
+#             self.run(self.fname)
+
+#     def run(self, fname, *args, **kwargs):
+#         while True:
+#             try:
+#                 # self._flock = os.open(
+#                 #     self._lock, os.O_CREAT | os.O_EXCL)
+#                 # self._lock = args[0] + ".lock"
+#                 self._flock = open(self._lock, "w")
+#                 log.info("SafeHDF:%s lock:%s" % (self._lock, self._flock))
+#                 break
+#             except (IOError, EOFError, Exception) as e:
+#                 if self.countlock > 1:
+#                     log.debug("IOError Error:%s" % (e))
+
+#                 if self.countlock <= 8:
+#                     time.sleep(round(random.randint(3, 10) / 1.2, 2))
+#                     # time.sleep(random.randint(0,5))
+#                     self.countlock += 1
+#                 else:
+#                     os.remove(self._lock)
+#                     log.error("count10 remove lock")
+#             except WindowsError:
+#                 log.error('WindowsError')
+#             finally:
+#                 pass
+
+#         HDFStore.__init__(self, fname, *args, **kwargs)
+
+#     def wait_for_unlock(lock_file, timeout=30, interval=1):
+#         """
+#         等待 lock 文件被释放
+#         """
+#         start = time.time()
+#         while os.path.exists(lock_file):
+#             if time.time() - start > timeout:
+#                 raise TimeoutError(f"等待锁超时: {lock_file}")
+#             time.sleep(interval)
+
+#     def __enter__(self):
+#         if self.write_status:
+#             return self
+
+#     def __exit__(self, *args, **kwargs):
+#         if self.write_status:
+#             HDFStore.__exit__(self, *args, **kwargs)
+#             # os.close(self._flock)
+#             self._flock.close()
+#             if os.path.exists(self._lock):
+#                 os.remove(self._lock)
+#             h5_size = os.path.getsize(self.fname) / 1000 / 1000
+#             new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit)
+#             # global Compress_Count
+#            # if Compress_Count == 1 and self.h5_size_org > self.big_H5_Size_limit:
+# #                cct.get_config_value(self.config_ini,self.fname_o,h5_size,new_limit)
+#                # log.info("Compress_Count init:%s h5_size_org:%s" % (Compress_Count, self.h5_size_org))
+#             log.info("fname:%s h5_size:%s big:%s" % (self.fname,h5_size, self.big_H5_Size_limit))
+#             # if  h5_size >= self.big_H5_Size_limit:
+#             if cct.get_config_value(self.config_ini,self.fname_o,h5_size,new_limit):
+#                 time_pt=time.time()
+#                 if os.path.exists(self.fname) and os.path.exists(self.temp_file):
+#                     log.error("remove tmpfile is exists:%s"%(self.temp_file))
+#                     os.remove(self.temp_file)
+#                 os.rename(self.fname, self.temp_file)
+#                 if cct.get_os_system() == 'mac':
+#                     p=subprocess.Popen(self.ptrepack_cmds % (
+#                         self.complib, self.temp_file, self.fname), shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+#                 else:
+#                     back_path = os.getcwd()
+#                     os.chdir(self.basedir)
+#                     # if os.getcwd()+"\\" == self.basedir:
+#                     log.info('current path is: %s after change dir' %os.getcwd())
+#                     pt_cmd = self.ptrepack_cmds % (self.complib, self.temp_file.split(self.basedir)[1], self.fname.split(self.basedir)[1])
+#                     p=subprocess.Popen(pt_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+#                 p.wait()
+#                 # ptrepack --chunkshape=auto --complevel=9 --complib=zlib tdx_all_df_300.h5_tmp tdx_all_df_300.h5
+#                 if p.returncode != 0:
+#                     # p.communicate()
+#                     # log.error("ptrepack hdf Error:%s for tmp_file:%s Er:%s" % (self.fname,self.temp_file,p.stderr))
+#                     log.error("ptrepack hdf Error:%s src%s  tofile:%s Er:%s" % (p.communicate(),self.temp_file,self.fname,p.stdout.read().decode("gbk")))
+#                     # return -1
+#                     # if os.path.exists(self.temp_file):
+#                     #     os.remove(self.temp_file)
+#                 else:
+#                     if os.path.exists(self.temp_file):
+#                         os.remove(self.temp_file)
+#                     # log.error("fname:%s h5_size:%sM Limit:%s t:%.1f" % (self.fname, h5_size, new_limit , time_pt - time.time()))
+#                 os.chdir(back_path)
+
+#             if os.path.exists(self._lock):
+#                 os.remove(self._lock)
 '''
 https://stackoverflow.com/questions/21126295/how-do-you-create-a-compressed-dataset-in-pytables-that-can-store-a-unicode-stri/21128497#21128497
 >>> h5file = pt.openFile("test1.h5",'w')
@@ -407,7 +607,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
         if df is not None and not df.empty and table is not None:
             # h5 = get_hdf5_file(fname,wr_mode='r')
             tmpdf=[]
-            with SafeHDFStore(fname) as store:
+            with SafeHDFStore(fname,mode='r') as store:
                 if store is not None:
                     log.debug(f"fname: {(fname)} keys:{store.keys()}")
                     if showtable:
@@ -527,7 +727,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 #                    df[co] = df[co].apply()
 #                    recordStringInHDF5(h5file, h5file.root, 'mrtamb',u'\u266b Hey Mr. Tambourine Man \u266b')
     
-        with SafeHDFStore(fname) as h5:
+        with SafeHDFStore(fname,mode='a') as h5:
             df=df.fillna(0)
             df=cct.reduce_memory_usage(df,verbose=False)
             log.info(f'df.shape:{df.shape}')
@@ -649,7 +849,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
     if code_l is not None:
         if table is not None:
 
-            with SafeHDFStore(fname) as store:
+            with SafeHDFStore(fname,mode='r') as store:
                 if store is not None:
                     log.debug(f"fname: {(fname)} keys:{store.keys()}")
                     if showtable:
@@ -778,7 +978,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
     else:
         # h5 = get_hdf5_file(fname,wr_mode='r')
         if table is not None:
-            with SafeHDFStore(fname) as store:
+            with SafeHDFStore(fname,mode='r') as store:
                 # if store is not None:
                 #     if '/' + table in store.keys():
                 #         try:
@@ -814,10 +1014,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                         o_time=[time.time() - t_x for t_x in o_time]
                         if len(o_time) > 0:
                             l_time=np.mean(o_time)
-                            # l_time = time.time() - l_time
-                # return_hdf_status = not cct.get_work_day_status()  or not
-                # cct.get_work_time() or (cct.get_work_day_status() and
-                # (cct.get_work_time() and l_time < limit_time))
+ 
 
                             if 'ticktime' in dd.columns and 'kind' not in dd.columns:
                                 # len(dd) ,len(dd.query('ticktime >= "15:00:00"'))
@@ -1045,7 +1242,7 @@ if __name__ == "__main__":
     fname=['test_s.h5']
     # fname = 'powerCompute.h5'
     for na in fname:
-        with SafeHDFStore(na) as h5:
+        with SafeHDFStore(fname,mode='r') as h5:
             import ipdb;ipdb.set_trace()
             print(h5)
             if '/' + 'all' in list(h5.keys()):
