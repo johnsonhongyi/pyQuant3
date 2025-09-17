@@ -407,7 +407,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
         if df is not None and not df.empty and table is not None:
             # h5 = get_hdf5_file(fname,wr_mode='r')
             tmpdf=[]
-            with SafeHDFStore(fname,mode='r') as store:
+            with SafeHDFStore(fname) as store:
                 if store is not None:
                     log.debug(f"fname: {(fname)} keys:{store.keys()}")
                     if showtable:
@@ -527,7 +527,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 #                    df[co] = df[co].apply()
 #                    recordStringInHDF5(h5file, h5file.root, 'mrtamb',u'\u266b Hey Mr. Tambourine Man \u266b')
     
-        with SafeHDFStore(fname,mode='a') as h5:
+        with SafeHDFStore(fname) as h5:
             df=df.fillna(0)
             df=cct.reduce_memory_usage(df,verbose=False)
             log.info(f'df.shape:{df.shape}')
@@ -649,7 +649,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
     if code_l is not None:
         if table is not None:
 
-            with SafeHDFStore(fname,mode='r') as store:
+            with SafeHDFStore(fname) as store:
                 if store is not None:
                     log.debug(f"fname: {(fname)} keys:{store.keys()}")
                     if showtable:
@@ -659,9 +659,9 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                             dd=store[table]
                     except AttributeError as e:
                         store.close()
-                        os.remove(store.filename)
+                        # os.remove(store.filename)
                         log.error("AttributeError:%s %s"%(fname,e))
-                        log.error("Remove File:%s"%(fname))
+                        # log.error("Remove File:%s"%(fname))
                     except Exception as e:
                         print(("Exception:%s name:%s"%(fname,e)))
                     else:
@@ -778,7 +778,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
     else:
         # h5 = get_hdf5_file(fname,wr_mode='r')
         if table is not None:
-            with SafeHDFStore(fname,mode='r') as store:
+            with SafeHDFStore(fname) as store:
                 # if store is not None:
                 #     if '/' + table in store.keys():
                 #         try:
@@ -795,9 +795,9 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                             dd=store[table]
                     except AttributeError as e:
                         store.close()
-                        os.remove(store.filename)
+                        # os.remove(store.filename)
                         log.error("AttributeError:%s %s"%(fname,e))
-                        log.error("Remove File:%s"%(fname))
+                        # log.error("Remove File:%s"%(fname))
                     except Exception as e:
                         log.error("Exception:%s %s"%(fname,e))
                         print(("Exception:%s name:%s"%(fname,e)))
@@ -1045,7 +1045,7 @@ if __name__ == "__main__":
     fname=['test_s.h5']
     # fname = 'powerCompute.h5'
     for na in fname:
-        with SafeHDFStore(fname,mode='r') as h5:
+        with SafeHDFStore(na) as h5:
             import ipdb;ipdb.set_trace()
             print(h5)
             if '/' + 'all' in list(h5.keys()):
