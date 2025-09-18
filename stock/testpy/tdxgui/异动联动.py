@@ -2,6 +2,7 @@ import os
 import sys
 import requests
 import pandas as pd
+from pandas import HDFStore
 import tkinter as tk
 import shutil
 from tkinter import ttk, messagebox, filedialog
@@ -86,8 +87,50 @@ def get_base_path():
         # 通常の.pyファイルとして実行された場合
         return os.path.dirname(os.path.abspath(__file__))
 
-BASE_DIR = get_base_path()
 
+class SafeHDFStore(HDFStore):
+    """
+    精简只读版本的 SafeHDFStore：
+    - 自动等待锁文件释放，避免读取冲突
+    - 不做写入和压缩操作
+    """
+    def __init__(self, fname, mode='r', **kwargs):
+        self.fname = fname
+        self.mode = mode
+        self._lock = self.fname + ".lock"
+        self._flock = None
+        self.countlock = 0
+
+        # 如果文件不存在，直接报错
+        if not os.path.exists(self.fname):
+            raise FileNotFoundError(f"HDF5 file not found: {self.fname}")
+
+        # 等待锁释放
+        if mode == 'r':
+            self._wait_for_lock()
+
+        # 调用父类初始化
+        super().__init__(self.fname, mode='r', **kwargs)
+
+    # ===== 锁等待 =====
+    def _wait_for_lock(self):
+        wait_count = 0
+        while os.path.exists(self._lock):
+            wait_count += 1
+            print(f"锁文件存在，读操作等待中... 已等待 {wait_count} 秒")
+            time.sleep(1)
+        print("锁已释放，读操作继续。")
+
+    # ===== 上下文管理 =====
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        super().__exit__(exc_type, exc_val, exc_tb)
+
+
+
+BASE_DIR = get_base_path()
 
 code_file_name= os.path.join(BASE_DIR, "code_ths_other.json")
 MONITOR_LIST_FILE =  os.path.join(BASE_DIR, "monitor_list.json")
@@ -1066,6 +1109,7 @@ def save_dataframe(df=None):
         time.sleep(5)
         print('wait init background 完成...')
     print(f'start_init:{start_init} will to save')    
+    toast_message(root,f'start_init:{start_init} will to save')    
     try:
         # 1. 從 DateEntry 獲取日期物件
         selected_date_obj = date_entry.get_date()
@@ -1092,14 +1136,15 @@ def save_dataframe(df=None):
             all_df.to_csv(filename, index=False, encoding='utf-8-sig', compression="bz2") 
             # messagebox.showinfo("成功", f"文件已儲存為: {filename}")
             print(f"文件已儲存為: {filename}")
+            toast_message(root,f"文件已儲存為: {filename}")
             loaded_df = all_df
         loaded_df['代码'] = loaded_df["代码"].astype(str).str.zfill(6)
 
         return loaded_df
 
     except Exception as e:
-        messagebox.showerror("錯誤", f"儲存文件時發生錯誤: {e}")
-        print(f"儲存文件時發生錯誤: {e}")
+        messagebox.showerror("錯誤", f"save_data儲存文件時發生錯誤: {e}")
+        print(f"save_data儲存文件時發生錯誤: {e}")
 
 
 
@@ -1553,7 +1598,7 @@ def check_readldf_exist():
     selected_type  = type_var.get()
     filename =  os.path.join(BASE_DIR, "datacsv",f"dfcf_{date_str}.csv.bz2")
     # --- 核心檢查邏輯 ---
-    if (not get_day_is_trade_day() or (get_day_is_trade_day() and (get_now_time_int() >1530  or get_now_time_int() < 923))) and  os.path.exists(filename):
+    if (not get_day_is_trade_day() or (get_day_is_trade_day() and (get_now_time_int() >1505  or get_now_time_int() < 923))) and  os.path.exists(filename):
         if start_init > 0 and date_entry.winfo_exists():
             try:
                 date_entry.set_date(date_str)
@@ -2049,8 +2094,12 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
                     # 去除重复数据，保留最新的数据
                     realdatadf.drop_duplicates(subset=['时间','代码', '板块'], keep='last', inplace=True)
                     print(f"为 ({symbol}) 获取了新的异动数据，并更新了 realdatadf")
+                    if start_init == 0:
+                        toast_message(root,f"为 ({symbol}) 获取了新的异动数据，并更新了 realdatadf")
                     time.sleep(5)
                 print(f"time:{time.time() - start_time}全部更新 获取了新的异动数据，并更新了realdatadf:{len(realdatadf)}")
+                if start_init == 0:
+                    toast_message(root,f"time:{time.time() - start_time}全部更新 获取了新的异动数据，并更新了realdatadf:{len(realdatadf)}")
                 print(f"realdatadf 已更新:{time.strftime('%H:%M:%S')} {len(realdatadf)}")
             else:
                 print(f"{current_time - last_updated_time}:未到更新时间，返回内存realdatadf数据。")
@@ -2225,6 +2274,8 @@ def format_time(dt_str):
     """
     解析日期时间或仅时间字符串，统一返回 H:M:S 格式
     """
+
+    dt_str = str(dt_str)
     try:
         # 尝试完整日期时间
         dt = datetime.strptime(dt_str, "%Y-%m-%d %H:%M:%S")
@@ -2512,59 +2563,111 @@ def show_context_menu(event):
 
 
 def on_monitor_double_click(event, stock_code):
-    monitor_tree = event.widget
-    items = monitor_tree.get_children()
     # exists = any(monitor_tree.item(item, "values") == stock_code for item in items)
-    exists = any(
-        monitor_tree.item(item, "values") and monitor_tree.item(item, "values")[0] == stock_code
-        for item in items
-        if monitor_tree.item(item, "values") and monitor_tree.item(item, "values")[0] not in ("加载ing...", "loading")
-    )
+    monitor_tree = event.widget
+    # items = monitor_tree.get_children()
+    needs_update = False
+    for item in monitor_tree.get_children():
+        vals = monitor_tree.item(item, "values")
+        # vals 为 None 或空，或者第一列是 "加载ing..." / "loading"
+        if not vals or len(vals) == 0 or vals[0] in ("加载ing...", "loading"):
+            needs_update = True
+            break
 
-    if not exists:
-        # 异步刷新
-        def fetch_and_insert():
+    print(f'stock_code: {stock_code} needs_update :{needs_update} 加载ing')
+    if needs_update:
+        def fetch_and_insert(stock_code, monitor_tree):
+            # 获取股票涨跌数据
             data = _get_stock_changes(stock_code=stock_code)
-            # monitor_tree.after(0, lambda: monitor_tree.insert("", "end", values=[
-            #     stock_code,
-            #     data.get("name", "暂无数据"),
-            #     data.get("percent", "-"),
-            #     data.get("price", "-"),
-            #     data.get("vol", "-")
-            # ]))
-            def update_latest_row(new_row):
+
+            # 删除占位符行
+            def clean_placeholder():
                 children = monitor_tree.get_children()
-                # 删除占位符行
                 for item in children:
                     vals = monitor_tree.item(item, "values")
                     if vals and vals[0] in ("加载ing...", "loading"):  # 可根据占位符调整
                         monitor_tree.delete(item)
-                # 插入到最上面一行
+
+            # 插入到最上面一行，保证列数一致
+            def update_latest_row(new_row):
+                clean_placeholder()
+                n_cols = len(monitor_tree["columns"])
+                # 截断或补空，保证长度与列一致
+                new_row = list(new_row)[:n_cols] + [""] * max(0, n_cols - len(new_row))
                 monitor_tree.insert("", 0, values=new_row)
 
+            clean_placeholder()
+
+            # 处理 DataFrame 并插入现有数据
             if data is not None and not data.empty:
                 # 只保留当前股票
                 data = data[data['代码'] == stock_code].set_index('时间').reset_index()
                 if '涨幅' not in data.columns:
                     data = process_full_dataframe(data)
                 data = data[['时间', '板块', '涨幅', '价格', '量']]
-                monitor_tree.delete(*tree.get_children())
-                for _, row in data.iterrows():
-                    monitor_tree.insert("", "end", values=list(row))
-            dd  = _get_sina_data_realtime(stock_code)
+                # 保留默认列顺序
+                cols = ['时间', '板块', '涨幅', '价格', '量']
+                for col in cols:
+                    if col not in data.columns:
+                        data[col] = ""  # 缺失列补空
 
+                data = data[cols]  # 按顺序
+                n_cols = len(monitor_tree["columns"])
+                for _, row in data.iterrows():
+                    values = list(row)[:n_cols] + [""] * max(0, n_cols - len(row))
+                    monitor_tree.insert("", "end", values=values)
+
+            # 获取新浪实时数据
+            dd = _get_sina_data_realtime(stock_code)
             if dd is not None:
                 price = dd.close
-                percent = round((dd.close - dd.llastp) / dd.llastp *100,1)
-                amount = round(dd.turnover/100/10000/100,1)
-                print(f'double_click get sina_data:{stock_code}, {price},{percent},{amount}')
-                check_alert(stock_code, price,percent,amount)
+                percent = round((dd.close - dd.llastp) / dd.llastp * 100, 1)
+                amount = round(dd.turnover / 100 / 10000 / 100, 1)
+                print(f'double_click get sina_data: {stock_code}, {price}, {percent}, {amount}')
+                check_alert(stock_code, price, percent, amount)
                 time_str = format_time(dd.ticktime)
-                row = [time_str,"新浪" , percent ,price,amount]
-                update_latest_row(row)
-        threading.Thread(target=fetch_and_insert, daemon=True).start()
-
+                alert_row = [time_str, "新浪", percent, price, amount]
+                update_latest_row(alert_row)
+        threading.Thread(target=fetch_and_insert,args=(stock_code, monitor_tree), daemon=True).start()
     update_code_entry(stock_code)
+
+        # 异步刷新
+        # def fetch_and_insert():
+        #     data = _get_stock_changes(stock_code=stock_code)
+
+        #     def update_latest_row(new_row):
+        #         children = monitor_tree.get_children()
+        #         # 删除占位符行
+        #         for item in children:
+        #             vals = monitor_tree.item(item, "values")
+        #             if vals and vals[0] in ("加载ing...", "loading"):  # 可根据占位符调整
+        #                 monitor_tree.delete(item)
+        #         # 插入到最上面一行
+        #         monitor_tree.insert("", 0, values=new_row)
+
+        #     if data is not None and not data.empty:
+        #         # 只保留当前股票
+        #         data = data[data['代码'] == stock_code].set_index('时间').reset_index()
+        #         if '涨幅' not in data.columns:
+        #             data = process_full_dataframe(data)
+        #         data = data[['时间', '板块', '涨幅', '价格', '量']]
+        #         monitor_tree.delete(*tree.get_children())
+        #         for _, row in data.iterrows():
+        #             monitor_tree.insert("", "end", values=list(row))
+        #     dd  = _get_sina_data_realtime(stock_code)
+
+        #     if dd is not None:
+        #         price = dd.close
+        #         percent = round((dd.close - dd.llastp) / dd.llastp *100,1)
+        #         amount = round(dd.turnover/100/10000/100,1)
+        #         print(f'double_click get sina_data:{stock_code}, {price},{percent},{amount}')
+        #         check_alert(stock_code, price,percent,amount)
+        #         time_str = format_time(dd.ticktime)
+        #         row = [time_str,"新浪" , percent ,price,amount]
+        #         update_latest_row(row)
+        # threading.Thread(target=fetch_and_insert, daemon=True).start()
+
+    # update_code_entry(stock_code)
 
 
 
@@ -2637,12 +2740,26 @@ def bring_both_to_front(main_window):
         main_window.attributes('-topmost', 0)
     monitor_list = [win['toplevel'] for win in monitor_windows.values()]
 
-    for win_info in list(monitor_windows.values()):
+    # for win_info in list(monitor_windows.values()):
 
-        if  win_info['toplevel'] and win_info['toplevel'].winfo_exists():
-            win_info['toplevel'].lift()
-            win_info['toplevel'].attributes('-topmost', 1)
-            win_info['toplevel'].attributes('-topmost', 0)
+    #     if  win_info['toplevel'] and win_info['toplevel'].winfo_exists():
+    #         win_info['toplevel'].lift()
+    #         win_info['toplevel'].attributes('-topmost', 1)
+    #         win_info['toplevel'].attributes('-topmost', 0)
+    for win_id, win_info in monitor_windows.items():
+        toplevel = win_info.get('toplevel')
+        if toplevel and toplevel.winfo_exists():
+            # 使用自定义标记记录是否已经在前台
+            if not win_info.get('is_lifted', False):
+                toplevel.lift()
+                toplevel.attributes('-topmost', 1)
+                toplevel.attributes('-topmost', 0)
+                win_info['is_lifted'] = True  # 标记已提升
+            else:
+                # 窗口已经在前台，不再刷新
+                pass
+
+
 
 def get_monitor_index_for_window(window):
     """根据窗口位置找到所属显示器索引"""
@@ -2661,7 +2778,91 @@ def get_monitor_index_for_window(window):
     return 0  # 默认主屏
         
 
+# 整体提升
+# def bring_monitor_windows_to_front():
+#     """
+#     提升所有 monitor_windows 中的窗口到前台，
+#     只有第一次不在前台时才会 lift，避免重复刷新。
+#     """
+#     for win_id, win_info in list(monitor_windows.items()):
+#         toplevel = win_info.get('toplevel')
+#         if toplevel and toplevel.winfo_exists():
+#             # 如果窗口被最小化，则恢复
+#             if toplevel.state() == 'iconic':  # 'iconic' 表示最小化
+#                 toplevel.deiconify()
+#                 win_info['is_lifted'] = False  # 重置状态，让窗口被提升
+
+#             # 检查是否已经提升过
+#             if not win_info.get('is_lifted', False):
+#                 toplevel.lift()
+#                 # 通过 topmost 确保窗口置顶一次，然后恢复普通状态
+#                 toplevel.attributes('-topmost', 1)
+#                 toplevel.attributes('-topmost', 0)
+#                 win_info['is_lifted'] = True
+
+# monitor_windows = {
+#     'win1': {'toplevel': win1_toplevel, 'is_lifted': False},
+#     'win2': {'toplevel': win2_toplevel, 'is_lifted': False},
+# }
+
+# def on_close_window(win_id):
+#     win_info = monitor_windows.get(win_id)
+#     if win_info:
+#         win_info['toplevel'].destroy()
+#         del monitor_windows[win_id]
+
+
+
 def bring_monitor_to_front(active_window):
+    """
+    将 active_window 所在显示器上的窗口提升到前台，
+    只在未提升过或被最小化时执行，避免闪烁。
+    """
+    target_monitor = get_monitor_index_for_window(active_window)
+
+    for win_id, win_info in monitor_windows.items():
+        toplevel = win_info.get("toplevel")
+        if not (toplevel and toplevel.winfo_exists()):
+            continue
+
+        monitor_idx = get_monitor_index_for_window(toplevel)
+        if monitor_idx != target_monitor:
+            continue  # 只处理同一个显示器的窗口
+
+        # 如果窗口被最小化，则恢复并重置标记
+        if toplevel.state() == "iconic":
+            toplevel.deiconify()
+            win_info["is_lifted"] = False
+
+        # 只有未提升过的才执行 lift
+        if not win_info.get("is_lifted", False):
+            toplevel.lift()
+            toplevel.attributes("-topmost", 1)
+            toplevel.attributes("-topmost", 0)
+            win_info["is_lifted"] = True
+
+def reset_lift_flags():
+    """
+    定时检测窗口状态，如果窗口失去焦点或被最小化，
+    自动清除 is_lifted 标记，以便下次 bring_windows_to_front 能生效。
+    """
+    for win_id, win_info in monitor_windows.items():
+        toplevel = win_info.get("toplevel")
+        if not (toplevel and toplevel.winfo_exists()):
+            continue
+
+        # 如果窗口不是最前的 或 被最小化，就重置标记
+        # print(f'{win_id} toplevel.state() :{toplevel.state()} is_lifted : {win_info.keys()}')
+        if toplevel.state() == "iconic" or not toplevel.focus_displayof():
+            win_info["is_lifted"] = False
+
+    # 每 2 秒检测一次
+    root.after(2000, reset_lift_flags)
+
+# # 在主程序初始化时调用一次
+# reset_lift_flags()
+
+def bring_monitor_to_front_old(active_window):
     """只把和 active_window 在同一屏幕的窗口带到前面"""
     # uniq_state =uniq_var.get()
     # dfcf_state = dfcf_var.get()
@@ -2680,6 +2881,21 @@ def bring_monitor_to_front(active_window):
                     win.lift()
                     win.attributes("-topmost", 1)
                     win.attributes("-topmost", 0)
+
+        # for win_id, win_info in monitor_windows.items():
+        #     toplevel = win_info.get('toplevel')
+        #     if toplevel and toplevel.winfo_exists():
+        #         # 使用自定义标记记录是否已经在前台
+        #         if not win_info.get('is_lifted', False):
+        #             toplevel.lift()
+        #             toplevel.attributes('-topmost', 1)
+        #             toplevel.attributes('-topmost', 0)
+        #             win_info['is_lifted'] = True  # 标记已提升
+        #         else:
+        #             # 窗口已经在前台，不再刷新
+        #             pass
+
+
     # else:
     #     if root and root.winfo_exists():
     #         print(f'bring_both_to_front root')
@@ -4443,9 +4659,44 @@ def read_hdf_table(fname, key='all', columns=None):
     pd.DataFrame
         表格数据
     """
+    # try:
+    #     df = pd.read_hdf(fname, key=key, columns=columns)
+    #     return df
+    # except FileNotFoundError:
+    #     print(f"文件不存在: {fname}")
+    #     return None
+    # except KeyError:
+    #     print(f"表不存在: {key}")
+    #     return None
+    # except Exception as e:
+    #     print(f"HDF读取出错: {e}")
+    #     return None
+
+    # 自动确保 key 以 '/'
+    if not key.startswith('/'):
+        key = '/' + key
+
     try:
-        df = pd.read_hdf(fname, key=key, columns=columns)
-        return df
+        with SafeHDFStore(fname, mode='r') as h5:
+            if h5 is None:
+                print(f"HDF文件无法读取（锁定或不存在）: {fname}")
+                return None
+            if key not in h5.keys():
+                print(f"表不存在: {key}")
+                return None
+            df = h5[key]  # 读取整个表
+            if columns is not None:
+                df = df[columns]
+
+            # 如果需要转换 ticktime
+            # if convert_ticktime and 'ticktime' in df.columns:
+            #     df = df.copy()
+            #     df['ticktime'] = df['ticktime'].apply(
+            #         lambda x: int(x.strftime('%H%M%S')) if isinstance(x, pd.Timestamp) else x
+            #     )
+
+            return df
+
     except FileNotFoundError:
         print(f"文件不存在: {fname}")
         return None
@@ -4761,6 +5012,9 @@ if initial_monitor_list:
                 monitor_windows[stock_code] = monitor_win
 
 root.after(10000, flush_alerts)
+# 在主程序初始化时调用一次
+reset_lift_flags()
+
 refresh_all_stock_data()
 bind_hotkeys(root)
 
