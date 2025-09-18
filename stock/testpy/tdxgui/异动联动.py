@@ -2264,16 +2264,36 @@ def update_monitor_tree(data, tree, window_info, item_id):
     #     refresh_registry[key]["after_id"] = tree.after(delay_ms, lambda: refresh_stock_data(window_info, tree, item_id))
 
     # 更新最新一行
+    # def update_latest_row(new_row):
+    #     children = tree.get_children()
+    #     if children:
+    #         # 获取最后一行的 item id
+    #         # last_item = children[-1]
+    #         # tree.item(last_item, values=new_row)
+    #          # 插入到最上面一行
+    #         tree.insert("", 0, values=new_row) 
+    #     else:
+    #         tree.insert("", tk.END, values=new_row)
+
     def update_latest_row(new_row):
         children = tree.get_children()
-        if children:
-            # 获取最后一行的 item id
-            # last_item = children[-1]
-            # tree.item(last_item, values=new_row)
-             # 插入到最上面一行
-            tree.insert("", 0, values=new_row) 
-        else:
-            tree.insert("", tk.END, values=new_row)
+        # 删除占位符行
+        for item in children:
+            vals = tree.item(item, "values")
+            if vals and vals[0] in ("加载ing...", "loading"):  # 可根据占位符调整
+                tree.delete(item)
+        # 插入到最上面一行
+        tree.insert("", 0, values=new_row)
+
+    # def update_latest_row(new_row):
+    #     children = monitor_tree.get_children()
+    #     # 删除占位符行（模糊匹配 "加载" 或 "loading"）
+    #     for item in children:
+    #         vals = monitor_tree.item(item, "values")
+    #         if vals and vals[0] and any(s.lower() in str(vals[0]).lower() for s in ("加载ing...", "loading")):
+    #             monitor_tree.delete(item)
+    #     # 插入到最上面一行
+    #     monitor_tree.insert("", 0, values=new_row)
 
     def schedule_next(delay_ms,key, tree, window_info, item_id):
         now = time.time()
@@ -2494,12 +2514,17 @@ def show_context_menu(event):
 def on_monitor_double_click(event, stock_code):
     monitor_tree = event.widget
     items = monitor_tree.get_children()
-    exists = any(monitor_tree.item(item, "values")[0] == stock_code for item in items)
+    # exists = any(monitor_tree.item(item, "values") == stock_code for item in items)
+    exists = any(
+        monitor_tree.item(item, "values") and monitor_tree.item(item, "values")[0] == stock_code
+        for item in items
+        if monitor_tree.item(item, "values") and monitor_tree.item(item, "values")[0] not in ("加载ing...", "loading")
+    )
 
     if not exists:
         # 异步刷新
         def fetch_and_insert():
-            data = _get_stock_changes(stock_code)
+            data = _get_stock_changes(stock_code=stock_code)
             # monitor_tree.after(0, lambda: monitor_tree.insert("", "end", values=[
             #     stock_code,
             #     data.get("name", "暂无数据"),
@@ -2509,14 +2534,13 @@ def on_monitor_double_click(event, stock_code):
             # ]))
             def update_latest_row(new_row):
                 children = monitor_tree.get_children()
-                if children:
-                    # 获取最后一行的 item id
-                    # last_item = children[-1]
-                    # tree.item(last_item, values=new_row)
-                     # 插入到最上面一行
-                    tree.insert("", 0, values=new_row) 
-                else:
-                    tree.insert("", tk.END, values=new_row)
+                # 删除占位符行
+                for item in children:
+                    vals = monitor_tree.item(item, "values")
+                    if vals and vals[0] in ("加载ing...", "loading"):  # 可根据占位符调整
+                        monitor_tree.delete(item)
+                # 插入到最上面一行
+                monitor_tree.insert("", 0, values=new_row)
 
             if data is not None and not data.empty:
                 # 只保留当前股票
@@ -2524,10 +2548,11 @@ def on_monitor_double_click(event, stock_code):
                 if '涨幅' not in data.columns:
                     data = process_full_dataframe(data)
                 data = data[['时间', '板块', '涨幅', '价格', '量']]
-                tree.delete(*tree.get_children())
+                monitor_tree.delete(*tree.get_children())
                 for _, row in data.iterrows():
-                    tree.insert("", "end", values=list(row))
+                    monitor_tree.insert("", "end", values=list(row))
             dd  = _get_sina_data_realtime(stock_code)
+
             if dd is not None:
                 price = dd.close
                 percent = round((dd.close - dd.llastp) / dd.llastp *100,1)
