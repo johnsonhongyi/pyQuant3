@@ -6,34 +6,7 @@ Created on 2015-3-11
 import logging
 import sys,os
 sys.path.append("..")
-# from logging.handlers import RotatingFileHandler
 from JohnsonUtil.LoggerFactoryMultiprocess import MultiprocessHandler
-# sys.path.append("..")
-# import ipykernel.iostream 
-# from logbook import StderrHandler
-# from commonTips import RamBaseDir as rbd
-# print sys.modules
-# try:
-#     from commonTips import *
-#     print "imp",commonTips.get_os_system()
-# except ImportError:
-#     print "a"
-#     cct = sys.modules['/Users/Johnson/Documents/Quant/pyQuant/stock/JohnsonUtil/' + 'commonTips']
-#     print cct.get_os_system()
-    
-# Hack to import something without circular import issue
-# def load_module(name):
-#     """Load module using imp.find_module"""
-#     import imp
-#     names = name.split(".")
-#     path = None
-#     for name in names:
-#         print name,path
-#         f, path, info = imp.find_module(name, path)
-#         path = [path]
-#     return imp.load_module(name, f, path[0], info)
-# constants = load_module("commonTips")    
-# print constants    
 
 win10_ramdisk_triton = r'G:'
 win10_ramdisk_root = r'R:'
@@ -199,75 +172,75 @@ def set_log_file(console, level_s='DEBUG'):
     logging.getLogger('').addHandler(console)
 
 
-class JohnsonLoger(logging.Logger):
-    """
-    Custom logger class with additional levels and methods
-    """
-    # WARNPFX = logging.WARNING+1
-    # CRITICAL = 50
-    # FATAL = CRITICAL
-    # ERROR = 40
-    # WARNING = 30
-    # WARN = WARNING
-    # INFO = 20
-    # DEBUG = 10
-    # NOTSET = 0
+# class JohnsonLoger(logging.Logger):
+#     """
+#     Custom logger class with additional levels and methods
+#     """
+#     # WARNPFX = logging.WARNING+1
+#     # CRITICAL = 50
+#     # FATAL = CRITICAL
+#     # ERROR = 40
+#     # WARNING = 30
+#     # WARN = WARNING
+#     # INFO = 20
+#     # DEBUG = 10
+#     # NOTSET = 0
 
-    def __init__(self, name):
-        # now = time.strftime('%Y-%m-%d %H:%M:%S')
-        # path_sep = get_os_path_sep()
-        self.name=name
-        log_path = get_run_path() + 'stock.log'
-        logging.basicConfig(
-            # level    =eval('logging.%s'%(level_s)),
-            # level=DEBUG,
-            # format   = now +":" + name + ' LINE %(lineno)-4d  %(levelname)-8s %(message)s',
-            format="[%(asctime)s] %(name)s:%(levelname)s: %(message)s",
-            datefmt='%m-%d %H:%M',
-            filename=log_path,
-#            filemode='w');
-            filemode='a');
-        self.console=logging.StreamHandler();
-        self.console.setLevel(logging.DEBUG);
-        formatter = logging.Formatter(self.name + ': LINE %(lineno)-4d :%(levelname)-8s %(message)s');
-        self.console.setFormatter(formatter);
-        self.logger = logging.getLogger(self.name)
-        self.logger.addHandler(self.console);
-        self.setLevel(ERROR)
+#     def __init__(self, name):
+#         # now = time.strftime('%Y-%m-%d %H:%M:%S')
+#         # path_sep = get_os_path_sep()
+#         self.name=name
+#         log_path = get_run_path() + 'stock.log'
+#         logging.basicConfig(
+#             # level    =eval('logging.%s'%(level_s)),
+#             # level=DEBUG,
+#             # format   = now +":" + name + ' LINE %(lineno)-4d  %(levelname)-8s %(message)s',
+#             format="[%(asctime)s] %(name)s:%(levelname)s: %(message)s",
+#             datefmt='%m-%d %H:%M',
+#             filename=log_path,
+# #            filemode='w');
+#             filemode='a');
+#         self.console=logging.StreamHandler();
+#         self.console.setLevel(logging.DEBUG);
+#         formatter = logging.Formatter(self.name + ': LINE %(lineno)-4d :%(levelname)-8s %(message)s');
+#         self.console.setFormatter(formatter);
+#         self.logger = logging.getLogger(self.name)
+#         self.logger.addHandler(self.console);
+#         self.setLevel(ERROR)
 
-        # return self.logger
+#         # return self.logger
 
-    def warnpfx(self, msg, *args, **kw):
-        self.log(self.WARNPFX, "! PFXWRN %s" % msg, *args, **kw)
+#     def warnpfx(self, msg, *args, **kw):
+#         self.log(self.WARNPFX, "! PFXWRN %s" % msg, *args, **kw)
 
-    def setLevel(self, level):
-        self.logger.setLevel(level)
-        return self.logger
+#     def setLevel(self, level):
+#         self.logger.setLevel(level)
+#         return self.logger
 
-    def debug(self,message):
-        self.logger.debug(message)
+#     def debug(self,message):
+#         self.logger.debug(message)
 
-    def info(self,message):
-        self.logger.info(message)
+#     def info(self,message):
+#         self.logger.info(message)
 
-    def warn(self,message):
-        self.logger.warn(message)
+#     def warn(self,message):
+#         self.logger.warn(message)
 
-    def error(self,message):
-        self.logger.error(message)
+#     def error(self,message):
+#         self.logger.error(message)
 
-    def cri(self,message):
-        self.logger.critical(message)
-    # logging.setLoggerClass(CheloExtendedLogger)
-    # rrclogger = logging.getLogger("rrcheck")
-    # rrclogger.setLevel(logging.INFO)
+#     def cri(self,message):
+#         self.logger.critical(message)
+#     # logging.setLoggerClass(CheloExtendedLogger)
+#     # rrclogger = logging.getLogger("rrcheck")
+#     # rrclogger.setLevel(logging.INFO)
 
-# def set_log_format():
-#     console = logging.StreamHandler()
-#     console.setLevel(logging.WARNING)
-#     formatter = logging.Formatter('%(name)-12s: %(levelname)-8s %(message)s')
-#     console.setFormatter(formatter)
-#     logging.getLogger('').addHandler(console)
+# # def set_log_format():
+# #     console = logging.StreamHandler()
+# #     console.setLevel(logging.WARNING)
+# #     formatter = logging.Formatter('%(name)-12s: %(levelname)-8s %(message)s')
+# #     console.setFormatter(formatter)
+# #     logging.getLogger('').addHandler(console)
 
 if __name__ == '__main__':
     getLogger("www").debug("www")

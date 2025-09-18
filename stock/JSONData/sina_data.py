@@ -22,7 +22,7 @@ from JSONData import tdx_hdf5_api as h5a
 from akshare import stock_info_bj_name_code
 # pip install --no-deps akshare
 # import functools
-
+import datetime
 class StockCode:
 
     def __init__(self):
@@ -253,7 +253,21 @@ class Sina:
         if h5 is not None and len(h5) > 0:
             o_time = h5[h5.timel != 0].timel
             # o_time = o_time[0] if isinstance(o_time, pd.Series) else o_time
-            ticktime = int(h5[h5.ticktime != 0].ticktime[0][-8:-3].replace(":",''))
+            # 获取第一个非零 ticktime
+            ts = h5[h5.ticktime != 0].ticktime.iloc[0]  # iloc[0] 更安全
+            if isinstance(ts, pd.Timestamp):
+                ts_str = ts.strftime('%H%M%S')  # 转成 'HHMMSS'
+            elif isinstance(ts, datetime.datetime):
+                ts_str = ts.strftime('%H%M%S')
+            elif isinstance(ts, str):
+                # 如果已经是字符串，尝试去掉冒号或处理已有格式
+                ts_str = ts.replace(":", "")[-6:]  # 保留 HHMMSS
+            else:
+                # 其他类型直接转字符串
+                ts_str = str(ts)[-6:]
+            ticktime = int(ts_str)
+            
+            # ticktime = int(h5[h5.ticktime != 0].ticktime[0][-8:-3].replace(":",''))
             if len(o_time) > 0 and ((self.get_int_time(o_time[0]) >= 1500 and ticktime >= 1500) or (self.get_int_time(o_time[0]) < 1500 and ticktime < 1500) ):
                 o_time = o_time[0]
                 l_time = time.time() - o_time
@@ -391,7 +405,23 @@ class Sina:
 
             if h5 is not None and len(h5) > 0:
                 o_time = h5[h5.timel != 0].timel
-                ticktime = int(h5[h5.ticktime != 0].ticktime[0][-8:-3].replace(":",''))
+
+                # 获取第一个非零 ticktime
+                ts = h5[h5.ticktime != 0].ticktime.iloc[0]  # iloc[0] 更安全
+                if isinstance(ts, pd.Timestamp):
+                    ts_str = ts.strftime('%H%M%S')  # 转成 'HHMMSS'
+                elif isinstance(ts, datetime.datetime):
+                    ts_str = ts.strftime('%H%M%S')
+                elif isinstance(ts, str):
+                    # 如果已经是字符串，尝试去掉冒号或处理已有格式
+                    ts_str = ts.replace(":", "")[-6:]  # 保留 HHMMSS
+                else:
+                    # 其他类型直接转字符串
+                    ts_str = str(ts)[-6:]
+
+                ticktime = int(ts_str)
+                # ticktime = int(h5[h5.ticktime != 0].ticktime[0][-8:-3].replace(":",''))
+
                 if len(o_time) > 0 and ((self.get_int_time(o_time[0]) >= 1500 and ticktime >= 1500) or (self.get_int_time(o_time[0]) < 1500 and ticktime < 1500) ):
                     h5 = self.combine_lastbuy(h5)
                     return h5

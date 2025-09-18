@@ -6,7 +6,7 @@ import time
 # dwmapi = ctypes.WinDLL("dwmapi")
 
 from mouseMonitor.displayDetction import  Display_Detection
-
+import os
 import re
 import win32gui
 
@@ -275,7 +275,7 @@ tdx_ths_position4644nodfcf={'Edge': '891,-905,704,912','交易信号监控': '25
 #         '股票异动数据监控': '2058,-967,750,550','开盘啦竞价板块观察1.0': '914,-1052,898,265','股票异动数据监控': '2058,-967,750,550',\
 # }
 
-tdx_ths_position4644={'Edge': '2154,-858,654,852','交易信号监控': '1232,84,566,389','东兴证券': '51,205,1083,717',\
+tdx_ths_position4644_exe={'Edge': '2154,-858,654,852','交易信号监控': '1232,84,566,389','东兴证券': '51,205,1083,717',\
         '行业跟随1': '861,0,677,404','人气综合排行榜2.2': '-2,0,478,753','通达信金融终端(开心果交易版) 副屏一': '1260,-829,1174,655',\
         '通达信金融终端(开心果交易版) 副屏二': '1303,-649,1150,620','通达信金融终端(开心果交易版) 副屏三': '856,-743,1199,704','通达信金融终端(开心果交易版)V2025': '209,60,1216,794',\
         '东方财富': '1449,-858,1354,790','同花顺': '927,-785,1440,785','sina_Market-DurationDn.exe': '-6,432,1356,423',\
@@ -286,6 +286,16 @@ tdx_ths_position4644={'Edge': '2154,-858,654,852','交易信号监控': '1232,84
         '股票异动数据监控': '2270,-1022,516,979','开盘啦竞价板块观察1.0': '891,-1043,898,265','股票异动数据监控': '2270,-1022,516,979',\
 }
 
+tdx_ths_position4644={'Edge': '2153,-859,655,853','交易信号监控': '1232,84,566,389','东兴证券': '51,205,1083,717',\
+        '行业跟随1': '861,0,677,404','人气综合排行榜2.2': '-2,0,478,753','通达信金融终端(开心果交易版) 副屏一': '1260,-829,1174,655',\
+        '通达信金融终端(开心果交易版) 副屏二': '1303,-649,1150,620','通达信金融终端(开心果交易版) 副屏三': '856,-743,1199,704','通达信金融终端(开心果交易版)V2025': '209,60,1216,794',\
+        '东方财富': '1449,-858,1354,790','同花顺': '927,-785,1440,785','sina_Market-DurationDn.py': '-6,432,1356,423',\
+        'sina_Market-DurationCXDN.py': '10,313,1329,438','sina_Market-DurationDnUP.py': '-6,411,1353,438','sina_Market-DurationUP.py': '119,329,1394,439',\
+        'sina_Monitor-Market-LH.py': '264,306,1307,407','sina_Monitor.py': '946,-1080,1353,521','singleAnalyseUtil.py': '1890,-1080,897,359',\
+        'LinePower.py': '750,33,761,407','instock_Monitor.py': '16,82,1346,439','chantdxpower.exe': '86,128,649,407',\
+        'ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51','开盘啦竞价板块观察1.0': '891,-1043,898,265',\
+        '股票异动数据监控': '130,130,516,979','开盘啦竞价板块观察1.0': '891,-1043,898,265','股票异动数据监控': '130,130,516,979',\
+}
 
 #LG + samsung  + triton
 tdx_ths_position5376_Triton={'Edge': '1013,-793,914,800','交易信号监控': '1361,-896,566,389','东兴证券': '51,205,1083,717',\
@@ -1078,12 +1088,19 @@ if __name__ == '__main__':
     idx = 0
     idx_status=0
 
-    proc_title = [proc.replace('.py','.exe') if not proc.startswith('py') else proc for proc in proc_title]
+    workExePath = "D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\sina_Monitor.exe"
 
-    positon_exe = {}
-    for key in positon.keys():
-        value = positon[key]
-        positon_exe[key.replace('.py','.exe') if not key.startswith('py') else key] = value
+    exe_status = os.path.exists(workExePath)
+    # EXE
+    if exe_status:
+        proc_title = [proc.replace('.py','.exe') if not proc.startswith('py') else proc for proc in proc_title]
+        positon_exe = {}
+        for key in positon.keys():
+            value = positon[key]
+            positon_exe[key.replace('.py','.exe') if not key.startswith('py') else key] = value
+        print(f'positon_exe:{positon_exe}')
+        positon = positon_exe
+
 
     # py2exe
     # proc_title_exe = [name for proc in proc_title for name in (proc, proc.replace('.py', '.exe') if proc.endswith('.py') else proc)]
@@ -1112,7 +1129,6 @@ if __name__ == '__main__':
 
 
 
-    positon = positon_exe
     appendProc = ['开盘啦竞价板块观察1.0','股票异动数据监控']
     proc_title.extend(appendProc)   # good src 
     # proc_title_new.extend(appendProc)
@@ -1133,7 +1149,11 @@ if __name__ == '__main__':
         result=FindWindowRectFromName(title)
 
         if result == (0,0,0,0):
-            print("'%s': '%s',"%(title,positon[title]),end='')
+            # print("'%s': '%s',"%(title,positon[title]),end='')
+            if exe_status:
+                print("'%s': '%s',"%(title,positon[title]),end='')
+            else:
+                print("'%s': '%s',"%(title.replace('.exe','.py') if not title.startswith('py') else title,positon[title]),end='')
         if idx%3 == 0:
             print(f'\\')
 
@@ -1154,7 +1174,7 @@ if __name__ == '__main__':
     # print(f'title: {proc_title},exe: {positon_exe}')
     # import ipdb;ipdb.set_trace()
 
-    set_proc_windows_position(proc_title,tdx_ths_position=positon_exe)
+    set_proc_windows_position(proc_title,tdx_ths_position=positon)
 
 
     # print(find_proc_windows('ths-tdx-web'))

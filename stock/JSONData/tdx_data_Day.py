@@ -3332,7 +3332,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
         red_cout = eval(f"df.query('close > ma5d or high > high.shift(1) or (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
     else:
         red_cout = eval(f"df.query('close > ma5d or high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.03) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.03 ))')")
-    log.debug('red_cout:%s idx_close:%s'%(red_cout,idx_close))
+    log.debug('red_cout:%s idx_close:%s'%(red_cout[:1],idx_close))
     # red_cout = eval(f"df.query('close >={idx_close}  and high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
     df2 = df[df.index >= idx_date]
     green_cout = df2.query('(low < low.shift(1) and high < high.shift(1)) or (close < open)')
@@ -4571,11 +4571,11 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
             h5 = h5a.write_hdf_db(
                 h5_fname, tdxdata, table=h5_table, append=True)
 
-        log.debug("TDX Col:%s" % tdxdata.columns.values)
+        log.debug("TDX Col:%s" % tdxdata.columns.values[:10])
     else:
         tdxdata = lastpTDX_DF
     log.debug("TdxLastP: %s %s" %
-              (len(tdxdata), tdxdata.columns.values))
+              (len(tdxdata), tdxdata.columns.values[:10]))
 
     if checknew:
         tdx_list = tdxdata.index.tolist()
