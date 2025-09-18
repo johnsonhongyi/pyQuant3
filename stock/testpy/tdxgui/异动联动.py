@@ -1609,6 +1609,8 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
     now = datetime.now()
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
 
+    if get_day_is_trade_day() and 922 < get_now_time_int() < 932:
+        loaded_df = None
 
     # 使用 root.after() 调度任务，在回调函数中使用 lambda 包装，
     # 确保在任务完成后再次调用自身进行重新调度。
@@ -1622,7 +1624,8 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
             # 5分钟后再次调用此函数
             schedule_task('worktime_task',5 * 60 * 1000,lambda: schedule_worktime_task(tree))
         else:
-            status_label3.config(text=f"更新在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
+            # status_label3.config(text=f"更新在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
+            status_label3.config(text=f"延迟在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
             schedule_task('worktime_task',delay_ms,lambda: schedule_worktime_task(tree))
     else:
         # if get_work_time() :
@@ -1633,7 +1636,7 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
         # else:
         print(f"下一次background任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
         print(f"自动更新任务get_stock_changes_background执行于:在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
-        status_label3.config(text=f"更新{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}")
+        status_label3.config(text=f"日更新{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}")
         schedule_task('worktime_task',delay_ms,lambda: schedule_worktime_task(tree))
 
 
