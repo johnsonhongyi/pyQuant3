@@ -102,4 +102,4 @@ python macRun.py
 timeout /t 2 /nobreak >nul
 
 echo 所有程序启动完成
-pause
+rem pause

@@ -327,7 +327,7 @@ if __name__ == "__main__":
                             top_all['dff2'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),
                                                    top_all['buy'].values, top_all['lastp'].values)))
 
-                         _top_all = top_all[top_all.close > 10]
+                        _top_all = top_all[top_all.close > 10]
                         if len(_top_all) > 0 and _top_all.lastp1d[0] == _top_all.close[0] and _top_all.lastp1d[-1] == _top_all.close[-1]:
                             print('initf_false ',end='')
                             if cct.GlobalValues().getkey('initfilter_false') is None:

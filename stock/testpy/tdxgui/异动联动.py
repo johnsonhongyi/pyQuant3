@@ -1330,7 +1330,8 @@ def search_by_code(event=None):
         else:
             # 其他长度也可以模糊匹配
             df = _get_stock_changes()
-            data = df[df["代码"].str.contains(code)]
+            # data = df[df["代码"].str.contains(code)]
+            data = df[df["代码"].str.match(rf"^({code})")]
 
     else:
         # 非数字，模糊匹配名称
@@ -1361,7 +1362,12 @@ def refresh_data():
     global date_write_is_processed,worker_thread,last_updated_time
 
     if loaded_df is not None and not loaded_df.empty:
-        date_entry.set_date(get_today())
+        if start_init > 0:
+            if date_entry.winfo_exists():
+                try:
+                    date_entry.set_date(get_today())
+                except Exception as e:
+                    print("还不能设置:", e)
         if scheduled_task:
             root.after_cancel(scheduled_task)
             time.sleep(0.2)
@@ -1537,7 +1543,7 @@ def check_readldf_exist():
     # # 2. 格式化日期為字串
     # # 例如: 2025-09-03
     # date_str = selected_date_obj.strftime("%Y-%m-%d")
-    global loaded_df,realdatadf
+    global loaded_df,realdatadf,date_entry,start_init
     date_str = get_today()
 
     if not get_day_is_trade_day() or (get_day_is_trade_day() and (get_now_time_int() < 923)):
@@ -1548,7 +1554,11 @@ def check_readldf_exist():
     filename =  os.path.join(BASE_DIR, "datacsv",f"dfcf_{date_str}.csv.bz2")
     # --- 核心檢查邏輯 ---
     if (not get_day_is_trade_day() or (get_day_is_trade_day() and (get_now_time_int() >1530  or get_now_time_int() < 923))) and  os.path.exists(filename):
-        date_entry.set_date(date_str)
+        if start_init > 0 and date_entry.winfo_exists():
+            try:
+                date_entry.set_date(date_str)
+            except Exception as e:
+                print("还不能设置:", e)
         print(f"文件 '{filename}' 已存在，放棄寫入,已加载")
         loaded_df = pd.read_csv(filename, encoding='utf-8-sig', compression="bz2")
         loaded_df['代码'] = loaded_df["代码"].astype(str).str.zfill(6)
@@ -1685,43 +1695,137 @@ def rearrange_monitor_windows_grid():
                 print(f"移动窗口失败 {code}: {e}")
 
 
-
-def rearrange_monitors_per_screen():
-    """基于窗口所在屏幕，重新垂直排列 monitor_windows 里的所有窗口"""
+def rearrange_monitors_per_screen(align="left", sort_by="id"):
+    """
+    多屏幕窗口重排（自动换列 + 左右对齐 + 屏幕内排序）
+    
+    align: "left" 或 "right" 控制对齐方向
+    sort_by: "id" 或 "title" 窗口排序依据
+    """
     if not MONITORS:
         init_monitors()
 
+    #转换stock_info to dict for info.get("id", 0)
+    def stock_info_to_dict(stock_info):
+        stock_code, stock_name, *rest = stock_info
+        return {
+            "id": stock_code,
+            "name": stock_name,
+            "data": rest
+        }
+
     # 取监控窗口列表
-    windows = [info["toplevel"] for info in monitor_windows.values() if "toplevel" in info]
+    windows = [info for info in monitor_windows.values() if "toplevel" in info]
 
     # 按屏幕分组
     screen_groups = {i: [] for i in range(len(MONITORS))}
-    for win in windows:
+    for win_info in windows:
+        win = win_info["toplevel"]
         try:
             x, y = win.winfo_x(), win.winfo_y()
             for idx, (l, t, r, b) in enumerate(MONITORS):
                 if l <= x < r and t <= y < b:
-                    screen_groups[idx].append(win)
+                    screen_groups[idx].append(win_info)
                     break
         except Exception as e:
             print(f"⚠ 获取窗口位置失败: {e}")
 
-    # 每个屏幕内重新排列
+    # 每个屏幕内排序并排列
     for idx, group in screen_groups.items():
         if not group:
             continue
+
+        # 排序
+        if sort_by == "id":
+            # group.sort(key=lambda info: info.get("id", 0))
+            group.sort(key=lambda info:  info['stock_info'][0]) 
+        elif sort_by == "title":
+            # group.sort(key=lambda info: info.get("title", ""))
+            group.sort(key=lambda info:  info['stock_info'][1]) 
+        else:
+            pass  # 保持原顺序
+
         l, t, r, b = MONITORS[idx]
-        current_x = l + 50  # 左上角偏移 50
-        current_y = t + 50  # 左上角偏移 50
-        margin_x = 5
-        for win in group:
+        screen_height = b - t
+
+        margin_y = 5
+        col_margin_x = 30  # 列间隔
+
+        if align == "left":
+            current_x = l + 50
+        elif align == "right":
+            current_x = r - 50
+        else:
+            raise ValueError("align 参数必须是 'left' 或 'right'")
+
+        current_y = t + 50
+        max_col_width = 0
+
+        for win_info in group:
+            win = win_info["toplevel"]
             try:
                 w = win.winfo_width()
                 h = win.winfo_height()
+
+                if align == "right" and max_col_width == 0:
+                    current_x -= w
+
+                # 超出屏幕高度 -> 换列
+                if current_y + h + margin_y > b:
+                    if align == "left":
+                        current_x += max_col_width + col_margin_x
+                    else:
+                        current_x -= max_col_width + col_margin_x
+                    current_y = t + 50
+                    max_col_width = 0
+                    if align == "right":
+                        current_x -= w
+
                 win.geometry(f"{w}x{h}+{current_x}+{current_y}")
-                current_y += h + margin_x  # 窗口间隔
+                current_y += h + margin_y
+                max_col_width = max(max_col_width, w)
+
             except Exception as e:
                 print(f"⚠ 窗口排列失败: {e}")
+
+
+#  窗口重排,出现一列一直排问题
+# def rearrange_monitors_per_screen():
+#     """基于窗口所在屏幕，重新垂直排列 monitor_windows 里的所有窗口"""
+#     if not MONITORS:
+#         init_monitors()
+
+#     # 取监控窗口列表
+#     windows = [info["toplevel"] for info in monitor_windows.values() if "toplevel" in info]
+
+#     # 按屏幕分组
+#     screen_groups = {i: [] for i in range(len(MONITORS))}
+#     for win in windows:
+#         try:
+#             x, y = win.winfo_x(), win.winfo_y()
+#             for idx, (l, t, r, b) in enumerate(MONITORS):
+#                 if l <= x < r and t <= y < b:
+#                     screen_groups[idx].append(win)
+#                     break
+#         except Exception as e:
+#             print(f"⚠ 获取窗口位置失败: {e}")
+
+#     # 每个屏幕内重新排列
+#     for idx, group in screen_groups.items():
+#         if not group:
+#             continue
+#         l, t, r, b = MONITORS[idx]
+#         current_x = l + 50  # 左上角偏移 50
+#         current_y = t + 50  # 左上角偏移 50
+#         margin_x = 5
+#         for win in group:
+#             try:
+#                 w = win.winfo_width()
+#                 h = win.winfo_height()
+#                 win.geometry(f"{w}x{h}+{current_x}+{current_y}")
+#                 current_y += h + margin_x  # 窗口间隔
+#             except Exception as e:
+#                 print(f"⚠ 窗口排列失败: {e}")
 
 
 
@@ -1906,9 +2010,14 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
         realdatadf = pd.DataFrame()
         loaded_df = None
         viewdf = pd.DataFrame()
+        if start_init > 0:
+            if date_entry.winfo_exists():
+                try:
+                    date_entry.set_date(get_today())
+                except Exception as e:
+                    print("还不能设置:", e)
         start_init = 0
         last_updated_time = 0
-        date_entry.set_date(get_today())
 
     # 使用 with realdatadf_lock 确保只有一个线程可以进入此关键区域
     if loaded_df is None  and (len(realdatadf) == 0 or get_work_time() or (not date_write_is_processed and get_now_time_int() > 1505)):
@@ -2254,8 +2363,9 @@ def update_monitor_tree(data, tree, window_info, item_id):
         # window.after(wait_time, lambda: refresh_stock_data(window_info, tree, item_id))
 
     else:
+        pass
         # 如果没有数据，清空并短间隔重试
-        tree.delete(*tree.get_children())
+        # tree.delete(*tree.get_children())
 
     if  get_work_time() :
         # print(f'start flush_alerts')
@@ -2377,6 +2487,59 @@ def show_context_menu(event):
     except Exception as e:
         print(f"[右键菜单异常] {e}")
 
+
+def on_monitor_double_click(event, stock_code):
+    monitor_tree = event.widget
+    items = monitor_tree.get_children()
+    exists = any(monitor_tree.item(item, "values")[0] == stock_code for item in items)
+
+    if not exists:
+        # 异步刷新
+        def fetch_and_insert():
+            data = _get_stock_changes(stock_code)
+            # monitor_tree.after(0, lambda: monitor_tree.insert("", "end", values=[
+            #     stock_code,
+            #     data.get("name", "暂无数据"),
+            #     data.get("percent", "-"),
+            #     data.get("price", "-"),
+            #     data.get("vol", "-")
+            # ]))
+            def update_latest_row(new_row):
+                children = monitor_tree.get_children()
+                if children:
+                    # 获取最后一行的 item id
+                    # last_item = children[-1]
+                    # tree.item(last_item, values=new_row)
+                     # 插入到最上面一行
+                    tree.insert("", 0, values=new_row) 
+                else:
+                    tree.insert("", tk.END, values=new_row)
+
+            if data is not None and not data.empty:
+                # 只保留当前股票
+                data = data[data['代码'] == stock_code].set_index('时间').reset_index()
+                if '涨幅' not in data.columns:
+                    data = process_full_dataframe(data)
+                data = data[['时间', '板块', '涨幅', '价格', '量']]
+                tree.delete(*tree.get_children())
+                for _, row in data.iterrows():
+                    tree.insert("", "end", values=list(row))
+            dd  = _get_sina_data_realtime(stock_code)
+            if dd is not None:
+                price = dd.close
+                percent = round((dd.close - dd.llastp) / dd.llastp *100,1)
+                amount = round(dd.turnover/100/10000/100,1)
+                print(f'double_click get sina_data:{stock_code}, {price},{percent},{amount}')
+                check_alert(stock_code, price,percent,amount)
+                time_str = format_time(dd.ticktime)
+                row = [time_str,"新浪" , percent ,price,amount]
+                update_latest_row(row)
+        threading.Thread(target=fetch_and_insert, daemon=True).start()
+
+    update_code_entry(stock_code)
+
+
+
 def update_code_entry(stock_code):
     """更新主窗口的 Entry"""
     global code_entry
@@ -2472,10 +2635,13 @@ def get_monitor_index_for_window(window):
 
 def bring_monitor_to_front(active_window):
     """只把和 active_window 在同一屏幕的窗口带到前面"""
-
+    # uniq_state =uniq_var.get()
+    # dfcf_state = dfcf_var.get()
+    sub_state = sub_var.get()
     global alert_moniter_bring_front
     #没有监控中心是开启多窗口级联
-    if not alert_moniter_bring_front:
+    #修改为默认不联动,
+    if sub_state and not alert_moniter_bring_front :
         target_monitor = get_monitor_index_for_window(active_window)
 
         for win_info in monitor_windows.values():
@@ -2486,7 +2652,12 @@ def bring_monitor_to_front(active_window):
                     win.lift()
                     win.attributes("-topmost", 1)
                     win.attributes("-topmost", 0)
-
+    # else:
+    #     if root and root.winfo_exists():
+    #         print(f'bring_both_to_front root')
+    #         root.lift()
+    #         root.attributes('-topmost', 1)
+    #         root.attributes('-topmost', 0)
 
 def sort_treeview(tree, col, reverse):
     """
@@ -2744,58 +2915,173 @@ def clamp_window_to_screens(x, y, w, h, monitors):
 # -----------------------------
 # 修改 place_new_window 使用全局缓存
 # -----------------------------
-def place_new_window(window, window_id, win_width=300, win_height=160, margin=10):
-    """放置窗口，如果已有存储位置就用，否则垂直平铺"""
-    global WINDOW_GEOMETRIES, WINDOWS_BY_ID, MONITORS
-    WINDOWS_BY_ID[window_id] = window  # 必须保留
+# def place_new_window(window, window_id, win_width=300, win_height=160, margin=10):
+#     """放置窗口，如果已有存储位置就用，否则垂直平铺"""
+#     global WINDOW_GEOMETRIES, WINDOWS_BY_ID, MONITORS
+#     WINDOWS_BY_ID[window_id] = window  # 必须保留
 
-    monitors = MONITORS  # 使用全局缓存
+#     monitors = MONITORS  # 使用全局缓存
+
+#     if window_id in WINDOW_GEOMETRIES:
+#         # 使用已有存储位置
+#         geom = WINDOW_GEOMETRIES[window_id]
+#         try:
+#             _, x_part, y_part = geom.split('+')
+#             x, y = int(x_part), int(y_part)
+#         except Exception:
+#             x, y = 100, 100
+#         # 校正窗口位置到可见屏幕
+#         x, y = clamp_window_to_screens(x, y, win_width, win_height, monitors)
+#         WINDOWS_BY_ID[window_id] = window
+#         window.geometry(f"{win_width}x{win_height}+{x}+{y}")
+#     else:
+#         # 垂直平铺
+#         used_positions = []
+#         for w in WINDOWS_BY_ID.values():
+#             try:
+#                 geom = w.geometry()
+#                 parts = geom.split('+')
+#                 if len(parts) == 3:
+#                     used_positions.append((int(parts[1]), int(parts[2])))
+#             except:
+#                 continue
+
+#         # 从主显示器左上角开始
+#         left, top, right, bottom = monitors[0]
+#         x, y = left + margin, top + margin
+#         step_y = win_height + margin
+#         step_x = win_width + margin
+#         max_y = bottom - win_height - margin
+
+#         while (x, y) in used_positions:
+#             y += step_y
+#             if y > max_y:
+#                 y = top + margin
+#                 x += step_x
+#                 if x + win_width > right:
+#                     x = left + margin
+
+#         window.geometry(f"{win_width}x{win_height}+{x}+{y}")
+
+def rects_overlap(r1, r2):
+    """判断两个矩形是否重叠"""
+    x1, y1, x2, y2 = r1
+    a1, b1, a2, b2 = r2
+    return not (x2 <= a1 or a2 <= x1 or y2 <= b1 or b2 <= y1)
+
+def place_new_window(window, window_id, win_width=300, win_height=160, margin=5):
+    """放置窗口：避免重叠 + 在所属屏幕内自动排列"""
+    global WINDOW_GEOMETRIES, WINDOWS_BY_ID, MONITORS
+    WINDOWS_BY_ID[window_id] = window
+
+    monitors = MONITORS or [(0, 0, win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1))]
 
     if window_id in WINDOW_GEOMETRIES:
-        # 使用已有存储位置
+        # 使用已存储位置
         geom = WINDOW_GEOMETRIES[window_id]
         try:
             _, x_part, y_part = geom.split('+')
             x, y = int(x_part), int(y_part)
         except Exception:
             x, y = 100, 100
-        # 校正窗口位置到可见屏幕
         x, y = clamp_window_to_screens(x, y, win_width, win_height, monitors)
-        WINDOWS_BY_ID[window_id] = window
         window.geometry(f"{win_width}x{win_height}+{x}+{y}")
-    else:
-        # 垂直平铺
-        used_positions = []
-        for w in WINDOWS_BY_ID.values():
-            try:
-                geom = w.geometry()
-                parts = geom.split('+')
-                if len(parts) == 3:
-                    used_positions.append((int(parts[1]), int(parts[2])))
-            except:
-                continue
+        return
 
-        # 从主显示器左上角开始
-        left, top, right, bottom = monitors[0]
-        x, y = left + margin, top + margin
-        step_y = win_height + margin
-        step_x = win_width + margin
-        max_y = bottom - win_height - margin
+    # -------------------
+    # 自动排列逻辑
+    # -------------------
+    # 1. 获取所有已占用的矩形
+    used_rects = []
+    for w in WINDOWS_BY_ID.values():
+        try:
+            geom = w.geometry()  # e.g. "300x160+100+200"
+            size_part, x_part, y_part = geom.split('+')
+            w_width, w_height = map(int, size_part.split('x'))
+            x, y = int(x_part), int(y_part)
+            used_rects.append((x, y, x + w_width, y + w_height))
+        except:
+            continue
 
-        while (x, y) in used_positions:
-            y += step_y
-            if y > max_y:
-                y = top + margin
-                x += step_x
-                if x + win_width > right:
-                    x = left + margin
+    # 2. 默认放主屏幕（第一个）
+    left, top, right, bottom = monitors[0]
+    step_x, step_y = win_width + margin, win_height + margin
+    max_x, max_y = right - win_width - margin, bottom - win_height - margin
 
-        window.geometry(f"{win_width}x{win_height}+{x}+{y}")
+    # 3. 尝试所有候选位置
+    y = top + margin
+    while y <= max_y:
+        x = left + margin
+        while x <= max_x:
+            new_rect = (x, y, x + win_width, y + win_height)
+            if not any(rects_overlap(new_rect, r) for r in used_rects):
+                # 找到不重叠的位置
+                window.geometry(f"{win_width}x{win_height}+{x}+{y}")
+                return
+            x += step_x
+        y += step_y
 
-    # 保留更新位置回调
-    # window.bind("<Configure>", lambda e: update_window_position(window_id))
+    # 4. 如果全满，放在主屏幕左上角（兜底）
+    window.geometry(f"{win_width}x{win_height}+{left+margin}+{top+margin}")
 
 
+# import win32api
+#窗口重排2
+# def get_screen_bounds(hwnd):
+#     """获取窗口所在屏幕的边界 (left, top, right, bottom)。"""
+#     # 获取窗口矩形
+#     rect = hwnd.winfo_geometry()  # "WxH+X+Y"
+#     w, h, x, y = parse_geometry(rect)
+#     center_x, center_y = x + w // 2, y + h // 2
+
+#     # 遍历所有显示器，找到包含该点的屏幕
+#     monitors = win32api.EnumDisplayMonitors()
+#     for monitor in monitors:
+#         (mx1, my1, mx2, my2) = monitor[2]
+#         if mx1 <= center_x <= mx2 and my1 <= center_y <= my2:
+#             return (mx1, my1, mx2, my2)
+
+#     # 默认返回主屏幕
+#     return win32api.GetSystemMetrics(0), 0, win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1)
+
+
+# def parse_geometry(geom_str):
+#     """解析 Tk geometry: WxH+X+Y -> (w, h, x, y)"""
+#     wh, xy = geom_str.split("+", 1)
+#     w, h = map(int, wh.split("x"))
+#     x, y = map(int, xy.split("+"))
+#     return w, h, x, y
+
+
+# def rearrange_windows_in_screens(windows, margin=10, col_width=400, row_height=300):
+#     """
+#     只在窗口所在的屏幕内重排窗口。
+#     windows: {id: tk_window}
+#     """
+#     # 1. 按屏幕分组
+#     screen_groups = {}
+#     for win_id, win in windows.items():
+#         bounds = get_screen_bounds(win)
+#         screen_groups.setdefault(bounds, []).append(win)
+
+#     # 2. 每个屏幕内独立重排
+#     for bounds, group in screen_groups.items():
+#         left, top, right, bottom = bounds
+#         screen_w, screen_h = right - left, bottom - top
+
+#         x, y = left + margin, top + margin
+#         max_height_in_col = 0
+
+#         for win in group:
+#             w, h, _, _ = parse_geometry(win.winfo_geometry())
+
+#             # 如果超出屏幕高度，换列
+#             if y + h + margin > bottom:
+#                 x += col_width + margin
+#                 y = top + margin
+
+#             win.geometry(f"{w}x{h}+{x}+{y}")
+#             y += h + margin
 
 
 def create_monitor_window(stock_info):
@@ -2867,6 +3153,7 @@ def create_monitor_window(stock_info):
     monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(window_info))
     monitor_win.bind("<FocusIn>", lambda e, w=monitor_win: on_monitor_window_focus(w))
     monitor_win.bind("<Button-1>", lambda event: update_code_entry(stock_code))
+    monitor_win.bind("<Double-1>", lambda event, code=stock_code: on_monitor_double_click(event,stock_code))
 
     # === 右键菜单加报警规则 ===
     # def show_menu(event, stock_info):
