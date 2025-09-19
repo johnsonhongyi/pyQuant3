@@ -283,7 +283,7 @@ tdx_ths_position4644_exe={'Edge': '2154,-858,654,852','交易信号监控': '123
         'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '946,-1080,1353,521','singleAnalyseUtil.exe': '1890,-1080,897,359',\
         'LinePower.exe': '750,33,761,407','instock_Monitor.exe': '16,82,1346,439','chantdxpower.exe': '-6,463,649,407',\
         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51','开盘啦竞价板块观察1.0': '891,-1043,898,265',\
-        '股票异动数据监控': '2270,-1022,516,979','开盘啦竞价板块观察1.0': '891,-1043,898,265','股票异动数据监控': '2270,-1022,516,979',\
+        '股票异动数据监控': '2270,-1022,516,979','开盘啦竞价板块观察1.0': '891,-1043,898,265',\
 }
 
 tdx_ths_position4644={'Edge': '2153,-859,655,853','交易信号监控': '1232,84,566,389','东兴证券': '51,205,1083,717',\
@@ -294,7 +294,7 @@ tdx_ths_position4644={'Edge': '2153,-859,655,853','交易信号监控': '1232,84
         'sina_Monitor-Market-LH.py': '264,306,1307,407','sina_Monitor.py': '946,-1080,1353,521','singleAnalyseUtil.py': '1890,-1080,897,359',\
         'LinePower.py': '750,33,761,407','instock_Monitor.py': '16,82,1346,439','chantdxpower.exe': '86,128,649,407',\
         'ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51','开盘啦竞价板块观察1.0': '891,-1043,898,265',\
-        '股票异动数据监控': '130,130,516,979','开盘啦竞价板块观察1.0': '891,-1043,898,265','股票异动数据监控': '130,130,516,979',\
+        '股票异动数据监控': '2270,-1022,516,979','开盘啦竞价板块观察1.0': '891,-1043,898,265',\
 }
 
 #LG + samsung  + triton
@@ -1128,9 +1128,17 @@ if __name__ == '__main__':
     #         positon_exe[key.replace('.py', '.exe')] = value  # 添加对应 .exe
 
 
+    #新加的时候
 
     appendProc = ['开盘啦竞价板块观察1.0','股票异动数据监控']
-    proc_title.extend(appendProc)   # good src 
+
+    for proc in appendProc:
+        if proc not in positon.keys():
+            proc_title.append(proc)   # good src 
+            print(f'add pro :{proc} to proc_title')
+
+
+
     # proc_title_new.extend(appendProc)
     # positon = positon_exe | appendProc   #dict
     #new dict
