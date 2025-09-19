@@ -411,7 +411,7 @@ def actually_start_worker(worker_task,param=None):
 def check_worker_done():
     #检查任务结束更新视图
     global worker_thread,realdatadf
-    if worker_thread.is_alive():
+    if worker_thread and worker_thread.is_alive():
         root.after(2000, check_worker_done)  # 200ms 后再检查
     else:
         print("Worker finished!")
@@ -1405,24 +1405,24 @@ def refresh_data():
 
     global loaded_df,viewdf,realdatadf,start_init,scheduled_task
     global date_write_is_processed,worker_thread,last_updated_time
-
+    # print(loaded_df is not None , loaded_df is not None and not loaded_df.empty,start_init)
     if loaded_df is not None and not loaded_df.empty:
-        if start_init > 0:
-            if date_entry.winfo_exists():
-                try:
-                    date_entry.set_date(get_today())
-                except Exception as e:
-                    print("还不能设置:", e)
+        date_write_is_processed = False
+        if date_entry.winfo_exists():
+            try:
+                date_entry.set_date(get_today())
+            except Exception as e:
+                print("还不能设置:", e)
         if scheduled_task:
             root.after_cancel(scheduled_task)
-            time.sleep(0.2)
+            time.sleep(0.1)
         show_tasks()
         loaded_df = None
         start_init = 0
         viewdf = pd.DataFrame()
         realdatadf = pd.DataFrame()
         print('start refresh_data get_stock_changes_background')
-        start_worker(schedule_worktime_task(tree))
+        start_worker(schedule_worktime_task,tree)
         last_updated_time = None
 
     status_var.set("刷新中...")
@@ -2058,21 +2058,23 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
         realdatadf = pd.DataFrame()
         loaded_df = None
         viewdf = pd.DataFrame()
-        if start_init > 0:
-            if date_entry.winfo_exists():
-                try:
-                    date_entry.set_date(get_today())
-                except Exception as e:
-                    print("还不能设置:", e)
+        date_write_is_processed = False
+        if date_entry.winfo_exists():
+            try:
+                date_entry.set_date(get_today())
+            except Exception as e:
+                print("还不能设置:", e)
         start_init = 0
         last_updated_time = 0
 
     # 使用 with realdatadf_lock 确保只有一个线程可以进入此关键区域
-    if loaded_df is None  and (len(realdatadf) == 0 or get_work_time() or (not date_write_is_processed and get_now_time_int() > 1505)):
+    print(loaded_df is None  , (realdatadf.empty , get_work_time() , (not date_write_is_processed , get_now_time_int() > 1505)))
+    if loaded_df is None  and (realdatadf.empty or get_work_time() or (not date_write_is_processed and get_now_time_int() > 1505)):
         with realdatadf_lock:
 
             # 检查是否需要从API获取数据
             if last_updated_time is None or current_time - last_updated_time >= timedelta(minutes=update_interval_minutes):
+                # print(last_updated_time is None , last_updated_time is None or current_time - last_updated_time , timedelta(minutes=update_interval_minutes))
                 print(f"时间间隔已到，正在从API获取新数据...")
                 last_updated_time = current_time
                 # 模拟从 Eastmoney API 获取数据
@@ -2093,7 +2095,7 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
                     
                     # 去除重复数据，保留最新的数据
                     realdatadf.drop_duplicates(subset=['时间','代码', '板块'], keep='last', inplace=True)
-                    print(f"为 ({symbol}) 获取了新的异动数据，并更新了 realdatadf")
+                    print(f"为 ({symbol}) 获取了新的异动数据，并更新了 realdatadf, start_init:{start_init}")
                     if start_init == 0:
                         toast_message(root,f"为 ({symbol}) 获取了新的异动数据，并更新了 realdatadf")
                     time.sleep(5)
@@ -2105,6 +2107,7 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
                 print(f"{current_time - last_updated_time}:未到更新时间，返回内存realdatadf数据。")
     if start_init == 0:
         time.sleep(6)
+        refresh_cout = 0
         start_init = 1
     # if not get_work_time() and get_now_time_int() > 1505:
     #     start_async_save()
@@ -2131,7 +2134,11 @@ def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_
             temp_df = get_stock_changes(selected_type=selected_type)
 
         else:
-            temp_df = realdatadf
+            if not realdatadf.empty:
+                temp_df = realdatadf
+            else:
+                temp_df = get_stock_changes()
+
         if not get_work_time() and (get_now_time_int() >1530  or get_now_time_int() < 923):
             temp_df = get_stock_changes(selected_type=selected_type)
     else:
@@ -2162,7 +2169,11 @@ def _get_sina_data_realtime(stock_code=None):
         else:
             if sina_data_df is not None and not sina_data_df.empty:
                 if stock_code is not None:
-                    df = sina_data_df.loc[stock_code]
+                    if stock_code in sina_data_df.index:
+                        df = sina_data_df.loc[stock_code]
+                    else:
+                        print(f'stock_code: {stock_code} not in sina_data')
+                        df = None
                 else:
                     df = sina_data_df
 
@@ -3213,7 +3224,9 @@ def rects_overlap(r1, r2):
     a1, b1, a2, b2 = r2
     return not (x2 <= a1 or a2 <= x1 or y2 <= b1 or b2 <= y1)
 
-def place_new_window(window, window_id, win_width=300, win_height=160, margin=5):
+
+
+def place_new_window(window, window_id, win_width=300, win_height=160, margin=2):
     """放置窗口：避免重叠 + 在所属屏幕内自动排列"""
     global WINDOW_GEOMETRIES, WINDOWS_BY_ID, MONITORS
     WINDOWS_BY_ID[window_id] = window
