@@ -3335,35 +3335,40 @@ def code_to_tdx_blk(code):
             # return '1%s' % code if code[:1] in ['5', '6'] else '0%s' % code
 
 
-def get_config_value(fname, classtype, currvalue, limitvalue=1, xtype='limit', read=False):
+def get_config_value(fname, classtype, currvalue=0, limitvalue=1, xtype='limit', read=False):
     conf_ini = fname
     currvalue = int(float(currvalue))
     # conf_ini = cct.get_work_path('stock','JSONData','count.ini')
     if os.path.exists(conf_ini):
         # log.info("file ok:%s"%conf_ini)
         config = ConfigObj(conf_ini, encoding='UTF8')
-
-        if classtype in list(config.keys()) and xtype in config[classtype].keys():
-            if int(float(config[classtype][xtype])) > currvalue:
-                ratio = float(config[classtype][xtype]) / limitvalue
-                if ratio < 1.2:
-                    log.info("f_size:%s < read_limit:%s ratio:%0.2f" % (currvalue, config[classtype][xtype], ratio))
+        if not read:
+            if classtype in list(config.keys()) and xtype in config[classtype].keys():
+                if int(float(config[classtype][xtype])) > currvalue:
+                    ratio = float(config[classtype][xtype]) / limitvalue
+                    if ratio < 1.2:
+                        log.info("f_size:%s < read_limit:%s ratio:%0.2f" % (currvalue, config[classtype][xtype], ratio))
+                    else:
+                        config[classtype][xtype] = limitvalue
+                        config.write()
+                        log.info("f_size:%s < read_limit:%s ratio < 2 ratio:%0.2f" % (currvalue, config[classtype][xtype], ratio))
+                        
                 else:
+
+                    log.info("file:%s f_size:%s > read_limit:%s" % (fname, currvalue, config[classtype][xtype][:5]))
                     config[classtype][xtype] = limitvalue
                     config.write()
-                    log.error("f_size:%s < read_limit:%s ratio < 2 ratio:%0.2f" % (currvalue, config[classtype][xtype], ratio))
-                    
+                    return True
             else:
-
-                log.error("file:%s f_size:%s > read_limit:%s" % (fname, currvalue, config[classtype][xtype]))
+                # log.error("no type:%s f_size:%s" % (classtype, currvalue))
+                config[classtype] = {}
                 config[classtype][xtype] = limitvalue
                 config.write()
-                return True
         else:
-            # log.error("no type:%s f_size:%s" % (classtype, currvalue))
-            config[classtype] = {}
-            config[classtype][xtype] = limitvalue
-            config.write()
+            if classtype in list(config.keys()) and xtype in config[classtype].keys():
+                return config[classtype][xtype]
+            else:
+                return None
     else:
         config = ConfigObj(conf_ini, encoding='UTF8')
         config[classtype] = {}

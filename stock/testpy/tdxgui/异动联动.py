@@ -3817,7 +3817,7 @@ def open_alert_center():
     alert_window.bind("<Escape>", lambda  : on_close_alert_monitor(alert_window))
     # 1小时后自动关闭（3600*1000 毫秒）
     alert_window.protocol("WM_DELETE_WINDOW", lambda: on_close_alert_monitor(alert_window))
-    alert_window.after(25*1000,  lambda  :on_close_alert_monitor(alert_window))
+    alert_window.after(120*1000,  lambda  :on_close_alert_monitor(alert_window))
     # 强制渲染一次，避免白屏
     alert_window.update_idletasks()
 
