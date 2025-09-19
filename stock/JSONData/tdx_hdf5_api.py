@@ -24,7 +24,7 @@ INIT_LOG_Error = 0
 Debug_is_not_find = 0
 # Compress_Count = 1
 BaseDir = cct.get_ramdisk_dir()
-
+import tables
 #import fcntl linux
 #lock：
 # fcntl.flock(f,fcntl.LOCK_EX)
@@ -56,26 +56,7 @@ BaseDir = cct.get_ramdisk_dir()
 # )
 # log = logging.getLogger(__name__)
 
-# import os
-# import time
-# import random
-# import logging
-# import subprocess
-# import pandas as pd
-# import tables
-# from pandas import HDFStore
 
-# BaseDir = cct.get_ramdisk_dir()
-# log_file = os.path.join(BaseDir, "tdx_hdf5.log")
-# logging.basicConfig(
-#     level=logging.INFO,
-#     format="%(asctime)s [%(levelname)s] %(message)s",
-#     handlers=[
-#         logging.FileHandler(log_file, encoding="utf-8"),
-#         logging.StreamHandler()
-#     ]
-# )
-# log = logging.getLogger(__name__)
 
 
 
@@ -175,16 +156,27 @@ import psutil
 
 
 class SafeHDFStore(pd.HDFStore):
-    def __init__(self, fname, mode='r', **kwargs):
+    def __init__(self, fname, mode='a', **kwargs):
         self.fname_o = fname
         self.mode = mode
         self.probe_interval = kwargs.pop("probe_interval", 2)  
-        self.lock_timeout = kwargs.pop("lock_timeout", 20)  
+        self.lock_timeout = kwargs.pop("lock_timeout", 10)  
         self.max_wait = 60
         self.multiIndexsize = False
         self.log = log
         self.basedir = BaseDir
         self.log.info(f'{self.fname_o.lower()} {self.basedir.lower()}')
+        self.start_time = time.time()
+        self.config_ini = self.basedir + os.path.sep+ 'h5config.txt'
+
+        self.complevel = 9
+        self.complib = 'zlib'
+        self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s"
+
+        self.h5_size_org = 0
+        global RAMDISK_KEY
+
+
         if self.fname_o.lower().find(self.basedir.lower()) < 0 and (self.fname_o == cct.tdx_hd5_name or self.fname_o.find('tdx_all_df') >= 0):
             self.multiIndexsize = True
             self.fname = cct.get_run_path_tdx(self.fname_o)
@@ -195,54 +187,57 @@ class SafeHDFStore(pd.HDFStore):
             self.basedir = self.fname.split(self.fname_o)[0]
             self.log.info(f"ramdisk_hd5: {self.fname}")
 
+        if self.multiIndexsize:
+            self.big_H5_Size_limit = ct.big_H5_Size_limit * 6
+        else:
+            self.big_H5_Size_limit = ct.big_H5_Size_limit
+        self.log.info(f'self.big_H5_Size_limit :{self.big_H5_Size_limit} self.multiIndexsize :{self.multiIndexsize}')
+        if not os.path.exists(self.basedir):
+            if RAMDISK_KEY < 1:
+                log.error("NO RamDisk Root:%s" % (baseDir))
+                RAMDISK_KEY += 1
+        else:
+            self.temp_file = self.fname + '_tmp'
+            if os.path.exists(self.fname):
+                self.h5_size_org = os.path.getsize(self.fname) / 1000 / 1000
+
+
         self._lock = self.fname + ".lock"
         self._flock = None
         self.write_status = True if os.path.exists(self.fname) else False
         self.my_pid = os.getpid()
         self.log.info(f"self.fname: {self.fname} self.basedir:{self.basedir}")
-        if not os.path.exists(self.fname):
-            log.warning(f"HDF5 file {self.fname} not found. Creating empty file.")
-            with pd.HDFStore(self.fname, mode='w') as store:
-                pass
+        # if not os.path.exists(self.fname):
+        #     log.warning(f"HDF5 file {self.fname} not found. Creating empty file.")
+        #     with pd.HDFStore(self.fname, mode='a') as store:
+        #         pass
 
-        self._check_and_clean_corrupt_keys()
-
-        if mode != 'r':
+        if self.mode != 'r':
             self._acquire_lock()
-        elif mode == 'r':
+        elif self.mode == 'r':
             self._wait_for_lock()
+        self.log.info(f'mode : {self.mode}  fname:{self.fname}')
+        # self._check_and_clean_corrupt_keys()
+        self.ensure_hdf_file() 
+        # super().__init__(self.fname, mode=self.mode, **kwargs)
+        super().__init__(self.fname, **kwargs)
 
-        super().__init__(self.fname, mode=mode, **kwargs)
-
-    # def write_safe(self, key, df, **kwargs):
-    #     """写入 HDF5，同时打印 PID 日志"""
-    #     corrupt = False
-    #     if key in self.keys():
-    #         try:
-    #             _ = self.get(key)
-    #         except (tables.exceptions.HDF5ExtError, AttributeError) as e:
-    #             log.warning(f"[{self.my_pid}] Key {key} corrupted: {e}, removing before rewrite")
-    #             corrupt = True
-    #     if corrupt:
-    #         try:
-    #             self.remove(key)
-    #             log.info(f"[{self.my_pid}] Removed corrupted key: {key}")
-    #         except Exception as e:
-    #             log.error(f"[{self.my_pid}] Failed to remove key {key}: {e}")
-    #     try:
-    #         self.put(key, df, **kwargs)
-    #         log.info(f"[{self.my_pid}] Successfully wrote key: {key}")
-    #     except Exception as e:
-    #         log.error(f"[{self.my_pid}] Failed to write key {key}: {e}")
+    def ensure_hdf_file(self):
+        """确保 HDF5 文件存在"""
+        if not os.path.exists(self.fname):
+            # 使用 'w' 创建空文件
+            pd.HDFStore(self.fname, mode='w').close()
 
     def write_safe(self, key, df, append=False,  chunksize=10000, **kwargs):
         """
         安全写入 HDF5，无论 store 打开模式是 'a' 还是 'w'
         自动加锁、删除损坏 key、自动计算 chunksize
-        """
+        """
+
         
         # 确保文件加锁（如果自己持有锁则不会重复加锁）
-        self._acquire_lock()
+        # if mode != 'r' 已加锁
+        # self._acquire_lock()
 
         # 删除损坏 key
         if key in self.keys():
@@ -352,7 +347,61 @@ class SafeHDFStore(pd.HDFStore):
                 pass
 
     def _acquire_lock(self):
-        start_time = time.time()
+        my_pid = os.getpid()
+        retries = 0
+        try:
+            while True:
+                # 检查锁文件是否存在
+                if os.path.exists(self._lock):
+                    with open(self._lock, "r") as f:
+                        content = f.read().strip()
+                    pid_str, ts_str = (content.split("|") + ["0", "0"])[:2]
+                    pid = int(pid_str) if pid_str.isdigit() else -1
+                    ts = float(ts_str) if ts_str.replace(".", "", 1).isdigit() else 0.0
+                    elapsed = time.time() - ts
+                    total_wait = time.time() - self.start_time
+                    pid_alive = psutil.pid_exists(pid)
+
+                    if pid == my_pid:
+                        # 自己持有锁，直接清理并重建锁
+                        self.log.info(f"[Lock] 超时自解锁 (pid={pid}) (my_pid:{my_pid}), removing and reacquiring")
+                        try:
+                            os.remove(self._lock)
+                        except Exception as e:
+                            self.log.error(f"[Lock] failed to remove self lock: {e}")
+                        continue
+
+                    if not pid_alive or elapsed > self.lock_timeout or total_wait > self.max_wait:
+                        # 锁超时或持有锁进程不存在，可以删除锁
+                        self.log.warning(f"[Lock] 强制解超时锁 pid={pid} (my_pid:{my_pid}), removing {self._lock}")
+                        try:
+                            os.remove(self._lock)
+                        except Exception as e:
+                            self.log.error(f"[Lock] 强制解超时锁 失败: {e}")
+                        continue
+
+                    # 其他进程持有锁，等待
+                    retries += 1
+                    if retries % 3 == 0:
+                        self.log.info(f"[Lock] 重试:{retries} 等待 进程锁, pid={pid},(my_pid:{my_pid}), alive={pid_alive}, elapsed={elapsed:.1f}s, total_wait={total_wait:.1f}s")
+                    time.sleep(self.probe_interval)
+
+                else:
+                    # 创建锁文件
+                    try:
+                        with open(self._lock, "w") as f:
+                            f.write(f"{my_pid}|{time.time()}")
+                        self.log.info(f"[Lock] 创建锁文件 {self._lock} by pid={my_pid}")
+                        return True
+                    except Exception as e:
+                        self.log.error(f"[Lock] 创建锁文件 失败: {e}")
+                        time.sleep(self.probe_interval)
+        except Exception as e:
+                self.log.warning(f"[Lock] KeyboardInterrupt during lock acquire, releasing lock:{e}")
+                self._release_lock()
+                raise
+
+    def _forced_unlock(self):
         my_pid = os.getpid()
         retries = 0
         while True:
@@ -364,25 +413,31 @@ class SafeHDFStore(pd.HDFStore):
                 pid = int(pid_str) if pid_str.isdigit() else -1
                 ts = float(ts_str) if ts_str.replace(".", "", 1).isdigit() else 0.0
                 elapsed = time.time() - ts
-                total_wait = time.time() - start_time
+                total_wait = time.time() - self.start_time
                 pid_alive = psutil.pid_exists(pid)
 
                 if pid == my_pid:
                     # 自己持有锁，直接清理并重建锁
-                    self.log.info(f"[Lock] lock owned by self (pid={pid}) (my_pid:{my_pid}), removing and reacquiring")
+                    self.log.info(f"[Lock] 超时解自锁 (pid={pid}) (my_pid:{my_pid}), removing and reacquiring")
                     try:
                         os.remove(self._lock)
+                        return True
                     except Exception as e:
                         self.log.error(f"[Lock] failed to remove self lock: {e}")
+                        if retries > 3:
+                            return False
                     continue
 
                 if not pid_alive or elapsed > self.lock_timeout or total_wait > self.max_wait:
                     # 锁超时或持有锁进程不存在，可以删除锁
-                    self.log.warning(f"[Lock] stale/timeout lock detected pid={pid} (my_pid:{my_pid}), removing {self._lock}")
+                    self.log.warning(f"[Lock] 强制解超时锁 pid={pid} (my_pid:{my_pid}), removing {self._lock}")
                     try:
                         os.remove(self._lock)
+                        return True
                     except Exception as e:
-                        self.log.error(f"[Lock] failed to remove lock: {e}")
+                        self.log.error(f"[Lock] 强制解超时锁 失败: {e}")
+                        if retries > 3:
+                            return False
                     continue
 
                 # 其他进程持有锁，等待
@@ -391,20 +446,9 @@ class SafeHDFStore(pd.HDFStore):
                     self.log.info(f"[Lock] exists, pid={pid},(my_pid:{my_pid}), alive={pid_alive}, elapsed={elapsed:.1f}s, total_wait={total_wait:.1f}s, retry={retries}")
                 time.sleep(self.probe_interval)
 
-            else:
-                # 创建锁文件
-                try:
-                    with open(self._lock, "w") as f:
-                        f.write(f"{my_pid}|{time.time()}")
-                    self.log.info(f"[Lock] acquired {self._lock} by pid={my_pid}")
-                    return True
-                except Exception as e:
-                    self.log.error(f"[Lock] failed to create lock: {e}")
-                    time.sleep(self.probe_interval)
-
     def _wait_for_lock(self):
         """读取模式等待锁释放"""
-        start_time = time.time()
+        # start_time = time.time()
         while os.path.exists(self._lock):
             try:
                 with open(self._lock, "r") as f:
@@ -415,7 +459,9 @@ class SafeHDFStore(pd.HDFStore):
                 lock_pid = None
                 ts = 0
             elapsed = time.time() - ts
-            total_wait = time.time() - start_time
+            total_wait = time.time() - self.start_time
+            if elapsed > self.lock_timeout: 
+                self._forced_unlock()
             self.log.info(f"[{self.my_pid}] Waiting for lock held by pid={lock_pid}, elapsed={elapsed:.1f}s total_wait={total_wait:.1f}s")
             time.sleep(self.probe_interval)
 
@@ -445,147 +491,187 @@ class SafeHDFStore(pd.HDFStore):
 
     def close(self):
         super().close()
-        self._release_lock()
+        # self._release_lock()
 
-
-
-
-class SafeHDFStore_lastOne(HDFStore):
-    def __init__(self, fname, mode='r', **kwargs):
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.write_status:
+            try:
+                super().__exit__(exc_type, exc_val, exc_tb)
+                self.close()
+                # ===== 压缩逻辑 =====
+                h5_size = os.path.getsize(self.fname) / 1e6
+                h5_size_limit =  h5_size*1.2 if h5_size > 5 else 5
+                new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit) if h5_size > self.big_H5_Size_limit else h5_size_limit
+                read_ini_limit = cct.get_config_value(self.config_ini,self.fname_o,read=True)
+                self.log.info(f"fname: {self.fname} h5_size: {h5_size} big_limit: {self.big_H5_Size_limit} conf:{read_ini_limit}")
+                if (read_ini_limit is  None and h5_size > self.big_H5_Size_limit) or cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
+                    if self.mode == 'r':
+                        self._acquire_lock()
+                    if os.path.exists(self.fname) and os.path.exists(self.temp_file):
+                        log.error(f"Remove tmp file exists: {self.temp_file}")
+                        os.remove(self.temp_file)
+                    os.rename(self.fname, self.temp_file)
+                    if cct.get_os_system() == 'mac':
+                        p = subprocess.Popen(
+                            self.ptrepack_cmds % (self.complib, self.temp_file, self.fname),
+                            shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+                        )
+                    else:
+                        back_path = os.getcwd()
+                        os.chdir(self.basedir)
+                        pt_cmd = self.ptrepack_cmds % (
+                            self.complib,
+                            self.temp_file.split(self.basedir)[1],
+                            self.fname.split(self.basedir)[1]
+                        )
+                        p = subprocess.Popen(pt_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                    p.wait()
+                    if p.returncode != 0:
+                        log.error(f"ptrepack error {p.communicate()}, src {self.temp_file}, dest {self.fname}")
+                    else:
+                        if os.path.exists(self.temp_file):
+                            os.remove(self.temp_file)
+                    if cct.get_os_system() != 'mac':
+                        os.chdir(back_path)
+            finally:
+                self._release_lock()
+                self.log.info(f'clean:{self.fname}')
+# class SafeHDFStore_lastOne(HDFStore):
+#     def __init__(self, fname, mode='r', **kwargs):
        
-        self.fname_o = fname
-        self.mode = mode
-        self.probe_interval = kwargs.pop("probe_interval", 2)  
-        self.lock_timeout = kwargs.pop("lock_timeout", 20)  
-        self.max_wait = 60
-        self.multiIndexsize = False
-        # ===== 原有路径处理逻辑 =====
-        if self.fname_o == cct.tdx_hd5_name or self.fname_o.find('tdx_all_df') >= 0:
-            self.multiIndexsize = True
-            self.fname = cct.get_run_path_tdx(self.fname_o)
-            self.basedir = self.fname.split(self.fname_o)[0]
-            log.info(f"tdx_hd5: {self.fname}")
-        else:
-            self.fname = cct.get_ramdisk_path(self.fname_o)
-            self.basedir = self.fname.split(self.fname_o)[0]
-            log.info(f"ramdisk_hd5: {self.fname}")
+#         self.fname_o = fname
+#         self.mode = mode
+#         self.probe_interval = kwargs.pop("probe_interval", 2)  
+#         self.lock_timeout = kwargs.pop("lock_timeout", 10)  
+#         self.max_wait = 60
+#         self.multiIndexsize = False
+#         # ===== 原有路径处理逻辑 =====
+#         if self.fname_o == cct.tdx_hd5_name or self.fname_o.find('tdx_all_df') >= 0:
+#             self.multiIndexsize = True
+#             self.fname = cct.get_run_path_tdx(self.fname_o)
+#             self.basedir = self.fname.split(self.fname_o)[0]
+#             log.info(f"tdx_hd5: {self.fname}")
+#         else:
+#             self.fname = cct.get_ramdisk_path(self.fname_o)
+#             self.basedir = self.fname.split(self.fname_o)[0]
+#             log.info(f"ramdisk_hd5: {self.fname}")
 
-        self._lock = self.fname + ".lock"
-        self._flock = None
-        self.write_status = True if os.path.exists(self.fname) else False
+#         self._lock = self.fname + ".lock"
+#         self._flock = None
+#         self.write_status = True if os.path.exists(self.fname) else False
 
-        self.complevel = 9
-        self.complib = 'zlib'
-        self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s"
-        self.temp_file = self.fname + '_tmp'
-        self.big_H5_Size_limit = 200  
+#         self.complevel = 9
+#         self.complib = 'zlib'
+#         self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s"
+#         self.temp_file = self.fname + '_tmp'
+#         self.big_H5_Size_limit = 200  
 
-        if not os.path.exists(self.fname):
-            log.warning(f"HDF5 file {self.fname} not found. Creating empty file.")
-            with pd.HDFStore(self.fname, mode='w') as store:
-                pass
+#         if not os.path.exists(self.fname):
+#             log.warning(f"HDF5 file {self.fname} not found. Creating empty file.")
+#             with pd.HDFStore(self.fname, mode='w') as store:
+#                 pass
 
-        self._check_and_clean_corrupt_keys()
+#         self._check_and_clean_corrupt_keys()
 
-        if mode != 'r':
-            self._acquire_lock()
-        elif mode == 'r':
-            self._wait_for_lock()
+#         if mode != 'r':
+#             self._acquire_lock()
+#         elif mode == 'r':
+#             self._wait_for_lock()
 
-        super().__init__(self.fname, mode=mode, **kwargs)
+#         super().__init__(self.fname, mode=mode, **kwargs)
 
-    def write_safe(self, key, df, **kwargs):
-        corrupt = False
-        if key in self.keys():
-            try:
-                _ = self.get(key)
-            except (tables.exceptions.HDF5ExtError, AttributeError) as e:
-                log.warning(f"Key {key} corrupted: {e}, removing before rewrite")
-                corrupt = True
-        if corrupt:
-            try:
-                self.remove(key)
-                log.info(f"Removed corrupted key: {key}")
-            except Exception as e:
-                log.error(f"Failed to remove key {key}: {e}")
-        try:
-            self.put(key, df, **kwargs)
-            log.info(f"Successfully wrote key: {key}")
-        except Exception as e:
-            log.error(f"Failed to write key {key}: {e}")
+#     def write_safe(self, key, df, **kwargs):
+#         corrupt = False
+#         if key in self.keys():
+#             try:
+#                 _ = self.get(key)
+#             except (tables.exceptions.HDF5ExtError, AttributeError) as e:
+#                 log.warning(f"Key {key} corrupted: {e}, removing before rewrite")
+#                 corrupt = True
+#         if corrupt:
+#             try:
+#                 self.remove(key)
+#                 log.info(f"Removed corrupted key: {key}")
+#             except Exception as e:
+#                 log.error(f"Failed to remove key {key}: {e}")
+#         try:
+#             self.put(key, df, **kwargs)
+#             log.info(f"Successfully wrote key: {key}")
+#         except Exception as e:
+#             log.error(f"Failed to write key {key}: {e}")
 
-    def _check_and_clean_corrupt_keys(self):
-        try:
-            with pd.HDFStore(self.fname, mode='r') as store:
-                keys = store.keys()
-                corrupt_keys = []
-                for key in keys:
-                    try:
-                        _ = store.get(key)
-                    except (tables.exceptions.HDF5ExtError, AttributeError) as e:
-                        log.error(f"Failed to read key {key}: {e}")
-                        corrupt_keys.append(key)
-                if corrupt_keys:
-                    log.warning(f"Corrupt keys detected: {corrupt_keys}, removing...")
-                    store.close()
-                    with pd.HDFStore(self.fname, mode='a') as wstore:
-                        for key in corrupt_keys:
-                            try:
-                                wstore.remove(key)
-                                log.info(f"Removed corrupted key: {key}")
-                            except Exception as e:
-                                log.error(f"Failed to remove key {key}: {e}")
-        except Exception as e:
-            log.error(f"HDF5 file {self.fname} corrupted, recreating: {e}")
-            with pd.HDFStore(self.fname, mode='w') as store:
-                pass
+#     def _check_and_clean_corrupt_keys(self):
+#         try:
+#             with pd.HDFStore(self.fname, mode='r') as store:
+#                 keys = store.keys()
+#                 corrupt_keys = []
+#                 for key in keys:
+#                     try:
+#                         _ = store.get(key)
+#                     except (tables.exceptions.HDF5ExtError, AttributeError) as e:
+#                         log.error(f"Failed to read key {key}: {e}")
+#                         corrupt_keys.append(key)
+#                 if corrupt_keys:
+#                     log.warning(f"Corrupt keys detected: {corrupt_keys}, removing...")
+#                     store.close()
+#                     with pd.HDFStore(self.fname, mode='a') as wstore:
+#                         for key in corrupt_keys:
+#                             try:
+#                                 wstore.remove(key)
+#                                 log.info(f"Removed corrupted key: {key}")
+#                             except Exception as e:
+#                                 log.error(f"Failed to remove key {key}: {e}")
+#         except Exception as e:
+#             log.error(f"HDF5 file {self.fname} corrupted, recreating: {e}")
+#             with pd.HDFStore(self.fname, mode='w') as store:
+#                 pass
 
-    def _acquire_lock(self):
-        """获取文件锁，支持超时检测和轮询提示"""
-        start_time = time.time()
-        while True:
-            try:
-                # 尝试创建锁文件
-                self._flock = os.open(self._lock, os.O_CREAT | os.O_EXCL | os.O_RDWR)
-                with open(self._lock, "w") as f:
-                    f.write(f"{os.getpid()}|{time.time()}")
-                log.info(f"SafeHDF: acquired lock {self._lock}")
-                break
+#     def _acquire_lock(self):
+#         """获取文件锁，支持超时检测和轮询提示"""
+#         start_time = time.time()
+#         while True:
+#             try:
+#                 # 尝试创建锁文件
+#                 self._flock = os.open(self._lock, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+#                 with open(self._lock, "w") as f:
+#                     f.write(f"{os.getpid()}|{time.time()}")
+#                 log.info(f"SafeHDF: acquired lock {self._lock}")
+#                 break
 
-            except FileExistsError:
-                # 锁文件存在，读取信息
-                try:
-                    with open(self._lock, "r") as f:
-                        content = f.read().strip()
-                    pid_str, ts_str = content.split("|")
-                    ts = float(ts_str)
-                except Exception:
-                    ts = 0  # 锁文件损坏，直接当作陈旧锁
+#             except FileExistsError:
+#                 # 锁文件存在，读取信息
+#                 try:
+#                     with open(self._lock, "r") as f:
+#                         content = f.read().strip()
+#                     pid_str, ts_str = content.split("|")
+#                     ts = float(ts_str)
+#                 except Exception:
+#                     ts = 0  # 锁文件损坏，直接当作陈旧锁
 
-                elapsed = time.time() - ts
-                total_wait = time.time() - start_time
+#                 elapsed = time.time() - ts
+#                 total_wait = time.time() - start_time
 
-                if elapsed > self.lock_timeout:
-                    log.warning(f"SafeHDF: stale lock detected (age {elapsed:.1f}s), removing {self._lock}")
-                    try:
-                        os.remove(self._lock)
-                    except Exception as e:
-                        log.error(f"SafeHDF: failed to remove stale lock: {e}")
+#                 if elapsed > self.lock_timeout:
+#                     log.warning(f"SafeHDF: stale lock detected (age {elapsed:.1f}s), removing {self._lock}")
+#                     try:
+#                         os.remove(self._lock)
+#                     except Exception as e:
+#                         log.error(f"SafeHDF: failed to remove stale lock: {e}")
 
-                elif total_wait > self.max_wait:
-                    log.error(f"SafeHDF: wait exceeded {self.max_wait}s, force removing lock {self._lock}")
-                    try:
-                        os.remove(self._lock)
-                    except Exception as e:
-                        log.error(f"SafeHDF: failed to force remove lock: {e}")
+#                 elif total_wait > self.max_wait:
+#                     log.error(f"SafeHDF: wait exceeded {self.max_wait}s, force removing lock {self._lock}")
+#                     try:
+#                         os.remove(self._lock)
+#                     except Exception as e:
+#                         log.error(f"SafeHDF: failed to force remove lock: {e}")
 
-                else:
-                    log.info(f"SafeHDF: lock exists, waiting... elapsed={elapsed:.1f}s total_wait={total_wait:.1f}s")
-                    time.sleep(self.probe_interval)
+#                 else:
+#                     log.info(f"SafeHDF: lock exists, waiting... elapsed={elapsed:.1f}s total_wait={total_wait:.1f}s")
+#                     time.sleep(self.probe_interval)
 
-            except Exception as e:
-                log.error(f"SafeHDF: unexpected error acquiring lock: {e}")
-                time.sleep(self.probe_interval)
+#             except Exception as e:
+#                 log.error(f"SafeHDF: unexpected error acquiring lock: {e}")
+#                 time.sleep(self.probe_interval)
 
 
     #没有轮训提示,逻辑锁前一版本
@@ -677,79 +763,79 @@ class SafeHDFStore_lastOne(HDFStore):
     #             time.sleep(self.probe_interval)
 
 
-    def _wait_for_lock(self):
-        while os.path.exists(self._lock):
-            try:
-                with open(self._lock, 'r') as f:
-                    content = f.read()
-                try:
-                    pid_str, ts_str = content.split('|')
-                    ts = float(ts_str)
-                except Exception:
-                    ts = 0
-                elapsed = time.time() - ts
-                if elapsed > self.lock_timeout:
-                    log.warning(f"Read wait lock timeout {elapsed:.1f}s, removing stale lock")
-                    try:
-                        os.remove(self._lock)
-                    except Exception as e:
-                        log.error(f"Failed to remove stale lock: {e}")
-                    break
-                log.info(f"Waiting for lock... elapsed {elapsed:.1f}s")
-                time.sleep(self.probe_interval)
-            except Exception as e:
-                log.error(f"Error waiting for lock: {e}")
-                time.sleep(self.probe_interval)
+    # def _wait_for_lock(self):
+    #     while os.path.exists(self._lock):
+    #         try:
+    #             with open(self._lock, 'r') as f:
+    #                 content = f.read()
+    #             try:
+    #                 pid_str, ts_str = content.split('|')
+    #                 ts = float(ts_str)
+    #             except Exception:
+    #                 ts = 0
+    #             elapsed = time.time() - ts
+    #             if elapsed > self.lock_timeout:
+    #                 log.warning(f"Read wait lock timeout {elapsed:.1f}s, removing stale lock")
+    #                 try:
+    #                     os.remove(self._lock)
+    #                 except Exception as e:
+    #                     log.error(f"Failed to remove stale lock: {e}")
+    #                 break
+    #             log.info(f"Waiting for lock... elapsed {elapsed:.1f}s")
+    #             time.sleep(self.probe_interval)
+    #         except Exception as e:
+    #             log.error(f"Error waiting for lock: {e}")
+    #             time.sleep(self.probe_interval)
 
-    def _release_lock(self):
-        if self._flock:
-            try:
-                self._flock = None
-                if os.path.exists(self._lock):
-                    os.remove(self._lock)
-                    log.info(f"Released lock {self._lock}")
-            except Exception as e:
-                log.error(f"Failed to release lock: {e}")
+    # def _release_lock(self):
+    #     if self._flock:
+    #         try:
+    #             self._flock = None
+    #             if os.path.exists(self._lock):
+    #                 os.remove(self._lock)
+    #                 log.info(f"Released lock {self._lock}")
+    #         except Exception as e:
+    #             log.error(f"Failed to release lock: {e}")
 
-    def __enter__(self):
-        return self
+    # def __enter__(self):
+    #     return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        try:
-            super().__exit__(exc_type, exc_val, exc_tb)
-            h5_size = os.path.getsize(self.fname) / 1e6
-            new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit)
-            log.info(f"fname: {self.fname}, size: {h5_size:.1f}MB, limit: {self.big_H5_Size_limit}MB")
-            if h5_size > self.big_H5_Size_limit:
-                log.info(f"Trigger compression: {self.fname}")
-                if os.path.exists(self.temp_file):
-                    os.remove(self.temp_file)
-                os.rename(self.fname, self.temp_file)
-                back_path = os.getcwd()
-                os.chdir(self.basedir)
-                pt_cmd = self.ptrepack_cmds % (
-                    self.complib,
-                    os.path.basename(self.temp_file),
-                    os.path.basename(self.fname)
-                )
-                p = subprocess.Popen(pt_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                p.wait()
-                if p.returncode != 0:
-                    log.error(f"ptrepack error src {self.temp_file} dest {self.fname}")
-                else:
-                    if os.path.exists(self.temp_file):
-                        os.remove(self.temp_file)
-                os.chdir(back_path)
-        finally:
-            self._release_lock()
+    # def __exit__(self, exc_type, exc_val, exc_tb):
+    #     try:
+    #         super().__exit__(exc_type, exc_val, exc_tb)
+    #         h5_size = os.path.getsize(self.fname) / 1e6
+    #         new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit)
+    #         log.info(f"fname: {self.fname}, size: {h5_size:.1f}MB, limit: {self.big_H5_Size_limit}MB")
+    #         if h5_size > self.big_H5_Size_limit:
+    #             log.info(f"Trigger compression: {self.fname}")
+    #             if os.path.exists(self.temp_file):
+    #                 os.remove(self.temp_file)
+    #             os.rename(self.fname, self.temp_file)
+    #             back_path = os.getcwd()
+    #             os.chdir(self.basedir)
+    #             pt_cmd = self.ptrepack_cmds % (
+    #                 self.complib,
+    #                 os.path.basename(self.temp_file),
+    #                 os.path.basename(self.fname)
+    #             )
+    #             p = subprocess.Popen(pt_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    #             p.wait()
+    #             if p.returncode != 0:
+    #                 log.error(f"ptrepack error src {self.temp_file} dest {self.fname}")
+    #             else:
+    #                 if os.path.exists(self.temp_file):
+    #                     os.remove(self.temp_file)
+    #             os.chdir(back_path)
+    #     finally:
+    #         self._release_lock()
 
-    def read_key(self, key):
-        df = None
-        try:
-            df = self[key]
-        except Exception as e:
-            log.error(f"Failed to read key {key}: {e}")
-        return df
+    # def read_key(self, key):
+    #     df = None
+    #     try:
+    #         df = self[key]
+    #     except Exception as e:
+    #         log.error(f"Failed to read key {key}: {e}")
+    #     return df
 
 
 
@@ -1421,113 +1507,111 @@ class SafeHDFStore_lastOne(HDFStore):
 
 
 
-class SafeHDFStore_me(HDFStore):
-    # def __init__(self, *args, **kwargs):
+# class SafeHDFStore_me(HDFStore):
+#     # def __init__(self, *args, **kwargs):
 
-    def __init__(self, *args, **kwargs):
-        self.probe_interval = kwargs.pop("probe_interval", 2)
-        lock = cct.get_ramdisk_path(args[0], lock=True)
-        baseDir = BaseDir
-        self.fname_o = args[0]
-        self.basedir = baseDir
-        self.config_ini = baseDir + os.path.sep+ 'h5config.txt'
-        self.multiIndexsize = False
-        if args[0] == cct.tdx_hd5_name or args[0].find('tdx_all_df') >=0:
-            self.multiIndexsize = True
-            self.fname = cct.get_run_path_tdx(args[0])
-            self.basedir = self.fname.split(self.fname_o)[0]
-            log.info("tdx_hd5:%s"%(self.fname))
-        else:
-            self.fname = cct.get_ramdisk_path(args[0])
-            self.basedir = self.fname.split(self.fname_o)[0]
-            log.info("ramdisk_hd5:%s"%(self.fname))
+#     def __init__(self, *args, **kwargs):
+#         self.probe_interval = kwargs.pop("probe_interval", 2)
+#         lock = cct.get_ramdisk_path(args[0], lock=True)
+#         baseDir = BaseDir
+#         self.fname_o = args[0]
+#         self.basedir = baseDir
+#         self.config_ini = baseDir + os.path.sep+ 'h5config.txt'
+#         self.multiIndexsize = False
+#         if args[0] == cct.tdx_hd5_name or args[0].find('tdx_all_df') >=0:
+#             self.multiIndexsize = True
+#             self.fname = cct.get_run_path_tdx(args[0])
+#             self.basedir = self.fname.split(self.fname_o)[0]
+#             log.info("tdx_hd5:%s"%(self.fname))
+#         else:
+#             self.fname = cct.get_ramdisk_path(args[0])
+#             self.basedir = self.fname.split(self.fname_o)[0]
+#             log.info("ramdisk_hd5:%s"%(self.fname))
 
-        self._lock = lock
-        self.countlock = 0
-        self.write_status = False
-        self.complevel = 9
-        self.complib = 'zlib'
-        # self.ptrepack_cmds = "ptrepack --chunkshape=auto --propindexes --complevel=9 --complib=%s %s %s"
-        self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s"
-        if self.multiIndexsize:
-            self.big_H5_Size_limit = ct.big_H5_Size_limit * 6
-        else:
-            self.big_H5_Size_limit = ct.big_H5_Size_limit
-        self.h5_size_org = 0
-        # self.pt_lock_file = self.fname + '.txt'
-        global RAMDISK_KEY
-        if not os.path.exists(baseDir):
-            if RAMDISK_KEY < 1:
-                log.error("NO RamDisk Root:%s" % (baseDir))
-                RAMDISK_KEY += 1
-        else:
-            self.temp_file = self.fname + '_tmp'
-            self.write_status = True
-            if os.path.exists(self.fname):
-                self.h5_size_org = os.path.getsize(self.fname) / 1000 / 1000
-            self.run(self.fname)
+#         self._lock = lock
+#         self.countlock = 0
+#         self.write_status = False
+#         self.complevel = 9
+#         self.complib = 'zlib'
+#         self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s"
+#         if self.multiIndexsize:
+#             self.big_H5_Size_limit = ct.big_H5_Size_limit * 6
+#         else:
+#             self.big_H5_Size_limit = ct.big_H5_Size_limit
+#         self.h5_size_org = 0
+#         global RAMDISK_KEY
+#         if not os.path.exists(baseDir):
+#             if RAMDISK_KEY < 1:
+#                 log.error("NO RamDisk Root:%s" % (baseDir))
+#                 RAMDISK_KEY += 1
+#         else:
+#             self.temp_file = self.fname + '_tmp'
+#             self.write_status = True
+#             if os.path.exists(self.fname):
+#                 self.h5_size_org = os.path.getsize(self.fname) / 1000 / 1000
+#             self.run(self.fname)
 
-    def run(self, fname, *args, **kwargs):
-        while True:
-            try:
-                self._flock = os.open(
-                    self._lock, os.O_CREAT | os.O_EXCL)
-                    # self._lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-                log.info("SafeHDF:%s lock:%s" % (self._lock, self._flock))
-                break
-            except (IOError, EOFError, Exception) as e:
-                if self.countlock > 1:
-                    log.debug("IOError Error:%s" % (e))
+#     def run(self, fname, *args, **kwargs):
+#         while True:
+#             try:
+#                 self._flock = os.open(
+#                     self._lock, os.O_CREAT | os.O_EXCL)
+#                     # self._lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+#                 log.info("SafeHDF:%s lock:%s" % (self._lock, self._flock))
+#                 break
+#             except (IOError, EOFError, Exception) as e:
+#                 if self.countlock > 1:
+#                     log.debug("IOError Error:%s" % (e))
 
-                if self.countlock <= 8:
-                    time.sleep(round(random.randint(3, 10) / 1.2, 2))
-                    self.countlock += 1
-                else:
-                    os.remove(self._lock)
-                    log.error("count10 remove lock")
-            except WindowsError:
-                log.error('WindowsError')
-            finally:
-                pass
+#                 if self.countlock <= 8:
+#                     time.sleep(round(random.randint(3, 10) / 1.2, 2))
+#                     self.countlock += 1
+#                 else:
+#                     os.remove(self._lock)
+#                     log.error("count10 remove lock")
+#             except WindowsError:
+#                 log.error('WindowsError')
+#             finally:
+#                 pass
 
-        HDFStore.__init__(self, fname, *args, **kwargs)
+#         HDFStore.__init__(self, fname, *args, **kwargs)
 
-    def __enter__(self):
-        if self.write_status:
-            return self
+#     def __enter__(self):
+#         if self.write_status:
+#             return self
 
-    def __exit__(self, *args, **kwargs):
-        if self.write_status:
-            HDFStore.__exit__(self, *args, **kwargs)
-            os.close(self._flock)
-            h5_size = os.path.getsize(self.fname) / 1000 / 1000
-            new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit)
-            log.info("fname:%s h5_size:%s big:%s" % (self.fname,h5_size, self.big_H5_Size_limit))
-            if cct.get_config_value(self.config_ini,self.fname_o,h5_size,new_limit):
-                time_pt=time.time()
-                if os.path.exists(self.fname) and os.path.exists(self.temp_file):
-                    log.error("remove tmpfile is exists:%s"%(self.temp_file))
-                    os.remove(self.temp_file)
-                os.rename(self.fname, self.temp_file)
-                if cct.get_os_system() == 'mac':
-                    p=subprocess.Popen(self.ptrepack_cmds % (
-                        self.complib, self.temp_file, self.fname), shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                else:
-                    back_path = os.getcwd()
-                    os.chdir(self.basedir)
-                    log.info('current path is: %s after change dir' %os.getcwd())
-                    pt_cmd = self.ptrepack_cmds % (self.complib, self.temp_file.split(self.basedir)[1], self.fname.split(self.basedir)[1])
-                    p=subprocess.Popen(pt_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                p.wait()
-                if p.returncode != 0:
-                    log.error("ptrepack hdf Error:%s src%s  tofile:%s Er:%s" % (p.communicate(),self.temp_file,self.fname,p.stdout.read().decode("gbk")))
-                else:
-                    if os.path.exists(self.temp_file):
-                        os.remove(self.temp_file)
-                os.chdir(back_path)
+#     def __exit__(self, *args, **kwargs):
+#         if self.write_status:
+#             HDFStore.__exit__(self, *args, **kwargs)
+#             os.close(self._flock)
+#             h5_size = os.path.getsize(self.fname) / 1000 / 1000
+#             new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit)
+#             log.info("fname:%s h5_size:%s big:%s conf: %s " % (self.fname,h5_size, self.big_H5_Size_limit, cct.get_config_value(self.config_ini,self.fname_o)))
+#             if cct.get_config_value(self.config_ini,self.fname_o,h5_size,new_limit):
+#                 time_pt=time.time()
+#                 if os.path.exists(self.fname) and os.path.exists(self.temp_file):
+#                     log.error("remove tmpfile is exists:%s"%(self.temp_file))
+#                     os.remove(self.temp_file)
+#                 os.rename(self.fname, self.temp_file)
+#                 if cct.get_os_system() == 'mac':
+#                     p=subprocess.Popen(self.ptrepack_cmds % (
+#                         self.complib, self.temp_file, self.fname), shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+#                 else:
+#                     back_path = os.getcwd()
+#                     os.chdir(self.basedir)
+#                     log.info('current path is: %s after change dir' %os.getcwd())
+#                     pt_cmd = self.ptrepack_cmds % (self.complib, self.temp_file.split(self.basedir)[1], self.fname.split(self.basedir)[1])
+#                     p=subprocess.Popen(pt_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+#                 p.wait()
+#                 if p.returncode != 0:
+#                     log.error("ptrepack hdf Error:%s src%s  tofile:%s Er:%s" % (p.communicate(),self.temp_file,self.fname,p.stdout.read().decode("gbk")))
+#                 else:
+#                     if os.path.exists(self.temp_file):
+#                         os.remove(self.temp_file)
+#                 os.chdir(back_path)
 
-            if os.path.exists(self._lock):
-                os.remove(self._lock)
+#             if os.path.exists(self._lock):
+#                 os.remove(self._lock)
 
 '''
 https://stackoverflow.com/questions/21126295/how-do-you-create-a-compressed-dataset-in-pytables-that-can-store-a-unicode-stri/21128497#21128497
@@ -1669,8 +1753,210 @@ def get_hdf5_file(fpath, wr_mode='r', complevel=9, complib='blosc', mutiindx=Fal
     # store.select("Year2015", where=['dt<Timestamp("2015-01-07")','code=="000570"'])
     # return store
 
+def write_hdf_db(fname, df, table='all', index=False, complib='blosc',
+                 baseCount=500, append=True, MultiIndex=False,
+                 rewrite=False, showtable=False):
+    """安全写入 HDF5 文件（单次打开），保留所有原有逻辑"""
 
-def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False,showtable=False):
+    if 'code' in df.columns:
+        df = df.set_index('code')
+
+    time_t = time.time()
+    df = df.fillna(0)
+    df = df[~df.index.duplicated(keep='first')]
+
+    global RAMDISK_KEY
+    if not RAMDISK_KEY < 1:
+        return df
+
+    if not MultiIndex:
+        df['timel'] = time.time()
+
+    # fname = f'G:\\{fname}.h5'
+    # if not os.path.exists(f'G:\\{fname}.h5'):
+    #     with pd.HDFStore(fname, mode='w') as store:
+    #         pass
+    # 打开 HDF5 文件一次完成所有操作
+    with SafeHDFStore(fname, mode='a') as store:
+        tmpdf = None
+        keys = store.keys()
+        log.debug(f"fname: {fname} keys:{keys}")
+        if showtable:
+            print(f"fname: {fname} keys:{keys}")
+
+        # 读取已有表数据
+        if '/' + table in keys:
+            tmpdf = store[table].copy()
+            tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
+
+        # MultiIndex 特殊逻辑
+        if MultiIndex and tmpdf is not None and len(tmpdf) > 0 and not rewrite:
+            multi_code = tmpdf.index.get_level_values('code').unique().tolist()
+            df_multi_code = df.index.get_level_values('code').unique().tolist()
+            dratio = cct.get_diff_dratio(multi_code, df_multi_code)
+            if dratio < ct.dratio_limit:
+                comm_code = list(set(df_multi_code) & set(multi_code))
+                inx_key = comm_code[random.randint(0, len(comm_code) - 1)]
+                if inx_key in df.index.get_level_values('code'):
+                    now_time = df.loc[inx_key].index[-1]
+                    tmp_time = tmpdf.loc[inx_key].index[-1]
+                    if now_time == tmp_time:
+                        log.debug("%s %s Multi out %s hdf5:%s No Wri!!!" %
+                                  (fname, table, inx_key, now_time))
+                        return False
+
+        # 合并已有数据
+        if tmpdf is not None and len(tmpdf) > 0 and not MultiIndex:
+            limit_t = time.time()
+            df['timel'] = limit_t
+            df = cct.combine_dataFrame(tmpdf, df, col=None, append=append)
+            if not append:
+                df['timel'] = time.time()
+            elif fname == 'powerCompute':
+                o_time = df[df.timel < limit_t].timel.tolist()
+                o_time = sorted(set(o_time))
+                if len(o_time) >= ct.h5_time_l_count:
+                    o_time = [time.time() - t_x for t_x in o_time]
+                    o_timel = len(o_time)
+                    o_time = np.mean(o_time)
+                    if o_time > ct.h5_power_limit_time:
+                        df['timel'] = time.time()
+                        log.error("%s %s o_time:%.1f timel:%s" %
+                                  (fname, table, o_time, o_timel))
+
+        # 对 object 类型列进行处理
+        dd = df.dtypes.to_frame()
+        if 'object' in dd.values:
+            dd = dd[dd == 'object'].dropna()
+            col = dd.index.tolist()
+            log.info("col:%s" % col)
+            df[col] = df[col].astype(str)
+
+        df.index = df.index.astype(str)
+        df = df.fillna(0)
+        df = cct.reduce_memory_usage(df, verbose=False)
+        log.info(f'df.shape: {df.shape}')
+
+        # 写回 HDF5
+        if '/' + table in store.keys():
+            if not MultiIndex:
+                store.remove(table)
+                store.put(table, df, format='table', append=False,
+                          complib=complib, data_columns=True)
+            else:
+                if rewrite or len(store[table]) < 1:
+                    store.remove(table)
+                store.put(table, df, format='table', index=False,
+                          complib=complib, data_columns=True, append=True)
+        else:
+            store.put(table, df, format='table',
+                      index=MultiIndex is False,
+                      complib=complib,
+                      data_columns=True,
+                      append=MultiIndex)
+
+        store.flush()
+
+    log.info("write hdf time:%0.2f" % (time.time() - time_t))
+    return True
+
+
+def write_hdf_db_gptmod1(fname, df, table='all', index=False, complib='blosc',
+                 baseCount=500, append=True, MultiIndex=False,
+                 rewrite=False, showtable=False):
+    """安全写入 HDF5 文件，保留原功能"""
+
+    if 'code' in df.columns:
+        df = df.set_index('code')
+    time_t = time.time()
+    df = df.fillna(0)
+    df = df[~df.index.duplicated(keep='first')]
+    global RAMDISK_KEY
+    if not RAMDISK_KEY < 1:
+        return df
+
+    if not MultiIndex:
+        df['timel'] = time.time()
+
+    # 打开一次 HDF5 文件，读 + 写都在这里完成
+    with SafeHDFStore(fname, mode='a') as store:
+        tmpdf = None
+        # 检查表是否存在
+        if store is not None:
+            keys = store.keys()
+            log.debug(f"fname: {fname} keys:{keys}")
+            if showtable:
+                print(f"fname: {fname} keys:{keys}")
+            if '/' + table in keys:
+                tmpdf = store[table].copy()
+                tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
+
+        # MultiIndex 逻辑
+        if MultiIndex and tmpdf is not None and len(tmpdf) > 0 and not rewrite:
+            multi_code = tmpdf.index.get_level_values('code').unique().tolist()
+            df_multi_code = df.index.get_level_values('code').unique().tolist()
+            dratio = cct.get_diff_dratio(multi_code, df_multi_code)
+            if dratio < ct.dratio_limit:
+                comm_code = list(set(df_multi_code) & set(multi_code))
+                inx_key = comm_code[random.randint(0, len(comm_code) - 1)]
+                if inx_key in df.index.get_level_values('code'):
+                    now_time = df.loc[inx_key].index[-1]
+                    tmp_time = tmpdf.loc[inx_key].index[-1]
+                    if now_time == tmp_time:
+                        log.debug("%s %s Multi out %s hdf5:%s No Wri!!!" % (fname, table, inx_key, now_time))
+                        return False
+
+        # 普通逻辑
+        if tmpdf is not None and len(tmpdf) > 0 and not MultiIndex:
+            limit_t = time.time()
+            df['timel'] = limit_t
+            df = cct.combine_dataFrame(tmpdf, df, col=None, append=append)
+            if not append:
+                df['timel'] = time.time()
+            elif fname == 'powerCompute':
+                o_time = df[df.timel < limit_t].timel.tolist()
+                o_time = sorted(set(o_time))
+                if len(o_time) >= ct.h5_time_l_count:
+                    o_time = [time.time() - t_x for t_x in o_time]
+                    o_timel = len(o_time)
+                    o_time = np.mean(o_time)
+                    if o_time > ct.h5_power_limit_time:
+                        df['timel'] = time.time()
+                        log.error("%s %s o_time:%.1f timel:%s" % (fname, table, o_time, o_timel))
+
+        # 类型转换
+        dd = df.dtypes.to_frame()
+        if 'object' in dd.values:
+            dd = dd[dd == 'object'].dropna()
+            col = dd.index.tolist()
+            log.info("col:%s" % col)
+            df[col] = df[col].astype(str)
+        df.index = df.index.astype(str)
+        df = df.fillna(0)
+        df = cct.reduce_memory_usage(df, verbose=False)
+        log.info(f'df.shape: {df.shape}')
+
+        # 写回 HDF5
+        if '/' + table in store.keys():
+            if not MultiIndex:
+                store.remove(table)
+                store.put(table, df, format='table', append=False, complib=complib, data_columns=True)
+            else:
+                if rewrite or len(store[table]) < 1:
+                    store.remove(table)
+                store.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
+        else:
+            store.put(table, df, format='table',
+                      index=MultiIndex is False, complib=complib, data_columns=True,
+                      append=MultiIndex)
+
+        store.flush()
+
+    log.info("write hdf time:%0.2f" % (time.time() - time_t))
+    return True
+
+
+def write_hdf_db_src(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False,showtable=False):
     """[summary]
 
     [description]
@@ -1718,8 +2004,8 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
         
     if not rewrite:
         if df is not None and not df.empty and table is not None:
-            # h5 = get_hdf5_file(fname,wr_mode='r')
             tmpdf=[]
+
             with SafeHDFStore(fname,mode='r') as store:
                 if store is not None:
                     log.debug(f"fname: {(fname)} keys:{store.keys()}")
@@ -1728,7 +2014,6 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                     if '/' + table in list(store.keys()):
                         tmpdf=store[table]
                         tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
-
 
             if not MultiIndex:
                 if index:
@@ -1771,31 +2056,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                     log.info("h5 None hdf reindex time:%0.2f" %
                              (time.time() - time_t))
             else:
-                # df.loc[df.index.isin(['000002','000001'], level='code')]
-                # df.loc[(df.index.get_level_values('code')== 600004)]
-                # df.loc[(df.index.get_level_values('code')== '600199')]
-                # da.swaplevel(0, 1, axis=0).loc['2017-05-25']
-                # df.loc[(600004,20170414),:]
-                # df.xs(20170425,level='date')
-                # df.index.get_level_values('code').unique()
-                # df.index.get_loc(600006)
-                # slice(58, 87, None)
-                # df.index.get_loc_level(600006)
-                # da.swaplevel(0, 1, axis=0).loc['2017-05-25']
-                # da.reorder_levels([1,0], axis=0)
-                # da.sort_index(level=0, axis=0,ascending=False
-                # setting: dfm.index.is_lexsorted() dfm = dfm.sort_index()  da.loc[('000001','2017-05-12'):('000005','2017-05-25')]
-                # da.groupby(level=1).mean()
-                # da.index.get_loc('000005')     da.iloc[slice(22,33,None)]
-                # mask = totals['dirty']+totals['swap'] > 1e7     result =
-                # mask.loc[mask]
-                # store.remove('key_name', where='<where clause>')
-
-
-                # tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
-                # df = df[~df.index.duplicated(keep='first')]
                 if not rewrite and tmpdf is not None and len(tmpdf) > 0:
-                    # multi_code = tmpdf.index.get_level_values('code').unique().tolist()
                     multi_code=tmpdf.index.get_level_values('code').unique().tolist()
                     df_multi_code = df.index.get_level_values('code').unique().tolist()
                     dratio = cct.get_diff_dratio(multi_code, df_multi_code)
@@ -1814,7 +2075,6 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                         print(("newData ratio:%s all:%s"%(dratio,len(df))))
                     else:
                         log.debug("dratio:%s main:%s new:%s %s %s Multi All Wri" % (dratio,len(multi_code),len(df_multi_code),fname, table))
-                    # da.drop(('000001','2017-05-11'))
                 else:
                     log.debug("%s %s Multi rewrite:%s Wri!!!" % (fname, table, rewrite))
 
@@ -1832,21 +2092,13 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                 df[col]=df[col].astype(str)
                 df.index=df.index.astype(str)
                 df=df.fillna(0)
-            # else:
-            #     print col
-            #     for co in col:
-            #         print ('object:%s'%(co))
-                # df = df.drop(col,axis=1)
-#                    df[co] = df[co].apply()
-#                    recordStringInHDF5(h5file, h5file.root, 'mrtamb',u'\u266b Hey Mr. Tambourine Man \u266b')
-    
+
         with SafeHDFStore(fname,mode='a') as h5:
             df=df.fillna(0)
             df=cct.reduce_memory_usage(df,verbose=False)
             log.info(f'df.shape:{df.shape}')
             if h5 is not None:
                 if '/' + table in list(h5.keys()):
-                    # isinstance(df.index, pd.MultiIndex)
                     if not MultiIndex:
 
                         h5.remove(table)
@@ -1957,7 +2209,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                         print(f"fname: {(fname)} keys:{store.keys()}")
                     try:
                         if '/' + table in list(store.keys()):
-                            dd=store[table]
+                            dd=store[table].copy()
                     except AttributeError as e:
                         store.close()
                         # os.remove(store.filename)
@@ -2056,7 +2308,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                         print(f"keys:{store.keys()}")
                     try:
                         if '/' + table in list(store.keys()):
-                            dd=store[table]
+                            dd=store[table].copy()
                     except AttributeError as e:
                         store.close()
                         # os.remove(store.filename)
@@ -2227,7 +2479,15 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
 #     log.info("load_hdf_time:%0.2f"%(time.time()-time_t))
 #     return df
 
-
+def compact_hdf5_file(old_path, new_path=None, key="all_30/table"):
+    if new_path is None:
+        new_path = old_path.replace(".h5", "_clean.h5")
+    df = pd.read_hdf(old_path, key=key)
+    df.to_hdf(new_path, key=key, mode="w", format="table", complib="blosc", complevel=9)
+    old_size = os.path.getsize(old_path) / 1024**2
+    new_size = os.path.getsize(new_path) / 1024**2
+    print(f"Compacted {old_path}: {old_size:.1f} MB → {new_size:.1f} MB")
+    return new_path
 if __name__ == "__main__":
 
     #    import tushare as ts
@@ -2268,9 +2528,34 @@ if __name__ == "__main__":
         return h5
 
     h5=get_tdx_all_from_h5()
+
+    def get_tdx_all_MultiIndex_h5(showtable=True):
+        #sina_monitor
+        h5_fname = 'sina_MultiIndex_data'
+        resample='d'
+        dl='60'
+        filter='y'
+        h5_table = 'low' + '_' + resample + '_' + str(dl) + '_' + filter + '_' + 'all'
+        h5_table = 'all_30'
+        h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
+        return h5
+
+    def check_hdf(h5_fname,h5_table,showtable=True,new_path=None):
+        print(f'fname : {h5_fname}')
+        h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
+        with tables.open_file(f"G:\\{h5_fname}.h5") as f: print(f)
+        if new_path:
+            hm5.to_hdf(f"G:\\{new_path}", key=f"{h5_table}/table", mode="w", format="table", complib="blosc", complevel=9)
+
+    hm5=get_tdx_all_MultiIndex_h5()
+    with tables.open_file(r"G:\sina_MultiIndex_data.h5") as f: print(f)
+    # print(hm5.memory_usage(deep=True).sum() / 1024**2, "MB")
+    # hm5.to_hdf(r"G:\sina_MultiIndex_data_clean.h5", key="all_30/table", mode="w", format="table", complib="blosc", complevel=9)
+    print(f"sina_data:{check_hdf(h5_fname='sina_data',h5_table='all')}")
+
+
+
     import ipdb;ipdb.set_trace()
-
-
 
     sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
     # sina_MultiD_path = "D:\\RamDisk\\sina_MultiIndex_data.h5"
