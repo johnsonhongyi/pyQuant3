@@ -1105,6 +1105,7 @@ def get_market_sort_value_key(st, top_all=None, perd_d=3):
                 if isDigit(st_l[1]):
                     cct.GlobalValues().setkey('market_key',st_l[0])
                     cct.GlobalValues().setkey('market_value', st_l[1])
+                    log.info(f"market_key:{cct.GlobalValues().getkey('market_key')} market_value :{cct.GlobalValues().getkey('market_value')}")
                     if st_l[1] == '0':
                         new_l = []
                         for x in range(0,st_count):
