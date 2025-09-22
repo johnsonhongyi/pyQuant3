@@ -496,12 +496,14 @@ class SafeHDFStore(pd.HDFStore):
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.write_status:
             try:
+                self.close()
                 super().__exit__(exc_type, exc_val, exc_tb)
                 if self.mode != 'r':
                     # ===== 压缩逻辑 =====
                     h5_size = os.path.getsize(self.fname) / 1e6
                     h5_size_limit =  h5_size*1.5 if h5_size > 5 else 5
                     if self.fname_o.find('tdx_all_df') >= 0 or self.fname_o.find('sina_MultiIndex_data') >= 0:
+                        h5_size = 30 if h5_size < 30 else h5_size
                         new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit) if h5_size > self.big_H5_Size_limit else self.big_H5_Size_limit
                     else:
                         new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit) if h5_size > self.big_H5_Size_limit else h5_size_limit
@@ -539,10 +541,12 @@ class SafeHDFStore(pd.HDFStore):
                         if cct.get_os_system() != 'mac':
                             os.chdir(back_path)
             finally:
-                self.close()
                 time.sleep(0.1)
                 self._release_lock()
                 self.log.info(f'clean:{self.fname}')
+        else:
+            self.close()
+            super().__exit__(exc_type, exc_val, exc_tb)
 # class SafeHDFStore_lastOne(HDFStore):
 #     def __init__(self, fname, mode='r', **kwargs):
        
