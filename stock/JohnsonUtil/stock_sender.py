@@ -128,7 +128,7 @@ class StockSender:
             with open(self.code_file_name, "r", encoding="utf-8") as f:
                 codelist = json.load(f).get('stock', [])
                 self.ths_code = [co for co in codelist]
-
+            print("Loaded:", len(self.ths_code))
     # ----------------- 工具函数 ----------------- #
     @staticmethod
     def get_pids(pname):
@@ -229,37 +229,37 @@ class StockSender:
         if str(code)[0] == '6':
             # 将16进制数转换为整数
             dec_num = int('11', 16)
-            if code in ths_code:
+            if code in self.ths_code:
                 dec_num = 0x16
-            bytes_codex = bytes_16(dec_num, code)
+            bytes_codex = self.bytes_16(dec_num, code)
         # 11开头的可转债
         elif str(code).startswith('11'):
             # 将16进制数转换为整数
             dec_num = int('13', 16)
-            bytes_codex = bytes_16(dec_num, code)
+            bytes_codex = bself.ytes_16(dec_num, code)
         # 12开头的可转债
         elif str(code).startswith('12'):
             # 将16进制数转换为整数
             dec_num = int('23', 16)
-            bytes_codex = bytes_16(dec_num, code)
+            bytes_codex = self.bytes_16(dec_num, code)
         # 12开头的可转债
         elif str(code).startswith('15'):
             # 将16进制数转换为整数
             dec_num = int('24', 16)
-            bytes_codex = bytes_16(dec_num, code)
+            bytes_codex = self.bytes_16(dec_num, code)
 
         elif str(code).startswith('90'):
             # 将16进制数转换为整数
             dec_num = int('12', 16)
-            bytes_codex = bytes_16(dec_num, code)
+            bytes_codex = self.bytes_16(dec_num, code)
         elif str(code).startswith('20'):
             # 将16进制数转换为整数
             dec_num = int('22', 16)
-            bytes_codex = bytes_16(dec_num, code)
+            bytes_codex = self.bytes_16(dec_num, code)
         else:
             # 将16进制数转换为整数
             dec_num = int('21', 16)
-            bytes_codex = bytes_16(dec_num, code)
+            bytes_codex = self.bytes_16(dec_num, code)
 
         return bytes_codex
 

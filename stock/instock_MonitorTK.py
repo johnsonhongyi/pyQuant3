@@ -279,9 +279,73 @@ class StockMonitorApp(tk.Tk):
         # tk.Button(ctrl_frame, text="启动刷新", command=self.start_refresh).pack(side="left", padx=2)
 
         # ----------------- 状态栏 ----------------- #
+        # self.status_var = tk.StringVar()
+        # self.status_bar = tk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w")
+        # self.status_bar.pack(fill="x", side="bottom")
+
+
+        # ====== 底部状态栏 ======
+        status_frame = tk.Frame(self, relief="sunken", bd=1)
+        status_frame.pack(side="bottom", fill="x")
+
+        # 使用 PanedWindow 水平分割，支持拖动
+        pw = tk.PanedWindow(status_frame, orient=tk.HORIZONTAL, sashrelief="sunken", sashwidth=4)
+        pw.pack(fill="x", expand=True)
+
+        # 左侧状态信息
+        left_frame = tk.Frame(pw, bg="#f0f0f0")
         self.status_var = tk.StringVar()
-        self.status_bar = tk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w")
-        self.status_bar.pack(fill="x", side="bottom")
+        status_label_left = tk.Label(
+            left_frame, textvariable=self.status_var, anchor="w", padx=10, pady=2
+        )
+        status_label_left.pack(fill="x", expand=True)
+
+        # 右侧状态信息
+        right_frame = tk.Frame(pw, bg="#f0f0f0")
+        self.status_var2 = tk.StringVar()
+        status_label_right = tk.Label(
+            right_frame, textvariable=self.status_var2, anchor="e", padx=10, pady=2
+        )
+        status_label_right.pack(fill="x", expand=True)
+
+        # 添加左右面板
+        # pw.add(left_frame, minsize=100)   # 左侧最小宽度
+        # pw.add(right_frame, minsize=100)  # 右侧最小宽度
+        pw.add(left_frame, minsize=100, width=700)
+        pw.add(right_frame, minsize=100, width=300)
+
+
+        # 设置初始 6:4 比例
+        # self.update_idletasks()           # 先刷新窗口获取宽度
+        # total_width = pw.winfo_width()
+        # pw.sash_place(0, int(total_width * 0.6), 0)
+
+        # 初始化内容
+        # self.status_var_left.set("Ready")
+        # self.status_var_right.set("Rows: 0")
+
+        # # 底部容器
+        # bottom_frame = tk.Frame(self, bg="#f0f0f0")
+        # bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # # 左边状态栏
+        # left_frame = tk.Frame(bottom_frame, bg="#f0f0f0")
+        # left_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # self.status_var = tk.StringVar()
+        # self.status_label1 = tk.Label(left_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, bg="#f0f0f0", padx=10, pady=2)
+        # self.status_label1.pack(fill=tk.X)
+
+        # # 右边任务状态
+        # right_frame = tk.Frame(bottom_frame, bg="#f0f0f0")
+        # right_frame.pack(side=tk.RIGHT)
+
+        # self.status_var2 = tk.StringVar()
+        # self.status_label2 = tk.Label(right_frame, textvariable=self.status_var2, relief=tk.SUNKEN, anchor=tk.W, bg="#f0f0f0", padx=10, pady=2)
+        # self.status_label2.pack(fill=tk.X, expand=True)
+
+
+
 
         # ----------------- TreeView ----------------- #
         tree_frame = tk.Frame(self)
@@ -874,7 +938,8 @@ class StockMonitorApp(tk.Tk):
     def update_send_status(self, status_dict):
         # 更新状态栏
         status_text = f"TDX: {status_dict['TDX']} | THS: {status_dict['THS']} | DC: {status_dict['DC']}"
-        self.status_var.set(status_text)
+        # self.status_var.set(status_text)
+        print(status_text)
 
     # ----------------- Checkbuttons ----------------- #
     def init_checkbuttons(self, parent_frame):
@@ -1969,9 +2034,11 @@ class StockMonitorApp(tk.Tk):
         if self.current_df.empty:
             return
         import datetime
-        file_name = os.path.join(DARACSV_DIR, f"monitor_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+        file_name = os.path.join(DARACSV_DIR, f"monitor_{self.resample_combo.get()}_{time.strftime('%Y%m%d_%H%M')}.csv")
         self.current_df.to_csv(file_name, index=True, encoding="utf-8-sig")
-        self.status_var.set(f"已保存数据到 {file_name}")
+        idx =file_name.find('monitor')
+        status_txt = file_name[idx:]
+        self.status_var2.set(f"已保存数据到 {status_txt}")
 
     def load_data_from_csv(self):
         file_path = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
@@ -1981,8 +2048,14 @@ class StockMonitorApp(tk.Tk):
                 # 如果 CSV 本身已经有 code 列，不要再插入
                 if 'code' in df.columns:
                     df = df.copy()
+                #停止刷新
+                self.stop_refresh()
+                self.df_all = df
                 self.refresh_tree(df)
-                self.status_var.set(f"已加载数据: {file_path}")
+                idx =file_path.find('monitor')
+                status_txt = file_path[idx:]
+                # print(f'status_txt:{status_txt}')
+                self.status_var2.set(f"已加载数据: {status_txt}")
             except Exception as e:
                 log.error(f"加载 CSV 失败: {e}")
 
