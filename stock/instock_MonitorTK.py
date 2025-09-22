@@ -56,24 +56,24 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
     lastpTDX_DF, top_all = pd.DataFrame(), pd.DataFrame()
     print(f"init resample: {resample} flag.value : {flag.value}")
     while True:
-        print(f'resample : new : {g_values.getkey("resample")} last : {resample} ')
+        # print(f'resample : new : {g_values.getkey("resample")} last : {resample} st : {g_values.getkey("st_key_sort")}')
         if flag is not None and not flag.value:   # 停止刷新
                time.sleep(1)
-               print(f'flag.value : {flag.value} 停止更新')
+               # print(f'flag.value : {flag.value} 停止更新')
                continue
         elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
-            print(f'resample : new : {g_values.getkey("resample")} last : {resample} ')
+            # print(f'resample : new : {g_values.getkey("resample")} last : {resample} ')
             top_all = pd.DataFrame()
             lastpTDX_DF = pd.DataFrame()
         elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
-            print(f'market : new : {g_values.getkey("market")} last : {market} ')
+            # print(f'market : new : {g_values.getkey("market")} last : {market} ')
             top_all = pd.DataFrame()
             lastpTDX_DF = pd.DataFrame()
         elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
-            print(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
+            # print(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
             st_key_sort = g_values.getkey("st_key_sort")
         elif (not cct.get_work_time()) and START_INIT > 0:
-                print(f'not worktime and work_duration')
+                # print(f'not worktime and work_duration')
                 time.sleep(5)
                 continue
         else:
@@ -116,11 +116,12 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
             #     if top_temp is None:
             #         top_temp = pd.DataFrame(columns=DISPLAY_COLS)
 
+            top_temp=stf.getBollFilter(df=top_temp, resample=resample, down=False)
             top_temp = top_temp.sort_values(by=sort_cols, ascending=sort_keys)
             # print(f'DISPLAY_COLS:{DISPLAY_COLS}')
             # print(f'col: {top_temp.columns.values}')
             # top_temp = top_temp.loc[:, DISPLAY_COLS]
-            top_temp=stf.getBollFilter(df=top_temp, resample=resample, down=False)
+            # print(f'top_temp : {top_temp.loc[:,sort_cols][sort_cols[0]]}')
             queue.put(top_temp)
             gc.collect()
             time.sleep(ct.duration_sleep_time)
@@ -607,16 +608,26 @@ class StockMonitorApp(tk.Tk):
 
     def replace_st_key_sort_col(self, old_col, new_col):
         """替换显示列并刷新表格"""
-
-        if old_col in self.current_cols:
+        if old_col in self.current_cols and new_col not in self.current_cols:
+            print(f'old_col : {old_col} new_col {new_col} self.current_cols : {self.current_cols}')
             idx = self.current_cols.index(old_col)
             self.current_cols[idx] = new_col
 
-            # 重新设置 tree 的列集合
-            if "code" not in self.current_cols:
-                new_columns = ["code"] + self.current_cols
-            else:
-                new_columns = self.current_cols
+            # 去掉重复列
+            new_columns = []
+            for col in ["code"] + self.current_cols:
+                if col not in new_columns:
+                    new_columns.append(col)
+
+            # 确保 Treeview 先注册所有列
+            for col in new_columns:
+                if col not in self.tree["columns"]:
+                    self.tree["columns"] = list(self.tree["columns"]) + [col]
+            # # 重新设置 tree 的列集合
+            # if "code" not in self.current_cols:
+            #     new_columns = ["code"] + self.current_cols
+            # else:
+            #     new_columns = self.current_cols
 
             self.tree.config(columns=new_columns)
 
@@ -629,6 +640,8 @@ class StockMonitorApp(tk.Tk):
             # 重新加载数据
             self.refresh_tree(self.df_all)
             # self.apply_search()
+
+
     def on_st_key_sort_enter(self, event):
         sort_val = self.st_key_sort_value.get()
         # try:
@@ -655,6 +668,7 @@ class StockMonitorApp(tk.Tk):
                 if old != new:
                     return old, new
             return None
+
         if sort_val:
             # global DISPLAY_COLS
             sort_val = sort_val.strip()
@@ -664,6 +678,7 @@ class StockMonitorApp(tk.Tk):
             self.sortby_col = None
             self.sortby_col_ascend = None
             self.select_code = None
+
             if self.df_all is not None and not self.df_all.empty:
                 sort_cols, sort_keys = ct.get_market_sort_value_key(sort_val,self.df_all)
             else:
@@ -761,9 +776,9 @@ class StockMonitorApp(tk.Tk):
             if self.refresh_enabled:  # ✅ 只在启用时刷新
                 while not self.queue.empty():
                     df = self.queue.get_nowait()
-                    log.info(f'df:{df[:1]}')
+                    # print(f'df:{df[:1]}')
                     if self.sortby_col is not None:
-                        print(f'sortby_col : {self.sortby_col} sortby_col_ascend : {self.sortby_col_ascend}')
+                        print(f'update_tree sortby_col : {self.sortby_col} sortby_col_ascend : {self.sortby_col_ascend}')
                         df = df.sort_values(by=self.sortby_col, ascending=self.sortby_col_ascend)
                     self.df_all = df.copy()
                     if self.search_var.get():
@@ -867,7 +882,7 @@ class StockMonitorApp(tk.Tk):
         frame_right.pack(side=tk.RIGHT, padx=2, pady=2)
 
         self.tdx_var = tk.BooleanVar(value=True)
-        self.ths_var = tk.BooleanVar(value=False)
+        self.ths_var = tk.BooleanVar(value=True)
         self.dfcf_var = tk.BooleanVar(value=False)
         self.uniq_var = tk.BooleanVar(value=False)
         self.sub_var = tk.BooleanVar(value=False)
@@ -1701,7 +1716,25 @@ class StockMonitorApp(tk.Tk):
 
         # 要显示的列顺序（把 DISPLAY_COLS 的顺序保持一致）
         # cols_to_show = ['code'] + [c for c in DISPLAY_COLS if c != 'code']
-        cols_to_show =  self.current_cols
+        cols_to_show = [c for c in self.current_cols if c in df.columns]
+        # print(f'cols_to_show : {cols_to_show}')
+        # self.tree.config(columns=cols_to_show)
+        # self.tree["displaycolumns"] = cols_to_show
+
+
+        # 插入数据严格按 cols_to_show
+        for _, row in df.iterrows():
+            values = [row.get(col, "") for col in cols_to_show]
+            self.tree.insert("", "end", values=values)
+
+        # cols_to_show =  self.current_cols
+        # # 插入数据严格按 cols_to_show
+        # for _, row in df.iterrows():
+        #     values = [row.get(col, "") for col in cols_to_show]
+        #     self.tree.insert("", "end", values=values)
+
+
+
 
         # 如果 Treeview 的 columns 与我们想要的不一致，则重新配置
         current_cols = list(self.tree["columns"])

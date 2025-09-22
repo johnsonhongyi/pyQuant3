@@ -207,22 +207,61 @@ class StockSender:
         codex = ascii_char + str(code)
         return codex.encode('ascii', 'ignore')
 
-    def ths_convert_code(self, code):
-        c = str(code)
-        dec_num = 0x21
-        if c[0] == '6':
-            dec_num = 0x16 if code in self.ths_code else 0x16
-        elif c.startswith('11'):
-            dec_num = 0x13
-        elif c.startswith('12'):
-            dec_num = 0x23
-        elif c.startswith('15'):
-            dec_num = 0x24
-        elif c.startswith('90'):
-            dec_num = 0x12
-        elif c.startswith('20'):
-            dec_num = 0x22
-        return self.bytes_16(dec_num, code)
+    # def ths_convert_code(self, code):
+    #     c = str(code)
+    #     dec_num = 0x21
+    #     if c[0] == '6':
+    #         dec_num = 0x16 if code in self.ths_code else 0x16
+    #     elif c.startswith('11'):
+    #         dec_num = 0x13
+    #     elif c.startswith('12'):
+    #         dec_num = 0x23
+    #     elif c.startswith('15'):
+    #         dec_num = 0x24
+    #     elif c.startswith('90'):
+    #         dec_num = 0x12
+    #     elif c.startswith('20'):
+    #         dec_num = 0x22
+    #     return self.bytes_16(dec_num, code)
+    def ths_convert_code(self,code):
+
+        # 上海，深圳股票判断;
+        if str(code)[0] == '6':
+            # 将16进制数转换为整数
+            dec_num = int('11', 16)
+            if code in ths_code:
+                dec_num = 0x16
+            bytes_codex = bytes_16(dec_num, code)
+        # 11开头的可转债
+        elif str(code).startswith('11'):
+            # 将16进制数转换为整数
+            dec_num = int('13', 16)
+            bytes_codex = bytes_16(dec_num, code)
+        # 12开头的可转债
+        elif str(code).startswith('12'):
+            # 将16进制数转换为整数
+            dec_num = int('23', 16)
+            bytes_codex = bytes_16(dec_num, code)
+        # 12开头的可转债
+        elif str(code).startswith('15'):
+            # 将16进制数转换为整数
+            dec_num = int('24', 16)
+            bytes_codex = bytes_16(dec_num, code)
+
+        elif str(code).startswith('90'):
+            # 将16进制数转换为整数
+            dec_num = int('12', 16)
+            bytes_codex = bytes_16(dec_num, code)
+        elif str(code).startswith('20'):
+            # 将16进制数转换为整数
+            dec_num = int('22', 16)
+            bytes_codex = bytes_16(dec_num, code)
+        else:
+            # 将16进制数转换为整数
+            dec_num = int('21', 16)
+            bytes_codex = bytes_16(dec_num, code)
+
+        return bytes_codex
 
     # ----------------- 发送函数 ----------------- #
     def send_to_dfcf(self, stock_code):
