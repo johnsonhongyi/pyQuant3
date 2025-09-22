@@ -786,7 +786,7 @@ if __name__ == '__main__':
                     time.sleep(1)
             else:
                 ramdisk_h5 = 'D:\\Ramdisk\\sina_MultiIndex_data.h5'
-                if  cct.get_work_day_status() and cct.creation_date_duration(ramdisk_h5) > 0:
+                if  cct.get_now_time_int() > 1500 and cct.get_work_day_status() and cct.creation_date_duration(ramdisk_h5) > 0:
                     os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-ramdisk_back.bat')
                     time.sleep(1)
                     os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-Restore.bat')

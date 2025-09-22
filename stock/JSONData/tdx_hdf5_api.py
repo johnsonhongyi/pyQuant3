@@ -252,25 +252,25 @@ class SafeHDFStore(pd.HDFStore):
 
         # 写入
         try:
-            if append:
-                 # 如果传了 chunksize 自动切 table
-                if 'chunksize' in kwargs and 'format' not in kwargs:
-                    kwargs['format'] = 'table'
+            # if append:
+            #      # 如果传了 chunksize 自动切 table
+            #     if 'chunksize' in kwargs and 'format' not in kwargs:
+            #         kwargs['format'] = 'table'
 
-                if 'chunksize' not in kwargs:
-                    col_bytes = sum(
-                        8 if pd.api.types.is_numeric_dtype(dt) else 50
-                        for dt in df.dtypes
-                    )
-                    target_chunk_size = 5 * 1024 * 1024  # 5MB
-                    kwargs['chunksize'] = max(1000, int(target_chunk_size / col_bytes))
-                    self.log.info(f"Auto chunksize for key {key}: {kwargs['chunksize']} rows")
+            #     if 'chunksize' not in kwargs:
+            #         col_bytes = sum(
+            #             8 if pd.api.types.is_numeric_dtype(dt) else 50
+            #             for dt in df.dtypes
+            #         )
+            #         target_chunk_size = 5 * 1024 * 1024  # 5MB
+            #         kwargs['chunksize'] = max(1000, int(target_chunk_size / col_bytes))
+            #         self.log.info(f"Auto chunksize for key {key}: {kwargs['chunksize']} rows")
 
-                # 使用 append 写入，支持 chunksize
-                self.append(key, df, **kwargs, chunksize=chunksize)
-            else:
-                # 覆盖写入，使用 put，不支持 chunksize
-                self.put(key, df, **kwargs)
+            #     # 使用 append 写入，支持 chunksize
+            #     self.append(key, df, **kwargs, chunksize=chunksize)
+            # else:
+            #     # 覆盖写入，使用 put，不支持 chunksize
+            #     self.put(key, df, **kwargs)
             self.put(key, df, format='table', **kwargs)
             self.log.info(f"Successfully wrote key: {key}")
         except Exception as e:
@@ -497,43 +497,50 @@ class SafeHDFStore(pd.HDFStore):
         if self.write_status:
             try:
                 super().__exit__(exc_type, exc_val, exc_tb)
-                self.close()
-                # ===== 压缩逻辑 =====
-                h5_size = os.path.getsize(self.fname) / 1e6
-                h5_size_limit =  h5_size*1.2 if h5_size > 5 else 5
-                new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit) if h5_size > self.big_H5_Size_limit else h5_size_limit
-                read_ini_limit = cct.get_config_value(self.config_ini,self.fname_o,read=True)
-                self.log.info(f"fname: {self.fname} h5_size: {h5_size} big_limit: {self.big_H5_Size_limit} conf:{read_ini_limit}")
-                if (read_ini_limit is  None and h5_size > self.big_H5_Size_limit) or cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
-                    if self.mode == 'r':
-                        self._acquire_lock()
-                    if os.path.exists(self.fname) and os.path.exists(self.temp_file):
-                        log.error(f"Remove tmp file exists: {self.temp_file}")
-                        os.remove(self.temp_file)
-                    os.rename(self.fname, self.temp_file)
-                    if cct.get_os_system() == 'mac':
-                        p = subprocess.Popen(
-                            self.ptrepack_cmds % (self.complib, self.temp_file, self.fname),
-                            shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-                        )
+                if self.mode != 'r':
+                    # ===== 压缩逻辑 =====
+                    h5_size = os.path.getsize(self.fname) / 1e6
+                    h5_size_limit =  h5_size*1.5 if h5_size > 5 else 5
+                    if self.fname_o.find('tdx_all_df') >= 0 or self.fname_o.find('sina_MultiIndex_data') >= 0:
+                        new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit) if h5_size > self.big_H5_Size_limit else self.big_H5_Size_limit
                     else:
-                        back_path = os.getcwd()
-                        os.chdir(self.basedir)
-                        pt_cmd = self.ptrepack_cmds % (
-                            self.complib,
-                            self.temp_file.split(self.basedir)[1],
-                            self.fname.split(self.basedir)[1]
-                        )
-                        p = subprocess.Popen(pt_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                    p.wait()
-                    if p.returncode != 0:
-                        log.error(f"ptrepack error {p.communicate()}, src {self.temp_file}, dest {self.fname}")
-                    else:
-                        if os.path.exists(self.temp_file):
+                        new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit) if h5_size > self.big_H5_Size_limit else h5_size_limit
+                        
+                    read_ini_limit = cct.get_config_value(self.config_ini,self.fname_o,read=True)
+                    self.log.info(f"fname: {self.fname} h5_size: {h5_size} big_limit: {self.big_H5_Size_limit} conf:{read_ini_limit}")
+                    # if (read_ini_limit is  None and h5_size > self.big_H5_Size_limit) or cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
+                    if cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
+                        if self.mode == 'r':
+                            self._acquire_lock()
+                        if os.path.exists(self.fname) and os.path.exists(self.temp_file):
+                            log.error(f"Remove tmp file exists: {self.temp_file}")
                             os.remove(self.temp_file)
-                    if cct.get_os_system() != 'mac':
-                        os.chdir(back_path)
+                        os.rename(self.fname, self.temp_file)
+                        if cct.get_os_system() == 'mac':
+                            p = subprocess.Popen(
+                                self.ptrepack_cmds % (self.complib, self.temp_file, self.fname),
+                                shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+                            )
+                        else:
+                            back_path = os.getcwd()
+                            os.chdir(self.basedir)
+                            pt_cmd = self.ptrepack_cmds % (
+                                self.complib,
+                                self.temp_file.split(self.basedir)[1],
+                                self.fname.split(self.basedir)[1]
+                            )
+                            p = subprocess.Popen(pt_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                        p.wait()
+                        if p.returncode != 0:
+                            log.error(f"ptrepack error {p.communicate()}, src {self.temp_file}, dest {self.fname}")
+                        else:
+                            if os.path.exists(self.temp_file):
+                                os.remove(self.temp_file)
+                        if cct.get_os_system() != 'mac':
+                            os.chdir(back_path)
             finally:
+                self.close()
+                time.sleep(0.1)
                 self._release_lock()
                 self.log.info(f'clean:{self.fname}')
 # class SafeHDFStore_lastOne(HDFStore):
@@ -1753,11 +1760,13 @@ def get_hdf5_file(fpath, wr_mode='r', complevel=9, complib='blosc', mutiindx=Fal
     # store.select("Year2015", where=['dt<Timestamp("2015-01-07")','code=="000570"'])
     # return store
 
-def write_hdf_db(fname, df, table='all', index=False, complib='blosc',
+def write_hdf_db_gpt_error(fname, df, table='all', index=False, complib='blosc',
                  baseCount=500, append=True, MultiIndex=False,
                  rewrite=False, showtable=False):
     """安全写入 HDF5 文件（单次打开），保留所有原有逻辑"""
-
+    # df.index = df.index.astype(str)
+    # TypeError: Setting a MultiIndex dtype to anything other than object is not supported
+    # df.index 其实是 MultiIndex，但是你的 write_hdf_db 里强行 `
     if 'code' in df.columns:
         df = df.set_index('code')
 
@@ -1956,7 +1965,7 @@ def write_hdf_db_gptmod1(fname, df, table='all', index=False, complib='blosc',
     return True
 
 
-def write_hdf_db_src(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False,showtable=False):
+def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False,showtable=False):
     """[summary]
 
     [description]
@@ -2006,7 +2015,7 @@ def write_hdf_db_src(fname, df, table='all', index=False, complib='blosc', baseC
         if df is not None and not df.empty and table is not None:
             tmpdf=[]
 
-            with SafeHDFStore(fname,mode='r') as store:
+            with SafeHDFStore(fname,mode='a') as store:
                 if store is not None:
                     log.debug(f"fname: {(fname)} keys:{store.keys()}")
                     if showtable:
@@ -2203,24 +2212,42 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
     if code_l is not None:
         if table is not None:
             with SafeHDFStore(fname,mode='r') as store:
+                # if store is not None:
+                #     log.debug(f"fname: {(fname)} keys:{store.keys()}")
+                #     if showtable:
+                #         print(f"fname: {(fname)} keys:{store.keys()}")
+                #     try:
+                #         if '/' + table in list(store.keys()):
+                #             dd=store[table].copy()
+                #     except AttributeError as e:
+                #         store.close()
+                #         # os.remove(store.filename)
+                #         log.error("AttributeError:%s %s"%(fname,e))
+                #         # log.error("Remove File:%s"%(fname))
+                #     except Exception as e:
+                #         print(("Exception:%s name:%s"%(fname,e)))
+                #     else:
+                #         pass
+                #     finally:
+                #         pass
                 if store is not None:
-                    log.debug(f"fname: {(fname)} keys:{store.keys()}")
+                    log.debug(f"fname: {fname} keys:{store.keys()}")
                     if showtable:
-                        print(f"fname: {(fname)} keys:{store.keys()}")
+                        print(f"fname: {fname} keys:{store.keys()}")
+
                     try:
-                        if '/' + table in list(store.keys()):
-                            dd=store[table].copy()
-                    except AttributeError as e:
-                        store.close()
-                        # os.remove(store.filename)
-                        log.error("AttributeError:%s %s"%(fname,e))
-                        # log.error("Remove File:%s"%(fname))
+                        if '/' + table in store.keys():
+                            obj = store.get(table)
+                            if isinstance(obj, pd.DataFrame):
+                                dd = obj.copy()
+                            else:
+                                log.error("Unexpected object type from HDF5: %s", type(obj))
+                                dd = pd.DataFrame()
+                        else:
+                            dd = pd.DataFrame()
                     except Exception as e:
-                        print(("Exception:%s name:%s"%(fname,e)))
-                    else:
-                        pass
-                    finally:
-                        pass
+                        log.error("load_hdf_db Error: %s %s", fname, e)
+                        dd = pd.DataFrame()
 
             if dd is not None and len(dd) > 0:
                 if not MultiIndex:
@@ -2527,7 +2554,6 @@ if __name__ == "__main__":
         h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
         return h5
 
-    h5=get_tdx_all_from_h5()
 
     def get_tdx_all_MultiIndex_h5(showtable=True):
         #sina_monitor
@@ -2549,6 +2575,9 @@ if __name__ == "__main__":
 
     hm5=get_tdx_all_MultiIndex_h5()
     with tables.open_file(r"G:\sina_MultiIndex_data.h5") as f: print(f)
+    with tables.open_file(r"G:\sina_data.h5") as f: print(f)
+    h5=get_tdx_all_from_h5()
+    
     # print(hm5.memory_usage(deep=True).sum() / 1024**2, "MB")
     # hm5.to_hdf(r"G:\sina_MultiIndex_data_clean.h5", key="all_30/table", mode="w", format="table", complib="blosc", complevel=9)
     print(f"sina_data:{check_hdf(h5_fname='sina_data',h5_table='all')}")
@@ -2594,7 +2623,8 @@ if __name__ == "__main__":
     fname=['test_s.h5']
     # fname = 'powerCompute.h5'
     for na in fname:
-        with SafeHDFStore(na) as h5:
+        # with SafeHDFStore(na) as h5:
+        with HDFStore(na) as h5:
             import ipdb;ipdb.set_trace()
             print(h5)
             if '/' + 'all' in list(h5.keys()):
@@ -2608,3 +2638,35 @@ if __name__ == "__main__":
 
     # Only put inside this block the code which operates on the store
     # store['result'] = df
+
+# Traceback (most recent call last):
+#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\sina_Monitor.py", line 262, in <module>
+#     top_now = tdd.getSinaAlldf(market=market_blk, vol=ct.json_countVol, vtype=ct.json_countType)
+#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\JSONData\tdx_data_Day.py", line 2539, in getSinaAlldf
+#     df = sina_data.Sina().all
+#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\JSONData\sina_data.py", line 332, in all
+#     return self.get_stock_data()
+#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\JSONData\sina_data.py", line 557, in get_stock_data
+#     return self.format_response_data()
+#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\JSONData\sina_data.py", line 1034, in format_response_data
+#     h5a.write_hdf_db(self.hdf_name, dd, self.table, index=index)
+#   File "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock\JSONData\tdx_hdf5_api.py", line 2023, in write_hdf_db
+#     tmpdf=store[table]
+#   File "C:\Users\Johnson\anaconda3\lib\site-packages\pandas\io\pytables.py", line 608, in __getitem__
+#     return self.get(key)
+#   File "C:\Users\Johnson\anaconda3\lib\site-packages\pandas\io\pytables.py", line 800, in get
+#     return self._read_group(group)
+#   File "C:\Users\Johnson\anaconda3\lib\site-packages\pandas\io\pytables.py", line 1793, in _read_group
+#     s.infer_axes()
+#   File "C:\Users\Johnson\anaconda3\lib\site-packages\pandas\io\pytables.py", line 2733, in infer_axes
+#     self.get_attrs()
+#   File "C:\Users\Johnson\anaconda3\lib\site-packages\pandas\io\pytables.py", line 3519, in get_attrs
+#     self.index_axes = [a for a in self.indexables if a.is_an_indexable]
+#   File "pandas\_libs\properties.pyx", line 37, in pandas._libs.properties.CachedProperty.__get__
+#   File "C:\Users\Johnson\anaconda3\lib\site-packages\pandas\io\pytables.py", line 3556, in indexables
+#     desc = self.description
+#   File "C:\Users\Johnson\anaconda3\lib\site-packages\pandas\io\pytables.py", line 3418, in description
+#     return self.table.description
+# AttributeError: 'UnImplemented' object has no attribute 'description'
+# Error2sleep:6
+# [2025-09-22 12:27:34,831] INFO:commonTips.py(sleep:1992): sleep:6

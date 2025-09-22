@@ -53,8 +53,8 @@ REM 启动后续程序
 REM ============================
 
 REM 依次启动 exe 或 py 文件，保持延迟
-set PROGRAMS=instock_Monitor singleAnalyseUtil sina_Market-DurationUP LinePower filter_resample_Monitor
-
+rem set PROGRAMS=instock_Monitor singleAnalyseUtil sina_Market-DurationUP LinePower filter_resample_Monitor
+set PROGRAMS= singleAnalyseUtil  filter_resample_Monitor
 for %%P in (%PROGRAMS%) do (
     if exist "%WORKDIR%\%%P.exe" (
         echo 启动 EXE: %%P.exe
@@ -65,7 +65,7 @@ for %%P in (%PROGRAMS%) do (
     ) else (
         echo ERROR: 找不到 %%P.exe 或 %%P.py
     )
-    timeout /t 5 /nobreak >nul
+    timeout /t 15 /nobreak >nul
 )
 
 REM dataBarFeed 目录启动 chantdxpower

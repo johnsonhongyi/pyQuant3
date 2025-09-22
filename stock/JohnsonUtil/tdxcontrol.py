@@ -66,7 +66,8 @@ if __name__ == '__main__':
     # broadcast_stock_code('999999')
     # broadcast_stock_code('000001')
     code='159775'
-    code='580019'
+    code='002905'
+    code='301446'
     broadcast_stock_code(code)
     # broadcast_stock_code(code,message_type='etf')
     # send_dfcf(code)

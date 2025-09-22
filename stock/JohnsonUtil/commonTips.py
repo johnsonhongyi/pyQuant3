@@ -58,7 +58,7 @@ requests.adapters.DEFAULT_RETRIES = 0
 global initGlobalValue
 global last_trade_date,is_trade_date_today
 
-
+_global_dict = {}
 initGlobalValue = 0
 # clean_terminal = ["Python Launcher", 'Johnson — -bash', 'Johnson — python']
 clean_terminal = ["Python Launcher", 'Johnson — -bash', 'Johnson — python']
@@ -93,18 +93,50 @@ def get_os_path_sep():
     
 evalcmdfpath = r'./sina_pandasSelectCmd.txt'.replace('\\',get_os_path_sep())
 
-class GlobalValues:
-    # -*- coding: utf-8 -*-
 
-    def __init__(self):
+class GlobalValues:
+    _instance = None
+
+    def __new__(cls, ext_dict=None):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._global_dict = ext_dict or {}
+        elif ext_dict is not None:
+            cls._global_dict = ext_dict
+        return cls._instance
+
+    def getkey(self, key, default=None):
+        return self._global_dict.get(key, default)
+
+    def setkey(self, key, value):
+        self._global_dict[key] = value
+
+    def getkey_status(self, key):
+        return key in self._global_dict
+
+    def getlist(self):
+        return list(self._global_dict.keys())
+
+
+
+class GlobalValues2:
+    # -*- coding: utf-8 -*-
+    _instance = None
+    _global_dict = None
+
+    def __init__(self, ext_dict=None):
+    # def __init__(self):
         global initGlobalValue
         if initGlobalValue == 0:
-            self._init_()
+            self._init_(ext_dict)
             initGlobalValue += 1
 
-    def _init_(self):  # 初始化
+    def _init_(self,ext_dict=None):  # 初始化
         global _global_dict
-        _global_dict = {}
+        if ext_dict is not None:
+            _global_dict = ext_dict
+        else:
+            _global_dict = {}
 
     def setkey(self, key, value):
         # """ 定义一个全局变量 """
@@ -2875,8 +2907,8 @@ def process_file_exc(func=None,code=None):
 
 
 
+# https://stackoverflow.com/questions/68065937/how-to-show-progress-bar-tqdm-while-using-multiprocessing-in-python
 def to_mp_run_async(cmd, urllist, *args,**kwargs):
-    # https://stackoverflow.com/questions/68065937/how-to-show-progress-bar-tqdm-while-using-multiprocessing-in-python
     result = []  
     time_s = time.time()
     # func = partial(cmd, **kwargs)

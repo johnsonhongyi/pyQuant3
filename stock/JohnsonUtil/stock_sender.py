@@ -4,12 +4,13 @@ import ctypes
 from ctypes import wintypes
 import win32gui
 import win32api
+import win32con
 import win32process
 import psutil
 import pyperclip
 import json
 import os
-import re
+# import re
 # import LoggerFactory 
 
 FAGE_READWRITE = 0x04
@@ -25,38 +26,13 @@ GetWindowTextW.restype = ctypes.c_int
 GetClassNameW = user32.GetClassNameW
 GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 GetClassNameW.restype = ctypes.c_int
-PostMessageW = user32.PostMessageW
-PostMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
-PostMessageW.restype = ctypes.c_int
-RegisterWindowMessageW = user32.RegisterWindowMessageW
-RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
-RegisterWindowMessageW.restype = ctypes.c_uint
+# PostMessageW = user32.PostMessageW
+# PostMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
+# PostMessageW.restype = ctypes.c_int
+# RegisterWindowMessageW = user32.RegisterWindowMessageW
+# RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
+# RegisterWindowMessageW.restype = ctypes.c_uint
 
-# class StockSender:
-#     def __init__(self, tdx_var, ths_var, dfcf_var, base_dir=None):
-#         self.tdx_var = tdx_var
-#         self.ths_var = ths_var
-#         self.dfcf_var = dfcf_var
-
-#         self.tdx_window_handle = 0
-#         self.ths_window_handle = 0
-#         self.ths_process_hwnd = 0
-#         self.dfcf_process_hwnd = 0
-#         self.ahk_process_hwnd = 0
-#         self.thsweb_process_hwnd = 0
-
-#         self.tdx_status = ""
-#         self.ths_status = ""
-#         self.dfcf_status = ""
-
-#         self.base_dir = base_dir or os.getcwd()
-#         self.code_file_name = os.path.join(self.base_dir, "code_ths_other.json")
-#         self.ths_code = []
-
-#         self.load_ths_code()
-#         self.find_tdx_window()
-#         self.find_ths_window()
-#         self.find_dfcf_handle()
 class StockSender:
     def __init__(self, tdx_var, ths_var, dfcf_var, base_dir=None, callback=None):
         self.tdx_var = tdx_var
@@ -71,7 +47,7 @@ class StockSender:
         self.ths_process_hwnd = 0
         self.dfcf_process_hwnd = 0
         self.ahk_process_hwnd = 0
-        self.thsweb_process_hwnd = 0
+        # self.thsweb_process_hwnd = 0
 
         # 状态
         self.tdx_status = ""
@@ -85,15 +61,42 @@ class StockSender:
         self.load_ths_code()
 
         # 查找窗口
+        # if self.tdx_var.get()
         self.find_tdx_window()
+        # if self.ths_var.get()
         self.find_ths_window()
+        # if self.dfcf_var.get():
         self.find_dfcf_handle()
 
+    def reload(self):
+        # 句柄初始化
+        # print(f'reload process_hwnd')
+        # print(f'self.tdx_var : {self.tdx_var.get()} self.ths_var : {self.ths_var.get()} self.dfcf_var : {self.dfcf_var.get()}')
+        if  self.tdx_var.get():
+            self.tdx_window_handle = 0
+            self.find_tdx_window()
+            print(f'reload  tdx_window_handle: {self.tdx_window_handle}')
+        if  self.ths_var.get():
+            self.ths_process_hwnd = 0
+            self.ths_window_handle = 0
+            self.find_ths_window()
+            print(f'reload ths_process_hwnd: {self.ths_process_hwnd} ths_window_handle :{self.ths_window_handle}')
+
+        if  self.dfcf_var.get():
+            self.dfcf_process_hwnd = 0
+            self.ahk_process_hwnd = 0
+            # self.thsweb_process_hwnd = 0
+            self.find_dfcf_handle()
+            print(f'reload dfcf_process_hwnd: {self.dfcf_process_hwnd} ahk_process_hwnd: {self.ahk_process_hwnd}')
+
+        # 查找窗口
     # ----------------- 统一发送 ----------------- #
     def send(self, stock_code):
+        print(f'send :{stock_code}')
         threading.Thread(target=self._send_thread, args=(stock_code,)).start()
 
     def _send_thread(self, stock_code):
+        print(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
         if self.tdx_var.get():
             self.send_to_tdx(stock_code)
         else:
@@ -131,6 +134,17 @@ class StockSender:
     def get_pids(pname):
         return [p.pid for p in psutil.process_iter() if pname.lower() in p.name().lower()]
 
+    # @staticmethod    
+    # def get_pids_values(pname):
+    #     # print(pname)
+    #     # find AutoHotkeyU64.exe
+    #     pids = 0
+    #     for proc in psutil.process_iter():
+    #         if pname in proc.name():
+    #             # pids.append(proc.pid)
+    #             pids = proc.pid
+    #     return pids
+    
     @staticmethod
     def get_handle_by_pid(pid):
         handles = []
@@ -151,6 +165,7 @@ class StockSender:
             if hwnd:
                 return hwnd
         return 0
+
 
     # ----------------- 查找窗口 ----------------- #
     def find_tdx_window(self):
@@ -182,7 +197,7 @@ class StockSender:
 
     def find_dfcf_handle(self):
         self.dfcf_process_hwnd = self.get_handle_by_name("mainfree.exe")
-        self.ahk_process_hwnd = self.get_handle_by_name("AutoHotkey")
+        self.ahk_process_hwnd = self.get_pids("AutoHotkey")
         print(f'dfcf_process_hwnd : {self.dfcf_process_hwnd}  ahk_process_hwnd :{self.ahk_process_hwnd }' )
         # LoggerFactory.info(f'dfcf_process_hwnd : {self.dfcf_process_hwnd}  ahk_process_hwnd :{self.ahk_process_hwnd }' )
 
@@ -211,7 +226,8 @@ class StockSender:
 
     # ----------------- 发送函数 ----------------- #
     def send_to_dfcf(self, stock_code):
-        if self.dfcf_process_hwnd and (self.ahk_process_hwnd or self.thsweb_process_hwnd):
+        print(self.dfcf_process_hwnd , self.ahk_process_hwnd)
+        if self.dfcf_process_hwnd and self.ahk_process_hwnd:
             pyperclip.copy(stock_code)
             self.dfcf_status = f"DC-> 成功"
         else:
@@ -229,18 +245,48 @@ class StockSender:
             self.ths_status = "未找到THS"
         return self.ths_status
 
-    def send_to_tdx(self, stock_code):
-        UWM_STOCK = RegisterWindowMessageW("Stock")
+    def send_to_tdx(self,stock_code,message_type='stock'):
         if self.tdx_window_handle:
             try:
                 message_code = int(stock_code)
             except ValueError:
                 message_code = 0
-            PostMessageW(self.tdx_window_handle, UWM_STOCK, message_code, 2)
+            if isinstance(stock_code, dict):
+                stock_code = stock_code['content']
+                stock_code = stock_code.strip()
+            if len(stock_code) == 6:
+                codex = int(stock_code)
+                if str(message_type) == 'stock':
+                    if str(stock_code)[0] in ['0','3','1']:
+                        codex = '6' + str(stock_code)
+                    elif str(stock_code)[0] in ['6','5']:
+                        codex = '7' + str(stock_code)
+                    # elif str(stock_code)[0] == '9':
+                    #     codex = '2' + str(stock_code)
+                    else:
+                        codex = '4' + str(stock_code)
+                else:
+                    codex = int(stock_code)
+                UWM_STOCK = win32api.RegisterWindowMessage('stock')
+                print(win32con.HWND_BROADCAST,UWM_STOCK,str(codex))
+                #系统广播
+                win32gui.PostMessage( win32con.HWND_BROADCAST,UWM_STOCK,int(codex),0)
             self.tdx_status = "TDX-> 成功"
         else:
             self.tdx_status = "未找到TDX"
         return self.tdx_status
+    # def send_to_tdx(self, stock_code):
+    #     UWM_STOCK = RegisterWindowMessageW("Stock")
+    #     if self.tdx_window_handle:
+    #         try:
+    #             message_code = int(stock_code)
+    #         except ValueError:
+    #             message_code = 0
+    #         PostMessageW(self.tdx_window_handle, UWM_STOCK, message_code, 2)
+    #         self.tdx_status = "TDX-> 成功"
+    #     else:
+    #         self.tdx_status = "未找到TDX"
+    #     return self.tdx_status
 
     # ----------------- 统一发送 ----------------- #
     # def send(self, stock_code):

@@ -12,7 +12,6 @@ import pyperclip
 import win32api
 import win32con
 import win32gui
-from ths_link import send_code_message
 import time
 import pandas as pd
 import sys
