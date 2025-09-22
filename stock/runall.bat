@@ -54,7 +54,7 @@ REM ============================
 
 REM 依次启动 exe 或 py 文件，保持延迟
 rem set PROGRAMS=instock_Monitor singleAnalyseUtil sina_Market-DurationUP LinePower filter_resample_Monitor
-set PROGRAMS= singleAnalyseUtil  filter_resample_Monitor
+set PROGRAMS= instock_MonitorTK singleAnalyseUtil  filter_resample_Monitor
 for %%P in (%PROGRAMS%) do (
     if exist "%WORKDIR%\%%P.exe" (
         echo 启动 EXE: %%P.exe
