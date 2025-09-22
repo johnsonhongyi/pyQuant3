@@ -24,6 +24,7 @@ import pyperclip
 import random
 import queue
 import importlib.util
+import win32pipe, win32file
 # 全局变量
 monitor_windows = {}  # 存储监控窗口实例
 
@@ -74,6 +75,41 @@ IsWindowVisible = ctypes.windll.user32.IsWindowVisible
 date_entry = None
 codelist = []
 ths_code=[]
+
+PIPE_NAME = r"\\.\pipe\my_named_pipe"
+
+def pipe_server(update_callback):
+    """
+    命名管道服务器线程
+    """
+    pipe = win32pipe.CreateNamedPipe(
+        PIPE_NAME,
+        win32pipe.PIPE_ACCESS_DUPLEX,
+        win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
+        win32pipe.PIPE_UNLIMITED_INSTANCES,
+        65536, 65536, 0, None
+    )
+    print("管道服务器启动，等待连接...")
+
+    while True:
+        win32pipe.ConnectNamedPipe(pipe, None)
+        try:
+            while True:
+                err, data = win32file.ReadFile(pipe, 65536)
+                print(f'err : {err} data :{data}')
+                if err == 0 and data:
+                    code = data.decode("utf-8")
+                    update_callback(code)
+                else:
+                    # print(f'err : {err} data :{data}')
+                    break
+        except Exception as e:
+            # print("读取数据异常:", e)
+            pass
+        finally:
+            # print("DisconnectNamedPipe:")
+            win32pipe.DisconnectNamedPipe(pipe)
+
 
 def get_base_path():
     """
@@ -4870,6 +4906,22 @@ schedule_worktime_task(tree)
 
 # 启动定时任务调度
 schedule_get_ths_code_task()
+
+
+# 定义回调函数，用于线程安全更新 GUI
+def update_gui(code):
+    # label_main.config(text=f"已接收: {code}")
+    # label_last.config(text=f"最后接收: {code}")
+    # 1. 推送代码到输入框
+    print(f'code : {code}')
+    code_entry.delete(0, tk.END)
+    code_entry.insert(0, code)
+    search_by_code()
+
+
+# 启动命名管道服务器线程
+t = threading.Thread(target=pipe_server, args=(lambda code: root.after(0, lambda: update_gui(code)),), daemon=True)
+t.start()
 
 # if get_now_time_int() > 1530 and not date_write_is_processed:
 #     start_async_save()

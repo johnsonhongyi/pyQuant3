@@ -15,7 +15,7 @@ from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import LoggerFactory, commonTips as cct
 from JSONData import stockFilter as stf
 from JSONData import tdx_data_Day as tdd
-
+import win32pipe, win32file
 log = LoggerFactory.log
 # log.setLevel(log_level)
 # log.setLevel(LoggerFactory.DEBUG)
@@ -164,6 +164,28 @@ def calc_indicators(top_all, resample):
     else:
         top_all['dff'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
     return top_all.sort_values(by=['dff','percent','volume','ratio','couts'], ascending=[0,0,0,1,1])
+
+
+PIPE_NAME = r"\\.\pipe\my_named_pipe"
+
+def send_code_via_pipe(code):
+    for _ in range(5):
+        try:
+            handle = win32file.CreateFile(
+                PIPE_NAME,
+                win32file.GENERIC_WRITE,
+                0, None,
+                win32file.OPEN_EXISTING,
+                0, None
+            )
+            # print(f'handle : {handle}')
+            win32file.WriteFile(handle, code.encode("utf-8"))
+            win32file.CloseHandle(handle)
+            return True
+        except Exception as e:
+            print("发送失败，重试中...", e)
+            time.sleep(0.5)
+    return False
 
 # ------------------ Tk 前端 ------------------ #
 # class StockMonitorApp(tk.Tk):
@@ -858,9 +880,20 @@ class StockMonitorApp(tk.Tk):
         """右键点击 TreeView 行"""
         # 确保选中行
         item_id = self.tree.identify_row(event.y)
+        # if item_id:
+        #     self.tree.selection_set(item_id)
+            # self.tree_menu.post(event.x_root, event.y_root)
+        # selected_item = self.tree.selection()
         if item_id:
-          self.tree.selection_set(item_id)
-          self.tree_menu.post(event.x_root, event.y_root)
+            stock_info = self.tree.item(item_id, 'values')
+            stock_code = stock_info[0]
+            if send_code_via_pipe(stock_code):
+                # 如果发送成功，更新状态标签
+                self.status_var2.set(f"发送成功: {stock_code}")
+            else:
+                # 如果发送失败，更新状态标签
+                self.status_var2.set(f"发送失败: {stock_code}")
+
 
     def open_alert_rule_new(self):
         """新建报警规则"""
@@ -1933,7 +1966,13 @@ class StockMonitorApp(tk.Tk):
                 self.search_history = self.search_history[:20]
             self.search_combo['values'] = self.search_history
             self.save_search_history()  # 保存到文件
-        
+        else:
+            self.search_history.remove(query)  # リストから既存のクエリを削除する
+            self.search_history.insert(0, query) # リストの先頭にクエリを挿入する
+            self.search_combo['values'] = self.search_history
+            self.save_search_history()
+
+
         if self.df_all.empty:
             self.status_var.set("当前数据为空")
             return
