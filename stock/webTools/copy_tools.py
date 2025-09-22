@@ -176,8 +176,6 @@ def broadcast_stock_code(stock_code,message_type='stock'):
         #系统广播
         win32gui.PostMessage( win32con.HWND_BROADCAST,UWM_STOCK,int(codex),0)
         send_code_message(stock_code)
-# broadcast_stock_code('399001')
-# broadcast_stock_code('833171')
 
 def add_data(new_data):
     new_status=False

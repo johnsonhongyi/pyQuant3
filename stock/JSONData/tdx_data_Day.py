@@ -4526,7 +4526,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
         else:
             log.info("no hdf data:%s %s" % (h5_fname, h5_table))
             # tdxdata = get_tdx_all_day_LastDF(codelist) '''only get lastp no
-            print(("TDD:%s" % (len(codelist)),))
+            print(f"TDD: {len(codelist)} resample:{resample}",end='')
             
             # import ipdb;ipdb.set_trace()
 

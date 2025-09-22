@@ -686,13 +686,13 @@ GetClassNameW = user32.GetClassNameW
 GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 GetClassNameW.restype = ctypes.c_int
 
-PostMessageW = user32.PostMessageW
-PostMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
-PostMessageW.restype = ctypes.c_int
+# PostMessageW = user32.PostMessageW
+# PostMessageW.argtypes = [wintypes.HWND, ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
+# PostMessageW.restype = ctypes.c_int
 
-RegisterWindowMessageW = user32.RegisterWindowMessageW
-RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
-RegisterWindowMessageW.restype = ctypes.c_uint
+# RegisterWindowMessageW = user32.RegisterWindowMessageW
+# RegisterWindowMessageW.argtypes = [wintypes.LPCWSTR]
+# RegisterWindowMessageW.restype = ctypes.c_uint
 
 # 全局变量，用于存储通达信窗口句柄
 tdx_window_handle = 0
@@ -878,6 +878,28 @@ def send_to_tdx(stock_code):
         threading.Thread(target=_send_to_tdx_thread, args=(stock_code, generated_code)).start()
 
 
+def broadcast_stock_code(stock_code,message_type='stock'):
+    if isinstance(stock_code, dict):
+        stock_code = stock_code['content']
+        stock_code = stock_code.strip()
+    if len(stock_code) == 6:
+        codex = int(stock_code)
+        if str(message_type) == 'stock':
+            if str(stock_code)[0] in ['0','3','1']:
+                codex = '6' + str(stock_code)
+            elif str(stock_code)[0] in ['6','5']:
+                codex = '7' + str(stock_code)
+            # elif str(stock_code)[0] == '9':
+            #     codex = '2' + str(stock_code)
+            else:
+                codex = '4' + str(stock_code)
+        else:
+            codex = int(stock_code)
+        UWM_STOCK = win32api.RegisterWindowMessage('stock')
+        print(win32con.HWND_BROADCAST,UWM_STOCK,str(codex))
+        #系统广播
+        status=win32gui.PostMessage( win32con.HWND_BROADCAST,UWM_STOCK,int(codex),0)
+
 def _send_to_tdx_thread(stock_code, generated_code,retry=True):
     """在线程中执行发送操作"""
     global tdx_window_handle
@@ -889,37 +911,9 @@ def _send_to_tdx_thread(stock_code, generated_code,retry=True):
     dfcfstatus = '成功'
     try:
         if tdx_state:
-
-            # 获取通达信注册消息代码
-            UWM_STOCK = RegisterWindowMessageW("Stock")
-
             # 发送消息
-            if tdx_window_handle != 0:
-                # 尝试将生成的代码转换为整数
-                try:
-                    message_code = int(generated_code)
-                except ValueError:
-                    message_code = 0
-
-                # 发送消息
-                status = PostMessageW(tdx_window_handle, UWM_STOCK, message_code, 2)
-                if status:
-                    print("TDX Message posted successfully.")
-                else:
-                    # PostMessageW returns 0 on failure.
-                    print("Failed to post message.")
-                    if retry:
-                        find_tdx_window()
-                        _send_to_tdx_thread(stock_code, generated_code,retry=False)
-
-                # 更新状态
-                status = "发送成功"
-            else:
-                status = "未找到通达信窗口，请确保通达信已打开"
-                if retry:
-                    find_tdx_window()
-                    _send_to_tdx_thread(stock_code, generated_code,retry=False)
-            # root.after(0, _update_ui_after_send, status)
+            broadcast_stock_code(stock_code)
+            status = "发送成功"
         if ths_state:
             thsstatus = send_code_message(stock_code)
             print(f"THS send Message posted:{thsstatus}")
@@ -2097,11 +2091,11 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
                     realdatadf.drop_duplicates(subset=['时间','代码', '板块'], keep='last', inplace=True)
                     print(f"为 ({symbol}) 获取了新的异动数据，并更新了 realdatadf, start_init:{start_init}")
                     if start_init == 0:
-                        toast_message(root,f"为 ({symbol}) 获取了新的异动数据，并更新了 realdatadf")
+                        toast_message(None,f"为 ({symbol}) 获取了新的异动数据，并更新了 realdatadf")
                     time.sleep(5)
                 print(f"time:{time.time() - start_time}全部更新 获取了新的异动数据，并更新了realdatadf:{len(realdatadf)}")
                 if start_init == 0:
-                    toast_message(root,f"time:{time.time() - start_time}全部更新 获取了新的异动数据，并更新了realdatadf:{len(realdatadf)}")
+                    toast_message(None,f"time:{time.time() - start_time}全部更新 获取了新的异动数据，并更新了realdatadf:{len(realdatadf)}")
                 print(f"realdatadf 已更新:{time.strftime('%H:%M:%S')} {len(realdatadf)}")
             else:
                 print(f"{current_time - last_updated_time}:未到更新时间，返回内存realdatadf数据。")
@@ -3938,63 +3932,7 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
 
     editor = tk.Toplevel(root)
     editor.title(f"设置报警规则 -{name} {code}")
-    # editor.geometry("500x300")
-    # 固定窗口尺寸
     win_width, win_height = 500, 300
-    # # 1. 如果右键事件传入，优先使用鼠标位置
-    # if event is not None:
-    #     x = event.x_root
-    #     y = event.y_root
-    # else:
-    #     # 2. 否则在父窗口附近
-    #     parent_x = parent_window.winfo_x()
-    #     parent_y = parent_window.winfo_y()
-    #     parent_w = parent_window.winfo_width()
-    #     parent_h = parent_window.winfo_height()
-    #     x = parent_x + parent_w // 3
-    #     y = parent_y + parent_h // 3
-
-    # # 3. 获取屏幕尺寸
-    # screen_w = editor.winfo_screenwidth()
-    # screen_h = editor.winfo_screenheight()
-
-    # # 4. 避免窗口超出屏幕
-    # if x + width > screen_w:
-    #     x = screen_w - width - 10
-    # if y + height > screen_h:
-    #     y = screen_h - height - 10
-
-    # editor.geometry(f"{width}x{height}+{x}+{y}")
-
-    # screen_width, screen_height = get_monitors_info()
-
-    # # 默认位置：屏幕中心
-    # x = (screen_width - win_width) // 2
-    # y = (screen_height - win_height) // 2
-
-    # # 优先使用右键位置
-    # if x_root is not None and y_root is not None:
-    #     x = x_root
-    #     y = y_root
-    # # 如果 parent_win 传入，则在父窗口右下角附近打开
-    # elif parent_win is not None:
-    #     parent_win.update_idletasks()
-    #     px = parent_win.winfo_x()
-    #     py = parent_win.winfo_y()
-    #     pw = parent_win.winfo_width()
-    #     ph = parent_win.winfo_height()
-    #     x = px + pw // 2 - win_width // 2
-    #     y = py + ph // 2 - win_height // 2
-
-    # # 超出屏幕边界自动调整
-    # if x + win_width > screen_width:
-    #     x = screen_width - win_width
-    # if y + win_height > screen_height:
-    #     y = screen_height - win_height
-    # if x < 0:
-    #     x = 0
-    # if y < 0:
-    #     y = 0
 
     screen_width, screen_height = get_monitors_info()
 
@@ -4179,67 +4117,11 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
         ttk.Button(rules_frame, text=plus_text, width=5,
                    command=make_adjust_fn(val_var, plus_delta, field_var.get()=="价格")).grid(row=row, column=5)
 
-        # # 调整按钮逻辑
-        # def make_adjust_fn(var):
-        #     def _inc():
-        #         try:
-        #             val = float(var.get())
-        #         except:
-        #             val = 0.0
-        #         if field_var.get() == "价格":
-        #             var.set(round(val * 1.01, 2))  # 价格按 1% 增加
-        #         elif field_var.get() == "涨幅":
-        #             var.set(round(val + 1, 2))     # 涨幅 +1
-        #         elif field_var.get() == "量":
-        #             var.set(round(val + 0.5, 2))   # 量 +0.5
-        #     return _inc
-
-        # def make_adjust_fn_minus(var):
-        #     def _dec():
-        #         try:
-        #             val = float(var.get())
-        #         except:
-        #             val = 0.0
-        #         if field_var.get() == "价格":
-        #             var.set(round(val * 0.99, 2))  # 价格按 1% 减少
-        #         elif field_var.get() == "涨幅":
-        #             var.set(round(val - 1, 2))     # 涨幅 -1
-        #         elif field_var.get() == "量":
-        #             var.set(round(val - 0.5, 2))   # 量 -0.5
-        #     return _dec
-
-        # ttk.Button(rules_frame, text="-", command=make_adjust_fn_minus(val_var), width=4).grid(row=row, column=4)
-        # ttk.Button(rules_frame, text="+", command=make_adjust_fn(val_var), width=4).grid(row=row, column=5)
-
-        '''
-        # 根据字段决定调整幅度
-        if field == "量":
-            step = 0.5
-            text_minus = "-0.5"
-            text_plus = "+0.5"
-        elif field == "涨幅":
-            step = 0.1
-            text_minus = "-0.1"
-            text_plus = "+0.1"
-        else:  # 默认价格
-            step = 0.01  # 1%
-            text_minus = "-1%"
-            text_plus = "+1%"
-
-        # 百分比/步进调整按钮
-        ttk.Button(rules_frame, text=text_minus, command=make_adjust_fn(val_var, -step), width=4).grid(row=row, column=4)
-        ttk.Button(rules_frame, text=text_plus,  command=make_adjust_fn(val_var, step),  width=4).grid(row=row, column=5)
-        '''
-        # # 百分比调整按钮
-        # ttk.Button(rules_frame, text="-1%", command=make_adjust_fn(val_var, -0.02), width=4).grid(row=row, column=4)
-        # ttk.Button(rules_frame, text="+1%", command=make_adjust_fn(val_var, 0.02), width=4).grid(row=row, column=5)
-
         # delta 输入
         delta_var = tk.DoubleVar(value=delta)
         # delta_var = tk.StringVar(value=delta)
         ttk.Spinbox(rules_frame, textvariable=delta_var, from_=-10.01, to=100,
                     increment=0.1, width=8,validate="key",validatecommand=(vcmd, "%P")).grid(row=row, column=6, padx=5)
-        # ttk.Entry(rules_frame, textvariable=delta_var, width=10,validate="key", validatecommand=(vcmd, "%P")).grid(row=row, column=3, padx=2)
 
         entries.append({
             "field_var": field_var,
@@ -4292,7 +4174,6 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
 
     def cancel_rule():
         global alerts_rules
-        # print(f'alerts_rules:{alerts_rules.get(code, [])} orig_rules:{orig_rules.get(code, [])}')
         alerts_rules = orig_rules
         editor.destroy()
     # 控制按钮区域

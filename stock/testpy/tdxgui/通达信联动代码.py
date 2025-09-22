@@ -216,6 +216,8 @@ class TdxStockSenderApp:
             if tdx_window_handle != 0:
                 # 尝试将生成的代码转换为整数
                 try:
+                    import ipdb;ipdb.set_trace()
+                    
                     message_code = int(generated_code)
                 except ValueError:
                     message_code = 0

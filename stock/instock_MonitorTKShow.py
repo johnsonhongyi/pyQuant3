@@ -29,29 +29,52 @@ DISPLAY_COLS = ct.get_Duration_format_Values(
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DARACSV_DIR = os.path.join(BASE_DIR, "datacsv")
 WINDOW_CONFIG_FILE = os.path.join(BASE_DIR, "window_config.json")
+SEARCH_HISTORY_FILE = os.path.join(DARACSV_DIR, "search_history.json")
 os.makedirs(DARACSV_DIR, exist_ok=True)
+START_INIT = 0
+st_key_sort = '3 0'
 
 
-st_key_sort = '1'
-# market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(
-#         st_key_sort)
+
 # ------------------ 后台数据进程 ------------------ #
-# def fetch_and_process(queue, blkname="boll", resample="d"):
-def fetch_and_process(queue, blkname="boll", flag=None):
-    global st_key_sort
+def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
+    global st_key_sort,START_INIT
+    g_values = cct.GlobalValues(shared_dict)  # 主进程唯一实例
+    resample = g_values.getkey("resample") or "d"
+    market = g_values.getkey("market", "all")        # all / sh / cyb / kcb / bj
+    blkname = g_values.getkey("blkname", "061.blk")  # 对应的 blk 文件
+    print(f"当前选择市场: {market}, blkname={blkname}")
+
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort)
     lastpTDX_DF, top_all = pd.DataFrame(), pd.DataFrame()
-    # st_key_sort = cct.GlobalValues().getkey("market_value") or "1"
-    resample = cct.GlobalValues().getkey("resample") or "d"
-    log.info(f"resample: {resample}")
-    print(f"resample: {resample} flag.value : {flag.value}")
+    print(f"init resample: {resample} flag.value : {flag.value}")
     while True:
+        print(f'resample : new : {g_values.getkey("resample")} last : {resample} ')
         if flag is not None and not flag.value:   # 停止刷新
                time.sleep(1)
-               # print(f'flag.value : {flag.value} 停止更新')
+               print(f'flag.value : {flag.value} 停止更新')
                continue
+        elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
+            print(f'resample : new : {g_values.getkey("resample")} last : {resample} ')
+            top_all = pd.DataFrame()
+            lastpTDX_DF = pd.DataFrame()
+        elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
+            print(f'market : new : {g_values.getkey("market")} last : {market} ')
+            top_all = pd.DataFrame()
+            lastpTDX_DF = pd.DataFrame()
+        elif (not cct.get_work_time()) and START_INIT > 0:
+                print(f'not worktime and work_duration')
+                time.sleep(5)
+                continue
+        else:
+            print(f'start worktime and work_duration get_work_time: {cct.get_work_time()} , START_INIT :{START_INIT} ')
         try:
-            top_now = tdd.getSinaAlldf(vol=ct.json_countVol, vtype=ct.json_countType)
+            # resample = cct.GlobalValues().getkey("resample") or "d"
+            resample = g_values.getkey("resample") or "d"
+            market = g_values.getkey("market", "all")        # all / sh / cyb / kcb / bj
+            blkname = g_values.getkey("blkname", "061.blk")  # 对应的 blk 文件
+            print(f"resample: {resample} flag.value : {flag.value}")
+            top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
             if top_now.empty:
                 log.debug("no data fetched")
                 time.sleep(ct.duration_sleep_time)
@@ -59,7 +82,7 @@ def fetch_and_process(queue, blkname="boll", flag=None):
 
             if top_all.empty:
                 if lastpTDX_DF.empty:
-                    top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl=ct.duration_date_day, resample=resample)
+                    top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl= ct.Resample_LABELS_Days[resample], resample=resample)
                 else:
                     top_all = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF)
             else:
@@ -85,7 +108,8 @@ def fetch_and_process(queue, blkname="boll", flag=None):
             queue.put(top_temp)
             gc.collect()
             time.sleep(ct.duration_sleep_time)
-            print(f'fetch_and_process timesleep:{ct.duration_sleep_time} resample:{resample}')
+            START_INIT = 1
+            print(f'START_INIT : {START_INIT} fetch_and_process sleep:{ct.duration_sleep_time} resample:{resample}')
             # log.debug(f'fetch_and_process timesleep:{ct.duration_sleep_time} resample:{resample}')
         except Exception as e:
             log.error(f"Error in background process: {e}", exc_info=True)
@@ -195,6 +219,14 @@ class StockMonitorApp(tk.Tk):
 
         # 刷新开关标志
         self.refresh_enabled = True
+        from multiprocessing import Manager
+        manager = Manager()
+        self.global_dict = manager.dict()  # 共享字典
+        self.global_dict["resample"] = "d"
+        self.global_values = cct.GlobalValues(self.global_dict)
+        resample = self.global_values.getkey("resample")
+        print(f'app init getkey resample:{self.global_values.getkey("resample")}')
+        self.global_values.setkey("resample", resample)
 
         # ----------------- 控件框 ----------------- #
         ctrl_frame = tk.Frame(self)
@@ -268,28 +300,92 @@ class StockMonitorApp(tk.Tk):
         self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=self.update_send_status)
 
     def _build_ui(self, ctrl_frame):
+
+        # Market 下拉菜单
+        tk.Label(ctrl_frame, text="Market:").pack(side="left", padx=5)
+
+        # 显示值和内部值的映射
+        # self.market_map = {
+        #     "全部": "all",
+        #     "上证": "sh",
+        #     "创业板": "cyb",
+        #     "科创板": "kcb",
+        #     "北证": "bj",
+        # }
+        # self.market_combo = ttk.Combobox(
+        #     ctrl_frame,
+        #     values=list(self.market_map.keys()),  # 显示中文
+        #     width=8,
+        #     state="readonly"
+        # )
+        # self.market_combo.current(0)  # 默认 "全部"
+        # self.market_combo.pack(side="left", padx=5)
+        # # 绑定选择事件，选中后保存到 GlobalValues
+        # def on_market_select(event=None):
+        #     market_cn = self.market_combo.get()
+        #     market_code = self.market_map.get(market_cn, "all")
+        #     self.global_dict.setkey("market", market_code)
+                # Market 下拉菜单
+
+        # 显示中文 → 内部 code + blkname
+        self.market_map = {
+            "全部": {"code": "all", "blkname": "061.blk"},
+            "上证": {"code": "sh",  "blkname": "062.blk"},
+            "创业板": {"code": "cyb", "blkname": "063.blk"},
+            "科创板": {"code": "kcb", "blkname": "064.blk"},
+            "北证": {"code": "bj",  "blkname": "065.blk"},
+        }
+
+        self.market_combo = ttk.Combobox(
+            ctrl_frame,
+            values=list(self.market_map.keys()),  # 显示中文
+            width=8,
+            state="readonly"
+        )
+        self.market_combo.current(0)  # 默认 "全部"
+        self.market_combo.pack(side="left", padx=5)
+
+        # 绑定选择事件，存入 GlobalValues
+        def on_market_select(event=None):
+            market_cn = self.market_combo.get()
+            market_info = self.market_map.get(market_cn, {"code": "all", "blkname": "061.blk"})
+            self.global_values.setkey("market", market_info["code"])
+            self.global_values.setkey("blkname", market_info["blkname"])
+            print(f"选择市场: {market_cn}, code={market_info['code']}, blkname={market_info['blkname']}")
+
+        self.market_combo.bind("<<ComboboxSelected>>", on_market_select)
+
         # 控件区
-        tk.Label(ctrl_frame, text="blkname:").pack(side="left")
-        self.blk_label = tk.Label(ctrl_frame, text=cct.GlobalValues().getkey("blkname") or "boll")
+        tk.Label(ctrl_frame, text="blk:").pack(side="left")
+        self.blk_label = tk.Label(ctrl_frame, text=self.global_values.getkey("blkname") or "061.blk")
         self.blk_label.pack(side="left", padx=2)
+
 
         # --- resample 下拉框 ---
         tk.Label(ctrl_frame, text="Resample:").pack(side="left")
-        self.resample_combo = ttk.Combobox(ctrl_frame, values=["d", "w", "m"], width=5)
+        self.resample_combo = ttk.Combobox(ctrl_frame, values=["d",'3d', "w", "m"], width=5)
         self.resample_combo.current(0)
         self.resample_combo.pack(side="left", padx=5)
-
+        self.resample_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_data())
         # --- 刷新按钮 ---
         tk.Button(ctrl_frame, text="刷新", command=self.refresh_data).pack(side="left", padx=5)
 
         # --- 搜索框 ---
-        tk.Label(ctrl_frame, text="搜索:").pack(side="left")
+        # tk.Label(ctrl_frame, text="搜索:").pack(side="left")
+        # self.search_var = tk.StringVar()
+        # self.search_entry = tk.Entry(ctrl_frame, textvariable=self.search_var)
+        # self.search_entry.pack(side="left", padx=5)
+        # self.search_entry.bind("<Return>", lambda e: self.set_search())
+
+        # 在 __init__ 中
+        self.search_history = self.load_search_history()
         self.search_var = tk.StringVar()
-        self.search_entry = tk.Entry(ctrl_frame, textvariable=self.search_var)
-        self.search_entry.pack(side="left", padx=5)
-        # self.search_entry.bind("<Return>", lambda e: self.apply_search())
-        self.search_entry.bind("<Return>", lambda e: self.set_search())
-        tk.Button(ctrl_frame, text="Go", command=self.set_search).pack(side="left", padx=2)
+        self.search_combo = ttk.Combobox(ctrl_frame, textvariable=self.search_var, values=self.search_history, width=30)
+        self.search_combo.pack(side="left", padx=5)
+        self.search_combo.bind("<Return>", lambda e: self.apply_search())
+        self.search_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_search())  # 选中历史也刷新
+        tk.Button(ctrl_frame, text="清空", command=self.clean_search).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="删除历史", command=self.delete_search_history).pack(side="left", padx=2)
 
         # --- 数据存档按钮 ---
         tk.Button(ctrl_frame, text="保存数据", command=self.save_data_to_csv).pack(side="left", padx=2)
@@ -353,14 +449,17 @@ class StockMonitorApp(tk.Tk):
         手动刷新：更新 resample 全局配置，触发后台进程下一轮 fetch_and_process
         """
         resample = self.resample_combo.get().strip()
-        cct.GlobalValues().setkey("resample", resample)
+        print(f'set resample : {resample}')
+        # cct.GlobalValues().setkey("resample", resample)
+        self.global_values.setkey("resample", resample)
         self.status_var.set(f"手动刷新: resample={resample}")
 
     def _start_process(self):
         self.refresh_flag = mp.Value('b', True)
         # self.proc = mp.Process(target=fetch_and_process, args=(self.queue,))
-        self.proc = mp.Process(target=fetch_and_process, args=(self.queue, "boll", self.refresh_flag))
-        self.proc.daemon = True
+        self.proc = mp.Process(target=fetch_and_process, args=(self.global_dict,self.queue, "boll", self.refresh_flag))
+        # self.proc.daemon = True
+        self.proc.daemon = False 
         self.proc.start()
 
     # def update_tree(self):
@@ -476,6 +575,8 @@ class StockMonitorApp(tk.Tk):
 
     def update_linkage_status(self):
         # 此处处理 checkbuttons 状态
+        if not self.tdx_var.get() or self.ths_var.get() or self.dfcf_var.get():
+            self.sender.reload()
         print(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}, Uniq:{self.uniq_var.get()}, Sub:{self.sub_var.get()}")
 
     # def refresh_tree(self, df):
@@ -558,15 +659,73 @@ class StockMonitorApp(tk.Tk):
         self.refresh_tree(df_sorted)
         self.tree.heading(col, command=lambda: self.sort_by_column(col, not reverse))
 
-    # ----------------- 搜索 ----------------- #
-    def set_search(self):
-        query = self.search_entry.get().strip()
-        if query and not self.current_df.empty:
+    def save_search_history(self):
+        try:
+            with open(SEARCH_HISTORY_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.search_history, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            log.error(f"保存搜索历史失败: {e}")
+
+    def load_search_history(self):
+        if os.path.exists(SEARCH_HISTORY_FILE):
             try:
-                df_filtered = self.current_df.query(query)
-                self.refresh_tree(df_filtered)
+                with open(SEARCH_HISTORY_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
             except Exception as e:
-                log.error(f"Query error: {e}")
+                log.error(f"加载搜索历史失败: {e}")
+        return []
+
+    def apply_search(self):
+        query = self.search_var.get().strip()
+        if not query:
+            self.status_var.set("搜索框为空")
+            return
+
+        if query not in self.search_history:
+            self.search_history.insert(0, query)
+            if len(self.search_history) > 20:  # 最多保存20条
+                self.search_history = self.search_history[:20]
+            self.search_combo['values'] = self.search_history
+            self.save_search_history()  # 保存到文件
+
+        if self.current_df.empty:
+            self.status_var.set("当前数据为空")
+            return
+
+        try:
+            df_filtered = self.current_df.query(query)
+            self.refresh_tree(df_filtered)
+            self.status_var.set(f"搜索: {query} | 结果 {len(df_filtered)} 行")
+        except Exception as e:
+            log.error(f"Query error: {e}")
+            self.status_var.set(f"查询错误: {e}")
+
+    def clean_search(self, entry=None):
+        """删除指定历史，默认删除当前搜索框内容"""
+        self.search_var.set('')
+        self.refresh_tree(self.current_df)
+        resample = self.resample_combo.get()
+        self.status_var.set(f"Row 结果 {len(self.current_df)} 行 | resample: {resample} ")
+    
+    def delete_search_history(self, entry=None):
+        """删除指定历史，默认删除当前搜索框内容"""
+        target = entry or self.search_var.get().strip()
+        if target in self.search_history:
+            self.search_history.remove(target)
+            self.search_combo['values'] = self.search_history
+            self.save_search_history()
+            self.status_var.set(f"已删除历史: {target}")
+
+
+    # ----------------- 搜索 ----------------- #
+    # def set_search(self):
+    #     query = self.search_entry.get().strip()
+    #     if query and not self.current_df.empty:
+    #         try:
+    #             df_filtered = self.current_df.query(query)
+    #             self.refresh_tree(df_filtered)
+    #         except Exception as e:
+    #             log.error(f"Query error: {e}")
 
     # # ----------------- Resample ----------------- #
     # def set_resample(self, event=None):
@@ -579,7 +738,8 @@ class StockMonitorApp(tk.Tk):
         cnt = len(self.current_df)
         blk = self.blk_label.cget("text")
         resample = self.resample_combo.get()
-        search = self.search_entry.get()
+        # search = self.search_entry.get()
+        search = self.search_var.get()
         self.status_var.set(f"Rows: {cnt} | blkname: {blk} | resample: {resample} | search: {search}")
 
     # ----------------- 数据刷新 ----------------- #
@@ -636,6 +796,7 @@ class StockMonitorApp(tk.Tk):
 
     def on_close(self):
         self.save_window_position()
+        self.save_search_history()
         self.destroy()
 
 # ------------------ 主程序入口 ------------------ #
@@ -646,5 +807,9 @@ if __name__ == "__main__":
     # p.daemon = True
     # p.start()
     # app = StockMonitorApp(queue)
+
+    # from multiprocessing import Manager
+    # manager = Manager()
+    # global_dict = manager.dict()  # 共享字典
     app = StockMonitorApp()
     app.mainloop()
