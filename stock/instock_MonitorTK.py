@@ -16,6 +16,8 @@ from JohnsonUtil import LoggerFactory, commonTips as cct
 from JSONData import stockFilter as stf
 from JSONData import tdx_data_Day as tdd
 import win32pipe, win32file
+from datetime import datetime, timedelta
+import shutil
 log = LoggerFactory.log
 # log.setLevel(log_level)
 # log.setLevel(LoggerFactory.DEBUG)
@@ -37,6 +39,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DARACSV_DIR = os.path.join(BASE_DIR, "datacsv")
 WINDOW_CONFIG_FILE = os.path.join(BASE_DIR, "window_config.json")
 SEARCH_HISTORY_FILE = os.path.join(DARACSV_DIR, "search_history.json")
+ARCHIVE_DIR = os.path.join(BASE_DIR, "archives")
+os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(DARACSV_DIR, exist_ok=True)
 START_INIT = 0
 # st_key_sort = '3 0'
@@ -121,7 +125,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
             # print(f'DISPLAY_COLS:{DISPLAY_COLS}')
             # print(f'col: {top_temp.columns.values}')
             # top_temp = top_temp.loc[:, DISPLAY_COLS]
-            # print(f'top_temp : {top_temp.loc[:,sort_cols][sort_cols[0]]}')
+            print(f'top_temp :  {top_temp.loc[:,sort_cols][sort_cols[0]][:5]} shape : {top_temp.shape}')
             queue.put(top_temp)
             gc.collect()
             time.sleep(ct.duration_sleep_time)
@@ -169,7 +173,11 @@ def calc_indicators(top_all, resample):
 PIPE_NAME = r"\\.\pipe\my_named_pipe"
 
 def send_code_via_pipe(code):
-    for _ in range(5):
+
+    if isinstance(code, dict):
+        code = json.dumps(code, ensure_ascii=False)
+
+    for _ in range(1):
         try:
             handle = win32file.CreateFile(
                 PIPE_NAME,
@@ -187,6 +195,62 @@ def send_code_via_pipe(code):
             time.sleep(0.5)
     return False
 
+def list_archives():
+    """列出所有存档文件"""
+    files = sorted(
+        [f for f in os.listdir(ARCHIVE_DIR) if f.startswith("search_history") and f.endswith(".json")],
+        reverse=True
+    )
+    return files
+
+
+def archive_search_history_list(MONITOR_LIST_FILE=SEARCH_HISTORY_FILE,ARCHIVE_DIR=ARCHIVE_DIR):
+    """归档监控文件，避免空或重复存档"""
+
+    if not os.path.exists(MONITOR_LIST_FILE):
+        print("⚠ search_history.json 不存在，跳过归档")
+        return
+
+    try:
+        with open(MONITOR_LIST_FILE, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+    except Exception as e:
+        print(f"⚠ 无法读取监控文件: {e}")
+        return
+
+    if not content or content in ("[]", "{}"):
+        print("⚠ search_history.json 内容为空，跳过归档")
+        return
+
+    # 确保存档目录存在
+    os.makedirs(ARCHIVE_DIR, exist_ok=True)
+
+    # 检查是否和最近一个存档内容相同
+    files = sorted(list_archives(), reverse=True)
+    if files:
+        last_file = os.path.join(ARCHIVE_DIR, files[0])
+        try:
+            with open(last_file, "r", encoding="utf-8") as f:
+                last_content = f.read().strip()
+            if not content or content in ("[]", "{}") or content == last_content:
+                print("⚠ 内容与上一次存档相同，跳过归档")
+                return
+        except Exception as e:
+            print(f"⚠ 无法读取最近存档: {e}")
+
+    # 生成带日期的存档文件名
+    today = datetime.now().strftime("%Y-%m-%d")
+    filename = f"search_history_{today}.json"
+    dest = os.path.join(ARCHIVE_DIR, filename)
+
+    # 如果当天已有存档，加时间戳避免覆盖
+    if os.path.exists(dest):
+        filename = f"search_history_{today}.json"
+        dest = os.path.join(ARCHIVE_DIR, filename)
+
+    # 复制文件
+    shutil.copy2(MONITOR_LIST_FILE, dest)
+    print(f"✅ 已归档监控文件: {dest}")
 # ------------------ Tk 前端 ------------------ #
 # class StockMonitorApp(tk.Tk):
 #     def __init__(self, queue):
@@ -272,6 +336,7 @@ class StockMonitorApp(tk.Tk):
         print(f'app init getkey resample:{self.global_values.getkey("resample")}')
         self.global_values.setkey("resample", resample)
         self.blkname = self.global_values.getkey("blkname") or "061.blk"
+
         # ----------------- 控件框 ----------------- #
         ctrl_frame = tk.Frame(self)
         ctrl_frame.pack(fill="x", padx=5, pady=2)
@@ -333,8 +398,8 @@ class StockMonitorApp(tk.Tk):
         # 添加左右面板
         # pw.add(left_frame, minsize=100)   # 左侧最小宽度
         # pw.add(right_frame, minsize=100)  # 右侧最小宽度
-        pw.add(left_frame, minsize=100, width=700)
-        pw.add(right_frame, minsize=100, width=300)
+        pw.add(left_frame, minsize=100, width=780)
+        pw.add(right_frame, minsize=100, width=220)
 
 
         # 设置初始 6:4 比例
@@ -415,11 +480,7 @@ class StockMonitorApp(tk.Tk):
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=self.update_send_status)
 
-        # 在初始化时（StockMonitorApp.__init__）创建并注册：
-        self.alert_manager = AlertManager(storage_dir=DARACSV_DIR, logger=log)
-        set_global_manager(self.alert_manager)
-        # 在 UI 控件区加个按钮：
-        tk.Button(ctrl_frame, text="报警中心", command=lambda: open_alert_center(self)).pack(side="left", padx=2)
+
 
 
         # # ========== 右键菜单 ==========
@@ -431,8 +492,7 @@ class StockMonitorApp(tk.Tk):
         # 绑定右键点击事件
         self.tree.bind("<Button-3>", self.on_tree_right_click)
 
-        if len(self.search_history) > 0:
-            self.search_var.set(self.search_history[0])
+
         #     self.apply_search()
 
     def open_alert_editorAuto(self, stock_info, new_rule=False):
@@ -525,29 +585,6 @@ class StockMonitorApp(tk.Tk):
         # Market 下拉菜单
         tk.Label(ctrl_frame, text="Market:").pack(side="left", padx=2)
 
-        # 显示值和内部值的映射
-        # self.market_map = {
-        #     "全部": "all",
-        #     "上证": "sh",
-        #     "创业板": "cyb",
-        #     "科创板": "kcb",
-        #     "北证": "bj",
-        # }
-        # self.market_combo = ttk.Combobox(
-        #     ctrl_frame,
-        #     values=list(self.market_map.keys()),  # 显示中文
-        #     width=8,
-        #     state="readonly"
-        # )
-        # self.market_combo.current(0)  # 默认 "全部"
-        # self.market_combo.pack(side="left", padx=5)
-        # # 绑定选择事件，选中后保存到 GlobalValues
-        # def on_market_select(event=None):
-        #     market_cn = self.market_combo.get()
-        #     market_code = self.market_map.get(market_cn, "all")
-        #     self.global_dict.setkey("market", market_code)
-                # Market 下拉菜单
-
         # 显示中文 → 内部 code + blkname
         self.market_map = {
             "全部": {"code": "all", "blkname": "061.blk"},
@@ -576,11 +613,6 @@ class StockMonitorApp(tk.Tk):
 
         self.market_combo.bind("<<ComboboxSelected>>", on_market_select)
 
-        # # 控件区
-        # tk.Label(ctrl_frame, text="blk:").pack(side="left")
-        # self.blk_label = tk.Label(ctrl_frame, text=self.global_values.getkey("blkname") or "061.blk")
-        # self.blk_label.pack(side="left", padx=0)
-        # --- sort ---
         tk.Label(ctrl_frame, text="stkey:").pack(side="left", padx=2)
         self.st_key_sort_value = tk.StringVar()
         self.st_key_sort_entry = tk.Entry(ctrl_frame, textvariable=self.st_key_sort_value,width=5)
@@ -598,98 +630,182 @@ class StockMonitorApp(tk.Tk):
         # --- 刷新按钮 ---
         # tk.Button(ctrl_frame, text="刷新", command=self.refresh_data).pack(side="left", padx=5)
 
-        # --- 搜索框 ---
-        # tk.Label(ctrl_frame, text="搜索:").pack(side="left")
-        # self.search_var = tk.StringVar()
-        # self.search_entry = tk.Entry(ctrl_frame, textvariable=self.search_var)
-        # self.search_entry.pack(side="left", padx=5)
-        # self.search_entry.bind("<Return>", lambda e: self.set_search())
-
         # 在 __init__ 中
-        self.search_history = self.load_search_history()
-        self.search_var = tk.StringVar()
-        self.search_combo = ttk.Combobox(ctrl_frame, textvariable=self.search_var, values=self.search_history, width=20)
-        self.search_combo.pack(side="left", padx=5)
-        self.search_combo.bind("<Return>", lambda e: self.apply_search())
-        self.search_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_search())  # 选中历史也刷新
-        tk.Button(ctrl_frame, text="清空", command=self.clean_search).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="删除历史", command=self.delete_search_history).pack(side="left", padx=2)
+
+        # self.search_var = tk.StringVar()
+        # self.search_combo = ttk.Combobox(ctrl_frame, textvariable=self.search_var, values=self.search_history, width=30)
+        # self.search_combo.pack(side="left", padx=5)
+        # self.search_combo.bind("<Return>", lambda e: self.apply_search())
+        # self.search_combo.bind("<<ComboboxSelected>>", lambda e: self.apply_search())  # 选中历史也刷新
+        # tk.Button(ctrl_frame, text="清空", command=self.clean_search).pack(side="left", padx=2)
+        # tk.Button(ctrl_frame, text="删除历史", command=self.delete_search_history).pack(side="left", padx=2)
 
 
-        # 查询输入框
-        # self.query_var = tk.StringVar()
-        # tk.Entry(ctrl_frame, textvariable=self.query_var, width=30).pack(side="left", padx=2)
-        # tk.Button(ctrl_frame, text="查询", command=self.on_query).pack(side="left", padx=2)
+        # 在初始化时（StockMonitorApp.__init__）创建并注册：
+        self.alert_manager = AlertManager(storage_dir=DARACSV_DIR, logger=log)
+        set_global_manager(self.alert_manager)
 
-        # self.query_history = []  # [{'name':'中信','trade':'>=10','desc':'高成交股'}, ...]
-        # self.query_combo_var = tk.StringVar()
-        # self.query_combo = ttk.Combobox(ctrl_frame, textvariable=self.query_combo_var, width=15)
-        # self.query_combo.pack(side="left", padx=2)
-        # # self.update_query_combo()
-        # self.query_combo.bind("<Return>", lambda e: self.on_query())
-        # self.query_combo.bind("<<ComboboxSelected>>",  lambda e: self.on_query_select())
+        # --- 控件区 ---
+        # ctrl_frame = tk.Frame(self)
+        # ctrl_frame.pack(side="top", fill="x", pady=5)
 
-        # 当前查询说明标签
-        # self.query_desc_label = tk.Label(ctrl_frame, text="", fg="blue")
-        # self.query_desc_label.pack(side="left", padx=5)
+        # --- 底部搜索框 2 ---
+        bottom_search_frame = tk.Frame(self)
+        bottom_search_frame.pack(side="bottom", fill="x", pady=2)
+
+        # # --- 顶部工具栏 ---
+        # ctrl_frame = tk.Frame(self)
+        # ctrl_frame.pack(side="top", fill="x", pady=5)
+
+        # # 功能按钮
+        # tk.Button(ctrl_frame, text="停止刷新", command=self.stop_refresh).pack(side="left", padx=5)
+        # tk.Button(ctrl_frame, text="启动刷新", command=self.start_refresh).pack(side="left", padx=5)
+
+        # top_search_frame = tk.Frame(ctrl_frame)
+        # top_search_frame.pack(side="left", fill="x", expand=True, padx=5)
+        # 搜索框 1（在顶部）
+        self.search_history1, self.search_history2 = self.load_search_history()
+        self.search_var1 = tk.StringVar()
+        self.search_combo1 = ttk.Combobox(bottom_search_frame, textvariable=self.search_var1, values=self.search_history1, width=30)
+        self.search_combo1.pack(side="left", padx=5, fill="x", expand=True)
+        self.search_combo1.bind("<Return>", lambda e: self.apply_search())
+        self.search_combo1.bind("<<ComboboxSelected>>", lambda e: self.apply_search())
+
+        # 其他功能按钮
+        # tk.Button(ctrl_frame, text="清空", command=self.clean_search).pack(side="left", padx=2)
+        # tk.Button(ctrl_frame, text="删除历史", command=self.delete_search_history).pack(side="left", padx=2)
+
+        tk.Button(bottom_search_frame, text="清空", command=lambda: self.clean_search(1)).pack(side="left", padx=2)
+        tk.Button(bottom_search_frame, text="删除", command=lambda: self.delete_search_history(1)).pack(side="left", padx=2)
 
 
-        # --- 数据存档按钮 ---
-        tk.Button(ctrl_frame, text="保存数据", command=self.save_data_to_csv).pack(side="left", padx=2)
-        tk.Button(ctrl_frame, text="读取存档", command=self.load_data_from_csv).pack(side="left", padx=2)
+        # 功能选择下拉框（固定宽度）
+        options = ["保存数据", "读取存档", "报警中心"]
+        self.action_var = tk.StringVar()
+        self.action_combo = ttk.Combobox(
+            bottom_search_frame, textvariable=self.action_var,
+            values=options, state="readonly", width=10
+        )
+        self.action_combo.set("功能选择")
+        self.action_combo.pack(side="left", padx=10, pady=2, ipady=1)
 
-        # --- 刷新控制按钮 ---
-        tk.Button(ctrl_frame, text="停止刷新", command=self.stop_refresh).pack(side="left", padx=5)
-        tk.Button(ctrl_frame, text="启动刷新", command=self.start_refresh).pack(side="left", padx=2)
+        def run_action(action):
+            if action == "停止刷新":
+                self.stop_refresh()
+            elif action == "启动刷新":
+                self.start_refresh()
+            elif action == "保存数据":
+                self.save_data_to_csv()
+            elif action == "读取存档":
+                self.load_data_from_csv()
+            elif action == "报警中心":
+                open_alert_center(self)
 
-    # def _build_ui(self,ctrl_frame):
-    #     # 控件区
+        def on_select(event=None):
+            run_action(self.action_combo.get())
+            self.action_combo.set("功能选择")
 
-    #     # ctrl_frame = tk.Frame(self)
-    #     # ctrl_frame.pack(side="top", fill="x")
-    #     tk.Label(ctrl_frame, text="blkname:").pack(side="left")
-    #     self.blk_label = tk.Label(ctrl_frame, text=cct.GlobalValues().getkey("blkname") or "boll")
-    #     self.blk_label.pack(side="left", padx=2)
+        self.action_combo.bind("<<ComboboxSelected>>", on_select)
 
-    #     # --- resample 下拉框 ---
-    #     tk.Label(ctrl_frame, text="Resample:").pack(side="left")
-    #     self.resample_combo = ttk.Combobox(ctrl_frame, values=["d", "w", "m"], width=5)
-    #     self.resample_combo.current(0)
-    #     self.resample_combo.pack(side="left", padx=5)
+        self.search_var2 = tk.StringVar()
+        self.search_combo2 = ttk.Combobox(ctrl_frame, textvariable=self.search_var2, values=self.search_history2, width=30)
+        self.search_combo2.pack(side="left", padx=5, fill="x", expand=True)
+        self.search_combo2.bind("<Return>", lambda e: self.apply_search())
+        self.search_combo2.bind("<<ComboboxSelected>>", lambda e: self.apply_search())
 
-    #     # --- 刷新按钮（新增） ---
-    #     tk.Button(ctrl_frame, text="刷新", command=self.refresh_data).pack(side="left", padx=5)
+        # 其他功能按钮
+        # tk.Button(bottom_search_frame, text="清空", command=self.clean_search).pack(side="left", padx=2)
+        # tk.Button(bottom_search_frame, text="删除历史", command=self.delete_search_history).pack(side="left", padx=2)
 
-    #     # --- 搜索框 ---
-    #     tk.Label(ctrl_frame, text="搜索:").pack(side="left")
-    #     self.search_var = tk.StringVar()
-    #     self.search_entry = tk.Entry(ctrl_frame, textvariable=self.search_var)
-    #     self.search_entry.pack(side="left", padx=5)
-    #     # self.search_entry.bind("<Return>", lambda e: self.apply_search())
-    #     self.search_entry.bind("<Return>", lambda e: self.set_search())
-    #     tk.Button(ctrl_frame, text="Go", command=self.set_search).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="清空", command=lambda: self.clean_search(2)).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="删除", command=lambda: self.delete_search_history(2)).pack(side="left", padx=2)
 
-    #     # tk.Label(ctrl_frame, text="Search:").pack(side="left", padx=5)
-    #     # self.search_entry = tk.Entry(ctrl_frame, width=30)
-    #     # self.search_entry.pack(side="left", padx=2)
-    #     # tk.Button(ctrl_frame, text="Go", command=self.set_search).pack(side="left", padx=2)
+        # # 搜索区（可拉伸）
+        # search_frame = tk.Frame(ctrl_frame)
+        # search_frame.pack(side="left", fill="x", expand=True, padx=5)
 
-    #     # # TreeView  重复创建了
-    #     # self.tree = ttk.Treeview(self, show="headings")
-    #     # self.tree.pack(side="top", fill="both", expand=True)
+        # # self.search_history = self.load_search_history()
+        # self.search_history1, self.search_history2 = self.load_search_history()
 
-    #     # 状态栏
-    #     self.status_var = tk.StringVar(value="初始化完成")
-    #     status_bar = tk.Label(self, textvariable=self.status_var, anchor="w")
-    #     status_bar.pack(side="bottom", fill="x")
+        # # 第一个搜索框 + 独立历史
+        # self.search_var1 = tk.StringVar()
+        # self.search_combo1 = ttk.Combobox(search_frame, textvariable=self.search_var1, values=self.search_history1)
+        # self.search_combo1.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        # self.search_combo1.bind("<Return>", lambda e: self.apply_search())
+        # self.search_combo1.bind("<<ComboboxSelected>>", lambda e: self.apply_search())
 
-    #             # 数据存档按钮
-    #     tk.Button(ctrl_frame, text="保存数据", command=self.save_data_to_csv).pack(side="left", padx=2)
-    #     tk.Button(ctrl_frame, text="读取存档", command=self.load_data_from_csv).pack(side="left", padx=2)
+        # tk.Button(ctrl_frame, text="清空", command=self.clean_search).pack(side="left", padx=2)
+        # tk.Button(ctrl_frame, text="删除", command=self.delete_search_history).pack(side="left", padx=2)
 
-    #     # 刷新控制按钮
-    #     tk.Button(ctrl_frame, text="停止刷新", command=self.stop_refresh).pack(side="left", padx=5)
-    #     tk.Button(ctrl_frame, text="启动刷新", command=self.start_refresh).pack(side="left", padx=2)
+        # # 第二个搜索框 + 独立历史
+        # self.search_var2 = tk.StringVar()
+        # self.search_combo2 = ttk.Combobox(search_frame, textvariable=self.search_var2, values=self.search_history2)
+        # self.search_combo2.pack(side="left", fill="x", expand=True, padx=(5, 0))
+        # self.search_combo2.bind("<Return>", lambda e: self.apply_search())
+        # self.search_combo2.bind("<<ComboboxSelected>>", lambda e: self.apply_search())
+
+
+
+        # self.search_combo1['values'] = self.search_history1
+        # self.search_combo2['values'] = self.search_history2
+
+        # # --------------------
+        # # 其他按钮区（固定宽度，不拉伸）
+        # tk.Button(ctrl_frame, text="清空", command=self.clean_search).pack(side="left", padx=2)
+        # tk.Button(ctrl_frame, text="删除", command=self.delete_search_history).pack(side="left", padx=2)
+        # tk.Button(ctrl_frame, text="停止刷新", command=self.stop_refresh).pack(side="left", padx=5)
+        # tk.Button(ctrl_frame, text="启动刷新", command=self.start_refresh).pack(side="left", padx=5)
+
+        if len(self.search_history1) > 0:
+            self.search_var1.set(self.search_history1[0])
+        if len(self.search_history2) > 0:
+            self.search_var2.set(self.search_history2[0])
+        # self.search_btn1.config(
+        #     command=lambda: self.apply_search(self.search_var1, self.search_history1, self.search_combo1, "search1")
+        # )
+        # self.search_btn2.config(
+        #     command=lambda: self.apply_search(self.search_var2, self.search_history2, self.search_combo2, "search2")
+        # )
+
+        # ctrl_frame = tk.Frame(self)
+        # ctrl_frame.pack(side="top", fill="x", pady=5)
+
+        # # 功能选择
+        # combo.pack(side="left", padx=10, pady=2, ipady=1)
+
+        # # 第二搜索框
+        # self.search_combo2.pack(side="left", padx=5)
+
+        # # 原搜索框
+        # self.search_combo.pack(side="left", padx=5)
+
+
+        #2
+        # options = ["保存数据", "读取存档", "停止刷新", "启动刷新", "报警中心"]
+
+        # self.action_var = tk.StringVar()
+        # combo = ttk.Combobox(ctrl_frame, textvariable=self.action_var, values=options, state="readonly")
+        # combo.set("选择操作")  # 默认提示
+        # combo.pack(side="left", padx=5)
+
+        # def on_select(event=None):
+        #     run_action(combo.get())
+
+        # combo.bind("<<ComboboxSelected>>", on_select)
+
+        # # --- 数据存档按钮 ---
+        # tk.Button(ctrl_frame, text="保存数据", command=self.save_data_to_csv).pack(side="left", padx=2)
+        # tk.Button(ctrl_frame, text="读取存档", command=self.load_data_from_csv).pack(side="left", padx=2)
+
+        # # --- 刷新控制按钮 ---
+        # tk.Button(ctrl_frame, text="停止刷新", command=self.stop_refresh).pack(side="left", padx=5)
+        # tk.Button(ctrl_frame, text="启动刷新", command=self.start_refresh).pack(side="left", padx=2)
+
+        #         # 在初始化时（StockMonitorApp.__init__）创建并注册：
+        # self.alert_manager = AlertManager(storage_dir=DARACSV_DIR, logger=log)
+        # set_global_manager(self.alert_manager)
+        # # 在 UI 控件区加个按钮：
+        # tk.Button(ctrl_frame, text="报警中心", command=lambda: open_alert_center(self)).pack(side="left", padx=2)
 
 
     def replace_st_key_sort_col(self, old_col, new_col):
@@ -867,7 +983,7 @@ class StockMonitorApp(tk.Tk):
                         print(f'update_tree sortby_col : {self.sortby_col} sortby_col_ascend : {self.sortby_col_ascend}')
                         df = df.sort_values(by=self.sortby_col, ascending=self.sortby_col_ascend)
                     self.df_all = df.copy()
-                    if self.search_var.get():
+                    if self.search_var1.get() or self.search_var2.get():
                         self.apply_search()
                     else:
                         self.refresh_tree(df)
@@ -875,6 +991,44 @@ class StockMonitorApp(tk.Tk):
             log.error(f"Error updating tree: {e}", exc_info=True)
         finally:
             self.after(1000, self.update_tree)
+
+    def push_stock_info(self,stock_code, row):
+        """
+        从 self.df_all 的一行数据提取 stock_info 并推送
+        """
+        try:
+            stock_info = {
+                "code": str(stock_code),
+                "name": str(row["name"]),
+                "high": str(row["high"]),
+                "lastp1d": str(row["lastp1d"]),
+                "percent": float(row.get("percent", 0)),
+                "price": float(row.get("close", 0)),
+                "volume": int(row.get("volume", 0))
+            }
+            # code, _ , percent,price, vol
+            # 转为 JSON 字符串
+            payload = json.dumps(stock_info, ensure_ascii=False)
+
+            # ---- 根据传输方式选择 ----
+            # 如果用 WM_COPYDATA，需要 encode 成 bytes 再传
+            # if hasattr(self, "send_wm_copydata"):
+            #     self.send_wm_copydata(payload.encode("utf-8"))
+
+            # 如果用 Pipe / Queue，可以直接传 str
+            # elif hasattr(self, "pipe"):
+            #     self.pipe.send(payload)
+
+
+            # 推送给异动联动（用管道/消息）
+            send_code_via_pipe(payload)   # 假设你用 multiprocessing.Pipe
+            # 或者 self.queue.put(stock_info)  # 如果是队列
+            # 或者 send_code_to_other_window(stock_info) # 如果是 WM_COPYDATA
+            log.info(f"推送: {stock_info}")
+            return True
+        except Exception as e:
+            log.error(f"推送 stock_info 出错: {e} {row}")
+            return False
 
     def on_tree_right_click(self, event):
         """右键点击 TreeView 行"""
@@ -884,10 +1038,11 @@ class StockMonitorApp(tk.Tk):
         #     self.tree.selection_set(item_id)
             # self.tree_menu.post(event.x_root, event.y_root)
         # selected_item = self.tree.selection()
+
         if item_id:
             stock_info = self.tree.item(item_id, 'values')
             stock_code = stock_info[0]
-            if send_code_via_pipe(stock_code):
+            if self.push_stock_info(stock_code,self.df_all.loc[stock_code]):
                 # 如果发送成功，更新状态标签
                 self.status_var2.set(f"发送成功: {stock_code}")
             else:
@@ -1937,24 +2092,140 @@ class StockMonitorApp(tk.Tk):
         self.refresh_tree(df_sorted)
         self.tree.heading(col, command=lambda: self.sort_by_column(col, not reverse))
 
+    # def save_search_history(self):
+    #     try:
+    #         with open(SEARCH_HISTORY_FILE, "w", encoding="utf-8") as f:
+    #             json.dump(self.search_history, f, ensure_ascii=False, indent=2)
+    #     except Exception as e:
+    #         log.error(f"保存搜索历史失败: {e}")
+
+    # def load_search_history(self):
+    #     if os.path.exists(SEARCH_HISTORY_FILE):
+    #         try:
+    #             with open(SEARCH_HISTORY_FILE, "r", encoding="utf-8") as f:
+    #                 return json.load(f)
+    #         except Exception as e:
+    #             log.error(f"加载搜索历史失败: {e}")
+    #     return []
+    # SEARCH_HISTORY_FILE = "search_history.json"
+
     def save_search_history(self):
+        """保存两个搜索框的历史到一个文件，自动去重"""
         try:
+            # 用 dict.fromkeys() 保留顺序去重
+            self.search_history1 = list(dict.fromkeys(self.search_history1))
+            self.search_history2 = list(dict.fromkeys(self.search_history2))
+
+            data = {
+                "history1": self.search_history1,
+                "history2": self.search_history2
+            }
             with open(SEARCH_HISTORY_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.search_history, f, ensure_ascii=False, indent=2)
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             log.error(f"保存搜索历史失败: {e}")
 
     def load_search_history(self):
+        """从文件加载两个搜索框的历史"""
         if os.path.exists(SEARCH_HISTORY_FILE):
             try:
                 with open(SEARCH_HISTORY_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    return data.get("history1", []), data.get("history2", [])
             except Exception as e:
                 log.error(f"加载搜索历史失败: {e}")
-        return []
+        return [], []
+
+    def apply_search_single(self, query, history_list, combo):
+        """执行单个搜索框的搜索逻辑"""
+        query = query.strip()
+        if not query:
+            self.status_var.set("搜索框为空")
+            return
+
+        # --- 插入历史：先去掉旧的，再插到最前面 ---
+        if query in history_list:
+            history_list.remove(query)
+        history_list.insert(0, query)
+
+        # 保留最多 20 条
+        history_list[:] = history_list[:20]
+
+        # 更新到 combobox
+        combo['values'] = history_list
+        self.save_search_history()  # 存档时也会去重
+
+        # --- 数据过滤 ---
+        if self.df_all.empty:
+            self.status_var.set("当前数据为空")
+            return
+
+        try:
+            df_filtered = self.df_all.query(query)
+            self.refresh_tree(df_filtered)
+            self.status_var.set(f"搜索: {query} | 结果 {len(df_filtered)} 行")
+        except Exception as e:
+            log.error(f"Query error: {e}")
+            self.status_var.set(f"查询错误: {e}")
 
 
+
+    # --- 搜索逻辑 ---
+    # 搜索逻辑：支持双搜索框 & 独立历史
     def apply_search(self):
+        val1 = self.search_var1.get().strip()
+        val2 = self.search_var2.get().strip()
+
+        if not val1 and not val2:
+            self.status_var.set("搜索框为空")
+            return
+
+        # 构建查询语句
+        if val1 and val2:
+            query = f"({val1}) and ({val2})"
+        elif val1:
+            query = val1
+        else:
+            query = val2
+
+        # 更新第一个搜索历史
+        if val1:
+            if val1 not in self.search_history1:
+                self.search_history1.insert(0, val1)
+                if len(self.search_history1) > 20:
+                    self.search_history1 = self.search_history1[:20]
+            else:
+                self.search_history1.remove(val1)
+                self.search_history1.insert(0, val1)
+            self.search_combo1['values'] = self.search_history1
+            self.save_search_history()
+
+        # 更新第二个搜索历史
+        if val2:
+            if val2 not in self.search_history2:
+                self.search_history2.insert(0, val2)
+                if len(self.search_history2) > 20:
+                    self.search_history2 = self.search_history2[:20]
+            else:
+                self.search_history2.remove(val2)
+                self.search_history2.insert(0, val2)
+            self.search_combo2['values'] = self.search_history2
+            self.save_search_history()
+
+        # 数据过滤与刷新
+        if self.df_all.empty:
+            self.status_var.set("当前数据为空")
+            return
+
+        try:
+            df_filtered = self.df_all.query(query)
+            self.refresh_tree(df_filtered)
+            self.status_var.set(f"搜索: {query} | 结果 {len(df_filtered)} 行")
+        except Exception as e:
+            log.error(f"Query error: {e}")
+            self.status_var.set(f"查询错误: {e}")
+
+    def apply_search_start(self):
         query = self.search_var.get().strip()
         if not query:
             self.status_var.set("搜索框为空")
@@ -1980,7 +2251,7 @@ class StockMonitorApp(tk.Tk):
         try:
             df_filtered = self.df_all.query(query)
             self.refresh_tree(df_filtered)
-            self.status_var.set(f"搜索: {query} | 结果 {len(df_filtered)} 行")
+            self.status_var.set(f"结果 {len(df_filtered)}行|搜索: {query}  ")
         except Exception as e:
             log.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")
@@ -2011,24 +2282,69 @@ class StockMonitorApp(tk.Tk):
             log.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")
 
-    def clean_search(self, entry=None):
-        """删除指定历史，默认删除当前搜索框内容"""
-        self.search_var.set('')
+    def clean_search(self, which):
+        """清空指定搜索框内容"""
+        if which == 1:
+            self.search_var1.set("")
+        else:
+            self.search_var2.set("")
+
         self.select_code = None
         self.sortby_col = None
         self.sortby_col_ascend = None
         self.refresh_tree(self.df_all)
         resample = self.resample_combo.get()
-        self.status_var.set(f"Row 结果 {len(self.current_df)} 行 | resample: {resample} ")
-    
-    def delete_search_history(self, entry=None):
-        """删除指定历史，默认删除当前搜索框内容"""
-        target = entry or self.search_var.get().strip()
-        if target in self.search_history:
-            self.search_history.remove(target)
-            self.search_combo['values'] = self.search_history
+        # self.status_var.set(f"搜索框 {which} 已清空")
+        # self.status_var.set(f"Row 结果 {len(self.current_df)} 行 | resample: {resample} ")
+
+    def delete_search_history(self, which, entry=None):
+        """
+        删除指定搜索框的历史条目
+        which = 1 -> 顶部搜索框
+        which = 2 -> 底部搜索框
+        entry: 指定要删除的条目，如果为空则用搜索框当前内容
+        """
+        if which == 1:
+            history = self.search_history1
+            combo = self.search_combo1
+            var = self.search_var1
+        else:
+            history = self.search_history2
+            combo = self.search_combo2
+            var = self.search_var2
+
+        target = entry or var.get().strip()
+        if not target:
+            self.status_var.set(f"搜索框 {which} 内容为空，无可删除项")
+            return
+
+        if target in history:
+            history.remove(target)
+            combo['values'] = history
             self.save_search_history()
-            self.status_var.set(f"已删除历史: {target}")
+            self.status_var.set(f"搜索框 {which} 已删除历史: {target}")
+        else:
+            self.status_var.set(f"搜索框 {which} 历史中没有: {target}")
+
+
+    # def clean_search(self, entry=None):
+    #     """删除指定历史，默认删除当前搜索框内容"""
+    #     self.search_var.set('')
+    #     self.select_code = None
+    #     self.sortby_col = None
+    #     self.sortby_col_ascend = None
+    #     self.refresh_tree(self.df_all)
+    #     resample = self.resample_combo.get()
+    #     self.status_var.set(f"Row 结果 {len(self.current_df)} 行 | resample: {resample} ")
+    
+    # def delete_search_history(self, entry=None):
+    #     """删除指定历史，默认删除当前搜索框内容"""
+    #     target = entry or self.search_var.get().strip()
+    #     if target in self.search_history:
+    #         self.search_history.remove(target)
+    #         self.search_combo['values'] = self.search_history
+    #         self.save_search_history()
+    #         self.status_var.set(f"已删除历史: {target}")
 
 
     # ----------------- 搜索 ----------------- #
@@ -2053,7 +2369,7 @@ class StockMonitorApp(tk.Tk):
         # blk = self.blk_label.cget("text")
         resample = self.resample_combo.get()
         # search = self.search_entry.get()
-        search = self.search_var.get()
+        search = self.search_var1.get()
         self.status_var.set(f"Rows: {cnt} | blkname: {self.blkname} | resample: {resample} | st: {self.st_key_sort} | search: {search}")
 
     # ----------------- 数据刷新 ----------------- #
@@ -2120,6 +2436,7 @@ class StockMonitorApp(tk.Tk):
         self.alert_manager.save_all()
         self.save_window_position()
         self.save_search_history()
+        archive_search_history_list()
         self.destroy()
 
 # ------------------ 主程序入口 ------------------ #

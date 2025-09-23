@@ -96,13 +96,23 @@ def pipe_server(update_callback):
         try:
             while True:
                 err, data = win32file.ReadFile(pipe, 65536)
-                print(f'err : {err} data :{data}')
-                if err == 0 and data:
-                    code = data.decode("utf-8")
-                    update_callback(code)
-                else:
-                    # print(f'err : {err} data :{data}')
-                    break
+                # print(f'err : {err} data :{data}')
+                # if err == 0 and data:
+                #     code = data.decode("utf-8")
+                #     update_callback(code)
+                # else:
+                #     # print(f'err : {err} data :{data}')
+                #     break
+                # 1. 解码字符串
+                # 1. bytes -> str
+                text = data.decode("utf-8")  # 注意这里 decode
+                # 2. str -> dict
+                try:
+                    stock_info = json.loads(text)
+                except json.JSONDecodeError:
+                    stock_info = text  # 如果不是 JSON 就原样使用
+                # 3. 调用回调（异动联动 search）
+                update_callback(stock_info)
         except Exception as e:
             # print("读取数据异常:", e)
             pass
@@ -1684,7 +1694,7 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
     now = datetime.now()
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
 
-    if get_day_is_trade_day() and 922 < get_now_time_int() < 932:
+    if get_day_is_trade_day() and 924 < get_now_time_int() < 930:
         loaded_df = None
 
     # 使用 root.after() 调度任务，在回调函数中使用 lambda 包装，
@@ -2027,8 +2037,8 @@ def open_archive_loader():
     # 加载按钮
     ttk.Button(win, text="加载", command=lambda: load_archive(selected_file.get())).pack(pady=5)
     # 按 Esc 关闭窗口
-    win.bind("<Escape>", lambda : win.destroy())
-    win.after(6*1000,  lambda  :win.destroy())
+    win.bind("<Escape>", lambda event: win.destroy())
+    win.after(6*1000,  lambda  event:win.destroy())
 
 # --- 数据持久化函数 ---
 def save_monitor_list():
@@ -2084,7 +2094,7 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
     current_time = datetime.now()
     start_time=time.time()
     
-    if get_day_is_trade_day() and 922 < get_now_time_int() < 932:
+    if get_day_is_trade_day() and 924 < get_now_time_int() < 930:
         realdatadf = pd.DataFrame()
         loaded_df = None
         viewdf = pd.DataFrame()
@@ -3373,6 +3383,7 @@ def place_new_window(window, window_id, win_width=300, win_height=160, margin=2)
 
 def create_monitor_window(stock_info):
     # stock_info 可能缺失部分数据
+    global monitor_windows
     if stock_info[0].find(':') > 0 and len(stock_info) > 4:
         stock_info = stock_info[1:]
 
@@ -3414,7 +3425,7 @@ def create_monitor_window(stock_info):
     tree_frame = ttk.Frame(monitor_win)
     tree_frame.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
 
-    window_info = {'stock_info': stock_info, 'toplevel': monitor_win}
+
     columns = ('时间', '异动类型', '涨幅', '价格', '量')
     monitor_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
     vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=monitor_tree.yview, style='Thin.Vertical.TScrollbar')
@@ -3434,13 +3445,6 @@ def create_monitor_window(stock_info):
     monitor_tree.tag_configure("alert", background="yellow", foreground="red")
     item_id = monitor_tree.insert("", "end", values=("加载ing...", "", "", "", ""))
 
-    place_new_window(monitor_win, stock_code)
-    refresh_stock_data(window_info, monitor_tree, item_id)
-
-    monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(window_info))
-    monitor_win.bind("<FocusIn>", lambda e, w=monitor_win: on_monitor_window_focus(w))
-    monitor_win.bind("<Button-1>", lambda event: update_code_entry(stock_code))
-    monitor_win.bind("<Double-1>", lambda event, code=stock_code: on_monitor_double_click(event,stock_code))
 
     # === 右键菜单加报警规则 ===
     # def show_menu(event, stock_info):
@@ -3497,14 +3501,24 @@ def create_monitor_window(stock_info):
                 y_root=event.y_root))
             menu.post(event.x_root, event.y_root)
 
-    monitor_win.bind("<Button-3>", lambda event: show_menu(event, stock_info))
 
     # === 保存窗口信息到全局字典 ===
     monitor_windows[stock_code] = {
         'toplevel': monitor_win,
-        'monitor_tree': monitor_tree
+        'monitor_tree': monitor_tree,
+        'stock_info': stock_info  # 新增这一行
     }
 
+    window_info = {'stock_info': stock_info, 'toplevel': monitor_win}
+
+    place_new_window(monitor_win, stock_code)
+    refresh_stock_data(window_info, monitor_tree, item_id)
+    monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(window_info))
+    monitor_win.bind("<FocusIn>", lambda e, w=monitor_win: on_monitor_window_focus(w))
+    monitor_win.bind("<Button-1>", lambda event: update_code_entry(stock_code))
+    monitor_win.bind("<Double-1>", lambda event, code=stock_code: on_monitor_double_click(event,stock_code))
+    monitor_win.bind("<Button-3>", lambda event: show_menu(event, stock_info))
+    
     return window_info
 
 
@@ -3673,14 +3687,213 @@ default_deltas = {
     "量": 100      # 成交量增加 100 手触发
 }
 
+
+# def get_centered_window_position(win_width, win_height, x_root=None, y_root=None, parent_win=None):
+#     """
+#     计算窗口显示位置，优先考虑右键位置，其次父窗口，最后居中屏幕。
+    
+#     Args:
+#         win_width (int): 窗口宽度
+#         win_height (int): 窗口高度
+#         x_root (int, optional): 鼠标点击 x 坐标
+#         y_root (int, optional): 鼠标点击 y 坐标
+#         parent_win (tk.Widget, optional): 父窗口对象
+
+#     Returns:
+#         tuple: (x, y) 窗口左上角位置
+#     """
+#     screen_width, screen_height = get_monitors_info()
+
+#     # 默认居中
+#     x = (screen_width - win_width) // 2
+#     y = (screen_height - win_height) // 2
+
+#     # --- 鼠标右键位置优先 ---
+#     if x_root is not None and y_root is not None:
+#         x, y = x_root, y_root
+#         # 如果鼠标右侧空间不足，窗口翻到左侧
+#         if x + win_width > screen_width:
+#             x = max(0, x_root - win_width)
+
+#     # --- 父窗口位置 ---
+#     elif parent_win is not None:
+#         parent_win.update_idletasks()
+#         px, py = parent_win.winfo_x(), parent_win.winfo_y()
+#         pw, ph = parent_win.winfo_width(), parent_win.winfo_height()
+
+#         if px <= 1 or py <= 1:  # 父窗口未渲染，回退到居中
+#             x = (screen_width - win_width) // 2
+#             y = (screen_height - win_height) // 2
+#         else:
+#             x = px + pw // 2 - win_width // 2
+#             y = py + ph // 2 - win_height // 2
+
+#     # --- 边界检查 ---
+#     x = max(0, min(x, screen_width - win_width))
+#     y = max(0, min(y, screen_height - win_height))
+#     print(x,y)
+#     return x, y
+
+def get_centered_window_position(win_width, win_height, x_root=None, y_root=None, parent_win=None):
+    """
+    多屏环境下获取窗口显示位置
+    """
+    # 默认取主屏幕
+    screen = get_monitor_by_point(0, 0)
+    x = (screen['width'] - win_width) // 2
+    y = (screen['height'] - win_height) // 2
+
+    # 鼠标右键优先
+    if x_root is not None and y_root is not None:
+        screen = get_monitor_by_point(x_root, y_root)
+        x, y = x_root, y_root
+        if x + win_width > screen['right']:
+            x = max(screen['left'], x_root - win_width)
+        if y + win_height > screen['bottom']:
+            y = max(screen['top'], y_root - win_height)
+
+    # 父窗口位置
+    elif parent_win is not None:
+        parent_win.update_idletasks()
+        px, py = parent_win.winfo_x(), parent_win.winfo_y()
+        pw, ph = parent_win.winfo_width(), parent_win.winfo_height()
+        screen = get_monitor_by_point(px, py)
+        x = px + pw // 2 - win_width // 2
+        y = py + ph // 2 - win_height // 2
+
+    # 边界检查
+    x = max(screen['left'], min(x, screen['right'] - win_width))
+    y = max(screen['top'], min(y, screen['bottom'] - win_height))
+    print(x,y)
+    return x, y
+
+
+def open_rules_overview(parent_win=None):
+    """查看所有已存档的报警规则"""
+    global sina_data_df
+
+    # 使用局部变量 aw_rules
+    aw_rules = tk.Toplevel(parent_win or root)
+    aw_rules.title("报警规则总览")
+
+    # 关键点：设置模态和焦点
+    aw_rules.transient(parent_win)   # 父窗口关系
+    aw_rules.grab_set()              # 模态，阻止父窗口操作
+    aw_rules.focus_force()           # 强制获得焦点
+    aw_rules.lift()                  # 提升到顶层
+
+    frame = ttk.Frame(aw_rules)
+    frame.pack(expand=True, fill="both")
+
+    win_width, win_height = 680, 400
+    x, y = get_centered_window_position(win_width, win_height, parent_win=parent_win)
+    aw_rules.geometry(f"{win_width}x{win_height}+{x}+{y}")
+
+    scrollbar = ttk.Scrollbar(frame)
+    scrollbar.pack(side="right", fill="y")
+
+    cols = ("代码", "名称", "规则名", "条件", "启用状态")
+    tree = ttk.Treeview(frame, columns=cols, show="headings", yscrollcommand=scrollbar.set)
+    scrollbar.config(command=tree.yview)
+
+    for c in cols:
+        tree.heading(c, text=c)
+        tree.column(c, width=220 if c == "条件" else 60, anchor="w" if c == "条件" else "center")
+    tree.pack(expand=True, fill="both")
+
+    # 读取规则文件
+    try:
+        with open(ALERTS_FILE, "r") as f:
+            alerts_rules_file = json.load(f)
+    except:
+        alerts_rules_file = []
+
+    tree.delete(*tree.get_children())
+
+    for code, rule_list in alerts_rules_file.items():
+        # 安全取股票名称
+        if sina_data_df is not None and not sina_data_df.empty:
+            stock_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
+        else:
+            stock_name = monitor_windows.get(code, {}).get("stock_info", ["", "未知"])[1]
+
+        # 提取规则名（只取字段名）
+        rule_names = [rule.get("field", "") for rule in rule_list if rule.get("field") in ("价格", "量")]
+
+        # 构造条件字符串
+        conditions = []
+        enabled_states = []
+        for rule in rule_list:
+            field = rule.get("field")
+            if field in ("价格", "量", "涨幅"):
+                op = rule.get("op", "")
+                value = rule.get("value", "")
+                conditions.append(f"{field} {op} {value}")
+                enabled_states.append("开" if rule.get("enabled", False) else "关")
+
+        if all(e == "开" for e in enabled_states):
+            enabled_state = "开"
+        elif all(e == "关" for e in enabled_states):
+            enabled_state = "关"
+        else:
+            enabled_state = "部分开"
+
+        # 插入 Treeview
+        tree.insert("", "end", values=(
+            code,
+            stock_name,
+            ", ".join(rule_names),
+            ", ".join(conditions),
+            enabled_state
+        ))
+
+    # 右键菜单
+    def show_menu(event):
+        sel = tree.selection()
+        if not sel:
+            return
+        vals = tree.item(sel[0], "values")
+        code = vals[0]
+        menu = tk.Menu(aw_rules, tearoff=0)
+        menu.add_command(label="编辑规则", command=lambda: open_alert_editor(code, parent_win=aw_rules))
+        menu.add_command(label="新增规则", command=lambda: open_alert_editor(code, new=True, parent_win=aw_rules))
+        menu.add_command(label="删除规则", command=lambda: delete_alert_rule(code, parent_win=aw_rules))
+        menu.post(event.x_root, event.y_root)
+
+    def on_double_click_edit(event):
+        sel = tree.selection()
+        if not sel:
+            return
+        vals = tree.item(sel[0], "values")
+        code = vals[0]
+        open_alert_editor(code, parent_win=aw_rules)
+
+    tree.bind("<Button-3>", show_menu)
+    tree.bind("<Double-1>", on_double_click_edit)
+
+    # Esc 只关闭当前窗口
+    aw_rules.bind("<Escape>", lambda event, w=aw_rules: w.destroy())
+
+    return aw_rules
+
+
+
+
 # ------------------------
 # 报警中心窗口
 # ------------------------
+
 def open_alert_center():
     global alert_window, alert_tree
-    global alert_moniter_bring_front
+    global alert_moniter_bring_front,sina_data_df
+
+    # 如果窗口已存在则置顶
+    if alert_window and alert_window.winfo_exists():
+        alert_window.lift()
+        return
+
     alert_moniter_bring_front = True
-    stock_code,stock_name, stock_info = None, None,None
+    stock_code, stock_name, stock_info = None, None, None
     selected_item = tree.selection()
     if selected_item:
         vals = tree.item(selected_item, 'values')
@@ -3689,137 +3902,121 @@ def open_alert_center():
             stock_name = vals[2]
             stock_info = vals[1:]
 
-    if alert_window and alert_window.winfo_exists():
-        alert_window.lift()
-        return
+    # 改用局部变量 aw_win
+    aw_win = tk.Toplevel(root)
+    aw_win.title("报警中心")
 
-    alert_window = tk.Toplevel(root)
-    alert_window.title("报警中心")
-    alert_window.geometry("720x360")
-    # 获取之前保存的位置，如果没有则居中
-    # pos = load_alert_window_position()  # 返回 (x, y, w, h) 或 None
-    # if pos is None:
-    #     w, h, x, y = init_alert_window()
-    # else:
-    #     x, y, w, h = pos
-    w, h, x, y = init_alert_window()
+    win_width, win_height = 720 , 360
+    x, y = get_centered_window_position(win_width, win_height, parent_win=root)
+    aw_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
 
-    alert_window.geometry(f"{w}x{h}+{x}+{y}")
+    # 保持全局变量引用
+    alert_window = aw_win
+
     # 上方快速规则入口
-    top_frame = ttk.Frame(alert_window)
+    top_frame = ttk.Frame(aw_win)
     top_frame.pack(fill="x", padx=5, pady=5)
-
     tk.Label(top_frame, text="股票代码:").pack(side="left")
 
-    # stock_var = tk.StringVar()
-    # vlist = list(monitor_windows.keys())
-
-    # stock_list_for_combo  = [tuple(monitor_windows[co]['stock_info'][:2])  for co in vlist]
-    # if stock_code and stock_code not in monitor_windows.keys():
-    #     stock_list_for_combo.append((stock_code,stock_name))
-    #     stock_entry = ttk.Combobox(top_frame, textvariable=stock_var, values=stock_list_for_combo, width=10)
-    # else:
-    #     stock_entry = ttk.Combobox(top_frame, textvariable=stock_var, values=stock_list_for_combo, width=10)
-
-    # def show_context_menu(event, stock_code):
-    #     parent_win = event.widget.winfo_toplevel()
-    #     menu = tk.Menu(parent_win, tearoff=0)
-    #     menu.add_command(
-    #         label="添加/编辑规则",
-    #         command=lambda: open_alert_editor(stock_code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root)
-    #     )
-    #     menu.post(event.x_root, event.y_root)
-
-    # -------------------------
     # 股票选择 Combobox 初始化
-    # -------------------------
     stock_var = tk.StringVar()
     vlist = list(monitor_windows.keys())
+    # bug 
+    # stock_list_for_combo = [f"{co} {monitor_windows[co]['stock_info'][1]}" for co in vlist]
+    stock_list_for_combo = []
+    for co in vlist:
+        info = monitor_windows.get(co)
+        if not info:
+            print(f"[DEBUG] monitor_windows 没有 entry: {co}")
+            stock_list_for_combo.append(f"{co} 无数据")
+            continue
 
-    # 统一 values 为字符串 "code name"
-    stock_list_for_combo = [f"{co} {monitor_windows[co]['stock_info'][1]}" for co in vlist]
+        stock_info = info.get("stock_info")
+        if not stock_info or len(stock_info) < 2:
+            print(f"[DEBUG] monitor_windows[{co}] 缺少 stock_info: {info}")
+            stock_list_for_combo.append(f"{co} 未初始化")
+            continue
 
-    # 如果选中的股票不在监控窗口中，加入列表
+        stock_list_for_combo.append(f"{co} {stock_info[1]}")
+
+
+    #1:
+    # stock_list_for_combo = [
+    #     f"{co} {monitor_windows.get(co, {}).get('stock_info',[None,'未知'])[1]}"
+    #     for co in vlist
+    # ]
+
+    #2
+    # stock_list_for_combo = []
+    # for co in vlist:
+    #     info = monitor_windows.get(co, {}).get("stock_info", None)
+    #     if info and len(info) > 1:
+    #         stock_list_for_combo.append(f"{co} {info[1]}")
+    #     else:
+    #         # 如果缺失，显示 code + "未知"
+    #         stock_list_for_combo.append(f"{co} 未知")
+
     if stock_code and stock_code not in monitor_windows.keys():
         stock_list_for_combo.append(f"{stock_code} {stock_name}")
-
-    # 创建 Combobox，限制宽度避免拉伸
     stock_entry = ttk.Combobox(top_frame, textvariable=stock_var, values=stock_list_for_combo, width=15)
-
-    # 设置初始值
     if stock_code:
         stock_var.set(f"{stock_code} {stock_name}")
     elif stock_list_for_combo:
-        stock_var.set(stock_list_for_combo[0])  # 默认选第一个
-
+        stock_var.set(stock_list_for_combo[0])
     stock_entry.pack(side="left", padx=5)
 
-    # 右键菜单或双击触发编辑规则
-    def show_context_menu(event):
-        selected = stock_var.get()
-        if not selected:
-            return
-        # 取 code 部分（前6-7位数字）
-        code = selected.split()[0]
-        parent_win = event.widget.winfo_toplevel()
-        menu = tk.Menu(parent_win, tearoff=0)
-        menu.add_command(
-            label="添加/编辑规则",
-            command=lambda: open_alert_editor(code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root)
-        )
-        menu.post(event.x_root, event.y_root)
-
-    # stock_entry.bind("<Button-3>", show_context_menu)
-
-    tk.Button(top_frame, text="添加/编辑规则", command=lambda: open_alert_editor(stock_var.get())).pack(side="left", padx=5)
+    # 按钮和规则管理
+    tk.Button(top_frame, text="添加/编辑规则", command=lambda sv=stock_var: open_alert_editor(sv.get())).pack(side="left", padx=5)
+    tk.Button(top_frame, text="规则管理", command=lambda w=aw_win: open_rules_overview(parent_win=w)).pack(side="left", padx=5)
 
     # 报警列表
-    frame = ttk.Frame(alert_window)
+    frame = ttk.Frame(aw_win)
     frame.pack(expand=True, fill="both")
-
     scrollbar = ttk.Scrollbar(frame)
     scrollbar.pack(side="right", fill="y")
-
     cols = ("时间", "代码", "名称", "触发值", "规则", "变化量")
-
     alert_tree = ttk.Treeview(frame, columns=cols, show="headings", yscrollcommand=scrollbar.set)
     scrollbar.config(command=alert_tree.yview)
-
     for c in cols:
         alert_tree.heading(c, text=c)
         if c == '触发值':
-            alert_tree.column(c, width=120 , anchor="center")
+            alert_tree.column(c, width=120, anchor="center")
         elif c == '规则':
-            alert_tree.column(c, width=100 , anchor="center")
+            alert_tree.column(c, width=100, anchor="center")
         else:
             alert_tree.column(c, width=40, anchor="center")
     alert_tree.pack(expand=True, fill="both")
-
-
 
     # 双击报警 → 聚焦监控窗口
     def on_double_click(event):
         global code_entry
         sel = alert_tree.selection()
-        if not sel:
-            return
-
+        if not sel: return
         vals = alert_tree.item(sel[0], "values")
         code = vals[1]
         name = vals[2]
 
-        # 先发送 TDX 查询
         send_to_tdx(code)
         code_entry.delete(0, tk.END)
         code_entry.insert(0, code)
 
+
         if code in monitor_windows.keys():
             win = monitor_windows[code]['toplevel']
         else:
-            # 构造 stock_info 填充默认值
-            stock_info = [code, name, 0, 0, 0.0, 0.0, 0]
-            window_info = create_monitor_window(stock_info)
-            win = window_info['toplevel']
+            percent,price, vol = 0.0 , 0.0 , 0
+            if sina_data_df is not None and not sina_data_df.empty:
+                stock_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
+                dd = sina_data_df.loc[code]
+                if dd is not None:
+                    price = dd.close
+                    percent = round((dd.close - dd.llastp) / dd.llastp *100,1)
+                    vol = round(dd.turnover/100/10000/100,1)
+                    print(f'监控窗口:{stock_code}, {price},{percent},{vol}')
+                stock_info = [code, name, 0, 0, percent,price, vol]
+            else:
+                stock_info = [code, name, 0, 0, 0.0, 0.0, 0]
+            win = create_monitor_window(stock_info)['toplevel']
 
         if win and win.winfo_exists():
             win.lift()
@@ -3827,32 +4024,329 @@ def open_alert_center():
             win.attributes("-topmost", 0)
             highlight_window(win)
 
-
     alert_tree.bind("<Double-1>", on_double_click)
 
     # 右键菜单 → 编辑 / 新增 / 删除规则
     def show_menu(event):
         sel = alert_tree.selection()
-        parent_win = event.widget.winfo_toplevel()
         if not sel: return
         vals = alert_tree.item(sel[0], "values")
         code = vals[1]
-        menu = tk.Menu(alert_window, tearoff=0)
-        menu.add_command(label="编辑规则", command=lambda: open_alert_editor(code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root))
-        menu.add_command(label="新增规则", command=lambda: open_alert_editor(code, new=True, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root))
-        menu.add_command(label="删除规则", command=lambda: delete_alert_rule(code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root))
+        menu = tk.Menu(aw_win, tearoff=0)
+        menu.add_command(label="编辑规则", command=lambda: open_alert_editor(code, parent_win=aw_win, x_root=event.x_root, y_root=event.y_root))
+        menu.add_command(label="新增规则", command=lambda: open_alert_editor(code, new=True, parent_win=aw_win, x_root=event.x_root, y_root=event.y_root))
+        menu.add_command(label="删除规则", command=lambda: delete_alert_rule(code, parent_win=aw_win, x_root=event.x_root, y_root=event.y_root))
         menu.post(event.x_root, event.y_root)
-    alert_tree.bind("<Button-3>", show_menu)
-    # 按 Esc 关闭窗口
-    alert_window.bind("<Escape>", lambda  : on_close_alert_monitor(alert_window))
-    # 1小时后自动关闭（3600*1000 毫秒）
-    alert_window.protocol("WM_DELETE_WINDOW", lambda: on_close_alert_monitor(alert_window))
-    alert_window.after(120*1000,  lambda  :on_close_alert_monitor(alert_window))
-    # 强制渲染一次，避免白屏
-    alert_window.update_idletasks()
 
-    # 延迟刷新（100ms 后执行，避免卡初始化）
-    alert_window.after(100, refresh_alert_center)
+    alert_tree.bind("<Button-3>", show_menu)
+
+    # Esc 只关闭当前 aw_win，不影响父窗口
+    aw_win.bind("<Escape>", lambda e, w=aw_win: on_close_alert_monitor(w))
+    aw_win.protocol("WM_DELETE_WINDOW", lambda w=aw_win: on_close_alert_monitor(w))
+
+    # 强制渲染
+    aw_win.update_idletasks()
+    aw_win.after(100, refresh_alert_center)
+
+# def open_rules_overview_src(parent_win=None):
+#     """查看所有已存档的报警规则"""
+#     global sina_data_df
+#     rules_win = tk.Toplevel(parent_win or root)
+#     rules_win.title("报警规则总览")
+#     # rules_win.geometry("680x400")
+
+#     frame = ttk.Frame(rules_win)
+#     frame.pack(expand=True, fill="both")
+
+#     win_width, win_height = 680, 400
+#     x, y = get_centered_window_position(win_width, win_height, x_root=None, y_root=None, parent_win=parent_win)
+#     rules_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
+
+
+#     scrollbar = ttk.Scrollbar(frame)
+#     scrollbar.pack(side="right", fill="y")
+
+#     cols = ("代码", "名称", "规则名", "条件", "启用状态")
+#     tree = ttk.Treeview(frame, columns=cols, show="headings", yscrollcommand=scrollbar.set)
+#     scrollbar.config(command=tree.yview)
+
+#     for c in cols:
+#         tree.heading(c, text=c)
+#         if c == "条件":
+#             tree.column(c, width=180, anchor="w")
+#         else:
+#             tree.column(c, width=80, anchor="center")
+#     tree.pack(expand=True, fill="both")
+
+
+#     try:
+#         with open(ALERTS_FILE, "r") as f:
+#             alerts_rules_file = json.load(f)
+#     except:
+#         alerts_rules_file = []
+#     # 填充数据
+
+#     cols = ("代码", "名称", "规则名", "条件", "启用状态")
+#     tree.delete(*tree.get_children())
+
+#     for code, rule_list in alerts_rules_file.items():
+#         # 安全取股票名称
+#         if sina_data_df is not None and not sina_data_df.empty:
+#             stock_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
+#         else:
+#             stock_name = monitor_windows.get(code, {}).get("stock_info", ["", "未知"])[1]
+
+#         # 提取规则名（只取字段名）
+#         rule_names = [rule.get("field", "") for rule in rule_list if rule.get("field") in ("价格", "量")]
+
+#         # 构造条件字符串
+#         conditions = []
+#         enabled_states = []
+#         for rule in rule_list:
+#             field = rule.get("field")
+#             if field in ("价格", "量" ,"涨幅"):
+#                 op = rule.get("op", "")
+#                 value = rule.get("value", "")
+#                 conditions.append(f"{field} {op} {value}")
+#                 enabled_states.append("开" if rule.get("enabled", False) else "关")
+
+#         # 合并同一股票的启用状态，如果不一致可以显示“部分开”或者取第一个
+#         if all(e == "开" for e in enabled_states):
+#             enabled_state = "开"
+#         elif all(e == "关" for e in enabled_states):
+#             enabled_state = "关"
+#         else:
+#             enabled_state = "部分开"
+
+#         # 插入 Treeview
+#         tree.insert("", "end", values=(
+#             code,
+#             stock_name,
+#             ", ".join(rule_names),      # 规则名合并
+#             ", ".join(conditions),      # 条件合并
+#             enabled_state
+#         ))
+
+
+#     # 右键菜单
+#     def show_menu(event):
+#         sel = tree.selection()
+#         if not sel:
+#             return
+#         vals = tree.item(sel[0], "values")
+#         code = vals[0]
+#         menu = tk.Menu(rules_win, tearoff=0)
+#         menu.add_command(label="编辑规则", command=lambda: open_alert_editor(code, parent_win=rules_win))
+#         menu.add_command(label="新增规则", command=lambda: open_alert_editor(code, new=True, parent_win=rules_win))
+#         menu.add_command(label="删除规则", command=lambda: delete_alert_rule(code, parent_win=rules_win))
+#         menu.post(event.x_root, event.y_root)
+
+#     def on_double_click_edit(event): 
+#         sel = tree.selection()
+#         if not sel:
+#             return
+#         vals = tree.item(sel[0], "values")
+#         code = vals[0]
+#         open_alert_editor(code,parent_win=rules_win)
+#     tree.bind("<Button-3>", show_menu)
+#     tree.bind("<Double-1>", on_double_click_edit)
+#     rules_win.bind("<Escape>", lambda event: rules_win.destroy())
+
+# def open_alert_center_src():
+#     global alert_window, alert_tree
+#     global alert_moniter_bring_front
+#     if alert_window and alert_window.winfo_exists():
+#         alert_window.lift()
+#         return
+#     alert_moniter_bring_front = True
+#     stock_code,stock_name, stock_info = None, None,None
+#     selected_item = tree.selection()
+#     if selected_item:
+#         vals = tree.item(selected_item, 'values')
+#         if len(vals) >= 2:
+#             stock_code = vals[1]
+#             stock_name = vals[2]
+#             stock_info = vals[1:]
+
+
+
+#     alert_window = tk.Toplevel(root)
+#     alert_window.title("报警中心")
+#     # alert_window.geometry("720x360")
+#     # # 获取之前保存的位置，如果没有则居中
+#     # # pos = load_alert_window_position()  # 返回 (x, y, w, h) 或 None
+#     # # if pos is None:
+#     # #     w, h, x, y = init_alert_window()
+#     # # else:
+#     # #     x, y, w, h = pos
+#     # w, h, x, y = init_alert_window()
+#     # alert_window.geometry(f"{w}x{h}+{x}+{y}")
+#     win_width, win_height = 720 , 360
+#     x, y = get_centered_window_position(win_width, win_height, x_root=None, y_root=None, parent_win=root)
+#     alert_window.geometry(f"{win_width}x{win_height}+{x}+{y}")
+
+
+
+#     # 上方快速规则入口
+#     top_frame = ttk.Frame(alert_window)
+#     top_frame.pack(fill="x", padx=5, pady=5)
+
+#     tk.Label(top_frame, text="股票代码:").pack(side="left")
+
+#     # stock_var = tk.StringVar()
+#     # vlist = list(monitor_windows.keys())
+
+#     # stock_list_for_combo  = [tuple(monitor_windows[co]['stock_info'][:2])  for co in vlist]
+#     # if stock_code and stock_code not in monitor_windows.keys():
+#     #     stock_list_for_combo.append((stock_code,stock_name))
+#     #     stock_entry = ttk.Combobox(top_frame, textvariable=stock_var, values=stock_list_for_combo, width=10)
+#     # else:
+#     #     stock_entry = ttk.Combobox(top_frame, textvariable=stock_var, values=stock_list_for_combo, width=10)
+
+#     # def show_context_menu(event, stock_code):
+#     #     parent_win = event.widget.winfo_toplevel()
+#     #     menu = tk.Menu(parent_win, tearoff=0)
+#     #     menu.add_command(
+#     #         label="添加/编辑规则",
+#     #         command=lambda: open_alert_editor(stock_code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root)
+#     #     )
+#     #     menu.post(event.x_root, event.y_root)
+
+#     # -------------------------
+#     # 股票选择 Combobox 初始化
+#     # -------------------------
+#     stock_var = tk.StringVar()
+#     vlist = list(monitor_windows.keys())
+
+#     # 统一 values 为字符串 "code name"
+#     stock_list_for_combo = [f"{co} {monitor_windows[co]['stock_info'][1]}" for co in vlist]
+
+#     # 如果选中的股票不在监控窗口中，加入列表
+#     if stock_code and stock_code not in monitor_windows.keys():
+#         stock_list_for_combo.append(f"{stock_code} {stock_name}")
+
+#     # 创建 Combobox，限制宽度避免拉伸
+#     stock_entry = ttk.Combobox(top_frame, textvariable=stock_var, values=stock_list_for_combo, width=15)
+
+#     # 设置初始值
+#     if stock_code:
+#         stock_var.set(f"{stock_code} {stock_name}")
+#     elif stock_list_for_combo:
+#         stock_var.set(stock_list_for_combo[0])  # 默认选第一个
+
+#     stock_entry.pack(side="left", padx=5)
+
+#     # 右键菜单或双击触发编辑规则
+#     def show_context_menu(event):
+#         selected = stock_var.get()
+#         if not selected:
+#             return
+#         # 取 code 部分（前6-7位数字）
+#         code = selected.split()[0]
+#         parent_win = event.widget.winfo_toplevel()
+#         menu = tk.Menu(parent_win, tearoff=0)
+#         menu.add_command(
+#             label="添加/编辑规则",
+#             command=lambda: open_alert_editor(code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root)
+#         )
+#         menu.post(event.x_root, event.y_root)
+
+#     # stock_entry.bind("<Button-3>", show_context_menu)
+
+#     tk.Button(top_frame, text="添加/编辑规则", command=lambda: open_alert_editor(stock_var.get())).pack(side="left", padx=5)
+#     tk.Button(top_frame, text="规则管理", command=lambda: open_rules_overview(alert_window)).pack(side="left", padx=5)
+#     # 报警列表
+#     frame = ttk.Frame(alert_window)
+#     frame.pack(expand=True, fill="both")
+
+#     scrollbar = ttk.Scrollbar(frame)
+#     scrollbar.pack(side="right", fill="y")
+
+#     cols = ("时间", "代码", "名称", "触发值", "规则", "变化量")
+
+#     alert_tree = ttk.Treeview(frame, columns=cols, show="headings", yscrollcommand=scrollbar.set)
+#     scrollbar.config(command=alert_tree.yview)
+
+#     for c in cols:
+#         alert_tree.heading(c, text=c)
+#         if c == '触发值':
+#             alert_tree.column(c, width=120 , anchor="center")
+#         elif c == '规则':
+#             alert_tree.column(c, width=100 , anchor="center")
+#         else:
+#             alert_tree.column(c, width=40, anchor="center")
+#     alert_tree.pack(expand=True, fill="both")
+
+
+
+#     # 双击报警 → 聚焦监控窗口
+#     def on_double_click(event):
+#         global code_entry
+#         sel = alert_tree.selection()
+#         if not sel:
+#             return
+
+#         vals = alert_tree.item(sel[0], "values")
+#         code = vals[1]
+#         name = vals[2]
+
+#         # 先发送 TDX 查询
+#         send_to_tdx(code)
+#         code_entry.delete(0, tk.END)
+#         code_entry.insert(0, code)
+
+#         if code in monitor_windows.keys():
+#             win = monitor_windows[code]['toplevel']
+        # else:
+        #     # 构造 stock_info 填充默认值
+        #     percent,price, vol = 0.0 , 0.0 , 0
+        #     if sina_data_df is not None and not sina_data_df.empty:
+        #         stock_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
+        #         dd = sina_data_df.loc[code]
+        #         if dd is not None:
+        #             price = dd.close
+        #             percent = round((dd.close - dd.llastp) / dd.llastp *100,1)
+        #             amount = round(dd.turnover/100/10000/100,1)
+        #             print(f'监控窗口:{stock_code}, {price},{percent},{amount}')
+        #         stock_info = [code, name, 0, 0, percent,price, amount]
+        #     else:
+        #         stock_info = [code, name, 0, 0, 0.0, 0.0, 0]
+        #     window_info = create_monitor_window(stock_info)
+        #     win = window_info['toplevel']
+
+#         if win and win.winfo_exists():
+#             win.lift()
+#             win.attributes("-topmost", 1)
+#             win.attributes("-topmost", 0)
+#             highlight_window(win)
+
+
+#     alert_tree.bind("<Double-1>", on_double_click)
+
+#     # 右键菜单 → 编辑 / 新增 / 删除规则
+#     def show_menu(event):
+#         sel = alert_tree.selection()
+#         parent_win = event.widget.winfo_toplevel()
+#         if not sel: return
+#         vals = alert_tree.item(sel[0], "values")
+#         code = vals[1]
+#         menu = tk.Menu(alert_window, tearoff=0)
+#         menu.add_command(label="编辑规则", command=lambda: open_alert_editor(code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root))
+#         menu.add_command(label="新增规则", command=lambda: open_alert_editor(code, new=True, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root))
+#         menu.add_command(label="删除规则", command=lambda: delete_alert_rule(code, parent_win=parent_win, x_root=event.x_root, y_root=event.y_root))
+#         menu.post(event.x_root, event.y_root)
+#     alert_tree.bind("<Button-3>", show_menu)
+#     # 按 Esc 关闭窗口
+#     alert_window.bind("<Escape>", lambda  event: on_close_alert_monitor(alert_window))
+#     # 1小时后自动关闭（3600*1000 毫秒）
+#     alert_window.protocol("WM_DELETE_WINDOW", lambda event: on_close_alert_monitor(alert_window))
+#     # alert_window.after(120*1000,  lambda  event:on_close_alert_monitor(alert_window))
+
+#     # 强制渲染一次，避免白屏
+#     alert_window.update_idletasks()
+
+#     # 延迟刷新（100ms 后执行，避免卡初始化）
+#     alert_window.after(100, refresh_alert_center)
 
 
 def get_alert_status(stock_code):
@@ -3917,25 +4411,74 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     # 简化数据获取，使其能正常运行
     # --- 1. 准备规则 ---
     # orig_rules = alerts_rules.get(code, [])
+    global sina_data_df
     orig_rules = alerts_rules.copy()
 
     price, percent, vol = 5.0, 1.0, 1
+    # print(f'1:{stock_info[-3]}')
     if new and stock_info is not None:
         if stock_code in alerts_rules:
             del alerts_rules[stock_code]
-        # print(f'stock_info:{stock_info}')
+        print(f'stock_info:{stock_info}')
         code, name, *_ , percent,price, vol = stock_info
+        if price < 0.1:
+            # 优先从 sina_data_df 获取最新行情
+            if sina_data_df is not None and not sina_data_df.empty and code in sina_data_df.index:
+                # stock_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
+                dd = sina_data_df.loc[code]
+                price = dd.close
+                percent = round((dd.close - dd.llastp) / dd.llastp * 100, 1)
+                vol = round(dd.turnover / 100 / 10000 / 100, 1)
+            # 如果 sina_data_df 无数据，则从 monitor_windows 获取已有 stock_info
+            elif code in monitor_windows:
+                stock_info = monitor_windows[code].get('stock_info', [code, name, 0, 0, 0.0, 0.0, 0])
+                _, _, _, _, percent, price, vol = stock_info
+            # 如果都没有，使用默认值
+        # code, name, *_ , percent,price, vol = stock_info
 
     elif not stock_code == '':
         try:
+            # print(f'2:{stock_info[-3]}')
             if stock_info is not None:
                 code, name, *_ , percent,price, vol = stock_info
+            # 如果 stock_code 是字符串，格式 "CODE NAME"
             elif not isinstance(stock_code, (list, tuple)) and len(stock_code.split()) == 2:
-                code,name = stock_code.split()
-                if code in monitor_windows.keys():
-                    stock_info = monitor_windows.get(code, {}).get('stock_info', [code, 0, 0, 0, 1, 5, 1])
-                    _, _, _, _, percent,price, vol = stock_info
-                    print(f'price : {price},percent:{percent}, vol:{vol}')
+                code, name = stock_code.split()
+                # percent, price, vol = 0.0, 0.0, 0
+
+                # 优先从 sina_data_df 获取最新行情
+                if sina_data_df is not None and not sina_data_df.empty and code in sina_data_df.index:
+                    # stock_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
+                    dd = sina_data_df.loc[code]
+                    price = dd.close
+                    percent = round((dd.close - dd.llastp) / dd.llastp * 100, 1)
+                    vol = round(dd.turnover / 100 / 10000 / 100, 1)
+
+                # 如果 sina_data_df 无数据，则从 monitor_windows 获取已有 stock_info
+                elif code in monitor_windows:
+                    stock_info = monitor_windows[code].get('stock_info', [code, name, 0, 0, 0.0, 0.0, 0])
+                    _, _, _, _, percent, price, vol = stock_info
+
+                # 如果都没有，使用默认值
+                else:
+                    # stock_name = name
+                    percent, price, vol = 0.0, 0.0, 0
+
+            # elif not isinstance(stock_code, (list, tuple)) and len(stock_code.split()) == 2:
+            #     code,name = stock_code.split()
+            #     percent,price, vol = 0.0 , 0.0 , 0
+            #     if sina_data_df is not None and not sina_data_df.empty:
+            #         stock_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
+            #         dd = sina_data_df.loc[code]
+            #         if dd is not None:
+            #             price = dd.close
+            #             percent = round((dd.close - dd.llastp) / dd.llastp *100,1)
+            #             vol = round(dd.turnover/100/10000/100,1)
+            #             # print(f'监控窗口:{stock_code}, {price},{percent},{vol}')
+            #     elif code in monitor_windows.keys():
+            #         stock_info = monitor_windows.get(code, {}).get('stock_info', [code, 0, 0, 0, 1, 5, 1])
+            #         _, _, _, _, percent,price, vol = stock_info
+                    # print(f'price : {price},percent:{percent}, vol:{vol}')
             elif isinstance(stock_code, (list, tuple)) and len(stock_code) == 5:
                 code, _ , percent,price, vol = stock_code
                 print(f'price : {price},percent:{percent}, vol:{vol}')
@@ -3968,55 +4511,61 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
 
     editor = tk.Toplevel(root)
     editor.title(f"设置报警规则 -{name} {code}")
+
+
+    # 关键点：设置模态和焦点
+    editor.transient(parent_win)   # 父窗口关系
+    editor.grab_set()              # 模态，阻止父窗口操作
+    editor.focus_force()           # 强制获得焦点
+    editor.lift()                  # 提升到顶层
+
     win_width, win_height = 500, 300
+    x, y = get_centered_window_position(win_width, win_height, parent_win=parent_win)
+    editor.geometry(f"{win_width}x{win_height}+{x}+{y}")
+    # screen_width, screen_height = get_monitors_info()
 
-    screen_width, screen_height = get_monitors_info()
+    # # 默认位置：屏幕中心
+    # x = (screen_width - win_width) // 2
+    # y = (screen_height - win_height) // 2
+    # print(f'x :{x} y: {y}')
+    # # 优先使用右键位置
+    # if x_root is not None and y_root is not None:
+    #     x = x_root
+    #     y = y_root
 
-    # 默认位置：屏幕中心
-    x = (screen_width - win_width) // 2
-    y = (screen_height - win_height) // 2
-    print(f'x :{x} y: {y}')
-    # 优先使用右键位置
-    if x_root is not None and y_root is not None:
-        x = x_root
-        y = y_root
+    #     # 如果鼠标右侧空间不足，窗口翻到左侧
+    #     if x + win_width > screen_width:
+    #         x = max(0, x_root - win_width)
+    #     print(f'x :{x} y: {y}')
+    # # 如果 parent_win 传入，则在父窗口右下角附近打开
+    # elif parent_win is not None:
+    #     parent_win.update_idletasks()
+    #     px = parent_win.winfo_x()
+    #     py = parent_win.winfo_y()
+    #     pw = parent_win.winfo_width()
+    #     ph = parent_win.winfo_height()
+    #     # x = px + pw // 2 - win_width // 2
+    #     # y = py + ph // 2 - win_height // 2
+    #     if px <= 1 or py <= 1:  # 未渲染
+    #         x = (screen_width - win_width) // 2
+    #         y = (screen_height - win_height) // 2
+    #     else:
+    #         x = px + pw//2 - win_width//2
+    #         y = py + ph//2 - win_height//2
+    #     print(f'x :{x} y: {y}')
 
-        # 如果鼠标右侧空间不足，窗口翻到左侧
-        if x + win_width > screen_width:
-            x = max(0, x_root - win_width)
-        print(f'x :{x} y: {y}')
-    # 如果 parent_win 传入，则在父窗口右下角附近打开
-    elif parent_win is not None:
-        parent_win.update_idletasks()
-        px = parent_win.winfo_x()
-        py = parent_win.winfo_y()
-        pw = parent_win.winfo_width()
-        ph = parent_win.winfo_height()
-        # x = px + pw // 2 - win_width // 2
-        # y = py + ph // 2 - win_height // 2
-        if px <= 1 or py <= 1:  # 未渲染
-            x = (screen_width - win_width) // 2
-            y = (screen_height - win_height) // 2
-        else:
-            x = px + pw//2 - win_width//2
-            y = py + ph//2 - win_height//2
-        print(f'x :{x} y: {y}')
-
-    # 超出屏幕边界自动调整
-    if x + win_width > screen_width:
-        x = screen_width - win_width
-    if y + win_height > screen_height:
-        y = screen_height - win_height
-    if x < 0:
-        x = 0
-    if y < 0:
-        y = 0
-
-    print(f'x :{x} y: {y}')
-
-    x , y = calc_alert_window_position(win_width, win_height, x_root=x_root, y_root=y_root, parent_win=parent_win)
-
-    print(f'calc_alert_window_position x :{x} y: {y}')
+    # # 超出屏幕边界自动调整
+    # if x + win_width > screen_width:
+    #     x = screen_width - win_width
+    # if y + win_height > screen_height:
+    #     y = screen_height - win_height
+    # if x < 0:
+    #     x = 0
+    # if y < 0:
+    #     y = 0
+    # print(f'x :{x} y: {y}')
+    # x , y = calc_alert_window_position(win_width, win_height, x_root=x_root, y_root=y_root, parent_win=parent_win)
+    # print(f'calc_alert_window_position x :{x} y: {y}')
 
     #    # 防止超出屏幕
     # x = max(0, min(x, screen_width - win_width))
@@ -4440,7 +4989,8 @@ def refresh_all_stock_data():
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
     sina_realtime_status = False
     df = _get_sina_data_realtime()
-    if df is not None and not not df.empty:
+
+    if df is not None and not df.empty:
         data = df
         sina_realtime_status = True
         for stock_code, row in data.iterrows():
@@ -4909,14 +5459,29 @@ schedule_get_ths_code_task()
 
 
 # 定义回调函数，用于线程安全更新 GUI
-def update_gui(code):
+def update_gui(stock_info):
     # label_main.config(text=f"已接收: {code}")
     # label_last.config(text=f"最后接收: {code}")
     # 1. 推送代码到输入框
-    print(f'code : {code}')
-    code_entry.delete(0, tk.END)
-    code_entry.insert(0, code)
-    search_by_code()
+    print(f'code : {stock_info}')
+    # search_by_code()
+    # if stock_info and stock_info is not None:
+    if isinstance(stock_info, dict):
+        code = stock_info.get("code")
+        name = stock_info.get("name")
+        percent = stock_info.get("percent")
+        price = stock_info.get("price")
+        vol = stock_info.get("volume")
+        # 补齐 7 列
+        high = stock_info.get("high", None)
+        lastp1d = stock_info.get("lastp1d", None)
+        stock_tuple = (code, name, high, lastp1d, percent, price, vol)
+        print(f'stock_code : {stock_code} name : {name} percent : {percent} price : {price} vol : {vol}')
+        code_entry.delete(0, tk.END)
+        code_entry.insert(0, code)
+        search_by_code()
+        # code_entry.event_generate("<Return>")
+        open_alert_editor(stock_code,new=True, stock_info=stock_tuple)
 
 
 # 启动命名管道服务器线程
