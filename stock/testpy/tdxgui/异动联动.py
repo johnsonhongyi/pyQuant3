@@ -1682,6 +1682,46 @@ def schedule_checkpid_task():
     # root.after(3 * 60 * 1000, schedule_checkpid_task)
     schedule_task('checkpid_task',3 * 60 * 1000,lambda: schedule_checkpid_task)
 
+def daily_init():
+    global realdatadf, loaded_df, viewdf, date_write_is_processed, start_init, last_updated_time
+    realdatadf = pd.DataFrame()
+    loaded_df = None
+    viewdf = pd.DataFrame()
+    date_write_is_processed = False
+    start_init = 0
+    last_updated_time = None
+    if date_entry.winfo_exists():
+        try:
+            date_entry.set_date(get_today())
+        except Exception as e:
+            print("还不能设置日期:", e)
+    print("已执行每日开盘初始化")
+
+def schedule_daily_init(root):
+    now = datetime.now()
+    today_925 = now.replace(hour=9, minute=24, second=0, microsecond=0)
+    if now > today_925:
+        # 如果已经过了 9:25，延迟到第二天
+        today_925 += timedelta(days=1)
+    delay_ms = int((today_925 - now).total_seconds() * 1000)
+    root.after(delay_ms, lambda: (daily_init(), start_background_worker()))
+    print(f"每日开盘定时初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
+# update_queue = queue.Queue()
+
+# def background_worker():
+#     while True:
+#         df = get_stock_changes_background()
+#         update_queue.put(df)
+#         time.sleep(update_interval_minutes * 60)
+
+# def process_updates():
+#     try:
+#         while True:
+#             df = update_queue.get_nowait()
+#             update_tree(df)
+#     except queue.Empty:
+#         pass
+#     root.after(500, process_updates)
 
 
 
@@ -3857,7 +3897,7 @@ def open_rules_overview(parent_win=None):
         menu = tk.Menu(aw_rules, tearoff=0)
         menu.add_command(label="编辑规则", command=lambda: open_alert_editor(code, parent_win=aw_rules))
         menu.add_command(label="新增规则", command=lambda: open_alert_editor(code, new=True, parent_win=aw_rules))
-        menu.add_command(label="删除规则", command=lambda: delete_alert_rule(code, parent_win=aw_rules))
+        menu.add_command(label="删除规则", command=lambda: delete_alert_rule(code))
         menu.post(event.x_root, event.y_root)
 
     def on_double_click_edit(event):
@@ -3905,6 +3945,12 @@ def open_alert_center():
     # 改用局部变量 aw_win
     aw_win = tk.Toplevel(root)
     aw_win.title("报警中心")
+
+        # 关键点：设置模态和焦点
+    # aw_win.transient(root)   # 父窗口关系
+    # aw_win.grab_set()              # 模态，阻止父窗口操作
+    aw_win.focus_force()           # 强制获得焦点
+    aw_win.lift()                  # 提升到顶层
 
     win_width, win_height = 720 , 360
     x, y = get_centered_window_position(win_width, win_height, parent_win=root)
@@ -3987,6 +4033,20 @@ def open_alert_center():
             alert_tree.column(c, width=40, anchor="center")
     alert_tree.pack(expand=True, fill="both")
 
+    
+    def on_single_click(event):
+        global code_entry
+        row_id = alert_tree.identify_row(event.y)
+        if not row_id:
+            return
+        vals = alert_tree.item(row_id, "values")
+        code = vals[1]
+        name = vals[2]
+        # print(f'on_single_click sel : {row_id} vals : {vals}')
+        send_to_tdx(code)
+        code_entry.delete(0, tk.END)
+        code_entry.insert(0, code)
+
     # 双击报警 → 聚焦监控窗口
     def on_double_click(event):
         global code_entry
@@ -3995,7 +4055,7 @@ def open_alert_center():
         vals = alert_tree.item(sel[0], "values")
         code = vals[1]
         name = vals[2]
-
+        # print(f'on_double_click sel : {sel} vals : {vals}')
         send_to_tdx(code)
         code_entry.delete(0, tk.END)
         code_entry.insert(0, code)
@@ -4024,7 +4084,6 @@ def open_alert_center():
             win.attributes("-topmost", 0)
             highlight_window(win)
 
-    alert_tree.bind("<Double-1>", on_double_click)
 
     # 右键菜单 → 编辑 / 新增 / 删除规则
     def show_menu(event):
@@ -4035,15 +4094,17 @@ def open_alert_center():
         menu = tk.Menu(aw_win, tearoff=0)
         menu.add_command(label="编辑规则", command=lambda: open_alert_editor(code, parent_win=aw_win, x_root=event.x_root, y_root=event.y_root))
         menu.add_command(label="新增规则", command=lambda: open_alert_editor(code, new=True, parent_win=aw_win, x_root=event.x_root, y_root=event.y_root))
-        menu.add_command(label="删除规则", command=lambda: delete_alert_rule(code, parent_win=aw_win, x_root=event.x_root, y_root=event.y_root))
+        menu.add_command(label="删除规则", command=lambda: delete_alert_rule(code))
         menu.post(event.x_root, event.y_root)
 
+    alert_tree.bind("<Double-1>", on_double_click)
     alert_tree.bind("<Button-3>", show_menu)
+    alert_tree.bind("<Button-1>", on_single_click)
 
     # Esc 只关闭当前 aw_win，不影响父窗口
     aw_win.bind("<Escape>", lambda e, w=aw_win: on_close_alert_monitor(w))
     aw_win.protocol("WM_DELETE_WINDOW", lambda w=aw_win: on_close_alert_monitor(w))
-
+    aw_win.after(120*1000,  lambda  w=aw_win: on_close_alert_monitor(w))
     # 强制渲染
     aw_win.update_idletasks()
     aw_win.after(100, refresh_alert_center)
@@ -4897,9 +4958,93 @@ def check_alert(stock_code, price, change, volume, name=None):
 # -----------------------------
 # 刷新报警中心
 # -----------------------------
+# def refresh_alert_center():
+#     global alert_window, alert_tree, alerts_history
+#     if not alert_window or not alert_window.winfo_exists() or alert_tree is None:
+#         return
+
+#     alert_tree.delete(*alert_tree.get_children())
+#     alert_tree.tag_configure("triggered", background="yellow", foreground="red")
+#     alert_tree.tag_configure("not_triggered", background="white", foreground="black")
+
+#     # 保持最新在最后一行（alerts_history append -> 最新在末尾）
+#     rows = alerts_history[-200:]
+#     print(f'rows: {row}')
+#     last_iid = None
+#     base_counter = len(alerts_history)  # 用作 iid 前缀的一部分，保证在多次刷新时不会重复
+
+#     for idx, alert in enumerate(rows):
+#         field = alert.get("field", "")
+#         value = alert.get("value", "")
+#         rule = alert.get("rule", {}) or {}
+#         delta = rule.get("delta", "")
+#         op = rule.get("op", "")
+#         rule_value = rule.get("value", "")
+
+#         triggered = False
+#         try:
+#             if op == ">=" and value >= rule_value:
+#                 triggered = True
+#             elif op == "<=" and value <= rule_value:
+#                 triggered = True
+#         except Exception:
+#             triggered = False
+
+#         status = "触发" if triggered else "未触发"
+#         vals = (
+#             alert.get('time', ''),
+#             alert.get('stock_code', ''),
+#             alert.get('name', ''),
+#             f"{field}{op}{rule_value} → {status}",
+#             f"现值 {value}",
+#             f"变化量 {delta}"
+#         )
+#         tag = "triggered" if triggered else "not_triggered"
+
+#         # 生成唯一 iid（可换成 stock_code+time 等更语义化的 id）
+#         iid = f"alert_{base_counter}_{idx}"
+#         print(f'iid= {iid}, values={vals}, tags={tag}')
+#         alert_tree.insert("", "end", iid=iid, values=vals, tags=(tag,))
+#         last_iid = iid
+
+#     # 强制渲染完成
+#     try:
+#         alert_window.update_idletasks()
+#     except Exception:
+#         pass
+
+#     # 在下一个事件循环再选中最后一行（确保任何可能的排序/回调已执行）
+#     def _select_last():
+#         try:
+#             children = alert_tree.get_children()
+#             if not children:
+#                 return
+
+#             # 如果 last_iid 在 children 中，用它；否则退回到 children[-1]
+#             target = last_iid if (last_iid and last_iid in children) else children[-1]
+
+#             # 先清除旧选择，然后设置选中、焦点并滚动到可见
+#             try:
+#                 alert_tree.selection_remove(alert_tree.selection())
+#             except Exception:
+#                 pass
+#             alert_tree.selection_set(target)
+#             alert_tree.focus(target)
+#             alert_tree.see(target)
+
+#             # **（可选）调试输出，确认选中行与显示一致**
+#             # print("SELECTED IID:", target, "VALUES:", alert_tree.item(target).get("values"))
+#         except Exception:
+#             pass
+
+#     try:
+#         alert_window.after(0, _select_last)
+#     except Exception:
+#         _select_last()
+
+
 def refresh_alert_center():
     global alert_window, alert_tree, alerts_history
-
     if not alert_window or not alert_window.winfo_exists() or alert_tree is None:
         return
 
@@ -4907,32 +5052,55 @@ def refresh_alert_center():
     alert_tree.tag_configure("triggered", background="yellow", foreground="red")
     alert_tree.tag_configure("not_triggered", background="white", foreground="black")
 
-    for alert in alerts_history[-200:]:
+    # 确保最新在最后一行
+    rows = list(reversed(alerts_history[-200:]))
+
+    for alert in rows:
         field = alert.get("field", "")
-        value = alert.get("value", "")
-        rule = alert.get("rule", {})
+        value = alert.get("value", 0)
+        rule = alert.get("rule", {}) or {}
         delta = rule.get("delta", "")
         op = rule.get("op", "")
         rule_value = rule.get("value", "")
 
-        # 判断是否触发
         triggered = False
-        if op == ">=" and value >= rule_value:
-            triggered = True
-        elif op == "<=" and value <= rule_value:
-            triggered = True
+        try:
+            if op == ">=" and value >= rule_value:
+                triggered = True
+            elif op == "<=" and value <= rule_value:
+                triggered = True
+        except Exception:
+            triggered = False
 
         status = "触发" if triggered else "未触发"
         vals = (
-            alert['time'],
-            alert['stock_code'],
-            alert['name'],
+            alert.get('time', ''),
+            alert.get('stock_code', ''),
+            alert.get('name', ''),
             f"{field}{op}{rule_value} → {status}",
             f"现值 {value}",
             f"变化量 {delta}"
         )
         tag = "triggered" if triggered else "not_triggered"
         alert_tree.insert("", "end", values=vals, tags=(tag,))
+
+    alert_window.update_idletasks()
+
+    children = alert_tree.get_children()
+    if children:
+        last_item = children[-1]  # 真正的最后一行
+        def _select_last():
+            try:
+                alert_tree.selection_set(last_item)
+                alert_tree.focus(last_item)
+                alert_tree.see(last_item)
+            except Exception:
+                pass
+        # 延迟 50ms，保证滚动条和行索引同步
+        alert_window.after(0, _select_last)
+
+
+
 
 def flush_alerts():
     """定时刷新报警缓冲区，将 alerts_buffer 写入报警中心"""
@@ -4979,6 +5147,12 @@ def get_latest_valid_data(df):
     # 每个股票取最后一条有效数据
     latest_df = df_valid.sort_values("时间").groupby("代码").tail(1)
     return latest_df
+
+def format_next_time(delay_ms):
+    """把 root.after 的延迟时间转换成 %H:%M 格式"""
+    delay_sec = delay_ms / 1000
+    target_time = datetime.now() + timedelta(seconds=delay_sec)
+    return target_time.strftime("%H:%M")
 
 def refresh_all_stock_data():
     # 假设 get_all_stock_data 返回 DataFrame 或 dict
@@ -5028,53 +5202,54 @@ def refresh_all_stock_data():
     # 刷新报警中心显示
     flush_alerts()
     # 10 分钟后再次执行
-    if  get_work_time() :
-        # print(f'start flush_alerts')
-        if  not 1130 < get_now_time_int() < 1300:
-            root.after(60*1000, refresh_all_stock_data)
+    if get_work_time() or (get_day_is_trade_day() and 1130 < get_now_time_int() < 1300):
+        if not 1130 < get_now_time_int() < 1300:
+            delay_ms = 60 * 1000
+            root.after(delay_ms, refresh_all_stock_data)
+            status_label2.config(text=f"alert刷新 {format_next_time(delay_ms)}")
         else:
-            next_time =  int(minutes_to_time(1300)) 
-            print(f'refresh_all_stock_data next_update:{next_time} Min')
-            root.after(next_time*1000, refresh_all_stock_data)
-
+            next_time = int(minutes_to_time(1300))  # 单位：秒
+            root.after(next_time * 1000, refresh_all_stock_data)
+            status_label2.config(text=f"午休刷新 {format_next_time(next_time * 1000)}")
     else:
-        print(f'refresh_all_stock_data next_update work:{delay_ms/1000/60/60} hour')
         root.after(delay_ms, refresh_all_stock_data)
+        status_label2.config(text=f"非交易刷新 {format_next_time(delay_ms)}")
+
 
     # if (get_day_is_trade_day() and get_now_time_int() < 1505) or get_work_time() or (start_init == 0 ):
     #     root.after(60*1000, refresh_all_stock_data)
     # else:
     #     root.after(delay_ms, refresh_all_stock_data)
 
-def refresh_alert_centerlist():
-    """刷新报警中心UI"""
-    global alerts_buffer, alert_center_listbox
+# def refresh_alert_centerlist():
+#     """刷新报警中心UI"""
+#     global alerts_buffer, alert_center_listbox
 
-    if not alert_center_listbox:
-        return
+#     if not alert_center_listbox:
+#         return
 
-    alert_center_listbox.delete(0, tk.END)
+#     alert_center_listbox.delete(0, tk.END)
 
-    for alert in alerts_buffer[-100:]:  # 只显示最近 100 条
-        time_str = alert.get('time', '')
-        code = alert.get('stock_code', '')
-        name = alert.get('name', '')
+#     for alert in alerts_buffer[-100:]:  # 只显示最近 100 条
+#         time_str = alert.get('time', '')
+#         code = alert.get('stock_code', '')
+#         name = alert.get('name', '')
         
-        # ✅ 优先用 status 字段（规则 + 当前值 + 触发/未触发）
-        status = alert.get('status')
-        if not status:
-            # 兼容旧数据
-            field = alert.get('field', '')
-            op = alert.get('rule', {}).get('op', '')
-            value = alert.get('rule', {}).get('value', '')
-            cur_val = alert.get('value', '')
-            if field and op and value != '':
-                status = f"{field}{op}{value} (当前 {cur_val})"
-            else:
-                status = "未知规则"
+#         # ✅ 优先用 status 字段（规则 + 当前值 + 触发/未触发）
+#         status = alert.get('status')
+#         if not status:
+#             # 兼容旧数据
+#             field = alert.get('field', '')
+#             op = alert.get('rule', {}).get('op', '')
+#             value = alert.get('rule', {}).get('value', '')
+#             cur_val = alert.get('value', '')
+#             if field and op and value != '':
+#                 status = f"{field}{op}{value} (当前 {cur_val})"
+#             else:
+#                 status = "未知规则"
 
-        display_text = f"[{time_str}] {code} {name} → {status}"
-        alert_center_listbox.insert(tk.END, display_text)
+#         display_text = f"[{time_str}] {code} {name} → {status}"
+#         alert_center_listbox.insert(tk.END, display_text)
 
 
 # ------------------------
@@ -5110,10 +5285,12 @@ def check_condition(code, field, op, threshold, current_val, delta):
 
 
 def delete_alert_rule(code):
+    global alerts_rules
     if code in alerts_rules:
         del alerts_rules[code]
         save_alerts()
-        messagebox.showinfo("删除规则", f"{code} 的规则已删除")
+        # messagebox.showinfo("删除规则", f"{code} 的规则已删除")
+        toast_message(None, f"{code} 所有规则已删除")
 
 def bind_hotkeys(root):
     """绑定快捷键"""
@@ -5249,7 +5426,7 @@ frame_right.pack(side=tk.RIGHT, padx=2, pady=2)
 
 # Variables
 tdx_var = tk.BooleanVar(value=True)
-ths_var = tk.BooleanVar(value=False)
+ths_var = tk.BooleanVar(value=True)
 dfcf_var = tk.BooleanVar(value=False)
 uniq_var = tk.BooleanVar(value=False)
 sub_var = tk.BooleanVar(value=False)
@@ -5457,6 +5634,8 @@ schedule_worktime_task(tree)
 # 启动定时任务调度
 schedule_get_ths_code_task()
 
+#每日定时初始化
+schedule_daily_init(root)
 
 # 定义回调函数，用于线程安全更新 GUI
 def update_gui(stock_info):

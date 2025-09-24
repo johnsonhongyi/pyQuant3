@@ -9,7 +9,7 @@ import multiprocessing as mp
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox,Menu
 import pandas as pd
-
+import re
 from JohnsonUtil.stock_sender import StockSender
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import LoggerFactory, commonTips as cct
@@ -328,8 +328,8 @@ class StockMonitorApp(tk.Tk):
         # 刷新开关标志
         self.refresh_enabled = True
         from multiprocessing import Manager
-        manager = Manager()
-        self.global_dict = manager.dict()  # 共享字典
+        self.manager = Manager()
+        self.global_dict = self.manager.dict()  # 共享字典
         self.global_dict["resample"] = "d"
         self.global_values = cct.GlobalValues(self.global_dict)
         resample = self.global_values.getkey("resample")
@@ -570,7 +570,6 @@ class StockMonitorApp(tk.Tk):
             log.info(f"保存报警规则: {rule}")
             stock_code = rule.get("stock")  # 或者从 UI 里获取选中的股票代码
             print(f'stock_code:{stock_code}')
-            import ipdb;ipdb.set_trace()
             parent.alert_manager.save_rule(stock_code['name'],rule)  # 保存到 AlertManager
             messagebox.showinfo("成功", "规则已保存")
             win.destroy()
@@ -971,7 +970,14 @@ class StockMonitorApp(tk.Tk):
             print(f'refresh_flag.value : {self.refresh_flag.value}')
         self.status_var.set("刷新已启动")
 
-
+    def format_next_time(self,delay_ms=None):
+        """把 root.after 的延迟时间转换成 %H:%M 格式"""
+        if delay_ms == None:
+            target_time = datetime.now()
+        else:
+            delay_sec = delay_ms / 1000
+            target_time = datetime.now() + timedelta(seconds=delay_sec)
+        return target_time.strftime("%H:%M")
     # ----------------- 数据刷新 ----------------- #
     def update_tree(self):
         try:
@@ -987,6 +993,7 @@ class StockMonitorApp(tk.Tk):
                         self.apply_search()
                     else:
                         self.refresh_tree(df)
+                    self.status_var2.set(f'queue update: {self.format_next_time()}')
         except Exception as e:
             log.error(f"Error updating tree: {e}", exc_info=True)
         finally:
@@ -2018,9 +2025,6 @@ class StockMonitorApp(tk.Tk):
         #             values.append("")
         #     self.tree.insert("", "end", values=values)
 
-        for _, row in df.iterrows():
-            values = [row.get(col, "") for col in self.current_cols]
-            self.tree.insert("", "end", values=values)
 
         # 4. 恢复选中
         if self.select_code:
@@ -2136,43 +2140,227 @@ class StockMonitorApp(tk.Tk):
                 log.error(f"加载搜索历史失败: {e}")
         return [], []
 
-    def apply_search_single(self, query, history_list, combo):
-        """执行单个搜索框的搜索逻辑"""
-        query = query.strip()
-        if not query:
+    # def apply_search_single(self, query, history_list, combo):
+    #     """执行单个搜索框的搜索逻辑"""
+    #     query = query.strip()
+    #     if not query:
+    #         self.status_var.set("搜索框为空")
+    #         return
+
+    #     # --- 插入历史：先去掉旧的，再插到最前面 ---
+    #     if query in history_list:
+    #         history_list.remove(query)
+    #     history_list.insert(0, query)
+
+    #     # 保留最多 20 条
+    #     history_list[:] = history_list[:20]
+
+    #     # 更新到 combobox
+    #     combo['values'] = history_list
+    #     self.save_search_history()  # 存档时也会去重
+
+    #     # --- 数据过滤 ---
+    #     if self.df_all.empty:
+    #         self.status_var.set("当前数据为空")
+    #         return
+
+    #     try:
+    #         df_filtered = self.df_all.query(query)
+    #         self.refresh_tree(df_filtered)
+    #         self.status_var.set(f"搜索: {query} | 结果 {len(df_filtered)} 行")
+    #     except Exception as e:
+    #         log.error(f"Query error: {e}")
+    #         self.status_var.set(f"查询错误: {e}")
+
+
+    def apply_search(self):
+        val1 = self.search_var1.get().strip()
+        val2 = self.search_var2.get().strip()
+
+        if not val1 and not val2:
             self.status_var.set("搜索框为空")
             return
 
-        # --- 插入历史：先去掉旧的，再插到最前面 ---
-        if query in history_list:
-            history_list.remove(query)
-        history_list.insert(0, query)
+        # 构建原始查询语句
+        if val1 and val2:
+            query = f"({val1}) and ({val2})"
+        elif val1:
+            query = val1
+        else:
+            query = val2
 
-        # 保留最多 20 条
-        history_list[:] = history_list[:20]
+        try:
+            # 顶部搜索框
+            if val1:
+                if val1 in self.search_history1:
+                    self.search_history1.remove(val1)
+                self.search_history1.insert(0, val1)
+                if len(self.search_history1) > 20:
+                    self.search_history1[:] = self.search_history1[:20]
+                self.search_combo1['values'] = self.search_history1
+                try:
+                    self.search_combo1.set(val1)
+                except Exception:
+                    pass
 
-        # 更新到 combobox
-        combo['values'] = history_list
-        self.save_search_history()  # 存档时也会去重
+            # 底部搜索框
+            if val2:
+                if val2 in self.search_history2:
+                    self.search_history2.remove(val2)
+                self.search_history2.insert(0, val2)
+                if len(self.search_history2) > 20:
+                    self.search_history2[:] = self.search_history2[:20]
+                self.search_combo2['values'] = self.search_history2
+                try:
+                    self.search_combo2.set(val2)
+                except Exception:
+                    pass
 
-        # --- 数据过滤 ---
+            # 一次性保存
+            self.save_search_history()
+        except Exception as ex:
+            log.exception("更新搜索历史时出错: %s", ex)
+
+        # ================= 数据为空检查 =================
         if self.df_all.empty:
             self.status_var.set("当前数据为空")
             return
 
+        # ====== 条件清理 ======
+        import re
+        conditions = [c.strip() for c in query.split('and')]
+        valid_conditions = []
+        removed_conditions = []
+
+        for cond in conditions:
+            cond_clean = cond.lstrip('(').rstrip(')')
+
+            # index 条件特殊保留
+            # if 'index.' in cond_clean.lower():
+            #     valid_conditions.append(cond_clean)
+            #     continue
+
+            # index 或 str 操作条件特殊保留
+            if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower():
+                valid_conditions.append(cond_clean)
+                continue
+
+
+            # 提取条件中的列名
+            cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
+
+            # 所有列都必须存在才保留
+            if all(col in self.df_all.columns for col in cols_in_cond):
+                valid_conditions.append(cond_clean)
+            else:
+                removed_conditions.append(cond_clean)
+                log.info(f"剔除不存在的列条件: {cond_clean}")
+
+        # 打印剔除条件列表
+        if removed_conditions:
+            print(f"[剔除的条件列表] {removed_conditions}")
+
+        if not valid_conditions:
+            self.status_var.set("没有可用的查询条件")
+            return
+
+        # ====== 拼接 final_query 并检查括号 ======
+        final_query = ' and '.join(f"({c})" for c in valid_conditions)
+
+        left_count = final_query.count("(")
+        right_count = final_query.count(")")
+        if left_count != right_count:
+            if left_count > right_count:
+                final_query += ")" * (left_count - right_count)
+            elif right_count > left_count:
+                final_query = "(" * (right_count - left_count) + final_query
+
+        # ====== 决定 engine ======
+        query_engine = 'numexpr'
+        if any('index.' in c.lower() for c in valid_conditions):
+            query_engine = 'python'
+
+        # ====== 数据过滤 ======
         try:
-            df_filtered = self.df_all.query(query)
+            df_filtered = self.df_all.query(final_query, engine=query_engine)
             self.refresh_tree(df_filtered)
-            self.status_var.set(f"搜索: {query} | 结果 {len(df_filtered)} 行")
+            # 打印剔除条件列表
+            if removed_conditions:
+                print(f"[剔除的条件列表] {removed_conditions}")
+                # 显示到状态栏
+                self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
+                self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
+            else:
+                self.status_var2.set('')
+                self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
         except Exception as e:
             log.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")
 
 
 
+
+    # def apply_search_python(self):
+    #     val1 = self.search_var1.get().strip()
+    #     val2 = self.search_var2.get().strip()
+
+    #     if not val1 and not val2:
+    #         self.status_var.set("搜索框为空")
+    #         return
+
+    #     # 构建查询语句
+    #     if val1 and val2:
+    #         query = f"({val1}) and ({val2})"
+    #     elif val1:
+    #         query = val1
+    #     else:
+    #         query = val2
+
+    #     # 更新第一个搜索历史
+    #     if val1:
+    #         if val1 not in self.search_history1:
+    #             self.search_history1.insert(0, val1)
+    #             if len(self.search_history1) > 20:
+    #                 self.search_history1 = self.search_history1[:20]
+    #         else:
+    #             self.search_history1.remove(val1)
+    #             self.search_history1.insert(0, val1)
+    #         self.search_combo1['values'] = self.search_history1
+    #         self.save_search_history()
+
+    #     # 更新第二个搜索历史
+    #     if val2:
+    #         if val2 not in self.search_history2:
+    #             self.search_history2.insert(0, val2)
+    #             if len(self.search_history2) > 20:
+    #                 self.search_history2 = self.search_history2[:20]
+    #         else:
+    #             self.search_history2.remove(val2)
+    #             self.search_history2.insert(0, val2)
+    #         self.search_combo2['values'] = self.search_history2
+    #         self.save_search_history()
+
+    #     # 数据过滤与刷新
+    #     if self.df_all.empty:
+    #         self.status_var.set("当前数据为空")
+    #         return
+
+    #     try:
+    #         # 判断 query 是否涉及 index
+    #         if 'index.' in query.lower():
+    #             df_filtered = self.df_all.query(query, engine='python')
+    #         else:
+    #             df_filtered = self.df_all.query(query)  # 默认 engine
+
+    #         self.refresh_tree(df_filtered)
+    #         self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {query}")
+    #     except Exception as e:
+    #         log.error(f"Query error: {e}")
+    #         self.status_var.set(f"查询错误: {e}")
+
     # --- 搜索逻辑 ---
     # 搜索逻辑：支持双搜索框 & 独立历史
-    def apply_search(self):
+    def apply_search_nopython(self):
         val1 = self.search_var1.get().strip()
         val2 = self.search_var2.get().strip()
 
@@ -2220,67 +2408,67 @@ class StockMonitorApp(tk.Tk):
         try:
             df_filtered = self.df_all.query(query)
             self.refresh_tree(df_filtered)
-            self.status_var.set(f"搜索: {query} | 结果 {len(df_filtered)} 行")
+            self.status_var.set(f"结果 {len(df_filtered)}行| 搜索: {query}")
         except Exception as e:
             log.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")
 
-    def apply_search_start(self):
-        query = self.search_var.get().strip()
-        if not query:
-            self.status_var.set("搜索框为空")
-            return
+    # def apply_search_start(self):
+    #     query = self.search_var.get().strip()
+    #     if not query:
+    #         self.status_var.set("搜索框为空")
+    #         return
 
-        if query not in self.search_history:
-            self.search_history.insert(0, query)
-            if len(self.search_history) > 20:  # 最多保存20条
-                self.search_history = self.search_history[:20]
-            self.search_combo['values'] = self.search_history
-            self.save_search_history()  # 保存到文件
-        else:
-            self.search_history.remove(query)  # リストから既存のクエリを削除する
-            self.search_history.insert(0, query) # リストの先頭にクエリを挿入する
-            self.search_combo['values'] = self.search_history
-            self.save_search_history()
-
-
-        if self.df_all.empty:
-            self.status_var.set("当前数据为空")
-            return
-
-        try:
-            df_filtered = self.df_all.query(query)
-            self.refresh_tree(df_filtered)
-            self.status_var.set(f"结果 {len(df_filtered)}行|搜索: {query}  ")
-        except Exception as e:
-            log.error(f"Query error: {e}")
-            self.status_var.set(f"查询错误: {e}")
+    #     if query not in self.search_history:
+    #         self.search_history.insert(0, query)
+    #         if len(self.search_history) > 20:  # 最多保存20条
+    #             self.search_history = self.search_history[:20]
+    #         self.search_combo['values'] = self.search_history
+    #         self.save_search_history()  # 保存到文件
+    #     else:
+    #         self.search_history.remove(query)  # リストから既存のクエリを削除する
+    #         self.search_history.insert(0, query) # リストの先頭にクエリを挿入する
+    #         self.search_combo['values'] = self.search_history
+    #         self.save_search_history()
 
 
-    def apply_search_src(self):
-        query = self.search_var.get().strip()
-        if not query:
-            self.status_var.set("搜索框为空")
-            return
+    #     if self.df_all.empty:
+    #         self.status_var.set("当前数据为空")
+    #         return
 
-        if query not in self.search_history:
-            self.search_history.insert(0, query)
-            if len(self.search_history) > 20:  # 最多保存20条
-                self.search_history = self.search_history[:20]
-            self.search_combo['values'] = self.search_history
-            self.save_search_history()  # 保存到文件
+    #     try:
+    #         df_filtered = self.df_all.query(query)
+    #         self.refresh_tree(df_filtered)
+    #         self.status_var.set(f"结果 {len(df_filtered)}行| 搜索: {query}  ")
+    #     except Exception as e:
+    #         log.error(f"Query error: {e}")
+    #         self.status_var.set(f"查询错误: {e}")
 
-        if self.current_df.empty:
-            self.status_var.set("当前数据为空")
-            return
 
-        try:
-            df_filtered = self.current_df.query(query)
-            self.refresh_tree(df_filtered)
-            self.status_var.set(f"搜索: {query} | 结果 {len(df_filtered)} 行")
-        except Exception as e:
-            log.error(f"Query error: {e}")
-            self.status_var.set(f"查询错误: {e}")
+    # def apply_search_src(self):
+    #     query = self.search_var.get().strip()
+    #     if not query:
+    #         self.status_var.set("搜索框为空")
+    #         return
+
+    #     if query not in self.search_history:
+    #         self.search_history.insert(0, query)
+    #         if len(self.search_history) > 20:  # 最多保存20条
+    #             self.search_history = self.search_history[:20]
+    #         self.search_combo['values'] = self.search_history
+    #         self.save_search_history()  # 保存到文件
+
+    #     if self.current_df.empty:
+    #         self.status_var.set("当前数据为空")
+    #         return
+
+    #     try:
+    #         df_filtered = self.current_df.query(query)
+    #         self.refresh_tree(df_filtered)
+    #         self.status_var.set(f"搜索: {query} | 结果 {len(df_filtered)} 行")
+    #     except Exception as e:
+    #         log.error(f"Query error: {e}")
+    #         self.status_var.set(f"查询错误: {e}")
 
     def clean_search(self, which):
         """清空指定搜索框内容"""
@@ -2323,6 +2511,10 @@ class StockMonitorApp(tk.Tk):
             combo['values'] = history
             self.save_search_history()
             self.status_var.set(f"搜索框 {which} 已删除历史: {target}")
+            if var.get() == target:
+                var.set('')
+            # if select_var is not None and select_var.get() == target:
+            #     select_var.set('')
         else:
             self.status_var.set(f"搜索框 {which} 历史中没有: {target}")
 
@@ -2437,6 +2629,10 @@ class StockMonitorApp(tk.Tk):
         self.save_window_position()
         self.save_search_history()
         archive_search_history_list()
+        try:
+            self.manager.shutdown()
+        except Exception as e: 
+            print(f'manager.shutdown : {e}')
         self.destroy()
 
 # ------------------ 主程序入口 ------------------ #
@@ -2451,4 +2647,10 @@ if __name__ == "__main__":
     # manager = Manager()
     # global_dict = manager.dict()  # 共享字典
     app = StockMonitorApp()
+    if cct.isMac():
+        width, height = 100, 32
+        cct.set_console(width, height)
+    else:
+        width, height = 100, 32
+        cct.set_console(width, height)
     app.mainloop()
