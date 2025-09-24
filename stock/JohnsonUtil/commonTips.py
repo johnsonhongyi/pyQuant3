@@ -103,13 +103,27 @@ class GlobalValues:
             cls._global_dict = ext_dict or {}
         elif ext_dict is not None:
             cls._global_dict = ext_dict
+        cls._local_fallback = {}   # 本地兜底字典
         return cls._instance
 
     def getkey(self, key, default=None):
-        return self._global_dict.get(key, default)
+        try:
+            return self._global_dict.get(key, default)
+        except (BrokenPipeError, EOFError, OSError):
+            # 管道断开时，返回默认值，避免子进程报错
+            # 你也可以这里写日志
+            return default
+        # return self._global_dict.get(key, default)
 
     def setkey(self, key, value):
-        self._global_dict[key] = value
+        try:
+            self._global_dict[key] = value
+        except (BrokenPipeError, EOFError, OSError) as e:
+            # 这里可以记录日志，说明 Manager 已经失效
+            log.error(f"setkey 管道断开: {e}, key={key}, value={value}")
+            # 可以选择丢弃，或者用本地 dict 兜底
+            self._local_fallback[key] = value
+        # self._global_dict[key] = value
 
     def getkey_status(self, key):
         return key in self._global_dict
@@ -1088,6 +1102,24 @@ terminal_positionKey1K_triton = {'sina_Market-DurationDn.py': '48, 506,1356,438'
                         'sina_Monitor.py': '109, 20, 1356, 520',
                         'singleAnalyseUtil.py': '1046, 20,897,359',
                         'LinePower.py': '9, 216, 761,407',
+                        'instock_MonitorTK.py': '48, 216, 761,407',
+                        'sina_Market-DurationDnUP.py': '602,518,1352,464',
+                        'sina_Market-DurationUP.py': '48, 506,1353,438',
+                        'instock_Monitor.py':'32, 86,1400, 359',
+                        'chantdxpower.py':'86, 128, 649,407',
+                        'ths-tdx-web.py':'70, 200, 159,27',
+                        'pywin32_mouse.py':'70, 200, 159,27',
+                        'filter_resample_Monitor.py':'549, 244,1356,520'}
+
+terminal_positionKey_triton = {'sina_Market-DurationDn.py': '48, 506,1356,438',
+                        'sina_Market-DurationCXDN.py': '13, 310,1356,438',
+                        'sina_Market-DurationSH.py': '-29, 623,1400,440',
+                        'sina_Monitor-Market-LH.py': '567, 286,1356,407',
+                        'sina_Monitor-Market.py': '140, 63,1400,440',
+                        'sina_Monitor.py': '109, 20, 1356, 520',
+                        'singleAnalyseUtil.py': '1046, 20,897,359',
+                        'LinePower.py': '9, 216, 761,407',
+                        'instock_MonitorTK.py': '48, 216, 761,407',
                         'sina_Market-DurationDnUP.py': '602,518,1352,464',
                         'sina_Market-DurationUP.py': '48, 506,1353,438',
                         'instock_Monitor.py':'32, 86,1400, 359',

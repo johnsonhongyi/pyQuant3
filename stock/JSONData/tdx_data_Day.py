@@ -2669,7 +2669,6 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     # print 'ratio' in dm.columns
     # print time.time()-time_s
     dm['nvol'] = dm['volume']
-    
     if cct.get_now_time_int() > 932 and market not in ['sh', 'sz', 'cyb']:
         dd = rl.get_sina_Market_json('all')
         if isinstance(dd, pd.DataFrame):
@@ -2691,6 +2690,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
             dm = cct.combine_dataFrame(dm, df.loc[:, ['name']])
         log.info("dm combine_df ratio:%s %s" % (len(dm), len(df))),
         dm = dm.fillna(0)
+        
     if 925 < cct.get_now_time_int() < 1502:
         dm = dm.query('b1_v > 0 or a1_v > 0')  
     if market != 'index' and (cct.get_now_time_int() > 935 or not cct.get_work_time()):
@@ -2720,7 +2720,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         log.error("top_all is None :%s" % (top_now))
     if isinstance(top_now,pd.DataFrame) and not 'ratio' in top_now.columns:
         top_now['ratio'] = 0
-    top_now = top_now.query('open != 0 and close != 0')
+    # top_now = top_now.query('open != 0 and close != 0')
     return cct.reduce_memory_usage(top_now)
 
 
