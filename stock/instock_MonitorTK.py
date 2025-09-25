@@ -7,6 +7,7 @@ import json
 import threading
 import multiprocessing as mp
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox,Menu
 import pandas as pd
 import re
@@ -18,6 +19,7 @@ from JSONData import tdx_data_Day as tdd
 import win32pipe, win32file
 from datetime import datetime, timedelta
 import shutil
+import ctypes
 log = LoggerFactory.log
 # log.setLevel(log_level)
 # log.setLevel(LoggerFactory.DEBUG)
@@ -40,11 +42,64 @@ DARACSV_DIR = os.path.join(BASE_DIR, "datacsv")
 WINDOW_CONFIG_FILE = os.path.join(BASE_DIR, "window_config.json")
 SEARCH_HISTORY_FILE = os.path.join(DARACSV_DIR, "search_history.json")
 ARCHIVE_DIR = os.path.join(BASE_DIR, "archives")
+icon_path = os.path.join(BASE_DIR, "MonitorTK.ico")
+# icon_path = os.path.join(BASE_DIR, "MonitorTK.png")
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(DARACSV_DIR, exist_ok=True)
 START_INIT = 0
 # st_key_sort = '3 0'
 
+def get_monitor_by_point(x, y):
+    """返回包含坐标(x,y)的屏幕信息字典"""
+    monitors = []
+    class RECT(ctypes.Structure):
+        _fields_ = [
+            ("left", ctypes.c_long),
+            ("top", ctypes.c_long),
+            ("right", ctypes.c_long),
+            ("bottom", ctypes.c_long)
+        ]
+
+    class MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize", ctypes.c_long),
+            ("rcMonitor", RECT),
+            ("rcWork", RECT),
+            ("dwFlags", ctypes.c_long)
+        ]
+
+    def monitor_enum_proc(hMonitor, hdcMonitor, lprcMonitor, dwData):
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(MONITORINFO)
+        ctypes.windll.user32.GetMonitorInfoW(hMonitor, ctypes.byref(info))
+        rc = info.rcMonitor
+        monitors.append({
+            "left": rc.left,
+            "top": rc.top,
+            "right": rc.right,
+            "bottom": rc.bottom,
+            "width": rc.right - rc.left,
+            "height": rc.bottom - rc.top
+        })
+        return 1
+
+    MonitorEnumProc = ctypes.WINFUNCTYPE(ctypes.c_int,
+                                         ctypes.c_ulong,
+                                         ctypes.c_ulong,
+                                         ctypes.POINTER(RECT),
+                                         ctypes.c_double)
+    ctypes.windll.user32.EnumDisplayMonitors(0, 0, MonitorEnumProc(monitor_enum_proc), 0)
+
+    for m in monitors:
+        if m['left'] <= x < m['right'] and m['top'] <= y < m['bottom']:
+            return m
+    # 如果没有匹配，返回主屏幕
+    if monitors:
+        return monitors[0]
+    else:
+        # fallback
+        width, height = get_monitors_info()
+        return {"left": 0, "top": 0, "width": width, "height": height}
 
 
 # ------------------ 后台数据进程 ------------------ #
@@ -61,7 +116,8 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
     print(f"init resample: {resample} flag.value : {flag.value}")
     while True:
         # print(f'resample : new : {g_values.getkey("resample")} last : {resample} st : {g_values.getkey("st_key_sort")}')
-        if flag is not None and not flag.value:   # 停止刷新
+        # if flag is not None and not flag.value:   # 停止刷新
+        if not flag.value:   # 停止刷新
                time.sleep(1)
                # print(f'flag.value : {flag.value} 停止更新')
                continue
@@ -78,7 +134,9 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
             st_key_sort = g_values.getkey("st_key_sort")
         elif (not cct.get_work_time()) and START_INIT > 0:
                 # print(f'not worktime and work_duration')
-                time.sleep(5)
+                for _ in range(5):
+                    if not flag.value: break
+                    time.sleep(1)
                 continue
         else:
             print(f'start worktime : {cct.get_now_time()} get_work_time: {cct.get_work_time()} , START_INIT :{START_INIT} ')
@@ -129,6 +187,9 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
             queue.put(top_temp)
             gc.collect()
             time.sleep(ct.duration_sleep_time)
+            for _ in range(ct.duration_sleep_time):
+                if not flag.value: break
+                time.sleep(1)
             START_INIT = 1
             print(f'START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{ct.duration_sleep_time} resample:{resample}')
             # log.debug(f'fetch_and_process timesleep:{ct.duration_sleep_time} resample:{resample}')
@@ -322,6 +383,9 @@ class StockMonitorApp(tk.Tk):
         # self.queue = queue
         self.title("Stock Monitor")
         self.load_window_position()
+        self.iconbitmap(icon_path)  # Windows 下 .ico 文件
+        # self._icon = tk.PhotoImage(file=icon_path)
+        # self.iconphoto(True, self._icon)
         self.sortby_col = None
         self.sortby_col_ascend = None
         self.select_code = None
@@ -336,6 +400,10 @@ class StockMonitorApp(tk.Tk):
         print(f'app init getkey resample:{self.global_values.getkey("resample")}')
         self.global_values.setkey("resample", resample)
         self.blkname = self.global_values.getkey("blkname") or "061.blk"
+
+        # 用于保存 detail_win
+        self.detail_win = None
+        self.txt_widget = None
 
         # ----------------- 控件框 ----------------- #
         ctrl_frame = tk.Frame(self)
@@ -455,7 +523,8 @@ class StockMonitorApp(tk.Tk):
             # self.tree.heading(col, command=lambda c=col: self.show_column_menu(c))
 
         # 双击表头绑定
-        self.tree.bind("<Double-1>", self.on_tree_header_double_click)
+        # self.tree.bind("<Double-1>", self.on_tree_header_double_click)
+        self.tree.bind("<Double-1>", self.on_tree_double_click)
 
         self.df_all = pd.DataFrame()      # 保存 fetch_and_process 返回的完整原始数据
         self.current_df = pd.DataFrame()
@@ -475,9 +544,7 @@ class StockMonitorApp(tk.Tk):
         self.after(1000, self.update_tree)
 
 
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
-        # Tree selection event
-        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+
         self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=self.update_send_status)
 
 
@@ -489,8 +556,17 @@ class StockMonitorApp(tk.Tk):
         # self.tree_menu.add_command(label="新建报警规则", command=self.open_alert_rule_new)
         # self.tree_menu.add_command(label="编辑报警规则", command=self.open_alert_rule_edit)
 
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        # Tree selection event
+        # self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
+        self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)  
+        self.tree.bind("<Button-1>", self.on_single_click)
+
         # 绑定右键点击事件
         self.tree.bind("<Button-3>", self.on_tree_right_click)
+
+        # 绑定双击事件
+        # self.tree.bind("<Double-1>", self.on_double_click)
 
 
         #     self.apply_search()
@@ -679,7 +755,7 @@ class StockMonitorApp(tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["保存数据", "读取存档", "报警中心"]
+        options = ["停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -759,6 +835,9 @@ class StockMonitorApp(tk.Tk):
             self.search_var1.set(self.search_history1[0])
         if len(self.search_history2) > 0:
             self.search_var2.set(self.search_history2[0])
+
+        # self.focus_force()
+        # self.lift()
         # self.search_btn1.config(
         #     command=lambda: self.apply_search(self.search_var1, self.search_history1, self.search_combo1, "search1")
         # )
@@ -1037,25 +1116,6 @@ class StockMonitorApp(tk.Tk):
             log.error(f"推送 stock_info 出错: {e} {row}")
             return False
 
-    def on_tree_right_click(self, event):
-        """右键点击 TreeView 行"""
-        # 确保选中行
-        item_id = self.tree.identify_row(event.y)
-        # if item_id:
-        #     self.tree.selection_set(item_id)
-            # self.tree_menu.post(event.x_root, event.y_root)
-        # selected_item = self.tree.selection()
-
-        if item_id:
-            stock_info = self.tree.item(item_id, 'values')
-            stock_code = stock_info[0]
-            if self.push_stock_info(stock_code,self.df_all.loc[stock_code]):
-                # 如果发送成功，更新状态标签
-                self.status_var2.set(f"发送成功: {stock_code}")
-            else:
-                # 如果发送失败，更新状态标签
-                self.status_var2.set(f"发送失败: {stock_code}")
-
 
     def open_alert_rule_new(self):
         """新建报警规则"""
@@ -1093,31 +1153,10 @@ class StockMonitorApp(tk.Tk):
             "extra": values  # 保留整行
         }
         self.selected_stock_info = stock_info
-        # 假设 tree 列是 (code, name, price, change, volume)
-        # stock_info = {
-        #     "code": values[0],
-        #     "name": values[1] if len(values) > 1 else "",
-        #     "price": values[2] if len(values) > 2 else 0.0,
-        #     "change": values[3] if len(values) > 3 else 0.0,
-        #     "volume": values[4] if len(values) > 4 else 0,
-        #     "extra": values  # 保留整行
-        # }
-        # self.selected_stock_info = stock_info
 
         if selected_item:
             stock_info = self.tree.item(selected_item, 'values')
             stock_code = stock_info[0]
-            # send_tdx_Key = False
-            # if self.select_code: 
-            #     if stock_code != self.select_code:
-            #         self.select_code =  stock_code
-            #         send_tdx_Key = True
-            # else:
-            #     send_tdx_Key = True
-            #     self.select_code =  stock_code
-            #gpt 精简逻辑
-            # send_tdx_Key = (self.select_code is None or self.select_code != stock_code)
-            # self.select_code = stock_code
 
             send_tdx_Key = (self.select_code != stock_code)
             self.select_code = stock_code
@@ -1611,6 +1650,270 @@ class StockMonitorApp(tk.Tk):
 
         win.grab_set()  # 模态
 
+    def get_centered_window_position(self,win_width, win_height, x_root=None, y_root=None, parent_win=None):
+        """
+        多屏环境下获取窗口显示位置
+        """
+        # 默认取主屏幕
+        screen = get_monitor_by_point(0, 0)
+        x = (screen['width'] - win_width) // 2
+        y = (screen['height'] - win_height) // 2
+
+        # 鼠标右键优先
+        if x_root is not None and y_root is not None:
+            screen = get_monitor_by_point(x_root, y_root)
+            x, y = x_root, y_root
+            if x + win_width > screen['right']:
+                x = max(screen['left'], x_root - win_width)
+            if y + win_height > screen['bottom']:
+                y = max(screen['top'], y_root - win_height)
+
+        # 父窗口位置
+        elif parent_win is not None:
+            parent_win.update_idletasks()
+            px, py = parent_win.winfo_x(), parent_win.winfo_y()
+            pw, ph = parent_win.winfo_width(), parent_win.winfo_height()
+            screen = get_monitor_by_point(px, py)
+            x = px + pw // 2 - win_width // 2
+            y = py + ph // 2 - win_height // 2
+
+        # 边界检查
+        x = max(screen['left'], min(x, screen['right'] - win_width))
+        y = max(screen['top'], min(y, screen['bottom'] - win_height))
+        print(x,y)
+        return x, y
+
+    def on_single_click(self, event):
+        """统一处理 alert_tree 的单击和双击"""
+        sel_row = self.tree.identify_row(event.y)
+        sel_col = self.tree.identify_column(event.x)  # '#1', '#2' ...
+
+        if not sel_row or not sel_col:
+            return
+
+        values = self.tree.item(sel_row, "values")
+        if not values:
+            return
+
+        # item = self.tree.item(selected_item[0])
+        # values = item.get("values")
+
+        # 假设你的 tree 列是 (code, name, price, …)
+        stock_info = {
+            "code": values[0],
+            "name": values[1] if len(values) > 1 else "",
+            "extra": values  # 保留整行
+        }
+        self.selected_stock_info = stock_info
+
+        if values:
+            # stock_info = self.tree.item(selected_item, 'values')
+            stock_code = values[0]
+
+            send_tdx_Key = (self.select_code != stock_code)
+            self.select_code = stock_code
+
+            stock_code = str(stock_code).zfill(6)
+            log.info(f'stock_code:{stock_code}')
+            # send_to_tdx(stock_code)   # 根据你的逻辑发送到 TDX 或其他
+            print(f"选中股票代码: {stock_code}")
+            if send_tdx_Key and stock_code:
+                self.sender.send(stock_code)
+
+    def show_category_detail(self, code, name, category_content):
+        def on_close():
+            """关闭时清空引用"""
+            if self.detail_win and self.detail_win.winfo_exists():
+                self.detail_win.destroy()
+            self.detail_win = None
+            self.txt_widget = None
+
+        if self.detail_win and self.detail_win.winfo_exists():
+            # 已存在 → 更新内容
+            self.detail_win.title(f"{code} {name} - Category Details")
+            self.txt_widget.config(state="normal")
+            self.txt_widget.delete("1.0", tk.END)
+            self.txt_widget.insert("1.0", category_content)
+            self.txt_widget.config(state="disabled")
+
+            # 检查窗口是否最小化或被遮挡
+            state = self.detail_win.state()
+            if state == "iconic":  # 最小化
+                self.detail_win.deiconify()  # 恢复
+                self.detail_win.lift()
+                self.detail_win.attributes("-topmost", True)
+                self.detail_win.after(50, lambda: self.detail_win.attributes("-topmost", False))
+            else:
+                try:
+                    if not self.detail_win.focus_displayof():
+                        self.detail_win.lift()
+                except Exception:
+                    pass
+        else:
+            # 第一次创建
+            self.detail_win = tk.Toplevel(self)
+            self.detail_win.title(f"{code} {name} - Category Details")
+            # 先强制绘制一次
+            # self.detail_win.update_idletasks()
+            self.detail_win.withdraw()  # 先隐藏，避免闪到默认(50,50)
+
+            win_width, win_height = 400, 200
+            x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
+            self.detail_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
+            # 再显示出来
+            self.detail_win.deiconify()
+
+            # print(
+            #     f"位置: ({self.detail_win.winfo_x()}, {self.detail_win.winfo_y()}), "
+            #     f"大小: {self.detail_win.winfo_width()}x{self.detail_win.winfo_height()}"
+            # )
+            # print("geometry:", self.detail_win.geometry())
+            # 字体设置
+            font_style = tkfont.Font(family="微软雅黑", size=12)
+            self.txt_widget = tk.Text(self.detail_win, wrap="word", font=font_style)
+            self.txt_widget.pack(expand=True, fill="both")
+            self.txt_widget.insert("1.0", category_content)
+            self.txt_widget.config(state="disabled")
+            self.detail_win.lift()
+
+            # 右键菜单
+            menu = tk.Menu(self.detail_win, tearoff=0)
+            menu.add_command(label="复制", command=lambda: self.detail_win.clipboard_append(self.txt_widget.selection_get()))
+            menu.add_command(label="全选", command=lambda: self.txt_widget.tag_add("sel", "1.0", "end"))
+
+            def show_context_menu(event):
+                try:
+                    menu.tk_popup(event.x_root, event.y_root)
+                finally:
+                    menu.grab_release()
+
+            self.txt_widget.bind("<Button-3>", show_context_menu)
+            # ESC 关闭
+            self.detail_win.bind("<Escape>", lambda e: on_close())
+            # 点窗口右上角 × 关闭
+            self.detail_win.protocol("WM_DELETE_WINDOW", on_close)
+
+            # 初次创建才强制前置
+            self.detail_win.focus_force()
+            self.detail_win.lift()
+
+
+    def on_double_click(self, event):
+        print(f'on_double_click')
+        sel_row = self.tree.identify_row(event.y)
+        sel_col = self.tree.identify_column(event.x)
+
+        if not sel_row or not sel_col:
+            return
+
+        # 列索引
+        col_idx = int(sel_col.replace("#", "")) - 1
+        col_name = 'category'  # 这里假设只有 category 列需要弹窗
+
+        vals = self.tree.item(sel_row, "values")
+        if not vals:
+            return
+
+        # 获取股票代码
+        code = vals[0]
+        name = vals[1]
+
+        # 通过 code 从 df_all 获取 category 内容
+        try:
+            category_content = self.df_all.loc[code, 'category']
+        except KeyError:
+            category_content = "未找到该股票的 category 信息"
+
+        self.show_category_detail(code,name,category_content)
+
+        # # 如果 detail_win 已经存在，则更新内容，否则创建新的
+        # if self.detail_win and self.detail_win.winfo_exists():
+        #     self.detail_win.title(f"{code} { name }- Category Details")
+        #     self.txt_widget.config(state="normal")
+        #     self.txt_widget.delete("1.0", tk.END)
+        #     self.txt_widget.insert("1.0", category_content)
+        #     self.txt_widget.config(state="disabled")
+        #     # self.detail_win.focus_force()           # 强制获得焦点
+        #     # self.detail_win.lift()
+        # else:
+        #     self.detail_win = tk.Toplevel(self)
+        #     self.detail_win.title(f"{code} { name }- Category Details")
+        #     # self.detail_win.geometry("400x200")
+
+        #     win_width, win_height = 400 , 200
+        #     x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
+        #     self.detail_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
+        #     # 字体设置
+        #     font_style = tkfont.Font(family="微软雅黑", size=12)
+        #     self.txt_widget = tk.Text(self.detail_win, wrap="word", font=font_style)
+        #     self.txt_widget.pack(expand=True, fill="both")
+        #     self.txt_widget.insert("1.0", category_content)
+        #     self.txt_widget.config(state="disabled")
+        #     self.detail_win.focus_force()           # 强制获得焦点
+        #     self.detail_win.lift()                  # 提升到顶层
+
+        #     # 右键菜单
+        #     menu = tk.Menu(self.detail_win, tearoff=0)
+        #     menu.add_command(label="复制", command=lambda: self.detail_win.clipboard_append(self.txt_widget.selection_get()))
+        #     menu.add_command(label="全选", command=lambda: self.txt_widget.tag_add("sel", "1.0", "end"))
+
+        #     def show_context_menu(event):
+        #         try:
+        #             menu.tk_popup(event.x_root, event.y_root)
+        #         finally:
+        #             menu.grab_release()
+
+        #     self.txt_widget.bind("<Button-3>", show_context_menu)
+        #     # 绑定 ESC 键关闭窗口
+        #     self.detail_win.bind("<Escape>", lambda e: self.detail_win.destroy())
+
+        # # 弹窗显示 category 内容
+        # detail_win = tk.Toplevel(self)
+        # detail_win.title(f"{code} - Category Details")
+        # # detail_win.geometry("400x200")
+
+        # win_width, win_height = 400 , 200
+        # x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
+        # detail_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
+
+        # # 设置字体
+        # font_style = tkfont.Font(family="微软雅黑", size=12)  # 可以换成你想要的字体和大小
+
+        # txt = tk.Text(detail_win, wrap="word", font=font_style)
+        # txt.pack(expand=True, fill="both")
+        # txt.insert("1.0", category_content)
+        # txt.config(state="disabled")
+
+
+
+    def on_tree_right_click(self, event):
+        """右键点击 TreeView 行"""
+        # 确保选中行
+        item_id = self.tree.identify_row(event.y)
+        # if item_id:
+        #     self.tree.selection_set(item_id)
+            # self.tree_menu.post(event.x_root, event.y_root)
+        # selected_item = self.tree.selection()
+
+        if item_id:
+            stock_info = self.tree.item(item_id, 'values')
+            stock_code = stock_info[0]
+            if self.push_stock_info(stock_code,self.df_all.loc[stock_code]):
+                # 如果发送成功，更新状态标签
+                self.status_var2.set(f"发送成功: {stock_code}")
+            else:
+                # 如果发送失败，更新状态标签
+                self.status_var2.set(f"发送失败: {stock_code}")
+
+    def on_tree_double_click(self, event):
+        region = self.tree.identify_region(event.x, event.y)
+        if region == "heading":
+            # 双击表头逻辑
+            self.on_tree_header_double_click(event)
+        elif region == "cell":
+            # 双击行逻辑
+            self.on_double_click(event)
+
     def on_tree_header_double_click(self, event):
         region = self.tree.identify_region(event.x, event.y)
         if region == "heading":  # 确认点击在表头
@@ -2036,7 +2339,7 @@ class StockMonitorApp(tk.Tk):
                     self.tree.see(iid)  # 自动滚动到可见位置
                     break
         # 双击表头绑定
-        self.tree.bind("<Double-1>", self.on_tree_header_double_click)
+        self.tree.bind("<Double-1>", self.on_tree_double_click)
         # 保存完整数据（方便后续 query / 显示切换）
         self.current_df = df
         # 调整列宽
@@ -2095,7 +2398,7 @@ class StockMonitorApp(tk.Tk):
         df_sorted = self.current_df.sort_values(by=col, ascending=not reverse)
         self.refresh_tree(df_sorted)
         self.tree.heading(col, command=lambda: self.sort_by_column(col, not reverse))
-
+        self.tree.yview_moveto(0)
     # def save_search_history(self):
     #     try:
     #         with open(SEARCH_HISTORY_FILE, "w", encoding="utf-8") as f:
@@ -2282,6 +2585,14 @@ class StockMonitorApp(tk.Tk):
 
         # ====== 数据过滤 ======
         try:
+            # 检查 category 列是否存在
+            if 'category' in self.df_all.columns:
+                # 强制转换为字符串，避免 str.contains 报错
+                if not pd.api.types.is_string_dtype(self.df_all['category']):
+                    self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
+                    # self.df_all['category'] = self.df_all['category'].astype(str)
+                    # 可选：去掉前后空格
+                    # self.df_all['category'] = self.df_all['category'].str.strip()
             df_filtered = self.df_all.query(final_query, engine=query_engine)
             self.refresh_tree(df_filtered)
             # 打印剔除条件列表
@@ -2629,6 +2940,11 @@ class StockMonitorApp(tk.Tk):
         self.save_window_position()
         self.save_search_history()
         archive_search_history_list()
+        self.stop_refresh()
+        if self.proc.is_alive():
+            self.proc.join(timeout=1)    # 等待最多 5 秒
+            if self.proc.is_alive():
+                self.proc.terminate()    # 强制终止
         try:
             self.manager.shutdown()
         except Exception as e: 

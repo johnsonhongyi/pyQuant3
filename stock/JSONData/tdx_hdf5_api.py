@@ -187,7 +187,7 @@ class SafeHDFStore(pd.HDFStore):
             self.basedir = self.fname.split(self.fname_o)[0]
             self.log.info(f"ramdisk_hd5: {self.fname}")
 
-        if self.multiIndexsize:
+        if self.multiIndexsize or self.fname_o.find('sina_MultiIndex') >= 0:
             self.big_H5_Size_limit = ct.big_H5_Size_limit * 6
         else:
             self.big_H5_Size_limit = ct.big_H5_Size_limit
@@ -501,9 +501,9 @@ class SafeHDFStore(pd.HDFStore):
                 if self.mode != 'r':
                     # ===== 压缩逻辑 =====
                     h5_size = os.path.getsize(self.fname) / 1e6
-                    h5_size_limit =  h5_size*1.5 if h5_size > 5 else 5
+                    h5_size_limit =  h5_size*1.5 if h5_size > 10 else 10
                     if self.fname_o.find('tdx_all_df') >= 0 or self.fname_o.find('sina_MultiIndex_data') >= 0:
-                        h5_size = 30 if h5_size < 30 else h5_size
+                        h5_size = 40 if h5_size < 40 else h5_size
                         new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit) if h5_size > self.big_H5_Size_limit else self.big_H5_Size_limit
                     else:
                         new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit) if h5_size > self.big_H5_Size_limit else h5_size_limit

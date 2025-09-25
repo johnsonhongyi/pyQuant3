@@ -75,7 +75,7 @@ IsWindowVisible = ctypes.windll.user32.IsWindowVisible
 date_entry = None
 codelist = []
 ths_code=[]
-
+send_stock_code = None
 PIPE_NAME = r"\\.\pipe\my_named_pipe"
 
 def pipe_server(update_callback):
@@ -144,6 +144,7 @@ class SafeHDFStore(HDFStore):
         self.fname = fname
         self.mode = mode
         self._lock = self.fname + ".lock"
+        print(f'self._lock : {self._lock}')
         self._flock = None
         self.countlock = 0
 
@@ -901,6 +902,12 @@ def generate_stock_code(stock_code):
 
 def send_to_tdx(stock_code):
     """发送股票代码到通达信"""
+    global send_stock_code
+    if send_stock_code and send_stock_code == stock_code:
+        return
+    else:
+        send_stock_code = stock_code
+        
     tdx_state = tdx_var.get()
     ths_state = ths_var.get()
     dfcf_state = dfcf_var.get()
@@ -1010,63 +1017,63 @@ symbol_map = {
     "60日大幅下跌": "8216",
 }
 
-#获取全部数据
-def get_dfcf_all_data():
+# #获取全部数据
+# def get_dfcf_all_data():
 
-    # if not (get_day_is_trade_day() and get_now_time_int() > 1505):
-    url = "https://push2ex.eastmoney.com/getAllStockChanges?"
+#     # if not (get_day_is_trade_day() and get_now_time_int() > 1505):
+#     url = "https://push2ex.eastmoney.com/getAllStockChanges?"
 
-    reversed_symbol_map = {v: k for k, v in symbol_map.items()}
+#     reversed_symbol_map = {v: k for k, v in symbol_map.items()}
 
-    params = {
-        'ut': '7eea3edcaed734bea9cbfc24409ed989',
-        'pageindex': '0',
-        'pagesize': '50000',
-        'dpt': 'wzchanges',
-        '_': int(time.time() * 1000)
-    }
+#     params = {
+#         'ut': '7eea3edcaed734bea9cbfc24409ed989',
+#         'pageindex': '0',
+#         'pagesize': '50000',
+#         'dpt': 'wzchanges',
+#         '_': int(time.time() * 1000)
+#     }
 
-    df = pd.DataFrame()
+#     df = pd.DataFrame()
 
-    for sel_type in symbol_map:
+#     for sel_type in symbol_map:
 
-        params['type'] = symbol_map[sel_type]
+#         params['type'] = symbol_map[sel_type]
     
-        try:
-            response = requests.get(url, params=params, timeout=15)
-            response.raise_for_status()
-            data_json = response.json()
+#         try:
+#             response = requests.get(url, params=params, timeout=15)
+#             response.raise_for_status()
+#             data_json = response.json()
             
-            if not data_json.get('data') or not data_json['data'].get('allstock'):
-                messagebox.showinfo("提示", "未获取到数据")
-                return pd.DataFrame()
+#             if not data_json.get('data') or not data_json['data'].get('allstock'):
+#                 messagebox.showinfo("提示", "未获取到数据")
+#                 return pd.DataFrame()
             
-            temp_df = pd.DataFrame(data_json["data"]["allstock"])
-            if 'tm' not in temp_df.columns:
-                return pd.DataFrame()
+#             temp_df = pd.DataFrame(data_json["data"]["allstock"])
+#             if 'tm' not in temp_df.columns:
+#                 return pd.DataFrame()
             
-            temp_df["tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors='coerce').dt.time
-            temp_df.columns = ["时间", "代码", "_", "名称", "板块", "相关信息"]
-            temp_df = temp_df[["时间", "代码", "名称", "板块", "相关信息"]]
+#             temp_df["tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors='coerce').dt.time
+#             temp_df.columns = ["时间", "代码", "_", "名称", "板块", "相关信息"]
+#             temp_df = temp_df[["时间", "代码", "名称", "板块", "相关信息"]]
             
-            temp_df["板块"] = temp_df["板块"].astype(str).map(
-                lambda x: reversed_symbol_map.get(x, f"未知类型({x})")
-            )
+#             temp_df["板块"] = temp_df["板块"].astype(str).map(
+#                 lambda x: reversed_symbol_map.get(x, f"未知类型({x})")
+#             )
 
-            temp_df = temp_df.sort_values(by="时间", ascending=False)
-            df = pd.concat([df, temp_df], axis=0)
+#             temp_df = temp_df.sort_values(by="时间", ascending=False)
+#             df = pd.concat([df, temp_df], axis=0)
 
-        except requests.exceptions.Timeout:
-            messagebox.showerror("错误", "请求超时")
-            return pd.DataFrame()
-        except requests.exceptions.RequestException as e:
-            messagebox.showerror("错误", f"网络错误: {str(e)}")
-            return pd.DataFrame()
-        except Exception as e:
-            messagebox.showerror("错误", f"数据处理错误: {str(e)}")
-            return pd.DataFrame()
+#         except requests.exceptions.Timeout:
+#             messagebox.showerror("错误", "请求超时")
+#             return pd.DataFrame()
+#         except requests.exceptions.RequestException as e:
+#             messagebox.showerror("错误", f"网络错误: {str(e)}")
+#             return pd.DataFrame()
+#         except Exception as e:
+#             messagebox.showerror("错误", f"数据处理错误: {str(e)}")
+#             return pd.DataFrame()
 
-    return df
+#     return df
 
 def start_async_save(df=None):
     """启动一个新线程来保存DataFrame"""
@@ -1141,15 +1148,21 @@ def save_dataframe(df=None):
     if get_now_time_int() > 1505 and  os.path.exists(filename):
         print(f' workday:{date_str} {filename} exists,return')
         return
+
+    init_start_time = time.time()
     while not start_init:
         if  get_work_time() or (not get_day_is_trade_day() and os.path.exists(filename)) or (930 < get_now_time_int() < 1505):
             # print("not workday don't run  save_dataframe...")
             print("get_work_time don't run  save_dataframe...")
             return
-        time.sleep(5)
-        print('wait init background 完成...')
-    print(f'start_init:{start_init} will to save')    
-    toast_message(root,f'start_init:{start_init} will to save')    
+        count_time = int(time.time() - init_start_time)
+        if count_time < 90: 
+            time.sleep(5)
+        else:
+            break
+        print(f'count_time : {count_time} wait init background 完成...')
+    print(f'start_init:{start_init}  will to save')    
+    toast_message(None,f'start_init:{start_init} will to save')    
     try:
         # 1. 從 DateEntry 獲取日期物件
         selected_date_obj = date_entry.get_date()
@@ -1176,7 +1189,7 @@ def save_dataframe(df=None):
             all_df.to_csv(filename, index=False, encoding='utf-8-sig', compression="bz2") 
             # messagebox.showinfo("成功", f"文件已儲存為: {filename}")
             print(f"文件已儲存為: {filename}")
-            toast_message(root,f"文件已儲存為: {filename}")
+            toast_message(None,f"文件已儲存為: {filename}")
             loaded_df = all_df
         loaded_df['代码'] = loaded_df["代码"].astype(str).str.zfill(6)
 
@@ -1325,13 +1338,17 @@ def get_stock_changes(selected_type=None, stock_code=None):
         return temp_df
         
     except requests.exceptions.Timeout:
-        messagebox.showerror("错误", "请求超时")
+        # messagebox.showerror("错误", "请求超时")
+        toast_message(None, "请求超时")
         return pd.DataFrame()
     except requests.exceptions.RequestException as e:
-        messagebox.showerror("错误", f"网络错误: {str(e)}")
+        # messagebox.showerror("错误", f"网络错误: {str(e)}")
+        print("错误", f"网络错误: {str(e)}")
+        toast_message(None, f"网络错误: {str(e)}")
         return pd.DataFrame()
     except Exception as e:
-        messagebox.showerror("错误", f"数据处理错误: {str(e)}")
+        # messagebox.showerror("错误", f"数据处理错误: {str(e)}")
+        toast_message(None,f"数据处理错误: {str(e)}")
         return pd.DataFrame()
 
 
@@ -1699,13 +1716,14 @@ def daily_init():
 
 def schedule_daily_init(root):
     now = datetime.now()
-    today_925 = now.replace(hour=9, minute=24, second=0, microsecond=0)
+    today_925 = now.replace(hour=9, minute=20, second=0, microsecond=0)
     if now > today_925:
         # 如果已经过了 9:25，延迟到第二天
         today_925 += timedelta(days=1)
     delay_ms = int((today_925 - now).total_seconds() * 1000)
     root.after(delay_ms, lambda: (daily_init(), start_background_worker()))
     print(f"每日开盘定时初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
+    status_label3.config(text=f"日初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
 # update_queue = queue.Queue()
 
 # def background_worker():
@@ -1734,23 +1752,23 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
     now = datetime.now()
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
 
-    if get_day_is_trade_day() and 924 < get_now_time_int() < 930:
-        loaded_df = None
+    # if get_day_is_trade_day() and 924 < get_now_time_int() < 930:
+    #     loaded_df = None
 
     # 使用 root.after() 调度任务，在回调函数中使用 lambda 包装，
     # 确保在任务完成后再次调用自身进行重新调度。
     if loaded_df is None and (get_day_is_trade_day() or start_init == 0):
-        if get_work_time() or 1130 < get_now_time_int() < 1300 or start_init == 0:
+        if get_work_time() or 1130 < get_now_time_int() < 1300:
             current_time = datetime.now().strftime("%H:%M:%S")
             print(f"自动更新任务get_stock_changes_background执行于: {current_time}")
             # 在这里添加你的具体任务逻辑
-            status_label3.config(text=f"更新在{current_time[:-3]}执行")
+            status_label3.config(text=f"bg更新在{current_time[:-3]}执行")
             scheduled_task = actually_start_worker(get_stock_changes_background)
             # 5分钟后再次调用此函数
             schedule_task('worktime_task',5 * 60 * 1000,lambda: schedule_worktime_task(tree))
         else:
             # status_label3.config(text=f"更新在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
-            status_label3.config(text=f"延迟在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
+            status_label3.config(text=f"bg延迟在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
             schedule_task('worktime_task',delay_ms,lambda: schedule_worktime_task(tree))
     else:
         # if get_work_time() :
@@ -2134,18 +2152,18 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
     current_time = datetime.now()
     start_time=time.time()
     
-    if get_day_is_trade_day() and 924 < get_now_time_int() < 930:
-        realdatadf = pd.DataFrame()
-        loaded_df = None
-        viewdf = pd.DataFrame()
-        date_write_is_processed = False
-        if date_entry.winfo_exists():
-            try:
-                date_entry.set_date(get_today())
-            except Exception as e:
-                print("还不能设置:", e)
-        start_init = 0
-        last_updated_time = 0
+    # if get_day_is_trade_day() and 924 < get_now_time_int() < 930:
+    #     realdatadf = pd.DataFrame()
+    #     loaded_df = None
+    #     viewdf = pd.DataFrame()
+    #     date_write_is_processed = False
+    #     if date_entry.winfo_exists():
+    #         try:
+    #             date_entry.set_date(get_today())
+    #         except Exception as e:
+    #             print("还不能设置:", e)
+    #     start_init = 0
+    #     last_updated_time = 0
 
     # 使用 with realdatadf_lock 确保只有一个线程可以进入此关键区域
     print(loaded_df is None  , (realdatadf.empty , get_work_time() , (not date_write_is_processed , get_now_time_int() > 1505)))
@@ -2179,7 +2197,7 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
                     if start_init == 0:
                         toast_message(None,f"为 ({symbol}) 获取了新的异动数据，并更新了 realdatadf")
                     time.sleep(5)
-                print(f"time:{time.time() - start_time}全部更新 获取了新的异动数据，并更新了realdatadf:{len(realdatadf)}")
+                print(f"time:{int(time.time() - start_time)}全部更新 获取了新的异动数据，并更新了realdatadf:{len(realdatadf)}")
                 if start_init == 0:
                     toast_message(None,f"time:{time.time() - start_time}全部更新 获取了新的异动数据，并更新了realdatadf:{len(realdatadf)}")
                 print(f"realdatadf 已更新:{time.strftime('%H:%M:%S')} {len(realdatadf)}")
@@ -2532,19 +2550,23 @@ def update_monitor_tree(data, tree, window_info, item_id):
         # 如果没有数据，清空并短间隔重试
         # tree.delete(*tree.get_children())
 
-    if  get_work_time() :
+    if get_work_time() or (get_day_is_trade_day() and 1130 < get_now_time_int() < 1300):
         # print(f'start flush_alerts')
         if  not 1130 < get_now_time_int() < 1300:
             # print(f'update_monitor_tree worktime next_update:{30} S')
             # tree.after(30000, lambda: refresh_stock_data(window_info, tree, item_id))
-            schedule_next(30000,key, tree, window_info, item_id)
+            delay_ms = 30000
+            schedule_next(delay_ms,key, tree, window_info, item_id)
+            status_label2.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
         else:
-            next_time =  int(minutes_to_time(1300)) 
+            delay_ms =  int(minutes_to_time(1300)) * 1000
             # print(f'update_monitor_tree next_update:{next_time} Min')
-            schedule_next(next_time*1000,key, tree, window_info, item_id)
+            schedule_next(delay_ms,key, tree, window_info, item_id)
+            status_label2.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
     else:
         print(f'update_monitor_tree next_update:{next_execution_time}')
         schedule_next(delay_ms,key, tree, window_info, item_id)
+        status_label2.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
             # window.after(delay_ms, lambda: refresh_stock_data(window_info, tree, item_id))
 
 # --- 主窗口逻辑 ---  (lag)
@@ -3523,7 +3545,7 @@ def create_monitor_window(stock_info):
             else:
                 stock_info = (stock_code,) + stock_info[1:]
             # 6. 建立右鍵選單
-            print(f'stock_info:{stock_info}')
+            # print(f'stock_info:{stock_info}')
             menu = tk.Menu(root, tearoff=0)
             
             # 7. 动态地為選單命令綁定函式和參數
@@ -3602,9 +3624,91 @@ def flash_title(win, code, name):
     # 5 秒后恢复
     win.after(5000, lambda: win.title(f"监控: {name} ({code})"))
 
+# def get_toast_parent(stock_code=None):
+#     """
+#     返回一个现有监控窗口作为 toast 的 parent。
+#     如果指定 stock_code，优先返回对应窗口；
+#     否则返回任意已打开的监控窗口。
+#     如果没有监控窗口，返回 None。
+#     """
+#     # 如果指定股票代码，找对应窗口
+#     if stock_code:
+#         win = monitor_windows.get(stock_code)
+#         if win:
+#             return win['toplevel']
+
+#     # 否则找任意窗口
+#     for win in monitor_windows.values():
+#         return win['toplevel']  # 返回第一个
+
+#     # 没有任何窗口
+#     return None
+
+# import tkinter as tk
+# import threading
+
+def toast_message2(parent=None, text="", duration=2000, bg="#333", fg="#fff"):
+    """
+    在主窗口右下角显示一条提示信息，自动淡出。
+    parent: 可以是已有监控窗口或 root，如果为 None，会尝试使用已有 Toplevel，否则用 root。
+    """
+    global root, monitor_windows
+
+    def _show():
+        nonlocal parent
+        # 如果没有传入 parent，尝试使用任意已打开的 Toplevel 监控窗口
+        if parent is None:
+            # parent = next((win for win in monitor_windows.values() if isinstance(win, tk.Toplevel)), None)
+            parent_win = next((win['toplevel'] for win in monitor_windows.values() if isinstance(win.get('toplevel'), tk.Toplevel)), None)
+            print(parent_win)
+        # 如果仍然没有 parent，则使用 root
+        if parent is None:
+            # parent = root
+            parent = tk.Tk()
+            parent.withdraw()
+
+        # 创建 toast 窗口
+        win = tk.Toplevel(parent)
+        win.overrideredirect(True)
+        win.config(bg=bg)
+
+        # 文本标签
+        label = tk.Label(win, text=text, bg=bg, fg=fg, font=("Microsoft YaHei", 11))
+        label.pack(ipadx=15, ipady=8)
+
+        # 放在 parent 窗口右下角
+        parent.update_idletasks()
+        x = parent.winfo_x() + parent.winfo_width() - win.winfo_reqwidth() - 20
+        y = parent.winfo_y() + parent.winfo_height() - win.winfo_reqheight() - 40
+        win.geometry(f"+{x}+{y}")
+
+        # 窗口置顶
+        win.attributes("-topmost", True)
+        win.update()
+        win.attributes("-topmost", False)
+
+        # 自动淡出
+        def fade(alpha=1.0):
+            if alpha <= 0:
+                win.destroy()
+            else:
+                win.attributes("-alpha", alpha)
+                win.after(50, fade, alpha - 0.05)
+
+        win.after(duration, fade)
+
+    # 线程安全：后台线程调用时用 root.after 调回主线程
+    if threading.current_thread() == threading.main_thread():
+        _show()
+    else:
+        root.after(0, _show)
+
+
 def toast_message(parent=None, text="", duration=2000, bg="#333", fg="#fff"):
     """在主窗口右下角显示一条提示信息，自动淡出"""
+    # 如果仍然没有 parent，则使用 root
     if parent is None:
+        # parent = root
         parent = tk.Tk()
         parent.withdraw()
     win = tk.Toplevel(parent)
@@ -3636,43 +3740,6 @@ def toast_message(parent=None, text="", duration=2000, bg="#333", fg="#fff"):
 
     # 延迟 duration 毫秒后开始淡出
     win.after(duration, fade)
-
-# def toast_message(parent=None, text="", duration=2000, bg="#333", fg="#fff"):
-#     """在主窗口右下角显示一条提示信息，自动淡出"""
-#     # 创建顶层窗口
-#     if parent is None:
-#         parent = tk.Tk()
-#         parent.withdraw()
-#     win = tk.Toplevel(parent)
-#     win.overrideredirect(True)  # 去掉边框
-#     win.config(bg=bg)
-
-#     # 文本标签
-#     label = tk.Label(win, text=text, bg=bg, fg=fg, font=("Microsoft YaHei", 11))
-#     label.pack(ipadx=15, ipady=8)
-
-#     # 放在主窗口右下角
-#     parent.update_idletasks()
-#     x = parent.winfo_x() + parent.winfo_width() - win.winfo_reqwidth() - 20
-#     y = parent.winfo_y() + parent.winfo_height() - win.winfo_reqheight() - 40
-#     win.geometry(f"+{x}+{y}")
-
-#     # 窗口置顶
-#     win.attributes("-topmost", True)
-#     win.update()
-#     win.attributes("-topmost", False)
-
-#     # 自动淡出
-#     def fade_out():
-#         alpha = 1.0
-#         while alpha > 0:
-#             alpha -= 0.05
-#             win.attributes("-alpha", alpha)
-#             win.update()
-#             win.after(50)
-#         win.destroy()
-
-#     win.after(duration, lambda: threading.Thread(target=fade_out).start())
 
 
 def auto_close_message(title, message, timeout=2000):
@@ -3815,12 +3882,8 @@ def open_rules_overview(parent_win=None):
     # 使用局部变量 aw_rules
     aw_rules = tk.Toplevel(parent_win or root)
     aw_rules.title("报警规则总览")
+    aw_rules.withdraw()  # 先隐藏，避免闪到默认(50,50)
 
-    # 关键点：设置模态和焦点
-    aw_rules.transient(parent_win)   # 父窗口关系
-    aw_rules.grab_set()              # 模态，阻止父窗口操作
-    aw_rules.focus_force()           # 强制获得焦点
-    aw_rules.lift()                  # 提升到顶层
 
     frame = ttk.Frame(aw_rules)
     frame.pack(expand=True, fill="both")
@@ -3828,6 +3891,15 @@ def open_rules_overview(parent_win=None):
     win_width, win_height = 680, 400
     x, y = get_centered_window_position(win_width, win_height, parent_win=parent_win)
     aw_rules.geometry(f"{win_width}x{win_height}+{x}+{y}")
+
+    # 再显示出来
+    aw_rules.deiconify()
+
+    # 关键点：设置模态和焦点
+    aw_rules.transient(parent_win)   # 父窗口关系
+    # aw_rules.grab_set()              # 模态，阻止父窗口操作
+    # aw_rules.focus_force()           # 强制获得焦点
+    aw_rules.lift()                  # 提升到顶层
 
     scrollbar = ttk.Scrollbar(frame)
     scrollbar.pack(side="right", fill="y")
@@ -3908,9 +3980,47 @@ def open_rules_overview(parent_win=None):
         code = vals[0]
         open_alert_editor(code, parent_win=aw_rules)
 
+    def on_tree_select(event):
+        """处理表格行选择事件"""
+        tree = event.widget
+        # print(f"事件来源: {tree}")
+        selected_item = tree.selection()
+        # print(f'selected_item : {selected_item}')
+        if selected_item:
+            stock_info = tree.item(selected_item, 'values')
+            stock_code = stock_info[0]
+            stock_code = stock_code.zfill(6)
+            send_to_tdx(stock_code)
+
+            # 1. 推送代码到输入框
+            # code_entry.delete(0, tk.END)
+            # code_entry.insert(0, stock_code)
+            
+            # 2. 更新其他数据（示例）
+            print(f"选中股票代码: {stock_code}")
+            time.sleep(0.1)
+    
+    def on_single_click(event):
+        global code_entry
+        # tree = event.widget
+        tree = event.widget
+
+        row_id = tree.identify_row(event.y)
+        if not row_id:
+            return
+        vals = tree.item(row_id, "values")
+        code = vals[0]
+        name = vals[1]
+        # print(f'on_single_click sel : {row_id} vals : {vals}')
+        send_to_tdx(code)
+        # code_entry.delete(0, tk.END)
+        # code_entry.insert(0, code)
+
+
     tree.bind("<Button-3>", show_menu)
     tree.bind("<Double-1>", on_double_click_edit)
-
+    tree.bind("<<TreeviewSelect>>", on_tree_select)
+    tree.bind("<Button-1>", on_single_click)
     # Esc 只关闭当前窗口
     aw_rules.bind("<Escape>", lambda event, w=aw_rules: w.destroy())
 
@@ -3945,17 +4055,18 @@ def open_alert_center():
     # 改用局部变量 aw_win
     aw_win = tk.Toplevel(root)
     aw_win.title("报警中心")
-
+    aw_win.withdraw()  # 先隐藏，避免闪到默认(50,50)
         # 关键点：设置模态和焦点
     # aw_win.transient(root)   # 父窗口关系
     # aw_win.grab_set()              # 模态，阻止父窗口操作
-    aw_win.focus_force()           # 强制获得焦点
+    # aw_win.focus_force()           # 强制获得焦点
     aw_win.lift()                  # 提升到顶层
 
     win_width, win_height = 720 , 360
     x, y = get_centered_window_position(win_width, win_height, parent_win=root)
     aw_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
-
+    # 再显示出来
+    aw_win.deiconify()
     # 保持全局变量引用
     alert_window = aw_win
 
@@ -4033,6 +4144,25 @@ def open_alert_center():
             alert_tree.column(c, width=40, anchor="center")
     alert_tree.pack(expand=True, fill="both")
 
+    def on_tree_select(event):
+        """处理表格行选择事件"""
+        tree = event.widget
+        # print(f"事件来源: {tree}")
+        selected_item = tree.selection()
+        # print(f'selected_item : {selected_item}')
+        if selected_item:
+            stock_info = tree.item(selected_item, 'values')
+            stock_code = stock_info[1]
+            stock_code = stock_code.zfill(6)
+            send_to_tdx(stock_code)
+
+            # 1. 推送代码到输入框
+            code_entry.delete(0, tk.END)
+            code_entry.insert(0, stock_code)
+            
+            # 2. 更新其他数据（示例）
+            print(f"选中股票代码: {stock_code}")
+            time.sleep(0.1)
     
     def on_single_click(event):
         global code_entry
@@ -4097,6 +4227,7 @@ def open_alert_center():
         menu.add_command(label="删除规则", command=lambda: delete_alert_rule(code))
         menu.post(event.x_root, event.y_root)
 
+    alert_tree.bind("<<TreeviewSelect>>", on_tree_select)
     alert_tree.bind("<Double-1>", on_double_click)
     alert_tree.bind("<Button-3>", show_menu)
     alert_tree.bind("<Button-1>", on_single_click)
@@ -4572,7 +4703,7 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
 
     editor = tk.Toplevel(root)
     editor.title(f"设置报警规则 -{name} {code}")
-
+    editor.withdraw()  # 先隐藏，避免闪到默认(50,50)
 
     # 关键点：设置模态和焦点
     editor.transient(parent_win)   # 父窗口关系
@@ -4584,7 +4715,8 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     x, y = get_centered_window_position(win_width, win_height, parent_win=parent_win)
     editor.geometry(f"{win_width}x{win_height}+{x}+{y}")
     # screen_width, screen_height = get_monitors_info()
-
+    # 再显示出来
+    editor.deiconify()
     # # 默认位置：屏幕中心
     # x = (screen_width - win_width) // 2
     # y = (screen_height - win_height) // 2
@@ -5084,20 +5216,25 @@ def refresh_alert_center():
         tag = "triggered" if triggered else "not_triggered"
         alert_tree.insert("", "end", values=vals, tags=(tag,))
 
+    if alert_tree.get_children():
+        first_item = alert_tree.get_children()[0]
+        alert_tree.selection_set(first_item)
+        alert_tree.focus(first_item)
+
     alert_window.update_idletasks()
 
-    children = alert_tree.get_children()
-    if children:
-        last_item = children[-1]  # 真正的最后一行
-        def _select_last():
-            try:
-                alert_tree.selection_set(last_item)
-                alert_tree.focus(last_item)
-                alert_tree.see(last_item)
-            except Exception:
-                pass
-        # 延迟 50ms，保证滚动条和行索引同步
-        alert_window.after(0, _select_last)
+    # children = alert_tree.get_children()
+    # if children:
+    #     last_item = children[-1]  # 真正的最后一行
+    #     def _select_last():
+    #         try:
+    #             alert_tree.selection_set(last_item)
+    #             alert_tree.focus(last_item)
+    #             alert_tree.see(last_item)
+    #         except Exception:
+    #             pass
+    #     # 延迟 50ms，保证滚动条和行索引同步
+    #     alert_window.after(0, _select_last)
 
 
 
@@ -5208,9 +5345,9 @@ def refresh_all_stock_data():
             root.after(delay_ms, refresh_all_stock_data)
             status_label2.config(text=f"alert刷新 {format_next_time(delay_ms)}")
         else:
-            next_time = int(minutes_to_time(1300))  # 单位：秒
-            root.after(next_time * 1000, refresh_all_stock_data)
-            status_label2.config(text=f"午休刷新 {format_next_time(next_time * 1000)}")
+            delay_ms = int(minutes_to_time(1300)) * 1000  # 单位：秒
+            root.after(delay_ms , refresh_all_stock_data)
+            status_label2.config(text=f"午休刷新 {format_next_time(delay_ms)}")
     else:
         root.after(delay_ms, refresh_all_stock_data)
         status_label2.config(text=f"非交易刷新 {format_next_time(delay_ms)}")
@@ -5642,7 +5779,7 @@ def update_gui(stock_info):
     # label_main.config(text=f"已接收: {code}")
     # label_last.config(text=f"最后接收: {code}")
     # 1. 推送代码到输入框
-    print(f'code : {stock_info}')
+    # print(f'code : {stock_info}')
     # search_by_code()
     # if stock_info and stock_info is not None:
     if isinstance(stock_info, dict):
