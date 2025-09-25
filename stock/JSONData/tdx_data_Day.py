@@ -2291,7 +2291,7 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
                     if len(duration_code) < 30:
                         print(f'recheck duration_code:{len(duration_code)} to write')
                     else:
-                        print(f'recheck duration_code write:{len(duration_code)}: {duration_code}')
+                        print(f'recheck duration_code write:{len(duration_code)}: {duration_code[:5]}')
 
                     results = cct.to_mp_run_async(
                         get_tdx_append_now_df_api_tofile, duration_code, dm=dm, newdays=0)
