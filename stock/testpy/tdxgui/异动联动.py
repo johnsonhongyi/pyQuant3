@@ -3841,6 +3841,54 @@ default_deltas = {
 #     print(x,y)
 #     return x, y
 
+def get_centered_window_position_center(win_width, win_height, x_root=None, y_root=None, parent_win=None):
+    """
+   在多屏环境下，为新窗口选择合适位置，避免遮挡父窗口(root)。
+   优先顺序：右侧 -> 下方 -> 左侧 -> 上方 -> 居中
+   """
+   # 默认取主屏幕
+    screen = get_monitor_by_point(0, 0)
+    x = (screen['width'] - win_width) // 2
+    y = (screen['height'] - win_height) // 2
+
+    if parent_win:
+       parent_win.update_idletasks()
+       px, py = parent_win.winfo_x(), parent_win.winfo_y()
+       pw, ph = parent_win.winfo_width(), parent_win.winfo_height()
+       screen = get_monitor_by_point(px, py)
+
+       # --- 尝试放右侧 ---
+       if px + pw + win_width <= screen['right']:
+           x, y = px + pw + 10, py
+       # --- 尝试放下方 ---
+       elif py + ph + win_height <= screen['bottom']:
+           x, y = px, py + ph + 10
+       # --- 尝试放左侧 ---
+       elif px - win_width >= screen['left']:
+           x, y = px - win_width - 10, py
+       # --- 尝试放上方 ---
+       elif py - win_height >= screen['top']:
+           x, y = px, py - win_height - 10
+       # --- 实在不行，屏幕居中 ---
+       else:
+           x = (screen['width'] - win_width) // 2
+           y = (screen['height'] - win_height) // 2
+    elif x_root is not None and y_root is not None:
+       # 鼠标点的屏幕
+       screen = get_monitor_by_point(x_root, y_root)
+       x, y = x_root, y_root
+       if x + win_width > screen['right']:
+           x = max(screen['left'], x_root - win_width)
+       if y + win_height > screen['bottom']:
+           y = max(screen['top'], y_root - win_height)
+
+    # 边界检查
+    x = max(screen['left'], min(x, screen['right'] - win_width))
+    y = max(screen['top'], min(y, screen['bottom'] - win_height))
+
+    print(f"[定位] x={x}, y={y}, screen={screen}")
+    return x, y
+
 def get_centered_window_position(win_width, win_height, x_root=None, y_root=None, parent_win=None):
     """
     多屏环境下获取窗口显示位置
@@ -4063,7 +4111,7 @@ def open_alert_center():
     aw_win.lift()                  # 提升到顶层
 
     win_width, win_height = 720 , 360
-    x, y = get_centered_window_position(win_width, win_height, parent_win=root)
+    x, y = get_centered_window_position_center(win_width, win_height, parent_win=root)
     aw_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
     # 再显示出来
     aw_win.deiconify()
@@ -4712,7 +4760,7 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     editor.lift()                  # 提升到顶层
 
     win_width, win_height = 500, 300
-    x, y = get_centered_window_position(win_width, win_height, parent_win=parent_win)
+    x, y = get_centered_window_position_center(win_width, win_height, parent_win=parent_win)
     editor.geometry(f"{win_width}x{win_height}+{x}+{y}")
     # screen_width, screen_height = get_monitors_info()
     # 再显示出来
@@ -5797,7 +5845,7 @@ def update_gui(stock_info):
         code_entry.insert(0, code)
         search_by_code()
         # code_entry.event_generate("<Return>")
-        open_alert_editor(stock_code,new=True, stock_info=stock_tuple)
+        open_alert_editor(stock_code,new=True, stock_info=stock_tuple,parent_win=root)
 
 
 # 启动命名管道服务器线程

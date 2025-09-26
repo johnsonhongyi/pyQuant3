@@ -500,12 +500,26 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
         zt = str(ff['time'])
         print(("流入: %s亿 占比: %s%% %s" %
               (f_print(4, zlr, 31), f_print(4, zzb, 31), f_print(4, zt))))
-
-    ff = ffu.get_dfcfw_fund_SHSZ()
-    # hgt = ffu.get_dfcfw_fund_HGT()
-    # szt = ffu.get_dfcfw_fund_HGT(url=ct.DFCFW_FUND_FLOW_SZT)
-    hgt = ffu.get_dfcfw_fund_HGSZ2021('bei')
-    szt = ffu.get_dfcfw_fund_HGSZ2021('nan')
+    ff = {}
+    hgt = {}
+    szt = {}
+    dfcfw_Except = cct.GlobalValues().getkey('dfcfw_Except')
+    global dfcfw_Except_time
+    if not dfcfw_Except and dfcfw_Except_time == 0:
+        try:
+            ff = ffu.get_dfcfw_fund_SHSZ()
+            hgt = ffu.get_dfcfw_fund_HGSZ2021('bei')
+            szt = ffu.get_dfcfw_fund_HGSZ2021('nan')
+        except Exception as e:
+            print(f'get_dfcfw_fund_SHSZ Exception: {e}')
+            cct.GlobalValues().setkey('dfcfw_Except', True)
+            dfcfw_Except_time = time.time()
+            # raise e
+    else:
+        duration_dfcfw_Except_time = time.time() - dfcfw_Except_time
+        if duration_dfcfw_Except_time > 60:
+            dfcfw_Except_time == 0
+            cct.GlobalValues().setkey('dfcfw_Except', False)
     log.debug("shzs:%s hgt:%s" % (ff, hgt))
     # if len(ff) > 0:
     #     print ("\tSH: %s u:%s vo: %s sz: %s u:%s vo: %s" % (
@@ -514,21 +528,50 @@ def get_hot_countNew(changepercent, rzrq, fibl=None, fibc=10):
     #         f_print(5, ff['zvol']))),
     bigcount = rd.getconfigBigCount(count=None, write=True)
 
-    if len(ff) > 0:
+    # if len(ff) > 0:
+    #     print(("\tSh: %s Vr:%s Sz: %s Vr:%s " % (
+    #         f_print(4, ff['scent']), f_print(5, ff['svol'], 31), f_print(4, ff['zcent']), f_print(5, ff['zvol'], 31))), end=' ')
+    #     print(('B:%s-%s V:%s' %
+    #           (bigcount[0], bigcount[2], f_print(4, bigcount[1]))))
+    # else:
+    #     print(("\tSh: \t%s Vr:  \t%s Sz: \t%s Vr: \t%s ") % (0, 0, 0, 0), end=' ')
+    #     print(('B:%s-%s V:%s' %
+    #           (bigcount[0], bigcount[2], f_print(4, bigcount[1]))))
+
+    # if len(hgt) > 0:
+    #     print(("\tSgt: %s Gst: %s Hgt: %s Ggt: %s SSVol:%s" %
+    #           (hgt['ggt'], szt['ggt'], hgt['hgt'], szt['hgt'], f_print(10, ff['allvol'] if len(ff) > 0 else 0, 32))))
+    # else:
+    #     print(("\t%s Sgt: %s Gst: %s \tHgt: \t%s Ggt: " % (0, 0, 0, 0)))
+
+
+    if ff:
         print(("\tSh: %s Vr:%s Sz: %s Vr:%s " % (
-            f_print(4, ff['scent']), f_print(5, ff['svol'], 31), f_print(4, ff['zcent']), f_print(5, ff['zvol'], 31))), end=' ')
-        print(('B:%s-%s V:%s' %
-              (bigcount[0], bigcount[2], f_print(4, bigcount[1]))))
+            f_print(4, ff.get('scent', 0)),
+            f_print(5, ff.get('svol', 0), 31),
+            f_print(4, ff.get('zcent', 0)),
+            f_print(5, ff.get('zvol', 0), 31)
+        )), end=' ')
+        print(('B:%s-%s V:%s' % (
+            bigcount[0], bigcount[2], f_print(4, bigcount[1])
+        )))
     else:
         print(("\tSh: \t%s Vr:  \t%s Sz: \t%s Vr: \t%s ") % (0, 0, 0, 0), end=' ')
-        print(('B:%s-%s V:%s' %
-              (bigcount[0], bigcount[2], f_print(4, bigcount[1]))))
+        print(('B:%s-%s V:%s' % (
+            bigcount[0], bigcount[2], f_print(4, bigcount[1])
+        )))
 
-    if len(hgt) > 0:
-        print(("\tSgt: %s Gst: %s Hgt: %s Ggt: %s SSVol:%s" %
-              (hgt['ggt'], szt['ggt'], hgt['hgt'], szt['hgt'], f_print(10, ff['allvol'] if len(ff) > 0 else 0, 32))))
+    if hgt:
+        print(("\tSgt: %s Gst: %s Hgt: %s Ggt: %s SSVol:%s" % (
+            hgt.get('ggt', 0),
+            szt.get('ggt', 0),
+            hgt.get('hgt', 0),
+            szt.get('hgt', 0),
+            f_print(10, ff.get('allvol', 0), 32)
+        )))
     else:
         print(("\t%s Sgt: %s Gst: %s \tHgt: \t%s Ggt: " % (0, 0, 0, 0)))
+
 
     if len(rzrq) > 0:
         if 'shrz' not in list(rzrq.keys()) and 'szrz' not in list(rzrq.keys()):
@@ -635,7 +678,8 @@ if __name__ == '__main__':
     fibl = fibonacciCount(['999999', '399001', '399006'], dl=dl)
     percentDuration = 0.1
     cct.get_terminal_Position(position=sys.argv[0])
-
+    cct.GlobalValues().setkey('dfcfw_Except', False)
+    dfcfw_Except_time = 0
     blkname = '061.blk'
     block_path = tdd.get_tdx_dir_blocknew() + blkname
     while 1:

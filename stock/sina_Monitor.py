@@ -775,7 +775,6 @@ if __name__ == "__main__":
                             top_temp = top_all.query('lasto1d > lasto2d > lasto3d and lastp1d > lastp2d >lastp3d and close > lastp1d and lastp1d > ma51d and red > 2 and low > ma51d')
                         else:
                             top_temp = eval(f'top_all.query{initfilter}')
-
                         # if 915 < cct.get_now_time_int() < 1100:
                         #     # top_temp = top_all.query('(lasth1d > upper and lasto1d*0.996 < lastp1d < lasto1d*1.003 and lastl1d <ma201d*1.1 and low > lastp1d*0.999 and close > upper) or (b1_v < 1 and lastp1d > high4  and open > lasth1d and lasth1d > upper1 and lasth2d > upper2 and close > upper and close >lastp1d and not name.str.contains("ST"))')
                         #     # top_temp = top_all.query('open > high4 and (low > open*0.99 or low > lasth1d) and open > lasth1d and a1_v > 0')
@@ -1082,7 +1081,7 @@ if __name__ == "__main__":
                     cct.evalcmd(dir_mo,Market_Values=ct_MonitorMarket_Values,top_temp=top_temp,block_path=block_path,top_all=top_all,resample=resample)
             elif st.lower() == 'rr':
                 print(f"defaultRule: top_all.query{cct.read_ini(inifile='filter.ini',setrule='default',category='sina_Monitor')}")
-                rule = cct.cct_raw_input("filter_rule:")
+                rule = cct.cct_raw_input("initfilter:")
                 if len(rule.split()) > 1:
                     filterkey = rule.split()[-1]
                     query_rule = rule.replace(rule.split()[-1],'') if len(rule) > 0 else None

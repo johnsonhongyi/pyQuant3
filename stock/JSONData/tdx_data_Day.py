@@ -315,6 +315,487 @@ def custom_macd(prices, fastperiod=12, slowperiod=26, signalperiod=9):
    macd = 2 * (diff - dea)
    return diff, dea, macdmmm
 
+def detect_bullish_breakout(df, 
+                            price_col='close', 
+                            high_col='high', 
+                            low_col='low', 
+                            upper_col='upper', 
+                            mid_col='ene', 
+                            ma26_col='ma20d',
+                            lookback=60):
+    """
+    识别多头爆发形态：
+    1. 最近 lookback 天内至少一次冲击过上轨 upper
+    2. 回落时没有有效跌破 mid
+    3. 当前价格重新突破 upper（二次突破）
+    4. 站上 ma26，且突破近期高点
+    
+    返回: 一个 Series，标记每个交易日是否符合形态
+    """
+
+    price = df[price_col]
+    high = df[high_col]
+    low = df[low_col]
+    upper = df[upper_col]
+    mid = df[mid_col]
+    ma26 = df[ma26_col]
+
+    signals = pd.Series(False, index=df.index)
+
+    for i in range(lookback, len(df)):
+        window = df.iloc[i-lookback:i+1]
+
+        # Step 1: 曾经冲击过上轨
+        cond1 = (window[high_col].iloc[:-5] > window[upper_col].iloc[:-5]).any()
+
+        # Step 2: 回落时守住 mid
+        cond2 = (window[low_col].iloc[:-5].min() > window[mid_col].iloc[:-5].min())
+
+        # Step 3: 当前突破 upper
+        cond3 = window[price_col].iloc[-1] > window[upper_col].iloc[-1]
+
+        # Step 4: 当前在 ma26 上方
+        cond4 = window[price_col].iloc[-1] > window[ma26_col].iloc[-1]
+
+        # Step 5: 突破近期高点
+        recent_high = window[high_col].iloc[:-1].max()
+        cond5 = window[price_col].iloc[-1] > recent_high
+
+        if cond1 and cond2 and cond3 and cond4 and cond5:
+            signals.iloc[i] = True
+
+    return signals
+
+def track_bullish_signals_simple(df, breakout_col='bullbreak', gap=5, stop_loss_pct=0.05, take_profit_pct=0.15):
+    """
+    简单版本：单表处理 bullish_first 和 bullish_second，直接在 df 中增加列
+    """
+    df = df.copy()
+    # df.index = pd.to_datetime(df.index)
+
+    # 找到 upper 有效的开始位置
+    valid_start = df['upper'].replace(0, np.nan).first_valid_index()
+    if valid_start is None:
+        return df  # 没有可用 upper，直接返回
+
+    df['bullbreak'] = detect_bullish_breakout(df)
+
+
+    df['bull_f'] = False
+    df['bull_s'] = False
+    df['signal_status'] = None
+    df['entry_price'] = np.nan
+    df['stop_loss'] = np.nan
+    df['take_profit'] = np.nan
+    df['alert'] = False
+
+    holding = False
+    entry_price = None
+    stop_loss = None
+    take_profit = None
+
+    # 找到所有突破信号
+    signal_idx = df[df[breakout_col]].index
+    signal_pos = df.index.get_indexer(signal_idx)
+    last_pos = -gap*2
+
+    # 区分第一次和第二次突破
+    for pos, idx in zip(signal_pos, signal_idx):
+        if pos - last_pos > gap:
+            df.loc[idx, 'bull_f'] = True
+            df.loc[idx, 'signal_status'] = 'observing'
+            df.loc[idx, 'alert'] = True
+        else:
+            df.loc[idx, 'bull_s'] = True
+            df.loc[idx, 'signal_status'] = 'holding'
+            entry_price = df.loc[idx, 'close']
+            df.loc[idx, 'entry_price'] = entry_price
+            df.loc[idx, 'stop_loss'] = entry_price * (1 - stop_loss_pct)
+            df.loc[idx, 'take_profit'] = entry_price * (1 + take_profit_pct)
+            df.loc[idx, 'alert'] = True
+        last_pos = pos
+
+    df = track_bullish_status(df)
+
+    return df
+
+
+def track_bullish_status(df):
+    df = df.copy()
+    
+    df['has_first'] = False
+    df['obs_d'] = 0
+    df['hold_d'] = 0
+    df['status'] = None
+    
+    first_occurred = False
+    observing_count = 0
+    holding_count = 0
+    
+    for idx, row in df.iterrows():
+        # 第一次突破
+        if row.get('bull_f', False):
+            first_occurred = True
+            observing_count = 1
+            holding_count = 0
+            df.loc[idx, 'status'] = 'observing'
+        
+        # 第二次突破
+        elif row.get('bull_s', False):
+            holding_count = 1
+            df.loc[idx, 'status'] = 'holding'
+        
+        # 持仓延续
+        elif holding_count > 0:
+            holding_count += 1
+            df.loc[idx, 'status'] = 'holding'
+        
+        # 观察延续（第一次突破后）
+        elif first_occurred and observing_count > 0:
+            observing_count += 1
+            df.loc[idx, 'status'] = 'observing'
+        
+        else:
+            df.loc[idx, 'status'] = None
+        
+        # 保存累计信息
+        df.loc[idx, 'has_first'] = first_occurred
+        df.loc[idx, 'obs_d'] = observing_count
+        df.loc[idx, 'hold_d'] = holding_count
+    
+    return df
+
+
+    # 使用示例
+    # df 是单只股票的 DataFrame，包含 bullish_first / bullish_second / bullish_breakout
+    # df_tracked = track_bullish_status(df)
+
+    # # 查看最后几行
+    # print(df[['bull_f','bull_s','bullbreak','has_first','status','hold_d']].tail(10))
+
+
+# =============== start_pos 版 =================
+def track_bullish_signals_startpos(df,
+                                   price_col='close',
+                                   high_col='high',
+                                   low_col='low',
+                                   upper_col='upper',
+                                   mid_col='ene',
+                                   ma26_col='ma20d',
+                                   lookback=30,
+                                   gap=5,
+                                   stop_loss_pct=0.05,
+                                   take_profit_pct=0.15):
+    df = df.copy()
+    valid_start = df[upper_col].replace(0, np.nan).first_valid_index()
+    if valid_start is None:
+        return df
+
+    start_pos = df.index.get_loc(valid_start)
+    signals = pd.Series(False, index=df.index)
+
+    for i in range(max(lookback, start_pos), len(df)):
+        window = df.iloc[i-lookback:i+1]
+
+        cond1 = (window[high_col].iloc[:-5] > window[upper_col].iloc[:-5]).any()
+        cond2 = (window[low_col].iloc[:-5].min() > window[mid_col].iloc[:-5].min())
+        cond3 = window[price_col].iloc[-1] > window[upper_col].iloc[-1]
+        cond4 = window[price_col].iloc[-1] > window[ma26_col].iloc[-1]
+        recent_high = window[high_col].iloc[:-1].max()
+        cond5 = window[price_col].iloc[-1] > recent_high
+
+        if cond1 and cond2 and cond3 and cond4 and cond5:
+            signals.iloc[i] = True
+
+    df['bullbreak'] = signals
+    df['bull_f'] = False
+    df['bull_s'] = False
+    df['entry'] = np.nan
+    df['sl'] = np.nan
+    df['tp'] = np.nan
+    df['alert'] = False
+
+    signal_idx = df.index[df['bullbreak']].tolist()
+    last_pos = -gap*2
+
+    for idx in signal_idx:
+        pos = df.index.get_loc(idx)
+        if pos - last_pos > gap:
+            df.at[idx, 'bull_f'] = True
+            df.at[idx, 'alert'] = True
+        else:
+            df.at[idx, 'bull_s'] = True
+            df.at[idx, 'alert'] = True
+            entry_price = df.at[idx, price_col]
+            df.at[idx, 'entry'] = entry_price
+            df.at[idx, 'sl'] = entry_price * (1 - stop_loss_pct)
+            df.at[idx, 'tp'] = entry_price * (1 + take_profit_pct)
+        last_pos = pos
+
+    df['obs_d'] = 0
+    df['hold_d'] = 0
+    df['status'] = -101
+    df['has_first'] = False
+
+    first_occurred = False
+    observing_count = 0
+    holding_count = 0
+
+    for idx, row in df.iterrows():
+        if row['bull_f']:
+            first_occurred = True
+            observing_count = 1
+            holding_count = 0
+            df.at[idx, 'status'] = 'observing'
+        elif row['bull_s']:
+            holding_count = 1
+            df.at[idx, 'status'] = 'holding'
+        elif holding_count > 0:
+            holding_count += 1
+            df.at[idx, 'status'] = 'holding'
+        elif first_occurred and observing_count > 0:
+            observing_count += 1
+            df.at[idx, 'status'] = 'observing'
+        else:
+            df.at[idx, 'status'] = -101
+
+        df.at[idx, 'has_first'] = first_occurred
+        df.at[idx, 'obs_d'] = observing_count
+        df.at[idx, 'hold_d'] = holding_count
+
+    return df
+
+
+def track_bullish_signals_optimized(df,
+                               price_col='close',
+                               high_col='high',
+                               low_col='low',
+                               upper_col='upper',
+                               mid_col='ene',
+                               ma26_col='ma20d',
+                               lookback=60,
+                               gap=5,
+                               stop_loss_pct=0.05,
+                               take_profit_pct=0.15):
+    """
+    完整版本：
+    1. 检测 bullish_breakout
+    2. 区分 bullish_first / bullish_second
+    3. 计算观察天数 / 持仓天数 / 状态 / has_first_occurred
+    4. 支持 entry_price / stop_loss / take_profit / alert
+    """
+    df = df.copy()
+
+    price = df[price_col]
+    high = df[high_col]
+    low = df[low_col]
+    upper = df[upper_col]
+    mid = df[mid_col]
+    ma26 = df[ma26_col]
+
+
+    valid_start = df['upper'].replace(0, np.nan).first_valid_index()
+    if valid_start is None:
+        return df  # 没有有效 upper，直接返回
+
+    # # 将 index 转为位置
+    # start_pos = df.index.get_loc(valid_start)
+    # lookback = start_pos
+    # ------------------------
+    # Step1: 计算 bullish_breakout
+    # ------------------------
+    signals = pd.Series(False, index=df.index)
+
+    for i in range(lookback, len(df)):
+        window = df.iloc[i-lookback:i+1]
+
+        cond1 = (window[high_col].iloc[:-5] > window[upper_col].iloc[:-5]).any()
+        cond2 = (window[low_col].iloc[:-5].min() > window[mid_col].iloc[:-5].min())
+        cond3 = window[price_col].iloc[-1] > window[upper_col].iloc[-1]
+        cond4 = window[price_col].iloc[-1] > window[ma26_col].iloc[-1]
+        recent_high = window[high_col].iloc[:-1].max()
+        cond5 = window[price_col].iloc[-1] > recent_high
+
+        if cond1 and cond2 and cond3 and cond4 and cond5:
+            signals.iloc[i] = True
+
+    df['bullbreak'] = signals
+
+    # ------------------------
+    # Step2: 区分第一次/第二次突破
+    # ------------------------
+    df['bull_f'] = False
+    df['bull_s'] = False
+    df['entry_price'] = np.nan
+    df['stop_loss'] = np.nan
+    df['take_profit'] = np.nan
+    df['alert'] = False
+
+    signal_idx = df.index[df['bullbreak']].tolist()
+    last_pos = -gap*2
+
+    for idx in signal_idx:
+        pos = df.index.get_loc(idx)
+        if pos - last_pos > gap:
+            df.at[idx, 'bull_f'] = True
+            df.at[idx, 'alert'] = True
+        else:
+            df.at[idx, 'bull_s'] = True
+            df.at[idx, 'alert'] = True
+            entry_price = df.at[idx, price_col]
+            df.at[idx, 'entry_price'] = entry_price
+            df.at[idx, 'stop_loss'] = entry_price * (1 - stop_loss_pct)
+            df.at[idx, 'take_profit'] = entry_price * (1 + take_profit_pct)
+        last_pos = pos
+
+    # ------------------------
+    # Step3: 计算 observing_days / holding_days / status / has_first_occurred
+    # ------------------------
+    df['obs_d'] = 0
+    df['hold_d'] = 0
+    df['status'] = -101
+    df['has_first'] = False
+
+    first_occurred = False
+    observing_count = 0
+    holding_count = 0
+
+    for idx, row in df.iterrows():
+        if row['bull_f']:
+            first_occurred = True
+            observing_count = 1
+            holding_count = 0
+            df.at[idx, 'status'] = 'observing'
+        elif row['bull_s']:
+            holding_count = 1
+            df.at[idx, 'status'] = 'holding'
+        elif holding_count > 0:
+            holding_count += 1
+            df.at[idx, 'status'] = 'holding'
+        elif first_occurred and observing_count > 0:
+            observing_count += 1
+            df.at[idx, 'status'] = 'observing'
+        else:
+            df.at[idx, 'status'] = -101
+
+        df.at[idx, 'has_first'] = first_occurred
+        df.at[idx, 'obs_d'] = observing_count
+        df.at[idx, 'hold_d'] = holding_count
+
+    return df
+
+
+
+ 
+
+def track_bullish_signals_vectorized_full(
+        df,
+        price_col='close',
+        high_col='high',
+        low_col='low',
+        upper_col='upper',
+        mid_col='ene',
+        ma26_col='ma20d',
+        lookback=60,
+        gap=5,
+        stop_loss_pct=0.05,
+        take_profit_pct=0.15
+    ):
+    df = df.copy()
+
+    price = df[price_col]
+    high = df[high_col]
+    low = df[low_col]
+    upper = df[upper_col]
+    mid = df[mid_col]
+    ma26 = df[ma26_col]
+
+    # =======================
+    # Step1: bullish_breakout
+    # =======================
+    recent_high = high.shift(1).rolling(lookback).max()
+    recent_upper = upper.shift(1).rolling(lookback).max()
+    recent_low = low.shift(1).rolling(lookback).min()
+    recent_mid = mid.shift(1).rolling(lookback).min()
+
+    cond1 = recent_high > recent_upper
+    cond2 = recent_low > recent_mid
+    cond3 = price > upper
+    cond4 = price > ma26
+    cond5 = price > recent_high
+
+    df['bullbreak'] = (cond1 & cond2 & cond3 & cond4 & cond5).fillna(False)
+
+    # =======================
+    # Step2: bullish_first / bullish_second
+    # =======================
+    signal_idx = np.flatnonzero(df['bullbreak'].values)
+    bullish_first = np.zeros(len(df), dtype=bool)
+    bullish_second = np.zeros(len(df), dtype=bool)
+
+    entry_price = np.full(len(df), np.nan)
+    stop_loss = np.full(len(df), np.nan)
+    take_profit = np.full(len(df), np.nan)
+
+    last_pos = -gap*2
+    for pos in signal_idx:
+        if pos - last_pos > gap:
+            bullish_first[pos] = True
+        else:
+            bullish_second[pos] = True
+            entry_price[pos] = price.iloc[pos]
+            stop_loss[pos] = price.iloc[pos] * (1 - stop_loss_pct)
+            take_profit[pos] = price.iloc[pos] * (1 + take_profit_pct)
+        last_pos = pos
+
+    df['bull_f'] = bullish_first
+    df['bull_s'] = bullish_second
+    df['entry_price'] = entry_price
+    df['stop_loss'] = stop_loss
+    df['take_profit'] = take_profit
+
+    # =======================
+    # Step3: has_first_occurred
+    # =======================
+    df['has_first'] = df['bull_f'].cumsum() > 0
+
+    # =======================
+    # Step4: observing_days / holding_days
+    # =======================
+    obs_days = np.zeros(len(df), dtype=int)
+    hold_days = np.zeros(len(df), dtype=int)
+
+    obs_counter = 0
+    hold_counter = 0
+    for i in range(len(df)):
+        if df['bull_f'].iloc[i]:
+            obs_counter = 1
+            hold_counter = 0
+        elif df['bull_s'].iloc[i]:
+            hold_counter = 1
+            obs_counter = 0
+        else:
+            if obs_counter > 0:
+                obs_counter += 1
+            if hold_counter > 0:
+                hold_counter += 1
+        obs_days[i] = obs_counter
+        hold_days[i] = hold_counter
+
+    df['obs_d'] = obs_days
+    df['hold_d'] = hold_days
+
+    # =======================
+    # Step5: status
+    # =======================
+    df['status'] = np.where(df['hold_d'] > 0, 'holding',
+                            np.where(df['obs_d'] > 0, 'observing', -101))
+
+    return df
+
+
+
+
 def get_tdx_macd(df):
     if len(df) < 10:
         df['upper'] = 0
@@ -411,10 +892,270 @@ def get_tdx_macd(df):
 
     if increasing is not None:
         df = df.sort_index(ascending=increasing)
-        
+
+
     return df
 
-def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, type='f', wds=True, lastdays=3, resample='d', MultiIndex=False):
+
+
+def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
+                          type='f', wds=True, lastdays=3, resample='d', MultiIndex=False,lastday=None):
+    """
+    获取指定股票的日线数据，并计算各类指标
+    保留原有逻辑和所有变量
+
+    Arguments:
+        code (str): 股票代码
+        start (str, optional): 开始日期 YYYYMMDD
+        end (str, optional): 结束日期 YYYYMMDD
+        dl (int, optional): 最近天数
+        newdays (int, optional): 新数据天数
+        type (str, optional): 'f' forward / 'b' back
+        wds (bool, optional): 是否写入数据
+        lastdays (int, optional): 最近几日计算涨幅
+        resample (str, optional): 'd','w','m'等
+        MultiIndex (bool, optional): 是否返回多索引格式
+
+    Returns:
+        pd.DataFrame: 包含原始数据与计算指标的 DataFrame
+    """
+
+    # ------------------------------
+    # 初始化参数
+    # ------------------------------
+    code_u = cct.code_to_symbol(code)
+    if type == 'f':
+        file_path = os.path.join(exp_path, 'forwardp', f"{code_u.upper()}.txt")
+    elif type == 'b':
+        file_path = os.path.join(exp_path, 'backp', f"{code_u.upper()}.txt")
+    else:
+        return pd.DataFrame()
+
+    global initTdxdata
+    write_k_data_status = wds and not code_u.startswith('bj')
+
+    if dl is not None:
+        start = cct.last_tddate(dl)
+    start = cct.day8_to_day10(start)
+    end = cct.day8_to_day10(end)
+
+    tdx_max_int = ct.tdx_max_int
+    tdx_max_int_end = ct.tdx_max_int_end
+    tdx_high_da = ct.tdx_high_da
+    newstockdayl = newdays if newdays is not None else newdaysinit
+
+    df = None
+
+    # ------------------------------
+    # 文件不存在或为空
+    # ------------------------------
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        tmp_df = get_kdate_data(code, start='', end='', ktype='D')
+        if len(tmp_df) > 0:
+            write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
+            log.error(f'{code_u} file not exists: {file_path}')
+        else:
+            if initTdxdata == 0:
+                log.error(f"file_path not exists code: {code}")
+            initTdxdata += 1
+        return pd.DataFrame()
+
+    # ------------------------------
+    # 读取文件数据
+    # ------------------------------
+    dt_list = []
+    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
+        lines = f.readlines()
+
+    for line in lines:
+        a = line.strip().split(',')
+        if len(a) < 7: 
+            continue
+        tdate, topen, thigh, tlow, tclose, tvol, amount = a[:7]
+        if len(tdate) != 10:
+            continue
+        try:
+            topen, thigh, tlow, tclose = map(float, [topen, thigh, tlow, tclose])
+            tvol = float(tvol)
+            amount = round(float(amount), 1)
+        except:
+            continue
+        if topen == 0 or amount == 0:
+            continue
+        dt_list.append({'code': code, 'date': tdate, 'open': topen, 'high': thigh,
+                        'low': tlow, 'close': tclose, 'vol': tvol, 'amount': amount})
+
+    df = pd.DataFrame(dt_list, columns=ct.TDX_Day_columns)
+    df = df[~df.date.duplicated()]
+
+    # ------------------------------
+    # 筛选日期
+    # ------------------------------
+    if start is not None:
+        df = df[df.date >= start]
+    if end is not None:
+        df = df[df.date <= end]
+
+    if len(df) == 0:
+        return pd.DataFrame()
+
+    df['date'] = df['date'].astype(str)
+    df = df.set_index('date').sort_index(ascending=True)
+
+    if lastday is not None:
+        df = df[:-lastday]
+    # ------------------------------
+    # 非日线重采样
+    # ------------------------------
+    if not MultiIndex and resample != 'd':
+        df = get_tdx_stock_period_to_type(df, period_day=resample)
+        if 'date' in df.columns:
+            df['date'] = df['date'].astype(str)
+            df = df.set_index('date')
+
+    # ------------------------------
+    # 数据完整性检查
+    # ------------------------------
+    if resample == 'd' and len(df) >= 3:
+        cond = cct.get_today_duration(df.index[-1]) > 20 or df.close[-3:].max() / df.open[-3:].min() > 1.9
+        if cond:
+            tdx_err_code = cct.GlobalValues().getkey('tdx_err_code') or []
+            if code not in tdx_err_code:
+                tdx_err_code.append(code)
+                cct.GlobalValues().setkey('tdx_err_code', tdx_err_code)
+                log.error(f"{code} dl None outdata!")
+                initTdxdata += 1
+                if write_k_data_status:
+                    write_all_kdata_to_file(code, f_path=file_path)
+                    return get_tdx_Exp_day_to_df(
+                        code, start=start, end=end, dl=dl, newdays=newdays,
+                        type=type, wds=False, lastdays=lastdays, resample=resample, MultiIndex=MultiIndex
+                    )
+
+    # ------------------------------
+    # MACD 和涨幅
+    # ------------------------------
+    if 'macd' not in df.columns:
+        df = get_tdx_macd(df)
+    if f'perc{lastdays}d' not in df.columns:
+        df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
+
+    # ------------------------------
+    # maxp / fib / maxpcout
+    # ------------------------------
+    per_couts = df.filter(regex=r'per[1-9]d')[-1:]
+    if len(per_couts.T) > 2:
+        if resample == 'd':
+            df['maxp'] = per_couts.T[1:].values.max()
+            fib_c = (per_couts.T.values > 2).sum()
+        else:
+            df['maxp'] = per_couts.T[:3].values.max()
+            fib_c = (per_couts.T[:3].values > 10).sum()
+        df['fib'] = fib_c
+        df['maxpcout'] = fib_c
+    else:
+        df['maxp'] = df['fib'] = df['maxpcout'] = 0
+
+    # ------------------------------
+    # 高低价 / 成交量 / 均价指标
+    # ------------------------------
+    if len(df) > 10:
+        df['lmin'] = df.low[-tdx_max_int_end:-tdx_high_da].min()
+        df['min5'] = df.low[-6:-1].min()
+        df['cmean'] = round(df.close[-10:-tdx_high_da].mean(), 2)
+        df['hv'] = df.vol[-tdx_max_int:-tdx_high_da].max()
+        df['lv'] = df.vol[-tdx_max_int:-tdx_high_da].min()
+        df = df.fillna(0)
+
+        # 滚动指标
+        df['max5'] = df.close.shift(1).rolling(5).max()
+        df['max10'] = df.close.shift(1).rolling(10).max()
+        df['hmax'] = df.close.shift(1).rolling(30).max()
+        df['hmax60'] = df.close.shift(1).rolling(60).max()
+        df['high4'] = df.close.shift(1).rolling(4).max()
+        df['llowvol'] = df.vol[-tdx_max_int_end:-tdx_high_da].min()
+        df['low10'] = df.low.shift(1).rolling(10).min()
+        df['low60'] = df.close[-tdx_max_int_end*2:-tdx_max_int_end].min()
+        df['low4'] = df.low.shift(1).rolling(4).min()
+        df['lastdu4'] = ((df.high.rolling(4).max() - df.low.rolling(4).min()) /
+                          df.close.rolling(4).mean() * 100).round(1)
+
+    # ------------------------------
+    # dl == 1 的特殊处理
+    # ------------------------------
+    if dl is not None and int(dl) == 1:
+        data = cct.read_last_lines(file_path, int(dl) + 3)
+        data_l = data.split('\n')
+        data_l.reverse()
+        for line in data_l:
+            a = line.split(',')
+            if len(a) == 7:
+                tdate = a[0]
+                if len(tdate) != 10:
+                    continue
+                topen = round(float(a[1]), 2)
+                thigh = round(float(a[2]), 2)
+                tlow = round(float(a[3]), 2)
+                tclose = round(float(a[4]), 2)
+                tvol = round(float(a[5]), 2)
+                amount = round(float(a[6].replace('\r\n','')), 1)
+                if int(topen) == 0 or int(amount) == 0:
+                    continue
+                # 返回 pd.Series
+                df = pd.Series({
+                    'code': code, 'date': tdate, 'open': topen, 'high': thigh,
+                    'low': tlow, 'close': tclose, 'amount': amount, 'vol': tvol
+                })
+                return df
+        # 如果循环结束没有有效行，返回空 Series
+        return pd.Series([], dtype='float64')
+
+        # 索引设置与排序
+    # ------------------------------
+    if len(df) > 0:
+        if 'date' in df.columns:
+            df = df.set_index('date')
+        df = df.sort_index(ascending=True)
+    # ------------------------------
+    # tdx_err_code 检查逻辑
+    # ------------------------------
+    if resample == 'd':
+        try:
+            cond = cct.get_today_duration(df.index[-1]) > 20 or df.close[-3:].max() / df.open[-3:].min() > 1.9
+        except Exception as e:
+            log.error(f"tdx_err_code cond check failed: {e}")
+            cond = False
+
+        if cond:
+            tdx_err_code = cct.GlobalValues().getkey('tdx_err_code')
+            if tdx_err_code is None:
+                tdx_err_code = [code]
+                cct.GlobalValues().setkey('tdx_err_code', tdx_err_code)
+                log.error(f"{code} dl None outdata!")
+                initTdxdata += 1
+                if write_k_data_status:
+                    write_all_kdata_to_file(code, f_path=file_path)
+                    df = get_tdx_Exp_day_to_df(
+                        code, start=start, end=end, dl=dl, newdays=newdays, type='f', wds=False, MultiIndex=MultiIndex
+                    )
+            else:
+                if code not in tdx_err_code:
+                    tdx_err_code.append(code)
+                    cct.GlobalValues().setkey('tdx_err_code', tdx_err_code)
+                    log.error(f"{code} dl None outdata!")
+                    initTdxdata += 1
+                    if write_k_data_status:
+                        write_all_kdata_to_file(code, f_path=file_path)
+                        df = get_tdx_Exp_day_to_df(
+                            code, start=start, end=end, dl=dl, newdays=newdays, type='f', wds=False, MultiIndex=MultiIndex
+                        )
+
+
+    return df
+
+
+
+def get_tdx_Exp_day_to_df_SRC(code, start=None, end=None, dl=None, newdays=None, type='f', wds=True, lastdays=3, resample='d', MultiIndex=False):
     """[summary]
 
     [description]
@@ -457,26 +1198,14 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
 
     start = cct.day8_to_day10(start)
     end = cct.day8_to_day10(end)
-    
-    # if dl is not None:
-    #     if dl < 70:
-    #         tdx_max_int = dl
-    #     else:
-    #         tdx_max_int = ct.tdx_max_int_start
-    # else:
-    #     tdx_max_int = ct.tdx_max_int
 
     tdx_max_int = ct.tdx_max_int
-    # max_int_end = -1 if int(tdx_max_int) > 10 else None
-    # max_int_end = -1 if int(tdx_max_int) > 10 else None
     max_int_end = -1 
     if newdays is not None:
         newstockdayl = newdays
     else:
         newstockdayl = newdaysinit
-    # day_path = day_dir % 'sh' if code[:1] in ['5', '6', '9'] else day_dir % 'sz'
     code_u = cct.code_to_symbol(code)
-    # log.debug("code:%s code_u:%s" % (code, code_u))
     if type == 'f':
         file_path = exp_path + 'forwardp' + path_sep + code_u.upper() + ".txt"
     elif type == 'b':
@@ -484,11 +1213,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
     else:
         return None
     
-    # print file_path
-    # log.debug("daypath:%s" % file_path)
-    # p_day_dir = day_path.replace('/', path_sep).replace('\\', path_sep)
-    # p_exp_dir = exp_dir.replace('/', path_sep).replace('\\', path_sep)
-    # print p_day_dir,p_exp_dir
     global initTdxdata
 
     if code_u.startswith('bj'):
@@ -497,9 +1221,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         write_k_data_status = wds
     
     if not os.path.exists(file_path):
-        # ds = Series(
-        #     {'code': code, 'date': cct.get_today(), 'open': 0, 'high': 0, 'low': 0, 'close': 0, 'amount': 0,
-        #      'vol': 0})
         ds = pd.DataFrame()
 
         tmp_df = get_kdate_data(code, start='', end='', ktype='D')
@@ -511,15 +1232,11 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             if initTdxdata == 0:
                 log.error("file_path:not exists code:%s" % (code))
             initTdxdata += 1
-            # ds.index = '2016-01-01'
-            # ds = ds.fillna(0)
             return ds
     else:
-        # print os.path.getsize(file_path)
         if os.path.getsize(file_path) == 0:
             write_all_kdata_to_file(code, file_path)
 
-    # ofile = open(file_path, 'rb')
     if start is None and dl is None:
         ofile = open(file_path, 'rb')
         buf = ofile.readlines()
@@ -530,38 +1247,27 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         for i in range(no):
             abuf = cct.decode_bytes_type(buf[i])
             a = abuf.split(',')
-            # a = buf[i].split(',')
-            # 01/15/2016,27.57,28.15,26.30,26.97,714833.15,1946604544.000
-            # da=a[0].split('/')
             if len(a) < 7:
                 continue
             tdate = a[0]
             if len(tdate) != 10:
                 continue
-            # tdate = str(a[0])[:4] + '-' + str(a[0])[4:6] + '-' + str(a[0])[6:8]
-            # tdate=dt.strftime('%Y-%m-%d')
             topen = float(a[1])
             thigh = float(a[2])
             tlow = float(a[3])
             tclose = float(a[4])
-            # tvol = round(float(a[5]) / 10, 2)
             tvol = float(a[5])
             amount = round(float(a[6].replace('\r\n', '')), 1)  # int
-            # tpre = int(a[7])  # back
             if int(topen) == 0 or int(amount) == 0:
                 continue
             dt_list.append(
                 {'code': code, 'date': tdate, 'open': topen, 'high': thigh, 'low': tlow, 'close': tclose,
                  'amount': amount,
                  'vol': tvol})
-            # if dt is not None and tdate < dt:
-            #     break
         df = pd.DataFrame(dt_list, columns=ct.TDX_Day_columns)
         df = df[~df.date.duplicated()]
-        # df.sort_index(ascending=False, inplace=True)
         if start is not None and end is not None:
             df = df[(df.date >= start) & (df.date <= end)]
-            # print "startend"
         elif end is not None:
             df = df[df.date <= end]
         elif start is not None:
@@ -570,7 +1276,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             df = df.set_index('date')
             df = df.sort_index(ascending=True)
             if not MultiIndex:
-                # if not resample == 'd' and resample in resample_dtype:
                 if not resample == 'd':
                     df = get_tdx_stock_period_to_type(df, period_day=resample)
 
@@ -595,15 +1300,11 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                             write_all_kdata_to_file(code, f_path=file_path)
                             df = get_tdx_Exp_day_to_df(
                                 code, start=start, end=end, dl=dl, newdays=newdays, type='f', wds=False, MultiIndex=MultiIndex)
-                # write_tdx_sina_data_to_file(code, df=df)
-        # return df
     elif dl is not None and int(dl) == 1:
         fileSize = os.path.getsize(file_path)
         if newstockdayl != 0:
             if fileSize < atomStockSize * newstockdayl:
                 return pd.Series([],dtype='float64')
-        # else:
-            # log.info("newsday=0:%s"(code))
         data = cct.read_last_lines(file_path, int(dl) + 3)
         data_l = data.split('\n')
         dt_list = pd.Series([],dtype='float64')
@@ -611,24 +1312,18 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         log.debug("day 1:%s" % data_l)
         for line in data_l:
             a = line.split(',')
-            # 01/15/2016,27.57,28.15,26.30,26.97,714833.15,1946604544.000
-            # da=a[0].split('/')
             log.debug("day 1 len(a):%s a:%s" % (len(a), a))
             if len(a) == 7:
                 tdate = a[0]
                 if len(tdate) != 10:
                     continue
                 log.debug("day 1 tdate:%s" % tdate)
-                # tdate = str(a[0])[:4] + '-' + str(a[0])[4:6] + '-' + str(a[0])[6:8]
-                # tdate=dt.strftime('%Y-%m-%d')
                 topen = round(float(a[1]), 2)
                 thigh = round(float(a[2]), 2)
                 tlow = round(float(a[3]), 2)
                 tclose = round(float(a[4]), 2)
-                # tvol = round(float(a[5]) / 10, 2)
                 tvol = round(float(a[5]), 2)
                 amount = round(float(a[6].replace('\r\n', '')), 1)  # int
-                # tpre = int(a[7])  # back
                 if int(topen) == 0 or int(amount) == 0:
                     continue
                 df = Series(
@@ -638,10 +1333,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                 break
             else:
                 continue
-                # if dt is not None and tdate < dt:
-                #     break
-        # df = pd.DataFrame(dt_list, columns=ct.TDX_Day_columns)
-        # df = df.set_index('date')
         return df
 
     else:
@@ -669,21 +1360,16 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             data_l.reverse()
             for line in data_l:
                 a = line.split(',')
-                # 01/15/2016,27.57,28.15,26.30,26.97,714833.15,1946604544.000
-                # da=a[0].split('/')
                 if len(a) == 7:
                     tdate = a[0]
                     if len(tdate) != 10:
                         continue
-                    # tdate = str(a[0])[:4] + '-' + str(a[0])[4:6] + '-' + str(a[0])[6:8]
-                    # tdate=dt.strftime('%Y-%m-%d')
                     topen = round(float(a[1]), 2)
                     thigh = round(float(a[2]), 2)
                     tlow = round(float(a[3]), 2)
                     tclose = round(float(a[4]), 2)
                     tvol = round(float(a[5]), 2)
                     amount = round(float(a[6].replace('\r\n', '')), 1)  # int
-                    # tpre = int(a[7])  # back
                     if int(topen) == 0 or int(amount) == 0:
                         continue
                     dt_list.append(
@@ -692,13 +1378,10 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                          'vol': tvol})
                 else:
                     continue
-                    # if dt is not None and tdate < dt:
-                    #     break
             df = pd.DataFrame(dt_list, columns=ct.TDX_Day_columns)
             df = df[~df.date.duplicated()]
 
         else:
-            # log.error("df in Multidata:%s"%(len(df)))
             df.sort_index(ascending=False, inplace=True)
 
         if start is not None and end is not None:
@@ -715,31 +1398,13 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
 
             if 'date' in df.columns:
                 df = df.set_index('date')
-
-            # if not MultiIndex and resample == 'd':
-            #     df = get_tdx_macd(df)
-            #     df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
-
             df = df.sort_index(ascending=True)
             if not MultiIndex:
                 # if not resample == 'd' and resample in resample_dtype:
                 if not resample == 'd':
                     df = get_tdx_stock_period_to_type(df, period_day=resample)
-                    # df = get_tdx_macd(df)
-                    # df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
                     if 'date' in df.columns:
                         df = df.set_index('date')
-                # df['ma5d'] = pd.rolling_mean(df.close, 5)
-                # df['ma10d'] = pd.rolling_mean(df.close, 10)
-                # df['ma20d'] = pd.rolling_mean(df.close, 26)
-                # # df['ma60d'] = pd.rolling_mean(df.close, 60)
-                # df['hmax'] = df.high[-tdx_max_int:max_int_end].max()
-                # df['max5'] = df.close[-5:max_int_end].max()
-                # df['lmin'] = df.low[-tdx_max_int:max_int_end].min()
-                # df['min5'] = df.low[-5:max_int_end].min()
-                # df['cmean'] = round(df.close[-tdx_max_int:max_int_end].mean(), 2)
-                # df['hv'] = df.vol[-tdx_max_int:max_int_end].max()
-                # df['lv'] = df.vol[-tdx_max_int:max_int_end].min()
 
             dratio = (dl - len(df)) / float(dl)
 
@@ -768,20 +1433,13 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
                             df = get_tdx_Exp_day_to_df(
                                 code, start=start, end=end, dl=dl, newdays=newdays, type='f', wds=False, MultiIndex=MultiIndex)
 
-                # write_tdx_sina_data_to_file(code, df=df)
 
     if 'macd' not in df.columns:
         df = get_tdx_macd(df)
     if 'perc9d' not in df.columns:
         df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
 
-    #hmax -10 days max
-    # df['hmax'] = df.high[-tdx_max_int:-ct.tdx_max_int_end].max()
-    # df['hmax'] = df.close[:-ct.tdx_max_int_end].max()
     df = df.sort_index(ascending=True)
-    # if isinstance(df,pd.DataFrame):
-    # perc_couts = df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:]
-    # perc_couts = df.loc[:,df.columns[df.columns.str.contains('perc[1-9]{1}d', regex=True, case=False)]][-1:]
     per_couts = df.loc[:,df.columns[df.columns.str.contains('per[1-9]{1}d', regex=True, case=False)]][-1:]
     
     if len(per_couts.T) > 2:
@@ -798,24 +1456,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         df['fib'] =   0
         df['maxpcout'] =  0
 
-
-
-    '''
-
-    df['max5'] = df['high'].rolling(3).max()
-    df['high4'] = df['high'].rolling(2).max()
-    df['low4'] = df['low'].rolling(2).min()
-    df['hmax'] = df['high'].rolling(5).max()
-    df['lastdu4'] = df['high'].rolling(2).max()/df['low'].rolling(2).min()
-
-    '''
-
-    
-    # df['lastdu4'] = round(max(df.high4[-1],df.max5[-1],df.hmax[-1],df.upper[-1])/(df['low4'][-1]),2)
-
     if len(df) > 10:
-        # df['lastdu4'] = round((df.high4[-1])/(df['low4'][-1]),2)
-        # df['lmin'] = df.low[-tdx_max_int:max_int_end].min()
         df['lmin'] = df.low[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
         df['min5'] = df.low[-6:-1].min()
         df['cmean'] = round(df.close[-10:-ct.tdx_high_da].mean(), 2)
@@ -823,9 +1464,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
         df['lv'] = df.vol[-tdx_max_int:-ct.tdx_high_da].min()
         df = df.fillna(0)
 
-        # df = df.sort_index(ascending=False)
         if not df.index.is_monotonic_increasing:
-            # increasing = False
             df = df.sort_index(ascending=True)
 
         if cct.get_work_time_duration():
@@ -839,15 +1478,8 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             df['llowvol'] = df.vol[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
             df['low10'] = df['low'].shift(1).rolling(window=10).min()
             df['low60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].min()
-
-            # df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
-            # df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
-            # df['high4'] = df.high[-5:-1].max()
             df['low4'] = df['low'].shift(1).rolling(window=4).min()
             df['lastdu4'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
-             # (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
-
-
 
         else:
             df['max5'] = df['close'].shift(1).rolling(window=5).max()
@@ -860,23 +1492,14 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None, typ
             df['llowvol'] = df['vol'].shift(1).rolling(window=30).max()
             df['low10'] = df['low'].shift(1).rolling(window=10).min()
             df['low60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].min()
-            # df['hmax'] = df.high[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
-            # df['hmax60'] = df.high[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].max()
-            # df['high4'] = df.high[-5:-1].max()
             df['low4'] = df['low'].shift(1).rolling(window=4).min()
-            # print(df.high4[0],(df['low4'][0]))
             df['lastdu4'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
-            # df['lastdu4'] = (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
 
     if 'date' in df.columns:
         df = df.set_index('date')
-    # if len(df) > 5:
-    #     df['hvdu'] = df.vol.tolist().index(df.hv[-1])+1
-    #     df['hvhigh'] = df.high.tolist()[df.hvdu.values[0]-1]
-    #     df['lvdu'] = df.vol.tolist().index(df.lv[-1])+1
-    #     df['lvlow'] = df.close.tolist()[df.lvdu.values[0]-1]
-    # df = df.sort_index(ascending=False)
     return df
+
+
     # add cumin[:10]
 
     # if not MultiIndex :
@@ -3278,6 +3901,10 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     np.seterr(divide='ignore',invalid='ignore')  #RuntimeWarning: invalid value encountered in greater
     # df = dd[-(lastdays+1):].copy()
+    # dd = track_bullish_signals_vectorized_full(dd)
+    # dd = track_bullish_signals_simple(dd)
+    # dd = track_bullish_signals_optimized(dd)
+    dd = track_bullish_signals_startpos(dd)
 
     df = dd.copy()
     # df['max5'] = df['high'].rolling(5).max()
@@ -5127,7 +5754,74 @@ def get_tdx_stock_period_to_type_in(df, period_day='W-FRI', periods=5, ncol=None
             period_stock_data = period_stock_data.drop(['date'], axis=1)
     return period_stock_data.reset_index()
 
+
 def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=None):
+    """
+    将股票日K数据转换为周K/月K等周期数据。
+
+    Args:
+        stock_data (pd.DataFrame): 日K数据，必须包含 open, high, low, vol, amount 列。
+        period_day (str): 周期类型，'w' 周，'m' 月等。
+        periods (int): 使用周期数，暂未使用。
+        ncol (list|None): 附加需要求和的列，默认 None。
+
+    Returns:
+        pd.DataFrame: resample 后的周期数据。
+    """
+    # 1. 确定周期类型
+    period_type = period_type_dic.get(period_day.lower(), period_day)
+
+    # 2. 检查索引类型
+    indextype = stock_data.index.dtype == 'datetime64[ns]'
+
+    # 3. 工作日过滤，若在交易时段且今天已有数据，则排除当天
+    if 915 < cct.get_now_time_int() < 1500 and cct.get_trade_date_status() == 'True' and cct.get_work_day_status():
+        stock_data = stock_data[stock_data.index < cct.get_today()]
+
+    # 4. 确保索引为 datetime
+    stock_data['date'] = stock_data.index
+    if stock_data.index.name != 'date':
+        if 'date' in stock_data.columns:
+            stock_data = stock_data.set_index('date')
+        else:
+            log.error(f"index.name not date, pls check: {stock_data[:1]}")
+    stock_data.index = pd.to_datetime(stock_data.index, format='%Y-%m-%d')
+    stock_data = stock_data.sort_index(ascending=True)
+
+    # 5. 生成周期数据
+    period_stock_data = stock_data.resample(period_type).last()
+    period_stock_data['open'] = stock_data['open'].resample(period_type).first()
+    period_stock_data['high'] = stock_data['high'].resample(period_type).max()
+    period_stock_data['low'] = stock_data['low'].resample(period_type).min()
+
+    # 6. 处理成交量和其他数值列
+    if ncol:
+        for co in ncol:
+            period_stock_data[co] = stock_data[co].resample(period_type).sum()
+    else:
+        period_stock_data['amount'] = stock_data['amount'].resample(period_type).sum()
+        period_stock_data['vol'] = stock_data['vol'].resample(period_type).sum()
+
+    # 7. 设置索引为周期最后一天
+    period_stock_data.index = stock_data['date'].resample(period_type).last().index
+
+    # 8. 清理无效数据
+    if 'code' in period_stock_data.columns:
+        period_stock_data = period_stock_data[period_stock_data['code'].notnull()]
+    period_stock_data = period_stock_data.dropna()
+
+    # 9. 如果原始索引不是 datetime，则保留原 date 列作为索引
+    if not indextype and period_stock_data.index.name == 'date' and 'date' in period_stock_data.columns:
+        period_stock_data.index = period_stock_data['date']
+        period_stock_data = period_stock_data.drop(['date'], axis=1)
+    else:
+        if 'date' in period_stock_data.columns:
+            period_stock_data = period_stock_data.drop(['date'], axis=1)
+
+    return period_stock_data
+
+
+def get_tdx_stock_period_to_type_SRC(stock_data, period_day='w', periods=5, ncol=None):
     """_周期转换周K,月K_
 
     Returns:
@@ -5440,13 +6134,18 @@ if __name__ == '__main__':
     '''
     
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
-    code='837174'
+    code='600895'
     # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'], end=None, newdays=0, resample='d')
     # print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
     # import ipdb;ipdb.set_trace()
 
-    df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='d' )
-    print(df[-3:],df[-1:])
+    df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='d',lastday=None )
+    print(f"{code} : {df.loc[:,['lastp1d','ma51d','lastp2d','ma52d','lastp3d','ma53d','lasth1d','lasth2d','lasth3d']][-1:].values}")
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
+    print(df[['bull_f','bull_s','bullbreak','has_first','status','hold_d','obs_d']].tail(10))
+    import ipdb;ipdb.set_trace()
+
+    # print(df[-3:],df[-1:])
     print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
     print(f'df lastp1d:{df[:2].lastp1d}')
     print(f'3d per1d:{df.per1d[0]}  per2d:{df.per2d[0]}  per3d:{df.per3d[0]}  per4d:{df.per4d[0]}  per5d:{df.per5d[0]}  ')
@@ -5495,7 +6194,8 @@ if __name__ == '__main__':
     # dd = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='d')
     # print(f'ral:{dd.ral}')
     # import ipdb;ipdb.set_trace()
-
+    df=get_tdx_exp_all_LastDF_DL(code_l, dt='80',filter='y', resample='d')
+    print(df[:2])
 
     # write_to_all()
 
@@ -5507,16 +6207,16 @@ if __name__ == '__main__':
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
     print(f'df2 lastp1d:{df2.lastp1d}')
     print(f'code:{code}')
-    print(f'topR-d:{df2.topR} red:{df2.red} lastdu:{df2.lastdu} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl}  macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-d:{df2.topR} red:{df2.red} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl}  macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )
-    print(f'topR-3d:{df2.topR} red:{df2.red} lastdu:{df2.lastdu} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-3d:{df2.topR} red:{df2.red} lastdu:{df2.lastdu4} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
-    print(f'topR-W:{df2.topR} red:{df2.red} lastdu:{df2.lastdu} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-W:{df2.topR} red:{df2.red} lastdu:{df2.lastdu4} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
-    print(f'topR-m:{df2.topR} red:{df2.red} lastdu:{df2.lastdu} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f'topR-m:{df2.topR} red:{df2.red} lastdu:{df2.lastdu4} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     print(f'topR:{df2.topR} red:{df2.red} df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
     print(f'ldate:{df2.ldate[:2]}')
@@ -5535,8 +6235,7 @@ if __name__ == '__main__':
     #     write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
 
     # df = get_tdx_append_now_df_api_tofile('301287')
-    df=get_tdx_exp_all_LastDF_DL(code_l, dt='80',filter='y', resample='d')
-    print(df[:2])
+
     # code='600005'
     # df2 = get_tdx_exp_low_or_high_power(code,dl=120,resample='d' )
     # df = get_tdx_Exp_day_to_df(code,dl=60, start=None,end=None, newdays=0, resample='d')
