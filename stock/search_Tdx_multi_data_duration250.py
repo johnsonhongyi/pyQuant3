@@ -63,6 +63,7 @@ def get_roll_mean_all(single=True,tdx=False,app=True,duration=100,ma_250_l=1.02,
     # df = tdd.search_Tdx_multi_data_duration('tdx_all_df_300', 'all_300', df=None,code_l=code_list, start='20150501', end=None, freq=None, col=None, index='date')
     df = tdd.search_Tdx_multi_data_duration(h5_fname, h5_table, df=None,code_l=code_list, start=None, end=None, freq=None, col=None, index='date')
     # df = tdd.search_Tdx_multi_data_duration(h5_fname, h5_table, df=None,code_l=code_list, start=None, end=None, freq=None, col=None, index='date',tail=1)
+    
     def check_date_accurate(dfs):
         dd = dfs.reset_index().set_index('code')
         last3day = str(dd.loc['000002'].date[-3])[:10]

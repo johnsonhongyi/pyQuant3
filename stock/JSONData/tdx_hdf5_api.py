@@ -500,8 +500,8 @@ class SafeHDFStore(pd.HDFStore):
                 super().__exit__(exc_type, exc_val, exc_tb)
                 if self.mode != 'r':
                     # ===== 压缩逻辑 =====
-                    h5_size = os.path.getsize(self.fname) / 1e6
-                    h5_size_limit =  h5_size*1.5 if h5_size > 10 else 10
+                    h5_size = int(os.path.getsize(self.fname) / 1e6)
+                    h5_size_limit =  h5_size*2 if h5_size > 10 else 10
                     if self.fname_o.find('tdx_all_df') >= 0 or self.fname_o.find('sina_MultiIndex_data') >= 0:
                         h5_size = 40 if h5_size < 40 else h5_size
                         new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit) if h5_size > self.big_H5_Size_limit else self.big_H5_Size_limit
@@ -2269,7 +2269,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
 
                     log.info("find all:%s :%s %0.2f" %
                             (len(code_l), len(code_l) - len(dif_co), dratio))
-                    if timelimit and len(dd) > 0:
+                    if not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300) and timelimit and len(dd) > 0:
                        dd=dd.loc[dif_co]
                        o_time=dd[dd.timel != 0].timel.tolist()
                     #                        if fname == 'powerCompute':
@@ -2354,7 +2354,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                         pass
 
             if dd is not None and len(dd) > 0:
-                if timelimit:
+                if not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300) and timelimit:
                     if dd is not None and len(dd) > 0:
                         o_time=dd[dd.timel != 0].timel.tolist()
                         o_time=sorted(set(o_time))

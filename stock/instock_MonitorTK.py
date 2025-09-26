@@ -2073,33 +2073,52 @@ class StockMonitorApp(tk.Tk):
 
 
         # 默认防抖刷新
+        # def refresh_buttons():
+        #     # 清空旧按钮
+        #     for w in btn_frame.winfo_children():
+        #         w.destroy()
+        #     # 获取搜索过滤
+        #     key = search_var.get().lower()
+        #     filtered = [c for c in all_cols if key in c.lower()]
+        #     # 自动计算行列布局
+        #     n = len(filtered)
+        #     if n == 0:
+        #         return
+        #     cols_per_row = min(6, n)  # 每行最多6个
+        #     rows = (n + cols_per_row - 1) // cols_per_row
+        #     for idx, c in enumerate(filtered):
+        #         btn = ttk.Button(btn_frame, text=c,
+        #                          command=lambda nc=c: self.replace_column(col, nc))
+        #         btn.grid(row=idx // cols_per_row, column=idx % cols_per_row, padx=2, pady=2, sticky="nsew")
+
+        #     # 自动扩展列宽
+        #     for i in range(cols_per_row):
+        #         btn_frame.columnconfigure(i, weight=1)
         def refresh_buttons():
-            # 清空旧按钮
             for w in btn_frame.winfo_children():
                 w.destroy()
-            # 获取搜索过滤
-            key = search_var.get().lower()
-            filtered = [c for c in all_cols if key in c.lower()]
-            # 自动计算行列布局
-            n = len(filtered)
-            if n == 0:
-                return
-            cols_per_row = min(6, n)  # 每行最多6个
-            rows = (n + cols_per_row - 1) // cols_per_row
-            for idx, c in enumerate(filtered):
-                btn = ttk.Button(btn_frame, text=c,
-                                 command=lambda nc=c: self.replace_column(col, nc))
-                btn.grid(row=idx // cols_per_row, column=idx % cols_per_row, padx=2, pady=2, sticky="nsew")
+            kw = search_var.get().lower()
 
-            # 自动扩展列宽
-            for i in range(cols_per_row):
-                btn_frame.columnconfigure(i, weight=1)
+            # 搜索匹配所有列，但排除已经在 current_cols 的
+            if kw:
+                filtered = [c for c in self.df_all.columns if kw in c.lower() and c not in self.current_cols]
+            else:
+                # 默认显示符合默认规则且不在 current_cols
+                keywords = ["perc","status","obs","hold","bull","has","lastdu","red"]
+                filtered = [c for c in self.df_all.columns if any(k in c.lower() for k in keywords) and c not in self.current_cols]
+
+            n = len(filtered)
+            cols_per_row = 5 if n > 5 else n
+            for i, c in enumerate(filtered):
+                btn = tk.Button(btn_frame, text=c, width=12,
+                                command=lambda nc=c, oc=col: [self.replace_column(oc, nc), menu_frame.destroy()])
+                btn.grid(row=i // cols_per_row, column=i % cols_per_row, padx=2, pady=2)
 
         def default_filter(c):
             if c in self.current_cols:
                 return False
             # keywords = ["perc","percent","trade","volume","boll","macd","ma"]
-            keywords = ["perc","percent","trade","volume","macd","ma"]
+            keywords = ["perc","status","obs","hold","bull","has","lastdu","red"]
             return any(k in c.lower() for k in keywords)
 
         # 防抖机制
@@ -2111,7 +2130,7 @@ class StockMonitorApp(tk.Tk):
         # 获取可选列，排除当前已经显示的
         # all_cols = [c for c in self.df_all.columns if c not in self.current_cols]   
         all_cols = [c for c in self.df_all.columns if default_filter(c)]
-
+        # print(f'all_cols : {all_cols}')
         search_var.trace_add("write", on_search_changed)
 
         # 初次填充
@@ -2475,8 +2494,202 @@ class StockMonitorApp(tk.Tk):
     #         log.error(f"Query error: {e}")
     #         self.status_var.set(f"查询错误: {e}")
 
+    import re
+
+    def process_query(query: str):
+        """
+        提取 query 中 `and (...)` 的部分，剔除后再拼接回去
+        """
+
+        # 1️⃣ 提取所有 `and (...)` 的括号条件
+        bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
+
+        # 2️⃣ 剔除原始 query 里的这些条件
+        new_query = query
+        for bracket in bracket_patterns:
+            new_query = new_query.replace(f'and {bracket}', '')
+
+        # 3️⃣ 保留剔除的括号条件（后面可单独处理，比如分类条件）
+        removed_conditions = bracket_patterns
+
+        # 4️⃣ 示例：把条件拼接回去
+        if removed_conditions:
+            final_query = f"{new_query} and " + " and ".join(removed_conditions)
+        else:
+            final_query = new_query
+
+        return new_query.strip(), removed_conditions, final_query.strip()
+
+
+        # 🔍 测试
+        query = '(lastp1d > ma51d  and lasth1d > lasth2d  > lasth3d and lastl1d > lastl2d > lastl3d and (high > high4 or high > upper)) and (category.str.contains("固态电池"))'
+
+        new_query, removed, final_query = process_query(query)
+
+        print("去掉后的 query:", new_query)
+        print("提取出的条件:", removed)
+        print("拼接后的 final_query:", final_query)
+
 
     def apply_search(self):
+        val1 = self.search_var1.get().strip()
+        val2 = self.search_var2.get().strip()
+
+        if not val1 and not val2:
+            self.status_var.set("搜索框为空")
+            return
+
+        # 构建原始查询语句
+        if val1 and val2:
+            query = f"({val1}) and ({val2})"
+        elif val1:
+            query = val1
+        else:
+            query = val2
+
+        try:
+            # 顶部搜索框
+            if val1:
+                if val1 in self.search_history1:
+                    self.search_history1.remove(val1)
+                self.search_history1.insert(0, val1)
+                if len(self.search_history1) > 20:
+                    self.search_history1[:] = self.search_history1[:20]
+                self.search_combo1['values'] = self.search_history1
+                try:
+                    self.search_combo1.set(val1)
+                except Exception:
+                    pass
+
+            # 底部搜索框
+            if val2:
+                if val2 in self.search_history2:
+                    self.search_history2.remove(val2)
+                self.search_history2.insert(0, val2)
+                if len(self.search_history2) > 20:
+                    self.search_history2[:] = self.search_history2[:20]
+                self.search_combo2['values'] = self.search_history2
+                try:
+                    self.search_combo2.set(val2)
+                except Exception:
+                    pass
+
+            # 一次性保存
+            self.save_search_history()
+        except Exception as ex:
+            log.exception("更新搜索历史时出错: %s", ex)
+
+        # ================= 数据为空检查 =================
+        if self.df_all.empty:
+            self.status_var.set("当前数据为空")
+            return
+
+        # ====== 条件清理 ======
+        import re
+
+        # bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
+        # if len(bracket_patterns) > 0:
+        #     for bracket in bracket_patterns:
+        #         query = query.replace(f'and {bracket}','')
+        # 1️⃣ 提取带 and 的括号部分
+        bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
+
+        # 2️⃣ 替换掉原 query 中的这些部分
+        for bracket in bracket_patterns:
+            query = query.replace(f'and {bracket}', '')
+
+        # print("修改后的 query:", query)
+        # print("提取出来的括号条件:", bracket_patterns)
+
+        # 3️⃣ 后续可以在拼接 final_query 时再组合回去
+        # 例如:
+        # final_query = ' and '.join(valid_conditions)
+        # final_query += ' and ' + ' and '.join(bracket_patterns)
+
+
+        conditions = [c.strip() for c in query.split('and')]
+        valid_conditions = []
+        removed_conditions = []
+
+        for cond in conditions:
+            cond_clean = cond.lstrip('(').rstrip(')')
+
+            # index 条件特殊保留
+            # if 'index.' in cond_clean.lower():
+            #     valid_conditions.append(cond_clean)
+            #     continue
+
+            # index 或 str 操作条件特殊保留
+            if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower():
+                valid_conditions.append(cond_clean)
+                continue
+
+
+            # 提取条件中的列名
+            cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
+
+            # 所有列都必须存在才保留
+            if all(col in self.df_all.columns for col in cols_in_cond):
+                valid_conditions.append(cond_clean)
+            else:
+                removed_conditions.append(cond_clean)
+                log.info(f"剔除不存在的列条件: {cond_clean}")
+
+        # 打印剔除条件列表
+        if removed_conditions:
+            print(f"[剔除的条件列表] {removed_conditions}")
+
+        if not valid_conditions:
+            self.status_var.set("没有可用的查询条件")
+            return
+
+        # ====== 拼接 final_query 并检查括号 ======
+        final_query = ' and '.join(f"({c})" for c in valid_conditions)
+        # print(f'final_query : {final_query}')
+        if bracket_patterns:
+            final_query += ' and ' + ' and '.join(bracket_patterns)
+        # print(f'final_query : {final_query}')
+        left_count = final_query.count("(")
+        right_count = final_query.count(")")
+        if left_count != right_count:
+            if left_count > right_count:
+                final_query += ")" * (left_count - right_count)
+            elif right_count > left_count:
+                final_query = "(" * (right_count - left_count) + final_query
+
+        # ====== 决定 engine ======
+        query_engine = 'numexpr'
+        if any('index.' in c.lower() for c in valid_conditions):
+            query_engine = 'python'
+
+        # ====== 数据过滤 ======
+        try:
+            # 检查 category 列是否存在
+            if 'category' in self.df_all.columns:
+                # 强制转换为字符串，避免 str.contains 报错
+                if not pd.api.types.is_string_dtype(self.df_all['category']):
+                    self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
+                    # self.df_all['category'] = self.df_all['category'].astype(str)
+                    # 可选：去掉前后空格
+                    # self.df_all['category'] = self.df_all['category'].str.strip()
+            df_filtered = self.df_all.query(final_query, engine=query_engine)
+            self.refresh_tree(df_filtered)
+            # 打印剔除条件列表
+            if removed_conditions:
+                print(f"[剔除的条件列表] {removed_conditions}")
+                # 显示到状态栏
+                self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
+                self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
+            else:
+                self.status_var2.set('')
+                self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
+            print(f'final_query: {final_query}')
+        except Exception as e:
+            log.error(f"Query error: {e}")
+            self.status_var.set(f"查询错误: {e}")
+
+
+    def apply_search_no_or(self):
         val1 = self.search_var1.get().strip()
         val2 = self.search_var2.get().strip()
 
@@ -2604,6 +2817,7 @@ class StockMonitorApp(tk.Tk):
             else:
                 self.status_var2.set('')
                 self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
+            print(f'final_query: {final_query}')
         except Exception as e:
             log.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")

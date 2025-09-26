@@ -788,6 +788,7 @@ def get_last_trade_date(dt=None):
     return(a_trade_calendar.get_pre_trade_date(dt))
 
 def get_lastdays_trade_date(days=10):
+    days = int(days)
     if days is None:
         dt = get_last_trade_date()
     else:
@@ -2245,6 +2246,8 @@ def testdf2(df):
 
 
 def get_today_duration(datastr, endday=None,tdx=False):
+    if isinstance(datastr, int):
+        datastr = str(datastr)
     if datastr is not None and len(datastr) > 6:
         if endday:
             today = datetime.datetime.strptime(day8_to_day10(endday), '%Y-%m-%d').date()

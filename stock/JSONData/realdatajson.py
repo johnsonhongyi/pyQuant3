@@ -237,9 +237,7 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
                 if len(dd) > 100:
                     log.info("return sina_ratio:%s"%(len(dd)))
                     return dd
-    # else:
 
-#    market = 'all'
     if h5 is None or market=='all':
         url_list=[]
         # for m in ct.SINA_Market_KEY.values():
