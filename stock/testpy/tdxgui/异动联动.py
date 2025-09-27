@@ -1603,7 +1603,7 @@ def update_linkage_status():
         dfcf_process_hwnd = 0
     if uniq_var.get() or not uniq_var.get():
         show_tasks()
-    print(f"TDX: {tdx_var.get()}, THS: {ths_var.get()}, DC: {dfcf_var.get()}, Uniq: {uniq_var.get()},Sub: {sub_var.get()}")
+    print(f"TDX: {tdx_var.get()}, THS: {ths_var.get()}, DC: {dfcf_var.get()}, Uniq: {uniq_var.get()},Sub: {sub_var.get()} ,Win, {win_var.get()}")
 
 def daily_task():
     """
@@ -1841,7 +1841,117 @@ def rearrange_monitor_windows_grid():
                 print(f"移动窗口失败 {code}: {e}")
 
 
-def rearrange_monitors_per_screen(align="left", sort_by="id"):
+def rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal"):
+    """
+    多屏幕窗口重排（自动换列/换行 + 左右对齐 + 屏幕内排序）
+    
+    align: "left" 或 "right" 控制对齐方向
+    sort_by: "id" 或 "title" 窗口排序依据
+    layout: "vertical" -> 竖排 (上下叠加，满高换列)
+            "horizontal" -> 横排 (左右并排，满宽换行)
+    """
+    if not MONITORS:
+        init_monitors()
+
+    # 取监控窗口列表
+    windows = [info for info in monitor_windows.values() if "toplevel" in info]
+
+    # 按屏幕分组
+    screen_groups = {i: [] for i in range(len(MONITORS))}
+    for win_info in windows:
+        win = win_info["toplevel"]
+        try:
+            x, y = win.winfo_x(), win.winfo_y()
+            for idx, (l, t, r, b) in enumerate(MONITORS):
+                if l <= x < r and t <= y < b:
+                    screen_groups[idx].append(win_info)
+                    break
+        except Exception as e:
+            print(f"⚠ 获取窗口位置失败: {e}")
+
+    # 每个屏幕内排序并排列
+    for idx, group in screen_groups.items():
+        if not group:
+            continue
+
+        # 排序
+        if sort_by == "id":
+            group.sort(key=lambda info: info['stock_info'][0]) 
+        elif sort_by == "title":
+            group.sort(key=lambda info: info['stock_info'][1]) 
+
+        l, t, r, b = MONITORS[idx]
+        screen_width = r - l
+        screen_height = b - t
+
+        margin_x = 30
+        margin_y = 5
+
+        if align == "left":
+            current_x = l + 50
+        elif align == "right":
+            current_x = r - 50
+        else:
+            raise ValueError("align 参数必须是 'left' 或 'right'")
+
+        current_y = t + 50
+        max_col_width = 0
+        max_row_height = 0
+
+        for win_info in group:
+            win = win_info["toplevel"]
+            try:
+                w = win.winfo_width()
+                h = win.winfo_height()
+                win_state = win_var.get()
+                if layout == "vertical" or  win_state:
+                    # -------- 竖排逻辑 --------
+                    if align == "right" and max_col_width == 0:
+                        current_x -= w
+
+                    if current_y + h + margin_y > b:
+                        # 换列
+                        if align == "left":
+                            current_x += max_col_width + margin_x
+                        else:
+                            current_x -= max_col_width + margin_x
+                        current_y = t + 50
+                        max_col_width = 0
+                        if align == "right":
+                            current_x -= w
+
+                    win.geometry(f"{w}x{h}+{current_x}+{current_y}")
+                    current_y += h + margin_y
+                    max_col_width = max(max_col_width, w)
+
+                else:
+                    # -------- 横排逻辑 --------
+                    if align == "right" and max_row_height == 0:
+                        current_x -= w
+
+                    if current_x + w + margin_x > r:
+                        # 换行
+                        current_y += max_row_height + margin_y
+                        if align == "left":
+                            current_x = l + 50
+                        else:
+                            current_x = r - 50 - w
+                        max_row_height = 0
+
+                    win.geometry(f"{w}x{h}+{current_x}+{current_y}")
+
+                    if align == "left":
+                        current_x += w + margin_x
+                    else:
+                        current_x -= w + margin_x
+
+                    max_row_height = max(max_row_height, h)
+
+            except Exception as e:
+                print(f"⚠ 窗口排列失败: {e}")
+
+
+def rearrange_monitors_per_screen_vertical(align="left", sort_by="id"):
     """
     多屏幕窗口重排（自动换列 + 左右对齐 + 屏幕内排序）
     
@@ -5615,13 +5725,14 @@ ths_var = tk.BooleanVar(value=True)
 dfcf_var = tk.BooleanVar(value=False)
 uniq_var = tk.BooleanVar(value=False)
 sub_var = tk.BooleanVar(value=False)
-
+win_var = tk.BooleanVar(value=False)
 checkbuttons_info = [
     ("TDX", tdx_var),
     ("THS", ths_var),
     ("DC", dfcf_var),
     ("Uniq", uniq_var),
-    ("Sub", sub_var)
+    ("Sub", sub_var),
+    ("Win", win_var)
 ]
 
 for text, var in checkbuttons_info:

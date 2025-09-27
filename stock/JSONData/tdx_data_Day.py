@@ -961,6 +961,36 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         return pd.DataFrame()
 
     # ------------------------------
+    # dl == 1 的特殊处理
+    # ------------------------------
+    if dl is not None and int(dl) == 1:
+        data = cct.read_last_lines(file_path, int(dl) + 3)
+        data_l = data.split('\n')
+        data_l.reverse()
+        for line in data_l:
+            a = line.split(',')
+            if len(a) == 7:
+                tdate = a[0]
+                if len(tdate) != 10:
+                    continue
+                topen = round(float(a[1]), 2)
+                thigh = round(float(a[2]), 2)
+                tlow = round(float(a[3]), 2)
+                tclose = round(float(a[4]), 2)
+                tvol = round(float(a[5]), 2)
+                amount = round(float(a[6].replace('\r\n','')), 1)
+                if int(topen) == 0 or int(amount) == 0:
+                    continue
+                # 返回 pd.Series
+                df = pd.Series({
+                    'code': code, 'date': tdate, 'open': topen, 'high': thigh,
+                    'low': tlow, 'close': tclose, 'amount': amount, 'vol': tvol
+                })
+                return df
+        # 如果循环结束没有有效行，返回空 Series
+        return pd.Series([], dtype='float64')
+
+    # ------------------------------
     # 读取文件数据
     # ------------------------------
     dt_list = []
@@ -1080,35 +1110,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         df['lastdu4'] = ((df.high.rolling(4).max() - df.low.rolling(4).min()) /
                           df.close.rolling(4).mean() * 100).round(1)
 
-    # ------------------------------
-    # dl == 1 的特殊处理
-    # ------------------------------
-    if dl is not None and int(dl) == 1:
-        data = cct.read_last_lines(file_path, int(dl) + 3)
-        data_l = data.split('\n')
-        data_l.reverse()
-        for line in data_l:
-            a = line.split(',')
-            if len(a) == 7:
-                tdate = a[0]
-                if len(tdate) != 10:
-                    continue
-                topen = round(float(a[1]), 2)
-                thigh = round(float(a[2]), 2)
-                tlow = round(float(a[3]), 2)
-                tclose = round(float(a[4]), 2)
-                tvol = round(float(a[5]), 2)
-                amount = round(float(a[6].replace('\r\n','')), 1)
-                if int(topen) == 0 or int(amount) == 0:
-                    continue
-                # 返回 pd.Series
-                df = pd.Series({
-                    'code': code, 'date': tdate, 'open': topen, 'high': thigh,
-                    'low': tlow, 'close': tclose, 'amount': amount, 'vol': tvol
-                })
-                return df
-        # 如果循环结束没有有效行，返回空 Series
-        return pd.Series([], dtype='float64')
+    
 
         # 索引设置与排序
     # ------------------------------
@@ -2802,6 +2804,7 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
     """
     sh_index = '000002'
     dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
+
     # log.error("Write_market_all_day_mp:%s"%(dd))
     # #fix sleep not update sina.all
     # df = sina_data.Sina().sina.all
@@ -6133,6 +6136,9 @@ if __name__ == '__main__':
     dfw.index = dfw.index - pd.tseries.frequencies.to_offset("6D")
     '''
     
+    sh_index = '000002'
+    dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
+    print(f'dd : {dd}')
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
     code='600895'
     # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'], end=None, newdays=0, resample='d')
@@ -6194,6 +6200,8 @@ if __name__ == '__main__':
     # dd = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='d')
     # print(f'ral:{dd.ral}')
     # import ipdb;ipdb.set_trace()
+
+
     df=get_tdx_exp_all_LastDF_DL(code_l, dt='80',filter='y', resample='d')
     print(df[:2])
 
