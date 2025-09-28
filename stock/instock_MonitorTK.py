@@ -28,7 +28,7 @@ log = LoggerFactory.log
 sort_cols, sort_keys = ct.get_market_sort_value_key('3 0')
 DISPLAY_COLS = ct.get_Duration_format_Values(
     ct.Monitor_format_trade,sort_cols[:2])
-
+# print(f'DISPLAY_COLS : {DISPLAY_COLS}')
 # DISPLAY_COLS = ct.get_Duration_format_Values(
 # ct.Monitor_format_trade,
 #     ['name','trade','boll','dff','df2','couts','percent','volume','category']
@@ -48,6 +48,25 @@ os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(DARACSV_DIR, exist_ok=True)
 START_INIT = 0
 # st_key_sort = '3 0'
+
+
+CONFIG_FILE = "display_cols.json"
+DEFAULT_DISPLAY_COLS = [
+    'name', 'trade', 'boll', 'dff', 'df2', 'couts',
+    'percent', 'per1d', 'perc1d', 'ra', 'ral',
+    'topR', 'volume', 'red', 'lastdu4', 'category'
+]
+
+def load_display_config():
+    if os.path.exists(CONFIG_FILE):
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"current": DEFAULT_DISPLAY_COLS, "sets": []}
+
+def save_display_config(config):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=2)
+
 
 def get_monitor_by_point(x, y):
     """返回包含坐标(x,y)的屏幕信息字典"""
@@ -149,6 +168,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
             top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
             if top_now.empty:
                 log.debug("no data fetched")
+                print("top_now.empty no data fetched")
                 time.sleep(ct.duration_sleep_time)
                 continue
 
@@ -389,6 +409,9 @@ class StockMonitorApp(tk.Tk):
         self.sortby_col = None
         self.sortby_col_ascend = None
         self.select_code = None
+        self.ColumnSetManager = None
+        self.ColManagerconfig = None
+        self._open_column_manager_job = None
         # 刷新开关标志
         self.refresh_enabled = True
         from multiprocessing import Manager
@@ -410,33 +433,6 @@ class StockMonitorApp(tk.Tk):
         ctrl_frame.pack(fill="x", padx=5, pady=2)
 
         self.st_key_sort = self.global_values.getkey("st_key_sort") or "3 0"
-        # tk.Label(ctrl_frame, text="blkname:").pack(side="left")
-        # self.blk_label = tk.Label(ctrl_frame, text=cct.GlobalValues().getkey("blkname") or "boll")
-        # self.blk_label.pack(side="left", padx=2)
-
-        # tk.Label(ctrl_frame, text="resample:").pack(side="left", padx=5)
-        # self.resample_combo = ttk.Combobox(ctrl_frame, values=["d","w","m"], width=5)
-        # self.resample_combo.set(cct.GlobalValues().getkey("resample") or "d")
-        # self.resample_combo.pack(side="left")
-        # self.resample_combo.bind("<<ComboboxSelected>>", self.set_resample)
-
-        # tk.Label(ctrl_frame, text="Search:").pack(side="left", padx=5)
-        # self.search_entry = tk.Entry(ctrl_frame, width=30)
-        # self.search_entry.pack(side="left", padx=2)
-        # tk.Button(ctrl_frame, text="Go", command=self.set_search).pack(side="left", padx=2)
-
-        # # 数据存档按钮
-        # tk.Button(ctrl_frame, text="保存数据", command=self.save_data_to_csv).pack(side="left", padx=2)
-        # tk.Button(ctrl_frame, text="读取存档", command=self.load_data_from_csv).pack(side="left", padx=2)
-
-        # # 刷新控制按钮
-        # tk.Button(ctrl_frame, text="停止刷新", command=self.stop_refresh).pack(side="left", padx=5)
-        # tk.Button(ctrl_frame, text="启动刷新", command=self.start_refresh).pack(side="left", padx=2)
-
-        # ----------------- 状态栏 ----------------- #
-        # self.status_var = tk.StringVar()
-        # self.status_bar = tk.Label(self, textvariable=self.status_var, relief="sunken", anchor="w")
-        # self.status_bar.pack(fill="x", side="bottom")
 
 
         # ====== 底部状态栏 ======
@@ -464,8 +460,6 @@ class StockMonitorApp(tk.Tk):
         status_label_right.pack(fill="x", expand=True)
 
         # 添加左右面板
-        # pw.add(left_frame, minsize=100)   # 左侧最小宽度
-        # pw.add(right_frame, minsize=100)  # 右侧最小宽度
         pw.add(left_frame, minsize=100, width=780)
         pw.add(right_frame, minsize=100, width=220)
 
@@ -565,11 +559,81 @@ class StockMonitorApp(tk.Tk):
         # 绑定右键点击事件
         self.tree.bind("<Button-3>", self.on_tree_right_click)
 
+
+        self.bind("<Alt-c>", lambda e:self.open_column_manager(self, self.df_all.columns, self.update_treeview_cols))
+
         # 绑定双击事件
         # self.tree.bind("<Double-1>", self.on_double_click)
 
 
-        #     self.apply_search()
+
+    def update_treeview_cols(self, new_cols):
+        # code 永远在最前
+        new_cols = ["code"] + new_cols
+        refesh_col_status = False
+        if new_cols !=  self.current_cols:
+            refesh_col_status = True
+        self.current_cols = ["code"] + new_cols
+        self.tree["columns"] = self.current_cols
+
+        for col in self.current_cols:
+            self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+            # 初始先给个宽度
+            width = 120 if col == "name" else 80
+            self.tree.column(col, width=width, anchor="center", minwidth=50)
+
+        # 最后自适应调整
+        self.adjust_column_widths()
+        if refesh_col_status:
+            self.refresh_tree()
+
+    # def open_column_manager(self,master, all_columns, on_apply_callback):
+    #     if  self.ColManagerconfig is None and  self.ColumnSetManager is None:
+    #         self.ColManagerconfig = load_display_config()
+    #         # print(f'all_columns : {all_columns.values}')
+    #         # self.manager = ColumnSetManager(master, all_columns, config, on_apply_callback)
+    #         self.ColumnSetManager = ColumnSetManager(master, all_columns, self.ColManagerconfig, on_apply_callback, default_cols=DISPLAY_COLS)
+    #         self.ColumnSetManager.grab_set()
+    #     else:
+    #         self.ColumnSetManager.open_column_manager_editor()
+
+
+    # 防抖 resize（避免重复刷新）
+    # ---------------------------
+    def _on_open_column_manager(self):
+        if self._open_column_manager_job:
+            self.after_cancel(self._open_column_manager_job)
+        self._open_column_manager_job = self.after(1000, self.open_column_manager)
+
+    def open_column_manager(self,master, all_columns, on_apply_callback):
+        if self.ColumnSetManager is not None and self.ColumnSetManager.winfo_exists():
+            # 已存在，直接激活
+            # self.ColumnSetManager.deiconify()
+            # self.ColumnSetManager.lift()
+            # self.ColumnSetManager.focus_set()
+            # if not self.ColManagerconfig:
+            #     self.ColManagerconfig = load_display_config()
+            self.ColumnSetManager.open_column_manager_editor()
+        else:
+            if not self.df_all.empty:
+                self.ColManagerconfig = load_display_config()
+                # 创建新窗口
+                self.ColumnSetManager = ColumnSetManager(
+                self,
+                self.df_all.columns,
+                self.ColManagerconfig,
+                self.update_treeview_cols,
+                default_cols=["code","name"]  # 默认列
+                        )
+                # 关闭时清理引用
+                self.ColumnSetManager.protocol("WM_DELETE_WINDOW", self.on_close_column_manager)
+            else:
+                self.after(1000,self._on_open_column_manager)
+
+    def on_close_column_manager(self):
+        if self.ColumnSetManager is not None:
+            self.ColumnSetManager.destroy()
+            self.ColumnSetManager = None
 
     def open_alert_editorAuto(self, stock_info, new_rule=False):
         code = stock_info.get("code")
@@ -792,6 +856,7 @@ class StockMonitorApp(tk.Tk):
         tk.Button(bottom_search_frame, text="搜索", command=lambda: self.apply_search()).pack(side="left", padx=3)
         tk.Button(bottom_search_frame, text="清空", command=lambda: self.clean_search(1)).pack(side="left", padx=2)
         tk.Button(bottom_search_frame, text="删除", command=lambda: self.delete_search_history(1)).pack(side="left", padx=2)
+        tk.Button(bottom_search_frame, text="管理", command=lambda: self.open_column_manager(self, self.df_all.columns, self.update_treeview_cols)).pack(side="left", padx=2)
 
 
         # 功能选择下拉框（固定宽度）
@@ -2489,7 +2554,12 @@ class StockMonitorApp(tk.Tk):
         self.select_code = None
         self.sortby_col =  col
         self.sortby_col_ascend = not reverse
-        df_sorted = self.current_df.sort_values(by=col, ascending=not reverse)
+        # df_sorted = self.current_df.sort_values(by=col, ascending=not reverse)
+        if pd.api.types.is_numeric_dtype(self.current_df[col]):
+            df_sorted = self.current_df.sort_values(by=col, ascending=not reverse)
+        else:
+            df_sorted = self.current_df.sort_values(by=col, key=lambda s: s.astype(str), ascending=not reverse)
+
         self.refresh_tree(df_sorted)
         self.tree.heading(col, command=lambda: self.sort_by_column(col, not reverse))
         self.tree.yview_moveto(0)
@@ -3463,10 +3533,10 @@ class StockMonitorApp(tk.Tk):
             self.proc.join(timeout=1)    # 等待最多 5 秒
             if self.proc.is_alive():
                 self.proc.terminate()    # 强制终止
-        try:
-            self.manager.shutdown()
-        except Exception as e: 
-            print(f'manager.shutdown : {e}')
+        # try:
+        #     self.manager.shutdown()
+        # except Exception as e: 
+        #     print(f'manager.shutdown : {e}')
         self.destroy()
 
 # class QueryHistoryManager(tk.Frame):
@@ -3496,7 +3566,7 @@ class QueryHistoryManager:
 
 
     def _build_ui(self):
-        self.root.title("Query History Manager")
+        # self.root.title("Query History Manager")
 
         if hasattr(self, "editor_frame"):
             self.editor_frame.destroy()  # 重建
@@ -3567,6 +3637,9 @@ class QueryHistoryManager:
         self.tree.bind("<Double-1>", self.on_double_click)
         # 右键菜单
         self.tree.bind("<Button-3>", self.show_context_menu)
+
+        # self.root.bind("<Escape>", lambda event: self.open_editor())
+        self.root.bind("<Alt-q>", lambda event: self.open_editor())
         # 为每列绑定排序
         for col in ("query", "star", "note"):
             self.tree.heading(col, text=col.capitalize(), command=lambda _col=col: self.treeview_sort_column(self.tree, _col))
@@ -3811,35 +3884,6 @@ class QueryHistoryManager:
 
         return x, y
 
-
-    # def get_centered_window_position(self, parent, win_width, win_height, side="right"):
-    #     # 获取父窗口在屏幕上的位置
-    #     parent.update_idletasks()
-    #     px = parent.winfo_rootx()
-    #     py = parent.winfo_rooty()
-    #     pw = parent.winfo_width()
-    #     ph = parent.winfo_height()
-
-    #     # 屏幕尺寸
-    #     screen_width = parent.winfo_screenwidth()
-    #     screen_height = parent.winfo_screenheight()
-
-    #     if side == "right":
-    #         x = px + pw + 10
-    #         y = py + (ph - win_height) // 2
-    #         # 防止超出屏幕
-    #         if x + win_width > screen_width:
-    #             x = screen_width - win_width - 10
-    #     elif side == "left":
-    #         x = px - win_width - 10
-    #         y = py + (ph - win_height) // 2
-    #         if x < 0:
-    #             x = 10
-    #     else:  # center
-    #         x = px + (pw - win_width) // 2
-    #         y = py + (ph - win_height) // 2
-    #     return x, y
-
     def askstring_at_parent(self,parent, title, prompt, initialvalue=""):
         # 创建临时窗口
         dlg = tk.Toplevel(parent)
@@ -4074,6 +4118,763 @@ class QueryHistoryManager:
             star = "⭐" if record.get("starred") else ""
             note = record.get("note", "")
             self.tree.insert("", "end", iid=str(idx), values=(record.get("query", ""), star, note))
+
+
+
+# toast_message （使用你给定的实现）
+def toast_message(master, text, duration=1500):
+    """短暂提示信息（浮层，不阻塞）"""
+    toast = tk.Toplevel(master)
+    toast.overrideredirect(True)
+    toast.attributes("-topmost", True)
+    label = tk.Label(toast, text=text, bg="black", fg="white", padx=10, pady=5)
+    label.pack()
+    try:
+        master.update_idletasks()
+        master_x = master.winfo_rootx()
+        master_y = master.winfo_rooty()
+        master_w = master.winfo_width()
+    except Exception:
+        master_x, master_y, master_w = 100, 100, 400
+    toast.update_idletasks()
+    toast_w = toast.winfo_width()
+    toast_h = toast.winfo_height()
+    toast.geometry(f"{toast_w}x{toast_h}+{master_x + (master_w-toast_w)//2}+{master_y + 50}")
+    toast.after(duration, toast.destroy)
+
+
+class ColumnSetManager(tk.Toplevel):
+    def __init__(self, master, all_columns, config, on_apply_callback, default_cols):
+        super().__init__(master)
+        self.title("列组合管理器")
+        # 基础尺寸（用于初始化宽度 fallback）
+        self.width = 800
+        self.height = 500
+        self.geometry(f"{self.width}x{self.height}")
+
+        # 参数
+        self.all_columns = list(all_columns)
+        self.no_filtered = []
+        self.config = config if isinstance(config, dict) else {}
+        self.on_apply_callback = on_apply_callback
+        self.default_cols = list(default_cols)
+
+        # 状态
+        self.current_set = list(self.config.get("current", self.default_cols.copy()))
+        self.saved_sets = list(self.config.get("sets", []))  # 格式：[{ "name": str, "cols": [...] }, ...]
+
+        # 存放 checkbutton 的 BooleanVar，防 GC
+        self._chk_vars = {}
+
+        # 拖拽数据（用于 tag 拖拽）
+        self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
+
+        # 防抖 job id
+        self._resize_job = None
+
+        # 构建 UI
+        self._build_ui()
+
+        # 延迟首次布局（保证 winfo_width() 可用）
+        self.after(80, self.update_grid)
+
+        # 绑定窗口 resize（防抖）
+        # self.bind("<Configure>", self._on_resize)
+
+    def _build_ui(self):
+        # 主容器：左右两栏（左：选择区 + 当前组合；右：已保存组合）
+        self.main = ttk.Frame(self)
+        self.main.pack(fill=tk.BOTH, expand=True)
+
+        top = ttk.Frame(self.main)
+        top.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        left = ttk.Frame(top)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        right = ttk.Frame(top, width=220)
+        right.pack(side=tk.RIGHT, fill=tk.Y)
+        right.pack_propagate(False)
+
+        # 搜索栏（放在 left 顶部）
+        search_frame = ttk.Frame(left)
+        search_frame.pack(fill=tk.X, pady=(0,6))
+        ttk.Label(search_frame, text="搜索:").pack(side=tk.LEFT)
+        self.search_var = tk.StringVar()
+        entry = ttk.Entry(search_frame, textvariable=self.search_var)
+        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6,0))
+        entry.bind("<KeyRelease>", lambda e: self._debounced_update())
+
+        # 列选择区（canvas + scrollable_frame）
+        grid_container = ttk.Frame(left)
+        grid_container.pack(fill=tk.BOTH, expand=True)
+
+        self.canvas = tk.Canvas(grid_container, height=160)
+        self.vscroll = ttk.Scrollbar(grid_container, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.vscroll.set)
+
+        self.inner_frame = ttk.Frame(self.canvas)  # 放 checkbuttons 的 frame
+        # 当 inner_frame size 改变时，同步调整 canvas scrollregion
+        self.inner_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+
+        self.canvas.create_window((0,0), window=self.inner_frame, anchor="nw")
+
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # 鼠标滚轮在 canvas 上滚动（适配 Windows 与 Linux）
+        self.canvas.bind("<Enter>", lambda e: self._bind_mousewheel(True))
+        self.canvas.bind("<Leave>", lambda e: self._bind_mousewheel(False))
+
+        # 当前组合横向标签（自动换行 + 拖拽）
+        current_lf = ttk.LabelFrame(left, text="当前组合")
+        current_lf.pack(fill=tk.X, pady=(6,0))
+        self.current_frame = tk.Frame(current_lf, height=60)
+        self.current_frame.pack(fill=tk.X, padx=4, pady=6)
+        # 确保 current_frame 能获取尺寸变化事件
+        self.current_frame.bind("<Configure>", lambda e: self._debounced_refresh_tags())
+
+        # 右侧：已保存组合列表与管理按钮
+        ttk.Label(right, text="已保存组合").pack(anchor="w", padx=6, pady=(6,0))
+        self.sets_listbox = tk.Listbox(right, exportselection=False)
+        self.sets_listbox.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self.sets_listbox.bind("<Double-1>", lambda e: self.load_selected_set())
+
+        sets_btns = ttk.Frame(right)
+        sets_btns.pack(fill=tk.X, padx=6, pady=(0,6))
+        ttk.Button(sets_btns, text="加载", command=self.load_selected_set).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(sets_btns, text="删除", command=self.delete_selected_set).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+
+        # 底部按钮（全宽）
+        bottom = ttk.Frame(self)
+        bottom.pack(fill=tk.X, padx=6, pady=6)
+        ttk.Button(bottom, text="保存组合", command=self.save_current_set).pack(side=tk.LEFT, expand=True, fill=tk.X)
+        ttk.Button(bottom, text="应用组合", command=self.apply_current_set).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=6)
+        ttk.Button(bottom, text="恢复默认", command=self.restore_default).pack(side=tk.LEFT, expand=True, fill=tk.X)
+
+        self.bind("<Alt-c>",lambda e:self.open_column_manager_editor())
+        # 填充保存组合列表
+        self.refresh_saved_sets()
+
+    # def open_column_manager_editor(self):
+    #     """在已有 root 上打开编辑窗口"""
+    #     #应用于frame
+    #     if  hasattr(self, "main"):
+    #         if self.winfo_ismapped():
+    #             self.pack_forget()  # 隐藏
+    #         else:
+    #             self.pack(fill="both", expand=True)  # 仅显示，不移动位置
+
+    def open_column_manager_editor(self):
+        """切换显示/隐藏"""
+        if self.state() == "withdrawn":
+            # 已隐藏 → 显示
+            self.deiconify()
+            self.lift()
+            self.focus_set()
+        else:
+            # 已显示 → 隐藏
+            self.withdraw()
+    # ---------------------------
+    # 鼠标滚轮支持（只在 canvas 区生效）
+    # ---------------------------
+    def _bind_mousewheel(self, bind: bool):
+        # Windows: <MouseWheel> with event.delta; Linux: Button-4/5
+        if bind:
+            self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+            self.canvas.bind_all("<Button-4>", self._on_mousewheel)
+            self.canvas.bind_all("<Button-5>", self._on_mousewheel)
+        else:
+            try:
+                self.canvas.unbind_all("<MouseWheel>")
+                self.canvas.unbind_all("<Button-4>")
+                self.canvas.unbind_all("<Button-5>")
+            except Exception:
+                pass
+
+    def _on_mousewheel(self, event):
+        # cross-platform wheel handling
+        if event.num == 4:  # Linux scroll up
+            self.canvas.yview_scroll(-1, "units")
+        elif event.num == 5:  # Linux scroll down
+            self.canvas.yview_scroll(1, "units")
+        else:
+            # Windows / Mac
+            delta = int(-1*(event.delta/120))
+            self.canvas.yview_scroll(delta, "units")
+
+    # ---------------------------
+    # 防抖 resize（避免重复刷新）
+    # ---------------------------
+    # def _on_resize(self, event):
+    #     if self._resize_job:
+    #         self.after_cancel(self._resize_job)
+    #     self._resize_job = self.after(120, self._debounced_update)
+
+    def _debounced_update(self):
+        self.update_grid()
+
+    def _debounced_refresh_tags(self):
+        if self._resize_job:
+            self.after_cancel(self._resize_job)
+        self._resize_job = self.after(180, self.refresh_current_tags)
+
+    def default_filter(self,c):
+        if c in self.current_set:
+            return True
+        # keywords = ["perc","percent","trade","volume","boll","macd","ma"]
+        keywords = ["perc","status","obs","hold","bull","has","lastdu","red","ma"]
+        return any(k in c.lower() for k in keywords)
+
+    # ---------------------------
+    # 列选择区更新（Checkbuttons 自动排列）
+    # ---------------------------
+    def update_grid(self):
+        # 清空旧的 checkbuttons
+        for w in self.inner_frame.winfo_children():
+            w.destroy()
+        self._chk_vars.clear()
+
+        # filter
+        search = (self.search_var.get() or "").lower()
+        # print(f'search : {search}')
+        if search == "":
+            filtered = [c for c in self.all_columns if self.default_filter(c)]
+        elif search == "no" or search == "other":
+            filtered = [c for c in self.all_columns if not self.default_filter(c)]
+        else:
+            filtered = [c for c in self.all_columns if search in c.lower()]
+
+        # no_filtered = [c for c in self.all_columns if not self.default_filter(c)]
+        # if no_filtered != self.no_filtered:
+        #     self.no_filtered = no_filtered
+        #     print(f'no_filtered : {no_filtered}')
+
+        # filtered = [c for c in self.all_columns if search in c.lower()]
+
+        filtered = filtered[:200]  # 可以扩展，但前面限制为 50/200
+
+        # 计算每行列数（使用 canvas 宽度 fallback）
+        self.update_idletasks()
+        total_width = self.canvas.winfo_width() if self.canvas.winfo_width() > 10 else self.width
+        col_w = 100
+        cols_per_row = max(3, total_width // col_w)
+
+        # 计算高度（最多显示 max_rows 行）
+        rows_needed = (len(filtered) + cols_per_row - 1) // cols_per_row
+        max_rows = 4
+        row_h = 30
+        canvas_h = min(rows_needed, max_rows) * row_h
+        self.canvas.config(height=canvas_h)
+
+        for i, col in enumerate(filtered):
+            var = tk.BooleanVar(value=(col in self.current_set))
+            self._chk_vars[col] = var
+            chk = ttk.Checkbutton(self.inner_frame, text=col, variable=var,
+                                  command=lambda c=col, v=var: self._on_check_toggle(c, v.get()))
+            chk.grid(row=i // cols_per_row, column=i % cols_per_row, sticky="w", padx=4, pady=3)
+
+        # 刷新当前组合标签显示
+        print(f'update_grid')
+        self.refresh_current_tags()
+
+    def _on_check_toggle(self, col, state):
+        if state:
+            if col not in self.current_set:
+                self.current_set.append(col)
+        else:
+            if col in self.current_set:
+                self.current_set.remove(col)
+        print(f'_on_check_toggle')
+        self.refresh_current_tags()
+
+    # ---------------------------
+    # 当前组合标签显示 + 拖拽重排
+    # ---------------------------
+    def refresh_current_tags(self):
+        # 清空
+        for w in self.current_frame.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+
+        # 可能窗口刚弹出，宽度还没算好 -> fallback
+        max_w = self.current_frame.winfo_width()
+        if not max_w or max_w < 20:
+            max_w = self.width - 40
+
+        # 计算每个标签位置并 place
+        y = 0
+        x = 4
+        row_h = 28
+        padding = 6
+
+        # 用于存放标签和位置信息
+        self._tag_widgets = []
+
+        for idx, col in enumerate(self.current_set):
+            lbl = tk.Label(self.current_frame, text=col, bd=1, relief="solid", padx=6, pady=2, bg="#e8e8e8")
+            lbl.update_idletasks()
+            try:
+                w_req = lbl.winfo_reqwidth()
+            except tk.TclError:
+                w_req = 80
+            if x + w_req > max_w - 10:
+                # 换行
+                y += row_h
+                x = 4
+
+            # place at (x,y)
+            lbl.place(x=x, y=y)
+            # 保存 widget 及位置数据（仅用于拖拽计算）
+            self._tag_widgets.append({"widget": lbl, "x": x, "y": y, "w": w_req, "idx": idx})
+            # 绑定拖拽事件（闭包捕获 idx）
+            lbl.bind("<Button-1>", lambda e, i=idx: self._start_drag(e, i))
+            lbl.bind("<B1-Motion>", self._on_drag)
+            lbl.bind("<ButtonRelease-1>", self._end_drag)
+            x += w_req + padding
+
+        # 更新 frame 高度以容纳所有行
+        total_height = y + row_h + 4
+        try:
+            self.current_frame.config(height=total_height)
+            # print(f'total_height:{total_height}')
+
+        except Exception:
+            pass
+
+    def _start_drag(self, event, idx):
+        # 记录拖拽开始
+        widget = event.widget
+        widget.lift()
+        self._drag_data["widget"] = widget
+        self._drag_data["start_x"] = event.x_root
+        self._drag_data["start_y"] = event.y_root
+        # find index of widget in current_set
+        # safe mapping: find by widget reference in _tag_widgets
+        for info in getattr(self, "_tag_widgets", []):
+            if info["widget"] == widget:
+                self._drag_data["idx"] = info["idx"]
+                print(f'_start_drag')
+                break
+
+    def _on_drag(self, event):
+        lbl = self._drag_data.get("widget")
+        if not lbl:
+            return
+        # move label with cursor (relative to current_frame)
+        frame_x = self.current_frame.winfo_rootx()
+        frame_y = self.current_frame.winfo_rooty()
+        new_x = event.x_root - frame_x - 10
+        new_y = event.y_root - frame_y - 8
+        try:
+            lbl.place(x=new_x, y=new_y)
+        except Exception:
+            pass  # might be destroyed during rapid resize
+
+    def _end_drag(self, event):
+        lbl = self._drag_data.get("widget")
+        orig_idx = self._drag_data.get("idx")
+        if not lbl or orig_idx is None:
+            self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
+            return
+
+        # get drop x relative to frame
+        try:
+            frame_x = self.current_frame.winfo_rootx()
+            drop_x = event.x_root - frame_x
+        except Exception:
+            drop_x = lbl.winfo_x()
+
+        # compute new index based on centers of existing widgets (excluding dragged one)
+        centers = []
+        for info in getattr(self, "_tag_widgets", []):
+            w = info["widget"]
+            if w is lbl:
+                continue
+            # current position
+            try:
+                cx = w.winfo_x() + info["w"]/2
+            except Exception:
+                cx = info["x"] + info["w"]/2
+            centers.append((cx, info["idx"]))
+
+        # find insertion position
+        new_idx = orig_idx
+        if centers:
+            # sort centers by x
+            centers_sorted = sorted(centers, key=lambda x: x[0])
+            inserted = False
+            for i, (cx, idx_ref) in enumerate(centers_sorted):
+                if drop_x < cx:
+                    new_idx = i
+                    inserted = True
+                    break
+            if not inserted:
+                new_idx = len(centers_sorted)
+        else:
+            new_idx = 0
+
+        # clamp and adjust relative to original
+        if new_idx > orig_idx:
+            # when removing orig element index shifts left by 1
+            new_idx = new_idx
+        # apply reorder to current_set
+        try:
+            item = self.current_set.pop(orig_idx)
+            self.current_set.insert(new_idx, item)
+        except Exception:
+            pass
+
+        # reset drag data and refresh tags
+        print(f'_end_drag')
+        self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
+        self.after(100, self.refresh_current_tags)
+
+    # ---------------------------
+    # 已保存组合管理
+    # ---------------------------
+    def refresh_saved_sets(self):
+        self.sets_listbox.delete(0, tk.END)
+        for s in self.saved_sets:
+            name = s.get("name", "<noname>")
+            self.sets_listbox.insert(tk.END, name)
+
+    def get_centered_window_position(self, parent, win_width, win_height, margin=10):
+        # 获取鼠标位置
+        mx = parent.winfo_pointerx()
+        my = parent.winfo_pointery()
+
+        # 屏幕尺寸
+        screen_width = parent.winfo_screenwidth()
+        screen_height = parent.winfo_screenheight()
+
+        # 默认右边放置
+        x = mx + margin
+        y = my - win_height // 2  # 垂直居中鼠标位置
+
+        # 如果右边放不下，改到左边
+        if x + win_width > screen_width:
+            x = mx - win_width - margin
+
+        # 防止y超出屏幕
+        if y + win_height > screen_height:
+            y = screen_height - win_height - margin
+        if y < 0:
+            y = margin
+
+        return x, y
+
+    def askstring_at_parent(self,parent, title, prompt, initialvalue=""):
+        # 创建临时窗口
+        dlg = tk.Toplevel(parent)
+        dlg.transient(parent)
+        dlg.title(title)
+        dlg.resizable(False, False)
+
+        # 计算位置，靠父窗口右侧居中
+        win_width, win_height = 300, 120
+        x, y = self.get_centered_window_position(parent, win_width, win_height)
+        dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
+
+        result = {"value": None}
+
+        tk.Label(dlg, text=prompt).pack(pady=5, padx=5)
+        entry = tk.Entry(dlg)
+        entry.pack(pady=5, padx=5, fill="x", expand=True)
+        entry.insert(0, initialvalue)
+        entry.focus_set()
+
+        def on_ok():
+            result["value"] = entry.get()
+            dlg.destroy()
+
+        def on_cancel():
+            dlg.destroy()
+
+        frame_btn = tk.Frame(dlg)
+        frame_btn.pack(pady=5)
+        tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
+        tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
+
+        dlg.grab_set()
+        parent.wait_window(dlg)
+        return result["value"]
+
+    def save_current_set(self):
+        if not self.current_set:
+            toast_message(self, "当前组合为空")
+            return
+        # name = simpledialog.askstring("保存组合", "请输入组合名称:")
+        name = self.askstring_at_parent(self.main,"保存组合", "请输入组合名称:")
+
+        if not name:
+            return
+        # 覆盖同名
+        for s in self.saved_sets:
+            if s.get("name") == name:
+                s["cols"] = list(self.current_set)
+                toast_message(self, f"组合 {name} 已更新")
+                self.refresh_saved_sets()
+                return
+        self.saved_sets.append({"name": name, "cols": list(self.current_set)})
+        self.refresh_saved_sets()
+        toast_message(self, f"组合 {name} 已保存")
+
+    def load_selected_set(self):
+        sel = self.sets_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        data = self.saved_sets[idx]
+        self.current_set = list(data.get("cols", []))
+        # sync checkboxes (if visible)
+        for col, var in self._chk_vars.items():
+            var.set(col in self.current_set)
+        self.refresh_current_tags()
+        # also update grid so checked box matches
+        self.update_grid()
+
+    def delete_selected_set(self):
+        sel = self.sets_listbox.curselection()
+        if not sel:
+            toast_message(self, "请选择要删除的组合")
+            return
+        idx = sel[0]
+        name = self.saved_sets[idx].get("name", "")
+        # 执行删除
+        self.saved_sets.pop(idx)
+        self.refresh_saved_sets()
+        toast_message(self, f"组合 {name} 已删除")
+
+    # ---------------------------
+    # 应用 / 恢复默认
+    # ---------------------------
+    def apply_current_set(self):
+        if not self.current_set:
+            toast_message(self, "当前组合为空")
+            return
+        # 写回 config（如果调用方提供 save_display_config，会被调用）
+        self.config["current"] = list(self.current_set)
+        self.config["sets"] = list(self.saved_sets)
+        try:
+            # save_display_config 是外部函数（如果定义则调用）
+            save_display_config(self.config)
+        except Exception:
+            pass
+        # 回调主视图更新列
+        try:
+            if callable(self.on_apply_callback):
+                self.on_apply_callback(list(self.current_set))
+        except Exception:
+            pass
+        toast_message(self, "组合已应用")
+        # self.destroy()
+
+    def restore_default(self):
+        self.current_set = list(self.default_cols)
+        # sync checkboxes
+        for col, var in self._chk_vars.items():
+            var.set(col in self.current_set)
+        self.refresh_current_tags()
+        toast_message(self, "已恢复默认组合")
+
+
+
+# class ColumnSetManager_OK(tk.Toplevel):
+#     def __init__(self, master, all_columns, config, on_apply_callback,default_cols=DISPLAY_COLS):
+#         super().__init__(master)
+#         self.title("列组合管理器")
+#         self.width = 800
+#         self.height = 500
+#         self.geometry(f"{self.width}x{self.height}")
+
+#         self.all_columns = all_columns
+#         self.config = config
+#         self.on_apply_callback = on_apply_callback
+#         self.current_set = list(config.get("current", []))
+#         self.saved_sets = list(config.get("sets", []))  # [{name, cols}]
+
+#         self._build_ui()
+#         self.after_idle(self.update_grid)  # 延迟布局计算
+
+#     def _build_ui(self):
+#         # 搜索栏
+#         search_frame = ttk.Frame(self)
+#         search_frame.pack(fill=tk.X, padx=5, pady=5)
+#         ttk.Label(search_frame, text="搜索:").pack(side=tk.LEFT)
+#         self.search_var = tk.StringVar()
+#         entry = ttk.Entry(search_frame, textvariable=self.search_var)
+#         entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+#         entry.bind("<KeyRelease>", lambda e: self.update_grid())
+
+#         # 列选择区容器
+#         grid_container = ttk.Frame(self)
+#         grid_container.pack(fill=tk.X, padx=5, pady=5)
+
+#         self.canvas = tk.Canvas(grid_container)
+#         self.scrollbar = ttk.Scrollbar(grid_container, orient="vertical", command=self.canvas.yview)
+#         self.scrollable_frame = ttk.Frame(self.canvas)
+
+#         self.scrollable_frame.bind(
+#             "<Configure>",
+#             lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+#         )
+#         self.canvas.create_window((0,0), window=self.scrollable_frame, anchor="nw")
+#         self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+#         self.canvas.pack(side="left", fill="x", expand=True)
+#         self.scrollbar.pack(side="right", fill="y")
+#         self.canvas.bind_all("<MouseWheel>", lambda e: self.canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+
+#         # 当前组合横向标签
+#         current_frame = ttk.LabelFrame(self, text="当前组合")
+#         current_frame.pack(fill=tk.X, padx=5, pady=5)
+#         self.current_frame = ttk.Frame(current_frame)
+#         self.current_frame.pack(fill=tk.X, padx=5, pady=5)
+
+#         # 底部按钮
+#         bottom_frame = ttk.Frame(self)
+#         bottom_frame.pack(fill=tk.X, padx=5, pady=5)
+#         ttk.Button(bottom_frame, text="保存组合", command=self.save_current_set).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+#         ttk.Button(bottom_frame, text="应用组合", command=self.apply_current_set).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+#         ttk.Button(bottom_frame, text="恢复默认", command=self.reset_to_default).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
+#         # 已保存组合
+#         self.sets_listbox = tk.Listbox(self)
+#         self.sets_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+#         self.sets_listbox.bind("<Double-1>", self.load_selected_set)
+#         self.refresh_saved_sets()
+
+#     def default_filter(self,c):
+#         if c in self.current_cols:
+#             return False
+#         # keywords = ["perc","percent","trade","volume","boll","macd","ma"]
+#         keywords = ["perc","status","obs","hold","bull","has","lastdu","red","ma"]
+#         return any(k in c.lower() for k in keywords)
+#     # --- 列选择区 ---
+#     def update_grid(self):
+#         self.update_idletasks()  # 确保获取宽度正确
+#         for w in self.scrollable_frame.winfo_children():
+#             w.destroy()
+
+#         search = self.search_var.get().lower()
+
+#         # filtered = [c for c in self.df_all.columns if default_filter(c)]
+#         filtered = [c for c in self.all_columns if search in c.lower()]
+#         filtered = filtered[:50]  # 最多50列
+
+#         total_width = self.width if self.canvas.winfo_width()  < 10  else self.canvas.winfo_width() 
+#         print(f'total_width : {total_width} self.canvas.winfo_width() : {self.canvas.winfo_width()}')
+#         col_width = 50
+#         cols_per_row = max(3, total_width // col_width)
+
+#         rows_needed = (len(filtered) + cols_per_row - 1) // cols_per_row
+#         max_rows = 4
+#         row_height = 30
+#         canvas_height = min(rows_needed, max_rows) * row_height
+#         self.canvas.config(height=canvas_height)
+
+#         for i, col in enumerate(filtered):
+#             var = tk.BooleanVar(value=col in self.current_set)
+#             chk = ttk.Checkbutton(
+#                 self.scrollable_frame, text=col, variable=var,
+#                 command=lambda c=col, v=var: self.toggle_column(c, v.get())
+#             )
+#             chk.grid(row=i // cols_per_row, column=i % cols_per_row,
+#                      padx=3, pady=3, sticky="w")
+
+#         self.refresh_current_tags()
+
+#     # --- 当前组合横向标签 ---
+#     def refresh_current_tags(self):
+#         # 清空旧标签
+#         for w in self.current_frame.winfo_children():
+#             w.destroy()
+
+#         # 取可用宽度（避免刚启动时为 1）
+#         max_width = self.current_frame.winfo_width()
+#         if max_width < 10:
+#             max_width = self.width - 24  # 或者直接给个默认值，比如 776
+
+#         # 自动换行布局
+#         x_offset = 0
+#         y_offset = 0
+#         row_height = 28  # 标签高度行距
+#         padding_x = 6
+
+#         for col in self.current_set:
+#             lbl = ttk.Label(self.current_frame, text=col, relief="solid", padding=(6, 2))
+#             lbl.update_idletasks()
+
+#             try:
+#                 lbl_width = lbl.winfo_reqwidth() + padding_x
+#             except tk.TclError:
+#                 continue  # 避免销毁时报错
+
+#             # 判断是否需要换行
+#             if x_offset + lbl_width > max_width:
+#                 x_offset = 0
+#                 y_offset += row_height
+
+#             lbl.place(x=x_offset, y=y_offset)
+#             x_offset += lbl_width
+
+#         # 动态调整 frame 高度
+#         self.current_frame.config(height=y_offset + row_height)
+
+
+#     # --- 操作 ---
+#     def toggle_column(self, col, state):
+#         if state and col not in self.current_set:
+#             self.current_set.append(col)
+#         elif not state and col in self.current_set:
+#             self.current_set.remove(col)
+#         self.refresh_current_tags()
+
+#     # --- 保存/应用组合 ---
+#     def save_current_set(self):
+#         if not self.current_set:
+#             messagebox.showwarning("提示", "当前组合为空")
+#             return
+#         name = simpledialog.askstring("保存组合", "请输入组合名称:")
+#         if not name:
+#             return
+#         self.saved_sets.append({"name": name, "cols": list(self.current_set)})
+#         self.refresh_saved_sets()
+#         messagebox.showinfo("成功", f"组合 {name} 已保存")
+
+#     def refresh_saved_sets(self):
+#         self.sets_listbox.delete(0, tk.END)
+#         for s in self.saved_sets:
+#             self.sets_listbox.insert(tk.END, s["name"])
+
+#     def load_selected_set(self, event=None):
+#         sel = self.sets_listbox.curselection()
+#         if not sel:
+#             return
+#         idx = sel[0]
+#         self.current_set = list(self.saved_sets[idx]["cols"])
+#         self.refresh_current_tags()
+#         self.update_grid()
+
+#     def apply_current_set(self):
+#         if not self.current_set:
+#             messagebox.showwarning("提示", "当前组合为空")
+#             return
+#         self.config["current"] = self.current_set
+#         self.config["sets"] = self.saved_sets
+#         save_display_config(self.config)
+#         self.on_apply_callback(self.current_set)
+#         self.destroy()
+#     def reset_to_default(self):
+#         global DISPLAY_COLS  # 你的全局默认列变量
+#         self.current_set = list(DISPLAY_COLS)
+#         self.refresh_current_tags()
+#         self.update_grid()
+
+
+
 # ------------------ 主程序入口 ------------------ #
 if __name__ == "__main__":
     # queue = mp.Queue()
