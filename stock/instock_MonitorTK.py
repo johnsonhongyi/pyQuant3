@@ -3638,8 +3638,9 @@ class QueryHistoryManager:
         # 右键菜单
         self.tree.bind("<Button-3>", self.show_context_menu)
 
-        # self.root.bind("<Escape>", lambda event: self.open_editor())
+        self.root.bind("<Escape>", lambda event: self.open_editor())
         self.root.bind("<Alt-q>", lambda event: self.open_editor())
+        self.root.bind("<Alt-e>", lambda event: self.open_editor())
         # 为每列绑定排序
         for col in ("query", "star", "note"):
             self.tree.heading(col, text=col.capitalize(), command=lambda _col=col: self.treeview_sort_column(self.tree, _col))

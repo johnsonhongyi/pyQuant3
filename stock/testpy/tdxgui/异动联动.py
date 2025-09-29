@@ -4220,7 +4220,7 @@ def open_alert_center():
     # aw_win.focus_force()           # 强制获得焦点
     aw_win.lift()                  # 提升到顶层
 
-    win_width, win_height = 720 , 360
+    win_width, win_height = 720 , 260
     x, y = get_centered_window_position_center(win_width, win_height, parent_win=root)
     aw_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
     # 再显示出来
@@ -5434,14 +5434,17 @@ def flush_alerts():
 def get_latest_valid_data(df):
     # 确保时间字段是可排序的
     df = df.copy()
-    df["时间"] = pd.to_datetime(df["时间"], format="%H:%M:%S", errors="coerce")
+    if "时间" in df.columns:
+        df["时间"] = pd.to_datetime(df["时间"], format="%H:%M:%S", errors="coerce")
 
-    # 过滤掉无效数据（价格=0 且 涨幅=0 且 量=0 的行）
-    df_valid = df[~((df["价格"] == 0) & (df["涨幅"] == 0) & (df["量"] == 0))]
+        # 过滤掉无效数据（价格=0 且 涨幅=0 且 量=0 的行）
+        df_valid = df[~((df["价格"] == 0) & (df["涨幅"] == 0) & (df["量"] == 0))]
 
-    # 每个股票取最后一条有效数据
-    latest_df = df_valid.sort_values("时间").groupby("代码").tail(1)
-    return latest_df
+        # 每个股票取最后一条有效数据
+        latest_df = df_valid.sort_values("时间").groupby("代码").tail(1)
+        return latest_df
+    else:
+        return pd.dataframe()
 
 def format_next_time(delay_ms):
     """把 root.after 的延迟时间转换成 %H:%M 格式"""
