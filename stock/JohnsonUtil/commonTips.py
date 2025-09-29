@@ -3607,14 +3607,14 @@ def get_trade_date_status():
     trade_date = GlobalValues().getkey('trade_date')
     trade_status = GlobalValues().getkey('is_trade_date')
     if  trade_status is None:
-        trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date')
+        trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=get_day_istrade_date(),xtype='trade_date')
         if trade_status is None or trade_status == 'None':
-            trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date',update=True)
+            trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=get_day_istrade_date(),xtype='trade_date',update=True)
         GlobalValues().setkey('is_trade_date',trade_status)
         GlobalValues().setkey('trade_date',get_today())
     if trade_date is not None:
         if trade_date != get_today():
-            trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date')
+            trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=get_day_istrade_date(),xtype='trade_date')
             GlobalValues().setkey('is_trade_date',trade_status)
             GlobalValues().setkey('trade_date',get_today())
     
@@ -6491,6 +6491,8 @@ def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean
             # log.info("col:%s %s" % (dif_co[:3], eval(("maindf.%s") % (dif_co[0]))[1]))
     return maindf
 
+get_config_value_ramfile(fname='is_trade_date',update=True,currvalue=get_day_istrade_date(),xtype='trade_date')
+
 if __name__ == '__main__':
 
     '''
@@ -6556,11 +6558,13 @@ if __name__ == '__main__':
     GlobalValues()
     GlobalValues().setkey('key', 'GlobalValuesvalue')
     print(GlobalValues().getlist())
-    import ipdb;ipdb.set_trace()
     
     # print(read_to_indb())
-    print(get_trade_date_status())
-    print(get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date'))
+    print(f'get_trade_date_status : {get_trade_date_status()}')
+    print(f'get_day_istrade_date : {get_day_istrade_date()}')
+    print(f"get_config_value_ramfile : {get_config_value_ramfile(fname='is_trade_date',update=True,currvalue=get_day_istrade_date(),xtype='trade_date')}")
+    import ipdb;ipdb.set_trace()
+
     print(code_to_symbol_ths('000002'))
     print(get_index_fibl())
     GlobalValues()
