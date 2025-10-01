@@ -430,7 +430,7 @@ class StockMonitorApp(tk.Tk):
 
         # ----------------- 控件框 ----------------- #
         ctrl_frame = tk.Frame(self)
-        ctrl_frame.pack(fill="x", padx=5, pady=2)
+        ctrl_frame.pack(fill="x", padx=5, pady=1)
 
         self.st_key_sort = self.global_values.getkey("st_key_sort") or "3 0"
 
@@ -447,7 +447,7 @@ class StockMonitorApp(tk.Tk):
         left_frame = tk.Frame(pw, bg="#f0f0f0")
         self.status_var = tk.StringVar()
         status_label_left = tk.Label(
-            left_frame, textvariable=self.status_var, anchor="w", padx=10, pady=2
+            left_frame, textvariable=self.status_var, anchor="w", padx=10, pady=1
         )
         status_label_left.pack(fill="x", expand=True)
 
@@ -455,7 +455,7 @@ class StockMonitorApp(tk.Tk):
         right_frame = tk.Frame(pw, bg="#f0f0f0")
         self.status_var2 = tk.StringVar()
         status_label_right = tk.Label(
-            right_frame, textvariable=self.status_var2, anchor="e", padx=10, pady=2
+            right_frame, textvariable=self.status_var2, anchor="e", padx=10, pady=1
         )
         status_label_right.pack(fill="x", expand=True)
 
@@ -685,7 +685,7 @@ class StockMonitorApp(tk.Tk):
             except Exception:
                 stock_str = str(stock_info)
         if stock_str:
-            tk.Label(win, text=f"股票: {stock_str}", font=("Arial", 12, "bold")).pack(pady=5)
+            tk.Label(win, text=f"股票: {stock_str}", font=("Arial", 12, "bold")).pack(pady=1)
 
         # 报警条件输入区
         frame = tk.Frame(win)
@@ -792,7 +792,7 @@ class StockMonitorApp(tk.Tk):
 
         # --- 底部搜索框 2 ---
         bottom_search_frame = tk.Frame(self)
-        bottom_search_frame.pack(side="bottom", fill="x", pady=2)
+        bottom_search_frame.pack(side="bottom", fill="x", pady=1)
 
         # # --- 顶部工具栏 ---
         # ctrl_frame = tk.Frame(self)
@@ -869,7 +869,7 @@ class StockMonitorApp(tk.Tk):
             values=options, state="readonly", width=10
         )
         self.action_combo.set("功能选择")
-        self.action_combo.pack(side="left", padx=10, pady=2, ipady=1)
+        self.action_combo.pack(side="left", padx=10, pady=1, ipady=1)
 
         def run_action(action):
 
@@ -1284,7 +1284,7 @@ class StockMonitorApp(tk.Tk):
     # ----------------- Checkbuttons ----------------- #
     def init_checkbuttons(self, parent_frame):
         frame_right = tk.Frame(parent_frame, bg="#f0f0f0")
-        frame_right.pack(side=tk.RIGHT, padx=2, pady=2)
+        frame_right.pack(side=tk.RIGHT, padx=2, pady=1)
 
         self.tdx_var = tk.BooleanVar(value=True)
         self.ths_var = tk.BooleanVar(value=True)
@@ -2171,7 +2171,7 @@ class StockMonitorApp(tk.Tk):
         # 添加一个搜索框
         search_var = tk.StringVar()
         search_entry = ttk.Entry(menu_frame, textvariable=search_var)
-        search_entry.pack(fill="x", padx=4, pady=2)
+        search_entry.pack(fill="x", padx=4, pady=1)
 
         # 布局按钮 Frame
         btn_frame = ttk.Frame(menu_frame)
@@ -3579,7 +3579,7 @@ class QueryHistoryManager:
         # --- 输入区 ---
         # frame_input = tk.Frame(self.root)
         frame_input = tk.Frame(self.editor_frame)
-        frame_input.pack(fill="x", padx=5, pady=5, expand=True)
+        frame_input.pack(fill="x", padx=5, pady=1, expand=True)
 
         tk.Label(frame_input, text="Query:").pack(side="left")
         self.entry_query = tk.Entry(frame_input)
@@ -3598,7 +3598,7 @@ class QueryHistoryManager:
         # 下拉选择管理 history1 / history2
         self.combo_group = ttk.Combobox(frame_input, values=["history1", "history2"], state="readonly", width=10)
         self.combo_group.set("history1")
-        self.combo_group.pack(side="left", padx=5)
+        self.combo_group.pack(side="left", padx=5, ipady=1)
         self.combo_group.bind("<<ComboboxSelected>>", self.switch_group)
 
         # --- Treeview ---
@@ -3615,7 +3615,7 @@ class QueryHistoryManager:
         self.tree.column("star", width=int(total_width * 0.1), anchor="center")
         self.tree.column("note", width=int(total_width * 0.3), anchor="w")
 
-        self.tree.pack(fill="both", expand=True, padx=5, pady=5)
+        self.tree.pack(fill="both", expand=True, padx=5, pady=1)
 
         # 单击星标 / 双击修改 / 右键菜单
         self.tree.bind("<Button-1>", self.on_click_star)
@@ -3908,9 +3908,9 @@ class QueryHistoryManager:
 
         result = {"value": None}
 
-        tk.Label(dlg, text=prompt).pack(pady=5, padx=5)
+        tk.Label(dlg, text=prompt).pack(pady=1, padx=5)
         entry = tk.Entry(dlg)
-        entry.pack(pady=5, padx=5, fill="x", expand=True)
+        entry.pack(pady=1, padx=5, fill="x", expand=True)
         entry.insert(0, initialvalue)
         entry.focus_set()
 
@@ -3922,7 +3922,7 @@ class QueryHistoryManager:
             dlg.destroy()
 
         frame_btn = tk.Frame(dlg)
-        frame_btn.pack(pady=5)
+        frame_btn.pack(pady=1)
         tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
         tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
 
@@ -4137,7 +4137,7 @@ def toast_message(master, text, duration=1500):
     toast = tk.Toplevel(master)
     toast.overrideredirect(True)
     toast.attributes("-topmost", True)
-    label = tk.Label(toast, text=text, bg="black", fg="white", padx=10, pady=5)
+    label = tk.Label(toast, text=text, bg="black", fg="white", padx=10, pady=1)
     label.pack()
     try:
         master.update_idletasks()
@@ -4197,7 +4197,7 @@ class ColumnSetManager(tk.Toplevel):
         self.main.pack(fill=tk.BOTH, expand=True)
 
         top = ttk.Frame(self.main)
-        top.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        top.pack(fill=tk.BOTH, expand=True, padx=6, pady=1)
 
         left = ttk.Frame(top)
         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -4385,7 +4385,7 @@ class ColumnSetManager(tk.Toplevel):
             chk.grid(row=i // cols_per_row, column=i % cols_per_row, sticky="w", padx=4, pady=3)
 
         # 刷新当前组合标签显示
-        print(f'update_grid')
+        # print(f'update_grid')
         self.refresh_current_tags()
 
     def _on_check_toggle(self, col, state):
@@ -4630,6 +4630,12 @@ class ColumnSetManager(tk.Toplevel):
                 return
         self.saved_sets.append({"name": name, "cols": list(self.current_set)})
         self.refresh_saved_sets()
+        try:
+            # save_display_config 是外部函数（如果定义则调用）
+            save_display_config(self.config)
+        except Exception:
+            pass
+        # 回调主视图更新列
         toast_message(self, f"组合 {name} 已保存")
 
     def load_selected_set(self):
