@@ -552,7 +552,7 @@ class EditRuleDialog(tk.Toplevel):
             self.tree.insert("", "end", values=(r.get("field"), r.get("op"), r.get("value"), "是" if r.get("enabled", True) else "否", r.get("delta", "")))
 
     def add_new_rule(self):
-        default = {"field": "价格", "op": ">=", "value": 1.0, "enabled": True, "delta": 0.1}
+        default = {"field": "价格", "op": ">=", "value": 1.0, "enabled": True, "delta": 1}
         self.rules.append(default)
         self.edit_rule(len(self.rules) - 1)
 

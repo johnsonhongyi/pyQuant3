@@ -569,11 +569,13 @@ class StockMonitorApp(tk.Tk):
 
     def update_treeview_cols(self, new_cols):
         # code 永远在最前
-        new_cols = ["code"] + new_cols
+        if 'code' not in new_cols:
+            new_cols = ["code"] + new_cols
         refesh_col_status = False
         if new_cols !=  self.current_cols:
             refesh_col_status = True
-        self.current_cols = ["code"] + new_cols
+            self.current_cols =  new_cols
+        #    self.current_cols = ["code"] + new_cols
         self.tree["columns"] = self.current_cols
 
         for col in self.current_cols:
@@ -623,7 +625,7 @@ class StockMonitorApp(tk.Tk):
                 self.df_all.columns,
                 self.ColManagerconfig,
                 self.update_treeview_cols,
-                default_cols=["code","name"]  # 默认列
+                default_cols=DISPLAY_COLS  # 默认列
                         )
                 # 关闭时清理引用
                 self.ColumnSetManager.protocol("WM_DELETE_WINDOW", self.on_close_column_manager)
@@ -646,8 +648,8 @@ class StockMonitorApp(tk.Tk):
         rules = self.alert_manager.get_rules(code)
         if new_rule or not rules:
             rules = [
-                {"field": "价格", "op": ">=", "value": price, "enabled": True, "delta": 0.1},
-                {"field": "涨幅", "op": ">=", "value": change, "enabled": True, "delta": 0.2},
+                {"field": "价格", "op": ">=", "value": price, "enabled": True, "delta": 1},
+                {"field": "涨幅", "op": ">=", "value": change, "enabled": True, "delta": 1},
                 {"field": "量", "op": ">=", "value": volume, "enabled": True, "delta": 100}
             ]
             self.alert_manager.set_rules(code, rules)
@@ -2905,6 +2907,7 @@ class StockMonitorApp(tk.Tk):
         #     for bracket in bracket_patterns:
         #         query = query.replace(f'and {bracket}','')
         # 1️⃣ 提取带 and 的括号部分
+
         bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
 
         # 2️⃣ 替换掉原 query 中的这些部分
@@ -2933,7 +2936,7 @@ class StockMonitorApp(tk.Tk):
             #     continue
 
             # index 或 str 操作条件特殊保留
-            if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower():
+            if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0:
                 valid_conditions.append(cond_clean)
                 continue
 
@@ -3893,7 +3896,13 @@ class QueryHistoryManager:
         dlg.resizable(False, False)
 
         # 计算位置，靠父窗口右侧居中
-        win_width, win_height = 300, 120
+        char_width = 6
+        min_width = 400
+        max_width = 1000
+        win_width = max(min_width, min(len(initialvalue) * char_width + 50, max_width))
+        win_height = 120
+        print(f'len(initialvalue) : {len(initialvalue)} win_width : {win_width}')
+        # win_width, win_height = 520, 120
         x, y = self.get_centered_window_position(parent, win_width, win_height)
         dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
 
@@ -4675,6 +4684,7 @@ class ColumnSetManager(tk.Toplevel):
 
     def restore_default(self):
         self.current_set = list(self.default_cols)
+        # print(f'restore_default self.default_cols : {self.default_cols}')
         # sync checkboxes
         for col, var in self._chk_vars.items():
             var.set(col in self.current_set)

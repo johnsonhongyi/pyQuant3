@@ -6145,12 +6145,11 @@ if __name__ == '__main__':
     # print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
     # import ipdb;ipdb.set_trace()
 
-    df = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='d',lastday=None )
+    df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'],resample='d',lastday=None )
     print(f"{code} : {df.loc[:,['lastp1d','ma51d','lastp2d','ma52d','lastp3d','ma53d','lasth1d','lasth2d','lasth3d']][-1:].values}")
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
     print(df[['bull_f','bull_s','bullbreak','has_first','status','hold_d','obs_d']].tail(10))
-    import ipdb;ipdb.set_trace()
-
+    print(f' d: {ct.Resample_LABELS_Days["d"] } df.ma60d : {df.ma60d[-3:]} \n\n')
     # print(df[-3:],df[-1:])
     print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
     print(f'df lastp1d:{df[:2].lastp1d}')
@@ -6212,18 +6211,21 @@ if __name__ == '__main__':
     # df = get_tdx_append_now_df_api_tofile('001236')
     # df = get_tdx_append_now_df_api('001236')
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='d' )
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['d'],resample='d' )
     print(f'df2 lastp1d:{df2.lastp1d}')
     print(f'code:{code}')
     print(f'topR-d:{df2.topR} red:{df2.red} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl}  macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_day,resample='3d' )
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d' )
     print(f'topR-3d:{df2.topR} red:{df2.red} lastdu:{df2.lastdu4} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
+    print(f"3d :{ct.Resample_LABELS_Days['3d']} df2.ma60d : {df2.ma60d}\n")
 
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_week,resample='w' )
+    import ipdb;ipdb.set_trace()
+
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['w'],resample='w' )
     print(f'topR-W:{df2.topR} red:{df2.red} lastdu:{df2.lastdu4} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_month,resample='m' )
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )
     print(f'topR-m:{df2.topR} red:{df2.red} lastdu:{df2.lastdu4} lastdu4:{df2.lastdu4} boll:{df2.boll} ra:{df2.ra} fibl:{df2.fibl} macd:{df2.macd} macdlast1:{df2.macdlast1} macdlast2:{df2.macdlast2} macdlast6:{df2.macdlast6} macddif:{df2.macddif} macddea:{df2.macddea}')
 
     print(f'topR:{df2.topR} red:{df2.red} df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')

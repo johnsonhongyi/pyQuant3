@@ -2290,7 +2290,7 @@ def get_work_time(now_t = None):
     # return True
     # now_t = str(get_now_time()).replace(':', '')
     # now_t = int(now_t)
-    if get_trade_date_status() == 'False':
+    if not get_trade_date_status():
         return False
     if now_t == None:
         now_t = get_now_time_int()
@@ -2329,7 +2329,7 @@ def get_work_hdf_status():
 def get_work_duration():
     int_time = get_now_time_int()
     # now_t = int(now_t)
-    if get_work_day_status() and ((700 < int_time < 915) or (1132 < int_time < 1300)):
+    if get_trade_date_status() and ((700 < int_time < 915) or (1132 < int_time < 1300)):
         # if (int_time > 830 and int_time < 915) or (int_time > 1130 and int_time < 1300) or (int_time > 1500 and int_time < 1510):
         # return False
         return True
@@ -3618,8 +3618,6 @@ def get_trade_date_status():
             GlobalValues().setkey('is_trade_date',trade_status)
             GlobalValues().setkey('trade_date',get_today())
     
-    # lag error: trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=is_trade_date(),xtype='trade_date')
-
     return trade_status
 # wencai_count = cct.get_config_value_wencai(config_ini,fname,1,update=True)
 
