@@ -724,7 +724,6 @@ if __name__ == '__main__':
             #         cct.sleep(45)
             #     else:
             #         cct.sleep(ct.duration_sleep_time)
-
             int_time = cct.get_now_time_int()
             if cct.get_work_time():
                 log.debug('into get_work_time:%s' % (int_time))
@@ -760,16 +759,18 @@ if __name__ == '__main__':
                         break
 
             else:
+
                 log.debug('into clean_duration:%s' % (int_time))
-                if (cct.get_now_time_int() > 1501 and cct.get_now_time_int() < 2400):
+                if (not cct.get_trade_date_status() or cct.get_now_time_int() > 1501 and cct.get_now_time_int() < 2400):
                     while 1:
                         if cct.get_now_time_int() > 1501 and cct.get_now_time_int() < 1503:
                             print(".", end=' ')
                             cct.sleep(60)
-                        elif cct.get_now_time_int() < 2400:
+                        elif not cct.get_trade_date_status() or cct.get_now_time_int() < 2400:
                             print(".", end=' ')
                             print("write dm to file")
-                            if (cct.get_work_day_status() and cct.get_now_time_int() > 1502) or not cct.get_work_day_status():
+
+                            if (cct.get_trade_date_status() and cct.get_now_time_int() > 1502) or not cct.get_trade_date_status():
                                 tdd.Write_market_all_day_mp('all')
                                 top_temp = cct.GlobalValues().getkey('top_max')
                                 codew = stf.WriteCountFilter(
@@ -785,7 +786,7 @@ if __name__ == '__main__':
                         else:
                             print(".")
                 else:
-                    if  not cct.get_work_day_status() :
+                    if  not cct.get_trade_date_status() :
                         print(".", end=' ')
                         print("write dm to file")
                         tdd.Write_market_all_day_mp('all')
@@ -830,7 +831,7 @@ if __name__ == '__main__':
                     time.sleep(1)
             else:
                 ramdisk_h5 = 'D:\\Ramdisk\\sina_MultiIndex_data.h5'
-                if  cct.get_now_time_int() > 1500 and cct.get_work_day_status() and cct.creation_date_duration(ramdisk_h5) > 0:
+                if  cct.get_now_time_int() > 1500 and cct.get_trade_date_status() and cct.creation_date_duration(ramdisk_h5) > 0:
                     os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-ramdisk_back.bat')
                     time.sleep(1)
                     os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-Restore.bat')
@@ -844,7 +845,8 @@ if __name__ == '__main__':
                 ave = None
                 code = ''
             elif st.lower() == 'c' or st.lower() == 'C':
-                rzrq = {}
+                # rzrq = {}
+                pass
             # elif st.startswith('w') or st.startswith('a'):
             #     args = cct.writeArgmain().parse_args(st.split())
             #     top_temp = cct.GlobalValues().getkey('top_max')
@@ -859,14 +861,14 @@ if __name__ == '__main__':
             #         # sl.write_to_blocknew(all_diffpath, codew, False)
             #     print(("wri ok:%s" % block_path))
             elif st.startswith('w') or st.lower == 'w':
-                log.debug('into clean_duration:%s' % (int_time))
-                if (cct.get_now_time_int() > 1502 or cct.get_now_time_int() < 900):
+                # log.debug('into clean_duration:%s' % (int_time))
+                if (cct.get_now_time_int() > 1502 or cct.get_now_time_int() < 900 or not cct.get_trade_date_status() ):
                     while 1:
-                        if cct.get_work_day_status() and cct.get_now_time_int() > 1502 and cct.get_now_time_int() < 1510:
+                        if cct.get_trade_date_status() and cct.get_now_time_int() > 1502 and cct.get_now_time_int() < 1510:
                             print(".", end=' ')
                             cct.sleep(60)
                         # elif (cct.get_now_time_int() > 1502 or cct.get_now_time_int() < 900):
-                        elif not cct.get_work_day_status():
+                        elif not cct.get_trade_date_status():
                             print(".", end=' ')
                             print("write dm to file")
                             # if cct.get_work_day_status():

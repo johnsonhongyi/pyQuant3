@@ -332,8 +332,8 @@ class StockMonitorApp(tk.Tk):
         rules = self.alert_manager.get_rules(code)
         if new_rule or not rules:
             rules = [
-                {"field": "价格", "op": ">=", "value": price, "enabled": True, "delta": 0.1},
-                {"field": "涨幅", "op": ">=", "value": change, "enabled": True, "delta": 0.2},
+                {"field": "价格", "op": ">=", "value": price, "enabled": True, "delta": 1},
+                {"field": "涨幅", "op": ">=", "value": change, "enabled": True, "delta": 1},
                 {"field": "量", "op": ">=", "value": volume, "enabled": True, "delta": 100}
             ]
             self.alert_manager.set_rules(code, rules)

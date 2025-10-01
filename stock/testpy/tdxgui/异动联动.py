@@ -25,6 +25,7 @@ import random
 import queue
 import importlib.util
 import win32pipe, win32file
+import a_trade_calendar
 # 全局变量
 monitor_windows = {}  # 存储监控窗口实例
 
@@ -55,6 +56,7 @@ scheduled_task = None
 viewdf = pd.DataFrame()
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 result_queue = queue.Queue()
+
 # 停止信号
 stop_event = threading.Event()
 worker_thread = None   # 保存后台线程
@@ -799,16 +801,35 @@ def get_last_weekday_before(target_date=datetime.today().date()):
     
     return current_date.strftime("%Y-%m-%d")
 
-def get_day_is_trade_day(today=datetime.today().date()):
-    day_n = int(today.strftime("%w"))
-    if day_n > 0 and day_n < 6:
-        return True
+def get_day_is_trade_day():
+    sep='-'
+    TODAY = datetime.today().date()
+    fstr = "%Y" + sep + "%m" + sep + "%d"
+    dt = TODAY.strftime(fstr)    
+    is_trade_date = a_trade_calendar.is_trade_date(dt)
+    return(is_trade_date)
+    # day_n = int(today.strftime("%w"))
+    # if day_n > 0 and day_n < 6:
+    #     return True
+    # else:
+    #     return False
+
+def get_trade_date_status(dt=None):
+    sep='-'
+    if dt is None:
+        TODAY = datetime.today().date()
+        fstr = "%Y" + sep + "%m" + sep + "%d"
+        dt = TODAY.strftime(fstr)
     else:
-        return False
+        if isinstance(dt, datetime.date):
+            dt = dt.strftime('%Y-%m-%d')
+    is_trade_date = a_trade_calendar.is_trade_date(dt)
+
+    return(is_trade_date)
 
 def get_work_time(now_t = None):
-
-    if not get_day_is_trade_day():
+    # if not get_day_is_trade_day():
+    if not get_trade_date_status():
         return False
     if now_t == None:
         now_t = get_now_time_int()
@@ -1093,6 +1114,7 @@ def start_async_save(df=None):
     
     save_thread = threading.Thread(target=save_wrapper, daemon=True)
     save_thread.start()
+    # save_wrapper()
 
 
 def schedule_daily_archive(root, hour=15, minute=5, archive_file=None):
@@ -1100,6 +1122,7 @@ def schedule_daily_archive(root, hour=15, minute=5, archive_file=None):
     
     def archive_func():
         start_async_save()
+        # start_async_save_dataframe()
 
     def next_archive_time():
         """计算下一次存档时间，跳过周末"""
@@ -1137,7 +1160,6 @@ def save_dataframe(df=None):
     """獲取選取的日期，並將 DataFrame 儲存為以該日期命名的檔案。"""
     global date_write_is_processed
     global loaded_df,start_init
-
     if not get_day_is_trade_day():
         date_str = get_last_weekday_before()
     else:
@@ -1151,27 +1173,38 @@ def save_dataframe(df=None):
 
     init_start_time = time.time()
     while not start_init:
-        if  get_work_time() or (not get_day_is_trade_day() and os.path.exists(filename)) or (930 < get_now_time_int() < 1505):
-            # print("not workday don't run  save_dataframe...")
-            print("get_work_time don't run  save_dataframe...")
+        now_time = get_now_time_int()
+        is_trade_day = get_day_is_trade_day()
+        work_time = get_work_time()
+
+        # 条件判断
+        in_trade_session = is_trade_day and 930 < now_time < 1505
+        is_non_trade_day_with_file = (not is_trade_day) and os.path.exists(filename)
+
+        if work_time or in_trade_session or is_non_trade_day_with_file:
+            print("条件满足，不执行 save_dataframe...")
             return
+
+        # 等待逻辑
         count_time = int(time.time() - init_start_time)
-        if count_time < 90: 
+        if is_trade_day and count_time < 90:
+            print(f'count_time : {count_time}，等待初始化完成...')
             time.sleep(5)
         else:
             break
-        print(f'count_time : {count_time} wait init background 完成...')
     print(f'start_init:{start_init}  will to save')    
     toast_message(None,f'start_init:{start_init} will to save')    
     try:
         # 1. 從 DateEntry 獲取日期物件
-        selected_date_obj = date_entry.get_date()
+        # selected_date_obj = date_entry.get_date()
         # 2. 格式化日期為字串
         # 例如: 2025-09-03
-        date_str = selected_date_obj.strftime("%Y-%m-%d")
+        # date_str = selected_date_obj.strftime("%Y-%m-%d")
+        # date_str = get_last_weekday_before()
+        print(f'save date_str : {date_str}')
         
         # 3. 建立檔名（這裡儲存為 CSV）
-        selected_type  = type_var.get()
+        # selected_type  = type_var.get()
         filename =  os.path.join(BASE_DIR, "datacsv",f"dfcf_{date_str}.csv.bz2")
         date_write_is_processed = True
         
@@ -1612,8 +1645,119 @@ def daily_task():
     print(f"每日定时任务执行了！当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     # save_dataframe()
     start_async_save()
+    # start_async_save_dataframe()
     # 在这里添加你的具体任务，例如：
 
+# ui_queue = queue.Queue()      # UI 更新队列
+# data_queue = queue.Queue()    # 后台线程数据队列
+
+# def process_ui_queue():
+#     while not ui_queue.empty():
+#         func = ui_queue.get()
+#         func()
+#     root.after(100, process_ui_queue)  # 每 100ms 处理一次
+
+# def process_data_queue():
+#     while not data_queue.empty():
+#         df = data_queue.get()
+#         # df 就是后台线程生成的 realdatadf，可以安全存档
+#         date_str = date_entry.get_date()
+#         filename = f"datacsv/dfcf_{date_str}.csv.bz2"
+#         print(f'start save date: {df.shape} filename : {filename}')
+#         df.to_csv(filename, index=False, encoding='utf-8-sig', compression='bz2')
+#         toast_message(None, f"文件已存儲: {filename}")
+#         print( f"文件已存儲: {filename}")
+#     # 继续轮询
+#     root.after(500, process_data_queue)
+
+# def start_async_save_dataframe():
+#     """后台线程安全保存 DataFrame，UI 不阻塞"""
+#     def worker():
+#         global date_write_is_processed, loaded_df, start_init
+
+#         # 获取今天/最后交易日日期
+#         if not get_day_is_trade_day():
+#             date_str = get_last_weekday_before()
+#         else:
+#             date_str = get_today()
+#         filename = os.path.join(BASE_DIR, "datacsv", f"dfcf_{date_str}.csv.bz2")
+
+#         # 核心检查逻辑
+#         if get_now_time_int() > 1505 and os.path.exists(filename):
+#             print(f'workday:{date_str} {filename} exists, return')
+#             return
+
+#         init_start_time = time.time()
+#         while not start_init:
+#             now_time = get_now_time_int()
+#             is_trade_day = get_day_is_trade_day()
+#             work_time = get_work_time()
+#             in_trade_session = is_trade_day and 930 < now_time < 1505
+#             is_non_trade_day_with_file = (not is_trade_day) and os.path.exists(filename)
+
+#             if work_time or in_trade_session or is_non_trade_day_with_file:
+#                 print("条件满足，不执行 save_dataframe...")
+#                 return
+
+#             count_time = int(time.time() - init_start_time)
+#             if is_trade_day and count_time < 90:
+#                 print(f'count_time : {count_time}，等待初始化完成...')
+#                 time.sleep(5)
+#             else:
+#                 break
+
+#         print(f'start_init:{start_init} will to save')
+#         # root.after(0, lambda: toast_message(None, f'start_init:{start_init} will to save'))
+#         ui_queue.put(lambda: toast_message(None, f'start_init:{start_init} will to save'))
+
+
+#         try:
+#             # ✅ UI 访问部分，先在主线程安全获取
+#             # selected_date_obj = date_entry.get_date()
+#             # selected_type_val = type_var.get()
+#             # date_str = selected_date_obj.strftime("%Y-%m-%d")
+
+#             date_str = get_last_weekday_before()
+#             filename = os.path.join(BASE_DIR, "datacsv", f"dfcf_{date_str}.csv.bz2")
+#             date_write_is_processed = True
+
+#             # 后台耗时任务
+#             if os.path.exists(filename):
+#                 print(f"文件 '{filename}' 已存在，加载...")
+#                 loaded_df = pd.read_csv(filename, encoding='utf-8-sig', compression="bz2")
+#             else:
+#                 # 模拟耗时等待
+#                 time.sleep(6)
+#                 print(f"文件 '{filename}' 不存在，init to save...")
+#                 all_df = get_stock_changes_background()
+#                 all_df['代码'] = all_df["代码"].astype(str).str.zfill(6)
+#                 # 保存 CSV
+#                 if all_df and not all_df.empty:
+#                     print(' data_queue.put(all_df) : {all_df.shape}')
+#                     data_queue.put(all_df)
+#                 else:
+#                     ui_queue.put(lambda: toast_message(None, f'df is None'))
+
+#                 # all_df.to_csv(filename, index=False, encoding='utf-8-sig', compression="bz2")
+#                 loaded_df = all_df
+#                 # UI 提示
+#                 msg = f"文件已儲存為: {filename}"
+#                 ui_queue.put(lambda: toast_message(None, msg))
+#                 print(f"文件已儲存為: {filename}")
+
+#             loaded_df['代码'] = loaded_df["代码"].astype(str).str.zfill(6)
+
+#         except Exception as e:
+#             # 异常 UI 提示必须在主线程
+#             # root.after(0, lambda: messagebox.showerror("錯誤", f"save_data儲存文件時發生錯誤: {e}"))
+#             msg = f"save_data儲存文件時發生錯誤: {e}"
+#             ui_queue.put(lambda: toast_message(None, msg))
+#             # ui_queue.put(lambda: toast_message(None, f"save_data儲存文件時發生錯誤: {e}"))
+
+#             print(f"save_data儲存文件時發生錯誤: {e}")
+
+#     # 启动后台线程
+#     threading.Thread(target=worker, daemon=True).start()
 
 
 def get_next_weekday_time(target_hour, target_minute):
@@ -1656,7 +1800,7 @@ def check_readldf_exist():
     filename =  os.path.join(BASE_DIR, "datacsv",f"dfcf_{date_str}.csv.bz2")
     # --- 核心檢查邏輯 ---
     if (not get_day_is_trade_day() or (get_day_is_trade_day() and (get_now_time_int() >1505  or get_now_time_int() < 923))) and  os.path.exists(filename):
-        if start_init > 0 and date_entry.winfo_exists():
+        if date_entry.winfo_exists():
             try:
                 date_entry.set_date(date_str)
             except Exception as e:
@@ -1667,6 +1811,14 @@ def check_readldf_exist():
         realdatadf = loaded_df
         return True
     else:
+        # start_async_save()
+        if not get_day_is_trade_day(): 
+            if date_entry.winfo_exists():
+                try:
+                    date_entry.set_date(date_str)
+                except Exception as e:
+                    print("还不能设置:", e)
+
         return False
 
 def schedule_get_ths_code_task():
@@ -1783,17 +1935,42 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
         schedule_task('worktime_task',delay_ms,lambda: schedule_worktime_task(tree))
 
 
-def schedule_workday_task(root, target_hour, target_minute):
+# def schedule_workday_task(root, target_hour, target_minute):
+#     """
+#     调度任务在下一个工作日的指定时间执行。
+#     """
+#     next_execution_time = get_next_weekday_time(target_hour, target_minute)
+#     now = datetime.now()
+#     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
+#     print(f"下一次保存任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
+
+#     status_label2.config(text=f"存档-{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}")
+#     schedule_task('worksaveday_task',delay_ms,lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
+
+def schedule_workday_task(root, target_hour, target_minute, immediate=False):
     """
     调度任务在下一个工作日的指定时间执行。
     """
     next_execution_time = get_next_weekday_time(target_hour, target_minute)
     now = datetime.now()
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
-    print(f"下一次保存任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
 
+    if immediate:
+        next_execution_time = now + 10
+        delay_ms = 10 * 1000
+
+    print(f"下一次保存任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
+    
     status_label2.config(text=f"存档-{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}")
-    schedule_task('worksaveday_task',delay_ms,lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)])
+    
+    # 调度任务，执行 daily_task 后再次安排下一个工作日任务
+    schedule_task(
+        'worksaveday_task',
+        delay_ms,
+        lambda: [daily_task(), schedule_workday_task(root, target_hour, target_minute)]
+    )
+
+
 
 
 def rearrange_monitor_windows_grid():
@@ -2317,8 +2494,6 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
         time.sleep(6)
         refresh_cout = 0
         start_init = 1
-    # if not get_work_time() and get_now_time_int() > 1505:
-    #     start_async_save()
     return realdatadf
 
 def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_minutes=update_interval_minutes):
@@ -3899,8 +4074,8 @@ def init_alert_window():
 
 
 default_deltas = {
-    "价格": 0.1,   # 价格变动 0.1 元触发
-    "涨幅": 0.2,   # 涨幅变动 0.2% 触发
+    "价格": 1,   # 价格变动 0.1 元触发
+    "涨幅": 1,   # 涨幅变动 0.2% 触发
     "量": 100      # 成交量增加 100 手触发
 }
 
@@ -4767,7 +4942,7 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     price, percent, vol = 5.0, 1.0, 1
     # print(f'1:{stock_info[-3]}')
     if new and stock_info is not None:
-        if stock_code in alerts_rules:
+        if stock_code in alerts_rules.keys():
             del alerts_rules[stock_code]
         print(f'stock_info:{stock_info}')
         code, name, *_ , percent,price, vol = stock_info
@@ -4971,7 +5146,7 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     def make_adjust_fn(val_var, pct):
         return lambda: val_var.set(round(val_var.get() * (1 + pct), 2))
 
-    def add_rule(field="价格", op=">=", value=0.0, enabled=True, delta=None):
+    def add_rule(field="价格", op=">=", value=0.0, enabled=True, delta=1):
         if delta is None:
             delta = default_deltas.get(field, 0.5)
 
@@ -5085,7 +5260,7 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
 
     def del_rule():
 
-        if code in alerts_rules:
+        if code in alerts_rules.keys():
             print(f"删除规则: {alerts_rules[code]}")
             del alerts_rules[code]
 
@@ -5166,7 +5341,7 @@ def check_alert(stock_code, price, change, volume, name=None):
     """
     global alerts_rules, alerts_history, alerts_buffer, monitor_windows, last_alert_times
 
-    if stock_code not in alerts_rules:
+    if stock_code not in alerts_rules.keys():
         return  # 无规则直接返回
 
     # 有监控窗口才检查开关
@@ -5461,12 +5636,12 @@ def refresh_all_stock_data():
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
     sina_realtime_status = False
     df = _get_sina_data_realtime()
-
+    
     if df is not None and not df.empty:
         data = df
         sina_realtime_status = True
         for stock_code, row in data.iterrows():
-            if stock_code  in alerts_rules:
+            if stock_code  in alerts_rules.keys():
                 price = row.close
                 name = row['name']
                 percent = round((row.close - row.llastp) / row.llastp *100,1)
@@ -5486,7 +5661,7 @@ def refresh_all_stock_data():
         data = get_latest_valid_data(data)
         for _, row in data.iterrows():
             stock_code = row["代码"]
-            if stock_code  in alerts_rules:
+            if stock_code  in alerts_rules.keys():
                 # if stock_code == '603083':
                 #     import ipdb;ipdb.set_trace()
                 name = row["名称"]
@@ -5584,7 +5759,7 @@ def check_condition(code, field, op, threshold, current_val, delta):
 
 def delete_alert_rule(code):
     global alerts_rules
-    if code in alerts_rules:
+    if code in alerts_rules.keys():
         del alerts_rules[code]
         save_alerts()
         # messagebox.showinfo("删除规则", f"{code} 的规则已删除")
@@ -5922,19 +6097,8 @@ status_label3.pack(side=tk.LEFT, padx=5)
 root.after(100, lambda: populate_treeview())
 
 load_alerts()
-# 启动定时任务调度
-schedule_workday_task(root, target_hour, target_minute)
 
-# 首次调用任务，启动定时循环
-check_readldf_exist()
 
-schedule_worktime_task(tree)
-
-# 启动定时任务调度
-schedule_get_ths_code_task()
-
-#每日定时初始化
-schedule_daily_init(root)
 
 # 定义回调函数，用于线程安全更新 GUI
 def update_gui(stock_info):
@@ -6000,7 +6164,33 @@ if initial_monitor_list:
                 monitor_win = create_monitor_window([stock_code, "未知", "未知", 0, 0])
                 monitor_windows[stock_code] = monitor_win
 
+# 主线程启动后
+# root.after(1000, process_ui_queue)
+# root.after(5000, process_data_queue)
+
+# 假设点击按钮触发后台保存
+#quene 模式
+# start_async_save_dataframe()
+
 root.after(10000, flush_alerts)
+
+# 首次调用任务，启动定时循环
+check_file_status = check_readldf_exist()
+if not check_file_status:
+    schedule_workday_task(root, target_hour, target_minute,immediate=True)
+else:
+    # 启动定时任务调度
+    schedule_workday_task(root, target_hour, target_minute)
+
+schedule_worktime_task(tree)
+
+# 启动定时任务调度
+schedule_get_ths_code_task()
+
+#每日定时初始化
+schedule_daily_init(root)
+
+
 # 在主程序初始化时调用一次
 reset_lift_flags()
 
