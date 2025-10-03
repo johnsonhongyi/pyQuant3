@@ -2285,12 +2285,15 @@ def get_now_time_int():
     now_t = datetime.datetime.now().strftime("%H%M")
     return int(now_t)
 
+def str2bool(s):
+    return str(s).lower() in ("true", "1", "yes")
 
 def get_work_time(now_t = None):
     # return True
     # now_t = str(get_now_time()).replace(':', '')
     # now_t = int(now_t)
-    if not get_trade_date_status():
+    if  get_trade_date_status() == 'False':
+        # print(f'get_trade_date_status() : {get_trade_date_status()}')
         return False
     if now_t == None:
         now_t = get_now_time_int()
@@ -3617,7 +3620,6 @@ def get_trade_date_status():
             trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=get_day_istrade_date(),xtype='trade_date')
             GlobalValues().setkey('is_trade_date',trade_status)
             GlobalValues().setkey('trade_date',get_today())
-    
     return trade_status
 # wencai_count = cct.get_config_value_wencai(config_ini,fname,1,update=True)
 
@@ -6540,6 +6542,7 @@ if __name__ == '__main__':
     '''
     # rzrq['all']='nan'
     # print(get_last_trade_date('2025-06-01'))
+    print(f'cct.get_work_time() : {get_work_time()}')
     st_key_sort='3 0 f'
     print(ct.get_market_sort_value_key(st_key_sort))
     import ipdb;ipdb.set_trace()

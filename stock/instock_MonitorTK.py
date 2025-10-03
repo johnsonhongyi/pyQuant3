@@ -136,6 +136,8 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
     while True:
         # print(f'resample : new : {g_values.getkey("resample")} last : {resample} st : {g_values.getkey("st_key_sort")}')
         # if flag is not None and not flag.value:   # 停止刷新
+        # print(f'worktime : {cct.get_work_time()} {not cct.get_work_time()} , START_INIT : {START_INIT}')
+        time_s = time.time()
         if not flag.value:   # 停止刷新
                time.sleep(1)
                # print(f'flag.value : {flag.value} 停止更新')
@@ -151,14 +153,14 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
         elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
             # print(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
             st_key_sort = g_values.getkey("st_key_sort")
-        elif (not cct.get_work_time()) and START_INIT > 0:
+        elif START_INIT > 0 and (not cct.get_work_time()):
                 # print(f'not worktime and work_duration')
                 for _ in range(5):
                     if not flag.value: break
                     time.sleep(1)
                 continue
         else:
-            print(f'start worktime : {cct.get_now_time()} get_work_time: {cct.get_work_time()} , START_INIT :{START_INIT} ')
+            print(f'start work : {cct.get_now_time()} get_work_time: {cct.get_work_time()} , START_INIT :{START_INIT} ')
         try:
             # resample = cct.GlobalValues().getkey("resample") or "d"
             resample = g_values.getkey("resample") or "d"
@@ -187,7 +189,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
             else:
                 sort_cols, sort_keys = ct.get_market_sort_value_key(st_key_sort)
 
-            print(f'sort_cols : {sort_cols} sort_keys : {sort_keys}  st_key_sort : {st_key_sort}')
+            print(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
             top_temp = top_all.copy()
             # if blkname == "boll":
             #     if "market_value" in top_temp.columns:
@@ -203,15 +205,15 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
             # print(f'DISPLAY_COLS:{DISPLAY_COLS}')
             # print(f'col: {top_temp.columns.values}')
             # top_temp = top_temp.loc[:, DISPLAY_COLS]
-            print(f'top_temp :  {top_temp.loc[:,sort_cols][sort_cols[0]][:5]} shape : {top_temp.shape}')
+            print(f'top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:5]} shape : {top_temp.shape}')
             queue.put(top_temp)
             gc.collect()
-            time.sleep(ct.duration_sleep_time)
-            for _ in range(ct.duration_sleep_time):
+            print(f'now: {cct.get_now_time_int()} time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{ct.duration_sleep_time} resample:{resample}')
+            # time.sleep(ct.duration_sleep_time)
+            for _ in range(ct.duration_sleep_time*2):
                 if not flag.value: break
-                time.sleep(1)
+                time.sleep(0.5)
             START_INIT = 1
-            print(f'START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{ct.duration_sleep_time} resample:{resample}')
             # log.debug(f'fetch_and_process timesleep:{ct.duration_sleep_time} resample:{resample}')
         except Exception as e:
             log.error(f"Error in background process: {e}", exc_info=True)
@@ -1092,6 +1094,9 @@ class StockMonitorApp(tk.Tk):
         print(f'set resample : {resample}')
         # cct.GlobalValues().setkey("resample", resample)
         self.global_values.setkey("resample", resample)
+        self.refresh_flag.value = False
+        time.sleep(0.6)
+        self.refresh_flag.value = True
         self.status_var.set(f"手动刷新: resample={resample}")
 
     def _start_process(self):
@@ -1759,6 +1764,54 @@ class StockMonitorApp(tk.Tk):
 
         win.grab_set()  # 模态
 
+    def get_centered_window_position_center(win_width, win_height, x_root=None, y_root=None, parent_win=None):
+        """
+       在多屏环境下，为新窗口选择合适位置，避免遮挡父窗口(root)。
+       优先顺序：右侧 -> 下方 -> 左侧 -> 上方 -> 居中
+       """
+       # 默认取主屏幕
+        screen = get_monitor_by_point(0, 0)
+        x = (screen['width'] - win_width) // 2
+        y = (screen['height'] - win_height) // 2
+
+        if parent_win:
+           parent_win.update_idletasks()
+           px, py = parent_win.winfo_x(), parent_win.winfo_y()
+           pw, ph = parent_win.winfo_width(), parent_win.winfo_height()
+           screen = get_monitor_by_point(px, py)
+
+           # --- 尝试放右侧 ---
+           if px + pw + win_width <= screen['right']:
+               x, y = px + pw + 10, py
+           # --- 尝试放下方 ---
+           elif py + ph + win_height <= screen['bottom']:
+               x, y = px, py + ph + 10
+           # --- 尝试放左侧 ---
+           elif px - win_width >= screen['left']:
+               x, y = px - win_width - 10, py
+           # --- 尝试放上方 ---
+           elif py - win_height >= screen['top']:
+               x, y = px, py - win_height - 10
+           # --- 实在不行，屏幕居中 ---
+           else:
+               x = (screen['width'] - win_width) // 2
+               y = (screen['height'] - win_height) // 2
+        elif x_root is not None and y_root is not None:
+           # 鼠标点的屏幕
+           screen = get_monitor_by_point(x_root, y_root)
+           x, y = x_root, y_root
+           if x + win_width > screen['right']:
+               x = max(screen['left'], x_root - win_width)
+           if y + win_height > screen['bottom']:
+               y = max(screen['top'], y_root - win_height)
+
+        # 边界检查
+        x = max(screen['left'], min(x, screen['right'] - win_width))
+        y = max(screen['top'], min(y, screen['bottom'] - win_height))
+
+        print(f"[定位] x={x}, y={y}, screen={screen}")
+        return x, y
+
     def get_centered_window_position(self,win_width, win_height, x_root=None, y_root=None, parent_win=None):
         """
         多屏环境下获取窗口显示位置
@@ -2154,6 +2207,11 @@ class StockMonitorApp(tk.Tk):
         col: 当前列
         event: 鼠标事件，用于获取指针位置
         """
+
+        # 如果是 code 列，直接返回
+        if col == "code" or col in ("#1", "code"):  # 看你的列 id 定义方式
+            return
+
         if not hasattr(self, "_menu_frame"):
             self._menu_frame = None  # 防止重复弹出
 
@@ -2161,16 +2219,18 @@ class StockMonitorApp(tk.Tk):
         if self._menu_frame and self._menu_frame.winfo_exists():
             self._menu_frame.destroy()
 
-        # 获取当前鼠标指针位置
-        x = event.x_root
-        y = event.y_root
+        # # 获取当前鼠标指针位置
+        # x = event.x_root
+        # y = event.y_root
+
 
         # 创建顶级 Frame，用于承载按钮
         menu_frame = tk.Toplevel(self)
         menu_frame.overrideredirect(True)  # 去掉标题栏
-        menu_frame.geometry(f"+{x}+{y}")
-        self._menu_frame = menu_frame
+        # menu_frame.lift()                  # ⬅️ 把窗口置顶
+        # menu_frame.attributes("-topmost", True)  # ⬅️ 确保不被遮挡
 
+        self._menu_frame = menu_frame
         # 添加一个搜索框
         search_var = tk.StringVar()
         search_entry = ttk.Entry(menu_frame, textvariable=search_var)
@@ -2179,6 +2239,64 @@ class StockMonitorApp(tk.Tk):
         # 布局按钮 Frame
         btn_frame = ttk.Frame(menu_frame)
         btn_frame.pack(fill="both", expand=True)
+
+        # 鼠标点击的绝对坐标
+        x_root, y_root = event.x_root, event.y_root
+
+        # 等待 Tk 渲染完毕，才能获取实际宽高
+        # menu_frame.update_idletasks()
+        # menu_frame.update()  
+        win_w = 300
+        win_h = 300
+        # win_w = menu_frame.winfo_width()
+        # win_h = menu_frame.winfo_height()
+
+        # 当前窗口宽度（相对坐标用 event.x）
+        # window_w = self.winfo_width()
+
+       
+        # 屏幕边界保护
+        screen_w = self.winfo_screenwidth()
+        screen_h = self.winfo_screenheight()
+
+        # 默认以鼠标右上角为参考
+        x = x_root - win_w
+        y = y_root
+
+        # 判断左侧/右侧显示逻辑
+        if x < screen_w / 2:  # 左半屏，向右展开
+            x = x_root
+        else:  # 右半屏，向左展开
+            x = x_root - win_w
+
+        # 边界检测
+        if x < 0:
+            x = 0
+        if x + win_w > screen_w:
+            x = screen_w - win_w
+        if y + win_h > screen_h:
+            y = screen_h - win_h
+        if y < 0:
+            y = 0
+
+        # 设置菜单窗口位置
+        menu_frame.geometry(f"+{x}+{y}")
+
+        # print(f"[DEBUG] event.x={event.x}, window_w={window_w}, win_w={win_w}, win_h={win_h}, pos=({x},{y})")
+
+        # 更新 geometry 才能拿到真实宽高
+        # menu_frame.update_idletasks()
+        # menu_frame.withdraw()  # 先隐藏，避免闪到默认(50,50)
+
+        # x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
+        # menu_frame.geometry(f"{win_width}x{win_height}+{x}+{y}")
+        # 再显示出来
+        # menu_frame.deiconify()
+        # 屏幕大小
+
+        # menu_frame.geometry(f"+{x}+{y}")
+        # menu_frame.deiconify()
+
 
 
         # 默认防抖刷新
@@ -2253,109 +2371,6 @@ class StockMonitorApp(tk.Tk):
 
         menu_frame.bind("<FocusOut>", close_menu)
         menu_frame.focus_force()
-
-
-    # def show_column_menu_(self, col ,event):
-
-    #     x = event.x_root
-    #     y = event.y_root
-
-
-    #     # 创建顶级 Frame，用于承载按钮
-    #     # menu_frame = tk.Toplevel(self)
-    #     # menu_frame.overrideredirect(True)  # 去掉标题栏
-    #     # menu_frame.geometry(f"+{x}+{y}")
-    #     # self._menu_frame = menu_frame
-
-    #     # # 添加一个搜索框
-    #     # search_var = tk.StringVar()
-    #     # search_entry = ttk.Entry(menu_frame, textvariable=search_var)
-    #     # search_entry.pack(fill="x", padx=4, pady=2)
-
-    #     # # 布局按钮 Frame
-    #     # btn_frame = ttk.Frame(menu_frame)
-    #     # btn_frame.pack(fill="both", expand=True)
-
-
-    #     win = tk.Toplevel(self)
-    #     # win.overrideredirect(True) 
-    #     win.transient(self)
-    #     win.grab_set()
-    #     win.title(f"替换列: {col}")
-    #     win.geometry(f"+{x}+{y}")
-
-    #     # 搜索框
-    #     tk.Label(win, text="搜索列:").grid(row=0, column=0, sticky="w")
-    #     search_var = tk.StringVar()
-    #     search_entry = tk.Entry(win, textvariable=search_var, width=20)
-    #     search_entry.grid(row=0, column=1, columnspan=4, sticky="we", padx=2, pady=2)
-    #     # search_var.trace_add("write", lambda *args: refresh_buttons())
-
-    #     # 按钮显示框架
-    #     btn_frame = tk.Frame(win)
-    #     btn_frame.grid(row=1, column=0, columnspan=5, padx=2, pady=2)
-
-    #     # 默认筛选规则
-    #     def default_filter(c):
-    #         if c in self.current_cols:
-    #             return False
-    #         keywords = ["perc","percent","trade","volume","boll","macd","ma"]
-    #         return any(k in c.lower() for k in keywords)
-
-    #     def on_search_changed(event):
-    #         if hasattr(self, "_search_after_id"):
-    #             self.after_cancel(self._search_after_id)
-    #         self._search_after_id = self.after(300, refresh_buttons)
-    #     all_cols = [c for c in self.df_all.columns if default_filter(c)]
-
-    #     search_entry.bind("<KeyRelease>", on_search_changed)
-
-    #     # 刷新按钮
-    #     # def refresh_buttons():
-    #     #     # 清空旧按钮
-    #     #     for w in btn_frame.winfo_children():
-    #     #         w.destroy()
-    #     #     kw = search_var.get().lower()
-    #     #     filtered = [c for c in all_cols if kw in c.lower()]
-    #     #     n = len(filtered)
-    #     #     cols_per_row = 5 if n > 5 else n
-    #     #     for i, c in enumerate(filtered):
-    #     #         btn = tk.Button(btn_frame, text=c, width=12,
-    #     #                         command=lambda nc=c, oc=col: [self.replace_column(oc, nc), win.destroy()])
-    #     #         btn.grid(row=i // cols_per_row, column=i % cols_per_row, padx=2, pady=2)
-    #     def refresh_buttons():
-    #         for w in btn_frame.winfo_children():
-    #             w.destroy()
-    #         kw = search_var.get().lower()
-
-    #         # 搜索匹配所有列，但排除已经在 current_cols 的
-    #         if kw:
-    #             filtered = [c for c in self.df_all.columns if kw in c.lower() and c not in self.current_cols]
-    #         else:
-    #             # 默认显示符合默认规则且不在 current_cols
-    #             keywords = ["perc","percent","trade","volume","boll","macd","ma"]
-    #             filtered = [c for c in self.df_all.columns if any(k in c.lower() for k in keywords) and c not in self.current_cols]
-
-    #         n = len(filtered)
-    #         cols_per_row = 5 if n > 5 else n
-    #         for i, c in enumerate(filtered):
-    #             btn = tk.Button(btn_frame, text=c, width=12,
-    #                             command=lambda nc=c, oc=col: [self.replace_column(oc, nc), win.destroy()])
-    #             btn.grid(row=i // cols_per_row, column=i % cols_per_row, padx=2, pady=2)
-    #     # 防抖机制
-    #     def on_search_changed(*args):
-    #         if hasattr(self, "_search_after_id"):
-    #             self.after_cancel(self._search_after_id)
-    #         self._search_after_id = self.after(200, refresh_buttons)
-
-    #     refresh_buttons()
-    #     # 点击其他地方关闭菜单
-    #     # def close_menu(event=None):
-    #     #     if win.winfo_exists():
-    #     #         win.destroy()
-
-    #     # win.bind("<FocusOut>", close_menu)
-    #     # win.focus_force()
 
     def replace_column(self, old_col, new_col):
         """替换显示列并刷新表格"""
@@ -2788,7 +2803,7 @@ class StockMonitorApp(tk.Tk):
 
         if self._search_job:
             self.after_cancel(self._search_job)
-        self._search_job = self.after(5000, self.apply_search)  # 500ms后执行
+        self._search_job = self.after(5000, self.apply_search)  # 5000ms后执行
 
     def sync_history_from_QM(self,search_history1=None,search_history2=None):
         if search_history1:
@@ -2983,11 +2998,17 @@ class StockMonitorApp(tk.Tk):
         # ====== 数据过滤 ======
         try:
             if val1.count('or') > 0 and val1.count('(') > 0:
-                df_filtered = self.df_all.query(f"{val1} and {val2}", engine=query_engine)
+                if val2 :
+                    query_search = f"({val1}) and {val2}"
+                    print(f'query: {query_search} ')
+
+                else:
+                    query_search = f"({val1})"
+                    print(f'query: {query_search} ')
+                df_filtered = self.df_all.query(query_search, engine=query_engine)
                 self.refresh_tree(df_filtered)
                 self.status_var2.set('')
                 self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {val1} and {val2}")
-                print(f'query: {val1} and {val2} ')
             else:
                 # 检查 category 列是否存在
                 if 'category' in self.df_all.columns:
@@ -4835,6 +4856,7 @@ class ColumnSetManager(tk.Toplevel):
             pass
         toast_message(self, "组合已应用")
         # self.destroy()
+        self.open_column_manager_editor()
 
     def restore_default(self):
         self.current_set = list(self.default_cols)
@@ -4845,198 +4867,23 @@ class ColumnSetManager(tk.Toplevel):
         self.refresh_current_tags()
         toast_message(self, "已恢复默认组合")
 
+def test_single_thread():
+    import queue
+    # 用普通 dict 代替 manager.dict()
+    shared_dict = {}
+    shared_dict["resample"] = "d"
 
+    # 用 Python 内置 queue 代替 multiprocessing.Queue
+    q = queue.Queue()
 
-# class ColumnSetManager_OK(tk.Toplevel):
-#     def __init__(self, master, all_columns, config, on_apply_callback,default_cols=DISPLAY_COLS):
-#         super().__init__(master)
-#         self.title("列组合管理器")
-#         self.width = 800
-#         self.height = 500
-#         self.geometry(f"{self.width}x{self.height}")
+    # 用一个简单的对象/布尔值模拟 flag
+    class Flag:
+        def __init__(self, value=True):
+            self.value = value
+    flag = Flag(True)   # 或者 flag = Flag(False) 看你的测试需求
 
-#         self.all_columns = all_columns
-#         self.config = config
-#         self.on_apply_callback = on_apply_callback
-#         self.current_set = list(config.get("current", []))
-#         self.saved_sets = list(config.get("sets", []))  # [{name, cols}]
-
-#         self._build_ui()
-#         self.after_idle(self.update_grid)  # 延迟布局计算
-
-#     def _build_ui(self):
-#         # 搜索栏
-#         search_frame = ttk.Frame(self)
-#         search_frame.pack(fill=tk.X, padx=5, pady=5)
-#         ttk.Label(search_frame, text="搜索:").pack(side=tk.LEFT)
-#         self.search_var = tk.StringVar()
-#         entry = ttk.Entry(search_frame, textvariable=self.search_var)
-#         entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
-#         entry.bind("<KeyRelease>", lambda e: self.update_grid())
-
-#         # 列选择区容器
-#         grid_container = ttk.Frame(self)
-#         grid_container.pack(fill=tk.X, padx=5, pady=5)
-
-#         self.canvas = tk.Canvas(grid_container)
-#         self.scrollbar = ttk.Scrollbar(grid_container, orient="vertical", command=self.canvas.yview)
-#         self.scrollable_frame = ttk.Frame(self.canvas)
-
-#         self.scrollable_frame.bind(
-#             "<Configure>",
-#             lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-#         )
-#         self.canvas.create_window((0,0), window=self.scrollable_frame, anchor="nw")
-#         self.canvas.configure(yscrollcommand=self.scrollbar.set)
-
-#         self.canvas.pack(side="left", fill="x", expand=True)
-#         self.scrollbar.pack(side="right", fill="y")
-#         self.canvas.bind_all("<MouseWheel>", lambda e: self.canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
-
-#         # 当前组合横向标签
-#         current_frame = ttk.LabelFrame(self, text="当前组合")
-#         current_frame.pack(fill=tk.X, padx=5, pady=5)
-#         self.current_frame = ttk.Frame(current_frame)
-#         self.current_frame.pack(fill=tk.X, padx=5, pady=5)
-
-#         # 底部按钮
-#         bottom_frame = ttk.Frame(self)
-#         bottom_frame.pack(fill=tk.X, padx=5, pady=5)
-#         ttk.Button(bottom_frame, text="保存组合", command=self.save_current_set).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
-#         ttk.Button(bottom_frame, text="应用组合", command=self.apply_current_set).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
-#         ttk.Button(bottom_frame, text="恢复默认", command=self.reset_to_default).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=5)
-#         # 已保存组合
-#         self.sets_listbox = tk.Listbox(self)
-#         self.sets_listbox.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-#         self.sets_listbox.bind("<Double-1>", self.load_selected_set)
-#         self.refresh_saved_sets()
-
-#     def default_filter(self,c):
-#         if c in self.current_cols:
-#             return False
-#         # keywords = ["perc","percent","trade","volume","boll","macd","ma"]
-#         keywords = ["perc","status","obs","hold","bull","has","lastdu","red","ma"]
-#         return any(k in c.lower() for k in keywords)
-#     # --- 列选择区 ---
-#     def update_grid(self):
-#         self.update_idletasks()  # 确保获取宽度正确
-#         for w in self.scrollable_frame.winfo_children():
-#             w.destroy()
-
-#         search = self.search_var.get().lower()
-
-#         # filtered = [c for c in self.df_all.columns if default_filter(c)]
-#         filtered = [c for c in self.all_columns if search in c.lower()]
-#         filtered = filtered[:50]  # 最多50列
-
-#         total_width = self.width if self.canvas.winfo_width()  < 10  else self.canvas.winfo_width() 
-#         print(f'total_width : {total_width} self.canvas.winfo_width() : {self.canvas.winfo_width()}')
-#         col_width = 50
-#         cols_per_row = max(3, total_width // col_width)
-
-#         rows_needed = (len(filtered) + cols_per_row - 1) // cols_per_row
-#         max_rows = 4
-#         row_height = 30
-#         canvas_height = min(rows_needed, max_rows) * row_height
-#         self.canvas.config(height=canvas_height)
-
-#         for i, col in enumerate(filtered):
-#             var = tk.BooleanVar(value=col in self.current_set)
-#             chk = ttk.Checkbutton(
-#                 self.scrollable_frame, text=col, variable=var,
-#                 command=lambda c=col, v=var: self.toggle_column(c, v.get())
-#             )
-#             chk.grid(row=i // cols_per_row, column=i % cols_per_row,
-#                      padx=3, pady=3, sticky="w")
-
-#         self.refresh_current_tags()
-
-#     # --- 当前组合横向标签 ---
-#     def refresh_current_tags(self):
-#         # 清空旧标签
-#         for w in self.current_frame.winfo_children():
-#             w.destroy()
-
-#         # 取可用宽度（避免刚启动时为 1）
-#         max_width = self.current_frame.winfo_width()
-#         if max_width < 10:
-#             max_width = self.width - 24  # 或者直接给个默认值，比如 776
-
-#         # 自动换行布局
-#         x_offset = 0
-#         y_offset = 0
-#         row_height = 28  # 标签高度行距
-#         padding_x = 6
-
-#         for col in self.current_set:
-#             lbl = ttk.Label(self.current_frame, text=col, relief="solid", padding=(6, 2))
-#             lbl.update_idletasks()
-
-#             try:
-#                 lbl_width = lbl.winfo_reqwidth() + padding_x
-#             except tk.TclError:
-#                 continue  # 避免销毁时报错
-
-#             # 判断是否需要换行
-#             if x_offset + lbl_width > max_width:
-#                 x_offset = 0
-#                 y_offset += row_height
-
-#             lbl.place(x=x_offset, y=y_offset)
-#             x_offset += lbl_width
-
-#         # 动态调整 frame 高度
-#         self.current_frame.config(height=y_offset + row_height)
-
-
-#     # --- 操作 ---
-#     def toggle_column(self, col, state):
-#         if state and col not in self.current_set:
-#             self.current_set.append(col)
-#         elif not state and col in self.current_set:
-#             self.current_set.remove(col)
-#         self.refresh_current_tags()
-
-#     # --- 保存/应用组合 ---
-#     def save_current_set(self):
-#         if not self.current_set:
-#             messagebox.showwarning("提示", "当前组合为空")
-#             return
-#         name = simpledialog.askstring("保存组合", "请输入组合名称:")
-#         if not name:
-#             return
-#         self.saved_sets.append({"name": name, "cols": list(self.current_set)})
-#         self.refresh_saved_sets()
-#         messagebox.showinfo("成功", f"组合 {name} 已保存")
-
-#     def refresh_saved_sets(self):
-#         self.sets_listbox.delete(0, tk.END)
-#         for s in self.saved_sets:
-#             self.sets_listbox.insert(tk.END, s["name"])
-
-#     def load_selected_set(self, event=None):
-#         sel = self.sets_listbox.curselection()
-#         if not sel:
-#             return
-#         idx = sel[0]
-#         self.current_set = list(self.saved_sets[idx]["cols"])
-#         self.refresh_current_tags()
-#         self.update_grid()
-
-#     def apply_current_set(self):
-#         if not self.current_set:
-#             messagebox.showwarning("提示", "当前组合为空")
-#             return
-#         self.config["current"] = self.current_set
-#         self.config["sets"] = self.saved_sets
-#         save_display_config(self.config)
-#         self.on_apply_callback(self.current_set)
-#         self.destroy()
-#     def reset_to_default(self):
-#         global DISPLAY_COLS  # 你的全局默认列变量
-#         self.current_set = list(DISPLAY_COLS)
-#         self.refresh_current_tags()
-#         self.update_grid()
+    # 直接单线程调用
+    fetch_and_process(shared_dict, q, blkname="boll", flag=flag)
 
 
 
@@ -5051,6 +4898,8 @@ if __name__ == "__main__":
     # from multiprocessing import Manager
     # manager = Manager()
     # global_dict = manager.dict()  # 共享字典
+    # test_single_thread()
+
     app = StockMonitorApp()
     if cct.isMac():
         width, height = 100, 32
