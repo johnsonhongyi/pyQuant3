@@ -122,18 +122,82 @@ def pipe_server(update_callback):
             # print("DisconnectNamedPipe:")
             win32pipe.DisconnectNamedPipe(pipe)
 
-
 def get_base_path():
     """
-    プログラム実行時のベースパスを取得する。
-    PyInstallerでexe化された場合でも、実行ファイルのディレクトリを返す。
+    获取程序基准路径：
+    - PyInstaller 单文件/多文件 exe
+    - Nuitka 单文件/多文件 exe
+    - 普通 Python 脚本
     """
-    if getattr(sys, 'frozen', False):
-        # PyInstallerでexe化された場合
+    # 1️⃣ PyInstaller 单文件 exe（存在 _MEIPASS）
+    if hasattr(sys, "_MEIPASS"):
+        # 返回 exe 解压目录（单文件模式），配置文件在 exe 同目录可能需要相对路径调整
         return os.path.dirname(os.path.abspath(sys.executable))
+
+    # 2️⃣ Nuitka 打包 exe（单文件或多文件）
+    elif getattr(sys, "frozen", False):
+        # sys.argv[0] 指向运行时 exe
+        exe_path = os.path.abspath(sys.argv[0])
+
+        # 单文件模式解压在临时目录，需要返回原始 exe 所在目录
+        # 可通过环境变量 TEMP 或者 exe 旁边的文件夹判断
+        temp_dir = os.environ.get("TEMP", "")
+        if temp_dir and os.path.commonpath([exe_path, temp_dir]) == temp_dir:
+            # 单文件 exe，返回当前脚本所在目录（用户原始目录）
+            return os.path.dirname(os.path.realpath(sys.executable))
+        else:
+            # 多文件 exe，直接返回 exe 所在目录
+            return os.path.dirname(exe_path)
+
+    # 3️⃣ 普通 Python 脚本
     else:
-        # 通常の.pyファイルとして実行された場合
         return os.path.dirname(os.path.abspath(__file__))
+
+def get_base_path_google():
+    """
+    获取程序基准路径（即 EXE 或脚本所在的真实目录）。
+    适用于 PyInstaller (单/多文件) 和 Nuitka (单/多文件) 模式。
+    """
+
+    # 1️⃣ PyInstaller 打包模式 (无论单文件或多文件)
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        # PyInstaller 单文件模式运行时：
+        # sys.executable 指向解压后的临时 EXE
+        # _MEIPASS 存在
+        # 此时应该返回原始 EXE 文件所在的目录（即用户双击的目录）
+        # 兼容方法是获取原始 EXE 的目录
+        return os.path.dirname(os.path.abspath(sys.executable))
+
+    # 2️⃣ Nuitka 打包模式 (sys.frozen 为 True，且没有 _MEIPASS)
+    # Nuitka onefile/standalone 模式都适用此判断
+    elif getattr(sys, "frozen", False):
+        # Nuitka 模式下：
+        # sys.executable 和 sys.argv[0] 都指向用户双击的最终 .exe 文件。
+        # os.path.abspath(sys.argv[0]) 即可获取到该 .exe 的绝对路径
+        exe_path = os.path.abspath(sys.argv[0])
+        return os.path.dirname(exe_path)
+
+    # 3️⃣ 普通 Python 脚本模式
+    else:
+        # __file__ 指向当前脚本文件
+        return os.path.dirname(os.path.abspath(__file__))
+
+# --- 使用示例 ---
+# base_dir = get_base_path()
+# config_path = os.path.join(base_dir, "conf.ini") 
+# # 确保 conf.ini 放在你的原始 .py 脚本所在的目录
+
+# def get_base_path():
+#     """
+#     プログラム実行時のベースパスを取得する。
+#     PyInstallerでexe化された場合でも、実行ファイルのディレクトリを返す。
+#     """
+#     if getattr(sys, 'frozen', False):
+#         # PyInstallerでexe化された場合
+#         return os.path.dirname(os.path.abspath(sys.executable))
+#     else:
+#         # 通常の.pyファイルとして実行された場合
+#         return os.path.dirname(os.path.abspath(__file__))
 
 
 class SafeHDFStore(HDFStore):
@@ -786,7 +850,7 @@ def get_now_time_int_sec():
     return (now_t)
 
 
-def get_last_weekday_before(target_date=datetime.today().date()):
+def get_last_weekday_before_out(target_date=datetime.today().date()):
     """
     获取指定日期之前的最后一个工作日。
     """
@@ -800,6 +864,16 @@ def get_last_weekday_before(target_date=datetime.today().date()):
         current_date -= one_day
     
     return current_date.strftime("%Y-%m-%d")
+
+def get_next_trade_date(dt=None):
+    if dt is None:
+        dt = datetime.today().date().strftime('%Y-%m-%d')
+    return(a_trade_calendar.get_next_trade_date(dt))
+
+def get_last_weekday_before(dt=None):
+    if dt is None:
+        dt = datetime.today().date().strftime('%Y-%m-%d')
+    return(a_trade_calendar.get_pre_trade_date(dt))
 
 def get_day_is_trade_day():
     sep='-'
@@ -1131,8 +1205,9 @@ def schedule_daily_archive(root, hour=15, minute=5, archive_file=None):
         
         # 如果已经过今天目标时间或今天是周末，则找下一个工作日
         while target <= now or target.weekday() >= 5:  # 5=周六,6=周日
-            target += timedelta(days=1)
-            target = target.replace(hour=hour, minute=minute, second=0, microsecond=0)
+            target =  get_next_weekday_time(hour, minute)
+            # target += timedelta(days=1)
+            # target = target.replace(hour=hour, minute=minute, second=0, microsecond=0)
         return target
 
     def check_and_schedule():
@@ -1304,11 +1379,11 @@ def process_full_dataframe(df):
         df[['涨幅', '价格', '量']] = parsed_data
 
         # 步驟2: 使用 fillna(0.0) 填充 NaN 值
-        df[['涨幅', '价格', '量']] = df[['涨幅', '价格', '量']].fillna(0.0)
+        df.loc[:,['涨幅', '价格', '量']] = df[['涨幅', '价格', '量']].fillna(0.0)
 
         # 步驟3: 計算每個“代码”出現的次數
-        df['count'] = df.groupby('代码')['代码'].transform('count')
-
+        # df['count'] = df.groupby('代码')['代码'].transform('count')
+        df.loc[:, 'count'] = df.groupby('代码')['代码'].transform('count')
         df = df[['时间', '代码', '名称','count', '板块','相关信息', '涨幅', '价格', '量']]
     return df
 
@@ -1354,10 +1429,15 @@ def get_stock_changes(selected_type=None, stock_code=None):
             if 'tm' not in temp_df.columns:
                 return pd.DataFrame()
             
-            temp_df["tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors='coerce').dt.time
+            # temp_df["tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors='coerce').dt.time
+            temp_df.loc[:, "tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors='coerce').dt.time
             temp_df.columns = ["时间", "代码", "_", "名称", "板块", "相关信息"]
             temp_df = temp_df[["时间", "代码", "名称", "板块", "相关信息"]]
-            temp_df["板块"] = temp_df["板块"].astype(str).map(
+            # temp_df["板块"] = temp_df["板块"].astype(str).map(
+            #     lambda x: reversed_symbol_map.get(x, f"未知类型({x})")
+            # )
+            # 使用 .loc 确保赋值是针对整个 DataFrame/Series 的明确操作
+            temp_df.loc[:, "板块"] = temp_df["板块"].astype(str).map(
                 lambda x: reversed_symbol_map.get(x, f"未知类型({x})")
             )
             temp_df = temp_df.sort_values(by="时间", ascending=False)
@@ -1762,6 +1842,37 @@ def daily_task():
 
 def get_next_weekday_time(target_hour, target_minute):
     """
+    获取下一次交易日的指定时间
+    """
+    now = datetime.now()
+    
+    # 今天的目标时间
+    target_time_today = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+    
+    # 获取今天的日期字符串
+    today_str = now.date().strftime('%Y-%m-%d')
+    
+    # 判断今天是否是交易日
+    try:
+        next_trade_str = a_trade_calendar.get_next_trade_date(today_str)
+    except Exception:
+        # 如果今天不在交易日历中，则获取下一个交易日
+        next_trade_str = a_trade_calendar.get_next_trade_date(today_str)
+
+    # 如果今天是交易日且还没到目标时间，则使用今天
+    if today_str == next_trade_str and now < target_time_today:
+        return target_time_today
+    
+    # 否则获取下一个交易日
+    next_day_str = a_trade_calendar.get_next_trade_date(today_str)
+    next_day = datetime.strptime(next_day_str, '%Y-%m-%d')
+    
+    # 返回下一交易日的目标时间
+    next_trade_time = next_day.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+    return next_trade_time
+
+def get_next_weekday_time_out(target_hour, target_minute):
+    """
     计算下一次在工作日的指定时间。
     """
     now = datetime.now()
@@ -1807,7 +1918,8 @@ def check_readldf_exist():
                 print("还不能设置:", e)
         print(f"文件 '{filename}' 已存在，放棄寫入,已加载")
         loaded_df = pd.read_csv(filename, encoding='utf-8-sig', compression="bz2")
-        loaded_df['代码'] = loaded_df["代码"].astype(str).str.zfill(6)
+        # loaded_df['代码'] = loaded_df["代码"].astype(str).str.zfill(6)
+        loaded_df.loc[:, '代码'] = loaded_df['代码'].astype(str).str.zfill(6)
         realdatadf = loaded_df
         return True
     else:
@@ -1871,7 +1983,8 @@ def schedule_daily_init(root):
     today_925 = now.replace(hour=9, minute=20, second=0, microsecond=0)
     if now > today_925:
         # 如果已经过了 9:25，延迟到第二天
-        today_925 += timedelta(days=1)
+        # today_925 += timedelta(days=1)
+        today_925 = get_next_weekday_time(9,20)
     delay_ms = int((today_925 - now).total_seconds() * 1000)
     root.after(delay_ms, lambda: (daily_init(), start_background_worker()))
     print(f"每日开盘定时初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
@@ -1956,7 +2069,7 @@ def schedule_workday_task(root, target_hour, target_minute, immediate=False):
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
 
     if immediate:
-        next_execution_time = now + 10
+        next_execution_time = now + timedelta(seconds=10)
         delay_ms = 10 * 1000
 
     print(f"下一次保存任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
@@ -3437,7 +3550,8 @@ def on_closing(window, window_id):
     
     # 1. 停止后台线程
     executor.shutdown(wait=False)  # 或 wait=True，根据线程安全性
-    
+    stop_worker()
+    time.sleep(1)
     # 2. 保存监控列表和窗口位置（建议放线程里异步保存）
     try:
         save_monitor_list()
