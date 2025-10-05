@@ -2,3 +2,5 @@ pywin32
 pandas
 pywebio
 psutil
+a_trade_calendar
+ctypes
