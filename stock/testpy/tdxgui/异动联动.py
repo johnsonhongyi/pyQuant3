@@ -122,65 +122,116 @@ def pipe_server(update_callback):
             # print("DisconnectNamedPipe:")
             win32pipe.DisconnectNamedPipe(pipe)
 
+# def get_base_path():
+#     """
+#     获取程序基准路径：
+#     - PyInstaller 单文件/多文件 exe
+#     - Nuitka 单文件/多文件 exe
+#     - 普通 Python 脚本
+#     """
+#     # 1️⃣ PyInstaller 单文件 exe（存在 _MEIPASS）
+#     if hasattr(sys, "_MEIPASS"):
+#         # 返回 exe 解压目录（单文件模式），配置文件在 exe 同目录可能需要相对路径调整
+#         print(f'_MEIPASS  os.path.dirname(os.path.abspath(sys.executable): {os.path.dirname(os.path.abspath(sys.executable))}')
+#         return os.path.dirname(os.path.abspath(sys.executable))
+
+#     # 2️⃣ Nuitka 打包 exe（单文件或多文件）
+#     elif getattr(sys, "frozen", False):
+#         # sys.argv[0] 指向运行时 exe
+#         exe_path = os.path.abspath(sys.argv[0])
+
+#         # 单文件模式解压在临时目录，需要返回原始 exe 所在目录
+#         # 可通过环境变量 TEMP 或者 exe 旁边的文件夹判断
+#         temp_dir = os.environ.get("TEMP", "")
+#         print(f'temp_dir : {temp_dir}')
+#         print(f'os.path.commonpath([exe_path, temp_dir]) : {os.path.commonpath([exe_path, temp_dir])}')
+#         print(f'frozen os.path.dirname(os.path.realpath(sys.executable)): {os.path.dirname(os.path.realpath(sys.executable))}')
+#         print(f'frozen os.path.dirname(exe_path) : {os.path.dirname(exe_path)}')
+#         if temp_dir and os.path.commonpath([exe_path, temp_dir]) == temp_dir:
+#             # 单文件 exe，返回当前脚本所在目录（用户原始目录）
+#             print(f'frozen os.path.dirname(os.path.realpath(sys.executable)): {os.path.dirname(os.path.realpath(sys.executable))}')
+#             return os.path.dirname(os.path.realpath(sys.executable))
+#         else:
+#             # 多文件 exe，直接返回 exe 所在目录
+#             print(f' os.path.dirname(exe_path) : { os.path.dirname(exe_path)}')
+#             return os.path.dirname(exe_path)
+
+#     # 3️⃣ 普通 Python 脚本
+#     else:
+#         print(f'else os.path.dirname(os.path.abspath(__file__)) : {os.path.dirname(os.path.abspath(__file__))}')
+#         return os.path.dirname(os.path.abspath(__file__))
+
+
+# --- Win32 API 用于获取 EXE 原始路径 (仅限 Windows) ---
+def _get_win32_exe_path():
+    """
+    使用 Win32 API 获取当前进程的主模块路径。
+    这在 Nuitka/PyInstaller 的 Onefile 模式下能可靠地返回原始 EXE 路径。
+    """
+    # 假设是 32767 字符的路径长度是足够的
+    MAX_PATH_LENGTH = 32767 
+    buffer = ctypes.create_unicode_buffer(MAX_PATH_LENGTH)
+    
+    # 调用 GetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename, DWORD nSize)
+    # 传递 NULL 作为 hModule 获取当前进程的可执行文件路径
+    ctypes.windll.kernel32.GetModuleFileNameW(
+        None, buffer, MAX_PATH_LENGTH
+    )
+    return os.path.dirname(os.path.abspath(buffer.value))
+
 def get_base_path():
     """
-    获取程序基准路径：
-    - PyInstaller 单文件/多文件 exe
-    - Nuitka 单文件/多文件 exe
-    - 普通 Python 脚本
+    获取程序基准路径。在 Windows 打包环境 (Nuitka/PyInstaller) 中，
+    使用 Win32 API 优先获取真实的 EXE 目录。
     """
-    # 1️⃣ PyInstaller 单文件 exe（存在 _MEIPASS）
-    if hasattr(sys, "_MEIPASS"):
-        # 返回 exe 解压目录（单文件模式），配置文件在 exe 同目录可能需要相对路径调整
-        return os.path.dirname(os.path.abspath(sys.executable))
+    
+    # 检查是否为 Python 解释器运行
+    is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
+    
+    # 1. 普通 Python 脚本模式
+    if is_interpreter and not getattr(sys, "frozen", False):
+        # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
+        try:
+            # 此时 __file__ 是可靠的
+            path = os.path.dirname(os.path.abspath(__file__))
+            print(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
+            return path
+        except NameError:
+             pass # 忽略交互模式
+    
+    # 2. Windows 打包模式 (Nuitka/PyInstaller EXE 模式)
+    # 只要不是解释器运行，或者 sys.frozen 被设置，我们就认为是打包模式
+    if sys.platform.startswith('win'):
+        try:
+            # 无论是否 Onefile，Win32 API 都会返回真实 EXE 路径
+            real_path = _get_win32_exe_path()
+            
+            # 核心：确保我们返回的是 EXE 的真实目录
+            if real_path != os.path.dirname(os.path.abspath(sys.executable)):
+                 # 这是一个强烈信号：sys.executable 被欺骗了 (例如 Nuitka Onefile 启动器)，
+                 # 或者程序被从其他地方调用，我们信任 Win32 API。
+                 print(f"[DEBUG] Path Mode: WinAPI (Override). Path: {real_path}")
+                 return real_path
+            
+            # 如果 Win32 API 结果与 sys.executable 目录一致，且我们处于打包状态
+            if not is_interpreter:
+                 print(f"[DEBUG] Path Mode: WinAPI (Standalone). Path: {real_path}")
+                 return real_path
 
-    # 2️⃣ Nuitka 打包 exe（单文件或多文件）
-    elif getattr(sys, "frozen", False):
-        # sys.argv[0] 指向运行时 exe
-        exe_path = os.path.abspath(sys.argv[0])
+        except Exception:
+            pass 
 
-        # 单文件模式解压在临时目录，需要返回原始 exe 所在目录
-        # 可通过环境变量 TEMP 或者 exe 旁边的文件夹判断
-        temp_dir = os.environ.get("TEMP", "")
-        if temp_dir and os.path.commonpath([exe_path, temp_dir]) == temp_dir:
-            # 单文件 exe，返回当前脚本所在目录（用户原始目录）
-            return os.path.dirname(os.path.realpath(sys.executable))
-        else:
-            # 多文件 exe，直接返回 exe 所在目录
-            return os.path.dirname(exe_path)
+    # 3. 最终回退（适用于所有打包模式，包括 Linux/macOS）
+    if getattr(sys, "frozen", False) or not is_interpreter:
+        path = os.path.dirname(os.path.abspath(sys.executable))
+        print(f"[DEBUG] Path Mode: Final Fallback. Path: {path}")
+        return path
 
-    # 3️⃣ 普通 Python 脚本
-    else:
-        return os.path.dirname(os.path.abspath(__file__))
+    # 4. 极端脚本回退
+    print(f"[DEBUG] Path Mode: Final Script Fallback.")
+    return os.path.dirname(os.path.abspath(sys.argv[0]))
 
-def get_base_path_google():
-    """
-    获取程序基准路径（即 EXE 或脚本所在的真实目录）。
-    适用于 PyInstaller (单/多文件) 和 Nuitka (单/多文件) 模式。
-    """
-
-    # 1️⃣ PyInstaller 打包模式 (无论单文件或多文件)
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        # PyInstaller 单文件模式运行时：
-        # sys.executable 指向解压后的临时 EXE
-        # _MEIPASS 存在
-        # 此时应该返回原始 EXE 文件所在的目录（即用户双击的目录）
-        # 兼容方法是获取原始 EXE 的目录
-        return os.path.dirname(os.path.abspath(sys.executable))
-
-    # 2️⃣ Nuitka 打包模式 (sys.frozen 为 True，且没有 _MEIPASS)
-    # Nuitka onefile/standalone 模式都适用此判断
-    elif getattr(sys, "frozen", False):
-        # Nuitka 模式下：
-        # sys.executable 和 sys.argv[0] 都指向用户双击的最终 .exe 文件。
-        # os.path.abspath(sys.argv[0]) 即可获取到该 .exe 的绝对路径
-        exe_path = os.path.abspath(sys.argv[0])
-        return os.path.dirname(exe_path)
-
-    # 3️⃣ 普通 Python 脚本模式
-    else:
-        # __file__ 指向当前脚本文件
-        return os.path.dirname(os.path.abspath(__file__))
+# print(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
 
 # --- 使用示例 ---
 # base_dir = get_base_path()
@@ -1292,14 +1343,14 @@ def save_dataframe(df=None):
             print(f'realdatadf_lock:{realdatadf_lock}')
             time.sleep(6)
             all_df = get_stock_changes_background()
-            all_df['代码'] = all_df["代码"].astype(str).str.zfill(6)
+            all_df.loc[:,'代码'] = all_df["代码"].astype(str).str.zfill(6)
             # 4. 儲存 DataFrame
             all_df.to_csv(filename, index=False, encoding='utf-8-sig', compression="bz2") 
             # messagebox.showinfo("成功", f"文件已儲存為: {filename}")
             print(f"文件已儲存為: {filename}")
             toast_message(None,f"文件已儲存為: {filename}")
             loaded_df = all_df
-        loaded_df['代码'] = loaded_df["代码"].astype(str).str.zfill(6)
+        loaded_df.loc[:, "代码"] = loaded_df["代码"].astype(str).str.zfill(6)  # 改写简单赋值
 
         return loaded_df
 
@@ -1379,7 +1430,7 @@ def process_full_dataframe(df):
         df[['涨幅', '价格', '量']] = parsed_data
 
         # 步驟2: 使用 fillna(0.0) 填充 NaN 值
-        df.loc[:,['涨幅', '价格', '量']] = df[['涨幅', '价格', '量']].fillna(0.0)
+        df.loc[:,['涨幅', '价格', '量']] = df[['涨幅', '价格', '量']].astype(float).fillna(0.0)
 
         # 步驟3: 計算每個“代码”出現的次數
         # df['count'] = df.groupby('代码')['代码'].transform('count')
@@ -1430,16 +1481,17 @@ def get_stock_changes(selected_type=None, stock_code=None):
                 return pd.DataFrame()
             
             # temp_df["tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors='coerce').dt.time
-            temp_df.loc[:, "tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors='coerce').dt.time
+            # temp_df["tm"] = temp_df["tm"].apply(lambda x: pd.to_datetime(x, format="%H%M%S", errors='coerce').time() if pd.notna(x) else pd.NaT)
+            # temp_df["tm"] = temp_df["tm"].astype(object)
+            # temp_df.loc[:, "tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors='coerce').dt.time
+            # 转换时间字段
+            temp_df["tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors="coerce").dt.time
             temp_df.columns = ["时间", "代码", "_", "名称", "板块", "相关信息"]
             temp_df = temp_df[["时间", "代码", "名称", "板块", "相关信息"]]
-            # temp_df["板块"] = temp_df["板块"].astype(str).map(
-            #     lambda x: reversed_symbol_map.get(x, f"未知类型({x})")
-            # )
-            # 使用 .loc 确保赋值是针对整个 DataFrame/Series 的明确操作
-            temp_df.loc[:, "板块"] = temp_df["板块"].astype(str).map(
+            temp_df["板块"] = temp_df["板块"].astype(str).map(
                 lambda x: reversed_symbol_map.get(x, f"未知类型({x})")
-            )
+            ).astype(str)  # 或 .astype(object)
+
             temp_df = temp_df.sort_values(by="时间", ascending=False)
         else:
             temp_df = loaded_df
@@ -1686,7 +1738,7 @@ def on_date_selected(event):
             # 檔案存在，載入到 DataFrame
             loaded_df = pd.read_csv(filename, encoding='utf-8-sig', compression="bz2")
             # loaded_df['代码'] = loaded_df['代码'].apply(lambda x:str(x))
-            loaded_df['代码'] = loaded_df["代码"].astype(str).str.zfill(6)
+            loaded_df.loc[:, "代码"] = loaded_df["代码"].astype(str).str.zfill(6)  # 改写简单赋值
             # 這裡可以根據需要更新 Treeview 或其他UI
             populate_treeview(loaded_df)
             
@@ -1918,7 +1970,7 @@ def check_readldf_exist():
                 print("还不能设置:", e)
         print(f"文件 '{filename}' 已存在，放棄寫入,已加载")
         loaded_df = pd.read_csv(filename, encoding='utf-8-sig', compression="bz2")
-        # loaded_df['代码'] = loaded_df["代码"].astype(str).str.zfill(6)
+        loaded_df["代码"] = loaded_df["代码"].astype(object)
         loaded_df.loc[:, '代码'] = loaded_df['代码'].astype(str).str.zfill(6)
         realdatadf = loaded_df
         return True
@@ -2903,7 +2955,7 @@ def update_monitor_tree(data, tree, window_info, item_id):
         price = dd.close
         percent = round((dd.close - dd.llastp) / dd.llastp *100,1)
         amount = round(dd.turnover/100/10000/100,1)
-        print(f'sina_data:{stock_code}, {price},{percent},{amount}')
+        # print(f'line 2910 sina_data:{stock_code}, {price},{percent},{amount}')
 
 
     if data is not None and not data.empty:
@@ -2914,7 +2966,7 @@ def update_monitor_tree(data, tree, window_info, item_id):
             data = process_full_dataframe(data)
         if not get_work_time():
             if dd is not None:
-                print(f'sina_data:{stock_code}, {price},{percent},{amount}')
+                print(f'line 2921 sina_data:{stock_code}, {price},{percent},{amount}')
                 check_alert(stock_code, price,percent,amount)
             else:
                 _data = data[data['量'] > 0 ]
@@ -2922,7 +2974,7 @@ def update_monitor_tree(data, tree, window_info, item_id):
                     check_alert(stock_code, _data[:1]['价格'].values[0], _data[:1]['涨幅'].values[0], _data[:1]['量'].values[0])
         else:
             if dd is not None:
-                print(f'sina_data:{stock_code}, {price},{percent},{amount}')
+                # print(f'line 2929 sina_data:{stock_code}, {price},{percent},{amount}')
                 check_alert(stock_code, price,percent,amount)
             else:
                 check_alert(stock_code, data[:1]['价格'].values[0], data[:1]['涨幅'].values[0], data[:1]['量'].values[0])
