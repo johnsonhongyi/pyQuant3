@@ -5580,8 +5580,8 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     editor.protocol("WM_DELETE_WINDOW", lambda: cancel_rule())
     # 按 Esc 关闭窗口
     editor.bind("<Escape>", lambda event: cancel_rule())
-    # alert_window.protocol("WM_DELETE_WINDOW", lambda: on_close_alert_monitor(alert_window))
 
+    return editor
 
 def refresh_alert_rules_ui(stock_code):
     """
@@ -6492,32 +6492,112 @@ root.after(100, lambda: populate_treeview())
 
 load_alerts()
 
+# 保存上次打开的股票和时间
+last_open_times = {}
+# 保存已经打开的编辑窗口引用
+open_editors = {}
 
-
-# 定义回调函数，用于线程安全更新 GUI
 def update_gui(stock_info):
-    # label_main.config(text=f"已接收: {code}")
-    # label_last.config(text=f"最后接收: {code}")
-    # 1. 推送代码到输入框
-    # print(f'code : {stock_info}')
-    # search_by_code()
-    # if stock_info and stock_info is not None:
-    if isinstance(stock_info, dict):
-        code = stock_info.get("code")
-        name = stock_info.get("name")
-        percent = stock_info.get("percent")
-        price = stock_info.get("price")
-        vol = stock_info.get("volume")
-        # 补齐 7 列
-        high = stock_info.get("high", None)
-        lastp1d = stock_info.get("lastp1d", None)
-        stock_tuple = (code, name, high, lastp1d, percent, price, vol)
-        print(f'stock_code : {stock_code} name : {name} percent : {percent} price : {price} vol : {vol}')
-        code_entry.delete(0, tk.END)
-        code_entry.insert(0, code)
-        search_by_code()
-        # code_entry.event_generate("<Return>")
-        open_alert_editor(stock_code,new=True, stock_info=stock_tuple,parent_win=root)
+    global last_open_times, open_editors
+
+    if not isinstance(stock_info, dict):
+        return
+
+    code = stock_info.get("code")
+    if not code:
+        return
+
+    name = stock_info.get("name")
+    percent = stock_info.get("percent")
+    price = stock_info.get("price")
+    vol = stock_info.get("volume")
+    high = stock_info.get("high", None)
+    lastp1d = stock_info.get("lastp1d", None)
+    stock_tuple = (code, name, high, lastp1d, percent, price, vol)
+    print(f"stock_code : {code} name : {name} percent : {percent} price : {price} vol : {vol}")
+
+    # --- ① 检查防抖（1秒内不重复打开） ---
+    now = time.time()
+    last_time = last_open_times.get(code, 0)
+    if now - last_time < 1.0:
+        print(f"[防抖] 阻止重复打开: {code}")
+        return
+    last_open_times[code] = now
+
+    # --- ② 检查是否已有打开窗口 ---
+    if code in open_editors:
+        win = open_editors[code]
+        if win and win.winfo_exists():
+            try:
+                win.lift()
+                win.focus_force()
+                print(f"[提示] 已存在编辑窗口，聚焦: {code}")
+            except Exception as e:
+                print(f"[警告] 聚焦失败: {e}")
+            return
+        else:
+            # 如果记录存在但窗口已关闭，则清理
+            open_editors.pop(code, None)
+
+    # --- ③ 打开新编辑窗口 ---
+    code_entry.delete(0, tk.END)
+    code_entry.insert(0, code)
+    search_by_code()
+
+    win = open_alert_editor(code, new=True, stock_info=stock_tuple, parent_win=root)
+
+    # --- ④ 保存窗口引用 ---
+    if win and hasattr(win, "winfo_exists"):
+        open_editors[code] = win
+
+        # 当窗口关闭时自动清除记录
+        def _on_close(c=code, w=win):
+            if c in open_editors:
+                open_editors.pop(c, None)
+            try:
+                w.destroy()
+            except Exception:
+                pass
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
+# # 定义回调函数，用于线程安全更新 GUI
+# def update_gui(stock_info):
+#     # label_main.config(text=f"已接收: {code}")
+#     # label_last.config(text=f"最后接收: {code}")
+#     # 1. 推送代码到输入框
+#     # print(f'code : {stock_info}')
+#     # search_by_code()
+#     # if stock_info and stock_info is not None:
+#     global last_open_times
+#     if not isinstance(stock_info, dict):
+#         return
+
+#     code = stock_info.get("code")
+#     name = stock_info.get("name")
+#     percent = stock_info.get("percent")
+#     price = stock_info.get("price")
+#     vol = stock_info.get("volume")
+#     # 补齐 7 列
+#     high = stock_info.get("high", None)
+#     lastp1d = stock_info.get("lastp1d", None)
+#     stock_tuple = (code, name, high, lastp1d, percent, price, vol)
+#     print(f'stock_code : {stock_code} name : {name} percent : {percent} price : {price} vol : {vol}')
+
+#     # --- 防抖逻辑 ---
+#     now = time.time()
+#     last_time = last_open_times.get(code, 0)
+#     if now - last_time < 3.0:  # 小于1秒不再重复打开
+#         print(f"[防抖] 已阻止重复打开编辑器: {code}")
+#         return
+#     last_open_times[code] = now
+#     # 更新输入框
+#     code_entry.delete(0, tk.END)
+#     code_entry.insert(0, code)
+#     search_by_code()
+#     # code_entry.event_generate("<Return>")
+#     # 打开编辑器
+#     open_alert_editor(stock_code,new=True, stock_info=stock_tuple,parent_win=root)
 
 
 # 启动命名管道服务器线程

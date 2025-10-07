@@ -2,18 +2,22 @@
 ; 全局变量
 ; ================================
 #Persistent
+#NoEnv
+#SingleInstance Force
 
 global ClipSaved := Clipboard
 global custom_copy_triggered := false
-global AutoSendToDFCF := False   ; <<< 开关：true=复制即推送，false=只提示不推送
-
-; 通用通知函数
+global AutoSendToDFCF := False     ; <<< 自动推送开关（默认关闭）
+global DEBUG_MODE := false         ; <<< 调试日志开关
+global LOG_FILE := A_ScriptDir "\hotkey_debug.log"
+global SentCodes := {}  ; <<< 已发送代码记录
+; ================================
+; 通知与日志函数
 ; ================================
 Notify(msg, type:="tray", duration:=3) {
     if (type = "msgbox") {
         MsgBox, %msg%
-    } 
-    else if (type = "tooltip") {
+    } else if (type = "tooltip") {
         Gui, Tooltip:New, +AlwaysOnTop -Caption +ToolWindow
         Gui, Tooltip:Font, s10
         Gui, Tooltip:Add, Text,, %msg%
@@ -21,15 +25,20 @@ Notify(msg, type:="tray", duration:=3) {
         Gui, Tooltip:Show, x%xpos% y%ypos%
         Sleep, duration*1000
         Gui, Tooltip:Destroy
-    } 
-    else if (type = "tray") {
+    } else if (type = "tray") {
         TrayTip, 通知, %msg%, %duration%, 1
-    } 
-    else if (type = "sound") {
+    } else if (type = "sound") {
         SoundBeep, 750, duration*1000
     }
 }
 
+Log(msg) {
+    global DEBUG_MODE, LOG_FILE
+    if (!DEBUG_MODE)
+        return
+    FormatTime, now, , yyyy-MM-dd HH:mm:ss
+    FileAppend, [%now%] %msg%`r`n, %LOG_FILE%
+}
 
 ; ================================
 ; 剪贴板变化监控
@@ -37,14 +46,13 @@ Notify(msg, type:="tray", duration:=3) {
 OnClipboardChange("HandleClipboardChange")
 
 HandleClipboardChange(Type) {
-    global custom_copy_triggered, ClipSaved,AutoSendToDFCF
+    global custom_copy_triggered, ClipSaved, AutoSendToDFCF
     if !custom_copy_triggered {
         current := Clipboard
         if (current != ClipSaved && current != "") {
             ClipSaved := current
-            if RegExMatch(ClipSaved,  "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", stockCode) 
-            {
-                ;Notify(剪贴板中检测到6位数字stockCode, "tray", 1)
+            if RegExMatch(ClipSaved, "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", stockCode) {
+                Log("剪贴板检测到股票代码: " . stockCode)
                 if (AutoSendToDFCF) {
                     Notify("检测到股票代码: " . stockCode, "sound", 0.3)
                     WinGet, activeWinID, ID, A
@@ -52,18 +60,19 @@ HandleClipboardChange(Type) {
                     Sleep, 100
                     WinActivate, ahk_id %activeWinID%
                     WinWaitActive, ahk_id %activeWinID%
-                    }
+                }
             }
         }
-    }else {
-        Notify("ClipboardChang触发，但已被热键处理:" . . , "tooltip", 1)
-    } 
+    } else {
+        Log("剪贴板事件被热键保护拦截")
+    }
 }
 
 ; ================================
 ; 功能函数
 ; ================================
 SendToDFCF(stockCode) {
+    Log("执行 SendToDFCF(" stockCode ")")
     if WinExist("ahk_exe mainfree.exe") {
         WinActivate
         WinWaitActive
@@ -73,15 +82,18 @@ SendToDFCF(stockCode) {
         Sleep, 250
         Send, {Enter}
     } else {
+        Log("DFCF 窗口未找到")
         Notify("DFCF not found:" . stockCode, "tooltip", 1)
     }
 }
 
 SendToTDX(stockCode) {
+    Log("执行 SendToTDX(" stockCode ")")
     if WinExist("ahk_class TdxW_MainFrame_Class") {
         WinActivate
         WinWaitActive
-        SetKeyDelay, 50
+        Sleep, 100
+        SetKeyDelay, 80
         Send, %stockCode%
         Sleep, 200
         Send, {Enter}
@@ -89,6 +101,7 @@ SendToTDX(stockCode) {
 }
 
 SendToHexin(stockCode) {
+    Log("执行 SendToHexin(" stockCode ")")
     if WinExist("ahk_exe hexin.exe") {
         WinActivate
         WinWaitActive
@@ -100,92 +113,99 @@ SendToHexin(stockCode) {
 }
 
 ; ================================
-; 热键：鼠标中键（只在特定程序生效）
+; 热键：鼠标中键（仅在特定窗口）
 ; ================================
 #If WinActive("ahk_class TdxW_MainFrame_Class") 
     || WinActive("ahk_class TdxW_SecondFrame_Class") 
     || WinActive("ahk_exe hexin.exe")
 
 MButton::
-    global custom_copy_triggered, ClipSaved
+{
+    global custom_copy_triggered, ClipSaved,SentCodes
     custom_copy_triggered := true
-
-    ; ================================
-    ; 逻辑分支
-    ; ================================
     WinGet, activeWinID, ID, A
+    WinGetActiveTitle, actitle
+    Log("中键热键触发于窗口: " . actitle)
 
-    if WinActive("ahk_class TdxW_MainFrame_Class") 
-        || WinActive("ahk_class TdxW_SecondFrame_Class") 
-    {
+    try {
+        if WinActive("ahk_class TdxW_MainFrame_Class") || WinActive("ahk_class TdxW_SecondFrame_Class") {
+            ClipBackup := ClipboardAll
+            SendMessage, 0x111, 33819, 0,, ahk_class TdxW_MainFrame_Class
 
-        ClipBackup := ClipboardAll
-        ;ClipBackup := Clipboard
-        ; 标记：接下来的剪贴板变化由我们触发，需要忽略回调
+            ClipWait, 0.5
+            if (ErrorLevel)
+                Log("ClipWait 超时")
+            else
+                Log("ClipWait 成功")
 
-        ; 发送 TDX 的消息（你原来用的 0x111,33819）
-        SendMessage, 0x111, 33819, 0,, ahk_class TdxW_MainFrame_Class
+            RegExMatch(Clipboard, "\b\d{6}\b", stockCode)
+            Log("提取到代码：" . stockCode)
 
-        ; 等待剪贴板被更新
-        ClipWait, % timeout_sec
-        if (ErrorLevel) {
-            ;Log("FetchCodeFromTDX: ClipWait timeout")
-            ClipSaved := Clipboard  ; 尝试读一下（可能没有变化）
-        } else {
-            ClipSaved := Clipboard
-            ;Log("FetchCodeFromTDX: got clipboard: " . SubStr(new,1,200))
-        }
-
-        ; 恢复原来剪贴板
-        ;Clipboard := ClipBackup
-        ;Sleep, 50  ; 给系统一点时间
-
-        ; 通过消息号获取股票代码
-        ;SendMessage,0x111,33819,0,,ahk_class TdxW_MainFrame_Class
-        ;RegExMatch(ClipSaved,  "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", stockCode)
-        RegExMatch(ClipSaved, "\d{6}", stockCode)
-        if (stockCode != "") {
-            Notify("热键触发代码: " . stockCode, "tooltip", 1)
-        }
-        ;custom_copy_triggered := false
-        ; → 从 TDX 联动到 东方财富 + 同花顺
-        SendToDFCF(stockCode)
-        SendToHexin(stockCode)
-        ;Notify("通达信联动股成功: " . stockCode, "tray", 1)
-
-    }
-    else if WinActive("ahk_exe hexin.exe") {
-        ; → 从同花顺提取股票代码
-        SendMessage,0x111,31067,0,,a
-        if WinExist("ahk_class #32770") {
-            WinActivate
-            WinWaitActive
-            WinGetActiveTitle, title
-            Send {Esc}
-            RegExMatch(title,  "^(?:60|30|00|43|83|87|92)\d{4}(?!\d)|^(?:688|200)\d{3}(?!\d)", stockCode)
             if (stockCode != "") {
-                Notify("热键触发代码: " . stockCode, "tooltip", 1)
+                if SentCodes.HasKey(stockCode) {
+                    Notify("股票代码 " . stockCode . " 已发送过，跳过", "tooltip", 1)
+                } else {
+                    Notify("热键触发: " . stockCode, "tooltip", 0.8)
+                    SendToDFCF(stockCode)
+                    SendToHexin(stockCode)
+                    SentCodes[stockCode] := true
+                }
+            } else {
+                Notify("未检测到股票代码", "tooltip", 1)
+            }
+
+            Clipboard := ClipBackup
+            
+        } else if WinActive("ahk_exe hexin.exe") {
+            SendMessage, 0x111, 31067, 0,, a
+            if WinExist("ahk_class #32770") {
+                WinActivate
+                WinWaitActive, ahk_class #32770,, 1
+                WinGetActiveTitle, title
+                Send {Esc}
+                Log("检测到弹窗标题: " . title)
+                RegExMatch(title, "\b(?:60|30|00|43|83|87|92)\d{4}\b|(?:688|200)\d{3}\b", stockCode)
+                Log("同花顺提取股票代码: " . stockCode)
+                if (stockCode != "") {
+                    if SentCodes.HasKey(stockCode) {
+                        Notify("股票代码 " . stockCode . " 已发送过，跳过", "tooltip", 1)
+                    } else {
+                        Notify("Hexin热键触发: " . stockCode, "tooltip", 0.8)
+                        SendToTDX(stockCode)
+                        SendToDFCF(stockCode)
+                        SentCodes[stockCode] := true
+                    }
+                }
             }
         }
-        ; 再联动到 TDX + 东方财富
-        SendToTDX(stockCode)
-        SendToDFCF(stockCode)
-        ;Notify("同花顺联动成功: " . stockCode, "tray", 1)
+    } catch e {
+        Log("热键异常: " . e.Message)
+        Notify("热键异常: " . e.Message, "tray", 2)
+    } finally {
+        Sleep, 100
+        if (activeWinID) {
+            WinActivate, ahk_id %activeWinID%
+            WinWaitActive, ahk_id %activeWinID%,, 1
+        }
+        custom_copy_triggered := false
+        Log("热键执行结束")
     }
-    Sleep, 100
-    WinActivate, ahk_id %activeWinID%
-    WinWaitActive, ahk_id %activeWinID%
-    ; 清除标志
-    custom_copy_triggered := false
+}
 return
-
 #If
 
-
-; =====================
-; 热键：切换开关
-; =====================
-^!d::  ; Ctrl+Alt+D 切换自动推送开关
+; ================================
+; 快捷键：切换功能
+; ================================
+^!d::  ; Ctrl+Alt+D 切换自动推送
 AutoSendToDFCF := !AutoSendToDFCF
 Notify("AutoSendToDFCF 切换为: " . (AutoSendToDFCF ? "开启" : "关闭"), "tray", 1)
+Log("AutoSendToDFCF = " . AutoSendToDFCF)
+return
+
+^!L::  ; Ctrl+Alt+L 切换日志模式
+DEBUG_MODE := !DEBUG_MODE
+msg := DEBUG_MODE ? "🔵 调试日志已开启" : "⚪ 调试日志已关闭"
+Notify(msg, "tray", 1)
+Log("====== " msg " ======")
 return
