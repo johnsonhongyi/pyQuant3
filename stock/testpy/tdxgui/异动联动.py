@@ -889,7 +889,7 @@ def minutes_to_time(target_int):
     
 
 # 示例
-print(minutes_to_time(1300))
+# print(minutes_to_time(1300))
 
 
 def get_now_time_int():
@@ -951,6 +951,7 @@ def get_trade_date_status(dt=None):
     is_trade_date = a_trade_calendar.is_trade_date(dt)
 
     return(is_trade_date)
+
 
 def get_work_time(now_t = None):
     # if not get_day_is_trade_day():
@@ -1246,6 +1247,7 @@ def schedule_daily_archive(root, hour=15, minute=5, archive_file=None):
     """每日固定时间执行存档任务，仅工作日"""
     
     def archive_func():
+        print(f'archive_func datetime.now() : {datetime.now()}')
         start_async_save()
         # start_async_save_dataframe()
 
@@ -1483,14 +1485,37 @@ def get_stock_changes(selected_type=None, stock_code=None):
             # temp_df["tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors='coerce').dt.time
             # temp_df["tm"] = temp_df["tm"].apply(lambda x: pd.to_datetime(x, format="%H%M%S", errors='coerce').time() if pd.notna(x) else pd.NaT)
             # temp_df["tm"] = temp_df["tm"].astype(object)
-            # temp_df.loc[:, "tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors='coerce').dt.time
             # 转换时间字段
-            temp_df["tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors="coerce").dt.time
+            # temp_df.loc[:, "tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors='coerce').dt.time
+            # temp_df.loc["tm"] = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors="coerce").dt.time
+            # 1. 计算新的 'tm' 列
+            new_tm_series = pd.to_datetime(temp_df["tm"], format="%H%M%S", errors="coerce").dt.time
+            # 2. 使用 assign 将计算结果添加到 DataFrame 中
+            temp_df = temp_df.assign(tm=new_tm_series)
+
             temp_df.columns = ["时间", "代码", "_", "名称", "板块", "相关信息"]
             temp_df = temp_df[["时间", "代码", "名称", "板块", "相关信息"]]
-            temp_df["板块"] = temp_df["板块"].astype(str).map(
-                lambda x: reversed_symbol_map.get(x, f"未知类型({x})")
-            ).astype(str)  # 或 .astype(object)
+            # temp_df["板块"] = temp_df["板块"].astype(str).map(
+            #     lambda x: reversed_symbol_map.get(x, f"未知类型({x})")
+            # ).astype(str)  # 或 .astype(object)
+            # temp_df.loc[:, "板块"] = temp_df["板块"].astype(str).map(
+            #     lambda x: reversed_symbol_map.get(x, f"未知类型({x})")
+            # ).astype(str) 
+            # 推荐修改方案：使用 .assign()
+            temp_df = temp_df.assign(
+                板块=temp_df["板块"]
+                .astype(str)
+                .map(lambda x: reversed_symbol_map.get(x, f"未知类型({x})"))
+                .astype(str)
+            )
+
+            # 或者使用 lambda 表达式，让代码更清晰：
+            # temp_df = temp_df.assign(
+            #     板块=lambda df: df["板块"]
+            #     .astype(str)
+            #     .map(lambda x: reversed_symbol_map.get(x, f"未知类型({x})"))
+            #     .astype(str)
+            # )
 
             temp_df = temp_df.sort_values(by="时间", ascending=False)
         else:
@@ -1774,8 +1799,13 @@ def daily_task():
     """
     这个函数包含了你希望每天执行的逻辑。
     """
-    print(f"每日定时任务执行了！当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"daily_task每日定时任务执行了！当前时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     # save_dataframe()
+    show_tasks()
+    for name, info in after_tasks.items():
+        if 'worksaveday_task' == name:
+            print('worksaveday_task is running ,return')
+            return
     start_async_save()
     # start_async_save_dataframe()
     # 在这里添加你的具体任务，例如：
@@ -1903,21 +1933,22 @@ def get_next_weekday_time(target_hour, target_minute):
     
     # 获取今天的日期字符串
     today_str = now.date().strftime('%Y-%m-%d')
-    
+
     # 判断今天是否是交易日
     try:
         next_trade_str = a_trade_calendar.get_next_trade_date(today_str)
+        # next_trade_str = a_trade_calendar.get_next_trade_date(today_str)
     except Exception:
         # 如果今天不在交易日历中，则获取下一个交易日
         next_trade_str = a_trade_calendar.get_next_trade_date(today_str)
 
     # 如果今天是交易日且还没到目标时间，则使用今天
-    if today_str == next_trade_str and now < target_time_today:
+    if (get_trade_date_status() or today_str == next_trade_str) and now < target_time_today:
         return target_time_today
     
     # 否则获取下一个交易日
-    next_day_str = a_trade_calendar.get_next_trade_date(today_str)
-    next_day = datetime.strptime(next_day_str, '%Y-%m-%d')
+    # next_day_str = a_trade_calendar.get_next_trade_date(today_str)
+    next_day = datetime.strptime(next_trade_str, '%Y-%m-%d')
     
     # 返回下一交易日的目标时间
     next_trade_time = next_day.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
@@ -1970,8 +2001,12 @@ def check_readldf_exist():
                 print("还不能设置:", e)
         print(f"文件 '{filename}' 已存在，放棄寫入,已加载")
         loaded_df = pd.read_csv(filename, encoding='utf-8-sig', compression="bz2")
-        loaded_df["代码"] = loaded_df["代码"].astype(object)
-        loaded_df.loc[:, '代码'] = loaded_df['代码'].astype(str).str.zfill(6)
+        # loaded_df["代码"] = loaded_df["代码"].astype(object)
+        # loaded_df.loc[:, '代码'] = loaded_df['代码'].astype(str).str.zfill(6)
+        # 推荐写法：使用字符串作为列名
+        loaded_df = loaded_df.assign(
+            代码 = loaded_df["代码"].astype(str).str.zfill(6)
+        )
         realdatadf = loaded_df
         return True
     else:
@@ -2038,7 +2073,7 @@ def schedule_daily_init(root):
         # today_925 += timedelta(days=1)
         today_925 = get_next_weekday_time(9,20)
     delay_ms = int((today_925 - now).total_seconds() * 1000)
-    root.after(delay_ms, lambda: (daily_init(), start_background_worker()))
+    root.after(delay_ms, lambda: (daily_init(), start_worker()))
     print(f"每日开盘定时初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
     status_label3.config(text=f"日初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
 # update_queue = queue.Queue()
@@ -2077,7 +2112,7 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
     if loaded_df is None and (get_day_is_trade_day() or start_init == 0):
         if get_work_time() or 1130 < get_now_time_int() < 1300:
             current_time = datetime.now().strftime("%H:%M:%S")
-            print(f"自动更新任务get_stock_changes_background执行于: {current_time}")
+            print(f"bg更新任务get_stock_changes_background执行于: {current_time}")
             # 在这里添加你的具体任务逻辑
             status_label3.config(text=f"bg更新在{current_time[:-3]}执行")
             scheduled_task = actually_start_worker(get_stock_changes_background)
@@ -2088,12 +2123,6 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
             status_label3.config(text=f"bg延迟在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
             schedule_task('worktime_task',delay_ms,lambda: schedule_worktime_task(tree))
     else:
-        # if get_work_time() :
-        #     status_label3.config(text=f"更新在{current_time[:-3]}执行")
-        #     scheduled_task = actually_start_worker(get_stock_changes_background)
-        #     # 5分钟后再次调用此函数
-        #     schedule_task('worktime_task',5 * 60 * 1000,lambda: schedule_worktime_task(tree))
-        # else:
         print(f"下一次background任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
         print(f"自动更新任务get_stock_changes_background执行于:在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
         status_label3.config(text=f"日更新{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}")
@@ -2121,10 +2150,10 @@ def schedule_workday_task(root, target_hour, target_minute, immediate=False):
     delay_ms = int((next_execution_time - now).total_seconds() * 1000)
 
     if immediate:
-        next_execution_time = now + timedelta(seconds=10)
-        delay_ms = 10 * 1000
+        next_execution_time = now + timedelta(seconds=30)
+        delay_ms = 30 * 1000
 
-    print(f"下一次保存任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
+    print(f"workday_task下一次保存任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
     
     status_label2.config(text=f"存档-{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}")
     
@@ -2589,7 +2618,7 @@ def load_monitor_list():
                 return []
     return []
 
-def get_stock_changes_background(selected_type=None, stock_code=None, update_interval_minutes=update_interval_minutes):
+def get_stock_changes_background(selected_type=None, stock_code=None, update_interval_minutes=update_interval_minutes,initwork=False):
     """
     获取股票异动数据，根据时间间隔判断是否从API获取。
     Args:
@@ -2618,7 +2647,7 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
     #     last_updated_time = 0
 
     # 使用 with realdatadf_lock 确保只有一个线程可以进入此关键区域
-    print(loaded_df is None  , (realdatadf.empty , get_work_time() , (not date_write_is_processed , get_now_time_int() > 1505)))
+    # print(loaded_df is None  , (realdatadf.empty , get_work_time() , (not date_write_is_processed , get_now_time_int() > 1505)))
     if loaded_df is None  and (realdatadf.empty or get_work_time() or (not date_write_is_processed and get_now_time_int() > 1505)):
         with realdatadf_lock:
 
@@ -2632,7 +2661,7 @@ def get_stock_changes_background(selected_type=None, stock_code=None, update_int
                 for symbol in symbol_map.keys():
                     # 构造模拟数据
                     # 假设每次调用都返回一些新的和一些旧的数据
-                    if stop_event.is_set():
+                    if not initwork and stop_event.is_set():
                         print(f'backgroundworker线程停止运行')
                         last_updated_time = None
                         realdatadf = pd.DataFrame()
@@ -2999,7 +3028,7 @@ def update_monitor_tree(data, tree, window_info, item_id):
         pass
         # 如果没有数据，清空并短间隔重试
         # tree.delete(*tree.get_children())
-
+    
     if get_work_time() or (get_day_is_trade_day() and 1130 < get_now_time_int() < 1300):
         # print(f'start flush_alerts')
         if  not 1130 < get_now_time_int() < 1300:
@@ -4561,7 +4590,7 @@ def open_alert_center():
     # aw_win.focus_force()           # 强制获得焦点
     aw_win.lift()                  # 提升到顶层
 
-    win_width, win_height = 720 , 260
+    win_width, win_height = 720 , 360
     x, y = get_centered_window_position_center(win_width, win_height, parent_win=root)
     aw_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
     # 再显示出来
@@ -4636,11 +4665,11 @@ def open_alert_center():
     for c in cols:
         alert_tree.heading(c, text=c)
         if c == '触发值':
-            alert_tree.column(c, width=120, anchor="center")
+            alert_tree.column(c, width=160, anchor="center")
         elif c == '规则':
             alert_tree.column(c, width=100, anchor="center")
         else:
-            alert_tree.column(c, width=40, anchor="center")
+            alert_tree.column(c, width=30, anchor="center")
     alert_tree.pack(expand=True, fill="both")
 
     def on_tree_select(event):
@@ -5096,6 +5125,61 @@ def calc_alert_window_position(win_width, win_height, x_root=None, y_root=None, 
 
     return x, y
 
+
+def ensure_alert_rules(code, price, percent, vol, alerts_rules, alerts_history, default_deltas, new=False, master=None):
+    """
+    确保股票监控规则存在：
+    - 已有规则：保留 enabled 状态，只更新 value/delta
+    - 无规则：创建新规则（仅价格默认开启）
+    - 若 new=True：弹窗确认是否重置规则
+    """
+    rules = alerts_rules.get(code, [])
+    has_alert_history = any(a['stock_code'] == code for a in alerts_history)
+
+    # ========== 🟡 情况1：请求新建或重置 ==========
+    if new:
+        reset = True
+        if rules:  # 仅在已有规则时才弹窗确认
+            msg = f"是否重置股票 {code} 的监控规则？\n（将恢复为仅价格开启的默认配置）"
+            reset = messagebox.askyesno("确认重置规则", msg, parent=master)
+
+        if reset:
+            rules = [
+                {"field": "价格", "op": ">=", "value": float(price), "enabled": True,  "delta": default_deltas["价格"]},
+                {"field": "涨幅", "op": ">=", "value": float(percent), "enabled": False, "delta": default_deltas["涨幅"]},
+                {"field": "量",   "op": ">=", "value": float(vol),    "enabled": False, "delta": default_deltas["量"]},
+            ]
+            alerts_rules[code] = rules
+            return rules
+        # 否则就继续往下执行（仅更新值）
+
+    # ========== 🟢 情况2：没有旧规则 ==========
+    if not rules:
+        rules = [
+            {"field": "价格", "op": ">=", "value": float(price), "enabled": True,  "delta": default_deltas["价格"]},
+            {"field": "涨幅", "op": ">=", "value": float(percent), "enabled": False, "delta": default_deltas["涨幅"]},
+            {"field": "量",   "op": ">=", "value": float(vol),    "enabled": False, "delta": default_deltas["量"]},
+        ]
+        alerts_rules[code] = rules
+        return rules
+
+    # ========== 🟢 情况3：已有规则，仅更新值 ==========
+    for rule in rules:
+        f = rule["field"]
+        if f == "价格":
+            rule["value"] = float(price)
+            rule["delta"] = default_deltas["价格"]
+        elif f == "涨幅":
+            rule["value"] = float(percent)
+            rule["delta"] = default_deltas["涨幅"]
+        elif f == "量":
+            rule["value"] = float(vol)
+            rule["delta"] = default_deltas["量"]
+
+    alerts_rules[code] = rules
+    return rules
+
+
 def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_root=None, y_root=None):
     global alerts_rules,alert_window
     # ------------------ 数据处理 ------------------
@@ -5155,21 +5239,6 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
                     # stock_name = name
                     percent, price, vol = 0.0, 0.0, 0
 
-            # elif not isinstance(stock_code, (list, tuple)) and len(stock_code.split()) == 2:
-            #     code,name = stock_code.split()
-            #     percent,price, vol = 0.0 , 0.0 , 0
-            #     if sina_data_df is not None and not sina_data_df.empty:
-            #         stock_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
-            #         dd = sina_data_df.loc[code]
-            #         if dd is not None:
-            #             price = dd.close
-            #             percent = round((dd.close - dd.llastp) / dd.llastp *100,1)
-            #             vol = round(dd.turnover/100/10000/100,1)
-            #             # print(f'监控窗口:{stock_code}, {price},{percent},{vol}')
-            #     elif code in monitor_windows.keys():
-            #         stock_info = monitor_windows.get(code, {}).get('stock_info', [code, 0, 0, 0, 1, 5, 1])
-            #         _, _, _, _, percent,price, vol = stock_info
-                    # print(f'price : {price},percent:{percent}, vol:{vol}')
             elif isinstance(stock_code, (list, tuple)) and len(stock_code) == 5:
                 code, _ , percent,price, vol = stock_code
                 print(f'price : {price},percent:{percent}, vol:{vol}')
@@ -5274,18 +5343,64 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     style.configure("TButton", padding=5)
     style.configure("TLabel", padding=5)
 
-    rules = alerts_rules.get(code, [])
+    # rules = alerts_rules.get(code, [])
+
+    # if not rules or new:
+    #     # 检查历史报警
+    #     has_alert_history = any(a['stock_code'] == code for a in alerts_history)
+        
+    #     rules = [
+    #         {"field": "价格", "op": ">=", "value": float(price), "enabled": not has_alert_history, "delta": default_deltas["价格"]},
+    #         {"field": "涨幅", "op": ">=", "value": float(percent), "enabled": not has_alert_history, "delta": default_deltas["涨幅"]},
+    #         {"field": "量", "op": ">=", "value": float(vol), "enabled": not has_alert_history, "delta": default_deltas["量"]},
+    #     ]
+    #     alerts_rules[code] = rules
+
+
+    # alerts_rules: dict mapping stock_code -> list of rule dicts
+    # default_deltas: dict like {"价格":.., "涨幅":.., "量":..}
+    # price, percent, vol: incoming阈值（字符串或数字）
+
+    rules = alerts_rules.get(code)
 
     if not rules or new:
-        # 检查历史报警
-        has_alert_history = any(a['stock_code'] == code for a in alerts_history)
-        
+        # 若没有已有规则，创建默认新规则：
         rules = [
-            {"field": "价格", "op": ">=", "value": float(price), "enabled": not has_alert_history, "delta": default_deltas["价格"]},
-            {"field": "涨幅", "op": ">=", "value": float(percent), "enabled": not has_alert_history, "delta": default_deltas["涨幅"]},
-            {"field": "量", "op": ">=", "value": float(vol), "enabled": not has_alert_history, "delta": default_deltas["量"]},
+            {"field": "价格", "op": ">=", "value": float(price), "enabled": True,  "delta": default_deltas["价格"]},
+            {"field": "涨幅", "op": ">=", "value": float(percent),"enabled": False, "delta": default_deltas["涨幅"]},
+            {"field": "量",   "op": ">=", "value": float(vol),    "enabled": False, "delta": default_deltas["量"]},
         ]
         alerts_rules[code] = rules
+    # else:
+    #     # 已有规则：只更新可变值（value, delta），并保留已有的 enabled/op/其它字段
+    #     # 先把已有规则按 field 索引
+    #     field_map = { r.get("field"): r for r in rules }
+
+    #     def upsert_field(field_name, new_value):
+    #         if field_name in field_map:
+    #             r = field_map[field_name]
+    #             # 只覆盖 value 与 delta（保留 enabled/op/其它自定义字段）
+    #             r["value"] = float(new_value)
+    #             r["delta"] = default_deltas.get(field_name, r.get("delta"))
+    #         else:
+    #             # 若不存在该 field，则新增，默认 enabled 仅对价格为 True
+    #             field_map[field_name] = {
+    #                 "field": field_name,
+    #                 "op": ">=", 
+    #                 "value": float(new_value),
+    #                 "enabled": True if field_name == "价格" else False,
+    #                 "delta": default_deltas.get(field_name)
+    #             }
+
+    #     upsert_field("价格", price)
+    #     upsert_field("涨幅", percent)
+    #     upsert_field("量", vol)
+
+    #     # 保持固定顺序输出（价格, 涨幅, 量）
+    #     new_rules = [field_map["价格"], field_map["涨幅"], field_map["量"]]
+    #     alerts_rules[code] = new_rules
+    #     rules = new_rules
+
 
     # 创建一个 Frame 来容纳规则列表
     rules_frame = ttk.Frame(editor, padding=10)
@@ -5673,54 +5788,167 @@ def check_alert(stock_code, price, change, volume, name=None):
 #     except Exception:
 #         _select_last()
 
-
 def refresh_alert_center():
-    global alert_window, alert_tree, alerts_history
+    global alert_window, alert_tree, alerts_history, alerts_rules, sina_data_df, monitor_windows
     if not alert_window or not alert_window.winfo_exists() or alert_tree is None:
         return
 
+    # 清空并设置 tag
     alert_tree.delete(*alert_tree.get_children())
     alert_tree.tag_configure("triggered", background="yellow", foreground="red")
     alert_tree.tag_configure("not_triggered", background="white", foreground="black")
 
-    # 确保最新在最后一行
-    rows = list(reversed(alerts_history[-200:]))
+    # 取最近若干条记录（按时间倒序），按股票分组，保留每个股票的最近记录序列
+    recent = alerts_history[-500:]
+    grouped = {}
+    for alert in reversed(recent):
+        code = alert.get("stock_code", "")
+        if not code:
+            continue
+        grouped.setdefault(code, []).append(alert)
 
-    for alert in rows:
-        field = alert.get("field", "")
-        value = alert.get("value", 0)
-        rule = alert.get("rule", {}) or {}
-        delta = rule.get("delta", "")
-        op = rule.get("op", "")
-        rule_value = rule.get("value", "")
+    for code, alerts in grouped.items():
+        # 股票名称（优先用 sina_data_df）
+        if sina_data_df is not None and not sina_data_df.empty:
+            name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
+        else:
+            name = monitor_windows.get(code, {}).get("stock_info", ["", "未知"])[1]
 
+        # 取该股的规则列表（可能为空）
+        rule_list = alerts_rules.get(code, [])
+        if not rule_list:
+            continue
+
+        # --- 提取每个字段的最近现值（只保留第一次出现，即最近一次） ---
+        latest_values = {}
+        for alert in alerts:
+            f = alert.get("field", "")
+            if f and f not in latest_values:
+                latest_values[f] = alert.get("value", "")
+
+        # --- 构造“规则”列（阈值/操作，三合一） ---
+        conds = []
+        for rule in rule_list:
+            field = rule.get("field", "")
+            if field in ("价格", "涨幅", "量"):
+                op = rule.get("op", "")
+                value = rule.get("value", "")
+                conds.append(f"{field}{op}{value}")
+        rule_str = ", ".join(conds) if conds else "无规则"
+
+        # --- 构造“触发值”列（每个字段的最近现值，精简显示并保留 1 位小数） ---
+        val_parts = []
         triggered = False
-        try:
-            if op == ">=" and value >= rule_value:
-                triggered = True
-            elif op == "<=" and value <= rule_value:
-                triggered = True
-        except Exception:
-            triggered = False
+        for rule in rule_list:
+            field = rule.get("field", "")
+            if field not in ("价格", "涨幅", "量"):
+                continue
+            cur = latest_values.get(field, "")
+            if cur == "" or cur is None:
+                continue
+            # 格式化为 1 位小数（失败则原样）
+            try:
+                curf = float(cur)
+                cur_s = f"{curf:.1f}"
+            except Exception:
+                cur_s = str(cur)
+                curf = None
 
-        status = "触发" if triggered else "未触发"
+            val_parts.append(f"{field}{cur_s}")
+
+            # 若该规则启用，则用当前值判定是否触发
+            try:
+                if rule.get("enabled", False) and curf is not None:
+                    rv = float(rule.get("value", float("nan")))
+                    op = rule.get("op", "")
+                    if op == ">=" and curf >= rv:
+                        triggered = True
+                    elif op == "<=" and curf <= rv:
+                        triggered = True
+            except Exception:
+                # 忽略转换错误
+                pass
+
+        val_str = ", ".join(val_parts) if val_parts else ""
+
+        # --- 启用状态（开 / 部分开 / 关） ---
+        enabled_state = (
+            "开" if all(rule.get("enabled", False) for rule in rule_list)
+            else "部分开" if any(rule.get("enabled", False) for rule in rule_list)
+            else "关"
+        )
+
+        # 使用该股票最近一条记录的时间作为时间列（若没有可为空）
+        time_txt = alerts[0].get("time", "")
+
+        # 插入一行：时间, 代码, 名称, 规则(三合一), 触发值(三合一精简), 启用状态
         vals = (
-            alert.get('time', ''),
-            alert.get('stock_code', ''),
-            alert.get('name', ''),
-            f"{field}{op}{rule_value} → {status}",
-            f"现值 {value}",
-            f"变化量 {delta}"
+            time_txt,
+            code,
+            name,
+            rule_str,
+            val_str,
+            enabled_state
         )
         tag = "triggered" if triggered else "not_triggered"
         alert_tree.insert("", "end", values=vals, tags=(tag,))
 
+    # 选中第一行以便展示
     if alert_tree.get_children():
         first_item = alert_tree.get_children()[0]
         alert_tree.selection_set(first_item)
         alert_tree.focus(first_item)
 
     alert_window.update_idletasks()
+
+
+# def refresh_alert_center_old_ok():
+#     global alert_window, alert_tree, alerts_history
+#     if not alert_window or not alert_window.winfo_exists() or alert_tree is None:
+#         return
+
+#     alert_tree.delete(*alert_tree.get_children())
+#     alert_tree.tag_configure("triggered", background="yellow", foreground="red")
+#     alert_tree.tag_configure("not_triggered", background="white", foreground="black")
+
+#     # 确保最新在最后一行
+#     rows = list(reversed(alerts_history[-200:]))
+
+#     for alert in rows:
+#         field = alert.get("field", "")
+#         value = alert.get("value", 0)
+#         rule = alert.get("rule", {}) or {}
+#         delta = rule.get("delta", "")
+#         op = rule.get("op", "")
+#         rule_value = rule.get("value", "")
+
+#         triggered = False
+#         try:
+#             if op == ">=" and value >= rule_value:
+#                 triggered = True
+#             elif op == "<=" and value <= rule_value:
+#                 triggered = True
+#         except Exception:
+#             triggered = False
+
+#         status = "触发" if triggered else "未触发"
+#         vals = (
+#             alert.get('time', ''),
+#             alert.get('stock_code', ''),
+#             alert.get('name', ''),
+#             f"{field}{op}{rule_value} → {status}",
+#             f"现值 {value}",
+#             f"变化量 {delta}"
+#         )
+#         tag = "triggered" if triggered else "not_triggered"
+#         alert_tree.insert("", "end", values=vals, tags=(tag,))
+
+#     if alert_tree.get_children():
+#         first_item = alert_tree.get_children()[0]
+#         alert_tree.selection_set(first_item)
+#         alert_tree.focus(first_item)
+
+#     alert_window.update_idletasks()
 
     # children = alert_tree.get_children()
     # if children:
@@ -6298,7 +6526,6 @@ t.start()
 
 # if get_now_time_int() > 1530 and not date_write_is_processed:
 #     start_async_save()
-schedule_daily_archive(root, hour=15, minute=5, archive_file=None)
 
 tree.bind("<Button-3>", show_context_menu)
 
@@ -6349,6 +6576,9 @@ else:
     schedule_workday_task(root, target_hour, target_minute)
 
 schedule_worktime_task(tree)
+
+#重复了schedule_workday_task
+schedule_daily_archive(root, hour=15, minute=5, archive_file=None)
 
 # 启动定时任务调度
 schedule_get_ths_code_task()

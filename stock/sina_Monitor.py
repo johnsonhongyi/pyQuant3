@@ -412,7 +412,7 @@ if __name__ == "__main__":
                 # import ipdb;ipdb.set_trace()
                 top_temp=top_all.copy()
 
-                if st_key_sort.split()[0] not in st_key_sort_status or cct.get_trade_date_status() == 'False':
+                if st_key_sort.split()[0] not in st_key_sort_status or not cct.get_trade_date_status() :
                     pass
 
                 elif cct.get_now_time_int() > 0 and cct.get_now_time_int() <= 950:

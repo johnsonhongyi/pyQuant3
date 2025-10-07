@@ -2292,7 +2292,7 @@ def get_work_time(now_t = None):
     # return True
     # now_t = str(get_now_time()).replace(':', '')
     # now_t = int(now_t)
-    if  get_trade_date_status() == 'False':
+    if  not get_trade_date_status() :
         # print(f'get_trade_date_status() : {get_trade_date_status()}')
         return False
     if now_t == None:
@@ -2308,7 +2308,7 @@ def get_work_time(now_t = None):
         return True
 
 def get_work_time_duration():
-    if get_trade_date_status() == 'False':
+    if not get_trade_date_status():
         return False
     now_t = get_now_time_int()
     if  now_t < 915 or now_t > 1502:
@@ -2332,7 +2332,7 @@ def get_work_hdf_status():
 def get_work_duration():
     int_time = get_now_time_int()
     # now_t = int(now_t)
-    if get_trade_date_status() and ((700 < int_time < 915) or (1132 < int_time < 1300)):
+    if  get_trade_date_status() and ((700 < int_time < 915) or (1132 < int_time < 1300)):
         # if (int_time > 830 and int_time < 915) or (int_time > 1130 and int_time < 1300) or (int_time > 1500 and int_time < 1510):
         # return False
         return True
@@ -3606,6 +3606,25 @@ def get_config_value_wencai(fname, classtype, currvalue=0, xtype='limit', update
     return int(currvalue)
 
 
+def to_bool(value):
+    """
+    将输入转换为布尔值：
+    - 如果已经是 bool，直接返回
+    - 如果是字符串 'True' / 'False'（大小写敏感或忽略大小写），转换为对应布尔值
+    - 其它类型返回 False
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v == "true":
+            return True
+        elif v == "false":
+            return False
+    # 其它情况默认 False
+    return False
+
+
 def get_trade_date_status():
     trade_date = GlobalValues().getkey('trade_date')
     trade_status = GlobalValues().getkey('is_trade_date')
@@ -3620,9 +3639,8 @@ def get_trade_date_status():
             trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=get_day_istrade_date(),xtype='trade_date')
             GlobalValues().setkey('is_trade_date',trade_status)
             GlobalValues().setkey('trade_date',get_today())
-    return trade_status
+    return to_bool(trade_status)
 # wencai_count = cct.get_config_value_wencai(config_ini,fname,1,update=True)
-
 
 def get_index_fibl(default=1):
     # import sys
