@@ -4369,12 +4369,6 @@ def compute_ma_cross_old(dd,ma1='ma5d',ma2='ma10d',ratio=0.02):
 def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
     # ct.compute_lastdays lastdays to 9
     if df is not None and len(df) > lastdays:
-        # if cct.get_trade_date_status() == 'True' and resample != 'd' :
-
-        # if resample != 'd' and cct.get_trade_date_status() == 'True':
-        #     df = df[:-1]
-
-            # print "df:",df[-1:]
         if len(df) > lastdays + 1:
             # 判断lastdays > 9 
             lastdays = len(df) - 2
@@ -5250,7 +5244,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     #20250607 mod today topR
 
     if cct.get_day_istrade_date() and len(top_all) > 2:
-        if cct.get_trade_date_status() == 'False':
+        if not cct.get_trade_date_status():
             top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if x > 0 and y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
         # elif 915 < cct.get_now_time_int() < 1500:
         #     top_all['topR'] =  list(map(lambda x, y, z: (x + 1.1 if y > z else x),top_all.topR, top_all.low, top_all.lasth1d))
@@ -5278,7 +5272,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     # for co in co2int:
     #     df[co]= df[co].astype(int)
 
-    co2int = ['boll','dff','df2','ra','ral','fib','fibl','op', 'ratio','red','top10','ra']    
+    co2int = ['boll','dff','ra','ral','fib','fibl','op', 'ratio','red','top10','ra']    
     for col in co2int:
         if col in top_all.columns:
             top_all[col] = top_all[col].astype(int)
@@ -5778,7 +5772,7 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
     indextype = stock_data.index.dtype == 'datetime64[ns]'
 
     # 3. 工作日过滤，若在交易时段且今天已有数据，则排除当天
-    if 915 < cct.get_now_time_int() < 1500 and cct.get_trade_date_status() == 'True' and cct.get_work_day_status():
+    if 915 < cct.get_now_time_int() < 1500 and cct.get_trade_date_status() and cct.get_work_day_status():
         stock_data = stock_data[stock_data.index < cct.get_today()]
 
     # 4. 确保索引为 datetime
@@ -5840,7 +5834,7 @@ def get_tdx_stock_period_to_type_SRC(stock_data, period_day='w', periods=5, ncol
 
     indextype = True if stock_data.index.dtype == 'datetime64[ns]' else False
     
-    if 915 < cct.get_now_time_int() < 1500 and cct.get_trade_date_status() == 'True' and  cct.get_work_day_status():
+    if 915 < cct.get_now_time_int() < 1500 and cct.get_trade_date_status() and  cct.get_work_day_status():
     # if cct.get_work_day_status() and 915 < cct.get_now_time_int() < 1500:
         stock_data = stock_data[stock_data.index < cct.get_today()]
     stock_data['date'] = stock_data.index

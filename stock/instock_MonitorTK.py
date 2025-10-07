@@ -221,7 +221,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
 
 # ------------------ 指标计算 ------------------ #
 def calc_indicators(top_all, resample):
-    if cct.get_trade_date_status() == 'True':
+    if cct.get_trade_date_status():
         for co in ['boll', 'df2']:
             top_all[co] = list(
                 map(lambda x, y, m, z: z + (1 if (x > y) else 0),
@@ -238,18 +238,22 @@ def calc_indicators(top_all, resample):
             top_all.last6vol.values)
     )
     now_time = cct.get_now_time_int()
-    if 'lastbuy' in top_all.columns:
-        if 915 < now_time < 930:
-            top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
-            top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
-        elif 926 < now_time < 1455:
-            top_all['dff'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
-            top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+    if  cct.get_trade_date_status():    
+        if 'lastbuy' in top_all.columns:
+            if 915 < now_time < 930:
+                top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
+                top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+            elif 926 < now_time < 1455:
+                top_all['dff'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
+                top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+            else:
+                top_all['dff'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+                top_all['dff2'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
         else:
             top_all['dff'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
-            top_all['dff2'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
     else:
-        top_all['dff'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+        top_all['dff'] = ((top_all['buy'] - top_all['df2']) / top_all['df2'] * 100).round(1)
+
     return top_all.sort_values(by=['dff','percent','volume','ratio','couts'], ascending=[0,0,0,1,1])
 
 
@@ -567,29 +571,73 @@ class StockMonitorApp(tk.Tk):
         # 绑定双击事件
         # self.tree.bind("<Double-1>", self.on_double_click)
 
-
-
     def update_treeview_cols(self, new_cols):
-        # code 永远在最前
-        if 'code' not in new_cols:
-            new_cols = ["code"] + new_cols
-        refesh_col_status = False
-        if new_cols !=  self.current_cols:
-            refesh_col_status = True
-            self.current_cols =  new_cols
-        #    self.current_cols = ["code"] + new_cols
-        self.tree["columns"] = self.current_cols
+        try:
+            # code 永远在最前
+            new_cols = [c for c in new_cols if c in self.df_all.columns]
+            if 'code' not in new_cols:
+                new_cols = ["code"] + new_cols
 
-        for col in self.current_cols:
-            self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
-            # 初始先给个宽度
-            width = 120 if col == "name" else 80
-            self.tree.column(col, width=width, anchor="center", minwidth=50)
+            if new_cols == self.current_cols:
+                return  # 无变化不处理
 
-        # 最后自适应调整
-        self.adjust_column_widths()
-        if refesh_col_status:
-            self.refresh_tree()
+            self.current_cols = new_cols
+
+            # # 暂停更新以避免崩溃
+            self.tree["displaycolumns"] = ()
+            self.tree["columns"] = ()
+
+            # 清空旧列安全更新
+            cols = tuple(self.current_cols)
+            self.tree["columns"] = cols
+            # self.tree["show"] = "headings"
+
+            for col in cols:
+                self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+                width = 120 if col == "name" else 80
+                self.tree.column(col, width=width, anchor="center", minwidth=50)
+
+            # 自适应列宽
+            self.adjust_column_widths()
+
+            # 恢复显示
+            self.tree["displaycolumns"] = cols
+
+            # 最后再刷新数据（延迟一点更安全）
+            self.tree.after(100, self.refresh_tree)
+
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print("更新 Treeview 列失败：", e)
+
+
+    # def update_treeview_cols1(self, new_cols):
+    #     # code 永远在最前
+    #     if 'code' not in new_cols:
+    #         new_cols = ["code"] + new_cols
+    #     refesh_col_status = False
+    #     if new_cols !=  self.current_cols:
+    #         refesh_col_status = True
+    #         self.current_cols =  new_cols
+    #         # ⚠️ 先清空旧列定义，避免 Invalid column index 错误
+    #         self.tree["columns"] = ()
+    #         self.tree["show"] = "headings"
+
+    #         # 再设置新列
+    #         self.tree["columns"] = self.current_cols
+
+
+    #         for col in self.current_cols:
+    #             self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+    #             # 初始先给个宽度
+    #             width = 120 if col == "name" else 80
+    #             self.tree.column(col, width=width, anchor="center", minwidth=50)
+
+    #         # 最后自适应调整
+    #         self.adjust_column_widths()
+    #         if refesh_col_status:
+    #             self.refresh_tree()
 
     # def open_column_manager(self,master, all_columns, on_apply_callback):
     #     if  self.ColManagerconfig is None and  self.ColumnSetManager is None:
@@ -609,7 +657,6 @@ class StockMonitorApp(tk.Tk):
             self.after_cancel(self._open_column_manager_job)
         self._open_column_manager_job = self.after(1000, self.open_column_manager)
 
-    # def open_column_manager(self, all_columns, on_apply_callback):
     def open_column_manager(self):
         if self.ColumnSetManager is not None and self.ColumnSetManager.winfo_exists():
             # 已存在，直接激活
@@ -624,21 +671,55 @@ class StockMonitorApp(tk.Tk):
                 self.ColManagerconfig = load_display_config()
                 # 创建新窗口
                 self.ColumnSetManager = ColumnSetManager(
-                self,
-                self.df_all.columns,
-                self.ColManagerconfig,
-                self.update_treeview_cols,
-                default_cols=DISPLAY_COLS  # 默认列
+                    self,
+                    self.df_all.columns,
+                    self.ColManagerconfig,
+                    self.update_treeview_cols,  # 回调更新函数
+                    default_cols=DISPLAY_COLS,  # 默认列
                         )
                 # 关闭时清理引用
                 self.ColumnSetManager.protocol("WM_DELETE_WINDOW", self.on_close_column_manager)
             else:
                 self.after(1000,self._on_open_column_manager)
 
+    def open_column_manager_init(self):
+        global DISPLAY_COLS
+        def _on_open_column_manager_init():
+            if self._open_column_manager_job:
+                self.after_cancel(self._open_column_manager_job)
+            self._open_column_manager_job = self.after(1000, self.open_column_manager_init)
+        
+        if self.ColumnSetManager is not None and self.ColumnSetManager.winfo_exists():
+            # 已存在，直接激活
+            # self.ColumnSetManager.deiconify()
+            # self.ColumnSetManager.lift()
+            # self.ColumnSetManager.focus_set()
+            # if not self.ColManagerconfig:
+            #     self.ColManagerconfig = load_display_config()
+            self.ColumnSetManager.open_column_manager_editor()
+        else:
+            if not self.df_all.empty:
+                self.ColManagerconfig = load_display_config()
+                # 创建新窗口
+                self.ColumnSetManager = ColumnSetManager(
+                    self,
+                    self.df_all.columns,
+                    self.ColManagerconfig,
+                    self.update_treeview_cols,  # 回调更新函数
+                    default_cols=DISPLAY_COLS,  # 默认列
+                    auto_apply_on_init=True     #   ✅ 初始化自动执行 apply_current_set()
+                        )
+                # 关闭时清理引用
+                self.ColumnSetManager.protocol("WM_DELETE_WINDOW", self.on_close_column_manager)
+                # DISPLAY_COLS = self.current_cols
+            else:
+                self.after(1000,_on_open_column_manager_init)
+
     def on_close_column_manager(self):
         if self.ColumnSetManager is not None:
             self.ColumnSetManager.destroy()
             self.ColumnSetManager = None
+            self._open_column_manager_job = None
 
     def open_alert_editorAuto(self, stock_info, new_rule=False):
         code = stock_info.get("code")
@@ -946,6 +1027,9 @@ class StockMonitorApp(tk.Tk):
             self.search_var1.set(self.search_history1[0])
         if len(self.search_history2) > 0:
             self.search_var2.set(self.search_history2[0])
+
+
+        self.open_column_manager_init()
 
         # self.focus_force()
         # self.lift()
@@ -2422,7 +2506,6 @@ class StockMonitorApp(tk.Tk):
         """刷新 TreeView，保证列和数据严格对齐。"""
         if df is None:
             df = self.current_df.copy()
-
         # 清空
         for iid in self.tree.get_children():
             self.tree.delete(iid)
@@ -2466,6 +2549,8 @@ class StockMonitorApp(tk.Tk):
         # 如果 Treeview 的 columns 与我们想要的不一致，则重新配置
         current_cols = list(self.tree["columns"])
         if current_cols != cols_to_show:
+            import ipdb;ipdb.set_trace()
+
             # 关键：更新 columns，确保使用 list/tuple（不要使用 numpy array）
             self.tree.config(columns=cols_to_show)
             # 强制只显示 headings（隐藏 #0），并设置 displaycolumns 显示顺序
@@ -2803,7 +2888,7 @@ class StockMonitorApp(tk.Tk):
 
         if self._search_job:
             self.after_cancel(self._search_job)
-        self._search_job = self.after(5000, self.apply_search)  # 5000ms后执行
+        self._search_job = self.after(3000, self.apply_search)  # 3000ms后执行
 
     def sync_history_from_QM(self,search_history1=None,search_history2=None):
         if search_history1:
@@ -3746,8 +3831,11 @@ class QueryHistoryManager:
                         h2_old = dedup(loaded_data.get("history2", []))
 
                         # 剔除最后 20 条（编辑区）
-                        all_data["history1"] = h1_old[:-20] if len(h1_old) > 20 else []
-                        all_data["history2"] = h2_old[:-20] if len(h2_old) > 20 else []
+
+                        # all_data["history1"] = h1_old[:-20] if len(h1_old) > 20 else []
+                        # all_data["history2"] = h2_old[:-20] if len(h2_old) > 20 else []
+                        all_data["history1"] = h1_old[20:] if len(h1_old) > 20 else []
+                        all_data["history2"] = h2_old[20:] if len(h2_old) > 20 else []
                         print(f'h1_old : {len(h1_old)} all_data : {len(all_data["history1"])}')
                         print(f'h2_old : {len(h2_old)} all_data : {len(all_data["history2"])}')
 
@@ -3807,10 +3895,11 @@ class QueryHistoryManager:
 
                     raw_h1 = dedup(raw_h1)
                     raw_h2 = dedup(raw_h2)
-
                     # 只取最后 20 条作为可编辑区域
-                    h1 = raw_h1[-20:] if len(raw_h1) > 20 else raw_h1
-                    h2 = raw_h2[-20:] if len(raw_h2) > 20 else raw_h2
+                    # h1 = raw_h1[-20:] if len(raw_h1) > 20 else raw_h1
+                    # h2 = raw_h2[-20:] if len(raw_h2) > 20 else raw_h2
+                    h1 = raw_h1[:20] if len(raw_h1) > 20 else raw_h1
+                    h2 = raw_h2[:20] if len(raw_h2) > 20 else raw_h2
 
             except Exception as e:
                 messagebox.showerror("错误", f"加载搜索历史失败: {e}")
@@ -4135,14 +4224,15 @@ class QueryHistoryManager:
         self.editing_idx = idx
         self.entry_query.delete(0, tk.END)
         self.entry_query.insert(0, record["query"])
+        self.use_query(record["query"])
 
-
-    def use_query(self):
-        item = self.tree.selection()
-        if not item:
-            return
-        idx = int(item[0]) - 1
-        query = self.current_history[idx]["query"]
+    def use_query(self,query=None):
+        if query is None:
+            item = self.tree.selection()
+            if not item:
+                return
+            idx = int(item[0]) - 1
+            query = self.current_history[idx]["query"]
 
         # 推送到 tk 主界面的输入框 / 下拉框
         if self.current_key == "history1":
@@ -4321,10 +4411,15 @@ def toast_message(master, text, duration=1500):
 
 
 class ColumnSetManager(tk.Toplevel):
-    def __init__(self, master, all_columns, config, on_apply_callback, default_cols):
+    def __init__(self, master, all_columns, config, on_apply_callback, default_cols, auto_apply_on_init=False):
         super().__init__(master)
         self.title("列组合管理器")
         # 基础尺寸（用于初始化宽度 fallback）
+        # 如果不希望初始显示窗口（隐藏）
+        self.auto_apply_on_init = auto_apply_on_init
+        if self.auto_apply_on_init:
+            self.withdraw()  # 先隐藏窗口
+
         self.width = 800
         self.height = 500
         self.geometry(f"{self.width}x{self.height}")
@@ -4433,6 +4528,16 @@ class ColumnSetManager(tk.Toplevel):
         # 填充保存组合列表
         self.refresh_saved_sets()
 
+
+        # 初始化后自动应用当前列组合（不会弹出窗口）
+        if self.auto_apply_on_init:
+            try:
+                self.set_current_set()
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                print("⚠️ 自动应用列组合失败：", e)
+
     # def open_column_manager_editor(self):
     #     """在已有 root 上打开编辑窗口"""
     #     #应用于frame
@@ -4452,6 +4557,19 @@ class ColumnSetManager(tk.Toplevel):
         else:
             # 已显示 → 隐藏
             self.withdraw()
+
+    # def init_column_manager_editor(self):
+    #     """切换显示/隐藏"""
+    #     if self.state() == "withdrawn":
+    #         # 已隐藏 → 显示
+    #         # self.deiconify()
+    #         # self.lift()
+    #         # self.focus_set()
+    #         pass
+    #     else:
+    #         # 已显示 → 隐藏
+    #         self.withdraw()
+
     # ---------------------------
     # 鼠标滚轮支持（只在 canvas 区生效）
     # ---------------------------
@@ -4533,9 +4651,9 @@ class ColumnSetManager(tk.Toplevel):
 
         # 计算每行列数（使用 canvas 宽度 fallback）
         self.update_idletasks()
-        total_width = self.canvas.winfo_width() if self.canvas.winfo_width() > 10 else self.width
+        total_width = self.canvas.winfo_width() if self.canvas.winfo_width() > 600 else self.width
         col_w = 100
-        cols_per_row = max(3, total_width // col_w)
+        cols_per_row = max(3, total_width // col_w - 2)
 
         # 计算高度（最多显示 max_rows 行）
         rows_needed = (len(filtered) + cols_per_row - 1) // cols_per_row
@@ -4562,7 +4680,7 @@ class ColumnSetManager(tk.Toplevel):
         else:
             if col in self.current_set:
                 self.current_set.remove(col)
-        print(f'_on_check_toggle')
+        # print(f'_on_check_toggle')
         self.refresh_current_tags()
 
     # ---------------------------
@@ -4836,6 +4954,30 @@ class ColumnSetManager(tk.Toplevel):
     # ---------------------------
     # 应用 / 恢复默认
     # ---------------------------
+
+    def set_current_set(self):
+        if not self.current_set:
+            toast_message(self, "当前组合为空")
+            return
+        # # 写回 config（如果调用方提供 save_display_config，会被调用）
+        # self.config["current"] = list(self.current_set)
+        # self.config["sets"] = list(self.saved_sets)
+        # try:
+        #     # save_display_config 是外部函数（如果定义则调用）
+        #     save_display_config(self.config)
+        # except Exception:
+        #     pass
+        # # 回调主视图更新列
+
+        try:
+            if callable(self.on_apply_callback):
+                self.on_apply_callback(list(self.current_set))
+        except Exception:
+            pass
+        # toast_message(self, "init组合已应用")
+        # self.destroy()
+        # self.open_column_manager_editor()
+
     def apply_current_set(self):
         if not self.current_set:
             toast_message(self, "当前组合为空")
@@ -4899,6 +5041,8 @@ if __name__ == "__main__":
     # manager = Manager()
     # global_dict = manager.dict()  # 共享字典
     # test_single_thread()
+    # import ipdb;ipdb.set_trace()
+
 
     app = StockMonitorApp()
     if cct.isMac():

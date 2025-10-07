@@ -204,7 +204,7 @@ if __name__ == "__main__":
                 top_all = top_all_d
 
 
-                if cct.get_trade_date_status() == 'True':
+                if cct.get_trade_date_status():
                     for co in ['boll','df2']:
                          # df['dff'] = list(map(lambda x, y, z: round((x + (y if z > 20 else 3 * y)), 1), df.dff.values, df.volume.values, df.ratio.values))
                         top_all[co] = list(map(lambda x, y,m , z: (z + (1 if ( x > y ) else 0 )), top_all.close.values,top_all.upper.values, top_all.llastp.values,top_all[co].values))

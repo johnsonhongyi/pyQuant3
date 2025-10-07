@@ -92,7 +92,7 @@ if __name__ == "__main__":
                     top_all = cct.combine_dataFrame(
                         top_all, top_now, col='couts', compare='dff')
                 top_bak = top_all.copy()
-                if cct.get_trade_date_status() == 'True':
+                if cct.get_trade_date_status():
                     for co in ['boll','df2']:
                         top_all[co] = list(map(lambda x, y,m , z: (z + (1 if ( x > y ) else 0 )), top_all.close.values,top_all.upper.values, top_all.llastp.values,top_all[co].values))
 

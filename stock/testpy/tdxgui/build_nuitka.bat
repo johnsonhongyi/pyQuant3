@@ -52,6 +52,7 @@ echo.
 echo 🗂️ 设置临时目录为 C:\Temp ...
 set TEMP=C:\Temp
 set TMP=C:\Temp
+set CC_VERSION=13.2.0
 echo ✅ TEMP 和 TMP 已设置为 %TEMP%
 
 :: 4️⃣ 检查编译器
@@ -102,27 +103,12 @@ echo.
 
 :: ===== 创建输出目录 =====
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
-rem --windows-disable-console ^
+rem --windows-console-mode=disable ^
 rem --lto=yes ^
 
 rem :: ===== 构建 Nuitka 命令 =====
 rem set CMD="%PYTHON_EXEC%" -m nuitka --standalone --onefile "%MAIN_SCRIPT%" ^
-rem     --output-filename="%OUTPUT_NAME%" ^
-rem     --output-dir="%OUTPUT_DIR%" ^
-rem     --enable-plugin=tk-inter ^
-rem     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
-rem     --windows-icon-from-ico="%ICON_FILE%" ^
-rem     --windows-company-name="Johnson QuantLab" ^
-rem     --windows-product-name="异动联动" ^
-rem     --windows-file-version="1.0.0" ^
-rem     --windows-product-version="1.0.0" ^
-rem     --windows-console-mode=disable ^
-rem     --lto=yes ^
-rem     --jobs=8 ^
-rem     --remove-output
-
-:: =====debug 构建 Nuitka 命令 =====
-set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
+set CMD="%PYTHON_EXEC%" -m nuitka --onefile "%MAIN_SCRIPT%" ^
     --output-filename="%OUTPUT_NAME%" ^
     --output-dir="%OUTPUT_DIR%" ^
     --enable-plugin=tk-inter ^
@@ -132,8 +118,24 @@ set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
     --windows-product-name="异动联动" ^
     --windows-file-version="1.0.0" ^
     --windows-product-version="1.0.0" ^
-    --jobs=10 ^
+    --windows-console-mode=disable ^
+    --lto=yes ^
+    --jobs=8 ^
     --remove-output
+
+rem :: =====debug 构建 Nuitka 命令 =====
+rem set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
+rem     --output-filename="%OUTPUT_NAME%" ^
+rem     --output-dir="%OUTPUT_DIR%" ^
+rem     --enable-plugin=tk-inter ^
+rem     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
+rem     --windows-icon-from-ico="%ICON_FILE%" ^
+rem     --windows-company-name="Johnson QuantLab" ^
+rem     --windows-product-name="异动联动" ^
+rem     --windows-file-version="1.0.0" ^
+rem     --windows-product-version="1.0.0" ^
+rem     --jobs=10 ^
+rem     --remove-output
 
 
 :: ===== 执行编译 =====
