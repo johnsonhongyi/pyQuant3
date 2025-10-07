@@ -142,18 +142,12 @@ MButton::
             Log("提取到代码：" . stockCode)
 
             if (stockCode != "") {
-                if SentCodes.HasKey(stockCode) {
-                    Notify("股票代码 " . stockCode . " 已发送过，跳过", "tooltip", 1)
-                } else {
-                    Notify("热键触发: " . stockCode, "tooltip", 0.8)
-                    SendToDFCF(stockCode)
-                    SendToHexin(stockCode)
-                    SentCodes[stockCode] := true
-                }
+                Notify("热键触发: " . stockCode, "tooltip", 0.8)
+                SendToDFCF(stockCode)
+                SendToHexin(stockCode)
             } else {
                 Notify("未检测到股票代码", "tooltip", 1)
             }
-
             Clipboard := ClipBackup
             
         } else if WinActive("ahk_exe hexin.exe") {
@@ -167,14 +161,9 @@ MButton::
                 RegExMatch(title, "\b(?:60|30|00|43|83|87|92)\d{4}\b|(?:688|200)\d{3}\b", stockCode)
                 Log("同花顺提取股票代码: " . stockCode)
                 if (stockCode != "") {
-                    if SentCodes.HasKey(stockCode) {
-                        Notify("股票代码 " . stockCode . " 已发送过，跳过", "tooltip", 1)
-                    } else {
-                        Notify("Hexin热键触发: " . stockCode, "tooltip", 0.8)
-                        SendToTDX(stockCode)
-                        SendToDFCF(stockCode)
-                        SentCodes[stockCode] := true
-                    }
+                    Notify("Hexin热键触发: " . stockCode, "tooltip", 0.8)
+                    SendToTDX(stockCode)
+                    SendToDFCF(stockCode)
                 }
             }
         }

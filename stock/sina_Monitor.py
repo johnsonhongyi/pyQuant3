@@ -263,6 +263,7 @@ if __name__ == "__main__":
             # top_now = tdd.getSinaAlldf(market='rzrq', vol=ct.json_countVol, vtype=ct.json_countType)
             # top_now = tdd.getSinaAlldf(market='??¹?060',filename='cxg', vol=ct.json_countVol, vtype=ct.json_countType)
             time_d = time.time()
+            print(("now:%0.2f" % (time.time() - time_Rt)), end=' ')
             if time_d - time_s > delay_time:
                 status_change = True
                 time_s = time.time()
@@ -306,7 +307,7 @@ if __name__ == "__main__":
                     #         top_all.append(top_now.loc[symbol])
                     top_all = cct.combine_dataFrame(
                         top_all, top_now, col='couts', compare='dff')
-
+                print(("all:%0.2f" % (time.time() - time_Rt)), end=' ')
                 # top_all=top_all.sort_values(by=['dff','percent','couts'],ascending=[0,0,1])
                 # top_all=top_all.sort_values(by=['dff','ratio','percent','couts'],ascending=[0,1,0,1])
                 # top_all=top_all.sort_values(by=['dff','percent','couts','ratio'],ascending=[0,0,1,1])

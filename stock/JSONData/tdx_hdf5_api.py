@@ -2196,8 +2196,273 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 #            return h5
 #    return None
 
+def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
+                limit_time=ct.h5_limit_time, dratio_limit=ct.dratio_limit,
+                MultiIndex=False, showtable=False):
+    """
+    优化版 load_hdf_db — 保留原有行为与参数，仅优化性能与日志级别
+    """
+    time_t = time.time()
+    global RAMDISK_KEY, INIT_LOG_Error
 
-def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, limit_time=ct.h5_limit_time, dratio_limit=ct.dratio_limit,MultiIndex=False,showtable=False):
+    # 与原逻辑一致：RAMDISK_KEY 非 0 时直接返回 None
+    if not RAMDISK_KEY < 1:
+        return None
+
+    df = None
+    dd = None
+
+    # -------------------------
+    # When filtering by code list
+    # -------------------------
+    if code_l is not None:
+        if table is not None:
+            with SafeHDFStore(fname, mode='r') as store:
+                if store is not None:
+                    log.debug("fname: %s keys:%s", fname, store.keys())
+                    if showtable:
+                        log.debug("fname: %s keys:%s", fname, store.keys())
+
+                    try:
+                        table_key = '/' + table
+                        if table_key in store.keys():
+                            # 直接读取对象（避免无谓 copy）
+                            obj = store.get(table)
+                            if isinstance(obj, pd.DataFrame):
+                                dd = obj
+                            else:
+                                log.error("Unexpected object type from HDF5: %s", type(obj))
+                                dd = pd.DataFrame()
+                        else:
+                            dd = pd.DataFrame()
+                    except Exception as e:
+                        log.error("load_hdf_db Error: %s %s", fname, e)
+                        dd = pd.DataFrame()
+
+            if dd is not None and len(dd) > 0:
+                if not MultiIndex:
+                    # 若 index 模式下需要映射 code（保持原行为）
+                    if index:
+                        code_l = list(map((lambda x: str(1000000 - int(x))
+                                           if x.startswith('0') else x), code_l))
+
+                    # 使用 pandas Index.intersection 替代 set 交集（更快）
+                    try:
+                        dif_index = dd.index.intersection(code_l)
+                    except Exception:
+                        # 兼容性回退（极少见）
+                        dif_index = pd.Index(list(set(dd.index) & set(code_l)))
+
+                    # 保持原变量名 dif_co（列表形式）以兼容后续逻辑
+                    dif_co = list(dif_index)
+
+                    if len(code_l) > 0:
+                        dratio = (float(len(code_l)) - float(len(dif_co))) / float(len(code_l))
+                    else:
+                        dratio = 0.0
+
+                    log.debug("find all:%s :%s %0.2f", len(code_l), len(code_l) - len(dif_co), dratio)
+
+                    # 与原逻辑相同的 timelimit 分支
+                    if not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300) and timelimit and len(dd) > 0:
+                        # 先按 dif_co 筛选（避免对整表重复计算）
+                        if len(dif_co) > 0:
+                            # 这会返回新 DataFrame（必要时会复制）
+                            dd = dd.loc[dif_co]
+                        else:
+                            dd = dd.iloc[0:0]
+
+                        # 计算 o_time（保留最近唯一 timel 的偏移列表）
+                        o_time = []
+                        if 'timel' in dd.columns:
+                            timel_vals = dd.loc[dd['timel'] != 0, 'timel'].values
+                            if timel_vals.size > 0:
+                                unique_timel = np.unique(timel_vals)
+                                # 计算距离现在的秒数（与原逻辑一致）
+                                now_t = time.time()
+                                o_time = [now_t - float(t) for t in unique_timel]
+                                o_time.sort()  # 原代码使用 sorted(..., reverse=False)
+
+                        if len(dd) > 0:
+                            l_time = np.mean(o_time) if len(o_time) > 0 else 0.0
+
+                            # 原先在极高命中率时用 ticktime 重新计算 dratio
+                            if len(code_l) / len(dd) > 0.95 and 'ticktime' in dd.columns and 'kind' not in dd.columns:
+                                try:
+                                    late_count = int((dd['ticktime'] >= "15:00:00").sum())
+                                except Exception:
+                                    # 回退到 query（兼容性）
+                                    try:
+                                        late_count = len(dd.query('ticktime >= "15:00:00"'))
+                                    except Exception:
+                                        late_count = 0
+                                dratio = (float(len(dd)) - float(late_count)) / float(len(dd)) if len(dd) > 0 else 0.0
+                                return_hdf_status = (not cct.get_work_time() and dratio < dratio_limit) or (cct.get_work_time() and l_time < limit_time)
+                            else:
+                                return_hdf_status = not cct.get_work_time() or (cct.get_work_time() and l_time < limit_time)
+
+                            if return_hdf_status:
+                                # 注意：dd 已经被筛选为 dif_co，直接使用 dd 即可
+                                df = dd
+                                log.debug("return hdf: %s timel:%s l_t:%s hdf ok:%s", fname, len(o_time), l_time, len(df))
+                        else:
+                            log.error("%s %s o_time:%s %s", fname, table, len(o_time), o_time[:3] if len(o_time) >= 3 else o_time)
+
+                        # 记录一下（调试级别）
+                        if 'o_time' in locals() and o_time:
+                            log.debug('fname:%s sample_o_time:%s', fname, o_time[:5])
+                    else:
+                        # 非 timelimit 分支，直接按 dif_co 返回（与原逻辑一致）
+                        df = dd.loc[dif_co] if len(dif_co) > 0 else dd.iloc[0:0]
+
+                    # dratio 超限处理（保持原行为）
+                    if dratio > dratio_limit:
+                        if len(code_l) > ct.h5_time_l_count * 10 and INIT_LOG_Error < 5:
+                            log.error("dratio_limit fn:%s cl:%s h5:%s don't find:%s dra:%0.2f log_err:%s",
+                                      fname, len(code_l), len(dd), len(code_l) - len(dif_co), dratio, INIT_LOG_Error)
+                            return None
+
+                else:
+                    # MultiIndex 情况按原逻辑：按 level='code' 过滤
+                    try:
+                        df = dd.loc[dd.index.isin(code_l, level='code')]
+                    except Exception:
+                        # 回退：使用 boolean mask
+                        mask = dd.index.get_level_values('code').isin(code_l)
+                        df = dd.loc[mask]
+        else:
+            log.error("%s is not find %s", fname, table)
+
+    # -------------------------
+    # When not filtering by code list (code_l is None)
+    # -------------------------
+    else:
+        if table is not None:
+            with SafeHDFStore(fname, mode='r') as store:
+                if store is not None:
+                    log.debug("fname: %s keys:%s", fname, store.keys())
+                    if showtable:
+                        log.debug("keys:%s", store.keys())
+                    try:
+                        table_key = '/' + table
+                        if table_key in store.keys():
+                            # 读取整表（尽量避免额外 copy）
+                            dd = store[table]
+                        else:
+                            dd = pd.DataFrame()
+                    except AttributeError as e:
+                        # 与原逻辑保持一致：在异常时关闭 store 并记录错误
+                        try:
+                            store.close()
+                        except Exception:
+                            pass
+                        log.error("AttributeError:%s %s", fname, e)
+                        dd = pd.DataFrame()
+                    except Exception as e:
+                        log.error("Exception:%s %s", fname, e)
+                        dd = pd.DataFrame()
+
+            if dd is not None and len(dd) > 0:
+                if not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300) and timelimit:
+                    # 计算 unique timel 并求平均延迟
+                    o_time = []
+                    if 'timel' in dd.columns:
+                        timel_vals = dd.loc[dd['timel'] != 0, 'timel'].values
+                        if timel_vals.size > 0:
+                            unique_timel = np.unique(timel_vals)
+                            now_t = time.time()
+                            o_time = [now_t - float(t) for t in unique_timel]
+                            o_time.sort()
+                    if len(o_time) > 0:
+                        l_time = np.mean(o_time)
+                    else:
+                        l_time = 0.0
+
+                    # 判断是否返回 hdf（与原逻辑一致）
+                    if 'ticktime' in dd.columns and 'kind' not in dd.columns:
+                        try:
+                            late_count = int((dd['ticktime'] >= "15:00:00").sum())
+                        except Exception:
+                            try:
+                                late_count = len(dd.query('ticktime >= "15:00:00"'))
+                            except Exception:
+                                late_count = 0
+                        dratio = (float(len(dd)) - float(late_count)) / float(len(dd)) if len(dd) > 0 else 0.0
+                        return_hdf_status = (not cct.get_work_time() and dratio < dratio_limit) or (cct.get_work_time() and l_time < limit_time)
+                    else:
+                        return_hdf_status = not cct.get_work_time() or (cct.get_work_time() and l_time < limit_time)
+
+                    log.debug("return_hdf_status:%s time:%0.2f", return_hdf_status, l_time)
+                    if return_hdf_status:
+                        log.debug("return hdf5 data:%s o_time_count:%s", len(dd), len(o_time))
+                        df = dd
+                    else:
+                        log.debug("no return time hdf5:%s", len(dd))
+                else:
+                    df = dd
+            else:
+                log.error("%s is not find %s", fname, table)
+        else:
+            log.error("%s / table is Init None:%s", fname, table)
+
+    # -------------------------
+    # Post-process & cleanup (与原逻辑保持一致)
+    # -------------------------
+    if df is not None and len(df) > 0:
+        # 保持原来行为：填充空值
+        # 使用 inplace 以减少一次复制
+        try:
+            df.fillna(0, inplace=True)
+        except Exception:
+            df = df.fillna(0)
+
+        # 保持原来把 timel 设为最早唯一 timel 的行为
+        if 'timel' in df.columns:
+            try:
+                time_list = np.unique(df['timel'].values)
+                if time_list.size > 0:
+                    # pick the smallest (与 sorted(set(...)) 的结果一致)
+                    first_timel = float(np.min(time_list))
+                    df['timel'] = first_timel
+                    log.debug("load hdf times sample:%s", time_list[:3].tolist() if hasattr(time_list, 'tolist') else time_list)
+            except Exception:
+                pass
+
+    log.debug("load_hdf_time:%0.2f", (time.time() - time_t))
+
+    # 保持原来去重与 MultiIndex 处理
+    if df is not None:
+        try:
+            df = df[~df.index.duplicated(keep='last')]
+        except Exception:
+            # 若 index 操作失败则忽略
+            pass
+
+        if fname.find('MultiIndex') > 0 and 'volume' in df.columns:
+            count_drop = len(df)
+            try:
+                df = df.drop_duplicates()
+            except Exception:
+                # fallback: no-op
+                pass
+            try:
+                dratio_check = round((float(len(df))) / float(count_drop), 2) if count_drop > 0 else 0.0
+                log.debug("all:%s  drop:%s  dratio:%.2f", int(count_drop / 100), int(len(df) / 100), dratio_check)
+                if dratio_check < 0.8:
+                    log.error("MultiIndex drop_duplicates:%s %s dr:%s", count_drop, len(df), dratio_check)
+                    if isinstance(df.index, pd.MultiIndex):
+                        write_hdf_db(fname, df, table=table, index=index, MultiIndex=True, rewrite=True)
+            except Exception:
+                pass
+
+    # 与原函数保持一致：返回 reduce_memory_usage(df)
+    try:
+        return cct.reduce_memory_usage(df)
+    except Exception:
+        return df
+
+
+def load_hdf_db_src_OK(fname, table='all', code_l=None, timelimit=True, index=False, limit_time=ct.h5_limit_time, dratio_limit=ct.dratio_limit,MultiIndex=False,showtable=False):
     """[summary]
 
     [load hdf ]
@@ -2235,24 +2500,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
     if code_l is not None:
         if table is not None:
             with SafeHDFStore(fname,mode='r') as store:
-                # if store is not None:
-                #     log.debug(f"fname: {(fname)} keys:{store.keys()}")
-                #     if showtable:
-                #         print(f"fname: {(fname)} keys:{store.keys()}")
-                #     try:
-                #         if '/' + table in list(store.keys()):
-                #             dd=store[table].copy()
-                #     except AttributeError as e:
-                #         store.close()
-                #         # os.remove(store.filename)
-                #         log.error("AttributeError:%s %s"%(fname,e))
-                #         # log.error("Remove File:%s"%(fname))
-                #     except Exception as e:
-                #         print(("Exception:%s name:%s"%(fname,e)))
-                #     else:
-                #         pass
-                #     finally:
-                #         pass
                 if store is not None:
                     log.debug(f"fname: {fname} keys:{store.keys()}")
                     if showtable:
@@ -2309,13 +2556,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                                    cct.get_work_time() and l_time < limit_time)
 
 
-                           # return_hdf_status=(not cct.get_work_time()) or (
-                           #     cct.get_work_time() and l_time < limit_time)
-                           
-                           # import ipdb;ipdb.set_trace()
-
-                           # return_hdf_status = l_time < limit_time
-                           # print return_hdf_status,l_time,limit_time
                            if return_hdf_status:
                                # df=dd
                                df = dd.loc[dif_co]
@@ -2342,16 +2582,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
         else:
             log.error("%s is not find %s" % (fname, table))
     else:
-        # h5 = get_hdf5_file(fname,wr_mode='r')
         if table is not None:
             with SafeHDFStore(fname,mode='r') as store:
-                # if store is not None:
-                #     if '/' + table in store.keys():
-                #         try:
-                #             dd=store[table]
-                #         except Exception as e:
-                #             print ("%s fname:%s"%(e,fname))
-                #             cct.sleep(ct.sleep_time)
                 if store is not None:
                     log.debug(f"fname: {(fname)} keys:{store.keys()}")
                     if showtable:
@@ -2380,10 +2612,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                         o_time=[time.time() - t_x for t_x in o_time]
                         if len(o_time) > 0:
                             l_time=np.mean(o_time)
-                            # l_time = time.time() - l_time
-                # return_hdf_status = not cct.get_work_day_status()  or not
-                # cct.get_work_time() or (cct.get_work_day_status() and
-                # (cct.get_work_time() and l_time < limit_time))
 
                             if 'ticktime' in dd.columns and 'kind' not in dd.columns:
                                 # len(dd) ,len(dd.query('ticktime >= "15:00:00"'))
@@ -2393,8 +2621,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                                 return_hdf_status=not cct.get_work_time() or (
                                     cct.get_work_time() and l_time < limit_time)
 
-                            # return_hdf_status=not cct.get_work_time() or (
-                            #     cct.get_work_time() and l_time < limit_time)
 
                             log.info("return_hdf_status:%s time:%0.2f" %
                                      (return_hdf_status, l_time))
@@ -2409,11 +2635,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                 else:
                     df=dd
             else:
-                # global Debug_is_not_find
-                # if Debug_is_not_find < 4:
-                #     Debug_is_not_find +=1
-                # else:
-                #     import ipdb;ipdb.set_trace()
                 log.error("%s is not find %s" % (fname, table))
         else:
             log.error("%s / table is Init None:%s"%(fname, table))
@@ -2422,9 +2643,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
         df=df.fillna(0)
         if 'timel' in df.columns:
             time_list=df.timel.tolist()
-            # time_list = sorted(set(time_list),key = time_list.index)
             time_list=sorted(set(time_list))
-            # log.info("test:%s"%(sorted(set(time_list),key = time_list.index)))
             if time_list is not None and len(time_list) > 0:
                 df['timel']=time_list[0]
                 log.info("load hdf times:%s" %
@@ -2444,8 +2663,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False, li
                 log.error("MultiIndex drop_duplicates:%s %s dr:%s"%(count_drop,len(df),dratio))
                 if isinstance(df.index, pd.MultiIndex):
                     write_hdf_db(fname, df, table=table, index=index, MultiIndex=True,rewrite=True)
-
-    # df = df.drop_duplicates()
 
     return  cct.reduce_memory_usage(df)
 

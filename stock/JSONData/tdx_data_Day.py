@@ -5103,7 +5103,7 @@ def get_index_percd(codeList=tdx_index_code_list, dt=60, end=None, ptype='low', 
 
 
 def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=None, ptype='low', filter='y', power=True, lastp=False, newdays=None, checknew=True, resample='d',showtable=False):
-
+    time_s = time.time()
     codelist = top_all.index.tolist()
     # append INDEX tdxdata
     codelist.extend(tdx_index_code_list)
@@ -5124,7 +5124,6 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
 
     # if newdays is not None:
     #     h5_table = h5_table + '_'+ str(newdays)
-
     log.info('h5_table:%s' % (h5_table))
 
     # codelist = dm.index.tolist()
@@ -5134,7 +5133,8 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
         # h5 = top_hdf_api(fname=h5_fname,table=market,df=None)
         h5 = h5a.load_hdf_db(h5_fname, table=h5_table,
                              code_l=codelist, timelimit=False,showtable=showtable)
-
+        
+        print(("%s:%0.2f" % (h5_fname,time.time() - time_s)), end=' ')
         if h5 is not None and not h5.empty:
             #            o_time = h5[h5.time <> 0].time
             #            if len(o_time) > 0:
@@ -5546,7 +5546,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             for code in codeList:
                 log.debug(f'codeList:{len(codeList)}: idx:{codeList.index(code)} code:{code} :dt')
                 results.append(get_tdx_exp_low_or_high_power(code, dt, ptype, dl, end, power, lastp, newdays, resample))
-            print("tdxdataT:%s"%(round(time.time()-ts,2)),)
+            # print("tdxdataT:%s"%(round(time.time()-ts,2)),)
 #        print round(time.time()-ts,2),
         # print dt,ptype,dl,end
         # for code in codelist:
