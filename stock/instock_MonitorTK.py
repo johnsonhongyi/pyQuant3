@@ -20,6 +20,8 @@ import win32pipe, win32file
 from datetime import datetime, timedelta
 import shutil
 import ctypes
+import platform
+from screeninfo import get_monitors
 log = LoggerFactory.log
 # log.setLevel(log_level)
 # log.setLevel(LoggerFactory.DEBUG)
@@ -56,6 +58,19 @@ DEFAULT_DISPLAY_COLS = [
     'percent', 'per1d', 'perc1d', 'ra', 'ral',
     'topR', 'volume', 'red', 'lastdu4', 'category'
 ]
+
+# import ctypes
+
+# try:
+#     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # Per-monitor DPI aware
+# except Exception:
+#     try:
+#         ctypes.windll.user32.SetProcessDPIAware()  # Windows 7 fallback
+#     except Exception:
+#         pass
+# 作用：告诉 Windows，这个程序会自己处理 DPI，因此系统不会强制缩放 Tkinter 窗口。
+# 这能让 Tkinter 在高分屏和多屏之间的字体保持一致大小。 
+
 
 def load_display_config():
     if os.path.exists(CONFIG_FILE):
@@ -120,6 +135,271 @@ def get_monitor_by_point(x, y):
         width, height = get_monitors_info()
         return {"left": 0, "top": 0, "width": width, "height": height}
 
+# # 定义常量
+# WM_MOUSEHWHEEL = 0x020E
+
+# def enable_horizontal_mouse_wheel(widget):
+#     """为 Treeview 或 Canvas 启用鼠标水平滚轮 (Windows only)"""
+#     if not isinstance(widget, tk.Widget):
+#         return
+
+#     hwnd = ctypes.windll.user32.GetParent(widget.winfo_id())
+
+#     # 定义回调函数
+#     def low_level_proc(hwnd, msg, wparam, lparam):
+#         if msg == WM_MOUSEHWHEEL:
+#             delta = ctypes.c_short(wparam >> 16).value
+#             widget.xview_scroll(-int(delta / 120), "units")
+#             return 0  # 已处理
+#         return ctypes.windll.user32.CallWindowProcW(old_proc, hwnd, msg, wparam, lparam)
+
+#     # 设置消息钩子
+#     WNDPROC = ctypes.WINFUNCTYPE(ctypes.c_long, ctypes.c_int, ctypes.c_uint, ctypes.c_int, ctypes.c_int)
+#     old_proc = ctypes.windll.user32.GetWindowLongW(hwnd, -4)
+#     new_proc = WNDPROC(low_level_proc)
+#     ctypes.windll.user32.SetWindowLongW(hwnd, -4, new_proc)
+
+
+def bind_mouse_scroll(widget,speed=3):
+    """改进版：支持 Alt + 滚轮、Shift + 滚轮、直接水平滚动（持续触发）"""
+
+    system = platform.system()
+
+    def on_vertical_scroll(event):
+        widget.yview_scroll(-int(event.delta / 120) * speed, "units")
+
+    def on_horizontal_scroll(event):
+        widget.xview_scroll(-int(event.delta / 120) * speed, "units")
+
+    if system == "Windows":
+        # 垂直滚动（普通）
+        widget.bind("<MouseWheel>", on_vertical_scroll)
+        # Shift 或 Alt 滚轮 → 水平滚动
+        widget.bind("<Shift-MouseWheel>", on_horizontal_scroll)
+        widget.bind("<Alt-MouseWheel>", on_horizontal_scroll)
+
+    elif system == "Darwin":  # macOS
+        widget.bind("<MouseWheel>", lambda e: widget.yview_scroll(-int(e.delta), "units"))
+        widget.bind("<Shift-MouseWheel>", lambda e: widget.xview_scroll(-int(e.delta), "units"))
+        widget.bind("<Alt-MouseWheel>", lambda e: widget.xview_scroll(-int(e.delta), "units"))
+
+    else:  # Linux
+        widget.bind("<Button-4>", lambda e: widget.yview_scroll(-1, "units"))
+        widget.bind("<Button-5>", lambda e: widget.yview_scroll(1, "units"))
+        widget.bind("<Shift-Button-4>", lambda e: widget.xview_scroll(-1, "units"))
+        widget.bind("<Shift-Button-5>", lambda e: widget.xview_scroll(1, "units"))
+        widget.bind("<Alt-Button-4>", lambda e: widget.xview_scroll(-1, "units"))
+        widget.bind("<Alt-Button-5>", lambda e: widget.xview_scroll(1, "units"))
+
+def enable_native_horizontal_scroll(tree: ttk.Treeview, speed=5):
+    """
+    为 Treeview 添加跨平台水平滚动支持
+    - Windows: 支持 Shift+滚轮
+    - macOS/Linux: 支持 Button-6/7 事件
+    - 不阻塞 GUI，完全非线程方式
+    """
+    def on_shift_wheel(event):
+        delta = -1 if event.delta > 0 else 1
+        tree.xview_scroll(delta * speed, "units")
+        return "break"
+
+    # Windows: 捕获 Shift + 滚轮
+    tree.bind("<Shift-MouseWheel>", on_shift_wheel)
+
+    # macOS/Linux 专用
+    if platform.system() != "Windows":
+        def on_button_scroll(event):
+            if event.num == 6:  # 左
+                tree.xview_scroll(-speed, "units")
+            elif event.num == 7:  # 右
+                tree.xview_scroll(speed, "units")
+            return "break"
+
+        tree.bind("<Button-6>", on_button_scroll)
+        tree.bind("<Button-7>", on_button_scroll)
+
+# # -----------------------------
+# # 初始化显示器信息（程序启动时调用一次）
+# # -----------------------------
+# MONITORS = []  # 全局缓存
+
+
+
+# # # 双屏幕,上屏新建
+# # def init_monitors():
+# #     """扫描所有显示器并缓存信息（使用可用区域，避开任务栏）"""
+# #     global MONITORS
+# #     monitors = get_all_monitors()  # 原来的函数
+# #     if not monitors:
+# #         left, top, right, bottom = get_monitor_workarea()
+# #         MONITORS = [(left, top, right, bottom)]
+# #     else:
+# #         # 对每个 monitor 也可计算可用区域
+# #         MONITORS = []
+# #         for mon in monitors:
+# #             # mon = (x, y, width, height)
+# #             mx, my, mw, mh = mon
+# #             MONITORS.append((mx, my, mx+mw, my+mh))
+# #     print(f"✅ Detected {len(MONITORS)} monitor(s).")
+
+# def get_all_monitors():
+#     """返回所有显示器的边界列表 [(left, top, right, bottom), ...]"""
+#     monitors = []
+#     for handle_tuple in win32api.EnumDisplayMonitors():
+#         info = win32api.GetMonitorInfo(handle_tuple[0])
+#         monitors.append(info["Monitor"])  # (left, top, right, bottom)
+#     return monitors
+
+# def init_monitors():
+#     """扫描所有显示器并缓存信息"""
+#     global MONITORS
+#     MONITORS = get_all_monitors()
+#     if not MONITORS:
+#         # 至少保留主屏幕
+#         screen_width = win32api.GetSystemMetrics(0)
+#         screen_height = win32api.GetSystemMetrics(1)
+#         MONITORS = [(0, 0, screen_width, screen_height)]
+#     print(f"✅ Detected {len(MONITORS)} monitor(s).")
+
+
+# init_monitors()
+
+# def clamp_window_to_screens(x, y, w, h, monitors=MONITORS):
+#     """保证窗口在可见显示器范围内"""
+#     global MONITORS
+#     monitors = MONITORS or [(0, 0, win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1))]
+#     for left, top, right, bottom in monitors:
+#         if left <= x < right and top <= y < bottom:
+#             x = max(left, min(x, right - w))
+#             y = max(top, min(y, bottom - h))
+#             return x, y
+#     # 如果完全不在任何显示器内，放到主屏幕左上角
+#     x, y = monitors[0][0], monitors[0][1]
+#     return x, y
+
+
+
+import win32api
+def clamp_window_to_screens(x, y, w, h):
+    """
+    保证窗口 (x, y, w, h) 位于可见的显示器范围内。
+    - 自动检测所有显示器
+    - 若不在任何显示器内，则放主屏左上角
+    - 自动修正超出边界的情况
+    """
+    # 获取所有显示器信息
+    monitors = []
+    try:
+        for handle_tuple in win32api.EnumDisplayMonitors():
+            info = win32api.GetMonitorInfo(handle_tuple[0])
+            monitors.append(info["Monitor"])  # (left, top, right, bottom)
+    except Exception:
+        pass
+
+    # 如果检测不到，默认用主屏幕
+    if not monitors:
+        screen_width = win32api.GetSystemMetrics(0)
+        screen_height = win32api.GetSystemMetrics(1)
+        monitors = [(0, 0, screen_width, screen_height)]
+
+    # 检查窗口位置是否在任何显示器内
+    for left, top, right, bottom in monitors:
+        if left <= x < right and top <= y < bottom:
+            # 修正窗口不要超出边界
+            x = max(left, min(x, right - w))
+            y = max(top, min(y, bottom - h))
+            print(f"✅ clamp_window_to_screens: 命中屏幕 ({left},{top},{right},{bottom}) -> ({x},{y})")
+            return x, y
+
+    # 完全不在屏幕内 -> 放主屏左上角
+    left, top, right, bottom = monitors[0]
+    print(f"⚠️ clamp_window_to_screens: 未命中屏幕，放主屏 (465, 442)")
+    return (465, 442)
+
+
+
+# def get_system_dpi_scale():
+#     """获取系统 DPI 缩放比例（Windows 默认 1.0 = 100%）"""
+#     try:
+#         user32 = ctypes.windll.user32
+#         user32.SetProcessDPIAware()
+#         dpi_x = user32.GetDpiForSystem()  # 仅 Win10+
+#         scale = dpi_x / 96.0
+#         return round(scale, 2)
+#     except Exception:
+#         return 1.0
+
+# def clamp_window_to_screens(x, y, w, h, monitors=None, default_pos=(465, 442)):
+#     """
+#     确保窗口在可见屏幕内。
+#     返回 (x, y)，并考虑 DPI 缩放。
+#     """
+#     monitors = monitors or get_monitors()
+#     dpi_scale = get_system_dpi_scale()
+
+#     if not monitors:
+#         return default_pos
+
+#     for m in monitors:
+#         left, top = m.x, m.y
+#         right, bottom = m.x + m.width, m.y + m.height
+#         if left <= x < right and top <= y < bottom:
+#             new_x = max(left, min(x, right - w))
+#             new_y = max(top, min(y, bottom - h))
+#             print(f"✅ 命中屏幕 ({left},{top},{right},{bottom}) DPI={dpi_scale:.2f} → ({new_x},{new_y})")
+#             return new_x, new_y
+
+#     print(f"⚠️ 未命中任何屏幕，使用默认位置 {default_pos}")
+#     return default_pos
+
+
+
+
+def get_centered_window_position_all(parent, win_width, win_height, margin=10):
+    """
+    获取在鼠标所在屏幕内、水平居中于鼠标位置的窗口坐标。
+    保证窗口不会跑出当前屏幕边界。
+    适用于 Tkinter、Toplevel、askstring 等窗口。
+
+    :param parent: Tk 或 Toplevel 对象（用于获取鼠标坐标）
+    :param win_width: 窗口宽度
+    :param win_height: 窗口高度
+    :param margin: 与鼠标/屏幕边缘的距离（默认10像素）
+    :return: (x, y) 可直接用于 geometry
+    """
+    # 获取鼠标全局位置（跨屏）
+    mx = parent.winfo_pointerx()
+    my = parent.winfo_pointery()
+
+    # 找出鼠标所在屏幕
+    monitors = get_monitors()
+    current_screen = None
+    for m in monitors:
+        if m.x <= mx < m.x + m.width and m.y <= my < m.y + m.height:
+            current_screen = m
+            break
+    if current_screen is None:
+        current_screen = monitors[0]  # 默认主屏
+
+    screen_x, screen_y = current_screen.x, current_screen.y
+    screen_width, screen_height = current_screen.width, current_screen.height
+
+    # 默认放在鼠标右侧，垂直居中
+    x = mx + margin
+    y = my - win_height // 2
+
+    # 如果右侧放不下则放左边
+    if x + win_width > screen_x + screen_width:
+        x = mx - win_width - margin
+
+    # 垂直防止越界
+    if y + win_height > screen_y + screen_height:
+        y = screen_y + screen_height - win_height - margin
+    if y < screen_y:
+        y = screen_y + margin
+
+    # print(f"[get_centered_window_position_query] 鼠标=({mx},{my}), 屏幕=({screen_x},{screen_y},{screen_width},{screen_height}), 结果=({x},{y})")
+    return x, y
 
 # ------------------ 后台数据进程 ------------------ #
 def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
@@ -428,8 +708,9 @@ class StockMonitorApp(tk.Tk):
         resample = self.global_values.getkey("resample")
         print(f'app init getkey resample:{self.global_values.getkey("resample")}')
         self.global_values.setkey("resample", resample)
-        self.blkname = self.global_values.getkey("blkname") or "061.blk"
-
+        # self.blkname = self.global_values.getkey("blkname") or "061.blk"
+        self.blkname = ct.Resample_LABELS_Blk[resample] or "060.blk"
+        self.global_values.setkey("blkname", self.blkname)
         # 用于保存 detail_win
         self.detail_win = None
         self.txt_widget = None
@@ -510,9 +791,16 @@ class StockMonitorApp(tk.Tk):
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
         hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
         self.tree.configure(yscroll=vsb.set, xscroll=hsb.set)
+
         vsb.pack(side="right", fill="y")
         hsb.pack(side="bottom", fill="x")
         self.tree.pack(fill="both", expand=True)
+
+        # self.tree.bind("<Shift-MouseWheel>", lambda e: self.tree.xview_scroll(-1 * int(e.delta / 120), "units"))
+        # ✅ 启用鼠标水平滚轮支持
+        # enable_horizontal_mouse_wheel(self.tree)
+        bind_mouse_scroll(self.tree)
+        # enable_native_horizontal_scroll(self.tree, speed=5)
 
         self.current_cols = ["code"] + DISPLAY_COLS
         # TreeView 列头
@@ -571,45 +859,132 @@ class StockMonitorApp(tk.Tk):
         # 绑定双击事件
         # self.tree.bind("<Double-1>", self.on_double_click)
 
+    # def update_treeview_cols_tmp(self, new_cols):
+    #     try:
+
+    #         if 'perc1d' not in self.current_cols:
+    #             # 遍历 self.current_cols 找到第一个 percXd
+    #             first_perc_col = None
+    #             for col in self.current_cols:
+    #                 if col.startswith('perc') and col != 'perc1d':  # 忽略 perc1d
+    #                     first_perc_col = col
+    #                     break
+    #             print(f'first_perc_col : {first_perc_col}')
+    #             # 如果 new_cols 中有 perc1d，就替换成 first_perc_col
+    #             if 'perc1d' in new_cols and first_perc_col:
+    #                 idx = new_cols.index('perc1d')
+    #                 new_cols[idx] = first_perc_col
+    #                 print(f'new_cols : idx : {idx} {new_cols[idx]}')
+    #                 print(f"⚙️ 替换 new_cols 中的 perc1d → {first_perc_col}")
+    #             else:
+    #                 # # 方法 1：如果确定 perc1d 存在
+    #                 # if 'perc1d' in new_cols:
+    #                 #     new_cols.remove('perc1d')
+    #                 # 方法 2：更通用，删除所有 perc1d（防止重复）
+    #                 new_cols = [c for c in new_cols if c != 'perc1d']
+
+    #         # 🔹 1. 保证 new_cols 合法：必须存在于 df_all.columns 中
+    #         valid_cols = [c for c in new_cols if c in self.df_all.columns]
+    #         if 'code' not in valid_cols:
+    #             valid_cols = ["code"] + valid_cols
+
+    #         # 如果完全相同就跳过
+    #         if valid_cols == self.current_cols:
+    #             return
+
+    #         # print(f"[update_treeview_cols] current={self.current_cols}, new={valid_cols}")
+    #         self.curren`t_cols = valid_cols
+    #         cols = tuple(self.current_cols)`
+    #         self.after_idle(lambda: self.reset_tree_columns(self.tree, cols, self.sort_by_column))
+    #     except:
+    #         pass
+
     def update_treeview_cols(self, new_cols):
         try:
-            # code 永远在最前
-            new_cols = [c for c in new_cols if c in self.df_all.columns]
-            if 'code' not in new_cols:
-                new_cols = ["code"] + new_cols
+            # 🔹 1. 保证 new_cols 合法：必须存在于 df_all.columns 中
+            valid_cols = [c for c in new_cols if c in self.df_all.columns]
+            if 'code' not in valid_cols:
+                valid_cols = ["code"] + valid_cols
 
-            if new_cols == self.current_cols:
-                return  # 无变化不处理
+            # 如果完全相同就跳过
+            if valid_cols == self.current_cols:
+                return
 
-            self.current_cols = new_cols
+            # print(f"[update_treeview_cols] current={self.current_cols}, new={valid_cols}")
 
-            # # 暂停更新以避免崩溃
+            self.current_cols = valid_cols
+            # cols = tuple(self.current_cols)
+            # self.after_idle(lambda: self.reset_tree_columns(self.tree, cols, self.sort_by_column))
+
+            # 🔹 2. 暂时清空列，避免 Invalid column index 残留
             self.tree["displaycolumns"] = ()
             self.tree["columns"] = ()
+            self.tree.update_idletasks()
 
-            # 清空旧列安全更新
+            # 🔹 3. 重新配置列
             cols = tuple(self.current_cols)
             self.tree["columns"] = cols
-            # self.tree["show"] = "headings"
+            self.tree["displaycolumns"] = cols
+            self.tree.configure(show="headings")
 
+            # 🔹 4. 重新设置表头和列宽
             for col in cols:
-                self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
                 width = 120 if col == "name" else 80
+                self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
                 self.tree.column(col, width=width, anchor="center", minwidth=50)
 
-            # 自适应列宽
+            # 🔹 5. 自动调整列宽（可选）
             self.adjust_column_widths()
 
-            # 恢复显示
-            self.tree["displaycolumns"] = cols
-
-            # 最后再刷新数据（延迟一点更安全）
+            # 🔹 6. 延迟刷新数据
             self.tree.after(100, self.refresh_tree)
 
         except Exception as e:
             import traceback
             traceback.print_exc()
             print("更新 Treeview 列失败：", e)
+
+
+    # def update_treeview_cols1(self, new_cols):
+    #     try:
+    #         # code 永远在最前
+    #         new_cols = [c for c in new_cols if c in self.df_all.columns]
+    #         if 'code' not in new_cols:
+    #             new_cols = ["code"] + new_cols
+
+    #         if new_cols == self.current_cols:
+    #             return  # 无变化不处理
+
+    #         print(f'self.current_cols : {self.current_cols}    new_cols : {new_cols}')
+    #         self.current_cols = new_cols
+
+    #         # # 暂停更新以避免崩溃
+    #         self.tree["displaycolumns"] = ()
+    #         self.tree["columns"] = ()
+
+    #         # 清空旧列安全更新
+    #         cols = tuple(self.current_cols)
+    #         self.tree["columns"] = cols
+    #         # self.tree["show"] = "headings"
+
+    #         for col in cols:
+    #             self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+    #             width = 120 if col == "name" else 80
+    #             self.tree.column(col, width=width, anchor="center", minwidth=50)
+
+    #         # 自适应列宽
+    #         self.adjust_column_widths()
+
+    #         # 恢复显示
+    #         self.tree["displaycolumns"] = cols
+
+    #         # 最后再刷新数据（延迟一点更安全）
+    #         self.tree.after(100, self.refresh_tree)
+
+    #     except Exception as e:
+    #         import traceback
+    #         traceback.print_exc()
+    #         print("更新 Treeview 列失败：", e)
 
 
     # def update_treeview_cols1(self, new_cols):
@@ -675,7 +1050,7 @@ class StockMonitorApp(tk.Tk):
                     self.df_all.columns,
                     self.ColManagerconfig,
                     self.update_treeview_cols,  # 回调更新函数
-                    default_cols=DISPLAY_COLS,  # 默认列
+                    default_cols=self.current_cols,  # 默认列
                         )
                 # 关闭时清理引用
                 self.ColumnSetManager.protocol("WM_DELETE_WINDOW", self.on_close_column_manager)
@@ -683,7 +1058,7 @@ class StockMonitorApp(tk.Tk):
                 self.after(1000,self._on_open_column_manager)
 
     def open_column_manager_init(self):
-        global DISPLAY_COLS
+        # global DISPLAY_COLS
         def _on_open_column_manager_init():
             if self._open_column_manager_job:
                 self.after_cancel(self._open_column_manager_job)
@@ -706,7 +1081,7 @@ class StockMonitorApp(tk.Tk):
                     self.df_all.columns,
                     self.ColManagerconfig,
                     self.update_treeview_cols,  # 回调更新函数
-                    default_cols=DISPLAY_COLS,  # 默认列
+                    default_cols=self.current_cols,  # 默认列
                     auto_apply_on_init=True     #   ✅ 初始化自动执行 apply_current_set()
                         )
                 # 关闭时清理引用
@@ -923,9 +1298,6 @@ class StockMonitorApp(tk.Tk):
             sync_history_callback = self.sync_history_from_QM
 
         )
-        # self.query_manager.pack(side="right", fill="y")  # 固定在右侧
-        # self.query_manager.pack(side="bottom", fill="x")
-        # self.query_manager.pack(side="left", fill="y")
 
         # self.search_history1, self.search_history2 = self.load_search_history()
         self.search_history1, self.search_history2 = self.query_manager.load_search_history()
@@ -948,7 +1320,7 @@ class StockMonitorApp(tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心"]
+        options = ["Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","覆写TDX"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -971,6 +1343,9 @@ class StockMonitorApp(tk.Tk):
                 self.load_data_from_csv()
             elif action == "报警中心":
                 open_alert_center(self)
+            elif action == "覆写TDX":
+                self.write_to_blk(append=False)
+
 
         def on_select(event=None):
             run_action(self.action_combo.get())
@@ -986,6 +1361,7 @@ class StockMonitorApp(tk.Tk):
 
         tk.Button(ctrl_frame, text="清空", command=lambda: self.clean_search(2)).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="删除", command=lambda: self.delete_search_history(2)).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk()).pack(side="left", padx=2)
 
         # # 搜索区（可拉伸）
         # search_frame = tk.Frame(ctrl_frame)
@@ -1080,6 +1456,61 @@ class StockMonitorApp(tk.Tk):
         # # 在 UI 控件区加个按钮：
         # tk.Button(ctrl_frame, text="报警中心", command=lambda: open_alert_center(self)).pack(side="left", padx=2)
 
+    # def replace_st_key_sort_col_gpt_bug(self, old_col, new_col):
+    #     """安全替换 Treeview 中的一列（含完整检查）"""
+    #     try:
+    #         print(f"diff : ({old_col}, {new_col})")
+    #         print(f"old_col : {old_col} new_col {new_col} self.current_cols : {self.current_cols}")
+
+    #         # 🧩 Step 1. 数据检查
+    #         if self.df_all is None or self.df_all.empty:
+    #             print("⚠️ df_all 为空，无法替换列。")
+    #             return
+    #         if new_col not in self.df_all.columns:
+    #             print(f"⚠️ 新列 {new_col} 不存在于 df_all.columns，跳过。")
+    #             return
+
+    #         # 🧩 Step 2. 获取 Tree 当前列
+    #         current_tree_cols = list(self.tree["columns"])
+
+    #         # old_col 不在当前 tree，直接跳过
+    #         if old_col not in current_tree_cols:
+    #             print(f"⚠️ {old_col} 不在 TreeView columns：{current_tree_cols}")
+    #             # 保险策略：如果 new_col 不在，也追加进去
+    #             if new_col not in current_tree_cols:
+    #                 current_tree_cols.append(new_col)
+    #             # 同步到 current_cols
+    #             self.current_cols = current_tree_cols
+    #             self.update_treeview_cols(self.current_cols)
+    #             return
+
+    #         # 🧩 Step 3. 清空 Tree 结构（避免无效列引用）
+    #         self.tree["displaycolumns"] = ()
+    #         self.tree["columns"] = ()
+    #         self.tree.update_idletasks()
+
+    #         # 🧩 Step 4. 替换 self.current_cols
+    #         if old_col in self.current_cols:
+    #             self.current_cols = [
+    #                 new_col if c == old_col else c for c in self.current_cols
+    #             ]
+    #         else:
+    #             print(f"⚠️ {old_col} 不在 current_cols，追加新列 {new_col}")
+    #             if new_col not in self.current_cols:
+    #                 self.current_cols.append(new_col)
+
+    #         # 🧩 Step 5. 过滤无效列（仅保留 df_all 中存在的）
+    #         self.current_cols = [c for c in self.current_cols if c in self.df_all.columns]
+
+    #         # 🧩 Step 6. 调用安全更新函数
+    #         self.update_treeview_cols(self.current_cols)
+
+    #         print(f"✅ 替换完成：{old_col} → {new_col}")
+    #     except Exception as e:
+    #         import traceback
+    #         traceback.print_exc()
+    #         print(f"❌ 替换列时出错：{e}")
+
 
     def replace_st_key_sort_col(self, old_col, new_col):
         """替换显示列并刷新表格"""
@@ -1094,27 +1525,46 @@ class StockMonitorApp(tk.Tk):
                 if col not in new_columns:
                     new_columns.append(col)
 
-            # 确保 Treeview 先注册所有列
-            for col in new_columns:
-                if col not in self.tree["columns"]:
-                    self.tree["columns"] = list(self.tree["columns"]) + [col]
-            # # 重新设置 tree 的列集合
-            # if "code" not in self.current_cols:
-            #     new_columns = ["code"] + self.current_cols
-            # else:
-            #     new_columns = self.current_cols
+            # #判断是否有这个col
+            # new_columns = [c for c in new_columns if c in self.df_all.columns]
 
-            self.tree.config(columns=new_columns)
+            # # 确保 Treeview 先注册所有列
+            # for col in new_columns:
+            #     if col not in self.tree["columns"]:
+            #         self.tree["columns"] = list(self.tree["columns"]) + [col]
 
-            # 重新设置表头
-            for col in new_columns:
-                # self.tree.heading(col, text=col, anchor="center")
-                self.tree.heading(col, text=col, anchor="center", command=lambda _col=col: self.sort_by_column(_col, False))
-                                  # command=lambda c=col: self.show_column_menu(c))
+            # 只保留 DataFrame 中存在的列，避免 TclError
+            new_columns = [c for c in new_columns if c in self.df_all.columns or c == "code"]
 
-            # 重新加载数据
-            self.refresh_tree(self.df_all)
-            # self.apply_search()
+            self.update_treeview_cols(new_columns)
+            # # 注册所有新列
+            # existing_cols = list(self.tree["columns"])
+            # for col in new_columns:
+            #     if col not in existing_cols:
+            #         existing_cols.append(col)
+            # self.tree["columns"] = existing_cols
+
+            # # # 重新设置 tree 的列集合
+            # # if "code" not in self.current_cols:
+            # #     new_columns = ["code"] + self.current_cols
+            # # else:
+            # #     new_columns = self.current_cols
+
+            # self.tree.config(columns=new_columns)
+            # self.tree["displaycolumns"] = new_columns
+            # self.tree.configure(show="headings")
+
+            # # 重新设置表头
+            # for col in new_columns:
+            #     # self.tree.heading(col, text=col, anchor="center")
+            #     if col in self.tree['columns']:
+            #         self.tree.heading(col, text=col, anchor="center", command=lambda _col=col: self.sort_by_column(_col, False))
+            #                       # command=lambda c=col: self.show_column_menu(c))
+            #     else:
+            #         # 如果 Treeview 没有这个列，可以选择添加或者跳过
+            #         print(f"⚠️ Treeview 没有列 {col}，跳过")
+            # # 重新加载数据
+            # self.refresh_tree(self.df_all)
 
 
     def on_st_key_sort_enter(self, event):
@@ -1166,9 +1616,11 @@ class StockMonitorApp(tk.Tk):
             diff = first_diff(self.current_cols[1:], DISPLAY_COLS_2)
             if diff:
                 print(f'diff : {diff}')
-                self.replace_st_key_sort_col(*diff)
-            DISPLAY_COLS = DISPLAY_COLS_2
-            self.current_cols = ["code"] + DISPLAY_COLS_2
+                # bug index 
+                # self.replace_st_key_sort_col(*diff)
+                self.replace_column(*diff,apply_search=False)
+            # DISPLAY_COLS = DISPLAY_COLS_2
+            # self.current_cols = ["code"] + DISPLAY_COLS_2
 
     def refresh_data(self):
         """
@@ -1178,6 +1630,9 @@ class StockMonitorApp(tk.Tk):
         print(f'set resample : {resample}')
         # cct.GlobalValues().setkey("resample", resample)
         self.global_values.setkey("resample", resample)
+        self.blkname = ct.Resample_LABELS_Blk[resample] or "060.blk"
+        self.global_values.setkey("blkname", self.blkname)
+        
         self.refresh_flag.value = False
         time.sleep(0.6)
         self.refresh_flag.value = True
@@ -1896,6 +2351,42 @@ class StockMonitorApp(tk.Tk):
         print(f"[定位] x={x}, y={y}, screen={screen}")
         return x, y
 
+    def get_centered_window_position_main(self, parent, win_width, win_height, margin=10):
+        # 获取鼠标全局位置（跨屏）
+        mx = parent.winfo_pointerx()
+        my = parent.winfo_pointery()
+
+        # 找出鼠标所在屏幕
+        monitors = get_monitors()
+        current_screen = None
+        for m in monitors:
+            if m.x <= mx < m.x + m.width and m.y <= my < m.y + m.height:
+                current_screen = m
+                break
+        if current_screen is None:
+            # 如果找不到（罕见），默认使用主屏
+            current_screen = monitors[0]
+
+        screen_x, screen_y = current_screen.x, current_screen.y
+        screen_width, screen_height = current_screen.width, current_screen.height
+
+        # 默认在鼠标右侧显示
+        x = mx + margin
+        y = my - win_height // 2
+
+        # 如果右边放不下，则放左侧
+        if x + win_width > screen_x + screen_width:
+            x = mx - win_width - margin
+
+        # 垂直方向防止超出屏幕
+        if y + win_height > screen_y + screen_height:
+            y = screen_y + screen_height - win_height - margin
+        if y < screen_y:
+            y = screen_y + margin
+
+        print(f"[get_centered_window_position_query] 鼠标=({mx},{my}), 屏幕=({screen_x},{screen_y},{screen_width},{screen_height}), 结果=({x},{y})")
+        return x, y
+
     def get_centered_window_position(self,win_width, win_height, x_root=None, y_root=None, parent_win=None):
         """
         多屏环境下获取窗口显示位置
@@ -2456,30 +2947,52 @@ class StockMonitorApp(tk.Tk):
         menu_frame.bind("<FocusOut>", close_menu)
         menu_frame.focus_force()
 
-    def replace_column(self, old_col, new_col):
+    def replace_column(self, old_col, new_col,apply_search=True):
         """替换显示列并刷新表格"""
 
         if old_col in self.current_cols:
             idx = self.current_cols.index(old_col)
             self.current_cols[idx] = new_col
 
-            # 重新设置 tree 的列集合
-            if "code" not in self.current_cols:
-                new_columns = ["code"] + self.current_cols
-            else:
-                new_columns = self.current_cols
+            # 🔹 2. 暂时清空列，避免 Invalid column index 残留
+            self.tree["displaycolumns"] = ()
+            self.tree["columns"] = ()
+            self.tree.update_idletasks()
 
-            self.tree.config(columns=new_columns)
+            # 🔹 3. 重新配置列
+            new_columns = tuple(self.current_cols)
+            self.tree["columns"] = new_columns
+            self.tree["displaycolumns"] = new_columns
+            self.tree.configure(show="headings")
+
+            # # 🔹 4. 重新设置表头和列宽
+            # for col in cols:
+            #     self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+            #     width = 120 if col == "name" else 80
+            #     self.tree.column(col, width=width, anchor="center", minwidth=50)
+
+            # # 重新设置 tree 的列集合
+            # if "code" not in self.current_cols:
+            #     new_columns = ["code"] + self.current_cols
+            # else:
+            #     new_columns = self.current_cols
+
+            # self.tree.config(columns=new_columns)
 
             # 重新设置表头
             for col in new_columns:
-                # self.tree.heading(col, text=col, anchor="center")
-                self.tree.heading(col, text=col, anchor="center", command=lambda _col=col: self.sort_by_column(_col, False))
-                                  # command=lambda c=col: self.show_column_menu(c))
+                # self.tree.heading(col, text=col, anchor="center", command=lambda _col=col: self.sort_by_column(_col, False))
+                width = 120 if col == "name" else 80
+                self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+                self.tree.column(col, width=width, anchor="center", minwidth=50)
 
             # 重新加载数据
             # self.refresh_tree(self.df_all)
-            self.apply_search()
+            if apply_search:
+                self.apply_search()
+            else:
+                # 重新加载数据
+                self.tree.after(100, self.refresh_tree(self.df_all))
 
     def restore_tree_selection(tree, code: str, col_index: int = 0):
         """
@@ -2500,6 +3013,51 @@ class StockMonitorApp(tk.Tk):
                 tree.see(iid)            # 滚动到可见
                 return True
         return False
+
+
+    def reset_tree_columns(self,tree, cols_to_show, sort_func=None):
+        """
+        安全地重新配置 Treeview 的列定义，防止 TclError: Invalid column index
+        参数：
+            tree        - Tkinter Treeview 实例
+            cols_to_show - 新的列名列表（list/tuple）
+            sort_func   - 排序回调函数，形如 lambda col, reverse: ...
+        """
+
+        current_cols = list(tree["columns"])
+        if current_cols == list(cols_to_show):
+            return  # 无需更新
+
+        # print(f"[Tree Reset] old_cols={current_cols}, new_cols={cols_to_show}")
+
+        # 1️⃣ 清空旧列配置
+        for col in current_cols:
+            try:
+                tree.heading(col, text="")
+                tree.column(col, width=0)
+            except Exception as e:
+                print(f"clear col err: {col}, {e}")
+
+        # 2️⃣ 清空列定义，确保内部索引干净
+        tree["columns"] = ()
+        tree.update_idletasks()
+
+        # 3️⃣ 重新设置列定义
+        tree.config(columns=cols_to_show)
+        tree.configure(show="headings")
+        tree["displaycolumns"] = cols_to_show
+        tree.update_idletasks()
+
+        # 4️⃣ 为每个列重新设置 heading / column
+        for col in cols_to_show:
+            if sort_func:
+                tree.heading(col, text=col, command=lambda _c=col: sort_func(_c, False))
+            else:
+                tree.heading(col, text=col)
+            width = 120 if col == "name" else 80
+            tree.column(col, width=width, anchor="center", minwidth=50)
+
+        # print(f"[Tree Reset] applied cols={list(tree['columns'])}")
 
 
     def refresh_tree(self, df=None):
@@ -2528,65 +3086,32 @@ class StockMonitorApp(tk.Tk):
         # cols_to_show = ['code'] + [c for c in DISPLAY_COLS if c != 'code']
         cols_to_show = [c for c in self.current_cols if c in df.columns]
         # print(f'cols_to_show : {cols_to_show}')
-        # self.tree.config(columns=cols_to_show)
-        # self.tree["displaycolumns"] = cols_to_show
-
+        self.after_idle(lambda: self.reset_tree_columns(self.tree, cols_to_show, self.sort_by_column))
 
         # 插入数据严格按 cols_to_show
         for _, row in df.iterrows():
             values = [row.get(col, "") for col in cols_to_show]
             self.tree.insert("", "end", values=values)
 
-        # cols_to_show =  self.current_cols
-        # # 插入数据严格按 cols_to_show
-        # for _, row in df.iterrows():
-        #     values = [row.get(col, "") for col in cols_to_show]
-        #     self.tree.insert("", "end", values=values)
+        # # 如果 Treeview 的 columns 与我们想要的不一致，则重新配置
+        # current_cols = list(self.tree["columns"])
+        # print(f'cols_to_show : {cols_to_show}')
+        # print(f'current_cols : {current_cols}')
+        # if current_cols != cols_to_show:
+        #     # 关键：更新 columns，确保使用 list/tuple（不要使用 numpy array）
+        #     self.tree.config(columns=cols_to_show)
+        #     # 强制只显示 headings（隐藏 #0），并设置 displaycolumns 显示顺序
+        #     self.tree.configure(show='headings')
+        #     self.tree["displaycolumns"] = cols_to_show
 
-
-
-
-        # 如果 Treeview 的 columns 与我们想要的不一致，则重新配置
-        current_cols = list(self.tree["columns"])
-        if current_cols != cols_to_show:
-            import ipdb;ipdb.set_trace()
-
-            # 关键：更新 columns，确保使用 list/tuple（不要使用 numpy array）
-            self.tree.config(columns=cols_to_show)
-            # 强制只显示 headings（隐藏 #0），并设置 displaycolumns 显示顺序
-            self.tree.configure(show='headings')
-            self.tree["displaycolumns"] = cols_to_show
-
-            # 清理旧的 heading/column 配置，然后为每列重新设置 heading 和 column
-            for col in cols_to_show:
-                # 用默认参数避免 lambda 闭包问题
-                self.tree.heading(col, text=col, command=lambda _c=col: self.sort_by_column(_c, False))
-                # 初始宽度，可以根据需要调整
-                width = 120 if col == "name" else 80
-                self.tree.column(col, width=width, anchor="center", minwidth=50)
-
-        # 插入数据：**严格按 cols_to_show 的顺序选取值**（防止错位）
-        # for _, row in df.iterrows():
-        #     values = []
+        #     # 清理旧的 heading/column 配置，然后为每列重新设置 heading 和 column
         #     for col in cols_to_show:
-        #         if col in df.columns:
-        #             # 避免 NaN 导致显示 "nan"
-        #             v = row[col]
-        #             values.append("" if pd.isna(v) else v)
-        #         else:
-        #             values.append("")
-        #     self.tree.insert("", "end", values=values)
+        #         # 用默认参数避免 lambda 闭包问题
+        #         self.tree.heading(col, text=col, command=lambda _c=col: self.sort_by_column(_c, False))
+        #         # 初始宽度，可以根据需要调整
+        #         width = 120 if col == "name" else 80
+        #         self.tree.column(col, width=width, anchor="center", minwidth=50)
 
-
-        # 4. 恢复选中
-        # if self.select_code:
-        #     print(f'self.select_code: {self.select_code}')
-        #     for iid in self.tree.get_children():
-        #         values = self.tree.item(iid, "values")
-        #         if values and values[0] == self.select_code:
-        #             self.tree.selection_add(iid)
-        #             self.tree.see(iid)  # 自动滚动到可见位置
-        #             break
         # 4. 恢复选中
         if self.select_code:
             print(f'self.select_code: {self.select_code}')
@@ -2597,10 +3122,6 @@ class StockMonitorApp(tk.Tk):
                     self.tree.focus(iid)           # 恢复键盘焦点
                     self.tree.see(iid)             # 滚动到可见位置
                     break
-        # 刷新后调用
-        # restore_tree_selection(self.tree, self.select_code)
-
-
 
         # 双击表头绑定
         self.tree.bind("<Double-1>", self.on_tree_double_click)
@@ -2611,25 +3132,6 @@ class StockMonitorApp(tk.Tk):
         # 更新状态栏
         self.update_status()
 
-    # ------------------ 调整列宽 ------------------ #
-    # def adjust_column_widths(self):
-    #     for col in DISPLAY_COLS:
-    #         if col in self.current_df.columns:
-    #             max_len = max([len(str(val)) for val in self.current_df[col]] + [len(col)])
-    #             width = min(max(max_len * 10, 60), 300) 
-    #             if col == 'name':
-    #                 width =int(width * 1.8) 
-    #             self.tree.column(col, width=width)
-
-    # def adjust_column_widths(self):
-    #     # 只调整 Treeview 中存在的列
-    #     for col in self.tree["columns"]:
-    #         if col in self.current_df.columns:
-    #             max_len = max([len(str(val)) for val in self.current_df[col]] + [len(col)])
-    #             width = min(max(max_len * 10, 60), 300)
-    #             if col == 'name':
-    #                 width = int(width * 1.8)
-    #             self.tree.column(col, width=width)
 
     def adjust_column_widths(self):
         """根据当前 self.current_df 和 tree 的列调整列宽（只作用在 display 的列）"""
@@ -2649,7 +3151,8 @@ class StockMonitorApp(tk.Tk):
                 max_len = len(col)
             width = min(max(max_len * 8, 60), 300)  # 经验值：每字符约8像素，可调整
             if col == 'name':
-                width = int(width * 1.6)
+                width = int(width * 2)
+                # print(f'col width: {width}')
             self.tree.column(col, width=width)
 
     # ----------------- 排序 ----------------- #
@@ -3489,7 +3992,20 @@ class StockMonitorApp(tk.Tk):
         else:
             self.status_var.set(f"搜索框 {which} 历史中没有: {target}")
 
-
+    def write_to_blk(self,append=True):
+        if self.current_df.empty:
+            return
+        # codew=stf.WriteCountFilter(top_temp, writecount=args.dl)
+        codew = self.current_df.index.tolist()
+        # codew = self.current_df.index.tolist()[:50]
+        block_path = tdd.get_tdx_dir_blocknew() + self.blkname
+        cct.write_to_blocknew(block_path, codew,append=append,doubleFile=False,keep_last=0,dfcf=False,reappend=True)
+        print("wri ok:%s" % block_path)
+        self.status_var2.set(f"wri ok: {self.blkname} count: {len(codew)}")
+        # if args.code == 'a':
+        #     cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=True,reappend=True)
+        # else:
+        #     cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=True,reappend=True)
     # def delete_search_history(self, which, entry=None):
     #     """
     #     删除指定搜索框的历史条目
@@ -3593,15 +4109,71 @@ class StockMonitorApp(tk.Tk):
     #         self.after(1000, self.update_tree)
 
     # ----------------- 数据存档 ----------------- #
+    # def save_data_to_csv(self):
+    #     if self.current_df.empty:
+    #         return
+    #     import datetime
+    #     file_name = os.path.join(DARACSV_DIR, f"monitor_{self.resample_combo.get()}_{time.strftime('%Y%m%d_%H%M')}.csv")
+    #     self.current_df.to_csv(file_name, index=True, encoding="utf-8-sig")
+    #     idx =file_name.find('monitor')
+    #     status_txt = file_name[idx:]
+    #     self.status_var2.set(f"已保存数据到 {status_txt}")
+
     def save_data_to_csv(self):
+        """保存当前 DataFrame 到 CSV 文件，并自动带上当前 query 的 note"""
         if self.current_df.empty:
             return
-        import datetime
-        file_name = os.path.join(DARACSV_DIR, f"monitor_{self.resample_combo.get()}_{time.strftime('%Y%m%d_%H%M')}.csv")
+
+        import os, re, time
+        from datetime import datetime
+
+        resample_type = self.resample_combo.get()
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+
+        # 获取当前选中的 query（优先从 active combo）
+        current_query = ""
+        try:
+            if hasattr(self, "search_combo1") and self.search_combo1 and self.search_combo1.get():
+                current_query = self.search_combo1.get().strip()
+            elif hasattr(self, "search_combo2") and self.search_combo2 and self.search_combo2.get():
+                current_query = self.search_combo2.get().strip()
+        except Exception:
+            pass
+
+        note = ""
+
+        try:
+            # 遍历两个历史，查找匹配的 query
+            for hist_list in [getattr(self.query_manager, "history1", []),
+                              getattr(self.query_manager, "history2", [])]:
+                for record in self.query_manager.history1:
+                    if record.get("query") == current_query:
+                        note = record.get("note", "")
+                        break
+                if note:
+                    break
+        except Exception as e:
+            print(f"[save_data_to_csv] 获取 note 失败: {e}")
+            
+        # 处理 note
+        if note:
+            note = re.sub(r'[\\/*?:"<>|]', "_", note.strip())
+
+        # 拼接文件名
+        file_name = os.path.join(
+            DARACSV_DIR,
+            f"monitor_{resample_type}_{timestamp}{'_' + note if note else ''}.csv"
+        )
+
+        # 保存 CSV
         self.current_df.to_csv(file_name, index=True, encoding="utf-8-sig")
-        idx =file_name.find('monitor')
+
+        # 状态栏提示
+        idx = file_name.find("monitor")
         status_txt = file_name[idx:]
         self.status_var2.set(f"已保存数据到 {status_txt}")
+        print(f"[save_data_to_csv] 文件已保存: {file_name}")
+
 
     def load_data_from_csv(self):
         file_path = filedialog.askopenfilename(filetypes=[("CSV Files", "*.csv")])
@@ -3636,7 +4208,10 @@ class StockMonitorApp(tk.Tk):
             try:
                 with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
                     pos = json.load(f)
-                    self.geometry(f"{pos['width']}x{pos['height']}+{pos['x']}+{pos['y']}")
+                    # x,y = self.get_centered_window_position_main(self, pos['width'], pos['height'])
+                    x,y = clamp_window_to_screens(pos['x'],pos['y'], pos['width'], pos['height'])
+                    # self.geometry(f"{pos['width']}x{pos['height']}+{pos['x']}+{pos['y']}")
+                    self.geometry(f"{pos['width']}x{pos['height']}+{x}+{y}")
             except Exception as e:
                 log.error(f"读取窗口位置失败: {e}")
 
@@ -3670,7 +4245,7 @@ class QueryHistoryManager:
         self.history_file = history_file
         self.search_var1 = search_var1
         self.search_var2 = search_var2
-
+        self.his_limit = 30
         self.search_combo1 = search_combo1
         self.search_combo2 = search_combo2
 
@@ -3834,8 +4409,8 @@ class QueryHistoryManager:
 
                         # all_data["history1"] = h1_old[:-20] if len(h1_old) > 20 else []
                         # all_data["history2"] = h2_old[:-20] if len(h2_old) > 20 else []
-                        all_data["history1"] = h1_old[20:] if len(h1_old) > 20 else []
-                        all_data["history2"] = h2_old[20:] if len(h2_old) > 20 else []
+                        all_data["history1"] = h1_old[self.his_limit:] if len(h1_old) > self.his_limit else []
+                        all_data["history2"] = h2_old[self.his_limit:] if len(h2_old) > self.his_limit else []
                         print(f'h1_old : {len(h1_old)} all_data : {len(all_data["history1"])}')
                         print(f'h2_old : {len(h2_old)} all_data : {len(all_data["history2"])}')
 
@@ -3898,8 +4473,8 @@ class QueryHistoryManager:
                     # 只取最后 20 条作为可编辑区域
                     # h1 = raw_h1[-20:] if len(raw_h1) > 20 else raw_h1
                     # h2 = raw_h2[-20:] if len(raw_h2) > 20 else raw_h2
-                    h1 = raw_h1[:20] if len(raw_h1) > 20 else raw_h1
-                    h2 = raw_h2[:20] if len(raw_h2) > 20 else raw_h2
+                    h1 = raw_h1[:self.his_limit] if len(raw_h1) > self.his_limit else raw_h1
+                    h2 = raw_h2[:self.his_limit] if len(raw_h2) > self.his_limit else raw_h2
 
             except Exception as e:
                 messagebox.showerror("错误", f"加载搜索历史失败: {e}")
@@ -4084,30 +4659,42 @@ class QueryHistoryManager:
     #             self.refresh_tree()
     #             self.save_search_history()
 
-    def get_centered_window_position(self, parent, win_width, win_height, margin=10):
-        # 获取鼠标位置
+    def get_centered_window_position_query(self, parent, win_width, win_height, margin=10):
+        # 获取鼠标全局位置（跨屏）
         mx = parent.winfo_pointerx()
         my = parent.winfo_pointery()
 
-        # 屏幕尺寸
-        screen_width = parent.winfo_screenwidth()
-        screen_height = parent.winfo_screenheight()
+        # 找出鼠标所在屏幕
+        monitors = get_monitors()
+        current_screen = None
+        for m in monitors:
+            if m.x <= mx < m.x + m.width and m.y <= my < m.y + m.height:
+                current_screen = m
+                break
+        if current_screen is None:
+            # 如果找不到（罕见），默认使用主屏
+            current_screen = monitors[0]
 
-        # 默认右边放置
+        screen_x, screen_y = current_screen.x, current_screen.y
+        screen_width, screen_height = current_screen.width, current_screen.height
+
+        # 默认在鼠标右侧显示
         x = mx + margin
-        y = my - win_height // 2  # 垂直居中鼠标位置
+        y = my - win_height // 2
 
-        # 如果右边放不下，改到左边
-        if x + win_width > screen_width:
+        # 如果右边放不下，则放左侧
+        if x + win_width > screen_x + screen_width:
             x = mx - win_width - margin
 
-        # 防止y超出屏幕
-        if y + win_height > screen_height:
-            y = screen_height - win_height - margin
-        if y < 0:
-            y = margin
+        # 垂直方向防止超出屏幕
+        if y + win_height > screen_y + screen_height:
+            y = screen_y + screen_height - win_height - margin
+        if y < screen_y:
+            y = screen_y + margin
 
+        print(f"[get_centered_window_position_query] 鼠标=({mx},{my}), 屏幕=({screen_x},{screen_y},{screen_width},{screen_height}), 结果=({x},{y})")
         return x, y
+
 
     def askstring_at_parent(self,parent, title, prompt, initialvalue=""):
         # 创建临时窗口
@@ -4122,9 +4709,12 @@ class QueryHistoryManager:
         max_width = 1000
         win_width = max(min_width, min(len(initialvalue) * char_width + 50, max_width))
         win_height = 120
-        print(f'len(initialvalue) : {len(initialvalue)} win_width : {win_width}')
         # win_width, win_height = 520, 120
-        x, y = self.get_centered_window_position(parent, win_width, win_height)
+        x, y = self.get_centered_window_position_query(parent, win_width, win_height)
+        # monitors = MONITORS or [(0, 0, win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1))]
+        # x, y = clamp_window_to_screens(x, y, width, height, monitors)
+        # print(f'len(initialvalue) : {len(initialvalue)} win_width : {win_width} , x : {x} ,y : {y}')
+        print(f"askstring_at_parent {win_width}x{win_height}+{x}+{y}")
         dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
 
         result = {"value": None}
@@ -4133,6 +4723,7 @@ class QueryHistoryManager:
         entry = tk.Entry(dlg)
         entry.pack(pady=1, padx=5, fill="x", expand=True)
         entry.insert(0, initialvalue)
+        entry.lift()
         entry.focus_set()
 
         def on_ok():
@@ -4147,36 +4738,13 @@ class QueryHistoryManager:
         tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
         tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
 
+        # ✅ 新增：按 ESC 关闭对话框
+        dlg.bind("<Escape>", lambda e: on_cancel())
+
         dlg.grab_set()
         parent.wait_window(dlg)
         return result["value"]
 
-    # def on_double_click(self, event):
-    #     region = self.tree.identify("region", event.x, event.y)
-    #     if region != "cell":
-    #         return
-    #     col = self.tree.identify_column(event.x)
-    #     row_id = self.tree.identify_row(event.y)
-    #     if not row_id:
-    #         return
-    #     idx = int(row_id) - 1
-    #     record = self.current_history[idx]
-    #     if col == "#3":  # Note 列
-    #         # new_note = simpledialog.askstring("修改备注", "请输入新的备注：", initialvalue=record["note"])
-    #         new_note = self.askstring_at_parent(self.root, "修改备注", "请输入新的备注：", initialvalue=record["note"])
-    #         if new_note is not None:
-    #             record["note"] = new_note
-    #             self.refresh_tree()
-    #             self.save_search_history()
-
-    #     row_id = self.tree.identify_row(event.y)
-    #     if not row_id:
-    #         return
-    #     idx = int(row_id) - 1
-    #     self.editing_idx = idx
-    #     record = self.current_history[idx]
-    #     self.entry_query.delete(0, tk.END)
-    #     self.entry_query.insert(0, record["query"])
     def on_double_click(self, event):
         region = self.tree.identify("region", event.x, event.y)
         if region != "cell":

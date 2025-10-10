@@ -3578,10 +3578,14 @@ def update_window_position(window_id):
 
 
 
+
 def on_close_alert_monitor(window):
     """处理子窗口关闭事件"""
     global alert_moniter_bring_front,alert_window,alert_tree
     alert_moniter_bring_front = False
+    if alert_window and alert_window.winfo_exists():
+        update_window_position("alert_center")  # 保存位置
+
     try:
         if window and window.winfo_exists():
             window.destroy()
@@ -3598,18 +3602,6 @@ def on_close_alert_monitor(window):
         alert_window = None
         alert_tree = None
 
-
-    # try:
-    #     if win and win.winfo_exists():
-    #             win.destroy()
-    #     except:
-    #         pass
-    #     alert_window = None
-
-    # if window and window.winfo_exists():
-    #     window.destroy()
-    #     window.update_idletasks()  # 让销毁立即生效
-    # alert_window = None
 
 def on_close_monitor(window_info):
     """处理子窗口关闭事件"""
@@ -3687,30 +3679,57 @@ def init_screen_size(root):
     screen_height = root.winfo_screenheight()
 
 
+# def update_position_window(window, window_id, is_main=False):
+#     """创建一个新窗口，并加载其位置（自动平铺）"""
+#     global WINDOWS_BY_ID, WINDOW_GEOMETRIES, NEXT_OFFSET, OFFSET_STEP, screen_width, screen_height
+#     WINDOWS_BY_ID[window_id] = window
+
+#     if window_id in WINDOW_GEOMETRIES.keys():
+#         # 有历史配置，直接使用
+#         wsize = WINDOW_GEOMETRIES[window_id].split('+')
+#         if len(wsize) == 3:
+#             subw_width = int(wsize[1])
+#             subw_height = int(wsize[2])
+#             if subw_width > screen_width or subw_height > screen_height:
+#                 place_new_window(window, window_id)
+#             else:
+#                 window.geometry(WINDOW_GEOMETRIES[window_id])
+#         else:
+#             place_new_window(window, window_id)
+#     else:
+#         # 没有配置，使用默认 + 自动平铺
+#         place_new_window(window, window_id)
+
+#     # window.bind("<Configure>", lambda event: update_window_position(window_id))
+#     return window
+
 def update_position_window(window, window_id, is_main=False):
     """创建一个新窗口，并加载其位置（自动平铺）"""
-    global WINDOWS_BY_ID, WINDOW_GEOMETRIES, NEXT_OFFSET, OFFSET_STEP, screen_width, screen_height
+    global WINDOWS_BY_ID, WINDOW_GEOMETRIES, screen_width, screen_height
     WINDOWS_BY_ID[window_id] = window
 
-    if window_id in WINDOW_GEOMETRIES.keys():
-        # 有历史配置，直接使用
-        wsize = WINDOW_GEOMETRIES[window_id].split('+')
-        if len(wsize) == 3:
-            subw_width = int(wsize[1])
-            subw_height = int(wsize[2])
-            if subw_width > screen_width or subw_height > screen_height:
-                place_new_window(window, window_id)
-            else:
-                window.geometry(WINDOW_GEOMETRIES[window_id])
-        else:
+    if window_id in WINDOW_GEOMETRIES:
+        # 有历史配置，解析并限制到屏幕内
+        geom = WINDOW_GEOMETRIES[window_id]
+        # if window_id == 'alert_center':
+        #     print(f'alert_center geom : {geom}')
+        try:
+            size_part, x_part, y_part = geom.split('+')
+            width, height = map(int, size_part.split('x'))
+            x, y = int(x_part), int(y_part)
+        except Exception:
+            # 格式异常则使用默认放置
             place_new_window(window, window_id)
+        else:
+            # 限制在可见屏幕内
+            monitors = MONITORS or [(0, 0, win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1))]
+            x, y = clamp_window_to_screens(x, y, width, height, monitors)
+            window.geometry(f"{width}x{height}+{x}+{y}")
     else:
         # 没有配置，使用默认 + 自动平铺
         place_new_window(window, window_id)
 
-    # window.bind("<Configure>", lambda event: update_window_position(window_id))
     return window
-
 
 # -----------------------------
 # 初始化显示器信息（程序启动时调用一次）
@@ -3725,7 +3744,22 @@ def get_all_monitors():
         monitors.append(info["Monitor"])  # (left, top, right, bottom)
     return monitors
 
-# 双屏幕,上屏新建
+# # 双屏幕,上屏新建
+# def init_monitors():
+#     """扫描所有显示器并缓存信息（使用可用区域，避开任务栏）"""
+#     global MONITORS
+#     monitors = get_all_monitors()  # 原来的函数
+#     if not monitors:
+#         left, top, right, bottom = get_monitor_workarea()
+#         MONITORS = [(left, top, right, bottom)]
+#     else:
+#         # 对每个 monitor 也可计算可用区域
+#         MONITORS = []
+#         for mon in monitors:
+#             # mon = (x, y, width, height)
+#             mx, my, mw, mh = mon
+#             MONITORS.append((mx, my, mx+mw, my+mh))
+#     print(f"✅ Detected {len(MONITORS)} monitor(s).")
 
 def init_monitors():
     """扫描所有显示器并缓存信息"""
@@ -3806,6 +3840,17 @@ def rects_overlap(r1, r2):
     a1, b1, a2, b2 = r2
     return not (x2 <= a1 or a2 <= x1 or y2 <= b1 or b2 <= y1)
 
+# def clamp_window_to_screens(x, y, width, height, monitors):
+#     """
+#     如果窗口坐标超出任意屏幕，则将窗口放到第一个屏幕可见区域
+#     """
+#     for mx, my, mw, mh in monitors:
+#         if mx <= x < mx + mw and my <= y < my + mh:
+#             # 窗口在屏幕范围内
+#             return x, y
+#     # 超出屏幕，放到第一个屏幕左上角偏移
+#     mx, my, mw, mh = monitors[0]
+#     return mx + 50, my + 50
 
 
 def place_new_window(window, window_id, win_width=300, win_height=160, margin=2):
@@ -3815,16 +3860,32 @@ def place_new_window(window, window_id, win_width=300, win_height=160, margin=2)
 
     monitors = MONITORS or [(0, 0, win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1))]
 
+    # if window_id in WINDOW_GEOMETRIES:
+    #     # 使用已存储位置
+    #     geom = WINDOW_GEOMETRIES[window_id]
+    #     try:
+    #         _, x_part, y_part = geom.split('+')
+    #         x, y = int(x_part), int(y_part)
+    #     except Exception:
+    #         x, y = 100, 100
+    #     x, y = clamp_window_to_screens(x, y, win_width, win_height, monitors)
+    #     window.geometry(f"{win_width}x{win_height}+{x}+{y}")
+    #     return
+
+    # 如果已有历史 geometry
     if window_id in WINDOW_GEOMETRIES:
-        # 使用已存储位置
         geom = WINDOW_GEOMETRIES[window_id]
         try:
-            _, x_part, y_part = geom.split('+')
+            size_part, x_part, y_part = geom.split('+')
+            w_width, w_height = map(int, size_part.split('x'))
             x, y = int(x_part), int(y_part)
         except Exception:
             x, y = 100, 100
-        x, y = clamp_window_to_screens(x, y, win_width, win_height, monitors)
-        window.geometry(f"{win_width}x{win_height}+{x}+{y}")
+            w_width, w_height = win_width, win_height
+
+        # 只调整超出屏幕的窗口
+        x, y = clamp_window_to_screens(x, y, w_width, w_height, monitors)
+        window.geometry(f"{w_width}x{w_height}+{x}+{y}")
         return
 
     # -------------------
@@ -4566,9 +4627,13 @@ def open_alert_center():
     global alert_moniter_bring_front,sina_data_df
 
     # 如果窗口已存在则置顶
-    if alert_window and alert_window.winfo_exists():
+    # if alert_window and alert_window.winfo_exists():
+    #     alert_window.lift()
+    #     return
+    if alert_window and isinstance(alert_window, tk.Toplevel) and alert_window.winfo_exists():
         alert_window.lift()
         return
+
 
     alert_moniter_bring_front = True
     stock_code, stock_name, stock_info = None, None, None
@@ -4584,20 +4649,27 @@ def open_alert_center():
     aw_win = tk.Toplevel(root)
     aw_win.title("报警中心")
     aw_win.withdraw()  # 先隐藏，避免闪到默认(50,50)
-        # 关键点：设置模态和焦点
+    # aw_win.geometry("720x300")
+    # 🔹 使用和 monitor 一样的自动记忆位置函数
+    window_id = "alert_center"   # <<< 每个窗口一个唯一 ID
+
+    update_position_window(aw_win, window_id)
+
+    # 关键点：设置模态和焦点
     # aw_win.transient(root)   # 父窗口关系
     # aw_win.grab_set()              # 模态，阻止父窗口操作
     # aw_win.focus_force()           # 强制获得焦点
     aw_win.lift()                  # 提升到顶层
 
-    win_width, win_height = 720 , 360
-    x, y = get_centered_window_position_center(win_width, win_height, parent_win=root)
-    aw_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
+    # win_width, win_height = 720 , 300
+    # x, y = get_centered_window_position_center(win_width, win_height, parent_win=root)
+    # aw_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
     # 再显示出来
     aw_win.deiconify()
     # 保持全局变量引用
     alert_window = aw_win
 
+    
     # 上方快速规则入口
     top_frame = ttk.Frame(aw_win)
     top_frame.pack(fill="x", padx=5, pady=5)

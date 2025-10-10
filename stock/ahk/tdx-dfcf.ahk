@@ -119,6 +119,7 @@ SendToHexin(stockCode) {
     || WinActive("ahk_class TdxW_SecondFrame_Class") 
     || WinActive("ahk_exe hexin.exe")
 
+!MButton::   ; Alt + 中键
 MButton::
 {
     global custom_copy_triggered, ClipSaved,SentCodes

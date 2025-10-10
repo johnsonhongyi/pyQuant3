@@ -43,6 +43,8 @@ duration_date_month = 300
 Resample_LABELS_Days = {'d':duration_date_day,'3d':duration_date_up,
                       'w':duration_date_week,'m':duration_date_month}
 
+Resample_LABELS_Blk = {'d':'060.blk','3d':'061.blk',
+                      'w':'062.blk','m':'063.blk'}
 # duration_date_day = 60
 # duration_date_up = 120
 # duration_date_week = 200
