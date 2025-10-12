@@ -1119,6 +1119,7 @@ if __name__ == '__main__':
     exe_status = os.path.exists(workExePath)
     # EXE
     if exe_status:
+        print(f'exe_status: {exe_status}')
         proc_title = [proc.replace('.py','.exe') if not proc.startswith('py') else proc for proc in proc_title]
         positon_exe = {}
         for key in positon.keys():
@@ -1185,9 +1186,11 @@ if __name__ == '__main__':
         if result == (0,0,0,0):
             # print("'%s': '%s',"%(title,positon[title]),end='')
             if exe_status:
-                print("'%s': '%s',"%(title,positon[title]),end='')
+                if title in positon:
+                    print("'%s': '%s',"%(title,positon[title]),end='')
             else:
-                print("'%s': '%s',"%(title.replace('.exe','.py') if not title.startswith('py') else title,positon[title]),end='')
+                if title in positon:
+                    print("'%s': '%s',"%(title.replace('.exe','.py') if not title.startswith('py') else title,positon[title]),end='')
         if idx%3 == 0:
             print(f'\\')
 
