@@ -355,52 +355,6 @@ def clamp_window_to_screens(x, y, w, h):
 
 
 
-def get_centered_window_position_all(parent, win_width, win_height, margin=10):
-    """
-    获取在鼠标所在屏幕内、水平居中于鼠标位置的窗口坐标。
-    保证窗口不会跑出当前屏幕边界。
-    适用于 Tkinter、Toplevel、askstring 等窗口。
-
-    :param parent: Tk 或 Toplevel 对象（用于获取鼠标坐标）
-    :param win_width: 窗口宽度
-    :param win_height: 窗口高度
-    :param margin: 与鼠标/屏幕边缘的距离（默认10像素）
-    :return: (x, y) 可直接用于 geometry
-    """
-    # 获取鼠标全局位置（跨屏）
-    mx = parent.winfo_pointerx()
-    my = parent.winfo_pointery()
-
-    # 找出鼠标所在屏幕
-    monitors = get_monitors()
-    current_screen = None
-    for m in monitors:
-        if m.x <= mx < m.x + m.width and m.y <= my < m.y + m.height:
-            current_screen = m
-            break
-    if current_screen is None:
-        current_screen = monitors[0]  # 默认主屏
-
-    screen_x, screen_y = current_screen.x, current_screen.y
-    screen_width, screen_height = current_screen.width, current_screen.height
-
-    # 默认放在鼠标右侧，垂直居中
-    x = mx + margin
-    y = my - win_height // 2
-
-    # 如果右侧放不下则放左边
-    if x + win_width > screen_x + screen_width:
-        x = mx - win_width - margin
-
-    # 垂直防止越界
-    if y + win_height > screen_y + screen_height:
-        y = screen_y + screen_height - win_height - margin
-    if y < screen_y:
-        y = screen_y + margin
-
-    # print(f"[get_centered_window_position_query] 鼠标=({mx},{my}), 屏幕=({screen_x},{screen_y},{screen_width},{screen_height}), 结果=({x},{y})")
-    return x, y
-
 # ------------------ 后台数据进程 ------------------ #
 def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
     global START_INIT
@@ -606,7 +560,8 @@ def archive_search_history_list(MONITOR_LIST_FILE=SEARCH_HISTORY_FILE,ARCHIVE_DI
             print(f"⚠ 无法读取最近存档: {e}")
 
     # 生成带日期的存档文件名
-    today = datetime.now().strftime("%Y-%m-%d")
+    # today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d-%H")
     filename = f"search_history_{today}.json"
     dest = os.path.join(ARCHIVE_DIR, filename)
 
@@ -2351,41 +2306,6 @@ class StockMonitorApp(tk.Tk):
         print(f"[定位] x={x}, y={y}, screen={screen}")
         return x, y
 
-    def get_centered_window_position_main(self, parent, win_width, win_height, margin=10):
-        # 获取鼠标全局位置（跨屏）
-        mx = parent.winfo_pointerx()
-        my = parent.winfo_pointery()
-
-        # 找出鼠标所在屏幕
-        monitors = get_monitors()
-        current_screen = None
-        for m in monitors:
-            if m.x <= mx < m.x + m.width and m.y <= my < m.y + m.height:
-                current_screen = m
-                break
-        if current_screen is None:
-            # 如果找不到（罕见），默认使用主屏
-            current_screen = monitors[0]
-
-        screen_x, screen_y = current_screen.x, current_screen.y
-        screen_width, screen_height = current_screen.width, current_screen.height
-
-        # 默认在鼠标右侧显示
-        x = mx + margin
-        y = my - win_height // 2
-
-        # 如果右边放不下，则放左侧
-        if x + win_width > screen_x + screen_width:
-            x = mx - win_width - margin
-
-        # 垂直方向防止超出屏幕
-        if y + win_height > screen_y + screen_height:
-            y = screen_y + screen_height - win_height - margin
-        if y < screen_y:
-            y = screen_y + margin
-
-        print(f"[get_centered_window_position_query] 鼠标=({mx},{my}), 屏幕=({screen_x},{screen_y},{screen_width},{screen_height}), 结果=({x},{y})")
-        return x, y
 
     def get_centered_window_position(self,win_width, win_height, x_root=None, y_root=None, parent_win=None):
         """
@@ -2417,7 +2337,7 @@ class StockMonitorApp(tk.Tk):
         # 边界检查
         x = max(screen['left'], min(x, screen['right'] - win_width))
         y = max(screen['top'], min(y, screen['bottom'] - win_height))
-        print(x,y)
+        # print(x,y)
         return x, y
 
     def on_single_click(self, event):
@@ -3172,167 +3092,6 @@ class StockMonitorApp(tk.Tk):
         self.tree.heading(col, command=lambda: self.sort_by_column(col, not reverse))
         self.tree.yview_moveto(0)
 
-    # def save_search_history(self):
-    #     """保存两个搜索框的历史到一个文件，自动去重"""
-    #     try:
-    #         # 用 dict.fromkeys() 保留顺序去重
-    #         self.search_history1 = list(dict.fromkeys(self.search_history1))
-    #         self.search_history2 = list(dict.fromkeys(self.search_history2))
-
-    #         data = {
-    #             "history1": self.search_history1,
-    #             "history2": self.search_history2
-    #         }
-    #         with open(SEARCH_HISTORY_FILE, "w", encoding="utf-8") as f:
-    #             json.dump(data, f, ensure_ascii=False, indent=2)
-    #     except Exception as e:
-    #         log.error(f"保存搜索历史失败: {e}")
-
-    # def load_search_history(self):
-    #     """从文件加载两个搜索框的历史"""
-    #     if os.path.exists(SEARCH_HISTORY_FILE):
-    #         try:
-    #             with open(SEARCH_HISTORY_FILE, "r", encoding="utf-8") as f:
-    #                 data = json.load(f)
-    #                 return data.get("history1", []), data.get("history2", [])
-    #         except Exception as e:
-    #             log.error(f"加载搜索历史失败: {e}")
-    #     return [], []
-
-    # def save_search_history(self):
-    #     """保存两个搜索框的历史到一个文件，自动去重"""
-    #     try:
-    #         # 保证格式统一成 dict
-    #         def normalize_list(lst):
-    #             normalized = []
-    #             seen = set()
-    #             for r in lst:
-    #                 if isinstance(r, str):
-    #                     q = r.strip()
-    #                     rec = {"query": q, "starred": False, "note": ""}
-    #                 elif isinstance(r, dict):
-    #                     q = r.get("query", "").strip()
-    #                     rec = {
-    #                         "query": q,
-    #                         "starred": r.get("starred", False),
-    #                         "note": r.get("note", "")
-    #                     }
-    #                 else:
-    #                     q = str(r).strip()
-    #                     rec = {"query": q, "starred": False, "note": ""}
-    #                 if q and q not in seen:
-    #                     seen.add(q)
-    #                     normalized.append(rec)
-    #             return normalized
-
-    #         self.search_history1 = normalize_list(self.search_history1)
-    #         self.search_history2 = normalize_list(self.search_history2)
-
-    #         data = {
-    #             "history1": self.search_history1,
-    #             "history2": self.search_history2
-    #         }
-    #         with open(SEARCH_HISTORY_FILE, "w", encoding="utf-8") as f:
-    #             json.dump(data, f, ensure_ascii=False, indent=2)
-    #     except Exception as e:
-    #         log.error(f"保存搜索历史失败: {e}")
-
-    # def load_search_history(self):
-    #     """从文件加载两个搜索框的历史"""
-    #     if os.path.exists(SEARCH_HISTORY_FILE):
-    #         try:
-    #             with open(SEARCH_HISTORY_FILE, "r", encoding="utf-8") as f:
-    #                 data = json.load(f)
-    #                 h1 = [self._normalize_record(r) for r in data.get("history1", [])]
-    #                 h2 = [self._normalize_record(r) for r in data.get("history2", [])]
-    #                 return h1, h2
-    #         except Exception as e:
-    #             log.error(f"加载搜索历史失败: {e}")
-    #     return [], []
-
-    # def _normalize_record(self, r):
-    #     """保证统一成 dict"""
-    #     if isinstance(r, str):
-    #         return {"query": r, "starred": False, "note": ""}
-    #     elif isinstance(r, dict):
-    #         return {
-    #             "query": r.get("query", ""),
-    #             "starred": r.get("starred", False),
-    #             "note": r.get("note", "")
-    #         }
-    #     else:
-    #         return {"query": str(r), "starred": False, "note": ""}
-
-
-    # def _normalize_query(self, r):
-    #     """兼容旧数据格式，统一返回 query 字符串"""
-    #     if isinstance(r, str):
-    #         # 可能是普通字符串，也可能是字典的字符串表现形式
-    #         try:
-    #             parsed = ast.literal_eval(r)
-    #             if isinstance(parsed, dict) and "query" in parsed:
-    #                 return parsed["query"]
-    #         except Exception:
-    #             return r.strip()
-    #         return r.strip()
-    #     elif isinstance(r, dict):
-    #         return r.get("query", "").strip()
-    #     else:
-    #         return str(r).strip()
-
-    # def load_search_history(self):
-    #     """从文件加载两个搜索框的历史（只保留 query 字符串）"""
-    #     if os.path.exists(SEARCH_HISTORY_FILE):
-    #         try:
-    #             with open(SEARCH_HISTORY_FILE, "r", encoding="utf-8") as f:
-    #                 data = json.load(f)
-    #                 h1 = [self._normalize_query(r) for r in data.get("history1", [])]
-    #                 h2 = [self._normalize_query(r) for r in data.get("history2", [])]
-    #                 # 去重、去空
-    #                 h1 = list(dict.fromkeys([q for q in h1 if q]))
-    #                 h2 = list(dict.fromkeys([q for q in h2 if q]))
-    #                 return h1, h2
-    #         except Exception as e:
-    #             log.error(f"加载搜索历史失败: {e}")
-    #     return [], []
-
-
-
-
-
-
-    # def apply_search_single(self, query, history_list, combo):
-    #     """执行单个搜索框的搜索逻辑"""
-    #     query = query.strip()
-    #     if not query:
-    #         self.status_var.set("搜索框为空")
-    #         return
-
-    #     # --- 插入历史：先去掉旧的，再插到最前面 ---
-    #     if query in history_list:
-    #         history_list.remove(query)
-    #     history_list.insert(0, query)
-
-    #     # 保留最多 20 条
-    #     history_list[:] = history_list[:20]
-
-    #     # 更新到 combobox
-    #     combo['values'] = history_list
-    #     self.save_search_history()  # 存档时也会去重
-
-    #     # --- 数据过滤 ---
-    #     if self.df_all.empty:
-    #         self.status_var.set("当前数据为空")
-    #         return
-
-    #     try:
-    #         df_filtered = self.df_all.query(query)
-    #         self.refresh_tree(df_filtered)
-    #         self.status_var.set(f"搜索: {query} | 结果 {len(df_filtered)} 行")
-    #     except Exception as e:
-    #         log.error(f"Query error: {e}")
-    #         self.status_var.set(f"查询错误: {e}")
-
     import re
 
     def process_query(query: str):
@@ -3425,7 +3184,7 @@ class StockMonitorApp(tk.Tk):
                 new_history.append(existing_queries[q])
             else:
                 # 新建
-                new_history.append({"query": q, "starred": False, "note": ""})
+                new_history.append({"query": q, "starred":  0, "note": ""})
 
         setattr(self.query_manager, history_attr, new_history)
 
@@ -3478,7 +3237,7 @@ class StockMonitorApp(tk.Tk):
         #         except Exception:
         #             pass
         #         # 同步到 QueryHistoryManager
-        #         self.query_manager.history1 = [{"query": q, "starred": False, "note": ""} for q in self.search_history1]
+        #         self.query_manager.history1 = [{"query": q, "starred":  0, "note": ""} for q in self.search_history1]
         #         if self.query_manager.current_key == "history1":
         #             self.query_manager.current_history = self.query_manager.history1
         #             self.query_manager.refresh_tree()
@@ -3496,7 +3255,7 @@ class StockMonitorApp(tk.Tk):
         #             pass
 
         #         # 同步到 QueryHistoryManager
-        #         self.query_manager.history2 = [{"query": q, "starred": False, "note": ""} for q in self.search_history2]
+        #         self.query_manager.history2 = [{"query": q, "starred":  0, "note": ""} for q in self.search_history2]
         #         if self.query_manager.current_key == "history2":
         #             self.query_manager.current_history = self.query_manager.history2
         #             self.query_manager.refresh_tree()
@@ -4034,7 +3793,7 @@ class StockMonitorApp(tk.Tk):
     #     if target in history:
     #         history.remove(target)
     #         combo['values'] = history
-    #         query_manager_his= [{"query": q, "starred": False, "note": ""} for q in history]
+    #         query_manager_his= [{"query": q, "starred":  0, "note": ""} for q in history]
 
     #         if self.query_manager.current_key == "history1" and which == 1:
     #             self.query_manager.current_history = query_manager_his
@@ -4208,8 +3967,9 @@ class StockMonitorApp(tk.Tk):
             try:
                 with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
                     pos = json.load(f)
-                    # x,y = self.get_centered_window_position_main(self, pos['width'], pos['height'])
+                    # x,y = self.get_centered_window_position(self, pos['width'], pos['height'])
                     x,y = clamp_window_to_screens(pos['x'],pos['y'], pos['width'], pos['height'])
+                    # x,y = self.get_centered_window_position(pos['x'],pos['y'], pos['width'], pos['height'])
                     # self.geometry(f"{pos['width']}x{pos['height']}+{pos['x']}+{pos['y']}")
                     self.geometry(f"{pos['width']}x{pos['height']}+{x}+{y}")
             except Exception as e:
@@ -4304,8 +4064,8 @@ class QueryHistoryManager:
         # 设置初始列宽（按比例 6:1:3）
         total_width = 600  # 初始宽度参考
         self.tree.column("query", width=int(total_width * 0.6), anchor="w")
-        self.tree.column("star", width=int(total_width * 0.1), anchor="center")
-        self.tree.column("note", width=int(total_width * 0.3), anchor="w")
+        self.tree.column("star", width=int(total_width * 0.2), anchor="center")
+        self.tree.column("note", width=int(total_width * 0.2), anchor="w")
 
         self.tree.pack(fill="both", expand=True, padx=5, pady=1)
 
@@ -4382,43 +4142,108 @@ class QueryHistoryManager:
             else:
                 self.editor_frame.pack(fill="both", expand=True)  # 仅显示，不移动位置
 
+    # def save_search_history_starred(self):
+    #     """保存到文件，合并编辑的20条到历史顶部，保留最多 MAX_HISTORY 条"""
+    #     try:
+    #         # 先读文件中的全量历史
+    #         all_data = {"history1": [], "history2": []}
+    #         if os.path.exists(self.history_file):
+    #             with open(self.history_file, "r", encoding="utf-8") as f:
+    #                 try:
+    #                     loaded_data = json.load(f)
+    #                     # 历史全量去重
+    #                     def dedup(history):
+    #                         seen = set()
+    #                         result = []
+    #                         for r in history:
+    #                             q = r.get("query") if isinstance(r, dict) else str(r)
+    #                             if q not in seen:
+    #                                 seen.add(q)
+    #                                 result.append(r)
+    #                         return result
+
+    #                     h1_old = dedup(loaded_data.get("history1", []))
+    #                     h2_old = dedup(loaded_data.get("history2", []))
+
+    #                     # 剔除最后 20 条（编辑区）
+
+    #                     # all_data["history1"] = h1_old[:-20] if len(h1_old) > 20 else []
+    #                     # all_data["history2"] = h2_old[:-20] if len(h2_old) > 20 else []
+    #                     all_data["history1"] = h1_old[self.his_limit:] if len(h1_old) > self.his_limit else []
+    #                     all_data["history2"] = h2_old[self.his_limit:] if len(h2_old) > self.his_limit else []
+    #                     print(f'h1_old : {len(h1_old)} all_data : {len(all_data["history1"])}')
+    #                     print(f'h2_old : {len(h2_old)} all_data : {len(all_data["history2"])}')
+
+    #                 except json.JSONDecodeError:
+    #                     pass
+
+    #         def merge_history(current, old):
+    #             """合并：current优先，后补 old 去重"""
+    #             seen = set()
+    #             result = []
+
+    #             for r in current:
+    #                 q = r.get("query") if isinstance(r, dict) else str(r)
+    #                 if q not in seen:
+    #                     seen.add(q)
+    #                     result.append(r)
+    #             for r in old:
+    #                 q = r.get("query") if isinstance(r, dict) else str(r)
+    #                 if q not in seen:
+    #                     seen.add(q)
+    #                     result.append(r)
+    #             return result[:self.MAX_HISTORY]
+
+    #         all_data["history1"] = merge_history(self.history1, all_data.get("history1", []))
+    #         all_data["history2"] = merge_history(self.history2, all_data.get("history2", []))
+    #         print(f'all_data 1: {len(all_data["history1"])}')
+    #         print(f'all_data 2: {len(all_data["history2"])}')
+    #         # 写回文件（全量保存）
+    #         with open(self.history_file, "w", encoding="utf-8") as f:
+    #             json.dump(all_data, f, ensure_ascii=False, indent=2)
+
+    #     except Exception as e:
+    #         messagebox.showerror("错误", f"保存搜索历史失败: {e}")
+
     def save_search_history(self):
-        """保存到文件，合并编辑的20条到历史顶部，保留最多 MAX_HISTORY 条"""
+        """保存到文件，合并编辑的 N 条到历史顶部，保留最多 MAX_HISTORY 条"""
         try:
-            # 先读文件中的全量历史
-            all_data = {"history1": [], "history2": []}
-            if os.path.exists(self.history_file):
-                with open(self.history_file, "r", encoding="utf-8") as f:
-                    try:
-                        loaded_data = json.load(f)
-                        # 历史全量去重
-                        def dedup(history):
-                            seen = set()
-                            result = []
-                            for r in history:
-                                q = r.get("query") if isinstance(r, dict) else str(r)
-                                if q not in seen:
-                                    seen.add(q)
-                                    result.append(r)
-                            return result
+            # ---------- 工具函数 ----------
+            def dedup(history):
+                seen = set()
+                result = []
+                for r in history:
+                    q = r.get("query") if isinstance(r, dict) else str(r)
+                    if q not in seen:
+                        seen.add(q)
+                        result.append(r)
+                return result
 
-                        h1_old = dedup(loaded_data.get("history1", []))
-                        h2_old = dedup(loaded_data.get("history2", []))
+            def normalize_history(history):
+                """统一字段格式，确保 starred 为 int，note 存在"""
+                normalized = []
+                for r in history:
+                    if not isinstance(r, dict):
+                        continue
+                    q = r.get("query", "")
+                    starred = r.get("starred", 0)
+                    note = r.get("note", "")
 
-                        # 剔除最后 20 条（编辑区）
+                    # 布尔 → 整数，非法类型 → 0
+                    if isinstance(starred, bool):
+                        starred = 1 if starred else 0
+                    elif not isinstance(starred, int):
+                        starred = 0
 
-                        # all_data["history1"] = h1_old[:-20] if len(h1_old) > 20 else []
-                        # all_data["history2"] = h2_old[:-20] if len(h2_old) > 20 else []
-                        all_data["history1"] = h1_old[self.his_limit:] if len(h1_old) > self.his_limit else []
-                        all_data["history2"] = h2_old[self.his_limit:] if len(h2_old) > self.his_limit else []
-                        print(f'h1_old : {len(h1_old)} all_data : {len(all_data["history1"])}')
-                        print(f'h2_old : {len(h2_old)} all_data : {len(all_data["history2"])}')
-
-                    except json.JSONDecodeError:
-                        pass
+                    normalized.append({
+                        "query": q,
+                        "starred": starred,
+                        "note": note
+                    })
+                return normalized
 
             def merge_history(current, old):
-                """合并：current优先，后补 old 去重"""
+                """合并：current 优先，后补 old 去重"""
                 seen = set()
                 result = []
 
@@ -4434,91 +4259,66 @@ class QueryHistoryManager:
                         result.append(r)
                 return result[:self.MAX_HISTORY]
 
-            all_data["history1"] = merge_history(self.history1, all_data.get("history1", []))
-            all_data["history2"] = merge_history(self.history2, all_data.get("history2", []))
-            print(f'all_data 1: {len(all_data["history1"])}')
-            print(f'all_data 2: {len(all_data["history2"])}')
-            # 写回文件（全量保存）
+            # ---------- 加载旧历史 ----------
+            all_data = {"history1": [], "history2": []}
+            if os.path.exists(self.history_file):
+                with open(self.history_file, "r", encoding="utf-8") as f:
+                    try:
+                        loaded_data = json.load(f)
+                        h1_old = dedup(loaded_data.get("history1", []))
+                        h2_old = dedup(loaded_data.get("history2", []))
+                        all_data["history1"] = h1_old[self.his_limit:] if len(h1_old) > self.his_limit else []
+                        all_data["history2"] = h2_old[self.his_limit:] if len(h2_old) > self.his_limit else []
+                    except json.JSONDecodeError:
+                        pass
+
+            # ---------- 合并并规范 ----------
+            self.history1 = normalize_history(self.history1)
+            self.history2 = normalize_history(self.history2)
+            all_data["history1"] = normalize_history(merge_history(self.history1, all_data.get("history1", [])))
+            all_data["history2"] = normalize_history(merge_history(self.history2, all_data.get("history2", [])))
+
+            # ---------- 写回文件 ----------
             with open(self.history_file, "w", encoding="utf-8") as f:
                 json.dump(all_data, f, ensure_ascii=False, indent=2)
 
+            print(f"✅ 搜索历史已保存 (共 {len(all_data['history1'])}/{len(all_data['history2'])})，starred 已统一为整数")
+
         except Exception as e:
             messagebox.showerror("错误", f"保存搜索历史失败: {e}")
-
 
 
     def load_search_history(self):
-        """从文件加载，只取最后20条作为当前编辑数据"""
+        """从文件加载，只取最后 N 条作为当前编辑数据，并自动升级 starred 字段为整数"""
         h1, h2 = [], []
+        upgraded = False  # 是否发生过格式升级
+
         if os.path.exists(self.history_file):
             try:
                 with open(self.history_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    # 全量历史，去重
-                    raw_h1 = [self._normalize_record(r) for r in data.get("history1", [])]
-                    raw_h2 = [self._normalize_record(r) for r in data.get("history2", [])]
 
-                    def dedup(history):
-                        seen = set()
-                        result = []
-                        for r in history:
-                            q = r.get("query", "")
-                            if q not in seen:
-                                seen.add(q)
-                                result.append(r)
-                        return result
+                # 自动兼容/升级 starred 字段
+                def normalize_starred_field(history_list):
+                    nonlocal upgraded
+                    for r in history_list:
+                        val = r.get("starred", 0)
+                        if isinstance(val, bool):
+                            r["starred"] = 1 if val else 0
+                            upgraded = True
+                        elif not isinstance(val, int):
+                            # 出现异常类型也统一置0
+                            r["starred"] = 0
+                            upgraded = True
 
-                    raw_h1 = dedup(raw_h1)
-                    raw_h2 = dedup(raw_h2)
-                    # 只取最后 20 条作为可编辑区域
-                    # h1 = raw_h1[-20:] if len(raw_h1) > 20 else raw_h1
-                    # h2 = raw_h2[-20:] if len(raw_h2) > 20 else raw_h2
-                    h1 = raw_h1[:self.his_limit] if len(raw_h1) > self.his_limit else raw_h1
-                    h2 = raw_h2[:self.his_limit] if len(raw_h2) > self.his_limit else raw_h2
+                raw_h1 = [self._normalize_record(r) for r in data.get("history1", [])]
+                raw_h2 = [self._normalize_record(r) for r in data.get("history2", [])]
 
-            except Exception as e:
-                messagebox.showerror("错误", f"加载搜索历史失败: {e}")
+                # 升级字段
+                normalize_starred_field(raw_h1)
+                normalize_starred_field(raw_h2)
 
-        return h1, h2
-    # ========== 数据存取 ==========
-    def save_search_history1(self):
-        """保存到文件，自动按 query 去重"""
-        try:
-            # 去重
-            def dedup(history):
-                seen = set()
-                result = []
-                for r in history:
-                    q = r.get("query") if isinstance(r, dict) else str(r)
-                    if q not in seen:
-                        seen.add(q)
-                        result.append(r)
-                return result
-
-            self.history1 = dedup(self.history1)
-            self.history2 = dedup(self.history2)
-
-            data = {
-                "history1": self.history1,
-                "history2": self.history2
-            }
-            with open(self.history_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            messagebox.showerror("错误", f"保存搜索历史失败: {e}")
-
-
-    def load_search_history1(self):
-        """从文件加载并去重"""
-        h1, h2 = [], []
-        if os.path.exists(self.history_file):
-            try:
-                with open(self.history_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    h1 = [self._normalize_record(r) for r in data.get("history1", [])]
-                    h2 = [self._normalize_record(r) for r in data.get("history2", [])]
-
-                # 按 query 去重
+                # 去重函数
                 def dedup(history):
                     seen = set()
                     result = []
@@ -4529,12 +4329,114 @@ class QueryHistoryManager:
                             result.append(r)
                     return result
 
-                h1 = dedup(h1)
-                h2 = dedup(h2)
+                raw_h1 = dedup(raw_h1)
+                raw_h2 = dedup(raw_h2)
+
+                # 只取最近 self.his_limit 条
+                h1 = raw_h1[:self.his_limit] if len(raw_h1) > self.his_limit else raw_h1
+                h2 = raw_h2[:self.his_limit] if len(raw_h2) > self.his_limit else raw_h2
+
+                # 如果有升级，自动保存回文件（避免下次重复升级）
+                if upgraded:
+                    with open(self.history_file, "w", encoding="utf-8") as f:
+                        json.dump({"history1": raw_h1, "history2": raw_h2}, f, ensure_ascii=False, indent=2)
+                    print("✅ 已自动升级 search_history.json 的 starred 字段为整数格式")
 
             except Exception as e:
                 messagebox.showerror("错误", f"加载搜索历史失败: {e}")
+
         return h1, h2
+
+
+    # def load_search_history_starred(self):
+    #     """从文件加载，只取最后20条作为当前编辑数据"""
+    #     h1, h2 = [], []
+    #     if os.path.exists(self.history_file):
+    #         try:
+    #             with open(self.history_file, "r", encoding="utf-8") as f:
+    #                 data = json.load(f)
+    #                 # 全量历史，去重
+    #                 raw_h1 = [self._normalize_record(r) for r in data.get("history1", [])]
+    #                 raw_h2 = [self._normalize_record(r) for r in data.get("history2", [])]
+
+    #                 def dedup(history):
+    #                     seen = set()
+    #                     result = []
+    #                     for r in history:
+    #                         q = r.get("query", "")
+    #                         if q not in seen:
+    #                             seen.add(q)
+    #                             result.append(r)
+    #                     return result
+
+    #                 raw_h1 = dedup(raw_h1)
+    #                 raw_h2 = dedup(raw_h2)
+    #                 # 只取最后 20 条作为可编辑区域
+    #                 # h1 = raw_h1[-20:] if len(raw_h1) > 20 else raw_h1
+    #                 # h2 = raw_h2[-20:] if len(raw_h2) > 20 else raw_h2
+    #                 h1 = raw_h1[:self.his_limit] if len(raw_h1) > self.his_limit else raw_h1
+    #                 h2 = raw_h2[:self.his_limit] if len(raw_h2) > self.his_limit else raw_h2
+
+    #         except Exception as e:
+    #             messagebox.showerror("错误", f"加载搜索历史失败: {e}")
+
+    #     return h1, h2
+
+    # # ========== 数据存取 ==========
+    # def save_search_history1(self):
+    #     """保存到文件，自动按 query 去重"""
+    #     try:
+    #         # 去重
+    #         def dedup(history):
+    #             seen = set()
+    #             result = []
+    #             for r in history:
+    #                 q = r.get("query") if isinstance(r, dict) else str(r)
+    #                 if q not in seen:
+    #                     seen.add(q)
+    #                     result.append(r)
+    #             return result
+
+    #         self.history1 = dedup(self.history1)
+    #         self.history2 = dedup(self.history2)
+
+    #         data = {
+    #             "history1": self.history1,
+    #             "history2": self.history2
+    #         }
+    #         with open(self.history_file, "w", encoding="utf-8") as f:
+    #             json.dump(data, f, ensure_ascii=False, indent=2)
+    #     except Exception as e:
+    #         messagebox.showerror("错误", f"保存搜索历史失败: {e}")
+
+
+    # def load_search_history1(self):
+    #     """从文件加载并去重"""
+    #     h1, h2 = [], []
+    #     if os.path.exists(self.history_file):
+    #         try:
+    #             with open(self.history_file, "r", encoding="utf-8") as f:
+    #                 data = json.load(f)
+    #                 h1 = [self._normalize_record(r) for r in data.get("history1", [])]
+    #                 h2 = [self._normalize_record(r) for r in data.get("history2", [])]
+
+    #             # 按 query 去重
+    #             def dedup(history):
+    #                 seen = set()
+    #                 result = []
+    #                 for r in history:
+    #                     q = r.get("query", "")
+    #                     if q not in seen:
+    #                         seen.add(q)
+    #                         result.append(r)
+    #                 return result
+
+    #             h1 = dedup(h1)
+    #             h2 = dedup(h2)
+
+    #         except Exception as e:
+    #             messagebox.showerror("错误", f"加载搜索历史失败: {e}")
+    #     return h1, h2
 
 
     def _normalize_record(self, r):
@@ -4550,9 +4452,9 @@ class QueryHistoryManager:
                 pass
             return {"query": q, "starred": r.get("starred", False), "note": r.get("note", "")}
         elif isinstance(r, str):
-            return {"query": r, "starred": False, "note": ""}
+            return {"query": r, "starred":  0, "note": ""}
         else:
-            return {"query": str(r), "starred": False, "note": ""}
+            return {"query": str(r), "starred":  0, "note": ""}
 
     # ========== 功能 ==========
     def switch_group(self, event=None):
@@ -4570,7 +4472,7 @@ class QueryHistoryManager:
     #     if not query:
     #         messagebox.showwarning("提示", "请输入 Query")
     #         return
-    #     self.current_history.insert(0, {"query": query, "starred": False, "note": ""})
+    #     self.current_history.insert(0, {"query": query, "starred":  0, "note": ""})
     #     self.refresh_tree()
     #     self.entry_query.delete(0, tk.END)
     #     self.save_search_history()
@@ -4608,7 +4510,7 @@ class QueryHistoryManager:
             self.current_history.remove(existing)
 
         # 插入到顶部
-        self.current_history.insert(0, {"query": query, "starred": False, "note": ""})
+        self.current_history.insert(0, {"query": query, "starred":  0, "note": ""})
         if self.current_key == "history1":
             self.history1 = self.current_history
         else:  # history2
@@ -4618,22 +4520,45 @@ class QueryHistoryManager:
         self.entry_query.delete(0, tk.END)
         # self.save_search_history()
 
-
     def on_click_star(self, event):
         region = self.tree.identify("region", event.x, event.y)
         if region != "cell":
             return
         col = self.tree.identify_column(event.x)
-        if col != "#2":
+        if col != "#2":  # 第二列是星标
             return
         row_id = self.tree.identify_row(event.y)
         if not row_id:
             return
+
         idx = int(row_id) - 1
         if 0 <= idx < len(self.current_history):
-            self.current_history[idx]["starred"] = not self.current_history[idx]["starred"]
+            record = self.current_history[idx]
+            # 原布尔值兼容转 int
+            old_val = record.get("starred", 0)
+            if isinstance(old_val, bool):
+                old_val = 1 if old_val else 0
+
+            # 循环 0 → 1 → 2 → 3 → 4 → 0
+            record["starred"] = (old_val + 1) % 5
             self.refresh_tree()
-            # self.save_search_history()
+
+
+    # def on_click_star(self, event):
+    #     region = self.tree.identify("region", event.x, event.y)
+    #     if region != "cell":
+    #         return
+    #     col = self.tree.identify_column(event.x)
+    #     if col != "#2":
+    #         return
+    #     row_id = self.tree.identify_row(event.y)
+    #     if not row_id:
+    #         return
+    #     idx = int(row_id) - 1
+    #     if 0 <= idx < len(self.current_history):
+    #         self.current_history[idx]["starred"] = not self.current_history[idx]["starred"]
+    #         self.refresh_tree()
+    #         # self.save_search_history()
 
     # def on_double_click(self, event):
     #     region = self.tree.identify("region", event.x, event.y)
@@ -4660,40 +4585,67 @@ class QueryHistoryManager:
     #             self.save_search_history()
 
     def get_centered_window_position_query(self, parent, win_width, win_height, margin=10):
-        # 获取鼠标全局位置（跨屏）
+        """
+        自动定位弹窗在鼠标附近（多屏+高DPI兼容）
+        """
+        # 获取鼠标全局坐标
         mx = parent.winfo_pointerx()
         my = parent.winfo_pointery()
 
-        # 找出鼠标所在屏幕
-        monitors = get_monitors()
-        current_screen = None
-        for m in monitors:
-            if m.x <= mx < m.x + m.width and m.y <= my < m.y + m.height:
-                current_screen = m
-                break
-        if current_screen is None:
-            # 如果找不到（罕见），默认使用主屏
-            current_screen = monitors[0]
-
-        screen_x, screen_y = current_screen.x, current_screen.y
-        screen_width, screen_height = current_screen.width, current_screen.height
+        # DPI 缩放修正（防止4K屏太小）
+        # scale = get_system_dpi_scale()
+        scale = 1
+        win_width = int(win_width * scale)
+        win_height = int(win_height * scale)
 
         # 默认在鼠标右侧显示
         x = mx + margin
         y = my - win_height // 2
 
-        # 如果右边放不下，则放左侧
-        if x + win_width > screen_x + screen_width:
-            x = mx - win_width - margin
+        # -----------------------------
+        # 获取所有显示器信息
+        # -----------------------------
+        monitors = []
+        try:
+            for handle_tuple in win32api.EnumDisplayMonitors():
+                info = win32api.GetMonitorInfo(handle_tuple[0])
+                monitors.append(info["Monitor"])  # (left, top, right, bottom)
+        except Exception as e:
+            print(f"[WARN] 获取显示器信息失败: {e}")
 
-        # 垂直方向防止超出屏幕
-        if y + win_height > screen_y + screen_height:
-            y = screen_y + screen_height - win_height - margin
-        if y < screen_y:
-            y = screen_y + margin
+        # 如果检测不到，使用主屏幕尺寸
+        if not monitors:
+            screen_width = win32api.GetSystemMetrics(0)
+            screen_height = win32api.GetSystemMetrics(1)
+            monitors = [(0, 0, screen_width, screen_height)]
 
-        print(f"[get_centered_window_position_query] 鼠标=({mx},{my}), 屏幕=({screen_x},{screen_y},{screen_width},{screen_height}), 结果=({x},{y})")
-        return x, y
+        # -----------------------------
+        # 检查并限制窗口在显示器边界内
+        # -----------------------------
+        hit_monitor = None
+        for left, top, right, bottom in monitors:
+            if left <= mx < right and top <= my < bottom:
+                hit_monitor = (left, top, right, bottom)
+                break
+
+        if hit_monitor:
+            left, top, right, bottom = hit_monitor
+            # 如果右边放不下，则放左侧
+            if x + win_width > right:
+                x = mx - win_width - margin
+
+            # 防止超出边界
+            x = max(left, min(x, right - win_width))
+            y = max(top, min(y, bottom - win_height))
+            print(f"✅ 命中屏幕 ({left},{top},{right},{bottom}) scale={scale:.2f} → ({x},{y})")
+        else:
+            # 未命中任何屏幕则居中主屏
+            main_left, main_top, main_right, main_bottom = monitors[0]
+            x = main_left + (main_right - main_left - win_width) // 2
+            y = main_top + (main_bottom - main_top - win_height) // 2
+            print(f"⚠️ 未命中屏幕, 使用主屏居中 scale={scale:.2f} → ({x},{y})")
+
+        return int(x), int(y)
 
 
     def askstring_at_parent(self,parent, title, prompt, initialvalue=""):
@@ -4942,7 +4894,7 @@ class QueryHistoryManager:
         # if self.current_key == "history1":
         #     self.current_history = self.history1
         # else:
-        #     # self.current_history = [{"query": q, "starred": False, "note": ""} for q in self.history2]
+        #     # self.current_history = [{"query": q, "starred":  0, "note": ""} for q in self.history2]
         #     self.current_history = self.history2
         # 清空Treeview
         for i in self.tree.get_children():
@@ -4950,9 +4902,17 @@ class QueryHistoryManager:
         
         # 填充Treeview
         for idx, record in enumerate(self.current_history, start=1):
-            star = "⭐" if record.get("starred") else ""
+            #单星
+            # star = "⭐" if record.get("starred") else ""
+
+            # 原来：star_text = "★" if rec.get("starred") else ""
+            star_count = record.get("starred", 0)
+            if isinstance(star_count, bool):
+                star_count = 1 if star_count else 0
+            star_text = "★" * star_count
+
             note = record.get("note", "")
-            self.tree.insert("", "end", iid=str(idx), values=(record.get("query", ""), star, note))
+            self.tree.insert("", "end", iid=str(idx), values=(record.get("query", ""), star_text, note))
 
 
 
