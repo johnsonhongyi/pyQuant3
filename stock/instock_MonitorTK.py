@@ -760,7 +760,7 @@ class StockMonitorApp(tk.Tk):
         self.current_cols = ["code"] + DISPLAY_COLS
         # TreeView 列头
         for col in ["code"] + DISPLAY_COLS:
-            width = 120 if col=="name" else 80
+            width = 80 if col=="name" else 60
             self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
             self.tree.column(col, width=width, anchor="center", minwidth=50)
             # self.tree.heading(col, command=lambda c=col: self.show_column_menu(c))
@@ -814,30 +814,144 @@ class StockMonitorApp(tk.Tk):
         # 绑定双击事件
         # self.tree.bind("<Double-1>", self.on_double_click)
 
-    # def update_treeview_cols_tmp(self, new_cols):
+    def bind_treeview_column_resize(self):
+        def on_column_release(event):
+            # # 获取当前列宽
+            # col_widths = {col: self.tree.column(col)["width"] for col in self.tree["columns"]}
+            # print("当前列宽：", col_widths)
+
+            # # 如果需要，可以单独保存name列宽
+            # if "name" in col_widths:
+            #     self._name_col_width = col_widths["name"]
+            #     print("name列宽更新为:", self._name_col_width)
+
+            # 只记录 name 列宽
+            if "name" in self.tree["columns"]:
+                self._name_col_width = self.tree.column("name")["width"]
+                print("name列宽更新为:", self._name_col_width)
+
+        self.tree.bind("<ButtonRelease-1>", on_column_release)
+
+
+    def update_treeview_cols(self, new_cols):
+        try:
+            # 1. 合法列
+            valid_cols = [c for c in new_cols if c in self.df_all.columns]
+            if 'code' not in valid_cols:
+                valid_cols = ["code"] + valid_cols
+
+            # 相同就跳过
+            if valid_cols == self.current_cols:
+                return
+
+            self.current_cols = valid_cols
+
+            # 2. 暂时清空列
+            self.tree["displaycolumns"] = ()
+            self.tree["columns"] = ()
+            self.tree.update_idletasks()
+
+            # 3. 重新配置列
+            cols = tuple(self.current_cols)
+            self.tree["columns"] = cols
+            self.tree["displaycolumns"] = cols
+            self.tree.configure(show="headings")
+
+            # 4. 设置列宽
+            if not hasattr(self, "_name_col_width"):
+                self._name_col_width = 60  # 初始name列宽
+
+            # for col in cols:
+            #     self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+            #     if col == "name":
+            #         # 固定name列宽
+            #         self.tree.column(col, width=self._name_col_width, anchor="center", minwidth=50, stretch=False)
+            #     else:
+            #         # 其他列自动宽度
+            #         self.tree.column(col, width=60, anchor="center", minwidth=50, stretch=True)
+
+            co2int = ['ra','ral','fib','fibl','op', 'ratio','red','top10','ra']
+            co2width = ['boll','kind']   
+            for col in cols:
+                self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+
+                if col == "name":
+                    width = getattr(self, "_name_col_width", 120)  # 使用记录的 name 宽度
+                    minwidth = 50
+                    self.tree.column(col, width=self._name_col_width, anchor="center", minwidth=minwidth, stretch=False)
+                elif col in co2int:
+                    width = 60  # 数字列宽度可小
+                    minwidth = 20
+                    self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
+                elif col in co2width:
+                    width = 60  # 数字列宽度可小
+                    minwidth = 30
+                    self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
+                else:
+                    width = 80
+                    minwidth = 50
+                    self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
+
+
+            # 5. 延迟刷新
+            self.tree.after(100, self.refresh_tree)
+            self.tree.after(500, self.bind_treeview_column_resize)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print("更新 Treeview 列失败：", e)
+
+
+    # def update_treeview_cols_remember_col(self, new_cols):
     #     try:
+    #         # 1. 合法列
+    #         valid_cols = [c for c in new_cols if c in self.df_all.columns]
+    #         if 'code' not in valid_cols:
+    #             valid_cols = ["code"] + valid_cols
 
-    #         if 'perc1d' not in self.current_cols:
-    #             # 遍历 self.current_cols 找到第一个 percXd
-    #             first_perc_col = None
-    #             for col in self.current_cols:
-    #                 if col.startswith('perc') and col != 'perc1d':  # 忽略 perc1d
-    #                     first_perc_col = col
-    #                     break
-    #             print(f'first_perc_col : {first_perc_col}')
-    #             # 如果 new_cols 中有 perc1d，就替换成 first_perc_col
-    #             if 'perc1d' in new_cols and first_perc_col:
-    #                 idx = new_cols.index('perc1d')
-    #                 new_cols[idx] = first_perc_col
-    #                 print(f'new_cols : idx : {idx} {new_cols[idx]}')
-    #                 print(f"⚙️ 替换 new_cols 中的 perc1d → {first_perc_col}")
-    #             else:
-    #                 # # 方法 1：如果确定 perc1d 存在
-    #                 # if 'perc1d' in new_cols:
-    #                 #     new_cols.remove('perc1d')
-    #                 # 方法 2：更通用，删除所有 perc1d（防止重复）
-    #                 new_cols = [c for c in new_cols if c != 'perc1d']
+    #         # 相同就跳过
+    #         if valid_cols == self.current_cols:
+    #             return
 
+    #         self.current_cols = valid_cols
+
+    #         # 2. 暂时清空列
+    #         self.tree["displaycolumns"] = ()
+    #         self.tree["columns"] = ()
+    #         self.tree.update_idletasks()
+
+    #         # 3. 重新配置列
+    #         cols = tuple(self.current_cols)
+    #         self.tree["columns"] = cols
+    #         self.tree["displaycolumns"] = cols
+    #         self.tree.configure(show="headings")
+
+    #         # 4. 设置列宽，只在第一次初始化或新增列时设置宽度
+    #         if not hasattr(self, "_col_widths"):
+    #             self._col_widths = {}
+
+    #         for col in cols:
+    #             if col not in self._col_widths:
+    #                 # 初始化宽度
+    #                 self._col_widths[col] = 80 if col == "name" else 60
+    #             self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+    #             self.tree.column(col, width=self._col_widths[col], anchor="center", minwidth=50,
+    #                              stretch=(col != "name"))
+
+    #         # 🔹 5. 自动调整列宽（可选）
+    #         # self.adjust_column_widths()
+    #         # 5. 延迟刷新
+    #         self.tree.after(100, self.refresh_tree)
+
+    #     except Exception as e:
+    #         import traceback
+    #         traceback.print_exc()
+    #         print("更新 Treeview 列失败：", e)
+
+
+
+    # def update_treeview_cols(self, new_cols):
+    #     try:
     #         # 🔹 1. 保证 new_cols 合法：必须存在于 df_all.columns 中
     #         valid_cols = [c for c in new_cols if c in self.df_all.columns]
     #         if 'code' not in valid_cols:
@@ -848,92 +962,40 @@ class StockMonitorApp(tk.Tk):
     #             return
 
     #         # print(f"[update_treeview_cols] current={self.current_cols}, new={valid_cols}")
-    #         self.curren`t_cols = valid_cols
-    #         cols = tuple(self.current_cols)`
-    #         self.after_idle(lambda: self.reset_tree_columns(self.tree, cols, self.sort_by_column))
-    #     except:
-    #         pass
 
-    def update_treeview_cols(self, new_cols):
-        try:
-            # 🔹 1. 保证 new_cols 合法：必须存在于 df_all.columns 中
-            valid_cols = [c for c in new_cols if c in self.df_all.columns]
-            if 'code' not in valid_cols:
-                valid_cols = ["code"] + valid_cols
+    #         self.current_cols = valid_cols
+    #         # cols = tuple(self.current_cols)
+    #         # self.after_idle(lambda: self.reset_tree_columns(self.tree, cols, self.sort_by_column))
 
-            # 如果完全相同就跳过
-            if valid_cols == self.current_cols:
-                return
-
-            # print(f"[update_treeview_cols] current={self.current_cols}, new={valid_cols}")
-
-            self.current_cols = valid_cols
-            # cols = tuple(self.current_cols)
-            # self.after_idle(lambda: self.reset_tree_columns(self.tree, cols, self.sort_by_column))
-
-            # 🔹 2. 暂时清空列，避免 Invalid column index 残留
-            self.tree["displaycolumns"] = ()
-            self.tree["columns"] = ()
-            self.tree.update_idletasks()
-
-            # 🔹 3. 重新配置列
-            cols = tuple(self.current_cols)
-            self.tree["columns"] = cols
-            self.tree["displaycolumns"] = cols
-            self.tree.configure(show="headings")
-
-            # 🔹 4. 重新设置表头和列宽
-            for col in cols:
-                width = 120 if col == "name" else 80
-                self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
-                self.tree.column(col, width=width, anchor="center", minwidth=50)
-
-            # 🔹 5. 自动调整列宽（可选）
-            self.adjust_column_widths()
-
-            # 🔹 6. 延迟刷新数据
-            self.tree.after(100, self.refresh_tree)
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            print("更新 Treeview 列失败：", e)
-
-
-    # def update_treeview_cols1(self, new_cols):
-    #     try:
-    #         # code 永远在最前
-    #         new_cols = [c for c in new_cols if c in self.df_all.columns]
-    #         if 'code' not in new_cols:
-    #             new_cols = ["code"] + new_cols
-
-    #         if new_cols == self.current_cols:
-    #             return  # 无变化不处理
-
-    #         print(f'self.current_cols : {self.current_cols}    new_cols : {new_cols}')
-    #         self.current_cols = new_cols
-
-    #         # # 暂停更新以避免崩溃
+    #         # 🔹 2. 暂时清空列，避免 Invalid column index 残留
     #         self.tree["displaycolumns"] = ()
     #         self.tree["columns"] = ()
+    #         self.tree.update_idletasks()
 
-    #         # 清空旧列安全更新
+    #         # 🔹 3. 重新配置列
     #         cols = tuple(self.current_cols)
     #         self.tree["columns"] = cols
-    #         # self.tree["show"] = "headings"
+    #         self.tree["displaycolumns"] = cols
+    #         self.tree.configure(show="headings")
+
+    #         # # 🔹 4. 重新设置表头和列宽
+    #         # for col in cols:
+    #         #     width = 120 if col == "name" else 80
+    #         #     self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+    #         #     self.tree.column(col, width=width, anchor="center", minwidth=50)
+
+    #         # 获取当前列宽
+    #         col_widths = {col: self.tree.column(col)["width"] for col in self.tree["columns"]}
 
     #         for col in cols:
+    #             width = col_widths.get(col, 120 if col == "name" else 80)
     #             self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
-    #             width = 120 if col == "name" else 80
     #             self.tree.column(col, width=width, anchor="center", minwidth=50)
 
-    #         # 自适应列宽
-    #         self.adjust_column_widths()
+    #         # 🔹 5. 自动调整列宽（可选）
+    #         # self.adjust_column_widths()
 
-    #         # 恢复显示
-    #         self.tree["displaycolumns"] = cols
-
-    #         # 最后再刷新数据（延迟一点更安全）
+    #         # 🔹 6. 延迟刷新数据
     #         self.tree.after(100, self.refresh_tree)
 
     #     except Exception as e:
@@ -942,42 +1004,7 @@ class StockMonitorApp(tk.Tk):
     #         print("更新 Treeview 列失败：", e)
 
 
-    # def update_treeview_cols1(self, new_cols):
-    #     # code 永远在最前
-    #     if 'code' not in new_cols:
-    #         new_cols = ["code"] + new_cols
-    #     refesh_col_status = False
-    #     if new_cols !=  self.current_cols:
-    #         refesh_col_status = True
-    #         self.current_cols =  new_cols
-    #         # ⚠️ 先清空旧列定义，避免 Invalid column index 错误
-    #         self.tree["columns"] = ()
-    #         self.tree["show"] = "headings"
-
-    #         # 再设置新列
-    #         self.tree["columns"] = self.current_cols
-
-
-    #         for col in self.current_cols:
-    #             self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
-    #             # 初始先给个宽度
-    #             width = 120 if col == "name" else 80
-    #             self.tree.column(col, width=width, anchor="center", minwidth=50)
-
-    #         # 最后自适应调整
-    #         self.adjust_column_widths()
-    #         if refesh_col_status:
-    #             self.refresh_tree()
-
-    # def open_column_manager(self,master, all_columns, on_apply_callback):
-    #     if  self.ColManagerconfig is None and  self.ColumnSetManager is None:
-    #         self.ColManagerconfig = load_display_config()
-    #         # print(f'all_columns : {all_columns.values}')
-    #         # self.manager = ColumnSetManager(master, all_columns, config, on_apply_callback)
-    #         self.ColumnSetManager = ColumnSetManager(master, all_columns, self.ColManagerconfig, on_apply_callback, default_cols=DISPLAY_COLS)
-    #         self.ColumnSetManager.grab_set()
-    #     else:
-    #         self.ColumnSetManager.open_column_manager_editor()
+    
 
 
     # 防抖 resize（避免重复刷新）
@@ -2902,7 +2929,7 @@ class StockMonitorApp(tk.Tk):
             # 重新设置表头
             for col in new_columns:
                 # self.tree.heading(col, text=col, anchor="center", command=lambda _col=col: self.sort_by_column(_col, False))
-                width = 120 if col == "name" else 80
+                width = 80 if col == "name" else 60
                 self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
                 self.tree.column(col, width=width, anchor="center", minwidth=50)
 
@@ -2974,7 +3001,7 @@ class StockMonitorApp(tk.Tk):
                 tree.heading(col, text=col, command=lambda _c=col: sort_func(_c, False))
             else:
                 tree.heading(col, text=col)
-            width = 120 if col == "name" else 80
+            width = 80 if col == "name" else 60
             tree.column(col, width=width, anchor="center", minwidth=50)
 
         # print(f"[Tree Reset] applied cols={list(tree['columns'])}")
@@ -3062,7 +3089,7 @@ class StockMonitorApp(tk.Tk):
             # 跳过不存在于 df 的列
             if col not in self.current_df.columns:
                 # 仍要确保列有最小宽度
-                self.tree.column(col, width=80)
+                self.tree.column(col, width=50)
                 continue
             # 计算列中最大字符串长度
             try:
@@ -3071,8 +3098,10 @@ class StockMonitorApp(tk.Tk):
                 max_len = len(col)
             width = min(max(max_len * 8, 60), 300)  # 经验值：每字符约8像素，可调整
             if col == 'name':
-                width = int(width * 2)
+                # width = int(width * 2)
+                width = int(width * 1.5)
                 # print(f'col width: {width}')
+                # print(f'col : {col} width: {width}')
             self.tree.column(col, width=width)
 
     # ----------------- 排序 ----------------- #
