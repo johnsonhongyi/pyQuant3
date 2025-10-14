@@ -244,7 +244,7 @@ class Sina:
         # else:
         #     h5 = None
 
-        if (cct.get_work_time(otime) and cct.get_work_time()) or (not cct.get_work_time(otime) and not cct.get_work_time() and ((otime >= 1500) or cct.get_now_time_int() < 1500 ) ):
+        if (cct.get_work_time(otime) and cct.get_trade_date_status()) or (not cct.get_work_time(otime) and not cct.get_work_time() and ((otime >= 1500) or cct.get_now_time_int() < 1500 ) ):
             h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=self.sina_limit_time)
         else:
             h5 = None
@@ -275,7 +275,7 @@ class Sina:
                 sina_time_status = (cct.get_work_day_status() and 915 < cct.get_now_time_int() < 926)
 #                return_hdf_status = not cct.get_work_day_status() or (cct.get_work_day_status() and (cct.get_work_time() and l_time < sina_limit_time))
                 # return_hdf_status = not cct.get_work_time() or (cct.get_work_time() and l_time < sina_limit_time)
-                return_hdf_status = (not cct.get_work_time()  and not cct.get_work_time(otime)) or (cct.get_work_time() and l_time < sina_limit_time)
+                return_hdf_status = (not cct.get_work_time()  and not cct.get_work_time(otime)) or (cct.get_trade_date_status() and l_time < sina_limit_time)
                 log.info("915:%s sina_time:%0.2f limit:%s" % (sina_time_status, l_time, sina_limit_time))
 
                 h5 = self.combine_lastbuy(h5)
@@ -594,7 +594,7 @@ class Sina:
         # if not self.cname and cct.get_now_time_int() > 925:
         time_s= time.time()
         # if cct.get_now_time_int() > 925:
-        if not self.cname and cct.get_work_time() and cct.get_now_time_int() > 925 or ('nclose' in h5.columns and len(h5.query('nclose != -2')) == 0):
+        if not self.cname and cct.get_trade_date_status() and cct.get_now_time_int() > 925 or ('nclose' in h5.columns and len(h5.query('nclose != -2')) == 0):
             h5_fname = 'sina_MultiIndex_data'
             h5_table = 'all' + '_' + str(ct.sina_limit_time)
             fname = 'sina_logtime'
@@ -615,7 +615,7 @@ class Sina:
                 if 'nclose' in h5.columns and len(h5.query('nclose != -2')) == 0:
                      h5_a = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False)
                      if h5_a is not None and len(h5_a) > len(h5):
-                         if cct.get_work_time() and cct.get_now_time_int() <= 945:
+                         if cct.get_trade_date_status() and cct.get_now_time_int() <= 945:
                              run_col = ['low', 'high', 'close']
                              startime = '09:25:00'
                              # endtime = '10:00:00'
@@ -974,13 +974,13 @@ class Sina:
             df = df.set_index(['code', 'ticktime'])
             h5a.write_hdf_db(h5_fname, df, table=h5_table, index=False, baseCount=500, append=False, MultiIndex=True)
             log.info("hdf5 class all :%s  time:%0.2f" % (len(df), time.time() - time_s))
-
+        
         # if ('nlow' not in df.columns or 'nhigh' not in df.columns) and  (cct.get_work_time() and 924 < cct.get_now_time_int() <= 1501):
-        if ('nlow' not in df.columns or 'nhigh' not in df.columns) and  ((cct.get_work_time() and 924 < cct.get_now_time_int() <= 1501)  or  cct.get_now_time_int() > 1500 ):
+        if ('nlow' not in df.columns or 'nhigh' not in df.columns) and  ((cct.get_trade_date_status() and 924 < cct.get_now_time_int() <= 1501)  or  cct.get_now_time_int() > 1500 ):
             # if 'nlow' not in df.columns or 'nhigh' not in df.columns or cct.get_work_time():
             h5 = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False)
             time_s = time.time()
-            if cct.get_work_time() and cct.get_now_time_int() <= 945:
+            if cct.get_trade_date_status() and cct.get_now_time_int() <= 945:
                 run_col = ['low', 'high', 'close']
                 startime = '09:25:00'
                 # endtime = '10:00:00'
@@ -1196,7 +1196,7 @@ if __name__ == "__main__":
     h5 = h5a.load_hdf_db(h5_fname, table=h5_table, code_l=None, timelimit=False, dratio_limit=0.12)
     print(('h5:', len(h5)))
     
-    if cct.get_work_time() and cct.get_now_time_int() <= 1000:
+    if cct.get_trade_date_status() and cct.get_now_time_int() <= 1000:
         run_col = ['low', 'high', 'close']
         startime = None
         # endtime = '10:00:00'

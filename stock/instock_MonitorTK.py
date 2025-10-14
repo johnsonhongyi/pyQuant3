@@ -701,9 +701,9 @@ class StockMonitorApp(tk.Tk):
         )
         status_label_right.pack(fill="x", expand=True)
 
-        # 添加左右面板
-        pw.add(left_frame, minsize=100, width=780)
-        pw.add(right_frame, minsize=100, width=220)
+        # 添加左右面板 状态栏
+        pw.add(left_frame, minsize=100, width=850)
+        pw.add(right_frame, minsize=100, width=150)
 
 
         # 设置初始 6:4 比例
@@ -828,7 +828,7 @@ class StockMonitorApp(tk.Tk):
             # 只记录 name 列宽
             if "name" in self.tree["columns"]:
                 self._name_col_width = self.tree.column("name")["width"]
-                print("name列宽更新为:", self._name_col_width)
+                # print("name列宽更新为:", self._name_col_width)
 
         self.tree.bind("<ButtonRelease-1>", on_column_release)
 
@@ -870,8 +870,8 @@ class StockMonitorApp(tk.Tk):
             #         # 其他列自动宽度
             #         self.tree.column(col, width=60, anchor="center", minwidth=50, stretch=True)
 
-            co2int = ['ra','ral','fib','fibl','op', 'ratio','red','top10','ra']
-            co2width = ['boll','kind']   
+            co2int = ['ra','ral','fib','fibl','op', 'ratio','top10','ra']
+            co2width = ['boll','kind','red']   
             for col in cols:
                 self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
 
@@ -3061,7 +3061,7 @@ class StockMonitorApp(tk.Tk):
 
         # 4. 恢复选中
         if self.select_code:
-            print(f'self.select_code: {self.select_code}')
+            print(f'select_code: {self.select_code}')
             for iid in self.tree.get_children():
                 values = self.tree.item(iid, "values")
                 if values and values[0] == self.select_code:
@@ -3189,11 +3189,28 @@ class StockMonitorApp(tk.Tk):
 
     def sync_history(self, val, search_history, combo, history_attr, current_key):
 
-        if val in search_history:
-            search_history.remove(val)
-        search_history.insert(0, val)
-        # if len(search_history) > 20:
-        #     search_history[:] = search_history[:20]
+
+        # ⚙️ 检查是否是刚编辑过的 query
+        edited_pair = getattr(self.query_manager, "_just_edited_query", None)
+        if edited_pair:
+            old_query, new_query = edited_pair
+            # 清除标记，防止影响下次
+            self.query_manager._just_edited_query = None
+            if val == new_query and old_query in search_history:
+                # 🔹 替换旧值而非新增
+                search_history.remove(old_query)
+                if new_query not in search_history:
+                    search_history.insert(0, new_query)
+            elif val == old_query:
+                # 若 val 仍是旧的，直接跳过同步
+                return
+        else:
+
+            if val in search_history:
+                search_history.remove(val)
+            search_history.insert(0, val)
+            # if len(search_history) > 20:
+            #     search_history[:] = search_history[:20]
         combo['values'] = search_history
         try:
             combo.set(val)
@@ -3205,7 +3222,7 @@ class StockMonitorApp(tk.Tk):
         # ----------------------
         history = getattr(self.query_manager, history_attr)
         existing_queries = {r["query"]: r for r in history}
-
+        # print(f'val: {val} {val in existing_queries}')
         new_history = []
         for q in search_history:
             if q in existing_queries:
@@ -3213,6 +3230,8 @@ class StockMonitorApp(tk.Tk):
                 new_history.append(existing_queries[q])
             else:
                 # 新建
+                # if hasattr(self, "_last_value") and self._last_value.find(q) >=0:
+                #     continue
                 new_history.append({"query": q, "starred":  0, "note": ""})
 
         setattr(self.query_manager, history_attr, new_history)
@@ -3237,6 +3256,11 @@ class StockMonitorApp(tk.Tk):
             query = val1
         else:
             query = val2
+
+        # 如果新值和上次一样，就不触发
+        # if hasattr(self, "_last_value") and self._last_value == query:
+        #     return
+        self._last_value = query
 
         try:
             if val1:
@@ -4519,13 +4543,79 @@ class QueryHistoryManager:
         record = self.current_history[idx]
         new_query = self.askstring_at_parent(self.root, "修改 Query", "请输入新的 Query：", initialvalue=record.get("query", ""))
         if new_query and new_query.strip():
-            record["query"] = new_query.strip()
+            new_query = new_query.strip()
+            old_query = record["query"]
+            # record["query"] = new_query
             if self.current_key == "history1":
-                self.history1[idx]["query"] = new_query.strip()
+                self.history1[idx]["query"] = new_query
+                # values = list(self.search_combo1["values"])
+                # # 更新下拉项：删除旧值，插入新值到最前
+                # if old_query in values:
+                #     values.remove(old_query)
+                # if new_query not in values:
+                #     values.insert(0, new_query)
+                #     if self.search_var1.get() == old_query:
+                #         self.search_var1.set(new_query)
+                # self.search_combo1["values"] = values
+
             else:
-                self.history2[idx]["query"] = new_query.strip()
+                self.history2[idx]["query"] = new_query
+                # values = list(self.search_combo2["values"])
+                # if old_query in values:
+                #     values.remove(old_query)
+                # if new_query not in values:
+                #     values.insert(0, new_query)
+                #     if self.search_var2.get() == old_query:
+                #         self.search_var2.set(new_query)
+                # self.search_combo2["values"] = values
+            # ✅ 设置全局标志（主窗口 sync_history 会读取）
+            self._just_edited_query = (old_query, new_query)
+            # print(f'record2 : {record}')
+            # self.sync_history_current(record)
             self.refresh_tree()
+            self.use_query(new_query)
             # self.save_search_history()
+
+
+    # def add_query(self):
+    #     query = self.entry_query.get().strip()
+    #     if not query:
+    #         messagebox.showwarning("提示", "请输入 Query")
+    #         return
+
+    #     # 确定当前操作的是哪一个历史区
+    #     target_history = self.current_history
+    #     if target_history is None:
+    #         messagebox.showwarning("提示", "未找到当前历史记录区")
+    #         return
+
+    #     # 查重：是否已存在相同 query
+    #     existing = next((item for item in target_history if item["query"] == query), None)
+
+    #     if existing:
+    #         # 如果已有星标或备注，则仅置顶，不覆盖
+    #         if existing.get("starred", 0) > 0 or existing.get("note", "").strip():
+    #             target_history.remove(existing)
+    #             target_history.insert(0, existing)
+    #         else:
+    #             # 没有星标/备注，替换为新的记录
+    #             target_history.remove(existing)
+    #             target_history.insert(0, {"query": query, "starred": 0, "note": ""})
+    #     else:
+    #         # 新增记录
+    #         target_history.insert(0, {"query": query, "starred": 0, "note": ""})
+
+    #     # 限制最大条数（根据区分 history1 / history2）
+    #     if target_history is self.history1:
+    #         self.history1 = self.history1[:self.MAX_HISTORY]
+    #     elif target_history is self.history2:
+    #         self.history2 = self.history2[:self.MAX_HISTORY]
+
+    #     # 刷新 TreeView
+    #     self.refresh_tree()
+
+    #     # 自动保存更新
+    #     self.save_search_history()
 
     def add_query(self):
         query = self.entry_query.get().strip()
@@ -4533,13 +4623,30 @@ class QueryHistoryManager:
             messagebox.showwarning("提示", "请输入 Query")
             return
 
-        # 查重：如果已存在，先删除旧的
-        existing = next((item for item in self.current_history if item["query"] == query), None)
-        if existing:
-            self.current_history.remove(existing)
+        # # 查重：如果已存在，先删除旧的
+        # existing = next((item for item in self.current_history if item["query"] == query), None)
+        # if existing:
+        #     self.current_history.remove(existing)
 
-        # 插入到顶部
-        self.current_history.insert(0, {"query": query, "starred":  0, "note": ""})
+        # # 插入到顶部
+        # self.current_history.insert(0, {"query": query, "starred":  0, "note": ""})
+
+        # 查重：是否已存在相同 query
+        existing = next((item for item in self.current_history if item["query"] == query), None)
+
+        if existing:
+            # 如果已有星标或备注，则仅置顶，不覆盖
+            if existing.get("starred", 0) > 0 or existing.get("note", "").strip():
+                self.current_history.remove(existing)
+                self.current_history.insert(0, existing)
+            else:
+                # 没有星标/备注，替换为新的记录
+                self.current_history.remove(existing)
+                self.current_history.insert(0, {"query": query, "starred": 0, "note": ""})
+        else:
+            # 新增记录
+            self.current_history.insert(0, {"query": query, "starred": 0, "note": ""})
+
         if self.current_key == "history1":
             self.history1 = self.current_history
         else:  # history2
@@ -4547,6 +4654,7 @@ class QueryHistoryManager:
 
         self.refresh_tree()
         self.entry_query.delete(0, tk.END)
+        self.use_query(query)
         # self.save_search_history()
 
     def on_click_star(self, event):
@@ -4912,12 +5020,7 @@ class QueryHistoryManager:
             # self.save_search_history()
 
 
-    # def refresh_tree(self):
-    #     self.tree.delete(*self.tree.get_children())
-    #     for idx, record in enumerate(self.current_history, start=1):
-    #         star = "⭐" if record.get("starred") else ""
-    #         note = record.get("note", "")
-    #         self.tree.insert("", "end", iid=str(idx), values=(record.get("query", ""), star, note))
+
     def refresh_tree(self):
         # # 自动同步当前显示的历史
         # if self.current_key == "history1":
