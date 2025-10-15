@@ -22,6 +22,7 @@ import shutil
 import ctypes
 import platform
 from screeninfo import get_monitors
+import pyperclip  # 用于复制到剪贴板
 log = LoggerFactory.log
 # log.setLevel(log_level)
 # log.setLevel(LoggerFactory.DEBUG)
@@ -358,7 +359,8 @@ def test_code_against_queries(df_code, queries):
     df_code: DataFrame（单只股票的数据）
     queries: list[dict]，每个包含 'query' 键
     返回每条 query 是否命中
-    """
+    """
+
     if not isinstance(df_code, pd.DataFrame) or df_code.empty:
         print("df_code : empty or invalid")
         return
@@ -807,6 +809,7 @@ class StockMonitorApp(tk.Tk):
         # 双击表头绑定
         # self.tree.bind("<Double-1>", self.on_tree_header_double_click)
         self.tree.bind("<Double-1>", self.on_tree_double_click)
+        self.tree.bind("<Button-2>", self.copy_code)
 
         self.df_all = pd.DataFrame()      # 保存 fetch_and_process 返回的完整原始数据
         self.current_df = pd.DataFrame()
@@ -2520,7 +2523,7 @@ class StockMonitorApp(tk.Tk):
 
 
     def on_double_click(self, event):
-        print(f'on_double_click')
+        # print(f'on_double_click')
         sel_row = self.tree.identify_row(event.y)
         sel_col = self.tree.identify_column(event.x)
 
@@ -2546,7 +2549,7 @@ class StockMonitorApp(tk.Tk):
             category_content = "未找到该股票的 category 信息"
 
         self.show_category_detail(code,name,category_content)
-
+        pyperclip.copy(code)
         # # 如果 detail_win 已经存在，则更新内容，否则创建新的
         # if self.detail_win and self.detail_win.winfo_exists():
         #     self.detail_win.title(f"{code} { name }- Category Details")
@@ -2625,6 +2628,15 @@ class StockMonitorApp(tk.Tk):
             else:
                 # 如果发送失败，更新状态标签
                 self.status_var2.set(f"发送失败: {stock_code}")
+    def copy_code(self,event):
+        region = self.tree.identify_region(event.x, event.y)
+        if region == "cell":
+            item_id = self.tree.identify_row(event.y)
+            if not item_id:
+                return
+            code = tree.item(item_id, "values")[0]  # 假设第一列是 code
+            pyperclip.copy(code)
+            print(f"已复制: {code}")
 
     def on_tree_double_click(self, event):
         region = self.tree.identify_region(event.x, event.y)
@@ -4315,7 +4327,7 @@ class QueryHistoryManager:
         btn_add3 = tk.Button(frame_input, text="保存", command=self.save_search_history)
         btn_add3.pack(side="right", padx=5)
 
-
+        self.entry_query.bind("<Button-3>", self.on_right_click)
 
         # 下拉选择管理 history1 / history2
         self.combo_group = ttk.Combobox(frame_input, values=["history1", "history2"], state="readonly", width=10)
@@ -4378,6 +4390,19 @@ class QueryHistoryManager:
         # tk.Button(frame_btn, text="保存文件", command=self.save_search_history).pack(side="left", padx=5)
 
         self.refresh_tree()
+
+    def on_right_click(self,event):
+        try:
+            # 获取剪贴板内容
+            clipboard_text = event.widget.clipboard_get()
+        except tk.TclError:
+            return
+        # 插入到光标位置
+        # event.widget.insert(tk.INSERT, clipboard_text)
+        # 先清空再黏贴
+        event.widget.delete(0, tk.END)
+        event.widget.insert(0, clipboard_text)
+        self.on_test_click()
 
     # 先给每列绑定排序事件
     def treeview_sort_column(self,tv, col, reverse=False):
