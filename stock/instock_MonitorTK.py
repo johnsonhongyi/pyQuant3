@@ -353,6 +353,45 @@ def clamp_window_to_screens(x, y, w, h):
 #     return default_pos
 
 
+def test_code_against_queries(df_code, queries):
+    """
+    df_code: DataFrame（单只股票的数据）
+    queries: list[dict]，每个包含 'query' 键
+    返回每条 query 是否命中
+    """
+    if not isinstance(df_code, pd.DataFrame) or df_code.empty:
+        print("df_code : empty or invalid")
+        return
+
+    results = []
+    ignore_keywords = {"and", "or", "not", "True", "False", "None"}
+
+    for q in queries:
+        expr = q.get("query", "")
+        hit = False
+        try:
+            # 用 DataFrame.query() 执行逻辑表达式
+            missing_cols = [col for col in re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', expr)
+                            if col not in df_code.columns and col not in ignore_keywords]
+            if missing_cols:
+                print(f"缺少字段: {missing_cols}")
+                continue
+                
+            df_hit = df_code.query(expr)
+            # 命中条件：返回非空
+            hit = not df_hit.empty
+        except Exception as e:
+            print(f"[ERROR] 执行 query 出错: {expr}, {e}")
+            hit = False
+
+        results.append({
+            "query": expr,
+            "note": q.get("note", ""),
+            "starred": q.get("starred", 0),
+            "hit": bool(hit)
+        })
+    return results
+
 
 
 # ------------------ 后台数据进程 ------------------ #
@@ -1277,8 +1316,8 @@ class StockMonitorApp(tk.Tk):
             search_combo1=self.search_combo1,
             search_combo2=self.search_combo2,
             history_file=SEARCH_HISTORY_FILE,
-            sync_history_callback = self.sync_history_from_QM
-
+            sync_history_callback = self.sync_history_from_QM,
+            test_callback=self.on_test_code
         )
 
         # self.search_history1, self.search_history2 = self.load_search_history()
@@ -1341,6 +1380,7 @@ class StockMonitorApp(tk.Tk):
         # tk.Button(bottom_search_frame, text="清空", command=self.clean_search).pack(side="left", padx=2)
         # tk.Button(bottom_search_frame, text="删除历史", command=self.delete_search_history).pack(side="left", padx=2)
 
+        # tk.Button(ctrl_frame, text="测试", command=lambda: self.on_test_code()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="清空", command=lambda: self.clean_search(2)).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="删除", command=lambda: self.delete_search_history(2)).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk()).pack(side="left", padx=2)
@@ -3118,7 +3158,7 @@ class StockMonitorApp(tk.Tk):
         self.tree.heading(col, command=lambda: self.sort_by_column(col, not reverse))
         self.tree.yview_moveto(0)
 
-    import re
+    # import re
 
     def process_query(query: str):
         """
@@ -3185,6 +3225,7 @@ class StockMonitorApp(tk.Tk):
     #         self.search_history2 = [r["query"] for r in search_history2]
 
     def sync_history_from_QM(self, search_history1=None, search_history2=None):
+        self.query_manager.clear_hits()
         if search_history1 is not None:
             if search_history1 is self.query_manager.history2:
                 print("[警告] sync_history_from_QM 收到错误引用（history2）→ 覆盖 history1 被阻止")
@@ -3259,6 +3300,7 @@ class StockMonitorApp(tk.Tk):
             self.status_var.set("搜索框为空")
             return
 
+        self.query_manager.clear_hits()
         query = (f"({val1}) and ({val2})" if val1 and val2 else val1 or val2)
         self._last_value = query
 
@@ -3396,157 +3438,156 @@ class StockMonitorApp(tk.Tk):
             log.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")
 
+    # def apply_search1(self):
+    #     val1 = self.search_var1.get().strip()
+    #     val2 = self.search_var2.get().strip()
 
-    def apply_search1(self):
-        val1 = self.search_var1.get().strip()
-        val2 = self.search_var2.get().strip()
+    #     if not val1 and not val2:
+    #         self.status_var.set("搜索框为空")
+    #         return
 
-        if not val1 and not val2:
-            self.status_var.set("搜索框为空")
-            return
+    #     # 构建原始查询语句
+    #     if val1 and val2:
+    #         query = f"({val1}) and ({val2})"
+    #     elif val1:
+    #         query = val1
+    #     else:
+    #         query = val2
 
-        # 构建原始查询语句
-        if val1 and val2:
-            query = f"({val1}) and ({val2})"
-        elif val1:
-            query = val1
-        else:
-            query = val2
+    #     # 如果新值和上次一样，就不触发
+    #     # if hasattr(self, "_last_value") and self._last_value == query:
+    #     #     return
+    #     self._last_value = query
 
-        # 如果新值和上次一样，就不触发
-        # if hasattr(self, "_last_value") and self._last_value == query:
-        #     return
-        self._last_value = query
+    #     try:
+    #         if val1:
+    #             self.sync_history(val1, self.search_history1, self.search_combo1, "history1", "history1")
 
-        try:
-            if val1:
-                self.sync_history(val1, self.search_history1, self.search_combo1, "history1", "history1")
+    #         if val2:
+    #             self.sync_history(val2, self.search_history2, self.search_combo2, "history2", "history2")
 
-            if val2:
-                self.sync_history(val2, self.search_history2, self.search_combo2, "history2", "history2")
+    #         # 一次性保存
+    #         # self.query_manager.save_search_history()
 
-            # 一次性保存
-            # self.query_manager.save_search_history()
+    #     except Exception as ex:
+    #         log.exception("更新搜索历史时出错: %s", ex)
 
-        except Exception as ex:
-            log.exception("更新搜索历史时出错: %s", ex)
+    #     # ================= 数据为空检查 =================
+    #     if self.df_all.empty:
+    #         self.status_var.set("当前数据为空")
+    #         return
 
-        # ================= 数据为空检查 =================
-        if self.df_all.empty:
-            self.status_var.set("当前数据为空")
-            return
+    #     # ====== 条件清理 ======
+    #     import re
 
-        # ====== 条件清理 ======
-        import re
+    #     bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
 
-        bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
+    #     # 2️⃣ 替换掉原 query 中的这些部分
+    #     for bracket in bracket_patterns:
+    #         query = query.replace(f'and {bracket}', '')
 
-        # 2️⃣ 替换掉原 query 中的这些部分
-        for bracket in bracket_patterns:
-            query = query.replace(f'and {bracket}', '')
+    #     # print("修改后的 query:", query)
+    #     # print("提取出来的括号条件:", bracket_patterns)
 
-        # print("修改后的 query:", query)
-        # print("提取出来的括号条件:", bracket_patterns)
-
-        # 3️⃣ 后续可以在拼接 final_query 时再组合回去
-        # 例如:
-        # final_query = ' and '.join(valid_conditions)
-        # final_query += ' and ' + ' and '.join(bracket_patterns)
-
-
-        conditions = [c.strip() for c in query.split('and')]
-        valid_conditions = []
-        removed_conditions = []
-
-        for cond in conditions:
-            cond_clean = cond.lstrip('(').rstrip(')')
-
-            # index 条件特殊保留
-            # if 'index.' in cond_clean.lower():
-            #     valid_conditions.append(cond_clean)
-            #     continue
-
-            # index 或 str 操作条件特殊保留
-            if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0:
-                valid_conditions.append(cond_clean)
-                continue
+    #     # 3️⃣ 后续可以在拼接 final_query 时再组合回去
+    #     # 例如:
+    #     # final_query = ' and '.join(valid_conditions)
+    #     # final_query += ' and ' + ' and '.join(bracket_patterns)
 
 
-            # 提取条件中的列名
-            cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
+    #     conditions = [c.strip() for c in query.split('and')]
+    #     valid_conditions = []
+    #     removed_conditions = []
 
-            # 所有列都必须存在才保留
-            if all(col in self.df_all.columns for col in cols_in_cond):
-                valid_conditions.append(cond_clean)
-            else:
-                removed_conditions.append(cond_clean)
-                log.info(f"剔除不存在的列条件: {cond_clean}")
+    #     for cond in conditions:
+    #         cond_clean = cond.lstrip('(').rstrip(')')
 
-        # 打印剔除条件列表
-        if removed_conditions:
-            print(f"[剔除的条件列表] {removed_conditions}")
+    #         # index 条件特殊保留
+    #         # if 'index.' in cond_clean.lower():
+    #         #     valid_conditions.append(cond_clean)
+    #         #     continue
 
-        if not valid_conditions:
-            self.status_var.set("没有可用的查询条件")
-            return
+    #         # index 或 str 操作条件特殊保留
+    #         if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0:
+    #             valid_conditions.append(cond_clean)
+    #             continue
 
-        # ====== 拼接 final_query 并检查括号 ======
-        final_query = ' and '.join(f"({c})" for c in valid_conditions)
-        # print(f'final_query : {final_query}')
-        if bracket_patterns:
-            final_query += ' and ' + ' and '.join(bracket_patterns)
-        # print(f'final_query : {final_query}')
-        left_count = final_query.count("(")
-        right_count = final_query.count(")")
-        if left_count != right_count:
-            if left_count > right_count:
-                final_query += ")" * (left_count - right_count)
-            elif right_count > left_count:
-                final_query = "(" * (right_count - left_count) + final_query
 
-        # ====== 决定 engine ======
-        query_engine = 'numexpr'
-        if any('index.' in c.lower() for c in valid_conditions):
-            query_engine = 'python'
+    #         # 提取条件中的列名
+    #         cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
 
-        # ====== 数据过滤 ======
-        try:
-            if val1.count('or') > 0 and val1.count('(') > 0:
-                if val2 :
-                    query_search = f"({val1}) and {val2}"
-                    print(f'query: {query_search} ')
+    #         # 所有列都必须存在才保留
+    #         if all(col in self.df_all.columns for col in cols_in_cond):
+    #             valid_conditions.append(cond_clean)
+    #         else:
+    #             removed_conditions.append(cond_clean)
+    #             log.info(f"剔除不存在的列条件: {cond_clean}")
 
-                else:
-                    query_search = f"({val1})"
-                    print(f'query: {query_search} ')
-                df_filtered = self.df_all.query(query_search, engine=query_engine)
-                self.refresh_tree(df_filtered)
-                self.status_var2.set('')
-                self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {val1} and {val2}")
-            else:
-                # 检查 category 列是否存在
-                if 'category' in self.df_all.columns:
-                    # 强制转换为字符串，避免 str.contains 报错
-                    if not pd.api.types.is_string_dtype(self.df_all['category']):
-                        self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
-                        # self.df_all['category'] = self.df_all['category'].astype(str)
-                        # 可选：去掉前后空格
-                        # self.df_all['category'] = self.df_all['category'].str.strip()
-                df_filtered = self.df_all.query(final_query, engine=query_engine)
-                self.refresh_tree(df_filtered)
-                # 打印剔除条件列表
-                if removed_conditions:
-                    print(f"[剔除的条件列表] {removed_conditions}")
-                    # 显示到状态栏
-                    self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
-                    self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-                else:
-                    self.status_var2.set('')
-                    self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-                print(f'final_query: {final_query}')
-        except Exception as e:
-            log.error(f"Query error: {e}")
-            self.status_var.set(f"查询错误: {e}")
+    #     # 打印剔除条件列表
+    #     if removed_conditions:
+    #         print(f"[剔除的条件列表] {removed_conditions}")
+
+    #     if not valid_conditions:
+    #         self.status_var.set("没有可用的查询条件")
+    #         return
+
+    #     # ====== 拼接 final_query 并检查括号 ======
+    #     final_query = ' and '.join(f"({c})" for c in valid_conditions)
+    #     # print(f'final_query : {final_query}')
+    #     if bracket_patterns:
+    #         final_query += ' and ' + ' and '.join(bracket_patterns)
+    #     # print(f'final_query : {final_query}')
+    #     left_count = final_query.count("(")
+    #     right_count = final_query.count(")")
+    #     if left_count != right_count:
+    #         if left_count > right_count:
+    #             final_query += ")" * (left_count - right_count)
+    #         elif right_count > left_count:
+    #             final_query = "(" * (right_count - left_count) + final_query
+
+    #     # ====== 决定 engine ======
+    #     query_engine = 'numexpr'
+    #     if any('index.' in c.lower() for c in valid_conditions):
+    #         query_engine = 'python'
+
+    #     # ====== 数据过滤 ======
+    #     try:
+    #         if val1.count('or') > 0 and val1.count('(') > 0:
+    #             if val2 :
+    #                 query_search = f"({val1}) and {val2}"
+    #                 print(f'query: {query_search} ')
+
+    #             else:
+    #                 query_search = f"({val1})"
+    #                 print(f'query: {query_search} ')
+    #             df_filtered = self.df_all.query(query_search, engine=query_engine)
+    #             self.refresh_tree(df_filtered)
+    #             self.status_var2.set('')
+    #             self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {val1} and {val2}")
+    #         else:
+    #             # 检查 category 列是否存在
+    #             if 'category' in self.df_all.columns:
+    #                 # 强制转换为字符串，避免 str.contains 报错
+    #                 if not pd.api.types.is_string_dtype(self.df_all['category']):
+    #                     self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
+    #                     # self.df_all['category'] = self.df_all['category'].astype(str)
+    #                     # 可选：去掉前后空格
+    #                     # self.df_all['category'] = self.df_all['category'].str.strip()
+    #             df_filtered = self.df_all.query(final_query, engine=query_engine)
+    #             self.refresh_tree(df_filtered)
+    #             # 打印剔除条件列表
+    #             if removed_conditions:
+    #                 print(f"[剔除的条件列表] {removed_conditions}")
+    #                 # 显示到状态栏
+    #                 self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
+    #                 self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
+    #             else:
+    #                 self.status_var2.set('')
+    #                 self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
+    #             print(f'final_query: {final_query}')
+    #     except Exception as e:
+    #         log.error(f"Query error: {e}")
+    #         self.status_var.set(f"查询错误: {e}")
 
 
     # def apply_search_no_or(self):
@@ -3855,11 +3896,70 @@ class StockMonitorApp(tk.Tk):
     #         log.error(f"Query error: {e}")
     #         self.status_var.set(f"查询错误: {e}")
 
+    # def on_test_code(self):
+    #     code = self.query_manager.entry_query.get().strip()
+    #     # code = self.entry_code.get().strip()
+    #     import ipdb;ipdb.set_trace()
+
+    #     if code and len(code) == 6:
+    #         # df_code = self.df_all.loc[code]  # 自己实现获取行情数据
+    #         df_code = self.df_all.loc[[code]]  # 自己实现获取行情数据 dataframe
+    #         results = self.query_manager.test_code(df_code)
+            
+    #         # 刷新 Treeview 显示
+    #         for i in self.tree.get_children():
+    #             self.tree.delete(i)
+    #         for r in results:
+    #             self.tree.insert("", tk.END, values=(r["query"], r["note"], r["starred"], "✅" if r["hit"] else ""))
+
+    # def on_test_code(self):
+    #     # code = self.code_entry.get().strip()
+    #     code = self.query_manager.entry_query.get().strip()
+    #     if not code:
+    #         toast_message(self, "请输入股票代码")
+    #         return
+
+    #     df_code = self.df_all.loc[[code]]  # 一定是 DataFrame（query 才能工作）
+    #     results = self.query_manager.test_code(df_code)
+
+    #     # 更新 current_history 的命中状态
+    #     for i, r in enumerate(results):
+    #         if i < len(self.query_manager.current_history):
+    #             self.query_manager.current_history[i]["hit"] = r["hit"]
+
+    #     # 刷新 Treeview
+    #     self.query_manager.refresh_tree()
+    #     toast_message(self, f"{code} 测试完成，共 {len(results)} 条规则")
+
+    def on_test_code(self):
+        code = self.query_manager.entry_query.get().strip()
+        if not code:
+            toast_message(self, "请输入股票代码")
+            return
+        # 判断是否为 6 位数字
+        if not (code.isdigit() and len(code) == 6):
+            toast_message(self, "请输入6位数字股票代码")
+            return
+
+        df_code = self.df_all.loc[[code]]
+        results = self.query_manager.test_code(df_code)
+
+        # 更新当前历史的命中结果
+        for i, r in enumerate(results):
+            if i < len(self.query_manager.current_history):
+                self.query_manager.current_history[i]["hit"] = r["hit"]
+
+        self.query_manager.refresh_tree()
+        toast_message(self, f"{code} 测试完成，共 {len(results)} 条规则")
+
+
+
     def clean_search(self, which):
         """清空指定搜索框内容"""
         if which == 1:
             self.search_var1.set("")
         else:
+            # if len(self.search_var2.get()) == 6:
             self.search_var2.set("")
 
         self.select_code = None
@@ -4163,7 +4263,7 @@ class StockMonitorApp(tk.Tk):
 #     def __init__(self, master, search_var1, search_var2, search_combo1, search_combo2, history_file):
 #         super().__init__(master)  
 class QueryHistoryManager:
-    def __init__(self, root=None,search_var1=None, search_var2=None, search_combo1=None,search_combo2=None,auto_run=False,history_file="query_history.json",sync_history_callback=None):
+    def __init__(self, root=None,search_var1=None, search_var2=None, search_combo1=None,search_combo2=None,auto_run=False,history_file="query_history.json",sync_history_callback=None,test_callback=None):
         """
         root=None 时不创建窗口，只管理数据
         auto_run=True 时直接打开编辑窗口
@@ -4178,6 +4278,7 @@ class QueryHistoryManager:
         self.deleted_stack = []  # 保存被删除的 query 记录
 
         self.sync_history_callback = sync_history_callback
+        self.test_callback = test_callback
         # 读取历史
         self.history1, self.history2 = self.load_search_history()
         self.current_history = self.history1
@@ -4205,6 +4306,7 @@ class QueryHistoryManager:
         self.entry_query = tk.Entry(frame_input)
         self.entry_query.pack(side="left", padx=5, fill="x", expand=True)
 
+        btn_add = tk.Button(frame_input, text="测试", command=self.on_test_click).pack(side="left", padx=2)
         btn_add = tk.Button(frame_input, text="添加", command=self.add_query)
         btn_add.pack(side="left", padx=5)
 
@@ -4311,43 +4413,47 @@ class QueryHistoryManager:
             else:
                 self.editor_frame.pack(fill="both", expand=True)  # 仅显示，不移动位置
 
-    # def save_search_history_starred(self):
-    #     """保存到文件，合并编辑的20条到历史顶部，保留最多 MAX_HISTORY 条"""
+   
+    # add test_code bug
+    # def save_search_history(self):
+    #     """保存到文件，合并编辑的 N 条到历史顶部，保留最多 MAX_HISTORY 条"""
     #     try:
-    #         # 先读文件中的全量历史
-    #         all_data = {"history1": [], "history2": []}
-    #         if os.path.exists(self.history_file):
-    #             with open(self.history_file, "r", encoding="utf-8") as f:
-    #                 try:
-    #                     loaded_data = json.load(f)
-    #                     # 历史全量去重
-    #                     def dedup(history):
-    #                         seen = set()
-    #                         result = []
-    #                         for r in history:
-    #                             q = r.get("query") if isinstance(r, dict) else str(r)
-    #                             if q not in seen:
-    #                                 seen.add(q)
-    #                                 result.append(r)
-    #                         return result
+    #         # ---------- 工具函数 ----------
+    #         def dedup(history):
+    #             seen = set()
+    #             result = []
+    #             for r in history:
+    #                 q = r.get("query") if isinstance(r, dict) else str(r)
+    #                 if q not in seen:
+    #                     seen.add(q)
+    #                     result.append(r)
+    #             return result
 
-    #                     h1_old = dedup(loaded_data.get("history1", []))
-    #                     h2_old = dedup(loaded_data.get("history2", []))
+    #         def normalize_history(history):
+    #             """统一字段格式，确保 starred 为 int，note 存在"""
+    #             normalized = []
+    #             for r in history:
+    #                 if not isinstance(r, dict):
+    #                     continue
+    #                 q = r.get("query", "")
+    #                 starred = r.get("starred", 0)
+    #                 note = r.get("note", "")
 
-    #                     # 剔除最后 20 条（编辑区）
+    #                 # 布尔 → 整数，非法类型 → 0
+    #                 if isinstance(starred, bool):
+    #                     starred = 1 if starred else 0
+    #                 elif not isinstance(starred, int):
+    #                     starred = 0
 
-    #                     # all_data["history1"] = h1_old[:-20] if len(h1_old) > 20 else []
-    #                     # all_data["history2"] = h2_old[:-20] if len(h2_old) > 20 else []
-    #                     all_data["history1"] = h1_old[self.his_limit:] if len(h1_old) > self.his_limit else []
-    #                     all_data["history2"] = h2_old[self.his_limit:] if len(h2_old) > self.his_limit else []
-    #                     print(f'h1_old : {len(h1_old)} all_data : {len(all_data["history1"])}')
-    #                     print(f'h2_old : {len(h2_old)} all_data : {len(all_data["history2"])}')
-
-    #                 except json.JSONDecodeError:
-    #                     pass
+    #                 normalized.append({
+    #                     "query": q,
+    #                     "starred": starred,
+    #                     "note": note
+    #                 })
+    #             return normalized
 
     #         def merge_history(current, old):
-    #             """合并：current优先，后补 old 去重"""
+    #             """合并：current 优先，后补 old 去重"""
     #             seen = set()
     #             result = []
 
@@ -4363,19 +4469,38 @@ class QueryHistoryManager:
     #                     result.append(r)
     #             return result[:self.MAX_HISTORY]
 
-    #         all_data["history1"] = merge_history(self.history1, all_data.get("history1", []))
-    #         all_data["history2"] = merge_history(self.history2, all_data.get("history2", []))
-    #         print(f'all_data 1: {len(all_data["history1"])}')
-    #         print(f'all_data 2: {len(all_data["history2"])}')
-    #         # 写回文件（全量保存）
+    #         # ---------- 加载旧历史 ----------
+    #         all_data = {"history1": [], "history2": []}
+    #         if os.path.exists(self.history_file):
+    #             with open(self.history_file, "r", encoding="utf-8") as f:
+    #                 try:
+    #                     loaded_data = json.load(f)
+    #                     h1_old = dedup(loaded_data.get("history1", []))
+    #                     h2_old = dedup(loaded_data.get("history2", []))
+    #                     all_data["history1"] = h1_old[self.his_limit:] if len(h1_old) > self.his_limit else []
+    #                     all_data["history2"] = h2_old[self.his_limit:] if len(h2_old) > self.his_limit else []
+    #                 except json.JSONDecodeError:
+    #                     pass
+
+    #         # ---------- 合并并规范 ----------
+    #         self.history1 = normalize_history(self.history1)
+    #         self.history2 = normalize_history(self.history2)
+    #         all_data["history1"] = normalize_history(merge_history(self.history1, all_data.get("history1", [])))
+    #         all_data["history2"] = normalize_history(merge_history(self.history2, all_data.get("history2", [])))
+
+    #         # ---------- 写回文件 ----------
     #         with open(self.history_file, "w", encoding="utf-8") as f:
     #             json.dump(all_data, f, ensure_ascii=False, indent=2)
+
+    #         print(f"✅ 搜索历史已保存 (共 {len(all_data['history1'])}/{len(all_data['history2'])})，starred 已统一为整数")
 
     #     except Exception as e:
     #         messagebox.showerror("错误", f"保存搜索历史失败: {e}")
 
-    def save_search_history(self):
-        """保存到文件，合并编辑的 N 条到历史顶部，保留最多 MAX_HISTORY 条"""
+
+    def save_search_history(self, confirm_threshold=10):
+        #fix add test_code save clear history bug
+        """保存搜索历史，合并编辑记录到历史顶部，超过 confirm_threshold 条变动时提示确认"""
         try:
             # ---------- 工具函数 ----------
             def dedup(history):
@@ -4389,7 +4514,6 @@ class QueryHistoryManager:
                 return result
 
             def normalize_history(history):
-                """统一字段格式，确保 starred 为 int，note 存在"""
                 normalized = []
                 for r in history:
                     if not isinstance(r, dict):
@@ -4397,25 +4521,16 @@ class QueryHistoryManager:
                     q = r.get("query", "")
                     starred = r.get("starred", 0)
                     note = r.get("note", "")
-
-                    # 布尔 → 整数，非法类型 → 0
                     if isinstance(starred, bool):
                         starred = 1 if starred else 0
                     elif not isinstance(starred, int):
                         starred = 0
-
-                    normalized.append({
-                        "query": q,
-                        "starred": starred,
-                        "note": note
-                    })
+                    normalized.append({"query": q, "starred": starred, "note": note})
                 return normalized
 
             def merge_history(current, old):
-                """合并：current 优先，后补 old 去重"""
                 seen = set()
                 result = []
-
                 for r in current:
                     q = r.get("query") if isinstance(r, dict) else str(r)
                     if q not in seen:
@@ -4429,29 +4544,50 @@ class QueryHistoryManager:
                 return result[:self.MAX_HISTORY]
 
             # ---------- 加载旧历史 ----------
-            all_data = {"history1": [], "history2": []}
+            old_data = {"history1": [], "history2": []}
             if os.path.exists(self.history_file):
                 with open(self.history_file, "r", encoding="utf-8") as f:
                     try:
                         loaded_data = json.load(f)
-                        h1_old = dedup(loaded_data.get("history1", []))
-                        h2_old = dedup(loaded_data.get("history2", []))
-                        all_data["history1"] = h1_old[self.his_limit:] if len(h1_old) > self.his_limit else []
-                        all_data["history2"] = h2_old[self.his_limit:] if len(h2_old) > self.his_limit else []
+                        old_data["history1"] = dedup(loaded_data.get("history1", []))
+                        old_data["history2"] = dedup(loaded_data.get("history2", []))
                     except json.JSONDecodeError:
                         pass
 
-            # ---------- 合并并规范 ----------
+            # ---------- 规范当前历史 ----------
             self.history1 = normalize_history(self.history1)
             self.history2 = normalize_history(self.history2)
-            all_data["history1"] = normalize_history(merge_history(self.history1, all_data.get("history1", [])))
-            all_data["history2"] = normalize_history(merge_history(self.history2, all_data.get("history2", [])))
+
+            # ---------- 合并历史 ----------
+            merged_data = {
+                "history1": normalize_history(merge_history(self.history1, old_data.get("history1", []))),
+                "history2": normalize_history(merge_history(self.history2, old_data.get("history2", []))),
+            }
+
+            # ---------- 检测变动量 ----------
+            def changes_count(old_list, new_list):
+                old_set = {r['query'] for r in old_list}
+                new_set = {r['query'] for r in new_list}
+                return len(new_set - old_set) + len(old_set - new_set)
+
+            delta1 = changes_count(old_data.get("history1", []), merged_data["history1"])
+            delta2 = changes_count(old_data.get("history2", []), merged_data["history2"])
+
+            if delta1 + delta2 >= confirm_threshold:
+                if not messagebox.askyesno(
+                    "确认保存",
+                    f"搜索历史发生较大变动（{delta1 + delta2} 条），是否继续保存？"
+                ):
+                    print("❌ 用户取消保存搜索历史")
+                    return
 
             # ---------- 写回文件 ----------
             with open(self.history_file, "w", encoding="utf-8") as f:
-                json.dump(all_data, f, ensure_ascii=False, indent=2)
+                json.dump(merged_data, f, ensure_ascii=False, indent=2)
 
-            print(f"✅ 搜索历史已保存 (共 {len(all_data['history1'])}/{len(all_data['history2'])})，starred 已统一为整数")
+            print(f"✅ 搜索历史已保存 "
+                  f"(history1: {len(merged_data['history1'])} 条 / "
+                  f"history2: {len(merged_data['history2'])} 条)，starred 已统一为整数")
 
         except Exception as e:
             messagebox.showerror("错误", f"保存搜索历史失败: {e}")
@@ -4637,6 +4773,7 @@ class QueryHistoryManager:
     #     self.refresh_tree()
 
     def switch_group(self, event=None):
+        self.clear_hits()
         if getattr(self, "_suppress_switch", False):
             return
 
@@ -4754,6 +4891,11 @@ class QueryHistoryManager:
         query = self.entry_query.get().strip()
         if not query:
             messagebox.showwarning("提示", "请输入 Query")
+            return
+
+        # 判断是否为 6 位数字
+        if (query.isdigit() or len(query) == 6):
+            toast_message(self.root, "股票代码仅测试使用")
             return
 
         # # 查重：如果已存在，先删除旧的
@@ -5011,9 +5153,10 @@ class QueryHistoryManager:
             return
 
         # 否则把 query 放到输入框准备编辑（原逻辑）
-        self.editing_idx = idx
-        self.entry_query.delete(0, tk.END)
-        self.entry_query.insert(0, record["query"])
+        # self.editing_idx = idx
+        # self.entry_query.delete(0, tk.END)
+        # self.entry_query.insert(0, record["query"])
+
         self.use_query(record["query"])
 
     def use_query(self,query=None):
@@ -5050,7 +5193,8 @@ class QueryHistoryManager:
         menu = tk.Menu(self.editor_frame, tearoff=0)
         menu.add_command(label="使用", command=lambda: self.use_query())
         menu.add_command(label="编辑Query", command=lambda: self.edit_query(item))
-        menu.add_command(label="置顶", command=lambda: self.move_to_top(item))
+        # menu.add_command(label="置顶", command=lambda: self.move_to_top(item))
+        menu.add_command(label="编辑框", command=lambda: self.up_to_entry(item))
         menu.add_command(label="删除", command=lambda: self.delete_item(item))
         menu.tk_popup(event.x_root, event.y_root)
 
@@ -5344,58 +5488,130 @@ class QueryHistoryManager:
 
         toast_message(self.root, f"已恢复：{record.get('query')}", 1500)
 
+    def up_to_entry(self,iid):
+        values = self.tree.item(iid, "values")
+        if not values:
+            return
+        current_query = values[0]
+        idx = next((i for i, r in enumerate(self.current_history) if r.get("query") == current_query), None)
+        if idx is None:
+            return
+        record = self.current_history[idx]
+        self.entry_query.delete(0, tk.END)
+        self.entry_query.insert(0, record["query"])
 
-    def move_to_top(self, iid):
-        idx = int(iid) - 1
-        if 0 <= idx < len(self.current_history):
-            record = self.current_history.pop(idx)
-            self.current_history.insert(0, record)
+    # def move_to_top(self, iid):
+    #     idx = int(iid) - 1
+    #     if 0 <= idx < len(self.current_history):
+    #         record = self.current_history.pop(idx)
+    #         self.current_history.insert(0, record)
 
-            # 同步主窗口 history
-            if self.current_key == "history1":
-                # self.history1 = [r for r in self.history1 if r["query"] != record["query"]]
-                # self.history1.insert(0, record)
-                self.history1 = record
-                self.search_combo1['values'] = [r["query"] for r in self.history1]
-                self.search_var1.set(self.search_combo1['values'][0])
-            else:
-                # self.history2 = [r for r in self.history2 if r["query"] != record["query"]]
-                # self.history2.insert(0, record)
-                self.history2 = record
-                self.search_combo2['values'] = [r["query"] for r in self.history2]
-                self.search_var2.set(self.search_combo2['values'][0])
+    #         # 同步主窗口 history
+    #         if self.current_key == "history1":
+    #             # self.history1 = [r for r in self.history1 if r["query"] != record["query"]]
+    #             # self.history1.insert(0, record)
+    #             self.history1 = record
+    #             self.search_combo1['values'] = [r["query"] for r in self.history1]
+    #             self.search_var1.set(self.search_combo1['values'][0])
+    #         else:
+    #             # self.history2 = [r for r in self.history2 if r["query"] != record["query"]]
+    #             # self.history2.insert(0, record)
+    #             self.history2 = record
+    #             self.search_combo2['values'] = [r["query"] for r in self.history2]
+    #             self.search_var2.set(self.search_combo2['values'][0])
+    #         self.refresh_tree()
 
-            self.refresh_tree()
-            # self.save_search_history()
 
+
+    # def refresh_tree(self):
+    #     # # 自动同步当前显示的历史
+    #     if self.current_key == "history1":
+    #         self.current_history = self.history1
+    #     else:
+    #         # self.current_history = [{"query": q, "starred":  0, "note": ""} for q in self.history2]
+    #         self.current_history = self.history2
+    #     # 清空Treeview
+    #     for i in self.tree.get_children():
+    #         self.tree.delete(i)
+        
+    #     # 填充Treeview
+    #     for idx, record in enumerate(self.current_history, start=1):
+    #         #单星
+    #         # star = "⭐" if record.get("starred") else ""
+
+    #         # 原来：star_text = "★" if rec.get("starred") else ""
+    #         star_count = record.get("starred", 0)
+    #         if isinstance(star_count, bool):
+    #             star_count = 1 if star_count else 0
+    #         star_text = "★" * star_count
+
+    #         note = record.get("note", "")
+    #         self.tree.insert("", "end", iid=str(idx), values=(record.get("query", ""), star_text, note))
 
 
     def refresh_tree(self):
-        # # 自动同步当前显示的历史
+        """
+        刷新 Treeview 显示
+        - 当前历史 self.current_history 自动同步
+        - 根据 record['hit'] 添加符号 ✅/❌ 并设置背景颜色
+        """
+        # 自动同步当前显示的历史
         if self.current_key == "history1":
             self.current_history = self.history1
         else:
-            # self.current_history = [{"query": q, "starred":  0, "note": ""} for q in self.history2]
             self.current_history = self.history2
-        # 清空Treeview
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-        
-        # 填充Treeview
-        for idx, record in enumerate(self.current_history, start=1):
-            #单星
-            # star = "⭐" if record.get("starred") else ""
 
-            # 原来：star_text = "★" if rec.get("starred") else ""
+        # 清空 Treeview
+        self.tree.delete(*self.tree.get_children())
+
+        # 配置 tag 颜色
+        self.tree.tag_configure("hit", background="#d1ffd1")   # 命中绿色
+        self.tree.tag_configure("miss", background="#ffd1d1")  # 未命中红色
+        self.tree.tag_configure("normal", background="#ffffff") # 默认白色
+
+        for idx, record in enumerate(self.current_history, start=1):
             star_count = record.get("starred", 0)
             if isinstance(star_count, bool):
                 star_count = 1 if star_count else 0
             star_text = "★" * star_count
-
             note = record.get("note", "")
-            self.tree.insert("", "end", iid=str(idx), values=(record.get("query", ""), star_text, note))
+            query_text = record.get("query", "")
+
+            # ✅ 显示时添加命中/未命中符号，但不修改原始 record
+            display_query = query_text
+            hit = record.get("hit", None)
+            if hit is True:
+                display_query = "✅ " + query_text
+                tag = "hit"
+            elif hit is False:
+                display_query = "❌ " + query_text
+                tag = "miss"
+            else:
+                tag = "normal"
+
+            # 插入 Treeview
+            self.tree.insert("", "end", iid=str(idx),
+                             values=(display_query, star_text, note),
+                             tags=(tag,))
 
 
+
+    def clear_hits(self):
+        for record in self.current_history:
+            record.pop("hit", None)
+
+    def on_test_click(self):
+            if callable(self.test_callback):
+                self.test_callback()
+
+    def test_code(self, code_data):
+        """
+        code_data: dict, 当前 code 的行情数据
+        返回每条 query 是否命中
+        """
+        # queries = getattr(self, "history1", []) + getattr(self, "history2", [])
+        queries = getattr(self, "current_history", [])
+        return test_code_against_queries(code_data, queries)
 
 # toast_message （使用你给定的实现）
 def toast_message(master, text, duration=1500):
