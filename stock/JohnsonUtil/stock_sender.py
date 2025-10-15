@@ -92,11 +92,11 @@ class StockSender:
         # 查找窗口
     # ----------------- 统一发送 ----------------- #
     def send(self, stock_code):
-        print(f'send :{stock_code}')
+        # print(f'send :{stock_code}')
         threading.Thread(target=self._send_thread, args=(stock_code,)).start()
 
     def _send_thread(self, stock_code):
-        print(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
+        # print(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
         if self.tdx_var.get():
             self.send_to_tdx(stock_code)
         else:
@@ -265,7 +265,7 @@ class StockSender:
 
     # ----------------- 发送函数 ----------------- #
     def send_to_dfcf(self, stock_code):
-        print(self.dfcf_process_hwnd , self.ahk_process_hwnd)
+        # print(self.dfcf_process_hwnd , self.ahk_process_hwnd)
         if self.dfcf_process_hwnd and self.ahk_process_hwnd:
             pyperclip.copy(stock_code)
             self.dfcf_status = f"DC-> 成功"
@@ -307,7 +307,7 @@ class StockSender:
                 else:
                     codex = int(stock_code)
                 UWM_STOCK = win32api.RegisterWindowMessage('stock')
-                print(win32con.HWND_BROADCAST,UWM_STOCK,str(codex))
+                # print(win32con.HWND_BROADCAST,UWM_STOCK,str(codex))
                 #系统广播
                 win32gui.PostMessage( win32con.HWND_BROADCAST,UWM_STOCK,int(codex),0)
             self.tdx_status = "TDX-> 成功"

@@ -377,7 +377,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
                # print(f'flag.value : {flag.value} 停止更新')
                continue
         elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
-            # print(f'resample : new : {g_values.getkey("resample")} last : {resample} ')
+            print(f'resample : new : {g_values.getkey("resample")} last : {resample} ')
             top_all = pd.DataFrame()
             lastpTDX_DF = pd.DataFrame()
         elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
@@ -400,7 +400,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
             resample = g_values.getkey("resample") or "d"
             market = g_values.getkey("market", "all")        # all / sh / cyb / kcb / bj
             blkname = g_values.getkey("blkname", "061.blk")  # 对应的 blk 文件
-            print(f"resample: {resample} flag.value : {flag.value}")
+            print(f"resample: {resample} flag.value : {flag.value} blkname :{blkname} market : {market}")
             top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
             if top_now.empty:
                 log.debug("no data fetched")
@@ -439,7 +439,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
             # print(f'DISPLAY_COLS:{DISPLAY_COLS}')
             # print(f'col: {top_temp.columns.values}')
             # top_temp = top_temp.loc[:, DISPLAY_COLS]
-            print(f'top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:5]} shape : {top_temp.shape}')
+            print(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape}')
             queue.put(top_temp)
             gc.collect()
             print(f'now: {cct.get_now_time_int()} time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{ct.duration_sleep_time} resample:{resample}')
@@ -1386,7 +1386,6 @@ class StockMonitorApp(tk.Tk):
         if len(self.search_history2) > 0:
             self.search_var2.set(self.search_history2[0])
 
-
         self.open_column_manager_init()
 
         # self.focus_force()
@@ -1798,8 +1797,7 @@ class StockMonitorApp(tk.Tk):
 
             stock_code = str(stock_code).zfill(6)
             log.info(f'stock_code:{stock_code}')
-            # send_to_tdx(stock_code)   # 根据你的逻辑发送到 TDX 或其他
-            print(f"选中股票代码: {stock_code}")
+            # print(f"选中股票代码: {stock_code}")
             if send_tdx_Key and stock_code:
                 self.sender.send(stock_code)
 
@@ -1808,7 +1806,7 @@ class StockMonitorApp(tk.Tk):
         # 更新状态栏
         status_text = f"TDX: {status_dict['TDX']} | THS: {status_dict['THS']} | DC: {status_dict['DC']}"
         # self.status_var.set(status_text)
-        print(status_text)
+        # print(status_text)
 
     # ----------------- Checkbuttons ----------------- #
     def init_checkbuttons(self, parent_frame):
@@ -2399,8 +2397,7 @@ class StockMonitorApp(tk.Tk):
 
             stock_code = str(stock_code).zfill(6)
             log.info(f'stock_code:{stock_code}')
-            # send_to_tdx(stock_code)   # 根据你的逻辑发送到 TDX 或其他
-            print(f"选中股票代码: {stock_code}")
+            # print(f"选中股票代码: {stock_code}")
             if send_tdx_Key and stock_code:
                 self.sender.send(stock_code)
 
@@ -3181,11 +3178,25 @@ class StockMonitorApp(tk.Tk):
             self.after_cancel(self._search_job)
         self._search_job = self.after(3000, self.apply_search)  # 3000ms后执行
 
-    def sync_history_from_QM(self,search_history1=None,search_history2=None):
-        if search_history1:
-            self.search_history1 = [r["query"] for r in search_history1]
-        if search_history2:
-            self.search_history2 = [r["query"] for r in search_history2]
+    # def sync_history_from_QM(self,search_history1=None,search_history2=None):
+    #     if search_history1:
+    #         self.search_history1 = [r["query"] for r in search_history1]
+    #     if search_history2:
+    #         self.search_history2 = [r["query"] for r in search_history2]
+
+    def sync_history_from_QM(self, search_history1=None, search_history2=None):
+        if search_history1 is not None:
+            if search_history1 is self.query_manager.history2:
+                print("[警告] sync_history_from_QM 收到错误引用（history2）→ 覆盖 history1 被阻止")
+                return
+            self.search_history1 = [r["query"] for r in list(search_history1)]
+
+        if search_history2 is not None:
+            if search_history2 is self.query_manager.history1:
+                print("[警告] sync_history_from_QM 收到错误引用（history1）→ 覆盖 history2 被阻止")
+                return
+            self.search_history2 = [r["query"] for r in list(search_history2)]
+
 
     def sync_history(self, val, search_history, combo, history_attr, current_key):
 
@@ -3240,8 +3251,153 @@ class StockMonitorApp(tk.Tk):
             self.query_manager.current_history = new_history
             self.query_manager.refresh_tree()
 
-
     def apply_search(self):
+        val1 = self.search_var1.get().strip()
+        val2 = self.search_var2.get().strip()
+
+        if not val1 and not val2:
+            self.status_var.set("搜索框为空")
+            return
+
+        query = (f"({val1}) and ({val2})" if val1 and val2 else val1 or val2)
+        self._last_value = query
+
+        # try:
+        #     key = self.query_manager.current_key
+        #     if key == "history1" and val1:
+        #         self.sync_history(val1, self.search_history1, self.search_combo1, "history1", "history1")
+        #     elif key == "history2" and val2:
+        #         self.sync_history(val2, self.search_history2, self.search_combo2, "history2", "history2")
+        # except Exception as ex:
+        #     log.exception("更新搜索历史时出错: %s", ex)
+        try:
+            # 🔹 同步两个搜索框的历史，不依赖 current_key
+            if val1:
+                self.sync_history(val1, self.search_history1, self.search_combo1, "history1", "history1")
+            if val2:
+                self.sync_history(val2, self.search_history2, self.search_combo2, "history2", "history2")
+        except Exception as ex:
+            log.exception("更新搜索历史时出错: %s", ex)
+
+        # ================= 数据为空检查 =================
+        if self.df_all.empty:
+            self.status_var.set("当前数据为空")
+            return
+
+        # ====== 条件清理 ======
+        import re
+
+        bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
+
+        # 2️⃣ 替换掉原 query 中的这些部分
+        for bracket in bracket_patterns:
+            query = query.replace(f'and {bracket}', '')
+
+        # print("修改后的 query:", query)
+        # print("提取出来的括号条件:", bracket_patterns)
+
+        # 3️⃣ 后续可以在拼接 final_query 时再组合回去
+        # 例如:
+        # final_query = ' and '.join(valid_conditions)
+        # final_query += ' and ' + ' and '.join(bracket_patterns)
+
+
+        conditions = [c.strip() for c in query.split('and')]
+        valid_conditions = []
+        removed_conditions = []
+
+        for cond in conditions:
+            cond_clean = cond.lstrip('(').rstrip(')')
+
+            # index 条件特殊保留
+            # if 'index.' in cond_clean.lower():
+            #     valid_conditions.append(cond_clean)
+            #     continue
+
+            # index 或 str 操作条件特殊保留
+            if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0:
+                valid_conditions.append(cond_clean)
+                continue
+
+
+            # 提取条件中的列名
+            cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
+
+            # 所有列都必须存在才保留
+            if all(col in self.df_all.columns for col in cols_in_cond):
+                valid_conditions.append(cond_clean)
+            else:
+                removed_conditions.append(cond_clean)
+                log.info(f"剔除不存在的列条件: {cond_clean}")
+
+        # 打印剔除条件列表
+        if removed_conditions:
+            print(f"[剔除的条件列表] {removed_conditions}")
+
+        if not valid_conditions:
+            self.status_var.set("没有可用的查询条件")
+            return
+
+        # ====== 拼接 final_query 并检查括号 ======
+        final_query = ' and '.join(f"({c})" for c in valid_conditions)
+        # print(f'final_query : {final_query}')
+        if bracket_patterns:
+            final_query += ' and ' + ' and '.join(bracket_patterns)
+        # print(f'final_query : {final_query}')
+        left_count = final_query.count("(")
+        right_count = final_query.count(")")
+        if left_count != right_count:
+            if left_count > right_count:
+                final_query += ")" * (left_count - right_count)
+            elif right_count > left_count:
+                final_query = "(" * (right_count - left_count) + final_query
+
+        # ====== 决定 engine ======
+        query_engine = 'numexpr'
+        if any('index.' in c.lower() for c in valid_conditions):
+            query_engine = 'python'
+
+        # ====== 数据过滤 ======
+        try:
+            if val1.count('or') > 0 and val1.count('(') > 0:
+                if val2 :
+                    query_search = f"({val1}) and {val2}"
+                    print(f'query: {query_search} ')
+
+                else:
+                    query_search = f"({val1})"
+                    print(f'query: {query_search} ')
+                df_filtered = self.df_all.query(query_search, engine=query_engine)
+                self.refresh_tree(df_filtered)
+                self.status_var2.set('')
+                self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {val1} and {val2}")
+            else:
+                # 检查 category 列是否存在
+                if 'category' in self.df_all.columns:
+                    # 强制转换为字符串，避免 str.contains 报错
+                    if not pd.api.types.is_string_dtype(self.df_all['category']):
+                        self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
+                        # self.df_all['category'] = self.df_all['category'].astype(str)
+                        # 可选：去掉前后空格
+                        # self.df_all['category'] = self.df_all['category'].str.strip()
+                df_filtered = self.df_all.query(final_query, engine=query_engine)
+                self.refresh_tree(df_filtered)
+                # 打印剔除条件列表
+                if removed_conditions:
+                    print(f"[剔除的条件列表] {removed_conditions}")
+                    # 显示到状态栏
+                    self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
+                    self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
+                else:
+                    self.status_var2.set('')
+                    self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
+                print(f'final_query: {final_query}')
+        except Exception as e:
+            log.error(f"Query error: {e}")
+            self.status_var.set(f"查询错误: {e}")
+
+
+    def apply_search1(self):
         val1 = self.search_var1.get().strip()
         val2 = self.search_var2.get().strip()
 
@@ -3274,48 +3430,6 @@ class StockMonitorApp(tk.Tk):
 
         except Exception as ex:
             log.exception("更新搜索历史时出错: %s", ex)
-
-
-        # try:
-        #     # 顶部搜索框
-        #     if val1:
-        #         if val1 in self.search_history1:
-        #             self.search_history1.remove(val1)
-        #         self.search_history1.insert(0, val1)
-        #         if len(self.search_history1) > 20:
-        #             self.search_history1[:] = self.search_history1[:20]
-        #         self.search_combo1['values'] = self.search_history1
-        #         try:
-        #             self.search_combo1.set(val1)
-        #         except Exception:
-        #             pass
-        #         # 同步到 QueryHistoryManager
-        #         self.query_manager.history1 = [{"query": q, "starred":  0, "note": ""} for q in self.search_history1]
-        #         if self.query_manager.current_key == "history1":
-        #             self.query_manager.current_history = self.query_manager.history1
-        #             self.query_manager.refresh_tree()
-        #     # 底部搜索框
-        #     if val2:
-        #         if val2 in self.search_history2:
-        #             self.search_history2.remove(val2)
-        #         self.search_history2.insert(0, val2)
-        #         if len(self.search_history2) > 20:
-        #             self.search_history2[:] = self.search_history2[:20]
-        #         self.search_combo2['values'] = self.search_history2
-        #         try:
-        #             self.search_combo2.set(val2)
-        #         except Exception:
-        #             pass
-
-        #         # 同步到 QueryHistoryManager
-        #         self.query_manager.history2 = [{"query": q, "starred":  0, "note": ""} for q in self.search_history2]
-        #         if self.query_manager.current_key == "history2":
-        #             self.query_manager.current_history = self.query_manager.history2
-        #             self.query_manager.refresh_tree()
-        #     # 一次性保存
-        #     self.query_manager.save_search_history()
-        # except Exception as ex:
-        #     log.exception("更新搜索历史时出错: %s", ex)
 
         # ================= 数据为空检查 =================
         if self.df_all.empty:
@@ -4061,6 +4175,7 @@ class QueryHistoryManager:
         self.his_limit = 30
         self.search_combo1 = search_combo1
         self.search_combo2 = search_combo2
+        self.deleted_stack = []  # 保存被删除的 query 记录
 
         self.sync_history_callback = sync_history_callback
         # 读取历史
@@ -4148,6 +4263,7 @@ class QueryHistoryManager:
         # 键盘 Delete 删除
         self.tree.bind("<Delete>", self.on_delete_key)
 
+        self.root.bind("<Control-z>", self.undo_delete)  # 快捷键绑定
         self.root.bind("<Escape>", lambda event: self.open_editor())
         self.root.bind("<Alt-q>", lambda event: self.open_editor())
         self.root.bind("<Alt-e>", lambda event: self.open_editor())
@@ -4509,8 +4625,21 @@ class QueryHistoryManager:
         else:
             return {"query": str(r), "starred":  0, "note": ""}
 
-    # ========== 功能 ==========
+    # # ========== 功能 ==========
+    # def switch_group(self, event=None):
+    #     sel = self.combo_group.get()
+    #     if sel == "history1":
+    #         self.current_history = self.history1
+    #         self.current_key = "history1"
+    #     else:
+    #         self.current_history = self.history2
+    #         self.current_key = "history2"
+    #     self.refresh_tree()
+
     def switch_group(self, event=None):
+        if getattr(self, "_suppress_switch", False):
+            return
+
         sel = self.combo_group.get()
         if sel == "history1":
             self.current_history = self.history1
@@ -4518,7 +4647,10 @@ class QueryHistoryManager:
         else:
             self.current_history = self.history2
             self.current_key = "history2"
+
+        print(f"[SWITCH] 当前分组切换到：{sel}")
         self.refresh_tree()
+
 
     # def add_query(self):
     #     query = self.entry_query.get().strip()
@@ -4573,7 +4705,8 @@ class QueryHistoryManager:
             # print(f'record2 : {record}')
             # self.sync_history_current(record)
             self.refresh_tree()
-            self.use_query(new_query)
+            if self.current_key == "history1":
+                self.use_query(new_query)
             # self.save_search_history()
 
 
@@ -4921,79 +5054,295 @@ class QueryHistoryManager:
         menu.add_command(label="删除", command=lambda: self.delete_item(item))
         menu.tk_popup(event.x_root, event.y_root)
 
-    # def delete_item(self, iid):
-    #     idx = int(iid) - 1
-    #     if 0 <= idx < len(self.current_history):
-    #         self.current_history.pop(idx)
-    #         self.refresh_tree()
-    #         self.save_search_history()
 
-    # def move_to_top(self, iid):
-    #     idx = int(iid) - 1
-    #     if 0 <= idx < len(self.current_history):
-    #         record = self.current_history.pop(idx)
-    #         self.current_history.insert(0, record)
-    #         self.refresh_tree()
-    #         self.save_search_history()
+    def on_delete_key(self, event):
+        selected = self.tree.selection()
+        if not selected:
+            return
+        self.delete_item(selected[0])
 
-    def sync_history_current(self,record):
-        # 同步主窗口 history
+    '''
+    def sync_history_current(self, record, action="delete"):
+        """
+        同步主窗口的历史列表
+        action: "delete" 删除记录（默认） | "add" 恢复记录（undo）
+        """
+        query = record.get("query")
+        if not query:
+            return
+
         if self.current_key == "history1":
-            self.history1 = [r for r in self.history1 if r["query"] != record["query"]]
-            # self.history1 = record
-            self.search_combo1['values'] = [r["query"] for r in self.history1]
-            if self.search_var1.get() == record["query"]:
+            if action == "delete":
+                # 删除记录
+                self.history1 = [r for r in self.history1 if r["query"] != query]
+            elif action == "add":
+                # 撤销删除 → 恢复记录
+                if not any(r["query"] == query for r in self.history1):
+                    self.history1.insert(0, record)  # 插到最前面
+            # 更新下拉列表
+            self.search_combo1["values"] = [r["query"] for r in self.history1]
+            # 清除输入框中刚被删掉的项
+            if action == "delete" and self.search_var1.get() == query:
                 self.search_var1.set("")
-
+            if action == "add" and self.search_var1.get() == query:
+                self.search_var1.set(query)
+            # 回调同步给主窗口
             try:
                 if callable(self.sync_history_callback):
                     self.sync_history_callback(self.history1)
             except Exception:
                 pass
-        else:
-            self.history2 = [r for r in self.history2 if r["query"] != record["query"]]
-            # self.history2 = record
-            self.search_combo2['values'] = [r["query"] for r in self.history2]
-            if self.search_var2.get() == record["query"]:
+
+        else:  # history2
+            if action == "delete":
+                self.history2 = [r for r in self.history2 if r["query"] != query]
+            elif action == "add":
+                if not any(r["query"] == query for r in self.history2):
+                    self.history2.insert(0, record)
+            self.search_combo2["values"] = [r["query"] for r in self.history2]
+            if action == "delete" and self.search_var2.get() == query:
                 self.search_var2.set("")
+            if action == "add" and self.search_var1.get() == query:
+                self.search_var1.set(query)
             try:
                 if callable(self.sync_history_callback):
                     self.sync_history_callback(self.history2)
             except Exception:
                 pass
+
         self.refresh_tree()
 
-    def on_delete_key(self, event):
-        # 如果没有传 item，从选中项里取
-        selected = self.tree.selection()
-        if not selected:
+    def delete_item(self, iid):
+        """删除选中项并保存到撤销栈"""
+        idx = int(iid) - 1
+        if not (0 <= idx < len(self.current_history)):
             return
 
-        item = selected[0]
-        self.delete_item(item)
+        # 取出被删除的记录
+        record = self.current_history.pop(idx)
+
+        # 保存到撤销栈（支持 Ctrl+Z 恢复）
+        self.deleted_stack.append({
+            "record": record,
+            "history_key": self.current_key,
+            "index": idx
+        })
+
+        # 限制撤销栈大小（可选）
+        if len(self.deleted_stack) > 20:
+            self.deleted_stack.pop(0)
+
+        # 同步到全局（主程序保存、写入文件等）
+        self.sync_history_current(record)
+        # 刷新界面
+        self.refresh_tree()
+
+    def undo_delete(self, event=None):
+        if not self.deleted_stack:
+            toast_message(self.root,"没有可撤销的删除记录")
+            return
+
+        last_deleted = self.deleted_stack.pop()
+        record = last_deleted["record"]
+        history_key = last_deleted["history_key"]
+        index = last_deleted["index"]
+
+        if history_key == "history1":
+            target_history = self.history1
+        else:
+            target_history = self.history2
+
+        # ✅ 插入原来的完整记录（包括 note / starred）
+        if 0 <= index <= len(target_history):
+            target_history.insert(index, record)
+        else:
+            target_history.insert(0, record)
+
+        # ✅ 同步回主窗口
+        self.sync_history_current(record, action="add")
+
+        # messagebox.showinfo("提示", f"已恢复删除的 Query：{record.get('query', '')}")
+        toast_message(self.root ,f"已恢复删除的 Query：{record.get('query', '')}")
+
+    '''
+    
+    def sync_history_current(self, record, action="delete", history_key=None):
+        """
+        同步主窗口与 QueryHistoryManager 的状态。
+        支持 delete / add，带防循环保护与分组标识。
+        """
+        if history_key is None:
+            history_key = self.current_key
+
+        query = record.get("query")
+        if not query:
+            return
+
+        # --- 选择目标控件与历史 ---
+        if history_key == "history1":
+            combo, var, target = self.search_combo1, self.search_var1, self.history1
+        else:
+            combo, var, target = self.search_combo2, self.search_var2, self.history2
+
+        # --- 修改本地历史数据 ---
+        if action == "delete":
+            target[:] = [r for r in target if r.get("query") != query]
+            if combo:
+                combo['values'] = [r.get("query") for r in target]
+            if var and var.get() == query:
+                var.set("")
+        elif action == "add":
+            if not any(r.get("query") == query for r in target):
+                target.insert(0, record.copy())
+            if combo:
+                combo['values'] = [r.get("query") for r in target]
+
+        # --- 回调主窗口同步 ---
+        if callable(self.sync_history_callback):
+            # 防止主窗口在同步时递归触发回调
+            if hasattr(self.root, "_suppress_sync") and self.root._suppress_sync:
+                return
+            try:
+                if history_key == "history1":
+                    self.sync_history_callback(search_history1=self.history1)
+                else:
+                    self.sync_history_callback(search_history2=self.history2)
+            except Exception as e:
+                print(f"[SYNC ERR] {e}")
+
+        # --- 刷新 UI，但防止误触 switch ---
+        suppress_state = getattr(self, "_suppress_switch", False)
+        self._suppress_switch = True
+        try:
+            self.refresh_tree()
+        finally:
+            self._suppress_switch = suppress_state
+
+    # def sync_history_current(self, record, action="delete", history_key=None):
+    #     """
+    #     同步主窗口的 ComboBox 与数据结构
+    #     record: 被操作的记录 dict
+    #     action: "delete" 或 "add"
+    #     history_key: "history1" 或 "history2"（如果为 None，则使用 self.current_key 作为后备）
+    #     """
+    #     if history_key is None:
+    #         history_key = self.current_key
+
+    #     query = record.get("query")
+    #     if not query:
+    #         return
+
+    #     if history_key == "history1":
+    #         combo = self.search_combo1
+    #         var = self.search_var1
+    #         target = self.history1
+    #     else:
+    #         combo = self.search_combo2
+    #         var = self.search_var2
+    #         target = self.history2
+
+    #     if action == "delete":
+    #         # 删除：从目标历史和下拉框移除
+    #         target[:] = [r for r in target if r.get("query") != query]
+    #         combo['values'] = [r.get("query") for r in target]
+    #         if var.get() == query:
+    #             var.set("")
+    #     elif action == "add":
+    #         # 恢复：插入完整记录（保留 note/starred）
+    #         if not any(r.get("query") == query for r in target):
+    #             target.insert(0, record.copy())
+    #         combo['values'] = [r.get("query") for r in target]
+
+    #     # callback：同步回主窗口 / 外层
+    #     try:
+    #         if callable(self.sync_history_callback):
+    #             # 仍然传回单个 list（兼容现有接收方）
+    #             self.sync_history_callback(target)
+    #     except Exception:
+    #         pass
+
+    #     # 刷新 Treeview
+    #     self.refresh_tree()
+
+    # def delete_item(self, iid):
+    #     idx = int(iid) - 1
+    #     if 0 <= idx < len(self.current_history):
+    #         record = self.current_history.pop(idx)
+
+    #         # 保存完整删除记录（带 note/starred）
+    #         self.deleted_stack.append({
+    #             "record": record.copy(),
+    #             "history_key": self.current_key,
+    #             "index": idx
+    #         })
+
+    #         # 传入 history_key，避免依赖 self.current_key（更稳）
+    #         self.sync_history_current(record, action="delete", history_key=self.current_key)
 
     def delete_item(self, iid):
         idx = int(iid) - 1
-        if 0 <= idx < len(self.current_history):
-            # 删除 Treeview 当前历史
-            record = self.current_history.pop(idx)
+        if not (0 <= idx < len(self.current_history)):
+            return
 
-            self.sync_history_current(record)
+        record = self.current_history.pop(idx)
 
-            # # 同步主窗口 history
-            # if self.current_key == "history1":
-            #     self.history1 = [r for r in self.history1 if r["query"] != record["query"]]
-            #     self.search_combo1['values'] = [r["query"] for r in self.history1]
-            #     if self.search_var1.get() == record["query"]:
-            #         self.search_var1.set("")
-            # else:
-            #     self.history2 = [r for r in self.history2 if r["query"] != record["query"]]
-            #     self.search_combo2['values'] = [r["query"] for r in self.history2]
-            #     if self.search_var2.get() == record["query"]:
-            #         self.search_var2.set("")
+        # 精确识别所属分组
+        if self.current_history is self.history2:
+            history_key = "history2"
+        else:
+            history_key = "history1"
 
-            # self.refresh_tree()
-            # # self.save_search_history()
+        # 保存完整删除记录（含 note/starred）
+        self.deleted_stack.append({
+            "record": record.copy(),
+            "history_key": history_key,
+            "index": idx
+        })
+
+        # 🔹 在刷新期间禁止触发 group 切换
+        self._suppress_switch = True
+
+        # 🔹 通知主窗口（带 action 和 history_key）
+        self.sync_history_current(record, action="delete", history_key=history_key)
+
+        # 🔹 刷新本地 UI
+        self.refresh_tree()
+
+        self._suppress_switch = False
+
+        print(f"[DEL] 从 {history_key} 删除 {record.get('query')}")
+
+
+    def undo_delete(self, event=None):
+        if not self.deleted_stack:
+            toast_message(self.root, "没有可撤销的记录", 1200)
+            return
+
+        last_deleted = self.deleted_stack.pop()
+        record = last_deleted["record"]
+        history_key = last_deleted["history_key"]
+        index = last_deleted["index"]
+
+        # 目标列表
+        if history_key == "history1":
+            target_history = self.history1
+        else:
+            target_history = self.history2
+
+        # 防止重复
+        if any(r.get("query") == record.get("query") for r in target_history):
+            toast_message(self.root, f"已存在：{record.get('query')}", 1200)
+            return
+
+        if 0 <= index <= len(target_history):
+            target_history.insert(index, record)
+        else:
+            target_history.insert(0, record)
+
+        # 显式传入 history_key
+        self.sync_history_current(record, action="add", history_key=history_key)
+
+        toast_message(self.root, f"已恢复：{record.get('query')}", 1500)
 
 
     def move_to_top(self, iid):
@@ -5023,11 +5372,11 @@ class QueryHistoryManager:
 
     def refresh_tree(self):
         # # 自动同步当前显示的历史
-        # if self.current_key == "history1":
-        #     self.current_history = self.history1
-        # else:
-        #     # self.current_history = [{"query": q, "starred":  0, "note": ""} for q in self.history2]
-        #     self.current_history = self.history2
+        if self.current_key == "history1":
+            self.current_history = self.history1
+        else:
+            # self.current_history = [{"query": q, "starred":  0, "note": ""} for q in self.history2]
+            self.current_history = self.history2
         # 清空Treeview
         for i in self.tree.get_children():
             self.tree.delete(i)
