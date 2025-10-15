@@ -354,6 +354,52 @@ def clamp_window_to_screens(x, y, w, h):
 #     return default_pos
 
 
+from collections import Counter, OrderedDict
+
+def counterCategory(df, col='category', limit=50, topn=10, table=False):
+    """
+    统计 DataFrame 某列中前 limit 条的概念出现频率。
+    用于分析涨幅榜中哪些板块/概念最集中。
+
+    参数：
+        df : pandas.DataFrame
+        col : str, 目标列名，如 'category'
+        limit : int, 取前多少条股票进行统计
+        topn : int, 输出前多少个概念
+        table : bool, True 返回表格字符串；False 打印简要结果
+    """
+    if df is None or len(df) == 0 or col not in df.columns:
+        return ""
+
+    # 取前 limit 行的分类字段
+    series = df[col].head(limit).dropna().astype(str)
+
+    # 按分隔符拆解成单个概念
+    all_concepts = []
+    for text in series:
+        if ';' in text:
+            all_concepts.extend([t.strip() for t in text.split(';') if len(t.strip()) > 1])
+        elif '+' in text:
+            all_concepts.extend([t.strip() for t in text.split('+') if len(t.strip()) > 1])
+
+    # 统计出现频次
+    top_counts = Counter(all_concepts)
+    if len(top_counts) == 0:
+        return ""
+
+    # 排序并截取前 topn 个
+    topn_items = OrderedDict(top_counts.most_common(topn))
+
+    # 格式化输出
+    if table:
+        return " ".join([f"{k}:{v}" for k, v in topn_items.items()])
+    else:
+        return(" | ".join([f"{k}:{v}" for k, v in topn_items.items()]))
+        # return topn_items
+
+# 假设 df 是你提供的涨幅榜表格
+# counterCategory(df, 'category', limit=50)
+
 def test_code_against_queries(df_code, queries):
     """
     df_code: DataFrame（单只股票的数据）
@@ -370,7 +416,8 @@ def test_code_against_queries(df_code, queries):
 
     for q in queries:
         expr = q.get("query", "")
-        hit = False
+        # hit = False
+        hit_count = 0
         try:
             # 用 DataFrame.query() 执行逻辑表达式
             missing_cols = [col for col in re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', expr)
@@ -381,18 +428,23 @@ def test_code_against_queries(df_code, queries):
                 
             df_hit = df_code.query(expr)
             # 命中条件：返回非空
-            hit = not df_hit.empty
+            # hit = not df_hit.empty
+            hit_count = len(df_hit)
         except Exception as e:
             print(f"[ERROR] 执行 query 出错: {expr}, {e}")
-            hit = False
+            # hit = False
+            hit_count = 0
+
 
         results.append({
             "query": expr,
             "note": q.get("note", ""),
             "starred": q.get("starred", 0),
-            "hit": bool(hit)
+            "hit": hit_count
         })
+            # "hit": bool(hit)
     return results
+
 
 
 
@@ -714,6 +766,10 @@ class StockMonitorApp(tk.Tk):
         # ----------------- 控件框 ----------------- #
         ctrl_frame = tk.Frame(self)
         ctrl_frame.pack(fill="x", padx=5, pady=1)
+
+        # self.lbl_category_result = tk.Label(self, text="", fg="green", anchor="w")
+        # self.lbl_category_result.pack(fill="x", padx=5, pady=(0, 4))
+
 
         self.st_key_sort = self.global_values.getkey("st_key_sort") or "3 0"
 
@@ -3328,6 +3384,78 @@ class StockMonitorApp(tk.Tk):
             self.query_manager.current_history = new_history
             self.query_manager.refresh_tree()
 
+        # # --- 2️⃣ 如果编辑器已显示，直接写入 entry_query ---
+        # if self.query_manager.editor_frame.winfo_ismapped():
+        #     self.query_manager.entry_query.delete(0, tk.END)
+        #     self.query_manager.entry_query.insert(0, self._Categoryresult)
+        #     return
+
+    def update_category_result(self, df_filtered):
+        """统计概念异动，并显示在顶部区域"""
+        if df_filtered is None or df_filtered.empty:
+            return
+
+        # 统计当前概念
+        result = counterCategory(df_filtered, 'category', limit=50, table=False)
+        if isinstance(result, list):
+            current_categories = set(result)
+            display_text = "、".join(result)
+        elif isinstance(result, str):
+            current_categories = set(result.replace("、", " ").split())
+            display_text = result.strip()
+        else:
+            current_categories = set()
+            display_text = ""
+
+        # --- 初始化标签 ---
+        if not hasattr(self, "lbl_category_result"):
+            self.lbl_category_result = tk.Label(
+                self, text="", font=("Consolas", 10), fg="green",
+                anchor="w", justify="left", wraplength=800
+            )
+            self.lbl_category_result.pack(fill="x", padx=5, pady=(2, 4))
+            self._last_categories = current_categories
+            self._last_display_text = display_text
+            self.lbl_category_result.config(text=f"当前概念：{display_text}")
+            return
+
+        # --- 对比上次结果 ---
+        old_categories = getattr(self, "_last_categories", set())
+        added = current_categories - old_categories
+        removed = old_categories - current_categories
+
+        if added or removed:
+            # 生成对比文本
+            diff_texts = []
+            if added:
+                diff_texts.append(f"🆕 新增：{'、'.join(sorted(added))}")
+            if removed:
+                diff_texts.append(f"❌ 消失：{'、'.join(sorted(removed))}")
+            diff_summary = "  ".join(diff_texts)
+            new_text = f"概念异动：{diff_summary}"
+            self.lbl_category_result.config(text=new_text, fg="red")
+
+            # --- 红绿闪烁提示 ---
+            def flash_label(count=0):
+                if count >= 6:
+                    self.lbl_category_result.config(fg="red")
+                    return
+                cur_color = self.lbl_category_result.cget("fg")
+                new_color = "green" if cur_color == "red" else "red"
+                self.lbl_category_result.config(fg=new_color)
+                self.lbl_category_result.after(300, flash_label, count + 1)
+
+            flash_label()
+        else:
+            # 无变化，保持绿色
+            self.lbl_category_result.config(text=f"当前概念：{display_text}", fg="green")
+
+        # --- 保存状态 ---
+        self._last_categories = current_categories
+        self._last_display_text = display_text
+
+
+
     def apply_search(self):
         val1 = self.search_var1.get().strip()
         val2 = self.search_var2.get().strip()
@@ -3459,6 +3587,12 @@ class StockMonitorApp(tk.Tk):
                         # 可选：去掉前后空格
                         # self.df_all['category'] = self.df_all['category'].str.strip()
                 df_filtered = self.df_all.query(final_query, engine=query_engine)
+
+                # 假设 df 是你提供的涨幅榜表格
+                # result = counterCategory(df_filtered, 'category', limit=50, table=True)
+                # self._Categoryresult = result
+                # self.query_manager.entry_query.set(self._Categoryresult)
+
                 self.refresh_tree(df_filtered)
                 # 打印剔除条件列表
                 if removed_conditions:
@@ -3473,6 +3607,27 @@ class StockMonitorApp(tk.Tk):
         except Exception as e:
             log.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")
+
+        self.update_category_result(df_filtered)
+        # if df_filtered is not None and not df_filtered.empty:
+        #     result = counterCategory(df_filtered, 'category', limit=50, table=True)
+        #     self._Categoryresult = result
+        #     if self.query_manager.editor_frame.winfo_ismapped():
+        #             # ✅ 编辑器已打开 → 显示在输入框中
+        #             self.query_manager.entry_query.delete(0, tk.END)
+        #             self.query_manager.entry_query.insert(0, self._Categoryresult)
+        #     else:
+        #         # ✅ 编辑器未打开 → 显示在主窗口标题或标签
+        #         if hasattr(self, "lbl_category_result"):
+        #             # 如果已经有标签则更新文字
+        #             self.lbl_category_result.config(text=self._Categoryresult)
+        #         else:
+        #             # 否则创建一个新的标签显示统计
+        #             self.lbl_category_result = tk.Label(
+        #                 self.main_frame, text=self._Categoryresult,
+        #                 font=("Consolas", 10), fg="green", anchor="w", justify="left"
+        #             )
+        #             self.lbl_category_result.pack(fill="x", padx=5, pady=(2, 4))
 
     # def apply_search1(self):
     #     val1 = self.search_var1.get().strip()
@@ -3969,15 +4124,22 @@ class StockMonitorApp(tk.Tk):
 
     def on_test_code(self):
         code = self.query_manager.entry_query.get().strip()
-        if not code:
-            toast_message(self, "请输入股票代码")
-            return
+        result = getattr(self, "_Categoryresult", "")
+        # if not code:
+        #     toast_message(self, "请输入股票代码")
+        #     return
         # 判断是否为 6 位数字
-        if not (code.isdigit() and len(code) == 6):
+        # if not (code.isdigit() and len(code) == 6):
+
+        if code and code == result:
+            df_code = self.df_all
+        elif code and not (code.isdigit() and len(code) == 6):
             toast_message(self, "请输入6位数字股票代码")
             return
-
-        df_code = self.df_all.loc[[code]]
+        elif code and code.isdigit() and len(code) == 6: 
+            df_code = self.df_all.loc[[code]]
+        else:
+            df_code = self.df_all
         results = self.query_manager.test_code(df_code)
 
         # 更新当前历史的命中结果
@@ -3986,7 +4148,7 @@ class StockMonitorApp(tk.Tk):
                 self.query_manager.current_history[i]["hit"] = r["hit"]
 
         self.query_manager.refresh_tree()
-        toast_message(self, f"{code} 测试完成，共 {len(results)} 条规则")
+        # toast_message(self, f"{code} 测试完成，共 {len(results)} 条规则")
 
 
 
@@ -4361,19 +4523,49 @@ class QueryHistoryManager:
 
         # --- Treeview ---
         self.tree = ttk.Treeview(
-            self.editor_frame, columns=("query", "star", "note"), show="headings", height=12
+            self.editor_frame, columns=("query", "star", "note","hit"), show="headings", height=12
         )
         self.tree.heading("query", text="Query")
         self.tree.heading("star", text="⭐")
         self.tree.heading("note", text="备注")
+        self.tree.heading("hit", text="命中")  # 新增 hit 列
 
-        # 设置初始列宽（按比例 6:1:3）
-        total_width = 600  # 初始宽度参考
-        self.tree.column("query", width=int(total_width * 0.6), anchor="w")
-        self.tree.column("star", width=int(total_width * 0.2), anchor="center")
-        self.tree.column("note", width=int(total_width * 0.2), anchor="w")
+        # # 设置初始列宽（按比例 6:1:3）
+        # total_width = 600  # 初始宽度参考
+        # self.tree.column("query", width=int(total_width * 0.6), anchor="w")
+        # self.tree.column("star", width=int(total_width * 0.1), anchor="center")
+        # self.tree.column("note", width=int(total_width * 0.2), anchor="w")
+        # self.tree.column("hit", width=int(total_width * 0.1), anchor="w")
+        # self.tree.pack(fill="both", expand=True, padx=5, pady=1)
 
-        self.tree.pack(fill="both", expand=True, padx=5, pady=1)
+        # 初始列宽参考比例 6:1:2:1
+        col_ratios = {"query": 0.7, "star": 0.05, "note": 0.2, "hit": 0.05}
+
+        for col in self.tree["columns"]:
+            self.tree.column(col, width=1, anchor="w", stretch=True)  # 先给最小宽度
+
+        self.tree.pack(expand=True, fill="both")
+
+        # --- 窗口绘制完成后调整列宽 ---
+        def adjust_column_widths():
+            total_width = self.tree.winfo_width()
+            if total_width <= 1:  # 尚未绘制完成，延迟再执行
+                self.tree.after(50, adjust_column_widths)
+                return
+            for col, ratio in col_ratios.items():
+                self.tree.column(col, width=int(total_width * ratio))
+
+        # self.tree.after_idle(adjust_column_widths)  # 窗口绘制完成后执行
+        # 延迟执行一次，确保 Treeview 已经有宽度
+        self.tree.after(50, adjust_column_widths)
+
+        # --- 可选：绑定窗口调整事件，实现动态调整 ---
+        def on_resize(event):
+            total_width = event.width
+            for col, ratio in col_ratios.items():
+                self.tree.column(col, width=int(total_width * ratio))
+
+        self.editor_frame.bind("<Configure>", on_resize)
 
         # 单击星标 / 双击修改 / 右键菜单
         self.tree.bind("<Button-1>", self.on_click_star)
@@ -4406,7 +4598,7 @@ class QueryHistoryManager:
         self.root.bind("<Alt-q>", lambda event: self.open_editor())
         self.root.bind("<Alt-e>", lambda event: self.open_editor())
         # 为每列绑定排序
-        for col in ("query", "star", "note"):
+        for col in ("query", "star", "note","hit"):
             self.tree.heading(col, text=col.capitalize(), command=lambda _col=col: self.treeview_sort_column(self.tree, _col))
         # # --- 操作按钮 ---
         # frame_btn = tk.Frame(self.editor_frame)
@@ -5572,7 +5764,7 @@ class QueryHistoryManager:
 
 
 
-    # def refresh_tree(self):
+    # def refresh_tree_sr(self):
     #     # # 自动同步当前显示的历史
     #     if self.current_key == "history1":
     #         self.current_history = self.history1
@@ -5598,17 +5790,59 @@ class QueryHistoryManager:
     #         self.tree.insert("", "end", iid=str(idx), values=(record.get("query", ""), star_text, note))
 
 
+    # def refresh_tree_hit(self):
+    #     """
+    #     刷新 Treeview 显示
+    #     - 当前历史 self.current_history 自动同步
+    #     - 根据 record['hit'] 添加符号 ✅/❌ 并设置背景颜色
+    #     """
+    #     # 自动同步当前显示的历史
+    #     if self.current_key == "history1":
+    #         self.current_history = self.history1
+    #     else:
+    #         self.current_history = self.history2
+
+    #     # 清空 Treeview
+    #     self.tree.delete(*self.tree.get_children())
+
+    #     # 配置 tag 颜色
+    #     self.tree.tag_configure("hit", background="#d1ffd1")   # 命中绿色
+    #     self.tree.tag_configure("miss", background="#ffd1d1")  # 未命中红色
+    #     self.tree.tag_configure("normal", background="#ffffff") # 默认白色
+
+    #     for idx, record in enumerate(self.current_history, start=1):
+    #         star_count = record.get("starred", 0)
+    #         if isinstance(star_count, bool):
+    #             star_count = 1 if star_count else 0
+    #         star_text = "★" * star_count
+    #         note = record.get("note", "")
+    #         query_text = record.get("query", "")
+
+    #         # ✅ 显示时添加命中/未命中符号，但不修改原始 record
+    #         display_query = query_text
+    #         hit = record.get("hit", None)
+    #         if hit is True:
+    #             display_query = "✅ " + query_text
+    #             tag = "hit"
+    #         elif hit is False:
+    #             display_query = "❌ " + query_text
+    #             tag = "miss"
+    #         else:
+    #             tag = "normal"
+
+    #         # 插入 Treeview
+    #         self.tree.insert("", "end", iid=str(idx),
+    #                          values=(display_query, star_text, note),
+    #                          tags=(tag,))
+
     def refresh_tree(self):
         """
         刷新 Treeview 显示
         - 当前历史 self.current_history 自动同步
-        - 根据 record['hit'] 添加符号 ✅/❌ 并设置背景颜色
+        - 根据 record['hit'] 设置 hit 列显示，并设置背景颜色
         """
         # 自动同步当前显示的历史
-        if self.current_key == "history1":
-            self.current_history = self.history1
-        else:
-            self.current_history = self.history2
+        self.current_history = self.history1 if self.current_key == "history1" else self.history2
 
         # 清空 Treeview
         self.tree.delete(*self.tree.get_children())
@@ -5626,23 +5860,32 @@ class QueryHistoryManager:
             note = record.get("note", "")
             query_text = record.get("query", "")
 
-            # ✅ 显示时添加命中/未命中符号，但不修改原始 record
-            display_query = query_text
+            # hit 列显示
             hit = record.get("hit", None)
-            if hit is True:
-                display_query = "✅ " + query_text
+            if isinstance(hit, int):
+                if hit == 0:
+                    hit_text = "❌"
+                    tag = "miss"
+                elif hit == 1:
+                    hit_text = "✅"
+                    tag = "hit"
+                else:  # hit > 1
+                    hit_text = str(hit)
+                    tag = "hit"  # 多于1也算命中
+            elif hit is True:
+                hit_text = "✅"
                 tag = "hit"
             elif hit is False:
-                display_query = "❌ " + query_text
+                hit_text = "❌"
                 tag = "miss"
             else:
+                hit_text = ""
                 tag = "normal"
 
             # 插入 Treeview
             self.tree.insert("", "end", iid=str(idx),
-                             values=(display_query, star_text, note),
+                             values=(query_text, star_text, note, hit_text),
                              tags=(tag,))
-
 
 
     def clear_hits(self):
