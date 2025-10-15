@@ -2444,6 +2444,26 @@ class StockMonitorApp(tk.Tk):
             if send_tdx_Key and stock_code:
                 self.sender.send(stock_code)
 
+    def is_window_covered_by_main(self, win):
+        """
+        判断 win 是否完全在主窗口 self 范围内（可能被遮挡）
+        返回 True 表示被覆盖
+        """
+        if not win.winfo_exists():
+            return False
+
+        main_x, main_y = self.winfo_x(), self.winfo_y()
+        main_w, main_h = self.winfo_width(), self.winfo_height()
+
+        win_x, win_y = win.winfo_x(), win.winfo_y()
+        win_w, win_h = win.winfo_width(), win.winfo_height()
+
+        inside_x = main_x <= win_x and win_x + win_w <= main_x + main_w
+        inside_y = main_y <= win_y and win_y + win_h <= main_y + main_h
+
+        return inside_x and inside_y
+
+
     def show_category_detail(self, code, name, category_content):
         def on_close():
             """关闭时清空引用"""
@@ -2460,19 +2480,23 @@ class StockMonitorApp(tk.Tk):
             self.txt_widget.insert("1.0", category_content)
             self.txt_widget.config(state="disabled")
 
-            # 检查窗口是否最小化或被遮挡
+            # # 检查窗口是否最小化或被遮挡
             state = self.detail_win.state()
-            if state == "iconic":  # 最小化
+            # if state == "iconic":  # 最小化
+            if (state == "iconic" or self.is_window_covered_by_main(self.detail_win)):
                 self.detail_win.deiconify()  # 恢复
                 self.detail_win.lift()
                 self.detail_win.attributes("-topmost", True)
                 self.detail_win.after(50, lambda: self.detail_win.attributes("-topmost", False))
             else:
+
                 try:
                     if not self.detail_win.focus_displayof():
                         self.detail_win.lift()
+                        self.detail_win.focus_force()
                 except Exception:
                     pass
+
         else:
             # 第一次创建
             self.detail_win = tk.Toplevel(self)
