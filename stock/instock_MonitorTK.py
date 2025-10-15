@@ -736,7 +736,7 @@ class StockMonitorApp(tk.Tk):
         super().__init__()
         # self.queue = queue
         self.title("Stock Monitor")
-        self.load_window_position()
+        self.load_window_position(self, "main_window")
         self.iconbitmap(icon_path)  # Windows 下 .ico 文件
         # self._icon = tk.PhotoImage(file=icon_path)
         # self.iconphoto(True, self._icon)
@@ -3391,31 +3391,58 @@ class StockMonitorApp(tk.Tk):
         #     return
 
     def update_category_result(self, df_filtered):
-        """统计概念异动，并显示在顶部区域"""
+        """统计概念异动，在主窗口上方显示摘要"""
         if df_filtered is None or df_filtered.empty:
             return
 
-        # 统计当前概念
-        result = counterCategory(df_filtered, 'category', limit=50, table=False)
-        if isinstance(result, list):
-            current_categories = set(result)
-            display_text = "、".join(result)
-        elif isinstance(result, str):
-            current_categories = set(result.replace("、", " ").split())
-            display_text = result.strip()
-        else:
-            current_categories = set()
-            display_text = ""
+        # # --- 统计当前概念 ---
+        # cat_dict = {}  # {concept: [codes]}
+        # topN = df_filtered.head(50)
+        # for code, row in topN.iterrows():
+        #     if isinstance(row.get("category"), str):
+        #         cats = [c.strip() for c in row["category"].replace("；", ";").replace("+", ";").split(";") if c.strip()]
+        #         for ca in cats:
+        #             cat_dict.setdefault(ca, []).append((code, row.get("name", "")))
 
-        # --- 初始化标签 ---
+        # current_categories = set(cat_dict.keys())
+        # display_text = "、".join(sorted(current_categories))[:200]  # 限制显示长度
+
+        # --- 统计当前概念 ---
+        cat_dict = {}  # {concept: [codes]}
+        all_cats = []  # 用于统计出现次数
+        topN = df_filtered.head(50)
+        for code, row in topN.iterrows():
+            if isinstance(row.get("category"), str):
+                cats = [c.strip() for c in row["category"].replace("；", ";").replace("+", ";").split(";") if c.strip()]
+                for ca in cats:
+                    all_cats.append(ca)
+                    cat_dict.setdefault(ca, []).append((code, row.get("name", "")))
+
+        # --- 统计出现次数 ---
+        counter = Counter(all_cats)
+        top5 = OrderedDict(counter.most_common(5))
+        display_text = "  ".join([f"{k}:{v}" for k, v in top5.items()])
+        # print(f'display_text : {display_text}  list(top5.keys()) : { list(top5.keys()) }')
+        # 取前5个类别
+        # current_categories = set(top5.keys())
+        current_categories =  list(top5.keys())  #保持顺序
+
+        # --- 标签初始化 ---
         if not hasattr(self, "lbl_category_result"):
             self.lbl_category_result = tk.Label(
-                self, text="", font=("Consolas", 10), fg="green",
-                anchor="w", justify="left", wraplength=800
+                self,
+                text="",
+                font=("微软雅黑", 10, "bold"),
+                fg="green",
+                bg="#f7f7f7",
+                anchor="w",
+                justify="left",
+                cursor="hand2"
             )
-            self.lbl_category_result.pack(fill="x", padx=5, pady=(2, 4))
+            self.lbl_category_result.pack(fill="x", padx=8, pady=(2, 4), before=self.children[list(self.children.keys())[0]])
+            self.lbl_category_result.bind("<Button-1>", lambda e: self.show_concept_detail_window())
             self._last_categories = current_categories
-            self._last_display_text = display_text
+            self._last_cat_dict = cat_dict
             self.lbl_category_result.config(text=f"当前概念：{display_text}")
             return
 
@@ -3425,17 +3452,14 @@ class StockMonitorApp(tk.Tk):
         removed = old_categories - current_categories
 
         if added or removed:
-            # 生成对比文本
             diff_texts = []
             if added:
                 diff_texts.append(f"🆕 新增：{'、'.join(sorted(added))}")
             if removed:
                 diff_texts.append(f"❌ 消失：{'、'.join(sorted(removed))}")
             diff_summary = "  ".join(diff_texts)
-            new_text = f"概念异动：{diff_summary}"
-            self.lbl_category_result.config(text=new_text, fg="red")
+            self.lbl_category_result.config(text=f"概念异动：{diff_summary}", fg="red")
 
-            # --- 红绿闪烁提示 ---
             def flash_label(count=0):
                 if count >= 6:
                     self.lbl_category_result.config(fg="red")
@@ -3447,12 +3471,203 @@ class StockMonitorApp(tk.Tk):
 
             flash_label()
         else:
-            # 无变化，保持绿色
             self.lbl_category_result.config(text=f"当前概念：{display_text}", fg="green")
 
-        # --- 保存状态 ---
+        # 保存状态
         self._last_categories = current_categories
-        self._last_display_text = display_text
+        self._last_cat_dict = cat_dict
+
+    def on_code_click(self, code):
+        """点击异动窗口中的股票代码"""
+        self.select_code = code
+        print(f"点击代码：{code}")
+        # ✅ 可改为打开详情逻辑，比如：
+        # if hasattr(self, "show_stock_detail"):
+        #     self.show_stock_detail(code)
+        self.sender.send(code)
+
+
+    # def show_concept_detail_window(self):
+    #     """弹出详细概念异动窗口"""
+    #     if not hasattr(self, "_last_categories"):
+    #         return
+
+    #     added = getattr(self, "_last_categories", set()) - getattr(self, "_prev_categories", set())
+    #     removed = getattr(self, "_prev_categories", set()) - getattr(self, "_last_categories", set())
+    #     cat_dict = getattr(self, "_last_cat_dict", {})
+
+    #     win = tk.Toplevel(self)
+    #     win.title("概念异动详情")
+    #     # win.geometry("500x500")
+    #     win_width, win_height = 500, 500
+    #     x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
+    #     win.geometry(f"{win_width}x{win_height}+{x}+{y}")
+    #     win.transient(self)
+    #     win.grab_set()
+
+    #     frame = tk.Frame(win)
+    #     frame.pack(fill="both", expand=True, padx=10, pady=10)
+    #     canvas = tk.Canvas(frame)
+    #     scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+    #     scroll_frame = tk.Frame(canvas)
+
+    #     scroll_frame.bind(
+    #         "<Configure>",
+    #         lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    #     )
+    #     canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+    #     canvas.configure(yscrollcommand=scrollbar.set)
+
+    #     canvas.pack(side="left", fill="both", expand=True)
+    #     scrollbar.pack(side="right", fill="y")
+
+    #     # === 新增概念 ===
+    #     if added:
+    #         tk.Label(scroll_frame, text="🆕 新增概念", font=("微软雅黑", 11, "bold"), fg="green").pack(anchor="w", pady=(0, 5))
+    #         for c in sorted(added):
+    #             tk.Label(scroll_frame, text=c, fg="blue", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=10)
+    #             for code, name in cat_dict.get(c, []):
+    #                 lbl = tk.Label(scroll_frame, text=f"  {code} {name}", fg="black", cursor="hand2")
+    #                 lbl.pack(anchor="w", padx=25)
+    #                 lbl.bind("<Button-1>", lambda e, cd=code: self.on_code_click(cd))
+
+    #     # === 消失概念 ===
+    #     if removed:
+    #         tk.Label(scroll_frame, text="❌ 消失概念", font=("微软雅黑", 11, "bold"), fg="red").pack(anchor="w", pady=(10, 5))
+    #         for c in sorted(removed):
+    #             tk.Label(scroll_frame, text=c, fg="gray", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=10)
+
+    #     self._prev_categories = getattr(self, "_last_categories", set())
+
+    def show_concept_detail_window(self):
+        """弹出详细概念异动窗口"""
+        if not hasattr(self, "_last_categories"):
+            return
+
+        # 如果窗口已经存在并且还没被销毁，直接显示
+        if hasattr(self, "_concept_win") and self._concept_win.winfo_exists():
+            self._concept_win.deiconify()
+            self._concept_win.lift()  # 提到最前
+            return
+
+        # added = getattr(self, "_last_categories", set()) - getattr(self, "_prev_categories", set())
+        # removed = getattr(self, "_prev_categories", set()) - getattr(self, "_last_categories", set())
+
+        current_categories = getattr(self, "_last_categories", [])  # 列表，保持顺序
+        prev_categories = getattr(self, "_prev_categories", [])     # 列表或空列表
+
+        cat_dict = getattr(self, "_last_cat_dict", {})
+
+        # 计算新增和消失概念（保持顺序）
+        added = [c for c in current_categories if c not in prev_categories]
+        removed = [c for c in prev_categories if c not in current_categories]
+
+        # print(f'current_categories : {current_categories} prev_categories : {prev_categories}')
+        # print(f'added : {added} removed : {removed}')
+        win = tk.Toplevel(self)
+        self._concept_win = win  # 保存引用，方便复用
+        win.title("概念异动详情")
+        # win_width, win_height = 200,400
+        # x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
+        # win.geometry(f"{win_width}x{win_height}+{x}+{y}")
+
+        self.load_window_position(win, "detail_window", default_width=200, default_height=400)
+
+        win.transient(self)
+        # win.grab_set()
+
+        # 当关闭窗口时，只隐藏，不 destroy
+        # win.protocol("WM_DELETE_WINDOW", win.withdraw)
+        win.protocol("WM_DELETE_WINDOW", lambda: (self.save_window_position(win, "detail_window"), win.withdraw()))
+
+        # def on_close_detail_window():
+        #     win.grab_release()
+        #     win.destroy()
+
+        # win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
+
+        frame = tk.Frame(win)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+        canvas = tk.Canvas(frame)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas)
+
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # 清空之前内容
+        for widget in scroll_frame.winfo_children():
+            widget.destroy()
+
+        # === 新增概念 ===
+        if added:
+            tk.Label(scroll_frame, text="🆕 新增概念", font=("微软雅黑", 11, "bold"), fg="green").pack(anchor="w", pady=(0, 5))
+            # for c in sorted(added):
+            for c in (added):
+                tk.Label(scroll_frame, text=c, fg="blue", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=10)
+                for code, name in cat_dict.get(c, []):
+                    lbl = tk.Label(scroll_frame, text=f"  {code} {name}", fg="black", cursor="hand2")
+                    lbl.pack(anchor="w", padx=25)
+                    lbl.bind("<Button-1>", lambda e, cd=code: self.on_code_click(cd))
+
+        # === 消失概念 ===
+        if removed:
+            tk.Label(scroll_frame, text="❌ 消失概念", font=("微软雅黑", 11, "bold"), fg="red").pack(anchor="w", pady=(10, 5))
+            # for c in sorted(removed):
+            for c in (removed):
+                tk.Label(scroll_frame, text=c, fg="gray", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=10)
+
+        # 更新上一次类别
+        # self._prev_categories = getattr(self, "_last_categories", set())
+        self._prev_categories = list(current_categories)
+
+    # def show_category_detail1(self, event=None):
+    #     """点击标签后弹出详细概念窗口"""
+    #     if not hasattr(self, "_Categoryresult") or not self._Categoryresult:
+    #         return
+
+    #     win = tk.Toplevel(self.root)
+    #     win.title("概念详情")
+    #     win.geometry("600x400")
+
+    #     text = tk.Text(win, wrap="word")
+    #     text.pack(fill="both", expand=True)
+
+    #     # 插入概念结果内容
+    #     text.insert("end", self._Categoryresult)
+
+    #     # --- 查找股票代码并高亮 ---
+    #     import re
+    #     for code in re.findall(r'\b\d{6}\b', self._Categoryresult):
+    #         start = text.search(code, "1.0", stopindex="end")
+    #         while start:
+    #             end = f"{start}+{len(code)}c"
+    #             text.tag_add(code, start, end)
+    #             text.tag_config(code, foreground="blue", underline=True)
+    #             text.tag_bind(code, "<Button-1>", lambda e, c=code: self.open_stock_detail(c))
+    #             start = text.search(code, end, stopindex="end")
+
+    def open_stock_detail(self, code):
+        """点击概念窗口中股票代码弹出详情"""
+        win = tk.Toplevel(self)
+        win.title(f"股票详情 - {code}")
+        win.geometry("400x300")
+        tk.Label(win, text=f"正在加载个股 {code} ...", font=("微软雅黑", 12, "bold")).pack(pady=10)
+
+        # 如果有 df_filtered 数据，可以显示详细行情
+        if hasattr(self, "_last_cat_dict"):
+            for c, lst in self._last_cat_dict.items():
+                for row_code, name in lst:
+                    if row_code == code:
+                        tk.Label(win, text=f"{row_code} {name}", font=("微软雅黑", 11)).pack(anchor="w", padx=10)
+                        # 可以加更多字段，如 trade、涨幅等
 
 
 
@@ -4419,30 +4634,94 @@ class StockMonitorApp(tk.Tk):
                 log.error(f"加载 CSV 失败: {e}")
 
     # ----------------- 窗口位置记忆 ----------------- #
-    def save_window_position(self):
-        pos = {"x": self.winfo_x(), "y": self.winfo_y(), "width": self.winfo_width(), "height": self.winfo_height()}
+    # def save_window_position(self):
+    #     pos = {"x": self.winfo_x(), "y": self.winfo_y(), "width": self.winfo_width(), "height": self.winfo_height()}
+    #     try:
+    #         with open(WINDOW_CONFIG_FILE, "w", encoding="utf-8") as f:
+    #             json.dump(pos, f, ensure_ascii=False, indent=2)
+    #     except Exception as e:
+    #         log.error(f"保存窗口位置失败: {e}")
+
+    # def load_window_position(self):
+    #     if os.path.exists(WINDOW_CONFIG_FILE):
+    #         try:
+    #             with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
+    #                 pos = json.load(f)
+    #                 # x,y = self.get_centered_window_position(self, pos['width'], pos['height'])
+    #                 x,y = clamp_window_to_screens(pos['x'],pos['y'], pos['width'], pos['height'])
+    #                 # x,y = self.get_centered_window_position(pos['x'],pos['y'], pos['width'], pos['height'])
+    #                 # self.geometry(f"{pos['width']}x{pos['height']}+{pos['x']}+{pos['y']}")
+    #                 self.geometry(f"{pos['width']}x{pos['height']}+{x}+{y}")
+    #         except Exception as e:
+    #             log.error(f"读取窗口位置失败: {e}")
+
+
+    def save_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE):
+        """保存指定窗口位置到统一配置文件"""
+        pos = {
+            "x": win.winfo_x(),
+            "y": win.winfo_y(),
+            "width": win.winfo_width(),
+            "height": win.winfo_height()
+        }
+
+        data = {}
+        if os.path.exists(file_path):
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                log.error(f"读取窗口配置失败: {e}")
+
+        data[window_name] = pos
+
         try:
-            with open(WINDOW_CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(pos, f, ensure_ascii=False, indent=2)
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception as e:
             log.error(f"保存窗口位置失败: {e}")
 
-    def load_window_position(self):
-        if os.path.exists(WINDOW_CONFIG_FILE):
+
+    def center_window(self,win, width, height):
+        """
+        将指定窗口居中显示
+        win: Tk 或 Toplevel
+        width, height: 窗口宽高
+        """
+        win.update_idletasks()  # 更新窗口信息
+        screen_width = win.winfo_screenwidth()
+        screen_height = win.winfo_screenheight()
+        x = (screen_width - width) // 2
+        y = (screen_height - height) // 2
+        win.geometry(f"{width}x{height}+{x}+{y}")
+
+
+    def load_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500):
+        """从统一配置文件加载窗口位置"""
+        if os.path.exists(file_path):
             try:
-                with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
-                    pos = json.load(f)
-                    # x,y = self.get_centered_window_position(self, pos['width'], pos['height'])
-                    x,y = clamp_window_to_screens(pos['x'],pos['y'], pos['width'], pos['height'])
-                    # x,y = self.get_centered_window_position(pos['x'],pos['y'], pos['width'], pos['height'])
-                    # self.geometry(f"{pos['width']}x{pos['height']}+{pos['x']}+{pos['y']}")
-                    self.geometry(f"{pos['width']}x{pos['height']}+{x}+{y}")
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if window_name in data:
+                        pos = data[window_name]
+                        x, y = clamp_window_to_screens(pos['x'], pos['y'], pos['width'], pos['height'])
+                        win.geometry(f"{pos['width']}x{pos['height']}+{x}+{y}")
+                        return
             except Exception as e:
                 log.error(f"读取窗口位置失败: {e}")
+        # 默认居中
+        self.center_window(win, default_width, default_height)
+
 
     def on_close(self):
         self.alert_manager.save_all()
-        self.save_window_position()
+        # self.save_window_position()
+        # 3. 如果 concept 窗口存在，也保存位置并隐藏
+        if hasattr(self, "_concept_win") and self._concept_win.winfo_exists():
+            self.save_window_position(self._concept_win, "detail_window")
+            self._concept_win.destroy()
+                
+        self.save_window_position(self,"main_window")
         # self.save_search_history()
         self.query_manager.save_search_history()
         archive_search_history_list()
