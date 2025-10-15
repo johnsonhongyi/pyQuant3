@@ -3688,9 +3688,10 @@ def compute_power_tdx_df(tdx_df,dd):
         # dd['fib'] = fibl
         dd['fibl'] = fibh
         # dd['ldate'] = idx
-        dd['boll'] = dd.upperL[0]
-        # dd['df2'] = dd.upperT[0]
-        dd['ra'] = dd.upperT[0]
+        # dd['boll'] = dd.upperL[0]
+        dd['boll'] = dd.upperT[0]
+        dd['ra'] = dd.upperL[0]
+        # dd['ra'] = dd.upperT[0]
         dd['kdj'] = 1
         # dd['macd'] = 1
         dd['rsi'] = 1
@@ -3975,9 +3976,9 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # dd['upperT'] = dd.close[ (dd.upper > 0) & (dd.high > dd.upper)].count()
 
     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.high > df.upper)].count()
-    dfupper=df[-10:]
-    
-    upperT = dfupper.close[-10:][ (dfupper.upper > 0) & (dfupper.close > dfupper.upper)]
+    dfupper=df[-6:]
+
+    upperT = dfupper.high[-6:][ (dfupper.upper > 0) & (dfupper.high > dfupper.upper)]
     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.close > df.upper)].apply(lambda x: round(x, 0)).median()
     upperLIS, posLIS = LIS_TDX(upperT) if len(upperT) > 0 else ([],[])
     dd['upperT'] = len(posLIS) 
@@ -3990,7 +3991,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
     # upperL = df.close[ ((df.high > df.upper) | (df.upper > df.upper.shift(1)) ) & (df.close >= df.ma5d*0.99) ]
 
-    upperL = dfupper.close[ (dfupper.high > dfupper.upper) & (dfupper.upper >0) ]
+    upperL = dfupper.close[ (dfupper.low > dfupper.ma5d) & (dfupper.ma5d >0) ]
 
 
     # upperL = df.close[ (df.high > df.upper) & (df.close > df.ma5d) & (df.close > df.close.shift(1)) ]
