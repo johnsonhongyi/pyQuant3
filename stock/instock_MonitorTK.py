@@ -3448,8 +3448,11 @@ class StockMonitorApp(tk.Tk):
 
         # --- 对比上次结果 ---
         old_categories = getattr(self, "_last_categories", set())
-        added = current_categories - old_categories
-        removed = old_categories - current_categories
+        # added = current_categories - old_categories
+        # removed = old_categories - current_categories
+        added = [c for c in current_categories if c not in old_categories]
+        removed = [c for c in old_categories if c not in current_categories]
+
 
         if added or removed:
             diff_texts = []
@@ -3545,10 +3548,11 @@ class StockMonitorApp(tk.Tk):
             return
 
         # 如果窗口已经存在并且还没被销毁，直接显示
-        if hasattr(self, "_concept_win") and self._concept_win.winfo_exists():
-            self._concept_win.deiconify()
-            self._concept_win.lift()  # 提到最前
-            return
+        if hasattr(self, "_concept_win") and self._concept_win:
+            if self._concept_win.winfo_exists():
+                self._concept_win.deiconify()
+                self._concept_win.lift()  # 提到最前
+                return
 
         # added = getattr(self, "_last_categories", set()) - getattr(self, "_prev_categories", set())
         # removed = getattr(self, "_prev_categories", set()) - getattr(self, "_last_categories", set())
@@ -3564,6 +3568,8 @@ class StockMonitorApp(tk.Tk):
 
         # print(f'current_categories : {current_categories} prev_categories : {prev_categories}')
         # print(f'added : {added} removed : {removed}')
+
+        
         win = tk.Toplevel(self)
         self._concept_win = win  # 保存引用，方便复用
         win.title("概念异动详情")
@@ -3578,19 +3584,29 @@ class StockMonitorApp(tk.Tk):
 
         # 当关闭窗口时，只隐藏，不 destroy
         # win.protocol("WM_DELETE_WINDOW", win.withdraw)
-        win.protocol("WM_DELETE_WINDOW", lambda: (self.save_window_position(win, "detail_window"), win.withdraw()))
+        # win.protocol("WM_DELETE_WINDOW", lambda: (self.save_window_position(win, "detail_window"), win.withdraw()))
 
-        # def on_close_detail_window():
-        #     win.grab_release()
-        #     win.destroy()
+        def on_close_detail_window():
+            self.save_window_position(win, "detail_window")
+            win.grab_release()
+            win.destroy()
+            self._concept_win = None
 
-        # win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
+        win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
+        def _on_mousewheel(event):
+            # Windows / Mac / Linux 兼容处理
+            if event.num == 5 or event.delta == -120:
+                canvas.yview_scroll(1, "units")
+            elif event.num == 4 or event.delta == 120:
+                canvas.yview_scroll(-1, "units")
+
 
         frame = tk.Frame(win)
         frame.pack(fill="both", expand=True, padx=10, pady=10)
         canvas = tk.Canvas(frame)
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
         scroll_frame = tk.Frame(canvas)
+
 
         scroll_frame.bind(
             "<Configure>",
@@ -3601,6 +3617,14 @@ class StockMonitorApp(tk.Tk):
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
+
+
+        # Windows / Mac
+        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
+        # Linux
+        canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+        canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+
 
         # 清空之前内容
         for widget in scroll_frame.winfo_children():
@@ -4717,9 +4741,10 @@ class StockMonitorApp(tk.Tk):
         self.alert_manager.save_all()
         # self.save_window_position()
         # 3. 如果 concept 窗口存在，也保存位置并隐藏
-        if hasattr(self, "_concept_win") and self._concept_win.winfo_exists():
-            self.save_window_position(self._concept_win, "detail_window")
-            self._concept_win.destroy()
+        if hasattr(self, "_concept_win") and self._concept_win:
+            if self._concept_win.winfo_exists():
+                self.save_window_position(self._concept_win, "detail_window")
+                self._concept_win.destroy()
                 
         self.save_window_position(self,"main_window")
         # self.save_search_history()
