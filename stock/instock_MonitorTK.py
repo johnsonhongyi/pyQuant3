@@ -400,6 +400,55 @@ def counterCategory(df, col='category', limit=50, topn=10, table=False):
 # 假设 df 是你提供的涨幅榜表格
 # counterCategory(df, 'category', limit=50)
 
+def filter_concepts(cat_dict):
+    #批量过滤后期处理用
+    INVALID = [
+        "国企改革", "沪股通", "深股通", "融资融券", "MSCI", "富时", 
+        "标普", "中字头", "央企", "基金重仓", "机构重仓", "大盘股", "高股息"
+    ]
+    VALID_HINTS = [
+        "能源", "科技", "芯片", "AI", "人工智能", "光伏", "储能", 
+        "汽车", "机器人", "碳", "半导体", "电力", "通信", "军工", "医药"
+    ]
+    res = {}
+    for k, v in cat_dict.items():
+        if any(bad in k for bad in INVALID):
+            continue
+        if len(v) > 500 or len(v) < 2:  # 太大或太小的概念过滤
+            continue
+        if not any(ok in k for ok in VALID_HINTS):
+            # 名称不含实际产业关键词，也不保留
+            continue
+        res[k] = v
+    return res
+
+# === 概念过滤逻辑 ===
+GENERIC_KEYWORDS = [
+    "国企改革", "沪股通", "深股通", "融资融券", "高股息", "MSCI", "中字头",
+    "央企改革", "标普概念", "B股", "AH股", "转融券", "股权转让", "新股与次新股",
+    "战略", "指数", "主题", "计划", "预期", "改革", "通", "国企", "央企"
+]
+
+REAL_CONCEPT_KEYWORDS = [
+    "半导体", "AI", "机器人", "光伏", "锂电", "医药", "芯片", "5G", "储能",
+    "新能源", "军工", "卫星", "航天", "汽车", "算力", "氢能", "量子", "云计算",
+    "电商", "游戏", "消费电子", "数据要素", "AI", "大模型"
+]
+
+def is_generic_concept(concept_name: str) -> bool:
+    """识别是否为泛概念（需过滤）"""
+    if any(k in concept_name for k in REAL_CONCEPT_KEYWORDS):
+        return False
+    if any(k in concept_name for k in GENERIC_KEYWORDS):
+        return True
+    if len(concept_name) <= 3:
+        return True
+    # 包含“通”、“改革”、“计划”等关键词的多为无实际含义
+    if any(x in concept_name for x in ["通", "改革", "指数", "主题", "计划", "战略", "预期"]):
+        return True
+    return False
+
+
 def test_code_against_queries(df_code, queries):
     """
     df_code: DataFrame（单只股票的数据）
@@ -746,6 +795,9 @@ class StockMonitorApp(tk.Tk):
         self.ColumnSetManager = None
         self.ColManagerconfig = None
         self._open_column_manager_job = None
+        # self._last_cat_dict = filter_concepts(new_cat_dict)
+        # self._last_categories = list(self._last_cat_dict.keys())
+
         # 刷新开关标志
         self.refresh_enabled = True
         from multiprocessing import Manager
@@ -3407,20 +3459,60 @@ class StockMonitorApp(tk.Tk):
         # current_categories = set(cat_dict.keys())
         # display_text = "、".join(sorted(current_categories))[:200]  # 限制显示长度
 
+        # # --- 统计当前概念 ---
+        # cat_dict = {}  # {concept: [codes]}
+        # all_cats = []  # 用于统计出现次数
+        # topN = df_filtered.head(50)
+        # for code, row in topN.iterrows():
+        #     if isinstance(row.get("category"), str):
+        #         cats = [c.strip() for c in row["category"].replace("；", ";").replace("+", ";").split(";") if c.strip()]
+        #         for ca in cats:
+        #             all_cats.append(ca)
+        #             cat_dict.setdefault(ca, []).append((code, row.get("name", "")))
+
+        # # --- 统计出现次数 ---
+        # counter = Counter(all_cats)
+        # top5 = OrderedDict(counter.most_common(5))
+
+
         # --- 统计当前概念 ---
         cat_dict = {}  # {concept: [codes]}
         all_cats = []  # 用于统计出现次数
         topN = df_filtered.head(50)
+
+        # for code, row in topN.iterrows():
+        #     if isinstance(row.get("category"), str):
+        #         cats = [c.strip() for c in row["category"].replace("；", ";").replace("+", ";").split(";") if c.strip()]
+        #         for ca in cats:
+        #             # 过滤泛概念
+        #             if is_generic_concept(ca):
+        #                 continue
+        #             all_cats.append(ca)
+        #             cat_dict.setdefault(ca, []).append((code, row.get("name", "")))
+
+
         for code, row in topN.iterrows():
             if isinstance(row.get("category"), str):
                 cats = [c.strip() for c in row["category"].replace("；", ";").replace("+", ";").split(";") if c.strip()]
                 for ca in cats:
+                    # 过滤泛概念
+                    if is_generic_concept(ca):
+                        continue
                     all_cats.append(ca)
-                    cat_dict.setdefault(ca, []).append((code, row.get("name", "")))
+                    # 添加其他信息到元组里，比如 (code, name, percent, volume)
+                    cat_dict.setdefault(ca, []).append((
+                        code,
+                        row.get("name", ""),
+                        row.get("percent", 0.0),
+                        row.get("volume", 0)
+                        # 如果还有其他列，可以继续加: row.get("其他列")
+                    ))
+
 
         # --- 统计出现次数 ---
         counter = Counter(all_cats)
         top5 = OrderedDict(counter.most_common(5))
+
         display_text = "  ".join([f"{k}:{v}" for k, v in top5.items()])
         # print(f'display_text : {display_text}  list(top5.keys()) : { list(top5.keys()) }')
         # 取前5个类别
@@ -3489,194 +3581,733 @@ class StockMonitorApp(tk.Tk):
         #     self.show_stock_detail(code)
         self.sender.send(code)
 
-
-    # def show_concept_detail_window(self):
-    #     """弹出详细概念异动窗口"""
+    # old single
+    # def _show_concept_detail_window_Good(self):
+    #     """弹出详细概念异动窗口（支持复用、滚轮、自动刷新、显示当前前5）"""
     #     if not hasattr(self, "_last_categories"):
     #         return
 
-    #     added = getattr(self, "_last_categories", set()) - getattr(self, "_prev_categories", set())
-    #     removed = getattr(self, "_prev_categories", set()) - getattr(self, "_last_categories", set())
-    #     cat_dict = getattr(self, "_last_cat_dict", {})
+    #     # --- 检查并重建窗口 ---
+    #     if getattr(self, "_concept_win", None):
+    #         try:
+    #             if self._concept_win.winfo_exists():
+    #                 win = self._concept_win
+    #                 win.deiconify()
+    #                 win.lift()
+    #                 for widget in win.winfo_children():
+    #                     widget.destroy()
+    #             else:
+    #                 win = tk.Toplevel(self)
+    #                 self._concept_win = win
+    #         except Exception:
+    #             win = tk.Toplevel(self)
+    #             self._concept_win = win
+    #     else:
+    #         win = tk.Toplevel(self)
+    #         self._concept_win = win
 
-    #     win = tk.Toplevel(self)
     #     win.title("概念异动详情")
-    #     # win.geometry("500x500")
-    #     win_width, win_height = 500, 500
-    #     x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
-    #     win.geometry(f"{win_width}x{win_height}+{x}+{y}")
+    #     self.load_window_position(win, "detail_window", default_width=220, default_height=400)
     #     win.transient(self)
-    #     win.grab_set()
 
+    #     # --- 主Frame + Canvas ---
     #     frame = tk.Frame(win)
     #     frame.pack(fill="both", expand=True, padx=10, pady=10)
-    #     canvas = tk.Canvas(frame)
+
+    #     canvas = tk.Canvas(frame, highlightthickness=0)
     #     scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
     #     scroll_frame = tk.Frame(canvas)
+
+    #     canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+    #     canvas.configure(yscrollcommand=scrollbar.set)
 
     #     scroll_frame.bind(
     #         "<Configure>",
     #         lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
     #     )
-    #     canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
-    #     canvas.configure(yscrollcommand=scrollbar.set)
 
     #     canvas.pack(side="left", fill="both", expand=True)
     #     scrollbar.pack(side="right", fill="y")
 
-    #     # === 新增概念 ===
-    #     if added:
-    #         tk.Label(scroll_frame, text="🆕 新增概念", font=("微软雅黑", 11, "bold"), fg="green").pack(anchor="w", pady=(0, 5))
-    #         for c in sorted(added):
-    #             tk.Label(scroll_frame, text=c, fg="blue", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=10)
+    #     # --- 局部绑定滚轮（防止关闭后异常） ---
+    #     def on_mousewheel(event):
+    #         canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    #     def bind_mousewheel(event):
+    #         canvas.bind_all("<MouseWheel>", on_mousewheel)
+    #         canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+    #         canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+
+    #     def unbind_mousewheel(event=None):
+    #         try:
+    #             canvas.unbind_all("<MouseWheel>")
+    #             canvas.unbind_all("<Button-4>")
+    #             canvas.unbind_all("<Button-5>")
+    #         except Exception:
+    #             pass
+
+    #     canvas.bind("<Enter>", bind_mousewheel)
+    #     canvas.bind("<Leave>", unbind_mousewheel)
+
+    #     # --- 关闭事件 ---
+    #     def on_close_detail_window():
+    #         self.save_window_position(win, "detail_window")
+    #         unbind_mousewheel()  # 关闭前解绑防止残留
+    #         try:
+    #             win.grab_release()
+    #         except:
+    #             pass
+    #         win.destroy()
+    #         self._concept_win = None
+
+    #     win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
+
+    #     # --- 数据逻辑 ---
+    #     current_categories = getattr(self, "_last_categories", [])
+    #     prev_categories = getattr(self, "_prev_categories", [])
+    #     cat_dict = getattr(self, "_last_cat_dict", {})
+
+    #     added = [c for c in current_categories if c not in prev_categories]
+    #     removed = [c for c in prev_categories if c not in current_categories]
+
+    #     # === 有新增或消失 ===
+    #     if added or removed:
+    #         if added:
+    #             tk.Label(scroll_frame, text="🆕 新增概念", font=("微软雅黑", 11, "bold"), fg="green").pack(anchor="w", pady=(0, 5))
+    #             for c in added:
+    #                 tk.Label(scroll_frame, text=c, fg="blue", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+    #                 for code, name in cat_dict.get(c, []):
+    #                     lbl = tk.Label(scroll_frame, text=f"  {code} {name}", fg="black", cursor="hand2")
+    #                     lbl.pack(anchor="w", padx=6)
+    #                     lbl.bind("<Button-1>", lambda e, cd=code: self.on_code_click(cd))
+
+    #         if removed:
+    #             tk.Label(scroll_frame, text="❌ 消失概念", font=("微软雅黑", 11, "bold"), fg="red").pack(anchor="w", pady=(10, 5))
+    #             for c in removed:
+    #                 tk.Label(scroll_frame, text=c, fg="gray", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+    #     else:
+    #         # === 无新增/消失时，显示当前前5 ===
+    #         tk.Label(scroll_frame, text="📊 当前前5概念", font=("微软雅黑", 11, "bold"), fg="blue").pack(anchor="w", pady=(0, 5))
+    #         for c in current_categories:
+    #             tk.Label(scroll_frame, text=c, fg="black", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
     #             for code, name in cat_dict.get(c, []):
-    #                 lbl = tk.Label(scroll_frame, text=f"  {code} {name}", fg="black", cursor="hand2")
-    #                 lbl.pack(anchor="w", padx=25)
+    #                 lbl = tk.Label(scroll_frame, text=f"  {code} {name}", fg="gray", cursor="hand2")
+    #                 lbl.pack(anchor="w", padx=6)
     #                 lbl.bind("<Button-1>", lambda e, cd=code: self.on_code_click(cd))
 
-    #     # === 消失概念 ===
-    #     if removed:
-    #         tk.Label(scroll_frame, text="❌ 消失概念", font=("微软雅黑", 11, "bold"), fg="red").pack(anchor="w", pady=(10, 5))
-    #         for c in sorted(removed):
-    #             tk.Label(scroll_frame, text=c, fg="gray", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=10)
+    #     # --- 更新状态 ---
+    #     self._prev_categories = list(current_categories)
 
-    #     self._prev_categories = getattr(self, "_last_categories", set())
 
+
+    # --- 类内部方法 ---
     def show_concept_detail_window(self):
-        """弹出详细概念异动窗口"""
+        """弹出详细概念异动窗口（复用+自动刷新+键盘/滚轮+高亮）"""
         if not hasattr(self, "_last_categories"):
             return
 
-        # 如果窗口已经存在并且还没被销毁，直接显示
-        if hasattr(self, "_concept_win") and self._concept_win:
-            if self._concept_win.winfo_exists():
-                self._concept_win.deiconify()
-                self._concept_win.lift()  # 提到最前
-                return
+        # --- 检查窗口是否已存在 ---
+        if getattr(self, "_concept_win", None):
+            try:
+                if self._concept_win.winfo_exists():
+                    win = self._concept_win
+                    win.deiconify()
+                    win.lift()
+                    # 仅清理旧内容区，不销毁窗口结构
+                    for widget in win._content_frame.winfo_children():
+                        widget.destroy()
+                    self.update_concept_detail_content()
+                    return
+                else:
+                    self._concept_win = None
+            except Exception:
+                self._concept_win = None
 
-        # added = getattr(self, "_last_categories", set()) - getattr(self, "_prev_categories", set())
-        # removed = getattr(self, "_prev_categories", set()) - getattr(self, "_last_categories", set())
-
-        current_categories = getattr(self, "_last_categories", [])  # 列表，保持顺序
-        prev_categories = getattr(self, "_prev_categories", [])     # 列表或空列表
-
-        cat_dict = getattr(self, "_last_cat_dict", {})
-
-        # 计算新增和消失概念（保持顺序）
-        added = [c for c in current_categories if c not in prev_categories]
-        removed = [c for c in prev_categories if c not in current_categories]
-
-        # print(f'current_categories : {current_categories} prev_categories : {prev_categories}')
-        # print(f'added : {added} removed : {removed}')
-
-        
         win = tk.Toplevel(self)
-        self._concept_win = win  # 保存引用，方便复用
+        self._concept_win = win
         win.title("概念异动详情")
-        # win_width, win_height = 200,400
-        # x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
-        # win.geometry(f"{win_width}x{win_height}+{x}+{y}")
-
-        self.load_window_position(win, "detail_window", default_width=200, default_height=400)
-
+        self.load_window_position(win, "detail_window", default_width=220, default_height=400)
         win.transient(self)
-        # win.grab_set()
 
-        # 当关闭窗口时，只隐藏，不 destroy
-        # win.protocol("WM_DELETE_WINDOW", win.withdraw)
-        # win.protocol("WM_DELETE_WINDOW", lambda: (self.save_window_position(win, "detail_window"), win.withdraw()))
-
-        def on_close_detail_window():
-            self.save_window_position(win, "detail_window")
-            win.grab_release()
-            win.destroy()
-            self._concept_win = None
-
-        win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
-        def _on_mousewheel(event):
-            # Windows / Mac / Linux 兼容处理
-            if event.num == 5 or event.delta == -120:
-                canvas.yview_scroll(1, "units")
-            elif event.num == 4 or event.delta == 120:
-                canvas.yview_scroll(-1, "units")
-
-
+        # --- 主Frame + Canvas + 滚动 ---
         frame = tk.Frame(win)
         frame.pack(fill="both", expand=True, padx=10, pady=10)
-        canvas = tk.Canvas(frame)
+
+        canvas = tk.Canvas(frame, highlightthickness=0)
         scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
         scroll_frame = tk.Frame(canvas)
 
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
 
         scroll_frame.bind(
             "<Configure>",
             lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
-        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
 
         canvas.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
+        # --- 鼠标滚轮 ---
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-        # Windows / Mac
-        canvas.bind_all("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
-        # Linux
-        canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
-        canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+        def bind_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", on_mousewheel)
+            canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+            canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+
+        def unbind_mousewheel(event=None):
+            try:
+                canvas.unbind_all("<MouseWheel>")
+                canvas.unbind_all("<Button-4>")
+                canvas.unbind_all("<Button-5>")
+            except Exception:
+                pass
+
+        canvas.bind("<Enter>", bind_mousewheel)
+        canvas.bind("<Leave>", unbind_mousewheel)
+
+        # --- 保存引用 ---
+        win._canvas = canvas
+        win._content_frame = scroll_frame
+        win._unbind_mousewheel = unbind_mousewheel
+
+        # --- 键盘滚动与高亮初始化 ---
+        self._label_widgets = []
+        self._selected_index = 0
+
+        # --- 键盘事件绑定 ---
+        # canvas.bind_all("<Up>", lambda e: self._on_key(e))
+        # canvas.bind_all("<Down>", lambda e: self._on_key(e))
+        # canvas.bind_all("<Prior>", lambda e: self._on_key(e))
+        # canvas.bind_all("<Next>", lambda e: self._on_key(e))
+        # 键盘事件只在滚动区域有效
+        canvas.bind("<Up>", self._on_key)
+        canvas.bind("<Down>", self._on_key)
+        canvas.bind("<Prior>", self._on_key)
+        canvas.bind("<Next>", self._on_key)
+        # 获取焦点
+        canvas.focus_set()
+        # --- 关闭窗口 ---
+        def on_close_detail_window():
+            self.save_window_position(win, "detail_window")
+            unbind_mousewheel()
+            try:
+                win.grab_release()
+            except:
+                pass
+            win.destroy()
+            self._concept_win = None
+
+        win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
+
+        # --- 初始内容 ---
+        self.update_concept_detail_content()
 
 
-        # 清空之前内容
+    def update_concept_detail_content(self):
+        """刷新概念详情窗口内容（后台可调用）"""
+        if not hasattr(self, "_concept_win") or not self._concept_win:
+            return
+        if not self._concept_win.winfo_exists():
+            self._concept_win = None
+            return
+
+        scroll_frame = self._concept_win._content_frame
+        canvas = self._concept_win._canvas
+
+        # 清空旧内容
         for widget in scroll_frame.winfo_children():
             widget.destroy()
+        self._label_widgets = []
 
-        # === 新增概念 ===
-        if added:
-            tk.Label(scroll_frame, text="🆕 新增概念", font=("微软雅黑", 11, "bold"), fg="green").pack(anchor="w", pady=(0, 5))
-            # for c in sorted(added):
-            for c in (added):
-                tk.Label(scroll_frame, text=c, fg="blue", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=10)
-                for code, name in cat_dict.get(c, []):
-                    lbl = tk.Label(scroll_frame, text=f"  {code} {name}", fg="black", cursor="hand2")
-                    lbl.pack(anchor="w", padx=25)
-                    lbl.bind("<Button-1>", lambda e, cd=code: self.on_code_click(cd))
+        # --- 数据逻辑 ---
+        current_categories = getattr(self, "_last_categories", [])
+        prev_categories = getattr(self, "_prev_categories", [])
+        cat_dict = getattr(self, "_last_cat_dict", {})
 
-        # === 消失概念 ===
-        if removed:
-            tk.Label(scroll_frame, text="❌ 消失概念", font=("微软雅黑", 11, "bold"), fg="red").pack(anchor="w", pady=(10, 5))
-            # for c in sorted(removed):
-            for c in (removed):
-                tk.Label(scroll_frame, text=c, fg="gray", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=10)
+        added = [c for c in current_categories if c not in prev_categories]
+        removed = [c for c in prev_categories if c not in current_categories]
 
-        # 更新上一次类别
-        # self._prev_categories = getattr(self, "_last_categories", set())
+        # === 有新增或消失 ===
+        if added or removed:
+            if added:
+                tk.Label(scroll_frame, text="🆕 新增概念", font=("微软雅黑", 11, "bold"), fg="green").pack(anchor="w", pady=(0, 5))
+                for c in added:
+                    tk.Label(scroll_frame, text=c, fg="blue", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+                    stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)
+                    for code, name, percent, volume in stocks:
+                        lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}",
+                                       fg="black", cursor="hand2", anchor="w")
+                        lbl.pack(anchor="w", padx=6)
+                        lbl._code = code  # 保存对应 code
+                        idx = len(self._label_widgets)
+                        lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self._on_label_click(cd, i))
+                        self._label_widgets.append(lbl)
+
+            if removed:
+                tk.Label(scroll_frame, text="❌ 消失概念", font=("微软雅黑", 11, "bold"), fg="red").pack(anchor="w", pady=(10, 5))
+                for c in removed:
+                    tk.Label(scroll_frame, text=c, fg="gray", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+
+        else:
+            tk.Label(scroll_frame, text="📊 当前前5概念", font=("微软雅黑", 11, "bold"), fg="blue").pack(anchor="w", pady=(0, 5))
+            for c in current_categories[:5]:
+                tk.Label(scroll_frame, text=c, fg="black", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+                stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)
+                for code, name, percent, volume in stocks:
+                    lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}",
+                                   fg="gray", cursor="hand2", anchor="w")
+                    lbl.pack(anchor="w", padx=6)
+                    lbl._code = code  # 保存对应 code
+                    idx = len(self._label_widgets)
+                    lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self._on_label_click(cd, i))
+                    self._label_widgets.append(lbl)
+
+        # --- 默认选中第一条 ---
+        if self._label_widgets:
+            self._selected_index = 0
+            self._label_widgets[0].configure(bg="lightblue")
+
+        # --- 滚动到顶部 ---
+        canvas.yview_moveto(0)
+
+        # --- 更新状态 ---
         self._prev_categories = list(current_categories)
 
-    # def show_category_detail1(self, event=None):
-    #     """点击标签后弹出详细概念窗口"""
-    #     if not hasattr(self, "_Categoryresult") or not self._Categoryresult:
+
+    # --- 类内部方法：选择和点击 ---
+    def _update_selection(self, idx):
+        """更新选中高亮并滚动"""
+        if not hasattr(self, "_concept_win") or not self._concept_win:
+            return
+        canvas = self._concept_win._canvas
+        scroll_frame = self._concept_win._content_frame
+
+        for lbl in self._label_widgets:
+            lbl.configure(bg=self._concept_win.cget("bg"))
+        if 0 <= idx < len(self._label_widgets):
+            lbl = self._label_widgets[idx]
+            lbl.configure(bg="lightblue")
+            self._selected_index = idx
+
+            # 滚动 Canvas 使当前 Label 可见
+            canvas.update_idletasks()
+            scroll_frame.update_idletasks()
+            lbl_top = lbl.winfo_y()
+            lbl_bottom = lbl_top + lbl.winfo_height()
+            view_top = canvas.canvasy(0)
+            view_bottom = view_top + canvas.winfo_height()
+            if lbl_top < view_top:
+                canvas.yview_moveto(lbl_top / max(1, scroll_frame.winfo_height()))
+            elif lbl_bottom > view_bottom:
+                canvas.yview_moveto((lbl_bottom - canvas.winfo_height()) / max(1, scroll_frame.winfo_height()))
+
+
+    def _on_label_click(self, code, idx):
+        """点击标签事件"""
+        self._update_selection(idx)
+        self.on_code_click(code)
+
+
+    def _on_key(self, event):
+        """键盘上下/分页滚动"""
+        if not self._label_widgets:
+            return
+        idx = self._selected_index
+        if event.keysym == "Up":
+            idx = max(0, idx - 1)
+        elif event.keysym == "Down":
+            idx = min(len(self._label_widgets) - 1, idx + 1)
+        elif event.keysym == "Prior":  # PageUp
+            idx = max(0, idx - 5)
+        elif event.keysym == "Next":   # PageDown
+            idx = min(len(self._label_widgets) - 1, idx + 5)
+        self._update_selection(idx)
+        # --- 调用 on_code_click ---
+        code = getattr(self._label_widgets[idx], "_code", None)
+        if code:
+            self.on_code_click(code)
+
+    '''
+    def show_concept_detail_window(self):
+        """弹出详细概念异动窗口（复用+自动刷新+键盘/滚轮+高亮）"""
+        if not hasattr(self, "_last_categories"):
+            return
+
+        # --- 检查窗口是否已存在 ---
+        if getattr(self, "_concept_win", None):
+            try:
+                if self._concept_win.winfo_exists():
+                    win = self._concept_win
+                    win.deiconify()
+                    win.lift()
+                    # 仅清理旧内容区，不销毁窗口结构
+                    for widget in win._content_frame.winfo_children():
+                        widget.destroy()
+                    self.update_concept_detail_content()
+                    return
+                else:
+                    self._concept_win = None
+            except Exception:
+                self._concept_win = None
+
+        win = tk.Toplevel(self)
+        self._concept_win = win
+        win.title("概念异动详情")
+        self.load_window_position(win, "detail_window", default_width=220, default_height=400)
+        win.transient(self)
+
+        # --- 主Frame + Canvas + 滚动 ---
+        frame = tk.Frame(win)
+        frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        canvas = tk.Canvas(frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas)
+
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # --- 鼠标滚轮 ---
+        def on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def bind_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", on_mousewheel)
+            canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+            canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+
+        def unbind_mousewheel(event=None):
+            try:
+                canvas.unbind_all("<MouseWheel>")
+                canvas.unbind_all("<Button-4>")
+                canvas.unbind_all("<Button-5>")
+            except Exception:
+                pass
+
+        canvas.bind("<Enter>", bind_mousewheel)
+        canvas.bind("<Leave>", unbind_mousewheel)
+
+        # --- 保存引用 ---
+        win._canvas = canvas
+        win._content_frame = scroll_frame
+        win._unbind_mousewheel = unbind_mousewheel
+
+        # --- 键盘滚动与高亮初始化 ---
+        self._label_widgets = []
+        self._selected_index = 0
+
+        # def update_selection(idx):
+        #     for lbl in self._label_widgets:
+        #         lbl.configure(bg=win.cget("bg"))
+        #     if 0 <= idx < len(self._label_widgets):
+        #         self._label_widgets[idx].configure(bg="lightblue")
+        #         self._selected_index = idx
+        #         # 滚动到可见
+        #         self._label_widgets[idx].update_idletasks()
+        #         scroll_frame.update_idletasks()
+        #         canvas.yview_moveto(self._label_widgets[idx].winfo_y() / max(1, scroll_frame.winfo_height()))
+        def update_selection(idx):
+            for lbl in self._label_widgets:
+                lbl.configure(bg=win.cget("bg"))  # 恢复默认背景
+            if 0 <= idx < len(self._label_widgets):
+                lbl = self._label_widgets[idx]
+                lbl.configure(bg="lightblue")
+                self._selected_index = idx
+
+                # --- 滚动 Canvas 使当前 Label 可见 ---
+                canvas.update_idletasks()
+                scroll_frame.update_idletasks()
+                lbl_top = lbl.winfo_y()
+                lbl_bottom = lbl_top + lbl.winfo_height()
+                view_top = canvas.canvasy(0)
+                view_bottom = view_top + canvas.winfo_height()
+
+                if lbl_top < view_top:
+                    canvas.yview_moveto(lbl_top / max(1, scroll_frame.winfo_height()))
+                elif lbl_bottom > view_bottom:
+                    canvas.yview_moveto((lbl_bottom - canvas.winfo_height()) / max(1, scroll_frame.winfo_height()))
+
+
+        def on_label_click(code, idx):
+            update_selection(idx)
+            self.on_code_click(code)
+
+        def on_key(event):
+            if not self._label_widgets:
+                return
+            idx = self._selected_index
+            if event.keysym == "Up":
+                idx = max(0, idx - 1)
+            elif event.keysym == "Down":
+                idx = min(len(self._label_widgets) - 1, idx + 1)
+            elif event.keysym == "Prior":  # PageUp
+                idx = max(0, idx - 5)
+            elif event.keysym == "Next":   # PageDown
+                idx = min(len(self._label_widgets) - 1, idx + 5)
+            update_selection(idx)
+
+        canvas.bind_all("<Up>", on_key)
+        canvas.bind_all("<Down>", on_key)
+        canvas.bind_all("<Prior>", on_key)
+        canvas.bind_all("<Next>", on_key)
+
+        # --- 关闭窗口 ---
+        def on_close_detail_window():
+            self.save_window_position(win, "detail_window")
+            unbind_mousewheel()
+            try:
+                win.grab_release()
+            except:
+                pass
+            win.destroy()
+            self._concept_win = None
+
+        win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
+
+        # --- 初始内容 ---
+        self.update_concept_detail_content()
+
+
+    def update_concept_detail_content(self):
+        """刷新概念详情窗口内容（后台可调用）"""
+        if not hasattr(self, "_concept_win") or not self._concept_win:
+            return
+        if not self._concept_win.winfo_exists():
+            self._concept_win = None
+            return
+
+        scroll_frame = self._concept_win._content_frame
+
+        # 清空旧内容
+        for widget in scroll_frame.winfo_children():
+            widget.destroy()
+        self._label_widgets = []
+
+        # --- 数据逻辑 ---
+        current_categories = getattr(self, "_last_categories", [])
+        prev_categories = getattr(self, "_prev_categories", [])
+        cat_dict = getattr(self, "_last_cat_dict", {})
+
+        added = [c for c in current_categories if c not in prev_categories]
+        removed = [c for c in prev_categories if c not in current_categories]
+
+        # === 有新增或消失 ===
+        if added or removed:
+            if added:
+                tk.Label(scroll_frame, text="🆕 新增概念", font=("微软雅黑", 11, "bold"), fg="green").pack(anchor="w", pady=(0, 5))
+                for c in added:
+                    tk.Label(scroll_frame, text=c, fg="blue", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+                    stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)
+                    for code, name, percent, volume in stocks:
+                        lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}", fg="black",
+                                       cursor="hand2", anchor="w")
+                        lbl.pack(anchor="w", padx=6)
+                        idx = len(self._label_widgets)
+                        lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self.on_label_click(cd, i))
+                        self._label_widgets.append(lbl)
+
+            if removed:
+                tk.Label(scroll_frame, text="❌ 消失概念", font=("微软雅黑", 11, "bold"), fg="red").pack(anchor="w", pady=(10, 5))
+                for c in removed:
+                    tk.Label(scroll_frame, text=c, fg="gray", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+
+        else:
+            # === 无新增/消失时，显示当前前5 ===
+            tk.Label(scroll_frame, text="📊 当前前5概念", font=("微软雅黑", 11, "bold"), fg="blue").pack(anchor="w", pady=(0, 5))
+            for c in current_categories[:5]:
+                tk.Label(scroll_frame, text=c, fg="black", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+                stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)
+                for code, name, percent, volume in stocks:
+                    lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}", fg="gray",
+                                   cursor="hand2", anchor="w")
+                    lbl.pack(anchor="w", padx=6)
+                    idx = len(self._label_widgets)
+                    lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self.on_label_click(cd, i))
+                    self._label_widgets.append(lbl)
+
+        # --- 默认选中第一条 ---
+        if self._label_widgets:
+            self._selected_index = 0
+            self._label_widgets[0].configure(bg="lightblue")
+
+        # --- 滚动到顶部 ---
+        self._concept_win._canvas.yview_moveto(0)
+
+        # --- 更新上次状态 ---
+        self._prev_categories = list(current_categories)
+    '''
+
+    # 功能OK,没有键盘滚动
+    # def show_concept_detail_window(self):
+    #     """弹出详细概念异动窗口（可复用+自动刷新）"""
+    #     if not hasattr(self, "_last_categories"):
     #         return
 
-    #     win = tk.Toplevel(self.root)
-    #     win.title("概念详情")
-    #     win.geometry("600x400")
+    #     # --- 检查并重建窗口 ---
+    #     if getattr(self, "_concept_win", None):
+    #         try:
+    #             if self._concept_win.winfo_exists():
+    #                 win = self._concept_win
+    #                 win.deiconify()
+    #                 win.lift()
+    #                 # 仅清理旧内容区，不销毁窗口结构
+    #                 for widget in win._content_frame.winfo_children():
+    #                     widget.destroy()
+    #                 self.update_concept_detail_content()
+    #                 return
+    #             else:
+    #                 self._concept_win = None
+    #         except Exception:
+    #             self._concept_win = None
 
-    #     text = tk.Text(win, wrap="word")
-    #     text.pack(fill="both", expand=True)
+    #     win = tk.Toplevel(self)
+    #     self._concept_win = win
+    #     win.title("概念异动详情")
+    #     self.load_window_position(win, "detail_window", default_width=220, default_height=400)
+    #     win.transient(self)
 
-    #     # 插入概念结果内容
-    #     text.insert("end", self._Categoryresult)
+    #     # --- 主Frame + Canvas ---
+    #     frame = tk.Frame(win)
+    #     frame.pack(fill="both", expand=True, padx=10, pady=10)
 
-    #     # --- 查找股票代码并高亮 ---
-    #     import re
-    #     for code in re.findall(r'\b\d{6}\b', self._Categoryresult):
-    #         start = text.search(code, "1.0", stopindex="end")
-    #         while start:
-    #             end = f"{start}+{len(code)}c"
-    #             text.tag_add(code, start, end)
-    #             text.tag_config(code, foreground="blue", underline=True)
-    #             text.tag_bind(code, "<Button-1>", lambda e, c=code: self.open_stock_detail(c))
-    #             start = text.search(code, end, stopindex="end")
+    #     canvas = tk.Canvas(frame, highlightthickness=0)
+    #     scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+    #     scroll_frame = tk.Frame(canvas)
+
+    #     canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+    #     canvas.configure(yscrollcommand=scrollbar.set)
+
+    #     scroll_frame.bind(
+    #         "<Configure>",
+    #         lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+    #     )
+
+    #     canvas.pack(side="left", fill="both", expand=True)
+    #     scrollbar.pack(side="right", fill="y")
+
+    #     # --- 滚轮绑定（进入/离开自动启停） ---
+    #     def on_mousewheel(event):
+    #         canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    #     def bind_mousewheel(event):
+    #         canvas.bind_all("<MouseWheel>", on_mousewheel)
+    #         canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+    #         canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+
+    #     def unbind_mousewheel(event=None):
+    #         try:
+    #             canvas.unbind_all("<MouseWheel>")
+    #             canvas.unbind_all("<Button-4>")
+    #             canvas.unbind_all("<Button-5>")
+    #         except Exception:
+    #             pass
+
+    #     canvas.bind("<Enter>", bind_mousewheel)
+    #     canvas.bind("<Leave>", unbind_mousewheel)
+
+    #     # --- 保存引用 ---
+    #     win._canvas = canvas
+    #     win._content_frame = scroll_frame
+    #     win._unbind_mousewheel = unbind_mousewheel
+
+    #     # --- 关闭事件 ---
+    #     def on_close_detail_window():
+    #         self.save_window_position(win, "detail_window")
+    #         unbind_mousewheel()
+    #         try:
+    #             win.grab_release()
+    #         except:
+    #             pass
+    #         win.destroy()
+    #         self._concept_win = None
+
+    #     win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
+
+    #     # --- 初始化内容 ---
+    #     self.update_concept_detail_content()
+
+
+    # def update_concept_detail_content(self):
+    #     """刷新概念详情窗口内容（后台可调用）"""
+    #     if not hasattr(self, "_concept_win") or not self._concept_win:
+    #         return
+    #     if not self._concept_win.winfo_exists():
+    #         self._concept_win = None
+    #         return
+
+    #     scroll_frame = self._concept_win._content_frame
+
+    #     # 清空旧内容
+    #     for widget in scroll_frame.winfo_children():
+    #         widget.destroy()
+
+    #     # --- 数据逻辑 ---
+    #     current_categories = getattr(self, "_last_categories", [])
+    #     prev_categories = getattr(self, "_prev_categories", [])
+    #     cat_dict = getattr(self, "_last_cat_dict", {})
+
+    #     added = [c for c in current_categories if c not in prev_categories]
+    #     removed = [c for c in prev_categories if c not in current_categories]
+
+    #     # === 有新增或消失 ===
+    #     if added or removed:
+    #         if added:
+    #             tk.Label(scroll_frame, text="🆕 新增概念", font=("微软雅黑", 11, "bold"), fg="green").pack(anchor="w", pady=(0, 5))
+    #             for c in added:
+    #                 tk.Label(scroll_frame, text=c, fg="blue", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+    #                 # for code, name in cat_dict.get(c, []):
+    #                 #     lbl = tk.Label(scroll_frame, text=f"  {code} {name}", fg="black", cursor="hand2")
+    #                 #     lbl.pack(anchor="w", padx=25)
+    #                 #     lbl.bind("<Button-1>", lambda e, cd=code: self.on_code_click(cd))
+
+    #                 # 按 percent 排序，降序
+    #                 stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)
+    #                 for code, name, percent, volume in stocks:
+    #                     lbl = tk.Label(scroll_frame, text=f"  {code} {name}  {percent:.2f}%  {volume}", fg="black", cursor="hand2")
+    #                     lbl.pack(anchor="w", padx=12)
+    #                     lbl.bind("<Button-1>", lambda e, cd=code: self.on_code_click(cd))
+
+    #         if removed:
+    #             tk.Label(scroll_frame, text="❌ 消失概念", font=("微软雅黑", 11, "bold"), fg="red").pack(anchor="w", pady=(10, 5))
+    #             for c in removed:
+    #                 tk.Label(scroll_frame, text=c, fg="gray", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+    #     else:
+    #         # === 无新增/消失时，显示当前前5 ===
+    #         tk.Label(scroll_frame, text="📊 当前前5概念", font=("微软雅黑", 11, "bold"), fg="blue").pack(anchor="w", pady=(0, 5))
+    #         for c in current_categories[:5]:
+    #             tk.Label(scroll_frame, text=c, fg="black", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+    #             # for code, name in cat_dict.get(c, []):
+    #             #     lbl = tk.Label(scroll_frame, text=f"  {code} {name}", fg="gray", cursor="hand2")
+    #             #     lbl.pack(anchor="w", padx=25)
+    #             #     lbl.bind("<Button-1>", lambda e, cd=code: self.on_code_click(cd))
+    #             stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)
+    #             for code, name, percent, volume in stocks:
+    #                 lbl = tk.Label(scroll_frame, text=f"  {code} {name}  {percent:.2f}%  {volume}", fg="gray", cursor="hand2")
+    #                 lbl.pack(anchor="w", padx=12)
+    #                 lbl.bind("<Button-1>", lambda e, cd=code: self.on_code_click(cd))
+
+    #     # --- 滚动到顶部 ---
+    #     self._concept_win._canvas.yview_moveto(0)
+
+    #     # --- 更新状态 ---
+    #     self._prev_categories = list(current_categories)
+
+    def auto_refresh_detail_window(self):
+        # ... 逻辑更新 _last_categories / _last_cat_dict ...
+        if getattr(self, "_concept_win", None) and self._concept_win.winfo_exists():
+            self.update_concept_detail_content()
+
 
     def open_stock_detail(self, code):
         """点击概念窗口中股票代码弹出详情"""
@@ -3847,6 +4478,8 @@ class StockMonitorApp(tk.Tk):
             log.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")
 
+        self.on_test_code()
+        self.auto_refresh_detail_window()
         self.update_category_result(df_filtered)
         # if df_filtered is not None and not df_filtered.empty:
         #     result = counterCategory(df_filtered, 'category', limit=50, table=True)

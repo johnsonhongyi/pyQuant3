@@ -329,7 +329,8 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
                 
                 # if len(df) > 3:
                 _top_all = df[df.close > 10]
-
+                if _top_all.empty:
+                    return  _top_all               
                 if (_top_all['open'][1] == _top_all['lasto1d'][1]) and (_top_all['open'][0] == _top_all['lasto1d'][0]):
                     nowd, per1d=2, 1
                     df['perc_n']=list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'], df['lasto%sd' % nowd], df['lastp%sd' % (nowd)],
