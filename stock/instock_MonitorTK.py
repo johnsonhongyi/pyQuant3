@@ -3634,7 +3634,7 @@ class StockMonitorApp(tk.Tk):
                     cat_dict.setdefault(ca, []).append((
                         code,
                         row.get("name", ""),
-                        row.get("percent", 0.0),
+                        row.get("percent", 0) or row.get("per1d", 0),
                         row.get("volume", 0)
                         # 如果还有其他列，可以继续加: row.get("其他列")
                     ))
@@ -4162,6 +4162,7 @@ class StockMonitorApp(tk.Tk):
             return
 
         query_expr = f'category.str.contains("{concept_name}", na=False)'
+
         try:
             df_concept = self.df_all.query(query_expr)
         except Exception as e:
@@ -4174,7 +4175,10 @@ class StockMonitorApp(tk.Tk):
 
         df_concept = df_concept.copy()
         if "percent" in df_concept.columns and "volume" in df_concept.columns:
-            df_concept = df_concept[df_concept["percent"] > 0]
+            # df_concept = df_concept[df_concept["percent"] >= 0]
+            df_top = df_concept[df_concept["percent"] > 0]
+            df_concept = df_top if not df_top.empty else df_concept[df_concept["per1d"] >= 0]
+
             df_concept = df_concept.sort_values("volume", ascending=False).head(10)
         else:
             messagebox.showinfo("概念详情", "df_all 缺少 'percent' 或 'volume' 列")
@@ -4299,8 +4303,10 @@ class StockMonitorApp(tk.Tk):
         for idx, (code, row) in enumerate(df_concept.iterrows()):
             # code = row.get("code", "")
             name = row.get("name", "")
-            percent = row.get("percent", 0)
+            # percent = row.get("percent", 0)
+            percent = row.get("percent", 0) or row.get("per1d", 0)
             volume = row.get("volume", 0)
+
             text = f"{code}  {name:<6}  涨幅:{percent:.2f}%  量:{volume:.2f}"
 
             lbl = tk.Label(frame, text=text, anchor="w", font=("微软雅黑", 9), cursor="hand2")
@@ -4936,7 +4942,7 @@ class StockMonitorApp(tk.Tk):
         conditions = [c.strip() for c in query.split('and')]
         valid_conditions = []
         removed_conditions = []
-
+        print(f'conditions: {conditions} bracket_patterns : {bracket_patterns}')
         for cond in conditions:
             cond_clean = cond.lstrip('(').rstrip(')')
 
@@ -4946,10 +4952,10 @@ class StockMonitorApp(tk.Tk):
             #     continue
 
             # index 或 str 操作条件特殊保留
-            if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0:
+            # if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 or cond.find('or') >= 0:
+            if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 :
                 valid_conditions.append(cond_clean)
                 continue
-
 
             # 提取条件中的列名
             cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
@@ -4961,6 +4967,14 @@ class StockMonitorApp(tk.Tk):
                 removed_conditions.append(cond_clean)
                 log.info(f"剔除不存在的列条件: {cond_clean}")
 
+        # 去掉在 bracket_patterns 中出现的内容
+        removed_conditions = [
+            cond for cond in removed_conditions
+            if not any(bp.strip('() ').strip() == cond.strip() for bp in bracket_patterns)
+        ]
+
+        # print(filtered_removed)
+        # removed_conditions = filtered_removed
         # 打印剔除条件列表
         if removed_conditions:
             print(f"[剔除的条件列表] {removed_conditions}")
@@ -4968,7 +4982,7 @@ class StockMonitorApp(tk.Tk):
         if not valid_conditions:
             self.status_var.set("没有可用的查询条件")
             return
-
+        # print(f'valid_conditions : {valid_conditions}')
         # ====== 拼接 final_query 并检查括号 ======
         final_query = ' and '.join(f"({c})" for c in valid_conditions)
         # print(f'final_query : {final_query}')
@@ -4987,48 +5001,49 @@ class StockMonitorApp(tk.Tk):
         query_engine = 'numexpr'
         if any('index.' in c.lower() for c in valid_conditions):
             query_engine = 'python'
-
         # ====== 数据过滤 ======
         try:
-            if val1.count('or') > 0 and val1.count('(') > 0:
-                if val2 :
-                    query_search = f"({val1}) and {val2}"
-                    print(f'query: {query_search} ')
 
-                else:
-                    query_search = f"({val1})"
-                    print(f'query: {query_search} ')
-                df_filtered = self.df_all.query(query_search, engine=query_engine)
-                self.refresh_tree(df_filtered)
-                self.status_var2.set('')
-                self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {val1} and {val2}")
+            # if val1.count('or') > 0 and val1.count('(') > 0:
+            #     if val2 :
+            #         query_search = f"({val1}) and {val2}"
+            #         print(f'query: {query_search} ')
+
+            #     else:
+            #         query_search = f"({val1})"
+            #         print(f'query: {query_search} ')
+
+            #     df_filtered = self.df_all.query(query_search, engine=query_engine)
+            #     self.refresh_tree(df_filtered)
+            #     self.status_var2.set('')
+            #     self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {val1} and {val2}")
+            # else:
+            # 检查 category 列是否存在
+            if 'category' in self.df_all.columns:
+                # 强制转换为字符串，避免 str.contains 报错
+                if not pd.api.types.is_string_dtype(self.df_all['category']):
+                    self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
+                    # self.df_all['category'] = self.df_all['category'].astype(str)
+                    # 可选：去掉前后空格
+                    # self.df_all['category'] = self.df_all['category'].str.strip()
+            df_filtered = self.df_all.query(final_query, engine=query_engine)
+
+            # 假设 df 是你提供的涨幅榜表格
+            # result = counterCategory(df_filtered, 'category', limit=50, table=True)
+            # self._Categoryresult = result
+            # self.query_manager.entry_query.set(self._Categoryresult)
+
+            self.refresh_tree(df_filtered)
+            # 打印剔除条件列表
+            if removed_conditions:
+                # print(f"[剔除的条件列表] {removed_conditions}")
+                # 显示到状态栏
+                self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
+                self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
             else:
-                # 检查 category 列是否存在
-                if 'category' in self.df_all.columns:
-                    # 强制转换为字符串，避免 str.contains 报错
-                    if not pd.api.types.is_string_dtype(self.df_all['category']):
-                        self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
-                        # self.df_all['category'] = self.df_all['category'].astype(str)
-                        # 可选：去掉前后空格
-                        # self.df_all['category'] = self.df_all['category'].str.strip()
-                df_filtered = self.df_all.query(final_query, engine=query_engine)
-
-                # 假设 df 是你提供的涨幅榜表格
-                # result = counterCategory(df_filtered, 'category', limit=50, table=True)
-                # self._Categoryresult = result
-                # self.query_manager.entry_query.set(self._Categoryresult)
-
-                self.refresh_tree(df_filtered)
-                # 打印剔除条件列表
-                if removed_conditions:
-                    print(f"[剔除的条件列表] {removed_conditions}")
-                    # 显示到状态栏
-                    self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
-                    self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-                else:
-                    self.status_var2.set('')
-                    self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-                print(f'final_query: {final_query}')
+                self.status_var2.set('')
+                self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
+            print(f'final_query: {final_query}')
         except Exception as e:
             log.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")
