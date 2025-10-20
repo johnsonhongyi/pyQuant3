@@ -716,6 +716,7 @@ def read_ini(inifile='filter.ini',setrule=None,category='General',filterkey='fil
 
         # Write the config object to the file
         config.write()
+        print(f'config[{category}][{filterkey}] : {rule}')
         print(f"Config file '{config_file_path}' created successfully.")
 
     else:
@@ -725,16 +726,20 @@ def read_ini(inifile='filter.ini',setrule=None,category='General',filterkey='fil
         if category in read_config.keys():
             if filterkey in read_config[category].keys():
                 rule = read_config[category][filterkey]
+                print(f'read_config[{category}][{filterkey}] :  {rule}')
             else:
                 read_config[category][filterkey] = {}
                 rule = 'None'
                 read_config[category][filterkey] = rule
                 read_config.write()
+                print(f'read_config[{category}][{filterkey}] :  {rule}')
+
         else:
             read_config[category] = {}
             rule = 'None'
             read_config[category][filterkey] = rule
             read_config.write()
+            print(f'read_config[{category}][{filterkey}] :  {rule}')
             # print(f"Config file '{config_file_path}' init None")
         # db_host = read_config['Database']['host']
         # enabled_modules = read_config['Features']['enabled_modules']
@@ -753,6 +758,7 @@ def read_ini(inifile='filter.ini',setrule=None,category='General',filterkey='fil
             # read_config['General']['version'] = '1.0.1'
             # read_config['Database']['password'] = 'new_secure_pass'
             read_config.write()
+            print(f'config[{category}][{filterkey}] : {setrule}')
             print(f"Config file '{config_file_path}' updated successfully.")
     if rule.find('top_all') >= 0 or rule.find('top_temp') >= 0:
         rule = rule.replace('top_all.query','').replace('top_temp.query','')
@@ -819,8 +825,8 @@ def get_day_istrade_date(dt=None):
     return(is_trade_date)
 
 
-is_trade_date_today = get_day_istrade_date()
-last_trade_date = get_last_trade_date()
+# is_trade_date_today = get_day_istrade_date()
+# last_trade_date = get_last_trade_date()
 
 
 def check_file_exist(filepath):
@@ -2252,6 +2258,8 @@ def get_today_duration(datastr, endday=None,tdx=False):
         if endday:
             today = datetime.datetime.strptime(day8_to_day10(endday), '%Y-%m-%d').date()
         else:
+            is_trade_date_today = get_day_istrade_date()
+            last_trade_date = get_last_trade_date()
             if tdx and ((is_trade_date_today and get_now_time_int() < 1500) or not is_trade_date_today) and datastr == last_trade_date:
                 return 0 
                 # today = last_trade_date
@@ -2341,69 +2349,112 @@ def get_work_duration():
 
 
 def get_work_time_ratio(resample='d'):
-    initx = 3.5
-    stepx = 0.5
-    init = 0
-    initAll = 10
-    now = time.localtime()
-    ymd = time.strftime("%Y:%m:%d:", now)
-    hm1 = '09:30'
-    hm2 = '13:00'
-    all_work_time = 14400
-    d1 = datetime.datetime.now()
-    now_t = int(datetime.datetime.now().strftime("%H%M"))
-    # d2 = datetime.datetime.strptime('201510111011','%Y%M%d%H%M')
-    if now_t > 915 and now_t <= 930:
-        d2 = datetime.datetime.strptime(ymd + '09:29', '%Y:%m:%d:%H:%M')
-        d1 = datetime.datetime.strptime(ymd + '09:30', '%Y:%m:%d:%H:%M')
-        ds = float((d1 - d2).seconds)
-        init += 1
-        ratio_t = round(ds / all_work_time / (initx + init * stepx) * initAll, 3)
-    elif now_t > 930 and now_t <= 1000:
-        d2 = datetime.datetime.strptime(ymd + hm1, '%Y:%m:%d:%H:%M')
-        ds = float((d1 - d2).seconds)
-        init += 1
-        ratio_t = round(ds / all_work_time / (initx + init * stepx) * initAll, 3)
-    elif now_t > 1000 and now_t <= 1030:
-        d2 = datetime.datetime.strptime(ymd + hm1, '%Y:%m:%d:%H:%M')
-        ds = float((d1 - d2).seconds)
-        init += 2
-        ratio_t = round(ds / all_work_time / (initx + init * stepx) * initAll, 3)
-    elif now_t > 1030 and now_t <= 1100:
-        d2 = datetime.datetime.strptime(ymd + hm1, '%Y:%m:%d:%H:%M')
-        ds = float((d1 - d2).seconds)
-        init += 3
-        ratio_t = round(ds / all_work_time / (initx + init * stepx) * initAll, 3)
-    elif now_t > 1100 and now_t <= 1130:
-        d2 = datetime.datetime.strptime(ymd + hm1, '%Y:%m:%d:%H:%M')
-        ds = float((d1 - d2).seconds)
-        init += 4
-        ratio_t = round(ds / all_work_time / (initx + init * stepx) * initAll, 3)
-    elif now_t > 1130 and now_t < 1300:
-        init += 4
-        ratio_t = 0.5 / (initx + init * stepx) * initAll
-    elif now_t >= 1500 or now_t < 930:
-        ratio_t = 1.0
-    elif now_t > 1300 and now_t <= 1330:
-        d2 = datetime.datetime.strptime(ymd + hm2, '%Y:%m:%d:%H:%M')
-        ds = float((d1 - d2).seconds)
-        init += 5
-        ratio_t = round((ds + 7200) / all_work_time / (initx + init * stepx) * initAll, 3)
-    elif now_t > 1330 and now_t <= 1400:
-        d2 = datetime.datetime.strptime(ymd + hm2, '%Y:%m:%d:%H:%M')
-        ds = float((d1 - d2).seconds)
-        init += 6
-        ratio_t = round((ds + 7200) / all_work_time / (initx + init * stepx) * initAll, 3)
-    elif now_t > 1400 and now_t <= 1430:
-        d2 = datetime.datetime.strptime(ymd + hm2, '%Y:%m:%d:%H:%M')
-        ds = float((d1 - d2).seconds)
-        init += 7
-        ratio_t = round((ds + 7200) / all_work_time / (initx + init * stepx) * initAll, 3)
-    else:
-        d2 = datetime.datetime.strptime(ymd + hm2, '%Y:%m:%d:%H:%M')
-        ds = float((d1 - d2).seconds)
-        ratio_t = round((ds + 7200) / all_work_time, 3)
+    # initx = 3.5
+    # stepx = 0.5
+    # init = 0
+    # initAll = 10
+    # now = time.localtime()
+    # ymd = time.strftime("%Y:%m:%d:", now)
+    # hm1 = '09:30'
+    # hm2 = '13:00'
+    # all_work_time = 14400
+    # d1 = datetime.datetime.now()
+    # now_t = int(datetime.datetime.now().strftime("%H%M"))
+    # # d2 = datetime.datetime.strptime('201510111011','%Y%M%d%H%M')
+    # if now_t > 915 and now_t <= 930:
+    #     d2 = datetime.datetime.strptime(ymd + '09:29', '%Y:%m:%d:%H:%M')
+    #     d1 = datetime.datetime.strptime(ymd + '09:30', '%Y:%m:%d:%H:%M')
+    #     ds = float((d1 - d2).seconds)
+    #     init += 1
+    #     ratio_t = round(ds / all_work_time / (initx + init * stepx) * initAll, 3)
+    # elif now_t > 930 and now_t <= 1000:
+    #     d2 = datetime.datetime.strptime(ymd + hm1, '%Y:%m:%d:%H:%M')
+    #     ds = float((d1 - d2).seconds)
+    #     init += 1
+    #     ratio_t = round(ds / all_work_time / (initx + init * stepx) * initAll, 3)
+    # elif now_t > 1000 and now_t <= 1030:
+    #     d2 = datetime.datetime.strptime(ymd + hm1, '%Y:%m:%d:%H:%M')
+    #     ds = float((d1 - d2).seconds)
+    #     init += 2
+    #     ratio_t = round(ds / all_work_time / (initx + init * stepx) * initAll, 3)
+    # elif now_t > 1030 and now_t <= 1100:
+    #     d2 = datetime.datetime.strptime(ymd + hm1, '%Y:%m:%d:%H:%M')
+    #     ds = float((d1 - d2).seconds)
+    #     init += 3
+    #     ratio_t = round(ds / all_work_time / (initx + init * stepx) * initAll, 3)
+    # elif now_t > 1100 and now_t <= 1130:
+    #     d2 = datetime.datetime.strptime(ymd + hm1, '%Y:%m:%d:%H:%M')
+    #     ds = float((d1 - d2).seconds)
+    #     init += 4
+    #     ratio_t = round(ds / all_work_time / (initx + init * stepx) * initAll, 3)
+    # elif now_t > 1130 and now_t < 1300:
+    #     init += 4
+    #     ratio_t = 0.5 / (initx + init * stepx) * initAll
+    # elif now_t >= 1500 or now_t < 930:
+    #     ratio_t = 1.0
+    # elif now_t > 1300 and now_t <= 1330:
+    #     d2 = datetime.datetime.strptime(ymd + hm2, '%Y:%m:%d:%H:%M')
+    #     ds = float((d1 - d2).seconds)
+    #     init += 5
+    #     ratio_t = round((ds + 7200) / all_work_time / (initx + init * stepx) * initAll, 3)
+    # elif now_t > 1330 and now_t <= 1400:
+    #     d2 = datetime.datetime.strptime(ymd + hm2, '%Y:%m:%d:%H:%M')
+    #     ds = float((d1 - d2).seconds)
+    #     init += 6
+    #     ratio_t = round((ds + 7200) / all_work_time / (initx + init * stepx) * initAll, 3)
+    # elif now_t > 1400 and now_t <= 1430:
+    #     d2 = datetime.datetime.strptime(ymd + hm2, '%Y:%m:%d:%H:%M')
+    #     ds = float((d1 - d2).seconds)
+    #     init += 7
+    #     ratio_t = round((ds + 7200) / all_work_time / (initx + init * stepx) * initAll, 3)
+    # else:
+    #     d2 = datetime.datetime.strptime(ymd + hm2, '%Y:%m:%d:%H:%M')
+    #     ds = float((d1 - d2).seconds)
+    #     ratio_t = round((ds + 7200) / all_work_time, 3)
 
+
+    # if now is None:
+    #     now = dt.datetime.now()
+    now = datetime.datetime.now()
+        
+    t = now.time()
+    minutes = t.hour * 60 + t.minute
+
+    # ---- A股真实经验比例（可微调）----
+    # 开盘 9:30 - 10:00 约 25%
+    # 10:00 - 11:00 约 50%
+    # 11:00 - 11:30 约 60%
+    # 午后 13:00 - 14:00 约 78%
+    # 14:00 - 15:00 约 100%
+    segments = [
+        (9*60+30, 10*60, 0.25),
+        (10*60, 11*60, 0.50),
+        (11*60, 11*60+30, 0.60),
+        (13*60, 14*60, 0.78),
+        (14*60, 15*60, 1.00),
+    ]
+
+    passed_ratio = 0.0
+    prev_end = 9*60+30
+    prev_ratio = 0.0
+
+    for start, end, ratio in segments:
+        if minutes <= start:
+            passed_ratio = prev_ratio
+            break
+        elif start < minutes <= end:
+            seg_progress = (minutes - start) / (end - start)
+            passed_ratio = prev_ratio + (ratio - prev_ratio) * seg_progress
+            break
+        prev_ratio = ratio
+        prev_end = end
+    else:
+        passed_ratio = 1.0  # 超过收盘
+
+    # 防止过早时刻分母太小
+    passed_ratio = max(passed_ratio, 0.05)
+
+    ratio_t = passed_ratio
     # work_day = get_work_day_idx() 
     # work_day = work_day-3 if work_day > 2 else work_day
     if resample == '3d':
