@@ -495,6 +495,74 @@ def test_code_against_queries(df_code, queries):
     return results
 
 
+import datetime as dt
+
+def estimate_virtual_volume_simple(now=None):
+# def estimate_virtual_volume_simple(current_volume, avg_volume_6d, now=None):
+    """
+    根据当前成交量估算全天预期成交量 + 计算虚拟量比
+    
+    参数：
+        current_volume : float 当前实时成交量
+        avg_volume_6d  : float 最近6日平均成交量
+        now            : datetime.datetime 或 None，默认为当前时间
+        
+    返回：
+        est_volume   : float  预估全天成交量
+        passed_ratio : float  当前时间已完成的成交量比例（0~1）
+        vol_ratio    : float  预估虚拟量比（全天预估量 / 6日均量）
+    """
+    if now is None:
+        now = dt.datetime.now()
+    t = now.time()
+    minutes = t.hour * 60 + t.minute
+
+    # ---- A股真实经验比例（可微调）----
+    # 开盘 9:30 - 10:00 约 25%
+    # 10:00 - 11:00 约 50%
+    # 11:00 - 11:30 约 60%
+    # 午后 13:00 - 14:00 约 78%
+    # 14:00 - 15:00 约 100%
+    segments = [
+        (9*60+30, 10*60, 0.25),
+        (10*60, 11*60, 0.50),
+        (11*60, 11*60+30, 0.60),
+        (13*60, 14*60, 0.78),
+        (14*60, 15*60, 1.00),
+    ]
+
+    passed_ratio = 0.0
+    prev_end = 9*60+30
+    prev_ratio = 0.0
+
+    for start, end, ratio in segments:
+        if minutes <= start:
+            passed_ratio = prev_ratio
+            break
+        elif start < minutes <= end:
+            seg_progress = (minutes - start) / (end - start)
+            passed_ratio = prev_ratio + (ratio - prev_ratio) * seg_progress
+            break
+        prev_ratio = ratio
+        prev_end = end
+    else:
+        passed_ratio = 1.0  # 超过收盘
+
+    # 防止过早时刻分母太小
+    passed_ratio = max(passed_ratio, 0.05)
+
+    # # 预测全天成交量
+    # est_volume = current_volume / passed_ratio
+
+    # # 计算虚拟量比（全天预估量 ÷ 6日平均量）
+    # if avg_volume_6d > 0:
+    #     vol_ratio = round(est_volume / avg_volume_6d, 2)
+    # else:
+    #     vol_ratio = 0.0
+
+    # return est_volume, passed_ratio, vol_ratio
+    return passed_ratio
+
 
 
 # ------------------ 后台数据进程 ------------------ #
@@ -608,6 +676,8 @@ def calc_indicators(top_all, resample):
             )
     # top_all = top_all[(top_all.df2 > 0) & (top_all.boll > 0)]
     ratio_t = cct.get_work_time_ratio(resample=resample)
+    # ratio_t = estimate_virtual_volume_simple()
+    print(f'ratio_t: {round(ratio_t,2)}')
     top_all['volume'] = list(
         map(lambda x, y: round(x / y / ratio_t, 1),
             top_all['volume'].values,
@@ -631,6 +701,63 @@ def calc_indicators(top_all, resample):
         top_all['dff'] = ((top_all['buy'] - top_all['df2']) / top_all['df2'] * 100).round(1)
 
     return top_all.sort_values(by=['dff','percent','volume','ratio','couts'], ascending=[0,0,0,1,1])
+
+# ------------------ 指标计算 ------------------ #
+# def calc_indicators(top_all, resample):
+#     if cct.get_trade_date_status():
+#         for co in ['boll', 'df2']:
+#             top_all[co] = list(
+#                 map(lambda x, y, m, z: z + (1 if (x > y) else 0),
+#                     top_all.close.values,
+#                     top_all.upper.values,
+#                     top_all.llastp.values,
+#                     top_all[co].values)
+#             )
+
+
+#     def calc_virtual_volume_ratio(current_vol, avg_vol):
+#         est_volume, passed_ratio, vol_ratio = estimate_virtual_volume_simple(
+#             current_vol, avg_vol, now=None
+#         )
+#         return round(vol_ratio, 1)  # 返回虚拟量比（如 1.3 表示今日预计量是均量的1.3倍）
+#     # --- 计算实时虚拟成交量 ---
+#     ratio_t = cct.get_work_time_ratio(resample=resample)  # 已开市时间比例（如 0.35）
+#     # 如果当前为交易中，则将 volume 转换为预估全天成交量
+#     # 更新 DataFrame 中的 volume 列为“虚拟量比”
+#     top_all["volume"] = list(
+#         map(calc_virtual_volume_ratio,
+#             top_all["volume"].values,
+#             top_all["last6vol"].values)
+#     )
+
+#     # --- 与均量比 ---
+#     top_all['volume'] = list(
+#         map(lambda x, y: round(x / y / ratio_t, 1),
+#             top_all['volume'].values,
+#             top_all.last6vol.values)
+#     )
+
+#     # --- 差值计算 ---
+#     now_time = cct.get_now_time_int()
+#     if cct.get_trade_date_status():
+#         if 'lastbuy' in top_all.columns:
+#             if 915 < now_time < 930:
+#                 top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
+#                 top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+#             elif 926 < now_time < 1455:
+#                 top_all['dff'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
+#                 top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+#             else:
+#                 top_all['dff'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+#                 top_all['dff2'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
+#         else:
+#             top_all['dff'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+#     else:
+#         top_all['dff'] = ((top_all['buy'] - top_all['df2']) / top_all['df2'] * 100).round(1)
+
+#     # --- 排序 ---
+#     return top_all.sort_values(by=['dff', 'percent', 'volume', 'ratio', 'couts'], ascending=[0, 0, 0, 1, 1])
+
 
 
 PIPE_NAME = r"\\.\pipe\my_named_pipe"
@@ -803,7 +930,7 @@ class StockMonitorApp(tk.Tk):
         from multiprocessing import Manager
         self.manager = Manager()
         self.global_dict = self.manager.dict()  # 共享字典
-        self.global_dict["resample"] = "d"
+        self.global_dict["resample"] = "3d"
         self.global_values = cct.GlobalValues(self.global_dict)
         resample = self.global_values.getkey("resample")
         print(f'app init getkey resample:{self.global_values.getkey("resample")}')
@@ -1354,9 +1481,10 @@ class StockMonitorApp(tk.Tk):
         self.st_key_sort_value.set(self.st_key_sort) 
         
         # --- resample 下拉框 ---
+        resampleValues = ["d",'3d', "w", "m"]
         tk.Label(ctrl_frame, text="resample:").pack(side="left")
-        self.resample_combo = ttk.Combobox(ctrl_frame, values=["d",'3d', "w", "m"], width=3)
-        self.resample_combo.current(0)
+        self.resample_combo = ttk.Combobox(ctrl_frame, values=resampleValues, width=3)
+        self.resample_combo.current(resampleValues.index(self.global_values.getkey("resample")))
         self.resample_combo.pack(side="left", padx=5)
         self.resample_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_data())
         # --- 刷新按钮 ---
@@ -1419,6 +1547,8 @@ class StockMonitorApp(tk.Tk):
         self.search_combo2.bind("<Return>", lambda e: self.apply_search())
         self.search_combo2.bind("<<ComboboxSelected>>", lambda e: self.apply_search())
         self.search_var2.trace_add("write", self._on_search_var_change)
+
+        self.search_combo2.bind("<Button-3>", self.on_right_click_search_var2)
 
         self.query_manager = QueryHistoryManager(
             self,
@@ -2760,6 +2890,7 @@ class StockMonitorApp(tk.Tk):
             else:
                 # 如果发送失败，更新状态标签
                 self.status_var2.set(f"发送失败: {stock_code}")
+
     def copy_code(self,event):
         region = self.tree.identify_region(event.x, event.y)
         if region == "cell":
@@ -3242,7 +3373,7 @@ class StockMonitorApp(tk.Tk):
 
         # 4. 恢复选中
         if self.select_code:
-            print(f'select_code: {self.select_code}')
+            # print(f'select_code: {self.select_code}')
             for iid in self.tree.get_children():
                 values = self.tree.item(iid, "values")
                 if values and values[0] == self.select_code:
@@ -3575,7 +3706,7 @@ class StockMonitorApp(tk.Tk):
     def on_code_click(self, code):
         """点击异动窗口中的股票代码"""
         self.select_code = code
-        print(f"点击代码：{code}")
+        print(f"select_code: {code}")
         # ✅ 可改为打开详情逻辑，比如：
         # if hasattr(self, "show_stock_detail"):
         #     self.show_stock_detail(code)
@@ -3804,7 +3935,13 @@ class StockMonitorApp(tk.Tk):
 
         # --- 初始内容 ---
         self.update_concept_detail_content()
+        def _keep_focus(event):
+            """防止焦点丢失"""
+            if self._concept_win._content_frame and self._concept_win._content_frame.winfo_exists():
+                self._concept_win._content_frame.focus_set()
 
+        # 在初始化中绑定一次
+        canvas.bind("<FocusOut>", _keep_focus)
 
     def update_concept_detail_content(self):
         """刷新概念详情窗口内容（后台可调用）"""
@@ -3842,8 +3979,11 @@ class StockMonitorApp(tk.Tk):
                                        fg="black", cursor="hand2", anchor="w")
                         lbl.pack(anchor="w", padx=6)
                         lbl._code = code  # 保存对应 code
+                        lbl._concept = c  # 绑定当前概念
                         idx = len(self._label_widgets)
                         lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self._on_label_click(cd, i))
+                        lbl.bind("<Button-3>", lambda e, cd=code, i=idx: self._on_label_right_click(cd, i))
+                        lbl.bind("<Double-Button-1>", lambda e, cd=code, i=idx: self._on_label_double_click(cd, i))  # ✅ 新增双击事件
                         self._label_widgets.append(lbl)
 
             if removed:
@@ -3861,8 +4001,12 @@ class StockMonitorApp(tk.Tk):
                                    fg="gray", cursor="hand2", anchor="w")
                     lbl.pack(anchor="w", padx=6)
                     lbl._code = code  # 保存对应 code
+                    lbl._concept = c  # 绑定当前概念
                     idx = len(self._label_widgets)
                     lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self._on_label_click(cd, i))
+                    lbl.bind("<Button-3>", lambda e, cd=code, i=idx: self._on_label_right_click(cd, i))
+                    lbl.bind("<Double-Button-1>", lambda e, cd=code, i=idx: self._on_label_double_click(cd, i))  # ✅ 新增双击事件
+
                     self._label_widgets.append(lbl)
 
         # --- 默认选中第一条 ---
@@ -3909,7 +4053,418 @@ class StockMonitorApp(tk.Tk):
         """点击标签事件"""
         self._update_selection(idx)
         self.on_code_click(code)
+        # 确保键盘事件仍绑定有效
 
+        if hasattr(self._concept_win, "_canvas"):
+            canvas = self._concept_win._canvas
+            yview = canvas.yview()  # 保存当前滚动条位置
+            self._concept_win._canvas.focus_set()
+            canvas.yview_moveto(yview[0])  # 恢复原位置
+
+    def on_right_click_search_var2(self,event):
+        try:
+            # 获取剪贴板内容
+            clipboard_text = event.widget.clipboard_get()
+        except tk.TclError:
+            return
+        # 插入到光标位置
+        # event.widget.insert(tk.INSERT, clipboard_text)
+        # 先清空再黏贴
+        event.widget.delete(0, tk.END)
+        event.widget.insert(0, clipboard_text)
+        # self.on_test_click()
+
+
+    def _on_label_on_code_click(self, code,idx):
+        self._update_selection_top10(idx)
+        """点击异动窗口中的股票代码"""
+        self.select_code = code
+        # print(f"select_code: {code}")
+        # ✅ 可改为打开详情逻辑，比如：
+        # if hasattr(self, "show_stock_detail"):
+        #     self.show_stock_detail(code)
+        self.sender.send(code)
+
+
+    def _on_key_top10(self, event):
+        """键盘上下/分页滚动（仅Top10窗口用）"""
+        if not hasattr(self, "_top10_label_widgets") or not self._top10_label_widgets:
+            return
+
+        idx = getattr(self, "_top10_selected_index", 0)
+
+        if event.keysym == "Up":
+            idx = max(0, idx - 1)
+        elif event.keysym == "Down":
+            idx = min(len(self._top10_label_widgets) - 1, idx + 1)
+        elif event.keysym == "Prior":  # PageUp
+            idx = max(0, idx - 5)
+        elif event.keysym == "Next":   # PageDown
+            idx = min(len(self._top10_label_widgets) - 1, idx + 5)
+        else:
+            return
+
+        self._top10_selected_index = idx
+        self._update_selection_top10(idx)
+
+        # 点击行为（可复用 on_code_click）
+        lbl = self._top10_label_widgets[idx]
+        code = getattr(lbl, "_code", None)
+        if code:
+            self.on_code_click(code)
+
+    # def _update_selection_top10(self, idx):
+    #     """更新Top10窗口的高亮状态"""
+    #     for i, lbl in enumerate(self._top10_label_widgets):
+    #         lbl.configure(bg="lightblue" if i == idx else "SystemButtonFace")
+
+    def _update_selection_top10(self, idx):
+        """更新 Top10 窗口选中高亮并滚动"""
+        if not hasattr(self, "_concept_top10_win") or not self._concept_top10_win:
+            return
+        win = self._concept_top10_win
+        canvas = win._canvas_top10
+        scroll_frame = win._content_frame_top10
+
+        # 清除所有高亮
+        for lbl in self._top10_label_widgets:
+            lbl.configure(bg=win.cget("bg"))
+
+        # 高亮选中
+        if 0 <= idx < len(self._top10_label_widgets):
+            lbl = self._top10_label_widgets[idx]
+            self._top10_selected_index = idx
+            lbl.configure(bg="lightblue")
+            self._concept_top10_selected_index = idx
+
+            # 滚动 Canvas 使当前 Label 可见
+            canvas.update_idletasks()
+            scroll_frame.update_idletasks()
+            lbl_top = lbl.winfo_y()
+            lbl_bottom = lbl_top + lbl.winfo_height()
+            view_top = canvas.canvasy(0)
+            view_bottom = view_top + canvas.winfo_height()
+            if lbl_top < view_top:
+                canvas.yview_moveto(lbl_top / max(1, scroll_frame.winfo_height()))
+            elif lbl_bottom > view_bottom:
+                canvas.yview_moveto((lbl_bottom - canvas.winfo_height()) / max(1, scroll_frame.winfo_height()))
+
+
+    def show_concept_top10_window(self, concept_name):
+        """
+        显示指定概念的前10放量上涨股（复用窗口；支持滚轮/键盘/点击）
+        """
+        # import tkinter as tk
+        # from tkinter import ttk, messagebox
+
+        if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
+            messagebox.showwarning("数据错误", "df_all 数据为空，无法筛选概念股票")
+            return
+
+        query_expr = f'category.str.contains("{concept_name}", na=False)'
+        try:
+            df_concept = self.df_all.query(query_expr)
+        except Exception as e:
+            messagebox.showerror("筛选错误", f"筛选表达式错误: {query_expr}\n{e}")
+            return
+
+        if df_concept.empty:
+            messagebox.showinfo("概念详情", f"概念【{concept_name}】暂无匹配股票")
+            return
+
+        df_concept = df_concept.copy()
+        if "percent" in df_concept.columns and "volume" in df_concept.columns:
+            df_concept = df_concept[df_concept["percent"] > 0]
+            df_concept = df_concept.sort_values("volume", ascending=False).head(10)
+        else:
+            messagebox.showinfo("概念详情", "df_all 缺少 'percent' 或 'volume' 列")
+            return
+
+        # --- 复用 ---
+        try:
+            if getattr(self, "_concept_top10_win", None) and self._concept_top10_win.winfo_exists():
+                win = self._concept_top10_win
+                win.deiconify()
+                win.lift()
+                for w in win._content_frame_top10.winfo_children():
+                    w.destroy()
+                self._fill_concept_top10_content(win, concept_name, df_concept)
+                win._canvas_top10.yview_moveto(0)
+                win._content_frame_top10.focus_set()
+                return
+        except Exception:
+            self._concept_top10_win = None
+
+        # --- 新建窗口 ---
+        win = tk.Toplevel(self)
+        self._concept_top10_win = win
+        win.title(f"{concept_name} 概念前10放量上涨股")
+        try:
+            self.load_window_position(win, "concept_top10_window", default_width=300, default_height=320)
+        except Exception:
+            win.geometry("300x320")
+
+        frame = tk.Frame(win)
+        frame.pack(fill="both", expand=True)
+
+        # Canvas + Scrollbar
+        canvas = tk.Canvas(frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        # 使用 grid 布局保证 scrollbar 永远可见
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        # 让 frame 自适应
+        frame.grid_rowconfigure(0, weight=1)
+        frame.grid_columnconfigure(0, weight=1)
+
+        # 内部滚动内容
+        scroll_frame = tk.Frame(canvas)
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+
+        def on_frame_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        scroll_frame.bind("<Configure>", on_frame_configure)
+
+        def _on_mousewheel(event):
+            delta = 0
+            if hasattr(event, 'delta'):
+                delta = int(-1 * (event.delta / 120))  # Windows / Mac
+            elif event.num == 4:  # Linux 向上
+                delta = -1
+            elif event.num == 5:  # Linux 向下
+                delta = 1
+            canvas.yview_scroll(delta, "units")
+
+        canvas.bind("<MouseWheel>", _on_mousewheel)   # Windows / Mac
+        canvas.bind("<Button-4>", _on_mousewheel)     # Linux
+        canvas.bind("<Button-5>", _on_mousewheel)     # Linux
+
+        # # --- 鼠标滚轮 ---
+        # # def _on_mousewheel(e): canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        def _bind_scroll(): canvas.bind("<MouseWheel>", _on_mousewheel)
+        def _unbind_scroll(): canvas.unbind("<MouseWheel>")
+
+        # scroll_frame.bind("<Enter>", lambda e: _bind_scroll())
+        # scroll_frame.bind("<Leave>", lambda e: _unbind_scroll())
+
+        # ✅ 改成独立引用
+        win._canvas_top10 = canvas
+        win._content_frame_top10 = scroll_frame
+        win._unbind_mousewheel_top10 = _unbind_scroll
+
+        canvas.bind("<Up>", self._on_key_top10)
+        canvas.bind("<Down>", self._on_key_top10)
+        canvas.bind("<Prior>", self._on_key_top10)
+        canvas.bind("<Next>", self._on_key_top10)
+        win.after_idle(lambda: canvas.focus_set())
+
+        # 填充内容
+        self._fill_concept_top10_content(win, concept_name, df_concept)
+
+        # 关闭事件
+        def _on_close():
+            try:
+                self.save_window_position(win, "concept_top10_window")
+            except Exception:
+                pass
+            _unbind_scroll()
+            win.destroy()
+            self._concept_top10_win = None
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
+    def _fill_concept_top10_content(self, win, concept_name, df_concept):
+        """
+        在概念Top10窗口中填充内容（安全引用独立）
+        """
+        # import tkinter as tk
+        # from tkinter import messagebox
+
+        frame = win._content_frame_top10
+
+        tk.Label(
+            frame,
+            text=f"📈 {concept_name} 概念前10放量上涨股",
+            font=("微软雅黑", 11, "bold"),
+            fg="blue"
+        ).pack(anchor="w", pady=(0, 8))
+
+        self._top10_label_widgets = []
+        self._top10_selected_index = 0
+
+        for idx, (code, row) in enumerate(df_concept.iterrows()):
+            # code = row.get("code", "")
+            name = row.get("name", "")
+            percent = row.get("percent", 0)
+            volume = row.get("volume", 0)
+            text = f"{code}  {name:<6}  涨幅:{percent:.2f}%  量:{volume:.2f}"
+
+            lbl = tk.Label(frame, text=text, anchor="w", font=("微软雅黑", 9), cursor="hand2")
+            lbl.pack(anchor="w", padx=8, pady=2, fill="x")
+            lbl._code = code
+            lbl._concept = concept_name
+            lbl.bind("<Button-1>", lambda e, c=code, i=idx: self._on_label_on_code_click(c, i))
+            lbl.bind("<Double-Button-1>", lambda e, c=code, i=idx: self._on_label_double_click(c, i))
+            lbl.bind("<Button-3>", lambda e, c=code, i=idx: self._on_label_right_click(c, i))
+            self._top10_label_widgets.append(lbl)
+
+        btn_frame = tk.Frame(frame)
+        btn_frame.pack(fill="x", pady=6)
+        def _copy_expr():
+            import pyperclip
+            q = f'category.str.contains("{concept_name}", na=False)'
+            pyperclip.copy(q)
+            # messagebox.showinfo("已复制", f"筛选条件：\n{q}")
+            toast_message(self,f"已复制筛选条件：{q}")
+        tk.Button(btn_frame, text="复制筛选表达式", command=_copy_expr).pack(side="left", padx=6)
+
+        if self._top10_label_widgets:
+            self._top10_label_widgets[0].configure(bg="lightblue")
+
+        try:
+            win._canvas_top10.yview_moveto(0)
+            frame.focus_set()
+        except Exception:
+            pass
+
+
+    def _on_label_double_click(self, code, idx):
+        """
+        双击股票标签时，显示该股票所属概念详情（复用 show_concept_detail_window）
+        """
+        try:
+            concept_name = getattr(self._label_widgets[idx], "_concept", None)
+            if not concept_name:
+                messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
+                return
+
+            self.show_concept_top10_window(concept_name)
+
+
+        except Exception as e:
+            print("获取概念详情失败：", e)
+
+
+    # def _on_label_double_click(self, code, idx):
+    #     """
+    #     双击股票标签时，显示该股票所属概念详情（前10放量上涨股）
+    #     """
+    #     try:
+    #         concept_name = getattr(self._label_widgets[idx], "_concept", None)
+    #         if not concept_name:
+    #             messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
+    #             return
+
+    #         if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
+    #             messagebox.showwarning("数据错误", "df_all 数据为空，无法筛选概念股票")
+    #             return
+
+    #         # === 用 query 直接筛选该概念股票 ===
+    #         query_expr = f'category.str.contains("{concept_name}", na=False)'
+    #         try:
+    #             df_concept = self.df_all.query(query_expr)
+    #         except Exception as e:
+    #             messagebox.showerror("筛选错误", f"筛选表达式错误: {query_expr}\n{e}")
+    #             return
+
+    #         if df_concept.empty:
+    #             messagebox.showinfo("概念详情", f"概念【{concept_name}】暂无匹配股票")
+    #             return
+
+    #         # === 取放量上涨的前10 ===
+    #         df_concept = df_concept.copy()
+    #         if "percent" in df_concept.columns and "volume" in df_concept.columns:
+    #             df_concept = df_concept[df_concept["percent"] > 0]
+    #             df_concept = df_concept.sort_values("volume", ascending=False).head(10)
+    #         else:
+    #             messagebox.showinfo("概念详情", "df_all 缺少 'percent' 或 'volume' 列")
+    #             return
+
+    #         # === 弹窗显示 ===
+    #         win = tk.Toplevel(self._concept_win)
+    #         win.title(f"{concept_name} 概念前10放量上涨股")
+    #         win.geometry("300x320")
+    #         win.transient(self._concept_win)
+
+    #         tk.Label(
+    #             win, 
+    #             text=f"📈 {concept_name} 概念前10放量上涨股", 
+    #             font=("微软雅黑", 11, "bold"), 
+    #             fg="blue"
+    #         ).pack(pady=5)
+
+    #         frame = tk.Frame(win)
+    #         frame.pack(fill="both", expand=True, padx=10)
+
+    #         # === 每只股票一行显示 ===
+    #         # resample = self.resample_combo.get().strip()
+    #         # ratio_t = cct.get_work_time_ratio(resample=resample)
+    #         for code, row in df_concept.iterrows():
+    #             # name2 = row.get("code", "")
+    #             name = row.get("name", "")
+    #             percent = row.get("percent", 0)
+    #             volume = row.get("volume", 0)
+    #             # volume = row.get("volume", 0) / ratio_t * row.get("last6vol",0)
+
+    #             # text = f"{code}  {name:<6}  涨幅:{percent:.2f}%  量:{volume/1e8:.2f}亿"
+    #             text = f"{code} {name:<6}  涨幅:{percent:.2f}%  量:{volume:.2f}倍"
+    #             lbl = tk.Label(frame, text=text, anchor="w", font=("微软雅黑", 9), cursor="hand2")
+    #             lbl.pack(anchor="w")
+
+    #             lbl.bind("<Button-1>", lambda e, c=code: self._on_label_on_code_click(c))
+
+    #         # === 底部功能 ===
+    #         btn_frame = tk.Frame(win)
+    #         btn_frame.pack(fill="x", pady=8)
+
+    #         def copy_expr():
+    #             import pyperclip
+    #             pyperclip.copy(query_expr)
+    #             messagebox.showinfo("已复制", f"筛选条件：\n{query_expr}")
+
+    #         tk.Button(btn_frame, text="复制筛选表达式", command=copy_expr).pack(side="left", padx=10)
+
+    #     except Exception as e:
+    #         print("获取概念详情失败：", e)
+
+
+    def _on_label_double_click_copy(self, code, idx):
+        """
+        双击股票标签时，显示该股票的概念详情
+        """
+        try:
+            # 假设 self.get_concept_by_code(code) 可返回该股票所属概念列表
+
+            # --- 调用 on_code_click ---
+            concepts = getattr(self._label_widgets[idx], "_concept", None)
+            # if concepts:
+            #     self.on_code_click(code)
+            if not concepts:
+                messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
+                return
+
+            # text = "\n".join(concepts)
+            text = f'category.str.contains("{concepts.strip()}")'
+            pyperclip.copy(text)
+            print(f"已复制: {text}")
+            # messagebox.showinfo("概念详情", f"{code} 所属概念：\n{text}")
+        except Exception as e:
+            print("获取概念详情失败：", e)
+
+
+    def _on_label_right_click(self,code ,idx):
+        self._update_selection(idx)
+        stock_code = code
+        if self.push_stock_info(stock_code,self.df_all.loc[stock_code]):
+            # 如果发送成功，更新状态标签
+            self.status_var2.set(f"发送成功: {stock_code}")
+        else:
+            # 如果发送失败，更新状态标签
+            self.status_var2.set(f"发送失败: {stock_code}")
 
     def _on_key(self, event):
         """键盘上下/分页滚动"""
@@ -5006,8 +5561,9 @@ class StockMonitorApp(tk.Tk):
         if code and code == result:
             df_code = self.df_all
         elif code and not (code.isdigit() and len(code) == 6):
-            toast_message(self, "请输入6位数字股票代码")
-            return
+            # toast_message(self, "请输入6位数字股票代码")
+            # return
+            df_code = self.df_all
         elif code and code.isdigit() and len(code) == 6: 
             df_code = self.df_all.loc[[code]]
         else:
