@@ -879,6 +879,8 @@ class Sina:
         if (cct.get_now_time_int() > 915 and cct.get_now_time_int() < 926):
             #            df.rename(columns={'buy': 'close'}, inplace=True)
             df['close'] = df['buy']
+            df['open'] = df['buy']
+            df['high'] = df['buy']
             df['low'] = df['buy']
             df['volume'] = ((df['b1_v'] + df['b2_v'])).map(lambda x: x)
             # df['b1_v'] = ((df['b1_v'] + df['b2_v']) / 100 / 10000).map(lambda x: round(x, 1) + 0.01)
@@ -1097,6 +1099,7 @@ if __name__ == "__main__":
     df =sina.all
     print(len(df))
     print(f"df.loc['002786']: {df.loc['002786']}")
+    print((df[-5:][['open','close']].T))
 
     for ma in ['bj','sh', 'sz', 'cyb', 'kcb','all']:
         # for ma in ['sh']:
