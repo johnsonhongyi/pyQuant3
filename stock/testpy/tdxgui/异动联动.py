@@ -2064,18 +2064,57 @@ def daily_init():
         except Exception as e:
             print("还不能设置日期:", e)
     print("已执行每日开盘初始化")
+    # 自动注册下一天任务
+    schedule_daily_init(root)
+
+# def schedule_daily_init(root):
+#     now = datetime.now()
+#     today_925 = now.replace(hour=9, minute=20, second=0, microsecond=0)
+#     if now > today_925:
+#         # 如果已经过了 9:25，延迟到第二天
+#         # today_925 += timedelta(days=1)
+#         today_925 = get_next_weekday_time(9,20)
+#     delay_ms = int((today_925 - now).total_seconds() * 1000)
+#     root.after(delay_ms, lambda: (daily_init(), start_worker()))
+#     print(f"每日开盘定时初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
+#     status_label3.config(text=f"日初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
+
+# 保存上次的任务ID
+_scheduled_task_id = None
 
 def schedule_daily_init(root):
+    """
+    每日定时初始化任务：
+    - 若已有定时任务，取消旧的，仅保留最后一次注册。
+    - 执行时间为每天 9:20（若当前时间已过，则安排到下一工作日）
+    """
+    global _scheduled_task_id
+
     now = datetime.now()
     today_925 = now.replace(hour=9, minute=20, second=0, microsecond=0)
     if now > today_925:
-        # 如果已经过了 9:25，延迟到第二天
-        # today_925 += timedelta(days=1)
-        today_925 = get_next_weekday_time(9,20)
+        today_925 = get_next_weekday_time(9, 20)
+
     delay_ms = int((today_925 - now).total_seconds() * 1000)
-    root.after(delay_ms, lambda: (daily_init(), start_worker()))
-    print(f"每日开盘定时初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
-    status_label3.config(text=f"日初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
+
+    # --- 防重复：若存在旧任务，先取消 ---
+    if _scheduled_task_id is not None:
+        try:
+            root.after_cancel(_scheduled_task_id)
+            print("🧹 已取消旧的定时任务，准备注册新任务。")
+        except Exception as e:
+            print("⚠️ 取消旧任务失败:", e)
+
+    # --- 注册新任务 ---
+    _scheduled_task_id = root.after(delay_ms, lambda: (daily_init(), start_worker()))
+    print(f"✅ 已注册每日开盘初始化任务: {today_925.strftime('%Y-%m-%d %H:%M')[5:]} (任务ID={_scheduled_task_id})")
+
+    # --- 状态显示 ---
+    try:
+        status_label3.config(text=f"日初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
+    except Exception:
+        pass
+
 # update_queue = queue.Queue()
 
 # def background_worker():
@@ -2121,10 +2160,12 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
         else:
             # status_label3.config(text=f"更新在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
             status_label3.config(text=f"bg延迟在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
+            # schedule_daily_init(root)
             schedule_task('worktime_task',delay_ms,lambda: schedule_worktime_task(tree))
     else:
         print(f"下一次background任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
         print(f"自动更新任务get_stock_changes_background执行于:在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
+        # schedule_daily_init(root)
         status_label3.config(text=f"日更新{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}")
         schedule_task('worktime_task',delay_ms,lambda: schedule_worktime_task(tree))
 

@@ -3705,12 +3705,13 @@ class StockMonitorApp(tk.Tk):
 
     def on_code_click(self, code):
         """点击异动窗口中的股票代码"""
-        self.select_code = code
-        print(f"select_code: {code}")
-        # ✅ 可改为打开详情逻辑，比如：
-        # if hasattr(self, "show_stock_detail"):
-        #     self.show_stock_detail(code)
-        self.sender.send(code)
+        if code != self.select_code:
+            self.select_code = code
+            print(f"select_code: {code}")
+            # ✅ 可改为打开详情逻辑，比如：
+            # if hasattr(self, "show_stock_detail"):
+            #     self.show_stock_detail(code)
+            self.sender.send(code)
 
     # old single
     # def _show_concept_detail_window_Good(self):
@@ -4081,9 +4082,12 @@ class StockMonitorApp(tk.Tk):
         self.select_code = code
         # print(f"select_code: {code}")
         # ✅ 可改为打开详情逻辑，比如：
-        # if hasattr(self, "show_stock_detail"):
-        #     self.show_stock_detail(code)
         self.sender.send(code)
+        if hasattr(self._concept_top10_win, "_canvas_top10"):
+            canvas = self._concept_top10_win._canvas_top10
+            yview = canvas.yview()  # 保存当前滚动条位置
+            self._concept_top10_win._canvas_top10.focus_set()
+            canvas.yview_moveto(yview[0])  # 恢复原位置
 
 
     def _on_key_top10(self, event):
@@ -4278,6 +4282,7 @@ class StockMonitorApp(tk.Tk):
             _unbind_scroll()
             win.destroy()
             self._concept_top10_win = None
+            self._canvas_top10 = None
 
         win.protocol("WM_DELETE_WINDOW", _on_close)
 
@@ -4338,6 +4343,34 @@ class StockMonitorApp(tk.Tk):
             pass
 
 
+    # def _on_label_double_click(self, code, idx):
+    #     """
+    #     双击股票标签时，显示该股票所属概念详情（复用 show_concept_detail_window）
+    #     """
+    #     try:
+    #         concept_name = getattr(self._label_widgets[idx], "_concept", None)
+    #         if not concept_name:
+    #             messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
+    #             return
+
+    #         self.show_concept_top10_window(concept_name)
+    #         # --- 提升窗口层级 & 聚焦 ---
+    #         if hasattr(self, "_concept_top10_win") and self._concept_top10_win:
+    #             win = self._concept_top10_win
+    #             win.lift()          # 🔹 提到最前
+    #             win.focus_force()   # 🔹 把键盘焦点给它
+    #             win.attributes('-topmost', True)   # 🔹 临时置顶
+    #             win.after(300, lambda: win.attributes('-topmost', False))  # 🔹 避免永久置顶
+
+    #             if hasattr(win, "_canvas_top10"):
+    #                 canvas = win._canvas_top10
+    #                 yview = canvas.yview()
+    #                 canvas.focus_set()
+    #                 canvas.yview_moveto(yview[0])  # 恢复滚动位置
+
+    #     except Exception as e:
+    #         print("获取概念详情失败：", e)
+
     def _on_label_double_click(self, code, idx):
         """
         双击股票标签时，显示该股票所属概念详情（复用 show_concept_detail_window）
@@ -4348,94 +4381,46 @@ class StockMonitorApp(tk.Tk):
                 messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
                 return
 
+            # 打开或复用 Top10 窗口
             self.show_concept_top10_window(concept_name)
 
+            if hasattr(self, "_concept_top10_win") and self._concept_top10_win:
+                win = self._concept_top10_win
+
+                # --- 更新标题 ---
+                win.title(f"{concept_name} 概念前10放量上涨股")
+
+                # --- 检查窗口状态 ---
+                try:
+                    state = win.state()
+
+                    # 最小化或被主窗口遮挡
+                    if state == "iconic" or self.is_window_covered_by_main(win):
+                        win.deiconify()      # 恢复窗口
+                        win.lift()           # 提前显示
+                        win.focus_force()    # 聚焦
+                        win.attributes("-topmost", True)
+                        win.after(100, lambda: win.attributes("-topmost", False))
+                    else:
+                        # 没被遮挡但未聚焦
+                        if not win.focus_displayof():
+                            win.lift()
+                            win.focus_force()
+
+                except Exception as e:
+                    print("窗口状态检查失败：", e)
+
+                # --- 恢复 Canvas 滚动位置 ---
+                if hasattr(win, "_canvas_top10"):
+                    canvas = win._canvas_top10
+                    yview = canvas.yview()
+                    canvas.focus_set()
+                    canvas.yview_moveto(yview[0])
 
         except Exception as e:
             print("获取概念详情失败：", e)
 
 
-    # def _on_label_double_click(self, code, idx):
-    #     """
-    #     双击股票标签时，显示该股票所属概念详情（前10放量上涨股）
-    #     """
-    #     try:
-    #         concept_name = getattr(self._label_widgets[idx], "_concept", None)
-    #         if not concept_name:
-    #             messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
-    #             return
-
-    #         if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
-    #             messagebox.showwarning("数据错误", "df_all 数据为空，无法筛选概念股票")
-    #             return
-
-    #         # === 用 query 直接筛选该概念股票 ===
-    #         query_expr = f'category.str.contains("{concept_name}", na=False)'
-    #         try:
-    #             df_concept = self.df_all.query(query_expr)
-    #         except Exception as e:
-    #             messagebox.showerror("筛选错误", f"筛选表达式错误: {query_expr}\n{e}")
-    #             return
-
-    #         if df_concept.empty:
-    #             messagebox.showinfo("概念详情", f"概念【{concept_name}】暂无匹配股票")
-    #             return
-
-    #         # === 取放量上涨的前10 ===
-    #         df_concept = df_concept.copy()
-    #         if "percent" in df_concept.columns and "volume" in df_concept.columns:
-    #             df_concept = df_concept[df_concept["percent"] > 0]
-    #             df_concept = df_concept.sort_values("volume", ascending=False).head(10)
-    #         else:
-    #             messagebox.showinfo("概念详情", "df_all 缺少 'percent' 或 'volume' 列")
-    #             return
-
-    #         # === 弹窗显示 ===
-    #         win = tk.Toplevel(self._concept_win)
-    #         win.title(f"{concept_name} 概念前10放量上涨股")
-    #         win.geometry("300x320")
-    #         win.transient(self._concept_win)
-
-    #         tk.Label(
-    #             win, 
-    #             text=f"📈 {concept_name} 概念前10放量上涨股", 
-    #             font=("微软雅黑", 11, "bold"), 
-    #             fg="blue"
-    #         ).pack(pady=5)
-
-    #         frame = tk.Frame(win)
-    #         frame.pack(fill="both", expand=True, padx=10)
-
-    #         # === 每只股票一行显示 ===
-    #         # resample = self.resample_combo.get().strip()
-    #         # ratio_t = cct.get_work_time_ratio(resample=resample)
-    #         for code, row in df_concept.iterrows():
-    #             # name2 = row.get("code", "")
-    #             name = row.get("name", "")
-    #             percent = row.get("percent", 0)
-    #             volume = row.get("volume", 0)
-    #             # volume = row.get("volume", 0) / ratio_t * row.get("last6vol",0)
-
-    #             # text = f"{code}  {name:<6}  涨幅:{percent:.2f}%  量:{volume/1e8:.2f}亿"
-    #             text = f"{code} {name:<6}  涨幅:{percent:.2f}%  量:{volume:.2f}倍"
-    #             lbl = tk.Label(frame, text=text, anchor="w", font=("微软雅黑", 9), cursor="hand2")
-    #             lbl.pack(anchor="w")
-
-    #             lbl.bind("<Button-1>", lambda e, c=code: self._on_label_on_code_click(c))
-
-    #         # === 底部功能 ===
-    #         btn_frame = tk.Frame(win)
-    #         btn_frame.pack(fill="x", pady=8)
-
-    #         def copy_expr():
-    #             import pyperclip
-    #             pyperclip.copy(query_expr)
-    #             messagebox.showinfo("已复制", f"筛选条件：\n{query_expr}")
-
-    #         tk.Button(btn_frame, text="复制筛选表达式", command=copy_expr).pack(side="left", padx=10)
-
-    #     except Exception as e:
-    #         print("获取概念详情失败：", e)
 
 
     def _on_label_double_click_copy(self, code, idx):
@@ -4490,379 +4475,6 @@ class StockMonitorApp(tk.Tk):
         code = getattr(self._label_widgets[idx], "_code", None)
         if code:
             self.on_code_click(code)
-
-    '''
-    def show_concept_detail_window(self):
-        """弹出详细概念异动窗口（复用+自动刷新+键盘/滚轮+高亮）"""
-        if not hasattr(self, "_last_categories"):
-            return
-
-        # --- 检查窗口是否已存在 ---
-        if getattr(self, "_concept_win", None):
-            try:
-                if self._concept_win.winfo_exists():
-                    win = self._concept_win
-                    win.deiconify()
-                    win.lift()
-                    # 仅清理旧内容区，不销毁窗口结构
-                    for widget in win._content_frame.winfo_children():
-                        widget.destroy()
-                    self.update_concept_detail_content()
-                    return
-                else:
-                    self._concept_win = None
-            except Exception:
-                self._concept_win = None
-
-        win = tk.Toplevel(self)
-        self._concept_win = win
-        win.title("概念异动详情")
-        self.load_window_position(win, "detail_window", default_width=220, default_height=400)
-        win.transient(self)
-
-        # --- 主Frame + Canvas + 滚动 ---
-        frame = tk.Frame(win)
-        frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-        canvas = tk.Canvas(frame, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
-        scroll_frame = tk.Frame(canvas)
-
-        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        scroll_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-        )
-
-        canvas.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        # --- 鼠标滚轮 ---
-        def on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        def bind_mousewheel(event):
-            canvas.bind_all("<MouseWheel>", on_mousewheel)
-            canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
-            canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
-
-        def unbind_mousewheel(event=None):
-            try:
-                canvas.unbind_all("<MouseWheel>")
-                canvas.unbind_all("<Button-4>")
-                canvas.unbind_all("<Button-5>")
-            except Exception:
-                pass
-
-        canvas.bind("<Enter>", bind_mousewheel)
-        canvas.bind("<Leave>", unbind_mousewheel)
-
-        # --- 保存引用 ---
-        win._canvas = canvas
-        win._content_frame = scroll_frame
-        win._unbind_mousewheel = unbind_mousewheel
-
-        # --- 键盘滚动与高亮初始化 ---
-        self._label_widgets = []
-        self._selected_index = 0
-
-        # def update_selection(idx):
-        #     for lbl in self._label_widgets:
-        #         lbl.configure(bg=win.cget("bg"))
-        #     if 0 <= idx < len(self._label_widgets):
-        #         self._label_widgets[idx].configure(bg="lightblue")
-        #         self._selected_index = idx
-        #         # 滚动到可见
-        #         self._label_widgets[idx].update_idletasks()
-        #         scroll_frame.update_idletasks()
-        #         canvas.yview_moveto(self._label_widgets[idx].winfo_y() / max(1, scroll_frame.winfo_height()))
-        def update_selection(idx):
-            for lbl in self._label_widgets:
-                lbl.configure(bg=win.cget("bg"))  # 恢复默认背景
-            if 0 <= idx < len(self._label_widgets):
-                lbl = self._label_widgets[idx]
-                lbl.configure(bg="lightblue")
-                self._selected_index = idx
-
-                # --- 滚动 Canvas 使当前 Label 可见 ---
-                canvas.update_idletasks()
-                scroll_frame.update_idletasks()
-                lbl_top = lbl.winfo_y()
-                lbl_bottom = lbl_top + lbl.winfo_height()
-                view_top = canvas.canvasy(0)
-                view_bottom = view_top + canvas.winfo_height()
-
-                if lbl_top < view_top:
-                    canvas.yview_moveto(lbl_top / max(1, scroll_frame.winfo_height()))
-                elif lbl_bottom > view_bottom:
-                    canvas.yview_moveto((lbl_bottom - canvas.winfo_height()) / max(1, scroll_frame.winfo_height()))
-
-
-        def on_label_click(code, idx):
-            update_selection(idx)
-            self.on_code_click(code)
-
-        def on_key(event):
-            if not self._label_widgets:
-                return
-            idx = self._selected_index
-            if event.keysym == "Up":
-                idx = max(0, idx - 1)
-            elif event.keysym == "Down":
-                idx = min(len(self._label_widgets) - 1, idx + 1)
-            elif event.keysym == "Prior":  # PageUp
-                idx = max(0, idx - 5)
-            elif event.keysym == "Next":   # PageDown
-                idx = min(len(self._label_widgets) - 1, idx + 5)
-            update_selection(idx)
-
-        canvas.bind_all("<Up>", on_key)
-        canvas.bind_all("<Down>", on_key)
-        canvas.bind_all("<Prior>", on_key)
-        canvas.bind_all("<Next>", on_key)
-
-        # --- 关闭窗口 ---
-        def on_close_detail_window():
-            self.save_window_position(win, "detail_window")
-            unbind_mousewheel()
-            try:
-                win.grab_release()
-            except:
-                pass
-            win.destroy()
-            self._concept_win = None
-
-        win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
-
-        # --- 初始内容 ---
-        self.update_concept_detail_content()
-
-
-    def update_concept_detail_content(self):
-        """刷新概念详情窗口内容（后台可调用）"""
-        if not hasattr(self, "_concept_win") or not self._concept_win:
-            return
-        if not self._concept_win.winfo_exists():
-            self._concept_win = None
-            return
-
-        scroll_frame = self._concept_win._content_frame
-
-        # 清空旧内容
-        for widget in scroll_frame.winfo_children():
-            widget.destroy()
-        self._label_widgets = []
-
-        # --- 数据逻辑 ---
-        current_categories = getattr(self, "_last_categories", [])
-        prev_categories = getattr(self, "_prev_categories", [])
-        cat_dict = getattr(self, "_last_cat_dict", {})
-
-        added = [c for c in current_categories if c not in prev_categories]
-        removed = [c for c in prev_categories if c not in current_categories]
-
-        # === 有新增或消失 ===
-        if added or removed:
-            if added:
-                tk.Label(scroll_frame, text="🆕 新增概念", font=("微软雅黑", 11, "bold"), fg="green").pack(anchor="w", pady=(0, 5))
-                for c in added:
-                    tk.Label(scroll_frame, text=c, fg="blue", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
-                    stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)
-                    for code, name, percent, volume in stocks:
-                        lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}", fg="black",
-                                       cursor="hand2", anchor="w")
-                        lbl.pack(anchor="w", padx=6)
-                        idx = len(self._label_widgets)
-                        lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self.on_label_click(cd, i))
-                        self._label_widgets.append(lbl)
-
-            if removed:
-                tk.Label(scroll_frame, text="❌ 消失概念", font=("微软雅黑", 11, "bold"), fg="red").pack(anchor="w", pady=(10, 5))
-                for c in removed:
-                    tk.Label(scroll_frame, text=c, fg="gray", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
-
-        else:
-            # === 无新增/消失时，显示当前前5 ===
-            tk.Label(scroll_frame, text="📊 当前前5概念", font=("微软雅黑", 11, "bold"), fg="blue").pack(anchor="w", pady=(0, 5))
-            for c in current_categories[:5]:
-                tk.Label(scroll_frame, text=c, fg="black", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
-                stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)
-                for code, name, percent, volume in stocks:
-                    lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}", fg="gray",
-                                   cursor="hand2", anchor="w")
-                    lbl.pack(anchor="w", padx=6)
-                    idx = len(self._label_widgets)
-                    lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self.on_label_click(cd, i))
-                    self._label_widgets.append(lbl)
-
-        # --- 默认选中第一条 ---
-        if self._label_widgets:
-            self._selected_index = 0
-            self._label_widgets[0].configure(bg="lightblue")
-
-        # --- 滚动到顶部 ---
-        self._concept_win._canvas.yview_moveto(0)
-
-        # --- 更新上次状态 ---
-        self._prev_categories = list(current_categories)
-    '''
-
-    # 功能OK,没有键盘滚动
-    # def show_concept_detail_window(self):
-    #     """弹出详细概念异动窗口（可复用+自动刷新）"""
-    #     if not hasattr(self, "_last_categories"):
-    #         return
-
-    #     # --- 检查并重建窗口 ---
-    #     if getattr(self, "_concept_win", None):
-    #         try:
-    #             if self._concept_win.winfo_exists():
-    #                 win = self._concept_win
-    #                 win.deiconify()
-    #                 win.lift()
-    #                 # 仅清理旧内容区，不销毁窗口结构
-    #                 for widget in win._content_frame.winfo_children():
-    #                     widget.destroy()
-    #                 self.update_concept_detail_content()
-    #                 return
-    #             else:
-    #                 self._concept_win = None
-    #         except Exception:
-    #             self._concept_win = None
-
-    #     win = tk.Toplevel(self)
-    #     self._concept_win = win
-    #     win.title("概念异动详情")
-    #     self.load_window_position(win, "detail_window", default_width=220, default_height=400)
-    #     win.transient(self)
-
-    #     # --- 主Frame + Canvas ---
-    #     frame = tk.Frame(win)
-    #     frame.pack(fill="both", expand=True, padx=10, pady=10)
-
-    #     canvas = tk.Canvas(frame, highlightthickness=0)
-    #     scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
-    #     scroll_frame = tk.Frame(canvas)
-
-    #     canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
-    #     canvas.configure(yscrollcommand=scrollbar.set)
-
-    #     scroll_frame.bind(
-    #         "<Configure>",
-    #         lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
-    #     )
-
-    #     canvas.pack(side="left", fill="both", expand=True)
-    #     scrollbar.pack(side="right", fill="y")
-
-    #     # --- 滚轮绑定（进入/离开自动启停） ---
-    #     def on_mousewheel(event):
-    #         canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-    #     def bind_mousewheel(event):
-    #         canvas.bind_all("<MouseWheel>", on_mousewheel)
-    #         canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
-    #         canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
-
-    #     def unbind_mousewheel(event=None):
-    #         try:
-    #             canvas.unbind_all("<MouseWheel>")
-    #             canvas.unbind_all("<Button-4>")
-    #             canvas.unbind_all("<Button-5>")
-    #         except Exception:
-    #             pass
-
-    #     canvas.bind("<Enter>", bind_mousewheel)
-    #     canvas.bind("<Leave>", unbind_mousewheel)
-
-    #     # --- 保存引用 ---
-    #     win._canvas = canvas
-    #     win._content_frame = scroll_frame
-    #     win._unbind_mousewheel = unbind_mousewheel
-
-    #     # --- 关闭事件 ---
-    #     def on_close_detail_window():
-    #         self.save_window_position(win, "detail_window")
-    #         unbind_mousewheel()
-    #         try:
-    #             win.grab_release()
-    #         except:
-    #             pass
-    #         win.destroy()
-    #         self._concept_win = None
-
-    #     win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
-
-    #     # --- 初始化内容 ---
-    #     self.update_concept_detail_content()
-
-
-    # def update_concept_detail_content(self):
-    #     """刷新概念详情窗口内容（后台可调用）"""
-    #     if not hasattr(self, "_concept_win") or not self._concept_win:
-    #         return
-    #     if not self._concept_win.winfo_exists():
-    #         self._concept_win = None
-    #         return
-
-    #     scroll_frame = self._concept_win._content_frame
-
-    #     # 清空旧内容
-    #     for widget in scroll_frame.winfo_children():
-    #         widget.destroy()
-
-    #     # --- 数据逻辑 ---
-    #     current_categories = getattr(self, "_last_categories", [])
-    #     prev_categories = getattr(self, "_prev_categories", [])
-    #     cat_dict = getattr(self, "_last_cat_dict", {})
-
-    #     added = [c for c in current_categories if c not in prev_categories]
-    #     removed = [c for c in prev_categories if c not in current_categories]
-
-    #     # === 有新增或消失 ===
-    #     if added or removed:
-    #         if added:
-    #             tk.Label(scroll_frame, text="🆕 新增概念", font=("微软雅黑", 11, "bold"), fg="green").pack(anchor="w", pady=(0, 5))
-    #             for c in added:
-    #                 tk.Label(scroll_frame, text=c, fg="blue", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
-    #                 # for code, name in cat_dict.get(c, []):
-    #                 #     lbl = tk.Label(scroll_frame, text=f"  {code} {name}", fg="black", cursor="hand2")
-    #                 #     lbl.pack(anchor="w", padx=25)
-    #                 #     lbl.bind("<Button-1>", lambda e, cd=code: self.on_code_click(cd))
-
-    #                 # 按 percent 排序，降序
-    #                 stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)
-    #                 for code, name, percent, volume in stocks:
-    #                     lbl = tk.Label(scroll_frame, text=f"  {code} {name}  {percent:.2f}%  {volume}", fg="black", cursor="hand2")
-    #                     lbl.pack(anchor="w", padx=12)
-    #                     lbl.bind("<Button-1>", lambda e, cd=code: self.on_code_click(cd))
-
-    #         if removed:
-    #             tk.Label(scroll_frame, text="❌ 消失概念", font=("微软雅黑", 11, "bold"), fg="red").pack(anchor="w", pady=(10, 5))
-    #             for c in removed:
-    #                 tk.Label(scroll_frame, text=c, fg="gray", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
-    #     else:
-    #         # === 无新增/消失时，显示当前前5 ===
-    #         tk.Label(scroll_frame, text="📊 当前前5概念", font=("微软雅黑", 11, "bold"), fg="blue").pack(anchor="w", pady=(0, 5))
-    #         for c in current_categories[:5]:
-    #             tk.Label(scroll_frame, text=c, fg="black", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
-    #             # for code, name in cat_dict.get(c, []):
-    #             #     lbl = tk.Label(scroll_frame, text=f"  {code} {name}", fg="gray", cursor="hand2")
-    #             #     lbl.pack(anchor="w", padx=25)
-    #             #     lbl.bind("<Button-1>", lambda e, cd=code: self.on_code_click(cd))
-    #             stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)
-    #             for code, name, percent, volume in stocks:
-    #                 lbl = tk.Label(scroll_frame, text=f"  {code} {name}  {percent:.2f}%  {volume}", fg="gray", cursor="hand2")
-    #                 lbl.pack(anchor="w", padx=12)
-    #                 lbl.bind("<Button-1>", lambda e, cd=code: self.on_code_click(cd))
-
-    #     # --- 滚动到顶部 ---
-    #     self._concept_win._canvas.yview_moveto(0)
-
-    #     # --- 更新状态 ---
-    #     self._prev_categories = list(current_categories)
 
     def auto_refresh_detail_window(self):
         # ... 逻辑更新 _last_categories / _last_cat_dict ...
@@ -4952,10 +4564,12 @@ class StockMonitorApp(tk.Tk):
             #     continue
 
             # index 或 str 操作条件特殊保留
-            # if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 or cond.find('or') >= 0:
-            if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 :
-                valid_conditions.append(cond_clean)
-                continue
+            # if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 :
+                # if not any(bp.strip('() ').strip() == cond_clean for bp in bracket_patterns):
+            if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 or cond.find('or') >= 0:
+                if not any(bp.strip('() ').strip() == cond_clean for bp in bracket_patterns):
+                    valid_conditions.append(cond_clean)
+                    continue
 
             # 提取条件中的列名
             cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
@@ -7765,92 +7379,235 @@ class ColumnSetManager(tk.Toplevel):
             pass
 
     def _start_drag(self, event, idx):
-        # 记录拖拽开始
+        """开始拖拽"""
         widget = event.widget
         widget.lift()
-        self._drag_data["widget"] = widget
-        self._drag_data["start_x"] = event.x_root
-        self._drag_data["start_y"] = event.y_root
-        # find index of widget in current_set
-        # safe mapping: find by widget reference in _tag_widgets
-        for info in getattr(self, "_tag_widgets", []):
-            if info["widget"] == widget:
-                self._drag_data["idx"] = info["idx"]
-                print(f'_start_drag')
-                break
+        self._drag_data = {
+            "widget": widget,
+            "start_x": event.x_root,
+            "start_y": event.y_root,
+            "idx": idx,
+        }
+
+        # --- 安全创建提示线 ---
+        try:
+            if not hasattr(self, "_insert_line") or not self._insert_line.winfo_exists() \
+                    or self._insert_line.master != self.current_frame:
+                self._insert_line = tk.Frame(self.current_frame, bg="#0078d7", width=2, height=26)
+        except Exception:
+            self._insert_line = tk.Frame(self.current_frame, bg="#0078d7", width=2, height=26)
+
+        try:
+            self._insert_line.place_forget()
+        except Exception:
+            pass
+
+        print(f"_start_drag {idx}")
+
 
     def _on_drag(self, event):
+        """拖拽中"""
         lbl = self._drag_data.get("widget")
         if not lbl:
             return
-        # move label with cursor (relative to current_frame)
+
+        # --- 移动标签跟随光标 ---
         frame_x = self.current_frame.winfo_rootx()
         frame_y = self.current_frame.winfo_rooty()
         new_x = event.x_root - frame_x - 10
         new_y = event.y_root - frame_y - 8
+
         try:
             lbl.place(x=new_x, y=new_y)
         except Exception:
-            pass  # might be destroyed during rapid resize
+            return
+
+        # --- 计算插入位置 ---
+        drop_cx = event.x_root - frame_x
+        drop_cy = event.y_root - frame_y
+        centers = []
+
+        for info in getattr(self, "_tag_widgets", []):
+            w = info["widget"]
+            if not w.winfo_exists() or w is lbl:
+                continue
+            cx = w.winfo_x() + info["w"] / 2
+            cy = w.winfo_y() + 14  # 行中心
+            centers.append((cx, cy, w, info["idx"]))
+
+        if not centers:
+            if hasattr(self, "_insert_line") and self._insert_line.winfo_exists():
+                self._insert_line.place_forget()
+            return
+
+        # --- 找最近标签 ---
+        centers.sort(key=lambda x: ((x[0] - drop_cx) ** 2 + (x[1] - drop_cy) ** 2))
+        nearest_cx, nearest_cy, nearest_widget, nearest_idx = centers[0]
+
+        # 判断插入线位置（在前或在后）
+        if drop_cx < nearest_cx:
+            x_line = nearest_widget.winfo_x() - 2
+            y_line = nearest_widget.winfo_y()
+        else:
+            x_line = nearest_widget.winfo_x() + nearest_widget.winfo_width() + 2
+            y_line = nearest_widget.winfo_y()
+
+        # --- 显示插入提示线 ---
+        try:
+            if hasattr(self, "_insert_line") and self._insert_line.winfo_exists():
+                self._insert_line.place(x=x_line, y=y_line)
+                self._insert_line.lift()
+        except Exception:
+            pass
+
 
     def _end_drag(self, event):
+        """拖拽结束"""
         lbl = self._drag_data.get("widget")
         orig_idx = self._drag_data.get("idx")
+
+        # 隐藏插入线
+        try:
+            if hasattr(self, "_insert_line") and self._insert_line.winfo_exists():
+                self._insert_line.place_forget()
+        except Exception:
+            pass
+
         if not lbl or orig_idx is None:
             self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
             return
 
-        # get drop x relative to frame
-        try:
-            frame_x = self.current_frame.winfo_rootx()
-            drop_x = event.x_root - frame_x
-        except Exception:
-            drop_x = lbl.winfo_x()
+        # --- 计算拖放位置 ---
+        frame_x = self.current_frame.winfo_rootx()
+        frame_y = self.current_frame.winfo_rooty()
+        drop_cx = event.x_root - frame_x
+        drop_cy = event.y_root - frame_y
 
-        # compute new index based on centers of existing widgets (excluding dragged one)
         centers = []
         for info in getattr(self, "_tag_widgets", []):
             w = info["widget"]
-            if w is lbl:
+            if not w.winfo_exists() or w is lbl:
                 continue
-            # current position
-            try:
-                cx = w.winfo_x() + info["w"]/2
-            except Exception:
-                cx = info["x"] + info["w"]/2
-            centers.append((cx, info["idx"]))
+            cx = w.winfo_x() + info["w"] / 2
+            cy = w.winfo_y() + 14
+            centers.append((cx, cy, info["idx"]))
 
-        # find insertion position
-        new_idx = orig_idx
-        if centers:
-            # sort centers by x
-            centers_sorted = sorted(centers, key=lambda x: x[0])
-            inserted = False
-            for i, (cx, idx_ref) in enumerate(centers_sorted):
-                if drop_x < cx:
-                    new_idx = i
-                    inserted = True
-                    break
-            if not inserted:
-                new_idx = len(centers_sorted)
-        else:
+        if not centers:
             new_idx = 0
+        else:
+            centers.sort(key=lambda x: ((x[0] - drop_cx) ** 2 + (x[1] - drop_cy) ** 2))
+            nearest_cx, nearest_cy, nearest_idx = centers[0]
 
-        # clamp and adjust relative to original
-        if new_idx > orig_idx:
-            # when removing orig element index shifts left by 1
-            new_idx = new_idx
-        # apply reorder to current_set
-        try:
-            item = self.current_set.pop(orig_idx)
-            self.current_set.insert(new_idx, item)
-        except Exception:
-            pass
+            if drop_cx < nearest_cx:
+                new_idx = nearest_idx
+            else:
+                new_idx = nearest_idx + 1
 
-        # reset drag data and refresh tags
-        print(f'_end_drag')
+            new_idx = max(0, min(len(self.current_set), new_idx))
+
+        # --- 调整顺序 ---
+        if new_idx != orig_idx:
+            try:
+                item = self.current_set.pop(orig_idx)
+                if new_idx > orig_idx:
+                    new_idx -= 1  # 因 pop 导致右移
+                self.current_set.insert(new_idx, item)
+            except Exception as e:
+                print("Reorder error:", e)
+
+        # print(f"drag: {orig_idx} → {new_idx}")
+
+        # --- 清理 & 刷新 ---
         self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
         self.after(100, self.refresh_current_tags)
+
+
+
+    # def _start_drag(self, event, idx):
+    #     # 记录拖拽开始
+    #     widget = event.widget
+    #     widget.lift()
+    #     self._drag_data["widget"] = widget
+    #     self._drag_data["start_x"] = event.x_root
+    #     self._drag_data["start_y"] = event.y_root
+    #     # find index of widget in current_set
+    #     # safe mapping: find by widget reference in _tag_widgets
+    #     for info in getattr(self, "_tag_widgets", []):
+    #         if info["widget"] == widget:
+    #             self._drag_data["idx"] = info["idx"]
+    #             print(f'_start_drag')
+    #             break
+
+    # def _on_drag(self, event):
+    #     lbl = self._drag_data.get("widget")
+    #     if not lbl:
+    #         return
+    #     # move label with cursor (relative to current_frame)
+    #     frame_x = self.current_frame.winfo_rootx()
+    #     frame_y = self.current_frame.winfo_rooty()
+    #     new_x = event.x_root - frame_x - 10
+    #     new_y = event.y_root - frame_y - 8
+    #     try:
+    #         lbl.place(x=new_x, y=new_y)
+    #     except Exception:
+    #         pass  # might be destroyed during rapid resize
+
+    # def _end_drag(self, event):
+    #     lbl = self._drag_data.get("widget")
+    #     orig_idx = self._drag_data.get("idx")
+    #     if not lbl or orig_idx is None:
+    #         self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
+    #         return
+
+    #     # 获取拖动中心点（相对 current_frame）
+    #     frame_x = self.current_frame.winfo_rootx()
+    #     frame_y = self.current_frame.winfo_rooty()
+    #     drop_cx = event.x_root - frame_x
+    #     drop_cy = event.y_root - frame_y
+
+    #     # 收集所有其他标签的中心坐标
+    #     centers = []
+    #     for info in getattr(self, "_tag_widgets", []):
+    #         w = info["widget"]
+    #         if not w.winfo_exists() or w is lbl:
+    #             continue
+    #         try:
+    #             cx = w.winfo_x() + info["w"]/2
+    #             cy = w.winfo_y() + 14  # 行高一半
+    #         except Exception:
+    #             continue
+    #         centers.append((cx, cy, info["idx"]))
+
+    #     if not centers:
+    #         new_idx = 0
+    #     else:
+    #         # 计算拖动点与各标签中心的距离（欧式距离）
+    #         centers.sort(key=lambda x: ((x[0]-drop_cx)**2 + (x[1]-drop_cy)**2))
+    #         nearest_cx, nearest_cy, nearest_idx = centers[0]
+
+    #         # 判断相对方向决定插在前还是后
+    #         if drop_cx < nearest_cx:
+    #             new_idx = nearest_idx
+    #         else:
+    #             new_idx = nearest_idx + 1
+
+    #         # 边界限制
+    #         new_idx = max(0, min(len(self.current_set)-1, new_idx))
+
+    #     # 如果有移动，调整顺序
+    #     if new_idx != orig_idx:
+    #         try:
+    #             item = self.current_set.pop(orig_idx)
+    #             self.current_set.insert(new_idx, item)
+    #         except Exception as e:
+    #             print("Reorder error:", e)
+
+    #     # print(f"drag: {orig_idx} -> {new_idx}")
+
+    #     # 重置 & 刷新
+    #     self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
+    #     self.after(100, self.refresh_current_tags)
+
 
     # ---------------------------
     # 已保存组合管理
@@ -7927,7 +7684,9 @@ class ColumnSetManager(tk.Toplevel):
             toast_message(self, "当前组合为空")
             return
         # name = simpledialog.askstring("保存组合", "请输入组合名称:")
-        name = self.askstring_at_parent(self.main,"保存组合", "请输入组合名称:")
+        # 取当前组合名称（或默认空字符串）
+        current_name = getattr(self, "current_set_name", "") or ""
+        name = self.askstring_at_parent(self.main,"保存组合", "请输入组合名称:",initialvalue=current_name)
 
         if not name:
             return
@@ -7957,6 +7716,10 @@ class ColumnSetManager(tk.Toplevel):
         idx = sel[0]
         data = self.saved_sets[idx]
         self.current_set = list(data.get("cols", []))
+
+        # 保存当前组合名称（新增）
+        self.current_set_name = data.get("name", "")
+
         # sync checkboxes (if visible)
         for col, var in self._chk_vars.items():
             var.set(col in self.current_set)
