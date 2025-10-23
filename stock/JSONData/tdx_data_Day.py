@@ -6135,7 +6135,7 @@ if __name__ == '__main__':
     dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
     print(f'dd : {dd}')
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
-    code='301456'
+    code='000852'
     # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'], end=None, newdays=0, resample='d')
     # print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
     # import ipdb;ipdb.set_trace()
@@ -6145,7 +6145,8 @@ if __name__ == '__main__':
     
     df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d',lastday=None )
     print(f"{code} : {df.loc[:,['boll','lastp1d','ma51d','lastp2d','ma52d','lastp3d','ma53d','lasth1d','lasth2d','lasth3d']][-1:].values}")
-
+    import ipdb;ipdb.set_trace()
+    
     df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
     print(df[['bull_f','bull_s','bullbreak','has_first','status','hold_d','obs_d']].tail(10))
     print(f' d: {ct.Resample_LABELS_Days["d"] } df.ma60d : {df.ma60d[-3:]} \n\n')

@@ -665,15 +665,16 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
 
 # ------------------ 指标计算 ------------------ #
 def calc_indicators(top_all, resample):
-    if cct.get_trade_date_status():
-        for co in ['boll', 'df2']:
-            top_all[co] = list(
-                map(lambda x, y, m, z: z + (1 if (x > y) else 0),
-                    top_all.close.values,
-                    top_all.upper.values,
-                    top_all.llastp.values,
-                    top_all[co].values)
-            )
+    # if cct.get_trade_date_status():
+    #     for co in ['boll', 'df2']:
+    #         top_all[co] = list(
+    #             map(lambda x, y, m, z: z + (1 if (x > y) else 0),
+    #                 top_all.close.values,
+    #                 top_all.upper.values,
+    #                 top_all.llastp.values,
+    #                 top_all[co].values)
+    #         )
+            
     # top_all = top_all[(top_all.df2 > 0) & (top_all.boll > 0)]
     ratio_t = cct.get_work_time_ratio(resample=resample)
     # ratio_t = estimate_virtual_volume_simple()
@@ -930,7 +931,7 @@ class StockMonitorApp(tk.Tk):
         from multiprocessing import Manager
         self.manager = Manager()
         self.global_dict = self.manager.dict()  # 共享字典
-        self.global_dict["resample"] = "3d"
+        self.global_dict["resample"] = 'w'
         self.global_values = cct.GlobalValues(self.global_dict)
         resample = self.global_values.getkey("resample")
         print(f'app init getkey resample:{self.global_values.getkey("resample")}')
@@ -1624,8 +1625,8 @@ class StockMonitorApp(tk.Tk):
         # tk.Button(ctrl_frame, text="测试", command=lambda: self.on_test_code()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="清空", command=lambda: self.clean_search(2)).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="删除", command=lambda: self.delete_search_history(2)).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="监控", command=lambda: self.KLineMonitor_init()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk()).pack(side="left", padx=2)
-
         # # 搜索区（可拉伸）
         # search_frame = tk.Frame(ctrl_frame)
         # search_frame.pack(side="left", fill="x", expand=True, padx=5)
@@ -2646,20 +2647,61 @@ class StockMonitorApp(tk.Tk):
         # print(x,y)
         return x, y
 
-    def on_single_click(self, event):
-        """统一处理 alert_tree 的单击和双击"""
-        sel_row = self.tree.identify_row(event.y)
-        sel_col = self.tree.identify_column(event.x)  # '#1', '#2' ...
+    # def on_single_click(self, event):
+    #     """统一处理 alert_tree 的单击和双击"""
+    #     sel_row = self.tree.identify_row(event.y)
+    #     sel_col = self.tree.identify_column(event.x)  # '#1', '#2' ...
 
-        if not sel_row or not sel_col:
-            return
+    #     if not sel_row or not sel_col:
+    #         return
 
-        values = self.tree.item(sel_row, "values")
+    #     values = self.tree.item(sel_row, "values")
+    #     if not values:
+    #         return
+
+    #     # item = self.tree.item(selected_item[0])
+    #     # values = item.get("values")
+
+    #     # 假设你的 tree 列是 (code, name, price, …)
+    #     stock_info = {
+    #         "code": values[0],
+    #         "name": values[1] if len(values) > 1 else "",
+    #         "extra": values  # 保留整行
+    #     }
+    #     self.selected_stock_info = stock_info
+
+    #     if values:
+    #         # stock_info = self.tree.item(selected_item, 'values')
+    #         stock_code = values[0]
+
+    #         send_tdx_Key = (self.select_code != stock_code)
+    #         self.select_code = stock_code
+
+    #         stock_code = str(stock_code).zfill(6)
+    #         log.info(f'stock_code:{stock_code}')
+    #         # print(f"选中股票代码: {stock_code}")
+    #         if send_tdx_Key and stock_code:
+    #             self.sender.send(stock_code)
+    def on_single_click(self, event=None, values=None):
+        """
+        统一处理 alert_tree 的单击和双击
+        event: Tkinter事件对象（Treeview点击）
+        values: 可选，直接传入行数据（来自 KLineMonitor）
+        """
+        # 如果没有 values，就从 event 里取
+        if values is None and event is not None:
+            sel_row = self.tree.identify_row(event.y)
+            sel_col = self.tree.identify_column(event.x)
+
+            if not sel_row or not sel_col:
+                return
+
+            values = self.tree.item(sel_row, "values")
+            if not values:
+                return
+
         if not values:
             return
-
-        # item = self.tree.item(selected_item[0])
-        # values = item.get("values")
 
         # 假设你的 tree 列是 (code, name, price, …)
         stock_info = {
@@ -2669,18 +2711,18 @@ class StockMonitorApp(tk.Tk):
         }
         self.selected_stock_info = stock_info
 
-        if values:
-            # stock_info = self.tree.item(selected_item, 'values')
-            stock_code = values[0]
+        stock_code = values[0]
 
-            send_tdx_Key = (self.select_code != stock_code)
-            self.select_code = stock_code
+        send_tdx_Key = (getattr(self, "select_code", None) != stock_code)
+        self.select_code = stock_code
 
-            stock_code = str(stock_code).zfill(6)
-            log.info(f'stock_code:{stock_code}')
-            # print(f"选中股票代码: {stock_code}")
-            if send_tdx_Key and stock_code:
-                self.sender.send(stock_code)
+        stock_code = str(stock_code).zfill(6)
+        log.info(f'stock_code:{stock_code}')
+        # print(f"选中股票代码: {stock_code}")
+
+        if send_tdx_Key and stock_code:
+            self.sender.send(stock_code)
+
 
     def is_window_covered_by_main(self, win):
         """
@@ -5273,6 +5315,27 @@ class StockMonitorApp(tk.Tk):
         else:
             self.status_var.set(f"搜索框 {which} 历史中没有: {target}")
 
+    def KLineMonitor_init(self):
+        print("启动K线监控...")
+
+        # # 仅初始化一次监控对象
+        # if not hasattr(self, "kline_monitor"):
+        #     self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=10)
+        # else:
+        #     print("监控已在运行中。")
+
+        print("启动K线监控...")
+        if not hasattr(self, "kline_monitor") or not getattr(self.kline_monitor, "winfo_exists", lambda: False)():
+            self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=10)
+        else:
+            print("监控已在运行中。")
+        # 在这里可以启动你的实时监控逻辑，例如:
+        # 1. 调用获取数据的线程
+        # 2. 计算MACD/BOLL/EMA等指标
+        # 3. 输出买卖点提示、强弱信号
+        # 4. 定期刷新UI 或 控制台输出
+
+
     def write_to_blk(self,append=True):
         if self.current_df.empty:
             return
@@ -7149,12 +7212,19 @@ class ColumnSetManager(tk.Toplevel):
         ttk.Label(right, text="已保存组合").pack(anchor="w", padx=6, pady=(6,0))
         self.sets_listbox = tk.Listbox(right, exportselection=False)
         self.sets_listbox.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        # 单击选中高亮 → 更新当前选中组合名（但不加载）
+        self.sets_listbox.bind("<<ListboxSelect>>", self.on_select_saved_set)
+
         self.sets_listbox.bind("<Double-1>", lambda e: self.load_selected_set())
 
         sets_btns = ttk.Frame(right)
         sets_btns.pack(fill=tk.X, padx=6, pady=(0,6))
         ttk.Button(sets_btns, text="加载", command=self.load_selected_set).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(sets_btns, text="删除", command=self.delete_selected_set).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+
+        self.lbl_current_set = ttk.Label(right, text="当前选中: (无)")
+        self.lbl_current_set.pack(anchor="w", padx=6, pady=(0,4))
+
 
         # 底部按钮（全宽）
         bottom = ttk.Frame(self)
@@ -7709,6 +7779,21 @@ class ColumnSetManager(tk.Toplevel):
         # 回调主视图更新列
         toast_message(self, f"组合 {name} 已保存")
 
+    def on_select_saved_set(self, event):
+        sel = self.sets_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        data = self.saved_sets[idx]
+        self.current_set_name = data.get("name", "")
+
+        # 可选：在界面上显示当前选择的组合名
+        if hasattr(self, "lbl_current_set"):
+            self.lbl_current_set.config(text=f"当前选中: {self.current_set_name}")
+        else:
+            print(f"选中组合: {self.current_set_name}")
+
+
     def load_selected_set(self):
         sel = self.sets_listbox.curselection()
         if not sel:
@@ -7796,6 +7881,152 @@ class ColumnSetManager(tk.Toplevel):
             var.set(col in self.current_set)
         self.refresh_current_tags()
         toast_message(self, "已恢复默认组合")
+
+# ========== 信号检测函数 ==========
+def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    if df.empty:
+        return df
+
+    if "code" not in df.columns:
+        df["code"] = df.index.astype(str).str.zfill(6)  # 补齐6位  # 如果没有code列，用name占位（最好是实际code）
+
+    df["signal"] = ""
+    df["emotion"] = "中性"
+
+    # 买入逻辑
+    buy_cond = (
+        (df["now"] > df["ma5d"]) &
+        (df["ma5d"] > df["ma10d"]) &
+        (df["macddif"] > df["macddea"]) &
+        (df["rsi"] < 70) &
+        ((df["now"] > df["upperL"]) | (df["now"] > df["upper1"]))
+    )
+
+    # 卖出逻辑
+    sell_cond = (
+        (df["now"] < df["ma10d"]) &
+        (df["macddif"] < df["macddea"]) &
+        (df["rsi"] > 50) &
+        (df["now"] < df["upperL"])
+    )
+
+    df.loc[buy_cond, "signal"] = "BUY"
+    df.loc[sell_cond, "signal"] = "SELL"
+
+    # 情绪判定
+    df.loc[df["vchange"] > 20, "emotion"] = "乐观"
+    df.loc[df["vchange"] < -20, "emotion"] = "悲观"
+
+    return df
+
+
+
+class KLineMonitor(tk.Toplevel):
+    def __init__(self, parent, get_df_func, refresh_interval=3):
+        """
+        parent: 主窗口实例（例如 MainWindow）
+        get_df_func: 返回最新DataFrame的函数（例如 lambda: self.df_all）
+        """
+        super().__init__(parent)
+        self.master = parent     # ✅ 保存主窗口引用，便于回调
+        self.get_df_func = get_df_func
+        self.refresh_interval = refresh_interval
+        self.stop_event = threading.Event()
+
+        self.title("K线趋势实时监控")
+        self.geometry("720x420")
+
+        # ---- 状态栏 ----
+        self.status_label = tk.Label(self, text="监控中...", bg="#eee")
+        self.status_label.pack(fill="x")
+
+        # ---- 表格设置 ----
+        self.tree = ttk.Treeview(self, columns=("code", "name", "now", "signal", "emotion"),
+                                 show="headings", height=20)
+        self.tree.pack(fill=tk.BOTH, expand=True)
+
+        for col, text, w in [
+            ("code", "代码", 80),
+            ("name", "名称", 150),
+            ("now", "当前价", 80),
+            ("signal", "信号", 80),
+            ("emotion", "情绪", 100)
+        ]:
+            self.tree.heading(col, text=text)
+            self.tree.column(col, width=w, anchor="center")
+
+
+        self.tree.tag_configure("buy", background="#d0f5d0")    # 绿色
+        self.tree.tag_configure("sell", background="#f5d0d0")   # 红色
+        self.tree.tag_configure("neutral", background="#f0f0f0")# 灰色
+
+        # ---- 绑定点击事件 ----
+        self.tree.bind("<Button-1>", self.on_tree_click)
+
+        # ---- 启动监控线程 ----
+        threading.Thread(target=self.refresh_loop, daemon=True).start()
+
+        self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def on_tree_click(self, event):
+        """表格单击事件（可回调主窗口）"""
+        try:
+            item_id = self.tree.identify_row(event.y)
+            if not item_id:
+                return
+            values = self.tree.item(item_id, "values")
+            stock_code = values[0] if len(values) > 0 else None
+
+            print(f"[Monitor] 点击了 {stock_code}")
+
+            # ✅ 如果主窗口有 on_single_click 方法，则调用它
+            if hasattr(self.master, "on_single_click"):
+                # self.master.on_single_click(name)
+                send_tdx_Key = (getattr(self.master, "select_code", None) != stock_code)
+                self.master.select_code = stock_code
+
+                stock_code = str(stock_code).zfill(6)
+                # print(f"选中股票代码: {stock_code}")
+
+                if send_tdx_Key and stock_code:
+                    self.master.sender.send(stock_code)
+        except Exception as e:
+            print(f"[Monitor] 点击处理错误: {e}")
+
+    def refresh_loop(self):
+        """后台刷新循环"""
+        while not self.stop_event.is_set():
+            try:
+                df = self.get_df_func()
+                if df is not None and not df.empty:
+                    df = detect_signals(df)
+                    self.after(0, lambda d=df: self.update_table(d))
+            except Exception as e:
+                print("[Monitor] 更新错误:", e)
+            time.sleep(self.refresh_interval)
+
+    def update_table(self, df):
+        """更新表格内容"""
+        self.tree.delete(*self.tree.get_children())
+        for _, r in df.iterrows():
+            tag = "neutral"
+            if r["signal"] == "BUY":
+                tag = "buy"
+            elif r["signal"] == "SELL":
+                tag = "sell"
+            self.tree.insert(
+                "", tk.END,
+                values=(r.get("code", ""), r.get("name", ""), f"{r.get('now', 0):.2f}", r.get("signal", ""), r.get("emotion", "")),
+                tags=(tag,)
+            )
+
+    def on_close(self):
+        self.stop_event.set()
+        self.destroy()
+        if hasattr(self.master, "kline_monitor"):
+            self.master.kline_monitor = None
+
 
 def test_single_thread():
     import queue
