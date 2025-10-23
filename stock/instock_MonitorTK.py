@@ -5326,14 +5326,21 @@ class StockMonitorApp(tk.Tk):
 
         print("启动K线监控...")
         if not hasattr(self, "kline_monitor") or not getattr(self.kline_monitor, "winfo_exists", lambda: False)():
-            self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=10)
+            self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=15)
         else:
             print("监控已在运行中。")
             # 前置窗口
-            self.kline_monitor.lift()                # 提升窗口层级
-            self.kline_monitor.attributes('-topmost', True)  # 暂时置顶
-            self.kline_monitor.focus_force()         # 获取焦点
-            self.kline_monitor.attributes('-topmost', False) # 取消置顶
+            # self.kline_monitor.lift()                # 提升窗口层级
+            # self.kline_monitor.attributes('-topmost', True)  # 暂时置顶
+            # self.kline_monitor.focus_force()         # 获取焦点
+            # self.kline_monitor.attributes('-topmost', False) # 取消置顶
+
+            if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
+                # 已经创建过，直接显示
+                self.kline_monitor.deiconify()
+                self.kline_monitor.lift()
+                self.kline_monitor.focus_force()
+
         # 在这里可以启动你的实时监控逻辑，例如:
         # 1. 调用获取数据的线程
         # 2. 计算MACD/BOLL/EMA等指标
@@ -5631,7 +5638,13 @@ class StockMonitorApp(tk.Tk):
             if self._concept_win.winfo_exists():
                 self.save_window_position(self._concept_win, "detail_window")
                 self._concept_win.destroy()
-                
+        # 如果 KLineMonitor 存在且还没销毁，保存位置
+        if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
+            try:
+                self.save_window_position(self.kline_monitor, "KLineMonitor")
+                self.kline_monitor.destroy()
+            except Exception:
+                pass
         self.save_window_position(self,"main_window")
         # self.save_search_history()
         self.query_manager.save_search_history()
@@ -7887,6 +7900,74 @@ class ColumnSetManager(tk.Toplevel):
         self.refresh_current_tags()
         toast_message(self, "已恢复默认组合")
 
+
+def calc_breakout_signals(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["signal_strength"] = 0
+    df["signal"] = ""
+
+    # === 基础特征 ===
+    ma_short = df['ma51d']
+    ma_mid = df['ma512d']
+
+    # --- 趋势条件 ---
+    cond_trend_up = (df['close'] > ma_short) & (ma_short > ma_mid)
+    cond_trend_turn = (df['close'] > ma_short) & (df['ma51d'].diff() > 0)
+    cond_price_rise = (df['lastp1d'] > df['lastp2d']) & (df['lastp2d'] > df['lastp3d'])
+
+    # --- MACD 动能 ---
+    cond_macd_bull = (df['macddif'] > df['macddea']) & (df['macd'] > 0)
+    cond_macd_accel = (df['macdlast1'] > df['macdlast2']) & (df['macdlast2'] > df['macdlast3'])
+
+    # --- RSI 动能 ---
+    cond_rsi_mid = (df['rsi'] > 45) & (df['rsi'] < 75)
+    cond_rsi_up = df['rsi'].diff() > 2  # RSI加速上升
+
+    # --- KDJ 动量 ---
+    cond_kdj_bull = (df['kdj_j'] > df['kdj_k']) & (df['kdj_k'] > df['kdj_d'])
+    cond_kdj_strong = (df['kdj_j'] > 60)
+
+    # --- 突破条件 ---
+    cond_break_high = df['close'] > df['lasth3d']  # 突破近3日高点
+    # cond_break_mid = df['close'] > df['high'].rolling(6).max()
+    cond_break_mid = df['close'] > df['max5']
+
+    # --- 成交量放大 ---
+    cond_vol_boom = df['volume'] > 1
+
+    # === 打分系统 ===
+    score = 0
+    score += cond_trend_up * 2
+    score += cond_trend_turn * 1
+    score += cond_price_rise * 1
+    score += cond_macd_bull * 1
+    score += cond_macd_accel * 2
+    score += cond_rsi_mid * 1
+    score += cond_rsi_up * 1
+    score += cond_kdj_bull * 1
+    score += cond_kdj_strong * 1
+    score += cond_break_high * 2
+    score += cond_break_mid * 1
+    score += cond_vol_boom * 1
+
+    df['signal_strength'] = score
+
+    # === 信号等级 ===
+    df.loc[df['signal_strength'] >= 8, 'signal'] = 'BUY_S'   # 强势爆发（主升浪）
+    df.loc[(df['signal_strength'] >= 5) & (df['signal_strength'] < 8), 'signal'] = 'BUY_N'  # 底部反弹
+    df.loc[(df['signal_strength'] < 5) & (df['macd'] < 0), 'signal'] = 'SELL_WEAK'  # 弱势或衰退
+
+    # === 补充卖出逻辑（防止回落） ===
+    sell_cond = (
+        ((df['macddif'] < df['macddea']) & (df['macd'] < 0)) |
+        ((df['rsi'] < 45) & (df['kdj_j'] < df['kdj_k'])) |
+        ((df['close'] < ma_short) & (df['macdlast1'] < df['macdlast2']))
+    )
+    df.loc[sell_cond, "signal"] = "SELL"
+
+    return df
+
+
 # ========== 信号检测函数 ==========
 def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
@@ -7899,48 +7980,185 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
     df["signal"] = ""
     df["emotion"] = "中性"
 
-    # 买入逻辑
-    buy_cond = (
-        (df["now"] > df["ma5d"]) &
-        (df["ma5d"] > df["ma10d"]) &
-        (df["macddif"] > df["macddea"]) &
-        (df["rsi"] < 70) &
-        ((df["now"] > df["upperL"]) | (df["now"] > df["upper1"]))
-    )
+    # # 买入逻辑
+    # buy_cond = (
+    #     (df["now"] > df["ma5d"]) &
+    #     (df["ma5d"] > df["ma10d"]) &
+    #     (df["macddif"] > df["macddea"]) &
+    #     (df["rsi"] < 70) &
+    #     ((df["now"] > df["upperL"]) | (df["now"] > df["upper1"]))
+    # )
 
-    # 卖出逻辑
-    sell_cond = (
-        (df["now"] < df["ma10d"]) &
-        (df["macddif"] < df["macddea"]) &
-        (df["rsi"] > 50) &
-        (df["now"] < df["upperL"])
-    )
+    # # 卖出逻辑
+    # sell_cond = (
+    #     (df["now"] < df["ma5d"]) &
+    #     (df["macddif"] < df["macddea"]) &
+    #     (df["rsi"] > 50) &
+    #     (df["now"] < df["lastp1d"])
+    # )
 
-    df.loc[buy_cond, "signal"] = "BUY"
-    df.loc[sell_cond, "signal"] = "SELL"
+    # 示例逻辑：最近收盘价高于均线，MACD金叉，RSI<70，KDJ J > 50 -> BUY
+    # buy_cond = (
+    #     (df['close'] > df['close'].rolling(5).mean()) &
+    #     (df['macddif'] > df['macddea']) &
+    #     (df['rsi'] < 70) &
+    #     (df['kdj_j'] > 50)
+    # )
 
+    # sell_cond = (
+    #     (df['close'] < df['close'].rolling(10).mean()) &
+    #     (df['macddif'] < df['macddea']) &
+    #     (df['rsi'] > 50) &
+    #     (df['kdj_j'] < 50)
+    # )
+
+    # buy_cond = (
+    #     # 趋势共振
+    #     (df['close'] > df['ma51d']) &                 # 短期价格在均线之上
+    #     (df['close'] > df['ma512d']) &               # 中期趋势向上
+    #     (df['lastp1d'] > df['lastp2d']) & (df['lastp2d'] > df['lastp3d']) &  # 连续上涨3日
+        
+    #     # MACD 共振
+    #     (df['macddif'] > df['macddea']) &            # DIF上穿DEA（形成金叉）
+    #     (df['macd'] > 0) &                           # MACD柱为正，确认趋势
+    #     (df['macdlast1'] > df['macdlast2']) & (df['macdlast2'] > df['macdlast3']) &  # 柱线递增
+        
+    #     # RSI 动能支持
+    #     (df['rsi'] > 40) & (df['rsi'] < 70) &        # 适中区间（非过热）
+        
+    #     # KDJ 动量突破
+    #     (df['kdj_j'] > df['kdj_k']) & (df['kdj_k'] > df['kdj_d']) &  # 多头排列
+    #     (df['kdj_j'] > 50) &                         # 动能强于中值
+    #     (df['close'] < df['upper'])                  # 尚未过度上涨（未触上轨）
+    # )
+
+    # sell_cond = (
+    #     # 趋势转弱
+    #     (df['close'] < df['ma51d']) |                  # 跌破短期均线
+    #     (df['macddif'] < df['macddea']) |             # DIF下穿DEA死叉
+    #     ((df['macdlast1'] < df['macdlast2']) & (df['macdlast2'] < df['macdlast3'])) |  # 柱线递减
+        
+    #     # RSI 过热后回落
+    #     (df['rsi'] > 70) |                            # 超买
+    #     ((df['rsi'] < 50) & (df['macd'] < 0)) |        # RSI掉头向下
+        
+    #     # KDJ 死叉或动能衰竭
+    #     ((df['kdj_j'] < df['kdj_k']) & (df['kdj_k'] < df['kdj_d'])) |  # 空头排列
+    #     (df['kdj_j'] < 30) |                          # 动能偏弱
+    #     (df['close'] > df['upper'])                   # 价格触及上轨（可能见顶）
+    # )
+
+    # # 初始化信号列
+    # df["signal"] = ""
+
+    # # 买入条件：底部爆发 + 动能共振
+    # buy_cond = (
+    #     # 趋势确认
+    #     (df['close'] > df['ma51d']) &
+    #     (df['ma51d'] > df['ma512d']) &                      # 均线多头排列
+    #     (df['macddif'] > df['macddea']) &
+    #     (df['macd'] > 0) &
+
+    #     # 动能爆发
+    #     (df['close'] > df['lasth3d']) &                      # 突破近3日高点
+    #     ((df['lastp1d'] > df['lastp2d']) & (df['lastp2d'] > df['lastp3d'])) &  # 连涨三日
+    #     ((df['macdlast1'] > df['macdlast2']) & (df['macdlast2'] > df['macdlast3'])) &  # 柱线递增
+    #     (df['volume'] > df['volume'].rolling(5).mean() * 1.2) &  # 成交放大至少20%
+
+    #     # 动能共振
+    #     (df['rsi'] > 45) & (df['rsi'] < 80) &
+    #     (df['kdj_j'] > df['kdj_k']) & (df['kdj_k'] > df['kdj_d']) &
+    #     (df['kdj_j'] > 60)
+    # )
+
+    # # 卖出条件：动能衰竭或假突破回落
+    # sell_cond = (
+    #     ((df['close'] < df['ma51d']) & (df['macd'] < 0)) |
+    #     ((df['macddif'] < df['macddea']) & (df['macd'] < 0)) |
+    #     ((df['macdlast1'] < df['macdlast2']) & (df['macdlast2'] < df['macdlast3'])) |
+    #     (df['rsi'] > 80) |
+    #     ((df['kdj_j'] < df['kdj_k']) & (df['kdj_k'] < df['kdj_d'])) |
+    #     (df['kdj_j'] < 40)
+    # )
+
+    # df.loc[buy_cond, "signal"] = "BUY"
+    # df.loc[sell_cond, "signal"] = "SELL"
+
+    df = calc_breakout_signals(df)
+
+    # signals = df[df['signal'].isin(['BUY_STRONG', 'BUY_NORMAL', 'SELL'])]
+    # print(signals[['close', 'macd', 'rsi', 'kdj_j', 'signal_strength', 'signal']].tail(10))
     # 情绪判定
-    df.loc[df["vchange"] > 20, "emotion"] = "乐观"
-    df.loc[df["vchange"] < -20, "emotion"] = "悲观"
+    # df.loc[df["vchange"] > 20, "emotion"] = "乐观"
+    # df.loc[df["vchange"] < -20, "emotion"] = "悲观"
+    # 使用 last6vol 或模拟量比
+    df.loc[df.get("volume", 0) > 1.2, "emotion"] = "乐观"
+    df.loc[df.get("volume", 0) < 0.8, "emotion"] = "悲观"
 
     return df
 
+# def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
+#     df = df.copy()
+#     if df.empty:
+#         return df
+
+#     if "code" not in df.columns:
+#         df["code"] = df.index.astype(str).str.zfill(6)  # 补齐6位  # 如果没有code列，用name占位（最好是实际code）
+    
+#     df["signal"] = ""
+#     df["emotion"] = "中性"
+
+#     # ---------- 情绪判断 ----------
+#     # 使用 last6vol 或模拟量比
+#     df.loc[df.get("last6vol", 0) > 1.2, "emotion"] = "乐观"
+#     df.loc[df.get("last6vol", 0) < 0.8, "emotion"] = "悲观"
+
+#     # ---------- 买入信号 ----------
+#     buy_cond = (
+#         (df.get("open", 0) > df.get("lastp1d", 0)) &
+#         (df.get("low", 0) > df.get("lastp1d", 0)) &
+#         (df.get("now", 0) > df.get("open", 0))
+#     )
+#     df.loc[buy_cond, "signal"] = "BUY"
+
+#     # ---------- 卖出信号 ----------
+#     sell_cond = (
+#         (df.get("open", 0) < df.get("lastp1d", 0)) |
+#         (df.get("now", 0) < df.get("open", 0))
+#     )
+#     df.loc[sell_cond, "signal"] = "SELL"
+
+#     return df
 
 
-# ========== KLineMonitor ==========
+
 class KLineMonitor(tk.Toplevel):
-    def __init__(self, parent, get_df_func, refresh_interval=3):
+    def __init__(self, parent, get_df_func, refresh_interval=30):
         super().__init__(parent)
         self.master = parent
         self.get_df_func = get_df_func
         self.refresh_interval = refresh_interval
         self.stop_event = threading.Event()
-        self.sort_column = None   # 当前排序列
-        self.sort_reverse = False # 是否倒序
-        # 初始化
-        self.df_cache = None
+        self.sort_column = None
+        self.sort_reverse = False
+
+        # 点击计数器
+        self.click_count = 0
+
+        # 历史信号追踪
+        self.last_buy_index = None
+        self.last_sell_index = None
+        self.buy_history_indices = set()
+        self.sell_history_indices = set()
+        self.signal_types = ["BUY_S", "BUY_N", "SELL"]
+        # 历史信号追踪（根据 signal_types 动态生成）
+        # self.last_signal_index = {sig: None for sig in self.signal_types}
+        # self.signal_history_indices = {sig: set() for sig in self.signal_types}
+        # 筛选栈
         self.filter_stack = []
-        self.click_count = 0  # 点击计数器
+
+        # 缓存数据
+        self.df_cache = None
 
         self.title("K线趋势实时监控")
         self.geometry("760x460")
@@ -7952,14 +8170,23 @@ class KLineMonitor(tk.Toplevel):
         self.total_label = tk.Label(self.status_frame, text="总数: 0", bg="#eee")
         self.total_label.pack(side="left", padx=5)
 
-        self.buy_label = tk.Label(self.status_frame, text="BUY: 0", fg="green", cursor="hand2", bg="#eee")
-        self.buy_label.pack(side="left", padx=5)
-        self.buy_label.bind("<Button-1>", lambda e: self.filter_by_signal("BUY"))
+        # self.buy_label = tk.Label(self.status_frame, text="BUY: 0", fg="green", cursor="hand2", bg="#eee")
+        # self.buy_label.pack(side="left", padx=5)
+        # self.buy_label.bind("<Button-1>", lambda e: self.filter_by_signal("BUY"))
 
-        self.sell_label = tk.Label(self.status_frame, text="SELL: 0", fg="red", cursor="hand2", bg="#eee")
-        self.sell_label.pack(side="left", padx=5)
-        self.sell_label.bind("<Button-1>", lambda e: self.filter_by_signal("SELL"))
+        # self.sell_label = tk.Label(self.status_frame, text="SELL: 0", fg="red", cursor="hand2", bg="#eee")
+        # self.sell_label.pack(side="left", padx=5)
+        # self.sell_label.bind("<Button-1>", lambda e: self.filter_by_signal("SELL"))
 
+        # 动态生成信号统计标签
+        self.signal_labels = {}
+        for sig in self.signal_types:
+            lbl = tk.Label(self.status_frame, text=f"{sig}: 0", bg="#eee", cursor="hand2")
+            lbl.pack(side="left", padx=5)
+            lbl.bind("<Button-1>", lambda e, s=sig: self.filter_by_signal(s))
+            self.signal_labels[sig] = lbl
+
+        # 情绪标签保持不变
         self.emotion_labels = {}
         for emo, color in [("乐观", "green"), ("悲观", "red"), ("中性", "gray")]:
             lbl = tk.Label(self.status_frame, text=f"{emo}: 0", fg=color, cursor="hand2", bg="#eee")
@@ -7967,48 +8194,60 @@ class KLineMonitor(tk.Toplevel):
             lbl.bind("<Button-1>", lambda e, em=emo: self.filter_by_emotion(em))
             self.emotion_labels[emo] = lbl
 
+        # 全局显示按钮
+        self.global_btn = tk.Button(self.status_frame, text="全局", cursor="hand2", command=self.reset_filters)
+        self.global_btn.pack(side="right", padx=5)
+
         # ---- 表格 ----
         self.tree = ttk.Treeview(
             self,
-            columns=("code", "name", "now", "signal", "emotion"),
+            columns=("code", "name", "now", "percent","volume","signal", "emotion"),
             show="headings",
             height=20
         )
         self.tree.pack(fill=tk.BOTH, expand=True)
 
         for col, text, w in [
-            ("code", "代码", 80),
-            ("name", "名称", 150),
-            ("now", "当前价", 80),
-            ("signal", "信号", 80),
-            ("emotion", "情绪", 100)
+            ("code", "代码", 40),
+            ("name", "名称", 60),
+            ("now", "当前价", 30),
+            ("percent", "涨幅",30),
+            ("volume", "量比", 30),
+            ("signal", "信号", 60),
+            ("emotion", "情绪", 60)
         ]:
             self.tree.heading(col, text=text, command=lambda c=col: self.treeview_sort_column(c))
             self.tree.column(col, width=w, anchor="center")
 
-        self.tree.tag_configure("buy", background="#d0f5d0")
-        self.tree.tag_configure("sell", background="#f5d0d0")
+        # 高亮配置
+        # 高亮配置可以根据 signal_types 动态生成
         self.tree.tag_configure("neutral", background="#f0f0f0")
+        for sig in self.signal_types:
+            self.tree.tag_configure(sig.lower(), background="#d0f0d0")  # 示例，BUY_STRONG -> buy_strong
+        # self.tree.tag_configure("buy", background="#d0f5d0")
+        # self.tree.tag_configure("sell", background="#f5d0d0")
+        self.tree.tag_configure("neutral", background="#f0f0f0")
+        self.tree.tag_configure("buy_hist", background="#b0f0b0")
+        self.tree.tag_configure("sell_hist", background="#f0b0b0")
 
+        # 绑定点击和键盘
         self.tree.bind("<Button-1>", self.on_tree_click)
         self.tree.bind("<Up>", self.on_key_select)
         self.tree.bind("<Down>", self.on_key_select)
 
-        # ---- 启动刷新线程 ----
+        # 启动刷新线程
         threading.Thread(target=self.refresh_loop, daemon=True).start()
 
-        self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.protocol("WM_DELETE_WINDOW", self.on_kline_monitor_close)
 
-        # 全局显示按钮
-        self.global_btn = tk.Button(self.status_frame, text="全局", cursor="hand2", command=self.reset_filters)
-        self.global_btn.pack(side="right", padx=5)
+        # 加载窗口位置（可选）
         try:
-            self.master.load_window_position(self, "KLineMonitor", default_width=700, default_height=320)
+            self.master.load_window_position(self, "KLineMonitor", default_width=760, default_height=460)
         except Exception:
-            self.geometry("700x320")
+            self.geometry("760x460")
 
+    # ---- 点击逻辑 ----
     def on_tree_click(self, event=None, item_id=None):
-        """表格单击事件（可回调主窗口）"""
         try:
             if item_id is None and event is not None:
                 item_id = self.tree.identify_row(event.y)
@@ -8021,7 +8260,6 @@ class KLineMonitor(tk.Toplevel):
             values = self.tree.item(item_id, "values")
             stock_code = values[0] if len(values) > 0 else None
 
-            # 每10次打印一次
             self.click_count += 1
             if self.click_count % 10 == 0:
                 print(f"[Monitor] 点击了 {stock_code}")
@@ -8035,8 +8273,8 @@ class KLineMonitor(tk.Toplevel):
         except Exception as e:
             print(f"[Monitor] 点击处理错误: {e}")
 
+    # ---- 上下键选择 ----
     def on_key_select(self, event):
-        """上下键切换选中行时触发点击逻辑"""
         try:
             children = self.tree.get_children()
             if not children:
@@ -8054,10 +8292,7 @@ class KLineMonitor(tk.Toplevel):
                 else:
                     return "break"
 
-            # 让选中行可见
             self.tree.see(item_id)
-
-            # 调用点击逻辑
             self.on_tree_click(item_id=item_id)
         except Exception as e:
             print("[Monitor] 键盘选择错误:", e)
@@ -8075,24 +8310,24 @@ class KLineMonitor(tk.Toplevel):
                 data_list.sort(reverse=reverse)
             for index, (val, k) in enumerate(data_list):
                 self.tree.move(k, '', index)
-            # 下次点击反向排序
             self.tree.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
         except Exception as e:
             print("[Monitor] 排序错误:", e)
 
+    # ---- 刷新循环 ----
     def refresh_loop(self):
         while not self.stop_event.is_set():
             try:
                 df = self.get_df_func()
                 if df is not None and not df.empty:
-                    df = detect_signals(df)
-                    self.df_cache = df.copy()  # 缓存最新数据
-                    self.after(0, self.apply_filters)  # 保留筛选
+                    df = detect_signals(df)  # 外部函数
+                    self.df_cache = df.copy()
+                    self.after(0, self.apply_filters)
             except Exception as e:
                 print("[Monitor] 更新错误:", e)
             time.sleep(self.refresh_interval)
 
-    # ---- 更新表格 + 状态栏 ----
+    # ---- 更新表格 ----
     def update_table(self, df):
         # 保存选中行
         selected_code = None
@@ -8102,47 +8337,168 @@ class KLineMonitor(tk.Toplevel):
             if values:
                 selected_code = values[0]
 
+        # ---- 更新历史信号 ----
+        buy_rows = df.index[df['signal'].astype(str).str.startswith('BUY', na=False)].tolist()
+        sell_rows = df.index[df['signal'].astype(str).str.startswith('SELL', na=False)].tolist()
+
+        if buy_rows:
+            self.last_buy_index = buy_rows[-1]
+            self.buy_history_indices.update(buy_rows)
+        if sell_rows:
+            self.last_sell_index = sell_rows[-1]
+            self.sell_history_indices.update(sell_rows)
+
+        # ---- 清空表格 ----
         self.tree.delete(*self.tree.get_children())
 
-        for _, r in df.iterrows():
+        for idx, r in df.iterrows():
+            signal = str(r.get("signal", "") or "")
             tag = "neutral"
-            if r["signal"] == "BUY":
+            arrow = ""
+
+            if signal.startswith("BUY"):
                 tag = "buy"
-            elif r["signal"] == "SELL":
+                if idx == getattr(self, "last_buy_index", None):
+                    arrow = "↑"
+                if idx in getattr(self, "buy_history_indices", set()):
+                    tag = "buy_hist"
+
+            elif signal.startswith("SELL"):
                 tag = "sell"
+                if idx == getattr(self, "last_sell_index", None):
+                    arrow = "↓"
+                if idx in getattr(self, "sell_history_indices", set()):
+                    tag = "sell_hist"
+
+            display_signal = f"{signal} {arrow}"
             self.tree.insert(
                 "", tk.END,
-                values=(r.get("code", ""), r.get("name", ""), f"{r.get('now', 0):.2f}", r.get("signal", ""), r.get("emotion", "")),
+                values=(r.get("code",""), r.get("name",""), f"{r.get('now',0):.2f}",f"{r.get('percent',0):.2f}",f"{r.get('volume',0):.1f}", display_signal, r.get("emotion","")),
                 tags=(tag,)
             )
 
-        # ---- 应用上一次排序 ----
-        if self.sort_column:
+        # ---- 保留排序 ----
+        if getattr(self, "sort_column", None):
             self.treeview_sort_column(self.sort_column, self.sort_reverse)
 
-        # ---- 恢复选中行高亮 ----
+        # ---- 恢复选中行 ----
         if selected_code:
             for item in self.tree.get_children():
                 if self.tree.set(item, "code") == selected_code:
                     self.tree.selection_set(item)
                     self.tree.focus(item)
+                    self.tree.see(item)
                     break
 
-        # 更新状态栏统计
+        # ---- 更新状态栏 ----
         total = len(df)
-        buy_count = (df["signal"]=="BUY").sum()
-        sell_count = (df["signal"]=="SELL").sum()
+        self.total_label.config(text=f"总数: {total}")
+
+        # 动态生成信号统计
+        signal_counts = df["signal"].value_counts().to_dict()
+
+        # 确保有一个字典存放动态标签
+        if not hasattr(self, "signal_labels"):
+            self.signal_labels = {}
+
+        # 删除不存在的标签（旧信号）
+        # for sig in list(self.signal_labels.keys()):
+        #     if sig not in signal_counts:
+        #         self.signal_labels[sig].destroy()
+        #         del self.signal_labels[sig]
+
+        # 更新或新增信号标签
+        # for sig, count in signal_counts.items():
+        #     if sig not in self.signal_labels:
+        #         lbl = tk.Label(self.status_frame, text=f"{sig}: {count}", fg="green" if "BUY" in sig else "red")
+        #         lbl.pack(side=tk.LEFT, padx=4)
+        #         self.signal_labels[sig] = lbl
+        #     else:
+        #         self.signal_labels[sig].config(text=f"{sig}: {count}")
+
+        # 更新信号统计，不再动态增删 Label
+        signal_counts = df["signal"].value_counts().to_dict()
+        for sig, lbl in self.signal_labels.items():
+            count = signal_counts.get(sig, 0)
+            lbl.config(text=f"{sig}: {count}")
+
+        # ---- 更新情绪标签 ----
+        emotion_counts = df["emotion"].value_counts().to_dict()
+        for emo, lbl in self.emotion_labels.items():
+            lbl.config(text=f"{emo}: {emotion_counts.get(emo, 0)}")
+
+    # ---- 更新表格 ----
+    def update_table_src(self, df):
+        # 保存选中行
+        selected_code = None
+        sel_items = self.tree.selection()
+        if sel_items:
+            values = self.tree.item(sel_items[0], "values")
+            if values:
+                selected_code = values[0]
+
+        # ---- 更新历史信号 ----
+        buy_rows = df.index[df['signal'] == 'BUY'].tolist()
+        sell_rows = df.index[df['signal'] == 'SELL'].tolist()
+        if buy_rows:
+            self.last_buy_index = buy_rows[-1]
+            self.buy_history_indices.update(buy_rows)
+        if sell_rows:
+            self.last_sell_index = sell_rows[-1]
+            self.sell_history_indices.update(sell_rows)
+
+        # ---- 清空表格 ----
+        self.tree.delete(*self.tree.get_children())
+
+        for idx, r in df.iterrows():
+            tag = "neutral"
+            arrow = ""
+            if r["signal"] == "BUY":
+                tag = "buy"
+                if idx == self.last_buy_index:
+                    arrow = "↑"
+                if idx in self.buy_history_indices:
+                    tag = "buy_hist"
+            elif r["signal"] == "SELL":
+                tag = "sell"
+                if idx == self.last_sell_index:
+                    arrow = "↓"
+                if idx in self.sell_history_indices:
+                    tag = "sell_hist"
+
+            display_signal = f"{r.get('signal','')} {arrow}"
+            self.tree.insert(
+                "", tk.END,
+                values=(r.get("code",""), r.get("name",""), f"{r.get('now',0):.2f}", display_signal, r.get("emotion","")),
+                tags=(tag,)
+            )
+
+        # ---- 保留排序 ----
+        if self.sort_column:
+            self.treeview_sort_column(self.sort_column, self.sort_reverse)
+
+        # ---- 恢复选中行 ----
+        if selected_code:
+            for item in self.tree.get_children():
+                if self.tree.set(item, "code") == selected_code:
+                    self.tree.selection_set(item)
+                    self.tree.focus(item)
+                    self.tree.see(item)
+                    break
+
+        # ---- 更新状态栏 ----
+        total = len(df)
+        buy_count = (df["signal"].str.contains("BUY")).sum()
+        sell_count = (df["signal"].str.contains("SELL")).sum()
         emotion_counts = df["emotion"].value_counts().to_dict()
 
         self.total_label.config(text=f"总数: {total}")
-        self.buy_label.config(text=f"BUY: {buy_count}")
-        self.sell_label.config(text=f"SELL: {sell_count}")
+        self.buy_label.config(text=f"BUY: {buy_count} ↑")
+        self.sell_label.config(text=f"SELL: {sell_count} ↓")
         for emo, lbl in self.emotion_labels.items():
             lbl.config(text=f"{emo}: {emotion_counts.get(emo,0)}")
 
-
-
-    # 点击状态栏筛选
+    # ---- 筛选 ----
     def filter_by_signal(self, signal):
         self.filter_stack.append({"type":"signal","value":signal})
         self.apply_filters()
@@ -8156,7 +8512,6 @@ class KLineMonitor(tk.Toplevel):
         if self.df_cache is not None:
             self.update_table(self.df_cache)
 
-    # 应用筛选
     def apply_filters(self):
         if self.df_cache is None:
             return
@@ -8169,7 +8524,7 @@ class KLineMonitor(tk.Toplevel):
         self.update_table(df)
 
     # ---- 关闭 ----
-    def on_close(self):
+    def on_kline_monitor_close(self):
         self.stop_event.set()
         try:
             self.master.save_window_position(self, "KLineMonitor")
@@ -8178,6 +8533,9 @@ class KLineMonitor(tk.Toplevel):
         self.destroy()
         if hasattr(self.master, "kline_monitor"):
             self.master.kline_monitor = None
+        # 隐藏窗口而不是销毁
+        # self.withdraw()  
+
 
 def test_single_thread():
     import queue
