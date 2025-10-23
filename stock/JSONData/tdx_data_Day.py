@@ -795,21 +795,23 @@ def track_bullish_signals_vectorized_full(
 
 
 
+# def get_tdx_macd(df):
+def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_period: int = 9) -> pd.DataFrame:
+    # if len(df) < 10:
+    #     df['upper'] = 0
+    #     df['lower'] = 0
+    #     df['ene'] = 0
+    #     df['bandwidth'] = 0
+    #     df['bollpect'] = 0
+    #     log.debug(f'code:{df[-1:]} df count < 6:{len(df)}')
+    #     return df
 
-def get_tdx_macd(df):
-    if len(df) < 10:
-        df['upper'] = 0
-        df['lower'] = 0
-        df['ene'] = 0
-        df['bandwidth'] = 0
-        df['bollpect'] = 0
-        log.debug(f'code:{df[-1:]} df count < 6:{len(df)}')
-        return df
+    if df.empty or not all(col in df.columns for col in ['close', 'high', 'low']):
+        return df.copy()
+
     increasing = None
     id_cout = len(df)
     limit = 39
-    # if df.index.name != 'date':
-    #     df=df.set_index('date')
     
     if 'macd' in df.columns and 'macdlast6' in df.columns:
         log.debug(f'macd is exists macd:{df.macd[-2:]}  macdlast6:{df.macdlast6[-2:]}')
@@ -836,54 +838,63 @@ def get_tdx_macd(df):
 
         df=df.sort_index(ascending=False)
 
-    # if  increasing:
-    #     df = df.sort_index(ascending=increasing)
-    # df=df.fillna(0)
-    # macd=DIF，signal=DEA，hist=BAR
-    #macddif -> macd macddea-> dif macd=>dea ??
-    # df.loc[:, 'macddif'], df.loc[:, 'macddea'], df.loc[:, 'macd'] = ta.macd(
-    # df[['macd','macddif','macddea']] = ta.macd(
-
-    # MACD (macddif) Signal Line (macddea) MACD Histogram->MACD - Signal_Line
-    # macddif (MACD line), macddea (Signal Line), and the MACD Histogram
-    # MACD_12_26_9  MACDh_12_26_9  MACDs_12_26_9
-    # MACD Line (MACD_12_26_9, macd): Indicates the momentum.
-    # Signal Line (MACDs_12_26_9, macddea): Provides buy/sell signals when crossed by the MACD line.
-    # Histogram (MACDh_12_26_9, macddif): Shows the divergence or convergence between the MACD line and the Signal line, indicating 
     
-    if len(df) > 33:
-            # df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma20d]
-            # df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma20d]
-            # df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
-            df[['lower', 'ene', 'upper','bandwidth','bollpect']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
+    # if len(df) > 33:
+    #         df[['lower', 'ene', 'upper','bandwidth','bollpect']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
 
-    else:
-        df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma10d]
-        df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma10d]
-        df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
-        df['bandwidth'] = 0
-        df['bollpect'] = 0
+    # else:
+    #     df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma10d]
+    #     df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma10d]
+    #     df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
+    #     df['bandwidth'] = 0
+    #     df['bollpect'] = 0
 
-    df['upper'] = df['upper'].apply(lambda x: round(x,1))   
-    df['lower'] = df['lower'].apply(lambda x: round(x,1))   
-    df['ene'] =  df['ene'].apply(lambda x: round(x,1))  
+    # df['upper'] = df['upper'].apply(lambda x: round(x,1))   
+    # df['lower'] = df['lower'].apply(lambda x: round(x,1))   
+    # df['ene'] =  df['ene'].apply(lambda x: round(x,1))  
 
-    df[['macd','macddif','macddea']] = ta.macd(
-        df['close'], fastperiod=12, slowperiod=26, signalperiod=9) 
+    # df[['macd','macddif','macddea']] = ta.macd(
+    #     df['close'], fastperiod=12, slowperiod=26, signalperiod=9) 
+    # df = df.fillna(0)
+    # df['macddif'] = round( df['macddif'], 2)
+    # df['macddea'] = round( df['macddea'], 2)
+    # df['macd'] = df['macd'].apply(lambda x:round(x,2))
+    # df['macdlast1'] = df.iloc[-1]['macd']
+    # df['macdlast2'] = df.iloc[-2]['macd']
+    # df['macdlast3'] = df.iloc[-3]['macd']
+    # df['macdlast4'] = df.iloc[-4]['macd']
+    # df['macdlast5'] = df.iloc[-5]['macd']
+    # df['macdlast6'] = df.iloc[-6]['macd']   
+    # df['macd'] = df.iloc[-1]['macd']
+
+    # --- BOLLINGER BANDS ---
+    bb = ta.bbands(df['close'], length=20, std=2, mamode='sma')
+    df['lower'] = bb['BBL_20_2.0'].round(2)
+    df['upper'] = bb['BBU_20_2.0'].round(2)
+    df['ene'] = bb['BBM_20_2.0'].round(2)
+    df['bandwidth'] = (df['upper'] - df['lower']).round(2)
+    df['bollpect'] = ((df['close'] - df['lower']) / df['bandwidth'] * 100).round(2)
+
+    # --- MACD ---
+    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+    df['macddif'] = macd['MACD_12_26_9'].round(2)
+    df['macddea'] = macd['MACDs_12_26_9'].round(2)
+    df['macd'] = macd['MACDh_12_26_9'].round(2)
+
+    # 保留最近 6 个 macd 值
+    for i in range(1, 7):
+        df[f'macdlast{i}'] = df['macd'].shift(i-1).round(2)
+
+    # --- RSI ---
+    df['rsi'] = ta.rsi(df['close'], length=rsi_period).round(2)
+
+    # --- KDJ ---
+    kdj = ta.stoch(high=df['high'], low=df['low'], close=df['close'], k=3, d=3, smooth_k=3)
+    df['kdj_k'] = kdj['STOCHk_3_3_3'].round(2)
+    df['kdj_d'] = kdj['STOCHd_3_3_3'].round(2)
+    df['kdj_j'] = (3*df['kdj_k'] - 2*df['kdj_d']).round(2)
+
     df = df.fillna(0)
-    df['macddif'] = round( df['macddif'], 2)
-    df['macddea'] = round( df['macddea'], 2)
-    # data['diff'].values[np.isnan(data['diff'].values)] = 0.0
-    # data['dea'].values[np.isnan(data['dea'].values)] = 0.0
-    # data['macd'].values[np.isnan(data['macd'].values)] = 0.0
-    df['macd'] = df['macd'].apply(lambda x:round(x,2))
-    df['macdlast1'] = df.iloc[-1]['macd']
-    df['macdlast2'] = df.iloc[-2]['macd']
-    df['macdlast3'] = df.iloc[-3]['macd']
-    df['macdlast4'] = df.iloc[-4]['macd']
-    df['macdlast5'] = df.iloc[-5]['macd']
-    df['macdlast6'] = df.iloc[-6]['macd']   
-    df['macd'] = df.iloc[-1]['macd']
 
     if df.index.name != 'date':
         df=df[-id_cout:].set_index('date')
@@ -892,8 +903,6 @@ def get_tdx_macd(df):
 
     if increasing is not None:
         df = df.sort_index(ascending=increasing)
-
-
     return df
 
 
@@ -3692,9 +3701,9 @@ def compute_power_tdx_df(tdx_df,dd):
         dd['boll'] = dd.upperT[0]
         dd['ra'] = dd.upperL[0]
         # dd['ra'] = dd.upperT[0]
-        dd['kdj'] = 1
+        # dd['kdj'] = 1
         # dd['macd'] = 1
-        dd['rsi'] = 1
+        # dd['rsi'] = 1
         dd['ma'] = 1
         dd['oph'] = 1
         dd['rah'] = 1
@@ -3705,9 +3714,9 @@ def compute_power_tdx_df(tdx_df,dd):
         dd['fibl'] = -1
         dd['ldate'] = -1
         dd['boll'] = -1
-        dd['kdj'] = -1
+        # dd['kdj'] = -1
         # dd['macd'] = -1
-        dd['rsi'] = -1
+        # dd['rsi'] = -1
         # dd['df2'] = -1
         dd['ma'] = -1
         dd['oph'] = -1
@@ -3948,7 +3957,8 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # idx_close = df.query('perd == perd.max()')[:1].close
     idx_close_temp = df.query('high > upper')
 
-    idx_close = idx_close_temp.close[0] if len(idx_close_temp) > 0 else df[df.perd == df.perd.max()].close[0]
+    # idx_close = idx_close_temp.close[0] if len(idx_close_temp) > 0 else df[df.perd == df.perd.max()].close[0]
+    idx_close = idx_close_temp.close.iloc[0] if len(idx_close_temp) > 0 else df[df.perd == df.perd.max()].close.iloc[0]
     idx_date_temp = df.query('high > upper')
     idx_date  = idx_date_temp.index[0] if len(idx_date_temp) > 0 else df[df.high == df.high.max()].index[0]
     # idx_top = df[df.high]
@@ -4022,8 +4032,14 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # dd['df2'] = df[df.lastdu == df.lastdu.max()].close.values[0]
     dd['percmax'] = df.percent[:-1].max()
     # dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0],1)
-    dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0] if len(df.query('high > upper')) == 0 else df.query('high > upper').close[0],1)
-    
+    # dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0] if len(df.query('high > upper')) == 0 else df.query('high > upper').close[0],1)
+    dd['df2'] = round(
+        df[df.percent == df.percent.max()].close.iloc[0] 
+        if len(df.query('high > upper')) == 0 
+        else df.query('high > upper').close.iloc[0],
+        1
+    )
+
     df = df.dropna(subset=['perd'])
 
     # if len(upperT) > 0:
@@ -4171,13 +4187,14 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
 
 
     upper_dd = dd[(dd.upper > 0) & (dd.high > dd.upper)]
-    upper_start = upper_dd.high[0] if len(upper_dd) > 0 else dd.high.max()
+    # upper_start = upper_dd.high[0] if len(upper_dd) > 0 else dd.high.max()
+    upper_start = upper_dd.high.iloc[0] if len(upper_dd) > 0 else dd.high.max()
     if resample == 'd' :
-        ral = round((dd.close[-1]-upper_start)/upper_start*100,1)
+        ral = round((dd.close.iloc[-1]-upper_start)/upper_start*100,1)
         # ral = round((dd.close[-1]-dd.high[:-1].max())/dd.high[:-1].max()*100,1)
     else:
         # ral = round((dd.close[-1]-dd.high.max())/dd.high.max()*100,1)
-        ral = round((dd.close[-1]-upper_start)/upper_start*100,1)
+        ral = round((dd.close.iloc[-1]-upper_start)/upper_start*100,1)
 
 
     df_ma20d=dd[-20:]
@@ -4288,10 +4305,12 @@ def compute_ma_cross(dd,ma1='ma5d',ma2='ma10d',ratio=0.02,resample='d'):
 
         if idx_min != -1:
             # fibl = len(dd[dd.index >= idx_min])
-            idx = round((dd.close[-1]/temp.close[temp.index == idx_min])*100-100,1)
+            # idx = round((dd.close[-1]/temp.close[temp.index == idx_min])*100-100,1)
+            idx = round((dd.close.iloc[-1]/temp.close[temp.index == idx_min])*100-100,1)
+
         else:
             # fibl = -1
-            idx = round((dd.close[-1]/temp.close[-1])*100-100,1)
+            idx = round((dd.close.iloc[-1]/temp.close[-1])*100-100,1)
         # if len(temp) == len(df):
         #     fibl = len(dd[dd.index >= temp.index[0]])
         #     idx = round((dd.close[-1]/temp.close[0])*100-100,1)
@@ -6135,7 +6154,7 @@ if __name__ == '__main__':
     dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
     print(f'dd : {dd}')
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
-    code='000852'
+    code='920108'
     # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'], end=None, newdays=0, resample='d')
     # print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
     # import ipdb;ipdb.set_trace()
@@ -6143,11 +6162,11 @@ if __name__ == '__main__':
     # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['w'],resample='w',lastday=None )
     # import ipdb;ipdb.set_trace()
     
-    df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d',lastday=None )
+    df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'],resample='d',lastday=None )
     print(f"{code} : {df.loc[:,['boll','lastp1d','ma51d','lastp2d','ma52d','lastp3d','ma53d','lasth1d','lasth2d','lasth3d']][-1:].values}")
     import ipdb;ipdb.set_trace()
     
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.duration_date_up,resample='d' )
+    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['w'],resample='w')
     print(df[['bull_f','bull_s','bullbreak','has_first','status','hold_d','obs_d']].tail(10))
     print(f' d: {ct.Resample_LABELS_Days["d"] } df.ma60d : {df.ma60d[-3:]} \n\n')
     # print(df[-3:],df[-1:])

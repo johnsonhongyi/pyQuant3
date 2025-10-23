@@ -818,8 +818,6 @@ class Sina:
         list_s = []
         for stock_match_object in result:
             stock = stock_match_object.groups()
-            # print stock
-            # print stock
             # fn=(lambda x:x)
             # list.append(map(fn,stock))
             # df = pd.DataFrame(list,columns=ct.SINA_Total_Columns)
@@ -866,18 +864,12 @@ class Sina:
             log.error("Sina Url error:%s"%(self.sina_stock_api + ','.join(self.stock_codes[:2])))
 
         df = pd.DataFrame(list_s, columns=ct.SINA_Total_Columns)
-        # if self.index_status and cct.get_work_time():
-        # if self.index_status:
-        # if cct.get_work_time() or (cct.get_now_time_int() > 915) :
-        # df = df.drop('close', axis=1)
-        # print(df.dt.value_counts())
         dt = df.dt.value_counts().index[0]
         df = df[(df.dt >= dt)]
 
         df.rename(columns={'close': 'llastp'}, inplace=True)
         df['b1_vv'] = df['b1_v'].map(lambda x: int(x/100/10000))
         if (cct.get_now_time_int() > 915 and cct.get_now_time_int() < 926):
-            #            df.rename(columns={'buy': 'close'}, inplace=True)
             df['close'] = df['buy']
             df['open'] = df['buy']
             df['high'] = df['buy']

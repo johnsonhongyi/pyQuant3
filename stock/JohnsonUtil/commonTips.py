@@ -2995,6 +2995,7 @@ def process_file_exc(func=None,code=None):
         return Exception("Exception on code {}".format(code)+ os.linesep + traceback.format_exc())
 
 
+error_codes = []
 
 # https://stackoverflow.com/questions/68065937/how-to-show-progress-bar-tqdm-while-using-multiprocessing-in-python
 def to_mp_run_async(cmd, urllist, *args,**kwargs):
@@ -3035,7 +3036,17 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                 #         results.append(y)
                 # except Exception as e:
                 #     log.error("except:%s"%(e))
+                # 用来收集错误 code
+                global error_codes
 
+                def log_idx_none(idx, code, count_all, result_count):
+                    global error_codes
+                    error_codes.append(code)
+
+                    # 每 30 条输出一次
+                    if len(error_codes) % 30 == 0:
+                        log.error(f"idx is None, codes: {error_codes[-30:]}, CountAll: {count_all}, resultCount: {result_count}")
+                        error_codes = []
                 try:
                     progress_bar = tqdm(total=data_count)
                     log.debug(f'data_count:{data_count},mininterval:{ct.tqdm_mininterval},ncols={ct.ncols}')
@@ -3069,9 +3080,13 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                                 result.append(data)
                             else:
                                 # log.error(f'idx:{idx} is None,last code:{result[-1].code} resultCount:{len(result)}')
-                                log.error(f'idx:{idx} is None, code: {urllist[idx]} CountAll:{data_count} resultCount:{len(result)}')
-
+                                # log.error(f'idx:{idx} is None, code: {urllist[idx]} CountAll:{data_count} resultCount:{len(result)}')
+                                log_idx_none(idx, urllist[idx], data_count, len(result))
                     # result = list(set(result))
+                    # 最后剩余不足 30 条，也输出一次
+                    if len(error_codes) % 30 != 0:
+                        log.error(f"idx is None, codes: {error_codes[-(len(error_codes)%30):]}")
+                        error_codes = []
                     log.debug(f'result:{len(result)}')
                             
                 except Exception as e:
@@ -3080,8 +3095,10 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     # log.error("except:results%s"%(results[-1]))
                     # import ipdb;ipdb.set_trace()
                     results=[]
+                    urllist = error_codes
                     for code in urllist:
                         print(f"code:{code},count:{data_count} idx:{urllist.index(code)}", end=' ')
+                        # log_idx_none(urllist.index(code), code, data_count, len(result))
                         res=cmd(code,**kwargs)
                         print("status:%s\t"%(len(res)), end=' ')
                         results.append(res)
