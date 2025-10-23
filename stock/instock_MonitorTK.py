@@ -5329,6 +5329,11 @@ class StockMonitorApp(tk.Tk):
             self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=10)
         else:
             print("监控已在运行中。")
+            # 前置窗口
+            self.kline_monitor.lift()                # 提升窗口层级
+            self.kline_monitor.attributes('-topmost', True)  # 暂时置顶
+            self.kline_monitor.focus_force()         # 获取焦点
+            self.kline_monitor.attributes('-topmost', False) # 取消置顶
         # 在这里可以启动你的实时监控逻辑，例如:
         # 1. 调用获取数据的线程
         # 2. 计算MACD/BOLL/EMA等指标
@@ -7922,28 +7927,53 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
 
 
 
+# ========== KLineMonitor ==========
 class KLineMonitor(tk.Toplevel):
     def __init__(self, parent, get_df_func, refresh_interval=3):
-        """
-        parent: 主窗口实例（例如 MainWindow）
-        get_df_func: 返回最新DataFrame的函数（例如 lambda: self.df_all）
-        """
         super().__init__(parent)
-        self.master = parent     # ✅ 保存主窗口引用，便于回调
+        self.master = parent
         self.get_df_func = get_df_func
         self.refresh_interval = refresh_interval
         self.stop_event = threading.Event()
+        self.sort_column = None   # 当前排序列
+        self.sort_reverse = False # 是否倒序
+        # 初始化
+        self.df_cache = None
+        self.filter_stack = []
+        self.click_count = 0  # 点击计数器
 
         self.title("K线趋势实时监控")
-        self.geometry("720x420")
+        self.geometry("760x460")
 
         # ---- 状态栏 ----
-        self.status_label = tk.Label(self, text="监控中...", bg="#eee")
-        self.status_label.pack(fill="x")
+        self.status_frame = tk.Frame(self, bg="#eee")
+        self.status_frame.pack(fill="x")
 
-        # ---- 表格设置 ----
-        self.tree = ttk.Treeview(self, columns=("code", "name", "now", "signal", "emotion"),
-                                 show="headings", height=20)
+        self.total_label = tk.Label(self.status_frame, text="总数: 0", bg="#eee")
+        self.total_label.pack(side="left", padx=5)
+
+        self.buy_label = tk.Label(self.status_frame, text="BUY: 0", fg="green", cursor="hand2", bg="#eee")
+        self.buy_label.pack(side="left", padx=5)
+        self.buy_label.bind("<Button-1>", lambda e: self.filter_by_signal("BUY"))
+
+        self.sell_label = tk.Label(self.status_frame, text="SELL: 0", fg="red", cursor="hand2", bg="#eee")
+        self.sell_label.pack(side="left", padx=5)
+        self.sell_label.bind("<Button-1>", lambda e: self.filter_by_signal("SELL"))
+
+        self.emotion_labels = {}
+        for emo, color in [("乐观", "green"), ("悲观", "red"), ("中性", "gray")]:
+            lbl = tk.Label(self.status_frame, text=f"{emo}: 0", fg=color, cursor="hand2", bg="#eee")
+            lbl.pack(side="left", padx=5)
+            lbl.bind("<Button-1>", lambda e, em=emo: self.filter_by_emotion(em))
+            self.emotion_labels[emo] = lbl
+
+        # ---- 表格 ----
+        self.tree = ttk.Treeview(
+            self,
+            columns=("code", "name", "now", "signal", "emotion"),
+            show="headings",
+            height=20
+        )
         self.tree.pack(fill=tk.BOTH, expand=True)
 
         for col, text, w in [
@@ -7953,62 +7983,127 @@ class KLineMonitor(tk.Toplevel):
             ("signal", "信号", 80),
             ("emotion", "情绪", 100)
         ]:
-            self.tree.heading(col, text=text)
+            self.tree.heading(col, text=text, command=lambda c=col: self.treeview_sort_column(c))
             self.tree.column(col, width=w, anchor="center")
 
+        self.tree.tag_configure("buy", background="#d0f5d0")
+        self.tree.tag_configure("sell", background="#f5d0d0")
+        self.tree.tag_configure("neutral", background="#f0f0f0")
 
-        self.tree.tag_configure("buy", background="#d0f5d0")    # 绿色
-        self.tree.tag_configure("sell", background="#f5d0d0")   # 红色
-        self.tree.tag_configure("neutral", background="#f0f0f0")# 灰色
-
-        # ---- 绑定点击事件 ----
         self.tree.bind("<Button-1>", self.on_tree_click)
+        self.tree.bind("<Up>", self.on_key_select)
+        self.tree.bind("<Down>", self.on_key_select)
 
-        # ---- 启动监控线程 ----
+        # ---- 启动刷新线程 ----
         threading.Thread(target=self.refresh_loop, daemon=True).start()
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def on_tree_click(self, event):
+        # 全局显示按钮
+        self.global_btn = tk.Button(self.status_frame, text="全局", cursor="hand2", command=self.reset_filters)
+        self.global_btn.pack(side="right", padx=5)
+        try:
+            self.master.load_window_position(self, "KLineMonitor", default_width=700, default_height=320)
+        except Exception:
+            self.geometry("700x320")
+
+    def on_tree_click(self, event=None, item_id=None):
         """表格单击事件（可回调主窗口）"""
         try:
-            item_id = self.tree.identify_row(event.y)
+            if item_id is None and event is not None:
+                item_id = self.tree.identify_row(event.y)
             if not item_id:
                 return
+
+            self.tree.selection_set(item_id)
+            self.tree.focus(item_id)
+
             values = self.tree.item(item_id, "values")
             stock_code = values[0] if len(values) > 0 else None
 
-            print(f"[Monitor] 点击了 {stock_code}")
+            # 每10次打印一次
+            self.click_count += 1
+            if self.click_count % 10 == 0:
+                print(f"[Monitor] 点击了 {stock_code}")
 
-            # ✅ 如果主窗口有 on_single_click 方法，则调用它
             if hasattr(self.master, "on_single_click"):
-                # self.master.on_single_click(name)
                 send_tdx_Key = (getattr(self.master, "select_code", None) != stock_code)
                 self.master.select_code = stock_code
-
                 stock_code = str(stock_code).zfill(6)
-                # print(f"选中股票代码: {stock_code}")
-
                 if send_tdx_Key and stock_code:
                     self.master.sender.send(stock_code)
         except Exception as e:
             print(f"[Monitor] 点击处理错误: {e}")
 
+    def on_key_select(self, event):
+        """上下键切换选中行时触发点击逻辑"""
+        try:
+            children = self.tree.get_children()
+            if not children:
+                return "break"
+
+            sel_items = self.tree.selection()
+            if not sel_items:
+                item_id = children[0]
+            else:
+                current_index = children.index(sel_items[0])
+                if event.keysym == "Up":
+                    item_id = children[max(0, current_index - 1)]
+                elif event.keysym == "Down":
+                    item_id = children[min(len(children) - 1, current_index + 1)]
+                else:
+                    return "break"
+
+            # 让选中行可见
+            self.tree.see(item_id)
+
+            # 调用点击逻辑
+            self.on_tree_click(item_id=item_id)
+        except Exception as e:
+            print("[Monitor] 键盘选择错误:", e)
+        return "break"
+
+    # ---- 列排序 ----
+    def treeview_sort_column(self, col, reverse=False):
+        self.sort_column = col
+        self.sort_reverse = reverse
+        try:
+            data_list = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
+            try:
+                data_list.sort(key=lambda t: float(t[0]), reverse=reverse)
+            except ValueError:
+                data_list.sort(reverse=reverse)
+            for index, (val, k) in enumerate(data_list):
+                self.tree.move(k, '', index)
+            # 下次点击反向排序
+            self.tree.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
+        except Exception as e:
+            print("[Monitor] 排序错误:", e)
+
     def refresh_loop(self):
-        """后台刷新循环"""
         while not self.stop_event.is_set():
             try:
                 df = self.get_df_func()
                 if df is not None and not df.empty:
                     df = detect_signals(df)
-                    self.after(0, lambda d=df: self.update_table(d))
+                    self.df_cache = df.copy()  # 缓存最新数据
+                    self.after(0, self.apply_filters)  # 保留筛选
             except Exception as e:
                 print("[Monitor] 更新错误:", e)
             time.sleep(self.refresh_interval)
 
+    # ---- 更新表格 + 状态栏 ----
     def update_table(self, df):
-        """更新表格内容"""
+        # 保存选中行
+        selected_code = None
+        sel_items = self.tree.selection()
+        if sel_items:
+            values = self.tree.item(sel_items[0], "values")
+            if values:
+                selected_code = values[0]
+
         self.tree.delete(*self.tree.get_children())
+
         for _, r in df.iterrows():
             tag = "neutral"
             if r["signal"] == "BUY":
@@ -8021,12 +8116,68 @@ class KLineMonitor(tk.Toplevel):
                 tags=(tag,)
             )
 
+        # ---- 应用上一次排序 ----
+        if self.sort_column:
+            self.treeview_sort_column(self.sort_column, self.sort_reverse)
+
+        # ---- 恢复选中行高亮 ----
+        if selected_code:
+            for item in self.tree.get_children():
+                if self.tree.set(item, "code") == selected_code:
+                    self.tree.selection_set(item)
+                    self.tree.focus(item)
+                    break
+
+        # 更新状态栏统计
+        total = len(df)
+        buy_count = (df["signal"]=="BUY").sum()
+        sell_count = (df["signal"]=="SELL").sum()
+        emotion_counts = df["emotion"].value_counts().to_dict()
+
+        self.total_label.config(text=f"总数: {total}")
+        self.buy_label.config(text=f"BUY: {buy_count}")
+        self.sell_label.config(text=f"SELL: {sell_count}")
+        for emo, lbl in self.emotion_labels.items():
+            lbl.config(text=f"{emo}: {emotion_counts.get(emo,0)}")
+
+
+
+    # 点击状态栏筛选
+    def filter_by_signal(self, signal):
+        self.filter_stack.append({"type":"signal","value":signal})
+        self.apply_filters()
+
+    def filter_by_emotion(self, emotion):
+        self.filter_stack.append({"type":"emotion","value":emotion})
+        self.apply_filters()
+
+    def reset_filters(self):
+        self.filter_stack.clear()
+        if self.df_cache is not None:
+            self.update_table(self.df_cache)
+
+    # 应用筛选
+    def apply_filters(self):
+        if self.df_cache is None:
+            return
+        df = self.df_cache.copy()
+        for f in self.filter_stack:
+            if f["type"] == "signal":
+                df = df[df["signal"] == f["value"]]
+            elif f["type"] == "emotion":
+                df = df[df["emotion"] == f["value"]]
+        self.update_table(df)
+
+    # ---- 关闭 ----
     def on_close(self):
         self.stop_event.set()
+        try:
+            self.master.save_window_position(self, "KLineMonitor")
+        except Exception:
+            pass
         self.destroy()
         if hasattr(self.master, "kline_monitor"):
             self.master.kline_monitor = None
-
 
 def test_single_thread():
     import queue
