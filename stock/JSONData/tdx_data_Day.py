@@ -794,9 +794,6 @@ def track_bullish_signals_vectorized_full(
     return df
 
 
-
-# def get_tdx_macd(df):
-def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_period: int = 9) -> pd.DataFrame:
     # if len(df) < 10:
     #     df['upper'] = 0
     #     df['lower'] = 0
@@ -806,39 +803,6 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
     #     log.debug(f'code:{df[-1:]} df count < 6:{len(df)}')
     #     return df
 
-    if df.empty or not all(col in df.columns for col in ['close', 'high', 'low']):
-        return df.copy()
-
-    increasing = None
-    id_cout = len(df)
-    limit = 39
-    
-    if 'macd' in df.columns and 'macdlast6' in df.columns:
-        log.debug(f'macd is exists macd:{df.macd[-2:]}  macdlast6:{df.macdlast6[-2:]}')
-        # return df
-
-    if id_cout < limit:
-        if  df.index.is_monotonic_increasing:
-            increasing = True
-            df = df.sort_index(ascending=False)
-        else:
-            increasing = False
-
-        # temp_df = df.iloc[0]
-
-        runtimes = limit-id_cout
-        df = df.reset_index()
-        # for t in range(runtimes):
-        #     df.loc[df.shape[0]] = temp_df
-        temp = df.loc[np.repeat(df.index[-1], runtimes)].reset_index(drop=True)
-        # df = df.append(temp)
-        df = pd.concat([df, temp], axis=0)
-
-        df = df.reset_index(drop=True)
-
-        df=df.sort_index(ascending=False)
-
-    
     # if len(df) > 33:
     #         df[['lower', 'ene', 'upper','bandwidth','bollpect']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
 
@@ -866,6 +830,44 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
     # df['macdlast5'] = df.iloc[-5]['macd']
     # df['macdlast6'] = df.iloc[-6]['macd']   
     # df['macd'] = df.iloc[-1]['macd']
+
+
+# def get_tdx_macd(df):
+def get_tdx_macd_no_sws(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_period: int = 9) -> pd.DataFrame:
+
+    if df.empty or not all(col in df.columns for col in ['close', 'high', 'low']):
+        return df.copy()
+
+    increasing = None
+    id_cout = len(df)
+    limit = min_len
+    
+    if 'macd' in df.columns and 'macdlast6' in df.columns:
+        log.debug(f'macd is exists macd:{df.macd[-2:]}  macdlast6:{df.macdlast6[-2:]}')
+        # return df
+
+    if id_cout < limit:
+        if  df.index.is_monotonic_increasing:
+            increasing = True
+            df = df.sort_index(ascending=False)
+        else:
+            increasing = False
+
+        # temp_df = df.iloc[0]
+
+        runtimes = limit-id_cout
+        df = df.reset_index()
+        # for t in range(runtimes):
+        #     df.loc[df.shape[0]] = temp_df
+        temp = df.loc[np.repeat(df.index[-1], runtimes)].reset_index(drop=True)
+        # df = df.append(temp)
+        df = pd.concat([df, temp], axis=0)
+
+        df = df.reset_index(drop=True)
+
+        df=df.sort_index(ascending=False)
+
+    
 
     # --- BOLLINGER BANDS ---
     bb = ta.bbands(df['close'], length=20, std=2, mamode='sma')
@@ -903,6 +905,367 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
 
     if increasing is not None:
         df = df.sort_index(ascending=increasing)
+    return df
+
+def detect_local_extremes(df, base_window=10, tol_pct=0.01):
+    """
+    动态识别局部高低点和极点
+    df: 包含 'high', 'low', 'close' 列的 DataFrame
+    base_window: 基础滚动窗口长度，可随数据长度动态调整
+    tol_pct: 极值容差百分比
+    """
+    N = max(3, min(base_window, len(df)//10))  # 动态窗口：最少3天，最多数据长度的1/10
+    
+    LLV_L_N = df['low'].rolling(N, min_periods=1).min()
+    HHV_H_N = df['high'].rolling(N, min_periods=1).max()
+    
+    # 容差匹配
+    df['局部低点'] = np.where(df['low'] <= LLV_L_N * (1 + tol_pct), -1, 0)
+    df['局部高点'] = np.where(df['high'] >= HHV_H_N * (1 - tol_pct), 1, 0)
+    
+    # 极点和局部极点
+    df['极点'] = df['局部高点'] + df['局部低点']
+    df['局部极点'] = df['close'].where(df['极点'] != 0, np.nan)
+    # 简化：中枢上轨ZG = 最近两个极点高点最小,中枢下轨ZD = 最近两个极点低点最大
+    high_peaks = df['high'].where(df['局部高点'] == 1)
+    low_troughs = df['low'].where(df['局部低点'] == -1)
+
+    # df['ZSG'] = high_peaks.rolling(2, min_periods=1).min()
+    # df['ZSD'] = low_troughs.rolling(2, min_periods=1).max()
+    df['ZSH'] = high_peaks.rolling(2, min_periods=1).max()
+    df['ZSL'] = low_troughs.rolling(2, min_periods=1).min()
+
+    return df
+
+
+def extend_signals(df: pd.DataFrame, N1: int = 10, N2: int = 10, DISP: int = 2) -> pd.DataFrame:
+    """
+    在 get_tdx_macd 基础上扩展：
+    - 中枢 ZSD/ZSG/ZSH/ZSL
+    - 局部极点 极点/局部极点
+    - 买卖信号 BUY_SIGNAL/SELL_SIGNAL
+    """
+
+    df = df.copy()
+
+    # 确保价格列
+    H = df['high']
+    L = df['low']
+    C = df['close']
+
+    # --------------------
+    # 1. 极点计算（局部高低点）
+    # --------------------
+    LLV_L_N1 = L.rolling(N1).min()
+    HHV_H_N1 = H.rolling(N1).max()
+
+    # 局部低点
+    df['局部低点'] = np.where((L == LLV_L_N1.shift(1)), -1, 0)
+    # 局部高点
+    df['局部高点'] = np.where((H == HHV_H_N1.shift(1)), 1, 0)
+    # 极点 = 高点1 / 低点-1 / 其他0
+    df['极点'] = df['局部高点'] + df['局部低点']
+    df['局部极点'] = df['close'].where(df['极点'] != 0, np.nan)
+
+    # --------------------
+    # 2. 中枢计算
+    # --------------------
+    # 简化：中枢上轨ZG = 最近两个极点高点最小,中枢下轨ZD = 最近两个极点低点最大
+    high_peaks = df['high'].where(df['局部高点'] == 1)
+    low_troughs = df['low'].where(df['局部低点'] == -1)
+
+    df['ZSG'] = high_peaks.rolling(2, min_periods=1).min()
+    df['ZSD'] = low_troughs.rolling(2, min_periods=1).max()
+    df['ZSH'] = high_peaks.rolling(2, min_periods=1).max()
+    df['ZSL'] = low_troughs.rolling(2, min_periods=1).min()
+
+    # --------------------
+    # 3. 买卖信号（基于短中期均线交叉）
+    # --------------------
+    # 假设 df 已经包含 MA10d, MA101d, MA102d, MA20d, MA201d, MA202d
+    # df['buy_signal'] = ((df['ma10d'] > df['ma20d']) & (df['ma101d'] > df['ma201d'])).astype(int)
+    # df['sell_signal'] = ((df['ma10d'] < df['ma20d']) & (df['ma101d'] < df['ma201d'])).astype(int)
+
+
+    # --------------------
+    # 4. 保留 MACD/RSI/KDJ 等
+    # --------------------
+    # 假设 df 已经包含 MACD, MACD_signal, MACD_hist, RSI, KDJ_K, KDJ_D, KDJ_J
+    # 如果不存在，可以调用 get_tdx_macd 先计算
+
+    return df
+
+
+# def detect_local_extremes_filtered(df, base_window=10, tol_pct=0.01):
+#     """
+#     动态识别局部高低点和极点，并过滤连续噪音点
+#     df: 包含 'high', 'low', 'close' 列的 DataFrame
+#     base_window: 基础滚动窗口长度
+#     tol_pct: 极值容差百分比
+#     """
+#     df = df.copy()
+#     # N = max(3, min(base_window, len(df)//10))  # 动态窗口
+#     N = 10  # 动态窗口
+
+#     # 原始局部高低点
+#     LLV_L_N = df['low'].rolling(N, min_periods=1).min()
+#     HHV_H_N = df['high'].rolling(N, min_periods=1).max()
+    
+#     df['局部低点_raw'] = np.where(df['low'] <= LLV_L_N * (1 + tol_pct), -1, 0)
+#     df['局部高点_raw'] = np.where(df['high'] >= HHV_H_N * (1 - tol_pct), 1, 0)
+    
+#     # 过滤噪音：只保留窗口内极端值
+#     low_indices = np.where(df['局部低点_raw'] != 0)[0]
+#     high_indices = np.where(df['局部高点_raw'] != 0)[0]
+#     df['局部低点'] = 0
+#     df['局部高点'] = 0
+
+#     for i in low_indices:
+#         win = df['low'].iloc[max(0, i-N+1):i+1]
+#         if win.idxmin() == df.index[i]:
+#             df.at[df.index[i], '局部低点'] = -1
+
+#     for i in high_indices:
+#         win = df['high'].iloc[max(0, i-N+1):i+1]
+#         if win.idxmax() == df.index[i]:
+#             df.at[df.index[i], '局部高点'] = 1
+
+
+#     # 极点和局部极点
+#     df['极点'] = df['局部高点'] + df['局部低点']
+#     df['局部极点'] = df['close'].where(df['极点'] != 0, np.nan)
+    
+#     # 删除临时列
+#     df.drop(columns=['局部低点_raw', '局部高点_raw'], inplace=True)
+#     # 简化：中枢上轨ZG = 最近两个极点高点最小,中枢下轨ZD = 最近两个极点低点最大
+#     high_peaks = df['high'].where(df['局部高点'] == 1)
+#     low_troughs = df['low'].where(df['局部低点'] == -1)
+
+#     # df['ZSG'] = high_peaks.rolling(2, min_periods=1).min()
+#     # df['ZSD'] = low_troughs.rolling(2, min_periods=1).max()
+#     df['ZSH'] = high_peaks.rolling(2, min_periods=1).max()
+#     df['ZSL'] = low_troughs.rolling(2, min_periods=1).min()
+
+#     # 只保留最后一个有效值，放在最后一天
+#     # for col in ['ZSG', 'ZSD', 'ZSH', 'ZSL']:
+#     #     last_valid = df[col].replace(-101, np.nan).dropna()
+#     #     last_value = last_valid.iloc[-1] if not last_valid.empty else np.nan
+#     #     df[col] = np.nan
+#     #     df[col].iloc[-1] = last_value
+#     # 自动识别最后连续有效区间，并只保留最后一天
+#     # for col in ['ZSG', 'ZSD', 'ZSH', 'ZSL']:
+#     for col in ['ZSH', 'ZSL']:
+#         # 过滤无效值
+#         valid_series = df[col].replace(-101, np.nan)
+#         # 找到最后连续有效值
+#         last_valid = valid_series.dropna()
+#         last_value = last_valid.iloc[-1] if not last_valid.empty else np.nan
+#         # 清空列，最后一天放置最后有效值
+#         df[col] = np.nan
+#         df.at[df.index[-1], col] = last_value
+
+#     return df
+
+
+def detect_local_extremes_filtered(df, N=10, tol_pct=0.01):
+    """
+    动态识别局部高低点和极点，并只在最后一天放置中枢相关值。
+    
+    df: 包含 'high', 'low', 'close' 列的 DataFrame
+    N: 计算局部高低点的滚动窗口长度
+    tol_pct: 极值容差百分比
+    """
+    df = df.copy()
+    # 1. 原始局部高低点
+    LLV_L_N = df['low'].rolling(N, min_periods=1).min()
+    HHV_H_N = df['high'].rolling(N, min_periods=1).max()
+    
+    df['局部低点'] = np.where(df['low'] <= LLV_L_N * (1 + tol_pct), -1, 0)
+    df['局部高点'] = np.where(df['high'] >= HHV_H_N * (1 - tol_pct), 1, 0)
+    
+    # 2. 只保留窗口内极值
+    low_idx = np.where(df['局部低点'] != 0)[0]
+    high_idx = np.where(df['局部高点'] != 0)[0]
+    
+    for i in low_idx:
+        if df['low'].iloc[max(0, i-N+1):i+1].idxmin() == df.index[i]:
+            df.at[df.index[i], '局部低点'] = -1
+        else:
+            df.at[df.index[i], '局部低点'] = 0
+
+    for i in high_idx:
+        if df['high'].iloc[max(0, i-N+1):i+1].idxmax() == df.index[i]:
+            df.at[df.index[i], '局部高点'] = 1
+        else:
+            df.at[df.index[i], '局部高点'] = 0
+    
+    # 3. 极点和局部极点
+    # df['极点'] = df['局部高点'] + df['局部低点']
+    # df['局部极点'] = df['close'].where(df['极点'] != 0, np.nan)
+    
+    # 4. 中枢上轨/下轨，只保留最后一天有效
+    high_peaks = df['high'].where(df['局部高点'] == 1)
+    low_troughs = df['low'].where(df['局部低点'] == -1)
+    
+    df['ZSH'] = high_peaks.max()  # 最大高点
+    df['ZSL'] = low_troughs.min()  # 最小低点
+    
+    # 清空列，只在最后一天放置值
+    df['ZSH'] = np.nan
+    df['ZSL'] = np.nan
+    if not high_peaks.dropna().empty:
+        df.at[df.index[-1], 'ZSH'] = high_peaks.dropna().iloc[-1]
+    if not low_troughs.dropna().empty:
+        df.at[df.index[-1], 'ZSL'] = low_troughs.dropna().iloc[-1]
+
+    return df
+
+# ============================================
+# ============   技术指标整合版   =============
+# ============================================
+
+def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_period: int = 9) -> pd.DataFrame:
+    """
+    统一计算：
+      - BOLL, MACD, RSI, KDJ
+      - EMA10/20, SWL/SWS 支撑压力
+      - 明日支撑/阻力, 分数（XX）
+    """
+    if df.empty or not all(col in df.columns for col in ['close', 'high', 'low']):
+        return df.copy()
+
+    increasing = None
+    id_cout = len(df)
+    limit = min_len
+
+    # ----------- 补足长度（回测时平滑） -----------
+    # if id_cout < limit:
+    #     if df.index.is_monotonic_increasing:
+    #         increasing = True
+    #         df = df.sort_index(ascending=False)
+    #     else:
+    #         increasing = False
+
+    #     temp = df.iloc[-1:].copy()
+    #     df = pd.concat([df, temp.loc[np.repeat(temp.index[0], limit - id_cout)]], axis=0).reset_index(drop=True)
+    #     df = df.sort_index(ascending=False)
+    if id_cout < limit:
+        if  df.index.is_monotonic_increasing:
+            increasing = True
+            df = df.sort_index(ascending=False)
+        else:
+            increasing = False
+
+        runtimes = limit-id_cout
+        df = df.reset_index()
+        # for t in range(runtimes):
+        #     df.loc[df.shape[0]] = temp_df
+        temp = df.loc[np.repeat(df.index[-1], runtimes)].reset_index(drop=True)
+        # df = df.append(temp)
+        df = pd.concat([df, temp], axis=0)
+
+        df = df.reset_index(drop=True)
+
+        df=df.sort_index(ascending=False)
+
+    # --- BOLLINGER BANDS ---
+    bb = ta.bbands(df['close'], length=20, std=2, mamode='sma')
+    df['lower'] = bb['BBL_20_2.0']
+    df['upper'] = bb['BBU_20_2.0']
+    df['ene'] = bb['BBM_20_2.0']
+    df['bandwidth'] = df['upper'] - df['lower']
+    df['bollpect'] = (df['close'] - df['lower']) / df['bandwidth'] * 100
+
+    # --- MACD ---
+    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
+    df['macddif'] = macd['MACD_12_26_9']
+    df['macddea'] = macd['MACDs_12_26_9']
+    df['macd'] = macd['MACDh_12_26_9']
+    for i in range(1, 7):
+        df[f'macdlast{i}'] = df['macd'].shift(i - 1)
+
+    # --- RSI ---
+    df['rsi'] = ta.rsi(df['close'], length=rsi_period)
+
+    # --- KDJ ---
+    kdj = ta.stoch(high=df['high'], low=df['low'], close=df['close'], k=3, d=3, smooth_k=3)
+    df['kdj_k'] = kdj['STOCHk_3_3_3']
+    df['kdj_d'] = kdj['STOCHd_3_3_3']
+    df['kdj_j'] = 3 * df['kdj_k'] - 2 * df['kdj_d']
+
+    # ========== 均线与支撑压力 ==========
+    df["EMA10"] = df["close"].ewm(span=10, adjust=False).mean()
+    df["EMA20"] = df["close"].ewm(span=20, adjust=False).mean()
+    df["SWL"] = (df["EMA10"] * 7 + df["EMA20"] * 3) / 10  # 支撑线
+
+    vol5 = df["vol"].rolling(5).sum()
+    df["CAPITAL"] = df.get("CAPITAL", vol5.rolling(20).mean())
+    if len(df) < 100:
+        df["SWS"] = df["EMA20"].copy()
+    else:
+        factor = np.maximum(1, 100 * (vol5 / (3 * df["CAPITAL"])))
+        alpha = 2 / (1 + factor.clip(1, 200))  # 动态平滑因子
+
+        # 初始化第一个值（可用EMA20首个值）
+        df["SWS"] = np.nan
+        df.iloc[0, df.columns.get_loc("SWS")] = df.iloc[0]["EMA20"]
+
+        # 动态加权平均（模拟 DMA）
+        for i in range(1, len(df)):
+            prev_sws = df.iloc[i - 1]["SWS"]
+            ema20_now = df.iloc[i]["EMA20"]
+            a = alpha.iloc[i]
+            df.iloc[i, df.columns.get_loc("SWS")] = a * ema20_now + (1 - a) * prev_sws
+
+        # 补 NaN
+        df["SWS"] = df["SWS"].fillna(method="ffill").fillna(df["EMA20"])
+
+    # ========== 明日支撑 / 阻力 ==========
+    E = (df["high"] + df["low"] + df["open"] + 2 * df["close"]) / 5
+    df["resist_next"] = 2 * E - df["low"]
+    df["support_next"] = 2 * E - df["high"]
+    df["break_next"] = E + (df["high"] - df["low"])
+    df["reverse_next"] = E - (df["high"] - df["low"])
+    df["resist_today"] = df["resist_next"].shift(1)
+    df["support_today"] = df["support_next"].shift(1)
+
+    # ========== 量化评分（XX） ==========
+    X1 = np.where(df["close"].rolling(5).mean() > df["close"].rolling(10).mean(), 20, 0)
+    X2 = np.where(df["close"].rolling(20).mean() > df["close"].rolling(60).mean(), 10, 0)
+    X3 = np.where(df["kdj_j"] > df["kdj_k"], 10, 0)
+    X4 = np.where(df["macddif"] > df["macddea"], 10, 0)
+    X5 = np.where(df["macd"] > 0, 10, 0)
+
+    X6 = np.where(df["vol"] > df["vol"].rolling(60).mean(), 10, 0)
+    X7 = np.where(
+        (df["close"] - df["low"].rolling(60).min()) /
+        (df["high"].rolling(60).max() - df["low"].rolling(60).min()) > 0.5, 10, 0
+    )
+    X8 = np.where(df["close"] / df["close"].shift(1) > 1.03, 10, 0)
+    df["score"] = X1 + X2 + X3 + X4 + X5 + X6 + X7 + X8
+
+    # ======== 清理格式 =========
+    df = df.fillna(0)
+
+    # if df.index.name != 'date':
+    #     if 'date' in df.columns:
+    #         df = df.set_index('date')
+    #     else:
+    #         df.index.name = 'date'
+
+    # if increasing is not None:
+    #     df = df.sort_index(ascending=increasing)
+
+    if df.index.name != 'date':
+        df=df[-id_cout:].set_index('date')
+    else:
+        df=df[-id_cout:]
+
+    if increasing is not None:
+        df = df.sort_index(ascending=increasing)
+    # df = extend_signals(df)
+    # df = detect_local_extremes(df)
+    df = detect_local_extremes_filtered(df)
     return df
 
 
@@ -3027,6 +3390,7 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
         # df['ma60d'].fillna(0)
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
+
     df = get_tdx_macd(df)
     return df
 
