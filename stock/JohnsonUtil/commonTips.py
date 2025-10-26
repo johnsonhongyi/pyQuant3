@@ -2143,7 +2143,6 @@ def get_work_day_idx():
     #     return 5
     return day_n
 
-def last_tddate(days=1):
     # # today = datetime.datetime.today().date() + datetime.timedelta(-days)
     # if days is None:
     #     return days
@@ -2163,7 +2162,8 @@ def last_tddate(days=1):
     #         dt = get_lastdays_trade_date(days)
     #         GlobalValues().setkey(f'last_tddate-{days}',dt)
     #         log.debug(f'setkey:last_tddate-{days} : {dt}')
-
+    
+def last_tddate(days=1):
     return get_lastdays_trade_date(days)
    
 # def last_tddate(days=1):
