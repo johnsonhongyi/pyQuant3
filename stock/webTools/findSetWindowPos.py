@@ -935,12 +935,49 @@ def run_system_fpath(fpath):
     else:
         print("fpath:%s isn't exist"%(fpath))
 
+def get_tdx_ths_position_eval(titleName='sina_Monitor.py'):
+    displaySet =Display_Detection()
+    displayNum = displaySet[0]
+    displayMainRes = displaySet[1][0]
+    if displaySet[0] > 1:
+        # print(f"displaySet:{displaySet}")
+        proc_title =  [proc for proc in tdx_ths_positionDouble.keys()]
+        # proc_title =  [proc for proc in sorted(tdx_ths_positionDouble.keys(),reverse=False)]
+        # positon = tdx_ths_positionDouble
+        displayRes = 0 
+        # displayRes = displaySet[1][0] + displaySet[2][0]
+        for i in range(1, displaySet[0]+1 ):
+            displayRes = displayRes + displaySet[i][0]
+            # print(f'i:{i} displayRes;{displayRes} , displaySet[{i}][0]: {displaySet[i][0]}')
+        # print(f"displayMainRes:{displayMainRes} displayRes:{displayRes} displaySet: {displaySet[0]}, 1: {displaySet[1][0]} 2: {displaySet[2][0]}")
+        if 3800 < displayRes < 4700:
+            displayRes = 4644
+        elif 4700 < displayRes:
+            displayRes = 5376
+        tdx_ths_position_eval = 'tdx_ths_position%s'%(displayRes)
+        positon = eval(tdx_ths_position_eval)
+        proc_title =  [proc for proc in positon.keys()]
+        # print(f'proc_title:{proc_title}')
+        # print("positionDouble:%s  "%(tdx_ths_position_eval))
+
+    else:
+        # print(f"displaySet:{displaySet}")
+        # print("displaySet:%s %s"%(displaySet[0],displaySet[1][0]))
+        tdx_ths_position_eval = 'tdx_ths_position%s'%(displayMainRes)
+        
+        # print("positon:%s  "%(tdx_ths_position_eval))
+        positon = eval(tdx_ths_position_eval)
+        proc_title =  [proc for proc in positon.keys()]
+        # print(f'proc_title:{proc_title}')
+    if titleName in proc_title:
+        return positon[titleName]
+    return None
 if __name__ == '__main__':
     print('Process IDs:')
     # print(*list_pids(), sep='\n')
     print('\nWindows:\n')
     # print(*list_windows(all=False), sep='\n')
-
+    # print(get_tdx_ths_position_eval())
     # result3=find_proc_windows('行业跟随1.0',visible=True)
     # print(result3)
     print(FindWindowRectFromName('股票异动数据监控'))
@@ -1046,9 +1083,6 @@ if __name__ == '__main__':
 
     import sys
     sys.path.append("..")
-    # from JSONData import tdx_data_Day as tdd
-    # from JohnsonUtil import LoggerFactory as LoggerFactory
-    # from JohnsonUtil import johnson_cons as ct
     from JohnsonUtil import commonTips as cct
     
     displaySet =Display_Detection()
