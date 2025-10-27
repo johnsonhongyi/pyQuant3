@@ -24,6 +24,8 @@ import platform
 from screeninfo import get_monitors
 import pyperclip  # 用于复制到剪贴板
 import traceback
+from collections import deque
+
 # import matplotlib.pyplot as plt
 # plt.ion()  # 开启交互模式
 
@@ -38,7 +40,7 @@ def set_process_dpi_awareness():
     """强制设置进程的 DPI 意识级别，确保窗口不模糊。"""
     try:
         # Per-Monitor DPI Aware (2) - 推荐在 Windows 8.1/10/11 上使用
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
     except Exception:
         try:
             # System DPI Aware (1) - 备用
@@ -71,7 +73,6 @@ def get_windows_dpi_scale_factor():
         # 如果 scale == 1 且是远程桌面，则用 Tk 的效果（2倍）
         _is_rdp_session = is_rdp_session()
         print(f'is_rdp_session : {_is_rdp_session} os.environ.get("SESSIONNAME") : {os.environ.get("SESSIONNAME", "")}')
-        # if scale == 1.0 and (os.environ.get("SESSIONNAME", "").startswith("RDP") or os.environ.get("SESSIONNAME", "").startswith("Console")):
         if scale == 1.0 and _is_rdp_session:
             return 2.0
         return scale
@@ -83,7 +84,7 @@ def get_windows_dpi_scale_factor():
 # ----------------------------------------------------
 
 
-from PyQt5 import QtWidgets, QtCore
+from PyQt5 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 import numpy as np
 import hashlib
@@ -1060,8 +1061,8 @@ class StockMonitorApp(tk.Tk):
         from multiprocessing import Manager
         self.manager = Manager()
         self.global_dict = self.manager.dict()  # 共享字典
-        self.global_dict["resample"] = '3d'
-        # self.global_dict["resample"] = 'w'
+        # self.global_dict["resample"] = '3d'
+        self.global_dict["resample"] = 'w'
         self.global_values = cct.GlobalValues(self.global_dict)
         resample = self.global_values.getkey("resample")
         print(f'app init getkey resample:{self.global_values.getkey("resample")}')
@@ -1083,6 +1084,34 @@ class StockMonitorApp(tk.Tk):
 
         self.st_key_sort = self.global_values.getkey("st_key_sort") or "3 0"
 
+
+        # # ====== 底部状态栏 ======
+        # status_frame = tk.Frame(self, relief="sunken", bd=1)
+        # status_frame.pack(side="bottom", fill="x")
+
+        # # 使用 PanedWindow 水平分割，支持拖动
+        # pw = tk.PanedWindow(status_frame, orient=tk.HORIZONTAL, sashrelief="sunken", sashwidth=4)
+        # pw.pack(fill="x", expand=True)
+
+        # # 左侧状态信息
+        # left_frame = tk.Frame(pw, bg="#f0f0f0")
+        # self.status_var = tk.StringVar()
+        # status_label_left = tk.Label(
+        #     left_frame, textvariable=self.status_var, anchor="w", padx=10, pady=1
+        # )
+        # status_label_left.pack(fill="x", expand=True)
+
+        # # 右侧状态信息
+        # right_frame = tk.Frame(pw, bg="#f0f0f0")
+        # self.status_var2 = tk.StringVar()
+        # status_label_right = tk.Label(
+        #     right_frame, textvariable=self.status_var2, anchor="e", padx=10, pady=1
+        # )
+        # status_label_right.pack(fill="x", expand=True)
+
+        # # 添加左右面板 状态栏
+        # pw.add(left_frame, minsize=100, width=900)
+        # pw.add(right_frame, minsize=100, width=100)
 
         # ====== 底部状态栏 ======
         status_frame = tk.Frame(self, relief="sunken", bd=1)
@@ -1109,38 +1138,11 @@ class StockMonitorApp(tk.Tk):
         status_label_right.pack(fill="x", expand=True)
 
         # 添加左右面板 状态栏
-        pw.add(left_frame, minsize=100, width=850)
-        pw.add(right_frame, minsize=100, width=150)
+        # 动态调整宽度
+        self.update_status_bar_width(pw, left_frame, right_frame)
 
-
-        # 设置初始 6:4 比例
-        # self.update_idletasks()           # 先刷新窗口获取宽度
-        # total_width = pw.winfo_width()
-        # pw.sash_place(0, int(total_width * 0.6), 0)
-
-        # 初始化内容
-        # self.status_var_left.set("Ready")
-        # self.status_var_right.set("Rows: 0")
-
-        # # 底部容器
-        # bottom_frame = tk.Frame(self, bg="#f0f0f0")
-        # bottom_frame.pack(side=tk.BOTTOM, fill=tk.X)
-
-        # # 左边状态栏
-        # left_frame = tk.Frame(bottom_frame, bg="#f0f0f0")
-        # left_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        # self.status_var = tk.StringVar()
-        # self.status_label1 = tk.Label(left_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W, bg="#f0f0f0", padx=10, pady=2)
-        # self.status_label1.pack(fill=tk.X)
-
-        # # 右边任务状态
-        # right_frame = tk.Frame(bottom_frame, bg="#f0f0f0")
-        # right_frame.pack(side=tk.RIGHT)
-
-        # self.status_var2 = tk.StringVar()
-        # self.status_label2 = tk.Label(right_frame, textvariable=self.status_var2, relief=tk.SUNKEN, anchor=tk.W, bg="#f0f0f0", padx=10, pady=2)
-        # self.status_label2.pack(fill=tk.X, expand=True)
+        # 延时更新状态栏宽度
+        self.after(200, lambda: self.update_status_bar_width(pw, left_frame, right_frame))
 
 
 
@@ -1222,6 +1224,19 @@ class StockMonitorApp(tk.Tk):
         # 绑定双击事件
         # self.tree.bind("<Double-1>", self.on_double_click)
 
+    def update_status_bar_width(self, pw, left_frame, right_frame):
+        """ 根据 DPI 缩放调整左右面板的宽度比例 """
+        left_width = int(900 * self.scale_factor)
+        right_width = int(100 * self.scale_factor)
+
+        # 移除并重新添加左、右面板
+        pw.forget(left_frame)
+        pw.forget(right_frame)
+
+        pw.add(left_frame, minsize=100, width=left_width)
+        pw.add(right_frame, minsize=100, width=right_width)
+        # print(f'update_status_bar_width')
+
     # def correct_window_geometry(self, initial_x, initial_y, initial_w, initial_h):
     def correct_window_geometry(self):
         """
@@ -1296,7 +1311,7 @@ class StockMonitorApp(tk.Tk):
 
         if scale_factor > 1.0:
             # Tkinter 'scaling' 值 = (系统 DPI / 72 DPI)
-            print(f'scale_factor : {scale_factor} {self.scale_factor}')
+            print(f'scale_factor apply: {scale_factor} {self.scale_factor}')
             tk_scaling_value = (scale_factor * DEFAULT_DPI) / 72.0 
             # 这一步会放大所有基于像素定义的组件尺寸和默认字体大小
             self.tk.call('tk', 'scaling', tk_scaling_value)
@@ -1330,7 +1345,7 @@ class StockMonitorApp(tk.Tk):
             )
             
             print(f"✅ Tkinter DPI 自动缩放应用于 {scale_factor}x，Treeview 行高设置为 {scaled_row_height}")
-
+        return scale_factor
 
     def bind_treeview_column_resize(self):
         def on_column_release(event):
@@ -1683,20 +1698,42 @@ class StockMonitorApp(tk.Tk):
     #         #     percent = df_all.loc[code, 'per1d']
     #         return code, percent
 
+    # def get_stock_code_none(self, code=None):
+    #     df_all = self.df_all.copy()
+    #     # --- 如果没有 percent 列，用 per1d 补充 ---
+    #     if 'percent' not in df_all.columns and 'per1d' in df_all.columns:
+    #         df_all['percent'] = df_all['per1d']
+    #     elif 'percent' in df_all.columns and 'per1d' in df_all.columns:
+    #         df_all['percent'] = df_all.apply(
+    #             lambda r: r['per1d'] if pd.isna(r['percent']) or r['percent']==0 else r['percent'],
+    #             axis=1
+    #         )
+
+    #     # --- 判断市场是否开盘 ---
+    #     zero_ratio = (df_all['percent'] == 0).sum() / len(df_all)
+    #     use_per1d = zero_ratio > 0.5 and 'per1d' in df_all.columns
     def get_stock_code_none(self, code=None):
         df_all = self.df_all.copy()
+
         # --- 如果没有 percent 列，用 per1d 补充 ---
         if 'percent' not in df_all.columns and 'per1d' in df_all.columns:
             df_all['percent'] = df_all['per1d']
         elif 'percent' in df_all.columns and 'per1d' in df_all.columns:
+            # 优先使用非空且非0的percent，否则用per1d
             df_all['percent'] = df_all.apply(
-                lambda r: r['per1d'] if pd.isna(r['percent']) or r['percent']==0 else r['percent'],
+                lambda r: r['per1d'] if pd.isna(r['percent']) or r['percent'] == 0 else r['percent'],
                 axis=1
             )
 
-        # --- 判断市场是否开盘 ---
+        # --- 判断是否需要用 per1d 替换 ---
         zero_ratio = (df_all['percent'] == 0).sum() / len(df_all)
-        use_per1d = zero_ratio > 0.5 and 'per1d' in df_all.columns
+        extreme_ratio = ((df_all['percent'] >= 100) | (df_all['percent'] <= -100)).mean()
+
+        # 如果停牌占比高 或 有 ±100% 的异常，使用 per1d
+        use_per1d = (zero_ratio > 0.5 or extreme_ratio > 0.01) and 'per1d' in df_all.columns
+
+        if use_per1d:
+            df_all['percent'] = df_all['per1d']
 
         # --- 处理 code ---
         if code is None or code not in df_all.index:
@@ -1713,10 +1750,20 @@ class StockMonitorApp(tk.Tk):
                 percent = df_all.loc[code, 'per1d']
             return code, percent
 
-
+    
 
     def get_following_concepts_by_correlation(self, code, top_n=10):
-
+        def compute_follow_ratio(percents, stock_percent):
+            """
+            percents: 概念内所有股票涨幅列表
+            stock_percent: 目标股票或大盘涨幅
+            """
+            percents = np.array(percents)
+            stock_sign = np.sign(stock_percent)
+            stock_sign = 1 if stock_sign > 0 else (-1 if stock_sign < 0 else 0)
+            # 概念内每只股票是否跟随
+            follow_flags = np.sign(percents) == stock_sign
+            return follow_flags.sum() / len(percents)
         df_all = self.df_all.copy()
         # --- ✅ 修正涨幅替代逻辑 ---
         if 'percent' in df_all.columns and 'per1d' in df_all.columns:
@@ -1758,10 +1805,6 @@ class StockMonitorApp(tk.Tk):
             print(f"[INFO] {code} 无概念数据。")
             return []
 
-        # --- 构建概念 -> 股票涨幅列表 ---
-        # concept_dict = self._concept_dict_global
-        # print(f'concept_dict : {concept_dict}')
-
         concept_dict = {}
         for idx, row in df_all.iterrows():
             categories = [c.strip() for c in str(row['category']).split(';') if c.strip()]
@@ -1780,7 +1823,8 @@ class StockMonitorApp(tk.Tk):
                 continue
 
             avg_percent = sum(percents) / len(percents)
-            follow_ratio = sum(1 for p in percents if p <= stock_percent) / len(percents)
+            # follow_ratio = sum(1 for p in percents if p <= stock_percent) / len(percents)
+            follow_ratio = compute_follow_ratio(percents, stock_percent)
             score = avg_percent * follow_ratio
             concept_score.append((c, score, avg_percent, follow_ratio))
 
@@ -1788,51 +1832,6 @@ class StockMonitorApp(tk.Tk):
         concept_score.sort(key=lambda x: x[1], reverse=True)
         return concept_score[:10]
 
-        # # --- 获取股票所属的概念列表 ---
-        # stock_categories = [
-        #     c.strip() for c in str(stock_row.get('category', '')).split(';') if c.strip()
-        # ]
-        # if not stock_categories:
-        #     print(f"[INFO] {code} 无概念数据。")
-        #     return []
-
-        # # --- 构建概念 -> 股票涨幅列表 ---
-        # concept_dict = {}
-        # for idx, row in df_all.iterrows():
-        #     categories = [c.strip() for c in str(row['category']).split(';') if c.strip()]
-        #     for c in categories:
-        #         concept_dict.setdefault(c, []).append(row['percent'])
-
-        # # --- 计算概念强度（仅限该股票所属的概念）---
-        # concept_score = []
-
-        # for c, percents in concept_dict.items():
-        #     percents = [p for p in percents if not pd.isna(p)]
-        #     if len(percents) < 1:
-        #         continue  # ✅ 跳过没有股票的概念
-
-        #     avg_percent = sum(percents) / len(percents)
-        #     follow_ratio = sum(1 for p in percents if p <= stock_percent) / len(percents)
-        #     score = avg_percent * follow_ratio
-
-        #     # ✅ 如果该概念中根本没有包含目标股票，且 top_n=1（用于“强势概念识别”）
-        #     # 就可以直接跳过，防止错误地识别无关概念。
-        #     if top_n == 1:
-        #         # 获取股票所属概念
-        #         row = df_all.loc[code]  # 直接按索引取行
-        #         stock_categories = [c.strip() for c in str(row.get('category', '')).split(';') if c.strip()]
-        #         # stock_categories = [c.strip() for c in str(df_all.loc[df_all['code'] == code, 'category'].values[0]).split(';')]
-        #         if c not in stock_categories:
-        #             continue
-
-        #     concept_score.append((c, score, avg_percent, follow_ratio))
-
-
-        # # --- 排序 ---
-        # concept_score.sort(key=lambda x: x[1], reverse=True)
-
-        # # --- 只取前 top_n（但仅限该股票所属的）---
-        # return concept_score[:top_n]
 
     def get_following_concepts_by_correlation_all(self, code, top_n=10):
         df_all = self.df_all.copy()
@@ -2639,28 +2638,61 @@ class StockMonitorApp(tk.Tk):
         # self.status_var.set(status_text)
         # print(status_text)
 
-    # ----------------- Checkbuttons ----------------- #
+    def scale_size(self,base_size):
+        """根据 DPI 缩放返回尺寸"""
+        scale = get_windows_dpi_scale_factor()
+        return int(base_size * scale)
+    
+    # def init_checkbuttons(self, parent_frame):
+    #     frame_right = tk.Frame(parent_frame, bg="#f0f0f0")
+    #     frame_right.pack(side=tk.RIGHT, padx=2, pady=1)
+
+    #     self.tdx_var = tk.BooleanVar(value=True)
+    #     self.ths_var = tk.BooleanVar(value=True)
+    #     self.dfcf_var = tk.BooleanVar(value=False)
+    #     # self.uniq_var = tk.BooleanVar(value=False)
+    #     # self.sub_var = tk.BooleanVar(value=False)
+    #     # ("Uniq", self.uniq_var),
+    #     # ("Sub", self.sub_var)
+
+    #     checkbuttons_info = [
+    #         ("TDX", self.tdx_var),
+    #         ("THS", self.ths_var),
+    #         ("DC", self.dfcf_var),
+    #     ]
+    #     for text, var in checkbuttons_info:
+    #         cb = tk.Checkbutton(frame_right, text=text, variable=var, command=self.update_linkage_status,
+    #                             bg="#f0f0f0", font=('Microsoft YaHei', 9),
+    #                             padx=0, pady=0, bd=0, highlightthickness=0)
+    #         cb.pack(side=tk.LEFT, padx=1)
+
     def init_checkbuttons(self, parent_frame):
-        frame_right = tk.Frame(parent_frame, bg="#f0f0f0")
+        # 保持 Tk.Frame 不变，因为它是容器
+        frame_right = tk.Frame(parent_frame, bg="#f0f0f0") 
         frame_right.pack(side=tk.RIGHT, padx=2, pady=1)
 
         self.tdx_var = tk.BooleanVar(value=True)
         self.ths_var = tk.BooleanVar(value=True)
         self.dfcf_var = tk.BooleanVar(value=False)
-        # self.uniq_var = tk.BooleanVar(value=False)
-        # self.sub_var = tk.BooleanVar(value=False)
-        # ("Uniq", self.uniq_var),
-        # ("Sub", self.sub_var)
 
         checkbuttons_info = [
             ("TDX", self.tdx_var),
             ("THS", self.ths_var),
             ("DC", self.dfcf_var),
         ]
+        
+        # 💥 修正：使用 ttk.Checkbutton 替代 tk.Checkbutton
         for text, var in checkbuttons_info:
-            cb = tk.Checkbutton(frame_right, text=text, variable=var, command=self.update_linkage_status,
-                                bg="#f0f0f0", font=('Microsoft YaHei', 9),
-                                padx=0, pady=0, bd=0, highlightthickness=0)
+            cb = ttk.Checkbutton(
+                frame_right, 
+                text=text, 
+                variable=var, 
+                command=self.update_linkage_status,
+                # 💥 注意：ttk 组件不再使用 bg, font 等直接参数
+                # bg="#f0f0f0", 
+                # font=('Microsoft YaHei', 9), # 字体应该通过 Style 统一设置
+                # padx=0, pady=0, bd=0, highlightthickness=0
+            )
             cb.pack(side=tk.LEFT, padx=1)
 
     def update_linkage_status(self):
@@ -3296,6 +3328,10 @@ class StockMonitorApp(tk.Tk):
     def show_category_detail(self, code, name, category_content):
         def on_close():
             """关闭时清空引用"""
+            try:
+                self.save_window_position(self.detail_win, "detail_win_Category")
+            except Exception:
+                pass
             if self.detail_win and self.detail_win.winfo_exists():
                 self.detail_win.destroy()
             self.detail_win = None
@@ -3328,15 +3364,18 @@ class StockMonitorApp(tk.Tk):
 
         else:
             # 第一次创建
+
             self.detail_win = tk.Toplevel(self)
             self.detail_win.title(f"{code} {name} - Category Details")
             # 先强制绘制一次
             # self.detail_win.update_idletasks()
             self.detail_win.withdraw()  # 先隐藏，避免闪到默认(50,50)
 
-            win_width, win_height = 400, 200
-            x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
-            self.detail_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
+            self.load_window_position(self.detail_win, "detail_win_Category", default_width=400, default_height=200)
+
+            # win_width, win_height = 400, 200
+            # x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
+            # self.detail_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
             # 再显示出来
             self.detail_win.deiconify()
 
@@ -3373,7 +3412,6 @@ class StockMonitorApp(tk.Tk):
             # 初次创建才强制前置
             self.detail_win.focus_force()
             self.detail_win.lift()
-
 
     def on_double_click(self, event):
         # print(f'on_double_click')
@@ -4386,11 +4424,6 @@ class StockMonitorApp(tk.Tk):
         self._label_widgets = []
         self._selected_index = 0
 
-        # --- 键盘事件绑定 ---
-        # canvas.bind_all("<Up>", lambda e: self._on_key(e))
-        # canvas.bind_all("<Down>", lambda e: self._on_key(e))
-        # canvas.bind_all("<Prior>", lambda e: self._on_key(e))
-        # canvas.bind_all("<Next>", lambda e: self._on_key(e))
         # 键盘事件只在滚动区域有效
         canvas.bind("<Up>", self._on_key)
         canvas.bind("<Down>", self._on_key)
@@ -4557,6 +4590,7 @@ class StockMonitorApp(tk.Tk):
         self._update_selection_top10(idx)
         """点击异动窗口中的股票代码"""
         self.select_code = code
+
         # print(f"select_code: {code}")
         # ✅ 可改为打开详情逻辑，比如：
         self.sender.send(code)
@@ -4599,30 +4633,165 @@ class StockMonitorApp(tk.Tk):
     #     for i, lbl in enumerate(self._top10_label_widgets):
     #         lbl.configure(bg="lightblue" if i == idx else "SystemButtonFace")
 
+    # def _update_selection_top10(self, idx):
+    #     """更新 Top10 窗口选中高亮并滚动"""
+    #     if not hasattr(self, "_concept_top10_win") or not self._concept_top10_win:
+    #         return
+    #     win = self._concept_top10_win
+    #     canvas = win._canvas_top10
+    #     scroll_frame = win._content_frame_top10
+
+    #     # 清除所有高亮
+    #     for lbl in self._top10_label_widgets:
+    #         lbl.configure(bg=win.cget("bg"))
+
+    #     # 高亮选中
+    #     if 0 <= idx < len(self._top10_label_widgets):
+    #         lbl = self._top10_label_widgets[idx]
+    #         self._top10_selected_index = idx
+    #         lbl.configure(bg="lightblue")
+    #         self._concept_top10_selected_index = idx
+
+    #         # 滚动 Canvas 使当前 Label 可见
+    #         canvas.update_idletasks()
+    #         scroll_frame.update_idletasks()
+    #         lbl_top = lbl.winfo_y()
+    #         lbl_bottom = lbl_top + lbl.winfo_height()
+    #         view_top = canvas.canvasy(0)
+    #         view_bottom = view_top + canvas.winfo_height()
+    #         if lbl_top < view_top:
+    #             canvas.yview_moveto(lbl_top / max(1, scroll_frame.winfo_height()))
+    #         elif lbl_bottom > view_bottom:
+    #             canvas.yview_moveto((lbl_bottom - canvas.winfo_height()) / max(1, scroll_frame.winfo_height()))
+
+    def _on_label_right_click_top10(self,code ,idx):
+        self._update_selection_top10(idx)
+        stock_code = code
+        if self.push_stock_info(stock_code,self.df_all.loc[stock_code]):
+            # 如果发送成功，更新状态标签
+            self.status_var2.set(f"发送成功: {stock_code}")
+        else:
+            # 如果发送失败，更新状态标签
+            self.status_var2.set(f"发送失败: {stock_code}")
+
+    def _on_label_double_click_top10(self, code, idx):
+        """
+        双击股票标签时，显示该股票所属概念详情。
+        如果 _label_widgets 不存在或 concept_name 获取失败，
+        则自动使用 code 计算该股票所属强势概念并显示详情。
+        """
+        try:
+            # ---------------- 原逻辑 ----------------
+            concept_name = None
+            # if hasattr(self, "_label_widgets"):
+            #     try:
+            #         concept_name = getattr(self._label_widgets[idx], "_concept", None)
+            #     except Exception:
+            #         concept_name = None
+
+            # ---------------- 回退逻辑 ----------------
+            if not concept_name:
+                # print(f"[Info] 未从 _label_widgets 获取到概念，尝试通过 {code} 自动识别强势概念。")
+                try:
+                    top_concepts = self.get_following_concepts_by_correlation(code, top_n=1)
+                    if top_concepts:
+                        concept_name = top_concepts[0][0]
+                        print(f"自动识别强势概念：{concept_name}")
+                    else:
+                        messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
+                        return
+                except Exception as e:
+                    print(f"[Error] 回退获取概念失败：{e}")
+                    traceback.print_exc()
+                    messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
+                    return
+
+            # ---------------- 绘图逻辑 ----------------
+            self.plot_following_concepts_pg(code,top_n=1)
+
+            # ---------------- 打开/复用 Top10 窗口 ----------------
+            self.show_concept_top10_window(concept_name)
+
+            if hasattr(self, "_concept_top10_win") and self._concept_top10_win:
+                win = self._concept_top10_win
+
+                # --- 更新标题 ---
+                win.title(f"{concept_name} 概念前10放量上涨股")
+
+                # --- 检查窗口状态 ---
+                try:
+                    state = win.state()
+
+                    if state == "iconic" or self.is_window_covered_by_main(win):
+                        win.deiconify()
+                        win.lift()
+                        win.focus_force()
+                        win.attributes("-topmost", True)
+                        win.after(100, lambda: win.attributes("-topmost", False))
+                    else:
+                        if not win.focus_displayof():
+                            win.lift()
+                            win.focus_force()
+
+                except Exception as e:
+                    print("窗口状态检查失败：", e)
+
+                # --- 恢复 Canvas 滚动位置 ---
+                if hasattr(win, "_canvas_top10"):
+                    canvas = win._canvas_top10
+                    yview = canvas.yview()
+                    canvas.focus_set()
+                    canvas.yview_moveto(yview[0])
+
+        except Exception as e:
+            print("获取概念详情失败：", e)
+            traceback.print_exc()
+
     def _update_selection_top10(self, idx):
         """更新 Top10 窗口选中高亮并滚动"""
         if not hasattr(self, "_concept_top10_win") or not self._concept_top10_win:
             return
+
         win = self._concept_top10_win
         canvas = win._canvas_top10
         scroll_frame = win._content_frame_top10
 
+        normal_bg = win.cget("bg")
+        highlight_bg = "lightblue"
+
         # 清除所有高亮
-        for lbl in self._top10_label_widgets:
-            lbl.configure(bg=win.cget("bg"))
+        for rf in self._top10_label_widgets:
+            if isinstance(rf, list):
+                for ch in rf:
+                    ch.configure(bg=normal_bg)
+            else:
+                for ch in rf.winfo_children():
+                    ch.configure(bg=normal_bg)
 
         # 高亮选中
         if 0 <= idx < len(self._top10_label_widgets):
-            lbl = self._top10_label_widgets[idx]
+            rf = self._top10_label_widgets[idx]
+            if isinstance(rf, list):
+                for ch in rf:
+                    ch.configure(bg=highlight_bg)
+                code = rf[0]._code
+            else:
+                for ch in rf.winfo_children():
+                    ch.configure(bg=highlight_bg)
+                code = rf.winfo_children()[0]._code
+
             self._top10_selected_index = idx
-            lbl.configure(bg="lightblue")
-            self._concept_top10_selected_index = idx
+            self.select_code = code
 
             # 滚动 Canvas 使当前 Label 可见
             canvas.update_idletasks()
             scroll_frame.update_idletasks()
-            lbl_top = lbl.winfo_y()
-            lbl_bottom = lbl_top + lbl.winfo_height()
+            if isinstance(rf, list):
+                lbl_top = rf[0].winfo_y()
+                lbl_bottom = rf[-1].winfo_y() + rf[-1].winfo_height()
+            else:
+                lbl_top = rf.winfo_y()
+                lbl_bottom = lbl_top + rf.winfo_height()
             view_top = canvas.canvasy(0)
             view_bottom = view_top + canvas.winfo_height()
             if lbl_top < view_top:
@@ -4630,8 +4799,297 @@ class StockMonitorApp(tk.Tk):
             elif lbl_bottom > view_bottom:
                 canvas.yview_moveto((lbl_bottom - canvas.winfo_height()) / max(1, scroll_frame.winfo_height()))
 
+            # 发送消息
+            self.sender.send(code)
+
 
     def show_concept_top10_window(self, concept_name):
+        """
+        显示指定概念的前10放量上涨股（可滚动、列排序、点击事件、复制筛选表达式）
+        """
+        if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
+            messagebox.showwarning("数据错误", "df_all 数据为空，无法筛选概念股票")
+            return
+
+        query_expr = f'category.str.contains("{concept_name}", na=False)'
+
+        try:
+            df_concept = self.df_all.query(query_expr)
+        except Exception as e:
+            messagebox.showerror("筛选错误", f"筛选表达式错误: {query_expr}\n{e}")
+            return
+
+        if df_concept.empty:
+            messagebox.showinfo("概念详情", f"概念【{concept_name}】暂无匹配股票")
+            return
+
+        df_concept = df_concept.copy()
+        if "percent" in df_concept.columns and "volume" in df_concept.columns:
+            df_top = df_concept[df_concept["percent"] > 0]
+            df_concept = df_top if not df_top.empty else df_concept[df_concept["per1d"] >= 0]
+        else:
+            messagebox.showinfo("概念详情", "df_all 缺少 'percent' 或 'volume' 列")
+            return
+
+        # --- 复用已存在窗口 ---
+        try:
+            if getattr(self, "_concept_top10_win", None) and self._concept_top10_win.winfo_exists():
+                win = self._concept_top10_win
+                win.deiconify()
+                win.lift()
+                for w in win._content_frame_top10.winfo_children():
+                    w.destroy()
+                self._fill_concept_top10_content(win, concept_name, df_concept)
+                win._canvas_top10.yview_moveto(0)
+                win._content_frame_top10.focus_set()
+                return
+        except Exception:
+            self._concept_top10_win = None
+
+        # --- 新建窗口 ---
+        win = tk.Toplevel(self)
+        self._concept_top10_win = win
+        win.title(f"{concept_name} 概念前10放量上涨股")
+        try:
+            self.load_window_position(win, "concept_top10_window", default_width=400, default_height=400)
+        except Exception:
+            win.geometry("400x400")
+
+        frame = tk.Frame(win)
+        frame.pack(fill="both", expand=True)
+
+        # --- Canvas + Scrollbar ---
+        canvas = tk.Canvas(frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(frame, orient="vertical", command=canvas.yview)
+        scroll_frame = tk.Frame(canvas)
+
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scroll_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        # --- 鼠标滚轮悬停滚动 ---
+        def on_mousewheel(event):
+            delta = 0
+            if hasattr(event, 'delta'):
+                delta = int(-1 * (event.delta / 120))  # Windows / Mac
+            elif event.num == 4:  # Linux
+                delta = -1
+            elif event.num == 5:
+                delta = 1
+            canvas.yview_scroll(delta, "units")
+
+        def bind_mousewheel(event):
+            canvas.bind_all("<MouseWheel>", on_mousewheel)
+            canvas.bind_all("<Button-4>", lambda e: canvas.yview_scroll(-1, "units"))
+            canvas.bind_all("<Button-5>", lambda e: canvas.yview_scroll(1, "units"))
+
+        def unbind_mousewheel(event=None):
+            try:
+                canvas.unbind_all("<MouseWheel>")
+                canvas.unbind_all("<Button-4>")
+                canvas.unbind_all("<Button-5>")
+            except Exception:
+                pass
+
+        canvas.bind("<Enter>", bind_mousewheel)
+        canvas.bind("<Leave>", unbind_mousewheel)
+
+        # --- 保存引用 ---
+        win._canvas_top10 = canvas
+        win._content_frame_top10 = scroll_frame
+        win._unbind_mousewheel_top10 = unbind_mousewheel
+
+        # --- 键盘上下翻页 ---
+        canvas.bind("<Up>", self._on_key_top10)
+        canvas.bind("<Down>", self._on_key_top10)
+        canvas.bind("<Prior>", self._on_key_top10)
+        canvas.bind("<Next>", self._on_key_top10)
+        win.after_idle(lambda: canvas.focus_set())
+
+        # --- 填充内容 ---
+        self._fill_concept_top10_content(win, concept_name, df_concept)
+
+        # --- 关闭事件 ---
+        def _on_close():
+            try:
+                self.save_window_position(win, "concept_top10_window")
+            except Exception:
+                pass
+            win._unbind_mousewheel_top10()
+            win.destroy()
+            self._concept_top10_win = None
+            self._canvas_top10 = None
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
+
+
+    def _fill_concept_top10_content(self, win, concept_name, df_concept):
+        """
+        概念Top10显示（紧凑行距、高亮整行、点击列头排序、显示总数）
+        """
+        frame = win._content_frame_top10
+        for w in frame.winfo_children():
+            w.destroy()
+
+        normal_bg = frame.cget("bg")
+        highlight_bg = "#d0e8ff"
+        font_row = ("微软雅黑", 9)
+        font_head = ("微软雅黑", 9, "bold")
+
+        # --- 排序 ---
+        self._top10_sort_state = getattr(self, "_top10_sort_state", {"col": "percent", "asc": False})
+        sort_col = self._top10_sort_state["col"]
+        ascending = self._top10_sort_state["asc"]
+
+        if sort_col in df_concept.columns:
+            df_concept = df_concept.sort_values(sort_col, ascending=ascending)
+
+        total_count = len(df_concept)
+
+        # --- 标题 ---
+        tk.Label(
+            frame,
+            text=f"📈 {concept_name}（共 {total_count} 支）",
+            font=("微软雅黑", 10, "bold"),
+            fg="blue",
+            anchor="w"
+        ).pack(anchor="w", pady=(0, 4), padx=8)
+
+        # --- 表头 ---
+        header_frame = tk.Frame(frame, bg="#efefef")
+        header_frame.pack(fill="x", padx=6, pady=(0, 3))
+
+        headers = [("code", "代码"), ("name", "名称"), ("percent", "涨幅(%)"), ("volume", "量")]
+        col_widths = [10, 12, 8, 10]
+        header_labels = {}
+
+        def on_header_click(col):
+            cur = self._top10_sort_state
+            if cur["col"] == col:
+                cur["asc"] = not cur["asc"]
+            else:
+                cur["col"] = col
+                cur["asc"] = False
+            self._top10_sort_state = cur
+            self._fill_concept_top10_content(win, concept_name, df_concept)
+
+        for i, (col, text) in enumerate(headers):
+            arrow = ""
+            if col == sort_col:
+                arrow = "↑" if ascending else "↓"
+            lbl = tk.Label(
+                header_frame,
+                text=f"{text}{arrow}",
+                font=font_head,
+                bg="#efefef",
+                width=col_widths[i],
+                anchor="center",
+                cursor="hand2"
+            )
+            lbl.grid(row=0, column=i, sticky="we", padx=(0, 2))
+            lbl.bind("<Button-1>", lambda e, c=col: on_header_click(c))
+            header_labels[col] = lbl
+
+        # --- 数据行 ---
+        self._top10_label_widgets = []
+        self._top10_selected_index = 0
+
+        def on_row_click(i,sender=True):
+            for rf in self._top10_label_widgets:
+                # 清空背景
+                if isinstance(rf, list):
+                    for ch in rf:
+                        ch.configure(bg=normal_bg)
+                else:
+                    for ch in rf.winfo_children():
+                        ch.configure(bg=normal_bg)
+
+            if 0 <= i < len(self._top10_label_widgets):
+                rf = self._top10_label_widgets[i]
+                # 高亮
+                if isinstance(rf, list):
+                    for ch in rf:
+                        ch.configure(bg=highlight_bg)
+                    code = rf[0]._code  # 获取 code
+                else:
+                    for ch in rf.winfo_children():
+                        ch.configure(bg=highlight_bg)
+                    code = rf.winfo_children()[0]._code  # 获取 code
+
+                # self._top10_selected_index = i
+                # self.select_code = code
+                # # 发送消息
+                # self.sender.send(code)
+
+                # # 滚动保持位置
+                # if hasattr(self._concept_top10_win, "_canvas_top10"):
+                #     canvas = self._concept_top10_win._canvas_top10
+                #     yview = canvas.yview()
+                #     self._concept_top10_win._canvas_top10.focus_set()
+                #     canvas.yview_moveto(yview[0])
+
+        for idx, (code, row) in enumerate(df_concept.iterrows()):
+            row_frame = tk.Frame(frame, bg=normal_bg)
+            row_frame.pack(fill="x", padx=8, pady=0)
+
+            vals = [row.name, row["name"], getattr(row, "percent", 0) or getattr(row, "per1d", 0), getattr(row, "volume", 0)]
+            aligns = ["w", "w", "e", "e"]
+
+            for j, (val, w, a) in enumerate(zip(vals, col_widths, aligns)):
+                lbl = tk.Label(
+                    row_frame,
+                    text=f"{val:.2f}" if isinstance(val, (float, int)) else str(val),
+                    width=w,
+                    anchor=a,
+                    font=font_row,
+                    bg=normal_bg,
+                    cursor="hand2"
+                )
+                lbl.grid(row=0, column=j, sticky="we", padx=(0, 2))
+                lbl._code = row.name
+                lbl._concept = concept_name
+
+
+            for child in row_frame.winfo_children():
+                child.bind("<Button-1>", lambda e, c=code, i=idx: self._on_label_on_code_click(c, i))
+                # child.bind("<Double-Button-1>", lambda e, c=code, i=idx: self._on_label_double_click(c, i))
+                child.bind("<Double-Button-1>", lambda e, c=code, i=idx: self._on_label_double_click_top10(c, i))
+                child.bind("<Button-3>", lambda e, c=code, i=idx: self._on_label_right_click_top10(c, i))
+
+
+            self._top10_label_widgets.append(row_frame)
+
+        # 默认选中第一行
+        if self._top10_label_widgets:
+            on_row_click(0)
+
+        # --- 底部按钮 ---
+        btn_frame = tk.Frame(frame)
+        btn_frame.pack(fill="x", pady=4)
+
+        def _copy_expr():
+            import pyperclip
+            q = f'category.str.contains("{concept_name}", na=False)'
+            pyperclip.copy(q)
+            toast_message(self, f"已复制筛选条件：{q}")
+
+        tk.Button(btn_frame, text="复制筛选表达式", command=_copy_expr).pack(side="left", padx=6)
+
+        try:
+            win._canvas_top10.yview_moveto(0)
+        except Exception:
+            pass
+
+
+
+
+
+    def show_concept_top10_window_nosort(self, concept_name):
         """
         显示指定概念的前10放量上涨股（复用窗口；支持滚轮/键盘/点击）
         """
@@ -4729,12 +5187,9 @@ class StockMonitorApp(tk.Tk):
         canvas.bind("<Button-5>", _on_mousewheel)     # Linux
 
         # # --- 鼠标滚轮 ---
-        # # def _on_mousewheel(e): canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
         def _bind_scroll(): canvas.bind("<MouseWheel>", _on_mousewheel)
         def _unbind_scroll(): canvas.unbind("<MouseWheel>")
 
-        # scroll_frame.bind("<Enter>", lambda e: _bind_scroll())
-        # scroll_frame.bind("<Leave>", lambda e: _unbind_scroll())
 
         # ✅ 改成独立引用
         win._canvas_top10 = canvas
@@ -4763,7 +5218,7 @@ class StockMonitorApp(tk.Tk):
 
         win.protocol("WM_DELETE_WINDOW", _on_close)
 
-    def _fill_concept_top10_content(self, win, concept_name, df_concept):
+    def _fill_concept_top10_content_nosort(self, win, concept_name, df_concept):
         """
         在概念Top10窗口中填充内容（安全引用独立）
         """
@@ -4820,125 +5275,290 @@ class StockMonitorApp(tk.Tk):
             pass
 
 
-    # def _on_label_double_click(self, code, idx):
+
+    # def plot_following_concepts_pg(self, code=None, top_n=10):
+    #     if not hasattr(self, "_pg_windows"):
+    #         self._pg_windows = {}
+    #         self._pg_data_hash = {}
+    #     # --- 获取股票数据 ---
+    #     if code is None:
+    #         tcode, _ = self.get_stock_code_none()
+    #         top_concepts = self.get_following_concepts_by_correlation(tcode, top_n=top_n)
+    #         code = "总览"
+    #         name = "All"
+    #     else:
+    #         top_concepts = self.get_following_concepts_by_correlation(code, top_n=top_n)
+    #         name = self.df_all.loc[code]['name'] if code in self.df_all.index else code
+
+    #     if not top_concepts:
+    #         print("未找到相关概念")
+    #         return
+
+    #     # --- 准备数据 ---
+    #     concepts = [c[0] for c in top_concepts]
+    #     scores = np.array([c[1] for c in top_concepts])
+    #     avg_percents = np.array([c[2] for c in top_concepts])
+    #     follow_ratios = np.array([c[3] for c in top_concepts])
+    #     data_hash = hashlib.md5(str(concepts[:3]).encode()).hexdigest()
+
+    #     # --- 创建主容器窗口 ---
+    #     app = self.app
+    #     dpi_scale = app.devicePixelRatio()
+    #     win = QtWidgets.QWidget()
+    #     win.setWindowTitle(f"{code} 概念分析Top{top_n}")
+    #     layout = QtWidgets.QVBoxLayout(win)
+
+    #     # --- 控制栏（自动更新选项） ---
+    #     ctrl_layout = QtWidgets.QHBoxLayout()
+    #     ctrl_layout.setContentsMargins(0, 0, 0, 0)  # 去掉四周空白
+    #     ctrl_layout.setSpacing(0)  # 控件之间间距，0 或小值都可以
+    #     chk_auto = QtWidgets.QCheckBox("自动更新")
+    #     spin_interval = QtWidgets.QSpinBox()
+    #     spin_interval.setRange(5, 300)
+    #     spin_interval.setValue(30)
+    #     spin_interval.setSuffix(" 秒")
+    #     ctrl_layout.addWidget(chk_auto)
+    #     ctrl_layout.addWidget(spin_interval)
+    #     ctrl_layout.addStretch()
+    #     layout.addLayout(ctrl_layout)
+
+    #     # --- 绘图区域 ---
+    #     pg_widget = pg.GraphicsLayoutWidget()
+    #     layout.addWidget(pg_widget)
+
+    #     # 去掉 GraphicsLayoutWidget 自身的边距
+    #     pg_widget.setContentsMargins(0, 0, 0, 0)
+
+    #     # 去掉内部布局间距
+    #     pg_widget.ci.layout.setSpacing(0)
+
+    #     plot = pg_widget.addPlot()
+    #     plot.invertY(True)
+    #     plot.setLabel('bottom', '跟随指数 (score)')
+    #     plot.setLabel('left', '概念')
+
+    #     # --- 初始绘制 ---
+    #     color_map = pg.colormap.get('CET-R1')
+    #     brushes = [pg.mkBrush(color_map.map(r)) for r in follow_ratios]
+    #     y = np.arange(len(concepts))
+    #     bars = pg.BarGraphItem(
+    #         x0=np.zeros(len(y)),
+    #         y=y,
+    #         height=0.6,
+    #         width=scores,
+    #         brushes=brushes
+    #     )
+    #     plot.addItem(bars)
+
+    #     texts = []
+    #     for i, (avg, ratio, score) in enumerate(zip(avg_percents, follow_ratios, scores)):
+    #         text = pg.TextItem(f"avg:{avg:.2f}%\nratio:{ratio:.2f}", anchor=(0, 0.5))
+    #         text.setPos(score + 0.1, y[i])
+    #         plot.addItem(text)
+    #         texts.append(text)
+    #     plot.getAxis('left').setTicks([list(zip(y, concepts))])
+
+    #     # --- 鼠标事件 ---
+    #     def mouse_click(event):
+    #         if event.button() == QtCore.Qt.LeftButton:
+    #             pos = event.scenePos()
+    #             vb = plot.vb
+    #             if plot.sceneBoundingRect().contains(pos):
+    #                 mouse_point = vb.mapSceneToView(pos)
+    #                 idx = int(round(mouse_point.y()))
+    #                 if 0 <= idx < len(concepts):
+    #                     concept = concepts[idx]
+    #                     print(f"[Click] 概念: {concept}")
+    #                     self._call_concept_top10_win(code, concept)
+
+    #     plot.scene().sigMouseClicked.connect(mouse_click)
+
+    #     # --- 键盘事件 ---
+    #     def key_event(event):
+    #         key = event.key()
+    #         if key == QtCore.Qt.Key_R:
+    #             print(f"[Key] 手动刷新 {code}")
+    #             self.plot_following_concepts_pg(code, top_n)
+    #             event.accept()
+    #         elif key in (QtCore.Qt.Key_Q, QtCore.Qt.Key_Escape):
+    #             print("[Key] ESC/Q 按下，关闭窗口")
+    #             QtCore.QTimer.singleShot(0, win.close)
+    #             event.accept()
+
+    #     win.keyPressEvent = key_event
+
+    #     # --- 自动刷新逻辑 ---
+    #     timer = QtCore.QTimer(win)
+    #     timer.timeout.connect(lambda: self._refresh_pg_window(code, top_n))
+
+    #     # 条件判断，如果是总览窗口，则默认打开自动刷新
+    #     if code == "总览" and name == "All":
+    #         chk_auto.setChecked(True)
+    #         timer.start(spin_interval.value() * 1000)
+    #         QtCore.QTimer.singleShot(500, lambda: timer.start(spin_interval.value() * 1000))
+
+    #     def on_auto_toggle(state):
+    #         if state:
+    #             timer.start(spin_interval.value() * 1000)
+    #             print(f"[Auto] 启动自动刷新 {code} 每 {spin_interval.value()} 秒")
+    #         else:
+    #             timer.stop()
+    #             print(f"[Auto] 停止自动刷新 {code}")
+
+    #     chk_auto.toggled.connect(on_auto_toggle)
+
+    #     # 当调整间隔时重新启动计时器
+    #     spin_interval.valueChanged.connect(lambda v: timer.start(v * 1000) if chk_auto.isChecked() else None)
+
+    #     # --- 关闭事件 ---
+    #     def on_close(evt):
+    #         timer.stop()
+    #         self.save_window_position_qt(win, f"概念分析Top{top_n}")
+    #         self._pg_windows.pop(code, None)
+    #         self._pg_data_hash.pop(code, None)
+    #         evt.accept()
+
+    #     win.closeEvent = on_close
+
+    #     # --- 缓存组件 ---
+    #     self._pg_windows[code] = {
+    #         "win": win,
+    #         "plot": plot,
+    #         "bars": bars,
+    #         "texts": texts,
+    #         "timer": timer,
+    #         "chk_auto": chk_auto,
+    #         "spin": spin_interval
+    #     }
+    #     self._pg_data_hash[code] = data_hash
+
+    #     # ✅ 在这里加载窗口位置（关键）
+    #     # self.load_window_position_qt(win, f"concept_pg_{code}")
+    #     self.load_window_position_qt(win, f"概念分析Top{top_n}")
+
+    #     # ✅ 当窗口关闭时自动保存位置
+    #     # win.destroyed.connect(lambda: self.save_window_position_qt(win, f"concept_pg_{code}"))
+    #     # win.destroyed.connect(lambda: self.save_window_position_qt(win, f"概念分析Top{top_n}"))
+
+    #     win.show()
+
+    # def update_pg_plot(self, w_dict, concepts, scores, avg_percents, follow_ratios):
     #     """
-    #     双击股票标签时，显示该股票所属概念详情（复用 show_concept_detail_window）
+    #     更新图形窗口的条形图和文本，比较上一次数据显示涨跌箭头。
+    #     w_dict: 存储窗口组件的字典，win 在 w_dict["win"]
     #     """
-    #     try:
-    #         concept_name = getattr(self._label_widgets[idx], "_concept", None)
-    #         if not concept_name:
-    #             messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
-    #             return
+    #     win = w_dict["win"]
+    #     plot = w_dict["plot"]
+    #     bars = w_dict["bars"]
+    #     texts = w_dict["texts"]
 
-    #         self.show_concept_top10_window(concept_name)
-    #         # --- 提升窗口层级 & 聚焦 ---
-    #         if hasattr(self, "_concept_top10_win") and self._concept_top10_win:
-    #             win = self._concept_top10_win
-    #             win.lift()          # 🔹 提到最前
-    #             win.focus_force()   # 🔹 把键盘焦点给它
-    #             win.attributes('-topmost', True)   # 🔹 临时置顶
-    #             win.after(300, lambda: win.attributes('-topmost', False))  # 🔹 避免永久置顶
+    #     # 初始化上一次数据
+    #     if not hasattr(win, "_prev_concepts_data"):
+    #         win._prev_concepts_data = {
+    #             "avg_percents": np.zeros(len(avg_percents)),
+    #             "follow_ratios": np.zeros(len(follow_ratios))
+    #         }
 
-    #             if hasattr(win, "_canvas_top10"):
-    #                 canvas = win._canvas_top10
-    #                 yview = canvas.yview()
-    #                 canvas.focus_set()
-    #                 canvas.yview_moveto(yview[0])  # 恢复滚动位置
+    #     prev_data = win._prev_concepts_data
 
-    #     except Exception as e:
-    #         print("获取概念详情失败：", e)
+    #     # 更新条形图宽度和颜色
+    #     brushes = [pg.mkBrush(pg.colormap.get('CET-R1').map(r)) for r in follow_ratios]
+    #     bars.setOpts(width=scores, brushes=brushes)
+
+    #     # 更新文本显示，带涨跌箭头
+    #     for i, text in enumerate(texts):
+    #         if i >= len(concepts):
+    #             continue
+    #         avg = avg_percents[i]
+    #         ratio = follow_ratios[i]
+    #         # 箭头判断
+    #         diff_avg = avg - prev_data["avg_percents"][i] if i < len(prev_data["avg_percents"]) else avg
+    #         diff_ratio = ratio - prev_data["follow_ratios"][i] if i < len(prev_data["follow_ratios"]) else ratio
+    #         arrow_avg = "↑" if diff_avg > 0 else ("↓" if diff_avg < 0 else "→")
+    #         arrow_ratio = "↑" if diff_ratio > 0 else ("↓" if diff_ratio < 0 else "→")
+    #         text.setText(f"avg:{arrow_avg} {avg:.2f}%\nratio:{arrow_ratio} {ratio:.2f}")
+    #         text.setPos(scores[i] + 0.1, i)
+
+    #     # 保存本次数据
+    #     win._prev_concepts_data = {
+    #         "avg_percents": avg_percents.copy(),
+    #         "follow_ratios": follow_ratios.copy()
+    #     }
 
 
 
     def plot_following_concepts_pg(self, code=None, top_n=10):
-        # --- 初始化窗口缓存 ---
-
         if not hasattr(self, "_pg_windows"):
             self._pg_windows = {}
             self._pg_data_hash = {}
 
+        # --- 获取股票数据 ---
         if code is None:
-            tcode, percent = self.get_stock_code_none()
+            tcode, _ = self.get_stock_code_none()
             top_concepts = self.get_following_concepts_by_correlation(tcode, top_n=top_n)
-            # code = tcode
+            code = "总览"
+            name = "All"
         else:
             top_concepts = self.get_following_concepts_by_correlation(code, top_n=top_n)
+            name = self.df_all.loc[code]['name'] if code in self.df_all.index else code
 
         if not top_concepts:
             print("未找到相关概念")
             return
 
-        if code is None:
-            code = '总览'
-            name = 'All'
-        else:
-            name = self.df_all.loc[code]['name']
-
+        # --- 准备数据 ---
         concepts = [c[0] for c in top_concepts]
         scores = np.array([c[1] for c in top_concepts])
         avg_percents = np.array([c[2] for c in top_concepts])
         follow_ratios = np.array([c[3] for c in top_concepts])
-
-        # --- 生成摘要 hash ---
         data_hash = hashlib.md5(str(concepts[:3]).encode()).hexdigest()
 
-        # 如果数据没变化且窗口还在，则直接激活
-        if code in self._pg_data_hash and self._pg_data_hash[code] == data_hash:
-            win = self._pg_windows[code]
-            if win.isVisible():
-                win.raise_()
-                win.activateWindow()
-                print("数据相同，不重复打开窗口。")
-                return
-
-
-        # 1️⃣ 创建 Qt 应用（如果已有实例就用现有的）
-        # app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-        app = self.app
-
-        # 2️⃣ 获取 DPI 缩放比例
-        dpi_scale = app.devicePixelRatio()  # Windows 的缩放比例
-        print(f"QtWidgets DPI 缩放比例: {dpi_scale}")
-        # 3️⃣ 创建 GraphicsLayoutWidget 窗口
-        win = pg.GraphicsLayoutWidget(show=True, title=f"{code} 概念分析Top{top_n}")
-        # win.resize(int(600 * dpi_scale), int(400 * dpi_scale))  # 按 DPI 缩放
+        # --- 创建主窗口 ---
+        win = QtWidgets.QWidget()
         win.setWindowTitle(f"{code} 概念分析Top{top_n}")
+        layout = QtWidgets.QVBoxLayout(win)
 
+        # 控制栏
+        ctrl_layout = QtWidgets.QHBoxLayout()
+        ctrl_layout.setContentsMargins(0, 0, 0, 0)
+        ctrl_layout.setSpacing(0)
+        chk_auto = QtWidgets.QCheckBox("自动更新")
+        spin_interval = QtWidgets.QSpinBox()
+        spin_interval.setRange(5, 300)
+        spin_interval.setValue(30)
+        spin_interval.setSuffix(" 秒")
+        ctrl_layout.addWidget(chk_auto)
+        ctrl_layout.addWidget(spin_interval)
+        ctrl_layout.addStretch()
+        layout.addLayout(ctrl_layout)
 
-        plot = win.addPlot()
+        # 绘图区域
+        pg_widget = pg.GraphicsLayoutWidget()
+        layout.addWidget(pg_widget)
+        pg_widget.setContentsMargins(0, 0, 0, 0)
+        pg_widget.ci.layout.setSpacing(0)
+
+        plot = pg_widget.addPlot()
         plot.invertY(True)
-        plot.setLabel('bottom', '跟随指数 (score)')
+        plot.setLabel('bottom', '综合得分 (score)')
         plot.setLabel('left', '概念')
 
-        # --- 颜色映射 ---
-        color_map = pg.colormap.get('CET-R1')  # 红色系
-        brushes = [pg.mkBrush(color_map.map(ratio)) for ratio in follow_ratios]
-
-        # --- 绘制横向条形图 ---
         y = np.arange(len(concepts))
-        bars = pg.BarGraphItem(
-            x0=np.zeros(len(y)),
-            y=y,
-            height=0.6,
-            width=scores,
-            brushes=brushes
-        )
+        color_map = pg.colormap.get('CET-R1')
+        brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
+        bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
         plot.addItem(bars)
 
-        # --- 添加文字标签 ---
-        for i, (avg, ratio, score) in enumerate(zip(avg_percents, follow_ratios, scores)):
-            text = pg.TextItem(f"avg:{avg:.2f}%\nratio:{ratio:.2f}", anchor=(0, 0.5))
+        texts = []
+        for i, (avg, score) in enumerate(zip(avg_percents, scores)):
+            text = pg.TextItem(f"avg:{avg:.2f}%\nscore:{score:.2f}", anchor=(0, 0.5))
+            text.setPos(score + 0.1, y[i])
             plot.addItem(text)
-            text.setPos(scores[i] + 0.1, y[i])
+            texts.append(text)
+        plot.getAxis('left').setTicks([list(zip(y, concepts))])
 
-        # --- y轴标签 ---
-        ax = plot.getAxis('left')
-        ax.setTicks([list(zip(y, concepts))])
-
-        # --- 鼠标点击事件 ---
+        # 鼠标点击事件
         def mouse_click(event):
-            # win.setFocusPolicy(QtCore.Qt.StrongFocus)
-            # win.activateWindow()
             if event.button() == QtCore.Qt.LeftButton:
                 pos = event.scenePos()
                 vb = plot.vb
@@ -4949,62 +5569,139 @@ class StockMonitorApp(tk.Tk):
                         concept = concepts[idx]
                         print(f"[Click] 概念: {concept}")
                         self._call_concept_top10_win(code, concept)
-                        # self.after(0, lambda c=concept: self._call_concept_top10_win(code, c))
-
         plot.scene().sigMouseClicked.connect(mouse_click)
 
-        # --- 键盘事件 ---
+        # 鼠标悬停显示 tooltip
+        def show_tooltip(event):
+            pos = event
+            vb = plot.vb
+            if plot.sceneBoundingRect().contains(pos):
+                mouse_point = vb.mapSceneToView(pos)
+                idx = int(round(mouse_point.y()))
+                if 0 <= idx < len(concepts):
+                    msg = (f"概念: {concepts[idx]}\n"
+                           f"平均涨幅: {avg_percents[idx]:.2f}%\n"
+                           f"跟随指数: {follow_ratios[idx]:.2f}\n"
+                           f"综合得分: {scores[idx]:.2f}")
+                    QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), msg, win)
+        plot.scene().sigMouseMoved.connect(show_tooltip)
+
+        # 键盘事件
         def key_event(event):
             key = event.key()
             if key == QtCore.Qt.Key_R:
-                print(f"[Key] 刷新 {code}")
-                # 延迟关闭窗口，避免直接销毁触发 sip 错误
-                QtCore.QTimer.singleShot(0, win.close)
-                # 延迟调用刷新函数
-                QtCore.QTimer.singleShot(50, lambda: self.plot_following_concepts_pg(code, top_n))
+                self.plot_following_concepts_pg(code, top_n)
                 event.accept()
             elif key in (QtCore.Qt.Key_Q, QtCore.Qt.Key_Escape):
-                print("[Key] ESC/Q 按下，关闭窗口")
                 QtCore.QTimer.singleShot(0, win.close)
                 event.accept()
-
-
         win.keyPressEvent = key_event
 
-        # --- 窗口关闭清理 ---
+        # 自动刷新
+        timer = QtCore.QTimer(win)
+        timer.timeout.connect(lambda: self._refresh_pg_window(code, top_n))
+        if code == "总览" and name == "All":
+            chk_auto.setChecked(True)
+            timer.start(spin_interval.value() * 1000)
+            QtCore.QTimer.singleShot(500, lambda: timer.start(spin_interval.value() * 1000))
+        chk_auto.toggled.connect(lambda state: timer.start(spin_interval.value() * 1000) if state else timer.stop())
+        spin_interval.valueChanged.connect(lambda v: timer.start(v * 1000) if chk_auto.isChecked() else None)
+
+        # 关闭事件
         def on_close(evt):
+            timer.stop()
+            self.save_window_position_qt(win, f"概念分析Top{top_n}")
             self._pg_windows.pop(code, None)
             self._pg_data_hash.pop(code, None)
             evt.accept()
-
         win.closeEvent = on_close
 
-
-        # # ✅ 设置焦点以接收键盘事件
-        # win.setFocusPolicy(QtCore.Qt.StrongFocus)
-        # win.activateWindow()
-        # win.raise_()
-        # win.show()
-
-        # # ✅ 保证按键能生效
-        # win.setFocus()
-        # self.plot_widget.setFocusPolicy(QtCore.Qt.StrongFocus)
-        # self.plot_widget.grabKeyboard()
-
-        # app.processEvents()
-
-        if '总览' not in self._pg_windows:
-            print(f'self._pg_windows no in: {self._pg_windows}')
-            self.correct_window_geometry()
-
-        else:
-            print(f'self._pg_windows in : {self._pg_windows.keys()}')
-
-        # --- 缓存窗口与数据 ---
-        self._pg_windows[code] = win
+        # 缓存窗口
+        self._pg_windows[code] = {"win": win, "plot": plot, "bars": bars, "texts": texts,
+                                  "timer": timer, "chk_auto": chk_auto, "spin": spin_interval}
         self._pg_data_hash[code] = data_hash
+
+        # 加载窗口位置
+        self.load_window_position_qt(win, f"概念分析Top{top_n}")
+
         win.show()
-        # win.raise_()
+
+
+    def update_pg_plot(self, w_dict, concepts, scores, avg_percents, follow_ratios):
+        """
+        更新图形窗口的条形图和文本，实时使用 scores。
+        """
+        win = w_dict["win"]
+        plot = w_dict["plot"]
+        bars = w_dict["bars"]
+        texts = w_dict["texts"]
+
+        if not hasattr(win, "_prev_concepts_data"):
+            win._prev_concepts_data = {
+                "avg_percents": np.zeros(len(avg_percents)),
+                "scores": np.zeros(len(scores)),
+                "follow_ratios": np.zeros(len(follow_ratios))
+            }
+        prev_data = win._prev_concepts_data
+
+        color_map = pg.colormap.get('CET-R1')
+        brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
+        bars.setOpts(width=scores, brushes=brushes)
+
+        for i, text in enumerate(texts):
+            if i >= len(concepts):
+                continue
+            avg = avg_percents[i]
+            score = scores[i]
+
+            # --- 计算平均涨幅箭头 ---
+            diff_avg = avg - prev_data["avg_percents"][i] if i < len(prev_data["avg_percents"]) else avg
+            arrow_avg = "↑" if diff_avg > 0 else ("↓" if diff_avg < 0 else "→")
+
+            # --- 计算综合得分箭头 ---
+            diff_score = score - prev_data["scores"][i] if i < len(prev_data["scores"]) else score
+            arrow_score = "↑" if diff_score > 0 else ("↓" if diff_score < 0 else "→")
+
+            # --- 更新文本 ---
+            text.setText(f"avg:{arrow_avg} {avg:.2f}%\nscore:{arrow_score} {score:.2f}")
+            text.setPos(score + 0.1, i)
+
+        win._prev_concepts_data = {
+            "avg_percents": avg_percents.copy(),
+            "scores": scores.copy(),
+            "follow_ratios": follow_ratios.copy()
+        }
+
+
+    # --- 定时刷新 ---
+    def _refresh_pg_window(self, code, top_n):
+        if code not in self._pg_windows:
+            return
+        if not cct.get_work_time():  # 仅工作时间刷新
+            # print(f'not 工作时间刷新' )
+            return
+        w_dict = self._pg_windows[code]
+        win = w_dict["win"]
+
+        # 获取最新概念数据
+        if code == "总览":
+            tcode, _ = self.get_stock_code_none()
+            top_concepts = self.get_following_concepts_by_correlation(tcode, top_n=top_n)
+        else:
+            top_concepts = self.get_following_concepts_by_correlation(code, top_n=top_n)
+
+        if not top_concepts:
+            print(f"[Auto] 无法刷新 {code} 数据为空")
+            return
+
+        concepts = [c[0] for c in top_concepts]
+        scores = np.array([c[1] for c in top_concepts])
+        avg_percents = np.array([c[2] for c in top_concepts])
+        follow_ratios = np.array([c[3] for c in top_concepts])
+
+        # 更新图形
+        self.update_pg_plot(w_dict, concepts, scores, avg_percents, follow_ratios)
+        print(f"[Auto] 已自动刷新 {code}")
 
 
     def plot_following_concepts_mp(self, code=None, top_n=10):
@@ -5107,9 +5804,7 @@ class StockMonitorApp(tk.Tk):
                            f"跟随指数: {ratio:.2f}\n"
                            f"综合得分: {score:.3f}")
                     print(f'[Click] {msg}')
-                    # self.master._call_concept_top10_win(code, concept)
                     self._call_concept_top10_win(code, concept)
-                    # time.sleep(0.3)
                     break
 
         fig.canvas.mpl_connect("button_press_event", on_click)
@@ -5212,12 +5907,11 @@ class StockMonitorApp(tk.Tk):
         """
         try:
             # ---------------- 原逻辑 ----------------
-            concept_name = None
-            # if hasattr(self, "_label_widgets"):
-            #     try:
-            #         concept_name = getattr(self._label_widgets[idx], "_concept", None)
-            #     except Exception:
-            #         concept_name = None
+            if hasattr(self, "_label_widgets"):
+                try:
+                    concept_name = getattr(self._label_widgets[idx], "_concept", None)
+                except Exception:
+                    concept_name = None
 
             # ---------------- 回退逻辑 ----------------
             if not concept_name:
@@ -6428,54 +7122,286 @@ class StockMonitorApp(tk.Tk):
             except Exception as e:
                 log.error(f"加载 CSV 失败: {e}")
 
-    # ----------------- 窗口位置记忆 ----------------- #
-    # def save_window_position(self):
-    #     pos = {"x": self.winfo_x(), "y": self.winfo_y(), "width": self.winfo_width(), "height": self.winfo_height()}
+
+    # def load_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500):
+    #     """从统一配置文件加载窗口位置"""
+    #     if os.path.exists(file_path):
+    #         try:
+    #             with open(file_path, "r", encoding="utf-8") as f:
+    #                 data = json.load(f)
+    #                 if window_name in data:
+    #                     pos = data[window_name]
+    #                     x, y = clamp_window_to_screens(pos['x'], pos['y'], pos['width'], pos['height'])
+    #                     win.geometry(f"{pos['width']}x{pos['height']}+{x}+{y}")
+    #                     # Tkinter geometry 格式
+    #                     return pos['width'],pos['height'],x,y
+    #         except Exception as e:
+    #             log.error(f"读取窗口位置失败: {e}")
+    #     # 默认居中
+    #     self.center_window(win, default_width, default_height)
+
+    # def save_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE):
+    #     """保存指定窗口位置到统一配置文件"""
+    #     pos = {
+    #         "x": win.winfo_x(),
+    #         "y": win.winfo_y(),
+    #         "width": win.winfo_width(),
+    #         "height": win.winfo_height()
+    #     }
+
+    #     data = {}
+    #     if os.path.exists(file_path):
+    #         try:
+    #             with open(file_path, "r", encoding="utf-8") as f:
+    #                 data = json.load(f)
+    #         except Exception as e:
+    #             log.error(f"读取窗口配置失败: {e}")
+
+    #     data[window_name] = pos
+
     #     try:
-    #         with open(WINDOW_CONFIG_FILE, "w", encoding="utf-8") as f:
-    #             json.dump(pos, f, ensure_ascii=False, indent=2)
+    #         with open(file_path, "w", encoding="utf-8") as f:
+    #             json.dump(data, f, ensure_ascii=False, indent=2)
     #     except Exception as e:
     #         log.error(f"保存窗口位置失败: {e}")
 
-    # def load_window_position(self):
-    #     if os.path.exists(WINDOW_CONFIG_FILE):
+    # def load_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500):
+    #     """从统一配置文件加载窗口位置"""
+    #     scale = get_windows_dpi_scale_factor()
+
+    #     if os.path.exists(file_path):
     #         try:
-    #             with open(WINDOW_CONFIG_FILE, "r", encoding="utf-8") as f:
-    #                 pos = json.load(f)
-    #                 # x,y = self.get_centered_window_position(self, pos['width'], pos['height'])
-    #                 x,y = clamp_window_to_screens(pos['x'],pos['y'], pos['width'], pos['height'])
-    #                 # x,y = self.get_centered_window_position(pos['x'],pos['y'], pos['width'], pos['height'])
-    #                 # self.geometry(f"{pos['width']}x{pos['height']}+{pos['x']}+{pos['y']}")
-    #                 self.geometry(f"{pos['width']}x{pos['height']}+{x}+{y}")
+    #             with open(file_path, "r", encoding="utf-8") as f:
+    #                 data = json.load(f)
+    #                 if window_name in data:
+    #                     pos = data[window_name]
+    #                     # 根据当前 DPI 比例调整
+    #                     width = int(pos['width'] * scale)
+    #                     height = int(pos['height'] * scale)
+    #                     x = int(pos['x'] * scale)
+    #                     y = int(pos['y'] * scale)
+    #                     # x, y = clamp_window_to_screens(pos['x'], pos['y'], pos['width'], pos['height'])
+    #                     x, y = clamp_window_to_screens(x, y, width, height)
+    #                     win.geometry(f"{pos['width']}x{pos['height']}+{x}+{y}  {width}  {height}")
+    #                     # Tkinter geometry 格式
+    #                     return width,height,x,y
     #         except Exception as e:
     #             log.error(f"读取窗口位置失败: {e}")
+    #     # 默认居中
+    #     self.center_window(win, default_width, default_height)
 
-
-    def save_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE):
-        """保存指定窗口位置到统一配置文件"""
-        pos = {
-            "x": win.winfo_x(),
-            "y": win.winfo_y(),
-            "width": win.winfo_width(),
-            "height": win.winfo_height()
-        }
-
-        data = {}
-        if os.path.exists(file_path):
+    def load_window_position(self, win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500):
+        """从统一配置文件加载窗口位置（自动按当前 DPI 缩放）"""
+        try:
+            window_name = str(window_name)
+            scale = 1.0
             try:
+                scale = get_windows_dpi_scale_factor()
+                if not isinstance(scale, (int, float)) or scale <= 0:
+                    scale = 1.0
+            except Exception as e:
+                log.warning(f"[load_window_position] 获取 DPI 缩放失败: {e}")
+
+            if os.path.exists(file_path):
                 with open(file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-            except Exception as e:
-                log.error(f"读取窗口配置失败: {e}")
 
-        data[window_name] = pos
+                if window_name in data:
+                    pos = data[window_name]
+                    # ✳️ 按当前 DPI 放大回去
+                    width = int(pos["width"] * scale)
+                    height = int(pos["height"] * scale)
+                    x = int(pos["x"] * scale)
+                    y = int(pos["y"] * scale)
 
+                    # 防止窗口位置越界
+                    x, y = clamp_window_to_screens(x, y, width, height)
+
+                    win.geometry(f"{width}x{height}+{x}+{y}")
+                    log.info(f"[load_window_position] 加载 {window_name}: {width}x{height}+{x}+{y}")
+                    return width, height, x, y
+
+            # 没有记录则默认居中
+            log.info(f"[load_window_position] 未找到 {window_name} 配置，使用默认居中")
+            self.center_window(win, default_width, default_height)
+            return default_width, default_height, None, None
+
+        except Exception as e:
+            log.error(f"[load_window_position] 读取窗口位置失败: {e}")
+            self.center_window(win, default_width, default_height)
+            return default_width, default_height, None, None
+
+
+    def save_window_position(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
+        """保存指定窗口位置到统一配置文件（自动按 DPI 缩放）"""
         try:
+            window_name = str(window_name)
+
+            # --- 获取当前 Windows DPI 缩放比例 ---
+            scale = 1.0
+            try:
+                scale = get_windows_dpi_scale_factor()
+                if not isinstance(scale, (int, float)) or scale <= 0:
+                    scale = 1.0
+            except Exception as e:
+                log.warning(f"[save_window_position] 获取 DPI 缩放失败: {e}")
+
+            # --- 按缩放比例保存位置 ---
+            pos = {
+                "x": int(win.winfo_x() / scale),
+                "y": int(win.winfo_y() / scale),
+                "width": int(win.winfo_width() / scale),
+                "height": int(win.winfo_height() / scale)
+            }
+
+            # --- 读取旧数据 ---
+            data = {}
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception as e:
+                    log.error(f"读取窗口配置失败: {e}")
+
+            # --- 更新数据 ---
+            data[window_name] = pos
+
+            # --- 写入文件 ---
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            log.error(f"保存窗口位置失败: {e}")
 
+            log.info(f"[save_window_position] 已保存 {window_name}: {pos}")
+
+        except Exception as e:
+            log.error(f"[save_window_position] 保存窗口位置失败: {e}")
+
+    def load_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500, offset_step=30):
+        """加载 Qt 窗口位置（支持自动错开已存在的窗口）"""
+        try:
+            window_name = str(window_name)
+            scale = 1.0
+            try:
+                scale = get_windows_dpi_scale_factor()
+                if not isinstance(scale, (int, float)) or scale <= 0:
+                    scale = 1.0
+            except Exception as e:
+                print(f"[load_window_position_qt] 获取 DPI 缩放失败: {e}")
+
+            x = y = None
+            width = default_width
+            height = default_height
+
+            if os.path.exists(file_path):
+                with open(file_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if window_name in data:
+                    pos = data[window_name]
+                    width = int(pos["width"] * scale)
+                    height = int(pos["height"] * scale)
+                    x = int(pos["x"] * scale)
+                    y = int(pos["y"] * scale)
+
+            # --- 检查屏幕边界 ---
+            screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+            if x is None or y is None:
+                x = (screen.width() - width) // 2
+                y = (screen.height() - height) // 2
+
+            # ✅ 检查是否已有同名窗口正在显示
+            if hasattr(self, "_pg_windows"):
+                active_windows = [w for w in self._pg_windows.values() if isinstance(w, QtWidgets.QWidget) and w.isVisible()]
+                same_name_count = sum(1 for w in active_windows if w.windowTitle() == win.windowTitle())
+                if same_name_count > 0:
+                    # 每个叠加窗口偏移 offset_step
+                    x += offset_step * same_name_count
+                    y += offset_step * same_name_count
+                    # 限制不超出屏幕范围
+                    if x + width > screen.width():
+                        x = screen.width() - width - 10
+                    if y + height > screen.height():
+                        y = screen.height() - height - 10
+
+            # ✅ 设置窗口位置
+            win.setGeometry(x, y, width, height)
+            print(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
+            return width, height, x, y
+
+        except Exception as e:
+            print(f"[load_window_position_qt] 加载失败: {e}")
+            # 默认居中
+            screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+            x = (screen.width() - default_width) // 2
+            y = (screen.height() - default_height) // 2
+            win.setGeometry(x, y, default_width, default_height)
+            return default_width, default_height, x, y
+
+
+
+    def save_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
+        """保存 PyQt 窗口位置到统一配置文件（自动按 DPI 缩放）"""
+        try:
+            window_name = str(window_name)
+            from PyQt5 import QtCore
+
+            scale = 1.0
+            try:
+                scale = get_windows_dpi_scale_factor()
+                if not isinstance(scale, (int, float)) or scale <= 0:
+                    scale = 1.0
+            except Exception as e:
+                log.warning(f"[save_window_position_qt] 获取 DPI 缩放失败: {e}")
+
+            geom = win.geometry()  # QRect
+            pos = {
+                "x": int(geom.x() / scale),
+                "y": int(geom.y() / scale),
+                "width": int(geom.width() / scale),
+                "height": int(geom.height() / scale)
+            }
+
+            data = {}
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception as e:
+                    log.error(f"[save_window_position_qt] 读取配置失败: {e}")
+
+            data[window_name] = pos
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            log.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
+
+        except Exception as e:
+            log.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
+
+
+    # def save_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE):
+    #     """保存指定窗口位置到统一配置文件"""
+    #     scale = get_windows_dpi_scale_factor()
+    #     pos = {
+    #             "x": int(win.winfo_x() / scale),
+    #             "y": int(win.winfo_y() / scale),
+    #             "width": int(win.winfo_width() / scale),
+    #             "height": int(win.winfo_height() / scale)
+    #         }
+
+    #     data = {}
+    #     if os.path.exists(file_path):
+    #         try:
+    #             with open(file_path, "r", encoding="utf-8") as f:
+    #                 data = json.load(f)
+    #         except Exception as e:
+    #             log.error(f"读取窗口配置失败: {e}")
+
+    #     data[window_name] = pos
+
+    #     try:
+    #         with open(file_path, "w", encoding="utf-8") as f:
+    #             json.dump(data, f, ensure_ascii=False, indent=2)
+    #     except Exception as e:
+    #         log.error(f"保存窗口位置失败: {e}")
 
     def center_window(self,win, width, height):
         """
@@ -6490,23 +7416,6 @@ class StockMonitorApp(tk.Tk):
         y = (screen_height - height) // 2
         win.geometry(f"{width}x{height}+{x}+{y}")
 
-
-    def load_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500):
-        """从统一配置文件加载窗口位置"""
-        if os.path.exists(file_path):
-            try:
-                with open(file_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if window_name in data:
-                        pos = data[window_name]
-                        x, y = clamp_window_to_screens(pos['x'], pos['y'], pos['width'], pos['height'])
-                        win.geometry(f"{pos['width']}x{pos['height']}+{x}+{y}")
-                        # Tkinter geometry 格式
-                        return pos['width'],pos['height'],x,y
-            except Exception as e:
-                log.error(f"读取窗口位置失败: {e}")
-        # 默认居中
-        self.center_window(win, default_width, default_height)
 
 
     def on_close(self):
@@ -8012,65 +8921,219 @@ def toast_message(master, text, duration=1500):
     toast.after(duration, toast.destroy)
 
 
+# class ColumnSetManager(tk.Toplevel):
+#     def __init__(self, master, all_columns, config, on_apply_callback, default_cols, auto_apply_on_init=False):
+#         super().__init__(master)
+#         self.title("列组合管理器")
+#         # 基础尺寸（用于初始化宽度 fallback）
+#         # 如果不希望初始显示窗口（隐藏）
+#         self.auto_apply_on_init = auto_apply_on_init
+#         if self.auto_apply_on_init:
+#             self.withdraw()  # 先隐藏窗口
+
+#         self.width = 800
+#         self.height = 500
+#         self.geometry(f"{self.width}x{self.height}")
+
+#         # 参数
+#         self.all_columns = list(all_columns)
+#         self.no_filtered = []
+#         self.config = config if isinstance(config, dict) else {}
+#         self.on_apply_callback = on_apply_callback
+#         self.default_cols = list(default_cols)
+
+#         # 状态
+#         self.current_set = list(self.config.get("current", self.default_cols.copy()))
+#         self.saved_sets = list(self.config.get("sets", []))  # 格式：[{ "name": str, "cols": [...] }, ...]
+
+#         # 存放 checkbutton 的 BooleanVar，防 GC
+#         self._chk_vars = {}
+
+#         # 拖拽数据（用于 tag 拖拽）
+#         self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
+
+#         # 防抖 job id
+#         self._resize_job = None
+
+#         # 构建 UI
+#         self._build_ui()
+
+#         # 延迟首次布局（保证 winfo_width() 可用）
+#         self.after(80, self.update_grid)
+
+#         # 绑定窗口 resize（防抖）
+#         # self.bind("<Configure>", self._on_resize)
+
+#     def _build_ui(self):
+#         # 主容器：左右两栏（左：选择区 + 当前组合；右：已保存组合）
+#         self.main = ttk.Frame(self)
+#         self.main.pack(fill=tk.BOTH, expand=True)
+
+#         top = ttk.Frame(self.main)
+#         top.pack(fill=tk.BOTH, expand=True, padx=6, pady=1)
+
+#         left = ttk.Frame(top)
+#         left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+#         right = ttk.Frame(top, width=220)
+#         right.pack(side=tk.RIGHT, fill=tk.Y)
+#         right.pack_propagate(False)
+
+#         # 搜索栏（放在 left 顶部）
+#         search_frame = ttk.Frame(left)
+#         search_frame.pack(fill=tk.X, pady=(0,6))
+#         ttk.Label(search_frame, text="搜索:").pack(side=tk.LEFT)
+#         self.search_var = tk.StringVar()
+#         entry = ttk.Entry(search_frame, textvariable=self.search_var)
+#         entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6,0))
+#         entry.bind("<KeyRelease>", lambda e: self._debounced_update())
+
+#         # 列选择区（canvas + scrollable_frame）
+#         grid_container = ttk.Frame(left)
+#         grid_container.pack(fill=tk.BOTH, expand=True)
+
+#         self.canvas = tk.Canvas(grid_container, height=160)
+#         self.vscroll = ttk.Scrollbar(grid_container, orient="vertical", command=self.canvas.yview)
+#         self.canvas.configure(yscrollcommand=self.vscroll.set)
+
+#         self.inner_frame = ttk.Frame(self.canvas)  # 放 checkbuttons 的 frame
+#         # 当 inner_frame size 改变时，同步调整 canvas scrollregion
+#         self.inner_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+
+#         self.canvas.create_window((0,0), window=self.inner_frame, anchor="nw")
+
+#         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+#         self.vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+#         # 鼠标滚轮在 canvas 上滚动（适配 Windows 与 Linux）
+#         self.canvas.bind("<Enter>", lambda e: self._bind_mousewheel(True))
+#         self.canvas.bind("<Leave>", lambda e: self._bind_mousewheel(False))
+
+#         # 当前组合横向标签（自动换行 + 拖拽）
+#         current_lf = ttk.LabelFrame(left, text="当前组合")
+#         current_lf.pack(fill=tk.X, pady=(6,0))
+#         self.current_frame = tk.Frame(current_lf, height=60)
+#         self.current_frame.pack(fill=tk.X, padx=4, pady=6)
+#         # 确保 current_frame 能获取尺寸变化事件
+#         self.current_frame.bind("<Configure>", lambda e: self._debounced_refresh_tags())
+
+#         # 右侧：已保存组合列表与管理按钮
+#         ttk.Label(right, text="已保存组合").pack(anchor="w", padx=6, pady=(6,0))
+#         self.sets_listbox = tk.Listbox(right, exportselection=False)
+#         self.sets_listbox.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+#         # 单击选中高亮 → 更新当前选中组合名（但不加载）
+#         self.sets_listbox.bind("<<ListboxSelect>>", self.on_select_saved_set)
+
+#         self.sets_listbox.bind("<Double-1>", lambda e: self.load_selected_set())
+
+#         sets_btns = ttk.Frame(right)
+#         sets_btns.pack(fill=tk.X, padx=6, pady=(0,6))
+#         ttk.Button(sets_btns, text="加载", command=self.load_selected_set).pack(side=tk.LEFT, fill=tk.X, expand=True)
+#         ttk.Button(sets_btns, text="删除", command=self.delete_selected_set).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+
+#         self.lbl_current_set = ttk.Label(right, text="当前选中: (无)")
+#         self.lbl_current_set.pack(anchor="w", padx=6, pady=(0,4))
+
+
+#         # 底部按钮（全宽）
+#         bottom = ttk.Frame(self)
+#         bottom.pack(fill=tk.X, padx=6, pady=6)
+#         ttk.Button(bottom, text="保存组合", command=self.save_current_set).pack(side=tk.LEFT, expand=True, fill=tk.X)
+#         ttk.Button(bottom, text="应用组合", command=self.apply_current_set).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=6)
+#         ttk.Button(bottom, text="恢复默认", command=self.restore_default).pack(side=tk.LEFT, expand=True, fill=tk.X)
+
+#         self.bind("<Alt-c>",lambda e:self.open_column_manager_editor())
+#         # 填充保存组合列表
+#         self.refresh_saved_sets()
+
 class ColumnSetManager(tk.Toplevel):
     def __init__(self, master, all_columns, config, on_apply_callback, default_cols, auto_apply_on_init=False):
         super().__init__(master)
+        # self._apply_dpi_scaling_Column()
+        self.master = master
         self.title("列组合管理器")
-        # 基础尺寸（用于初始化宽度 fallback）
-        # 如果不希望初始显示窗口（隐藏）
-        self.auto_apply_on_init = auto_apply_on_init
-        if self.auto_apply_on_init:
-            self.withdraw()  # 先隐藏窗口
+        # # ---------- 全局 DPI 缩放 ----------
+        # try:
+        #     scale_factor = self.tk.call('tk', 'scaling')  # Tk 默认缩放
+        # except Exception:
+        #     scale_factor = 1.0
+        # print(f'scale_factor : {scale_factor}')
+        # default_font = tkFont.nametofont("TkDefaultFont")
+        # default_font.configure(size=int(10 * float(scale_factor)))
 
+        # ---------- 基础尺寸 ----------
         self.width = 800
         self.height = 500
         self.geometry(f"{self.width}x{self.height}")
 
-        # 参数
+        # ---------- 参数 ----------
         self.all_columns = list(all_columns)
-        self.no_filtered = []
         self.config = config if isinstance(config, dict) else {}
         self.on_apply_callback = on_apply_callback
         self.default_cols = list(default_cols)
+        self.auto_apply_on_init = auto_apply_on_init
 
-        # 状态
+        # ---------- 状态 ----------
         self.current_set = list(self.config.get("current", self.default_cols.copy()))
-        self.saved_sets = list(self.config.get("sets", []))  # 格式：[{ "name": str, "cols": [...] }, ...]
-
-        # 存放 checkbutton 的 BooleanVar，防 GC
+        self.saved_sets = list(self.config.get("sets", []))
         self._chk_vars = {}
-
-        # 拖拽数据（用于 tag 拖拽）
         self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
-
-        # 防抖 job id
         self._resize_job = None
 
-        # 构建 UI
+        # ---------- 构建 UI ----------
         self._build_ui()
 
-        # 延迟首次布局（保证 winfo_width() 可用）
+        # 延迟首次布局
         self.after(80, self.update_grid)
 
-        # 绑定窗口 resize（防抖）
-        # self.bind("<Configure>", self._on_resize)
+        # ---------- 自动应用列组合 ----------
+        if self.auto_apply_on_init:
+            try:
+                self.withdraw()  # 先隐藏
+                self.set_current_set()  # 调用回调更新列
+                # 可选择应用后显示或保持隐藏
+                # self.deiconify()
+            except Exception as e:
+                traceback.print_exc()
+                print("⚠️ 自动应用列组合失败：", e)
 
     def _build_ui(self):
-        # 主容器：左右两栏（左：选择区 + 当前组合；右：已保存组合）
+        # ---------- 高 DPI 初始化 ----------
+        # try:
+        #     from ctypes import windll
+        #     windll.shcore.SetProcessDpiAwareness(1)  # Windows 高 DPI 感知
+        # except:
+        #     pass
+        # dpi_scale = self.winfo_fpixels('1i') / 72  # 获取 DPI 缩放比例
+        dpi_scale = self.master.scale_factor
+        # dpi_scale = get_windows_dpi_scale_factor()
+        base_width, base_height = 800, 500
+        self.width = int(base_width * dpi_scale)
+        self.height = int(base_height * dpi_scale)
+        self.geometry(f"{self.width}x{self.height}")
+
+        # ---------- 主容器 ----------
         self.main = ttk.Frame(self)
         self.main.pack(fill=tk.BOTH, expand=True)
 
         top = ttk.Frame(self.main)
         top.pack(fill=tk.BOTH, expand=True, padx=6, pady=1)
 
+        # 使用 grid 管理左右比例，左 3/4，右 1/4
+        top.grid_columnconfigure(0, weight=3)
+        top.grid_columnconfigure(1, weight=1)
+        top.grid_rowconfigure(0, weight=1)
+
+        # 左侧容器
         left = ttk.Frame(top)
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        left.grid(row=0, column=0, sticky="nsew")
 
-        right = ttk.Frame(top, width=220)
-        right.pack(side=tk.RIGHT, fill=tk.Y)
-        right.pack_propagate(False)
+        # 右侧容器
+        right = ttk.Frame(top)
+        right.grid(row=0, column=1, sticky="nsew")
+        right.grid_propagate(False)
 
-        # 搜索栏（放在 left 顶部）
+        # ---------- 搜索栏 ----------
         search_frame = ttk.Frame(left)
         search_frame.pack(fill=tk.X, pady=(0,6))
         ttk.Label(search_frame, text="搜索:").pack(side=tk.LEFT)
@@ -8079,42 +9142,37 @@ class ColumnSetManager(tk.Toplevel):
         entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6,0))
         entry.bind("<KeyRelease>", lambda e: self._debounced_update())
 
-        # 列选择区（canvas + scrollable_frame）
+        # ---------- 列选择区（Canvas + Scrollable Frame） ----------
         grid_container = ttk.Frame(left)
         grid_container.pack(fill=tk.BOTH, expand=True)
 
-        self.canvas = tk.Canvas(grid_container, height=160)
+        self.canvas = tk.Canvas(grid_container)
         self.vscroll = ttk.Scrollbar(grid_container, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=self.vscroll.set)
 
-        self.inner_frame = ttk.Frame(self.canvas)  # 放 checkbuttons 的 frame
-        # 当 inner_frame size 改变时，同步调整 canvas scrollregion
+        self.inner_frame = ttk.Frame(self.canvas)
         self.inner_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
 
         self.canvas.create_window((0,0), window=self.inner_frame, anchor="nw")
-
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.vscroll.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # 鼠标滚轮在 canvas 上滚动（适配 Windows 与 Linux）
+        # 鼠标滚轮
         self.canvas.bind("<Enter>", lambda e: self._bind_mousewheel(True))
         self.canvas.bind("<Leave>", lambda e: self._bind_mousewheel(False))
 
-        # 当前组合横向标签（自动换行 + 拖拽）
+        # ---------- 当前组合标签 ----------
         current_lf = ttk.LabelFrame(left, text="当前组合")
         current_lf.pack(fill=tk.X, pady=(6,0))
-        self.current_frame = tk.Frame(current_lf, height=60)
+        self.current_frame = tk.Frame(current_lf)
         self.current_frame.pack(fill=tk.X, padx=4, pady=6)
-        # 确保 current_frame 能获取尺寸变化事件
         self.current_frame.bind("<Configure>", lambda e: self._debounced_refresh_tags())
 
-        # 右侧：已保存组合列表与管理按钮
+        # ---------- 右侧：已保存组合列表 ----------
         ttk.Label(right, text="已保存组合").pack(anchor="w", padx=6, pady=(6,0))
         self.sets_listbox = tk.Listbox(right, exportselection=False)
         self.sets_listbox.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-        # 单击选中高亮 → 更新当前选中组合名（但不加载）
         self.sets_listbox.bind("<<ListboxSelect>>", self.on_select_saved_set)
-
         self.sets_listbox.bind("<Double-1>", lambda e: self.load_selected_set())
 
         sets_btns = ttk.Frame(right)
@@ -8125,20 +9183,20 @@ class ColumnSetManager(tk.Toplevel):
         self.lbl_current_set = ttk.Label(right, text="当前选中: (无)")
         self.lbl_current_set.pack(anchor="w", padx=6, pady=(0,4))
 
-
-        # 底部按钮（全宽）
+        # ---------- 底部按钮 ----------
         bottom = ttk.Frame(self)
         bottom.pack(fill=tk.X, padx=6, pady=6)
         ttk.Button(bottom, text="保存组合", command=self.save_current_set).pack(side=tk.LEFT, expand=True, fill=tk.X)
         ttk.Button(bottom, text="应用组合", command=self.apply_current_set).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=6)
         ttk.Button(bottom, text="恢复默认", command=self.restore_default).pack(side=tk.LEFT, expand=True, fill=tk.X)
 
-        self.bind("<Alt-c>",lambda e:self.open_column_manager_editor())
-        # 填充保存组合列表
+        # ---------- 快捷键 ----------
+        self.bind("<Alt-c>", lambda e: self.open_column_manager_editor())
+
+        # ---------- 填充保存组合列表 ----------
         self.refresh_saved_sets()
 
-
-        # 初始化后自动应用当前列组合（不会弹出窗口）
+        # ---------- 自动应用当前列组合 ----------
         if self.auto_apply_on_init:
             try:
                 self.set_current_set()
@@ -8146,14 +9204,56 @@ class ColumnSetManager(tk.Toplevel):
                 traceback.print_exc()
                 print("⚠️ 自动应用列组合失败：", e)
 
-    # def open_column_manager_editor(self):
-    #     """在已有 root 上打开编辑窗口"""
-    #     #应用于frame
-    #     if  hasattr(self, "main"):
-    #         if self.winfo_ismapped():
-    #             self.pack_forget()  # 隐藏
-    #         else:
-    #             self.pack(fill="both", expand=True)  # 仅显示，不移动位置
+
+
+  
+    def _apply_dpi_scaling_Column(self,scale_factor=None):
+        """自动计算并设置 Tkinter 的内部 DPI 缩放。"""
+        # 获取系统的缩放因子 (例如 2.0)
+
+        if not scale_factor: 
+            self.scale_factor = get_windows_dpi_scale_factor()
+            scale_factor = self.scale_factor
+        else:
+            self.scale_factor = scale_factor
+        print(f'_apply_dpi_scaling_Column scale_factor : {scale_factor}')
+
+        if scale_factor > 1.0:
+            # Tkinter 'scaling' 值 = (系统 DPI / 72 DPI)
+            print(f'Column scale_factor apply: {scale_factor} {self.scale_factor}')
+            tk_scaling_value = (scale_factor * DEFAULT_DPI) / 72.0 
+            # 这一步会放大所有基于像素定义的组件尺寸和默认字体大小
+            self.tk.call('tk', 'scaling', tk_scaling_value)
+
+            print(f"✅ Column DPI 自动缩放应用于 {scale_factor}x ({tk_scaling_value})")
+            
+            # 3. 💥 关键：配置 Treeview 样式以统一处理行高和字体
+            style = ttk.Style(self)
+            
+            # a. 设置行高 (Rowheight)
+            BASE_ROW_HEIGHT = 22  # 基础行高像素
+            scaled_row_height = int(BASE_ROW_HEIGHT * scale_factor)
+            
+            # b. 获取缩放后的字体 (可选，但推荐用于清晰度)
+            # Tkinter 的 'tk scaling' 已经缩放了默认字体，但显式配置更稳健。
+            # 这里我们使用一个基准字体，通常是 'TkDefaultFont'
+            default_font = tk.font.nametofont("TkDefaultFont")
+            
+            # 使用 ttk.Style 配置所有 Treeview 实例
+            # 注意：配置行高必须在 Treeview 元素上完成
+            style.configure(
+                "Treeview", 
+                rowheight=scaled_row_height,
+                font=default_font  # 保持使用 Tkinter 已经缩放过的默认字体
+            )
+            
+            # 配置 Heading 字体 (通常需要单独设置，确保列标题也适配)
+            style.configure(
+                "Treeview.Heading",
+                font=default_font
+            )
+            
+            print(f"✅ Column DPI 自动缩放应用于 {scale_factor}x，Treeview 行高设置为 {scaled_row_height}")
 
     def open_column_manager_editor(self):
         """切换显示/隐藏"""
@@ -8166,17 +9266,6 @@ class ColumnSetManager(tk.Toplevel):
             # 已显示 → 隐藏
             self.withdraw()
 
-    # def init_column_manager_editor(self):
-    #     """切换显示/隐藏"""
-    #     if self.state() == "withdrawn":
-    #         # 已隐藏 → 显示
-    #         # self.deiconify()
-    #         # self.lift()
-    #         # self.focus_set()
-    #         pass
-    #     else:
-    #         # 已显示 → 隐藏
-    #         self.withdraw()
 
     # ---------------------------
     # 鼠标滚轮支持（只在 canvas 区生效）
@@ -9266,14 +10355,6 @@ class KLineMonitor(tk.Toplevel):
         self.total_label = tk.Label(self.status_frame, text="总数: 0", bg="#eee")
         self.total_label.pack(side="left", padx=5)
 
-        # self.buy_label = tk.Label(self.status_frame, text="BUY: 0", fg="green", cursor="hand2", bg="#eee")
-        # self.buy_label.pack(side="left", padx=5)
-        # self.buy_label.bind("<Button-1>", lambda e: self.filter_by_signal("BUY"))
-
-        # self.sell_label = tk.Label(self.status_frame, text="SELL: 0", fg="red", cursor="hand2", bg="#eee")
-        # self.sell_label.pack(side="left", padx=5)
-        # self.sell_label.bind("<Button-1>", lambda e: self.filter_by_signal("SELL"))
-
         # 动态生成信号统计标签
         self.signal_labels = {}
         for sig in self.signal_types:
@@ -9313,7 +10394,7 @@ class KLineMonitor(tk.Toplevel):
 
         self.tree = ttk.Treeview(
             table_frame,
-            columns=("code", "name", "now", "percent", "volume", "signal", "emotion"),
+            columns=("code", "name", "now", "percent", "volume", "signal","score", "emotion"),
             show="headings",
             height=20
         )
@@ -9329,15 +10410,6 @@ class KLineMonitor(tk.Toplevel):
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self.tree.configure(yscrollcommand=vsb.set)
 
-        
-        # ---- 表格 ----
-        # self.tree = ttk.Treeview(
-        #     self,
-        #     columns=("code", "name", "now", "percent","volume","signal", "emotion"),
-        #     show="headings",
-        #     height=20
-        # )
-        # self.tree.pack(fill=tk.BOTH, expand=True)
 
         for col, text, w in [
             ("code", "代码", 40),
@@ -9346,6 +10418,7 @@ class KLineMonitor(tk.Toplevel):
             ("percent", "涨幅",30),
             ("volume", "量比", 30),
             ("signal", "信号", 60),
+            ("score", "评分", 30),
             ("emotion", "情绪", 60)
         ]:
             self.tree.heading(col, text=text, command=lambda c=col: self.treeview_sort_column(c))
@@ -9760,7 +10833,7 @@ class KLineMonitor(tk.Toplevel):
         # --- 循环刷新 ---
         while not self.stop_event.is_set():
             try:
-                if cct.get_work_time():  # 仅工作时间刷新
+                if  cct.get_work_time():  # 仅工作时间刷新
                     df = self.get_df_func()
                     if df is not None and not df.empty:
                         df = detect_signals(df)
@@ -9882,12 +10955,194 @@ class KLineMonitor(tk.Toplevel):
     #     for emo, lbl in self.emotion_labels.items():
     #         lbl.config(text=f"{emo}: {emotion_counts.get(emo, 0)}")
 
+    def process_table_data1(self, df):
+        """
+        处理表格数据，返回可直接插入 treeview 的列表
+        每条数据包含：
+          code, name, now, percent, volume, display_signal, emotion, tag
+        """
+        processed = []
+
+        # 初始化累积信号和价格历史
+        if not hasattr(self, "cumulative_signals"):
+            self.cumulative_signals = {}
+        if not hasattr(self, "price_history"):
+            self.price_history = {}  # {code: deque([...])}
+            self.max_history_len = 10
+
+        if not hasattr(self, "signal_history_indices"):
+            self.signal_history_indices = {sig: set() for sig in self.signal_types}
+            self.last_signal_index = {sig: None for sig in self.signal_types}
+
+        for idx, r in df.iterrows():
+            code = r.get("code")
+            sig = str(r.get("signal", "") or "")
+            now_price = r.get("now", 0)
+
+            # --- 更新价格历史 ---
+            if code not in self.price_history:
+                self.price_history[code] = deque(maxlen=self.max_history_len)
+            self.price_history[code].append(now_price)
+
+            # --- 判断趋势 ---
+            ph = self.price_history[code]
+            if len(ph) > 1:
+                if ph[-1] > ph[0]:
+                    trend = "up"
+                elif ph[-1] < ph[0]:
+                    trend = "down"
+                else:
+                    trend = "flat"
+            else:
+                trend = "flat"
+
+            # --- 更新累积信号 ---
+            if code not in self.cumulative_signals:
+                self.cumulative_signals[code] = []
+
+            if sig in self.signal_types:
+                if trend == "up":
+                    self.cumulative_signals[code].append(sig)
+                elif trend == "down" and self.cumulative_signals[code]:
+                    try:
+                        self.cumulative_signals[code].remove(sig)
+                    except ValueError:
+                        pass
+                # 横盘 trend=="flat" 不变化
+
+                # 更新历史索引
+                self.signal_history_indices[sig].add(idx)
+                self.last_signal_index[sig] = idx
+
+            # --- 构造显示信号 ---
+            count = self.cumulative_signals.get(code, []).count(sig) if sig else 0
+            arrow = "↑" if trend=="up" else ("↓" if trend=="down" else "→")
+            display_signal = f"{sig} {arrow}{count}" if sig else ""
+
+            # tag
+            tag = "neutral"
+            if sig.startswith("BUY"):
+                tag = "buy"
+            elif sig.startswith("SELL"):
+                tag = "sell"
+            # 历史高亮
+            for s in self.signal_types:
+                if idx in self.signal_history_indices.get(s, set()):
+                    tag += "_hist"
+
+            processed.append({
+                "code": code,
+                "name": r.get("name",""),
+                "now": now_price,
+                "percent": r.get("percent",0) or r.get("per1d",0),
+                "volume": r.get("volume",0),
+                "display_signal": display_signal,
+                "score": r.get("score",0),
+                "emotion": r.get("emotion",""),
+                "tag": tag
+            })
+
+        return processed
+
+
+    def process_table_data(self, df):
+        """
+        处理表格数据，使用滑动平均斜率判断趋势
+        """
+        processed = []
+
+        # 初始化累积信号和价格历史
+        if not hasattr(self, "cumulative_signals"):
+            self.cumulative_signals = {}
+        if not hasattr(self, "price_history"):
+            self.price_history = {}  # {code: deque([...])}
+            self.max_history_len = 10
+
+        if not hasattr(self, "signal_history_indices"):
+            self.signal_history_indices = {sig: set() for sig in self.signal_types}
+            self.last_signal_index = {sig: None for sig in self.signal_types}
+
+        for idx, r in df.iterrows():
+            code = r.get("code")
+            sig = str(r.get("signal", "") or "")
+            now_price = r.get("now", 0)
+
+            # --- 更新价格历史 ---
+            if code not in self.price_history:
+                self.price_history[code] = deque(maxlen=self.max_history_len)
+            self.price_history[code].append(now_price)
+
+            ph = np.array(self.price_history[code])
+            trend = "flat"
+
+            # --- 计算趋势：滑动平均斜率 ---
+            if len(ph) >= 3:  # 至少3个点
+                # 使用最小二乘线性拟合
+                x = np.arange(len(ph))
+                y = ph
+                A = np.vstack([x, np.ones(len(x))]).T
+                slope, _ = np.linalg.lstsq(A, y, rcond=None)[0]
+
+                # 根据斜率判断趋势
+                if slope > 0.01:  # 阈值可调
+                    trend = "up"
+                elif slope < -0.01:
+                    trend = "down"
+                else:
+                    trend = "flat"
+
+            # --- 更新累积信号 ---
+            if code not in self.cumulative_signals:
+                self.cumulative_signals[code] = []
+
+            if sig in self.signal_types:
+                if trend == "up":
+                    self.cumulative_signals[code].append(sig)
+                elif trend == "down" and self.cumulative_signals[code]:
+                    try:
+                        self.cumulative_signals[code].remove(sig)
+                    except ValueError:
+                        pass
+                # 横盘 trend=="flat" 不变化
+
+                # 更新历史索引
+                self.signal_history_indices[sig].add(idx)
+                self.last_signal_index[sig] = idx
+
+            # --- 构造显示信号 ---
+            count = self.cumulative_signals.get(code, []).count(sig) if sig else 0
+            arrow = "↑" if trend=="up" else ("↓" if trend=="down" else "→")
+            display_signal = f"{sig} {arrow}{count}" if sig else ""
+
+            # tag
+            tag = "neutral"
+            if sig.startswith("BUY"):
+                tag = "buy"
+            elif sig.startswith("SELL"):
+                tag = "sell"
+            # 历史高亮
+            for s in self.signal_types:
+                if idx in self.signal_history_indices.get(s, set()):
+                    tag += "_hist"
+
+            processed.append({
+                "code": code,
+                "name": r.get("name",""),
+                "now": now_price,
+                "percent": r.get("percent",0) or r.get("per1d",0),
+                "volume": r.get("volume",0),
+                "display_signal": display_signal,
+                "score": r.get("score",0),
+                "emotion": r.get("emotion",""),
+                "tag": tag
+            })
+
+        return processed
+
+
     def update_table(self, df):
         """
-        更新表格：
-        - 每个个股的信号累加显示次数
-        - 最新信号箭头 ↑ / ↓，后面数字表示次数
-        - 历史高亮 buy_hist / sell_hist
+        使用 process_table_data 处理数据，再更新 Treeview
         """
         # 保存选中行
         selected_code = None
@@ -9897,74 +11152,34 @@ class KLineMonitor(tk.Toplevel):
             if values:
                 selected_code = values[0]
 
-        # 初始化每个个股的累积信号字典
-        if not hasattr(self, "cumulative_signals"):
-            self.cumulative_signals = {}
+        # 处理数据
+        processed_data = self.process_table_data(df)
 
-        # 初始化历史索引
-        if not hasattr(self, "signal_history_indices"):
-            self.signal_history_indices = {sig: set() for sig in self.signal_types}
-            self.last_signal_index = {sig: None for sig in self.signal_types}
-
-        # ---- 更新历史信号和累积信号 ----
-        for idx, r in df.iterrows():
-            code = r.get("code")
-            sig = str(r.get("signal", "") or "")
-
-            if code not in self.cumulative_signals:
-                self.cumulative_signals[code] = []
-
-            # 累加信号（BUY/SELL）到该股票的历史
-            if sig in self.signal_types:
-                self.cumulative_signals[code].append(sig)
-                self.signal_history_indices[sig].add(idx)
-                self.last_signal_index[sig] = idx
-
-        # ---- 清空表格 ----
+        # 清空表格
         self.tree.delete(*self.tree.get_children())
-        for idx, r in df.iterrows():
-            code = r.get("code")
-            sig = str(r.get("signal", "") or "")
-            tag = "neutral"
 
-            # 最新方向箭头
-            arrow = ""
-            if sig.startswith("BUY"):
-                arrow = "↑"
-                tag = "buy"
-            elif sig.startswith("SELL"):
-                arrow = "↓"
-                tag = "sell"
-
-            # 累积信号统计次数
-            count = self.cumulative_signals.get(code, []).count(sig) if sig else 0
-            display_signal = f"{sig} {arrow}{count}" if sig else ""
-
-            # 历史高亮
-            for s in self.signal_types:
-                if idx in self.signal_history_indices.get(s, set()):
-                    tag += "_hist"
-
-            # 插入表格
+        # 插入表格
+        for row in processed_data:
             self.tree.insert(
                 "", tk.END,
                 values=(
-                    code,
-                    r.get("name", ""),
-                    f"{r.get('now',0):.2f}",
-                    f"{r.get('percent',0) or r.get('per1d',0):.2f}",
-                    f"{r.get('volume',0):.1f}",
-                    display_signal,
-                    r.get("emotion","")
+                    row["code"],
+                    row["name"],
+                    f"{row['now']:.2f}",
+                    f"{row['percent']:.2f}",
+                    f"{row['volume']:.1f}",
+                    row["display_signal"],
+                    f"{row['score']}",
+                    row["emotion"]
                 ),
-                tags=(tag,)
+                tags=(row["tag"],)
             )
 
-        # ---- 保留排序 ----
+        # 保留排序
         if getattr(self, "sort_column", None):
             self.treeview_sort_column(self.sort_column, self.sort_reverse)
 
-        # ---- 恢复选中行 ----
+        # 恢复选中行
         if selected_code:
             for item in self.tree.get_children():
                 if self.tree.set(item, "code") == selected_code:
@@ -9973,7 +11188,7 @@ class KLineMonitor(tk.Toplevel):
                     self.tree.see(item)
                     break
 
-        # ---- 更新状态栏 ----
+        # 更新状态栏
         total = len(df)
         self.total_label.config(text=f"总数: {total}")
 
@@ -9989,162 +11204,269 @@ class KLineMonitor(tk.Toplevel):
             lbl.config(text=f"{emo}: {emotion_counts.get(emo, 0)}")
 
 
-    # ---- 更新表格 ----
-    def update_table_no_arrow(self, df):
-        # 保存选中行
-        selected_code = None
-        sel_items = self.tree.selection()
-        if sel_items:
-            values = self.tree.item(sel_items[0], "values")
-            if values:
-                selected_code = values[0]
+    # def update_table(self, df):
+    #     """
+    #     更新表格：
+    #     - 每个个股的信号累加显示次数
+    #     - 最新信号箭头 ↑ / ↓，后面数字表示次数
+    #     - 历史高亮 buy_hist / sell_hist
+    #     """
+    #     # 保存选中行
+    #     selected_code = None
+    #     sel_items = self.tree.selection()
+    #     if sel_items:
+    #         values = self.tree.item(sel_items[0], "values")
+    #         if values:
+    #             selected_code = values[0]
 
-        # ---- 更新历史信号 ----
-        buy_rows = df.index[df['signal'].astype(str).str.startswith('BUY', na=False)].tolist()
-        sell_rows = df.index[df['signal'].astype(str).str.startswith('SELL', na=False)].tolist()
+    #     # 初始化每个个股的累积信号字典
+    #     if not hasattr(self, "cumulative_signals"):
+    #         self.cumulative_signals = {}
 
-        if buy_rows:
-            self.last_buy_index = buy_rows[-1]
-            self.buy_history_indices.update(buy_rows)
-        if sell_rows:
-            self.last_sell_index = sell_rows[-1]
-            self.sell_history_indices.update(sell_rows)
+    #     # 初始化历史索引
+    #     if not hasattr(self, "signal_history_indices"):
+    #         self.signal_history_indices = {sig: set() for sig in self.signal_types}
+    #         self.last_signal_index = {sig: None for sig in self.signal_types}
 
-        # ---- 清空表格 ----
-        self.tree.delete(*self.tree.get_children())
+    #     # ---- 更新历史信号和累积信号 ----
+    #     for idx, r in df.iterrows():
+    #         code = r.get("code")
+    #         sig = str(r.get("signal", "") or "")
 
-        for idx, r in df.iterrows():
-            signal = str(r.get("signal", "") or "")
-            tag = "neutral"
-            arrow = ""
+    #         if code not in self.cumulative_signals:
+    #             self.cumulative_signals[code] = []
 
-            if signal.startswith("BUY"):
-                tag = "buy"
-                if idx == getattr(self, "last_buy_index", None):
-                    arrow = "↑"
-                if idx in getattr(self, "buy_history_indices", set()):
-                    tag = "buy_hist"
+    #         # 累加信号（BUY/SELL）到该股票的历史
+    #         if sig in self.signal_types:
+    #             self.cumulative_signals[code].append(sig)
+    #             self.signal_history_indices[sig].add(idx)
+    #             self.last_signal_index[sig] = idx
 
-            elif signal.startswith("SELL"):
-                tag = "sell"
-                if idx == getattr(self, "last_sell_index", None):
-                    arrow = "↓"
-                if idx in getattr(self, "sell_history_indices", set()):
-                    tag = "sell_hist"
+    #     # ---- 清空表格 ----
+    #     self.tree.delete(*self.tree.get_children())
+    #     for idx, r in df.iterrows():
+    #         code = r.get("code")
+    #         sig = str(r.get("signal", "") or "")
+    #         tag = "neutral"
 
-            display_signal = f"{signal} {arrow}"
-            self.tree.insert(
-                "", tk.END,
-                values=(r.get("code",""), r.get("name",""), f"{r.get('now',0):.2f}",f"{r.get('percent',0):.2f}",f"{r.get('volume',0):.1f}", display_signal, r.get("emotion","")),
-                tags=(tag,)
-            )
+    #         # 最新方向箭头
+    #         arrow = ""
+    #         if sig.startswith("BUY"):
+    #             arrow = "↑"
+    #             tag = "buy"
+    #         elif sig.startswith("SELL"):
+    #             arrow = "↓"
+    #             tag = "sell"
 
-        # ---- 保留排序 ----
-        if getattr(self, "sort_column", None):
-            self.treeview_sort_column(self.sort_column, self.sort_reverse)
+    #         # 累积信号统计次数
+    #         count = self.cumulative_signals.get(code, []).count(sig) if sig else 0
+    #         display_signal = f"{sig} {arrow}{count}" if sig else ""
 
-        # ---- 恢复选中行 ----
-        if selected_code:
-            for item in self.tree.get_children():
-                if self.tree.set(item, "code") == selected_code:
-                    self.tree.selection_set(item)
-                    self.tree.focus(item)
-                    self.tree.see(item)
-                    break
+    #         # 历史高亮
+    #         for s in self.signal_types:
+    #             if idx in self.signal_history_indices.get(s, set()):
+    #                 tag += "_hist"
 
-        # ---- 更新状态栏 ----
-        total = len(df)
-        self.total_label.config(text=f"总数: {total}")
+    #         # 插入表格
+    #         self.tree.insert(
+    #             "", tk.END,
+    #             values=(
+    #                 code,
+    #                 r.get("name", ""),
+    #                 f"{r.get('now',0):.2f}",
+    #                 f"{r.get('percent',0) or r.get('per1d',0):.2f}",
+    #                 f"{r.get('volume',0):.1f}",
+    #                 display_signal,
+    #                 r.get("emotion","")
+    #             ),
+    #             tags=(tag,)
+    #         )
 
-        # 动态生成信号统计
-        signal_counts = df["signal"].value_counts().to_dict()
+    #     # ---- 保留排序 ----
+    #     if getattr(self, "sort_column", None):
+    #         self.treeview_sort_column(self.sort_column, self.sort_reverse)
 
-        # 确保有一个字典存放动态标签
-        if not hasattr(self, "signal_labels"):
-            self.signal_labels = {}
+    #     # ---- 恢复选中行 ----
+    #     if selected_code:
+    #         for item in self.tree.get_children():
+    #             if self.tree.set(item, "code") == selected_code:
+    #                 self.tree.selection_set(item)
+    #                 self.tree.focus(item)
+    #                 self.tree.see(item)
+    #                 break
+
+    #     # ---- 更新状态栏 ----
+    #     total = len(df)
+    #     self.total_label.config(text=f"总数: {total}")
+
+    #     # 各信号计数
+    #     signal_counts = df["signal"].value_counts().to_dict()
+    #     for sig, lbl in self.signal_labels.items():
+    #         count = signal_counts.get(sig, 0)
+    #         lbl.config(text=f"{sig}: {count}")
+
+    #     # 情绪统计
+    #     emotion_counts = df["emotion"].value_counts().to_dict()
+    #     for emo, lbl in self.emotion_labels.items():
+    #         lbl.config(text=f"{emo}: {emotion_counts.get(emo, 0)}")
 
 
-        # 更新信号统计，不再动态增删 Label
-        signal_counts = df["signal"].value_counts().to_dict()
-        for sig, lbl in self.signal_labels.items():
-            count = signal_counts.get(sig, 0)
-            lbl.config(text=f"{sig}: {count}")
+    # # ---- 更新表格 ----
+    # def update_table_no_arrow(self, df):
+    #     # 保存选中行
+    #     selected_code = None
+    #     sel_items = self.tree.selection()
+    #     if sel_items:
+    #         values = self.tree.item(sel_items[0], "values")
+    #         if values:
+    #             selected_code = values[0]
 
-        # ---- 更新情绪标签 ----
-        emotion_counts = df["emotion"].value_counts().to_dict()
-        for emo, lbl in self.emotion_labels.items():
-            lbl.config(text=f"{emo}: {emotion_counts.get(emo, 0)}")
+    #     # ---- 更新历史信号 ----
+    #     buy_rows = df.index[df['signal'].astype(str).str.startswith('BUY', na=False)].tolist()
+    #     sell_rows = df.index[df['signal'].astype(str).str.startswith('SELL', na=False)].tolist()
 
-    # ---- 更新表格 ----
-    def update_table_src(self, df):
-        # 保存选中行
-        selected_code = None
-        sel_items = self.tree.selection()
-        if sel_items:
-            values = self.tree.item(sel_items[0], "values")
-            if values:
-                selected_code = values[0]
+    #     if buy_rows:
+    #         self.last_buy_index = buy_rows[-1]
+    #         self.buy_history_indices.update(buy_rows)
+    #     if sell_rows:
+    #         self.last_sell_index = sell_rows[-1]
+    #         self.sell_history_indices.update(sell_rows)
 
-        # ---- 更新历史信号 ----
-        buy_rows = df.index[df['signal'] == 'BUY'].tolist()
-        sell_rows = df.index[df['signal'] == 'SELL'].tolist()
-        if buy_rows:
-            self.last_buy_index = buy_rows[-1]
-            self.buy_history_indices.update(buy_rows)
-        if sell_rows:
-            self.last_sell_index = sell_rows[-1]
-            self.sell_history_indices.update(sell_rows)
+    #     # ---- 清空表格 ----
+    #     self.tree.delete(*self.tree.get_children())
 
-        # ---- 清空表格 ----
-        self.tree.delete(*self.tree.get_children())
+    #     for idx, r in df.iterrows():
+    #         signal = str(r.get("signal", "") or "")
+    #         tag = "neutral"
+    #         arrow = ""
 
-        for idx, r in df.iterrows():
-            tag = "neutral"
-            arrow = ""
-            if r["signal"] == "BUY":
-                tag = "buy"
-                if idx == self.last_buy_index:
-                    arrow = "↑"
-                if idx in self.buy_history_indices:
-                    tag = "buy_hist"
-            elif r["signal"] == "SELL":
-                tag = "sell"
-                if idx == self.last_sell_index:
-                    arrow = "↓"
-                if idx in self.sell_history_indices:
-                    tag = "sell_hist"
+    #         if signal.startswith("BUY"):
+    #             tag = "buy"
+    #             if idx == getattr(self, "last_buy_index", None):
+    #                 arrow = "↑"
+    #             if idx in getattr(self, "buy_history_indices", set()):
+    #                 tag = "buy_hist"
 
-            display_signal = f"{r.get('signal','')} {arrow}"
-            self.tree.insert(
-                "", tk.END,
-                values=(r.get("code",""), r.get("name",""), f"{r.get('now',0):.2f}", display_signal, r.get("emotion","")),
-                tags=(tag,)
-            )
+    #         elif signal.startswith("SELL"):
+    #             tag = "sell"
+    #             if idx == getattr(self, "last_sell_index", None):
+    #                 arrow = "↓"
+    #             if idx in getattr(self, "sell_history_indices", set()):
+    #                 tag = "sell_hist"
 
-        # ---- 保留排序 ----
-        if self.sort_column:
-            self.treeview_sort_column(self.sort_column, self.sort_reverse)
+    #         display_signal = f"{signal} {arrow}"
+    #         self.tree.insert(
+    #             "", tk.END,
+    #             values=(r.get("code",""), r.get("name",""), f"{r.get('now',0):.2f}",f"{r.get('percent',0):.2f}",f"{r.get('volume',0):.1f}", display_signal, r.get("emotion","")),
+    #             tags=(tag,)
+    #         )
 
-        # ---- 恢复选中行 ----
-        if selected_code:
-            for item in self.tree.get_children():
-                if self.tree.set(item, "code") == selected_code:
-                    self.tree.selection_set(item)
-                    self.tree.focus(item)
-                    self.tree.see(item)
-                    break
+    #     # ---- 保留排序 ----
+    #     if getattr(self, "sort_column", None):
+    #         self.treeview_sort_column(self.sort_column, self.sort_reverse)
 
-        # ---- 更新状态栏 ----
-        total = len(df)
-        buy_count = (df["signal"].str.contains("BUY")).sum()
-        sell_count = (df["signal"].str.contains("SELL")).sum()
-        emotion_counts = df["emotion"].value_counts().to_dict()
+    #     # ---- 恢复选中行 ----
+    #     if selected_code:
+    #         for item in self.tree.get_children():
+    #             if self.tree.set(item, "code") == selected_code:
+    #                 self.tree.selection_set(item)
+    #                 self.tree.focus(item)
+    #                 self.tree.see(item)
+    #                 break
 
-        self.total_label.config(text=f"总数: {total}")
-        self.buy_label.config(text=f"BUY: {buy_count} ↑")
-        self.sell_label.config(text=f"SELL: {sell_count} ↓")
-        for emo, lbl in self.emotion_labels.items():
-            lbl.config(text=f"{emo}: {emotion_counts.get(emo,0)}")
+    #     # ---- 更新状态栏 ----
+    #     total = len(df)
+    #     self.total_label.config(text=f"总数: {total}")
+
+    #     # 动态生成信号统计
+    #     signal_counts = df["signal"].value_counts().to_dict()
+
+    #     # 确保有一个字典存放动态标签
+    #     if not hasattr(self, "signal_labels"):
+    #         self.signal_labels = {}
+
+
+    #     # 更新信号统计，不再动态增删 Label
+    #     signal_counts = df["signal"].value_counts().to_dict()
+    #     for sig, lbl in self.signal_labels.items():
+    #         count = signal_counts.get(sig, 0)
+    #         lbl.config(text=f"{sig}: {count}")
+
+    #     # ---- 更新情绪标签 ----
+    #     emotion_counts = df["emotion"].value_counts().to_dict()
+    #     for emo, lbl in self.emotion_labels.items():
+    #         lbl.config(text=f"{emo}: {emotion_counts.get(emo, 0)}")
+
+    # # ---- 更新表格 ----
+    # def update_table_src(self, df):
+    #     # 保存选中行
+    #     selected_code = None
+    #     sel_items = self.tree.selection()
+    #     if sel_items:
+    #         values = self.tree.item(sel_items[0], "values")
+    #         if values:
+    #             selected_code = values[0]
+
+    #     # ---- 更新历史信号 ----
+    #     buy_rows = df.index[df['signal'] == 'BUY'].tolist()
+    #     sell_rows = df.index[df['signal'] == 'SELL'].tolist()
+    #     if buy_rows:
+    #         self.last_buy_index = buy_rows[-1]
+    #         self.buy_history_indices.update(buy_rows)
+    #     if sell_rows:
+    #         self.last_sell_index = sell_rows[-1]
+    #         self.sell_history_indices.update(sell_rows)
+
+    #     # ---- 清空表格 ----
+    #     self.tree.delete(*self.tree.get_children())
+
+    #     for idx, r in df.iterrows():
+    #         tag = "neutral"
+    #         arrow = ""
+    #         if r["signal"] == "BUY":
+    #             tag = "buy"
+    #             if idx == self.last_buy_index:
+    #                 arrow = "↑"
+    #             if idx in self.buy_history_indices:
+    #                 tag = "buy_hist"
+    #         elif r["signal"] == "SELL":
+    #             tag = "sell"
+    #             if idx == self.last_sell_index:
+    #                 arrow = "↓"
+    #             if idx in self.sell_history_indices:
+    #                 tag = "sell_hist"
+
+    #         display_signal = f"{r.get('signal','')} {arrow}"
+    #         self.tree.insert(
+    #             "", tk.END,
+    #             values=(r.get("code",""), r.get("name",""), f"{r.get('now',0):.2f}", display_signal, r.get("emotion","")),
+    #             tags=(tag,)
+    #         )
+
+    #     # ---- 保留排序 ----
+    #     if self.sort_column:
+    #         self.treeview_sort_column(self.sort_column, self.sort_reverse)
+
+    #     # ---- 恢复选中行 ----
+    #     if selected_code:
+    #         for item in self.tree.get_children():
+    #             if self.tree.set(item, "code") == selected_code:
+    #                 self.tree.selection_set(item)
+    #                 self.tree.focus(item)
+    #                 self.tree.see(item)
+    #                 break
+
+    #     # ---- 更新状态栏 ----
+    #     total = len(df)
+    #     buy_count = (df["signal"].str.contains("BUY")).sum()
+    #     sell_count = (df["signal"].str.contains("SELL")).sum()
+    #     emotion_counts = df["emotion"].value_counts().to_dict()
+
+    #     self.total_label.config(text=f"总数: {total}")
+    #     self.buy_label.config(text=f"BUY: {buy_count} ↑")
+    #     self.sell_label.config(text=f"SELL: {sell_count} ↓")
+    #     for emo, lbl in self.emotion_labels.items():
+    #         lbl.config(text=f"{emo}: {emotion_counts.get(emo,0)}")
 
     # ---- 筛选 ----
     def filter_by_signal(self, signal):

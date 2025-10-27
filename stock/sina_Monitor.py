@@ -205,8 +205,8 @@ if __name__ == "__main__":
     # st_key_sort = '3 1'
     # st_key_sort = '8'
     
-    # cct.GlobalValues().setkey('resample',"w")
-    cct.GlobalValues().setkey('resample',"3d")
+    cct.GlobalValues().setkey('resample','w')
+    # cct.GlobalValues().setkey('resample','3d')
     # resample = cct.GlobalValues().getkey('resample')
     # duration_date = ct.duration_date_day  #80dat
     duration_date = ct.Resample_LABELS_Days[cct.GlobalValues().getkey('resample')]
