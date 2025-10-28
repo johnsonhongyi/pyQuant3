@@ -4733,7 +4733,259 @@ class StockMonitorApp(tk.Tk):
             # 发送消息
             self.sender.send(code)
 
-    def show_concept_top10_window(self, concept_name,code=None):
+    def show_concept_top10_window(self, concept_name, code=None, auto_update=True, interval=30):
+        """
+        显示指定概念的前10放量上涨股（Treeview 高性能版，完全替代 Canvas 版本）
+        auto_update: 是否自动刷新
+        interval: 自动刷新间隔秒
+        """
+        if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
+            toast_message(self, "df_all 数据为空，无法筛选概念股票")
+            return
+
+        query_expr = f'category.str.contains("{concept_name}", na=False)'
+        try:
+            df_concept = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
+        except Exception as e:
+            toast_message(self,  f"筛选表达式错误: {query_expr}\n{e}")
+            return
+
+        if df_concept.empty:
+            print(f"概念【{concept_name}】暂无匹配股票")
+            self.after(100, lambda: toast_message(self,f"概念【{concept_name}】暂无匹配股票"))
+            return
+
+        # --- 复用窗口 ---
+        try:
+            if getattr(self, "_concept_top10_win", None) and self._concept_top10_win.winfo_exists():
+                win = self._concept_top10_win
+                win.deiconify()
+                win.lift()
+                self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
+                return
+        except Exception:
+            self._concept_top10_win = None
+
+        # --- 新窗口 ---
+        win = tk.Toplevel(self)
+        self._concept_top10_win = win
+        win.title(f"{concept_name} 概念前10放量上涨股")
+
+        try:
+            self.load_window_position(win, "concept_top10_window", default_width=520, default_height=420)
+        except Exception:
+            win.geometry("520x420")
+
+        # --- Treeview 主体 ---
+        frame = tk.Frame(win)
+        frame.pack(fill="both", expand=True)
+
+        columns = ("code", "name", "percent", "volume")
+        tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量"}
+        for col in columns:
+            tree.heading(col, text=col_texts[col], anchor="center",
+                         command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
+            tree.column(col, anchor="center", width=60 if col != "name" else 80)
+
+        # 保存引用
+        win._content_frame_top10 = frame
+        win._tree_top10 = tree
+        win._selected_index = 0
+        win._concept_name = concept_name
+
+        # 鼠标滚轮悬停滚动
+        def on_mousewheel(event):
+            tree.yview_scroll(int(-1*(event.delta/120)), "units")
+        def bind_mousewheel(event):
+            tree.bind_all("<MouseWheel>", on_mousewheel)
+            tree.bind_all("<Button-4>", lambda e: tree.yview_scroll(-1,"units"))
+            tree.bind_all("<Button-5>", lambda e: tree.yview_scroll(1,"units"))
+        def unbind_mousewheel(event=None):
+            tree.unbind_all("<MouseWheel>")
+            tree.unbind_all("<Button-4>")
+            tree.unbind_all("<Button-5>")
+
+        tree.bind("<Enter>", bind_mousewheel)
+        tree.bind("<Leave>", unbind_mousewheel)
+
+        # 填充数据
+        self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
+
+        # 双击 / 右键
+        tree.bind("<Double-1>", lambda e: self._on_tree_double_click_newTop10(tree))
+        tree.bind("<Button-3>", lambda e: self._on_tree_right_click_newTop10(tree, e))
+
+        # 单击选中
+        def on_click(event):
+            sel = tree.selection()
+            if sel:
+                item = sel[0]
+                code = tree.item(item, "values")[0]
+                self.select_code = code
+                self.sender.send(code)
+                self._highlight_tree_selection(tree, item)
+        tree.bind("<<TreeviewSelect>>", on_click)
+
+        # 键盘导航
+        def on_key(event):
+            children = tree.get_children()
+            if not children:
+                return
+            idx = win._selected_index
+            if event.keysym in ("Up","Down"):
+                idx = max(0, idx-1) if event.keysym=="Up" else min(len(children)-1, idx+1)
+            elif event.keysym in ("Prior","Next"):
+                step=10
+                idx = max(0, idx-step) if event.keysym=="Prior" else min(len(children)-1, idx+step)
+            elif event.keysym=="Return":
+                sel = tree.selection()
+                if sel:
+                    code = tree.item(sel[0], "values")[0]
+                    self._on_label_double_click_top10(code, int(sel[0]))
+                    return
+            else:
+                return
+            tree.selection_set(children[idx])
+            tree.focus(children[idx])
+            tree.see(children[idx])
+            win._selected_index = idx
+            self._highlight_tree_selection(tree, children[idx])
+        tree.bind("<Up>", on_key)
+        tree.bind("<Down>", on_key)
+        tree.bind("<Prior>", on_key)
+        tree.bind("<Next>", on_key)
+        tree.bind("<Return>", on_key)
+        tree.focus_set()
+
+        # --- 按钮和控制栏区域 ---
+        btn_frame = tk.Frame(win)
+        btn_frame.pack(fill="x", pady=4)
+
+        # --- 自动更新控制栏 ---
+        ctrl_frame = tk.Frame(btn_frame)
+        ctrl_frame.pack(side="left", padx=6)
+
+        chk_auto = tk.BooleanVar(value=True)  # 默认开启自动更新
+        chk_btn = tk.Checkbutton(ctrl_frame, text="自动更新", variable=chk_auto)
+        chk_btn.pack(side="left")
+
+        spin_interval = tk.Spinbox(ctrl_frame, from_=5, to=300, width=5)
+        spin_interval.delete(0, "end")
+        spin_interval.insert(0, 30)  # 默认30秒
+        spin_interval.pack(side="left")
+        tk.Label(ctrl_frame, text="秒").pack(side="left")
+
+        # --- 复制表达式按钮 ---
+        def _copy_expr():
+            import pyperclip
+            q = f'category.str.contains("{concept_name}", na=False)'
+            pyperclip.copy(q)
+            self.after(100, lambda: toast_message(self, f"已复制筛选条件：{q}"))
+
+        tk.Button(btn_frame, text="复制筛选", command=_copy_expr).pack(side="left", padx=4)
+
+        # --- 状态栏 ---
+        visible_count = len(df_concept[df_concept["percent"] > 2])
+        total_count = len(df_concept)
+        lbl_status = tk.Label(btn_frame, text=f"显示 {visible_count}/{total_count} 只", anchor="e",
+                              fg="#555", font=("微软雅黑", 9))
+        lbl_status.pack(side="right", padx=8)
+        win._status_label_top10 = lbl_status
+
+        # --- 自动刷新逻辑 ---
+        def auto_refresh():
+            if not win.winfo_exists():
+                return
+            if chk_auto.get():
+                # 从 self.df_all 更新数据并刷新 Treeview
+                # self.update_df_all_from_api()  # 你需要实现这个函数
+                if not cct.get_work_time():  # 仅工作时间刷新
+                    # print(f'not 工作时间刷新' )
+                    return
+                try:
+                    # 每次从最新 df_all 筛选数据
+                    df_latest = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
+                    self._fill_concept_top10_content(win, concept_name, df_latest, code=code)
+                except Exception as e:
+                    print(f"[WARN] 自动刷新失败: {e}")
+            win.after(int(spin_interval.get()) * 1000, auto_refresh)
+
+        auto_refresh()  # 启动循环
+
+
+        # --- 关闭事件 ---
+        def _on_close():
+            try:
+                self.save_window_position(win, "concept_top10_window")
+            except Exception:
+                pass
+            unbind_mousewheel()
+            win.destroy()
+            self._concept_top10_win = None
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
+    def _fill_concept_top10_content(self, win, concept_name, df_concept, code=None, limit=30):
+        """
+        填充概念Top10内容到Treeview（支持实时刷新）。
+        保留原有 df_concept 参数和 code 参数，limit 默认为 10。
+        """
+        tree = win._tree_top10
+        tree.delete(*tree.get_children())
+
+        # 如果 df_concept 为 None，则从 self.df_all 动态获取
+        if df_concept is None:
+            df_concept = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
+
+        if df_concept.empty:
+            return
+
+        # 排序状态
+        self._top10_sort_state = getattr(self, "_top10_sort_state", {"col": "percent", "asc": False})
+        sort_col = self._top10_sort_state["col"]
+        ascending = self._top10_sort_state["asc"]
+        if sort_col in df_concept.columns:
+            df_concept = df_concept.sort_values(sort_col, ascending=ascending)
+
+        code_to_iid = {}
+        df_display = df_concept.head(limit).copy()  # 限制显示前 N 条
+        for idx, (code_row, row) in enumerate(df_display.iterrows()):
+            iid = str(idx)
+            # 从 self.df_all 动态获取最新 percent 和 volume
+            latest_row = self.df_all.loc[code_row] if code_row in self.df_all.index else row
+            tree.insert("", "end", iid=iid,
+                        values=(code_row,
+                                latest_row.get("name", row.get("name", "")),
+                                f"{latest_row.get('percent', row.get('percent', 0)):.2f}",
+                                f"{latest_row.get('volume', row.get('volume', 0)):.1f}"))
+            code_to_iid[code_row] = iid
+
+        # 默认选中第一行
+        if tree.get_children():
+            target_iid = code_to_iid.get(code, tree.get_children()[0])
+            tree.selection_set(target_iid)
+            tree.focus(target_iid)
+            tree.see(target_iid)
+            win._selected_index = int(target_iid)
+            self._highlight_tree_selection(tree, target_iid)
+
+        # 更新状态栏
+        if hasattr(win, "_status_label_top10"):
+            visible_count = len(df_display)
+            total_count = len(df_concept)
+            win._status_label_top10.config(text=f"显示 {visible_count}/{total_count} 只")
+            win._status_label_top10.pack(side="bottom", fill="x", pady=(0, 4))
+
+        win.update_idletasks()
+
+
+    def show_concept_top10_window_def(self, concept_name,code=None):
         """
         显示指定概念的前10放量上涨股（Treeview 高性能版，完全替代 Canvas 版本）
         """
@@ -4746,12 +4998,12 @@ class StockMonitorApp(tk.Tk):
             # df_concept = self.df_all.query(query_expr)
             df_concept = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
         except Exception as e:
-            toast_message(self,  f"筛选表达式错误: {query_expr}\n{e}")
+            self.after(100, lambda: toast_message(self, f"筛选表达式错误: {query_expr}\n{e}"))
             return
 
         if df_concept.empty:
             print(f"概念【{concept_name}】暂无匹配股票")
-            toast_message(self, f"概念【{concept_name}】暂无匹配股票")
+            self.after(100, lambda: toast_message(self, f"概念【{concept_name}】暂无匹配股票"))
             return
 
         # --- 复用窗口 ---
@@ -4914,7 +5166,7 @@ class StockMonitorApp(tk.Tk):
         win.protocol("WM_DELETE_WINDOW", _on_close)
 
 
-    def _fill_concept_top10_content(self, win, concept_name, df_concept,code=None):
+    def _fill_concept_top10_content_def(self, win, concept_name, df_concept,code=None):
         """
         填充概念Top10内容到Treeview（支持实时刷新）
         """
@@ -5956,7 +6208,7 @@ class StockMonitorApp(tk.Tk):
         font = QtWidgets.QApplication.font()
         font_size = font.pointSize()
         self._font_size = font_size
-        print("concepts_pg 默认字体大小:", font_size)
+        # print("concepts_pg 默认字体大小:", font_size)
 
         texts = []
         max_score = max(scores.max(), 1)
@@ -6356,9 +6608,9 @@ class StockMonitorApp(tk.Tk):
     def _refresh_pg_window(self, code, top_n):
         if code not in self._pg_windows:
             return
-        # if not cct.get_work_time():  # 仅工作时间刷新
-        #     # print(f'not 工作时间刷新' )
-        #     return
+        if not cct.get_work_time():  # 仅工作时间刷新
+            # print(f'not 工作时间刷新' )
+            return
         w_dict = self._pg_windows[code]
         win = w_dict["win"]
 
