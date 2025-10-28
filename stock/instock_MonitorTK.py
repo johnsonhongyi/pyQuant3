@@ -4733,12 +4733,31 @@ class StockMonitorApp(tk.Tk):
             # 发送消息
             self.sender.send(code)
 
+    def _bind_copy_expr(self, win):
+        """绑定或重新绑定复制表达式按钮"""
+        btn_frame = getattr(win, "_btn_frame", None)
+        if btn_frame is None: return
+        # 销毁旧按钮
+        if hasattr(win, "_btn_copy_expr") and win._btn_copy_expr.winfo_exists():
+            win._btn_copy_expr.destroy()
+        def _copy_expr():
+            import pyperclip
+            concept = getattr(win, "_concept_name","未知概念")
+            q = f'category.str.contains("{concept}", na=False)'
+            pyperclip.copy(q)
+            self.after(100, lambda: toast_message(self,f"已复制筛选条件：{q}"))
+        btn = tk.Button(btn_frame, text="复制筛选", command=_copy_expr)
+        btn.pack(side="left", padx=4)
+        win._btn_copy_expr = btn
+
+
     def show_concept_top10_window(self, concept_name, code=None, auto_update=True, interval=30):
         """
         显示指定概念的前10放量上涨股（Treeview 高性能版，完全替代 Canvas 版本）
         auto_update: 是否自动刷新
         interval: 自动刷新间隔秒
-        """
+        """
+
         if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
             toast_message(self, "df_all 数据为空，无法筛选概念股票")
             return
@@ -4761,8 +4780,14 @@ class StockMonitorApp(tk.Tk):
                 win = self._concept_top10_win
                 win.deiconify()
                 win.lift()
+                win._concept_name = concept_name  # 更新概念名
+                # 重新绑定复制按钮
+                self._bind_copy_expr(win)
+
                 self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
                 return
+            
+
         except Exception:
             self._concept_top10_win = None
 
@@ -4814,8 +4839,6 @@ class StockMonitorApp(tk.Tk):
         tree.bind("<Enter>", bind_mousewheel)
         tree.bind("<Leave>", unbind_mousewheel)
 
-        # 填充数据
-        self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
 
         # 双击 / 右键
         tree.bind("<Double-1>", lambda e: self._on_tree_double_click_newTop10(tree))
@@ -4881,14 +4904,18 @@ class StockMonitorApp(tk.Tk):
         spin_interval.pack(side="left")
         tk.Label(ctrl_frame, text="秒").pack(side="left")
 
-        # --- 复制表达式按钮 ---
-        def _copy_expr():
-            import pyperclip
-            q = f'category.str.contains("{concept_name}", na=False)'
-            pyperclip.copy(q)
-            self.after(100, lambda: toast_message(self, f"已复制筛选条件：{q}"))
+        # # --- 复制表达式按钮 ---
+        # def _copy_expr():
+        #     import pyperclip
+        #     q = f'category.str.contains("{concept_name}", na=False)'
+        #     pyperclip.copy(q)
+        #     self.after(100, lambda: toast_message(self, f"已复制筛选条件：{q}"))
 
-        tk.Button(btn_frame, text="复制筛选", command=_copy_expr).pack(side="left", padx=4)
+        # tk.Button(btn_frame, text="复制筛选", command=_copy_expr).pack(side="left", padx=4)
+
+        
+        # --- 在创建窗口或复用窗口后调用 ---
+        bind_copy_expr(win)
 
         # --- 状态栏 ---
         visible_count = len(df_concept[df_concept["percent"] > 2])
@@ -4930,6 +4957,8 @@ class StockMonitorApp(tk.Tk):
             self._concept_top10_win = None
 
         win.protocol("WM_DELETE_WINDOW", _on_close)
+        # 填充数据
+        self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
 
     def _fill_concept_top10_content(self, win, concept_name, df_concept, code=None, limit=30):
         """
@@ -4981,6 +5010,21 @@ class StockMonitorApp(tk.Tk):
             total_count = len(df_concept)
             win._status_label_top10.config(text=f"显示 {visible_count}/{total_count} 只")
             win._status_label_top10.pack(side="bottom", fill="x", pady=(0, 4))
+
+
+        # # 创建窗口或复用窗口时
+        # if not hasattr(win, "_status_label_top10") or not win._status_label_top10.winfo_exists():
+        #     lbl_status = tk.Label(btn_frame, text="", anchor="e", fg="#555", font=("微软雅黑", 9))
+        #     lbl_status.pack(side="right", padx=8)
+        #     win._status_label_top10 = lbl_status
+        # else:
+        #     lbl_status = win._status_label_top10
+
+        # # 填充内容时只更新文字
+        # visible_count = len(df_display)  # 显示所有股票，不过滤
+        # total_count = len(df_concept)
+        # lbl_status.config(text=f"显{visible_count}/{total_count}只")
+
 
         win.update_idletasks()
 
@@ -6796,6 +6840,7 @@ class StockMonitorApp(tk.Tk):
         # 打开或复用 Top10 窗口
         if code is None:
             return
+
         self.show_concept_top10_window(concept_name,code=code)
         if hasattr(self, "_concept_top10_win") and self._concept_top10_win:
             win = self._concept_top10_win
@@ -8263,11 +8308,18 @@ class StockMonitorApp(tk.Tk):
                     data = json.load(f)
                 if window_name in data:
                     pos = data[window_name]
+                    # ✳️ 按当前 DPI 放大回去
                     width = int(pos["width"] * scale)
                     height = int(pos["height"] * scale)
                     x = int(pos["x"] * scale)
                     y = int(pos["y"] * scale)
 
+                    # 防止窗口位置越界
+                    x, y = clamp_window_to_screens(x, y, width, height)
+
+                    win.geometry(f"{width}x{height}+{x}+{y}")
+                    log.info(f"[load_window_position] 加载 {window_name}: {width}x{height}+{x}+{y}")
+                    # return width, height, x, y
             # --- 检查屏幕边界 ---
             screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
             if x is None or y is None:
@@ -8296,6 +8348,7 @@ class StockMonitorApp(tk.Tk):
         except Exception as e:
             print(f"[load_window_position_qt] 加载失败: {e}")
             # 默认居中
+            traceback.print_exc()
             screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
             x = (screen.width() - default_width) // 2
             y = (screen.height() - default_height) // 2
