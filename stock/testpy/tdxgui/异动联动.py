@@ -2108,6 +2108,7 @@ def schedule_daily_init(root):
     # --- 注册新任务 ---
     _scheduled_task_id = root.after(delay_ms, lambda: (daily_init(), start_worker()))
     print(f"✅ 已注册每日开盘初始化任务: {today_925.strftime('%Y-%m-%d %H:%M')[5:]} (任务ID={_scheduled_task_id})")
+    _scheduled_process_queue_task_id = root.after(delay_ms, lambda: process_queue(root))
 
     # --- 状态显示 ---
     try:
@@ -3079,7 +3080,7 @@ def update_monitor_tree(data, tree, window_info, item_id):
             schedule_next(delay_ms,key, tree, window_info, item_id)
             status_label2.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
         else:
-            delay_ms =  int(minutes_to_time(1300)) * 1000
+            delay_ms =  int(minutes_to_time(1300)) * 60 * 1000
             # print(f'update_monitor_tree next_update:{next_time} Min')
             schedule_next(delay_ms,key, tree, window_info, item_id)
             status_label2.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
@@ -6182,13 +6183,14 @@ def refresh_all_stock_data():
     # 刷新报警中心显示
     flush_alerts()
     # 10 分钟后再次执行
+
     if get_work_time() or (get_day_is_trade_day() and 1130 < get_now_time_int() < 1300):
         if not 1130 < get_now_time_int() < 1300:
             delay_ms = 60 * 1000
             root.after(delay_ms, refresh_all_stock_data)
             status_label2.config(text=f"alert刷新 {format_next_time(delay_ms)}")
         else:
-            delay_ms = int(minutes_to_time(1300)) * 1000  # 单位：秒
+            delay_ms = int(minutes_to_time(1300)) * 60 * 1000  # 单位：秒
             root.after(delay_ms , refresh_all_stock_data)
             status_label2.config(text=f"午休刷新 {format_next_time(delay_ms)}")
     else:
