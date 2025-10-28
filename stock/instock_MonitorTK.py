@@ -40,14 +40,34 @@ def set_process_dpi_awareness():
     """强制设置进程的 DPI 意识级别，确保窗口不模糊。"""
     try:
         # Per-Monitor DPI Aware (2) - 推荐在 Windows 8.1/10/11 上使用
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        # SetProcessDpiAwareness(1) 对应的是 PROCESS_DPI_AWARENESS.PROCESS_SYSTEM_DPI_AWARE，即 System DPI Aware。
+        # SetProcessDpiAwareness(2) 对应的是 PROCESS_DPI_AWARENESS.PROCESS_PER_MONITOR_DPI_AWARE，即 Per-Monitor DPI Aware
+        # 无论是 (1) 还是 (2)，它们都会告诉 Windows：“我的程序会处理 DPI 缩放，不要对我的程序进行位图拉伸。”
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
         try:
             # System DPI Aware (1) - 备用
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
             pass
-
+            
+def set_process_dpi_awareness_Close():
+    if sys.platform.startswith('win'):
+        # 强制 DPI Unaware 模式 (值 0)
+        # 这将允许 Windows / RDP 客户端负责拉伸
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(0)
+        except:
+            # 备用： SetProcessDPIAware() 实际上设置为 System Aware，所以最好避免
+            pass 
+            
+        # 确保 Qt 不会启用自己的缩放
+        os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '0'
+        os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '0'
+        os.environ['QT_QPA_PLATFORM'] = 'windows:dpiawareness=0' 
+    
+    # ... 然后再导入 PyqtGraph.Qt ...
+os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"  # 禁用 Qt 自动缩放避免错位
 def is_rdp_session():
     """
     检测当前是否通过远程桌面 (RDP) 连接。
@@ -89,33 +109,26 @@ import pyqtgraph as pg
 import numpy as np
 import hashlib
 
+# default_font = QtGui.QFont("Microsoft YaHei", 10)
+# QtWidgets.QApplication.setFont(default_font)
+
 if sys.platform.startswith('win'):
-    set_process_dpi_awareness()
+    set_process_dpi_awareness()  # 假设设置为 Per-Monitor V2
     # 1. 获取缩放因子
     scale_factor = get_windows_dpi_scale_factor()
     # 2. 设置环境变量（在导入 Qt 之前）
     # 禁用 Qt 自动缩放，改为显式设置缩放因子
-    os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '1'
-    os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1' 
-    os.environ['QT_FONT_DPI'] = '1' 
+    # os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '1'
+    # os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1' 
+    # os.environ['QT_FONT_DPI'] = '1'  # 这个设置通常无效或被忽略
+    os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '0'
+    os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '0' 
+    os.environ['QT_QPA_PLATFORM'] = 'windows:dpiawareness=0'
     # os.environ['QT_SCALE_FACTOR'] = str(scale_factor)
 
     # 打印检查
-    print(f"QT_SCALE_FACTOR Windows 系统 DPI 缩放因子: {scale_factor}")
+    print(f"Windows 系统 DPI 缩放因子: {scale_factor}")
     # print(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
-
-# plot = pg_widget.addPlot() 
-
-# # 启用高 DPI 缩放自动适配
-# QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-
-# # 使用高 DPI pixmap (图标/图片) 自动缩放
-# QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
-
-FONT_FAMILY = "Microsoft YaHei"
-LABEL_SIZE = "14pt"
-TITLE_SIZE = "14pt"
-
 
 
 # 设置 PlotItem 标题的字体 (如果使用了 plot.setTitle())
@@ -1052,19 +1065,51 @@ class StockMonitorApp(tk.Tk):
         
         # 3. 接下来是 Qt 初始化，它不应该影响 self.scale_factor
         if not QtWidgets.QApplication.instance():
-             self.app = pg.mkQApp()
-             screen = self.app.primaryScreen()
-             dpi = screen.logicalDotsPerInch()
-             # 根据 DPI 调整字体比例
-             font = self.app.font()
-             font.setPointSize(int(font.pointSize() * dpi / 96)+ 2)
-             self.app.setFont(font)
-             print(f'dpi : {dpi} fontsize: {font.pointSize()} ratio :  {(dpi / 72)}')
+            self.app = pg.mkQApp()
+            font = QtWidgets.QApplication.font()
+            self.base_font_size = font.pointSize()
+            # if self.scale_factor > 1.5:
+            # # 1. 获取当前的应用程序默认字体 (这是 Qt 认为的 1.0x 逻辑字体)
+            # app_font = self.app.font()
+            # # 2. 获取逻辑点大小（使用 PointSizeF 以获得浮点精度）
+            # # 在 DPI Unaware 模式下，这通常返回 9pt 或 10pt 的逻辑大小。
+            # default_size_pt = app_font.pointSizeF() 
+
+            # # 3. 仅进行微调（例如，比默认字体大 2 逻辑点）
+            # NEW_LOGICAL_SIZE = default_size_pt + 2 
+
+            # # 4. 设置新的逻辑大小
+            # new_app_font = QtGui.QFont(app_font.family())
+            # new_app_font.setPointSizeF(NEW_LOGICAL_SIZE)
+
+            # # 5. 应用到应用程序 (影响所有未设置字体的控件)
+            # # self.app.setFont(new_app_font)
+
+            # # 6. 打印当前的逻辑 DPI (验证)
+            # screen = self.app.primaryScreen()
+            # logical_dpi = screen.logicalDotsPerInch() 
+            # print(f'逻辑 DPI: {logical_dpi} (应为 96) 新字体逻辑大小: {new_app_font.pointSize()}')
+
+            # # --- 您的 PyqtGraph 绘图字体应该继续基于这个 NEW_LOGICAL_SIZE 进行创建 ---
+            # LABEL_SIZE_PT = NEW_LOGICAL_SIZE
+            # TICK_SIZE_PT = NEW_LOGICAL_SIZE - 1 
+
+            # 创建 PyqtGraph 轴标签字体时：
+            # label_font = QtGui.QFont("Microsoft YaHei")
+            # label_font.setPointSizeF(LABEL_SIZE_PT)
+            # plot.setLabel('bottom', '标签', **font=label_font**) # 注意 PyqtGraph 的 setLabel 参数用法
+
+
+            # screen = self.app.primaryScreen()
+            # dpi = screen.logicalDotsPerInch()
+            # # 根据 DPI 调整字体比例
+            # font = self.app.font()
+            # font.setPointSize(int(font.pointSize() * dpi / 96)+ 2)
+            # self.app.setFont(font)
+            # print(f'dpi : {dpi} fontsize: {font.pointSize()} ratio :  {(dpi / 72)}')
 
         self.title("Stock Monitor")
         self.initial_w, self.initial_h, self.initial_x, self.initial_y  = self.load_window_position(self, "main_window")
-        # self.scale_factor = scale_factor
-        # self.scale_factor = int(get_windows_dpi_scale_factor())
         
         self.iconbitmap(icon_path)  # Windows 下 .ico 文件
         # self._icon = tk.PhotoImage(file=icon_path)
@@ -1101,40 +1146,7 @@ class StockMonitorApp(tk.Tk):
         ctrl_frame = tk.Frame(self)
         ctrl_frame.pack(fill="x", padx=5, pady=1)
 
-        # self.lbl_category_result = tk.Label(self, text="", fg="green", anchor="w")
-        # self.lbl_category_result.pack(fill="x", padx=5, pady=(0, 4))
-
-
         self.st_key_sort = self.global_values.getkey("st_key_sort") or "3 0"
-
-
-        # # ====== 底部状态栏 ======
-        # status_frame = tk.Frame(self, relief="sunken", bd=1)
-        # status_frame.pack(side="bottom", fill="x")
-
-        # # 使用 PanedWindow 水平分割，支持拖动
-        # pw = tk.PanedWindow(status_frame, orient=tk.HORIZONTAL, sashrelief="sunken", sashwidth=4)
-        # pw.pack(fill="x", expand=True)
-
-        # # 左侧状态信息
-        # left_frame = tk.Frame(pw, bg="#f0f0f0")
-        # self.status_var = tk.StringVar()
-        # status_label_left = tk.Label(
-        #     left_frame, textvariable=self.status_var, anchor="w", padx=10, pady=1
-        # )
-        # status_label_left.pack(fill="x", expand=True)
-
-        # # 右侧状态信息
-        # right_frame = tk.Frame(pw, bg="#f0f0f0")
-        # self.status_var2 = tk.StringVar()
-        # status_label_right = tk.Label(
-        #     right_frame, textvariable=self.status_var2, anchor="e", padx=10, pady=1
-        # )
-        # status_label_right.pack(fill="x", expand=True)
-
-        # # 添加左右面板 状态栏
-        # pw.add(left_frame, minsize=100, width=900)
-        # pw.add(right_frame, minsize=100, width=100)
 
         # ====== 底部状态栏 ======
         status_frame = tk.Frame(self, relief="sunken", bd=1)
@@ -1166,9 +1178,6 @@ class StockMonitorApp(tk.Tk):
 
         # 延时更新状态栏宽度
         self.after(200, lambda: self.update_status_bar_width(pw, left_frame, right_frame))
-
-
-
 
         # ----------------- TreeView ----------------- #
         tree_frame = tk.Frame(self)
@@ -1219,33 +1228,16 @@ class StockMonitorApp(tk.Tk):
         # 定时检查队列
         self.after(1000, self.update_tree)
 
-
-
         self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=self.update_send_status)
 
-
-
-
-        # # ========== 右键菜单 ==========
-        # self.tree_menu = tk.Menu(self, tearoff=0)
-        # self.tree_menu.add_command(label="打开报警中心", command=lambda: open_alert_center(self))
-        # self.tree_menu.add_command(label="新建报警规则", command=self.open_alert_rule_new)
-        # self.tree_menu.add_command(label="编辑报警规则", command=self.open_alert_rule_edit)
-
         self.protocol("WM_DELETE_WINDOW", self.on_close)
-        # Tree selection event
-        # self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)  
         self.tree.bind("<Button-1>", self.on_single_click)
 
         # 绑定右键点击事件
         self.tree.bind("<Button-3>", self.on_tree_right_click)
 
-
         self.bind("<Alt-c>", lambda e:self.open_column_manager())
-
-        # 绑定双击事件
-        # self.tree.bind("<Double-1>", self.on_double_click)
 
     def update_status_bar_width(self, pw, left_frame, right_frame):
         """ 根据 DPI 缩放调整左右面板的宽度比例 """
@@ -1828,11 +1820,24 @@ class StockMonitorApp(tk.Tk):
             print(f"[INFO] {code} 无概念数据。")
             return []
 
+        # concept_dict = {}
+        # for idx, row in df_all.iterrows():
+        #     categories = [c.strip() for c in str(row['category']).split(';') if c.strip()]
+        #     for c in categories:
+        #         concept_dict.setdefault(c, []).append(row['percent'])
         concept_dict = {}
         for idx, row in df_all.iterrows():
-            categories = [c.strip() for c in str(row['category']).split(';') if c.strip()]
+            # 拆分概念，去掉空字符串或 '0'
+            categories = [
+                c.strip() for c in str(row.get('category', '')).split(';') 
+                if c.strip() and c.strip() != '0'
+            ]
             for c in categories:
                 concept_dict.setdefault(c, []).append(row['percent'])
+
+        # --- 丢弃成员少于 4 的概念 ---
+        concept_dict = {k: v for k, v in concept_dict.items() if len(v) >= 4}
+
 
         # --- top_n==1 时，只保留股票所属概念 ---
         if top_n == 1:
@@ -1856,68 +1861,6 @@ class StockMonitorApp(tk.Tk):
         return concept_score[:10]
 
 
-    def get_following_concepts_by_correlation_all(self, code, top_n=10):
-        df_all = self.df_all.copy()
-
-        # --- ✅ 全局替换逻辑 ---
-        # 如果 percent 列存在，则在为 0 的地方用 per1d 替代
-        if 'percent' in df_all.columns and 'per1d' in df_all.columns:
-            df_all['percent'] = df_all.apply(
-                lambda r: r['per1d'] if (r.get('percent', 0) == 0 or pd.isna(r.get('percent', 0))) else r['percent'],
-                axis=1
-            )
-        elif 'percent' not in df_all.columns and 'per1d' in df_all.columns:
-            df_all['percent'] = df_all['per1d']
-        elif 'percent' not in df_all.columns:
-            raise ValueError("DataFrame 必须包含 'percent' 或 'per1d' 列")
-
-        # --- 获取目标股票涨幅 ---
-        try:
-            stock_percent = df_all.loc[code, 'percent']
-        except Exception:
-            try:
-                stock_percent = df_all.loc[df_all['code'] == code, 'percent'].values[0]
-            except Exception:
-                return []
-
-        # --- 构建概念字典：概念 -> 股票涨幅列表 ---
-        concept_dict = {}
-        for idx, row in df_all.iterrows():
-            categories = [c.strip() for c in str(row['category']).split(';') if c.strip()]
-            for c in categories:
-                concept_dict.setdefault(c, []).append(row['percent'])
-
-        # --- 计算跟随指数 ---
-        concept_score = []
-
-        for c, percents in concept_dict.items():
-            percents = [p for p in percents if not pd.isna(p)]
-            if len(percents) < 1:
-                continue  # ✅ 跳过没有股票的概念
-
-            avg_percent = sum(percents) / len(percents)
-            follow_ratio = sum(1 for p in percents if p <= stock_percent) / len(percents)
-            score = avg_percent * follow_ratio
-
-            # ✅ 如果该概念中根本没有包含目标股票，且 top_n=1（用于“强势概念识别”）
-            # 就可以直接跳过，防止错误地识别无关概念。
-            if top_n == 1:
-                stock_categories = [c.strip() for c in str(df_all.loc[df_all['code'] == code, 'category'].values[0]).split(';')]
-                if c not in stock_categories:
-                    continue
-
-            concept_score.append((c, score, avg_percent, follow_ratio))
-
-
-        # --- 排序并返回 ---
-        concept_score.sort(key=lambda x: x[1], reverse=True)
-        return concept_score[:top_n]
-
-
-        # # 使用
-        # top_concepts = self.get_following_concepts_by_correlation('000001')
-        # for c, score, avg_pct, follow_ratio in top_concepts:
-        #     print(f"{c}: score={score:.2f}, avg_percent={avg_pct:.2f}, follow_ratio={follow_ratio:.2f}")
 
     def open_alert_editorAuto(self, stock_info, new_rule=False):
         code = stock_info.get("code")
@@ -4234,48 +4177,11 @@ class StockMonitorApp(tk.Tk):
         if df_filtered is None or df_filtered.empty:
             return
 
-        # # --- 统计当前概念 ---
-        # cat_dict = {}  # {concept: [codes]}
-        # topN = df_filtered.head(50)
-        # for code, row in topN.iterrows():
-        #     if isinstance(row.get("category"), str):
-        #         cats = [c.strip() for c in row["category"].replace("；", ";").replace("+", ";").split(";") if c.strip()]
-        #         for ca in cats:
-        #             cat_dict.setdefault(ca, []).append((code, row.get("name", "")))
-
-        # current_categories = set(cat_dict.keys())
-        # display_text = "、".join(sorted(current_categories))[:200]  # 限制显示长度
-
-        # # --- 统计当前概念 ---
-        # cat_dict = {}  # {concept: [codes]}
-        # all_cats = []  # 用于统计出现次数
-        # topN = df_filtered.head(50)
-        # for code, row in topN.iterrows():
-        #     if isinstance(row.get("category"), str):
-        #         cats = [c.strip() for c in row["category"].replace("；", ";").replace("+", ";").split(";") if c.strip()]
-        #         for ca in cats:
-        #             all_cats.append(ca)
-        #             cat_dict.setdefault(ca, []).append((code, row.get("name", "")))
-
-        # # --- 统计出现次数 ---
-        # counter = Counter(all_cats)
-        # top5 = OrderedDict(counter.most_common(5))
-
 
         # --- 统计当前概念 ---
         cat_dict = {}  # {concept: [codes]}
         all_cats = []  # 用于统计出现次数
         topN = df_filtered.head(50)
-
-        # for code, row in topN.iterrows():
-        #     if isinstance(row.get("category"), str):
-        #         cats = [c.strip() for c in row["category"].replace("；", ";").replace("+", ";").split(";") if c.strip()]
-        #         for ca in cats:
-        #             # 过滤泛概念
-        #             if is_generic_concept(ca):
-        #                 continue
-        #             all_cats.append(ca)
-        #             cat_dict.setdefault(ca, []).append((code, row.get("name", "")))
 
 
         for code, row in topN.iterrows():
@@ -4477,7 +4383,7 @@ class StockMonitorApp(tk.Tk):
         # 在初始化中绑定一次
         canvas.bind("<FocusOut>", _keep_focus)
 
-    def update_concept_detail_content(self):
+    def update_concept_detail_content(self, limit=5):
         """刷新概念详情窗口内容（后台可调用）"""
         if not hasattr(self, "_concept_win") or not self._concept_win:
             return
@@ -4507,17 +4413,17 @@ class StockMonitorApp(tk.Tk):
                 tk.Label(scroll_frame, text="🆕 新增概念", font=("微软雅黑", 11, "bold"), fg="green").pack(anchor="w", pady=(0, 5))
                 for c in added:
                     tk.Label(scroll_frame, text=c, fg="blue", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
-                    stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)
+                    stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)[:limit]  # 只取前 limit
                     for code, name, percent, volume in stocks:
                         lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}",
                                        fg="black", cursor="hand2", anchor="w")
                         lbl.pack(anchor="w", padx=6)
-                        lbl._code = code  # 保存对应 code
-                        lbl._concept = c  # 绑定当前概念
+                        lbl._code = code
+                        lbl._concept = c
                         idx = len(self._label_widgets)
                         lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self._on_label_click(cd, i))
                         lbl.bind("<Button-3>", lambda e, cd=code, i=idx: self._on_label_right_click(cd, i))
-                        lbl.bind("<Double-Button-1>", lambda e, cd=code, i=idx: self._on_label_double_click(cd, i))  # ✅ 新增双击事件
+                        lbl.bind("<Double-Button-1>", lambda e, cd=code, i=idx: self._on_label_double_click(cd, i))
                         self._label_widgets.append(lbl)
 
             if removed:
@@ -4529,18 +4435,17 @@ class StockMonitorApp(tk.Tk):
             tk.Label(scroll_frame, text="📊 当前前5概念", font=("微软雅黑", 11, "bold"), fg="blue").pack(anchor="w", pady=(0, 5))
             for c in current_categories[:5]:
                 tk.Label(scroll_frame, text=c, fg="black", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
-                stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)
+                stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)[:limit]  # 只取前 limit
                 for code, name, percent, volume in stocks:
                     lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}",
                                    fg="gray", cursor="hand2", anchor="w")
                     lbl.pack(anchor="w", padx=6)
-                    lbl._code = code  # 保存对应 code
-                    lbl._concept = c  # 绑定当前概念
+                    lbl._code = code
+                    lbl._concept = c
                     idx = len(self._label_widgets)
                     lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self._on_label_click(cd, i))
                     lbl.bind("<Button-3>", lambda e, cd=code, i=idx: self._on_label_right_click(cd, i))
-                    lbl.bind("<Double-Button-1>", lambda e, cd=code, i=idx: self._on_label_double_click(cd, i))  # ✅ 新增双击事件
-
+                    lbl.bind("<Double-Button-1>", lambda e, cd=code, i=idx: self._on_label_double_click(cd, i))
                     self._label_widgets.append(lbl)
 
         # --- 默认选中第一条 ---
@@ -4553,6 +4458,7 @@ class StockMonitorApp(tk.Tk):
 
         # --- 更新状态 ---
         self._prev_categories = list(current_categories)
+
 
 
     # --- 类内部方法：选择和点击 ---
@@ -4848,14 +4754,6 @@ class StockMonitorApp(tk.Tk):
             toast_message(self, f"概念【{concept_name}】暂无匹配股票")
             return
 
-        # df_concept = df_concept.copy()
-        # if "percent" in df_concept.columns and "volume" in df_concept.columns:
-        #     df_top = df_concept[df_concept["percent"] > 0]
-        #     df_concept = df_top if not df_top.empty else df_concept[df_concept["per1d"] >= 0]
-        # else:
-        #     messagebox.showinfo("概念详情", "df_all 缺少 'percent' 或 'volume' 列")
-        #     return
-
         # --- 复用窗口 ---
         try:
             if getattr(self, "_concept_top10_win", None) and self._concept_top10_win.winfo_exists():
@@ -4974,16 +4872,6 @@ class StockMonitorApp(tk.Tk):
         tree.bind("<Return>", on_key)
         tree.focus_set()
 
-        # # --- 底部按钮 ---
-        # btn_frame = tk.Frame(win)
-        # btn_frame.pack(fill="x", pady=4)
-        # def _copy_expr():
-        #     import pyperclip
-        #     q = f'category.str.contains("{concept_name}", na=False)'
-        #     pyperclip.copy(q)
-        #     toast_message(self, f"已复制筛选条件：{q}")
-        # tk.Button(btn_frame, text="复制筛选表达式", command=_copy_expr).pack(side="left", padx=6)
-        # --- 底部操作区：左侧按钮 + 右侧状态栏 ---
         btn_frame = tk.Frame(win)
         btn_frame.pack(fill="x", pady=4)
 
@@ -5029,7 +4917,8 @@ class StockMonitorApp(tk.Tk):
     def _fill_concept_top10_content(self, win, concept_name, df_concept,code=None):
         """
         填充概念Top10内容到Treeview（支持实时刷新）
-        """
+        """
+
         visible_count = len(df_concept[df_concept['percent'] > 2])  # 示例
         total_count = len(df_concept)
 
@@ -5040,14 +4929,6 @@ class StockMonitorApp(tk.Tk):
 
         if sort_col in df_concept.columns:
             df_concept = df_concept.sort_values(sort_col, ascending=ascending)
-
-        # total_count = len(df_concept)
-
-        # win.title(f"{concept_name} 概念前10放量上涨股（显示 {visible_count}/{total_count} 只）")
-        # ---------------- 主框架清空并重建 ----------------
-        # frame = win._content_frame_top10
-        # for w in frame.winfo_children():
-        #     w.destroy()
 
         tree = win._tree_top10
         tree.delete(*tree.get_children())
@@ -5077,7 +4958,6 @@ class StockMonitorApp(tk.Tk):
             win._status_label_top10.pack(side="bottom", fill="x", pady=(0, 4))
 
         win.update_idletasks()
-        # self._setup_tree_bindings_newTop10(tree)
 
 
     def _setup_tree_bindings_newTop10(self, tree):
@@ -5997,6 +5877,9 @@ class StockMonitorApp(tk.Tk):
 
 
     def plot_following_concepts_pg(self, code=None, top_n=10):
+        import os
+        os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"  # 禁用 Qt 自动缩放避免错位
+
         if not hasattr(self, "_pg_windows"):
             self._pg_windows = {}
             self._pg_data_hash = {}
@@ -6015,7 +5898,6 @@ class StockMonitorApp(tk.Tk):
             print("未找到相关概念")
             return
 
-        # --- 准备数据 ---
         concepts = [c[0] for c in top_concepts]
         scores = np.array([c[1] for c in top_concepts])
         avg_percents = np.array([c[2] for c in top_concepts])
@@ -6023,16 +5905,24 @@ class StockMonitorApp(tk.Tk):
         data_hash = hashlib.md5(str(concepts[:3]).encode()).hexdigest()
 
 
-        print(f'fontsize : {self.app.font().pointSize()}')
         # --- 创建主窗口 ---
         win = QtWidgets.QWidget()
         win.setWindowTitle(f"{code} 概念分析Top{top_n}")
         layout = QtWidgets.QVBoxLayout(win)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(0)
+
+        # window_handle = win.windowHandle()
+        # if window_handle and window_handle.screen():
+        #     screen = window_handle.screen()
+        # else:
+        #     screen = self.app.primaryScreen()
+        # self._dpi_now = screen.logicalDotsPerInch()
+        self.dpi_scale =  1
+        # print(f'self.dpi_scale : {self.dpi_scale} self._dpi_now  : {self._dpi_now}')
 
         # 控制栏
         ctrl_layout = QtWidgets.QHBoxLayout()
-        ctrl_layout.setContentsMargins(0, 0, 0, 0)
-        ctrl_layout.setSpacing(0)
         chk_auto = QtWidgets.QCheckBox("自动更新")
         spin_interval = QtWidgets.QSpinBox()
         spin_interval.setRange(5, 300)
@@ -6045,12 +5935,13 @@ class StockMonitorApp(tk.Tk):
 
         # 绘图区域
         pg_widget = pg.GraphicsLayoutWidget()
-        layout.addWidget(pg_widget)
         pg_widget.setContentsMargins(0, 0, 0, 0)
+        pg_widget.ci.layout.setContentsMargins(0, 0, 0, 0)
         pg_widget.ci.layout.setSpacing(0)
+        layout.addWidget(pg_widget)
 
         plot = pg_widget.addPlot()
-
+        plot.setContentsMargins(0, 0, 0, 0)
         plot.invertY(True)
         plot.setLabel('bottom', '综合得分 (score)')
         plot.setLabel('left', '概念')
@@ -6061,29 +5952,68 @@ class StockMonitorApp(tk.Tk):
         bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
         plot.addItem(bars)
 
+
+        font = QtWidgets.QApplication.font()
+        font_size = font.pointSize()
+        self._font_size = font_size
+        print("concepts_pg 默认字体大小:", font_size)
+
         texts = []
+        max_score = max(scores.max(), 1)
         for i, (avg, score) in enumerate(zip(avg_percents, scores)):
             text = pg.TextItem(f"avg:{avg:.2f}%\nscore:{score:.2f}", anchor=(0, 0.5))
-            text.setPos(score + 0.1, y[i])
+            # text.setFont(QtGui.QFont(text.font().family(), font_size))
+            text.setFont(QtGui.QFont("Microsoft YaHei", font_size))
+            text.setPos(score + 0.03 * max_score, y[i])
             plot.addItem(text)
             texts.append(text)
         plot.getAxis('left').setTicks([list(zip(y, concepts))])
 
-        # 鼠标点击事件
+        # 鼠标点击
+        # def mouse_click(event):
+        #     if event.button() == QtCore.Qt.LeftButton:
+        #         pos = event.scenePos()
+        #         vb = plot.vb
+        #         if plot.sceneBoundingRect().contains(pos):
+        #             mouse_point = vb.mapSceneToView(pos)
+        #             idx = int(round(mouse_point.y()))
+        #             if 0 <= idx < len(concepts):
+        #                 self._call_concept_top10_win(code, concepts[idx])
+        #                 win.raise_()
+        #                 win.activateWindow()
+
+        from PyQt5.QtCore import QPoint
+        # 禁用右键菜单
+        plot.setMenuEnabled(False)  # ✅ 关键
+
         def mouse_click(event):
-            if event.button() == QtCore.Qt.LeftButton:
-                pos = event.scenePos()
+            if plot.sceneBoundingRect().contains(event.scenePos()):
                 vb = plot.vb
-                if plot.sceneBoundingRect().contains(pos):
-                    mouse_point = vb.mapSceneToView(pos)
-                    idx = int(round(mouse_point.y()))
-                    if 0 <= idx < len(concepts):
-                        concept = concepts[idx]
-                        print(f"[Click] 概念: {concept}")
-                        self._call_concept_top10_win(code, concept)
+                mouse_point = vb.mapSceneToView(event.scenePos())
+                idx = int(round(mouse_point.y()))
+                if 0 <= idx < len(concepts):
+                    if event.button() == QtCore.Qt.LeftButton:
+                        # 左键打开窗口
+                        self._call_concept_top10_win(code, concepts[idx])
+                        win.raise_()
+                        win.activateWindow()
+                    elif event.button() == QtCore.Qt.RightButton:
+                        # 右键复制概念文字到剪贴板
+                        concept_text = concepts[idx]
+                        clipboard = QtWidgets.QApplication.clipboard()
+                        copy_concept_text =  f'category.str.contains("{concept_text}")'
+
+                        clipboard.setText(copy_concept_text)
+                        
+                        # 使用父窗口 win 作为 widget
+                        pos = event.screenPos()  # QPointF
+                        pos_int = QPoint(int(pos.x()), int(pos.y()))
+                        QtWidgets.QToolTip.showText(pos_int, f"已复制: {copy_concept_text}", win)
+
+
         plot.scene().sigMouseClicked.connect(mouse_click)
 
-        # 鼠标悬停显示 tooltip
+        # tooltip
         def show_tooltip(event):
             pos = event
             vb = plot.vb
@@ -6115,13 +6045,98 @@ class StockMonitorApp(tk.Tk):
         if code == "总览" and name == "All":
             chk_auto.setChecked(True)
             timer.start(spin_interval.value() * 1000)
-            QtCore.QTimer.singleShot(500, lambda: timer.start(spin_interval.value() * 1000))
         chk_auto.toggled.connect(lambda state: timer.start(spin_interval.value() * 1000) if state else timer.stop())
         spin_interval.valueChanged.connect(lambda v: timer.start(v * 1000) if chk_auto.isChecked() else None)
+
+
+        # --- 屏幕/DPI 切换重定位文本 ---
+        def reposition_texts():
+            app_font = QtWidgets.QApplication.font()
+            family = app_font.family()
+            print("reposition_texts 默认字体大小:", self._font_size)
+            for i, text in enumerate(texts):
+                if i >= len(concepts):
+                    continue
+
+                avg = avg_percents[i]
+                score = scores[i]
+                if not hasattr(win, "_prev_concepts_data"):
+                    win._prev_concepts_data = {
+                        "avg_percents": np.zeros(len(avg_percents)),
+                        "scores": np.zeros(len(scores)),
+                        "follow_ratios": np.zeros(len(follow_ratios))
+                    }
+                prev_data = win._prev_concepts_data
+                # 平均涨幅箭头
+                diff_avg = avg - prev_data["avg_percents"][i] if i < len(prev_data["avg_percents"]) else avg
+                arrow_avg = "↑" if diff_avg > 0 else ("↓" if diff_avg < 0 else "→")
+
+                # 综合得分箭头
+                diff_score = score - prev_data["scores"][i] if i < len(prev_data["scores"]) else score
+                arrow_score = "↑" if diff_score > 0 else ("↓" if diff_score < 0 else "→")
+
+                # 更新文字内容
+                text.setText(f"avg:{arrow_avg} {avg:.2f}%\nscore:{arrow_score} {score:.2f}")
+
+                # ✅ 安全地设置字体大小（不调用 text.font()）
+                text.setFont(QtGui.QFont("Microsoft YaHei", self._font_size))
+
+                # 更新坐标
+                x = (scores[i] + 0.03 * max_score) * self.dpi_scale
+                y_pos = y[i] * self.dpi_scale
+                text.setPos(x, y_pos)
+                # 设置位置
+                # text.setPos(score + 0.03 * max_score, y[i])
+                text.setAnchor((0, 0.5))  # 垂直居中
+            plot.update()
+
+        # 定时轮询 DPI / 屏幕变化
+        prev_screen = None
+        prev_dpi = None
+        # app = QtWidgets.QApplication.instance() or pg.mkQApp()
+        # screen = app.primaryScreen()
+        # dpi = screen.logicalDotsPerInch()
+        # font_size = max(7, int(10 * dpi / 96))  # 根据 DPI 调整字体
+        # print(f"[DEBUG] 当前屏幕: {screen.name()}, DPI={dpi}, 字体大小={font_size}")
+
+        def check_screen():
+            nonlocal prev_screen, prev_dpi
+            window_handle = win.windowHandle()
+            if window_handle and window_handle.screen():
+                screen = window_handle.screen()
+            else:
+                screen = self.app.primaryScreen()
+            self._dpi_now = screen.logicalDotsPerInch()
+            # self.dpi_scale = self._dpi_now / prev_dpi if prev_dpi else 1
+            # print(f'self.dpi_scale : {self.dpi_scale}')
+            if prev_screen or prev_dpi:
+                if screen != prev_screen or self._dpi_now  != prev_dpi:
+                    print(f'dpi_now :{self._dpi_now } prev_dpi :{prev_dpi}')
+                    prev_screen, prev_dpi = screen, self._dpi_now
+                    self.dpi_scale = self._dpi_now / prev_dpi
+                    # if self._dpi_now == 96 and font_size == self.base_font_size:
+                    #     self._font_size = int(self._font_size / self.scale_factor)
+                        # dpi_scale = dpi_now / prev_dpi if prev_dpi else 1
+                        # self._font_size = int(self.base_font_size * self.dpi_scale)
+                        # print(f'check_screen _font_size : {self._font_size}')
+                    reposition_texts()
+            else:
+                if self._dpi_now == 96:
+                    self.dpi_scale = self._dpi_now / (self.scale_factor*96)
+                    print(f'self.dpi_scale init: {self.dpi_scale}')
+                    # if  font_size == self.base_font_size:
+                    #     self._font_size = int(self._font_size / self.scale_factor)
+                    #     print(f'self._font_size init: {self._font_size}')
+                prev_screen, prev_dpi = screen, self._dpi_now 
+
+        # screen_timer = QtCore.QTimer(win)
+        # screen_timer.timeout.connect(check_screen)
+        # screen_timer.start(500)
 
         # 关闭事件
         def on_close(evt):
             timer.stop()
+            # screen_timer.stop()
             self.save_window_position_qt(win, f"概念分析Top{top_n}")
             self._pg_windows.pop(code, None)
             self._pg_data_hash.pop(code, None)
@@ -6129,23 +6144,22 @@ class StockMonitorApp(tk.Tk):
         win.closeEvent = on_close
 
         # 缓存窗口
-        self._pg_windows[code] = {"win": win, "plot": plot, "bars": bars, "texts": texts,
-                                  "timer": timer, "chk_auto": chk_auto, "spin": spin_interval}
+        self._pg_windows[code] = {
+            "win": win, "plot": plot, "bars": bars, "texts": texts,
+            "timer": timer, "chk_auto": chk_auto, "spin": spin_interval
+        }
         self._pg_data_hash[code] = data_hash
 
-        # 加载窗口位置
         self.load_window_position_qt(win, f"概念分析Top{top_n}")
-
         win.show()
 
 
     def update_pg_plot(self, w_dict, concepts, scores, avg_percents, follow_ratios):
         """
-        更新图形窗口的条形图和文本，实时使用 scores。
+        更新图形窗口的条形图和文本，保持 Bar 和 TextItem 对齐。
         """
         win = w_dict["win"]
         plot = w_dict["plot"]
-        bars = w_dict["bars"]
         texts = w_dict["texts"]
 
         if not hasattr(win, "_prev_concepts_data"):
@@ -6156,42 +6170,195 @@ class StockMonitorApp(tk.Tk):
             }
         prev_data = win._prev_concepts_data
 
+        y = np.arange(len(concepts))
+        max_score = max(scores) if len(scores) > 0 else 1
+
+        # --- 删除原 bars，重新绘制 ---
+        for item in plot.items[:]:
+            if isinstance(item, pg.BarGraphItem):
+                plot.removeItem(item)
         color_map = pg.colormap.get('CET-R1')
         brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
-        bars.setOpts(width=scores, brushes=brushes)
+        bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
+        plot.addItem(bars)
+        w_dict["bars"] = bars
 
+        app_font = QtWidgets.QApplication.font()
+        font_family = app_font.family()
+        # print(f'update_pg_plot font_size: {self._font_size}')
         for i, text in enumerate(texts):
             if i >= len(concepts):
                 continue
+
             avg = avg_percents[i]
             score = scores[i]
 
-            # --- 计算平均涨幅箭头 ---
+            # 平均涨幅箭头
             diff_avg = avg - prev_data["avg_percents"][i] if i < len(prev_data["avg_percents"]) else avg
             arrow_avg = "↑" if diff_avg > 0 else ("↓" if diff_avg < 0 else "→")
 
-            # --- 计算综合得分箭头 ---
+            # 综合得分箭头
             diff_score = score - prev_data["scores"][i] if i < len(prev_data["scores"]) else score
             arrow_score = "↑" if diff_score > 0 else ("↓" if diff_score < 0 else "→")
 
-            # --- 更新文本 ---
+            # 更新文字内容
             text.setText(f"avg:{arrow_avg} {avg:.2f}%\nscore:{arrow_score} {score:.2f}")
-            text.setPos(score + 0.1, i)
+
+            # ✅ 安全地设置字体大小（不调用 text.font()）
+            text.setFont(QtGui.QFont(font_family, self._font_size))
+
+            # 更新坐标
+            x = (scores[i] + 0.03 * max_score) * self.dpi_scale
+            y_pos = y[i] * self.dpi_scale
+            text.setPos(x, y_pos)
+            # 设置位置
+            # text.setPos(score + 0.03 * max_score, y[i])
+            text.setAnchor((0, 0.5))  # 垂直居中
 
         win._prev_concepts_data = {
             "avg_percents": avg_percents.copy(),
             "scores": scores.copy(),
-            "follow_ratios": follow_ratios.copy()
-        }
+            "follow_ratios": follow_ratios.copy() 
+            }
+
+
+    # def update_pg_plot1(self, w_dict, concepts, scores, avg_percents, follow_ratios):
+    #     """
+    #     更新图形窗口的条形图和文本，保持 Bar 和 TextItem 对齐，支持箭头显示涨跌，自动适配 DPI。
+    #     """
+    #     win = w_dict["win"]
+    #     plot = w_dict["plot"]
+    #     texts = w_dict["texts"]
+
+    #     # --- 保存上一次数据用于箭头 ---
+    #     if not hasattr(win, "_prev_concepts_data"):
+    #         win._prev_concepts_data = {
+    #             "avg_percents": np.zeros(len(avg_percents)),
+    #             "scores": np.zeros(len(scores)),
+    #             "follow_ratios": np.zeros(len(follow_ratios))
+    #         }
+    #     prev_data = win._prev_concepts_data
+
+    #     y = np.arange(len(concepts))
+    #     max_score = max(scores) if len(scores) > 0 else 1
+
+    #     # --- 删除原 bars，重新绘制 ---
+    #     for item in plot.items[:]:
+    #         if isinstance(item, pg.BarGraphItem):
+    #             plot.removeItem(item)
+    #     color_map = pg.colormap.get('CET-R1')
+    #     brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
+    #     bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
+    #     plot.addItem(bars)
+    #     w_dict["bars"] = bars  # 更新引用
+
+    #     # --- DPI 缩放字体 ---
+    #     screen = QtWidgets.QApplication.instance().primaryScreen()
+    #     dpi_scale = screen.logicalDotsPerInch() / 96.0  # 基于96dpi的缩放比例
+    #     font_size = max(6, int(9 * dpi_scale))  # 文字最小6号，自动放大
+
+    #     # --- 更新文本 ---
+    #     for i, text in enumerate(texts):
+    #         if i >= len(concepts):
+    #             continue
+    #         avg = avg_percents[i]
+    #         score = scores[i]
+
+    #         # 平均涨幅箭头
+    #         diff_avg = avg - prev_data["avg_percents"][i] if i < len(prev_data["avg_percents"]) else avg
+    #         arrow_avg = "↑" if diff_avg > 0 else ("↓" if diff_avg < 0 else "→")
+
+    #         # 综合得分箭头
+    #         diff_score = score - prev_data["scores"][i] if i < len(prev_data["scores"]) else score
+    #         arrow_score = "↑" if diff_score > 0 else ("↓" if diff_score < 0 else "→")
+
+    #         # 更新文字
+    #         text.setText(f"avg:{arrow_avg} {avg:.2f}%\nscore:{arrow_score} {score:.2f}")
+    #         font = text.font()
+    #         font.setPointSize(font_size)
+    #         text.setFont(font)
+
+    #         # 设置位置，条形右侧稍偏移
+    #         text.setPos(score + 0.03 * max_score, y[i])
+    #         text.setAnchor((0, 0.5))  # 垂直居中
+
+    #     # --- 屏幕切换或 DPI 改变时重新定位文字 ---
+    #     def reposition_texts():
+    #         for i, (avg, score) in enumerate(zip(avg_percents, scores)):
+    #             if i >= len(texts):
+    #                 continue
+    #             texts[i].setPos(score + 0.03 * max_score, y[i])
+    #             texts[i].setFont(QtGui.QFont(texts[i].font().family(), font_size))
+    #         plot.update()
+
+    #     def on_screen_changed(new_screen):
+    #         print("[DEBUG] 屏幕切换或 DPI 改变，重定位文字")
+    #         QtCore.QTimer.singleShot(100, reposition_texts)
+
+    #     if win.windowHandle():
+    #         win.windowHandle().screenChanged.connect(on_screen_changed)
+
+    #     # --- 保存当前数据 ---
+    #     win._prev_concepts_data = {
+    #         "avg_percents": avg_percents.copy(),
+    #         "scores": scores.copy(),
+    #         "follow_ratios": follow_ratios.copy()
+    #     }
+
+
+    # def update_pg_plot_src(self, w_dict, concepts, scores, avg_percents, follow_ratios):
+    #     """
+    #     更新图形窗口的条形图和文本，实时使用 scores。
+    #     """
+    #     win = w_dict["win"]
+    #     plot = w_dict["plot"]
+    #     bars = w_dict["bars"]
+    #     texts = w_dict["texts"]
+
+    #     if not hasattr(win, "_prev_concepts_data"):
+    #         win._prev_concepts_data = {
+    #             "avg_percents": np.zeros(len(avg_percents)),
+    #             "scores": np.zeros(len(scores)),
+    #             "follow_ratios": np.zeros(len(follow_ratios))
+    #         }
+    #     prev_data = win._prev_concepts_data
+
+    #     color_map = pg.colormap.get('CET-R1')
+    #     brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
+    #     bars.setOpts(width=scores, brushes=brushes)
+
+    #     for i, text in enumerate(texts):
+    #         if i >= len(concepts):
+    #             continue
+    #         avg = avg_percents[i]
+    #         score = scores[i]
+
+    #         # --- 计算平均涨幅箭头 ---
+    #         diff_avg = avg - prev_data["avg_percents"][i] if i < len(prev_data["avg_percents"]) else avg
+    #         arrow_avg = "↑" if diff_avg > 0 else ("↓" if diff_avg < 0 else "→")
+
+    #         # --- 计算综合得分箭头 ---
+    #         diff_score = score - prev_data["scores"][i] if i < len(prev_data["scores"]) else score
+    #         arrow_score = "↑" if diff_score > 0 else ("↓" if diff_score < 0 else "→")
+
+    #         # --- 更新文本 ---
+    #         text.setText(f"avg:{arrow_avg} {avg:.2f}%\nscore:{arrow_score} {score:.2f}")
+    #         text.setPos(score + 0.1, i)
+
+    #     win._prev_concepts_data = {
+    #         "avg_percents": avg_percents.copy(),
+    #         "scores": scores.copy(),
+    #         "follow_ratios": follow_ratios.copy()
+    #     }
 
 
     # --- 定时刷新 ---
     def _refresh_pg_window(self, code, top_n):
         if code not in self._pg_windows:
             return
-        if not cct.get_work_time():  # 仅工作时间刷新
-            # print(f'not 工作时间刷新' )
-            return
+        # if not cct.get_work_time():  # 仅工作时间刷新
+        #     # print(f'not 工作时间刷新' )
+        #     return
         w_dict = self._pg_windows[code]
         win = w_dict["win"]
 
@@ -6213,7 +6380,7 @@ class StockMonitorApp(tk.Tk):
 
         # 更新图形
         self.update_pg_plot(w_dict, concepts, scores, avg_percents, follow_ratios)
-        print(f"[Auto] 已自动刷新 {code}")
+        # print(f"[Auto] 已自动刷新 {code}")
 
 
     def plot_following_concepts_mp(self, code=None, top_n=10):
