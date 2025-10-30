@@ -26,8 +26,83 @@ import pyperclip  # 用于复制到剪贴板
 import traceback
 from collections import deque
 
+from PyQt5 import QtWidgets, QtCore, QtGui
+import pyqtgraph as pg
+import numpy as np
+import hashlib
+import sqlite3
+
 # import matplotlib.pyplot as plt
 # plt.ion()  # 开启交互模式
+
+
+# logging_setup.py
+import logging
+# import sys
+
+import sys
+import logging
+
+class LoggerWriter:
+    """将 print 输出重定向到 logger"""
+    def __init__(self, level_func):
+        self.level_func = level_func
+        self._is_logging = False  # 防止递归
+
+    def write(self, message):
+        if not message.strip():
+            return
+        if self._is_logging:
+            return
+        try:
+            self._is_logging = True
+            for line in message.rstrip().splitlines():
+                self.level_func(line)
+        finally:
+            self._is_logging = False
+
+    def flush(self):
+        pass
+
+def init_logging(log_file="appTk.log", level=logging.INFO):
+    """初始化全局日志"""
+    # 1️⃣ 先创建 logger
+    logger = logging.getLogger()
+    logger.setLevel(level)
+    formatter = logging.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
+
+    # 文件 handler（UTF-8）
+    fh = logging.FileHandler(log_file, encoding="utf-8")
+    fh.setFormatter(formatter)
+    logger.addHandler(fh)
+
+    # 控制台 handler
+    ch = logging.StreamHandler()
+    ch.setFormatter(formatter)
+    logger.addHandler(ch)
+
+    # 2️⃣ 再重定向 print
+    sys.stdout = LoggerWriter(logger.info)
+    sys.stderr = LoggerWriter(logger.error)
+
+    # 捕获未处理异常
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        logger.error("未捕获异常:", exc_info=(exc_type, exc_value, exc_traceback))
+
+    sys.excepthook = handle_exception
+
+    logger.info("日志初始化完成")
+    return logger
+
+
+
+
+
+
+
 
 
 # --- 辅助函数：DPI 处理（放在类的外面） ---
@@ -35,6 +110,222 @@ from collections import deque
 # Windows API 常量
 LOGPIXELSX = 88
 DEFAULT_DPI = 96.0
+
+DB_PATH = "./concept_pg_data.db"
+
+# --- SQLite 初始化 ---
+def init_concept_db():
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS concept_data (
+            date TEXT,
+            concept_name TEXT,
+            init_data TEXT,
+            prev_data TEXT,
+            PRIMARY KEY (date, concept_name)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def save_concept_pg_data(win, concept_name):
+    """保存每个概念当天数据到 SQLite，自动转换所有 NumPy 类型，并保留浮点数两位小数"""
+    import numpy as np
+    import sqlite3, json, traceback
+    from datetime import datetime
+
+    try:
+        init_concept_db()
+        date_str = datetime.now().strftime("%Y%m%d")
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+
+        def to_serializable(obj):
+            """将 NumPy 类型自动转换为原生 Python 类型，并保留浮点数两位小数"""
+            if isinstance(obj, np.ndarray):
+                return [to_serializable(v) for v in obj.tolist()]
+            elif isinstance(obj, (np.integer, np.int32, np.int64)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float32, np.float64, float)):
+                return round(float(obj), 2)  # 保留两位小数
+            elif isinstance(obj, dict):
+                return {k: to_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, (list, tuple)):
+                return [to_serializable(v) for v in obj]
+            else:
+                return obj
+
+        base_data = getattr(win, "_init_prev_concepts_data", {}).get(concept_name)
+        prev_data = getattr(win, "_prev_concepts_data", {}).get(concept_name)
+        if base_data is None:
+            print(f'[save_concept_pg_data] base_data is None for {concept_name}')
+            conn.close()
+            return
+
+        init_serial = to_serializable(base_data)
+        prev_serial = to_serializable(prev_data) if prev_data else {}
+
+        cur.execute("""
+            INSERT INTO concept_data (date, concept_name, init_data, prev_data)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(date, concept_name)
+            DO UPDATE SET
+                init_data=excluded.init_data,
+                prev_data=excluded.prev_data
+        """, (
+            date_str,
+            concept_name,
+            json.dumps(init_serial, ensure_ascii=False),
+            json.dumps(prev_serial, ensure_ascii=False)
+        ))
+
+        conn.commit()
+        conn.close()
+        print(f"[保存成功] {concept_name} 数据已写入 SQLite")
+    except Exception as e:
+        traceback.print_exc()
+        print(f"[保存失败] {concept_name} -> {e}")
+
+
+def save_concept_pg_data_simple(win, concept_name):
+    """保存每个概念当天数据到 SQLite（自动处理 ndarray -> list）"""
+    try:
+        init_concept_db()
+        date_str = datetime.now().strftime("%Y%m%d")
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+
+        # 将 ndarray 转为 list
+        def arr_to_list(a):
+            return a.tolist() if isinstance(a, np.ndarray) else a
+
+        base_data = getattr(win, "_init_prev_concepts_data", {}).get(concept_name)
+        prev_data = getattr(win, "_prev_concepts_data", {}).get(concept_name)
+
+        if not base_data:
+            print(f"[保存失败] {concept_name} base_data is None")
+            conn.close()
+            return
+
+        init_data = {
+            "concepts": base_data["concepts"],
+            "avg_percents": arr_to_list(base_data.get("avg_percents", [])),
+            "scores": arr_to_list(base_data.get("scores", [])),
+            "follow_ratios": arr_to_list(base_data.get("follow_ratios", [])),
+        }
+        prev_data_dict = {
+            "concepts": prev_data.get("concepts", []) if prev_data else [],
+            "avg_percents": arr_to_list(prev_data.get("avg_percents", [])) if prev_data else [],
+            "scores": arr_to_list(prev_data.get("scores", [])) if prev_data else [],
+            "follow_ratios": arr_to_list(prev_data.get("follow_ratios", [])) if prev_data else [],
+        }
+
+        cur.execute("""
+            INSERT INTO concept_data (date, concept_name, init_data, prev_data)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(date, concept_name)
+            DO UPDATE SET
+                init_data=excluded.init_data,
+                prev_data=excluded.prev_data
+        """, (date_str, concept_name,
+              json.dumps(init_data, ensure_ascii=False),
+              json.dumps(prev_data_dict, ensure_ascii=False)))
+
+        conn.commit()
+        conn.close()
+        print(f"[保存成功] {concept_name} 数据已写入 SQLite")
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"[保存失败] {concept_name} -> {e}")
+
+
+
+def load_concept_pg_data_no_serializable(concept_name):
+    """加载当天数据"""
+    date_str = datetime.now().strftime("%Y%m%d")
+
+    if not sqlite3.connect(DB_PATH):
+        return None, None
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT init_data, prev_data FROM concept_data WHERE date=? AND concept_name=?",
+                    (date_str, concept_name))
+        row = cur.fetchone()
+        conn.close()
+        if not row:
+            return None, None
+
+        init_data = json.loads(row[0]) if row[0] else None
+        prev_data = json.loads(row[1]) if row[1] else None
+        return init_data, prev_data
+    except Exception as e:
+        print(f"[加载失败] {concept_name} -> {e}")
+        return None, None
+
+def load_all_concepts_pg_data():
+    """
+    一次性加载当天所有 concept 的 init_data 和 prev_data
+    返回 dict: concept_name -> (init_data, prev_data)
+    保证 init_data 和 prev_data 都是 dict，并且内部字段是 list
+    """
+    from datetime import datetime
+    import sqlite3, json, traceback
+
+    date_str = datetime.now().strftime("%Y%m%d")
+    result = {}
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT concept_name, init_data, prev_data FROM concept_data WHERE date=?", (date_str,))
+        rows = cur.fetchall()
+        conn.close()
+
+        for concept_name, init_json, prev_json in rows:
+            try:
+                init_data = json.loads(init_json) if init_json else {}
+                prev_data = json.loads(prev_json) if prev_json else {}
+
+                # 补齐字段，保证一致性
+                for key in ["concepts", "avg_percents", "scores", "follow_ratios"]:
+                    init_data.setdefault(key, [])
+                    prev_data.setdefault(key, [])
+
+                result[concept_name] = (init_data, prev_data)
+            except Exception:
+                traceback.print_exc()
+                print(f"[加载单个概念失败] {concept_name}")
+    except Exception as e:
+        traceback.print_exc()
+        print(f"[加载全部概念失败] {e}")
+
+    return result
+
+# def load_all_concepts_pg_data():
+#     """
+#     一次性加载当天所有 concept 的 init_data 和 prev_data
+#     返回 dict: concept_name -> (init_data, prev_data)
+#     """
+#     date_str = datetime.now().strftime("%Y%m%d")
+#     result = {}
+#     try:
+#         conn = sqlite3.connect(DB_PATH)
+#         cur = conn.cursor()
+#         cur.execute("SELECT concept_name, init_data, prev_data FROM concept_data WHERE date=?", (date_str,))
+#         rows = cur.fetchall()
+#         conn.close()
+
+#         for concept_name, init_json, prev_json in rows:
+#             init_data = json.loads(init_json) if init_json else None
+#             prev_data = json.loads(prev_json) if prev_json else None
+#             result[concept_name] = (init_data, prev_data)
+#     except Exception as e:
+#         print(f"[加载全部概念失败] {e}")
+#     return result
+
 
 def set_process_dpi_awareness():
     """强制设置进程的 DPI 意识级别，确保窗口不模糊。"""
@@ -103,10 +394,6 @@ def get_windows_dpi_scale_factor():
 # ----------------------------------------------------
 
 
-from PyQt5 import QtWidgets, QtCore, QtGui
-import pyqtgraph as pg
-import numpy as np
-import hashlib
 
 # default_font = QtGui.QFont("Microsoft YaHei", 10)
 # QtWidgets.QApplication.setFont(default_font)
@@ -698,12 +985,12 @@ def test_code_against_queries(df_code, queries):
         hit_count = 0
         try:
             # 用 DataFrame.query() 执行逻辑表达式
-            missing_cols = [col for col in re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', expr)
-                            if col not in df_code.columns and col not in ignore_keywords]
-            if missing_cols:
-                print(f"缺少字段: {missing_cols}")
-                continue
-            # print(f'expr : {expr} final_query :{final_query} engine : {query_engine}')
+            # missing_cols = [col for col in re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', expr)
+            #                 if col not in df_code.columns and col not in ignore_keywords]
+            # if missing_cols:
+            #     print(f"缺少字段: {missing_cols}")
+            #     continue
+            # # print(f'expr : {expr} final_query :{final_query} engine : {query_engine}')
             df_hit = df_code.query(final_query, engine=query_engine)
             # df_hit = df_code.query(final_query)
             # 命中条件：返回非空
@@ -4605,6 +4892,8 @@ class StockMonitorApp(tk.Tk):
         # 插入到光标位置
         # event.widget.insert(tk.INSERT, clipboard_text)
         # 先清空再黏贴
+        if clipboard_text.isdigit() and len(clipboard_text) == 6:
+            clipboard_text = query_str = f'index.str.contains("^{clipboard_text}")'
         event.widget.delete(0, tk.END)
         event.widget.insert(0, clipboard_text)
         # self.on_test_click()
@@ -4921,7 +5210,7 @@ class StockMonitorApp(tk.Tk):
         now = datetime.now()
         timestamp_suffix = f"{now:%M%S}{int(now.microsecond/1000):03d}"[:6]
         key = f"{concept_name}_{timestamp_suffix}"
-
+        # print(f'show_concept_top10_window_simple : {unique_code}')
         # 缓存窗口
         self._pg_top10_window_simple[key] = {
             "win": win,
@@ -5754,18 +6043,15 @@ class StockMonitorApp(tk.Tk):
     
 
     def plot_following_concepts_pg(self, code=None, top_n=10):
-        # import os
-        # os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "0"  # 禁用 Qt 自动缩放避免错位
 
         if not hasattr(self, "_pg_windows"):
             self._pg_windows = {}
             self._pg_data_hash = {}
 
-
         # --- 获取股票数据 ---
         if code is None or code == "总览":
             tcode, _ = self.get_stock_code_none()
-            top_concepts = self. (tcode, top_n=top_n)
+            top_concepts = self.get_following_concepts_by_correlation(tcode, top_n=top_n)
             code = "总览"
             name = "All"
         else:
@@ -5787,14 +6073,14 @@ class StockMonitorApp(tk.Tk):
                 win.raise_()             # 提到最前
                 win.activateWindow()     # 获得焦点
                 return  # 不创建新窗口
-                
+
         concepts = [c[0] for c in top_concepts]
         scores = np.array([c[1] for c in top_concepts])
         avg_percents = np.array([c[2] for c in top_concepts])
         follow_ratios = np.array([c[3] for c in top_concepts])
         data_hash = hashlib.md5(str(concepts[:3]).encode()).hexdigest()
 
-
+        print(f'concepts : {concepts} unique_code: {unique_code} ')
         # --- 创建主窗口 ---
         win = QtWidgets.QWidget()
         win.setWindowTitle(f"{code} 概念分析Top{top_n}")
@@ -5809,8 +6095,6 @@ class StockMonitorApp(tk.Tk):
             # screen = self.app.primaryScreen()
         # self._dpi_now = screen.logicalDotsPerInch()
         self.dpi_scale =  1
-
-        
         # print(f'self.dpi_scale : {self.dpi_scale} self._dpi_now  : {self._dpi_now}')
 
         # 控制栏
@@ -5859,6 +6143,8 @@ class StockMonitorApp(tk.Tk):
             text.setPos(score + 0.03 * max_score, y[i])
             plot.addItem(text)
             texts.append(text)
+            print(f"[DEBUG] : avg={avg:.2f}, score={score:.2f}")
+
         plot.getAxis('left').setTicks([list(zip(y, concepts))])
 
 
@@ -5866,27 +6152,47 @@ class StockMonitorApp(tk.Tk):
         # 禁用右键菜单
         plot.setMenuEnabled(False)  # ✅ 关键
 
+        current_idx = {"value": 0}  # 用 dict 保持可变引用
+
+        def highlight_bar(index):
+            """高亮当前选中的 bar（通过改变颜色或添加边框实现）"""
+            if not (0 <= index < len(concepts)):
+                return
+            # 恢复所有 bar 的 brush
+            bars.setOpts(brushes=brushes)
+            # 高亮当前选中项
+            highlight_brushes = brushes.copy()
+            highlight_brushes[index] = pg.mkBrush((255, 255, 0, 180))  # 黄色高亮
+            bars.setOpts(brushes=highlight_brushes)
+            plot.update()
+
+
         def mouse_click(event):
+            """鼠标点击事件处理：左键打开概念窗口，右键复制概念表达式"""
             if plot.sceneBoundingRect().contains(event.scenePos()):
                 vb = plot.vb
                 mouse_point = vb.mapSceneToView(event.scenePos())
                 idx = int(round(mouse_point.y()))
                 if 0 <= idx < len(concepts):
+                    # ✅ 记录当前点击的索引并高亮
+                    current_idx["value"] = idx
+                    highlight_bar(idx)
+
                     if event.button() == QtCore.Qt.LeftButton:
                         # 左键打开窗口
                         self._call_concept_top10_win(code, concepts[idx])
                         win.raise_()
                         win.activateWindow()
+
                     elif event.button() == QtCore.Qt.RightButton:
-                        # 右键复制概念文字到剪贴板
+                        # 右键复制概念筛选表达式
                         concept_text = concepts[idx]
                         clipboard = QtWidgets.QApplication.clipboard()
-                        copy_concept_text =  f'category.str.contains("{concept_text}")'
-
+                        copy_concept_text = f'category.str.contains("{concept_text}")'
                         clipboard.setText(copy_concept_text)
-                        
-                        # 使用父窗口 win 作为 widget
-                        pos = event.screenPos()  # QPointF
+
+                        from PyQt5.QtCore import QPoint
+                        pos = event.screenPos()
                         pos_int = QPoint(int(pos.x()), int(pos.y()))
                         QtWidgets.QToolTip.showText(pos_int, f"已复制: {copy_concept_text}", win)
 
@@ -5908,19 +6214,46 @@ class StockMonitorApp(tk.Tk):
                     QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), msg, win)
         plot.scene().sigMouseMoved.connect(show_tooltip)
 
-        # 键盘事件
         def key_event(event):
             key = event.key()
             if key == QtCore.Qt.Key_R:
                 self.plot_following_concepts_pg(code, top_n)
                 event.accept()
+
             elif key in (QtCore.Qt.Key_Q, QtCore.Qt.Key_Escape):
                 QtCore.QTimer.singleShot(0, win.close)
                 event.accept()
+
+            elif key == QtCore.Qt.Key_Up:
+                current_idx["value"] = max(0, current_idx["value"] - 1)
+                highlight_bar(current_idx["value"])
+                self._call_concept_top10_win(code, concepts[current_idx["value"]])
+                win.raise_()
+                win.activateWindow()
+                event.accept()
+
+            elif key == QtCore.Qt.Key_Down:
+                current_idx["value"] = min(len(concepts) - 1, current_idx["value"] + 1)
+                highlight_bar(current_idx["value"])
+                self._call_concept_top10_win(code, concepts[current_idx["value"]])
+                win.raise_()
+                win.activateWindow()
+                event.accept()
+
+            elif key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+                # 回车键打开窗口（等价左键点击）
+                idx = current_idx["value"]
+                if 0 <= idx < len(concepts):
+                    self._call_concept_top10_win(code, concepts[idx])
+                    win.raise_()
+                    win.activateWindow()
+                event.accept()
+
+
         win.keyPressEvent = key_event
 
         # --- 屏幕/DPI 切换重定位文本 ---
-        def reposition_texts():
+        def reposition_texts1():
             app_font = QtWidgets.QApplication.font()
             family = app_font.family()
             print("reposition_texts 默认字体大小:", self._font_size)
@@ -6020,13 +6353,23 @@ class StockMonitorApp(tk.Tk):
         # screen_timer.start(500)
 
         # 关闭事件
+
         def on_close(evt):
             timer.stop()
-            # screen_timer.stop()
+            # 遍历窗口涉及的 concept，只保存自己拥有的概念数据
+
+            for concept_name in concepts:
+                base_data = getattr(win, "_init_prev_concepts_data", {}).get(concept_name)
+                prev_data = getattr(win, "_prev_concepts_data", {}).get(concept_name)
+                if base_data or prev_data:
+                    save_concept_pg_data(win, concept_name)  # 已改写为安全单概念保存
+
             self.save_window_position_qt(win, f"概念分析Top{top_n}")
             self._pg_windows.pop(code, None)
             self._pg_data_hash.pop(code, None)
             evt.accept()
+
+
         win.closeEvent = on_close
 
         
@@ -6035,11 +6378,61 @@ class StockMonitorApp(tk.Tk):
         self.load_window_position_qt(win, f"概念分析Top{top_n}")
 
         win.show()
+        # --- 初始化多 concept 数据容器 ---
+        if not hasattr(win, "_init_prev_concepts_data"):
+            win._init_prev_concepts_data = {}  # 每个 concept_name 对应初始数据
+        if not hasattr(win, "_prev_concepts_data"):
+            win._prev_concepts_data = {}       # 每个 concept_name 对应上次刷新数据
+
+            
+        # --- 全局一次加载当天数据 ---
+        if not hasattr(self, "_concept_data_loaded"):
+            self._concept_data_loaded = True
+            # 读取当天所有 concept 数据，一次性加载
+            all_data = load_all_concepts_pg_data()  # 自定义 NoSQL 函数，返回 dict: concept_name -> (init_data, prev_data)
+            
+            self._global_concept_init_data = {}
+            self._global_concept_prev_data = {}
+            for c_name, (init_data, prev_data) in all_data.items():
+                if init_data:
+                    self._global_concept_init_data[c_name] = {k: np.array(v) for k, v in init_data.items()}
+                if prev_data:
+                    self._global_concept_prev_data[c_name] = {k: np.array(v) for k, v in prev_data.items()}
+
+        # # --- 窗口初始化各自 concept 数据 ---
+        for i, c_name in enumerate(concepts):
+            # 初始化 base_data
+            if c_name not in win._init_prev_concepts_data:
+                base_data = self._global_concept_init_data.get(c_name)
+                if base_data is None:
+                    # 全局没有数据，初始化基础数据
+                    base_data = {
+                        "concepts": [c_name],
+                        "avg_percents": np.array([avg_percents[i]]),
+                        "scores": np.array([scores[i]]),
+                        "follow_ratios": np.array([follow_ratios[i]])
+                    }
+                    self._global_concept_init_data[c_name] = base_data
+                win._init_prev_concepts_data[c_name] = base_data
+                # print("[DEBUG] 已初始概念数据(_init_prev_concepts_data)")
+            # 初始化 prev_data
+            if c_name not in win._prev_concepts_data:
+                prev_data = self._global_concept_prev_data.get(c_name)
+                if prev_data is None:
+                    prev_data = {
+                        "concepts": [c_name],
+                        "avg_percents": np.array([avg_percents[i]]),
+                        "scores": np.array([scores[i]]),
+                        "follow_ratios": np.array([follow_ratios[i]])
+                    }
+                    self._global_concept_prev_data[c_name] = prev_data
+                win._prev_concepts_data[c_name] = prev_data
+
         # 自动刷新
         timer = QtCore.QTimer(win)
         timer.timeout.connect(lambda: self._refresh_pg_window(code, top_n))
         # 缓存窗口
-        self._pg_windows[code] = {
+        self._pg_windows[unique_code] = {
             "win": win, "plot": plot, "bars": bars, "texts": texts, "code" : unique_code,
             "timer": timer, "chk_auto": chk_auto, "spin": spin_interval
         }
@@ -6050,82 +6443,319 @@ class StockMonitorApp(tk.Tk):
         chk_auto.toggled.connect(lambda state: timer.start(spin_interval.value() * 1000) if state else timer.stop())
         spin_interval.valueChanged.connect(lambda v: timer.start(v * 1000) if chk_auto.isChecked() else None)
 
+
     def update_pg_plot(self, w_dict, concepts, scores, avg_percents, follow_ratios):
         """
-        更新图形窗口的条形图和文本，保持 Bar 和 TextItem 对齐。
+        更新 PyQtGraph 条形图窗口（NoSQL 多 concept 版本）：
+        1. 每个 concept 独立保存初始分数和上次刷新分数。
+        2. 绘制主 BarGraphItem 显示当前分数。
+        3. 绘制增量条（相对于初始分数）。
+        4. 增量条正增量绿色，负增量红色，文字箭头显示方向。
+        5. 支持增量条闪烁。
+        6. 自动恢复当天已有数据（NoSQL 存储）。
         """
+
         win = w_dict["win"]
         plot = w_dict["plot"]
         texts = w_dict["texts"]
 
+        # --- 初始化多 concept 数据容器 ---
+        if not hasattr(win, "_init_prev_concepts_data"):
+            win._init_prev_concepts_data = {}  # 每个 concept_name 对应初始数据
         if not hasattr(win, "_prev_concepts_data"):
-            win._prev_concepts_data = {
-                "avg_percents": np.zeros(len(avg_percents)),
-                "scores": np.zeros(len(scores)),
-                "follow_ratios": np.zeros(len(follow_ratios))
-            }
-        prev_data = win._prev_concepts_data
+            win._prev_concepts_data = {}       # 每个 concept_name 对应上次刷新数据
 
+        # --- 全局一次加载当天数据 ---
+        if not hasattr(self, "_concept_data_loaded"):
+            self._concept_data_loaded = True
+            all_data = load_all_concepts_pg_data()  # 返回 dict: concept_name -> (init_data, prev_data)
+            self._global_concept_init_data = {}
+            self._global_concept_prev_data = {}
+            for c_name, (init_data, prev_data) in all_data.items():
+                if init_data:
+                    self._global_concept_init_data[c_name] = {k: np.array(v) for k, v in init_data.items()}
+                if prev_data:
+                    self._global_concept_prev_data[c_name] = {k: np.array(v) for k, v in prev_data.items()}
+
+        # --- 窗口初始化各自 concept 数据 ---
+        for i, c_name in enumerate(concepts):
+            # 初始化 base_data
+            if c_name not in win._init_prev_concepts_data:
+                base_data = self._global_concept_init_data.get(c_name)
+                if base_data is None:
+                    # 全局没有数据，初始化基础数据
+                    base_data = {
+                        "concepts": [c_name],
+                        "avg_percents": np.array([avg_percents[i]]),
+                        "scores": np.array([scores[i]]),
+                        "follow_ratios": np.array([follow_ratios[i]])
+                    }
+                    self._global_concept_init_data[c_name] = base_data
+                win._init_prev_concepts_data[c_name] = base_data
+
+            # 初始化 prev_data
+            if c_name not in win._prev_concepts_data:
+                prev_data = self._global_concept_prev_data.get(c_name)
+                if prev_data is None:
+                    prev_data = {
+                        "concepts": [c_name],
+                        "avg_percents": np.array([avg_percents[i]]),
+                        "scores": np.array([scores[i]]),
+                        "follow_ratios": np.array([follow_ratios[i]])
+                    }
+                    self._global_concept_prev_data[c_name] = prev_data
+                win._prev_concepts_data[c_name] = prev_data
+
+        # --- 检查是否需要刷新（数据完全一致时跳过） ---
+        data_changed = False
+
+        for i, c_name in enumerate(concepts):
+            prev_data = win._prev_concepts_data.get(c_name)
+            if prev_data is None:
+                data_changed = True
+                print(f"[DEBUG] {c_name} 没有 prev_data -> 需要刷新")
+                break
+
+            cur_avg = avg_percents[i]
+            cur_score = scores[i]
+            cur_follow = follow_ratios[i]
+            prev_avg = prev_data["avg_percents"][0]
+            prev_score = prev_data["scores"][0]
+            prev_follow = prev_data["follow_ratios"][0]
+
+            da = abs(cur_avg - prev_avg)
+            ds = abs(cur_score - prev_score)
+            df = abs(cur_follow - prev_follow)
+            # print(f"[CHECK] {c_name}: Δavg={da:.6f}, Δscore={ds:.6f}, Δfollow={df:.6f}")
+
+            if da > 1e-6 or ds > 1e-6 or df > 1e-6:
+                data_changed = True
+                # print(f"[DEBUG] {c_name} 数据有变化 -> 刷新")
+                break
+
+        if not data_changed:
+            print("[DEBUG] 数据未变化，跳过刷新 ✅")
+            return  # ← 这一行非常重要，直接退出函数！
+
+            # print(f'c_name: cur_score : {cur_avg} cur_score :{cur_score} cur_follow :{cur_follow}' )
+            # print(f'c_name: prev_avg : {prev_avg} prev_score :{prev_score} prev_follow :{prev_follow}' )
+            # print(f'(cur_avg - prev_avg) : {abs(cur_avg - prev_avg)} (cur_score - prev_score)  : {abs(cur_score - prev_score)}: {abs(cur_follow - prev_follow)}')
+            # # 判断是否变化（允许极小浮动）
         y = np.arange(len(concepts))
         max_score = max(scores) if len(scores) > 0 else 1
 
-        # --- 删除原 bars，重新绘制 ---
+        # --- 清除旧 BarGraphItem ---
         for item in plot.items[:]:
             if isinstance(item, pg.BarGraphItem):
                 plot.removeItem(item)
+
+        # --- 主 BarGraphItem ---
         color_map = pg.colormap.get('CET-R1')
         brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
-        bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
-        plot.addItem(bars)
-        w_dict["bars"] = bars
+        main_bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
+        plot.addItem(main_bars)
+        w_dict["bars"] = main_bars
 
-        app_font = QtWidgets.QApplication.font()
-        font_family = app_font.family()
-        # print(f'update_pg_plot font_size: {self._font_size}')
-        for i, text in enumerate(texts):
-            if i >= len(concepts):
+        # --- 绘制增量条（相对于初始数据） ---
+        delta_bars_list = []
+        for i, c_name in enumerate(concepts):
+            score = scores[i]
+            base_score = win._init_prev_concepts_data[c_name]["scores"][0]
+            delta = score - base_score
+
+            if abs(delta) < 1e-6:
+                delta_bars_list.append(None)
                 continue
 
-            avg = avg_percents[i]
+            color = (0, 255, 0, 150) if delta > 0 else (255, 0, 0, 150)
+            x0 = base_score if delta > 0 else score
+            bar = pg.BarGraphItem(x0=x0, y=[y[i]], height=0.6, width=[abs(delta)], brushes=[pg.mkBrush(color)])
+            plot.addItem(bar)
+            delta_bars_list.append(bar)
+        w_dict["delta_bars"] = delta_bars_list
+
+        # --- 更新文字显示（相对初始数据） ---
+        app_font = QtWidgets.QApplication.font()
+        font_family = app_font.family()
+        for i, text in enumerate(texts):
             score = scores[i]
+            delta = score - win._init_prev_concepts_data[concepts[i]]["scores"][0]
 
-            # 平均涨幅箭头
-            diff_avg = avg - prev_data["avg_percents"][i] if i < len(prev_data["avg_percents"]) else avg
-            arrow_avg = "↑" if diff_avg > 0 else ("↓" if diff_avg < 0 else "→")
+            if delta > 0:
+                arrow = "↑"
+                color = "green"
+            elif delta < 0:
+                arrow = "↓"
+                color = "red"
+            else:
+                arrow = "→"
+                color = "gray"
 
-            # 综合得分箭头
-            diff_score = score - prev_data["scores"][i] if i < len(prev_data["scores"]) else score
-            arrow_score = "↑" if diff_score > 0 else ("↓" if diff_score < 0 else "→")
-
-            # 更新文字内容
-            text.setText(f"avg:{arrow_avg} {avg:.2f}%\nscore:{arrow_score} {score:.2f}")
-
-            # ✅ 安全地设置字体大小（不调用 text.font()）
+            text.setText(f"{arrow}{score:.2f} ({avg_percents[i]:.2f}%)")
+            text.setColor(QtGui.QColor(color))
             text.setFont(QtGui.QFont(font_family, self._font_size))
+            text.setPos((score + 0.03 * max_score) * self.dpi_scale, y[i] * self.dpi_scale)
+            text.setAnchor((0, 0.5))
 
-            # 更新坐标
-            x = (scores[i] + 0.03 * max_score) * self.dpi_scale
-            y_pos = y[i] * self.dpi_scale
-            text.setPos(x, y_pos)
-            # 设置位置
-            # text.setPos(score + 0.03 * max_score, y[i])
-            text.setAnchor((0, 0.5))  # 垂直居中
-
-        win._prev_concepts_data = {
-            "avg_percents": avg_percents.copy(),
-            "scores": scores.copy(),
-            "follow_ratios": follow_ratios.copy() 
+        # --- 保存当前刷新数据到 prev_concepts_data ---
+        for i, c_name in enumerate(concepts):
+            win._prev_concepts_data[c_name] = {
+                "concepts": [c_name],
+                "avg_percents": np.array([avg_percents[i]]),
+                "scores": np.array([scores[i]]),
+                "follow_ratios": np.array([follow_ratios[i]])
             }
+
+        # --- 增量条闪烁 ---
+        if not hasattr(win, "_flash_timer"):
+            win._flash_state = True
+            win._flash_timer = QtCore.QTimer(win)
+
+            def flash_delta():
+                for bar in w_dict["delta_bars"]:
+                    if bar is not None:
+                        bar.setVisible(win._flash_state)
+                win._flash_state = not win._flash_state
+
+            win._flash_timer.timeout.connect(flash_delta)
+            win._flash_timer.start(30000)  # 30 秒闪烁一次
+
+
+
+    # def update_pg_plot_no_sql(self, w_dict, concepts, scores, avg_percents, follow_ratios):
+    #     """
+    #     更新 PyQtGraph 条形图窗口：
+    #     1. 绘制主 BarGraphItem 显示当前分数。
+    #     2. 绘制增量条，比较当前分数与初始分数 (_init_prev_concepts_data)。
+    #     3. 增量条正增量绿色，负增量红色。
+    #     4. 条形闪烁，文字箭头显示增减方向。
+    #     """
+
+    #     win = w_dict["win"]
+    #     plot = w_dict["plot"]
+    #     texts = w_dict["texts"]
+
+    #     # --- 初始化：保存初始参考数据 (_init_prev_concepts_data) ---
+    #     # 用于计算每次刷新后的增量
+    #     if not hasattr(win, "_init_prev_concepts_data"):
+    #         win._init_prev_concepts_data = {
+    #             "concepts":concepts,
+    #             "avg_percents": np.array(avg_percents, copy=True),
+    #             "scores": np.array(scores, copy=True),
+    #             "follow_ratios": np.array(follow_ratios, copy=True)
+    #         }
+    #         print("[DEBUG] 已保存初始概念数据(_init_prev_concepts_data)")
+
+    #     # --- 当前数据与上次刷新数据 (_prev_concepts_data) ---
+    #     # 用于比较上一次刷新后的变化（非初始参考）
+    #     if not hasattr(win, "_prev_concepts_data"):
+    #         win._prev_concepts_data = {
+    #             "concepts":concepts,
+    #             "avg_percents": np.zeros(len(avg_percents)),
+    #             "scores": np.zeros(len(scores)),
+    #             "follow_ratios": np.zeros(len(follow_ratios))
+    #         }
+
+    #     prev_data = win._prev_concepts_data
+    #     base_data = win._init_prev_concepts_data
+
+    #     y = np.arange(len(concepts))
+    #     max_score = max(scores) if len(scores) > 0 else 1
+
+    #     # --- 清除旧 BarGraphItem ---
+    #     for item in plot.items[:]:
+    #         if isinstance(item, pg.BarGraphItem):
+    #             plot.removeItem(item)
+
+    #     # --- 主 BarGraphItem ---
+    #     # 显示当前分数
+    #     color_map = pg.colormap.get('CET-R1')
+    #     brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
+    #     main_bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
+    #     plot.addItem(main_bars)
+    #     w_dict["bars"] = main_bars  # 保存引用
+
+    #     # --- 计算相对初始的变化（增量 delta_from_init） ---
+    #     # 用于绘制正负增量条
+    #     delta_from_init = np.array(scores) - base_data["scores"]
+
+    #     # --- 绘制增量条 ---
+    #     delta_bars_list = []
+    #     for i, d in enumerate(delta_from_init):
+    #         if abs(d) < 1e-6:  # 无变化则跳过
+    #             delta_bars_list.append(None)
+    #             continue
+    #         # 正增量绿色，负增量红色，半透明
+    #         color = (0, 255, 0, 150) if d > 0 else (255, 0, 0, 150)
+    #         # x0 起点：正增量从初始分数开始，负增量从当前分数开始
+    #         x0 = base_data["scores"][i] if d > 0 else scores[i]
+    #         bar = pg.BarGraphItem(x0=x0, y=[y[i]], height=0.6, width=[abs(d)], brushes=[pg.mkBrush(color)])
+    #         plot.addItem(bar)
+    #         delta_bars_list.append(bar)
+    #     w_dict["delta_bars"] = delta_bars_list  # 保存引用以便闪烁
+
+    #     # --- 更新文字显示 ---
+    #     app_font = QtWidgets.QApplication.font()
+    #     font_family = app_font.family()
+    #     for i, text in enumerate(texts):
+    #         if i >= len(concepts):
+    #             continue
+    #         avg = avg_percents[i]
+    #         score = scores[i]
+    #         diff_score = delta_from_init[i]
+
+    #         # 箭头和文字颜色表示增减方向
+    #         if diff_score > 0:
+    #             arrow = "↑"
+    #             color = "green"
+    #         elif diff_score < 0:
+    #             arrow = "↓"
+    #             color = "red"
+    #         else:
+    #             arrow = "→"
+    #             color = "gray"
+
+    #         text.setText(f"{arrow}{score:.2f} ({avg:.2f}%)")
+    #         text.setColor(QtGui.QColor(color))
+    #         text.setFont(QtGui.QFont(font_family, self._font_size))
+    #         text.setPos((scores[i] + 0.03 * max_score) * self.dpi_scale, y[i] * self.dpi_scale)
+    #         text.setAnchor((0, 0.5))  # 垂直居中
+
+        # # --- 保存当前刷新数据 (_prev_concepts_data) ---
+        # win._prev_concepts_data = {
+        #     "concepts":concepts,
+        #     "avg_percents": np.array(avg_percents, copy=True),
+        #     "scores": np.array(scores, copy=True),
+        #     "follow_ratios": np.array(follow_ratios, copy=True)
+        # }
+
+    #     # --- 增量条闪烁定时器 ---
+    #     if not hasattr(win, "_flash_timer"):
+    #         win._flash_state = True  # 控制可见性状态
+    #         win._flash_timer = QtCore.QTimer(win)
+
+    #         def flash_delta():
+    #             # 切换增量条显示状态
+    #             for bar in w_dict["delta_bars"]:
+    #                 if bar is not None:
+    #                     bar.setVisible(win._flash_state)
+    #             win._flash_state = not win._flash_state
+
+    #         win._flash_timer.timeout.connect(flash_delta)
+    #         win._flash_timer.start(30000)  # 每10秒闪烁一次
+
 
 
     # --- 定时刷新 ---
     def _refresh_pg_window(self, code, top_n):
-        if code not in self._pg_windows:
+        unique_code = f"{code or ''}_{top_n or ''}"
+        if unique_code not in self._pg_windows:
             return
         if not cct.get_work_time():  # 仅工作时间刷新
             # print(f'not 工作时间刷新' )
             return
-        w_dict = self._pg_windows[code]
+        print(f'unique_code : {unique_code}')
+        w_dict = self._pg_windows[unique_code]
         win = w_dict["win"]
         # 获取最新概念数据
         if code == "总览":
@@ -6144,8 +6774,9 @@ class StockMonitorApp(tk.Tk):
         follow_ratios = np.array([c[3] for c in top_concepts])
 
         # 更新图形
+        print(f'更新图形: {unique_code} : {concepts}')
         self.update_pg_plot(w_dict, concepts, scores, avg_percents, follow_ratios)
-        # print(f"[Auto] 已自动刷新 {code}")
+        print(f"[Auto] 已自动刷新 {code}")
 
 
     # def plot_following_concepts_mp(self, code=None, top_n=10):
@@ -6342,6 +6973,14 @@ class StockMonitorApp(tk.Tk):
                 yview = canvas.yview()
                 canvas.focus_set()
                 canvas.yview_moveto(yview[0])
+                # --- 关键：强制聚焦并启用键盘捕获 ---
+                # try:
+                #     # 1. 激活窗口
+                #     win.focus_force()
+                #     # 2. 稍微延迟再聚焦 canvas，防止系统阻止焦点抢占
+                #     win.after(100, lambda: canvas.focus_set())
+                # except Exception as e:
+                #     print("焦点设置失败：", e)
 
     def _on_label_double_click(self, code, idx):
         """
@@ -7318,7 +7957,7 @@ class StockMonitorApp(tk.Tk):
         resample = self.resample_combo.get()
         # self.status_var.set(f"搜索框 {which} 已清空")
         # self.status_var.set(f"Row 结果 {len(self.current_df)} 行 | resample: {resample} ")
-
+        self.query_manager.entry_query.delete(0, tk.END)
 
     def delete_search_history(self, which, entry=None):
         """
@@ -7696,7 +8335,6 @@ class StockMonitorApp(tk.Tk):
 
 
                     if hasattr(self, "_pg_top10_window_simple"):
-                        # active_windows = [w for w in self._pg_top10_window_simple.values() if w['win'].winfo_exists()]
                         active_windows = self._pg_top10_window_simple.values()
                         count_active_window = len(active_windows)
                         same_name_count = count_active_window - 1
@@ -7767,67 +8405,60 @@ class StockMonitorApp(tk.Tk):
         except Exception as e:
             log.error(f"[save_window_position] 保存窗口位置失败: {e}")
 
-    def load_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500, offset_step=30):
+    def load_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE,
+                                default_width=500, default_height=500, offset_step=30):
         """加载 Qt 窗口位置（支持自动错开已存在的窗口）"""
         try:
             window_name = str(window_name)
-            scale = 1.0
-            try:
-                scale = get_windows_dpi_scale_factor()
-                if not isinstance(scale, (int, float)) or scale <= 0:
-                    scale = 1.0
-            except Exception as e:
-                print(f"[load_window_position_qt] 获取 DPI 缩放失败: {e}")
-
             x = y = None
             width = default_width
             height = default_height
 
+            # --- 从文件加载保存的窗口位置 ---
             if os.path.exists(file_path):
                 with open(file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if window_name in data:
                     pos = data[window_name]
-                    # ✳️ 按当前 DPI 放大回去
-                    width = int(pos["width"] * scale)
-                    height = int(pos["height"] * scale)
-                    x = int(pos["x"] * scale)
-                    y = int(pos["y"] * scale)
+                    # ✅ 直接使用存储的逻辑坐标，不乘 DPI
+                    width = int(pos.get("width", default_width))
+                    height = int(pos.get("height", default_height))
+                    x = int(pos.get("x", 0))
+                    y = int(pos.get("y", 0))
 
                     # 防止窗口位置越界
                     x, y = clamp_window_to_screens(x, y, width, height)
 
-                    log.info(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
-                    # return width, height, x, y
-            # --- 检查屏幕边界 ---
+                    print(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
+
+            # --- 如果没有存储位置，则居中 ---
             screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
             if x is None or y is None:
                 x = (screen.width() - width) // 2
                 y = (screen.height() - height) // 2
 
-            # ✅ 检查是否已有同名窗口正在显示
+            # --- 检查是否已有同名窗口正在显示，并自动偏移 ---
             if hasattr(self, "_pg_windows"):
-                active_windows = [w for w in self._pg_windows.values() if isinstance(w, QtWidgets.QWidget) and w.isVisible()]
+                active_windows = [w["win"] for w in self._pg_windows.values()
+                                  if isinstance(w.get("win"), QtWidgets.QWidget) and w["win"].isVisible()]
                 same_name_count = sum(1 for w in active_windows if w.windowTitle() == win.windowTitle())
                 if same_name_count > 0:
-                    # 每个叠加窗口偏移 offset_step
                     x += offset_step * same_name_count
                     y += offset_step * same_name_count
-                    # 限制不超出屏幕范围
+                    # 限制不超出屏幕
                     if x + width > screen.width():
                         x = screen.width() - width - 10
                     if y + height > screen.height():
                         y = screen.height() - height - 10
 
-            # ✅ 设置窗口位置
+            # ✅ 设置窗口几何
             win.setGeometry(x, y, width, height)
-            print(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
             return width, height, x, y
 
         except Exception as e:
             print(f"[load_window_position_qt] 加载失败: {e}")
-            # 默认居中
             traceback.print_exc()
+            # 默认居中
             screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
             x = (screen.width() - default_width) // 2
             y = (screen.height() - default_height) // 2
@@ -7835,27 +8466,83 @@ class StockMonitorApp(tk.Tk):
             return default_width, default_height, x, y
 
 
+    # def load_window_position_qt_src(self, win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500, offset_step=30):
+    #     """加载 Qt 窗口位置（支持自动错开已存在的窗口）"""
+    #     try:
+    #         window_name = str(window_name)
+    #         scale = 1.0
+    #         try:
+    #             scale = get_windows_dpi_scale_factor()
+    #             if not isinstance(scale, (int, float)) or scale <= 0:
+    #                 scale = 1.0
+    #         except Exception as e:
+    #             print(f"[load_window_position_qt] 获取 DPI 缩放失败: {e}")
+
+    #         x = y = None
+    #         width = default_width
+    #         height = default_height
+
+    #         if os.path.exists(file_path):
+    #             with open(file_path, "r", encoding="utf-8") as f:
+    #                 data = json.load(f)
+    #             if window_name in data:
+    #                 pos = data[window_name]
+    #                 # ✳️ 按当前 DPI 放大回去
+    #                 width = int(pos["width"] * scale)
+    #                 height = int(pos["height"] * scale)
+    #                 x = int(pos["x"] * scale)
+    #                 y = int(pos["y"] * scale)
+
+    #                 # 防止窗口位置越界
+    #                 x, y = clamp_window_to_screens(x, y, width, height)
+
+    #                 log.info(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
+    #                 # return width, height, x, y
+    #         # --- 检查屏幕边界 ---
+    #         screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+    #         if x is None or y is None:
+    #             x = (screen.width() - width) // 2
+    #             y = (screen.height() - height) // 2
+
+    #         # ✅ 检查是否已有同名窗口正在显示
+    #         if hasattr(self, "_pg_windows"):
+    #             active_windows = [w for w in self._pg_windows.values() if isinstance(w, QtWidgets.QWidget) and w.isVisible()]
+    #             same_name_count = sum(1 for w in active_windows if w.windowTitle() == win.windowTitle())
+    #             if same_name_count > 0:
+    #                 # 每个叠加窗口偏移 offset_step
+    #                 x += offset_step * same_name_count
+    #                 y += offset_step * same_name_count
+    #                 # 限制不超出屏幕范围
+    #                 if x + width > screen.width():
+    #                     x = screen.width() - width - 10
+    #                 if y + height > screen.height():
+    #                     y = screen.height() - height - 10
+
+    #         # ✅ 设置窗口位置
+    #         win.setGeometry(x, y, width, height)
+    #         print(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
+    #         return width, height, x, y
+
+    #     except Exception as e:
+    #         print(f"[load_window_position_qt] 加载失败: {e}")
+    #         # 默认居中
+    #         traceback.print_exc()
+    #         screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+    #         x = (screen.width() - default_width) // 2
+    #         y = (screen.height() - default_height) // 2
+    #         win.setGeometry(x, y, default_width, default_height)
+    #         return default_width, default_height, x, y
 
     def save_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
-        """保存 PyQt 窗口位置到统一配置文件（自动按 DPI 缩放）"""
+        """保存 PyQt 窗口位置到统一配置文件（逻辑坐标，不依赖 DPI）"""
         try:
             window_name = str(window_name)
-            from PyQt5 import QtCore
-
-            scale = 1.0
-            try:
-                scale = get_windows_dpi_scale_factor()
-                if not isinstance(scale, (int, float)) or scale <= 0:
-                    scale = 1.0
-            except Exception as e:
-                log.warning(f"[save_window_position_qt] 获取 DPI 缩放失败: {e}")
-
             geom = win.geometry()  # QRect
             pos = {
-                "x": int(geom.x() / scale),
-                "y": int(geom.y() / scale),
-                "width": int(geom.width() / scale),
-                "height": int(geom.height() / scale)
+                "x": int(geom.x()),
+                "y": int(geom.y()),
+                "width": int(geom.width()),
+                "height": int(geom.height())
             }
 
             data = {}
@@ -7874,6 +8561,46 @@ class StockMonitorApp(tk.Tk):
 
         except Exception as e:
             log.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
+
+
+    # def save_window_position_qt_src(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
+    #     """保存 PyQt 窗口位置到统一配置文件（自动按 DPI 缩放）"""
+    #     try:
+    #         window_name = str(window_name)
+    #         from PyQt5 import QtCore
+
+    #         scale = 1.0
+    #         try:
+    #             scale = get_windows_dpi_scale_factor()
+    #             if not isinstance(scale, (int, float)) or scale <= 0:
+    #                 scale = 1.0
+    #         except Exception as e:
+    #             log.warning(f"[save_window_position_qt] 获取 DPI 缩放失败: {e}")
+
+    #         geom = win.geometry()  # QRect
+    #         pos = {
+    #             "x": int(geom.x() / scale),
+    #             "y": int(geom.y() / scale),
+    #             "width": int(geom.width() / scale),
+    #             "height": int(geom.height() / scale)
+    #         }
+
+    #         data = {}
+    #         if os.path.exists(file_path):
+    #             try:
+    #                 with open(file_path, "r", encoding="utf-8") as f:
+    #                     data = json.load(f)
+    #             except Exception as e:
+    #                 log.error(f"[save_window_position_qt] 读取配置失败: {e}")
+
+    #         data[window_name] = pos
+    #         with open(file_path, "w", encoding="utf-8") as f:
+    #             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    #         log.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
+
+    #     except Exception as e:
+    #         log.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
 
 
     # def save_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE):
@@ -10538,7 +11265,6 @@ class ColumnSetManager(tk.Toplevel):
 
 #         return df
 
-import pandas as pd
 
 class RealtimeSignalManager:
     def __init__(self):
@@ -11251,7 +11977,6 @@ class KLineMonitor(tk.Toplevel):
                 toast_message(self, "当前表格为空，无法筛选")
                 return
 
-            import pandas as pd
             df_tree = pd.DataFrame(rows)
 
             # 将数字列转换类型
@@ -11801,6 +12526,20 @@ if __name__ == "__main__":
     # test_single_thread()
     # import ipdb;ipdb.set_trace()
 
+    logger = init_logging("test.log")
+
+    # print("这是 print 输出")
+    # logger.info("这是 logger 输出")
+
+    # # 测试异常
+    # try:
+    #     1 / 0
+    # except Exception:
+    #     logging.exception("捕获异常")
+    
+    # 测试未捕获异常
+    # 直接触发
+    # 1/0
 
     app = StockMonitorApp()
     if cct.isMac():
@@ -11810,3 +12549,5 @@ if __name__ == "__main__":
         width, height = 100, 32
         cct.set_console(width, height)
     app.mainloop()
+# --- 使用示例 ---
+    

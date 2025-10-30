@@ -65,7 +65,7 @@ def testlog():
     logger.setLevel(logging.DEBUG)
 
     # create file handler which logs even debug messages
-    fh = logging.FileHandler('test.log')
+    fh = logging.FileHandler('test.log', encoding="utf-8")
     fh.setLevel(logging.DEBUG)
     # create console handler with a higher log level
     ch = logging.StreamHandler()
@@ -132,7 +132,7 @@ def getLogger(name=None,logpath=None,writemode='a',show_detail=True):
      # handler = RotatingFileHandler(log_f, maxBytes=2*1000*1000, 
      #                             backupCount=1, encoding=None, delay=0)
 
-    handler = MultiprocessHandler(log_f, when='D')
+    handler = MultiprocessHandler(log_f, when='D', encoding="utf-8")
     # handler = MultiprocessHandler(log_f, when='S')
 
 
