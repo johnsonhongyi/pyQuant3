@@ -155,7 +155,7 @@ MButton::
                 Notify("未检测到股票代码", "tooltip", 1)
             }
 
-            Clipboard := ClipBackup
+            ;Clipboard := ClipBackup
             
         } else if WinActive("ahk_exe hexin.exe") {
             SendMessage, 0x111, 31067, 0,, a
