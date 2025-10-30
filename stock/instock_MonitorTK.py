@@ -595,7 +595,29 @@ def test_code_against_queries(df_code, queries):
     queries: list[dict]，每个包含 'query' 键
     返回每条 query 是否命中
     """
+    def ensure_parentheses_balanced(expr: str) -> str:
+        expr = expr.strip()
+        left_count = expr.count("(")
+        right_count = expr.count(")")
 
+        # 自动补齐括号
+        if left_count > right_count:
+            expr += ")" * (left_count - right_count)
+        elif right_count > left_count:
+            expr = "(" * (right_count - left_count) + expr
+
+        # ✅ 如果原本已经完整成对，就不再包外层
+        if not (expr.startswith("(") and expr.endswith(")")):
+            expr = f"({expr})"
+        elif expr.startswith("((") and expr.endswith("))"):
+            # 如果已经双层包裹，就不处理
+            pass
+
+        # # 外层包裹一层括号
+        # if not (expr.startswith("(") and expr.endswith(")")):
+        #     expr = f"({expr})"
+
+        return expr
     if not isinstance(df_code, pd.DataFrame) or df_code.empty:
         print("df_code : empty or invalid")
         return
@@ -605,7 +627,74 @@ def test_code_against_queries(df_code, queries):
 
     for q in queries:
         expr = q.get("query", "")
+        query = expr
         # hit = False
+        if not (query.isdigit() and len(query) == 6):
+            bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
+            # 2️⃣ 替换掉原 query 中的这些部分
+            for bracket in bracket_patterns:
+                query = query.replace(f'and {bracket}', '')
+
+            conditions = [c.strip() for c in query.split('and')]
+            # print(f'conditions {conditions}')
+            valid_conditions = []
+            removed_conditions = []
+            # print(f'conditions: {conditions} bracket_patterns : {bracket_patterns}')
+            for cond in conditions:
+                cond_clean = cond.lstrip('(').rstrip(')')
+                # cond_clean = ensure_parentheses_balanced(cond_clean)
+                if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 or cond.find('or') >= 0:
+                    if not any(bp.strip('() ').strip() == cond_clean for bp in bracket_patterns):
+                        ensure_cond = ensure_parentheses_balanced(cond)
+                        # print(f'cond : {cond} ensure_cond : {ensure_cond}')
+                        valid_conditions.append(ensure_cond)
+                        continue
+
+                # 提取条件中的列名
+                cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
+
+                # 所有列都必须存在才保留
+                if all(col in df_code.columns for col in cols_in_cond):
+                    valid_conditions.append(cond_clean)
+                else:
+                    removed_conditions.append(cond_clean)
+                    log.info(f"剔除不存在的列条件: {cond_clean}")
+
+            # 去掉在 bracket_patterns 中出现的内容
+            removed_conditions = [
+                cond for cond in removed_conditions
+                if not any(bp.strip('() ').strip() == cond.strip() for bp in bracket_patterns)
+            ]
+
+            # # 打印剔除条件列表
+            # if removed_conditions:
+            #     print(f"[剔除的条件列表] {removed_conditions}")
+
+            if not valid_conditions:
+                print(f"没有可用的查询条件:{expr}")
+                continue
+            # print(f'valid_conditions : {valid_conditions}')
+            # ====== 拼接 final_query 并检查括号 ======
+            final_query = ' and '.join(f"({c})" for c in valid_conditions)
+            # print(f'final_query : {final_query}')
+            if bracket_patterns:
+                final_query += ' and ' + ' and '.join(bracket_patterns)
+            # print(f'final_query : {final_query}')
+            left_count = final_query.count("(")
+            right_count = final_query.count(")")
+            if left_count != right_count:
+                if left_count > right_count:
+                    final_query += ")" * (left_count - right_count)
+                elif right_count > left_count:
+                    final_query = "(" * (right_count - left_count) + final_query
+
+            # ====== 决定 engine ======
+            query_engine = 'numexpr'
+            if any('index.' in c.lower() for c in valid_conditions):
+                query_engine = 'python'
+        else:
+            final_query = expr
+            query_engine = 'numexpr'
         hit_count = 0
         try:
             # 用 DataFrame.query() 执行逻辑表达式
@@ -614,11 +703,13 @@ def test_code_against_queries(df_code, queries):
             if missing_cols:
                 print(f"缺少字段: {missing_cols}")
                 continue
-                
-            df_hit = df_code.query(expr)
+            # print(f'expr : {expr} final_query :{final_query} engine : {query_engine}')
+            df_hit = df_code.query(final_query, engine=query_engine)
+            # df_hit = df_code.query(final_query)
             # 命中条件：返回非空
             # hit = not df_hit.empty
             hit_count = len(df_hit)
+
         except Exception as e:
             print(f"[ERROR] 执行 query 出错: {expr}, {e}")
             # hit = False
@@ -4755,6 +4846,42 @@ class StockMonitorApp(tk.Tk):
         btn.pack(side="left", padx=4)
         win._btn_copy_expr = btn
 
+    # def show_concept_top10_window_simple(self, concept_name, code=None, auto_update=True, interval=30):
+    #     """
+    #     显示指定概念的前10放量上涨股，不复用已有窗口，简单独立创建
+    #     """
+    #     if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
+    #         toast_message(self, "df_all 数据为空，无法筛选概念股票")
+    #         return
+
+    #     try:
+    #         df_concept = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
+    #     except Exception as e:
+    #         toast_message(self, f"筛选表达式错误: {e}")
+    #         return
+
+    #     if df_concept.empty:
+    #         toast_message(self, f"概念【{concept_name}】暂无匹配股票")
+    #         return
+
+    #     if not hasattr(self, "_pg_top10_window_simple"):
+    #         self._pg_top10_window_simple = {}
+    #         # self._pg_data_hash = {}
+    #     # --- 新窗口 ---
+    #     win = tk.Toplevel(self)
+    #     win.title(f"{concept_name} 概念前10放量上涨股")
+    #     win.attributes('-toolwindow', True)  # 去掉最大化/最小化按钮，只留关闭按钮
+
+    #     now = datetime.now()
+    #     timestamp_suffix = f"{now:%M%S}{int(now.microsecond/1000):03d}"[:6]
+
+    #     # 拼接成唯一键
+    #     key = f"{concept_name}_{timestamp_suffix}"
+    #      # 缓存窗口
+    #     self._pg_top10_window_simple[key] = {
+    #         "win": win
+    #         "code": code
+    #     }
     def show_concept_top10_window_simple(self, concept_name, code=None, auto_update=True, interval=30):
         """
         显示指定概念的前10放量上涨股，不复用已有窗口，简单独立创建
@@ -4775,7 +4902,17 @@ class StockMonitorApp(tk.Tk):
 
         if not hasattr(self, "_pg_top10_window_simple"):
             self._pg_top10_window_simple = {}
-            # self._pg_data_hash = {}
+
+        unique_code = f"{concept_name or ''}_{code or ''}"
+        # --- 检查是否已有相同 code 的窗口 ---
+        for k, v in self._pg_top10_window_simple.items():
+            if v.get("code") == unique_code and v.get("win") is not None:
+                # 已存在，聚焦并显示
+                v["win"].deiconify()      # 如果窗口最小化了，恢复
+                v["win"].lift()           # 提到最前
+                v["win"].focus_force()    # 获得焦点
+                return  # 不创建新窗口
+
         # --- 新窗口 ---
         win = tk.Toplevel(self)
         win.title(f"{concept_name} 概念前10放量上涨股")
@@ -4783,13 +4920,16 @@ class StockMonitorApp(tk.Tk):
 
         now = datetime.now()
         timestamp_suffix = f"{now:%M%S}{int(now.microsecond/1000):03d}"[:6]
-
-        # 拼接成唯一键
         key = f"{concept_name}_{timestamp_suffix}"
-         # 缓存窗口
+
+        # 缓存窗口
         self._pg_top10_window_simple[key] = {
-            "win": win
+            "win": win,
+            "code": f"{concept_name or ''}_{code or ''}"
         }
+
+        # 这里可以继续填充窗口内容
+
         # "plot": plot, "bars": bars, "texts": texts,
         # "timer": timer, "chk_auto": chk_auto, "spin": spin_interval
         # 主体 Treeview
@@ -4811,9 +4951,13 @@ class StockMonitorApp(tk.Tk):
 
         # 保存引用，独立窗口不复用 _concept_top10_win
         win._tree_top10 = tree
-        win._selected_index = 0
         win._concept_name = concept_name
-
+        # 在创建窗口时保存定时器 id
+        win._auto_refresh_id = None
+        # 初始化窗口状态（放在创建 win 后）
+        win._selected_index = 0
+        win.select_code = None
+        win.is_refreshing = False
 
         try:
             self.load_window_position(win, "concept_top10_window_simple", default_width=520, default_height=420)
@@ -4840,41 +4984,69 @@ class StockMonitorApp(tk.Tk):
         tree.bind("<Double-1>", lambda e: self._on_tree_double_click_newTop10(tree))
         tree.bind("<Button-3>", lambda e: self._on_tree_right_click_newTop10(tree, e))
 
-        # 单击选中
+        # -------------------
+        # 鼠标点击统一处理
+        # -------------------
+        def select_row_by_item(item):
+            children = list(tree.get_children())
+            if item not in children:
+                return
+            idx = children.index(item)
+            win._selected_index = idx
+
+            code = tree.item(item, "values")[0]
+            if code != win.select_code:
+                win.select_code = code
+                self.sender.send(code)
+
+            # 高亮
+            self._highlight_tree_selection(tree, item)
+
         def on_click(event):
+            if win.is_refreshing:
+                return
             sel = tree.selection()
             if sel:
-                item = sel[0]
-                code = tree.item(item, "values")[0]
-                self.select_code = code
-                self.sender.send(code)
-                self._highlight_tree_selection(tree, item)
+                select_row_by_item(sel[0])
+
         tree.bind("<<TreeviewSelect>>", on_click)
 
-        # 键盘导航
+        # -------------------
+        # 键盘操作
+        # -------------------
         def on_key(event):
-            children = tree.get_children()
+            children = list(tree.get_children())
             if not children:
-                return
-            idx = win._selected_index
-            if event.keysym in ("Up","Down"):
-                idx = max(0, idx-1) if event.keysym=="Up" else min(len(children)-1, idx+1)
-            elif event.keysym in ("Prior","Next"):
-                step=10
+                return "break"
+
+            idx = getattr(win, "_selected_index", 0)
+
+            if event.keysym == "Up":
+                idx = max(0, idx-1)
+            elif event.keysym == "Down":
+                idx = min(len(children)-1, idx+1)
+            elif event.keysym in ("Prior", "Next"):  # PageUp / PageDown
+                step = 10
                 idx = max(0, idx-step) if event.keysym=="Prior" else min(len(children)-1, idx+step)
-            elif event.keysym=="Return":
+            elif event.keysym == "Return":
                 sel = tree.selection()
                 if sel:
                     code = tree.item(sel[0], "values")[0]
                     self._on_label_double_click_top10(code, int(sel[0]))
-                    return
+                return "break"
             else:
                 return
-            tree.selection_set(children[idx])
-            tree.focus(children[idx])
-            tree.see(children[idx])
+
+            target_item = children[idx]
+            tree.selection_set(target_item)
+            tree.focus(target_item)
+            tree.see(target_item)
+            select_row_by_item(target_item)
             win._selected_index = idx
-            self._highlight_tree_selection(tree, children[idx])
+            return "break"  # ❌ 阻止 Treeview 默认上下键移动
+
+        # 绑定键事件到 tree（或 win），确保 tree 有焦点
+
         tree.bind("<Up>", on_key)
         tree.bind("<Down>", on_key)
         tree.bind("<Prior>", on_key)
@@ -4933,44 +5105,50 @@ class StockMonitorApp(tk.Tk):
         lbl_status.pack(side="right", padx=8)
         win._status_label_top10 = lbl_status
 
-        # --- 自动刷新逻辑 ---
         def auto_refresh():
             if not win.winfo_exists():
+                # 窗口已经关闭，取消定时器
+                if getattr(win, "_auto_refresh_id", None):
+                    win.after_cancel(win._auto_refresh_id)
+                    win._auto_refresh_id = None
                 return
+
             if chk_auto.get():
-                # 从 self.df_all 更新数据并刷新 Treeview
-                # self.update_df_all_from_api()  # 你需要实现这个函数
-                if getattr(win, "_concept_name"):
-                    concept_name = win._concept_name 
+                # 仅工作时间刷新
+                if not cct.get_work_time():
+                    pass
                 else:
-                    concept_name = None
-                    print(f'win._concept_name  : None')
-                    return
-                if not cct.get_work_time():  # 仅工作时间刷新
-                    # print(f'not 工作时间刷新: {concept_name}' )
-                    return
-                try:
-                    # 每次从最新 df_all 筛选数据
-                    df_latest = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
-                    self._fill_concept_top10_content(win, concept_name, df_latest, code=code)
-                    # else:
-                        # print(f'win._concept_name  : None')
-                except Exception as e:
-                    print(f"[WARN] 自动刷新失败: {e}")
-            win.after(int(spin_interval.get()) * 1000, auto_refresh)
+                    try:
+                        concept_name = getattr(win, "_concept_name", None)
+                        if not concept_name:
+                            print('win._concept_name  : None')
+                            return
+                        df_latest = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
+                        self._fill_concept_top10_content(win, concept_name, df_latest, code=code)
+                    except Exception as e:
+                        print(f"[WARN] 自动刷新失败: {e}")
 
-        auto_refresh()  # 启动循环
+            # 安全地重新注册下一次刷新
+            win._auto_refresh_id = win.after(int(spin_interval.get()) * 1000, auto_refresh)
 
+        # 启动循环
+        auto_refresh()
 
-        # --- 关闭事件 ---
         def _on_close():
             try:
                 self.save_window_position(win, "concept_top10_window_simple")
             except Exception:
                 pass
+
+            # 取消自动刷新
+            if getattr(win, "_auto_refresh_id", None):
+                win.after_cancel(win._auto_refresh_id)
+                win._auto_refresh_id = None
+
             unbind_mousewheel()
             win.destroy()
             self._concept_top10_win = None
+
 
         win.protocol("WM_DELETE_WINDOW", _on_close)
         win.bind("<Escape>", lambda e: _on_close())  # ESC关闭窗口
@@ -5025,7 +5203,14 @@ class StockMonitorApp(tk.Tk):
         win = tk.Toplevel(self)
         self._concept_top10_win = win
         win.title(f"{concept_name} 概念前10放量上涨股")
+        win.attributes('-toolwindow', True)  # 去掉最大化/最小化按钮，只留关闭按钮
         win._concept_name = concept_name
+        # 在创建窗口时保存定时器 id
+        win._auto_refresh_id = None
+        # 初始化窗口状态（放在创建 win 后）
+        win._selected_index = 0
+        win.select_code = None
+        win.is_refreshing = False
 
         try:
             self.load_window_position(win, "concept_top10_window", default_width=520, default_height=420)
@@ -5052,7 +5237,6 @@ class StockMonitorApp(tk.Tk):
         # 保存引用
         win._content_frame_top10 = frame
         win._tree_top10 = tree
-        win._selected_index = 0
 
         # 鼠标滚轮悬停滚动
         def on_mousewheel(event):
@@ -5074,41 +5258,70 @@ class StockMonitorApp(tk.Tk):
         tree.bind("<Double-1>", lambda e: self._on_tree_double_click_newTop10(tree))
         tree.bind("<Button-3>", lambda e: self._on_tree_right_click_newTop10(tree, e))
 
-        # 单击选中
+
+        # -------------------
+        # 鼠标点击统一处理
+        # -------------------
+        def select_row_by_item(item):
+            children = list(tree.get_children())
+            if item not in children:
+                return
+            idx = children.index(item)
+            win._selected_index = idx
+
+            code = tree.item(item, "values")[0]
+            if code != win.select_code:
+                win.select_code = code
+                self.sender.send(code)
+
+            # 高亮
+            self._highlight_tree_selection(tree, item)
+
         def on_click(event):
+            if win.is_refreshing:
+                return
             sel = tree.selection()
             if sel:
-                item = sel[0]
-                code = tree.item(item, "values")[0]
-                self.select_code = code
-                self.sender.send(code)
-                self._highlight_tree_selection(tree, item)
+                select_row_by_item(sel[0])
+
         tree.bind("<<TreeviewSelect>>", on_click)
 
-        # 键盘导航
+        # -------------------
+        # 键盘操作
+        # -------------------
         def on_key(event):
-            children = tree.get_children()
+            children = list(tree.get_children())
             if not children:
-                return
-            idx = win._selected_index
-            if event.keysym in ("Up","Down"):
-                idx = max(0, idx-1) if event.keysym=="Up" else min(len(children)-1, idx+1)
-            elif event.keysym in ("Prior","Next"):
-                step=10
+                return "break"
+
+            idx = getattr(win, "_selected_index", 0)
+
+            if event.keysym == "Up":
+                idx = max(0, idx-1)
+            elif event.keysym == "Down":
+                idx = min(len(children)-1, idx+1)
+            elif event.keysym in ("Prior", "Next"):  # PageUp / PageDown
+                step = 10
                 idx = max(0, idx-step) if event.keysym=="Prior" else min(len(children)-1, idx+step)
-            elif event.keysym=="Return":
+            elif event.keysym == "Return":
                 sel = tree.selection()
                 if sel:
                     code = tree.item(sel[0], "values")[0]
                     self._on_label_double_click_top10(code, int(sel[0]))
-                    return
+                return "break"
             else:
                 return
-            tree.selection_set(children[idx])
-            tree.focus(children[idx])
-            tree.see(children[idx])
+
+            target_item = children[idx]
+            tree.selection_set(target_item)
+            tree.focus(target_item)
+            tree.see(target_item)
+            select_row_by_item(target_item)
             win._selected_index = idx
-            self._highlight_tree_selection(tree, children[idx])
+
+            return "break"  # ❌ 阻止 Treeview 默认上下键移动
+
+
         tree.bind("<Up>", on_key)
         tree.bind("<Down>", on_key)
         tree.bind("<Prior>", on_key)
@@ -5158,41 +5371,47 @@ class StockMonitorApp(tk.Tk):
         lbl_status.pack(side="right", padx=8)
         win._status_label_top10 = lbl_status
 
-        # --- 自动刷新逻辑 ---
         def auto_refresh():
             if not win.winfo_exists():
+                # 窗口已经关闭，取消定时器
+                if getattr(win, "_auto_refresh_id", None):
+                    win.after_cancel(win._auto_refresh_id)
+                    win._auto_refresh_id = None
                 return
+
             if chk_auto.get():
-                # 从 self.df_all 更新数据并刷新 Treeview
-                # self.update_df_all_from_api()  # 你需要实现这个函数
-                if getattr(win, "_concept_name"):
-                    concept_name = win._concept_name 
+                # 仅工作时间刷新
+                if not cct.get_work_time():
+                    pass
                 else:
-                    concept_name = None
-                    print(f'win._concept_name  : None')
-                    return
-                if not cct.get_work_time():  # 仅工作时间刷新
-                    # print(f'not 工作时间刷新: {concept_name}' )
-                    return
-                try:
-                    # 每次从最新 df_all 筛选数据
-                    df_latest = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
-                    self._fill_concept_top10_content(win, concept_name, df_latest, code=code)
-                    # else:
-                        # print(f'win._concept_name  : None')
-                except Exception as e:
-                    print(f"[WARN] 自动刷新失败: {e}")
-            win.after(int(spin_interval.get()) * 1000, auto_refresh)
+                    try:
+                        concept_name = getattr(win, "_concept_name", None)
+                        if not concept_name:
+                            print('win._concept_name  : None')
+                            return
+                        df_latest = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
+                        self._fill_concept_top10_content(win, concept_name, df_latest, code=code)
+                    except Exception as e:
+                        print(f"[WARN] 自动刷新失败: {e}")
 
-        auto_refresh()  # 启动循环
+            # 安全地重新注册下一次刷新
+            win._auto_refresh_id = win.after(int(spin_interval.get()) * 1000, auto_refresh)
+
+        # 启动循环
+        auto_refresh()
 
 
-        # --- 关闭事件 ---
         def _on_close():
             try:
                 self.save_window_position(win, "concept_top10_window")
             except Exception:
                 pass
+
+            # 取消自动刷新
+            if getattr(win, "_auto_refresh_id", None):
+                win.after_cancel(win._auto_refresh_id)
+                win._auto_refresh_id = None
+
             unbind_mousewheel()
             win.destroy()
             self._concept_top10_win = None
@@ -5201,10 +5420,12 @@ class StockMonitorApp(tk.Tk):
         # 填充数据
         self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
 
-    def _fill_concept_top10_content(self, win, concept_name, df_concept, code=None, limit=50):
+    def _fill_concept_top10_content(self, win, concept_name, df_concept=None, code=None, limit=50):
         """
         填充概念Top10内容到Treeview（支持实时刷新）。
-        保留原有 df_concept 参数和 code 参数，limit 默认为 10。
+        - df_concept: 可选，若为 None 则从 self.df_all 获取
+        - code: 打开窗口或刷新时优先选中的股票 code
+        - limit: 显示前 N 条
         """
         tree = win._tree_top10
         tree.delete(*tree.get_children())
@@ -5212,10 +5433,8 @@ class StockMonitorApp(tk.Tk):
         # 如果 df_concept 为 None，则从 self.df_all 动态获取
         if df_concept is None:
             df_concept = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
-
         if df_concept.empty:
             return
-
 
         # 排序状态
         win._top10_sort_state = getattr(win, "_top10_sort_state", {"col": "percent", "asc": False})
@@ -5223,13 +5442,16 @@ class StockMonitorApp(tk.Tk):
         ascending = win._top10_sort_state["asc"]
         if sort_col in df_concept.columns:
             df_concept = df_concept.sort_values(sort_col, ascending=ascending)
-        code_to_iid = {}
-        df_display = df_concept.head(limit).copy()  # 限制显示前 N 条
-        tree._full_df = df_concept.copy() 
+
+        # 限制显示前 N 条
+        df_display = df_concept.head(limit).copy()
+        tree._full_df = df_concept.copy()
         tree._display_limit = limit
+
+        # 插入 Treeview 并建立 code -> iid 映射
+        code_to_iid = {}
         for idx, (code_row, row) in enumerate(df_display.iterrows()):
             iid = str(idx)
-            # 从 self.df_all 动态获取最新 percent 和 volume
             latest_row = self.df_all.loc[code_row] if code_row in self.df_all.index else row
             tree.insert("", "end", iid=iid,
                         values=(code_row,
@@ -5238,16 +5460,33 @@ class StockMonitorApp(tk.Tk):
                                 f"{latest_row.get('volume', row.get('volume', 0)):.1f}"))
             code_to_iid[code_row] = iid
 
-        # 默认选中第一行
-        if tree.get_children():
-            target_iid = code_to_iid.get(code, tree.get_children()[0])
+        # --- 默认选中逻辑 ---
+        children = list(tree.get_children())
+        if children:
+            # 优先使用窗口当前选中 code，其次使用传入 code
+            target_code = getattr(win, "select_code", None) or code
+            target_iid = code_to_iid.get(target_code, children[0])
+
             tree.selection_set(target_iid)
             tree.focus(target_iid)
-            tree.see(target_iid)
-            win._selected_index = int(target_iid)
-            self._highlight_tree_selection(tree, target_iid)
+            # # 强制刷新 Treeview 渲染，再滚动
+            win.update_idletasks()      # 确保 Treeview 已渲染
+            # tree.see(target_iid)
 
-        # 更新状态栏
+            # 延迟滚动 + 高亮
+            def scroll_and_highlight():
+                tree.see(target_iid)
+                self._highlight_tree_selection(tree, target_iid)
+
+            win.after(50, scroll_and_highlight)
+            # 更新窗口索引和选中 code
+            win._selected_index = children.index(target_iid)
+            win.select_code = tree.item(target_iid, "values")[0]
+
+            # 高亮
+            # self._highlight_tree_selection(tree, target_iid)
+
+        # --- 更新状态栏 ---
         if hasattr(win, "_status_label_top10"):
             visible_count = len(df_display)
             total_count = len(df_concept)
@@ -5255,6 +5494,62 @@ class StockMonitorApp(tk.Tk):
             win._status_label_top10.pack(side="bottom", fill="x", pady=(0, 4))
 
         win.update_idletasks()
+
+
+    # def _fill_concept_top10_content_src_ok(self, win, concept_name, df_concept, code=None, limit=50):
+    #     """
+    #     填充概念Top10内容到Treeview（支持实时刷新）。
+    #     保留原有 df_concept 参数和 code 参数，limit 默认为 10。
+    #     """
+    #     tree = win._tree_top10
+    #     tree.delete(*tree.get_children())
+
+    #     # 如果 df_concept 为 None，则从 self.df_all 动态获取
+    #     if df_concept is None:
+    #         df_concept = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
+
+    #     if df_concept.empty:
+    #         return
+
+
+    #     # 排序状态
+    #     win._top10_sort_state = getattr(win, "_top10_sort_state", {"col": "percent", "asc": False})
+    #     sort_col = win._top10_sort_state["col"]
+    #     ascending = win._top10_sort_state["asc"]
+    #     if sort_col in df_concept.columns:
+    #         df_concept = df_concept.sort_values(sort_col, ascending=ascending)
+    #     code_to_iid = {}
+    #     df_display = df_concept.head(limit).copy()  # 限制显示前 N 条
+    #     tree._full_df = df_concept.copy() 
+    #     tree._display_limit = limit
+    #     for idx, (code_row, row) in enumerate(df_display.iterrows()):
+    #         iid = str(idx)
+    #         # 从 self.df_all 动态获取最新 percent 和 volume
+    #         latest_row = self.df_all.loc[code_row] if code_row in self.df_all.index else row
+    #         tree.insert("", "end", iid=iid,
+    #                     values=(code_row,
+    #                             latest_row.get("name", row.get("name", "")),
+    #                             f"{latest_row.get('percent', row.get('percent', 0)):.2f}",
+    #                             f"{latest_row.get('volume', row.get('volume', 0)):.1f}"))
+    #         code_to_iid[code_row] = iid
+
+    #     # 默认选中第一行
+    #     if tree.get_children():
+    #         target_iid = code_to_iid.get(code, tree.get_children()[0])
+    #         tree.selection_set(target_iid)
+    #         tree.focus(target_iid)
+    #         tree.see(target_iid)
+    #         win._selected_index = int(target_iid)
+    #         self._highlight_tree_selection(tree, target_iid)
+
+    #     # 更新状态栏
+    #     if hasattr(win, "_status_label_top10"):
+    #         visible_count = len(df_display)
+    #         total_count = len(df_concept)
+    #         win._status_label_top10.config(text=f"显示 {visible_count}/{total_count} 只")
+    #         win._status_label_top10.pack(side="bottom", fill="x", pady=(0, 4))
+
+    #     win.update_idletasks()
 
 
 
@@ -5466,10 +5761,11 @@ class StockMonitorApp(tk.Tk):
             self._pg_windows = {}
             self._pg_data_hash = {}
 
+
         # --- 获取股票数据 ---
-        if code is None:
+        if code is None or code == "总览":
             tcode, _ = self.get_stock_code_none()
-            top_concepts = self.get_following_concepts_by_correlation(tcode, top_n=top_n)
+            top_concepts = self. (tcode, top_n=top_n)
             code = "总览"
             name = "All"
         else:
@@ -5480,6 +5776,18 @@ class StockMonitorApp(tk.Tk):
             print("未找到相关概念")
             return
 
+        unique_code = f"{code or ''}_{top_n or ''}"
+
+        # --- 检查是否已有相同 code 的窗口 ---
+        for k, v in self._pg_windows.items():
+            win = v.get("win")
+            if v.get("code") == unique_code and win is not None:
+                # 已存在，聚焦并显示 (PyQt)
+                win.show()               # 如果窗口被最小化或隐藏
+                win.raise_()             # 提到最前
+                win.activateWindow()     # 获得焦点
+                return  # 不创建新窗口
+                
         concepts = [c[0] for c in top_concepts]
         scores = np.array([c[1] for c in top_concepts])
         avg_percents = np.array([c[2] for c in top_concepts])
@@ -5732,7 +6040,7 @@ class StockMonitorApp(tk.Tk):
         timer.timeout.connect(lambda: self._refresh_pg_window(code, top_n))
         # 缓存窗口
         self._pg_windows[code] = {
-            "win": win, "plot": plot, "bars": bars, "texts": texts,
+            "win": win, "plot": plot, "bars": bars, "texts": texts, "code" : unique_code,
             "timer": timer, "chk_auto": chk_auto, "spin": spin_interval
         }
         
@@ -5810,136 +6118,6 @@ class StockMonitorApp(tk.Tk):
             }
 
 
-    # def update_pg_plot1(self, w_dict, concepts, scores, avg_percents, follow_ratios):
-    #     """
-    #     更新图形窗口的条形图和文本，保持 Bar 和 TextItem 对齐，支持箭头显示涨跌，自动适配 DPI。
-    #     """
-    #     win = w_dict["win"]
-    #     plot = w_dict["plot"]
-    #     texts = w_dict["texts"]
-
-    #     # --- 保存上一次数据用于箭头 ---
-    #     if not hasattr(win, "_prev_concepts_data"):
-    #         win._prev_concepts_data = {
-    #             "avg_percents": np.zeros(len(avg_percents)),
-    #             "scores": np.zeros(len(scores)),
-    #             "follow_ratios": np.zeros(len(follow_ratios))
-    #         }
-    #     prev_data = win._prev_concepts_data
-
-    #     y = np.arange(len(concepts))
-    #     max_score = max(scores) if len(scores) > 0 else 1
-
-    #     # --- 删除原 bars，重新绘制 ---
-    #     for item in plot.items[:]:
-    #         if isinstance(item, pg.BarGraphItem):
-    #             plot.removeItem(item)
-    #     color_map = pg.colormap.get('CET-R1')
-    #     brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
-    #     bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
-    #     plot.addItem(bars)
-    #     w_dict["bars"] = bars  # 更新引用
-
-    #     # --- DPI 缩放字体 ---
-    #     screen = QtWidgets.QApplication.instance().primaryScreen()
-    #     dpi_scale = screen.logicalDotsPerInch() / 96.0  # 基于96dpi的缩放比例
-    #     font_size = max(6, int(9 * dpi_scale))  # 文字最小6号，自动放大
-
-    #     # --- 更新文本 ---
-    #     for i, text in enumerate(texts):
-    #         if i >= len(concepts):
-    #             continue
-    #         avg = avg_percents[i]
-    #         score = scores[i]
-
-    #         # 平均涨幅箭头
-    #         diff_avg = avg - prev_data["avg_percents"][i] if i < len(prev_data["avg_percents"]) else avg
-    #         arrow_avg = "↑" if diff_avg > 0 else ("↓" if diff_avg < 0 else "→")
-
-    #         # 综合得分箭头
-    #         diff_score = score - prev_data["scores"][i] if i < len(prev_data["scores"]) else score
-    #         arrow_score = "↑" if diff_score > 0 else ("↓" if diff_score < 0 else "→")
-
-    #         # 更新文字
-    #         text.setText(f"avg:{arrow_avg} {avg:.2f}%\nscore:{arrow_score} {score:.2f}")
-    #         font = text.font()
-    #         font.setPointSize(font_size)
-    #         text.setFont(font)
-
-    #         # 设置位置，条形右侧稍偏移
-    #         text.setPos(score + 0.03 * max_score, y[i])
-    #         text.setAnchor((0, 0.5))  # 垂直居中
-
-    #     # --- 屏幕切换或 DPI 改变时重新定位文字 ---
-    #     def reposition_texts():
-    #         for i, (avg, score) in enumerate(zip(avg_percents, scores)):
-    #             if i >= len(texts):
-    #                 continue
-    #             texts[i].setPos(score + 0.03 * max_score, y[i])
-    #             texts[i].setFont(QtGui.QFont(texts[i].font().family(), font_size))
-    #         plot.update()
-
-    #     def on_screen_changed(new_screen):
-    #         print("[DEBUG] 屏幕切换或 DPI 改变，重定位文字")
-    #         QtCore.QTimer.singleShot(100, reposition_texts)
-
-    #     if win.windowHandle():
-    #         win.windowHandle().screenChanged.connect(on_screen_changed)
-
-    #     # --- 保存当前数据 ---
-    #     win._prev_concepts_data = {
-    #         "avg_percents": avg_percents.copy(),
-    #         "scores": scores.copy(),
-    #         "follow_ratios": follow_ratios.copy()
-    #     }
-
-
-    # def update_pg_plot_src(self, w_dict, concepts, scores, avg_percents, follow_ratios):
-    #     """
-    #     更新图形窗口的条形图和文本，实时使用 scores。
-    #     """
-    #     win = w_dict["win"]
-    #     plot = w_dict["plot"]
-    #     bars = w_dict["bars"]
-    #     texts = w_dict["texts"]
-
-    #     if not hasattr(win, "_prev_concepts_data"):
-    #         win._prev_concepts_data = {
-    #             "avg_percents": np.zeros(len(avg_percents)),
-    #             "scores": np.zeros(len(scores)),
-    #             "follow_ratios": np.zeros(len(follow_ratios))
-    #         }
-    #     prev_data = win._prev_concepts_data
-
-    #     color_map = pg.colormap.get('CET-R1')
-    #     brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
-    #     bars.setOpts(width=scores, brushes=brushes)
-
-    #     for i, text in enumerate(texts):
-    #         if i >= len(concepts):
-    #             continue
-    #         avg = avg_percents[i]
-    #         score = scores[i]
-
-    #         # --- 计算平均涨幅箭头 ---
-    #         diff_avg = avg - prev_data["avg_percents"][i] if i < len(prev_data["avg_percents"]) else avg
-    #         arrow_avg = "↑" if diff_avg > 0 else ("↓" if diff_avg < 0 else "→")
-
-    #         # --- 计算综合得分箭头 ---
-    #         diff_score = score - prev_data["scores"][i] if i < len(prev_data["scores"]) else score
-    #         arrow_score = "↑" if diff_score > 0 else ("↓" if diff_score < 0 else "→")
-
-    #         # --- 更新文本 ---
-    #         text.setText(f"avg:{arrow_avg} {avg:.2f}%\nscore:{arrow_score} {score:.2f}")
-    #         text.setPos(score + 0.1, i)
-
-    #     win._prev_concepts_data = {
-    #         "avg_percents": avg_percents.copy(),
-    #         "scores": scores.copy(),
-    #         "follow_ratios": follow_ratios.copy()
-    #     }
-
-
     # --- 定时刷新 ---
     def _refresh_pg_window(self, code, top_n):
         if code not in self._pg_windows:
@@ -5949,7 +6127,6 @@ class StockMonitorApp(tk.Tk):
             return
         w_dict = self._pg_windows[code]
         win = w_dict["win"]
-
         # 获取最新概念数据
         if code == "总览":
             tcode, _ = self.get_stock_code_none()
@@ -7113,6 +7290,7 @@ class StockMonitorApp(tk.Tk):
             df_code = self.df_all.loc[[code]]
         else:
             df_code = self.df_all
+
         results = self.query_manager.test_code(df_code)
 
         # 更新当前历史的命中结果
@@ -7751,9 +7929,43 @@ class StockMonitorApp(tk.Tk):
         if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
             try:
                 self.save_window_position(self.kline_monitor, "KLineMonitor")
+                self.kline_monitor.on_kline_monitor_close()
                 self.kline_monitor.destroy()
             except Exception:
                 pass
+
+        # --- 关闭所有 concept top10 窗口 ---
+        if hasattr(self, "_pg_top10_window_simple"):
+            for key, win_info in list(self._pg_top10_window_simple.items()):
+                win = win_info.get("win")
+                if win and win.winfo_exists():
+                    try:
+                        # 如果窗口有 on_close 方法，先调用
+                        if hasattr(win, "on_close") and callable(win.on_close):
+                            win.on_close()
+                        else:
+                            # 没有 on_close 的就直接销毁
+                            win.destroy()
+                    except Exception as e:
+                        print(f"关闭窗口 {key} 出错: {e}")
+            self._pg_top10_window_simple.clear()
+
+        # --- 关闭所有 concept top10 窗口 (PyQt 版) ---
+        if hasattr(self, "_pg_windows"):
+            for key, win_info in list(self._pg_windows.items()):
+                win = win_info.get("win")
+                if win is not None:
+                    try:
+                        # 如果窗口有 on_close 方法，先调用
+                        if hasattr(win, "on_close") and callable(win.on_close):
+                            win.on_close()
+                        else:
+                            # 没有 on_close 的就直接关闭窗口
+                            win.close()  # QWidget 的关闭方法
+                    except Exception as e:
+                        print(f"关闭窗口 {key} 出错: {e}")
+            self._pg_windows.clear()
+
         self.save_window_position(self,"main_window")
         # self.save_search_history()
         self.query_manager.save_search_history()
@@ -7931,9 +8143,50 @@ class QueryHistoryManager:
         # 插入到光标位置
         # event.widget.insert(tk.INSERT, clipboard_text)
         # 先清空再黏贴
-        event.widget.delete(0, tk.END)
-        event.widget.insert(0, clipboard_text)
-        self.on_test_click()
+        # event.widget.delete(0, tk.END)
+        # event.widget.insert(0, clipboard_text)
+        # self.on_test_click()
+        # 正则提取 6 位数字代码（如 002171）
+        if clipboard_text.find('and') < 0:
+            match = re.search(r'\b\d{6}\b', clipboard_text)
+            if match:
+                code = match.group(0)
+                # 清空输入框并插入代码
+                event.widget.delete(0, tk.END)
+                event.widget.insert(0, code)
+                self.on_test_click()
+            # 自动触发查询
+            else:
+                print(f"[on_right_click] 未找到6位数字代码: {clipboard_text}")
+        else:
+            event.widget.delete(0, tk.END)
+            event.widget.insert(0, clipboard_text)
+            self.on_test_click()
+
+    # def on_right_click(self, event):
+    #     try:
+    #         # 获取剪贴板文本
+    #         clipboard_text = event.widget.clipboard_get().strip()
+    #     except tk.TclError:
+    #         return  # 没有可用的剪贴板内容
+
+    #     # 如果包含 'and'，说明是表达式，直接使用
+    #     if "and" in clipboard_text.lower():
+    #         event.widget.delete(0, tk.END)
+    #         event.widget.insert(0, clipboard_text)
+    #         self.on_test_click()
+    #         return
+
+    #     # 否则尝试匹配 6 位股票代码
+    #     match = re.search(r"\b\d{6}\b", clipboard_text)
+    #     if match:
+    #         code = match.group(0)
+    #         event.widget.delete(0, tk.END)
+    #         event.widget.insert(0, code)
+    #         self.on_test_click()
+    #     else:
+    #         print(f"[on_right_click] 未找到有效的6位代码: {clipboard_text}")
+
 
     # 先给每列绑定排序事件
     def treeview_sort_column(self,tv, col, reverse=False):
@@ -10663,6 +10916,19 @@ class KLineMonitor(tk.Toplevel):
         # 筛选栈
         self.filter_stack = []
 
+        self.last_query = ""
+
+        # --- 加载历史查询 ---
+        if os.path.exists("last_query.json"):
+            try:
+                with open("last_query.json", "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.last_query = data.get("last_query", "")
+                    if self.last_query:
+                        self.search_var.set(self.last_query)
+            except Exception as e:
+                print(f"读取 last_query.json 出错: {e}")
+
         # 缓存数据
         self.df_cache = None
 
@@ -10745,7 +11011,6 @@ class KLineMonitor(tk.Toplevel):
             self.tree.heading(col, text=text, command=lambda c=col: self.treeview_sort_column(c))
             self.tree.column(col, width=w, anchor="center")
 
-        # 高亮配置
         # 高亮配置可以根据 signal_types 动态生成
         self.tree.tag_configure("neutral", background="#f0f0f0")
         for sig in self.signal_types:
@@ -10764,6 +11029,23 @@ class KLineMonitor(tk.Toplevel):
 
         self.tree.bind("<Up>", self.on_key_select)
         self.tree.bind("<Down>", self.on_key_select)
+
+
+        # ---- 窗口底部状态栏 ----
+        self.query_status_var = tk.StringVar(value="")
+        self.query_status_label = tk.Label(
+            self,
+            textvariable=self.query_status_var,
+            anchor="w",
+            bg="#f0f0f0",
+            fg="blue"
+        )
+        self.query_status_label.pack(side="bottom", fill="x")
+
+
+        # ---- 中间表格 ----
+        table_frame = tk.Frame(self)
+        table_frame.pack(fill=tk.BOTH, expand=True)
 
 
         # --- 搜索框区域 ---
@@ -10787,61 +11069,240 @@ class KLineMonitor(tk.Toplevel):
 
         self.protocol("WM_DELETE_WINDOW", self.on_kline_monitor_close)
 
+
+         # --- 加载历史查询 ---
+        if os.path.exists("last_query.json"):
+            try:
+                with open("last_query.json", "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.last_query = data.get("last_query", "")
+                    if self.last_query:
+                        self.search_var.set(self.last_query)
+            except Exception as e:
+                print(f"读取 last_query.json 出错: {e}")
         # 加载窗口位置（可选）
         try:
             self.master.load_window_position(self, "KLineMonitor", default_width=760, default_height=460)
         except Exception:
             self.geometry("760x460")
 
+    # def search_code_status(self):
+
+    #     """在 Treeview 中搜索 code 并高亮显示"""
+    #     code = self.search_var.get().strip()
+    #     if not code:
+    #        return
+
+    #     found = False
+    #     for item in self.tree.get_children():
+    #        if self.tree.set(item, "code") == code:
+    #            # 选中并滚动到该行
+    #            self.tree.selection_set(item)
+    #            self.tree.focus(item)
+    #            self.tree.see(item)
+    #            found = True
+    #            break
+
+    #     if not found:
+    #        # 未找到则弹出提示
+    #        toast_message(self,f"未找到代码 {code}")
+
+    # def search_code_status(self):
+    #     """
+    #     在 Treeview 中搜索 code 或使用 query 过滤当前表格数据
+    #     支持表达式: score>80 and percent>5 and volume>2
+    #     """
+    #     query = self.search_var.get().strip()
+    #     if not query:
+    #         return
+
+    #     # --- 1. 搜索股票代码 ---
+    #     if query.isdigit() and len(query) == 6:
+    #         code = query
+    #         found = False
+    #         for item in self.tree.get_children():
+    #             if self.tree.set(item, "code") == code:
+    #                 self.tree.selection_set(item)
+    #                 self.tree.focus(item)
+    #                 self.tree.see(item)
+    #                 found = True
+    #                 break
+    #         if not found:
+    #             toast_message(self, f"未找到代码 {code}")
+    #         else:
+    #             # 选中后让窗口前置（如果在独立窗口中）
+    #             try:
+    #                 self.lift()
+    #                 self.focus_force()
+    #             except Exception:
+    #                 pass
+    #         return
+
+    #     # --- 2. 表达式过滤 TreeView 当前数据 ---
+    #     try:
+    #         # 收集当前表格数据
+    #         cols = self.tree["columns"]
+    #         rows = []
+    #         for item in self.tree.get_children():
+    #             values = self.tree.item(item, "values")
+    #             if not values:
+    #                 continue
+    #             rows.append(dict(zip(cols, values)))
+
+    #         if not rows:
+    #             toast_message(self, "当前表格为空，无法筛选")
+    #             return
+
+    #         df_tree = pd.DataFrame(rows)
+
+    #         # 将数字列转换类型
+    #         for col in ["score", "percent", "volume", "now"]:
+    #             if col in df_tree.columns:
+    #                 df_tree[col] = pd.to_numeric(df_tree[col], errors="coerce")
+
+    #         # --- 列名映射（中文兼容）---
+    #         col_map = {
+    #             "评分": "score",
+    #             "涨幅": "percent",
+    #             "量比": "volume",
+    #             "当前价": "now",
+    #             "信号": "signal",
+    #             "情绪": "emotion",
+    #         }
+    #         expr = query
+    #         for k, v in col_map.items():
+    #             expr = expr.replace(k, v)
+
+    #         # --- 用 pandas.query 过滤 ---
+    #         df_filtered = df_tree.query(expr)
+    #         if df_filtered.empty:
+    #             toast_message(self, f"未找到符合条件的结果: {query}")
+    #             return
+
+    #         # --- 清空并填充 ---
+    #         self.tree.delete(*self.tree.get_children())
+    #         for _, row in df_filtered.iterrows():
+    #             values = [row.get(col, "") for col in cols]
+    #             # 尝试保持原有tag风格（按signal推断）
+    #             sig = str(row.get("signal", "")).upper()
+    #             tag = "neutral"
+    #             if sig.startswith("BUY"):
+    #                 tag = "buy"
+    #             elif sig.startswith("SELL"):
+    #                 tag = "sell"
+    #             self.tree.insert("", "end", values=values, tags=(tag,))
+
+    #         toast_message(self, f"共找到 {len(df_filtered)} 条结果")
+
+    #         # 过滤后保持焦点
+    #         try:
+    #             self.lift()
+    #             self.focus_force()
+    #         except Exception:
+    #             pass
+
+    #     except Exception as e:
+    #         toast_message(self, f"筛选语句错误: {e}")
+
     def search_code_status(self):
+        """
+        在 Treeview 中搜索 code 或使用 query 过滤当前表格数据
+        支持表达式: score>80 and percent>5 and volume>2
+        """
+        query = self.search_var.get().strip()
+        if not query:
+            return
 
-        """在 Treeview 中搜索 code 并高亮显示"""
-        code = self.search_var.get().strip()
-        if not code:
-           return
+        # --- 保存到实例属性（不立即写文件） ---
+        self.last_query = query
 
-        found = False
-        for item in self.tree.get_children():
-           if self.tree.set(item, "code") == code:
-               # 选中并滚动到该行
-               self.tree.selection_set(item)
-               self.tree.focus(item)
-               self.tree.see(item)
-               found = True
-               break
+        # --- 1. 搜索股票代码 ---
+        if query.isdigit() and len(query) == 6:
+            code = query
+            found = False
+            for item in self.tree.get_children():
+                if self.tree.set(item, "code") == code:
+                    self.tree.selection_set(item)
+                    self.tree.focus(item)
+                    self.tree.see(item)
+                    found = True
+                    break
+            if not found:
+                toast_message(self, f"未找到代码 {code}")
+            else:
+                try:
+                    self.lift()
+                    self.focus_force()
+                except Exception:
+                    pass
+            return
 
-        if not found:
-           # 未找到则弹出提示
-           toast_message(self,f"未找到代码 {code}")
+        # --- 2. 表达式过滤 TreeView 当前数据 ---
+        try:
+            cols = self.tree["columns"]
+            rows = []
+            for item in self.tree.get_children():
+                values = self.tree.item(item, "values")
+                if not values:
+                    continue
+                rows.append(dict(zip(cols, values)))
 
-        """搜索指定代码并显示其信号状态"""
-        # code = self.search_var.get().strip()
-        # if not code:
-        #     messagebox.showinfo("提示", "请输入代码")
-        #     return
+            if not rows:
+                toast_message(self, "当前表格为空，无法筛选")
+                return
 
-        # if self.df_cache is None or code not in self.df_cache["code"].values:
-        #     messagebox.showwarning("未找到", f"未找到代码 {code}")
-        #     return
+            import pandas as pd
+            df_tree = pd.DataFrame(rows)
 
-        # row = self.df_cache.loc[self.df_cache["code"] == code].iloc[0]
-        # signal = row.get("signal", "无信号")
+            # 将数字列转换类型
+            for col in ["score", "percent", "volume", "now"]:
+                if col in df_tree.columns:
+                    df_tree[col] = pd.to_numeric(df_tree[col], errors="coerce")
 
-        # # 颜色提示
-        # if signal == "BUY_STRONG":
-        #     color = "green"
-        # elif signal == "BUY_NORMAL":
-        #     color = "#009933"
-        # elif signal == "SELL":
-        #     color = "red"
-        # else:
-        #     color = "black"
+            # --- 中文列名映射 ---
+            col_map = {
+                "评分": "score",
+                "涨幅": "percent",
+                "量比": "volume",
+                "当前价": "now",
+                "信号": "signal",
+                "情绪": "emotion",
+            }
+            expr = query
+            for k, v in col_map.items():
+                expr = expr.replace(k, v)
 
-        # # 更新状态栏显示
-        # self.total_label.config(
-        #     text=f"代码 {code} 当前信号: {signal}",
-        #     fg=color
-        # )
+            # --- 过滤 ---
+            df_filtered = df_tree.query(expr)
+            if df_filtered.empty:
+                toast_message(self, f"未找到符合条件的结果: {query}")
+                return
+
+            # --- 清空并填充 ---
+            self.tree.delete(*self.tree.get_children())
+            for _, row in df_filtered.iterrows():
+                values = [row.get(col, "") for col in cols]
+                sig = str(row.get("signal", "")).upper()
+                tag = "neutral"
+                if sig.startswith("BUY"):
+                    tag = "buy"
+                elif sig.startswith("SELL"):
+                    tag = "sell"
+                self.tree.insert("", "end", values=values, tags=(tag,))
+
+            toast_message(self, f"共找到 {len(df_filtered)} 条结果")
+
+            try:
+                self.lift()
+                self.focus_force()
+            except Exception:
+                pass
+
+        except Exception as e:
+            toast_message(self, f"筛选语句错误: {e}")
+
+
+
 
     def on_kline_monitor_right_click(self,event):
         try:
@@ -11026,203 +11487,6 @@ class KLineMonitor(tk.Toplevel):
                 time.sleep(self.refresh_interval)
 
 
-    # ---- 更新表格 ----
-    # def update_table(self, df):
-    #     """
-    #     更新表格：
-    #     - 每个个股的信号累加显示
-    #     - 最新信号箭头 ↑ / ↓
-    #     - 历史高亮 buy_hist / sell_hist
-    #     """
-    #     # 保存选中行
-    #     selected_code = None
-    #     sel_items = self.tree.selection()
-    #     if sel_items:
-    #         values = self.tree.item(sel_items[0], "values")
-    #         if values:
-    #             selected_code = values[0]
-
-    #     # 初始化每个个股的累积信号字典
-    #     if not hasattr(self, "cumulative_signals"):
-    #         self.cumulative_signals = {}
-
-    #     # 初始化历史索引
-    #     if not hasattr(self, "signal_history_indices"):
-    #         self.signal_history_indices = {sig: set() for sig in self.signal_types}
-    #         self.last_signal_index = {sig: None for sig in self.signal_types}
-
-    #     # ---- 更新历史信号和累积信号 ----
-    #     for idx, r in df.iterrows():
-    #         code = r.get("code")
-    #         sig = str(r.get("signal", "") or "")
-
-    #         if code not in self.cumulative_signals:
-    #             self.cumulative_signals[code] = []
-
-    #         # 累加信号（BUY/SELL）到该股票的历史
-    #         if sig in self.signal_types:
-    #             self.cumulative_signals[code].append(sig)
-    #             self.signal_history_indices[sig].add(idx)
-    #             self.last_signal_index[sig] = idx
-
-    #     # ---- 清空表格 ----
-    #     self.tree.delete(*self.tree.get_children())
-
-    #     for idx, r in df.iterrows():
-    #         code = r.get("code")
-    #         sig = str(r.get("signal", "") or "")
-    #         tag = "neutral"
-
-    #         # 最新方向箭头
-    #         arrow = ""
-    #         if sig.startswith("BUY"):
-    #             arrow = "↑"
-    #             tag = "buy"
-    #         elif sig.startswith("SELL"):
-    #             arrow = "↓"
-    #             tag = "sell"
-
-    #         # 历史高亮
-    #         for s in self.signal_types:
-    #             if idx in self.signal_history_indices.get(s, set()):
-    #                 tag += "_hist"
-
-    #         # 累积信号显示
-    #         cumulative = " ".join(self.cumulative_signals.get(code, []))
-    #         display_signal = f"{cumulative} {arrow}"
-
-    #         self.tree.insert(
-    #             "", tk.END,
-    #             values=(
-    #                 code,
-    #                 r.get("name", ""),
-    #                 f"{r.get('now',0):.2f}",
-    #                 f"{r.get('percent',0):.2f}",
-    #                 f"{r.get('volume',0):.1f}",
-    #                 display_signal,
-    #                 r.get("emotion","")
-    #             ),
-    #             tags=(tag,)
-    #         )
-
-    #     # ---- 保留排序 ----
-    #     if getattr(self, "sort_column", None):
-    #         self.treeview_sort_column(self.sort_column, self.sort_reverse)
-
-    #     # ---- 恢复选中行 ----
-    #     if selected_code:
-    #         for item in self.tree.get_children():
-    #             if self.tree.set(item, "code") == selected_code:
-    #                 self.tree.selection_set(item)
-    #                 self.tree.focus(item)
-    #                 self.tree.see(item)
-    #                 break
-
-    #     # ---- 更新状态栏 ----
-    #     total = len(df)
-    #     self.total_label.config(text=f"总数: {total}")
-
-    #     # 各信号计数
-    #     signal_counts = df["signal"].value_counts().to_dict()
-    #     for sig, lbl in self.signal_labels.items():
-    #         count = signal_counts.get(sig, 0)
-    #         lbl.config(text=f"{sig}: {count}")
-
-    #     # 情绪统计
-    #     emotion_counts = df["emotion"].value_counts().to_dict()
-    #     for emo, lbl in self.emotion_labels.items():
-    #         lbl.config(text=f"{emo}: {emotion_counts.get(emo, 0)}")
-
-    def process_table_data1(self, df):
-        """
-        处理表格数据，返回可直接插入 treeview 的列表
-        每条数据包含：
-          code, name, now, percent, volume, display_signal, emotion, tag
-        """
-        processed = []
-
-        # 初始化累积信号和价格历史
-        if not hasattr(self, "cumulative_signals"):
-            self.cumulative_signals = {}
-        if not hasattr(self, "price_history"):
-            self.price_history = {}  # {code: deque([...])}
-            self.max_history_len = 10
-
-        if not hasattr(self, "signal_history_indices"):
-            self.signal_history_indices = {sig: set() for sig in self.signal_types}
-            self.last_signal_index = {sig: None for sig in self.signal_types}
-
-        for idx, r in df.iterrows():
-            code = r.get("code")
-            sig = str(r.get("signal", "") or "")
-            now_price = r.get("now", 0)
-
-            # --- 更新价格历史 ---
-            if code not in self.price_history:
-                self.price_history[code] = deque(maxlen=self.max_history_len)
-            self.price_history[code].append(now_price)
-
-            # --- 判断趋势 ---
-            ph = self.price_history[code]
-            if len(ph) > 1:
-                if ph[-1] > ph[0]:
-                    trend = "up"
-                elif ph[-1] < ph[0]:
-                    trend = "down"
-                else:
-                    trend = "flat"
-            else:
-                trend = "flat"
-
-            # --- 更新累积信号 ---
-            if code not in self.cumulative_signals:
-                self.cumulative_signals[code] = []
-
-            if sig in self.signal_types:
-                if trend == "up":
-                    self.cumulative_signals[code].append(sig)
-                elif trend == "down" and self.cumulative_signals[code]:
-                    try:
-                        self.cumulative_signals[code].remove(sig)
-                    except ValueError:
-                        pass
-                # 横盘 trend=="flat" 不变化
-
-                # 更新历史索引
-                self.signal_history_indices[sig].add(idx)
-                self.last_signal_index[sig] = idx
-
-            # --- 构造显示信号 ---
-            count = self.cumulative_signals.get(code, []).count(sig) if sig else 0
-            arrow = "↑" if trend=="up" else ("↓" if trend=="down" else "→")
-            display_signal = f"{sig} {arrow}{count}" if sig else ""
-
-            # tag
-            tag = "neutral"
-            if sig.startswith("BUY"):
-                tag = "buy"
-            elif sig.startswith("SELL"):
-                tag = "sell"
-            # 历史高亮
-            for s in self.signal_types:
-                if idx in self.signal_history_indices.get(s, set()):
-                    tag += "_hist"
-
-            processed.append({
-                "code": code,
-                "name": r.get("name",""),
-                "now": now_price,
-                "percent": r.get("percent",0) or r.get("per1d",0),
-                "volume": r.get("volume",0),
-                "display_signal": display_signal,
-                "score": r.get("score",0),
-                "emotion": r.get("emotion",""),
-                "tag": tag
-            })
-
-        return processed
-
-
     def process_table_data(self, df):
         """
         处理表格数据，使用滑动平均斜率判断趋势
@@ -11381,271 +11645,8 @@ class KLineMonitor(tk.Toplevel):
         for emo, lbl in self.emotion_labels.items():
             lbl.config(text=f"{emo}: {emotion_counts.get(emo, 0)}")
 
-
-    # def update_table(self, df):
-    #     """
-    #     更新表格：
-    #     - 每个个股的信号累加显示次数
-    #     - 最新信号箭头 ↑ / ↓，后面数字表示次数
-    #     - 历史高亮 buy_hist / sell_hist
-    #     """
-    #     # 保存选中行
-    #     selected_code = None
-    #     sel_items = self.tree.selection()
-    #     if sel_items:
-    #         values = self.tree.item(sel_items[0], "values")
-    #         if values:
-    #             selected_code = values[0]
-
-    #     # 初始化每个个股的累积信号字典
-    #     if not hasattr(self, "cumulative_signals"):
-    #         self.cumulative_signals = {}
-
-    #     # 初始化历史索引
-    #     if not hasattr(self, "signal_history_indices"):
-    #         self.signal_history_indices = {sig: set() for sig in self.signal_types}
-    #         self.last_signal_index = {sig: None for sig in self.signal_types}
-
-    #     # ---- 更新历史信号和累积信号 ----
-    #     for idx, r in df.iterrows():
-    #         code = r.get("code")
-    #         sig = str(r.get("signal", "") or "")
-
-    #         if code not in self.cumulative_signals:
-    #             self.cumulative_signals[code] = []
-
-    #         # 累加信号（BUY/SELL）到该股票的历史
-    #         if sig in self.signal_types:
-    #             self.cumulative_signals[code].append(sig)
-    #             self.signal_history_indices[sig].add(idx)
-    #             self.last_signal_index[sig] = idx
-
-    #     # ---- 清空表格 ----
-    #     self.tree.delete(*self.tree.get_children())
-    #     for idx, r in df.iterrows():
-    #         code = r.get("code")
-    #         sig = str(r.get("signal", "") or "")
-    #         tag = "neutral"
-
-    #         # 最新方向箭头
-    #         arrow = ""
-    #         if sig.startswith("BUY"):
-    #             arrow = "↑"
-    #             tag = "buy"
-    #         elif sig.startswith("SELL"):
-    #             arrow = "↓"
-    #             tag = "sell"
-
-    #         # 累积信号统计次数
-    #         count = self.cumulative_signals.get(code, []).count(sig) if sig else 0
-    #         display_signal = f"{sig} {arrow}{count}" if sig else ""
-
-    #         # 历史高亮
-    #         for s in self.signal_types:
-    #             if idx in self.signal_history_indices.get(s, set()):
-    #                 tag += "_hist"
-
-    #         # 插入表格
-    #         self.tree.insert(
-    #             "", tk.END,
-    #             values=(
-    #                 code,
-    #                 r.get("name", ""),
-    #                 f"{r.get('now',0):.2f}",
-    #                 f"{r.get('percent',0) or r.get('per1d',0):.2f}",
-    #                 f"{r.get('volume',0):.1f}",
-    #                 display_signal,
-    #                 r.get("emotion","")
-    #             ),
-    #             tags=(tag,)
-    #         )
-
-    #     # ---- 保留排序 ----
-    #     if getattr(self, "sort_column", None):
-    #         self.treeview_sort_column(self.sort_column, self.sort_reverse)
-
-    #     # ---- 恢复选中行 ----
-    #     if selected_code:
-    #         for item in self.tree.get_children():
-    #             if self.tree.set(item, "code") == selected_code:
-    #                 self.tree.selection_set(item)
-    #                 self.tree.focus(item)
-    #                 self.tree.see(item)
-    #                 break
-
-    #     # ---- 更新状态栏 ----
-    #     total = len(df)
-    #     self.total_label.config(text=f"总数: {total}")
-
-    #     # 各信号计数
-    #     signal_counts = df["signal"].value_counts().to_dict()
-    #     for sig, lbl in self.signal_labels.items():
-    #         count = signal_counts.get(sig, 0)
-    #         lbl.config(text=f"{sig}: {count}")
-
-    #     # 情绪统计
-    #     emotion_counts = df["emotion"].value_counts().to_dict()
-    #     for emo, lbl in self.emotion_labels.items():
-    #         lbl.config(text=f"{emo}: {emotion_counts.get(emo, 0)}")
-
-
-    # # ---- 更新表格 ----
-    # def update_table_no_arrow(self, df):
-    #     # 保存选中行
-    #     selected_code = None
-    #     sel_items = self.tree.selection()
-    #     if sel_items:
-    #         values = self.tree.item(sel_items[0], "values")
-    #         if values:
-    #             selected_code = values[0]
-
-    #     # ---- 更新历史信号 ----
-    #     buy_rows = df.index[df['signal'].astype(str).str.startswith('BUY', na=False)].tolist()
-    #     sell_rows = df.index[df['signal'].astype(str).str.startswith('SELL', na=False)].tolist()
-
-    #     if buy_rows:
-    #         self.last_buy_index = buy_rows[-1]
-    #         self.buy_history_indices.update(buy_rows)
-    #     if sell_rows:
-    #         self.last_sell_index = sell_rows[-1]
-    #         self.sell_history_indices.update(sell_rows)
-
-    #     # ---- 清空表格 ----
-    #     self.tree.delete(*self.tree.get_children())
-
-    #     for idx, r in df.iterrows():
-    #         signal = str(r.get("signal", "") or "")
-    #         tag = "neutral"
-    #         arrow = ""
-
-    #         if signal.startswith("BUY"):
-    #             tag = "buy"
-    #             if idx == getattr(self, "last_buy_index", None):
-    #                 arrow = "↑"
-    #             if idx in getattr(self, "buy_history_indices", set()):
-    #                 tag = "buy_hist"
-
-    #         elif signal.startswith("SELL"):
-    #             tag = "sell"
-    #             if idx == getattr(self, "last_sell_index", None):
-    #                 arrow = "↓"
-    #             if idx in getattr(self, "sell_history_indices", set()):
-    #                 tag = "sell_hist"
-
-    #         display_signal = f"{signal} {arrow}"
-    #         self.tree.insert(
-    #             "", tk.END,
-    #             values=(r.get("code",""), r.get("name",""), f"{r.get('now',0):.2f}",f"{r.get('percent',0):.2f}",f"{r.get('volume',0):.1f}", display_signal, r.get("emotion","")),
-    #             tags=(tag,)
-    #         )
-
-    #     # ---- 保留排序 ----
-    #     if getattr(self, "sort_column", None):
-    #         self.treeview_sort_column(self.sort_column, self.sort_reverse)
-
-    #     # ---- 恢复选中行 ----
-    #     if selected_code:
-    #         for item in self.tree.get_children():
-    #             if self.tree.set(item, "code") == selected_code:
-    #                 self.tree.selection_set(item)
-    #                 self.tree.focus(item)
-    #                 self.tree.see(item)
-    #                 break
-
-    #     # ---- 更新状态栏 ----
-    #     total = len(df)
-    #     self.total_label.config(text=f"总数: {total}")
-
-    #     # 动态生成信号统计
-    #     signal_counts = df["signal"].value_counts().to_dict()
-
-    #     # 确保有一个字典存放动态标签
-    #     if not hasattr(self, "signal_labels"):
-    #         self.signal_labels = {}
-
-
-    #     # 更新信号统计，不再动态增删 Label
-    #     signal_counts = df["signal"].value_counts().to_dict()
-    #     for sig, lbl in self.signal_labels.items():
-    #         count = signal_counts.get(sig, 0)
-    #         lbl.config(text=f"{sig}: {count}")
-
-    #     # ---- 更新情绪标签 ----
-    #     emotion_counts = df["emotion"].value_counts().to_dict()
-    #     for emo, lbl in self.emotion_labels.items():
-    #         lbl.config(text=f"{emo}: {emotion_counts.get(emo, 0)}")
-
-    # # ---- 更新表格 ----
-    # def update_table_src(self, df):
-    #     # 保存选中行
-    #     selected_code = None
-    #     sel_items = self.tree.selection()
-    #     if sel_items:
-    #         values = self.tree.item(sel_items[0], "values")
-    #         if values:
-    #             selected_code = values[0]
-
-    #     # ---- 更新历史信号 ----
-    #     buy_rows = df.index[df['signal'] == 'BUY'].tolist()
-    #     sell_rows = df.index[df['signal'] == 'SELL'].tolist()
-    #     if buy_rows:
-    #         self.last_buy_index = buy_rows[-1]
-    #         self.buy_history_indices.update(buy_rows)
-    #     if sell_rows:
-    #         self.last_sell_index = sell_rows[-1]
-    #         self.sell_history_indices.update(sell_rows)
-
-    #     # ---- 清空表格 ----
-    #     self.tree.delete(*self.tree.get_children())
-
-    #     for idx, r in df.iterrows():
-    #         tag = "neutral"
-    #         arrow = ""
-    #         if r["signal"] == "BUY":
-    #             tag = "buy"
-    #             if idx == self.last_buy_index:
-    #                 arrow = "↑"
-    #             if idx in self.buy_history_indices:
-    #                 tag = "buy_hist"
-    #         elif r["signal"] == "SELL":
-    #             tag = "sell"
-    #             if idx == self.last_sell_index:
-    #                 arrow = "↓"
-    #             if idx in self.sell_history_indices:
-    #                 tag = "sell_hist"
-
-    #         display_signal = f"{r.get('signal','')} {arrow}"
-    #         self.tree.insert(
-    #             "", tk.END,
-    #             values=(r.get("code",""), r.get("name",""), f"{r.get('now',0):.2f}", display_signal, r.get("emotion","")),
-    #             tags=(tag,)
-    #         )
-
-    #     # ---- 保留排序 ----
-    #     if self.sort_column:
-    #         self.treeview_sort_column(self.sort_column, self.sort_reverse)
-
-    #     # ---- 恢复选中行 ----
-    #     if selected_code:
-    #         for item in self.tree.get_children():
-    #             if self.tree.set(item, "code") == selected_code:
-    #                 self.tree.selection_set(item)
-    #                 self.tree.focus(item)
-    #                 self.tree.see(item)
-    #                 break
-
-    #     # ---- 更新状态栏 ----
-    #     total = len(df)
-    #     buy_count = (df["signal"].str.contains("BUY")).sum()
-    #     sell_count = (df["signal"].str.contains("SELL")).sum()
-    #     emotion_counts = df["emotion"].value_counts().to_dict()
-
-    #     self.total_label.config(text=f"总数: {total}")
-    #     self.buy_label.config(text=f"BUY: {buy_count} ↑")
-    #     self.sell_label.config(text=f"SELL: {sell_count} ↓")
-    #     for emo, lbl in self.emotion_labels.items():
-    #         lbl.config(text=f"{emo}: {emotion_counts.get(emo,0)}")
-
+        # 成功查询后
+        self.query_status_var.set(f"共找到 {len(df)} 条结果")
     # ---- 筛选 ----
     def filter_by_signal(self, signal):
         self.filter_stack.append({"type":"signal","value":signal})
@@ -11660,16 +11661,72 @@ class KLineMonitor(tk.Toplevel):
         if self.df_cache is not None:
             self.update_table(self.df_cache)
 
+    # def apply_filters(self):
+    #     if self.df_cache is None:
+    #         return
+    #     df = self.df_cache.copy()
+    #     for f in self.filter_stack:
+    #         if f["type"] == "signal":
+    #             df = df[df["signal"] == f["value"]]
+    #         elif f["type"] == "emotion":
+    #             df = df[df["emotion"] == f["value"]]
+    #     self.update_table(df)
     def apply_filters(self):
-        if self.df_cache is None:
+        """应用信号/情绪过滤 + 自动 query 查询"""
+        if self.df_cache is None or self.df_cache.empty:
             return
+
         df = self.df_cache.copy()
-        for f in self.filter_stack:
+
+        # --- 1️⃣ 先应用 filter_stack 逻辑 ---
+        for f in getattr(self, "filter_stack", []):
             if f["type"] == "signal":
                 df = df[df["signal"] == f["value"]]
             elif f["type"] == "emotion":
                 df = df[df["emotion"] == f["value"]]
+
+        # --- 2️⃣ 然后应用上次查询条件（last_query） ---
+        query_text = ""
+        # 优先用当前搜索框内容
+        if hasattr(self, "search_var") and self.search_var.get().strip():
+            query_text = self.search_var.get().strip()
+        # 否则使用上次保存的查询条件
+        elif hasattr(self, "last_query") and self.last_query:
+            query_text = self.last_query.strip()
+
+        if query_text:
+            try:
+                # 中文列名兼容映射
+                col_map = {
+                    "评分": "score",
+                    "涨幅": "percent",
+                    "量比": "volume",
+                    "当前价": "now",
+                    "信号": "signal",
+                    "情绪": "emotion",
+                }
+                expr = query_text
+                for k, v in col_map.items():
+                    expr = expr.replace(k, v)
+
+                # 数字列转换，确保query能正常执行
+                for col in ["score", "percent", "volume", "now"]:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+                if query_text.isdigit() and len(query_text) == 6:
+                    # 股票代码精确查找
+                    df = df[df["code"] == query_text]
+                else:
+                    # pandas 表达式过滤
+                    df = df.query(expr)
+
+            except Exception as e:
+                print(f"[apply_filters] 查询错误: {e}")
+
+        # --- 3️⃣ 更新表格 ---
         self.update_table(df)
+
 
     # ---- 关闭 ----
     def on_kline_monitor_close(self):
@@ -11678,6 +11735,15 @@ class KLineMonitor(tk.Toplevel):
             self.master.save_window_position(self, "KLineMonitor")
         except Exception:
             pass
+
+        """窗口关闭时保存 last_query"""
+        try:
+            if getattr(self, "last_query", ""):
+                import json
+                with open("last_query.json", "w", encoding="utf-8") as f:
+                    json.dump({"last_query": self.last_query}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"保存 last_query.json 出错: {e}")
         # self.destroy()
         # if hasattr(self.master, "kline_monitor"):
         #     self.master.kline_monitor = None
