@@ -16,7 +16,7 @@ from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import LoggerFactory, commonTips as cct
 from JSONData import stockFilter as stf
 from JSONData import tdx_data_Day as tdd
-import win32pipe, win32file
+import win32pipe, win32file,win32api
 from datetime import datetime, timedelta
 import shutil
 import ctypes
@@ -34,15 +34,17 @@ import sqlite3
 
 # import matplotlib.pyplot as plt
 # plt.ion()  # 开启交互模式
+import hashlib
 
+def df_hash(df: pd.DataFrame) -> str:
+    """计算 DataFrame 的唯一哈希，用于一致性检测"""
+    if df is None or df.empty:
+        return "empty"
+    # 转成字符串或二进制哈希
+    h = pd.util.hash_pandas_object(df, index=True).sum()
+    return hashlib.md5(str(h).encode()).hexdigest()[:8]  # 截取前8位
 
-# logging_setup.py
 import logging
-# import sys
-
-import sys
-import logging
-
 class LoggerWriter:
     """将 print 输出重定向到 logger"""
     def __init__(self, level_func):
@@ -64,24 +66,63 @@ class LoggerWriter:
     def flush(self):
         pass
 
-def init_logging(log_file="appTk.log", level=logging.INFO):
+def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=True):
     """初始化全局日志"""
-    # 1️⃣ 先创建 logger
-    logger = logging.getLogger()
+    logger = logging.getLogger("instock_MonitorTK")
     logger.setLevel(level)
-    formatter = logging.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
 
-    # 文件 handler（UTF-8）
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setFormatter(formatter)
-    logger.addHandler(fh)
+    if not logger.handlers:
+        formatter = logging.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
 
-    # 控制台 handler
-    ch = logging.StreamHandler()
-    ch.setFormatter(formatter)
-    logger.addHandler(ch)
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
 
-    # 2️⃣ 再重定向 print
+        ch = logging.StreamHandler()
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
+
+    logger.propagate = False
+
+    # ⚠️ 调试时禁用 print 重定向
+    if redirect_print:
+        sys.stdout = LoggerWriter(logger.info)
+        sys.stderr = LoggerWriter(logger.error)
+
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        logger.error("未捕获异常:", exc_info=(exc_type, exc_value, exc_traceback))
+
+    sys.excepthook = handle_exception
+
+    logger.info("日志初始化完成")
+    return logger
+
+
+def init_logging_nopdb(log_file="appTk.log", level=logging.INFO):
+    """初始化全局日志，避免重复打印"""
+    logger = logging.getLogger("instock_MonitorTK")  # 指定子 logger
+    logger.setLevel(level)
+
+    if not logger.handlers:  # 避免重复添加 handler
+        formatter = logging.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
+
+        # 文件 handler
+        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+
+        # 控制台 handler
+        ch = logging.StreamHandler()
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
+
+    # 子 logger 不向 root logger 冒泡
+    logger.propagate = False
+
+    # 重定向 print
     sys.stdout = LoggerWriter(logger.info)
     sys.stderr = LoggerWriter(logger.error)
 
@@ -96,13 +137,6 @@ def init_logging(log_file="appTk.log", level=logging.INFO):
 
     logger.info("日志初始化完成")
     return logger
-
-
-
-
-
-
-
 
 
 # --- 辅助函数：DPI 处理（放在类的外面） ---
@@ -304,6 +338,7 @@ def load_all_concepts_pg_data():
 
     return result
 
+
 # def load_all_concepts_pg_data():
 #     """
 #     一次性加载当天所有 concept 的 init_data 和 prev_data
@@ -327,21 +362,30 @@ def load_all_concepts_pg_data():
 #     return result
 
 
+# def set_process_dpi_awareness():
+#     """强制设置进程的 DPI 意识级别，确保窗口不模糊。"""
+#     try:
+#         # Per-Monitor DPI Aware (2) - 推荐在 Windows 8.1/10/11 上使用
+#         # SetProcessDpiAwareness(1) 对应的是 PROCESS_DPI_AWARENESS.PROCESS_SYSTEM_DPI_AWARE，即 System DPI Aware。
+#         # SetProcessDpiAwareness(2) 对应的是 PROCESS_DPI_AWARENESS.PROCESS_PER_MONITOR_DPI_AWARE，即 Per-Monitor DPI Aware
+#         # 无论是 (1) 还是 (2)，它们都会告诉 Windows：“我的程序会处理 DPI 缩放，不要对我的程序进行位图拉伸。”
+#         ctypes.windll.shcore.SetProcessDpiAwareness(2)
+#     except Exception:
+#         try:
+#             # System DPI Aware (1) - 备用
+#             ctypes.windll.user32.SetProcessDPIAware()
+#         except Exception:
+#             pass
+
 def set_process_dpi_awareness():
-    """强制设置进程的 DPI 意识级别，确保窗口不模糊。"""
     try:
-        # Per-Monitor DPI Aware (2) - 推荐在 Windows 8.1/10/11 上使用
-        # SetProcessDpiAwareness(1) 对应的是 PROCESS_DPI_AWARENESS.PROCESS_SYSTEM_DPI_AWARE，即 System DPI Aware。
-        # SetProcessDpiAwareness(2) 对应的是 PROCESS_DPI_AWARENESS.PROCESS_PER_MONITOR_DPI_AWARE，即 Per-Monitor DPI Aware
-        # 无论是 (1) 还是 (2)，它们都会告诉 Windows：“我的程序会处理 DPI 缩放，不要对我的程序进行位图拉伸。”
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)
-    except Exception:
-        try:
-            # System DPI Aware (1) - 备用
-            ctypes.windll.user32.SetProcessDPIAware()
-        except Exception:
-            pass
-            
+        if sys.platform == "win32":
+            # 对 Windows 10+ 启用 Per-Monitor DPI 感知
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+            print("[DPI] 已启用 Per-Monitor DPI Aware")
+    except Exception as e:
+        print(f"[DPI] 启用失败: {e}")
+
 def set_process_dpi_awareness_Close():
     if sys.platform.startswith('win'):
         # 强制 DPI Unaware 模式 (值 0)
@@ -365,6 +409,51 @@ def is_rdp_session():
     SM_REMOTESESSION = 0x1000
     return bool(ctypes.windll.user32.GetSystemMetrics(SM_REMOTESESSION))
 
+def scale_tk_window_for_rdp(root, scale_factor=1.5):
+    """在 RDP 环境下自动放大 Tk 窗口尺寸"""
+    if is_rdp_session():
+        w = int(root.winfo_width() * scale_factor)
+        h = int(root.winfo_height() * scale_factor)
+        root.geometry(f"{w}x{h}")
+        print(f"[RDP] 已按 {scale_factor} 缩放 Tk 窗口: {w}x{h}")
+
+def monitor_rdp_and_scale(win, interval_ms=3000, scale_factor=1.5):
+    """
+    每隔 interval_ms 毫秒检测是否进入 RDP，
+    若进入则自动放大窗口及字体。
+    """
+    if not hasattr(win, "_last_rdp_state"):
+        win._last_rdp_state = is_rdp_session()
+
+    current_state = is_rdp_session()
+    if current_state != win._last_rdp_state:
+        win._last_rdp_state = current_state
+
+        if current_state:
+            # --- 已切入 RDP 会话 ---
+            print(f"[RDP] 检测到远程登录，放大 Tk 窗口 scale={scale_factor}")
+            try:
+                win.tk.call('tk', 'scaling', scale_factor)  # 放大字体/UI
+                w = int(win.winfo_width() * scale_factor)
+                h = int(win.winfo_height() * scale_factor)
+                win.geometry(f"{w}x{h}")
+            except Exception as e:
+                print(f"[RDP] 调整窗口缩放失败: {e}")
+        else:
+            # --- 退出 RDP 回本地 ---
+            print("[RDP] 返回本地会话，恢复默认缩放")
+            try:
+                win.tk.call('tk', 'scaling', 1.0)
+                w = int(win.winfo_width() / scale_factor)
+                h = int(win.winfo_height() / scale_factor)
+                win.geometry(f"{w}x{h}")
+            except Exception as e:
+                print(f"[RDP] 恢复窗口缩放失败: {e}")
+
+    # 继续检测
+    win.after(interval_ms, lambda: monitor_rdp_and_scale(win, interval_ms, scale_factor))
+
+
 def get_windows_dpi_scale_factor():
     """
     获取 Windows 缩放因子：
@@ -382,7 +471,7 @@ def get_windows_dpi_scale_factor():
         scale = dpi / 96.0
         # 如果 scale == 1 且是远程桌面，则用 Tk 的效果（2倍）
         _is_rdp_session = is_rdp_session()
-        print(f'is_rdp_session : {_is_rdp_session} os.environ.get("SESSIONNAME") : {os.environ.get("SESSIONNAME")}')
+        print(f'scale : {scale} is_rdp_session : {_is_rdp_session} os.environ.get("SESSIONNAME") : {os.environ.get("SESSIONNAME")}')
         if scale == 1.0 and _is_rdp_session:
             return 2.0
         return scale
@@ -645,52 +734,66 @@ def enable_native_horizontal_scroll(tree: ttk.Treeview, speed=5):
         tree.bind("<Button-6>", on_button_scroll)
         tree.bind("<Button-7>", on_button_scroll)
 
-# # -----------------------------
-# # 初始化显示器信息（程序启动时调用一次）
-# # -----------------------------
-# MONITORS = []  # 全局缓存
+# -----------------------------
+# 初始化显示器信息（程序启动时调用一次）
+# -----------------------------
+MONITORS = []  # 全局缓存
 
-
-
-# # # 双屏幕,上屏新建
-# # def init_monitors():
-# #     """扫描所有显示器并缓存信息（使用可用区域，避开任务栏）"""
-# #     global MONITORS
-# #     monitors = get_all_monitors()  # 原来的函数
-# #     if not monitors:
-# #         left, top, right, bottom = get_monitor_workarea()
-# #         MONITORS = [(left, top, right, bottom)]
-# #     else:
-# #         # 对每个 monitor 也可计算可用区域
-# #         MONITORS = []
-# #         for mon in monitors:
-# #             # mon = (x, y, width, height)
-# #             mx, my, mw, mh = mon
-# #             MONITORS.append((mx, my, mx+mw, my+mh))
-# #     print(f"✅ Detected {len(MONITORS)} monitor(s).")
-
-# def get_all_monitors():
-#     """返回所有显示器的边界列表 [(left, top, right, bottom), ...]"""
-#     monitors = []
-#     for handle_tuple in win32api.EnumDisplayMonitors():
-#         info = win32api.GetMonitorInfo(handle_tuple[0])
-#         monitors.append(info["Monitor"])  # (left, top, right, bottom)
-#     return monitors
-
+# # 双屏幕,上屏新建
 # def init_monitors():
-#     """扫描所有显示器并缓存信息"""
+#     """扫描所有显示器并缓存信息（使用可用区域，避开任务栏）"""
 #     global MONITORS
-#     MONITORS = get_all_monitors()
-#     if not MONITORS:
-#         # 至少保留主屏幕
-#         screen_width = win32api.GetSystemMetrics(0)
-#         screen_height = win32api.GetSystemMetrics(1)
-#         MONITORS = [(0, 0, screen_width, screen_height)]
+#     monitors = get_all_monitors()  # 原来的函数
+#     if not monitors:
+#         left, top, right, bottom = get_monitor_workarea()
+#         MONITORS = [(left, top, right, bottom)]
+#     else:
+#         # 对每个 monitor 也可计算可用区域
+#         MONITORS = []
+#         for mon in monitors:
+#             # mon = (x, y, width, height)
+#             mx, my, mw, mh = mon
+#             MONITORS.append((mx, my, mx+mw, my+mh))
 #     print(f"✅ Detected {len(MONITORS)} monitor(s).")
 
+def get_all_monitors():
+    """返回所有显示器的边界列表 [(left, top, right, bottom), ...]"""
+    monitors = []
+    for handle_tuple in win32api.EnumDisplayMonitors():
+        info = win32api.GetMonitorInfo(handle_tuple[0])
+        monitors.append(info["Monitor"])  # (left, top, right, bottom)
+    return monitors
 
-# init_monitors()
+def init_monitors():
+    """扫描所有显示器并缓存信息"""
+    global MONITORS
+    MONITORS = get_all_monitors()
+    if not MONITORS:
+        # 至少保留主屏幕
+        screen_width = win32api.GetSystemMetrics(0)
+        screen_height = win32api.GetSystemMetrics(1)
+        MONITORS = [(0, 0, screen_width, screen_height)]
+    print(f"✅ Detected {len(MONITORS)} monitor(s).")
 
+
+init_monitors()
+
+def get_monitor_index_for_window(window):
+    """根据窗口位置找到所属显示器索引"""
+    global MONITORS
+    if not MONITORS:
+        return 0
+    try:
+        geom = window.geometry()
+        _, x_part, y_part = geom.split("+")
+        x, y = int(x_part), int(y_part)
+    except Exception:
+        return 0
+
+    for idx, (left, top, right, bottom) in enumerate(MONITORS):
+        if left <= x <= right and top <= y <= bottom:
+            return idx
+    return 0  # 默认主屏
 # def clamp_window_to_screens(x, y, w, h, monitors=MONITORS):
 #     """保证窗口在可见显示器范围内"""
 #     global MONITORS
@@ -945,7 +1048,7 @@ def test_code_against_queries(df_code, queries):
                     valid_conditions.append(cond_clean)
                 else:
                     removed_conditions.append(cond_clean)
-                    log.info(f"剔除不存在的列条件: {cond_clean}")
+                    # log.info(f"剔除不存在的列条件: {cond_clean}")
 
             # 去掉在 bracket_patterns 中出现的内容
             removed_conditions = [
@@ -955,7 +1058,7 @@ def test_code_against_queries(df_code, queries):
 
             # # 打印剔除条件列表
             # if removed_conditions:
-            #     print(f"[剔除的条件列表] {removed_conditions}")
+            #     log.info(f"剔除不存在的列条件: {removed_conditions}")
 
             if not valid_conditions:
                 print(f"没有可用的查询条件:{expr}")
@@ -1013,7 +1116,6 @@ def test_code_against_queries(df_code, queries):
     return results
 
 
-import datetime as dt
 
 def estimate_virtual_volume_simple(now=None):
 # def estimate_virtual_volume_simple(current_volume, avg_volume_6d, now=None):
@@ -1031,7 +1133,7 @@ def estimate_virtual_volume_simple(now=None):
         vol_ratio    : float  预估虚拟量比（全天预估量 / 6日均量）
     """
     if now is None:
-        now = dt.datetime.now()
+        now = datetime.now()
     t = now.time()
     minutes = t.hour * 60 + t.minute
 
@@ -1443,7 +1545,8 @@ class StockMonitorApp(tk.Tk):
             result_scale = self._apply_dpi_scaling()
             if result_scale is not None and isinstance(result_scale, (float, int)):
                 self.scale_factor = result_scale
-        
+
+        self.last_dpi_scale = get_windows_dpi_scale_factor()
         # 3. 接下来是 Qt 初始化，它不应该影响 self.scale_factor
         if not QtWidgets.QApplication.instance():
             self.app = pg.mkQApp()
@@ -1492,7 +1595,7 @@ class StockMonitorApp(tk.Tk):
 
         self.title("Stock Monitor")
         self.initial_w, self.initial_h, self.initial_x, self.initial_y  = self.load_window_position(self, "main_window")
-        
+        self.monitor_windows = {}
         self.iconbitmap(icon_path)  # Windows 下 .ico 文件
         # self._icon = tk.PhotoImage(file=icon_path)
         # self.iconphoto(True, self._icon)
@@ -1511,8 +1614,8 @@ class StockMonitorApp(tk.Tk):
         from multiprocessing import Manager
         self.manager = Manager()
         self.global_dict = self.manager.dict()  # 共享字典
-        # self.global_dict["resample"] = '3d'
-        self.global_dict["resample"] = 'w'
+        self.global_dict["resample"] = '3d'
+        # self.global_dict["resample"] = 'w'
         self.global_values = cct.GlobalValues(self.global_dict)
         resample = self.global_values.getkey("resample")
         print(f'app init getkey resample:{self.global_values.getkey("resample")}')
@@ -1620,6 +1723,8 @@ class StockMonitorApp(tk.Tk):
         self.tree.bind("<Button-3>", self.on_tree_right_click)
 
         self.bind("<Alt-c>", lambda e:self.open_column_manager())
+        # 启动周期检测 RDP DPI 变化
+        self.after(3000, self._check_dpi_change)
 
     def update_status_bar_width(self, pw, left_frame, right_frame):
         """ 根据 DPI 缩放调整左右面板的宽度比例 """
@@ -1694,6 +1799,99 @@ class StockMonitorApp(tk.Tk):
 
         print(f"✅ Tkinter 窗口几何信息已在 Qt 启动后刷新。重新定位到 ({target_x},{target_y}) 物理像素。")
 
+    def print_tk_dpi_detail(self):
+        px_per_inch = self.winfo_fpixels('1i')
+        width_px = self.winfo_screenwidth()
+        height_px = self.winfo_screenheight()
+        width_in = self.winfo_screenmmwidth() / 25.4
+        height_in = self.winfo_screenmmheight() / 25.4
+        screen_dpi = width_px / width_in / 96
+        # print(f"分辨率: {width_px}×{height_px}")
+        # print(f"物理尺寸: {width_in:.2f}×{height_in:.2f} inch")
+        # print(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
+        return  width_px
+
+    def _check_dpi_change(self):
+            """定期检测 DPI 是否变化（例如 RDP 登录）"""
+            # current_scale = get_windows_dpi_scale_factor()
+            # print(f'current_scale : {current_scale} self.last_dpi_scale : {self.last_dpi_scale}')
+            # current_scale = self.get_tk_dpi_scale()
+            width_px = self.print_tk_dpi_detail()
+            if width_px == 1920:
+                current_scale = 1.25
+            elif  width_px == 3840:
+                current_scale = 2
+            else:
+                current_scale = 1
+            # _pgscale = self.get_dynamic_dpi_scale()
+            # print(f'tk_scale : {current_scale}')
+            # print(self.print_tk_dpi_detail())
+            # print(f'_pgscale : {_pgscale}')
+            if abs(current_scale - self.last_dpi_scale) > 0.05:
+                print(f"[DPI变化检测] 从 {self.last_dpi_scale:.2f} → {current_scale:.2f}")
+                self._apply_scale_dpi_change(current_scale)
+                self.last_dpi_scale = current_scale
+
+            # 每 3 秒检测一次
+            self.after(5000, self._check_dpi_change)
+
+    def on_dpi_changed(self, new_scale):
+        """RDP 或 DPI 变化时自动缩放窗口"""
+        try:
+            win = self  # 你的主窗口实例
+            geom = win.geometry()
+            width, height = geom.width(), geom.height()
+
+            new_w = int(width * new_scale)
+            new_h = int(height * new_scale)
+            win.resize(new_w, new_h)
+
+            LOG.info(f"[DPI] 窗口自动放大到 {new_scale:.2f} 倍 ({new_w}x{new_h})")
+
+            # 如果你使用 PyQtGraph 或 Label，也可重设字体：
+            for child in win.findChildren(QtWidgets.QWidget):
+                font = child.font()
+                font.setPointSizeF(font.pointSizeF() * new_scale)
+                child.setFont(font)
+
+        except Exception as e:
+            LOG.error(f"[DPI] 自动缩放失败: {e}")
+
+    def get_dynamic_dpi_scale(self):
+        """通过当前显示器分辨率动态估算缩放比例"""
+        screen = self.app.primaryScreen()
+        dpi = screen.logicalDotsPerInch()
+        scale = dpi / 96.0
+        # print(f"[DPI] Qt 检测 scale = {scale:.2f}, DPI = {dpi}")
+        return scale
+
+    def get_tk_dpi_scale(self):
+        # 返回当前屏幕缩放比例，例如 1.0、1.25、2.0
+        dpi = self.winfo_fpixels('1i')
+        scale = dpi / 96.0
+        print(f"[Tk] DPI={dpi:.2f}, scale={scale:.2f}")
+        return scale
+
+    def _apply_scale_dpi_change(self, scale_factor):
+            """当检测到 DPI 变化时，自动放大/缩小主窗口"""
+            # 获取当前窗口大小
+            width = self.winfo_width()
+            height = self.winfo_height()
+
+            # 按比例调整
+            new_w = int(width * scale_factor / self.scale_factor)
+            new_h = int(height * scale_factor / self.scale_factor)
+            print(f'width: {width} height: {height} new_w : {new_w} new_h: {new_h}')
+            # 更新窗口大小
+            self.geometry(f"{new_w}x{new_h}")
+
+            # 可选：字体也缩放
+            default_font = tk.font.nametofont("TkDefaultFont")
+            size = int(default_font.cget("size") * scale_factor / self.scale_factor)
+            default_font.configure(size=size)
+
+            self.scale_factor = scale_factor
+            print(f"[自动缩放] 主窗口调整为 {scale_factor:.2f} 倍，尺寸 {new_w}x{new_h}")
 
     def _apply_dpi_scaling(self,scale_factor=None):
         """自动计算并设置 Tkinter 的内部 DPI 缩放。"""
@@ -1743,6 +1941,7 @@ class StockMonitorApp(tk.Tk):
             
             print(f"✅ Tkinter DPI 自动缩放应用于 {scale_factor}x，Treeview 行高设置为 {scaled_row_height}")
         return scale_factor
+
 
     def bind_treeview_column_resize(self):
         def on_column_release(event):
@@ -2147,7 +2346,57 @@ class StockMonitorApp(tk.Tk):
                 percent = df_all.loc[code, 'per1d']
             return code, percent
 
-    
+    # def init_global_concept_data(self, win, concepts, avg_percents, scores, follow_ratios, force_reset=False):
+    def init_global_concept_data(self, concepts, avg_percents, scores, follow_ratios, force_reset=False):
+        """
+        全局初始化概念数据
+        force_reset: True 表示强制重新加载当天数据
+        """
+        today = datetime.now().date()
+        
+        # 判断是否需要重置
+        need_reset = force_reset or not hasattr(self, "_concept_data_loaded") or getattr(self, "_concept_data_date", None) != today
+
+        if need_reset:
+            self._concept_data_loaded = True
+            self._concept_data_date = today
+
+            # 读取当天所有 concept 数据
+            all_data = load_all_concepts_pg_data()
+            self._global_concept_init_data = {}
+            self._global_concept_prev_data = {}
+            for c_name, (init_data, prev_data) in all_data.items():
+                if init_data:
+                    self._global_concept_init_data[c_name] = {k: np.array(v) for k, v in init_data.items()}
+                if prev_data:
+                    self._global_concept_prev_data[c_name] = {k: np.array(v) for k, v in prev_data.items()}
+
+            for i, c_name in enumerate(concepts):
+                # 初始化 base_data
+                if c_name not in self._global_concept_init_data:
+                    # 全局没有数据，初始化基础数据
+                    base_data = {
+                        "concepts": [c_name],
+                        "avg_percents": np.array([avg_percents[i]]),
+                        "scores": np.array([scores[i]]),
+                        "follow_ratios": np.array([follow_ratios[i]])
+                    }
+                    self._global_concept_init_data[c_name] = base_data
+                    # print("[DEBUG] 已初始概念数据(_init_prev_concepts_data)")
+        else:
+            for i, c_name in enumerate(concepts):
+                # 初始化 prev_data
+                if c_name not in self._global_concept_prev_data:
+                    prev_data = {
+                        "concepts": [c_name],
+                        "avg_percents": np.array([avg_percents[i]]),
+                        "scores": np.array([scores[i]]),
+                        "follow_ratios": np.array([follow_ratios[i]])
+                    }
+                    self._global_concept_prev_data[c_name] = prev_data
+                    # print("[DEBUG] 已初始概念数据(_init_prev_concepts_data)")
+            log.debug(f"[init_global_concept_data] 新增 prev_data: {concepts[0]}")
+
 
     def get_following_concepts_by_correlation(self, code, top_n=10):
         def compute_follow_ratio(percents, stock_percent):
@@ -2161,6 +2410,7 @@ class StockMonitorApp(tk.Tk):
             # 概念内每只股票是否跟随
             follow_flags = np.sign(percents) == stock_sign
             return follow_flags.sum() / len(percents)
+        # print(f"by_correlation [Debug] df_all_hash={df_hash(self.df_all)} len={len(self.df_all)} time={datetime.now():%H:%M:%S}")
         df_all = self.df_all.copy()
         # --- ✅ 修正涨幅替代逻辑 ---
         if 'percent' in df_all.columns and 'per1d' in df_all.columns:
@@ -2240,6 +2490,38 @@ class StockMonitorApp(tk.Tk):
 
         # --- 排序并返回 ---
         concept_score.sort(key=lambda x: x[1], reverse=True)
+        concepts = [c[0] for c in concept_score]
+        scores = np.array([c[1] for c in concept_score])
+        avg_percents = np.array([c[2] for c in concept_score])
+        follow_ratios = np.array([c[3] for c in concept_score])
+        # 仅在工作日 9:25 后第一次刷新时重置
+        now = datetime.now()
+        now_t = int(now.strftime("%H%M"))
+        today = now.date()
+
+        force_reset = False
+
+        # 检查是否跨天，跨天就重置阶段标记
+        if getattr(self, "_concept_data_date", None) != today:
+            self._concept_data_date = today
+            self._concept_first_phase_done = False
+            self._concept_second_phase_done = False
+
+        # 第一阶段：9:15~9:24触发一次
+        if cct.get_trade_date_status() and (915 <= now_t <= 924) and not getattr(self, "_concept_first_phase_done", False):
+            self._concept_first_phase_done = True
+            force_reset = True
+            print(f"{today} 触发 9:15~9:24 第一阶段刷新")
+
+        # 第二阶段：9:25 后触发一次
+        elif cct.get_trade_date_status() and (now_t >= 925) and not getattr(self, "_concept_second_phase_done", False):
+            self._concept_second_phase_done = True
+            force_reset = True
+            print(f"{today} 触发 9:25 第二阶段全局重置")
+
+        self.init_global_concept_data(concept_score, avg_percents, scores, follow_ratios, force_reset)
+
+        # print(f'concept_score[:10]:{concept_score[:10]}')
         return concept_score[:10]
 
 
@@ -2874,6 +3156,7 @@ class StockMonitorApp(tk.Tk):
                         print(f'update_tree sortby_col : {self.sortby_col} sortby_col_ascend : {self.sortby_col_ascend}')
                         df = df.sort_values(by=self.sortby_col, ascending=self.sortby_col_ascend)
                     self.df_all = df.copy()
+                    # print(f"self.queue [Debug] df_all_hash={df_hash(self.df_all)} len={len(self.df_all)} time={datetime.now():%H:%M:%S}")
                     if self.search_var1.get() or self.search_var2.get():
                         self.apply_search()
                     else:
@@ -3019,14 +3302,15 @@ class StockMonitorApp(tk.Tk):
         frame_right = tk.Frame(parent_frame, bg="#f0f0f0") 
         frame_right.pack(side=tk.RIGHT, padx=2, pady=1)
 
+        self.win_var = tk.BooleanVar(value=False)
         self.tdx_var = tk.BooleanVar(value=True)
         self.ths_var = tk.BooleanVar(value=True)
         self.dfcf_var = tk.BooleanVar(value=False)
-
         checkbuttons_info = [
+            ("Win", self.win_var),
             ("TDX", self.tdx_var),
             ("THS", self.ths_var),
-            ("DC", self.dfcf_var),
+            ("DC", self.dfcf_var)
         ]
         
         # 💥 修正：使用 ttk.Checkbutton 替代 tk.Checkbutton
@@ -3047,6 +3331,7 @@ class StockMonitorApp(tk.Tk):
         # 此处处理 checkbuttons 状态
         if not self.tdx_var.get() or self.ths_var.get() or self.dfcf_var.get():
             self.sender.reload()
+
         print(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
 
     # def refresh_tree(self, df):
@@ -4754,7 +5039,6 @@ class StockMonitorApp(tk.Tk):
             self._concept_win = None
 
         win.protocol("WM_DELETE_WINDOW", on_close_detail_window)
-
         # --- 初始内容 ---
         self.update_concept_detail_content()
         def _keep_focus(event):
@@ -4764,6 +5048,9 @@ class StockMonitorApp(tk.Tk):
 
         # 在初始化中绑定一次
         canvas.bind("<FocusOut>", _keep_focus)
+        # win.bind("<FocusIn>", lambda e, w=win: self.on_monitor_window_focus(w))
+        # 初始化时绑定
+        win.bind("<Button-1>", lambda e, w=win: self.on_monitor_window_focus(w))
 
     def update_concept_detail_content(self, limit=5):
         """刷新概念详情窗口内容（后台可调用）"""
@@ -5273,6 +5560,11 @@ class StockMonitorApp(tk.Tk):
         tree.bind("<Double-1>", lambda e: self._on_tree_double_click_newTop10(tree))
         tree.bind("<Button-3>", lambda e: self._on_tree_right_click_newTop10(tree, e))
 
+        self.monitor_windows[unique_code] = {
+                'toplevel': win,
+                'monitor_tree': tree,
+                'stock_info': code  # 新增这一行
+            }
         # -------------------
         # 鼠标点击统一处理
         # -------------------
@@ -5542,11 +5834,17 @@ class StockMonitorApp(tk.Tk):
         tree.bind("<Enter>", bind_mousewheel)
         tree.bind("<Leave>", unbind_mousewheel)
 
-
         # 双击 / 右键
         tree.bind("<Double-1>", lambda e: self._on_tree_double_click_newTop10(tree))
         tree.bind("<Button-3>", lambda e: self._on_tree_right_click_newTop10(tree, e))
 
+        # unique_code = f"{code or ''}_{top_n or ''}"
+        unique_code = f"{concept_name or ''}_{code or ''}"
+        self.monitor_windows[unique_code] = {
+                'toplevel': win,
+                'monitor_tree': tree,
+                'stock_info': code  # 新增这一行
+            }
 
         # -------------------
         # 鼠标点击统一处理
@@ -5705,6 +6003,7 @@ class StockMonitorApp(tk.Tk):
             win.destroy()
             self._concept_top10_win = None
 
+        win.bind("<Button-1>", lambda e, w=win: self.on_monitor_window_focus(w))
         win.protocol("WM_DELETE_WINDOW", _on_close)
         # 填充数据
         self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
@@ -6054,10 +6353,14 @@ class StockMonitorApp(tk.Tk):
             top_concepts = self.get_following_concepts_by_correlation(tcode, top_n=top_n)
             code = "总览"
             name = "All"
+            unique_code = f"{code or ''}_{top_n or ''}"
+            print(f'concepts_pg concepts : {top_concepts[0]} unique_code: {unique_code} ')
         else:
             top_concepts = self.get_following_concepts_by_correlation(code, top_n=top_n)
             name = self.df_all.loc[code]['name'] if code in self.df_all.index else code
-
+            unique_code = f"{code or ''}_{top_n or ''}"
+            concepts = [c[0] for c in top_concepts]
+            print(f'concepts_pg concepts : {top_concepts} unique_code: {unique_code} ')
         if not top_concepts:
             print("未找到相关概念")
             return
@@ -6080,7 +6383,7 @@ class StockMonitorApp(tk.Tk):
         follow_ratios = np.array([c[3] for c in top_concepts])
         data_hash = hashlib.md5(str(concepts[:3]).encode()).hexdigest()
 
-        print(f'concepts : {concepts} unique_code: {unique_code} ')
+        # print(f'concepts : {concepts} unique_code: {unique_code} ')
         # --- 创建主窗口 ---
         win = QtWidgets.QWidget()
         win.setWindowTitle(f"{code} 概念分析Top{top_n}")
@@ -6137,13 +6440,12 @@ class StockMonitorApp(tk.Tk):
         texts = []
         max_score = max(scores.max(), 1)
         for i, (avg, score) in enumerate(zip(avg_percents, scores)):
-            text = pg.TextItem(f"avg:{avg:.2f}%\nscore:{score:.2f}", anchor=(0, 0.5))
-            # text.setFont(QtGui.QFont(text.font().family(), font_size))
-            text.setFont(QtGui.QFont("Microsoft YaHei", font_size))
+            text = pg.TextItem(f"score:{score:.2f}\navg:{avg:.2f}%", anchor=(0, 0.5))
+            # text.setFont(QtGui.QFont("Microsoft YaHei", font_size))
             text.setPos(score + 0.03 * max_score, y[i])
             plot.addItem(text)
             texts.append(text)
-            print(f"[DEBUG] : avg={avg:.2f}, score={score:.2f}")
+            # print(f"[DEBUG] : avg={avg:.2f}, score={score:.2f}")
 
         plot.getAxis('left').setTicks([list(zip(y, concepts))])
 
@@ -6151,15 +6453,66 @@ class StockMonitorApp(tk.Tk):
         from PyQt5.QtCore import QPoint
         # 禁用右键菜单
         plot.setMenuEnabled(False)  # ✅ 关键
-
         current_idx = {"value": 0}  # 用 dict 保持可变引用
 
+        plot._data_ref = {
+               "concepts": concepts,
+               "scores": scores,
+               "avg_percents": avg_percents,
+               "follow_ratios": follow_ratios,
+               "bars" : bars,
+               "brushes" : brushes,
+               "code" : unique_code
+           }
+        
+
+        # # --- 同步更新到 plot._data_ref（给 tooltip / 点击事件使用）---
+        # if hasattr(plot, "_data_ref"):
+        #     plot._data_ref["concepts"] = concepts
+        #     plot._data_ref["scores"] = scores
+        #     plot._data_ref["avg_percents"] = avg_percents
+        #     plot._data_ref["follow_ratios"] = follow_ratios
+        #     plot._data_ref["bars"] = bars
+        #     plot._data_ref["brushes"] = brushes
+
+        # else:
+        #     # 如果第一次还没有绑定，就直接创建
+        #     plot._data_ref = {
+        #         "concepts": concepts,
+        #         "scores": scores,
+        #         "avg_percents": avg_percents,
+        #         "follow_ratios": follow_ratios,
+        #         "bars" : bars,
+        #         "brushes" : brushes
+        #     }
+
+        # def highlight_bar(index):
+        #     """高亮当前选中的 bar（通过改变颜色或添加边框实现）"""
+        #     if not (0 <= index < len(concepts)):
+        #         return
+        #     # 恢复所有 bar 的 brush
+        #     bars.setOpts(brushes=brushes)
+        #     # 高亮当前选中项
+        #     highlight_brushes = brushes.copy()
+        #     highlight_brushes[index] = pg.mkBrush((255, 255, 0, 180))  # 黄色高亮
+        #     bars.setOpts(brushes=highlight_brushes)
+        #     plot.update()
+
         def highlight_bar(index):
-            """高亮当前选中的 bar（通过改变颜色或添加边框实现）"""
+            """高亮当前选中的 bar（动态读取 plot._data_ref）"""
+            data = plot._data_ref
+            concepts = data.get("concepts", [])
+            bars = data.get("bars", None)        # 你需要把 BarGraphItem 也存到 plot._data_ref
+            brushes = data.get("brushes", None)  # 同理，存默认颜色列表
+
+            if bars is None or brushes is None:
+                return
             if not (0 <= index < len(concepts)):
                 return
+
             # 恢复所有 bar 的 brush
             bars.setOpts(brushes=brushes)
+
             # 高亮当前选中项
             highlight_brushes = brushes.copy()
             highlight_brushes[index] = pg.mkBrush((255, 255, 0, 180))  # 黄色高亮
@@ -6167,25 +6520,122 @@ class StockMonitorApp(tk.Tk):
             plot.update()
 
 
+        # def mouse_click(event):
+        #     """鼠标点击事件处理：左键打开概念窗口，右键复制概念表达式"""
+        #     if plot.sceneBoundingRect().contains(event.scenePos()):
+        #         vb = plot.vb
+        #         mouse_point = vb.mapSceneToView(event.scenePos())
+        #         idx = int(round(mouse_point.y()))
+
+        #         # 动态取最新概念数据
+        #         concepts = w_dict.get("_concepts", [])
+        #         if 0 <= idx < len(concepts):
+        #             current_idx["value"] = idx
+        #             highlight_bar(idx)
+
+        #             if event.button() == QtCore.Qt.LeftButton:
+        #                 self._call_concept_top10_win(code, concepts[idx])
+        #                 win.raise_()
+        #                 win.activateWindow()
+
+        #             elif event.button() == QtCore.Qt.RightButton:
+        #                 concept_text = concepts[idx]
+        #                 clipboard = QtWidgets.QApplication.clipboard()
+        #                 copy_concept_text = f'category.str.contains("{concept_text}")'
+        #                 clipboard.setText(copy_concept_text)
+
+        #                 from PyQt5.QtCore import QPoint
+        #                 pos = event.screenPos()
+        #                 pos_int = QPoint(int(pos.x()), int(pos.y()))
+        #                 QtWidgets.QToolTip.showText(pos_int, f"已复制: {copy_concept_text}", win)
+
+
+
+        # plot.scene().sigMouseClicked.connect(mouse_click)
+        # def show_tooltip(event):
+        #     pos = event
+        #     vb = plot.vb
+        #     if plot.sceneBoundingRect().contains(pos):
+        #         mouse_point = vb.mapSceneToView(pos)
+        #         idx = int(round(mouse_point.y()))
+
+        #         # 动态取最新数据
+        #         concepts = w_dict.get("_concepts", [])
+        #         scores = w_dict.get("_scores", [])
+        #         avg_percents = w_dict.get("_avg_percents", [])
+        #         follow_ratios = w_dict.get("_follow_ratios", [])
+
+        #         if 0 <= idx < len(concepts):
+        #             msg = (f"概念: {concepts[idx]}\n"
+        #                    f"平均涨幅: {avg_percents[idx]:.2f}%\n"
+        #                    f"跟随指数: {follow_ratios[idx]:.2f}\n"
+        #                    f"综合得分: {scores[idx]:.2f}")
+        #             QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), msg, win)
+
+        # plot.scene().sigMouseMoved.connect(show_tooltip)
+
+        # def key_event(event):
+        #     key = event.key()
+        #     if key == QtCore.Qt.Key_R:
+        #         self.plot_following_concepts_pg(code, top_n)
+        #         event.accept()
+
+        #     elif key in (QtCore.Qt.Key_Q, QtCore.Qt.Key_Escape):
+        #         QtCore.QTimer.singleShot(0, win.close)
+        #         event.accept()
+
+        #     elif key == QtCore.Qt.Key_Up:
+        #         current_idx["value"] = max(0, current_idx["value"] - 1)
+        #         highlight_bar(current_idx["value"])
+        #         self._call_concept_top10_win(code, concepts[current_idx["value"]])
+        #         win.raise_()
+        #         win.activateWindow()
+        #         event.accept()
+
+        #     elif key == QtCore.Qt.Key_Down:
+        #         current_idx["value"] = min(len(concepts) - 1, current_idx["value"] + 1)
+        #         highlight_bar(current_idx["value"])
+        #         self._call_concept_top10_win(code, concepts[current_idx["value"]])
+        #         win.raise_()
+        #         win.activateWindow()
+        #         event.accept()
+
+        #     elif key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+        #         # 回车键打开窗口（等价左键点击）
+        #         idx = current_idx["value"]
+        #         if 0 <= idx < len(concepts):
+        #             self._call_concept_top10_win(code, concepts[idx])
+        #             win.raise_()
+        #             win.activateWindow()
+        #         event.accept()
+
+        # win.keyPressEvent = key_event
+
+        # --- 鼠标点击事件 ---
         def mouse_click(event):
-            """鼠标点击事件处理：左键打开概念窗口，右键复制概念表达式"""
             if plot.sceneBoundingRect().contains(event.scenePos()):
                 vb = plot.vb
                 mouse_point = vb.mapSceneToView(event.scenePos())
                 idx = int(round(mouse_point.y()))
+
+                # ✅ 动态读取最新数据
+                data = plot._data_ref
+                concepts = data.get("concepts", [])
+                # 获取 plot 对应的顶层窗口
+                # 调用你的聚焦函数，并传入 win
+                unique_code = data.get("code", '')
+                self.on_monitor_window_focus_pg(unique_code)
+
                 if 0 <= idx < len(concepts):
-                    # ✅ 记录当前点击的索引并高亮
                     current_idx["value"] = idx
                     highlight_bar(idx)
 
                     if event.button() == QtCore.Qt.LeftButton:
-                        # 左键打开窗口
                         self._call_concept_top10_win(code, concepts[idx])
                         win.raise_()
                         win.activateWindow()
 
                     elif event.button() == QtCore.Qt.RightButton:
-                        # 右键复制概念筛选表达式
                         concept_text = concepts[idx]
                         clipboard = QtWidgets.QApplication.clipboard()
                         copy_concept_text = f'category.str.contains("{concept_text}")'
@@ -6196,26 +6646,38 @@ class StockMonitorApp(tk.Tk):
                         pos_int = QPoint(int(pos.x()), int(pos.y()))
                         QtWidgets.QToolTip.showText(pos_int, f"已复制: {copy_concept_text}", win)
 
-
         plot.scene().sigMouseClicked.connect(mouse_click)
 
-        # tooltip
+        # --- 鼠标悬停 tooltip ---
         def show_tooltip(event):
             pos = event
             vb = plot.vb
             if plot.sceneBoundingRect().contains(pos):
                 mouse_point = vb.mapSceneToView(pos)
                 idx = int(round(mouse_point.y()))
+
+                # ✅ 动态读取最新数据
+                data = plot._data_ref
+                concepts = data.get("concepts", [])
+                scores = data.get("scores", [])
+                avg_percents = data.get("avg_percents", [])
+                follow_ratios = data.get("follow_ratios", [])
+
                 if 0 <= idx < len(concepts):
                     msg = (f"概念: {concepts[idx]}\n"
                            f"平均涨幅: {avg_percents[idx]:.2f}%\n"
                            f"跟随指数: {follow_ratios[idx]:.2f}\n"
                            f"综合得分: {scores[idx]:.2f}")
                     QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), msg, win)
+
         plot.scene().sigMouseMoved.connect(show_tooltip)
 
+        # --- 键盘事件 ---
         def key_event(event):
             key = event.key()
+            data = plot._data_ref  # ✅ 动态读取最新数据
+            concepts = data.get("concepts", [])
+            
             if key == QtCore.Qt.Key_R:
                 self.plot_following_concepts_pg(code, top_n)
                 event.accept()
@@ -6241,14 +6703,12 @@ class StockMonitorApp(tk.Tk):
                 event.accept()
 
             elif key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
-                # 回车键打开窗口（等价左键点击）
                 idx = current_idx["value"]
                 if 0 <= idx < len(concepts):
                     self._call_concept_top10_win(code, concepts[idx])
                     win.raise_()
                     win.activateWindow()
                 event.accept()
-
 
         win.keyPressEvent = key_event
 
@@ -6378,6 +6838,8 @@ class StockMonitorApp(tk.Tk):
         self.load_window_position_qt(win, f"概念分析Top{top_n}")
 
         win.show()
+
+
         # --- 初始化多 concept 数据容器 ---
         if not hasattr(win, "_init_prev_concepts_data"):
             win._init_prev_concepts_data = {}  # 每个 concept_name 对应初始数据
@@ -6385,19 +6847,19 @@ class StockMonitorApp(tk.Tk):
             win._prev_concepts_data = {}       # 每个 concept_name 对应上次刷新数据
 
             
-        # --- 全局一次加载当天数据 ---
-        if not hasattr(self, "_concept_data_loaded"):
-            self._concept_data_loaded = True
-            # 读取当天所有 concept 数据，一次性加载
-            all_data = load_all_concepts_pg_data()  # 自定义 NoSQL 函数，返回 dict: concept_name -> (init_data, prev_data)
+        # # --- 全局一次加载当天数据 ---
+        # if not hasattr(self, "_concept_data_loaded"):
+        #     self._concept_data_loaded = True
+        #     # 读取当天所有 concept 数据，一次性加载
+        #     all_data = load_all_concepts_pg_data()  # 自定义 NoSQL 函数，返回 dict: concept_name -> (init_data, prev_data)
             
-            self._global_concept_init_data = {}
-            self._global_concept_prev_data = {}
-            for c_name, (init_data, prev_data) in all_data.items():
-                if init_data:
-                    self._global_concept_init_data[c_name] = {k: np.array(v) for k, v in init_data.items()}
-                if prev_data:
-                    self._global_concept_prev_data[c_name] = {k: np.array(v) for k, v in prev_data.items()}
+        #     self._global_concept_init_data = {}
+        #     self._global_concept_prev_data = {}
+        #     for c_name, (init_data, prev_data) in all_data.items():
+        #         if init_data:
+        #             self._global_concept_init_data[c_name] = {k: np.array(v) for k, v in init_data.items()}
+        #         if prev_data:
+        #             self._global_concept_prev_data[c_name] = {k: np.array(v) for k, v in prev_data.items()}
 
         # # --- 窗口初始化各自 concept 数据 ---
         for i, c_name in enumerate(concepts):
@@ -6431,22 +6893,24 @@ class StockMonitorApp(tk.Tk):
         # 自动刷新
         timer = QtCore.QTimer(win)
         timer.timeout.connect(lambda: self._refresh_pg_window(code, top_n))
+
         # 缓存窗口
         self._pg_windows[unique_code] = {
             "win": win, "plot": plot, "bars": bars, "texts": texts, "code" : unique_code,
-            "timer": timer, "chk_auto": chk_auto, "spin": spin_interval
-        }
-        
-        if code == "总览" and name == "All":
-            chk_auto.setChecked(True)
-            timer.start(spin_interval.value() * 1000)
+            "timer": timer, "chk_auto": chk_auto, "spin": spin_interval, "_concepts": concepts
+        } 
+            # "_scores" : scores,"_avg_percents" :avg_percents ,"_follow_ratios" : follow_ratios
+
+        # if code == "总览" and name == "All":
+        chk_auto.setChecked(True)
+        timer.start(spin_interval.value() * 1000)
         chk_auto.toggled.connect(lambda state: timer.start(spin_interval.value() * 1000) if state else timer.stop())
         spin_interval.valueChanged.connect(lambda v: timer.start(v * 1000) if chk_auto.isChecked() else None)
 
 
     def update_pg_plot(self, w_dict, concepts, scores, avg_percents, follow_ratios):
         """
-        更新 PyQtGraph 条形图窗口（NoSQL 多 concept 版本）：
+        更新 PyQtGraph 条形图窗口（NoSQL 多 concept 版本），保证排序对齐：
         1. 每个 concept 独立保存初始分数和上次刷新分数。
         2. 绘制主 BarGraphItem 显示当前分数。
         3. 绘制增量条（相对于初始分数）。
@@ -6455,20 +6919,74 @@ class StockMonitorApp(tk.Tk):
         6. 自动恢复当天已有数据（NoSQL 存储）。
         """
 
+        # === 🧩 调试信息 ===
+        def quick_hash(arr):
+            try:
+                if isinstance(arr, (list, tuple, np.ndarray)):
+                    s = ",".join(map(str, arr[:10]))
+                    return hashlib.md5(s.encode()).hexdigest()[:8]
+                return str(type(arr))
+            except Exception as e:
+                return f"err:{e}"
+
+        print(
+            f"[DEBUG {datetime.now():%H:%M:%S}] update_pg_plot 调用 "
+            f"概念数={len(concepts)} thread={threading.current_thread().name} "
+            f"hash_concepts={quick_hash(concepts)} hash_scores={quick_hash(scores)}"
+        )
+
         win = w_dict["win"]
         plot = w_dict["plot"]
         texts = w_dict["texts"]
 
+        # # --- 按 scores 降序排序，保证绘图、文字对齐 ---
+        # sort_idx = np.argsort(-np.array(scores))
+        # concepts = [concepts[i] for i in sort_idx]
+        # scores = np.array(scores)[sort_idx]
+        # avg_percents = np.array(avg_percents)[sort_idx]
+        # follow_ratios = np.array(follow_ratios)[sort_idx]
+        # texts = [texts[i] for i in sort_idx]
+
+        # --- 判断是否需要 9:25 后重置 ---
+        # force_reset = False
+        # now = datetime.now()
+        # if now.time() >= time(9, 25) and getattr(self, "_concept_data_date", None) != now.date():
+        #     force_reset = True
+
+        now = datetime.now()
+        now_t = int(now.strftime("%H%M"))
+        today = now.date()
+
+        force_reset = False
+
+        # 检查是否跨天，跨天就重置阶段标记
+        if getattr(self, "_concept_data_date", None) != today:
+            win._concept_data_date = today
+            win._concept_first_phase_done = False
+            win._concept_second_phase_done = False
+
+        # 第一阶段：9:15~9:24触发一次
+        if cct.get_trade_date_status() and (915 <= now_t <= 924) and not getattr(self, "_concept_first_phase_done", False):
+            win._concept_first_phase_done = True
+            force_reset = True
+            print(f"{today} 触发 9:15~9:24 第一阶段刷新")
+
+        # 第二阶段：9:25 后触发一次
+        elif cct.get_trade_date_status() and (now_t >= 925) and not getattr(self, "_concept_second_phase_done", False):
+            win._concept_second_phase_done = True
+            force_reset = True
+            print(f"{today} 触发 9:25 第二阶段全局重置")
+
         # --- 初始化多 concept 数据容器 ---
-        if not hasattr(win, "_init_prev_concepts_data"):
-            win._init_prev_concepts_data = {}  # 每个 concept_name 对应初始数据
-        if not hasattr(win, "_prev_concepts_data"):
-            win._prev_concepts_data = {}       # 每个 concept_name 对应上次刷新数据
+        if not hasattr(win, "_init_prev_concepts_data") or force_reset:
+            win._init_prev_concepts_data = {}
+        if not hasattr(win, "_prev_concepts_data") or force_reset:
+            win._prev_concepts_data = {}
 
         # --- 全局一次加载当天数据 ---
         if not hasattr(self, "_concept_data_loaded"):
             self._concept_data_loaded = True
-            all_data = load_all_concepts_pg_data()  # 返回 dict: concept_name -> (init_data, prev_data)
+            all_data = load_all_concepts_pg_data()  # dict: concept_name -> (init_data, prev_data)
             self._global_concept_init_data = {}
             self._global_concept_prev_data = {}
             for c_name, (init_data, prev_data) in all_data.items():
@@ -6479,11 +6997,9 @@ class StockMonitorApp(tk.Tk):
 
         # --- 窗口初始化各自 concept 数据 ---
         for i, c_name in enumerate(concepts):
-            # 初始化 base_data
             if c_name not in win._init_prev_concepts_data:
                 base_data = self._global_concept_init_data.get(c_name)
                 if base_data is None:
-                    # 全局没有数据，初始化基础数据
                     base_data = {
                         "concepts": [c_name],
                         "avg_percents": np.array([avg_percents[i]]),
@@ -6493,7 +7009,6 @@ class StockMonitorApp(tk.Tk):
                     self._global_concept_init_data[c_name] = base_data
                 win._init_prev_concepts_data[c_name] = base_data
 
-            # 初始化 prev_data
             if c_name not in win._prev_concepts_data:
                 prev_data = self._global_concept_prev_data.get(c_name)
                 if prev_data is None:
@@ -6508,39 +7023,21 @@ class StockMonitorApp(tk.Tk):
 
         # --- 检查是否需要刷新（数据完全一致时跳过） ---
         data_changed = False
-
         for i, c_name in enumerate(concepts):
             prev_data = win._prev_concepts_data.get(c_name)
             if prev_data is None:
                 data_changed = True
-                print(f"[DEBUG] {c_name} 没有 prev_data -> 需要刷新")
                 break
-
-            cur_avg = avg_percents[i]
-            cur_score = scores[i]
-            cur_follow = follow_ratios[i]
-            prev_avg = prev_data["avg_percents"][0]
-            prev_score = prev_data["scores"][0]
-            prev_follow = prev_data["follow_ratios"][0]
-
-            da = abs(cur_avg - prev_avg)
-            ds = abs(cur_score - prev_score)
-            df = abs(cur_follow - prev_follow)
-            # print(f"[CHECK] {c_name}: Δavg={da:.6f}, Δscore={ds:.6f}, Δfollow={df:.6f}")
-
-            if da > 1e-6 or ds > 1e-6 or df > 1e-6:
+            if (abs(prev_data["avg_percents"][0] - avg_percents[i]) > 1e-6 or
+                abs(prev_data["scores"][0] - scores[i]) > 1e-6 or
+                abs(prev_data["follow_ratios"][0] - follow_ratios[i]) > 1e-6):
                 data_changed = True
-                # print(f"[DEBUG] {c_name} 数据有变化 -> 刷新")
                 break
 
         if not data_changed:
             print("[DEBUG] 数据未变化，跳过刷新 ✅")
-            return  # ← 这一行非常重要，直接退出函数！
+            return
 
-            # print(f'c_name: cur_score : {cur_avg} cur_score :{cur_score} cur_follow :{cur_follow}' )
-            # print(f'c_name: prev_avg : {prev_avg} prev_score :{prev_score} prev_follow :{prev_follow}' )
-            # print(f'(cur_avg - prev_avg) : {abs(cur_avg - prev_avg)} (cur_score - prev_score)  : {abs(cur_score - prev_score)}: {abs(cur_follow - prev_follow)}')
-            # # 判断是否变化（允许极小浮动）
         y = np.arange(len(concepts))
         max_score = max(scores) if len(scores) > 0 else 1
 
@@ -6549,14 +7046,38 @@ class StockMonitorApp(tk.Tk):
             if isinstance(item, pg.BarGraphItem):
                 plot.removeItem(item)
 
-        # --- 主 BarGraphItem ---
+        # --- 按新顺序生成 y 轴 ---
+        y = np.arange(len(concepts))
+        max_score = max(scores) if len(scores) > 0 else 1
+
+        # --- 主 BarGraphItem（使用排序后的 scores 和 y） ---
         color_map = pg.colormap.get('CET-R1')
         brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
         main_bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
         plot.addItem(main_bars)
         w_dict["bars"] = main_bars
 
-        # --- 绘制增量条（相对于初始数据） ---
+        # # --- 清除所有 TextItem ---
+        # for item in plot.items[:]:
+        #     if isinstance(item, pg.TextItem):
+        #         plot.removeItem(item)
+
+        # # --- 创建新的 TextItem ---
+        # texts = []
+        # max_score = max(scores.max(), 1)
+        # for i, (avg, score) in enumerate(zip(avg_percents, scores)):
+        #     # text = pg.TextItem(f"avg:{avg:.2f}%\nscore:{score:.2f}", anchor=(0, 0.5))
+        #     text = pg.TextItem(f"score:{score:.2f}\navg:{avg:.2f}%", anchor=(0, 0.5))
+        #     # text.setFont(QtGui.QFont("Microsoft YaHei", font_size))
+        #     text.setPos(score + 0.03 * max_score, y[i])
+        #     plot.addItem(text)
+        #     texts.append(text)
+        #     print(f"update[DEBUG] : avg={avg:.2f}, score={score:.2f}")
+
+        # # --- 更新左轴刻度 ---
+        # plot.getAxis('left').setTicks([list(zip(y, concepts))])
+
+        # --- 绘制增量条 ---
         delta_bars_list = []
         for i, c_name in enumerate(concepts):
             score = scores[i]
@@ -6573,8 +7094,8 @@ class StockMonitorApp(tk.Tk):
             plot.addItem(bar)
             delta_bars_list.append(bar)
         w_dict["delta_bars"] = delta_bars_list
-
-        # --- 更新文字显示（相对初始数据） ---
+        # print(f'texts: {texts}')
+        # --- 更新文字显示（顺序保持和 y 对齐） ---
         app_font = QtWidgets.QApplication.font()
         font_family = app_font.family()
         for i, text in enumerate(texts):
@@ -6591,13 +7112,42 @@ class StockMonitorApp(tk.Tk):
                 arrow = "→"
                 color = "gray"
 
-            text.setText(f"{arrow}{score:.2f} ({avg_percents[i]:.2f}%)")
+            # text.setText(f"{arrow} {delta} {score:.2f} \n ({avg_percents[i]:.2f}%)")
+            # text.setText(f"{arrow} {delta} {score:.2f} \n ({avg_percents[i]:.2f}%)")
+            text.setText(f"{arrow}{delta:.1f} score:{score:.2f}\navg:{avg_percents[i]:.2f}%")
+            #     text = pg.TextItem(f"score:{score:.2f}\navg:{avg:.2f}%", anchor=(0, 0.5))
             text.setColor(QtGui.QColor(color))
-            text.setFont(QtGui.QFont(font_family, self._font_size))
-            text.setPos((score + 0.03 * max_score) * self.dpi_scale, y[i] * self.dpi_scale)
+            # text.setFont(QtGui.QFont(font_family, self._font_size))
+            # text.setPos((score + 0.03 * max_score) * self.dpi_scale, y[i] * self.dpi_scale)
+            text.setPos(score + 0.03 * max_score, y[i])
             text.setAnchor((0, 0.5))
 
-        # --- 保存当前刷新数据到 prev_concepts_data ---
+        plot.getAxis('left').setTicks([list(zip(y, concepts))])
+
+
+
+        # texts = []
+        # max_score = max(scores.max(), 1)
+        # for i, (avg, score) in enumerate(zip(avg_percents, scores)):
+        #     text = pg.TextItem(f"avg:{avg:.2f}%\nscore:{score:.2f}", anchor=(0, 0.5))
+        #     text = pg.TextItem(f"score:{score:.2f}\navg:{avg:.2f}%", anchor=(0, 0.5))
+        #     # text.setFont(QtGui.QFont("Microsoft YaHei", font_size))
+        #     text.setPos(score + 0.03 * max_score, y[i])
+        #     plot.addItem(text)
+        #     texts.append(text)
+        #     print(f"[DEBUG] : avg={avg:.2f}, score={score:.2f}")
+
+        # plot.getAxis('left').setTicks([list(zip(y, concepts))])
+
+        plot._data_ref["concepts"] = concepts
+        plot._data_ref["scores"] = scores
+        plot._data_ref["avg_percents"] = avg_percents
+        plot._data_ref["follow_ratios"] = follow_ratios
+        plot._data_ref["bars"] = main_bars
+        plot._data_ref["brushes"] = brushes
+
+
+        # --- 保存当前刷新数据 ---
         for i, c_name in enumerate(concepts):
             win._prev_concepts_data[c_name] = {
                 "concepts": [c_name],
@@ -6619,7 +7169,6 @@ class StockMonitorApp(tk.Tk):
 
             win._flash_timer.timeout.connect(flash_delta)
             win._flash_timer.start(30000)  # 30 秒闪烁一次
-
 
 
     # def update_pg_plot_no_sql(self, w_dict, concepts, scores, avg_percents, follow_ratios):
@@ -6752,15 +7301,18 @@ class StockMonitorApp(tk.Tk):
         if unique_code not in self._pg_windows:
             return
         if not cct.get_work_time():  # 仅工作时间刷新
-            # print(f'not 工作时间刷新' )
             return
+
         print(f'unique_code : {unique_code}')
         w_dict = self._pg_windows[unique_code]
         win = w_dict["win"]
-        # 获取最新概念数据
+
+        # --- 获取最新概念数据 ---
         if code == "总览":
             tcode, _ = self.get_stock_code_none()
             top_concepts = self.get_following_concepts_by_correlation(tcode, top_n=top_n)
+            unique_code = f"{code or ''}_{top_n or ''}"
+            # print(f'_refresh_pg_window concepts : {top_concepts} unique_code: {unique_code} ')
         else:
             top_concepts = self.get_following_concepts_by_correlation(code, top_n=top_n)
 
@@ -6768,14 +7320,29 @@ class StockMonitorApp(tk.Tk):
             print(f"[Auto] 无法刷新 {code} 数据为空")
             return
 
-        concepts = [c[0] for c in top_concepts]
-        scores = np.array([c[1] for c in top_concepts])
-        avg_percents = np.array([c[2] for c in top_concepts])
-        follow_ratios = np.array([c[3] for c in top_concepts])
+        # --- 对概念按 score 降序排序 ---
+        top_concepts_sorted = sorted(top_concepts, key=lambda x: x[1], reverse=True)
 
-        # 更新图形
+        concepts = [c[0] for c in top_concepts_sorted]
+        scores = np.array([c[1] for c in top_concepts_sorted])
+        avg_percents = np.array([c[2] for c in top_concepts_sorted])
+        follow_ratios = np.array([c[3] for c in top_concepts_sorted])
+
+        # --- 判断概念顺序是否变化 ---
+        old_concepts = w_dict.get("_concepts", [])
+        concept_changed = old_concepts != concepts
+        # if concept_changed:
+        #     print(f"[DEBUG] 概念顺序变化，会重建文字:old_concepts {old_concepts} → concepts:{concepts}")
+        #     # w_dict["texts"] = []  # 强制重建文字
+        # else:
+        #     print(f"[DEBUG] 概念顺序未变，仅更新文字内容")
+
+        # --- 调试输出 ---
+        # print(f'_refresh_pg_window top_concepts_sorted : {top_concepts_sorted} unique_code: {unique_code} ')
         print(f'更新图形: {unique_code} : {concepts}')
+        # --- 更新图形 ---
         self.update_pg_plot(w_dict, concepts, scores, avg_percents, follow_ratios)
+
         print(f"[Auto] 已自动刷新 {code}")
 
 
@@ -7311,7 +7878,7 @@ class StockMonitorApp(tk.Tk):
                 valid_conditions.append(cond_clean)
             else:
                 removed_conditions.append(cond_clean)
-                log.info(f"剔除不存在的列条件: {cond_clean}")
+                # log.info(f"剔除不存在的列条件: {cond_clean}")
 
         # 去掉在 bracket_patterns 中出现的内容
         removed_conditions = [
@@ -7321,7 +7888,7 @@ class StockMonitorApp(tk.Tk):
 
         # 打印剔除条件列表
         if removed_conditions:
-            print(f"[剔除的条件列表] {removed_conditions}")
+            log.info(f"剔除不存在的列条件: {removed_conditions}")
 
         if not valid_conditions:
             self.status_var.set("没有可用的查询条件")
@@ -8159,7 +8726,6 @@ class StockMonitorApp(tk.Tk):
     # def save_data_to_csv(self):
     #     if self.current_df.empty:
     #         return
-    #     import datetime
     #     file_name = os.path.join(DARACSV_DIR, f"monitor_{self.resample_combo.get()}_{time.strftime('%Y%m%d_%H%M')}.csv")
     #     self.current_df.to_csv(file_name, index=True, encoding="utf-8-sig")
     #     idx =file_name.find('monitor')
@@ -8309,6 +8875,80 @@ class StockMonitorApp(tk.Tk):
     #     # 默认居中
     #     self.center_window(win, default_width, default_height)
 
+    def is_window_visible_on_top(self,tk_window):
+        """判断 Tk 窗口是否仍在最前层"""
+        hwnd = int(tk_window.frame(), 0) if isinstance(tk_window.frame(), str) else tk_window.frame()
+        user32 = ctypes.windll.user32
+        foreground = user32.GetForegroundWindow()
+        return hwnd == foreground
+
+    def bring_monitor_to_front(self, active_window):
+        target_monitor = get_monitor_index_for_window(active_window)
+
+        for win_id, win_info in self.monitor_windows.items():
+            toplevel = win_info.get("toplevel")
+            if not (toplevel and toplevel.winfo_exists()):
+                continue
+
+            monitor_idx = get_monitor_index_for_window(toplevel)
+            if monitor_idx != target_monitor:
+                continue
+
+            # 如果窗口被最小化，则恢复
+            if toplevel.state() == "iconic":
+                toplevel.deiconify()
+                win_info["is_lifted"] = False
+
+            # 检查是否真的还在最前层
+            if not self.is_window_visible_on_top(toplevel):
+                win_info["is_lifted"] = False
+
+            # 提升逻辑
+            if not win_info.get("is_lifted", False):
+                toplevel.lift()
+                toplevel.attributes("-topmost", 1)
+                toplevel.attributes("-topmost", 0)
+                win_info["is_lifted"] = True
+
+    def bring_monitor_to_front_pg(self, active_window):
+        for k, v in self._pg_windows.items():
+            win = v.get("win")
+            if win is None:
+                continue
+            if v.get("code") == active_window:
+                continue
+            # 如果窗口被最小化，恢复
+            if win.isMinimized():
+                win.setWindowState(QtCore.Qt.WindowNoState)
+
+            # 显示窗口
+            win.show()              # 如果窗口被隐藏
+            win.raise_()            # 提到最前
+            win.activateWindow()    # 获取焦点
+
+            # 窗口置顶逻辑（短暂置顶）
+            win.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
+            win.show()  # 需要调用 show 让 flag 生效
+            win.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, False)
+            win.show()  # 取消置顶后刷新
+
+    def on_monitor_window_focus_pg(self,active_windows):
+        """
+        当任意窗口获得焦点时，协调两个窗口到最前。
+        """
+
+        win_state = self.win_var.get()
+        if win_state:
+            self.bring_monitor_to_front_pg(active_windows)
+
+    def on_monitor_window_focus(self,active_windows):
+        """
+        当任意窗口获得焦点时，协调两个窗口到最前。
+        """
+        win_state = self.win_var.get()
+        if win_state:
+            self.bring_monitor_to_front(active_windows)
+
     def load_window_position(self, win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500,offset_step=100):
         """从统一配置文件加载窗口位置（自动按当前 DPI 缩放）"""
         try:
@@ -8404,6 +9044,85 @@ class StockMonitorApp(tk.Tk):
 
         except Exception as e:
             log.error(f"[save_window_position] 保存窗口位置失败: {e}")
+
+    # def load_window_position(self, win, window_name, file_path=WINDOW_CONFIG_FILE,
+    #                          default_width=500, default_height=500, offset_step=100):
+    #     """从统一配置文件加载窗口位置（不依赖 DPI 缩放）"""
+    #     try:
+    #         window_name = str(window_name)
+
+    #         if os.path.exists(file_path):
+    #             with open(file_path, "r", encoding="utf-8") as f:
+    #                 data = json.load(f)
+
+    #             if window_name in data:
+    #                 pos = data[window_name]
+    #                 width = int(pos.get("width", default_width))
+    #                 height = int(pos.get("height", default_height))
+    #                 x = int(pos.get("x", 100))
+    #                 y = int(pos.get("y", 100))
+
+    #                 # --- 检查是否有同类型窗口 ---
+    #                 if hasattr(self, "_pg_top10_window_simple"):
+    #                     active_windows = self._pg_top10_window_simple.values()
+    #                     count_active_window = len(active_windows)
+    #                     same_name_count = count_active_window - 1
+    #                     if count_active_window > 1:
+    #                         # 每个叠加窗口偏移 offset_step
+    #                         x += offset_step * count_active_window
+    #                         y += offset_step * same_name_count
+
+    #                 # --- 防止窗口位置越界 ---
+    #                 x, y = clamp_window_to_screens(x, y, width, height)
+
+    #                 # --- 应用窗口位置 ---
+    #                 win.geometry(f"{width}x{height}+{x}+{y}")
+    #                 log.info(f"[load_window_position] 加载 {window_name}: {width}x{height}+{x}+{y}")
+    #                 return width, height, x, y
+
+    #         # 没有记录则默认居中
+    #         log.info(f"[load_window_position] 未找到 {window_name} 配置，使用默认居中")
+    #         self.center_window(win, default_width, default_height)
+    #         return default_width, default_height, None, None
+
+    #     except Exception as e:
+    #         log.error(f"[load_window_position] 读取窗口位置失败: {e}")
+    #         self.center_window(win, default_width, default_height)
+    #         return default_width, default_height, None, None
+
+
+    # def save_window_position(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
+    #     """保存指定窗口位置到统一配置文件（不依赖 DPI 缩放）"""
+    #     try:
+    #         window_name = str(window_name)
+
+    #         # --- 获取当前窗口位置 ---
+    #         pos = {
+    #             "x": int(win.winfo_x()),
+    #             "y": int(win.winfo_y()),
+    #             "width": int(win.winfo_width()),
+    #             "height": int(win.winfo_height())
+    #         }
+
+    #         # --- 读取旧配置 ---
+    #         data = {}
+    #         if os.path.exists(file_path):
+    #             try:
+    #                 with open(file_path, "r", encoding="utf-8") as f:
+    #                     data = json.load(f)
+    #             except Exception as e:
+    #                 log.error(f"[save_window_position] 读取旧配置失败: {e}")
+
+    #         # --- 更新并写入 ---
+    #         data[window_name] = pos
+    #         with open(file_path, "w", encoding="utf-8") as f:
+    #             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    #         log.info(f"[save_window_position] 已保存 {window_name}: {pos}")
+
+    #     except Exception as e:
+    #         log.error(f"[save_window_position] 保存窗口位置失败: {e}")
+
 
     def load_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE,
                                 default_width=500, default_height=500, offset_step=30):
@@ -9604,9 +10323,11 @@ class QueryHistoryManager:
         dlg.resizable(False, False)
 
         # 计算位置，靠父窗口右侧居中
+        screen_width = win32api.GetSystemMetrics(0)
+        screen_width_limit = screen_width*0.8
         char_width = 6
-        min_width = 400
-        max_width = 1000
+        min_width = 400*self.root.scale_factor
+        max_width = 2000 if 1000*self.root.scale_factor < screen_width_limit else screen_width_limit
         win_width = max(min_width, min(len(initialvalue) * char_width + 50, max_width))
         win_height = 120
         # win_width, win_height = 520, 120
@@ -9614,8 +10335,10 @@ class QueryHistoryManager:
         # monitors = MONITORS or [(0, 0, win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1))]
         # x, y = clamp_window_to_screens(x, y, width, height, monitors)
         # print(f'len(initialvalue) : {len(initialvalue)} win_width : {win_width} , x : {x} ,y : {y}')
-        print(f"askstring_at_parent {win_width}x{win_height}+{x}+{y}")
-        dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
+        print(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+        dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+        # dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
+
 
         result = {"value": None}
 
@@ -9673,6 +10396,7 @@ class QueryHistoryManager:
 
         # 如果是备注列（第三列）
         if col == "#3":
+
             new_note = self.askstring_at_parent(self.root, "修改备注", "请输入新的备注：", initialvalue=record.get("note", ""))
             if new_note is not None:
                 record["note"] = new_note
@@ -11012,8 +11736,9 @@ class ColumnSetManager(tk.Toplevel):
         # 计算位置，靠父窗口右侧居中
         win_width, win_height = 300, 120
         x, y = self.get_centered_window_position(parent, win_width, win_height)
-        dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
-
+        # dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
+        print(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+        dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
         result = {"value": None}
 
         tk.Label(dlg, text=prompt).pack(pady=5, padx=5)
@@ -12526,7 +13251,9 @@ if __name__ == "__main__":
     # test_single_thread()
     # import ipdb;ipdb.set_trace()
 
-    logger = init_logging("test.log")
+    # logger = init_logging("test.log")
+
+    logger = init_logging(redirect_print=False)
 
     # print("这是 print 输出")
     # logger.info("这是 logger 输出")
@@ -12548,6 +13275,8 @@ if __name__ == "__main__":
     else:
         width, height = 100, 32
         cct.set_console(width, height)
+
+    # monitor_rdp_and_scale(app)
     app.mainloop()
 # --- 使用示例 ---
     
