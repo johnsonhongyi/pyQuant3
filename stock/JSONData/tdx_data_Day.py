@@ -4350,9 +4350,9 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # dd['upperT'] = dd.close[ (dd.upper > 0) & (dd.high > dd.upper)].count()
 
     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.high > df.upper)].count()
-    dfupper=df[-6:]
+    dfupper=df[-ct.bollupperT:]
 
-    upperT = dfupper.high[-6:][ (dfupper.upper > 0) & (dfupper.high > dfupper.upper)]
+    upperT = dfupper.high[-ct.bollupperT:][ (dfupper.upper > 0) & (dfupper.high > dfupper.upper)]
     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.close > df.upper)].apply(lambda x: round(x, 0)).median()
     upperLIS, posLIS = LIS_TDX(upperT) if len(upperT) > 0 else ([],[])
     dd['upperT'] = len(posLIS) 
@@ -5471,7 +5471,7 @@ def compute_top10_count(df,lastdays=ct.compute_lastdays,top_limit=ct.per_redline
     # temp.T[temp.T >=10].count()
 
     df['top10']=temp.T[temp.T >=9.9].count()        #涨停个数
-
+    df['top5']=temp.T[temp.T >5].count()
     # df['topU']=temp.T[temp.T >= top_limit].count()  #0.8 上涨个数  compute_upper_cross
     # df['topR']=temp_du.T[temp_du.T >= 0].count()    #跳空缺口
     # df['top0']=temp_du.T[temp_du.T == 0].count()    #一字涨停
@@ -5656,7 +5656,8 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     # for co in co2int:
     #     df[co]= df[co].astype(int)
 
-    co2int = ['boll','dff','ra','ral','fib','fibl','op', 'ratio','red','top10','ra']    
+    co2int = ['boll','dff','ra','ral','fib','fibl','op', 'ratio','red','ra']    
+    # co2int = ['boll','dff','ra','ral','fib','fibl','op', 'ratio','red','top5','top10','ra']    
     for col in co2int:
         if col in top_all.columns:
             top_all[col] = top_all[col].astype(int)

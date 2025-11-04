@@ -848,6 +848,242 @@ def clamp_window_to_screens(x, y, w, h):
     return (465, 442)
 
 
+def get_centered_window_position_mainWin(parent,win_width, win_height, x_root=None, y_root=None, parent_win=None):
+    """
+    多屏环境下获取窗口显示位置
+    """
+    # 默认取主屏幕
+    screen = get_monitor_by_point(0, 0)
+    x = (screen['width'] - win_width) // 2
+    y = (screen['height'] - win_height) // 2
+
+    # 鼠标右键优先
+    if x_root is not None and y_root is not None:
+        screen = get_monitor_by_point(x_root, y_root)
+        x, y = x_root, y_root
+        if x + win_width > screen['right']:
+            x = max(screen['left'], x_root - win_width)
+        if y + win_height > screen['bottom']:
+            y = max(screen['top'], y_root - win_height)
+
+    # 父窗口位置
+    elif parent_win is not None:
+        parent_win.update_idletasks()
+        px, py = parent_win.winfo_x(), parent_win.winfo_y()
+        pw, ph = parent_win.winfo_width(), parent_win.winfo_height()
+        screen = get_monitor_by_point(px, py)
+        x = px + pw // 2 - win_width // 2
+        y = py + ph // 2 - win_height // 2
+
+    # 边界检查
+    x = max(screen['left'], min(x, screen['right'] - win_width))
+    y = max(screen['top'], min(y, screen['bottom'] - win_height))
+    # print(x,y)
+    return x, y
+
+def get_centered_window_position_single(parent, win_width, win_height, margin=10):
+    # 获取鼠标位置
+    mx = parent.winfo_pointerx()
+    my = parent.winfo_pointery()
+
+    # 屏幕尺寸
+    screen_width = parent.winfo_screenwidth()
+    screen_height = parent.winfo_screenheight()
+
+    # 默认右边放置
+    x = mx + margin
+    y = my - win_height // 2  # 垂直居中鼠标位置
+
+    # 如果右边放不下，改到左边
+    if x + win_width > screen_width:
+        x = mx - win_width - margin
+
+    # 防止y超出屏幕
+    if y + win_height > screen_height:
+        y = screen_height - win_height - margin
+    if y < 0:
+        y = margin
+
+    return x, y
+
+
+def askstring_at_parent_single(parent, title, prompt, initialvalue=""):
+    dlg = tk.Toplevel(parent)
+    dlg.transient(parent)
+    dlg.title(title)
+    dlg.resizable(True, True)
+
+    # 屏幕宽度限制（你原本的逻辑）
+    screen = get_monitor_by_point(0, 0)
+    screen_width_limit = int(screen['width'] * 0.5)
+
+    base_width, base_height = 400, 200
+    char_width = 8
+    text_len = max(len(prompt), len(initialvalue))
+    win_width = min(max(base_width, text_len * char_width // 2), screen_width_limit)
+    win_height = base_height + (prompt.count("\n") * 20)
+
+    x, y = get_centered_window_position_single(parent, win_width, win_height)
+    dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+
+    result = {"value": None}
+
+    lbl = tk.Label(dlg, text=prompt, anchor="w", justify="left", wraplength=win_width - 40)
+    lbl.pack(pady=5, padx=5, fill="x")
+
+    # ✅ 获取系统默认字体，统一字号
+    default_font = tkfont.nametofont("TkDefaultFont")
+    text_font = default_font.copy()
+    text_font.configure(size=default_font.cget("size"))  # 可加粗或放大
+    # text_font.configure(size=default_font.cget("size") + 1)
+
+    # ✅ 多行输入框 + 自动换行 + 指定字体
+    text = tk.Text(dlg, wrap="word", height=6, font=text_font)
+    text.pack(pady=5, padx=5, fill="both", expand=True)
+    if initialvalue:
+        text.insert("1.0", initialvalue)
+    text.focus_set()
+
+    def on_ok():
+        result["value"] = text.get("1.0", "end-1c").replace("\n", " ")
+        dlg.destroy()
+
+    def on_cancel():
+        dlg.destroy()
+
+    frame_btn = tk.Frame(dlg)
+    frame_btn.pack(pady=5)
+    tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
+    tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
+
+    dlg.bind("<Escape>", lambda e: on_cancel())
+
+    dlg.grab_set()
+    parent.wait_window(dlg)
+    return result["value"]
+
+# def askstring_at_parent_single_nofont(parent, title, prompt, initialvalue=""):
+#     """带自动换行多行输入框的 askstring 版本"""
+#     dlg = tk.Toplevel(parent)
+#     dlg.transient(parent)
+#     dlg.title(title)
+#     dlg.resizable(True, True)
+
+#     # 获取屏幕信息
+#     screen = get_monitor_by_point(0, 0)
+#     screen_width_limit = int(screen['width'] * 0.5)
+
+#     # --- 智能计算初始大小 ---
+#     base_width, base_height = 400, 200
+#     char_width = 8
+#     text_len = max(len(prompt), len(initialvalue))
+#     win_width = min(max(base_width, text_len * char_width // 2), screen_width_limit)
+#     win_height = base_height + (prompt.count("\n") * 20)
+
+#     # --- 居中 ---
+#     x, y = get_centered_window_position_single(parent, win_width, win_height)
+#     dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+
+#     result = {"value": None}
+
+#     # --- 提示文字 ---
+#     lbl = tk.Label(dlg, text=prompt, anchor="w", justify="left", wraplength=win_width - 40)
+#     lbl.pack(pady=5, padx=5, fill="x")
+
+#     # --- ✅ 多行文本输入框（自动换行） ---
+#     text = tk.Text(dlg, wrap="word", height=6)  # wrap="word" 按单词换行
+#     text.pack(pady=5, padx=5, fill="both", expand=True)
+#     if initialvalue:
+#         text.insert("1.0", initialvalue)
+#     text.focus_set()
+
+#     # --- 按钮 ---
+#     def on_ok():
+#         # ✅ 保存时去掉换行符，恢复为单行字符串
+#         result["value"] = text.get("1.0", "end-1c").replace("\n", " ")
+#         dlg.destroy()
+
+#     def on_cancel():
+#         dlg.destroy()
+
+#     frame_btn = tk.Frame(dlg)
+#     frame_btn.pack(pady=5)
+#     tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
+#     tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
+
+#     dlg.bind("<Escape>", lambda e: on_cancel())
+
+#     dlg.grab_set()
+#     parent.wait_window(dlg)
+#     return result["value"]
+
+
+def askstring_at_parent_single_base(parent, title, prompt, initialvalue=""):
+    # 创建临时窗口
+    dlg = tk.Toplevel(parent)
+    dlg.transient(parent)
+    dlg.title(title)
+    dlg.resizable(True, True)
+
+    screen = get_monitor_by_point(0, 0)
+    screen_width_limit = int(screen['width'] * 0.5)
+
+    # --- 智能计算初始大小 ---
+    base_width, base_height = 300, 120
+    char_width = 9  # 每个字符大约宽 9 像素
+    text_len = max(len(prompt), len(initialvalue))
+    extra_width = min(text_len * char_width, screen_width_limit)
+    win_width = max(base_width, extra_width)
+    win_height = base_height + (prompt.count("\n") * 15)
+
+    # --- 居中定位 ---
+    x, y = get_centered_window_position_single(parent, win_width, win_height)
+    dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+
+    result = {"value": None}
+
+    # --- 提示文字 ---
+    lbl = tk.Label(dlg, text=prompt, justify="left", anchor="w")
+    lbl.pack(pady=5, padx=5, fill="x")
+
+    # 初始化时设置一次 wraplength
+    lbl.update_idletasks()
+    lbl.config(wraplength=lbl.winfo_width() - 20)
+
+    # 当窗口大小变化时动态调整 wraplength
+    def on_resize(event):
+        new_width = event.width - 20
+        if new_width > 100:
+            lbl.config(wraplength=new_width)
+
+    dlg.bind("<Configure>", on_resize)
+
+    # --- 输入框 ---
+    entry = tk.Entry(dlg)
+    entry.pack(pady=5, padx=5, fill="x", expand=True)
+    entry.insert(0, initialvalue)
+    entry.focus_set()
+
+    # --- 按钮 ---
+    def on_ok():
+        result["value"] = entry.get()
+        dlg.destroy()
+
+    def on_cancel():
+        dlg.destroy()
+
+    frame_btn = tk.Frame(dlg)
+    frame_btn.pack(pady=5)
+    tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
+    tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
+
+    # --- ESC 键关闭 ---
+    dlg.bind("<Escape>", lambda e: on_cancel())
+
+    dlg.grab_set()
+    parent.wait_window(dlg)
+    return result["value"]
+
 
 # def get_system_dpi_scale():
 #     """获取系统 DPI 缩放比例（Windows 默认 1.0 = 100%）"""
@@ -1805,10 +2041,11 @@ class StockMonitorApp(tk.Tk):
         height_px = self.winfo_screenheight()
         width_in = self.winfo_screenmmwidth() / 25.4
         height_in = self.winfo_screenmmheight() / 25.4
-        screen_dpi = width_px / width_in / 96
-        # print(f"分辨率: {width_px}×{height_px}")
-        # print(f"物理尺寸: {width_in:.2f}×{height_in:.2f} inch")
-        # print(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
+        screen_dpi = round(width_px / width_in / 96,2)
+        if screen_dpi != self.scale_factor:
+            print(f"分辨率: {width_px}×{height_px}")
+            print(f"物理尺寸: {width_in:.2f}×{height_in:.2f} inch")
+            print(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
         return  width_px
 
     def _check_dpi_change(self):
@@ -1830,47 +2067,58 @@ class StockMonitorApp(tk.Tk):
             if abs(current_scale - self.last_dpi_scale) > 0.05:
                 print(f"[DPI变化检测] 从 {self.last_dpi_scale:.2f} → {current_scale:.2f}")
                 self._apply_scale_dpi_change(current_scale)
+                self.on_dpi_changed_qt(current_scale)
                 self.last_dpi_scale = current_scale
 
             # 每 3 秒检测一次
             self.after(5000, self._check_dpi_change)
 
-    def on_dpi_changed(self, new_scale):
+    def on_dpi_changed_qt(self, new_scale):
         """RDP 或 DPI 变化时自动缩放窗口"""
         try:
-            win = self  # 你的主窗口实例
-            geom = win.geometry()
-            width, height = geom.width(), geom.height()
+            for k, v in self._pg_windows.items():
+                win = v.get("win")
+                try:
+                    if  v.get("win") is not None:
+                        # 已存在，聚焦并显示 (PyQt)
+                        geom = win.geometry()
+                        width, height = geom.width(), geom.height()
 
-            new_w = int(width * new_scale)
-            new_h = int(height * new_scale)
-            win.resize(new_w, new_h)
+                        new_w = int(width * new_scale)
+                        new_h = int(height * new_scale)
+                        win.resize(new_w, new_h)
+                        code = v.get("code", "N/A")
+                        print(f"[DPI] code={code} 窗口自动放大到 {new_scale:.2f} 倍 ({new_w}x{new_h})")
+                        # 如果你使用 PyQtGraph 或 Label，也可重设字体：
+                        for child in win.findChildren(QtWidgets.QWidget):
+                            font = child.font()
+                            font.setPointSizeF(font.pointSizeF() * new_scale)
+                            child.setFont(font)
 
-            LOG.info(f"[DPI] 窗口自动放大到 {new_scale:.2f} 倍 ({new_w}x{new_h})")
-
-            # 如果你使用 PyQtGraph 或 Label，也可重设字体：
-            for child in win.findChildren(QtWidgets.QWidget):
-                font = child.font()
-                font.setPointSizeF(font.pointSizeF() * new_scale)
-                child.setFont(font)
+                except Exception as e:
+                    print(f'e:{e} pg win is None will remove:{v.get("win")}')
+                    del self._pg_windows[k]
+                finally:
+                    pass
+                
 
         except Exception as e:
             LOG.error(f"[DPI] 自动缩放失败: {e}")
 
-    def get_dynamic_dpi_scale(self):
-        """通过当前显示器分辨率动态估算缩放比例"""
-        screen = self.app.primaryScreen()
-        dpi = screen.logicalDotsPerInch()
-        scale = dpi / 96.0
-        # print(f"[DPI] Qt 检测 scale = {scale:.2f}, DPI = {dpi}")
-        return scale
+    # def get_dynamic_dpi_scale(self):
+    #     """通过当前显示器分辨率动态估算缩放比例"""
+    #     screen = self.app.primaryScreen()
+    #     dpi = screen.logicalDotsPerInch()
+    #     scale = dpi / 96.0
+    #     # print(f"[DPI] Qt 检测 scale = {scale:.2f}, DPI = {dpi}")
+    #     return scale
 
-    def get_tk_dpi_scale(self):
-        # 返回当前屏幕缩放比例，例如 1.0、1.25、2.0
-        dpi = self.winfo_fpixels('1i')
-        scale = dpi / 96.0
-        print(f"[Tk] DPI={dpi:.2f}, scale={scale:.2f}")
-        return scale
+    # def get_tk_dpi_scale(self):
+    #     # 返回当前屏幕缩放比例，例如 1.0、1.25、2.0
+    #     dpi = self.winfo_fpixels('1i')
+    #     scale = dpi / 96.0
+    #     print(f"[Tk] DPI={dpi:.2f}, scale={scale:.2f}")
+    #     return scale
 
     def _apply_scale_dpi_change(self, scale_factor):
             """当检测到 DPI 变化时，自动放大/缩小主窗口"""
@@ -1881,7 +2129,7 @@ class StockMonitorApp(tk.Tk):
             # 按比例调整
             new_w = int(width * scale_factor / self.scale_factor)
             new_h = int(height * scale_factor / self.scale_factor)
-            print(f'width: {width} height: {height} new_w : {new_w} new_h: {new_h}')
+            print(f'scale_factor: {scale_factor} old_scale: {self.scale_factor} width: {width} height: {height} new_w : {new_w} new_h: {new_h}')
             # 更新窗口大小
             self.geometry(f"{new_w}x{new_h}")
 
@@ -2363,6 +2611,7 @@ class StockMonitorApp(tk.Tk):
 
             # 读取当天所有 concept 数据
             all_data = load_all_concepts_pg_data()
+            # all_data = {}
             self._global_concept_init_data = {}
             self._global_concept_prev_data = {}
             for c_name, (init_data, prev_data) in all_data.items():
@@ -4860,10 +5109,14 @@ class StockMonitorApp(tk.Tk):
                         continue
                     all_cats.append(ca)
                     # 添加其他信息到元组里，比如 (code, name, percent, volume)
+                    percent = row.get("percent")
+                    if pd.isna(percent) or percent == 0:
+                        percent = row.get("per1d", 0)
                     cat_dict.setdefault(ca, []).append((
                         code,
                         row.get("name", ""),
-                        row.get("percent", 0) or row.get("per1d", 0),
+                        # row.get("percent", 0) or row.get("per1d", 0),
+                        percent,
                         row.get("volume", 0)
                         # 如果还有其他列，可以继续加: row.get("其他列")
                     ))
@@ -5180,7 +5433,17 @@ class StockMonitorApp(tk.Tk):
         # event.widget.insert(tk.INSERT, clipboard_text)
         # 先清空再黏贴
         if clipboard_text.isdigit() and len(clipboard_text) == 6:
-            clipboard_text = query_str = f'index.str.contains("^{clipboard_text}")'
+            clipboard_text = f'index.str.contains("^{clipboard_text}")'
+            # clipboard_text = query_str = f'index.str.contains("^{clipboard_text}")'
+        else:
+            # match = re.search(r'[\u4e00-\u9fa5A-Za-z0-9（）\(\)\-]+', clipboard_text)
+            # pattern = r'[\u4e00-\u9fa5]+[A-Za-z0-9\-\(\)（）]*'
+            allowed = r'\-\(\)'
+            pattern = rf'[\u4e00-\u9fa5]+[A-Za-z0-9{allowed}（）]*'
+            matches = re.findall(r'[\u4e00-\u9fa5]+[A-Za-z0-9\-\(\)（）]*', clipboard_text)
+            if matches:
+                clipboard_text = f'category.str.contains("^{matches[0]}")'
+
         event.widget.delete(0, tk.END)
         event.widget.insert(0, clipboard_text)
         # self.on_test_click()
@@ -5482,8 +5745,8 @@ class StockMonitorApp(tk.Tk):
         unique_code = f"{concept_name or ''}_{code or ''}"
         # --- 检查是否已有相同 code 的窗口 ---
         for k, v in self._pg_top10_window_simple.items():
-            if v.get("code") == unique_code and v.get("win") is not None:
-                # 已存在，聚焦并显示
+            if v.get("code") == unique_code and v.get("win") is not None and v.get("win").winfo_exists():
+                # 已存在，聚焦并显示TK
                 v["win"].deiconify()      # 如果窗口最小化了，恢复
                 v["win"].lift()           # 提到最前
                 v["win"].focus_force()    # 获得焦点
@@ -5727,8 +5990,19 @@ class StockMonitorApp(tk.Tk):
                 win._auto_refresh_id = None
 
             unbind_mousewheel()
+            # ✅ 安全删除 _pg_top10_window_simple 中对应项
+            try:
+                # 用字典推导找到对应键
+                for k, v in list(self._pg_top10_window_simple.items()):
+                    if v.get("win") == win:
+                        del self._pg_top10_window_simple[k]
+                        break
+            except Exception as e:
+                print(f"清理 _pg_top10_window_simple 出错: {e}")
+
             win.destroy()
             self._concept_top10_win = None
+
 
 
         win.protocol("WM_DELETE_WINDOW", _on_close)
@@ -6041,10 +6315,14 @@ class StockMonitorApp(tk.Tk):
         for idx, (code_row, row) in enumerate(df_display.iterrows()):
             iid = str(idx)
             latest_row = self.df_all.loc[code_row] if code_row in self.df_all.index else row
+            percent = latest_row.get("percent")
+            if pd.isna(percent) or percent == 0:
+                percent = latest_row.get("per1d", row.get("per1d", 0))
             tree.insert("", "end", iid=iid,
                         values=(code_row,
                                 latest_row.get("name", row.get("name", "")),
-                                f"{latest_row.get('percent', row.get('percent', 0)):.2f}",
+                                # f"{latest_row.get('percent', row.get('percent', 0)):.2f}",
+                                f"{percent:.2f}",
                                 f"{latest_row.get('volume', row.get('volume', 0)):.1f}"))
             code_to_iid[code_row] = iid
 
@@ -6114,10 +6392,14 @@ class StockMonitorApp(tk.Tk):
     #         iid = str(idx)
     #         # 从 self.df_all 动态获取最新 percent 和 volume
     #         latest_row = self.df_all.loc[code_row] if code_row in self.df_all.index else row
+            # percent = latest_row.get("percent")
+            # if pd.isna(percent) or percent == 0:
+            #     percent = latest_row.get("per1d", row.get("per1d", 0))
     #         tree.insert("", "end", iid=iid,
     #                     values=(code_row,
     #                             latest_row.get("name", row.get("name", "")),
-    #                             f"{latest_row.get('percent', row.get('percent', 0)):.2f}",
+                                # # f"{latest_row.get('percent', row.get('percent', 0)):.2f}",
+                                #  f"{percent:.2f}",
     #                             f"{latest_row.get('volume', row.get('volume', 0)):.1f}"))
     #         code_to_iid[code_row] = iid
 
@@ -6232,8 +6514,11 @@ class StockMonitorApp(tk.Tk):
         tree.delete(*tree.get_children())
         for idx, (code_row, row) in enumerate(df_display.iterrows()):
             iid = str(code_row)  # 使用原 DataFrame index 或股票 code 保证唯一
+            percent = row.get("percent")
+            if pd.isna(percent) or percent == 0:
+                percent = row.get("per1d")
             tree.insert("", "end", iid=iid,
-                        values=(code_row, row["name"], f"{row.get('percent',0):.2f}", f"{row.get('volume',0):.1f}"))
+                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}"))
 
         # 保留选中状态
         if hasattr(tree, "_selected_index") and tree.get_children():
@@ -6275,8 +6560,11 @@ class StockMonitorApp(tk.Tk):
         tree.delete(*tree.get_children())
         for idx, (code_row, row) in enumerate(df_display.iterrows()):
             iid = str(code_row)  # 使用原 DataFrame index 或股票 code 保证唯一
+            percent = row.get("percent")
+            if pd.isna(percent) or percent == 0:
+                percent = row.get("per1d")
             tree.insert("", "end", iid=iid,
-                        values=(code_row, row["name"], f"{row.get('percent',0):.2f}", f"{row.get('volume',0):.1f}"))
+                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}"))
 
         # 保留选中状态
         if hasattr(tree, "_selected_index") and tree.get_children():
@@ -6367,15 +6655,23 @@ class StockMonitorApp(tk.Tk):
 
         unique_code = f"{code or ''}_{top_n or ''}"
 
+
         # --- 检查是否已有相同 code 的窗口 ---
         for k, v in self._pg_windows.items():
             win = v.get("win")
-            if v.get("code") == unique_code and win is not None:
-                # 已存在，聚焦并显示 (PyQt)
-                win.show()               # 如果窗口被最小化或隐藏
-                win.raise_()             # 提到最前
-                win.activateWindow()     # 获得焦点
-                return  # 不创建新窗口
+            try:
+                if v.get("code") == unique_code and v.get("win") is not None:
+                    # 已存在，聚焦并显示 (PyQt)
+                    win.show()               # 如果窗口被最小化或隐藏
+                    win.raise_()             # 提到最前
+                    win.activateWindow()     # 获得焦点
+                    return  # 不创建新窗口
+            except Exception as e:
+                print(f'e:{e} pg win is None will remove:{v.get("win")}')
+                del self._pg_windows[k]
+            finally:
+                pass
+            
 
         concepts = [c[0] for c in top_concepts]
         scores = np.array([c[1] for c in top_concepts])
@@ -9129,6 +9425,14 @@ class StockMonitorApp(tk.Tk):
         """加载 Qt 窗口位置（支持自动错开已存在的窗口）"""
         try:
             window_name = str(window_name)
+            scale = 1.0
+            try:
+                # scale = get_windows_dpi_scale_factor()
+                scale = self.scale_factor
+                if not isinstance(scale, (int, float)) or scale <= 0:
+                    scale = 1.0
+            except Exception as e:
+                print(f"[load_window_position_qt] 获取 DPI 缩放失败: {e}")
             x = y = None
             width = default_width
             height = default_height
@@ -9140,8 +9444,8 @@ class StockMonitorApp(tk.Tk):
                 if window_name in data:
                     pos = data[window_name]
                     # ✅ 直接使用存储的逻辑坐标，不乘 DPI
-                    width = int(pos.get("width", default_width))
-                    height = int(pos.get("height", default_height))
+                    width = int(pos.get("width", default_width)*scale)
+                    height = int(pos.get("height", default_height)*scale)
                     x = int(pos.get("x", 0))
                     y = int(pos.get("y", 0))
 
@@ -9185,7 +9489,7 @@ class StockMonitorApp(tk.Tk):
             return default_width, default_height, x, y
 
 
-    # def load_window_position_qt_src(self, win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500, offset_step=30):
+    # def load_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500, offset_step=30):
     #     """加载 Qt 窗口位置（支持自动错开已存在的窗口）"""
     #     try:
     #         window_name = str(window_name)
@@ -9209,9 +9513,10 @@ class StockMonitorApp(tk.Tk):
     #                 # ✳️ 按当前 DPI 放大回去
     #                 width = int(pos["width"] * scale)
     #                 height = int(pos["height"] * scale)
+    #                 # width = int(pos["width"] )
+    #                 # height = int(pos["height"] )
     #                 x = int(pos["x"] * scale)
     #                 y = int(pos["y"] * scale)
-
     #                 # 防止窗口位置越界
     #                 x, y = clamp_window_to_screens(x, y, width, height)
 
@@ -9223,19 +9528,20 @@ class StockMonitorApp(tk.Tk):
     #             x = (screen.width() - width) // 2
     #             y = (screen.height() - height) // 2
 
-    #         # ✅ 检查是否已有同名窗口正在显示
+    #         # --- 检查是否已有同名窗口正在显示，并自动偏移 ---
     #         if hasattr(self, "_pg_windows"):
-    #             active_windows = [w for w in self._pg_windows.values() if isinstance(w, QtWidgets.QWidget) and w.isVisible()]
+    #             active_windows = [w["win"] for w in self._pg_windows.values()
+    #                              if isinstance(w.get("win"), QtWidgets.QWidget) and w["win"].isVisible()]
     #             same_name_count = sum(1 for w in active_windows if w.windowTitle() == win.windowTitle())
     #             if same_name_count > 0:
-    #                 # 每个叠加窗口偏移 offset_step
     #                 x += offset_step * same_name_count
     #                 y += offset_step * same_name_count
-    #                 # 限制不超出屏幕范围
+    #                 # 限制不超出屏幕
     #                 if x + width > screen.width():
-    #                     x = screen.width() - width - 10
+    #                     x = screen.width() - width - 50
     #                 if y + height > screen.height():
-    #                     y = screen.height() - height - 10
+    #                     y = screen.height() - height - 50
+
 
     #         # ✅ 设置窗口位置
     #         win.setGeometry(x, y, width, height)
@@ -9252,56 +9558,16 @@ class StockMonitorApp(tk.Tk):
     #         win.setGeometry(x, y, default_width, default_height)
     #         return default_width, default_height, x, y
 
-    def save_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
-        """保存 PyQt 窗口位置到统一配置文件（逻辑坐标，不依赖 DPI）"""
-        try:
-            window_name = str(window_name)
-            geom = win.geometry()  # QRect
-            pos = {
-                "x": int(geom.x()),
-                "y": int(geom.y()),
-                "width": int(geom.width()),
-                "height": int(geom.height())
-            }
-
-            data = {}
-            if os.path.exists(file_path):
-                try:
-                    with open(file_path, "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                except Exception as e:
-                    log.error(f"[save_window_position_qt] 读取配置失败: {e}")
-
-            data[window_name] = pos
-            with open(file_path, "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-
-            log.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
-
-        except Exception as e:
-            log.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
-
-
-    # def save_window_position_qt_src(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
-    #     """保存 PyQt 窗口位置到统一配置文件（自动按 DPI 缩放）"""
+    # def save_window_position_qt_nodpi(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
+    #     """保存 PyQt 窗口位置到统一配置文件（逻辑坐标，不依赖 DPI）"""
     #     try:
     #         window_name = str(window_name)
-    #         from PyQt5 import QtCore
-
-    #         scale = 1.0
-    #         try:
-    #             scale = get_windows_dpi_scale_factor()
-    #             if not isinstance(scale, (int, float)) or scale <= 0:
-    #                 scale = 1.0
-    #         except Exception as e:
-    #             log.warning(f"[save_window_position_qt] 获取 DPI 缩放失败: {e}")
-
     #         geom = win.geometry()  # QRect
     #         pos = {
-    #             "x": int(geom.x() / scale),
-    #             "y": int(geom.y() / scale),
-    #             "width": int(geom.width() / scale),
-    #             "height": int(geom.height() / scale)
+    #             "x": int(geom.x()),
+    #             "y": int(geom.y()),
+    #             "width": int(geom.width()),
+    #             "height": int(geom.height())
     #         }
 
     #         data = {}
@@ -9320,6 +9586,47 @@ class StockMonitorApp(tk.Tk):
 
     #     except Exception as e:
     #         log.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
+
+
+    def save_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
+        """保存 PyQt 窗口位置到统一配置文件（自动按 DPI 缩放）"""
+        try:
+            window_name = str(window_name)
+            from PyQt5 import QtCore
+
+            scale = 1.0
+            try:
+                # scale = get_windows_dpi_scale_factor()
+                scale = self.scale_factor
+                if not isinstance(scale, (int, float)) or scale <= 0:
+                    scale = 1.0
+            except Exception as e:
+                log.warning(f"[save_window_position_qt] 获取 DPI 缩放失败: {e}")
+
+            geom = win.geometry()  # QRect
+            pos = {
+                "x": int(geom.x() ),
+                "y": int(geom.y() ),
+                "width": int(geom.width() / scale),
+                "height": int(geom.height() / scale)
+            }
+
+            data = {}
+            if os.path.exists(file_path):
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception as e:
+                    log.error(f"[save_window_position_qt] 读取配置失败: {e}")
+
+            data[window_name] = pos
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            log.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
+
+        except Exception as e:
+            log.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
 
 
     # def save_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE):
@@ -10065,7 +10372,8 @@ class QueryHistoryManager:
             return
 
         record = self.current_history[idx]
-        new_query = self.askstring_at_parent(self.root, "修改 Query", "请输入新的 Query：", initialvalue=record.get("query", ""))
+        # new_query = self.askstring_at_parent(self.root, "修改 Query", "请输入新的 Query：", initialvalue=record.get("query", ""))
+        new_query = askstring_at_parent_single(self.root, "修改 Query", "请输入新的 Query：", initialvalue=record.get("query", ""))
         if new_query and new_query.strip():
             new_query = new_query.strip()
             old_query = record["query"]
@@ -10315,40 +10623,107 @@ class QueryHistoryManager:
         return int(x), int(y)
 
 
-    def askstring_at_parent(self,parent, title, prompt, initialvalue=""):
-        # 创建临时窗口
+    # def askstring_at_parent(self,parent, title, prompt, initialvalue=""):
+    #     # 创建临时窗口
+    #     dlg = tk.Toplevel(parent)
+    #     dlg.transient(parent)
+    #     dlg.title(title)
+    #     dlg.resizable(False, False)
+
+    #     # 计算位置，靠父窗口右侧居中
+    #     screen_width = win32api.GetSystemMetrics(0)
+    #     screen_width_limit = screen_width*0.8
+    #     char_width = 6
+    #     min_width = 400*self.root.scale_factor
+    #     max_width = 2000 if 1000*self.root.scale_factor < screen_width_limit else screen_width_limit
+    #     win_width = max(min_width, min(len(initialvalue) * char_width + 50, max_width))
+    #     win_height = 120
+    #     # win_width, win_height = 520, 120
+    #     x, y = self.get_centered_window_position_query(parent, win_width, win_height)
+    #     # monitors = MONITORS or [(0, 0, win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1))]
+    #     # x, y = clamp_window_to_screens(x, y, width, height, monitors)
+    #     # print(f'len(initialvalue) : {len(initialvalue)} win_width : {win_width} , x : {x} ,y : {y}')
+    #     print(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+    #     dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+    #     # dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
+
+
+    #     result = {"value": None}
+
+    #     tk.Label(dlg, text=prompt).pack(pady=1, padx=5)
+    #     entry = tk.Entry(dlg)
+    #     entry.pack(pady=1, padx=5, fill="x", expand=True)
+    #     entry.insert(0, initialvalue)
+    #     entry.lift()
+    #     entry.focus_set()
+
+    #     def on_ok():
+    #         result["value"] = entry.get()
+    #         dlg.destroy()
+
+    #     def on_cancel():
+    #         dlg.destroy()
+
+    #     frame_btn = tk.Frame(dlg)
+    #     frame_btn.pack(pady=1)
+    #     tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
+    #     tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
+
+    #     # ✅ 新增：按 ESC 关闭对话框
+    #     dlg.bind("<Escape>", lambda e: on_cancel())
+
+    #     dlg.grab_set()
+    #     parent.wait_window(dlg)
+    #     return result["value"]
+
+    def askstring_at_parent(self, parent, title, prompt, initialvalue=""):
+        # import tkinter as tk
+        # from tkinter import ttk
+        # import win32api
+
         dlg = tk.Toplevel(parent)
         dlg.transient(parent)
         dlg.title(title)
-        dlg.resizable(False, False)
+        dlg.resizable(True, True)  # ✅ 允许自由拉伸
 
-        # 计算位置，靠父窗口右侧居中
+        # --- 计算窗口初始位置 ---
         screen_width = win32api.GetSystemMetrics(0)
-        screen_width_limit = screen_width*0.8
-        char_width = 6
-        min_width = 400*self.root.scale_factor
-        max_width = 2000 if 1000*self.root.scale_factor < screen_width_limit else screen_width_limit
-        win_width = max(min_width, min(len(initialvalue) * char_width + 50, max_width))
+        screen_width_limit = screen_width * 0.8
+        char_width = 10
+        min_width = int(400 * self.root.scale_factor)
+        max_width = 2000 if 1000 * self.root.scale_factor < screen_width_limit else screen_width_limit
+        win_width = max(min_width, min(len(initialvalue) * char_width + 100, max_width))
         win_height = 120
-        # win_width, win_height = 520, 120
-        x, y = self.get_centered_window_position_query(parent, win_width, win_height)
-        # monitors = MONITORS or [(0, 0, win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1))]
-        # x, y = clamp_window_to_screens(x, y, width, height, monitors)
-        # print(f'len(initialvalue) : {len(initialvalue)} win_width : {win_width} , x : {x} ,y : {y}')
-        print(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
-        dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
-        # dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
 
+        x, y = self.get_centered_window_position_query(parent, win_width, win_height)
+        dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+        print(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
 
         result = {"value": None}
 
-        tk.Label(dlg, text=prompt).pack(pady=1, padx=5)
-        entry = tk.Entry(dlg)
-        entry.pack(pady=1, padx=5, fill="x", expand=True)
+        # --- 提示文字（自动换行） ---
+        lbl = tk.Label(
+            dlg,
+            text=prompt,
+            anchor="w",
+            justify="left",        # 多行文字左对齐
+            wraplength=int(win_width * 0.9)  # ✅ 超过宽度自动换行
+        )
+        lbl.pack(pady=(10, 6), padx=10, fill="x")
+
+        # --- 输入框 ---
+        entry = ttk.Entry(dlg)
+        entry.pack(padx=10, pady=(0, 10), fill="both", expand=True)
         entry.insert(0, initialvalue)
-        entry.lift()
         entry.focus_set()
 
+        # --- 按钮区 ---
+        frame_btn = tk.Frame(dlg)
+        frame_btn.pack(pady=(0, 10))
+        tk.Button(frame_btn, text="确定", width=10, command=lambda: on_ok()).pack(side="left", padx=6)
+        tk.Button(frame_btn, text="取消", width=10, command=lambda: on_cancel()).pack(side="left", padx=6)
+
+        # --- 回调函数 ---
         def on_ok():
             result["value"] = entry.get()
             dlg.destroy()
@@ -10356,17 +10731,18 @@ class QueryHistoryManager:
         def on_cancel():
             dlg.destroy()
 
-        frame_btn = tk.Frame(dlg)
-        frame_btn.pack(pady=1)
-        tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
-        tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
-
-        # ✅ 新增：按 ESC 关闭对话框
+        # ✅ 绑定 ESC 关闭
         dlg.bind("<Escape>", lambda e: on_cancel())
+
+        # ✅ 让输入框随窗口变化自动扩展
+        dlg.grid_rowconfigure(1, weight=1)
+        dlg.grid_columnconfigure(0, weight=1)
 
         dlg.grab_set()
         parent.wait_window(dlg)
         return result["value"]
+
+
 
     def on_double_click(self, event):
         region = self.tree.identify("region", event.x, event.y)
@@ -11726,27 +12102,77 @@ class ColumnSetManager(tk.Toplevel):
 
         return x, y
 
-    def askstring_at_parent(self,parent, title, prompt, initialvalue=""):
+    # def askstring_at_parent(self,parent, title, prompt, initialvalue=""):
+    #     # 创建临时窗口
+    #     dlg = tk.Toplevel(parent)
+    #     dlg.transient(parent)
+    #     dlg.title(title)
+    #     # ✅ 允许用户自由拉伸
+    #     dlg.resizable(True, True)
+    #     # 计算位置，靠父窗口右侧居中
+    #     win_width, win_height = 300, 120
+    #     x, y = self.get_centered_window_position(parent, win_width, win_height)
+    #     # dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
+    #     print(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+    #     dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+    #     result = {"value": None}
+
+    #     tk.Label(dlg, text=prompt).pack(pady=5, padx=5)
+    #     entry = tk.Entry(dlg)
+    #     entry.pack(pady=5, padx=5, fill="x", expand=True)
+    #     entry.insert(0, initialvalue)
+    #     entry.focus_set()
+
+    #     def on_ok():
+    #         result["value"] = entry.get()
+    #         dlg.destroy()
+
+    #     def on_cancel():
+    #         dlg.destroy()
+
+    #     frame_btn = tk.Frame(dlg)
+    #     frame_btn.pack(pady=5)
+    #     tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
+    #     tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
+
+    #     dlg.grab_set()
+    #     parent.wait_window(dlg)
+    #     return result["value"]
+
+    def askstring_at_parent(self, parent, title, prompt, initialvalue=""):
+
         # 创建临时窗口
         dlg = tk.Toplevel(parent)
         dlg.transient(parent)
         dlg.title(title)
-        dlg.resizable(False, False)
+        dlg.resizable(True, True)  # ✅ 可自由拉伸
 
-        # 计算位置，靠父窗口右侧居中
-        win_width, win_height = 300, 120
+        # --- 智能计算初始大小 ---
+        base_width, base_height = 300, 120
+        char_width = 10
+        text_len = max(len(prompt), len(initialvalue))
+        extra_width = min(text_len * char_width, 600)
+        win_width = max(base_width, extra_width)
+        win_height = base_height + (prompt.count("\n") * 15)  # 多行时稍高
+
+        # --- 居中定位 ---
         x, y = self.get_centered_window_position(parent, win_width, win_height)
-        # dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
         print(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
         dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+
         result = {"value": None}
 
-        tk.Label(dlg, text=prompt).pack(pady=5, padx=5)
+        # --- 提示文字（自动换行） ---
+        lbl = tk.Label(dlg, text=prompt, wraplength=win_width - 40, justify="left", anchor="w")
+        lbl.pack(pady=5, padx=5, fill="x")
+
+        # --- 输入框 ---
         entry = tk.Entry(dlg)
         entry.pack(pady=5, padx=5, fill="x", expand=True)
         entry.insert(0, initialvalue)
         entry.focus_set()
 
+        # --- 按钮 ---
         def on_ok():
             result["value"] = entry.get()
             dlg.destroy()
@@ -11759,9 +12185,13 @@ class ColumnSetManager(tk.Toplevel):
         tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
         tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
 
+        # --- ESC 键关闭 ---
+        dlg.bind("<Escape>", lambda e: on_cancel())
+
         dlg.grab_set()
         parent.wait_window(dlg)
         return result["value"]
+
 
     def save_current_set(self):
         if not self.current_set:
@@ -12369,17 +12799,6 @@ class KLineMonitor(tk.Toplevel):
 
         self.last_query = ""
 
-        # --- 加载历史查询 ---
-        if os.path.exists("last_query.json"):
-            try:
-                with open("last_query.json", "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.last_query = data.get("last_query", "")
-                    if self.last_query:
-                        self.search_var.set(self.last_query)
-            except Exception as e:
-                print(f"读取 last_query.json 出错: {e}")
-
         # 缓存数据
         self.df_cache = None
 
@@ -12515,6 +12934,24 @@ class KLineMonitor(tk.Toplevel):
         self.search_entry.bind("<Return>", lambda e: self.search_code_status())
         # 绑定右键事件
         self.search_entry.bind("<Button-3>", self.on_kline_monitor_right_click)
+
+
+        # EDIT按钮
+        self.search_btn2 = tk.Button(
+            self.status_frame, text="编辑", cursor="hand2", command=self.edit_code_status)
+        self.search_btn2.pack(side="left", padx=3)
+
+        # --- 加载历史查询 ---
+        if os.path.exists("last_query.json"):
+            try:
+                with open("last_query.json", "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.last_query = data.get("last_query", "")
+                    if self.last_query:
+                        self.search_var.set(self.last_query)
+            except Exception as e:
+                print(f"读取 last_query.json 出错: {e}")
+
         # 启动刷新线程
         threading.Thread(target=self.refresh_loop, daemon=True).start()
 
@@ -12654,6 +13091,13 @@ class KLineMonitor(tk.Toplevel):
 
     #     except Exception as e:
     #         toast_message(self, f"筛选语句错误: {e}")
+    def edit_code_status(self):
+        query = self.search_var.get().strip()
+        new_note = askstring_at_parent_single(self, "修改备注", "请输入新的备注：", initialvalue=query)
+        if new_note is not None:
+            self.search_var.set(new_note)
+            print(f'set self.search_var : {new_note}')
+            self.search_code_status()
 
     def search_code_status(self):
         """
@@ -12690,56 +13134,57 @@ class KLineMonitor(tk.Toplevel):
 
         # --- 2. 表达式过滤 TreeView 当前数据 ---
         try:
-            cols = self.tree["columns"]
-            rows = []
-            for item in self.tree.get_children():
-                values = self.tree.item(item, "values")
-                if not values:
-                    continue
-                rows.append(dict(zip(cols, values)))
+            # cols = self.tree["columns"]
+            # rows = []
+            # for item in self.tree.get_children():
+            #     values = self.tree.item(item, "values")
+            #     if not values:
+            #         continue
+            #     rows.append(dict(zip(cols, values)))
 
-            if not rows:
-                toast_message(self, "当前表格为空，无法筛选")
-                return
+            # if not rows:
+            #     toast_message(self, "当前表格为空，无法筛选")
+            #     return
 
-            df_tree = pd.DataFrame(rows)
+            # df_tree = pd.DataFrame(rows)
 
-            # 将数字列转换类型
-            for col in ["score", "percent", "volume", "now"]:
-                if col in df_tree.columns:
-                    df_tree[col] = pd.to_numeric(df_tree[col], errors="coerce")
+            # # 将数字列转换类型
+            # for col in ["score", "percent", "volume", "now"]:
+            #     if col in df_tree.columns:
+            #         df_tree[col] = pd.to_numeric(df_tree[col], errors="coerce")
 
-            # --- 中文列名映射 ---
-            col_map = {
-                "评分": "score",
-                "涨幅": "percent",
-                "量比": "volume",
-                "当前价": "now",
-                "信号": "signal",
-                "情绪": "emotion",
-            }
-            expr = query
-            for k, v in col_map.items():
-                expr = expr.replace(k, v)
+            # # --- 中文列名映射 ---
+            # col_map = {
+            #     "评分": "score",
+            #     "涨幅": "percent",
+            #     "量比": "volume",
+            #     "当前价": "now",
+            #     "信号": "signal",
+            #     "情绪": "emotion",
+            # }
+            # expr = query
+            # for k, v in col_map.items():
+            #     expr = expr.replace(k, v)
 
-            # --- 过滤 ---
-            df_filtered = df_tree.query(expr)
-            if df_filtered.empty:
-                toast_message(self, f"未找到符合条件的结果: {query}")
-                return
+            # # --- 过滤 ---
+            # df_filtered = df_tree.query(expr)
+            # if df_filtered.empty:
+            #     toast_message(self, f"未找到符合条件的结果: {query}")
+            #     return
 
-            # --- 清空并填充 ---
-            self.tree.delete(*self.tree.get_children())
-            for _, row in df_filtered.iterrows():
-                values = [row.get(col, "") for col in cols]
-                sig = str(row.get("signal", "")).upper()
-                tag = "neutral"
-                if sig.startswith("BUY"):
-                    tag = "buy"
-                elif sig.startswith("SELL"):
-                    tag = "sell"
-                self.tree.insert("", "end", values=values, tags=(tag,))
+            # # --- 清空并填充 ---
+            # self.tree.delete(*self.tree.get_children())
+            # for _, row in df_filtered.iterrows():
+            #     values = [row.get(col, "") for col in cols]
+            #     sig = str(row.get("signal", "")).upper()
+            #     tag = "neutral"
+            #     if sig.startswith("BUY"):
+            #         tag = "buy"
+            #     elif sig.startswith("SELL"):
+            #         tag = "sell"
+            #     self.tree.insert("", "end", values=values, tags=(tag,))
 
+            df_filtered = self.apply_filters()
             toast_message(self, f"共找到 {len(df_filtered)} 条结果")
 
             try:
@@ -13146,19 +13591,19 @@ class KLineMonitor(tk.Toplevel):
 
         if query_text:
             try:
-                # 中文列名兼容映射
-                col_map = {
-                    "评分": "score",
-                    "涨幅": "percent",
-                    "量比": "volume",
-                    "当前价": "now",
-                    "信号": "signal",
-                    "情绪": "emotion",
-                }
+                # # 中文列名兼容映射 使用中文查询时需要
+                # col_map = {
+                #     "评分": "score",
+                #     "涨幅": "percent",
+                #     "量比": "volume",
+                #     "当前价": "now",
+                #     "信号": "signal",
+                #     "情绪": "emotion",
+                # }
+                # expr = query_text
+                # for k, v in col_map.items():
+                #     expr = expr.replace(k, v)
                 expr = query_text
-                for k, v in col_map.items():
-                    expr = expr.replace(k, v)
-
                 # 数字列转换，确保query能正常执行
                 for col in ["score", "percent", "volume", "now"]:
                     if col in df.columns:
@@ -13176,8 +13621,8 @@ class KLineMonitor(tk.Toplevel):
 
         # --- 3️⃣ 更新表格 ---
         self.update_table(df)
-
-
+        return df
+ 
     # ---- 关闭 ----
     def on_kline_monitor_close(self):
         self.stop_event.set()

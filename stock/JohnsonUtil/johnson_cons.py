@@ -336,6 +336,7 @@ sina_lastbuy_logtime = 3600
 bigcount_logtime = 360
 cumdays = 14
 bollFilter = -5
+bollupperT = 10
 keep_lastnum = 0
 writeblockbakNum = 15
 checkfilter = True
