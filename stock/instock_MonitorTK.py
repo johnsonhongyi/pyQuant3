@@ -9880,10 +9880,6 @@ class QueryHistoryManager:
         # 为每列绑定排序
         for col in ("query", "star", "note","hit"):
             self.tree.heading(col, text=col.capitalize(), command=lambda _col=col: self.treeview_sort_column(self.tree, _col))
-        # # --- 操作按钮 ---
-        # frame_btn = tk.Frame(self.editor_frame)
-        # frame_btn.pack(fill="x", padx=5, pady=5)
-        # tk.Button(frame_btn, text="保存文件", command=self.save_search_history).pack(side="left", padx=5)
 
         self.refresh_tree()
 
@@ -9915,30 +9911,6 @@ class QueryHistoryManager:
             event.widget.delete(0, tk.END)
             event.widget.insert(0, clipboard_text)
             self.on_test_click()
-
-    # def on_right_click(self, event):
-    #     try:
-    #         # 获取剪贴板文本
-    #         clipboard_text = event.widget.clipboard_get().strip()
-    #     except tk.TclError:
-    #         return  # 没有可用的剪贴板内容
-
-    #     # 如果包含 'and'，说明是表达式，直接使用
-    #     if "and" in clipboard_text.lower():
-    #         event.widget.delete(0, tk.END)
-    #         event.widget.insert(0, clipboard_text)
-    #         self.on_test_click()
-    #         return
-
-    #     # 否则尝试匹配 6 位股票代码
-    #     match = re.search(r"\b\d{6}\b", clipboard_text)
-    #     if match:
-    #         code = match.group(0)
-    #         event.widget.delete(0, tk.END)
-    #         event.widget.insert(0, code)
-    #         self.on_test_click()
-    #     else:
-    #         print(f"[on_right_click] 未找到有效的6位代码: {clipboard_text}")
 
 
     # 先给每列绑定排序事件
@@ -9974,90 +9946,6 @@ class QueryHistoryManager:
                 self.editor_frame.pack_forget()  # 隐藏
             else:
                 self.editor_frame.pack(fill="both", expand=True)  # 仅显示，不移动位置
-
-   
-    # add test_code bug
-    # def save_search_history(self):
-    #     """保存到文件，合并编辑的 N 条到历史顶部，保留最多 MAX_HISTORY 条"""
-    #     try:
-    #         # ---------- 工具函数 ----------
-    #         def dedup(history):
-    #             seen = set()
-    #             result = []
-    #             for r in history:
-    #                 q = r.get("query") if isinstance(r, dict) else str(r)
-    #                 if q not in seen:
-    #                     seen.add(q)
-    #                     result.append(r)
-    #             return result
-
-    #         def normalize_history(history):
-    #             """统一字段格式，确保 starred 为 int，note 存在"""
-    #             normalized = []
-    #             for r in history:
-    #                 if not isinstance(r, dict):
-    #                     continue
-    #                 q = r.get("query", "")
-    #                 starred = r.get("starred", 0)
-    #                 note = r.get("note", "")
-
-    #                 # 布尔 → 整数，非法类型 → 0
-    #                 if isinstance(starred, bool):
-    #                     starred = 1 if starred else 0
-    #                 elif not isinstance(starred, int):
-    #                     starred = 0
-
-    #                 normalized.append({
-    #                     "query": q,
-    #                     "starred": starred,
-    #                     "note": note
-    #                 })
-    #             return normalized
-
-    #         def merge_history(current, old):
-    #             """合并：current 优先，后补 old 去重"""
-    #             seen = set()
-    #             result = []
-
-    #             for r in current:
-    #                 q = r.get("query") if isinstance(r, dict) else str(r)
-    #                 if q not in seen:
-    #                     seen.add(q)
-    #                     result.append(r)
-    #             for r in old:
-    #                 q = r.get("query") if isinstance(r, dict) else str(r)
-    #                 if q not in seen:
-    #                     seen.add(q)
-    #                     result.append(r)
-    #             return result[:self.MAX_HISTORY]
-
-    #         # ---------- 加载旧历史 ----------
-    #         all_data = {"history1": [], "history2": []}
-    #         if os.path.exists(self.history_file):
-    #             with open(self.history_file, "r", encoding="utf-8") as f:
-    #                 try:
-    #                     loaded_data = json.load(f)
-    #                     h1_old = dedup(loaded_data.get("history1", []))
-    #                     h2_old = dedup(loaded_data.get("history2", []))
-    #                     all_data["history1"] = h1_old[self.his_limit:] if len(h1_old) > self.his_limit else []
-    #                     all_data["history2"] = h2_old[self.his_limit:] if len(h2_old) > self.his_limit else []
-    #                 except json.JSONDecodeError:
-    #                     pass
-
-    #         # ---------- 合并并规范 ----------
-    #         self.history1 = normalize_history(self.history1)
-    #         self.history2 = normalize_history(self.history2)
-    #         all_data["history1"] = normalize_history(merge_history(self.history1, all_data.get("history1", [])))
-    #         all_data["history2"] = normalize_history(merge_history(self.history2, all_data.get("history2", [])))
-
-    #         # ---------- 写回文件 ----------
-    #         with open(self.history_file, "w", encoding="utf-8") as f:
-    #             json.dump(all_data, f, ensure_ascii=False, indent=2)
-
-    #         print(f"✅ 搜索历史已保存 (共 {len(all_data['history1'])}/{len(all_data['history2'])})，starred 已统一为整数")
-
-    #     except Exception as e:
-    #         messagebox.showerror("错误", f"保存搜索历史失败: {e}")
 
 
     def save_search_history(self, confirm_threshold=10):
@@ -10215,97 +10103,6 @@ class QueryHistoryManager:
         return h1, h2
 
 
-    # def load_search_history_starred(self):
-    #     """从文件加载，只取最后20条作为当前编辑数据"""
-    #     h1, h2 = [], []
-    #     if os.path.exists(self.history_file):
-    #         try:
-    #             with open(self.history_file, "r", encoding="utf-8") as f:
-    #                 data = json.load(f)
-    #                 # 全量历史，去重
-    #                 raw_h1 = [self._normalize_record(r) for r in data.get("history1", [])]
-    #                 raw_h2 = [self._normalize_record(r) for r in data.get("history2", [])]
-
-    #                 def dedup(history):
-    #                     seen = set()
-    #                     result = []
-    #                     for r in history:
-    #                         q = r.get("query", "")
-    #                         if q not in seen:
-    #                             seen.add(q)
-    #                             result.append(r)
-    #                     return result
-
-    #                 raw_h1 = dedup(raw_h1)
-    #                 raw_h2 = dedup(raw_h2)
-    #                 # 只取最后 20 条作为可编辑区域
-    #                 # h1 = raw_h1[-20:] if len(raw_h1) > 20 else raw_h1
-    #                 # h2 = raw_h2[-20:] if len(raw_h2) > 20 else raw_h2
-    #                 h1 = raw_h1[:self.his_limit] if len(raw_h1) > self.his_limit else raw_h1
-    #                 h2 = raw_h2[:self.his_limit] if len(raw_h2) > self.his_limit else raw_h2
-
-    #         except Exception as e:
-    #             messagebox.showerror("错误", f"加载搜索历史失败: {e}")
-
-    #     return h1, h2
-
-    # # ========== 数据存取 ==========
-    # def save_search_history1(self):
-    #     """保存到文件，自动按 query 去重"""
-    #     try:
-    #         # 去重
-    #         def dedup(history):
-    #             seen = set()
-    #             result = []
-    #             for r in history:
-    #                 q = r.get("query") if isinstance(r, dict) else str(r)
-    #                 if q not in seen:
-    #                     seen.add(q)
-    #                     result.append(r)
-    #             return result
-
-    #         self.history1 = dedup(self.history1)
-    #         self.history2 = dedup(self.history2)
-
-    #         data = {
-    #             "history1": self.history1,
-    #             "history2": self.history2
-    #         }
-    #         with open(self.history_file, "w", encoding="utf-8") as f:
-    #             json.dump(data, f, ensure_ascii=False, indent=2)
-    #     except Exception as e:
-    #         messagebox.showerror("错误", f"保存搜索历史失败: {e}")
-
-
-    # def load_search_history1(self):
-    #     """从文件加载并去重"""
-    #     h1, h2 = [], []
-    #     if os.path.exists(self.history_file):
-    #         try:
-    #             with open(self.history_file, "r", encoding="utf-8") as f:
-    #                 data = json.load(f)
-    #                 h1 = [self._normalize_record(r) for r in data.get("history1", [])]
-    #                 h2 = [self._normalize_record(r) for r in data.get("history2", [])]
-
-    #             # 按 query 去重
-    #             def dedup(history):
-    #                 seen = set()
-    #                 result = []
-    #                 for r in history:
-    #                     q = r.get("query", "")
-    #                     if q not in seen:
-    #                         seen.add(q)
-    #                         result.append(r)
-    #                 return result
-
-    #             h1 = dedup(h1)
-    #             h2 = dedup(h2)
-
-    #         except Exception as e:
-    #             messagebox.showerror("错误", f"加载搜索历史失败: {e}")
-    #     return h1, h2
-
-
     def _normalize_record(self, r):
         """兼容旧数据格式"""
         if isinstance(r, dict):
@@ -10323,16 +10120,6 @@ class QueryHistoryManager:
         else:
             return {"query": str(r), "starred":  0, "note": ""}
 
-    # # ========== 功能 ==========
-    # def switch_group(self, event=None):
-    #     sel = self.combo_group.get()
-    #     if sel == "history1":
-    #         self.current_history = self.history1
-    #         self.current_key = "history1"
-    #     else:
-    #         self.current_history = self.history2
-    #         self.current_key = "history2"
-    #     self.refresh_tree()
 
     def switch_group(self, event=None):
         self.clear_hits()
@@ -10350,16 +10137,6 @@ class QueryHistoryManager:
         print(f"[SWITCH] 当前分组切换到：{sel}")
         self.refresh_tree()
 
-
-    # def add_query(self):
-    #     query = self.entry_query.get().strip()
-    #     if not query:
-    #         messagebox.showwarning("提示", "请输入 Query")
-    #         return
-    #     self.current_history.insert(0, {"query": query, "starred":  0, "note": ""})
-    #     self.refresh_tree()
-    #     self.entry_query.delete(0, tk.END)
-    #     self.save_search_history()
 
     def edit_query(self, iid):
         values = self.tree.item(iid, "values")
@@ -10380,75 +10157,17 @@ class QueryHistoryManager:
             # record["query"] = new_query
             if self.current_key == "history1":
                 self.history1[idx]["query"] = new_query
-                # values = list(self.search_combo1["values"])
-                # # 更新下拉项：删除旧值，插入新值到最前
-                # if old_query in values:
-                #     values.remove(old_query)
-                # if new_query not in values:
-                #     values.insert(0, new_query)
-                #     if self.search_var1.get() == old_query:
-                #         self.search_var1.set(new_query)
-                # self.search_combo1["values"] = values
 
             else:
                 self.history2[idx]["query"] = new_query
-                # values = list(self.search_combo2["values"])
-                # if old_query in values:
-                #     values.remove(old_query)
-                # if new_query not in values:
-                #     values.insert(0, new_query)
-                #     if self.search_var2.get() == old_query:
-                #         self.search_var2.set(new_query)
-                # self.search_combo2["values"] = values
+
             # ✅ 设置全局标志（主窗口 sync_history 会读取）
             self._just_edited_query = (old_query, new_query)
-            # print(f'record2 : {record}')
             # self.sync_history_current(record)
             self.refresh_tree()
             if self.current_key == "history1":
                 self.use_query(new_query)
             # self.save_search_history()
-
-
-    # def add_query(self):
-    #     query = self.entry_query.get().strip()
-    #     if not query:
-    #         messagebox.showwarning("提示", "请输入 Query")
-    #         return
-
-    #     # 确定当前操作的是哪一个历史区
-    #     target_history = self.current_history
-    #     if target_history is None:
-    #         messagebox.showwarning("提示", "未找到当前历史记录区")
-    #         return
-
-    #     # 查重：是否已存在相同 query
-    #     existing = next((item for item in target_history if item["query"] == query), None)
-
-    #     if existing:
-    #         # 如果已有星标或备注，则仅置顶，不覆盖
-    #         if existing.get("starred", 0) > 0 or existing.get("note", "").strip():
-    #             target_history.remove(existing)
-    #             target_history.insert(0, existing)
-    #         else:
-    #             # 没有星标/备注，替换为新的记录
-    #             target_history.remove(existing)
-    #             target_history.insert(0, {"query": query, "starred": 0, "note": ""})
-    #     else:
-    #         # 新增记录
-    #         target_history.insert(0, {"query": query, "starred": 0, "note": ""})
-
-    #     # 限制最大条数（根据区分 history1 / history2）
-    #     if target_history is self.history1:
-    #         self.history1 = self.history1[:self.MAX_HISTORY]
-    #     elif target_history is self.history2:
-    #         self.history2 = self.history2[:self.MAX_HISTORY]
-
-    #     # 刷新 TreeView
-    #     self.refresh_tree()
-
-    #     # 自动保存更新
-    #     self.save_search_history()
 
     def add_query(self):
         query = self.entry_query.get().strip()
@@ -10460,14 +10179,6 @@ class QueryHistoryManager:
         if (query.isdigit() or len(query) == 6):
             toast_message(self.root, "股票代码仅测试使用")
             return
-
-        # # 查重：如果已存在，先删除旧的
-        # existing = next((item for item in self.current_history if item["query"] == query), None)
-        # if existing:
-        #     self.current_history.remove(existing)
-
-        # # 插入到顶部
-        # self.current_history.insert(0, {"query": query, "starred":  0, "note": ""})
 
         # 查重：是否已存在相同 query
         existing = next((item for item in self.current_history if item["query"] == query), None)
@@ -10487,7 +10198,7 @@ class QueryHistoryManager:
 
         if self.current_key == "history1":
             self.history1 = self.current_history
-        else:  # history2
+        elif  self.current_key == "history2":
             self.history2 = self.current_history
 
         self.refresh_tree()
@@ -10517,47 +10228,6 @@ class QueryHistoryManager:
             # 循环 0 → 1 → 2 → 3 → 4 → 0
             record["starred"] = (old_val + 1) % 5
             self.refresh_tree()
-
-
-    # def on_click_star(self, event):
-    #     region = self.tree.identify("region", event.x, event.y)
-    #     if region != "cell":
-    #         return
-    #     col = self.tree.identify_column(event.x)
-    #     if col != "#2":
-    #         return
-    #     row_id = self.tree.identify_row(event.y)
-    #     if not row_id:
-    #         return
-    #     idx = int(row_id) - 1
-    #     if 0 <= idx < len(self.current_history):
-    #         self.current_history[idx]["starred"] = not self.current_history[idx]["starred"]
-    #         self.refresh_tree()
-    #         # self.save_search_history()
-
-    # def on_double_click(self, event):
-    #     region = self.tree.identify("region", event.x, event.y)
-    #     if region != "cell":
-    #         return
-    #     col = self.tree.identify_column(event.x)
-    #     row_id = self.tree.identify_row(event.y)
-    #     if not row_id:
-    #         return
-    #     idx = int(row_id) - 1
-    #     record = self.current_history[idx]
-
-    #     if col == "#1":
-    #         new_q = simpledialog.askstring("修改 Query", "请输入新的 Query：", initialvalue=record["query"])
-    #         if new_q is not None and new_q.strip():
-    #             record["query"] = new_q.strip()
-    #             self.refresh_tree()
-    #             self.save_search_history()
-    #     elif col == "#3":
-    #         new_note = simpledialog.askstring("修改备注", "请输入新的备注：", initialvalue=record["note"])
-    #         if new_note is not None:
-    #             record["note"] = new_note
-    #             self.refresh_tree()
-    #             self.save_search_history()
 
     def get_centered_window_position_query(self, parent, win_width, win_height, margin=10):
         """
@@ -10623,63 +10293,7 @@ class QueryHistoryManager:
         return int(x), int(y)
 
 
-    # def askstring_at_parent(self,parent, title, prompt, initialvalue=""):
-    #     # 创建临时窗口
-    #     dlg = tk.Toplevel(parent)
-    #     dlg.transient(parent)
-    #     dlg.title(title)
-    #     dlg.resizable(False, False)
-
-    #     # 计算位置，靠父窗口右侧居中
-    #     screen_width = win32api.GetSystemMetrics(0)
-    #     screen_width_limit = screen_width*0.8
-    #     char_width = 6
-    #     min_width = 400*self.root.scale_factor
-    #     max_width = 2000 if 1000*self.root.scale_factor < screen_width_limit else screen_width_limit
-    #     win_width = max(min_width, min(len(initialvalue) * char_width + 50, max_width))
-    #     win_height = 120
-    #     # win_width, win_height = 520, 120
-    #     x, y = self.get_centered_window_position_query(parent, win_width, win_height)
-    #     # monitors = MONITORS or [(0, 0, win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1))]
-    #     # x, y = clamp_window_to_screens(x, y, width, height, monitors)
-    #     # print(f'len(initialvalue) : {len(initialvalue)} win_width : {win_width} , x : {x} ,y : {y}')
-    #     print(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
-    #     dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
-    #     # dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
-
-
-    #     result = {"value": None}
-
-    #     tk.Label(dlg, text=prompt).pack(pady=1, padx=5)
-    #     entry = tk.Entry(dlg)
-    #     entry.pack(pady=1, padx=5, fill="x", expand=True)
-    #     entry.insert(0, initialvalue)
-    #     entry.lift()
-    #     entry.focus_set()
-
-    #     def on_ok():
-    #         result["value"] = entry.get()
-    #         dlg.destroy()
-
-    #     def on_cancel():
-    #         dlg.destroy()
-
-    #     frame_btn = tk.Frame(dlg)
-    #     frame_btn.pack(pady=1)
-    #     tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
-    #     tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
-
-    #     # ✅ 新增：按 ESC 关闭对话框
-    #     dlg.bind("<Escape>", lambda e: on_cancel())
-
-    #     dlg.grab_set()
-    #     parent.wait_window(dlg)
-    #     return result["value"]
-
     def askstring_at_parent(self, parent, title, prompt, initialvalue=""):
-        # import tkinter as tk
-        # from tkinter import ttk
-        # import win32api
 
         dlg = tk.Toplevel(parent)
         dlg.transient(parent)
@@ -10840,111 +10454,6 @@ class QueryHistoryManager:
         if not selected:
             return
         self.delete_item(selected[0])
-
-    '''
-    def sync_history_current(self, record, action="delete"):
-        """
-        同步主窗口的历史列表
-        action: "delete" 删除记录（默认） | "add" 恢复记录（undo）
-        """
-        query = record.get("query")
-        if not query:
-            return
-
-        if self.current_key == "history1":
-            if action == "delete":
-                # 删除记录
-                self.history1 = [r for r in self.history1 if r["query"] != query]
-            elif action == "add":
-                # 撤销删除 → 恢复记录
-                if not any(r["query"] == query for r in self.history1):
-                    self.history1.insert(0, record)  # 插到最前面
-            # 更新下拉列表
-            self.search_combo1["values"] = [r["query"] for r in self.history1]
-            # 清除输入框中刚被删掉的项
-            if action == "delete" and self.search_var1.get() == query:
-                self.search_var1.set("")
-            if action == "add" and self.search_var1.get() == query:
-                self.search_var1.set(query)
-            # 回调同步给主窗口
-            try:
-                if callable(self.sync_history_callback):
-                    self.sync_history_callback(self.history1)
-            except Exception:
-                pass
-
-        else:  # history2
-            if action == "delete":
-                self.history2 = [r for r in self.history2 if r["query"] != query]
-            elif action == "add":
-                if not any(r["query"] == query for r in self.history2):
-                    self.history2.insert(0, record)
-            self.search_combo2["values"] = [r["query"] for r in self.history2]
-            if action == "delete" and self.search_var2.get() == query:
-                self.search_var2.set("")
-            if action == "add" and self.search_var1.get() == query:
-                self.search_var1.set(query)
-            try:
-                if callable(self.sync_history_callback):
-                    self.sync_history_callback(self.history2)
-            except Exception:
-                pass
-
-        self.refresh_tree()
-
-    def delete_item(self, iid):
-        """删除选中项并保存到撤销栈"""
-        idx = int(iid) - 1
-        if not (0 <= idx < len(self.current_history)):
-            return
-
-        # 取出被删除的记录
-        record = self.current_history.pop(idx)
-
-        # 保存到撤销栈（支持 Ctrl+Z 恢复）
-        self.deleted_stack.append({
-            "record": record,
-            "history_key": self.current_key,
-            "index": idx
-        })
-
-        # 限制撤销栈大小（可选）
-        if len(self.deleted_stack) > 20:
-            self.deleted_stack.pop(0)
-
-        # 同步到全局（主程序保存、写入文件等）
-        self.sync_history_current(record)
-        # 刷新界面
-        self.refresh_tree()
-
-    def undo_delete(self, event=None):
-        if not self.deleted_stack:
-            toast_message(self.root,"没有可撤销的删除记录")
-            return
-
-        last_deleted = self.deleted_stack.pop()
-        record = last_deleted["record"]
-        history_key = last_deleted["history_key"]
-        index = last_deleted["index"]
-
-        if history_key == "history1":
-            target_history = self.history1
-        else:
-            target_history = self.history2
-
-        # ✅ 插入原来的完整记录（包括 note / starred）
-        if 0 <= index <= len(target_history):
-            target_history.insert(index, record)
-        else:
-            target_history.insert(0, record)
-
-        # ✅ 同步回主窗口
-        self.sync_history_current(record, action="add")
-
-        # messagebox.showinfo("提示", f"已恢复删除的 Query：{record.get('query', '')}")
-        toast_message(self.root ,f"已恢复删除的 Query：{record.get('query', '')}")
-
-    '''
     
     def sync_history_current(self, record, action="delete", history_key=None):
         """
@@ -10998,66 +10507,6 @@ class QueryHistoryManager:
         finally:
             self._suppress_switch = suppress_state
 
-    # def sync_history_current(self, record, action="delete", history_key=None):
-    #     """
-    #     同步主窗口的 ComboBox 与数据结构
-    #     record: 被操作的记录 dict
-    #     action: "delete" 或 "add"
-    #     history_key: "history1" 或 "history2"（如果为 None，则使用 self.current_key 作为后备）
-    #     """
-    #     if history_key is None:
-    #         history_key = self.current_key
-
-    #     query = record.get("query")
-    #     if not query:
-    #         return
-
-    #     if history_key == "history1":
-    #         combo = self.search_combo1
-    #         var = self.search_var1
-    #         target = self.history1
-    #     else:
-    #         combo = self.search_combo2
-    #         var = self.search_var2
-    #         target = self.history2
-
-    #     if action == "delete":
-    #         # 删除：从目标历史和下拉框移除
-    #         target[:] = [r for r in target if r.get("query") != query]
-    #         combo['values'] = [r.get("query") for r in target]
-    #         if var.get() == query:
-    #             var.set("")
-    #     elif action == "add":
-    #         # 恢复：插入完整记录（保留 note/starred）
-    #         if not any(r.get("query") == query for r in target):
-    #             target.insert(0, record.copy())
-    #         combo['values'] = [r.get("query") for r in target]
-
-    #     # callback：同步回主窗口 / 外层
-    #     try:
-    #         if callable(self.sync_history_callback):
-    #             # 仍然传回单个 list（兼容现有接收方）
-    #             self.sync_history_callback(target)
-    #     except Exception:
-    #         pass
-
-    #     # 刷新 Treeview
-    #     self.refresh_tree()
-
-    # def delete_item(self, iid):
-    #     idx = int(iid) - 1
-    #     if 0 <= idx < len(self.current_history):
-    #         record = self.current_history.pop(idx)
-
-    #         # 保存完整删除记录（带 note/starred）
-    #         self.deleted_stack.append({
-    #             "record": record.copy(),
-    #             "history_key": self.current_key,
-    #             "index": idx
-    #         })
-
-    #         # 传入 history_key，避免依赖 self.current_key（更稳）
-    #         self.sync_history_current(record, action="delete", history_key=self.current_key)
 
     def delete_item(self, iid):
         idx = int(iid) - 1
@@ -11136,99 +10585,6 @@ class QueryHistoryManager:
         self.entry_query.delete(0, tk.END)
         self.entry_query.insert(0, record["query"])
 
-    # def move_to_top(self, iid):
-    #     idx = int(iid) - 1
-    #     if 0 <= idx < len(self.current_history):
-    #         record = self.current_history.pop(idx)
-    #         self.current_history.insert(0, record)
-
-    #         # 同步主窗口 history
-    #         if self.current_key == "history1":
-    #             # self.history1 = [r for r in self.history1 if r["query"] != record["query"]]
-    #             # self.history1.insert(0, record)
-    #             self.history1 = record
-    #             self.search_combo1['values'] = [r["query"] for r in self.history1]
-    #             self.search_var1.set(self.search_combo1['values'][0])
-    #         else:
-    #             # self.history2 = [r for r in self.history2 if r["query"] != record["query"]]
-    #             # self.history2.insert(0, record)
-    #             self.history2 = record
-    #             self.search_combo2['values'] = [r["query"] for r in self.history2]
-    #             self.search_var2.set(self.search_combo2['values'][0])
-    #         self.refresh_tree()
-
-
-
-    # def refresh_tree_sr(self):
-    #     # # 自动同步当前显示的历史
-    #     if self.current_key == "history1":
-    #         self.current_history = self.history1
-    #     else:
-    #         # self.current_history = [{"query": q, "starred":  0, "note": ""} for q in self.history2]
-    #         self.current_history = self.history2
-    #     # 清空Treeview
-    #     for i in self.tree.get_children():
-    #         self.tree.delete(i)
-        
-    #     # 填充Treeview
-    #     for idx, record in enumerate(self.current_history, start=1):
-    #         #单星
-    #         # star = "⭐" if record.get("starred") else ""
-
-    #         # 原来：star_text = "★" if rec.get("starred") else ""
-    #         star_count = record.get("starred", 0)
-    #         if isinstance(star_count, bool):
-    #             star_count = 1 if star_count else 0
-    #         star_text = "★" * star_count
-
-    #         note = record.get("note", "")
-    #         self.tree.insert("", "end", iid=str(idx), values=(record.get("query", ""), star_text, note))
-
-
-    # def refresh_tree_hit(self):
-    #     """
-    #     刷新 Treeview 显示
-    #     - 当前历史 self.current_history 自动同步
-    #     - 根据 record['hit'] 添加符号 ✅/❌ 并设置背景颜色
-    #     """
-    #     # 自动同步当前显示的历史
-    #     if self.current_key == "history1":
-    #         self.current_history = self.history1
-    #     else:
-    #         self.current_history = self.history2
-
-    #     # 清空 Treeview
-    #     self.tree.delete(*self.tree.get_children())
-
-    #     # 配置 tag 颜色
-    #     self.tree.tag_configure("hit", background="#d1ffd1")   # 命中绿色
-    #     self.tree.tag_configure("miss", background="#ffd1d1")  # 未命中红色
-    #     self.tree.tag_configure("normal", background="#ffffff") # 默认白色
-
-    #     for idx, record in enumerate(self.current_history, start=1):
-    #         star_count = record.get("starred", 0)
-    #         if isinstance(star_count, bool):
-    #             star_count = 1 if star_count else 0
-    #         star_text = "★" * star_count
-    #         note = record.get("note", "")
-    #         query_text = record.get("query", "")
-
-    #         # ✅ 显示时添加命中/未命中符号，但不修改原始 record
-    #         display_query = query_text
-    #         hit = record.get("hit", None)
-    #         if hit is True:
-    #             display_query = "✅ " + query_text
-    #             tag = "hit"
-    #         elif hit is False:
-    #             display_query = "❌ " + query_text
-    #             tag = "miss"
-    #         else:
-    #             tag = "normal"
-
-    #         # 插入 Treeview
-    #         self.tree.insert("", "end", iid=str(idx),
-    #                          values=(display_query, star_text, note),
-    #                          tags=(tag,))
 
     def refresh_tree(self):
         """
@@ -11450,18 +10806,8 @@ def toast_message(master, text, duration=1500):
 class ColumnSetManager(tk.Toplevel):
     def __init__(self, master, all_columns, config, on_apply_callback, default_cols, auto_apply_on_init=False):
         super().__init__(master)
-        # self._apply_dpi_scaling_Column()
         self.master = master
         self.title("列组合管理器")
-        # # ---------- 全局 DPI 缩放 ----------
-        # try:
-        #     scale_factor = self.tk.call('tk', 'scaling')  # Tk 默认缩放
-        # except Exception:
-        #     scale_factor = 1.0
-        # print(f'scale_factor : {scale_factor}')
-        # default_font = tkFont.nametofont("TkDefaultFont")
-        # default_font.configure(size=int(10 * float(scale_factor)))
-
         # ---------- 基础尺寸 ----------
         self.width = 800
         self.height = 500
@@ -11696,14 +11042,6 @@ class ColumnSetManager(tk.Toplevel):
             delta = int(-1*(event.delta/120))
             self.canvas.yview_scroll(delta, "units")
 
-    # ---------------------------
-    # 防抖 resize（避免重复刷新）
-    # ---------------------------
-    # def _on_resize(self, event):
-    #     if self._resize_job:
-    #         self.after_cancel(self._resize_job)
-    #     self._resize_job = self.after(120, self._debounced_update)
-
     def _debounced_update(self):
         self.update_grid()
 
@@ -11738,12 +11076,6 @@ class ColumnSetManager(tk.Toplevel):
         else:
             filtered = [c for c in self.all_columns if search in c.lower()]
 
-        # no_filtered = [c for c in self.all_columns if not self.default_filter(c)]
-        # if no_filtered != self.no_filtered:
-        #     self.no_filtered = no_filtered
-        #     print(f'no_filtered : {no_filtered}')
-
-        # filtered = [c for c in self.all_columns if search in c.lower()]
 
         filtered = filtered[:200]  # 可以扩展，但前面限制为 50/200
 
