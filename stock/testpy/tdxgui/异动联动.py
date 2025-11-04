@@ -80,6 +80,14 @@ ths_code=[]
 send_stock_code = None
 PIPE_NAME = r"\\.\pipe\my_named_pipe"
 
+# 保存每个 stock_code/item_id 的刷新状态
+refresh_registry = {}  # {(tree, window_info, item_id): {"after_id": None}}
+# 控制更新节流
+UPDATE_INTERVAL = 30  # 秒，更新UI最小间隔
+last_update_time = 0
+message_cache = []  # 缓存队列
+
+
 def pipe_server(update_callback):
     """
     命名管道服务器线程
@@ -2064,6 +2072,19 @@ def daily_init():
         except Exception as e:
             print("还不能设置日期:", e)
     print("已执行每日开盘初始化")
+
+    global last_update_time, message_cache
+    # global refresh_registry
+    # # 保存每个 stock_code/item_id 的刷新状态
+    # refresh_registry = {}  # {(tree, window_info, item_id): {"after_id": None}}
+
+    # 控制更新节流
+    UPDATE_INTERVAL = 30  # 秒，更新UI最小间隔
+    last_update_time = 0
+    message_cache = []  # 缓存队列
+    #加入队列检测
+    process_queue(root)
+
     # 自动注册下一天任务
     schedule_daily_init(root)
 
@@ -2852,11 +2873,6 @@ def refresh_stock_data(window_info, tree, item_id):
             result_queue.put(("error", e, tree, window_info, item_id))
     threading.Thread(target=task, daemon=True).start()
 
-# 控制更新节流
-UPDATE_INTERVAL = 30  # 秒，更新UI最小间隔
-last_update_time = 0
-message_cache = []  # 缓存队列
-
 def process_queue(window):
     global last_update_time, message_cache
     global refresh_registry
@@ -2914,8 +2930,7 @@ def format_time(dt_str):
         dt = datetime.strptime(dt_str, "%H:%M:%S")
     return dt.strftime("%H:%M:%S")
 
-# 保存每个 stock_code/item_id 的刷新状态
-refresh_registry = {}  # {(tree, window_info, item_id): {"after_id": None}}
+
 # ---------------------------
 # 主线程 UI 更新函数
 # ---------------------------
@@ -2927,34 +2942,6 @@ def update_monitor_tree(data, tree, window_info, item_id):
     stock_code, stock_name, *rest = stock_info
     window = window_info['toplevel']
 
-    # print(refresh_registry.keys())
-    # 如果已经有 active after，说明下一次刷新已经安排好了，直接返回
-    # if refresh_registry[key]["after_id"] is not None:
-    #     return
-
-    # def schedule_next(delay_ms):
-    #     # 如果已有定时器，取消它（防止重复）
-    #     if refresh_registry[key]["after_id"]:
-    #         # tree.after_cancel(refresh_registry[key]["after_id"])
-    #         try:
-    #             tree.after_cancel(refresh_registry[key]["after_id"])
-    #         except Exception:
-    #             pass  # 任务可能已执行完或被取消
-    #         refresh_registry[key]["after_id"] = None
-    #     # 启动下一次刷新
-    #     refresh_registry[key]["after_id"] = tree.after(delay_ms, lambda: refresh_stock_data(window_info, tree, item_id))
-
-    # 更新最新一行
-    # def update_latest_row(new_row):
-    #     children = tree.get_children()
-    #     if children:
-    #         # 获取最后一行的 item id
-    #         # last_item = children[-1]
-    #         # tree.item(last_item, values=new_row)
-    #          # 插入到最上面一行
-    #         tree.insert("", 0, values=new_row) 
-    #     else:
-    #         tree.insert("", tk.END, values=new_row)
 
     def update_latest_row(new_row):
         children = tree.get_children()
@@ -2966,22 +2953,12 @@ def update_monitor_tree(data, tree, window_info, item_id):
         # 插入到最上面一行
         tree.insert("", 0, values=new_row)
 
-    # def update_latest_row(new_row):
-    #     children = monitor_tree.get_children()
-    #     # 删除占位符行（模糊匹配 "加载" 或 "loading"）
-    #     for item in children:
-    #         vals = monitor_tree.item(item, "values")
-    #         if vals and vals[0] and any(s.lower() in str(vals[0]).lower() for s in ("加载ing...", "loading")):
-    #             monitor_tree.delete(item)
-    #     # 插入到最上面一行
-    #     monitor_tree.insert("", 0, values=new_row)
 
     def schedule_next(delay_ms,key, tree, window_info, item_id):
         now = time.time()
         
         # 如果已有任务且还没到期，直接返回
         if refresh_registry[key]["execute_at"] > now:
-            # print('refresh_registry not run time')
             return
         execute_at = now + delay_ms / 1000  # 转为秒
         dt=datetime.fromtimestamp(execute_at).strftime("%Y-%m-%d %H:%M:%S")
@@ -3074,20 +3051,23 @@ def update_monitor_tree(data, tree, window_info, item_id):
     if get_work_time() or (get_day_is_trade_day() and 1130 < get_now_time_int() < 1300):
         # print(f'start flush_alerts')
         if  not 1130 < get_now_time_int() < 1300:
-            # print(f'update_monitor_tree worktime next_update:{30} S')
-            # tree.after(30000, lambda: refresh_stock_data(window_info, tree, item_id))
             delay_ms = 30000
             schedule_next(delay_ms,key, tree, window_info, item_id)
+            print(f'update_monitor_tree 交易时段刷新 {stock_code} {stock_name} :{format_next_time(delay_ms)}')
             status_label2.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
+            # status_var.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
         else:
             delay_ms =  int(minutes_to_time(1300)) * 60 * 1000
             # print(f'update_monitor_tree next_update:{next_time} Min')
             schedule_next(delay_ms,key, tree, window_info, item_id)
+            print(f'update_monitor_tree 非交易刷新 {stock_code} {stock_name} :{format_next_time(delay_ms)}')
             status_label2.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
+            # status_var.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
     else:
-        print(f'update_monitor_tree next_update:{next_execution_time}')
+        print(f'update_monitor_tree 次日刷新 {stock_code} {stock_name} :{format_next_time(delay_ms)}')
         schedule_next(delay_ms,key, tree, window_info, item_id)
         status_label2.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
+        # status_var.config(text=f"monitor刷新 {format_next_time(delay_ms)}")
             # window.after(delay_ms, lambda: refresh_stock_data(window_info, tree, item_id))
 
 # --- 主窗口逻辑 ---  (lag)

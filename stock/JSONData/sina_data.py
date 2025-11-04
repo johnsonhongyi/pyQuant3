@@ -913,9 +913,6 @@ class Sina:
         # otime = int(time.strftime("%H:%M:%S",time.localtime(logtime))[:6].replace(':',''))
         otime =  cct.get_config_value_ramfile('sina_logtime',int_time=True)
 
-        # if cct.get_now_time_int() > 925 and not index and len(df) > 3000 and ( 924 < otime < 1500 or cct.get_work_time()):
-
-        # if cct.is_trade_date() and cct.get_now_time_int() > 925 and (not index and len(df) > 3000 and ( cct.get_work_time(otime) or cct.get_work_time())):
         if cct.get_now_time_int() > 925 and (not index and len(df) > 3000 and ( cct.get_work_time(otime) or cct.get_work_time())):
             time_s = time.time()
             df.index = df.index.astype(str)
