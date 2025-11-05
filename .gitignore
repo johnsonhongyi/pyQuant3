@@ -9,6 +9,7 @@ __pycache__/
 *.txt
 *.json
 *.bz2
+*.db
 # C extensions
 #*.so
 

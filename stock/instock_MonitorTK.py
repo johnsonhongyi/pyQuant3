@@ -794,6 +794,7 @@ def get_monitor_index_for_window(window):
         if left <= x <= right and top <= y <= bottom:
             return idx
     return 0  # 默认主屏
+
 # def clamp_window_to_screens(x, y, w, h, monitors=MONITORS):
 #     """保证窗口在可见显示器范围内"""
 #     global MONITORS
@@ -903,7 +904,7 @@ def get_centered_window_position_single(parent, win_width, win_height, margin=10
         y = screen_height - win_height - margin
     if y < 0:
         y = margin
-
+    x,y = clamp_window_to_screens(x, y, screen_width, screen_height)
     return x, y
 
 
@@ -1617,6 +1618,29 @@ def calc_indicators(top_all, resample):
 #     # --- 排序 ---
 #     return top_all.sort_values(by=['dff', 'percent', 'volume', 'ratio', 'couts'], ascending=[0, 0, 0, 1, 1])
 
+def ensure_parentheses_balanced(expr: str) -> str:
+    expr = expr.strip()
+    left_count = expr.count("(")
+    right_count = expr.count(")")
+
+    # 自动补齐括号
+    if left_count > right_count:
+        expr += ")" * (left_count - right_count)
+    elif right_count > left_count:
+        expr = "(" * (right_count - left_count) + expr
+
+    # ✅ 如果原本已经完整成对，就不再包外层
+    if not (expr.startswith("(") and expr.endswith(")")):
+        expr = f"({expr})"
+    elif expr.startswith("((") and expr.endswith("))"):
+        # 如果已经双层包裹，就不处理
+        pass
+
+    # # 外层包裹一层括号
+    # if not (expr.startswith("(") and expr.endswith(")")):
+    #     expr = f"({expr})"
+
+    return expr
 
 
 PIPE_NAME = r"\\.\pipe\my_named_pipe"
@@ -2052,7 +2076,9 @@ class StockMonitorApp(tk.Tk):
         if screen_dpi != self.scale_factor:
             print(f"分辨率: {width_px}×{height_px}")
             print(f"物理尺寸: {width_in:.2f}×{height_in:.2f} inch")
-            print(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
+            print(f"实际 DPI: {screen_dpi:.2f}, last_dpi: {self.scale_factor} Tk DPI: {px_per_inch/96:.2f}")
+            self.scale_factor = current_scale
+
         # print(f"分辨率: {width_px}×{height_px}")
         # print(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
         return  width_px
@@ -2077,6 +2103,7 @@ class StockMonitorApp(tk.Tk):
                 self._apply_scale_dpi_change(current_scale)
                 self.on_dpi_changed_qt(current_scale)
                 self.last_dpi_scale = current_scale
+                self.scale_factor = current_scale
 
             # 每 3 秒检测一次
             self.after(5000, self._check_dpi_change)
@@ -2218,6 +2245,19 @@ class StockMonitorApp(tk.Tk):
 
         self.tree.bind("<ButtonRelease-1>", on_column_release)
 
+    def get_scaled_value(self):
+        sf = self.scale_factor
+
+        if sf <= 1.25:
+            offset = 0
+        elif sf < 1.5:
+            offset = 0.15
+        elif sf < 2:
+            offset = 0.25
+        else:
+            offset = 0.5
+
+        return sf - offset
 
     def update_treeview_cols(self, new_cols):
         try:
@@ -2258,25 +2298,26 @@ class StockMonitorApp(tk.Tk):
             #         self.tree.column(col, width=60, anchor="center", minwidth=50, stretch=True)
             print(f'update_treeview_cols self.scale_factor : {self.scale_factor}')
             co2int = ['ra','ral','fib','fibl','op', 'ratio','top10','ra']
-            co2width = ['boll','kind','red']   
+            co2width = ['boll','kind','red']
+            col_scaled = self.get_scaled_value() 
             for col in cols:
                 self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
 
                 if col == "name":
-                    width = int(getattr(self, "_name_col_width", 120*self.scale_factor))  # 使用记录的 name 宽度
-                    minwidth = int(60*self.scale_factor)
+                    width = int(getattr(self, "_name_col_width", 120*col_scaled))  # 使用记录的 name 宽度
+                    minwidth = int(60*col_scaled)
                     self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=False)
                 elif col in co2int:
-                    width = int(60*self.scale_factor)  # 数字列宽度可小
-                    minwidth = int(20*self.scale_factor)
+                    width = int(60*col_scaled)  # 数字列宽度可小
+                    minwidth = int(30*col_scaled)
                     self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
                 elif col in co2width:
-                    width = int(60*self.scale_factor)  # 数字列宽度可小
-                    minwidth = int(30*self.scale_factor)
+                    width = int(60*col_scaled)  # 数字列宽度可小
+                    minwidth = int(30*col_scaled)
                     self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
                 else:
-                    width = int(80*self.scale_factor)
-                    minwidth = int(50*self.scale_factor)
+                    width = int(80*col_scaled)
+                    minwidth = int(60*col_scaled)
                     self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
 
 
@@ -4770,7 +4811,7 @@ class StockMonitorApp(tk.Tk):
             # 重新设置表头
             for col in new_columns:
                 # self.tree.heading(col, text=col, anchor="center", command=lambda _col=col: self.sort_by_column(_col, False))
-                width = int(80*self.scale_factor) if col == "name" else 60
+                width = int(80*self.get_scaled_value()) if col == "name" else int(60*self.get_scaled_value())
                 self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
                 self.tree.column(col, width=width, anchor="center", minwidth=50)
 
@@ -4837,14 +4878,14 @@ class StockMonitorApp(tk.Tk):
         tree.update_idletasks()
 
         # 4️⃣ 为每个列重新设置 heading / column
-        print(f'self.scale_factor :{self.scale_factor}')
+        print(f'self.scale_factor :{self.scale_factor} col_scaled:{self.get_scaled_value()}')
         for col in cols_to_show:
             if sort_func:
                 tree.heading(col, text=col, command=lambda _c=col: sort_func(_c, False))
             else:
                 tree.heading(col, text=col)
-            width = int(80*self.scale_factor) if col == "name" else 60
-            tree.column(col, width=width, anchor="center", minwidth=50)
+            width = int(80*self.get_scaled_value()) if col == "name" else int(60*self.get_scaled_value())
+            tree.column(col, width=width, anchor="center", minwidth=int(50*self.get_scaled_value()))
 
         # print(f"[Tree Reset] applied cols={list(tree['columns'])}")
 
@@ -4921,7 +4962,6 @@ class StockMonitorApp(tk.Tk):
         # 更新状态栏
         self.update_status()
 
-
     def adjust_column_widths(self):
         """根据当前 self.current_df 和 tree 的列调整列宽（只作用在 display 的列）"""
         # cols = list(self.tree["displaycolumns"]) if self.tree["displaycolumns"] else list(self.tree["columns"])
@@ -4933,17 +4973,29 @@ class StockMonitorApp(tk.Tk):
             # 跳过不存在于 df 的列
             if col not in self.current_df.columns:
                 # 仍要确保列有最小宽度
-                self.tree.column(col, width=50)
+                self.tree.column(col, width=int(50*self.get_scaled_value()))
                 continue
-            # 计算列中最大字符串长度
+            # # 计算列中最大字符串长度
             try:
                 max_len = max([len(str(x)) for x in self.current_df[col].fillna("").values] + [len(col)])
             except Exception:
                 max_len = len(col)
-            width = min(max(max_len * 8, 60), 300)  # 经验值：每字符约8像素，可调整
+            width = min(max(max_len * 8, int(60*self.get_scaled_value())) , 300)  # 经验值：每字符约8像素，可调整
+
+            # try:
+            #     max_len = max([len(str(x)) for x in self.current_df[col].fillna("").values] + [len(col)])
+            # except Exception:
+            #     max_len = len(col)
+
+            # # 使用 self.get_scaled_value() 代替 DPI 缩放比例
+            # scale = self.get_scaled_value()  # 返回 self.scale_factor - offset
+            # base_char_width = 8  # 每字符经验值
+            # width = int(max(max_len * base_char_width * scale, 60))  # 最小宽度 60
+            # width = min(width, 300)  # 最大宽度 300
+
             if col == 'name':
                 # width = int(width * 2)
-                width = int(width * 1.5 * self.scale_factor )
+                width = int(width * 1.5 * self.get_scaled_value())
                 # width = getattr(self, "_name_col_width", 120*self.scale_factor) 
                 # print(f'col width: {width}')
                 # print(f'col : {col} width: {width}')
@@ -8153,29 +8205,6 @@ class StockMonitorApp(tk.Tk):
             self.status_var.set("当前数据为空")
             return
 
-        def ensure_parentheses_balanced(expr: str) -> str:
-            expr = expr.strip()
-            left_count = expr.count("(")
-            right_count = expr.count(")")
-
-            # 自动补齐括号
-            if left_count > right_count:
-                expr += ")" * (left_count - right_count)
-            elif right_count > left_count:
-                expr = "(" * (right_count - left_count) + expr
-
-            # ✅ 如果原本已经完整成对，就不再包外层
-            if not (expr.startswith("(") and expr.endswith(")")):
-                expr = f"({expr})"
-            elif expr.startswith("((") and expr.endswith("))"):
-                # 如果已经双层包裹，就不处理
-                pass
-
-            # # 外层包裹一层括号
-            # if not (expr.startswith("(") and expr.endswith(")")):
-            #     expr = f"({expr})"
-
-            return expr
 
 
         # # === 测试 ===
@@ -8186,8 +8215,6 @@ class StockMonitorApp(tk.Tk):
 
 
         # ====== 条件清理 ======
-        import re
-
         bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
 
         # 2️⃣ 替换掉原 query 中的这些部分
@@ -8227,7 +8254,17 @@ class StockMonitorApp(tk.Tk):
 
         # 打印剔除条件列表
         if removed_conditions:
-            log.info(f"剔除不存在的列条件: {removed_conditions}")
+            # log.info(f"剔除不存在的列条件: {removed_conditions}")
+            # # print(f"剔除不存在的列条件: {removed_conditions}")
+            # print(f"剔除不存在的列条件: {removed_conditions}")
+            unique_conditions = tuple(sorted(set(removed_conditions)))
+            # 初始化缓存
+            if not hasattr(self, "_printed_removed_conditions"):
+                self._printed_removed_conditions = set()
+            # 只打印新的
+            if unique_conditions not in self._printed_removed_conditions:
+                print(f"剔除不存在的列条件: {unique_conditions}")
+                self._printed_removed_conditions.add(unique_conditions)
 
         if not valid_conditions:
             self.status_var.set("没有可用的查询条件")
@@ -12827,6 +12864,7 @@ class KLineMonitor(tk.Toplevel):
         self.search_combo3.pack(side="left", padx=5, fill="x", expand=True)
         self.search_combo3.bind("<Return>", lambda e: self.search_code_status())
         self.search_combo3.bind("<Button-3>", self.on_kline_monitor_right_click)
+        self.search_combo3.bind("<<ComboboxSelected>>", lambda e: self.search_code_status())
 
         # self.search_combo3.bind("<<ComboboxSelected>>", lambda e: self.apply_search())
         # self.search_var2.trace_add("write", self._on_search_var_change)
@@ -12992,13 +13030,46 @@ class KLineMonitor(tk.Toplevel):
     #     except Exception as e:
     #         toast_message(self, f"筛选语句错误: {e}")
 
+    # def update_search_combo3(self):
+    #     """刷新 search_combo3 的内容与默认选中值"""
+    #     # 获取最新历史记录
+    #     new_values = self.history3()
+        
+    #     # 更新下拉框列表
+    #     self.search_combo3['values'] = new_values
+
+    #     # 如果有历史记录，则自动设置第一个为当前值
+    #     if len(new_values) > 0:
+    #         self.search_var.set(new_values[0])
+    #     else:
+    #         self.search_var.set("")
+
+    # def refresh_search_combo3(self):
+    #     """刷新 KLine 搜索框的历史下拉值"""
+    #     if hasattr(self, "search_combo3") and self.search_combo3.winfo_exists():
+    #         try:
+    #             self.search_combo3["values"] = list(self.history3()) if callable(self.history3) else list(self.history3)
+    #         except Exception as e:
+    #             print(f"[refresh_search_combo3] 刷新失败: {e}")
     def refresh_search_combo3(self):
-        """刷新 KLine 搜索框的历史下拉值"""
+        """刷新 KLine 搜索框的历史下拉值，并自动更新当前选中项"""
         if hasattr(self, "search_combo3") and self.search_combo3.winfo_exists():
             try:
-                self.search_combo3["values"] = list(self.history3()) if callable(self.history3) else list(self.history3)
+                # 兼容 self.history3 是函数或直接是列表
+                values = self.history3() if callable(self.history3) else self.history3
+                values = list(values) if values else []
+                
+                # 更新下拉框内容
+                self.search_combo3["values"] = values
+
+                # 如果存在历史记录，则自动设置第一个值为当前输入框内容
+                if values:
+                    self.search_var.set(values[0])
+                else:
+                    self.search_var.set("")
             except Exception as e:
                 print(f"[refresh_search_combo3] 刷新失败: {e}")
+
 
 
     # def edit_code_status(self):
@@ -13064,7 +13135,6 @@ class KLineMonitor(tk.Toplevel):
                     pass
             return
 
-        # --- 2. 表达式过滤 TreeView 当前数据 ---
         try:
             # cols = self.tree["columns"]
             # rows = []
@@ -13523,6 +13593,81 @@ class KLineMonitor(tk.Toplevel):
 
         if query_text:
             try:
+                # --- 2. 表达式过滤 TreeView 当前数据 ---
+                # ====== 条件清理 ======
+                query = query_text
+                bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
+
+                # 2️⃣ 替换掉原 query 中的这些部分
+                for bracket in bracket_patterns:
+                    query = query.replace(f'and {bracket}', '')
+
+                conditions = [c.strip() for c in query.split('and')]
+                # print(f'conditions {conditions}')
+                valid_conditions = []
+                removed_conditions = []
+                # print(f'conditions: {conditions} bracket_patterns : {bracket_patterns}')
+                for cond in conditions:
+                    cond_clean = cond.lstrip('(').rstrip(')')
+                    # cond_clean = ensure_parentheses_balanced(cond_clean)
+                    if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 or cond.find('or') >= 0:
+                        if not any(bp.strip('() ').strip() == cond_clean for bp in bracket_patterns):
+                            ensure_cond = ensure_parentheses_balanced(cond)
+                            # print(f'cond : {cond} ensure_cond : {ensure_cond}')
+                            valid_conditions.append(ensure_cond)
+                            continue
+
+                    # 提取条件中的列名
+                    cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
+
+                    # 所有列都必须存在才保留
+                    if all(col in df.columns for col in cols_in_cond):
+                        valid_conditions.append(cond_clean)
+                    else:
+                        removed_conditions.append(cond_clean)
+                        # log.info(f"剔除不存在的列条件: {cond_clean}")
+
+                # 去掉在 bracket_patterns 中出现的内容
+                removed_conditions = [
+                    cond for cond in removed_conditions
+                    if not any(bp.strip('() ').strip() == cond.strip() for bp in bracket_patterns)
+                ]
+
+                # 打印剔除条件列表
+                if removed_conditions:
+                    # print(f"剔除不存在的列条件: {removed_conditions}")
+                    unique_conditions = tuple(sorted(set(removed_conditions)))
+                    # 初始化缓存
+                    if not hasattr(self, "_printed_removed_conditions"):
+                        self._printed_removed_conditions = set()
+                    # 只打印新的
+                    if unique_conditions not in self._printed_removed_conditions:
+                        print(f"剔除不存在的列条件: {unique_conditions}")
+                        self._printed_removed_conditions.add(unique_conditions)
+
+                if not valid_conditions:
+                    self.status_var.set("没有可用的查询条件")
+                    return
+                # print(f'valid_conditions : {valid_conditions}')
+                # ====== 拼接 final_query 并检查括号 ======
+                final_query = ' and '.join(f"({c})" for c in valid_conditions)
+                # print(f'final_query : {final_query}')
+                if bracket_patterns:
+                    final_query += ' and ' + ' and '.join(bracket_patterns)
+                # print(f'final_query : {final_query}')
+                left_count = final_query.count("(")
+                right_count = final_query.count(")")
+                if left_count != right_count:
+                    if left_count > right_count:
+                        final_query += ")" * (left_count - right_count)
+                    elif right_count > left_count:
+                        final_query = "(" * (right_count - left_count) + final_query
+
+                # ====== 决定 engine ======
+                query_engine = 'numexpr'
+                if any('index.' in c.lower() for c in valid_conditions):
+                    query_engine = 'python'
+
                 # # 中文列名兼容映射 使用中文查询时需要
                 # col_map = {
                 #     "评分": "score",
@@ -13535,7 +13680,7 @@ class KLineMonitor(tk.Toplevel):
                 # expr = query_text
                 # for k, v in col_map.items():
                 #     expr = expr.replace(k, v)
-                expr = query_text
+                expr = final_query
                 # 数字列转换，确保query能正常执行
                 for col in ["score", "percent", "volume", "now"]:
                     if col in df.columns:
@@ -13546,7 +13691,8 @@ class KLineMonitor(tk.Toplevel):
                     df = df[df["code"] == query_text]
                 else:
                     # pandas 表达式过滤
-                    df = df.query(expr)
+                    # df = df.query(expr)
+                    df = df.query(final_query, engine=query_engine)
 
             except Exception as e:
                 print(f"[apply_filters] 查询错误: {e}")
