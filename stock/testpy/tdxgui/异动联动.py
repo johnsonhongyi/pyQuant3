@@ -1073,7 +1073,9 @@ def send_to_tdx(stock_code):
         if len(stock_code.split()) == 2:
             stock_code,stock_name = stock_code.split()
         elif not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
-            messagebox.showerror("错误", "请输入有效的6位股票代码")
+            # messagebox.showerror("错误", "请输入有效的6位股票代码:{stock_code}")
+            print(f"请输入有效的6位股票代码:{stock_code}")
+            toast_message(root,f"请输入有效的6位股票代码:{stock_code}")
             return
 
         # 生成股票代码
@@ -3730,6 +3732,7 @@ def on_close_monitor(window_info):
 def on_closing(window, window_id):
     """在窗口关闭时调用。"""
     
+    # save_alerts()
     # 1. 停止后台线程
     executor.shutdown(wait=False)  # 或 wait=True，根据线程安全性
     stop_worker()
@@ -4237,18 +4240,208 @@ def create_monitor_window(stock_info):
 # ------------------------
 # 报警规则加载/保存
 # ------------------------
+# def load_alerts():
+#     global alerts_rules
+#     try:
+#         with open(ALERTS_FILE, "r") as f:
+#             alerts_rules = json.load(f)
+#     except:
+#         alerts_rules = {}
+
+# def save_alerts():
+#     with open(ALERTS_FILE, "w") as f:
+#         json.dump(alerts_rules, f, indent=2, ensure_ascii=False)
+
+
+# def update_meta_info(alert_rules, code, price=None, percent=None, vol=None):
+#     """
+#     自动更新指定股票的 meta 信息（如价格、涨幅、成交量等），
+#     并计算涨幅变化 delta_percent。
+#     兼容旧格式（list → dict）。
+#     """
+#     if code not in alert_rules:
+#         print(f"⚠️ 未找到代码 {code} 的监控规则，跳过更新")
+#         return alert_rules
+
+#     entry = alert_rules[code]
+#     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+#     # --- 兼容旧格式（list → dict） ---
+#     if isinstance(entry, list):
+#         entry = {
+#             "meta": {
+#                 "created_at": now_str,
+#                 "updated_at": now_str,
+#                 "created_price": price,
+#                 "created_percent": percent,
+#                 "created_vol": vol,
+#                 "updated_price": price,
+#                 "updated_percent": percent,
+#                 "updated_vol": vol,
+#                 "delta_percent": 0.0,
+#             },
+#             "rules": entry,
+#         }
+#         alert_rules[code] = entry
+#         return alert_rules
+
+#     # --- 已是新版结构 ---
+#     meta = entry.get("meta", {})
+
+#     # 初始化 created 值
+#     if meta.get("created_price") is None:
+#         meta["created_price"] = price
+#         meta["created_percent"] = percent
+#         meta["created_vol"] = vol
+#         meta["created_at"] = now_str
+
+#     # 更新 updated 值
+#     meta["updated_price"] = price
+#     meta["updated_percent"] = percent
+#     meta["updated_vol"] = vol
+#     meta["updated_at"] = now_str
+
+#     # --- 计算涨幅变化 ---
+#     try:
+#         if meta.get("created_percent") is not None and percent is not None:
+#             meta["delta_percent"] = round(percent - meta["created_percent"], 2)
+#     except Exception:
+#         meta["delta_percent"] = None
+
+#     entry["meta"] = meta
+#     alert_rules[code] = entry
+#     return alert_rules
+
+
+
+
+def upgrade_alert_rules(data):
+    """将旧版 list 结构升级为新版带 meta 的结构"""
+    from datetime import datetime
+    # now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now().strftime("%Y-%m-%d")
+    new_data = {}
+    for code, rules in data.items():
+        if isinstance(rules, list):
+            # 尝试取价格/涨幅/量
+            price = next((r["value"] for r in rules if r["field"]=="价格"), 0)
+            percent = next((r["value"] for r in rules if r["field"]=="涨幅"), 0)
+            vol = next((r["value"] for r in rules if r["field"]=="量"), 0)
+            new_data[code] = {
+                "meta": {
+                    "created_at": now,
+                    "updated_at": now,
+                    "created_price": price,
+                    "created_percent": percent,
+                    "created_vol": vol,
+                    "updated_price": price,
+                    "updated_percent": percent,
+                    "updated_vol": vol,
+                },
+                "rules": rules
+            }
+        else:
+            # 已经是新版，直接保留
+            new_data[code] = rules
+    return new_data
+
+# def load_alerts():
+#     """加载报警规则文件，若为旧格式则自动升级"""
+#     global alerts_rules
+
+#     if not os.path.exists(ALERTS_FILE):
+#         alerts_rules = {}
+#         return
+
+#     try:
+#         with open(ALERTS_FILE, "r", encoding="utf-8") as f:
+#             data = json.load(f)
+#     except UnicodeDecodeError:
+#         # 尝试 gbk 编码
+#         with open(ALERTS_FILE, "r", encoding="gbk") as f:
+#             data = json.load(f)
+#     except Exception as e:
+#         print(f"❌ 读取报警规则失败: {e}")
+#         alerts_rules = {}
+#         return
+
+#     # 检测是否需要升级
+#     needs_upgrade = any(isinstance(v, list) for v in data.values())
+#     if needs_upgrade:
+#         print("⚙️ 检测到旧版报警规则格式，正在升级...")
+#         data = upgrade_alert_rules(data)
+#         with open(ALERTS_FILE, "w", encoding="utf-8") as f:
+#             json.dump(data, f, indent=2, ensure_ascii=False)
+#         print("✅ 报警规则文件已自动升级为新版结构。")
+
+#     alerts_rules = data
+
 def load_alerts():
+    """加载报警规则文件，若为旧格式则自动升级，同时补齐 meta 时间和创建字段"""
     global alerts_rules
-    try:
-        with open(ALERTS_FILE, "r") as f:
-            alerts_rules = json.load(f)
-    except:
+
+    if not os.path.exists(ALERTS_FILE):
         alerts_rules = {}
+        return
+
+    try:
+        with open(ALERTS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except UnicodeDecodeError:
+        with open(ALERTS_FILE, "r", encoding="gbk") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"❌ 读取报警规则失败: {e}")
+        alerts_rules = {}
+        return
+
+    # 升级旧版 list 格式
+    needs_upgrade = any(isinstance(v, list) for v in data.values())
+    if needs_upgrade:
+        print("⚙️ 检测到旧版报警规则格式，正在升级...")
+        data = upgrade_alert_rules(data)
+        with open(ALERTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        print("✅ 报警规则文件已自动升级为新版结构。")
+
+    # ------------------ 补齐 meta ------------------
+    for code, item in data.items():
+        if isinstance(item, dict) and "rules" in item:
+            meta = item.get("meta", {})
+
+            # 补齐时间
+            created_at = meta.get("created_at")
+            updated_at = meta.get("updated_at")
+            if not created_at and updated_at:
+                meta["created_at"] = updated_at
+            if not updated_at and created_at:
+                meta["updated_at"] = created_at
+
+            # 补齐价格/涨幅/量
+            for field in ["price", "percent", "vol"]:
+                created_key = f"created_{field}"
+                updated_key = f"updated_{field}"
+                if created_key not in meta or meta[created_key] is None:
+                    if updated_key in meta:
+                        meta[created_key] = meta[updated_key]
+                if updated_key not in meta or meta[updated_key] is None:
+                    if created_key in meta:
+                        meta[updated_key] = meta[created_key]
+
+            item["meta"] = meta
+            data[code] = item
+
+    alerts_rules = data
+
+
 
 def save_alerts():
-    with open(ALERTS_FILE, "w") as f:
-        json.dump(alerts_rules, f, indent=2, ensure_ascii=False)
-
+    """保存报警规则"""
+    try:
+        with open(ALERTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(alerts_rules, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print(f"❌ 保存报警规则失败: {e}")
 # ------------------------
 # 报警添加/刷新
 # ------------------------
@@ -4572,6 +4765,47 @@ def get_centered_window_position(win_width, win_height, x_root=None, y_root=None
     print(x,y)
     return x, y
 
+def open_rules_overview_sort_column(tv, col, reverse):
+    l = [(tv.set(k, col), k) for k in tv.get_children('')]
+    
+    try:
+        # 尝试按数字排序
+        l.sort(key=lambda t: float(t[0].replace(',', '')), reverse=reverse)
+    except ValueError:
+        # 按字符串排序
+        l.sort(reverse=reverse)
+    
+    # 重排 Treeview
+    for index, (_, k) in enumerate(l):
+        tv.move(k, '', index)
+    
+    # 再次绑定列头点击事件，实现切换升序/降序
+    tv.heading(col, command=lambda _col=col: open_rules_overview_sort_column(tv, _col, not reverse))
+
+# # 存储每列的排序状态
+# sort_states = {}
+
+# def open_rules_overview_sort_column(tv, col, reverse):
+
+#     reverse = sort_states.get(col, False)  # 获取当前列的排序状态
+#     l = [(tv.set(k, col), k) for k in tv.get_children('')]
+    
+#     try:
+#         # 尝试按数字排序
+#         l.sort(key=lambda t: float(str(t[0]).replace(',', '')), reverse=reverse)
+#     except ValueError:
+#         # 按字符串排序
+#         l.sort(reverse=reverse)
+    
+#     # 重排 Treeview
+#     for index, (_, k) in enumerate(l):
+#         tv.move(k, '', index)
+    
+#     # 切换下一次点击的排序状态
+#     sort_states[col] = not reverse
+
+#     # 再次绑定列头点击事件
+#     tv.heading(col, command=lambda: open_rules_overview_sort_column(tv, col))
 
 def open_rules_overview(parent_win=None):
     """查看所有已存档的报警规则"""
@@ -4586,7 +4820,7 @@ def open_rules_overview(parent_win=None):
     frame = ttk.Frame(aw_rules)
     frame.pack(expand=True, fill="both")
 
-    win_width, win_height = 680, 400
+    win_width, win_height = 700, 400
     x, y = get_centered_window_position(win_width, win_height, parent_win=parent_win)
     aw_rules.geometry(f"{win_width}x{win_height}+{x}+{y}")
 
@@ -4602,60 +4836,174 @@ def open_rules_overview(parent_win=None):
     scrollbar = ttk.Scrollbar(frame)
     scrollbar.pack(side="right", fill="y")
 
-    cols = ("代码", "名称", "规则名", "条件", "启用状态")
+    # cols = ("代码", "名称", "规则名", "条件", "启用状态")
+    # tree = ttk.Treeview(frame, columns=cols, show="headings", yscrollcommand=scrollbar.set)
+    # scrollbar.config(command=tree.yview)
+
+    # for c in cols:
+    #     tree.heading(c, text=c)
+    #     tree.column(c, width=220 if c == "条件" else 60, anchor="w" if c == "条件" else "center")
+    # tree.pack(expand=True, fill="both")
+
+    cols = ("代码", "名称", "规则名", "条件", "启用状态", "创建时间", "更新时间")
     tree = ttk.Treeview(frame, columns=cols, show="headings", yscrollcommand=scrollbar.set)
     scrollbar.config(command=tree.yview)
 
     for c in cols:
-        tree.heading(c, text=c)
-        tree.column(c, width=220 if c == "条件" else 60, anchor="w" if c == "条件" else "center")
+        if c in ( "创建时间", "更新时间"):
+            width = 100 if c in ("条件", "规则名") else 100
+            # tree.heading(c, text=c)
+            tree.heading(c, text=c, anchor="center", 
+                             command=lambda _c=c: open_rules_overview_sort_column(tree, _c, False))
+            tree.column(c, width=width, anchor="w" if c in ("条件", "规则名") else "center")
+        else:
+            # width = 220 if c in ("条件", "规则名") else 800
+            # tree.heading(c, text=c)
+            tree.heading(c, text=c, anchor="center", 
+                             command=lambda _c=c: open_rules_overview_sort_column(tree, _c, False))
+            # tree.column(c, width=width, anchor="w" if c in ("条件", "规则名") else "center")
+            tree.column(c, width=220 if c == "条件" else 60, anchor="w" if c == "条件" else "center")
     tree.pack(expand=True, fill="both")
+    scrollbar.config(command=tree.yview)
 
     # 读取规则文件
     try:
-        with open(ALERTS_FILE, "r") as f:
+        with open(ALERTS_FILE, "r", encoding="utf-8") as f:
             alerts_rules_file = json.load(f)
     except:
-        alerts_rules_file = []
+        alerts_rules_file = {}
 
     tree.delete(*tree.get_children())
 
-    for code, rule_list in alerts_rules_file.items():
-        # 安全取股票名称
+    # # 遍历规则，兼容旧版 list 和新版 dict
+
+    # def iter_alerts(alerts):
+    #     if isinstance(alerts, dict):
+    #         for code, data in alerts.items():
+    #             if isinstance(data, list):  # 旧版
+    #                 yield code, data
+    #             elif isinstance(data, dict):  # 新版
+    #                 yield code, data.get("rules", [])
+    #     elif isinstance(alerts, list):
+    #         for item in alerts:
+    #             code = item.get("stock_code", "UNKNOWN")
+    #             rules = item.get("rules", [item])
+    #             yield code, rules
+
+
+    def iter_alerts(alerts):
+        if isinstance(alerts, dict):
+            for code, data in alerts.items():
+                if isinstance(data, list):  # 旧版
+                    yield code, data, {}
+                elif isinstance(data, dict):  # 新版
+                    yield code, data.get("rules", []), data.get("meta", {})
+        elif isinstance(alerts, list):
+            for item in alerts:
+                code = item.get("stock_code", "UNKNOWN")
+                rules = item.get("rules", [item])
+                meta = item.get("meta", {})
+                yield code, rules, meta
+
+
+    # 遍历规则，兼容旧版 list 和新版 dict
+    # for code, rule_list in iter_alerts(alerts_rules_file):
+    for code, rule_list, meta in iter_alerts(alerts_rules_file):
+        created_time_raw = meta.get("created_at", meta.get("updated_at", ""))
+        updated_time_raw = meta.get("updated_at", meta.get("created_at", ""))
+
+        # 转为 datetime 对象，再格式化为 "YYYY-MM-DD HH:MM"
+        def format_time(t_str):
+            try:
+                dt = datetime.strptime(t_str, "%Y-%m-%d %H:%M:%S")
+                return dt.strftime("%Y-%m-%d:%H")
+            except:
+                return t_str  # 若格式不对，则原样返回
+        created_time = format_time(created_time_raw)
+        updated_time = format_time(updated_time_raw)
+
         if sina_data_df is not None and not sina_data_df.empty:
             stock_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
         else:
             stock_name = monitor_windows.get(code, {}).get("stock_info", ["", "未知"])[1]
 
-        # 提取规则名（只取字段名）
-        rule_names = [rule.get("field", "") for rule in rule_list if rule.get("field") in ("价格", "量")]
+        if isinstance(rule_list, dict) and "rules" in rule_list:
+            # meta = rule_list.get("meta", {})
+            rules = rule_list.get("rules", [])
+        else:
+            # meta = {}
+            rules = rule_list
 
-        # 构造条件字符串
         conditions = []
         enabled_states = []
-        for rule in rule_list:
+        # created_times = []
+        # updated_times = []
+
+        # 只显示开启状态的规则名
+        rule_names = []
+        for rule in rules:
             field = rule.get("field")
             if field in ("价格", "量", "涨幅"):
                 op = rule.get("op", "")
                 value = rule.get("value", "")
                 conditions.append(f"{field} {op} {value}")
-                enabled_states.append("开" if rule.get("enabled", False) else "关")
+                enabled = rule.get("enabled", False)
+                enabled_states.append("开" if enabled else "关")
+                # created_times.append(created_time)
+                # updated_times.append(updated_time)
+                if enabled:
+                    rule_names.append(field)  # 仅加入已开启字段
 
-        if all(e == "开" for e in enabled_states):
-            enabled_state = "开"
-        elif all(e == "关" for e in enabled_states):
-            enabled_state = "关"
-        else:
-            enabled_state = "部分开"
-
-        # 插入 Treeview
         tree.insert("", "end", values=(
             code,
             stock_name,
-            ", ".join(rule_names),
+            ", ".join(rule_names),                       # ✅ 显示已开启规则名
             ", ".join(conditions),
-            enabled_state
+            "开" if all(e == "开" for e in enabled_states) else "关" if all(e=="关" for e in enabled_states) else "部分开",
+            created_time,           # ✅ 直接使用字符串
+            updated_time            # ✅ 直接使用字符串
         ))
+
+            # ", ".join(created_time),
+            # ", ".join(updated_time)
+
+    # for code, rule_list in iter_alerts(alerts_rules_file):
+    # # for code, rule_list in alerts_rules_file.items():
+    #     # 安全取股票名称
+    #     if sina_data_df is not None and not sina_data_df.empty:
+    #         stock_name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
+    #     else:
+    #         stock_name = monitor_windows.get(code, {}).get("stock_info", ["", "未知"])[1]
+
+    #     # 提取规则名（只取字段名）
+    #     rule_names = [rule.get("field", "") for rule in rule_list if rule.get("field") in ("价格", "量")]
+
+    #     # 构造条件字符串
+    #     conditions = []
+    #     enabled_states = []
+    #     for rule in rule_list:
+    #         field = rule.get("field")
+    #         if field in ("价格", "量", "涨幅"):
+    #             op = rule.get("op", "")
+    #             value = rule.get("value", "")
+    #             conditions.append(f"{field} {op} {value}")
+    #             enabled_states.append("开" if rule.get("enabled", False) else "关")
+
+    #     if all(e == "开" for e in enabled_states):
+    #         enabled_state = "开"
+    #     elif all(e == "关" for e in enabled_states):
+    #         enabled_state = "关"
+    #     else:
+    #         enabled_state = "部分开"
+
+    #     # 插入 Treeview
+    #     tree.insert("", "end", values=(
+    #         code,
+    #         stock_name,
+    #         ", ".join(rule_names),
+    #         ", ".join(conditions),
+    #         enabled_state
+    #     ))
 
     # 右键菜单
     def show_menu(event):
@@ -5307,15 +5655,47 @@ def calc_alert_window_position(win_width, win_height, x_root=None, y_root=None, 
     return x, y
 
 
+
 def ensure_alert_rules(code, price, percent, vol, alerts_rules, alerts_history, default_deltas, new=False, master=None):
     """
-    确保股票监控规则存在：
-    - 已有规则：保留 enabled 状态，只更新 value/delta
-    - 无规则：创建新规则（仅价格默认开启）
-    - 若 new=True：弹窗确认是否重置规则
+    确保股票监控规则存在（新版结构支持 meta 信息）
     """
-    rules = alerts_rules.get(code, [])
-    has_alert_history = any(a['stock_code'] == code for a in alerts_history)
+    # now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = datetime.now().strftime("%Y-%m-%d")
+    existing = alerts_rules.get(code, None)
+
+    # 🟢 如果是旧格式（list）
+    if isinstance(existing, list):
+        rules = existing
+        meta = {
+            "created_at": now,
+            "updated_at": now,
+            "created_price": float(price),
+            "created_percent": float(percent),
+            "created_vol": float(vol),
+            "updated_price": float(price),
+            "updated_percent": float(percent),
+            "updated_vol": float(vol)
+        }
+    # 🟢 新格式（dict，包含meta和rules）
+    elif isinstance(existing, dict):
+        rules = existing.get("rules", [])
+        meta = existing.get("meta", {})
+        meta.setdefault("created_at", now)
+        meta.setdefault("created_price", float(price))
+        meta.setdefault("created_percent", float(percent))
+        meta.setdefault("created_vol", float(vol))
+    else:
+        rules, meta = [], {
+            "created_at": now,
+            "updated_at": now,
+            "created_price": float(price),
+            "created_percent": float(percent),
+            "created_vol": float(vol),
+            "updated_price": float(price),
+            "updated_percent": float(percent),
+            "updated_vol": float(vol)
+        }
 
     # ========== 🟡 情况1：请求新建或重置 ==========
     if new:
@@ -5330,9 +5710,18 @@ def ensure_alert_rules(code, price, percent, vol, alerts_rules, alerts_history, 
                 {"field": "涨幅", "op": ">=", "value": float(percent), "enabled": False, "delta": default_deltas["涨幅"]},
                 {"field": "量",   "op": ">=", "value": float(vol),    "enabled": False, "delta": default_deltas["量"]},
             ]
-            alerts_rules[code] = rules
+            meta.update({
+                "created_at": now,
+                "updated_at": now,
+                "created_price": float(price),
+                "created_percent": float(percent),
+                "created_vol": float(vol),
+                "updated_price": float(price),
+                "updated_percent": float(percent),
+                "updated_vol": float(vol)
+            })
+            alerts_rules[code] = {"meta": meta, "rules": rules}
             return rules
-        # 否则就继续往下执行（仅更新值）
 
     # ========== 🟢 情况2：没有旧规则 ==========
     if not rules:
@@ -5341,7 +5730,7 @@ def ensure_alert_rules(code, price, percent, vol, alerts_rules, alerts_history, 
             {"field": "涨幅", "op": ">=", "value": float(percent), "enabled": False, "delta": default_deltas["涨幅"]},
             {"field": "量",   "op": ">=", "value": float(vol),    "enabled": False, "delta": default_deltas["量"]},
         ]
-        alerts_rules[code] = rules
+        alerts_rules[code] = {"meta": meta, "rules": rules}
         return rules
 
     # ========== 🟢 情况3：已有规则，仅更新值 ==========
@@ -5357,8 +5746,16 @@ def ensure_alert_rules(code, price, percent, vol, alerts_rules, alerts_history, 
             rule["value"] = float(vol)
             rule["delta"] = default_deltas["量"]
 
-    alerts_rules[code] = rules
+    meta.update({
+        "updated_at": now,
+        "updated_price": float(price),
+        "updated_percent": float(percent),
+        "updated_vol": float(vol)
+    })
+
+    alerts_rules[code] = {"meta": meta, "rules": rules}
     return rules
+
 
 
 def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_root=None, y_root=None):
@@ -5478,16 +5875,47 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     style.configure("TButton", padding=5)
     style.configure("TLabel", padding=5)
 
-    rules = alerts_rules.get(code)
+    # rules = alerts_rules.get(code)
+    rule_entry = alerts_rules.get(code, {})
+    if isinstance(rule_entry, dict):
+        rules = rule_entry.get("rules", [])
+    else:
+        rules = rule_entry or []
+
+
+    # if not rules or new:
+    #     # 若没有已有规则，创建默认新规则：
+    #     rules = [
+    #         {"field": "价格", "op": ">=", "value": float(price), "enabled": True,  "delta": default_deltas["价格"]},
+    #         {"field": "涨幅", "op": ">=", "value": float(percent),"enabled": False, "delta": default_deltas["涨幅"]},
+    #         {"field": "量",   "op": ">=", "value": float(vol),    "enabled": False, "delta": default_deltas["量"]},
+    #     ]
+    #     alerts_rules[code] = rules
 
     if not rules or new:
-        # 若没有已有规则，创建默认新规则：
+        # now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = datetime.now().strftime("%Y-%m-%d")
+        # 创建默认规则
         rules = [
             {"field": "价格", "op": ">=", "value": float(price), "enabled": True,  "delta": default_deltas["价格"]},
             {"field": "涨幅", "op": ">=", "value": float(percent),"enabled": False, "delta": default_deltas["涨幅"]},
             {"field": "量",   "op": ">=", "value": float(vol),    "enabled": False, "delta": default_deltas["量"]},
         ]
-        alerts_rules[code] = rules
+        # 新版格式：同时添加 meta
+        alerts_rules[code] = {
+            "meta": {
+                "created_at": now_str,
+                "updated_at": now_str,
+                "created_price": float(price),
+                "created_percent": float(percent),
+                "created_vol": float(vol),
+                "updated_price": float(price),
+                "updated_percent": float(percent),
+                "updated_vol": float(vol)
+            },
+            "rules": rules
+        }
+
 
 
     # 创建一个 Frame 来容纳规则列表
@@ -5609,6 +6037,20 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
         })
 
     # 保存时同步到每条规则
+    # def save_rule():
+    #     new_rules = []
+    #     for entry in entries:
+    #         new_rules.append({
+    #             "field": entry["field_var"].get(),
+    #             "op": entry["op_var"].get(),
+    #             "value": entry["val_var"].get(),
+    #             "enabled":entry["enabled_var"].get(),
+    #             "delta": entry["delta_var"].get()
+    #         })
+    #     alerts_rules[code] = new_rules
+    #     save_alerts()
+    #     toast_message(alert_window, f"{code} 报警规则已保存")
+    #     editor.destroy()
     def save_rule():
         new_rules = []
         for entry in entries:
@@ -5616,13 +6058,28 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
                 "field": entry["field_var"].get(),
                 "op": entry["op_var"].get(),
                 "value": entry["val_var"].get(),
-                "enabled":entry["enabled_var"].get(),
+                "enabled": entry["enabled_var"].get(),
                 "delta": entry["delta_var"].get()
             })
-        alerts_rules[code] = new_rules
+
+        # now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now = datetime.now().strftime("%Y-%m-%d")
+        meta = {
+            "updated_at": now,
+            "updated_price": float(price),
+            "updated_percent": float(percent),
+            "updated_vol": float(vol)
+        }
+
+        existing = alerts_rules.get(code, {})
+        if isinstance(existing, dict) and "meta" in existing:
+            meta = {**existing["meta"], **meta}
+
+        alerts_rules[code] = {"meta": meta, "rules": new_rules}
         save_alerts()
         toast_message(alert_window, f"{code} 报警规则已保存")
         editor.destroy()
+
 
     def del_rule():
 
@@ -5697,6 +6154,15 @@ def refresh_alert_rules_ui(stock_code):
         alert_tree.window_create(f"{stock_code}_{i}", column=3, window=chk)
 
 
+def get_rules(code):
+    r = alerts_rules.get(code)
+    if not r:
+        return []
+    if isinstance(r, dict) and "rules" in r:
+        return r["rules"]
+    elif isinstance(r, list):
+        return r
+    return []
 # -----------------------------
 # 检查单只股票是否触发报警
 # -----------------------------
@@ -5718,8 +6184,9 @@ def check_alert(stock_code, price, change, volume, name=None):
         name = monitor_windows.get(stock_code, {}).get('stock_info', [stock_code, ''])[1]
 
     val_map = {'价格': price, '涨幅': change, '量': volume}
-
-    for rule in alerts_rules[stock_code]:
+    
+    # for rule in alerts_rules[stock_code]:
+    for rule in get_rules(stock_code):
         if not rule.get('enabled', True):
             continue
 
@@ -5900,7 +6367,8 @@ def refresh_alert_center():
             name = monitor_windows.get(code, {}).get("stock_info", ["", "未知"])[1]
 
         # 取该股的规则列表（可能为空）
-        rule_list = alerts_rules.get(code, [])
+        # rule_list = alerts_rules.get(code, [])
+        rule_list = alerts_rules.get(code, {}).get("rules", [])
         if not rule_list:
             continue
 
@@ -5913,6 +6381,7 @@ def refresh_alert_center():
 
         # --- 构造“规则”列（阈值/操作，三合一） ---
         conds = []
+        get_rules(stock_code)
         for rule in rule_list:
             field = rule.get("field", "")
             if field in ("价格", "涨幅", "量"):
