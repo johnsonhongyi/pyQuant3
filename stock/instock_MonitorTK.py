@@ -917,7 +917,7 @@ def askstring_at_parent_single(parent, title, prompt, initialvalue=""):
     screen = get_monitor_by_point(0, 0)
     screen_width_limit = int(screen['width'] * 0.5)
 
-    base_width, base_height = 400, 200
+    base_width, base_height = 600, 300
     char_width = 8
     text_len = max(len(prompt), len(initialvalue))
     win_width = min(max(base_width, text_len * char_width // 2), screen_width_limit)
@@ -957,6 +957,8 @@ def askstring_at_parent_single(parent, title, prompt, initialvalue=""):
     tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
 
     dlg.bind("<Escape>", lambda e: on_cancel())
+    text.bind("<Return>",lambda e: on_ok())       # 回车确认
+    text.bind("<Shift-Return>", lambda e: text.insert("insert", "\n"))  # Shift+回车换行
 
     dlg.grab_set()
     parent.wait_window(dlg)
@@ -1774,7 +1776,12 @@ class StockMonitorApp(tk.Tk):
         
         # 💥 关键修正 1：在所有代码执行前，初始化为安全值
         self.scale_factor = 1.0 
-        
+        self.default_font = tkfont.nametofont("TkDefaultFont")
+        self.default_font_size = self.default_font.cget("size")
+        self.default_font_bold = tkfont.nametofont("TkDefaultFont").copy()
+        # self.default_font_bold.configure(weight="bold")  # 只加粗，不修改字号或字体
+        self.default_font_bold.configure(family="Microsoft YaHei", size=10, weight="bold")
+
         # 💥 关键修正 2：立即执行 DPI 缩放并重新赋值
         if sys.platform.startswith('win'):
             # 确保 self._apply_dpi_scaling() 总是返回一个 float
@@ -2046,6 +2053,8 @@ class StockMonitorApp(tk.Tk):
             print(f"分辨率: {width_px}×{height_px}")
             print(f"物理尺寸: {width_in:.2f}×{height_in:.2f} inch")
             print(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
+        print(f"分辨率: {width_px}×{height_px}")
+        print(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
         return  width_px
 
     def _check_dpi_change(self):
@@ -2061,9 +2070,8 @@ class StockMonitorApp(tk.Tk):
             else:
                 current_scale = 1
             # _pgscale = self.get_dynamic_dpi_scale()
-            # print(f'tk_scale : {current_scale}')
-            # print(self.print_tk_dpi_detail())
-            # print(f'_pgscale : {_pgscale}')
+            # print(f'current_scale : {current_scale} self.last_dpi_scale :{self.last_dpi_scale}')
+            # print(f'width_px : {width_px}')
             if abs(current_scale - self.last_dpi_scale) > 0.05:
                 print(f"[DPI变化检测] 从 {self.last_dpi_scale:.2f} → {current_scale:.2f}")
                 self._apply_scale_dpi_change(current_scale)
@@ -2076,34 +2084,35 @@ class StockMonitorApp(tk.Tk):
     def on_dpi_changed_qt(self, new_scale):
         """RDP 或 DPI 变化时自动缩放窗口"""
         try:
-            for k, v in self._pg_windows.items():
-                win = v.get("win")
-                try:
-                    if  v.get("win") is not None:
-                        # 已存在，聚焦并显示 (PyQt)
-                        geom = win.geometry()
-                        width, height = geom.width(), geom.height()
+            if  hasattr(self, "_pg_windows"):
+                for k, v in self._pg_windows.items():
+                    win = v.get("win")
+                    try:
+                        if  v.get("win") is not None:
+                            # 已存在，聚焦并显示 (PyQt)
+                            geom = win.geometry()
+                            width, height = geom.width(), geom.height()
 
-                        new_w = int(width * new_scale)
-                        new_h = int(height * new_scale)
-                        win.resize(new_w, new_h)
-                        code = v.get("code", "N/A")
-                        print(f"[DPI] code={code} 窗口自动放大到 {new_scale:.2f} 倍 ({new_w}x{new_h})")
-                        # 如果你使用 PyQtGraph 或 Label，也可重设字体：
-                        for child in win.findChildren(QtWidgets.QWidget):
-                            font = child.font()
-                            font.setPointSizeF(font.pointSizeF() * new_scale)
-                            child.setFont(font)
+                            new_w = int(width * new_scale)
+                            new_h = int(height * new_scale)
+                            win.resize(new_w, new_h)
+                            code = v.get("code", "N/A")
+                            print(f"[DPI] code={code} 窗口自动放大到 {new_scale:.2f} 倍 ({new_w}x{new_h})")
+                            # 如果你使用 PyQtGraph 或 Label，也可重设字体：
+                            for child in win.findChildren(QtWidgets.QWidget):
+                                font = child.font()
+                                font.setPointSizeF(font.pointSizeF() * new_scale)
+                                child.setFont(font)
 
-                except Exception as e:
-                    print(f'e:{e} pg win is None will remove:{v.get("win")}')
-                    del self._pg_windows[k]
-                finally:
-                    pass
+                    except Exception as e:
+                        print(f'e:{e} pg win is None will remove:{v.get("win")}')
+                        del self._pg_windows[k]
+                    finally:
+                        pass
                 
 
         except Exception as e:
-            LOG.error(f"[DPI] 自动缩放失败: {e}")
+            print(f"[DPI] 自动缩放失败: {e}")
 
     # def get_dynamic_dpi_scale(self):
     #     """通过当前显示器分辨率动态估算缩放比例"""
@@ -2134,13 +2143,13 @@ class StockMonitorApp(tk.Tk):
             self.geometry(f"{new_w}x{new_h}")
 
             # 可选：字体也缩放
-            default_font = tk.font.nametofont("TkDefaultFont")
-            size = int(default_font.cget("size") * scale_factor / self.scale_factor)
-            default_font.configure(size=size)
-
+            
+            size = int(self.default_font.cget("size") * scale_factor / self.scale_factor)
+            self.default_font.configure(size=size)
+            self.default_font_bold.configure(size=size)
             self.scale_factor = scale_factor
-            print(f"[自动缩放] 主窗口调整为 {scale_factor:.2f} 倍，尺寸 {new_w}x{new_h}")
-
+            print(f"[自动缩放] 主窗口调整为 {scale_factor:.2f} 倍，font_size:{self.default_font_size} new_size:{size} 尺寸 {new_w}x{new_h} ")
+ 
     def _apply_dpi_scaling(self,scale_factor=None):
         """自动计算并设置 Tkinter 的内部 DPI 缩放。"""
         # 获取系统的缩放因子 (例如 2.0)
@@ -2171,7 +2180,7 @@ class StockMonitorApp(tk.Tk):
             # b. 获取缩放后的字体 (可选，但推荐用于清晰度)
             # Tkinter 的 'tk scaling' 已经缩放了默认字体，但显式配置更稳健。
             # 这里我们使用一个基准字体，通常是 'TkDefaultFont'
-            default_font = tk.font.nametofont("TkDefaultFont")
+            default_font = self.default_font
             
             # 使用 ttk.Style 配置所有 Treeview 实例
             # 注意：配置行高必须在 Treeview 元素上完成
@@ -2823,7 +2832,8 @@ class StockMonitorApp(tk.Tk):
             except Exception:
                 stock_str = str(stock_info)
         if stock_str:
-            tk.Label(win, text=f"股票: {stock_str}", font=("Arial", 12, "bold")).pack(pady=1)
+            # tk.Label(win, text=f"股票: {stock_str}", font=("Arial", 12, "bold")).pack(pady=1)
+            tk.Label(win, text=f"股票: {stock_str}", font=self.default_font_bold).pack(pady=1)
 
         # 报警条件输入区
         frame = tk.Frame(win)
@@ -2951,6 +2961,7 @@ class StockMonitorApp(tk.Tk):
 
         self.search_history1 = []
         self.search_history2 = []
+        self.search_history3 = []
         self._search_job = None
 
         self.search_var1 = tk.StringVar()
@@ -2980,16 +2991,18 @@ class StockMonitorApp(tk.Tk):
             sync_history_callback = self.sync_history_from_QM,
             test_callback=self.on_test_code
         )
+            # search_combo3=self.search_combo3,
 
         # self.search_history1, self.search_history2 = self.load_search_history()
-        self.search_history1, self.search_history2 = self.query_manager.load_search_history()
+        self.search_history1, self.search_history2,self.search_history3 = self.query_manager.load_search_history()
 
         # 从 query_manager 获取历史
-        h1, h2 = self.query_manager.history1, self.query_manager.history2
+        h1, h2, h3 = self.query_manager.history1, self.query_manager.history2, self.query_manager.history3
 
         # 提取 query 字段用于下拉框
         self.search_history1 = [r["query"] for r in h1]
         self.search_history2 = [r["query"] for r in h2]   
+        self.search_history3 = [r["query"] for r in h3]
 
         # 其他功能按钮
         # tk.Button(ctrl_frame, text="清空", command=self.clean_search).pack(side="left", padx=2)
@@ -4267,8 +4280,8 @@ class StockMonitorApp(tk.Tk):
             # )
             # print("geometry:", self.detail_win.geometry())
             # 字体设置
-            font_style = tkfont.Font(family="微软雅黑", size=12)
-            self.txt_widget = tk.Text(self.detail_win, wrap="word", font=font_style)
+            # font_style = tkfont.Font(family="微软雅黑", size=12)
+            self.txt_widget = tk.Text(self.detail_win, wrap="word", font=self.default_font)
             self.txt_widget.pack(expand=True, fill="both")
             self.txt_widget.insert("1.0", category_content)
             self.txt_widget.config(state="disabled")
@@ -5014,8 +5027,9 @@ class StockMonitorApp(tk.Tk):
     #     if search_history2:
     #         self.search_history2 = [r["query"] for r in search_history2]
 
-    def sync_history_from_QM(self, search_history1=None, search_history2=None):
+    def sync_history_from_QM(self, search_history1=None, search_history2=None, search_history3=None):
         self.query_manager.clear_hits()
+
         if search_history1 is not None:
             if search_history1 is self.query_manager.history2:
                 print("[警告] sync_history_from_QM 收到错误引用（history2）→ 覆盖 history1 被阻止")
@@ -5027,7 +5041,26 @@ class StockMonitorApp(tk.Tk):
                 print("[警告] sync_history_from_QM 收到错误引用（history1）→ 覆盖 history2 被阻止")
                 return
             self.search_history2 = [r["query"] for r in list(search_history2)]
+        if search_history3 is not None:
+            if search_history3 is self.query_manager.history1 or search_history3 is self.query_manager.history2:
+                print("[警告] sync_history_from_QM 收到错误引用（history1/2）→ 覆盖 history3 被阻止")
+                return
 
+            # ✅ 如果 self.search_history3 已存在，就直接更新原对象
+            if hasattr(self, "search_history3") and isinstance(self.search_history3, list):
+                self.search_history3.clear()
+                self.search_history3.extend([r["query"] for r in list(search_history3)])
+            else:
+                # 第一次初始化才创建
+                self.search_history3 = [r["query"] for r in list(search_history3)]
+            # ✅ 同步 combobox
+            # if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
+            # ✅ 如果 kline_monitor 存在，就刷新 ComboBox
+            if hasattr(self, "kline_monitor") and getattr(self.kline_monitor, "winfo_exists", lambda: False)():
+                try:
+                    self.kline_monitor.refresh_search_combo3()
+                except Exception as e:
+                    print(f"[警告] 刷新 KLineMonitor ComboBox 失败: {e}")
 
     def sync_history(self, val, search_history, combo, history_attr, current_key):
 
@@ -5131,13 +5164,17 @@ class StockMonitorApp(tk.Tk):
         # 取前5个类别
         # current_categories = set(top5.keys())
         current_categories =  list(top5.keys())  #保持顺序
+        # 获取 Tk 默认字体
+        # default_font = tkfont.nametofont("TkDefaultFont").copy()
+        # default_font.configure(weight="bold")  # 只加粗，不修改字号或字体
+        # font=("微软雅黑", 10, "bold"),
 
         # --- 标签初始化 ---
         if not hasattr(self, "lbl_category_result"):
             self.lbl_category_result = tk.Label(
                 self,
                 text="",
-                font=("微软雅黑", 10, "bold"),
+                font=self.default_font_bold,
                 fg="green",
                 bg="#f7f7f7",
                 anchor="w",
@@ -5328,13 +5365,14 @@ class StockMonitorApp(tk.Tk):
 
         added = [c for c in current_categories if c not in prev_categories]
         removed = [c for c in prev_categories if c not in current_categories]
-
+        # default_font = tkfont.nametofont("TkDefaultFont").copy()
+        # default_font.configure(weight="bold")  # 只加粗，不修改字号或字体
         # === 有新增或消失 ===
         if added or removed:
             if added:
-                tk.Label(scroll_frame, text="🆕 新增概念", font=("微软雅黑", 11, "bold"), fg="green").pack(anchor="w", pady=(0, 5))
+                tk.Label(scroll_frame, text="🆕 新增概念", font=self.default_font, fg="green").pack(anchor="w", pady=(0, 5))
                 for c in added:
-                    tk.Label(scroll_frame, text=c, fg="blue", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+                    tk.Label(scroll_frame, text=c, fg="blue", font=self.default_font_bold).pack(anchor="w", padx=5)
                     stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)[:limit]  # 只取前 limit
                     for code, name, percent, volume in stocks:
                         lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}",
@@ -5349,14 +5387,14 @@ class StockMonitorApp(tk.Tk):
                         self._label_widgets.append(lbl)
 
             if removed:
-                tk.Label(scroll_frame, text="❌ 消失概念", font=("微软雅黑", 11, "bold"), fg="red").pack(anchor="w", pady=(10, 5))
+                tk.Label(scroll_frame, text="❌ 消失概念", font=self.default_font_bold, fg="red").pack(anchor="w", pady=(10, 5))
                 for c in removed:
-                    tk.Label(scroll_frame, text=c, fg="gray", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+                    tk.Label(scroll_frame, text=c, fg="gray", font=self.default_font_bold).pack(anchor="w", padx=5)
 
         else:
-            tk.Label(scroll_frame, text="📊 当前前5概念", font=("微软雅黑", 11, "bold"), fg="blue").pack(anchor="w", pady=(0, 5))
+            tk.Label(scroll_frame, text="📊 当前前5概念", font=self.default_font_bold, fg="blue").pack(anchor="w", pady=(0, 5))
             for c in current_categories[:5]:
-                tk.Label(scroll_frame, text=c, fg="black", font=("微软雅黑", 10, "bold")).pack(anchor="w", padx=5)
+                tk.Label(scroll_frame, text=c, fg="black", font=self.default_font_bold).pack(anchor="w", padx=5)
                 stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)[:limit]  # 只取前 limit
                 for code, name, percent, volume in stocks:
                     lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}",
@@ -5945,7 +5983,7 @@ class StockMonitorApp(tk.Tk):
         visible_count = len(df_concept[df_concept["percent"] > 2])
         total_count = len(df_concept)
         lbl_status = tk.Label(btn_frame, text=f"显示 {visible_count}/{total_count} 只", anchor="e",
-                              fg="#555", font=("微软雅黑", 9))
+                              fg="#555", font=self.default_font)
         lbl_status.pack(side="right", padx=8)
         win._status_label_top10 = lbl_status
 
@@ -6228,7 +6266,7 @@ class StockMonitorApp(tk.Tk):
         visible_count = len(df_concept[df_concept["percent"] > 2])
         total_count = len(df_concept)
         lbl_status = tk.Label(btn_frame, text=f"显示 {visible_count}/{total_count} 只", anchor="e",
-                              fg="#555", font=("微软雅黑", 9))
+                              fg="#555", font=self.default_font)
         lbl_status.pack(side="right", padx=8)
         win._status_label_top10 = lbl_status
 
@@ -7121,7 +7159,7 @@ class StockMonitorApp(tk.Tk):
                     save_concept_pg_data(win, concept_name)  # 已改写为安全单概念保存
 
             self.save_window_position_qt(win, f"概念分析Top{top_n}")
-            self._pg_windows.pop(code, None)
+            self._pg_windows.pop(unique_code, None)
             self._pg_data_hash.pop(code, None)
             evt.accept()
 
@@ -8072,14 +8110,14 @@ class StockMonitorApp(tk.Tk):
         win = tk.Toplevel(self)
         win.title(f"股票详情 - {code}")
         win.geometry("400x300")
-        tk.Label(win, text=f"正在加载个股 {code} ...", font=("微软雅黑", 12, "bold")).pack(pady=10)
+        tk.Label(win, text=f"正在加载个股 {code} ...", font=self.default_font_bold).pack(pady=10)
 
         # 如果有 df_filtered 数据，可以显示详细行情
         if hasattr(self, "_last_cat_dict"):
             for c, lst in self._last_cat_dict.items():
                 for row_code, name in lst:
                     if row_code == code:
-                        tk.Label(win, text=f"{row_code} {name}", font=("微软雅黑", 11)).pack(anchor="w", padx=10)
+                        tk.Label(win, text=f"{row_code} {name}", font=self.default_font).pack(anchor="w", padx=10)
                         # 可以加更多字段，如 trade、涨幅等
 
 
@@ -8774,6 +8812,8 @@ class StockMonitorApp(tk.Tk):
     #     toast_message(self, f"{code} 测试完成，共 {len(results)} 条规则")
 
     def on_test_code(self):
+        # if self.query_manager.current_key == 'history2':
+        #     return
         code = self.query_manager.entry_query.get().strip()
         result = getattr(self, "_Categoryresult", "")
         # if not code:
@@ -8834,7 +8874,7 @@ class StockMonitorApp(tk.Tk):
             combo = self.search_combo1
             var = self.search_var1
             key = "history1"
-        else:
+        elif which == 2:
             history = self.search_history2
             combo = self.search_combo2
             var = self.search_var2
@@ -8880,7 +8920,8 @@ class StockMonitorApp(tk.Tk):
 
         print("启动K线监控...")
         if not hasattr(self, "kline_monitor") or not getattr(self.kline_monitor, "winfo_exists", lambda: False)():
-            self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=15)
+            self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=15,history3=lambda: self.search_history3)
+            # self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=15,history3=self.search_history3)
         else:
             print("监控已在运行中。")
             # 前置窗口
@@ -9420,6 +9461,25 @@ class StockMonitorApp(tk.Tk):
     #         log.error(f"[save_window_position] 保存窗口位置失败: {e}")
 
 
+    # def load_window_position_qt_guisave(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
+    #     """从 JSON 中恢复 Qt 窗口位置（Base64 geometry）"""
+    #     try:
+    #         import base64, os, json
+    #         if not os.path.exists(file_path):
+    #             return
+
+    #         with open(file_path, "r", encoding="utf-8") as f:
+    #             data = json.load(f)
+
+    #         geom_b64 = data.get(window_name)
+    #         if geom_b64:
+    #             geom_bytes = base64.b64decode(geom_b64)
+    #             win.restoreGeometry(geom_bytes)
+    #             log.info(f"[load_window_position_qt] 已恢复 {window_name}")
+    #     except Exception as e:
+    #         log.error(f"[load_window_position_qt] 恢复窗口位置失败: {e}")
+
+
     def load_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE,
                                 default_width=500, default_height=500, offset_step=30):
         """加载 Qt 窗口位置（支持自动错开已存在的窗口）"""
@@ -9444,8 +9504,11 @@ class StockMonitorApp(tk.Tk):
                 if window_name in data:
                     pos = data[window_name]
                     # ✅ 直接使用存储的逻辑坐标，不乘 DPI
-                    width = int(pos.get("width", default_width)*scale)
-                    height = int(pos.get("height", default_height)*scale)
+
+                    # width = int(pos.get("width", default_width)*scale)
+                    width = int(pos.get("width", default_width))
+                    # height = int(pos.get("height", default_height)*scale)
+                    height = int(pos.get("height", default_height))
                     x = int(pos.get("x", 0))
                     y = int(pos.get("y", 0))
 
@@ -9588,6 +9651,44 @@ class StockMonitorApp(tk.Tk):
     #         log.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
 
 
+
+    # "概念分析Top1": "AdnQywACAAAAAAGUAAAApAAAAn8AAAHAAAABlwAAALQAAAJ8AAABvQAAAAAAAAAABEk=",
+    # "概念分析Top10": "AdnQywACAAAAAAC3AAAAuAAAA0AAAAJlAAAAugAAAMgAAAM9AAACYgAAAAAAAAAABEk="
+
+    # def save_window_position_qt_gui(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
+    #     """保存 PyQt 窗口位置到统一配置文件（Base64 存储 geometry，自动按 DPI 缩放）"""
+    #     try:
+    #         window_name = str(window_name)
+    #         from PyQt5 import QtCore
+    #         import base64
+    #         import os, json
+
+    #         # 获取窗口 geometry 字节串
+    #         geom_bytes = win.saveGeometry()
+    #         # 转成 Base64 可存 JSON
+    #         geom_b64 = base64.b64encode(geom_bytes).decode('ascii')
+
+    #         # 读取已有 JSON
+    #         data = {}
+    #         if os.path.exists(file_path):
+    #             try:
+    #                 with open(file_path, "r", encoding="utf-8") as f:
+    #                     data = json.load(f)
+    #             except Exception as e:
+    #                 log.error(f"[save_window_position_qt] 读取配置失败: {e}")
+
+    #         # 保存当前窗口 geometry
+    #         data[window_name] = geom_b64
+
+    #         with open(file_path, "w", encoding="utf-8") as f:
+    #             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    #         log.info(f"[save_window_position_qt] 已保存 {window_name}（Base64 geometry）")
+
+    #     except Exception as e:
+    #         log.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
+
+
     def save_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
         """保存 PyQt 窗口位置到统一配置文件（自动按 DPI 缩放）"""
         try:
@@ -9607,8 +9708,10 @@ class StockMonitorApp(tk.Tk):
             pos = {
                 "x": int(geom.x() ),
                 "y": int(geom.y() ),
-                "width": int(geom.width() / scale),
-                "height": int(geom.height() / scale)
+                # "width": int(geom.width() / scale),
+                "width": int(geom.width()),
+                # "height": int(geom.height() / scale)
+                "height": int(geom.height())
             }
 
             data = {}
@@ -9739,7 +9842,7 @@ class StockMonitorApp(tk.Tk):
 #     def __init__(self, master, search_var1, search_var2, search_combo1, search_combo2, history_file):
 #         super().__init__(master)  
 class QueryHistoryManager:
-    def __init__(self, root=None,search_var1=None, search_var2=None, search_combo1=None,search_combo2=None,auto_run=False,history_file="query_history.json",sync_history_callback=None,test_callback=None):
+    def __init__(self, root=None,search_var1=None, search_var2=None, search_var3=None,search_combo1=None,search_combo2=None,search_combo3=None,auto_run=False,history_file="query_history.json",sync_history_callback=None,test_callback=None):
         """
         root=None 时不创建窗口，只管理数据
         auto_run=True 时直接打开编辑窗口
@@ -9748,15 +9851,18 @@ class QueryHistoryManager:
         self.history_file = history_file
         self.search_var1 = search_var1
         self.search_var2 = search_var2
+        self.search_var3 = search_var3
         self.his_limit = 30
         self.search_combo1 = search_combo1
         self.search_combo2 = search_combo2
+        self.search_combo3 = search_combo3
         self.deleted_stack = []  # 保存被删除的 query 记录
 
         self.sync_history_callback = sync_history_callback
         self.test_callback = test_callback
         # 读取历史
-        self.history1, self.history2 = self.load_search_history()
+        # self.history1, self.history2 = self.load_search_history()
+        self.history1, self.history2, self.history3 = self.load_search_history()
         self.current_history = self.history1
         self.current_key = "history1"
         self.MAX_HISTORY = 500
@@ -9794,10 +9900,21 @@ class QueryHistoryManager:
         self.entry_query.bind("<Button-3>", self.on_right_click)
 
         # 下拉选择管理 history1 / history2
-        self.combo_group = ttk.Combobox(frame_input, values=["history1", "history2"], state="readonly", width=10)
+        # self.combo_group = ttk.Combobox(frame_input, values=["history1", "history2"], state="readonly", width=10)
+        # self.combo_group.set("history1")
+        # self.combo_group.pack(side="left", padx=5, ipady=1)
+        # self.combo_group.bind("<<ComboboxSelected>>", self.switch_group)
+
+        # 下拉选择管理 history1 / history2 / history3
+        self.combo_group = ttk.Combobox(
+            frame_input,
+            values=["history1", "history2", "history3"],  # 加入 history3
+            state="readonly", width=10
+        )
         self.combo_group.set("history1")
         self.combo_group.pack(side="left", padx=5, ipady=1)
         self.combo_group.bind("<<ComboboxSelected>>", self.switch_group)
+
 
         # --- Treeview ---
         self.tree = ttk.Treeview(
@@ -9948,6 +10065,100 @@ class QueryHistoryManager:
                 self.editor_frame.pack(fill="both", expand=True)  # 仅显示，不移动位置
 
 
+    # def save_search_history_h1h2(self, confirm_threshold=10):
+    #     #fix add test_code save clear history bug
+    #     """保存搜索历史，合并编辑记录到历史顶部，超过 confirm_threshold 条变动时提示确认"""
+    #     try:
+    #         # ---------- 工具函数 ----------
+    #         def dedup(history):
+    #             seen = set()
+    #             result = []
+    #             for r in history:
+    #                 q = r.get("query") if isinstance(r, dict) else str(r)
+    #                 if q not in seen:
+    #                     seen.add(q)
+    #                     result.append(r)
+    #             return result
+
+    #         def normalize_history(history):
+    #             normalized = []
+    #             for r in history:
+    #                 if not isinstance(r, dict):
+    #                     continue
+    #                 q = r.get("query", "")
+    #                 starred = r.get("starred", 0)
+    #                 note = r.get("note", "")
+    #                 if isinstance(starred, bool):
+    #                     starred = 1 if starred else 0
+    #                 elif not isinstance(starred, int):
+    #                     starred = 0
+    #                 normalized.append({"query": q, "starred": starred, "note": note})
+    #             return normalized
+
+    #         def merge_history(current, old):
+    #             seen = set()
+    #             result = []
+    #             for r in current:
+    #                 q = r.get("query") if isinstance(r, dict) else str(r)
+    #                 if q not in seen:
+    #                     seen.add(q)
+    #                     result.append(r)
+    #             for r in old:
+    #                 q = r.get("query") if isinstance(r, dict) else str(r)
+    #                 if q not in seen:
+    #                     seen.add(q)
+    #                     result.append(r)
+    #             return result[:self.MAX_HISTORY]
+
+    #         # ---------- 加载旧历史 ----------
+    #         old_data = {"history1": [], "history2": []}
+    #         if os.path.exists(self.history_file):
+    #             with open(self.history_file, "r", encoding="utf-8") as f:
+    #                 try:
+    #                     loaded_data = json.load(f)
+    #                     old_data["history1"] = dedup(loaded_data.get("history1", []))
+    #                     old_data["history2"] = dedup(loaded_data.get("history2", []))
+    #                 except json.JSONDecodeError:
+    #                     pass
+
+    #         # ---------- 规范当前历史 ----------
+    #         self.history1 = normalize_history(self.history1)
+    #         self.history2 = normalize_history(self.history2)
+
+    #         # ---------- 合并历史 ----------
+    #         merged_data = {
+    #             "history1": normalize_history(merge_history(self.history1, old_data.get("history1", []))),
+    #             "history2": normalize_history(merge_history(self.history2, old_data.get("history2", []))),
+    #         }
+
+    #         # ---------- 检测变动量 ----------
+    #         def changes_count(old_list, new_list):
+    #             old_set = {r['query'] for r in old_list}
+    #             new_set = {r['query'] for r in new_list}
+    #             return len(new_set - old_set) + len(old_set - new_set)
+
+    #         delta1 = changes_count(old_data.get("history1", []), merged_data["history1"])
+    #         delta2 = changes_count(old_data.get("history2", []), merged_data["history2"])
+
+    #         if delta1 + delta2 >= confirm_threshold:
+    #             if not messagebox.askyesno(
+    #                 "确认保存",
+    #                 f"搜索历史发生较大变动（{delta1 + delta2} 条），是否继续保存？"
+    #             ):
+    #                 print("❌ 用户取消保存搜索历史")
+    #                 return
+
+    #         # ---------- 写回文件 ----------
+    #         with open(self.history_file, "w", encoding="utf-8") as f:
+    #             json.dump(merged_data, f, ensure_ascii=False, indent=2)
+
+    #         print(f"✅ 搜索历史已保存 "
+    #               f"(history1: {len(merged_data['history1'])} 条 / "
+    #               f"history2: {len(merged_data['history2'])} 条)，starred 已统一为整数")
+
+    #     except Exception as e:
+    #         messagebox.showerror("错误", f"保存搜索历史失败: {e}")
+
     def save_search_history(self, confirm_threshold=10):
         #fix add test_code save clear history bug
         """保存搜索历史，合并编辑记录到历史顶部，超过 confirm_threshold 条变动时提示确认"""
@@ -9994,24 +10205,27 @@ class QueryHistoryManager:
                 return result[:self.MAX_HISTORY]
 
             # ---------- 加载旧历史 ----------
-            old_data = {"history1": [], "history2": []}
+            old_data = {"history1": [], "history2": [] , "history3": []}
             if os.path.exists(self.history_file):
                 with open(self.history_file, "r", encoding="utf-8") as f:
                     try:
                         loaded_data = json.load(f)
                         old_data["history1"] = dedup(loaded_data.get("history1", []))
                         old_data["history2"] = dedup(loaded_data.get("history2", []))
+                        old_data["history3"] = dedup(loaded_data.get("history3", []))
                     except json.JSONDecodeError:
                         pass
 
             # ---------- 规范当前历史 ----------
             self.history1 = normalize_history(self.history1)
             self.history2 = normalize_history(self.history2)
+            self.history3 = normalize_history(self.history3)
 
             # ---------- 合并历史 ----------
             merged_data = {
                 "history1": normalize_history(merge_history(self.history1, old_data.get("history1", []))),
                 "history2": normalize_history(merge_history(self.history2, old_data.get("history2", []))),
+                "history3": normalize_history(merge_history(self.history3, old_data.get("history3", []))),
             }
 
             # ---------- 检测变动量 ----------
@@ -10022,6 +10236,7 @@ class QueryHistoryManager:
 
             delta1 = changes_count(old_data.get("history1", []), merged_data["history1"])
             delta2 = changes_count(old_data.get("history2", []), merged_data["history2"])
+            delta3 = changes_count(old_data.get("history3", []), merged_data["history3"])
 
             if delta1 + delta2 >= confirm_threshold:
                 if not messagebox.askyesno(
@@ -10032,18 +10247,91 @@ class QueryHistoryManager:
                     return
 
             # ---------- 写回文件 ----------
-            with open(self.history_file, "w", encoding="utf-8") as f:
-                json.dump(merged_data, f, ensure_ascii=False, indent=2)
+            # with open(self.history_file, "w", encoding="utf-8") as f:
+            #     json.dump(merged_data, f, ensure_ascii=False, indent=2)
 
+            # print(f"✅ 搜索历史已保存 "
+            #       f"(history1: {len(merged_data['history1'])} 条 / "
+            #       f"history2: {len(merged_data['history2'])} 条)，starred 已统一为整数")
+            # ---------- 写回文件 ----------
+            with open(self.history_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "history1": merged_data["history1"],
+                    "history2": merged_data["history2"],
+                    "history3": merged_data["history3"]  # ✅ 单独保存，不参与合并
+                }, f, ensure_ascii=False, indent=2)
+
+                    # "history3": self.history3,  # ✅ 单独保存，不参与合并
             print(f"✅ 搜索历史已保存 "
-                  f"(history1: {len(merged_data['history1'])} 条 / "
-                  f"history2: {len(merged_data['history2'])} 条)，starred 已统一为整数")
+                  f"(h1: {len(merged_data['history1'])} / "
+                  f"h2: {len(merged_data['history2'])} / "
+                  f"h3: {len(merged_data['history3'])})")
+
 
         except Exception as e:
             messagebox.showerror("错误", f"保存搜索历史失败: {e}")
 
-
     def load_search_history(self):
+        """从文件加载，支持 history3（仅加载与保存，不参与同步）"""
+        h1, h2, h3 = [], [], []
+        upgraded = False
+
+        if os.path.exists(self.history_file):
+            try:
+                with open(self.history_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+
+                # --- 标准化函数 ---
+                def normalize_starred_field(history_list):
+                    nonlocal upgraded
+                    for r in history_list:
+                        val = r.get("starred", 0)
+                        if isinstance(val, bool):
+                            r["starred"] = 1 if val else 0
+                            upgraded = True
+                        elif not isinstance(val, int):
+                            r["starred"] = 0
+                            upgraded = True
+
+                def dedup(history):
+                    seen = set()
+                    result = []
+                    for r in history:
+                        q = r.get("query", "")
+                        if q not in seen:
+                            seen.add(q)
+                            result.append(r)
+                    return result
+
+                raw_h1 = [self._normalize_record(r) for r in data.get("history1", [])]
+                raw_h2 = [self._normalize_record(r) for r in data.get("history2", [])]
+                raw_h3 = [self._normalize_record(r) for r in data.get("history3", [])]  # ✅ 新增
+
+                normalize_starred_field(raw_h1)
+                normalize_starred_field(raw_h2)
+                normalize_starred_field(raw_h3)
+
+                raw_h1, raw_h2, raw_h3 = map(dedup, (raw_h1, raw_h2, raw_h3))
+
+                h1 = raw_h1[:self.his_limit]
+                h2 = raw_h2[:self.his_limit]
+                h3 = raw_h3[:self.his_limit]
+
+                if upgraded:
+                    with open(self.history_file, "w", encoding="utf-8") as f:
+                        json.dump(
+                            {"history1": raw_h1, "history2": raw_h2, "history3": raw_h3},
+                            f, ensure_ascii=False, indent=2
+                        )
+                    print("✅ 自动升级 search_history.json，starred 字段格式已统一")
+
+            except Exception as e:
+                messagebox.showerror("错误", f"加载搜索历史失败: {e}")
+
+        return h1, h2, h3
+
+
+    def load_search_history_h1h2(self):
         """从文件加载，只取最后 N 条作为当前编辑数据，并自动升级 starred 字段为整数"""
         h1, h2 = [], []
         upgraded = False  # 是否发生过格式升级
@@ -10120,6 +10408,16 @@ class QueryHistoryManager:
         else:
             return {"query": str(r), "starred":  0, "note": ""}
 
+    # def switch_group(self, event=None):
+    #     group = self.combo_group.get()
+    #     self.current_key = group
+    #     if group == "history1":
+    #         self.current_history = self.history1
+    #     elif group == "history2":
+    #         self.current_history = self.history2
+    #     elif group == "history3":
+    #         self.current_history = self.history3  # ✅ 新增
+    #     self.refresh_tree()
 
     def switch_group(self, event=None):
         self.clear_hits()
@@ -10130,10 +10428,12 @@ class QueryHistoryManager:
         if sel == "history1":
             self.current_history = self.history1
             self.current_key = "history1"
-        else:
+        elif sel == "history2":
             self.current_history = self.history2
             self.current_key = "history2"
-
+        elif sel == "history3":
+            self.current_history = self.history3
+            self.current_key = "history3"
         print(f"[SWITCH] 当前分组切换到：{sel}")
         self.refresh_tree()
 
@@ -10158,15 +10458,18 @@ class QueryHistoryManager:
             if self.current_key == "history1":
                 self.history1[idx]["query"] = new_query
 
-            else:
+            elif self.current_key == "history2":
                 self.history2[idx]["query"] = new_query
+
+            elif self.current_key == "history3":
+                self.history3[idx]["query"] = new_query
 
             # ✅ 设置全局标志（主窗口 sync_history 会读取）
             self._just_edited_query = (old_query, new_query)
             # self.sync_history_current(record)
             self.refresh_tree()
-            if self.current_key == "history1":
-                self.use_query(new_query)
+            # if self.current_key == "history1":
+            self.use_query(new_query)
             # self.save_search_history()
 
     def add_query(self):
@@ -10200,6 +10503,8 @@ class QueryHistoryManager:
             self.history1 = self.current_history
         elif  self.current_key == "history2":
             self.history2 = self.current_history
+        elif  self.current_key == "history3":
+            self.history3 = self.current_history
 
         self.refresh_tree()
         self.entry_query.delete(0, tk.END)
@@ -10393,8 +10698,11 @@ class QueryHistoryManager:
                 # ⚠️ 同步到主视图
                 if self.current_key == "history1":
                     self.history1[idx]["note"] = new_note
-                else:
+                elif self.current_key == "history2":
                     self.history2[idx]["note"] = new_note
+                elif self.current_key == "history3":
+                    self.history3[idx]["note"] = new_note
+                # if self.current_key != "history1":
                 self.current_history[idx]["note"] = new_note
                 # 同步到主视图的 combobox values（如果你用的是 query 字符串列表）
                 # 如果你维护 combobox values 为 [r["query"] for r in self.history1]，备注不影响 combobox
@@ -10426,13 +10734,62 @@ class QueryHistoryManager:
                 values = list(self.search_combo1["values"])
                 values.insert(0, query)
                 self.search_combo1["values"] = values
-        else:  # history2
+        elif self.current_key == "history2": # history2
             self.search_var2.set(query)
             # self.history2 = self.current_history
             if query not in self.search_combo2["values"]:
                 values = list(self.search_combo2["values"])
                 values.insert(0, query)
                 self.search_combo2["values"] = values
+        # elif self.current_key == "history3": # history2
+        #     # self.search_var3.set(query)
+        #     # # self.history3 = self.current_history
+        #     # if query not in self.search_combo3["values"]:
+        #     #     values = list(self.search_combo3["values"])
+        #     #     values.insert(0, query)
+        #     #     self.search_combo3["values"] = values
+        #     self.sync_history_callback(search_history3=self.history3)
+
+        elif self.current_key == "history3":
+            # query = self.tree.item(self.tree.focus(), "values")[0]  # 获取点击的 query
+            item = self.tree.selection()
+            if not item:
+                return
+            idx = int(item[0]) - 1
+            query = self.current_history[idx]["query"]
+
+            history_list = self.current_history  # 当前指向的列表（字典结构）
+
+            # --- 查找条目索引 ---
+            idx = next((i for i, item in enumerate(history_list) if item.get("query") == query), None)
+            if idx is not None and idx != 0:
+                # 将已有条目移动到最上面
+                item = history_list.pop(idx)
+                history_list.insert(0, item)
+            elif idx is None:
+                # 新条目，直接插入最上面
+                history_list.insert(0, {"query": query, "starred": 0, "note": ""})
+            self.current_history =  history_list
+            self.history3 =  self.current_history    
+            # # --- 更新下拉框显示 ---
+            # values = [item["query"] for item in history_list]
+            # if hasattr(self, "search_combo3"):
+            #     self.search_combo3["values"] = values
+            #     self.search_combo3.set(query)
+
+            # # --- 同步 Entry/Combobox 文本 ---
+            # if hasattr(self, "search_var3"):
+            #     self.search_var3.set(query)
+
+            # --- 可选回调同步到主程序 ---
+            if hasattr(self, "sync_history_callback") and callable(self.sync_history_callback):
+                try:
+                    self.sync_history_callback(search_history3=self.history3)
+                    self.refresh_tree()
+                except Exception as e:
+                    print(f"[警告] 同步 search_history3 失败: {e}")
+
+            print(f"✅ 已将 [{query}] 置顶 history3")
 
 
     # ========== 右键菜单 ==========
@@ -10460,6 +10817,11 @@ class QueryHistoryManager:
         同步主窗口与 QueryHistoryManager 的状态。
         支持 delete / add，带防循环保护与分组标识。
         """
+
+
+        # if history_key == 'history3':
+        #     return
+
         if history_key is None:
             history_key = self.current_key
 
@@ -10470,9 +10832,10 @@ class QueryHistoryManager:
         # --- 选择目标控件与历史 ---
         if history_key == "history1":
             combo, var, target = self.search_combo1, self.search_var1, self.history1
-        else:
+        elif history_key == "history2":
             combo, var, target = self.search_combo2, self.search_var2, self.history2
-
+        elif history_key == "history3":
+            combo, var, target = self.search_combo3, self.search_var3, self.history3
         # --- 修改本地历史数据 ---
         if action == "delete":
             target[:] = [r for r in target if r.get("query") != query]
@@ -10494,8 +10857,14 @@ class QueryHistoryManager:
             try:
                 if history_key == "history1":
                     self.sync_history_callback(search_history1=self.history1)
-                else:
+                    # self.sync_history_callback(search_history1=self.history1, current_key = history_key)
+                elif history_key == "history2":
                     self.sync_history_callback(search_history2=self.history2)
+                    # self.sync_history_callback(search_history2=self.history2, current_key = history_key)
+                elif history_key == "history3":
+                    self.sync_history_callback(search_history3=self.history3)
+                    # self.sync_history_callback(search_history3=self.history3, current_key = history_key)
+
             except Exception as e:
                 print(f"[SYNC ERR] {e}")
 
@@ -10516,10 +10885,12 @@ class QueryHistoryManager:
         record = self.current_history.pop(idx)
 
         # 精确识别所属分组
-        if self.current_history is self.history2:
-            history_key = "history2"
-        else:
-            history_key = "history1"
+        # if self.current_history is self.history2:
+        #     history_key = "history2"
+        # else:
+        #     history_key = "history1"
+
+        history_key = self.current_key
 
         # 保存完整删除记录（含 note/starred）
         self.deleted_stack.append({
@@ -10555,9 +10926,10 @@ class QueryHistoryManager:
         # 目标列表
         if history_key == "history1":
             target_history = self.history1
-        else:
+        elif history_key == "history2":
             target_history = self.history2
-
+        elif history_key == "history3":
+            target_history = self.history3
         # 防止重复
         if any(r.get("query") == record.get("query") for r in target_history):
             toast_message(self.root, f"已存在：{record.get('query')}", 1200)
@@ -10593,7 +10965,7 @@ class QueryHistoryManager:
         - 根据 record['hit'] 设置 hit 列显示，并设置背景颜色
         """
         # 自动同步当前显示的历史
-        self.current_history = self.history1 if self.current_key == "history1" else self.history2
+        # self.current_history = self.history1 if self.current_key == "history1" else self.history2
 
         # 清空 Treeview
         self.tree.delete(*self.tree.get_children())
@@ -10984,7 +11356,7 @@ class ColumnSetManager(tk.Toplevel):
             # b. 获取缩放后的字体 (可选，但推荐用于清晰度)
             # Tkinter 的 'tk scaling' 已经缩放了默认字体，但显式配置更稳健。
             # 这里我们使用一个基准字体，通常是 'TkDefaultFont'
-            default_font = tk.font.nametofont("TkDefaultFont")
+            default_font = self.default_font
             
             # 使用 ttk.Style 配置所有 Treeview 实例
             # 注意：配置行高必须在 Treeview 元素上完成
@@ -12105,7 +12477,7 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
 
 
 class KLineMonitor(tk.Toplevel):
-    def __init__(self, parent, get_df_func, refresh_interval=30):
+    def __init__(self, parent, get_df_func, refresh_interval=30,history3=None):
         super().__init__(parent)
         self.master = parent
         self.get_df_func = get_df_func
@@ -12113,7 +12485,7 @@ class KLineMonitor(tk.Toplevel):
         self.stop_event = threading.Event()
         self.sort_column = None
         self.sort_reverse = False
-
+        self.history3 = history3
         # 点击计数器
         self.click_count = 0
 
@@ -12251,10 +12623,19 @@ class KLineMonitor(tk.Toplevel):
 
 
         # --- 搜索框区域 ---
-        tk.Label(self.status_frame, text="查代码:").pack(side="left", padx=(5, 0))
+        # tk.Label(self.status_frame, text="查代码:").pack(side="left", padx=(5, 0))
+        # self.search_var = tk.StringVar()
+        # self.search_entry = tk.Entry(self.status_frame, textvariable=self.search_var, width=10)
+        # self.search_entry.pack(side="left", padx=3)
+
         self.search_var = tk.StringVar()
-        self.search_entry = tk.Entry(self.status_frame, textvariable=self.search_var, width=10)
-        self.search_entry.pack(side="left", padx=3)
+        self.search_combo3 = ttk.Combobox(self.status_frame, textvariable=self.search_var, values=self.history3(), width=20)
+        self.search_combo3.pack(side="left", padx=5, fill="x", expand=True)
+        self.search_combo3.bind("<Return>", lambda e: self.search_code_status())
+        self.search_combo3.bind("<Button-3>", self.on_kline_monitor_right_click)
+
+        # self.search_combo3.bind("<<ComboboxSelected>>", lambda e: self.apply_search())
+        # self.search_var2.trace_add("write", self._on_search_var_change)
 
         # 搜索按钮
         self.search_btn = tk.Button(
@@ -12262,10 +12643,10 @@ class KLineMonitor(tk.Toplevel):
         )
         self.search_btn.pack(side="left", padx=3)
 
-        # 绑定回车键快速查询
-        self.search_entry.bind("<Return>", lambda e: self.search_code_status())
-        # 绑定右键事件
-        self.search_entry.bind("<Button-3>", self.on_kline_monitor_right_click)
+        # # 绑定回车键快速查询
+        # self.search_entry.bind("<Return>", lambda e: self.search_code_status())
+        # # 绑定右键事件
+        # self.search_entry.bind("<Button-3>", self.on_kline_monitor_right_click)
 
 
         # EDIT按钮
@@ -12273,16 +12654,9 @@ class KLineMonitor(tk.Toplevel):
             self.status_frame, text="编辑", cursor="hand2", command=self.edit_code_status)
         self.search_btn2.pack(side="left", padx=3)
 
-        # --- 加载历史查询 ---
-        if os.path.exists("last_query.json"):
-            try:
-                with open("last_query.json", "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.last_query = data.get("last_query", "")
-                    if self.last_query:
-                        self.search_var.set(self.last_query)
-            except Exception as e:
-                print(f"读取 last_query.json 出错: {e}")
+        if len(self.history3()) > 0:
+            self.search_var.set(self.history3()[0])
+
 
         # 启动刷新线程
         threading.Thread(target=self.refresh_loop, daemon=True).start()
@@ -12290,16 +12664,16 @@ class KLineMonitor(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.on_kline_monitor_close)
 
 
-         # --- 加载历史查询 ---
-        if os.path.exists("last_query.json"):
-            try:
-                with open("last_query.json", "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.last_query = data.get("last_query", "")
-                    if self.last_query:
-                        self.search_var.set(self.last_query)
-            except Exception as e:
-                print(f"读取 last_query.json 出错: {e}")
+        #  # --- 加载历史查询 ---
+        # if os.path.exists("last_query.json"):
+        #     try:
+        #         with open("last_query.json", "r", encoding="utf-8") as f:
+        #             data = json.load(f)
+        #             self.last_query = data.get("last_query", "")
+        #             if self.last_query:
+        #                 self.search_var.set(self.last_query)
+        #     except Exception as e:
+        #         print(f"读取 last_query.json 出错: {e}")
         # 加载窗口位置（可选）
         try:
             self.master.load_window_position(self, "KLineMonitor", default_width=760, default_height=460)
@@ -12423,13 +12797,45 @@ class KLineMonitor(tk.Toplevel):
 
     #     except Exception as e:
     #         toast_message(self, f"筛选语句错误: {e}")
+
+    def refresh_search_combo3(self):
+        """刷新 KLine 搜索框的历史下拉值"""
+        if hasattr(self, "search_combo3") and self.search_combo3.winfo_exists():
+            try:
+                self.search_combo3["values"] = list(self.history3()) if callable(self.history3) else list(self.history3)
+            except Exception as e:
+                print(f"[refresh_search_combo3] 刷新失败: {e}")
+
+
+    # def edit_code_status(self):
+    #     # query = self.search_var.get().strip()
+    #     query = self.history3()[0]
+    #     new_note = askstring_at_parent_single(self, "修改备注", "请输入新的备注：", initialvalue=query)
+    #     if new_note is not None:
+    #         self.search_var.set(new_note)
+    #         print(f'set self.search_var : {new_note}')
+    #         self.history3()[0] = new_note
+    #         self.search_code_status()
+
     def edit_code_status(self):
-        query = self.search_var.get().strip()
+        # 获取当前第一个历史项（仅示例）
+        query = self.history3()[0] if self.history3() else ""
         new_note = askstring_at_parent_single(self, "修改备注", "请输入新的备注：", initialvalue=query)
         if new_note is not None:
             self.search_var.set(new_note)
             print(f'set self.search_var : {new_note}')
+
+            # ✅ 修改底层数据（是引用，直接生效）
+            self.history3()[0] = new_note
+
+            # ✅ 刷新 combobox 的 values
+            self.search_combo3["values"] = self.history3()
+
+            # ✅ 设置当前显示值
+            self.search_combo3.set(new_note)
+
             self.search_code_status()
+
 
     def search_code_status(self):
         """
@@ -12963,14 +13369,15 @@ class KLineMonitor(tk.Toplevel):
         except Exception:
             pass
 
-        """窗口关闭时保存 last_query"""
-        try:
-            if getattr(self, "last_query", ""):
-                import json
-                with open("last_query.json", "w", encoding="utf-8") as f:
-                    json.dump({"last_query": self.last_query}, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"保存 last_query.json 出错: {e}")
+        # """窗口关闭时保存 last_query"""
+        # try:
+        #     if getattr(self, "last_query", ""):
+        #         import json
+        #         with open("last_query.json", "w", encoding="utf-8") as f:
+        #             json.dump({"last_query": self.last_query}, f, ensure_ascii=False, indent=2)
+        # except Exception as e:
+        #     print(f"保存 last_query.json 出错: {e}")
+
         # self.destroy()
         # if hasattr(self.master, "kline_monitor"):
         #     self.master.kline_monitor = None
