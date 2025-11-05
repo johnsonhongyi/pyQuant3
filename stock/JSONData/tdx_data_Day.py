@@ -4340,7 +4340,8 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     log.debug('red_cout:%s idx_close:%s'%(red_cout[:1],idx_close))
     # red_cout = eval(f"df.query('close >={idx_close}  and high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
     df2 = df[df.index >= idx_date]
-    green_cout = df2.query('(low < low.shift(1) and high < high.shift(1)) or (close < open)')
+
+    green_cout = df2[-ct.green_cout:].query('(low < low.shift(1) and high < high.shift(1)) or (close < open)')
     
     # df = df.dropna(subset=['perd'])
 
