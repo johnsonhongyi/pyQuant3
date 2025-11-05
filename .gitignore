@@ -144,3 +144,4 @@ stock/jupyterAlgo/Quant2023/TradingTutorial
 #规范行尾换行符
 * text=auto
 *.ipynb text eol=lf
+stock/concept_pg_data.db
