@@ -1962,6 +1962,40 @@ def get_next_weekday_time(target_hour, target_minute):
     next_trade_time = next_day.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
     return next_trade_time
 
+
+def get_next_trade_time_mod_notest(target_hour, target_minute):
+    """
+    获取下一个交易日的指定时间（未来时间）
+    """
+    now = datetime.now()
+    today_str = now.date().strftime('%Y-%m-%d')
+    
+    # 今天的目标时间
+    target_time_today = now.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+    
+    try:
+        next_trade_str = a_trade_calendar.get_next_trade_date(today_str)
+    except Exception:
+        # 异常直接取今天之后的下一交易日
+        next_trade_str = today_str  # 防止报错
+    
+    # 如果今天是交易日且还没到目标时间
+    if get_trade_date_status() and now < target_time_today:
+        return target_time_today
+    
+    # 否则使用下一个交易日
+    next_day = datetime.strptime(next_trade_str, '%Y-%m-%d')
+    next_trade_time = next_day.replace(hour=target_hour, minute=target_minute, second=0, microsecond=0)
+    
+    # 确保 next_trade_time > now，如果出现意外，顺延一天
+    if next_trade_time <= now:
+        next_trade_time += timedelta(days=1)
+        while not is_trade_day(next_trade_time):
+            next_trade_time += timedelta(days=1)
+    
+    return next_trade_time
+
+
 def get_next_weekday_time_out(target_hour, target_minute):
     """
     计算下一次在工作日的指定时间。
@@ -2058,47 +2092,93 @@ def schedule_checkpid_task():
     # root.after(3 * 60 * 1000, schedule_checkpid_task)
     schedule_task('checkpid_task',3 * 60 * 1000,lambda: schedule_checkpid_task)
 
-def daily_init():
-    global realdatadf, loaded_df, viewdf, date_write_is_processed, start_init, last_updated_time
+# def daily_init():
+#     global realdatadf, loaded_df, viewdf, date_write_is_processed, start_init, last_updated_time
+#     realdatadf = pd.DataFrame()
+#     loaded_df = None
+#     viewdf = pd.DataFrame()
+#     date_write_is_processed = False
+#     start_init = 0
+#     last_updated_time = None
+#     if date_entry.winfo_exists():
+#         try:
+#             date_entry.set_date(get_today())
+#         except Exception as e:
+#             print("还不能设置日期:", e)
+#     print("已执行每日开盘初始化")
+
+#     global last_update_time, message_cache
+#     # global refresh_registry
+#     # # 保存每个 stock_code/item_id 的刷新状态
+#     # refresh_registry = {}  # {(tree, window_info, item_id): {"after_id": None}}
+
+#     # 控制更新节流
+#     UPDATE_INTERVAL = 30  # 秒，更新UI最小间隔
+#     last_update_time = 0
+#     message_cache = []  # 缓存队列
+#     #加入队列检测
+#     process_queue(root)
+
+#     # 自动注册下一天任务
+#     schedule_daily_init(root)
+
+def daily_init(root):
+    """每日开盘初始化，重启所有监控窗口刷新"""
+    global realdatadf, loaded_df, viewdf
+    global date_write_is_processed, start_init, last_updated_time
+    global last_update_time, message_cache, refresh_registry, result_queue
+    global monitor_windows
+
+    print("🔄 [daily_init] 每日开盘初始化开始...")
+
+    # --- 1️⃣ 重置状态变量 ---
     realdatadf = pd.DataFrame()
     loaded_df = None
     viewdf = pd.DataFrame()
     date_write_is_processed = False
     start_init = 0
     last_updated_time = None
+
+    last_update_time = 0
+    message_cache = []
+    refresh_registry = {}
+    result_queue = queue.Queue()  # 清空旧队列
+
+    # --- 2️⃣ 恢复日期选择框 ---
     if date_entry.winfo_exists():
         try:
             date_entry.set_date(get_today())
         except Exception as e:
-            print("还不能设置日期:", e)
-    print("已执行每日开盘初始化")
+            print(f"[daily_init] 日期控件未就绪: {e}")
 
-    global last_update_time, message_cache
-    # global refresh_registry
-    # # 保存每个 stock_code/item_id 的刷新状态
-    # refresh_registry = {}  # {(tree, window_info, item_id): {"after_id": None}}
-
-    # 控制更新节流
-    UPDATE_INTERVAL = 30  # 秒，更新UI最小间隔
-    last_update_time = 0
-    message_cache = []  # 缓存队列
-    #加入队列检测
+    # --- 3️⃣ 启动主消息队列 ---
     process_queue(root)
 
-    # 自动注册下一天任务
+    # --- 4️⃣ 重新启动所有监控窗口的刷新任务 ---
+    if monitor_windows:
+        for stock_code, window_info in monitor_windows.items():
+            win = window_info.get("toplevel")
+            tree = window_info.get("monitor_tree")
+            stock_info = window_info.get("stock_info")
+            if not win or not tree:
+                continue
+            if not win.winfo_exists():
+                continue
+            try:
+                item_id = stock_info[0] if stock_info else stock_code
+                refresh_stock_data(window_info, tree, item_id)
+                print(f"✅ [daily_init] 已重启监控任务: {stock_code}")
+            except Exception as e:
+                print(f"⚠️ [daily_init] 任务重启失败 {stock_code}: {e}")
+    else:
+        print("⚠️ [daily_init] 没有检测到监控窗口，跳过刷新任务")
+
+    print("✅ [daily_init] 每日初始化完成，监控刷新系统已恢复")
+
+    # --- 5️⃣ 安排下一次自动初始化 ---
     schedule_daily_init(root)
 
-# def schedule_daily_init(root):
-#     now = datetime.now()
-#     today_925 = now.replace(hour=9, minute=20, second=0, microsecond=0)
-#     if now > today_925:
-#         # 如果已经过了 9:25，延迟到第二天
-#         # today_925 += timedelta(days=1)
-#         today_925 = get_next_weekday_time(9,20)
-#     delay_ms = int((today_925 - now).total_seconds() * 1000)
-#     root.after(delay_ms, lambda: (daily_init(), start_worker()))
-#     print(f"每日开盘定时初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
-#     status_label3.config(text=f"日初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
+
 
 # 保存上次的任务ID
 _scheduled_task_id = None
@@ -2872,6 +2952,13 @@ def refresh_stock_data(window_info, tree, item_id):
         except Exception as e:
             result_queue.put(("error", e, tree, window_info, item_id))
     threading.Thread(target=task, daemon=True).start()
+
+def handle_error(payload, tree, window_info, item_id):
+    """处理后台线程或消息队列中的错误"""
+    import traceback
+    print("⚠️ 异步任务出错:", payload)
+    traceback.print_exc()
+
 
 def process_queue(window):
     global last_update_time, message_cache
@@ -5379,52 +5466,6 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     # screen_width, screen_height = get_monitors_info()
     # 再显示出来
     editor.deiconify()
-    # # 默认位置：屏幕中心
-    # x = (screen_width - win_width) // 2
-    # y = (screen_height - win_height) // 2
-    # print(f'x :{x} y: {y}')
-    # # 优先使用右键位置
-    # if x_root is not None and y_root is not None:
-    #     x = x_root
-    #     y = y_root
-
-    #     # 如果鼠标右侧空间不足，窗口翻到左侧
-    #     if x + win_width > screen_width:
-    #         x = max(0, x_root - win_width)
-    #     print(f'x :{x} y: {y}')
-    # # 如果 parent_win 传入，则在父窗口右下角附近打开
-    # elif parent_win is not None:
-    #     parent_win.update_idletasks()
-    #     px = parent_win.winfo_x()
-    #     py = parent_win.winfo_y()
-    #     pw = parent_win.winfo_width()
-    #     ph = parent_win.winfo_height()
-    #     # x = px + pw // 2 - win_width // 2
-    #     # y = py + ph // 2 - win_height // 2
-    #     if px <= 1 or py <= 1:  # 未渲染
-    #         x = (screen_width - win_width) // 2
-    #         y = (screen_height - win_height) // 2
-    #     else:
-    #         x = px + pw//2 - win_width//2
-    #         y = py + ph//2 - win_height//2
-    #     print(f'x :{x} y: {y}')
-
-    # # 超出屏幕边界自动调整
-    # if x + win_width > screen_width:
-    #     x = screen_width - win_width
-    # if y + win_height > screen_height:
-    #     y = screen_height - win_height
-    # if x < 0:
-    #     x = 0
-    # if y < 0:
-    #     y = 0
-    # print(f'x :{x} y: {y}')
-    # x , y = calc_alert_window_position(win_width, win_height, x_root=x_root, y_root=y_root, parent_win=parent_win)
-    # print(f'calc_alert_window_position x :{x} y: {y}')
-
-    #    # 防止超出屏幕
-    # x = max(0, min(x, screen_width - win_width))
-    # y = max(0, min(y, screen_height - win_height))
 
     editor.geometry(f"{win_width}x{win_height}+{x}+{y}")
     editor.title(f"设置报警规则 - {name} {code}")
@@ -5437,24 +5478,6 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     style.configure("TButton", padding=5)
     style.configure("TLabel", padding=5)
 
-    # rules = alerts_rules.get(code, [])
-
-    # if not rules or new:
-    #     # 检查历史报警
-    #     has_alert_history = any(a['stock_code'] == code for a in alerts_history)
-        
-    #     rules = [
-    #         {"field": "价格", "op": ">=", "value": float(price), "enabled": not has_alert_history, "delta": default_deltas["价格"]},
-    #         {"field": "涨幅", "op": ">=", "value": float(percent), "enabled": not has_alert_history, "delta": default_deltas["涨幅"]},
-    #         {"field": "量", "op": ">=", "value": float(vol), "enabled": not has_alert_history, "delta": default_deltas["量"]},
-    #     ]
-    #     alerts_rules[code] = rules
-
-
-    # alerts_rules: dict mapping stock_code -> list of rule dicts
-    # default_deltas: dict like {"价格":.., "涨幅":.., "量":..}
-    # price, percent, vol: incoming阈值（字符串或数字）
-
     rules = alerts_rules.get(code)
 
     if not rules or new:
@@ -5465,35 +5488,6 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
             {"field": "量",   "op": ">=", "value": float(vol),    "enabled": False, "delta": default_deltas["量"]},
         ]
         alerts_rules[code] = rules
-    # else:
-    #     # 已有规则：只更新可变值（value, delta），并保留已有的 enabled/op/其它字段
-    #     # 先把已有规则按 field 索引
-    #     field_map = { r.get("field"): r for r in rules }
-
-    #     def upsert_field(field_name, new_value):
-    #         if field_name in field_map:
-    #             r = field_map[field_name]
-    #             # 只覆盖 value 与 delta（保留 enabled/op/其它自定义字段）
-    #             r["value"] = float(new_value)
-    #             r["delta"] = default_deltas.get(field_name, r.get("delta"))
-    #         else:
-    #             # 若不存在该 field，则新增，默认 enabled 仅对价格为 True
-    #             field_map[field_name] = {
-    #                 "field": field_name,
-    #                 "op": ">=", 
-    #                 "value": float(new_value),
-    #                 "enabled": True if field_name == "价格" else False,
-    #                 "delta": default_deltas.get(field_name)
-    #             }
-
-    #     upsert_field("价格", price)
-    #     upsert_field("涨幅", percent)
-    #     upsert_field("量", vol)
-
-    #     # 保持固定顺序输出（价格, 涨幅, 量）
-    #     new_rules = [field_map["价格"], field_map["涨幅"], field_map["量"]]
-    #     alerts_rules[code] = new_rules
-    #     rules = new_rules
 
 
     # 创建一个 Frame 来容纳规则列表
@@ -5512,9 +5506,6 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
             return True
         except ValueError:
             return False
-        # if re.match(r"^-?\d*\.?\d*$", P):
-        #     return True
-        # return False
 
     vcmd = rules_frame.register(validate_float)
 

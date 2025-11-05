@@ -2053,8 +2053,8 @@ class StockMonitorApp(tk.Tk):
             print(f"分辨率: {width_px}×{height_px}")
             print(f"物理尺寸: {width_in:.2f}×{height_in:.2f} inch")
             print(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
-        print(f"分辨率: {width_px}×{height_px}")
-        print(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
+        # print(f"分辨率: {width_px}×{height_px}")
+        # print(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
         return  width_px
 
     def _check_dpi_change(self):
@@ -2239,6 +2239,7 @@ class StockMonitorApp(tk.Tk):
 
             # 3. 重新配置列
             cols = tuple(self.current_cols)
+            # print(f'cols : {cols}')
             self.tree["columns"] = cols
             self.tree["displaycolumns"] = cols
             self.tree.configure(show="headings")
@@ -3417,12 +3418,16 @@ class StockMonitorApp(tk.Tk):
                     if self.sortby_col is not None:
                         print(f'update_tree sortby_col : {self.sortby_col} sortby_col_ascend : {self.sortby_col_ascend}')
                         df = df.sort_values(by=self.sortby_col, ascending=self.sortby_col_ascend)
-                    self.df_all = df.copy()
+                    if df is not None and not df.empty:
+                        time_s = time.time()
+                        df = detect_signals(df)
+                        self.df_all = df.copy()
+                        print(f'detect_signals duration time:{time.time()-time_s:.2f}')
                     # print(f"self.queue [Debug] df_all_hash={df_hash(self.df_all)} len={len(self.df_all)} time={datetime.now():%H:%M:%S}")
                     if self.search_var1.get() or self.search_var2.get():
                         self.apply_search()
                     else:
-                        self.refresh_tree(df)
+                        self.refresh_tree(self.df_all)
                     # 初始化一次
                     # self._concept_dict_global = {}
                     # for idx, row in self.df_all.iterrows():
@@ -5570,6 +5575,7 @@ class StockMonitorApp(tk.Tk):
         stock_code = code
         self.select_code = code
         self.sender.send(code)
+        pyperclip.copy(code)
         if self.push_stock_info(stock_code,self.df_all.loc[stock_code]):
             # 如果发送成功，更新状态标签
             self.status_var2.set(f"发送成功: {stock_code}")
@@ -5714,7 +5720,6 @@ class StockMonitorApp(tk.Tk):
         if hasattr(win, "_btn_copy_expr") and win._btn_copy_expr.winfo_exists():
             win._btn_copy_expr.destroy()
         def _copy_expr():
-            import pyperclip
             concept = getattr(win, "_concept_name","未知概念")
             q = f'category.str.contains("{concept}", na=False)'
             pyperclip.copy(q)
@@ -5968,7 +5973,6 @@ class StockMonitorApp(tk.Tk):
             if hasattr(win, "_btn_copy_expr") and win._btn_copy_expr.winfo_exists():
                 win._btn_copy_expr.destroy()
             def _copy_expr():
-                import pyperclip
                 concept = getattr(win, "_concept_name","未知概念")
                 q = f'category.str.contains("{concept}", na=False)'
                 pyperclip.copy(q)
@@ -8073,6 +8077,7 @@ class StockMonitorApp(tk.Tk):
     def _on_label_right_click(self,code ,idx):
         self._update_selection(idx)
         stock_code = code
+        pyperclip.copy(code)
         if self.push_stock_info(stock_code,self.df_all.loc[stock_code]):
             # 如果发送成功，更新状态标签
             self.status_var2.set(f"发送成功: {stock_code}")
@@ -8811,7 +8816,7 @@ class StockMonitorApp(tk.Tk):
     #     self.query_manager.refresh_tree()
     #     toast_message(self, f"{code} 测试完成，共 {len(results)} 条规则")
 
-    def on_test_code(self):
+    def on_test_code(self,onclick=False):
         # if self.query_manager.current_key == 'history2':
         #     return
         code = self.query_manager.entry_query.get().strip()
@@ -8828,8 +8833,22 @@ class StockMonitorApp(tk.Tk):
             # toast_message(self, "请输入6位数字股票代码")
             # return
             df_code = self.df_all
-        elif code and code.isdigit() and len(code) == 6: 
-            df_code = self.df_all.loc[[code]]
+        elif code and code.isdigit() and len(code) == 6:
+            # 初始化上次选中的 code
+            if not hasattr(self, "_select_on_test_code"):
+                self._select_on_test_code = None
+
+            # 判断是否为新的 code
+            if self._select_on_test_code != code:
+                # 更新缓存，并筛选对应行
+                self._select_on_test_code = code
+                df_code = self.df_all.loc[self.df_all.index == code]
+            else:
+                if onclick:
+                    df_code = self.df_all.loc[self.df_all.index == code]
+                # 连续选择相同 code，则显示全部
+                else:
+                    df_code = self.df_all
         else:
             df_code = self.df_all
 
@@ -10463,6 +10482,15 @@ class QueryHistoryManager:
 
             elif self.current_key == "history3":
                 self.history3[idx]["query"] = new_query
+                # --- 可选回调同步到主程序 ---
+                if hasattr(self, "sync_history_callback") and callable(self.sync_history_callback):
+                    try:
+                        self.sync_history_callback(search_history3=self.history3)
+                        self.refresh_tree()
+                    except Exception as e:
+                        print(f"[警告] 同步 search_history3 失败: {e}")
+
+                print(f"✅ 已将 [{query}] 置顶 history3")
 
             # ✅ 设置全局标志（主窗口 sync_history 会读取）
             self._just_edited_query = (old_query, new_query)
@@ -11017,7 +11045,7 @@ class QueryHistoryManager:
 
     def on_test_click(self):
             if callable(self.test_callback):
-                self.test_callback()
+                self.test_callback(onclick=True)
 
     def test_code(self, code_data):
         """
@@ -12129,7 +12157,135 @@ class RealtimeSignalManager:
     def __init__(self):
         self.state = {}
 
+    import numpy as np
+    import pandas as pd
+
     def update_signals(self, df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df['signal'] = ''
+        df['signal_strength'] = 0
+
+        # 保留 code 列为 index
+        if 'code' in df.columns:
+            df.set_index('code', inplace=True, drop=False)
+
+        # --- 准备状态 ---
+        # 如果 self.state 为空，初始化
+        for code, row in df.iterrows():
+            if code not in self.state:
+                self.state[code] = {
+                    'prev_now': row['now'],
+                    'today_high': row['high'],
+                    'today_low': row['low'],
+                    'prev_signal': None,
+                    'down_streak': 0,
+                    'recent_vols': [row['volume']]
+                }
+
+        # 转成 NumPy 数组加速
+        codes = df['code'].values
+        prev_now_arr = np.array([self.state[c]['prev_now'] for c in codes])
+        today_high_arr = np.array([self.state[c]['today_high'] for c in codes])
+        today_low_arr = np.array([self.state[c]['today_low'] for c in codes])
+        down_streak_arr = np.array([self.state[c]['down_streak'] for c in codes])
+        recent_vols_list = [self.state[c]['recent_vols'] for c in codes]
+        prev_signal_list = [self.state[c]['prev_signal'] for c in codes]
+
+        now_arr = df['now'].values
+        high_arr = df['high'].values
+        low_arr = df['low'].values
+        volume_arr = df['volume'].values
+        ma51d = df['ma51d'].values
+        ma512d = df['ma512d'].values
+        lastp1d = df['lastp1d'].values
+        lastp2d = df['lastp2d'].values
+        lastp3d = df['lastp3d'].values
+        macddif = df['macddif'].values
+        macddea = df['macddea'].values
+        macd = df['macd'].values
+        macdlast1 = df['macdlast1'].values
+        macdlast2 = df['macdlast2'].values
+        macdlast3 = df['macdlast3'].values
+        rsi = df['rsi'].values
+        kdj_j = df['kdj_j'].values
+        kdj_k = df['kdj_k'].values
+        kdj_d = df['kdj_d'].values
+        open_arr = df['open'].values
+
+        # --- 更新 high/low ---
+        today_high_arr = np.maximum(today_high_arr, high_arr)
+        today_low_arr = np.minimum(today_low_arr, low_arr)
+
+        # --- 计算最近 5 根 volume 均值 ---
+        avg_vol_arr = np.array([np.mean((recent + [v])[-5:]) for recent, v in zip(recent_vols_list, volume_arr)])
+        vol_boom_now = volume_arr > avg_vol_arr
+
+        # --- 大趋势指标 ---
+        trend_up = ma51d > ma512d
+        price_rise = (lastp1d > lastp2d) & (lastp2d > lastp3d)
+        macd_bull = (macddif > macddea) & (macd > 0)
+        macd_accel = (macdlast1 > macdlast2) & (macdlast2 > macdlast3)
+        rsi_mid = (rsi > 45) & (rsi < 75)
+        kdj_bull = (kdj_j > kdj_k) & (kdj_k > kdj_d)
+        kdj_strong = kdj_j > 60
+        morning_gap_up = open_arr <= low_arr * 1.001
+        intraday_up = now_arr > prev_now_arr
+        intraday_high_break = now_arr > today_high_arr
+        intraday_low_break = now_arr < today_low_arr
+
+        # 连续下跌 streak
+        down_streak_arr = np.where(now_arr < prev_now_arr, down_streak_arr + 1, 0)
+
+        # --- 计算 score ---
+        score = np.zeros(len(df))
+        score += trend_up * 2
+        score += price_rise * 1
+        score += macd_bull * 1
+        score += macd_accel * 2
+        score += rsi_mid * 1
+        score += np.nan_to_num(rsi - 50) * 0.05
+        score += kdj_bull * 1
+        score += kdj_strong * 1
+        score += morning_gap_up * 2
+        score += intraday_up * 1
+        score += intraday_high_break * 2
+        score += vol_boom_now * 1
+        score += ((down_streak_arr >= 2) & (now_arr > prev_now_arr * 1.005)) * 2
+
+        # 前置信号加权
+        prev_signal_arr = np.array([1 if s in ['BUY_N', 'BUY_S'] else 0 for s in prev_signal_list])
+        score += prev_signal_arr
+
+        df['signal_strength'] = score
+
+        # --- 信号等级 ---
+        df['signal'] = ''
+        df.loc[score >= 9, 'signal'] = 'BUY_S'
+        df.loc[(score >= 6) & (score < 9), 'signal'] = 'BUY_N'
+        df.loc[(score < 6) & (macd < 0), 'signal'] = 'SELL_WEAK'
+
+        # 卖出条件
+        sell_cond = ((macddif < macddea) & (macd < 0)) | ((rsi < 45) & (kdj_j < kdj_k)) | ((now_arr < ma51d) & (macdlast1 < macdlast2)) | intraday_low_break
+        df.loc[sell_cond, 'signal'] = 'SELL'
+
+        # --- 更新状态 ---
+        for i, code in enumerate(codes):
+            s = self.state[code]
+            s['prev_now'] = now_arr[i]
+            s['today_high'] = today_high_arr[i]
+            s['today_low'] = today_low_arr[i]
+            s['down_streak'] = down_streak_arr[i]
+            recent_vols_list[i].append(volume_arr[i])
+            if len(recent_vols_list[i]) > 5:
+                recent_vols_list[i] = recent_vols_list[i][-5:]
+            s['recent_vols'] = recent_vols_list[i]
+            s['prev_signal'] = df.at[code, 'signal']
+
+        return df
+
+
+
+    def update_signals_old(self, df: pd.DataFrame) -> pd.DataFrame:
         """
         df: 最新盘中数据，包含已有 columns
         返回 df，增加 'signal' 和 'signal_strength'
@@ -12322,7 +12478,45 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
     df["emotion"] = "中性"
 
     # df = calc_breakout_signals(df)
-    df = signal_manager.update_signals(df)
+    # df = signal_manager.update_signals_old(df.copy())
+    df = signal_manager.update_signals(df.copy())
+
+
+    # # --- 保留 code 作为 index ---
+    # df = df.set_index('code', drop=False)  # drop=False 保留 code 列
+
+    # # 计算新旧信号
+    # df_vect  = signal_manager.update_signals(df.copy())
+    # df_orig = signal_manager.update_signals_old(df.copy())
+
+    # # 对齐索引，确保可以逐行比较
+    # df_vect = df_vect.sort_index()
+    # df_orig = df_orig.sort_index()
+
+    # # --- 比较 signal_strength ---
+    # mask_strength = df_vect['signal_strength'] != df_orig['signal_strength']
+    # diff_idx_strength = df_vect.index[mask_strength]
+
+    # if len(diff_idx_strength) > 0:
+    #     print("signal_strength 不一致，行 code:", list(diff_idx_strength))
+    #     print(df_vect.loc[diff_idx_strength, ['name','signal_strength']])
+    #     print(df_orig.loc[diff_idx_strength, ['name','signal_strength']])
+    # else:
+    #     print("signal_strength 一致 ✅")
+
+    # # --- 比较 signal ---
+    # mask_signal = df_vect['signal'] != df_orig['signal']
+    # diff_idx_signal = df_vect.index[mask_signal]
+
+    # if len(diff_idx_signal) > 0:
+    #     print("signal 不一致，行 code:", list(diff_idx_signal))
+    #     print(df_vect.loc[diff_idx_signal, ['name','signal']])
+    #     print(df_orig.loc[diff_idx_signal, ['name','signal']])
+    # else:
+    #     print("signal 一致 ✅")
+
+    # import ipdb;ipdb.set_trace()
+
     df.loc[df.get("volume", 0) > 1.2, "emotion"] = "乐观"
     df.loc[df.get("volume", 0) < 0.8, "emotion"] = "悲观"
     return df
@@ -13096,7 +13290,7 @@ class KLineMonitor(tk.Toplevel):
         try:
             df = self.get_df_func()
             if df is not None and not df.empty:
-                df = detect_signals(df)
+                # df = detect_signals(df)
                 self.df_cache = df.copy()
                 self.after(0, self.apply_filters)
         except Exception as e:
