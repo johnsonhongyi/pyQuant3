@@ -3068,14 +3068,20 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     #             result.append(data)
                     #         else:
                     #             log.error(f'data is None,last code:{result[-1].code}')
-                    index_couts = len(results[0].index) if len(results[0]) > 10 else len(results[1].index)
-                    log.debug(f'index_couts:{index_couts}')
+                    
+                    # index_counts = len(results[0].index) if len(results[0]) > 10 else len(results[1].index)
+                    
+                    try:
+                        index_counts = len(results[0].index) if len(results[0]) > 10 else len(results[1].index)
+                    except Exception:
+                        index_counts = 0  # 或 log.error(...)
+                    log.debug(f'index_counts:{index_counts}')
                     for idx, data in enumerate(results):
                         if isinstance(data, Exception):
                             print("Got exception: {}".format(data))
                         else:
                             # print("Got OK result: {}".format(result))
-                            # if len(data) > 0 and len(data.index) == index_couts:
+                            # if len(data) > 0 and len(data.index) == index_counts:
                             if len(data) > 0:
                                 result.append(data)
                             else:
@@ -4404,85 +4410,168 @@ def using_Grouper(df, freq='5T', col='low', closed='right', label='right'):
     level_values = df.index.get_level_values
     return (df.groupby([level_values(i) for i in [0]] + [pd.Grouper(freq=freq, level=-1, closed=closed, label=label)]).agg(func))
 
-
-def select_multiIndex_index(df, index='ticktime', start=None, end=None, datev=None, code=None):
-    # df = df[df.index.duplicated()]
-
-    # df = df.drop_duplicates('volume')
-
-    if len(str(df.index.get_level_values(1)[-1])) > 10:
-        index_date = str(df.index.get_level_values(1)[-1])[:10]
+def fix_start_end_datetime_for_index(df, start, end, index='ticktime', datev=None):
+    """
+    Auto-complete start and end datetimes based on MultiIndex date level.
+    Return as pd.Timestamp
+    """
+    lvl = df.index.get_level_values(index)
+    if len(lvl) == 0:
+        today = pd.Timestamp.now().normalize()
+        base_date = today.strftime('%Y-%m-%d')
     else:
-        index_date = None
-    if index != 'date' and code is None:
-        if start is not None and len(start) < 10:
-            if datev is None:
-                if index_date != None:
-                    start = index_date + ' ' + start
-                else:
-                    start = get_today() + ' ' + start
-            else:
-                start = day8_to_day10(datev) + ' ' + start
-            if end is None:
-                end = start
-        else:
-            if end is None:
-                end = start
-        if end is not None and len(end) < 10:
-            if datev is None:
-                if index_date != None:
-                    end = index_date + ' ' + end
-                else:
-                    end = get_today() + ' ' + end
-                if start is None:
-                    start = get_today(sep='-') + ' ' + '09:25:00'
-            else:
-                end = day8_to_day10(datev) + ' ' + end
-                if start is None:
-                    start = day8_to_day10(datev) + ' ' + '09:25:00'
-        else:
-            if start is None:
-                if end is None:
-                    if index_date != None:
-                        start = index_date + ' ' + '09:25:00'
-                        end = index_date + ' ' + '09:45:00'
-                        log.error("start and end is None to 930 and 945")
-                    else:
-                        start = get_today(sep='-') + ' ' + '09:25:00'
-                        end = get_today(sep='-') + ' ' + '09:45:00'
-                        log.error("start and end is None to 930 and 945")
-                else:
-                    start = end
-    else:
-        start = day8_to_day10(start)
-        end = day8_to_day10(end)
+        base_date = str(lvl[-1])[:10]
 
+    def to_timestamp(t):
+        if t is None:
+            return None
+        t = str(t)
+        if len(t) <= 8:  # only HH:MM:SS
+            t = f"{base_date} {t}"
+        return pd.Timestamp(t)
+
+    start_ts = to_timestamp(start)
+    end_ts   = to_timestamp(end)
+    return start_ts, end_ts
+
+
+def select_multiIndex_index_fast(df, index='ticktime', start=None, end=None, datev=None, code=None):
+    """
+    极速版 MultiIndex 时间/代码筛选 (兼容 Timestamp 类型 index)
+    
+    参数:
+        df      : MultiIndex DataFrame，index 为 ['code', 'ticktime']
+        index   : 用于筛选的 level 名称，默认 'ticktime'
+        start   : 起始时间，可以是 'HH:MM:SS' 或完整日期时间字符串
+        end     : 结束时间，可以是 'HH:MM:SS' 或完整日期时间字符串
+        datev   : 可选日期，用于补全 start/end
+        code    : 可选股票代码，直接筛选 code level
+
+    返回:
+        筛选后的 DataFrame
+    """
+    if df is None or df.empty:
+        return df
+
+    lvl = df.index.get_level_values(index)
+
+    # -------- 补齐 start/end 时间，兼容 Timestamp --------
+    def fix_datetime(t):
+        if t is None:
+            return None
+        t = str(t)
+        if len(t) <= 10:  # 只有时间部分
+            # 用第一行日期补齐
+            base_date = str(lvl[0])[:10]
+            t = f"{base_date} {t}"
+        return pd.Timestamp(t)
+
+    start_ts = fix_datetime(start)
+    end_ts   = fix_datetime(end)
+    # print(f'start_ts : {start_ts} end_ts : {end_ts}')
+    # import ipdb;ipdb.set_trace()
+
+    # -------- code level 快速过滤 --------
     if code is not None:
-        if start is None:
-            if index_date != None:
-                start = index_date + ' ' + '09:24:30'
-            else:
-                start = get_today(sep='-') + ' ' + '09:24:30'
-        else:
-            start = day8_to_day10(start) + ' ' + '09:24:30'
-        # df = df[(df.index.get_level_values('code') == code) & (df.index.get_level_values(index) > start)]
-        df = df[(df.index.get_level_values('code') == code)]
+        df = df.xs(code, level="code", drop_level=False)
 
-    if start is None and end is not None:
-        df = df[(df.index.get_level_values(index) <= end)]
-    elif start is not None and end is None:
-        df = df[(df.index.get_level_values(index) >= start)]
-    elif start is not None and end is not None:
-        idx = df.index.get_level_values(index)[0] if len(df.index.get_level_values(index)) > 0 else 0
-        idx_end = pd.Timestamp(end) if index == 'ticktime' else end
-        log.info("idx:%s idx<=end:%s" % (idx, idx <= idx_end))
-        if idx <= idx_end:
-            df = df[(df.index.get_level_values(index) >= start) & (df.index.get_level_values(index) <= end)]
-        else:
-            df = df[(df.index.get_level_values(index) >= start)]
-    else:
-        log.info("start end is None")
+    lvl = df.index.get_level_values(index)
+
+    # -------- 时间区间过滤 --------
+    if start_ts is not None and end_ts is not None:
+        mask = (lvl >= start_ts) & (lvl <= end_ts)
+        return df[mask]
+    elif start_ts is not None:
+        mask = lvl >= start_ts
+        return df[mask]
+    elif end_ts is not None:
+        mask = lvl <= end_ts
+        return df[mask]
+
     return df
+
+
+
+# def select_multiIndex_index(df, index='ticktime', start=None, end=None, datev=None, code=None):
+#     # df = df[df.index.duplicated()]
+
+#     # df = df.drop_duplicates('volume')
+#     print(df.index)
+#     print(type(df.index.get_level_values("ticktime")[0]))
+
+#     if len(str(df.index.get_level_values(1)[-1])) > 10:
+#         index_date = str(df.index.get_level_values(1)[-1])[:10]
+#     else:
+#         index_date = None
+#     if index != 'date' and code is None:
+#         if start is not None and len(start) < 10:
+#             if datev is None:
+#                 if index_date != None:
+#                     start = index_date + ' ' + start
+#                 else:
+#                     start = get_today() + ' ' + start
+#             else:
+#                 start = day8_to_day10(datev) + ' ' + start
+#             if end is None:
+#                 end = start
+#         else:
+#             if end is None:
+#                 end = start
+#         if end is not None and len(end) < 10:
+#             if datev is None:
+#                 if index_date != None:
+#                     end = index_date + ' ' + end
+#                 else:
+#                     end = get_today() + ' ' + end
+#                 if start is None:
+#                     start = get_today(sep='-') + ' ' + '09:25:00'
+#             else:
+#                 end = day8_to_day10(datev) + ' ' + end
+#                 if start is None:
+#                     start = day8_to_day10(datev) + ' ' + '09:25:00'
+#         else:
+#             if start is None:
+#                 if end is None:
+#                     if index_date != None:
+#                         start = index_date + ' ' + '09:25:00'
+#                         end = index_date + ' ' + '09:45:00'
+#                         log.error("start and end is None to 930 and 945")
+#                     else:
+#                         start = get_today(sep='-') + ' ' + '09:25:00'
+#                         end = get_today(sep='-') + ' ' + '09:45:00'
+#                         log.error("start and end is None to 930 and 945")
+#                 else:
+#                     start = end
+#     else:
+#         start = day8_to_day10(start)
+#         end = day8_to_day10(end)
+
+#     if code is not None:
+#         if start is None:
+#             if index_date != None:
+#                 start = index_date + ' ' + '09:24:30'
+#             else:
+#                 start = get_today(sep='-') + ' ' + '09:24:30'
+#         else:
+#             start = day8_to_day10(start) + ' ' + '09:24:30'
+#         # df = df[(df.index.get_level_values('code') == code) & (df.index.get_level_values(index) > start)]
+#         df = df[(df.index.get_level_values('code') == code)]
+
+#     if start is None and end is not None:
+#         df = df[(df.index.get_level_values(index) <= end)]
+#     elif start is not None and end is None:
+#         df = df[(df.index.get_level_values(index) >= start)]
+#     elif start is not None and end is not None:
+#         idx = df.index.get_level_values(index)[0] if len(df.index.get_level_values(index)) > 0 else 0
+#         idx_end = pd.Timestamp(end) if index == 'ticktime' else end
+#         log.info("idx:%s idx<=end:%s" % (idx, idx <= idx_end))
+#         if idx <= idx_end:
+#             df = df[(df.index.get_level_values(index) >= start) & (df.index.get_level_values(index) <= end)]
+#         else:
+#             df = df[(df.index.get_level_values(index) >= start)]
+#     else:
+#         log.info("start end is None")
+#     return df
 
 
 def from_list_to_dict(col, func_dict):
@@ -4497,6 +4586,83 @@ def from_list_to_dict(col, func_dict):
         if col in list(func_dict.keys()):
             func[col] = func_dict[col]
     return func
+
+
+# def get_limit_multiIndex_Row_fast(df, col=None, index='ticktime', start=None, end='10:00:00'):
+
+#     if df is None or df.empty:
+#         log.error("df is None or empty")
+#         return df
+
+#     # 1. 使用 xs(slice) 在 MultiIndex 上按时间过滤（最快）
+#     try:
+#         df_slice = df.xs(slice(start, end), level=index, drop_level=False)
+#     except:
+#         return df.iloc[0:0]  # 返回空集，无报错
+
+#     if df_slice.empty:
+#         return df_slice
+
+#     # 2. 如果未指定 col，则直接返回原切片
+#     if col is None:
+#         return df_slice
+
+#     # 3. 获取每个 code 的最后一条记录
+#     df_last = df_slice.groupby(level=0).last()
+
+#     # 4. 重命名列（使用 multiIndex_func 映射）
+#     func = from_list_to_dict(col, multiIndex_func)
+#     df_last = df_last.rename(columns=func)
+
+#     # 5. 返回指定字段
+#     now_cols = list(func.values())
+
+#     return df_last[now_cols]
+
+def fast_multiIndex_agg(df, func_map=None):
+    """
+    MultiIndex 快速聚合（按 code 聚合 ticktime）
+    
+    Args:
+        df (pd.DataFrame): MultiIndex DataFrame, index=['code','ticktime']
+        func_map (dict): 聚合映射，例如:
+            {'close':'mean', 'low':'min', 'high':'max', 'volume':'last', 'open':'first'}
+    
+    Returns:
+        pd.DataFrame: 聚合后的 DataFrame, index=code
+    """
+    if df is None or df.empty:
+        return df
+    
+    if func_map is None:
+        func_map = {'close':'mean', 'low':'min', 'high':'max', 'volume':'last', 'open':'first'}
+    
+    # 只保留需要的列
+    selected_cols = [c for c in func_map.keys() if c in df.columns]
+    df_sel = df[selected_cols]
+    
+    # 分别处理 last/first 列，其他列用 agg
+    last_first_cols = {k:v for k,v in func_map.items() if v in ['last','first']}
+    other_cols = {k:v for k,v in func_map.items() if v not in ['last','first']}
+    
+    agg_result = {}
+    
+    # 处理 last/first
+    for col, agg_type in last_first_cols.items():
+        if agg_type == 'last':
+            agg_result[col] = df_sel.groupby(level=0, sort=False)[col].nth(-1)
+        elif agg_type == 'first':
+            agg_result[col] = df_sel.groupby(level=0, sort=False)[col].nth(0)
+    
+    # 处理其他聚合
+    if other_cols:
+        df_other = df_sel[list(other_cols.keys())].groupby(level=0, sort=False).agg(other_cols)
+        for c in df_other.columns:
+            agg_result[c] = df_other[c]
+    
+    # 合并结果
+    result = pd.DataFrame(agg_result)
+    return result
 
 
 def get_limit_multiIndex_Row(df, col=None, index='ticktime', start=None, end='10:00:00'):
@@ -4517,15 +4683,32 @@ def get_limit_multiIndex_Row(df, col=None, index='ticktime', start=None, end='10
         [type] -- [description]
     """
     if df is not None:
-        df = select_multiIndex_index(df, index=index, start=start, end=end)
+        # df = select_multiIndex_index(df, index=index, start=start, end=end)
+        df = select_multiIndex_index_fast(df, index=index, start=start, end=end)
+
     else:
         log.error("df is None")
+    # if col is not None:
+    #     func = from_list_to_dict(col, multiIndex_func)
+    #     # func = {
+    #     #     'close': 'mean',
+    #     #     'low': 'min',
+    #     #     'high': 'max',
+    #     #     'volume': 'last',
+    #     #     'open': 'first'
+    #     # }
+    #     df = df.groupby(level=[0]).agg(func)
+    # else:
+    #     log.info('col is None')
+
     if col is not None:
-        # import pdb;pdb.set_trace()
         func = from_list_to_dict(col, multiIndex_func)
-        df = df.groupby(level=[0]).agg(func)
+        # 使用快速聚合替代原来的 groupby+agg
+        df = fast_multiIndex_agg(df, func_map=func)
     else:
         log.info('col is None')
+    # import ipdb;ipdb.set_trace()
+    
     return df
 
 

@@ -320,50 +320,60 @@ class SafeHDFStore(pd.HDFStore):
             self.log.error(f"Failed to write key {key}: {e}")
 
 
+    # def _check_and_clean_corrupt_keys(self):
+    #     try:
+    #         with pd.HDFStore(self.fname, mode='a') as store:
+    #             keys = store.keys()
+    #             corrupt_keys = []
+    #             for key in keys:
+    #                 try:
+    #                     _ = store.get(key)
+    #                 except (tables.exceptions.HDF5ExtError, AttributeError) as e:
+    #                     log.error(f"Failed to read key {key}: {e}")
+    #                     corrupt_keys.append(key)
+    #             if corrupt_keys:
+    #                 log.warning(f"Corrupt keys detected: {corrupt_keys}, removing...")
+    #                 for key in corrupt_keys:
+    #                     try:
+    #                         store.remove(key)
+    #                         self.log.info(f"Removed corrupted key: {key}")
+    #                     except Exception as e:
+    #                         self.log.error(f"Failed to remove key {key}: {e}")
+
+    #     except Exception as e:
+    #         log.error(f"HDF5 file {self.fname} corrupted, recreating: {e}")
+    #         with pd.HDFStore(self.fname, mode='w') as store:
+    #             pass
+
     def _check_and_clean_corrupt_keys(self):
         try:
-            # with pd.HDFStore(self.fname, mode='r') as store:
-            #     keys = store.keys()
-            #     corrupt_keys = []
-            #     for key in keys:
-            #         try:
-            #             _ = store.get(key)
-            #         except (tables.exceptions.HDF5ExtError, AttributeError) as e:
-            #             log.error(f"Failed to read key {key}: {e}")
-            #             corrupt_keys.append(key)
-            #     if corrupt_keys:
-            #         log.warning(f"Corrupt keys detected: {corrupt_keys}, removing...")
-            #         store.close()
-            #         with pd.HDFStore(self.fname, mode='a') as wstore:
-            #             for key in corrupt_keys:
-            #                 try:
-            #                     wstore.remove(key)
-            #                     self.log.info(f"Removed corrupted key: {key}")
-            #                 except Exception as e:
-            #                     self.log.error(f"Failed to remove key {key}: {e}")
-
             with pd.HDFStore(self.fname, mode='a') as store:
                 keys = store.keys()
                 corrupt_keys = []
                 for key in keys:
                     try:
                         _ = store.get(key)
-                    except (tables.exceptions.HDF5ExtError, AttributeError) as e:
+                    except Exception as e:  # 捕获所有异常
                         log.error(f"Failed to read key {key}: {e}")
                         corrupt_keys.append(key)
+
                 if corrupt_keys:
                     log.warning(f"Corrupt keys detected: {corrupt_keys}, removing...")
                     for key in corrupt_keys:
                         try:
                             store.remove(key)
-                            self.log.info(f"Removed corrupted key: {key}")
+                            log.info(f"Removed corrupted key: {key}")
                         except Exception as e:
-                            self.log.error(f"Failed to remove key {key}: {e}")
+                            log.error(f"Failed to remove key {key}: {e}")
 
         except Exception as e:
             log.error(f"HDF5 file {self.fname} corrupted, recreating: {e}")
-            with pd.HDFStore(self.fname, mode='w') as store:
-                pass
+            try:
+                with pd.HDFStore(self.fname, mode='w') as store:
+                    log.info(f"Recreated empty HDF5 file: {self.fname}")
+            except Exception as e2:
+                log.error(f"Failed to recreate HDF5 file: {e2}")
+
 
     def _acquire_lock(self):
         my_pid = os.getpid()

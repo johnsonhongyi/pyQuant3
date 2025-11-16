@@ -196,7 +196,6 @@ if __name__ == "__main__":
     block_path = tdd.get_tdx_dir_blocknew() + blkname
     lastpTDX_DF = pd.DataFrame()
     parserDuraton = cct.DurationArgmain()
-    # resample = '3d'
     # global resample
     st_key_sort = '1'
     # st_key_sort = 'x 1.1'

@@ -146,3 +146,4 @@ stock/jupyterAlgo/Quant2023/TradingTutorial
 *.ipynb text eol=lf
 stock/concept_pg_data.db
 *.bak
+stock/concept_pg_data.db

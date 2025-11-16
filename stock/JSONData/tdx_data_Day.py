@@ -1124,6 +1124,164 @@ def detect_local_extremes_filtered(df, N=10, tol_pct=0.01):
 # ============   技术指标整合版   =============
 # ============================================
 
+def calc_support_resistance(df):
+
+    LLV = lambda x, n: x.rolling(n, min_periods=1).min()
+    HHV = lambda x, n: x.rolling(n, min_periods=1).max()
+    SMA = lambda x, n, m: x.ewm(alpha=m/n, adjust=False).mean()
+
+    # --- 短周期 ---
+    RSV13 = (df['close'] - LLV(df['low'], 13)) / (HHV(df['high'], 13) - LLV(df['low'], 13)) * 100
+    ARSV = SMA(RSV13, 3, 1)
+    AK = SMA(ARSV, 3, 1)
+    AD = (3 * ARSV) - (2 * AK)
+
+    # --- 长周期 ---
+    RSV55 = (df['close'] - LLV(df['low'], 55)) / (HHV(df['high'], 55) - LLV(df['low'], 55)) * 100
+    ARSV24 = SMA(RSV55, 3, 1)
+    AK24 = SMA(ARSV24, 3, 1)
+    AD24 = (3 * ARSV24) - (2 * AK24)
+
+    # --- CROSS 检测 ---
+    cross_up = (AD24 > AD) & (AD24.shift(1) <= AD.shift(1))
+
+    # 通达信逻辑：撑 = IF(CROSS, HIGH, REF(HIGH, BARSLAST(CROSS)))
+    pressure = []
+    last_high = None
+    last_cross_idx = None
+
+    for i in range(len(df)):
+        if cross_up.iloc[i]:
+            last_high = df['high'].iloc[i]
+            last_cross_idx = i
+        elif last_high is not None and last_cross_idx is not None:
+            # REF(HIGH, BARSLAST(...)) → 维持上次的高点
+            last_high = df['high'].iloc[last_cross_idx]
+        pressure.append(last_high)
+
+    df['pressure'] = pressure
+
+    # --- 支撑线 ---
+    df['support'] = LLV(df['high'], 30)
+
+    return df
+
+def calc_support_resistance_vec(df):
+    """
+    矢量化计算支撑/压力位，参考通达信逻辑。
+    df: DataFrame 包含 ['open','high','low','close']
+    返回 df 增加 ['pressure','support']
+    """
+    LLV = lambda x, n: x.rolling(n, min_periods=1).min()
+    HHV = lambda x, n: x.rolling(n, min_periods=1).max()
+    SMA = lambda x, n, m: x.ewm(alpha=m/n, adjust=False).mean()
+
+    # --- 短周期 ---
+    RSV13 = (df['close'] - LLV(df['low'], 13)) / (HHV(df['high'], 13) - LLV(df['low'], 13)) * 100
+    ARSV = SMA(RSV13, 3, 1)
+    AK = SMA(ARSV, 3, 1)
+    AD = 3 * ARSV - 2 * AK
+
+    # --- 长周期 ---
+    RSV55 = (df['close'] - LLV(df['low'], 55)) / (HHV(df['high'], 55) - LLV(df['low'], 55)) * 100
+    ARSV24 = SMA(RSV55, 3, 1)
+    AK24 = SMA(ARSV24, 3, 1)
+    AD24 = 3 * ARSV24 - 2 * AK24
+
+    # --- CROSS 检测 ---
+    cross_up = (AD24 > AD) & (AD24.shift(1) <= AD.shift(1))
+
+    # --- 压力位（pressure）矢量化 ---
+    # 生成 cross_up 为 True 的索引对应的 high
+    cross_high = df['high'].where(cross_up)
+
+    # 用 ffill 填充，等价于 REF(HIGH, BARSLAST(CROSS)) 压力
+    # resistance
+    df['resist'] = cross_high.ffill()
+
+    # --- 支撑位（support）矢量化 ---
+    df['support'] = LLV(df['high'], 30)
+
+    return df
+
+# def check_conditions_auto(df, days=6, prefix_list=['lasto','lastl','lastp','per']):
+#     """
+#     自动批量检查 DataFrame 条件：
+#     1. 对每行，检查每一天的条件：
+#        lasto <= lastl*1.002 and lastp > lasto and per > 1
+#     2. 最终条件：至少一天满足 + lastp1d > lastp2d
+#     返回 DataFrame 新增列：'符合条件', '满足天数'
+#     """
+#     def check_row(row):
+#         satisfied_days = []
+#         for i in range(1, days+1):
+#             lasto = row[f'lasto{i}d']
+#             lastl = row[f'lastl{i}d']
+#             lastp = row[f'lastp{i}d']
+#             per = row[f'per{i}d']
+#             if (lasto <= lastl * 1.002) and (lastp > lasto) and (per > 1):
+#                 satisfied_days.append(i)
+#         final_result = bool(satisfied_days) and (row['lastp1d'] > row['lastp2d'])
+#         return pd.Series({'符合条件': final_result, 'MainU': satisfied_days})
+    
+#     result = df.apply(check_row, axis=1)
+#     return pd.concat([df, result], axis=1)
+
+def check_conditions_auto(df, days=6):
+    """
+    自动批量检查 DataFrame 条件：
+    1. 对每行，检查每一天的条件：
+       lasto <= lastl*1.002 and lastp > lasto and per > 1
+    2. 最终条件：至少一天满足 + lastp1d > lastp2d
+    返回 DataFrame 新增列：
+      - MainU (布尔)
+      - 满足天数 (逗号分隔字符串)
+    """
+    def check_row(row):
+        satisfied_days = []
+        for i in range(1, days + 1):
+            # 构造列名
+            lasto_col = f'lasto{i}d'
+            lasto2_col = f'lasto{i+1}d'
+            lastl_col = f'lastl{i}d'
+            lastp_col = f'lastp{i}d'
+            lasth_col = f'lasth{i}d'
+            lastp2d_col = f'lastp{i+1}d'
+            per_col   = f'per{i}d'
+            high4_col = f'high4{i}d'
+            hmax_col = f'hmax{i}d'
+            ma5d_col = f'ma5{i}d'
+            # 用 row.get(col, 0) 方式取值：如果列不存在 → 默认值 0
+            lasto = row.get(lasto_col, 0)
+            lasto2 = row.get(lasto2_col, 0)
+            lastl = row.get(lastl_col, 0)
+            lastp = row.get(lastp_col, 0)
+            lasth = row.get(lasth_col, 0)
+            lastp2d = row.get(lastp2d_col, 0)
+            per   = row.get(per_col, 0)
+            high4   = row.get(high4_col, 0)
+            hmax   = row.get(hmax_col, 0)
+            ma5d   = row.get(ma5d_col, 0)
+            # 因为默认值是0，因此避免无意义匹配：
+            # 只有当四个值都有效（非0 或者本身确实为0但逻辑可正常比较）才继续判断
+            # 当列不存在时 lasto=lastl=lastp=per=0，肯定不会满足条件，从而自然跳过
+            # print(lasto , lastl * 1.002 , lastp , high4 , lasto ,lastp2d*0.998)
+            if (lasto <= lastl * 1.002 or (lasth > high4 and lasth >= hmax*0.99) or (lastp > ma5d and lastp >= lastp2d)) and (lastp >= lasto) and (per > 0):
+                satisfied_days.append(i)
+
+        satisfied_days.sort()
+        mainu = bool(satisfied_days) and (row['lastp1d'] >= row['lastp2d'])
+        # 列表转字符串方便显示
+        # days_str = ','.join(map(str, satisfied_days))
+        days_str = ','.join(map(str, satisfied_days)) if satisfied_days else '0'
+        return pd.Series({'MainU': days_str})
+        # return pd.Series({'MainU': mainu, '满足天数': days_str})
+
+    result = df.apply(check_row, axis=1)
+    return pd.concat([df, result], axis=1)
+
+
+
 def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_period: int = 9) -> pd.DataFrame:
     """
     统一计算：
@@ -1266,6 +1424,9 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
     # df = extend_signals(df)
     # df = detect_local_extremes(df)
     df = detect_local_extremes_filtered(df)
+    df = calc_support_resistance_vec(df)
+    # print(df[['high','low','close','pressure','support']].tail(20))
+    # import ipdb;ipdb.set_trace()
     return df
 
 
@@ -1439,24 +1600,25 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     # ------------------------------
     if 'macd' not in df.columns:
         df = get_tdx_macd(df)
-    if f'perc{lastdays}d' not in df.columns:
-        df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
 
-    # ------------------------------
-    # maxp / fib / maxpcout
-    # ------------------------------
-    per_couts = df.filter(regex=r'per[1-9]d')[-1:]
-    if len(per_couts.T) > 2:
-        if resample == 'd':
-            df['maxp'] = per_couts.T[1:].values.max()
-            fib_c = (per_couts.T.values > 2).sum()
-        else:
-            df['maxp'] = per_couts.T[:3].values.max()
-            fib_c = (per_couts.T[:3].values > 10).sum()
-        df['fib'] = fib_c
-        df['maxpcout'] = fib_c
-    else:
-        df['maxp'] = df['fib'] = df['maxpcout'] = 0
+    # if f'perc{lastdays}d' not in df.columns:
+    #     df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
+
+    # # ------------------------------
+    # # maxp / fib / maxpcout
+    # # ------------------------------
+    # per_couts = df.filter(regex=r'per[1-9]d')[-1:]
+    # if len(per_couts.T) > 2:
+    #     if resample == 'd':
+    #         df['maxp'] = per_couts.T[1:].values.max()
+    #         fib_c = (per_couts.T.values > 2).sum()
+    #     else:
+    #         df['maxp'] = per_couts.T[:3].values.max()
+    #         fib_c = (per_couts.T[:3].values > 10).sum()
+    #     df['fib'] = fib_c
+    #     df['maxpcout'] = fib_c
+    # else:
+    #     df['maxp'] = df['fib'] = df['maxpcout'] = 0
 
     # ------------------------------
     # 高低价 / 成交量 / 均价指标
@@ -1482,7 +1644,34 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         df['lastdu4'] = ((df.high.rolling(4).max() - df.low.rolling(4).min()) /
                           df.close.rolling(4).mean() * 100).round(1)
 
+    if f'perc{lastdays}d' not in df.columns:
+        df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
+
+    # ------------------------------
+    # maxp / fib / maxpcout
+    # ------------------------------
+    per_couts = df.filter(regex=r'per[1-9]d')[-1:]
+    if len(per_couts.T) > 2:
+        if resample == 'd':
+            df['maxp'] = per_couts.T[1:].values.max()
+            fib_c = (per_couts.T.values > 2).sum()
+        else:
+            df['maxp'] = per_couts.T[:3].values.max()
+            fib_c = (per_couts.T[:3].values > 10).sum()
+        df['fib'] = fib_c
+        df['maxpcout'] = fib_c
+    else:
+        df['maxp'] = df['fib'] = df['maxpcout'] = 0
     
+    if len(df) > 10:
+        # 2. 调用自动检查函数
+
+        df_checked = check_conditions_auto(df[-1:])
+
+        # 3. 直接赋值给原始 df 的 'MainU' 列对应最后一行
+        # df.loc[df.index[-1], 'MainU'] = df_checked.loc[df_checked.index[-1], '符合条件']
+
+        df.loc[df.index[-1], 'MainU'] = df_checked.loc[df_checked.index[-1], 'MainU']
 
         # 索引设置与排序
     # ------------------------------
@@ -2743,7 +2932,6 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f',rewrite=False)
 #            x += 1
 # fo.write(b.getvalue())
 
-        # import ipdb;ipdb.set_trace() 
         #rb+ wb+ byte bug
         fo.writelines(wdata_list)
         fo.close()
@@ -4751,6 +4939,11 @@ def compute_ma_cross_old(dd,ma1='ma5d',ma2='ma10d',ratio=0.02):
             dd['ldate'] = -1
     return dd
 
+def safe_get(df, col, idx=-1, default=0):
+    if col in df.columns:
+        return df[col].iloc[idx]
+    return default
+
 def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
     # ct.compute_lastdays lastdays to 9
     if df is not None and len(df) > lastdays:
@@ -4858,12 +5051,46 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
             # df['du%sd' % da] = df['perd'][-da] - df['lastdu'][-da]
             # df['per%sd' % da] = df['perd'].shift(da-1)
             df_temp['perc%sd' % da] = df['perlastp'][-da]
+            # df_temp['high4%sd' % da] = df['high4'][-da]
+            # df_temp['hmax%sd' % da] = df['hmax'][-da]
+            df_temp[f'high4{da}d'] = safe_get(df, 'high4', -da)
+            df_temp[f'hmax{da}d']  = safe_get(df, 'hmax', -da)
 
         df_repeat = pd.DataFrame([df_temp]).loc[np.repeat(0, len(df))].reset_index(drop=True)
 
         df = pd.concat([df.reset_index(), df_repeat], axis=1)
         df = df.loc[:,~df.columns.duplicated()]
         df = df.set_index('date').sort_index(ascending=True)
+        # cols = [
+        #         'lasto1d','lastl1d','lastp1d','per1d',
+        #         'lasto2d','lastl2d','lastp2d','per2d',
+        #         'lasto3d','lastl3d','lastp3d','per3d',
+        #         'lasto4d','lastl4d','lastp4d','per4d',
+        #         'lasto5d','lastl5d','lastp5d','per5d',
+        #         'lasto6d','lastl6d','lastp6d','per6d'
+        #     ]
+
+        # # df_cols_only = df.loc[:, cols][-1:]
+        # # df_checked = check_conditions_auto(df_cols_only)
+        # # df['MainU'] = df_checked.MainU.values[0]
+
+
+        # # # 1. 保留最后一行需要检查的列
+        # # df_cols_only = df.loc[:, cols].iloc[[-1]]  # 用 iloc[[-1]] 返回 DataFrame 而非 Series
+
+        # # 2. 调用自动检查函数
+
+        # df_checked = check_conditions_auto(df[-1:])
+
+        # # 3. 直接赋值给原始 df 的 'MainU' 列对应最后一行
+        # # df.loc[df.index[-1], 'MainU'] = df_checked.loc[df_checked.index[-1], '符合条件']
+
+        # df.loc[df.index[-1], 'MainU'] = df_checked.loc[df_checked.index[-1], 'MainU']
+        # # 列表 → 逗号分隔字符串
+        # # df.loc[df.index[-1], 'MainU'] = ','.join(map(str, df_checked.loc[df_checked.index[-1], 'MainU']))
+        # # print(df.MainU)
+        # # import ipdb;ipdb.set_trace()
+
 
         # new_row_df = pd.DataFrame([df_temp]) 
         # df = pd.concat([df, new_row_df], ignore_index=True)
@@ -5370,6 +5597,7 @@ def get_single_df_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end
         top_all, tdxdata, col=None, compare=None, append=False)
 
     # log.info('Top-merge_now:%s' % (top_all[:1]))
+    top_all['llow'] = top_all.get('llow', 0)  # 列不存在时用默认0
     top_all = top_all[top_all['llow'] > 0]
     log.debug('T:%0.2f'%(time.time()-time_s))
     return top_all
@@ -5595,6 +5823,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
         if len(diff_code) > 0:
             log.error("tdx Out:%s code:%s" % (len(diff_code), diff_code[:2]))
             # log.debug("diff_code:%s" % (diff_code[-2]))
+            print(f"diff_code: {len(diff_code)} resample:{resample} ",end='')
             tdx_diff = get_tdx_exp_all_LastDF_DL(
                 diff_code, dt=dl, end=end, ptype=ptype, filter=filter, power=power, lastp=lastp, newdays=newdays, resample=resample)
             if tdx_diff is not None and len(tdx_diff) > 0:
@@ -5623,7 +5852,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     # cct.combine_dataFrame(top_all, tdxdata, col=['b1_v','a1_v'], compare=None, append=False).query('9 <percent < 10.2 ')
 
     # log.info('Top-merge_now:%s' % (top_all[:1]))
-
+    top_all['llow'] = top_all.get('llow', 0)  # 列不存在时用默认0
     top_all = top_all[top_all['llow'] > 0]
     #20231110 add today topR
     #20250607 mod today topR
@@ -6520,23 +6749,51 @@ if __name__ == '__main__':
     dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
     print(f'dd : {dd}')
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
-    code='920108'
+    code='600108'
     # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'], end=None, newdays=0, resample='d')
     # print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
     # import ipdb;ipdb.set_trace()
     
     # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['w'],resample='w',lastday=None )
     # import ipdb;ipdb.set_trace()
-    
-    df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'],resample='d',lastday=None )
+
+
+
+    df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['w'],resample='w',lastday=None )
     print(f"{code} : {df.loc[:,['boll','lastp1d','ma51d','lastp2d','ma52d','lastp3d','ma53d','lasth1d','lasth2d','lasth3d']][-1:].values}")
+    print(f"{code} 'resist','support' : {df.loc[:,['resist','support']][-1:].values}")
+    print(f'd per1d:{df.per1d[0]}  per2d:{df.per2d[0]}  per3d:{df.per3d[0]}  per4d:{df.per4d[0]}  per5d:{df.per5d[0]}  ')
+    cols = [
+        'lasto1d','lastl1d','lastp1d','per1d',
+        'lasto2d','lastl2d','lastp2d','per2d',
+        'lasto3d','lastl3d','lastp3d','per3d',
+        'lasto4d','lastl4d','lastp4d','per4d',
+        'lasto5d','lastl5d','lastp5d','per5d',
+        'lasto6d','lastl6d','lastp6d','per6d'
+    ]
+    df_cols_only = df.loc[:, cols]
+    print(df_cols_only[-1:].T)
+    df_checked = check_conditions_auto(df_cols_only[-1:])
+    print(f'print(df.MainU): {df.MainU[-1:]}')
+
+    import ipdb;ipdb.set_trace()
+
+    df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d',lastday=None )
+    print(f"{code} : {df.loc[:,['boll','lastp1d','ma51d','lastp2d','ma52d','lastp3d','ma53d','lasth1d','lasth2d','lasth3d']][-1:].values}")
+    print(f"{code} 'resist','support' : {df.loc[:,['resist','support']][-1:].values}")
+    print(f'3d per1d:{df.per1d[0]}  per2d:{df.per2d[0]}  per3d:{df.per3d[0]}  per4d:{df.per4d[0]}  per5d:{df.per5d[0]}  ')
+    df_cols_only2 = df.loc[:, cols]
+    print(df_cols_only2[-1:])
+    print(f'print(df.MainU): {df.MainU[-1:]}')
     import ipdb;ipdb.set_trace()
     
-    df2 = get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['w'],resample='w')
-    print(df[['bull_f','bull_s','bullbreak','has_first','status','hold_d','obs_d']].tail(10))
-    print(f' d: {ct.Resample_LABELS_Days["d"] } df.ma60d : {df.ma60d[-3:]} \n\n')
+    # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['w'],resample='w')
+    df2 = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['w'],resample='w')
+    print(df2[['bull_f','bull_s','bullbreak','has_first','status','hold_d','obs_d','resist','support']].tail(10))
+    print(f"{code} 'resist','support' : {df2.loc[:,['resist','support']][-1:].values}")
+    print(f' d: {ct.Resample_LABELS_Days["w"] } df.ma60d : {df2.ma60d[-3:]} \n\n')
     # print(df[-3:],df[-1:])
-    print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
+    print(df2.loc[:,df2.columns[df2.columns.str.contains('perc')]][-1:])
     print(f'df lastp1d:{df[:2].lastp1d}')
     print(f'3d per1d:{df.per1d[0]}  per2d:{df.per2d[0]}  per3d:{df.per3d[0]}  per4d:{df.per4d[0]}  per5d:{df.per5d[0]}  ')
     # df = get_tdx_Exp_day_to_df(code, dl=1)

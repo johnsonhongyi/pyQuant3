@@ -45,6 +45,7 @@ def df_hash(df: pd.DataFrame) -> str:
     return hashlib.md5(str(h).encode()).hexdigest()[:8]  # 截取前8位
 
 import logging
+from logging.handlers import RotatingFileHandler
 class LoggerWriter:
     """将 print 输出重定向到 logger"""
     def __init__(self, level_func):
@@ -74,7 +75,14 @@ def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=True):
     if not logger.handlers:
         formatter = logging.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
 
-        fh = logging.FileHandler(log_file, encoding="utf-8")
+        # fh = logging.FileHandler(log_file, encoding="utf-8")
+        # ✅ 使用 RotatingFileHandler：超过 1MB 自动轮转
+        fh = RotatingFileHandler(
+            log_file, 
+            maxBytes=1024 * 1024,  # 1MB
+            backupCount=3,         # 最多保留3个历史日志
+            encoding="utf-8"
+        )
         fh.setFormatter(formatter)
         logger.addHandler(fh)
 
@@ -138,6 +146,55 @@ def init_logging_nopdb(log_file="appTk.log", level=logging.INFO):
     logger.info("日志初始化完成")
     return logger
 
+# def remove_condition_query(expr: str, cond: str) -> str:
+def remove_invalid_conditions(query: str, invalid_cols: list,showdebug=True):
+    """
+    从 query 表达式中剔除包含无效列的条件（连带 and/or）
+    """
+    original_query = query
+    # 为防止影响原始括号结构，去掉多余空格方便处理
+    query = re.sub(r'\s+', ' ', query).strip()
+
+    # 逐个无效列处理
+    for col in invalid_cols:
+        # 匹配各种形式：
+        # and close > nclose
+        # or close > nclose
+        # (close > nclose)
+        # close > nclose and
+        # close > nclose or
+        pattern = (
+            rf'(\b(and|or)\s+[^()]*\b{col}\b[^()]*?)'  # 前面带 and/or
+            rf'|(\([^()]*\b{col}\b[^()]*\))'          # 在括号内
+            rf'|([^()]*\b{col}\b[^()]*\s+(and|or))'   # 后面带 and/or
+            rf'|([^()]*\b{col}\b[^()]*)'              # 独立条件
+        )
+
+        def replacer(m):
+            text = m.group(0)
+            # 检查括号是否被完整包裹，如果是就删除整个子句
+            if text.startswith("(") and text.endswith(")"):
+                return ""
+            # 如果前后是逻辑符号，删除逻辑符号连带条件
+            return ""
+
+        query = re.sub(pattern, replacer, query, flags=re.IGNORECASE)
+
+    # 清理多余的空格与重复逻辑符号
+    query = re.sub(r'\s+(and|or)\s+(\)|$)', ' ', query)
+    query = re.sub(r'(\(|^)\s*(and|or)\s+', ' ', query)
+    query = re.sub(r'\s{2,}', ' ', query).strip()
+
+    # 检查括号平衡（自动修复）
+    open_count = query.count("(")
+    close_count = query.count(")")
+    if open_count > close_count:
+        query += ")" * (open_count - close_count)
+    elif close_count > open_count:
+        query = "(" * (close_count - open_count) + query
+    if showdebug:
+        print(f"原始: {original_query}\n剔除后: {query}\n{'-'*60}")
+    return query
 
 # --- 辅助函数：DPI 处理（放在类的外面） ---
 
@@ -566,7 +623,7 @@ os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(DARACSV_DIR, exist_ok=True)
 START_INIT = 0
 # st_key_sort = '3 0'
-
+MONITOR_LIST_FILE = os.path.join(BASE_DIR, "monitor_category_list.json")
 
 CONFIG_FILE = "display_cols.json"
 DEFAULT_DISPLAY_COLS = [
@@ -812,14 +869,120 @@ def get_monitor_index_for_window(window):
 
 import win32api
 
+# def clamp_window_to_screens(x, y, w, h):
+#     """
+#     保证窗口 (x, y, w, h) 位于可见的显示器范围内。
+#     - 自动检测所有显示器
+#     - 若不在任何显示器内，则放主屏左上角
+#     - 自动修正超出边界的情况
+#     """
+#     # 获取所有显示器信息
+#     monitors = []
+#     try:
+#         for handle_tuple in win32api.EnumDisplayMonitors():
+#             info = win32api.GetMonitorInfo(handle_tuple[0])
+#             monitors.append(info["Monitor"])  # (left, top, right, bottom)
+#     except Exception:
+#         pass
+
+#     # 如果检测不到，默认用主屏幕
+#     if not monitors:
+#         screen_width = win32api.GetSystemMetrics(0)
+#         screen_height = win32api.GetSystemMetrics(1)
+#         monitors = [(0, 0, screen_width, screen_height)]
+
+#     # 检查窗口位置是否在任何显示器内
+#     for left, top, right, bottom in monitors:
+#         if left <= x < right and top <= y < bottom:
+#             # 修正窗口不要超出边界
+#             x = max(left, min(x, right - w))
+#             y = max(top, min(y, bottom - h))
+#             print(f"✅ clamp_window_to_screens: 命中屏幕 ({left},{top},{right},{bottom}) -> ({x},{y})")
+#             return x, y
+
+#     # 完全不在屏幕内 -> 放主屏左上角
+#     left, top, right, bottom = monitors[0]
+#     print(f"⚠️ clamp_window_to_screens: 未命中屏幕，放主屏 (465, 442)")
+#     return (465, 442)
+
+def tk_geometry_to_rect(tk_win):
+    """把 Tk geometry 字符串转换为 QRect 或简单坐标"""
+    geom = tk_win.geometry()  # '2162x1026+786+860'
+    size_pos = geom.split('+')
+    w, h = map(int, size_pos[0].split('x'))
+    x, y = map(int, size_pos[1:])
+    return QtCore.QRect(x, y, w, h)
+
+def is_window_covered_pg(win_pg, win_main, cover_ratio=0.4):
+    """判断 PG 窗口是否被主窗口覆盖超过一定比例"""
+    rect_pg = win_pg.geometry()
+    if isinstance(win_main, tk.Tk) or isinstance(win_main, tk.Toplevel):
+        rect_main = tk_geometry_to_rect(win_main)
+    else:
+        rect_main = win_main.geometry()
+
+    # 计算交集矩形
+    left = max(rect_pg.left(), rect_main.left())
+    top = max(rect_pg.top(), rect_main.top())
+    right = min(rect_pg.right(), rect_main.right())
+    bottom = min(rect_pg.bottom(), rect_main.bottom())
+
+    if right < left or bottom < top:
+        print(f'没交集 → 完全没被覆盖')
+        return False   # 没交集 → 完全没被覆盖
+
+    intersection_area = (right - left) * (bottom - top)
+    pg_area = rect_pg.width() * rect_pg.height()
+
+    # 覆盖比例超过 40% 就认为需要提升
+    return (intersection_area / pg_area) > cover_ratio
+
+def clamp_window_to_screens_mod(x, y, w, h, monitors):
+    """保证窗口在可见显示器范围内"""
+    for left, top, right, bottom in monitors:
+        if left <= x < right and top <= y < bottom:
+            x = max(left, min(x, right - w))
+            y = max(top, min(y, bottom - h))
+            return x, y
+    # 如果完全不在任何显示器内，放到主屏幕左上角
+    print(f"⚠️ 窗口不在任何屏幕，放主屏左上角 ({x},{y})")
+    x, y = monitors[0][0], monitors[0][1]
+    return x, y
+def clamp_window_to_screens_logical(x, y, w, h):
+    """
+    使用 DPI 逻辑坐标进行 clamp 判断
+    """
+    monitors = []
+    for hndl in win32api.EnumDisplayMonitors():
+        print(f'EnumDisplayMonitors :{hndl}')
+
+        mi = win32api.GetMonitorInfo(hndl[0])
+        left, top, right, bottom = mi["Work"]  # 工作区
+        # 转逻辑像素
+        scale = win32api.GetDeviceCaps(win32api.GetDC(0), 10) / 96.0
+        monitors.append((int(left / scale), int(top / scale),
+                         int(right / scale), int(bottom / scale)))
+
+    # 检查窗口是否有交集
+    for left, top, right, bottom in monitors:
+        if (x + w > left and x < right and
+            y + h > top and y < bottom):
+            x = max(left, min(x, right - w))
+            y = max(top, min(y, bottom - h))
+            return x, y
+
+    # 默认回主屏左上角
+    left, top, right, bottom = monitors[0]
+    return left, top
+
 def clamp_window_to_screens(x, y, w, h):
     """
-    保证窗口 (x, y, w, h) 位于可见的显示器范围内。
-    - 自动检测所有显示器
-    - 若不在任何显示器内，则放主屏左上角
+    保证窗口 (x, y, w, h) 位于可见显示器范围内。
+    - 优先保持窗口原位置
     - 自动修正超出边界的情况
+    - 不在任何屏幕则放主屏左上角
     """
-    # 获取所有显示器信息
+
     monitors = []
     try:
         for handle_tuple in win32api.EnumDisplayMonitors():
@@ -828,25 +991,37 @@ def clamp_window_to_screens(x, y, w, h):
     except Exception:
         pass
 
-    # 如果检测不到，默认用主屏幕
     if not monitors:
-        screen_width = win32api.GetSystemMetrics(0)
-        screen_height = win32api.GetSystemMetrics(1)
-        monitors = [(0, 0, screen_width, screen_height)]
-
-    # 检查窗口位置是否在任何显示器内
+        sw, sh = win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1)
+        monitors = [(0, 0, sw, sh)]
+        print(f'x:{x} y:{y} w:{w} h:{h}')
+    # for left, top, right, bottom in monitors:
+    #     # 判断整个窗口矩形是否与屏幕有交集
+    #     if x + w > left and x < right and y + h > top and y < bottom:
+    #         # 修正超出屏幕边界
+    #         # print(f'x + w > left and x < right and y + h > top and y < bottom')
+    #         # print(x , w , left , x , right ,  y , h , top , y , bottom)
+    #         x = max(left, min(x, right - w))
+    #         y = max(top, min(y, bottom - h))
+    #         # print(f"✅ 窗口命中屏幕 ({left},{top},{right},{bottom}) -> ({x},{y})")
+    #         return x, y
+    # x,y = clamp_window_to_screens_mod(x, y, w, h, monitors)
+    """保证窗口在可见显示器范围内"""
     for left, top, right, bottom in monitors:
+        print(f'left: {left} top : {top} right:{right} bottom:{bottom}')
+        # print(x , w , left , x , right ,  y , h , top , y , bottom)
         if left <= x < right and top <= y < bottom:
-            # 修正窗口不要超出边界
             x = max(left, min(x, right - w))
             y = max(top, min(y, bottom - h))
-            print(f"✅ clamp_window_to_screens: 命中屏幕 ({left},{top},{right},{bottom}) -> ({x},{y})")
+            print(f'left <= x < right and top <= y < bottom: : {left <= x < right and top <= y < bottom:} x:{x} y: {y} ')
             return x, y
 
+    # return (x,y)
     # 完全不在屏幕内 -> 放主屏左上角
     left, top, right, bottom = monitors[0]
-    print(f"⚠️ clamp_window_to_screens: 未命中屏幕，放主屏 (465, 442)")
-    return (465, 442)
+    x, y = left, top
+    print(f"⚠️ 窗口不在任何屏幕，放主屏左上角 ({x},{y})")
+    return (100, 100)
 
 
 def get_centered_window_position_mainWin(parent,win_width, win_height, x_root=None, y_root=None, parent_win=None):
@@ -904,7 +1079,7 @@ def get_centered_window_position_single(parent, win_width, win_height, margin=10
         y = screen_height - win_height - margin
     if y < 0:
         y = margin
-    x,y = clamp_window_to_screens(x, y, screen_width, screen_height)
+    x,y = clamp_window_to_screens(x, y, win_width, win_height)
     return x, y
 
 
@@ -1257,9 +1432,10 @@ def test_code_against_queries(df_code, queries):
     for q in queries:
         expr = q.get("query", "")
         query = expr
-        # hit = False
         if not (query.isdigit() and len(query) == 6):
+            # ====== 条件清理 ======
             bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
+
             # 2️⃣ 替换掉原 query 中的这些部分
             for bracket in bracket_patterns:
                 query = query.replace(f'and {bracket}', '')
@@ -1295,12 +1471,8 @@ def test_code_against_queries(df_code, queries):
                 if not any(bp.strip('() ').strip() == cond.strip() for bp in bracket_patterns)
             ]
 
-            # # 打印剔除条件列表
-            # if removed_conditions:
-            #     log.info(f"剔除不存在的列条件: {removed_conditions}")
-
             if not valid_conditions:
-                print(f"没有可用的查询条件:{expr}")
+                print(f'valid_conditions not valid_condition : {expr}')
                 continue
             # print(f'valid_conditions : {valid_conditions}')
             # ====== 拼接 final_query 并检查括号 ======
@@ -1317,10 +1489,19 @@ def test_code_against_queries(df_code, queries):
                 elif right_count > left_count:
                     final_query = "(" * (right_count - left_count) + final_query
 
-            # ====== 决定 engine ======
-            query_engine = 'numexpr'
-            if any('index.' in c.lower() for c in valid_conditions):
-                query_engine = 'python'
+            if expr.count('or') > 0 and expr.count('(') > 0:
+                final_query = expr
+                if removed_conditions:
+                    final_query = remove_invalid_conditions(final_query, removed_conditions)
+                # print(f'{query.count("or")} OR query: {final_query[:30]}')
+                query_engine = 'numexpr'
+                if any('index.' in c.lower() for c in query) or ('.str' in query and '|' in query):
+                    query_engine = 'python'
+            else:
+                # ====== 决定 engine ======
+                query_engine = 'numexpr'
+                if any('index.' in c.lower() for c in valid_conditions):
+                    query_engine = 'python'
         else:
             final_query = expr
             query_engine = 'numexpr'
@@ -1332,7 +1513,7 @@ def test_code_against_queries(df_code, queries):
             # if missing_cols:
             #     print(f"缺少字段: {missing_cols}")
             #     continue
-            # # print(f'expr : {expr} final_query :{final_query} engine : {query_engine}')
+            # print(f'expr : {expr} final_query :{final_query} engine : {query_engine}')
             df_hit = df_code.query(final_query, engine=query_engine)
             # df_hit = df_code.query(final_query)
             # 命中条件：返回非空
@@ -1340,7 +1521,7 @@ def test_code_against_queries(df_code, queries):
             hit_count = len(df_hit)
 
         except Exception as e:
-            print(f"[ERROR] 执行 query 出错: {expr}, {e}")
+            print(f"[ERROR] 执行 query 出错: {final_query}, {e}")
             # hit = False
             hit_count = 0
 
@@ -1422,7 +1603,159 @@ def estimate_virtual_volume_simple(now=None):
     # return est_volume, passed_ratio, vol_ratio
     return passed_ratio
 
+def rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal",monitor_list=None,win_var=None):
+    """
+    多屏幕窗口重排（自动换列/换行 + 左右对齐 + 屏幕内排序）
+    
+    align: "left" 或 "right" 控制对齐方向
+    sort_by: "id" 或 "title" 窗口排序依据
+    layout: "vertical" -> 竖排 (上下叠加，满高换列)
+            "horizontal" -> 横排 (左右并排，满宽换行)
+    """
+    if not MONITORS:
+        init_monitors()
 
+    # 取监控窗口列表
+    windows = [info for info in monitor_list.values() if "win" in info]
+
+    # 按屏幕分组
+    screen_groups = {i: [] for i in range(len(MONITORS))}
+    for win_info in windows:
+        win = win_info["win"]
+        try:
+            x, y = win.winfo_x(), win.winfo_y()
+            for idx, (l, t, r, b) in enumerate(MONITORS):
+                if l <= x < r and t <= y < b:
+                    screen_groups[idx].append(win_info)
+                    break
+        except Exception as e:
+            print(f"⚠ 获取窗口位置失败: {e}")
+
+    # 每个屏幕内排序并排列
+    for idx, group in screen_groups.items():
+        if not group:
+            continue
+
+        # 排序
+        if sort_by == "id":
+            group.sort(key=lambda info: info['stock_info'][0]) 
+        elif sort_by == "title":
+            group.sort(key=lambda info: info['stock_info'][1]) 
+
+        l, t, r, b = MONITORS[idx]
+        screen_width = r - l
+        screen_height = b - t
+
+        margin_x = 30
+        margin_y = 5
+
+        if align == "left":
+            current_x = l + 50
+        elif align == "right":
+            current_x = r - 50
+        else:
+            raise ValueError("align 参数必须是 'left' 或 'right'")
+
+        current_y = t + 50
+        max_col_width = 0
+        max_row_height = 0
+
+        for win_info in group:
+            win = win_info["win"]
+            try:
+                w = win.winfo_width()
+                h = win.winfo_height()
+                win_state = win_var.get()
+                if layout == "vertical" or  win_state:
+                    # -------- 竖排逻辑 --------
+                    if align == "right" and max_col_width == 0:
+                        current_x -= w
+
+                    if current_y + h + margin_y > b:
+                        # 换列
+                        if align == "left":
+                            current_x += max_col_width + margin_x
+                        else:
+                            current_x -= max_col_width + margin_x
+                        current_y = t + 50
+                        max_col_width = 0
+                        if align == "right":
+                            current_x -= w
+
+                    win.geometry(f"{w}x{h}+{current_x}+{current_y}")
+                    current_y += h + margin_y
+                    max_col_width = max(max_col_width, w)
+
+                else:
+                    # -------- 横排逻辑 --------
+                    if align == "right" and max_row_height == 0:
+                        current_x -= w
+
+                    if current_x + w + margin_x > r:
+                        # 换行
+                        current_y += max_row_height + margin_y
+                        if align == "left":
+                            current_x = l + 50
+                        else:
+                            current_x = r - 50 - w
+                        max_row_height = 0
+
+                    win.geometry(f"{w}x{h}+{current_x}+{current_y}")
+
+                    if align == "left":
+                        current_x += w + margin_x
+                    else:
+                        current_x -= w + margin_x
+
+                    max_row_height = max(max_row_height, h)
+
+            except Exception as e:
+                print(f"⚠ 窗口排列失败: {e}")
+
+# --- 数据持久化函数 ---
+def save_monitor_list(monitor_list):
+    """保存当前的监控股票列表到文件"""
+    monitor_list = [win['stock_info'] for win in monitor_list.values()]
+    mo_list = []
+    if len(monitor_list) > 0:
+        for m in monitor_list:
+            stock_code = m[0]
+            if stock_code:
+                stock_code = stock_code.zfill(6)
+
+            if  not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
+                print(f"错误请输入有效的6位股票代码:{m}")
+                continue
+            # ✅ 确保结构升级：带 create_time
+
+            if len(m) < 4:
+                create_time = datetime.now().strftime("%Y-%m-%d %H")
+                m.append(create_time)
+            mo_list.append(m)
+        # 写入文件
+        with open(MONITOR_LIST_FILE, "w", encoding="utf-8") as f:
+            json.dump(mo_list, f, ensure_ascii=False, indent=2)
+
+    else:
+        print('no window find')
+
+    print(f"监控列表已保存到 {MONITOR_LIST_FILE} : count: {len(monitor_list)}")
+
+
+
+def load_monitor_list():
+    """从文件加载监控股票列表"""
+    if os.path.exists(MONITOR_LIST_FILE):
+        with open(MONITOR_LIST_FILE, "r", encoding="utf-8") as f:
+            try:
+                loaded_list = json.load(f)
+                # 确保加载的数据是列表，并且包含列表/元组
+                if isinstance(loaded_list, list) and all(isinstance(item, (list, tuple)) for item in loaded_list):
+                    return [list(item) for item in loaded_list]
+                return []
+            except (json.JSONDecodeError, TypeError):
+                return []
+    return []
 
 # ------------------ 后台数据进程 ------------------ #
 def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
@@ -1799,6 +2132,7 @@ class StockMonitorApp(tk.Tk):
         super().__init__()
         
         # 💥 关键修正 1：在所有代码执行前，初始化为安全值
+        self.main_window = self   # ✨ 正确
         self.scale_factor = 1.0 
         self.default_font = tkfont.nametofont("TkDefaultFont")
         self.default_font_size = self.default_font.cget("size")
@@ -1993,6 +2327,47 @@ class StockMonitorApp(tk.Tk):
         # 启动周期检测 RDP DPI 变化
         self.after(3000, self._check_dpi_change)
 
+    def save_all_monitor_windows(self):
+        """保存当前所有监控窗口"""
+        try:
+            save_monitor_list(self._pg_top10_window_simple)
+        except Exception as e:
+            print(f"保存监控列表失败: {e}")
+
+
+    def restore_all_monitor_windows(self):
+        """启动时从文件恢复窗口"""
+        monitor_data = load_monitor_list()
+        if not monitor_data:
+            print("无监控窗口记录。")
+            return
+
+        print(f"正在恢复 {len(monitor_data)} 个监控窗口...")
+        for m in monitor_data:
+            try:
+                code = m[0]
+                stock_name = m[1] if len(m) > 1 else ""
+                concept_name = m[2] if len(m) > 2 else ""   # 视你的 stock_info 结构而定
+                create_time = m[3] if len(m) > 3 else "" 
+                # 唯一key
+                # unique_code = f"{concept_name or ''}_{code or ''}"
+                unique_code = f"{concept_name or ''}_"
+
+                # 创建窗口
+                win = self.show_concept_top10_window_simple(concept_name, code=code, auto_update=True, interval=30)
+
+                # 注册回监控字典
+                self._pg_top10_window_simple[unique_code] = {
+                    "win": win,
+                    "code": unique_code,
+                    "stock_info": m
+                }
+                print(f"恢复窗口 {unique_code}: {concept_name} - {stock_name} ({code}) [{create_time}]")
+            except Exception as e:
+                print(f"恢复窗口失败: {m}, 错误: {e}")
+        if len(monitor_data) > 2:
+            rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal",monitor_list=self._pg_top10_window_simple, win_var=self.win_var)
+
     def update_status_bar_width(self, pw, left_frame, right_frame):
         """ 根据 DPI 缩放调整左右面板的宽度比例 """
         left_width = int(900 * self.scale_factor)
@@ -2073,22 +2448,23 @@ class StockMonitorApp(tk.Tk):
         width_in = self.winfo_screenmmwidth() / 25.4
         height_in = self.winfo_screenmmheight() / 25.4
         screen_dpi = round(width_px / width_in / 96,2)
-        if screen_dpi != self.scale_factor:
-            print(f"分辨率: {width_px}×{height_px}")
-            print(f"物理尺寸: {width_in:.2f}×{height_in:.2f} inch")
-            print(f"实际 DPI: {screen_dpi:.2f}, last_dpi: {self.scale_factor} Tk DPI: {px_per_inch/96:.2f}")
-            self.scale_factor = current_scale
+
+        # if screen_dpi != self.scale_factor:
+        #     print(f"{cct.get_now_time_int()} 分辨率: {width_px}×{height_px}")
+        #     print(f"{cct.get_now_time_int()} 物理尺寸: {width_in:.2f}×{height_in:.2f} inch")
+        #     print(f"{cct.get_now_time_int()} 实际 DPI: {screen_dpi:.2f}, last_dpi: {self.scale_factor} Tk DPI: {px_per_inch/96:.2f}")
+        #     self.scale_factor = screen_dpi
 
         # print(f"分辨率: {width_px}×{height_px}")
         # print(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
-        return  width_px
+        return  (width_px,height_px)
 
     def _check_dpi_change(self):
             """定期检测 DPI 是否变化（例如 RDP 登录）"""
             # current_scale = get_windows_dpi_scale_factor()
             # print(f'current_scale : {current_scale} self.last_dpi_scale : {self.last_dpi_scale}')
             # current_scale = self.get_tk_dpi_scale()
-            width_px = self.print_tk_dpi_detail()
+            width_px,height_px = self.print_tk_dpi_detail()
             if width_px == 1920:
                 current_scale = 1.25
             elif  width_px == 3840:
@@ -2099,11 +2475,12 @@ class StockMonitorApp(tk.Tk):
             # print(f'current_scale : {current_scale} self.last_dpi_scale :{self.last_dpi_scale}')
             # print(f'width_px : {width_px}')
             if abs(current_scale - self.last_dpi_scale) > 0.05:
+                print(f"{cct.get_now_time_int()} 分辨率: {width_px}×{height_px} current_scale:{current_scale}")
                 print(f"[DPI变化检测] 从 {self.last_dpi_scale:.2f} → {current_scale:.2f}")
                 self._apply_scale_dpi_change(current_scale)
                 self.on_dpi_changed_qt(current_scale)
+                # self.scale_factor = current_scale
                 self.last_dpi_scale = current_scale
-                self.scale_factor = current_scale
 
             # 每 3 秒检测一次
             self.after(5000, self._check_dpi_change)
@@ -2165,7 +2542,7 @@ class StockMonitorApp(tk.Tk):
             # 按比例调整
             new_w = int(width * scale_factor / self.scale_factor)
             new_h = int(height * scale_factor / self.scale_factor)
-            print(f'scale_factor: {scale_factor} old_scale: {self.scale_factor} width: {width} height: {height} new_w : {new_w} new_h: {new_h}')
+            print(f'{cct.get_now_time_int()} scale_factor: {scale_factor} old_scale: {self.scale_factor} width: {width} height: {height} new_w : {new_w} new_h: {new_h}')
             # 更新窗口大小
             self.geometry(f"{new_w}x{new_h}")
 
@@ -2175,7 +2552,7 @@ class StockMonitorApp(tk.Tk):
             self.default_font.configure(size=size)
             self.default_font_bold.configure(size=size)
             self.scale_factor = scale_factor
-            print(f"[自动缩放] 主窗口调整为 {scale_factor:.2f} 倍，font_size:{self.default_font_size} new_size:{size} 尺寸 {new_w}x{new_h} ")
+            print(f"{cct.get_now_time_int()} [自动缩放] 主窗口调整为 {scale_factor:.2f} 倍，font_size:{self.default_font_size} new_size:{size} 尺寸 {new_w}x{new_h} ")
  
     def _apply_dpi_scaling(self,scale_factor=None):
         """自动计算并设置 Tkinter 的内部 DPI 缩放。"""
@@ -2249,16 +2626,95 @@ class StockMonitorApp(tk.Tk):
         sf = self.scale_factor
 
         if sf <= 1.25:
-            offset = 0
-        elif sf < 1.5:
             offset = 0.15
+        elif sf < 1.5:
+            offset = 0.25
         elif sf < 2:
             offset = 0.25
         else:
-            offset = 0.5
+            offset = 0.25
 
         return sf - offset
 
+    def _setup_tree_columns(self,tree, cols, sort_callback=None, other={}):
+        """
+        通用 Treeview 列初始化函数
+        - 自动绑定点击排序
+        - 按列名自动分配宽度
+        - 自动应用 DPI 缩放
+        - 可自定义 name 列宽度
+        """
+        co2int = ['ra', 'ral', 'fib', 'fibl', 'op', 'ratio', 'ra']
+        co2width = ['boll', 'kind', 'red']
+
+        col_scaled = self.get_scaled_value() 
+
+        for col in cols:
+            # 绑定排序点击事件
+            if sort_callback:
+                tree.heading(col, text=col, command=lambda _col=col: sort_callback(_col, False))
+            else:
+                tree.heading(col, text=col)
+            # 动态列宽计算
+            if col == "code":
+                # width = int((name_width or 100) * col_scaled)
+                width = int(100 * col_scaled)
+                minwidth = int(60 * col_scaled)
+                stretch = False
+            elif col == "name":
+                # width = int((name_width or 100) * col_scaled)
+                width = int(getattr(self, "_name_col_width", 100*col_scaled))  # 使用记录的 name 宽度
+                minwidth = int(60 * col_scaled)
+                stretch = False
+            elif col in co2int or col in co2width:
+                width = int(60 * col_scaled)
+                minwidth = int(22 * col_scaled)
+                stretch = True
+            else:
+                width = int(80 * col_scaled)
+                minwidth = int(50 * col_scaled)
+                stretch = True
+            tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=stretch)
+
+    # def update_treeview_cols(self, new_cols):
+    #     try:
+    #         # 1. 合法列
+    #         valid_cols = [c for c in new_cols if c in self.df_all.columns]
+    #         if 'code' not in valid_cols:
+    #             valid_cols = ["code"] + valid_cols
+
+    #         # 相同就跳过
+    #         if valid_cols == self.current_cols:
+    #             return
+
+    #         self.current_cols = valid_cols
+
+    #         # 2. 暂时清空列
+    #         self.tree["displaycolumns"] = ()
+    #         self.tree["columns"] = ()
+    #         self.tree.update_idletasks()
+
+    #         # 3. 重新配置列
+    #         cols = tuple(self.current_cols)
+    #         # print(f'cols : {cols}')
+    #         self.tree["columns"] = cols
+    #         self.tree["displaycolumns"] = cols
+    #         self.tree.configure(show="headings")
+
+    #         # 4. 设置列宽
+    #         if not hasattr(self, "_name_col_width"):
+    #             self._name_col_width = int(100*self.get_scaled_value())   # 初始name列宽
+
+    #         print(f'update_treeview_cols self.scale_factor : {self.scale_factor}')
+    #         self._setup_tree_columns(self.tree,cols, sort_callback=self.sort_by_column, other={})
+
+    #         # 5. 延迟刷新
+    #         self.tree.after(100, self.refresh_tree)
+    #         self.tree.after(500, self.bind_treeview_column_resize)
+    #     except Exception as e:
+    #         import traceback
+    #         traceback.print_exc()
+    #         print("更新 Treeview 列失败：", e)
     def update_treeview_cols(self, new_cols):
         try:
             # 1. 合法列
@@ -2267,67 +2723,38 @@ class StockMonitorApp(tk.Tk):
                 valid_cols = ["code"] + valid_cols
 
             # 相同就跳过
-            if valid_cols == self.current_cols:
+            if valid_cols == getattr(self, 'current_cols', []):
                 return
 
             self.current_cols = valid_cols
-
-            # 2. 暂时清空列
-            self.tree["displaycolumns"] = ()
-            self.tree["columns"] = ()
-            self.tree.update_idletasks()
-
-            # 3. 重新配置列
             cols = tuple(self.current_cols)
-            # print(f'cols : {cols}')
+
+            # 2. 不要直接清空 columns，直接设置新列即可
             self.tree["columns"] = cols
             self.tree["displaycolumns"] = cols
             self.tree.configure(show="headings")
 
-            # 4. 设置列宽
+            # 3. 设置列宽
             if not hasattr(self, "_name_col_width"):
-                self._name_col_width = 60  # 初始name列宽
+                self._name_col_width = int(100*self.get_scaled_value())
 
-            # for col in cols:
-            #     self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
-            #     if col == "name":
-            #         # 固定name列宽
-            #         self.tree.column(col, width=self._name_col_width, anchor="center", minwidth=50, stretch=False)
-            #     else:
-            #         # 其他列自动宽度
-            #         self.tree.column(col, width=60, anchor="center", minwidth=50, stretch=True)
             print(f'update_treeview_cols self.scale_factor : {self.scale_factor}')
-            co2int = ['ra','ral','fib','fibl','op', 'ratio','top10','ra']
-            co2width = ['boll','kind','red']
-            col_scaled = self.get_scaled_value() 
-            for col in cols:
-                self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+            self._setup_tree_columns(
+                self.tree,
+                cols,
+                sort_callback=self.sort_by_column,
+                other={}
+            )
 
-                if col == "name":
-                    width = int(getattr(self, "_name_col_width", 120*col_scaled))  # 使用记录的 name 宽度
-                    minwidth = int(60*col_scaled)
-                    self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=False)
-                elif col in co2int:
-                    width = int(60*col_scaled)  # 数字列宽度可小
-                    minwidth = int(30*col_scaled)
-                    self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
-                elif col in co2width:
-                    width = int(60*col_scaled)  # 数字列宽度可小
-                    minwidth = int(30*col_scaled)
-                    self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
-                else:
-                    width = int(80*col_scaled)
-                    minwidth = int(60*col_scaled)
-                    self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
-
-
-            # 5. 延迟刷新
+            # 4. 延迟刷新
             self.tree.after(100, self.refresh_tree)
             self.tree.after(500, self.bind_treeview_column_resize)
+
         except Exception as e:
             import traceback
             traceback.print_exc()
             print("更新 Treeview 列失败：", e)
+
 
 
     # def update_treeview_cols_remember_col(self, new_cols):
@@ -3057,7 +3484,7 @@ class StockMonitorApp(tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","覆写TDX"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","覆写TDX"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -3068,7 +3495,9 @@ class StockMonitorApp(tk.Tk):
 
         def run_action(action):
 
-            if action == "Query编辑":
+            if action == "窗口重排":
+                rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal",monitor_list=self._pg_top10_window_simple, win_var=self.win_var)
+            elif action == "Query编辑":
                 self.query_manager.open_editor()  # 打开 QueryHistoryManager 编辑窗口
             elif action == "停止刷新":
                 self.stop_refresh()
@@ -3143,6 +3572,8 @@ class StockMonitorApp(tk.Tk):
             self.search_var2.set(self.search_history2[0])
 
         self.open_column_manager_init()
+        # # 程序启动时恢复
+        # self.restore_all_monitor_windows()
 
         # self.focus_force()
         # self.lift()
@@ -3325,14 +3756,69 @@ class StockMonitorApp(tk.Tk):
             # for old_col, new_col in diffs:
             #     self.replace_st_key_sort_col(old_col, new_col)
 
-        def first_diff(old_cols, new_cols):
+
+        # def first_diff_and_replace(old_cols, new_cols, current_cols):
+        #     """
+        #     查找 old_cols 与 new_cols 的第一个不同项，并在 current_cols 中替换。
+        #     若当前列中不存在 old，则继续找下一个不同项。
+        #     返回 (old, new) 若替换成功，否则返回 None。
+        #     """
+        #     for old, new in zip(old_cols, new_cols):
+        #         if old != new:
+        #             if old in current_cols:
+        #                 idx = current_cols.index(old)
+        #                 current_cols[idx] = new
+        #                 print(f"✅ 替换: {old} -> {new}")
+        #                 return old, new
+        #             else:
+        #                 print(f"⚠️ {old} 不在 current_cols 中，继续查找下一组差异...")
+        #     print("⚠️ 没有可替换的差异列。")
+        #     return None
+
+        # def first_diff(old_cols, new_cols):
+        #     for old, new in zip(old_cols, new_cols):
+        #         if old != new:
+        #             return old, new
+        #     return None
+
+        def first_diff(old_cols, new_cols, current_cols):
+            """
+            找出 old_cols 与 new_cols 的第一个不同项，
+            且 old 在 current_cols 中存在。
+            返回 (old, new)，若无则返回 None。
+            """
             for old, new in zip(old_cols, new_cols):
                 if old != new:
-                    return old, new
+                    if old in current_cols:
+                        print(f"✅ 可替换列对: ({old}, {new})")
+                        return old, new
+                    else:
+                        print(f"⚠️ {old} 不在 current_cols 中，跳过...")
+            print("⚠️ 未找到可替换的差异列。")
             return None
 
+
+        def update_display_cols_if_diff(display_cols, display_cols_2, current_cols):
+            """
+            检测并自动更新 display_cols，如果发现有匹配差异则替换。
+            返回 (新的 display_cols, diff)
+            """
+            diff = first_diff(display_cols, display_cols_2, current_cols)
+            if diff:
+                old, new = diff
+                # 替换第一个匹配的 old 为 new
+                updated_cols = [new if c == old else c for c in display_cols]
+                print(f"🟢 已更新 DISPLAY_COLS: 替换 {old} → {new}")
+                return updated_cols, diff
+            else:
+                print("🔸 无可更新的列。")
+                return display_cols, None
+
+
+
+        global DISPLAY_COLS 
+
         if sort_val:
-            # global DISPLAY_COLS
             sort_val = sort_val.strip()
             self.global_values.setkey("st_key_sort", sort_val)
             self.status_var.set(f"设置 st_key_sort : {sort_val}")
@@ -3349,8 +3835,13 @@ class StockMonitorApp(tk.Tk):
             DISPLAY_COLS_2 = ct.get_Duration_format_Values(
                 ct.Monitor_format_trade,sort_cols[:2])
             # print(f'DISPLAY_COLS : {DISPLAY_COLS}')
+            # print(f'self.current_cols[1:] : {self.current_cols[1:]}')
             # print(f'DISPLAY_COLS_2 : {DISPLAY_COLS_2}')
-            diff = first_diff(self.current_cols[1:], DISPLAY_COLS_2)
+            # diff = first_diff(self.current_cols[1:], DISPLAY_COLS_2)
+            # diff = first_diff(DISPLAY_COLS, DISPLAY_COLS_2,self.current_cols[1:])
+            # 第一次调用
+            DISPLAY_COLS, diff = update_display_cols_if_diff(DISPLAY_COLS, DISPLAY_COLS_2, self.current_cols[1:])
+            # print(f'diff : {diff}')
             if diff:
                 print(f'diff : {diff}')
                 # bug index 
@@ -3459,16 +3950,25 @@ class StockMonitorApp(tk.Tk):
                     if self.sortby_col is not None:
                         print(f'update_tree sortby_col : {self.sortby_col} sortby_col_ascend : {self.sortby_col_ascend}')
                         df = df.sort_values(by=self.sortby_col, ascending=self.sortby_col_ascend)
-                    if df is not None and not df.empty:
+                    if df is not None and not df.empty and len(df) > 30:
                         time_s = time.time()
                         df = detect_signals(df)
                         self.df_all = df.copy()
                         print(f'detect_signals duration time:{time.time()-time_s:.2f}')
                     # print(f"self.queue [Debug] df_all_hash={df_hash(self.df_all)} len={len(self.df_all)} time={datetime.now():%H:%M:%S}")
-                    if self.search_var1.get() or self.search_var2.get():
-                        self.apply_search()
-                    else:
-                        self.refresh_tree(self.df_all)
+                        
+                        # ✅ 仅在第一次获取 df_all 后恢复监控窗口
+                        if not hasattr(self, "_restore_done"):
+                            self._restore_done = True
+                            print("首次数据加载完成，开始恢复监控窗口...")
+                            self.after(1000,self.restore_all_monitor_windows)
+
+
+                        if self.search_var1.get() or self.search_var2.get():
+                            self.apply_search()
+                        else:
+                            self.refresh_tree(self.df_all)
+                            
                     # 初始化一次
                     # self._concept_dict_global = {}
                     # for idx, row in self.df_all.iterrows():
@@ -3610,7 +4110,7 @@ class StockMonitorApp(tk.Tk):
         frame_right = tk.Frame(parent_frame, bg="#f0f0f0") 
         frame_right.pack(side=tk.RIGHT, padx=2, pady=1)
 
-        self.win_var = tk.BooleanVar(value=False)
+        self.win_var = tk.BooleanVar(value=True)
         self.tdx_var = tk.BooleanVar(value=True)
         self.ths_var = tk.BooleanVar(value=True)
         self.dfcf_var = tk.BooleanVar(value=False)
@@ -4807,13 +5307,38 @@ class StockMonitorApp(tk.Tk):
             #     new_columns = self.current_cols
 
             # self.tree.config(columns=new_columns)
-
+            print(f'replace_column get_scaled_value:{self.get_scaled_value()}')
             # 重新设置表头
-            for col in new_columns:
-                # self.tree.heading(col, text=col, anchor="center", command=lambda _col=col: self.sort_by_column(_col, False))
-                width = int(80*self.get_scaled_value()) if col == "name" else int(60*self.get_scaled_value())
-                self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
-                self.tree.column(col, width=width, anchor="center", minwidth=50)
+            # for col in new_columns:
+            #     # self.tree.heading(col, text=col, anchor="center", command=lambda _col=col: self.sort_by_column(_col, False))
+            #     width = int(getattr(self, "_name_col_width", int(120*self.get_scaled_value()))) if col == "name" else int(60*self.get_scaled_value())
+            #     self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+            #     self.tree.column(col, width=width, anchor="center", minwidth=int(60*self.get_scaled_value()))
+
+            # co2int = ['ra','ral','fib','fibl','op', 'ratio','ra']
+            # co2width = ['boll','kind','red']
+            # col_scaled = self.get_scaled_value() 
+            # for col in new_columns:
+            #     self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+            #     if col == "name":
+            #         width = int(getattr(self, "_name_col_width", 100*col_scaled))  # 使用记录的 name 宽度
+            #         minwidth = int(60*col_scaled)
+            #         self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=False)
+            #     elif col in co2int:
+            #         width = int(60*col_scaled)  # 数字列宽度可小
+            #         minwidth = int(22*col_scaled)
+            #         self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
+            #     elif col in co2width:
+            #         width = int(60*col_scaled)  # 数字列宽度可小
+            #         minwidth = int(22*col_scaled)
+            #         self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
+            #     else:
+            #         width = int(80*col_scaled)
+            #         minwidth = int(50*col_scaled)
+            #         self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
+
+            self._setup_tree_columns(self.tree,new_columns, sort_callback=self.sort_by_column, other={})
+
 
             # 重新加载数据
             # self.refresh_tree(self.df_all)
@@ -4878,17 +5403,70 @@ class StockMonitorApp(tk.Tk):
         tree.update_idletasks()
 
         # 4️⃣ 为每个列重新设置 heading / column
-        print(f'self.scale_factor :{self.scale_factor} col_scaled:{self.get_scaled_value()}')
-        for col in cols_to_show:
-            if sort_func:
-                tree.heading(col, text=col, command=lambda _c=col: sort_func(_c, False))
-            else:
-                tree.heading(col, text=col)
-            width = int(80*self.get_scaled_value()) if col == "name" else int(60*self.get_scaled_value())
-            tree.column(col, width=width, anchor="center", minwidth=int(50*self.get_scaled_value()))
+        print(f'reset_tree_columns self.scale_factor :{self.scale_factor} col_scaled:{self.get_scaled_value()}')
+        # for col in cols_to_show:
+        #     if sort_func:
+        #         tree.heading(col, text=col, command=lambda _c=col: sort_func(_c, False))
+        #     else:
+        #         tree.heading(col, text=col)
+        #     width = int(80*self.get_scaled_value()) if col == "name" else int(60*self.get_scaled_value())
+        #     tree.column(col, width=width, anchor="center", minwidth=int(60*self.get_scaled_value()))
+
+        # co2int = ['ra','ral','fib','fibl','op', 'ratio','ra']
+        # co2width = ['boll','kind','red']
+        # col_scaled = self.get_scaled_value() 
+        # for col in cols_to_show:
+        #     if sort_func:
+        #         tree.heading(col, text=col, command=lambda _c=col: sort_func(_c, False))
+        #     else:
+        #         tree.heading(col, text=col)
+
+        #     if col == "name":
+        #         width = int(getattr(self, "_name_col_width", 100*col_scaled))  # 使用记录的 name 宽度
+        #         minwidth = int(60*col_scaled)
+        #         tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=False)
+        #     elif col in co2int:
+        #         width = int(60*col_scaled)  # 数字列宽度可小
+        #         minwidth = int(22*col_scaled)
+        #         tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
+        #     elif col in co2width:
+        #         width = int(60*col_scaled)  # 数字列宽度可小
+        #         minwidth = int(22*col_scaled)
+        #         tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
+        #     else:
+        #         width = int(80*col_scaled)
+        #         minwidth = int(50*col_scaled)
+        #         tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
+
+        self._setup_tree_columns(tree,cols_to_show, sort_callback=sort_func, other={})
+
 
         # print(f"[Tree Reset] applied cols={list(tree['columns'])}")
 
+
+    def tree_scroll_to_code(self, code):
+        """在 Treeview 中自动定位到指定 code 行"""
+        if not code or not (code.isdigit() and len(code) == 6):
+            return
+
+        try:
+            # --- 2. 清空原有选择（可选） ---
+            # self.tree.selection_remove(self.tree.selection())
+
+            for iid in self.tree.get_children():
+                values = self.tree.item(iid, "values")
+                # values[0] 通常是 code，如果你的 code 列不是第一列可以传入 index 参数
+                if values and str(values[0]) == str(code):
+                    self.tree.selection_set(iid)   # 设置选中
+                    self.tree.focus(iid)           # 键盘焦点
+                    self.tree.see(iid)             # 自动滚动，使其可见
+                    return True
+            toast_message(self, f"{code} is not Found Main")
+        except Exception as e:
+            print(f"[tree_scroll_to_code] Error: {e}")
+            return False
+
+        return False  # 未找到
 
     def refresh_tree(self, df=None):
         """刷新 TreeView，保证列和数据严格对齐。"""
@@ -4916,8 +5494,9 @@ class StockMonitorApp(tk.Tk):
         # cols_to_show = ['code'] + [c for c in DISPLAY_COLS if c != 'code']
         cols_to_show = [c for c in self.current_cols if c in df.columns]
         # print(f'cols_to_show : {cols_to_show}')
-        self.after_idle(lambda: self.reset_tree_columns(self.tree, cols_to_show, self.sort_by_column))
 
+        # self.after_idle(lambda: self.reset_tree_columns(self.tree, cols_to_show, self.sort_by_column))
+        self.reset_tree_columns(self.tree, cols_to_show, self.sort_by_column)
         # 插入数据严格按 cols_to_show
         for _, row in df.iterrows():
             values = [row.get(col, "") for col in cols_to_show]
@@ -4968,6 +5547,7 @@ class StockMonitorApp(tk.Tk):
         if not hasattr(self, "tree") or not self.tree.winfo_exists():
             return  # 已销毁，直接返回
         cols = list(self.tree["columns"])
+
         # 遍历显示列并设置合适宽度
         for col in cols:
             # 跳过不存在于 df 的列
@@ -5003,13 +5583,20 @@ class StockMonitorApp(tk.Tk):
 
     # ----------------- 排序 ----------------- #
     def sort_by_column(self, col, reverse):
-        if col in ['code'] or col not in self.current_df.columns:
+        # if col in ['code'] or col not in self.current_df.columns:
+        if col not in self.current_df.columns:
             return
         self.select_code = None
         self.sortby_col =  col
         self.sortby_col_ascend = not reverse
         # df_sorted = self.current_df.sort_values(by=col, ascending=not reverse)
-        if pd.api.types.is_numeric_dtype(self.current_df[col]):
+        if col in ['code']:
+            # df_sorted = self.current_df.reset_index().sort_values(
+            #     by=col, key=lambda s: s.astype(str), ascending=not reverse)
+            df_sorted = self.current_df.reset_index(drop=True).sort_values(
+                by=col, key=lambda s: s.astype(str), ascending=not reverse)
+
+        elif pd.api.types.is_numeric_dtype(self.current_df[col]):
             df_sorted = self.current_df.sort_values(by=col, ascending=not reverse)
         else:
             df_sorted = self.current_df.sort_values(by=col, key=lambda s: s.astype(str), ascending=not reverse)
@@ -5020,7 +5607,7 @@ class StockMonitorApp(tk.Tk):
 
     # import re
 
-    def process_query(query: str):
+    def process_query_test(query: str):
         """
         提取 query 中 `and (...)` 的部分，剔除后再拼接回去
         """
@@ -5816,9 +6403,15 @@ class StockMonitorApp(tk.Tk):
     #         "win": win
     #         "code": code
     #     }
-    def show_concept_top10_window_simple(self, concept_name, code=None, auto_update=True, interval=30):
+    def show_concept_top10_window_simple(self, concept_name, code=None, auto_update=True, interval=30,stock_name=None):
         """
         显示指定概念的前10放量上涨股，不复用已有窗口，简单独立创建
+        参数：
+            concept_name: 概念名称
+            code: 股票代码，可选
+            auto_update: 是否自动刷新
+            interval: 刷新间隔（秒）
+            stock_name: 股票名称（可选）
         """
         if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
             toast_message(self, "df_all 数据为空，无法筛选概念股票")
@@ -5837,7 +6430,8 @@ class StockMonitorApp(tk.Tk):
         if not hasattr(self, "_pg_top10_window_simple"):
             self._pg_top10_window_simple = {}
 
-        unique_code = f"{concept_name or ''}_{code or ''}"
+        # unique_code = f"{concept_name or ''}_{code or ''}"
+        unique_code = f"{concept_name or ''}_"
         # --- 检查是否已有相同 code 的窗口 ---
         for k, v in self._pg_top10_window_simple.items():
             if v.get("code") == unique_code and v.get("win") is not None and v.get("win").winfo_exists():
@@ -5852,14 +6446,33 @@ class StockMonitorApp(tk.Tk):
         win.title(f"{concept_name} 概念前10放量上涨股")
         win.attributes('-toolwindow', True)  # 去掉最大化/最小化按钮，只留关闭按钮
 
-        now = datetime.now()
-        timestamp_suffix = f"{now:%M%S}{int(now.microsecond/1000):03d}"[:6]
-        key = f"{concept_name}_{timestamp_suffix}"
+        # now = datetime.now()
+        # timestamp_suffix = f"{now:%M%S}{int(now.microsecond/1000):03d}"[:6]
+        # key = f"{concept_name}_{timestamp_suffix}"
+        # key = f"{concept_name}_{timestamp_suffix}"
         # print(f'show_concept_top10_window_simple : {unique_code}')
         # 缓存窗口
-        self._pg_top10_window_simple[key] = {
+        # --- 如果传了code但没传stock_name，则从self.df_all查找 ---
+        if code and not stock_name:
+            try:
+                if hasattr(self, "df_all") and code in self.df_all.index:
+                    stock_name = self.df_all.loc[code, "name"]
+                elif hasattr(self, "df_all") and "code" in self.df_all.columns:
+                    match = self.df_all[self.df_all["code"].astype(str) == str(code)]
+                    if not match.empty:
+                        stock_name = match.iloc[0]["name"]
+            except Exception as e:
+                print(f"查找股票名称出错: {e}")
+
+        # 确保格式化
+        code = str(code).zfill(6) if code else ""
+        stock_name = stock_name or "未命名"
+
+        self._pg_top10_window_simple[unique_code] = {
             "win": win,
-            "code": f"{concept_name or ''}_{code or ''}"
+            "toplevel": win,
+            "code": f"{concept_name or ''}_{code or ''}",
+            "stock_info": [ code , stock_name, concept_name]   # 这里保存股票详细信息
         }
 
         # 这里可以继续填充窗口内容
@@ -6103,9 +6716,9 @@ class StockMonitorApp(tk.Tk):
         win.bind("<Escape>", lambda e: _on_close())  # ESC关闭窗口
         # 填充数据
         self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
+        return win
 
-
-    def show_concept_top10_window(self, concept_name, code=None, auto_update=True, interval=30,):
+    def show_concept_top10_window(self, concept_name, code=None, auto_update=True, interval=30,bring_monitor_status=True):
         """
         显示指定概念的前10放量上涨股（Treeview 高性能版，完全替代 Canvas 版本）
         auto_update: 是否自动刷新
@@ -6370,8 +6983,15 @@ class StockMonitorApp(tk.Tk):
             unbind_mousewheel()
             win.destroy()
             self._concept_top10_win = None
+        def window_focus_bring_monitor_status(win):
+            if bring_monitor_status:
+                self.on_monitor_window_focus(win)
+                win.lift()           # 提前显示
+                win.focus_force()    # 聚焦
+                win.attributes("-topmost", True)
+                win.after(100, lambda: win.attributes("-topmost", False))
 
-        win.bind("<Button-1>", lambda e, w=win: self.on_monitor_window_focus(w))
+        win.bind("<Button-1>", lambda e, w=win: window_focus_bring_monitor_status(w))
         win.protocol("WM_DELETE_WINDOW", _on_close)
         # 填充数据
         self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
@@ -6909,98 +7529,6 @@ class StockMonitorApp(tk.Tk):
             bars.setOpts(brushes=highlight_brushes)
             plot.update()
 
-
-        # def mouse_click(event):
-        #     """鼠标点击事件处理：左键打开概念窗口，右键复制概念表达式"""
-        #     if plot.sceneBoundingRect().contains(event.scenePos()):
-        #         vb = plot.vb
-        #         mouse_point = vb.mapSceneToView(event.scenePos())
-        #         idx = int(round(mouse_point.y()))
-
-        #         # 动态取最新概念数据
-        #         concepts = w_dict.get("_concepts", [])
-        #         if 0 <= idx < len(concepts):
-        #             current_idx["value"] = idx
-        #             highlight_bar(idx)
-
-        #             if event.button() == QtCore.Qt.LeftButton:
-        #                 self._call_concept_top10_win(code, concepts[idx])
-        #                 win.raise_()
-        #                 win.activateWindow()
-
-        #             elif event.button() == QtCore.Qt.RightButton:
-        #                 concept_text = concepts[idx]
-        #                 clipboard = QtWidgets.QApplication.clipboard()
-        #                 copy_concept_text = f'category.str.contains("{concept_text}")'
-        #                 clipboard.setText(copy_concept_text)
-
-        #                 from PyQt5.QtCore import QPoint
-        #                 pos = event.screenPos()
-        #                 pos_int = QPoint(int(pos.x()), int(pos.y()))
-        #                 QtWidgets.QToolTip.showText(pos_int, f"已复制: {copy_concept_text}", win)
-
-
-
-        # plot.scene().sigMouseClicked.connect(mouse_click)
-        # def show_tooltip(event):
-        #     pos = event
-        #     vb = plot.vb
-        #     if plot.sceneBoundingRect().contains(pos):
-        #         mouse_point = vb.mapSceneToView(pos)
-        #         idx = int(round(mouse_point.y()))
-
-        #         # 动态取最新数据
-        #         concepts = w_dict.get("_concepts", [])
-        #         scores = w_dict.get("_scores", [])
-        #         avg_percents = w_dict.get("_avg_percents", [])
-        #         follow_ratios = w_dict.get("_follow_ratios", [])
-
-        #         if 0 <= idx < len(concepts):
-        #             msg = (f"概念: {concepts[idx]}\n"
-        #                    f"平均涨幅: {avg_percents[idx]:.2f}%\n"
-        #                    f"跟随指数: {follow_ratios[idx]:.2f}\n"
-        #                    f"综合得分: {scores[idx]:.2f}")
-        #             QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), msg, win)
-
-        # plot.scene().sigMouseMoved.connect(show_tooltip)
-
-        # def key_event(event):
-        #     key = event.key()
-        #     if key == QtCore.Qt.Key_R:
-        #         self.plot_following_concepts_pg(code, top_n)
-        #         event.accept()
-
-        #     elif key in (QtCore.Qt.Key_Q, QtCore.Qt.Key_Escape):
-        #         QtCore.QTimer.singleShot(0, win.close)
-        #         event.accept()
-
-        #     elif key == QtCore.Qt.Key_Up:
-        #         current_idx["value"] = max(0, current_idx["value"] - 1)
-        #         highlight_bar(current_idx["value"])
-        #         self._call_concept_top10_win(code, concepts[current_idx["value"]])
-        #         win.raise_()
-        #         win.activateWindow()
-        #         event.accept()
-
-        #     elif key == QtCore.Qt.Key_Down:
-        #         current_idx["value"] = min(len(concepts) - 1, current_idx["value"] + 1)
-        #         highlight_bar(current_idx["value"])
-        #         self._call_concept_top10_win(code, concepts[current_idx["value"]])
-        #         win.raise_()
-        #         win.activateWindow()
-        #         event.accept()
-
-        #     elif key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
-        #         # 回车键打开窗口（等价左键点击）
-        #         idx = current_idx["value"]
-        #         if 0 <= idx < len(concepts):
-        #             self._call_concept_top10_win(code, concepts[idx])
-        #             win.raise_()
-        #             win.activateWindow()
-        #         event.accept()
-
-        # win.keyPressEvent = key_event
-
         # --- 鼠标点击事件 ---
         def mouse_click(event):
             if plot.sceneBoundingRect().contains(event.scenePos()):
@@ -7035,6 +7563,8 @@ class StockMonitorApp(tk.Tk):
                         pos = event.screenPos()
                         pos_int = QPoint(int(pos.x()), int(pos.y()))
                         QtWidgets.QToolTip.showText(pos_int, f"已复制: {copy_concept_text}", win)
+                    # ⭐ 未处理的按键继续向下传播
+                    event.ignore()
 
         plot.scene().sigMouseClicked.connect(mouse_click)
 
@@ -7097,9 +7627,10 @@ class StockMonitorApp(tk.Tk):
                 if 0 <= idx < len(concepts):
                     self._call_concept_top10_win(code, concepts[idx])
                     win.raise_()
-                    win.activateWindow()
+                    # win.activateWindow()
                 event.accept()
-
+            # ⭐ 未处理的按键继续向下传播
+            event.ignore()
         win.keyPressEvent = key_event
 
         # --- 屏幕/DPI 切换重定位文本 ---
@@ -7897,7 +8428,7 @@ class StockMonitorApp(tk.Tk):
         # 打开或复用 Top10 窗口
         if code is None:
             return
-        self.show_concept_top10_window(concept_name,code=code)
+        self.show_concept_top10_window(concept_name,code=code,bring_monitor_status=False)
         if hasattr(self, "_concept_top10_win") and self._concept_top10_win:
             win = self._concept_top10_win
 
@@ -8205,8 +8736,6 @@ class StockMonitorApp(tk.Tk):
             self.status_var.set("当前数据为空")
             return
 
-
-
         # # === 测试 ===
         # expr = "(topR > 0 or (per1d > 1) and (per2d > 0)"
         # result = ensure_parentheses_balanced(expr)
@@ -8254,9 +8783,7 @@ class StockMonitorApp(tk.Tk):
 
         # 打印剔除条件列表
         if removed_conditions:
-            # log.info(f"剔除不存在的列条件: {removed_conditions}")
             # # print(f"剔除不存在的列条件: {removed_conditions}")
-            # print(f"剔除不存在的列条件: {removed_conditions}")
             unique_conditions = tuple(sorted(set(removed_conditions)))
             # 初始化缓存
             if not hasattr(self, "_printed_removed_conditions"):
@@ -8292,46 +8819,48 @@ class StockMonitorApp(tk.Tk):
         # ====== 数据过滤 ======
         try:
 
-            # if val1.count('or') > 0 and val1.count('(') > 0:
-            #     if val2 :
-            #         query_search = f"({val1}) and {val2}"
-            #         print(f'query: {query_search} ')
+            if val1.count('or') > 0 and val1.count('(') > 0:
+                if val2 :
+                    query_search = f"({val1}) and {val2}"
+                    print(f'query: {query_search} ')
 
-            #     else:
-            #         query_search = f"({val1})"
-            #         print(f'query: {query_search} ')
-
-            #     df_filtered = self.df_all.query(query_search, engine=query_engine)
-            #     self.refresh_tree(df_filtered)
-            #     self.status_var2.set('')
-            #     self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {val1} and {val2}")
-            # else:
-            # 检查 category 列是否存在
-            if 'category' in self.df_all.columns:
-                # 强制转换为字符串，避免 str.contains 报错
-                if not pd.api.types.is_string_dtype(self.df_all['category']):
-                    self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
-                    # self.df_all['category'] = self.df_all['category'].astype(str)
-                    # 可选：去掉前后空格
-                    # self.df_all['category'] = self.df_all['category'].str.strip()
-            df_filtered = self.df_all.query(final_query, engine=query_engine)
-
-            # 假设 df 是你提供的涨幅榜表格
-            # result = counterCategory(df_filtered, 'category', limit=50, table=True)
-            # self._Categoryresult = result
-            # self.query_manager.entry_query.set(self._Categoryresult)
-
-            self.refresh_tree(df_filtered)
-            # 打印剔除条件列表
-            if removed_conditions:
-                # print(f"[剔除的条件列表] {removed_conditions}")
-                # 显示到状态栏
-                self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
-                self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-            else:
+                else:
+                    query_search = f"({val1})"
+                    print(f'query: {query_search} ')
+                if removed_conditions:
+                    query_search = remove_invalid_conditions(query_search, removed_conditions,showdebug=False)
+                    # print(f'query_search: {query_search} ')
+                # print(f'apply_search {query_search.count("or")} or query: {query_search} ')
+                df_filtered = self.df_all.query(query_search, engine=query_engine)
+                self.refresh_tree(df_filtered)
                 self.status_var2.set('')
-                self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-            print(f'final_query: {final_query}')
+                self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {val1} and {val2}")
+            else:
+                # 检查 category 列是否存在
+                if 'category' in self.df_all.columns:
+                    # 强制转换为字符串，避免 str.contains 报错
+                    if not pd.api.types.is_string_dtype(self.df_all['category']):
+                        self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
+                        # self.df_all['category'] = self.df_all['category'].astype(str)
+                        # 可选：去掉前后空格
+                        # self.df_all['category'] = self.df_all['category'].str.strip()
+                df_filtered = self.df_all.query(final_query, engine=query_engine)
+
+                # 假设 df 是你提供的涨幅榜表格
+                # result = counterCategory(df_filtered, 'category', limit=50, table=True)
+                # self._Categoryresult = result
+                # self.query_manager.entry_query.set(self._Categoryresult)
+                self.after(500,self.refresh_tree(df_filtered))
+                # 打印剔除条件列表
+                if removed_conditions:
+                    # print(f"[剔除的条件列表] {removed_conditions}")
+                    # 显示到状态栏
+                    self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
+                    self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
+                else:
+                    self.status_var2.set('')
+                    self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
+                print(f'final_query: {final_query}')
         except Exception as e:
             log.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")
@@ -8883,6 +9412,9 @@ class StockMonitorApp(tk.Tk):
             else:
                 if onclick:
                     df_code = self.df_all.loc[self.df_all.index == code]
+                    self.tree_scroll_to_code(code)
+                    if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
+                        self.kline_monitor.tree_scroll_to_code_kline(code)
                 # 连续选择相同 code，则显示全部
                 else:
                     df_code = self.df_all
@@ -9130,9 +9662,6 @@ class StockMonitorApp(tk.Tk):
         if self.current_df.empty:
             return
 
-        import os, re, time
-        from datetime import datetime
-
         resample_type = self.resample_combo.get()
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
 
@@ -9303,27 +9832,56 @@ class StockMonitorApp(tk.Tk):
                 toplevel.attributes("-topmost", 0)
                 win_info["is_lifted"] = True
 
-    def bring_monitor_to_front_pg(self, active_window):
+
+    # def bring_monitor_to_front_pg(self, active_window):
+    #     for k, v in self._pg_windows.items():
+    #         win = v.get("win")
+    #         if win is None:
+    #             continue
+    #         if v.get("code") == active_window:
+    #             continue
+    #         # 如果窗口被最小化，恢复
+    #         if win.isMinimized():
+    #             win.setWindowState(QtCore.Qt.WindowNoState)
+
+    #         # 显示窗口
+    #         win.show()              # 如果窗口被隐藏
+    #         win.raise_()            # 提到最前
+    #         # win.activateWindow()    # 获取焦点
+
+    #         # 窗口置顶逻辑（短暂置顶）
+    #         win.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
+    #         win.show()  # 需要调用 show 让 flag 生效
+    #         win.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, False)
+    #         win.show()  # 取消置顶后刷新
+    def bring_monitor_to_front_pg(self, active_code):
+        """仅在当前 PG 窗口被主窗口遮挡时才提升"""
+        # main_win = self.main_window     # 主窗口
+        main_win = self.main_window     # 主窗口
+        if main_win is None:
+            return
+
         for k, v in self._pg_windows.items():
             win = v.get("win")
             if win is None:
                 continue
-            if v.get("code") == active_window:
-                continue
-            # 如果窗口被最小化，恢复
-            if win.isMinimized():
-                win.setWindowState(QtCore.Qt.WindowNoState)
 
-            # 显示窗口
-            win.show()              # 如果窗口被隐藏
-            win.raise_()            # 提到最前
-            win.activateWindow()    # 获取焦点
+            if v.get("code") == active_code:
+                continue  # 不处理当前活动窗口
 
-            # 窗口置顶逻辑（短暂置顶）
-            win.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
-            win.show()  # 需要调用 show 让 flag 生效
-            win.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, False)
-            win.show()  # 取消置顶后刷新
+            # 判断是否被遮挡
+            print(f'win: {win} main_win: {main_win} type: {type(main_win)}')
+
+            if is_window_covered_pg(win, main_win):
+                # 若被最小化，恢复
+                print(f'v.get("code"): {v.get("code")}')
+                if win.isMinimized():
+                    win.showNormal()
+
+                # 轻量提升 → 不抢焦点
+                win.raise_()
+                win.activateWindow()
+
 
     def on_monitor_window_focus_pg(self,active_windows):
         """
@@ -9341,6 +9899,7 @@ class StockMonitorApp(tk.Tk):
         win_state = self.win_var.get()
         if win_state:
             self.bring_monitor_to_front(active_windows)
+            self.bring_monitor_to_front_pg(active_windows)
 
     def load_window_position(self, win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500,offset_step=100):
         """从统一配置文件加载窗口位置（自动按当前 DPI 缩放）"""
@@ -9348,11 +9907,20 @@ class StockMonitorApp(tk.Tk):
             window_name = str(window_name)
             scale = 1.0
             try:
-                scale = get_windows_dpi_scale_factor()
+                # scale = get_windows_dpi_scale_factor()
+                scale = self.scale_factor
+                print(f'scale :{scale}')
                 if not isinstance(scale, (int, float)) or scale <= 0:
                     scale = 1.0
             except Exception as e:
                 log.warning(f"[load_window_position] 获取 DPI 缩放失败: {e}")
+
+            if scale > 1.5:
+                base, filename = os.path.split(WINDOW_CONFIG_FILE)
+                # 在文件名前加 scale2_
+                file_path = os.path.join(base, f"scale{int(scale)}_{filename}")
+            else:
+                file_path = WINDOW_CONFIG_FILE
 
             if os.path.exists(file_path):
                 with open(file_path, "r", encoding="utf-8") as f:
@@ -9363,21 +9931,26 @@ class StockMonitorApp(tk.Tk):
                     # ✳️ 按当前 DPI 放大回去
                     width = int(pos["width"] * scale)
                     height = int(pos["height"] * scale)
-                    x = int(pos["x"] * scale)
-                    y = int(pos["y"] * scale)
+                    x = int(pos["x"] * scale )
+                    y = int(pos["y"] * scale )
 
 
-                    if hasattr(self, "_pg_top10_window_simple"):
+                    if window_name == 'concept_top10_window_simple' and hasattr(self, "_pg_top10_window_simple"):
                         active_windows = self._pg_top10_window_simple.values()
                         count_active_window = len(active_windows)
                         same_name_count = count_active_window - 1
                         if count_active_window > 1:
                             # 每个叠加窗口偏移 offset_step
+                            print(f'_pg_top10_window_simple')
                             x += offset_step * count_active_window
                             y += offset_step * same_name_count
 
+                    print(win.winfo_x(), win.winfo_y(), win.winfo_width(), win.winfo_height())
+                    print(scale_factor)
+
                     # 防止窗口位置越界
                     x, y = clamp_window_to_screens(x, y, width, height)
+                    # x, y = clamp_window_to_screens_logical(x, y, width, height)
 
 
                     win.geometry(f"{width}x{height}+{x}+{y}")
@@ -9395,6 +9968,7 @@ class StockMonitorApp(tk.Tk):
             return default_width, default_height, None, None
 
 
+
     def save_window_position(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
         """保存指定窗口位置到统一配置文件（自动按 DPI 缩放）"""
         try:
@@ -9403,7 +9977,9 @@ class StockMonitorApp(tk.Tk):
             # --- 获取当前 Windows DPI 缩放比例 ---
             scale = 1.0
             try:
-                scale = get_windows_dpi_scale_factor()
+                # scale = get_windows_dpi_scale_factor()
+                scale = self.scale_factor
+                print(f'scale :{scale}')
                 if not isinstance(scale, (int, float)) or scale <= 0:
                     scale = 1.0
             except Exception as e:
@@ -9411,7 +9987,7 @@ class StockMonitorApp(tk.Tk):
 
             # --- 按缩放比例保存位置 ---
             pos = {
-                "x": int(win.winfo_x() / scale),
+                "x": int(win.winfo_x() / scale ),
                 "y": int(win.winfo_y() / scale),
                 "width": int(win.winfo_width() / scale),
                 "height": int(win.winfo_height() / scale)
@@ -9419,6 +9995,13 @@ class StockMonitorApp(tk.Tk):
 
             # --- 读取旧数据 ---
             data = {}
+            if scale > 1.5:
+                base, filename = os.path.split(WINDOW_CONFIG_FILE)
+                # 在文件名前加 scale2_
+                file_path = os.path.join(base, f"scale{int(scale)}_{filename}")
+            else:
+                file_path = WINDOW_CONFIG_FILE
+                
             if os.path.exists(file_path):
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
@@ -9545,6 +10128,7 @@ class StockMonitorApp(tk.Tk):
             try:
                 # scale = get_windows_dpi_scale_factor()
                 scale = self.scale_factor
+                print(f'scale :{scale}')
                 if not isinstance(scale, (int, float)) or scale <= 0:
                     scale = 1.0
             except Exception as e:
@@ -9552,7 +10136,12 @@ class StockMonitorApp(tk.Tk):
             x = y = None
             width = default_width
             height = default_height
-
+            if scale > 1.5:
+                base, filename = os.path.split(WINDOW_CONFIG_FILE)
+                # 在文件名前加 scale2_
+                file_path = os.path.join(base, f"scale{int(scale)}_{filename}")
+            else:
+                file_path = WINDOW_CONFIG_FILE
             # --- 从文件加载保存的窗口位置 ---
             if os.path.exists(file_path):
                 with open(file_path, "r", encoding="utf-8") as f:
@@ -9755,6 +10344,7 @@ class StockMonitorApp(tk.Tk):
             try:
                 # scale = get_windows_dpi_scale_factor()
                 scale = self.scale_factor
+                print(f'scale :{scale}')
                 if not isinstance(scale, (int, float)) or scale <= 0:
                     scale = 1.0
             except Exception as e:
@@ -9765,12 +10355,21 @@ class StockMonitorApp(tk.Tk):
                 "x": int(geom.x() ),
                 "y": int(geom.y() ),
                 # "width": int(geom.width() / scale),
-                "width": int(geom.width()),
-                # "height": int(geom.height() / scale)
-                "height": int(geom.height())
+                # "width": int(geom.width()),
+                # # "height": int(geom.height() / scale)
+                # "height": int(geom.height())
+                "width": max(300, min(int(geom.width()), 500)),
+                "height": max(300, min(int(geom.height()), 450))
             }
 
             data = {}
+            if scale > 1.5:
+                base, filename = os.path.split(WINDOW_CONFIG_FILE)
+                # 在文件名前加 scale2_
+                file_path = os.path.join(base, f"scale{int(scale)}_{filename}")
+            else:
+                file_path = WINDOW_CONFIG_FILE
+
             if os.path.exists(file_path):
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
@@ -9848,6 +10447,7 @@ class StockMonitorApp(tk.Tk):
 
         # --- 关闭所有 concept top10 窗口 ---
         if hasattr(self, "_pg_top10_window_simple"):
+            self.save_all_monitor_windows()
             for key, win_info in list(self._pg_top10_window_simple.items()):
                 win = win_info.get("win")
                 if win and win.winfo_exists():
@@ -10717,6 +11317,7 @@ class QueryHistoryManager:
 
         # ✅ 绑定 ESC 关闭
         dlg.bind("<Escape>", lambda e: on_cancel())
+        dlg.bind("<Return>", lambda e: on_ok())
 
         # ✅ 让输入框随窗口变化自动扩展
         dlg.grid_rowconfigure(1, weight=1)
@@ -11376,6 +11977,7 @@ class ColumnSetManager(tk.Toplevel):
 
         # ---------- 快捷键 ----------
         self.bind("<Alt-c>", lambda e: self.open_column_manager_editor())
+        self.bind("<Escape>", lambda e: self.open_column_manager_editor())
 
         # ---------- 填充保存组合列表 ----------
         self.refresh_saved_sets()
@@ -11956,6 +12558,7 @@ class ColumnSetManager(tk.Toplevel):
 
         # --- ESC 键关闭 ---
         dlg.bind("<Escape>", lambda e: on_cancel())
+        dlg.bind("<Return>",lambda e: on_ok())       # 回车确认
 
         dlg.grab_set()
         parent.wait_window(dlg)
@@ -12320,6 +12923,46 @@ class RealtimeSignalManager:
 
         return df
 
+    def calc_support_resistance(df):
+        """
+        根据通达信逻辑计算撑压位（压力）和支撑位
+        返回 df，包含 columns: ['pressure', 'support']
+        """
+        import pandas as pd
+        from pandas import Series
+
+        LLV = lambda x, n: x.rolling(n, min_periods=1).min()
+        HHV = lambda x, n: x.rolling(n, min_periods=1).max()
+        SMA = lambda x, n, m: x.ewm(alpha=m/n, adjust=False).mean()
+
+        # --- 短周期 ---
+        RSV13 = (df['close'] - LLV(df['low'], 13)) / (HHV(df['high'], 13) - LLV(df['low'], 13)) * 100
+        ARSV = SMA(RSV13, 3, 1)
+        AK = SMA(ARSV, 3, 1)
+        AD = 3 * ARSV - 2 * AK
+
+        # --- 长周期 ---
+        RSV55 = (df['close'] - LLV(df['low'], 55)) / (HHV(df['high'], 55) - LLV(df['low'], 55)) * 100
+        ARSV24 = SMA(RSV55, 3, 1)
+        AK24 = SMA(ARSV24, 3, 1)
+        AD24 = 3 * ARSV24 - 2 * AK24
+
+        # --- CROSS 计算 ---
+        cross_up = (AD24 > AD) & (AD24.shift(1) <= AD.shift(1))
+
+        # 最近一次上穿的 high 值
+        pressure = []
+        last_high = None
+        for i in range(len(df)):
+            if cross_up.iloc[i]:
+                last_high = df['high'].iloc[i]
+            pressure.append(last_high)
+        df['pressure'] = pressure
+
+        # --- 支撑位 ---
+        df['support'] = LLV(df['high'], 30)
+
+        return df
 
 
     def update_signals_old(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -13198,7 +13841,28 @@ class KLineMonitor(tk.Toplevel):
         except Exception as e:
             toast_message(self, f"筛选语句错误: {e}")
 
+    def tree_scroll_to_code_kline(self, code):
+        """在 Treeview 中自动定位到指定 code 行"""
+        if not code or not (code.isdigit() and len(code) == 6):
+            return
 
+        try:
+            # --- 2. 清空原有选择（可选） ---
+            # self.tree.selection_remove(self.tree.selection())
+            for iid in self.tree.get_children():
+                values = self.tree.item(iid, "values")
+                # values[0] 通常是 code，如果你的 code 列不是第一列可以传入 index 参数
+                if values and str(values[0]) == str(code):
+                    self.tree.selection_set(iid)   # 设置选中
+                    self.tree.focus(iid)           # 键盘焦点
+                    self.tree.see(iid)             # 自动滚动，使其可见
+                    return True
+            toast_message(self.master, f"{code} is not Found")
+        except Exception as e:
+            print(f"[tree_scroll_to_code] Error: {e}")
+            return False
+
+        return False  # 未找到
 
 
     def on_kline_monitor_right_click(self,event):
@@ -13596,103 +14260,112 @@ class KLineMonitor(tk.Toplevel):
                 # --- 2. 表达式过滤 TreeView 当前数据 ---
                 # ====== 条件清理 ======
                 query = query_text
-                bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
-
-                # 2️⃣ 替换掉原 query 中的这些部分
-                for bracket in bracket_patterns:
-                    query = query.replace(f'and {bracket}', '')
-
-                conditions = [c.strip() for c in query.split('and')]
-                # print(f'conditions {conditions}')
-                valid_conditions = []
-                removed_conditions = []
-                # print(f'conditions: {conditions} bracket_patterns : {bracket_patterns}')
-                for cond in conditions:
-                    cond_clean = cond.lstrip('(').rstrip(')')
-                    # cond_clean = ensure_parentheses_balanced(cond_clean)
-                    if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 or cond.find('or') >= 0:
-                        if not any(bp.strip('() ').strip() == cond_clean for bp in bracket_patterns):
-                            ensure_cond = ensure_parentheses_balanced(cond)
-                            # print(f'cond : {cond} ensure_cond : {ensure_cond}')
-                            valid_conditions.append(ensure_cond)
-                            continue
-
-                    # 提取条件中的列名
-                    cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
-
-                    # 所有列都必须存在才保留
-                    if all(col in df.columns for col in cols_in_cond):
-                        valid_conditions.append(cond_clean)
-                    else:
-                        removed_conditions.append(cond_clean)
-                        # log.info(f"剔除不存在的列条件: {cond_clean}")
-
-                # 去掉在 bracket_patterns 中出现的内容
-                removed_conditions = [
-                    cond for cond in removed_conditions
-                    if not any(bp.strip('() ').strip() == cond.strip() for bp in bracket_patterns)
-                ]
-
-                # 打印剔除条件列表
-                if removed_conditions:
-                    # print(f"剔除不存在的列条件: {removed_conditions}")
-                    unique_conditions = tuple(sorted(set(removed_conditions)))
-                    # 初始化缓存
-                    if not hasattr(self, "_printed_removed_conditions"):
-                        self._printed_removed_conditions = set()
-                    # 只打印新的
-                    if unique_conditions not in self._printed_removed_conditions:
-                        print(f"剔除不存在的列条件: {unique_conditions}")
-                        self._printed_removed_conditions.add(unique_conditions)
-
-                if not valid_conditions:
-                    self.status_var.set("没有可用的查询条件")
-                    return
-                # print(f'valid_conditions : {valid_conditions}')
-                # ====== 拼接 final_query 并检查括号 ======
-                final_query = ' and '.join(f"({c})" for c in valid_conditions)
-                # print(f'final_query : {final_query}')
-                if bracket_patterns:
-                    final_query += ' and ' + ' and '.join(bracket_patterns)
-                # print(f'final_query : {final_query}')
-                left_count = final_query.count("(")
-                right_count = final_query.count(")")
-                if left_count != right_count:
-                    if left_count > right_count:
-                        final_query += ")" * (left_count - right_count)
-                    elif right_count > left_count:
-                        final_query = "(" * (right_count - left_count) + final_query
-
-                # ====== 决定 engine ======
-                query_engine = 'numexpr'
-                if any('index.' in c.lower() for c in valid_conditions):
-                    query_engine = 'python'
-
-                # # 中文列名兼容映射 使用中文查询时需要
-                # col_map = {
-                #     "评分": "score",
-                #     "涨幅": "percent",
-                #     "量比": "volume",
-                #     "当前价": "now",
-                #     "信号": "signal",
-                #     "情绪": "emotion",
-                # }
-                # expr = query_text
-                # for k, v in col_map.items():
-                #     expr = expr.replace(k, v)
-                expr = final_query
-                # 数字列转换，确保query能正常执行
-                for col in ["score", "percent", "volume", "now"]:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(df[col], errors="coerce")
-
-                if query_text.isdigit() and len(query_text) == 6:
-                    # 股票代码精确查找
-                    df = df[df["code"] == query_text]
+                if query.count('or') > 0 and query.count('(') > 0:
+                    query_search = f"({query})"
+                    print(f'apply_filters {query.count("or")} OR query: {query_search} ')
+                    query_engine = 'numexpr'
+                    # if any('index.' in c.lower() for c in query):
+                    if any('index.' in c.lower() for c in query) or ('.str' in query and '|' in query):
+                        query_engine = 'python'
+                    df = df.query(query_search, engine=query_engine)
                 else:
-                    # pandas 表达式过滤
-                    # df = df.query(expr)
-                    df = df.query(final_query, engine=query_engine)
+
+                    bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
+                    # 2️⃣ 替换掉原 query 中的这些部分
+                    for bracket in bracket_patterns:
+                        query = query.replace(f'and {bracket}', '')
+
+                    conditions = [c.strip() for c in query.split('and')]
+                    # print(f'conditions {conditions}')
+                    valid_conditions = []
+                    removed_conditions = []
+                    # print(f'conditions: {conditions} bracket_patterns : {bracket_patterns}')
+                    for cond in conditions:
+                        cond_clean = cond.lstrip('(').rstrip(')')
+                        # cond_clean = ensure_parentheses_balanced(cond_clean)
+                        if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 or cond.find('or') >= 0:
+                            if not any(bp.strip('() ').strip() == cond_clean for bp in bracket_patterns):
+                                ensure_cond = ensure_parentheses_balanced(cond)
+                                # print(f'cond : {cond} ensure_cond : {ensure_cond}')
+                                valid_conditions.append(ensure_cond)
+                                continue
+
+                        # 提取条件中的列名
+                        cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
+
+                        # 所有列都必须存在才保留
+                        if all(col in df.columns for col in cols_in_cond):
+                            valid_conditions.append(cond_clean)
+                        else:
+                            removed_conditions.append(cond_clean)
+                            # log.info(f"剔除不存在的列条件: {cond_clean}")
+
+                    # 去掉在 bracket_patterns 中出现的内容
+                    removed_conditions = [
+                        cond for cond in removed_conditions
+                        if not any(bp.strip('() ').strip() == cond.strip() for bp in bracket_patterns)
+                    ]
+
+                    # 打印剔除条件列表
+                    if removed_conditions:
+                        # print(f"剔除不存在的列条件: {removed_conditions}")
+                        unique_conditions = tuple(sorted(set(removed_conditions)))
+                        # 初始化缓存
+                        if not hasattr(self, "_printed_removed_conditions"):
+                            self._printed_removed_conditions = set()
+                        # 只打印新的
+                        if unique_conditions not in self._printed_removed_conditions:
+                            print(f"剔除不存在的列条件: {unique_conditions}")
+                            self._printed_removed_conditions.add(unique_conditions)
+
+                    if not valid_conditions:
+                        self.status_var.set("没有可用的查询条件")
+                        return
+                    # print(f'valid_conditions : {valid_conditions}')
+                    # ====== 拼接 final_query 并检查括号 ======
+                    final_query = ' and '.join(f"({c})" for c in valid_conditions)
+                    # print(f'final_query : {final_query}')
+                    if bracket_patterns:
+                        final_query += ' and ' + ' and '.join(bracket_patterns)
+                    # print(f'final_query : {final_query}')
+                    left_count = final_query.count("(")
+                    right_count = final_query.count(")")
+                    if left_count != right_count:
+                        if left_count > right_count:
+                            final_query += ")" * (left_count - right_count)
+                        elif right_count > left_count:
+                            final_query = "(" * (right_count - left_count) + final_query
+
+                    # ====== 决定 engine ======
+                    query_engine = 'numexpr'
+                    if any('index.' in c.lower() for c in valid_conditions):
+                        query_engine = 'python'
+
+                    # # 中文列名兼容映射 使用中文查询时需要
+                    # col_map = {
+                    #     "评分": "score",
+                    #     "涨幅": "percent",
+                    #     "量比": "volume",
+                    #     "当前价": "now",
+                    #     "信号": "signal",
+                    #     "情绪": "emotion",
+                    # }
+                    # expr = query_text
+                    # for k, v in col_map.items():
+                    #     expr = expr.replace(k, v)
+                    expr = final_query
+                    # 数字列转换，确保query能正常执行
+                    for col in ["score", "percent", "volume", "now"]:
+                        if col in df.columns:
+                            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+                    if query_text.isdigit() and len(query_text) == 6:
+                        # 股票代码精确查找
+                        df = df[df["code"] == query_text]
+                    else:
+                        # pandas 表达式过滤
+                        # df = df.query(expr)
+                        df = df.query(final_query, engine=query_engine)
 
             except Exception as e:
                 print(f"[apply_filters] 查询错误: {e}")
@@ -13777,7 +14450,7 @@ if __name__ == "__main__":
 
     # logger = init_logging("test.log")
 
-    logger = init_logging(redirect_print=False)
+    # logger = init_logging(log_file='monitor_tk.log',redirect_print=True)
 
     # print("这是 print 输出")
     # logger.info("这是 logger 输出")

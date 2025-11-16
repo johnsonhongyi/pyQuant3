@@ -87,6 +87,69 @@ UPDATE_INTERVAL = 30  # 秒，更新UI最小间隔
 last_update_time = 0
 message_cache = []  # 缓存队列
 
+import logging
+from logging.handlers import RotatingFileHandler
+class LoggerWriter:
+    """将 print 输出重定向到 logger"""
+    def __init__(self, level_func):
+        self.level_func = level_func
+        self._is_logging = False  # 防止递归
+
+    def write(self, message):
+        if not message.strip():
+            return
+        if self._is_logging:
+            return
+        try:
+            self._is_logging = True
+            for line in message.rstrip().splitlines():
+                self.level_func(line)
+        finally:
+            self._is_logging = False
+
+    def flush(self):
+        pass
+
+def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=True):
+    """初始化全局日志"""
+    logger = logging.getLogger("MonitorDFCF")
+    logger.setLevel(level)
+
+    if not logger.handlers:
+        formatter = logging.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
+
+        # fh = logging.FileHandler(log_file, encoding="utf-8")
+        # ✅ 使用 RotatingFileHandler：超过 1MB 自动轮转
+        fh = RotatingFileHandler(
+            log_file, 
+            maxBytes= 5 * 1024 * 1024,  # 1MB
+            backupCount=3,         # 最多保留3个历史日志
+            encoding="utf-8"
+        )
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
+
+        ch = logging.StreamHandler()
+        ch.setFormatter(formatter)
+        logger.addHandler(ch)
+
+    logger.propagate = False
+
+    # ⚠️ 调试时禁用 print 重定向
+    if redirect_print:
+        sys.stdout = LoggerWriter(logger.info)
+        sys.stderr = LoggerWriter(logger.error)
+
+    def handle_exception(exc_type, exc_value, exc_traceback):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
+            return
+        logger.error("未捕获异常:", exc_info=(exc_type, exc_value, exc_traceback))
+
+    sys.excepthook = handle_exception
+
+    logger.info("日志初始化完成")
+    return logger
 
 def pipe_server(update_callback):
     """
@@ -519,17 +582,25 @@ screen_width,screen_height, = get_monitors_info()
 print(screen_width,screen_height)
 def schedule_task(name, delay_ms, func, *args):
     """带唯一名称的任务调度（重复调度会覆盖旧任务）"""
-
+    global root
     # 如果已存在同名任务 -> 先取消
     if name in after_tasks:
         root.after_cancel(after_tasks[name]["id"])
         after_tasks.pop(name, None)
 
+    # def wrapper():
+    #     try:
+    #         func(*args)
+    #     finally:
+    #         # 执行完后清理
+    #         after_tasks.pop(name, None)
     def wrapper():
         try:
             func(*args)
+        except Exception as e:
+            print(f"❌ 任务 {name} 执行异常:", e)
+            import traceback; traceback.print_exc()
         finally:
-            # 执行完后清理
             after_tasks.pop(name, None)
 
     task_id = root.after(delay_ms, wrapper)
@@ -557,6 +628,9 @@ def show_tasks():
             f"目标时间={time.strftime('%H:%M:%S', time.localtime(info['target']))}, "
             f"函数={info['func'].__name__}"
         )
+        remaining = max(0, info["target"] - time.time())
+        print(f"  Name={name}, ID={info['id']}, 剩余={remaining:.1f}s, 目标时间={...}")
+
     # root.after(2000, show_tasks)
 
 # --------------------
@@ -2094,7 +2168,7 @@ def schedule_checkpid_task():
     # root.after(3 * 60 * 1000, schedule_checkpid_task)
     schedule_task('checkpid_task',3 * 60 * 1000,lambda: schedule_checkpid_task)
 
-# def daily_init():
+# def daily_init_src():
 #     global realdatadf, loaded_df, viewdf, date_write_is_processed, start_init, last_updated_time
 #     realdatadf = pd.DataFrame()
 #     loaded_df = None
@@ -2124,65 +2198,147 @@ def schedule_checkpid_task():
 #     # 自动注册下一天任务
 #     schedule_daily_init(root)
 
-def daily_init(root):
+# def daily_init():
+#     """每日开盘初始化，重启所有监控窗口刷新"""
+#     global realdatadf, loaded_df, viewdf
+#     global date_write_is_processed, start_init, last_updated_time
+#     global last_update_time, message_cache, refresh_registry, result_queue
+#     global monitor_windows
+#     global root
+#     print("🔄 [daily_init] 每日开盘初始化开始...")
+
+#     # --- 1️⃣ 重置状态变量 ---
+#     realdatadf = pd.DataFrame()
+#     loaded_df = None
+#     viewdf = pd.DataFrame()
+#     date_write_is_processed = False
+#     start_init = 0
+#     last_updated_time = None
+
+#     last_update_time = 0
+#     message_cache = []
+#     refresh_registry = {}
+#     # refresh_registry.clear()
+#     result_queue = queue.Queue()  # 清空旧队列
+
+#     # --- 2️⃣ 恢复日期选择框 ---
+#     if date_entry.winfo_exists():
+#         try:
+#             date_entry.set_date(get_today())
+#         except Exception as e:
+#             print(f"[daily_init] 日期控件未就绪: {e}")
+
+#     # --- 3️⃣ 启动主消息队列 ---
+#     process_queue(root)
+
+#     # --- 4️⃣ 重新启动所有监控窗口的刷新任务 ---
+#     if monitor_windows:
+#         for stock_code, window_info in monitor_windows.items():
+#             win = window_info.get("toplevel")
+#             tree = window_info.get("monitor_tree")
+#             stock_info = window_info.get("stock_info")
+#             print(f'stock_info:{stock_info}')
+#             if not win or not tree:
+#                 print(f'stock_info :{stock_info} not win not tree')
+#                 continue
+#             if not win.winfo_exists():
+#                 print(f'stock_info :{stock_info} not win.winfo_exists')
+#                 continue
+#             try:
+#                 item_id = stock_info[0] if stock_info else stock_code
+#                 refresh_stock_data(window_info, tree, item_id)
+#                 print(f"✅ [daily_init] 已重启监控任务: {stock_code}")
+#             except Exception as e:
+#                 print(f"⚠️ [daily_init] 任务重启失败 {stock_code}: {e}")
+#     else:
+#         print("⚠️ [daily_init] 没有检测到监控窗口，跳过刷新任务")
+
+#     print("✅ [daily_init] 每日初始化完成，监控刷新系统已恢复")
+
+#     # --- 5️⃣ 安排下一次自动初始化 ---
+#     schedule_daily_init(root)
+
+# def daily_init():
+def daily_init(*args, **kwargs):
     """每日开盘初始化，重启所有监控窗口刷新"""
     global realdatadf, loaded_df, viewdf
     global date_write_is_processed, start_init, last_updated_time
     global last_update_time, message_cache, refresh_registry, result_queue
     global monitor_windows
+    global root
 
-    print("🔄 [daily_init] 每日开盘初始化开始...")
+    print(f"🔄 [daily_init] 每日初始化任务启动成功 (args接收={args if args else '无'})", flush=True)
 
-    # --- 1️⃣ 重置状态变量 ---
-    realdatadf = pd.DataFrame()
-    loaded_df = None
-    viewdf = pd.DataFrame()
-    date_write_is_processed = False
-    start_init = 0
-    last_updated_time = None
+    try:
+        # --- 1️⃣ 重置状态变量 ---
+        realdatadf = pd.DataFrame()
+        loaded_df = None
+        viewdf = pd.DataFrame()
+        date_write_is_processed = False
+        start_init = 0
+        last_updated_time = None
+        last_update_time = 0
+        message_cache = []
+        refresh_registry = {}
+        result_queue = queue.Queue()  # 清空旧队列
 
-    last_update_time = 0
-    message_cache = []
-    refresh_registry = {}
-    result_queue = queue.Queue()  # 清空旧队列
-
-    # --- 2️⃣ 恢复日期选择框 ---
-    if date_entry.winfo_exists():
+        # --- 2️⃣ 恢复日期选择框 ---
         try:
-            date_entry.set_date(get_today())
+            if date_entry.winfo_exists():
+                date_entry.set_date(get_today())
         except Exception as e:
-            print(f"[daily_init] 日期控件未就绪: {e}")
+            print(f"⚠️ [daily_init] 日期控件未就绪: {e}")
 
-    # --- 3️⃣ 启动主消息队列 ---
-    process_queue(root)
+        # --- 3️⃣ 启动主消息队列 ---
+        try:
+            process_queue(root)
+            print("🟢 [daily_init] 已启动消息队列")
+        except Exception as e:
+            print(f"❌ [daily_init] 启动消息队列失败: {e}")
+            import traceback
+            traceback.print_exc()
 
-    # --- 4️⃣ 重新启动所有监控窗口的刷新任务 ---
-    if monitor_windows:
-        for stock_code, window_info in monitor_windows.items():
-            win = window_info.get("toplevel")
-            tree = window_info.get("monitor_tree")
-            stock_info = window_info.get("stock_info")
-            if not win or not tree:
-                continue
-            if not win.winfo_exists():
-                continue
-            try:
-                item_id = stock_info[0] if stock_info else stock_code
-                refresh_stock_data(window_info, tree, item_id)
-                print(f"✅ [daily_init] 已重启监控任务: {stock_code}")
-            except Exception as e:
-                print(f"⚠️ [daily_init] 任务重启失败 {stock_code}: {e}")
-    else:
-        print("⚠️ [daily_init] 没有检测到监控窗口，跳过刷新任务")
+        # --- 4️⃣ 重启所有监控窗口刷新任务 ---
+        if monitor_windows:
+            for stock_code, window_info in monitor_windows.items():
+                try:
+                    win = window_info.get("toplevel")
+                    tree = window_info.get("monitor_tree")
+                    stock_info = window_info.get("stock_info")
+                    if not win or not tree or not win.winfo_exists():
+                        print(f"⚠️ [daily_init] 跳过无效窗口: {stock_code}")
+                        continue
+                    item_id = stock_info[0] if stock_info else stock_code
+                    refresh_stock_data(window_info, tree, item_id)
+                    print(f"✅ [daily_init] 已重启监控任务: {stock_code}")
+                except Exception as e:
+                    print(f"❌ [daily_init] 任务重启失败 {stock_code}: {e}")
+                    import traceback
+                    traceback.print_exc()
+        else:
+            print("⚠️ [daily_init] 没有检测到监控窗口，跳过刷新任务")
 
-    print("✅ [daily_init] 每日初始化完成，监控刷新系统已恢复")
+        print("✅ [daily_init] 每日初始化完成，监控刷新系统已恢复")
 
-    # --- 5️⃣ 安排下一次自动初始化 ---
-    schedule_daily_init(root)
+    except Exception as e:
+        print(f"❌ [daily_init] 主流程异常: {e}")
+        import traceback
+        traceback.print_exc()
+
+    finally:
+        # --- 5️⃣ 安排下一次自动初始化 ---
+        try:
+            schedule_daily_init(root)
+            print("🕒 [daily_init] 已安排下一次每日初始化任务")
+        except Exception as e:
+            print(f"❌ [daily_init] 安排下一次任务失败: {e}")
+            import traceback
+            traceback.print_exc()
 
 
 
-# 保存上次的任务ID
+
+# # 保存上次的任务ID
 _scheduled_task_id = None
 
 def schedule_daily_init(root):
@@ -2195,29 +2351,134 @@ def schedule_daily_init(root):
 
     now = datetime.now()
     today_925 = now.replace(hour=9, minute=20, second=0, microsecond=0)
+    # today_925 = now.replace(hour=11, minute=28, second=0, microsecond=0)
     if now > today_925:
         today_925 = get_next_weekday_time(9, 20)
 
     delay_ms = int((today_925 - now).total_seconds() * 1000)
 
-    # --- 防重复：若存在旧任务，先取消 ---
-    if _scheduled_task_id is not None:
-        try:
-            root.after_cancel(_scheduled_task_id)
-            print("🧹 已取消旧的定时任务，准备注册新任务。")
-        except Exception as e:
-            print("⚠️ 取消旧任务失败:", e)
+    # # --- 防重复：若存在旧任务，先取消 ---
+    # if _scheduled_task_id is not None:
+    #     try:
+    #         root.after_cancel(_scheduled_task_id)
+    #         print("🧹 已取消旧的定时任务，准备注册新任务。")
+    #     except Exception as e:
+    #         print("⚠️ 取消旧任务失败:", e)
 
     # --- 注册新任务 ---
-    _scheduled_task_id = root.after(delay_ms, lambda: (daily_init(), start_worker()))
-    print(f"✅ 已注册每日开盘初始化任务: {today_925.strftime('%Y-%m-%d %H:%M')[5:]} (任务ID={_scheduled_task_id})")
-    _scheduled_process_queue_task_id = root.after(delay_ms, lambda: process_queue(root))
+    def scheduled_task():
+        try:
+            print(f"🕒 [schedule_daily_init] 开始执行每日初始化任务: {datetime.now():%H:%M:%S}", flush=True)
+            start_worker(daily_init)
+            # start_worker(lambda: daily_init())  # ✅ 显式调用，不传 root
+        except Exception as e:
+            print(f"❌ [schedule_daily_init] 执行每日任务异常: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+        else:
+            print(f"✅ [schedule_daily_init] 任务执行完毕: {datetime.now():%H:%M:%S}", flush=True)
+        finally:
+            print("🔁 [schedule_daily_init] 准备注册下一次任务", flush=True)
+            schedule_daily_init(root)
 
+    # _scheduled_task_id = schedule_task('daily_init',delay_ms,lambda: scheduled_task())
+    _scheduled_task_id = schedule_task('daily_init', delay_ms, scheduled_task)
+
+    print(f"✅ 已注册每日开盘初始化任务: {today_925.strftime('%Y-%m-%d %H:%M')[5:]} (任务ID={_scheduled_task_id})")
+    # _scheduled_process_queue_task_id = root.after(delay_ms, lambda: process_queue(root))
+    delay_ms_queue = delay_ms+30000
+    _scheduled_process_queue_task_id = schedule_task('process_queue',delay_ms_queue,lambda: process_queue(root))
+    # print(f"✅ 已注册每日开盘初始化任务: {today_925.strftime('%Y-%m-%d %H:%M')[5:]} (任务ID={_scheduled_process_queue_task_id})")
+    print(f"✅ 已注册每日queue_task初始化任务: {format_next_time(delay_ms_queue)} (任务ID={_scheduled_process_queue_task_id})")
     # --- 状态显示 ---
     try:
         status_label3.config(text=f"日初始化: {today_925.strftime('%Y-%m-%d %H:%M')[5:]}")
     except Exception:
         pass
+
+def schedule_daily_init_debug(root, interval_minutes=5):
+    """
+    每 interval_minutes 分钟执行一次 daily_init，用于测试循环是否正常。
+    - 执行 daily_init 后自动安排下一次执行。
+    """
+    global _scheduled_task_id
+
+    delay_ms = interval_minutes * 60 * 1000  # 每 interval_minutes 分钟
+
+    def scheduled_task():
+        try:
+            print(f"🕒 [schedule_daily_init] 开始执行每日初始化任务: {datetime.now():%H:%M:%S}", flush=True)
+            start_worker(daily_init)
+            # start_worker(lambda: daily_init())  # ✅ 显式调用，不传 root
+        except Exception as e:
+            print(f"❌ [schedule_daily_init] 执行每日任务异常: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
+        else:
+            print(f"✅ [schedule_daily_init] 任务执行完毕: {datetime.now():%H:%M:%S}", flush=True)
+        finally:
+            print("🔁 [schedule_daily_init] 准备注册下一次任务", flush=True)
+            schedule_daily_init(root)
+
+
+    # ✅ 注册任务
+    _scheduled_task_id = schedule_task('daily_init', delay_ms, scheduled_task)
+    print(f"✅ 已注册 {interval_minutes} 分钟循环任务: 下次执行 {format_next_time(delay_ms)} (任务ID={_scheduled_task_id})")
+
+    # ✅ 注册延迟30秒的队列任务
+    delay_ms_queue = delay_ms + 30000
+    _scheduled_process_queue_task_id = schedule_task('process_queue', delay_ms_queue, lambda: process_queue(root))
+    print(f"✅ 已注册 queue_task 延迟任务: {format_next_time(delay_ms_queue)} (任务ID={_scheduled_process_queue_task_id})")
+
+    # ✅ 更新UI状态
+    try:
+        status_label3.config(text=f"下次初始化: {format_next_time(delay_ms)}")
+    except Exception:
+        pass
+
+
+# def schedule_daily_init(root):
+#     """
+#     每日定时初始化任务：
+#     - 若已有同名任务，则自动覆盖
+#     - 执行时间为每天 9:20（若当前时间已过，则安排到下一工作日）
+#     """
+#     global _scheduled_task_id
+
+#     now = datetime.now()
+#     today_925 = now.replace(hour=9, minute=20, second=0, microsecond=0)
+#     if now > today_925:
+#         today_925 = get_next_weekday_time(9, 20)
+
+#     delay_ms = int((today_925 - now).total_seconds() * 1000)
+
+#     def scheduled_task():
+#         try:
+#             print(f"🕒 [schedule_daily_init] 开始执行每日初始化任务: {datetime.now():%H:%M:%S}")
+#             start_worker(daily_init)
+#         except Exception as e:
+#             print(f"❌ [schedule_daily_init] 执行每日任务异常: {e}")
+#             import traceback
+#             traceback.print_exc()
+#         finally:
+#             # 再次注册下一次
+#             schedule_daily_init(root)
+
+#     # ✅ 注册主任务
+#     _scheduled_task_id = schedule_task('daily_init', delay_ms, scheduled_task)
+#     print(f"✅ 已注册每日开盘初始化任务: {today_925.strftime('%Y-%m-%d %H:%M')[5:]} (任务ID={_scheduled_task_id})")
+
+#     # ✅ 注册延迟30秒的队列任务
+#     delay_ms_queue = delay_ms + 30000
+#     _scheduled_process_queue_task_id = schedule_task('process_queue', delay_ms_queue, lambda: process_queue(root))
+#     print(f"✅ 已注册每日queue_task初始化任务: {format_next_time(delay_ms_queue)} (任务ID={_scheduled_process_queue_task_id})")
+
+#     # ✅ 更新UI状态
+#     try:
+#         status_label3.config(text=f"日初始化: {today_925.strftime('%m-%d %H:%M')}")
+#     except Exception:
+#         pass
+
 
 # update_queue = queue.Queue()
 
@@ -2264,12 +2525,10 @@ def schedule_worktime_task(tree,update_interval_minutes=update_interval_minutes)
         else:
             # status_label3.config(text=f"更新在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
             status_label3.config(text=f"bg延迟在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
-            # schedule_daily_init(root)
             schedule_task('worktime_task',delay_ms,lambda: schedule_worktime_task(tree))
     else:
         print(f"下一次background任务将在 {next_execution_time.strftime('%Y-%m-%d %H:%M:%S')} 执行，还有 {delay_ms // 1000} 秒。")
         print(f"自动更新任务get_stock_changes_background执行于:在{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}执行")
-        # schedule_daily_init(root)
         status_label3.config(text=f"日更新{next_execution_time.strftime('%Y-%m-%d %H:%M')[5:]}")
         schedule_task('worktime_task',delay_ms,lambda: schedule_worktime_task(tree))
 
@@ -2357,7 +2616,7 @@ def rearrange_monitor_windows_grid():
                 print(f"移动窗口失败 {code}: {e}")
 
 
-def rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal"):
+def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="horizontal"):
     """
     多屏幕窗口重排（自动换列/换行 + 左右对齐 + 屏幕内排序）
     
@@ -2371,6 +2630,16 @@ def rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal
 
     # 取监控窗口列表
     windows = [info for info in monitor_windows.values() if "toplevel" in info]
+
+
+    # ----------- 新增支持 createtime 排序 ----------
+    if sort_by == "create_time":
+        windows.sort(key=lambda w: w["stock_info"][-1], reverse=True)
+    elif sort_by == "title":
+        windows.sort(key=lambda w: w.get("title", ""))
+    else:
+        # 默认按 id 排序
+        windows.sort(key=lambda w: w.get("id", 0))
 
     # 按屏幕分组
     screen_groups = {i: [] for i in range(len(MONITORS))}
@@ -2724,44 +2993,252 @@ def open_archive_loader():
     win.bind("<Escape>", lambda event: win.destroy())
     win.after(6*1000,  lambda  event:win.destroy())
 
+# # --- 数据持久化函数 ---
+# def save_monitor_list():
+#     """保存当前的监控股票列表到文件"""
+#     monitor_list = [win['stock_info'] for win in monitor_windows.values()]
+#     mo_list = []
+#     if len(monitor_list) > 0:
+#         for m in monitor_list:
+#             stock_code = m[0]
+#             if stock_code:
+#                 stock_code = stock_code.zfill(6)
+
+#             if  not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
+#                 print(f"错误请输入有效的6位股票代码:{m}")
+#                 continue
+#             mo_list.append(m)
+
+#     else:
+#         print('no window find')
+
+    # # 写入文件
+    # with open(MONITOR_LIST_FILE, "w", encoding="utf-8") as f:
+    #     json.dump(mo_list, f, ensure_ascii=False, indent=2)
+#     print(f"监控列表已保存到 {MONITOR_LIST_FILE}")
+
+#     archive_monitor_list()
+
+# def load_monitor_list():
+#     """从文件加载监控股票列表"""
+#     if os.path.exists(MONITOR_LIST_FILE):
+#         with open(MONITOR_LIST_FILE, "r", encoding="utf-8") as f:
+#             try:
+#                 loaded_list = json.load(f)
+#                 # 确保加载的数据是列表，并且包含列表/元组
+#                 if isinstance(loaded_list, list) and all(isinstance(item, (list, tuple)) for item in loaded_list):
+#                     return [list(item) for item in loaded_list]
+#                 return []
+#             except (json.JSONDecodeError, TypeError):
+#                 return []
+#     return []
+
 # --- 数据持久化函数 ---
+# def save_monitor_list():
+#     """保存当前的监控股票列表到文件"""
+#     monitor_list = [win['stock_info'] for win in monitor_windows.values()]
+#     mo_list = []
+#     if len(monitor_list) > 0:
+#         for m in monitor_list:
+#             stock_code = m[0]
+#             if stock_code:
+#                 stock_code = stock_code.zfill(6)
+
+#             # 检查合法股票代码
+#             if not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
+#                 print(f"错误请输入有效的6位股票代码: {m}")
+#                 continue
+#             import ipdb;ipdb.set_trace()
+
+#             # ✅ 确保结构升级：带 create_time
+#             if len(m) < 8:
+#                 create_time = datetime.now().strftime("%Y-%m-%d %H")
+#                 m.append(create_time)
+#             mo_list.append(m)
+#     else:
+#         print('no window find')
+
+#     # 写入文件
+#     with open(MONITOR_LIST_FILE, "w", encoding="utf-8") as f:
+#         json.dump(mo_list, f, ensure_ascii=False, indent=2)
+#     print(f"监控列表已保存到 {MONITOR_LIST_FILE}")
+
+#     archive_monitor_list()
+
 def save_monitor_list():
     """保存当前的监控股票列表到文件"""
     monitor_list = [win['stock_info'] for win in monitor_windows.values()]
     mo_list = []
-    if len(monitor_list) > 0:
+
+    if monitor_list:
         for m in monitor_list:
             stock_code = m[0]
             if stock_code:
                 stock_code = stock_code.zfill(6)
 
-            if  not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
-                print(f"错误请输入有效的6位股票代码:{m}")
+            # 检查合法股票代码
+            if not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
+                print(f"错误请输入有效的6位股票代码: {m}")
                 continue
-            mo_list.append(m)
 
+            # ❗ 关键：使用拷贝，不修改原始 m
+            new_m = m.copy()
+
+            # 补齐 create_time 字段
+            if len(new_m) < 8:
+                create_time = datetime.now().strftime("%Y-%m-%d %H")
+                new_m.append(create_time)
+
+            mo_list.append(new_m)
     else:
         print('no window find')
 
-    with open(MONITOR_LIST_FILE, "w") as f:
-            json.dump(mo_list, f)
+    # 写入文件
+    # with open(MONITOR_LIST_FILE, "w", encoding="utf-8") as f:
+    #     json.dump(mo_list, f, ensure_ascii=False, indent=None)
+
+    with open(MONITOR_LIST_FILE, "w", encoding="utf-8") as f:
+        f.write('[\n' + ',\n'.join('  ' + json.dumps(item, ensure_ascii=False) for item in mo_list) + '\n]\n')
+
+
     print(f"监控列表已保存到 {MONITOR_LIST_FILE}")
 
     archive_monitor_list()
 
+
+# def load_monitor_list():
+#     """
+#     从文件加载监控股票列表（自动升级旧结构）。
+#     确保返回值总是 List[List]，且每条记录至少包含8个字段（含 create_time）。
+#     """
+#     if not os.path.exists(MONITOR_LIST_FILE):
+#         return []
+
+#     # 读取原始文件
+#     try:
+#         with open(MONITOR_LIST_FILE, "r", encoding="utf-8") as f:
+#             loaded_raw = json.load(f)
+#     except (json.JSONDecodeError, TypeError, OSError) as e:
+#         print(f"⚠️ 读取监控列表失败: {e}")
+#         return []
+
+#     if not isinstance(loaded_raw, list):
+#         print("⚠️ 文件内容不是列表，已忽略。")
+#         return []
+
+#     upgraded = []
+#     changed = False
+#     now_str = datetime.now().strftime("%Y-%m-%d %H")
+
+#     for idx, item in enumerate(loaded_raw):
+#         # 只接受 list/tuple
+#         if not isinstance(item, (list, tuple)):
+#             print(f"⚠️ 跳过无效记录 index={idx}: {item!r}")
+#             continue
+
+#         row = list(item)
+
+#         # 若缺失 create_time，则补充
+#         if len(row) < 8:
+#             row.append(now_str)
+#             changed = True
+#             print(f"升级监控记录: code={row[0] if row else 'UNKNOWN'} -> 添加 create_time={now_str}")
+
+#         upgraded.append(row)
+
+#     # ✅ 如果有变更，写回文件
+#     if changed:
+#         try:
+#             with open(MONITOR_LIST_FILE, "w", encoding="utf-8") as f:
+#                 json.dump(upgraded, f, ensure_ascii=False, indent=2)
+#             print(f"已自动升级并回写文件: {MONITOR_LIST_FILE}")
+#         except OSError as e:
+#             print(f"⚠️ 写入文件失败: {e}")
+
+#     # ✅ 如果没有任何升级发生，就返回规范化后的 loaded_raw
+#     # （保证外部调用返回的是 list[list]）
+#     return upgraded if changed else [list(item) for item in loaded_raw if isinstance(item, (list, tuple))]
+
 def load_monitor_list():
-    """从文件加载监控股票列表"""
-    if os.path.exists(MONITOR_LIST_FILE):
-        with open(MONITOR_LIST_FILE, "r") as f:
-            try:
-                loaded_list = json.load(f)
-                # 确保加载的数据是列表，并且包含列表/元组
-                if isinstance(loaded_list, list) and all(isinstance(item, (list, tuple)) for item in loaded_list):
-                    return [list(item) for item in loaded_list]
-                return []
-            except (json.JSONDecodeError, TypeError):
-                return []
-    return []
+    """
+    从文件加载监控股票列表，并自动修复结构。
+    规则：
+    - 每条记录必须是长度≥7。
+    - 第 8 个字段（索引 7）固定为 create_time。
+    - 若存在多余的时间字段（索引>7），自动删除。
+    - 若缺失 create_time，自动补齐。
+    """
+    if not os.path.exists(MONITOR_LIST_FILE):
+        return []
+
+    # 读取文件
+    try:
+        with open(MONITOR_LIST_FILE, "r", encoding="utf-8") as f:
+            loaded_raw = json.load(f)
+    except Exception as e:
+        print(f"⚠️ 读取监控列表失败: {e}")
+        return []
+
+    if not isinstance(loaded_raw, list):
+        print("⚠️ 文件内容不是列表，忽略。")
+        return []
+
+    upgraded = []
+    changed = False
+    now_str = datetime.now().strftime("%Y-%m-%d %H")
+
+    for idx, item in enumerate(loaded_raw):
+        if not isinstance(item, (list, tuple)):
+            print(f"⚠️ 跳过无效记录 index={idx}: {item!r}")
+            continue
+
+        row = list(item)
+        original_len = len(row)
+
+        # ----------------------------
+        # ① 若长度 < 7，本身就是损坏数据，跳过（代码、名称等都不完整）
+        # ----------------------------
+        if original_len < 7:
+            print(f"⚠️ 跳过损坏记录 index={idx}: {row}")
+            continue
+
+        # ----------------------------
+        # ② 处理 create_time 字段
+        # ----------------------------
+        if original_len == 7:
+            # 缺少 create_time → 补上
+            row.append(now_str)
+            changed = True
+            print(f"升级记录 index={idx}: 添加 create_time={now_str}")
+
+        elif original_len > 8:
+            # 多余字段，只保留前 8 个
+            extra = row[8:]
+            row = row[:8]
+            changed = True
+            print(f"修剪记录 index={idx}: 移除多余字段 {extra}")
+
+        else:
+            # 恰好 8 项，正常
+            pass
+
+        upgraded.append(row)
+
+    # ----------------------------
+    # ③ 若有修改 → 写回文件
+    # ----------------------------
+    if changed:
+        try:
+            with open(MONITOR_LIST_FILE, "w", encoding="utf-8") as f:
+                json.dump(upgraded, f, ensure_ascii=False, indent=2)
+            print(f"✔ 已自动修复并写回文件: {MONITOR_LIST_FILE}")
+        except Exception as e:
+            print(f"⚠️ 写入文件失败: {e}")
+
+    # 返回规范化结果
+    return upgraded
+
+
 
 def get_stock_changes_background(selected_type=None, stock_code=None, update_interval_minutes=update_interval_minutes,initwork=False):
     """
@@ -2918,6 +3395,7 @@ def _get_stock_changes(selected_type=None, stock_code=None):
     if stock_code:
         stock_code = stock_code.zfill(6)
         temp_df = temp_df[temp_df["代码"].astype(str).str.zfill(6) == str(stock_code)]
+    # print(f'temp_df:{temp_df}')
     return temp_df
         
     
@@ -3043,20 +3521,48 @@ def update_monitor_tree(data, tree, window_info, item_id):
         tree.insert("", 0, values=new_row)
 
 
-    def schedule_next(delay_ms,key, tree, window_info, item_id):
-        now = time.time()
+    # def schedule_next(delay_ms,key, tree, window_info, item_id):
+    #     now = time.time()
         
+    #     # 如果已有任务且还没到期，直接返回
+    #     if refresh_registry[key]["execute_at"] > now:
+    #         return
+    #     execute_at = now + delay_ms / 1000  # 转为秒
+    #     dt=datetime.fromtimestamp(execute_at).strftime("%Y-%m-%d %H:%M:%S")
+    #     # print(f"[{item_id}] {stock_code} 更新刷新任务，安排下一次执行:{dt}")
+    #     refresh_registry[key]["execute_at"] = execute_at
+    #     # 取消旧任务（可能已经执行完也没关系）
+    #     if refresh_registry[key]["after_id"]:
+    #         try:
+    #             tree.after_cancel(refresh_registry[key]["after_id"])
+    #         except Exception:
+    #             pass
+
+    #     # 安排下一次刷新
+    #     def task():
+    #         try:
+    #             refresh_stock_data(window_info, tree, item_id)
+    #         finally:
+    #             # 执行完成后清理状态
+    #             refresh_registry[key]["after_id"] = None
+    #             refresh_registry[key]["execute_at"] = 0
+
+    #     refresh_registry[key]["after_id"] = tree.after(delay_ms, task)
+    def schedule_next(delay_ms, key, tree, window_info, item_id):
+        now = time.time()
+        reg = refresh_registry.setdefault(key, {"after_id": None, "execute_at": 0})
+
         # 如果已有任务且还没到期，直接返回
-        if refresh_registry[key]["execute_at"] > now:
+        if reg["execute_at"] > now:
             return
-        execute_at = now + delay_ms / 1000  # 转为秒
-        dt=datetime.fromtimestamp(execute_at).strftime("%Y-%m-%d %H:%M:%S")
-        # print(f"[{item_id}] {stock_code} 更新刷新任务，安排下一次执行:{dt}")
-        refresh_registry[key]["execute_at"] = execute_at
-        # 取消旧任务（可能已经执行完也没关系）
-        if refresh_registry[key]["after_id"]:
+
+        execute_at = now + delay_ms / 1000
+        reg["execute_at"] = execute_at
+
+        # 取消旧任务
+        if reg["after_id"]:
             try:
-                tree.after_cancel(refresh_registry[key]["after_id"])
+                tree.after_cancel(reg["after_id"])
             except Exception:
                 pass
 
@@ -3065,11 +3571,11 @@ def update_monitor_tree(data, tree, window_info, item_id):
             try:
                 refresh_stock_data(window_info, tree, item_id)
             finally:
-                # 执行完成后清理状态
-                refresh_registry[key]["after_id"] = None
-                refresh_registry[key]["execute_at"] = 0
+                reg["after_id"] = None
+                reg["execute_at"] = 0
 
-        refresh_registry[key]["after_id"] = tree.after(delay_ms, task)
+        reg["after_id"] = tree.after(delay_ms, task)
+
 
 
 
@@ -3082,6 +3588,7 @@ def update_monitor_tree(data, tree, window_info, item_id):
      # 如果已经有刷新任务在调度中，就不再创建新的
     if key not in refresh_registry:
         refresh_registry[key] = {"after_id": None , "execute_at": 0 }
+        schedule_next(1000,key, tree, window_info, item_id)
 
     now = datetime.now()
     next_execution_time = get_next_weekday_time(9, 25)
@@ -3415,8 +3922,10 @@ def safe_drop_down(date_entry):
 def on_monitor_window_focus(event):
     """
     当任意窗口获得焦点时，协调两个窗口到最前。
-    """
-    bring_monitor_to_front(event)
+    """
+    sub_state = sub_var.get()
+    if sub_state:
+        bring_monitor_to_front(event)
 
 def on_window_focus(event):
     """
@@ -3544,6 +4053,24 @@ def bring_monitor_to_front(active_window):
             toplevel.attributes("-topmost", 0)
             win_info["is_lifted"] = True
 
+# def reset_lift_flags():
+#     """
+#     定时检测窗口状态，如果窗口失去焦点或被最小化，
+#     自动清除 is_lifted 标记，以便下次 bring_windows_to_front 能生效。
+#     """
+#     for win_id, win_info in monitor_windows.items():
+#         toplevel = win_info.get("toplevel")
+#         if not (toplevel and toplevel.winfo_exists()):
+#             continue
+
+#         # 如果窗口不是最前的 或 被最小化，就重置标记
+#         # print(f'{win_id} toplevel.state() :{toplevel.state()} is_lifted : {win_info.keys()}')
+#         if toplevel.state() == "iconic" or not toplevel.focus_displayof():
+#             win_info["is_lifted"] = False
+
+#     # 每 2 秒检测一次
+#     root.after(2000, reset_lift_flags)
+
 def reset_lift_flags():
     """
     定时检测窗口状态，如果窗口失去焦点或被最小化，
@@ -3551,16 +4078,26 @@ def reset_lift_flags():
     """
     for win_id, win_info in monitor_windows.items():
         toplevel = win_info.get("toplevel")
+
+        # --- 窗口已销毁 ---
         if not (toplevel and toplevel.winfo_exists()):
             continue
 
-        # 如果窗口不是最前的 或 被最小化，就重置标记
-        # print(f'{win_id} toplevel.state() :{toplevel.state()} is_lifted : {win_info.keys()}')
-        if toplevel.state() == "iconic" or not toplevel.focus_displayof():
+        # --- 安全检测焦点 ---
+        focused = False
+        try:
+            focused = bool(toplevel.focus_displayof())
+        except Exception:
+            # popdown 等子控件已销毁时会进入这里
+            focused = False
+
+        # --- 最小化 或 未聚焦 → 清除标记 ---
+        if toplevel.state() == "iconic" or not focused:
             win_info["is_lifted"] = False
 
     # 每 2 秒检测一次
     root.after(2000, reset_lift_flags)
+
 
 # # 在主程序初始化时调用一次
 # reset_lift_flags()
@@ -3952,18 +4489,76 @@ def rects_overlap(r1, r2):
     a1, b1, a2, b2 = r2
     return not (x2 <= a1 or a2 <= x1 or y2 <= b1 or b2 <= y1)
 
-# def clamp_window_to_screens(x, y, width, height, monitors):
-#     """
-#     如果窗口坐标超出任意屏幕，则将窗口放到第一个屏幕可见区域
-#     """
-#     for mx, my, mw, mh in monitors:
-#         if mx <= x < mx + mw and my <= y < my + mh:
-#             # 窗口在屏幕范围内
-#             return x, y
-#     # 超出屏幕，放到第一个屏幕左上角偏移
-#     mx, my, mw, mh = monitors[0]
-#     return mx + 50, my + 50
 
+def get_physical_resolution():
+    """
+    获取主显示器物理分辨率 (width, height)
+    """
+    try:
+        monitors = win32api.EnumDisplayMonitors()
+        if monitors:
+            info = win32api.GetMonitorInfo(monitors[0][0])
+            left, top, right, bottom = info["Monitor"]
+            return right - left, bottom - top
+    except Exception as e:
+        print("⚠️ 无法获取物理分辨率:", e)
+    return win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1)
+
+
+def print_tk_dpi_detail(root, scale_factor_holder):
+    """
+    打印 Tk 实际缩放和物理分辨率比较，返回逻辑与物理宽度。
+    """
+    # Tk 获取的逻辑分辨率（受系统缩放影响）
+    logical_width = root.winfo_screenwidth()
+    logical_height = root.winfo_screenheight()
+
+    # 系统实际物理分辨率
+    physical_width, physical_height = get_physical_resolution()
+
+    # 当前缩放比（系统层面缩放因子）
+    scale = round(physical_width / logical_width, 2)
+
+    if abs(scale - scale_factor_holder["scale"]) > 0.01:
+        print("──────────────────────────────")
+        print(f"物理分辨率: {physical_width}×{physical_height}")
+        print(f"逻辑分辨率: {logical_width}×{logical_height}")
+        print(f"系统缩放比: {scale:.2f}×（物理/逻辑）")
+        print(f"上次记录: {scale_factor_holder['scale']}")
+        scale_factor_holder["scale"] = scale
+    # print(f"物理分辨率: {physical_width}×{physical_height}")
+    # print(f"逻辑分辨率: {logical_width}×{logical_height}")
+    # print(f"系统缩放比: {scale:.2f}×（物理/逻辑）")
+    return physical_width, logical_width
+
+
+def check_dpi_change(root, scale_factor_holder, last_dpi_holder):
+    """
+    定期检测 DPI/缩放变化（5 秒），并自动应用 Tk scaling。
+    """
+    physical_width, logical_width = print_tk_dpi_detail(root, scale_factor_holder)
+
+    current_scale = scale_factor_holder["scale"]
+
+    # 检测缩放变化
+    if abs(current_scale - last_dpi_holder["scale"]) > 0.05:
+        print(f"[缩放变化检测] 从 {last_dpi_holder['scale']:.2f} → {current_scale:.2f}")
+        # root.tk.call('tk', 'scaling', current_scale)
+        init_monitors()
+        last_dpi_holder["scale"] = current_scale
+
+    # 5 秒后继续检测
+    root.after(5000, lambda: check_dpi_change(root, scale_factor_holder, last_dpi_holder))
+
+
+def start_dpi_monitor(root):
+    """
+    启动 DPI / 缩放监测，基于真实物理分辨率。
+    """
+    scale_holder = {"scale": 1.0}
+    last_holder = {"scale": 1.0}
+    check_dpi_change(root, scale_holder, last_holder)
+    return scale_holder
 
 def place_new_window(window, window_id, win_width=300, win_height=160, margin=2):
     """放置窗口：避免重叠 + 在所属屏幕内自动排列"""
@@ -4096,7 +4691,7 @@ def place_new_window(window, window_id, win_width=300, win_height=160, margin=2)
 #             y += h + margin
 
 
-def create_monitor_window(stock_info):
+def create_monitor_window_notime(stock_info):
     # stock_info 可能缺失部分数据
     global monitor_windows
     if stock_info[0].find(':') > 0 and len(stock_info) > 4:
@@ -4234,6 +4829,222 @@ def create_monitor_window(stock_info):
     monitor_win.bind("<Double-1>", lambda event, code=stock_code: on_monitor_double_click(event,stock_code))
     monitor_win.bind("<Button-3>", lambda event: show_menu(event, stock_info))
     
+    return window_info
+
+
+def normalize_stock_info1(stock_info):
+    """
+    规范化 stock_info 结构，最终格式为 8 项：
+    [code, name, 0, 0, percent, price, vol, create_time]
+    """
+
+    # ============================================
+    # ① 修复你说的 Bug：某些 stock_info 前缀带 index:xxx
+    # ============================================
+    if isinstance(stock_info[0], str) and ":" in stock_info[0] and len(stock_info) > 4:
+        stock_info = stock_info[1:]
+
+    # ============================================
+    # ② 拆解基本字段
+    # ============================================
+    try:
+        stock_code, stock_name, *rest = stock_info
+    except ValueError:
+        stock_code = stock_info[0]
+        stock_name = stock_info[1] if len(stock_info) > 1 else ""
+        rest = []
+
+    # 旧数据中的时间字段可能在 rest 中任何位置
+    old_time = None
+    for v in rest:
+        if isinstance(v, str) and re.match(r"\d{4}-\d{2}-\d{2}", v.strip()):
+            old_time = v.strip()
+            break
+
+    # ============================================
+    # ③ 自动生成其余字段
+    # ============================================
+    default_values = {"percent": 0.0, "price": 0.0, "vol": 0}
+
+    percent = rest[0] if len(rest) >= 1 else default_values["percent"]
+    price   = rest[1] if len(rest) >= 2 else default_values["price"]
+    vol     = rest[2] if len(rest) >= 3 else default_values["vol"]
+
+    # ============================================
+    # ④ 修复 create_time：保持旧的，不重复生成
+    # ============================================
+    if old_time:
+        create_time = old_time  # 使用旧时间
+    else:
+        create_time = datetime.now().strftime("%Y-%m-%d %H")  # 新时间
+
+    # ============================================
+    # ⑤ 生成最终 8 项结构
+    # ============================================
+    return [stock_code, stock_name, 0, 0, percent, price, vol, create_time]
+
+def normalize_stock_info2(stock_info):
+    # 如果有带 ':' 的前缀就移除
+    if stock_info[0].find(':') > 0 and len(stock_info) > 4:
+        stock_info = stock_info[1:]
+
+    # 统一确保长度至少 2
+    stock_code = stock_info[0]
+    stock_name = stock_info[1]
+
+    # 默认值
+    percent = 0.0
+    price   = 0.0
+    vol     = 0
+
+    # 剩余部分
+    rest = stock_info[2:]
+
+    # ---- 判断最后一项是否是 create_time ----
+    create_time = None
+    if rest and isinstance(rest[-1], str) and len(rest[-1]) >= 10:
+        # 是时间
+        create_time = rest[-1]
+        rest = rest[:-1]
+
+    # ---- 按顺序提取 percent / price / vol ----
+    if len(rest) >= 1: percent = rest[0]
+    if len(rest) >= 2: price   = rest[1]
+    if len(rest) >= 3: vol     = rest[2]
+
+    # ---- 创建时间缺失就生成 ----
+    if not create_time:
+        create_time = datetime.now().strftime("%Y-%m-%d %H")
+
+    # ---- 最终统一结构（6 项）----
+    return [stock_code, stock_name, percent, price, vol, create_time]
+
+
+def create_monitor_window(stock_info):
+    global monitor_windows
+
+    if stock_info[0].find(':') > 0 and len(stock_info) > 4:
+        stock_info = stock_info[1:]
+
+
+    # === 创建时间 ===
+    create_time = datetime.now().strftime("%Y-%m-%d %H")
+    # 默认值
+    default_values = {"percent": 0.0, "price": 0.0, "vol": 0,'create_time':create_time}
+
+    try:
+        stock_code, stock_name, *rest = stock_info
+    except ValueError:
+        stock_code, stock_name = stock_info[0], stock_info[1]
+        rest = []
+
+    percent = rest[2] if len(rest) >= 3 else default_values["percent"]
+    price   = rest[3] if len(rest) >= 4 else default_values["price"]
+    vol     = rest[4] if len(rest) >= 5 else default_values["vol"]
+    c_time     = rest[5] if len(rest) >= 6 else default_values["create_time"]
+    # # 构造完整 stock_info
+    # stock_info = [stock_code, stock_name, 0, 0, percent, price, vol,c_time]
+    # ✅ 构造带时间的 stock_info（升级结构）
+    stock_info = [stock_code, stock_name, 0, 0, percent, price, vol, c_time]
+
+    # === 创建窗口 ===
+    monitor_win = tk.Toplevel(root)
+    monitor_win.resizable(True, True)
+    monitor_win.title(f"监控: {stock_name} ({stock_code})")
+
+    # === 顶部信息栏 ===
+    top_frame = ttk.Frame(monitor_win)
+    top_frame.pack(fill=tk.X, padx=5, pady=5)
+
+    # 报警开关
+    alerts_enabled[stock_code] = tk.IntVar(value=1)
+    cb = tk.Checkbutton(top_frame, text="报警开启", variable=alerts_enabled[stock_code])
+    cb.pack(side=tk.LEFT, anchor='w')
+
+    # 添加：创建时间标签
+    lbl_time = ttk.Label(top_frame, text=f"创建时间: {c_time}", foreground="gray")
+    lbl_time.pack(side=tk.LEFT, padx=10)
+
+    # === 样式 ===
+    style = ttk.Style()
+    style.configure('Thin.Vertical.TScrollbar', arrowsize=8)
+
+    tree_frame = ttk.Frame(monitor_win)
+    tree_frame.pack(expand=True, fill=tk.BOTH, padx=5, pady=5)
+
+    columns = ('时间', '异动类型', '涨幅', '价格', '量')
+    monitor_tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+    vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=monitor_tree.yview, style='Thin.Vertical.TScrollbar')
+    monitor_tree.configure(yscrollcommand=vsb.set)
+    vsb.pack(side=tk.RIGHT, fill=tk.Y)
+    monitor_tree.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+
+    for col in columns:
+        monitor_tree.heading(col, text=col)
+        if col in ['涨幅', '量']:
+            monitor_tree.column(col, width=30, anchor=tk.CENTER, minwidth=20)
+        elif col in ['异动类型']:
+            monitor_tree.column(col, width=60, anchor=tk.CENTER, minwidth=40)
+        else:
+            monitor_tree.column(col, width=40, anchor=tk.CENTER, minwidth=30)
+
+    monitor_tree.tag_configure("alert", background="yellow", foreground="red")
+    item_id = monitor_tree.insert("", "end", values=("加载ing...", "", "", "", ""))
+
+    # === 右键菜单 ===
+    def show_menu(event, stock_info):
+        parent_win = event.widget.winfo_toplevel()
+        iid = monitor_tree.identify_row(event.y)
+        if iid:
+            monitor_tree.selection_set(iid)
+            selected_item_id = monitor_tree.selection()[0]
+            item_values = monitor_tree.item(selected_item_id, "values")
+
+            if len(item_values) == 5:
+                _, _, percent, price, vol = item_values
+                si = (stock_code, stock_name, 0, 0, percent, price, vol)
+            else:
+                si = (stock_code,) + item_values[1:]
+
+            menu = tk.Menu(root, tearoff=0)
+            menu.add_command(label="设置报警规则",
+                             command=lambda: open_alert_editor(si,
+                                 parent_win=parent_win,
+                                 x_root=event.x_root,
+                                 y_root=event.y_root))
+            menu.post(event.x_root, event.y_root)
+        else:
+            menu = tk.Menu(monitor_win, tearoff=0)
+            menu.add_command(label="设置报警规则",
+                             command=lambda: open_alert_editor(stock_info,
+                                 parent_win=parent_win,
+                                 x_root=event.x_root,
+                                 y_root=event.y_root))
+            menu.post(event.x_root, event.y_root)
+
+    # === 保存窗口信息 ===
+    window_info = {
+        'stock_info': stock_info,
+        'toplevel': monitor_win,
+        'monitor_tree': monitor_tree,
+    }
+
+    monitor_windows[stock_code] = {
+        'toplevel': monitor_win,
+        'monitor_tree': monitor_tree,
+        'stock_info': stock_info,
+    }
+
+
+    # === 注册事件 ===
+    place_new_window(monitor_win, stock_code)
+    refresh_stock_data(window_info, monitor_tree, item_id)
+    monitor_win.protocol("WM_DELETE_WINDOW", lambda: on_close_monitor(window_info))
+    monitor_win.bind("<FocusIn>", lambda e, w=monitor_win: on_monitor_window_focus(w))
+    monitor_win.bind("<Button-1>", lambda event: update_code_entry(stock_code))
+    monitor_win.bind("<Double-1>", lambda event, code=stock_code: on_monitor_double_click(event, stock_code))
+    monitor_win.bind("<Button-3>", lambda event: show_menu(event, stock_info))
+
     return window_info
 
 
@@ -5200,6 +6011,17 @@ def open_alert_center():
         else:
             alert_tree.column(c, width=30, anchor="center")
     alert_tree.pack(expand=True, fill="both")
+    global after_id
+
+    def reset_timer(event=None):
+        """重置倒计时"""
+        global after_id
+        if after_id is not None:
+            # print(f'after_id : {after_id}')
+            aw_win.after_cancel(after_id)
+        # 重新启动 120 秒倒计时
+        after_id = aw_win.after(120*1000, lambda w=aw_win: on_close_alert_monitor(w))
+        print("Timer reset due to user action")
 
     def on_tree_select(event):
         """处理表格行选择事件"""
@@ -5221,7 +6043,7 @@ def open_alert_center():
             print(f"选中股票代码: {stock_code}")
             time.sleep(0.1)
     
-    def on_single_click(event):
+    def on_single_click_alert_center(event):
         global code_entry
         row_id = alert_tree.identify_row(event.y)
         if not row_id:
@@ -5233,6 +6055,7 @@ def open_alert_center():
         send_to_tdx(code)
         code_entry.delete(0, tk.END)
         code_entry.insert(0, code)
+        reset_timer()
 
     # 双击报警 → 聚焦监控窗口
     def on_double_click(event):
@@ -5287,12 +6110,14 @@ def open_alert_center():
     alert_tree.bind("<<TreeviewSelect>>", on_tree_select)
     alert_tree.bind("<Double-1>", on_double_click)
     alert_tree.bind("<Button-3>", show_menu)
-    alert_tree.bind("<Button-1>", on_single_click)
+    alert_tree.bind("<Button-1>", on_single_click_alert_center)
 
     # Esc 只关闭当前 aw_win，不影响父窗口
     aw_win.bind("<Escape>", lambda e, w=aw_win: on_close_alert_monitor(w))
     aw_win.protocol("WM_DELETE_WINDOW", lambda w=aw_win: on_close_alert_monitor(w))
-    aw_win.after(120*1000,  lambda  w=aw_win: on_close_alert_monitor(w))
+    # aw_win.after(120*1000,  lambda  w=aw_win: on_close_alert_monitor(w))
+    # 启动初始倒计时
+    after_id = aw_win.after(120*1000, lambda w=aw_win: on_close_alert_monitor(w))
     # 强制渲染
     aw_win.update_idletasks()
     aw_win.after(100, refresh_alert_center)
@@ -5756,6 +6581,31 @@ def ensure_alert_rules(code, price, percent, vol, alerts_rules, alerts_history, 
     alerts_rules[code] = {"meta": meta, "rules": rules}
     return rules
 
+def parse_stock_list(info):
+    """
+    安全解析 stock_info：
+    格式：[code, name, x, x, percent, price, vol, ...]
+    并将 '', None 自动转换成 0
+    """
+    
+    def safe_num(v):
+        """把 '', ' ', None 转成 0，并确保能转成 float"""
+        if v is None or v == '' or v == ' ':
+            return 0
+        try:
+            return float(v)
+        except:
+            return 0
+
+    code = info[0]
+    name = info[1]
+
+    percent = safe_num(info[4] if len(info) > 4 else 0)
+    price   = safe_num(info[5] if len(info) > 5 else 0)
+    vol     = safe_num(info[6] if len(info) > 6 else 0)
+
+    return code, name, percent, price, vol
+
 
 
 def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_root=None, y_root=None):
@@ -5768,7 +6618,6 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     orig_rules = alerts_rules.copy()
 
     price, percent, vol = 5.0, 1.0, 1
-    # print(f'1:{stock_info[-3]}')
     if new and stock_info is not None:
         if stock_code in alerts_rules.keys():
             del alerts_rules[stock_code]
@@ -5822,7 +6671,7 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
                 print(f'price : {price},percent:{percent}, vol:{vol}')
 
             elif isinstance(stock_code, (list, tuple)) and len(stock_code) >= 7:
-                code, name, *_ , percent,price, vol = stock_code
+                code, name, percent, price, vol = parse_stock_list(stock_code)
             else:
                 code = stock_code
                 stock_info = monitor_windows.get(code, {}).get('stock_info', [code, 0, 0, 0, 1, 5, 1])
@@ -5840,6 +6689,7 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
         toast_message(alert_window, "请先选择一个股票代码。")
         return
     # -------------------------------------------------------------
+    print(f'code: {code}')
     send_to_tdx(code)
 
 
@@ -5852,9 +6702,9 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     editor.withdraw()  # 先隐藏，避免闪到默认(50,50)
 
     # 关键点：设置模态和焦点
-    editor.transient(parent_win)   # 父窗口关系
-    editor.grab_set()              # 模态，阻止父窗口操作
-    editor.focus_force()           # 强制获得焦点
+    # editor.transient(parent_win)   # 父窗口关系
+    # editor.grab_set()              # 模态，阻止父窗口操作
+    # editor.focus_force()           # 强制获得焦点
     editor.lift()                  # 提升到顶层
 
     win_width, win_height = 500, 300
@@ -5867,8 +6717,6 @@ def open_alert_editor(stock_code, new=False,stock_info=None,parent_win=None, x_r
     editor.geometry(f"{win_width}x{win_height}+{x}+{y}")
     editor.title(f"设置报警规则 - {name} {code}")
 
-    editor.focus_force()
-    editor.grab_set()
 
     # 统一风格
     style = ttk.Style()
@@ -6788,6 +7636,9 @@ def read_hdf_table(fname, key='all', columns=None):
 
 
 #check hdf status
+logger = init_logging(log_file='monitor_dfcf.log',redirect_print=True)
+# logger = init_logging(log_file='monitor_dfcf.log',redirect_print=False)
+
 check_hdf5()
 
 init_monitors()
@@ -7227,6 +8078,8 @@ reset_lift_flags()
 
 refresh_all_stock_data()
 bind_hotkeys(root)
+
+start_dpi_monitor(root)
 
 root.bind("<FocusIn>", on_window_focus, add="+")
 # root.bind("<Configure>", lambda event: update_window_position("main"))
