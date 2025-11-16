@@ -325,10 +325,10 @@ if __name__ == '__main__':
         os.system('start cmd /k python pywin32_mouse.py')
         time.sleep(5)
 
-    # if not find_window_by_title_safe('交易信号监控'):
-    #     # os.system('cmd /c start /min D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
-    #     # os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
-    #     os.system('cmd /c start D:\\MacTools\\OrderMonitor\\OrderMon.exe')
+    if not find_window_by_title_safe('交易信号监控'):
+        # os.system('cmd /c start /min D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
+        # os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
+        os.system('cmd /c start D:\\MacTools\\OrderMonitor\\OrderMon.exe')
 
     time.sleep(5)
 

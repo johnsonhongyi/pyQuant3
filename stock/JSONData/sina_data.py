@@ -612,6 +612,7 @@ class Sina:
                             # h5['lastbuy'] = (map(lambda x, y: y if int(x) == 0 else x,h5['lastbuy'].values, h5['llastp'].values))
                     else:
                         h5 = cct.combine_dataFrame(h5,cct.GlobalValues().getkey('lastbuydf'))
+                    # print(f"load_hdf_db:{h5_fname} time: {round((time.time()-time_s),1)}", end=' ')
                 if 'nclose' in h5.columns and len(h5.query('nclose != -2')) == 0:
                      h5_a = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False)
                      if h5_a is not None and len(h5_a) > len(h5):
@@ -648,10 +649,6 @@ class Sina:
                              # time_s=time.time()
                              h5 = self.get_col_agg_df(h5_a, h5, run_col, all_func, startime, endtime)
 
-                     # h5 = cct.combine_dataFrame(h5,lastbuycol)
-                # else:
-                #     h5['lastbuy'] = (list(map(lambda x, y: y if int(x) == 0 else x,
-                #                              h5['lastbuy'].values, h5['close'].values)))
         time_use=round((time.time()-time_s),1)
         if time_use > 2:
             print("lastb:%s"%(time_use), end=' ')
@@ -784,7 +781,7 @@ class Sina:
     #     df = tdd.get_tdx_all_day_LastDF(self.stock_codes)
         # print df
 
-    def get_col_agg_df(self, h5, dd, run_col, all_func, startime, endtime, freq=None):
+    def get_col_agg_df_src(self, h5, dd, run_col, all_func, startime, endtime, freq=None):
         if isinstance(run_col, list):
             now_col = [all_func[co] for co in run_col if co in list(all_func.keys())]
         else:
@@ -792,8 +789,6 @@ class Sina:
         now_func = cct.from_list_to_dict(run_col, all_func)
         if h5 is not None and len(h5) > len(dd):
             time_n = time.time()
-            # h5 = cct.get_limit_multiIndex_Group(h5, freq=freq,end=endtime)
-            # import pdb;pdb.set_trace()
             if freq is None:
                 h5 = cct.get_limit_multiIndex_Row(h5, col=run_col, start=startime, end=endtime)
             else:
@@ -803,11 +798,52 @@ class Sina:
             if h5 is not None and len(h5) > 0:
                 h5 = h5.reset_index().set_index('code')
                 h5.rename(columns=now_func, inplace=True)
-                # log.info("get_limit_multiIndex_Row:%s  endtime:%s" % (len(h5), endtime))
-                #h5 = h5.drop(['ticktime'], axis=1)
                 h5 = h5.loc[:, now_col]
                 dd = cct.combine_dataFrame(dd, h5, col=None, compare=None, append=False, clean=True)
                 log.info('agg_df_Row:%.2f h5:%s endtime:%s' % ((time.time() - time_n), len(h5), endtime))
+        return dd
+        
+    def get_col_agg_df(self, h5, dd, run_col, all_func, startime, endtime, freq=None):
+        """
+        聚合 MultiIndex DataFrame，按 code 聚合 ticktime。
+        h5: 原始 tick 数据
+        dd: 已存在的汇总数据
+        run_col: 需要聚合的列列表或字典
+        all_func: 所有列的聚合映射
+        startime, endtime: 切片时间
+        freq: 可选，按频率取最后一条
+        """
+
+        if isinstance(run_col, list):
+            now_col = [all_func[co] for co in run_col if co in all_func]
+        else:
+            now_col = [all_func[co] for co in run_col.keys() if co in all_func]
+
+        # 构建列-聚合函数映射
+        func_map = cct.from_list_to_dict(run_col, all_func)
+
+        if h5 is not None and len(h5) > len(dd):
+            time_n = time.time()
+
+            # 先切片时间
+            if freq is None:
+                h5 = cct.get_limit_multiIndex_Row(h5, col=run_col, start=startime, end=endtime)
+            else:
+                # 如果按 freq，只取每组最后一条
+                h5 = cct.get_limit_multiIndex_freq(h5, freq=freq, col=run_col, start=startime, end=endtime)
+                h5 = h5.groupby(level=[0]).tail(1)
+
+            if h5 is not None and len(h5) > 0:
+                # 重置 index 到 code
+                h5 = h5.reset_index().set_index('code')
+                h5.rename(columns=func_map, inplace=True)
+                h5 = h5.loc[:, now_col]
+
+                # 使用 combine_dataFrame 合并
+                dd = cct.combine_dataFrame(dd, h5, col=None, compare=None, append=False, clean=True)
+
+            log.info('agg_df_Row:%.2f s, h5:%s, endtime:%s' % ((time.time() - time_n), len(h5), endtime))
+
         return dd
 
     def format_response_data(self, index=False):
