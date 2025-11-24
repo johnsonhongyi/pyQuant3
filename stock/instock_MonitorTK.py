@@ -44,6 +44,7 @@ def df_hash(df: pd.DataFrame) -> str:
     h = pd.util.hash_pandas_object(df, index=True).sum()
     return hashlib.md5(str(h).encode()).hexdigest()[:8]  # 截取前8位
 
+import argparse
 import logging
 from logging.handlers import RotatingFileHandler
 class LoggerWriter:
@@ -67,14 +68,23 @@ class LoggerWriter:
     def flush(self):
         pass
 
-def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=True):
+def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=False,show_detail=True):
     """初始化全局日志"""
+    # logger\.info\((?!f)  查找没有f  loggger.info(
+    # logger\.info\((?!f)[^,)]*,\s*\w+    查找没有f 加,
+    #   ^(?!\s*#).*?logger\.info\((?!f)[^,)]*,\s*\w+   查找没有f 加, 排除#
+
     logger = logging.getLogger("instock_MonitorTK")
     logger.setLevel(level)
 
     if not logger.handlers:
         formatter = logging.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
-
+        if show_detail:
+            formatter = logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s")
+            ch_formatter = logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s");
+        else:
+            formatter = logging.Formatter("(%(funcName)s:%(lineno)s): %(message)s")
+            ch_formatter = logging.Formatter("(%(funcName)s:%(lineno)s): %(message)s");
         # fh = logging.FileHandler(log_file, encoding="utf-8")
         # ✅ 使用 RotatingFileHandler：超过 1MB 自动轮转
         fh = RotatingFileHandler(
@@ -83,8 +93,8 @@ def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=True):
             backupCount=3,         # 最多保留3个历史日志
             encoding="utf-8"
         )
-        fh.setFormatter(formatter)
-        logger.addHandler(fh)
+        # fh.setFormatter(formatter)
+        # logger.addHandler(fh)
 
         ch = logging.StreamHandler()
         ch.setFormatter(formatter)
@@ -107,6 +117,8 @@ def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=True):
 
     logger.info("日志初始化完成")
     return logger
+
+logger = init_logging(log_file='instock_tk.log',redirect_print=False) 
 
 
 def init_logging_nopdb(log_file="appTk.log", level=logging.INFO):
@@ -145,6 +157,7 @@ def init_logging_nopdb(log_file="appTk.log", level=logging.INFO):
 
     logger.info("日志初始化完成")
     return logger
+
 
 # def remove_condition_query(expr: str, cond: str) -> str:
 def remove_invalid_conditions(query: str, invalid_cols: list,showdebug=True):
@@ -193,7 +206,7 @@ def remove_invalid_conditions(query: str, invalid_cols: list,showdebug=True):
     elif close_count > open_count:
         query = "(" * (close_count - open_count) + query
     if showdebug:
-        print(f"原始: {original_query}\n剔除后: {query}\n{'-'*60}")
+        logger.info(f"原始: {original_query}\n剔除后: {query}\n{'-'*60}")
     return query
 
 # --- 辅助函数：DPI 处理（放在类的外面） ---
@@ -250,7 +263,7 @@ def save_concept_pg_data(win, concept_name):
         base_data = getattr(win, "_init_prev_concepts_data", {}).get(concept_name)
         prev_data = getattr(win, "_prev_concepts_data", {}).get(concept_name)
         if base_data is None:
-            print(f'[save_concept_pg_data] base_data is None for {concept_name}')
+            logger.info(f'[save_concept_pg_data] base_data is None for {concept_name}')
             conn.close()
             return
 
@@ -273,10 +286,10 @@ def save_concept_pg_data(win, concept_name):
 
         conn.commit()
         conn.close()
-        print(f"[保存成功] {concept_name} 数据已写入 SQLite")
+        logger.info(f"[保存成功] {concept_name} 数据已写入 SQLite")
     except Exception as e:
         traceback.print_exc()
-        print(f"[保存失败] {concept_name} -> {e}")
+        logger.info(f"[保存失败] {concept_name} -> {e}")
 
 
 def save_concept_pg_data_simple(win, concept_name):
@@ -295,7 +308,7 @@ def save_concept_pg_data_simple(win, concept_name):
         prev_data = getattr(win, "_prev_concepts_data", {}).get(concept_name)
 
         if not base_data:
-            print(f"[保存失败] {concept_name} base_data is None")
+            logger.info(f"[保存失败] {concept_name} base_data is None")
             conn.close()
             return
 
@@ -325,11 +338,11 @@ def save_concept_pg_data_simple(win, concept_name):
 
         conn.commit()
         conn.close()
-        print(f"[保存成功] {concept_name} 数据已写入 SQLite")
+        logger.info(f"[保存成功] {concept_name} 数据已写入 SQLite")
     except Exception as e:
         import traceback
         traceback.print_exc()
-        print(f"[保存失败] {concept_name} -> {e}")
+        logger.info(f"[保存失败] {concept_name} -> {e}")
 
 
 
@@ -354,7 +367,7 @@ def load_concept_pg_data_no_serializable(concept_name):
         prev_data = json.loads(row[1]) if row[1] else None
         return init_data, prev_data
     except Exception as e:
-        print(f"[加载失败] {concept_name} -> {e}")
+        logger.info(f"[加载失败] {concept_name} -> {e}")
         return None, None
 
 def load_all_concepts_pg_data():
@@ -388,10 +401,10 @@ def load_all_concepts_pg_data():
                 result[concept_name] = (init_data, prev_data)
             except Exception:
                 traceback.print_exc()
-                print(f"[加载单个概念失败] {concept_name}")
+                logger.info(f"[加载单个概念失败] {concept_name}")
     except Exception as e:
         traceback.print_exc()
-        print(f"[加载全部概念失败] {e}")
+        logger.info(f"[加载全部概念失败] {e}")
 
     return result
 
@@ -415,7 +428,7 @@ def load_all_concepts_pg_data():
 #             prev_data = json.loads(prev_json) if prev_json else None
 #             result[concept_name] = (init_data, prev_data)
 #     except Exception as e:
-#         print(f"[加载全部概念失败] {e}")
+#         logger.info(f"[加载全部概念失败] {e}")
 #     return result
 
 
@@ -439,9 +452,9 @@ def set_process_dpi_awareness():
         if sys.platform == "win32":
             # 对 Windows 10+ 启用 Per-Monitor DPI 感知
             ctypes.windll.shcore.SetProcessDpiAwareness(2)
-            print("[DPI] 已启用 Per-Monitor DPI Aware")
+            logger.info("[DPI] 已启用 Per-Monitor DPI Aware")
     except Exception as e:
-        print(f"[DPI] 启用失败: {e}")
+        logger.info(f"[DPI] 启用失败: {e}")
 
 def set_process_dpi_awareness_Close():
     if sys.platform.startswith('win'):
@@ -472,7 +485,7 @@ def scale_tk_window_for_rdp(root, scale_factor=1.5):
         w = int(root.winfo_width() * scale_factor)
         h = int(root.winfo_height() * scale_factor)
         root.geometry(f"{w}x{h}")
-        print(f"[RDP] 已按 {scale_factor} 缩放 Tk 窗口: {w}x{h}")
+        logger.info(f"[RDP] 已按 {scale_factor} 缩放 Tk 窗口: {w}x{h}")
 
 def monitor_rdp_and_scale(win, interval_ms=3000, scale_factor=1.5):
     """
@@ -488,24 +501,24 @@ def monitor_rdp_and_scale(win, interval_ms=3000, scale_factor=1.5):
 
         if current_state:
             # --- 已切入 RDP 会话 ---
-            print(f"[RDP] 检测到远程登录，放大 Tk 窗口 scale={scale_factor}")
+            logger.info(f"[RDP] 检测到远程登录，放大 Tk 窗口 scale={scale_factor}")
             try:
                 win.tk.call('tk', 'scaling', scale_factor)  # 放大字体/UI
                 w = int(win.winfo_width() * scale_factor)
                 h = int(win.winfo_height() * scale_factor)
                 win.geometry(f"{w}x{h}")
             except Exception as e:
-                print(f"[RDP] 调整窗口缩放失败: {e}")
+                logger.info(f"[RDP] 调整窗口缩放失败: {e}")
         else:
             # --- 退出 RDP 回本地 ---
-            print("[RDP] 返回本地会话，恢复默认缩放")
+            logger.info("[RDP] 返回本地会话，恢复默认缩放")
             try:
                 win.tk.call('tk', 'scaling', 1.0)
                 w = int(win.winfo_width() / scale_factor)
                 h = int(win.winfo_height() / scale_factor)
                 win.geometry(f"{w}x{h}")
             except Exception as e:
-                print(f"[RDP] 恢复窗口缩放失败: {e}")
+                logger.info(f"[RDP] 恢复窗口缩放失败: {e}")
 
     # 继续检测
     win.after(interval_ms, lambda: monitor_rdp_and_scale(win, interval_ms, scale_factor))
@@ -528,7 +541,7 @@ def get_windows_dpi_scale_factor():
         scale = dpi / 96.0
         # 如果 scale == 1 且是远程桌面，则用 Tk 的效果（2倍）
         _is_rdp_session = is_rdp_session()
-        print(f'scale : {scale} is_rdp_session : {_is_rdp_session} os.environ.get("SESSIONNAME") : {os.environ.get("SESSIONNAME")}')
+        logger.info(f'scale : {scale} is_rdp_session : {_is_rdp_session} os.environ.get("SESSIONNAME") : {os.environ.get("SESSIONNAME")}')
         if scale == 1.0 and _is_rdp_session:
             return 2.0
         return scale
@@ -563,8 +576,8 @@ if sys.platform.startswith('win'):
     # os.environ['QT_QPA_PLATFORM'] = 'windows:dpiawareness=0'
 
     # 打印检查
-    print(f"Windows 系统 DPI 缩放因子: {scale_factor}")
-    # print(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
+    logger.info(f"Windows 系统 DPI 缩放因子: {scale_factor}")
+    # logger.info(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
 
 
 # 设置 PlotItem 标题的字体 (如果使用了 plot.setTitle())
@@ -603,7 +616,7 @@ log = LoggerFactory.log
 sort_cols, sort_keys = ct.get_market_sort_value_key('3 0')
 DISPLAY_COLS = ct.get_Duration_format_Values(
     ct.Monitor_format_trade,sort_cols[:2])
-# print(f'DISPLAY_COLS : {DISPLAY_COLS}')
+# logger.info(f'DISPLAY_COLS : {DISPLAY_COLS}')
 # DISPLAY_COLS = ct.get_Duration_format_Values(
 # ct.Monitor_format_trade,
 #     ['name','trade','boll','dff','df2','couts','percent','volume','category']
@@ -811,7 +824,7 @@ MONITORS = []  # 全局缓存
 #             # mon = (x, y, width, height)
 #             mx, my, mw, mh = mon
 #             MONITORS.append((mx, my, mx+mw, my+mh))
-#     print(f"✅ Detected {len(MONITORS)} monitor(s).")
+#     logger.info(f"✅ Detected {len(MONITORS)} monitor(s).")
 
 def get_all_monitors():
     """返回所有显示器的边界列表 [(left, top, right, bottom), ...]"""
@@ -830,7 +843,7 @@ def init_monitors():
         screen_width = win32api.GetSystemMetrics(0)
         screen_height = win32api.GetSystemMetrics(1)
         MONITORS = [(0, 0, screen_width, screen_height)]
-    print(f"✅ Detected {len(MONITORS)} monitor(s).")
+    logger.info(f"✅ Detected {len(MONITORS)} monitor(s).")
 
 
 init_monitors()
@@ -897,12 +910,12 @@ import win32api
 #             # 修正窗口不要超出边界
 #             x = max(left, min(x, right - w))
 #             y = max(top, min(y, bottom - h))
-#             print(f"✅ clamp_window_to_screens: 命中屏幕 ({left},{top},{right},{bottom}) -> ({x},{y})")
+#             logger.info(f"✅ clamp_window_to_screens: 命中屏幕 ({left},{top},{right},{bottom}) -> ({x},{y})")
 #             return x, y
 
 #     # 完全不在屏幕内 -> 放主屏左上角
 #     left, top, right, bottom = monitors[0]
-#     print(f"⚠️ clamp_window_to_screens: 未命中屏幕，放主屏 (465, 442)")
+#     logger.info(f"⚠️ clamp_window_to_screens: 未命中屏幕，放主屏 (465, 442)")
 #     return (465, 442)
 
 def tk_geometry_to_rect(tk_win):
@@ -928,7 +941,7 @@ def is_window_covered_pg(win_pg, win_main, cover_ratio=0.4):
     bottom = min(rect_pg.bottom(), rect_main.bottom())
 
     if right < left or bottom < top:
-        print(f'没交集 → 完全没被覆盖')
+        logger.info(f'没交集 → 完全没被覆盖')
         return False   # 没交集 → 完全没被覆盖
 
     intersection_area = (right - left) * (bottom - top)
@@ -945,16 +958,17 @@ def clamp_window_to_screens_mod(x, y, w, h, monitors):
             y = max(top, min(y, bottom - h))
             return x, y
     # 如果完全不在任何显示器内，放到主屏幕左上角
-    print(f"⚠️ 窗口不在任何屏幕，放主屏左上角 ({x},{y})")
     x, y = monitors[0][0], monitors[0][1]
-    return x, y
+    logger.info(f"⚠️ 窗口不在任何屏幕，放主屏左上角 ({x},{y})")
+    return 100, 100
+
 def clamp_window_to_screens_logical(x, y, w, h):
     """
     使用 DPI 逻辑坐标进行 clamp 判断
     """
     monitors = []
     for hndl in win32api.EnumDisplayMonitors():
-        print(f'EnumDisplayMonitors :{hndl}')
+        logger.info(f'EnumDisplayMonitors :{hndl}')
 
         mi = win32api.GetMonitorInfo(hndl[0])
         left, top, right, bottom = mi["Work"]  # 工作区
@@ -994,33 +1008,33 @@ def clamp_window_to_screens(x, y, w, h):
     if not monitors:
         sw, sh = win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1)
         monitors = [(0, 0, sw, sh)]
-        print(f'x:{x} y:{y} w:{w} h:{h}')
+        logger.info(f'x:{x} y:{y} w:{w} h:{h}')
     # for left, top, right, bottom in monitors:
     #     # 判断整个窗口矩形是否与屏幕有交集
     #     if x + w > left and x < right and y + h > top and y < bottom:
     #         # 修正超出屏幕边界
-    #         # print(f'x + w > left and x < right and y + h > top and y < bottom')
-    #         # print(x , w , left , x , right ,  y , h , top , y , bottom)
+    #         # logger.info(f'x + w > left and x < right and y + h > top and y < bottom')
+    #         # logger.info(x , w , left , x , right ,  y , h , top , y , bottom)
     #         x = max(left, min(x, right - w))
     #         y = max(top, min(y, bottom - h))
-    #         # print(f"✅ 窗口命中屏幕 ({left},{top},{right},{bottom}) -> ({x},{y})")
+    #         # logger.info(f"✅ 窗口命中屏幕 ({left},{top},{right},{bottom}) -> ({x},{y})")
     #         return x, y
     # x,y = clamp_window_to_screens_mod(x, y, w, h, monitors)
     """保证窗口在可见显示器范围内"""
     for left, top, right, bottom in monitors:
-        print(f'left: {left} top : {top} right:{right} bottom:{bottom}')
-        # print(x , w , left , x , right ,  y , h , top , y , bottom)
+        logger.info(f'left: {left} top : {top} right:{right} bottom:{bottom}')
+        # logger.info(x , w , left , x , right ,  y , h , top , y , bottom)
         if left <= x < right and top <= y < bottom:
             x = max(left, min(x, right - w))
             y = max(top, min(y, bottom - h))
-            print(f'left <= x < right and top <= y < bottom: : {left <= x < right and top <= y < bottom:} x:{x} y: {y} ')
+            logger.info(f'left <= x < right and top <= y < bottom: {left <= x < right and top <= y < bottom:} x:{x} y: {y} ')
             return x, y
 
     # return (x,y)
     # 完全不在屏幕内 -> 放主屏左上角
     left, top, right, bottom = monitors[0]
     x, y = left, top
-    print(f"⚠️ 窗口不在任何屏幕，放主屏左上角 ({x},{y})")
+    logger.info(f"⚠️ 窗口不在任何屏幕，放主屏左上角 ({x},{y})")
     return (100, 100)
 
 
@@ -1054,7 +1068,7 @@ def get_centered_window_position_mainWin(parent,win_width, win_height, x_root=No
     # 边界检查
     x = max(screen['left'], min(x, screen['right'] - win_width))
     y = max(screen['top'], min(y, screen['bottom'] - win_height))
-    # print(x,y)
+    # logger.info(x,y)
     return x, y
 
 def get_centered_window_position_single(parent, win_width, win_height, margin=10):
@@ -1291,10 +1305,10 @@ def askstring_at_parent_single_base(parent, title, prompt, initialvalue=""):
 #         if left <= x < right and top <= y < bottom:
 #             new_x = max(left, min(x, right - w))
 #             new_y = max(top, min(y, bottom - h))
-#             print(f"✅ 命中屏幕 ({left},{top},{right},{bottom}) DPI={dpi_scale:.2f} → ({new_x},{new_y})")
+#             logger.info(f"✅ 命中屏幕 ({left},{top},{right},{bottom}) DPI={dpi_scale:.2f} → ({new_x},{new_y})")
 #             return new_x, new_y
 
-#     print(f"⚠️ 未命中任何屏幕，使用默认位置 {default_pos}")
+#     logger.info(f"⚠️ 未命中任何屏幕，使用默认位置 {default_pos}")
 #     return default_pos
 
 
@@ -1423,7 +1437,7 @@ def test_code_against_queries(df_code, queries):
 
         return expr
     if not isinstance(df_code, pd.DataFrame) or df_code.empty:
-        print("df_code : empty or invalid")
+        logger.info("df_code : empty or invalid")
         return
 
     results = []
@@ -1441,17 +1455,17 @@ def test_code_against_queries(df_code, queries):
                 query = query.replace(f'and {bracket}', '')
 
             conditions = [c.strip() for c in query.split('and')]
-            # print(f'conditions {conditions}')
+            # logger.info(f'conditions {conditions}')
             valid_conditions = []
             removed_conditions = []
-            # print(f'conditions: {conditions} bracket_patterns : {bracket_patterns}')
+            # logger.info(f'conditions: {conditions} bracket_patterns : {bracket_patterns}')
             for cond in conditions:
                 cond_clean = cond.lstrip('(').rstrip(')')
                 # cond_clean = ensure_parentheses_balanced(cond_clean)
                 if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 or cond.find('or') >= 0:
                     if not any(bp.strip('() ').strip() == cond_clean for bp in bracket_patterns):
                         ensure_cond = ensure_parentheses_balanced(cond)
-                        # print(f'cond : {cond} ensure_cond : {ensure_cond}')
+                        # logger.info(f'cond : {cond} ensure_cond : {ensure_cond}')
                         valid_conditions.append(ensure_cond)
                         continue
 
@@ -1472,15 +1486,15 @@ def test_code_against_queries(df_code, queries):
             ]
 
             if not valid_conditions:
-                print(f'valid_conditions not valid_condition : {expr}')
+                logger.info(f'valid_conditions not valid_condition : {expr}')
                 continue
-            # print(f'valid_conditions : {valid_conditions}')
+            # logger.info(f'valid_conditions : {valid_conditions}')
             # ====== 拼接 final_query 并检查括号 ======
             final_query = ' and '.join(f"({c})" for c in valid_conditions)
-            # print(f'final_query : {final_query}')
+            # logger.info(f'final_query : {final_query}')
             if bracket_patterns:
                 final_query += ' and ' + ' and '.join(bracket_patterns)
-            # print(f'final_query : {final_query}')
+            # logger.info(f'final_query : {final_query}')
             left_count = final_query.count("(")
             right_count = final_query.count(")")
             if left_count != right_count:
@@ -1493,7 +1507,7 @@ def test_code_against_queries(df_code, queries):
                 final_query = expr
                 if removed_conditions:
                     final_query = remove_invalid_conditions(final_query, removed_conditions)
-                # print(f'{query.count("or")} OR query: {final_query[:30]}')
+                # logger.info(f'{query.count("or")} OR query: {final_query[:30]}')
                 query_engine = 'numexpr'
                 if any('index.' in c.lower() for c in query) or ('.str' in query and '|' in query):
                     query_engine = 'python'
@@ -1511,9 +1525,9 @@ def test_code_against_queries(df_code, queries):
             # missing_cols = [col for col in re.findall(r'\b[a-zA-Z_][a-zA-Z0-9_]*\b', expr)
             #                 if col not in df_code.columns and col not in ignore_keywords]
             # if missing_cols:
-            #     print(f"缺少字段: {missing_cols}")
+            #     logger.info(f"缺少字段: {missing_cols}")
             #     continue
-            # print(f'expr : {expr} final_query :{final_query} engine : {query_engine}')
+            # logger.info(f'expr : {expr} final_query :{final_query} engine : {query_engine}')
             df_hit = df_code.query(final_query, engine=query_engine)
             # df_hit = df_code.query(final_query)
             # 命中条件：返回非空
@@ -1521,7 +1535,7 @@ def test_code_against_queries(df_code, queries):
             hit_count = len(df_hit)
 
         except Exception as e:
-            print(f"[ERROR] 执行 query 出错: {final_query}, {e}")
+            logger.info(f"[ERROR] 执行 query 出错: {final_query}, {e}")
             # hit = False
             hit_count = 0
 
@@ -1629,7 +1643,7 @@ def rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal
                     screen_groups[idx].append(win_info)
                     break
         except Exception as e:
-            print(f"⚠ 获取窗口位置失败: {e}")
+            logger.info(f"⚠ 获取窗口位置失败: {e}")
 
     # 每个屏幕内排序并排列
     for idx, group in screen_groups.items():
@@ -1710,7 +1724,7 @@ def rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal
                     max_row_height = max(max_row_height, h)
 
             except Exception as e:
-                print(f"⚠ 窗口排列失败: {e}")
+                logger.info(f"⚠ 窗口排列失败: {e}")
 
 # --- 数据持久化函数 ---
 def save_monitor_list(monitor_list):
@@ -1724,7 +1738,7 @@ def save_monitor_list(monitor_list):
                 stock_code = stock_code.zfill(6)
 
             if  not stock_code or len(stock_code) != 6 or not stock_code.isdigit():
-                print(f"错误请输入有效的6位股票代码:{m}")
+                logger.info(f"错误请输入有效的6位股票代码:{m}")
                 continue
             # ✅ 确保结构升级：带 create_time
 
@@ -1737,13 +1751,13 @@ def save_monitor_list(monitor_list):
             json.dump(mo_list, f, ensure_ascii=False, indent=2)
 
     else:
-        print('no window find')
+        logger.info('no window find')
 
-    print(f"监控列表已保存到 {MONITOR_LIST_FILE} : count: {len(monitor_list)}")
+    logger.info(f"监控列表已保存到 {MONITOR_LIST_FILE} : count: {len(monitor_list)}")
 
 
 
-def load_monitor_list():
+def load_monitor_list(MONITOR_LIST_FILE=MONITOR_LIST_FILE):
     """从文件加载监控股票列表"""
     if os.path.exists(MONITOR_LIST_FILE):
         with open(MONITOR_LIST_FILE, "r", encoding="utf-8") as f:
@@ -1764,49 +1778,49 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
     resample = g_values.getkey("resample") or "d"
     market = g_values.getkey("market", "all")        # all / sh / cyb / kcb / bj
     blkname = g_values.getkey("blkname", "061.blk")  # 对应的 blk 文件
-    print(f"当前选择市场: {market}, blkname={blkname}")
+    logger.info(f"当前选择市场: {market}, blkname={blkname}")
     st_key_sort =  g_values.getkey("st_key_sort", "3 0") 
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort)
     lastpTDX_DF, top_all = pd.DataFrame(), pd.DataFrame()
-    print(f"init resample: {resample} flag.value : {flag.value}")
+    logger.info(f"init resample: {resample} flag.value : {flag.value}")
     while True:
-        # print(f'resample : new : {g_values.getkey("resample")} last : {resample} st : {g_values.getkey("st_key_sort")}')
+        # logger.info(f'resample : new : {g_values.getkey("resample")} last : {resample} st : {g_values.getkey("st_key_sort")}')
         # if flag is not None and not flag.value:   # 停止刷新
-        # print(f'worktime : {cct.get_work_time()} {not cct.get_work_time()} , START_INIT : {START_INIT}')
+        # logger.info(f'worktime : {cct.get_work_time()} {not cct.get_work_time()} , START_INIT : {START_INIT}')
         time_s = time.time()
         if not flag.value:   # 停止刷新
                time.sleep(1)
-               # print(f'flag.value : {flag.value} 停止更新')
+               # logger.info(f'flag.value : {flag.value} 停止更新')
                continue
         elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
-            print(f'resample : new : {g_values.getkey("resample")} last : {resample} ')
+            logger.info(f'resample : new : {g_values.getkey("resample")} last : {resample} ')
             top_all = pd.DataFrame()
             lastpTDX_DF = pd.DataFrame()
         elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
-            # print(f'market : new : {g_values.getkey("market")} last : {market} ')
+            # logger.info(f'market : new : {g_values.getkey("market")} last : {market} ')
             top_all = pd.DataFrame()
             lastpTDX_DF = pd.DataFrame()
         elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
-            # print(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
+            # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
             st_key_sort = g_values.getkey("st_key_sort")
         elif START_INIT > 0 and (not cct.get_work_time()):
-                # print(f'not worktime and work_duration')
+                # logger.info(f'not worktime and work_duration')
                 for _ in range(5):
                     if not flag.value: break
                     time.sleep(1)
                 continue
         else:
-            print(f'start work : {cct.get_now_time()} get_work_time: {cct.get_work_time()} , START_INIT :{START_INIT} ')
+            logger.info(f'start work : {cct.get_now_time()} get_work_time: {cct.get_work_time()} , START_INIT :{START_INIT} ')
         try:
             # resample = cct.GlobalValues().getkey("resample") or "d"
             resample = g_values.getkey("resample") or "d"
             market = g_values.getkey("market", "all")        # all / sh / cyb / kcb / bj
             blkname = g_values.getkey("blkname", "061.blk")  # 对应的 blk 文件
-            print(f"resample: {resample} flag.value : {flag.value} blkname :{blkname} market : {market}")
+            logger.info(f"resample: {resample} flag.value : {flag.value} blkname :{blkname} market : {market}")
             top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
             if top_now.empty:
                 log.debug("no data fetched")
-                print("top_now.empty no data fetched")
+                logger.info("top_now.empty no data fetched")
                 time.sleep(ct.duration_sleep_time)
                 continue
 
@@ -1825,7 +1839,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
             else:
                 sort_cols, sort_keys = ct.get_market_sort_value_key(st_key_sort)
 
-            print(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
+            logger.info(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
             top_temp = top_all.copy()
             # if blkname == "boll":
             #     if "market_value" in top_temp.columns:
@@ -1838,13 +1852,13 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
 
             top_temp=stf.getBollFilter(df=top_temp, resample=resample, down=False)
             top_temp = top_temp.sort_values(by=sort_cols, ascending=sort_keys)
-            # print(f'DISPLAY_COLS:{DISPLAY_COLS}')
-            # print(f'col: {top_temp.columns.values}')
+            # logger.info(f'DISPLAY_COLS:{DISPLAY_COLS}')
+            # logger.info(f'col: {top_temp.columns.values}')
             # top_temp = top_temp.loc[:, DISPLAY_COLS]
-            print(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape}')
+            logger.info(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape}')
             queue.put(top_temp)
             gc.collect()
-            print(f'now: {cct.get_now_time_int()} time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{ct.duration_sleep_time} resample:{resample}')
+            logger.info(f'now: {cct.get_now_time_int()} time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{ct.duration_sleep_time} resample:{resample}')
             # time.sleep(ct.duration_sleep_time)
             for _ in range(ct.duration_sleep_time*2):
                 if not flag.value: break
@@ -1870,7 +1884,7 @@ def calc_indicators(top_all, resample):
     # top_all = top_all[(top_all.df2 > 0) & (top_all.boll > 0)]
     ratio_t = cct.get_work_time_ratio(resample=resample)
     # ratio_t = estimate_virtual_volume_simple()
-    print(f'ratio_t: {round(ratio_t,2)}')
+    logger.info(f'ratio_t: {round(ratio_t,2)}')
     top_all['volume'] = list(
         map(lambda x, y: round(x / y / ratio_t, 1),
             top_all['volume'].values,
@@ -1992,12 +2006,12 @@ def send_code_via_pipe(code):
                 win32file.OPEN_EXISTING,
                 0, None
             )
-            # print(f'handle : {handle}')
+            # logger.info(f'handle : {handle}')
             win32file.WriteFile(handle, code.encode("utf-8"))
             win32file.CloseHandle(handle)
             return True
         except Exception as e:
-            print("发送失败，重试中...", e)
+            logger.info(f"发送失败，重试中...:{e}")
             time.sleep(0.5)
     return False
 
@@ -2014,18 +2028,18 @@ def archive_search_history_list(MONITOR_LIST_FILE=SEARCH_HISTORY_FILE,ARCHIVE_DI
     """归档监控文件，避免空或重复存档"""
 
     if not os.path.exists(MONITOR_LIST_FILE):
-        print("⚠ search_history.json 不存在，跳过归档")
+        logger.info("⚠ search_history.json 不存在，跳过归档")
         return
 
     try:
         with open(MONITOR_LIST_FILE, "r", encoding="utf-8") as f:
             content = f.read().strip()
     except Exception as e:
-        print(f"⚠ 无法读取监控文件: {e}")
+        logger.info(f"⚠ 无法读取监控文件: {e}")
         return
 
     if not content or content in ("[]", "{}"):
-        print("⚠ search_history.json 内容为空，跳过归档")
+        logger.info("⚠ search_history.json 内容为空，跳过归档")
         return
 
     # 确保存档目录存在
@@ -2039,10 +2053,10 @@ def archive_search_history_list(MONITOR_LIST_FILE=SEARCH_HISTORY_FILE,ARCHIVE_DI
             with open(last_file, "r", encoding="utf-8") as f:
                 last_content = f.read().strip()
             if not content or content in ("[]", "{}") or content == last_content:
-                print("⚠ 内容与上一次存档相同，跳过归档")
+                logger.info("⚠ 内容与上一次存档相同，跳过归档")
                 return
         except Exception as e:
-            print(f"⚠ 无法读取最近存档: {e}")
+            logger.info(f"⚠ 无法读取最近存档: {e}")
 
     # 生成带日期的存档文件名
     # today = datetime.now().strftime("%Y-%m-%d")
@@ -2057,7 +2071,7 @@ def archive_search_history_list(MONITOR_LIST_FILE=SEARCH_HISTORY_FILE,ARCHIVE_DI
 
     # 复制文件
     shutil.copy2(MONITOR_LIST_FILE, dest)
-    print(f"✅ 已归档监控文件: {dest}")
+    logger.info(f"✅ 已归档监控文件: {dest}")
 # ------------------ Tk 前端 ------------------ #
 # class StockMonitorApp(tk.Tk):
 #     def __init__(self, queue):
@@ -2174,7 +2188,7 @@ class StockMonitorApp(tk.Tk):
             # # 6. 打印当前的逻辑 DPI (验证)
             # screen = self.app.primaryScreen()
             # logical_dpi = screen.logicalDotsPerInch() 
-            # print(f'逻辑 DPI: {logical_dpi} (应为 96) 新字体逻辑大小: {new_app_font.pointSize()}')
+            # logger.info(f'逻辑 DPI: {logical_dpi} (应为 96) 新字体逻辑大小: {new_app_font.pointSize()}')
 
             # # --- 您的 PyqtGraph 绘图字体应该继续基于这个 NEW_LOGICAL_SIZE 进行创建 ---
             # LABEL_SIZE_PT = NEW_LOGICAL_SIZE
@@ -2192,7 +2206,7 @@ class StockMonitorApp(tk.Tk):
             # font = self.app.font()
             # font.setPointSize(int(font.pointSize() * dpi / 96)+ 2)
             # self.app.setFont(font)
-            # print(f'dpi : {dpi} fontsize: {font.pointSize()} ratio :  {(dpi / 72)}')
+            # logger.info(f'dpi : {dpi} fontsize: {font.pointSize()} ratio :  {(dpi / 72)}')
 
         self.title("Stock Monitor")
         self.initial_w, self.initial_h, self.initial_x, self.initial_y  = self.load_window_position(self, "main_window")
@@ -2219,7 +2233,7 @@ class StockMonitorApp(tk.Tk):
         # self.global_dict["resample"] = 'w'
         self.global_values = cct.GlobalValues(self.global_dict)
         resample = self.global_values.getkey("resample")
-        print(f'app init getkey resample:{self.global_values.getkey("resample")}')
+        logger.info(f'app init getkey resample:{self.global_values.getkey("resample")}')
         self.global_values.setkey("resample", resample)
         # self.blkname = self.global_values.getkey("blkname") or "061.blk"
         self.blkname = ct.Resample_LABELS_Blk[resample] or "060.blk"
@@ -2332,17 +2346,17 @@ class StockMonitorApp(tk.Tk):
         try:
             save_monitor_list(self._pg_top10_window_simple)
         except Exception as e:
-            print(f"保存监控列表失败: {e}")
+            logger.info(f"保存监控列表失败: {e}")
 
 
     def restore_all_monitor_windows(self):
         """启动时从文件恢复窗口"""
         monitor_data = load_monitor_list()
         if not monitor_data:
-            print("无监控窗口记录。")
+            logger.info("无监控窗口记录。")
             return
 
-        print(f"正在恢复 {len(monitor_data)} 个监控窗口...")
+        logger.info(f"正在恢复 {len(monitor_data)} 个监控窗口...")
         for m in monitor_data:
             try:
                 code = m[0]
@@ -2362,9 +2376,9 @@ class StockMonitorApp(tk.Tk):
                     "code": unique_code,
                     "stock_info": m
                 }
-                print(f"恢复窗口 {unique_code}: {concept_name} - {stock_name} ({code}) [{create_time}]")
+                logger.info(f"恢复窗口 {unique_code}: {concept_name} - {stock_name} ({code}) [{create_time}]")
             except Exception as e:
-                print(f"恢复窗口失败: {m}, 错误: {e}")
+                logger.info(f"恢复窗口失败: {m}, 错误: {e}")
         if len(monitor_data) > 2:
             rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal",monitor_list=self._pg_top10_window_simple, win_var=self.win_var)
 
@@ -2379,7 +2393,7 @@ class StockMonitorApp(tk.Tk):
 
         pw.add(left_frame, minsize=100, width=left_width)
         pw.add(right_frame, minsize=100, width=right_width)
-        # print(f'update_status_bar_width')
+        # logger.info(f'update_status_bar_width')
 
     # def correct_window_geometry(self, initial_x, initial_y, initial_w, initial_h):
     def correct_window_geometry(self):
@@ -2409,7 +2423,7 @@ class StockMonitorApp(tk.Tk):
             # 注意：这里的 DPI 可能被 Qt 更改，但我们仍使用初始获取的值（2.0）
             # 假设您在 __init__ 中保存了 scale_factor
             try:
-                print(f'self.scale_factor: {self.scale_factor}')
+                logger.info(f'self.scale_factor: {self.scale_factor}')
                 scale_factor = self.scale_factor 
             except AttributeError:
                 # 如果没有保存，重新获取，但可能不准
@@ -2439,7 +2453,7 @@ class StockMonitorApp(tk.Tk):
             current_geometry = self.geometry()
             self.geometry(current_geometry)
 
-        print(f"✅ Tkinter 窗口几何信息已在 Qt 启动后刷新。重新定位到 ({target_x},{target_y}) 物理像素。")
+        logger.info(f"✅ Tkinter 窗口几何信息已在 Qt 启动后刷新。重新定位到 ({target_x},{target_y}) 物理像素。")
 
     def print_tk_dpi_detail(self):
         px_per_inch = self.winfo_fpixels('1i')
@@ -2450,19 +2464,19 @@ class StockMonitorApp(tk.Tk):
         screen_dpi = round(width_px / width_in / 96,2)
 
         # if screen_dpi != self.scale_factor:
-        #     print(f"{cct.get_now_time_int()} 分辨率: {width_px}×{height_px}")
-        #     print(f"{cct.get_now_time_int()} 物理尺寸: {width_in:.2f}×{height_in:.2f} inch")
-        #     print(f"{cct.get_now_time_int()} 实际 DPI: {screen_dpi:.2f}, last_dpi: {self.scale_factor} Tk DPI: {px_per_inch/96:.2f}")
+        #     logger.info(f"{cct.get_now_time_int()} 分辨率: {width_px}×{height_px}")
+        #     logger.info(f"{cct.get_now_time_int()} 物理尺寸: {width_in:.2f}×{height_in:.2f} inch")
+        #     logger.info(f"{cct.get_now_time_int()} 实际 DPI: {screen_dpi:.2f}, last_dpi: {self.scale_factor} Tk DPI: {px_per_inch/96:.2f}")
         #     self.scale_factor = screen_dpi
 
-        # print(f"分辨率: {width_px}×{height_px}")
-        # print(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
+        # logger.info(f"分辨率: {width_px}×{height_px}")
+        # logger.info(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
         return  (width_px,height_px)
 
     def _check_dpi_change(self):
             """定期检测 DPI 是否变化（例如 RDP 登录）"""
             # current_scale = get_windows_dpi_scale_factor()
-            # print(f'current_scale : {current_scale} self.last_dpi_scale : {self.last_dpi_scale}')
+            # logger.info(f'current_scale : {current_scale} self.last_dpi_scale : {self.last_dpi_scale}')
             # current_scale = self.get_tk_dpi_scale()
             width_px,height_px = self.print_tk_dpi_detail()
             if width_px == 1920:
@@ -2472,11 +2486,11 @@ class StockMonitorApp(tk.Tk):
             else:
                 current_scale = 1
             # _pgscale = self.get_dynamic_dpi_scale()
-            # print(f'current_scale : {current_scale} self.last_dpi_scale :{self.last_dpi_scale}')
-            # print(f'width_px : {width_px}')
+            # logger.info(f'current_scale : {current_scale} self.last_dpi_scale :{self.last_dpi_scale}')
+            # logger.info(f'width_px : {width_px}')
             if abs(current_scale - self.last_dpi_scale) > 0.05:
-                print(f"{cct.get_now_time_int()} 分辨率: {width_px}×{height_px} current_scale:{current_scale}")
-                print(f"[DPI变化检测] 从 {self.last_dpi_scale:.2f} → {current_scale:.2f}")
+                logger.info(f"{cct.get_now_time_int()} 分辨率: {width_px}×{height_px} current_scale:{current_scale}")
+                logger.info(f"[DPI变化检测] 从 {self.last_dpi_scale:.2f} → {current_scale:.2f}")
                 self._apply_scale_dpi_change(current_scale)
                 self.on_dpi_changed_qt(current_scale)
                 # self.scale_factor = current_scale
@@ -2501,7 +2515,7 @@ class StockMonitorApp(tk.Tk):
                             new_h = int(height * new_scale)
                             win.resize(new_w, new_h)
                             code = v.get("code", "N/A")
-                            print(f"[DPI] code={code} 窗口自动放大到 {new_scale:.2f} 倍 ({new_w}x{new_h})")
+                            logger.info(f"[DPI] code={code} 窗口自动放大到 {new_scale:.2f} 倍 ({new_w}x{new_h})")
                             # 如果你使用 PyQtGraph 或 Label，也可重设字体：
                             for child in win.findChildren(QtWidgets.QWidget):
                                 font = child.font()
@@ -2509,28 +2523,28 @@ class StockMonitorApp(tk.Tk):
                                 child.setFont(font)
 
                     except Exception as e:
-                        print(f'e:{e} pg win is None will remove:{v.get("win")}')
+                        logger.info(f'e:{e} pg win is None will remove:{v.get("win")}')
                         del self._pg_windows[k]
                     finally:
                         pass
                 
 
         except Exception as e:
-            print(f"[DPI] 自动缩放失败: {e}")
+            logger.info(f"[DPI] 自动缩放失败: {e}")
 
     # def get_dynamic_dpi_scale(self):
     #     """通过当前显示器分辨率动态估算缩放比例"""
     #     screen = self.app.primaryScreen()
     #     dpi = screen.logicalDotsPerInch()
     #     scale = dpi / 96.0
-    #     # print(f"[DPI] Qt 检测 scale = {scale:.2f}, DPI = {dpi}")
+    #     # logger.info(f"[DPI] Qt 检测 scale = {scale:.2f}, DPI = {dpi}")
     #     return scale
 
     # def get_tk_dpi_scale(self):
     #     # 返回当前屏幕缩放比例，例如 1.0、1.25、2.0
     #     dpi = self.winfo_fpixels('1i')
     #     scale = dpi / 96.0
-    #     print(f"[Tk] DPI={dpi:.2f}, scale={scale:.2f}")
+    #     logger.info(f"[Tk] DPI={dpi:.2f}, scale={scale:.2f}")
     #     return scale
 
     def _apply_scale_dpi_change(self, scale_factor):
@@ -2542,7 +2556,7 @@ class StockMonitorApp(tk.Tk):
             # 按比例调整
             new_w = int(width * scale_factor / self.scale_factor)
             new_h = int(height * scale_factor / self.scale_factor)
-            print(f'{cct.get_now_time_int()} scale_factor: {scale_factor} old_scale: {self.scale_factor} width: {width} height: {height} new_w : {new_w} new_h: {new_h}')
+            logger.info(f'{cct.get_now_time_int()} scale_factor: {scale_factor} old_scale: {self.scale_factor} width: {width} height: {height} new_w : {new_w} new_h: {new_h}')
             # 更新窗口大小
             self.geometry(f"{new_w}x{new_h}")
 
@@ -2552,7 +2566,7 @@ class StockMonitorApp(tk.Tk):
             self.default_font.configure(size=size)
             self.default_font_bold.configure(size=size)
             self.scale_factor = scale_factor
-            print(f"{cct.get_now_time_int()} [自动缩放] 主窗口调整为 {scale_factor:.2f} 倍，font_size:{self.default_font_size} new_size:{size} 尺寸 {new_w}x{new_h} ")
+            logger.info(f"{cct.get_now_time_int()} [自动缩放] 主窗口调整为 {scale_factor:.2f} 倍，font_size:{self.default_font_size} new_size:{size} 尺寸 {new_w}x{new_h} ")
  
     def _apply_dpi_scaling(self,scale_factor=None):
         """自动计算并设置 Tkinter 的内部 DPI 缩放。"""
@@ -2563,16 +2577,16 @@ class StockMonitorApp(tk.Tk):
             scale_factor = self.scale_factor
         else:
             self.scale_factor = scale_factor
-        print(f'_apply_dpi_scaling scale_factor : {scale_factor}')
+        logger.info(f'_apply_dpi_scaling scale_factor : {scale_factor}')
 
         if scale_factor > 1.0:
             # Tkinter 'scaling' 值 = (系统 DPI / 72 DPI)
-            print(f'scale_factor apply: {scale_factor} {self.scale_factor}')
+            logger.info(f'scale_factor apply: {scale_factor} {self.scale_factor}')
             tk_scaling_value = (scale_factor * DEFAULT_DPI) / 72.0 
             # 这一步会放大所有基于像素定义的组件尺寸和默认字体大小
             self.tk.call('tk', 'scaling', tk_scaling_value)
 
-            print(f"✅ Tkinter DPI 自动缩放应用于 {scale_factor}x ({tk_scaling_value})")
+            logger.info(f"✅ Tkinter DPI 自动缩放应用于 {scale_factor}x ({tk_scaling_value})")
             
             # 3. 💥 关键：配置 Treeview 样式以统一处理行高和字体
             style = ttk.Style(self)
@@ -2600,7 +2614,7 @@ class StockMonitorApp(tk.Tk):
                 font=default_font
             )
             
-            print(f"✅ Tkinter DPI 自动缩放应用于 {scale_factor}x，Treeview 行高设置为 {scaled_row_height}")
+            logger.info(f"✅ Tkinter DPI 自动缩放应用于 {scale_factor}x，Treeview 行高设置为 {scaled_row_height}")
         return scale_factor
 
 
@@ -2608,17 +2622,17 @@ class StockMonitorApp(tk.Tk):
         def on_column_release(event):
             # # 获取当前列宽
             # col_widths = {col: self.tree.column(col)["width"] for col in self.tree["columns"]}
-            # print("当前列宽：", col_widths)
+            # logger.info("当前列宽：", col_widths)
 
             # # 如果需要，可以单独保存name列宽
             # if "name" in col_widths:
             #     self._name_col_width = col_widths["name"]
-            #     print("name列宽更新为:", self._name_col_width)
+            #     logger.info("name列宽更新为:", self._name_col_width)
 
             # 只记录 name 列宽
             if "name" in self.tree["columns"]:
                 self._name_col_width = self.tree.column("name")["width"]
-                # print("name列宽更新为:", self._name_col_width)
+                # logger.info("name列宽更新为:", self._name_col_width)
 
         self.tree.bind("<ButtonRelease-1>", on_column_release)
 
@@ -2626,13 +2640,13 @@ class StockMonitorApp(tk.Tk):
         sf = self.scale_factor
 
         if sf <= 1.25:
-            offset = 0.15
+            offset = -0.15
         elif sf < 1.5:
-            offset = 0.25
+            offset = -0.25
         elif sf < 2:
-            offset = 0.25
+            offset = -0.25
         else:
-            offset = 0.25
+            offset = -0.25
 
         return sf - offset
 
@@ -2646,7 +2660,7 @@ class StockMonitorApp(tk.Tk):
         """
         co2int = ['ra', 'ral', 'fib', 'fibl', 'op', 'ratio', 'ra']
         co2width = ['boll', 'kind', 'red']
-
+        co3other = ['MainU']
         col_scaled = self.get_scaled_value() 
 
         for col in cols:
@@ -2663,16 +2677,21 @@ class StockMonitorApp(tk.Tk):
                 stretch = False
             elif col == "name":
                 # width = int((name_width or 100) * col_scaled)
-                width = int(getattr(self, "_name_col_width", 100*col_scaled))  # 使用记录的 name 宽度
+                width = int(getattr(self, "_name_col_width", 80*col_scaled))  # 使用记录的 name 宽度
                 minwidth = int(60 * col_scaled)
                 stretch = False
+            elif col in co3other:
+                width = int(60 * col_scaled)  # 缩小一点，保持紧凑
+                minwidth = int(30 * col_scaled)
+                stretch = False
+
             elif col in co2int or col in co2width:
-                width = int(60 * col_scaled)
-                minwidth = int(22 * col_scaled)
+                width = int(60 * col_scaled)  # 缩小一点，保持紧凑
+                minwidth = int(25 * col_scaled)
                 stretch = True
             else:
-                width = int(80 * col_scaled)
-                minwidth = int(50 * col_scaled)
+                width = int(80 * col_scaled)  # 更小的宽度
+                minwidth = int(30 * col_scaled)
                 stretch = True
             tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=stretch)
 
@@ -2696,7 +2715,7 @@ class StockMonitorApp(tk.Tk):
 
     #         # 3. 重新配置列
     #         cols = tuple(self.current_cols)
-    #         # print(f'cols : {cols}')
+    #         # logger.info(f'cols : {cols}')
     #         self.tree["columns"] = cols
     #         self.tree["displaycolumns"] = cols
     #         self.tree.configure(show="headings")
@@ -2705,7 +2724,7 @@ class StockMonitorApp(tk.Tk):
     #         if not hasattr(self, "_name_col_width"):
     #             self._name_col_width = int(100*self.get_scaled_value())   # 初始name列宽
 
-    #         print(f'update_treeview_cols self.scale_factor : {self.scale_factor}')
+    #         logger.info(f'update_treeview_cols self.scale_factor : {self.scale_factor}')
     #         self._setup_tree_columns(self.tree,cols, sort_callback=self.sort_by_column, other={})
 
     #         # 5. 延迟刷新
@@ -2714,7 +2733,7 @@ class StockMonitorApp(tk.Tk):
     #     except Exception as e:
     #         import traceback
     #         traceback.print_exc()
-    #         print("更新 Treeview 列失败：", e)
+    #         logger.info("更新 Treeview 列失败：", e)
     def update_treeview_cols(self, new_cols):
         try:
             # 1. 合法列
@@ -2736,9 +2755,10 @@ class StockMonitorApp(tk.Tk):
 
             # 3. 设置列宽
             if not hasattr(self, "_name_col_width"):
-                self._name_col_width = int(100*self.get_scaled_value())
+                self._name_col_width = int(80*self.get_scaled_value())
+                logger.info(f'_name_col_width : {int(80*self.get_scaled_value())}')
 
-            print(f'update_treeview_cols self.scale_factor : {self.scale_factor}')
+            logger.info(f'update_treeview_cols self.scale_factor : {self.scale_factor}')
             self._setup_tree_columns(
                 self.tree,
                 cols,
@@ -2753,7 +2773,7 @@ class StockMonitorApp(tk.Tk):
         except Exception as e:
             import traceback
             traceback.print_exc()
-            print("更新 Treeview 列失败：", e)
+            logger.info(f"更新 Treeview 列失败：{e}")
 
 
 
@@ -2801,7 +2821,7 @@ class StockMonitorApp(tk.Tk):
     #     except Exception as e:
     #         import traceback
     #         traceback.print_exc()
-    #         print("更新 Treeview 列失败：", e)
+    #         logger.info("更新 Treeview 列失败：", e)
 
 
 
@@ -2816,7 +2836,7 @@ class StockMonitorApp(tk.Tk):
     #         if valid_cols == self.current_cols:
     #             return
 
-    #         # print(f"[update_treeview_cols] current={self.current_cols}, new={valid_cols}")
+    #         # logger.info(f"[update_treeview_cols] current={self.current_cols}, new={valid_cols}")
 
     #         self.current_cols = valid_cols
     #         # cols = tuple(self.current_cols)
@@ -2856,7 +2876,7 @@ class StockMonitorApp(tk.Tk):
     #     except Exception as e:
     #         import traceback
     #         traceback.print_exc()
-    #         print("更新 Treeview 列失败：", e)
+    #         logger.info("更新 Treeview 列失败：", e)
 
 
     
@@ -3109,7 +3129,7 @@ class StockMonitorApp(tk.Tk):
                         "follow_ratios": np.array([follow_ratios[i]])
                     }
                     self._global_concept_init_data[c_name] = base_data
-                    # print("[DEBUG] 已初始概念数据(_init_prev_concepts_data)")
+                    # logger.info("[DEBUG] 已初始概念数据(_init_prev_concepts_data)")
         else:
             for i, c_name in enumerate(concepts):
                 # 初始化 prev_data
@@ -3121,7 +3141,7 @@ class StockMonitorApp(tk.Tk):
                         "follow_ratios": np.array([follow_ratios[i]])
                     }
                     self._global_concept_prev_data[c_name] = prev_data
-                    # print("[DEBUG] 已初始概念数据(_init_prev_concepts_data)")
+                    # logger.info("[DEBUG] 已初始概念数据(_init_prev_concepts_data)")
             log.debug(f"[init_global_concept_data] 新增 prev_data: {concepts[0]}")
 
 
@@ -3137,7 +3157,7 @@ class StockMonitorApp(tk.Tk):
             # 概念内每只股票是否跟随
             follow_flags = np.sign(percents) == stock_sign
             return follow_flags.sum() / len(percents)
-        # print(f"by_correlation [Debug] df_all_hash={df_hash(self.df_all)} len={len(self.df_all)} time={datetime.now():%H:%M:%S}")
+        # logger.info(f"by_correlation [Debug] df_all_hash={df_hash(self.df_all)} len={len(self.df_all)} time={datetime.now():%H:%M:%S}")
         df_all = self.df_all.copy()
         # --- ✅ 修正涨幅替代逻辑 ---
         if 'percent' in df_all.columns and 'per1d' in df_all.columns:
@@ -3167,16 +3187,16 @@ class StockMonitorApp(tk.Tk):
                 stock_row = df_all.loc[code]
                 stock_percent = stock_row['percent']
             except Exception:
-                print(f"[WARN] 未找到 {code} 的数据")
+                logger.info(f"[WARN] 未找到 {code} 的数据")
                 return []
         # --- 获取股票所属的概念列表 ---
         # stock_row = df_all.loc[code]
         stock_categories = [
             c.strip() for c in str(stock_row.get('category', '')).split(';') if c.strip()
         ]
-        # print(f'stock_categories : {stock_categories}')
+        # logger.info(f'stock_categories : {stock_categories}')
         if not stock_categories:
-            print(f"[INFO] {code} 无概念数据。")
+            logger.info(f"[INFO] {code} 无概念数据。")
             return []
 
         # concept_dict = {}
@@ -3201,7 +3221,7 @@ class StockMonitorApp(tk.Tk):
         # --- top_n==1 时，只保留股票所属概念 ---
         if top_n == 1:
             concept_dict = {c: concept_dict[c] for c in stock_categories if c in concept_dict}
-            # print(f'top_n == 1 stock_categories : {stock_categories}  concept_dict:{concept_dict}')
+            # logger.info(f'top_n == 1 stock_categories : {stock_categories}  concept_dict:{concept_dict}')
         # --- 计算概念强度 ---
         concept_score = []
         for c, percents in concept_dict.items():
@@ -3238,17 +3258,17 @@ class StockMonitorApp(tk.Tk):
         if cct.get_trade_date_status() and (915 <= now_t <= 924) and not getattr(self, "_concept_first_phase_done", False):
             self._concept_first_phase_done = True
             force_reset = True
-            print(f"{today} 触发 9:15~9:24 第一阶段刷新")
+            logger.info(f"{today} 触发 9:15~9:24 第一阶段刷新")
 
         # 第二阶段：9:25 后触发一次
         elif cct.get_trade_date_status() and (now_t >= 925) and not getattr(self, "_concept_second_phase_done", False):
             self._concept_second_phase_done = True
             force_reset = True
-            print(f"{today} 触发 9:25 第二阶段全局重置")
+            logger.info(f"{today} 触发 9:25 第二阶段全局重置")
 
         self.init_global_concept_data(concept_score, avg_percents, scores, follow_ratios, force_reset)
 
-        # print(f'concept_score[:10]:{concept_score[:10]}')
+        # logger.info(f'concept_score[:10]:{concept_score[:10]}')
         return concept_score[:10]
 
 
@@ -3328,7 +3348,7 @@ class StockMonitorApp(tk.Tk):
             }
             log.info(f"保存报警规则: {rule}")
             stock_code = rule.get("stock")  # 或者从 UI 里获取选中的股票代码
-            print(f'stock_code:{stock_code}')
+            logger.info(f'stock_code:{stock_code}')
             parent.alert_manager.save_rule(stock_code['name'],rule)  # 保存到 AlertManager
             messagebox.showinfo("成功", "规则已保存")
             win.destroy()
@@ -3367,7 +3387,7 @@ class StockMonitorApp(tk.Tk):
             market_info = self.market_map.get(market_cn, {"code": "all", "blkname": "061.blk"})
             self.global_values.setkey("market", market_info["code"])
             self.global_values.setkey("blkname", market_info["blkname"])
-            print(f"选择市场: {market_cn}, code={market_info['code']}, blkname={market_info['blkname']}")
+            logger.info(f"选择市场: {market_cn}, code={market_info['code']}, blkname={market_info['blkname']}")
 
         self.market_combo.bind("<<ComboboxSelected>>", on_market_select)
 
@@ -3627,15 +3647,15 @@ class StockMonitorApp(tk.Tk):
     # def replace_st_key_sort_col_gpt_bug(self, old_col, new_col):
     #     """安全替换 Treeview 中的一列（含完整检查）"""
     #     try:
-    #         print(f"diff : ({old_col}, {new_col})")
-    #         print(f"old_col : {old_col} new_col {new_col} self.current_cols : {self.current_cols}")
+    #         logger.info(f"diff : ({old_col}, {new_col})")
+    #         logger.info(f"old_col : {old_col} new_col {new_col} self.current_cols : {self.current_cols}")
 
     #         # 🧩 Step 1. 数据检查
     #         if self.df_all is None or self.df_all.empty:
-    #             print("⚠️ df_all 为空，无法替换列。")
+    #             logger.info("⚠️ df_all 为空，无法替换列。")
     #             return
     #         if new_col not in self.df_all.columns:
-    #             print(f"⚠️ 新列 {new_col} 不存在于 df_all.columns，跳过。")
+    #             logger.info(f"⚠️ 新列 {new_col} 不存在于 df_all.columns，跳过。")
     #             return
 
     #         # 🧩 Step 2. 获取 Tree 当前列
@@ -3643,7 +3663,7 @@ class StockMonitorApp(tk.Tk):
 
     #         # old_col 不在当前 tree，直接跳过
     #         if old_col not in current_tree_cols:
-    #             print(f"⚠️ {old_col} 不在 TreeView columns：{current_tree_cols}")
+    #             logger.info(f"⚠️ {old_col} 不在 TreeView columns：{current_tree_cols}")
     #             # 保险策略：如果 new_col 不在，也追加进去
     #             if new_col not in current_tree_cols:
     #                 current_tree_cols.append(new_col)
@@ -3663,7 +3683,7 @@ class StockMonitorApp(tk.Tk):
     #                 new_col if c == old_col else c for c in self.current_cols
     #             ]
     #         else:
-    #             print(f"⚠️ {old_col} 不在 current_cols，追加新列 {new_col}")
+    #             logger.info(f"⚠️ {old_col} 不在 current_cols，追加新列 {new_col}")
     #             if new_col not in self.current_cols:
     #                 self.current_cols.append(new_col)
 
@@ -3673,17 +3693,17 @@ class StockMonitorApp(tk.Tk):
     #         # 🧩 Step 6. 调用安全更新函数
     #         self.update_treeview_cols(self.current_cols)
 
-    #         print(f"✅ 替换完成：{old_col} → {new_col}")
+    #         logger.info(f"✅ 替换完成：{old_col} → {new_col}")
     #     except Exception as e:
     #         import traceback
     #         traceback.print_exc()
-    #         print(f"❌ 替换列时出错：{e}")
+    #         logger.info(f"❌ 替换列时出错：{e}")
 
 
     def replace_st_key_sort_col(self, old_col, new_col):
         """替换显示列并刷新表格"""
         if old_col in self.current_cols and new_col not in self.current_cols:
-            print(f'old_col : {old_col} new_col {new_col} self.current_cols : {self.current_cols}')
+            logger.info(f'old_col : {old_col} new_col {new_col} self.current_cols : {self.current_cols}')
             idx = self.current_cols.index(old_col)
             self.current_cols[idx] = new_col
 
@@ -3730,7 +3750,7 @@ class StockMonitorApp(tk.Tk):
             #                       # command=lambda c=col: self.show_column_menu(c))
             #     else:
             #         # 如果 Treeview 没有这个列，可以选择添加或者跳过
-            #         print(f"⚠️ Treeview 没有列 {col}，跳过")
+            #         logger.info(f"⚠️ Treeview 没有列 {col}，跳过")
             # # 重新加载数据
             # self.refresh_tree(self.df_all)
 
@@ -3742,7 +3762,7 @@ class StockMonitorApp(tk.Tk):
         #     if len(nums) != 2:
         #         raise ValueError
         # except:
-        #     print("输入格式错误，例如：'3 0'")
+        #     logger.info("输入格式错误，例如：'3 0'")
         #     return
         def diff_and_replace_all(old_cols, new_cols):
             """找出两个列表不同的元素，返回替换规则 (old, new)"""
@@ -3768,11 +3788,11 @@ class StockMonitorApp(tk.Tk):
         #             if old in current_cols:
         #                 idx = current_cols.index(old)
         #                 current_cols[idx] = new
-        #                 print(f"✅ 替换: {old} -> {new}")
+        #                 logger.info(f"✅ 替换: {old} -> {new}")
         #                 return old, new
         #             else:
-        #                 print(f"⚠️ {old} 不在 current_cols 中，继续查找下一组差异...")
-        #     print("⚠️ 没有可替换的差异列。")
+        #                 logger.info(f"⚠️ {old} 不在 current_cols 中，继续查找下一组差异...")
+        #     logger.info("⚠️ 没有可替换的差异列。")
         #     return None
 
         # def first_diff(old_cols, new_cols):
@@ -3790,11 +3810,11 @@ class StockMonitorApp(tk.Tk):
             for old, new in zip(old_cols, new_cols):
                 if old != new:
                     if old in current_cols:
-                        print(f"✅ 可替换列对: ({old}, {new})")
+                        logger.info(f"✅ 可替换列对: ({old}, {new})")
                         return old, new
                     else:
-                        print(f"⚠️ {old} 不在 current_cols 中，跳过...")
-            print("⚠️ 未找到可替换的差异列。")
+                        logger.info(f"⚠️ {old} 不在 current_cols 中，跳过...")
+            logger.info("⚠️ 未找到可替换的差异列。")
             return None
 
 
@@ -3808,10 +3828,10 @@ class StockMonitorApp(tk.Tk):
                 old, new = diff
                 # 替换第一个匹配的 old 为 new
                 updated_cols = [new if c == old else c for c in display_cols]
-                print(f"🟢 已更新 DISPLAY_COLS: 替换 {old} → {new}")
+                logger.info(f"🟢 已更新 DISPLAY_COLS: 替换 {old} → {new}")
                 return updated_cols, diff
             else:
-                print("🔸 无可更新的列。")
+                logger.info("🔸 无可更新的列。")
                 return display_cols, None
 
 
@@ -3834,16 +3854,16 @@ class StockMonitorApp(tk.Tk):
 
             DISPLAY_COLS_2 = ct.get_Duration_format_Values(
                 ct.Monitor_format_trade,sort_cols[:2])
-            # print(f'DISPLAY_COLS : {DISPLAY_COLS}')
-            # print(f'self.current_cols[1:] : {self.current_cols[1:]}')
-            # print(f'DISPLAY_COLS_2 : {DISPLAY_COLS_2}')
+            # logger.info(f'DISPLAY_COLS : {DISPLAY_COLS}')
+            # logger.info(f'self.current_cols[1:] : {self.current_cols[1:]}')
+            # logger.info(f'DISPLAY_COLS_2 : {DISPLAY_COLS_2}')
             # diff = first_diff(self.current_cols[1:], DISPLAY_COLS_2)
             # diff = first_diff(DISPLAY_COLS, DISPLAY_COLS_2,self.current_cols[1:])
             # 第一次调用
             DISPLAY_COLS, diff = update_display_cols_if_diff(DISPLAY_COLS, DISPLAY_COLS_2, self.current_cols[1:])
-            # print(f'diff : {diff}')
+            # logger.info(f'diff : {diff}')
             if diff:
-                print(f'diff : {diff}')
+                logger.info(f'diff : {diff}')
                 # bug index 
                 # self.replace_st_key_sort_col(*diff)
                 self.replace_column(*diff,apply_search=False)
@@ -3855,7 +3875,7 @@ class StockMonitorApp(tk.Tk):
         手动刷新：更新 resample 全局配置，触发后台进程下一轮 fetch_and_process
         """
         resample = self.resample_combo.get().strip()
-        print(f'set resample : {resample}')
+        logger.info(f'set resample : {resample}')
         # cct.GlobalValues().setkey("resample", resample)
         self.global_values.setkey("resample", resample)
         self.blkname = ct.Resample_LABELS_Blk[resample] or "060.blk"
@@ -3921,13 +3941,13 @@ class StockMonitorApp(tk.Tk):
     def stop_refresh(self):
         if hasattr(self, 'refresh_flag'):
             self.refresh_flag.value = False
-            print(f'refresh_flag.value : {self.refresh_flag.value}')
+            logger.info(f'refresh_flag.value : {self.refresh_flag.value}')
         self.status_var.set("刷新已停止")
 
     def start_refresh(self):
         if hasattr(self, 'refresh_flag'):
             self.refresh_flag.value = True
-            print(f'refresh_flag.value : {self.refresh_flag.value}')
+            logger.info(f'refresh_flag.value : {self.refresh_flag.value}')
         self.status_var.set("刷新已启动")
 
     def format_next_time(self,delay_ms=None):
@@ -3946,21 +3966,21 @@ class StockMonitorApp(tk.Tk):
             if self.refresh_enabled:  # ✅ 只在启用时刷新
                 while not self.queue.empty():
                     df = self.queue.get_nowait()
-                    # print(f'df:{df[:1]}')
+                    # logger.info(f'df:{df[:1]}')
                     if self.sortby_col is not None:
-                        print(f'update_tree sortby_col : {self.sortby_col} sortby_col_ascend : {self.sortby_col_ascend}')
+                        logger.info(f'update_tree sortby_col : {self.sortby_col} sortby_col_ascend : {self.sortby_col_ascend}')
                         df = df.sort_values(by=self.sortby_col, ascending=self.sortby_col_ascend)
                     if df is not None and not df.empty and len(df) > 30:
                         time_s = time.time()
                         df = detect_signals(df)
                         self.df_all = df.copy()
-                        print(f'detect_signals duration time:{time.time()-time_s:.2f}')
-                    # print(f"self.queue [Debug] df_all_hash={df_hash(self.df_all)} len={len(self.df_all)} time={datetime.now():%H:%M:%S}")
+                        logger.info(f'detect_signals duration time:{time.time()-time_s:.2f}')
+                    # logger.info(f"self.queue [Debug] df_all_hash={df_hash(self.df_all)} len={len(self.df_all)} time={datetime.now():%H:%M:%S}")
                         
                         # ✅ 仅在第一次获取 df_all 后恢复监控窗口
                         if not hasattr(self, "_restore_done"):
                             self._restore_done = True
-                            print("首次数据加载完成，开始恢复监控窗口...")
+                            logger.info("首次数据加载完成，开始恢复监控窗口...")
                             self.after(1000,self.restore_all_monitor_windows)
 
 
@@ -4066,7 +4086,7 @@ class StockMonitorApp(tk.Tk):
 
             stock_code = str(stock_code).zfill(6)
             log.info(f'stock_code:{stock_code}')
-            # print(f"选中股票代码: {stock_code}")
+            # logger.info(f"选中股票代码: {stock_code}")
             if send_tdx_Key and stock_code:
                 self.sender.send(stock_code)
 
@@ -4075,7 +4095,7 @@ class StockMonitorApp(tk.Tk):
         # 更新状态栏
         status_text = f"TDX: {status_dict['TDX']} | THS: {status_dict['THS']} | DC: {status_dict['DC']}"
         # self.status_var.set(status_text)
-        # print(status_text)
+        # logger.info(status_text)
 
     def scale_size(self,base_size):
         """根据 DPI 缩放返回尺寸"""
@@ -4110,7 +4130,7 @@ class StockMonitorApp(tk.Tk):
         frame_right = tk.Frame(parent_frame, bg="#f0f0f0") 
         frame_right.pack(side=tk.RIGHT, padx=2, pady=1)
 
-        self.win_var = tk.BooleanVar(value=True)
+        self.win_var = tk.BooleanVar(value=False)
         self.tdx_var = tk.BooleanVar(value=True)
         self.ths_var = tk.BooleanVar(value=True)
         self.dfcf_var = tk.BooleanVar(value=False)
@@ -4140,7 +4160,7 @@ class StockMonitorApp(tk.Tk):
         if not self.tdx_var.get() or self.ths_var.get() or self.dfcf_var.get():
             self.sender.reload()
 
-        print(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
+        logger.info(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
 
     # def refresh_tree(self, df):
     #     for i in self.tree.get_children():
@@ -4233,7 +4253,7 @@ class StockMonitorApp(tk.Tk):
     #         return
     #     # 构造 query_dict，例如：{'name':'ABC','percent':">1"}
     #     query_dict = self.parse_query_text(query_text)
-    #     print(f'query_dict:{query_dict}')
+    #     logger.info(f'query_dict:{query_dict}')
     #     # 保存到历史
     #     desc = query_text  # 简单说明为输入文本
     #     # self.query_history.append({'query': query_dict, 'desc': desc})
@@ -4632,7 +4652,7 @@ class StockMonitorApp(tk.Tk):
         x = max(screen['left'], min(x, screen['right'] - win_width))
         y = max(screen['top'], min(y, screen['bottom'] - win_height))
 
-        print(f"[定位] x={x}, y={y}, screen={screen}")
+        logger.info(f"[定位] x={x}, y={y}, screen={screen}")
         return x, y
 
 
@@ -4666,7 +4686,7 @@ class StockMonitorApp(tk.Tk):
         # 边界检查
         x = max(screen['left'], min(x, screen['right'] - win_width))
         y = max(screen['top'], min(y, screen['bottom'] - win_height))
-        # print(x,y)
+        # logger.info(x,y)
         return x, y
 
     # def on_single_click(self, event):
@@ -4701,7 +4721,7 @@ class StockMonitorApp(tk.Tk):
 
     #         stock_code = str(stock_code).zfill(6)
     #         log.info(f'stock_code:{stock_code}')
-    #         # print(f"选中股票代码: {stock_code}")
+    #         # logger.info(f"选中股票代码: {stock_code}")
     #         if send_tdx_Key and stock_code:
     #             self.sender.send(stock_code)
     def on_single_click(self, event=None, values=None):
@@ -4740,7 +4760,7 @@ class StockMonitorApp(tk.Tk):
 
         stock_code = str(stock_code).zfill(6)
         log.info(f'stock_code:{stock_code}')
-        # print(f"选中股票代码: {stock_code}")
+        # logger.info(f"选中股票代码: {stock_code}")
 
         if send_tdx_Key and stock_code:
             self.sender.send(stock_code)
@@ -4820,11 +4840,11 @@ class StockMonitorApp(tk.Tk):
             # 再显示出来
             self.detail_win.deiconify()
 
-            # print(
+            # logger.info(
             #     f"位置: ({self.detail_win.winfo_x()}, {self.detail_win.winfo_y()}), "
             #     f"大小: {self.detail_win.winfo_width()}x{self.detail_win.winfo_height()}"
             # )
-            # print("geometry:", self.detail_win.geometry())
+            # logger.info("geometry:", self.detail_win.geometry())
             # 字体设置
             # font_style = tkfont.Font(family="微软雅黑", size=12)
             self.txt_widget = tk.Text(self.detail_win, wrap="word", font=self.default_font)
@@ -4855,7 +4875,7 @@ class StockMonitorApp(tk.Tk):
             self.detail_win.lift()
 
     def on_double_click(self, event):
-        # print(f'on_double_click')
+        # logger.info(f'on_double_click')
         sel_row = self.tree.identify_row(event.y)
         sel_col = self.tree.identify_column(event.x)
 
@@ -4969,7 +4989,7 @@ class StockMonitorApp(tk.Tk):
                 return
             code = tree.item(item_id, "values")[0]  # 假设第一列是 code
             pyperclip.copy(code)
-            print(f"已复制: {code}")
+            logger.info(f"已复制: {code}")
 
     def on_tree_double_click(self, event):
         region = self.tree.identify_region(event.x, event.y)
@@ -5186,7 +5206,7 @@ class StockMonitorApp(tk.Tk):
         # 设置菜单窗口位置
         menu_frame.geometry(f"+{x}+{y}")
 
-        # print(f"[DEBUG] event.x={event.x}, window_w={window_w}, win_w={win_w}, win_h={win_h}, pos=({x},{y})")
+        # logger.info(f"[DEBUG] event.x={event.x}, window_w={window_w}, win_w={win_w}, win_h={win_h}, pos=({x},{y})")
 
         # 更新 geometry 才能拿到真实宽高
         # menu_frame.update_idletasks()
@@ -5261,8 +5281,8 @@ class StockMonitorApp(tk.Tk):
         # 获取可选列，排除当前已经显示的
         # all_cols = [c for c in self.df_all.columns if c not in self.current_cols]   
         all_cols = [c for c in self.df_all.columns if default_filter(c)]
-        # print(f'allcoulumns : {self.df_all.columns.values}')
-        # print(f'all_cols : {all_cols}')
+        # logger.info(f'allcoulumns : {self.df_all.columns.values}')
+        # logger.info(f'all_cols : {all_cols}')
         search_var.trace_add("write", on_search_changed)
 
         # 初次填充
@@ -5307,7 +5327,7 @@ class StockMonitorApp(tk.Tk):
             #     new_columns = self.current_cols
 
             # self.tree.config(columns=new_columns)
-            print(f'replace_column get_scaled_value:{self.get_scaled_value()}')
+            logger.info(f'replace_column get_scaled_value:{self.get_scaled_value()}')
             # 重新设置表头
             # for col in new_columns:
             #     # self.tree.heading(col, text=col, anchor="center", command=lambda _col=col: self.sort_by_column(_col, False))
@@ -5382,7 +5402,7 @@ class StockMonitorApp(tk.Tk):
         if current_cols == list(cols_to_show):
             return  # 无需更新
 
-        # print(f"[Tree Reset] old_cols={current_cols}, new_cols={cols_to_show}")
+        # logger.info(f"[Tree Reset] old_cols={current_cols}, new_cols={cols_to_show}")
 
         # 1️⃣ 清空旧列配置
         for col in current_cols:
@@ -5390,7 +5410,7 @@ class StockMonitorApp(tk.Tk):
                 tree.heading(col, text="")
                 tree.column(col, width=0)
             except Exception as e:
-                print(f"clear col err: {col}, {e}")
+                logger.info(f"clear col err: {col}, {e}")
 
         # 2️⃣ 清空列定义，确保内部索引干净
         tree["columns"] = ()
@@ -5403,7 +5423,7 @@ class StockMonitorApp(tk.Tk):
         tree.update_idletasks()
 
         # 4️⃣ 为每个列重新设置 heading / column
-        print(f'reset_tree_columns self.scale_factor :{self.scale_factor} col_scaled:{self.get_scaled_value()}')
+        logger.info(f'reset_tree_columns self.scale_factor :{self.scale_factor} col_scaled:{self.get_scaled_value()}')
         # for col in cols_to_show:
         #     if sort_func:
         #         tree.heading(col, text=col, command=lambda _c=col: sort_func(_c, False))
@@ -5441,7 +5461,7 @@ class StockMonitorApp(tk.Tk):
         self._setup_tree_columns(tree,cols_to_show, sort_callback=sort_func, other={})
 
 
-        # print(f"[Tree Reset] applied cols={list(tree['columns'])}")
+        # logger.info(f"[Tree Reset] applied cols={list(tree['columns'])}")
 
 
     def tree_scroll_to_code(self, code):
@@ -5463,7 +5483,7 @@ class StockMonitorApp(tk.Tk):
                     return True
             toast_message(self, f"{code} is not Found Main")
         except Exception as e:
-            print(f"[tree_scroll_to_code] Error: {e}")
+            logger.info(f"[tree_scroll_to_code] Error: {e}")
             return False
 
         return False  # 未找到
@@ -5493,7 +5513,7 @@ class StockMonitorApp(tk.Tk):
         # 要显示的列顺序（把 DISPLAY_COLS 的顺序保持一致）
         # cols_to_show = ['code'] + [c for c in DISPLAY_COLS if c != 'code']
         cols_to_show = [c for c in self.current_cols if c in df.columns]
-        # print(f'cols_to_show : {cols_to_show}')
+        # logger.info(f'cols_to_show : {cols_to_show}')
 
         # self.after_idle(lambda: self.reset_tree_columns(self.tree, cols_to_show, self.sort_by_column))
         self.reset_tree_columns(self.tree, cols_to_show, self.sort_by_column)
@@ -5504,8 +5524,8 @@ class StockMonitorApp(tk.Tk):
 
         # # 如果 Treeview 的 columns 与我们想要的不一致，则重新配置
         # current_cols = list(self.tree["columns"])
-        # print(f'cols_to_show : {cols_to_show}')
-        # print(f'current_cols : {current_cols}')
+        # logger.info(f'cols_to_show : {cols_to_show}')
+        # logger.info(f'current_cols : {current_cols}')
         # if current_cols != cols_to_show:
         #     # 关键：更新 columns，确保使用 list/tuple（不要使用 numpy array）
         #     self.tree.config(columns=cols_to_show)
@@ -5523,7 +5543,7 @@ class StockMonitorApp(tk.Tk):
 
         # 4. 恢复选中
         if self.select_code:
-            # print(f'select_code: {self.select_code}')
+            # logger.info(f'select_code: {self.select_code}')
             for iid in self.tree.get_children():
                 values = self.tree.item(iid, "values")
                 if values and values[0] == self.select_code:
@@ -5575,10 +5595,10 @@ class StockMonitorApp(tk.Tk):
 
             if col == 'name':
                 # width = int(width * 2)
-                width = int(width * 1.5 * self.get_scaled_value())
-                # width = getattr(self, "_name_col_width", 120*self.scale_factor) 
-                # print(f'col width: {width}')
-                # print(f'col : {col} width: {width}')
+                # width = int(width * 1.5 * self.get_scaled_value())
+                width = getattr(self, "_name_col_width", 80*self.scale_factor) 
+                # logger.info(f'col width: {width}')
+                # logger.info(f'col : {col} width: {width}')
             self.tree.column(col, width=width)
 
     # ----------------- 排序 ----------------- #
@@ -5637,9 +5657,9 @@ class StockMonitorApp(tk.Tk):
 
         new_query, removed, final_query = process_query(query)
 
-        print("去掉后的 query:", new_query)
-        print("提取出的条件:", removed)
-        print("拼接后的 final_query:", final_query)
+        logger.info(f"去掉后的 query: {new_query}")
+        logger.info(f"提取出的条件: {removed}")
+        logger.info(f"拼接后的 final_query:{final_query}")
 
     def _on_search_var_change(self, *_):
         val1 = self.search_var1.get().strip()
@@ -5676,18 +5696,18 @@ class StockMonitorApp(tk.Tk):
 
         if search_history1 is not None:
             if search_history1 is self.query_manager.history2:
-                print("[警告] sync_history_from_QM 收到错误引用（history2）→ 覆盖 history1 被阻止")
+                logger.info("[警告] sync_history_from_QM 收到错误引用（history2）→ 覆盖 history1 被阻止")
                 return
             self.search_history1 = [r["query"] for r in list(search_history1)]
 
         if search_history2 is not None:
             if search_history2 is self.query_manager.history1:
-                print("[警告] sync_history_from_QM 收到错误引用（history1）→ 覆盖 history2 被阻止")
+                logger.info("[警告] sync_history_from_QM 收到错误引用（history1）→ 覆盖 history2 被阻止")
                 return
             self.search_history2 = [r["query"] for r in list(search_history2)]
         if search_history3 is not None:
             if search_history3 is self.query_manager.history1 or search_history3 is self.query_manager.history2:
-                print("[警告] sync_history_from_QM 收到错误引用（history1/2）→ 覆盖 history3 被阻止")
+                logger.info("[警告] sync_history_from_QM 收到错误引用（history1/2）→ 覆盖 history3 被阻止")
                 return
 
             # ✅ 如果 self.search_history3 已存在，就直接更新原对象
@@ -5704,7 +5724,7 @@ class StockMonitorApp(tk.Tk):
                 try:
                     self.kline_monitor.refresh_search_combo3()
                 except Exception as e:
-                    print(f"[警告] 刷新 KLineMonitor ComboBox 失败: {e}")
+                    logger.info(f"[警告] 刷新 KLineMonitor ComboBox 失败: {e}")
 
     def sync_history(self, val, search_history, combo, history_attr, current_key):
 
@@ -5741,7 +5761,7 @@ class StockMonitorApp(tk.Tk):
         # ----------------------
         history = getattr(self.query_manager, history_attr)
         existing_queries = {r["query"]: r for r in history}
-        # print(f'val: {val} {val in existing_queries}')
+        # logger.info(f'val: {val} {val in existing_queries}')
         new_history = []
         for q in search_history:
             if q in existing_queries:
@@ -5804,7 +5824,7 @@ class StockMonitorApp(tk.Tk):
         top5 = OrderedDict(counter.most_common(5))
 
         display_text = "  ".join([f"{k}:{v}" for k, v in top5.items()])
-        # print(f'display_text : {display_text}  list(top5.keys()) : { list(top5.keys()) }')
+        # logger.info(f'display_text : {display_text}  list(top5.keys()) : { list(top5.keys()) }')
         # 取前5个类别
         # current_categories = set(top5.keys())
         current_categories =  list(top5.keys())  #保持顺序
@@ -5870,7 +5890,7 @@ class StockMonitorApp(tk.Tk):
         """点击异动窗口中的股票代码"""
         if code != self.select_code:
             self.select_code = code
-            print(f"select_code: {code}")
+            logger.info(f"select_code: {code}")
             # ✅ 可改为打开详情逻辑，比如：
             # if hasattr(self, "show_stock_detail"):
             #     self.show_stock_detail(code)
@@ -5904,7 +5924,10 @@ class StockMonitorApp(tk.Tk):
         self._concept_win = win
         win.title("概念异动详情")
         self.load_window_position(win, "detail_window", default_width=220, default_height=400)
-        win.transient(self)
+        #将 win 设为 父窗口的临时窗口
+        # 在 Windows 上表现为 没有单独任务栏图标
+        # 常用于 工具窗口 / 弹窗
+        # win.transient(self)
 
         # --- 主Frame + Canvas + 滚动 ---
         frame = tk.Frame(win)
@@ -6136,7 +6159,7 @@ class StockMonitorApp(tk.Tk):
         """点击异动窗口中的股票代码"""
         self.select_code = code
 
-        # print(f"select_code: {code}")
+        # logger.info(f"select_code: {code}")
         # ✅ 可改为打开详情逻辑，比如：
         self.sender.send(code)
         if hasattr(self._concept_top10_win, "_canvas_top10"):
@@ -6173,41 +6196,6 @@ class StockMonitorApp(tk.Tk):
         if code:
             self.on_code_click(code)
 
-    # def _update_selection_top10(self, idx):
-    #     """更新Top10窗口的高亮状态"""
-    #     for i, lbl in enumerate(self._top10_label_widgets):
-    #         lbl.configure(bg="lightblue" if i == idx else "SystemButtonFace")
-
-    # def _update_selection_top10(self, idx):
-    #     """更新 Top10 窗口选中高亮并滚动"""
-    #     if not hasattr(self, "_concept_top10_win") or not self._concept_top10_win:
-    #         return
-    #     win = self._concept_top10_win
-    #     canvas = win._canvas_top10
-    #     scroll_frame = win._content_frame_top10
-
-    #     # 清除所有高亮
-    #     for lbl in self._top10_label_widgets:
-    #         lbl.configure(bg=win.cget("bg"))
-
-    #     # 高亮选中
-    #     if 0 <= idx < len(self._top10_label_widgets):
-    #         lbl = self._top10_label_widgets[idx]
-    #         self._top10_selected_index = idx
-    #         lbl.configure(bg="lightblue")
-    #         self._concept_top10_selected_index = idx
-
-    #         # 滚动 Canvas 使当前 Label 可见
-    #         canvas.update_idletasks()
-    #         scroll_frame.update_idletasks()
-    #         lbl_top = lbl.winfo_y()
-    #         lbl_bottom = lbl_top + lbl.winfo_height()
-    #         view_top = canvas.canvasy(0)
-    #         view_bottom = view_top + canvas.winfo_height()
-    #         if lbl_top < view_top:
-    #             canvas.yview_moveto(lbl_top / max(1, scroll_frame.winfo_height()))
-    #         elif lbl_bottom > view_bottom:
-    #             canvas.yview_moveto((lbl_bottom - canvas.winfo_height()) / max(1, scroll_frame.winfo_height()))
 
     def _on_label_right_click_top10(self,code ,idx):
         # self._update_selection_top10(idx)
@@ -6239,17 +6227,17 @@ class StockMonitorApp(tk.Tk):
 
             # ---------------- 回退逻辑 ----------------
             if not concept_name:
-                # print(f"[Info] 未从 _label_widgets 获取到概念，尝试通过 {code} 自动识别强势概念。")
+                # logger.info(f"[Info] 未从 _label_widgets 获取到概念，尝试通过 {code} 自动识别强势概念。")
                 try:
                     top_concepts = self.get_following_concepts_by_correlation(code, top_n=1)
                     if top_concepts:
                         concept_name = top_concepts[0][0]
-                        print(f"自动识别强势概念：{concept_name}")
+                        logger.info(f"自动识别强势概念：{concept_name}")
                     else:
                         messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
                         return
                 except Exception as e:
-                    print(f"[Error] 回退获取概念失败：{e}")
+                    logger.info(f"[Error] 回退获取概念失败：{e}")
                     traceback.print_exc()
                     messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
                     return
@@ -6283,7 +6271,7 @@ class StockMonitorApp(tk.Tk):
                             win.focus_force()
 
                 except Exception as e:
-                    print("窗口状态检查失败：", e)
+                    logger.info(f"窗口状态检查失败：{e}")
 
                 # --- 恢复 Canvas 滚动位置 ---
                 if hasattr(win, "_canvas_top10"):
@@ -6293,7 +6281,7 @@ class StockMonitorApp(tk.Tk):
                     canvas.yview_moveto(yview[0])
 
         except Exception as e:
-            print("获取概念详情失败：", e)
+            logger.info(f"获取概念详情失败：{e}")
             traceback.print_exc()
 
     def _update_selection_top10(self, idx):
@@ -6367,42 +6355,7 @@ class StockMonitorApp(tk.Tk):
         btn.pack(side="left", padx=4)
         win._btn_copy_expr = btn
 
-    # def show_concept_top10_window_simple(self, concept_name, code=None, auto_update=True, interval=30):
-    #     """
-    #     显示指定概念的前10放量上涨股，不复用已有窗口，简单独立创建
-    #     """
-    #     if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
-    #         toast_message(self, "df_all 数据为空，无法筛选概念股票")
-    #         return
-
-    #     try:
-    #         df_concept = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
-    #     except Exception as e:
-    #         toast_message(self, f"筛选表达式错误: {e}")
-    #         return
-
-    #     if df_concept.empty:
-    #         toast_message(self, f"概念【{concept_name}】暂无匹配股票")
-    #         return
-
-    #     if not hasattr(self, "_pg_top10_window_simple"):
-    #         self._pg_top10_window_simple = {}
-    #         # self._pg_data_hash = {}
-    #     # --- 新窗口 ---
-    #     win = tk.Toplevel(self)
-    #     win.title(f"{concept_name} 概念前10放量上涨股")
-    #     win.attributes('-toolwindow', True)  # 去掉最大化/最小化按钮，只留关闭按钮
-
-    #     now = datetime.now()
-    #     timestamp_suffix = f"{now:%M%S}{int(now.microsecond/1000):03d}"[:6]
-
-    #     # 拼接成唯一键
-    #     key = f"{concept_name}_{timestamp_suffix}"
-    #      # 缓存窗口
-    #     self._pg_top10_window_simple[key] = {
-    #         "win": win
-    #         "code": code
-    #     }
+   
     def show_concept_top10_window_simple(self, concept_name, code=None, auto_update=True, interval=30,stock_name=None):
         """
         显示指定概念的前10放量上涨股，不复用已有窗口，简单独立创建
@@ -6444,13 +6397,13 @@ class StockMonitorApp(tk.Tk):
         # --- 新窗口 ---
         win = tk.Toplevel(self)
         win.title(f"{concept_name} 概念前10放量上涨股")
-        win.attributes('-toolwindow', True)  # 去掉最大化/最小化按钮，只留关闭按钮
+        # win.attributes('-toolwindow', True)  # 去掉最大化/最小化按钮，只留关闭按钮
 
         # now = datetime.now()
         # timestamp_suffix = f"{now:%M%S}{int(now.microsecond/1000):03d}"[:6]
         # key = f"{concept_name}_{timestamp_suffix}"
         # key = f"{concept_name}_{timestamp_suffix}"
-        # print(f'show_concept_top10_window_simple : {unique_code}')
+        # logger.info(f'show_concept_top10_window_simple : {unique_code}')
         # 缓存窗口
         # --- 如果传了code但没传stock_name，则从self.df_all查找 ---
         if code and not stock_name:
@@ -6462,7 +6415,7 @@ class StockMonitorApp(tk.Tk):
                     if not match.empty:
                         stock_name = match.iloc[0]["name"]
             except Exception as e:
-                print(f"查找股票名称出错: {e}")
+                logger.info(f"查找股票名称出错: {e}")
 
         # 确保格式化
         code = str(code).zfill(6) if code else ""
@@ -6672,12 +6625,12 @@ class StockMonitorApp(tk.Tk):
                     try:
                         concept_name = getattr(win, "_concept_name", None)
                         if not concept_name:
-                            print('win._concept_name  : None')
+                            logger.info('win._concept_name  : None')
                             return
                         df_latest = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
                         self._fill_concept_top10_content(win, concept_name, df_latest, code=code)
                     except Exception as e:
-                        print(f"[WARN] 自动刷新失败: {e}")
+                        logger.info(f"[WARN] 自动刷新失败: {e}")
 
             # 安全地重新注册下一次刷新
             win._auto_refresh_id = win.after(int(spin_interval.get()) * 1000, auto_refresh)
@@ -6705,7 +6658,7 @@ class StockMonitorApp(tk.Tk):
                         del self._pg_top10_window_simple[k]
                         break
             except Exception as e:
-                print(f"清理 _pg_top10_window_simple 出错: {e}")
+                logger.info(f"清理 _pg_top10_window_simple 出错: {e}")
 
             win.destroy()
             self._concept_top10_win = None
@@ -6737,7 +6690,7 @@ class StockMonitorApp(tk.Tk):
             return
 
         if df_concept.empty:
-            print(f"概念【{concept_name}】暂无匹配股票")
+            logger.info(f"概念【{concept_name}】暂无匹配股票")
             self.after(100, lambda: toast_message(self,f"概念【{concept_name}】暂无匹配股票"))
             return
 
@@ -6765,7 +6718,7 @@ class StockMonitorApp(tk.Tk):
         win = tk.Toplevel(self)
         self._concept_top10_win = win
         win.title(f"{concept_name} 概念前10放量上涨股")
-        win.attributes('-toolwindow', True)  # 去掉最大化/最小化按钮，只留关闭按钮
+        # win.attributes('-toolwindow', True)  # 去掉最大化/最小化按钮，只留关闭按钮
         win._concept_name = concept_name
         # 在创建窗口时保存定时器 id
         win._auto_refresh_id = None
@@ -6955,12 +6908,12 @@ class StockMonitorApp(tk.Tk):
                     try:
                         concept_name = getattr(win, "_concept_name", None)
                         if not concept_name:
-                            print('win._concept_name  : None')
+                            logger.info('win._concept_name  : None')
                             return
                         df_latest = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
                         self._fill_concept_top10_content(win, concept_name, df_latest, code=code)
                     except Exception as e:
-                        print(f"[WARN] 自动刷新失败: {e}")
+                        logger.info(f"[WARN] 自动刷新失败: {e}")
 
             # 安全地重新注册下一次刷新
             win._auto_refresh_id = win.after(int(spin_interval.get()) * 1000, auto_refresh)
@@ -7248,7 +7201,7 @@ class StockMonitorApp(tk.Tk):
 
     def _sort_treeview_column_newTop10(self, tree, col, reverse=None):
         if not hasattr(tree, "_full_df") or tree._full_df.empty:
-            print("[WARN] Treeview _full_df 为空")
+            logger.info("[WARN] Treeview _full_df 为空")
             return
 
         # 初始化排序状态
@@ -7264,12 +7217,12 @@ class StockMonitorApp(tk.Tk):
         df_sorted = tree._full_df.sort_values(col, ascending=not reverse)
 
         # 调试信息
-        print(f"[DEBUG] Sorting column: {col}, ascending: {not reverse}, total rows: {len(df_sorted)}")
+        logger.info(f"[DEBUG] Sorting column: {col}, ascending: {not reverse}, total rows: {len(df_sorted)}")
 
         # 填充前 limit 条
         limit = getattr(tree, "_display_limit", 50)
         df_display = df_sorted.head(limit)
-        print(f"[DEBUG] Displaying top {limit} rows after sort")
+        logger.info(f"[DEBUG] Displaying top {limit} rows after sort")
 
         tree.delete(*tree.get_children())
         for idx, (code_row, row) in enumerate(df_display.iterrows()):
@@ -7288,11 +7241,11 @@ class StockMonitorApp(tk.Tk):
                 tree.focus(sel_iid)
                 tree.see(sel_iid)
 
-        print(f"[DEBUG] _sort_state: {tree._sort_state}")
+        logger.info(f"[DEBUG] _sort_state: {tree._sort_state}")
 
         # 更新heading command
         tree.heading(col, command=lambda c=col: self._sort_treeview_column_newTop10(tree, c,not reverse))
-
+        tree.yview_moveto(0)
 
     # def _sort_treeview_column_newTop10(self, tree, col, reverse=None):
     #     # 每列保存排序状态
@@ -7356,15 +7309,15 @@ class StockMonitorApp(tk.Tk):
             code = "总览"
             name = "All"
             unique_code = f"{code or ''}_{top_n or ''}"
-            print(f'concepts_pg concepts : {top_concepts[0]} unique_code: {unique_code} ')
+            logger.info(f'concepts_pg concepts : {top_concepts[0]} unique_code: {unique_code} ')
         else:
             top_concepts = self.get_following_concepts_by_correlation(code, top_n=top_n)
             name = self.df_all.loc[code]['name'] if code in self.df_all.index else code
             unique_code = f"{code or ''}_{top_n or ''}"
             concepts = [c[0] for c in top_concepts]
-            print(f'concepts_pg concepts : {top_concepts} unique_code: {unique_code} ')
+            logger.info(f'concepts_pg concepts : {top_concepts} unique_code: {unique_code} ')
         if not top_concepts:
-            print("未找到相关概念")
+            logger.info("未找到相关概念")
             return
 
         unique_code = f"{code or ''}_{top_n or ''}"
@@ -7381,7 +7334,7 @@ class StockMonitorApp(tk.Tk):
                     win.activateWindow()     # 获得焦点
                     return  # 不创建新窗口
             except Exception as e:
-                print(f'e:{e} pg win is None will remove:{v.get("win")}')
+                logger.info(f'e:{e} pg win is None will remove:{v.get("win")}')
                 del self._pg_windows[k]
             finally:
                 pass
@@ -7393,7 +7346,7 @@ class StockMonitorApp(tk.Tk):
         follow_ratios = np.array([c[3] for c in top_concepts])
         data_hash = hashlib.md5(str(concepts[:3]).encode()).hexdigest()
 
-        # print(f'concepts : {concepts} unique_code: {unique_code} ')
+        # logger.info(f'concepts : {concepts} unique_code: {unique_code} ')
         # --- 创建主窗口 ---
         win = QtWidgets.QWidget()
         win.setWindowTitle(f"{code} 概念分析Top{top_n}")
@@ -7408,7 +7361,7 @@ class StockMonitorApp(tk.Tk):
             # screen = self.app.primaryScreen()
         # self._dpi_now = screen.logicalDotsPerInch()
         self.dpi_scale =  1
-        # print(f'self.dpi_scale : {self.dpi_scale} self._dpi_now  : {self._dpi_now}')
+        # logger.info(f'self.dpi_scale : {self.dpi_scale} self._dpi_now  : {self._dpi_now}')
 
         # 控制栏
         ctrl_layout = QtWidgets.QHBoxLayout()
@@ -7445,7 +7398,7 @@ class StockMonitorApp(tk.Tk):
         font = QtWidgets.QApplication.font()
         font_size = font.pointSize()
         self._font_size = font_size
-        print("concepts_pg 默认字体大小:", font_size)
+        logger.info(f"concepts_pg 默认字体大小: {font_size}")
 
         texts = []
         max_score = max(scores.max(), 1)
@@ -7455,7 +7408,7 @@ class StockMonitorApp(tk.Tk):
             text.setPos(score + 0.03 * max_score, y[i])
             plot.addItem(text)
             texts.append(text)
-            # print(f"[DEBUG] : avg={avg:.2f}, score={score:.2f}")
+            # logger.info(f"[DEBUG] : avg={avg:.2f}, score={score:.2f}")
 
         plot.getAxis('left').setTicks([list(zip(y, concepts))])
 
@@ -7637,7 +7590,7 @@ class StockMonitorApp(tk.Tk):
         def reposition_texts1():
             app_font = QtWidgets.QApplication.font()
             family = app_font.family()
-            print("reposition_texts 默认字体大小:", self._font_size)
+            logger.info(f"reposition_texts 默认字体大小: {self._font_size}")
             for i, text in enumerate(texts):
                 if i >= len(concepts):
                     continue
@@ -7682,7 +7635,7 @@ class StockMonitorApp(tk.Tk):
         # screen = app.primaryScreen()
         # dpi = screen.logicalDotsPerInch()
         # font_size = max(7, int(10 * dpi / 96))  # 根据 DPI 调整字体
-        # print(f"[DEBUG] 当前屏幕: {screen.name()}, DPI={dpi}, 字体大小={font_size}")
+        # logger.info(f"[DEBUG] 当前屏幕: {screen.name()}, DPI={dpi}, 字体大小={font_size}")
 
         def check_screen():
             nonlocal prev_screen, prev_dpi ,base_fontsize
@@ -7693,40 +7646,40 @@ class StockMonitorApp(tk.Tk):
                 screen = self.app.primaryScreen()
             self._dpi_now = screen.logicalDotsPerInch()
             # self.dpi_scale = self._dpi_now / prev_dpi if prev_dpi else 1
-            # print(f'self.dpi_scale : {self.dpi_scale}')
+            # logger.info(f'self.dpi_scale : {self.dpi_scale}')
             if prev_screen or  prev_dpi:
                 if screen != prev_screen or self._dpi_now  != prev_dpi:
-                    print(f'dpi_now :{self._dpi_now } prev_dpi :{prev_dpi}')
+                    logger.info(f'dpi_now :{self._dpi_now } prev_dpi :{prev_dpi}')
                     prev_screen, prev_dpi = screen, self._dpi_now
                     # self.dpi_scale = self._dpi_now / prev_dpi
                     # if self._dpi_now == 96 and font_size == self.base_font_size:
                     #     self._font_size = int(self._font_size / self.scale_factor)
                         # dpi_scale = dpi_now / prev_dpi if prev_dpi else 1
                     # self._font_size = int(self.base_font_size * self.scale_factor)
-                        # print(f'check_screen _font_size : {self._font_size}')
+                        # logger.info(f'check_screen _font_size : {self._font_size}')
                     # reposition_texts()
 
                     font = self.app.font()
                     self.dpi_scale =  1.5 if self._dpi_now / 96 > 1.5 else self._dpi_now / 96
                     font.setPointSize(int(base_font_size * self.dpi_scale))
                     self.app.setFont(font)
-                    # print(f'dpi : {dpi} _dpi_now : {self._dpi_now} fontsize: {font.pointSize()} ratio :  {(self._dpi_now  / 96)}')
+                    # logger.info(f'dpi : {dpi} _dpi_now : {self._dpi_now} fontsize: {font.pointSize()} ratio :  {(self._dpi_now  / 96)}')
 
             else:
                 font = self.app.font()
                 self.dpi_scale =  1.5 if self._dpi_now / 96 > 1.5 else self._dpi_now / 96
                 font.setPointSize(int(self.base_font_size  * self.dpi_scale))
                 self.app.setFont(font)
-                print(f'_dpi_now : {self._dpi_now} fontsize: {font.pointSize()} ratio :  {(self._dpi_now  / 96)}')
+                logger.info(f'_dpi_now : {self._dpi_now} fontsize: {font.pointSize()} ratio :  {(self._dpi_now  / 96)}')
 
                 # self._font_size = int(self.base_font_size * self.dpi_scale)
                 # self._font_size = int(self.base_font_size * self.scale_factor)
                 # if self._dpi_now == 96:
                 #     # self.dpi_scale = self._dpi_now / (self.scale_factor*96)
-                #     print(f'self.dpi_scale init: {self.dpi_scale}')
+                #     logger.info(f'self.dpi_scale init: {self.dpi_scale}')
                 #     # if  font_size == self.base_font_size:
                 #     #     self._font_size = int(self._font_size / self.scale_factor)
-                print(f'self._font_size init: {self._font_size}')
+                logger.info(f'self._font_size init: {self._font_size}')
                 prev_screen, prev_dpi = screen, self._dpi_now 
 
         # screen_timer = QtCore.QTimer(win)
@@ -7797,7 +7750,7 @@ class StockMonitorApp(tk.Tk):
                     }
                     self._global_concept_init_data[c_name] = base_data
                 win._init_prev_concepts_data[c_name] = base_data
-                # print("[DEBUG] 已初始概念数据(_init_prev_concepts_data)")
+                # logger.info("[DEBUG] 已初始概念数据(_init_prev_concepts_data)")
             # 初始化 prev_data
             if c_name not in win._prev_concepts_data:
                 prev_data = self._global_concept_prev_data.get(c_name)
@@ -7850,7 +7803,7 @@ class StockMonitorApp(tk.Tk):
             except Exception as e:
                 return f"err:{e}"
 
-        print(
+        logger.info(
             f"[DEBUG {datetime.now():%H:%M:%S}] update_pg_plot 调用 "
             f"概念数={len(concepts)} thread={threading.current_thread().name} "
             f"hash_concepts={quick_hash(concepts)} hash_scores={quick_hash(scores)}"
@@ -7890,13 +7843,13 @@ class StockMonitorApp(tk.Tk):
         if cct.get_trade_date_status() and (915 <= now_t <= 924) and not getattr(self, "_concept_first_phase_done", False):
             win._concept_first_phase_done = True
             force_reset = True
-            print(f"{today} 触发 9:15~9:24 第一阶段刷新")
+            logger.info(f"{today} 触发 9:15~9:24 第一阶段刷新")
 
         # 第二阶段：9:25 后触发一次
         elif cct.get_trade_date_status() and (now_t >= 925) and not getattr(self, "_concept_second_phase_done", False):
             win._concept_second_phase_done = True
             force_reset = True
-            print(f"{today} 触发 9:25 第二阶段全局重置")
+            logger.info(f"{today} 触发 9:25 第二阶段全局重置")
 
         # --- 初始化多 concept 数据容器 ---
         if not hasattr(win, "_init_prev_concepts_data") or force_reset:
@@ -7956,7 +7909,7 @@ class StockMonitorApp(tk.Tk):
                 break
 
         if not data_changed:
-            print("[DEBUG] 数据未变化，跳过刷新 ✅")
+            logger.info("[DEBUG] 数据未变化，跳过刷新 ✅")
             return
 
         y = np.arange(len(concepts))
@@ -7993,7 +7946,7 @@ class StockMonitorApp(tk.Tk):
         #     text.setPos(score + 0.03 * max_score, y[i])
         #     plot.addItem(text)
         #     texts.append(text)
-        #     print(f"update[DEBUG] : avg={avg:.2f}, score={score:.2f}")
+        #     logger.info(f"update[DEBUG] : avg={avg:.2f}, score={score:.2f}")
 
         # # --- 更新左轴刻度 ---
         # plot.getAxis('left').setTicks([list(zip(y, concepts))])
@@ -8015,7 +7968,7 @@ class StockMonitorApp(tk.Tk):
             plot.addItem(bar)
             delta_bars_list.append(bar)
         w_dict["delta_bars"] = delta_bars_list
-        # print(f'texts: {texts}')
+        # logger.info(f'texts: {texts}')
         # --- 更新文字显示（顺序保持和 y 对齐） ---
         app_font = QtWidgets.QApplication.font()
         font_family = app_font.family()
@@ -8056,7 +8009,7 @@ class StockMonitorApp(tk.Tk):
         #     text.setPos(score + 0.03 * max_score, y[i])
         #     plot.addItem(text)
         #     texts.append(text)
-        #     print(f"[DEBUG] : avg={avg:.2f}, score={score:.2f}")
+        #     logger.info(f"[DEBUG] : avg={avg:.2f}, score={score:.2f}")
 
         # plot.getAxis('left').setTicks([list(zip(y, concepts))])
 
@@ -8114,7 +8067,7 @@ class StockMonitorApp(tk.Tk):
     #             "scores": np.array(scores, copy=True),
     #             "follow_ratios": np.array(follow_ratios, copy=True)
     #         }
-    #         print("[DEBUG] 已保存初始概念数据(_init_prev_concepts_data)")
+    #         logger.info("[DEBUG] 已保存初始概念数据(_init_prev_concepts_data)")
 
     #     # --- 当前数据与上次刷新数据 (_prev_concepts_data) ---
     #     # 用于比较上一次刷新后的变化（非初始参考）
@@ -8224,7 +8177,7 @@ class StockMonitorApp(tk.Tk):
         if not cct.get_work_time():  # 仅工作时间刷新
             return
 
-        print(f'unique_code : {unique_code}')
+        logger.info(f'unique_code : {unique_code}')
         w_dict = self._pg_windows[unique_code]
         win = w_dict["win"]
 
@@ -8233,12 +8186,12 @@ class StockMonitorApp(tk.Tk):
             tcode, _ = self.get_stock_code_none()
             top_concepts = self.get_following_concepts_by_correlation(tcode, top_n=top_n)
             unique_code = f"{code or ''}_{top_n or ''}"
-            # print(f'_refresh_pg_window concepts : {top_concepts} unique_code: {unique_code} ')
+            # logger.info(f'_refresh_pg_window concepts : {top_concepts} unique_code: {unique_code} ')
         else:
             top_concepts = self.get_following_concepts_by_correlation(code, top_n=top_n)
 
         if not top_concepts:
-            print(f"[Auto] 无法刷新 {code} 数据为空")
+            logger.info(f"[Auto] 无法刷新 {code} 数据为空")
             return
 
         # --- 对概念按 score 降序排序 ---
@@ -8253,18 +8206,18 @@ class StockMonitorApp(tk.Tk):
         old_concepts = w_dict.get("_concepts", [])
         concept_changed = old_concepts != concepts
         # if concept_changed:
-        #     print(f"[DEBUG] 概念顺序变化，会重建文字:old_concepts {old_concepts} → concepts:{concepts}")
+        #     logger.info(f"[DEBUG] 概念顺序变化，会重建文字:old_concepts {old_concepts} → concepts:{concepts}")
         #     # w_dict["texts"] = []  # 强制重建文字
         # else:
-        #     print(f"[DEBUG] 概念顺序未变，仅更新文字内容")
+        #     logger.info(f"[DEBUG] 概念顺序未变，仅更新文字内容")
 
         # --- 调试输出 ---
-        # print(f'_refresh_pg_window top_concepts_sorted : {top_concepts_sorted} unique_code: {unique_code} ')
-        print(f'更新图形: {unique_code} : {concepts}')
+        # logger.info(f'_refresh_pg_window top_concepts_sorted : {top_concepts_sorted} unique_code: {unique_code} ')
+        logger.info(f'更新图形: {unique_code} : {concepts}')
         # --- 更新图形 ---
         self.update_pg_plot(w_dict, concepts, scores, avg_percents, follow_ratios)
 
-        print(f"[Auto] 已自动刷新 {code}")
+        logger.info(f"[Auto] 已自动刷新 {code}")
 
 
     # def plot_following_concepts_mp(self, code=None, top_n=10):
@@ -8277,13 +8230,13 @@ class StockMonitorApp(tk.Tk):
     #     plt.rcParams['axes.unicode_minus'] = False
     #     if code is None:
     #         tcode, percent = self.get_stock_code_none()
-    #         print(f'tcode: {tcode} percent :{percent}')
+    #         logger.info(f'tcode: {tcode} percent :{percent}')
     #         top_concepts = self.get_following_concepts_by_correlation(tcode, top_n=top_n)
     #     else:
     #         top_concepts = self.get_following_concepts_by_correlation(code, top_n=top_n)
 
     #     if not top_concepts:
-    #         print("未找到相关概念")
+    #         logger.info("未找到相关概念")
     #         return
 
     #     concepts = [c[0] for c in top_concepts]
@@ -8295,18 +8248,18 @@ class StockMonitorApp(tk.Tk):
 
     #     data_hash = tuple(concepts[:3])
 
-    #     print(f'data_hash : {data_hash}')
+    #     logger.info(f'data_hash : {data_hash}')
     #     # 如果数据完全一样且已有窗口，则不重复打开
     #     to_delete = []
     #     # --- 检查是否已有相同数据的窗口 ---
     #     for key, hash_val in list(self._figs_data_hash.items()):
-    #         print(f'key : {key} hash_val : {hash_val}')
+    #         logger.info(f'key : {key} hash_val : {hash_val}')
 
     #         fig = self._figs_opened.get(key, None)
 
     #         # 如果图表已经被关闭或不存在，删除字典记录
     #         if fig is None or not plt.fignum_exists(fig.number):
-    #             print(f"[Info] 图表 {key} 已关闭，清理记录")
+    #             logger.info(f"[Info] 图表 {key} 已关闭，清理记录")
     #             self._figs_opened.pop(key, None)
     #             self._figs_data_hash.pop(key, None)
     #             continue
@@ -8326,7 +8279,7 @@ class StockMonitorApp(tk.Tk):
     #                 self._figs_opened.pop(key, None)
     #                 self._figs_data_hash.pop(key, None)
     #             else:
-    #                 print("数据与已有窗口相同，不重复打开。")
+    #                 logger.info("数据与已有窗口相同，不重复打开。")
     #                 return
 
 
@@ -8366,7 +8319,7 @@ class StockMonitorApp(tk.Tk):
     #                        f"平均涨幅: {avgp:.2f}%\n"
     #                        f"跟随指数: {ratio:.2f}\n"
     #                        f"综合得分: {score:.3f}")
-    #                 print(f'[Click] {msg}')
+    #                 logger.info(f'[Click] {msg}')
     #                 self._call_concept_top10_win(code, concept)
     #                 break
 
@@ -8375,18 +8328,18 @@ class StockMonitorApp(tk.Tk):
     #     # 键盘事件
     #     def on_key_press(event):
     #         if event.key == "r":
-    #             print(f"[Key] 刷新 {code} 概念分析")
+    #             logger.info(f"[Key] 刷新 {code} 概念分析")
     #             plt.close(fig)
     #             self.plot_following_concepts_pg(code, top_n=top_n)
     #         elif event.key == "q":
-    #             print("[Key] 退出图表")
+    #             logger.info("[Key] 退出图表")
     #             plt.close(fig)
     #         elif event.key == "n":
-    #             print("[Key] 下一个概念")
+    #             logger.info("[Key] 下一个概念")
     #             if concepts:
     #                 self._call_concept_top10_win(code, concepts[0])
     #         elif event.key == "escape":
-    #             print("[Key] ESC 按下，关闭图表并退出")
+    #             logger.info("[Key] ESC 按下，关闭图表并退出")
     #             plt.close(fig)
     #             try:
     #                 del self._figs_opened[code]
@@ -8453,7 +8406,7 @@ class StockMonitorApp(tk.Tk):
                         win.focus_force()
 
             except Exception as e:
-                print("窗口状态检查失败：", e)
+                logger.info(f"窗口状态检查失败： {e}")
 
             # --- 恢复 Canvas 滚动位置 ---
             if hasattr(win, "_canvas_top10"):
@@ -8468,7 +8421,7 @@ class StockMonitorApp(tk.Tk):
                 #     # 2. 稍微延迟再聚焦 canvas，防止系统阻止焦点抢占
                 #     win.after(100, lambda: canvas.focus_set())
                 # except Exception as e:
-                #     print("焦点设置失败：", e)
+                #     logger.info("焦点设置失败：", e)
 
     def _on_label_double_click(self, code, idx):
         """
@@ -8486,17 +8439,17 @@ class StockMonitorApp(tk.Tk):
 
             # ---------------- 回退逻辑 ----------------
             if not concept_name:
-                # print(f"[Info] 未从 _label_widgets 获取到概念，尝试通过 {code} 自动识别强势概念。")
+                # logger.info(f"[Info] 未从 _label_widgets 获取到概念，尝试通过 {code} 自动识别强势概念。")
                 try:
                     top_concepts = self.get_following_concepts_by_correlation(code, top_n=1)
                     if top_concepts:
                         concept_name = top_concepts[0][0]
-                        print(f"自动识别强势概念：{concept_name}")
+                        logger.info(f"自动识别强势概念：{concept_name}")
                     else:
                         messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
                         return
                 except Exception as e:
-                    print(f"[Error] 回退获取概念失败：{e}")
+                    logger.info(f"[Error] 回退获取概念失败：{e}")
                     traceback.print_exc()
                     messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
                     return
@@ -8528,7 +8481,7 @@ class StockMonitorApp(tk.Tk):
                             win.focus_force()
 
                 except Exception as e:
-                    print("窗口状态检查失败：", e)
+                    logger.info(f"窗口状态检查失败： {e}")
 
                 # --- 恢复 Canvas 滚动位置 ---
                 if hasattr(win, "_canvas_top10"):
@@ -8538,7 +8491,7 @@ class StockMonitorApp(tk.Tk):
                     canvas.yview_moveto(yview[0])
 
         except Exception as e:
-            print("获取概念详情失败：", e)
+            logger.info(f"获取概念详情失败：{e}")
             traceback.print_exc()
 
 
@@ -8555,45 +8508,45 @@ class StockMonitorApp(tk.Tk):
             # ---------------- 原逻辑 ----------------
             if hasattr(self, "_label_widgets"):
                 t1 = time.time()
-                print(f"[DEBUG] 开始访问 _label_widgets，len={len(self._label_widgets)}")
+                logger.info(f"[DEBUG] 开始访问 _label_widgets，len={len(self._label_widgets)}")
                 try:
                     concept_name = getattr(self._label_widgets[idx], "_concept", None)
                 except Exception as e:
-                    print(f"[DEBUG] 获取 _concept 失败 idx={idx}: {e}")
+                    logger.info(f"[DEBUG] 获取 _concept 失败 idx={idx}: {e}")
                 t2 = time.time()
-                print(f"[DEBUG] _label_widgets 访问耗时: {(t2-t1)*1000:.2f} ms")
+                logger.info(f"[DEBUG] _label_widgets 访问耗时: {(t2-t1)*1000:.2f} ms")
 
             # ---------------- 回退逻辑 ----------------
             if not concept_name:
                 t3 = time.time()
-                print(f"[DEBUG] 回退逻辑开始，通过 code={code} 获取概念")
+                logger.info(f"[DEBUG] 回退逻辑开始，通过 code={code} 获取概念")
                 try:
                     top_concepts = self.get_following_concepts_by_correlation(code, top_n=1)
                     if top_concepts:
                         concept_name = top_concepts[0][0]
-                        print(f"[DEBUG] 自动识别强势概念：{concept_name}")
+                        logger.info(f"[DEBUG] 自动识别强势概念：{concept_name}")
                     else:
                         messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
                         return
                 except Exception as e:
-                    print(f"[ERROR] 回退获取概念失败：{e}")
+                    logger.info(f"[ERROR] 回退获取概念失败：{e}")
                     traceback.print_exc()
                     messagebox.showinfo("概念详情", f"{code} 暂无概念数据")
                     return
                 t4 = time.time()
-                print(f"[DEBUG] 回退逻辑耗时: {(t4-t3)*1000:.2f} ms")
+                logger.info(f"[DEBUG] 回退逻辑耗时: {(t4-t3)*1000:.2f} ms")
 
             # ---------------- 绘图逻辑 ----------------
             t5 = time.time()
             self.plot_following_concepts_pg(code, top_n=1)
             t6 = time.time()
-            print(f"[DEBUG] 绘图耗时: {(t6-t5)*1000:.2f} ms")
+            logger.info(f"[DEBUG] 绘图耗时: {(t6-t5)*1000:.2f} ms")
 
             # ---------------- 打开/复用 Top10 窗口 ----------------
             t7 = time.time()
             self.show_concept_top10_window(concept_name,code=code)
             t8 = time.time()
-            print(f"[DEBUG] show_concept_top10_window 耗时: {(t8-t7)*1000:.2f} ms")
+            logger.info(f"[DEBUG] show_concept_top10_window 耗时: {(t8-t7)*1000:.2f} ms")
 
             if hasattr(self, "_concept_top10_win") and self._concept_top10_win:
                 win = self._concept_top10_win
@@ -8615,7 +8568,7 @@ class StockMonitorApp(tk.Tk):
                             win.lift()
                             win.focus_force()
                 except Exception as e:
-                    print("窗口状态检查失败：", e)
+                    logger.info(f"窗口状态检查失败：{e}")
 
                 # --- 恢复 Canvas 滚动位置 ---
                 if hasattr(win, "_canvas_top10"):
@@ -8625,10 +8578,10 @@ class StockMonitorApp(tk.Tk):
                     canvas.yview_moveto(yview[0])
 
             t9 = time.time()
-            print(f"[DEBUG] _on_label_double_click 总耗时: {(t9-t0)*1000:.2f} ms")
+            logger.info(f"[DEBUG] _on_label_double_click 总耗时: {(t9-t0)*1000:.2f} ms")
 
         except Exception as e:
-            print("获取概念详情失败：", e)
+            logger.info(f"获取概念详情失败：{e}")
             traceback.print_exc()
 
 
@@ -8651,10 +8604,10 @@ class StockMonitorApp(tk.Tk):
             # text = "\n".join(concepts)
             text = f'category.str.contains("{concepts.strip()}")'
             pyperclip.copy(text)
-            print(f"已复制: {text}")
+            logger.info(f"已复制: {text}")
             # messagebox.showinfo("概念详情", f"{code} 所属概念：\n{text}")
         except Exception as e:
-            print("获取概念详情失败：", e)
+            logger.info(f"获取概念详情失败：{e}")
 
 
     def _on_label_right_click(self,code ,idx):
@@ -8739,8 +8692,8 @@ class StockMonitorApp(tk.Tk):
         # # === 测试 ===
         # expr = "(topR > 0 or (per1d > 1) and (per2d > 0)"
         # result = ensure_parentheses_balanced(expr)
-        # print("原始:", expr)
-        # print("修正:", result)
+        # logger.info("原始:", expr)
+        # logger.info("修正:", result)
 
 
         # ====== 条件清理 ======
@@ -8751,17 +8704,17 @@ class StockMonitorApp(tk.Tk):
             query = query.replace(f'and {bracket}', '')
 
         conditions = [c.strip() for c in query.split('and')]
-        # print(f'conditions {conditions}')
+        # logger.info(f'conditions {conditions}')
         valid_conditions = []
         removed_conditions = []
-        # print(f'conditions: {conditions} bracket_patterns : {bracket_patterns}')
+        # logger.info(f'conditions: {conditions} bracket_patterns : {bracket_patterns}')
         for cond in conditions:
             cond_clean = cond.lstrip('(').rstrip(')')
             # cond_clean = ensure_parentheses_balanced(cond_clean)
             if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 or cond.find('or') >= 0:
                 if not any(bp.strip('() ').strip() == cond_clean for bp in bracket_patterns):
                     ensure_cond = ensure_parentheses_balanced(cond)
-                    # print(f'cond : {cond} ensure_cond : {ensure_cond}')
+                    # logger.info(f'cond : {cond} ensure_cond : {ensure_cond}')
                     valid_conditions.append(ensure_cond)
                     continue
 
@@ -8783,26 +8736,26 @@ class StockMonitorApp(tk.Tk):
 
         # 打印剔除条件列表
         if removed_conditions:
-            # # print(f"剔除不存在的列条件: {removed_conditions}")
+            # # logger.info(f"剔除不存在的列条件: {removed_conditions}")
             unique_conditions = tuple(sorted(set(removed_conditions)))
             # 初始化缓存
             if not hasattr(self, "_printed_removed_conditions"):
                 self._printed_removed_conditions = set()
             # 只打印新的
             if unique_conditions not in self._printed_removed_conditions:
-                print(f"剔除不存在的列条件: {unique_conditions}")
+                logger.info(f"剔除不存在的列条件: {unique_conditions}")
                 self._printed_removed_conditions.add(unique_conditions)
 
         if not valid_conditions:
             self.status_var.set("没有可用的查询条件")
             return
-        # print(f'valid_conditions : {valid_conditions}')
+        # logger.info(f'valid_conditions : {valid_conditions}')
         # ====== 拼接 final_query 并检查括号 ======
         final_query = ' and '.join(f"({c})" for c in valid_conditions)
-        # print(f'final_query : {final_query}')
+        # logger.info(f'final_query : {final_query}')
         if bracket_patterns:
             final_query += ' and ' + ' and '.join(bracket_patterns)
-        # print(f'final_query : {final_query}')
+        # logger.info(f'final_query : {final_query}')
         left_count = final_query.count("(")
         right_count = final_query.count(")")
         if left_count != right_count:
@@ -8822,15 +8775,15 @@ class StockMonitorApp(tk.Tk):
             if val1.count('or') > 0 and val1.count('(') > 0:
                 if val2 :
                     query_search = f"({val1}) and {val2}"
-                    print(f'query: {query_search} ')
+                    logger.info(f'query: {query_search} ')
 
                 else:
                     query_search = f"({val1})"
-                    print(f'query: {query_search} ')
+                    logger.info(f'query: {query_search} ')
                 if removed_conditions:
                     query_search = remove_invalid_conditions(query_search, removed_conditions,showdebug=False)
-                    # print(f'query_search: {query_search} ')
-                # print(f'apply_search {query_search.count("or")} or query: {query_search} ')
+                    # logger.info(f'query_search: {query_search} ')
+                # logger.info(f'apply_search {query_search.count("or")} or query: {query_search} ')
                 df_filtered = self.df_all.query(query_search, engine=query_engine)
                 self.refresh_tree(df_filtered)
                 self.status_var2.set('')
@@ -8853,14 +8806,14 @@ class StockMonitorApp(tk.Tk):
                 self.after(500,self.refresh_tree(df_filtered))
                 # 打印剔除条件列表
                 if removed_conditions:
-                    # print(f"[剔除的条件列表] {removed_conditions}")
+                    # logger.info(f"[剔除的条件列表] {removed_conditions}")
                     # 显示到状态栏
                     self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
                     self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
                 else:
                     self.status_var2.set('')
                     self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-                print(f'final_query: {final_query}')
+                logger.info(f'final_query: {final_query}')
         except Exception as e:
             log.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")
@@ -8937,8 +8890,8 @@ class StockMonitorApp(tk.Tk):
     #     for bracket in bracket_patterns:
     #         query = query.replace(f'and {bracket}', '')
 
-    #     # print("修改后的 query:", query)
-    #     # print("提取出来的括号条件:", bracket_patterns)
+    #     # logger.info("修改后的 query:", query)
+    #     # logger.info("提取出来的括号条件:", bracket_patterns)
 
     #     # 3️⃣ 后续可以在拼接 final_query 时再组合回去
     #     # 例如:
@@ -8976,7 +8929,7 @@ class StockMonitorApp(tk.Tk):
 
     #     # 打印剔除条件列表
     #     if removed_conditions:
-    #         print(f"[剔除的条件列表] {removed_conditions}")
+    #         logger.info(f"[剔除的条件列表] {removed_conditions}")
 
     #     if not valid_conditions:
     #         self.status_var.set("没有可用的查询条件")
@@ -8984,10 +8937,10 @@ class StockMonitorApp(tk.Tk):
 
     #     # ====== 拼接 final_query 并检查括号 ======
     #     final_query = ' and '.join(f"({c})" for c in valid_conditions)
-    #     # print(f'final_query : {final_query}')
+    #     # logger.info(f'final_query : {final_query}')
     #     if bracket_patterns:
     #         final_query += ' and ' + ' and '.join(bracket_patterns)
-    #     # print(f'final_query : {final_query}')
+    #     # logger.info(f'final_query : {final_query}')
     #     left_count = final_query.count("(")
     #     right_count = final_query.count(")")
     #     if left_count != right_count:
@@ -9006,11 +8959,11 @@ class StockMonitorApp(tk.Tk):
     #         if val1.count('or') > 0 and val1.count('(') > 0:
     #             if val2 :
     #                 query_search = f"({val1}) and {val2}"
-    #                 print(f'query: {query_search} ')
+    #                 logger.info(f'query: {query_search} ')
 
     #             else:
     #                 query_search = f"({val1})"
-    #                 print(f'query: {query_search} ')
+    #                 logger.info(f'query: {query_search} ')
     #             df_filtered = self.df_all.query(query_search, engine=query_engine)
     #             self.refresh_tree(df_filtered)
     #             self.status_var2.set('')
@@ -9028,14 +8981,14 @@ class StockMonitorApp(tk.Tk):
     #             self.refresh_tree(df_filtered)
     #             # 打印剔除条件列表
     #             if removed_conditions:
-    #                 print(f"[剔除的条件列表] {removed_conditions}")
+    #                 logger.info(f"[剔除的条件列表] {removed_conditions}")
     #                 # 显示到状态栏
     #                 self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
     #                 self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
     #             else:
     #                 self.status_var2.set('')
     #                 self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-    #             print(f'final_query: {final_query}')
+    #             logger.info(f'final_query: {final_query}')
     #     except Exception as e:
     #         log.error(f"Query error: {e}")
     #         self.status_var.set(f"查询错误: {e}")
@@ -9126,7 +9079,7 @@ class StockMonitorApp(tk.Tk):
 
     #     # 打印剔除条件列表
     #     if removed_conditions:
-    #         print(f"[剔除的条件列表] {removed_conditions}")
+    #         logger.info(f"[剔除的条件列表] {removed_conditions}")
 
     #     if not valid_conditions:
     #         self.status_var.set("没有可用的查询条件")
@@ -9162,14 +9115,14 @@ class StockMonitorApp(tk.Tk):
     #         self.refresh_tree(df_filtered)
     #         # 打印剔除条件列表
     #         if removed_conditions:
-    #             print(f"[剔除的条件列表] {removed_conditions}")
+    #             logger.info(f"[剔除的条件列表] {removed_conditions}")
     #             # 显示到状态栏
     #             self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
     #             self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
     #         else:
     #             self.status_var2.set('')
     #             self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-    #         print(f'final_query: {final_query}')
+    #         logger.info(f'final_query: {final_query}')
     #     except Exception as e:
     #         log.error(f"Query error: {e}")
     #         self.status_var.set(f"查询错误: {e}")
@@ -9498,20 +9451,20 @@ class StockMonitorApp(tk.Tk):
             self.status_var.set(f"搜索框 {which} 历史中没有: {target}")
 
     def KLineMonitor_init(self):
-        # print("启动K线监控...")
+        # logger.info("启动K线监控...")
 
         # # 仅初始化一次监控对象
         # if not hasattr(self, "kline_monitor"):
         #     self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=10)
         # else:
-        #     print("监控已在运行中。")
+        #     logger.info("监控已在运行中。")
 
-        print("启动K线监控...")
+        logger.info("启动K线监控...")
         if not hasattr(self, "kline_monitor") or not getattr(self.kline_monitor, "winfo_exists", lambda: False)():
             self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=15,history3=lambda: self.search_history3)
             # self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=15,history3=self.search_history3)
         else:
-            print("监控已在运行中。")
+            logger.info("监控已在运行中。")
             # 前置窗口
             # self.kline_monitor.lift()                # 提升窗口层级
             # self.kline_monitor.attributes('-topmost', True)  # 暂时置顶
@@ -9539,7 +9492,7 @@ class StockMonitorApp(tk.Tk):
         # codew = self.current_df.index.tolist()[:50]
         block_path = tdd.get_tdx_dir_blocknew() + self.blkname
         cct.write_to_blocknew(block_path, codew,append=append,doubleFile=False,keep_last=0,dfcf=False,reappend=True)
-        print("wri ok:%s" % block_path)
+        logger.info("wri ok:%s" % block_path)
         self.status_var2.set(f"wri ok: {self.blkname} count: {len(codew)}")
         # if args.code == 'a':
         #     cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=True,reappend=True)
@@ -9688,7 +9641,7 @@ class StockMonitorApp(tk.Tk):
                 if note:
                     break
         except Exception as e:
-            print(f"[save_data_to_csv] 获取 note 失败: {e}")
+            logger.info(f"[save_data_to_csv] 获取 note 失败: {e}")
             
         # 处理 note
         if note:
@@ -9707,7 +9660,7 @@ class StockMonitorApp(tk.Tk):
         idx = file_name.find("monitor")
         status_txt = file_name[idx:]
         self.status_var2.set(f"已保存数据到 {status_txt}")
-        print(f"[save_data_to_csv] 文件已保存: {file_name}")
+        logger.info(f"[save_data_to_csv] 文件已保存: {file_name}")
 
 
     def load_data_from_csv(self):
@@ -9724,7 +9677,7 @@ class StockMonitorApp(tk.Tk):
                 self.refresh_tree(df)
                 idx =file_path.find('monitor')
                 status_txt = file_path[idx:]
-                # print(f'status_txt:{status_txt}')
+                # logger.info(f'status_txt:{status_txt}')
                 self.status_var2.set(f"已加载数据: {status_txt}")
             except Exception as e:
                 log.error(f"加载 CSV 失败: {e}")
@@ -9870,11 +9823,11 @@ class StockMonitorApp(tk.Tk):
                 continue  # 不处理当前活动窗口
 
             # 判断是否被遮挡
-            print(f'win: {win} main_win: {main_win} type: {type(main_win)}')
+            logger.info(f'win: {win} main_win: {main_win} type: {type(main_win)}')
 
             if is_window_covered_pg(win, main_win):
                 # 若被最小化，恢复
-                print(f'v.get("code"): {v.get("code")}')
+                logger.info(f'v.get("code"): {v.get("code")}')
                 if win.isMinimized():
                     win.showNormal()
 
@@ -9909,7 +9862,7 @@ class StockMonitorApp(tk.Tk):
             try:
                 # scale = get_windows_dpi_scale_factor()
                 scale = self.scale_factor
-                print(f'scale :{scale}')
+                logger.info(f'scale :{scale}')
                 if not isinstance(scale, (int, float)) or scale <= 0:
                     scale = 1.0
             except Exception as e:
@@ -9941,12 +9894,12 @@ class StockMonitorApp(tk.Tk):
                         same_name_count = count_active_window - 1
                         if count_active_window > 1:
                             # 每个叠加窗口偏移 offset_step
-                            print(f'_pg_top10_window_simple')
+                            logger.info(f'_pg_top10_window_simple')
                             x += offset_step * count_active_window
                             y += offset_step * same_name_count
 
-                    print(win.winfo_x(), win.winfo_y(), win.winfo_width(), win.winfo_height())
-                    print(scale_factor)
+                    logger.info(f"{win.winfo_x()}, {win.winfo_y()}, {win.winfo_width()}, {win.winfo_height()}")
+                    logger.info(scale_factor)
 
                     # 防止窗口位置越界
                     x, y = clamp_window_to_screens(x, y, width, height)
@@ -9979,7 +9932,7 @@ class StockMonitorApp(tk.Tk):
             try:
                 # scale = get_windows_dpi_scale_factor()
                 scale = self.scale_factor
-                print(f'scale :{scale}')
+                logger.info(f'save_window_position scale :{scale}')
                 if not isinstance(scale, (int, float)) or scale <= 0:
                     scale = 1.0
             except Exception as e:
@@ -10001,7 +9954,7 @@ class StockMonitorApp(tk.Tk):
                 file_path = os.path.join(base, f"scale{int(scale)}_{filename}")
             else:
                 file_path = WINDOW_CONFIG_FILE
-                
+            logger.info(f'save_window_position file_path scale :{file_path}')
             if os.path.exists(file_path):
                 try:
                     with open(file_path, "r", encoding="utf-8") as f:
@@ -10128,11 +10081,11 @@ class StockMonitorApp(tk.Tk):
             try:
                 # scale = get_windows_dpi_scale_factor()
                 scale = self.scale_factor
-                print(f'scale :{scale}')
+                logger.info(f'scale :{scale}')
                 if not isinstance(scale, (int, float)) or scale <= 0:
                     scale = 1.0
             except Exception as e:
-                print(f"[load_window_position_qt] 获取 DPI 缩放失败: {e}")
+                logger.info(f"[load_window_position_qt] 获取 DPI 缩放失败: {e}")
             x = y = None
             width = default_width
             height = default_height
@@ -10142,6 +10095,9 @@ class StockMonitorApp(tk.Tk):
                 file_path = os.path.join(base, f"scale{int(scale)}_{filename}")
             else:
                 file_path = WINDOW_CONFIG_FILE
+
+            logger.info(f'load_window_position_qt scale :{file_path}')
+
             # --- 从文件加载保存的窗口位置 ---
             if os.path.exists(file_path):
                 with open(file_path, "r", encoding="utf-8") as f:
@@ -10160,7 +10116,7 @@ class StockMonitorApp(tk.Tk):
                     # 防止窗口位置越界
                     x, y = clamp_window_to_screens(x, y, width, height)
 
-                    print(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
+                    logger.info(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
 
             # --- 如果没有存储位置，则居中 ---
             screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
@@ -10187,7 +10143,7 @@ class StockMonitorApp(tk.Tk):
             return width, height, x, y
 
         except Exception as e:
-            print(f"[load_window_position_qt] 加载失败: {e}")
+            logger.info(f"[load_window_position_qt] 加载失败: {e}")
             traceback.print_exc()
             # 默认居中
             screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
@@ -10207,7 +10163,7 @@ class StockMonitorApp(tk.Tk):
     #             if not isinstance(scale, (int, float)) or scale <= 0:
     #                 scale = 1.0
     #         except Exception as e:
-    #             print(f"[load_window_position_qt] 获取 DPI 缩放失败: {e}")
+    #             logger.info(f"[load_window_position_qt] 获取 DPI 缩放失败: {e}")
 
     #         x = y = None
     #         width = default_width
@@ -10253,11 +10209,11 @@ class StockMonitorApp(tk.Tk):
 
     #         # ✅ 设置窗口位置
     #         win.setGeometry(x, y, width, height)
-    #         print(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
+    #         logger.info(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
     #         return width, height, x, y
 
     #     except Exception as e:
-    #         print(f"[load_window_position_qt] 加载失败: {e}")
+    #         logger.info(f"[load_window_position_qt] 加载失败: {e}")
     #         # 默认居中
     #         traceback.print_exc()
     #         screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
@@ -10344,7 +10300,7 @@ class StockMonitorApp(tk.Tk):
             try:
                 # scale = get_windows_dpi_scale_factor()
                 scale = self.scale_factor
-                print(f'scale :{scale}')
+                logger.info(f'save_window_position_qt scale :{scale}')
                 if not isinstance(scale, (int, float)) or scale <= 0:
                     scale = 1.0
             except Exception as e:
@@ -10358,7 +10314,7 @@ class StockMonitorApp(tk.Tk):
                 # "width": int(geom.width()),
                 # # "height": int(geom.height() / scale)
                 # "height": int(geom.height())
-                "width": max(300, min(int(geom.width()), 500)),
+                "width": max(200, min(int(geom.width()), 500)),
                 "height": max(300, min(int(geom.height()), 450))
             }
 
@@ -10369,6 +10325,7 @@ class StockMonitorApp(tk.Tk):
                 file_path = os.path.join(base, f"scale{int(scale)}_{filename}")
             else:
                 file_path = WINDOW_CONFIG_FILE
+            logger.info(f'save_window_position_qt file_path scale :{file_path}')
 
             if os.path.exists(file_path):
                 try:
@@ -10459,7 +10416,7 @@ class StockMonitorApp(tk.Tk):
                             # 没有 on_close 的就直接销毁
                             win.destroy()
                     except Exception as e:
-                        print(f"关闭窗口 {key} 出错: {e}")
+                        logger.info(f"关闭窗口 {key} 出错: {e}")
             self._pg_top10_window_simple.clear()
 
         # --- 关闭所有 concept top10 窗口 (PyQt 版) ---
@@ -10475,7 +10432,7 @@ class StockMonitorApp(tk.Tk):
                             # 没有 on_close 的就直接关闭窗口
                             win.close()  # QWidget 的关闭方法
                     except Exception as e:
-                        print(f"关闭窗口 {key} 出错: {e}")
+                        logger.info(f"关闭窗口 {key} 出错: {e}")
             self._pg_windows.clear()
 
         self.save_window_position(self,"main_window")
@@ -10490,7 +10447,7 @@ class StockMonitorApp(tk.Tk):
         # try:
         #     self.manager.shutdown()
         # except Exception as e: 
-        #     print(f'manager.shutdown : {e}')
+        #     logger.info(f'manager.shutdown : {e}')
         # plt.close('all')
         self.destroy()
 
@@ -10679,7 +10636,7 @@ class QueryHistoryManager:
                 self.on_test_click()
             # 自动触发查询
             else:
-                print(f"[on_right_click] 未找到6位数字代码: {clipboard_text}")
+                logger.info(f"[on_right_click] 未找到6位数字代码: {clipboard_text}")
         else:
             event.widget.delete(0, tk.END)
             event.widget.insert(0, clipboard_text)
@@ -10801,14 +10758,14 @@ class QueryHistoryManager:
     #                 "确认保存",
     #                 f"搜索历史发生较大变动（{delta1 + delta2} 条），是否继续保存？"
     #             ):
-    #                 print("❌ 用户取消保存搜索历史")
+    #                 logger.info("❌ 用户取消保存搜索历史")
     #                 return
 
     #         # ---------- 写回文件 ----------
     #         with open(self.history_file, "w", encoding="utf-8") as f:
     #             json.dump(merged_data, f, ensure_ascii=False, indent=2)
 
-    #         print(f"✅ 搜索历史已保存 "
+    #         logger.info(f"✅ 搜索历史已保存 "
     #               f"(history1: {len(merged_data['history1'])} 条 / "
     #               f"history2: {len(merged_data['history2'])} 条)，starred 已统一为整数")
 
@@ -10899,14 +10856,14 @@ class QueryHistoryManager:
                     "确认保存",
                     f"搜索历史发生较大变动（{delta1 + delta2} 条），是否继续保存？"
                 ):
-                    print("❌ 用户取消保存搜索历史")
+                    logger.info("❌ 用户取消保存搜索历史")
                     return
 
             # ---------- 写回文件 ----------
             # with open(self.history_file, "w", encoding="utf-8") as f:
             #     json.dump(merged_data, f, ensure_ascii=False, indent=2)
 
-            # print(f"✅ 搜索历史已保存 "
+            # logger.info(f"✅ 搜索历史已保存 "
             #       f"(history1: {len(merged_data['history1'])} 条 / "
             #       f"history2: {len(merged_data['history2'])} 条)，starred 已统一为整数")
             # ---------- 写回文件 ----------
@@ -10918,7 +10875,7 @@ class QueryHistoryManager:
                 }, f, ensure_ascii=False, indent=2)
 
                     # "history3": self.history3,  # ✅ 单独保存，不参与合并
-            print(f"✅ 搜索历史已保存 "
+            logger.info(f"✅ 搜索历史已保存 "
                   f"(h1: {len(merged_data['history1'])} / "
                   f"h2: {len(merged_data['history2'])} / "
                   f"h3: {len(merged_data['history3'])})")
@@ -10979,7 +10936,7 @@ class QueryHistoryManager:
                             {"history1": raw_h1, "history2": raw_h2, "history3": raw_h3},
                             f, ensure_ascii=False, indent=2
                         )
-                    print("✅ 自动升级 search_history.json，starred 字段格式已统一")
+                    logger.info("✅ 自动升级 search_history.json，starred 字段格式已统一")
 
             except Exception as e:
                 messagebox.showerror("错误", f"加载搜索历史失败: {e}")
@@ -11039,7 +10996,7 @@ class QueryHistoryManager:
                 if upgraded:
                     with open(self.history_file, "w", encoding="utf-8") as f:
                         json.dump({"history1": raw_h1, "history2": raw_h2}, f, ensure_ascii=False, indent=2)
-                    print("✅ 已自动升级 search_history.json 的 starred 字段为整数格式")
+                    logger.info("✅ 已自动升级 search_history.json 的 starred 字段为整数格式")
 
             except Exception as e:
                 messagebox.showerror("错误", f"加载搜索历史失败: {e}")
@@ -11090,7 +11047,7 @@ class QueryHistoryManager:
         elif sel == "history3":
             self.current_history = self.history3
             self.current_key = "history3"
-        print(f"[SWITCH] 当前分组切换到：{sel}")
+        logger.info(f"[SWITCH] 当前分组切换到：{sel}")
         self.refresh_tree()
 
 
@@ -11125,9 +11082,9 @@ class QueryHistoryManager:
                         self.sync_history_callback(search_history3=self.history3)
                         self.refresh_tree()
                     except Exception as e:
-                        print(f"[警告] 同步 search_history3 失败: {e}")
+                        logger.info(f"[警告] 同步 search_history3 失败: {e}")
 
-                print(f"✅ 已将 [{query}] 置顶 history3")
+                logger.info(f"✅ 已将 [{query}] 置顶 history3")
 
             # ✅ 设置全局标志（主窗口 sync_history 会读取）
             self._just_edited_query = (old_query, new_query)
@@ -11226,7 +11183,7 @@ class QueryHistoryManager:
                 info = win32api.GetMonitorInfo(handle_tuple[0])
                 monitors.append(info["Monitor"])  # (left, top, right, bottom)
         except Exception as e:
-            print(f"[WARN] 获取显示器信息失败: {e}")
+            logger.info(f"[WARN] 获取显示器信息失败: {e}")
 
         # 如果检测不到，使用主屏幕尺寸
         if not monitors:
@@ -11252,13 +11209,13 @@ class QueryHistoryManager:
             # 防止超出边界
             x = max(left, min(x, right - win_width))
             y = max(top, min(y, bottom - win_height))
-            print(f"✅ 命中屏幕 ({left},{top},{right},{bottom}) scale={scale:.2f} → ({x},{y})")
+            logger.info(f"✅ 命中屏幕 ({left},{top},{right},{bottom}) scale={scale:.2f} → ({x},{y})")
         else:
             # 未命中任何屏幕则居中主屏
             main_left, main_top, main_right, main_bottom = monitors[0]
             x = main_left + (main_right - main_left - win_width) // 2
             y = main_top + (main_bottom - main_top - win_height) // 2
-            print(f"⚠️ 未命中屏幕, 使用主屏居中 scale={scale:.2f} → ({x},{y})")
+            logger.info(f"⚠️ 未命中屏幕, 使用主屏居中 scale={scale:.2f} → ({x},{y})")
 
         return int(x), int(y)
 
@@ -11281,7 +11238,7 @@ class QueryHistoryManager:
 
         x, y = self.get_centered_window_position_query(parent, win_width, win_height)
         dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
-        print(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+        logger.info(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
 
         result = {"value": None}
 
@@ -11453,9 +11410,9 @@ class QueryHistoryManager:
                     self.sync_history_callback(search_history3=self.history3)
                     self.refresh_tree()
                 except Exception as e:
-                    print(f"[警告] 同步 search_history3 失败: {e}")
+                    logger.info(f"[警告] 同步 search_history3 失败: {e}")
 
-            print(f"✅ 已将 [{query}] 置顶 history3")
+            logger.info(f"✅ 已将 [{query}] 置顶 history3")
 
 
     # ========== 右键菜单 ==========
@@ -11532,7 +11489,7 @@ class QueryHistoryManager:
                     # self.sync_history_callback(search_history3=self.history3, current_key = history_key)
 
             except Exception as e:
-                print(f"[SYNC ERR] {e}")
+                logger.info(f"[SYNC ERR] {e}")
 
         # --- 刷新 UI，但防止误触 switch ---
         suppress_state = getattr(self, "_suppress_switch", False)
@@ -11576,7 +11533,7 @@ class QueryHistoryManager:
 
         self._suppress_switch = False
 
-        print(f"[DEL] 从 {history_key} 删除 {record.get('query')}")
+        logger.info(f"[DEL] 从 {history_key} 删除 {record.get('query')}")
 
 
     def undo_delete(self, event=None):
@@ -11880,7 +11837,7 @@ class ColumnSetManager(tk.Toplevel):
                 # self.deiconify()
             except Exception as e:
                 traceback.print_exc()
-                print("⚠️ 自动应用列组合失败：", e)
+                logger.info(f"⚠️ 自动应用列组合失败：{e}")
 
     def _build_ui(self):
         # ---------- 高 DPI 初始化 ----------
@@ -11988,7 +11945,7 @@ class ColumnSetManager(tk.Toplevel):
                 self.set_current_set()
             except Exception as e:
                 traceback.print_exc()
-                print("⚠️ 自动应用列组合失败：", e)
+                logger.info(f"⚠️ 自动应用列组合失败：{e}")
 
 
 
@@ -12002,16 +11959,16 @@ class ColumnSetManager(tk.Toplevel):
             scale_factor = self.scale_factor
         else:
             self.scale_factor = scale_factor
-        print(f'_apply_dpi_scaling_Column scale_factor : {scale_factor}')
+        logger.info(f'_apply_dpi_scaling_Column scale_factor : {scale_factor}')
 
         if scale_factor > 1.0:
             # Tkinter 'scaling' 值 = (系统 DPI / 72 DPI)
-            print(f'Column scale_factor apply: {scale_factor} {self.scale_factor}')
+            logger.info(f'Column scale_factor apply: {scale_factor} {self.scale_factor}')
             tk_scaling_value = (scale_factor * DEFAULT_DPI) / 72.0 
             # 这一步会放大所有基于像素定义的组件尺寸和默认字体大小
             self.tk.call('tk', 'scaling', tk_scaling_value)
 
-            print(f"✅ Column DPI 自动缩放应用于 {scale_factor}x ({tk_scaling_value})")
+            logger.info(f"✅ Column DPI 自动缩放应用于 {scale_factor}x ({tk_scaling_value})")
             
             # 3. 💥 关键：配置 Treeview 样式以统一处理行高和字体
             style = ttk.Style(self)
@@ -12039,7 +11996,7 @@ class ColumnSetManager(tk.Toplevel):
                 font=default_font
             )
             
-            print(f"✅ Column DPI 自动缩放应用于 {scale_factor}x，Treeview 行高设置为 {scaled_row_height}")
+            logger.info(f"✅ Column DPI 自动缩放应用于 {scale_factor}x，Treeview 行高设置为 {scaled_row_height}")
 
     def open_column_manager_editor(self):
         """切换显示/隐藏"""
@@ -12107,7 +12064,7 @@ class ColumnSetManager(tk.Toplevel):
 
         # filter
         search = (self.search_var.get() or "").lower()
-        # print(f'search : {search}')
+        # logger.info(f'search : {search}')
         if search == "":
             filtered = [c for c in self.all_columns if self.default_filter(c)]
         elif search == "no" or search == "other":
@@ -12139,7 +12096,7 @@ class ColumnSetManager(tk.Toplevel):
             chk.grid(row=i // cols_per_row, column=i % cols_per_row, sticky="w", padx=4, pady=3)
 
         # 刷新当前组合标签显示
-        # print(f'update_grid')
+        # logger.info(f'update_grid')
         self.refresh_current_tags()
 
     def _on_check_toggle(self, col, state):
@@ -12149,7 +12106,7 @@ class ColumnSetManager(tk.Toplevel):
         else:
             if col in self.current_set:
                 self.current_set.remove(col)
-        # print(f'_on_check_toggle')
+        # logger.info(f'_on_check_toggle')
         self.refresh_current_tags()
 
     # ---------------------------
@@ -12203,7 +12160,7 @@ class ColumnSetManager(tk.Toplevel):
         total_height = y + row_h + 4
         try:
             self.current_frame.config(height=total_height)
-            # print(f'total_height:{total_height}')
+            # logger.info(f'total_height:{total_height}')
 
         except Exception:
             pass
@@ -12232,7 +12189,7 @@ class ColumnSetManager(tk.Toplevel):
         except Exception:
             pass
 
-        print(f"_start_drag {idx}")
+        logger.info(f"_start_drag {idx}")
 
 
     def _on_drag(self, event):
@@ -12343,9 +12300,9 @@ class ColumnSetManager(tk.Toplevel):
                     new_idx -= 1  # 因 pop 导致右移
                 self.current_set.insert(new_idx, item)
             except Exception as e:
-                print("Reorder error:", e)
+                logger.info(f"Reorder error:{e}")
 
-        # print(f"drag: {orig_idx} → {new_idx}")
+        # logger.info(f"drag: {orig_idx} → {new_idx}")
 
         # --- 清理 & 刷新 ---
         self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
@@ -12365,7 +12322,7 @@ class ColumnSetManager(tk.Toplevel):
     #     for info in getattr(self, "_tag_widgets", []):
     #         if info["widget"] == widget:
     #             self._drag_data["idx"] = info["idx"]
-    #             print(f'_start_drag')
+    #             logger.info(f'_start_drag')
     #             break
 
     # def _on_drag(self, event):
@@ -12430,9 +12387,9 @@ class ColumnSetManager(tk.Toplevel):
     #             item = self.current_set.pop(orig_idx)
     #             self.current_set.insert(new_idx, item)
     #         except Exception as e:
-    #             print("Reorder error:", e)
+    #             logger.info("Reorder error:", e)
 
-    #     # print(f"drag: {orig_idx} -> {new_idx}")
+    #     # logger.info(f"drag: {orig_idx} -> {new_idx}")
 
     #     # 重置 & 刷新
     #     self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
@@ -12484,7 +12441,7 @@ class ColumnSetManager(tk.Toplevel):
     #     win_width, win_height = 300, 120
     #     x, y = self.get_centered_window_position(parent, win_width, win_height)
     #     # dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
-    #     print(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+    #     logger.info(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
     #     dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
     #     result = {"value": None}
 
@@ -12528,7 +12485,7 @@ class ColumnSetManager(tk.Toplevel):
 
         # --- 居中定位 ---
         x, y = self.get_centered_window_position(parent, win_width, win_height)
-        print(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+        logger.info(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
         dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
 
         result = {"value": None}
@@ -12607,7 +12564,7 @@ class ColumnSetManager(tk.Toplevel):
         if hasattr(self, "lbl_current_set"):
             self.lbl_current_set.config(text=f"当前选中: {self.current_set_name}")
         else:
-            print(f"选中组合: {self.current_set_name}")
+            logger.info(f"选中组合: {self.current_set_name}")
 
 
     def load_selected_set(self):
@@ -12691,7 +12648,7 @@ class ColumnSetManager(tk.Toplevel):
 
     def restore_default(self):
         self.current_set = list(self.default_cols)
-        # print(f'restore_default self.default_cols : {self.default_cols}')
+        # logger.info(f'restore_default self.default_cols : {self.default_cols}')
         # sync checkboxes
         for col, var in self._chk_vars.items():
             var.set(col in self.current_set)
@@ -13178,22 +13135,22 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
     # diff_idx_strength = df_vect.index[mask_strength]
 
     # if len(diff_idx_strength) > 0:
-    #     print("signal_strength 不一致，行 code:", list(diff_idx_strength))
-    #     print(df_vect.loc[diff_idx_strength, ['name','signal_strength']])
-    #     print(df_orig.loc[diff_idx_strength, ['name','signal_strength']])
+    #     logger.info("signal_strength 不一致，行 code:", list(diff_idx_strength))
+    #     logger.info(df_vect.loc[diff_idx_strength, ['name','signal_strength']])
+    #     logger.info(df_orig.loc[diff_idx_strength, ['name','signal_strength']])
     # else:
-    #     print("signal_strength 一致 ✅")
+    #     logger.info("signal_strength 一致 ✅")
 
     # # --- 比较 signal ---
     # mask_signal = df_vect['signal'] != df_orig['signal']
     # diff_idx_signal = df_vect.index[mask_signal]
 
     # if len(diff_idx_signal) > 0:
-    #     print("signal 不一致，行 code:", list(diff_idx_signal))
-    #     print(df_vect.loc[diff_idx_signal, ['name','signal']])
-    #     print(df_orig.loc[diff_idx_signal, ['name','signal']])
+    #     logger.info("signal 不一致，行 code:", list(diff_idx_signal))
+    #     logger.info(df_vect.loc[diff_idx_signal, ['name','signal']])
+    #     logger.info(df_orig.loc[diff_idx_signal, ['name','signal']])
     # else:
-    #     print("signal 一致 ✅")
+    #     logger.info("signal 一致 ✅")
 
     # import ipdb;ipdb.set_trace()
 
@@ -13307,7 +13264,7 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
 
 
     # signals = df[df['signal'].isin(['BUY_STRONG', 'BUY_NORMAL', 'SELL'])]
-    # print(signals[['close', 'macd', 'rsi', 'kdj_j', 'signal_strength', 'signal']].tail(10))
+    # logger.info(signals[['close', 'macd', 'rsi', 'kdj_j', 'signal_strength', 'signal']].tail(10))
     # 情绪判定
     # df.loc[df["vchange"] > 20, "emotion"] = "乐观"
     # df.loc[df["vchange"] < -20, "emotion"] = "悲观"
@@ -13548,7 +13505,7 @@ class KLineMonitor(tk.Toplevel):
         #             if self.last_query:
         #                 self.search_var.set(self.last_query)
         #     except Exception as e:
-        #         print(f"读取 last_query.json 出错: {e}")
+        #         logger.info(f"读取 last_query.json 出错: {e}")
         # 加载窗口位置（可选）
         try:
             self.master.load_window_position(self, "KLineMonitor", default_width=760, default_height=460)
@@ -13693,7 +13650,7 @@ class KLineMonitor(tk.Toplevel):
     #         try:
     #             self.search_combo3["values"] = list(self.history3()) if callable(self.history3) else list(self.history3)
     #         except Exception as e:
-    #             print(f"[refresh_search_combo3] 刷新失败: {e}")
+    #             logger.info(f"[refresh_search_combo3] 刷新失败: {e}")
     def refresh_search_combo3(self):
         """刷新 KLine 搜索框的历史下拉值，并自动更新当前选中项"""
         if hasattr(self, "search_combo3") and self.search_combo3.winfo_exists():
@@ -13711,7 +13668,7 @@ class KLineMonitor(tk.Toplevel):
                 else:
                     self.search_var.set("")
             except Exception as e:
-                print(f"[refresh_search_combo3] 刷新失败: {e}")
+                logger.info(f"[refresh_search_combo3] 刷新失败: {e}")
 
 
 
@@ -13721,7 +13678,7 @@ class KLineMonitor(tk.Toplevel):
     #     new_note = askstring_at_parent_single(self, "修改备注", "请输入新的备注：", initialvalue=query)
     #     if new_note is not None:
     #         self.search_var.set(new_note)
-    #         print(f'set self.search_var : {new_note}')
+    #         logger.info(f'set self.search_var : {new_note}')
     #         self.history3()[0] = new_note
     #         self.search_code_status()
 
@@ -13731,7 +13688,7 @@ class KLineMonitor(tk.Toplevel):
         new_note = askstring_at_parent_single(self, "修改备注", "请输入新的备注：", initialvalue=query)
         if new_note is not None:
             self.search_var.set(new_note)
-            print(f'set self.search_var : {new_note}')
+            logger.info(f'set self.search_var : {new_note}')
 
             # ✅ 修改底层数据（是引用，直接生效）
             self.history3()[0] = new_note
@@ -13859,7 +13816,7 @@ class KLineMonitor(tk.Toplevel):
                     return True
             toast_message(self.master, f"{code} is not Found")
         except Exception as e:
-            print(f"[tree_scroll_to_code] Error: {e}")
+            logger.info(f"[tree_scroll_to_code] Error: {e}")
             return False
 
         return False  # 未找到
@@ -13893,7 +13850,7 @@ class KLineMonitor(tk.Toplevel):
 
             self.click_count += 1
             if self.click_count % 10 == 0:
-                print(f"[Monitor] 点击了 {stock_code}")
+                logger.info(f"[Monitor] 点击了 {stock_code}")
 
             if hasattr(self.master, "on_single_click"):
                 send_tdx_Key = (getattr(self.master, "select_code", None) != stock_code)
@@ -13902,7 +13859,7 @@ class KLineMonitor(tk.Toplevel):
                 if send_tdx_Key and stock_code:
                     self.master.sender.send(stock_code)
         except Exception as e:
-            print(f"[Monitor] 点击处理错误: {e}")
+            logger.info(f"[Monitor] 点击处理错误: {e}")
 
 
     
@@ -13933,7 +13890,7 @@ class KLineMonitor(tk.Toplevel):
 
         except Exception as e:
             import traceback
-            print("[Monitor] double_click错误:", e)
+            logger.info(f"[Monitor] double_click错误:{e}")
             traceback.print_exc()
 
     def on_tree_kline_monitor_right_click(self, event=None, item_id=None):
@@ -13964,7 +13921,7 @@ class KLineMonitor(tk.Toplevel):
                     self.master.status_var2.set(f"发送失败: {stock_code}")
 
         except Exception as e:
-            print(f"[Monitor] 点击处理错误: {e}")
+            logger.info(f"[Monitor] 点击处理错误: {e}")
 
     # ---- 上下键选择 ----
     def on_key_select(self, event):
@@ -13988,7 +13945,7 @@ class KLineMonitor(tk.Toplevel):
             self.tree.see(item_id)
             self.on_tree_kline_monitor_click(item_id=item_id)
         except Exception as e:
-            print("[Monitor] 键盘选择错误:", e)
+            logger.info(f"[Monitor] 键盘选择错误:{e}")
         return "break"
 
     # ---- 列排序 ----
@@ -14005,7 +13962,7 @@ class KLineMonitor(tk.Toplevel):
                 self.tree.move(k, '', index)
             self.tree.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
         except Exception as e:
-            print("[Monitor] 排序错误:", e)
+            logger.info(f"[Monitor] 排序错误:{e}")
 
     # ---- 刷新循环 ----
     # def refresh_loop(self):
@@ -14017,7 +13974,7 @@ class KLineMonitor(tk.Toplevel):
     #                 self.df_cache = df.copy()
     #                 self.after(0, self.apply_filters)
     #         except Exception as e:
-    #             print("[Monitor] 更新错误:", e)
+    #             logger.info("[Monitor] 更新错误:", e)
     #         time.sleep(self.refresh_interval)
     def refresh_loop(self):
         # --- 启动时先跑一次数据 ---
@@ -14028,7 +13985,7 @@ class KLineMonitor(tk.Toplevel):
                 self.df_cache = df.copy()
                 self.after(0, self.apply_filters)
         except Exception as e:
-            print("[Monitor] 初次更新错误:", e)
+            logger.info(f"[Monitor] 初次更新错误:{e}")
 
         # --- 循环刷新 ---
         while not self.stop_event.is_set():
@@ -14043,7 +14000,7 @@ class KLineMonitor(tk.Toplevel):
                     # 非工作时间休眠更久，减少CPU消耗
                     time.sleep(10)
             except Exception as e:
-                print("[Monitor] 更新错误:", e)
+                logger.info(f"[Monitor] 更新错误:{e}")
             finally:
                 time.sleep(self.refresh_interval)
 
@@ -14262,7 +14219,7 @@ class KLineMonitor(tk.Toplevel):
                 query = query_text
                 if query.count('or') > 0 and query.count('(') > 0:
                     query_search = f"({query})"
-                    print(f'apply_filters {query.count("or")} OR query: {query_search} ')
+                    logger.info(f'apply_filters {query.count("or")} OR query: {query_search} ')
                     query_engine = 'numexpr'
                     # if any('index.' in c.lower() for c in query):
                     if any('index.' in c.lower() for c in query) or ('.str' in query and '|' in query):
@@ -14276,17 +14233,17 @@ class KLineMonitor(tk.Toplevel):
                         query = query.replace(f'and {bracket}', '')
 
                     conditions = [c.strip() for c in query.split('and')]
-                    # print(f'conditions {conditions}')
+                    # logger.info(f'conditions {conditions}')
                     valid_conditions = []
                     removed_conditions = []
-                    # print(f'conditions: {conditions} bracket_patterns : {bracket_patterns}')
+                    # logger.info(f'conditions: {conditions} bracket_patterns : {bracket_patterns}')
                     for cond in conditions:
                         cond_clean = cond.lstrip('(').rstrip(')')
                         # cond_clean = ensure_parentheses_balanced(cond_clean)
                         if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 or cond.find('or') >= 0:
                             if not any(bp.strip('() ').strip() == cond_clean for bp in bracket_patterns):
                                 ensure_cond = ensure_parentheses_balanced(cond)
-                                # print(f'cond : {cond} ensure_cond : {ensure_cond}')
+                                # logger.info(f'cond : {cond} ensure_cond : {ensure_cond}')
                                 valid_conditions.append(ensure_cond)
                                 continue
 
@@ -14308,26 +14265,26 @@ class KLineMonitor(tk.Toplevel):
 
                     # 打印剔除条件列表
                     if removed_conditions:
-                        # print(f"剔除不存在的列条件: {removed_conditions}")
+                        # logger.info(f"剔除不存在的列条件: {removed_conditions}")
                         unique_conditions = tuple(sorted(set(removed_conditions)))
                         # 初始化缓存
                         if not hasattr(self, "_printed_removed_conditions"):
                             self._printed_removed_conditions = set()
                         # 只打印新的
                         if unique_conditions not in self._printed_removed_conditions:
-                            print(f"剔除不存在的列条件: {unique_conditions}")
+                            logger.info(f"剔除不存在的列条件: {unique_conditions}")
                             self._printed_removed_conditions.add(unique_conditions)
 
                     if not valid_conditions:
                         self.status_var.set("没有可用的查询条件")
                         return
-                    # print(f'valid_conditions : {valid_conditions}')
+                    # logger.info(f'valid_conditions : {valid_conditions}')
                     # ====== 拼接 final_query 并检查括号 ======
                     final_query = ' and '.join(f"({c})" for c in valid_conditions)
-                    # print(f'final_query : {final_query}')
+                    # logger.info(f'final_query : {final_query}')
                     if bracket_patterns:
                         final_query += ' and ' + ' and '.join(bracket_patterns)
-                    # print(f'final_query : {final_query}')
+                    # logger.info(f'final_query : {final_query}')
                     left_count = final_query.count("(")
                     right_count = final_query.count(")")
                     if left_count != right_count:
@@ -14368,7 +14325,7 @@ class KLineMonitor(tk.Toplevel):
                         df = df.query(final_query, engine=query_engine)
 
             except Exception as e:
-                print(f"[apply_filters] 查询错误: {e}")
+                logger.info(f"[apply_filters] 查询错误: {e}")
 
         # --- 3️⃣ 更新表格 ---
         self.update_table(df)
@@ -14389,7 +14346,7 @@ class KLineMonitor(tk.Toplevel):
         #         with open("last_query.json", "w", encoding="utf-8") as f:
         #             json.dump({"last_query": self.last_query}, f, ensure_ascii=False, indent=2)
         # except Exception as e:
-        #     print(f"保存 last_query.json 出错: {e}")
+        #     logger.info(f"保存 last_query.json 出错: {e}")
 
         # self.destroy()
         # if hasattr(self.master, "kline_monitor"):
@@ -14399,7 +14356,7 @@ class KLineMonitor(tk.Toplevel):
         # 判断是否需要销毁或隐藏
         if getattr(self, "df_cache", None) is None or len(getattr(self.df_cache, "index", [])) == 0:
             # 没有数据 => 直接销毁
-            print("[KLineMonitor] 无数据，销毁窗口。")
+            logger.info("[KLineMonitor] 无数据，销毁窗口。")
             try:
                 self.destroy()
             except Exception:
@@ -14408,7 +14365,7 @@ class KLineMonitor(tk.Toplevel):
                 self.master.kline_monitor = None
         else:
             # 有数据 => 隐藏窗口，保留状态
-            print("[KLineMonitor] 有数据，隐藏窗口。")
+            logger.info("[KLineMonitor] 有数据，隐藏窗口。")
             try:
                 self.withdraw()
             except Exception:
@@ -14433,6 +14390,16 @@ def test_single_thread():
     fetch_and_process(shared_dict, q, blkname="boll", flag=flag)
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Monitor Init Script")
+    parser.add_argument(
+        "--log",
+        type=str,
+        default="INFO",
+        help="日志等级，可选：DEBUG, INFO, WARNING, ERROR, CRITICAL"
+    )
+    return parser.parse_args()
+
 
 # ------------------ 主程序入口 ------------------ #
 if __name__ == "__main__":
@@ -14452,7 +14419,7 @@ if __name__ == "__main__":
 
     # logger = init_logging(log_file='monitor_tk.log',redirect_print=True)
 
-    # print("这是 print 输出")
+    # logger.info("这是 print 输出")
     # logger.info("这是 logger 输出")
 
     # # 测试异常
@@ -14464,6 +14431,15 @@ if __name__ == "__main__":
     # 测试未捕获异常
     # 直接触发
     # 1/0
+
+    args = parse_args()  # 解析命令行参数
+    level = getattr(logging, args.log.upper(), logging.INFO)
+
+    # 直接用自定义的 init_logging，传入日志等级
+    logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=level)
+    
+
+    logger.info("程序启动…")
 
     app = StockMonitorApp()
     if cct.isMac():

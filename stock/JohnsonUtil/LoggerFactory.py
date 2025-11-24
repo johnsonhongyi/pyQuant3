@@ -142,7 +142,7 @@ def getLogger(name=None,logpath=None,writemode='a',show_detail=True):
         ch_formatter = logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s");
     else:
         handler_logformat = logging.Formatter("(%(funcName)s:%(lineno)s): %(message)s")
-        ch_formatter = logging.Formatter("%(funcName)s:%(lineno)s): %(message)s");
+        ch_formatter = logging.Formatter("(%(funcName)s:%(lineno)s): %(message)s");
     
     handler.setFormatter(handler_logformat)
     ch.setFormatter(ch_formatter)
