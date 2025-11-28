@@ -41,6 +41,9 @@ alerts_history = []
 alert_window = None
 alert_tree = None
 alert_moniter_bring_front = False
+# 报警中心排序记录
+alert_sort_column = None
+alert_sort_reverse = False
 
 root = None
 stock_tree = None
@@ -2498,37 +2501,17 @@ def schedule_checkpid_task():
 #             traceback.print_exc()
 
 
-def run_daily_init_steps():
-    """执行每日初始化的核心步骤（便于重试调用）"""
-    global realdatadf, loaded_df, viewdf
-    global date_write_is_processed, start_init, last_updated_time
-    global last_update_time, message_cache, refresh_registry, result_queue
+def run_daily_init_steps_two():
+    # --- 3️⃣ 启动主消息队列 ---
+    global message_cache, refresh_registry, result_queue
     global monitor_windows
 
-    logger.info("🔄 [daily_init] 开始执行核心初始化步骤")
-
-    # --- 1️⃣ 重置状态变量 ---
-    realdatadf = pd.DataFrame()
-    loaded_df = None
-    viewdf = pd.DataFrame()
-    date_write_is_processed = False
-    start_init = 0
-    last_updated_time = None
-    last_update_time = 0
     message_cache = []
     refresh_registry = {}
     result_queue = queue.Queue()
-
-    # --- 2️⃣ 恢复日期控件 ---
-    try:
-        if date_entry.winfo_exists():
-            date_entry.set_date(get_today())
-    except Exception as e:
-        logger.info(f"⚠️ [daily_init] 日期控件未就绪: {e}")
-
-    # --- 3️⃣ 启动主消息队列 ---
     process_queue(root)
-    logger.info("🟢 [daily_init] 已启动消息队列")
+    logger.info("✅ [daily_init] 核心初始化步骤run_daily_init_steps_two")
+
 
     # --- 4️⃣ 重启所有监控窗口 ---
     if monitor_windows:
@@ -2552,9 +2535,37 @@ def run_daily_init_steps():
                 traceback.print_exc()
     else:
         logger.info("⚠️ [daily_init] 无监控窗口，跳过刷新")
+    logger.info("⚠️ [daily_init] monitor_windows 完成")
+
+
+def run_daily_init_steps():
+    """执行每日初始化的核心步骤（便于重试调用）"""
+    global realdatadf, loaded_df, viewdf
+    global date_write_is_processed, start_init, last_updated_time
+    global last_update_time
+
+    logger.info("🔄 [daily_init] 开始执行核心初始化步骤")
+
+    # --- 1️⃣ 重置状态变量 ---
+    realdatadf = pd.DataFrame()
+    loaded_df = None
+    viewdf = pd.DataFrame()
+    date_write_is_processed = False
+    start_init = 0
+    last_updated_time = None
+    last_update_time = 0
+
+    # --- 2️⃣ 恢复日期控件 ---
+    try:
+        if date_entry.winfo_exists():
+            date_entry.set_date(get_today())
+    except Exception as e:
+        logger.info(f"⚠️ [daily_init] 日期控件未就绪: {e}")
+
 
     logger.info("✅ [daily_init] 核心初始化步骤执行完毕")
-
+    root.after(10*60*1000,run_daily_init_steps_two)
+    logger.info("✅ [daily_init] 核心初始化步骤5分钟后run_daily_init_steps_two")
     
 def daily_init(*args, **kwargs):
     global root
@@ -2602,10 +2613,10 @@ def schedule_daily_init(root):
     global _scheduled_task_id
 
     now = datetime.now()
-    today_925 = now.replace(hour=9, minute=25, second=0, microsecond=0)
+    today_925 = now.replace(hour=9, minute=20, second=0, microsecond=0)
     # today_925 = now.replace(hour=11, minute=28, second=0, microsecond=0)
     if now > today_925:
-        today_925 = get_next_weekday_time(9, 25)
+        today_925 = get_next_weekday_time(9, 20)
 
     delay_ms = int((today_925 - now).total_seconds() * 1000)
 
@@ -2868,6 +2879,20 @@ def rearrange_monitor_windows_grid():
                 logger.info(f"移动窗口失败 {code}: {e}")
 
 
+        # margin_x = 30
+        # margin_y = 5
+
+        # if align == "left":
+        #     current_x = l + 50
+        # elif align == "right":
+        #     current_x = r - 50
+        # else:
+        #     raise ValueError("align 参数必须是 'left' 或 'right'")
+
+        # current_y = t + 50
+        # max_col_width = 0
+        # max_row_height = 0
+
 def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="horizontal"):
     """
     多屏幕窗口重排（自动换列/换行 + 左右对齐 + 屏幕内排序）
@@ -2921,19 +2946,23 @@ def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="h
         screen_width = r - l
         screen_height = b - t
 
-        margin_x = 30
-        margin_y = 5
+
+
+        margin_x = 10   # 距离边缘 30px
+        margin_y = 5    # 距离顶部 5px
 
         if align == "left":
-            current_x = l + 50
+            current_x = l + margin_x
         elif align == "right":
-            current_x = r - 50
+            current_x = r - margin_x
         else:
             raise ValueError("align 参数必须是 'left' 或 'right'")
 
-        current_y = t + 50
+        current_y = t + margin_y
+
         max_col_width = 0
         max_row_height = 0
+
 
         for win_info in group:
             win = win_info["toplevel"]
@@ -2946,16 +2975,29 @@ def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="h
                     if align == "right" and max_col_width == 0:
                         current_x -= w
 
+                    # if current_y + h + margin_y > b:
+                    #     # 换列
+                    #     if align == "left":
+                    #         current_x += max_col_width + margin_x
+                    #     else:
+                    #         current_x -= max_col_width + margin_x
+                    #     current_y = t + 50
+                    #     max_col_width = 0
+                    #     if align == "right":
+                    #         current_x -= w
                     if current_y + h + margin_y > b:
                         # 换列
                         if align == "left":
                             current_x += max_col_width + margin_x
                         else:
                             current_x -= max_col_width + margin_x
-                        current_y = t + 50
+
+                        current_y = t + margin_y
                         max_col_width = 0
+
                         if align == "right":
                             current_x -= w
+
 
                     win.geometry(f"{w}x{h}+{current_x}+{current_y}")
                     current_y += h + margin_y
@@ -2966,14 +3008,25 @@ def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="h
                     if align == "right" and max_row_height == 0:
                         current_x -= w
 
+                    # if current_x + w + margin_x > r:
+                    #     # 换行
+                    #     current_y += max_row_height + margin_y
+                    #     if align == "left":
+                    #         current_x = l + 50
+                    #     else:
+                    #         current_x = r - 50 - w
+                    #     max_row_height = 0
                     if current_x + w + margin_x > r:
                         # 换行
                         current_y += max_row_height + margin_y
+
                         if align == "left":
-                            current_x = l + 50
+                            current_x = l + margin_x
                         else:
-                            current_x = r - 50 - w
+                            current_x = r - margin_x - w
+
                         max_row_height = 0
+
 
                     win.geometry(f"{w}x{h}+{current_x}+{current_y}")
 
@@ -6767,18 +6820,44 @@ def open_rules_overview(parent_win=None):
 # ------------------------
 # 报警中心窗口
 # ------------------------
+def alert_treeview_sort_column(col, reverse=False):
+    global alert_tree, alert_sort_column, alert_sort_reverse
+
+    try:
+        # 记录排序规则
+        alert_sort_column = col
+        alert_sort_reverse = reverse
+
+        # 取值并排序
+        data_list = [(alert_tree.set(k, col), k) for k in alert_tree.get_children('')]
+
+        # 数字优先排序
+        try:
+            data_list.sort(key=lambda t: float(t[0]), reverse=reverse)
+        except ValueError:
+            data_list.sort(key=lambda t: t[0], reverse=reverse)
+
+        # 移动排序后的行
+        for index, (_, k) in enumerate(data_list):
+            alert_tree.move(k, '', index)
+
+        # 更新表头点击回调
+        alert_tree.heading(col, command=lambda: alert_treeview_sort_column(col, not reverse))
+
+        # 排序后固定滚动到顶部
+        alert_tree.after(10, lambda: alert_tree.yview_moveto(0))
+
+    except Exception as e:
+        print(f"[Alert] 排序失败: {e}")
 
 def open_alert_center():
     global alert_window, alert_tree
     global alert_moniter_bring_front,sina_data_df
 
-    # 如果窗口已存在则置顶
-    # if alert_window and alert_window.winfo_exists():
-    #     alert_window.lift()
-    #     return
     if alert_window and isinstance(alert_window, tk.Toplevel) and alert_window.winfo_exists():
         alert_window.lift()
         return
+
 
 
     alert_moniter_bring_front = True
@@ -6877,11 +6956,12 @@ def open_alert_center():
     frame.pack(expand=True, fill="both")
     scrollbar = ttk.Scrollbar(frame)
     scrollbar.pack(side="right", fill="y")
-    cols = ("时间", "代码", "名称", "触发值", "规则", "变化量")
+    # cols = ("时间", "代码", "名称", "触发值", "规则", "变化量")
+    cols = ("时间", "代码", "名称","次数",  "触发值", "规则", "变化量")
     alert_tree = ttk.Treeview(frame, columns=cols, show="headings", yscrollcommand=scrollbar.set)
     scrollbar.config(command=alert_tree.yview)
     for c in cols:
-        alert_tree.heading(c, text=c)
+        alert_tree.heading(c, text=c, command=lambda col=c: alert_treeview_sort_column(col, False))
         if c == '触发值':
             alert_tree.column(c, width=160, anchor="center")
         elif c == '规则':
@@ -7892,13 +7972,16 @@ def get_rules(code):
 # -----------------------------
 # 检查单只股票是否触发报警
 # -----------------------------
+# 全局 set，存放所有已经插入过的警报（防止重复插入）
+inserted_alert_keys = set()
+
 def check_alert(stock_code, price, change, volume, name=None):
     """
     检查股票是否触发报警规则，并使用冷却机制。
     delta 用于判断最小变化量触发报警。
     """
     global alerts_rules, alerts_history, alerts_buffer, monitor_windows, last_alert_times
-
+    global inserted_alert_keys,ALERT_COOLDOWN
     if stock_code not in alerts_rules.keys():
         return  # 无规则直接返回
 
@@ -7941,19 +8024,29 @@ def check_alert(stock_code, price, change, volume, name=None):
 
         # 冷却判断
         if last_time and (now - last_time).total_seconds() < ALERT_COOLDOWN:
-            alerts_buffer.append({
-                'time': now.strftime('%H:%M:%S'),
-                'stock_code': stock_code,
-                'name': name,
-                'field': field,
-                'value': val,
-                'delta': abs(val - last_val) if last_val is not None else 0,
-                'status': status_text,
-                'rule': rule
-            })
+            # alerts_buffer.append({
+            #     'time': now.strftime('%H:%M:%S'),
+            #     'stock_code': stock_code,
+            #     'name': name,
+            #     'field': field,
+            #     'value': val,
+            #     'delta': abs(val - last_val) if last_val is not None else 0,
+            #     'status': status_text,
+            #     'rule': rule
+            # })
             continue
 
         if triggered:
+            # 生成唯一键用于去重（你也可以加 name、delta 等）
+            unique_key = f"{now.strftime('%H:%M:%S')}-{stock_code}-{status_text}"
+
+            # --- 如果之前已经插入过，不再插入 ---
+            if unique_key in inserted_alert_keys:
+                continue  
+            # logger.info(f'unique_key: {unique_key}')
+            # --- 标记为已插入 ---
+            inserted_alert_keys.add(unique_key)
+
             # 记录报警时间和最新值
             last_alert_times[key] = {'time': now, 'last_val': val}
             last_alert_times[last_val_key] = {'time': now, 'last_val': val}
@@ -8078,6 +8171,18 @@ def refresh_alert_center():
 
     # 取最近若干条记录（按时间倒序），按股票分组，保留每个股票的最近记录序列
     recent = alerts_history[-500:]
+    
+    # # 取最近 500 条记录
+    # recent_raw = alerts_history[-500:]
+    # # 去重
+    # seen_keys = set()
+    # recent = []
+    # for alert in recent_raw:
+    #     unique_key = f"{alert['time']}-{alert['stock_code']}-{alert.get('status', '')}"
+    #     if unique_key not in seen_keys:
+    #         seen_keys.add(unique_key)
+    #         recent.append(alert)
+
     grouped = {}
     for alert in reversed(recent):
         code = alert.get("stock_code", "")
@@ -8085,7 +8190,11 @@ def refresh_alert_center():
             continue
         grouped.setdefault(code, []).append(alert)
 
-    for code, alerts in grouped.items():
+    # ---- 按报警次数排序（次数多的排前） ----
+    sorted_items = sorted(grouped.items(), key=lambda kv: len(kv[1]), reverse=True)
+
+    # for code, alerts in grouped.items():
+    for code, alerts in sorted_items:
         # 股票名称（优先用 sina_data_df）
         if sina_data_df is not None and not sina_data_df.empty:
             name = sina_data_df.get("name", pd.Series(dtype=object)).get(code, "未知")
@@ -8115,39 +8224,6 @@ def refresh_alert_center():
                 value = rule.get("value", "")
                 conds.append(f"{field}{op}{value}")
         rule_str = ", ".join(conds) if conds else "无规则"
-
-        # --- 构造“触发值”列（每个字段的最近现值，精简显示并保留 1 位小数） ---
-        # val_parts = []
-        # triggered = False
-        # for rule in rule_list:
-        #     field = rule.get("field", "")
-        #     if field not in ("价格", "涨幅", "量"):
-        #         continue
-        #     cur = latest_values.get(field, "")
-        #     if cur == "" or cur is None:
-        #         continue
-        #     # 格式化为 1 位小数（失败则原样）
-        #     try:
-        #         curf = float(cur)
-        #         cur_s = f"{curf:.1f}"
-        #     except Exception:
-        #         cur_s = str(cur)
-        #         curf = None
-
-        #     val_parts.append(f"{field}{cur_s}")
-
-        #     # 若该规则启用，则用当前值判定是否触发
-        #     try:
-        #         if rule.get("enabled", False) and curf is not None:
-        #             rv = float(rule.get("value", float("nan")))
-        #             op = rule.get("op", "")
-        #             if op == ">=" and curf >= rv:
-        #                 triggered = True
-        #             elif op == "<=" and curf <= rv:
-        #                 triggered = True
-        #     except Exception:
-        #         # 忽略转换错误
-        #         pass
 
         val_parts = []
         triggered = False
@@ -8201,10 +8277,13 @@ def refresh_alert_center():
         time_txt = alerts[0].get("time", "")
 
         # 插入一行：时间, 代码, 名称, 规则(三合一), 触发值(三合一精简), 启用状态
+        alert_count = len(alerts)
+        # logger.info(f'alerts:{alerts}')
         vals = (
             time_txt,
             code,
             name,
+            alert_count,   # 新列
             rule_str,
             val_str,
             enabled_state
@@ -8283,41 +8362,126 @@ def refresh_alert_center():
     #     alert_window.after(0, _select_last)
 
 
-
+flushing = False    # 全局变量，防止多次执行
+# 全局 set，存放所有已经插入过的警报（防止重复插入）
+# 全局：
+# inserted_alert_keys = set()
+# flushing = False
 
 def flush_alerts():
-    """定时刷新报警缓冲区，将 alerts_buffer 写入报警中心"""
-    global alerts_buffer, alerts_history
+    """定时刷新报警缓冲区，将 alerts_buffer 写入 alerts_history，然后用 refresh_alert_center 刷新 Treeview"""
+    global alerts_buffer, alerts_history, alert_tree
+    global flushing, inserted_alert_keys
 
-    next_execution_time = get_next_weekday_time(9, 20)
-    now = datetime.now()
-    delay_ms = int((next_execution_time - now).total_seconds() * 1000)
+    if flushing:
+        return
+    flushing = True
 
-    if alerts_buffer:
-        open_alert_center()
-        for alert in alerts_buffer:
-            if alert_tree:
-                # 使用 delta 显示
-                delta =  alert.get('rule', {}).get('delta', 0)
-                tag = "triggered" if "触发" in alert.get("status", "") else "not_triggered"
-                vals = (
-                    alert['time'],
-                    alert['stock_code'],
-                    alert['name'],
-                    alert['status'],          # 原状态描述
-                    f"现值 {alert.get('value', '')}",
-                    f"变化量 {delta}"          # 新增 delta 显示
-                )
-                alert_tree.insert("", "end", values=vals, tags=(tag,))
-            # 将 alert 写入历史
-            alerts_history.append(alert)
-        alerts_buffer = []
+    try:
+        # 计算下次执行时间
+        next_execution_time = get_next_weekday_time(9, 20)
+        now = datetime.now()
+        delay_ms = int((next_execution_time - now).total_seconds() * 1000)
 
-    # 决定下一次 flush 间隔
-    if (get_day_is_trade_day() and get_now_time_int() < 1505) or get_work_time():
-        root.after(30000, flush_alerts)  # 30 秒刷新
-    else:
-        root.after(delay_ms, flush_alerts)
+        if alerts_buffer:
+            # 打开窗口（不要在这里创建新的 tree）
+            open_alert_center()
+
+            # ---- 本批次去重 ----
+            batch_seen = set()
+            unique_alerts = []
+            for alert in alerts_buffer:
+                # 使用和 check_alert 保持一致的唯一键（time-stock-status 或 stock-status）
+                # 用 alert['time']（报警时间字符串）更稳；如果你想按同一分钟合并，也可改为只用 stock+status
+                unique_key = f"{alert.get('time','')}-{alert.get('stock_code','')}-{alert.get('status','')}"
+                if unique_key in batch_seen:
+                    continue
+                batch_seen.add(unique_key)
+
+                # 若你还想避免跨批次重复（长期重复），可以检查 inserted_alert_keys
+                if unique_key in inserted_alert_keys:
+                    # 已插入过（历史中），跳过
+                    continue
+
+                # 标记为已见（长期去重集合）
+                inserted_alert_keys.add(unique_key)
+
+                unique_alerts.append(alert)
+
+            # ---- 将去重后的 alerts 写入历史（不直接插入 Treeview）----
+            for alert in unique_alerts:
+                alerts_history.append(alert)
+
+            # 清空缓冲
+            alerts_buffer = []
+
+            # ---- 由 refresh_alert_center 统一负责刷新 Treeview（聚合/计数/排序） ----
+            try:
+                refresh_alert_center()
+            except Exception as e:
+                logger.exception(f"刷新报警中心失败: {e}")
+
+        # 安排下次执行
+        if (get_day_is_trade_day() and get_now_time_int() < 1505) or get_work_time():
+            root.after(30000, flush_alerts)
+        else:
+            root.after(delay_ms, flush_alerts)
+
+    finally:
+        flushing = False
+
+# def flush_alerts():
+#     """定时刷新报警缓冲区，将 alerts_buffer 写入报警中心"""
+#     global alerts_buffer, alerts_history,alert_tree
+#     global flushing,inserted_alert_keys
+
+#     if flushing:
+#         return  # 正在执行，不重复触发
+#     flushing = True
+
+#     try:
+#         next_execution_time = get_next_weekday_time(9, 20)
+#         now = datetime.now()
+#         delay_ms = int((next_execution_time - now).total_seconds() * 1000)
+
+#         # 打开窗口（必须确保不会重复创建 tree）
+#         if alerts_buffer:
+
+#             open_alert_center()  # 只打开，不创建新的 treeview
+
+#             for alert in alerts_buffer:
+#                 if alert_tree:
+#                     delta = alert.get('rule', {}).get('delta', 0)
+#                     tag = "triggered" if "触发" in alert.get("status", "") else "not_triggered"
+
+#                     vals = (
+#                         alert['time'],
+#                         alert['stock_code'],
+#                         alert['name'],
+#                         alert['status'],
+#                         f"现值 {alert.get('value', '')}",
+#                         f"变化量 {delta}"
+#                     )
+#                     alert_tree.insert("", "end", values=vals, tags=(tag,))
+#                 # 生成唯一键用于去重（你也可以加 name、delta 等）
+#                 unique_key = f"{alert['time']}-{alert['stock_code']}-{alert['status']}"
+
+#                 # --- 如果之前已经插入过，不再插入 ---
+#                 if unique_key in inserted_alert_keys:
+#                     continue  
+#                 # logger.info(f'unique_key: {unique_key}')
+#                 # --- 标记为已插入 ---
+#                 alerts_history.append(alert)
+
+#             alerts_buffer = []
+
+#         # 下次调度
+#         if (get_day_is_trade_day() and get_now_time_int() < 1505) or get_work_time():
+#             root.after(30000, flush_alerts)
+#         else:
+#             root.after(delay_ms, flush_alerts)
+#     finally:
+#         flushing = False
 
 def get_latest_valid_data(df):
     # 确保时间字段是可排序的
@@ -8595,8 +8759,8 @@ if __name__ == "__main__":
     level = getattr(logging, args.log.upper(), logging.INFO)
 
     # 直接用自定义的 init_logging，传入日志等级
-    logger = init_logging(log_file='monitor_dfcf.log', redirect_print=False, level=level)
-
+    # logger = init_logging(log_file='monitor_dfcf.log', redirect_print=False, level=level)
+    logger.setLevel(level)
     
 
     logger.info("程序启动…")

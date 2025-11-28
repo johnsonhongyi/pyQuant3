@@ -606,8 +606,24 @@ class Sina:
                     if  cct.GlobalValues().getkey('lastbuydf')  is None:
                         h5_a = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False)
                         if h5_a is not None and 'lastbuy' in h5_a.columns:
-                            lastbuycol = h5_a.lastbuy.groupby(level=[0]).tail(1).reset_index().set_index('code').lastbuy
-                            h5 = cct.combine_dataFrame(h5,lastbuycol)
+                            # 更快地获取每个 code 的最后一条 lastbuy 值
+                            try:
+                                lastbuycol = h5_a.groupby(level=0)['lastbuy'].last()
+                            except Exception:
+                                # fallback to the older slower method if grouping fails
+                                lastbuycol = h5_a.lastbuy.groupby(level=[0]).tail(1).reset_index().set_index('code').lastbuy
+
+                            # 直接将 lastbuySeries 对齐到 h5（支持 MultiIndex）以避免 combine_dataFrame 的开销
+                            if isinstance(h5.index, pd.MultiIndex):
+                                codes = h5.index.get_level_values(0)
+                                # reindex 到 codes 的顺序，再建立与 MultiIndex 对应的 Series
+                                mapped = lastbuycol.reindex(codes).values
+                                h5 = h5.copy()
+                                h5['lastbuy'] = mapped
+                            else:
+                                h5 = h5.copy()
+                                h5['lastbuy'] = lastbuycol.reindex(h5.index)
+
                             cct.GlobalValues().setkey('lastbuydf', lastbuycol)
                             # h5['lastbuy'] = (map(lambda x, y: y if int(x) == 0 else x,h5['lastbuy'].values, h5['llastp'].values))
                     else:
@@ -793,7 +809,8 @@ class Sina:
                 h5 = cct.get_limit_multiIndex_Row(h5, col=run_col, start=startime, end=endtime)
             else:
                 h5 = cct.get_limit_multiIndex_freq(h5, freq=freq, col=run_col, start=startime, end=endtime)
-                h5 = h5.groupby(level=[0]).tail(1)
+                # 获取每个 code 的最后一条记录，比 groupby(...).tail(1) 更高效
+                h5 = h5.groupby(level=0).last()
             # h5 = cct.get_limit_multiIndex_Row(h5,col=run_col,start=startime, end=endtime)
             if h5 is not None and len(h5) > 0:
                 h5 = h5.reset_index().set_index('code')
@@ -829,9 +846,9 @@ class Sina:
             if freq is None:
                 h5 = cct.get_limit_multiIndex_Row(h5, col=run_col, start=startime, end=endtime)
             else:
-                # 如果按 freq，只取每组最后一条
+                # 如果按 freq，只取每组最后一条（更高效方式）
                 h5 = cct.get_limit_multiIndex_freq(h5, freq=freq, col=run_col, start=startime, end=endtime)
-                h5 = h5.groupby(level=[0]).tail(1)
+                h5 = h5.groupby(level=0).last()
 
             if h5 is not None and len(h5) > 0:
                 # 重置 index 到 code
@@ -1206,7 +1223,7 @@ if __name__ == "__main__":
                 h5 = cct.get_limit_multiIndex_Row(h5, col=run_col, start=startime, end=endtime)
             else:
                 h5 = cct.get_limit_multiIndex_freq(h5, freq=freq, col=run_col, start=startime, end=endtime)
-                h5 = h5.groupby(level=[0]).tail(1)
+                h5 = h5.groupby(level=0).last()
             # h5 = h5.groupby(level=[0]).tail(1)
             print(("s:", round(time.time() - ts, 2), len(h5)))
             if h5 is not None and len(h5) > 0:

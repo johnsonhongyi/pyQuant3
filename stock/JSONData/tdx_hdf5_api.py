@@ -346,6 +346,49 @@ class SafeHDFStore(pd.HDFStore):
     #             pass
 
     def _check_and_clean_corrupt_keys(self):
+            corrupt_keys = []
+            try:
+                # 使用 with 打开 HDF5 文件，确保在操作完成后关闭文件
+                with pd.HDFStore(self.fname, mode='a') as store:
+                    keys = store.keys()
+
+                    for key in keys:
+                        try:
+                            _ = store.get(key)
+                        except Exception as e:  # 捕获所有异常
+                            log.error(f"Failed to read key {key}: {e}")
+                            corrupt_keys.append(key)
+
+            except Exception as e:
+                log.error(f"Error opening HDF5 file {self.fname}: {e}")
+                return
+
+            # 处理发现的损坏 keys
+            if corrupt_keys:
+                log.warning(f"Corrupt keys detected: {corrupt_keys}, removing...")
+                for key in corrupt_keys:
+                    try:
+                        with pd.HDFStore(self.fname, mode='a') as store:
+                            store.remove(key)
+                        log.info(f"Removed corrupted key: {key}")
+                    except Exception as e:
+                        log.error(f"Failed to remove key {key}: {e}")
+                        # 删除损坏的文件
+                        self._delete_file()
+
+    def _delete_file(self):
+        """删除损坏的文件"""
+        try:
+            if os.path.isfile(self.fname):
+                os.remove(self.fname)
+                log.info(f"文件删除成功: {self.fname}")
+            else:
+                log.error(f"文件 {self.fname} 不存在，无法删除")
+        except Exception as e:
+            log.error(f"删除文件失败: {e}")
+            # 在这里添加一些逻辑，比如稍后再重试等
+
+    def _check_and_clean_corrupt_keys_old(self):
         try:
             with pd.HDFStore(self.fname, mode='a') as store:
                 keys = store.keys()

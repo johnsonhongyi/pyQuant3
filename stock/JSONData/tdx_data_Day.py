@@ -1488,8 +1488,10 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
             write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
             log.error(f'{code_u} file not exists: {file_path}')
         else:
-            if initTdxdata == 0:
+            if initTdxdata < 10:
                 log.error(f"file_path not exists code: {code}")
+            else:
+                print('.',end=' ')
             initTdxdata += 1
         return pd.DataFrame()
 

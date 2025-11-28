@@ -1008,26 +1008,15 @@ def clamp_window_to_screens(x, y, w, h):
     if not monitors:
         sw, sh = win32api.GetSystemMetrics(0), win32api.GetSystemMetrics(1)
         monitors = [(0, 0, sw, sh)]
-        logger.info(f'x:{x} y:{y} w:{w} h:{h}')
-    # for left, top, right, bottom in monitors:
-    #     # 判断整个窗口矩形是否与屏幕有交集
-    #     if x + w > left and x < right and y + h > top and y < bottom:
-    #         # 修正超出屏幕边界
-    #         # logger.info(f'x + w > left and x < right and y + h > top and y < bottom')
-    #         # logger.info(x , w , left , x , right ,  y , h , top , y , bottom)
-    #         x = max(left, min(x, right - w))
-    #         y = max(top, min(y, bottom - h))
-    #         # logger.info(f"✅ 窗口命中屏幕 ({left},{top},{right},{bottom}) -> ({x},{y})")
-    #         return x, y
-    # x,y = clamp_window_to_screens_mod(x, y, w, h, monitors)
+        # logger.info(f'x:{x} y:{y} w:{w} h:{h}')
     """保证窗口在可见显示器范围内"""
     for left, top, right, bottom in monitors:
-        logger.info(f'left: {left} top : {top} right:{right} bottom:{bottom}')
+        # logger.info(f'left: {left} top : {top} right:{right} bottom:{bottom}')
         # logger.info(x , w , left , x , right ,  y , h , top , y , bottom)
         if left <= x < right and top <= y < bottom:
             x = max(left, min(x, right - w))
             y = max(top, min(y, bottom - h))
-            logger.info(f'left <= x < right and top <= y < bottom: {left <= x < right and top <= y < bottom:} x:{x} y: {y} ')
+            # logger.info(f'left <= x < right and top <= y < bottom: {left <= x < right and top <= y < bottom:} x:{x} y: {y} ')
             return x, y
 
     # return (x,y)
@@ -1660,17 +1649,18 @@ def rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal
         screen_width = r - l
         screen_height = b - t
 
-        margin_x = 30
-        margin_y = 5
+        margin_x = 10   # 距离边缘 30px
+        margin_y = 5    # 距离顶部 5px
 
         if align == "left":
-            current_x = l + 50
+            current_x = l + margin_x
         elif align == "right":
-            current_x = r - 50
+            current_x = r - margin_x
         else:
             raise ValueError("align 参数必须是 'left' 或 'right'")
 
-        current_y = t + 50
+        current_y = t + margin_y
+
         max_col_width = 0
         max_row_height = 0
 
@@ -1691,8 +1681,10 @@ def rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal
                             current_x += max_col_width + margin_x
                         else:
                             current_x -= max_col_width + margin_x
-                        current_y = t + 50
+
+                        current_y = t + margin_y
                         max_col_width = 0
+
                         if align == "right":
                             current_x -= w
 
@@ -1708,10 +1700,12 @@ def rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal
                     if current_x + w + margin_x > r:
                         # 换行
                         current_y += max_row_height + margin_y
+
                         if align == "left":
-                            current_x = l + 50
+                            current_x = l + margin_x
                         else:
-                            current_x = r - 50 - w
+                            current_x = r - margin_x - w
+
                         max_row_height = 0
 
                     win.geometry(f"{w}x{h}+{current_x}+{current_y}")
@@ -1891,22 +1885,35 @@ def calc_indicators(top_all, resample):
             top_all.last6vol.values)
     )
     now_time = cct.get_now_time_int()
-    if  cct.get_trade_date_status():    
+    if  cct.get_trade_date_status():  
+        logger.info(f'lastbuy :{"lastbuy" in top_all.columns}')
         if 'lastbuy' in top_all.columns:
             if 915 < now_time < 930:
                 top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
                 top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+                # logger.info(f'dff2 :{top_all["dff2"][:5]}')
+
             elif 926 < now_time < 1455:
                 top_all['dff'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
                 top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+                # logger.info(f'dff2 :{top_all["dff2"][:5]}')
+
             else:
                 top_all['dff'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
                 top_all['dff2'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
+                # logger.info(f'dff2 :{top_all["dff2"][:5]}')
+
         else:
-            top_all['dff'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+            top_all['dff'] = ((top_all['buy'] - top_all['df2']) / top_all['lastp'] * 100).round(1)
+            top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+
     else:
         top_all['dff'] = ((top_all['buy'] - top_all['df2']) / top_all['df2'] * 100).round(1)
-
+        top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
+        
+    # if 'dff2' in top_all.columns:
+    #     logger.info(f'dff2 :{top_all["dff2"][:5]}')
+        
     return top_all.sort_values(by=['dff','percent','volume','ratio','couts'], ascending=[0,0,0,1,1])
 
 # ------------------ 指标计算 ------------------ #
@@ -2481,7 +2488,7 @@ class StockMonitorApp(tk.Tk):
             width_px,height_px = self.print_tk_dpi_detail()
             if width_px == 1920:
                 current_scale = 1.25
-            elif  width_px == 3840:
+            elif  width_px == 3840 or width_px == 2560:
                 current_scale = 2
             else:
                 current_scale = 1
@@ -2563,6 +2570,7 @@ class StockMonitorApp(tk.Tk):
             # 可选：字体也缩放
             
             size = int(self.default_font.cget("size") * scale_factor / self.scale_factor)
+            size = max(6, min(size, 16))  # 最小6 最大16
             self.default_font.configure(size=size)
             self.default_font_bold.configure(size=size)
             self.scale_factor = scale_factor
@@ -2640,7 +2648,7 @@ class StockMonitorApp(tk.Tk):
         sf = self.scale_factor
 
         if sf <= 1.25:
-            offset = -0.15
+            offset = -0.25
         elif sf < 1.5:
             offset = -0.25
         elif sf < 2:
@@ -3982,7 +3990,8 @@ class StockMonitorApp(tk.Tk):
                             self._restore_done = True
                             logger.info("首次数据加载完成，开始恢复监控窗口...")
                             self.after(1000,self.restore_all_monitor_windows)
-
+                            logger.info("首次数据加载完成，开始监控...")
+                            self.after(30*1000,self.KLineMonitor_init)
 
                         if self.search_var1.get() or self.search_var2.get():
                             self.apply_search()
@@ -7217,12 +7226,12 @@ class StockMonitorApp(tk.Tk):
         df_sorted = tree._full_df.sort_values(col, ascending=not reverse)
 
         # 调试信息
-        logger.info(f"[DEBUG] Sorting column: {col}, ascending: {not reverse}, total rows: {len(df_sorted)}")
+        # logger.info(f"[DEBUG] Sorting column: {col}, ascending: {not reverse}, total rows: {len(df_sorted)}")
 
         # 填充前 limit 条
         limit = getattr(tree, "_display_limit", 50)
         df_display = df_sorted.head(limit)
-        logger.info(f"[DEBUG] Displaying top {limit} rows after sort")
+        # logger.info(f"[DEBUG] Displaying top {limit} rows after sort")
 
         tree.delete(*tree.get_children())
         for idx, (code_row, row) in enumerate(df_display.iterrows()):
@@ -7241,7 +7250,7 @@ class StockMonitorApp(tk.Tk):
                 tree.focus(sel_iid)
                 tree.see(sel_iid)
 
-        logger.info(f"[DEBUG] _sort_state: {tree._sort_state}")
+        # logger.info(f"[DEBUG] _sort_state: {tree._sort_state}")
 
         # 更新heading command
         tree.heading(col, command=lambda c=col: self._sort_treeview_column_newTop10(tree, c,not reverse))
@@ -9853,7 +9862,16 @@ class StockMonitorApp(tk.Tk):
         if win_state:
             self.bring_monitor_to_front(active_windows)
             self.bring_monitor_to_front_pg(active_windows)
+        else:
+           for win_id, win_info in self.monitor_windows.items():
+               toplevel = win_info.get("toplevel")
+               if not (toplevel and toplevel.winfo_exists()):
+                   continue
 
+               # 提升逻辑
+               if  win_info.get("is_lifted", True):
+                   win_info["is_lifted"] = False
+                   
     def load_window_position(self, win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500,offset_step=100):
         """从统一配置文件加载窗口位置（自动按当前 DPI 缩放）"""
         try:
@@ -13319,7 +13337,7 @@ class KLineMonitor(tk.Toplevel):
         self.history3 = history3
         # 点击计数器
         self.click_count = 0
-
+        self.search_filter_by_signal = True
         # 历史信号追踪
         self.last_buy_index = None
         self.last_sell_index = None
@@ -13413,7 +13431,8 @@ class KLineMonitor(tk.Toplevel):
             ("score", "评分", 30),
             ("emotion", "情绪", 60)
         ]:
-            self.tree.heading(col, text=text, command=lambda c=col: self.treeview_sort_column(c))
+            # self.tree.heading(col, text=text, command=lambda c=col: self.treeview_sort_columnKLine(c))
+            self.tree.heading(col, text=text, command=lambda c=col: self.treeview_sort_columnKLine(c,onclick=True))
             self.tree.column(col, width=w, anchor="center")
 
         # 高亮配置可以根据 signal_types 动态生成
@@ -13462,16 +13481,16 @@ class KLineMonitor(tk.Toplevel):
         self.search_var = tk.StringVar()
         self.search_combo3 = ttk.Combobox(self.status_frame, textvariable=self.search_var, values=self.history3(), width=20)
         self.search_combo3.pack(side="left", padx=5, fill="x", expand=True)
-        self.search_combo3.bind("<Return>", lambda e: self.search_code_status())
+        self.search_combo3.bind("<Return>", lambda e: self.search_code_status(onclick=True))
         self.search_combo3.bind("<Button-3>", self.on_kline_monitor_right_click)
-        self.search_combo3.bind("<<ComboboxSelected>>", lambda e: self.search_code_status())
+        self.search_combo3.bind("<<ComboboxSelected>>", lambda e: self.search_code_status(onclick=True))
 
         # self.search_combo3.bind("<<ComboboxSelected>>", lambda e: self.apply_search())
         # self.search_var2.trace_add("write", self._on_search_var_change)
 
         # 搜索按钮
         self.search_btn = tk.Button(
-            self.status_frame, text="查询", cursor="hand2", command=self.search_code_status
+            self.status_frame, text="查询", cursor="hand2", command=lambda: self.search_code_status(onclick=True)
         )
         self.search_btn.pack(side="left", padx=3)
 
@@ -13702,13 +13721,16 @@ class KLineMonitor(tk.Toplevel):
             self.search_code_status()
 
 
-    def search_code_status(self):
+    def search_code_status(self,onclick=False):
         """
         在 Treeview 中搜索 code 或使用 query 过滤当前表格数据
         支持表达式: score>80 and percent>5 and volume>2
         """
         query = self.search_var.get().strip()
-        if not query:
+        if onclick:
+            self.search_filter_by_signal = True
+        logger.info(f'self.search_filter_by_signal : {self.search_filter_by_signal}')
+        if not self.search_filter_by_signal or not query:
             return
 
         # --- 保存到实例属性（不立即写文件） ---
@@ -13814,7 +13836,7 @@ class KLineMonitor(tk.Toplevel):
                     self.tree.focus(iid)           # 键盘焦点
                     self.tree.see(iid)             # 自动滚动，使其可见
                     return True
-            toast_message(self.master, f"{code} is not Found")
+            toast_message(self.master, f"{code} is not Found in kline")
         except Exception as e:
             logger.info(f"[tree_scroll_to_code] Error: {e}")
             return False
@@ -13948,19 +13970,53 @@ class KLineMonitor(tk.Toplevel):
             logger.info(f"[Monitor] 键盘选择错误:{e}")
         return "break"
 
-    # ---- 列排序 ----
-    def treeview_sort_column(self, col, reverse=False):
-        self.sort_column = col
-        self.sort_reverse = reverse
+    # # ---- 列排序 ----
+    # def treeview_sort_columnKLine(self, col, reverse=False):
+    #     self.sort_column = col
+    #     self.sort_reverse = reverse
+    #     try:
+    #         data_list = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
+    #         try:
+    #             data_list.sort(key=lambda t: float(t[0]), reverse=reverse)
+    #         except ValueError:
+    #             data_list.sort(reverse=reverse)
+    #         for index, (val, k) in enumerate(data_list):
+    #             self.tree.move(k, '', index)
+    #         self.tree.heading(col, command=lambda: self.treeview_sort_columnKLine(col, not reverse))
+    #     except Exception as e:
+    #         logger.info(f"[Monitor] 排序错误:{e}")
+
+    def treeview_sort_columnKLine(self, col, reverse=False,onclick=False):
         try:
+            # ---- 保存当前滚动位置 ----
+            y = self.tree.yview()
+
+            self.sort_column = col
+            self.sort_reverse = reverse
+
+            # ---- 提取数据 ----
             data_list = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
+
+            # ---- 排序 ----
             try:
                 data_list.sort(key=lambda t: float(t[0]), reverse=reverse)
             except ValueError:
                 data_list.sort(reverse=reverse)
+
+            # ---- 重新排列 ----
             for index, (val, k) in enumerate(data_list):
                 self.tree.move(k, '', index)
-            self.tree.heading(col, command=lambda: self.treeview_sort_column(col, not reverse))
+
+            # ---- 再绑定点击事件 ----
+            self.tree.heading(col, command=lambda: self.treeview_sort_columnKLine(col, not reverse,onclick=True))
+            # logger.info(f'onclick: {onclick}')
+            if onclick:
+                self.tree.yview_moveto(0)
+            else:
+                # ---- 恢复滚动位置 ----
+                self.tree.yview_moveto(y[0])
+
+
         except Exception as e:
             logger.info(f"[Monitor] 排序错误:{e}")
 
@@ -14137,7 +14193,7 @@ class KLineMonitor(tk.Toplevel):
 
         # 保留排序
         if getattr(self, "sort_column", None):
-            self.treeview_sort_column(self.sort_column, self.sort_reverse)
+            self.treeview_sort_columnKLine(self.sort_column, self.sort_reverse)
 
         # 恢复选中行
         if selected_code:
@@ -14176,6 +14232,7 @@ class KLineMonitor(tk.Toplevel):
 
     def reset_filters(self):
         self.filter_stack.clear()
+        self.search_filter_by_signal = False
         if self.df_cache is not None:
             self.update_table(self.df_cache)
 
@@ -14191,7 +14248,7 @@ class KLineMonitor(tk.Toplevel):
     #     self.update_table(df)
     def apply_filters(self):
         """应用信号/情绪过滤 + 自动 query 查询"""
-        if self.df_cache is None or self.df_cache.empty:
+        if not self.search_filter_by_signal or self.df_cache is None or self.df_cache.empty:
             return
 
         df = self.df_cache.copy()
@@ -14436,7 +14493,8 @@ if __name__ == "__main__":
     level = getattr(logging, args.log.upper(), logging.INFO)
 
     # 直接用自定义的 init_logging，传入日志等级
-    logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=level)
+    # logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=level)
+    logger.setLevel(level)
     
 
     logger.info("程序启动…")
