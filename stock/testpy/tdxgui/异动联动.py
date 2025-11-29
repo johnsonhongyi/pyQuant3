@@ -2564,7 +2564,7 @@ def run_daily_init_steps():
 
 
     logger.info("✅ [daily_init] 核心初始化步骤执行完毕")
-    root.after(10*60*1000,run_daily_init_steps_two)
+    root.after(13*60*1000,run_daily_init_steps_two)
     logger.info("✅ [daily_init] 核心初始化步骤5分钟后run_daily_init_steps_two")
     
 def daily_init(*args, **kwargs):

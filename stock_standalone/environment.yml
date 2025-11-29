@@ -1,0 +1,34 @@
+name: py_stock_build
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Python版本
+  - python=3.9.13
+  
+  # 核心数据处理库
+  - numpy::numpy
+  - pandas::pandas
+  
+  # GUI框架
+  - pyqt5::pyqt5
+  
+  # 系统工具
+  - pip
+  - pywin32
+  
+  # 通过pip安装的包
+  - pip
+  
+pip:
+  - pyperclip==1.8.2
+  - pyqtgraph==0.12.4
+  - talib==0.4.21
+  - tushare==1.2.70
+  - pandas-ta==0.3.14b0
+  - requests==2.26.0
+  - configobj==5.0.6
+  - tqdm==4.62.0
+  - chardet==4.0.0
+  - a-trade-calendar==0.0.69
+  - pyinstaller==4.7

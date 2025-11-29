@@ -2386,8 +2386,8 @@ class StockMonitorApp(tk.Tk):
                 logger.info(f"恢复窗口 {unique_code}: {concept_name} - {stock_name} ({code}) [{create_time}]")
             except Exception as e:
                 logger.info(f"恢复窗口失败: {m}, 错误: {e}")
-        if len(monitor_data) > 2:
-            rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal",monitor_list=self._pg_top10_window_simple, win_var=self.win_var)
+        # if len(monitor_data) > 2:
+            # rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal",monitor_list=self._pg_top10_window_simple, win_var=self.win_var)
 
     def update_status_bar_width(self, pw, left_frame, right_frame):
         """ 根据 DPI 缩放调整左右面板的宽度比例 """
@@ -2555,27 +2555,98 @@ class StockMonitorApp(tk.Tk):
     #     return scale
 
     def _apply_scale_dpi_change(self, scale_factor):
-            """当检测到 DPI 变化时，自动放大/缩小主窗口"""
-            # 获取当前窗口大小
-            width = self.winfo_width()
-            height = self.winfo_height()
+            """当检测到 DPI 变化时，自动放大/缩小主窗口及所有 UI 元素"""
+            try:
+                # 1️⃣ 调整窗口大小
+                width = self.winfo_width()
+                height = self.winfo_height()
+                new_w = int(width * scale_factor / self.scale_factor)
+                new_h = int(height * scale_factor / self.scale_factor)
+                logger.info(f'[DPI变化] scale_factor: {scale_factor:.2f} old_scale: {self.scale_factor:.2f} window_size: {width}x{height} -> {new_w}x{new_h}')
+                self.geometry(f"{new_w}x{new_h}")
 
-            # 按比例调整
-            new_w = int(width * scale_factor / self.scale_factor)
-            new_h = int(height * scale_factor / self.scale_factor)
-            logger.info(f'{cct.get_now_time_int()} scale_factor: {scale_factor} old_scale: {self.scale_factor} width: {width} height: {height} new_w : {new_w} new_h: {new_h}')
-            # 更新窗口大小
-            self.geometry(f"{new_w}x{new_h}")
+                # 2️⃣ 调整字体大小
+                old_size = self.default_font.cget("size")
+                new_size = int(old_size * scale_factor / self.scale_factor)
+                new_size = max(6, min(new_size, 16))  # 最小6 最大16
+                self.default_font.configure(size=new_size)
+                self.default_font_bold.configure(size=new_size)
+                logger.info(f'[DPI变化] 字体大小: {old_size}pt -> {new_size}pt')
 
-            # 可选：字体也缩放
-            
-            size = int(self.default_font.cget("size") * scale_factor / self.scale_factor)
-            size = max(6, min(size, 16))  # 最小6 最大16
-            self.default_font.configure(size=size)
-            self.default_font_bold.configure(size=size)
-            self.scale_factor = scale_factor
-            logger.info(f"{cct.get_now_time_int()} [自动缩放] 主窗口调整为 {scale_factor:.2f} 倍，font_size:{self.default_font_size} new_size:{size} 尺寸 {new_w}x{new_h} ")
- 
+                # 3️⃣ 更新缩放因子
+                old_scale = self.scale_factor
+                self.scale_factor = scale_factor
+
+                # 4️⃣ 触发 TreeView 列宽重新计算
+                if hasattr(self, 'current_cols') and hasattr(self, 'tree'):
+                    logger.info(f'[DPI变化] 重新计算 TreeView 列宽')
+                    self._setup_tree_columns(
+                        self.tree,
+                        tuple(self.current_cols),
+                        sort_callback=self.sort_by_column,
+                        other={}
+                    )
+
+                # 5️⃣ 应用全局 Tkinter 缩放（字体和像素度量）
+                tk_scaling_value = (scale_factor * DEFAULT_DPI) / 72.0
+                self.tk.call('tk', 'scaling', tk_scaling_value)
+                logger.info(f'[DPI变化] Tkinter scaling 设置为 {tk_scaling_value:.3f}（对应 {scale_factor:.2f}x DPI）')
+
+                # 6️⃣ 🔑 设置 TreeView 行高（显式设置，确保正确缩放）
+                if hasattr(self, 'tree'):
+                    try:
+                        style = ttk.Style(self)
+                        BASE_ROW_HEIGHT = 22  # 基础行高像素
+                        scaled_row_height = int(BASE_ROW_HEIGHT * scale_factor)
+                        style.configure('Treeview', rowheight=scaled_row_height)
+                        logger.info(f'[DPI变化] TreeView 行高设置为 {scaled_row_height}px')
+                    except Exception as e_row:
+                        logger.warning(f'[DPI变化] 设置 TreeView 行高失败: {e_row}')
+
+                # 7️⃣ 🔑 重新配置 TreeView 列标题的字体（使其自动缩放）
+                if hasattr(self, 'tree'):
+                    try:
+                        style = ttk.Style(self)
+                        style.configure('Treeview.Heading', font=self.default_font)
+                        logger.info(f'[DPI变化] TreeView 列标题字体已更新')
+                    except Exception as e_heading:
+                        logger.warning(f'[DPI变化] 更新 TreeView 列标题失败: {e_heading}')
+
+                # 8️⃣ 🔑 重新配置状态栏标签字体（使其自动缩放）
+                try:
+                    for widget in self.winfo_children():
+                        if isinstance(widget, tk.PanedWindow):
+                            for child in widget.winfo_children():
+                                for label in child.winfo_children():
+                                    if isinstance(label, tk.Label):
+                                        label.configure(font=self.default_font)
+                    logger.info(f'[DPI变化] 状态栏标签字体已更新')
+                except Exception as e_status:
+                    logger.warning(f'[DPI变化] 更新状态栏标签失败: {e_status}')
+
+                # 9️⃣ 🔑 重新配置 PG 窗口（概念分析）中的文字字体（PyQt TextItem）
+                if hasattr(self, '_pg_windows'):
+                    try:
+                        for unique_code, w_dict in list(self._pg_windows.items()):
+                            texts = w_dict.get("texts", [])
+                            # 获取当前应用字体大小（已在步骤 2 中更新）
+                            app_font = QtWidgets.QApplication.font()
+                            font_size = app_font.pointSize()
+                            
+                            # 更新每个 TextItem 的字体
+                            for text in texts:
+                                try:
+                                    text.setFont(QtGui.QFont("Microsoft YaHei", font_size))
+                                except Exception as e_text:
+                                    logger.warning(f'[DPI变化] 更新 PG 文字字体失败: {e_text}')
+                        logger.info(f'[DPI变化] PG 窗口文字字体已更新（{len(self._pg_windows)} 个窗口）')
+                    except Exception as e_pg:
+                        logger.warning(f'[DPI变化] 更新 PG 窗口失败: {e_pg}')
+
+                logger.info(f"[DPI变化] ✅ 完成全部缩放：{old_scale:.2f}x -> {scale_factor:.2f}x (窗口/字体/TreeView/状态栏/PG总览)")
+
+            except Exception as e:
+                logger.error(f"[DPI变化] ❌ 应用缩放失败: {e}", exc_info=True)
     def _apply_dpi_scaling(self,scale_factor=None):
         """自动计算并设置 Tkinter 的内部 DPI 缩放。"""
         # 获取系统的缩放因子 (例如 2.0)
@@ -2594,35 +2665,30 @@ class StockMonitorApp(tk.Tk):
             # 这一步会放大所有基于像素定义的组件尺寸和默认字体大小
             self.tk.call('tk', 'scaling', tk_scaling_value)
 
-            logger.info(f"✅ Tkinter DPI 自动缩放应用于 {scale_factor}x ({tk_scaling_value})")
-            
-            # 3. 💥 关键：配置 Treeview 样式以统一处理行高和字体
-            style = ttk.Style(self)
-            
-            # a. 设置行高 (Rowheight)
-            BASE_ROW_HEIGHT = 22  # 基础行高像素
-            scaled_row_height = int(BASE_ROW_HEIGHT * scale_factor)
-            
-            # b. 获取缩放后的字体 (可选，但推荐用于清晰度)
-            # Tkinter 的 'tk scaling' 已经缩放了默认字体，但显式配置更稳健。
-            # 这里我们使用一个基准字体，通常是 'TkDefaultFont'
-            default_font = self.default_font
-            
-            # 使用 ttk.Style 配置所有 Treeview 实例
-            # 注意：配置行高必须在 Treeview 元素上完成
-            style.configure(
-                "Treeview", 
-                rowheight=scaled_row_height,
-                font=default_font  # 保持使用 Tkinter 已经缩放过的默认字体
-            )
-            
-            # 配置 Heading 字体 (通常需要单独设置，确保列标题也适配)
-            style.configure(
-                "Treeview.Heading",
-                font=default_font
-            )
-            
-            logger.info(f"✅ Tkinter DPI 自动缩放应用于 {scale_factor}x，Treeview 行高设置为 {scaled_row_height}")
+            logger.info(f"[初始化缩放] ✅ Tkinter scaling 设置为 {tk_scaling_value:.3f}（对应 {scale_factor}x DPI）")
+
+            # ✅ 不再需要手动设置 ttk.Style rowheight
+            # tk.call('tk', 'scaling') 已经自动处理了所有的像素度量和字体
+            # 手动设置 rowheight 会导致 scaling 失效或冲突
+            # 不在启动时修改默认字体或标签字体；仅使用 tk scaling 改变像素度量。
+            # 所有字体、Treeview 行高与 Label 的显式调整将在实际发生 DPI 变化时
+            # 由 `_apply_scale_dpi_change(scale_factor)` 统一处理，避免启动时字体被放大。
+            # 但是为避免字体变大后行高不足导致文字重叠，仍需确保 Treeview 的 rowheight 足够
+            try:
+                style = ttk.Style(self)
+                BASE_ROW_HEIGHT = 22
+                scaled_row_height = int(BASE_ROW_HEIGHT * scale_factor)
+                style.configure('Treeview', rowheight=scaled_row_height)
+                # 如果主 tree 已创建，确保样式应用
+                try:
+                    if hasattr(self, 'tree') and self.tree is not None:
+                        # 直接调用 configure 以确保已存在 Treeview 更新
+                        self.tree.configure(selectmode=self.tree.cget('selectmode'))
+                except Exception:
+                    pass
+                logger.info(f"[初始化缩放] Treeview 行高设置为 {scaled_row_height}px")
+            except Exception as e_rowinit:
+                logger.warning(f"[初始化缩放] 设置 Treeview 行高失败: {e_rowinit}")
         return scale_factor
 
 
@@ -2645,18 +2711,9 @@ class StockMonitorApp(tk.Tk):
         self.tree.bind("<ButtonRelease-1>", on_column_release)
 
     def get_scaled_value(self):
-        sf = self.scale_factor
-
-        if sf <= 1.25:
-            offset = -0.25
-        elif sf < 1.5:
-            offset = -0.25
-        elif sf < 2:
-            offset = -0.25
-        else:
-            offset = -0.25
-
-        return sf - offset
+        """返回当前的缩放因子（用于 TreeView 列宽计算）"""
+        # ✅ 直接返回 scale_factor，不要做奇怪的减法
+        return self.scale_factor
 
     def _setup_tree_columns(self,tree, cols, sort_callback=None, other={}):
         """
@@ -5589,7 +5646,7 @@ class StockMonitorApp(tk.Tk):
                 max_len = max([len(str(x)) for x in self.current_df[col].fillna("").values] + [len(col)])
             except Exception:
                 max_len = len(col)
-            width = min(max(max_len * 8, int(60*self.get_scaled_value())) , 300)  # 经验值：每字符约8像素，可调整
+            width = int(min(max(max_len * 8, int(60*self.get_scaled_value())) , 300))  # 经验值：每字符约8像素，可调整
 
             # try:
             #     max_len = max([len(str(x)) for x in self.current_df[col].fillna("").values] + [len(col)])
@@ -5605,10 +5662,10 @@ class StockMonitorApp(tk.Tk):
             if col == 'name':
                 # width = int(width * 2)
                 # width = int(width * 1.5 * self.get_scaled_value())
-                width = getattr(self, "_name_col_width", 80*self.scale_factor) 
+                width = int(getattr(self, "_name_col_width", 80*self.scale_factor))
                 # logger.info(f'col width: {width}')
                 # logger.info(f'col : {col} width: {width}')
-            self.tree.column(col, width=width)
+            self.tree.column(col, width=int(width))
 
     # ----------------- 排序 ----------------- #
     def sort_by_column(self, col, reverse):
@@ -6468,10 +6525,12 @@ class StockMonitorApp(tk.Tk):
         win.select_code = None
         win.is_refreshing = False
 
+        # 使用 unique_code 构造唯一的窗口保存名
+        window_name = f"concept_top10_window-{unique_code}"
         try:
-            self.load_window_position(win, "concept_top10_window_simple", default_width=520, default_height=420)
+            self.load_window_position(win, window_name, default_width=260, default_height=260)
         except Exception:
-            win.geometry("520x420")
+            win.geometry("260x260")
 
         # 鼠标滚轮悬停滚动
         def on_mousewheel(event):
@@ -6649,7 +6708,8 @@ class StockMonitorApp(tk.Tk):
 
         def _on_close():
             try:
-                self.save_window_position(win, "concept_top10_window_simple")
+                window_name = f"concept_top10_window-{unique_code}"
+                self.save_window_position(win, window_name)
             except Exception:
                 pass
 
@@ -9872,125 +9932,115 @@ class StockMonitorApp(tk.Tk):
                if  win_info.get("is_lifted", True):
                    win_info["is_lifted"] = False
                    
-    def load_window_position(self, win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500,offset_step=100):
+    def _get_dpi_scale_factor(self):
+        """获取当前 DPI 缩放因子（统一处理）"""
+        try:
+            scale = getattr(self, 'scale_factor', 1.0)
+            if not isinstance(scale, (int, float)) or scale <= 0:
+                scale = 1.0
+            return scale
+        except Exception as e:
+            logger.warning(f"[_get_dpi_scale_factor] 获取缩放失败，使用默认值: {e}")
+            return 1.0
+
+    def _get_config_file_path(self, base_file_path, scale):
+        """根据缩放因子获取配置文件路径（统一处理）"""
+        if scale > 1.5:
+            base, filename = os.path.split(base_file_path)
+            return os.path.join(base, f"scale{int(scale)}_{filename}")
+        return base_file_path
+
+    def load_window_position(self, win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500, offset_step=100):
         """从统一配置文件加载窗口位置（自动按当前 DPI 缩放）"""
         try:
             window_name = str(window_name)
-            scale = 1.0
-            try:
-                # scale = get_windows_dpi_scale_factor()
-                scale = self.scale_factor
-                logger.info(f'scale :{scale}')
-                if not isinstance(scale, (int, float)) or scale <= 0:
-                    scale = 1.0
-            except Exception as e:
-                log.warning(f"[load_window_position] 获取 DPI 缩放失败: {e}")
+            win_name = f"{window_name}-{getattr(win, '_concept_name')}" if hasattr(win, '_concept_name') else window_name
+            scale = self._get_dpi_scale_factor()
+            logger.info(f'[load_window_position] scale={scale}')
 
-            if scale > 1.5:
-                base, filename = os.path.split(WINDOW_CONFIG_FILE)
-                # 在文件名前加 scale2_
-                file_path = os.path.join(base, f"scale{int(scale)}_{filename}")
-            else:
-                file_path = WINDOW_CONFIG_FILE
+            # 获取正确的配置文件路径
+            config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
 
-            if os.path.exists(file_path):
-                with open(file_path, "r", encoding="utf-8") as f:
+            if os.path.exists(config_file_path):
+                with open(config_file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
 
                 if window_name in data:
                     pos = data[window_name]
-                    # ✳️ 按当前 DPI 放大回去
+                    # ✅ 配置文件中存储的是标准化值（scale=1.0时的坐标）
+                    # 现在需要按当前 scale 乘以还原到物理像素
                     width = int(pos["width"] * scale)
                     height = int(pos["height"] * scale)
-                    x = int(pos["x"] * scale )
-                    y = int(pos["y"] * scale )
+                    x = int(pos["x"] * scale)
+                    y = int(pos["y"] * scale)
 
-
+                    # 处理叠加窗口的偏移
                     if window_name == 'concept_top10_window_simple' and hasattr(self, "_pg_top10_window_simple"):
                         active_windows = self._pg_top10_window_simple.values()
                         count_active_window = len(active_windows)
-                        same_name_count = count_active_window - 1
-                        if count_active_window > 1:
-                            # 每个叠加窗口偏移 offset_step
-                            logger.info(f'_pg_top10_window_simple')
+                        if count_active_window > 0:
+                            logger.info(f'[load_window_position] 处理叠加窗口 {window_name}')
                             x += offset_step * count_active_window
-                            y += offset_step * same_name_count
-
-                    logger.info(f"{win.winfo_x()}, {win.winfo_y()}, {win.winfo_width()}, {win.winfo_height()}")
-                    logger.info(scale_factor)
+                            y += offset_step * (count_active_window - 1)
 
                     # 防止窗口位置越界
                     x, y = clamp_window_to_screens(x, y, width, height)
-                    # x, y = clamp_window_to_screens_logical(x, y, width, height)
-
-
                     win.geometry(f"{width}x{height}+{x}+{y}")
-                    log.info(f"[load_window_position] 加载 {window_name}: {width}x{height}+{x}+{y}")
+                    logger.info(f"[load_window_position] 加载 {window_name}: {width}x{height}+{x}+{y}")
                     return width, height, x, y
 
             # 没有记录则默认居中
-            log.info(f"[load_window_position] 未找到 {window_name} 配置，使用默认居中")
+            logger.info(f"[load_window_position] 未找到 {window_name} 配置，使用默认居中")
             self.center_window(win, default_width, default_height)
             return default_width, default_height, None, None
 
         except Exception as e:
-            log.error(f"[load_window_position] 读取窗口位置失败: {e}")
+            logger.error(f"[load_window_position] 读取窗口位置失败: {e}")
             self.center_window(win, default_width, default_height)
             return default_width, default_height, None, None
 
 
 
     def save_window_position(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
-        """保存指定窗口位置到统一配置文件（自动按 DPI 缩放）"""
+        """保存指定窗口位置到统一配置文件（按 DPI 反向缩放存储为标准值）"""
         try:
             window_name = str(window_name)
+            win_name = f"{window_name}-{getattr(win, '_concept_name')}" if hasattr(win, '_concept_name') else window_name
+            scale = self._get_dpi_scale_factor()
+            logger.info(f'[save_window_position] scale={scale}')
 
-            # --- 获取当前 Windows DPI 缩放比例 ---
-            scale = 1.0
-            try:
-                # scale = get_windows_dpi_scale_factor()
-                scale = self.scale_factor
-                logger.info(f'save_window_position scale :{scale}')
-                if not isinstance(scale, (int, float)) or scale <= 0:
-                    scale = 1.0
-            except Exception as e:
-                log.warning(f"[save_window_position] 获取 DPI 缩放失败: {e}")
-
-            # --- 按缩放比例保存位置 ---
+            # ✅ 获取窗口的物理坐标/大小，除以 scale 得到标准化值存储
             pos = {
-                "x": int(win.winfo_x() / scale ),
+                "x": int(win.winfo_x() / scale),
                 "y": int(win.winfo_y() / scale),
                 "width": int(win.winfo_width() / scale),
                 "height": int(win.winfo_height() / scale)
             }
 
-            # --- 读取旧数据 ---
+            # 获取正确的配置文件路径
+            config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+            logger.info(f'[save_window_position] config_file_path={config_file_path}')
+
+            # 读取旧数据
             data = {}
-            if scale > 1.5:
-                base, filename = os.path.split(WINDOW_CONFIG_FILE)
-                # 在文件名前加 scale2_
-                file_path = os.path.join(base, f"scale{int(scale)}_{filename}")
-            else:
-                file_path = WINDOW_CONFIG_FILE
-            logger.info(f'save_window_position file_path scale :{file_path}')
-            if os.path.exists(file_path):
+            if os.path.exists(config_file_path):
                 try:
-                    with open(file_path, "r", encoding="utf-8") as f:
+                    with open(config_file_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
                 except Exception as e:
-                    log.error(f"读取窗口配置失败: {e}")
+                    logger.error(f"[save_window_position] 读取窗口配置失败: {e}")
 
-            # --- 更新数据 ---
+            # 更新数据
             data[window_name] = pos
 
-            # --- 写入文件 ---
-            with open(file_path, "w", encoding="utf-8") as f:
+            # 写入文件
+            with open(config_file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
-            log.info(f"[save_window_position] 已保存 {window_name}: {pos}")
+            logger.info(f"[save_window_position] 已保存 {window_name}: {pos}")
 
         except Exception as e:
-            log.error(f"[save_window_position] 保存窗口位置失败: {e}")
+            logger.error(f"[save_window_position] 保存窗口位置失败: {e}")
 
     # def load_window_position(self, win, window_name, file_path=WINDOW_CONFIG_FILE,
     #                          default_width=500, default_height=500, offset_step=100):
@@ -10091,49 +10141,35 @@ class StockMonitorApp(tk.Tk):
 
 
     def load_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE,
-                                default_width=500, default_height=500, offset_step=30):
-        """加载 Qt 窗口位置（支持自动错开已存在的窗口）"""
+                                 default_width=500, default_height=500, offset_step=30):
+        """加载 Qt 窗口位置（支持自动错开已存在的窗口，DPI缩放一致化）"""
         try:
             window_name = str(window_name)
-            scale = 1.0
-            try:
-                # scale = get_windows_dpi_scale_factor()
-                scale = self.scale_factor
-                logger.info(f'scale :{scale}')
-                if not isinstance(scale, (int, float)) or scale <= 0:
-                    scale = 1.0
-            except Exception as e:
-                logger.info(f"[load_window_position_qt] 获取 DPI 缩放失败: {e}")
+            scale = self._get_dpi_scale_factor()
+            logger.info(f'[load_window_position_qt] scale={scale}')
+
             x = y = None
             width = default_width
             height = default_height
-            if scale > 1.5:
-                base, filename = os.path.split(WINDOW_CONFIG_FILE)
-                # 在文件名前加 scale2_
-                file_path = os.path.join(base, f"scale{int(scale)}_{filename}")
-            else:
-                file_path = WINDOW_CONFIG_FILE
 
-            logger.info(f'load_window_position_qt scale :{file_path}')
+            # 获取正确的配置文件路径
+            config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+            logger.info(f'[load_window_position_qt] config_file_path={config_file_path}')
 
             # --- 从文件加载保存的窗口位置 ---
-            if os.path.exists(file_path):
-                with open(file_path, "r", encoding="utf-8") as f:
+            if os.path.exists(config_file_path):
+                with open(config_file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if window_name in data:
                     pos = data[window_name]
-                    # ✅ 直接使用存储的逻辑坐标，不乘 DPI
-
-                    # width = int(pos.get("width", default_width)*scale)
-                    width = int(pos.get("width", default_width))
-                    # height = int(pos.get("height", default_height)*scale)
-                    height = int(pos.get("height", default_height))
-                    x = int(pos.get("x", 0))
-                    y = int(pos.get("y", 0))
+                    # ✅ 配置文件中存储的是标准化值，现在需要按 scale 乘以还原到物理像素
+                    width = int(pos.get("width", default_width) * scale)
+                    height = int(pos.get("height", default_height) * scale)
+                    x = int(pos.get("x", 0) * scale)
+                    y = int(pos.get("y", 0) * scale)
 
                     # 防止窗口位置越界
                     x, y = clamp_window_to_screens(x, y, width, height)
-
                     logger.info(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
 
             # --- 如果没有存储位置，则居中 ---
@@ -10156,12 +10192,12 @@ class StockMonitorApp(tk.Tk):
                     if y + height > screen.height():
                         y = screen.height() - height - 10
 
-            # ✅ 设置窗口几何
+            # ✅ 设置窗口几何（物理像素）
             win.setGeometry(x, y, width, height)
             return width, height, x, y
 
         except Exception as e:
-            logger.info(f"[load_window_position_qt] 加载失败: {e}")
+            logger.error(f"[load_window_position_qt] 加载失败: {e}")
             traceback.print_exc()
             # 默认居中
             screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
@@ -10309,57 +10345,47 @@ class StockMonitorApp(tk.Tk):
 
 
     def save_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
-        """保存 PyQt 窗口位置到统一配置文件（自动按 DPI 缩放）"""
+        """保存 PyQt 窗口位置到统一配置文件（按 DPI 反向缩放存储为标准值）"""
         try:
             window_name = str(window_name)
-            from PyQt5 import QtCore
-
-            scale = 1.0
-            try:
-                # scale = get_windows_dpi_scale_factor()
-                scale = self.scale_factor
-                logger.info(f'save_window_position_qt scale :{scale}')
-                if not isinstance(scale, (int, float)) or scale <= 0:
-                    scale = 1.0
-            except Exception as e:
-                log.warning(f"[save_window_position_qt] 获取 DPI 缩放失败: {e}")
+            scale = self._get_dpi_scale_factor()
+            logger.info(f'[save_window_position_qt] scale={scale}')
 
             geom = win.geometry()  # QRect
+            # ✅ 获取窗口的物理坐标/大小，除以 scale 得到标准化值存储
+            width = max(200, min(int(geom.width() / scale), 500))
+            height = max(300, min(int(geom.height() / scale), 450))
             pos = {
-                "x": int(geom.x() ),
-                "y": int(geom.y() ),
-                # "width": int(geom.width() / scale),
-                # "width": int(geom.width()),
-                # # "height": int(geom.height() / scale)
-                # "height": int(geom.height())
-                "width": max(200, min(int(geom.width()), 500)),
-                "height": max(300, min(int(geom.height()), 450))
+                "x": int(geom.x() / scale),
+                "y": int(geom.y() / scale),
+                "width": width,
+                "height": height
             }
 
-            data = {}
-            if scale > 1.5:
-                base, filename = os.path.split(WINDOW_CONFIG_FILE)
-                # 在文件名前加 scale2_
-                file_path = os.path.join(base, f"scale{int(scale)}_{filename}")
-            else:
-                file_path = WINDOW_CONFIG_FILE
-            logger.info(f'save_window_position_qt file_path scale :{file_path}')
+            # 获取正确的配置文件路径
+            config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
+            logger.info(f'[save_window_position_qt] config_file_path={config_file_path}')
 
-            if os.path.exists(file_path):
+            # 读取旧数据
+            data = {}
+            if os.path.exists(config_file_path):
                 try:
-                    with open(file_path, "r", encoding="utf-8") as f:
+                    with open(config_file_path, "r", encoding="utf-8") as f:
                         data = json.load(f)
                 except Exception as e:
-                    log.error(f"[save_window_position_qt] 读取配置失败: {e}")
+                    logger.error(f"[save_window_position_qt] 读取配置失败: {e}")
 
+            # 更新数据
             data[window_name] = pos
-            with open(file_path, "w", encoding="utf-8") as f:
+
+            # 写入文件
+            with open(config_file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
-            log.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
+            logger.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
 
         except Exception as e:
-            log.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
+            logger.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
 
 
     # def save_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE):
@@ -10419,6 +10445,21 @@ class StockMonitorApp(tk.Tk):
                 self.kline_monitor.destroy()
             except Exception:
                 pass
+
+        # --- 保存并关闭所有 monitor_windows（概念前10窗口）---
+        if hasattr(self, "monitor_windows") and self.monitor_windows:
+            for unique_code, win_info in list(self.monitor_windows.items()):
+                win = win_info.get('toplevel')
+                if win and win.winfo_exists():
+                    try:
+                        # 提取窗口名称用于保存位置
+                        # unique_code 格式为 "concept_name_code" 或 "concept_name"
+                        window_name = f"concept_top10_window-{unique_code}"
+                        self.save_window_position(win, window_name)
+                        logger.info(f"[on_close] 保存窗口位置: {window_name}")
+                    except Exception as e:
+                        logger.warning(f"[on_close] 保存窗口 {unique_code} 位置失败: {e}")
+            self.monitor_windows.clear()
 
         # --- 关闭所有 concept top10 窗口 ---
         if hasattr(self, "_pg_top10_window_simple"):
@@ -11102,7 +11143,7 @@ class QueryHistoryManager:
                     except Exception as e:
                         logger.info(f"[警告] 同步 search_history3 失败: {e}")
 
-                logger.info(f"✅ 已将 [{query}] 置顶 history3")
+                logger.info(f"✅ 已将 [{new_query}] 置顶 history3")
 
             # ✅ 设置全局标志（主窗口 sync_history 会读取）
             self._just_edited_query = (old_query, new_query)

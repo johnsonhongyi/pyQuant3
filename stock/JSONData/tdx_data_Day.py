@@ -4543,7 +4543,7 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.high > df.upper)].count()
     dfupper=df[-ct.bollupperT:]
 
-    upperT = dfupper.high[-ct.bollupperT:][ (dfupper.upper > 0) & (dfupper.high > dfupper.upper)]
+    upperT = dfupper.close[-ct.bollupperT:][ (dfupper.close > 0) & (dfupper.close > dfupper.upper)]
     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.close > df.upper)].apply(lambda x: round(x, 0)).median()
     upperLIS, posLIS = LIS_TDX(upperT) if len(upperT) > 0 else ([],[])
     dd['upperT'] = len(posLIS) 

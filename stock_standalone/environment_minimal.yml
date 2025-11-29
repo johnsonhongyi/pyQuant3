@@ -1,0 +1,39 @@
+name: py_stock_minimal
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Python版本
+  - python=3.9
+  
+  # 核心数据处理
+  - numpy>=1.21.0
+  - pandas>=1.3.0
+  
+  # GUI框架
+  - pyqt5>=5.12
+  
+  # 必需的系统库
+  - pip
+  
+  # pip安装的包
+  - pip::pyperclip>=1.8.2
+  - pip::pyqtgraph>=0.12.4
+  - pip::talib>=0.4.21
+  - pip::tushare>=1.2.70
+  - pip::pandas-ta>=0.3.14b0
+  - pip::requests>=2.26.0
+  - pip::configobj>=5.0.6
+  - pip::tqdm>=4.62.0
+  - pip::chardet>=4.0.0
+  - pip::a-trade-calendar>=0.0.69
+  
+  # Windows特定包
+  - pywin32>=300
+  
+  # 可选：如果需要更好的性能
+  - pip::numba>=0.54.0
+
+# 注意：不包含以下未使用的大包
+# bokeh, scipy, plotly, statsmodels, astropy, IPython, matplotlib
+# 这样可以节省 ~280MB 的空间
