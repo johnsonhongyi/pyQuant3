@@ -5853,104 +5853,111 @@ class StockMonitorApp(tk.Tk):
 
     def update_category_result(self, df_filtered):
         """统计概念异动，在主窗口上方显示摘要"""
-        if df_filtered is None or df_filtered.empty:
-            return
+        try:
+            if df_filtered is None or df_filtered.empty:
+                logger.info("[update_category_result] df_filtered is empty")
+                return
+
+            # --- 统计当前概念 ---
+            cat_dict = {}  # {concept: [codes]}
+            all_cats = []  # 用于统计出现次数
+            topN = df_filtered.head(50)
+
+            for code, row in topN.iterrows():
+                if isinstance(row.get("category"), str):
+                    cats = [c.strip() for c in row["category"].replace("；", ";").replace("+", ";").split(";") if c.strip()]
+                    for ca in cats:
+                        # 过滤泛概念
+                        if is_generic_concept(ca):
+                            continue
+                        all_cats.append(ca)
+                        # 添加其他信息到元组里，比如 (code, name, percent, volume)
+                        percent = row.get("percent")
+                        if pd.isna(percent) or percent == 0:
+                            percent = row.get("per1d", 0)
+                        cat_dict.setdefault(ca, []).append((
+                            code,
+                            row.get("name", ""),
+                            # row.get("percent", 0) or row.get("per1d", 0),
+                            percent,
+                            row.get("volume", 0)
+                            # 如果还有其他列，可以继续加: row.get("其他列")
+                        ))
+
+            if not all_cats:
+                logger.info("[update_category_result] No concepts found in filtered data")
+                return
+
+            # --- 统计出现次数 ---
+            counter = Counter(all_cats)
+            top5 = OrderedDict(counter.most_common(5))
+
+            display_text = "  ".join([f"{k}:{v}" for k, v in top5.items()])
+            # logger.info(f'display_text : {display_text}  list(top5.keys()) : { list(top5.keys()) }')
+            # 取前5个类别
+            # current_categories = set(top5.keys())
+            current_categories =  list(top5.keys())  #保持顺序
+
+            # 获取 Tk 默认字体
+            # default_font = tkfont.nametofont("TkDefaultFont").copy()
+            # default_font.configure(weight="bold")  # 只加粗，不修改字号或字体
+            # font=("微软雅黑", 10, "bold"),
+
+            # --- 标签初始化 ---
+            if not hasattr(self, "lbl_category_result"):
+                self.lbl_category_result = tk.Label(
+                    self,
+                    text="",
+                    font=self.default_font_bold,
+                    fg="green",
+                    bg="#f7f7f7",
+                    anchor="w",
+                    justify="left",
+                    cursor="hand2"
+                )
+                self.lbl_category_result.pack(fill="x", padx=8, pady=(2, 4), before=self.children[list(self.children.keys())[0]])
+                self.lbl_category_result.bind("<Button-1>", lambda e: self.show_concept_detail_window())
+                self._last_categories = current_categories
+                self._last_cat_dict = cat_dict
+                self.lbl_category_result.config(text=f"当前概念：{display_text}")
+                return
+
+            # --- 对比上次结果 ---
+            old_categories = getattr(self, "_last_categories", set())
+            # added = current_categories - old_categories
+            # removed = old_categories - current_categories
+            added = [c for c in current_categories if c not in old_categories]
+            removed = [c for c in old_categories if c not in current_categories]
 
 
-        # --- 统计当前概念 ---
-        cat_dict = {}  # {concept: [codes]}
-        all_cats = []  # 用于统计出现次数
-        topN = df_filtered.head(50)
+            if added or removed:
+                diff_texts = []
+                if added:
+                    diff_texts.append(f"🆕 新增：{'、'.join(sorted(added))}")
+                if removed:
+                    diff_texts.append(f"❌ 消失：{'、'.join(sorted(removed))}")
+                diff_summary = "  ".join(diff_texts)
+                self.lbl_category_result.config(text=f"概念异动：{diff_summary}", fg="red")
 
+                def flash_label(count=0):
+                    if count >= 6:
+                        self.lbl_category_result.config(fg="red")
+                        return
+                    cur_color = self.lbl_category_result.cget("fg")
+                    new_color = "green" if cur_color == "red" else "red"
+                    self.lbl_category_result.config(fg=new_color)
+                    self.lbl_category_result.after(300, flash_label, count + 1)
 
-        for code, row in topN.iterrows():
-            if isinstance(row.get("category"), str):
-                cats = [c.strip() for c in row["category"].replace("；", ";").replace("+", ";").split(";") if c.strip()]
-                for ca in cats:
-                    # 过滤泛概念
-                    if is_generic_concept(ca):
-                        continue
-                    all_cats.append(ca)
-                    # 添加其他信息到元组里，比如 (code, name, percent, volume)
-                    percent = row.get("percent")
-                    if pd.isna(percent) or percent == 0:
-                        percent = row.get("per1d", 0)
-                    cat_dict.setdefault(ca, []).append((
-                        code,
-                        row.get("name", ""),
-                        # row.get("percent", 0) or row.get("per1d", 0),
-                        percent,
-                        row.get("volume", 0)
-                        # 如果还有其他列，可以继续加: row.get("其他列")
-                    ))
+                flash_label()
+            else:
+                self.lbl_category_result.config(text=f"当前概念：{display_text}", fg="green")
 
-
-        # --- 统计出现次数 ---
-        counter = Counter(all_cats)
-        top5 = OrderedDict(counter.most_common(5))
-
-        display_text = "  ".join([f"{k}:{v}" for k, v in top5.items()])
-        # logger.info(f'display_text : {display_text}  list(top5.keys()) : { list(top5.keys()) }')
-        # 取前5个类别
-        # current_categories = set(top5.keys())
-        current_categories =  list(top5.keys())  #保持顺序
-        # 获取 Tk 默认字体
-        # default_font = tkfont.nametofont("TkDefaultFont").copy()
-        # default_font.configure(weight="bold")  # 只加粗，不修改字号或字体
-        # font=("微软雅黑", 10, "bold"),
-
-        # --- 标签初始化 ---
-        if not hasattr(self, "lbl_category_result"):
-            self.lbl_category_result = tk.Label(
-                self,
-                text="",
-                font=self.default_font_bold,
-                fg="green",
-                bg="#f7f7f7",
-                anchor="w",
-                justify="left",
-                cursor="hand2"
-            )
-            self.lbl_category_result.pack(fill="x", padx=8, pady=(2, 4), before=self.children[list(self.children.keys())[0]])
-            self.lbl_category_result.bind("<Button-1>", lambda e: self.show_concept_detail_window())
+            # 保存状态
             self._last_categories = current_categories
             self._last_cat_dict = cat_dict
-            self.lbl_category_result.config(text=f"当前概念：{display_text}")
-            return
 
-        # --- 对比上次结果 ---
-        old_categories = getattr(self, "_last_categories", set())
-        # added = current_categories - old_categories
-        # removed = old_categories - current_categories
-        added = [c for c in current_categories if c not in old_categories]
-        removed = [c for c in old_categories if c not in current_categories]
-
-
-        if added or removed:
-            diff_texts = []
-            if added:
-                diff_texts.append(f"🆕 新增：{'、'.join(sorted(added))}")
-            if removed:
-                diff_texts.append(f"❌ 消失：{'、'.join(sorted(removed))}")
-            diff_summary = "  ".join(diff_texts)
-            self.lbl_category_result.config(text=f"概念异动：{diff_summary}", fg="red")
-
-            def flash_label(count=0):
-                if count >= 6:
-                    self.lbl_category_result.config(fg="red")
-                    return
-                cur_color = self.lbl_category_result.cget("fg")
-                new_color = "green" if cur_color == "red" else "red"
-                self.lbl_category_result.config(fg=new_color)
-                self.lbl_category_result.after(300, flash_label, count + 1)
-
-            flash_label()
-        else:
-            self.lbl_category_result.config(text=f"当前概念：{display_text}", fg="green")
-
-        # 保存状态
-        self._last_categories = current_categories
-        self._last_cat_dict = cat_dict
+        except Exception as e:
+            logger.error(f"[update_category_result] 更新概念信息出错: {e}", exc_info=True)
 
     def on_code_click(self, code):
         """点击异动窗口中的股票代码"""

@@ -23,7 +23,6 @@ import pandas_ta as ta
 from JSONData import sina_data
 # import numba as nb
 import datetime
-import talib
 # import logbook
 
 # log=logbook.Logger('TDX_day')
