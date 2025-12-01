@@ -307,6 +307,7 @@ class GlobalConfig:
         self.marketInit = self.cfg.get("general", "marketInit")
         self.marketblk = self.cfg.get("general", "marketblk")
         self.scale_offset = self.cfg.get("general", "scale_offset")
+        self.resampleInit = self.cfg.get("general", "resampleInit")
 
         self.clean_terminal = self._split(
             self.cfg.get("terminal", "clean_terminal", fallback="")

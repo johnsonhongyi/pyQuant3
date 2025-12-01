@@ -236,20 +236,20 @@ def get_log_file(log_n='stock.log'):
         basedir = root.replace('/', path_sep).replace('\\', path_sep)
         if os.path.exists(basedir):
             break
-    if os.path.exists(basedir):
+    if basedir is not None and os.path.exists(basedir):
         path = basedir + os.path.sep
         # print basedir,path
     else:
-        # path = os.getcwd()
-        path = os.path.split(os.path.abspath(sys.argv[0]))[0]
-        alist = path.split('stock')
-        if len(alist) > 0:
-            path = alist[0]
-            # os_sep=get_os_path_sep()
-            path = path + 'stock' + os.path.sep
-        else:
-            print("error")
-            raise TypeError('log path error.')
+        # path = os.path.split(os.path.abspath(sys.argv[0]))[0]
+        # alist = path.split('stock')
+        # if len(alist) > 0:
+        #     path = alist[0]
+        #     # os_sep=get_os_path_sep()
+        #     path = path + 'stock' + os.path.sep
+        # else:
+        #     print("error")
+        #     raise TypeError('log path error.')
+        path = get_base_path()
 
     path = path + log_n
     return path
@@ -294,18 +294,12 @@ def testlog():
     logger.addHandler(fh)
     logger.addHandler(ch)
 
-def getLogger(name=None,logpath=None,writemode='a',show_detail=True):
+def getLogger_old(name=None,logpath=None,writemode='a',show_detail=True):
 
     if logpath is None:
         log_f = get_log_file(log_n='stock.log')
     else:
         log_f = logpath
-    # logging.basicConfig(
-    #         level=logging.ERROR,
-    #         format=_logformat,
-    #         datefmt='%m-%d %H:%M',
-    #         filename=log_f,
-    #         filemode=writemode);
     logger = logging.getLogger(name)
     '''
     #jupyter Notebook
@@ -321,38 +315,9 @@ def getLogger(name=None,logpath=None,writemode='a',show_detail=True):
         stderr = sys.stderr
     '''
     logger.setLevel(logging.ERROR)
-    # create file handler which logs even debug messages
-    
-    # handler = logging.FileHandler(log_f)
-    # handler.setLevel(logging.DEBUG)
-    # create console handler with a higher log level
-    '''
-    if len(logger.handlers) > 0:
-        ch = logger.handlers[0].stream
-        # print "name:%s handlers:%s stdout:%s"%(name,logger.handlers[0],sys.stdout)
-    else:
-        ch = logging.StreamHandler()
-    '''
     ch = logging.StreamHandler()
-    # ch.setLevel(logging.ERROR)
-    # create formatter and add it to the handlers
-    # print "handeer",len(logger.handlers)
-    # formatter = logging.Formatter(name + ': LINE %(lineno)-4d : %(levelname)-8s %(message)s');
-    # formatter = logging.Formatter( '%(levelname)-5s %(message)s');
-
-
-
-    # handler = RotatingFileHandler(log_f, maxBytes=2*1000*1000, 
-    #                              backupCount=1, encoding=None, delay=0)
-    
-     # handler = RotatingFileHandler(log_f, maxBytes=2*1000*1000, 
-     #                             backupCount=1, encoding=None, delay=0)
 
     handler = MultiprocessHandler(log_f, when='D', encoding="utf-8")
-    # handler = MultiprocessHandler(log_f, when='S')
-
-
-    # fh_formatter = logging.Formatter( '%(filename)s(%(funcName)s:%(lineno)s):%(levelname)-5s %(message)s');
     if show_detail:
         handler_logformat = logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s")
         ch_formatter = logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s");
@@ -361,12 +326,74 @@ def getLogger(name=None,logpath=None,writemode='a',show_detail=True):
         ch_formatter = logging.Formatter("(%(funcName)s:%(lineno)s): %(message)s");
     
     handler.setFormatter(handler_logformat)
+
     ch.setFormatter(ch_formatter)
     logger.addHandler(ch)
     logger.addHandler(handler)
     return logger
 
+
+from logging.handlers import RotatingFileHandler
+_GLOBAL_LOGGER = None
+_GLOBAL_LOG_NAME = None  # 先空，Tk 初始化时传入
+
+def getLogger(name=None, logpath='instock_tk.log', writemode='a', show_detail=True):
+
+    global _GLOBAL_LOGGER, _GLOBAL_LOG_NAME
+
+    if _GLOBAL_LOGGER:
+        return _GLOBAL_LOGGER  # 已经初始化过，直接返回
+
+    # 如果第一次调用传了 name，就用它初始化全局 name
+    if name:
+        _GLOBAL_LOG_NAME = name
+    elif not _GLOBAL_LOG_NAME:
+        _GLOBAL_LOG_NAME = "instock_TK"  # 默认名字
+
+    if logpath is None:
+        # log_f = get_log_file(log_n='stock.log')
+        log_f = get_log_file(log_n=_GLOBAL_LOG_NAME)
+    else:
+        log_f = logpath
+        # log_f = get_log_file(log_n=_GLOBAL_LOG_NAME)
+
+    logger = logging.getLogger(_GLOBAL_LOG_NAME)
+    # LoggerFactory.log = LoggerFactory.getLogger("instock_TK", logpath=log_file)
+
+    logger.setLevel(logging.ERROR)  # 可以根据需求改为 INFO 或 ERROR
+    logger.propagate = False  # 避免重复打印到 root logger
+
+    if not logger.handlers:  # 避免重复添加 handler
+        # ---------------- 控制台 ----------------
+        ch = logging.StreamHandler()
+        ch_formatter = logging.Formatter(
+            "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
+            if show_detail else
+            "(%(funcName)s:%(lineno)s): %(message)s"
+        )
+        ch.setFormatter(ch_formatter)
+        logger.addHandler(ch)
+
+        # ---------------- MultiprocessHandler ----------------
+        mph = MultiprocessHandler(
+            log_f,
+            when='D',             # 每天轮转
+            backupCount=3,        # 保留 3 个历史日志
+            encoding='utf-8'
+        )
+        mph_formatter = logging.Formatter(
+            "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
+            if show_detail else
+            "(%(funcName)s:%(lineno)s): %(message)s"
+        )
+        mph.setFormatter(mph_formatter)
+        logger.addHandler(mph)
+
+    return logger
+
+
 log = getLogger(show_detail=True)
+
 # sys.stdout = log.handlers[0].stream
 # sys.stderr = log.handlers[0].stream
 # def log_format(record, handler):

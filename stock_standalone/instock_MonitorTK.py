@@ -9,6 +9,12 @@ import multiprocessing as mp
 import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import ttk, filedialog, messagebox,Menu,simpledialog
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    message="pkg_resources is deprecated as an API.*"
+)
+
 import pandas as pd
 import re
 from JohnsonUtil.stock_sender import StockSender
@@ -32,16 +38,6 @@ import numpy as np
 import hashlib
 import sqlite3
 
-
-conf_ini= cct.get_conf_path('global.ini')
-if not conf_ini:
-    print("global.ini 加载失败，程序无法继续运行")
-
-CFG = cct.GlobalConfig(conf_ini)
-
-marketInit = CFG.marketInit
-marketblk = CFG.marketblk
-scale_offset = CFG.scale_offset
 
 # import matplotlib.pyplot as plt
 # plt.ion()  # 开启交互模式
@@ -79,12 +75,14 @@ class LoggerWriter:
     def flush(self):
         pass
 
-def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=True,show_detail=True):
+def init_logging(log_file="appTk.log", level=logging.ERROR, redirect_print=False,show_detail=True):
     """初始化全局日志"""
     # logger\.info\((?!f)  查找没有f  loggger.info(
     # logger\.info\((?!f)[^,)]*,\s*\w+    查找没有f 加,
     #   ^(?!\s*#).*?logger\.info\((?!f)[^,)]*,\s*\w+   查找没有f 加, 排除#
-    logger = logging.getLogger("instock_TK")
+    # logger = logging.getLogger("instock_TK")
+    logger = LoggerFactory.getLogger("instock_TK",logpath=log_file)
+    # logger = LoggerFactory.log
     logger.setLevel(level)
 
     if not logger.handlers:
@@ -129,7 +127,10 @@ def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=True,s
     return logger
 
 logger = init_logging(log_file='instock_tk.log',redirect_print=False) 
-
+# logger = LoggerFactory.log
+# logger.setLevel(log_level)
+# logger.setLevel(LoggerFactory.DEBUG)
+# logger.setLevel(LoggerFactory.INFO)
 
 def init_logging_nopdb(log_file="appTk.log", level=logging.INFO):
     """初始化全局日志，避免重复打印"""
@@ -168,6 +169,16 @@ def init_logging_nopdb(log_file="appTk.log", level=logging.INFO):
     logger.info("日志初始化完成")
     return logger
 
+conf_ini= cct.get_conf_path('global.ini')
+if not conf_ini:
+    print("global.ini 加载失败，程序无法继续运行")
+
+CFG = cct.GlobalConfig(conf_ini)
+
+marketInit = CFG.marketInit
+marketblk = CFG.marketblk
+scale_offset = CFG.scale_offset
+resampleInit = CFG.resampleInit 
 
 # def remove_condition_query(expr: str, cond: str) -> str:
 def remove_invalid_conditions(query: str, invalid_cols: list,showdebug=True):
@@ -588,10 +599,7 @@ if sys.platform.startswith('win'):
 
 
 
-log = LoggerFactory.log
-# log.setLevel(log_level)
-# log.setLevel(LoggerFactory.DEBUG)
-# log.setLevel(LoggerFactory.INFO)
+
 # -------------------- 常量 -------------------- #
 sort_cols, sort_keys = ct.get_market_sort_value_key('3 0')
 DISPLAY_COLS = ct.get_Duration_format_Values(
@@ -612,7 +620,7 @@ def get_base_path():
         try:
             # 此时 __file__ 是可靠的
             path = os.path.dirname(os.path.abspath(__file__))
-            log.info(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
+            logger.info(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
             return path
         except NameError:
              pass # 忽略交互模式
@@ -628,12 +636,12 @@ def get_base_path():
             if real_path != os.path.dirname(os.path.abspath(sys.executable)):
                  # 这是一个强烈信号：sys.executable 被欺骗了 (例如 Nuitka Onefile 启动器)，
                  # 或者程序被从其他地方调用，我们信任 Win32 API。
-                 log.info(f"[DEBUG] Path Mode: WinAPI (Override). Path: {real_path}")
+                 logger.info(f"[DEBUG] Path Mode: WinAPI (Override). Path: {real_path}")
                  return real_path
             
             # 如果 Win32 API 结果与 sys.executable 目录一致，且我们处于打包状态
             if not is_interpreter:
-                 log.info(f"[DEBUG] Path Mode: WinAPI (Standalone). Path: {real_path}")
+                 logger.info(f"[DEBUG] Path Mode: WinAPI (Standalone). Path: {real_path}")
                  return real_path
 
         except Exception:
@@ -642,16 +650,16 @@ def get_base_path():
     # 3. 最终回退（适用于所有打包模式，包括 Linux/macOS）
     if getattr(sys, "frozen", False) or not is_interpreter:
         path = os.path.dirname(os.path.abspath(sys.executable))
-        log.info(f"[DEBUG] Path Mode: Final Fallback. Path: {path}")
+        logger.info(f"[DEBUG] Path Mode: Final Fallback. Path: {path}")
         return path
 
     # 4. 极端脚本回退
-    log.info(f"[DEBUG] Path Mode: Final Script Fallback.")
+    logger.info(f"[DEBUG] Path Mode: Final Script Fallback.")
     return os.path.dirname(os.path.abspath(sys.argv[0]))
 
 BASE_DIR = get_base_path()
 # BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-def get_conf_path(fname):
+def get_conf_path(fname,BASE_DIR=BASE_DIR):
     """
     获取并验证 stock_codes.conf
 
@@ -666,10 +674,10 @@ def get_conf_path(fname):
     # --- 1. 直接存在 ---
     if os.path.exists(default_path):
         if os.path.getsize(default_path) > 0:
-            log.info(f"使用本地配置: {default_path}")
+            # logger.info(f"使用本地配置: {default_path}")
             return default_path
         else:
-            log.warning("配置文件存在但为空，将尝试重新释放")
+            logger.warning("配置文件存在但为空，将尝试重新释放")
 
     # --- 2. 释放默认资源 ---
     cfg_file = cct.get_resource_file(
@@ -680,36 +688,51 @@ def get_conf_path(fname):
 
     # --- 3. 校验释放结果 ---
     if not cfg_file:
-        log.error(f"获取 {fname} 失败（释放阶段）")
+        logger.error(f"获取 {fname} 失败（释放阶段）")
         return None
 
     if not os.path.exists(cfg_file):
-        log.error(f"释放后文件仍不存在: {cfg_file}")
+        logger.error(f"释放后文件仍不存在: {cfg_file}")
         return None
 
     if os.path.getsize(cfg_file) == 0:
-        log.error(f"配置文件为空: {cfg_file}")
+        logger.error(f"配置文件为空: {cfg_file}")
         return None
 
-    log.info(f"使用内置释放配置: {cfg_file}")
+    # logger.info(f"使用内置释放配置: {cfg_file}")
+    if os.path.exists(cfg_file):
+        return cfg_file
+    else:
+        logger.critical(f"资源文件不存在: {cfg_file}")
+        return None
     return cfg_file
 
 DARACSV_DIR = os.path.join(BASE_DIR, "datacsv")
-WINDOW_CONFIG_FILE = os.path.join(BASE_DIR, "window_config.json")
-SEARCH_HISTORY_FILE = os.path.join(DARACSV_DIR, "search_history.json")
 ARCHIVE_DIR = os.path.join(BASE_DIR, "archives")
-icon_path= get_conf_path("MonitorTK.ico")
-if not icon_path:
-    log.critical("scount.ini 加载失败，程序无法继续运行")
-# icon_path = os.path.join(BASE_DIR, "MonitorTK.ico")
-# icon_path = os.path.join(BASE_DIR, "MonitorTK.png")
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(DARACSV_DIR, exist_ok=True)
+
+# WINDOW_CONFIG_FILE = os.path.join(BASE_DIR, "window_config.json")
+# SEARCH_HISTORY_FILE = os.path.join(DARACSV_DIR, "search_history.json")
+# MONITOR_LIST_FILE = os.path.join(BASE_DIR, "monitor_category_list.json")
+# CONFIG_FILE = "display_cols.json"
+# icon_path= get_conf_path("MonitorTK.ico")
+
+SEARCH_HISTORY_FILE = get_conf_path("search_history.json",DARACSV_DIR)
+WINDOW_CONFIG_FILE = get_conf_path("window_config.json",BASE_DIR)
+WINDOW_CONFIG_FILE2 = get_conf_path("scale2_window_config.json",BASE_DIR)
+MONITOR_LIST_FILE = get_conf_path("monitor_category_list.json",BASE_DIR)
+CONFIG_FILE = get_conf_path("display_cols.json",BASE_DIR)
+icon_path = get_conf_path("MonitorTK.ico",BASE_DIR)
+
+if not icon_path:
+    logger.critical("MonitorTK.ico 加载失败，程序无法继续运行")
+# icon_path = os.path.join(BASE_DIR, "MonitorTK.ico")
+# icon_path = os.path.join(BASE_DIR, "MonitorTK.png")
+
 START_INIT = 0
 # st_key_sort = '3 0'
-MONITOR_LIST_FILE = os.path.join(BASE_DIR, "monitor_category_list.json")
 
-CONFIG_FILE = "display_cols.json"
 DEFAULT_DISPLAY_COLS = [
     'name', 'trade', 'boll', 'dff', 'df2', 'couts',
     'percent', 'per1d', 'perc1d', 'ra', 'ral',
@@ -1537,7 +1560,7 @@ def test_code_against_queries(df_code, queries):
                     valid_conditions.append(cond_clean)
                 else:
                     removed_conditions.append(cond_clean)
-                    # log.info(f"剔除不存在的列条件: {cond_clean}")
+                    # logger.info(f"剔除不存在的列条件: {cond_clean}")
 
             # 去掉在 bracket_patterns 中出现的内容
             removed_conditions = [
@@ -1886,7 +1909,6 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
             logger.info(f"resample: {resample} flag.value : {flag.value} market : {market} blkname :{blkname} ")
             top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
             if top_now.empty:
-                log.debug("no data fetched")
                 logger.info("top_now.empty no data fetched")
                 time.sleep(ct.duration_sleep_time)
                 continue
@@ -1931,9 +1953,9 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
                 if not flag.value: break
                 time.sleep(0.5)
             START_INIT = 1
-            # log.debug(f'fetch_and_process timesleep:{ct.duration_sleep_time} resample:{resample}')
+            # logger.debug(f'fetch_and_process timesleep:{ct.duration_sleep_time} resample:{resample}')
         except Exception as e:
-            log.error(f"Error in background process: {e}", exc_info=True)
+            logger.error(f"Error in background process: {e}", exc_info=True)
             time.sleep(ct.duration_sleep_time / 2)
 
 # ------------------ 指标计算 ------------------ #
@@ -2289,12 +2311,14 @@ class StockMonitorApp(tk.Tk):
             # logger.info(f'dpi : {dpi} fontsize: {font.pointSize()} ratio :  {(dpi / 72)}')
 
         self.title("Stock Monitor")
-        self.initial_w, self.initial_h, self.initial_x, self.initial_y  = self.load_window_position(self, "main_window")
+        self.initial_w, self.initial_h, self.initial_x, self.initial_y  = self.load_window_position(self, "main_window", default_width=1200, default_height=480)
         self.monitor_windows = {}
         # self.iconbitmap(icon_path)  # Windows 下 .ico 文件
         # 判断文件是否存在再加载
         if os.path.exists(icon_path):
-            self.iconbitmap(icon_path)
+            # self.iconbitmap(icon_path)
+            self.after(1000, lambda: self.iconbitmap(icon_path))
+
         else:
             print(f"图标文件不存在: {icon_path}")
         # self._icon = tk.PhotoImage(file=icon_path)
@@ -2314,7 +2338,7 @@ class StockMonitorApp(tk.Tk):
         from multiprocessing import Manager
         self.manager = Manager()
         self.global_dict = self.manager.dict()  # 共享字典
-        self.global_dict["resample"] = '3d'
+        self.global_dict["resample"] = resampleInit   
         # self.global_dict["resample"] = 'w'
         self.global_values = cct.GlobalValues(self.global_dict)
         resample = self.global_values.getkey("resample")
@@ -2834,6 +2858,7 @@ class StockMonitorApp(tk.Tk):
         marketInit = CFG.marketInit
         marketblk = CFG.marketblk
         scale_offset = CFG.scale_offset
+        resampleInit = CFG.resampleInit 
         logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} scale_offset: {scale_offset}")
 
     def get_scaled_value(self):
@@ -3307,7 +3332,7 @@ class StockMonitorApp(tk.Tk):
                     }
                     self._global_concept_prev_data[c_name] = prev_data
                     # logger.info("[DEBUG] 已初始概念数据(_init_prev_concepts_data)")
-            log.debug(f"[init_global_concept_data] 新增 prev_data: {concepts[0]}")
+            logger.debug(f"[init_global_concept_data] 新增 prev_data: {concepts[0]}")
 
 
     def get_following_concepts_by_correlation(self, code, top_n=10):
@@ -3511,7 +3536,7 @@ class StockMonitorApp(tk.Tk):
                 "cond_type": cond_type_var.get(),
                 "threshold": threshold_var.get()
             }
-            log.info(f"保存报警规则: {rule}")
+            logger.info(f"保存报警规则: {rule}")
             stock_code = rule.get("stock")  # 或者从 UI 里获取选中的股票代码
             logger.info(f'stock_code:{stock_code}')
             parent.alert_manager.save_rule(stock_code['name'],rule)  # 保存到 AlertManager
@@ -3598,7 +3623,7 @@ class StockMonitorApp(tk.Tk):
 
 
         # 在初始化时（StockMonitorApp.__init__）创建并注册：
-        self.alert_manager = AlertManager(storage_dir=DARACSV_DIR, logger=log)
+        self.alert_manager = AlertManager(storage_dir=DARACSV_DIR, logger=logger)
         set_global_manager(self.alert_manager)
 
         # --- 控件区 ---
@@ -4176,7 +4201,7 @@ class StockMonitorApp(tk.Tk):
                     #         self._concept_dict_global.setdefault(c, []).append(row['percent'])
                     self.status_var2.set(f'queue update: {self.format_next_time()}')
         except Exception as e:
-            log.error(f"Error updating tree: {e}", exc_info=True)
+            logger.error(f"Error updating tree: {e}", exc_info=True)
         finally:
             self.after(1000, self.update_tree)
 
@@ -4212,10 +4237,10 @@ class StockMonitorApp(tk.Tk):
             send_code_via_pipe(payload)   # 假设你用 multiprocessing.Pipe
             # 或者 self.queue.put(stock_info)  # 如果是队列
             # 或者 send_code_to_other_window(stock_info) # 如果是 WM_COPYDATA
-            log.info(f"推送: {stock_info}")
+            logger.info(f"推送: {stock_info}")
             return True
         except Exception as e:
-            log.error(f"推送 stock_info 出错: {e} {row}")
+            logger.error(f"推送 stock_info 出错: {e} {row}")
             return False
 
 
@@ -4264,7 +4289,7 @@ class StockMonitorApp(tk.Tk):
             self.select_code = stock_code
 
             stock_code = str(stock_code).zfill(6)
-            log.info(f'stock_code:{stock_code}')
+            logger.info(f'stock_code:{stock_code}')
             # logger.info(f"选中股票代码: {stock_code}")
             if send_tdx_Key and stock_code:
                 self.sender.send(stock_code)
@@ -4330,7 +4355,7 @@ class StockMonitorApp(tk.Tk):
     # def refresh_tree(self, df):
     #     for i in self.tree.get_children():
     #         self.tree.delete(i)
-    #     log.debug(f'refresh_tree df:{df[:2]}')
+    #     logger.debug(f'refresh_tree df:{df[:2]}')
     #     if not df.empty:
     #         df = df.copy()
     #         # 检查 DISPLAY_COLS 中 code 是否已经存在
@@ -4717,7 +4742,7 @@ class StockMonitorApp(tk.Tk):
     #     #     try:
     #     #         df = df.query(query)
     #     #     except Exception as e:
-    #     #         log.error(f"自动搜索过滤错误: {e}")
+    #     #         logger.error(f"自动搜索过滤错误: {e}")
 
     #     # 插入到 TreeView
     #     for _, row in df.iterrows():
@@ -4885,7 +4910,7 @@ class StockMonitorApp(tk.Tk):
     #         self.select_code = stock_code
 
     #         stock_code = str(stock_code).zfill(6)
-    #         log.info(f'stock_code:{stock_code}')
+    #         logger.info(f'stock_code:{stock_code}')
     #         # logger.info(f"选中股票代码: {stock_code}")
     #         if send_tdx_Key and stock_code:
     #             self.sender.send(stock_code)
@@ -4924,7 +4949,7 @@ class StockMonitorApp(tk.Tk):
         self.select_code = stock_code
 
         stock_code = str(stock_code).zfill(6)
-        log.info(f'stock_code:{stock_code}')
+        logger.info(f'stock_code:{stock_code}')
         # logger.info(f"选中股票代码: {stock_code}")
 
         if send_tdx_Key and stock_code:
@@ -6634,9 +6659,9 @@ class StockMonitorApp(tk.Tk):
         # 使用 unique_code 构造唯一的窗口保存名
         window_name = f"concept_top10_window-{unique_code}"
         try:
-            self.load_window_position(win, window_name, default_width=260, default_height=260)
+            self.load_window_position(win, window_name, default_width=420, default_height=340)
         except Exception:
-            win.geometry("260x260")
+            win.geometry("420x340")
 
         # 鼠标滚轮悬停滚动
         def on_mousewheel(event):
@@ -8857,7 +8882,7 @@ class StockMonitorApp(tk.Tk):
             if val2:
                 self.sync_history(val2, self.search_history2, self.search_combo2, "history2", "history2")
         except Exception as ex:
-            log.exception("更新搜索历史时出错: %s", ex)
+            logger.exception("更新搜索历史时出错: %s", ex)
 
         # ================= 数据为空检查 =================
         if self.df_all.empty:
@@ -8901,7 +8926,7 @@ class StockMonitorApp(tk.Tk):
                 valid_conditions.append(cond_clean)
             else:
                 removed_conditions.append(cond_clean)
-                # log.info(f"剔除不存在的列条件: {cond_clean}")
+                # logger.info(f"剔除不存在的列条件: {cond_clean}")
 
         # 去掉在 bracket_patterns 中出现的内容
         removed_conditions = [
@@ -8990,7 +9015,7 @@ class StockMonitorApp(tk.Tk):
                     self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
                 logger.info(f'final_query: {final_query}')
         except Exception as e:
-            log.error(f"Query error: {e}")
+            logger.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")
         if df_filtered.empty:
             return
@@ -9234,7 +9259,7 @@ class StockMonitorApp(tk.Tk):
     #             df_filtered = self.current_df.query(query)
     #             self.refresh_tree(df_filtered)
     #         except Exception as e:
-    #             log.error(f"Query error: {e}")
+    #             logger.error(f"Query error: {e}")
 
     # # ----------------- Resample ----------------- #
     # def set_resample(self, event=None):
@@ -9256,10 +9281,10 @@ class StockMonitorApp(tk.Tk):
     #     try:
     #         while not self.queue.empty():
     #             df = self.queue.get_nowait()
-    #             log.debug(f'df:{df[:2]}')
+    #             logger.debug(f'df:{df[:2]}')
     #             self.refresh_tree(df)
     #     except Exception as e:
-    #         log.error(f"Error updating tree: {e}", exc_info=True)
+    #         logger.error(f"Error updating tree: {e}", exc_info=True)
     #     finally:
     #         self.after(1000, self.update_tree)
 
@@ -9343,7 +9368,7 @@ class StockMonitorApp(tk.Tk):
                 # logger.info(f'status_txt:{status_txt}')
                 self.status_var2.set(f"已加载数据: {status_txt}")
             except Exception as e:
-                log.error(f"加载 CSV 失败: {e}")
+                logger.error(f"加载 CSV 失败: {e}")
 
 
     # def load_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500):
@@ -9359,7 +9384,7 @@ class StockMonitorApp(tk.Tk):
     #                     # Tkinter geometry 格式
     #                     return pos['width'],pos['height'],x,y
     #         except Exception as e:
-    #             log.error(f"读取窗口位置失败: {e}")
+    #             logger.error(f"读取窗口位置失败: {e}")
     #     # 默认居中
     #     self.center_window(win, default_width, default_height)
 
@@ -9378,7 +9403,7 @@ class StockMonitorApp(tk.Tk):
     #             with open(file_path, "r", encoding="utf-8") as f:
     #                 data = json.load(f)
     #         except Exception as e:
-    #             log.error(f"读取窗口配置失败: {e}")
+    #             logger.error(f"读取窗口配置失败: {e}")
 
     #     data[window_name] = pos
 
@@ -9386,7 +9411,7 @@ class StockMonitorApp(tk.Tk):
     #         with open(file_path, "w", encoding="utf-8") as f:
     #             json.dump(data, f, ensure_ascii=False, indent=2)
     #     except Exception as e:
-    #         log.error(f"保存窗口位置失败: {e}")
+    #         logger.error(f"保存窗口位置失败: {e}")
 
     # def load_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500):
     #     """从统一配置文件加载窗口位置"""
@@ -9409,7 +9434,7 @@ class StockMonitorApp(tk.Tk):
     #                     # Tkinter geometry 格式
     #                     return width,height,x,y
     #         except Exception as e:
-    #             log.error(f"读取窗口位置失败: {e}")
+    #             logger.error(f"读取窗口位置失败: {e}")
     #     # 默认居中
     #     self.center_window(win, default_width, default_height)
 
@@ -9668,16 +9693,16 @@ class StockMonitorApp(tk.Tk):
 
     #                 # --- 应用窗口位置 ---
     #                 win.geometry(f"{width}x{height}+{x}+{y}")
-    #                 log.info(f"[load_window_position] 加载 {window_name}: {width}x{height}+{x}+{y}")
+    #                 logger.info(f"[load_window_position] 加载 {window_name}: {width}x{height}+{x}+{y}")
     #                 return width, height, x, y
 
     #         # 没有记录则默认居中
-    #         log.info(f"[load_window_position] 未找到 {window_name} 配置，使用默认居中")
+    #         logger.info(f"[load_window_position] 未找到 {window_name} 配置，使用默认居中")
     #         self.center_window(win, default_width, default_height)
     #         return default_width, default_height, None, None
 
     #     except Exception as e:
-    #         log.error(f"[load_window_position] 读取窗口位置失败: {e}")
+    #         logger.error(f"[load_window_position] 读取窗口位置失败: {e}")
     #         self.center_window(win, default_width, default_height)
     #         return default_width, default_height, None, None
 
@@ -9702,17 +9727,17 @@ class StockMonitorApp(tk.Tk):
     #                 with open(file_path, "r", encoding="utf-8") as f:
     #                     data = json.load(f)
     #             except Exception as e:
-    #                 log.error(f"[save_window_position] 读取旧配置失败: {e}")
+    #                 logger.error(f"[save_window_position] 读取旧配置失败: {e}")
 
     #         # --- 更新并写入 ---
     #         data[window_name] = pos
     #         with open(file_path, "w", encoding="utf-8") as f:
     #             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    #         log.info(f"[save_window_position] 已保存 {window_name}: {pos}")
+    #         logger.info(f"[save_window_position] 已保存 {window_name}: {pos}")
 
     #     except Exception as e:
-    #         log.error(f"[save_window_position] 保存窗口位置失败: {e}")
+    #         logger.error(f"[save_window_position] 保存窗口位置失败: {e}")
 
 
     # def load_window_position_qt_guisave(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
@@ -9729,9 +9754,9 @@ class StockMonitorApp(tk.Tk):
     #         if geom_b64:
     #             geom_bytes = base64.b64decode(geom_b64)
     #             win.restoreGeometry(geom_bytes)
-    #             log.info(f"[load_window_position_qt] 已恢复 {window_name}")
+    #             logger.info(f"[load_window_position_qt] 已恢复 {window_name}")
     #     except Exception as e:
-    #         log.error(f"[load_window_position_qt] 恢复窗口位置失败: {e}")
+    #         logger.error(f"[load_window_position_qt] 恢复窗口位置失败: {e}")
 
 
     def load_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE,
@@ -9832,7 +9857,7 @@ class StockMonitorApp(tk.Tk):
     #                 # 防止窗口位置越界
     #                 x, y = clamp_window_to_screens(x, y, width, height)
 
-    #                 log.info(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
+    #                 logger.info(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
     #                 # return width, height, x, y
     #         # --- 检查屏幕边界 ---
     #         screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
@@ -9888,16 +9913,16 @@ class StockMonitorApp(tk.Tk):
     #                 with open(file_path, "r", encoding="utf-8") as f:
     #                     data = json.load(f)
     #             except Exception as e:
-    #                 log.error(f"[save_window_position_qt] 读取配置失败: {e}")
+    #                 logger.error(f"[save_window_position_qt] 读取配置失败: {e}")
 
     #         data[window_name] = pos
     #         with open(file_path, "w", encoding="utf-8") as f:
     #             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    #         log.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
+    #         logger.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
 
     #     except Exception as e:
-    #         log.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
+    #         logger.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
 
 
 
@@ -9924,7 +9949,7 @@ class StockMonitorApp(tk.Tk):
     #                 with open(file_path, "r", encoding="utf-8") as f:
     #                     data = json.load(f)
     #             except Exception as e:
-    #                 log.error(f"[save_window_position_qt] 读取配置失败: {e}")
+    #                 logger.error(f"[save_window_position_qt] 读取配置失败: {e}")
 
     #         # 保存当前窗口 geometry
     #         data[window_name] = geom_b64
@@ -9932,10 +9957,10 @@ class StockMonitorApp(tk.Tk):
     #         with open(file_path, "w", encoding="utf-8") as f:
     #             json.dump(data, f, ensure_ascii=False, indent=2)
 
-    #         log.info(f"[save_window_position_qt] 已保存 {window_name}（Base64 geometry）")
+    #         logger.info(f"[save_window_position_qt] 已保存 {window_name}（Base64 geometry）")
 
     #     except Exception as e:
-    #         log.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
+    #         logger.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
 
 
     def save_window_position_qt(self, win, window_name, file_path=WINDOW_CONFIG_FILE):
@@ -9998,7 +10023,7 @@ class StockMonitorApp(tk.Tk):
     #             with open(file_path, "r", encoding="utf-8") as f:
     #                 data = json.load(f)
     #         except Exception as e:
-    #             log.error(f"读取窗口配置失败: {e}")
+    #             logger.error(f"读取窗口配置失败: {e}")
 
     #     data[window_name] = pos
 
@@ -10006,7 +10031,7 @@ class StockMonitorApp(tk.Tk):
     #         with open(file_path, "w", encoding="utf-8") as f:
     #             json.dump(data, f, ensure_ascii=False, indent=2)
     #     except Exception as e:
-    #         log.error(f"保存窗口位置失败: {e}")
+    #         logger.error(f"保存窗口位置失败: {e}")
 
     def center_window(self,win, width, height):
         """
@@ -13161,7 +13186,7 @@ class KLineMonitor(tk.Toplevel):
         #         logger.info(f"读取 last_query.json 出错: {e}")
         # 加载窗口位置（可选）
         try:
-            self.master.load_window_position(self, "KLineMonitor", default_width=760, default_height=460)
+            self.master.load_window_position(self, "KLineMonitor", default_width=860, default_height=560)
         except Exception:
             self.geometry("760x460")
 
@@ -13946,7 +13971,7 @@ class KLineMonitor(tk.Toplevel):
                             valid_conditions.append(cond_clean)
                         else:
                             removed_conditions.append(cond_clean)
-                            # log.info(f"剔除不存在的列条件: {cond_clean}")
+                            # logger.info(f"剔除不存在的列条件: {cond_clean}")
 
                     # 去掉在 bracket_patterns 中出现的内容
                     removed_conditions = [
@@ -14182,13 +14207,21 @@ if __name__ == "__main__":
     mp.freeze_support()  # <-- 必须
 
     args = parse_args()  # 解析命令行参数
-    level = getattr(logging, args.log.upper(), logging.INFO)
+    log_level = getattr(logging, args.log.upper(), logging.INFO)
 
     # 直接用自定义的 init_logging，传入日志等级
-    # logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=level)
-    logger.setLevel(level)
-
+    # logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=log_level)
+    logger.setLevel(log_level)
     logger.info("程序启动…")
+    # if log_level == logging.DEBUG:
+    # if logger.isEnabledFor(logging.DEBUG):
+    #     logger.debug("当前已开启 DEBUG 模式")
+    #     log = LoggerFactory.log
+    #     log.setLevel(LoggerFactory.DEBUG)
+    #     log.debug("log当前已开启 DEBUG 模式")
+
+    # log.setLevel(LoggerFactory.INFO)
+    # log.setLevel(Log.DEBUG)
 
     # ✅ 命令行触发 write_to_hdf
     if args.write_to_hdf:
