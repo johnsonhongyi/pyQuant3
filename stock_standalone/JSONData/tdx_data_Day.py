@@ -19,7 +19,7 @@ from JohnsonUtil import commonTips as cct
 from JohnsonUtil import johnson_cons as ct
 import tushare as ts
 import pandas_ta as ta
-
+import talib
 from JSONData import sina_data
 # import numba as nb
 import datetime
@@ -7068,11 +7068,6 @@ if __name__ == '__main__':
         print("Index Wri ok 300", end=' ')
         Write_sina_to_tdx(tdx_index_code_list, index=True)
         Write_sina_to_tdx(market='all')
-        # print("Index Wri ok 900", end=' ')
-        # Write_sina_to_tdx(tdx_index_code_list, index=True,dl=900)
-        # Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=900)
-        # Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=300)
-
 
     hdf5_wri = cct.cct_raw_input("Multi-300 write all Tdx data to Multi hdf_300[rw|y|n]:")
     if hdf5_wri == 'rw':

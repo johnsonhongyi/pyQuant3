@@ -32,6 +32,17 @@ import numpy as np
 import hashlib
 import sqlite3
 
+
+conf_ini= cct.get_conf_path('global.ini')
+if not conf_ini:
+    print("global.ini 加载失败，程序无法继续运行")
+
+CFG = cct.GlobalConfig(conf_ini)
+
+marketInit = CFG.marketInit
+marketblk = CFG.marketblk
+scale_offset = CFG.scale_offset
+
 # import matplotlib.pyplot as plt
 # plt.ion()  # 开启交互模式
 import hashlib
@@ -68,13 +79,12 @@ class LoggerWriter:
     def flush(self):
         pass
 
-def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=False,show_detail=True):
+def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=True,show_detail=True):
     """初始化全局日志"""
     # logger\.info\((?!f)  查找没有f  loggger.info(
     # logger\.info\((?!f)[^,)]*,\s*\w+    查找没有f 加,
     #   ^(?!\s*#).*?logger\.info\((?!f)[^,)]*,\s*\w+   查找没有f 加, 排除#
-
-    logger = logging.getLogger("instock_MonitorTK")
+    logger = logging.getLogger("instock_TK")
     logger.setLevel(level)
 
     if not logger.handlers:
@@ -85,19 +95,19 @@ def init_logging(log_file="appTk.log", level=logging.INFO, redirect_print=False,
         else:
             formatter = logging.Formatter("(%(funcName)s:%(lineno)s): %(message)s")
             ch_formatter = logging.Formatter("(%(funcName)s:%(lineno)s): %(message)s");
-        # fh = logging.FileHandler(log_file, encoding="utf-8")
+        
         # ✅ 使用 RotatingFileHandler：超过 1MB 自动轮转
         fh = RotatingFileHandler(
             log_file, 
-            maxBytes=1024 * 1024,  # 1MB
+            maxBytes= 5 * 1024 * 1024,  # 1MB
             backupCount=3,         # 最多保留3个历史日志
             encoding="utf-8"
         )
-        # fh.setFormatter(formatter)
-        # logger.addHandler(fh)
+        fh.setFormatter(formatter)
+        logger.addHandler(fh)
 
         ch = logging.StreamHandler()
-        ch.setFormatter(formatter)
+        ch.setFormatter(ch_formatter)
         logger.addHandler(ch)
 
     logger.propagate = False
@@ -554,9 +564,6 @@ def get_windows_dpi_scale_factor():
 
 
 
-# default_font = QtGui.QFont("Microsoft YaHei", 10)
-# QtWidgets.QApplication.setFont(default_font)
-
 if sys.platform.startswith('win'):
     set_process_dpi_awareness()  # 假设设置为 Per-Monitor V2
     # 1. 获取缩放因子
@@ -580,33 +587,6 @@ if sys.platform.startswith('win'):
     # logger.info(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
 
 
-# 设置 PlotItem 标题的字体 (如果使用了 plot.setTitle())
-# plot.setTitle("我的图表", font=f'{FONT_FAMILY}, {TITLE_SIZE}, bold')
-
-# 针对 Windows，使用此变量来确保应用程序被识别为 DPI 意识的
-# 注意: 这在 PyQt/PySide6 中可能不是必需的，但在旧版中可能有用。
-# from ctypes import windll
-# try:
-#     # Set Process DPI Awareness (如果应用尚未设置)
-#     windll.shcore.SetProcessDpiAwareness(1) # 1 = System DPI Aware
-# except:
-#     pass
-
-# QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-# QtCore.QCoreApplication.setAttribute(QtCore.Qt.AA_UseHighDpiPixmaps, True)
-# app = QtWidgets.QApplication(sys.argv)
-
-# QtWidgets.QApplication.setAttribute(QtCore.Qt.AA_EnableHighDpiScaling, True)
-# app = QtWidgets.QApplication([])
-
-# if sys.platform == "win32":
-#     try:
-#         # 设置进程为 DPI 感知，不让系统自动缩放 Tkinter
-#         ctypes.windll.shcore.SetProcessDpiAwareness(2)  # 1 = 系统 DPI 感知
-#         # 或者 SetProcessDpiAwareness(2) 高 DPI 感知
-#     except Exception:
-#         pass
-
 
 log = LoggerFactory.log
 # log.setLevel(log_level)
@@ -616,21 +596,112 @@ log = LoggerFactory.log
 sort_cols, sort_keys = ct.get_market_sort_value_key('3 0')
 DISPLAY_COLS = ct.get_Duration_format_Values(
     ct.Monitor_format_trade,sort_cols[:2])
-# logger.info(f'DISPLAY_COLS : {DISPLAY_COLS}')
-# DISPLAY_COLS = ct.get_Duration_format_Values(
-# ct.Monitor_format_trade,
-#     ['name','trade','boll','dff','df2','couts','percent','volume','category']
-# )
 
-# ct_MonitorMarket_Values=ct.get_Duration_format_Values(
-#                     ct.Monitor_format_trade, market_sort_value[:2])
+def get_base_path():
+    """
+    获取程序基准路径。在 Windows 打包环境 (Nuitka/PyInstaller) 中，
+    使用 Win32 API 优先获取真实的 EXE 目录。
+    """
+    
+    # 检查是否为 Python 解释器运行
+    is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
+    
+    # 1. 普通 Python 脚本模式
+    if is_interpreter and not getattr(sys, "frozen", False):
+        # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
+        try:
+            # 此时 __file__ 是可靠的
+            path = os.path.dirname(os.path.abspath(__file__))
+            log.info(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
+            return path
+        except NameError:
+             pass # 忽略交互模式
+    
+    # 2. Windows 打包模式 (Nuitka/PyInstaller EXE 模式)
+    # 只要不是解释器运行，或者 sys.frozen 被设置，我们就认为是打包模式
+    if sys.platform.startswith('win'):
+        try:
+            # 无论是否 Onefile，Win32 API 都会返回真实 EXE 路径
+            real_path = cct._get_win32_exe_path()
+            
+            # 核心：确保我们返回的是 EXE 的真实目录
+            if real_path != os.path.dirname(os.path.abspath(sys.executable)):
+                 # 这是一个强烈信号：sys.executable 被欺骗了 (例如 Nuitka Onefile 启动器)，
+                 # 或者程序被从其他地方调用，我们信任 Win32 API。
+                 log.info(f"[DEBUG] Path Mode: WinAPI (Override). Path: {real_path}")
+                 return real_path
+            
+            # 如果 Win32 API 结果与 sys.executable 目录一致，且我们处于打包状态
+            if not is_interpreter:
+                 log.info(f"[DEBUG] Path Mode: WinAPI (Standalone). Path: {real_path}")
+                 return real_path
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        except Exception:
+            pass 
+
+    # 3. 最终回退（适用于所有打包模式，包括 Linux/macOS）
+    if getattr(sys, "frozen", False) or not is_interpreter:
+        path = os.path.dirname(os.path.abspath(sys.executable))
+        log.info(f"[DEBUG] Path Mode: Final Fallback. Path: {path}")
+        return path
+
+    # 4. 极端脚本回退
+    log.info(f"[DEBUG] Path Mode: Final Script Fallback.")
+    return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+BASE_DIR = get_base_path()
+# BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+def get_conf_path(fname):
+    """
+    获取并验证 stock_codes.conf
+
+    逻辑：
+      1. 优先使用 BASE_DIR/stock_codes.conf
+      2. 不存在 → 从 JSONData/stock_codes.conf 释放
+      3. 校验文件
+    """
+    # default_path = os.path.join(BASE_DIR, "stock_codes.conf")
+    default_path = os.path.join(BASE_DIR, fname)
+
+    # --- 1. 直接存在 ---
+    if os.path.exists(default_path):
+        if os.path.getsize(default_path) > 0:
+            log.info(f"使用本地配置: {default_path}")
+            return default_path
+        else:
+            log.warning("配置文件存在但为空，将尝试重新释放")
+
+    # --- 2. 释放默认资源 ---
+    cfg_file = cct.get_resource_file(
+        rel_path=f"{fname}",
+        out_name=fname,
+        BASE_DIR=BASE_DIR
+    )
+
+    # --- 3. 校验释放结果 ---
+    if not cfg_file:
+        log.error(f"获取 {fname} 失败（释放阶段）")
+        return None
+
+    if not os.path.exists(cfg_file):
+        log.error(f"释放后文件仍不存在: {cfg_file}")
+        return None
+
+    if os.path.getsize(cfg_file) == 0:
+        log.error(f"配置文件为空: {cfg_file}")
+        return None
+
+    log.info(f"使用内置释放配置: {cfg_file}")
+    return cfg_file
+
 DARACSV_DIR = os.path.join(BASE_DIR, "datacsv")
 WINDOW_CONFIG_FILE = os.path.join(BASE_DIR, "window_config.json")
 SEARCH_HISTORY_FILE = os.path.join(DARACSV_DIR, "search_history.json")
 ARCHIVE_DIR = os.path.join(BASE_DIR, "archives")
-icon_path = os.path.join(BASE_DIR, "MonitorTK.ico")
+icon_path= get_conf_path("MonitorTK.ico")
+if not icon_path:
+    log.critical("scount.ini 加载失败，程序无法继续运行")
+# icon_path = os.path.join(BASE_DIR, "MonitorTK.ico")
 # icon_path = os.path.join(BASE_DIR, "MonitorTK.png")
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(DARACSV_DIR, exist_ok=True)
@@ -1765,13 +1836,15 @@ def load_monitor_list(MONITOR_LIST_FILE=MONITOR_LIST_FILE):
                 return []
     return []
 
+
 # ------------------ 后台数据进程 ------------------ #
 def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
     global START_INIT
     g_values = cct.GlobalValues(shared_dict)  # 主进程唯一实例
     resample = g_values.getkey("resample") or "d"
-    market = g_values.getkey("market", "all")        # all / sh / cyb / kcb / bj
-    blkname = g_values.getkey("blkname", "061.blk")  # 对应的 blk 文件
+    # logger.info(f'getkey("market") : {g_values.getkey("market")} marketInit:{marketInit}')
+    market = g_values.getkey("market", marketInit)        # all / sh / cyb / kcb / bj
+    blkname = g_values.getkey("blkname", marketblk)  # 对应的 blk 文件
     logger.info(f"当前选择市场: {market}, blkname={blkname}")
     st_key_sort =  g_values.getkey("st_key_sort", "3 0") 
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort)
@@ -1808,9 +1881,9 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
         try:
             # resample = cct.GlobalValues().getkey("resample") or "d"
             resample = g_values.getkey("resample") or "d"
-            market = g_values.getkey("market", "all")        # all / sh / cyb / kcb / bj
-            blkname = g_values.getkey("blkname", "061.blk")  # 对应的 blk 文件
-            logger.info(f"resample: {resample} flag.value : {flag.value} blkname :{blkname} market : {market}")
+            market = g_values.getkey("market", marketInit)        # all / sh / cyb / kcb / bj
+            blkname = g_values.getkey("blkname", marketblk)  # 对应的 blk 文件
+            logger.info(f"resample: {resample} flag.value : {flag.value} market : {market} blkname :{blkname} ")
             top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
             if top_now.empty:
                 log.debug("no data fetched")
@@ -2218,7 +2291,12 @@ class StockMonitorApp(tk.Tk):
         self.title("Stock Monitor")
         self.initial_w, self.initial_h, self.initial_x, self.initial_y  = self.load_window_position(self, "main_window")
         self.monitor_windows = {}
-        self.iconbitmap(icon_path)  # Windows 下 .ico 文件
+        # self.iconbitmap(icon_path)  # Windows 下 .ico 文件
+        # 判断文件是否存在再加载
+        if os.path.exists(icon_path):
+            self.iconbitmap(icon_path)
+        else:
+            print(f"图标文件不存在: {icon_path}")
         # self._icon = tk.PhotoImage(file=icon_path)
         # self.iconphoto(True, self._icon)
         self.sortby_col = None
@@ -2347,6 +2425,41 @@ class StockMonitorApp(tk.Tk):
         self.bind("<Alt-c>", lambda e:self.open_column_manager())
         # 启动周期检测 RDP DPI 变化
         self.after(3000, self._check_dpi_change)
+        self.auto_adjust_column = self.dfcf_var.get()
+
+    # scheduler
+    def schedule_15_30_job(self):
+        from datetime import datetime, time
+
+        now = datetime.now()
+        today_1530 = datetime.combine(now.date(), time(15,30))
+
+        if not hasattr(self, "_last_run_date"):
+            logger.info("schedule_15_30_job，开始_last_run_date...")
+            self._last_run_date = None
+
+        if now >= today_1530 and self._last_run_date != now.date():
+            self._last_run_date = now.date()
+            logger.info(f'start run Write_market_all_day_mp')
+            threading.Thread(
+                target=self.run_15_30_task,
+                daemon=True
+            ).start()
+
+        self.after(60*1000, self.schedule_15_30_job)
+
+    # worker
+    def run_15_30_task(self):
+        if getattr(self, "_task_running", False):
+            return
+
+        self._task_running = True
+        try:
+            tdd.Write_market_all_day_mp('all')
+            logger.info(f'run Write_market_all_day_mp OK')
+
+        finally:
+            self._task_running = False
 
     def save_all_monitor_windows(self):
         """保存当前所有监控窗口"""
@@ -2710,10 +2823,34 @@ class StockMonitorApp(tk.Tk):
 
         self.tree.bind("<ButtonRelease-1>", on_column_release)
 
+    def reload_cfg_value(self):
+        global marketInit,marketblk,scale_offset
+        conf_ini= cct.get_conf_path('global.ini')
+        if not conf_ini:
+            logger.info("global.ini 加载失败，程序无法继续运行")
+
+        CFG = cct.GlobalConfig(conf_ini)
+
+        marketInit = CFG.marketInit
+        marketblk = CFG.marketblk
+        scale_offset = CFG.scale_offset
+        logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} scale_offset: {scale_offset}")
+
     def get_scaled_value(self):
         """返回当前的缩放因子（用于 TreeView 列宽计算）"""
         # ✅ 直接返回 scale_factor，不要做奇怪的减法
-        return self.scale_factor
+        global scale_offset
+        sf = self.scale_factor
+        offset = float(scale_offset)
+        # if sf <= 1.25:
+        #     offset = 0.15
+        # elif sf < 1.5:
+        #     offset = 0.25
+        # elif sf < 2:
+        #     offset = 0.25
+        # else:
+        #     offset = 0.25
+        return sf - offset
 
     def _setup_tree_columns(self,tree, cols, sort_callback=None, other={}):
         """
@@ -2751,54 +2888,17 @@ class StockMonitorApp(tk.Tk):
                 stretch = False
 
             elif col in co2int or col in co2width:
-                width = int(60 * col_scaled)  # 缩小一点，保持紧凑
+                width = int(40 * col_scaled)  # 缩小一点，保持紧凑
                 minwidth = int(25 * col_scaled)
-                stretch = True
+                # stretch = self.auto_adjust_column
+                stretch = not self.dfcf_var.get()
             else:
-                width = int(80 * col_scaled)  # 更小的宽度
+                width = int(60 * col_scaled)  # 更小的宽度
                 minwidth = int(30 * col_scaled)
-                stretch = True
+                stretch = not self.dfcf_var.get()
             tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=stretch)
 
-    # def update_treeview_cols(self, new_cols):
-    #     try:
-    #         # 1. 合法列
-    #         valid_cols = [c for c in new_cols if c in self.df_all.columns]
-    #         if 'code' not in valid_cols:
-    #             valid_cols = ["code"] + valid_cols
 
-    #         # 相同就跳过
-    #         if valid_cols == self.current_cols:
-    #             return
-
-    #         self.current_cols = valid_cols
-
-    #         # 2. 暂时清空列
-    #         self.tree["displaycolumns"] = ()
-    #         self.tree["columns"] = ()
-    #         self.tree.update_idletasks()
-
-    #         # 3. 重新配置列
-    #         cols = tuple(self.current_cols)
-    #         # logger.info(f'cols : {cols}')
-    #         self.tree["columns"] = cols
-    #         self.tree["displaycolumns"] = cols
-    #         self.tree.configure(show="headings")
-
-    #         # 4. 设置列宽
-    #         if not hasattr(self, "_name_col_width"):
-    #             self._name_col_width = int(100*self.get_scaled_value())   # 初始name列宽
-
-    #         logger.info(f'update_treeview_cols self.scale_factor : {self.scale_factor}')
-    #         self._setup_tree_columns(self.tree,cols, sort_callback=self.sort_by_column, other={})
-
-    #         # 5. 延迟刷新
-    #         self.tree.after(100, self.refresh_tree)
-    #         self.tree.after(500, self.bind_treeview_column_resize)
-    #     except Exception as e:
-    #         import traceback
-    #         traceback.print_exc()
-    #         logger.info("更新 Treeview 列失败：", e)
     def update_treeview_cols(self, new_cols):
         try:
             # 1. 合法列
@@ -3443,7 +3543,17 @@ class StockMonitorApp(tk.Tk):
             width=8,
             state="readonly"
         )
-        self.market_combo.current(0)  # 默认 "全部"
+
+        values = list(self.market_map.keys())
+
+        # 根据 code 找 index
+        idx = next(
+            (i for i, k in enumerate(values)
+             if self.market_map[k]["code"] == marketInit),
+            0   # 找不到则回退到 "全部"
+        )
+
+        self.market_combo.current(idx)  # 默认 "全部"
         self.market_combo.pack(side="left", padx=5)
 
         # 绑定选择事件，存入 GlobalValues
@@ -3455,7 +3565,9 @@ class StockMonitorApp(tk.Tk):
             logger.info(f"选择市场: {market_cn}, code={market_info['code']}, blkname={market_info['blkname']}")
 
         self.market_combo.bind("<<ComboboxSelected>>", on_market_select)
-
+        # ✅ 关键：同步一次状态
+        on_market_select()
+        
         tk.Label(ctrl_frame, text="stkey:").pack(side="left", padx=2)
         self.st_key_sort_value = tk.StringVar()
         self.st_key_sort_entry = tk.Entry(ctrl_frame, textvariable=self.st_key_sort_value,width=5)
@@ -4049,6 +4161,7 @@ class StockMonitorApp(tk.Tk):
                             self.after(1000,self.restore_all_monitor_windows)
                             logger.info("首次数据加载完成，开始监控...")
                             self.after(30*1000,self.KLineMonitor_init)
+                            self.after(60*1000, self.schedule_15_30_job)
 
                         if self.search_var1.get() or self.search_var2.get():
                             self.apply_search()
@@ -4168,28 +4281,6 @@ class StockMonitorApp(tk.Tk):
         scale = get_windows_dpi_scale_factor()
         return int(base_size * scale)
     
-    # def init_checkbuttons(self, parent_frame):
-    #     frame_right = tk.Frame(parent_frame, bg="#f0f0f0")
-    #     frame_right.pack(side=tk.RIGHT, padx=2, pady=1)
-
-    #     self.tdx_var = tk.BooleanVar(value=True)
-    #     self.ths_var = tk.BooleanVar(value=True)
-    #     self.dfcf_var = tk.BooleanVar(value=False)
-    #     # self.uniq_var = tk.BooleanVar(value=False)
-    #     # self.sub_var = tk.BooleanVar(value=False)
-    #     # ("Uniq", self.uniq_var),
-    #     # ("Sub", self.sub_var)
-
-    #     checkbuttons_info = [
-    #         ("TDX", self.tdx_var),
-    #         ("THS", self.ths_var),
-    #         ("DC", self.dfcf_var),
-    #     ]
-    #     for text, var in checkbuttons_info:
-    #         cb = tk.Checkbutton(frame_right, text=text, variable=var, command=self.update_linkage_status,
-    #                             bg="#f0f0f0", font=('Microsoft YaHei', 9),
-    #                             padx=0, pady=0, bd=0, highlightthickness=0)
-    #         cb.pack(side=tk.LEFT, padx=1)
 
     def init_checkbuttons(self, parent_frame):
         # 保持 Tk.Frame 不变，因为它是容器
@@ -4223,8 +4314,16 @@ class StockMonitorApp(tk.Tk):
 
     def update_linkage_status(self):
         # 此处处理 checkbuttons 状态
-        if not self.tdx_var.get() or self.ths_var.get() or self.dfcf_var.get():
+        if not self.tdx_var.get() or self.ths_var.get():
             self.sender.reload()
+        if  self.dfcf_var.get() != self.auto_adjust_column:
+            logger.info(f"DC:{self.dfcf_var.get()} self.auto_adjust_column :{self.auto_adjust_column}")
+            self.auto_adjust_column = self.dfcf_var.get()
+            # self.apply_search()
+            # self.after(50, self.adjust_column_widths)
+            self._setup_tree_columns(self.tree,self.current_cols, sort_callback=self.sort_by_column, other={})
+            self.reload_cfg_value()
+            # self.update_treeview_cols(self.current_cols)
 
         logger.info(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
 
@@ -8898,518 +8997,6 @@ class StockMonitorApp(tk.Tk):
         self.on_test_code()
         self.auto_refresh_detail_window()
         self.update_category_result(df_filtered)
-        # if df_filtered is not None and not df_filtered.empty:
-        #     result = counterCategory(df_filtered, 'category', limit=50, table=True)
-        #     self._Categoryresult = result
-        #     if self.query_manager.editor_frame.winfo_ismapped():
-        #             # ✅ 编辑器已打开 → 显示在输入框中
-        #             self.query_manager.entry_query.delete(0, tk.END)
-        #             self.query_manager.entry_query.insert(0, self._Categoryresult)
-        #     else:
-        #         # ✅ 编辑器未打开 → 显示在主窗口标题或标签
-        #         if hasattr(self, "lbl_category_result"):
-        #             # 如果已经有标签则更新文字
-        #             self.lbl_category_result.config(text=self._Categoryresult)
-        #         else:
-        #             # 否则创建一个新的标签显示统计
-        #             self.lbl_category_result = tk.Label(
-        #                 self.main_frame, text=self._Categoryresult,
-        #                 font=("Consolas", 10), fg="green", anchor="w", justify="left"
-        #             )
-        #             self.lbl_category_result.pack(fill="x", padx=5, pady=(2, 4))
-
-    # def apply_search1(self):
-    #     val1 = self.search_var1.get().strip()
-    #     val2 = self.search_var2.get().strip()
-
-    #     if not val1 and not val2:
-    #         self.status_var.set("搜索框为空")
-    #         return
-
-    #     # 构建原始查询语句
-    #     if val1 and val2:
-    #         query = f"({val1}) and ({val2})"
-    #     elif val1:
-    #         query = val1
-    #     else:
-    #         query = val2
-
-    #     # 如果新值和上次一样，就不触发
-    #     # if hasattr(self, "_last_value") and self._last_value == query:
-    #     #     return
-    #     self._last_value = query
-
-    #     try:
-    #         if val1:
-    #             self.sync_history(val1, self.search_history1, self.search_combo1, "history1", "history1")
-
-    #         if val2:
-    #             self.sync_history(val2, self.search_history2, self.search_combo2, "history2", "history2")
-
-    #         # 一次性保存
-    #         # self.query_manager.save_search_history()
-
-    #     except Exception as ex:
-    #         log.exception("更新搜索历史时出错: %s", ex)
-
-    #     # ================= 数据为空检查 =================
-    #     if self.df_all.empty:
-    #         self.status_var.set("当前数据为空")
-    #         return
-
-    #     # ====== 条件清理 ======
-    #     import re
-
-    #     bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
-
-    #     # 2️⃣ 替换掉原 query 中的这些部分
-    #     for bracket in bracket_patterns:
-    #         query = query.replace(f'and {bracket}', '')
-
-    #     # logger.info("修改后的 query:", query)
-    #     # logger.info("提取出来的括号条件:", bracket_patterns)
-
-    #     # 3️⃣ 后续可以在拼接 final_query 时再组合回去
-    #     # 例如:
-    #     # final_query = ' and '.join(valid_conditions)
-    #     # final_query += ' and ' + ' and '.join(bracket_patterns)
-
-
-    #     conditions = [c.strip() for c in query.split('and')]
-    #     valid_conditions = []
-    #     removed_conditions = []
-
-    #     for cond in conditions:
-    #         cond_clean = cond.lstrip('(').rstrip(')')
-
-    #         # index 条件特殊保留
-    #         # if 'index.' in cond_clean.lower():
-    #         #     valid_conditions.append(cond_clean)
-    #         #     continue
-
-    #         # index 或 str 操作条件特殊保留
-    #         if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0:
-    #             valid_conditions.append(cond_clean)
-    #             continue
-
-
-    #         # 提取条件中的列名
-    #         cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
-
-    #         # 所有列都必须存在才保留
-    #         if all(col in self.df_all.columns for col in cols_in_cond):
-    #             valid_conditions.append(cond_clean)
-    #         else:
-    #             removed_conditions.append(cond_clean)
-    #             log.info(f"剔除不存在的列条件: {cond_clean}")
-
-    #     # 打印剔除条件列表
-    #     if removed_conditions:
-    #         logger.info(f"[剔除的条件列表] {removed_conditions}")
-
-    #     if not valid_conditions:
-    #         self.status_var.set("没有可用的查询条件")
-    #         return
-
-    #     # ====== 拼接 final_query 并检查括号 ======
-    #     final_query = ' and '.join(f"({c})" for c in valid_conditions)
-    #     # logger.info(f'final_query : {final_query}')
-    #     if bracket_patterns:
-    #         final_query += ' and ' + ' and '.join(bracket_patterns)
-    #     # logger.info(f'final_query : {final_query}')
-    #     left_count = final_query.count("(")
-    #     right_count = final_query.count(")")
-    #     if left_count != right_count:
-    #         if left_count > right_count:
-    #             final_query += ")" * (left_count - right_count)
-    #         elif right_count > left_count:
-    #             final_query = "(" * (right_count - left_count) + final_query
-
-    #     # ====== 决定 engine ======
-    #     query_engine = 'numexpr'
-    #     if any('index.' in c.lower() for c in valid_conditions):
-    #         query_engine = 'python'
-
-    #     # ====== 数据过滤 ======
-    #     try:
-    #         if val1.count('or') > 0 and val1.count('(') > 0:
-    #             if val2 :
-    #                 query_search = f"({val1}) and {val2}"
-    #                 logger.info(f'query: {query_search} ')
-
-    #             else:
-    #                 query_search = f"({val1})"
-    #                 logger.info(f'query: {query_search} ')
-    #             df_filtered = self.df_all.query(query_search, engine=query_engine)
-    #             self.refresh_tree(df_filtered)
-    #             self.status_var2.set('')
-    #             self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {val1} and {val2}")
-    #         else:
-    #             # 检查 category 列是否存在
-    #             if 'category' in self.df_all.columns:
-    #                 # 强制转换为字符串，避免 str.contains 报错
-    #                 if not pd.api.types.is_string_dtype(self.df_all['category']):
-    #                     self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
-    #                     # self.df_all['category'] = self.df_all['category'].astype(str)
-    #                     # 可选：去掉前后空格
-    #                     # self.df_all['category'] = self.df_all['category'].str.strip()
-    #             df_filtered = self.df_all.query(final_query, engine=query_engine)
-    #             self.refresh_tree(df_filtered)
-    #             # 打印剔除条件列表
-    #             if removed_conditions:
-    #                 logger.info(f"[剔除的条件列表] {removed_conditions}")
-    #                 # 显示到状态栏
-    #                 self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
-    #                 self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-    #             else:
-    #                 self.status_var2.set('')
-    #                 self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-    #             logger.info(f'final_query: {final_query}')
-    #     except Exception as e:
-    #         log.error(f"Query error: {e}")
-    #         self.status_var.set(f"查询错误: {e}")
-
-
-    # def apply_search_no_or(self):
-    #     val1 = self.search_var1.get().strip()
-    #     val2 = self.search_var2.get().strip()
-
-    #     if not val1 and not val2:
-    #         self.status_var.set("搜索框为空")
-    #         return
-
-    #     # 构建原始查询语句
-    #     if val1 and val2:
-    #         query = f"({val1}) and ({val2})"
-    #     elif val1:
-    #         query = val1
-    #     else:
-    #         query = val2
-
-    #     try:
-    #         # 顶部搜索框
-    #         if val1:
-    #             if val1 in self.search_history1:
-    #                 self.search_history1.remove(val1)
-    #             self.search_history1.insert(0, val1)
-    #             if len(self.search_history1) > 20:
-    #                 self.search_history1[:] = self.search_history1[:20]
-    #             self.search_combo1['values'] = self.search_history1
-    #             try:
-    #                 self.search_combo1.set(val1)
-    #             except Exception:
-    #                 pass
-
-    #         # 底部搜索框
-    #         if val2:
-    #             if val2 in self.search_history2:
-    #                 self.search_history2.remove(val2)
-    #             self.search_history2.insert(0, val2)
-    #             if len(self.search_history2) > 20:
-    #                 self.search_history2[:] = self.search_history2[:20]
-    #             self.search_combo2['values'] = self.search_history2
-    #             try:
-    #                 self.search_combo2.set(val2)
-    #             except Exception:
-    #                 pass
-
-    #         # 一次性保存
-    #         self.save_search_history()
-    #     except Exception as ex:
-    #         log.exception("更新搜索历史时出错: %s", ex)
-
-    #     # ================= 数据为空检查 =================
-    #     if self.df_all.empty:
-    #         self.status_var.set("当前数据为空")
-    #         return
-
-    #     # ====== 条件清理 ======
-    #     import re
-    #     conditions = [c.strip() for c in query.split('and')]
-    #     valid_conditions = []
-    #     removed_conditions = []
-
-    #     for cond in conditions:
-    #         cond_clean = cond.lstrip('(').rstrip(')')
-
-    #         # index 条件特殊保留
-    #         # if 'index.' in cond_clean.lower():
-    #         #     valid_conditions.append(cond_clean)
-    #         #     continue
-
-    #         # index 或 str 操作条件特殊保留
-    #         if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower():
-    #             valid_conditions.append(cond_clean)
-    #             continue
-
-
-    #         # 提取条件中的列名
-    #         cols_in_cond = re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', cond_clean)
-
-    #         # 所有列都必须存在才保留
-    #         if all(col in self.df_all.columns for col in cols_in_cond):
-    #             valid_conditions.append(cond_clean)
-    #         else:
-    #             removed_conditions.append(cond_clean)
-    #             log.info(f"剔除不存在的列条件: {cond_clean}")
-
-    #     # 打印剔除条件列表
-    #     if removed_conditions:
-    #         logger.info(f"[剔除的条件列表] {removed_conditions}")
-
-    #     if not valid_conditions:
-    #         self.status_var.set("没有可用的查询条件")
-    #         return
-
-    #     # ====== 拼接 final_query 并检查括号 ======
-    #     final_query = ' and '.join(f"({c})" for c in valid_conditions)
-
-    #     left_count = final_query.count("(")
-    #     right_count = final_query.count(")")
-    #     if left_count != right_count:
-    #         if left_count > right_count:
-    #             final_query += ")" * (left_count - right_count)
-    #         elif right_count > left_count:
-    #             final_query = "(" * (right_count - left_count) + final_query
-
-    #     # ====== 决定 engine ======
-    #     query_engine = 'numexpr'
-    #     if any('index.' in c.lower() for c in valid_conditions):
-    #         query_engine = 'python'
-
-    #     # ====== 数据过滤 ======
-    #     try:
-    #         # 检查 category 列是否存在
-    #         if 'category' in self.df_all.columns:
-    #             # 强制转换为字符串，避免 str.contains 报错
-    #             if not pd.api.types.is_string_dtype(self.df_all['category']):
-    #                 self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
-    #                 # self.df_all['category'] = self.df_all['category'].astype(str)
-    #                 # 可选：去掉前后空格
-    #                 # self.df_all['category'] = self.df_all['category'].str.strip()
-    #         df_filtered = self.df_all.query(final_query, engine=query_engine)
-    #         self.refresh_tree(df_filtered)
-    #         # 打印剔除条件列表
-    #         if removed_conditions:
-    #             logger.info(f"[剔除的条件列表] {removed_conditions}")
-    #             # 显示到状态栏
-    #             self.status_var2.set(f"已剔除条件: {', '.join(removed_conditions)}")
-    #             self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-    #         else:
-    #             self.status_var2.set('')
-    #             self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-    #         logger.info(f'final_query: {final_query}')
-    #     except Exception as e:
-    #         log.error(f"Query error: {e}")
-    #         self.status_var.set(f"查询错误: {e}")
-
-
-
-
-    # def apply_search_python(self):
-    #     val1 = self.search_var1.get().strip()
-    #     val2 = self.search_var2.get().strip()
-
-    #     if not val1 and not val2:
-    #         self.status_var.set("搜索框为空")
-    #         return
-
-    #     # 构建查询语句
-    #     if val1 and val2:
-    #         query = f"({val1}) and ({val2})"
-    #     elif val1:
-    #         query = val1
-    #     else:
-    #         query = val2
-
-    #     # 更新第一个搜索历史
-    #     if val1:
-    #         if val1 not in self.search_history1:
-    #             self.search_history1.insert(0, val1)
-    #             if len(self.search_history1) > 20:
-    #                 self.search_history1 = self.search_history1[:20]
-    #         else:
-    #             self.search_history1.remove(val1)
-    #             self.search_history1.insert(0, val1)
-    #         self.search_combo1['values'] = self.search_history1
-    #         self.save_search_history()
-
-    #     # 更新第二个搜索历史
-    #     if val2:
-    #         if val2 not in self.search_history2:
-    #             self.search_history2.insert(0, val2)
-    #             if len(self.search_history2) > 20:
-    #                 self.search_history2 = self.search_history2[:20]
-    #         else:
-    #             self.search_history2.remove(val2)
-    #             self.search_history2.insert(0, val2)
-    #         self.search_combo2['values'] = self.search_history2
-    #         self.save_search_history()
-
-    #     # 数据过滤与刷新
-    #     if self.df_all.empty:
-    #         self.status_var.set("当前数据为空")
-    #         return
-
-    #     try:
-    #         # 判断 query 是否涉及 index
-    #         if 'index.' in query.lower():
-    #             df_filtered = self.df_all.query(query, engine='python')
-    #         else:
-    #             df_filtered = self.df_all.query(query)  # 默认 engine
-
-    #         self.refresh_tree(df_filtered)
-    #         self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {query}")
-    #     except Exception as e:
-    #         log.error(f"Query error: {e}")
-    #         self.status_var.set(f"查询错误: {e}")
-
-    # --- 搜索逻辑 ---
-    # 搜索逻辑：支持双搜索框 & 独立历史
-    # def apply_search_nopython(self):
-    #     val1 = self.search_var1.get().strip()
-    #     val2 = self.search_var2.get().strip()
-
-    #     if not val1 and not val2:
-    #         self.status_var.set("搜索框为空")
-    #         return
-
-    #     # 构建查询语句
-    #     if val1 and val2:
-    #         query = f"({val1}) and ({val2})"
-    #     elif val1:
-    #         query = val1
-    #     else:
-    #         query = val2
-
-    #     # 更新第一个搜索历史
-    #     if val1:
-    #         if val1 not in self.search_history1:
-    #             self.search_history1.insert(0, val1)
-    #             if len(self.search_history1) > 20:
-    #                 self.search_history1 = self.search_history1[:20]
-    #         else:
-    #             self.search_history1.remove(val1)
-    #             self.search_history1.insert(0, val1)
-    #         self.search_combo1['values'] = self.search_history1
-    #         self.save_search_history()
-
-    #     # 更新第二个搜索历史
-    #     if val2:
-    #         if val2 not in self.search_history2:
-    #             self.search_history2.insert(0, val2)
-    #             if len(self.search_history2) > 20:
-    #                 self.search_history2 = self.search_history2[:20]
-    #         else:
-    #             self.search_history2.remove(val2)
-    #             self.search_history2.insert(0, val2)
-    #         self.search_combo2['values'] = self.search_history2
-    #         self.save_search_history()
-
-    #     # 数据过滤与刷新
-    #     if self.df_all.empty:
-    #         self.status_var.set("当前数据为空")
-    #         return
-
-    #     try:
-    #         df_filtered = self.df_all.query(query)
-    #         self.refresh_tree(df_filtered)
-    #         self.status_var.set(f"结果 {len(df_filtered)}行| 搜索: {query}")
-    #     except Exception as e:
-    #         log.error(f"Query error: {e}")
-    #         self.status_var.set(f"查询错误: {e}")
-
-    # def apply_search_start(self):
-    #     query = self.search_var.get().strip()
-    #     if not query:
-    #         self.status_var.set("搜索框为空")
-    #         return
-
-    #     if query not in self.search_history:
-    #         self.search_history.insert(0, query)
-    #         if len(self.search_history) > 20:  # 最多保存20条
-    #             self.search_history = self.search_history[:20]
-    #         self.search_combo['values'] = self.search_history
-    #         self.save_search_history()  # 保存到文件
-    #     else:
-    #         self.search_history.remove(query)  # リストから既存のクエリを削除する
-    #         self.search_history.insert(0, query) # リストの先頭にクエリを挿入する
-    #         self.search_combo['values'] = self.search_history
-    #         self.save_search_history()
-
-
-    #     if self.df_all.empty:
-    #         self.status_var.set("当前数据为空")
-    #         return
-
-    #     try:
-    #         df_filtered = self.df_all.query(query)
-    #         self.refresh_tree(df_filtered)
-    #         self.status_var.set(f"结果 {len(df_filtered)}行| 搜索: {query}  ")
-    #     except Exception as e:
-    #         log.error(f"Query error: {e}")
-    #         self.status_var.set(f"查询错误: {e}")
-
-
-    # def apply_search_src(self):
-    #     query = self.search_var.get().strip()
-    #     if not query:
-    #         self.status_var.set("搜索框为空")
-    #         return
-
-    #     if query not in self.search_history:
-    #         self.search_history.insert(0, query)
-    #         if len(self.search_history) > 20:  # 最多保存20条
-    #             self.search_history = self.search_history[:20]
-    #         self.search_combo['values'] = self.search_history
-    #         self.save_search_history()  # 保存到文件
-
-    #     if self.current_df.empty:
-    #         self.status_var.set("当前数据为空")
-    #         return
-
-    #     try:
-    #         df_filtered = self.current_df.query(query)
-    #         self.refresh_tree(df_filtered)
-    #         self.status_var.set(f"搜索: {query} | 结果 {len(df_filtered)} 行")
-    #     except Exception as e:
-    #         log.error(f"Query error: {e}")
-    #         self.status_var.set(f"查询错误: {e}")
-
-    # def on_test_code(self):
-    #     code = self.query_manager.entry_query.get().strip()
-    #     # code = self.entry_code.get().strip()
-    #     import ipdb;ipdb.set_trace()
-
-    #     if code and len(code) == 6:
-    #         # df_code = self.df_all.loc[code]  # 自己实现获取行情数据
-    #         df_code = self.df_all.loc[[code]]  # 自己实现获取行情数据 dataframe
-    #         results = self.query_manager.test_code(df_code)
-            
-    #         # 刷新 Treeview 显示
-    #         for i in self.tree.get_children():
-    #             self.tree.delete(i)
-    #         for r in results:
-    #             self.tree.insert("", tk.END, values=(r["query"], r["note"], r["starred"], "✅" if r["hit"] else ""))
-
-    # def on_test_code(self):
-    #     # code = self.code_entry.get().strip()
-    #     code = self.query_manager.entry_query.get().strip()
-    #     if not code:
-    #         toast_message(self, "请输入股票代码")
-    #         return
-
-    #     df_code = self.df_all.loc[[code]]  # 一定是 DataFrame（query 才能工作）
-    #     results = self.query_manager.test_code(df_code)
-
-    #     # 更新 current_history 的命中状态
-    #     for i, r in enumerate(results):
-    #         if i < len(self.query_manager.current_history):
-    #             self.query_manager.current_history[i]["hit"] = r["hit"]
-
-    #     # 刷新 Treeview
-    #     self.query_manager.refresh_tree()
-    #     toast_message(self, f"{code} 测试完成，共 {len(results)} 条规则")
 
     def on_test_code(self,onclick=False):
         # if self.query_manager.current_key == 'history2':
@@ -13218,7 +12805,6 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
     # else:
     #     logger.info("signal 一致 ✅")
 
-    # import ipdb;ipdb.set_trace()
 
     df.loc[df.get("volume", 0) > 1.2, "emotion"] = "乐观"
     df.loc[df.get("volume", 0) < 0.8, "emotion"] = "悲观"
@@ -14495,15 +14081,72 @@ def test_single_thread():
     fetch_and_process(shared_dict, q, blkname="boll", flag=flag)
 
 
+# def parse_args():
+#     parser = argparse.ArgumentParser(description="Monitor Init Script")
+#     parser.add_argument(
+#         "--log",
+#         type=str,
+#         default="INFO",
+#         help="日志等级，可选：DEBUG, INFO, WARNING, ERROR, CRITICAL"
+#     )
+#     args, _ = parser.parse_known_args()   # ✅ 忽略 multiprocessing 的私有参数
+#     return args
 def parse_args():
     parser = argparse.ArgumentParser(description="Monitor Init Script")
+
     parser.add_argument(
         "--log",
         type=str,
         default="INFO",
         help="日志等级，可选：DEBUG, INFO, WARNING, ERROR, CRITICAL"
     )
-    return parser.parse_args()
+
+    # ✅ 新增布尔开关参数
+    parser.add_argument(
+        "--write_to_hdf",
+        action="store_true",
+        help="执行 write_to_hdf() 并退出"
+    )
+
+    args, _ = parser.parse_known_args()   # ✅ 忽略 multiprocessing 私有参数
+    return args
+
+
+def write_to_hdf():
+    while 1:
+        market = cct.cct_raw_input("1Day-Today check Duration Single write all TDXdata append [all,sh,sz,cyb,alla,q,n] :")
+        if market != 'q' and market != 'n'  and len(market) != 0:
+            if market in ['all', 'sh', 'sz', 'cyb', 'alla']:
+                if market != 'all':
+                    tdd.Write_market_all_day_mp(market, rewrite=True)
+                    break
+                else:
+                    tdd.Write_market_all_day_mp(market)
+                    break
+            else:
+                print("market is None ")
+        else:
+            break
+
+    hdf5_wri_append = cct.cct_raw_input("1Day-Today No check Duration Single write Multi-300 append sina to Tdx data to Multi hdf_300[y|n]:")
+    if hdf5_wri_append == 'y':
+        for inx in tdd.tdx_index_code_list:
+            tdd.get_tdx_append_now_df_api_tofile(inx)
+        print("Index Wri ok 300", end=' ')
+        tdd.Write_sina_to_tdx(tdd.tdx_index_code_list, index=True)
+        tdd.Write_sina_to_tdx(market='all')
+
+    hdf5_wri = cct.cct_raw_input("Multi-300 write all Tdx data to Multi hdf_300[rw|y|n]:")
+    if hdf5_wri == 'rw':
+        tdd.Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300, rewrite=True)
+    elif hdf5_wri == 'y':
+        tdd.Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300)
+
+    hdf5_wri = cct.cct_raw_input("Multi-900 write all Tdx data to Multi hdf_900[rw|y|n]:")
+    if hdf5_wri == 'rw':
+        tdd.Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=900, rewrite=True)
+    elif hdf5_wri == 'y':
+        tdd.Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=900)
 
 
 # ------------------ 主程序入口 ------------------ #
@@ -14536,6 +14179,7 @@ if __name__ == "__main__":
     # 测试未捕获异常
     # 直接触发
     # 1/0
+    mp.freeze_support()  # <-- 必须
 
     args = parse_args()  # 解析命令行参数
     level = getattr(logging, args.log.upper(), logging.INFO)
@@ -14543,10 +14187,13 @@ if __name__ == "__main__":
     # 直接用自定义的 init_logging，传入日志等级
     # logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=level)
     logger.setLevel(level)
-    
 
     logger.info("程序启动…")
 
+    # ✅ 命令行触发 write_to_hdf
+    if args.write_to_hdf:
+        write_to_hdf()
+        sys.exit(0)
     app = StockMonitorApp()
     if cct.isMac():
         width, height = 100, 32

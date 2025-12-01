@@ -58,34 +58,305 @@ requests.adapters.DEFAULT_RETRIES = 0
 global initGlobalValue
 global last_trade_date,is_trade_date_today
 
+import ctypes
+import shutil
+
+# --- Win32 API 用于获取 EXE 原始路径 (仅限 Windows) ---
+def _get_win32_exe_path():
+    """
+    使用 Win32 API 获取当前进程的主模块路径。
+    这在 Nuitka/PyInstaller 的 Onefile 模式下能可靠地返回原始 EXE 路径。
+    """
+    # 假设是 32767 字符的路径长度是足够的
+    MAX_PATH_LENGTH = 32767 
+    buffer = ctypes.create_unicode_buffer(MAX_PATH_LENGTH)
+    
+    # 调用 GetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename, DWORD nSize)
+    # 传递 NULL 作为 hModule 获取当前进程的可执行文件路径
+    ctypes.windll.kernel32.GetModuleFileNameW(
+        None, buffer, MAX_PATH_LENGTH
+    )
+    return os.path.dirname(os.path.abspath(buffer.value))
+
+
+def get_base_path():
+    """
+    获取程序基准路径。在 Windows 打包环境 (Nuitka/PyInstaller) 中，
+    使用 Win32 API 优先获取真实的 EXE 目录。
+    """
+    
+    # 检查是否为 Python 解释器运行
+    is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
+    
+    # 1. 普通 Python 脚本模式
+    if is_interpreter and not getattr(sys, "frozen", False):
+        # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
+        try:
+            # 此时 __file__ 是可靠的
+            path = os.path.dirname(os.path.abspath(__file__))
+            log.info(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
+            return path
+        except NameError:
+             pass # 忽略交互模式
+    
+    # 2. Windows 打包模式 (Nuitka/PyInstaller EXE 模式)
+    # 只要不是解释器运行，或者 sys.frozen 被设置，我们就认为是打包模式
+    if sys.platform.startswith('win'):
+        try:
+            # 无论是否 Onefile，Win32 API 都会返回真实 EXE 路径
+            real_path = _get_win32_exe_path()
+            
+            # 核心：确保我们返回的是 EXE 的真实目录
+            if real_path != os.path.dirname(os.path.abspath(sys.executable)):
+                 # 这是一个强烈信号：sys.executable 被欺骗了 (例如 Nuitka Onefile 启动器)，
+                 # 或者程序被从其他地方调用，我们信任 Win32 API。
+                 log.info(f"[DEBUG] Path Mode: WinAPI (Override). Path: {real_path}")
+                 return real_path
+            
+            # 如果 Win32 API 结果与 sys.executable 目录一致，且我们处于打包状态
+            if not is_interpreter:
+                 log.info(f"[DEBUG] Path Mode: WinAPI (Standalone). Path: {real_path}")
+                 return real_path
+
+        except Exception:
+            pass 
+
+    # 3. 最终回退（适用于所有打包模式，包括 Linux/macOS）
+    if getattr(sys, "frozen", False) or not is_interpreter:
+        path = os.path.dirname(os.path.abspath(sys.executable))
+        log.info(f"[DEBUG] Path Mode: Final Fallback. Path: {path}")
+        return path
+
+    # 4. 极端脚本回退
+    log.info(f"[DEBUG] Path Mode: Final Script Fallback.")
+    return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+
+# logger.info(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
+#print(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
+#print(f'get_base_path() : {get_base_path()}')
+
+def get_resource_file(rel_path, out_name=None,BASE_DIR=None):
+    """
+    从 PyInstaller 内置资源释放文件到 EXE 同目录
+
+    rel_path:   打包资源的相对路径
+    out_name:   释放目标文件名
+    """
+    if BASE_DIR is None:
+        BASE_DIR = get_base_path()
+        # log.info(f"BASE_DIR配置文件: {BASE_DIR}")
+
+    if out_name is None:
+        out_name = os.path.basename(rel_path)
+
+    # BASE_DIR = os.path.dirname(
+    #     sys.executable if getattr(sys, "frozen", False)
+    #     else os.path.abspath(__file__)    # ✅ 修复点
+    # )
+
+    target_path = os.path.join(BASE_DIR, out_name)
+    log.info(f"target_path配置文件: {target_path}")
+
+    # 已存在 → 直接返回
+    if os.path.exists(target_path):
+        return target_path
+
+    # 从 MEIPASS 复制
+    base = sys._MEIPASS if getattr(sys, "frozen", False) else os.path.abspath(".")
+    src = os.path.join(base, rel_path)
+
+    if not os.path.exists(src):
+        log.error(f"内置资源缺失: {src}")
+        return None
+
+    try:
+        shutil.copy(src, target_path)
+        log.info(f"释放配置文件: {target_path}")
+        return target_path
+    except Exception as e:
+        log.exception(f"释放资源失败: {e}")
+        return None
+
+
+# --------------------------------------
+# STOCK_CODE_PATH 专用逻辑
+# --------------------------------------
+BASE_DIR = get_base_path()
+
+def get_conf_path(fname):
+    """
+    获取并验证 stock_codes.conf
+
+    逻辑：
+      1. 优先使用 BASE_DIR/stock_codes.conf
+      2. 不存在 → 从 JSONData/stock_codes.conf 释放
+      3. 校验文件
+    """
+    # default_path = os.path.join(BASE_DIR, "stock_codes.conf")
+    default_path = os.path.join(BASE_DIR, fname)
+
+    # --- 1. 直接存在 ---
+    if os.path.exists(default_path):
+        if os.path.getsize(default_path) > 0:
+            log.info(f"使用本地配置: {default_path}")
+            return default_path
+        else:
+            log.warning("配置文件存在但为空，将尝试重新释放")
+
+    # --- 2. 释放默认资源 ---
+    cfg_file = get_resource_file(
+        rel_path=f"JohnsonUtil/{fname}",
+        out_name=fname,
+        BASE_DIR=BASE_DIR
+    )
+
+    # --- 3. 校验释放结果 ---
+    if not cfg_file:
+        log.error(f"获取 {fname} 失败（释放阶段）")
+        return None
+
+    if not os.path.exists(cfg_file):
+        log.error(f"释放后文件仍不存在: {cfg_file}")
+        return None
+
+    if os.path.getsize(cfg_file) == 0:
+        log.error(f"配置文件为空: {cfg_file}")
+        return None
+
+    log.info(f"使用内置释放配置: {cfg_file}")
+    return cfg_file
+
+def get_resource_file1(rel_path, out_name=None):
+    """
+    将打包资源从 _MEIPASS 释放到 EXE 目录
+    优先读取 EXE 外部版本
+    """
+
+    # exe 运行目录
+    exe_dir = os.path.dirname(sys.executable if getattr(sys, 'frozen', False) else os.path.abspath("."))
+
+    if out_name is None:
+        out_name = os.path.basename(rel_path)
+
+    target = os.path.join(exe_dir, out_name)
+
+    # 已存在 ⇒ 直接用（支持用户更新）
+    if os.path.exists(target):
+        return target
+
+    # 不存在 ⇒ 从 _MEIPASS 复制
+    base = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.abspath(".")
+    bundled = os.path.join(base, rel_path)
+
+    if not os.path.exists(bundled):
+        raise RuntimeError(f"内置资源缺失: {bundled}")
+
+    shutil.copy(bundled, target)
+
+    return target
+
+
 _global_dict = {}
-initGlobalValue = 0
+# initGlobalValue = 0
 # clean_terminal = ["Python Launcher", 'Johnson — -bash', 'Johnson — python']
-clean_terminal = ["Python Launcher", 'Johnson — -bash', 'Johnson — python']
-writecode = "cct.write_to_blocknew(block_path, dd.index.tolist())"
-perdall = "df[df.columns[(df.columns >= 'per1d') & (df.columns <= 'per%sd'%(ct.compute_lastdays))]][:1]"
-perdallc = "df[df.columns[(df.columns >= 'perc1d') & (df.columns <= 'perc%sd'%(ct.compute_lastdays))]][:1]"
-perdalla = "df[df.columns[ ((df.columns >= 'per1d') & (df.columns <= 'per%sd'%(ct.compute_lastdays))) | ((df.columns >= 'du1d') & (df.columns <= 'du%sd'%(ct.compute_lastdays)))]][:1]"
-perdallu = "df[df.columns[ ((df.columns >= 'du1d') & (df.columns <= 'du%sd'%(ct.compute_lastdays)))]][:1]"
-root_path=['D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\','/Users/Johnson/Documents/Quant/pyQuant3/stock']
-dfcf_path = 'D:\\MacTools\\WinTools\\eastmoney\\swc8\\config\\User\\6327113578970854\\StockwayStock.ini'
+# writecode = "cct.write_to_blocknew(block_path, dd.index.tolist())"
+# perdall = "df[df.columns[(df.columns >= 'per1d') & (df.columns <= 'per%sd'%(ct.compute_lastdays))]][:1]"
+# perdallc = "df[df.columns[(df.columns >= 'perc1d') & (df.columns <= 'perc%sd'%(ct.compute_lastdays))]][:1]"
+# perdalla = "df[df.columns[ ((df.columns >= 'per1d') & (df.columns <= 'per%sd'%(ct.compute_lastdays))) | ((df.columns >= 'du1d') & (df.columns <= 'du%sd'%(ct.compute_lastdays)))]][:1]"
+# perdallu = "df[df.columns[ ((df.columns >= 'du1d') & (df.columns <= 'du%sd'%(ct.compute_lastdays)))]][:1]"
+# root_path=['D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\','/Users/Johnson/Documents/Quant/pyQuant3/stock']
+# dfcf_path = 'D:\\MacTools\\WinTools\\eastmoney\\swc8\\config\\User\\6327113578970854\\StockwayStock.ini'
 
-win10Lengend = r'D:\Quant\new_tdx2'
-# win10Lengend = r'D:\Program\gfzq'
-win10Lixin = r'C:\zd_zszq'
-win10Triton = r'D:\MacTools\WinTools\new_tdx2'
-#东兴
-win10pazq = r'D:\MacTools\WinTools\new_tdx2'
-win10dxzq = r'D:\MacTools\WinTools\zd_dxzq'
+# win10Lengend = r'D:\Quant\new_tdx2'
+# # win10Lengend = r'D:\Program\gfzq'
+# win10Lixin = r'C:\zd_zszq'
+# win10Triton = r'D:\MacTools\WinTools\new_tdx2'
+# #东兴
+# win10pazq = r'D:\MacTools\WinTools\new_tdx2'
+# win10dxzq = r'D:\MacTools\WinTools\zd_dxzq'
 
-win7rootAsus = r'D:\Program Files\gfzq'
-win7rootXunji = r'E:\DOC\Parallels\WinTools\zd_pazq'
+# win7rootAsus = r'D:\Program Files\gfzq'
+# win7rootXunji = r'E:\DOC\Parallels\WinTools\zd_pazq'
+# win7rootList = [win10Triton,win10Lixin, win7rootAsus, win7rootXunji, win10Lengend]
+# macroot = r'/Users/Johnson/Documents/Johnson/WinTools/new_tdx2'
+# macroot_vm = r'/Volumes/VMware Shared Folders/MacTools/WinTools/new_tdx'
+# xproot = r'E:\DOC\Parallels\WinTools\zd_pazq'
+
+import configparser
+from pathlib import Path
+# from config.loader import GlobalConfig
+
+class GlobalConfig:
+    def __init__(self, cfg_file=None):
+        if not cfg_file:
+            cfg_file = Path(__file__).parent / "global.ini"
+
+        self.cfg_file = Path(cfg_file)
+
+        # 禁用 % 插值
+        # self.cfg = configparser.ConfigParser(interpolation=None)
+        self.cfg = configparser.ConfigParser(
+            interpolation=None,
+            inline_comment_prefixes=("#", ";")
+        )
+
+        self.cfg.read(self.cfg_file, encoding="utf-8")
+
+        self.init_value = self.cfg.getint("general", "initGlobalValue")
+        self.marketInit = self.cfg.get("general", "marketInit")
+        self.marketblk = self.cfg.get("general", "marketblk")
+        self.scale_offset = self.cfg.get("general", "scale_offset")
+
+        self.clean_terminal = self._split(
+            self.cfg.get("terminal", "clean_terminal", fallback="")
+        )
+
+        self.expressions = dict(self.cfg.items("expressions"))
+        self.paths = dict(self.cfg.items("path"))
+
+    def _split(self, s):
+        return [x.strip() for x in s.split(",") if x.strip()]
+
+    def get_expr(self, name):
+        return self.expressions.get(name)
+
+    def get_path(self, key):
+        return self.paths.get(key)
+
+    def __repr__(self):
+        return f"<GlobalConfig {self.cfg_file}>"
+
+
+conf_ini= get_conf_path('global.ini')
+if not conf_ini:
+    log.critical("global.ini 加载失败，程序无法继续运行")
+
+CFG = GlobalConfig(conf_ini)
+
+initGlobalValue = CFG.init_value
+clean_terminal = CFG.clean_terminal
+
+root_path = [
+    CFG.get_path("root_path_windows"),
+    CFG.get_path("root_path_mac"),
+]
+
+dfcf_path = CFG.get_path("dfcf_path")
+
+win10Lengend = CFG.get_path("win10lengend")
+win10Lixin = CFG.get_path("win10lixin")
+win10Triton = CFG.get_path("win10triton")
+win10pazq = CFG.get_path("win10pazq")
+win10dxzq = CFG.get_path("win10dxzq")
+
+win7rootAsus = CFG.get_path("win7rootasus")
+win7rootXunji = CFG.get_path("win7rootxunji")
 win7rootList = [win10Triton,win10Lixin, win7rootAsus, win7rootXunji, win10Lengend]
-# macroot = r'/Users/Johnson/Documents/Johnson/WinTools/zd_pazq'
-macroot = r'/Users/Johnson/Documents/Johnson/WinTools/new_tdx2'
-macroot_vm = r'/Volumes/VMware Shared Folders/MacTools/WinTools/new_tdx'
-xproot = r'E:\DOC\Parallels\WinTools\zd_pazq'
-
+macroot = CFG.get_path("macroot")
+macroot_vm = CFG.get_path("macroot_vm")
+xproot = CFG.get_path("xproot")
+tdx_all_df_path = CFG.get_path("tdx_all_df_path")
 
 def get_os_path_sep():
     return os.path.sep
@@ -888,6 +1159,14 @@ def get_run_path_tdx(fp=None):
         # os_sep=get_os_path_sep()
         if fp is not None:
             path = path + fp + '.h5'
+            if not check_file_exist(path):
+                log.error(f'path not find : {path}')
+                path = tdx_all_df_path + os.sep + fp + '.h5'
+                if not check_file_exist(path):
+                    log.error(f'path not find tdx_all_df_path : {path}')
+                else:
+                    log.info(f'path find in tdx_all_df_path : {path}')
+
         log.debug("info:%s getcwd:%s"%(alist[0],path))
     else:
         if isMac():
@@ -898,12 +1177,18 @@ def get_run_path_tdx(fp=None):
             path  = root_path[0].split('stock')[0] + fp + '.h5'
             if not check_file_exist(path):
                 log.error(f'path not find : {path}')
+                path = tdx_all_df_path + os.sep + fp + '.h5'
+                if not check_file_exist(path):
+                    log.error(f'path not find tdx_all_df_path : {path}')
+                else:
+                    log.info(f'path find in tdx_all_df_path : {path}')
         log.debug("error:%s cwd:%s"%(alist[0],path))
     return path
 
 
 tdx_hd5_name = r'tdx_all_df_%s' % (300)
 tdx_hd5_path = get_run_path_tdx(tdx_hd5_name)
+
 # win10_ramdisk_root = r'R:'
 # mac_ramdisk_root = r'/Volumes/RamDisk'
 # ramdisk_rootList = [win10_ramdisk_root, mac_ramdisk_root]
@@ -3482,7 +3767,6 @@ def code_to_tdx_blk(code):
 def get_config_value(fname, classtype, currvalue=0, limitvalue=1, xtype='limit', read=False):
     conf_ini = fname
     currvalue = int(float(currvalue))
-    # conf_ini = cct.get_work_path('stock','JSONData','count.ini')
     if os.path.exists(conf_ini):
         # log.info("file ok:%s"%conf_ini)
         config = ConfigObj(conf_ini, encoding='UTF8')
@@ -6108,7 +6392,6 @@ def evalcmd(dir_mo,workstatus=True,Market_Values=None,top_temp=pd.DataFrame(),bl
                     write_to_blocknew(block_path, codew, append=False,keep_last=0)
                     # sl.write_to_blocknew(all_diffpath, codew, False)
                 print("wri ok:%s" % block_path)
-                # cct.GlobalValues().setkey('tempdf',None)
                 sleeprandom(ct.duration_sleep_time / 10)
             else:
                 print(f'tempdf is None cmd:{cmd}')
@@ -6811,7 +7094,7 @@ if __name__ == '__main__':
     '''
     # rzrq['all']='nan'
     # print(get_last_trade_date('2025-06-01'))
-    print(f'cct.get_work_time() : {get_work_time()}')
+    print(f'get_work_time() : {get_work_time()}')
     st_key_sort='3 0 f'
     print(ct.get_market_sort_value_key(st_key_sort))
     import ipdb;ipdb.set_trace()

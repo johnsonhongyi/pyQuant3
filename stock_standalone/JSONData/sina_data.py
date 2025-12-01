@@ -23,11 +23,116 @@ from JSONData import tdx_hdf5_api as h5a
 # pip install --no-deps akshare
 # import functools
 import datetime
+
+def get_base_path():
+    """
+    获取程序基准路径。在 Windows 打包环境 (Nuitka/PyInstaller) 中，
+    使用 Win32 API 优先获取真实的 EXE 目录。
+    """
+    
+    # 检查是否为 Python 解释器运行
+    is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
+    
+    # 1. 普通 Python 脚本模式
+    if is_interpreter and not getattr(sys, "frozen", False):
+        # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
+        try:
+            # 此时 __file__ 是可靠的
+            path = os.path.dirname(os.path.abspath(__file__))
+            log.info(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
+            return path
+        except NameError:
+             pass # 忽略交互模式
+    
+    # 2. Windows 打包模式 (Nuitka/PyInstaller EXE 模式)
+    # 只要不是解释器运行，或者 sys.frozen 被设置，我们就认为是打包模式
+    if sys.platform.startswith('win'):
+        try:
+            # 无论是否 Onefile，Win32 API 都会返回真实 EXE 路径
+            real_path = cct._get_win32_exe_path()
+            
+            # 核心：确保我们返回的是 EXE 的真实目录
+            if real_path != os.path.dirname(os.path.abspath(sys.executable)):
+                 # 这是一个强烈信号：sys.executable 被欺骗了 (例如 Nuitka Onefile 启动器)，
+                 # 或者程序被从其他地方调用，我们信任 Win32 API。
+                 log.info(f"[DEBUG] Path Mode: WinAPI (Override). Path: {real_path}")
+                 return real_path
+            
+            # 如果 Win32 API 结果与 sys.executable 目录一致，且我们处于打包状态
+            if not is_interpreter:
+                 log.info(f"[DEBUG] Path Mode: WinAPI (Standalone). Path: {real_path}")
+                 return real_path
+
+        except Exception:
+            pass 
+
+    # 3. 最终回退（适用于所有打包模式，包括 Linux/macOS）
+    if getattr(sys, "frozen", False) or not is_interpreter:
+        path = os.path.dirname(os.path.abspath(sys.executable))
+        log.info(f"[DEBUG] Path Mode: Final Fallback. Path: {path}")
+        return path
+
+    # 4. 极端脚本回退
+    log.info(f"[DEBUG] Path Mode: Final Script Fallback.")
+    return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+BASE_DIR = get_base_path()
+
+# --------------------------------------
+# STOCK_CODE_PATH 专用逻辑
+# --------------------------------------
+
+def get_stock_code_path():
+    """
+    获取并验证 stock_codes.conf
+
+    逻辑：
+      1. 优先使用 BASE_DIR/stock_codes.conf
+      2. 不存在 → 从 JSONData/stock_codes.conf 释放
+      3. 校验文件
+    """
+    default_path = os.path.join(BASE_DIR, "stock_codes.conf")
+
+    # --- 1. 直接存在 ---
+    if os.path.exists(default_path):
+        if os.path.getsize(default_path) > 0:
+            log.info(f"使用本地配置: {default_path}")
+            return default_path
+        else:
+            log.warning("配置文件存在但为空，将尝试重新释放")
+
+    # --- 2. 释放默认资源 ---
+    cfg_file = cct.get_resource_file(
+        rel_path="JSONData/stock_codes.conf",
+        out_name="stock_codes.conf",
+        BASE_DIR=BASE_DIR
+    )
+
+    # --- 3. 校验释放结果 ---
+    if not cfg_file:
+        log.error("获取 stock_codes.conf 失败（释放阶段）")
+        return None
+
+    if not os.path.exists(cfg_file):
+        log.error(f"释放后文件仍不存在: {cfg_file}")
+        return None
+
+    if os.path.getsize(cfg_file) == 0:
+        log.error(f"配置文件为空: {cfg_file}")
+        return None
+
+    log.info(f"使用内置释放配置: {cfg_file}")
+    return cfg_file
+
 class StockCode:
 
     def __init__(self):
         self.start_t = time.time()
-        self.STOCK_CODE_PATH = 'stock_codes.conf'
+        # self.STOCK_CODE_PATH = os.path.join(BASE_DIR,"stock_codes.conf")
+        self.STOCK_CODE_PATH = get_stock_code_path()
+        if not self.STOCK_CODE_PATH:
+            log.critical("stock_codes.conf 加载失败，程序无法继续运行")
+
         self.encoding = 'gbk'
         self.stock_code_path = self.stock_code_path()
         self.exceptCount = cct.GlobalValues().getkey('exceptCount')
@@ -70,7 +175,7 @@ class StockCode:
         # stock_codes = df.index.tolist()
         # '301397'
         # stock_info_bj_name_code_df = stock_info_bj_name_code()
-        # bj_list = stock_info_bj_name_code_df['证券代码'].tolist()
+        # bj_list = stock_info_bj_name_code_df['证券代码'].tolist(
         # stock_codes.extend(bj_list)
         with open(self.stock_code_path, 'w') as f:
             f.write(json.dumps(dict(stock=stock_codes)))
@@ -1123,6 +1228,8 @@ if __name__ == "__main__":
     else:
         log_level = LoggerFactory.ERROR
     # log_level = LoggerFactory.DEBUG if args['-d']  else LoggerFactory.ERROR
+    log_level = LoggerFactory.INFO
+
     log.setLevel(log_level)
     # log.setLevel(LoggerFactory.DEBUG)
 
