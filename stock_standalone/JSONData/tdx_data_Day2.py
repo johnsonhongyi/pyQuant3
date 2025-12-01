@@ -19,7 +19,7 @@ from JohnsonUtil import commonTips as cct
 from JohnsonUtil import johnson_cons as ct
 import tushare as ts
 import pandas_ta as ta
-import talib
+
 from JSONData import sina_data
 # import numba as nb
 import datetime
@@ -280,39 +280,31 @@ def write_all_kdata_to_file(code, f_path, df=None):
     print("writeCode:%s size:%s" % (code, os.path.getsize(f_path) / 50))
 
 
-def custom_macd(prices, fastperiod=12, slowperiod=26, signalperiod=9):
-   """
- 自定义的MACD计算函数，根据指定的计算方法计算EMA，然后基于这些EMA值计算MACD值。
+    """
+  自定义的MACD计算函数，根据指定的计算方法计算EMA，然后基于这些EMA值计算MACD值。
 
- :param prices: 价格数组。
- :param fastperiod: 快速EMA的周期，默认为12。
- :param slowperiod: 慢速EMA的周期，默认为26。
- :param signalperiod: 信号线的周期，默认为9。
- :return: 返回DIFF, DEA和MACD。
-   """
-   # 初始化EMA数组
-   ema_fast = np.zeros_like(prices)
-   ema_slow = np.zeros_like(prices)
-
-   # 计算EMA
-   for i in range(1, len(prices)):
-       if i == 1:  # 第二日的EMA计算
-            ema_fast[i] = prices[i - 1] + (prices[i] - prices[i - 1]) * 2 / (fastperiod + 1)
-            ema_slow[i] = prices[i - 1] + (prices[i] - prices[i - 1]) * 2 / (slowperiod + 1)
-       else:  # 第三日及以后的EMA计算
-            ema_fast[i] = ema_fast[i - 1] * (fastperiod - 1) / (fastperiod + 1) + prices[i] * 2 / (fastperiod + 1)
-            ema_slow[i] = ema_slow[i - 1] * (slowperiod - 1) / (slowperiod + 1) + prices[i] * 2 / (slowperiod + 1)
-
-   # 计算DIFF
-   diff = ema_fast - ema_slow
-
-   # 计算DEA
-   dea = np.zeros_like(prices)
-   for i in range(1, len(prices)):
-        dea[i] = ((signalperiod - 1) * dea[i - 1] + 2 * diff[i]) / (signalperiod + 1)
-   # 计算MACD
-   macd = 2 * (diff - dea)
-   return diff, dea, macdmmm
+  :param prices: 价格数组。
+  :param fastperiod: 快速EMA的周期，默认为12。
+  :param slowperiod: 慢速EMA的周期，默认为26。
+  :param signalperiod: 信号线的周期，默认为9。
+  :return: 返回DIFF, DEA和MACD。
+    """
+    # 使用 pandas_ta 计算 MACD
+    macd_df = ta.macd(prices, fast=fastperiod, slow=slowperiod, signal=signalperiod)
+    
+    # pandas_ta 返回列名通常为: MACD_12_26_9, MACDh_12_26_9, MACDs_12_26_9
+    # 具体的列名取决于传入的参数，因此使用 iloc 按位置获取更稳健
+    # ta.macd 返回顺序: MACD (diff), Histogram, Signal (dea)
+    # 注意：pandas_ta 的 Histogram 是 (diff - dea)
+    # 通达信/国内常用的 MACD 指标中，MACD柱通常是 (diff - dea) * 2
+    
+    diff = macd_df.iloc[:, 0]
+    hist = macd_df.iloc[:, 1]
+    dea = macd_df.iloc[:, 2]
+    
+    macd = hist * 2
+    
+    return diff, dea, macd
 
 def detect_bullish_breakout(df, 
                             price_col='close', 
@@ -915,6 +907,8 @@ def detect_local_extremes(df, base_window=10, tol_pct=0.01):
     """
     N = max(3, min(base_window, len(df)//10))  # 动态窗口：最少3天，最多数据长度的1/10
     
+    # LLV_L_N = df['low'].rolling(N, min_periods=1).min()
+    # HHV_H_N = df['high'].rolling(N, min_periods=1).max()
     LLV_L_N = df['low'].rolling(N, min_periods=1).min()
     HHV_H_N = df['high'].rolling(N, min_periods=1).max()
     
@@ -950,18 +944,6 @@ def extend_signals(df: pd.DataFrame, N1: int = 10, N2: int = 10, DISP: int = 2) 
     # 确保价格列
     H = df['high']
     L = df['low']
-    C = df['close']
-
-    # --------------------
-    # 1. 极点计算（局部高低点）
-    # --------------------
-    LLV_L_N1 = L.rolling(N1).min()
-    HHV_H_N1 = H.rolling(N1).max()
-
-    # 局部低点
-    df['局部低点'] = np.where((L == LLV_L_N1.shift(1)), -1, 0)
-    # 局部高点
-    df['局部高点'] = np.where((H == HHV_H_N1.shift(1)), 1, 0)
     # 极点 = 高点1 / 低点-1 / 其他0
     df['极点'] = df['局部高点'] + df['局部低点']
     df['局部极点'] = df['close'].where(df['极点'] != 0, np.nan)
@@ -1076,6 +1058,8 @@ def detect_local_extremes_filtered(df, N=10, tol_pct=0.01):
     """
     df = df.copy()
     # 1. 原始局部高低点
+    # LLV_L_N = df['low'].rolling(N, min_periods=1).min()
+    # HHV_H_N = df['high'].rolling(N, min_periods=1).max()
     LLV_L_N = df['low'].rolling(N, min_periods=1).min()
     HHV_H_N = df['high'].rolling(N, min_periods=1).max()
     
@@ -1125,20 +1109,26 @@ def detect_local_extremes_filtered(df, N=10, tol_pct=0.01):
 
 def calc_support_resistance(df):
 
-    LLV = lambda x, n: x.rolling(n, min_periods=1).min()
-    HHV = lambda x, n: x.rolling(n, min_periods=1).max()
-    SMA = lambda x, n, m: x.ewm(alpha=m/n, adjust=False).mean()
+    # LLV = lambda x, n: x.rolling(n, min_periods=1).min()
+    # HHV = lambda x, n: x.rolling(n, min_periods=1).max()
+    # SMA = lambda x, n, m: x.ewm(alpha=m/n, adjust=False).mean()
 
     # --- 短周期 ---
-    RSV13 = (df['close'] - LLV(df['low'], 13)) / (HHV(df['high'], 13) - LLV(df['low'], 13)) * 100
-    ARSV = SMA(RSV13, 3, 1)
-    AK = SMA(ARSV, 3, 1)
-    AD = (3 * ARSV) - (2 * AK)
+    # RSV13 = (df['close'] - LLV(df['low'], 13)) / (HHV(df['high'], 13) - LLV(df['low'], 13)) * 100
+    # ARSV = SMA(RSV13, 3, 1)
 
     # --- 长周期 ---
-    RSV55 = (df['close'] - LLV(df['low'], 55)) / (HHV(df['high'], 55) - LLV(df['low'], 55)) * 100
-    ARSV24 = SMA(RSV55, 3, 1)
-    AK24 = SMA(ARSV24, 3, 1)
+    # RSV55 = (df['close'] - LLV(df['low'], 55)) / (HHV(df['high'], 55) - LLV(df['low'], 55)) * 100
+    # ARSV24 = SMA(RSV55, 3, 1)
+    # AK24 = SMA(ARSV24, 3, 1)
+    # AD24 = (3 * ARSV24) - (2 * AK24)
+    
+    low_55 = df['low'].rolling(55, min_periods=1).min()
+    high_55 = df['high'].rolling(55, min_periods=1).max()
+    RSV55 = (df['close'] - low_55) / (high_55 - low_55) * 100
+    
+    ARSV24 = ta.ema(RSV55, length=5)
+    AK24 = ta.ema(ARSV24, length=5)
     AD24 = (3 * ARSV24) - (2 * AK24)
 
     # --- CROSS 检测 ---
@@ -1161,7 +1151,8 @@ def calc_support_resistance(df):
     df['pressure'] = pressure
 
     # --- 支撑线 ---
-    df['support'] = LLV(df['high'], 30)
+    # df['support'] = LLV(df['high'], 30)
+    df['support'] = df['high'].rolling(30, min_periods=1).min()
 
     return df
 
@@ -1171,20 +1162,36 @@ def calc_support_resistance_vec(df):
     df: DataFrame 包含 ['open','high','low','close']
     返回 df 增加 ['pressure','support']
     """
-    LLV = lambda x, n: x.rolling(n, min_periods=1).min()
-    HHV = lambda x, n: x.rolling(n, min_periods=1).max()
-    SMA = lambda x, n, m: x.ewm(alpha=m/n, adjust=False).mean()
+    # LLV = lambda x, n: x.rolling(n, min_periods=1).min()
+    # HHV = lambda x, n: x.rolling(n, min_periods=1).max()
+    # SMA = lambda x, n, m: x.ewm(alpha=m/n, adjust=False).mean()
 
     # --- 短周期 ---
-    RSV13 = (df['close'] - LLV(df['low'], 13)) / (HHV(df['high'], 13) - LLV(df['low'], 13)) * 100
-    ARSV = SMA(RSV13, 3, 1)
-    AK = SMA(ARSV, 3, 1)
+    # RSV13 = (df['close'] - LLV(df['low'], 13)) / (HHV(df['high'], 13) - LLV(df['low'], 13)) * 100
+    # ARSV = SMA(RSV13, 3, 1)
+    # AK = SMA(ARSV, 3, 1)
+    # AD = 3 * ARSV - 2 * AK
+    
+    low_13 = df['low'].rolling(13, min_periods=1).min()
+    high_13 = df['high'].rolling(13, min_periods=1).max()
+    RSV13 = (df['close'] - low_13) / (high_13 - low_13) * 100
+    
+    ARSV = ta.ema(RSV13, length=5)
+    AK = ta.ema(ARSV, length=5)
     AD = 3 * ARSV - 2 * AK
 
     # --- 长周期 ---
-    RSV55 = (df['close'] - LLV(df['low'], 55)) / (HHV(df['high'], 55) - LLV(df['low'], 55)) * 100
-    ARSV24 = SMA(RSV55, 3, 1)
-    AK24 = SMA(ARSV24, 3, 1)
+    # RSV55 = (df['close'] - LLV(df['low'], 55)) / (HHV(df['high'], 55) - LLV(df['low'], 55)) * 100
+    # ARSV24 = SMA(RSV55, 3, 1)
+    # AK24 = SMA(ARSV24, 3, 1)
+    # AD24 = 3 * ARSV24 - 2 * AK24
+    
+    low_55 = df['low'].rolling(55, min_periods=1).min()
+    high_55 = df['high'].rolling(55, min_periods=1).max()
+    RSV55 = (df['close'] - low_55) / (high_55 - low_55) * 100
+    
+    ARSV24 = ta.ema(RSV55, length=5)
+    AK24 = ta.ema(ARSV24, length=5)
     AD24 = 3 * ARSV24 - 2 * AK24
 
     # --- CROSS 检测 ---
@@ -1199,7 +1206,8 @@ def calc_support_resistance_vec(df):
     df['resist'] = cross_high.ffill()
 
     # --- 支撑位（support）矢量化 ---
-    df['support'] = LLV(df['high'], 30)
+    # df['support'] = LLV(df['high'], 30)
+    df['support'] = df['high'].rolling(30, min_periods=1).min()
 
     return df
 
@@ -1633,17 +1641,30 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         df = df.fillna(0)
 
         # 滚动指标
-        df['max5'] = df.close.shift(1).rolling(5).max()
-        df['max10'] = df.close.shift(1).rolling(10).max()
-        df['hmax'] = df.close.shift(1).rolling(30).max()
-        df['hmax60'] = df.close.shift(1).rolling(60).max()
-        df['high4'] = df.close.shift(1).rolling(4).max()
+        # 滚动指标
+        # df['max5'] = df.close.shift(1).rolling(5).max()
+        # df['max10'] = df.close.shift(1).rolling(10).max()
+        # df['hmax'] = df.close.shift(1).rolling(30).max()
+        # df['hmax60'] = df.close.shift(1).rolling(60).max()
+        # df['high4'] = df.close.shift(1).rolling(4).max()
+        
+        df['max5'] = df['close'].shift(1).rolling(window=5).max()
+        df['max10'] = df['close'].shift(1).rolling(window=10).max()
+        df['hmax'] = df['close'].shift(1).rolling(window=30).max()
+        df['hmax60'] = df['close'].shift(1).rolling(window=60).max()
+        df['high4'] = df['close'].shift(1).rolling(window=4).max()
+        
         df['llowvol'] = df.vol[-tdx_max_int_end:-tdx_high_da].min()
-        df['low10'] = df.low.shift(1).rolling(10).min()
+        # df['low10'] = df.low.shift(1).rolling(10).min()
+        df['low10'] = df['close'].shift(1).rolling(window=10).min()
         df['low60'] = df.close[-tdx_max_int_end*2:-tdx_max_int_end].min()
-        df['low4'] = df.low.shift(1).rolling(4).min()
-        df['lastdu4'] = ((df.high.rolling(4).max() - df.low.rolling(4).min()) /
-                          df.close.rolling(4).mean() * 100).round(1)
+        # df['low4'] = df.low.shift(1).rolling(4).min()
+        df['low4'] = df['close'].shift(1).rolling(window=4).min()
+        
+        # df['lastdu4'] = ((df.high.rolling(4).max() - df.low.rolling(4).min()) /
+        #                   df.close.rolling(4).mean() * 100).round(1)
+        df['lastdu4'] = ((df['high'].shift(1).rolling(window=4).max() - df['low'].shift(1).rolling(window=4).min()) /
+                          df['close'].shift(1).rolling(window=4).mean() * 100).round(1)
 
     if f'perc{lastdays}d' not in df.columns:
         df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
@@ -2032,32 +2053,50 @@ def get_tdx_Exp_day_to_df_SRC(code, start=None, end=None, dl=None, newdays=None,
             df = df.sort_index(ascending=True)
 
         if cct.get_work_time_duration():
-            df['max5'] =  df['close'].shift(1).rolling(window=5).max()
-            df['max10'] = df['close'].shift(1).rolling(window=10).max()
-            df['hmax'] = df['close'].shift(1).rolling(window=30).max()
+            # df['max5'] =  df['close'].shift(1).rolling(window=5).max()
+            # df['max10'] = df['close'].shift(1).rolling(window=10).max()
+            # df['hmax'] = df['close'].shift(1).rolling(window=30).max()
+            df['max5'] = df['close'].shift(1).rolling(5).max()
+            df['max10'] = df['close'].shift(1).rolling(10).max()
+            df['hmax'] = df['close'].shift(1).rolling(30).max()
+            
             df['hmaxvol'] = df.vol[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
-            df['hmax60'] = df['close'].shift(1).rolling(window=60).max()
-            df['high4'] =  df['close'].shift(1).rolling(window=4).max()
+            # df['hmax60'] = df['close'].shift(1).rolling(window=60).max()
+            # df['high4'] =  df['close'].shift(1).rolling(window=4).max()
+            df['hmax60'] = df['close'].shift(1).rolling(60).max()
+            df['high4'] = df['close'].shift(1).rolling(4).max()
             
             df['llowvol'] = df.vol[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
-            df['low10'] = df['low'].shift(1).rolling(window=10).min()
+            # df['low10'] = df['low'].shift(1).rolling(window=10).min()
+            df['low10'] = df['low'].shift(1).rolling(10).min()
             df['low60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].min()
-            df['low4'] = df['low'].shift(1).rolling(window=4).min()
-            df['lastdu4'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
+            # df['low4'] = df['low'].shift(1).rolling(window=4).min()
+            df['low4'] = df['low'].shift(1).rolling(4).min()
+            # df['lastdu4'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
+            df['lastdu4'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / ta.sma(df['close'], length=4) * 100).round(1)
 
         else:
-            df['max5'] = df['close'].shift(1).rolling(window=5).max()
-            df['max10'] = df['close'].shift(1).rolling(window=10).max()
-            # df['hmax'] = df.close[-ct.tdx_max_int_end:max_int_end].max()
-            df['hmax'] = df['close'].shift(1).rolling(window=30).max()
-            df['hmax60'] = df['close'].shift(1).rolling(window=60).max()
-            df['high4'] =  df['close'].shift(1).rolling(window=4).max()
+            # df['max5'] = df['close'].shift(1).rolling(window=5).max()
+            # df['max10'] = df['close'].shift(1).rolling(window=10).max()
+            # # df['hmax'] = df.close[-ct.tdx_max_int_end:max_int_end].max()
+            # df['hmax'] = df['close'].shift(1).rolling(window=30).max()
+            # df['hmax60'] = df['close'].shift(1).rolling(window=60).max()
+            # df['high4'] =  df['close'].shift(1).rolling(window=4).max()
+            
+            df['max5'] = df['close'].shift(1).rolling(5).max()
+            df['max10'] = df['close'].shift(1).rolling(10).max()
+            df['hmax'] = df['close'].shift(1).rolling(30).max()
+            df['hmax60'] = df['close'].shift(1).rolling(60).max()
+            df['high4'] = df['close'].shift(1).rolling(4).max()
 
-            df['llowvol'] = df['vol'].shift(1).rolling(window=30).max()
-            df['low10'] = df['low'].shift(1).rolling(window=10).min()
+            df['llowvol'] = df['vol'].shift(1).rolling(window=30).max() # This one is rolling max of vol, can replace too
+            # df['low10'] = df['low'].shift(1).rolling(window=10).min()
+            df['low10'] = df['low'].shift(1).rolling(10).min()
             df['low60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].min()
-            df['low4'] = df['low'].shift(1).rolling(window=4).min()
-            df['lastdu4'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
+            # df['low4'] = df['low'].shift(1).rolling(window=4).min()
+            df['low4'] = df['low'].shift(1).rolling(4).min()
+            # df['lastdu4'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
+            df['lastdu4'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / ta.sma(df['close'], length=4) * 100).round(1)
 
     if 'date' in df.columns:
         df = df.set_index('date')
@@ -2424,10 +2463,10 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
         log.debug("now > 830 and <930 return")
         if isinstance(df, pd.DataFrame):
             df = df.sort_index(ascending=True)
-            df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
-            df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-            df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
-            df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+            df['ma5d'] = ta.sma(df['close'], length=5)
+            df['ma10d'] = ta.sma(df['close'], length=10)
+            df['ma20d'] = ta.sma(df['close'], length=26)
+            df['ma60d'] = ta.sma(df['close'], length=60)
             df = df.fillna(0)
             df = df.sort_index(ascending=False)
         return get_tdx_macd(df)
@@ -2462,10 +2501,10 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
                 vol_div = 10
             if dz.open.values[0] == df.open[-1] and 'volume' in dz.columns and int(df.vol[-1] / vol_div) == int(dz.volume.values / vol_div):
                 df = df.sort_index(ascending=True)
-                df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
-                df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-                df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
-                df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+                df['ma5d'] = ta.sma(df['close'], length=5)
+                df['ma10d'] = ta.sma(df['close'], length=10)
+                df['ma20d'] = ta.sma(df['close'], length=26)
+                df['ma60d'] = ta.sma(df['close'], length=60)
                 df = df.fillna(0)
                 df = df.sort_index(ascending=False)
                 return get_tdx_macd(df)
@@ -2542,10 +2581,10 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
         # df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
         # df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
         # df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
-        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
-        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
-        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+        df['ma5d'] = ta.sma(df['close'], length=5)
+        df['ma10d'] = ta.sma(df['close'], length=10)
+        df['ma20d'] = ta.sma(df['close'], length=26)
+        df['ma60d'] = ta.sma(df['close'], length=60)
 
         # df[['lower', 'ene', 'upper','bandwidth','bollpect']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
         # df = df.dropna()
@@ -2675,10 +2714,10 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
     if cct.get_now_time_int() > 900 and cct.get_now_time_int() < 930 and len(df) > 0:
         log.debug("now > 830 and <930 return")
         df = df.sort_index(ascending=True)
-        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
-        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
-        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+        df['ma5d'] = ta.sma(df['close'], length=5)
+        df['ma10d'] = ta.sma(df['close'], length=10)
+        df['ma20d'] = ta.sma(df['close'], length=26)
+        df['ma60d'] = ta.sma(df['close'], length=60)
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
         return df
@@ -2708,10 +2747,10 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
 
             if round(dz.open.values[0], 1) == round(df.open[-1], 1) and 'volume' in dz.columns and int(df.vol[-1] / vol_div) == int(dz.volume.values / vol_div):
                 df = df.sort_index(ascending=True)
-                df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
-                df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-                df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
-                df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+                df['ma5d'] = ta.sma(df['close'], length=5)
+                df['ma10d'] = ta.sma(df['close'], length=10)
+                df['ma20d'] = ta.sma(df['close'], length=26)
+                df['ma60d'] = ta.sma(df['close'], length=60)
                 df = df.fillna(0)
                 df = df.sort_index(ascending=False)
                 return df
@@ -2770,10 +2809,10 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
 
     if len(df) > 5:
         df = df.sort_index(ascending=True)
-        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
-        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
-        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+        df['ma5d'] = ta.sma(df['close'], length=5)
+        df['ma10d'] = ta.sma(df['close'], length=10)
+        df['ma20d'] = ta.sma(df['close'], length=26)
+        df['ma60d'] = ta.sma(df['close'], length=60)
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
 
@@ -3569,10 +3608,10 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
         log.debug("c_name:%s df.name:%s" % (c_name, df.name[-1]))
     if len(df) > 0:
         df = df.sort_index(ascending=True)
-        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
-        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
-        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+        df['ma5d'] = ta.trend.sma_indicator(df['close'], window=5)
+        df['ma10d'] = ta.trend.sma_indicator(df['close'], window=10)
+        df['ma20d'] = ta.trend.sma_indicator(df['close'], window=26)
+        df['ma60d'] = ta.trend.sma_indicator(df['close'], window=60)
         # df['ma5d'].fillna(0)
         # df['ma10d'].fillna(0)
         # df['ma20d'].fillna(0)
@@ -4963,10 +5002,10 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
 
 #        df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
 
-        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
-        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
-        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+        df['ma5d'] = ta.sma(df['close'], length=5)
+        df['ma10d'] = ta.sma(df['close'], length=10)
+        df['ma20d'] = ta.sma(df['close'], length=26)
+        df['ma60d'] = ta.sma(df['close'], length=60)
         # df['natr'] = ta.natr(df.high, df.low, df.close)
         df['truer'] = ta.true_range(df.high, df.low, df.close)
 
@@ -7068,6 +7107,11 @@ if __name__ == '__main__':
         print("Index Wri ok 300", end=' ')
         Write_sina_to_tdx(tdx_index_code_list, index=True)
         Write_sina_to_tdx(market='all')
+        # print("Index Wri ok 900", end=' ')
+        # Write_sina_to_tdx(tdx_index_code_list, index=True,dl=900)
+        # Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=900)
+        # Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=300)
+
 
     hdf5_wri = cct.cct_raw_input("Multi-300 write all Tdx data to Multi hdf_300[rw|y|n]:")
     if hdf5_wri == 'rw':
@@ -7347,3 +7391,7 @@ if __name__ == '__main__':
         usage(sys.argv[0])
         sys.exit(1)
     """
+        # df['ma5d'] = ta.sma(df['close'], length=5)
+        # df['ma10d'] = ta.sma(df['close'], length=10)
+        # df['ma20d'] = ta.sma(df['close'], length=26)
+        # df['ma60d'] = ta.sma(df['close'], length=60)

@@ -7,10 +7,226 @@ import logging
 import sys,os
 sys.path.append("..")
 from JohnsonUtil.LoggerFactoryMultiprocess import MultiprocessHandler
+import configparser
+from pathlib import Path
+# from config.loader import GlobalConfig
 
-win10_ramdisk_triton = r'G:'
-win10_ramdisk_root = r'R:'
-mac_ramdisk_root = r'/Volumes/RamDisk' 
+import ctypes
+import shutil
+
+# --- Win32 API 用于获取 EXE 原始路径 (仅限 Windows) ---
+def _get_win32_exe_path():
+    """
+    使用 Win32 API 获取当前进程的主模块路径。
+    这在 Nuitka/PyInstaller 的 Onefile 模式下能可靠地返回原始 EXE 路径。
+    """
+    # 假设是 32767 字符的路径长度是足够的
+    MAX_PATH_LENGTH = 32767 
+    buffer = ctypes.create_unicode_buffer(MAX_PATH_LENGTH)
+    
+    # 调用 GetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename, DWORD nSize)
+    # 传递 NULL 作为 hModule 获取当前进程的可执行文件路径
+    ctypes.windll.kernel32.GetModuleFileNameW(
+        None, buffer, MAX_PATH_LENGTH
+    )
+    return os.path.dirname(os.path.abspath(buffer.value))
+
+
+def get_base_path():
+    """
+    获取程序基准路径。在 Windows 打包环境 (Nuitka/PyInstaller) 中，
+    使用 Win32 API 优先获取真实的 EXE 目录。
+    """
+    
+    # 检查是否为 Python 解释器运行
+    is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
+    
+    # 1. 普通 Python 脚本模式
+    if is_interpreter and not getattr(sys, "frozen", False):
+        # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
+        try:
+            # 此时 __file__ 是可靠的
+            path = os.path.dirname(os.path.abspath(__file__))
+            print(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
+            return path
+        except NameError:
+             pass # 忽略交互模式
+    
+    # 2. Windows 打包模式 (Nuitka/PyInstaller EXE 模式)
+    # 只要不是解释器运行，或者 sys.frozen 被设置，我们就认为是打包模式
+    if sys.platform.startswith('win'):
+        try:
+            # 无论是否 Onefile，Win32 API 都会返回真实 EXE 路径
+            real_path = _get_win32_exe_path()
+            
+            # 核心：确保我们返回的是 EXE 的真实目录
+            if real_path != os.path.dirname(os.path.abspath(sys.executable)):
+                 # 这是一个强烈信号：sys.executable 被欺骗了 (例如 Nuitka Onefile 启动器)，
+                 # 或者程序被从其他地方调用，我们信任 Win32 API。
+                 print(f"[DEBUG] Path Mode: WinAPI (Override). Path: {real_path}")
+                 return real_path
+            
+            # 如果 Win32 API 结果与 sys.executable 目录一致，且我们处于打包状态
+            if not is_interpreter:
+                 print(f"[DEBUG] Path Mode: WinAPI (Standalone). Path: {real_path}")
+                 return real_path
+
+        except Exception:
+            pass 
+
+    # 3. 最终回退（适用于所有打包模式，包括 Linux/macOS）
+    if getattr(sys, "frozen", False) or not is_interpreter:
+        path = os.path.dirname(os.path.abspath(sys.executable))
+        print(f"[DEBUG] Path Mode: Final Fallback. Path: {path}")
+        return path
+
+    # 4. 极端脚本回退
+    print(f"[DEBUG] Path Mode: Final Script Fallback.")
+    return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+
+# logger.info(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
+#print(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
+#print(f'get_base_path() : {get_base_path()}')
+
+def get_resource_file(rel_path, out_name=None,BASE_DIR=None):
+    """
+    从 PyInstaller 内置资源释放文件到 EXE 同目录
+
+    rel_path:   打包资源的相对路径
+    out_name:   释放目标文件名
+    """
+    if BASE_DIR is None:
+        BASE_DIR = get_base_path()
+        # log.info(f"BASE_DIR配置文件: {BASE_DIR}")
+
+    if out_name is None:
+        out_name = os.path.basename(rel_path)
+
+    # BASE_DIR = os.path.dirname(
+    #     sys.executable if getattr(sys, "frozen", False)
+    #     else os.path.abspath(__file__)    # ✅ 修复点
+    # )
+
+    target_path = os.path.join(BASE_DIR, out_name)
+    print(f"target_path配置文件: {target_path}")
+
+    # 已存在 → 直接返回
+    if os.path.exists(target_path):
+        return target_path
+
+    # 从 MEIPASS 复制
+    base = sys._MEIPASS if getattr(sys, "frozen", False) else os.path.abspath(".")
+    src = os.path.join(base, rel_path)
+
+    if not os.path.exists(src):
+        print(f"内置资源缺失: {src}")
+        return None
+
+    try:
+        shutil.copy(src, target_path)
+        print(f"释放配置文件: {target_path}")
+        return target_path
+    except Exception as e:
+        print(f"释放资源失败: {e}")
+        return None
+
+
+# --------------------------------------
+# STOCK_CODE_PATH 专用逻辑
+# --------------------------------------
+BASE_DIR = get_base_path()
+
+def get_conf_path(fname):
+    """
+    获取并验证 stock_codes.conf
+
+    逻辑：
+      1. 优先使用 BASE_DIR/stock_codes.conf
+      2. 不存在 → 从 JSONData/stock_codes.conf 释放
+      3. 校验文件
+    """
+    # default_path = os.path.join(BASE_DIR, "stock_codes.conf")
+    default_path = os.path.join(BASE_DIR, fname)
+
+    # --- 1. 直接存在 ---
+    if os.path.exists(default_path):
+        if os.path.getsize(default_path) > 0:
+            print(f"使用本地配置: {default_path}")
+            return default_path
+        else:
+            print("配置文件存在但为空，将尝试重新释放")
+
+    # --- 2. 释放默认资源 ---
+    cfg_file = get_resource_file(
+        rel_path=f"JohnsonUtil/{fname}",
+        out_name=fname,
+        BASE_DIR=BASE_DIR
+    )
+
+    # --- 3. 校验释放结果 ---
+    if not cfg_file:
+        print(f"获取 {fname} 失败（释放阶段）")
+        return None
+
+    if not os.path.exists(cfg_file):
+        print(f"释放后文件仍不存在: {cfg_file}")
+        return None
+
+    if os.path.getsize(cfg_file) == 0:
+        print(f"配置文件为空: {cfg_file}")
+        return None
+
+    print(f"使用内置释放配置: {cfg_file}")
+    return cfg_file
+
+class GlobalConfig:
+    def __init__(self, cfg_file=None):
+        if not cfg_file:
+            cfg_file = Path(__file__).parent / "global.ini"
+
+        self.cfg_file = Path(cfg_file)
+
+        # 禁用 % 插值
+        self.cfg = configparser.ConfigParser(interpolation=None)
+        self.cfg.read(self.cfg_file, encoding="utf-8")
+
+        self.init_value = self.cfg.getint("general", "initGlobalValue")
+
+        self.clean_terminal = self._split(
+            self.cfg.get("terminal", "clean_terminal", fallback="")
+        )
+
+        self.expressions = dict(self.cfg.items("expressions"))
+        self.paths = dict(self.cfg.items("path"))
+
+    def _split(self, s):
+        return [x.strip() for x in s.split(",") if x.strip()]
+
+    def get_expr(self, name):
+        return self.expressions.get(name)
+
+    def get_path(self, key):
+        return self.paths.get(key)
+
+    def __repr__(self):
+        return f"<GlobalConfig {self.cfg_file}>"
+
+
+conf_ini= get_conf_path('global.ini')
+if not conf_ini:
+    print("global.ini 加载失败，程序无法继续运行")
+
+CFG = GlobalConfig(conf_ini)
+
+# win10_ramdisk_triton = r'G:'
+# win10_ramdisk_root = r'R:'
+# mac_ramdisk_root = r'/Volumes/RamDisk' 
+
+win10_ramdisk_triton = CFG.get_path("win10_ramdisk_triton")
+win10_ramdisk_root = CFG.get_path("win10_ramdisk_root")
+mac_ramdisk_root = CFG.get_path("mac_ramdisk_root")
+
 path_sep = os.path.sep
 ramdisk_rootList = [win10_ramdisk_triton,win10_ramdisk_root, mac_ramdisk_root]
 
