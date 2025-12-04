@@ -132,7 +132,7 @@ logger = init_logging(log_file='instock_tk.log',redirect_print=False)
 # logger.setLevel(LoggerFactory.DEBUG)
 # logger.setLevel(LoggerFactory.INFO)
 
-def init_logging_nopdb(log_file="appTk.log", level=logging.INFO):
+def init_logging_nopdb(log_file="appTk.log", level=logging.ERROR):
     """初始化全局日志，避免重复打印"""
     logger = logging.getLogger("instock_MonitorTK")  # 指定子 logger
     logger.setLevel(level)
@@ -179,7 +179,7 @@ marketInit = CFG.marketInit
 marketblk = CFG.marketblk
 scale_offset = CFG.scale_offset
 resampleInit = CFG.resampleInit 
-
+saved_width,saved_height = CFG.saved_width,CFG.saved_height
 # def remove_condition_query(expr: str, cond: str) -> str:
 def remove_invalid_conditions(query: str, invalid_cols: list,showdebug=True):
     """
@@ -2858,8 +2858,9 @@ class StockMonitorApp(tk.Tk):
         marketInit = CFG.marketInit
         marketblk = CFG.marketblk
         scale_offset = CFG.scale_offset
-        resampleInit = CFG.resampleInit 
-        logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} scale_offset: {scale_offset}")
+        resampleInit = CFG.resampleInit
+        saved_width,saved_height = CFG.saved_width,CFG.saved_height 
+        logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} scale_offset: {scale_offset} saved_width:{saved_width},{saved_height}")
 
     def get_scaled_value(self):
         """返回当前的缩放因子（用于 TreeView 列宽计算）"""
@@ -6548,7 +6549,7 @@ class StockMonitorApp(tk.Tk):
             q = f'category.str.contains("{concept}", na=False)'
             pyperclip.copy(q)
             self.after(100, lambda: toast_message(self,f"已复制筛选条件：{q}"))
-        btn = tk.Button(btn_frame, text="复制筛选", command=_copy_expr)
+        btn = tk.Button(btn_frame, text="复制", command=_copy_expr)
         btn.pack(side="left", padx=4)
         win._btn_copy_expr = btn
 
@@ -6594,6 +6595,10 @@ class StockMonitorApp(tk.Tk):
         # --- 新窗口 ---
         win = tk.Toplevel(self)
         win.title(f"{concept_name} 概念前10放量上涨股")
+        # win.minsize(460, 320)
+        real_width = int(saved_width * self.scale_factor)
+        real_height = int(saved_height * self.scale_factor)
+        win.minsize(real_width, real_height)
         # win.attributes('-toolwindow', True)  # 去掉最大化/最小化按钮，只留关闭按钮
 
         # now = datetime.now()
@@ -6794,7 +6799,7 @@ class StockMonitorApp(tk.Tk):
                 q = f'category.str.contains("{concept}", na=False)'
                 pyperclip.copy(q)
                 self.after(100, lambda: toast_message(self,f"已复制筛选条件：{q}"))
-            btn = tk.Button(btn_frame, text="复制筛选", command=_copy_expr)
+            btn = tk.Button(btn_frame, text="复制", command=_copy_expr)
             btn.pack(side="left", padx=4)
             win._btn_copy_expr = btn
 
@@ -6920,6 +6925,10 @@ class StockMonitorApp(tk.Tk):
         win.title(f"{concept_name} 概念前10放量上涨股")
         # win.attributes('-toolwindow', True)  # 去掉最大化/最小化按钮，只留关闭按钮
         win._concept_name = concept_name
+        real_width = int(saved_width * self.scale_factor)
+        real_height = int(saved_height * self.scale_factor)
+        win.minsize(real_width, real_height)
+        # win.minsize(460, 320)
         # 在创建窗口时保存定时器 id
         win._auto_refresh_id = None
         # 初始化窗口状态（放在创建 win 后）
@@ -7176,7 +7185,7 @@ class StockMonitorApp(tk.Tk):
         df_display = df_concept.head(limit).copy()
         tree._full_df = df_concept.copy()
         tree._display_limit = limit
-
+        tree.config(height=5)
         # 插入 Treeview 并建立 code -> iid 映射
         code_to_iid = {}
         for idx, (code_row, row) in enumerate(df_display.iterrows()):
@@ -9575,7 +9584,7 @@ class StockMonitorApp(tk.Tk):
             window_name = str(window_name)
             win_name = f"{window_name}-{getattr(win, '_concept_name')}" if hasattr(win, '_concept_name') else window_name
             scale = self._get_dpi_scale_factor()
-            logger.info(f'[load_window_position] scale={scale}')
+            logger.debug(f'[load_window_position] scale={scale}')
 
             # 获取正确的配置文件路径
             config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
@@ -9598,18 +9607,18 @@ class StockMonitorApp(tk.Tk):
                         active_windows = self._pg_top10_window_simple.values()
                         count_active_window = len(active_windows)
                         if count_active_window > 0:
-                            logger.info(f'[load_window_position] 处理叠加窗口 {window_name}')
+                            logger.debug(f'[load_window_position] 处理叠加窗口 {window_name}')
                             x += offset_step * count_active_window
                             y += offset_step * (count_active_window - 1)
 
                     # 防止窗口位置越界
                     x, y = clamp_window_to_screens(x, y, width, height)
                     win.geometry(f"{width}x{height}+{x}+{y}")
-                    logger.info(f"[load_window_position] 加载 {window_name}: {width}x{height}+{x}+{y}")
+                    logger.debug(f"[load_window_position] 加载 {window_name}: {width}x{height}+{x}+{y}")
                     return width, height, x, y
 
             # 没有记录则默认居中
-            logger.info(f"[load_window_position] 未找到 {window_name} 配置，使用默认居中")
+            logger.debug(f"[load_window_position] 未找到 {window_name} 配置，使用默认居中")
             self.center_window(win, default_width, default_height)
             return default_width, default_height, None, None
 
@@ -9626,7 +9635,7 @@ class StockMonitorApp(tk.Tk):
             window_name = str(window_name)
             win_name = f"{window_name}-{getattr(win, '_concept_name')}" if hasattr(win, '_concept_name') else window_name
             scale = self._get_dpi_scale_factor()
-            logger.info(f'[save_window_position] scale={scale}')
+            logger.debug(f'[save_window_position] scale={scale}')
 
             # ✅ 获取窗口的物理坐标/大小，除以 scale 得到标准化值存储
             pos = {
@@ -9638,7 +9647,7 @@ class StockMonitorApp(tk.Tk):
 
             # 获取正确的配置文件路径
             config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
-            logger.info(f'[save_window_position] config_file_path={config_file_path}')
+            logger.debug(f'[save_window_position] config_file_path={config_file_path} width: {win.winfo_width()/ scale}x{win.winfo_height() / scale} ')
 
             # 读取旧数据
             data = {}
@@ -9656,7 +9665,7 @@ class StockMonitorApp(tk.Tk):
             with open(config_file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
-            logger.info(f"[save_window_position] 已保存 {window_name}: {pos}")
+            logger.debug(f"[save_window_position] 已保存 {window_name}: {pos}")
 
         except Exception as e:
             logger.error(f"[save_window_position] 保存窗口位置失败: {e}")
@@ -9765,7 +9774,7 @@ class StockMonitorApp(tk.Tk):
         try:
             window_name = str(window_name)
             scale = self._get_dpi_scale_factor()
-            logger.info(f'[load_window_position_qt] scale={scale}')
+            logger.debug(f'[load_window_position_qt] scale={scale}')
 
             x = y = None
             width = default_width
@@ -9773,7 +9782,7 @@ class StockMonitorApp(tk.Tk):
 
             # 获取正确的配置文件路径
             config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
-            logger.info(f'[load_window_position_qt] config_file_path={config_file_path}')
+            logger.debug(f'[load_window_position_qt] config_file_path={config_file_path}')
 
             # --- 从文件加载保存的窗口位置 ---
             if os.path.exists(config_file_path):
@@ -9789,7 +9798,8 @@ class StockMonitorApp(tk.Tk):
 
                     # 防止窗口位置越界
                     x, y = clamp_window_to_screens(x, y, width, height)
-                    logger.info(f"[load_window_position_qt] 加载 {window_name}: {width}x{height}+{x}+{y}")
+                    logger.debug(f'width: {pos.get("width")}  height: {pos.get("height")}+{x}+{y}')
+                    logger.debug(f"[load_window_position_qt] 加载 {window_name}: {width}x{height} {x}+{y}")
 
             # --- 如果没有存储位置，则居中 ---
             screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
@@ -9968,22 +9978,23 @@ class StockMonitorApp(tk.Tk):
         try:
             window_name = str(window_name)
             scale = self._get_dpi_scale_factor()
-            logger.info(f'[save_window_position_qt] scale={scale}')
+            logger.debug(f'[save_window_position_qt] scale={scale}')
 
             geom = win.geometry()  # QRect
             # ✅ 获取窗口的物理坐标/大小，除以 scale 得到标准化值存储
-            width = max(200, min(int(geom.width() / scale), 500))
-            height = max(300, min(int(geom.height() / scale), 450))
+            width = max(130, min(int(geom.width() / scale), 500))
+            height = max(150, min(int(geom.height() / scale), 450))
             pos = {
                 "x": int(geom.x() / scale),
                 "y": int(geom.y() / scale),
                 "width": width,
                 "height": height
             }
+            logger.debug(f'width: {geom.width()}  height: {geom.height()}')
 
             # 获取正确的配置文件路径
             config_file_path = self._get_config_file_path(WINDOW_CONFIG_FILE, scale)
-            logger.info(f'[save_window_position_qt] config_file_path={config_file_path}')
+            logger.debug(f'[save_window_position_qt] config_file_path={config_file_path}')
 
             # 读取旧数据
             data = {}
@@ -10001,7 +10012,7 @@ class StockMonitorApp(tk.Tk):
             with open(config_file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
-            logger.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
+            logger.debug(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
 
         except Exception as e:
             logger.error(f"[save_window_position_qt] 保存窗口位置失败: {e}")
@@ -10045,7 +10056,7 @@ class StockMonitorApp(tk.Tk):
         x = (screen_width - width) // 2
         y = (screen_height - height) // 2
         win.geometry(f"{width}x{height}+{x}+{y}")
-
+        logger.debug(f"{width}x{height}+{x}+{y}")
 
 
     def on_close(self):
@@ -14122,7 +14133,7 @@ def parse_args():
     parser.add_argument(
         "--log",
         type=str,
-        default="INFO",
+        default="ERROR",
         help="日志等级，可选：DEBUG, INFO, WARNING, ERROR, CRITICAL"
     )
 
@@ -14207,7 +14218,7 @@ if __name__ == "__main__":
     mp.freeze_support()  # <-- 必须
 
     args = parse_args()  # 解析命令行参数
-    log_level = getattr(logging, args.log.upper(), logging.INFO)
+    log_level = getattr(logging, args.log.upper(), logging.ERROR)
 
     # 直接用自定义的 init_logging，传入日志等级
     # logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=log_level)

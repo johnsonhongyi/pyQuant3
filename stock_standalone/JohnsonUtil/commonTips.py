@@ -309,6 +309,17 @@ class GlobalConfig:
         self.scale_offset = self.cfg.get("general", "scale_offset")
         self.resampleInit = self.cfg.get("general", "resampleInit")
 
+        # 处理 saved_width_height
+        try:
+            if "x" in saved_wh_str:
+                self.saved_width, self.saved_height = map(int, saved_wh_str.split("x"))
+            elif "," in saved_wh_str:
+                self.saved_width, self.saved_height = map(int, saved_wh_str.split(","))
+            else:
+                self.saved_width, self.saved_height = 260, 180
+        except Exception:
+            self.saved_width, self.saved_height = 260, 180
+
         self.clean_terminal = self._split(
             self.cfg.get("terminal", "clean_terminal", fallback="")
         )
