@@ -229,6 +229,7 @@ def check_port_in_use(port):
         result = bool(output.stdout.strip())
         check_dict["Command_Line_netstat"] = result
         print("command:%s"%(command))
+        print("output:%s"%(output))
         is_port_in_use |= result  # 如果netstat检查结果显示端口被占用，更新标志位
     else:
         print("system == None")

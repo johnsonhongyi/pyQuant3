@@ -3555,13 +3555,13 @@ def open_archive_view_window(filename):
     # update_window_position(window_id)  #保存位置在close
 
     # 只保留需要的列
-    columns = ["code", "name", "v3", "v4", "v5", "time"]
+    columns = ["code", "name", "percent", "price", "volume", "time"]
     col_names = {
         "code": "代码",
         "name": "名称",
-        "v3": "percent",
-        "v4": "price",
-        "v5": "volume",
+        "percent": "percent",
+        "price": "price",
+        "volume": "volume",
         "time": "时间"
     }
 
