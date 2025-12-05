@@ -287,15 +287,68 @@ import configparser
 from pathlib import Path
 # from config.loader import GlobalConfig
 
+# class GlobalConfigOnly_read:
+#     def __init__(self, cfg_file=None):
+#         if not cfg_file:
+#             cfg_file = Path(__file__).parent / "global.ini"
+
+#         self.cfg_file = Path(cfg_file)
+
+#         # 禁用 % 插值
+#         # self.cfg = configparser.ConfigParser(interpolation=None)
+#         self.cfg = configparser.ConfigParser(
+#             interpolation=None,
+#             inline_comment_prefixes=("#", ";")
+#         )
+
+#         self.cfg.read(self.cfg_file, encoding="utf-8")
+
+#         self.init_value = self.cfg.getint("general", "initGlobalValue")
+#         self.marketInit = self.cfg.get("general", "marketInit")
+#         self.marketblk = self.cfg.get("general", "marketblk")
+#         self.scale_offset = self.cfg.get("general", "scale_offset")
+#         self.resampleInit = self.cfg.get("general", "resampleInit")
+#         self.write_all_day_date = self.cfg.get("general", "write_all_day_date")
+#         self.duration_sleep_time = self.cfg.getint("general", "duration_sleep_time")
+
+#         # 处理 saved_width_height
+#         try:
+#             if "x" in saved_wh_str:
+#                 self.saved_width, self.saved_height = map(int, saved_wh_str.split("x"))
+#             elif "," in saved_wh_str:
+#                 self.saved_width, self.saved_height = map(int, saved_wh_str.split(","))
+#             else:
+#                 self.saved_width, self.saved_height = 260, 180
+#         except Exception:
+#             self.saved_width, self.saved_height = 260, 180
+
+#         self.clean_terminal = self._split(
+#             self.cfg.get("terminal", "clean_terminal", fallback="")
+#         )
+
+#         self.expressions = dict(self.cfg.items("expressions"))
+#         self.paths = dict(self.cfg.items("path"))
+
+#     def _split(self, s):
+#         return [x.strip() for x in s.split(",") if x.strip()]
+
+#     def get_expr(self, name):
+#         return self.expressions.get(name)
+
+#     def get_path(self, key):
+#         return self.paths.get(key)
+
+#     def __repr__(self):
+#         return f"<GlobalConfig {self.cfg_file}>"
+
+
 class GlobalConfig:
-    def __init__(self, cfg_file=None):
+    def __init__(self, cfg_file=None, **updates):
         if not cfg_file:
             cfg_file = Path(__file__).parent / "global.ini"
 
         self.cfg_file = Path(cfg_file)
 
-        # 禁用 % 插值
-        # self.cfg = configparser.ConfigParser(interpolation=None)
         self.cfg = configparser.ConfigParser(
             interpolation=None,
             inline_comment_prefixes=("#", ";")
@@ -303,14 +356,16 @@ class GlobalConfig:
 
         self.cfg.read(self.cfg_file, encoding="utf-8")
 
-        self.init_value = self.cfg.getint("general", "initGlobalValue")
-        self.marketInit = self.cfg.get("general", "marketInit")
-        self.marketblk = self.cfg.get("general", "marketblk")
-        self.scale_offset = self.cfg.get("general", "scale_offset")
-        self.resampleInit = self.cfg.get("general", "resampleInit")
-        self.duration_sleep_time = self.cfg.getint("general", "duration_sleep_time")
+        # ---- 读取原有参数 ----
+        self.init_value = self.cfg.getint("general", "initGlobalValue", fallback=0)
+        self.marketInit = self.cfg.get("general", "marketInit", fallback="")
+        self.marketblk = self.cfg.get("general", "marketblk", fallback="")
+        self.scale_offset = self.cfg.get("general", "scale_offset", fallback="")
+        self.resampleInit = self.cfg.get("general", "resampleInit", fallback="")
+        self.write_all_day_date = self.cfg.get("general", "write_all_day_date", fallback="")
+        self.duration_sleep_time = self.cfg.getint("general", "duration_sleep_time", fallback=0)
 
-        # 处理 saved_width_height
+        saved_wh_str = self.cfg.get("general", "saved_width_height", fallback="260x180")
         try:
             if "x" in saved_wh_str:
                 self.saved_width, self.saved_height = map(int, saved_wh_str.split("x"))
@@ -325,8 +380,15 @@ class GlobalConfig:
             self.cfg.get("terminal", "clean_terminal", fallback="")
         )
 
-        self.expressions = dict(self.cfg.items("expressions"))
-        self.paths = dict(self.cfg.items("path"))
+        self.expressions = dict(self.cfg.items("expressions")) if self.cfg.has_section("expressions") else {}
+        self.paths = dict(self.cfg.items("path")) if self.cfg.has_section("path") else {}
+
+        # ---- 支持构造时直接写入 ----
+        if updates:
+            for key, value in updates.items():
+                self.set_value("general", key, value)
+
+            self.save()
 
     def _split(self, s):
         return [x.strip() for x in s.split(",") if x.strip()]
@@ -337,10 +399,42 @@ class GlobalConfig:
     def get_path(self, key):
         return self.paths.get(key)
 
+    # ===================== ✅ 写配置 API =====================
+
+    def set_value(self, section, key, value):
+        """设置配置项(内存中)"""
+        if not self.cfg.has_section(section):
+            self.cfg.add_section(section)
+
+        self.cfg.set(section, key, str(value))
+
+        # 如果是 general 区域，顺便更新实例字段
+        if section == "general":
+            setattr(self, key, value)
+
+    def save(self):
+        """写回 ini 文件"""
+        with open(self.cfg_file, "w", encoding="utf-8") as f:
+            self.cfg.write(f)
+
+    def set_and_save(self, section, key, value):
+        """一步完成 set + save"""
+        self.set_value(section, key, value)
+        self.save()
+        log.info(f"使用内置save: {section} {key} {value} ok")
+    # ========================================================
+
     def __repr__(self):
         return f"<GlobalConfig {self.cfg_file}>"
 
-
+    # cct.GlobalConfig(conf_ini, write_all_day_date=20251205)
+    # cfg.set_and_save("general", "write_all_day_date", "20251205")
+    # GlobalConfig(
+    #     conf_ini,
+    #     write_all_day_date=20251205,
+    #     initGlobalValue=99,
+    #     duration_sleep_time=2
+    # )
 conf_ini= get_conf_path('global.ini')
 if not conf_ini:
     log.critical("global.ini 加载失败，程序无法继续运行")

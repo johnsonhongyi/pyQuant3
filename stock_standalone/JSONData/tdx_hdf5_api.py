@@ -2040,43 +2040,141 @@ def write_hdf_db_gptmod1(fname, df, table='all', index=False, complib='blosc',
     log.info("write hdf time:%0.2f" % (time.time() - time_t))
     return True
 
+import shutil, os
+from pathlib import Path
+
+class SafeHDFWriter:
+    def __init__(self, final_path):
+        self.final = Path(final_path)
+        self.tmp = self.final.with_suffix(self.final.suffix + ".tmp")
+
+    def __enter__(self):
+        # 保留旧数据
+        if self.final.exists():
+            shutil.copy2(self.final, self.tmp)
+        return self.tmp
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+
+        # 写入异常直接丢弃
+        if exc_type is not None:
+            if self.tmp.exists():
+                self.tmp.unlink()
+            return False
+
+        # 校验失败直接丢弃
+        if not validate_h5(self.tmp):
+            if self.tmp.exists():
+                self.tmp.unlink()
+            raise RuntimeError("HDF5 校验失败，放弃写入")
+
+        # 原子替换
+        os.replace(self.tmp, self.final)
+
+def write_hdf_db_safe(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False, rewrite=False, showtable=False):
+    if df is None or df.empty: return False
+    if 'code' in df.columns: df = df.set_index('code')
+    df = df.fillna(0)
+    df = df[~df.index.duplicated(keep='first')]
+    if not MultiIndex: df['timel'] = time.time()
+    dd = df.dtypes.to_frame()
+    if 'object' in dd.values:
+        cols = dd[dd == 'object'].dropna().index.tolist()
+        df[cols] = df[cols].astype(str)
+        df.index = df.index.astype(str)
+    df = df.fillna(0)
+    df = cct.reduce_memory_usage(df, verbose=False)
+    fname = Path(fname)
+    with SafeHDFWriter(fname) as tmp:
+        with SafeHDFStore(tmp, mode='a') as h5:
+            if '/' + table in h5.keys(): h5.remove(table)
+            if not MultiIndex:
+                h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
+            else:
+                h5.put(table, df, format='table', index=False, append=True, complib=complib, data_columns=True)
+            h5.flush()
+    log.info("Safe HDF write OK => %s[%s] rows:%s", fname, table, len(df))
+    return True
+
+
+# def write_hdf_db_safe(
+#         fname, df,
+#         table='all',
+#         index=False,
+#         complib='blosc',
+#         baseCount=500,
+#         append=True,
+#         MultiIndex=False,
+#         rewrite=False,
+#         showtable=False):
+
+#     # ====== 你原有的 dataframe 清洗逻辑不动 ======
+#     if df is None or df.empty:
+#         return False
+
+#     if 'code' in df.columns:
+#         df = df.set_index('code')
+
+#     df = df.fillna(0)
+#     df = df[~df.index.duplicated(keep='first')]
+
+#     if not MultiIndex:
+#         df['timel'] = time.time()
+
+#     # dtype 修复
+#     dd = df.dtypes.to_frame()
+
+#     if 'object' in dd.values:
+#         cols = dd[dd == 'object'].dropna().index.tolist()
+#         df[cols] = df[cols].astype(str)
+#         df.index = df.index.astype(str)
+
+#     df = df.fillna(0)
+#     df = cct.reduce_memory_usage(df, verbose=False)
+
+#     fname = Path(fname)
+
+#     # ====== ★★★ 安全原子写入开始 ★★★ ======
+
+#     with SafeHDFWriter(fname) as tmp:
+
+#         # 始终只在 tmp 上写
+#         with SafeHDFStore(tmp, mode='a') as h5:
+
+#             if '/' + table in h5.keys():
+#                 h5.remove(table)
+
+#             if not MultiIndex:
+#                 h5.put(
+#                     table, df,
+#                     format='table',
+#                     append=False,
+#                     complib=complib,
+#                     data_columns=True
+#                 )
+#             else:
+#                 h5.put(
+#                     table, df,
+#                     format='table',
+#                     index=False,
+#                     append=True,
+#                     complib=complib,
+#                     data_columns=True
+#                 )
+
+#             h5.flush()
+
+#     # ====== ★★★ 原子写完成并自动校验替换 ★★★ ======
+
+#     log.info("Safe HDF write OK => %s[%s] rows:%s",
+#              fname, table, len(df))
+#     return True
 
 def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False,showtable=False):
-    """[summary]
 
-    [description]
-
-    Parameters
-    ----------
-    fname : {[type]}
-        [description]
-    df : {[type]}
-        [description]
-    table : {str}, optional
-        [description] (the default is 'all', which [default_description])
-    index : {bool}, optional
-        [description] (the default is False, which [default_description])
-    complib : {str}, optional
-        [description] (the default is 'blosc', which [default_description])
-    baseCount : {number}, optional
-        [description] (the default is 500, which [default_description])
-    append : {bool}, optional
-        [description] (the default is True, which [default_description])
-    MultiIndex : {bool}, optional
-        [description] (the default is False, which [default_description])
-
-    Returns
-    -------
-    [type]
-        [description]
-    """
     if 'code' in df.columns:
         df=df.set_index('code')
-#    write_status = False
     time_t=time.time()
-#    if not os.path.exists(cct.get_ramdisk_dir()):
-#        log.info("NO RamDisk")
-#        return False
     df=df.fillna(0)
     df=df[~df.index.duplicated(keep='first')]
     code_subdf=df.index.tolist()
@@ -2883,7 +2981,15 @@ if __name__ == "__main__":
     tdx_hd5_name = r'tdx_all_df_%s' % (300)
     tdx_hd5_name = 'tdx_all_df_300'
     tdx_hd5_path = cct.get_run_path_tdx(tdx_hd5_name)
-    h300 = load_hdf_db(tdx_hd5_name, table='all_300', code_l=None, timelimit=False, MultiIndex=True)
+    print(f'tdx_hd5_path: {tdx_hd5_path}')
+    import h5py
+    try:
+        f = h5py.File(tdx_hd5_path,"r")
+        print("顶层keys:", list(f.keys()))
+    except Exception as e:
+        print("H5PY无法打开:", e)
+    # h5repack tdx_hd5_path tdx_hd5_path.bak
+    # h300 = load_hdf_db(tdx_hd5_name, table='all_300', code_l=None, timelimit=False, MultiIndex=True)
     import ipdb;ipdb.set_trace()
 
     # sina_MultiD_path = "D:\\RamDisk\\sina_MultiIndex_data.h5"

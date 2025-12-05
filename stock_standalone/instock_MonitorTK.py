@@ -187,12 +187,12 @@ if not conf_ini:
     print("global.ini 加载失败，程序无法继续运行")
 
 CFG = cct.GlobalConfig(conf_ini)
-
 marketInit = CFG.marketInit
 marketblk = CFG.marketblk
 scale_offset = CFG.scale_offset
 resampleInit = CFG.resampleInit 
 duration_sleep_time = CFG.duration_sleep_time
+write_all_day_date = CFG.write_all_day_date
 saved_width,saved_height = CFG.saved_width,CFG.saved_height
 # def remove_condition_query(expr: str, cond: str) -> str:
 def remove_invalid_conditions(query: str, invalid_cols: list,showdebug=True):
@@ -2504,11 +2504,17 @@ class StockMonitorApp(tk.Tk):
     def run_15_30_task(self):
         if getattr(self, "_task_running", False):
             return
-
+        today = cct.get_today('')
+        if write_all_day_date == today:
+            logger.info(f'Write_market_all_day_mp 已经完成')
+            return
         self._task_running = True
         try:
             tdd.Write_market_all_day_mp('all')
             logger.info(f'run Write_market_all_day_mp OK')
+            CFG = cct.GlobalConfig(conf_ini)
+            # cct.GlobalConfig(conf_ini, write_all_day_date=20251205)
+            CFG.set_and_save("general", "write_all_day_date", today)
 
         finally:
             self._task_running = False
@@ -2888,6 +2894,7 @@ class StockMonitorApp(tk.Tk):
         scale_offset = CFG.scale_offset
         resampleInit = CFG.resampleInit
         duration_sleep_time = CFG.duration_sleep_time
+        write_all_day_date = CFG.write_all_day_date
         saved_width,saved_height = CFG.saved_width,CFG.saved_height 
         logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} scale_offset: {scale_offset} saved_width:{saved_width},{saved_height} duration_sleep_time:{duration_sleep_time}")
 
