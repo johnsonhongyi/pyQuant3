@@ -2975,21 +2975,25 @@ if __name__ == "__main__":
     # print(f"sina_data:{check_hdf(h5_fname='tdx_all_df_300',h5_table='all')}")
 
 
+    def check_tdx_all_df(fname='300'):
+        tdx_hd5_name = f'tdx_all_df_{fname}'
+        tdx_hd5_path = cct.get_run_path_tdx(tdx_hd5_name)
+        print(f'tdx_hd5_path: {tdx_hd5_path}')
+        import h5py
+        try:
+            f = h5py.File(tdx_hd5_path,"r")
+            print("顶层keys:", list(f.keys()))
+        except Exception as e:
+            print("H5PY无法打开:", e)
 
     # sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
     sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
     tdx_hd5_name = r'tdx_all_df_%s' % (300)
-    tdx_hd5_name = 'tdx_all_df_300'
-    tdx_hd5_path = cct.get_run_path_tdx(tdx_hd5_name)
-    print(f'tdx_hd5_path: {tdx_hd5_path}')
-    import h5py
-    try:
-        f = h5py.File(tdx_hd5_path,"r")
-        print("顶层keys:", list(f.keys()))
-    except Exception as e:
-        print("H5PY无法打开:", e)
+
     # h5repack tdx_hd5_path tdx_hd5_path.bak
     # h300 = load_hdf_db(tdx_hd5_name, table='all_300', code_l=None, timelimit=False, MultiIndex=True)
+    check_tdx_all_df('300')
+    check_tdx_all_df('900')
     import ipdb;ipdb.set_trace()
 
     # sina_MultiD_path = "D:\\RamDisk\\sina_MultiIndex_data.h5"
