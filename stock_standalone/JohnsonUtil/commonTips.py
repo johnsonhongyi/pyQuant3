@@ -308,6 +308,7 @@ class GlobalConfig:
         self.marketblk = self.cfg.get("general", "marketblk")
         self.scale_offset = self.cfg.get("general", "scale_offset")
         self.resampleInit = self.cfg.get("general", "resampleInit")
+        self.duration_sleep_time = self.cfg.getint("general", "duration_sleep_time")
 
         # 处理 saved_width_height
         try:
