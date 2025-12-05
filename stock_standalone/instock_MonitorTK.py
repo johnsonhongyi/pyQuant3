@@ -5820,8 +5820,9 @@ class StockMonitorApp(tk.Tk):
             # 使用传统方式刷新
             self._refresh_tree_traditional(df, cols_to_show)
 
-        # ✅ 移除了双击表头绑定 - 应该只在初始化时绑定一次,不要每次刷新都重新绑定
-        # self.tree.bind("<Double-1>", self.on_tree_double_click)
+        # ✅ 双击表头绑定 - 需要保留以支持列组合管理器
+        # 这个绑定不会干扰排序,因为on_tree_double_click会区分heading和cell区域
+        self.tree.bind("<Double-1>", self.on_tree_double_click)
         
         # 保存完整数据
         self.current_df = df
