@@ -179,6 +179,7 @@ marketInit = CFG.marketInit
 marketblk = CFG.marketblk
 scale_offset = CFG.scale_offset
 resampleInit = CFG.resampleInit 
+duration_sleep_time = CFG.duration_sleep_time
 saved_width,saved_height = CFG.saved_width,CFG.saved_height
 # def remove_condition_query(expr: str, cond: str) -> str:
 def remove_invalid_conditions(query: str, invalid_cols: list,showdebug=True):
@@ -1862,7 +1863,7 @@ def load_monitor_list(MONITOR_LIST_FILE=MONITOR_LIST_FILE):
 
 # ------------------ 后台数据进程 ------------------ #
 def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
-    global START_INIT
+    global START_INIT,duration_sleep_time
     g_values = cct.GlobalValues(shared_dict)  # 主进程唯一实例
     resample = g_values.getkey("resample") or "d"
     # logger.info(f'getkey("market") : {g_values.getkey("market")} marketInit:{marketInit}')
@@ -1910,7 +1911,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
             top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
             if top_now.empty:
                 logger.info("top_now.empty no data fetched")
-                time.sleep(ct.duration_sleep_time)
+                time.sleep(duration_sleep_time)
                 continue
 
             if top_all.empty:
@@ -1947,16 +1948,15 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
             logger.info(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape}')
             queue.put(top_temp)
             gc.collect()
-            logger.info(f'now: {cct.get_now_time_int()} time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{ct.duration_sleep_time} resample:{resample}')
-            # time.sleep(ct.duration_sleep_time)
-            for _ in range(ct.duration_sleep_time*2):
+            logger.info(f'now: {cct.get_now_time_int()} time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+            for _ in range(duration_sleep_time):
                 if not flag.value: break
                 time.sleep(0.5)
             START_INIT = 1
-            # logger.debug(f'fetch_and_process timesleep:{ct.duration_sleep_time} resample:{resample}')
+            # logger.debug(f'fetch_and_process timesleep:{duration_sleep_time} resample:{resample}')
         except Exception as e:
             logger.error(f"Error in background process: {e}", exc_info=True)
-            time.sleep(ct.duration_sleep_time / 2)
+            time.sleep(duration_sleep_time / 2)
 
 # ------------------ 指标计算 ------------------ #
 def calc_indicators(top_all, resample):
@@ -2255,7 +2255,7 @@ class StockMonitorApp(tk.Tk):
         self.default_font_bold = tkfont.nametofont("TkDefaultFont").copy()
         # self.default_font_bold.configure(weight="bold")  # 只加粗，不修改字号或字体
         self.default_font_bold.configure(family="Microsoft YaHei", size=10, weight="bold")
-
+        global duration_sleep_time
         # 💥 关键修正 2：立即执行 DPI 缩放并重新赋值
         if sys.platform.startswith('win'):
             # 确保 self._apply_dpi_scaling() 总是返回一个 float
@@ -2859,8 +2859,9 @@ class StockMonitorApp(tk.Tk):
         marketblk = CFG.marketblk
         scale_offset = CFG.scale_offset
         resampleInit = CFG.resampleInit
+        duration_sleep_time = CFG.duration_sleep_time
         saved_width,saved_height = CFG.saved_width,CFG.saved_height 
-        logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} scale_offset: {scale_offset} saved_width:{saved_width},{saved_height}")
+        logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} scale_offset: {scale_offset} saved_width:{saved_width},{saved_height} duration_sleep_time:{duration_sleep_time}")
 
     def get_scaled_value(self):
         """返回当前的缩放因子（用于 TreeView 列宽计算）"""
@@ -6563,7 +6564,7 @@ class StockMonitorApp(tk.Tk):
             auto_update: 是否自动刷新
             interval: 刷新间隔（秒）
             stock_name: 股票名称（可选）
-        """
+        """
         if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
             toast_message(self, "df_all 数据为空，无法筛选概念股票")
             return
@@ -6638,14 +6639,14 @@ class StockMonitorApp(tk.Tk):
         frame = tk.Frame(win)
         frame.pack(fill="both", expand=True)
 
-        columns = ("code", "name", "percent", "volume")
+        columns = ("code", "name", "percent", "volume","red")
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量"}
+        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量","red":"连阳"}
         for col in columns:
             tree.heading(col, text=col_texts[col], anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
@@ -6777,7 +6778,7 @@ class StockMonitorApp(tk.Tk):
 
         spin_interval = tk.Spinbox(ctrl_frame, from_=5, to=300, width=5)
         spin_interval.delete(0, "end")
-        spin_interval.insert(0, 30)  # 默认30秒
+        spin_interval.insert(0, duration_sleep_time)  # 默认30秒
         spin_interval.pack(side="left")
         tk.Label(ctrl_frame, text="秒").pack(side="left")
 
@@ -6882,7 +6883,6 @@ class StockMonitorApp(tk.Tk):
         auto_update: 是否自动刷新
         interval: 自动刷新间隔秒
         """
-
         if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
             toast_message(self, "df_all 数据为空，无法筛选概念股票")
             return
@@ -6945,14 +6945,15 @@ class StockMonitorApp(tk.Tk):
         frame = tk.Frame(win)
         frame.pack(fill="both", expand=True)
 
-        columns = ("code", "name", "percent", "volume")
+        columns = ("code", "name", "percent", "volume","red")
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
 
-        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量"}
+        # col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量"}
+        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量","red":"连阳"}
         for col in columns:
             tree.heading(col, text=col_texts[col], anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
@@ -7073,7 +7074,7 @@ class StockMonitorApp(tk.Tk):
 
         spin_interval = tk.Spinbox(ctrl_frame, from_=5, to=300, width=5)
         spin_interval.delete(0, "end")
-        spin_interval.insert(0, 30)  # 默认30秒
+        spin_interval.insert(0, duration_sleep_time)  # 默认30秒
         spin_interval.pack(side="left")
         tk.Label(ctrl_frame, text="秒").pack(side="left")
 
@@ -7199,7 +7200,8 @@ class StockMonitorApp(tk.Tk):
                                 latest_row.get("name", row.get("name", "")),
                                 # f"{latest_row.get('percent', row.get('percent', 0)):.2f}",
                                 f"{percent:.2f}",
-                                f"{latest_row.get('volume', row.get('volume', 0)):.1f}"))
+                                f"{latest_row.get('volume', row.get('volume', 0)):.1f}",
+                                latest_row.get("red", row.get("red", 0)) ))
             code_to_iid[code_row] = iid
 
         # --- 默认选中逻辑 ---
@@ -7394,7 +7396,8 @@ class StockMonitorApp(tk.Tk):
             if pd.isna(percent) or percent == 0:
                 percent = row.get("per1d")
             tree.insert("", "end", iid=iid,
-                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}"))
+                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}"))
+
 
         # 保留选中状态
         if hasattr(tree, "_selected_index") and tree.get_children():
@@ -7409,6 +7412,7 @@ class StockMonitorApp(tk.Tk):
 
 
     def _sort_treeview_column_newTop10(self, tree, col, reverse=None):
+
         if not hasattr(tree, "_full_df") or tree._full_df.empty:
             logger.info("[WARN] Treeview _full_df 为空")
             return
@@ -7440,7 +7444,7 @@ class StockMonitorApp(tk.Tk):
             if pd.isna(percent) or percent == 0:
                 percent = row.get("per1d")
             tree.insert("", "end", iid=iid,
-                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}"))
+                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}"))
 
         # 保留选中状态
         if hasattr(tree, "_selected_index") and tree.get_children():
@@ -9155,10 +9159,9 @@ class StockMonitorApp(tk.Tk):
         #     self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=10)
         # else:
         #     logger.info("监控已在运行中。")
-
         logger.info("启动K线监控...")
         if not hasattr(self, "kline_monitor") or not getattr(self.kline_monitor, "winfo_exists", lambda: False)():
-            self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=15,history3=lambda: self.search_history3)
+            self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=duration_sleep_time,history3=lambda: self.search_history3)
             # self.kline_monitor = KLineMonitor(self, lambda: self.df_all, refresh_interval=15,history3=self.search_history3)
         else:
             logger.info("监控已在运行中。")
@@ -13074,7 +13077,7 @@ class KLineMonitor(tk.Toplevel):
 
         self.tree = ttk.Treeview(
             table_frame,
-            columns=("code", "name", "now", "percent", "volume", "signal","score", "emotion"),
+            columns=("code", "name", "now", "percent", "volume", "signal","score","red", "emotion"),
             show="headings",
             height=20
         )
@@ -13099,6 +13102,7 @@ class KLineMonitor(tk.Toplevel):
             ("volume", "量比", 30),
             ("signal", "信号", 60),
             ("score", "评分", 30),
+            ("red", "连阳", 30),
             ("emotion", "情绪", 60)
         ]:
             # self.tree.heading(col, text=text, command=lambda c=col: self.treeview_sort_columnKLine(c))
@@ -13819,6 +13823,7 @@ class KLineMonitor(tk.Toplevel):
                 "volume": r.get("volume",0),
                 "display_signal": display_signal,
                 "score": r.get("score",0),
+                "red": r.get("red",0),
                 "emotion": r.get("emotion",""),
                 "tag": tag
             })
@@ -13856,6 +13861,7 @@ class KLineMonitor(tk.Toplevel):
                     f"{row['volume']:.1f}",
                     row["display_signal"],
                     f"{row['score']}",
+                    f"{row['red']}",
                     row["emotion"]
                 ),
                 tags=(row["tag"],)
