@@ -2866,35 +2866,42 @@ if __name__ == "__main__":
         if new_path:
             hm5.to_hdf(f"G:\\{new_path}", key=f"{h5_table}/table", mode="w", format="table", complib="blosc", complevel=9)
 
-    hm5=get_tdx_all_MultiIndex_h5()
-    with tables.open_file(r"G:\sina_MultiIndex_data.h5") as f: print(f)
-    with tables.open_file(r"G:\sina_data.h5") as f: print(f)
-    h5=get_tdx_all_from_h5()
+    # hm5=get_tdx_all_MultiIndex_h5()
+    # with tables.open_file(r"G:\sina_MultiIndex_data.h5") as f: print(f)
+    # with tables.open_file(r"G:\sina_data.h5") as f: print(f)
+    # h5=get_tdx_all_from_h5()
     
     # print(hm5.memory_usage(deep=True).sum() / 1024**2, "MB")
     # hm5.to_hdf(r"G:\sina_MultiIndex_data_clean.h5", key="all_30/table", mode="w", format="table", complib="blosc", complevel=9)
     print(f"sina_data:{check_hdf(h5_fname='sina_data',h5_table='all')}")
+    # print(f"sina_data:{check_hdf(h5_fname='tdx_all_df_300',h5_table='all')}")
 
 
 
+    # sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
+    sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
+    tdx_hd5_name = r'tdx_all_df_%s' % (300)
+    tdx_hd5_name = 'tdx_all_df_300'
+    tdx_hd5_path = cct.get_run_path_tdx(tdx_hd5_name)
+    h300 = load_hdf_db(tdx_hd5_name, table='all_300', code_l=None, timelimit=False, MultiIndex=True)
     import ipdb;ipdb.set_trace()
 
-    sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
     # sina_MultiD_path = "D:\\RamDisk\\sina_MultiIndex_data.h5"
     freq='30T'
     startime = '09:25:00'
     endtime = '15:01:00'
     def readHdf5(fpath, root=None):
         store = pd.HDFStore(fpath, "r")
-        (list(store.keys()))
+        print(list(store.keys()))
         if root is None:
             root = list(store.keys())[0].replace("/", "")
         df = store[root]
         store.close()
         return df
 
-    runcol=['low','high','close']
+    # runcol=['low','high','close']
     h5 = readHdf5(sina_MultiD_path)
+
     import ipdb;ipdb.set_trace()
     
     h5.shape
