@@ -136,6 +136,15 @@ except ImportError as e:
     PERFORMANCE_OPTIMIZER_AVAILABLE = False
     logger.warning(f"⚠️ 性能优化模块未找到,将使用传统刷新方式: {e}")
 
+# ✅ 股票特征标记模块导入
+try:
+    from stock_feature_marker import StockFeatureMarker
+    FEATURE_MARKER_AVAILABLE = True
+    logger.info("✅ 股票特征标记模块已加载")
+except ImportError as e:
+    FEATURE_MARKER_AVAILABLE = False
+    logger.warning(f"⚠️ 股票特征标记模块未找到: {e}")
+
 
 def df_hash(df: pd.DataFrame) -> str:
     """计算 DataFrame 的唯一哈希，用于一致性检测"""
@@ -2439,10 +2448,31 @@ class StockMonitorApp(tk.Tk):
         # 队列接收子进程数据
         self.queue = mp.Queue()
 
+        # ✅ 股票特征标记器初始化（必须在性能优化器之前）
+        if FEATURE_MARKER_AVAILABLE:
+            try:
+                self.feature_marker = StockFeatureMarker(self.tree)
+                self._use_feature_marking = True
+                logger.info("✅ 股票特征标记器已初始化")
+            except Exception as e:
+                logger.warning(f"⚠️ 股票特征标记器初始化失败: {e}")
+                self._use_feature_marking = False
+        else:
+            self._use_feature_marking = False
+        
         # ✅ 性能优化器初始化
         if PERFORMANCE_OPTIMIZER_AVAILABLE:
             try:
-                self.tree_updater = TreeviewIncrementalUpdater(self.tree, self.current_cols)
+                # 传入feature_marker以支持特征标记
+                feature_marker_instance = None
+                if FEATURE_MARKER_AVAILABLE and hasattr(self, 'feature_marker'):
+                    feature_marker_instance = self.feature_marker
+                
+                self.tree_updater = TreeviewIncrementalUpdater(
+                    self.tree, 
+                    self.current_cols,
+                    feature_marker=feature_marker_instance
+                )
                 self.df_cache = DataFrameCache(ttl=5)  # 5秒缓存
                 self.perf_monitor = PerformanceMonitor("TreeUpdate")
                 self._use_incremental_update = True
@@ -2453,6 +2483,18 @@ class StockMonitorApp(tk.Tk):
         else:
             self._use_incremental_update = False
             logger.info("ℹ️ 使用传统刷新模式")
+        
+        # ✅ 股票特征标记器初始化
+        if FEATURE_MARKER_AVAILABLE:
+            try:
+                self.feature_marker = StockFeatureMarker(self.tree)
+                self._use_feature_marking = True
+                logger.info("✅ 股票特征标记器已初始化")
+            except Exception as e:
+                logger.warning(f"⚠️ 股票特征标记器初始化失败: {e}")
+                self._use_feature_marking = False
+        else:
+            self._use_feature_marking = False
 
         # UI 构建
         self._build_ui(ctrl_frame)
@@ -2922,6 +2964,22 @@ class StockMonitorApp(tk.Tk):
         - 自动应用 DPI 缩放
         - 可自定义 name 列宽度
         """
+        # co2int = ['ra', 'ral', 'fib', 'fibl', 'op', 'ratio', 'ra']
+        # col_scaled = self.get_scaled_value() 
+        # width = int(60 * col_scaled)  # 缩小一点，保持紧凑
+        # minwidth = int(30 * col_scaled)
+        # stretch = False
+
+        # if col in co2int or col in co2width:
+        #     width = int(40 * col_scaled)  # 缩小一点，保持紧凑
+        #     minwidth = int(25 * col_scaled)
+        #     # stretch = self.auto_adjust_column
+        #     stretch = not self.dfcf_var.get()
+        # else:
+        #     width = int(60 * col_scaled)  # 更小的宽度
+        #     minwidth = int(30 * col_scaled)
+        #     stretch = not self.dfcf_var.get()
+        # tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=stretch)
         co2int = ['ra', 'ral', 'fib', 'fibl', 'op', 'ratio', 'ra']
         co2width = ['boll', 'kind', 'red']
         co3other = ['MainU']
@@ -2959,7 +3017,6 @@ class StockMonitorApp(tk.Tk):
                 minwidth = int(30 * col_scaled)
                 stretch = not self.dfcf_var.get()
             tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=stretch)
-
 
     def update_treeview_cols(self, new_cols):
         try:
@@ -5693,26 +5750,6 @@ class StockMonitorApp(tk.Tk):
         #     else:
         #         tree.heading(col, text=col)
         #     width = int(80*self.get_scaled_value()) if col == "name" else int(60*self.get_scaled_value())
-        #     tree.column(col, width=width, anchor="center", minwidth=int(60*self.get_scaled_value()))
-
-        # co2int = ['ra','ral','fib','fibl','op', 'ratio','ra']
-        # co2width = ['boll','kind','red']
-        # col_scaled = self.get_scaled_value() 
-        # for col in cols_to_show:
-        #     if sort_func:
-        #         tree.heading(col, text=col, command=lambda _c=col: sort_func(_c, False))
-        #     else:
-        #         tree.heading(col, text=col)
-
-        #     if col == "name":
-        #         width = int(getattr(self, "_name_col_width", 100*col_scaled))  # 使用记录的 name 宽度
-        #         minwidth = int(60*col_scaled)
-        #         tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=False)
-        #     elif col in co2int:
-        #         width = int(60*col_scaled)  # 数字列宽度可小
-        #         minwidth = int(22*col_scaled)
-        #         tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
-        #     elif col in co2width:
         #         width = int(60*col_scaled)  # 数字列宽度可小
         #         minwidth = int(22*col_scaled)
         #         tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
@@ -5841,20 +5878,54 @@ class StockMonitorApp(tk.Tk):
         self.update_status()
     
     def _refresh_tree_traditional(self, df, cols_to_show):
-        """传统的全量刷新方式（备用）"""
-        # 清空
+        """传统的全量刷新方式(作为增量更新的备用方案)"""
+        # 清空所有行
         for iid in self.tree.get_children():
             self.tree.delete(iid)
         
-        # 重置列配置
-        self.reset_tree_columns(self.tree, cols_to_show, self.sort_by_column)
-        
-        # 插入数据
-        for _, row in df.iterrows():
+        # 重新插入所有行
+        for idx, row in df.iterrows():
             values = [row.get(col, "") for col in cols_to_show]
-            self.tree.insert("", "end", values=values)
+            
+            # ✅ 如果启用了特征标记,在name列前添加图标
+            if self._use_feature_marking and hasattr(self, 'feature_marker'):
+                try:
+                    # 准备行数据用于特征检测
+                    row_data = {
+                        'percent': row.get('percent', 0),
+                        'volume': row.get('volume', 0),
+                        'category': row.get('category', '')
+                    }
+                    
+                    # 获取图标
+                    icon = self.feature_marker.get_icon_for_row(row_data)
+                    if icon:
+                        # 在name列前添加图标(假设name在第2列,index 1)
+                        name_idx = cols_to_show.index('name') if 'name' in cols_to_show else -1
+                        if name_idx >= 0 and name_idx < len(values):
+                            values[name_idx] = f"{icon} {values[name_idx]}"
+                except Exception as e:
+                    logger.debug(f"添加图标失败: {e}")
+            
+            # 插入行
+            iid = self.tree.insert("", "end", values=values)
+            
+            # ✅ 应用颜色标记
+            if self._use_feature_marking and hasattr(self, 'feature_marker'):
+                try:
+                    row_data = {
+                        'percent': row.get('percent', 0),
+                        'volume': row.get('volume', 0),
+                        'category': row.get('category', '')
+                    }
+                    # 获取并应用标签(不添加图标,因为已经在values中添加了)
+                    tags = self.feature_marker.get_tags_for_row(row_data)
+                    if tags:
+                        self.tree.item(iid, tags=tuple(tags))
+                except Exception as e:
+                    logger.debug(f"应用颜色标记失败: {e}")
         
-        # 恢复选中
+        # 恢复选中状态
         if self.select_code:
             for iid in self.tree.get_children():
                 values = self.tree.item(iid, "values")
@@ -14336,8 +14407,8 @@ if __name__ == "__main__":
     mp.freeze_support()  # <-- 必须
 
     args = parse_args()  # 解析命令行参数
-    # log_level = getattr(logging, args.log.upper(), logging.ERROR)
-    log_level = logging.DEBUG
+    log_level = getattr(logging, args.log.upper(), logging.ERROR)
+    # log_level = logging.DEBUG
 
     # 直接用自定义的 init_logging，传入日志等级
     # logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=log_level)

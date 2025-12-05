@@ -23,16 +23,18 @@ class TreeviewIncrementalUpdater:
     4. 大幅减少UI操作,提升流畅度
     """
     
-    def __init__(self, tree, columns: List[str]):
+    def __init__(self, tree, columns: List[str], feature_marker=None):
         """
         初始化增量更新器
         
         Args:
             tree: ttk.Treeview实例
             columns: 显示的列名列表
+            feature_marker: StockFeatureMarker实例(可选)
         """
         self.tree = tree
         self.columns = columns
+        self.feature_marker = feature_marker
         self._item_map: Dict[str, str] = {}  # code -> item_id映射
         self._last_df_hash: Optional[str] = None
         self._update_count = 0
@@ -84,8 +86,40 @@ class TreeviewIncrementalUpdater:
         for idx, row in df.iterrows():
             code = str(row.get('code', idx))
             values = [row.get(col, "") for col in self.columns]
+            
+            # ✅ 应用特征标记 - 添加图标
+            if self.feature_marker:
+                try:
+                    row_data = {
+                        'percent': row.get('percent', 0),
+                        'volume': row.get('volume', 0),
+                        'category': row.get('category', '')
+                    }
+                    icon = self.feature_marker.get_icon_for_row(row_data)
+                    if icon and 'name' in self.columns:
+                        name_idx = self.columns.index('name')
+                        if name_idx < len(values):
+                            values[name_idx] = f"{icon} {values[name_idx]}"
+                except Exception:
+                    pass
+            
             iid = self.tree.insert("", "end", values=values)
             self._item_map[code] = iid
+            
+            # ✅ 应用颜色标记
+            if self.feature_marker:
+                try:
+                    row_data = {
+                        'percent': row.get('percent', 0),
+                        'volume': row.get('volume', 0),
+                        'category': row.get('category', '')
+                    }
+                    tags = self.feature_marker.get_tags_for_row(row_data)
+                    if tags:
+                        self.tree.item(iid, tags=tuple(tags))
+                except Exception:
+                    pass
+            
             added += 1
         
         duration = time.time() - start_time
@@ -117,6 +151,22 @@ class TreeviewIncrementalUpdater:
             code = str(row.get('code', idx))
             values = [row.get(col, "") for col in self.columns]
             
+            # ✅ 应用特征标记 - 添加图标
+            if self.feature_marker:
+                try:
+                    row_data = {
+                        'percent': row.get('percent', 0),
+                        'volume': row.get('volume', 0),
+                        'category': row.get('category', '')
+                    }
+                    icon = self.feature_marker.get_icon_for_row(row_data)
+                    if icon and 'name' in self.columns:
+                        name_idx = self.columns.index('name')
+                        if name_idx < len(values):
+                            values[name_idx] = f"{icon} {values[name_idx]}"
+                except Exception:
+                    pass
+            
             if code in self._item_map:
                 # 更新现有行
                 iid = self._item_map[code]
@@ -126,11 +176,39 @@ class TreeviewIncrementalUpdater:
                 if tuple(values) != tuple(old_values):
                     self.tree.item(iid, values=values)
                     updated += 1
+                    
+                    # ✅ 更新颜色标记
+                    if self.feature_marker:
+                        try:
+                            row_data = {
+                                'percent': row.get('percent', 0),
+                                'volume': row.get('volume', 0),
+                                'category': row.get('category', '')
+                            }
+                            tags = self.feature_marker.get_tags_for_row(row_data)
+                            if tags:
+                                self.tree.item(iid, tags=tuple(tags))
+                        except Exception:
+                            pass
             else:
                 # 新增行
                 iid = self.tree.insert("", "end", values=values)
                 self._item_map[code] = iid
                 added += 1
+                
+                # ✅ 应用颜色标记
+                if self.feature_marker:
+                    try:
+                        row_data = {
+                            'percent': row.get('percent', 0),
+                            'volume': row.get('volume', 0),
+                            'category': row.get('category', '')
+                        }
+                        tags = self.feature_marker.get_tags_for_row(row_data)
+                        if tags:
+                            self.tree.item(iid, tags=tuple(tags))
+                    except Exception:
+                        pass
         
         duration = time.time() - start_time
         logger.info(f"[TreeviewUpdater] 增量更新: +{added} ~{updated} -{deleted}行, 耗时{duration:.3f}s")

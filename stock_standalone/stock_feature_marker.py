@@ -51,14 +51,16 @@ class StockFeatureMarker:
         'alert': '⚠️',
     }
     
-    def __init__(self, tree):
+    def __init__(self, tree, enable_colors=True):
         """
         初始化标记器
         
         Args:
             tree: ttk.Treeview实例
+            enable_colors: 是否启用颜色显示(默认True)
         """
         self.tree = tree
+        self.enable_colors = enable_colors
         self._configure_tags()
     
     def _configure_tags(self):
@@ -71,6 +73,10 @@ class StockFeatureMarker:
             )
         
         logger.info(f"✅ 已配置{len(self.COLORS)}种标记颜色")
+    
+    def set_enable_colors(self, enable: bool):
+        """设置是否启用颜色显示"""
+        self.enable_colors = enable
     
     def get_tags_for_row(self, row_data: dict) -> list:
         """
@@ -168,25 +174,16 @@ class StockFeatureMarker:
         Args:
             item_id: Treeview item ID
             row_data: 行数据字典
-            add_icon: 是否添加图标到name列
+            add_icon: 是否添加图标到name列(已废弃,使用独立icon列)
         """
-        # 获取标签
-        tags = self.get_tags_for_row(row_data)
-        
-        # 应用标签
-        if tags:
-            self.tree.item(item_id, tags=tuple(tags))
-        
-        # 添加图标(可选)
-        if add_icon:
-            icon = self.get_icon_for_row(row_data)
-            if icon:
-                # 获取当前values
-                values = list(self.tree.item(item_id, 'values'))
-                # 假设name在第2列(index 1)
-                if len(values) > 1:
-                    values[1] = f"{icon} {values[1]}"
-                    self.tree.item(item_id, values=tuple(values))
+        # ✅ 只在启用颜色时应用标签
+        if self.enable_colors:
+            tags = self.get_tags_for_row(row_data)
+            if tags:
+                self.tree.item(item_id, tags=tuple(tags))
+        else:
+            # 清除标签
+            self.tree.item(item_id, tags=())
 
 
 # 使用示例:
