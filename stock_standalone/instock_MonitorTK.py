@@ -43,14 +43,6 @@ import sqlite3
 # plt.ion()  # 开启交互模式
 import hashlib
 
-def df_hash(df: pd.DataFrame) -> str:
-    """计算 DataFrame 的唯一哈希，用于一致性检测"""
-    if df is None or df.empty:
-        return "empty"
-    # 转成字符串或二进制哈希
-    h = pd.util.hash_pandas_object(df, index=True).sum()
-    return hashlib.md5(str(h).encode()).hexdigest()[:8]  # 截取前8位
-
 import argparse
 import logging
 from logging.handlers import RotatingFileHandler
@@ -127,10 +119,31 @@ def init_logging(log_file="appTk.log", level=logging.ERROR, redirect_print=False
     return logger
 
 logger = init_logging(log_file='instock_tk.log',redirect_print=False) 
-# logger = LoggerFactory.log
-# logger.setLevel(log_level)
 # logger.setLevel(LoggerFactory.DEBUG)
 # logger.setLevel(LoggerFactory.INFO)
+
+# ✅ 性能优化模块导入
+try:
+    from performance_optimizer import (
+        TreeviewIncrementalUpdater,
+        DataFrameCache,
+        PerformanceMonitor,
+        optimize_dataframe_operations
+    )
+    PERFORMANCE_OPTIMIZER_AVAILABLE = True
+    logger.info("✅ 性能优化模块已加载")
+except ImportError as e:
+    PERFORMANCE_OPTIMIZER_AVAILABLE = False
+    logger.warning(f"⚠️ 性能优化模块未找到,将使用传统刷新方式: {e}")
+
+
+def df_hash(df: pd.DataFrame) -> str:
+    """计算 DataFrame 的唯一哈希，用于一致性检测"""
+    if df is None or df.empty:
+        return "empty"
+    # 转成字符串或二进制哈希
+    h = pd.util.hash_pandas_object(df, index=True).sum()
+    return hashlib.md5(str(h).encode()).hexdigest()[:8]  # 截取前8位
 
 def init_logging_nopdb(log_file="appTk.log", level=logging.ERROR):
     """初始化全局日志，避免重复打印"""
@@ -2411,7 +2424,7 @@ class StockMonitorApp(tk.Tk):
         # TreeView 列头
         for col in ["code"] + DISPLAY_COLS:
             width = 80 if col=="name" else 60
-            self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
+            self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, self.sortby_col_ascend))
             self.tree.column(col, width=width, anchor="center", minwidth=50)
             # self.tree.heading(col, command=lambda c=col: self.show_column_menu(c))
 
@@ -2425,6 +2438,21 @@ class StockMonitorApp(tk.Tk):
 
         # 队列接收子进程数据
         self.queue = mp.Queue()
+
+        # ✅ 性能优化器初始化
+        if PERFORMANCE_OPTIMIZER_AVAILABLE:
+            try:
+                self.tree_updater = TreeviewIncrementalUpdater(self.tree, self.current_cols)
+                self.df_cache = DataFrameCache(ttl=5)  # 5秒缓存
+                self.perf_monitor = PerformanceMonitor("TreeUpdate")
+                self._use_incremental_update = True
+                logger.info("✅ 性能优化器已初始化 (增量更新模式)")
+            except Exception as e:
+                logger.warning(f"⚠️ 性能优化器初始化失败,使用传统模式: {e}")
+                self._use_incremental_update = False
+        else:
+            self._use_incremental_update = False
+            logger.info("ℹ️ 使用传统刷新模式")
 
         # UI 构建
         self._build_ui(ctrl_frame)
@@ -2928,24 +2956,52 @@ class StockMonitorApp(tk.Tk):
 
     def update_treeview_cols(self, new_cols):
         try:
-            # 1. 合法列
+            # ✅ 1. 安全检查 - 确保df_all存在且有数据
+            if not hasattr(self, 'df_all') or self.df_all is None or self.df_all.empty:
+                logger.warning("⚠️ df_all为空,无法更新列配置,将在数据加载后自动应用")
+                # 保存列配置,等数据加载后再应用
+                self._pending_cols = new_cols
+                return
+            
+            # 2. 过滤出有效的列(只保留df_all中存在的列)
             valid_cols = [c for c in new_cols if c in self.df_all.columns]
+            
+            # 如果没有有效列,使用默认列
+            if not valid_cols:
+                logger.warning(f"⚠️ 请求的列都不存在于数据中: {new_cols}")
+                logger.warning(f"可用列: {list(self.df_all.columns)}")
+                # 使用前5列作为默认
+                valid_cols = list(self.df_all.columns)[:5]
+            
+            # 确保code列在第一位
             if 'code' not in valid_cols:
-                valid_cols = ["code"] + valid_cols
+                if 'code' in self.df_all.columns:
+                    valid_cols = ["code"] + valid_cols
+                else:
+                    # 如果没有code列,使用index
+                    logger.info("ℹ️ 数据中没有code列,将使用index")
 
             # 相同就跳过
             if valid_cols == getattr(self, 'current_cols', []):
+                logger.info("ℹ️ 列配置未变化,跳过更新")
                 return
 
             self.current_cols = valid_cols
             cols = tuple(self.current_cols)
+            
+            logger.info(f"✅ 更新列配置: {len(cols)}列 - {cols[:5]}...")
 
-            # 2. 不要直接清空 columns，直接设置新列即可
+            # ✅ 3. 先清空列配置,避免冲突
+            self.tree["displaycolumns"] = ()
+            self.tree["columns"] = ()
+            self.tree.update_idletasks()
+
+            # 4. 设置新列
             self.tree["columns"] = cols
             self.tree["displaycolumns"] = cols
             self.tree.configure(show="headings")
 
-            # 3. 设置列宽
+            # 5. 设置列宽
             if not hasattr(self, "_name_col_width"):
                 self._name_col_width = int(80*self.get_scaled_value())
                 logger.info(f'_name_col_width : {int(80*self.get_scaled_value())}')
@@ -2958,14 +3014,22 @@ class StockMonitorApp(tk.Tk):
                 other={}
             )
 
-            # 4. 延迟刷新
+            # 6. 延迟刷新
             self.tree.after(100, self.refresh_tree)
             self.tree.after(500, self.bind_treeview_column_resize)
 
         except Exception as e:
             import traceback
             traceback.print_exc()
-            logger.info(f"更新 Treeview 列失败：{e}")
+            logger.error(f"❌ 更新 Treeview 列失败：{e}")
+            # 尝试恢复到之前的列配置
+            if hasattr(self, 'current_cols') and self.current_cols:
+                try:
+                    self.tree["columns"] = tuple(self.current_cols)
+                    self.tree["displaycolumns"] = tuple(self.current_cols)
+                    logger.info("✅ 已恢复到之前的列配置")
+                except:
+                    pass
 
 
 
@@ -5682,16 +5746,23 @@ class StockMonitorApp(tk.Tk):
 
     def refresh_tree(self, df=None):
         """刷新 TreeView，保证列和数据严格对齐。"""
+        start_time = time.time()
+        
         if df is None:
             df = self.current_df.copy()
-        # 清空
-        for iid in self.tree.get_children():
-            self.tree.delete(iid)
 
         # 若 df 为空，更新状态并返回
         if df is None or df.empty:
-            # self.current_df = df
             self.current_df = pd.DataFrame() if df is None else df
+            
+            # ✅ 使用增量更新清空
+            if self._use_incremental_update and hasattr(self, 'tree_updater'):
+                self.tree_updater.update(pd.DataFrame(), force_full=True)
+            else:
+                # 传统方式清空
+                for iid in self.tree.get_children():
+                    self.tree.delete(iid)
+            
             self.update_status()
             return
 
@@ -5699,59 +5770,92 @@ class StockMonitorApp(tk.Tk):
 
         # 确保 code 列存在并为字符串（便于显示）
         if 'code' not in df.columns:
-            # 将 index 转成字符串放到 code 列
             df.insert(0, 'code', df.index.astype(str))
 
-        # 要显示的列顺序（把 DISPLAY_COLS 的顺序保持一致）
-        # cols_to_show = ['code'] + [c for c in DISPLAY_COLS if c != 'code']
+        # 要显示的列顺序
         cols_to_show = [c for c in self.current_cols if c in df.columns]
-        # logger.info(f'cols_to_show : {cols_to_show}')
 
-        # self.after_idle(lambda: self.reset_tree_columns(self.tree, cols_to_show, self.sort_by_column))
+        # ✅ 使用增量更新机制
+        if self._use_incremental_update and hasattr(self, 'tree_updater'):
+            try:
+                # 更新列配置（如果列发生变化）
+                if self.tree_updater.columns != cols_to_show:
+                    self.tree_updater.columns = cols_to_show
+                    logger.info(f"[TreeUpdater] 列配置已更新: {len(cols_to_show)}列")
+                
+                # ✅ 检测是否只是排序（数据相同但顺序不同）
+                # 如果是排序操作，强制全量刷新以确保顺序正确
+                force_full = False
+                if hasattr(self, '_last_df_codes'):
+                    current_codes = df['code'].astype(str).tolist()
+                    # 如果code集合相同但顺序不同，说明是排序操作
+                    if set(current_codes) == set(self._last_df_codes) and current_codes != self._last_df_codes:
+                        force_full = True
+                        logger.debug(f"[TreeUpdater] 检测到排序操作，执行全量刷新")
+                
+                # 保存当前的code列表用于下次比较
+                self._last_df_codes = df['code'].astype(str).tolist()
+                
+                # 执行增量更新
+                added, updated, deleted = self.tree_updater.update(df[cols_to_show], force_full=force_full)
+                
+                # 恢复选中状态
+                if self.select_code:
+                    self.tree_updater.restore_selection(self.select_code)
+                
+                # 记录性能
+                duration = time.time() - start_time
+                self.perf_monitor.record(duration)
+                
+                # 每10次更新打印一次性能报告
+                stats = self.perf_monitor.get_stats()
+                if stats.get("count", 0) % 10 == 0:
+                    logger.info(self.perf_monitor.report())
+                
+            except Exception as e:
+                logger.error(f"[TreeUpdater] 增量更新失败,回退到全量刷新: {e}")
+                # 回退到传统方式
+                self._refresh_tree_traditional(df, cols_to_show)
+        else:
+            # 使用传统方式刷新
+            self._refresh_tree_traditional(df, cols_to_show)
+
+        # ✅ 移除了双击表头绑定 - 应该只在初始化时绑定一次,不要每次刷新都重新绑定
+        # self.tree.bind("<Double-1>", self.on_tree_double_click)
+        
+        # 保存完整数据
+        self.current_df = df
+        
+        # 调整列宽
+        self.adjust_column_widths()
+        
+        # 更新状态栏
+        self.update_status()
+    
+    def _refresh_tree_traditional(self, df, cols_to_show):
+        """传统的全量刷新方式（备用）"""
+        # 清空
+        for iid in self.tree.get_children():
+            self.tree.delete(iid)
+        
+        # 重置列配置
         self.reset_tree_columns(self.tree, cols_to_show, self.sort_by_column)
-        # 插入数据严格按 cols_to_show
+        
+        # 插入数据
         for _, row in df.iterrows():
             values = [row.get(col, "") for col in cols_to_show]
             self.tree.insert("", "end", values=values)
-
-        # # 如果 Treeview 的 columns 与我们想要的不一致，则重新配置
-        # current_cols = list(self.tree["columns"])
-        # logger.info(f'cols_to_show : {cols_to_show}')
-        # logger.info(f'current_cols : {current_cols}')
-        # if current_cols != cols_to_show:
-        #     # 关键：更新 columns，确保使用 list/tuple（不要使用 numpy array）
-        #     self.tree.config(columns=cols_to_show)
-        #     # 强制只显示 headings（隐藏 #0），并设置 displaycolumns 显示顺序
-        #     self.tree.configure(show='headings')
-        #     self.tree["displaycolumns"] = cols_to_show
-
-        #     # 清理旧的 heading/column 配置，然后为每列重新设置 heading 和 column
-        #     for col in cols_to_show:
-        #         # 用默认参数避免 lambda 闭包问题
-        #         self.tree.heading(col, text=col, command=lambda _c=col: self.sort_by_column(_c, False))
-        #         # 初始宽度，可以根据需要调整
-        #         width = 120 if col == "name" else 80
-        #         self.tree.column(col, width=width, anchor="center", minwidth=50)
-
-        # 4. 恢复选中
+        
+        # 恢复选中
         if self.select_code:
-            # logger.info(f'select_code: {self.select_code}')
             for iid in self.tree.get_children():
                 values = self.tree.item(iid, "values")
                 if values and values[0] == self.select_code:
-                    self.tree.selection_set(iid)   # 选中（替代 add）
-                    self.tree.focus(iid)           # 恢复键盘焦点
-                    self.tree.see(iid)             # 滚动到可见位置
+                    self.tree.selection_set(iid)
+                    self.tree.focus(iid)
+                    self.tree.see(iid)
                     break
 
-        # 双击表头绑定
-        self.tree.bind("<Double-1>", self.on_tree_double_click)
-        # 保存完整数据（方便后续 query / 显示切换）
-        self.current_df = df
-        # 调整列宽
-        self.adjust_column_widths()
-        # 更新状态栏
-        self.update_status()
 
     def adjust_column_widths(self):
         """根据当前 self.current_df 和 tree 的列调整列宽（只作用在 display 的列）"""
@@ -5795,13 +5899,12 @@ class StockMonitorApp(tk.Tk):
 
     # ----------------- 排序 ----------------- #
     def sort_by_column(self, col, reverse):
-        # if col in ['code'] or col not in self.current_df.columns:
         if col not in self.current_df.columns:
             return
         self.select_code = None
         self.sortby_col =  col
         self.sortby_col_ascend = not reverse
-        # df_sorted = self.current_df.sort_values(by=col, ascending=not reverse)
+        logger.debug(f'self.sortby_col_ascend: {self.sortby_col_ascend}')
         if col in ['code']:
             # df_sorted = self.current_df.reset_index().sort_values(
             #     by=col, key=lambda s: s.astype(str), ascending=not reverse)
@@ -6564,7 +6667,8 @@ class StockMonitorApp(tk.Tk):
             auto_update: 是否自动刷新
             interval: 刷新间隔（秒）
             stock_name: 股票名称（可选）
-        """
+        """
+
         if not hasattr(self, "df_all") or self.df_all is None or self.df_all.empty:
             toast_message(self, "df_all 数据为空，无法筛选概念股票")
             return
@@ -14224,7 +14328,8 @@ if __name__ == "__main__":
     mp.freeze_support()  # <-- 必须
 
     args = parse_args()  # 解析命令行参数
-    log_level = getattr(logging, args.log.upper(), logging.ERROR)
+    # log_level = getattr(logging, args.log.upper(), logging.ERROR)
+    log_level = logging.DEBUG
 
     # 直接用自定义的 init_logging，传入日志等级
     # logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=log_level)

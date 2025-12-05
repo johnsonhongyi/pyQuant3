@@ -3298,7 +3298,7 @@ def search_Tdx_multi_data_duration(fname='tdx_all_df_300', table='all_300', df=N
     # h5_table = h5_table + '_' + str(dl)
 
     tdx_hd5_name = cct.tdx_hd5_name
-    # print(f'tdx_hd5_name:{tdx_hd5_name}')
+    log.debug(f'tdx_hd5_name:{tdx_hd5_name}')
     if df is None and fname == tdx_hd5_name:
         df = cct.GlobalValues().getkey(tdx_hd5_name)
         

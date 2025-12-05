@@ -1175,6 +1175,7 @@ def get_run_path_tdx(fp=None):
             if not check_file_exist(path):
                 log.error(f'path not find : {path}')
                 path = tdx_all_df_path + os.sep + fp + '.h5'
+                log.debug(f'tdx_all_df_path: {tdx_all_df_path} path: {path}')
                 if not check_file_exist(path):
                     log.error(f'path not find tdx_all_df_path : {path}')
                 else:
@@ -1191,6 +1192,7 @@ def get_run_path_tdx(fp=None):
             if not check_file_exist(path):
                 log.error(f'path not find : {path}')
                 path = tdx_all_df_path + os.sep + fp + '.h5'
+                log.debug(f'tdx_all_df_path: {tdx_all_df_path} path: {path}')
                 if not check_file_exist(path):
                     log.error(f'path not find tdx_all_df_path : {path}')
                 else:
