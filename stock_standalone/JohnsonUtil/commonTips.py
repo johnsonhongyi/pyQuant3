@@ -143,7 +143,8 @@ def get_resource_file(rel_path, out_name=None,BASE_DIR=None):
 
     rel_path:   打包资源的相对路径
     out_name:   释放目标文件名
-    """
+    """
+
     if BASE_DIR is None:
         BASE_DIR = get_base_path()
         # log.info(f"BASE_DIR配置文件: {BASE_DIR}")
@@ -155,7 +156,6 @@ def get_resource_file(rel_path, out_name=None,BASE_DIR=None):
     #     sys.executable if getattr(sys, "frozen", False)
     #     else os.path.abspath(__file__)    # ✅ 修复点
     # )
-
     target_path = os.path.join(BASE_DIR, out_name)
     log.info(f"target_path配置文件: {target_path}")
 
@@ -168,6 +168,10 @@ def get_resource_file(rel_path, out_name=None,BASE_DIR=None):
     src = os.path.join(base, rel_path)
 
     if not os.path.exists(src):
+        if rel_path.find('JohnsonUtil') >= 0:
+            src = os.path.join(get_base_path(), rel_path.replace('JohnsonUtil/',''))
+            if os.path.exists(src):
+                return src
         log.error(f"内置资源缺失: {src}")
         return None
 

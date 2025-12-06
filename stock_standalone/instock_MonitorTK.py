@@ -5893,6 +5893,26 @@ class StockMonitorApp(tk.Tk):
         # 获取多行文本和对应颜色
         lines, colors = self._format_stock_info(stock_data)
 
+        # # 使用 Text 控件显示
+        # text_widget = tk.Text(
+        #     tooltip,
+        #     bg='#FFF8E7',
+        #     bd=0,
+        #     padx=8,
+        #     pady=6,
+        #     height=len(lines),
+        #     width=max(len(line) for line in lines),
+        #     font=("Microsoft YaHei", 9)
+        # )
+        # text_widget.pack()
+
+        # for i, (line, color) in enumerate(zip(lines, colors)):
+        #     tag_name = f"line_{i}"          # 每行一个唯一 tag
+        #     text_widget.insert(tk.END, line + "\n", tag_name)
+        #     text_widget.tag_config(tag_name, foreground=color)
+
+        # text_widget.config(state=tk.DISABLED)
+
         # 使用 Text 控件显示
         text_widget = tk.Text(
             tooltip,
@@ -5902,13 +5922,29 @@ class StockMonitorApp(tk.Tk):
             pady=6,
             height=len(lines),
             width=max(len(line) for line in lines),
-            font=("Microsoft YaHei", 9)
+            font=("Microsoft YaHei", 9)  # 默认文字字体
         )
         text_widget.pack()
 
-        for line, color in zip(lines, colors):
-            text_widget.insert(tk.END, line + "\n", line)
-            text_widget.tag_config(line, foreground=color)
+        for i, (line, color) in enumerate(zip(lines, colors)):
+            tag_name = f"line_{i}"          # 每行一个唯一 tag
+            text_widget.insert(tk.END, line + "\n", tag_name)
+            text_widget.tag_config(tag_name, foreground=color, font=("Microsoft YaHei", 9))
+
+            # 检查 signal 行，单独设置图标颜色和大小
+            if "signal:" in line:
+                # 找到图标位置
+                icon_index = line.find("👍")
+                if icon_index == -1:
+                    icon_index = line.find("🚀")
+                if icon_index == -1:
+                    icon_index = line.find("☀️")
+
+                if icon_index != -1:
+                    start = f"{i+1}.{icon_index}"       # 第 i+1 行，第 icon_index 个字符
+                    end = f"{i+1}.{icon_index+2}"       # 图标占 1-2 个字符
+                    text_widget.tag_add(f"icon_{i}", start, end)
+                    text_widget.tag_config(f"icon_{i}", foreground="#FF6600", font=("Microsoft YaHei", 12, "bold"))
 
         text_widget.config(state=tk.DISABLED)
 
@@ -5938,9 +5974,15 @@ class StockMonitorApp(tk.Tk):
         boll = stock_data.get('boll', 0)
         upper = stock_data.get('upper', 0)
         upper1 = stock_data.get('upper1', 0)  # 假设有 upper1
+        upper2 = stock_data.get('upper2', 0)  # 假设有 upper1
         high4 = stock_data.get('high4', 0)
         ma5d = stock_data.get('ma5d', 0)
         ma10d = stock_data.get('ma10d', 0)
+
+        lastl1d = stock_data.get('lastl1d', 0)
+        lastl2d = stock_data.get('lastl2d', 0)
+        lasth1d = stock_data.get('lasth1d', 0)
+        lasth2d = stock_data.get('lasth2d', 0)
 
         # 默认无信号
         signal_icon = ""
@@ -5952,11 +5994,11 @@ class StockMonitorApp(tk.Tk):
                 signal_icon = "🚀"  # 突破高点
                 if close > upper1:
                     signal_icon = "☀️"  # 超越上轨
+        elif close >= lasth1d > lasth2d:
+            signal_icon = "🚀"  # 突破高点
+            if close > upper2:
+                signal_icon = "☀️"  # 超越上轨
 
-        lastl1d = stock_data.get('lastl1d', 0)
-        lastl2d = stock_data.get('lastl2d', 0)
-        lasth1d = stock_data.get('lasth1d', 0)
-        lasth2d = stock_data.get('lasth2d', 0)
 
         # 计算突破和强势
         breakthrough = "✓" if high > upper else "✗"
