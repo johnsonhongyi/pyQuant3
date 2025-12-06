@@ -6138,6 +6138,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
 #            print cct.get_today_duration(end,cct.get_today())
 
         if len(codeList) > 200:
+            log.debug("Codelist:%s LastDF:%s,%s" % (len(codeList),dt, dl))
             
             results = cct.to_mp_run_async(
                 get_tdx_exp_low_or_high_power, codeList, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample)
@@ -6154,7 +6155,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
                 
             # results=[]
             # for code in codeList:
-            # #    print(code,)
+            #    print(code,)
             #    results.append(get_tdx_exp_low_or_high_power(code, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample))
 
         else:
@@ -6747,7 +6748,7 @@ if __name__ == '__main__':
     dfw.index = dfw.index - pd.tseries.frequencies.to_offset("6D")
     '''
     
-    sh_index = '000002'
+    sh_index = '920799'
     dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
     print(f'dd : {dd}')
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
@@ -6830,7 +6831,7 @@ if __name__ == '__main__':
     code='600392'
     code='688189'
     code='300085'
-    code_l=['301287', '603091', '605167']
+    code_l=['920799', '603091', '605167']
     # df = get_kdate_data(code,ascending=True)
     
     # df = get_tdx_append_now_df_api_tofile(code)
@@ -6843,7 +6844,8 @@ if __name__ == '__main__':
     # dd = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='d')
     # print(f'ral:{dd.ral}')
     # import ipdb;ipdb.set_trace()
-
+    code='920799'
+    
 
     df=get_tdx_exp_all_LastDF_DL(code_l, dt='80',filter='y', resample='d')
     print(df[:2])

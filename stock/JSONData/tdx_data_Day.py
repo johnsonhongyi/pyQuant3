@@ -6138,7 +6138,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
 #            print cct.get_today_duration(end,cct.get_today())
 
         if len(codeList) > 200:
-            
+            log.debug("Codelist:%s LastDF:%s,%s" % (len(codeList),dt, dl))
             results = cct.to_mp_run_async(
                 get_tdx_exp_low_or_high_power, codeList, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample)
                 
@@ -6154,7 +6154,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
                 
             # results=[]
             # for code in codeList:
-            # #    print(code,)
+            #    print(code,)
             #    results.append(get_tdx_exp_low_or_high_power(code, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample))
 
         else:
