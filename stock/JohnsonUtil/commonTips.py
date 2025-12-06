@@ -2540,8 +2540,8 @@ def get_url_data_R(url, timeout=15,headers=None):
         log.error('url Exception Error:%s - URL %s ' % (e, url))
         # sleeprandom(60)
         sleep(30)
-    else:
-        log.info('Access successful.')
+    # else:
+    #     log.info('Access successful.')
 
     if isinstance(data,bytes):
         try:
