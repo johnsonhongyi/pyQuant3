@@ -413,8 +413,13 @@ def getLogger(name=None, logpath='instock_tk.log', show_detail=True):
     elif not _GLOBAL_LOG_NAME:
         _GLOBAL_LOG_NAME = "instock_TK"
 
-    log_f = logpath
-
+    # log_f = logpath
+    if logpath is None:
+        # log_f = get_log_file(log_n='stock.log')
+        log_f = get_log_file(log_n=_GLOBAL_LOG_NAME)
+    else:
+        log_f = logpath
+    # print(f'log_f: {log_f}')
     # 父进程初始化 QueueListener
     _ensure_listener_started(log_f, show_detail=show_detail)
 

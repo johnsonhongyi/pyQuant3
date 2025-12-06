@@ -2473,6 +2473,8 @@ class StockMonitorApp(tk.Tk):
         # self.tree.bind("<Double-1>", self.on_tree_header_double_click)
         self.tree.bind("<Double-1>", self.on_tree_double_click)
         self.tree.bind("<Button-2>", self.copy_code)
+        
+
 
         self.df_all = pd.DataFrame()      # 保存 fetch_and_process 返回的完整原始数据
         self.current_df = pd.DataFrame()
@@ -2535,7 +2537,8 @@ class StockMonitorApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)  
         self.tree.bind("<Button-1>", self.on_single_click)
-
+        # ✅ 绑定单击事件用于显示股票信息提示框
+        # self.tree.bind("<ButtonRelease-1>", self.on_tree_click_for_tooltip)
         # 绑定右键点击事件
         self.tree.bind("<Button-3>", self.on_tree_right_click)
 
@@ -4426,7 +4429,6 @@ class StockMonitorApp(tk.Tk):
         
         item = self.tree.item(selected_item[0])
         values = item.get("values")
-
         # 假设你的 tree 列是 (code, name, price, …)
         stock_info = {
             "code": values[0],
@@ -5103,6 +5105,7 @@ class StockMonitorApp(tk.Tk):
 
         send_tdx_Key = (getattr(self, "select_code", None) != stock_code)
         self.select_code = stock_code
+        self.on_tree_click_for_tooltip(event)
 
         stock_code = str(stock_code).zfill(6)
         logger.info(f'stock_code:{stock_code}')
@@ -5813,6 +5816,181 @@ class StockMonitorApp(tk.Tk):
             return False
 
         return False  # 未找到
+
+
+    def on_tree_click_for_tooltip(self, event):
+        """处理树视图点击事件，延迟显示提示框"""
+        logger.debug(f"[Tooltip] 点击事件触发: x={event.x}, y={event.y}")
+
+        # 取消之前的定时器
+        if getattr(self, '_tooltip_timer', None):
+            try:
+                self.after_cancel(self._tooltip_timer)
+            except Exception:
+                pass
+            self._tooltip_timer = None
+
+        # 销毁之前的提示框
+        if getattr(self, '_current_tooltip', None):
+            try:
+                self._current_tooltip.destroy()
+            except Exception:
+                pass
+            self._current_tooltip = None
+
+        # 获取点击的行
+        item = self.tree.identify_row(event.y)
+        if not item:
+            logger.debug("[Tooltip] 未点击到有效行")
+            return
+
+        # 获取股票代码
+        values = self.tree.item(item, 'values')
+        if not values:
+            logger.debug("[Tooltip] 行没有数据")
+            return
+
+        code = str(values[0])  # code在第一列
+        x_root, y_root = event.x_root, event.y_root  # 保存坐标
+        logger.debug(f"[Tooltip] 获取到代码: {code}, 设置0.2秒定时器")
+
+        # 设置0.2秒延迟定时器
+        self._tooltip_timer = self.after(200, lambda e=event:self.show_stock_tooltip(code, e))
+
+
+    def show_stock_tooltip(self, code, event):
+        """显示股票信息提示框，柔和背景 + 分色文字"""
+        logger.debug(f"[Tooltip] show_stock_tooltip 被调用: code={code}")
+
+        # 清理定时器引用
+        self._tooltip_timer = None
+
+        # 从 df_all 获取股票数据
+        if not hasattr(self, 'df_all') or self.df_all is None or self.df_all.empty:
+            logger.debug("[Tooltip] df_all 为空或不存在")
+            return
+
+        # 清理代码前缀
+        code_clean = code.strip()
+        for icon in ['🔴', '🟢', '📊', '⚠️']:
+            code_clean = code_clean.replace(icon, '').strip()
+
+        if code_clean not in self.df_all.index:
+            logger.debug(f"[Tooltip] 代码 {code_clean} 不在 df_all.index 中")
+            return
+
+        stock_data = self.df_all.loc[code_clean]
+
+        logger.debug(f"[Tooltip] 找到股票数据，准备创建提示框")
+
+        # 创建 tooltip
+        tooltip = tk.Toplevel(self)
+        tooltip.wm_overrideredirect(True)
+        tooltip.wm_geometry(f"+{event.x_root+15}+{event.y_root+15}")
+        tooltip.configure(bg='#FFF8E7')
+        self._current_tooltip = tooltip
+
+        # 获取多行文本和对应颜色
+        lines, colors = self._format_stock_info(stock_data)
+
+        # 使用 Text 控件显示
+        text_widget = tk.Text(
+            tooltip,
+            bg='#FFF8E7',
+            bd=0,
+            padx=8,
+            pady=6,
+            height=len(lines),
+            width=max(len(line) for line in lines),
+            font=("Microsoft YaHei", 9)
+        )
+        text_widget.pack()
+
+        for line, color in zip(lines, colors):
+            text_widget.insert(tk.END, line + "\n", line)
+            text_widget.tag_config(line, foreground=color)
+
+        text_widget.config(state=tk.DISABLED)
+
+        # 计算显示位置
+        x = event.x_root + 15
+        y = event.y_root + 15
+        tooltip.update_idletasks()  # 确保 Text 完全渲染
+        width = text_widget.winfo_reqwidth()
+        height = text_widget.winfo_reqheight()
+        tooltip.geometry(f"{width}x{height}+{x}+{y}")
+
+        # 保存引用
+        self._current_tooltip = tooltip
+
+        logger.debug(f"[Tooltip] 提示框已创建并显示在 ({event.x_root+15}, {event.y_root+15})")
+
+
+
+    def _format_stock_info(self, stock_data):
+        """格式化股票信息为显示文本，并返回颜色标签"""
+        code = stock_data.name
+        name = stock_data.get('name', '未知')
+
+        close = stock_data.get('close', 0)
+        low = stock_data.get('low', 0)
+        high = stock_data.get('high', 0)
+        boll = stock_data.get('boll', 0)
+        upper = stock_data.get('upper', 0)
+        upper1 = stock_data.get('upper1', 0)  # 假设有 upper1
+        high4 = stock_data.get('high4', 0)
+        ma5d = stock_data.get('ma5d', 0)
+        ma10d = stock_data.get('ma10d', 0)
+
+        # 默认无信号
+        signal_icon = ""
+
+        # 条件判断顺序很重要，从弱到强
+        if close > ma5d and low < ma10d:
+            signal_icon = "👍"  # 反抽
+            if close > high4:
+                signal_icon = "🚀"  # 突破高点
+                if close > upper1:
+                    signal_icon = "☀️"  # 超越上轨
+
+        lastl1d = stock_data.get('lastl1d', 0)
+        lastl2d = stock_data.get('lastl2d', 0)
+        lasth1d = stock_data.get('lasth1d', 0)
+        lasth2d = stock_data.get('lasth2d', 0)
+
+        # 计算突破和强势
+        breakthrough = "✓" if high > upper else "✗"
+        strength = "✓" if (lastl1d > lastl2d and lasth1d > lasth2d) else "✗"
+
+        lines = [
+            f"【{code}】{name}:{close}",
+            "─" * 20,
+            f"📊 成交量: {stock_data.get('volume', 'N/A')}",
+            f"🔴 连阳: {stock_data.get('red', 'N/A')}",
+            f"📈 突破布林: {boll}",
+            f"  signal: {signal_icon} (low<10 & C>5)",
+            f"  Upper:  {stock_data.get('upper', 'N/A')}",
+            f"  Lower:  {stock_data.get('lower', 'N/A')}",
+            f"🚀 突破: {breakthrough} (high > upper)",
+            f"💪 强势: {strength} (L1>L2 & H1>H2)",
+        ]
+
+        # 定义每行颜色
+        colors = [
+            'blue',        # 股票代码
+            'black',       # 分割线
+            'green',       # 成交量
+            'red',         # 连阳
+            'orange',      # 布林带标题
+            'orange',      # Upper
+            'orange',      # Middle
+            'orange',      # Lower
+            'purple',      # 突破
+            'purple',      # 强势
+        ]
+
+        return lines, colors
+
 
     def toggle_feature_colors(self):
         """
