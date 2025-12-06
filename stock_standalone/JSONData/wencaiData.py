@@ -1306,7 +1306,7 @@ def get_conf_path(fname):
     """
     # default_path = os.path.join(BASE_DIR, "stock_codes.conf")
     default_path = os.path.join(BASE_DIR, fname)
-
+    
     # --- 1. 直接存在 ---
     if os.path.exists(default_path):
         if os.path.getsize(default_path) > 0:
@@ -1316,6 +1316,7 @@ def get_conf_path(fname):
             log.warning("配置文件存在但为空，将尝试重新释放")
 
     # --- 2. 释放默认资源 ---
+        # rel_path=f"JohnsonUtil/wencai/{fname}",
     cfg_file = cct.get_resource_file(
         rel_path=f"JohnsonUtil/wencai/{fname}",
         out_name=fname,
