@@ -2414,10 +2414,13 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
             df = pd.concat([df,ds])
             if write_tushare and ((len(ds) == 1 and ds.index.values[0] != cct.get_today()) or len(ds) > 1):
                 #                if index_status:
-                sta = write_tdx_tushare_to_file(code, df=df)
-                if sta:
-                    if today == ds.index[-1]:
-                        return get_tdx_macd(df)
+                duration_day= get_today_duration(ds.index.values[0],cct.get_today())
+                log.info(f'duration_day: {duration_day}')
+                if duration_day and duration_day < 10:
+                    sta = write_tdx_tushare_to_file(code, df=df)
+                    if sta:
+                        if today == ds.index[-1]:
+                            return get_tdx_macd(df)
 #                else:
 #                    sta=write_tdx_tushare_to_file(code,df=df)
 
@@ -2661,17 +2664,19 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
             ds.sort_index(ascending=True, inplace=True)
             ds = ds.fillna(0)
             df = pd.concat([df,ds])
-            # import ipdb;ipdb.set_trace()
 
             # if (len(ds) == 1 and ds.index.values[0] != cct.get_today()) or len(ds) > 1:
             if (len(ds) == 1 and ((not cct.get_work_time()) or (ds.index.values[0] != cct.get_today())) ) or len(ds) > 1:
-                sta = write_tdx_tushare_to_file(code, df=df)
-                if sta:
-                    log.info("write %s OK." % (code))
-                    if today == ds.index[-1]:
-                        return df
-                else:
-                    log.warn("write %s error." % (code))
+                duration_day= get_today_duration(ds.index.values[0],cct.get_today())
+                log.info(f'duration_day: {duration_day}')
+                if duration_day and duration_day < 10:
+                    sta = write_tdx_tushare_to_file(code, df=df)
+                    if sta:
+                        log.info("write %s OK." % (code))
+                        if today == ds.index[-1]:
+                            return df
+                    else:
+                        log.warn("write %s error." % (code))
 
     if cct.get_now_time_int() > 900 and cct.get_now_time_int() < 930 and len(df) > 0:
         log.debug("now > 830 and <930 return")
@@ -2937,7 +2942,7 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f',rewrite=False)
         #rb+ wb+ byte bug
         fo.writelines(wdata_list)
         fo.close()
-        log.info("write_done:%0.3f" % (time.time() - w_t))
+        log.info(f"code :{code} write_done:{(time.time() - w_t):.3f}")
         return True
     fo.close()
     return "NTrue"
@@ -5327,11 +5332,11 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
                 dd = pd.Series([],dtype='float64')
 
         else:
-            log.debug("code:%s no < dt:NULL" % (code))
+            # log.info("code:%s no < dt:NULL df: %s" % (code,df))
             # df = get_tdx_append_now_df_api_tofile(code)
-            df = get_kdate_data(code, start='', end='', ktype='D',ascending=False)
-            if len(df) > 30:
-                write_tdx_tushare_to_file(code, df=df, start=None, type='f',rewrite=True)
+            # df = get_kdate_data(code, start='', end='', ktype='D',ascending=False)
+            # if len(df) > 30:
+            #     write_tdx_tushare_to_file(code, df=df, start=None, type='f',rewrite=True)
             dd = pd.Series([],dtype='float64')
             # dd = Series(
             #     {'code': code, 'date': cct.get_today(), 'open': 0, 'high': 0, 'low': 0, 'close': 0, 'amount': 0,
@@ -6752,7 +6757,7 @@ if __name__ == '__main__':
     dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
     print(f'dd : {dd}')
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
-    code='600108'
+    code='601028'
     # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'], end=None, newdays=0, resample='d')
     # print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
     # import ipdb;ipdb.set_trace()
@@ -6762,6 +6767,8 @@ if __name__ == '__main__':
 
 
 
+    df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'],resample='d',lastday=None )
+    
     df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['w'],resample='w',lastday=None )
     print(f"{code} : {df.loc[:,['boll','lastp1d','ma51d','lastp2d','ma52d','lastp3d','ma53d','lasth1d','lasth2d','lasth3d']][-1:].values}")
     print(f"{code} 'resist','support' : {df.loc[:,['resist','support']][-1:].values}")
