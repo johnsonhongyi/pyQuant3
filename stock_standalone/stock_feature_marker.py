@@ -4,9 +4,10 @@
 提供行颜色高亮、图标标记等功能
 """
 
-import logging
-
-logger = logging.getLogger(__name__)
+# import logging
+# logger = logging.getLogger(__name__)
+from JohnsonUtil import LoggerFactory
+logger = LoggerFactory.getLogger()
 
 
 class StockFeatureMarker:
@@ -62,7 +63,7 @@ class StockFeatureMarker:
         self.tree = tree
         self.enable_colors = enable_colors
         self._configure_tags()
-    
+        
     def _configure_tags(self):
         """配置Treeview标签颜色"""
         for tag_name, colors in self.COLORS.items():
@@ -182,7 +183,7 @@ class StockFeatureMarker:
             if tags:
                 self.tree.item(item_id, tags=tuple(tags))
         else:
-            # 清除标签
+            # 清除标签（关闭颜色时）
             self.tree.item(item_id, tags=())
 
 

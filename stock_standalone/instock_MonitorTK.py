@@ -44,8 +44,7 @@ import sqlite3
 import hashlib
 
 import argparse
-import logging
-from logging.handlers import RotatingFileHandler
+
 class LoggerWriter:
     """将 print 输出重定向到 logger"""
     def __init__(self, level_func):
@@ -67,7 +66,7 @@ class LoggerWriter:
     def flush(self):
         pass
 
-def init_logging(log_file="appTk.log", level=logging.ERROR, redirect_print=False,show_detail=True):
+def init_logging_old(log_file="appTk.log", level=LoggerFactory.ERROR, redirect_print=False,show_detail=True):
     """初始化全局日志"""
     # logger\.info\((?!f)  查找没有f  loggger.info(
     # logger\.info\((?!f)[^,)]*,\s*\w+    查找没有f 加,
@@ -78,13 +77,14 @@ def init_logging(log_file="appTk.log", level=logging.ERROR, redirect_print=False
     logger.setLevel(level)
 
     if not logger.handlers:
-        formatter = logging.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
+        print(f'not logger.handlers')
+        formatter = LoggerFactory.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
         if show_detail:
-            formatter = logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s")
-            ch_formatter = logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s");
+            formatter = LoggerFactory.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s")
+            ch_formatter = LoggerFactory.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s");
         else:
-            formatter = logging.Formatter("(%(funcName)s:%(lineno)s): %(message)s")
-            ch_formatter = logging.Formatter("(%(funcName)s:%(lineno)s): %(message)s");
+            formatter = LoggerFactory.Formatter("(%(funcName)s:%(lineno)s): %(message)s")
+            ch_formatter = LoggerFactory.Formatter("(%(funcName)s:%(lineno)s): %(message)s");
         
         # ✅ 使用 RotatingFileHandler：超过 1MB 自动轮转
         fh = RotatingFileHandler(
@@ -118,7 +118,33 @@ def init_logging(log_file="appTk.log", level=logging.ERROR, redirect_print=False
     logger.info("日志初始化完成")
     return logger
 
+def init_logging(log_file="appTk.log", level=LoggerFactory.ERROR, redirect_print=False, show_detail=True):
+    """初始化全局日志"""
+    logger = LoggerFactory.getLogger("instock_TK", logpath=log_file)
+
+    logger.setLevel(level)
+
+    # ⚠️ 可选重定向 print
+    if redirect_print:
+        import sys
+        class LoggerWriter:
+            def __init__(self, level_func):
+                self.level_func = level_func
+            def write(self, msg):
+                msg = msg.strip()
+                if msg:
+                    self.level_func(msg)
+            def flush(self):
+                pass
+        sys.stdout = LoggerWriter(logger.info)
+        sys.stderr = LoggerWriter(logger.error)
+
+    logger.info("日志初始化完成")
+    return logger
+
+# 全局单例
 logger = init_logging(log_file='instock_tk.log',redirect_print=False) 
+# logger.handlers.clear()
 # logger.setLevel(LoggerFactory.DEBUG)
 # logger.setLevel(LoggerFactory.INFO)
 
@@ -154,16 +180,16 @@ def df_hash(df: pd.DataFrame) -> str:
     h = pd.util.hash_pandas_object(df, index=True).sum()
     return hashlib.md5(str(h).encode()).hexdigest()[:8]  # 截取前8位
 
-def init_logging_nopdb(log_file="appTk.log", level=logging.ERROR):
+def init_logging_nopdb(log_file="appTk.log", level=LoggerFactory.ERROR):
     """初始化全局日志，避免重复打印"""
-    logger = logging.getLogger("instock_MonitorTK")  # 指定子 logger
+    logger = LoggerFactory.getLogger("instock_MonitorTK")  # 指定子 logger
     logger.setLevel(level)
 
     if not logger.handlers:  # 避免重复添加 handler
-        formatter = logging.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
+        formatter = LoggerFactory.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
 
         # 文件 handler
-        fh = logging.FileHandler(log_file, encoding="utf-8")
+        fh = LoggerFactory.FileHandler(log_file, encoding="utf-8")
         fh.setFormatter(formatter)
         logger.addHandler(fh)
 
@@ -173,7 +199,7 @@ def init_logging_nopdb(log_file="appTk.log", level=logging.ERROR):
         logger.addHandler(ch)
 
     # 子 logger 不向 root logger 冒泡
-    logger.propagate = False
+    logger.propagate = True
 
     # 重定向 print
     sys.stdout = LoggerWriter(logger.info)
@@ -1884,7 +1910,12 @@ def load_monitor_list(MONITOR_LIST_FILE=MONITOR_LIST_FILE):
 
 
 # ------------------ 后台数据进程 ------------------ #
-def fetch_and_process(shared_dict,queue, blkname="boll", flag=None):
+def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=None):
+    logger = LoggerFactory.getLogger()  # ✅ 必须调用一次，确保 QueueHandler 添加
+    if log_level is not None:
+        logger.setLevel(log_level.value)
+        # logger.setLevel(log_level)
+    logger.info(f"子进程开始，日志等级: {log_level.value}")
     global START_INIT,duration_sleep_time
     g_values = cct.GlobalValues(shared_dict)  # 主进程唯一实例
     resample = g_values.getkey("resample") or "d"
@@ -1993,6 +2024,7 @@ def calc_indicators(top_all, resample):
     #         )
             
     # top_all = top_all[(top_all.df2 > 0) & (top_all.boll > 0)]
+
     ratio_t = cct.get_work_time_ratio(resample=resample)
     # ratio_t = estimate_virtual_volume_simple()
     logger.info(f'ratio_t: {round(ratio_t,2)}')
@@ -2448,12 +2480,20 @@ class StockMonitorApp(tk.Tk):
         # 队列接收子进程数据
         self.queue = mp.Queue()
 
+        # UI 构建
+        self._build_ui(ctrl_frame)
+
+        # checkbuttons 顶部右侧
+        self.init_checkbuttons(ctrl_frame)
+
         # ✅ 股票特征标记器初始化（必须在性能优化器之前）
         if FEATURE_MARKER_AVAILABLE:
             try:
-                self.feature_marker = StockFeatureMarker(self.tree)
+                # 使用win_var控制颜色显示（如果win_var存在）
+                enable_colors = not self.win_var.get() if hasattr(self, 'win_var') else True
+                self.feature_marker = StockFeatureMarker(self.tree, enable_colors=enable_colors)
                 self._use_feature_marking = True
-                logger.info("✅ 股票特征标记器已初始化")
+                logger.info(f"✅ 股票特征标记器已初始化 (颜色显示: {enable_colors})")
             except Exception as e:
                 logger.warning(f"⚠️ 股票特征标记器初始化失败: {e}")
                 self._use_feature_marking = False
@@ -2484,23 +2524,6 @@ class StockMonitorApp(tk.Tk):
             self._use_incremental_update = False
             logger.info("ℹ️ 使用传统刷新模式")
         
-        # ✅ 股票特征标记器初始化
-        if FEATURE_MARKER_AVAILABLE:
-            try:
-                self.feature_marker = StockFeatureMarker(self.tree)
-                self._use_feature_marking = True
-                logger.info("✅ 股票特征标记器已初始化")
-            except Exception as e:
-                logger.warning(f"⚠️ 股票特征标记器初始化失败: {e}")
-                self._use_feature_marking = False
-        else:
-            self._use_feature_marking = False
-
-        # UI 构建
-        self._build_ui(ctrl_frame)
-
-        # checkbuttons 顶部右侧
-        self.init_checkbuttons(ctrl_frame)
         # 启动后台进程
         self._start_process()
 
@@ -4220,8 +4243,9 @@ class StockMonitorApp(tk.Tk):
 
     def _start_process(self):
         self.refresh_flag = mp.Value('b', True)
+        self.log_level = mp.Value('i', log_level)  # 'i' 表示整数
         # self.proc = mp.Process(target=fetch_and_process, args=(self.queue,))
-        self.proc = mp.Process(target=fetch_and_process, args=(self.global_dict,self.queue, "boll", self.refresh_flag))
+        self.proc = mp.Process(target=fetch_and_process, args=(self.global_dict,self.queue, "boll", self.refresh_flag,self.log_level))
         # self.proc.daemon = True
         self.proc.daemon = False 
         self.proc.start()
@@ -4443,6 +4467,8 @@ class StockMonitorApp(tk.Tk):
         frame_right.pack(side=tk.RIGHT, padx=2, pady=1)
 
         self.win_var = tk.BooleanVar(value=False)
+        # ✅ 绑定win_var变化回调，实时切换特征颜色显示
+        self.win_var.trace_add('write', lambda *args: self.toggle_feature_colors())
         self.tdx_var = tk.BooleanVar(value=True)
         self.ths_var = tk.BooleanVar(value=True)
         self.dfcf_var = tk.BooleanVar(value=False)
@@ -5787,6 +5813,30 @@ class StockMonitorApp(tk.Tk):
             return False
 
         return False  # 未找到
+
+    def toggle_feature_colors(self):
+        """
+        切换特征颜色显示状态（响应win_var变化）
+        实时更新颜色显示并刷新界面
+        """
+
+
+        if not hasattr(self, 'feature_marker') or not hasattr(self, 'win_var'):
+            return
+        
+        try:
+            # 获取win_var当前状态
+            enable_colors = not self.win_var.get()
+            
+            # 更新feature_marker的颜色显示状态
+            self.feature_marker.set_enable_colors(enable_colors)
+            logger.debug(f"self.feature_marker : {hasattr(self, 'feature_marker')}")
+            # 立即刷新显示以应用新的颜色状态
+            self.refresh_tree()
+            
+            logger.info(f"✅ 特征颜色显示已{'开启' if enable_colors else '关闭'}")
+        except Exception as e:
+            logger.error(f"❌ 切换特征颜色失败: {e}")
 
     def refresh_tree(self, df=None):
         """刷新 TreeView，保证列和数据严格对齐。"""
@@ -14322,7 +14372,7 @@ def parse_args():
     parser.add_argument(
         "--log",
         type=str,
-        default="ERROR",
+        default="INFO",
         help="日志等级，可选：DEBUG, INFO, WARNING, ERROR, CRITICAL"
     )
 
@@ -14407,13 +14457,18 @@ if __name__ == "__main__":
     mp.freeze_support()  # <-- 必须
 
     args = parse_args()  # 解析命令行参数
-    log_level = getattr(logging, args.log.upper(), logging.ERROR)
-    # log_level = logging.DEBUG
+    # log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.ERROR)
+    log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.INFO)
+    # log_level = LoggerFactory.DEBUG
 
     # 直接用自定义的 init_logging，传入日志等级
     # logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=log_level)
     logger.setLevel(log_level)
     logger.info("程序启动…")
+
+    # test_single_thread()
+    # import ipdb;ipdb.set_trace()
+
     # if log_level == logging.DEBUG:
     # if logger.isEnabledFor(logging.DEBUG):
     #     logger.debug("当前已开启 DEBUG 模式")
