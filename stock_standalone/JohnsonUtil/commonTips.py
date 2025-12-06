@@ -22,7 +22,6 @@ import asyncio
 import argparse
 
 
-from JohnsonUtil import LoggerFactory
 from JohnsonUtil.prettytable import PrettyTable
 from JohnsonUtil import johnson_cons as ct
 # from JohnsonUtil import inStockDb as inDb
@@ -31,7 +30,9 @@ import traceback
 import socket
 from configobj import ConfigObj
 import importlib
-log = LoggerFactory.log
+# log = LoggerFactory.log
+from JohnsonUtil import LoggerFactory
+log = LoggerFactory.getLogger()
 from tqdm import tqdm
 # import win32MoveCom
 # log.setLevel(Log.DEBUG)
@@ -2741,8 +2742,6 @@ def get_work_duration():
     else:
         return False
 
-
-def get_work_time_ratio(resample='d'):
     # initx = 3.5
     # stepx = 0.5
     # init = 0
@@ -2809,8 +2808,83 @@ def get_work_time_ratio(resample='d'):
 
     # if now is None:
     #     now = dt.datetime.now()
+
+def get_work_time_ratio(resample='d'):
     now = datetime.datetime.now()
-        
+
+    # ---------- 交易日判断 ----------
+    today = pd.Timestamp(now.date())
+
+    if not is_trade_date(today) == "True":
+        # 非交易日 → 回退到最近一个交易日
+        today -= pd.tseries.offsets.BDay(1)
+        passed_ratio = 1.0
+    else:
+        # ---------- 日内进度 ----------
+        t = now.time()
+        minutes = t.hour * 60 + t.minute
+
+        segments = [
+            (9*60+30, 10*60, 0.25),
+            (10*60, 11*60, 0.50),
+            (11*60, 11*60+30, 0.60),
+            (13*60, 14*60, 0.78),
+            (14*60, 15*60, 1.00),
+        ]
+
+        prev_ratio = 0.0
+        passed_ratio = 0.0
+
+        for start, end, ratio in segments:
+            if minutes <= start:
+                passed_ratio = prev_ratio
+                break
+            elif start < minutes <= end:
+                p = (minutes - start) / (end - start)
+                passed_ratio = prev_ratio + (ratio - prev_ratio) * p
+                break
+            prev_ratio = ratio
+        else:
+            passed_ratio = 1.0
+
+        passed_ratio = max(passed_ratio, 0.05)
+
+    # ---------- resample 处理 ----------
+    if resample == 'd':
+        return passed_ratio
+
+    # ---------- 周交易日计算 ----------
+    start_week = today - pd.Timedelta(days=today.weekday())
+    week_days = pd.bdate_range(start_week, today)
+    week_idx = len(week_days)        # 今天是第几个交易日
+    week_total = 5
+
+    # ---------- 月交易日计算 ----------
+    month_start = today.replace(day=1)
+    month_all = pd.bdate_range(
+        month_start,
+        (month_start + pd.offsets.MonthEnd())
+    )
+    month_idx = len(pd.bdate_range(month_start, today))
+    month_total = len(month_all)
+
+    # ---------- 周期比例计算 ----------
+    if resample == '3d':
+        ratio = ((min(week_idx - 1, 2)) + passed_ratio) / 3
+
+    elif resample == 'w':
+        ratio = ((week_idx - 1) + passed_ratio) / week_total
+
+    elif resample == 'm':
+        ratio = ((month_idx - 1) + passed_ratio) / month_total
+
+    else:
+        ratio = passed_ratio
+
+    return min(max(round(float(ratio),6), 0.01), 1.0)
+
+def get_work_time_ratio_noworkday(resample='d'):
+    now = datetime.datetime.now()
     t = now.time()
     minutes = t.hour * 60 + t.minute
 

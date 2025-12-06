@@ -28,6 +28,7 @@ import datetime
 # log=logbook.Logger('TDX_day')
 # log = LoggerFactory.getLogger('TDX_Day')
 log = LoggerFactory.log
+# log = LoggerFactory.getLogger()
 # log.setLevel(LoggerFactory.DEBUG)
 # log.setLevel(LoggerFactory.INFO)
 # log.setLevel(LoggerFactory.WARNING)

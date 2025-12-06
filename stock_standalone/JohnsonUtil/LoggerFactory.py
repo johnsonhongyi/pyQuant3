@@ -4,9 +4,19 @@ Created on 2015-3-11
 @author: Casey
 '''
 import logging
+from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
+import multiprocessing
+import os
+import atexit
+
+_GLOBAL_LOGGER = None
+_GLOBAL_LOG_NAME = None
+_GLOBAL_QUEUE = None
+_GLOBAL_LISTENER = None
+
 import sys,os
-sys.path.append("..")
-from JohnsonUtil.LoggerFactoryMultiprocess import MultiprocessHandler
+# sys.path.append("..")
+# from JohnsonUtil.LoggerFactoryMultiprocess import MultiprocessHandler
 import configparser
 from pathlib import Path
 # from config.loader import GlobalConfig
@@ -270,7 +280,6 @@ INFO = 20
 DEBUG = 10
 NOTSET = 0
 
-# print(log_path)
 
 # http://blog.sina.com.cn/s/blog_411fed0c0100wkvj.html
 
@@ -294,7 +303,7 @@ def testlog():
     logger.addHandler(fh)
     logger.addHandler(ch)
 
-def getLogger_old(name=None,logpath=None,writemode='a',show_detail=True):
+def getLogger_old_(name=None,logpath=None,writemode='a',show_detail=True):
 
     if logpath is None:
         log_f = get_log_file(log_n='stock.log')
@@ -333,11 +342,167 @@ def getLogger_old(name=None,logpath=None,writemode='a',show_detail=True):
     return logger
 
 
-from logging.handlers import RotatingFileHandler
-_GLOBAL_LOGGER = None
-_GLOBAL_LOG_NAME = None  # 先空，Tk 初始化时传入
+import logging
+from logging.handlers import RotatingFileHandler, QueueHandler, QueueListener
+import multiprocessing
+import os
+import atexit
 
-def getLogger(name=None, logpath='instock_tk.log', writemode='a', show_detail=True):
+# ---------------- 全局变量 ----------------
+_GLOBAL_LOGGER = None
+_GLOBAL_QUEUE = None
+_GLOBAL_LISTENER = None
+_GLOBAL_LOG_NAME = None
+_MAIN_PID = os.getpid()  # 父进程 PID，用于防止子进程重复启动 Listener
+
+# ---------------- 辅助函数 ----------------
+def stopLogger():
+    """停止 QueueListener，在程序退出时调用"""
+    global _GLOBAL_LISTENER
+    if _GLOBAL_LISTENER:
+        _GLOBAL_LISTENER.stop()
+        _GLOBAL_LISTENER = None
+
+def _ensure_listener_started(log_f, show_detail=True):
+    """
+    初始化 QueueListener（父进程启动一次即可）
+    """
+    global _GLOBAL_QUEUE, _GLOBAL_LISTENER
+
+    # 仅在父进程启动
+    if _GLOBAL_QUEUE is None and os.getpid() == _MAIN_PID:
+        _GLOBAL_QUEUE = multiprocessing.Queue(-1)
+
+        # Console handler
+        ch = logging.StreamHandler()
+        ch_formatter = logging.Formatter(
+            "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
+            if show_detail else
+            "(%(funcName)s:%(lineno)s): %(message)s",
+            datefmt="%m-%d %H:%M:%S"
+        )
+        ch.setFormatter(ch_formatter)
+
+        # File handler
+        os.makedirs(os.path.dirname(os.path.abspath(log_f)), exist_ok=True)
+        fh = RotatingFileHandler(log_f, maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
+        fh_formatter = logging.Formatter(
+            "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
+            if show_detail else
+            "(%(funcName)s:%(lineno)s): %(message)s",
+            datefmt="%m-%d %H:%M:%S"
+        )
+        fh.setFormatter(fh_formatter)
+
+        # QueueListener 自动监听父进程 Queue
+        _GLOBAL_LISTENER = QueueListener(_GLOBAL_QUEUE, ch, fh)
+        _GLOBAL_LISTENER.start()
+
+        # 程序退出时停止 listener
+        atexit.register(stopLogger)
+
+# ---------------- 核心函数 ----------------
+def getLogger(name=None, logpath='instock_tk.log', show_detail=True):
+    """
+    获取全局 logger，支持多进程/多线程
+    """
+    global _GLOBAL_LOGGER, _GLOBAL_LOG_NAME
+
+    if name:
+        _GLOBAL_LOG_NAME = name
+    elif not _GLOBAL_LOG_NAME:
+        _GLOBAL_LOG_NAME = "instock_TK"
+
+    log_f = logpath
+
+    # 父进程初始化 QueueListener
+    _ensure_listener_started(log_f, show_detail=show_detail)
+
+    # 获取 logger
+    logger = logging.getLogger(_GLOBAL_LOG_NAME)
+    logger.setLevel(logging.ERROR)
+    logger.propagate = False
+
+    # 添加 QueueHandler（每个进程/线程第一次调用都会添加）
+    # 先移除已有 QueueHandler 避免重复
+    logger.handlers = [h for h in logger.handlers if not isinstance(h, QueueHandler)]
+    logger.addHandler(QueueHandler(_GLOBAL_QUEUE))
+
+    global _GLOBAL_LOGGER
+    _GLOBAL_LOGGER = logger
+    return logger
+
+# ---------------- 全局单例 ----------------
+log = getLogger()
+
+
+
+# def _ensure_listener_started(log_f,show_detail=True):
+#     global _GLOBAL_QUEUE, _GLOBAL_LISTENER
+#     if _GLOBAL_QUEUE is None:
+#         _GLOBAL_QUEUE = multiprocessing.Queue(-1)
+
+#         # Console handler
+#         ch = logging.StreamHandler()
+#         ch_formatter = logging.Formatter(
+#             "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
+#             if show_detail else
+#             "(%(funcName)s:%(lineno)s): %(message)s",datefmt="%m-%d %H:%M:%S" 
+#         )
+#         ch.setFormatter(ch_formatter)
+#         # File handler
+#         os.makedirs(os.path.dirname(os.path.abspath(log_f)), exist_ok=True)
+#         fh = RotatingFileHandler(log_f, maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
+#         # fh.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)d): %(message)s"))
+#         mph_formatter = logging.Formatter(
+#             "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
+#             if show_detail else
+#             "(%(funcName)s:%(lineno)s): %(message)s",
+#             datefmt="%m-%d %H:%M:%S" 
+#         )
+#         fh.setFormatter(mph_formatter)
+#         # 自动启动 QueueListener
+#         _GLOBAL_LISTENER = QueueListener(_GLOBAL_QUEUE, ch, fh)
+#         _GLOBAL_LISTENER.start()
+
+#         # 自动注册退出停止 listener
+#         atexit.register(stopLogger)
+
+# def getLogger(name=None, logpath='instock_tk.log'):
+#     global _GLOBAL_LOGGER, _GLOBAL_LOG_NAME
+
+#     if _GLOBAL_LOGGER:
+#         return _GLOBAL_LOGGER
+
+#     if name:
+#         _GLOBAL_LOG_NAME = name
+#     elif not _GLOBAL_LOG_NAME:
+#         _GLOBAL_LOG_NAME = "instock_TK"
+
+#     log_f = logpath
+#     _ensure_listener_started(log_f)
+
+#     logger = logging.getLogger(_GLOBAL_LOG_NAME)
+#     logger.setLevel(logging.DEBUG)
+#     logger.propagate = False
+
+#     # 添加 QueueHandler（子进程也会调用）
+#     if not any(isinstance(h, QueueHandler) for h in logger.handlers):
+#         logger.addHandler(QueueHandler(_GLOBAL_QUEUE))
+
+#     _GLOBAL_LOGGER = logger
+#     return logger
+
+# def stopLogger():
+#     global _GLOBAL_LISTENER
+#     if _GLOBAL_LISTENER:
+#         _GLOBAL_LISTENER.stop()
+#         _GLOBAL_LISTENER = None
+
+# log = getLogger()
+
+
+def getLogger_no_mp(name=None, logpath='instock_tk.log', writemode='a', show_detail=True):
 
     global _GLOBAL_LOGGER, _GLOBAL_LOG_NAME
 
@@ -361,7 +526,7 @@ def getLogger(name=None, logpath='instock_tk.log', writemode='a', show_detail=Tr
     # LoggerFactory.log = LoggerFactory.getLogger("instock_TK", logpath=log_file)
 
     logger.setLevel(logging.ERROR)  # 可以根据需求改为 INFO 或 ERROR
-    logger.propagate = False  # 避免重复打印到 root logger
+    # logger.propagate = False  # 避免重复打印到 root logger
 
     if not logger.handlers:  # 避免重复添加 handler
         # ---------------- 控制台 ----------------
@@ -374,13 +539,23 @@ def getLogger(name=None, logpath='instock_tk.log', writemode='a', show_detail=Tr
         ch.setFormatter(ch_formatter)
         logger.addHandler(ch)
 
-        # ---------------- MultiprocessHandler ----------------
-        mph = MultiprocessHandler(
+        # # ---------------- MultiprocessHandler ----------------
+        # mph = MultiprocessHandler(
+        #     log_f,
+        #     when='D',             # 每天轮转
+        #     backupCount=3,        # 保留 3 个历史日志
+        #     encoding='utf-8'
+        # )
+
+        # ---------------- File Handler ----------------
+        mph = RotatingFileHandler(
             log_f,
-            when='D',             # 每天轮转
-            backupCount=3,        # 保留 3 个历史日志
-            encoding='utf-8'
+            maxBytes=10 * 1024 * 1024,
+            backupCount=3,
+            encoding="utf-8"
         )
+
+
         mph_formatter = logging.Formatter(
             "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
             if show_detail else
@@ -390,9 +565,6 @@ def getLogger(name=None, logpath='instock_tk.log', writemode='a', show_detail=Tr
         logger.addHandler(mph)
 
     return logger
-
-
-log = getLogger(show_detail=True)
 
 # sys.stdout = log.handlers[0].stream
 # sys.stderr = log.handlers[0].stream

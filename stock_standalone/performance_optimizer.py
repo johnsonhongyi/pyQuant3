@@ -7,10 +7,8 @@
 import time
 import pandas as pd
 from typing import Dict, List, Tuple, Optional, Any
-import logging
-
-logger = logging.getLogger(__name__)
-
+from JohnsonUtil import LoggerFactory
+logger = LoggerFactory.getLogger()
 
 class TreeviewIncrementalUpdater:
     """
@@ -106,8 +104,8 @@ class TreeviewIncrementalUpdater:
             iid = self.tree.insert("", "end", values=values)
             self._item_map[code] = iid
             
-            # ✅ 应用颜色标记
-            if self.feature_marker:
+            # ✅ 应用颜色标记（只在启用颜色时）
+            if self.feature_marker and self.feature_marker.enable_colors:
                 try:
                     row_data = {
                         'percent': row.get('percent', 0),
@@ -177,8 +175,8 @@ class TreeviewIncrementalUpdater:
                     self.tree.item(iid, values=values)
                     updated += 1
                     
-                    # ✅ 更新颜色标记
-                    if self.feature_marker:
+                    # ✅ 更新颜色标记（只在启用颜色时）
+                    if self.feature_marker and self.feature_marker.enable_colors:
                         try:
                             row_data = {
                                 'percent': row.get('percent', 0),
@@ -190,14 +188,17 @@ class TreeviewIncrementalUpdater:
                                 self.tree.item(iid, tags=tuple(tags))
                         except Exception:
                             pass
+                    elif self.feature_marker and not self.feature_marker.enable_colors:
+                        # 关闭颜色时清除标签
+                        self.tree.item(iid, tags=())
             else:
                 # 新增行
                 iid = self.tree.insert("", "end", values=values)
                 self._item_map[code] = iid
                 added += 1
                 
-                # ✅ 应用颜色标记
-                if self.feature_marker:
+                # ✅ 应用颜色标记（只在启用颜色时）
+                if self.feature_marker and self.feature_marker.enable_colors:
                     try:
                         row_data = {
                             'percent': row.get('percent', 0),
