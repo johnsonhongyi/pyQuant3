@@ -137,13 +137,14 @@ def get_base_path():
 #print(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
 #print(f'get_base_path() : {get_base_path()}')
 
-def get_resource_file(rel_path, out_name=None,BASE_DIR=None):
+def get_resource_file(rel_path, out_name=None,BASE_DIR=None,spec=None):
     """
     从 PyInstaller 内置资源释放文件到 EXE 同目录
 
     rel_path:   打包资源的相对路径
     out_name:   释放目标文件名
-    """
+    """
+
 
     if BASE_DIR is None:
         BASE_DIR = get_base_path()
@@ -168,7 +169,11 @@ def get_resource_file(rel_path, out_name=None,BASE_DIR=None):
     src = os.path.join(base, rel_path)
 
     if not os.path.exists(src):
-        if rel_path.find('JohnsonUtil') >= 0:
+        src = os.path.join(BASE_DIR, rel_path)
+        if os.path.exists(src):
+            log.info(f"BASE_DIR/rel_path资源: {src}")
+            return src
+        elif rel_path.find('JohnsonUtil') >= 0:
             src = os.path.join(get_base_path(), rel_path.replace('JohnsonUtil/',''))
             if os.path.exists(src):
                 return src
@@ -189,7 +194,7 @@ def get_resource_file(rel_path, out_name=None,BASE_DIR=None):
 # --------------------------------------
 BASE_DIR = get_base_path()
 
-def get_conf_path(fname):
+def get_conf_path(fname,rel_path=None):
     """
     获取并验证 stock_codes.conf
 
@@ -209,9 +214,11 @@ def get_conf_path(fname):
         else:
             log.warning("配置文件存在但为空，将尝试重新释放")
 
+    if rel_path is None:
+        rel_path=f"JohnsonUtil/{fname}"
     # --- 2. 释放默认资源 ---
     cfg_file = get_resource_file(
-        rel_path=f"JohnsonUtil/{fname}",
+        rel_path=rel_path,
         out_name=fname,
         BASE_DIR=BASE_DIR
     )
@@ -363,12 +370,13 @@ class GlobalConfig:
 
         # ---- 读取原有参数 ----
         self.init_value = self.cfg.getint("general", "initGlobalValue", fallback=0)
-        self.marketInit = self.cfg.get("general", "marketInit", fallback="")
-        self.marketblk = self.cfg.get("general", "marketblk", fallback="")
-        self.scale_offset = self.cfg.get("general", "scale_offset", fallback="")
-        self.resampleInit = self.cfg.get("general", "resampleInit", fallback="")
-        self.write_all_day_date = self.cfg.get("general", "write_all_day_date", fallback="")
-        self.duration_sleep_time = self.cfg.getint("general", "duration_sleep_time", fallback=0)
+        self.marketInit = self.cfg.get("general", "marketInit", fallback="all")
+        self.marketblk = self.cfg.get("general", "marketblk", fallback="063.blk")
+        self.scale_offset = self.cfg.get("general", "scale_offset", fallback="-0.45")
+        self.resampleInit = self.cfg.get("general", "resampleInit", fallback="d")
+        self.write_all_day_date = self.cfg.get("general", "write_all_day_date", fallback="20251208")
+        self.detect_calc_support =  self.cfg.getboolean("general", "detect_calc_support", fallback=False)
+        self.duration_sleep_time = self.cfg.getint("general", "duration_sleep_time", fallback=60)
 
         saved_wh_str = self.cfg.get("general", "saved_width_height", fallback="260x180")
         try:
