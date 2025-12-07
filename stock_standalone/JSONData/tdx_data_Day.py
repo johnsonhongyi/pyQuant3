@@ -1509,24 +1509,24 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         df = get_tdx_macd(df,detect_calc_support=detect_calc_support)
     t_macd_end = time.time()
 
-    # if f'perc{lastdays}d' not in df.columns:
-    #     df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
+    if f'perc{lastdays}d' not in df.columns:
+        df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
 
-    # # ------------------------------
-    # # maxp / fib / maxpcout
-    # # ------------------------------
-    # per_couts = df.filter(regex=r'per[1-9]d')[-1:]
-    # if len(per_couts.T) > 2:
-    #     if resample == 'd':
-    #         df['maxp'] = per_couts.T[1:].values.max()
-    #         fib_c = (per_couts.T.values > 2).sum()
-    #     else:
-    #         df['maxp'] = per_couts.T[:3].values.max()
-    #         fib_c = (per_couts.T[:3].values > 10).sum()
-    #     df['fib'] = fib_c
-    #     df['maxpcout'] = fib_c
-    # else:
-    #     df['maxp'] = df['fib'] = df['maxpcout'] = 0
+    # ------------------------------
+    # maxp / fib / maxpcout
+    # ------------------------------
+    per_couts = df.filter(regex=r'per[1-9]d')[-1:]
+    if len(per_couts.T) > 2:
+        if resample == 'd':
+            df['maxp'] = per_couts.T[1:].values.max()
+            fib_c = (per_couts.T.values > 2).sum()
+        else:
+            df['maxp'] = per_couts.T[:3].values.max()
+            fib_c = (per_couts.T[:3].values > 10).sum()
+        df['fib'] = fib_c
+        df['maxpcout'] = fib_c
+    else:
+        df['maxp'] = df['fib'] = df['maxpcout'] = 0
 
     # ------------------------------
     # 高低价 / 成交量 / 均价指标
@@ -5118,11 +5118,36 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     for col in co2int:
         if col in top_all.columns:
             top_all[col] = top_all[col].astype(int)
-    top_all['topR']=top_all['topR'].apply(lambda x:round(x,1))
-    # top_all = top_all.fillna(0)         
-    # tdxdata = tdxdata.fillna(0)
-    if ('dff' in top_all.columns and top_all.dff[0] == 0) or top_all.close[0] == top_all.lastp1d[0]:            
-        top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top_all['buy'].values, top_all['df2'].values)))
+    # top_all['topR']=top_all['topR'].apply(lambda x:round(x,1))
+    # if ('dff' in top_all.columns and top_all.dff[0] == 0) or top_all.close[0] == top_all.lastp1d[0]:            
+    #     top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top_all['buy'].values, top_all['df2'].values)))
+
+    # 1️⃣ 安全处理 topR
+    # topR_series = top_all.get('topR', pd.Series(np.nan, index=top_all.index))
+    # top_all['topR'] = topR_series.apply(lambda x: round(x, 1) if pd.notnull(x) else np.nan)
+    # 安全获取 topR 列，如果不存在则创建，默认值 0
+    topR_series = top_all.get('topR', pd.Series(0, index=top_all.index))
+    # 四舍五入处理
+    top_all['topR'] = topR_series.apply(lambda x: round(x, 1))
+
+    # 2️⃣ 安全处理 df2 和 buy 列，缺失用默认值 0
+    df2_series = top_all.get('df2', pd.Series(0, index=top_all.index))
+    buy_series = top_all.get('buy', pd.Series(0, index=top_all.index))
+
+    top_all['df2'] = df2_series
+    top_all['buy'] = buy_series
+
+    # 3️⃣ 安全计算 dff
+    def safe_dff(x, y):
+        if y == 0 or pd.isnull(x) or pd.isnull(y):
+            return np.nan
+        return round((x - y) / y * 100, 1)
+
+    # 只在满足条件时计算
+    if (top_all.get('dff', pd.Series([0]*len(top_all)))[0] == 0) \
+            or (top_all.get('close', pd.Series([0]*len(top_all)))[0] == top_all.get('lastp1d', pd.Series([0]*len(top_all)))[0]):
+        top_all['dff'] = list(map(safe_dff, top_all['buy'].values, top_all['df2'].values))
+        
 
     for col in co2int:
         if col in tdxdata.columns:
