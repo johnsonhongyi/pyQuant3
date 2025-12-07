@@ -1509,9 +1509,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         df = get_tdx_macd(df,detect_calc_support=detect_calc_support)
     t_macd_end = time.time()
 
-    if f'perc{lastdays}d' not in df.columns:
-        df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
-
     # ------------------------------
     # maxp / fib / maxpcout
     # ------------------------------
@@ -1527,6 +1524,13 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         df['maxpcout'] = fib_c
     else:
         df['maxp'] = df['fib'] = df['maxpcout'] = 0
+
+        
+    t_perc_start = time.time()
+    if f'perc{lastdays}d' not in df.columns:
+        df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
+    t_perc_end = time.time()
+
 
     # ------------------------------
     # 高低价 / 成交量 / 均价指标
@@ -1552,27 +1556,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         df['lastdu4'] = ((df.high.rolling(4).max() - df.low.rolling(4).min()) /
                           df.close.rolling(4).mean() * 100).round(1)
 
-    t_perc_start = time.time()
-    if f'perc{lastdays}d' not in df.columns:
-        df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
-    t_perc_end = time.time()
-
-    # ------------------------------
-    # maxp / fib / maxpcout
-    # ------------------------------
-    per_couts = df.filter(regex=r'per[1-9]d')[-1:]
-    if len(per_couts.T) > 2:
-        if resample == 'd':
-            df['maxp'] = per_couts.T[1:].values.max()
-            fib_c = (per_couts.T.values > 2).sum()
-        else:
-            df['maxp'] = per_couts.T[:3].values.max()
-            fib_c = (per_couts.T[:3].values > 10).sum()
-        df['fib'] = fib_c
-        df['maxpcout'] = fib_c
-    else:
-        df['maxp'] = df['fib'] = df['maxpcout'] = 0
-    
     if len(df) > 10:
         # 2. 调用自动检查函数
 

@@ -12268,7 +12268,7 @@ class ColumnSetManager(tk.Toplevel):
         row_h = 30
         canvas_h = min(rows_needed, max_rows) * row_h
         self.canvas.config(height=canvas_h)
-
+        logger.info(f'max_rows:{max_rows} rows_needed:{rows_needed} canvas_h:{canvas_h}')
         for i, col in enumerate(filtered):
             var = tk.BooleanVar(value=(col in self.current_set))
             self._chk_vars[col] = var
