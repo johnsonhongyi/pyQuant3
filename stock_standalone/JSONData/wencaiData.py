@@ -1312,7 +1312,7 @@ def get_conf_path(fname,BASE_DIR=None,spec=''):
     default_path = os.path.join(BASE_DIR, spec_name)
     
     # --- 1. 直接存在 ---
-    if not os.path.exists(default_path):
+    if os.path.exists(default_path):
         if os.path.getsize(default_path) > 0:
             log.info(f"使用本地配置: {default_path}")
             return default_path
@@ -1322,8 +1322,9 @@ def get_conf_path(fname,BASE_DIR=None,spec=''):
     # --- 2. 释放默认资源 ---
         # rel_path=f"JohnsonUtil/wencai/{fname}",
         # rel_path=f"JohnsonUtil{os.sep}{spec}{os.sep}{fname}",
+        # rel_path=f"{spec}{os.sep}{fname}",
     cfg_file = cct.get_resource_file(
-        rel_path=f"{spec}{os.sep}{fname}",
+        rel_path=f"JohnsonUtil/wencai/{fname}",
         out_name=fname,
         BASE_DIR=BASE_DIR
     )
