@@ -1295,7 +1295,7 @@ BASE_DIR = get_base_path()
 # STOCK_CODE_PATH 专用逻辑
 # --------------------------------------
 
-def get_conf_path(fname):
+def get_conf_path(fname,BASE_DIR=None,spec=''):
     """
     获取并验证 stock_codes.conf
 
@@ -1305,10 +1305,14 @@ def get_conf_path(fname):
       3. 校验文件
     """
     # default_path = os.path.join(BASE_DIR, "stock_codes.conf")
-    default_path = os.path.join(BASE_DIR, fname)
+
+    if BASE_DIR is None:
+        BASE_DIR = get_base_path()
+    spec_name=f'{spec}{os.sep}{fname}'
+    default_path = os.path.join(BASE_DIR, spec_name)
     
     # --- 1. 直接存在 ---
-    if os.path.exists(default_path):
+    if not os.path.exists(default_path):
         if os.path.getsize(default_path) > 0:
             log.info(f"使用本地配置: {default_path}")
             return default_path
@@ -1317,8 +1321,9 @@ def get_conf_path(fname):
 
     # --- 2. 释放默认资源 ---
         # rel_path=f"JohnsonUtil/wencai/{fname}",
+        # rel_path=f"JohnsonUtil{os.sep}{spec}{os.sep}{fname}",
     cfg_file = cct.get_resource_file(
-        rel_path=f"JohnsonUtil/wencai/{fname}",
+        rel_path=f"{spec}{os.sep}{fname}",
         out_name=fname,
         BASE_DIR=BASE_DIR
     )
@@ -1346,7 +1351,7 @@ def search_ths_data(code,category=False):
         # root_cwd = cct.get_run_path_stock()
         # fpath = f'{root_cwd}stock\\JohnsonUtil\\wencai\\同花顺板块行业.xlsx'.replace('\\',cct.get_os_path_sep())
         # print(f'fpath:{fpath}')
-        fpath= get_conf_path('同花顺板块行业.xlsx')
+        fpath= get_conf_path('同花顺板块行业.xlsx',BASE_DIR=cct.get_base_path(),spec='wencai')
         if not fpath:
             log.critical("同花顺板块行业.xlsx 加载失败，程序无法继续运行")
         df_ths = pd.read_excel(fpath)

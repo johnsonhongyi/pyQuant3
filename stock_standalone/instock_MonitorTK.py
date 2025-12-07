@@ -229,6 +229,7 @@ scale_offset = CFG.scale_offset
 resampleInit = CFG.resampleInit 
 duration_sleep_time = CFG.duration_sleep_time
 write_all_day_date = CFG.write_all_day_date
+detect_calc_support = CFG.detect_calc_support
 saved_width,saved_height = CFG.saved_width,CFG.saved_height
 # def remove_condition_query(expr: str, cond: str) -> str:
 def remove_invalid_conditions(query: str, invalid_cols: list,showdebug=True):
@@ -1910,8 +1911,18 @@ def load_monitor_list(MONITOR_LIST_FILE=MONITOR_LIST_FILE):
     return []
 
 
+def clean_bad_columns(df):
+    bad_cols = [
+        c for c in df.columns
+        if not isinstance(c, str) or not c.isidentifier()
+    ]
+    if bad_cols:
+        print("清理异常列:", bad_cols)
+        df = df.drop(columns=bad_cols)
+    return df
+
 # ------------------ 后台数据进程 ------------------ #
-def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=None):
+def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=None,detect_calc_support=False):
     logger = LoggerFactory.getLogger()  # ✅ 必须调用一次，确保 QueueHandler 添加
     if log_level is not None:
         logger.setLevel(log_level.value)
@@ -1927,7 +1938,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
     st_key_sort =  g_values.getkey("st_key_sort", "3 0") 
     market_sort_value, market_sort_value_key = ct.get_market_sort_value_key(st_key_sort)
     lastpTDX_DF, top_all = pd.DataFrame(), pd.DataFrame()
-    logger.info(f"init resample: {resample} flag.value : {flag.value}")
+    logger.info(f"init resample: {resample} flag.value : {flag.value} detect_calc_support:{detect_calc_support.value}")
     while True:
         # logger.info(f'resample : new : {g_values.getkey("resample")} last : {resample} st : {g_values.getkey("st_key_sort")}')
         # if flag is not None and not flag.value:   # 停止刷新
@@ -1970,9 +1981,9 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
 
             if top_all.empty:
                 if lastpTDX_DF.empty:
-                    top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl= ct.Resample_LABELS_Days[resample], resample=resample)
+                    top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl= ct.Resample_LABELS_Days[resample], resample=resample,detect_calc_support=detect_calc_support.value)
                 else:
-                    top_all = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF)
+                    top_all = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF,detect_calc_support=detect_calc_support.value)
             else:
                 top_all = cct.combine_dataFrame(top_all, top_now, col="couts", compare="dff")
 
@@ -1999,10 +2010,11 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
             # logger.info(f'DISPLAY_COLS:{DISPLAY_COLS}')
             # logger.info(f'col: {top_temp.columns.values}')
             # top_temp = top_temp.loc[:, DISPLAY_COLS]
-            logger.info(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape}')
+            logger.info(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape} detect_calc_support:{detect_calc_support.value}')
+            df_all = clean_bad_columns(top_temp)
             queue.put(top_temp)
             gc.collect()
-            logger.info(f'now: {cct.get_now_time_int()} time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+            logger.info(f'用时: {round(time.time() - time_s,1)/len(top_temp):.2f} now: {cct.get_now_time_int()} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
             for _ in range(duration_sleep_time):
                 if not flag.value: break
                 time.sleep(0.5)
@@ -2951,7 +2963,8 @@ class StockMonitorApp(tk.Tk):
         self.tree.bind("<ButtonRelease-1>", on_column_release)
 
     def reload_cfg_value(self):
-        global marketInit,marketblk,scale_offset
+        global marketInit,marketblk,scale_offset,resampleInit
+        global duration_sleep_time,write_all_day_date,detect_calc_support
         conf_ini= cct.get_conf_path('global.ini')
         if not conf_ini:
             logger.info("global.ini 加载失败，程序无法继续运行")
@@ -2964,8 +2977,9 @@ class StockMonitorApp(tk.Tk):
         resampleInit = CFG.resampleInit
         duration_sleep_time = CFG.duration_sleep_time
         write_all_day_date = CFG.write_all_day_date
+        detect_calc_support = CFG.detect_calc_support
         saved_width,saved_height = CFG.saved_width,CFG.saved_height 
-        logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} scale_offset: {scale_offset} saved_width:{saved_width},{saved_height} duration_sleep_time:{duration_sleep_time}")
+        logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} scale_offset: {scale_offset} saved_width:{saved_width},{saved_height} duration_sleep_time:{duration_sleep_time} detect_calc_support:{detect_calc_support}")
 
     def get_scaled_value(self):
         """返回当前的缩放因子（用于 TreeView 列宽计算）"""
@@ -4248,8 +4262,9 @@ class StockMonitorApp(tk.Tk):
     def _start_process(self):
         self.refresh_flag = mp.Value('b', True)
         self.log_level = mp.Value('i', log_level)  # 'i' 表示整数
+        self.detect_calc_support = mp.Value('b', detect_calc_support)  # 'i' 表示整数
         # self.proc = mp.Process(target=fetch_and_process, args=(self.queue,))
-        self.proc = mp.Process(target=fetch_and_process, args=(self.global_dict,self.queue, "boll", self.refresh_flag,self.log_level))
+        self.proc = mp.Process(target=fetch_and_process, args=(self.global_dict,self.queue, "boll", self.refresh_flag,self.log_level, self.detect_calc_support))
         # self.proc.daemon = True
         self.proc.daemon = False 
         self.proc.start()
@@ -9347,18 +9362,6 @@ class StockMonitorApp(tk.Tk):
                         tk.Label(win, text=f"{row_code} {name}", font=self.default_font).pack(anchor="w", padx=10)
                         # 可以加更多字段，如 trade、涨幅等
 
-    def clean_bad_columns(self,df):
-        bad_cols = [
-            c for c in df.columns
-            if not isinstance(c, str) or not c.isidentifier()
-        ]
-        if bad_cols:
-            print("清理异常列:", bad_cols)
-            df = df.drop(columns=bad_cols)
-        return df
-
-
-
     def apply_search(self):
         val1 = self.search_var1.get().strip()
         val2 = self.search_var2.get().strip()
@@ -9384,8 +9387,6 @@ class StockMonitorApp(tk.Tk):
         if self.df_all.empty:
             self.status_var.set("当前数据为空")
             return
-
-        self.df_all = self.clean_bad_columns(self.df_all)
 
         # # === 测试 ===
         # expr = "(topR > 0 or (per1d > 1) and (per2d > 0)"

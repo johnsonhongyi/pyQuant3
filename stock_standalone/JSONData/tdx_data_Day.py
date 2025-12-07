@@ -486,27 +486,39 @@ def track_bullish_signals_startpos(df,
                                    gap=5,
                                    stop_loss_pct=0.05,
                                    take_profit_pct=0.15):
+    # Vectorized implementation
     df = df.copy()
-    valid_start = df[upper_col].replace(0, np.nan).first_valid_index()
-    if valid_start is None:
+    
+    # Ensure columns exist to avoid errors
+    if not all(col in df.columns for col in [price_col, high_col, low_col, upper_col, mid_col, ma26_col]):
         return df
 
-    start_pos = df.index.get_loc(valid_start)
-    signals = pd.Series(False, index=df.index)
+    # Breakout condition Boolean Series
+    high_gt_upper = (df[high_col] > df[upper_col])
+    
+    # Cond1: Any breakout in the past (excluding recent 5 days)
+    # Rolling max of boolean gives 1.0 if any True.
+    rolling_window_1 = max(1, lookback - 4)
+    cond1 = high_gt_upper.rolling(window=rolling_window_1).max().shift(5).fillna(0).astype(bool)
 
-    for i in range(max(lookback, start_pos), len(df)):
-        window = df.iloc[i-lookback:i+1]
-
-        cond1 = (window[high_col].iloc[:-5] > window[upper_col].iloc[:-5]).any()
-        cond2 = (window[low_col].iloc[:-5].min() > window[mid_col].iloc[:-5].min())
-        cond3 = window[price_col].iloc[-1] > window[upper_col].iloc[-1]
-        cond4 = window[price_col].iloc[-1] > window[ma26_col].iloc[-1]
-        recent_high = window[high_col].iloc[:-1].max()
-        cond5 = window[price_col].iloc[-1] > recent_high
-
-        if cond1 and cond2 and cond3 and cond4 and cond5:
-            signals.iloc[i] = True
-
+    # Cond2: Min(Low) > Min(Mid) in [i-lookback, i-5)
+    low_rolling_min = df[low_col].rolling(window=rolling_window_1).min().shift(5)
+    mid_rolling_min = df[mid_col].rolling(window=rolling_window_1).min().shift(5)
+    cond2 = (low_rolling_min > mid_rolling_min)
+    
+    # Cond3: Current Price > Current Upper
+    cond3 = df[price_col] > df[upper_col]
+    
+    # Cond4: Current Price > Current MA26
+    cond4 = df[price_col] > df[ma26_col]
+    
+    # Cond5: Current Price > Recent High (in [i-lookback, i)) => window[:-1].max()
+    recent_high = df[high_col].rolling(window=lookback).max().shift(1)
+    cond5 = df[price_col] > recent_high
+    
+    # Combine conditions
+    signals = cond1 & cond2 & cond3 & cond4 & cond5
+    
     df['bullbreak'] = signals
     df['bull_f'] = False
     df['bull_s'] = False
@@ -515,11 +527,15 @@ def track_bullish_signals_startpos(df,
     df['tp'] = np.nan
     df['alert'] = False
 
-    signal_idx = df.index[df['bullbreak']].tolist()
-    last_pos = -gap*2
-
-    for idx in signal_idx:
-        pos = df.index.get_loc(idx)
+    # Vectorized Signal Processing
+    # We still need to iterate through signals to handle 'gap' logic which is state dependent relative to last signal
+    # But since signals are sparse, we iterate only over True indices
+    
+    signal_indices = np.where(signals)[0]
+    last_pos = -gap * 2
+    
+    for pos in signal_indices:
+        idx = df.index[pos]
         if pos - last_pos > gap:
             df.at[idx, 'bull_f'] = True
             df.at[idx, 'alert'] = True
@@ -532,36 +548,46 @@ def track_bullish_signals_startpos(df,
             df.at[idx, 'tp'] = entry_price * (1 + take_profit_pct)
         last_pos = pos
 
-    df['obs_d'] = 0
-    df['hold_d'] = 0
-    df['status'] = -101
-    df['has_first'] = False
-
+    # Status tracking loop: 'observing' / 'holding' 
+    # Optimized loop using arrays
+    status_values = np.full(len(df), -101, dtype=object)
+    has_first_values = np.zeros(len(df), dtype=bool)
+    obs_d_values = np.zeros(len(df), dtype=int)
+    hold_d_values = np.zeros(len(df), dtype=int)
+    
+    bull_f_arr = df['bull_f'].values
+    bull_s_arr = df['bull_s'].values
+    
     first_occurred = False
     observing_count = 0
     holding_count = 0
-
-    for idx, row in df.iterrows():
-        if row['bull_f']:
+    
+    for i in range(len(df)):
+        if bull_f_arr[i]:
             first_occurred = True
             observing_count = 1
             holding_count = 0
-            df.at[idx, 'status'] = 'observing'
-        elif row['bull_s']:
+            status_values[i] = 'observing'
+        elif bull_s_arr[i]:
             holding_count = 1
-            df.at[idx, 'status'] = 'holding'
+            status_values[i] = 'holding'
         elif holding_count > 0:
             holding_count += 1
-            df.at[idx, 'status'] = 'holding'
+            status_values[i] = 'holding'
         elif first_occurred and observing_count > 0:
             observing_count += 1
-            df.at[idx, 'status'] = 'observing'
+            status_values[i] = 'observing'
         else:
-            df.at[idx, 'status'] = -101
-
-        df.at[idx, 'has_first'] = first_occurred
-        df.at[idx, 'obs_d'] = observing_count
-        df.at[idx, 'hold_d'] = holding_count
+            status_values[i] = -101
+            
+        has_first_values[i] = first_occurred
+        obs_d_values[i] = observing_count
+        hold_d_values[i] = holding_count
+        
+    df['status'] = status_values
+    df['has_first'] = has_first_values
+    df['obs_d'] = obs_d_values
+    df['hold_d'] = hold_d_values
 
     return df
 
@@ -832,7 +858,6 @@ def track_bullish_signals_vectorized_full(
     # df['macd'] = df.iloc[-1]['macd']
 
 
-# def get_tdx_macd(df):
 def get_tdx_macd_no_sws(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_period: int = 9) -> pd.DataFrame:
 
     if df.empty or not all(col in df.columns for col in ['close', 'high', 'low']):
@@ -906,165 +931,6 @@ def get_tdx_macd_no_sws(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 1
     if increasing is not None:
         df = df.sort_index(ascending=increasing)
     return df
-
-def detect_local_extremes(df, base_window=10, tol_pct=0.01):
-    """
-    动态识别局部高低点和极点
-    df: 包含 'high', 'low', 'close' 列的 DataFrame
-    base_window: 基础滚动窗口长度，可随数据长度动态调整
-    tol_pct: 极值容差百分比
-    """
-    N = max(3, min(base_window, len(df)//10))  # 动态窗口：最少3天，最多数据长度的1/10
-    
-    LLV_L_N = df['low'].rolling(N, min_periods=1).min()
-    HHV_H_N = df['high'].rolling(N, min_periods=1).max()
-    
-    # 容差匹配
-    df['局部低点'] = np.where(df['low'] <= LLV_L_N * (1 + tol_pct), -1, 0)
-    df['局部高点'] = np.where(df['high'] >= HHV_H_N * (1 - tol_pct), 1, 0)
-    
-    # 极点和局部极点
-    df['极点'] = df['局部高点'] + df['局部低点']
-    df['局部极点'] = df['close'].where(df['极点'] != 0, np.nan)
-    # 简化：中枢上轨ZG = 最近两个极点高点最小,中枢下轨ZD = 最近两个极点低点最大
-    high_peaks = df['high'].where(df['局部高点'] == 1)
-    low_troughs = df['low'].where(df['局部低点'] == -1)
-
-    # df['ZSG'] = high_peaks.rolling(2, min_periods=1).min()
-    # df['ZSD'] = low_troughs.rolling(2, min_periods=1).max()
-    df['ZSH'] = high_peaks.rolling(2, min_periods=1).max()
-    df['ZSL'] = low_troughs.rolling(2, min_periods=1).min()
-
-    return df
-
-
-def extend_signals(df: pd.DataFrame, N1: int = 10, N2: int = 10, DISP: int = 2) -> pd.DataFrame:
-    """
-    在 get_tdx_macd 基础上扩展：
-    - 中枢 ZSD/ZSG/ZSH/ZSL
-    - 局部极点 极点/局部极点
-    - 买卖信号 BUY_SIGNAL/SELL_SIGNAL
-    """
-
-    df = df.copy()
-
-    # 确保价格列
-    H = df['high']
-    L = df['low']
-    C = df['close']
-
-    # --------------------
-    # 1. 极点计算（局部高低点）
-    # --------------------
-    LLV_L_N1 = L.rolling(N1).min()
-    HHV_H_N1 = H.rolling(N1).max()
-
-    # 局部低点
-    df['局部低点'] = np.where((L == LLV_L_N1.shift(1)), -1, 0)
-    # 局部高点
-    df['局部高点'] = np.where((H == HHV_H_N1.shift(1)), 1, 0)
-    # 极点 = 高点1 / 低点-1 / 其他0
-    df['极点'] = df['局部高点'] + df['局部低点']
-    df['局部极点'] = df['close'].where(df['极点'] != 0, np.nan)
-
-    # --------------------
-    # 2. 中枢计算
-    # --------------------
-    # 简化：中枢上轨ZG = 最近两个极点高点最小,中枢下轨ZD = 最近两个极点低点最大
-    high_peaks = df['high'].where(df['局部高点'] == 1)
-    low_troughs = df['low'].where(df['局部低点'] == -1)
-
-    df['ZSG'] = high_peaks.rolling(2, min_periods=1).min()
-    df['ZSD'] = low_troughs.rolling(2, min_periods=1).max()
-    df['ZSH'] = high_peaks.rolling(2, min_periods=1).max()
-    df['ZSL'] = low_troughs.rolling(2, min_periods=1).min()
-
-    # --------------------
-    # 3. 买卖信号（基于短中期均线交叉）
-    # --------------------
-    # 假设 df 已经包含 MA10d, MA101d, MA102d, MA20d, MA201d, MA202d
-    # df['buy_signal'] = ((df['ma10d'] > df['ma20d']) & (df['ma101d'] > df['ma201d'])).astype(int)
-    # df['sell_signal'] = ((df['ma10d'] < df['ma20d']) & (df['ma101d'] < df['ma201d'])).astype(int)
-
-
-    # --------------------
-    # 4. 保留 MACD/RSI/KDJ 等
-    # --------------------
-    # 假设 df 已经包含 MACD, MACD_signal, MACD_hist, RSI, KDJ_K, KDJ_D, KDJ_J
-    # 如果不存在，可以调用 get_tdx_macd 先计算
-
-    return df
-
-
-# def detect_local_extremes_filtered(df, base_window=10, tol_pct=0.01):
-#     """
-#     动态识别局部高低点和极点，并过滤连续噪音点
-#     df: 包含 'high', 'low', 'close' 列的 DataFrame
-#     base_window: 基础滚动窗口长度
-#     tol_pct: 极值容差百分比
-#     """
-#     df = df.copy()
-#     # N = max(3, min(base_window, len(df)//10))  # 动态窗口
-#     N = 10  # 动态窗口
-
-#     # 原始局部高低点
-#     LLV_L_N = df['low'].rolling(N, min_periods=1).min()
-#     HHV_H_N = df['high'].rolling(N, min_periods=1).max()
-    
-#     df['局部低点_raw'] = np.where(df['low'] <= LLV_L_N * (1 + tol_pct), -1, 0)
-#     df['局部高点_raw'] = np.where(df['high'] >= HHV_H_N * (1 - tol_pct), 1, 0)
-    
-#     # 过滤噪音：只保留窗口内极端值
-#     low_indices = np.where(df['局部低点_raw'] != 0)[0]
-#     high_indices = np.where(df['局部高点_raw'] != 0)[0]
-#     df['局部低点'] = 0
-#     df['局部高点'] = 0
-
-#     for i in low_indices:
-#         win = df['low'].iloc[max(0, i-N+1):i+1]
-#         if win.idxmin() == df.index[i]:
-#             df.at[df.index[i], '局部低点'] = -1
-
-#     for i in high_indices:
-#         win = df['high'].iloc[max(0, i-N+1):i+1]
-#         if win.idxmax() == df.index[i]:
-#             df.at[df.index[i], '局部高点'] = 1
-
-
-#     # 极点和局部极点
-#     df['极点'] = df['局部高点'] + df['局部低点']
-#     df['局部极点'] = df['close'].where(df['极点'] != 0, np.nan)
-    
-#     # 删除临时列
-#     df.drop(columns=['局部低点_raw', '局部高点_raw'], inplace=True)
-#     # 简化：中枢上轨ZG = 最近两个极点高点最小,中枢下轨ZD = 最近两个极点低点最大
-#     high_peaks = df['high'].where(df['局部高点'] == 1)
-#     low_troughs = df['low'].where(df['局部低点'] == -1)
-
-#     # df['ZSG'] = high_peaks.rolling(2, min_periods=1).min()
-#     # df['ZSD'] = low_troughs.rolling(2, min_periods=1).max()
-#     df['ZSH'] = high_peaks.rolling(2, min_periods=1).max()
-#     df['ZSL'] = low_troughs.rolling(2, min_periods=1).min()
-
-#     # 只保留最后一个有效值，放在最后一天
-#     # for col in ['ZSG', 'ZSD', 'ZSH', 'ZSL']:
-#     #     last_valid = df[col].replace(-101, np.nan).dropna()
-#     #     last_value = last_valid.iloc[-1] if not last_valid.empty else np.nan
-#     #     df[col] = np.nan
-#     #     df[col].iloc[-1] = last_value
-#     # 自动识别最后连续有效区间，并只保留最后一天
-#     # for col in ['ZSG', 'ZSD', 'ZSH', 'ZSL']:
-#     for col in ['ZSH', 'ZSL']:
-#         # 过滤无效值
-#         valid_series = df[col].replace(-101, np.nan)
-#         # 找到最后连续有效值
-#         last_valid = valid_series.dropna()
-#         last_value = last_valid.iloc[-1] if not last_valid.empty else np.nan
-#         # 清空列，最后一天放置最后有效值
-#         df[col] = np.nan
-#         df.at[df.index[-1], col] = last_value
-
-#     return df
 
 
 def detect_local_extremes_filtered(df, N=10, tol_pct=0.01):
@@ -1204,28 +1070,6 @@ def calc_support_resistance_vec(df):
 
     return df
 
-# def check_conditions_auto(df, days=6, prefix_list=['lasto','lastl','lastp','per']):
-#     """
-#     自动批量检查 DataFrame 条件：
-#     1. 对每行，检查每一天的条件：
-#        lasto <= lastl*1.002 and lastp > lasto and per > 1
-#     2. 最终条件：至少一天满足 + lastp1d > lastp2d
-#     返回 DataFrame 新增列：'符合条件', '满足天数'
-#     """
-#     def check_row(row):
-#         satisfied_days = []
-#         for i in range(1, days+1):
-#             lasto = row[f'lasto{i}d']
-#             lastl = row[f'lastl{i}d']
-#             lastp = row[f'lastp{i}d']
-#             per = row[f'per{i}d']
-#             if (lasto <= lastl * 1.002) and (lastp > lasto) and (per > 1):
-#                 satisfied_days.append(i)
-#         final_result = bool(satisfied_days) and (row['lastp1d'] > row['lastp2d'])
-#         return pd.Series({'符合条件': final_result, 'MainU': satisfied_days})
-    
-#     result = df.apply(check_row, axis=1)
-#     return pd.concat([df, result], axis=1)
 
 def check_conditions_auto(df, days=6):
     """
@@ -1317,7 +1161,7 @@ def check_conditions_auto(df, days=6):
 
 
 
-def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_period: int = 9) -> pd.DataFrame:
+def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_period: int = 9 ,detect_calc_support=False) -> pd.DataFrame:
     """
     统一计算：
       - BOLL, MACD, RSI, KDJ
@@ -1331,17 +1175,6 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
     id_cout = len(df)
     limit = min_len
 
-    # ----------- 补足长度（回测时平滑） -----------
-    # if id_cout < limit:
-    #     if df.index.is_monotonic_increasing:
-    #         increasing = True
-    #         df = df.sort_index(ascending=False)
-    #     else:
-    #         increasing = False
-
-    #     temp = df.iloc[-1:].copy()
-    #     df = pd.concat([df, temp.loc[np.repeat(temp.index[0], limit - id_cout)]], axis=0).reset_index(drop=True)
-    #     df = df.sort_index(ascending=False)
     if id_cout < limit:
         if  df.index.is_monotonic_increasing:
             increasing = True
@@ -1399,16 +1232,21 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
         factor = np.maximum(1, 100 * (vol5 / (3 * df["CAPITAL"])))
         alpha = 2 / (1 + factor.clip(1, 200))  # 动态平滑因子
 
+        # 动态加权平均（模拟 DMA） - Optimized to use NumPy array loop
+        ema20_vals = df["EMA20"].values
+        alpha_vals = alpha.values
+        sws_vals = np.zeros(len(df))
+        
         # 初始化第一个值（可用EMA20首个值）
-        df["SWS"] = np.nan
-        df.iloc[0, df.columns.get_loc("SWS")] = df.iloc[0]["EMA20"]
+        sws_vals[0] = ema20_vals[0]
 
-        # 动态加权平均（模拟 DMA）
         for i in range(1, len(df)):
-            prev_sws = df.iloc[i - 1]["SWS"]
-            ema20_now = df.iloc[i]["EMA20"]
-            a = alpha.iloc[i]
-            df.iloc[i, df.columns.get_loc("SWS")] = a * ema20_now + (1 - a) * prev_sws
+            # prev_sws = sws_vals[i - 1]
+            # ema20_now = ema20_vals[i]
+            # a = alpha_vals[i]
+            sws_vals[i] = alpha_vals[i] * ema20_vals[i] + (1 - alpha_vals[i]) * sws_vals[i-1]
+
+        df["SWS"] = sws_vals
 
         # 补 NaN
         df["SWS"] = df["SWS"].fillna(method="ffill").fillna(df["EMA20"])
@@ -1440,15 +1278,6 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
     # ======== 清理格式 =========
     df = df.fillna(0)
 
-    # if df.index.name != 'date':
-    #     if 'date' in df.columns:
-    #         df = df.set_index('date')
-    #     else:
-    #         df.index.name = 'date'
-
-    # if increasing is not None:
-    #     df = df.sort_index(ascending=increasing)
-
     if df.index.name != 'date':
         df=df[-id_cout:].set_index('date')
     else:
@@ -1456,18 +1285,15 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
 
     if increasing is not None:
         df = df.sort_index(ascending=increasing)
-    # df = extend_signals(df)
-    # df = detect_local_extremes(df)
-    df = detect_local_extremes_filtered(df)
-    df = calc_support_resistance_vec(df)
-    # print(df[['high','low','close','pressure','support']].tail(20))
-    # import ipdb;ipdb.set_trace()
+    if detect_calc_support:
+        df = detect_local_extremes_filtered(df)
+        df = calc_support_resistance_vec(df)
     return df
 
 
 
 def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
-                          type='f', wds=True, lastdays=3, resample='d', MultiIndex=False,lastday=None):
+                          type='f', wds=True, lastdays=3, resample='d', MultiIndex=False,lastday=None,detect_calc_support=True):
     """
     获取指定股票的日线数据，并计算各类指标
     保留原有逻辑和所有变量
@@ -1500,7 +1326,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         return pd.DataFrame()
 
     global initTdxdata
-    write_k_data_status = wds and not code_u.startswith('bj')
+    write_k_data_status = False #wds and not code_u.startswith('bj')
 
     if dl is not None:
         start = cct.last_tddate(dl)
@@ -1518,6 +1344,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     # 文件不存在或为空
     # ------------------------------
     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        log.error(f'get_kdate_data {code_u} file not exists: {file_path}')
         tmp_df = get_kdate_data(code, start='', end='', ktype='D')
         if len(tmp_df) > 0:
             write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
@@ -1563,6 +1390,15 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     # ------------------------------
     # 读取文件数据
     # ------------------------------
+    # 计算阶段耗时
+    t_io_end = 0
+    t_macd_start = 0
+    t_macd_end = 0
+    t_perc_start = 0
+    t_perc_end = 0
+    
+    t_start = time.time()
+
     # ------------------------------
     # 读取文件数据 (Refactored to use read_csv)
     # ------------------------------
@@ -1579,18 +1415,22 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
             names=file_cols, 
             header=None, 
             index_col=False, 
-            usecols=range(len(file_cols)), # Only read the first len(file_cols) columns (0 to 6)
+            # usecols=range(len(file_cols)), # Only read the first len(file_cols) columns (0 to 6)
             engine='c',
             encoding='gb18030', # Use broadly compatible encoding
             encoding_errors='replace', # Ignore encoding errors
             on_bad_lines='skip', 
         )
+        # t1 = time.time()
         
         # Ensure numeric columns are numeric (coerce errors to NaN)
         cols_to_numeric = ['open', 'high', 'low', 'close', 'vol', 'amount']
         for col in cols_to_numeric:
              if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # t2 = time.time()
+
         
         # Drop NaNs created by coercion
         df.dropna(subset=cols_to_numeric, inplace=True)
@@ -1600,6 +1440,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         
         # Add 'code' column
         df['code'] = code
+        t_io_end = time.time()
         
         # Format 'date' to string
         df['date'] = df['date'].astype(str)
@@ -1663,8 +1504,10 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     # ------------------------------
     # MACD 和涨幅
     # ------------------------------
+    t_macd_start = time.time()
     if 'macd' not in df.columns:
-        df = get_tdx_macd(df)
+        df = get_tdx_macd(df,detect_calc_support=detect_calc_support)
+    t_macd_end = time.time()
 
     # if f'perc{lastdays}d' not in df.columns:
     #     df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
@@ -1709,8 +1552,10 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         df['lastdu4'] = ((df.high.rolling(4).max() - df.low.rolling(4).min()) /
                           df.close.rolling(4).mean() * 100).round(1)
 
+    t_perc_start = time.time()
     if f'perc{lastdays}d' not in df.columns:
         df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
+    t_perc_end = time.time()
 
     # ------------------------------
     # maxp / fib / maxpcout
@@ -1779,460 +1624,17 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
                         )
 
 
+    t_end = time.time()
+    t_total = t_end - t_start
+    if t_start > 0 and t_total > 0.05: # Threshold 50ms
+        io_time = t_io_end - t_start if t_io_end > 0 else 0
+        macd_time = t_macd_end - t_macd_start if t_macd_end > 0 else 0
+        perc_time = t_perc_end - t_perc_start if t_perc_end > 0 else 0
+        other_time = t_total - io_time - macd_time - perc_time
+        log.info(f"SLOW_LOG: {code} Total:{t_total:.3f}s | IO:{io_time:.3f}s | MACD:{macd_time:.3f}s | PERC:{perc_time:.3f}s | Other:{other_time:.3f}s")
+
     return df
 
-
-
-def get_tdx_Exp_day_to_df_SRC(code, start=None, end=None, dl=None, newdays=None, type='f', wds=True, lastdays=3, resample='d', MultiIndex=False):
-    """[summary]
-
-    [description]
-
-    Arguments:
-        code {[type]} -- [description]
-
-    Keyword Arguments:
-        start {[type]} -- [description] (default: {None})
-        end {[type]} -- [description] (default: {None})
-        dl {[type]} -- [description] (default: {None})
-        newdays {[type]} -- [description] (default: {None})
-        type {str} -- [description] (default: {'f'})
-        wds {bool} -- [description] (default: {True})
-        lastdays {number} -- [description] (default: {3})
-        resample {str} -- [description] (default: {'d'})
-        MultiIndex {bool} -- [description] (default: {False})
-
-    Returns:
-        [type] -- [description]
-    """
-
-    # h5_fname = 'tdx_day'
-    # h5_table = 'day'+'_'+'dl'
-    # h5 = h5a.load_hdf_db(h5_fname, table=h5_table, code_l=codelist)
-    # if h5 is not None and not h5.empty:
-    #     return h5
-
-    # dd = cct.GlobalValues().getkey(cct.tdx_hd5_name)
-    dd = None
-    if dd is not None:
-        log.info("tdx_multi_data:%s" % (len(dd.index.get_level_values(0))))
-        # df = dd.loc[dd.index.isin([code], level='code')]
-        df = dd.loc[code]
-    else:
-        df = None
-
-    if dl is not None:
-        start = cct.last_tddate(dl)
-
-    start = cct.day8_to_day10(start)
-    end = cct.day8_to_day10(end)
-
-    tdx_max_int = ct.tdx_max_int
-    max_int_end = -1 
-    if newdays is not None:
-        newstockdayl = newdays
-    else:
-        newstockdayl = newdaysinit
-    code_u = cct.code_to_symbol(code)
-    if type == 'f':
-        file_path = exp_path + 'forwardp' + path_sep + code_u.upper() + ".txt"
-    elif type == 'b':
-        file_path = exp_path + 'backp' + path_sep + code_u.upper() + ".txt"
-    else:
-        return None
-    
-    global initTdxdata
-
-    if code_u.startswith('bj'):
-        write_k_data_status = False
-    else:
-        write_k_data_status = wds
-    
-    if not os.path.exists(file_path):
-        ds = pd.DataFrame()
-
-        tmp_df = get_kdate_data(code, start='', end='', ktype='D')
-        if len(tmp_df) > 0:
-            write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
-            log.error(f'{code_u}  file not exists: {file_path}')
-            return ds
-        else:
-            if initTdxdata == 0:
-                log.error("file_path:not exists code:%s" % (code))
-            initTdxdata += 1
-            return ds
-    else:
-        if os.path.getsize(file_path) == 0:
-            write_all_kdata_to_file(code, file_path)
-
-    if start is None and dl is None:
-        ofile = open(file_path, 'rb')
-        buf = ofile.readlines()
-        ofile.close()
-        num = len(buf)
-        no = num
-        dt_list = []
-        for i in range(no):
-            abuf = cct.decode_bytes_type(buf[i])
-            a = abuf.split(',')
-            if len(a) < 7:
-                continue
-            tdate = a[0]
-            if len(tdate) != 10:
-                continue
-            topen = float(a[1])
-            thigh = float(a[2])
-            tlow = float(a[3])
-            tclose = float(a[4])
-            tvol = float(a[5])
-            amount = round(float(a[6].replace('\r\n', '')), 1)  # int
-            if int(topen) == 0 or int(amount) == 0:
-                continue
-            dt_list.append(
-                {'code': code, 'date': tdate, 'open': topen, 'high': thigh, 'low': tlow, 'close': tclose,
-                 'amount': amount,
-                 'vol': tvol})
-        df = pd.DataFrame(dt_list, columns=ct.TDX_Day_columns)
-        df = df[~df.date.duplicated()]
-        if start is not None and end is not None:
-            df = df[(df.date >= start) & (df.date <= end)]
-        elif end is not None:
-            df = df[df.date <= end]
-        elif start is not None:
-            df = df[df.date >= start]
-        if len(df) > 0:
-            df = df.set_index('date')
-            df = df.sort_index(ascending=True)
-            if not MultiIndex:
-                if not resample == 'd':
-                    df = get_tdx_stock_period_to_type(df, period_day=resample)
-
-            if resample == 'd' and (cct.get_today_duration(df.index[-1]) > 20 or df.close[-3:].max() / df.open[-3:].min() > 1.9):
-                tdx_err_code = cct.GlobalValues().getkey('tdx_err_code')
-                if tdx_err_code is None:
-                    tdx_err_code = [code]
-                    cct.GlobalValues().setkey('tdx_err_code', tdx_err_code)
-                    log.error("%s dl None outdata!" % (code))
-                    initTdxdata += 1
-                    if write_k_data_status:
-                        write_all_kdata_to_file(code, f_path=file_path)
-                        df = get_tdx_Exp_day_to_df(
-                            code, start=start, end=end, dl=dl, newdays=newdays, type='f', wds=False, MultiIndex=MultiIndex)
-                else:
-                    if not code in tdx_err_code:
-                        tdx_err_code.append(code)
-                        cct.GlobalValues().setkey('tdx_err_code', tdx_err_code)
-                        log.error("%s dl None outdata!" % (code))
-                        initTdxdata += 1
-                        if write_k_data_status:
-                            write_all_kdata_to_file(code, f_path=file_path)
-                            df = get_tdx_Exp_day_to_df(
-                                code, start=start, end=end, dl=dl, newdays=newdays, type='f', wds=False, MultiIndex=MultiIndex)
-    elif dl is not None and int(dl) == 1:
-        fileSize = os.path.getsize(file_path)
-        if newstockdayl != 0:
-            if fileSize < atomStockSize * newstockdayl:
-                return pd.Series([],dtype='float64')
-        data = cct.read_last_lines(file_path, int(dl) + 3)
-        data_l = data.split('\n')
-        dt_list = pd.Series([],dtype='float64')
-        data_l.reverse()
-        log.debug("day 1:%s" % data_l)
-        for line in data_l:
-            a = line.split(',')
-            log.debug("day 1 len(a):%s a:%s" % (len(a), a))
-            if len(a) == 7:
-                tdate = a[0]
-                if len(tdate) != 10:
-                    continue
-                log.debug("day 1 tdate:%s" % tdate)
-                topen = round(float(a[1]), 2)
-                thigh = round(float(a[2]), 2)
-                tlow = round(float(a[3]), 2)
-                tclose = round(float(a[4]), 2)
-                tvol = round(float(a[5]), 2)
-                amount = round(float(a[6].replace('\r\n', '')), 1)  # int
-                if int(topen) == 0 or int(amount) == 0:
-                    continue
-                df = Series(
-                    {'code': code, 'date': tdate, 'open': topen, 'high': thigh, 'low': tlow, 'close': tclose,
-                     'amount': amount,
-                     'vol': tvol})
-                break
-            else:
-                continue
-        return df
-
-    else:
-        if df is None or len(df) == 0:
-            fileSize = os.path.getsize(file_path)
-            if fileSize < atomStockSize * newstockdayl:
-                return pd.Series([],dtype='float64')
-            if start is None:
-                if dl is None:
-                    dl = 60
-            else:
-                if dl is None:
-                    dl = int(cct.get_today_duration(start) * 5 / 7)
-                    log.debug("start:%s dl:%s" % (start, dl))
-            inxdl = int(dl)+2 if int(dl) > 3 else int(dl) + 2
-            data = cct.read_last_lines(file_path, inxdl)
-            dt_list = []
-            data_l = data.split('\n')
-            if newstockdayl == 0:
-                if len(data_l) < 2:
-                    if write_k_data_status and resample == 'd':
-                        write_all_kdata_to_file(code, file_path)
-                        data = cct.read_last_lines(file_path, inxdl)
-                        data_l = data.split('\n')
-            data_l.reverse()
-            for line in data_l:
-                a = line.split(',')
-                if len(a) == 7:
-                    tdate = a[0]
-                    if len(tdate) != 10:
-                        continue
-                    topen = round(float(a[1]), 2)
-                    thigh = round(float(a[2]), 2)
-                    tlow = round(float(a[3]), 2)
-                    tclose = round(float(a[4]), 2)
-                    tvol = round(float(a[5]), 2)
-                    amount = round(float(a[6].replace('\r\n', '')), 1)  # int
-                    if int(topen) == 0 or int(amount) == 0:
-                        continue
-                    dt_list.append(
-                        {'code': code, 'date': tdate, 'open': topen, 'high': thigh, 'low': tlow, 'close': tclose,
-                         'amount': amount,
-                         'vol': tvol})
-                else:
-                    continue
-            df = pd.DataFrame(dt_list, columns=ct.TDX_Day_columns)
-            df = df[~df.date.duplicated()]
-
-        else:
-            df.sort_index(ascending=False, inplace=True)
-
-        if start is not None and end is not None:
-            df = df[(df.date >= start) & (df.date <= end)]
-
-            # print df
-        elif end is not None:
-            df = df[df.date <= end]
-
-        elif start is not None:
-            df = df[df.date >= start]
-
-        if len(df) > 0:
-
-            if 'date' in df.columns:
-                df = df.set_index('date')
-            df = df.sort_index(ascending=True)
-            if not MultiIndex:
-                # if not resample == 'd' and resample in resample_dtype:
-                if not resample == 'd':
-                    df = get_tdx_stock_period_to_type(df, period_day=resample)
-                    if 'date' in df.columns:
-                        df = df.set_index('date')
-
-            dratio = (dl - len(df)) / float(dl)
-
-            if resample == 'd' and dratio < 0.2 and df.close[-3:].max() / df.open[-3:].min() > 1.9:
-
-                tdx_err_code = cct.GlobalValues().getkey('tdx_err_code')
-                if tdx_err_code is None:
-                    tdx_err_code = [code]
-                    cct.GlobalValues().setkey('tdx_err_code', tdx_err_code)
-                    log.info("%s start:%s df:%s dl:%s outdata!" %
-                              (code, start, len(df), dl))
-                    initTdxdata += 1
-                    if write_k_data_status:
-                        write_all_kdata_to_file(code, file_path)
-                        df = get_tdx_Exp_day_to_df(
-                            code, start=start, end=end, dl=dl, newdays=newdays, type='f', wds=False, MultiIndex=MultiIndex)
-                else:
-                    if not code in tdx_err_code:
-                        tdx_err_code.append(code)
-                        cct.GlobalValues().setkey('tdx_err_code', tdx_err_code)
-                        log.error("%s start:%s df:%s dl:%s outdata!" %
-                                  (code, start, len(df), dl))
-                        initTdxdata += 1
-                        if write_k_data_status:
-                            write_all_kdata_to_file(code, file_path)
-                            df = get_tdx_Exp_day_to_df(
-                                code, start=start, end=end, dl=dl, newdays=newdays, type='f', wds=False, MultiIndex=MultiIndex)
-
-
-    if 'macd' not in df.columns:
-        df = get_tdx_macd(df)
-    if 'perc9d' not in df.columns:
-        df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
-
-    df = df.sort_index(ascending=True)
-    per_couts = df.loc[:,df.columns[df.columns.str.contains('per[1-9]{1}d', regex=True, case=False)]][-1:]
-    
-    if len(per_couts.T) > 2:
-        if resample == 'd':
-            df['maxp'] = per_couts.T[1:].values.max()   #per[2-9]
-            fib_c  =(per_couts.T.values > 2).sum()
-        else:
-            df['maxp'] = per_couts.T[:3].values.max() 
-            fib_c  =(per_couts.T[:3].values > 10).sum()
-        df['fib'] =   fib_c
-        df['maxpcout'] =  fib_c
-    else:
-        df['maxp'] = 0
-        df['fib'] =   0
-        df['maxpcout'] =  0
-
-    if len(df) > 10:
-        df['lmin'] = df.low[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
-        df['min5'] = df.low[-6:-1].min()
-        df['cmean'] = round(df.close[-10:-ct.tdx_high_da].mean(), 2)
-        df['hv'] = df.vol[-tdx_max_int:-ct.tdx_high_da].max()
-        df['lv'] = df.vol[-tdx_max_int:-ct.tdx_high_da].min()
-        df = df.fillna(0)
-
-        if not df.index.is_monotonic_increasing:
-            df = df.sort_index(ascending=True)
-
-        if cct.get_work_time_duration():
-            df['max5'] =  df['close'].shift(1).rolling(window=5).max()
-            df['max10'] = df['close'].shift(1).rolling(window=10).max()
-            df['hmax'] = df['close'].shift(1).rolling(window=30).max()
-            df['hmaxvol'] = df.vol[-ct.tdx_max_int_end:-ct.tdx_high_da].max()
-            df['hmax60'] = df['close'].shift(1).rolling(window=60).max()
-            df['high4'] =  df['close'].shift(1).rolling(window=4).max()
-            
-            df['llowvol'] = df.vol[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
-            df['low10'] = df['low'].shift(1).rolling(window=10).min()
-            df['low60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].min()
-            df['low4'] = df['low'].shift(1).rolling(window=4).min()
-            df['lastdu4'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
-
-        else:
-            df['max5'] = df['close'].shift(1).rolling(window=5).max()
-            df['max10'] = df['close'].shift(1).rolling(window=10).max()
-            # df['hmax'] = df.close[-ct.tdx_max_int_end:max_int_end].max()
-            df['hmax'] = df['close'].shift(1).rolling(window=30).max()
-            df['hmax60'] = df['close'].shift(1).rolling(window=60).max()
-            df['high4'] =  df['close'].shift(1).rolling(window=4).max()
-
-            df['llowvol'] = df['vol'].shift(1).rolling(window=30).max()
-            df['low10'] = df['low'].shift(1).rolling(window=10).min()
-            df['low60'] = df.close[-ct.tdx_max_int_end*2:-ct.tdx_max_int_end].min()
-            df['low4'] = df['low'].shift(1).rolling(window=4).min()
-            df['lastdu4'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
-
-    if 'date' in df.columns:
-        df = df.set_index('date')
-    return df
-
-
-    # add cumin[:10]
-
-    # if not MultiIndex :
-    #     if  not isinstance(df, Series) and len(df) > 0:
-
-    #         cumdf = df.low.cummin()[:ct.cumdays].sort_index(ascending=True)
-    #         cumdf_max = df.high.cummax()[:ct.cumdays].sort_index(ascending=True)
-    #         cumdfc_max = df.close.cummax()[:ct.cumdays].sort_index(ascending=True)
-
-    #         # cumdf = df.low.cummin().sort_index(ascending=True)
-    #         # cumdf_max = df.high.cummax().sort_index(ascending=True)
-    #         # cumdfc_max = df.close.cummax().sort_index(ascending=True)
-
-    #         # cum_days = 30 if len(df) > 30 else (len(df))
-    #         # cumdf = df.low.cummin()[:cum_days].sort_index(ascending=True)
-    #         # cumdf_max = df.high.cummax()[:cum_days].sort_index(ascending=True)
-    #         # cumdfc_max = df.close.cummax()[:cum_days].sort_index(ascending=True)
-
-    #         cum_counts = cumdf.value_counts()
-    #         cum_counts_max = cumdf_max.value_counts()
-    #         cum_values = cumdf.values.tolist()
-
-    #         if len(cum_counts) > 1 :
-    #             # if cum_counts.values[0] > cum_counts.values[1] * 2 and (cum_counts.values[1] < 3 or cum_counts.index[0] * 1.25 < cum_counts.index[1]) :
-    #             # if cum_counts.values[0] > cum_counts.values[1] * 2 and ( (cum_values[::-1].index(cum_counts.index[1]) <> 0) or (cum_values[::-1].index(cum_counts.index[0]) < cum_values[::-1].index(cum_counts.index[1]))):
-
-    #             if cum_counts.values[0] > cum_counts.values[1] * 2 and (cum_counts.values[1] < 3 or cum_values.index(cum_counts.index[0]) > cum_values.index(cum_counts.index[1])):
-    #                 pos_price = cum_counts.index[0]
-    #             else:
-    #                 pos_price = cum_counts.index[1]
-
-    #         else:
-    #             # for i in (range(1,len(cum_counts)-1)):
-    #             #     if cum_counts.index[i] in cumdf.values:
-    #             pos_price = cum_counts.index[0]
-
-    #         if (cum_values[::-1].index(pos_price) <> 0):
-    #             cumdf_Lis = cumdf[cumdf.index >= cumdf[cumdf == pos_price ].index[-1]]
-    #         else:
-    #             cumdf_Lis = cumdf[cumdf.index >= cumdf[cumdf == pos_price ].index[0]]
-
-    #         # cumdf_Lis,pos_l = LIS_TDX(cumdf.tolist())
-    #         cumdf_Max_Lis = cumdf_max[cumdf_max.index >= cumdf_max[cumdf_max == cum_counts_max.index[0]].index[-1]]
-    #         # cumdf_Max_Lis,pos_m = LIS_TDX(cumdf_max.tolist())
-
-    #         # log.debug("cumdf:%s %s"%(cumdf,cum_counts))
-    #         # log.debug("cumdfmax:%s %s"%(cumdf_max,cum_counts_max))
-    #         # log.debug("cumdfc:%s %s"%(cumdfc_max,cumdfc_max.value_counts()))
-
-    #         # cum_min, pos = LIS_TDX_Cum(cumdf_Lis.tolist())
-    #         # log.debug("cum_min:%s pos:%s"%(cum_min,pos))
-
-    #         # max_lastd = cumdf_max[cumdf_max == cum_counts_max.index[0]].index[-1]
-    #         # cumdf_max_f = cumdf_max[cumdf_max.index >= max_lastd]
-    #         # cumdf_max_f = cumdf_max_f.sort_index(ascending=False)
-    #         # #print cumdf_max[-1],cum_counts_max.index[0]
-    #         # cum_maxf, posf = LIS_TDX_Cum(cumdf_max_f.tolist())
-
-    #         if len(cumdf_Lis) > 1:
-    #             df['cumins'] = round(cum_counts.index[0], 2)
-    #             #low price and start pos
-    #             df['cumine'] = round(cumdf[-1], 2)
-    #             #e end price and pos
-    #             df['cumaxe'] = round(max(cumdf_max), 2)
-    #             #cumax  high price max
-    #             df['cumaxc'] = round(max(cumdfc_max), 2)
-    #             #cumax close price max
-    #             # df['cumaxs'] = round(max(cumdf_max), 2)
-    #             df['cumin'] = len(cumdf_Lis)
-    #         else:
-    #             df['cumin'] = -len(cumdf_Max_Lis) if len(cum_counts_max) > 1 else (len(cumdf))
-    #         # if len(cum_counts) > 0 and len(pos) > 0 :
-    #         #     df['cumins'] = round(cum_counts.index[0], 2)
-    #         #     #low price and start pos
-    #         #     df['cumine'] = round(cumdf[-1], 2)
-    #         #     #cumine end price and pos
-    #         #     df['cumaxe'] = round(max(cumdf_max), 2)
-    #         #     #cumax  high price max
-    #         #     df['cumaxc'] = round(max(cumdfc_max), 2)
-    #         #     #cumax close price max
-    #         #     # df['cumaxs'] = round(max(cumdf_max), 2)
-    #         #     # if  (round(cum_counts.index[0], 2) == cum_min[0]) and len(pos) > 1 or len(cum_counts) == len(pos) :
-    #         #     import ipdb;ipdb.set_trace()
-
-    #         #     if  (round(cum_counts.index[0], 2) <= cum_min[0]) and len(pos) > 1 or len(cum_counts) == len(pos) :
-    #         #         if len(pos) == 1 and cum_min[0] == cumdf_max[-1]:
-    #         #             if len(cumdf_max_f) == len(posf) and len(posf) > len(pos):
-    #         #                 df['cumin'] = -len(posf)
-    #         #             else:
-    #         #                 df['cumin'] = len(pos)
-    #         #         else:
-    #         #             df['cumin'] = len(pos)
-    #         #         log.debug("cumincounts:%s cum_min:%s pos:%s"%(len(pos),cum_min,pos))
-    #         #     else:
-    #         #         if len(cumdf_max_f) == len(posf) and len(posf) > len(pos):
-    #         #             df['cumin'] = -len(posf)
-    #         #         else:
-    #         #             df['cumin'] = -1
-    #         # else:
-    #         #     if len(cumdf_max_f) == len(posf) and len(posf) > len(pos):
-    #         #         df['cumin'] = -len(posf)
-    #         #     else:
-    #         #         df['cumin'] = -1
-    #     else:
-    #         df['cumin'] = 0
 
 
 
@@ -2240,135 +1642,8 @@ INDEX_LIST = {'sh': 'sh000001', 'sz': 'sz399001', 'hs300': 'sz399300',
               'sz50': 'sh000016', 'zxb': 'sz399005', 'cyb': 'sz399006'}
 
 
-# def get_tdx_append_now_df_api(code, start=None, end=None, type='f'):
 
-#     # start=cct.day8_to_day10(start)
-#     # end=cct.day8_to_day10(end)
-#     # print start,end
-#     df = get_tdx_Exp_day_to_df(code, type, start, end).sort_index(ascending=True)
-#     # print df.index.values[:1],df.index.values[-1:]
-#     today = cct.get_today()
-
-#     if len(df) > 0:
-#         tdx_last_day = df.index[-1]
-#     else:
-#         tdx_last_day = start
-#     duration = cct.get_today_duration(tdx_last_day)
-#     log.debug("duration:%s"%duration)
-#     log.debug("tdx_last_day:%s" % tdx_last_day)
-#     index_status = False
-#     code_t=None
-#     if code == '999999':
-#         code = 'sh'
-#         index_status = True
-#     elif code.startswith('399'):
-#         index_status = True
-#         for k in INDEX_LIST.keys():
-#             if INDEX_LIST[k].find(code) > 0:
-#                 code = k
-#     log.debug("duration:%s" % duration)
-#     if end is not None:
-#         # print end,df.index[-1]
-#         if len(df)==0:
-#             return df
-#         if end <= df.index[-1]:
-#             # print(end, df.index[-1])
-#             # return df
-#             duration = 0
-#         else:
-#             today = end
-
-#     if duration >= 1:
-#         if index_status:
-#             code_t = INDEX_LIST[code][2:]
-#         try:
-#             ds = get_kdate_data(code, start=tdx_last_day, end=today)
-#             # ds = ts.get_h_data('000001', start=tdx_last_day, end=today,index=index_status)
-#             # df.index = pd.to_datetime(df.index)
-#         except (IOError, EOFError, Exception) as e:
-#             print "Error Duration:", e
-#             cct.sleep(2)
-#             ds = ts.get_h_data(code_t, start=tdx_last_day, end=today, index=index_status)
-#             df.index = pd.to_datetime(df.index)
-#         if ds is not None and len(ds) > 1:
-#             if len(df) > 0:
-#                 lends = len(ds)
-#             else:
-#                 lends = len(ds) + 1
-#             ds = ds[:lends - 1]
-#             if index_status:
-#                 if code == 'sh':
-#                     code = '999999'
-#                 else:
-#                     code = code_t
-#                 ds['code'] = code
-#             else:
-#                 ds['code'] = code
-#             # ds['vol'] = 0
-#             ds = ds.loc[:, ['code', 'open', 'high', 'low', 'close', 'volume', 'amount']]
-#             # ds.rename(columns={'volume': 'amount'}, inplace=True)
-#             ds.rename(columns={'volume': 'vol'}, inplace=True)
-#             ds.sort_index(ascending=True, inplace=True)
-#             log.debug("ds:%s" % ds[:1])
-#             df = df.append(ds)
-#             # pd.concat([df,ds],axis=0, join='outer')
-#             # result=pd.concat([df,ds])
-
-#         if cct.get_now_time_int() > 915 and cct.get_now_time_int() < 1510:
-#             log.debug("get_work_time:work")
-#             if end is None:
-#                 # dm = rl.get_sina_Market_json('all').set_index('code')
-#                 if index_status:
-#                     log.debug("code:%s code_t:%s"%(code,code_t))
-#                     dm = sina_data.Sina().get_stock_code_data(code_t,index=index_status)
-#                     dm.code = code
-#                     dm = dm.set_index('code')
-#                 else:
-#                     dm = sina_data.Sina().get_stock_code_data(code,index=index_status).set_index('code')
-#                 log.debug("dm:%s now:%s"%(len(dm),dm))
-#                 if dm is not None and df is not None and not dm.empty  and not df.empty:
-#                     # dm=dm.drop_duplicates()
-#                     # log.debug("not None dm:%s" % dm[-1:])
-#                     dm.rename(columns={'volume': 'amount', 'turnover': 'vol'}, inplace=True)
-#                     c_name=dm.loc[code,['name']].values[0]
-#                     dm_code = (dm.loc[:, ['open', 'high', 'low', 'close', 'amount','vol']])
-#                     log.debug("dm_code:%s" % dm_code)
-#                     dm_code['amount'] = round(float(dm_code['amount']) / 100, 2)
-#                     dm_code['code'] = code
-#                     # dm_code['vol'] = 0
-#                     dm_code['date']=today
-#                     dm_code = dm_code.set_index('date')
-#                     # dm_code.name = today
-#                     # log.debug("dm_code_index:%s"%(dm_code))
-#                     log.debug("df.open:%s dm.open%s"%(df.open[-1],round(dm.open[-1],2)))
-
-#                     if df.open[-1] != round(dm.open[-1],2):
-#                         df = df.append(dm_code)
-#                     df['name']=c_name
-#                     log.debug("c_name:%s df.name:%s"%(c_name,df.name[-1]))
-#                     # log.debug("df[-3:]:%s" % (df[-2:]))
-#                     # df['name'] = dm.loc[code, 'name']
-
-#     if not 'name' in df.columns:
-#         if index_status:
-#             if code_t is None:
-#                 code_t = INDEX_LIST[code][2:]
-#             log.debug("code:%s code_t:%s"%(code,code_t))
-#             dm = sina_data.Sina().get_stock_code_data(code_t,index=index_status)
-#             dm.code = code
-#             dm = dm.set_index('code')
-#         else:
-#             dm = sina_data.Sina().get_stock_code_data(code,index=index_status).set_index('code')
-#         log.debug("dm:%s now:%s"%(len(dm),dm))
-#         if dm is not None and not dm.empty:
-#             c_name=dm.loc[code,['name']].values[0]
-#             df['name']=c_name
-#             log.debug("c_name:%s df.name:%s"%(c_name,df.name[-1:]))
-#         log.debug("df:%s" % df[-3:])
-#         # print df
-#     # return df
-
-def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=None, dl=None, power=True, newdays=None, write_tushare=False, writedm=False):
+def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=None, dl=None, power=True, newdays=None, write_tushare=False, writedm=False,detect_calc_support=False):
 
     start = cct.day8_to_day10(start)
     end = cct.day8_to_day10(end)
@@ -2396,14 +1671,14 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
 
     if not power:
 
-        return get_tdx_macd(df)
+        return get_tdx_macd(df,detect_calc_support=detect_calc_support)
 
     today = cct.get_today()
 
     if len(df) > 0:
         tdx_last_day = df.index[-1]
         if tdx_last_day == today:
-            return get_tdx_macd(df)
+            return get_tdx_macd(df,detect_calc_support=detect_calc_support)
     else:
         if start is not None:
             tdx_last_day = start
@@ -2459,8 +1734,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
 #            else:
             ds['code'] = code
             ds = ds[:lends - 1]
-            # print ds[:1]
-#            ds['volume']=ds.volume.apply(lambda x: x * 100)
+
             if not 'amount' in ds.columns:
                 ds['amount'] = list(map(lambda x, y, z: round(
                     (y + z) / 2 * x, 1), ds.volume, ds.high, ds.low))
@@ -2469,23 +1743,20 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
 
             ds = ds.loc[:, ['code', 'open', 'high',
                             'low', 'close', 'volume', 'amount']]
-            # ds.rename(columns={'volume': 'amount'}, inplace=True)
             ds.rename(columns={'volume': 'vol'}, inplace=True)
             ds.sort_index(ascending=True, inplace=True)
-            # log.debug("ds:%s" % ds[:1])
+
             ds = ds.fillna(0)
             df = pd.concat([df,ds])
             if write_tushare and ((len(ds) == 1 and ds.index.values[0] != cct.get_today()) or len(ds) > 1):
-                #                if index_status:
                 duration_day= get_today_duration(ds.index.values[0],cct.get_today())
-                log.info(f'duration_day: {duration_day}')
-                if duration_day and duration_day < 10:
+                if duration_day and duration_day < 5:
+                    log.error(f'write_tdx_tushare_to_file-duration_day: {duration_day}')
                     sta = write_tdx_tushare_to_file(code, df=df)
                     if sta:
                         if today == ds.index[-1]:
-                            return get_tdx_macd(df)
-#                else:
-#                    sta=write_tdx_tushare_to_file(code,df=df)
+                            return get_tdx_macd(df,detect_calc_support=detect_calc_support)
+
 
     if cct.get_now_time_int() > 830 and cct.get_now_time_int() < 930:
         log.debug("now > 830 and <930 return")
@@ -2497,31 +1768,22 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
             df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
             df = df.fillna(0)
             df = df.sort_index(ascending=False)
-        return get_tdx_macd(df)
-    # else:
-    #     # if dm is None and not write_tushare and cct.get_work_time() and cct.get_now_time_int() < 1505:
-    #     if dm is None and not write_tushare and cct.get_work_time() and cct.get_now_time_int() < 1505:
-    #         return df
-#    print df.index.values,code
+        return get_tdx_macd(df,detect_calc_support=detect_calc_support)
+
     if dm is None and end is None:
         # if dm is None and today != df.index[-1]:
         # log.warn('today != end:%s'%(df.index[-1]))
         if index_status:
             dm = sina_data.Sina().get_stock_code_data(code, index=index_status)
-#            dm.code = code
-#            dm = dm.set_index('code')
+
         else:
             dm = sina_data.Sina().get_stock_code_data(code)
 
-    # if duration == 0:
-    #     writedm = False
-    # else:
-    #     writedm = True
-    # writedm = False
+
     if df is not None and len(df) > 0:
         if df.index.values[-1] == today:
             if dm is not None and not isinstance(dm, Series):
-                #                print dm.loc[code]
+
                 dz = dm.loc[code].to_frame().T
             if index_status:
                 vol_div = 1000
@@ -2535,7 +1797,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
                 df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
                 df = df.fillna(0)
                 df = df.sort_index(ascending=False)
-                return get_tdx_macd(df)
+                return get_tdx_macd(df,detect_calc_support=detect_calc_support)
             else:
                 writedm = True
 
@@ -2544,7 +1806,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
     if dm is not None and df is not None and not dm.empty and len(df) > 0:
         dm.rename(columns={'volume': 'vol',
                            'turnover': 'amount'}, inplace=True)
-        # dm.rename(columns={'volume': 'amount', 'turnover': 'vol'}, inplace=True)
+
         if code not in dm.index:
             if index_status:
                 if code == '999999':
@@ -2559,21 +1821,11 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
             c_name = dm.loc[code, ['name']].values[0]
             dm_code = (dm.loc[code, ['open', 'high', 'low',
                                      'close', 'amount', 'vol']]).to_frame().T
-#        dm_code = (dm.loc[:, ['open', 'high', 'low', 'close', 'amount', 'vol']])
         log.debug("dm_code:%s" % dm_code)
-        # dm_code['amount'] = round(float(dm_code['amount']), 2)
-#        if index_status:
-#            if code == 'sh':
-#                code_ts = '999999'
-#            else:
-#                code_ts = code_t
-#            dm_code['code'] = code_ts
-#        else:
-#            dm_code['code'] = code
+
         dm_code['date'] = today
         dm_code = dm_code.set_index('date')
-        # log.debug("df.open:%s dm.open%s" % (df.open[-1], round(dm.open[-1], 2)))
-        # print df.close[-1],round(dm.close[-1],2)
+
         if end is None and ((df is not None and not dm.empty) and (round(df.open[-1], 2) != round(dm.open[-1], 2)) and (round(df.close[-1], 2) != round(dm.close[-1], 2))):
             if dm.open[0] > 0 and len(df) > 0:
                 if dm_code.index == df.index[-1]:
@@ -2581,49 +1833,27 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
                               (dm_code.index.values, df.index[-1]))
                     df = df.drop(dm_code.index)
                 df = pd.concat([df,dm_code])
-                # df = df.astype(float)
-            # df=pd.concat([df,dm],axis=0, ignore_index=True).set
+
         df['name'] = c_name
         log.debug("c_name:%s df.name:%s" % (c_name, df.name[-1]))
 
-        # if not 'name' in df.columns:
-        #     if index_status:
-        #         if code_t is None:
-        #             code_t = INDEX_LIST[code][2:]
-        #         log.debug("code:%s code_t:%s"%(code,code_t))
-        #         dm = sina_data.Sina().get_stock_code_data(code_t,index=index_status)
-        #         dm.code = code
-        #         dm = dm.set_index('code')
-        #     else:
-        #         dm = sina_data.Sina().get_stock_code_data(code,index=index_status).set_index('code')
-        #     log.debug("dm:%s now:%s"%(len(dm),dm))
-        #     if dm is not None and not dm.empty:
-        #         c_name=dm.loc[code,['name']].values[0]
-        #         df['name']=c_name
-        #         log.debug("c_name:%s df.name:%s"%(c_name,df.name[-1:]))
-        #     log.debug("df:%s" % df[-3:])
-        # print df
+
     if len(df) > 0:
         df = df.sort_index(ascending=True)
-        # df['ma5d'] = pd.Series.rolling(df.close, 5).mean()
-        # df['ma10d'] = pd.Series.rolling(df.close, 10).mean()
-        # df['ma20d'] = pd.Series.rolling(df.close, 26).mean()
-        # df['ma60d'] = pd.Series.rolling(df.close, 60).mean()
+
         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
         df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
         df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
 
-        # df[['lower', 'ene', 'upper','bandwidth','bollpect']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
-        # df = df.dropna()
+
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
     if end is None and writedm and len(df) > 0:
         if cct.get_now_time_int() < 900 or cct.get_now_time_int() > 1505:
             #            if index_status:
             sta = write_tdx_sina_data_to_file(code, df=df)
-#            else:
-#                sta=write_tdx_sina_data_to_file(code,df=df)
+
     return df
 
 
@@ -2731,8 +1961,8 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
             # if (len(ds) == 1 and ds.index.values[0] != cct.get_today()) or len(ds) > 1:
             if (len(ds) == 1 and ((not cct.get_work_time()) or (ds.index.values[0] != cct.get_today())) ) or len(ds) > 1:
                 duration_day= get_today_duration(ds.index.values[0],cct.get_today())
-                log.info(f'duration_day: {duration_day}')
-                if duration_day and duration_day < 10:
+                if duration_day and duration_day < 5:
+                    log.error(f'write_tdx_tushare_to_file-duration_day: {duration_day}')
                     sta = write_tdx_tushare_to_file(code, df=df)
                     if sta:
                         log.info("write %s OK." % (code))
@@ -2790,7 +2020,6 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
     if not writedm and cct.get_now_time_int() > 1530 or cct.get_now_time_int() < 925:
         return df
 
-#    if dm is not None and df is not None and not dm.empty and len(df) >0:
     if dm is not None and not dm.empty:
         if len(dm) > 0:
             if code in dm.index:
@@ -2920,15 +2149,7 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f',rewrite=False)
         log.warn("not path:%s" % (file_path))
         return False
 
-#    else:
-#        print "no"
 
-#    print file_path
-    # fo = open(file_path, "r+")
-#    os.path.getsize(file_path)
-#    print fo.tell()
-#    fo.seek(-limitpo,2)
-#    print fo.readlines()
     if fsize != 0:
         fo.seek(-limitpo, 2)
         plist = []
@@ -3435,9 +2656,7 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
     sh_index = '000002'
     dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
 
-    # log.error("Write_market_all_day_mp:%s"%(dd))
-    # #fix sleep not update sina.all
-    # df = sina_data.Sina().sina.all
+
     duration_code=check_tdx_Exp_day_duration(market)
 
     # print dt,dd.date
@@ -3453,28 +2672,12 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
             print("Write duration_code:%s " %(len(duration_code)))
             log.info("duration to write :%s"%(len(duration_code)))
 
-        # fpath =  get_code_file_path(sh_index)
-        # mtime = os.path.getmtime(fpath)
-        # dt = cct.get_time_to_date(mtime,'%Y-%m-%d')
-        # if dt == dd.date:
-        #     hs = cct.get_time_to_date(mtime,'%H%M')
-        #     # print hs
-        #     if hs > 1500:
-        #         print "Data is out:%s"%(dd.close)
-        #         return False
 
 
-    # duration = 300
-    # if duration <= 300 :
-    #     h5_fname = 'tdx_all_df' + '_' + str(300)
-    #     h5_table = 'all' + '_' + str(300)
-    # else:
-    #     h5_fname = 'tdx_all_df' + '_' + str(900)
-    #     h5_table = 'all' + '_' + str(900)
-    # df = tdd.search_Tdx_multi_data_duration('tdx_all_df_300', 'all_300', df=None,code_l=code_list, start='20150501', end=None, freq=None, col=None, index='date')
-    # df = tdd.search_Tdx_multi_data_duration(h5_fname, h5_table, df=None,code_l=code_list, start=None, end=None, freq=None, col=None, index='date',tail=1)
+
+
     
-    # if duration == 0:
+
     if len(duration_code) == 0:
         dfs = search_Tdx_multi_data_duration(code_l=[sh_index],tail=1)
         mdate = dfs.reset_index().date.values
@@ -3483,64 +2686,47 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
             print("Multi_data:%s %s all writed" % (sh_index,mdate))
             return True
 
-    # import sys;sys.exit(0)
-    # start=dd.date
-    # index_ts = get_kdate_data('sh',start=start)
+
     if market == 'all':
         mlist = ['all']
-        # mlist = ['sh', 'sz', 'cyb']
-        # sina_data.Sina().all
+
     else:
         mlist = [market]
-    # if len(index_ts) > 1:
-    #     print "start:%s"%(start),
+
     results = []
 
     if len(duration_code) > 0:
         for mk in mlist:
             time_t = time.time()
             df = sina_data.Sina().market(mk)
-            # log.error("Write_market_all_day_mp:%s"%(df.loc['000002',['open','close','dt','ticktime']] if '000002' in df.index.values else 'No 0002'))
-            # if dd.date == df.loc['000002','dt']:
-            #     log.error("Pls check sina_data.Sina().market data")
 
-            # df = getSinaAlldf(market=mk,trend=False)
-            # df = rl.get_sina_Market_json(mk)
-            # print df.loc['600581']
+
+
 
             if df is None or len(df) < 10:
                 print("dsina_data f is None")
                 break
             else:
-                # dt = df.dt.value_counts().index[0]
-                # df = df[((df.b1 > 0) | (df.a1 > 0)) & ( df.dt >= dt)]
+
                 df = df[((df.b1 > 0) | (df.a1 > 0))]
 
-            # code_list = df.index.tolist()
+
             code_list = duration_code
             dm = get_sina_data_df(code_list)
             dm = dm[((dm.open > 0) | (dm.a1 > 0))]
             print(("market:%s A:%s open_dm:%s" % (mk, len(df),len(dm))), end=' ')
 
             log.info('code_list:%s df:%s' % (len(code_list), len(df)))
-        #        write_tdx_tushare_to_file(sh_index,index_ts)
-    #        get_tdx_append_now_df_api2(code,dl=dl,dm=dz,newdays=5)
-            # get_tdx_append_now_df_api_tofile('603113', dm=None, newdays=1,
-            # start=None, end=None, type='f', df=None, dl=2, power=True)
+
 
             if len(dm) > 0:
                 results = cct.to_mp_run_async(
-                    get_tdx_append_now_df_api_tofile, code_list, dm=dm, newdays=0)
+                    get_tdx_append_now_df_api_tofile, code_list, dm=dm, newdays=0,detect_calc_support=detect_calc_support)
 
             else:
                 print(("dm is not open sell:%s"%(code_list if len(code_list) <10 else len(code_list))))
 
-            # #debug
-            # for code in code_list:
-            #     print("code:%s "%(code),)
-            #     res=get_tdx_append_now_df_api_tofile(code,dm=dm, newdays=0)
-            #     print("status:%s\t"%(len(res)),)
-            #     results.append(res)
+
             if recheck:
                 duration_code=check_tdx_Exp_day_duration(market)
                 if len(duration_code) > 0 and recheck: 
@@ -3550,7 +2736,7 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
                         print(f'recheck duration_code write:{len(duration_code)}: {duration_code[:5]}')
 
                     results = cct.to_mp_run_async(
-                        get_tdx_append_now_df_api_tofile, duration_code, dm=dm, newdays=0)
+                        get_tdx_append_now_df_api_tofile, duration_code, dm=dm, newdays=0,detect_calc_support=detect_calc_support)
                     print(("market:%s A:%s open_dm:%s" % (mk, len(df),len(dm))), end=' ')
 
         if recheck:
@@ -3558,11 +2744,10 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
         print("AllWrite:%s t:%s"%(len(duration_code),round(time.time() - time_t, 2)))
 
 
-#    print "market:%s is succ result:%s"%(market,results),
-#    print "t:", time.time() - time_t,
+
 
     if market == 'all':
-        #        write_tdx_tushare_to_file(sh_index,index_ts)
+
         dm_index = sina_data.Sina().get_stock_list_data(tdx_index_code_list,index=True)
         for inx in tdx_index_code_list:
             get_tdx_append_now_df_api_tofile(inx,dm=dm_index)
@@ -3577,14 +2762,13 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
     return results
 
 
-def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None, dl=None):
+def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None, dl=None,detect_calc_support=False):
     if code == '999999' or code.startswith('399'):
-        # if dl is not None and start is None:
-            # start=get_duration_Index_date(code, dt=dl)
+
         if start is None and dl is not None:
             start = cct.last_tddate(days=dl)
         df = get_tdx_append_now_df_api(
-            code, start=start, end=end, type=type, df=df, dm=dm)
+            code, start=start, end=end, type=type, df=df, dm=dm,detect_calc_support=detect_calc_support)
         return df
     start = cct.day8_to_day10(start)
     end = cct.day8_to_day10(end)
@@ -3601,27 +2785,26 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
         df = df.sort_index(ascending=True)
     today = cct.get_today()
     if dm is None and (today != df.index[-1] or df.vol[-1] < df.vol[-2] * 0.8)and (cct.get_now_time_int() < 830 or cct.get_now_time_int() > 930):
-        # log.warn('today != end:%s'%(df.index[-1]))
+
         dm = sina_data.Sina().get_stock_code_data(code)
 
     if dm is not None and df is not None and not dm.empty:
-        # dm.rename(columns={'volume': 'amount', 'turnover': 'vol'}, inplace=True)
+
         dm.rename(columns={'volume': 'vol',
                            'turnover': 'amount'}, inplace=True)
         c_name = dm.loc[code, ['name']].values[0]
         dm_code = (
             dm.loc[:, ['open', 'high', 'low', 'close', 'amount', 'vol']])
         log.debug("dm_code:%s" % dm_code)
-        # dm_code['amount'] = round(float(dm_code['amount']) / 100, 2)
+
         dm_code['code'] = code
-        # dm_code['vol'] = 0
+
         dm_code['date'] = today
         dm_code = dm_code.set_index('date')
         log.debug("df.code:%s" % (code))
         log.debug("df.open:%s dm.open%s" %
                   (df.open[-1], round(dm.open[-1], 2)))
-        # print df.close[-1],round(dm.close[-1],2)
-        # if df.close[-1] != round(dm.close[-1], 2) and end is None:
+
 
         if end is None and ((df is not None and not dm.empty) and (round(df.open[-1], 2) != round(dm.open[-1], 2)) and (round(df.close[-1], 2) and round(dm.close[-1], 2))):
             if dm.open[0] > 0:
@@ -3631,9 +2814,7 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
                     df = df.drop(dm_code.index)
                 df = pd.concat([df,dm_code])
 
-            # print dm
-            # df=pd.concat([df,dm],axis=0, ignore_index=True).set
-            # print df
+
         df['name'] = c_name
         log.debug("c_name:%s df.name:%s" % (c_name, df.name[-1]))
     if len(df) > 0:
@@ -3649,7 +2830,7 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
 
-    df = get_tdx_macd(df)
+    df = get_tdx_macd(df,detect_calc_support=detect_calc_support)
     return df
 
 
@@ -4053,7 +3234,7 @@ def get_tdx_day_to_df(code):
     return df
 
 
-def get_duration_Index_date(code='999999', dt=None, ptype='low', dl=None, power=False):
+def get_duration_Index_date(code='999999', dt=None, ptype='low', dl=None, power=False,detect_calc_support=False):
     """[summary]
 
     [description]
@@ -4073,7 +3254,7 @@ def get_duration_Index_date(code='999999', dt=None, ptype='low', dl=None, power=
             dl = int(dt) + changedays
             # df = get_tdx_day_to_df(code).sort_index(ascending=False)
             df = get_tdx_append_now_df_api(
-                code, power=power).sort_index(ascending=False)
+                code, power=power,detect_calc_support=detect_calc_support).sort_index(ascending=False)
             dt = get_duration_price_date(code, dt=dt, ptype=ptype, df=df)
             dt = df[df.index <= dt].index.values[changedays]
             log.info("code:%s LastDF:%s,%s" % (code,dt, dl))
@@ -4082,7 +3263,7 @@ def get_duration_Index_date(code='999999', dt=None, ptype='low', dl=None, power=
                 dt = cct.day8_to_day10(dt)
             # df = get_tdx_day_to_df(code).sort_index(ascending=False)
             df = get_tdx_append_now_df_api(
-                code, start=dt, power=power).sort_index(ascending=False)
+                code, start=dt, power=power,detect_calc_support=detect_calc_support).sort_index(ascending=False)
             # dl = len(get_tdx_Exp_day_to_df(code, start=dt)) + changedays
             dl = len(df) + changedays
 
@@ -4092,7 +3273,7 @@ def get_duration_Index_date(code='999999', dt=None, ptype='low', dl=None, power=
     if dl is not None:
         # dl = int(dl)
         df = get_tdx_append_now_df_api(
-            code, start=dt, dl=dl, power=power).sort_index(ascending=False)
+            code, start=dt, dl=dl, power=power,detect_calc_support=detect_calc_support).sort_index(ascending=False)
         # print df
         # dl = len(get_tdx_Exp_day_to_df(code, start=dt)) + changedays
         # print df[:dl].index,dl
@@ -4174,7 +3355,7 @@ def get_duration_date(code, ptype='low', dt=None, df=None, dl=None):
 
 
 def get_duration_price_date(code=None, ptype='low', dt=None, df=None, dl=None, end=None, vtype=None, filter=True,
-                            power=False,resample='d'):
+                            power=False,resample='d',detect_calc_support=False):
     # if code == "600760":
         # log.setLevel(LoggerFactory.DEBUG)
     # else:u
@@ -4187,10 +3368,10 @@ def get_duration_price_date(code=None, ptype='low', dt=None, df=None, dl=None, e
         # df = get_tdx_day_to_df(code).sort_index(ascending=False)
         if power:
             df = get_tdx_append_now_df_api(
-                code, start=dt, end=end, dl=dl).sort_index(ascending=False)
+                code, start=dt, end=end, dl=dl,detect_calc_support=detect_calc_support).sort_index(ascending=False)
         else:
             df = get_tdx_Exp_day_to_df(
-                code, start=dt, end=end, dl=dl).sort_index(ascending=False)
+                code, start=dt, end=end, dl=dl,detect_calc_support=detect_calc_support).sort_index(ascending=False)
     else:
         df = df.sort_index(ascending=False)
         # log.debug("code:%s" % (df[:1].index))
@@ -4288,44 +3469,27 @@ def get_duration_price_date(code=None, ptype='low', dt=None, df=None, dl=None, e
 
 def compute_power_tdx_df(tdx_df,dd):
     if len(tdx_df) >= 5:
-        # idxdf = tdx_df.red[tdx_df.red <0]
-        # if len(idxdf) >1:
-        #     idx = tdx_df.red[tdx_df.red <0].argmax()
-        # else:
-        #     if len(tdx_df.red[tdx_df.red >0]) == 0:
-        #         return dd
-        #     else:
-        #         idx = tdx_df.red[tdx_df.red >0].index[0]
-        # trend = tdx_df[tdx_df.index >= idx]
-        # fibl = len(trend)
+
         # idxh = tdx_df.high.argmax()
         idxl = tdx_df.low.idxmin()
         idxh = tdx_df.low.idxmax()
         idxl_date=tdx_df.index.tolist().index(idxl)
         idxh_date=tdx_df.index.tolist().index(idxh)
 
-        # tdx_df.query('low == low.min() and high == high.min()')  # highest lowest
-        # tdx_df[idxh_date:].query('high > high.shift(1)*0.998')   #low highest 
-        # fibh = len(tdx_df[tdx_df.index >= idxh])
-        # fibh = len(tdx_df[idx_date:].query('percent > 0'))
+
 
         fibh = len(tdx_df[idxl_date:].query('high > high.shift(1)*0.998 or close > close.shift(1)'))
-        # vratio = -1
-        # if fibl > 1:
-        #     vratio = round(((trend.close[-1] - trend.close[0])/trend.close[0]*100)/fibl,1)
 
 
-        # dd['op'] = int(len(LIS_TDX(tdx_df.close)[1])/float(len(tdx_df.close))*10)
-        # dd['fib'] = fibl
+
+
         dd['fibl'] = fibh
         # dd['ldate'] = idx
         # dd['boll'] = dd.upperL[0]
         dd['boll'] = dd.upperT[0]
         dd['ra'] = dd.upperL[0]
         # dd['ra'] = dd.upperT[0]
-        # dd['kdj'] = 1
-        # dd['macd'] = 1
-        # dd['rsi'] = 1
+
         dd['ma'] = 1
         dd['oph'] = 1
         dd['rah'] = 1
@@ -4336,10 +3500,7 @@ def compute_power_tdx_df(tdx_df,dd):
         dd['fibl'] = -1
         dd['ldate'] = -1
         dd['boll'] = -1
-        # dd['kdj'] = -1
-        # dd['macd'] = -1
-        # dd['rsi'] = -1
-        # dd['df2'] = -1
+
         dd['ma'] = -1
         dd['oph'] = -1
         dd['rah'] = -1
@@ -4361,9 +3522,7 @@ def compute_condition_up_sample(df):
     condition_up = df['low'] > df['high'].shift()        #向上跳空缺口
     condition_down = df['high'] < df['low'].shift()      #向下跳空缺口
 
-    # df['hop'] = np.nan
-    # df['hop_up'] = 101
-    # df['hop_down'] = 101
+
 
     df.loc[condition_up,'hop_up'] = -1
     df.loc[condition_down,'hop_down'] =1
@@ -4395,7 +3554,7 @@ def compute_condition_up_sample(df):
             post_hop_price = df['high'].at[i]  #跳空后的价格
             fill_data = ''
             #看之后有没有回补向下的跳空
-            for j in rang(i,len(df)):
+            for j in range(i,len(df)):
                 if df['high'].at[j] >= ex_hop_price:
                     fill_data = df['date'].at[j]
                     break
@@ -4535,10 +3694,9 @@ def compute_perd_df(dd,lastdays=3,resample ='d'):
         last_TopR_days = ct.compute_lastdays
 
     np.seterr(divide='ignore',invalid='ignore')  #RuntimeWarning: invalid value encountered in greater
-    # df = dd[-(lastdays+1):].copy()
-    # dd = track_bullish_signals_vectorized_full(dd)
-    # dd = track_bullish_signals_simple(dd)
-    # dd = track_bullish_signals_optimized(dd)
+    
+    # Reverted slicing optimization to ensure full history is returned as expected by caller
+    # Using vectorized track_bullish_signals_startpos is fast enough (~0.01s vs 0.7s) even on full data
     dd = track_bullish_signals_startpos(dd)
 
     df = dd.copy()
@@ -5054,7 +4212,6 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         # df['lower'] = df['lower'].apply(lambda x: round(x,1))   
         # df['ene'] =  df['ene'].apply(lambda x: round(x,1))  
         # df = df.fillna(0)
-        # df = get_tdx_macd(df)
 
         dd = compute_ma_cross(df,resample=resample)
         dd = compute_upper_cross(df,resample=resample)
@@ -5255,7 +4412,7 @@ def get_tdx_exp_low_or_high_price(code, dt=None, ptype='close', dl=None, end=Non
         return dd
 
 
-def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=None, power=False, lastp=False, newdays=None, resample='d', lvoldays=ct.lastdays * 3):
+def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=None, power=False, lastp=False, newdays=None, resample='d', lvoldays=ct.lastdays * 3,detect_calc_support=False):
     '''
     :param code:999999
     :param dayl:Duration Days
@@ -5268,7 +4425,7 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
 
     if dt is not None or dl is not None:
         # log.debug("dt:%s dl:%s"%(dt,dl))
-        df = get_tdx_Exp_day_to_df(code, start=dt, dl=dl, end=end, newdays=newdays, resample=resample).sort_index(ascending=False)
+        df = get_tdx_Exp_day_to_df(code, start=dt, dl=dl, end=end, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support).sort_index(ascending=False)
         if df is not None and len(df) > 5:
             # if power:
             #     from JSONData import powerCompute as pct
@@ -5576,7 +4733,7 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
 # usage Ê¹ÓÃËµÃ÷
 #
 #############################################################
-def get_tdx_all_day_LastDF(codeList, dt=None, ptype='close'):
+def get_tdx_all_day_LastDF(codeList, dt=None, ptype='close',detect_calc_support=True):
     '''
     outdate
     '''
@@ -5603,7 +4760,7 @@ def get_tdx_all_day_LastDF(codeList, dt=None, ptype='close'):
     else:
         dl = None
     results = cct.to_mp_run_async(
-        get_tdx_Exp_day_to_df, codeList, start=None, end=None, dl=1, newdays=0)
+        get_tdx_Exp_day_to_df, codeList, start=None, end=None, dl=1, newdays=0,detect_calc_support=detect_calc_support)
     # get_tdx_day_to_df_last, codeList, 1, type, dt, ptype, dl)
     # results=[]
     # for code in codeList:
@@ -5785,7 +4942,7 @@ def get_index_percd(codeList=tdx_index_code_list, dt=60, end=None, ptype='low', 
     return tdxdata
 
 
-def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=None, ptype='low', filter='y', power=True, lastp=False, newdays=None, checknew=True, resample='d',showtable=False):
+def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=None, ptype='low', filter='y', power=True, lastp=False, newdays=None, checknew=True, resample='d',showtable=False,detect_calc_support=False):
     time_s = time.time()
     codelist = top_all.index.tolist()
     # append INDEX tdxdata
@@ -5838,7 +4995,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
             # import ipdb;ipdb.set_trace()
 
             tdxdata = get_tdx_exp_all_LastDF_DL(
-                codelist, dt=dl, end=end, ptype=ptype, filter=filter, power=power, lastp=lastp, newdays=newdays, resample=resample)
+                codelist, dt=dl, end=end, ptype=ptype, filter=filter, power=power, lastp=lastp, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support)
             # if checknew:
             #     tdx_list = tdxdata.index.tolist()
             #     diff_code = list(set(codelist) - set(tdx_list))
@@ -5895,7 +5052,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
             # log.debug("diff_code:%s" % (diff_code[-2]))
             print(f"diff_code: {len(diff_code)} resample:{resample} ",end='')
             tdx_diff = get_tdx_exp_all_LastDF_DL(
-                diff_code, dt=dl, end=end, ptype=ptype, filter=filter, power=power, lastp=lastp, newdays=newdays, resample=resample)
+                diff_code, dt=dl, end=end, ptype=ptype, filter=filter, power=power, lastp=lastp, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support)
             if tdx_diff is not None and len(tdx_diff) > 0:
                 tdx_diff.rename(columns={'open': 'lopen'}, inplace=True)
                 tdx_diff.rename(columns={'high': 'lhigh'}, inplace=True)
@@ -6095,7 +5252,7 @@ def get_tdx_exp_all_LastDF(codeList, dt=None, end=None, ptype='low', filter='n')
     return df
 
 
-def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='n', power=False, lastp=False, newdays=None, dl=None, resample='d', showRunTime=True):
+def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='n', power=False, lastp=False, newdays=None, dl=None, resample='d', showRunTime=True,detect_calc_support=False):
     """
 
     Function: get_tdx_exp_all_LastDF_DL
@@ -6162,14 +5319,14 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
                 dt = None
             log.info("LastDF:%s,%s" % (dt, dl))
         results = cct.to_mp_run_async(
-            get_tdx_exp_low_or_high_power, codeList, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample)
+            get_tdx_exp_low_or_high_power, codeList, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support)
 
         # results = get_tdx_exp_low_or_high_price(codeList[0], dt,ptype,dl)
 
         # results=[]
         # for code in codeList:
         #    print(code,)
-        #    results.append(get_tdx_exp_low_or_high_power(code, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample))
+        #    results.append(get_tdx_exp_low_or_high_power(code, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support))
            # results.append(get_tdx_exp_low_or_high_price(code, dt, ptype, dl,end,power,lastp,newdays))
         # results = get_tdx_exp_low_or_high_price(codeList[0], dt,ptype,dl)))
 
@@ -6209,7 +5366,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             log.debug("Codelist:%s LastDF:%s,%s" % (len(codeList),dt, dl))
             
             results = cct.to_mp_run_async(
-                get_tdx_exp_low_or_high_power, codeList, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample)
+                get_tdx_exp_low_or_high_power, codeList, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support)
                 
                 # get_tdx_exp_low_or_high_power, codeList, dt, ptype, dl, end, power, lastp, newdays, resample)
             
@@ -6231,7 +5388,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             ts = time.time()
             for code in codeList:
                 log.debug(f'codeList:{len(codeList)}: idx:{codeList.index(code)} code:{code} :dt')
-                results.append(get_tdx_exp_low_or_high_power(code, dt, ptype, dl, end, power, lastp, newdays, resample))
+                results.append(get_tdx_exp_low_or_high_power(code, dt, ptype, dl, end, power, lastp, newdays, resample,ct.lastdays * 3,detect_calc_support))
             # print("tdxdataT:%s"%(round(time.time()-ts,2)),)
 #        print round(time.time()-ts,2),
         # print dt,ptype,dl,end
@@ -6246,7 +5403,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
         results=[]
         for code in codeList:
            # print(code)
-           results.append(get_tdx_Exp_day_to_df, codeList, type='f', start=None, end=None, dl=None, newdays=1)
+           results.append(get_tdx_Exp_day_to_df, codeList, type='f', start=None, end=None, dl=None, newdays=1,detect_calc_support=detect_calc_support)
     # print results
 #    df = pd.DataFrame(results, columns=ct.TDX_Day_columns)
     df = pd.DataFrame(results)
@@ -6847,7 +6004,7 @@ if __name__ == '__main__':
     df_cols_only = df.loc[:, cols]
     print(df_cols_only[-1:].T)
     df_checked = check_conditions_auto(df_cols_only[-1:])
-    print(f'print(df.MainU): {df.MainU[-1:]}')
+    print(f'df_checked print(df.MainU): {df.MainU[-1:]}')
 
     import ipdb;ipdb.set_trace()
 
