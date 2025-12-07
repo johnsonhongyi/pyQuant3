@@ -360,25 +360,23 @@ class GlobalConfig:
             cfg_file = Path(__file__).parent / "global.ini"
 
         self.cfg_file = Path(cfg_file)
-
         self.cfg = configparser.ConfigParser(
             interpolation=None,
             inline_comment_prefixes=("#", ";")
         )
-
         self.cfg.read(self.cfg_file, encoding="utf-8")
 
-        # ---- 读取原有参数 ----
-        self.init_value = self.cfg.getint("general", "initGlobalValue", fallback=0)
-        self.marketInit = self.cfg.get("general", "marketInit", fallback="all")
-        self.marketblk = self.cfg.get("general", "marketblk", fallback="063.blk")
-        self.scale_offset = self.cfg.get("general", "scale_offset", fallback="-0.45")
-        self.resampleInit = self.cfg.get("general", "resampleInit", fallback="d")
-        self.write_all_day_date = self.cfg.get("general", "write_all_day_date", fallback="20251208")
-        self.detect_calc_support =  self.cfg.getboolean("general", "detect_calc_support", fallback=False)
-        self.duration_sleep_time = self.cfg.getint("general", "duration_sleep_time", fallback=60)
+        # ---- 读取原有参数（带 fallback 回写功能） ----
+        self.init_value = self.get_with_writeback("general", "initGlobalValue", fallback=0, value_type="int")
+        self.marketInit = self.get_with_writeback("general", "marketInit", fallback="all")
+        self.marketblk = self.get_with_writeback("general", "marketblk", fallback="063.blk")
+        self.scale_offset = self.get_with_writeback("general", "scale_offset", fallback="-0.45")
+        self.resampleInit = self.get_with_writeback("general", "resampleInit", fallback="d")
+        self.write_all_day_date = self.get_with_writeback("general", "write_all_day_date", fallback="20251208")
+        self.detect_calc_support = self.get_with_writeback("general", "detect_calc_support", fallback=False, value_type="bool")
+        self.duration_sleep_time = self.get_with_writeback("general", "duration_sleep_time", fallback=60, value_type="int")
 
-        saved_wh_str = self.cfg.get("general", "saved_width_height", fallback="260x180")
+        saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="260x180")
         try:
             if "x" in saved_wh_str:
                 self.saved_width, self.saved_height = map(int, saved_wh_str.split("x"))
@@ -390,7 +388,7 @@ class GlobalConfig:
             self.saved_width, self.saved_height = 260, 180
 
         self.clean_terminal = self._split(
-            self.cfg.get("terminal", "clean_terminal", fallback="")
+            self.get_with_writeback("terminal", "clean_terminal", fallback="")
         )
 
         self.expressions = dict(self.cfg.items("expressions")) if self.cfg.has_section("expressions") else {}
@@ -400,8 +398,36 @@ class GlobalConfig:
         if updates:
             for key, value in updates.items():
                 self.set_value("general", key, value)
-
             self.save()
+
+    # ===================== 新增 get_with_writeback =====================
+    def get_with_writeback(self, section, option, fallback, value_type="str"):
+        """
+        读取配置，如果不存在则写入 fallback 到 ini
+        value_type: "str", "int", "float", "bool"
+        """
+        if not self.cfg.has_option(section, option):
+            # 写回默认值
+            if value_type == "bool":
+                val_str = "True" if fallback else "False"
+            else:
+                val_str = str(fallback)
+            if not self.cfg.has_section(section):
+                self.cfg.add_section(section)
+            self.cfg.set(section, option, val_str)
+            self.save()
+            return fallback
+        else:
+            # 已存在，按类型返回
+            if value_type == "int":
+                return self.cfg.getint(section, option)
+            elif value_type == "float":
+                return self.cfg.getfloat(section, option)
+            elif value_type == "bool":
+                return self.cfg.getboolean(section, option)
+            else:
+                return self.cfg.get(section, option)
+    # =====================================================================
 
     def _split(self, s):
         return [x.strip() for x in s.split(",") if x.strip()]
@@ -413,14 +439,11 @@ class GlobalConfig:
         return self.paths.get(key)
 
     # ===================== ✅ 写配置 API =====================
-
     def set_value(self, section, key, value):
         """设置配置项(内存中)"""
         if not self.cfg.has_section(section):
             self.cfg.add_section(section)
-
         self.cfg.set(section, key, str(value))
-
         # 如果是 general 区域，顺便更新实例字段
         if section == "general":
             setattr(self, key, value)
@@ -440,14 +463,8 @@ class GlobalConfig:
     def __repr__(self):
         return f"<GlobalConfig {self.cfg_file}>"
 
-    # cct.GlobalConfig(conf_ini, write_all_day_date=20251205)
-    # cfg.set_and_save("general", "write_all_day_date", "20251205")
-    # GlobalConfig(
-    #     conf_ini,
-    #     write_all_day_date=20251205,
-    #     initGlobalValue=99,
-    #     duration_sleep_time=2
-    # )
+
+
 conf_ini= get_conf_path('global.ini')
 if not conf_ini:
     log.critical("global.ini 加载失败，程序无法继续运行")
