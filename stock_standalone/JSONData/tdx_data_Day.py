@@ -1229,56 +1229,91 @@ def calc_support_resistance_vec(df):
 
 def check_conditions_auto(df, days=6):
     """
-    自动批量检查 DataFrame 条件：
+    自动批量检查 DataFrame 条件 (Vectorized)：
     1. 对每行，检查每一天的条件：
        lasto <= lastl*1.002 and lastp > lasto and per > 1
     2. 最终条件：至少一天满足 + lastp1d > lastp2d
     返回 DataFrame 新增列：
-      - MainU (布尔)
+      - MainU (字符串)
       - 满足天数 (逗号分隔字符串)
     """
-    def check_row(row):
-        satisfied_days = []
-        for i in range(1, days + 1):
-            # 构造列名
-            lasto_col = f'lasto{i}d'
-            lasto2_col = f'lasto{i+1}d'
-            lastl_col = f'lastl{i}d'
-            lastp_col = f'lastp{i}d'
-            lasth_col = f'lasth{i}d'
-            lastp2d_col = f'lastp{i+1}d'
-            per_col   = f'per{i}d'
-            high4_col = f'high4{i}d'
-            hmax_col = f'hmax{i}d'
-            ma5d_col = f'ma5{i}d'
-            # 用 row.get(col, 0) 方式取值：如果列不存在 → 默认值 0
-            lasto = row.get(lasto_col, 0)
-            lasto2 = row.get(lasto2_col, 0)
-            lastl = row.get(lastl_col, 0)
-            lastp = row.get(lastp_col, 0)
-            lasth = row.get(lasth_col, 0)
-            lastp2d = row.get(lastp2d_col, 0)
-            per   = row.get(per_col, 0)
-            high4   = row.get(high4_col, 0)
-            hmax   = row.get(hmax_col, 0)
-            ma5d   = row.get(ma5d_col, 0)
-            # 因为默认值是0，因此避免无意义匹配：
-            # 只有当四个值都有效（非0 或者本身确实为0但逻辑可正常比较）才继续判断
-            # 当列不存在时 lasto=lastl=lastp=per=0，肯定不会满足条件，从而自然跳过
-            # print(lasto , lastl * 1.002 , lastp , high4 , lasto ,lastp2d*0.998)
-            if (lasto <= lastl * 1.002 or (lasth > high4 and lasth >= hmax*0.99) or (lastp > ma5d and lastp >= lastp2d)) and (lastp >= lasto) and (per > 0):
-                satisfied_days.append(i)
+    if df.empty:
+        df['MainU'] = '0'
+        return df
 
-        satisfied_days.sort()
-        mainu = bool(satisfied_days) and (row['lastp1d'] >= row['lastp2d'])
-        # 列表转字符串方便显示
-        # days_str = ','.join(map(str, satisfied_days))
-        days_str = ','.join(map(str, satisfied_days)) if satisfied_days else '0'
-        return pd.Series({'MainU': days_str})
-        # return pd.Series({'MainU': mainu, '满足天数': days_str})
+    # Initialize result string series
+    # We will accumulate "i," for each satisfied day
+    
+    # Pre-calculate fill value (0) for missing columns to match row.get(col, 0)
+    # Actually most pandas ops with 0 work fine.
+    
+    # We accumulate strings directly. Starting with empty strings.
+    res_str = pd.Series("", index=df.index, dtype=object)
+    
+    for i in range(1, days + 1):
+        # 构造列名
+        str_i = str(i)
+        lasto_col = f'lasto{str_i}d'
+        lasto2_col = f'lasto{i+1}d'
+        lastl_col = f'lastl{str_i}d'
+        lastp_col = f'lastp{str_i}d'
+        lasth_col = f'lasth{str_i}d'
+        lastp2d_col = f'lastp{i+1}d'
+        per_col   = f'per{str_i}d'
+        high4_col = f'high4{str_i}d'
+        hmax_col = f'hmax{str_i}d'
+        ma5d_col = f'ma5{str_i}d'
 
-    result = df.apply(check_row, axis=1)
-    return pd.concat([df, result], axis=1)
+        # Get columns efficiently, defaulting to 0
+        def get_col(col_name):
+            return df[col_name] if col_name in df.columns else 0
+
+        lasto = get_col(lasto_col)
+        # lasto2 = get_col(lasto2_col) # Not used in condition?
+        lastl = get_col(lastl_col)
+        lastp = get_col(lastp_col)
+        lasth = get_col(lasth_col)
+        lastp2d = get_col(lastp2d_col)
+        per = get_col(per_col)
+        high4 = get_col(high4_col)
+        hmax = get_col(hmax_col)
+        ma5d = get_col(ma5d_col)
+
+        # Condition logic:
+        # if (lasto <= lastl * 1.002 or (lasth > high4 and lasth >= hmax*0.99) or (lastp > ma5d and lastp >= lastp2d)) and (lastp >= lasto) and (per > 0):
+        
+        # Note: comparison with 0 (scalar) broadcasts correctly
+        
+        cond1 = (lasto <= lastl * 1.002)
+        cond2 = (lasth > high4) & (lasth >= hmax * 0.99)
+        cond3 = (lastp > ma5d) & (lastp >= lastp2d)
+        
+        # Combine
+        # (cond1 or cond2 or cond3) and ...
+        combined_cond = (cond1 | cond2 | cond3) & (lastp >= lasto) & (per > 0)
+        
+        # If combined_cond is True, append "i," to res_str
+        # Using numpy where is faster than series apply
+        # We need to ensure res_str is updated.
+        # res_str += np.where(combined_cond, f"{i},", "")
+        
+        # Careful with types, ensure string
+        to_add = np.where(combined_cond, f"{i},", "")
+        res_str = res_str + to_add
+
+    # Post-process
+    # Remove trailing comma
+    res_str = res_str.str.rstrip(',')
+    # Replace empty with '0'
+    res_str = res_str.replace('', '0')
+    
+    # Assign to new DataFrame/Column
+    # Original returned concat of df and result (which was just MainU series)
+    # We can just assign
+    df = df.copy() # Avoid SettingWithCopy if necessary, though typical usage accepts modification or new df
+    df['MainU'] = res_str
+    
+    return df
 
 
 
@@ -1528,29 +1563,57 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     # ------------------------------
     # 读取文件数据
     # ------------------------------
-    dt_list = []
-    with open(file_path, 'r', encoding='utf-8', errors='replace') as f:
-        lines = f.readlines()
+    # ------------------------------
+    # 读取文件数据 (Refactored to use read_csv)
+    # ------------------------------
+    try:
+        # Use C engine for speed, handle bad lines by skipping
+        # Assuming ct.TDX_Day_columns is ['code', 'date', 'open', 'high', 'low', 'close', 'vol', 'amount']
+        # The file content is: date, open, high, low, close, vol, amount (7 columns)
+        # So we must NOT use the first column name 'code' for reading.
+        
+        file_cols = ct.TDX_Day_columns[1:] # Exclude 'code'
+        
+        df = pd.read_csv(
+            file_path, 
+            names=file_cols, 
+            header=None, 
+            index_col=False, 
+            usecols=range(len(file_cols)), # Only read the first len(file_cols) columns (0 to 6)
+            engine='c',
+            encoding='gb18030', # Use broadly compatible encoding
+            encoding_errors='replace', # Ignore encoding errors
+            on_bad_lines='skip', 
+        )
+        
+        # Ensure numeric columns are numeric (coerce errors to NaN)
+        cols_to_numeric = ['open', 'high', 'low', 'close', 'vol', 'amount']
+        for col in cols_to_numeric:
+             if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        # Drop NaNs created by coercion
+        df.dropna(subset=cols_to_numeric, inplace=True)
+        
+        # Filter logic: if topen == 0 or amount == 0: continue
+        df = df[(df['open'] != 0) & (df['amount'] != 0)]
+        
+        # Add 'code' column
+        df['code'] = code
+        
+        # Format 'date' to string
+        df['date'] = df['date'].astype(str)
+        df = df[df['date'].str.len() == 10]
+        
+        # Reorder columns to match ct.TDX_Day_columns exactly
+        # This puts 'code' back at the first position
+        final_cols = [c for c in ct.TDX_Day_columns if c in df.columns]
+        df = df[final_cols]
 
-    for line in lines:
-        a = line.strip().split(',')
-        if len(a) < 7: 
-            continue
-        tdate, topen, thigh, tlow, tclose, tvol, amount = a[:7]
-        if len(tdate) != 10:
-            continue
-        try:
-            topen, thigh, tlow, tclose = map(float, [topen, thigh, tlow, tclose])
-            tvol = float(tvol)
-            amount = round(float(amount), 1)
-        except:
-            continue
-        if topen == 0 or amount == 0:
-            continue
-        dt_list.append({'code': code, 'date': tdate, 'open': topen, 'high': thigh,
-                        'low': tlow, 'close': tclose, 'vol': tvol, 'amount': amount})
-
-    df = pd.DataFrame(dt_list, columns=ct.TDX_Day_columns)
+    except Exception as e:
+        log.error(f"Error reading file {file_path} with read_csv: {e}")
+        print(f"DEBUG Error: {e}") # Print to stdout for visibility in test logs
+        return pd.DataFrame()
     df = df[~df.date.duplicated()]
 
     # ------------------------------

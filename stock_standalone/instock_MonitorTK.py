@@ -44,6 +44,7 @@ import sqlite3
 import hashlib
 
 import argparse
+import traceback
 
 class LoggerWriter:
     """将 print 输出重定向到 logger"""
@@ -4450,6 +4451,40 @@ class StockMonitorApp(tk.Tk):
             if send_tdx_Key and stock_code:
                 self.sender.send(stock_code)
 
+            # =========================
+            # ✅ 构造 fake mouse event
+            # =========================
+            from types import SimpleNamespace
+            try:
+                # ==========================
+                # ✅ 构造模拟 event
+                # ==========================
+
+                x_root = getattr(self, "event_x_root", None)
+                y_root = getattr(self, "event_y_root", None)
+
+                # 没有鼠标坐标就退回到行中心
+                if x_root is None or y_root is None:
+                    bbox = self.tree.bbox(item_id)
+                    if not bbox:
+                        return
+                    x, y, w, h = bbox
+
+                    x_root = self.tree.winfo_rootx() + x + w + 10
+                    y_root = self.tree.winfo_rooty() + y + h // 2
+
+                fake_event = SimpleNamespace(
+                    x=0,
+                    y=0,
+                    x_root=x_root,
+                    y_root=y_root
+                )
+
+                # ✅ 复用 Tooltip 入口
+                self.on_tree_click_for_tooltip(fake_event,stock_code)
+
+            except Exception as e:
+                logger.warning(f"Tooltip select trigger failed: {e}")
 
     def update_send_status(self, status_dict):
         # 更新状态栏
@@ -5105,6 +5140,9 @@ class StockMonitorApp(tk.Tk):
 
         send_tdx_Key = (getattr(self, "select_code", None) != stock_code)
         self.select_code = stock_code
+        if event:   # 只在真实鼠标触发时保存
+            self.event_x_root = event.x_root
+            self.event_y_root = event.y_root
         self.on_tree_click_for_tooltip(event)
 
         stock_code = str(stock_code).zfill(6)
@@ -5818,7 +5856,7 @@ class StockMonitorApp(tk.Tk):
         return False  # 未找到
 
 
-    def on_tree_click_for_tooltip(self, event):
+    def on_tree_click_for_tooltip(self, event,stock_code=None):
         """处理树视图点击事件，延迟显示提示框"""
         logger.debug(f"[Tooltip] 点击事件触发: x={event.x}, y={event.y}")
 
@@ -5838,20 +5876,22 @@ class StockMonitorApp(tk.Tk):
                 pass
             self._current_tooltip = None
 
-        # 获取点击的行
-        item = self.tree.identify_row(event.y)
-        if not item:
-            logger.debug("[Tooltip] 未点击到有效行")
-            return
+        if stock_code is None:
+            # 获取点击的行
+            item = self.tree.identify_row(event.y)
+            if not item:
+                logger.debug("[Tooltip] 未点击到有效行")
+                return
 
-        # 获取股票代码
-        values = self.tree.item(item, 'values')
-        if not values:
-            logger.debug("[Tooltip] 行没有数据")
-            return
-
-        code = str(values[0])  # code在第一列
-        x_root, y_root = event.x_root, event.y_root  # 保存坐标
+            # 获取股票代码
+            values = self.tree.item(item, 'values')
+            if not values:
+                logger.debug("[Tooltip] 行没有数据")
+                return
+            code = str(values[0])  # code在第一列
+        else:
+            code = stock_code
+        # x_root, y_root = event.x_root, event.y_root  # 保存坐标
         logger.debug(f"[Tooltip] 获取到代码: {code}, 设置0.2秒定时器")
 
         # 设置0.2秒延迟定时器
@@ -5892,26 +5932,6 @@ class StockMonitorApp(tk.Tk):
 
         # 获取多行文本和对应颜色
         lines, colors = self._format_stock_info(stock_data)
-
-        # # 使用 Text 控件显示
-        # text_widget = tk.Text(
-        #     tooltip,
-        #     bg='#FFF8E7',
-        #     bd=0,
-        #     padx=8,
-        #     pady=6,
-        #     height=len(lines),
-        #     width=max(len(line) for line in lines),
-        #     font=("Microsoft YaHei", 9)
-        # )
-        # text_widget.pack()
-
-        # for i, (line, color) in enumerate(zip(lines, colors)):
-        #     tag_name = f"line_{i}"          # 每行一个唯一 tag
-        #     text_widget.insert(tk.END, line + "\n", tag_name)
-        #     text_widget.tag_config(tag_name, foreground=color)
-
-        # text_widget.config(state=tk.DISABLED)
 
         # 使用 Text 控件显示
         text_widget = tk.Text(
@@ -9327,6 +9347,16 @@ class StockMonitorApp(tk.Tk):
                         tk.Label(win, text=f"{row_code} {name}", font=self.default_font).pack(anchor="w", padx=10)
                         # 可以加更多字段，如 trade、涨幅等
 
+    def clean_bad_columns(self,df):
+        bad_cols = [
+            c for c in df.columns
+            if not isinstance(c, str) or not c.isidentifier()
+        ]
+        if bad_cols:
+            print("清理异常列:", bad_cols)
+            df = df.drop(columns=bad_cols)
+        return df
+
 
 
     def apply_search(self):
@@ -9354,6 +9384,8 @@ class StockMonitorApp(tk.Tk):
         if self.df_all.empty:
             self.status_var.set("当前数据为空")
             return
+
+        self.df_all = self.clean_bad_columns(self.df_all)
 
         # # === 测试 ===
         # expr = "(topR > 0 or (per1d > 1) and (per2d > 0)"
@@ -9446,9 +9478,10 @@ class StockMonitorApp(tk.Tk):
                 else:
                     query_search = f"({val1})"
                     logger.info(f'query: {query_search} ')
-                if removed_conditions:
-                    query_search = remove_invalid_conditions(query_search, removed_conditions,showdebug=False)
-                    # logger.info(f'query_search: {query_search} ')
+                # if removed_conditions:
+                #     query_search = remove_invalid_conditions(query_search, removed_conditions,showdebug=False)
+                #     logger.info(f'removed_query_search: {query_search} removed_conditions:{removed_conditions}')
+
                 # logger.info(f'apply_search {query_search.count("or")} or query: {query_search} ')
                 df_filtered = self.df_all.query(query_search, engine=query_engine)
                 self.refresh_tree(df_filtered)
@@ -9481,6 +9514,8 @@ class StockMonitorApp(tk.Tk):
                     self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
                 logger.info(f'final_query: {final_query}')
         except Exception as e:
+            traceback.print_exc()
+            logger.error(f"query_check: {([c for c in self.df_all.columns if not c.isidentifier()])}")
             logger.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")
         if df_filtered.empty:
