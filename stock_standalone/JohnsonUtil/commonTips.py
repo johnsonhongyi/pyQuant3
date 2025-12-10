@@ -2674,33 +2674,82 @@ def testdf2(df):
     else:
         pass
 
+def parse_date_safe(date_str):
+    if not date_str:
+        return None
 
-def get_today_duration(datastr, endday=None,tdx=False):
+    if isinstance(date_str, int):
+        date_str = str(date_str)
+
+    date_str = str(date_str).strip().replace("/", "-")
+
+    fmts = ("%Y-%m-%d", "%Y%m%d")
+
+    for fmt in fmts:
+        try:
+            return datetime.datetime.strptime(date_str, fmt).date()
+        except ValueError:
+            continue
+
+    raise ValueError(f"无法识别的日期格式: {date_str}")
+
+def get_today_duration(datastr, endday=None, tdx=False):
     if isinstance(datastr, int):
         datastr = str(datastr)
-    if datastr is not None and len(datastr) > 6:
+
+    if datastr and len(datastr) > 6:
+
         if endday:
-            today = datetime.datetime.strptime(day8_to_day10(endday), '%Y-%m-%d').date()
+            today = parse_date_safe(day8_to_day10(endday))
         else:
             is_trade_date_today = get_day_istrade_date()
             last_trade_date = get_last_trade_date()
-            if tdx and ((is_trade_date_today and get_now_time_int() < 1500) or not is_trade_date_today) and datastr == last_trade_date:
-                return 0 
-                # today = last_trade_date
+
+            if tdx and (
+                (is_trade_date_today and get_now_time_int() < 1500)
+                or not is_trade_date_today
+            ) and datastr == last_trade_date:
+                return 0
             else:
                 today = datetime.date.today()
-        # if get_os_system() == 'mac':
-        #     # last_day = datetime.datetime.strptime(datastr, '%Y/%m/%d').date()
-        #     last_day = datetime.datetime.strptime(datastr, '%Y-%m-%d').date()
-        # else:
-        #     # last_day = datetime.datetime.strptime(datastr, '%Y/%m/%d').date()
-        #     last_day = datetime.datetime.strptime(datastr, '%Y-%m-%d').date()
-        last_day = datetime.datetime.strptime(datastr, '%Y-%m-%d').date()
-        
+
+        # ✅ 统一用安全解析
+        last_day = parse_date_safe(datastr)
+
         duration_day = int((today - last_day).days)
+
     else:
         duration_day = None
-    return (duration_day)
+
+    return duration_day
+
+
+# def get_today_duration(datastr, endday=None,tdx=False):
+#     if isinstance(datastr, int):
+#         datastr = str(datastr)
+#     if datastr is not None and len(datastr) > 6:
+#         if endday:
+#             today = datetime.datetime.strptime(day8_to_day10(endday), '%Y-%m-%d').date()
+#         else:
+#             is_trade_date_today = get_day_istrade_date()
+#             last_trade_date = get_last_trade_date()
+#             if tdx and ((is_trade_date_today and get_now_time_int() < 1500) or not is_trade_date_today) and datastr == last_trade_date:
+#                 return 0 
+#                 # today = last_trade_date
+#             else:
+#                 today = datetime.date.today()
+#         # if get_os_system() == 'mac':
+#         #     # last_day = datetime.datetime.strptime(datastr, '%Y/%m/%d').date()
+#         #     last_day = datetime.datetime.strptime(datastr, '%Y-%m-%d').date()
+#         # else:
+#         #     # last_day = datetime.datetime.strptime(datastr, '%Y/%m/%d').date()
+#         #     last_day = datetime.datetime.strptime(datastr, '%Y-%m-%d').date()
+#         last_day = datetime.datetime.strptime(datastr, '%Y-%m-%d').date()
+        
+#         duration_day = int((today - last_day).days)
+#     else:
+#         duration_day = None
+#     return (duration_day)
 
 
 def get_now_time():

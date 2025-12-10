@@ -259,8 +259,8 @@ def get_log_file(log_n='stock.log'):
         # else:
         #     print("error")
         #     raise TypeError('log path error.')
-        path = get_base_path()
-
+        # path = get_base_path()
+        path = ''
     path = path + log_n
     return path
 
@@ -363,13 +363,10 @@ def stopLogger():
         _GLOBAL_LISTENER.stop()
         _GLOBAL_LISTENER = None
 
+
 def _ensure_listener_started(log_f, show_detail=True):
-    """
-    初始化 QueueListener（父进程启动一次即可）
-    """
     global _GLOBAL_QUEUE, _GLOBAL_LISTENER
 
-    # 仅在父进程启动
     if _GLOBAL_QUEUE is None and os.getpid() == _MAIN_PID:
         _GLOBAL_QUEUE = multiprocessing.Queue(-1)
 
@@ -384,8 +381,23 @@ def _ensure_listener_started(log_f, show_detail=True):
         ch.setFormatter(ch_formatter)
 
         # File handler
+        import shutil
         os.makedirs(os.path.dirname(os.path.abspath(log_f)), exist_ok=True)
-        fh = RotatingFileHandler(log_f, maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
+        fh = RotatingFileHandler(
+            log_f,
+            maxBytes=5*1024*1024,
+            backupCount=3,
+            encoding="utf-8",
+            delay=True      # ✅ 必需
+        )
+
+        def win_safe_rotator(src, dst):
+            shutil.copyfile(src, dst)
+            with open(src, "w", encoding="utf-8"):
+                pass
+
+        fh.rotator = win_safe_rotator
+
         fh_formatter = logging.Formatter(
             "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
             if show_detail else
@@ -394,117 +406,60 @@ def _ensure_listener_started(log_f, show_detail=True):
         )
         fh.setFormatter(fh_formatter)
 
-        # QueueListener 自动监听父进程 Queue
         _GLOBAL_LISTENER = QueueListener(_GLOBAL_QUEUE, ch, fh)
         _GLOBAL_LISTENER.start()
 
-        # 程序退出时停止 listener
         atexit.register(stopLogger)
 
-# ---------------- 核心函数 ----------------
+# _GLOBAL_LOGGER_PRINTED = False  # 全局标志
+# 全局保存上一次 log_f
+_GLOBAL_LAST_LOG_F = None
+
 def getLogger(name=None, logpath='instock_tk.log', show_detail=True):
     """
     获取全局 logger，支持多进程/多线程
     """
-    global _GLOBAL_LOGGER, _GLOBAL_LOG_NAME
+    global _GLOBAL_LOGGER, _GLOBAL_LOG_NAME, _GLOBAL_LAST_LOG_F
 
+    # 已初始化，直接返回
+    if _GLOBAL_LOGGER is not None:
+        return _GLOBAL_LOGGER
+
+    # 设置全局 logger 名称
     if name:
         _GLOBAL_LOG_NAME = name
     elif not _GLOBAL_LOG_NAME:
-        _GLOBAL_LOG_NAME = "instock_TK"
+        _GLOBAL_LOG_NAME = "instock_TK.log"
 
-    # log_f = logpath
-    if logpath is None:
-        # log_f = get_log_file(log_n='stock.log')
-        log_f = get_log_file(log_n=_GLOBAL_LOG_NAME)
-    else:
-        log_f = logpath
-    # print(f'log_f: {log_f}')
+    # 确定 log 文件路径
+    log_f = logpath if logpath else get_log_file(log_n=_GLOBAL_LOG_NAME)
+    # log_f = get_log_file(logpath) if logpath else get_log_file(log_n=_GLOBAL_LOG_NAME)
+
+    print(f'log_f: {log_f}')
+    # 只在 log_f 变化时打印
+    # if _GLOBAL_LAST_LOG_F != log_f:
+    #     print(f'log_f: {log_f}')
+    #     _GLOBAL_LAST_LOG_F = log_f
+
     # 父进程初始化 QueueListener
     _ensure_listener_started(log_f, show_detail=show_detail)
 
-    # 获取 logger
+    # 创建 logger
     logger = logging.getLogger(_GLOBAL_LOG_NAME)
     logger.setLevel(logging.ERROR)
     logger.propagate = False
 
-    # 添加 QueueHandler（每个进程/线程第一次调用都会添加）
-    # 先移除已有 QueueHandler 避免重复
+    # 添加 QueueHandler
     logger.handlers = [h for h in logger.handlers if not isinstance(h, QueueHandler)]
     logger.addHandler(QueueHandler(_GLOBAL_QUEUE))
 
-    global _GLOBAL_LOGGER
+    # 保存单例
     _GLOBAL_LOGGER = logger
     return logger
 
+
 # ---------------- 全局单例 ----------------
 log = getLogger()
-
-
-
-# def _ensure_listener_started(log_f,show_detail=True):
-#     global _GLOBAL_QUEUE, _GLOBAL_LISTENER
-#     if _GLOBAL_QUEUE is None:
-#         _GLOBAL_QUEUE = multiprocessing.Queue(-1)
-
-#         # Console handler
-#         ch = logging.StreamHandler()
-#         ch_formatter = logging.Formatter(
-#             "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
-#             if show_detail else
-#             "(%(funcName)s:%(lineno)s): %(message)s",datefmt="%m-%d %H:%M:%S" 
-#         )
-#         ch.setFormatter(ch_formatter)
-#         # File handler
-#         os.makedirs(os.path.dirname(os.path.abspath(log_f)), exist_ok=True)
-#         fh = RotatingFileHandler(log_f, maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
-#         # fh.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)d): %(message)s"))
-#         mph_formatter = logging.Formatter(
-#             "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
-#             if show_detail else
-#             "(%(funcName)s:%(lineno)s): %(message)s",
-#             datefmt="%m-%d %H:%M:%S" 
-#         )
-#         fh.setFormatter(mph_formatter)
-#         # 自动启动 QueueListener
-#         _GLOBAL_LISTENER = QueueListener(_GLOBAL_QUEUE, ch, fh)
-#         _GLOBAL_LISTENER.start()
-
-#         # 自动注册退出停止 listener
-#         atexit.register(stopLogger)
-
-# def getLogger(name=None, logpath='instock_tk.log'):
-#     global _GLOBAL_LOGGER, _GLOBAL_LOG_NAME
-
-#     if _GLOBAL_LOGGER:
-#         return _GLOBAL_LOGGER
-
-#     if name:
-#         _GLOBAL_LOG_NAME = name
-#     elif not _GLOBAL_LOG_NAME:
-#         _GLOBAL_LOG_NAME = "instock_TK"
-
-#     log_f = logpath
-#     _ensure_listener_started(log_f)
-
-#     logger = logging.getLogger(_GLOBAL_LOG_NAME)
-#     logger.setLevel(logging.DEBUG)
-#     logger.propagate = False
-
-#     # 添加 QueueHandler（子进程也会调用）
-#     if not any(isinstance(h, QueueHandler) for h in logger.handlers):
-#         logger.addHandler(QueueHandler(_GLOBAL_QUEUE))
-
-#     _GLOBAL_LOGGER = logger
-#     return logger
-
-# def stopLogger():
-#     global _GLOBAL_LISTENER
-#     if _GLOBAL_LISTENER:
-#         _GLOBAL_LISTENER.stop()
-#         _GLOBAL_LISTENER = None
-
-# log = getLogger()
 
 
 def getLogger_no_mp(name=None, logpath='instock_tk.log', writemode='a', show_detail=True):
@@ -571,18 +526,6 @@ def getLogger_no_mp(name=None, logpath='instock_tk.log', writemode='a', show_det
 
     return logger
 
-# sys.stdout = log.handlers[0].stream
-# sys.stderr = log.handlers[0].stream
-# def log_format(record, handler):
-#     handler = StderrHandler()
-#     # handler.format_string = '{record.channel}: {record.message}'
-#     handler.format_string = '{record.channel}: {record.message) [{record.extra[cwd]}]'
-#     return record.message
-#
-#     # from logbook import FileHandler
-#     # log_handler = FileHandler('application.log')
-#     # log_handler.push_application()
-
 
 def set_log_file(console, level_s='DEBUG'):
     console = logging.StreamHandler()
@@ -591,76 +534,6 @@ def set_log_file(console, level_s='DEBUG'):
     console.setFormatter(formatter)
     logging.getLogger('').addHandler(console)
 
-
-# class JohnsonLoger(logging.Logger):
-#     """
-#     Custom logger class with additional levels and methods
-#     """
-#     # WARNPFX = logging.WARNING+1
-#     # CRITICAL = 50
-#     # FATAL = CRITICAL
-#     # ERROR = 40
-#     # WARNING = 30
-#     # WARN = WARNING
-#     # INFO = 20
-#     # DEBUG = 10
-#     # NOTSET = 0
-
-#     def __init__(self, name):
-#         # now = time.strftime('%Y-%m-%d %H:%M:%S')
-#         # path_sep = get_os_path_sep()
-#         self.name=name
-#         log_path = get_run_path() + 'stock.log'
-#         logging.basicConfig(
-#             # level    =eval('logging.%s'%(level_s)),
-#             # level=DEBUG,
-#             # format   = now +":" + name + ' LINE %(lineno)-4d  %(levelname)-8s %(message)s',
-#             format="[%(asctime)s] %(name)s:%(levelname)s: %(message)s",
-#             datefmt='%m-%d %H:%M',
-#             filename=log_path,
-# #            filemode='w');
-#             filemode='a');
-#         self.console=logging.StreamHandler();
-#         self.console.setLevel(logging.DEBUG);
-#         formatter = logging.Formatter(self.name + ': LINE %(lineno)-4d :%(levelname)-8s %(message)s');
-#         self.console.setFormatter(formatter);
-#         self.logger = logging.getLogger(self.name)
-#         self.logger.addHandler(self.console);
-#         self.setLevel(ERROR)
-
-#         # return self.logger
-
-#     def warnpfx(self, msg, *args, **kw):
-#         self.log(self.WARNPFX, "! PFXWRN %s" % msg, *args, **kw)
-
-#     def setLevel(self, level):
-#         self.logger.setLevel(level)
-#         return self.logger
-
-#     def debug(self,message):
-#         self.logger.debug(message)
-
-#     def info(self,message):
-#         self.logger.info(message)
-
-#     def warn(self,message):
-#         self.logger.warn(message)
-
-#     def error(self,message):
-#         self.logger.error(message)
-
-#     def cri(self,message):
-#         self.logger.critical(message)
-#     # logging.setLoggerClass(CheloExtendedLogger)
-#     # rrclogger = logging.getLogger("rrcheck")
-#     # rrclogger.setLevel(logging.INFO)
-
-# # def set_log_format():
-# #     console = logging.StreamHandler()
-# #     console.setLevel(logging.WARNING)
-# #     formatter = logging.Formatter('%(name)-12s: %(levelname)-8s %(message)s')
-# #     console.setFormatter(formatter)
-# #     logging.getLogger('').addHandler(console)
 
 if __name__ == '__main__':
     getLogger("www").debug("www")
