@@ -46,82 +46,98 @@ import hashlib
 import argparse
 import traceback
 
-class LoggerWriter:
-    """将 print 输出重定向到 logger"""
-    def __init__(self, level_func):
-        self.level_func = level_func
-        self._is_logging = False  # 防止递归
+
+class SafeLoggerWriter:
+    #放置管道关闭时，Queue.put() 抛 WinError 232
+    # 程序会报错，日志爆炸
+    # 这是你最早遇到的问题
+    def __init__(self, log_func):
+        self.log_func = log_func
+        self.alive = True
 
     def write(self, message):
-        if not message.strip():
+        if not self.alive:
             return
-        if self._is_logging:
+
+        msg = message.strip()
+        if not msg:
             return
+
         try:
-            self._is_logging = True
-            for line in message.rstrip().splitlines():
-                self.level_func(line)
-        finally:
-            self._is_logging = False
+            self.log_func(msg)
+        except Exception:
+            # logger 或 Queue 已关闭
+            self.alive = False
+            sys.__stdout__.write(msg + "\n")
 
     def flush(self):
-        pass
+        try:
+            sys.__stdout__.flush()
+        except:
+            pass
 
-def init_logging_old(log_file="appTk.log", level=LoggerFactory.ERROR, redirect_print=False,show_detail=True):
+
+
+class LoggerWriter:
+    """将 print 重定向到 logger，支持 end= 与防递归"""
+    def __init__(self, log_func):
+        self.log_func = log_func
+        self._working = False
+        self._buffer = ""   # ⭐ stdout 缓冲
+
+    def write(self, message):
+        if not message:
+            return
+
+        if self._working:
+            return
+
+        try:
+            self._working = True
+
+            self._buffer += message
+
+            # 按行拆分
+            while "\n" in self._buffer:
+                line, self._buffer = self._buffer.split("\n", 1)
+                line = line.strip()
+                if line:
+                    self.log_func(line)
+
+        finally:
+            self._working = False
+
+    def flush(self):
+        """程序结束时强制刷掉未换行内容"""
+        if self._buffer.strip():
+            self.log_func(self._buffer.strip())
+            self._buffer = ""
+
+
+
+def init_logging(log_file="appTk.log", level=LoggerFactory.ERROR, redirect_print=False, show_detail=True):
     """初始化全局日志"""
-    # logger\.info\((?!f)  查找没有f  loggger.info(
-    # logger\.info\((?!f)[^,)]*,\s*\w+    查找没有f 加,
-    #   ^(?!\s*#).*?logger\.info\((?!f)[^,)]*,\s*\w+   查找没有f 加, 排除#
-    # logger = logging.getLogger("instock_TK")
-    logger = LoggerFactory.getLogger("instock_TK",logpath=log_file)
-    # logger = LoggerFactory.log
+
+    logger = LoggerFactory.getLogger(
+        name="instock_TK",
+        logpath=log_file,
+        show_detail=show_detail
+    )
     logger.setLevel(level)
 
-    if not logger.handlers:
-        print(f'not logger.handlers')
-        formatter = LoggerFactory.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
-        if show_detail:
-            formatter = LoggerFactory.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s")
-            ch_formatter = LoggerFactory.Formatter("[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s");
-        else:
-            formatter = LoggerFactory.Formatter("(%(funcName)s:%(lineno)s): %(message)s")
-            ch_formatter = LoggerFactory.Formatter("(%(funcName)s:%(lineno)s): %(message)s");
-        
-        # ✅ 使用 RotatingFileHandler：超过 1MB 自动轮转
-        fh = RotatingFileHandler(
-            log_file, 
-            maxBytes= 5 * 1024 * 1024,  # 1MB
-            backupCount=3,         # 最多保留3个历史日志
-            encoding="utf-8"
-        )
-        fh.setFormatter(formatter)
-        logger.addHandler(fh)
-
-        ch = logging.StreamHandler()
-        ch.setFormatter(ch_formatter)
-        logger.addHandler(ch)
-
-    logger.propagate = False
-
-    # ⚠️ 调试时禁用 print 重定向
     if redirect_print:
-        sys.stdout = LoggerWriter(logger.info)
-        sys.stderr = LoggerWriter(logger.error)
-
-    def handle_exception(exc_type, exc_value, exc_traceback):
-        if issubclass(exc_type, KeyboardInterrupt):
-            sys.__excepthook__(exc_type, exc_value, exc_traceback)
-            return
-        logger.error("未捕获异常:", exc_info=(exc_type, exc_value, exc_traceback))
-
-    sys.excepthook = handle_exception
+        import sys
+        sys.stdout = LoggerWriter(LoggerFactory.INFO)
+        # sys.stdout = LoggerWriter(lambda msg: logger.log(level, msg))
+        sys.stderr = LoggerWriter(LoggerFactory.ERROR)
 
     logger.info("日志初始化完成")
     return logger
 
-def init_logging(log_file="appTk.log", level=LoggerFactory.ERROR, redirect_print=False, show_detail=True):
+
+def init_logging_noprint(log_file="appTk.log", level=LoggerFactory.ERROR, redirect_print=False, show_detail=True):
     """初始化全局日志"""
-    logger = LoggerFactory.getLogger("instock_TK", logpath=log_file)
+    logger = LoggerFactory.getLogger("instock_TK", logpath=log_file,show_detail=show_detail)
 
     logger.setLevel(level)
 
@@ -137,7 +153,7 @@ def init_logging(log_file="appTk.log", level=LoggerFactory.ERROR, redirect_print
                     self.level_func(msg)
             def flush(self):
                 pass
-        sys.stdout = LoggerWriter(logger.info)
+        sys.stdout = LoggerWriter(level)
         sys.stderr = LoggerWriter(logger.error)
 
     logger.info("日志初始化完成")
@@ -1921,6 +1937,77 @@ def clean_bad_columns(df):
         df = df.drop(columns=bad_cols)
     return df
 
+
+LOCK_FILE = "clean_once_{date}.lock"
+
+def cross_process_lock(date):
+    lock = LOCK_FILE.format(date=date)
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+        return fd
+    except FileExistsError:
+        return None
+
+
+# ---------------- 状态控制 ----------------
+
+_CLEAN_LOCK = threading.Lock()
+_LAST_CLEAN_DATE = None      # 上一次成功执行的交易日
+
+
+def clean_expired_tdx_file(logger):
+    """
+    每个交易日 09:00–09:30 执行一次文件清理
+    （跨日运行程序也能再次触发）
+    """
+
+    global _LAST_CLEAN_DATE
+
+    # ✅ 是否交易日
+    if not cct.get_trade_date_status():
+        return
+
+    today = cct.get_today()   # 例如：2025-12-09
+
+
+    # ✅ 当前时间窗口
+    now_time = cct.get_now_time_int()
+    if not (830 <= now_time <= 925):
+        return
+
+    logger.info(f"{today} 准备清理过期文件: {cct.get_ramdisk_path('tdx_last_df')}")
+    # ✅ 当前交易日
+    # logger.info(f"{today}清理过期文件: {cct.get_run_path_tdx('tdx_last_df')}")
+
+    fd = cross_process_lock(today)
+    if not fd:
+        return     # 多进程安全版本其他进程已执行
+
+    # ✅ 并发保护
+    try:
+        with _CLEAN_LOCK:
+
+            # 当天已经执行过
+            if _LAST_CLEAN_DATE == today:
+                return
+
+            # ✅ 计算文件路径
+            fname = cct.get_run_path_tdx('tdx_last_df')
+
+            if os.path.exists(fname):
+                try:
+                    os.remove(fname)
+                    logger.info(f"{today} 清理过期文件: {fname}")
+                except Exception as e:
+                    logger.error(f"{today} 清理文件失败: {fname}, err={e}")
+            else:
+                logger.info(f"{today} 待清理文件不存在: {fname}")
+
+            # ✅ 标记今天已完成
+            _LAST_CLEAN_DATE = today
+    finally:
+        os.close(fd)
+
 # ------------------ 后台数据进程 ------------------ #
 def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=None,detect_calc_support=False):
     logger = LoggerFactory.getLogger()  # ✅ 必须调用一次，确保 QueueHandler 添加
@@ -1959,6 +2046,16 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
         elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
             # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
             st_key_sort = g_values.getkey("st_key_sort")
+        elif  830 <= cct.get_now_time_int() <= 915:
+            global _LAST_CLEAN_DATE
+            if _LAST_CLEAN_DATE != cct.get_today():
+                logger.info(f"{cct.get_today()} 准备清理过期文件: {cct.get_ramdisk_path('tdx_last_df')}")
+                clean_expired_tdx_file(logger)
+            for _ in range(5):
+                if not flag.value: break
+                time.sleep(1)
+            continue
+
         elif START_INIT > 0 and (not cct.get_work_time()):
                 # logger.info(f'not worktime and work_duration')
                 for _ in range(5):
@@ -1973,6 +2070,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
             market = g_values.getkey("market", marketInit)        # all / sh / cyb / kcb / bj
             blkname = g_values.getkey("blkname", marketblk)  # 对应的 blk 文件
             logger.info(f"resample: {resample} flag.value : {flag.value} market : {market} blkname :{blkname} ")
+            clean_expired_tdx_file(logger)
             top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
             if top_now.empty:
                 logger.info("top_now.empty no data fetched")
@@ -2007,9 +2105,6 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
 
             top_temp=stf.getBollFilter(df=top_temp, resample=resample, down=False)
             top_temp = top_temp.sort_values(by=sort_cols, ascending=sort_keys)
-            # logger.info(f'DISPLAY_COLS:{DISPLAY_COLS}')
-            # logger.info(f'col: {top_temp.columns.values}')
-            # top_temp = top_temp.loc[:, DISPLAY_COLS]
             logger.info(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape} detect_calc_support:{detect_calc_support.value}')
             df_all = clean_bad_columns(top_temp)
             queue.put(top_temp)
@@ -2019,7 +2114,6 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
                 if not flag.value: break
                 time.sleep(0.5)
             START_INIT = 1
-            # logger.debug(f'fetch_and_process timesleep:{duration_sleep_time} resample:{resample}')
         except Exception as e:
             logger.error(f"Error in background process: {e}", exc_info=True)
             time.sleep(duration_sleep_time / 2)
@@ -2591,6 +2685,7 @@ class StockMonitorApp(tk.Tk):
             return
         self._task_running = True
         try:
+            logger.info(f'start Write_market_all_day_mp OK')
             tdd.Write_market_all_day_mp('all')
             logger.info(f'run Write_market_all_day_mp OK')
             CFG = cct.GlobalConfig(conf_ini)

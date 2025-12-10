@@ -23,11 +23,14 @@ import talib
 from JSONData import sina_data
 # import numba as nb
 import datetime
+import random
+
 # import logbook
 
 # log=logbook.Logger('TDX_day')
 # log = LoggerFactory.getLogger('TDX_Day')
-log = LoggerFactory.log
+log = LoggerFactory.getLogger()
+# log = LoggerFactory.log
 # log = LoggerFactory.getLogger()
 # log.setLevel(LoggerFactory.DEBUG)
 # log.setLevel(LoggerFactory.INFO)
@@ -1732,7 +1735,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
             ds = ds.fillna(0)
             df = pd.concat([df,ds])
             if write_tushare and ((len(ds) == 1 and ds.index.values[0] != cct.get_today()) or len(ds) > 1):
-                duration_day= get_today_duration(ds.index.values[0],cct.get_today())
+                duration_day= cct.get_today_duration(ds.index.values[0],cct.get_today())
                 if duration_day and duration_day < 5:
                     log.error(f'write_tdx_tushare_to_file-duration_day: {duration_day}')
                     sta = write_tdx_tushare_to_file(code, df=df)
@@ -1840,7 +1843,7 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
     return df
 
 
-def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=None, type='f', df=None, dl=10, power=True):
+def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=None, type='f', df=None, dl=10, power=True,detect_calc_support=False):
     #补数据power = false
     start = cct.day8_to_day10(start)
     end = cct.day8_to_day10(end)
@@ -1850,6 +1853,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
             code, start=start, end=end, dl=dl, newdays=newdays).sort_index(ascending=True)
     else:
         df = df.sort_index(ascending=True)
+
     index_status = False
     if code == '999999':
         code_ts = str(1000000 - int(code)).zfill(6)
@@ -1943,9 +1947,12 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
 
             # if (len(ds) == 1 and ds.index.values[0] != cct.get_today()) or len(ds) > 1:
             if (len(ds) == 1 and ((not cct.get_work_time()) or (ds.index.values[0] != cct.get_today())) ) or len(ds) > 1:
-                duration_day= get_today_duration(ds.index.values[0],cct.get_today())
-                if duration_day and duration_day < 5:
+                duration_day= cct.get_today_duration(ds.index.values[0],cct.get_today())
+                if duration_day is not None and duration_day < 5:
                     log.error(f'write_tdx_tushare_to_file-duration_day: {duration_day}')
+                    # 随机生成 0 到 2 之间的浮点数
+                    delay = random.uniform(0.1, 1.8)
+                    time.sleep(delay)
                     sta = write_tdx_tushare_to_file(code, df=df)
                     if sta:
                         log.info("write %s OK." % (code))
@@ -2630,7 +2637,7 @@ def check_tdx_Exp_day_duration(market='all'):
     print(("duration_zero:%s duration_other:%s"%(len(duration_zero),len(duration_other))))
     return duration_other
 
-def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
+def Write_market_all_day_mp(market='all', rewrite=False,recheck=True,detect_calc_support=False):
     """
     rewrite True: history date ?
     rewrite False: Now Sina date
@@ -2654,21 +2661,14 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
         else:
             print("Write duration_code:%s " %(len(duration_code)))
             log.info("duration to write :%s"%(len(duration_code)))
-
-
-
-
-
-    
-
     if len(duration_code) == 0:
         dfs = search_Tdx_multi_data_duration(code_l=[sh_index],tail=1)
         mdate = dfs.reset_index().date.values
         mdate = str(mdate[0])[:10] if len(mdate) > 0 else mdate
         if mdate == dd.date:
             print("Multi_data:%s %s all writed" % (sh_index,mdate))
+            log.info("Multi_data:%s %s all writed" % (sh_index,mdate))
             return True
-
 
     if market == 'all':
         mlist = ['all']
@@ -2683,9 +2683,6 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
             time_t = time.time()
             df = sina_data.Sina().market(mk)
 
-
-
-
             if df is None or len(df) < 10:
                 print("dsina_data f is None")
                 break
@@ -2698,7 +2695,7 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
             dm = get_sina_data_df(code_list)
             dm = dm[((dm.open > 0) | (dm.a1 > 0))]
             print(("market:%s A:%s open_dm:%s" % (mk, len(df),len(dm))), end=' ')
-
+            log.info(("market:%s A:%s open_dm:%s" % (mk, len(df),len(dm))))
             log.info('code_list:%s df:%s' % (len(code_list), len(df)))
 
 
@@ -2706,25 +2703,35 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True):
                 results = cct.to_mp_run_async(
                     get_tdx_append_now_df_api_tofile, code_list, dm=dm, newdays=0,detect_calc_support=detect_calc_support)
 
+                # for code in code_list:
+                #    print(code,)
+                #    results.append(get_tdx_append_now_df_api_tofile(code, dm=dm, newdays=0,detect_calc_support=detect_calc_support))
+                # results = get_tdx_exp_low_or_high_price(codeList[0], dt,ptype,dl)))
+
+
             else:
                 print(("dm is not open sell:%s"%(code_list if len(code_list) <10 else len(code_list))))
+                log.info(("dm is not open sell:%s"%(code_list if len(code_list) <10 else len(code_list))))
 
 
             if recheck:
                 duration_code=check_tdx_Exp_day_duration(market)
                 if len(duration_code) > 0 and recheck: 
                     if len(duration_code) < 30:
-                        print(f'recheck duration_code:{len(duration_code)} to write')
+                        log.info(f'recheck duration_code:{len(duration_code)} to write')
                     else:
                         print(f'recheck duration_code write:{len(duration_code)}: {duration_code[:5]}')
+                        log.info(f'recheck duration_code write:{len(duration_code)}: {duration_code[:5]}')
 
                     results = cct.to_mp_run_async(
                         get_tdx_append_now_df_api_tofile, duration_code, dm=dm, newdays=0,detect_calc_support=detect_calc_support)
                     print(("market:%s A:%s open_dm:%s" % (mk, len(df),len(dm))), end=' ')
+                    log.info(("market:%s A:%s open_dm:%s" % (mk, len(df),len(dm))))
 
         if recheck:
             recheck = False
         print("AllWrite:%s t:%s"%(len(duration_code),round(time.time() - time_t, 2)))
+        log.info("AllWrite:%s t:%s"%(len(duration_code),round(time.time() - time_t, 2)))
 
 
 
@@ -4716,7 +4723,7 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
 # usage Ê¹ÓÃËµÃ÷
 #
 #############################################################
-def get_tdx_all_day_LastDF(codeList, dt=None, ptype='close',detect_calc_support=True):
+def get_tdx_all_day_LastDF(codeList, dt=None, ptype='close',detect_calc_support=False):
     '''
     outdate
     '''
@@ -5857,7 +5864,8 @@ if __name__ == '__main__':
     # import sys
     # import timeit
     from docopt import docopt
-    log = LoggerFactory.log
+    # log = LoggerFactory.log
+    log = LoggerFactory.getLogger()
     args = docopt(cct.sina_doc, version='sina_cxdn')
     # print args,args['-d']
     if args['-d'] == 'debug':
@@ -6014,16 +6022,14 @@ if __name__ == '__main__':
     df_checked = check_conditions_auto(df_cols_only[-1:])
     print(f'df_checked print(df.MainU): {df.MainU[-1:]}')
 
-    import ipdb;ipdb.set_trace()
 
-    df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d',lastday=None )
-    print(f"{code} : {df.loc[:,['boll','lastp1d','ma51d','lastp2d','ma52d','lastp3d','ma53d','lasth1d','lasth2d','lasth3d']][-1:].values}")
-    print(f"{code} 'resist','support' : {df.loc[:,['resist','support']][-1:].values}")
-    print(f'3d per1d:{df.per1d[0]}  per2d:{df.per2d[0]}  per3d:{df.per3d[0]}  per4d:{df.per4d[0]}  per5d:{df.per5d[0]}  ')
-    df_cols_only2 = df.loc[:, cols]
-    print(df_cols_only2[-1:])
-    print(f'print(df.MainU): {df.MainU[-1:]}')
-    import ipdb;ipdb.set_trace()
+    # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d',lastday=None )
+    # print(f"{code} : {df.loc[:,['boll','lastp1d','ma51d','lastp2d','ma52d','lastp3d','ma53d','lasth1d','lasth2d','lasth3d']][-1:].values}")
+    # print(f"{code} 'resist','support' : {df.loc[:,['resist','support']][-1:].values}")
+    # print(f'3d per1d:{df.per1d[0]}  per2d:{df.per2d[0]}  per3d:{df.per3d[0]}  per4d:{df.per4d[0]}  per5d:{df.per5d[0]}  ')
+    # df_cols_only2 = df.loc[:, cols]
+    # print(df_cols_only2[-1:])
+    # print(f'print(df.MainU): {df.MainU[-1:]}')
     
     # df2 = get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days['w'],resample='w')
     df2 = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['w'],resample='w')

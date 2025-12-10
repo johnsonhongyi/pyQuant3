@@ -42,20 +42,12 @@ def run_benchmark():
     # 1. 测试 IO 性能 - get_tdx_Exp_day_to_df
     print("-" * 30)
     print("Benchmarking get_tdx_Exp_day_to_df (Refactored)...")
-    print(f"DEBUG: tdd.exp_path = {tdd.exp_path}")
     start_time = time.time()
-    
-    pr = cProfile.Profile()
-    pr.enable()
     try:
         df_new = tdd.get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=0)
     except Exception as e:
         print(f"Error running new function: {e}")
         return
-    pr.disable()
-    
-    ps = pstats.Stats(pr).sort_stats('cumulative')
-    ps.print_stats(20) # Print top 20 time-consuming functions
 
     end_time = time.time()
     print(f"Refactored IO Time: {end_time - start_time:.4f} seconds")
