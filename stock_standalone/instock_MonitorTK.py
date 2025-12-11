@@ -1989,7 +1989,7 @@ def clean_expired_tdx_file(logger):
 
     # ✅ 当前时间窗口
     now_time = cct.get_now_time_int()
-    if not (845 <= now_time <= 925):
+    if not (830 <= now_time <= 925):
         return
 
     logger.info(f"{today} 准备清理过期文件: {cct.get_ramdisk_path('tdx_last_df')}")
@@ -2011,18 +2011,16 @@ def clean_expired_tdx_file(logger):
                 if _LAST_CLEAN_DATE == today:
                     logger.info(f"{today} _LAST_CLEAN_DATE: {_LAST_CLEAN_DATE} 已清理过期文件: {fname}")
                     return
-
-
-                    try:
-                        os.remove(fname)
-                        logger.info(f"{today} 清理过期文件: {fname}")
-                    except Exception as e:
-                        logger.error(f"{today} 清理文件失败: {fname}, err={e}")
-                else:
-                    logger.info(f"{today} 待清理文件不存在: {fname}")
-
-                # ✅ 标记今天已完成
-                _LAST_CLEAN_DATE = today
+                try:
+                    os.remove(fname)
+                    logger.info(f"{today} 清理过期文件: {fname}")
+                except Exception as e:
+                    logger.error(f"{today} 清理文件失败: {fname}, err={e}")
+                # else:
+                #     logger.info(f"{today} 待清理文件不存在: {fname}")
+                finally:
+                    # ✅ 标记今天已完成
+                    _LAST_CLEAN_DATE = today
         finally:
             # os.close(fd)
             pass
@@ -2069,15 +2067,24 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
         elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
             # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
             st_key_sort = g_values.getkey("st_key_sort")
-        elif  845 <= cct.get_now_time_int() <= 925:
+        elif  830 <= cct.get_now_time_int() <= 925:
             global _LAST_CLEAN_DATE
             # ✅ 计算文件路径
             fname = cct.get_ramdisk_path('tdx_last_df')
             # if _LAST_CLEAN_DATE != cct.get_today():
+            time_init = time.time()
             if os.path.exists(fname) and _LAST_CLEAN_DATE != cct.get_today():
                 logger.info(f"{cct.get_today()} 准备清理过期文件: {cct.get_ramdisk_path('tdx_last_df')}")
                 clean_expired_tdx_file(logger)
                 START_INIT = 0
+                top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
+                for res_m in ['d','3d','w','m']:
+                    if res_m != g_values.getkey("resample"):
+                        top_all_d, lastpTDX_DF_d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[res_m],resample=res_m)
+                    # top_all_3d, lastpTDX_DF_3d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['3d'],resample='3d')
+                    # top_all_w, lastpTDX_DF_w = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['w'],resample='w')
+                    # top_all_m, lastpTDX_DF_m = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['m'],resample='m')
+                logger.info(f'init_tdx 用时:{time.time()-time_init:.2f}')
             for _ in range(30):
                 if not flag.value: break
                 time.sleep(1)
@@ -15034,9 +15041,10 @@ def test_single_thread():
         def __init__(self, value=True):
             self.value = value
     flag = Flag(True)   # 或者 flag = Flag(False) 看你的测试需求
-
+    log_level = mp.Value('i', LoggerFactory.DEBUG)  # 'i' 表示整数
+    detect_calc_support = mp.Value('b', False)  # 'i' 表示整数
     # 直接单线程调用
-    fetch_and_process(shared_dict, q, blkname="boll", flag=flag)
+    fetch_and_process(shared_dict, q, blkname="boll", flag=flag ,log_level=log_level,detect_calc_support=detect_calc_support)
 
 
 # def parse_args():
@@ -15185,7 +15193,6 @@ if __name__ == "__main__":
     # from multiprocessing import Manager
     # manager = Manager()
     # global_dict = manager.dict()  # 共享字典
-    # test_single_thread()
     # import ipdb;ipdb.set_trace()
 
     # logger = init_logging("test.log")
@@ -15214,7 +15221,7 @@ if __name__ == "__main__":
     # 直接用自定义的 init_logging，传入日志等级
     # logger = init_logging(log_file='instock_tk.log', redirect_print=False, level=log_level)
     logger.setLevel(log_level)
-    logger.info("程序启动…")
+    logger.info("程序启动…")    
 
     # test_single_thread()
     # import ipdb;ipdb.set_trace()
