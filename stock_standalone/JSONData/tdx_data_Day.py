@@ -25,6 +25,7 @@ from JSONData import sina_data
 import datetime
 import random
 
+import traceback
 # import logbook
 
 # log=logbook.Logger('TDX_day')
@@ -1293,6 +1294,181 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
         df = calc_support_resistance_vec(df)
     return df
 
+def get_tdx_Exp_day_to_df_debug(code, start=None, end=None, dl=None, newdays=None,
+                          type='f', wds=True, lastdays=3, resample='d',
+                          MultiIndex=False, lastday=None, detect_calc_support=True):
+    """
+    获取指定股票的日线数据，并计算各类指标
+    保留原有逻辑和所有变量
+    """
+    code_u = cct.code_to_symbol(code)
+    if type == 'f':
+        file_path = os.path.join(exp_path, 'forwardp', f"{code_u.upper()}.txt")
+    elif type == 'b':
+        file_path = os.path.join(exp_path, 'backp', f"{code_u.upper()}.txt")
+    else:
+        return pd.DataFrame()
+
+    global initTdxdata
+    write_k_data_status = False
+
+    if dl is not None:
+        start = cct.last_tddate(dl)
+    start = cct.day8_to_day10(start)
+    end = cct.day8_to_day10(end)
+
+    tdx_max_int = ct.tdx_max_int
+    tdx_max_int_end = ct.tdx_max_int_end
+    tdx_high_da = ct.tdx_high_da
+    newstockdayl = newdays if newdays is not None else newdaysinit
+
+    df = None
+
+    if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
+        # 只有当日志等级是 DEBUG 或更低才进入 ipdb
+        import ipdb; ipdb.set_trace()
+    log.debug(f'file_path:{file_path}')
+    
+    # ------------------------------
+    # 文件不存在或为空
+    # ------------------------------
+    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+        log.error(f'{code_u} file not exists: {file_path}')
+        tmp_df = get_kdate_data(code, start='', end='', ktype='D')
+        if len(tmp_df) > 0:
+            write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
+            log.error(f'{code_u} file created: {file_path}')
+        else:
+            if initTdxdata < 10:
+                log.error(f"file_path not exists code: {code}")
+            else:
+                print('.', end=' ')
+            initTdxdata += 1
+        return pd.DataFrame()
+
+    # ------------------------------
+    # dl == 1 的特殊处理
+    # ------------------------------
+    if dl is not None and int(dl) == 1:
+        data = cct.read_last_lines(file_path, int(dl) + 3)
+        data_l = data.split('\n')
+        data_l.reverse()
+        for line in data_l:
+            a = line.split(',')
+            if len(a) == 7:
+                tdate, topen, thigh, tlow, tclose, tvol, amount = a
+                try:
+                    topen = round(float(topen), 2)
+                    thigh = round(float(thigh), 2)
+                    tlow = round(float(tlow), 2)
+                    tclose = round(float(tclose), 2)
+                    tvol = round(float(tvol), 2)
+                    amount = round(float(amount.replace('\r','').replace('\n','')), 1)
+                except Exception:
+                    continue
+                if topen == 0 or amount == 0:
+                    continue
+                df = pd.Series({
+                    'code': code, 'date': tdate, 'open': topen, 'high': thigh,
+                    'low': tlow, 'close': tclose, 'amount': amount, 'vol': tvol
+                })
+                return df
+        return pd.Series([], dtype='float64')
+
+    # ------------------------------
+    # 读取文件数据
+    # ------------------------------
+    try:
+        if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
+            # 只有当日志等级是 DEBUG 或更低才进入 ipdb
+            import ipdb; ipdb.set_trace()
+        log.debug(f'file_path:{file_path}')
+        df = pd.read_csv(
+            file_path,
+            names=ct.TDX_Day_columns[1:],
+            header=None,
+            engine='c',
+            encoding='gb18030',
+            encoding_errors='replace',
+            on_bad_lines='skip'
+        )
+        log.debug(f"{code}: 文件读取完成, 行数={len(df)}, 前5行:\n{df.head()}")
+    except Exception as e:
+        log.error(f"{code}: 读取文件异常: {e}\n{traceback.format_exc()}")
+        return pd.DataFrame()
+
+    # ------------------------------
+    # 强制数值化 & drop NaN
+    # ------------------------------
+    for col in ['open','high','low','close','vol','amount']:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+    df.dropna(subset=['open','high','low','close','vol','amount'], inplace=True)
+    df = df[(df['open'] != 0) & (df['amount'] != 0)]
+    df['code'] = code
+    df['date'] = df['date'].astype(str)
+    df = df[df['date'].str.len() == 10]
+    log.debug(f"{code}: 数值化完成, 行数={len(df)}, 前5行:\n{df.head()}")
+
+    df = df[ct.TDX_Day_columns] if all(c in df.columns for c in ct.TDX_Day_columns) else df
+    df = df[~df.date.duplicated()]
+
+    # ------------------------------
+    # 筛选日期
+    # ------------------------------
+    if start is not None:
+        df = df[df.date >= start]
+    if end is not None:
+        df = df[df.date <= end]
+
+    if len(df) == 0:
+        return pd.DataFrame()
+
+    df = df.set_index('date').sort_index(ascending=True)
+    if lastday is not None:
+        df = df[:-lastday]
+
+    # ------------------------------
+    # 非日线重采样
+    # ------------------------------
+    if not MultiIndex and resample != 'd':
+        df = get_tdx_stock_period_to_type(df, period_day=resample)
+        if 'date' in df.columns:
+            df['date'] = df['date'].astype(str)
+            df = df.set_index('date')
+
+    # ------------------------------
+    # SMA计算
+    # ------------------------------
+    try:
+        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
+        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
+        df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
+        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+        log.debug(f"{code}: SMA计算完成, 前5行:\n{df[['close','ma5d','ma10d','ma20d','ma60d']].head()}")
+    except Exception as e:
+        log.error(f"{code}: SMA计算异常: {e}\n{traceback.format_exc()}\n前5行close:\n{df['close'].head()}")
+
+    # ------------------------------
+    # 滚动指标 / lastdays_percent / MACD
+    # ------------------------------
+    try:
+        df['max5'] = df.close.shift(1).rolling(5).max()
+        df['max10'] = df.close.shift(1).rolling(10).max()
+        log.debug(f"{code}: 滚动指标完成, 前5行:\n{df[['close','max5','max10']].head()}")
+
+        if f'perc{lastdays}d' not in df.columns:
+            df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
+            log.debug(f"{code}: lastdays_percent计算完成, 前5行:\n{df.head()}")
+
+        if 'macd' not in df.columns:
+            df = get_tdx_macd(df, detect_calc_support=detect_calc_support)
+            log.debug(f"{code}: MACD计算完成, 前5行:\n{df.head()}")
+    except Exception as e:
+        log.error(f"{code}: 指标计算异常: {e}\n{traceback.format_exc()}\n前5行:\n{df.head()}")
+
+    log.info(f"{code}: get_tdx_Exp_day_to_df完成, 行数={len(df)}, 列={df.columns.tolist()}")
+    return df
 
 
 def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
@@ -1320,6 +1496,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     # ------------------------------
     # 初始化参数
     # ------------------------------
+
     code_u = cct.code_to_symbol(code)
     if type == 'f':
         file_path = os.path.join(exp_path, 'forwardp', f"{code_u.upper()}.txt")
@@ -1342,6 +1519,11 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     newstockdayl = newdays if newdays is not None else newdaysinit
 
     df = None
+
+    if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
+        # 只有当日志等级是 DEBUG 或更低才进入 ipdb
+        import ipdb; ipdb.set_trace()
+    log.debug(f'file_path:{file_path}')
 
     # ------------------------------
     # 文件不存在或为空
@@ -4162,6 +4344,30 @@ def safe_get(df, col, idx=-1, default=0):
         return df[col].iloc[idx]
     return default
 
+def safe_SMA(df, column, period, name):
+    try:
+        df[name] = talib.SMA(df[column].astype(float), timeperiod=period)
+        return True
+    except Exception:
+        tb = traceback.format_exc()
+
+        log.error(
+            f"TA-Lib SMA 计算失败: column={column}, period={period}, name={name}\n"
+            f"Exception:\n{tb}\n"
+        )
+
+        # f"=== DF INFO START ===\n"
+        # f"{df.describe(include='all')}\n\n"
+        # f"Columns: {list(df.columns)}\n"
+        # f"Head:\n{df.head(5)}\n"
+        # f"Tail:\n{df.tail(5)}\n"
+        # f"DF isnull sum:\n{df.isnull().sum()}\n"
+        # f"=== DF INFO END ==="
+
+        # 失败时填充 NaN，不中断主流程
+        df[name] = 0.1
+        return False
+
 def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
     # ct.compute_lastdays lastdays to 9
     if df is not None and len(df) > lastdays:
@@ -4180,10 +4386,16 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
 
 #        df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
 
-        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
-        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
-        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+        # df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
+        # df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
+        # df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
+        # df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+
+        safe_SMA(df, 'close', 5,  'ma5d')
+        safe_SMA(df, 'close', 10, 'ma10d')
+        safe_SMA(df, 'close', 20, 'ma20d')
+        safe_SMA(df, 'close', 60, 'ma60d')
+
         # df['natr'] = ta.natr(df.high, df.low, df.close)
         df['truer'] = ta.true_range(df.high, df.low, df.close)
 
@@ -4762,7 +4974,7 @@ def get_tdx_all_day_LastDF(codeList, dt=None, ptype='close',detect_calc_support=
     df = df.set_index('code')
     # df.loc[:, 'open':] = df.loc[:, 'open':].astype(float)
     log.info("get_to_mp:%s" % (len(df)))
-    log.info("TDXTime:%s" % (time.time() - time_t))
+    log.info(f"TDXTime:{time.time() - time_t:.3f}")
     if dt != None:
         print(("TDX:%0.2f" % (time.time() - time_t)), end=' ')
     return df
@@ -5261,7 +5473,7 @@ def get_tdx_exp_all_LastDF(codeList, dt=None, end=None, ptype='low', filter='n')
     # df.loc[:, 'open':] = df.loc[:, 'open':].astype(float)
     # df.vol = df.vol.apply(lambda x: x / 100)
     log.info("get_to_mp:%s" % (len(df)))
-    log.info("TDXTime:%s" % (time.time() - time_t))
+    log.info(f"TDXTime:{time.time() - time_t:.3f}")
     if dt != None:
         print(("DFTDXE:%0.2f" % (time.time() - time_t)), end=' ')
     return df
@@ -5428,7 +5640,8 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
         # df.loc[:, 'open':'amount'] = df.loc[:, 'open':'amount'].astype(float)
     # df.vol = df.vol.apply(lambda x: x / 100)
     log.info("get_to_mp:%s" % (len(df)))
-    log.info("TDXTime:%s" % (time.time() - time_t))
+    log.info(f"TDXTime:{time.time() - time_t:.3f}")
+
     # if power and 'op' in df.columns:
     #     df=df[df.op >10]
     #     df=df[df.ra < 11]
