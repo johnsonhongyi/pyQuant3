@@ -25,7 +25,6 @@ Debug_is_not_find = 0
 # Compress_Count = 1
 BaseDir = cct.get_ramdisk_dir()
 import tables
-import h5py
 
 #import fcntl linux
 #lock：
@@ -1819,17 +1818,28 @@ def write_tdx_all_df(file_path: str, fetch_all_df_func=None):
 #     return True
 
 
-def compact_hdf5_file(file_path):
+def compact_hdf5_file(file_path, complevel=9, complib='blosc'):
     """
-    对 HDF5 文件进行瘦身，保留数据，清理膨胀
+    对 HDF5 文件进行瘦身，保留数据，重新写入压缩，清理膨胀
+    :param file_path: HDF5 文件路径
+    :param complevel: 压缩等级，0-9
+    :param complib: 压缩库，例如 'blosc', 'zlib'
     """
     tmp_file = file_path + ".tmp"
-    with h5py.File(file_path, 'r') as src, h5py.File(tmp_file, 'w') as dst:
-        for key in src.keys():
-            src.copy(key, dst)
-    # 替换原文件
-    os.replace(tmp_file, file_path)
-    print(f"HDF5 文件瘦身完成: {file_path}")
+
+    try:
+        with HDFStore(file_path, mode='r') as src, HDFStore(tmp_file, mode='w', complevel=complevel, complib=complib) as dst:
+            keys = src.keys()
+            for key in keys:
+                df = src[key]
+                dst.put(key, df, format='table', complevel=complevel, complib=complib)
+
+        # 替换原文件
+        os.replace(tmp_file, file_path)
+        print(f"HDF5 文件瘦身完成: {file_path}")
+
+    except Exception as e:
+        print("瘦身失败:", e)
 
 def check_tdx_all_df(fname='300', shrink_threshold=20000):
     tdx_hd5_name = f'tdx_all_df_{fname}'
@@ -1841,56 +1851,37 @@ def check_tdx_all_df(fname='300', shrink_threshold=20000):
         print("文件不存在")
         return
 
-    file_size_mb = os.path.getsize(tdx_hd5_path)/1024/1024
+    file_size_mb = os.path.getsize(tdx_hd5_path) / 1024 / 1024
     print(f"文件大小: {file_size_mb:.2f} MB")
 
     try:
-        with h5py.File(tdx_hd5_path, "r") as f:
-            top_keys = list(f.keys())
+        # 使用 HDFStore
+        with HDFStore(tdx_hd5_path, mode='r') as store:
+            top_keys = store.keys()  # 返回 ['/df1', '/df2']
+            top_keys = [k.lstrip('/') for k in top_keys]  # 去掉前导 /
             print("顶层 keys:", top_keys)
 
             if not top_keys:
                 print("HDF5 文件没有顶层 keys")
                 return
 
-            # 遍历顶层 keys，查找第一个 Dataset
-            ds = None
-            for k in top_keys:
-                obj = f[k]
-                if isinstance(obj, h5py.Dataset):
-                    ds = obj
-                    break
-                elif isinstance(obj, h5py.Group):
-                    # 如果 Group 里有 Dataset，取第一个
-                    sub_keys = list(obj.keys())
-                    if sub_keys:
-                        ds_candidate = obj[sub_keys[0]]
-                        if isinstance(ds_candidate, h5py.Dataset):
-                            ds = ds_candidate
-                            break
+            # 取第一个 key 对应的 DataFrame
+            first_key = top_keys[0]
+            df = store[first_key]
+            
+            print(f"[DataFrame] key: {first_key}")
+            print(f"shape: {df.shape}")
+            print(f"dtypes:\n{df.dtypes}")
 
-            if ds is None:
-                print("HDF5 文件中没有 Dataset")
-                return
-
-            print(f"[Dataset] 路径: {ds.name}")
-            print(f"shape: {ds.shape}")
-            print(f"dtype: {ds.dtype}")
-
-            rows = ds.shape[0]
+            rows = df.shape[0]
             avg_row_size = file_size_mb * 1024 * 1024 / rows if rows > 0 else 0
             print(f"总行数: {rows}, 文件大小: {file_size_mb:.2f} MB, 平均每行大小: {avg_row_size:.2f} bytes")
 
-        # if avg_row_size > shrink_threshold:
-        #     print("文件膨胀，自动瘦身...")
-        #     try:
-        #         compact_hdf5_file(tdx_hd5_path)
-        #         print("瘦身完成")
-        #     except Exception as e:
-        #         print(f"瘦身失败: {e}")
+            # if rows > shrink_threshold:
+            #     print(f"行数超过阈值 {shrink_threshold}, 建议缩减数据")
 
     except Exception as e:
-        print("无法打开 HDF5:", e)
+        print("读取 HDF5 文件失败:", e)
 
     finally:
         if avg_row_size > shrink_threshold:
@@ -1900,8 +1891,64 @@ def check_tdx_all_df(fname='300', shrink_threshold=20000):
                 print("瘦身完成")
             except Exception as e:
                 print(f"瘦身失败: {e}")
-def check_tdx_all_df_read(fname='300'):
+    return df
+    
+def check_tdx_all_df_Sina(fname='sina_data',max_cols_per_line=5, limit=None):
+    """
+    :param fname: HDF5 文件名后缀
+    :param max_cols_per_line: 打印 dtypes 时每行显示的列数
+    :param limit: 如果指定，打印 DataFrame 前 limit 行
+    """
+    tdx_hd5_name = fname
+    tdx_hd5_path = cct.get_ramdisk_path(tdx_hd5_name)
 
+    print(f"HDF5 文件路径: {tdx_hd5_path}\n\n")
+
+    if not os.path.exists(tdx_hd5_path):
+        print("文件不存在")
+        return
+
+    file_size = os.path.getsize(tdx_hd5_path) / 1024 / 1024  # MB
+    print(f"文件大小: {file_size:.2f} MB")
+
+    try:
+        with HDFStore(tdx_hd5_path, mode='r') as store:
+            top_keys = [k.lstrip('/') for k in store.keys()]
+            print("顶层 keys:", top_keys)
+
+            total_rows = 0
+
+            for key in top_keys:
+                df = store[key]
+                print("=" * 80)
+                print(f"[DataFrame] key: {key}")
+                print(f"shape: {df.shape}")
+
+                # 横向精简显示 dtypes
+                dtype_items = [f"{col}: {dtype}" for col, dtype in df.dtypes.items()]
+                for i in range(0, len(dtype_items), max_cols_per_line):
+                    print("  |  ".join(dtype_items[i:i+max_cols_per_line]))
+
+                rows = df.shape[0]
+                total_rows += rows
+
+            print("=" * 80)
+            print(f"总数据行数: {total_rows}")
+            avg_row_size = file_size * 1024 * 1024 / total_rows if total_rows > 0 else 0
+            print(f"平均每行大小: {avg_row_size:.2f} bytes/row")
+            # 输出前 limit 行
+            if limit is not None:
+                print(f"\n前 {limit} 行数据:")
+                print(df.head(limit))
+            else:
+                print("\n前 5 行数据:")
+                print(df.head(5))
+
+    except Exception as e:
+        print("无法打开 HDF5:", e)
+    return df
+
+def check_tdx_all_df_read(fname='300'):
     tdx_hd5_name = f'tdx_all_df_{fname}'
     tdx_hd5_path = cct.get_run_path_tdx(tdx_hd5_name)
 
@@ -1915,41 +1962,42 @@ def check_tdx_all_df_read(fname='300'):
     print(f"文件大小: {file_size:.2f} MB")
 
     try:
-        with h5py.File(tdx_hd5_path, "r") as f:
+        with HDFStore(tdx_hd5_path, mode='r') as store:
+            top_keys = store.keys()  # ['/df1', '/df2']
+            top_keys = [k.lstrip('/') for k in top_keys]
+            print("顶层 keys:", top_keys)
 
-            print("顶层 keys:", list(f.keys()))
             total_rows = 0
 
-            def walk(name, obj):
-                nonlocal total_rows
-                if isinstance(obj, h5py.Dataset):
-                    print("=" * 80)
-                    print(f"[Dataset] 路径: {name}")
-                    print(f"shape: {obj.shape}")
-                    print(f"dtype: {obj.dtype}")
+            for key in top_keys:
+                df = store[key]
+                print("=" * 80)
+                print(f"[DataFrame] key: {key}")
+                print(f"shape: {df.shape}")
+                print(f"dtypes:\n{df.dtypes}")
 
-                    row_count = obj.shape[0]
-                    total_rows += row_count
+                rows = df.shape[0]
+                total_rows += rows
 
-                    # 列字段分析
-                    print("\n字段结构:")
-                    for field_name in obj.dtype.fields:
-                        field_dtype = obj.dtype.fields[field_name][0]
-                        size = field_dtype.itemsize
-                        print(f"  - {field_name}: {field_dtype} ({size} bytes)")
-                elif isinstance(obj, h5py.Group):
-                    print(f"[Group] {name}")
-
-            f.visititems(walk)
+                # 打印列字段大小（估算每列单个元素大小）
+                print("\n字段结构:")
+                for col in df.columns:
+                    dtype = df[col].dtype
+                    try:
+                        itemsize = df[col].values.itemsize
+                    except:
+                        itemsize = 0
+                    print(f"  - {col}: {dtype} ({itemsize} bytes)")
 
             print("=" * 80)
             print(f"总数据行数: {total_rows}")
             print(f"文件大小: {file_size:.2f} MB")
-            print(f"平均每行大小: {file_size * 1024 * 1024 / total_rows:.2f} bytes/row")
+            avg_row_size = file_size * 1024 * 1024 / total_rows if total_rows > 0 else 0
+            print(f"平均每行大小: {avg_row_size:.2f} bytes/row")
 
     except Exception as e:
         print("无法打开 HDF5:", e)
-
+    return df
 if __name__ == "__main__":
 
     #    import tushare as ts
@@ -2065,6 +2113,7 @@ if __name__ == "__main__":
     # h300 = load_hdf_db(tdx_hd5_name, table='all_300', code_l=None, timelimit=False, MultiIndex=True)
     check_tdx_all_df('300')
     check_tdx_all_df('900')
+    check_tdx_all_df_read('900')
     import ipdb;ipdb.set_trace()
 
     # sina_MultiD_path = "D:\\RamDisk\\sina_MultiIndex_data.h5"
