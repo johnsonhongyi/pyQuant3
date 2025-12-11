@@ -1324,9 +1324,9 @@ def get_tdx_Exp_day_to_df_debug(code, start=None, end=None, dl=None, newdays=Non
 
     df = None
 
-    if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
-        # 只有当日志等级是 DEBUG 或更低才进入 ipdb
-        import ipdb; ipdb.set_trace()
+    # if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
+    #     # 只有当日志等级是 DEBUG 或更低才进入 ipdb
+    #     import ipdb; ipdb.set_trace()
     log.debug(f'file_path:{file_path}')
     
     # ------------------------------
@@ -1379,9 +1379,9 @@ def get_tdx_Exp_day_to_df_debug(code, start=None, end=None, dl=None, newdays=Non
     # 读取文件数据
     # ------------------------------
     try:
-        if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
-            # 只有当日志等级是 DEBUG 或更低才进入 ipdb
-            import ipdb; ipdb.set_trace()
+        # if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
+        #     # 只有当日志等级是 DEBUG 或更低才进入 ipdb
+        #     import ipdb; ipdb.set_trace()
         log.debug(f'file_path:{file_path}')
         df = pd.read_csv(
             file_path,
@@ -1520,9 +1520,9 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
 
     df = None
 
-    if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
-        # 只有当日志等级是 DEBUG 或更低才进入 ipdb
-        import ipdb; ipdb.set_trace()
+    # if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
+    #     # 只有当日志等级是 DEBUG 或更低才进入 ipdb
+    #     import ipdb; ipdb.set_trace()
     log.debug(f'file_path:{file_path}')
 
     # ------------------------------
