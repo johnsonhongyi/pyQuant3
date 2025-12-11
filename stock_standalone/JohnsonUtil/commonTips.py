@@ -707,7 +707,10 @@ def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=F
 
     except Exception as ex:
         # print("Exception on code: {}".format(code)+ os.linesep + traceback.format_exc())
-        return Exception("Exception on format_for_print {}".format(len(df))+ os.linesep + traceback.format_exc())    
+        # return Exception("Exception on format_for_print {}".format(len(df))+ os.linesep + traceback.format_exc())    
+        msg = "Exception on format_for_print {}".format(len(df))+ os.linesep + traceback.format_exc()
+        log.error(msg)
+        return Exception(msg)
 
 def format_replce_list(lst, old='volume', new='maxp'):
         lst_n = [new if x==old else x for x in lst]
@@ -1289,33 +1292,40 @@ def get_run_path_tdx(fp=None):
     # path ='c:\\users\\johnson\\anaconda2\\envs\\pytorch_gpu\\lib\\site-packages'
     # root_path='D:\\MacTools\\WorkFile\\WorkSpace\\pyQuant3\\stock\\'
     path = getcwd()
+    log.debug(f'tdx_all_df_path {path}')
     alist = path.split('stock')
     # if len(alist) > 0:
     if len(alist) > 0 and path.find('stock') >=0:
         path = alist[0]
         # os_sep=get_os_path_sep()
         if fp is not None:
-            path = path + fp + '.h5'
+            # path = path + fp + '.h5'
+            path  =  os.path.join(path, fp + '.h5')
             if not check_file_exist(path):
                 log.error(f'path not find : {path}')
-                path = tdx_all_df_path + os.sep + fp + '.h5'
-                log.debug(f'tdx_all_df_path: {tdx_all_df_path} path: {path}')
+                # path = tdx_all_df_path + os.sep + fp + '.h5'
+                path = os.path.join(tdx_all_df_path, fp + '.h5')
+                log.debug(f'tdx_all_df_path: {tdx_all_df_path} os.sep: {os.sep} path: {path}')
                 if not check_file_exist(path):
-                    log.error(f'path not find tdx_all_df_path : {path}')
+                    log.error(f'path not find tdx_all_df_path : {path} os.sep:{os.sep}')
                 else:
-                    log.info(f'path find in tdx_all_df_path : {path}')
+                    log.info(f'path find in tdx_all_df_path : {path} os.sep:{os.sep}')
 
         log.debug("info:%s getcwd:%s"%(alist[0],path))
     else:
         if isMac():
-            path  = root_path[1].split('stock')[0] + fp + '.h5'
+            # path  = root_path[1].split('stock')[0] + fp + '.h5'
+            path  =  os.path.join(root_path[1].split('stock')[0], fp + '.h5')
+
             if not check_file_exist(path):
                 log.error(f'path not find : {path}')
         else:
-            path  = root_path[0].split('stock')[0] + fp + '.h5'
+            # path  = root_path[0].split('stock')[0] + fp + '.h5'
+            path  =  os.path.join(root_path[0].split('stock')[0], fp + '.h5')
             if not check_file_exist(path):
-                log.error(f'path not find : {path}')
-                path = tdx_all_df_path + os.sep + fp + '.h5'
+                log.error(f'path not find1 : {path}')
+                # path = tdx_all_df_path + os.sep + fp + '.h5'
+                path = os.path.join(tdx_all_df_path, fp + '.h5')
                 log.debug(f'tdx_all_df_path: {tdx_all_df_path} path: {path}')
                 if not check_file_exist(path):
                     log.error(f'path not find tdx_all_df_path : {path}')
@@ -3528,6 +3538,44 @@ def to_mp_run_async_old2025(cmd, urllist, *args,**kwargs):
     print("time:%s"%(round(time.time()-time_s,2)),)
     return result
 
+# def format_func_call(func, *args, **kwargs):
+#     """把函数调用转换成可读字符串"""
+#     func_name = func.__name__
+    
+#     # 位置参数
+#     args_str = ", ".join(repr(a) for a in args)
+
+#     # 关键字参数
+#     kwargs_str = ", ".join(f"{k}={repr(v)}" for k, v in kwargs.items())
+
+#     # 拼接
+#     if args_str and kwargs_str:
+#         s = f"{func_name}({args_str}, {kwargs_str})"
+#     elif args_str:
+#         s = f"{func_name}({args_str})"
+#     elif kwargs_str:
+#         s = f"{func_name}({kwargs_str})"
+#     else:
+#         s = f"{func_name}()"
+
+#     return s
+
+def format_func_call(func, *args, **kwargs):
+    """
+    把函数调用转换成可读字符串。
+    如果 func 是 functools.partial，没有 __name__，自动取原函数名。
+    """
+    import functools
+    func_name = getattr(func, '__name__', None)
+    if func_name is None and isinstance(func, functools.partial):
+        func_name = getattr(func.func, '__name__', str(func))
+
+    # 构建 args 字符串
+    args_str = ", ".join([repr(a) for a in args])
+    kwargs_str = ", ".join([f"{k}={v!r}" for k, v in kwargs.items()])
+    all_args = ", ".join(filter(None, [args_str, kwargs_str]))
+
+    return f"{func_name}({all_args})"
 
 def process_file_exc(func=None,code=None):
     # partialfunc=GlobalValues().getkey('partialfunc')
@@ -3538,8 +3586,16 @@ def process_file_exc(func=None,code=None):
         return func(code)
     except Exception as ex:
         # print("Exception on code: {}".format(code)+ os.linesep + traceback.format_exc())
-        return Exception("Exception on code {}".format(code)+ os.linesep + traceback.format_exc())
+        # return Exception("Exception on code {}".format(code)+ os.linesep + traceback.format_exc())
 
+        msg = "Exception on code {}".format(code)+ os.linesep + traceback.format_exc()
+        runcmd = format_func_call(func, code)
+        log.error(f'msg:{msg} runcmd:{runcmd}')
+        return Exception(msg)
+
+        # tb = traceback.format_exc()
+        # logger.exception("Exception on code %s\n%s", code, tb)  # 自动带 traceback
+        # return e  # 或 return Exception(...)
 
 error_codes = []
 
@@ -3643,7 +3699,9 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                             
                 except Exception as e:
                     log.error("except:%s"%(e))
-                    traceback.print_exc()
+                    # traceback.print_exc()
+                    msg = traceback.format_exc()
+                    log.error(msg)
                     # log.error("except:results%s"%(results[-1]))
                     # import ipdb;ipdb.set_trace()
                     results=[]

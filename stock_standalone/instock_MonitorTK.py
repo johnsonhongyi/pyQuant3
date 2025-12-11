@@ -26,10 +26,10 @@ import win32pipe, win32file,win32api
 from datetime import datetime, timedelta
 import shutil
 import ctypes
+from ctypes import windll
 import platform
 from screeninfo import get_monitors
 import pyperclip  # 用于复制到剪贴板
-import traceback
 from collections import deque
 
 from PyQt5 import QtWidgets, QtCore, QtGui
@@ -46,6 +46,9 @@ import hashlib
 import argparse
 import traceback
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.completion import WordCompleter
 
 class SafeLoggerWriter:
     #放置管道关闭时，Queue.put() 抛 WinError 232
@@ -428,7 +431,6 @@ def save_concept_pg_data_simple(win, concept_name):
         conn.close()
         logger.info(f"[保存成功] {concept_name} 数据已写入 SQLite")
     except Exception as e:
-        import traceback
         traceback.print_exc()
         logger.info(f"[保存失败] {concept_name} -> {e}")
 
@@ -611,6 +613,20 @@ def monitor_rdp_and_scale(win, interval_ms=3000, scale_factor=1.5):
     # 继续检测
     win.after(interval_ms, lambda: monitor_rdp_and_scale(win, interval_ms, scale_factor))
 
+def get_window_dpi_scale(window):
+    try:
+        hwnd = window.winfo_id()
+        dpi = windll.user32.GetDpiForWindow(hwnd)
+        return dpi / 96.0
+    except Exception:
+        return 1.0
+
+def get_current_window_scale(tk):
+    hwnd = tk.winfo_id()
+    dpi = windll.user32.GetDpiForWindow(hwnd)
+    
+    scale = round(dpi / 96, 2)
+    return dpi, scale
 
 def get_windows_dpi_scale_factor():
     """
@@ -653,7 +669,7 @@ if sys.platform.startswith('win'):
     # os.environ['QT_FONT_DPI'] = '1'  # 这个设置通常无效或被忽略
     os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '1'
     os.environ['QT_AUTO_SCREEN_SCALE_FACTOR'] = '1' 
-    os.environ['QT_SCALE_FACTOR'] = str(scale_factor-0.25)
+    # os.environ['QT_SCALE_FACTOR'] = str(scale_factor-0.25)
 
 
     # os.environ['QT_ENABLE_HIGHDPI_SCALING'] = '0'
@@ -986,6 +1002,7 @@ MONITORS = []  # 全局缓存
 #             mx, my, mw, mh = mon
 #             MONITORS.append((mx, my, mx+mw, my+mh))
 #     logger.info(f"✅ Detected {len(MONITORS)} monitor(s).")
+
 
 def get_all_monitors():
     """返回所有显示器的边界列表 [(left, top, right, bottom), ...]"""
@@ -1972,41 +1989,47 @@ def clean_expired_tdx_file(logger):
 
     # ✅ 当前时间窗口
     now_time = cct.get_now_time_int()
-    if not (830 <= now_time <= 925):
+    if not (845 <= now_time <= 925):
         return
 
     logger.info(f"{today} 准备清理过期文件: {cct.get_ramdisk_path('tdx_last_df')}")
     # ✅ 当前交易日
     # logger.info(f"{today}清理过期文件: {cct.get_run_path_tdx('tdx_last_df')}")
+    # ✅ 计算文件路径
+    fname = cct.get_ramdisk_path('tdx_last_df')
+    if os.path.exists(fname):
+        # fd = cross_process_lock(today)
+        # if not fd:
+        #     logger.info(f"{today} fd:{LOCK_FILE.format(date=today)}文件已存在: {fname}")
+        #     return     # 多进程安全版本其他进程已执行
 
-    fd = cross_process_lock(today)
-    if not fd:
-        return     # 多进程安全版本其他进程已执行
+        # ✅ 并发保护
+        try:
+            with _CLEAN_LOCK:
 
-    # ✅ 并发保护
-    try:
-        with _CLEAN_LOCK:
+                # 当天已经执行过
+                if _LAST_CLEAN_DATE == today:
+                    logger.info(f"{today} _LAST_CLEAN_DATE: {_LAST_CLEAN_DATE} 已清理过期文件: {fname}")
+                    return
 
-            # 当天已经执行过
-            if _LAST_CLEAN_DATE == today:
-                return
 
-            # ✅ 计算文件路径
-            fname = cct.get_run_path_tdx('tdx_last_df')
+                    try:
+                        os.remove(fname)
+                        logger.info(f"{today} 清理过期文件: {fname}")
+                    except Exception as e:
+                        logger.error(f"{today} 清理文件失败: {fname}, err={e}")
+                else:
+                    logger.info(f"{today} 待清理文件不存在: {fname}")
 
-            if os.path.exists(fname):
-                try:
-                    os.remove(fname)
-                    logger.info(f"{today} 清理过期文件: {fname}")
-                except Exception as e:
-                    logger.error(f"{today} 清理文件失败: {fname}, err={e}")
-            else:
-                logger.info(f"{today} 待清理文件不存在: {fname}")
+                # ✅ 标记今天已完成
+                _LAST_CLEAN_DATE = today
+        finally:
+            # os.close(fd)
+            pass
+    else:
+        logger.info(f"{today} 待清理文件不存在: {fname}")
+        _LAST_CLEAN_DATE = today
 
-            # ✅ 标记今天已完成
-            _LAST_CLEAN_DATE = today
-    finally:
-        os.close(fd)
 
 # ------------------ 后台数据进程 ------------------ #
 def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=None,detect_calc_support=False):
@@ -2046,12 +2069,16 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
         elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
             # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
             st_key_sort = g_values.getkey("st_key_sort")
-        elif  830 <= cct.get_now_time_int() <= 915:
+        elif  845 <= cct.get_now_time_int() <= 925:
             global _LAST_CLEAN_DATE
-            if _LAST_CLEAN_DATE != cct.get_today():
+            # ✅ 计算文件路径
+            fname = cct.get_ramdisk_path('tdx_last_df')
+            # if _LAST_CLEAN_DATE != cct.get_today():
+            if os.path.exists(fname) and _LAST_CLEAN_DATE != cct.get_today():
                 logger.info(f"{cct.get_today()} 准备清理过期文件: {cct.get_ramdisk_path('tdx_last_df')}")
                 clean_expired_tdx_file(logger)
-            for _ in range(5):
+                START_INIT = 0
+            for _ in range(30):
                 if not flag.value: break
                 time.sleep(1)
             continue
@@ -2167,66 +2194,7 @@ def calc_indicators(top_all, resample):
         top_all['dff'] = ((top_all['buy'] - top_all['df2']) / top_all['df2'] * 100).round(1)
         top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
         
-    # if 'dff2' in top_all.columns:
-    #     logger.info(f'dff2 :{top_all["dff2"][:5]}')
-        
     return top_all.sort_values(by=['dff','percent','volume','ratio','couts'], ascending=[0,0,0,1,1])
-
-# ------------------ 指标计算 ------------------ #
-# def calc_indicators(top_all, resample):
-#     if cct.get_trade_date_status():
-#         for co in ['boll', 'df2']:
-#             top_all[co] = list(
-#                 map(lambda x, y, m, z: z + (1 if (x > y) else 0),
-#                     top_all.close.values,
-#                     top_all.upper.values,
-#                     top_all.llastp.values,
-#                     top_all[co].values)
-#             )
-
-
-#     def calc_virtual_volume_ratio(current_vol, avg_vol):
-#         est_volume, passed_ratio, vol_ratio = estimate_virtual_volume_simple(
-#             current_vol, avg_vol, now=None
-#         )
-#         return round(vol_ratio, 1)  # 返回虚拟量比（如 1.3 表示今日预计量是均量的1.3倍）
-#     # --- 计算实时虚拟成交量 ---
-#     ratio_t = cct.get_work_time_ratio(resample=resample)  # 已开市时间比例（如 0.35）
-#     # 如果当前为交易中，则将 volume 转换为预估全天成交量
-#     # 更新 DataFrame 中的 volume 列为“虚拟量比”
-#     top_all["volume"] = list(
-#         map(calc_virtual_volume_ratio,
-#             top_all["volume"].values,
-#             top_all["last6vol"].values)
-#     )
-
-#     # --- 与均量比 ---
-#     top_all['volume'] = list(
-#         map(lambda x, y: round(x / y / ratio_t, 1),
-#             top_all['volume'].values,
-#             top_all.last6vol.values)
-#     )
-
-#     # --- 差值计算 ---
-#     now_time = cct.get_now_time_int()
-#     if cct.get_trade_date_status():
-#         if 'lastbuy' in top_all.columns:
-#             if 915 < now_time < 930:
-#                 top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
-#                 top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
-#             elif 926 < now_time < 1455:
-#                 top_all['dff'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
-#                 top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
-#             else:
-#                 top_all['dff'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
-#                 top_all['dff2'] = ((top_all['buy'] - top_all['lastbuy']) / top_all['lastbuy'] * 100).round(1)
-#         else:
-#             top_all['dff'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
-#     else:
-#         top_all['dff'] = ((top_all['buy'] - top_all['df2']) / top_all['df2'] * 100).round(1)
-
-#     # --- 排序 ---
-#     return top_all.sort_values(by=['dff', 'percent', 'volume', 'ratio', 'couts'], ascending=[0, 0, 0, 1, 1])
 
 def ensure_parentheses_balanced(expr: str) -> str:
     expr = expr.strip()
@@ -2416,6 +2384,14 @@ class StockMonitorApp(tk.Tk):
         self.default_font_bold = tkfont.nametofont("TkDefaultFont").copy()
         # self.default_font_bold.configure(weight="bold")  # 只加粗，不修改字号或字体
         self.default_font_bold.configure(family="Microsoft YaHei", size=10, weight="bold")
+
+        # #保存初始化基准值
+        # self.base_font_size = self.default_font.cget("size")
+        # self.base_font_bold_size = self.default_font_bold.cget("size")
+        # self.base_window_width = self.winfo_width()
+        # self.base_window_height = self.winfo_height()
+
+
         global duration_sleep_time
         # 💥 关键修正 2：立即执行 DPI 缩放并重新赋值
         if sys.platform.startswith('win'):
@@ -2424,52 +2400,11 @@ class StockMonitorApp(tk.Tk):
             if result_scale is not None and isinstance(result_scale, (float, int)):
                 self.scale_factor = result_scale
 
-        self.last_dpi_scale = get_windows_dpi_scale_factor()
+        # self.last_dpi_scale = get_windows_dpi_scale_factor()
+        self.last_dpi_scale = self.scale_factor
         # 3. 接下来是 Qt 初始化，它不应该影响 self.scale_factor
         if not QtWidgets.QApplication.instance():
             self.app = pg.mkQApp()
-            # font = QtWidgets.QApplication.font()
-            # # self.base_font_size = font.pointSize()
-            # # if self.scale_factor > 1.5:
-            # # 1. 获取当前的应用程序默认字体 (这是 Qt 认为的 1.0x 逻辑字体)
-            # app_font = self.app.font()
-            # self.base_font_size = app_font.pointSize() 
-            # # 2. 获取逻辑点大小（使用 PointSizeF 以获得浮点精度）
-            # # 在 DPI Unaware 模式下，这通常返回 9pt 或 10pt 的逻辑大小。
-            # default_size_pt = app_font.pointSizeF() 
-
-            # # 3. 仅进行微调（例如，比默认字体大 2 逻辑点）
-            # NEW_LOGICAL_SIZE = default_size_pt + 2 
-
-            # # 4. 设置新的逻辑大小
-            # new_app_font = QtGui.QFont(app_font.family())
-            # new_app_font.setPointSizeF(NEW_LOGICAL_SIZE)
-
-            # # 5. 应用到应用程序 (影响所有未设置字体的控件)
-            # # self.app.setFont(new_app_font)
-
-            # # 6. 打印当前的逻辑 DPI (验证)
-            # screen = self.app.primaryScreen()
-            # logical_dpi = screen.logicalDotsPerInch() 
-            # logger.info(f'逻辑 DPI: {logical_dpi} (应为 96) 新字体逻辑大小: {new_app_font.pointSize()}')
-
-            # # --- 您的 PyqtGraph 绘图字体应该继续基于这个 NEW_LOGICAL_SIZE 进行创建 ---
-            # LABEL_SIZE_PT = NEW_LOGICAL_SIZE
-            # TICK_SIZE_PT = NEW_LOGICAL_SIZE - 1 
-
-            # 创建 PyqtGraph 轴标签字体时：
-            # label_font = QtGui.QFont("Microsoft YaHei")
-            # label_font.setPointSizeF(LABEL_SIZE_PT)
-            # plot.setLabel('bottom', '标签', **font=label_font**) # 注意 PyqtGraph 的 setLabel 参数用法
-
-
-            # screen = self.app.primaryScreen()
-            # dpi = screen.logicalDotsPerInch()
-            # 根据 DPI 调整字体比例
-            # font = self.app.font()
-            # font.setPointSize(int(font.pointSize() * dpi / 96)+ 2)
-            # self.app.setFont(font)
-            # logger.info(f'dpi : {dpi} fontsize: {font.pointSize()} ratio :  {(dpi / 72)}')
 
         self.title("Stock Monitor")
         self.initial_w, self.initial_h, self.initial_x, self.initial_y  = self.load_window_position(self, "main_window", default_width=1200, default_height=480)
@@ -2816,6 +2751,9 @@ class StockMonitorApp(tk.Tk):
         width_in = self.winfo_screenmmwidth() / 25.4
         height_in = self.winfo_screenmmheight() / 25.4
         screen_dpi = round(width_px / width_in / 96,2)
+        dpi, scale = get_current_window_scale(self)
+        print("当前显示器 DPI:", dpi)
+        print("缩放倍率:", scale)
 
         # if screen_dpi != self.scale_factor:
         #     logger.info(f"{cct.get_now_time_int()} 分辨率: {width_px}×{height_px}")
@@ -2827,31 +2765,64 @@ class StockMonitorApp(tk.Tk):
         # logger.info(f"实际 DPI: {screen_dpi:.2f}, Tk DPI: {px_per_inch/96:.2f}")
         return  (width_px,height_px)
 
+            # width_px,height_px = self.print_tk_dpi_detail()
+            # if width_px == 1920:
+            #     current_scale = 1.25
+            # elif  width_px == 3840 or width_px == 2560:
+            #     current_scale = 2
+            # else:
+            #     current_scale = 1
+
     def _check_dpi_change(self):
             """定期检测 DPI 是否变化（例如 RDP 登录）"""
-            # current_scale = get_windows_dpi_scale_factor()
-            # logger.info(f'current_scale : {current_scale} self.last_dpi_scale : {self.last_dpi_scale}')
-            # current_scale = self.get_tk_dpi_scale()
-            width_px,height_px = self.print_tk_dpi_detail()
-            if width_px == 1920:
-                current_scale = 1.25
-            elif  width_px == 3840 or width_px == 2560:
-                current_scale = 2
-            else:
-                current_scale = 1
-            # _pgscale = self.get_dynamic_dpi_scale()
-            # logger.info(f'current_scale : {current_scale} self.last_dpi_scale :{self.last_dpi_scale}')
+            # dpi, scale = get_current_window_scale(self)
+            scale = get_window_dpi_scale(self)
+            # print("当前显示器 DPI:", dpi)
+            # print("缩放倍率:", scale)
+            current_scale = scale
             # logger.info(f'width_px : {width_px}')
             if abs(current_scale - self.last_dpi_scale) > 0.05:
-                logger.info(f"{cct.get_now_time_int()} 分辨率: {width_px}×{height_px} current_scale:{current_scale}")
+                logger.info(f"{cct.get_now_time_int()}  current_scale:{current_scale}")
+                # logger.info(f"{cct.get_now_time_int()} 分辨率: {width_px}×{height_px} current_scale:{current_scale}")
                 logger.info(f"[DPI变化检测] 从 {self.last_dpi_scale:.2f} → {current_scale:.2f}")
                 self._apply_scale_dpi_change(current_scale)
                 self.on_dpi_changed_qt(current_scale)
                 # self.scale_factor = current_scale
                 self.last_dpi_scale = current_scale
 
-            # 每 3 秒检测一次
+            # 每 5 秒检测一次
             self.after(5000, self._check_dpi_change)
+
+    def get_qt_window_scale_base(self,win: QtWidgets.QWidget):
+        try:
+            handle = win.windowHandle()  # 获取 QWindow
+            if handle is None:
+                # 有些 QWidget 还没显示，会返回 None
+                return 96, 1.0
+            screen = handle.screen()  # QScreen
+            scale = screen.devicePixelRatio()
+            dpi = screen.logicalDotsPerInch()
+            return dpi, scale
+        except Exception as e:
+            logger.warning(f"获取 Qt 窗口缩放失败: {e}")
+            return 96, 1.0
+
+    def get_qt_window_scale(self,win: QtWidgets.QWidget):
+        try:
+            handle = win.windowHandle()
+            if handle is None:
+                return 1.0  # 还没显示窗口，默认 1.0
+            screen = handle.screen()
+            # logical DPI
+            logical_dpi = screen.logicalDotsPerInch()   # 通常 96
+            # 物理 DPI = logical DPI * devicePixelRatio()
+            physical_dpi = logical_dpi * screen.devicePixelRatio()
+            # 基准 DPI = 96
+            scale = physical_dpi / 96.0
+            return scale
+        except Exception as e:
+            logger.warning(f"获取 Qt 窗口缩放失败: {e}")
+            return 1.0
 
     def on_dpi_changed_qt(self, new_scale):
         """RDP 或 DPI 变化时自动缩放窗口"""
@@ -2862,19 +2833,25 @@ class StockMonitorApp(tk.Tk):
                     try:
                         if  v.get("win") is not None:
                             # 已存在，聚焦并显示 (PyQt)
-                            geom = win.geometry()
-                            width, height = geom.width(), geom.height()
-
-                            new_w = int(width * new_scale)
-                            new_h = int(height * new_scale)
-                            win.resize(new_w, new_h)
-                            code = v.get("code", "N/A")
-                            logger.info(f"[DPI] code={code} 窗口自动放大到 {new_scale:.2f} 倍 ({new_w}x{new_h})")
-                            # 如果你使用 PyQtGraph 或 Label，也可重设字体：
-                            for child in win.findChildren(QtWidgets.QWidget):
-                                font = child.font()
-                                font.setPointSizeF(font.pointSizeF() * new_scale)
-                                child.setFont(font)
+                            win_qt_scale = self.get_qt_window_scale(win)
+                            if win_qt_scale == new_scale:
+                                logger.info(f'get_qt_window_scale: {self.get_qt_window_scale(win)} get_qt_window_scale_base:{self.get_qt_window_scale_base(win)}')
+                                geom = win.geometry()
+                                width, height = geom.width(), geom.height()
+                                base = self._dpi_base
+                                scale_ratio = new_scale / base["scale"]
+                                # new_w = int(width * new_scale)
+                                # new_h = int(height * new_scale)
+                                new_w = int(width * scale_ratio)
+                                new_h = int(height * scale_ratio)
+                                win.resize(new_w, new_h)
+                                code = v.get("code", "N/A")
+                                logger.info(f"[DPI] code={code} 窗口自动放大到 {new_scale:.2f} 倍-> {scale_ratio:.2f}倍 ({new_w}x{new_h})")
+                                # 如果你使用 PyQtGraph 或 Label，也可重设字体：
+                                for child in win.findChildren(QtWidgets.QWidget):
+                                    font = child.font()
+                                    font.setPointSizeF(font.pointSizeF() * scale_ratio)
+                                    child.setFont(font)
 
                     except Exception as e:
                         logger.info(f'e:{e} pg win is None will remove:{v.get("win")}')
@@ -2901,105 +2878,462 @@ class StockMonitorApp(tk.Tk):
     #     logger.info(f"[Tk] DPI={dpi:.2f}, scale={scale:.2f}")
     #     return scale
 
-    def _apply_scale_dpi_change(self, scale_factor):
-            """当检测到 DPI 变化时，自动放大/缩小主窗口及所有 UI 元素"""
-            try:
-                # 1️⃣ 调整窗口大小
-                width = self.winfo_width()
-                height = self.winfo_height()
-                new_w = int(width * scale_factor / self.scale_factor)
-                new_h = int(height * scale_factor / self.scale_factor)
-                logger.info(f'[DPI变化] scale_factor: {scale_factor:.2f} old_scale: {self.scale_factor:.2f} window_size: {width}x{height} -> {new_w}x{new_h}')
-                self.geometry(f"{new_w}x{new_h}")
+    # def _apply_scale_dpi_change_2_125_no(self, new_scale):
+    #     """
+    #     完整 DPI 缩放方法（窗口尺寸、字体、TreeView 行高和列宽、全局 Tk scaling）
+    #     """
+    #     try:
+    #         # 初始化基准值
+    #         if not hasattr(self, "_dpi_base"):
+    #             base_tree_colwidths = []
+    #             if hasattr(self, 'tree'):
+    #                 base_tree_colwidths = [self.tree.column(c)['width'] for c in self.tree['columns']]
+    #             self._dpi_base = {
+    #                 "width": self.winfo_width(),
+    #                 "height": self.winfo_height(),
+    #                 "font_size": self.default_font.cget("size"),
+    #                 "tree_rowheight": 22,
+    #                 "tree_colwidths": base_tree_colwidths,
+    #                 "scale": self.scale_factor
+    #             }
+    #             logger.info(f"[DPI] 初始化基准值: 窗口 {self._dpi_base['width']}x{self._dpi_base['height']}, "
+    #                         f"字体 {self._dpi_base['font_size']}pt, TreeView行高 {self._dpi_base['tree_rowheight']}")
 
-                # 2️⃣ 调整字体大小
-                old_size = self.default_font.cget("size")
-                new_size = int(old_size * scale_factor / self.scale_factor)
-                new_size = max(6, min(new_size, 16))  # 最小6 最大16
-                self.default_font.configure(size=new_size)
-                self.default_font_bold.configure(size=new_size)
-                logger.info(f'[DPI变化] 字体大小: {old_size}pt -> {new_size}pt')
+    #         base = self._dpi_base
+    #         scale_ratio = new_scale / base["scale"]
 
-                # 3️⃣ 更新缩放因子
-                old_scale = self.scale_factor
-                self.scale_factor = scale_factor
+    #         # 1️⃣ 窗口尺寸
+    #         new_w = int(base["width"] * scale_ratio)
+    #         new_h = int(base["height"] * scale_ratio)
+    #         self.geometry(f"{new_w}x{new_h}")
 
-                # 4️⃣ 触发 TreeView 列宽重新计算
-                if hasattr(self, 'current_cols') and hasattr(self, 'tree'):
-                    logger.info(f'[DPI变化] 重新计算 TreeView 列宽')
-                    self._setup_tree_columns(
-                        self.tree,
-                        tuple(self.current_cols),
-                        sort_callback=self.sort_by_column,
-                        other={}
-                    )
+    #         # 2️⃣ 字体
+    #         new_font_size = max(6, min(int(base["font_size"] * scale_ratio), 24))
+    #         self.default_font.configure(size=new_font_size)
+    #         self.default_font_bold.configure(size=new_font_size)
 
-                # 5️⃣ 应用全局 Tkinter 缩放（字体和像素度量）
-                tk_scaling_value = (scale_factor * DEFAULT_DPI) / 72.0
-                self.tk.call('tk', 'scaling', tk_scaling_value)
-                logger.info(f'[DPI变化] Tkinter scaling 设置为 {tk_scaling_value:.3f}（对应 {scale_factor:.2f}x DPI）')
+    #         # 3️⃣ TreeView 行高和列宽
+    #         if hasattr(self, 'tree'):
+    #             style = ttk.Style(self)
+    #             new_rowheight = int(base["tree_rowheight"] * scale_ratio)
+    #             style.configure('Treeview', rowheight=new_rowheight)
+    #             style.configure('Treeview.Heading', font=self.default_font)
+    #             # 列宽按比例更新
+    #             for i, col in enumerate(self.tree['columns']):
+    #                 if i < len(base["tree_colwidths"]):
+    #                     self.tree.column(col, width=int(base["tree_colwidths"][i] * scale_ratio))
 
-                # 6️⃣ 🔑 设置 TreeView 行高（显式设置，确保正确缩放）
-                if hasattr(self, 'tree'):
-                    try:
-                        style = ttk.Style(self)
-                        BASE_ROW_HEIGHT = 22  # 基础行高像素
-                        scaled_row_height = int(BASE_ROW_HEIGHT * scale_factor)
-                        style.configure('Treeview', rowheight=scaled_row_height)
-                        logger.info(f'[DPI变化] TreeView 行高设置为 {scaled_row_height}px')
-                    except Exception as e_row:
-                        logger.warning(f'[DPI变化] 设置 TreeView 行高失败: {e_row}')
+    #         # 4️⃣ 全局 Tk scaling
+    #         self.tk.call('tk', 'scaling', new_scale)
 
-                # 7️⃣ 🔑 重新配置 TreeView 列标题的字体（使其自动缩放）
-                if hasattr(self, 'tree'):
-                    try:
-                        style = ttk.Style(self)
-                        style.configure('Treeview.Heading', font=self.default_font)
-                        logger.info(f'[DPI变化] TreeView 列标题字体已更新')
-                    except Exception as e_heading:
-                        logger.warning(f'[DPI变化] 更新 TreeView 列标题失败: {e_heading}')
+    #         # 5️⃣ 递归更新内部所有控件字体
+    #         for widget in self.winfo_children():
+    #             self._update_widget_font_recursive(widget, self.default_font)
 
-                # 8️⃣ 🔑 重新配置状态栏标签字体（使其自动缩放）
+    #         # 6️⃣ 保存 scale
+    #         self.scale_factor = new_scale
+    #         logger.info(f"[DPI] ✅ 完成全部缩放: scale={new_scale:.2f}")
+
+    #     except Exception as e:
+    #         logger.error(f"[DPI] ❌ 应用缩放失败: {e}", exc_info=True)
+
+    # def _update_widget_font_recursive(self, widget, font):
+    #     """
+    #     递归更新 widget 及其子控件的字体
+    #     """
+    #     try:
+    #         if isinstance(widget, (tk.Label, tk.Entry, tk.Button, ttk.Combobox, tk.Text)):
+    #             widget.configure(font=font)
+    #         elif isinstance(widget, ttk.Treeview):
+    #             # TreeView 已经在 _apply_scale_dpi_change 中单独处理
+    #             pass
+    #         elif isinstance(widget, tk.PanedWindow):
+    #             # PanedWindow 内部可能还有子控件
+    #             for child in widget.winfo_children():
+    #                 self._update_widget_font_recursive(child, font)
+    #         elif isinstance(widget, tk.Frame):
+    #             for child in widget.winfo_children():
+    #                 self._update_widget_font_recursive(child, font)
+    #         else:
+    #             # 其他通用控件
+    #             if hasattr(widget, "winfo_children"):
+    #                 for child in widget.winfo_children():
+    #                     self._update_widget_font_recursive(child, font)
+    #     except Exception as e:
+    #         logger.warning(f"[DPI] 更新控件字体失败: {e} ({widget})")
+
+    def scale_single_window(self,window, scale_factor):
+        # 调整窗口尺寸
+        width = window.winfo_width()
+        height = window.winfo_height()
+        window.geometry(f"{int(width*scale_factor)}x{int(height*scale_factor)}")
+
+        # 遍历窗口控件缩放字体
+        for child in window.winfo_children():
+            if isinstance(child, tk.Label) or isinstance(child, tk.Entry):
+                font = tkfont.nametofont(child.cget("font"))
+                font.configure(size=int(font.cget("size") * scale_factor))
+                child.configure(font=font)
+
+        # Treeview 行高
+        if isinstance(window, ttk.Treeview):
+            style = ttk.Style(window)
+            style.configure("Treeview", rowheight=int(22 * scale_factor))
+
+
+    def scale_tk_window(self,window, scale_factor: float,name:str):
+        """
+        对单个 Tk 窗口进行 DPI 缩放
+        ✅ 不使用 tk scaling
+        ✅ 不影响其它窗口
+        """
+
+        # 初始化基准值
+        if not hasattr(window, "_dpi_base"):
+            base_tree_colwidths = []
+            if hasattr(window, 'tree'):
+                base_tree_colwidths = [window.tree.column(c)['width'] for c in window.tree['columns']]
+            window._dpi_base = {
+                "width": window.winfo_width(),
+                "height": window.winfo_height(),
+                "font_size": self.default_font_size,
+                "tree_rowheight": 22,
+                "tree_colwidths": base_tree_colwidths,
+                "scale": get_window_dpi_scale(window)
+            }
+            logger.info(f"[DPI] {name} 初始化基准值: {window._dpi_base['scale']} 窗口 {window._dpi_base['width']}x{window._dpi_base['height']}, "
+                        f"字体 {window._dpi_base['font_size']}pt, TreeView行高 {window._dpi_base['tree_rowheight']}")
+            return
+
+        base = window._dpi_base
+        base_scale_factor = base["scale"]
+        font_size = base["font_size"]
+        rowheight = base["tree_rowheight"]
+
+        if scale_factor == base_scale_factor:
+            return
+        logger.info(f"[DPI] {name} font_size: {font_size} rowheight:{rowheight} 变化: {base_scale_factor} to {scale_factor}")
+        # scale_ratio = scale_factor / base["scale"]
+
+        # # 1. 缩放窗口尺寸
+        # width = window.winfo_width()
+        # height = window.winfo_height()
+        # new_w = int(width * scale_factor / base_scale_factor)
+        # new_h = int(height * scale_factor / base_scale_factor)
+        # logger.info(f'[DPI变化] scale_factor: {scale_factor:.2f} old_scale: {base_scale_factor:.2f} window_size: {width}x{height} -> {new_w}x{new_h}')
+        # window.geometry(f"{new_w}x{new_h}")
+        
+        # --- 递归控件字体 ---
+        def scale_widgets(parent,font_size):
+            for child in parent.winfo_children():
                 try:
-                    for widget in self.winfo_children():
-                        if isinstance(widget, tk.PanedWindow):
-                            for child in widget.winfo_children():
-                                for label in child.winfo_children():
-                                    if isinstance(label, tk.Label):
-                                        label.configure(font=self.default_font)
-                    logger.info(f'[DPI变化] 状态栏标签字体已更新')
-                except Exception as e_status:
-                    logger.warning(f'[DPI变化] 更新状态栏标签失败: {e_status}')
+                    base = tkfont.nametofont(child.cget("font"))
+                    f = tkfont.Font(family=base.cget("family"), size=font_size, weight=base.cget("weight"), slant=base.cget("slant"))
+                    child.configure(font=f)
 
-                # 9️⃣ 🔑 重新配置 PG 窗口（概念分析）中的文字字体（PyQt TextItem）
-                if hasattr(self, '_pg_windows'):
+                except Exception:
+                    pass
+
+                scale_widgets(child,font_size)
+
+        scale_widgets(window,font_size)
+
+        # --- Treeview 私有行高 ---
+        # style = ttk.Style(window)
+        # style_name = f"Treeview_{id(window)}"
+        # style.configure(style_name, rowheight=rowheight)
+
+        # if hasattr(self, "tree"):
+        #     try:
+        #         self.tree.configure(style=style_name)
+        #     except Exception:
+        #         pass
+        # --- 3. 当前Treeview样式 ---
+
+        if hasattr(window, "tree"):
+            style = ttk.Style(window)
+            style_name = f"{window.winfo_id()}.Treeview"
+            style.configure(style_name, rowheight=rowheight)
+            window.tree.configure(style=style_name)
+
+    def scale_refesh_windows(self,scale_factor):
+
+        if hasattr(self, "_concept_win") and self._concept_win:
+            if self._concept_win.winfo_exists():
+                logger.info(f"scale_tk_window  _concept_win窗口scale: {scale_factor}")
+                self.scale_tk_window(self._concept_win,scale_factor,name="_concept_win")
+        # 如果 KLineMonitor 存在且还没销毁，保存位置
+        if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
+            try:
+                logger.info(f"scale_tk_window  kline_monitor窗口scale: {scale_factor}")
+                self.scale_tk_window(self.kline_monitor,scale_factor,name="kline_monitor")
+            except Exception:
+                pass
+
+        # --- 保存并关闭所有 monitor_windows（概念前10窗口）---
+        if hasattr(self, "monitor_windows") and self.monitor_windows:
+            for unique_code, win_info in list(self.monitor_windows.items()):
+                win = win_info.get('toplevel')
+                if win and win.winfo_exists():
                     try:
-                        for unique_code, w_dict in list(self._pg_windows.items()):
-                            texts = w_dict.get("texts", [])
-                            # 获取当前应用字体大小（已在步骤 2 中更新）
-                            app_font = QtWidgets.QApplication.font()
-                            font_size = app_font.pointSize()
+                        # 提取窗口名称用于保存位置
+                        logger.info(f"scale_tk_window {unique_code}窗口scale: {scale_factor}")
+                        self.scale_tk_window(win,scale_factor,name=unique_code)
+                    except Exception as e:
+                        logger.warning(f"scale_tk_window {unique_code}窗口scale:  {scale_factor} 失败: {e}")
+        logger.info(f'scale_refesh_win  done')
+
+        # --- 关闭所有 concept top10 窗口 --- 同 monitor_windows
+        # if hasattr(self, "_pg_top10_window_simple"):
+        #     for key, win_info in list(self._pg_top10_window_simple.items()):
+        #         win = win_info.get("win")
+        #         if win and win.winfo_exists():
+        #             try:
+        #                 # 如果窗口，先调用
+        #                 logger.info(f'scale_tk_window {win_info.get("stock_info")} 窗口scale: {scale_factor}')
+        #                 self.scale_tk_window(win,scale_factor)
+        #             except Exception as e:
+        #                 logger.warning(f'scale_tk_window {win_info.get("stock_info")}窗口scale {scale_factor} 失败: {e}')
+
+    def _apply_scale_dpi_change(self, scale_factor: float):
+        """
+        当 DPI 变化时，同步缩放 Tk + Qt
+        ✅ 禁止几何反复 resize
+        ✅ 使用 Tk 原生 scaling
+        ✅ 完整同步命名字体
+        """
+
+        try:
+            # self.scale_refesh_windows(scale_factor)
+
+            # 初始化基准值
+            if not hasattr(self, "_dpi_base"):
+                base_tree_colwidths = []
+                if hasattr(self, 'tree'):
+                    base_tree_colwidths = [self.tree.column(c)['width'] for c in self.tree['columns']]
+                self._dpi_base = {
+                    "width": self.winfo_width(),
+                    "height": self.winfo_height(),
+                    "font_size": self.default_font.cget("size"),
+                    "tree_rowheight": 22,
+                    "tree_colwidths": base_tree_colwidths,
+                    "scale": self.scale_factor
+                }
+                logger.info(f"[DPI] 初始化基准值Main: 窗口 {self._dpi_base['width']}x{self._dpi_base['height']}, "
+                            f"字体 {self._dpi_base['font_size']}pt, TreeView行高 {self._dpi_base['tree_rowheight']}")
+
+            base = self._dpi_base
+            font_size = base["font_size"]
+            scale_ratio = scale_factor / base["scale"]
+
+            # 1️⃣ 调整窗口大小
+            width = self.winfo_width()
+            height = self.winfo_height()
+            new_w = int(width * scale_factor / self.scale_factor)
+            new_h = int(height * scale_factor / self.scale_factor)
+            logger.info(f'[DPI变化] scale_factor: {scale_factor:.2f} old_scale: {self.scale_factor:.2f} window_size: {width}x{height} -> {new_w}x{new_h}')
+            self.geometry(f"{new_w}x{new_h}")
+
+            old_scale = self.scale_factor or 1.0
+
+            # --- 1. 防抖 ---
+            if abs(scale_factor - old_scale) < 0.01:
+                return
+
+            self.scale_factor = scale_factor
+
+            logger.info(
+                f"[DPI变化] scale: {old_scale:.2f}x -> {scale_factor:.2f}x"
+            )
+
+            # ✅ 2. Tk 全局 scaling
+            # Tk scaling = DPI / 72
+            # scale = DPI / 96
+            # => tk = scale * 96/72 = scale * 4/3
+            # -------------------------------
+            tk_scaling = scale_factor * (4/3)
+            # self.tk.call("tk", "scaling", tk_scaling)
+
+            logger.info(
+                f"[DPI变化] 应该Tk scaling = {tk_scaling:.3f}"
+            )
+
+            # -------------------------------
+            # ✅ 3. 同步所有 Tk 命名字体
+            # -------------------------------
+
+            # new_size = max(9, round(self.default_font_size * scale_ratio))
+            new_size = max(9, round(font_size * scale_ratio))
+
+            font_names = [
+                "TkDefaultFont",
+                "TkTextFont",
+                "TkFixedFont",
+                "TkHeadingFont",
+                "TkMenuFont",
+            ]
+
+            for name in font_names:
+                try:
+                    f = tkfont.nametofont(name)
+                    f.configure(size=new_size)
+                except Exception:
+                    pass
+
+            # 保留你自定义字体引用
+            self.default_font.configure(size=new_size)
+            self.default_font_bold.configure(size=new_size)
+
+            logger.info(
+                f"[DPI变化] Tk font size: {self.default_font_size}pt -> {new_size}pt"
+            )
+            # self.default_font_size = new_size
+            # -------------------------------
+            # ✅ 4. Treeview 行高缩放
+            # -------------------------------
+            if hasattr(self, "tree"):
+                try:
+                    style = ttk.Style(self)
+                    BASE_ROW_HEIGHT = 22
+                    style.configure(
+                        "Treeview",
+                        rowheight=int(BASE_ROW_HEIGHT * scale_factor)
+                    )
+                except Exception as e:
+                    logger.warning(f"[DPI变化] 设置 Treeview 行高失败: {e}")
+
+            # -------------------------------
+            # ✅ 5. Qt 窗口同步
+            # -------------------------------
+
+            self.on_dpi_changed_qt(scale_factor)
+
+            logger.info(
+                f"[DPI变化] ✅ DPI同步完成 Tk+Qt @ {scale_factor:.2f}x"
+            )
+
+            # self.scale_refesh_windows(scale_factor)
+
+        except Exception as e:
+            logger.error(
+                f"[DPI变化] ❌ DPI同步失败: {e}",
+                exc_info=True
+            )
+        finally:
+            self.scale_factor = scale_factor
+
+
+    # def _apply_scale_dpi_change_last_nostatus(self, scale_factor):
+    #         """当检测到 DPI 变化时，自动放大/缩小主窗口及所有 UI 元素"""
+    #         try:
+    #             # 1️⃣ 调整窗口大小
+    #             width = self.winfo_width()
+    #             height = self.winfo_height()
+    #             new_w = int(width * scale_factor / self.scale_factor)
+    #             new_h = int(height * scale_factor / self.scale_factor)
+    #             logger.info(f'[DPI变化] scale_factor: {scale_factor:.2f} old_scale: {self.scale_factor:.2f} window_size: {width}x{height} -> {new_w}x{new_h}')
+    #             self.geometry(f"{new_w}x{new_h}")
+
+    #             # 2️⃣ 调整字体大小
+    #             old_size = self.default_font.cget("size")
+    #             new_size = int(old_size * scale_factor / self.scale_factor)
+    #             new_size = max(6, min(new_size, 16))  # 最小6 最大16
+    #             self.default_font.configure(size=new_size)
+    #             self.default_font_bold.configure(size=new_size)
+    #             logger.info(f'[DPI变化] 字体大小: {old_size}pt -> {new_size}pt')
+
+    #             # 3️⃣ 更新缩放因子
+    #             old_scale = self.scale_factor
+    #             self.scale_factor = scale_factor
+
+    #             # 4️⃣ 触发 TreeView 列宽重新计算
+    #             if hasattr(self, 'current_cols') and hasattr(self, 'tree'):
+    #                 logger.info(f'[DPI变化] 重新计算 TreeView 列宽')
+    #                 self._setup_tree_columns(
+    #                     self.tree,
+    #                     tuple(self.current_cols),
+    #                     sort_callback=self.sort_by_column,
+    #                     other={}
+    #                 )
+
+    #             # 5️⃣ 应用全局 Tkinter 缩放（字体和像素度量）
+    #             tk_scaling_value = (scale_factor * DEFAULT_DPI) / 72.0
+    #             self.tk.call('tk', 'scaling', tk_scaling_value)
+    #             logger.info(f'[DPI变化] Tkinter scaling 设置为 {tk_scaling_value:.3f}（对应 {scale_factor:.2f}x DPI）')
+
+    #             # 6️⃣ 🔑 设置 TreeView 行高（显式设置，确保正确缩放）
+    #             if hasattr(self, 'tree'):
+    #                 try:
+    #                     style = ttk.Style(self)
+    #                     BASE_ROW_HEIGHT = 22  # 基础行高像素
+    #                     scaled_row_height = int(BASE_ROW_HEIGHT * scale_factor)
+    #                     style.configure('Treeview', rowheight=scaled_row_height)
+    #                     logger.info(f'[DPI变化] TreeView 行高设置为 {scaled_row_height}px')
+    #                 except Exception as e_row:
+    #                     logger.warning(f'[DPI变化] 设置 TreeView 行高失败: {e_row}')
+
+    #             # 7️⃣ 🔑 重新配置 TreeView 列标题的字体（使其自动缩放）
+    #             if hasattr(self, 'tree'):
+    #                 try:
+    #                     style = ttk.Style(self)
+    #                     style.configure('Treeview.Heading', font=self.default_font)
+    #                     logger.info(f'[DPI变化] TreeView 列标题字体已更新')
+    #                 except Exception as e_heading:
+    #                     logger.warning(f'[DPI变化] 更新 TreeView 列标题失败: {e_heading}')
+
+    #             # 8️⃣ 🔑 重新配置状态栏标签字体（使其自动缩放）
+    #             try:
+    #                 for widget in self.winfo_children():
+    #                     if isinstance(widget, tk.PanedWindow):
+    #                         for child in widget.winfo_children():
+    #                             for label in child.winfo_children():
+    #                                 if isinstance(label, tk.Label):
+    #                                     label.configure(font=self.default_font)
+    #                 logger.info(f'[DPI变化] 状态栏标签字体已更新')
+    #             except Exception as e_status:
+    #                 logger.warning(f'[DPI变化] 更新状态栏标签失败: {e_status}')
+
+    #             # 9️⃣ 🔑 重新配置 PG 窗口（概念分析）中的文字字体（PyQt TextItem）
+    #             if hasattr(self, '_pg_windows'):
+    #                 try:
+    #                     for unique_code, w_dict in list(self._pg_windows.items()):
+    #                         texts = w_dict.get("texts", [])
+    #                         # 获取当前应用字体大小（已在步骤 2 中更新）
+    #                         app_font = QtWidgets.QApplication.font()
+    #                         font_size = app_font.pointSize()
                             
-                            # 更新每个 TextItem 的字体
-                            for text in texts:
-                                try:
-                                    text.setFont(QtGui.QFont("Microsoft YaHei", font_size))
-                                except Exception as e_text:
-                                    logger.warning(f'[DPI变化] 更新 PG 文字字体失败: {e_text}')
-                        logger.info(f'[DPI变化] PG 窗口文字字体已更新（{len(self._pg_windows)} 个窗口）')
-                    except Exception as e_pg:
-                        logger.warning(f'[DPI变化] 更新 PG 窗口失败: {e_pg}')
+    #                         # 更新每个 TextItem 的字体
+    #                         for text in texts:
+    #                             try:
+    #                                 text.setFont(QtGui.QFont("Microsoft YaHei", font_size))
+    #                             except Exception as e_text:
+    #                                 logger.warning(f'[DPI变化] 更新 PG 文字字体失败: {e_text}')
+    #                     logger.info(f'[DPI变化] PG 窗口文字字体已更新（{len(self._pg_windows)} 个窗口）')
+    #                 except Exception as e_pg:
+    #                     logger.warning(f'[DPI变化] 更新 PG 窗口失败: {e_pg}')
 
-                logger.info(f"[DPI变化] ✅ 完成全部缩放：{old_scale:.2f}x -> {scale_factor:.2f}x (窗口/字体/TreeView/状态栏/PG总览)")
+    #             logger.info(f"[DPI变化] ✅ 完成全部缩放：{old_scale:.2f}x -> {scale_factor:.2f}x (窗口/字体/TreeView/状态栏/PG总览)")
 
-            except Exception as e:
-                logger.error(f"[DPI变化] ❌ 应用缩放失败: {e}", exc_info=True)
+    #         except Exception as e:
+    #             logger.error(f"[DPI变化] ❌ 应用缩放失败: {e}", exc_info=True)
+
+    # def _apply_dpi_scaling_base(self):
+
+    #     hwnd = self.winfo_id()
+    #     scale = get_window_dpi_scale(hwnd)
+    #     logger.info(f'scale: {scale}')
+    #     # 应用到 Tk
+    #     self.tk.call("tk", "scaling", scale)
+
+    #     return scale
+
     def _apply_dpi_scaling(self,scale_factor=None):
         """自动计算并设置 Tkinter 的内部 DPI 缩放。"""
         # 获取系统的缩放因子 (例如 2.0)
 
         if not scale_factor: 
-            self.scale_factor = get_windows_dpi_scale_factor()
+            self.scale_factor = get_window_dpi_scale(self)
+            # self.scale_factor = get_windows_dpi_scale_factor()
             scale_factor = self.scale_factor
         else:
             self.scale_factor = scale_factor
@@ -3219,7 +3553,6 @@ class StockMonitorApp(tk.Tk):
             self.tree.after(500, self.bind_treeview_column_resize)
 
         except Exception as e:
-            import traceback
             traceback.print_exc()
             logger.error(f"❌ 更新 Treeview 列失败：{e}")
             # 尝试恢复到之前的列配置
@@ -6375,7 +6708,7 @@ class StockMonitorApp(tk.Tk):
                 # logger.info(f'col width: {width}')
                 # logger.info(f'col : {col} width: {width}')
             self.tree.column(col, width=int(width))
-
+        logger.debug(f'adjust_column_widths done :{len(cols)}')
     # ----------------- 排序 ----------------- #
     def sort_by_column(self, col, reverse):
         if col not in self.current_df.columns:
@@ -14169,7 +14502,6 @@ class KLineMonitor(tk.Toplevel):
             self.master.plot_following_concepts_pg(stock_code,top_n=1)
 
         except Exception as e:
-            import traceback
             logger.info(f"[Monitor] double_click错误:{e}")
             traceback.print_exc()
 
@@ -14709,14 +15041,40 @@ def test_single_thread():
 
 # def parse_args():
 #     parser = argparse.ArgumentParser(description="Monitor Init Script")
+
 #     parser.add_argument(
 #         "--log",
 #         type=str,
 #         default="INFO",
 #         help="日志等级，可选：DEBUG, INFO, WARNING, ERROR, CRITICAL"
 #     )
-#     args, _ = parser.parse_known_args()   # ✅ 忽略 multiprocessing 的私有参数
+
+#     # ✅ 新增布尔开关参数
+#     parser.add_argument(
+#         "--write_to_hdf",
+#         action="store_true",
+#         help="执行 write_to_hdf() 并退出"
+#     )
+
+#     args, _ = parser.parse_known_args()   # ✅ 忽略 multiprocessing 私有参数
 #     return args
+
+# 常用命令示例列表
+COMMON_COMMANDS = [
+    "tdd.get_tdx_Exp_day_to_df('000002', dl=60, newdays=0, resample='d')",
+    "tdd.h5a.check_tdx_all_df('300')",
+    "tdd.get_tdx_exp_low_or_high_power('000002', dl=60, newdays=0, resample='d')",
+    "write_to_hdf()"
+]
+
+# 格式化帮助信息，换行+缩进
+help_text = "传递 Python 命令字符串执行，例如:\n" + "\n".join([f"    {cmd}" for cmd in COMMON_COMMANDS])
+# import textwrap
+# 第一行紧跟说明，后续命令换行并缩进
+# # 使用 textwrap 格式化 help 文本
+# help_text = "传递 Python 命令字符串执行，例如:\n"
+# help_text += textwrap.indent("\n".join(COMMON_COMMANDS), "    ")
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Monitor Init Script")
 
@@ -14727,16 +15085,55 @@ def parse_args():
         help="日志等级，可选：DEBUG, INFO, WARNING, ERROR, CRITICAL"
     )
 
-    # ✅ 新增布尔开关参数
+    # 布尔开关参数
     parser.add_argument(
         "--write_to_hdf",
         action="store_true",
         help="执行 write_to_hdf() 并退出"
     )
 
-    args, _ = parser.parse_known_args()   # ✅ 忽略 multiprocessing 私有参数
+    # 新增测试开关
+    parser.add_argument(
+        "--test",
+        action="store_true",
+        help="执行测试数据流程"
+    )
+
+    parser.add_argument(
+        "--cmd",
+        type=str,
+        nargs='?',          # 表示参数可选
+        const=COMMON_COMMANDS[0],  # 默认无值时使用第一个常用命令  # 当没有值时使用 const
+        default=None,       # 如果完全没传 --cmd, default 才会生效
+        help=help_text
+        # help="传递 Python 命令字符串执行，例如:\n" + "\n".join(COMMON_COMMANDS)
+        # help="传递 Python 命令字符串执行，例如: tdd.get_tdx_Exp_day_to_df('000002', dl=60, newdays=0, resample='d')"
+    )
+
+    args, _ = parser.parse_known_args()  # 忽略 multiprocessing 私有参数
     return args
 
+def test_get_tdx():
+    """封装测试函数，获取股票历史数据"""
+    code = '000002'
+    dl = 60
+    newdays = 0
+    resample = 'd'
+
+    try:
+        df = tdd.get_tdx_Exp_day_to_df(code, dl=dl, newdays=newdays, resample=resample)
+        if df is not None and not df.empty:
+            logger.info(f"成功获取 {code} 的数据，前5行:\n{df.head()}")
+        else:
+            logger.warning(f"{code} 返回数据为空")
+
+        # df = tdd.get_tdx_exp_low_or_high_power(code, dl=dl, newdays=newdays, resample=resample)
+        # if df is not None and not df.empty:
+        #     logger.info(f"成功获取 {code} 的数据，前5行:\n{df.head()}")
+        # else:
+        #     logger.warning(f"{code} 返回数据为空")
+    except Exception as e:
+        logger.error(f"获取 {code} 数据失败: {e}", exc_info=True)
 
 def write_to_hdf():
     while 1:
@@ -14830,6 +15227,115 @@ if __name__ == "__main__":
     # log.setLevel(LoggerFactory.INFO)
     # log.setLevel(Log.DEBUG)
 
+    # ✅ 命令行触发 write_to_hdf
+    if args.test:
+        test_get_tdx()
+        sys.exit(0)
+
+    # 执行传入命令
+    if args.cmd:
+        if len(args.cmd) > 5:
+            try:
+                result = eval(args.cmd)
+                print("执行结果:", result)
+            except Exception as e:
+                logger.error(f"执行命令出错: {args.cmd}\n{traceback.format_exc()}")
+
+        # # 可选：补全关键字或函数名
+        # completer = WordCompleter(['get_tdx_Exp_day_to_df', 'quit', 'exit'], ignore_case=True)
+
+        # # 创建 PromptSession 并指定历史文件
+        # session = PromptSession(history=FileHistory('.cmd_history'), completer=completer)
+
+        # -------------------------------
+        # 动态收集补全列表
+        # -------------------------------
+        def get_completions():
+            completions = list(COMMON_COMMANDS)  # 先把常用命令放到最前面
+            # completions = []
+            for name, obj in globals().items():
+                completions.append(name)
+                if hasattr(obj, '__dict__'):
+                    # 支持 obj. 子属性补全
+                    completions.extend([f"{name}.{attr}" for attr in dir(obj) if not attr.startswith('_')])
+            return completions
+
+        # 创建 WordCompleter
+        completer = WordCompleter(get_completions(), ignore_case=True, sentence=True)
+
+        # 创建 PromptSession 并指定历史文件
+        session = PromptSession(history=FileHistory('.cmd_history'), completer=completer)
+
+
+        while True:
+            try:
+                cmd = session.prompt(">>> ").strip()  # 使用 session.prompt 替代 input
+                if not cmd:
+                    continue
+
+                if cmd.lower() in ['quit', 'q', 'exit', 'e']:
+                    print("退出调试模式")
+                    break
+
+                try:
+                    # 尝试 eval 执行表达式
+                    result = eval(cmd, globals(), locals())
+                    print("结果:", result)
+                except Exception:
+                    # 如果 eval 出错，尝试 exec
+                    try:
+                        exec(cmd, globals(), locals())
+                    except Exception:
+                        print("执行异常:\n", traceback.format_exc())
+
+            except KeyboardInterrupt:
+                print("\n手动中断，退出调试模式")
+                break
+
+        # import readline
+        # import rlcompleter
+
+        # # 启用 Tab 补全和历史记录
+        # # readline.parse_and_bind("tab: complete")
+        # # 可以选择保存历史文件
+        # history_file = ".cmd_history"
+        # try:
+        #     readline.read_history_file(history_file)
+        # except FileNotFoundError:
+        #     pass
+
+        # while True:
+        #     try:
+        #         cmd = input(">>> ").strip()
+        #         if not cmd:
+        #             continue
+
+        #         if cmd.lower() in ['quit', 'q', 'exit', 'e']:
+        #             print("退出调试模式")
+        #             break
+
+        #         # 尝试 eval 执行
+        #         try:
+        #             result = eval(cmd, globals(), locals())
+        #             print("结果:", result)
+        #         except Exception:
+        #             # 如果 eval 出错，尝试 exec（适合赋值或函数定义等）
+        #             try:
+        #                 exec(cmd, globals(), locals())
+        #             except Exception:
+        #                 print("执行异常:", traceback.format_exc())
+
+        #     except KeyboardInterrupt:
+        #         print("\n手动中断，退出调试模式")
+        #         break
+        #     finally:
+        #         # 保存历史命令
+        #         try:
+        #             readline.write_history_file(history_file)
+        #         except Exception:
+        #             pass
+
+        sys.exit(0)        
     # ✅ 命令行触发 write_to_hdf
     if args.write_to_hdf:
         write_to_hdf()
