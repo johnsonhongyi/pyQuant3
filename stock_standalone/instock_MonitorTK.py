@@ -15064,6 +15064,8 @@ COMMON_COMMANDS = [
     "tdd.get_tdx_Exp_day_to_df('000002', dl=60, newdays=0, resample='d')",
     "tdd.h5a.check_tdx_all_df('300')",
     "tdd.get_tdx_exp_low_or_high_power('000002', dl=60, newdays=0, resample='d')",
+    "tdd.h5a.check_tdx_all_df_Sina('sina_data')",
+    "tdd.h5a.check_tdx_all_df_Sina('get_sina_all_ratio')",
     "write_to_hdf()"
 ]
 
@@ -15266,31 +15268,113 @@ if __name__ == "__main__":
         # 创建 PromptSession 并指定历史文件
         session = PromptSession(history=FileHistory('.cmd_history'), completer=completer)
 
+        result_stack = []  # 保存历史结果
+
+        HELP_TEXT = """
+        调试模式命令:
+          :help         显示帮助信息
+          :result       查看最新结果
+          :history      查看历史结果内容（DataFrame显示前5行）
+          :clear        清空历史结果
+        退出:
+          quit / q / exit / e
+        说明:
+          最新执行结果总是存放在 `result` 变量中
+          所有历史结果都存放在 `result_stack` 列表，可通过索引访问
+        """
+
+        def summarize(obj, head_rows=5):
+            """根据对象类型返回可读摘要"""
+            if isinstance(obj, pd.DataFrame):
+                return f"<DataFrame shape={obj.shape}>\n{obj.head(head_rows)}"
+            elif isinstance(obj, (list, tuple, set)):
+                preview = list(obj)[:head_rows]
+                return f"<{type(obj).__name__} len={len(obj)}>\n{preview}"
+            elif isinstance(obj, dict):
+                preview = dict(list(obj.items())[:head_rows])
+                return f"<dict len={len(obj)}>\n{preview}"
+            else:
+                return repr(obj)
+
+        print("调试模式启动 (输入 ':help' 获取帮助)")
 
         while True:
             try:
-                cmd = session.prompt(">>> ").strip()  # 使用 session.prompt 替代 input
+                cmd = session.prompt(">>> ").strip()
                 if not cmd:
                     continue
 
+                # 退出命令
                 if cmd.lower() in ['quit', 'q', 'exit', 'e']:
                     print("退出调试模式")
                     break
 
+                # 特殊命令
+                if cmd.startswith(":"):
+                    if cmd == ":help":
+                        print(HELP_TEXT)
+                    elif cmd == ":result":
+                        if result_stack:
+                            print(summarize(result_stack[-1]))
+                        else:
+                            print("没有历史结果")
+                    elif cmd == ":history":
+                        if result_stack:
+                            for i, r in enumerate(result_stack):
+                                print(f"[{i}] {summarize(r)}\n{'-'*50}")
+                        else:
+                            print("没有历史结果")
+                    elif cmd == ":clear":
+                        result_stack.clear()
+                        print("历史结果已清空")
+                    else:
+                        print("未知命令:", cmd)
+                    continue
+
+                # 尝试 eval
                 try:
-                    # 尝试 eval 执行表达式
-                    result = eval(cmd, globals(), locals())
-                    print("结果:", result)
+                    temp = eval(cmd, globals(), locals())
+                    result_stack.append(temp)   # 保存历史
+                    result = result_stack[-1]   # 最新结果
+                    globals()['result'] = result  # 注入全局，方便后续操作
+                    print(summarize(temp))
                 except Exception:
-                    # 如果 eval 出错，尝试 exec
                     try:
                         exec(cmd, globals(), locals())
+                        print("执行完成 (exec)")
                     except Exception:
                         print("执行异常:\n", traceback.format_exc())
 
             except KeyboardInterrupt:
-                print("\n手动中断，退出调试模式")
+                print("\nKeyboardInterrupt, 输入 'quit' 退出")
+            except EOFError:
+                print("\nEOF, 退出调试模式")
                 break
+
+        # while True:
+        #     try:
+        #         cmd = session.prompt(">>> ").strip()  # 使用 session.prompt 替代 input
+        #         if not cmd:
+        #             continue
+
+        #         if cmd.lower() in ['quit', 'q', 'exit', 'e']:
+        #             print("退出调试模式")
+        #             break
+
+        #         try:
+        #             # 尝试 eval 执行表达式
+        #             result = eval(cmd, globals(), locals())
+        #             print("结果:", len(result))
+        #         except Exception:
+        #             # 如果 eval 出错，尝试 exec
+        #             try:
+        #                 result = exec(cmd, globals(), locals())
+        #             except Exception:
+        #                 print("执行异常:\n", traceback.format_exc())
+
+        #     except KeyboardInterrupt:
+        #         print("\n手动中断，退出调试模式")
+        #         break
 
         # import readline
         # import rlcompleter
