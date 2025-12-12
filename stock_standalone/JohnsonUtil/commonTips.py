@@ -375,6 +375,7 @@ class GlobalConfig:
         self.write_all_day_date = self.get_with_writeback("general", "write_all_day_date", fallback="20251208")
         self.detect_calc_support = self.get_with_writeback("general", "detect_calc_support", fallback=False, value_type="bool")
         self.duration_sleep_time = self.get_with_writeback("general", "duration_sleep_time", fallback=60, value_type="int")
+        self.compute_lastdays = self.get_with_writeback("general", "compute_lastdays", fallback=5, value_type="int")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="260x180")
         try:
@@ -494,6 +495,7 @@ macroot = CFG.get_path("macroot")
 macroot_vm = CFG.get_path("macroot_vm")
 xproot = CFG.get_path("xproot")
 tdx_all_df_path = CFG.get_path("tdx_all_df_path")
+compute_lastdays = CFG.compute_lastdays
 
 def get_os_path_sep():
     return os.path.sep
@@ -501,8 +503,143 @@ def get_os_path_sep():
     
 evalcmdfpath = r'./sina_pandasSelectCmd.txt'.replace('\\',get_os_path_sep())
 
+# import multiprocessing
+# from multiprocessing import Manager
+# import threading
+
+# class GlobalValues_mp:
+#     _instance = None
+#     _lock = threading.Lock()  # 确保多线程安全
+
+#     def __new__(cls, ext_dict=None, use_manager=True):
+#         with cls._lock:
+#             if cls._instance is None:
+#                 cls._instance = super().__new__(cls)
+#                 cls._local_fallback = {}
+#                 cls._use_manager = use_manager
+#                 if use_manager:
+#                     cls._manager = Manager()
+#                     cls._global_dict = cls._manager.dict(ext_dict or {})
+#                 else:
+#                     cls._global_dict = ext_dict or {}
+#             elif ext_dict is not None:
+#                 # 支持重新注入共享字典
+#                 if cls._use_manager:
+#                     cls._global_dict.clear()
+#                     cls._global_dict.update(ext_dict)
+#                 else:
+#                     cls._global_dict = ext_dict
+#             return cls._instance
+
+#     def getkey(self, key, default=None):
+#         try:
+#             value = self._global_dict.get(key, default)
+#             self._local_fallback[key] = value
+#             return value
+#         except (BrokenPipeError, EOFError, OSError):
+#             # 管道异常时尝试回退到本地
+#             log.warning(f"getkey fallback for key={key}")
+#             return self._local_fallback.get(key, default)
+
+#     def setkey(self, key, value):
+#         try:
+#             self._global_dict[key] = value
+#         except (BrokenPipeError, EOFError, OSError) as e:
+#             log.error(f"setkey 管道断开: {e}, key={key}, value={value}")
+#         finally:
+#             self._local_fallback[key] = value
+
+#     def getkey_status(self, key):
+#         try:
+#             exists = key in self._global_dict
+#             if exists:
+#                 self._local_fallback[key] = self._global_dict[key]
+#             return exists
+#         except (BrokenPipeError, EOFError, OSError):
+#             return key in self._local_fallback
+
+#     def getlist(self):
+#         try:
+#             keys = list(self._global_dict.keys())
+#             for k in keys:
+#                 self._local_fallback[k] = self._global_dict[k]
+#             return keys
+#         except (BrokenPipeError, EOFError, OSError):
+#             return list(self._local_fallback.keys())
+
+#     def rebuild_manager(self, ext_dict=None):
+#         """在 Manager 崩掉或管道断开后，可以重新创建共享字典"""
+#         with self._lock:
+#             if self._use_manager:
+#                 log.info("Rebuilding Manager shared dict...")
+#                 self._manager = Manager()
+#                 self._global_dict = self._manager.dict(ext_dict or self._local_fallback)
+
 
 class GlobalValues:
+    _instance = None
+
+    def __new__(cls, ext_dict=None):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._global_dict = ext_dict or {}
+        elif ext_dict is not None:
+            cls._global_dict = ext_dict
+        cls._local_fallback = {}  # 本地兜底字典
+        return cls._instance
+
+    def getkey(self, key, default=None):
+        """
+        获取 key，优先从全局共享字典获取，失败则回退到本地字典
+        """
+        try:
+            value = self._global_dict.get(key, default)
+            # 成功获取时，同步更新本地 fallback
+            self._local_fallback[key] = value
+            return value
+        except (BrokenPipeError, EOFError, OSError):
+            # 管道断开时，从本地 fallback 获取
+            return self._local_fallback.get(key, default)
+
+    def setkey(self, key, value):
+        """
+        设置 key，保证本地 fallback 始终更新
+        """
+        try:
+            self._global_dict[key] = value
+        except (BrokenPipeError, EOFError, OSError) as e:
+            log.error(f"setkey 管道断开: {e}, key={key}, value={value}")
+        finally:
+            # 无论共享字典是否可用，本地字典都更新
+            self._local_fallback[key] = value
+
+    def getkey_status(self, key):
+        """
+        检查 key 是否存在，优先共享字典
+        """
+        try:
+            exists = key in self._global_dict
+            # 同步 fallback
+            if exists:
+                self._local_fallback[key] = self._global_dict[key]
+            return exists
+        except (BrokenPipeError, EOFError, OSError):
+            return key in self._local_fallback
+
+    def getlist(self):
+        """
+        返回所有 key 列表，优先共享字典
+        """
+        try:
+            keys = list(self._global_dict.keys())
+            # 同步 fallback
+            for k in keys:
+                self._local_fallback[k] = self._global_dict[k]
+            return keys
+        except (BrokenPipeError, EOFError, OSError):
+            return list(self._local_fallback.keys())
+
+class GlobalValues_noLocal:
     _instance = None
 
     def __new__(cls, ext_dict=None):
@@ -537,49 +674,10 @@ class GlobalValues:
         return key in self._global_dict
 
     def getlist(self):
-        return list(self._global_dict.keys())
-
-
-
-class GlobalValues2:
-    # -*- coding: utf-8 -*-
-    _instance = None
-    _global_dict = None
-
-    def __init__(self, ext_dict=None):
-    # def __init__(self):
-        global initGlobalValue
-        if initGlobalValue == 0:
-            self._init_(ext_dict)
-            initGlobalValue += 1
-
-    def _init_(self,ext_dict=None):  # 初始化
-        global _global_dict
-        if ext_dict is not None:
-            _global_dict = ext_dict
-        else:
-            _global_dict = {}
-
-    def setkey(self, key, value):
-        # """ 定义一个全局变量 """
-        if isinstance(value,pd.DataFrame):
-            value = reduce_memory_usage(value)
-        _global_dict[key] = value
-
-    def getkey(self, key, defValue=None):
-        # 　　""" 获得一个全局变量,不存在则返回默认值 """
         try:
-            return _global_dict[key]
-        except KeyError:
-            return defValue
-    def getkey_status(self, key):
-        # """ 定义一个全局变量 """
-        return (key in _global_dict.keys())
-    def getlist(self):
-        # """ 定义一个全局变量 """
-        return (_global_dict.keys())
-
-
+            return list(self._global_dict.keys())
+        except (BrokenPipeError, EOFError, OSError):
+            return list(self._local_fallback.keys())
 
 def format_for_print(df,header=True,widths=False,showCount=False,width=0,table=False,limit_show=20):
 
@@ -3560,42 +3658,109 @@ def to_mp_run_async_old2025(cmd, urllist, *args,**kwargs):
 
 #     return s
 
+# def format_func_call(func, *args, **kwargs):
+#     """
+#     把函数调用转换成可读字符串。
+#     如果 func 是 functools.partial，没有 __name__，自动取原函数名。
+#     """
+#     import functools
+#     func_name = getattr(func, '__name__', None)
+#     if func_name is None and isinstance(func, functools.partial):
+#         func_name = getattr(func.func, '__name__', str(func))
+
+#     # 构建 args 字符串
+#     args_str = ", ".join([repr(a) for a in args])
+#     kwargs_str = ", ".join([f"{k}={v!r}" for k, v in kwargs.items()])
+#     all_args = ", ".join(filter(None, [args_str, kwargs_str]))
+
+#     return f"{func_name}({all_args})"
+
+def get_func_name(func):
+    """
+    获取函数名称，对 functools.partial 对象自动获取原始函数名。
+    """
+    while isinstance(func, functools.partial):
+        func = func.func
+    return getattr(func, '__name__', str(func))
+
+# def format_func_call(func, *args, **kwargs):
+#     import functools
+
+#     # 累积 partial 的 args 和 kwargs
+#     combined_args = list(args)
+#     combined_kwargs = dict(kwargs)
+
+#     while isinstance(func, functools.partial):
+#         combined_args = list(func.args) + combined_args
+#         combined_kwargs = {**func.keywords, **combined_kwargs} if func.keywords else combined_kwargs
+#         func = func.func
+
+#     func_name = getattr(func, '__name__', str(func))
+#     args_str = ", ".join(repr(a) for a in combined_args)
+#     kwargs_str = ", ".join(f"{k}={v!r}" for k, v in combined_kwargs.items())
+#     all_args = ", ".join(filter(None, [args_str, kwargs_str]))
+#     return f"{func_name}({all_args})"
+
+
 def format_func_call(func, *args, **kwargs):
     """
-    把函数调用转换成可读字符串。
-    如果 func 是 functools.partial，没有 __name__，自动取原函数名。
+    将函数调用转换成可读字符串。
+    支持 functools.partial，将 partial 内的参数也包含。
     """
-    import functools
-    func_name = getattr(func, '__name__', None)
-    if func_name is None and isinstance(func, functools.partial):
-        func_name = getattr(func.func, '__name__', str(func))
+    # 解析 functools.partial
+    while isinstance(func, functools.partial):
+        # 累积 partial 的 args 和 kwargs
+        partial_args = getattr(func, 'args', ())
+        partial_kwargs = getattr(func, 'keywords', {}) or {}
+        args = partial_args + args
+        # partial 的 kwargs 与外部 kwargs 合并，外部优先
+        combined_kwargs = {**partial_kwargs, **kwargs}
+        kwargs = combined_kwargs
+        func = func.func
 
-    # 构建 args 字符串
-    args_str = ", ".join([repr(a) for a in args])
-    kwargs_str = ", ".join([f"{k}={v!r}" for k, v in kwargs.items()])
+    func_name = getattr(func, '__name__', str(func))
+    
+    args_str = ", ".join(repr(a) for a in args)
+    kwargs_str = ", ".join(f"{k}={v!r}" for k, v in kwargs.items())
     all_args = ", ".join(filter(None, [args_str, kwargs_str]))
 
     return f"{func_name}({all_args})"
 
-def process_file_exc(func=None,code=None):
-    # partialfunc=GlobalValues().getkey('partialfunc')
+    
+# def process_file_exc(func=None,code=None):
+#     # partialfunc=GlobalValues().getkey('partialfunc')
+#     try:
+#         # if func is None:
+#         #     return Exception("func is None code: {}".format(code))
+#         # log.debug(f'code:{code},func:{func}')
+#         return func(code)
+#     except Exception as ex:
+#         # print("Exception on code: {}".format(code)+ os.linesep + traceback.format_exc())
+#         # return Exception("Exception on code {}".format(code)+ os.linesep + traceback.format_exc())
+
+#         msg = "Exception on code {}".format(code)+ os.linesep + traceback.format_exc()
+#         # runcmd = format_func_call(func, code)
+#         # log.error(f'msg:{msg} runcmd:{runcmd}')
+#         log.error(f'msg:{msg}')
+#         return Exception(msg)
+
+#         # tb = traceback.format_exc()
+#         # logger.exception("Exception on code %s\n%s", code, tb)  # 自动带 traceback
+#         # return e  # 或 return Exception(...)
+
+
+def process_file_exc(func=None, code=None):
     try:
-        # if func is None:
-        #     return Exception("func is None code: {}".format(code))
-        # log.debug(f'code:{code},func:{func}')
-        return func(code)
+        # 尝试执行函数
+        return func(code) 
     except Exception as ex:
-        # print("Exception on code: {}".format(code)+ os.linesep + traceback.format_exc())
-        # return Exception("Exception on code {}".format(code)+ os.linesep + traceback.format_exc())
-
-        msg = "Exception on code {}".format(code)+ os.linesep + traceback.format_exc()
+        msg = f"Exception on code:{code} " + os.linesep + traceback.format_exc()
         runcmd = format_func_call(func, code)
-        log.error(f'msg:{msg} runcmd:{runcmd}')
-        return Exception(msg)
-
-        # tb = traceback.format_exc()
-        # logger.exception("Exception on code %s\n%s", code, tb)  # 自动带 traceback
-        # return e  # 或 return Exception(...)
+        # 在工作进程中记录详细错误
+        log.error(f'Work process failed: msg:{msg} \n runcmd:{runcmd}')
+        # log.error(f'Work process failed: msg:{msg}')
+        # 返回 None 或一个特定的失败标记
+        return None # 不要返回 Exception 对象
 
 error_codes = []
 
@@ -3678,18 +3843,28 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     except Exception:
                         index_counts = 0  # 或 log.error(...)
                     log.debug(f'index_counts:{index_counts}')
+
+                    # for idx, data in enumerate(results):
+                    #     if isinstance(data, Exception):
+                    #         print("Got exception: {}".format(data))
+                    #     else:
+                    #         # print("Got OK result: {}".format(result))
+                    #         # if len(data) > 0 and len(data.index) == index_counts:
+                    #         if len(data) > 0:
+                    #             result.append(data)
+                    #         else:
+                    #             # log.error(f'idx:{idx} is None,last code:{result[-1].code} resultCount:{len(result)}')
+                    #             # log.error(f'idx:{idx} is None, code: {urllist[idx]} CountAll:{data_count} resultCount:{len(result)}')
+                    #             log_idx_none(idx, urllist[idx], data_count, len(result))
+
                     for idx, data in enumerate(results):
-                        if isinstance(data, Exception):
-                            print("Got exception: {}".format(data))
+                        if data is None: # 检查失败标记
+                            # 失败信息已在工作进程中记录，这里只需记录哪个 code 失败了
+                            log_idx_none(idx, urllist[idx], data_count, len(result))
                         else:
-                            # print("Got OK result: {}".format(result))
-                            # if len(data) > 0 and len(data.index) == index_counts:
-                            if len(data) > 0:
-                                result.append(data)
-                            else:
-                                # log.error(f'idx:{idx} is None,last code:{result[-1].code} resultCount:{len(result)}')
-                                # log.error(f'idx:{idx} is None, code: {urllist[idx]} CountAll:{data_count} resultCount:{len(result)}')
-                                log_idx_none(idx, urllist[idx], data_count, len(result))
+                            # 处理成功结果
+                            result.append(data)
+
                     # result = list(set(result))
                     # 最后剩余不足 30 条，也输出一次
                     if len(error_codes) % 30 != 0:
@@ -3707,10 +3882,10 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     results=[]
                     urllist = error_codes
                     for code in urllist:
-                        print(f"code:{code},count:{data_count} idx:{urllist.index(code)}", end=' ')
+                        log.info(f"error_codes code:{code},count:{data_count} idx:{urllist.index(code)}", end=' ')
                         # log_idx_none(urllist.index(code), code, data_count, len(result))
                         res=cmd(code,**kwargs)
-                        print("status:%s\t"%(len(res)), end=' ')
+                        log.info("error_codes status:%s\t"%(len(res)), end=' ')
                         results.append(res)
                     result=results
                 
@@ -7416,6 +7591,7 @@ if __name__ == '__main__':
     print(f'get_work_time() : {get_work_time()}')
     st_key_sort='3 0 f'
     print(ct.get_market_sort_value_key(st_key_sort))
+    print(get_run_path_tdx('all_300'))
     import ipdb;ipdb.set_trace()
     query_rule = read_ini(inifile='filter.ini',category='sina_Monitor')
     print(get_today(''))

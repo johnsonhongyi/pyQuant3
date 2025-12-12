@@ -9,10 +9,10 @@ import multiprocessing
 import os
 import atexit
 
-_GLOBAL_LOGGER = None
-_GLOBAL_LOG_NAME = None
-_GLOBAL_QUEUE = None
-_GLOBAL_LISTENER = None
+# _GLOBAL_LOGGER = None
+# _GLOBAL_LOG_NAME = None
+# _GLOBAL_QUEUE = None
+# _GLOBAL_LISTENER = None
 
 import sys,os
 # sys.path.append("..")
@@ -449,9 +449,15 @@ def getLogger(name=None, logpath='instock_tk.log', show_detail=True):
     logger.setLevel(logging.ERROR)
     logger.propagate = False
 
-    # 添加 QueueHandler
-    logger.handlers = [h for h in logger.handlers if not isinstance(h, QueueHandler)]
-    logger.addHandler(QueueHandler(_GLOBAL_QUEUE))
+    # # 添加 QueueHandler
+    # logger.handlers = [h for h in logger.handlers if not isinstance(h, QueueHandler)]
+    # logger.addHandler(QueueHandler(_GLOBAL_QUEUE))
+
+    try:
+        logger.handlers = [h for h in logger.handlers if not isinstance(h, QueueHandler)]
+        logger.addHandler(QueueHandler(_GLOBAL_QUEUE))
+    except Exception as e:
+        print(f"Failed to add QueueHandler: {e}")
 
     # 保存单例
     _GLOBAL_LOGGER = logger
