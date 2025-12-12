@@ -28,15 +28,7 @@ import random
 import traceback
 # import logbook
 
-# log=logbook.Logger('TDX_day')
-# log = LoggerFactory.getLogger('TDX_Day')
 log = LoggerFactory.getLogger()
-# log = LoggerFactory.log
-# log = LoggerFactory.getLogger()
-# log.setLevel(LoggerFactory.DEBUG)
-# log.setLevel(LoggerFactory.INFO)
-# log.setLevel(LoggerFactory.WARNING)
-# log.setLevel(LoggerFactory.ERROR)
 
 path_sep = os.path.sep
 newdaysinit = ct.newdays_limit_days
@@ -58,29 +50,6 @@ warnings.filterwarnings("ignore")
 
 def get_tdx_dir():
     return cct.get_tdx_dir()
-#     os_sys = cct.get_sys_system()
-#     os_platform = cct.get_sys_platform()
-#     if os_sys.find('Darwin') == 0:
-#         log.info("DarwinFind:%s" % os_sys)
-#         basedir = macroot.replace('/', path_sep).replace('\\',path_sep)
-#         log.info("Mac:%s" % os_platform)
-
-#     elif os_sys.find('Win') == 0:
-#         log.info("Windows:%s" % os_sys)
-#         if os_platform.find('XP') == 0:
-#             log.info("XP:%s" % os_platform)
-#             basedir = xproot.replace('/', path_sep).replace('\\',path_sep)  # Èç¹ûÄãµÄ°²×°Â·¾¶²»Í¬,Çë¸ÄÕâÀï
-#         else:
-#             log.info("Win7O:%s" % os_platform)
-#             for root in win7rootList:
-#                 basedir = root.replace('/', path_sep).replace('\\',path_sep)  # Èç¹ûÄãµÄ°²×°Â·¾¶²»Í¬,Çë¸ÄÕâÀï
-#                 if os.path.exists(basedir):
-#                     log.info("%s : path:%s" % (os_platform,basedir))
-#                     break
-#     if not os.path.exists(basedir):
-#         log.error("basedir not exists")
-#     return basedir
-
 
 def get_tdx_dir_blocknew():
     return cct.get_tdx_dir_blocknew()
@@ -1576,13 +1545,12 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     # 读取文件数据
     # ------------------------------
     # 计算阶段耗时
-    t_io_end = 0
-    t_macd_start = 0
-    t_macd_end = 0
-    t_perc_start = 0
-    t_perc_end = 0
-    
-    t_start = time.time()
+    # t_io_end = 0
+    # t_macd_start = 0
+    # t_macd_end = 0
+    # t_perc_start = 0
+    # t_perc_end = 0
+    # t_start = time.time()
 
     # ------------------------------
     # 读取文件数据 (Refactored to use read_csv)
@@ -1792,16 +1760,204 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
                         )
 
 
-    t_end = time.time()
-    t_total = t_end - t_start
-    if t_start > 0 and t_total > 0.05: # Threshold 50ms
-        io_time = t_io_end - t_start if t_io_end > 0 else 0
-        macd_time = t_macd_end - t_macd_start if t_macd_end > 0 else 0
-        perc_time = t_perc_end - t_perc_start if t_perc_end > 0 else 0
-        other_time = t_total - io_time - macd_time - perc_time
-        log.info(f"SLOW_LOG: {code} Total:{t_total:.3f}s | IO:{io_time:.3f}s | MACD:{macd_time:.3f}s | PERC:{perc_time:.3f}s | Other:{other_time:.3f}s")
+    # t_end = time.time()
+    # t_total = t_end - t_start
+    # if t_start > 0 and t_total > 0.1: # Threshold 50ms
+    #     io_time = t_io_end - t_start if t_io_end > 0 else 0
+    #     macd_time = t_macd_end - t_macd_start if t_macd_end > 0 else 0
+    #     perc_time = t_perc_end - t_perc_start if t_perc_end > 0 else 0
+    #     other_time = t_total - io_time - macd_time - perc_time
+    #     log.info(f"SLOW_LOG: {code} Total:{t_total:.3f}s | IO:{io_time:.3f}s | MACD:{macd_time:.3f}s | PERC:{perc_time:.3f}s | Other:{other_time:.3f}s")
 
     return df
+
+# import cProfile
+# import pstats
+# import io
+
+# def get_tdx_Exp_day_to_df_performance(code, start=None, end=None, dl=None, newdays=None,
+#                           type='f', wds=True, lastdays=3, resample='d',
+#                           MultiIndex=False, lastday=None, detect_calc_support=True):
+#     """
+#     使用 cProfile 分析性能的版本
+#     """
+
+#     # =====================================================
+#     # cProfile 启动
+#     # =====================================================
+#     profiler = cProfile.Profile()
+#     profiler.enable()
+
+#     # -------------------------------------------------------
+#     # 初始化参数
+#     # -------------------------------------------------------
+#     code_u = cct.code_to_symbol(code)
+#     if type == 'f':
+#         file_path = os.path.join(exp_path, 'forwardp', f"{code_u.upper()}.txt")
+#     elif type == 'b':
+#         file_path = os.path.join(exp_path, 'backp', f"{code_u.upper()}.txt")
+#     else:
+#         return pd.DataFrame()
+
+#     global initTdxdata
+#     write_k_data_status = False
+
+#     if dl is not None:
+#         start = cct.last_tddate(dl)
+#     start = cct.day8_to_day10(start)
+#     end   = cct.day8_to_day10(end)
+
+#     log.debug(f'file_path:{file_path}')
+
+#     # -------------------------------------------------------
+#     # 文件不存在
+#     # -------------------------------------------------------
+#     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+#         tmp_df = get_kdate_data(code, start='', end='', ktype='D')
+#         if len(tmp_df) > 0:
+#             write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
+#         else:
+#             if initTdxdata < 10:
+#                 log.error(f"file_path not exists code: {code}")
+#             else:
+#                 print('.', end=' ')
+#             initTdxdata += 1
+#         profiler.disable()
+#         return pd.DataFrame()
+
+#     # -------------------------------------------------------
+#     # 最后一条读取特例
+#     # -------------------------------------------------------
+#     if dl is not None and int(dl) == 1:
+#         data = cct.read_last_lines(file_path, int(dl) + 3)
+#         data_l = data.split('\n')
+#         data_l.reverse()
+#         for line in data_l:
+#             a = line.split(',')
+#             if len(a) == 7:
+#                 tdate = a[0]
+#                 if len(tdate) != 10:
+#                     continue
+#                 try:
+#                     topen = round(float(a[1]), 2)
+#                     thigh = round(float(a[2]), 2)
+#                     tlow  = round(float(a[3]), 2)
+#                     tclose = round(float(a[4]), 2)
+#                     tvol = round(float(a[5]), 2)
+#                     amount = round(float(a[6].replace('\r\n','')), 1)
+#                 except:
+#                     continue
+#                 if int(topen) == 0 or int(amount) == 0:
+#                     continue
+
+#                 profiler.disable()
+#                 return pd.Series({
+#                     'code': code, 'date': tdate, 'open': topen,
+#                     'high': thigh, 'low': tlow, 'close': tclose,
+#                     'amount': amount, 'vol': tvol
+#                 })
+#         profiler.disable()
+#         return pd.Series([], dtype='float64')
+
+#     # -------------------------------------------------------
+#     # 文件读取
+#     # -------------------------------------------------------
+#     try:
+#         file_cols = ct.TDX_Day_columns[1:]
+#         df = pd.read_csv(
+#             file_path,
+#             names=file_cols,
+#             header=None,
+#             engine='c',
+#             encoding='gb18030',
+#             encoding_errors='replace',
+#             on_bad_lines='skip',
+#         )
+
+#         numeric_cols = ['open', 'high', 'low', 'close', 'vol', 'amount']
+#         for col in numeric_cols:
+#             if col in df.columns:
+#                 df[col] = pd.to_numeric(df[col], errors='coerce')
+
+#         df.dropna(subset=numeric_cols, inplace=True)
+#         df = df[(df['open'] != 0) & (df['amount'] != 0)]
+#         df['code'] = code
+#         df['date'] = df['date'].astype(str)
+#         df = df[df['date'].str.len() == 10]
+#         df = df[[c for c in ct.TDX_Day_columns if c in df.columns]]
+
+#     except Exception as e:
+#         log.error(f"Error reading file {file_path}: {e}")
+#         profiler.disable()
+#         return pd.DataFrame()
+
+#     df = df[~df.date.duplicated()]
+
+#     # -------------------------------------------------------
+#     # 数据预处理
+#     # -------------------------------------------------------
+#     if start is not None:
+#         df = df[df.date >= start]
+#     if end is not None:
+#         df = df[df.date <= end]
+#     if len(df) == 0:
+#         profiler.disable()
+#         return pd.DataFrame()
+
+#     df = df.set_index('date').sort_index()
+
+#     if lastday is not None:
+#         df = df[:-lastday]
+
+#     if not MultiIndex and resample != 'd':
+#         df = get_tdx_stock_period_to_type(df, period_day=resample)
+#         if 'date' in df.columns:
+#             df = df.set_index('date')
+
+#     # -------------------------------------------------------
+#     # MACD
+#     # -------------------------------------------------------
+#     if 'macd' not in df.columns:
+#         df = get_tdx_macd(df, detect_calc_support=detect_calc_support)
+
+#     # -------------------------------------------------------
+#     # 涨幅
+#     # -------------------------------------------------------
+#     if f'perc{lastdays}d' not in df.columns:
+#         df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
+
+#     # -------------------------------------------------------
+#     # 高低指标
+#     # -------------------------------------------------------
+#     if len(df) > 10:
+#         df['lmin']    = df.low[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
+#         df['min5']    = df.low[-6:-1].min()
+#         df['cmean']   = round(df.close[-10:-ct.tdx_high_da].mean(), 2)
+#         df['hv']      = df.vol[-ct.tdx_max_int:-ct.tdx_high_da].max()
+#         df['lv']      = df.vol[-ct.tdx_max_int:-ct.tdx_high_da].min()
+
+#         df['max5']    = df.close.shift(1).rolling(5).max()
+#         df['max10']   = df.close.shift(1).rolling(10).max()
+#         df['hmax']    = df.close.shift(1).rolling(30).max()
+#         df['hmax60']  = df.close.shift(1).rolling(60).max()
+#         df['high4']   = df.close.shift(1).rolling(4).max()
+
+#         df_checked = check_conditions_auto(df[-1:])
+#         df.loc[df.index[-1], 'MainU'] = df_checked.iloc[-1]['MainU']
+
+#     df = df.sort_index()
+
+#     # =====================================================
+#     # 结束 profile 并输出
+#     # =====================================================
+#     profiler.disable()
+
+#     s = io.StringIO()
+#     ps = pstats.Stats(profiler, stream=s).sort_stats('cumulative')
+#     ps.print_stats(30)       # 只输出前 30 个函数
+#     log.info(f"[PROFILE] {code}\n{s.getvalue()}")
+
+#     return df
 
 
 
@@ -3639,7 +3795,7 @@ def get_duration_price_date(code=None, ptype='low', dt=None, df=None, dl=None, e
         return lowdate, index_d, df
 
 
-def compute_power_tdx_df(tdx_df,dd):
+def compute_power_tdx_df_slow(tdx_df,dd):
     if len(tdx_df) >= 5:
 
         # idxh = tdx_df.high.argmax()
@@ -3647,21 +3803,13 @@ def compute_power_tdx_df(tdx_df,dd):
         idxh = tdx_df.low.idxmax()
         idxl_date=tdx_df.index.tolist().index(idxl)
         idxh_date=tdx_df.index.tolist().index(idxh)
-
-
-
         fibh = len(tdx_df[idxl_date:].query('high > high.shift(1)*0.998 or close > close.shift(1)'))
-
-
-
-
         dd['fibl'] = fibh
         # dd['ldate'] = idx
         # dd['boll'] = dd.upperL[0]
         dd['boll'] = dd.upperT[0]
         dd['ra'] = dd.upperL[0]
         # dd['ra'] = dd.upperT[0]
-
         dd['ma'] = 1
         dd['oph'] = 1
         dd['rah'] = 1
@@ -3678,6 +3826,32 @@ def compute_power_tdx_df(tdx_df,dd):
         dd['rah'] = -1
         # log.error("tdx_df is no 9:%s"%(dd.code[0]))
     return dd
+
+def compute_power_tdx_df(tdx_df, dd):
+    if len(tdx_df) >= 5:
+        # 找 low 的最小值位置
+        idx_low = tdx_df['low'].idxmin()
+        pos_low = tdx_df.index.get_loc(idx_low)
+
+        # 从 idx_low 开始的子 DataFrame
+        sub_df = tdx_df.iloc[pos_low:]
+
+        # fibh 计算
+        fibh = ((sub_df['high'] > sub_df['high'].shift(1) * 0.998) | (sub_df['close'] > sub_df['close'].shift(1))).sum()
+
+        # 赋值给整个 dd
+        dd['fibl'] = fibh
+        dd['boll'] = dd['upperT'].iloc[0]  # 用第一行 upperT 作为标量
+        dd['ra'] = dd['upperL'].iloc[0]    # 用第一行 upperL 作为标量
+        dd['ma'] = 1
+        dd['oph'] = 1
+        dd['rah'] = 1
+    else:
+        for col in ['op', 'ra', 'fib', 'fibl', 'ldate', 'boll', 'ma', 'oph', 'rah']:
+            dd[col] = -1
+    return dd
+
+
 
 
 def dataframe_mode_round(df):
@@ -3858,12 +4032,122 @@ def compute_condition_up_add_up(df,condition_up):
 
     return condition_up2
 
-def compute_perd_df(dd,lastdays=3,resample ='d'):
+def compute_perd_df(dd, lastdays=3, resample='d'):
+    #fast to def ,src to slow
+    last_TopR_days = cct.compute_lastdays if resample == 'd' else cct.compute_lastdays
+    np.seterr(divide='ignore', invalid='ignore')
+
+    # 向量化处理看涨信号
+    dd = track_bullish_signals_startpos(dd)
+
+    df = dd.copy()
+    df['close_shift1'] = df['close'].shift(1)
+    df['high_shift1'] = df['high'].shift(1)
+    df['low_shift1'] = df['low'].shift(1)
+    df['open_shift1'] = df['open'].shift(1)
+    df['vol_shift1'] = df['vol'].shift(1)
+
+    # rolling max/min
+    df['max5'] = df['close_shift1'].rolling(5).max()
+    df['max10'] = df['close_shift1'].rolling(10).max()
+    df['hmax'] = df['close_shift1'].rolling(30).max()
+    df['high4'] = df['close_shift1'].rolling(4).max()
+    df['low4'] = df['low_shift1'].rolling(4).min()
+    df['lastdu4'] = (df['high4'].iloc[0] - (df['low4'].iloc[0]+0.1)) / (df['low4'].iloc[0]+0.1) * 100
+
+    df['lastupper'] = ((df['close'] > df['upper']) & (df['upper'] > 0)).sum()
+
+    df = df[-(last_TopR_days+1):]
+
+    # 计算涨跌幅
+    df['perlastp'] = cct.func_compute_percd2021_vectorized(df).round(1)
+    df['perd'] = ((df['close'] - df['close_shift1']) / df['close_shift1'] * 100).round(1)
+
+    # 向量化 red_cout
     if resample == 'd':
-        last_TopR_days = ct.compute_lastdays
+        red_mask = (
+            (df['close'] > df['ma5d']) |
+            (df['high'] > df['high_shift1']) |
+            ((df['low'] > df['low_shift1']) & (df['close'] > df['close_shift1']*1.01)) |
+            ((df['close'] > df['upper']) & (df['close'] > df['open']*1.01)) |
+            ((df['low'] >= df['open']*0.992) & (df['close'] >= df['close_shift1']*1.005))
+        )
+    else:
+        red_mask = (
+            (df['close'] > df['ma5d']) |
+            ((df['high'] > df['high_shift1']) & ((df['low'] > df['low_shift1']) & (df['close'] > df['close_shift1']*1.03))) |
+            ((df['close'] > df['upper']) & (df['close'] > df['open']*1.01)) |
+            ((df['low'] >= df['open']*0.992) & (df['close'] >= df['close_shift1']*1.03))
+        )
+
+    red_cout = df[red_mask]
+    df2 = df[df.index >= (df[df['high'] > df['upper']].index[0] if len(df[df['high'] > df['upper']]) > 0 else df['high'].idxmax())]
+
+    green_mask = (
+        ((df2['low'] < df2['low_shift1']) & (df2['high'] < df2['high_shift1'])) |
+        (df2['close'] < df2['open'])
+    )
+    green_cout = df2[green_mask]
+
+    df['lastdu'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
+    dfupper = df[-ct.bollupperT:]
+    upperT = dfupper['close'][(dfupper['close'] > 0) & (dfupper['close'] > dfupper['upper'])]
+    upperL = dfupper['close'][(dfupper['low'] > dfupper['ma5d']) & (dfupper['ma5d'] > 0)]
+    upperLIS, posLIS = LIS_TDX(upperT) if len(upperT) > 0 else ([], [])
+    dd['upperT'] = len(posLIS)
+    dd['upperL'] = len(upperL)
+
+    dd['red'] = len(red_cout)
+    dd['gren'] = len(green_cout)
+
+    top15 = dd[-ct.ddtop0:].query('(low >= open*0.992 or open > open.shift(1)) and close > open and ((high > upper or high > high.shift(1)) and close > close.shift(1)*1.04)')
+    top0 = dd[-ct.ddtop0:].query('low == high and low != 0')
+    dd['top0'] = len(top0)
+    dd['top15'] = len(top15)
+
+    # 计算跳空缺口回补
+    hop_df = compute_condition_up(dd[-15:])
+    condition_up = hop_df[(hop_df.fill_day.isnull()) & (hop_df.hop == 'up')] if len(hop_df) > 0 else pd.DataFrame()
+    condition_down = hop_df[(hop_df.fill_day.isnull()) & (hop_df.hop == 'down')] if len(hop_df) > 0 else pd.DataFrame()
+    c_up, c_down = len(condition_up), len(condition_down)
+    if c_up > 0:
+        dd['topR'] = c_up
+        dd['topD'] = c_down
+    else:
+        dd['topR'] = -c_down if c_down > 0 else 0
+        dd['topD'] = c_down
+
+    # 计算 ma20d_upper
+    df_ma20d = dd[-20:]
+    if resample == 'd':
+        ma20d_upper = len(df_ma20d.query('low > ma20d'))
+    elif resample in ['3d', 'w']:
+        ma20d_upper = len(df_ma20d.query('low > ma10d'))
+    else:
+        ma20d_upper = len(df_ma20d.query('low > ma5d'))
+    dd['ral'] = ma20d_upper
+
+    if resample == 'd':
+        df['perd'] = df['perd'].apply(lambda x: round(x, 1) if x < 9.85 else 10.0)
+    dd['perd'] = df['perd'][~df.index.duplicated()]
+    dd.fillna(ct.FILLNA, inplace=True)
+    dd['perlastp'] = df['perlastp']
+
+    # df_orig = compute_power_tdx_df_slow(df, dd)
+    dd = compute_power_tdx_df(df, dd)
+    # result = compare_perd_df_results(df_orig, dd, columns=None)
+    # # 查看匹配统计
+    # # print(result['match_stats'])
+    # print(result['mismatch_details'])
+
+    return dd
+
+def compute_perd_df_slow(dd,lastdays=3,resample ='d'):
+    if resample == 'd':
+        last_TopR_days = cct.compute_lastdays
     else:
         # last_TopR_days = 5
-        last_TopR_days = ct.compute_lastdays
+        last_TopR_days = cct.compute_lastdays
 
     np.seterr(divide='ignore',invalid='ignore')  #RuntimeWarning: invalid value encountered in greater
     
@@ -4214,7 +4498,7 @@ def resample_dataframe_recut(temp,resample='d',increasing=True,check=False):
         temp = temp.sort_index(ascending=ascending)   
     return temp
 
-def compute_upper_cross(dd,ma1='upper',ma2='ma5d',ratio=0.02,resample='d'): 
+def compute_upper_cross_slow(dd,ma1='upper',ma2='ma5d',ratio=0.02,resample='d'): 
     if ma1 in dd.columns:
         df = dd[(dd[ma1] != 0)]
         df = df[-ct.upper_cross_days:]
@@ -4236,8 +4520,157 @@ def compute_upper_cross(dd,ma1='upper',ma2='ma5d',ratio=0.02,resample='d'):
     
     return dd
 
+def compute_upper_cross(dd, ma1='upper', ma2='ma5d', ratio=0.02, resample='d'):
+    """
+    向量化计算 upper 与 ma5d 交叉相关指标。
+    dd: DataFrame，必须包含 'close', 'high', 'ene', ma1 列
+    ma1: 上轨列名，默认 'upper'
+    ma2: 均线列名，默认 'ma5d'
+    ratio: 比例阈值（预留）
+    resample: 重采样类型
+    """
+    # 初始化列
+    dd['topU'] = 0
+    dd['eneU'] = 0
 
-def compute_ma_cross(dd,ma1='ma5d',ma2='ma10d',ratio=0.02,resample='d'):
+    if ma1 not in dd.columns:
+        return dd
+
+    # 只取非零 upper 行
+    mask_upper_nonzero = dd[ma1] != 0
+    df = dd[mask_upper_nonzero]
+
+    if len(df) == 0:
+        return dd
+
+    # 取最后 N 天
+    df_tail = df.tail(ct.upper_cross_days)
+
+    # high >= upper
+    dd['topU'] = (df_tail['high'] >= df_tail['upper']).sum()
+
+    # close >= ene
+    dd['eneU'] = (df_tail['close'] >= df_tail['ene']).sum()
+
+    return dd
+
+
+def compute_ma_cross(dd, ma1='ma5d', ma2='ma10d', ratio=0.02, resample='d'):
+    """
+    向量化计算 MA 均线交叉相关指标。
+    dd: DataFrame，必须包含 'close', 'low', ma1, ma2 列
+    ma1, ma2: 均线列名
+    ratio: 比例阈值，保留以备后续逻辑扩展
+    resample: 重采样类型
+    """
+    # 重采样
+    temp = resample_dataframe_recut(dd, resample=resample)
+    
+    # 初始化列
+    dd['op'] = 0.0
+    dd['ldate'] = pd.NaT
+    dd['fib'] = -1
+    
+    if len(temp) == 0:
+        # fallback: ma1 > ma2
+        temp = dd[dd[ma1] > dd[ma2]]
+        if len(temp) == len(dd) and len(dd) > 0:
+            base_price = temp['close'].iloc[0]
+            dd['op'] = (dd['close'] / base_price * 100 - 100).round(1)
+            dd['ldate'] = temp.index[0]
+        return dd
+    
+    # 找 low > 0 的 idx_min 和 close 的 idx_max
+    temp_low_positive = temp['low'] > 0
+    if temp_low_positive.any():
+        idx_min = temp[temp_low_positive]['low'].idxmin()
+    else:
+        idx_min = temp.index[-1]
+
+    base_price = temp.at[idx_min, 'close'] if idx_min in temp.index else temp['close'].iloc[-1]
+
+    # 向量化计算 op 列
+    dd['op'] = ((dd['close'] / base_price) * 100 - 100).round(1)
+    dd['ldate'] = temp.index[0]
+
+    return dd
+
+def compute_cross_indicators(df, ma_cross_list=None, upper_cross_list=None, ratio=0.02, resample='d'):
+    """
+    向量化计算 MA 交叉和 Upper 交叉指标。
+    
+    df: pd.DataFrame, 必须包含 'close', 'high', 'low', 'ene' 列，以及相关均线列和 upper 列
+    ma_cross_list: list of tuple, 每个 tuple ('ma短期列', 'ma长期列', '结果列名')
+    upper_cross_list: list of tuple, 每个 tuple ('upper列', 'ma列', 'topU列', 'eneU列')
+    ratio: MA交叉阈值
+    resample: 重采样类型（可选）
+    """
+    # 初始化结果列，防止不存在时报错
+    if ma_cross_list:
+        for ma1, ma2, col_name in ma_cross_list:
+            df[col_name] = 0
+            df[f'{col_name}_ldate'] = pd.NaT
+
+    if upper_cross_list:
+        for upper_col, ma_col, topU_col, eneU_col in upper_cross_list:
+            df[topU_col] = 0
+            df[eneU_col] = 0
+
+    # MA 交叉向量化计算
+    if ma_cross_list:
+        for ma1, ma2, col_name in ma_cross_list:
+            if ma1 in df.columns and ma2 in df.columns:
+                # 计算条件
+                mask_cross = (df[ma1] > df[ma2] * (1 - ratio)) & (df[ma1] < df[ma2] * (1 + ratio))
+                df_cross = df[mask_cross].copy().dropna()
+                # if not df_cross.empty:
+                #     idx_max = df_cross['close'][:-1].idxmax()
+                #     idx_min = df_cross['low'][:-1].idxmin()
+                #     # 最后一行收盘价相对低点百分比
+                #     if idx_min in df_cross.index:
+                #         df[col_name].iloc[-1] = round(df['close'].iloc[-1] / df_cross['close'].loc[idx_min] * 100 - 100, 1)
+                #     else:
+                #         df[col_name].iloc[-1] = round(df['close'].iloc[-1] / df_cross['close'].iloc[-1] * 100 - 100, 1)
+                #     df[f'{col_name}_ldate'].iloc[-1] = df_cross.index[0]
+                if not df_cross.empty:
+                    close_series = df_cross['close'][:-1].dropna()
+                    low_series = df_cross['low'][:-1].dropna()
+
+                    if not close_series.empty:
+                        idx_max = close_series.idxmax()
+                    else:
+                        idx_max = df_cross.index[-1]
+
+                    if not low_series.empty:
+                        idx_min = low_series.idxmin()
+                    else:
+                        idx_min = df_cross.index[-1]
+
+                    # 最后一行收盘价相对低点百分比
+                    base_idx = idx_min if idx_min in df_cross.index else df_cross.index[-1]
+                    df.at[df.index[-1], col_name] = round(df['close'].iloc[-1] / df_cross['close'].loc[base_idx] * 100 - 100, 1)
+
+                    # 最早日期
+                    df.at[df.index[-1], f'{col_name}_ldate'] = df_cross.index[0]
+                else:
+                    # df_cross 为空时赋默认值
+                    df.at[df.index[-1], col_name] = 0
+                    df.at[df.index[-1], f'{col_name}_ldate'] = None
+
+    # Upper 交叉向量化计算
+    if upper_cross_list:
+        for upper_col, ma_col, topU_col, eneU_col in upper_cross_list:
+            if upper_col in df.columns:
+                df_nonzero = df[df[upper_col] != 0].copy()
+                if not df_nonzero.empty:
+                    df_tail = df_nonzero.tail(ct.upper_cross_days)
+                    df[topU_col].iloc[-1] = (df_tail['high'] >= df_tail['upper']).sum()
+                    df[eneU_col].iloc[-1] = (df_tail['close'] >= df_tail['ene']).sum()
+
+    return df
+
+
+def compute_ma_cross_slow(dd,ma1='ma5d',ma2='ma10d',ratio=0.02,resample='d'):
     #low
 
     temp = dd
@@ -4257,85 +4690,23 @@ def compute_ma_cross(dd,ma1='ma5d',ma2='ma10d',ratio=0.02,resample='d'):
             idx_max = -1
 
         if idx_min != -1:
-            # fibl = len(dd[dd.index >= idx_min])
-            # idx = round((dd.close[-1]/temp.close[temp.index == idx_min])*100-100,1)
             idx = round((dd.close.iloc[-1]/temp.close[temp.index == idx_min])*100-100,1)
 
         else:
-            # fibl = -1
             idx = round((dd.close.iloc[-1]/temp.close[-1])*100-100,1)
-        # if len(temp) == len(df):
-        #     fibl = len(dd[dd.index >= temp.index[0]])
-        #     idx = round((dd.close[-1]/temp.close[0])*100-100,1)
-        # else:
-        #     fibl = len(dd[dd.index >= temp.index[-1]])
-        #     idx = round((dd.close[-1]/temp.close[-1])*100-100,1)
         dd['op'] = idx
-        # dd['fib'] = fibl
-        # dd['ra'] = round(idx/fibl,1)
         dd['ldate'] = temp.index[0]
     else:
 
         temp = dd[ dd[ma1] > dd[ma2]]
         if len(temp) == len(dd) and len(dd) > 0:
-            # fibl = len(dd[dd.index >= temp.index[0]])
             idx = round((dd.close[-1]/temp.close[0])*100-100,1)
             dd['op'] = idx
-            # dd['fib'] = fibl
-            # dd['ra'] = round(idx/fibl,1)
             dd['ldate'] = temp.index[0]
         else:
             idx = 0
             dd['op'] = idx
             dd['fib'] = -1
-            # dd['ra'] = -1
-            dd['ldate'] = -1
-    return dd
-
-def compute_ma_cross_old(dd,ma1='ma5d',ma2='ma10d',ratio=0.02):
-
-    df = dd[(dd[ma2] != 0)]
-    # temp = df[ (df[ma1] > df[ma2] * (1-ratio))  & (df[ma1] < df[ma2] * (1+ratio)) ]
-    temp = dd[ ((dd.close > dd.ene) & (dd.close < df.upper)) & (dd[ma1] > dd[ma2] * (1-ratio))  & (dd[ma1] < dd[ma2] * (1+ratio))]
-
-    if len(temp) > 0:
-        temp_close = temp.close - temp.ene
-        if len(temp_close[temp_close >0]) >0:
-            idx_min = temp_close.idxmax()
-        else:
-            idx_min = -1
-
-        if idx_min != -1:
-            # fibl = len(dd[dd.index >= idx_min])
-            idx = round((dd.close[-1]/temp.close[temp.index == idx_min])*100-100,1)
-        else:
-            # fibl = -1
-            idx = round((dd.close[-1]/temp.close[-1])*100-100,1)
-        # if len(temp) == len(df):
-        #     fibl = len(dd[dd.index >= temp.index[0]])
-        #     idx = round((dd.close[-1]/temp.close[0])*100-100,1)
-        # else:
-        #     fibl = len(dd[dd.index >= temp.index[-1]])
-        #     idx = round((dd.close[-1]/temp.close[-1])*100-100,1)
-        dd['op'] = idx
-        # dd['fib'] = fibl
-        # dd['ra'] = round(idx/fibl,1)
-        dd['ldate'] = temp.index[0]
-    else:
-
-        temp = dd[ dd[ma1] > dd[ma2]]
-        if len(temp) == len(dd) and len(dd) > 0:
-            # fibl = len(dd[dd.index >= temp.index[0]])
-            idx = round((dd.close[-1]/temp.close[0])*100-100,1)
-            dd['op'] = idx
-            # dd['fib'] = fibl
-            # dd['ra'] = round(idx/fibl,1)
-            dd['ldate'] = temp.index[0]
-        else:
-            idx = 0
-            dd['op'] = idx
-            dd['fib'] = -1
-            # dd['ra'] = -1
             dd['ldate'] = -1
     return dd
 
@@ -4368,13 +4739,368 @@ def safe_SMA(df, column, period, name):
         df[name] = 0.1
         return False
 
+
+def compare_shifted_df(df, df_aug, lastdays=6):
+    """
+    比对 df 与 df_aug 中 shift 生成的历史列是否一致
+    自动匹配 df_aug 的列名规则
+    """
+    consistent = True
+    n_rows = len(df)
+
+    # 1. 前 6 天特殊列
+    special_cols_map = {'lasto': 'open', 'lastl': 'low', 'truer': 'truer'}
+    for da in range(1, min(6, lastdays)+1):
+        for aug_prefix, orig_col in special_cols_map.items():
+            aug_col = f'{aug_prefix}{da}d'
+            expected = df[orig_col].shift(da-1) if orig_col in df.columns else pd.Series([np.nan]*n_rows)
+            actual = df_aug.get(aug_col)
+            if actual is None:
+                print(f"列 {aug_col} 不存在")
+                consistent = False
+                continue
+            if not expected.equals(actual):
+                print(f"列 {aug_col} 数据不一致!")
+                inconsistent_idx = np.where(~expected.eq(actual).fillna(True))[0]
+                print("不一致索引示例:", inconsistent_idx[:10])
+                consistent = False
+
+    # 2. 通用列
+    general_cols_map = {
+        'lasth': 'high',
+        'lastp': 'close',
+        'lastv': 'vol',
+        'per': 'perd',
+        'upper': 'upper',
+        'ma5': 'ma5d',
+        'ma20': 'ma20d',
+        'ma60': 'ma60d',
+        'perc': 'perlastp',
+        'high4': 'high4',
+        'hmax': 'hmax'
+    }
+
+    for da in range(1, lastdays+1):
+        for aug_prefix, orig_col in general_cols_map.items():
+            aug_col = f'{aug_prefix}{da}d' if aug_prefix not in ['upper'] else f'{aug_prefix}{da}'
+            expected = df[orig_col].shift(da-1) if orig_col in df.columns else pd.Series([np.nan]*n_rows)
+            actual = df_aug.get(aug_col)
+            if actual is None:
+                print(f"列 {aug_col} 不存在")
+                consistent = False
+                continue
+            if not expected.equals(actual):
+                print(f"列 {aug_col} 数据不一致!")
+                inconsistent_idx = np.where(~expected.eq(actual).fillna(True))[0]
+                print("不一致索引示例:", inconsistent_idx[:10])
+                consistent = False
+
+    if consistent:
+        print("所有历史列一致！")
+    return consistent
+
+
+def compare_first_rows(df, df_aug, lastdays=6, n=10):
+    """
+    对比 df 与 df_aug 的前 n 行是否符合 lastdays 历史列规则
+    df: 原始 DataFrame
+    df_aug: 扩展后的 DataFrame
+    lastdays: 最大历史天数
+    n: 比对前几行
+    """
+    consistent = True
+    cols_special = ['open', 'low', 'truer']
+    cols_general = ['high', 'close', 'vol', 'perd', 'upper', 'ma5d', 'ma20d', 'ma60d', 'perlastp', 'high4', 'hmax']
+
+    for da in range(1, lastdays+1):
+        for col in cols_special:
+            if da <= 6 and col in df.columns:
+                aug_col = f'last{col[0]}{da}d' if col != 'truer' else f'truer{da}d'
+                expected = df[col].iloc[-da]
+                actual = df_aug[aug_col].iloc[:n]
+                if not all(actual == expected):
+                    print(f"列 {aug_col} 前 {n} 行不一致")
+                    consistent = False
+
+        for col in cols_general:
+            if col not in df.columns:
+                continue
+            prefix_map = {
+                'high':'lasth','close':'lastp','vol':'lastv','perd':'per',
+                'upper':'upper','ma5d':'ma5','ma20d':'ma20','ma60d':'ma60',
+                'perlastp':'perc','high4':'high4','hmax':'hmax'
+            }
+            aug_col = f"{prefix_map[col]}{da}d" if prefix_map[col] not in ['upper'] else f"{prefix_map[col]}{da}"
+            expected = df[col].iloc[-da]
+            actual = df_aug[aug_col].iloc[:n]
+            if not all(actual == expected):
+                print(f"列 {aug_col} 前 {n} 行不一致")
+                consistent = False
+
+    if consistent:
+        print(f"前 {n} 行所有历史列一致")
+    return consistent
+
+def build_aug_from_last_row(df, lastdays=6):
+    """
+    只用 df 的最后一行生成 df_aug 的历史列，前 lastdays 天。
+    df: 原始 DataFrame，索引为日期
+    lastdays: 最大历史天数
+    返回: df_aug
+    """
+    n_rows = len(df)
+    df_aug = pd.DataFrame(index=df.index)
+
+    # 特殊列，前 6 天
+    special_cols = ['open', 'low', 'truer']
+    for da in range(1, min(6, lastdays)+1):
+        for col in special_cols:
+            if col in df.columns:
+                val = df[col].iloc[-da]
+                aug_col = f'last{col[0]}{da}d' if col != 'truer' else f'truer{da}d'
+                df_aug[aug_col] = [val] * n_rows
+
+    # 通用列
+    general_cols = {
+        'high':'lasth','close':'lastp','vol':'lastv','perd':'per',
+        'upper':'upper','ma5d':'ma5','ma20d':'ma20','ma60d':'ma60',
+        'perlastp':'perc','high4':'high4','hmax':'hmax'
+    }
+    for da in range(1, lastdays+1):
+        for col, prefix in general_cols.items():
+            if col in df.columns:
+                val = df[col].iloc[-da]
+                aug_col = f"{prefix}{da}d" if prefix not in ['upper'] else f"{prefix}{da}"
+                df_aug[aug_col] = [val] * n_rows
+            else:
+                aug_col = f"{prefix}{da}d" if prefix not in ['upper'] else f"{prefix}{da}"
+                df_aug[aug_col] = [np.nan] * n_rows
+
+    return df_aug
+
+def add_last_days_features(df, lastdays=10):
+    """
+    df: 原始 DataFrame
+    lastdays: 需要处理的总天数
+    """
+    df_new = df.copy()
+
+    # ------------------------
+    # 1. 前 6 天的特殊列
+    # ------------------------
+    for da in range(1, min(6, lastdays) + 1):
+        df_new[f'lasto{da}d'] = df_new['open'].shift(da-1)
+        df_new[f'lastl{da}d'] = df_new['low'].shift(da-1)
+        df_new[f'truer{da}d'] = df_new['truer'].shift(da-1)
+
+    # ------------------------
+    # 2. 所有 lastdays 的通用列
+    # ------------------------
+    for da in range(1, lastdays + 1):
+        df_new[f'lasth{da}d'] = df_new['high'].shift(da-1)
+        df_new[f'lastp{da}d'] = df_new['close'].shift(da-1)
+        df_new[f'lastv{da}d'] = df_new['vol'].shift(da-1)
+        df_new[f'per{da}d'] = df_new['perd'].shift(da-1)
+        df_new[f'upper{da}'] = df_new['upper'].shift(da-1)
+        df_new[f'ma5{da}d'] = df_new['ma5d'].shift(da-1)
+        df_new[f'ma20{da}d'] = df_new['ma20d'].shift(da-1)
+        df_new[f'ma60{da}d'] = df_new['ma60d'].shift(da-1)
+        df_new[f'perc{da}d'] = df_new['perlastp'].shift(da-1)
+
+        # safe_get 列，如果不存在返回 NaN
+        for col in ['high4', 'hmax']:
+            df_new[f'{col}{da}d'] = df_new[col].shift(da-1) if col in df_new else np.nan
+
+    return df_new
+
+def compute_lastdays_percent_profile(df=None, lastdays=3, resample='d', vc_radio=100):
+    """
+    包装 compute_lastdays_percent 并添加性能分析
+    """
+    if df is None or len(df) <= 1:
+        log.info("compute df is none or too short")
+        return df
+    import cProfile
+    import pstats
+    import io
+    pr = cProfile.Profile()
+    pr.enable()  # 开始性能分析
+
+    # -----------------------------
+    # 原 compute_lastdays_percent 逻辑
+    # -----------------------------
+    result_df = compute_lastdays_percent(df=df, lastdays=lastdays, resample=resample, vc_radio=vc_radio)
+
+    pr.disable()  # 停止性能分析
+
+    # -----------------------------
+    # 输出 profile 信息到日志
+    # -----------------------------
+    s = io.StringIO()
+    ps = pstats.Stats(pr, stream=s).sort_stats('cumulative')
+    ps.print_stats(30)  # 打印前30条耗时记录
+    profile_output = s.getvalue()
+    log.info(f"[PROFILE] compute_lastdays_percent\n{profile_output}")
+
+    return result_df
+
+
+# def compare_perd_df_results(df_orig, df_opt, columns):
+#     result = {}
+#     mismatch_details = {}
+    
+#     for col in columns:
+#         s1 = df_orig[col] if col in df_orig else pd.Series([np.nan]*len(df_orig), index=df_orig.index)
+#         s2 = df_opt[col] if col in df_opt else pd.Series([np.nan]*len(df_orig), index=df_orig.index)
+        
+#         # mask for non-NaN comparisons
+#         mask = s1.notna() & s2.notna()
+#         mismatches = []
+#         for idx in s1.index:
+#             val1 = s1.loc[idx]
+#             val2 = s2.loc[idx]
+#             if pd.isna(val1) and pd.isna(val2):
+#                 continue
+#             if val1 != val2:
+#                 mismatches.append({'index': idx, 'orig': val1, 'opt': val2, 'diff': val2-val1 if pd.notna(val2) and pd.notna(val1) else None})
+
+#         result[col] = {
+#             'match': mask.sum() - len(mismatches),
+#             'mismatch': len(mismatches),
+#             'missing_in_orig': s1.isna().sum(),
+#             'missing_in_opt': s2.isna().sum(),
+#         }
+#         mismatch_details[col] = mismatches
+#     result['match_stats'] = match_stats
+#     result['mismatch_details'] = mismatch_details
+#     return result
+
+
+def compare_perd_df_results(df_orig, df_opt, columns=None):
+    """
+    对比两个 DataFrame 中指定列的值。
+    返回每列的 match/mismatch/missing 信息，并增加 match_stats 方便统计。
+    """
+    result = {}
+    if columns is None:
+        columns = df_orig.columns.tolist()
+    for col in columns:
+        # 初始化
+        col_result = {
+            'match': [],
+            'mismatch': [],
+            'missing_in_orig': [],
+            'missing_in_opt': []
+        }
+
+        # 遍历索引
+        all_index = df_orig.index.union(df_opt.index)
+        for idx in all_index:
+            val_orig = df_orig[col].get(idx, None) if col in df_orig else None
+            val_opt = df_opt[col].get(idx, None) if col in df_opt else None
+
+            # 缺失判断
+            if val_orig is None:
+                col_result['missing_in_orig'].append(idx)
+                continue
+            if val_opt is None:
+                col_result['missing_in_opt'].append(idx)
+                continue
+
+            # 比较值，NaN 当作相等
+            if pd.isna(val_orig) and pd.isna(val_opt):
+                col_result['match'].append(idx)
+            elif val_orig == val_opt:
+                col_result['match'].append(idx)
+            else:
+                col_result['mismatch'].append({
+                    'index': idx,
+                    'orig': val_orig,
+                    'opt': val_opt,
+                    'diff': (val_opt - val_orig) if pd.notna(val_opt) and pd.notna(val_orig) else None
+                })
+
+        result[col] = col_result
+
+    # 汇总 match_stats
+    match_stats = {}
+    for col in columns:
+        match_stats[col] = {
+            'match': len(result[col]['match']),
+            'mismatch': len(result[col]['mismatch']),
+            'missing_in_orig': len(result[col]['missing_in_orig']),
+            'missing_in_opt': len(result[col]['missing_in_opt']),
+        }
+    result['match_stats'] = match_stats
+    result['mismatch_details'] = {col: result[col]['mismatch'] for col in columns}
+    return result
+
+def compare_compute_perd(df, func1, func2, key_cols=None, verbose=True):
+    """
+    对比两个 compute_perd_df 版本的性能和结果。
+    
+    参数:
+        df: 输入 DataFrame
+        func1: 原始函数
+        func2: 新/优化函数
+        key_cols: 需要验证的关键列列表, 默认 ['perlastp', 'perd', 'red', 'gren', 'upperT', 'upperL', 'topR', 'topD', 'ral']
+        verbose: 是否打印详细信息
+    
+    返回:
+        dict: {
+            'time_func1': float,
+            'time_func2': float,
+            'results_match': dict {列名: True/False},
+            'diffs': dict {列名: DataFrame 差异明细}
+        }
+    """
+    if key_cols is None:
+        key_cols = ['perlastp', 'perd', 'red', 'gren', 'upperT', 'upperL', 'topR', 'topD', 'ral']
+    
+    # 性能测试
+    start = time.time()
+    df1 = func1(df.copy())
+    t1 = time.time() - start
+    
+    start = time.time()
+    df2 = func2(df.copy())
+    t2 = time.time() - start
+    
+    results_match = {}
+    diffs = {}
+    
+    for col in key_cols:
+        if col in df1.columns and col in df2.columns:
+            equal = (df1[col] == df2[col]).all()
+            results_match[col] = equal
+            if not equal:
+                diffs[col] = pd.concat([df1[col], df2[col]], axis=1).rename(columns={df1[col].name:'func1', df2[col].name:'func2'})
+        else:
+            results_match[col] = False
+    
+    if verbose:
+        print(f"{func1.__name__} time: {t1:.4f}s")
+        print(f"{func2.__name__} time: {t2:.4f}s")
+        for col, match in results_match.items():
+            print(f"{col}: {'MATCH' if match else 'MISMATCH'}")
+    
+    return {
+        'time_func1': t1,
+        'time_func2': t2,
+        'results_match': results_match,
+        'diffs': diffs
+    }
+
+# 使用示例：
+# result = compare_compute_perd(dd, compute_perd_df_ver, compute_perd_df_fast)
+# 如果有不匹配的列，可查看 result['diffs']['列名']
+
 def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
-    # ct.compute_lastdays lastdays to 9
     if df is not None and len(df) > lastdays:
         if len(df) > lastdays + 1:
             # 判断lastdays > 9 
             lastdays = len(df) - 2
-            lastdays = lastdays if lastdays < ct.compute_lastdays else ct.compute_lastdays
+            lastdays = lastdays if lastdays < cct.compute_lastdays else cct.compute_lastdays
         else:
             lastdays = len(df) - 1
         if 'date' in df.columns:
@@ -4382,43 +5108,51 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         df = df.sort_index(ascending=True)
         if cct.get_work_day_status() and 915 < cct.get_now_time_int() < 1500:
             df = df[df.index < cct.get_today()]
-        # df['ma5d'] = pd.Series.rolling(df.close, 5)
 
 #        df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
 
-        # df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
-        # df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        # df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
-        # df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
+        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
+        df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
+        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
 
-        safe_SMA(df, 'close', 5,  'ma5d')
-        safe_SMA(df, 'close', 10, 'ma10d')
-        safe_SMA(df, 'close', 20, 'ma20d')
-        safe_SMA(df, 'close', 60, 'ma60d')
+        # safe_SMA(df, 'close', 5,  'ma5d')
+        # safe_SMA(df, 'close', 10, 'ma10d')
+        # safe_SMA(df, 'close', 20, 'ma20d')
+        # safe_SMA(df, 'close', 60, 'ma60d')
 
-        # df['natr'] = ta.natr(df.high, df.low, df.close)
         df['truer'] = ta.true_range(df.high, df.low, df.close)
 
-        # if len(df) > 33:
-        #     # df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma20d]
-        #     # df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma20d]
-        #     # df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
-        #     df[['lower', 'ene', 'upper','bandwidth','bollpect']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
+        # # df_orig = compute_ma_cross_slow(df,resample=resample)
+        # df_orig = compute_ma_cross(df,resample=resample)
+        # # df_orig = compute_upper_cross_slow(df,resample=resample)
+        # df_orig = compute_upper_cross(df_orig,resample=resample)
 
-        # else:
-        #     df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma10d]
-        #     df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma10d]
-        #     df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
+        df = compute_cross_indicators(df, [('ma5d', 'ma10d', 'op')], [('upper', 'ma5d', 'topU', 'eneU')])
 
-        # df['upper'] = df['upper'].apply(lambda x: round(x,1))   
-        # df['lower'] = df['lower'].apply(lambda x: round(x,1))   
-        # df['ene'] =  df['ene'].apply(lambda x: round(x,1))  
-        # df = df.fillna(0)
+        # result = compare_perd_df_results(df_orig, df, columns=None)
+        # # 查看匹配统计
+        # # print(result['match_stats'])
+        # print(result['mismatch_details'])
 
-        dd = compute_ma_cross(df,resample=resample)
-        dd = compute_upper_cross(df,resample=resample)
 
+        # df_orig = compute_perd_df(df,lastdays=lastdays,resample=resample)
+        # df = compute_perd_df_vert(df,lastdays=lastdays,resample=resample)
         df = compute_perd_df(df,lastdays=lastdays,resample=resample)
+
+        # result = compare_perd_df_results(df_orig, df, columns=['perlastp','perd','red','gren','upperT','upperL','topR','topD','ral'])
+        # # 查看匹配统计
+        # print(result['match_stats'])
+        # print(result['mismatch_details'])
+
+        # # 查看某列不匹配详细信息
+        # if 'perlastp' in result['mismatch_details']:
+        #     print(result['mismatch_details']['perlastp'])
+
+
+        # compare_compute_perd(dd,compute_perd_df,compute_perd_df_fast)
+        # compare_compute_perd(dd,compute_perd_df_ver,compute_perd_df_fast)
+
         df['vchange'] = ((df['vol'] - df['vol'].shift(1)) / df['vol'].shift(1) * 100).map(lambda x: round(x, 1))
         df = df.fillna(0)
         df['vcra'] = len(df[df.vchange > vc_radio])
@@ -4426,43 +5160,14 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         # df['ma5vol'] = df.vol[-df.fib[0]]
         df['vcall'] = df['vchange'].max()
         # df['vchange'] = df['vchange'][-1]
-
         # df['meann'] = ((df['high'] + df['low']) / 2).map(lambda x: round(x, 1))
+
+
         df_temp = {}
-        # df = df.assign(hop=np.nan)s
         for da in range(1, lastdays + 1, 1):
-            # df['lastp%sd' % da] = df['close'].shift(da-1)
-            # df['lasto%sd' % da] = df['open'].shift(da-1)
-            # df['lasth%sd' % da] = df['high'].shift(da-1)
-            # df['lastl%sd' % da] = df['low'].shift(da-1)
-            # df['lastv%sd' % da] = df['vol'].shift(da-1)
             if da <=6:
-                # df['lastp%sd' % da] = df['close'][-da]
-            #     df.loc[:,'lasto%sd' % da] = df['open'][-da]
-            #     df.loc[:,'lastl%sd' % da] = df['low'][-da]
-            #     # df['lastv%sd' % da] = df['vol'][-da]
-            #     df.loc[:,'truer%sd' % da] = df['truer'][-da]
-
-            # # df['truer%sd' % da] = df['truer'][-da]
-            # df.loc[:,'lasth%sd' % da] = df['high'][-da]
-            # df.loc[:,'lastp%sd' % da] = df['close'][-da]
-
-            # df.loc[:,'lastv%sd' % da] = df['vol'][-da]
-            # # df['per%sd' % da] = df['close'].pct_change(da).apply(lambda x:round(x*100,1))
-            # # df['per%sd' % da] = df['perd'][-da:].sum()
-            # df.loc[:,'per%sd' % da] = df['perd'][-da]
-            # df.loc[:,'upper%s' % da] = df['upper'][-da]
-            # df.loc[:,'ma5%sd' % da] = df['ma5d'][-da]
-            # df.loc[:,'ma20%sd' % da] = df['ma20d'][-da]
-            # df.loc[:,'ma60%sd' % da] = df['ma60d'][-da]
-            # # df['du%sd' % da] = df['perd'][-da] - df['lastdu'][-da]
-            # # df['per%sd' % da] = df['perd'].shift(da-1)
-            # df.loc[:,'perc%sd' % da] = df['perlastp'][-da]
-
-
                 df_temp['lasto%sd' % da] = df['open'][-da]
                 df_temp['lastl%sd' % da] = df['low'][-da]
-                # df['lastv%sd' % da] = df['vol'][-da]
                 df_temp['truer%sd' % da] = df['truer'][-da]
 
             # df['truer%sd' % da] = df['truer'][-da]
@@ -4470,26 +5175,54 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
             df_temp['lastp%sd' % da] = df['close'][-da]
 
             df_temp['lastv%sd' % da] = df['vol'][-da]
-            # df['per%sd' % da] = df['close'].pct_change(da).apply(lambda x:round(x*100,1))
-            # df['per%sd' % da] = df['perd'][-da:].sum()
             df_temp['per%sd' % da] = df['perd'][-da]
             df_temp['upper%s' % da] = df['upper'][-da]
             df_temp['ma5%sd' % da] = df['ma5d'][-da]
             df_temp['ma20%sd' % da] = df['ma20d'][-da]
             df_temp['ma60%sd' % da] = df['ma60d'][-da]
-            # df['du%sd' % da] = df['perd'][-da] - df['lastdu'][-da]
-            # df['per%sd' % da] = df['perd'].shift(da-1)
             df_temp['perc%sd' % da] = df['perlastp'][-da]
-            # df_temp['high4%sd' % da] = df['high4'][-da]
-            # df_temp['hmax%sd' % da] = df['hmax'][-da]
             df_temp[f'high4{da}d'] = safe_get(df, 'high4', -da)
             df_temp[f'hmax{da}d']  = safe_get(df, 'hmax', -da)
-
         df_repeat = pd.DataFrame([df_temp]).loc[np.repeat(0, len(df))].reset_index(drop=True)
-
         df = pd.concat([df.reset_index(), df_repeat], axis=1)
         df = df.loc[:,~df.columns.duplicated()]
         df = df.set_index('date').sort_index(ascending=True)
+
+        # # df_aug = add_last_days_features(df, lastdays=lastdays)   #全数据
+        # df_aug = build_aug_from_last_row(df, lastdays=lastdays)   #最后一行数据
+        # # 2. 合并 df 与 df_aug，按列对齐
+        # df = df.join(df_aug)
+        # # 3. 去重列（如果有重复列名）
+        # df = df.loc[:, ~df.columns.duplicated()]
+        # # 4. 保证索引为 date 并升序排序
+        # df = df.sort_index(ascending=True)
+
+        # df_orig = compute_top10_count(df)
+        # df_orig = compute_ma5d_count(df,madays='5')     #ma5dcum
+        # # # df = compute_ma5d_count(df,madays='20')   #ma20dcum
+        # # # df = compute_ma5d_ra(df,madays='5')   #ma5d ra
+
+        df = compute_cum_and_top_stats(
+                df,
+                ma_days_list=['5','10'],            # 计算 ma5dcum 和 ma10dcum
+                lastdays=cct.compute_lastdays,
+                per_top_limits=[(9.9, 'top10'), (5, 'top5')]  # top10/top5 统计
+            )
+
+        # result = compare_perd_df_results(df_orig, df, columns=None)
+        # # 查看匹配统计
+        # # print(result['match_stats'])
+        # print(result['mismatch_details'])
+
+        df = df.reset_index()
+    else:
+        log.info("compute df is none")
+
+    return df
+
+        # compare_first_rows(df, df_aug, lastdays=lastdays,n=1)
+        # compare_shifted_df(df, df_aug, lastdays=lastdays)
+
         # cols = [
         #         'lasto1d','lastl1d','lastp1d','per1d',
         #         'lasto2d','lastl2d','lastp2d','per2d',
@@ -4527,17 +5260,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         # df['lastv9m'] = df['vol'][-lastdays:].mean()
             # df['mean%sd' % da] = df['meann'][-da]
 
-        df = compute_top10_count(df)
 
-        df = compute_ma5d_count(df,madays='5')     #ma5dcum
-        # df = compute_ma5d_count(df,madays='20')   #ma20dcum
-        # df = compute_ma5d_ra(df,madays='5')   #ma5d ra
-
-        df = df.reset_index()
-    else:
-        log.info("compute df is none")
-
-    return df
 
 
 def get_tdx_exp_low_or_high_price(code, dt=None, ptype='close', dl=None, end=None):
@@ -4629,31 +5352,6 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
         # log.debug("dt:%s dl:%s"%(dt,dl))
         df = get_tdx_Exp_day_to_df(code, start=dt, dl=dl, end=end, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support).sort_index(ascending=False)
         if df is not None and len(df) > 5:
-            # if power:
-            #     from JSONData import powerCompute as pct
-            #     dtype = resample
-            #     opc = 0
-            #     stl = ''
-            #     rac = 0
-            #     # fib = []
-            #     # sep = '|'
-            #     fibl = '0'
-            #     fib = '0'
-            #     for pty in ['low', 'high']:
-            #         op, ra, st, daysData = pct.get_linear_model_status(
-            #             code, df=df, dtype=dtype, start=dt, end=end, dl=dl, filter='y', ptype=pty, power=False)
-            #         opc += op
-            #         rac += ra
-            #         if pty == 'low':
-            #             stl = st
-            #             fibl = str(daysData[0])
-            #         else:
-            #             fib = str(daysData[0])
-            #     df['op'] = opc
-            #     df['ra'] = rac
-            #     df['fib'] = fib
-            #     df['fibl'] = fibl
-            #     df['ldate'] = stl
 
             df=resample_dataframe_recut(df,resample=resample)
 
@@ -4715,19 +5413,9 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
                 # lastvol = dz.vol[:lvoldays].min()
                 lastvol = round(sum(volmean) / len(volmean),1)
 
-                # log.debug("date:%s %s:%s" % (lowdate, ptype, lowp))
-
-                # log.debug("date:%s %s:%s" % (dt, ptype, lowp))
                 dtemp = df[df.index == lowdate]
                 dd = df[:1]
 
-                # if ptype == 'high':
-                #     lowp = dz.low.min()
-                #     dd.low = lowp
-                # else:
-                #     highp = dz.high.max()
-                #     dd.high = highp
-                    # print dd.high
                 if len(dd) > 0:
                     dd = dd[:1]
                     dt = dd.index.values[0]
@@ -4744,12 +5432,6 @@ def get_tdx_exp_low_or_high_power(code, dt=None, ptype='close', dl=None, end=Non
                 #min vol date
                 dd['last6vol'] = lastvol
 
-                # if 'ma5d' in df.columns and 'ma10d' in df.columns:
-                #     #                    print df[:1],code
-                #     if len(df.ma5d) > 0 and df[:1].ma5d.values[0] is not None and df[:1].ma5d.values[0] != 0:
-                #         dd['ma5d'] = round(float(df[:1].ma5d.values[0]), 2)
-                #     if len(df.ma10d) > 0 and df[:1].ma10d.values[0] is not None and df[:1].ma10d.values[0] != 0:
-                #         dd['ma10d'] = round(float(df[:1].ma10d.values[0]), 2)
             else:
                 dd = pd.Series([],dtype='float64')
 
@@ -5031,7 +5713,7 @@ def get_single_df_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end
     log.debug('T:%0.2f'%(time.time()-time_s))
     return top_all
 
-def compute_jump_du_count(df,lastdays=ct.compute_lastdays,resample='d'):
+def compute_jump_du_count(df,lastdays=cct.compute_lastdays,resample='d'):
 
     # if 'op' in df.columns and 'boll' in df.columns:
     #     df = df[(df.op > -1) & (df.boll > -1)]
@@ -5087,7 +5769,7 @@ def compute_jump_du_count(df,lastdays=ct.compute_lastdays,resample='d'):
 
     return codelist
 
-# def compute_ma5d_ra(df,lastdays=ct.compute_lastdays,madays='5'):
+# def compute_ma5d_ra(df,lastdays=cct.compute_lastdays,madays='5'):
 #     # temp=df[df.columns[(df.columns >= 'ma%s1d'%(madays)) & (df.columns <= 'ma%s%sd'%(madays,lastdays))]][-1:]
 #     temp=df.ma5d[-10:]
 #     cum_min,ops=LIS_TDX_Cum(temp.sort_index(ascending=False).values)
@@ -5096,7 +5778,62 @@ def compute_jump_du_count(df,lastdays=ct.compute_lastdays,resample='d'):
 #     df['ra']=ops[-1]+1 if ops[-1] > 0 else 0
 #     return df
 
-def compute_ma5d_count(df,lastdays=ct.compute_lastdays,madays='5'):
+def compute_ma5d_count(df, lastdays=cct.compute_lastdays, madays='5'):
+    """
+    计算 MA 累计值
+    """
+    # 匹配 maXd 列
+    ma_cols = df.filter(regex=f"ma{madays}\\d{{1,2}}d$")
+
+    # 计算累计均值
+    df[f'ma{madays}dcum'] = ma_cols.sum(axis=1) / lastdays
+    df[f'ma{madays}dcum'] = df[f'ma{madays}dcum'].round(1)
+
+    return df.fillna(0)
+
+
+def compute_cum_and_top_stats(df, ma_days_list=['5'], lastdays=cct.compute_lastdays, per_top_limits=[(9.9, 'top10'), (5, 'top5')]):
+    """
+    统一计算 MA 累计值和涨幅统计指标
+
+    参数:
+        df: pd.DataFrame, 股票数据
+        ma_days_list: list, 需要计算累计值的 MA 天数列表
+        lastdays: int, 计算累计均值的天数
+        per_top_limits: list of tuple, (阈值, 输出列名)
+    返回:
+        df: pd.DataFrame, 增加统计列
+    """
+    # 计算 MA 累计
+    for madays in ma_days_list:
+        ma_cols = df.filter(regex=f"ma{madays}\\d{{1,2}}d$")
+        if not ma_cols.empty:
+            df[f'ma{madays}dcum'] = (ma_cols.sum(axis=1) / lastdays).round(1)
+        else:
+            df[f'ma{madays}dcum'] = 0
+
+    # 计算涨幅统计
+    per_cols = df.filter(regex=r"per\d{1,2}d$")
+    for threshold, colname in per_top_limits:
+        if not per_cols.empty:
+            df[colname] = (per_cols >= threshold).sum(axis=1)
+        else:
+            df[colname] = 0
+
+    return df.fillna(0)
+
+def compute_top10_count(df, lastdays=cct.compute_lastdays, top_limit=ct.per_redline):
+    """
+    计算涨幅统计，如 top10/top5
+    """
+    per_cols = df.filter(regex=r"per\d{1,2}d$")
+
+    df['top10'] = (per_cols >= 9.9).sum(axis=1)
+    df['top5'] = (per_cols > 5).sum(axis=1)
+
+    return df.fillna(0)
+
+def compute_ma5d_count_slow(df,lastdays=cct.compute_lastdays,madays='5'):
     # temp=df[df.columns[(df.columns >= 'ma%s1d'%(madays)) & (df.columns <= 'ma%s%sd'%(madays,lastdays))]][-1:]
     # temp=df[df.columns[(df.columns >= 'ma%s1d'%(madays)) & (df.columns <= 'ma%s%sd'%(madays,lastdays))]]
 
@@ -5117,7 +5854,7 @@ def compute_ma5d_count(df,lastdays=ct.compute_lastdays,madays='5'):
     df = df.fillna(0)
     return df
 
-def compute_top10_count(df,lastdays=ct.compute_lastdays,top_limit=ct.per_redline):
+def compute_top10_count_slow(df,lastdays=cct.compute_lastdays,top_limit=ct.per_redline):
     # top_temp.loc[:,top_temp.columns.str.contains('perc')]
     # top_temp.loc[:,top_temp.columns.str.startswith('perc')]
     # temp.loc[:,temp.columns.str.contains( "per\d{1,2}d$",regex= True)]
@@ -6063,19 +6800,71 @@ def python_resample(qs, xs, rands):
     # # print timeit.timeit(lambda:cct.run_numba(python_resample(qs, xs,
     # # rands)),number=number)
 
+def safe_join(df, df_aug):
+    # 清除重复列
+    overlap = df.columns.intersection(df_aug.columns)
+    if len(overlap) > 0:
+        df_aug = df_aug.drop(columns=list(overlap))
+    return df.join(df_aug)
+
+def tdx_profile_test_tdx():
+    resample = 'd'
+    code = '000002'
+    dl = ct.Resample_LABELS_Days[resample]
+    # -----------------------
+    # 原始方法性能测试
+    # -----------------------
+    time_s = time.time()
+    for _ in range(10):
+        df = get_tdx_exp_low_or_high_power(code, dl=dl, end=None, ptype='low', power=False, resample=resample)
+        # df = get_tdx_Exp_day_to_df(code, dl=dl, end=None, ptype='low', power=False, resample=resample)
+        # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample) 
+        
+        # 原始扩展方法
+        # df_temp = {}
+        # lastdays = 12
+        # for da in range(1, lastdays+1):
+        #     df_temp[f'lasth{da}d'] = df['high'][-da]
+        #     df_temp[f'lastp{da}d'] = df['close'][-da]
+        #     df_temp[f'lastv{da}d'] = df['vol'][-da]
+        # df_repeat = pd.DataFrame([df_temp]).loc[np.repeat(0, len(df))].reset_index(drop=True)
+        # df_orig = pd.concat([df.reset_index(), df_repeat], axis=1)
+    print("原始方法 time: %s s" % round(time.time() - time_s, 2))
+
+    # -----------------------
+    # 优化方法性能测试
+    # -----------------------
+    time_s = time.time()
+    for _ in range(10):
+        # df = get_tdx_exp_low_or_high_power(code, dl=dl, end=None, ptype='low', power=False, resample=resample)
+        # df = get_tdx_Exp_day_to_df(code, dl=dl, end=None, ptype='low', power=False, resample=resample)
+        df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample) 
+
+
+        # # 优化扩展方法
+        # lastdays = 12
+        # df_aug = build_aug_from_last_row(df, lastdays=lastdays)
+        # # df_opt = df.join(df_aug)
+        # df_opt = safe_join(df, df_aug)
+        # df_opt = df_opt.loc[:, ~df_opt.columns.duplicated()]
+        # df_opt = df_opt.sort_index(ascending=True)
+
+    print("优化方法 time: %s s" % round(time.time() - time_s, 2))
+    print("done")
+
 def tdx_profile_test():
-    resample = 'w'
+    resample = 'd'
     code='000002'
     dl=ct.Resample_LABELS_Days[resample]
     time_s=time.time()
-    for i in range(100):
+    for i in range(10):
         df = get_tdx_exp_low_or_high_power(code, dl=dl, end=None, ptype='low', power=False, resample=resample)
     print("time:%s"%( round((time.time()-time_s),2) ))
     print("done")
-    # gui_test.py
 if __name__ == '__main__':
     # import sys
     # import timeit
+
     from docopt import docopt
     # log = LoggerFactory.log
     log = LoggerFactory.getLogger()
@@ -6086,10 +6875,19 @@ if __name__ == '__main__':
     elif args['-d'] == 'info':
         log_level = LoggerFactory.INFO
     else:
-        log_level = LoggerFactory.ERROR
+        log_level = LoggerFactory.INFO
     # log_level = LoggerFactory.DEBUG if args['-d']  else LoggerFactory.ERROR
     # log_level = LoggerFactory.DEBUG
     log.setLevel(log_level)
+    # tdx_profile_test_tdx()
+    resample = 'd'
+    code = '000002'
+    # (get_tdx_Exp_day_to_df_performance(code,dl=ct.Resample_LABELS_Days[resample],resample=resample))
+    df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+    # compute_lastdays_percent_profile(df, lastdays=5)
+
+
+
     # tdx_profile_test()
     # pyprof2calltree -k -i tdx.profile
     # # import cProfile
@@ -6227,8 +7025,8 @@ if __name__ == '__main__':
         'lasto2d','lastl2d','lastp2d','per2d',
         'lasto3d','lastl3d','lastp3d','per3d',
         'lasto4d','lastl4d','lastp4d','per4d',
-        'lasto5d','lastl5d','lastp5d','per5d',
-        'lasto6d','lastl6d','lastp6d','per6d'
+        'lasto5d','lastl5d','lastp5d','per5d'
+        # 'lasto6d','lastl6d','lastp6d','per6d'
     ]
     df_cols_only = df.loc[:, cols]
     print(df_cols_only[-1:].T)
@@ -6335,7 +7133,7 @@ if __name__ == '__main__':
     print(f' m: {ct.Resample_LABELS_Days["m"] } df2.ma20d : {df2.ma20d} df2.ma60d : {df2.ma60d} \n\n')
 
     print(f'topR:{df2.topR} red:{df2.red} df2.maxp: {df2.maxp} maxpcout: {df2.maxpcout}')
-    print(f'ldate:{df2.ldate[:2]}')
+    # print(f'ldate:{df2.ldate[:2]}')
     df = df2.to_frame().T
     print(df.loc[:,df.columns[df.columns.str.contains('perc')]][-1:])
     print(df.loc[:,df.columns[df.columns.str.contains('per[0-9]{1}d', regex=True, case=False)]][-1:])

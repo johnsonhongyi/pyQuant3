@@ -1989,7 +1989,7 @@ def clean_expired_tdx_file(logger):
 
     # ✅ 当前时间窗口
     now_time = cct.get_now_time_int()
-    if not (830 <= now_time <= 925):
+    if not (830 <= now_time <= 915):
         return
 
     logger.info(f"{today} 准备清理过期文件: {cct.get_ramdisk_path('tdx_last_df')}")
@@ -2028,6 +2028,29 @@ def clean_expired_tdx_file(logger):
         logger.info(f"{today} 待清理文件不存在: {fname}")
         _LAST_CLEAN_DATE = today
 
+def sanitize(df):
+    """
+    全面修复重复 index / 重复主键 / 异常残留
+    """
+    if df is None or df.empty:
+        return df
+
+    # 1. index 去重
+    df = df.loc[~df.index.duplicated(keep='last')]
+
+    # 2. 常见主键去重
+    if 'code' in df.columns:
+        if 'date' in df.columns:
+            df = df.drop_duplicates(subset=['code', 'date'], keep='last')
+        else:
+            df = df.drop_duplicates(subset=['code'], keep='last')
+
+    # 3. 删除 NA index
+    if df.index.isna().any():
+        df = df.loc[~df.index.isna()]
+
+    return df
+
 
 # ------------------ 后台数据进程 ------------------ #
 def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=None,detect_calc_support=False):
@@ -2051,54 +2074,65 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
         # logger.info(f'resample : new : {g_values.getkey("resample")} last : {resample} st : {g_values.getkey("st_key_sort")}')
         # if flag is not None and not flag.value:   # 停止刷新
         # logger.info(f'worktime : {cct.get_work_time()} {not cct.get_work_time()} , START_INIT : {START_INIT}')
-        time_s = time.time()
-        if not flag.value:   # 停止刷新
-               time.sleep(1)
-               # logger.info(f'flag.value : {flag.value} 停止更新')
-               continue
-        elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
-            logger.info(f'resample : new : {g_values.getkey("resample")} last : {resample} ')
-            top_all = pd.DataFrame()
-            lastpTDX_DF = pd.DataFrame()
-        elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
-            # logger.info(f'market : new : {g_values.getkey("market")} last : {market} ')
-            top_all = pd.DataFrame()
-            lastpTDX_DF = pd.DataFrame()
-        elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
-            # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
-            st_key_sort = g_values.getkey("st_key_sort")
-        elif  830 <= cct.get_now_time_int() <= 925:
-            global _LAST_CLEAN_DATE
-            # ✅ 计算文件路径
-            fname = cct.get_ramdisk_path('tdx_last_df')
-            # if _LAST_CLEAN_DATE != cct.get_today():
-            time_init = time.time()
-            if os.path.exists(fname) and _LAST_CLEAN_DATE != cct.get_today():
-                logger.info(f"{cct.get_today()} 准备清理过期文件: {cct.get_ramdisk_path('tdx_last_df')}")
-                clean_expired_tdx_file(logger)
-                START_INIT = 0
-                top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
-                for res_m in ['d','3d','w','m']:
-                    if res_m != g_values.getkey("resample"):
-                        top_all_d, lastpTDX_DF_d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[res_m],resample=res_m)
-                    # top_all_3d, lastpTDX_DF_3d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['3d'],resample='3d')
-                    # top_all_w, lastpTDX_DF_w = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['w'],resample='w')
-                    # top_all_m, lastpTDX_DF_m = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['m'],resample='m')
-                logger.info(f'init_tdx 用时:{time.time()-time_init:.2f}')
-            for _ in range(30):
-                if not flag.value: break
-                time.sleep(1)
-            continue
-
-        elif START_INIT > 0 and (not cct.get_work_time()):
-                # logger.info(f'not worktime and work_duration')
-                for _ in range(5):
+        try:
+            time_s = time.time()
+            if not flag.value:   # 停止刷新
+                   for _ in range(5):
+                        if not flag.value: break
+                        time.sleep(1)
+                   # logger.info(f'flag.value : {flag.value} 停止更新')
+                   continue
+            elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
+                logger.info(f'resample : new : {g_values.getkey("resample")} last : {resample} ')
+                top_all = pd.DataFrame()
+                lastpTDX_DF = pd.DataFrame()
+            elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
+                # logger.info(f'market : new : {g_values.getkey("market")} last : {market} ')
+                top_all = pd.DataFrame()
+                lastpTDX_DF = pd.DataFrame()
+            elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
+                # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
+                st_key_sort = g_values.getkey("st_key_sort")
+            elif  830 <= cct.get_now_time_int() <= 925:
+                global _LAST_CLEAN_DATE
+                # ✅ 计算文件路径
+                fname = cct.get_ramdisk_path('tdx_last_df')
+                # if _LAST_CLEAN_DATE != cct.get_today():
+                time_init = time.time()
+                if os.path.exists(fname) and _LAST_CLEAN_DATE != cct.get_today():
+                    logger.info(f"{cct.get_today()} 准备清理过期文件: {cct.get_ramdisk_path('tdx_last_df')}")
+                    clean_expired_tdx_file(logger)
+                    START_INIT = 0
+                    if cct.get_now_time_int() <= 900:
+                        top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
+                        for res_m in ['d','3d','w','m']:
+                            if res_m != g_values.getkey("resample"):
+                                logger.info(f'start init_tdx resample: {res_m}')
+                                top_all_d, lastpTDX_DF_d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[res_m],resample=res_m)
+                            # top_all_3d, lastpTDX_DF_3d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['3d'],resample='3d')
+                            # top_all_w, lastpTDX_DF_w = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['w'],resample='w')
+                            # top_all_m, lastpTDX_DF_m = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['m'],resample='m')
+                    else:
+                        top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
+                        for res_m in ['3d']:
+                            logger.info(f'start init_tdx resample: {res_m}')
+                            top_all_d, lastpTDX_DF_d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[res_m],resample=res_m)
+                    logger.info(f'init_tdx 用时:{time.time()-time_init:.2f}')
+                    
+                for _ in range(30):
                     if not flag.value: break
                     time.sleep(1)
                 continue
-        else:
-            logger.info(f'start work : {cct.get_now_time()} get_work_time: {cct.get_work_time()} , START_INIT :{START_INIT} ')
-        try:
+
+            elif START_INIT > 0 and (not cct.get_work_time()):
+                    # logger.info(f'not worktime and work_duration')
+                    for _ in range(5):
+                        if not flag.value: break
+                        time.sleep(1)
+                    continue
+            else:
+                logger.info(f'start work : {cct.get_now_time()} get_work_time: {cct.get_work_time()} , START_INIT :{START_INIT} ')
+        # try:
             # resample = cct.GlobalValues().getkey("resample") or "d"
             resample = g_values.getkey("resample") or "d"
             market = g_values.getkey("market", marketInit)        # all / sh / cyb / kcb / bj
@@ -2141,17 +2175,25 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
             top_temp = top_temp.sort_values(by=sort_cols, ascending=sort_keys)
             logger.info(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape} detect_calc_support:{detect_calc_support.value}')
             df_all = clean_bad_columns(top_temp)
-            queue.put(top_temp)
+            df_all = sanitize(df_all)
+            queue.put(df_all)
             gc.collect()
-            logger.info(f'用时: {round(time.time() - time_s,1)/len(top_temp):.2f} now: {cct.get_now_time_int()} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+            logger.info(f'用时: {round(time.time() - time_s,1)/len(df_all):.2f} now: {cct.get_now_time_int()} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
             for _ in range(duration_sleep_time):
                 if not flag.value: break
                 time.sleep(0.5)
             START_INIT = 1
-        except Exception as e:
-            logger.error(f"Error in background process: {e}", exc_info=True)
-            time.sleep(duration_sleep_time / 2)
 
+        except Exception as e:
+            logger.error(f"resample: {resample} Error in background process: {e}", exc_info=True)
+            # print(f"fetch_and_process error: {e}")
+            # log.error(f"resample: {resample}: 读取fetch_and_process error:异常: {e}\n{traceback.format_exc()}")
+            time.sleep(duration_sleep_time / 2)
+        # finally:
+        #     try:
+        #         queue.put(None)  # 避免父进程阻塞
+        #     except:
+        #         pass
 # ------------------ 指标计算 ------------------ #
 def calc_indicators(top_all, resample):
     # if cct.get_trade_date_status():
@@ -6458,17 +6500,30 @@ class StockMonitorApp(tk.Tk):
         signal_icon = ""
 
         # 条件判断顺序很重要，从弱到强
-        if close > ma5d and low < ma10d:
-            signal_icon = "👍"  # 反抽
-            if close > high4:
+        try:
+            if close > ma5d and low < ma10d:
+                signal_icon = "👍"  # 反抽
+                if close > high4:
+                    signal_icon = "🚀"  # 突破高点
+                    if close > upper1:
+                        signal_icon = "☀️"  # 超越上轨
+            elif close >= lasth1d > lasth2d:
                 signal_icon = "🚀"  # 突破高点
-                if close > upper1:
+                if close > upper2:
                     signal_icon = "☀️"  # 超越上轨
-        elif close >= lasth1d > lasth2d:
-            signal_icon = "🚀"  # 突破高点
-            if close > upper2:
-                signal_icon = "☀️"  # 超越上轨
-
+        except Exception as e:
+            if close > ma5d and low < ma5d:
+                signal_icon = "👍"  # 反抽
+                if close > high4:
+                    signal_icon = "🚀"  # 突破高点
+                    if close > upper1:
+                        signal_icon = "☀️"  # 超越上轨
+            elif close >= lasth1d > lasth2d:
+                signal_icon = "🚀"  # 突破高点
+                if close > upper2:
+                    signal_icon = "☀️"  # 超越上轨
+        finally:
+            pass
 
         # 计算突破和强势
         breakthrough = "✓" if high > upper else "✗"
@@ -13303,7 +13358,7 @@ class ColumnSetManager(tk.Toplevel):
 #             today_low = self.state[symbol]['today_low']
 
 #             # --- 大趋势 ---
-#             trend_up = row['ma51d'] > row['ma512d']
+#             trend_up = row['ma51d'] > row['ma10d']
 #             price_rise = (row['lastp1d'] > row['lastp2d']) & (row['lastp2d'] > row['lastp3d'])
 #             macd_bull = (row['macddif'] > row['macddea']) & (row['macd'] > 0)
 #             macd_accel = (row['macdlast1'] > row['macdlast2']) & (row['macdlast2'] > row['macdlast3'])
@@ -13365,6 +13420,45 @@ class ColumnSetManager(tk.Toplevel):
 
 #         return df
 
+def safe_prev_signal_array(df):
+    """
+    生成 prev_signal_arr，确保不会因为 df 异常、空值、结构错误而崩溃。
+    """
+    # 情况 1：df 为空 → 返回空数组
+    if df is None or df.empty:
+        return np.array([])
+
+    # 情况 2：没有 prev_signal 列 → 创建空列
+    if 'prev_signal' not in df.columns:
+        df['prev_signal'] = None
+
+    # 确保列存在后，取值
+    raw_vals = df['prev_signal'].tolist()
+
+    safe_vals = []
+    for v in raw_vals:
+
+        # 若 v 是 Series / ndarray / list / tuple → 代表数据结构异常
+        # 直接视为无信号
+        if isinstance(v, (pd.Series, np.ndarray, list, tuple, dict)):
+            safe_vals.append(0)
+            continue
+
+        # 若 v 是字符串（通常的 BUY_N / BUY_S）
+        if isinstance(v, str):
+            safe_vals.append(1 if v in ('BUY_N', 'BUY_S') else 0)
+            continue
+
+        # 若 v 是 NaN 或 None
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            safe_vals.append(0)
+            continue
+
+        # 其它情况全部归零
+        safe_vals.append(0)
+
+    return np.array(safe_vals)
+
 
 class RealtimeSignalManager:
     def __init__(self):
@@ -13409,7 +13503,7 @@ class RealtimeSignalManager:
         low_arr = df['low'].values
         volume_arr = df['volume'].values
         ma51d = df['ma51d'].values
-        ma512d = df['ma512d'].values
+        ma10d = df['ma10d'].values
         lastp1d = df['lastp1d'].values
         lastp2d = df['lastp2d'].values
         lastp3d = df['lastp3d'].values
@@ -13434,7 +13528,7 @@ class RealtimeSignalManager:
         vol_boom_now = volume_arr > avg_vol_arr
 
         # --- 大趋势指标 ---
-        trend_up = ma51d > ma512d
+        trend_up = ma51d > ma10d
         price_rise = (lastp1d > lastp2d) & (lastp2d > lastp3d)
         macd_bull = (macddif > macddea) & (macd > 0)
         macd_accel = (macdlast1 > macdlast2) & (macdlast2 > macdlast3)
@@ -13466,7 +13560,19 @@ class RealtimeSignalManager:
         score += ((down_streak_arr >= 2) & (now_arr > prev_now_arr * 1.005)) * 2
 
         # 前置信号加权
-        prev_signal_arr = np.array([1 if s in ['BUY_N', 'BUY_S'] else 0 for s in prev_signal_list])
+        # prev_signal_arr = np.array([1 if s in ['BUY_N', 'BUY_S'] else 0 for s in prev_signal_list])
+
+        prev_signal_arr = safe_prev_signal_array(df)
+        # # 确保 prev_signal_list 一律是列表
+        # prev_signal_list = df['prev_signal'].tolist()
+
+        # # 避免 Series、NaN、None 造成问题
+        # prev_signal_arr = np.array([
+        #     1 if isinstance(s, str) and s in ('BUY_N', 'BUY_S') else 0
+        #     for s in prev_signal_list
+        # ])
+
+
         score += prev_signal_arr
 
         df['signal_strength'] = score
@@ -13538,118 +13644,6 @@ class RealtimeSignalManager:
         return df
 
 
-    def update_signals_old(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        df: 最新盘中数据，包含已有 columns
-        返回 df，增加 'signal' 和 'signal_strength'
-        """
-        df = df.copy()
-        df['signal'] = ""
-        df['signal_strength'] = 0
-
-        for i, row in df.iterrows():
-            symbol = row['name']
-
-            # 初始化状态
-            if symbol not in self.state:
-                self.state[symbol] = {
-                    'prev_now': row['now'],
-                    'today_high': row['high'],
-                    'today_low': row['low'],
-                    'prev_signal': None,
-                    'down_streak': 0,
-                    'recent_vols': [row['volume']]
-                }
-
-            s = self.state[symbol]
-            prev_now = s['prev_now']
-            today_high = s['today_high']
-            today_low = s['today_low']
-
-            # 更新当日high/low
-            today_high = max(today_high, row['high'])
-            today_low = min(today_low, row['low'])
-
-            # 更新最近短期均量列表
-            s['recent_vols'].append(row['volume'])
-            if len(s['recent_vols']) > 5:  # 最近5根tick
-                s['recent_vols'].pop(0)
-            avg_vol = sum(s['recent_vols']) / len(s['recent_vols'])
-
-            # --- 大趋势指标 ---
-            trend_up = row['ma51d'] > row['ma512d']
-            price_rise = (row['lastp1d'] > row['lastp2d']) & (row['lastp2d'] > row['lastp3d'])
-            macd_bull = (row['macddif'] > row['macddea']) & (row['macd'] > 0)
-            macd_accel = (row['macdlast1'] > row['macdlast2']) & (row['macdlast2'] > row['macdlast3'])
-            rsi_mid = (row['rsi'] > 45) & (row['rsi'] < 75)
-            kdj_bull = (row['kdj_j'] > row['kdj_k']) & (row['kdj_k'] > row['kdj_d'])
-            kdj_strong = row['kdj_j'] > 60
-
-            # --- 实时短线指标 ---
-            morning_gap_up = row['open'] <= row['low'] * 1.001
-            vol_boom_now = row['volume'] > avg_vol  # 与短期均量比较
-            intraday_up = row['now'] > prev_now
-            intraday_high_break = row['now'] > today_high
-            intraday_low_break = row['now'] < today_low
-
-            # 连续下跌追踪
-            if row['now'] < prev_now:
-                s['down_streak'] += 1
-            else:
-                s['down_streak'] = 0
-
-            # --- 评分 ---
-            score = 0
-            score += trend_up * 2
-            score += price_rise * 1
-            score += macd_bull * 1
-            score += macd_accel * 2
-            score += rsi_mid * 1
-            score += (row['rsi'] - 50 if pd.notnull(row['rsi']) else 0) * 0.05
-            score += kdj_bull * 1
-            score += kdj_strong * 1
-            score += morning_gap_up * 2
-            score += intraday_up * 1
-            score += intraday_high_break * 2
-            score += vol_boom_now * 1
-
-            # 连续下跌 + 高开反弹加权
-            if s['down_streak'] >= 2 and row['now'] > prev_now * 1.005:
-                score += 2
-
-            # 前置信号加权
-            if s['prev_signal'] in ['BUY_N', 'BUY_S']:
-                score += 1
-
-            df.at[i, 'signal_strength'] = score
-
-            # --- 信号等级 ---
-            if score >= 9:
-                df.at[i, 'signal'] = 'BUY_S'
-            elif score >= 6:
-                df.at[i, 'signal'] = 'BUY_N'
-            elif score < 6 and row['macd'] < 0:
-                df.at[i, 'signal'] = 'SELL_WEAK'
-
-            # 卖出条件
-            sell_cond = (
-                ((row['macddif'] < row['macddea']) & (row['macd'] < 0)) |
-                ((row['rsi'] < 45) & (row['kdj_j'] < row['kdj_k'])) |
-                ((row['now'] < row['ma51d']) & (row['macdlast1'] < row['macdlast2'])) |
-                intraday_low_break
-            )
-            if sell_cond:
-                df.at[i, 'signal'] = 'SELL'
-
-            # --- 更新全局状态 ---
-            s['prev_now'] = row['now']
-            s['today_high'] = today_high
-            s['today_low'] = today_low
-            s['prev_signal'] = df.at[i, 'signal']
-
-        return df
-
-
 def calc_breakout_signals(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["signal_strength"] = 0
@@ -13657,7 +13651,7 @@ def calc_breakout_signals(df: pd.DataFrame) -> pd.DataFrame:
 
     # === 基础特征 ===
     ma_short = df['ma51d']
-    ma_mid = df['ma512d']
+    ma_mid = df['ma10d']
 
     # --- 趋势条件 ---
     cond_trend_up = (df['close'] > ma_short) & (ma_short > ma_mid)
@@ -13731,9 +13725,12 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
     df["emotion"] = "中性"
 
     # df = calc_breakout_signals(df)
-    # df = signal_manager.update_signals_old(df.copy())
     df = signal_manager.update_signals(df.copy())
 
+
+    df.loc[df.get("volume", 0) > 1.2, "emotion"] = "乐观"
+    df.loc[df.get("volume", 0) < 0.8, "emotion"] = "悲观"
+    return df
 
     # # --- 保留 code 作为 index ---
     # df = df.set_index('code', drop=False)  # drop=False 保留 code 列
@@ -13769,9 +13766,6 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
     #     logger.info("signal 一致 ✅")
 
 
-    df.loc[df.get("volume", 0) > 1.2, "emotion"] = "乐观"
-    df.loc[df.get("volume", 0) < 0.8, "emotion"] = "悲观"
-    return df
 
     # # 买入逻辑
     # buy_cond = (
@@ -13808,7 +13802,7 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
     # buy_cond = (
     #     # 趋势共振
     #     (df['close'] > df['ma51d']) &                 # 短期价格在均线之上
-    #     (df['close'] > df['ma512d']) &               # 中期趋势向上
+    #     (df['close'] > df['ma10d']) &               # 中期趋势向上
     #     (df['lastp1d'] > df['lastp2d']) & (df['lastp2d'] > df['lastp3d']) &  # 连续上涨3日
         
     #     # MACD 共振
@@ -13848,7 +13842,7 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
     # buy_cond = (
     #     # 趋势确认
     #     (df['close'] > df['ma51d']) &
-    #     (df['ma51d'] > df['ma512d']) &                      # 均线多头排列
+    #     (df['ma51d'] > df['ma10d']) &                      # 均线多头排列
     #     (df['macddif'] > df['macddea']) &
     #     (df['macd'] > 0) &
 
@@ -15211,7 +15205,13 @@ if __name__ == "__main__":
     # 测试未捕获异常
     # 直接触发
     # 1/0
-    mp.freeze_support()  # <-- 必须
+    # 仅在 Windows 上设置启动方法，因为 Unix/Linux 默认是 'fork'，更稳定
+    if sys.platform.startswith('win'):
+        mp.freeze_support() # Windows 必需
+        mp.set_start_method('spawn', force=True) 
+        # 'spawn' 是默认的，但显式设置有助于确保一致性。
+        # 另一种方法是尝试使用 'forkserver' (如果可用)
+        # mp.freeze_support()  # <-- 必须
 
     args = parse_args()  # 解析命令行参数
     # log_level = getattr(LoggerFactory, args.log.upper(), LoggerFactory.ERROR)
