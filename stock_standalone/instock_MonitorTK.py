@@ -2236,11 +2236,11 @@ def calc_indicators(top_all, resample):
                 # logger.info(f'dff2 :{top_all["dff2"][:5]}')
 
         else:
-            top_all['dff'] = ((top_all['buy'] - top_all['df2']) / top_all['lastp'] * 100).round(1)
+            top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
             top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
 
     else:
-        top_all['dff'] = ((top_all['buy'] - top_all['df2']) / top_all['df2'] * 100).round(1)
+        top_all['dff'] = ((top_all['buy'] - top_all['llastp']) / top_all['llastp'] * 100).round(1)
         top_all['dff2'] = ((top_all['buy'] - top_all['lastp']) / top_all['lastp'] * 100).round(1)
         
     return top_all.sort_values(by=['dff','percent','volume','ratio','couts'], ascending=[0,0,0,1,1])
@@ -2295,17 +2295,90 @@ def send_code_via_pipe(code):
             time.sleep(0.5)
     return False
 
-def list_archives():
+def list_archives(prefix="search_history"):
     """列出所有存档文件"""
     files = sorted(
-        [f for f in os.listdir(ARCHIVE_DIR) if f.startswith("search_history") and f.endswith(".json")],
+        [f for f in os.listdir(ARCHIVE_DIR) if f.startswith(prefix) and f.endswith(".json")],
         reverse=True
     )
     return files
 
+MAX_KEEP = 15  # 每个前缀只保留最近 15 个文件
+
+def archive_file_tools(src_file, prefix):
+    """
+    通用备份函数
+    src_file: 需要备份的文件路径，如 "alerts.json"
+    prefix  : 文件名前缀，如 "alerts", "monitor_list"
+    """
+    if not os.path.exists(src_file):
+        logger.info(f"⚠ {src_file} 不存在，跳过存档")
+        return
+
+    try:
+        with open(src_file, "r", encoding="utf-8") as f:
+            content = f.read().strip()
+    except Exception as e:
+        logger.info(f"⚠ 无法读取 {src_file}: {e}")
+        return
+
+    if not content or content in ("[]", "{}", ""):
+        logger.info(f"⚠ {src_file} 内容为空，跳过存档")
+        return
+
+    # 确保存档目录存在
+    os.makedirs(ARCHIVE_DIR, exist_ok=True)
+
+    # 检查最近一个存档是否相同
+    files = sorted(
+        [f for f in os.listdir(ARCHIVE_DIR) if f.startswith(prefix + "_")],
+        reverse=True
+    )
+
+    if files:
+        last_file = os.path.join(ARCHIVE_DIR, files[0])
+        try:
+            with open(last_file, "r", encoding="utf-8") as f:
+                last_content = f.read().strip()
+            if content == last_content:
+                logger.info(f"⚠ {src_file} 与上一次 {prefix} 存档相同，跳过存档")
+                return
+        except Exception as e:
+            logger.info(f"⚠ 无法读取最近存档: {e}")
+
+    # --- 生成存档文件名 ---
+    today = datetime.now().strftime("%Y-%m-%d")
+    filename = f"{prefix}_{today}.json"
+    dest = os.path.join(ARCHIVE_DIR, filename)
+
+    # 如果同一天已有 → 加时间戳避免覆盖
+    # if os.path.exists(dest):
+    #     timestamp = datetime.now().strftime("%H%M%S")
+    #     filename = f"{prefix}_{today}_{timestamp}.json"
+    #     dest = os.path.join(ARCHIVE_DIR, filename)
+
+    # 复制文件
+    shutil.copy2(src_file, dest)
+    rel_path = os.path.relpath(dest)
+    logger.info(f"✅ 已归档：{rel_path}")
+
+    # --- 清理旧备份，只保留最近 MAX_KEEP 个 ---
+    files = sorted(
+        [os.path.join(ARCHIVE_DIR, f) for f in os.listdir(ARCHIVE_DIR) if f.startswith(prefix + "_")],
+        key=os.path.getmtime,
+        reverse=True
+    )
+    logger.info(f'files:{len(files)} : {files}')
+    for old_file in files[MAX_KEEP:]:
+        try:
+            os.remove(old_file)
+            logger.info(f"🗑 删除旧归档: {os.path.basename(old_file)}")
+        except Exception as e:
+            logger.info(f"⚠ 删除失败 {old_file} -> {e}")
 
 def archive_search_history_list(MONITOR_LIST_FILE=SEARCH_HISTORY_FILE,ARCHIVE_DIR=ARCHIVE_DIR):
     """归档监控文件，避免空或重复存档"""
+    archive_file_tools("monitor_category_list.json", "monitor_category_list")
 
     if not os.path.exists(MONITOR_LIST_FILE):
         logger.info("⚠ search_history.json 不存在，跳过归档")
@@ -2352,6 +2425,7 @@ def archive_search_history_list(MONITOR_LIST_FILE=SEARCH_HISTORY_FILE,ARCHIVE_DI
     # 复制文件
     shutil.copy2(MONITOR_LIST_FILE, dest)
     logger.info(f"✅ 已归档监控文件: {dest}")
+
 # ------------------ Tk 前端 ------------------ #
 # class StockMonitorApp(tk.Tk):
 #     def __init__(self, queue):
@@ -4400,6 +4474,8 @@ class StockMonitorApp(tk.Tk):
         tk.Button(ctrl_frame, text="删除", command=lambda: self.delete_search_history(2)).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="监控", command=lambda: self.KLineMonitor_init()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk()).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="存档", command=lambda: self.open_archive_loader(), font=('Microsoft YaHei', 9), padx=2, pady=2).pack(side="left", padx=2)
+
         # # 搜索区（可拉伸）
         # search_frame = tk.Frame(ctrl_frame)
         # search_frame.pack(side="left", fill="x", expand=True, padx=5)
@@ -7532,7 +7608,7 @@ class StockMonitorApp(tk.Tk):
         win._btn_copy_expr = btn
 
    
-    def show_concept_top10_window_simple(self, concept_name, code=None, auto_update=True, interval=30,stock_name=None):
+    def show_concept_top10_window_simple(self, concept_name, code=None, auto_update=True, interval=30,stock_name=None,focus_force=False):
         """
         显示指定概念的前10放量上涨股，不复用已有窗口，简单独立创建
         参数：
@@ -7566,9 +7642,15 @@ class StockMonitorApp(tk.Tk):
         for k, v in self._pg_top10_window_simple.items():
             if v.get("code") == unique_code and v.get("win") is not None and v.get("win").winfo_exists():
                 # 已存在，聚焦并显示TK
+                logger.info(f'已存在，聚焦并显示TK:{unique_code}')
                 v["win"].deiconify()      # 如果窗口最小化了，恢复
                 v["win"].lift()           # 提到最前
                 v["win"].focus_force()    # 获得焦点
+                if hasattr(v["win"], "_tree_top10"):
+                    v["win"]._tree_top10.selection_set(v["win"]._tree_top10.get_children()[0])  # 选中第一行（可选）
+                    v["win"]._tree_top10.focus_set() # 获得焦点
+                v["win"].attributes("-topmost", True)
+                v["win"].after(100, lambda: v["win"].attributes("-topmost", False))
                 return  # 不创建新窗口
 
         # --- 新窗口 ---
@@ -7853,6 +7935,22 @@ class StockMonitorApp(tk.Tk):
         win.bind("<Escape>", lambda e: _on_close())  # ESC关闭窗口
         # 填充数据
         self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
+        if focus_force:
+            logger.info(f'已存在，focus_force聚焦并显示TK:{unique_code}')
+            win.transient(self)              # 关联主窗口（非常关键）
+            win.attributes("-topmost", True) # 临时置顶
+            win.deiconify()                  # 确保不是最小化
+            win.lift()
+            win.focus_force()    # 获得焦点
+            if hasattr(win, "tree"):
+                tree.selection_set(tree.get_children()[0])  # 选中第一行（可选）
+                tree.focus_set()
+
+
+            # 延迟激活焦点（绕过 Windows 限制）
+            # win.after(50, lambda: (
+            #     win._tree_top10.focus_set()   # 获得焦点focus_set(),
+            #     win.attributes("-topmost", False)))
         return win
 
     def show_concept_top10_window(self, concept_name, code=None, auto_update=True, interval=30,bring_monitor_status=True):
@@ -10161,7 +10259,206 @@ class StockMonitorApp(tk.Tk):
         # 2. 计算MACD/BOLL/EMA等指标
         # 3. 输出买卖点提示、强弱信号
         # 4. 定期刷新UI 或 控制台输出
+    def sort_column_archive_view(self,tree, col, reverse):
+        """支持列排序，包括日期字符串排序。"""
+        data = [(tree.set(k, col), k) for k in tree.get_children("")]
 
+        # 时间列特殊处理
+        if col == "time":
+            from datetime import datetime
+            data.sort(key=lambda t: datetime.strptime(t[0], "%Y-%m-%d %H"), reverse=reverse)
+
+        else:
+            # 尝试数字排序
+            try:
+                data.sort(key=lambda t: float(t[0]), reverse=reverse)
+            except:
+                data.sort(key=lambda t: t[0], reverse=reverse)
+
+        # 重排
+        for index, item in enumerate(data):
+            tree.move(item[1], "", index)
+
+        # 下次点击反向
+        tree.heading(col, command=lambda: self.sort_column_archive_view(tree, col, not reverse))
+
+    def load_archive(self,selected_file,readfile=True):
+        """加载选中的存档文件并刷新监控"""
+        archive_file = os.path.join(ARCHIVE_DIR, selected_file)
+        if not os.path.exists(archive_file):
+            messagebox.showerror("错误", "存档文件不存在")
+            return
+        if readfile:
+            initial_monitor_list = load_monitor_list(MONITOR_LIST_FILE=archive_file)
+            logger.info('readfile:{archive_file}')
+            return initial_monitor_list
+
+    def open_archive_view_window(self, filename):
+        """
+        从 filename 读取存档数据并显示
+        数据格式：[code, name, tag, time]
+        """
+
+        try:
+            data_list = self.load_archive(filename, readfile=True)
+
+        except Exception as e:
+            messagebox.showerror("读取失败", f"读取 {filename} 时发生错误:\n{e}")
+            return
+
+        if not data_list:
+            messagebox.showwarning("无数据", f"{filename} 中没有可显示的数据。")
+            return
+
+        win = tk.Toplevel(self)
+        win.title(f"存档预览 — {filename}")
+        win.geometry("600x480")
+
+        window_id = "存档预览"
+
+        columns = ["code", "name", "tag", "time"]
+        col_names = {
+            "code": "代码",
+            "name": "名称",
+            "tag":  "概念",
+            "time": "时间"
+        }
+
+        self.load_window_position(win, window_id, default_width=600, default_height=480)
+        frame = ttk.Frame(win)
+        frame.pack(fill="both", expand=True, padx=6, pady=6)
+
+        tree = ttk.Treeview(frame, columns=columns, show="headings")
+        vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
+        hsb = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
+        tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+
+        tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+
+        frame.rowconfigure(0, weight=1)
+        frame.columnconfigure(0, weight=1)
+
+        # === 列设置 ===
+        for c in columns:
+            tree.heading(c, text=col_names[c],
+                         anchor="center",
+                         command=lambda _c=c: self.sort_column_archive_view(tree, _c, False))
+            if c == "code":
+                tree.column(c, width=60, anchor="center")
+            elif c == "name":
+                tree.column(c, width=90, anchor="w")
+            elif c == "tag":
+                tree.column(c, width=120, anchor="w")
+            else:  # time
+                tree.column(c, width=100, anchor="center")
+
+        # === 插入数据 ===
+        for row in data_list:
+            # row: [code, name, tag, time]
+            tree.insert("", "end", values=row)
+
+        # === 行选择逻辑 ===
+        def on_tree_select(event):
+            sel = tree.selection()
+            if not sel:
+                return
+            vals = tree.item(sel[0], "values")
+            if not vals:
+                return
+            code = str(vals[0]).zfill(6)
+            self.sender.send(str(vals[0]).zfill(6))
+
+
+        def on_single_click(event):
+            row_id = tree.identify_row(event.y)
+            if not row_id:
+                return
+            vals = tree.item(row_id, "values")
+            if not vals:
+                return
+            self.sender.send(str(vals[0]).zfill(6))
+
+        def on_double_click(event):
+            item = tree.focus()
+            if item:
+                # code = tree.item(item, "values")[0]
+                m = tree.item(item, "values")
+                # self._on_label_double_click_top10(code)
+                try:
+                    code = m[0]
+                    stock_name = m[1] if len(m) > 1 else ""
+                    concept_name = m[2] if len(m) > 2 else ""   # 视你的 stock_info 结构而定
+                    create_time = m[3] if len(m) > 3 else "" 
+                    # 唯一key
+                    # unique_code = f"{concept_name or ''}_{code or ''}"
+                    unique_code = f"{concept_name or ''}_"
+
+                    # 创建窗口
+                    win = self.show_concept_top10_window_simple(concept_name, code=code, auto_update=True, interval=30,focus_force=True)
+
+                    # 注册回监控字典
+                    self._pg_top10_window_simple[unique_code] = {
+                        "win": win,
+                        "code": unique_code,
+                        "stock_info": m
+                    }
+                    logger.info(f"恢复窗口 {unique_code}: {concept_name} - {stock_name} ({code}) [{create_time}]")
+                except Exception as e:
+                    logger.info(f"恢复窗口失败: {m}, 错误: {e}")
+
+        tree.bind("<<TreeviewSelect>>", on_tree_select)
+        tree.bind("<Button-1>", on_single_click)
+        tree.bind("<Double-Button-1>", on_double_click)
+
+        # ESC / 关闭
+        def on_close(event=None):
+            # update_window_position(window_id)
+            self.save_window_position(win, window_id)
+            win.destroy()
+
+        win.bind("<Escape>", on_close)
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
+        # 默认按时间倒序
+        win.after(10, lambda: self.sort_column_archive_view(tree, "time", True))
+
+
+    def open_archive_loader(self):
+        """打开存档选择窗口"""
+        win = tk.Toplevel(self)
+        win.title("加载历史监控数据")
+        win.geometry("400x300")
+        window_id = "历史监控数据"   # <<< 每个窗口一个唯一 ID
+        # self.get_centered_window_position(win, window_id)
+        self.load_window_position(win, window_id, default_width=400, default_height=300)
+        files = list_archives(prefix='monitor_category_list')
+        if not files:
+            tk.Label(win, text="没有历史存档文件").pack(pady=20)
+            return
+
+        selected_file = tk.StringVar(value=files[0])
+        combo = ttk.Combobox(win, textvariable=selected_file, values=files, state="readonly")
+        combo.pack(pady=10)
+
+        # 加载按钮
+        # ttk.Button(win, text="加载", command=lambda: load_archive(selected_file.get())).pack(pady=5)
+        ttk.Button(win, text="显示", command=lambda: self.open_archive_view_window(selected_file.get())).pack(pady=5)
+
+        def on_close(event=None):
+            """
+            统一关闭函数，ESC 和右上角 × 都能使用
+            """
+            # 在这里可以加任何关闭前的逻辑，比如保存数据或确认
+            # if messagebox.askokcancel("关闭窗口", "确认要关闭吗？"):
+            # update_window_position(window_id)
+            self.save_window_position(win, window_id)
+            win.destroy()
+
+        win.bind("<Escape>", on_close)
+        win.protocol("WM_DELETE_WINDOW", lambda: on_close())
+        win.after(60*1000, lambda: on_close())   # 自动关闭
 
     def write_to_blk(self,append=True):
         if self.current_df.empty:
