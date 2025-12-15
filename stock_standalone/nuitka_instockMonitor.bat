@@ -74,11 +74,11 @@ if not errorlevel 1 (
 echo.
 
 :: ===== 配置区 =====
-set MAIN_SCRIPT=异动联动.py
-set OUTPUT_NAME=异动联动.exe
+set MAIN_SCRIPT=instock_MonitorTK.py
+set OUTPUT_NAME=instock_MonitorTK_Nuita.exe
 set OUTPUT_DIR=build
-set ICON_FILE=app.ico
-
+set ICON_FILE=MonitorTK.ico
+set PATH=C:\JohnsonProgram\SetDisplayMode\init\upx;%PATH%
 
 echo 🏗️ 检查 Python 环境
 :: 检测是否在虚拟环境
@@ -108,27 +108,53 @@ rem --lto=yes ^
 
 rem :: ===== 构建 Nuitka 命令 =====
 rem set CMD="%PYTHON_EXEC%" -m nuitka --standalone --onefile "%MAIN_SCRIPT%" ^
+
+rem --plugin-enable=upx ^
+rem --upx-binary="C:\JohnsonProgram\SetDisplayMode\init\upx.exe" ^   
+
 set CMD="%PYTHON_EXEC%" -m nuitka --onefile "%MAIN_SCRIPT%" ^
     --output-filename="%OUTPUT_NAME%" ^
     --output-dir="%OUTPUT_DIR%" ^
     --enable-plugin=tk-inter ^
-    --plugin-enable=upx ^
-    --upx-binary="C:\JohnsonProgram\SetDisplayMode\init\upx.exe" ^
+    --include-module=talib.stream ^
+    --include-module=talib.abstract ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
-    --windows-icon-from-ico="%ICON_FILE%" ^
+    --include-data-file=MonitorTK.ico=MonitorTK.ico ^
+    --include-data-file=window_config.json=window_config.json ^
+    --include-data-file=scale2_window_config.json=scale2_window_config.json ^
+    --include-data-file=monitor_category_list.json=monitor_category_list.json ^
+    --include-data-file=display_cols.json=display_cols.json ^
+    --include-data-file=datacsv\search_history.json=datacsv\search_history.json ^
+    --include-data-file=JSONData\stock_codes.conf=JSONData\stock_codes.conf ^
+    --include-data-file=JSONData\count.ini=JSONData\count.ini ^
+    --include-data-file=JohnsonUtil\global.ini=JohnsonUtil\global.ini ^
+    --include-data-file=JohnsonUtil\wencai\同花顺板块行业.xlsx=JohnsonUtil\wencai\同花顺板块行业.xlsx ^
+    --windows-icon-from-ico=MonitorTK.ico ^
     --windows-company-name="Johnson QuantLab" ^
-    --windows-product-name="异动联动" ^
+    --windows-product-name=instock_MonitorTK ^
     --windows-file-version="1.0.0" ^
     --windows-product-version="1.0.0" ^
-    --windows-console-mode=disable ^
+    --windows-console-mode=force ^
     --lto=yes ^
     --jobs=8 ^
-    --remove-output ^
-    --nofollow-import-to=configobj --nofollow-import-to=tqdm --nofollow-import-to=chardet ^
-    --nofollow-import-to=ta_lib --nofollow-import-to=pandas_ta --nofollow-import-to=tushare ^
-    --nofollow-import-to=lxml --nofollow-import-to=aiohttp --nofollow-import-to=screeninfo ^
-    --nofollow-import-to=PyQt5 --nofollow-import-to=pyqtgraph --nofollow-import-to=prompt_toolkit
+    --remove-output
 
+
+
+rem set CMD="%PYTHON_EXEC%" -m nuitka --onefile "%MAIN_SCRIPT%" ^
+rem     --output-filename="%OUTPUT_NAME%" ^
+rem     --output-dir="%OUTPUT_DIR%" ^
+rem     --enable-plugin=tk-inter ^
+rem     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
+rem     --windows-icon-from-ico="%ICON_FILE%" ^
+rem     --windows-company-name="Johnson QuantLab" ^
+rem     --windows-product-name="instock_MonitorTK" ^
+rem     --windows-file-version="1.0.0" ^
+rem     --windows-product-version="1.0.0" ^
+rem     --windows-console-mode=disable ^
+rem     --lto=yes ^
+rem     --jobs=8 ^
+rem     --remove-output
 
 rem :: =====debug 构建 Nuitka 命令 =====
 rem set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^

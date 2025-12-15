@@ -2287,7 +2287,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
             if (len(ds) == 1 and ((not cct.get_work_time()) or (ds.index.values[0] != cct.get_today())) ) or len(ds) > 1:
                 duration_day= cct.get_today_duration(ds.index.values[0],cct.get_today())
                 if duration_day is not None and duration_day < 5:
-                    log.error(f'write_tdx_tushare_to_file-duration_day: {duration_day}')
+                    log.error(f'{code} write_tdx_tushare_to_file-duration_day: {duration_day}')
                     # 随机生成 0 到 2 之间的浮点数
                     delay = random.uniform(0.1, 1.8)
                     time.sleep(delay)

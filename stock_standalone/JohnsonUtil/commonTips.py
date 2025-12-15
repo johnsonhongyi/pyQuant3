@@ -137,6 +137,171 @@ def get_base_path():
 #print(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
 #print(f'get_base_path() : {get_base_path()}')
 
+def get_base_path():
+    """获取程序运行目录，兼容 PyInstaller / Nuitka / 普通脚本"""
+    if getattr(sys, "frozen", False):
+        # PyInstaller
+        if hasattr(sys, "_MEIPASS"):
+            return os.path.dirname(sys.executable)
+        else:
+            # Nuitka 或其他冻结工具
+            return os.path.dirname(sys.executable)
+    else:
+        # 普通脚本
+        return os.path.dirname(os.path.abspath(__file__))
+
+
+#mode 2 统一是否 py and nui
+# ----------------------------
+# 基础路径获取
+# ----------------------------
+# def get_base_path():
+#     """获取程序运行目录，兼容 PyInstaller / Nuitka / 普通脚本"""
+#     if getattr(sys, "frozen", False):
+#         return os.path.dirname(sys.executable)
+#     else:
+#         return os.path.dirname(os.path.abspath(__file__))
+
+
+# # ----------------------------
+# # 全局资源释放函数
+# # ----------------------------
+# def release_resource(rel_path, out_dir=None):
+#     """
+#     将内置资源释放到运行目录指定文件夹
+#     rel_path: 内置资源相对路径（如 'JohnsonUtil/global.ini'）
+#     out_dir: 释放目标目录，默认 EXE 所在目录
+#     """
+#     if out_dir is None:
+#         out_dir = get_base_path()
+
+#     target_path = os.path.join(out_dir, os.path.basename(rel_path))
+
+#     # 文件已存在直接返回
+#     if os.path.exists(target_path):
+#         return target_path
+
+#     # 获取源文件路径
+#     if getattr(sys, "frozen", False):
+#         src_base = getattr(sys, "_MEIPASS", None)
+#         if src_base:
+#             src_path = os.path.join(src_base, rel_path)
+#         else:
+#             src_path = os.path.join(out_dir, rel_path)
+#     else:
+#         src_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), rel_path)
+
+#     if not os.path.exists(src_path):
+#         log.error(f"资源缺失: {src_path}")
+#         return None
+
+#     try:
+#         shutil.copy(src_path, target_path)
+#         log.info(f"资源释放成功: {target_path}")
+#         return target_path
+#     except Exception as e:
+#         log.exception(f"资源释放失败: {e}")
+#         return None
+
+
+# # ----------------------------
+# # 统一配置资源管理
+# # ----------------------------
+# RESOURCE_REGISTRY = {
+#     # '资源名': '相对路径'
+#     'global_ini': 'JohnsonUtil/global.ini',
+#     'stock_codes': 'JohnsonUtil/JSONData/stock_codes.conf',
+#     'count_ini': 'JohnsonUtil/JSONData/count.ini',
+#     'wencai_excel': 'JohnsonUtil/wencai/同花顺板块行业.xlsx',
+#     # 可继续添加新资源
+# }
+
+# def get_resource(name):
+#     """
+#     获取资源文件路径，自动释放到运行目录
+#     """
+#     rel_path = RESOURCE_REGISTRY.get(name)
+#     if not rel_path:
+#         log.error(f"资源未注册: {name}")
+#         return None
+#     return release_resource(rel_path)
+# global_ini_path = get_resource('global_ini')
+# stock_codes_path = get_resource('stock_codes')
+# wencai_path = get_resource('wencai_excel')
+
+
+#mode 1 no test py and nui
+# def get_resource_file(rel_path, out_name=None, base_dir=None):
+#     """
+#     从内置资源释放文件到 EXE 同目录或 base_dir
+
+#     rel_path:   内置资源相对路径
+#     out_name:   释放目标文件名
+#     base_dir:   释放目录，默认 EXE 所在目录
+#     """
+#     if base_dir is None:
+#         base_dir = get_base_path()
+
+#     if out_name is None:
+#         out_name = os.path.basename(rel_path)
+
+#     target_path = os.path.join(base_dir, out_name)
+
+#     # 文件已存在
+#     if os.path.exists(target_path):
+#         return target_path
+
+#     # 确定源文件路径
+#     if getattr(sys, "frozen", False):
+#         # PyInstaller MEIPASS
+#         src = getattr(sys, "_MEIPASS", None)
+#         if src:
+#             src = os.path.join(src, rel_path)
+#         else:
+#             # Nuitka: 直接从相对目录获取
+#             src = os.path.join(base_dir, rel_path)
+#     else:
+#         # 普通脚本
+#         src = os.path.join(os.path.dirname(os.path.abspath(__file__)), rel_path)
+
+#     if not os.path.exists(src):
+#         log.error(f"内置资源缺失: {src}")
+#         return None
+
+#     try:
+#         shutil.copy(src, target_path)
+#         log.info(f"释放资源: {target_path}")
+#         return target_path
+#     except Exception as e:
+#         log.exception(f"释放资源失败: {e}")
+#         return None
+
+
+# def get_conf_path(fname, rel_path=None, base_dir=None):
+#     """
+#     获取配置文件路径，优先使用运行目录已有文件，否则释放内置资源
+#     """
+#     if base_dir is None:
+#         base_dir = get_base_path()
+
+#     target_path = os.path.join(base_dir, fname)
+
+#     if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+#         log.info(f"使用本地配置: {target_path}")
+#         return target_path
+
+#     if rel_path is None:
+#         rel_path = os.path.join("JohnsonUtil", fname)
+
+#     cfg_file = get_resource_file(rel_path=rel_path, out_name=fname, base_dir=base_dir)
+
+#     if cfg_file and os.path.exists(cfg_file) and os.path.getsize(cfg_file) > 0:
+#         log.info(f"使用内置释放配置: {cfg_file}")
+#         return cfg_file
+
+#     log.error(f"获取配置文件失败: {fname}")
+#     return None
+
 def get_resource_file(rel_path, out_name=None,BASE_DIR=None,spec=None):
     """
     从 PyInstaller 内置资源释放文件到 EXE 同目录
@@ -144,7 +309,6 @@ def get_resource_file(rel_path, out_name=None,BASE_DIR=None,spec=None):
     rel_path:   打包资源的相对路径
     out_name:   释放目标文件名
     """
-
 
     if BASE_DIR is None:
         BASE_DIR = get_base_path()
@@ -215,7 +379,7 @@ def get_conf_path(fname,rel_path=None):
             log.warning("配置文件存在但为空，将尝试重新释放")
 
     if rel_path is None:
-        rel_path=f"JohnsonUtil/{fname}"
+        rel_path=f"JohnsonUtil{os.sep}{fname}"
     # --- 2. 释放默认资源 ---
     cfg_file = get_resource_file(
         rel_path=rel_path,
@@ -2088,8 +2252,14 @@ def get_screen_resolution():
     #         return screenWidth
     # return 0
     
+    # if len(res) > 10:
+    #     ScreenHeight,ScreenWidth = re.findall('\r\nScreenHeight\s+:\s(.*?)\r\nScreenWidth\s+:\s(.*?)\r\n', res[0].decode("gbk"))[-1]
+    # else:
     if len(res) > 10:
-        ScreenHeight,ScreenWidth = re.findall('\r\nScreenHeight\s+:\s(.*?)\r\nScreenWidth\s+:\s(.*?)\r\n', res[0].decode("gbk"))[-1]
+        ScreenHeight, ScreenWidth = re.findall(
+            r'\r\nScreenHeight\s+:\s(.*?)\r\nScreenWidth\s+:\s(.*?)\r\n',
+            res[0].decode("gbk")
+        )[-1]
     else:
         ScreenHeight,ScreenWidth = '1080','1920'
     return ScreenHeight,ScreenWidth 
@@ -2351,7 +2521,8 @@ def set_console(width=80, height=15, color=3, title=None, closeTerminal=True):
     if isMac():
         # os.system('printf "\033]0;%s\007"'%(filename))
         if title is None:
-            os.system('printf "\e[8;%s;%st"' % (height, width))
+            # os.system('printf "\e[8;%s;%st"' % (height, width))
+            os.system(r'printf "\e[8;%s;%st"' % (height, width))
         # printf "\033]0;%s sin ZL: 356.8 To:183 D:3 Sh: 1.73%  Vr:3282.4-3339.7-2.6%  MR: 4.3 ZL: 356.8\007"
         filename = filename.replace('%', '!')
         os.system('printf "\033]0;%s\007"' % (filename))
@@ -3363,7 +3534,7 @@ def to_asyncio_run_py2(urllist, cmd):
     loop.run_until_complete(asyncio.wait(threads))
     return results
 
-def to_asyncio_run(urllist, cmd):
+def to_asyncio_run_310(urllist, cmd):
     results = []
 
     async def sync_to_async(val):
@@ -3390,6 +3561,27 @@ def to_asyncio_run(urllist, cmd):
         asyncio.set_event_loop(loop)
     loop.run_until_complete(asyncio.wait(threads))
     return results
+
+def to_asyncio_run(urllist, cmd):
+    async def _runner():
+        loop = asyncio.get_running_loop()
+        tasks = [
+            loop.run_in_executor(None, cmd, url)
+            for url in urllist
+        ]
+        return await asyncio.gather(*tasks)
+
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+    if loop.is_running():
+        return asyncio.create_task(_runner())
+    else:
+        return loop.run_until_complete(_runner())
+
 
 def to_mp_run(cmd, urllist):
     # n_t=time.time()
@@ -4234,7 +4426,8 @@ def symbol_to_code(symbol):
         if len(symbol) != 8:
             return ''
         else:
-            return re.findall('(\d+)', symbol)[0]
+            # return re.findall('(\d+)', symbol)[0]
+            return re.findall(r'(\d+)', symbol)[0]
 
 
 def code_to_tdx_blk(code):

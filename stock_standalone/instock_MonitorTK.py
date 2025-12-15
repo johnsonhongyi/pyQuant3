@@ -49,6 +49,7 @@ import traceback
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.completion import WordCompleter
+import configparser
 
 class SafeLoggerWriter:
     #放置管道关闭时，Queue.put() 抛 WinError 232
@@ -739,6 +740,41 @@ def get_base_path():
     # 4. 极端脚本回退
     logger.info(f"[DEBUG] Path Mode: Final Script Fallback.")
     return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+def load_display_config_ini(config_file, stock_data, code, name, close, boll, signal_icon, breakthrough, strength):
+    """
+    根据自定义 ini 文件生成 lines 和 colors
+    """
+    config = configparser.ConfigParser()
+    config.read(config_file, encoding="utf-8")
+
+    lines = []
+    colors = []
+
+    placeholders = {
+        'code': code,
+        'name': name,
+        'close': close,
+        'ratio': stock_data.get('ratio', 'N/A'),
+        'volume': stock_data.get('volume', 'N/A'),
+        'red': stock_data.get('red', 'N/A'),
+        'boll': boll,
+        'signal_icon': signal_icon,
+        'upper': stock_data.get('upper', 'N/A'),
+        'lower': stock_data.get('lower', 'N/A'),
+        'breakthrough': breakthrough,
+        'strength': strength
+    }
+
+    # 按顺序遍历 lines
+    for key in sorted(config['lines'], key=lambda x: int(x.replace('line',''))):
+        line_template = config['lines'][key]
+        line_text = line_template.format(**placeholders)
+        color_value = config['colors'].get(key, 'black')  # 默认黑色
+        lines.append(line_text)
+        colors.append(color_value)
+
+    return lines, colors
 
 BASE_DIR = get_base_path()
 # BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1966,67 +2002,173 @@ def cross_process_lock(date):
         return None
 
 
-# ---------------- 状态控制 ----------------
 
-_CLEAN_LOCK = threading.Lock()
-_LAST_CLEAN_DATE = None      # 上一次成功执行的交易日
+def _get_clean_flag_path(today):
+    """
+    当天清理完成的跨进程标记文件
+    """
+    return os.path.join(
+        cct.get_ramdisk_dir(),
+        f".tdx_last_df.cleaned.{today}"
+    )
+
+
+def cleanup_old_clean_flags(keep_days=5):
+    """
+    清理过期的 clean flag 文件
+    """
+    base = cct.get_ramdisk_dir()
+    today = datetime.today().date()
+
+    for fn in os.listdir(base):
+        if not fn.startswith(".tdx_last_df.cleaned."):
+            continue
+        try:
+            date_str = fn.rsplit(".", 1)[-1]
+            d = datetime.strptime(date_str, "%Y-%m-%d").date()
+            if (today - d).days > keep_days:
+                os.remove(os.path.join(base, fn))
+        except Exception:
+            pass
 
 
 def clean_expired_tdx_file(logger):
     """
-    每个交易日 09:00–09:30 执行一次文件清理
-    （跨日运行程序也能再次触发）
+    每个交易日 08:30–09:15
+    清理一次 tdx_last_df（跨进程 / 跨循环安全）
     """
-
-    global _LAST_CLEAN_DATE
 
     # ✅ 是否交易日
     if not cct.get_trade_date_status():
         return
 
-    today = cct.get_today()   # 例如：2025-12-09
-
-
-    # ✅ 当前时间窗口
+    today = cct.get_today()
     now_time = cct.get_now_time_int()
+
+    # ✅ 时间窗口
     if not (830 <= now_time <= 915):
+        logger.debug(
+            f"[CLEAN_SKIP] {today} now={now_time} 不在清理窗口"
+        )
         return
 
-    logger.info(f"{today} 准备清理过期文件: {cct.get_ramdisk_path('tdx_last_df')}")
-    # ✅ 当前交易日
-    # logger.info(f"{today}清理过期文件: {cct.get_run_path_tdx('tdx_last_df')}")
-    # ✅ 计算文件路径
-    fname = cct.get_ramdisk_path('tdx_last_df')
-    if os.path.exists(fname):
-        # fd = cross_process_lock(today)
-        # if not fd:
-        #     logger.info(f"{today} fd:{LOCK_FILE.format(date=today)}文件已存在: {fname}")
-        #     return     # 多进程安全版本其他进程已执行
+    fname = cct.get_ramdisk_path("tdx_last_df")
+    flag_path = _get_clean_flag_path(today)
 
-        # ✅ 并发保护
+    logger.debug(
+        f"[CLEAN_CHECK] pid={os.getpid()} "
+        f"today={today} now={now_time} "
+        f"file_exists={os.path.exists(fname)} "
+        f"flag_exists={os.path.exists(flag_path)}"
+    )
+
+    # ✅ 今天已经完成过（跨进程）
+    if os.path.exists(flag_path):
+        return
+
+    # ✅ 文件不存在 → 直接视为完成
+    if not os.path.exists(fname):
+        logger.info(
+            f"[CLEAN_DONE] {today} 文件不存在，直接标记完成"
+        )
         try:
-            with _CLEAN_LOCK:
+            open(flag_path, "w").close()
+        except Exception as e:
+            logger.error(
+                f"[CLEAN_ERR] flag 写入失败: {flag_path}, err={e}"
+            )
+        return
 
-                # 当天已经执行过
-                if _LAST_CLEAN_DATE == today:
-                    logger.info(f"{today} _LAST_CLEAN_DATE: {_LAST_CLEAN_DATE} 已清理过期文件: {fname}")
-                    return
-                try:
-                    os.remove(fname)
-                    logger.info(f"{today} 清理过期文件: {fname}")
-                except Exception as e:
-                    logger.error(f"{today} 清理文件失败: {fname}, err={e}")
-                # else:
-                #     logger.info(f"{today} 待清理文件不存在: {fname}")
-                finally:
-                    # ✅ 标记今天已完成
-                    _LAST_CLEAN_DATE = today
-        finally:
-            # os.close(fd)
-            pass
-    else:
-        logger.info(f"{today} 待清理文件不存在: {fname}")
-        _LAST_CLEAN_DATE = today
+    # ✅ 真正删除
+    try:
+        os.remove(fname)
+        logger.info(
+            f"[CLEAN_OK] {today} 已清理过期文件: {fname}"
+        )
+    except Exception as e:
+        logger.error(
+            f"[CLEAN_ERR] 删除失败: {fname}, err={e}"
+        )
+        return   # 删除失败，不写 flag，允许后续重试
+
+    # ✅ 写入当天完成标记
+    try:
+        open(flag_path, "w").close()
+        logger.info(
+            f"[CLEAN_FLAG] {today} 清理完成标记已写入"
+        )
+    except Exception as e:
+        logger.error(
+            f"[CLEAN_ERR] flag 写入失败: {flag_path}, err={e}"
+        )
+
+def is_tdx_clean_done(today=None):
+    if today is None:
+        today = cct.get_today()
+    flag_path = _get_clean_flag_path(today)
+    return os.path.exists(flag_path)
+
+# ---------------- 状态控制 ----------------
+
+# _CLEAN_LOCK = threading.Lock()
+# _LAST_CLEAN_DATE = None      # 上一次成功执行的交易日
+
+# def clean_expired_tdx_file(logger):
+#     """
+#     每个交易日 09:00–09:30 执行一次文件清理
+#     （跨日运行程序也能再次触发）
+#     """
+
+#     global _LAST_CLEAN_DATE
+
+#     # ✅ 是否交易日
+#     if not cct.get_trade_date_status():
+#         return
+
+#     today = cct.get_today()   # 例如：2025-12-09
+
+
+#     # ✅ 当前时间窗口
+#     now_time = cct.get_now_time_int()
+#     if not (830 <= now_time <= 915):
+#         logger.debug(f"{today} 当前时间 {now_time} 不在清理窗口，跳过")
+#         return
+
+#     logger.info(f"{today} clean_expired准备清理过期文件: {cct.get_ramdisk_path('tdx_last_df')}")
+#     # ✅ 当前交易日
+#     # logger.info(f"{today}清理过期文件: {cct.get_run_path_tdx('tdx_last_df')}")
+#     # ✅ 计算文件路径
+#     fname = cct.get_ramdisk_path('tdx_last_df')
+#     if os.path.exists(fname):
+#         # fd = cross_process_lock(today)
+#         # if not fd:
+#         #     logger.info(f"{today} fd:{LOCK_FILE.format(date=today)}文件已存在: {fname}")
+#         #     return     # 多进程安全版本其他进程已执行
+
+#         # ✅ 并发保护
+#         try:
+#             with _CLEAN_LOCK:
+
+#                 # 当天已经执行过
+#                 if _LAST_CLEAN_DATE == today:
+#                     logger.info(f"{today} _LAST_CLEAN_DATE: {_LAST_CLEAN_DATE} 已清理过期文件: {fname}")
+#                     return
+#                 try:
+#                     os.remove(fname)
+#                     logger.info(f"{today} 清理过期文件: {fname}")
+#                 except Exception as e:
+#                     logger.error(f"{today} 清理文件失败: {fname}, err={e}")
+#                 # else:
+#                 #     logger.info(f"{today} 待清理文件不存在: {fname}")
+#                 finally:
+#                     # ✅ 标记今天已完成
+#                     _LAST_CLEAN_DATE = today
+#         finally:
+#             # os.close(fd)
+#             logger.info(f"{today} 清理过期文件完毕: {fname}")
+#     else:
+#         logger.info(f"{today} 待清理文件不存在: {fname}")
+#         _LAST_CLEAN_DATE = today
 
 def sanitize(df):
     """
@@ -2093,35 +2235,86 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
             elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
                 # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
                 st_key_sort = g_values.getkey("st_key_sort")
-            elif  830 <= cct.get_now_time_int() <= 925:
-                global _LAST_CLEAN_DATE
-                # ✅ 计算文件路径
-                fname = cct.get_ramdisk_path('tdx_last_df')
-                # if _LAST_CLEAN_DATE != cct.get_today():
+            # elif  830 <= cct.get_now_time_int() <= 915:
+            #     # global _LAST_CLEAN_DATE
+            #     # ✅ 计算文件路径
+            #     fname = cct.get_ramdisk_path('tdx_last_df')
+            #     # if _LAST_CLEAN_DATE != cct.get_today():
+            #     time_init = time.time()
+            #     if os.path.exists(fname) and _LAST_CLEAN_DATE != cct.get_today():
+            #         # logger.info(f"{cct.get_today()} 准备清理过期文件: {cct.get_ramdisk_path('tdx_last_df')}")
+            #         clean_expired_tdx_file(logger)
+            #         START_INIT = 0
+            #         if cct.get_now_time_int() <= 900:
+            #             top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
+            #             for res_m in ['d','3d','w','m']:
+            #                 if res_m != g_values.getkey("resample"):
+            #                     logger.info(f'start init_tdx resample: {res_m}')
+            #                     top_all_d, lastpTDX_DF_d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[res_m],resample=res_m)
+            #                 # top_all_3d, lastpTDX_DF_3d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['3d'],resample='3d')
+            #                 # top_all_w, lastpTDX_DF_w = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['w'],resample='w')
+            #                 # top_all_m, lastpTDX_DF_m = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['m'],resample='m')
+            #         else:
+            #             top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
+            #             for res_m in ['3d']:
+            #                 logger.info(f'start init_tdx resample: {res_m}')
+            #                 top_all_d, lastpTDX_DF_d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[res_m],resample=res_m)
+            #         logger.info(f'init_tdx 用时:{time.time()-time_init:.2f}')
+            elif 830 <= cct.get_now_time_int() <= 915:
+
                 time_init = time.time()
-                if os.path.exists(fname) and _LAST_CLEAN_DATE != cct.get_today():
-                    logger.info(f"{cct.get_today()} 准备清理过期文件: {cct.get_ramdisk_path('tdx_last_df')}")
-                    clean_expired_tdx_file(logger)
-                    START_INIT = 0
-                    if cct.get_now_time_int() <= 900:
-                        top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
-                        for res_m in ['d','3d','w','m']:
-                            if res_m != g_values.getkey("resample"):
-                                logger.info(f'start init_tdx resample: {res_m}')
-                                top_all_d, lastpTDX_DF_d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[res_m],resample=res_m)
-                            # top_all_3d, lastpTDX_DF_3d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['3d'],resample='3d')
-                            # top_all_w, lastpTDX_DF_w = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['w'],resample='w')
-                            # top_all_m, lastpTDX_DF_m = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days['m'],resample='m')
-                    else:
-                        top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
-                        for res_m in ['3d']:
-                            logger.info(f'start init_tdx resample: {res_m}')
-                            top_all_d, lastpTDX_DF_d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[res_m],resample=res_m)
-                    logger.info(f'init_tdx 用时:{time.time()-time_init:.2f}')
-                    
+
+                # ① 尝试清理（内部自己判断是否需要）
+                clean_expired_tdx_file(logger)
+
+                # ② 必须：确认今天清理已经完成
+                if not is_tdx_clean_done():
+                    logger.info(
+                        f"{cct.get_today()} 清理尚未完成，跳过 init_tdx"
+                    )
+                    continue
+
+                # ③ 超过 09:15，禁止初始化
+                now_time = cct.get_now_time_int()
+                if now_time > 915:
+                    logger.info(
+                        f"{cct.get_today()} 已超过初始化截止时间 {now_time}"
+                    )
+                    continue
+
+                # ④ 正式执行初始化（只会进一次）
+                START_INIT = 0
+
+                top_now = tdd.getSinaAlldf(
+                    market=market,
+                    vol=ct.json_countVol,
+                    vtype=ct.json_countType
+                )
+
+                if now_time <= 900:
+                    resamples = ['d', '3d', 'w', 'm']
+                else:
+                    resamples = ['3d']
+
+                for res_m in resamples:
+                    if res_m != g_values.getkey("resample"):
+                        logger.info(f"start init_tdx resample: {res_m}")
+                        tdd.get_append_lastp_to_df(
+                            top_now,
+                            dl=ct.Resample_LABELS_Days[res_m],
+                            resample=res_m
+                        )
+
+                logger.info(
+                    f"init_tdx 用时: {time.time() - time_init:.2f}s"
+                )
+
+                # ⑤ 休眠节流
                 for _ in range(30):
-                    if not flag.value: break
+                    if not flag.value:
+                        break
                     time.sleep(1)
+
                 continue
 
             elif START_INIT > 0 and (not cct.get_work_time()):
@@ -4279,6 +4472,7 @@ class StockMonitorApp(tk.Tk):
         self.market_map = {
             "全部": {"code": "all", "blkname": "061.blk"},
             "上证": {"code": "sh",  "blkname": "062.blk"},
+            "深证": {"code": "sz",  "blkname": "066.blk"},
             "创业板": {"code": "cyb", "blkname": "063.blk"},
             "科创板": {"code": "kcb", "blkname": "064.blk"},
             "北证": {"code": "bj",  "blkname": "065.blk"},
@@ -6608,6 +6802,7 @@ class StockMonitorApp(tk.Tk):
         lines = [
             f"【{code}】{name}:{close}",
             "─" * 20,
+            f"📊 换手率: {stock_data.get('ratio', 'N/A')}",
             f"📊 成交量: {stock_data.get('volume', 'N/A')}",
             f"🔴 连阳: {stock_data.get('red', 'N/A')}",
             f"📈 突破布林: {boll}",
@@ -6622,6 +6817,7 @@ class StockMonitorApp(tk.Tk):
         colors = [
             'blue',        # 股票代码
             'black',       # 分割线
+            'red',       # 换手率
             'green',       # 成交量
             'red',         # 连阳
             'orange',      # 布林带标题
@@ -7295,13 +7491,16 @@ class StockMonitorApp(tk.Tk):
                     stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)[:limit]  # 只取前 limit
                     for code, name, percent, volume in stocks:
                         lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}",
-                                       fg="black", cursor="hand2", anchor="w")
+                                       fg="black", cursor="hand2", anchor="w", takefocus=True)    # ⭐ 必须
                         lbl.pack(anchor="w", padx=6)
                         lbl._code = code
                         lbl._concept = c
                         idx = len(self._label_widgets)
                         lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self._on_label_click(cd, i))
                         lbl.bind("<Button-3>", lambda e, cd=code, i=idx: self._on_label_right_click(cd, i))
+                        # lbl.bind("<Up>", self._on_key)
+                        # lbl.bind("<Down>", self._on_key)
+                        # lbl.bind("<Return>", self._on_key)
                         lbl.bind("<Double-Button-1>", lambda e, cd=code, i=idx: self._on_label_double_click(cd, i))
                         self._label_widgets.append(lbl)
 
@@ -7317,13 +7516,16 @@ class StockMonitorApp(tk.Tk):
                 stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)[:limit]  # 只取前 limit
                 for code, name, percent, volume in stocks:
                     lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}",
-                                   fg="gray", cursor="hand2", anchor="w")
+                                   fg="gray", cursor="hand2", anchor="w",takefocus=True)    # ⭐ 必须
                     lbl.pack(anchor="w", padx=6)
                     lbl._code = code
                     lbl._concept = c
                     idx = len(self._label_widgets)
                     lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self._on_label_click(cd, i))
                     lbl.bind("<Button-3>", lambda e, cd=code, i=idx: self._on_label_right_click(cd, i))
+                    # lbl.bind("<Up>", self._on_key)
+                    # lbl.bind("<Down>", self._on_key)
+                    # lbl.bind("<Return>", self._on_key)
                     lbl.bind("<Double-Button-1>", lambda e, cd=code, i=idx: self._on_label_double_click(cd, i))
                     self._label_widgets.append(lbl)
 
@@ -7833,15 +8035,16 @@ class StockMonitorApp(tk.Tk):
         ctrl_frame.pack(side="left", padx=6)
 
         chk_auto = tk.BooleanVar(value=True)  # 默认开启自动更新
-        chk_btn = tk.Checkbutton(ctrl_frame, text="自动更新", variable=chk_auto)
+        chk_btn = tk.Checkbutton(ctrl_frame, text="自动更新", variable=chk_auto,takefocus=False)
         chk_btn.pack(side="left")
 
-        spin_interval = tk.Spinbox(ctrl_frame, from_=5, to=300, width=5)
+        spin_interval = tk.Spinbox(ctrl_frame, from_=5, to=300, width=5,takefocus=False)
         spin_interval.delete(0, "end")
         spin_interval.insert(0, duration_sleep_time)  # 默认30秒
         spin_interval.pack(side="left")
         tk.Label(ctrl_frame, text="秒").pack(side="left")
-
+        spin_interval.configure(takefocus=0)
+        chk_btn.configure(takefocus=0)
         # 保存引用到窗口，方便复用
         win._chk_auto = chk_auto
         win._spin_interval = spin_interval
@@ -7951,7 +8154,30 @@ class StockMonitorApp(tk.Tk):
             # win.after(50, lambda: (
             #     win._tree_top10.focus_set()   # 获得焦点focus_set(),
             #     win.attributes("-topmost", False)))
+        # logger.info(f"_focus_top10_tree = {self._focus_top10_tree}")
+        # self._focus_top10_tree(win)
         return win
+
+    def _focus_top10_tree(self,win):
+        try:
+            if not hasattr(win, "_tree_top10"):
+                return
+            tree = win._tree_top10
+            if not tree.winfo_exists():
+                return
+
+            def do_focus():
+                children = tree.get_children()
+                if children:
+                    tree.selection_set(children[0])
+                    tree.focus(children[0])
+                    tree.see(children[0])
+                tree.focus_set()
+
+            # 等 UI / after / PG timer 全部稳定下来
+            win.after(500, do_focus)
+        except Exception as e:
+            logger.info(f"聚焦 Top10 Tree 失败: {e}")
 
     def show_concept_top10_window(self, concept_name, code=None, auto_update=True, interval=30,bring_monitor_status=True):
         """
@@ -8134,7 +8360,8 @@ class StockMonitorApp(tk.Tk):
         tree.bind("<Prior>", on_key)
         tree.bind("<Next>", on_key)
         tree.bind("<Return>", on_key)
-        tree.focus_set()
+        tree.bind("<FocusIn>", lambda e: tree.focus_set())
+        # tree.focus_set()
 
         # --- 按钮和控制栏区域 ---
         btn_frame = tk.Frame(win)
@@ -8145,15 +8372,16 @@ class StockMonitorApp(tk.Tk):
         ctrl_frame.pack(side="left", padx=6)
 
         chk_auto = tk.BooleanVar(value=True)  # 默认开启自动更新
-        chk_btn = tk.Checkbutton(ctrl_frame, text="自动更新", variable=chk_auto)
+        chk_btn = tk.Checkbutton(ctrl_frame, text="自动更新", variable=chk_auto,takefocus=False)
         chk_btn.pack(side="left")
 
-        spin_interval = tk.Spinbox(ctrl_frame, from_=5, to=300, width=5)
+        spin_interval = tk.Spinbox(ctrl_frame, from_=5, to=300, width=5,takefocus=False)
         spin_interval.delete(0, "end")
         spin_interval.insert(0, duration_sleep_time)  # 默认30秒
         spin_interval.pack(side="left")
         tk.Label(ctrl_frame, text="秒").pack(side="left")
-
+        spin_interval.configure(takefocus=0)
+        chk_btn.configure(takefocus=0)
         # 保存引用到窗口，方便复用
         win._chk_auto = chk_auto
         win._spin_interval = spin_interval
@@ -8225,15 +8453,18 @@ class StockMonitorApp(tk.Tk):
         def window_focus_bring_monitor_status(win):
             if bring_monitor_status:
                 self.on_monitor_window_focus(win)
-                win.lift()           # 提前显示
-                win.focus_force()    # 聚焦
-                win.attributes("-topmost", True)
-                win.after(100, lambda: win.attributes("-topmost", False))
-
+                # win.lift()           # 提前显示
+                # win.focus_force()    # 聚焦
+                # win.attributes("-topmost", True)
+                # win.after(100, lambda: win.attributes("-topmost", False))
+        
         win.bind("<Button-1>", lambda e, w=win: window_focus_bring_monitor_status(w))
         win.protocol("WM_DELETE_WINDOW", _on_close)
         # 填充数据
         self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
+        # 窗口已创建 / 已复用
+        # logger.info(f"_focus_top10_tree = {self._focus_top10_tree}")
+        self._focus_top10_tree(win)
 
     def _fill_concept_top10_content(self, win, concept_name, df_concept=None, code=None, limit=50):
         """
@@ -8314,68 +8545,6 @@ class StockMonitorApp(tk.Tk):
             win._status_label_top10.pack(side="bottom", fill="x", pady=(0, 4))
 
         win.update_idletasks()
-
-
-    # def _fill_concept_top10_content_src_ok(self, win, concept_name, df_concept, code=None, limit=50):
-    #     """
-    #     填充概念Top10内容到Treeview（支持实时刷新）。
-    #     保留原有 df_concept 参数和 code 参数，limit 默认为 10。
-    #     """
-    #     tree = win._tree_top10
-    #     tree.delete(*tree.get_children())
-
-    #     # 如果 df_concept 为 None，则从 self.df_all 动态获取
-    #     if df_concept is None:
-    #         df_concept = self.df_all[self.df_all['category'].str.contains(concept_name.split('(')[0], na=False)]
-
-    #     if df_concept.empty:
-    #         return
-
-
-    #     # 排序状态
-    #     win._top10_sort_state = getattr(win, "_top10_sort_state", {"col": "percent", "asc": False})
-    #     sort_col = win._top10_sort_state["col"]
-    #     ascending = win._top10_sort_state["asc"]
-    #     if sort_col in df_concept.columns:
-    #         df_concept = df_concept.sort_values(sort_col, ascending=ascending)
-    #     code_to_iid = {}
-    #     df_display = df_concept.head(limit).copy()  # 限制显示前 N 条
-    #     tree._full_df = df_concept.copy() 
-    #     tree._display_limit = limit
-    #     for idx, (code_row, row) in enumerate(df_display.iterrows()):
-    #         iid = str(idx)
-    #         # 从 self.df_all 动态获取最新 percent 和 volume
-    #         latest_row = self.df_all.loc[code_row] if code_row in self.df_all.index else row
-            # percent = latest_row.get("percent")
-            # if pd.isna(percent) or percent == 0:
-            #     percent = latest_row.get("per1d", row.get("per1d", 0))
-    #         tree.insert("", "end", iid=iid,
-    #                     values=(code_row,
-    #                             latest_row.get("name", row.get("name", "")),
-                                # # f"{latest_row.get('percent', row.get('percent', 0)):.2f}",
-                                #  f"{percent:.2f}",
-    #                             f"{latest_row.get('volume', row.get('volume', 0)):.1f}"))
-    #         code_to_iid[code_row] = iid
-
-    #     # 默认选中第一行
-    #     if tree.get_children():
-    #         target_iid = code_to_iid.get(code, tree.get_children()[0])
-    #         tree.selection_set(target_iid)
-    #         tree.focus(target_iid)
-    #         tree.see(target_iid)
-    #         win._selected_index = int(target_iid)
-    #         self._highlight_tree_selection(tree, target_iid)
-
-    #     # 更新状态栏
-    #     if hasattr(win, "_status_label_top10"):
-    #         visible_count = len(df_display)
-    #         total_count = len(df_concept)
-    #         win._status_label_top10.config(text=f"显示 {visible_count}/{total_count} 只")
-    #         win._status_label_top10.pack(side="bottom", fill="x", pady=(0, 4))
-
-    #     win.update_idletasks()
-
-
 
 
     def _setup_tree_bindings_newTop10(self, tree):
@@ -8657,7 +8826,7 @@ class StockMonitorApp(tk.Tk):
         chk_auto = QtWidgets.QCheckBox("自动更新")
         spin_interval = QtWidgets.QSpinBox()
         spin_interval.setRange(5, 300)
-        spin_interval.setValue(30)
+        spin_interval.setValue(duration_sleep_time)
         spin_interval.setSuffix(" 秒")
         ctrl_layout.addWidget(chk_auto)
         ctrl_layout.addWidget(spin_interval)
@@ -9719,6 +9888,7 @@ class StockMonitorApp(tk.Tk):
         则自动使用 code 计算该股票所属强势概念并显示详情。
         """
         try:
+
             # ---------------- 原逻辑 ----------------
             if hasattr(self, "_label_widgets"):
                 try:

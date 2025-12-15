@@ -4,13 +4,15 @@ import requests
 import pandas as pd
 from pandas import HDFStore
 import tkinter as tk
-import shutil
 from tkinter import ttk, messagebox, filedialog
 import time
 import json
 from datetime import datetime, timedelta
 from ctypes import wintypes
 import ctypes
+import shutil
+import configparser
+from pathlib import Path
 from tkcalendar import DateEntry
 import psutil
 import re
@@ -59,6 +61,7 @@ scheduled_task = None
 viewdf = pd.DataFrame()
 executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 result_queue = queue.Queue()
+today_tdx_df = pd.DataFrame()
 
 # 停止信号
 stop_event = threading.Event()
@@ -386,7 +389,6 @@ class SafeHDFStore(HDFStore):
 
 
 BASE_DIR = get_base_path()
-
 code_file_name= os.path.join(BASE_DIR, "code_ths_other.json")
 MONITOR_LIST_FILE =  os.path.join(BASE_DIR, "monitor_list.json")
 CONFIG_FILE =  os.path.join(BASE_DIR, "window_config.json")
@@ -2540,7 +2542,7 @@ def run_daily_init_steps_two():
 
 def run_daily_init_steps():
     """执行每日初始化的核心步骤（便于重试调用）"""
-    global realdatadf, loaded_df, viewdf
+    global realdatadf, loaded_df, viewdf,today_tdx_df
     global date_write_is_processed, start_init, last_updated_time
     global last_update_time
 
@@ -2554,7 +2556,7 @@ def run_daily_init_steps():
     start_init = 0
     last_updated_time = None
     last_update_time = 0
-
+    today_tdx_df = pd.DataFrame()
     # --- 2️⃣ 恢复日期控件 ---
     try:
         if date_entry.winfo_exists():
@@ -2892,8 +2894,192 @@ def rearrange_monitor_windows_grid():
         # current_y = t + 50
         # max_col_width = 0
         # max_row_height = 0
+# 1️⃣ 左上角横向优先排列（normal）
+def layout_from_left_top(windows, l, t, r, b, margin_x=10, margin_y=5):
+    """
+    左上角开始，横向优先，满宽换行
+    """
+    current_x = l + margin_x
+    current_y = t + margin_y
+    max_row_height = 0
+
+    for win_info in windows:
+        win = win_info["toplevel"]
+        if not win.winfo_exists():
+            continue
+
+        w = win.winfo_width()
+        h = win.winfo_height()
+
+        # 换行
+        if current_x + w + margin_x > r:
+            current_x = l + margin_x
+            current_y += max_row_height + margin_y
+            max_row_height = 0
+
+        win.geometry(f"{w}x{h}+{current_x}+{current_y}")
+        win.configure(bg="SystemButtonFace")
+
+        current_x += w + margin_x
+        max_row_height = max(max_row_height, h)
+# 2️⃣ 右下角横向优先排列（alter）
+def layout_from_right_bottom(windows, l, t, r, b, margin_x=10, margin_y=5):
+    """
+    右下角开始，横向优先（向左），满宽换行（向上）
+    """
+    current_x = r - margin_x
+    current_y = b - margin_y
+    max_row_height = 0
+
+    for win_info in windows:
+        win = win_info["toplevel"]
+        if not win.winfo_exists():
+            continue
+
+        w = win.winfo_width()
+        h = win.winfo_height()
+
+        # 换行（向上）
+        if current_x - w - margin_x < l:
+            current_x = r - margin_x
+            current_y -= max_row_height + margin_y
+            max_row_height = 0
+
+        win.geometry(f"{w}x{h}+{current_x - w}+{current_y - h}")
+        win.configure(bg="red")
+
+        if not hasattr(win, "_alter_tdx"):
+            win._alter_tdx = True
+
+        current_x -= w + margin_x
+        max_row_height = max(max_row_height, h)
 
 def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="horizontal"):
+    """
+    多屏幕窗口重排（自动换列/换行 + 左右对齐 + 屏幕内排序）
+    
+    有 _alter_tdx 的窗口从右下角开始反向排列，背景红色
+    无 _alter_tdx 的窗口从左上角开始排列，背景默认
+    """
+    if not MONITORS:
+        init_monitors()
+
+    # 取监控窗口列表
+    windows = [info for info in monitor_windows.values() if "toplevel" in info]
+
+    # 分组：有 _alter_tdx / 无 _alter_tdx
+    group_alter = []
+    group_normal = []
+    for info in windows:
+        win = info["toplevel"]
+        if hasattr(win, "_alter_tdx"):
+            group_alter.append(info)
+        else:
+            group_normal.append(info)
+
+    # 排序
+    key_func = lambda w: w["stock_info"][-1] if sort_by == "create_time" else w.get("title", "")
+    group_alter.sort(key=key_func, reverse=True)
+    group_normal.sort(key=key_func, reverse=True)
+
+    # 屏幕分组
+    screen_groups = {i: [] for i in range(len(MONITORS))}
+    for win_info in group_normal + group_alter:  # 先正常窗口再 alter
+        win = win_info["toplevel"]
+        try:
+            x, y = win.winfo_x(), win.winfo_y()
+            for idx, (l, t, r, b) in enumerate(MONITORS):
+                if l <= x < r and t <= y < b:
+                    screen_groups[idx].append(win_info)
+                    break
+        except Exception as e:
+            logger.info(f"⚠ 获取窗口位置失败: {e}")
+
+    # 遍历屏幕
+    for idx, group in screen_groups.items():
+        if not group:
+            continue
+
+        l, t, r, b = MONITORS[idx]
+        screen_width = r - l
+        screen_height = b - t
+        margin_x, margin_y = 10, 5
+
+        # 分开有 _alter_tdx 和无 _alter_tdx
+        normal_group = [w for w in group if not hasattr(w["toplevel"], "_alter_tdx")]
+        alter_group = [w for w in group if hasattr(w["toplevel"], "_alter_tdx")]
+
+        # 左上角排列 normal_group
+        current_x = l + margin_x
+        current_y = t + margin_y
+        max_row_height = 0
+        for win_info in normal_group:
+            win = win_info["toplevel"]
+            try:
+                w, h = win.winfo_width(), win.winfo_height()
+                # 换行逻辑
+                if layout == "horizontal" and current_x + w + margin_x > r:
+                    current_x = l + margin_x
+                    current_y += max_row_height + margin_y
+                    max_row_height = 0
+                win.geometry(f"{w}x{h}+{current_x}+{current_y}")
+                win.configure(bg="SystemButtonFace")  # 默认背景
+                current_x += w + margin_x
+                max_row_height = max(max_row_height, h)
+            except Exception as e:
+                logger.info(f"⚠ 窗口排列失败: {e}")
+
+        # # 右下角排列 alter_group
+        # current_x = r - margin_x
+        # current_y = b - margin_y
+        # max_col_width = 0
+        # for win_info in alter_group:
+        #     win = win_info["toplevel"]
+        #     try:
+        #         w, h = win.winfo_width(), win.winfo_height()
+        #         # 换列逻辑
+        #         if layout == "vertical" and current_y - h - margin_y < t:
+        #             current_y = b - margin_y
+        #             current_x -= max_col_width + margin_x
+        #             max_col_width = 0
+        #         win.geometry(f"{w}x{h}+{current_x - w}+{current_y - h}")
+        #         win.configure(bg="red")  # alter 窗口背景红色
+        #         if not hasattr(win, "_alter_tdx"):
+        #             win._alter_tdx = True
+        #         current_y -= h + margin_y
+        #         max_col_width = max(max_col_width, w)
+        #     except Exception as e:
+        #         logger.info(f"⚠ 窗口排列失败: {e}")
+        # 右下角排列 alter_group 横向优先
+        current_x = r - margin_x
+        current_y = b - margin_y
+        max_row_height = 0
+
+        for win_info in alter_group:
+            win = win_info["toplevel"]
+            try:
+                w, h = win.winfo_width(), win.winfo_height()
+
+                # 横向优先排列：右向左
+                if current_x - w - margin_x < l:
+                    # 换行向上
+                    current_x = r - margin_x
+                    current_y -= max_row_height + margin_y
+                    max_row_height = 0
+
+                win.geometry(f"{w}x{h}+{current_x - w}+{current_y - h}")
+                win.configure(bg="red")  # alter 窗口背景红色
+                if not hasattr(win, "_alter_tdx"):
+                    win._alter_tdx = True
+
+                # 更新位置
+                current_x -= w + margin_x
+                max_row_height = max(max_row_height, h)
+
+            except Exception as e:
+                logger.info(f"⚠ 窗口排列失败: {e}")
+
+def rearrange_monitors_per_screen_noaltertdx(align="left", sort_by="create_time", layout="horizontal"):
     """
     多屏幕窗口重排（自动换列/换行 + 左右对齐 + 屏幕内排序）
     
@@ -2975,16 +3161,6 @@ def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="h
                     if align == "right" and max_col_width == 0:
                         current_x -= w
 
-                    # if current_y + h + margin_y > b:
-                    #     # 换列
-                    #     if align == "left":
-                    #         current_x += max_col_width + margin_x
-                    #     else:
-                    #         current_x -= max_col_width + margin_x
-                    #     current_y = t + 50
-                    #     max_col_width = 0
-                    #     if align == "right":
-                    #         current_x -= w
                     if current_y + h + margin_y > b:
                         # 换列
                         if align == "left":
@@ -3008,14 +3184,6 @@ def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="h
                     if align == "right" and max_row_height == 0:
                         current_x -= w
 
-                    # if current_x + w + margin_x > r:
-                    #     # 换行
-                    #     current_y += max_row_height + margin_y
-                    #     if align == "left":
-                    #         current_x = l + 50
-                    #     else:
-                    #         current_x = r - 50 - w
-                    #     max_row_height = 0
                     if current_x + w + margin_x > r:
                         # 换行
                         current_y += max_row_height + margin_y
@@ -4050,13 +4218,380 @@ def get_stock_changes_time(selected_type=None, stock_code=None, update_interval_
 #     return get_stock_changes(selected_type=selected_type, stock_code=stock_code)
 
 
+# def _get_tdx_data_df(stock_code=None):
+#     global sina_data_last_updated_time,sina_data_df
+#     global pytables_status,today_tdx_df
+#     basedir = "G:" + os.sep
+#     ptype='low'
+#     resample='d'
+#     dl = 70
+#     filter='y'
+#     fname = os.path.join(basedir, "tdx_last_df.h5")             # 原始 HDF5
+#     table = ptype + '_' + resample + '_' + str(dl) + '_' + filter + '_' + 'all'
+#     # table = "all"
+#     current_time = datetime.now()
+#     # tdx_df = None
+#     if pytables_status and today_tdx_df.isEmpty() :
+#         today_tdx_df = read_hdf_table(fname,table)
+#         sina_data_df = sina_data_df + today_tdx_df.loc('high4')
+#     return today_tdx_df
+# --- Win32 API 用于获取 EXE 原始路径 (仅限 Windows) ---
+
+
+# def _get_win32_exe_path():
+#     """
+#     使用 Win32 API 获取当前进程的主模块路径。
+#     这在 Nuitka/PyInstaller 的 Onefile 模式下能可靠地返回原始 EXE 路径。
+#     """
+#     # 假设是 32767 字符的路径长度是足够的
+#     MAX_PATH_LENGTH = 32767 
+#     buffer = ctypes.create_unicode_buffer(MAX_PATH_LENGTH)
+    
+#     # 调用 GetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename, DWORD nSize)
+#     # 传递 NULL 作为 hModule 获取当前进程的可执行文件路径
+#     ctypes.windll.kernel32.GetModuleFileNameW(
+#         None, buffer, MAX_PATH_LENGTH
+#     )
+#     return os.path.dirname(os.path.abspath(buffer.value))
+
+
+# def get_base_path(log=logger):
+#     """
+#     获取程序基准路径。在 Windows 打包环境 (Nuitka/PyInstaller) 中，
+#     使用 Win32 API 优先获取真实的 EXE 目录。
+#     """
+    
+#     # 检查是否为 Python 解释器运行
+#     is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
+    
+#     # 1. 普通 Python 脚本模式
+#     if is_interpreter and not getattr(sys, "frozen", False):
+#         # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
+#         try:
+#             # 此时 __file__ 是可靠的
+#             path = os.path.dirname(os.path.abspath(__file__))
+#             log.info(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
+#             return path
+#         except NameError:
+#              pass # 忽略交互模式
+    
+#     # 2. Windows 打包模式 (Nuitka/PyInstaller EXE 模式)
+#     # 只要不是解释器运行，或者 sys.frozen 被设置，我们就认为是打包模式
+#     if sys.platform.startswith('win'):
+#         try:
+#             # 无论是否 Onefile，Win32 API 都会返回真实 EXE 路径
+#             real_path = _get_win32_exe_path()
+            
+#             # 核心：确保我们返回的是 EXE 的真实目录
+#             if real_path != os.path.dirname(os.path.abspath(sys.executable)):
+#                  # 这是一个强烈信号：sys.executable 被欺骗了 (例如 Nuitka Onefile 启动器)，
+#                  # 或者程序被从其他地方调用，我们信任 Win32 API。
+#                  log.info(f"[DEBUG] Path Mode: WinAPI (Override). Path: {real_path}")
+#                  return real_path
+            
+#             # 如果 Win32 API 结果与 sys.executable 目录一致，且我们处于打包状态
+#             if not is_interpreter:
+#                  log.info(f"[DEBUG] Path Mode: WinAPI (Standalone). Path: {real_path}")
+#                  return real_path
+
+#         except Exception:
+#             pass 
+
+#     # 3. 最终回退（适用于所有打包模式，包括 Linux/macOS）
+#     if getattr(sys, "frozen", False) or not is_interpreter:
+#         path = os.path.dirname(os.path.abspath(sys.executable))
+#         log.info(f"[DEBUG] Path Mode: Final Fallback. Path: {path}")
+#         return path
+
+#     # 4. 极端脚本回退
+#     log.info(f"[DEBUG] Path Mode: Final Script Fallback.")
+#     return os.path.dirname(os.path.abspath(sys.argv[0]))
+
+
+# logger.info(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
+#print(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
+#print(f'get_base_path() : {get_base_path()}')
+
+def get_resource_file(rel_path, out_name=None,BASE_DIR=None,spec=None,log=logger):
+    """
+    从 PyInstaller 内置资源释放文件到 EXE 同目录
+
+    rel_path:   打包资源的相对路径
+    out_name:   释放目标文件名
+    """
+
+
+    if BASE_DIR is None:
+        BASE_DIR = get_base_path()
+        # log.info(f"BASE_DIR配置文件: {BASE_DIR}")
+
+    if out_name is None:
+        out_name = os.path.basename(rel_path)
+
+    # BASE_DIR = os.path.dirname(
+    #     sys.executable if getattr(sys, "frozen", False)
+    #     else os.path.abspath(__file__)    # ✅ 修复点
+    # )
+    target_path = os.path.join(BASE_DIR, out_name)
+    log.info(f"target_path配置文件: {target_path}")
+
+    # 已存在 → 直接返回
+    if os.path.exists(target_path):
+        return target_path
+
+    # 从 MEIPASS 复制
+    base = sys._MEIPASS if getattr(sys, "frozen", False) else os.path.abspath(".")
+    src = os.path.join(base, rel_path)
+
+    if not os.path.exists(src):
+        src = os.path.join(BASE_DIR, rel_path)
+        if os.path.exists(src):
+            log.info(f"BASE_DIR/rel_path资源: {src}")
+            return src
+        elif rel_path.find('JohnsonUtil') >= 0:
+            src = os.path.join(get_base_path(), rel_path.replace('JohnsonUtil/',''))
+            if os.path.exists(src):
+                return src
+        log.error(f"内置资源缺失: {src}")
+        return None
+
+    try:
+        shutil.copy(src, target_path)
+        log.info(f"释放配置文件: {target_path}")
+        return target_path
+    except Exception as e:
+        log.exception(f"释放资源失败: {e}")
+        return None
+
+
+# --------------------------------------
+# STOCK_CODE_PATH 专用逻辑
+# --------------------------------------
+BASE_DIR = get_base_path()
+
+def get_conf_path(fname,rel_path=None,log=logger):
+    """
+    获取并验证 stock_codes.conf
+
+    逻辑：
+      1. 优先使用 BASE_DIR/stock_codes.conf
+      2. 不存在 → 从 JSONData/stock_codes.conf 释放
+      3. 校验文件
+    """
+    # default_path = os.path.join(BASE_DIR, "stock_codes.conf")
+    default_path = os.path.join(BASE_DIR, fname)
+
+    # --- 1. 直接存在 ---
+    if os.path.exists(default_path):
+        if os.path.getsize(default_path) > 0:
+            log.info(f"使用本地配置: {default_path}")
+            return default_path
+        else:
+            log.warning("配置文件存在但为空，将尝试重新释放")
+
+    if rel_path is None:
+        rel_path=f"{fname}"
+    # --- 2. 释放默认资源 ---
+    cfg_file = get_resource_file(
+        rel_path=rel_path,
+        out_name=fname,
+        BASE_DIR=BASE_DIR
+    )
+
+    # --- 3. 校验释放结果 ---
+    if not cfg_file:
+        log.error(f"获取 {fname} 失败（释放阶段）")
+        return None
+
+    if not os.path.exists(cfg_file):
+        log.error(f"释放后文件仍不存在: {cfg_file}")
+        return None
+
+    if os.path.getsize(cfg_file) == 0:
+        log.error(f"配置文件为空: {cfg_file}")
+        return None
+
+    log.info(f"使用内置释放配置: {cfg_file}")
+    return cfg_file
+
+class GlobalConfig:
+    def __init__(self, cfg_file=None, **updates):
+        if not cfg_file:
+            cfg_file = Path(__file__).parent / "global.ini"
+
+        self.cfg_file = Path(cfg_file)
+        self.cfg = configparser.ConfigParser(
+            interpolation=None,
+            inline_comment_prefixes=("#", ";")
+        )
+        self.cfg.read(self.cfg_file, encoding="utf-8")
+
+        # ---- 读取原有参数（带 fallback 回写功能） ----
+        self.init_value = self.get_with_writeback("general", "initGlobalValue", fallback=0, value_type="int")
+        self.marketInit = self.get_with_writeback("general", "marketInit", fallback="all")
+        self.marketblk = self.get_with_writeback("general", "marketblk", fallback="063.blk")
+        self.scale_offset = self.get_with_writeback("general", "scale_offset", fallback="-0.45")
+        self.resampleInit = self.get_with_writeback("general", "resampleInit", fallback="d")
+        self.write_all_day_date = self.get_with_writeback("general", "write_all_day_date", fallback="20251208")
+        self.detect_calc_support = self.get_with_writeback("general", "detect_calc_support", fallback=False, value_type="bool")
+        self.duration_sleep_time = self.get_with_writeback("general", "duration_sleep_time", fallback=60, value_type="int")
+        self.compute_lastdays = self.get_with_writeback("general", "compute_lastdays", fallback=5, value_type="int")
+        self.win10_ramdisk  = self.get_with_writeback("general", "win10_ramdisk", fallback='G:', value_type="str")
+        self.filterclose  = self.get_with_writeback("general", "filterclose", fallback='close', value_type="str")
+        self.filterhigh4  = self.get_with_writeback("general", "filterhigh4", fallback='high4', value_type="str")
+
+        saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="260x180")
+        try:
+            if "x" in saved_wh_str:
+                self.saved_width, self.saved_height = map(int, saved_wh_str.split("x"))
+            elif "," in saved_wh_str:
+                self.saved_width, self.saved_height = map(int, saved_wh_str.split(","))
+            else:
+                self.saved_width, self.saved_height = 260, 180
+        except Exception:
+            self.saved_width, self.saved_height = 260, 180
+
+        self.clean_terminal = self._split(
+            self.get_with_writeback("terminal", "clean_terminal", fallback="")
+        )
+
+        self.expressions = dict(self.cfg.items("expressions")) if self.cfg.has_section("expressions") else {}
+        self.paths = dict(self.cfg.items("path")) if self.cfg.has_section("path") else {}
+
+        # ---- 支持构造时直接写入 ----
+        if updates:
+            for key, value in updates.items():
+                self.set_value("general", key, value)
+            self.save()
+
+    # ===================== 新增 get_with_writeback =====================
+    def get_with_writeback(self, section, option, fallback, value_type="str"):
+        """
+        读取配置，如果不存在则写入 fallback 到 ini
+        value_type: "str", "int", "float", "bool"
+        """
+        if not self.cfg.has_option(section, option):
+            # 写回默认值
+            if value_type == "bool":
+                val_str = "True" if fallback else "False"
+            else:
+                val_str = str(fallback)
+            if not self.cfg.has_section(section):
+                self.cfg.add_section(section)
+            self.cfg.set(section, option, val_str)
+            self.save()
+            return fallback
+        else:
+            # 已存在，按类型返回
+            if value_type == "int":
+                return self.cfg.getint(section, option)
+            elif value_type == "float":
+                return self.cfg.getfloat(section, option)
+            elif value_type == "bool":
+                return self.cfg.getboolean(section, option)
+            else:
+                return self.cfg.get(section, option)
+    # =====================================================================
+
+    def _split(self, s):
+        return [x.strip() for x in s.split(",") if x.strip()]
+
+    def get_expr(self, name):
+        return self.expressions.get(name)
+
+    def get_path(self, key):
+        return self.paths.get(key)
+
+    # ===================== ✅ 写配置 API =====================
+    def set_value(self, section, key, value):
+        """设置配置项(内存中)"""
+        if not self.cfg.has_section(section):
+            self.cfg.add_section(section)
+        self.cfg.set(section, key, str(value))
+        # 如果是 general 区域，顺便更新实例字段
+        if section == "general":
+            setattr(self, key, value)
+
+    def save(self):
+        """写回 ini 文件"""
+        with open(self.cfg_file, "w", encoding="utf-8") as f:
+            self.cfg.write(f)
+
+    def set_and_save(self, section, key, value):
+        """一步完成 set + save"""
+        self.set_value(section, key, value)
+        self.save()
+        logger.info(f"使用内置save: {section} {key} {value} ok")
+    # ========================================================
+
+    def __repr__(self):
+        return f"<GlobalConfig {self.cfg_file}>"
+
+
+conf_ini= get_conf_path('globalYD.ini')
+if not conf_ini:
+    logger.critical("globalYD.ini 加载失败，程序无法继续运行")
+
+CFG = GlobalConfig(conf_ini)
+
+initGlobalValue = CFG.init_value
+clean_terminal = CFG.clean_terminal
+win10_ramdisk = CFG.win10_ramdisk
+filterclose = CFG.filterclose
+filterhigh4 = CFG.filterhigh4
+
+# root_path = [
+#     CFG.get_path("root_path_windows"),
+#     CFG.get_path("root_path_mac"),
+# ]
+
+def _get_tdx_data_df(stock_code=None):
+    global sina_data_last_updated_time, sina_data_df
+    global pytables_status, today_tdx_df
+
+    basedir = win10_ramdisk + os.sep
+    ptype = 'low'
+    resample = 'd'
+    dl = 70
+    filter = 'y'
+
+    fname = os.path.join(basedir, "tdx_last_df.h5")
+    table = f"{ptype}_{resample}_{dl}_{filter}_all"
+
+    # ① 读取 TDX 数据（只读一次）
+    if pytables_status and (today_tdx_df is None or today_tdx_df.empty):
+        today_tdx_df = read_hdf_table(fname, table)
+    
+    if today_tdx_df is None or today_tdx_df.empty:
+        return today_tdx_df
+
+    # # ② 只取 high4 列
+    # if 'high4' not in today_tdx_df.columns:
+    #     return today_tdx_df
+
+    # high4_df = today_tdx_df[['high4']]
+
+    # # ③ 合并到 sina_data_df
+    # if sina_data_df is not None and not sina_data_df.empty:
+    #     sina_data_df = sina_data_df.join(high4_df, how='left')
+    # else:
+    #     sina_data_df = high4_df.copy()
+
+    # # ④ 可选：只返回指定股票
+    # if stock_code:
+    #     stock_code = stock_code.zfill(6)
+    #     if stock_code in today_tdx_df.index:
+    #         return today_tdx_df.loc[[stock_code]]
+
+    return today_tdx_df
 
 
 def _get_sina_data_realtime(stock_code=None):
     global sina_data_last_updated_time,sina_data_df
     global pytables_status
-    basedir = "G:" + os.sep
-    fname = os.path.join(basedir, "sina_data.h5")             # 原始 HDF5
+    basedir = win10_ramdisk + os.sep
+    fname = os.path.join(basedir, "sina_data.h5")    
+    logger.debug(f'win10_ramdisk fname:{fname}')
     table = "all"
     current_time = datetime.now()
     df = None
@@ -4082,7 +4617,6 @@ def _get_sina_data_realtime(stock_code=None):
                     df = sina_data_df
 
     return df
-    # return None
 
 # def _get_stock_changes(selected_type=None, stock_code=None):
 #     """获取股票异动数据"""
@@ -6186,18 +6720,131 @@ def save_alerts():
 # 报警添加/刷新
 # ------------------------
 # ============ 高亮函数 ============
-def highlight_window(win, times=10, delay=300):
-    """让窗口闪烁提示"""
+# def highlight_window(win, times=10, delay=300):
+#     """让窗口闪烁提示"""
+#     def _flash(count):
+#         if not win.winfo_exists():
+#             return
+#         color = "red" if count % 2 == 0 else "SystemButtonFace"
+#         win.configure(bg=color)
+#         if count < times:
+#             win.after(delay, _flash, count + 1)
+#         else:
+#             win.configure(bg="SystemButtonFace")  # 恢复默认
+#     _flash(0)
+
+def highlight_window_nobg(win, times=10, delay=300, interval=60_000):
+    """
+    让窗口闪烁提示，并提前到最前端
+    win: 要闪烁的窗口对象
+    times: 每次闪烁次数
+    delay: 每次闪烁间隔(ms)
+    interval: 间隔多久再次闪烁(ms)，默认30秒
+    """
     def _flash(count):
         if not win.winfo_exists():
             return
+        # 每次闪烁前把窗口提前
+        if count == 0:
+            win.lift()
+            win.attributes("-topmost", True)
+            win.after(1, lambda: win.attributes("-topmost", False))  # 立即取消 topmost 保持正常交互
+
         color = "red" if count % 2 == 0 else "SystemButtonFace"
         win.configure(bg=color)
+
         if count < times:
             win.after(delay, _flash, count + 1)
         else:
-            win.configure(bg="SystemButtonFace")  # 恢复默认
+            win.configure(bg="SystemButtonFace")
+            # 30秒后再次触发闪烁
+            win.after(interval, _flash, 0)
     _flash(0)
+
+# def highlight_window(win, times=10, delay=300, interval=60_000,alter_tdx=False):
+#     """
+#     让窗口闪烁提示，并提前到最前端
+#     win: 要闪烁的窗口对象
+#     times: 每次闪烁次数
+#     delay: 每次闪烁间隔(ms)
+#     interval: 间隔多久再次闪烁(ms)，默认60秒
+#     """
+#     def _flash(count):
+#         if not win.winfo_exists():
+#             return
+#         # 每次闪烁前把窗口提前
+#         if count == 0:
+#             win.lift()
+#             if alter_tdx:
+#                 win.attributes("-topmost", True)
+#                 win.after(1, lambda: win.attributes("-topmost", False))  # 立即取消 topmost 保持正常交互
+
+#         color = "red" if count % 2 == 0 else "SystemButtonFace"
+#         win.configure(bg=color)
+
+#         if count < times:
+#             win.after(delay, _flash, count + 1)
+#         else:
+#             # 🔴 闪烁结束后保持红色
+#             if alter_tdx:
+#                 win.configure(bg="red")
+#                 if not hasattr(win, "_alter_tdx"):
+#                     win._alter_tdx = True
+#                 # 如果有 Treeview，也修改背景为红色
+#                 # if hasattr(win, "monitor_tree") and win.monitor_tree.winfo_exists():
+#                 #     style = ttk.Style()
+#                 #     style.configure("Red.Treeview", background="red", fieldbackground="red")
+#                 #     win.monitor_tree.configure(style="Red.Treeview")
+#             else:
+#                 if not hasattr(win, "_alter_tdx"):
+#                     win.configure(bg="SystemButtonFace")
+#             # 30秒后再次触发闪烁
+#             win.after(interval, _flash, 0)
+
+#     _flash(0)
+
+def highlight_window(win, times=10, delay=300, interval=60_000, alter_tdx=False):
+    """
+    让窗口闪烁提示，并提前到最前端
+    """
+    # 提前标记 alter_tdx 属性
+    if alter_tdx and not hasattr(win, "_alter_tdx"):
+        win._alter_tdx = True
+
+    def _flash(count):
+        if not win.winfo_exists():
+            return
+        if count == 0:
+            win.lift()
+            if alter_tdx:
+                win.attributes("-topmost", True)
+                win.after(1, lambda: win.attributes("-topmost", False))
+
+        # 闪烁颜色
+        color = "red" if alter_tdx else ("red" if count % 2 == 0 else "SystemButtonFace")
+        win.configure(bg=color)
+
+        if count < times:
+            win.after(delay, _flash, count + 1)
+        else:
+            # 闪烁结束后
+            if alter_tdx:
+                win.configure(bg="red")
+                # 如果有 Treeview，也修改背景为红色
+                # if hasattr(win, "monitor_tree") and win.monitor_tree.winfo_exists():
+                #     style = ttk.Style()
+                #     style.configure("Red.Treeview", background="red", fieldbackground="red")
+                #     win.monitor_tree.configure(style="Red.Treeview")
+            else:
+                if not hasattr(win, "_alter_tdx"):
+                    win.configure(bg="SystemButtonFace")
+
+            # 间隔再次触发 无限闪屏
+            # win.after(interval, _flash, 0)
+
+    _flash(0)
+
+
 
 def flash_title(win, code, name):
     """窗口标题加上 ⚠ 提示"""
@@ -8504,6 +9151,74 @@ def format_next_time(delay_ms):
     target_time = datetime.now() + timedelta(seconds=delay_sec)
     return target_time.strftime("%H:%M")
 
+def trigger_monitor_flash(win_dict, flash_times=6, interval=300):
+    """
+    对 monitor 窗口执行闪屏报警
+    """
+    win = win_dict.get('toplevel')
+    if not win or not win.winfo_exists():
+        return
+    # def _flash(count=0):
+    #     if not win.winfo_exists() or count >= flash_times:
+    #         try:
+    #             win.configure(bg="SystemButtonFace")
+    #         except Exception:
+    #             pass
+    #         return
+
+    #     try:
+    #         bg = win.cget("bg")
+    #         win.configure(bg="red" if bg != "red" else "SystemButtonFace")
+    #     except Exception:
+    #         return
+
+    #     win.after(interval, _flash, count + 1)
+    logger.info(f'highlight_window : {win_dict.get("stock_info")[0]}')
+    highlight_window(win,alter_tdx=True)
+    # _flash()
+
+
+def check_monitor_break_high4(monitor_windows: dict,df: pd.DataFrame,logger):
+    """
+    从 monitor_windows 中读取 stock_code
+    判断 close > high4
+    触发对应 monitor 窗口闪屏报警
+    """
+
+    if df is None or df.empty:
+        return
+
+    for win in monitor_windows.values():
+        info = win.get("stock_info")
+        if not info:
+            continue
+
+        stock_code = info[0]
+        if not stock_code:
+            continue
+
+        stock_code = stock_code.zfill(6)
+
+        if stock_code not in df.index:
+            continue
+
+        row = df.loc[stock_code]
+
+        close = row.get(filterclose)
+        high4 = row.get(filterhigh4)
+
+        if close is None or high4 is None:
+            logger.error(f'stock_code_close : {close} high4:{high4}')
+            continue
+        # logger.info(f'stock_code_close : {close} high4:{high4}')
+
+        if close > high4:
+            logger.info(
+                f"[MONITOR_ALERT] {stock_code} close={close} > high4={high4}"
+            )
+            trigger_monitor_flash(win)
+
+
 def refresh_all_stock_data():
     # 假设 get_all_stock_data 返回 DataFrame 或 dict
     global loaded_df,realdatadf
@@ -8517,6 +9232,17 @@ def refresh_all_stock_data():
     if df is not None and not df.empty:
         data = df
         sina_realtime_status = True
+        _tdx_df = _get_tdx_data_df()
+        # ② 只取 high4 列
+        if 'high4' not in _tdx_df.columns:
+            logger.error(f'high4 not in _tdx_df count:{len(_tdx_df)}')
+
+        else:
+            high4_df = _tdx_df[['high4']]
+            # ③ 合并到 sina_data_df
+            if data is not None and not data.empty:
+                data = data.join(high4_df, how='left')
+        check_monitor_break_high4(monitor_windows=monitor_windows,df=data, logger=logger)
         for stock_code, row in data.iterrows():
             if stock_code  in alerts_rules.keys():
                 price = row.close
@@ -8702,7 +9428,7 @@ def read_hdf_table(fname, key='all', columns=None):
             #     df['ticktime'] = df['ticktime'].apply(
             #         lambda x: int(x.strftime('%H%M%S')) if isinstance(x, pd.Timestamp) else x
             #     )
-
+            
             return df
 
     except FileNotFoundError:
