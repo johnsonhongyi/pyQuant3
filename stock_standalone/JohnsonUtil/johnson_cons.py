@@ -33,7 +33,6 @@ DD_VOL_List = {'0': '40000', '1': '100000',
 
 # duration_date_l = 60
 duration_date_day = 70
-# duration_date_day = 60
 duration_date_up = 190
 # duration_date_up = 120
 duration_date_week = 280

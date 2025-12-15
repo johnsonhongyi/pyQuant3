@@ -112,6 +112,8 @@ set CMD="%PYTHON_EXEC%" -m nuitka --onefile "%MAIN_SCRIPT%" ^
     --output-filename="%OUTPUT_NAME%" ^
     --output-dir="%OUTPUT_DIR%" ^
     --enable-plugin=tk-inter ^
+    --plugin-enable=upx ^
+    --upx-binary="C:\JohnsonProgram\SetDisplayMode\init\upx.exe" ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
     --windows-icon-from-ico="%ICON_FILE%" ^
     --windows-company-name="Johnson QuantLab" ^
@@ -121,7 +123,12 @@ set CMD="%PYTHON_EXEC%" -m nuitka --onefile "%MAIN_SCRIPT%" ^
     --windows-console-mode=disable ^
     --lto=yes ^
     --jobs=8 ^
-    --remove-output
+    --remove-output ^
+    --nofollow-import-to=configobj --nofollow-import-to=tqdm --nofollow-import-to=chardet ^
+    --nofollow-import-to=ta_lib --nofollow-import-to=pandas_ta --nofollow-import-to=tushare ^
+    --nofollow-import-to=lxml --nofollow-import-to=aiohttp --nofollow-import-to=screeninfo ^
+    --nofollow-import-to=PyQt5 --nofollow-import-to=pyqtgraph --nofollow-import-to=prompt_toolkit
+
 
 rem :: =====debug 构建 Nuitka 命令 =====
 rem set CMD="%PYTHON_EXEC%" -m nuitka --standalone "%MAIN_SCRIPT%" ^
