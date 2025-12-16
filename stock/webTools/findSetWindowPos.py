@@ -9,7 +9,7 @@ from mouseMonitor.displayDetction import  Display_Detection
 import os
 import re
 import win32gui
-
+from current_display_configuration import restore_display_configuration
 from screeninfo import get_monitors
 def get_screen_resolution():
     monitors = get_monitors()
@@ -1036,6 +1036,9 @@ if __name__ == '__main__':
     print('Process IDs:')
     # print(*list_pids(), sep='\n')
     print('\nWindows:\n')
+
+    restore_display_configuration()
+
     # print(*list_windows(all=False), sep='\n')
     # print(get_tdx_ths_position_eval())
     # result3=find_proc_windows('行业跟随1.0',visible=True)
