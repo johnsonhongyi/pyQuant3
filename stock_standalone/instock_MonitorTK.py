@@ -1558,6 +1558,47 @@ def counterCategory(df, col='category', limit=50, topn=10, table=False):
         return(" | ".join([f"{k}:{v}" for k, v in topn_items.items()]))
         # return topn_items
 
+
+def get_row_tags(latest_row):
+        """
+        根据最新行情数据返回 Treeview 行标签列表
+        """
+        row_tags = []
+
+        low = latest_row.get("low")
+        lastp1d = latest_row.get("lastp1d")
+        high = latest_row.get("high")
+        high4 = latest_row.get("high4")
+        ma5d = latest_row.get("ma5d")
+        ma20d = latest_row.get("ma20d")
+        percent = latest_row.get("percent", latest_row.get("per1d", 0))
+
+        # 1️⃣ 红色：低点 > 昨收
+        if pd.notna(low) and pd.notna(lastp1d):
+            if low > lastp1d:
+                row_tags.append("red_row")
+
+        # 2️⃣ 橙色：高点或低点突破 high4
+        if pd.notna(high) and pd.notna(high4):
+            if high > high4 or (pd.notna(low) and low > high4):
+                row_tags.append("orange_row")
+
+        # 3️⃣ 紫色：弱势，低于 ma5d
+        if pd.notna(high) and pd.notna(ma5d):
+            if high < ma5d:
+                row_tags.append("purple_row")
+
+        # 4️⃣ 黄色：临界或预警，低于 ma20d
+        if pd.notna(low) and pd.notna(ma20d):
+            if low < ma20d:
+                row_tags.append("yellow_row")
+
+        # 5️⃣ 绿色：跌幅明显 <2% 且低于昨收
+        if pd.notna(percent) and pd.notna(low) and pd.notna(lastp1d):
+            if percent < 2 and low < lastp1d:
+                row_tags.append("green_row")
+        logger.debug(f'get_row_tags row_tags: {row_tags}')
+        return row_tags
 # 假设 df 是你提供的涨幅榜表格
 # counterCategory(df, 'category', limit=50)
 
@@ -2031,26 +2072,32 @@ def cleanup_old_clean_flags(keep_days=5):
         except Exception:
             pass
 
-
-def clean_expired_tdx_file(logger):
+def clean_expired_tdx_file(logger, g_values):
     """
     每个交易日 08:30–09:15
     清理一次 tdx_last_df（跨进程 / 跨循环安全）
     """
 
-    # ✅ 是否交易日
+    # ① 是否交易日
     if not cct.get_trade_date_status():
-        return
+        return False
 
     today = cct.get_today()
     now_time = cct.get_now_time_int()
 
-    # ✅ 时间窗口
+    # ② 进程内已完成 → 直接短路
+    if (
+        g_values.getkey("tdx.clean.done") is True
+        and g_values.getkey("tdx.clean.date") == today
+    ):
+        return True
+
+    # ③ 时间窗口校验
     if not (830 <= now_time <= 915):
         logger.debug(
             f"[CLEAN_SKIP] {today} now={now_time} 不在清理窗口"
         )
-        return
+        return False
 
     fname = cct.get_ramdisk_path("tdx_last_df")
     flag_path = _get_clean_flag_path(today)
@@ -2062,11 +2109,13 @@ def clean_expired_tdx_file(logger):
         f"flag_exists={os.path.exists(flag_path)}"
     )
 
-    # ✅ 今天已经完成过（跨进程）
+    # ④ 跨进程：今天已完成
     if os.path.exists(flag_path):
-        return
+        g_values.setkey("tdx.clean.done", True)
+        g_values.setkey("tdx.clean.date", today)
+        return True
 
-    # ✅ 文件不存在 → 直接视为完成
+    # ⑤ 文件不存在 → 直接视为完成
     if not os.path.exists(fname):
         logger.info(
             f"[CLEAN_DONE] {today} 文件不存在，直接标记完成"
@@ -2077,9 +2126,13 @@ def clean_expired_tdx_file(logger):
             logger.error(
                 f"[CLEAN_ERR] flag 写入失败: {flag_path}, err={e}"
             )
-        return
+            return False
 
-    # ✅ 真正删除
+        g_values.setkey("tdx.clean.done", True)
+        g_values.setkey("tdx.clean.date", today)
+        return True
+
+    # ⑥ 真正删除
     try:
         os.remove(fname)
         logger.info(
@@ -2089,9 +2142,9 @@ def clean_expired_tdx_file(logger):
         logger.error(
             f"[CLEAN_ERR] 删除失败: {fname}, err={e}"
         )
-        return   # 删除失败，不写 flag，允许后续重试
+        return False   # 删除失败，不写 flag，允许后续重试
 
-    # ✅ 写入当天完成标记
+    # ⑦ 写入完成标记
     try:
         open(flag_path, "w").close()
         logger.info(
@@ -2101,6 +2154,14 @@ def clean_expired_tdx_file(logger):
         logger.error(
             f"[CLEAN_ERR] flag 写入失败: {flag_path}, err={e}"
         )
+        return False
+
+    # ⑧ 同步进程内状态（关键）
+    g_values.setkey("tdx.clean.done", True)
+    g_values.setkey("tdx.clean.date", today)
+
+    return True
+
 
 def is_tdx_clean_done(today=None):
     if today is None:
@@ -2262,27 +2323,30 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
             #         logger.info(f'init_tdx 用时:{time.time()-time_init:.2f}')
             elif 830 <= cct.get_now_time_int() <= 915:
 
-                time_init = time.time()
+                today = cct.get_today()
 
-                # ① 尝试清理（内部自己判断是否需要）
-                clean_expired_tdx_file(logger)
-
-                # ② 必须：确认今天清理已经完成
-                if not is_tdx_clean_done():
-                    logger.info(
-                        f"{cct.get_today()} 清理尚未完成，跳过 init_tdx"
-                    )
+                # 0️⃣ init 今天已经完成 → 直接跳过
+                if (
+                    g_values.getkey("tdx.init.done") is True
+                    and g_values.getkey("tdx.init.date") == today
+                ):
                     continue
 
-                # ③ 超过 09:15，禁止初始化
+                # 1️⃣ 清理（未完成 → 不允许 init）
+                if not clean_expired_tdx_file(logger, g_values):
+                    logger.info(f"{today} 清理尚未完成，跳过 init_tdx")
+                    continue
+
+                # 2️⃣ 再次确认时间（防止跨 09:15）
                 now_time = cct.get_now_time_int()
                 if now_time > 915:
                     logger.info(
-                        f"{cct.get_today()} 已超过初始化截止时间 {now_time}"
+                        f"{today} 已超过初始化截止时间 {now_time}"
                     )
                     continue
 
-                # ④ 正式执行初始化（只会进一次）
+                # 3️⃣ 正式 init（只会执行一次）
+                time_init = time.time()
                 START_INIT = 0
 
                 top_now = tdd.getSinaAlldf(
@@ -2292,7 +2356,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
                 )
 
                 if now_time <= 900:
-                    resamples = ['d', '3d', 'w', 'm']
+                    resamples = ['d','3d', 'w', 'm']
                 else:
                     resamples = ['3d']
 
@@ -2305,11 +2369,15 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
                             resample=res_m
                         )
 
+                # 4️⃣ 关键：标记 init 已完成（跨循环）
+                g_values.setkey("tdx.init.done", True)
+                g_values.setkey("tdx.init.date", today)
+
                 logger.info(
-                    f"init_tdx 用时: {time.time() - time_init:.2f}s"
+                    f"init_tdx tdx.init.done:{tdx.init.done} tdx.init.date:{tdx.init.date}用时: {time.time() - time_init:.2f}s"
                 )
 
-                # ⑤ 休眠节流
+                # 5️⃣ 节流
                 for _ in range(30):
                     if not flag.value:
                         break
@@ -2325,13 +2393,12 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
                     continue
             else:
                 logger.info(f'start work : {cct.get_now_time()} get_work_time: {cct.get_work_time()} , START_INIT :{START_INIT} ')
-        # try:
-            # resample = cct.GlobalValues().getkey("resample") or "d"
             resample = g_values.getkey("resample") or "d"
             market = g_values.getkey("market", marketInit)        # all / sh / cyb / kcb / bj
             blkname = g_values.getkey("blkname", marketblk)  # 对应的 blk 文件
-            logger.info(f"resample: {resample} flag.value : {flag.value} market : {market} blkname :{blkname} ")
-            clean_expired_tdx_file(logger)
+            logger.info(f"resample Main: {resample} flag.value : {flag.value} market : {market} blkname :{blkname} ")
+            # if START_INIT == 0:
+            #     clean_expired_tdx_file(logger, g_values)
             top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
             if top_now.empty:
                 logger.info("top_now.empty no data fetched")
@@ -7916,6 +7983,13 @@ class StockMonitorApp(tk.Tk):
 
         # 保存引用，独立窗口不复用 _concept_top10_win
         win._tree_top10 = tree
+        win._tree_top10.tag_configure("red_row", foreground="red")        # 涨幅或低点大于前一日
+        win._tree_top10.tag_configure("orange_row", foreground="orange")  # 高位或突破
+        win._tree_top10.tag_configure("green_row", foreground="green")    # 跌幅明显
+        win._tree_top10.tag_configure("blue_row", foreground="#555555")      # 弱势或低于均线低于 ma5d
+        win._tree_top10.tag_configure("purple_row", foreground="purple")  # 成交量异常等特殊指标
+        win._tree_top10.tag_configure("yellow_row", foreground="yellow")  # 临界或预警
+
         win._concept_name = concept_name
         # 在创建窗口时保存定时器 id
         win._auto_refresh_id = None
@@ -8264,6 +8338,12 @@ class StockMonitorApp(tk.Tk):
         # 保存引用
         win._content_frame_top10 = frame
         win._tree_top10 = tree
+        win._tree_top10.tag_configure("red_row", foreground="red")        # 涨幅或低点大于前一日
+        win._tree_top10.tag_configure("orange_row", foreground="orange")  # 高位或突破
+        win._tree_top10.tag_configure("green_row", foreground="green")    # 跌幅明显
+        win._tree_top10.tag_configure("blue_row", foreground="#555555")      # 弱势或低于均线低于 ma5d
+        win._tree_top10.tag_configure("purple_row", foreground="purple")  # 成交量异常等特殊指标
+        win._tree_top10.tag_configure("yellow_row", foreground="yellow")  # 临界或预警
 
         # 鼠标滚轮悬停滚动
         def on_mousewheel(event):
@@ -8474,6 +8554,20 @@ class StockMonitorApp(tk.Tk):
         - limit: 显示前 N 条
         """
         tree = win._tree_top10
+
+        # # ✅ 先确保 tag 配置只做一次
+        # if not getattr(tree, "_tag_inited", False):
+        #     tree.tag_configure("red_row", foreground="red")        # 涨幅或低点大于前一日
+        #     tree.tag_configure("green_row", foreground="green")    # 跌幅明显
+        #     tree.tag_configure("orange_row", foreground="orange")  # 高位或突破
+        #     #tree.tag_configure("blue_row", foreground="#555555")    # 灰色弱势或低于均线  “purple”紫色、“magenta”品红/洋红 深灰（#555555）
+        #     #tree.tag_configure("purple_row", foreground="purple")  # 弱势 / 低于 ma5d
+        #     tree.tag_configure("purple_row", foreground="purple")  # 成交量异常等特殊指标
+        #     tree.tag_configure("yellow_row", foreground="yellow")  # 临界或预警临界 / 低于 ma20d
+        #     tree._tag_inited = True
+
+
+        # 清空旧行
         tree.delete(*tree.get_children())
 
         # 如果 df_concept 为 None，则从 self.df_all 动态获取
@@ -8500,15 +8594,53 @@ class StockMonitorApp(tk.Tk):
             iid = str(idx)
             latest_row = self.df_all.loc[code_row] if code_row in self.df_all.index else row
             percent = latest_row.get("percent")
+            # === 行条件判断 ===
+            # row_tags = []
+            row_tags = get_row_tags(latest_row)
+
+            # low = latest_row.get("low")
+            # lastp1d = latest_row.get("lastp1d")
+            # high = latest_row.get("high")
+            # high4 = latest_row.get("high4")  # 假设 high4 在 latest_row 中
+
+            # row_tags = []
+
+            # # 红色条件
+            # if pd.notna(low) and pd.notna(lastp1d):
+            #     if low > lastp1d:
+            #         row_tags.append("red_row")
+
+            # # 橙色条件
+            # if pd.notna(high) and pd.notna(high4):
+            #     if high > high4 or (pd.notna(low) and low > high4):
+            #         row_tags.append("orange_row")
+
+
             if pd.isna(percent) or percent == 0:
                 percent = latest_row.get("per1d", row.get("per1d", 0))
-            tree.insert("", "end", iid=iid,
-                        values=(code_row,
-                                latest_row.get("name", row.get("name", "")),
-                                # f"{latest_row.get('percent', row.get('percent', 0)):.2f}",
-                                f"{percent:.2f}",
-                                f"{latest_row.get('volume', row.get('volume', 0)):.1f}",
-                                latest_row.get("red", row.get("red", 0)) ))
+
+            tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    code_row,
+                    latest_row.get("name", row.get("name", "")),
+                    f"{percent:.2f}",
+                    f"{latest_row.get('volume', row.get('volume', 0)):.1f}",
+                    latest_row.get("red", row.get("red", 0)),
+                ),
+                tags=tuple(row_tags)
+            )
+
+            # tree.insert("", "end", iid=iid,
+            #             values=(code_row,
+            #                     latest_row.get("name", row.get("name", "")),
+            #                     # f"{latest_row.get('percent', row.get('percent', 0)):.2f}",
+            #                     f"{percent:.2f}",
+            #                     f"{latest_row.get('volume', row.get('volume', 0)):.1f}",
+            #                     latest_row.get("red", row.get("red", 0)) ))
+
             code_to_iid[code_row] = iid
 
         # --- 默认选中逻辑 ---
@@ -8525,9 +8657,18 @@ class StockMonitorApp(tk.Tk):
             # tree.see(target_iid)
 
             # 延迟滚动 + 高亮
+            # def scroll_and_highlight():
+            #     tree.see(target_iid)
+            #     self._highlight_tree_selection(tree, target_iid)
             def scroll_and_highlight():
                 tree.see(target_iid)
                 self._highlight_tree_selection(tree, target_iid)
+                # # 高亮后保持红色行
+                # for iid in tree.get_children():
+                #     tags = tree.item(iid, "tags")
+                #     if "red_row" in tags:
+                #         tree.item(iid, tags=tags)  # 强制刷新标签
+
 
             win.after(50, scroll_and_highlight)
             # 更新窗口索引和选中 code
@@ -8605,14 +8746,33 @@ class StockMonitorApp(tk.Tk):
         tree.bind("<FocusIn>", lambda e: tree.focus_set())
 
 
+    # def _highlight_tree_selection(self, tree, item):
+    #     """
+    #     Treeview 高亮选中行（背景蓝色，其他清除）
+    #     """
+    #     for iid in tree.get_children():
+    #         tree.item(iid, tags=())
+    #     tree.item(item, tags=("selected",))
+    #     tree.tag_configure("selected", background="#d0e0ff")
+
     def _highlight_tree_selection(self, tree, item):
         """
-        Treeview 高亮选中行（背景蓝色，其他清除）
+        Treeview 高亮选中行（背景蓝色，其他清除，但保留 red_row）
         """
         for iid in tree.get_children():
-            tree.item(iid, tags=())
-        tree.item(item, tags=("selected",))
+            tags = list(tree.item(iid, "tags"))
+            if "selected" in tags:
+                tags.remove("selected")  # 移除旧的 selected
+            tree.item(iid, tags=tuple(tags))
+
+        # 给新选中行添加 selected
+        tags = list(tree.item(item, "tags"))
+        if "selected" not in tags:
+            tags.append("selected")
+        tree.item(item, tags=tuple(tags))
+
         tree.tag_configure("selected", background="#d0e0ff")
+
 
     def _sort_treeview_column_newTop10_bug(self, tree, col, reverse=None):
         if not hasattr(tree, "_full_df") or tree._full_df.empty:
@@ -14500,10 +14660,15 @@ class KLineMonitor(tk.Toplevel):
             self.tree.tag_configure(sig.lower(), background="#d0f0d0")  # 示例，BUY_STRONG -> buy_strong
         # self.tree.tag_configure("buy", background="#d0f5d0")
         # self.tree.tag_configure("sell", background="#f5d0d0")
-        self.tree.tag_configure("neutral", background="#f0f0f0")
+        # self.tree.tag_configure("neutral", background="#f0f0f0")
         self.tree.tag_configure("buy_hist", background="#b0f0b0")
         self.tree.tag_configure("sell_hist", background="#f0b0b0")
-
+        self.tree.tag_configure("red_row", foreground="red")        # 涨幅或低点大于前一日
+        self.tree.tag_configure("orange_row", foreground="orange")  # 高位或突破
+        self.tree.tag_configure("green_row", foreground="green")    # 跌幅明显
+        self.tree.tag_configure("blue_row", foreground="#555555")      # 弱势或低于均线低于 ma5d
+        self.tree.tag_configure("purple_row", foreground="purple")  # 成交量异常等特殊指标
+        self.tree.tag_configure("yellow_row", foreground="yellow")  # 临界或预警
         # 绑定点击和键盘
         self.tree.bind("<Button-1>", self.on_tree_kline_monitor_click)
         # 绑定右键点击事件
@@ -14572,163 +14737,13 @@ class KLineMonitor(tk.Toplevel):
         threading.Thread(target=self.refresh_loop, daemon=True).start()
 
         self.protocol("WM_DELETE_WINDOW", self.on_kline_monitor_close)
-
-
-        #  # --- 加载历史查询 ---
-        # if os.path.exists("last_query.json"):
-        #     try:
-        #         with open("last_query.json", "r", encoding="utf-8") as f:
-        #             data = json.load(f)
-        #             self.last_query = data.get("last_query", "")
-        #             if self.last_query:
-        #                 self.search_var.set(self.last_query)
-        #     except Exception as e:
-        #         logger.info(f"读取 last_query.json 出错: {e}")
-        # 加载窗口位置（可选）
+       
         try:
             self.master.load_window_position(self, "KLineMonitor", default_width=860, default_height=560)
         except Exception:
             self.geometry("760x460")
 
-    # def search_code_status(self):
 
-    #     """在 Treeview 中搜索 code 并高亮显示"""
-    #     code = self.search_var.get().strip()
-    #     if not code:
-    #        return
-
-    #     found = False
-    #     for item in self.tree.get_children():
-    #        if self.tree.set(item, "code") == code:
-    #            # 选中并滚动到该行
-    #            self.tree.selection_set(item)
-    #            self.tree.focus(item)
-    #            self.tree.see(item)
-    #            found = True
-    #            break
-
-    #     if not found:
-    #        # 未找到则弹出提示
-    #        toast_message(self,f"未找到代码 {code}")
-
-    # def search_code_status(self):
-    #     """
-    #     在 Treeview 中搜索 code 或使用 query 过滤当前表格数据
-    #     支持表达式: score>80 and percent>5 and volume>2
-    #     """
-    #     query = self.search_var.get().strip()
-    #     if not query:
-    #         return
-
-    #     # --- 1. 搜索股票代码 ---
-    #     if query.isdigit() and len(query) == 6:
-    #         code = query
-    #         found = False
-    #         for item in self.tree.get_children():
-    #             if self.tree.set(item, "code") == code:
-    #                 self.tree.selection_set(item)
-    #                 self.tree.focus(item)
-    #                 self.tree.see(item)
-    #                 found = True
-    #                 break
-    #         if not found:
-    #             toast_message(self, f"未找到代码 {code}")
-    #         else:
-    #             # 选中后让窗口前置（如果在独立窗口中）
-    #             try:
-    #                 self.lift()
-    #                 self.focus_force()
-    #             except Exception:
-    #                 pass
-    #         return
-
-    #     # --- 2. 表达式过滤 TreeView 当前数据 ---
-    #     try:
-    #         # 收集当前表格数据
-    #         cols = self.tree["columns"]
-    #         rows = []
-    #         for item in self.tree.get_children():
-    #             values = self.tree.item(item, "values")
-    #             if not values:
-    #                 continue
-    #             rows.append(dict(zip(cols, values)))
-
-    #         if not rows:
-    #             toast_message(self, "当前表格为空，无法筛选")
-    #             return
-
-    #         df_tree = pd.DataFrame(rows)
-
-    #         # 将数字列转换类型
-    #         for col in ["score", "percent", "volume", "now"]:
-    #             if col in df_tree.columns:
-    #                 df_tree[col] = pd.to_numeric(df_tree[col], errors="coerce")
-
-    #         # --- 列名映射（中文兼容）---
-    #         col_map = {
-    #             "评分": "score",
-    #             "涨幅": "percent",
-    #             "量比": "volume",
-    #             "当前价": "now",
-    #             "信号": "signal",
-    #             "情绪": "emotion",
-    #         }
-    #         expr = query
-    #         for k, v in col_map.items():
-    #             expr = expr.replace(k, v)
-
-    #         # --- 用 pandas.query 过滤 ---
-    #         df_filtered = df_tree.query(expr)
-    #         if df_filtered.empty:
-    #             toast_message(self, f"未找到符合条件的结果: {query}")
-    #             return
-
-    #         # --- 清空并填充 ---
-    #         self.tree.delete(*self.tree.get_children())
-    #         for _, row in df_filtered.iterrows():
-    #             values = [row.get(col, "") for col in cols]
-    #             # 尝试保持原有tag风格（按signal推断）
-    #             sig = str(row.get("signal", "")).upper()
-    #             tag = "neutral"
-    #             if sig.startswith("BUY"):
-    #                 tag = "buy"
-    #             elif sig.startswith("SELL"):
-    #                 tag = "sell"
-    #             self.tree.insert("", "end", values=values, tags=(tag,))
-
-    #         toast_message(self, f"共找到 {len(df_filtered)} 条结果")
-
-    #         # 过滤后保持焦点
-    #         try:
-    #             self.lift()
-    #             self.focus_force()
-    #         except Exception:
-    #             pass
-
-    #     except Exception as e:
-    #         toast_message(self, f"筛选语句错误: {e}")
-
-    # def update_search_combo3(self):
-    #     """刷新 search_combo3 的内容与默认选中值"""
-    #     # 获取最新历史记录
-    #     new_values = self.history3()
-        
-    #     # 更新下拉框列表
-    #     self.search_combo3['values'] = new_values
-
-    #     # 如果有历史记录，则自动设置第一个为当前值
-    #     if len(new_values) > 0:
-    #         self.search_var.set(new_values[0])
-    #     else:
-    #         self.search_var.set("")
-
-    # def refresh_search_combo3(self):
-    #     """刷新 KLine 搜索框的历史下拉值"""
-    #     if hasattr(self, "search_combo3") and self.search_combo3.winfo_exists():
-    #         try:
-    #             self.search_combo3["values"] = list(self.history3()) if callable(self.history3) else list(self.history3)
-    #         except Exception as e:
-    #             logger.info(f"[refresh_search_combo3] 刷新失败: {e}")
     def refresh_search_combo3(self):
         """刷新 KLine 搜索框的历史下拉值，并自动更新当前选中项"""
         if hasattr(self, "search_combo3") and self.search_combo3.winfo_exists():
@@ -14748,17 +14763,6 @@ class KLineMonitor(tk.Toplevel):
             except Exception as e:
                 logger.info(f"[refresh_search_combo3] 刷新失败: {e}")
 
-
-
-    # def edit_code_status(self):
-    #     # query = self.search_var.get().strip()
-    #     query = self.history3()[0]
-    #     new_note = askstring_at_parent_single(self, "修改备注", "请输入新的备注：", initialvalue=query)
-    #     if new_note is not None:
-    #         self.search_var.set(new_note)
-    #         logger.info(f'set self.search_var : {new_note}')
-    #         self.history3()[0] = new_note
-    #         self.search_code_status()
 
     def edit_code_status(self):
         # 获取当前第一个历史项（仅示例）
@@ -14817,55 +14821,6 @@ class KLineMonitor(tk.Toplevel):
             return
 
         try:
-            # cols = self.tree["columns"]
-            # rows = []
-            # for item in self.tree.get_children():
-            #     values = self.tree.item(item, "values")
-            #     if not values:
-            #         continue
-            #     rows.append(dict(zip(cols, values)))
-
-            # if not rows:
-            #     toast_message(self, "当前表格为空，无法筛选")
-            #     return
-
-            # df_tree = pd.DataFrame(rows)
-
-            # # 将数字列转换类型
-            # for col in ["score", "percent", "volume", "now"]:
-            #     if col in df_tree.columns:
-            #         df_tree[col] = pd.to_numeric(df_tree[col], errors="coerce")
-
-            # # --- 中文列名映射 ---
-            # col_map = {
-            #     "评分": "score",
-            #     "涨幅": "percent",
-            #     "量比": "volume",
-            #     "当前价": "now",
-            #     "信号": "signal",
-            #     "情绪": "emotion",
-            # }
-            # expr = query
-            # for k, v in col_map.items():
-            #     expr = expr.replace(k, v)
-
-            # # --- 过滤 ---
-            # df_filtered = df_tree.query(expr)
-            # if df_filtered.empty:
-            #     toast_message(self, f"未找到符合条件的结果: {query}")
-            #     return
-
-            # # --- 清空并填充 ---
-            # self.tree.delete(*self.tree.get_children())
-            # for _, row in df_filtered.iterrows():
-            #     values = [row.get(col, "") for col in cols]
-            #     sig = str(row.get("signal", "")).upper()
-            #     tag = "neutral"
-            #     if sig.startswith("BUY"):
-            #         tag = "buy"
-            #     elif sig.startswith("SELL"):
-            #         tag = "sell"
-            #     self.tree.insert("", "end", values=values, tags=(tag,))
 
             df_filtered = self.apply_filters()
             toast_message(self, f"共找到 {len(df_filtered)} 条结果")
@@ -15029,21 +14984,6 @@ class KLineMonitor(tk.Toplevel):
         return "break"
 
     # # ---- 列排序 ----
-    # def treeview_sort_columnKLine(self, col, reverse=False):
-    #     self.sort_column = col
-    #     self.sort_reverse = reverse
-    #     try:
-    #         data_list = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
-    #         try:
-    #             data_list.sort(key=lambda t: float(t[0]), reverse=reverse)
-    #         except ValueError:
-    #             data_list.sort(reverse=reverse)
-    #         for index, (val, k) in enumerate(data_list):
-    #             self.tree.move(k, '', index)
-    #         self.tree.heading(col, command=lambda: self.treeview_sort_columnKLine(col, not reverse))
-    #     except Exception as e:
-    #         logger.info(f"[Monitor] 排序错误:{e}")
-
     def treeview_sort_columnKLine(self, col, reverse=False,onclick=False):
         try:
             # ---- 保存当前滚动位置 ----
@@ -15079,17 +15019,6 @@ class KLineMonitor(tk.Toplevel):
             logger.info(f"[Monitor] 排序错误:{e}")
 
     # ---- 刷新循环 ----
-    # def refresh_loop(self):
-    #     while not self.stop_event.is_set():
-    #         try:
-    #             df = self.get_df_func()
-    #             if cct.get_work_time() and df is not None and not df.empty:
-    #                 df = detect_signals(df)  # 外部函数
-    #                 self.df_cache = df.copy()
-    #                 self.after(0, self.apply_filters)
-    #         except Exception as e:
-    #             logger.info("[Monitor] 更新错误:", e)
-    #         time.sleep(self.refresh_interval)
     def refresh_loop(self):
         # --- 启动时先跑一次数据 ---
         try:
@@ -15117,6 +15046,39 @@ class KLineMonitor(tk.Toplevel):
                 logger.info(f"[Monitor] 更新错误:{e}")
             finally:
                 time.sleep(self.refresh_interval)
+
+    def get_row_tags_kline(self, r, idx=None):
+        """
+        根据一行数据 r 和索引 idx 生成 Treeview tag 列表
+        """
+        
+        tags = []
+
+        sig = str(r.get("signal","") or "")
+        # 基本 tag
+        if sig.startswith("BUY"):
+            tags.append("buy")
+        elif sig.startswith("SELL"):
+            tags.append("sell")
+        else:
+            tags.append("neutral")
+
+        # 历史高亮
+        if idx is not None:
+            for s in self.signal_types:
+                if idx in self.signal_history_indices.get(s, set()):
+                    tags.append(f"{tags[0]}_hist")  # 保留原 tag 并添加历史标记
+
+        # logger.info(f'get_row_tags_kline: {r}')
+        row_tags = get_row_tags(r)
+        tags.extend(row_tags) 
+        logger.debug(f'get_row_tags_kline tags: {tags}')
+
+        # 可以在这里继续添加其他颜色逻辑，比如：
+        # if r.get("low",0) > r.get("lastp1d",0):
+        #     tags.append("red_row")
+
+        return tags
 
 
     def process_table_data(self, df):
@@ -15188,16 +15150,17 @@ class KLineMonitor(tk.Toplevel):
             arrow = "↑" if trend=="up" else ("↓" if trend=="down" else "→")
             display_signal = f"{sig} {arrow}{count}" if sig else ""
 
-            # tag
-            tag = "neutral"
-            if sig.startswith("BUY"):
-                tag = "buy"
-            elif sig.startswith("SELL"):
-                tag = "sell"
-            # 历史高亮
-            for s in self.signal_types:
-                if idx in self.signal_history_indices.get(s, set()):
-                    tag += "_hist"
+            tag = self.get_row_tags_kline(r,idx=idx)
+            # # tag
+            # tag = "neutral"
+            # if sig.startswith("BUY"):
+            #     tag = "buy"
+            # elif sig.startswith("SELL"):
+            #     tag = "sell"
+            # # 历史高亮
+            # for s in self.signal_types:
+            #     if idx in self.signal_history_indices.get(s, set()):
+            #         tag += "_hist"
 
             processed.append({
                 "code": code,
@@ -15235,6 +15198,7 @@ class KLineMonitor(tk.Toplevel):
 
         # 插入表格
         for row in processed_data:
+            # logger.info(f'row["code"] : {row["code"]} row["tag"] : {row["tag"]}')
             self.tree.insert(
                 "", tk.END,
                 values=(
@@ -15248,9 +15212,10 @@ class KLineMonitor(tk.Toplevel):
                     f"{row['red']}",
                     row["emotion"]
                 ),
-                tags=(row["tag"],)
+                tags=tuple(row["tag"]) 
             )
 
+                # tags=(row["tag"],)
         # 保留排序
         if getattr(self, "sort_column", None):
             self.treeview_sort_columnKLine(self.sort_column, self.sort_reverse)
@@ -15296,16 +15261,6 @@ class KLineMonitor(tk.Toplevel):
         if self.df_cache is not None:
             self.update_table(self.df_cache)
 
-    # def apply_filters(self):
-    #     if self.df_cache is None:
-    #         return
-    #     df = self.df_cache.copy()
-    #     for f in self.filter_stack:
-    #         if f["type"] == "signal":
-    #             df = df[df["signal"] == f["value"]]
-    #         elif f["type"] == "emotion":
-    #             df = df[df["emotion"] == f["value"]]
-    #     self.update_table(df)
     def apply_filters(self):
         """应用信号/情绪过滤 + 自动 query 查询"""
         if not self.search_filter_by_signal or self.df_cache is None or self.df_cache.empty:
