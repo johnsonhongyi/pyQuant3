@@ -2343,20 +2343,26 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
                     resamples = ['3d']
 
                 for res_m in resamples:
+                    time_init_m = time.time()
                     if res_m != g_values.getkey("resample"):
-                        logger.info(f"start init_tdx resample: {res_m}")
-                        tdd.get_append_lastp_to_df(
-                            top_now,
-                            dl=ct.Resample_LABELS_Days[res_m],
-                            resample=res_m
-                        )
-
+                        now_time = cct.get_now_time_int()
+                        if now_time <= 905:
+                            logger.info(f"start init_tdx resample: {res_m}")
+                            tdd.get_append_lastp_to_df(
+                                top_now,
+                                dl=ct.Resample_LABELS_Days[res_m],
+                                resample=res_m)
+                        else:
+                            logger.info(f'resample:{res_m} now_time:{now_time} > 905 终止初始化 init_tdx 用时:{time.time()-time_init_m:.2f}')
+                            break
+                        logger.info(f'resample:{res_m} init_tdx 用时:{time.time()-time_init_m:.2f}')
+                
                 # 4️⃣ 关键：标记 init 已完成（跨循环）
                 g_values.setkey("tdx.init.done", True)
                 g_values.setkey("tdx.init.date", today)
 
                 logger.info(
-                    f"init_tdx tdx.init.done:{tdx.init.done} tdx.init.date:{tdx.init.date}用时: {time.time() - time_init:.2f}s"
+                    f"init_tdx tdx.init.done:{tdx.init.done} tdx.init.date:{tdx.init.date} 总用时: {time.time() - time_init:.2f}s"
                 )
 
                 # 5️⃣ 节流
