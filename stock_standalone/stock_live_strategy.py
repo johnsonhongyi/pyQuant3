@@ -113,7 +113,12 @@ class StockLiveStrategy:
         
         self.config_file = "voice_alert_config.json"
         self._load_monitors()
+        self.alert_callback = None
 
+    def set_alert_callback(self, callback):
+        """设置报警回调函数"""
+        self.alert_callback = callback
+    
     def _load_monitors(self):
         """加载配置"""
         try:
@@ -272,6 +277,13 @@ class StockLiveStrategy:
         # 2. 语音播报
         speak_text = f"注意，{name}，{message}"
         self._voice.say(speak_text)
+        
+        # 3. 回调
+        if self.alert_callback:
+            try:
+                self.alert_callback(code, name, message)
+            except Exception as e:
+                logger.error(f"Alert callback error: {e}")
 
     def _play_sound_async(self):
         try:

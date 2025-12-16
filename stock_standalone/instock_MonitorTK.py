@@ -2964,6 +2964,8 @@ class StockMonitorApp(tk.Tk):
         self.tree.bind("<Button-3>", self.on_tree_right_click)
 
         self.bind("<Alt-c>", lambda e:self.open_column_manager())
+        self.bind("<Alt-d>", lambda event: self.open_handbook_overview())
+        self.bind("<Alt-e>", lambda event: self.open_voice_monitor_manager())
         # 启动周期检测 RDP DPI 变化
         self.after(3000, self._check_dpi_change)
         self.auto_adjust_column = self.dfcf_var.get()
@@ -6555,7 +6557,6 @@ class StockMonitorApp(tk.Tk):
         try:
             win = tk.Toplevel(self)
             win.title("手札总览")
-            
             # --- 窗口定位 ---
             w, h = 900, 600
             # 居中显示
@@ -6567,7 +6568,10 @@ class StockMonitorApp(tk.Tk):
             
             # ESC 关闭
             win.bind("<Escape>", lambda e: win.destroy())
-            
+            win.lift()
+            win.focus_force()
+            win.attributes("-topmost", True)
+            win.after(100, lambda: win.attributes("-topmost", False))
             # --- 顶部滤镜/操作区域 ---
             top_frame = tk.Frame(win)
             top_frame.pack(fill="x", padx=10, pady=5)
@@ -6722,9 +6726,27 @@ class StockMonitorApp(tk.Tk):
             lbl_name = tk.Label(f, text=f"{label}:", width=10, anchor="w", fg="#666")
             lbl_name.pack(side="left")
             
+            # 价格对比逻辑
             val_str = f"{value}"
+            arrow = ""
+            arrow_fg = ""
+            
             if isinstance(value, float):
                 val_str = f"{value:.2f}"
+                if value_type == "price" and curr_price > 0 and value > 0:
+                    if value > curr_price:
+                        arrow =  "🟥 "
+                        # arrow = "🔴 "
+
+                        arrow_fg = "green"
+                    elif value < curr_price:
+                        arrow =  "🟩 "
+                        # arrow = "🟢 "
+                        arrow_fg = "red"
+            
+            # 如果有箭头，先显示箭头
+            if arrow:
+                tk.Label(f, text=arrow, fg=arrow_fg, font=("Arial", 10, "bold")).pack(side="left")
             
             lbl_val = tk.Label(f, text=val_str, fg="blue", cursor="hand2", font=("Arial", 10, "underline"))
             lbl_val.pack(side="left")
@@ -6794,9 +6816,9 @@ class StockMonitorApp(tk.Tk):
             left_frame = tk.Frame(main_frame) 
             left_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
             
-            right_frame = tk.LabelFrame(main_frame, text="参考数据 (点击自动填入)", width=250)
+            right_frame = tk.LabelFrame(main_frame, text="参考数据 (点击自动填入)", width=380)
             right_frame.pack(side="right", fill="both", padx=(10, 0))
-            right_frame.pack_propagate(False)
+            # right_frame.pack_propagate(False)
 
             # --- 左侧：输入区域 ---
             
@@ -6899,7 +6921,7 @@ class StockMonitorApp(tk.Tk):
                         # 自动关闭，不再弹窗确认，提升效率 (或者用 toast)
                         # messagebox.showinfo("成功", f"已添加监控: {name} {rtype} {val}", parent=win)
                         logger.info(f"Monitor added: {name} {rtype} {val}")
-                        win.on_close()
+                        on_close()   # ✅ 正确
                     else:
                         messagebox.showerror("错误", "实时监控模块未初始化", parent=win)
                 except ValueError:
@@ -6914,7 +6936,7 @@ class StockMonitorApp(tk.Tk):
             win.protocol("WM_DELETE_WINDOW", on_close)
             win.bind("<Return>", confirm)
             tk.Button(btn_frame, text="确认添加 (Enter)", command=confirm, bg="#ccff90", height=2).pack(side="left", fill="x", expand=True, padx=5)
-            tk.Button(btn_frame, text="取消 (Esc)", command=lambda e: on_close(), height=2).pack(side="left", fill="x", expand=True, padx=5)
+            tk.Button(btn_frame, text="取消 (Esc)", command=on_close, height=2).pack(side="left", fill="x", expand=True, padx=5)
             
         except Exception as e:
             logger.error(f"Add monitor dialog error: {e}")
@@ -6924,9 +6946,128 @@ class StockMonitorApp(tk.Tk):
         """延迟初始化策略模块"""
         try:
             self.live_strategy = StockLiveStrategy()
+            # 注册报警回调
+            self.live_strategy.set_alert_callback(self.on_voice_alert)
             logger.info("✅ 实时监控策略模块已启动")
         except Exception as e:
             logger.error(f"Failed to init live strategy: {e}")
+
+    def on_voice_alert(self, code, name, msg):
+        """
+        处理语音报警触发: 弹窗显示股票详情
+        """
+        # 必须回到主线程操作 GUI
+        self.after(0, lambda: self._show_alert_popup(code, name, msg))
+
+    def _update_alert_positions(self):
+        """重新排列所有报警弹窗"""
+        if not hasattr(self, 'active_alerts'):
+            self.active_alerts = []
+            
+        # Right-Bottom origin
+        w, h = 350, 260 # 稍微增高
+        margin = 10
+        taskbar = 80 # 避开任务栏
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        
+        # Max columns that fit
+        max_cols = (sw - 100) // (w + margin)
+        if max_cols < 1: max_cols = 1
+        
+        # 清理已销毁的窗口
+        self.active_alerts = [win for win in self.active_alerts if win.winfo_exists()]
+
+        for i, win in enumerate(self.active_alerts):
+            try:
+                col = i % max_cols
+                row = i // max_cols
+                
+                # 从右向左排列
+                x = sw - (col + 1) * (w + margin)
+                y = sh - taskbar - (row + 1) * (h + margin)
+                
+                win.geometry(f"{w}x{h}+{x}+{y}")
+            except Exception as e:
+                logger.error(f"Resize alert error: {e}")
+
+    def _close_alert(self, win):
+        """关闭弹窗并刷新布局"""
+        if hasattr(self, 'active_alerts') and win in self.active_alerts:
+            self.active_alerts.remove(win)
+        win.destroy()
+        self.after(100, self._update_alert_positions)
+
+    def _show_alert_popup(self, code, name, msg):
+        """显示报警弹窗"""
+        try:
+            if not hasattr(self, 'active_alerts'):
+                self.active_alerts = []
+                
+            # 获取 category content
+            category_content = "暂无详细信息"
+            if code in self.df_all.index:
+                category_content = self.df_all.loc[code].get('category', '')
+            
+            win = tk.Toplevel(self)
+            win.title(f"🔔 触发报警 - {name} ({code})")
+            win.attributes("-topmost", True) # 强制置顶
+            win.attributes("-toolwindow", True) # 工具窗口样式
+            
+            # 记录并定位
+            self.active_alerts.append(win)
+            self._update_alert_positions()
+            
+            # 关闭回调
+            win.protocol("WM_DELETE_WINDOW", lambda: self._close_alert(win))
+            
+            # 自动关闭 (60秒)
+            self.after(60000, lambda: self._close_alert(win))
+            
+            # 闪烁效果
+            def flash(count=0):
+                if not win.winfo_exists(): return
+                if count > 6: return
+                bg = "#ffcdd2" if count % 2 == 0 else "#ffebee"
+                win.configure(bg=bg)
+                win.after(300, lambda: flash(count+1))
+            flash()
+            
+            # 内容框架
+            frame = tk.Frame(win, bg="#fff", padx=10, pady=10)
+            frame.pack(fill="both", expand=True)
+
+            # --- 底部按钮区 (优先 Pack 保证可见) ---
+            def send_to_tdx():
+                if hasattr(self, 'sender'):
+                     try:
+                        self.sender.send(code)
+                        btn_send.config(text="✅ 已发送", bg="#ccff90")
+                     except Exception as e:
+                        logger.error(f"Send stock error: {e}")
+                else:
+                     logger.warning("Sender module not available")
+
+            btn_frame = tk.Frame(frame, bg="#fff")
+            btn_frame.pack(side="bottom", fill="x", pady=5)
+            
+            btn_send = tk.Button(btn_frame, text="🚀 发送到通达信", command=send_to_tdx, bg="#e0f7fa", font=("Arial", 10, "bold"), cursor="hand2")
+            btn_send.pack(side="left", fill="x", expand=True, padx=5)
+            
+            tk.Button(btn_frame, text="关闭", command=lambda: self._close_alert(win), bg="#eee").pack(side="right", padx=5)
+
+            # --- 上部内容 ---
+            tk.Label(frame, text=f"⚠️{code} {msg}", font=("Microsoft YaHei", 12, "bold"), fg="#d32f2f", bg="#fff", wraplength=380).pack(pady=5)
+            # tk.Label(frame, text=f"[{code}] {name}", font=("Arial", 14, "bold"), bg="#fff").pack(pady=5)
+            
+            # 详情文本 (自适应剩余空间)
+            text_box = tk.Text(frame, height=4, font=("Arial", 10), bg="#f5f5f5", relief="flat")
+            text_box.pack(fill="both", expand=True, pady=5)
+            text_box.insert("1.0", category_content)
+            text_box.config(state="disabled")
+            
+        except Exception as e:
+            logger.error(f"Show alert popup error: {e}")
 
     def open_voice_monitor_manager(self):
         """语音预警管理窗口"""
@@ -6947,7 +7088,6 @@ class StockMonitorApp(tk.Tk):
             # win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
             # win.bind("<Escape>", lambda e: win.destroy())
             self.load_window_position(win, window_id, default_width=800, default_height=500)
-            
             # --- 顶部操作区域 ---
             top_frame = tk.Frame(win)
             top_frame.pack(fill="x", padx=10, pady=5)
@@ -6955,7 +7095,10 @@ class StockMonitorApp(tk.Tk):
             tk.Label(top_frame, text="🔔 实时语音监控列表", font=("Arial", 12, "bold")).pack(side="left")
             
             tk.Button(top_frame, text="测试报警音", command=lambda: self.live_strategy.test_alert(), bg="#e0f7fa").pack(side="right", padx=5)
-            
+            win.lift()
+            win.focus_force()
+            win.attributes("-topmost", True)
+            win.after(100, lambda: win.attributes("-topmost", False))
             # --- 列表区域 ---
             list_frame = tk.Frame(win)
             list_frame.pack(fill="both", expand=True, padx=5, pady=5)
@@ -7101,9 +7244,9 @@ class StockMonitorApp(tk.Tk):
                  left_frame = tk.Frame(main_frame) 
                  left_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
                  
-                 right_frame = tk.LabelFrame(main_frame, text="参考数据 (点击自动填入)", width=250)
+                 right_frame = tk.LabelFrame(main_frame, text="参考数据 (点击自动填入)", width=350)
                  right_frame.pack(side="right", fill="both", padx=(10, 0))
-                 right_frame.pack_propagate(False)
+                 # right_frame.pack_propagate(False)
 
                  # --- 左侧 ---
                  curr_price = 0.0
@@ -7202,7 +7345,7 @@ class StockMonitorApp(tk.Tk):
                  btn_frame = tk.Frame(edit_win)
                  btn_frame.pack(pady=10, side="bottom", fill="x", padx=10)
                  tk.Button(btn_frame, text="保存 (Enter)", command=confirm_edit, bg="#ccff90", height=2).pack(side="left", fill="x", expand=True, padx=5)
-                 tk.Button(btn_frame, text="取消 (Esc)", command=lambda e: on_close(), height=2).pack(side="left", fill="x", expand=True, padx=5)
+                 tk.Button(btn_frame, text="取消 (Esc)", command=on_close, height=2).pack(side="left", fill="x", expand=True, padx=5)
 
             tk.Button(btn_frame, text="✏️ 修改阈值", command=edit_selected).pack(side="left", padx=10)
             tk.Button(btn_frame, text="🗑️ 删除规则 (Del)", command=delete_selected, fg="red").pack(side="left", padx=10)
@@ -12931,7 +13074,7 @@ class QueryHistoryManager:
         self.root.bind("<Control-z>", self.undo_delete)  # 快捷键绑定
         self.root.bind("<Escape>", lambda event: self.open_editor())
         self.root.bind("<Alt-q>", lambda event: self.open_editor())
-        self.root.bind("<Alt-e>", lambda event: self.open_editor())
+
         # 为每列绑定排序
         for col in ("query", "star", "note","hit"):
             self.tree.heading(col, text=col.capitalize(), command=lambda _col=col: self.treeview_sort_column(self.tree, _col))
