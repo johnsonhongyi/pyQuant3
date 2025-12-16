@@ -30,6 +30,7 @@ from ctypes import windll
 import platform
 from screeninfo import get_monitors
 import pyperclip  # 用于复制到剪贴板
+from stock_handbook import StockHandbook
 from collections import deque
 
 from PyQt5 import QtWidgets, QtCore, QtGui
@@ -2915,6 +2916,9 @@ class StockMonitorApp(tk.Tk):
         else:
             self._use_feature_marking = False
         
+        # ✅ 初始化标注手札
+        self.handbook = StockHandbook()
+        
         # ✅ 性能优化器初始化
         if PERFORMANCE_OPTIMIZER_AVAILABLE:
             try:
@@ -4677,7 +4681,7 @@ class StockMonitorApp(tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","覆写TDX"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","覆写TDX", "手札总览"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -4704,6 +4708,8 @@ class StockMonitorApp(tk.Tk):
                 open_alert_center(self)
             elif action == "覆写TDX":
                 self.write_to_blk(append=False)
+            elif action == "手札总览":
+                self.open_handbook_overview()
 
 
         def on_select(event=None):
@@ -6176,14 +6182,522 @@ class StockMonitorApp(tk.Tk):
         # selected_item = self.tree.selection()
 
         if item_id:
-            stock_info = self.tree.item(item_id, 'values')
-            stock_code = stock_info[0]
-            if self.push_stock_info(stock_code,self.df_all.loc[stock_code]):
-                # 如果发送成功，更新状态标签
-                self.status_var2.set(f"发送成功: {stock_code}")
+            # 选中该行
+            self.tree.selection_set(item_id)
+            self.tree.focus(item_id)
+            
+            # 获取基本信息
+            values = self.tree.item(item_id, 'values')
+            stock_code = values[0]
+            stock_name = values[1] if len(values) > 1 else "未知"
+            
+            # 创建菜单
+            menu = tk.Menu(self, tearoff=0)
+            
+            menu.add_command(label=f"📝 复制提取信息 ({stock_code})", 
+                            command=lambda: self.copy_stock_info(stock_code))
+                            
+            menu.add_separator()
+            
+            menu.add_command(label="🏷️ 添加标注备注", 
+                            command=lambda: self.add_stock_remark(stock_code, stock_name))
+                            
+            menu.add_command(label="📖 查看标注手札", 
+                            command=lambda: self.view_stock_remarks(stock_code, stock_name))
+            
+            menu.add_separator()
+            
+            menu.add_command(label=f"🚀 发送到关联软件", 
+                            command=lambda: self.original_push_logic(stock_code))
+                            
+            # 弹出菜单
+            menu.post(event.x_root, event.y_root)
+
+    def get_stock_info_text(self, code):
+        """获取格式化的股票信息文本"""
+        if code not in self.df_all.index:
+            return None
+            
+        stock_data = self.df_all.loc[code]
+        
+        # 计算/获取字段
+        name = stock_data.get('name', 'N/A')
+        close = stock_data.get('trade', 'N/A')
+        
+        # 计算 Boll
+        upper = stock_data.get('upper', 'N/A')
+        lower = stock_data.get('lower', 'N/A')
+        
+        # 判断逻辑
+        try:
+            high = float(stock_data.get('high', 0))
+            low = float(stock_data.get('low', 0))
+            c_close = float(close) if close != 'N/A' else 0
+            c_upper = float(upper) if upper != 'N/A' else 0
+            c_lower = float(lower) if lower != 'N/A' else 0
+            
+            boll = "Yes" if high > c_upper else "No"
+            breakthrough = "Yes" if high > c_upper else "No"
+            
+            # 信号图标逻辑
+            signal_val = stock_data.get('signal', '')
+            signal_icon = "🔴" if signal_val else "⚪"
+            
+            # 强势判断 (L1>L2 & H1>H2 这种需要历史数据，这里简化)
+            strength = "Check Graph" 
+            
+        except Exception:
+            boll = "CalcError"
+            breakthrough = "Unknown"
+            signal_icon = "?"
+            strength = "Unknown"
+
+        # 构建文本
+        info_text = (
+            f"【{code}】{name}:{close}\n"
+            f"{'─' * 20}\n"
+            f"📊 换手率: {stock_data.get('ratio', 'N/A')}\n"
+            f"📊 成交量: {stock_data.get('volume', 'N/A')}\n"
+            f"🔴 连阳: {stock_data.get('red', 'N/A')}\n"
+            f"📈 突破布林: {boll}\n"
+            f"  signal: {signal_icon} (low<10 & C>5)\n"
+            f"  Upper:  {upper}\n"
+            f"  Lower:  {lower}\n"
+            f"🚀 突破: {breakthrough} (high > upper)\n"
+            f"💪 强势: {strength} (L1>L2 & H1>H2)"
+        )
+        return info_text
+
+    def original_push_logic(self, stock_code):
+        """原有的推送逻辑 + 自动添加手札"""
+        try:
+            # 1. 尝试获取价格和信息，用于自动添加备注
+            close_price = "N/A"
+            info_text = ""
+            if stock_code in self.df_all.index:
+                close_price = self.df_all.loc[stock_code].get('trade', 'N/A')
+                info_text = self.get_stock_info_text(stock_code)
+
+            # 2. 执行原有推送
+            if self.push_stock_info(stock_code, self.df_all.loc[stock_code] if stock_code in self.df_all.index else None):
+                 self.status_var2.set(f"发送成功: {stock_code}")
+                 
+                 # 3. 如果发送成功，自动添加手札
+                 if info_text:
+                     # 构造备注内容
+                     remark_content = f"添加Close:{close_price}\n{info_text}"
+                     self.handbook.add_remark(stock_code, remark_content)
+                     logger.info(f"已自动添加手札: {stock_code}")
+                     
+                     # 可选：也复制到剪贴板，方便粘贴
+                     pyperclip.copy(remark_content)
+
             else:
-                # 如果发送失败，更新状态标签
-                self.status_var2.set(f"发送失败: {stock_code}")
+                 self.status_var2.set(f"发送失败: {stock_code}")
+
+        except Exception as e:
+            logger.error(f"Push logic error: {e}")
+
+    def copy_stock_info(self, code):
+        """提取并复制格式化信息"""
+        try:
+            info_text = self.get_stock_info_text(code)
+            if not info_text:
+                messagebox.showwarning("数据缺失", f"未找到代码 {code} 的完整数据")
+                return
+
+            pyperclip.copy(info_text)
+            
+            # 获取名称用于提示
+            name = "未知"
+            if code in self.df_all.index:
+                name = self.df_all.loc[code].get('name', '未知')
+                
+            self.status_var2.set(f"已复制 {name} 信息")
+            
+        except Exception as e:
+            logger.error(f"Copy Info Error: {e}")
+            messagebox.showerror("错误", f"提取信息失败: {e}")
+
+    def add_stock_remark(self, code, name):
+        """添加备注 - 使用自定义窗口支持多行"""
+        try:
+            win = tk.Toplevel(self)
+            win.title(f"添加备注 - {name} ({code})")
+            
+            # --- 窗口定位: 右下角在鼠标附近 ---
+            w, h = 500, 300
+            mx, my = self.winfo_pointerx(), self.winfo_pointery()
+            pos_x, pos_y = mx - w - 20, my - h - 20
+            pos_x, pos_y = max(0, pos_x), max(0, pos_y)
+            win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
+            
+            tk.Label(win, text="请输入备注/心得 (支持多行/粘贴，Ctrl+Enter保存):").pack(anchor="w", padx=10, pady=5)
+            
+            text_area = tk.Text(win, wrap="word", height=10, font=("Arial", 10))
+            text_area.pack(fill="both", expand=True, padx=10, pady=5)
+            text_area.focus_set()
+            
+            # --- 1. 右键菜单 (支持粘贴) ---
+            def show_text_menu(event):
+                menu = tk.Menu(win, tearoff=0)
+                menu.add_command(label="剪切", command=lambda: text_area.event_generate("<<Cut>>"))
+                menu.add_command(label="复制", command=lambda: text_area.event_generate("<<Copy>>"))
+                menu.add_command(label="粘贴", command=lambda: text_area.event_generate("<<Paste>>"))
+                menu.add_separator()
+                menu.add_command(label="全选", command=lambda: text_area.tag_add("sel", "1.0", "end"))
+                menu.post(event.x_root, event.y_root)
+
+            text_area.bind("<Button-3>", show_text_menu)
+
+            # --- 保存逻辑 ---
+            def save(event=None):
+                content = text_area.get("1.0", "end-1c").strip()
+                if content:
+                    self.handbook.add_remark(code, content)
+                    messagebox.showinfo("成功", "备注已添加", parent=win)
+                    win.destroy()
+                else:
+                    win.destroy()  # 空内容直接关闭
+                    
+            def cancel(event=None):
+                save()
+                win.destroy()
+                return "break"
+            
+            # --- 2. 快捷键绑定 ---
+            # 回车自动保存 (Ctrl+Enter)
+            text_area.bind("<Control-Return>", save)
+            
+            win.bind("<Escape>", cancel)
+
+            btn_frame = tk.Frame(win)
+            btn_frame.pack(pady=10)
+            tk.Button(btn_frame, text="保存 (Ctrl+Enter)", width=15, command=save, bg="#e1f5fe").pack(side="left", padx=10)
+            tk.Button(btn_frame, text="取消 (ESC)", width=10, command=cancel).pack(side="left", padx=10)
+        except Exception as e:
+            logger.error(f"Add remark error: {e}")
+
+    def view_stock_remarks(self, code, name):
+        """查看备注手札窗口"""
+        try:
+            win = tk.Toplevel(self)
+            win.title(f"标注手札 - {name} ({code})")
+            
+            # --- 窗口定位 ---
+            w, h = 600, 500
+            mx, my = self.winfo_pointerx(), self.winfo_pointery()
+            pos_x, pos_y = mx - w - 20, my - h - 20
+            pos_x, pos_y = max(0, pos_x), max(0, pos_y)
+            win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
+            
+            # ESC 关闭
+            def close_view_win(event=None):
+                win.destroy()
+                return "break"
+            win.bind("<Escape>", close_view_win)
+            
+            # ... UI 构建 ...
+            # --- 顶部信息区域 ---
+            top_frame = tk.Frame(win)
+            top_frame.pack(fill="x", padx=10, pady=5)
+            
+            tk.Label(top_frame, text=f"【{code}】{name}", font=("Microsoft YaHei", 14, "bold"), fg="#333").pack(anchor="w")
+            
+            category_info = "暂无板块信息"
+            if code in self.df_all.index:
+                row = self.df_all.loc[code]
+                cats = row.get('category', '')
+                if cats:
+                    category_info = f"板块: {cats}"
+            
+            msg = tk.Message(top_frame, text=category_info, width=560, font=("Arial", 10), fg="#666") 
+            msg.pack(anchor="w", fill="x", pady=2)
+
+            tk.Label(top_frame, text="💡 双击查看 / 右键删除 / ESC关闭", fg="gray", font=("Arial", 9)).pack(anchor="e")
+
+            # --- 列表区域 ---
+            list_frame = tk.Frame(win)
+            list_frame.pack(fill="both", expand=True, padx=5, pady=5)
+            
+            columns = ("time", "content")
+            tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
+            tree.heading("time", text="时间")
+            tree.heading("content", text="内容概要")
+            tree.column("time", width=140, anchor="center", stretch=False)
+            tree.column("content", width=400, anchor="w")
+            
+            vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+            tree.configure(yscroll=vsb.set)
+            
+            tree.pack(side="left", fill="both", expand=True)
+            vsb.pack(side="right", fill="y")
+            
+            # 加载数据
+            remarks = self.handbook.get_remarks(code)
+            for r in remarks:
+                raw_content = r['content']
+                display_content = raw_content.replace('\n', ' ')
+                if len(display_content) > 50:
+                    display_content = display_content[:50] + "..."
+                tree.insert("", "end", values=(r['time'], display_content))
+            
+            # --- 详情弹窗 ---
+            def show_detail_window(time_str, content, click_x=None, click_y=None):
+                d_win = tk.Toplevel(win)
+                d_win.title(f"手札详情 - {time_str}")
+                
+                dw, dh = 600, 450
+                if click_x is None:
+                    click_x = d_win.winfo_pointerx()
+                    click_y = d_win.winfo_pointery()
+                
+                dx, dy = click_x - dw - 20, click_y - dh - 20
+                dx, dy = max(0, dx), max(0, dy)
+                d_win.geometry(f"{dw}x{dh}+{dx}+{dy}")
+                
+                # ESC 关闭详情
+                def close_detail_win(event=None):
+                    d_win.destroy()
+                    return "break" # 阻止事件传播
+                d_win.bind("<Escape>", close_detail_win)
+                
+                # 设为 Topmost 并获取焦点，防止误触底层
+                d_win.attributes("-topmost", True)
+                d_win.focus_force()
+                d_win.grab_set() # 模态窗口，强制焦点直到关闭
+                
+                tk.Label(d_win, text=f"记录时间: {time_str}", font=("Arial", 10, "bold"), fg="#004d40").pack(pady=5, anchor="w", padx=10)
+                
+                txt_frame = tk.Frame(d_win)
+                txt_frame.pack(fill="both", expand=True, padx=10, pady=5)
+                
+                txt_scroll = ttk.Scrollbar(txt_frame)
+                txt = tk.Text(txt_frame, wrap="word", font=("Arial", 11), yscrollcommand=txt_scroll.set, padx=5, pady=5)
+                txt_scroll.config(command=txt.yview)
+                
+                txt.pack(side="left", fill="both", expand=True)
+                txt_scroll.pack(side="right", fill="y")
+                
+                txt.insert("1.0", content)
+                txt.config(state="disabled") 
+                
+                def copy_content():
+                    try:
+                        win.clipboard_clear()
+                        win.clipboard_append(content)
+                        messagebox.showinfo("提示", "内容已复制", parent=d_win)
+                    except:
+                        pass
+                
+                btn_frame = tk.Frame(d_win)
+                btn_frame.pack(pady=5)
+                tk.Button(btn_frame, text="复制全部", command=copy_content).pack(side="left", padx=10)
+                tk.Button(btn_frame, text="关闭 (ESC)", command=d_win.destroy).pack(side="left", padx=10)
+
+            def on_double_click(event):
+                item = tree.selection()
+                if not item: return
+                values = tree.item(item[0], "values")
+                time_str = values[0]
+                
+                full_content = ""
+                for r in self.handbook.get_remarks(code):
+                    if r['time'] == time_str:
+                        full_content = r['content']
+                        break
+                
+                if full_content:
+                    show_detail_window(time_str, full_content, event.x_root, event.y_root)
+
+            tree.bind("<Double-1>", on_double_click)
+
+            # 右键删除
+            def on_rmk_right_click(event):
+                item = tree.identify_row(event.y)
+                if item:
+                    tree.selection_set(item)
+                    menu = tk.Menu(win, tearoff=0)
+                    menu.add_command(label="删除此条", command=lambda: delete_current(item))
+                    menu.post(event.x_root, event.y_root)
+                    
+            def delete_current(item):
+                values = tree.item(item, "values")
+                time_str = values[0]
+                confirm = messagebox.askyesno("确认", "确定删除这条备注吗?", parent=win)
+                if confirm:
+                    target_ts = None
+                    for r in self.handbook.get_remarks(code):
+                        if r['time'] == time_str:
+                            target_ts = r['timestamp']
+                            break
+                    if target_ts:
+                        self.handbook.delete_remark(code, target_ts)
+                        tree.delete(item)
+            
+            tree.bind("<Button-3>", on_rmk_right_click)
+        except Exception as e:
+            logger.error(f"View remarks error: {e}")
+            messagebox.showerror("Error", f"开启手札失败: {e}")
+
+    def open_handbook_overview(self):
+        """手札总览窗口"""
+        try:
+            win = tk.Toplevel(self)
+            win.title("手札总览")
+            
+            # --- 窗口定位 ---
+            w, h = 900, 600
+            # 居中显示
+            sw = self.winfo_screenwidth()
+            sh = self.winfo_screenheight()
+            pos_x = (sw - w) // 2
+            pos_y = (sh - h) // 2
+            win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
+            
+            # ESC 关闭
+            win.bind("<Escape>", lambda e: win.destroy())
+            
+            # --- 顶部滤镜/操作区域 ---
+            top_frame = tk.Frame(win)
+            top_frame.pack(fill="x", padx=10, pady=5)
+            
+            tk.Label(top_frame, text="🔍 快速浏览所有手札", font=("Arial", 12, "bold")).pack(side="left")
+            
+            # --- 列表区域 ---
+            list_frame = tk.Frame(win)
+            list_frame.pack(fill="both", expand=True, padx=5, pady=5)
+            
+            columns = ("time", "code", "name", "content")
+            tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
+            
+            # 排序状态
+            self._hb_sort_col = None
+            self._hb_sort_reverse = False
+
+            def treeview_sort_column(col):
+                """通用排序函数"""
+                l = [(tree.set(k, col), k) for k in tree.get_children('')]
+                
+                # 简单值比较
+                l.sort(reverse=self._hb_sort_reverse)
+                self._hb_sort_reverse = not self._hb_sort_reverse  # 反转
+
+                for index, (val, k) in enumerate(l):
+                    tree.move(k, '', index)
+                    
+                # 更新表头显示 (可选)
+                for c in columns:
+                     tree.heading(c, text=c.capitalize()) # 重置
+                
+                arrow = "↓" if self._hb_sort_reverse else "↑"
+                tree.heading(col, text=f"{col.capitalize()} {arrow}")
+
+            tree.heading("time", text="时间", command=lambda: treeview_sort_column("time"))
+            tree.heading("code", text="代码", command=lambda: treeview_sort_column("code"))
+            tree.heading("name", text="名称", command=lambda: treeview_sort_column("name"))
+            tree.heading("content", text="内容概要", command=lambda: treeview_sort_column("content"))
+            
+            tree.column("time", width=160, anchor="center")
+            tree.column("code", width=100, anchor="center")
+            tree.column("name", width=120, anchor="center")
+            tree.column("content", width=500, anchor="w")
+            
+            vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+            tree.configure(yscroll=vsb.set)
+            
+            tree.pack(side="left", fill="both", expand=True)
+            vsb.pack(side="right", fill="y")
+            
+            # --- 加载数据 ---
+            all_data = self.handbook.get_all_remarks() 
+            # all_data format: { "code1": [ {time, content, timestamp}, ... ], ... }
+            
+            flat_rows = []
+            for code, remarks in all_data.items():
+                name = "Unknown"
+                if code in self.df_all.index:
+                    name = self.df_all.loc[code].get('name', 'N/A')
+                
+                for r in remarks:
+                    raw = r['content'].replace('\n', ' ')
+                    if len(raw) > 60:
+                        raw = raw[:60] + "..."
+                    flat_rows.append({
+                        "time": r['time'],
+                        "code": code,
+                        "name": name,
+                        "content": raw,
+                        "timestamp": r.get('timestamp', 0),
+                        "full_content": r['content']
+                    })
+            
+            # 默认按时间倒序
+            flat_rows.sort(key=lambda x: x['time'], reverse=True)
+            
+            for row in flat_rows:
+                tree.insert("", "end", values=(row['time'], row['code'], row['name'], row['content']))
+
+            # --- 双击事件 (复用之前的 detail window) ---
+            def on_double_click(event):
+                item = tree.selection()
+                if not item: return
+                values = tree.item(item[0], "values")
+                # values: (time, code, name, content_preview)
+                
+                target_code = values[1]
+                target_time = values[0]
+                
+                # 再次查找完整内容 (效率稍低但简单)
+                full_content = ""
+                rmks = self.handbook.get_remarks(target_code)
+                for r in rmks:
+                    if r['time'] == target_time:
+                        full_content = r['content']
+                        break
+                
+                if full_content:
+                    # 调用之前定义的 show_detail_window ?
+                    # 由于作用域问题，最好是把 show_detail_window 提出来变成类方法，
+                    # 或者这里再复制一份简单的。为避免重复代码，这里简单实现一个。
+                    show_simple_detail(target_time, target_code, values[2], full_content, event.x_root, event.y_root)
+
+            def show_simple_detail(time_str, code, name, content, cx, cy):
+                d_win = tk.Toplevel(win)
+                d_win.title(f"手札详情 - {name}({code})")
+                d_win.attributes("-topmost", True)
+                
+                dw, dh = 600, 450
+                dx, dy = cx - dw - 20, cy - dh - 20
+                dx, dy = max(0, dx), max(0, dy)
+                d_win.geometry(f"{dw}x{dh}+{dx}+{dy}")
+                
+                d_win.bind("<Escape>", lambda e: d_win.destroy())
+                d_win.focus_force()
+                d_win.grab_set()
+
+                tk.Label(d_win, text=f"股票: {name} ({code})   时间: {time_str}", font=("Arial", 10, "bold"), fg="#004d40").pack(pady=5, anchor="w", padx=10)
+                
+                txt_frame = tk.Frame(d_win)
+                txt_frame.pack(fill="both", expand=True, padx=10, pady=5)
+                
+                txt_scroll = ttk.Scrollbar(txt_frame)
+                txt = tk.Text(txt_frame, wrap="word", font=("Arial", 11), yscrollcommand=txt_scroll.set, padx=5, pady=5)
+                txt_scroll.config(command=txt.yview)
+                
+                txt.pack(side="left", fill="both", expand=True)
+                txt_scroll.pack(side="right", fill="y")
+                
+                txt.insert("1.0", content)
+                txt.config(state="disabled") 
+                
+                tk.Button(d_win, text="关闭 (ESC)", command=d_win.destroy).pack(pady=5)
+
+            tree.bind("<Double-1>", on_double_click)
+            
+        except Exception as e:
+            logger.error(f"Handbook Overview Error: {e}")
+            messagebox.showerror("错误", f"打开总览失败: {e}")
 
     def copy_code(self,event):
         region = self.tree.identify_region(event.x, event.y)
