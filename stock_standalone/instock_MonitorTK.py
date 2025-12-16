@@ -31,6 +31,7 @@ import platform
 from screeninfo import get_monitors
 import pyperclip  # 用于复制到剪贴板
 from stock_handbook import StockHandbook
+from stock_live_strategy import StockLiveStrategy
 from collections import deque
 
 from PyQt5 import QtWidgets, QtCore, QtGui
@@ -2918,6 +2919,9 @@ class StockMonitorApp(tk.Tk):
         
         # ✅ 初始化标注手札
         self.handbook = StockHandbook()
+        # ✅ 初始化实时监控策略 (延迟初始化，防止阻塞主窗口显示)
+        self.live_strategy = None
+        self.after(3000, self._init_live_strategy)
         
         # ✅ 性能优化器初始化
         if PERFORMANCE_OPTIMIZER_AVAILABLE:
@@ -4681,7 +4685,7 @@ class StockMonitorApp(tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","覆写TDX", "手札总览"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","覆写TDX", "手札总览", "语音预警"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -4710,6 +4714,8 @@ class StockMonitorApp(tk.Tk):
                 self.write_to_blk(append=False)
             elif action == "手札总览":
                 self.open_handbook_overview()
+            elif action == "语音预警":
+                self.open_voice_monitor_manager()
 
 
         def on_select(event=None):
@@ -5147,6 +5153,7 @@ class StockMonitorApp(tk.Tk):
             return  # 已销毁，直接返回
         try:
             if self.refresh_enabled:  # ✅ 只在启用时刷新
+                has_update = False
                 while not self.queue.empty():
                     df = self.queue.get_nowait()
                     # logger.info(f'df:{df[:1]}')
@@ -5157,6 +5164,7 @@ class StockMonitorApp(tk.Tk):
                         time_s = time.time()
                         df = detect_signals(df)
                         self.df_all = df.copy()
+                        has_update = True
                         logger.info(f'detect_signals duration time:{time.time()-time_s:.2f}')
                     # logger.info(f"self.queue [Debug] df_all_hash={df_hash(self.df_all)} len={len(self.df_all)} time={datetime.now():%H:%M:%S}")
                         
@@ -5174,13 +5182,12 @@ class StockMonitorApp(tk.Tk):
                         else:
                             self.refresh_tree(self.df_all)
                             
-                    # 初始化一次
-                    # self._concept_dict_global = {}
-                    # for idx, row in self.df_all.iterrows():
-                    #     categories = [c.strip() for c in str(row['category']).split(';') if c.strip()]
-                    #     for c in categories:
-                    #         self._concept_dict_global.setdefault(c, []).append(row['percent'])
-                    self.status_var2.set(f'queue update: {self.format_next_time()}')
+                # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
+                if has_update and hasattr(self, 'live_strategy'):
+                        self.live_strategy.process_data(self.df_all)
+                # -------------------------
+
+                self.status_var2.set(f'queue update: {self.format_next_time()}')
         except Exception as e:
             logger.error(f"Error updating tree: {e}", exc_info=True)
         finally:
@@ -5250,7 +5257,7 @@ class StockMonitorApp(tk.Tk):
         if not selected_item:
             self.selected_stock_info = None
             return
-        
+        item_id = selected_item[0]
         item = self.tree.item(selected_item[0])
         values = item.get("values")
         # 假设你的 tree 列是 (code, name, price, …)
@@ -6201,6 +6208,9 @@ class StockMonitorApp(tk.Tk):
             
             menu.add_command(label="🏷️ 添加标注备注", 
                             command=lambda: self.add_stock_remark(stock_code, stock_name))
+            
+            menu.add_command(label="🔔 加入语音预警",
+                            command=lambda: self.add_voice_monitor_dialog(stock_code, stock_name))
                             
             menu.add_command(label="📖 查看标注手札", 
                             command=lambda: self.view_stock_remarks(stock_code, stock_name))
@@ -6699,6 +6709,537 @@ class StockMonitorApp(tk.Tk):
             logger.error(f"Handbook Overview Error: {e}")
             messagebox.showerror("错误", f"打开总览失败: {e}")
 
+    def _create_monitor_ref_panel(self, parent, row_data, curr_price, set_callback):
+        """创建监控参考数据面板"""
+        if row_data is None:
+            tk.Label(parent, text="无详细数据", fg="#999").pack(pady=20)
+            return
+
+        def create_clickable_info(p, label, value, value_type="price"):
+            f = tk.Frame(p)
+            f.pack(fill="x", pady=2)
+            
+            lbl_name = tk.Label(f, text=f"{label}:", width=10, anchor="w", fg="#666")
+            lbl_name.pack(side="left")
+            
+            val_str = f"{value}"
+            if isinstance(value, float):
+                val_str = f"{value:.2f}"
+            
+            lbl_val = tk.Label(f, text=val_str, fg="blue", cursor="hand2", font=("Arial", 10, "underline"))
+            lbl_val.pack(side="left")
+            
+            def on_click(e):
+                set_callback(val_str, value_type, value)
+                # Flash effect
+                lbl_val.config(fg="red")
+                parent.after(200, lambda: lbl_val.config(fg="blue"))
+                
+            lbl_val.bind("<Button-1>", on_click)
+            
+        # 指标列表
+        metrics = [
+            ("MA5", row_data.get('ma5d', 0), "price"),
+            ("MA10", row_data.get('ma10d', 0), "price"),
+            ("MA20", row_data.get('ma20d', 0), "price"),
+            ("MA30", row_data.get('ma30d', 0), "price"),
+            ("MA60", row_data.get('ma60d', 0), "price"),
+            ("压力位", row_data.get('support_next', 0), "price"),
+            ("支撑位", row_data.get('support_today', 0), "price"),
+            ("上轨", row_data.get('upper', 0), "price"),
+            ("下轨", row_data.get('lower', 0), "price"),
+            ("昨收", row_data.get('lastp1d', 0), "price"),
+            ("开盘", row_data.get('open', 0), "price"),
+            ("最高", row_data.get('high', 0), "price"),
+            ("最低", row_data.get('low', 0), "price"),
+            ("涨停价", row_data.get('high_limit', 0), "price"),
+            ("跌停价", row_data.get('low_limit', 0), "price"),
+        ]
+        
+        # 涨幅类
+        if 'per1d' in row_data:
+            metrics.append(("昨日涨幅%", row_data['per1d'], "percent"))
+        if 'per2d' in row_data:
+            metrics.append(("前日涨幅%", row_data['per2d'], "percent"))
+            
+        for label, val, vtype in metrics:
+            try:
+                if val is None: continue
+                v = float(val)
+                if abs(v) > 0.001: # 过滤0值
+                    create_clickable_info(parent, label, v, vtype)
+            except:
+                pass
+
+    def add_voice_monitor_dialog(self, code, name):
+        """
+        弹出添加预警监控的对话框 (优化版)
+        """
+        try:
+            win = tk.Toplevel(self)
+            win.title(f"添加语音预警 - {name} ({code})")
+            window_id = "添加语音预警"
+            # --- 窗口定位 & 尺寸调整 ---
+            # w, h = 750, 520# 增加高度以容纳更多数据
+            # mx, my = self.winfo_pointerx(), self.winfo_pointery()
+            # pos_x, pos_y = mx - w - 20, my - h - 20
+            # pos_x, pos_y = max(0, pos_x), max(0, pos_y)
+            # win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
+            # win.bind("<Escape>", lambda e: win.destroy())
+            self.load_window_position(win, window_id, default_width=900, default_height=650)
+            # --- 布局 ---
+            main_frame = tk.Frame(win)
+            main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+            
+            left_frame = tk.Frame(main_frame) 
+            left_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
+            
+            right_frame = tk.LabelFrame(main_frame, text="参考数据 (点击自动填入)", width=250)
+            right_frame.pack(side="right", fill="both", padx=(10, 0))
+            right_frame.pack_propagate(False)
+
+            # --- 左侧：输入区域 ---
+            
+            # 获取当前数据
+            curr_price = 0.0
+            curr_change = 0.0
+            row_data = None
+            if code in self.df_all.index:
+                row_data = self.df_all.loc[code]
+                try:
+                    curr_price = float(row_data.get('trade', 0))
+                    curr_change = float(row_data.get('changepercent', 0))
+                except:
+                    pass
+            
+            tk.Label(left_frame, text=f"当前价格: {curr_price}", font=("Arial", 12, "bold"), fg="#1a237e").pack(pady=10, anchor="w")
+            tk.Label(left_frame, text=f"当前涨幅: {curr_change:.2f}%", font=("Arial", 10), fg="#b71c1c" if curr_change>=0 else "#00695c").pack(pady=5, anchor="w")
+            
+            tk.Label(left_frame, text="选择监控类型:").pack(anchor="w", pady=(15, 5))
+            
+            type_var = tk.StringVar(value="price_up")
+            e_val_var = tk.StringVar(value=str(curr_price)) # 绑定Entry变量
+            
+            def on_type_change():
+                """切换类型时更新默认值"""
+                t = type_var.get()
+                if t == "change_up":
+                     # 切换到涨幅时，填入当前涨幅方便修改，或者清空
+                     e_val_var.set(f"{curr_change:.2f}")
+                else:
+                     # 切换回价格
+                     e_val_var.set(str(curr_price))
+
+            types = [("价格突破 (Price >=)", "price_up"), 
+                     ("价格跌破 (Price <=)", "price_down"),
+                     ("涨幅超过 (Change% >=)", "change_up")]
+            
+            for text, val in types:
+                tk.Radiobutton(left_frame, text=text, variable=type_var, value=val, command=on_type_change).pack(anchor="w", padx=10, pady=2)
+                
+            tk.Label(left_frame, text="触发阈值:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(15, 5))
+            
+            # 阈值输入区域 (包含 +/- 按钮)
+            val_frame = tk.Frame(left_frame)
+            val_frame.pack(fill="x", padx=10, pady=5)
+            
+            e_val = tk.Entry(val_frame, textvariable=e_val_var, font=("Arial", 12))
+            e_val.pack(side="left", fill="x", expand=True)
+            e_val.focus() # 聚焦
+            
+            def adjust_val(pct):
+                try:
+                    current_val = float(e_val_var.get())
+                    # 如果是价格，按比例调整
+                    # 如果是涨幅(小于20通常视为涨幅)，直接加减数值?
+                    # 按照用户需求 "1%增加或减少"，如果是价格通常指价格 * 1.01
+                    # 如果是涨幅类型，通常指涨幅 + 1
+                    
+                    t = type_var.get()
+                    if t == "change_up":
+                         # 涨幅直接加减 1 (单位%)
+                         new_val = current_val + pct
+                    else:
+                         # 价格按百分比调整
+                         new_val = current_val * (1 + pct/100)
+                    
+                    e_val_var.set(f"{new_val:.2f}")
+                except ValueError:
+                    pass
+
+            # 按钮
+            tk.Button(val_frame, text="-1%", width=4, command=lambda: adjust_val(-1)).pack(side="left", padx=2)
+            tk.Button(val_frame, text="+1%", width=4, command=lambda: adjust_val(1)).pack(side="left", padx=2)
+
+            # --- 右侧：数据参考面板 ---
+            def set_val_callback(val_str, value_type, value):
+                e_val_var.set(val_str)
+                if value_type == "percent":
+                    type_var.set("change_up")
+                else:
+                    if value > curr_price:
+                        type_var.set("price_up")
+                    else:
+                        type_var.set("price_down")
+
+            self._create_monitor_ref_panel(right_frame, row_data, curr_price, set_val_callback)
+
+            # --- 底部按钮 ---
+            btn_frame = tk.Frame(win)
+            btn_frame.pack(side="bottom", fill="x", pady=10, padx=10)
+            
+            def confirm(event=None):
+                val_str = e_val_var.get()
+                try:
+                    val = float(val_str)
+                    rtype = type_var.get()
+                    
+                    if hasattr(self, 'live_strategy') and self.live_strategy:
+                        self.live_strategy.add_monitor(code, name, rtype, val)
+                        # 自动关闭，不再弹窗确认，提升效率 (或者用 toast)
+                        # messagebox.showinfo("成功", f"已添加监控: {name} {rtype} {val}", parent=win)
+                        logger.info(f"Monitor added: {name} {rtype} {val}")
+                        win.on_close()
+                    else:
+                        messagebox.showerror("错误", "实时监控模块未初始化", parent=win)
+                except ValueError:
+                    messagebox.showerror("错误", "请输入有效的数字", parent=win)
+            # ESC / 关闭
+            def on_close(event=None):
+                # update_window_position(window_id)
+                self.save_window_position(win, window_id)
+                win.destroy()
+
+            win.bind("<Escape>", on_close)
+            win.protocol("WM_DELETE_WINDOW", on_close)
+            win.bind("<Return>", confirm)
+            tk.Button(btn_frame, text="确认添加 (Enter)", command=confirm, bg="#ccff90", height=2).pack(side="left", fill="x", expand=True, padx=5)
+            tk.Button(btn_frame, text="取消 (Esc)", command=lambda e: on_close(), height=2).pack(side="left", fill="x", expand=True, padx=5)
+            
+        except Exception as e:
+            logger.error(f"Add monitor dialog error: {e}")
+            messagebox.showerror("Error", f"开启监控对话框失败: {e}")
+
+    def _init_live_strategy(self):
+        """延迟初始化策略模块"""
+        try:
+            self.live_strategy = StockLiveStrategy()
+            logger.info("✅ 实时监控策略模块已启动")
+        except Exception as e:
+            logger.error(f"Failed to init live strategy: {e}")
+
+    def open_voice_monitor_manager(self):
+        """语音预警管理窗口"""
+        if not hasattr(self, 'live_strategy') or self.live_strategy is None:
+            messagebox.showwarning("提示", "实时监控模块尚未启动，请稍后再试")
+            return
+
+        try:
+            win = tk.Toplevel(self)
+            win.title("语音预警管理")
+            window_id = "语音预警管理"
+            # --- 窗口定位 ---
+            # w, h = 800, 500
+            # sw = self.winfo_screenwidth()
+            # sh = self.winfo_screenheight()
+            # pos_x = (sw - w) // 2
+            # pos_y = (sh - h) // 2
+            # win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
+            # win.bind("<Escape>", lambda e: win.destroy())
+            self.load_window_position(win, window_id, default_width=800, default_height=500)
+            
+            # --- 顶部操作区域 ---
+            top_frame = tk.Frame(win)
+            top_frame.pack(fill="x", padx=10, pady=5)
+            
+            tk.Label(top_frame, text="🔔 实时语音监控列表", font=("Arial", 12, "bold")).pack(side="left")
+            
+            tk.Button(top_frame, text="测试报警音", command=lambda: self.live_strategy.test_alert(), bg="#e0f7fa").pack(side="right", padx=5)
+            
+            # --- 列表区域 ---
+            list_frame = tk.Frame(win)
+            list_frame.pack(fill="both", expand=True, padx=5, pady=5)
+            
+            # 显示 ID 是为了方便管理 (code + rule_index)
+            columns = ("code", "name", "rule_type", "value", "id")
+            tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
+            
+            tree.heading("code", text="代码")
+            tree.heading("name", text="名称")
+            tree.heading("rule_type", text="规则类型")
+            tree.heading("value", text="阈值")
+            tree.heading("id", text="ID (Code_Idx)")
+            
+            tree.column("code", width=80, anchor="center")
+            tree.column("name", width=100, anchor="center")
+            tree.column("rule_type", width=150, anchor="center")
+            tree.column("value", width=100, anchor="center")
+            tree.column("id", width=0, stretch=False) # 隐藏 ID 列
+            
+            vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+            tree.configure(yscroll=vsb.set)
+            
+            tree.pack(side="left", fill="both", expand=True)
+            vsb.pack(side="right", fill="y")
+            
+            # 双击编辑
+            tree.bind("<Double-1>", lambda e: edit_selected())
+
+            def load_data():
+                """加载数据到列表"""
+                for item in tree.get_children():
+                    tree.delete(item)
+                    
+                monitors = self.live_strategy.get_monitors()
+                for code, data in monitors.items():
+                    name = data['name']
+                    rules = data['rules']
+                    for idx, rule in enumerate(rules):
+                        rtype_map = {
+                            "price_up": "价格突破 >=",
+                            "price_down": "价格跌破 <=",
+                            "change_up": "涨幅超过 >="
+                        }
+                        display_type = rtype_map.get(rule['type'], rule['type'])
+                        # unique id
+                        uid = f"{code}_{idx}"
+                        tree.insert("", "end", values=(code, name, display_type, rule['value'], uid))
+
+            load_data()
+            
+            # --- 底部按钮 ---
+            btn_frame = tk.Frame(win)
+            btn_frame.pack(pady=10)
+            
+            def add_new():
+                # 弹出一个简单的输入框，或者复用 add_voice_monitor_dialog
+                # 但 add_voice_monitor_dialog 需要 code, name 参数
+                # 这里可以做一个更通用的添加对话框
+                
+                add_win = tk.Toplevel(win)
+                add_win.title("添加新监控")
+                wx, wy = win.winfo_x() + 100, win.winfo_y() + 100
+                add_win.geometry(f"300x250+{wx}+{wy}")
+                
+                tk.Label(add_win, text="股票代码:").pack(anchor="w", padx=20, pady=5)
+                e_code = tk.Entry(add_win)
+                e_code.pack(fill="x", padx=20)
+                
+                # 监控类型等复用之前的逻辑
+                # ... 为简化，这里建议用户先在主界面右键添加，这里主要做管理
+                # 或者调用之前的 dialog，但要先手动输入 code 获取 name
+                pass
+                
+                # 简化实现：提示用户去主界面添加
+                messagebox.showinfo("提示", "请在主界面股票列表右键点击股票添加监控", parent=add_win)
+                add_win.destroy()
+
+            def delete_selected(event=None):
+                selected = tree.selection()
+                if not selected:
+                    return
+                
+                # if not messagebox.askyesno("确认", "确定删除选中的规则吗?", parent=win):
+                #     return
+
+                # 这里直接删，为了顺手，可以不弹二次确认，或者仅在 list 选中时弹
+                if not messagebox.askyesno("删除确认", "确定删除选中项?", parent=win):
+                    return
+
+                for item in selected:
+                     values = tree.item(item, "values")
+                     code = values[0]
+                     uid = values[4]
+                     # 由于 uid 是 'code_idx'，但如果删除了前面的，后面的 idx 会变
+                     # 最稳妥的是：倒序删除，或者重新加载。
+                     # 我们的界面是单选还是多选？Treeview 默认多选。
+                     # 简单处理：只处理第一个
+                     try:
+                        idx = int(uid.split('_')[1])
+                        self.live_strategy.remove_rule(code, idx)
+                     except:
+                        pass
+                     break # 仅删一个，防止索引错乱
+                
+                load_data()
+
+            # 按 Delete 键删除
+            tree.bind("<Delete>", delete_selected)
+
+            def edit_selected(event=None):
+                 selected = tree.selection()
+                 if not selected: return
+                 item = selected[0]
+                 values = tree.item(item, "values")
+                 code = values[0]
+                 name = values[1]
+                 old_val = values[3]
+                 uid = values[4]
+                 idx = int(uid.split('_')[1])
+                 
+                 current_type = "price_up"
+                 monitors = self.live_strategy.get_monitors()
+                 if code in monitors:
+                     rules = monitors[code]['rules']
+                     if idx < len(rules):
+                         current_type = rules[idx]['type']
+
+                 # 弹出编辑框 (UI 与 Add 保持一致)
+                 edit_win = tk.Toplevel(win)
+                 edit_win.title(f"编辑规则 - {name}")
+                 edit_win_id = "编辑规则"
+                 # w, h = 750, 480
+                 # mx, my = self.winfo_pointerx(), self.winfo_pointery()
+                 # pos_x, pos_y = max(0, mx - w - 20), max(0, my - h - 20)
+                 # edit_win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
+                 # edit_win.bind("<Escape>", lambda e: edit_win.destroy())
+                 self.load_window_position(edit_win, edit_win_id, default_width=900, default_height=600)
+
+                 main_frame = tk.Frame(edit_win)
+                 main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+                 
+                 left_frame = tk.Frame(main_frame) 
+                 left_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
+                 
+                 right_frame = tk.LabelFrame(main_frame, text="参考数据 (点击自动填入)", width=250)
+                 right_frame.pack(side="right", fill="both", padx=(10, 0))
+                 right_frame.pack_propagate(False)
+
+                 # --- 左侧 ---
+                 curr_price = 0.0
+                 curr_change = 0.0
+                 row_data = None
+                 if code in self.df_all.index:
+                    row_data = self.df_all.loc[code]
+                    try:
+                        curr_price = float(row_data.get('trade', 0))
+                        curr_change = float(row_data.get('changepercent', 0))
+                    except: pass
+                 
+                 tk.Label(left_frame, text=f"当前价格: {curr_price}", font=("Arial", 12, "bold"), fg="#1a237e").pack(pady=10, anchor="w")
+                 # tk.Label(left_frame, text=f"当前涨幅: {curr_change:.2f}%", font=("Arial", 10)).pack(pady=5, anchor="w")
+
+                 tk.Label(left_frame, text="规则类型:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(15, 5))
+                 
+                 new_type_var = tk.StringVar(value=current_type)
+                 val_var = tk.StringVar(value=str(old_val))
+
+                 def on_type_change():
+                    # 切换默认值
+                    t = new_type_var.get()
+                    if t == "change_up":
+                         val_var.set(f"{curr_change:.2f}")
+                    else:
+                         val_var.set(str(curr_price))
+
+                 types = [("价格突破 (Price >=)", "price_up"), 
+                          ("价格跌破 (Price <=)", "price_down"),
+                          ("涨幅超过 (Change% >=)", "change_up")]
+                 
+                 for text, val in types:
+                     tk.Radiobutton(left_frame, text=text, variable=new_type_var, value=val, command=on_type_change).pack(anchor="w", padx=10, pady=2)
+
+                 tk.Label(left_frame, text="触发阈值:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(15, 5))
+                 
+                 # 阈值输入区域 (包含 +/- 按钮)
+                 val_frame = tk.Frame(left_frame)
+                 val_frame.pack(fill="x", padx=10, pady=5)
+
+                 e_new = tk.Entry(val_frame, textvariable=val_var, font=("Arial", 12))
+                 e_new.pack(side="left", fill="x", expand=True)
+                 e_new.focus()
+                 e_new.select_range(0, tk.END)
+                 
+                 def adjust_val_edit(pct):
+                    try:
+                        current_val = float(val_var.get())
+                        t = new_type_var.get()
+                        if t == "change_up":
+                             new_val = current_val + pct
+                        else:
+                             new_val = current_val * (1 + pct/100)
+                        val_var.set(f"{new_val:.2f}")
+                    except ValueError:
+                        pass
+
+                 tk.Button(val_frame, text="-1%", width=4, command=lambda: adjust_val_edit(-1)).pack(side="left", padx=2)
+                 tk.Button(val_frame, text="+1%", width=4, command=lambda: adjust_val_edit(1)).pack(side="left", padx=2)
+                 
+                 # --- 右侧参考面板 ---
+                 def set_val_callback(val_str, value_type, value):
+                    val_var.set(val_str)
+                    if value_type == "percent":
+                        new_type_var.set("change_up")
+                    else:
+                        if value > curr_price:
+                            new_type_var.set("price_up")
+                        else:
+                            new_type_var.set("price_down")
+
+                 self._create_monitor_ref_panel(right_frame, row_data, curr_price, set_val_callback)
+                 
+                 def confirm_edit(event=None):
+                     try:
+                         val = float(e_new.get())
+                         new_type = new_type_var.get()
+                         
+                         self.live_strategy.update_rule(code, idx, new_type, val)
+                         
+                         load_data()
+                         edit_win.on_close()
+                     except ValueError:
+                         messagebox.showerror("错误", "无效数字", parent=edit_win)
+                 # ESC / 关闭
+                 def on_close(event=None):
+                     # update_window_position(window_id)
+                     self.save_window_position(edit_win, edit_win_id)
+                     edit_win.destroy()
+
+                 edit_win.bind("<Escape>", on_close)
+                 edit_win.protocol("WM_DELETE_WINDOW", on_close)
+                 edit_win.bind("<Return>", confirm_edit)
+                 
+                 btn_frame = tk.Frame(edit_win)
+                 btn_frame.pack(pady=10, side="bottom", fill="x", padx=10)
+                 tk.Button(btn_frame, text="保存 (Enter)", command=confirm_edit, bg="#ccff90", height=2).pack(side="left", fill="x", expand=True, padx=5)
+                 tk.Button(btn_frame, text="取消 (Esc)", command=lambda e: on_close(), height=2).pack(side="left", fill="x", expand=True, padx=5)
+
+            tk.Button(btn_frame, text="✏️ 修改阈值", command=edit_selected).pack(side="left", padx=10)
+            tk.Button(btn_frame, text="🗑️ 删除规则 (Del)", command=delete_selected, fg="red").pack(side="left", padx=10)
+            tk.Button(btn_frame, text="刷新列表", command=load_data).pack(side="left", padx=10)
+            
+            # ESC / 关闭
+            def on_close(event=None):
+                # update_window_position(window_id)
+                self.save_window_position(win, window_id)
+                win.destroy()
+
+            win.bind("<Escape>", on_close)
+            win.protocol("WM_DELETE_WINDOW", on_close)
+
+            # --- 测试真实报警 ---
+            def test_selected_monitor():
+                selected = tree.selection()
+                if not selected:
+                    messagebox.showinfo("提示", "请先选择一条规则")
+                    return
+                
+                item = selected[0]
+                values = tree.item(item, "values")
+                code = values[0]
+                name = values[1] 
+                rule_desc = values[2]
+                val = values[3]
+                
+                msg = f"{rule_desc} {val} (测试)"
+                self.live_strategy.test_alert_specific(code, name, msg)
+
+            tk.Button(top_frame, text="🔊 测试选中报警", command=test_selected_monitor, bg="#fff9c4").pack(side="right", padx=5)
+            
+        except Exception as e:
+            logger.error(f"Voice Monitor Manager Error: {e}")
+            messagebox.showerror("错误", f"打开管理窗口失败: {e}")
+            
     def copy_code(self,event):
         region = self.tree.identify_region(event.x, event.y)
         if region == "cell":
