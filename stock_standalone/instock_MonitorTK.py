@@ -1022,24 +1022,6 @@ def enable_native_horizontal_scroll(tree: ttk.Treeview, speed=5):
 # -----------------------------
 MONITORS = []  # 全局缓存
 
-# # 双屏幕,上屏新建
-# def init_monitors():
-#     """扫描所有显示器并缓存信息（使用可用区域，避开任务栏）"""
-#     global MONITORS
-#     monitors = get_all_monitors()  # 原来的函数
-#     if not monitors:
-#         left, top, right, bottom = get_monitor_workarea()
-#         MONITORS = [(left, top, right, bottom)]
-#     else:
-#         # 对每个 monitor 也可计算可用区域
-#         MONITORS = []
-#         for mon in monitors:
-#             # mon = (x, y, width, height)
-#             mx, my, mw, mh = mon
-#             MONITORS.append((mx, my, mx+mw, my+mh))
-#     logger.info(f"✅ Detected {len(MONITORS)} monitor(s).")
-
-
 def get_all_monitors():
     """返回所有显示器的边界列表 [(left, top, right, bottom), ...]"""
     monitors = []
@@ -8845,11 +8827,12 @@ class StockMonitorApp(tk.Tk):
         tree.delete(*tree.get_children())
         for idx, (code_row, row) in enumerate(df_display.iterrows()):
             iid = str(code_row)  # 使用原 DataFrame index 或股票 code 保证唯一
+            tags_for_row = get_row_tags(row)  # 或 get_row_tags_kline(row, idx)
             percent = row.get("percent")
             if pd.isna(percent) or percent == 0:
                 percent = row.get("per1d")
             tree.insert("", "end", iid=iid,
-                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}"))
+                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}"),tags=tuple(tags_for_row))
 
         # 保留选中状态
         if hasattr(tree, "_selected_index") and tree.get_children():
@@ -8859,28 +8842,11 @@ class StockMonitorApp(tk.Tk):
                 tree.focus(sel_iid)
                 tree.see(sel_iid)
 
-        # logger.info(f"[DEBUG] _sort_state: {tree._sort_state}")
 
         # 更新heading command
         tree.heading(col, command=lambda c=col: self._sort_treeview_column_newTop10(tree, c,not reverse))
         tree.yview_moveto(0)
 
-    # def _sort_treeview_column_newTop10(self, tree, col, reverse=None):
-    #     # 每列保存排序状态
-    #     if not hasattr(tree, "_sort_state"):
-    #         tree._sort_state = {}
-
-    #     if reverse is None:
-    #         # 如果没有传reverse，取上次状态，默认升序
-    #         reverse = tree._sort_state.get(col, False)
-    #     l = [(tree.set(k, col), k) for k in tree.get_children("")]
-    #     try:
-    #         l.sort(key=lambda t: float(t[0].replace(",", "")), reverse=reverse)
-    #     except:
-    #         l.sort(reverse=reverse)
-    #     for index, (val, k) in enumerate(l):
-    #         tree.move(k, "", index)
-    #     tree.heading(col, command=lambda: self._sort_treeview_column_newTop10(tree, col, not reverse))
 
 
     def _on_tree_double_click_newTop10(self, tree):
@@ -15050,7 +15016,8 @@ class KLineMonitor(tk.Toplevel):
     def get_row_tags_kline(self, r, idx=None):
         """
         根据一行数据 r 和索引 idx 生成 Treeview tag 列表
-        """
+        """
+
         
         tags = []
 
