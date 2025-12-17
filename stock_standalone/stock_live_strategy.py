@@ -27,209 +27,6 @@ try:
 except ImportError:
     pythoncom = None
 
-# def risk_decision(stock, current_price, current_nclose, last_close, last_percent, last_nclose):
-#     """返回动态仓位比例和操作建议"""
-#     # 初始化
-#     position_ratio = 1.0  # 满仓
-#     action = "持仓"
-    
-#     # 安全判断
-#     valid_yesterday = (last_close > 0) and (last_percent is not None and -100 < last_percent < 100) and (last_nclose > 0)
-#     valid_today = (current_price > 0) and (current_nclose > 0)
-    
-#     # ---------- 今日均价偏离 ----------
-#     if valid_today:
-#         deviation_today = (current_nclose - current_price) / current_nclose
-#         max_normal_pullback = (last_percent / 5 / 100 if valid_yesterday else 0.01)
-#         if deviation_today > max_normal_pullback + 0.0005:
-#             # 超过正常回调 → 风险增加
-#             position_ratio *= 0.7
-#             action = "减仓"
-    
-#     # ---------- 昨日收盘偏离 ----------
-#     if valid_yesterday:
-#         deviation_last = (last_close - current_price) / last_close
-#         if deviation_last > max_normal_pullback + 0.0005:
-#             position_ratio *= 0.5
-#             action = "卖出"
-    
-#     # ---------- 趋势加仓判断 ----------
-#     if valid_today and current_price > current_nclose:
-#         # 高于均价，趋势向上，可加仓
-#         position_ratio = min(1.0, position_ratio + 0.2)
-#         if action == "持仓":
-#             action = "ADD"
-    
-#     # 保证比例范围
-#     position_ratio = max(0.0, min(1.0, position_ratio))
-    
-#     return action, position_ratio
-
-class RiskEngine:
-    def __init__(self, alert_cooldown=300):
-        """
-        alert_cooldown: 报警冷却时间，单位秒
-        _monitored_stocks: dict, 每只股票结构如下
-        {
-            'name': str,
-            'rules': list,
-            'last_alert': float,
-            'snapshot': dict,
-            'below_nclose_count': int,
-            'below_nclose_start': float,
-            'below_last_close_count': int,
-            'below_last_close_start': float
-        }
-        """
-        self._monitored_stocks = {}
-        self._alert_cooldown = alert_cooldown
-
-    def add_stock(self, code, name, snapshot=None):
-        """添加监控股票"""
-        self._monitored_stocks[code] = {
-            'name': name,
-            'rules': [],
-            'last_alert': 0,
-            'snapshot': snapshot or {},
-            'below_nclose_count': 0,
-            'below_nclose_start': 0,
-            'below_last_close_count': 0,
-            'below_last_close_start': 0
-        }
-
-    def _trigger_alert(self, code, name, msg):
-        """触发报警"""
-        logger.info(f"ALERT: {msg}")
-        # 可以拓展成声音报警、UI 弹窗、邮件等
-
-    def _calculate_position(self, stock, current_price, current_nclose, last_close, last_percent, last_nclose):
-        """根据今日/昨日数据计算动态仓位与操作"""
-        position_ratio = 1.0
-        action = "持仓"
-
-        valid_yesterday = (last_close > 0) and (last_percent is not None and -100 < last_percent < 100) and (last_nclose > 0)
-        valid_today = (current_price > 0) and (current_nclose > 0)
-
-        # 今日均价偏离
-        if valid_today:
-            deviation_today = (current_nclose - current_price) / current_nclose
-            max_normal_pullback = (last_percent / 5 / 100 if valid_yesterday else 0.01)
-            if deviation_today > max_normal_pullback + 0.0005:
-                position_ratio *= 0.7
-                action = "减仓"
-
-        # 昨日收盘偏离
-        if valid_yesterday:
-            deviation_last = (last_close - current_price) / last_close
-            max_normal_pullback = last_percent / 5 / 100
-            if deviation_last > max_normal_pullback + 0.0005:
-                position_ratio *= 0.5
-                action = "卖出"
-
-        # 趋势加仓
-        if valid_today and current_price > current_nclose:
-            position_ratio = min(1.0, position_ratio + 0.2)
-            if action == "持仓":
-                action = "买入"
-
-        position_ratio = max(0.0, min(1.0, position_ratio))
-        return action, position_ratio
-
-    def check_stocks(self, df):
-        """
-        df: pandas DataFrame, index为股票code
-        包含列: trade, nclose, percent, volume, ratio
-        """
-        now = time.time()
-        for code, stock in self._monitored_stocks.items():
-            if code not in df.index:
-                continue
-            row = df.loc[code]
-
-            # 安全获取数据
-            try:
-                current_price = float(row.get('trade', 0))
-                current_nclose = float(row.get('nclose', 0))
-                current_change = float(row.get('percent', 0))
-                volume_change = float(row.get('volume', 0))
-                ratio_change = float(row.get('ratio', 0))
-            except (ValueError, TypeError):
-                continue
-
-            snap = stock.get('snapshot', {})
-            last_close = snap.get('last_close', 0)
-            last_percent = snap.get('percent', None)
-            last_nclose = snap.get('nclose', 0)
-
-            # ---------- 今日均价计数 ----------
-            if current_price > 0 and current_nclose > 0:
-                deviation_today = (current_nclose - current_price) / current_nclose
-                max_normal_pullback = (last_percent / 5 / 100 if last_close > 0 else 0.01)
-                if deviation_today > max_normal_pullback + 0.0005:
-                    if stock['below_nclose_start'] == 0:
-                        stock['below_nclose_start'] = now
-                    if now - stock['below_nclose_start'] >= 300:
-                        stock['below_nclose_count'] += 1
-                        logger.debug(f"{code} below_nclose_count={stock['below_nclose_count']}")
-                else:
-                    stock['below_nclose_start'] = 0
-                    stock['below_nclose_count'] = 0
-            else:
-                stock['below_nclose_start'] = 0
-                stock['below_nclose_count'] = 0
-
-            # ---------- 昨日收盘计数 ----------
-            valid_yesterday = (last_close > 0) and (last_percent is not None and -100 < last_percent < 100)
-            if valid_yesterday and current_price < last_close:
-                deviation_last = (last_close - current_price) / last_close
-                max_normal_pullback = last_percent / 5 / 100
-                if deviation_last > max_normal_pullback + 0.0005:
-                    if stock['below_last_close_start'] == 0:
-                        stock['below_last_close_start'] = now
-                    if now - stock['below_last_close_start'] >= 300:
-                        stock['below_last_close_count'] += 1
-                        logger.debug(f"{code} below_last_close_count={stock['below_last_close_count']}")
-                else:
-                    stock['below_last_close_start'] = 0
-                    stock['below_last_close_count'] = 0
-            else:
-                stock['below_last_close_start'] = 0
-                stock['below_last_close_count'] = 0
-
-            # ---------- 决策触发 ----------
-            triggered = False
-            if stock['below_nclose_count'] >= 3:
-                msg = (
-                    f"卖出 {stock['name']} 价格连续低于今日均价 {current_nclose} ({current_price}) "
-                    f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
-                )
-                triggered = True
-            elif valid_yesterday and stock['below_last_close_count'] >= 2:
-                msg = (
-                    f"减仓 {stock['name']} 价格连续低于昨日收盘 {last_close} ({current_price}) "
-                    f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
-                )
-                triggered = True
-
-            if triggered and now - stock.get('last_alert', 0) >= self._alert_cooldown:
-                self._trigger_alert(code, stock['name'], msg)
-                stock['last_alert'] = now
-                stock['below_nclose_count'] = 0
-                stock['below_nclose_start'] = 0
-                stock['below_last_close_count'] = 0
-                stock['below_last_close_start'] = 0
-
-            # ---------- 动态仓位计算 ----------
-            action, ratio = self._calculate_position(stock, current_price, current_nclose, last_close, last_percent, last_nclose)
-            if action != "持仓":
-                msg = (
-                    f"{action} {stock['name']} 当前价 {current_price} "
-                    f"今日均价 {current_nclose} 昨日收盘 {last_close} "
-                    f"建议仓位 {ratio*100:.0f}% "
-                    f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
-                )
-                self._trigger_alert(code, stock['name'], msg)
-
 class VoiceAnnouncer:
     """独立的语音播报引擎"""
     def __init__(self):
@@ -379,6 +176,7 @@ class StockLiveStrategy:
     def _calculate_position(self, stock, current_price, current_nclose, last_close, last_percent, last_nclose):
         """根据今日/昨日数据计算动态仓位与操作"""
         position_ratio = round(1.0/self.stock_count,1)
+        logger.debug(f'仓位分配:position_ratio:{position_ratio}')
         action = "持仓"
 
         valid_yesterday = (last_close > 0) and (last_percent is not None and -100 < last_percent < 100) and (last_nclose > 0)
@@ -450,7 +248,7 @@ class StockLiveStrategy:
                 self.stock_count = len(self._monitored_stocks) 
                 logger.info(
                     f"Loaded voice monitors from {self.config_file}, "
-                    f"stocks={len(self._monitored_stocks)}"
+                    f"总计持仓stocks={len(self._monitored_stocks)}"
                 )
 
         except Exception as e:
@@ -734,7 +532,7 @@ class StockLiveStrategy:
                     # ---------- 调试输出 ----------
                     logger.debug(f"{code} 合并前 messages={messages}")
                     logger.debug(f"{code} 去重后 unique_msgs={unique_msgs}")
-                    logger.info(f"{code} combined_msg:\n{combined_msg}")
+                    # logger.info(f"{code} combined_msg:\n{combined_msg}")
 
                     # ---------- 单次触发 ----------
                     self._trigger_alert(
