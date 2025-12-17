@@ -2026,8 +2026,6 @@ def cross_process_lock(date):
     except FileExistsError:
         return None
 
-
-
 def _get_clean_flag_path(today):
     """
     当天清理完成的跨进程标记文件
@@ -2119,6 +2117,12 @@ def clean_expired_tdx_file(logger, g_values):
     # ⑥ 真正删除
     try:
         os.remove(fname)
+        MultiIndex_fname = cct.get_ramdisk_path("sina_MultiIndex_data")
+        if os.path.exists(MultiIndex_fname):
+            os.remove(MultiIndex_fname)
+            logger.info(
+            f"[CLEAN_OK] {today} 已清理过期文件: {MultiIndex_fname}"
+        )
         logger.info(
             f"[CLEAN_OK] {today} 已清理过期文件: {fname}"
         )
@@ -2428,7 +2432,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
             df_all = sanitize(df_all)
             queue.put(df_all)
             gc.collect()
-            logger.info(f'用时: {round(time.time() - time_s,1)/len(df_all):.2f} now: {cct.get_now_time_int()} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+            logger.info(f'now: {cct.get_now_time_int()}  用时: {round(time.time() - time_s,1)/len(df_all):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
             for _ in range(duration_sleep_time):
                 if not flag.value: break
                 time.sleep(0.5)
@@ -2438,7 +2442,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
             logger.error(f"resample: {resample} Error in background process: {e}", exc_info=True)
             # print(f"fetch_and_process error: {e}")
             # log.error(f"resample: {resample}: 读取fetch_and_process error:异常: {e}\n{traceback.format_exc()}")
-            time.sleep(duration_sleep_time / 2)
+            time.sleep(duration_sleep_time)
         # finally:
         #     try:
         #         queue.put(None)  # 避免父进程阻塞
@@ -2995,6 +2999,21 @@ class StockMonitorApp(tk.Tk):
     def run_15_30_task(self):
         if getattr(self, "_task_running", False):
             return
+
+        if hasattr(self, "live_strategy"):
+            try:
+                # 提取窗口名称用于保存位置
+                # unique_code 格式为 "concept_name_code" 或 "concept_name"
+                now_time = cct.get_now_time_int()
+                if now_time > 1500:
+                    self.live_strategy._save_monitors()
+                    logger.info(f"[on_close] self.live_strategy._save_monitors SAVE OK")
+                else:
+                    logger.info(f"[on_close] now:{now_time} 未到收盘时间 未进行_save_monitors SAVE")
+
+            except Exception as e:
+                logger.warning(f"[on_close] self.live_strategy._save_monitors 失败: {e}")
+
         today = cct.get_today('')
         if write_all_day_date == today:
             logger.info(f'Write_market_all_day_mp 已经完成')
@@ -6652,8 +6671,37 @@ class StockMonitorApp(tk.Tk):
             for row in flat_rows:
                 tree.insert("", "end", values=(row['time'], row['code'], row['name'], row['content']))
 
-            # --- 双击事件 (复用之前的 detail window) ---
-            def on_double_click(event):
+
+
+            def on_handbook_right_click(event):
+                item_id = tree.identify_row(event.y)
+                if not item_id:
+                    return
+                values = tree.item(item_id, "values")
+                # values: (time, code, name, content_preview)
+                target_code = values[1]
+                stock_code = str(target_code).zfill(6)
+                # pyperclip.copy(stock_code)
+                # toast_message(self, f"stock_code: {stock_code} 已复制")
+                self.tree_scroll_to_code(stock_code)
+
+            def on_handbook_on_click(event):
+                item_id = tree.identify_row(event.y)
+                if not item_id:
+                    return
+
+                values = tree.item(item_id, "values")
+                # values: (time, code, name, content_preview)
+
+                target_time = values[0]
+                target_code = values[1]
+                target_name = values[2]
+
+                stock_code = str(target_code).zfill(6)
+                # logger.info(f'on_handbook_on_click stock_code:{stock_code} name:{target_name}')
+                self.sender.send(stock_code)
+
+            def on_handbook_tree_select(event):
                 item = tree.selection()
                 if not item: return
                 values = tree.item(item[0], "values")
@@ -6661,6 +6709,21 @@ class StockMonitorApp(tk.Tk):
                 
                 target_code = values[1]
                 target_time = values[0]
+                target_name = values[2]
+                stock_code = str(target_code).zfill(6)
+                # logger.info(f'on_handbook_on_click stock_code:{stock_code} name:{target_name}')
+                self.sender.send(stock_code)
+
+            # --- 双击事件 (复用之前的 detail window) ---
+            def on_handbook_double_click(event):
+                item = tree.selection()
+                if not item: return
+                values = tree.item(item[0], "values")
+                # values: (time, code, name, content_preview)
+                
+                target_code = values[1]
+                target_time = values[0]
+                target_name = values[2]
                 
                 # 再次查找完整内容 (效率稍低但简单)
                 full_content = ""
@@ -6674,6 +6737,7 @@ class StockMonitorApp(tk.Tk):
                     # 调用之前定义的 show_detail_window ?
                     # 由于作用域问题，最好是把 show_detail_window 提出来变成类方法，
                     # 或者这里再复制一份简单的。为避免重复代码，这里简单实现一个。
+                    # logger.info(f'on_handbook_double_click stock_code:{target_code} name:{target_name}')
                     show_simple_detail(target_time, target_code, values[2], full_content, event.x_root, event.y_root)
 
             def show_simple_detail(time_str, code, name, content, cx, cy):
@@ -6707,8 +6771,10 @@ class StockMonitorApp(tk.Tk):
                 
                 tk.Button(d_win, text="关闭 (ESC)", command=d_win.destroy).pack(pady=5)
 
-            tree.bind("<Double-1>", on_double_click)
-            
+            tree.bind("<Button-1>", on_handbook_on_click)
+            tree.bind("<Button-3>", on_handbook_right_click)
+            tree.bind("<Double-1>", on_handbook_double_click)
+            tree.bind("<<TreeviewSelect>>", on_handbook_tree_select) 
         except Exception as e:
             logger.error(f"Handbook Overview Error: {e}")
             messagebox.showerror("错误", f"打开总览失败: {e}")
@@ -6965,7 +7031,7 @@ class StockMonitorApp(tk.Tk):
             self.active_alerts = []
             
         # Right-Bottom origin
-        w, h = 350, 260 # 稍微增高
+        w, h = 400, 260 # 稍微增高
         margin = 10
         taskbar = 80 # 避开任务栏
         sw = self.winfo_screenwidth()
@@ -7022,7 +7088,7 @@ class StockMonitorApp(tk.Tk):
             win.protocol("WM_DELETE_WINDOW", lambda: self._close_alert(win))
             
             # 自动关闭 (60秒)
-            self.after(60000, lambda: self._close_alert(win))
+            self.after(2*60000, lambda: self._close_alert(win))
             
             # 闪烁效果
             def flash(count=0):
@@ -7125,9 +7191,6 @@ class StockMonitorApp(tk.Tk):
             tree.pack(side="left", fill="both", expand=True)
             vsb.pack(side="right", fill="y")
             
-            # 双击编辑
-            tree.bind("<Double-1>", lambda e: edit_selected())
-
             def load_data():
                 """加载数据到列表"""
                 for item in tree.get_children():
@@ -7206,8 +7269,42 @@ class StockMonitorApp(tk.Tk):
                 
                 load_data()
 
-            # 按 Delete 键删除
-            tree.bind("<Delete>", delete_selected)
+            def on_voice_tree_select(event):
+                selected = tree.selection()
+                if not selected: return
+                item = selected[0]
+                values = tree.item(item, "values")
+                target_code = values[0]
+                name = values[1]
+                stock_code = str(target_code).zfill(6)
+                # logger.info(f'on_handbook_on_click stock_code:{stock_code} name:{target_name}')
+                self.sender.send(stock_code)
+
+            def on_voice_right_click(event):
+                item_id = tree.identify_row(event.y)
+                if not item_id:
+                    return
+                values = tree.item(item_id, "values")
+                # values: (time, code, name, content_preview)
+                target_code = values[0]
+                stock_code = str(target_code).zfill(6)
+                # pyperclip.copy(stock_code)
+                # toast_message(self, f"stock_code: {stock_code} 已复制")
+                self.tree_scroll_to_code(stock_code)
+                
+            def on_voice_on_click(event):
+                item_id = tree.identify_row(event.y)
+                if not item_id:
+                    return
+
+                values = tree.item(item_id, "values")
+                code = values[0]
+                name = values[1]
+
+                stock_code = str(code).zfill(6)
+                if stock_code:
+                    # logger.info(f'on_voice_on_click stock_code:{stock_code} name:{name}')
+                    self.sender.send(stock_code)
 
             def edit_selected(event=None):
                  selected = tree.selection()
@@ -7219,6 +7316,7 @@ class StockMonitorApp(tk.Tk):
                  old_val = values[3]
                  uid = values[4]
                  idx = int(uid.split('_')[1])
+                 # logger.info(f'on_voice_edit_selected stock_code:{code} name:{name}')
                  
                  current_type = "price_up"
                  monitors = self.live_strategy.get_monitors()
@@ -7350,7 +7448,13 @@ class StockMonitorApp(tk.Tk):
             tk.Button(btn_frame, text="✏️ 修改阈值", command=edit_selected).pack(side="left", padx=10)
             tk.Button(btn_frame, text="🗑️ 删除规则 (Del)", command=delete_selected, fg="red").pack(side="left", padx=10)
             tk.Button(btn_frame, text="刷新列表", command=load_data).pack(side="left", padx=10)
-            
+            tree.bind("<Button-1>", on_voice_on_click)
+            tree.bind("<Button-3>", on_voice_right_click)
+            # 双击编辑
+            tree.bind("<Double-1>", lambda e: edit_selected())
+            tree.bind("<<TreeviewSelect>>", on_voice_tree_select) 
+            # 按 Delete 键删除
+            tree.bind("<Delete>", delete_selected)
             # ESC / 关闭
             def on_close(event=None):
                 # update_window_position(window_id)
@@ -11612,6 +11716,13 @@ class StockMonitorApp(tk.Tk):
         self.on_test_code()
         self.auto_refresh_detail_window()
         self.update_category_result(df_filtered)
+        if not hasattr(self, "_start_init_show_concept_detail_window"):
+            # 已经创建过，直接显示
+            # self.kline_monitor.deiconify()
+            # self.kline_monitor.lift()
+            # self.kline_monitor.focus_force()
+            self.show_concept_detail_window()
+            self._start_init_show_concept_detail_window = True
 
     def on_test_code(self,onclick=False):
         # if self.query_manager.current_key == 'history2':
@@ -12855,20 +12966,29 @@ class StockMonitorApp(tk.Tk):
             except Exception:
                 pass
 
+        # 如果 KLineMonitor 存在且还没销毁，保存位置
+        if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
+            try:
+                self.save_window_position(self.kline_monitor, "KLineMonitor")
+                self.kline_monitor.on_kline_monitor_close()
+                self.kline_monitor.destroy()
+            except Exception:
+                pass
+
         # --- 保存并关闭所有 monitor_windows（概念前10窗口）---
-        if hasattr(self, "monitor_windows") and self.monitor_windows:
-            for unique_code, win_info in list(self.monitor_windows.items()):
-                win = win_info.get('toplevel')
-                if win and win.winfo_exists():
-                    try:
-                        # 提取窗口名称用于保存位置
-                        # unique_code 格式为 "concept_name_code" 或 "concept_name"
-                        window_name = f"concept_top10_window-{unique_code}"
-                        self.save_window_position(win, window_name)
-                        logger.info(f"[on_close] 保存窗口位置: {window_name}")
-                    except Exception as e:
-                        logger.warning(f"[on_close] 保存窗口 {unique_code} 位置失败: {e}")
-            self.monitor_windows.clear()
+        if hasattr(self, "live_strategy"):
+            try:
+                # 提取窗口名称用于保存位置
+                # unique_code 格式为 "concept_name_code" 或 "concept_name"
+                now_time = cct.get_now_time_int()
+                if now_time > 1500:
+                    self.live_strategy._save_monitors()
+                    logger.info(f"[on_close] self.live_strategy._save_monitors SAVE OK")
+                else:
+                    logger.info(f"[on_close] now:{now_time} 不到收盘时间 未进行_save_monitors SAVE OK")
+
+            except Exception as e:
+                logger.warning(f"[on_close] self.live_strategy._save_monitors 失败: {e}")
 
         # --- 关闭所有 concept top10 窗口 ---
         if hasattr(self, "_pg_top10_window_simple"):

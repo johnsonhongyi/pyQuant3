@@ -538,7 +538,7 @@ class GlobalConfig:
         self.resampleInit = self.get_with_writeback("general", "resampleInit", fallback="d")
         self.write_all_day_date = self.get_with_writeback("general", "write_all_day_date", fallback="20251208")
         self.detect_calc_support = self.get_with_writeback("general", "detect_calc_support", fallback=False, value_type="bool")
-        self.duration_sleep_time = self.get_with_writeback("general", "duration_sleep_time", fallback=60, value_type="int")
+        self.duration_sleep_time = self.get_with_writeback("general", "duration_sleep_time", fallback=120, value_type="int")
         self.compute_lastdays = self.get_with_writeback("general", "compute_lastdays", fallback=5, value_type="int")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="260x180")
