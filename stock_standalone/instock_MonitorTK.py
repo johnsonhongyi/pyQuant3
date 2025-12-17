@@ -258,6 +258,8 @@ resampleInit = CFG.resampleInit
 duration_sleep_time = CFG.duration_sleep_time
 write_all_day_date = CFG.write_all_day_date
 detect_calc_support = CFG.detect_calc_support
+alert_cooldown = CFG.alert_cooldown
+
 saved_width,saved_height = CFG.saved_width,CFG.saved_height
 # def remove_condition_query(expr: str, cond: str) -> str:
 def remove_invalid_conditions(query: str, invalid_cols: list,showdebug=True):
@@ -1587,7 +1589,7 @@ def get_row_tags(latest_row):
         if pd.notna(percent) and pd.notna(low) and pd.notna(lastp1d):
             if percent < 2 and low < lastp1d:
                 row_tags.append("green_row")
-        logger.debug(f'get_row_tags row_tags: {row_tags}')
+        # logger.debug(f'get_row_tags row_tags: {row_tags}')
         return row_tags
 # 假设 df 是你提供的涨幅榜表格
 # counterCategory(df, 'category', limit=50)
@@ -3818,6 +3820,8 @@ class StockMonitorApp(tk.Tk):
         duration_sleep_time = CFG.duration_sleep_time
         write_all_day_date = CFG.write_all_day_date
         detect_calc_support = CFG.detect_calc_support
+        alert_cooldown = CFG.alert_cooldown
+
         saved_width,saved_height = CFG.saved_width,CFG.saved_height 
         logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} scale_offset: {scale_offset} saved_width:{saved_width},{saved_height} duration_sleep_time:{duration_sleep_time} detect_calc_support:{detect_calc_support}")
 
@@ -7023,7 +7027,7 @@ class StockMonitorApp(tk.Tk):
     def _init_live_strategy(self):
         """延迟初始化策略模块"""
         try:
-            self.live_strategy = StockLiveStrategy()
+            self.live_strategy = StockLiveStrategy(alert_cooldown=alert_cooldown)
             # 注册报警回调
             self.live_strategy.set_alert_callback(self.on_voice_alert)
             logger.info("✅ 实时监控策略模块已启动")
@@ -16375,7 +16379,7 @@ class KLineMonitor(tk.Toplevel):
         # logger.info(f'get_row_tags_kline: {r}')
         row_tags = get_row_tags(r)
         tags.extend(row_tags) 
-        logger.debug(f'get_row_tags_kline tags: {tags}')
+        # logger.debug(f'get_row_tags_kline tags: {tags}')
 
         # 可以在这里继续添加其他颜色逻辑，比如：
         # if r.get("low",0) > r.get("lastp1d",0):
