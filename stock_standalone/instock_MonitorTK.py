@@ -20,6 +20,7 @@ import re
 from JohnsonUtil.stock_sender import StockSender
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import LoggerFactory, commonTips as cct
+from JohnsonUtil import inStockDb as inDb
 from JSONData import stockFilter as stf
 from JSONData import tdx_data_Day as tdd
 import win32pipe, win32file,win32api
@@ -52,6 +53,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.completion import WordCompleter
 import configparser
+
 
 class SafeLoggerWriter:
     #放置管道关闭时，Queue.put() 抛 WinError 232
@@ -119,7 +121,11 @@ class LoggerWriter:
             self.log_func(self._buffer.strip())
             self._buffer = ""
 
-
+def get_indb_df(days=10):
+    indf = inDb.showcount(inDb.selectlastDays(days),sort_date=True)
+    if len(indf) == 0:
+        indf = inDb.showcount(inDb.selectlastDays(days+5),sort_date=True)
+    return indf
 
 def init_logging(log_file="appTk.log", level=LoggerFactory.ERROR, redirect_print=False, show_detail=True):
     """初始化全局日志"""
@@ -2393,7 +2399,12 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
             logger.info(f"resample Main: {resample} flag.value : {flag.value} market : {market} blkname :{blkname} ")
             # if START_INIT == 0:
             #     clean_expired_tdx_file(logger, g_values)
-            top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
+            if market == 'indb':
+                indf = get_indb_df()
+                stock_code_list = indf.code.tolist()
+                top_now = tdd.getSinaAlldf(market=stock_code_list,vol=ct.json_countVol, vtype=ct.json_countType)
+            else:
+                top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
             if top_now.empty:
                 logger.info("top_now.empty no data fetched")
                 time.sleep(duration_sleep_time)
@@ -4560,6 +4571,7 @@ class StockMonitorApp(tk.Tk):
             "创业板": {"code": "cyb", "blkname": "063.blk"},
             "科创板": {"code": "kcb", "blkname": "064.blk"},
             "北证": {"code": "bj",  "blkname": "065.blk"},
+            "indb": {"code": "indb",  "blkname": "066.blk"},
         }
 
         self.market_combo = ttk.Combobox(
