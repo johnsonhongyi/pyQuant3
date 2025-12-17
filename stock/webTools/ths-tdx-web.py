@@ -98,7 +98,7 @@ async def get_content():
     pre = None
     while 1:
         content = pyperclip.paste()
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1)
         if content and content != pre:
             yield content
             pre = content

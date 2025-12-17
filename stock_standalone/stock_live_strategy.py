@@ -27,6 +27,209 @@ try:
 except ImportError:
     pythoncom = None
 
+# def risk_decision(stock, current_price, current_nclose, last_close, last_percent, last_nclose):
+#     """返回动态仓位比例和操作建议"""
+#     # 初始化
+#     position_ratio = 1.0  # 满仓
+#     action = "HOLD"
+    
+#     # 安全判断
+#     valid_yesterday = (last_close > 0) and (last_percent is not None and -100 < last_percent < 100) and (last_nclose > 0)
+#     valid_today = (current_price > 0) and (current_nclose > 0)
+    
+#     # ---------- 今日均价偏离 ----------
+#     if valid_today:
+#         deviation_today = (current_nclose - current_price) / current_nclose
+#         max_normal_pullback = (last_percent / 5 / 100 if valid_yesterday else 0.01)
+#         if deviation_today > max_normal_pullback + 0.0005:
+#             # 超过正常回调 → 风险增加
+#             position_ratio *= 0.7
+#             action = "REDUCE"
+    
+#     # ---------- 昨日收盘偏离 ----------
+#     if valid_yesterday:
+#         deviation_last = (last_close - current_price) / last_close
+#         if deviation_last > max_normal_pullback + 0.0005:
+#             position_ratio *= 0.5
+#             action = "SELL"
+    
+#     # ---------- 趋势加仓判断 ----------
+#     if valid_today and current_price > current_nclose:
+#         # 高于均价，趋势向上，可加仓
+#         position_ratio = min(1.0, position_ratio + 0.2)
+#         if action == "HOLD":
+#             action = "ADD"
+    
+#     # 保证比例范围
+#     position_ratio = max(0.0, min(1.0, position_ratio))
+    
+#     return action, position_ratio
+
+class RiskEngine:
+    def __init__(self, alert_cooldown=300):
+        """
+        alert_cooldown: 报警冷却时间，单位秒
+        _monitored_stocks: dict, 每只股票结构如下
+        {
+            'name': str,
+            'rules': list,
+            'last_alert': float,
+            'snapshot': dict,
+            'below_nclose_count': int,
+            'below_nclose_start': float,
+            'below_last_close_count': int,
+            'below_last_close_start': float
+        }
+        """
+        self._monitored_stocks = {}
+        self._alert_cooldown = alert_cooldown
+
+    def add_stock(self, code, name, snapshot=None):
+        """添加监控股票"""
+        self._monitored_stocks[code] = {
+            'name': name,
+            'rules': [],
+            'last_alert': 0,
+            'snapshot': snapshot or {},
+            'below_nclose_count': 0,
+            'below_nclose_start': 0,
+            'below_last_close_count': 0,
+            'below_last_close_start': 0
+        }
+
+    def _trigger_alert(self, code, name, msg):
+        """触发报警"""
+        logger.info(f"ALERT: {msg}")
+        # 可以拓展成声音报警、UI 弹窗、邮件等
+
+    def _calculate_position(self, stock, current_price, current_nclose, last_close, last_percent, last_nclose):
+        """根据今日/昨日数据计算动态仓位与操作"""
+        position_ratio = 1.0
+        action = "HOLD"
+
+        valid_yesterday = (last_close > 0) and (last_percent is not None and -100 < last_percent < 100) and (last_nclose > 0)
+        valid_today = (current_price > 0) and (current_nclose > 0)
+
+        # 今日均价偏离
+        if valid_today:
+            deviation_today = (current_nclose - current_price) / current_nclose
+            max_normal_pullback = (last_percent / 5 / 100 if valid_yesterday else 0.01)
+            if deviation_today > max_normal_pullback + 0.0005:
+                position_ratio *= 0.7
+                action = "REDUCE"
+
+        # 昨日收盘偏离
+        if valid_yesterday:
+            deviation_last = (last_close - current_price) / last_close
+            max_normal_pullback = last_percent / 5 / 100
+            if deviation_last > max_normal_pullback + 0.0005:
+                position_ratio *= 0.5
+                action = "SELL"
+
+        # 趋势加仓
+        if valid_today and current_price > current_nclose:
+            position_ratio = min(1.0, position_ratio + 0.2)
+            if action == "HOLD":
+                action = "ADD"
+
+        position_ratio = max(0.0, min(1.0, position_ratio))
+        return action, position_ratio
+
+    def check_stocks(self, df):
+        """
+        df: pandas DataFrame, index为股票code
+        包含列: trade, nclose, percent, volume, ratio
+        """
+        now = time.time()
+        for code, stock in self._monitored_stocks.items():
+            if code not in df.index:
+                continue
+            row = df.loc[code]
+
+            # 安全获取数据
+            try:
+                current_price = float(row.get('trade', 0))
+                current_nclose = float(row.get('nclose', 0))
+                current_change = float(row.get('percent', 0))
+                volume_change = float(row.get('volume', 0))
+                ratio_change = float(row.get('ratio', 0))
+            except (ValueError, TypeError):
+                continue
+
+            snap = stock.get('snapshot', {})
+            last_close = snap.get('last_close', 0)
+            last_percent = snap.get('percent', None)
+            last_nclose = snap.get('nclose', 0)
+
+            # ---------- 今日均价计数 ----------
+            if current_price > 0 and current_nclose > 0:
+                deviation_today = (current_nclose - current_price) / current_nclose
+                max_normal_pullback = (last_percent / 5 / 100 if last_close > 0 else 0.01)
+                if deviation_today > max_normal_pullback + 0.0005:
+                    if stock['below_nclose_start'] == 0:
+                        stock['below_nclose_start'] = now
+                    if now - stock['below_nclose_start'] >= 300:
+                        stock['below_nclose_count'] += 1
+                        logger.debug(f"{code} below_nclose_count={stock['below_nclose_count']}")
+                else:
+                    stock['below_nclose_start'] = 0
+                    stock['below_nclose_count'] = 0
+            else:
+                stock['below_nclose_start'] = 0
+                stock['below_nclose_count'] = 0
+
+            # ---------- 昨日收盘计数 ----------
+            valid_yesterday = (last_close > 0) and (last_percent is not None and -100 < last_percent < 100)
+            if valid_yesterday and current_price < last_close:
+                deviation_last = (last_close - current_price) / last_close
+                max_normal_pullback = last_percent / 5 / 100
+                if deviation_last > max_normal_pullback + 0.0005:
+                    if stock['below_last_close_start'] == 0:
+                        stock['below_last_close_start'] = now
+                    if now - stock['below_last_close_start'] >= 300:
+                        stock['below_last_close_count'] += 1
+                        logger.debug(f"{code} below_last_close_count={stock['below_last_close_count']}")
+                else:
+                    stock['below_last_close_start'] = 0
+                    stock['below_last_close_count'] = 0
+            else:
+                stock['below_last_close_start'] = 0
+                stock['below_last_close_count'] = 0
+
+            # ---------- 决策触发 ----------
+            triggered = False
+            if stock['below_nclose_count'] >= 3:
+                msg = (
+                    f"卖出 {stock['name']} 价格连续低于今日均价 {current_nclose} ({current_price}) "
+                    f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                )
+                triggered = True
+            elif valid_yesterday and stock['below_last_close_count'] >= 2:
+                msg = (
+                    f"减仓 {stock['name']} 价格连续低于昨日收盘 {last_close} ({current_price}) "
+                    f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                )
+                triggered = True
+
+            if triggered and now - stock.get('last_alert', 0) >= self._alert_cooldown:
+                self._trigger_alert(code, stock['name'], msg)
+                stock['last_alert'] = now
+                stock['below_nclose_count'] = 0
+                stock['below_nclose_start'] = 0
+                stock['below_last_close_count'] = 0
+                stock['below_last_close_start'] = 0
+
+            # ---------- 动态仓位计算 ----------
+            action, ratio = self._calculate_position(stock, current_price, current_nclose, last_close, last_percent, last_nclose)
+            if action != "HOLD":
+                msg = (
+                    f"{action} {stock['name']} 当前价 {current_price} "
+                    f"今日均价 {current_nclose} 昨日收盘 {last_close} "
+                    f"建议仓位 {ratio*100:.0f}% "
+                    f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                )
+                self._trigger_alert(code, stock['name'], msg)
+
 class VoiceAnnouncer:
     """独立的语音播报引擎"""
     def __init__(self):
@@ -105,7 +308,7 @@ class StockLiveStrategy:
         self._voice = VoiceAnnouncer()
         self._monitored_stocks = {} 
         self._last_process_time = 0
-        self._alert_cooldown = 60 # 报警冷却时间(秒)
+        self._alert_cooldown = 120 # 报警冷却时间(秒)
         self.enabled = True
         
         # 使用 max_workers=1 避免并发资源竞争，本身计算量很小
@@ -119,42 +322,225 @@ class StockLiveStrategy:
         """设置报警回调函数"""
         self.alert_callback = callback
     
+    # def _load_monitors_old(self):
+    #     """加载配置并进行结构修复"""
+    #     self._monitored_stocks = {}
+
+    #     try:
+    #         import json
+    #         if os.path.exists(self.config_file):
+    #             with open(self.config_file, 'r', encoding='utf-8') as f:
+    #                 self._monitored_stocks = json.load(f)
+
+    #             # ✅ 结构迁移 / 补齐
+    #             for code, stock in self._monitored_stocks.items():
+    #                 stock.setdefault('rules', [])
+    #                 stock.setdefault('last_alert', 0)
+
+    #                 # ✅ 重建 rule_keys（不从文件读取）
+    #                 rule_keys = set()
+    #                 for r in stock['rules']:
+    #                     try:
+    #                         key = self._rule_key(r['type'], r['value'])
+    #                         rule_keys.add(key)
+    #                     except Exception:
+    #                         logger.warning(
+    #                             f"Invalid rule skipped for {code}: {r}"
+    #                         )
+
+    #                 stock['rule_keys'] = rule_keys
+
+    #             logger.info(
+    #                 f"Loaded voice monitors from {self.config_file}, "
+    #                 f"stocks={len(self._monitored_stocks)}"
+    #             )
+
+    #     except Exception as e:
+    #         logger.error(f"Failed to load voice monitors: {e}")
+
+    # def _save_monitors_old(self):
+    #     """保存配置（不包含派生字段）"""
+    #     try:
+    #         import json
+    #         data = {}
+    #         for code, stock in self._monitored_stocks.items():
+    #             data[code] = {
+    #                 'name': stock.get('name'),
+    #                 'rules': stock.get('rules', []),
+    #                 'last_alert': stock.get('last_alert', 0)
+    #             }
+
+    #         with open(self.config_file, 'w', encoding='utf-8') as f:
+    #             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    #     except Exception as e:
+    #         logger.error(f"Failed to save voice monitors: {e}")
+
+    def _calculate_position(self, stock, current_price, current_nclose, last_close, last_percent, last_nclose):
+        """根据今日/昨日数据计算动态仓位与操作"""
+        position_ratio = 1.0
+        action = "HOLD"
+
+        valid_yesterday = (last_close > 0) and (last_percent is not None and -100 < last_percent < 100) and (last_nclose > 0)
+        valid_today = (current_price > 0) and (current_nclose > 0)
+
+        # 今日均价偏离
+        if valid_today:
+            deviation_today = (current_nclose - current_price) / current_nclose
+            max_normal_pullback = (last_percent / 5 / 100 if valid_yesterday else 0.01)
+            if deviation_today > max_normal_pullback + 0.0005:
+                position_ratio *= 0.7
+                action = "REDUCE"
+
+        # 昨日收盘偏离
+        if valid_yesterday:
+            deviation_last = (last_close - current_price) / last_close
+            max_normal_pullback = last_percent / 5 / 100
+            if deviation_last > max_normal_pullback + 0.0005:
+                position_ratio *= 0.5
+                action = "SELL"
+
+        # 趋势加仓
+        if valid_today and current_price > current_nclose:
+            position_ratio = min(1.0, position_ratio + 0.2)
+            if action == "HOLD":
+                action = "ADD"
+
+        position_ratio = max(0.0, min(1.0, position_ratio))
+        return action, position_ratio
+
     def _load_monitors(self):
-        """加载配置"""
+        """加载配置并进行结构修复，同时恢复行情快照"""
+        self._monitored_stocks = {}
+
         try:
             import json
             if os.path.exists(self.config_file):
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     self._monitored_stocks = json.load(f)
-                logger.info(f"Loaded voice monitors from {self.config_file}")
+
+                # ✅ 结构迁移 / 补齐
+                for code, stock in self._monitored_stocks.items():
+                    stock.setdefault('rules', [])
+                    stock.setdefault('last_alert', 0)
+                    stock.setdefault('snapshot', {})  # 快照信息
+
+                    # ✅ 重建 rule_keys（不从文件读取）
+                    rule_keys = set()
+                    for r in stock['rules']:
+                        try:
+                            key = self._rule_key(r['type'], r['value'])
+                            rule_keys.add(key)
+                        except Exception:
+                            logger.warning(f"Invalid rule skipped for {code}: {r}")
+
+                    stock['rule_keys'] = rule_keys
+
+                    # ✅ 可选：加载 snapshot 到运行时对象
+                    snap = stock.get('snapshot', {})
+                    stock['trade'] = snap.get('trade', 0)
+                    stock['percent'] = snap.get('percent', 0)
+                    stock['volume'] = snap.get('volume', 0)
+                    stock['ratio'] = snap.get('ratio', 0)
+                    stock['nclose'] = snap.get('nclose', 0)
+                    stock['last_close'] = snap.get('last_close', 0)
+
+                logger.info(
+                    f"Loaded voice monitors from {self.config_file}, "
+                    f"stocks={len(self._monitored_stocks)}"
+                )
+
         except Exception as e:
             logger.error(f"Failed to load voice monitors: {e}")
 
+
     def _save_monitors(self):
-        """保存配置"""
+        """保存配置（不包含派生字段，同时增加即时行情信息）"""
         try:
             import json
+            data = {}
+
+            for code, stock in self._monitored_stocks.items():
+                # --- 构建基础数据 ---
+                record = {
+                    'name': stock.get('name'),
+                    'rules': stock.get('rules', []),
+                    'last_alert': stock.get('last_alert', 0)
+                }
+
+                # --- 可选：添加行情快照 ---
+                if hasattr(self, 'df') and self.df is not None and not self.df.empty:
+                    if code in self.df.index:
+                        row = self.df.loc[code]
+                        try:
+                            record['snapshot'] = {
+                                'trade': float(row.get('trade', 0)),
+                                'percent': float(row.get('percent', 0)),
+                                'volume': float(row.get('volume', 0)),
+                                'ratio': float(row.get('ratio', 0)),
+                                'nclose': float(row.get('nclose', 0)),
+                                'last_close': float(row.get('lastp1d', 0))
+                            }
+                        except (ValueError, TypeError):
+                            # 如果数据异常，不存 snapshot
+                            pass
+
+                data[code] = record
+
+            # --- 保存到 JSON ---
             with open(self.config_file, 'w', encoding='utf-8') as f:
-                json.dump(self._monitored_stocks, f, ensure_ascii=False, indent=2)
-            # logger.info("Saved voice monitors")
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
         except Exception as e:
             logger.error(f"Failed to save voice monitors: {e}")
 
+    def _rule_key(self, rule_type, value):
+        return f"{rule_type}:{value:.4f}"
+
     def add_monitor(self, code, name, rule_type, value):
-        """添加监控规则"""
-        if code not in self._monitored_stocks:
-            self._monitored_stocks[code] = {
-                'name': name,
-                'rules': [],
-                'last_alert': 0
-            }
-        
-        self._monitored_stocks[code]['rules'].append({
-            'type': rule_type, 
-            'value': float(value)
+        value = float(value)
+
+        stock = self._monitored_stocks.setdefault(code, {
+            'name': name,
+            'rules': [],
+            'last_alert': 0
         })
+
+        # 确保派生字段存在
+        stock.setdefault('rule_keys', set())
+
+        # ✅ 查找是否已存在同 type 规则
+        for r in stock['rules']:
+            if r['type'] == rule_type:
+                old_value = r['value']
+                r['value'] = value
+
+                # 更新 rule_keys
+                old_key = self._rule_key(rule_type, old_value)
+                new_key = self._rule_key(rule_type, value)
+                stock['rule_keys'].discard(old_key)
+                stock['rule_keys'].add(new_key)
+
+                self._save_monitors()
+                logger.info(
+                    f"Monitor updated: {name}({code}) {rule_type} {old_value} → {value}"
+                )
+                return "updated"
+
+        # ✅ 不存在才新增
+        rule_key = self._rule_key(rule_type, value)
+
+        stock['rules'].append({
+            'type': rule_type,
+            'value': value
+        })
+        stock['rule_keys'].add(rule_key)
+
         self._save_monitors()
-        logger.info(f"Adding monitor: {name}({code}) {rule_type} > {value}")
+        logger.info(
+            f"Monitor added: {name}({code}) {rule_type} > {value}"
+        )
+        return "added"
 
     def process_data(self, df_all):
         """
@@ -177,55 +563,551 @@ class StockLiveStrategy:
         
         # 提交前检查 executor 队列是否太满？Executor 不支持直接检查。
         # 简单策略：try submit
+        self.df = df_all.copy()
         self.executor.submit(self._check_strategies, df_all.copy())
+
 
     def _check_strategies(self, df):
         try:
             now = time.time()
             valid_codes = [c for c in self._monitored_stocks.keys() if c in df.index]
-            
+
             for code in valid_codes:
                 data = self._monitored_stocks[code]
                 last_alert = data.get('last_alert', 0)
-                
+
+                # ---------- 冷却判断 ----------
+                if now - last_alert < self._alert_cooldown:
+                    logger.debug(f"{code} 冷却中，跳过检查")
+                    continue
+
+                row = df.loc[code]
+
+                # ---------- 安全获取行情数据 ----------
+                try:
+                    current_price = float(row.get('trade', 0))
+                    current_nclose = float(row.get('nclose', 0))
+                    current_change = float(row.get('percent', 0))
+                    volume_change = float(row.get('volume', 0))
+                    ratio_change = float(row.get('ratio', 0))
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"{code} 行情数据异常: {e}")  # 调试输出
+                    continue
+
+                # ---------- 历史 snapshot ----------
+                snap = data.get('snapshot', {})
+                last_close = snap.get('last_close', 0)
+                last_percent = snap.get('percent', None)
+                last_nclose = snap.get('nclose', 0)
+
+                # ---------- 初始化计数器 ----------
+                data.setdefault('below_nclose_count', 0)
+                data.setdefault('below_nclose_start', 0)
+                data.setdefault('below_last_close_count', 0)
+                data.setdefault('below_last_close_start', 0)
+
+                # ---------- 消息收集 ----------
+                messages = []
+
+                # ---------- 今日均价风控 ----------
+                max_normal_pullback = (last_percent / 5 / 100 if last_percent else 0.01)
+                if current_price > 0 and current_nclose > 0:
+                    deviation = (current_nclose - current_price) / current_nclose
+                    if deviation > max_normal_pullback + 0.0005:
+                        if data['below_nclose_start'] == 0:
+                            data['below_nclose_start'] = now
+                        if now - data['below_nclose_start'] >= 300:
+                            data['below_nclose_count'] += 1
+                    else:
+                        data['below_nclose_start'] = 0
+                        data['below_nclose_count'] = 0
+
+                    if data['below_nclose_count'] >= 3:
+                        msg = (
+                            f"卖出 {data['name']} 价格连续低于今日均价 {current_nclose} ({current_price}) "
+                            f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                        )
+                        messages.append(("RISK", msg))
+
+                # ---------- 昨日收盘风控 ----------
+                if last_close > 0:
+                    deviation_last = (last_close - current_price) / last_close
+                    if deviation_last > max_normal_pullback + 0.0005:
+                        if data['below_last_close_start'] == 0:
+                            data['below_last_close_start'] = now
+                        if now - data['below_last_close_start'] >= 300:
+                            data['below_last_close_count'] += 1
+                    else:
+                        data['below_last_close_start'] = 0
+                        data['below_last_close_count'] = 0
+
+                    if data['below_last_close_count'] >= 2:
+                        msg = (
+                            f"减仓 {data['name']} 价格连续低于昨日收盘 {last_close} ({current_price}) "
+                            f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                        )
+                        messages.append(("RISK", msg))
+
+                # ---------- 普通规则 ----------
+                for rule in data.get('rules', []):
+                    rtype = rule['type']
+                    rval = rule['value']
+                    rule_triggered = False
+                    if rtype == 'price_up' and current_price >= rval:
+                        rule_triggered = True
+                        msg = f"{data['name']} 价格突破 {current_price} 涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                    elif rtype == 'price_down' and current_price <= rval:
+                        rule_triggered = True
+                        msg = f"{data['name']} 价格跌破 {current_price} 涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                    elif rtype == 'change_up' and current_change >= rval:
+                        rule_triggered = True
+                        msg = f"{data['name']} 涨幅达到 {current_change:.1f}% 价格 {current_price} 量能 {volume_change} 换手 {ratio_change}"
+
+                    if rule_triggered:
+                        messages.append(("RULE", msg))
+
+                # ---------- 动态仓位建议 ----------
+                action, ratio = self._calculate_position(
+                    data, current_price, current_nclose, last_close, last_percent, last_nclose
+                )
+                if action != "HOLD":
+                    msg = (
+                        f"{action} {data['name']} 当前价 {current_price} "
+                        f"今日均价 {current_nclose} 昨日收盘 {last_close} "
+                        f"建议仓位 {ratio*100:.0f}% "
+                        f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                    )
+                    messages.append(("POSITION", msg))
+
+                # ---------- 调试信息输出（仅 debug） ----------
+                logger.debug(
+                    f"{code} 调试: price={current_price} nclose={current_nclose} "
+                    f"last_close={last_close} below_nclose_count={data['below_nclose_count']} "
+                    f"below_last_close_count={data['below_last_close_count']} "
+                    f"max_normal_pullback={max_normal_pullback:.4f}"
+                )
+
+                # ---------- 统一触发 ----------
+                if messages:
+                    for msg_type, msg in messages:
+                        logger.debug(f"{code} ALERT [{msg_type}]: {msg}")  # 调试输出
+                        self._trigger_alert(code, data['name'], msg)
+                    data['last_alert'] = now
+
+                    # 重置计数
+                    data['below_nclose_count'] = 0
+                    data['below_nclose_start'] = 0
+                    data['below_last_close_count'] = 0
+                    data['below_last_close_start'] = 0
+
+        except Exception as e:
+            logger.error(f"Strategy Check Error: {e}")
+
+    def _check_strategies_nodebug(self, df):
+        try:
+            now = time.time()
+            valid_codes = [c for c in self._monitored_stocks.keys() if c in df.index]
+
+            for code in valid_codes:
+                data = self._monitored_stocks[code]
+                last_alert = data.get('last_alert', 0)
+
+                # ---------- 冷却判断 ----------
+                if now - last_alert < self._alert_cooldown:
+                    logger.debug(f"{code} 冷却中，跳过检查")
+                    continue
+
+                row = df.loc[code]
+
+                # ---------- 安全获取行情数据 ----------
+                try:
+                    current_price = float(row.get('trade', 0))
+                    current_nclose = float(row.get('nclose', 0))
+                    current_change = float(row.get('percent', 0))
+                    volume_change = float(row.get('volume', 0))
+                    ratio_change = float(row.get('ratio', 0))
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"{code} 行情数据异常: {e}")
+                    continue
+
+                # ---------- 历史 snapshot ----------
+                snap = data.get('snapshot', {})
+                last_close = snap.get('last_close', 0)
+                last_percent = snap.get('percent', None)
+                last_nclose = snap.get('nclose', 0)
+
+                # ---------- 初始化计数器 ----------
+                data.setdefault('below_nclose_count', 0)
+                data.setdefault('below_nclose_start', 0)
+                data.setdefault('below_last_close_count', 0)
+                data.setdefault('below_last_close_start', 0)
+
+                # ---------- 消息收集 ----------
+                messages = []
+
+                # ---------- 今日均价风控 ----------
+                if current_price > 0 and current_nclose > 0:
+                    deviation = (current_nclose - current_price) / current_nclose
+                    max_normal_pullback = (last_percent / 5 / 100 if last_percent else 0.01)
+
+                    if deviation > max_normal_pullback + 0.0005:
+                        if data['below_nclose_start'] == 0:
+                            data['below_nclose_start'] = now
+                        if now - data['below_nclose_start'] >= 300:
+                            data['below_nclose_count'] += 1
+                            logger.debug(f"{code} below_nclose_count={data['below_nclose_count']}")
+                    else:
+                        data['below_nclose_start'] = 0
+                        data['below_nclose_count'] = 0
+
+                    if data['below_nclose_count'] >= 3:
+                        msg = (
+                            f"卖出 {data['name']} 价格连续低于今日均价 {current_nclose} ({current_price}) "
+                            f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                        )
+                        messages.append(("RISK", msg))
+
+                # ---------- 昨日收盘风控 ----------
+                if last_close > 0:
+                    deviation_last = (last_close - current_price) / last_close
+                    if deviation_last > max_normal_pullback + 0.0005:
+                        if data['below_last_close_start'] == 0:
+                            data['below_last_close_start'] = now
+                        if now - data['below_last_close_start'] >= 300:
+                            data['below_last_close_count'] += 1
+                            logger.debug(f"{code} below_last_close_count={data['below_last_close_count']}")
+                    else:
+                        data['below_last_close_start'] = 0
+                        data['below_last_close_count'] = 0
+
+                    if data['below_last_close_count'] >= 2:
+                        msg = (
+                            f"减仓 {data['name']} 价格连续低于昨日收盘 {last_close} ({current_price}) "
+                            f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                        )
+                        messages.append(("RISK", msg))
+
+                # ---------- 普通规则 ----------
+                for rule in data.get('rules', []):
+                    rtype = rule['type']
+                    rval = rule['value']
+                    rule_triggered = False
+                    if rtype == 'price_up' and current_price >= rval:
+                        rule_triggered = True
+                        msg = f"{data['name']} 价格突破 {current_price} 涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                    elif rtype == 'price_down' and current_price <= rval:
+                        rule_triggered = True
+                        msg = f"{data['name']} 价格跌破 {current_price} 涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                    elif rtype == 'change_up' and current_change >= rval:
+                        rule_triggered = True
+                        msg = f"{data['name']} 涨幅达到 {current_change:.1f}% 价格 {current_price} 量能 {volume_change} 换手 {ratio_change}"
+
+                    if rule_triggered:
+                        messages.append(("RULE", msg))
+
+                # ---------- 动态仓位建议 ----------
+                action, ratio = self._calculate_position(
+                    data, current_price, current_nclose, last_close, last_percent, last_nclose
+                )
+                if action != "HOLD":
+                    msg = (
+                        f"{action} {data['name']} 当前价 {current_price} "
+                        f"今日均价 {current_nclose} 昨日收盘 {last_close} "
+                        f"建议仓位 {ratio*100:.0f}% "
+                        f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                    )
+                    messages.append(("POSITION", msg))
+
+                # ---------- 统一触发 ----------
+                if messages:
+                    for msg_type, msg in messages:
+                        logger.debug(f"{code} ALERT [{msg_type}]: {msg}")
+                        self._trigger_alert(code, data['name'], msg)
+                    data['last_alert'] = now
+
+                    # 重置计数
+                    data['below_nclose_count'] = 0
+                    data['below_nclose_start'] = 0
+                    data['below_last_close_count'] = 0
+                    data['below_last_close_start'] = 0
+
+        except Exception as e:
+            logger.error(f"Strategy Check Error: {e}")
+
+
+    def _check_strategies_no_msg_(self, df):
+        #内联了RiskEngine逻辑,msg会被覆盖
+        try:
+            now = time.time()
+            valid_codes = [c for c in self._monitored_stocks.keys() if c in df.index]
+
+            for code in valid_codes:
+                data = self._monitored_stocks[code]
+                last_alert = data.get('last_alert', 0)
+
+                # 冷却判断
                 if now - last_alert < self._alert_cooldown:
                     continue
-                
+
                 row = df.loc[code]
+                # ---------- 安全获取行情数据 ----------
                 try:
-                    # 安全获取数据
                     current_price = float(row.get('trade', 0))
-                    current_change = float(row.get('changepercent', 0))
+                    current_nclose = float(row.get('nclose', 0))
+                    current_change = float(row.get('percent', 0))
+                    volume_change = float(row.get('volume', 0))
+                    ratio_change = float(row.get('ratio', 0))
                 except (ValueError, TypeError):
                     continue
 
-                name = data['name']
+                # ---------- 历史 snapshot ----------
+                snap = data.get('snapshot', {})
+                last_close = snap.get('last_close', 0)
+                last_percent = snap.get('percent', None)
+                last_nclose = snap.get('nclose', 0)
+
+                # ---------- 初始化计数器 ----------
+                data.setdefault('below_nclose_count', 0)
+                data.setdefault('below_nclose_start', 0)
+                data.setdefault('below_last_close_count', 0)
+                data.setdefault('below_last_close_start', 0)
+
+                # ---------- 当日均价偏离判断 ----------
+                valid_today = current_price > 0 and current_nclose > 0
+                valid_yesterday = last_close > 0 and last_percent is not None and -100 < last_percent < 100
+
+                # 今日均价连续低于计数
+                if valid_today and current_price < current_nclose:
+                    deviation = (current_nclose - current_price) / current_nclose
+                    max_normal_pullback = (last_percent / 5 / 100 if valid_yesterday else 0.01)
+                    if deviation <= max_normal_pullback + 0.0005:  # 良性回调
+                        data['below_nclose_start'] = 0
+                        data['below_nclose_count'] = 0
+                    else:
+                        if data['below_nclose_start'] == 0:
+                            data['below_nclose_start'] = now
+                        if now - data['below_nclose_start'] >= 300:
+                            data['below_nclose_count'] += 1
+                            logger.debug(f"{code} below_nclose_count={data['below_nclose_count']}")
+                else:
+                    data['below_nclose_start'] = 0
+                    data['below_nclose_count'] = 0
+
+                # 昨日收盘连续低于计数
+                if valid_yesterday and current_price < last_close:
+                    deviation_last = (last_close - current_price) / last_close
+                    max_normal_pullback = last_percent / 5 / 100
+                    if deviation_last <= max_normal_pullback + 0.0005:
+                        data['below_last_close_start'] = 0
+                        data['below_last_close_count'] = 0
+                    else:
+                        if data['below_last_close_start'] == 0:
+                            data['below_last_close_start'] = now
+                        if now - data['below_last_close_start'] >= 300:
+                            data['below_last_close_count'] += 1
+                            logger.debug(f"{code} below_last_close_count={data['below_last_close_count']}")
+                else:
+                    data['below_last_close_start'] = 0
+                    data['below_last_close_count'] = 0
+
+                # ---------- 决策触发 ----------
                 triggered = False
-                msg = ""
-                
-                for rule in data['rules']:
+                if data['below_nclose_count'] >= 3:
+                    msg = (
+                        f"卖出 {data['name']} 价格连续低于今日均价 {current_nclose} ({current_price}) "
+                        f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                    )
+                    triggered = True
+                elif valid_yesterday and data['below_last_close_count'] >= 2:
+                    msg = (
+                        f"减仓 {data['name']} 价格连续低于昨日收盘 {last_close} ({current_price}) "
+                        f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                    )
+                    triggered = True
+
+                if triggered:
+                    self._trigger_alert(code, data['name'], msg)
+                    data['last_alert'] = now
+                    data['below_nclose_count'] = 0
+                    data['below_nclose_start'] = 0
+                    data['below_last_close_count'] = 0
+                    data['below_last_close_start'] = 0
+                    continue  # 跳过普通规则
+
+                # ---------- 普通规则（价格突破、涨幅触发） ----------
+                for rule in data.get('rules', []):
                     rtype = rule['type']
                     rval = rule['value']
-                    
+                    rule_triggered = False
                     if rtype == 'price_up' and current_price >= rval:
-                        triggered = True
-                        msg = f"{name} 价格突破 {current_price}"
+                        rule_triggered = True
+                        msg = f"{data['name']} 价格突破 {current_price} 涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
                     elif rtype == 'price_down' and current_price <= rval:
-                        triggered = True
-                        msg = f"{name} 价格跌破 {current_price}"
+                        rule_triggered = True
+                        msg = f"{data['name']} 价格跌破 {current_price} 涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
                     elif rtype == 'change_up' and current_change >= rval:
-                        triggered = True
-                        msg = f"{name} 涨幅达到 {current_change:.1f}%"
-                        
-                    if triggered:
+                        rule_triggered = True
+                        msg = f"{data['name']} 涨幅达到 {current_change:.1f}% 价格 {current_price} 量能 {volume_change} 换手 {ratio_change}"
+
+                    if rule_triggered:
+                        self._trigger_alert(code, data['name'], msg)
+                        data['last_alert'] = now
                         break
-                
-                if triggered:
-                    self._trigger_alert(code, name, msg)
-                    data['last_alert'] = now
-            
+
+                # ---------- 动态仓位建议 ----------
+                action, ratio = self._calculate_position(
+                    data, current_price, current_nclose, last_close, last_percent, last_nclose
+                )
+                if action != "HOLD":
+                    msg = (
+                        f"{action} {data['name']} 当前价 {current_price} "
+                        f"今日均价 {current_nclose} 昨日收盘 {last_close} "
+                        f"建议仓位 {ratio*100:.0f}% "
+                        f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                    )
+                    self._trigger_alert(code, data['name'], msg)
+
         except Exception as e:
             logger.error(f"Strategy Check Error: {e}")
+
+    # def _check_strategies_Single(self, df):
+    #     #初始策略没有仓位建议
+    #     try:
+    #         now = time.time()
+    #         valid_codes = [c for c in self._monitored_stocks.keys() if c in df.index]
+            
+    #         for code in valid_codes:
+    #             data = self._monitored_stocks[code]
+    #             last_alert = data.get('last_alert', 0)
+                
+    #             if now - last_alert < self._alert_cooldown:
+    #                 continue
+                
+    #             row = df.loc[code]
+    #             try:
+    #                 # 安全获取数据
+    #                 current_price = float(row.get('trade', 0))
+    #                 current_change = float(row.get('percent', 0))
+    #                 volume_change = float(row.get('volume', 0))
+    #                 ratio_change = float(row.get('ratio', 0))
+    #                 nclose_change = float(row.get('nclose', 0))
+    #                 last_close = float(row.get('lastp1d', 0))
+
+    #             except (ValueError, TypeError):
+    #                 continue
+
+    #             name = data['name']
+    #             triggered = False
+    #             msg = ""
+
+    #             # ---------- 初始化计数器 ----------
+    #             data.setdefault('below_nclose_count', 0)
+    #             data.setdefault('below_nclose_start', 0)
+    #             data.setdefault('below_last_close_count', 0)
+    #             data.setdefault('below_last_close_start', 0)
+
+    #             # ---------- 历史快照 ----------
+    #             snap = stock.get('snapshot', {})
+
+    #             last_close = snap.get('last_close', 0)
+    #             last_percent = snap.get('percent', None)
+    #             last_nclose = snap.get('nclose', 0)
+
+    #             # 今日均价
+    #             current_nclose = nclose_change  # 已有的
+    #             valid_yesterday = (last_close > 0) and (last_percent is not None and -100 < last_percent < 100) and (last_nclose > 0)
+    #             valid_today = (current_price > 0) and (current_nclose > 0)
+
+    #             # ---------- 计算正常回调幅度 ----------
+    #             if valid_yesterday and last_percent > 0:
+    #                 max_normal_pullback = last_percent / 5 / 100  # 转成比例
+    #             else:
+    #                 max_normal_pullback = 0.01  # 默认1%回调
+
+    #             # ---------- 判断跌破今日均价 ----------
+    #             if valid_today and current_price < current_nclose:
+    #                 deviation = (current_nclose - current_price) / current_nclose
+    #                 if deviation <= max_normal_pullback + 0.0005:  # ±0.05%振幅视为正常
+    #                     # 良性回调，不计数
+    #                     data['below_nclose_start'] = 0
+    #                     data['below_nclose_count'] = 0
+    #                 else:
+    #                     if data['below_nclose_start'] == 0:
+    #                         data['below_nclose_start'] = now
+
+    #                     if now - data['below_nclose_start'] >= 300:  # 超过5分钟
+    #                         data['below_nclose_count'] += 1
+    #                         logger.debug(f"{code} below nclose count={data['below_nclose_count']}")
+    #             else:
+    #                 data['below_nclose_start'] = 0
+    #                 data['below_nclose_count'] = 0
+
+    #             # ---------- 判断跌破昨日收盘价 ----------
+    #             if valid_yesterday and current_price < last_close:
+    #                 deviation_last = (last_close - current_price) / last_close
+    #                 if deviation_last <= max_normal_pullback + 0.0005:  # ±0.05%振幅视为正常
+    #                     data['below_last_close_start'] = 0
+    #                     data['below_last_close_count'] = 0
+    #                 else:
+    #                     if data['below_last_close_start'] == 0:
+    #                         data['below_last_close_start'] = now
+    #                     if now - data['below_last_close_start'] >= 300:
+    #                         data['below_last_close_count'] += 1
+    #                         logger.debug(f"{code} below last_close count={data['below_last_close_count']}")
+    #             else:
+    #                 data['below_last_close_start'] = 0
+    #                 data['below_last_close_count'] = 0
+
+    #             # ---------- 决策触发 ----------
+    #             triggered = False
+    #             if data['below_nclose_count'] >= 3:
+    #                 msg = (
+    #                     f"卖出 {name} 价格连续低于今日均价 {current_nclose} ({current_price}) "
+    #                     f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+    #                 )
+    #                 triggered = True
+    #             elif valid_yesterday and data['below_last_close_count'] >= 2:
+    #                 msg = (
+    #                     f"减仓 {name} 价格连续低于昨日收盘 {last_close} ({current_price}) "
+    #                     f"涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+    #                 )
+    #                 triggered = True
+
+    #             if triggered:
+    #                 self._trigger_alert(code, name, msg)
+    #                 data['last_alert'] = now
+
+    #                 # 重置计数器
+    #                 data['below_nclose_count'] = 0
+    #                 data['below_nclose_start'] = 0
+    #                 data['below_last_close_count'] = 0
+    #                 data['below_last_close_start'] = 0
+
+    #                 continue  # 跳过普通规则
+
+    #             for rule in data['rules']:
+    #                 rtype = rule['type']
+    #                 rval = rule['value']
+                    
+    #                 if rtype == 'price_up' and current_price >= rval:
+    #                     triggered = True
+    #                     msg = f"{name} 价格突破 {current_price} 涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+    #                 elif rtype == 'price_down' and current_price <= rval:
+    #                     triggered = True
+    #                     msg = f"{name} 价格跌破 {current_price} 涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+    #                 elif rtype == 'change_up' and current_change >= rval:
+    #                     triggered = True
+    #                     msg = f"{name} 涨幅达到 {current_change:.1f}% 价格 {current_price} 量能 {volume_change} 换手 {ratio_change}"
+                        
+    #                 if triggered:
+    #                     break
+                
+    #             if triggered:
+    #                 self._trigger_alert(code, name, msg)
+    #                 data['last_alert'] = now
+            
+    #     except Exception as e:
+    #         logger.error(f"Strategy Check Error: {e}")
 
     def get_monitors(self):
         """获取所有监控数据"""
@@ -249,16 +1131,22 @@ class StockLiveStrategy:
                 logger.info(f"Updated rule for {code} index {rule_index}: {new_type} {new_value}")
 
     def remove_rule(self, code, rule_index):
-        """移除指定股票的某条规则"""
         if code in self._monitored_stocks:
-            rules = self._monitored_stocks[code]['rules']
-            if 0 <= rule_index < len(rules):
-                logger.info(f"Removing rule for {code}: {rules[rule_index]}")
-                rules.pop(rule_index)
-                if not rules: # 如果没有规则了，移除股票
-                    del self._monitored_stocks[code]
-                self._save_monitors()
+            stock = self._monitored_stocks[code]
+            rules = stock['rules']
 
+            if 0 <= rule_index < len(rules):
+                rule = rules.pop(rule_index)
+
+                if 'rule_keys' in stock:
+                    stock['rule_keys'].discard(
+                        self._rule_key(rule['type'], rule['value'])
+                    )
+
+                if not rules:
+                    del self._monitored_stocks[code]
+
+                self._save_monitors()
     def test_alert(self, text="这是一个测试报警"):
         """测试报警功能"""
         self._trigger_alert("TEST", "测试股票", text)
