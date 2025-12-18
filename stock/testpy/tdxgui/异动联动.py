@@ -2954,7 +2954,178 @@ def layout_from_right_bottom(windows, l, t, r, b, margin_x=10, margin_y=5):
         current_x -= w + margin_x
         max_row_height = max(max_row_height, h)
 
+def get_work_area():
+    SPI_GETWORKAREA = 0x0030
+    rect = ctypes.wintypes.RECT()
+    ctypes.windll.user32.SystemParametersInfoW(
+        SPI_GETWORKAREA, 0, ctypes.byref(rect), 0
+    )
+    return rect.left, rect.top, rect.right, rect.bottom
+
+def _get_monitor_rect(m):
+    """
+    返回物理屏幕区域 (l, t, r, b)
+    兼容:
+      - (l, t, r, b)
+      - {"monitor": (...), "work": (...)}
+    """
+    if isinstance(m, dict):
+        return m.get("monitor", m.get("work"))
+    return m
+
+
+def _get_work_rect(m):
+    """
+    返回可用工作区 (l, t, r, b)
+    若无 work，则退化为物理屏幕
+    """
+    if isinstance(m, dict):
+        return m.get("work", m.get("monitor"))
+    return m
+
+def get_bottom_taskbar_height():
+    """返回底部任务栏高度，如果任务栏在底部，否则返回0"""
+    SPI_GETWORKAREA = 48
+    rect = ctypes.wintypes.RECT()
+    ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0)
+    screen_height = ctypes.windll.user32.GetSystemMetrics(1)  # SM_CYSCREEN
+    taskbar_height = screen_height - rect.bottom
+    return max(taskbar_height, 0)
+
 def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="horizontal"):
+    """
+    多屏幕窗口重排（自动换行 + 屏幕内排序）
+
+    - 无 _alter_tdx：左上角排列（使用工作区）
+    - 有 _alter_tdx：右下角反向排列（使用工作区，避开任务栏）
+    """
+
+    if not MONITORS:
+        init_monitors()
+
+    # 取监控窗口
+    windows = [
+        info for info in monitor_windows.values()
+        if "toplevel" in info
+    ]
+
+    # 分组
+    group_alter = []
+    group_normal = []
+    for info in windows:
+        win = info["toplevel"]
+        if hasattr(win, "_alter_tdx"):
+            group_alter.append(info)
+        else:
+            group_normal.append(info)
+
+    # 排序
+    if sort_by == "create_time":
+        key_func = lambda w: w["stock_info"][-1]
+    else:
+        key_func = lambda w: w.get("title", "")
+
+    group_normal.sort(key=key_func, reverse=True)
+    group_alter.sort(key=key_func, reverse=True)
+
+    # 按物理屏幕分组
+    screen_groups = {i: [] for i in range(len(MONITORS))}
+
+    for win_info in group_normal + group_alter:
+        win = win_info["toplevel"]
+        try:
+            win.update_idletasks()
+            x, y = win.winfo_x(), win.winfo_y()
+
+            for idx, m in enumerate(MONITORS):
+                l, t, r, b = _get_monitor_rect(m)
+                if l <= x < r and t <= y < b:
+                    screen_groups[idx].append(win_info)
+                    break
+
+        except Exception as e:
+            logger.info(f"⚠ 获取窗口位置失败: {e}")
+
+    # 遍历每个屏幕
+    for idx, group in screen_groups.items():
+        if not group:
+            continue
+
+        # ✅ 关键修复：统一通过 helper 取工作区
+        work_l, work_t, work_r, work_b = _get_work_rect(MONITORS[idx])
+
+        margin_x, margin_y = 10, 5
+
+        normal_group = [
+            w for w in group
+            if not hasattr(w["toplevel"], "_alter_tdx")
+        ]
+        alter_group = [
+            w for w in group
+            if hasattr(w["toplevel"], "_alter_tdx")
+        ]
+
+        # ======================
+        # 左上角排列（normal）
+        # ======================
+        current_x = work_l + margin_x
+        current_y = work_t + margin_y
+        max_row_height = 0
+
+        for win_info in normal_group:
+            win = win_info["toplevel"]
+            try:
+                win.update_idletasks()
+                w, h = win.winfo_width(), win.winfo_height()
+
+                if layout == "horizontal" and current_x + w + margin_x > work_r:
+                    current_x = work_l + margin_x
+                    current_y += max_row_height + margin_y
+                    max_row_height = 0
+
+                win.geometry(f"{w}x{h}+{current_x}+{current_y}")
+                win.configure(bg="SystemButtonFace")
+
+                current_x += w + margin_x
+                max_row_height = max(max_row_height, h)
+
+            except Exception as e:
+                logger.info(f"⚠ 窗口排列失败: {e}")
+
+        # 右下角排列（alter_group）
+        taskbar_height_bottom = get_bottom_taskbar_height()
+        current_x = work_r - margin_x
+        current_y = work_b - margin_y - taskbar_height_bottom  # 自动上移避开底部任务栏
+        max_row_height = 0
+
+        for win_info in alter_group:
+            win = win_info["toplevel"]
+            try:
+                win.update_idletasks()
+                w, h = win.winfo_width(), win.winfo_height()
+
+                # 横向优先，向左排列
+                if current_x - w - margin_x < work_l:
+                    current_x = work_r - margin_x
+                    current_y -= max_row_height + margin_y
+                    max_row_height = 0
+
+                # 防止越过顶部
+                if current_y - h < work_t:
+                    break
+
+                win.geometry(f"{w}x{h}+{current_x - w}+{current_y - h}")
+                win.configure(bg="red")
+                win._alter_tdx = True
+
+                current_x -= w + margin_x
+                max_row_height = max(max_row_height, h)
+
+            except Exception as e:
+                logger.info(f"⚠ 窗口排列失败: {e}")
+
+
+def rearrange_monitors_per_screen_no_bar(align="left", sort_by="create_time", layout="horizontal"):
     """
     多屏幕窗口重排（自动换列/换行 + 左右对齐 + 屏幕内排序）
     
@@ -3029,27 +3200,7 @@ def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="h
             except Exception as e:
                 logger.info(f"⚠ 窗口排列失败: {e}")
 
-        # # 右下角排列 alter_group
-        # current_x = r - margin_x
-        # current_y = b - margin_y
-        # max_col_width = 0
-        # for win_info in alter_group:
-        #     win = win_info["toplevel"]
-        #     try:
-        #         w, h = win.winfo_width(), win.winfo_height()
-        #         # 换列逻辑
-        #         if layout == "vertical" and current_y - h - margin_y < t:
-        #             current_y = b - margin_y
-        #             current_x -= max_col_width + margin_x
-        #             max_col_width = 0
-        #         win.geometry(f"{w}x{h}+{current_x - w}+{current_y - h}")
-        #         win.configure(bg="red")  # alter 窗口背景红色
-        #         if not hasattr(win, "_alter_tdx"):
-        #             win._alter_tdx = True
-        #         current_y -= h + margin_y
-        #         max_col_width = max(max_col_width, w)
-        #     except Exception as e:
-        #         logger.info(f"⚠ 窗口排列失败: {e}")
+        
         # 右下角排列 alter_group 横向优先
         current_x = r - margin_x
         current_y = b - margin_y

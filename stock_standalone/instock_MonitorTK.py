@@ -2376,7 +2376,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
                 g_values.setkey("tdx.init.date", today)
 
                 logger.info(
-                    f"init_tdx tdx.init.done:{tdx.init.done} tdx.init.date:{tdx.init.date} 总用时: {time.time() - time_init:.2f}s"
+                    f"init_tdx tdx.init.done:{g_values.getkey('tdx.init.done')} tdx.init.date:{g_values.getkey('tdx.init.date')} 总用时: {time.time() - time_init:.2f}s"
                 )
 
                 # 5️⃣ 节流
@@ -7104,7 +7104,7 @@ class StockMonitorApp(tk.Tk):
             win.protocol("WM_DELETE_WINDOW", lambda: self._close_alert(win))
             
             # 自动关闭 (60秒)
-            self.after(2*60000, lambda: self._close_alert(win))
+            self.after(int(alert_cooldown/2)*1000, lambda: self._close_alert(win))
             
             # 闪烁效果
             def flash(count=0):
