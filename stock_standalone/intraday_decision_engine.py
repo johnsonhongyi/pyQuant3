@@ -547,6 +547,11 @@ class IntradayDecisionEngine:
                     logger.debug(f"实时卖出触发: deviation={deviation:.2%} threshold={threshold:.2%}")
                     return result
         
+        # ========== 3. 量价信号策略 ==========
+        volume_price_result = self._volume_price_signal(row, snapshot, mode, debug)
+        if volume_price_result["triggered"]:
+            return volume_price_result
+        
         return result
 
     def _volume_emotion_score(self, volume: float, ratio: float, 
@@ -602,6 +607,210 @@ class IntradayDecisionEngine:
         debug["volume_emotion_score"] = score
         debug["volume_emotion_reasons"] = reasons
         return score
+
+    def _volume_price_signal(self, row: dict, snapshot: dict, mode: str, debug: dict) -> dict:
+        """
+        量价信号策略
+        
+        买入信号：
+        1. 地量低价：成交量接近地量且价格接近近期低点（人气不活跃但有企稳迹象）
+        2. 地量放大爬坡：从地量开始放量上涨（资金开始入场）
+        3. 均线交叉蓄能：MA5 上穿 MA20（趋势反转信号）
+        
+        卖出信号：
+        1. 天量高价：成交量异常放大且价格接近近期高点（短期见顶）
+        2. 均线死叉：MA5 下穿 MA20（趋势走弱）
+        
+        Args:
+            row: 当前行情数据
+            snapshot: 历史快照（包含地量数据）
+            mode: 评估模式
+            debug: 调试信息
+        
+        Returns:
+            dict: 包含 triggered, action, position, reason
+        """
+        result = {"triggered": False, "action": "持仓", "position": 0.0, "reason": ""}
+        
+        # ---------- 数据获取 ----------
+        price = float(row.get("trade", 0))
+        high = float(row.get("high", 0))
+        low = float(row.get("low", 0))
+        volume = float(row.get("volume", 0))  # 当日量比（已处理过）
+        
+        # MA 均线
+        ma5 = float(snapshot.get("ma5d", 0) or row.get("ma5d", 0))
+        ma20 = float(snapshot.get("ma20d", 0) or row.get("ma20d", 0))
+        
+        # 地量数据
+        lowvol = float(snapshot.get("lowvol", 0))      # 最近最低价的地量
+        llowvol = float(snapshot.get("llowvol", 0))    # 30日内地量
+        
+        # 历史量能
+        v1 = float(snapshot.get("lastv1d", 0))
+        v2 = float(snapshot.get("lastv2d", 0))
+        v3 = float(snapshot.get("lastv3d", 0))
+        
+        # 3日高低价
+        h1 = float(snapshot.get("lasth1d", 0))
+        h2 = float(snapshot.get("lasth2d", 0))
+        h3 = float(snapshot.get("lasth3d", 0))
+        l1 = float(snapshot.get("lastl1d", 0))
+        l2 = float(snapshot.get("lastl2d", 0))
+        l3 = float(snapshot.get("lastl3d", 0))
+        
+        # 计算 3 日区间
+        high_3d = max(h1, h2, h3) if all([h1, h2, h3]) else 0
+        low_3d = min(l1, l2, l3) if all([l1, l2, l3]) else 0
+        
+        signals = []
+        buy_score = 0.0
+        sell_score = 0.0
+        
+        # 注意: volume 已经是量比 = real_volume / last6vol / ratio_t
+        # 量比 < 0.5 表示地量，量比 > 1.5 表示放量，量比 > 3 表示天量
+        # lowvol/llowvol 是历史地量的真实成交量，需要转换后比较
+        
+        # ========== 买入信号 ==========
+        if mode in ("full", "buy_only"):
+            
+            # 1. 地量低价买入：当前量比很低（接近地量）+ 价格接近 3 日低点
+            # 量比 < 0.6 认为是地量水平
+            is_current_low_vol = volume < 0.6
+            
+            if low_3d > 0:
+                # 价格接近 3 日低点
+                is_near_low = price <= low_3d * 1.02
+                
+                if is_current_low_vol and is_near_low:
+                    buy_score += 0.25
+                    signals.append(f"地量低价(量比{volume:.1f})")
+                elif is_current_low_vol:
+                    buy_score += 0.1
+                    signals.append(f"成交地量(量比{volume:.1f})")
+            
+            # 2. 地量放大爬坡：昨日量比低 + 今日放量上涨
+            # 由于 v1 是真实成交量，需要将 llowvol 和 v1 比较
+            if llowvol > 0 and v1 > 0 and volume > 0:
+                # 昨日接近 30 日地量
+                was_low_vol = v1 <= llowvol * 1.3
+                # 今日放量（量比 > 1.5）
+                is_volume_up = volume > 1.5
+                # 价格上涨
+                is_price_up = price > float(snapshot.get("last_close", 0)) * 1.005 if snapshot.get("last_close") else False
+                
+                if was_low_vol and is_volume_up and is_price_up:
+                    buy_score += 0.3
+                    signals.append(f"地量放大爬坡(量比{volume:.1f})")
+            
+            # 3. 均线金叉蓄能 / 平行均线蓄势
+            if ma5 > 0 and ma20 > 0:
+                ma_diff_pct = (ma5 - ma20) / ma20 if ma20 > 0 else 0
+                ma_is_parallel = abs(ma_diff_pct) < 0.005  # 差距 < 0.5% 视为平行
+                
+                # MA5 > MA20 且差距在 2% 内（刚形成金叉）
+                ma_cross_up = ma5 > ma20 and ma_diff_pct < 0.02
+                # 价格在 MA5 附近或上方
+                price_above_ma = price >= ma5 * 0.98 if ma5 > 0 else False
+                
+                if ma_cross_up and price_above_ma:
+                    buy_score += 0.2
+                    signals.append("均线金叉蓄能")
+                elif ma_cross_up:
+                    buy_score += 0.1
+                    signals.append("MA5>MA20")
+                elif ma_is_parallel and price_above_ma:
+                    # 均线平行且价格在上方 = 蓄势爬坡
+                    buy_score += 0.15
+                    signals.append("均线平行蓄势")
+                
+                debug["ma_diff_pct"] = ma_diff_pct * 100
+                debug["ma_is_parallel"] = ma_is_parallel
+            
+            # 4. 沿均线放量爬坡（阳线 + 突破新高）
+            hmax = float(row.get("hmax", 0))
+            high4 = float(row.get("high4", 0))
+            current_high = float(row.get("high", 0))
+            current_open = float(row.get("open", 0))
+            
+            is_yang_line = price > current_open * 1.001 if current_open > 0 else False
+            is_vol_up = volume > 1.2  # 量比 > 1.2
+            is_new_high = (hmax > 0 and current_high > hmax) or (high4 > 0 and current_high > high4)
+            is_near_ma = ma5 > 0 and abs(price - ma5) / ma5 < 0.03
+            
+            if is_yang_line and is_vol_up and is_new_high:
+                buy_score += 0.3
+                signals.append("放量突破新高")
+            elif is_yang_line and is_vol_up and is_near_ma:
+                buy_score += 0.2
+                signals.append("沿均线放量爬坡")
+            elif is_yang_line and is_new_high:
+                buy_score += 0.15
+                signals.append("阳线创新高")
+            
+            debug["vp_buy_score"] = buy_score
+            debug["vp_buy_signals"] = signals
+            
+            if buy_score >= 0.3:
+                result = {
+                    "triggered": True,
+                    "action": "买入",
+                    "position": min(buy_score + 0.2, 0.8),
+                    "reason": "量价买入: " + ", ".join(signals)
+                }
+                logger.debug(f"量价买入触发: score={buy_score:.2f} signals={signals}")
+                return result
+        
+        # ========== 卖出信号 ==========
+        if mode in ("full", "sell_only"):
+            sell_signals = []
+            
+            # 1. 天量高价：成交量异常放大 + 价格接近 3 日高点
+            if volume > 0 and high_3d > 0:
+                # 量比异常放大（> 3 倍）
+                is_high_vol = volume > 3.0
+                # 价格接近 3 日高点
+                is_near_high = high >= high_3d * 0.98
+                
+                if is_high_vol and is_near_high:
+                    sell_score += 0.3
+                    sell_signals.append("天量高价")
+                elif is_high_vol:
+                    sell_score += 0.1
+                    sell_signals.append("量能异常")
+            
+            # 2. 均线死叉（需排除平行情况）
+            if ma5 > 0 and ma20 > 0:
+                ma_diff_pct = (ma20 - ma5) / ma20 if ma20 > 0 else 0
+                ma_is_parallel = abs(ma_diff_pct) < 0.005  # 差距 < 0.5% 视为平行
+                
+                # 只有差距 > 0.5% 且 MA5 < MA20 才算真正死叉
+                ma_cross_down = ma5 < ma20 and not ma_is_parallel and ma_diff_pct < 0.02
+                # 价格在 MA5 下方
+                price_below_ma = price < ma5 * 0.98 if ma5 > 0 else False
+                
+                if ma_cross_down and price_below_ma:
+                    sell_score += 0.25
+                    sell_signals.append("均线死叉")
+                elif ma_cross_down:
+                    sell_score += 0.1
+                    sell_signals.append("MA5<MA20")
+                # 平行均线不触发卖出信号
+            
+            debug["vp_sell_score"] = sell_score
+            debug["vp_sell_signals"] = sell_signals
+            
+            if sell_score >= 0.3:
+                result = {
+                    "triggered": True,
+                    "action": "卖出",
+                    "position": max(0.3, 1.0 - sell_score),
+                    "reason": "量价卖出: " + ", ".join(sell_signals)
+                }
+                logger.debug(f"量价卖出触发: score={sell_score:.2f} signals={sell_signals}")
+                return result
+        
+        return result
 
     def _multiday_trend_score(self, row: dict, debug: dict) -> float:
         """

@@ -2461,6 +2461,33 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
         #         queue.put(None)  # 避免父进程阻塞
         #     except:
         #         pass
+
+def calc_compute_volume(top_all, resample='d', virtual=True):
+    """
+    计算成交量（虚拟量或原始量）
+
+    参数:
+        top_all: pd.DataFrame，至少包含 ['volume', 'last6vol'] 列
+        cct: 对象，必须有 get_work_time_ratio 方法
+        resample: None 或其他，传给 get_work_time_ratio
+        virtual: bool，True 返回虚拟量（量比），False 返回原始量
+
+    返回:
+        pd.Series，成交量
+    """
+    ratio_t = cct.get_work_time_ratio(resample=resample)
+    logger.info(f'ratio_t: {round(ratio_t, 2)}')
+
+    if virtual:
+        # 虚拟量 = volume / last6vol / ratio_t
+        volumes = top_all['volume'] / top_all['last6vol'] / ratio_t
+        return volumes.round(1)
+    else:
+        # 原始量 = 虚拟量 * last6vol * ratio_t
+        volumes = top_all['volume'] * top_all['last6vol'] * ratio_t
+        return volumes.round(1)
+
+
 # ------------------ 指标计算 ------------------ #
 def calc_indicators(top_all, resample):
     # if cct.get_trade_date_status():
@@ -2475,14 +2502,16 @@ def calc_indicators(top_all, resample):
             
     # top_all = top_all[(top_all.df2 > 0) & (top_all.boll > 0)]
 
-    ratio_t = cct.get_work_time_ratio(resample=resample)
-    # ratio_t = estimate_virtual_volume_simple()
-    logger.info(f'ratio_t: {round(ratio_t,2)}')
-    top_all['volume'] = list(
-        map(lambda x, y: round(x / y / ratio_t, 1),
-            top_all['volume'].values,
-            top_all.last6vol.values)
-    )
+    # ratio_t = cct.get_work_time_ratio(resample=resample)
+    # logger.info(f'ratio_t: {round(ratio_t,2)}')
+    # top_all['volume'] = list(
+    #     map(lambda x, y: round(x / y / ratio_t, 1),
+    #         top_all['volume'].values,
+    #         top_all.last6vol.values)
+    # )
+    
+    top_all['volume']  = calc_compute_volume(top_all,resample=resample,virtual=True)
+
     now_time = cct.get_now_time_int()
     if  cct.get_trade_date_status():  
         logger.info(f'lastbuy :{"lastbuy" in top_all.columns}')
@@ -5377,11 +5406,13 @@ class StockMonitorApp(tk.Tk):
         self.tdx_var = tk.BooleanVar(value=True)
         self.ths_var = tk.BooleanVar(value=True)
         self.dfcf_var = tk.BooleanVar(value=False)
+        self.tip_var = tk.BooleanVar(value=False)
         checkbuttons_info = [
             ("Win", self.win_var),
             ("TDX", self.tdx_var),
             ("THS", self.ths_var),
-            ("DC", self.dfcf_var)
+            ("DC", self.dfcf_var),
+            ("Tip", self.tip_var)
         ]
         
         # 💥 修正：使用 ttk.Checkbutton 替代 tk.Checkbutton
@@ -5400,7 +5431,7 @@ class StockMonitorApp(tk.Tk):
 
     def update_linkage_status(self):
         # 此处处理 checkbuttons 状态
-        if not self.tdx_var.get() or self.ths_var.get():
+        if not self.tdx_var.get() or not self.ths_var.get():
             self.sender.reload()
         if  self.dfcf_var.get() != self.auto_adjust_column:
             logger.info(f"DC:{self.dfcf_var.get()} self.auto_adjust_column :{self.auto_adjust_column}")
@@ -6373,13 +6404,21 @@ class StockMonitorApp(tk.Tk):
             snapshot = {
                 'last_close': row_dict.get('lastp1d', row_dict.get('settle', 0)),
                 'percent': row_dict.get('per1d', row_dict.get('percent', 0)),
-                'nclose': row_dict.get('nclose', 0),
-                'lastv1d': row_dict.get('lastv1d', 0),
-                'lastv2d': row_dict.get('lastv2d', 0),
-                'lastv3d': row_dict.get('lastv3d', 0),
+                'nclose': row_dict.get('nclose', 0),    # 今日均价
+                'lowvol': row_dict.get('lowvol', 0),    # 最近最低价的地量
+                'llowvol': row_dict.get('llowvol', 0),  # 三十日内的地量
+                'lastv1d': row_dict.get('lastv1d', 0),  # 昨日前量能
+                'lastv2d': row_dict.get('lastv2d', 0),  # 二日前量能
+                'lastv3d': row_dict.get('lastv3d', 0),  # 三日前量能
+                'ma20d': row_dict.get('ma20d', 0),      # 二十日线
+                'ma5d': row_dict.get('ma5d', 0),        # 五日线
+                'lasth3d': row_dict.get('lasth3d', 0),  # 三日前最高价
+                'lastl3d': row_dict.get('lastl3d', 0),  # 三日前最低价
+                'lasth2d': row_dict.get('lasth2d', 0),  # 二日前最高价
+                'lastl2d': row_dict.get('lastl2d', 0),  # 二日前最低价
                 'lasth1d': row_dict.get('lasth1d', 0),  # 昨日最高价
                 'lastl1d': row_dict.get('lastl1d', 0),  # 昨日最低价
-                'cost_price': row_dict.get('trade', 0),  # 假设当前价为成本
+                'cost_price': row_dict.get('lastp3d', 0),  # 假设三天前收盘价为成本
                 'highest_since_buy': row_dict.get('high', 0)
             }
             
@@ -8192,7 +8231,8 @@ class StockMonitorApp(tk.Tk):
     def on_tree_click_for_tooltip(self, event,stock_code=None):
         """处理树视图点击事件，延迟显示提示框"""
         logger.debug(f"[Tooltip] 点击事件触发: x={event.x}, y={event.y}")
-
+        if self.tip_var.get():
+            return
         # 取消之前的定时器
         if getattr(self, '_tooltip_timer', None):
             try:
@@ -8222,6 +8262,9 @@ class StockMonitorApp(tk.Tk):
                 logger.debug("[Tooltip] 行没有数据")
                 return
             code = str(values[0])  # code在第一列
+            name = str(values[1])  # code在第二列
+            
+            self.test_strategy_for_stock(code, name)
         else:
             code = stock_code
         # x_root, y_root = event.x_root, event.y_root  # 保存坐标
@@ -8313,8 +8356,6 @@ class StockMonitorApp(tk.Tk):
         self._current_tooltip = tooltip
 
         logger.debug(f"[Tooltip] 提示框已创建并显示在 ({event.x_root+15}, {event.y_root+15})")
-
-
 
     def _format_stock_info(self, stock_data):
         """格式化股票信息为显示文本，并返回颜色标签"""
