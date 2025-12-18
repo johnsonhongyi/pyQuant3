@@ -102,13 +102,30 @@ class VoiceAnnouncer:
 class StockLiveStrategy:
     """
     高性能实时行情监控策略类
+    
+    支持配置参数：
+    - alert_cooldown: 报警冷却时间(秒)
+    - stop_loss_pct: 止损百分比
+    - take_profit_pct: 止盈百分比
+    - trailing_stop_pct: 移动止盈回撤百分比
+    - max_single_stock_ratio: 单只股票最大仓位
+    - min_position_ratio: 最小仓位比例
+    - risk_duration_threshold: 风险持续时间阈值
     """
-    def __init__(self,alert_cooldown=60):
+    def __init__(self, 
+                 alert_cooldown: float = 60,
+                 stop_loss_pct: float = 0.05,
+                 take_profit_pct: float = 0.10,
+                 trailing_stop_pct: float = 0.03,
+                 max_single_stock_ratio: float = 0.3,
+                 min_position_ratio: float = 0.05,
+                 risk_duration_threshold: float = 300):
         self._voice = VoiceAnnouncer()
         self._monitored_stocks = {} 
         self._last_process_time = 0
-        self._alert_cooldown = alert_cooldown # 报警冷却时间(秒)
-        logger.info(f'alert_cooldown: {self._alert_cooldown}')
+        self._alert_cooldown = alert_cooldown
+        logger.info(f'StockLiveStrategy 初始化: alert_cooldown={alert_cooldown}s, '
+                   f'stop_loss={stop_loss_pct:.1%}, take_profit={take_profit_pct:.1%}')
         self.enabled = True
         
         # 使用 max_workers=1 避免并发资源竞争，本身计算量很小
@@ -117,9 +134,22 @@ class StockLiveStrategy:
         self.config_file = "voice_alert_config.json"
         self._load_monitors()
         self.alert_callback = None
-        # self.risk_engine = RiskEngine(alert_cooldown=self._alert_cooldown)
-        self._risk_engine = RiskEngine(max_single_stock_ratio=0.2, min_ratio=0.0)
-        self.decision_engine = IntradayDecisionEngine()
+        
+        # 初始化决策引擎（带止损止盈配置）
+        self.decision_engine = IntradayDecisionEngine(
+            stop_loss_pct=stop_loss_pct,
+            take_profit_pct=take_profit_pct,
+            trailing_stop_pct=trailing_stop_pct,
+            max_position=max_single_stock_ratio
+        )
+        
+        # 初始化风控引擎
+        self._risk_engine = RiskEngine(
+            max_single_stock_ratio=max_single_stock_ratio,
+            min_ratio=min_position_ratio,
+            alert_cooldown=alert_cooldown,
+            risk_duration_threshold=risk_duration_threshold
+        )
 
     def set_alert_callback(self, callback):
         """设置报警回调函数"""
