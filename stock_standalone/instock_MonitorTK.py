@@ -6408,20 +6408,37 @@ class StockMonitorApp(tk.Tk):
                 'nclose': row_dict.get('nclose', 0),    # 今日均价
                 'lowvol': row_dict.get('lowvol', 0),    # 最近最低价的地量
                 'llowvol': row_dict.get('llowvol', 0),  # 三十日内的地量
-                'lastv1d': row_dict.get('lastv1d', 0),  # 昨日前量能
-                'lastv2d': row_dict.get('lastv2d', 0),  # 二日前量能
-                'lastv3d': row_dict.get('lastv3d', 0),  # 三日前量能
                 'ma20d': row_dict.get('ma20d', 0),      # 二十日线
                 'ma5d': row_dict.get('ma5d', 0),        # 五日线
-                'lasth3d': row_dict.get('lasth3d', 0),  # 三日前最高价
-                'lastl3d': row_dict.get('lastl3d', 0),  # 三日前最低价
-                'lasth2d': row_dict.get('lasth2d', 0),  # 二日前最高价
-                'lastl2d': row_dict.get('lastl2d', 0),  # 二日前最低价
-                'lasth1d': row_dict.get('lasth1d', 0),  # 昨日最高价
-                'lastl1d': row_dict.get('lastl1d', 0),  # 昨日最低价
-                'cost_price': row_dict.get('lastp3d', 0),  # 假设三天前收盘价为成本
-                'highest_since_buy': row_dict.get('high', 0)
+                'hmax': row_dict.get('hmax', 0),        # 30日最高价
+                'hmax60': row_dict.get('hmax60', 0),    # 60日最高价
+                'low60': row_dict.get('low60', 0),      # 60日最低价
+                'low10': row_dict.get('low10', 0),      # 10日最低价
+                'high4': row_dict.get('high4', 0),      # 4日最高
+                'max5': row_dict.get('max5', 0),        # 5日最高
+                'lower': row_dict.get('lower', 0),      # 布林下轨
+                'upper1': row_dict.get('upper1', 0),
+                'upper2': row_dict.get('upper2', 0),
+                'upper3': row_dict.get('upper3', 0),
+                'upper4': row_dict.get('upper4', 0),
+                'upper5': row_dict.get('upper5', 0),
+                'highest_since_buy': row_dict.get('high', 0),
+                'cost_price': row_dict.get('lastp3d', 0),  # 默认三天前收盘价为成本
             }
+            
+            # 自动填充 1-15 日的历史 OHLCV 数据
+            for i in range(1, 16):
+                for suffix in ['p', 'h', 'l', 'o', 'v']:
+                    key = f'last{suffix}{i}d'
+                    if key in row_dict:
+                        snapshot[key] = row_dict[key]
+            
+            # 特殊别名映射以兼容旧代码
+            snapshot['lastv1d'] = snapshot.get('lastv1d', 0)
+            snapshot['lastv2d'] = snapshot.get('lastv2d', 0)
+            snapshot['lastv3d'] = snapshot.get('lastv3d', 0)
+            snapshot['lasth1d'] = snapshot.get('lasth1d', 0)
+            snapshot['lastl1d'] = snapshot.get('lastl1d', 0)
             
             # 创建决策引擎实例
             engine = IntradayDecisionEngine()
@@ -14958,7 +14975,7 @@ class ColumnSetManager(tk.Toplevel):
         row_h = 30
         canvas_h = min(rows_needed, max_rows) * row_h
         self.canvas.config(height=canvas_h)
-        logger.info(f'max_rows:{max_rows} rows_needed:{rows_needed} canvas_h:{canvas_h}')
+        # logger.info(f'max_rows:{max_rows} rows_needed:{rows_needed} canvas_h:{canvas_h}')
         for i, col in enumerate(filtered):
             var = tk.BooleanVar(value=(col in self.current_set))
             self._chk_vars[col] = var
