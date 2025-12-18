@@ -12,8 +12,8 @@ from datetime import datetime
 import pandas as pd
 from JohnsonUtil import LoggerFactory
 from concurrent.futures import ThreadPoolExecutor
-# from intraday_decision_engine import IntradayDecisionEngine
-# from risk_engine import RiskEngine
+from intraday_decision_engine import IntradayDecisionEngine
+from risk_engine import RiskEngine
 
 logger = LoggerFactory.getLogger()
 
@@ -118,8 +118,8 @@ class StockLiveStrategy:
         self._load_monitors()
         self.alert_callback = None
         # self.risk_engine = RiskEngine(alert_cooldown=self._alert_cooldown)
-        # self._risk_engine = RiskEngine(max_single_stock_ratio=0.2, min_ratio=0.0)
-        # self.decision_engine = IntradayDecisionEngine()
+        self._risk_engine = RiskEngine(max_single_stock_ratio=0.2, min_ratio=0.0)
+        self.decision_engine = IntradayDecisionEngine()
 
     def set_alert_callback(self, callback):
         """设置报警回调函数"""
@@ -321,8 +321,127 @@ class StockLiveStrategy:
         self.df = df_all.copy()
         self.executor.submit(self._check_strategies, df_all.copy())
 
-
     def _check_strategies(self, df):
+        try:
+            now = time.time()
+            valid_codes = [c for c in self._monitored_stocks.keys() if c in df.index]
+
+            for code in valid_codes:
+                data = self._monitored_stocks[code]
+                last_alert = data.get('last_alert', 0)
+                logger.debug(f"{code} data:{data}")
+
+                # ---------- 冷却判断 ----------
+                if now - last_alert < self._alert_cooldown:
+                    logger.debug(f"{code} 冷却中，跳过检查")
+                    continue
+
+                row = df.loc[code]
+
+                # ---------- 安全获取行情数据 ----------
+                try:
+                    current_price = float(row.get('trade', 0))
+                    current_nclose = float(row.get('nclose', 0))
+                    current_change = float(row.get('percent', 0))
+                    volume_change = float(row.get('volume', 0))
+                    ratio_change = float(row.get('ratio', 0))
+                    ma5d_change = float(row.get('ma5d', 0))
+                    ma10d_change = float(row.get('ma10d', 0))
+                    current_high = float(row.get('high', 0))
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"{code} 行情数据异常: {e}")
+                    continue
+
+                # ---------- 历史 snapshot ----------
+                snap = data.get('snapshot', {})
+                last_close = snap.get('last_close', 0)
+                last_percent = snap.get('percent', None)
+                last_nclose = snap.get('nclose', 0)
+
+                # ---------- 初始化计数器 ----------
+                data.setdefault('below_nclose_count', 0)
+                data.setdefault('below_nclose_start', 0)
+                data.setdefault('below_last_close_count', 0)
+                data.setdefault('below_last_close_start', 0)
+
+                messages = []
+
+                # ---------- 今日均价风控 ----------
+                max_normal_pullback = (last_percent / 5 / 100 if last_percent else 0.01)
+                if current_price > 0 and current_nclose > 0:
+                    deviation = (current_nclose - current_price) / current_nclose
+                    if deviation > max_normal_pullback + 0.0005:
+                        if data['below_nclose_start'] == 0:
+                            data['below_nclose_start'] = now
+                        if now - data['below_nclose_start'] >= 300:
+                            data['below_nclose_count'] += 1
+                    else:
+                        data['below_nclose_start'] = 0
+                        data['below_nclose_count'] = 0
+                    if data['below_nclose_count'] >= 3:
+                        messages.append(("RISK", f"卖出 {data['name']} 价格连续低于今日均价 {current_nclose} ({current_price})"))
+
+                # ---------- 昨日收盘风控 ----------
+                if last_close > 0:
+                    deviation_last = (last_close - current_price) / last_close
+                    if deviation_last > max_normal_pullback + 0.0005:
+                        if data['below_last_close_start'] == 0:
+                            data['below_last_close_start'] = now
+                        if now - data['below_last_close_start'] >= 300:
+                            data['below_last_close_count'] += 1
+                    else:
+                        data['below_last_close_start'] = 0
+                        data['below_last_close_count'] = 0
+                    if data['below_last_close_count'] >= 2:
+                        messages.append(("RISK", f"减仓 {data['name']} 价格连续低于昨日收盘 {last_close} ({current_price})"))
+
+                # ---------- 普通规则 ----------
+                for rule in data.get('rules', []):
+                    rtype, rval = rule['type'], rule['value']
+                    if (rtype == 'price_up' and current_price >= rval) or (rtype == 'price_down' and current_price <= rval) or (rtype == 'change_up' and current_change >= rval):
+                        msg = f"{data['name']} {('价格突破' if rtype=='price_up' else '价格跌破' if rtype=='price_down' else '涨幅达到')} {current_price} 涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
+                        messages.append(("RULE", msg))
+
+                # ---------- 决策引擎 ----------
+                decision = self.decision_engine.evaluate(row, snap)
+                if decision["action"] != "持仓":
+                    messages.append(("POSITION", f'{data["name"]} {decision["action"]} 仓位{int(decision["position"]*100)}% {decision["reason"]}'))
+
+                # ---------- 风控调整仓位 ----------
+                action, ratio = self._risk_engine.adjust_position(data, decision["action"], decision["position"])
+                if action and (action != "持仓"):
+                    messages.append(("POSITION", f'{data["name"]} {action} 当前价 {current_price} 建议仓位 {ratio*100:.0f}%'))
+
+                # ---------- 调试输出 ----------
+                logger.debug(f"{code} 调试: price={current_price} nclose={current_nclose} last_close={last_close} below_nclose_count={data['below_nclose_count']} below_last_close_count={data['below_last_close_count']} max_normal_pullback={max_normal_pullback:.4f}")
+
+                if messages:
+                    # ---------- 去重 & 合并 ----------
+                    priority_order = ["RISK", "RULE", "POSITION"]
+                    priority_rank = {k:i for i,k in enumerate(priority_order)}
+                    unique_msgs = {}
+                    last_duplicate = {}
+                    for mtype, msg in messages:
+                        if msg not in unique_msgs:
+                            unique_msgs[msg] = mtype
+                        else:
+                            last_duplicate[msg] = mtype  # 保留重复在最后
+                    combined_msgs = "\n".join(list(unique_msgs.keys()) + list(last_duplicate.keys()))
+
+                    logger.debug(f"{code} messages合并: {combined_msgs}")
+                    self._trigger_alert(code, data['name'], combined_msgs, action=action)
+                    data['last_alert'] = now
+
+                    data['below_nclose_count'] = 0
+                    data['below_nclose_start'] = 0
+                    data['below_last_close_count'] = 0
+                    data['below_last_close_start'] = 0
+                else:
+                    logger.debug(f"{code} data: {messages}")
+        except Exception as e:
+            logger.error(f"Strategy Check Error: {e}")
+
+    def _check_strategies_simple(self, df):
         try:
             now = time.time()
             valid_codes = [c for c in self._monitored_stocks.keys() if c in df.index]
