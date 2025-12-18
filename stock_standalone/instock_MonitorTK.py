@@ -2864,6 +2864,7 @@ class StockMonitorApp(tk.Tk):
         self.global_values.setkey("blkname", self.blkname)
         # 用于保存 detail_win
         self.detail_win = None
+        self.strategy_report_win = None
         self.txt_widget = None
 
         # ----------------- 控件框 ----------------- #
@@ -6531,19 +6532,9 @@ class StockMonitorApp(tk.Tk):
             messagebox.showerror("测试失败", f"策略测试出错: {e}")
 
     def _show_strategy_report_window(self, code, name, report_text, result):
-        """显示策略测试报告窗口"""
-        win = tk.Toplevel(self)
-        win.title(f"🧪 策略测试 - {name} ({code})")
+        """显示策略测试报告窗口 (窗口复用模式 - 优化版)"""
         window_id = '策略测试'
-        # 窗口定位
-        # w, h = 600, 850
-        # mx, my = self.winfo_pointerx(), self.winfo_pointery()
-        # pos_x, pos_y = mx - w - 20, my - h // 2
-        # pos_x, pos_y = max(0, pos_x), max(0, pos_y)
-        # win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
-        self.load_window_position(win, window_id, default_width=600, default_height=850)
         
-        # 顶部状态栏
         action = result.get('action', '持仓')
         action_color = {
             '买入': '#4CAF50',
@@ -6552,31 +6543,63 @@ class StockMonitorApp(tk.Tk):
             '止盈': '#2196F3',
             '持仓': '#9E9E9E'
         }.get(action, '#9E9E9E')
+
+        # 1. 检查窗口是否已存在且未销毁
+        if hasattr(self, 'strategy_report_win') and self.strategy_report_win and self.strategy_report_win.winfo_exists():
+            win = self.strategy_report_win
+            win.title(f"🧪 策略测试 - {name} ({code})")
+            
+            # 如果组件已存在，则直接更新，不销毁也不抢夺焦点
+            if hasattr(win, 'txt_widget'):
+                win.top_frame.config(bg=action_color)
+                win.action_label.config(
+                    text=f"建议: {action} | 仓位: {result['position']*100:.0f}%", 
+                    bg=action_color
+                )
+                win.txt_widget.config(state='normal')
+                win.txt_widget.delete('1.0', 'end')
+                win.txt_widget.insert('1.0', report_text)
+                win.txt_widget.config(state='disabled')
+                win.report_text = report_text # 更新复制引用的文本
+                return
+            else:
+                # 兜底：清空重建
+                for widget in win.winfo_children():
+                    widget.destroy()
+        else:
+            win = tk.Toplevel(self)
+            self.strategy_report_win = win
+            self.load_window_position(win, window_id, default_width=600, default_height=850)
+
+        win.title(f"🧪 策略测试 - {name} ({code})")
+        win.report_text = report_text
+
+        # 2. 构建持久化 UI
+        # 顶部状态栏
+        win.top_frame = tk.Frame(win, bg=action_color, height=40)
+        win.top_frame.pack(fill='x')
+        win.top_frame.pack_propagate(False)
         
-        top_frame = tk.Frame(win, bg=action_color, height=40)
-        top_frame.pack(fill='x')
-        top_frame.pack_propagate(False)
-        
-        action_label = tk.Label(top_frame, 
+        win.action_label = tk.Label(win.top_frame, 
                                text=f"建议: {action} | 仓位: {result['position']*100:.0f}%",
                                fg='white', bg=action_color,
                                font=('Microsoft YaHei', 14, 'bold'))
-        action_label.pack(pady=8)
+        win.action_label.pack(pady=8)
         
         # 报告文本区域
         txt_frame = tk.Frame(win)
         txt_frame.pack(fill='both', expand=True, padx=10, pady=5)
         
         scrollbar = ttk.Scrollbar(txt_frame)
-        txt = tk.Text(txt_frame, wrap='word', font=('Consolas', 10), 
+        win.txt_widget = tk.Text(txt_frame, wrap='word', font=('Consolas', 10), 
                      yscrollcommand=scrollbar.set, padx=10, pady=5)
-        scrollbar.config(command=txt.yview)
+        scrollbar.config(command=win.txt_widget.yview)
         
-        txt.pack(side='left', fill='both', expand=True)
+        win.txt_widget.pack(side='left', fill='both', expand=True)
         scrollbar.pack(side='right', fill='y')
         
-        txt.insert('1.0', report_text)
-        txt.config(state='disabled')
+        win.txt_widget.insert('1.0', report_text)
+        win.txt_widget.config(state='disabled')
         
         # 底部按钮
         btn_frame = tk.Frame(win)
@@ -6584,22 +6607,22 @@ class StockMonitorApp(tk.Tk):
         
         def copy_report():
             win.clipboard_clear()
-            win.clipboard_append(report_text)
+            win.clipboard_append(win.report_text)
             self.status_var2.set("报告已复制到剪贴板")
         
         tk.Button(btn_frame, text="📋 复制报告", command=copy_report, 
                  width=12).pack(side='left', padx=5)
-        tk.Button(btn_frame, text="关闭 (ESC)", command=win.destroy, 
+        
+        tk.Button(btn_frame, text="关闭 (ESC)", command=lambda: on_close(), 
                  width=12).pack(side='left', padx=5)
 
         def on_close(event=None):
-            # update_window_position(window_id)
             self.save_window_position(win, window_id)
             win.destroy()
+            self.strategy_report_win = None
+            
         win.bind("<Escape>", on_close)
         win.protocol("WM_DELETE_WINDOW", on_close)
-        # ESC 关闭
-        # win.bind("<Escape>", lambda e: win.destroy())
     def copy_stock_info(self, code):
         """提取并复制格式化信息"""
         try:
