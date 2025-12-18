@@ -4,7 +4,7 @@
 支持买入/卖出信号生成、动态仓位计算、趋势强度评估、止损止盈检测
 """
 import logging
-from typing import Optional
+from typing import Optional, Any
 
 logger = logging.getLogger(__name__)
 
@@ -51,28 +51,25 @@ class IntradayDecisionEngine:
 
     def evaluate(self, row: dict, snapshot: dict, mode: str = "full") -> dict:
         """
-        评估当前行情并生成交易决策
+        评估当前行情并生成买卖决策及详尽的调试信息
         
         Args:
-            row: 当前行情数据（包含 trade, high, low, open, volume, ratio, ma5d, ma10d 等）
-            snapshot: 历史快照（包含 last_close, nclose, cost_price 等）
-            mode: 评估模式
-                  - "full": 完整买卖判断（默认）
-                  - "buy_only": 仅评估买入信号
-                  - "sell_only": 仅评估卖出信号
-        
+            row: 当前行情数据字典 (由 df_all.loc[code].to_dict() 提供)
+            snapshot: 辅助快照数据 (包含昨收、昨量、成本价等)
+            mode: 评估模式 ("full", "buy_only", "sell_only")
+            
         Returns:
             dict: {
-                "action": "买入" | "卖出" | "持仓" | "止损" | "止盈",
-                "position": float (0.0 ~ 1.0),
-                "reason": str,
-                "debug": dict
+                "action": str ("买入", "卖出", "持仓", "止损", "止盈", "警告"),
+                "position": float (新目标持仓, 0.0-1.0),
+                "reason": str (触发理由),
+                "debug": dict (盘中结构、趋势强度等分析信息)
             }
         """
-        debug = {}
+        debug: dict[str, Any] = {}
         price = float(row.get("trade", 0))
         high = float(row.get("high", 0))
-        low = float(row.get("low", 0))
+        low = float(row.get("low", 0)) # 用于后续分析
         open_p = float(row.get("open", 0))
         volume = float(row.get("volume", 0))
         ratio = float(row.get("ratio", 0))
@@ -82,13 +79,30 @@ class IntradayDecisionEngine:
         if price <= 0:
             return self._hold("价格无效", debug)
         
+        # ---------- 基础行情分析（提前进行以填充调试信息） ----------
+        # 1. 均线有效性检查
+        if ma5 > 0 and ma10 > 0:
+            # 盘中结构分析
+            structure = self._intraday_structure(price, high, open_p, ratio)
+            debug["structure"] = structure
+            
+            # 趋势强度评估
+            trend_strength = self._trend_strength(row, debug)
+            debug["trend_strength"] = trend_strength
+        else:
+            structure = "UNKNOWN"
+            trend_strength = 0.0
+            debug["structure"] = structure
+            debug["trend_strength"] = trend_strength
+            debug["analysis_skip"] = "均线数据无效"
+
         # ---------- 止损止盈检测（优先级最高） ----------
         if mode in ("full", "sell_only"):
-            stop_result = self._stop_check(price, high, snapshot, debug)
+            stop_result = self._stop_check(row, snapshot, debug)
             if stop_result["triggered"]:
                 return {
                     "action": stop_result["action"],
-                    "position": 0.0,
+                    "position": stop_result["position"],
                     "reason": stop_result["reason"],
                     "debug": debug
                 }
@@ -103,17 +117,9 @@ class IntradayDecisionEngine:
                 "debug": debug
             }
         
-        # ---------- 均线有效性检查 ----------
+        # 如果均线无效，虽然过了实时检查，但常规买卖逻辑无法继续
         if ma5 <= 0 or ma10 <= 0:
             return self._hold("均线数据无效", debug)
-
-        # ---------- 盘中结构分析 ----------
-        structure = self._intraday_structure(price, high, open_p, ratio)
-        debug["structure"] = structure
-        
-        # ---------- 趋势强度评估 ----------
-        trend_strength = self._trend_strength(row, debug)
-        debug["trend_strength"] = trend_strength
 
         # ---------- 卖出信号检测 ----------
         if mode in ("full", "sell_only"):
@@ -137,21 +143,29 @@ class IntradayDecisionEngine:
                 return self._hold(ma_reason, debug)
             
             if action == "买入":
-                # 应用各种过滤器调整仓位
+                # 1. 应用各种过滤器调整仓位
                 base_pos += self._yesterday_anchor(price, snapshot, debug)
                 base_pos += self._structure_filter(row, debug)
                 base_pos += self._extreme_filter(row, debug)
                 
-                # 趋势强度加成
-                if trend_strength > 0.5:
+                # 2. 趋势强度及多日趋势加成
+                multiday_score = self._multiday_trend_score(snapshot, debug)
+                if trend_strength > 0.5 or multiday_score > 0.3:
                     base_pos += 0.1
                 elif trend_strength < -0.3:
                     base_pos -= 0.1
                 
-                # 量能加成
+                # 3. 低位大仓位逻辑 (靠近 low10/low60 加成)
+                low10 = float(snapshot.get("low10", 0))
+                low60 = float(snapshot.get("low60", 0))
+                if (low10 > 0 and price < low10 * 1.02) or (low60 > 0 and price < low60 * 1.03):
+                    base_pos += 0.1
+                    debug["开仓权重"] = "低位加成"
+                
+                # 4. 量能加成
                 base_pos += self._volume_bonus(row, debug)
 
-                final_pos = max(min(base_pos, self.max_position), 0)
+                final_pos = max(min(base_pos, self.max_position * 1.2), 0) # 低位允许略超 max_position
                 if final_pos <= 0:
                     return self._hold("仓位被限制为0", debug)
 
@@ -177,34 +191,34 @@ class IntradayDecisionEngine:
         Returns:
             (action, position_delta, reason)
         """
-        reasons = []
         sell_score = 0.0
-        
-        # 1. MA5/MA10 死叉
-        if price < ma5 < ma10:
-            sell_score += 0.4
-            reasons.append("跌破MA5/MA10")
-        
-        # 2. 价格远低于 MA5
-        if ma5 > 0:
-            bias = (price - ma5) / ma5
-            if bias < -0.02:  # 低于 MA5 超过 2%
-                sell_score += 0.3
-                reasons.append(f"低于MA5 {abs(bias):.1%}")
-        
-        # 3. 盘中结构弱势
-        if structure == "DISTRIBUTE":
-            sell_score += 0.2
-            reasons.append("高位派发")
-        elif structure == "WEAK":
-            sell_score += 0.1
-            reasons.append("盘中走弱")
-        
-        # 4. 跌破昨日收盘
         last_close = float(snapshot.get("last_close", 0))
+        
+        reasons: list[str] = []
+        if price > ma5 * 1.05:
+            sell_score += 0.2
+            reasons.append("短线乖离过大")
+        if price < ma10:
+            sell_score += 0.15
+            reasons.append("价格低于MA10")
+        if structure in ["派发", "走弱"]:
+            sell_score += 0.1
+            reasons.append(f"结构{structure}")
         if last_close > 0 and price < last_close * 0.97:
             sell_score += 0.2
             reasons.append(f"跌破昨收{last_close:.2f}")
+            
+        # 额外加分项：反弹无力检测
+        nclose = float(snapshot.get("nclose", 0)) # 确保 nclose 已定义
+        if nclose > 0 and price < nclose * 0.985:
+            sell_score += 0.1
+            reasons.append("均价线下运行")
+            
+        # “连阳持仓”保护逻辑：如果是强势连阳，且未出现结构走弱，略微调低卖出分数
+        multiday_score = self._multiday_trend_score(snapshot, debug)
+        if multiday_score > 0.3 and structure not in ["派发", "走弱"]:
+            sell_score -= 0.15
+            debug["持仓保护"] = "连阳护航"
         
         debug["sell_score"] = sell_score
         debug["sell_reasons"] = reasons
@@ -216,48 +230,96 @@ class IntradayDecisionEngine:
     
     # ==================== 止损止盈 ====================
     
-    def _stop_check(self, price: float, high: float, snapshot: dict, debug: dict) -> dict:
+    def _stop_check(self, row: dict, snapshot: dict, debug: dict[str, Any]) -> dict:
         """
-        止损止盈检测
-        
-        Args:
-            price: 当前价格
-            high: 当日最高价
-            snapshot: 快照数据（应包含 cost_price、highest_since_buy）
-        
-        Returns:
-            {"triggered": bool, "action": str, "reason": str}
+        全量止损止盈及技术位破位检测
         """
+        price = float(row.get("trade", 0))
+        high = float(row.get("high", 0))
+        low = float(row.get("low", 0))
+        volume = float(row.get("volume", 0))
+        nclose = float(snapshot.get("nclose", 0))
         cost_price = float(snapshot.get("cost_price", 0))
         highest_since_buy = float(snapshot.get("highest_since_buy", 0))
         
-        if cost_price <= 0:
-            return {"triggered": False, "action": "", "reason": ""}
+        if cost_price <= 0 or price <= 0:
+            return {"triggered": False, "action": "", "position": 1.0, "reason": ""}
         
         pnl_pct = (price - cost_price) / cost_price
-        debug["pnl_pct"] = pnl_pct
+        debug["盈亏比例"] = pnl_pct
         
-        # 止损检测
+        # 1. 基础百分比止损 (分批)
         if pnl_pct < -self.stop_loss_pct:
-            reason = f"触发止损: 亏损{abs(pnl_pct):.1%} > {self.stop_loss_pct:.1%}"
-            logger.warning(f"止损信号: {reason}")
-            return {"triggered": True, "action": "止损", "reason": reason}
+            # 达到硬止损线，全清
+            return {"triggered": True, "action": "止损", "position": 0.0, "reason": f"硬止损触发: 亏损{abs(pnl_pct):.1%}"}
         
-        # 固定止盈检测
-        if pnl_pct > self.take_profit_pct:
-            reason = f"触发止盈: 盈利{pnl_pct:.1%} > {self.take_profit_pct:.1%}"
-            logger.info(f"止盈信号: {reason}")
-            return {"triggered": True, "action": "止盈", "reason": reason}
+        if pnl_pct < -0.03: # 预警止损（亏损 3%）
+            # 检查是否有反弹无力迹象（低于均价）
+            if nclose > 0 and price < nclose:
+                return {"triggered": True, "action": "预警减仓", "position": 0.5, "reason": f"亏损{abs(pnl_pct):.1%}且均价下方"}
+
+        # 2. 基础百分比止盈 (分三步)
+        if pnl_pct >= self.take_profit_pct:
+            return {"triggered": True, "action": "目标止盈", "position": 0.0, "reason": f"达到目标止盈: {pnl_pct:.1%}"}
         
-        # 移动止盈（回撤止盈）
+        if 0.05 <= pnl_pct < self.take_profit_pct:
+            # 盈利 5% 减 30% 保护利润
+            debug["分步止盈"] = "第一目标已达"
+            # 保持盈利 5% 的减仓建议可以通过实时判断后续给出
+
+        # 3. 移动止盈 (回撤保护)
         if highest_since_buy > 0 and highest_since_buy > cost_price:
             drawdown = (highest_since_buy - price) / highest_since_buy
-            if drawdown > self.trailing_stop_pct and pnl_pct > 0.03:  # 仍有盈利才触发
-                reason = f"移动止盈: 从最高{highest_since_buy:.2f}回撤{drawdown:.1%}"
-                logger.info(f"移动止盈信号: {reason}")
-                return {"triggered": True, "action": "止盈", "reason": reason}
+            if pnl_pct > 0.03 and drawdown > self.trailing_stop_pct:
+                return {"triggered": True, "action": "移动止盈", "position": 0.3, "reason": f"最高回撤{drawdown:.1%}"}
+
+        # 4. 技术位破位检测 (大开大合)
+        low10 = float(snapshot.get("low10", 0))
+        low60 = float(snapshot.get("low60", 0))
+        hmax = float(snapshot.get("hmax", 0))
+        lower = float(snapshot.get("lower", 0))
         
-        return {"triggered": False, "action": "", "reason": ""}
+        # 平台破位/关键支撑
+        break_reason = ""
+        if lower > 0 and price < lower:
+            break_reason = "跌破布林下轨"
+        elif low10 > 0 and price < low10 * 0.995:
+            break_reason = "跌破10日低点"
+        elif hmax > 0 and price < hmax * 0.985: # 原高点转支撑失效
+            break_reason = f"跌破平台支撑({hmax:.2f})"
+        
+        if low60 > 0 and price < low60 * 0.98: # 60日大底破位
+            break_reason = "跌破60日底线"
+            
+        if break_reason:
+            # 如果是带量破位（量比 > 2）
+            if volume > 2.0:
+                return {"triggered": True, "action": "强制清仓", "position": 0.0, "reason": f"放量破位: {break_reason}"}
+            else:
+                return {"triggered": True, "action": "破位减仓", "position": 0.3, "reason": break_reason}
+
+        # 5. 布林压力位逻辑 (upper1-5)
+        uppers = [snapshot.get(f'upper{i}', 0) for i in range(1, 6)]
+        for i, up in enumerate(reversed(uppers)):
+            level = 5 - i
+            if up > 0 and price >= up:
+                # 触及 upper4/5 时检查盘中结构
+                structure = debug.get("structure", "中性")
+                if level >= 4:
+                    if structure in ["派发", "走弱"] or (volume > 2.5 and price < nclose):
+                        return {"triggered": True, "action": "高位止盈", "position": 0.3 if level == 5 else 0.5, "reason": f"触及布林{level}轨压力+盘中走弱"}
+                    debug["布林压力"] = f"触及{level}轨，观察中"
+                break
+
+        # 6. 大开大合逻辑 (大幅振幅且回落)
+        if nclose > 0:
+            daily_amplitude = (high - low) / nclose if nclose > 0 else 0
+            if daily_amplitude > 0.08: # 振幅超过 8%
+                # 如果从高位回撤显著且低于均价
+                if high > 0 and (high - price) / high > 0.04 and price < nclose:
+                    return {"triggered": True, "action": "振幅减仓", "position": 0.2, "reason": f"大开大合(振幅{daily_amplitude:.1%})且回落"}
+
+        return {"triggered": False, "action": "", "position": 1.0, "reason": ""}
 
     # ==================== 趋势强度 ====================
     
@@ -305,9 +367,9 @@ class IntradayDecisionEngine:
             elif price < ma60 * 0.95:
                 score -= 0.2
         
-        debug["trend_components"] = {
-            "ma_alignment": score,
-            "macd_direction": macd
+        debug["趋势分量"] = {
+            "均线排列": score,
+            "MACD方向": macd
         }
         
         return max(-1.0, min(1.0, score))
@@ -333,7 +395,7 @@ class IntradayDecisionEngine:
         elif ratio < 1:
             bonus -= 0.05  # 量能不足
         
-        debug["volume_bonus"] = bonus
+        debug["量能加成"] = bonus
         return bonus
 
     # ==================== 原有方法（保持兼容） ====================
@@ -341,12 +403,12 @@ class IntradayDecisionEngine:
     def _intraday_structure(self, price: float, high: float, open_p: float, ratio: float) -> str:
         """判断盘中结构"""
         if high > 0 and (high - price) / high > 0.02 and ratio > 8:
-            return "DISTRIBUTE"  # 高位派发
+            return "派发"  # 原 DISTRIBUTE
         if price > open_p and ratio > 5:
-            return "STRONG"  # 强势上涨
+            return "强势"  # 原 STRONG
         if price < open_p and ratio > 5:
-            return "WEAK"  # 高开低走
-        return "NEUTRAL"
+            return "走弱"  # 原 WEAK
+        return "中性"  # 原 NEUTRAL
 
     def _ma_decision(self, price: float, ma5: float, ma10: float) -> tuple:
         """均线决策"""
@@ -357,7 +419,7 @@ class IntradayDecisionEngine:
             return "卖出", -0.3, "跌破MA5/MA10"
         if bias > 0.05:
             return "持仓", 0, "远离MA5，追高风险"
-        return "持仓", 0, "结构中性"
+        return "持仓", 0, "均线结构中性"
 
     def _yesterday_anchor(self, price: float, snapshot: dict, debug: dict) -> float:
         """昨日锚点惩罚"""
@@ -368,7 +430,7 @@ class IntradayDecisionEngine:
             penalty -= 0.1
         if last_nclose > 0 and price < last_nclose:
             penalty -= 0.15
-        debug["yesterday_penalty"] = penalty
+        debug["昨日约束"] = penalty
         return penalty
 
     def _structure_filter(self, row: dict, debug: dict) -> float:
@@ -384,7 +446,7 @@ class IntradayDecisionEngine:
             penalty -= 0.1
         if high4 > 0 and price > high4 * 0.98:
             penalty -= 0.05
-        debug["structure_penalty"] = penalty
+        debug["结构约束"] = penalty
         return penalty
 
     def _extreme_filter(self, row: dict, debug: dict) -> float:
@@ -404,7 +466,7 @@ class IntradayDecisionEngine:
             penalty -= 0.1
         if lower > 0 and price < lower:
             penalty -= 0.1
-        debug["extreme_penalty"] = penalty
+        debug["指标约束"] = penalty
         return penalty
 
     # ==================== 实时行情高优先级决策 ====================
@@ -507,8 +569,8 @@ class IntradayDecisionEngine:
                 buy_score -= 0.1
                 buy_reasons.append(f"趋势偏空({multiday_score:.1f})")
             
-            debug["realtime_buy_score"] = buy_score
-            debug["realtime_buy_reasons"] = buy_reasons
+            debug["实时买入分"] = buy_score
+            debug["实时买入理由"] = buy_reasons
             
             # 触发条件：得分 >= 0.4
             if buy_score >= 0.4:
@@ -543,7 +605,7 @@ class IntradayDecisionEngine:
                         "position": round(sell_pos, 2),
                         "reason": f"跌破均价{deviation:.1%} (阈值{threshold:.1%})"
                     }
-                    debug["realtime_sell_deviation"] = deviation
+                    debug["实时卖出偏离"] = deviation
                     logger.debug(f"实时卖出触发: deviation={deviation:.2%} threshold={threshold:.2%}")
                     return result
         
@@ -604,8 +666,8 @@ class IntradayDecisionEngine:
                 score -= 0.1
                 reasons.append("量能萎缩")
         
-        debug["volume_emotion_score"] = score
-        debug["volume_emotion_reasons"] = reasons
+        debug["成交情绪分"] = score
+        debug["成交情绪理由"] = reasons
         return score
 
     def _volume_price_signal(self, row: dict, snapshot: dict, mode: str, debug: dict) -> dict:
@@ -724,8 +786,8 @@ class IntradayDecisionEngine:
                     buy_score += 0.15
                     signals.append("均线平行蓄势")
                 
-                debug["ma_diff_pct"] = ma_diff_pct * 100
-                debug["ma_is_parallel"] = ma_is_parallel
+                debug["均线差距%"] = ma_diff_pct * 100
+                debug["均线平行"] = ma_is_parallel
             
             # 4. 沿均线放量爬坡（阳线 + 突破新高）
             hmax = float(row.get("hmax", 0))
@@ -748,8 +810,8 @@ class IntradayDecisionEngine:
                 buy_score += 0.15
                 signals.append("阳线创新高")
             
-            debug["vp_buy_score"] = buy_score
-            debug["vp_buy_signals"] = signals
+            debug["量价买入分"] = buy_score
+            debug["量价买入信号"] = signals
             
             if buy_score >= 0.3:
                 result = {
@@ -797,8 +859,8 @@ class IntradayDecisionEngine:
                     sell_signals.append("MA5<MA20")
                 # 平行均线不触发卖出信号
             
-            debug["vp_sell_score"] = sell_score
-            debug["vp_sell_signals"] = sell_signals
+            debug["量价卖出分"] = sell_score
+            debug["量价卖出信号"] = sell_signals
             
             if sell_score >= 0.3:
                 result = {

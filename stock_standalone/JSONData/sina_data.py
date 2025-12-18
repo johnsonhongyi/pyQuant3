@@ -252,17 +252,52 @@ class Sina:
     def get_int_time(self,timet):
         return int(time.strftime("%H:%M:%S",time.localtime(timet))[:6].replace(':',''))
 
-    def load_stock_codes(self):
-        with open(self.stock_code_path) as f:
-            self.stock_codes = list(set(json.load(f)['stock']))
+    def load_stock_codes(self, all_codes=None):
+        if all_codes is not None:
+            self.stock_codes = list(set(all_codes))
+        else:
+            with open(self.stock_code_path) as f:
+                self.stock_codes = list(set(json.load(f)['stock']))
+        
+        # 统一内存级别剔除停牌股
+        excluded_codes = cct.GlobalValues().getkey('suspended_codes') or []
+        if excluded_codes:
+            original_len = len(self.stock_codes)
+            self.stock_codes = [c for c in self.stock_codes if c not in excluded_codes]
+            if len(self.stock_codes) < original_len:
+                log.info(f"Session过滤停牌/无效股: {original_len - len(self.stock_codes)} 只")
+
+    def _filter_suspended(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        统一检测并剔除停牌/无效股票，并更新内存缓存
+        """
+        if df is None or len(df) == 0:
+            return df
+            
+        # 判定条件：open, now 均为 0 表示停牌或无效。
+        # 注意：format_response_data 中已将原始 close 映射为 llastp，并将 now 映射为新 close。
+        # 因此 query 使用 close==0 or now==0 均可。
+        query_str = 'open == 0 and now == 0'
+        if 'close' in df.columns:
+            query_str = 'open == 0 and close == 0 and now == 0'
+            
+        suspended = df.query(query_str)
+        if len(suspended) > 0:
+            new_suspended = suspended.index.tolist()
+            log.info(f"检测到停牌股/无效数据: {len(new_suspended)} 只, 内存已记录并剔除")
+            excluded = cct.GlobalValues().getkey('suspended_codes') or []
+            excluded.extend(new_suspended)
+            cct.GlobalValues().setkey('suspended_codes', list(set(excluded)))
+            df = df.drop(new_suspended)
+        return df
 
     @property
     def all(self):
 
         self.stockcode = StockCode()
         self.stock_code_path = self.stockcode.stock_code_path
-        self.stock_codes = self.stockcode.get_stock_codes()
-        self.load_stock_codes()
+        all_codes = self.stockcode.get_stock_codes()
+        self.load_stock_codes(all_codes)
         self.stock_codes = [elem for elem in self.stock_codes if elem.startswith(('6', '30', '00','688','43','83','87','92'))]
         time_s = time.time()
         logtime = cct.get_config_value_ramfile(self.hdf_name,xtype='time',readonly=True)
@@ -283,7 +318,7 @@ class Sina:
             elif isinstance(ts, datetime.datetime):
                 ts_str = ts.strftime('%H%M%S')
             elif isinstance(ts, str):
-                # 如果已经是字符串，尝试去掉冒号或处理已有格式
+                # 如果已经是字符串，尝试去掉冒号 or 处理已有格式
                 ts_str = ts.replace(":", "")[-6:]  # 保留 HHMMSS
             else:
                 # 其他类型直接转字符串
@@ -311,11 +346,11 @@ class Sina:
                         
                 if sina_time_status and l_time < 6:
                     log.info("open 915 hdf ok:%s" % (len(h5)))
-                    return h5
+                    return self._filter_suspended(h5)
                 elif not sina_time_status and return_hdf_status:
                     log.info("return hdf5 data:%s" % (len(h5)))
                     ###update lastbuy data at not worktime
-                    return h5
+                    return self._filter_suspended(h5)
                 else:
                     log.info("no return  hdf5:%s" % (len(h5)))
         else:
@@ -349,10 +384,16 @@ class Sina:
         #     print i
         #     a += i
         #     print a
+        #     print a
         log.debug('all:%s' % len(self.stock_list[:5]))
         # log.error('all:%s req:%s' %
         #           (len(self.stock_list), len(self.stock_list)))
-        return self.get_stock_data()
+        
+        df = self.get_stock_data()
+        # 移除原 Sina.all 尾部的重复逻辑 (已合并到 get_stock_data 并通过 _filter_suspended 统一处理)
+
+        return self._filter_suspended(df)
+
 
     def get_cname_code(self,cname):
         self.cname  = True
@@ -380,8 +421,8 @@ class Sina:
         else:
             self.stockcode = StockCode()
             self.stock_code_path = self.stockcode.stock_code_path
-            self.stock_codes = self.stockcode.get_stock_codes()
-            self.load_stock_codes()
+            all_codes = self.stockcode.get_stock_codes()
+            self.load_stock_codes(all_codes)
             # print type(self.stock_codes)
             # self.stock_with_exchange_list = list(
             # map(lambda stock_code: ('sh%s' if stock_code.startswith(('5', '6', '9')) else 'sz%s') % stock_code,
@@ -439,7 +480,7 @@ class Sina:
 
                 if len(o_time) > 0 and ((self.get_int_time(o_time[0]) >= 1500 and ticktime >= 1500) or (self.get_int_time(o_time[0]) < 1500 and ticktime < 1500) ):
                     h5 = self.combine_lastbuy(h5)
-                    return h5
+                    return self._filter_suspended(h5)
 
             self.stock_list = []
             self.request_num = len(self.stock_with_exchange_list) // self.max_num
@@ -461,7 +502,7 @@ class Sina:
                 request_list = ','.join(
                     self.stock_with_exchange_list)
                 self.stock_list.append(request_list)
-            return self.get_stock_data()
+            return self._filter_suspended(self.get_stock_data())
 
 
     # https://github.com/jinrongxiaoe/easyquotation
@@ -500,7 +541,9 @@ class Sina:
             # asyncio.run(asyncio.wait(threads))
             # loop.close()
             log.debug('get_stock_data_loop')
-            return self.format_response_data()
+            
+            df = self.format_response_data()
+            return self._filter_suspended(df)
 
         raise IOError(ct.NETWORK_URL_ERROR_MSG)
 
@@ -950,6 +993,8 @@ if __name__ == "__main__":
     # print((sina.get_stock_code_data('300107').T))
 
     df =sina.all
+    import ipdb;ipdb.set_trace()
+    
     print(len(df))
     print(f"df.loc['002786']: {df.loc['002786']}")
     print((df[-5:][['open','close']].T))
