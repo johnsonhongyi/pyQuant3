@@ -3865,7 +3865,8 @@ class StockMonitorApp(tk.Tk):
         #     minwidth = int(30 * col_scaled)
         #     stretch = not self.dfcf_var.get()
         # tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=stretch)
-        co2int = ['ra', 'ral', 'fib', 'fibl', 'op', 'ratio', 'ra']
+        # co2int = ['ra', 'ral', 'fib', 'fibl', 'op', 'ratio', 'ra']
+        co2int = ['ra', 'ral', 'fib', 'fibl', 'op', 'ra']
         co2width = ['boll', 'kind', 'red']
         co3other = ['MainU']
         col_scaled = self.get_scaled_value() 
@@ -6243,6 +6244,9 @@ class StockMonitorApp(tk.Tk):
                             
             menu.add_separator()
             
+            menu.add_command(label="🧪 测试买卖策略", 
+                            command=lambda: self.test_strategy_for_stock(stock_code, stock_name))
+            
             menu.add_command(label="🏷️ 添加标注备注", 
                             command=lambda: self.add_stock_remark(stock_code, stock_name))
             
@@ -6345,6 +6349,200 @@ class StockMonitorApp(tk.Tk):
         except Exception as e:
             logger.error(f"Push logic error: {e}")
 
+    def test_strategy_for_stock(self, code, name):
+        """
+        测试选中股票的买卖策略并生成分析报告
+        用于验证数据完整性和策略决策
+        """
+        try:
+            from intraday_decision_engine import IntradayDecisionEngine
+            
+            # 检查数据是否存在
+            if code not in self.df_all.index:
+                messagebox.showwarning("数据缺失", f"未找到代码 {code} 的数据")
+                return
+            
+            row = self.df_all.loc[code]
+            
+            # 构建行情数据字典
+            row_dict = row.to_dict() if hasattr(row, 'to_dict') else dict(row)
+            
+            # 构建快照数据（使用 df_all 中的正确字段名）
+            # lastp1d = 昨日收盘价, lastv1d/2d/3d = 昨日/前日/大前日成交量
+            # lasth1d/lastl1d = 昨日最高/最低价, per1d = 昨日涨幅
+            snapshot = {
+                'last_close': row_dict.get('lastp1d', row_dict.get('settle', 0)),
+                'percent': row_dict.get('per1d', row_dict.get('percent', 0)),
+                'nclose': row_dict.get('nclose', 0),
+                'lastv1d': row_dict.get('lastv1d', 0),
+                'lastv2d': row_dict.get('lastv2d', 0),
+                'lastv3d': row_dict.get('lastv3d', 0),
+                'lasth1d': row_dict.get('lasth1d', 0),  # 昨日最高价
+                'lastl1d': row_dict.get('lastl1d', 0),  # 昨日最低价
+                'cost_price': row_dict.get('trade', 0),  # 假设当前价为成本
+                'highest_since_buy': row_dict.get('high', 0)
+            }
+            
+            # 创建决策引擎实例
+            engine = IntradayDecisionEngine()
+            
+            # 执行评估
+            result = engine.evaluate(row_dict, snapshot, mode="full")
+            
+            # 检测数据缺失（使用 df_all 中的正确字段名）
+            missing_fields = []
+            critical_fields = ['trade', 'open', 'high', 'low', 'nclose', 'volume', 
+                              'ratio', 'ma5d', 'ma10d', 'lastp1d', 'percent']
+            for field in critical_fields:
+                val = row_dict.get(field, None)
+                if val is None or (isinstance(val, (int, float)) and val == 0):
+                    missing_fields.append(field)
+            
+            # 构建报告
+            report_lines = [
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                f"📊 策略测试报告 - {name} ({code})",
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+                "",
+                "【决策结果】",
+                f"  动作: {result['action']}",
+                f"  仓位: {result['position'] * 100:.0f}%",
+                f"  原因: {result['reason']}",
+                "",
+            ]
+            
+            # 决策调试信息（优先显示便于分析）
+            debug = result.get('debug', {})
+            if debug:
+                report_lines.append("【决策调试信息】")
+                for key, val in debug.items():
+                    if isinstance(val, float):
+                        report_lines.append(f"  {key}: {val:.4f}")
+                    elif isinstance(val, list):
+                        report_lines.append(f"  {key}: {', '.join(map(str, val))}")
+                    else:
+                        report_lines.append(f"  {key}: {val}")
+                report_lines.append("")
+            
+            # 数据完整性检查
+            if missing_fields:
+                report_lines.extend([
+                    "⚠️ 【数据缺失警告】",
+                    f"  缺失字段: {', '.join(missing_fields)}",
+                    "  建议: 检查数据源或重新加载",
+                    ""
+                ])
+            else:
+                report_lines.extend([
+                    "✅ 【数据完整性检查】",
+                    "  所有关键字段正常",
+                    ""
+                ])
+            
+            # 关键行情数据
+            report_lines.extend([
+                "【关键行情数据】",
+                f"  当前价: {row_dict.get('trade', 'N/A')}",
+                f"  开盘价: {row_dict.get('open', 'N/A')}",
+                f"  最高价: {row_dict.get('high', 'N/A')}",
+                f"  最低价: {row_dict.get('low', 'N/A')}",
+                f"  均价:   {row_dict.get('nclose', 'N/A')}",
+                f"  昨收:   {snapshot.get('last_close', 'N/A')}",
+                "",
+                "【技术指标】",
+                f"  MA5:    {row_dict.get('ma5d', 'N/A')}",
+                f"  MA10:   {row_dict.get('ma10d', 'N/A')}",
+                f"  MA20:   {row_dict.get('ma20d', 'N/A')}",
+                f"  MACD:   {row_dict.get('macd', 'N/A')}",
+                f"  KDJ_J:  {row_dict.get('kdj_j', 'N/A')}",
+                "",
+                "【量能数据】",
+                f"  成交量: {row_dict.get('volume', 'N/A')}",
+                f"  换手率: {row_dict.get('ratio', 'N/A')}%",
+                f"  昨日量: {snapshot.get('lastv1d', 'N/A')}",
+            ])
+            
+            report_text = "\n".join(report_lines)
+            
+            # 创建报告窗口
+            self._show_strategy_report_window(code, name, report_text, result)
+            
+        except Exception as e:
+            logger.error(f"Strategy test error: {e}")
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("测试失败", f"策略测试出错: {e}")
+
+    def _show_strategy_report_window(self, code, name, report_text, result):
+        """显示策略测试报告窗口"""
+        win = tk.Toplevel(self)
+        win.title(f"🧪 策略测试 - {name} ({code})")
+        window_id = '策略测试'
+        # 窗口定位
+        # w, h = 600, 850
+        # mx, my = self.winfo_pointerx(), self.winfo_pointery()
+        # pos_x, pos_y = mx - w - 20, my - h // 2
+        # pos_x, pos_y = max(0, pos_x), max(0, pos_y)
+        # win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
+        self.load_window_position(win, window_id, default_width=600, default_height=850)
+        
+        # 顶部状态栏
+        action = result.get('action', '持仓')
+        action_color = {
+            '买入': '#4CAF50',
+            '卖出': '#F44336',
+            '止损': '#FF5722',
+            '止盈': '#2196F3',
+            '持仓': '#9E9E9E'
+        }.get(action, '#9E9E9E')
+        
+        top_frame = tk.Frame(win, bg=action_color, height=40)
+        top_frame.pack(fill='x')
+        top_frame.pack_propagate(False)
+        
+        action_label = tk.Label(top_frame, 
+                               text=f"建议: {action} | 仓位: {result['position']*100:.0f}%",
+                               fg='white', bg=action_color,
+                               font=('Microsoft YaHei', 14, 'bold'))
+        action_label.pack(pady=8)
+        
+        # 报告文本区域
+        txt_frame = tk.Frame(win)
+        txt_frame.pack(fill='both', expand=True, padx=10, pady=5)
+        
+        scrollbar = ttk.Scrollbar(txt_frame)
+        txt = tk.Text(txt_frame, wrap='word', font=('Consolas', 10), 
+                     yscrollcommand=scrollbar.set, padx=10, pady=5)
+        scrollbar.config(command=txt.yview)
+        
+        txt.pack(side='left', fill='both', expand=True)
+        scrollbar.pack(side='right', fill='y')
+        
+        txt.insert('1.0', report_text)
+        txt.config(state='disabled')
+        
+        # 底部按钮
+        btn_frame = tk.Frame(win)
+        btn_frame.pack(pady=10)
+        
+        def copy_report():
+            win.clipboard_clear()
+            win.clipboard_append(report_text)
+            self.status_var2.set("报告已复制到剪贴板")
+        
+        tk.Button(btn_frame, text="📋 复制报告", command=copy_report, 
+                 width=12).pack(side='left', padx=5)
+        tk.Button(btn_frame, text="关闭 (ESC)", command=win.destroy, 
+                 width=12).pack(side='left', padx=5)
+
+        def on_close(event=None):
+            # update_window_position(window_id)
+            self.save_window_position(win, window_id)
+            win.destroy()
+        win.bind("<Escape>", on_close)
+        win.protocol("WM_DELETE_WINDOW", on_close)
+        # ESC 关闭
+        # win.bind("<Escape>", lambda e: win.destroy())
     def copy_stock_info(self, code):
         """提取并复制格式化信息"""
         try:

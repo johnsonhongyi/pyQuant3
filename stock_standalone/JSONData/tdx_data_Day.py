@@ -3443,7 +3443,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
             df = dd
     if len(df) < 1 or len(dm) < 1:
         log.info("len(df):%s dm:%s" % (len(df), len(dm)))
-        dm['ratio'] = 0
+        dm['ratio'] = 0.0
     else:
         if len(dm) != len(df):
             log.info("code:%s %s diff:%s" %
@@ -3485,7 +3485,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     if top_now is None or len(top_now) == 0:
         log.error("top_all is None :%s" % (top_now))
     if isinstance(top_now,pd.DataFrame) and not 'ratio' in top_now.columns:
-        top_now['ratio'] = 0
+        top_now['ratio'] = 0.0
     # top_now = top_now.query('open != 0 and close != 0')
     return cct.reduce_memory_usage(top_now)
 
@@ -6052,7 +6052,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
     # for co in co2int:
     #     df[co]= df[co].astype(int)
 
-    co2int = ['boll','dff','ra','ral','fib','fibl','op', 'ratio','red','ra']    
+    co2int = ['boll','dff','ra','ral','fib','fibl','op','red','ra']    
     # co2int = ['boll','dff','ra','ral','fib','fibl','op', 'ratio','red','top5','top10','ra']    
     for col in co2int:
         if col in top_all.columns:
