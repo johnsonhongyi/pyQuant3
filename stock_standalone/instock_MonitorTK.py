@@ -5338,6 +5338,7 @@ class StockMonitorApp(tk.Tk):
         if selected_item:
             stock_info = self.tree.item(selected_item, 'values')
             stock_code = stock_info[0]
+            stock_name = stock_info[1]
 
             send_tdx_Key = (self.select_code != stock_code)
             self.select_code = stock_code
@@ -5378,7 +5379,7 @@ class StockMonitorApp(tk.Tk):
                 )
 
                 # ✅ 复用 Tooltip 入口
-                self.on_tree_click_for_tooltip(fake_event,stock_code)
+                self.on_tree_click_for_tooltip(fake_event,stock_code,stock_name)
 
             except Exception as e:
                 logger.warning(f"Tooltip select trigger failed: {e}")
@@ -7286,7 +7287,7 @@ class StockMonitorApp(tk.Tk):
         # Right-Bottom origin
         w, h = 400, 260 # 稍微增高
         margin = 10
-        taskbar = 80 # 避开任务栏
+        taskbar = 100 # 避开任务栏
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
         
@@ -8228,7 +8229,7 @@ class StockMonitorApp(tk.Tk):
         return False  # 未找到
 
 
-    def on_tree_click_for_tooltip(self, event,stock_code=None):
+    def on_tree_click_for_tooltip(self, event,stock_code=None,stock_name=None):
         """处理树视图点击事件，延迟显示提示框"""
         logger.debug(f"[Tooltip] 点击事件触发: x={event.x}, y={event.y}")
         if self.tip_var.get():
@@ -8261,21 +8262,21 @@ class StockMonitorApp(tk.Tk):
             if not values:
                 logger.debug("[Tooltip] 行没有数据")
                 return
-            code = str(values[0])  # code在第一列
-            name = str(values[1])  # code在第二列
+            stock_code = str(values[0])  # code在第一列
+            stock_name = str(values[1])  # code在第二列
             
-            self.test_strategy_for_stock(code, name)
         else:
-            code = stock_code
+            stock_code = stock_code
+        self.test_strategy_for_stock(stock_code, stock_name)
         # x_root, y_root = event.x_root, event.y_root  # 保存坐标
-        logger.debug(f"[Tooltip] 获取到代码: {code}, 设置0.2秒定时器")
+        logger.debug(f"[Tooltip] 获取到代码: {stock_code}, 设置0.2秒定时器")
 
         # 设置0.2秒延迟定时器
-        self._tooltip_timer = self.after(200, lambda e=event:self.show_stock_tooltip(code, e))
+        self._tooltip_timer = self.after(200, lambda e=event:self.show_stock_tooltip(stock_code, e))
 
 
     def show_stock_tooltip(self, code, event):
-        """显示股票信息提示框，柔和背景 + 分色文字"""
+        """显示股票信息提示框，支持位置保存/加载"""
         logger.debug(f"[Tooltip] show_stock_tooltip 被调用: code={code}")
 
         # 清理定时器引用
@@ -8296,40 +8297,73 @@ class StockMonitorApp(tk.Tk):
             return
 
         stock_data = self.df_all.loc[code_clean]
+        stock_name = stock_data.get('name', code_clean) if hasattr(stock_data, 'get') else code_clean
 
         logger.debug(f"[Tooltip] 找到股票数据，准备创建提示框")
 
-        # 创建 tooltip
-        tooltip = tk.Toplevel(self)
-        tooltip.wm_overrideredirect(True)
-        tooltip.wm_geometry(f"+{event.x_root+15}+{event.y_root+15}")
-        tooltip.configure(bg='#FFF8E7')
-        self._current_tooltip = tooltip
+        # 关闭已存在的 tooltip
+        if hasattr(self, '_current_tooltip') and self._current_tooltip:
+            try:
+                self._current_tooltip.destroy()
+            except:
+                pass
+
+        # 创建 Toplevel 窗口（带边框，可拖拽）
+        window_id = "stock_tooltip"
+        win = tk.Toplevel(self)
+        win.title(f"📊 {stock_name} ({code_clean})")
+        win.configure(bg='#FFF8E7')
+        win.resizable(True, True)
+        
+        # 加载保存的位置，或使用默认位置
+        self.load_window_position(win, window_id, default_width=280, default_height=320)
+        
+        # 如果没有保存的位置，使用鼠标位置
+        # if not hasattr(self, '_window_positions') or window_id not in getattr(self, '_window_positions', {}):
+        #     win.geometry(f"+{event.x_root+15}+{event.y_root+15}")
+        
+        self._current_tooltip = win
+
+        # ESC / 关闭时保存位置
+        def on_close(event=None):
+            self.save_window_position(win, window_id)
+            win.destroy()
+            self._current_tooltip = None
+        
+        win.bind("<Escape>", on_close)
+        win.protocol("WM_DELETE_WINDOW", on_close)
 
         # 获取多行文本和对应颜色
         lines, colors = self._format_stock_info(stock_data)
 
-        # 使用 Text 控件显示
+        # 创建 Text 控件（无滚动条，用鼠标滚轮滚动）
+        frame = tk.Frame(win, bg='#FFF8E7')
+        frame.pack(fill='both', expand=True, padx=5, pady=5)
+        
         text_widget = tk.Text(
-            tooltip,
+            frame,
             bg='#FFF8E7',
             bd=0,
             padx=8,
             pady=6,
-            height=len(lines),
-            width=max(len(line) for line in lines),
-            font=("Microsoft YaHei", 9)  # 默认文字字体
+            wrap='word',
+            font=("Microsoft YaHei", 9)
         )
-        text_widget.pack()
+        text_widget.pack(fill='both', expand=True)
+        
+        # 绑定鼠标滚轮滚动
+        def on_mousewheel(event):
+            text_widget.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        text_widget.bind("<MouseWheel>", on_mousewheel)
+        frame.bind("<MouseWheel>", on_mousewheel)
 
         for i, (line, color) in enumerate(zip(lines, colors)):
-            tag_name = f"line_{i}"          # 每行一个唯一 tag
+            tag_name = f"line_{i}"
             text_widget.insert(tk.END, line + "\n", tag_name)
             text_widget.tag_config(tag_name, foreground=color, font=("Microsoft YaHei", 9))
 
             # 检查 signal 行，单独设置图标颜色和大小
             if "signal:" in line:
-                # 找到图标位置
                 icon_index = line.find("👍")
                 if icon_index == -1:
                     icon_index = line.find("🚀")
@@ -8337,25 +8371,19 @@ class StockMonitorApp(tk.Tk):
                     icon_index = line.find("☀️")
 
                 if icon_index != -1:
-                    start = f"{i+1}.{icon_index}"       # 第 i+1 行，第 icon_index 个字符
-                    end = f"{i+1}.{icon_index+2}"       # 图标占 1-2 个字符
+                    start = f"{i+1}.{icon_index}"
+                    end = f"{i+1}.{icon_index+2}"
                     text_widget.tag_add(f"icon_{i}", start, end)
                     text_widget.tag_config(f"icon_{i}", foreground="#FF6600", font=("Microsoft YaHei", 12, "bold"))
 
         text_widget.config(state=tk.DISABLED)
 
-        # 计算显示位置
-        x = event.x_root + 15
-        y = event.y_root + 15
-        tooltip.update_idletasks()  # 确保 Text 完全渲染
-        width = text_widget.winfo_reqwidth()
-        height = text_widget.winfo_reqheight()
-        tooltip.geometry(f"{width}x{height}+{x}+{y}")
+        # 底部关闭按钮
+        btn_frame = tk.Frame(win, bg='#FFF8E7')
+        btn_frame.pack(fill='x', pady=3)
+        tk.Button(btn_frame, text="关闭 (ESC)", command=on_close, width=10).pack()
 
-        # 保存引用
-        self._current_tooltip = tooltip
-
-        logger.debug(f"[Tooltip] 提示框已创建并显示在 ({event.x_root+15}, {event.y_root+15})")
+        logger.debug(f"[Tooltip] 提示框已创建")
 
     def _format_stock_info(self, stock_data):
         """格式化股票信息为显示文本，并返回颜色标签"""
