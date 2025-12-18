@@ -2045,7 +2045,7 @@ if __name__ == "__main__":
         dl='60'
         filter='y'
         h5_table = 'low' + '_' + resample + '_' + str(dl) + '_' + filter + '_' + 'all'
-        h5_table = 'all_30'
+        h5_table = f'all_{cct.sina_limit_time}'
         h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
         return h5
 
@@ -2106,7 +2106,6 @@ if __name__ == "__main__":
 
 
     # sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
-    sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
     tdx_hd5_name = r'tdx_all_df_%s' % (300)
 
     # h5repack tdx_hd5_path tdx_hd5_path.bak
@@ -2114,9 +2113,9 @@ if __name__ == "__main__":
     check_tdx_all_df('300')
     check_tdx_all_df('900')
     check_tdx_all_df_read('900')
-    import ipdb;ipdb.set_trace()
 
     # sina_MultiD_path = "D:\\RamDisk\\sina_MultiIndex_data.h5"
+    sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
     freq='30T'
     startime = '09:25:00'
     endtime = '15:01:00'

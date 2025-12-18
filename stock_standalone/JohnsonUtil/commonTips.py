@@ -541,6 +541,13 @@ class GlobalConfig:
         self.duration_sleep_time = self.get_with_writeback("general", "duration_sleep_time", fallback=120, value_type="int")
         self.compute_lastdays = self.get_with_writeback("general", "compute_lastdays", fallback=5, value_type="int")
         self.alert_cooldown = self.get_with_writeback("general", "alert_cooldown", fallback=120, value_type="int")
+        self.sina_limit_time = self.get_with_writeback("general", "sina_limit_time", fallback=30, value_type="int")
+        self.stop_loss_pct = self.get_with_writeback("general", "stop_loss_pct", fallback=0.05, value_type="float")
+        self.take_profit_pct = self.get_with_writeback("general", "take_profit_pct", fallback=0.10, value_type="float")
+        self.trailing_stop_pct = self.get_with_writeback("general", "trailing_stop_pct", fallback=0.03, value_type="float")
+        self.max_single_stock_ratio = self.get_with_writeback("general", "max_single_stock_ratio", fallback=0.3, value_type="float")
+        self.min_position_ratio = self.get_with_writeback("general", "min_position_ratio", fallback=0.05, value_type="float")
+        self.risk_duration_threshold = self.get_with_writeback("general", "risk_duration_threshold", fallback=300, value_type="int")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="260x180")
         try:
@@ -661,6 +668,13 @@ macroot_vm = CFG.get_path("macroot_vm")
 xproot = CFG.get_path("xproot")
 tdx_all_df_path = CFG.get_path("tdx_all_df_path")
 compute_lastdays = CFG.compute_lastdays
+sina_limit_time = CFG.sina_limit_time
+stop_loss_pct = CFG.stop_loss_pct
+take_profit_pct = CFG.take_profit_pct
+trailing_stop_pct = CFG.trailing_stop_pct
+max_single_stock_ratio = CFG.max_single_stock_ratio
+min_position_ratio = CFG.min_position_ratio
+risk_duration_threshold = CFG.risk_duration_threshold
 
 def get_os_path_sep():
     return os.path.sep
@@ -2475,7 +2489,7 @@ def set_ctrl_handler():
 
 def set_clear_logtime(time_t=1):
     h5_fname = 'sina_MultiIndex_data'
-    h5_table = 'all' + '_' + str(ct.sina_limit_time)
+    h5_table = 'all' + '_' + str(sina_limit_time)
     fname = 'sina_logtime'
     logtime = get_config_value_ramfile(fname)
     write_t = get_config_value_ramfile(fname,currvalue=time_t,xtype='time',update=True)
