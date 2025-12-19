@@ -6526,8 +6526,11 @@ class StockMonitorApp(tk.Tk):
             
             report_text = "\n".join(report_lines)
             
+            # 获取当前测试价用于模拟成交
+            price = row_dict.get('trade', row_dict.get('now', 0))
+            
             # 创建报告窗口
-            self._show_strategy_report_window(code, name, report_text, result)
+            self._show_strategy_report_window(code, name, report_text, result, price=price)
             
         except Exception as e:
             logger.error(f"Strategy test error: {e}")
@@ -6535,7 +6538,7 @@ class StockMonitorApp(tk.Tk):
             traceback.print_exc()
             messagebox.showerror("测试失败", f"策略测试出错: {e}")
 
-    def _show_strategy_report_window(self, code, name, report_text, result):
+    def _show_strategy_report_window(self, code, name, report_text, result, price=0.0):
         """显示策略测试报告窗口 (窗口复用模式 - 优化版)"""
         window_id = '策略测试'
         
@@ -6552,7 +6555,9 @@ class StockMonitorApp(tk.Tk):
         if hasattr(self, 'strategy_report_win') and self.strategy_report_win and self.strategy_report_win.winfo_exists():
             win = self.strategy_report_win
             win.title(f"🧪 策略测试 - {name} ({code})")
-            
+            win.lift()
+            win.attributes("-topmost", True)
+            win.after(50, lambda: win.attributes("-topmost", False))
             # 如果组件已存在，则直接更新，不销毁也不抢夺焦点
             if hasattr(win, 'txt_widget'):
                 win.top_frame.config(bg=action_color)
@@ -6595,7 +6600,7 @@ class StockMonitorApp(tk.Tk):
         txt_frame.pack(fill='both', expand=True, padx=10, pady=5)
         
         scrollbar = ttk.Scrollbar(txt_frame)
-        win.txt_widget = tk.Text(txt_frame, wrap='word', font=('Consolas', 10), 
+        win.txt_widget = tk.Text(txt_frame, wrap='word', font=('Consolas', 10), height=20,
                      yscrollcommand=scrollbar.set, padx=10, pady=5)
         scrollbar.config(command=win.txt_widget.yview)
         
@@ -6617,6 +6622,103 @@ class StockMonitorApp(tk.Tk):
         tk.Button(btn_frame, text="📋 复制报告", command=copy_report, 
                  width=12).pack(side='left', padx=5)
         
+        def run_simulation():
+            if not self.live_strategy:
+                messagebox.showwarning("警告", "交易引擎未启动")
+                return
+            
+            # 创建模拟参数设置小窗口
+            sim_win = tk.Toplevel(win)
+            sim_win.title(f"模拟成交设置 - {name}")
+            sim_win_id = '模拟成交设置'
+            sim_win.geometry("350x480") # 稍微调大一点适应新控件
+            sim_win.transient(win)
+            sim_win.grab_set()
+            self.load_window_position(sim_win, sim_win_id, default_width=350, default_height=480)
+            main_frm = tk.Frame(sim_win, padx=20, pady=10)
+            main_frm.pack(fill="both", expand=True)
+            
+            tk.Label(main_frm, text=f"股票: {name} ({code})", font=("Arial", 11, "bold")).pack(pady=(0,5))
+            
+            # --- 资金与仓位管理 ---
+            tk.Label(main_frm, text="模拟可用本金 (元):").pack(anchor="w")
+            total_cap_var = tk.DoubleVar(value=100000.0)
+            entry_cap = tk.Entry(main_frm, textvariable=total_cap_var)
+            entry_cap.pack(fill="x", pady=2)
+
+            # 动作选择
+            tk.Label(main_frm, text="成交动作:").pack(anchor="w")
+            action_var = tk.StringVar(value=action if action in ['买入', '卖出', '止损', '止盈'] else '买入')
+            action_combo = ttk.Combobox(main_frm, textvariable=action_var, values=['买入', '卖出', '止损', '止盈'], state="readonly")
+            action_combo.pack(fill="x", pady=2)
+            
+            # 价格输入
+            tk.Label(main_frm, text="成交价格:").pack(anchor="w")
+            price_var = tk.DoubleVar(value=round(float(price), 3))
+            entry_price = tk.Entry(main_frm, textvariable=price_var)
+            entry_price.pack(fill="x", pady=2)
+
+            # 比例快捷键
+            ratio_frm = tk.Frame(main_frm)
+            ratio_frm.pack(fill="x", pady=5)
+            
+            def calc_and_set_amount(r):
+                try:
+                    p = price_var.get()
+                    cap = total_cap_var.get()
+                    if p > 0:
+                        # 简单计算：(总本金 * 比例) / (价格 * (1 + 手续费))
+                        qty = int((cap * r) / (p * 1.0003)) // 100 * 100
+                        amount_var.set(max(100, qty) if r > 0 else 100)
+                except:
+                    pass
+
+            tk.Label(main_frm, text="快速仓位比例:").pack(anchor="w")
+            btn_box = tk.Frame(main_frm)
+            btn_box.pack(fill="x")
+            for label, r in [("1/10",0.1), ("1/5",0.2), ("1/3",0.33), ("1/2",0.5), ("全仓",1.0)]:
+                tk.Button(btn_box, text=label, command=lambda val=r: calc_and_set_amount(val), font=("Arial", 8)).pack(side="left", padx=1, expand=True, fill="x")
+            
+            # 数量输入
+            tk.Label(main_frm, text="最后成交数量 (股):", font=("Arial", 9, "bold")).pack(anchor="w", pady=(5,0))
+            amount_var = tk.IntVar(value=100)
+            entry_amount = tk.Entry(main_frm, textvariable=amount_var, bg="#fffde7")
+            entry_amount.pack(fill="x", pady=5)
+            def on_close(event=None):
+                self.save_window_position(sim_win, sim_win_id)
+                sim_win.destroy()
+
+            def submit_sim():
+                try:
+                    s_action = action_var.get()
+                    s_price = price_var.get()
+                    s_amount = amount_var.get()
+                    
+                    if s_price <= 0 or s_amount <= 0:
+                        raise ValueError("价格和数量必须大于0")
+                        
+                    confirm_msg = f"确定以价格 {s_price} {s_action} {s_amount}股 [{name}] 吗?"
+                    if messagebox.askyesno("模拟交易确认", confirm_msg, parent=sim_win):
+                        self.live_strategy.trading_logger.record_trade(
+                            code, name, s_action, s_price, s_amount
+                        )
+                        messagebox.showinfo("成功", f"模拟成交已记录: {s_action} {name} @ {s_price}", parent=sim_win)
+                        on_close()
+                except Exception as e:
+                    messagebox.showerror("错误", f"输入无效: {e}", parent=sim_win)
+                    on_close()
+            tk.Button(main_frm, text="🔥 执行模拟成交并记入统计", command=submit_sim, 
+                      bg="#ffecb3", font=("Arial", 10, "bold"), pady=10).pack(fill="x", pady=10)
+            
+            tk.Button(main_frm, text="放弃取消", command=sim_win.destroy).pack(fill="x")
+            
+            
+            sim_win.bind("<Escape>", on_close)
+            sim_win.protocol("WM_DELETE_WINDOW", on_close)
+
+        tk.Button(btn_frame, text="🚀 模拟成交设置", command=run_simulation, 
+                 bg="#ccff90", fg="#333", font=("Arial", 10, "bold"), width=15).pack(side='left', padx=5)
+
         tk.Button(btn_frame, text="关闭 (ESC)", command=lambda: on_close(), 
                  width=12).pack(side='left', padx=5)
 
@@ -7566,32 +7668,37 @@ class StockMonitorApp(tk.Tk):
         
         report_win = tk.Toplevel(self)
         report_win.title("买卖交易盈亏统计报表")
-        report_win.geometry("900x650")
+        window_id = "交易盈亏统计报表"
+        self.load_window_position(report_win, window_id, default_width=900, default_height=650)
         report_win.focus_force()
 
-        # --- 顶部统计栏 ---
-        header_frame = tk.Frame(report_win, relief="groove", borderwidth=1, padx=10, pady=10)
-        header_frame.pack(side="top", fill="x")
-        
-        summary_label = tk.Label(header_frame, text="正在加载统计数据...", font=("Arial", 12, "bold"))
-        summary_label.pack(side="left")
+        # --- 核心数据加载与交互逻辑 ---
+        def load_stats():
+            for item in stats_tree.get_children():
+                stats_tree.delete(item)
+            rows = t_logger.get_db_summary(days=30)
+            for day, profit, count in rows:
+                stats_tree.insert("", "end", values=(day, f"{profit:.2f}", count))
 
-        # --- 日期过滤区域 ---
-        filter_frame = tk.Frame(header_frame)
-        filter_frame.pack(side="right")
-        
-        tk.Label(filter_frame, text="日期筛选:").pack(side="left", padx=5)
-        start_var = tk.StringVar(value=(datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
-        end_var = tk.StringVar(value=datetime.now().strftime('%Y-%m-%d'))
-        
-        tk.Entry(filter_frame, textvariable=start_var, width=12).pack(side="left", padx=2)
-        tk.Label(filter_frame, text="至").pack(side="left")
-        tk.Entry(filter_frame, textvariable=end_var, width=12).pack(side="left", padx=2)
+        def load_details(start_date=None, end_date=None):
+            for item in tree.get_children():
+                tree.delete(item)
+            trades = t_logger.get_trades(start_date=start_date, end_date=end_date)
+            for t in trades:
+                status = t.get('status', 'CLOSED')
+                sell_p = f"{t['sell_price']:.3f}" if t['sell_price'] is not None else "--"
+                profit = f"{t['profit']:.2f}" if t['profit'] is not None else "--"
+                pnl = f"{t['pnl_pct']*100:.2f}%" if t['pnl_pct'] is not None else "--"
+                sell_d = t['sell_date'] if t['sell_date'] else ("Holding" if status == 'OPEN' else "--")
+                
+                tree.insert("", "end", values=(
+                    t['id'], t['code'], t['name'], t['buy_price'], t.get('buy_amount', 0), sell_p, 
+                    profit, pnl, sell_d, t['feedback'] or ""
+                ))
 
         def refresh_summary():
             s_date = start_var.get()
             e_date = end_var.get()
-            # 简单校验格式
             try:
                 datetime.strptime(s_date, '%Y-%m-%d')
                 datetime.strptime(e_date, '%Y-%m-%d')
@@ -7599,7 +7706,7 @@ class StockMonitorApp(tk.Tk):
                 messagebox.showerror("错误", "日期格式不正确，请使用 YYYY-MM-DD")
                 return
 
-            results = t_logger.get_summary() # summary 还是全局的，或者你可以后续给 get_summary 也加 start/end
+            results = t_logger.get_summary()
             profit = results[0] if results and results[0] is not None else 0
             avg_pct = (results[1] if results and results[1] is not None else 0) * 100
             count = results[2] if results and results[2] is not None else 0
@@ -7608,69 +7715,6 @@ class StockMonitorApp(tk.Tk):
             load_stats()
             load_details(s_date, e_date)
 
-        # --- 多日走势列表 ---
-        stats_frame = tk.LabelFrame(report_win, text="多日盈亏统计 (近30天)", padx=5, pady=5)
-        stats_frame.pack(side="top", fill="x", padx=10, pady=5)
-        
-        stats_tree = ttk.Treeview(stats_frame, columns=("day", "profit", "count"), show="headings", height=5)
-        stats_tree.heading("day", text="日期")
-        stats_tree.heading("profit", text="单日利润")
-        stats_tree.heading("count", text="成交笔数")
-        stats_tree.column("day", width=150, anchor="center")
-        stats_tree.column("profit", width=150, anchor="center")
-        stats_tree.column("count", width=100, anchor="center")
-        stats_tree.pack(fill="x")
-
-        def load_stats():
-            for item in stats_tree.get_children():
-                stats_tree.delete(item)
-            rows = t_logger.get_db_summary(days=30)
-            for day, profit, count in rows:
-                stats_tree.insert("", "end", values=(day, f"{profit:.2f}", count))
-
-        # --- 详细交易流水 ---
-        list_frame = tk.LabelFrame(report_win, text="交易明细记录", padx=5, pady=5)
-        list_frame.pack(side="top", fill="both", expand=True, padx=10, pady=5)
-        
-        cols = ("id", "code", "name", "buy_price", "sell_price", "profit", "pnl_pct", "sell_date", "feedback")
-        tree = ttk.Treeview(list_frame, columns=cols, show="headings")
-        
-        tree.heading("id", text="ID")
-        tree.heading("code", text="代码")
-        tree.heading("name", text="名称")
-        tree.heading("buy_price", text="买入价")
-        tree.heading("sell_price", text="卖出价")
-        tree.heading("profit", text="净利润")
-        tree.heading("pnl_pct", text="盈亏%")
-        tree.heading("sell_date", text="成交日期")
-        tree.heading("feedback", text="策略反馈")
-        
-        tree.column("id", width=40, anchor="center")
-        tree.column("code", width=80, anchor="center")
-        tree.column("name", width=100, anchor="center")
-        tree.column("buy_price", width=80, anchor="center")
-        tree.column("sell_price", width=80, anchor="center")
-        tree.column("profit", width=100, anchor="center")
-        tree.column("pnl_pct", width=80, anchor="center")
-        tree.column("sell_date", width=150, anchor="center")
-        tree.column("feedback", width=200, anchor="w")
-        
-        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
-        tree.configure(yscroll=scrollbar.set)
-        tree.pack(side="left", fill="both", expand=True)
-        scrollbar.pack(side="right", fill="y")
-
-        def load_details(start_date=None, end_date=None):
-            for item in tree.get_children():
-                tree.delete(item)
-            trades = t_logger.get_closed_trades(start_date=start_date, end_date=end_date)
-            for t in trades:
-                tree.insert("", "end", values=(
-                    t['id'], t['code'], t['name'], t['buy_price'], t['sell_price'], 
-                    f"{t['profit']:.2f}", f"{t['pnl_pct']*100:.2f}%", t['sell_date'], t['feedback'] or ""
-                ))
-        
-        # --- 策略优化反馈按钮 ---
         def add_feedback():
             selected = tree.selection()
             if not selected:
@@ -7689,11 +7733,171 @@ class StockMonitorApp(tk.Tk):
                 else:
                     messagebox.showerror("错误", "反馈保存失败")
 
+        def delete_selected_trade():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showwarning("提醒", "请先选择要删除的记录")
+                return
+            
+            item = tree.item(selected[0])
+            trade_id = item['values'][0]
+            stock_name = item['values'][2]
+            
+            if messagebox.askyesno("确认删除", f"确定要永久删除 [{stock_name}] (ID:{trade_id}) 的这笔交易记录吗？"):
+                if t_logger.delete_trade(trade_id):
+                    messagebox.showinfo("成功", "记录已从数据库物理删除")
+                    refresh_summary()
+                else:
+                    messagebox.showerror("错误", "删除失败")
+
+        def edit_selected_trade():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showwarning("提醒", "请先选择要编辑的记录")
+                return
+            
+            item = tree.item(selected[0])
+            v = item['values']
+            trade_id = v[0]
+            stock_name = v[2]
+            buy_p = float(v[3])
+            buy_a = float(v[4])
+            sell_p_raw = v[5]
+            sell_p = float(sell_p_raw) if sell_p_raw != "--" else None
+
+            # 弹出简单编辑窗口
+            edit_win = tk.Toplevel(report_win)
+            edit_win.title(f"编辑交易 - {stock_name}")
+            window_id_edit = "编辑交易记录"
+            self.load_window_position(edit_win, window_id_edit, default_width=300, default_height=400)
+            edit_win.transient(report_win)
+            edit_win.grab_set()
+
+            def on_close_edit(event=None):
+                self.save_window_position(edit_win, window_id_edit)
+                edit_win.destroy()
+            
+            edit_win.bind("<Escape>", on_close_edit)
+            edit_win.protocol("WM_DELETE_WINDOW", on_close_edit)
+
+            frm = tk.Frame(edit_win, padx=20, pady=20)
+            frm.pack(fill="both", expand=True)
+
+            tk.Label(frm, text=f"交易 ID: {trade_id}", font=("Arial", 9, "bold")).pack(pady=5)
+
+            tk.Label(frm, text="买入价格:").pack(pady=(10,0))
+            bp_var = tk.DoubleVar(value=buy_p)
+            tk.Entry(frm, textvariable=bp_var).pack(fill="x")
+
+            tk.Label(frm, text="建议成交量 (股):").pack(pady=(10,0))
+            ba_var = tk.IntVar(value=buy_a)
+            tk.Entry(frm, textvariable=ba_var).pack(fill="x")
+
+            sp_var = None
+            if sell_p is not None:
+                tk.Label(frm, text="卖出价格:").pack(pady=(10,0))
+                sp_var = tk.DoubleVar(value=sell_p)
+                tk.Entry(frm, textvariable=sp_var).pack(fill="x")
+            
+            def save_edit():
+                try:
+                    new_bp = bp_var.get()
+                    new_ba = ba_var.get()
+                    new_sp = sp_var.get() if sp_var else None
+                    if t_logger.manual_update_trade(trade_id, new_bp, new_ba, new_sp):
+                        messagebox.showinfo("成功", "修改已保存，系统已自动重算净利润与收益率。")
+                        on_close_edit()
+                        refresh_summary()
+                    else:
+                        messagebox.showerror("错误", "数据库更新失败")
+                except Exception as e:
+                    messagebox.showerror("错误", f"输入无效: {e}")
+
+            tk.Button(frm, text="💾 保存修改", command=save_edit, bg="#ccff90", font=("Arial", 10, "bold"), height=2).pack(pady=30, fill="x")
+
+        # --- 布局开始 ---
+        # 1. 顶部统计
+        header_frame = tk.Frame(report_win, relief="groove", borderwidth=1, padx=10, pady=10)
+        header_frame.pack(side="top", fill="x")
+        
+        summary_label = tk.Label(header_frame, text="正在加载统计数据...", font=("Arial", 12, "bold"))
+        summary_label.pack(side="left")
+
+        filter_frame = tk.Frame(header_frame)
+        filter_frame.pack(side="right")
+        
+        tk.Label(filter_frame, text="日期筛选:").pack(side="left", padx=5)
+        start_var = tk.StringVar(value=(datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
+        end_var = tk.StringVar(value=datetime.now().strftime('%Y-%m-%d'))
+        
+        tk.Entry(filter_frame, textvariable=start_var, width=12).pack(side="left", padx=2)
+        tk.Label(filter_frame, text="至").pack(side="left")
+        tk.Entry(filter_frame, textvariable=end_var, width=12).pack(side="left", padx=2)
+
+        # 2. 多日汇总
+        stats_frame = tk.LabelFrame(report_win, text="多日盈亏统计 (近30天)", padx=5, pady=5)
+        stats_frame.pack(side="top", fill="x", padx=10, pady=5)
+        
+        stats_tree = ttk.Treeview(stats_frame, columns=("day", "profit", "count"), show="headings", height=5)
+        stats_tree.heading("day", text="日期")
+        stats_tree.heading("profit", text="单日利润")
+        stats_tree.heading("count", text="成交笔数")
+        stats_tree.column("day", width=150, anchor="center")
+        stats_tree.column("profit", width=150, anchor="center")
+        stats_tree.column("count", width=100, anchor="center")
+        stats_tree.pack(fill="x")
+
+        # 3. 底部按钮 bar (预先占位)
         btn_bar = tk.Frame(report_win, pady=10)
         btn_bar.pack(side="bottom", fill="x")
-        tk.Button(btn_bar, text="刷新数据", command=lambda: [refresh_summary(), load_stats(), load_details()], width=15).pack(side="left", padx=20)
+        
+        def on_close(event=None):
+            self.save_window_position(report_win, window_id)
+            report_win.destroy()
+        
+        report_win.bind("<Escape>", on_close)
+        report_win.protocol("WM_DELETE_WINDOW", on_close)
+
+        tk.Button(btn_bar, text="刷新数据", command=lambda: [refresh_summary()], width=12).pack(side="left", padx=10)
+        tk.Button(btn_bar, text="✏️ 手动修正", command=edit_selected_trade, width=12).pack(side="left", padx=10)
+        tk.Button(btn_bar, text="🗑️ 删除记录", command=delete_selected_trade, fg="red", width=12).pack(side="left", padx=10)
+        
         tk.Button(btn_bar, text="问题反馈/优化策略", command=add_feedback, bg="#ffcccc", width=20).pack(side="right", padx=20)
 
+        # 4. 中部明细列表 (填充扩充)
+        list_frame = tk.LabelFrame(report_win, text="交易明细记录", padx=5, pady=5)
+        list_frame.pack(side="top", fill="both", expand=True, padx=10, pady=5)
+        
+        cols = ("id", "code", "name", "buy_price", "amount", "sell_price", "profit", "pnl_pct", "sell_date", "feedback")
+        tree = ttk.Treeview(list_frame, columns=cols, show="headings")
+        
+        tree.heading("id", text="ID")
+        tree.heading("code", text="代码")
+        tree.heading("name", text="名称")
+        tree.heading("buy_price", text="买入价")
+        tree.heading("amount", text="成交量")
+        tree.heading("sell_price", text="卖出价")
+        tree.heading("profit", text="净利润")
+        tree.heading("pnl_pct", text="盈亏%")
+        tree.heading("sell_date", text="成交日期")
+        tree.heading("feedback", text="策略反馈")
+        
+        tree.column("id", width=40, anchor="center")
+        tree.column("code", width=80, anchor="center")
+        tree.column("name", width=100, anchor="center")
+        tree.column("buy_price", width=80, anchor="center")
+        tree.column("amount", width=70, anchor="center")
+        tree.column("sell_price", width=80, anchor="center")
+        tree.column("profit", width=100, anchor="center")
+        tree.column("pnl_pct", width=80, anchor="center")
+        tree.column("sell_date", width=150, anchor="center")
+        tree.column("feedback", width=200, anchor="w")
+        
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscroll=scrollbar.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        
         # 初始加载
         refresh_summary()
 
@@ -8030,8 +8234,8 @@ class StockMonitorApp(tk.Tk):
             win.bind("<Escape>", on_close)
             win.protocol("WM_DELETE_WINDOW", on_close)
 
-            # --- 测试真实报警 ---
-            def test_selected_monitor():
+            # --- 策略模拟测试 ---
+            def test_selected_strategy():
                 selected = tree.selection()
                 if not selected:
                     messagebox.showinfo("提示", "请先选择一条规则")
@@ -8041,13 +8245,11 @@ class StockMonitorApp(tk.Tk):
                 values = tree.item(item, "values")
                 code = values[0]
                 name = values[1] 
-                rule_desc = values[2]
-                val = values[3]
                 
-                msg = f"{rule_desc} {val} (测试)"
-                self.live_strategy.test_alert_specific(code, name, msg)
+                # 调用主界面的策略测试逻辑，进行信号确认与模拟交易入口
+                self.test_strategy_for_stock(code, name)
 
-            tk.Button(top_frame, text="🔊 测试选中报警", command=test_selected_monitor, bg="#fff9c4").pack(side="right", padx=5)
+            tk.Button(top_frame, text="🧪 模拟策略交易", command=test_selected_strategy, bg="#e3f2fd", font=("Arial", 10, "bold")).pack(side="right", padx=5)
             
         except Exception as e:
             logger.error(f"Voice Monitor Manager Error: {e}")

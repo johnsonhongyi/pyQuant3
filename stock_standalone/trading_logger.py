@@ -137,19 +137,22 @@ class TradingLogger:
         conn.close()
         return res # (总利润, 平均收益率, 总笔数)
 
-    def get_closed_trades(self, start_date=None, end_date=None):
-        """获取已平仓交易记录"""
+    def get_trades(self, start_date=None, end_date=None):
+        """获取交易记录（包含持仓中和已平仓）"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
-        query = "SELECT * FROM trade_records WHERE status='CLOSED'"
+        # 获取所有记录，优先按卖出日期（已平仓）或买入日期（持仓）排序
+        query = "SELECT * FROM trade_records WHERE 1=1"
         params = []
         if start_date:
-            query += " AND sell_date >= ?"
-            params.append(start_date)
+            # 这里的逻辑：如果是已平仓且有 sell_date，则按 sell_date 过滤；如果是持仓，则按 buy_date 过滤
+            query += " AND ( (status='CLOSED' AND date(sell_date) >= ?) OR (status='OPEN' AND date(buy_date) >= ?) )"
+            params.extend([start_date, start_date])
         if end_date:
-            query += " AND sell_date <= ?"
-            params.append(end_date)
-        query += " ORDER BY sell_date DESC"
+            query += " AND ( (status='CLOSED' AND date(sell_date) <= ?) OR (status='OPEN' AND date(buy_date) <= ?) )"
+            params.extend([end_date, end_date])
+            
+        query += " ORDER BY CASE WHEN status='CLOSED' THEN sell_date ELSE buy_date END DESC"
         cur.execute(query, params)
         rows = cur.fetchall()
         
@@ -158,6 +161,53 @@ class TradingLogger:
         results = [dict(zip(cols, row)) for row in rows]
         conn.close()
         return results
+
+    def delete_trade(self, trade_id):
+        """删除交易记录"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM trade_records WHERE id=?", (trade_id,))
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"delete_trade error: {e}")
+            return False
+
+    def manual_update_trade(self, trade_id, buy_p, buy_a, sell_p=None, fee_rate=0.0003):
+        """手动更新交易数据并重算盈亏"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            
+            # 先获取现有状态
+            cur.execute("SELECT status FROM trade_records WHERE id=?", (trade_id,))
+            row = cur.fetchone()
+            if not row: return False
+            status = row[0]
+
+            if status == 'OPEN':
+                fee = buy_p * buy_a * fee_rate
+                cur.execute("""
+                    UPDATE trade_records SET buy_price=?, buy_amount=?, fee=? WHERE id=?
+                """, (buy_p, buy_a, fee, trade_id))
+            else:
+                # CLOSED 状态需要重算全过程
+                total_fee = (buy_p * buy_a * fee_rate) + (sell_p * buy_a * fee_rate)
+                net_profit = (sell_p - buy_p) * buy_a - total_fee
+                pnl_pct = net_profit / (buy_p * buy_a) if buy_p > 0 else 0
+                cur.execute("""
+                    UPDATE trade_records SET buy_price=?, buy_amount=?, sell_price=?, fee=?, profit=?, pnl_pct=?
+                    WHERE id=?
+                """, (buy_p, buy_a, sell_p, total_fee, net_profit, pnl_pct, trade_id))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"manual_update_trade error: {e}")
+            return False
 
     def update_trade_feedback(self, trade_id, feedback):
         """更新交易反馈，用于策略优化告知问题"""
