@@ -2445,7 +2445,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
             df_all = sanitize(df_all)
             queue.put(df_all)
             gc.collect()
-            logger.info(f'now: {cct.get_now_time_int()}  用时: {round(time.time() - time_s,1)/len(df_all):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+            logger.info(f'now: {cct.get_now_time_int()}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
             for _ in range(duration_sleep_time):
                 if not flag.value: break
                 time.sleep(0.5)
