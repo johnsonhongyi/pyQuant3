@@ -2317,7 +2317,7 @@ def fetch_and_process(shared_dict,queue, blkname="boll", flag=None,log_level=Non
             #                 logger.info(f'start init_tdx resample: {res_m}')
             #                 top_all_d, lastpTDX_DF_d = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[res_m],resample=res_m)
             #         logger.info(f'init_tdx 用时:{time.time()-time_init:.2f}')
-            elif 830 <= cct.get_now_time_int() <= 915:
+            elif START_INIT > 0 and 830 <= cct.get_now_time_int() <= 915:
 
                 today = cct.get_today()
 

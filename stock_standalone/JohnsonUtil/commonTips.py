@@ -542,6 +542,7 @@ class GlobalConfig:
         self.compute_lastdays = self.get_with_writeback("general", "compute_lastdays", fallback=5, value_type="int")
         self.alert_cooldown = self.get_with_writeback("general", "alert_cooldown", fallback=120, value_type="int")
         self.sina_limit_time = self.get_with_writeback("general", "sina_limit_time", fallback=30, value_type="int")
+        self.sina_dd_limit_time = self.get_with_writeback("general", "sina_dd_limit_time", fallback=120, value_type="int")
         self.stop_loss_pct = self.get_with_writeback("general", "stop_loss_pct", fallback=0.05, value_type="float")
         self.take_profit_pct = self.get_with_writeback("general", "take_profit_pct", fallback=0.10, value_type="float")
         self.trailing_stop_pct = self.get_with_writeback("general", "trailing_stop_pct", fallback=0.03, value_type="float")
@@ -669,6 +670,7 @@ xproot = CFG.get_path("xproot")
 tdx_all_df_path = CFG.get_path("tdx_all_df_path")
 compute_lastdays = CFG.compute_lastdays
 sina_limit_time = CFG.sina_limit_time
+sina_dd_limit_time = CFG.sina_dd_limit_time
 stop_loss_pct = CFG.stop_loss_pct
 take_profit_pct = CFG.take_profit_pct
 trailing_stop_pct = CFG.trailing_stop_pct

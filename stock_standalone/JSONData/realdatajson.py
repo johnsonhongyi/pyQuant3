@@ -201,7 +201,7 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
     # h5_table = 'all'
     h5_table = 'all'+'_'+str(num)
     # if market == 'all':
-    limit_time = ct.sina_dd_limit_time
+    limit_time = cct.sina_dd_limit_time
     h5 = h5a.load_hdf_db(h5_fname, table=h5_table,limit_time=limit_time)
     if h5 is not None and len(h5) > 0 and 'timel' in h5.columns:
         o_time = h5[h5.timel != 0].timel
@@ -247,10 +247,6 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
         # print(url_list)
     else:
         url_list=_get_sina_Market_url(ct.SINA_Market_KEY[market], num=num)
-        # print url_list
-    # log.debug("Market_jsonURL: %s" % url_list[0])
-    # print url_list
-    # print "url:",url_list
     df = pd.DataFrame()
     # data['code'] = symbol
     # df = df.append(data, ignore_index=True)
@@ -266,38 +262,15 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
     if len(results)>0:
 
         df = pd.concat(results, ignore_index=True)
-        # df['volume']= df['volume'].apply(lambda x:x/100)
-        # print df.columns
         if 'ratio' in df.columns:
             df['ratio']=df['ratio'].apply(lambda x:round(float(x),1))
 
         df['percent']=df['percent'].apply(lambda x:round(float(x),2))
-#        if cct.get_now_time_int() > 915 and cct.get_now_time_int() < 926:
-#            df = df[(df.buy > 0)]
-#        else:
-#            df = df[(df.trade > 0)]
-        # print df[:1]
-    # for url in url_list:
-    #     # print url
-    #     data = _parsing_Market_price_json(url)
-    #     # print data[:1]
-    #     df = df.append(data, ignore_index=True)
-    #     # break
 
     if df is not None and len(df) > 0:
-        # for i in range(2, ct.PAGE_NUM[0]):
-        #     newdf = _parsing_dayprice_json(i)
-        #     df = df.append(newdf, ignore_index=True)
-        # print len(df.index)
-
-        # print type(df)
         if 'code' in df.columns:
             df=df.drop_duplicates('code')
             df = df.set_index('code')
-#        if market == 'all':
-#            append_status = False #(new all don't append main )
-#        else:
-#        append_status = True
         if market=='all':
             h5 = h5a.write_hdf_db(h5_fname, df, table=h5_table,append=False)
         else:
@@ -643,59 +616,7 @@ def _parsing_sina_dd_price_json(url):
     # print df['name'][len(df.index)-1:],len(df.index)
     return df
 
-
-def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.001):
-    start_t = time.time()
-    # url="http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=50&sort=changepercent&asc=0&node=sh_a&symbol="
-    # SINA_REAL_PRICE_DD = '%s%s/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=%s&sort=changepercent&asc=0&node=%s&symbol=%s'
-    #http://vip.stock.finance.sina.com.cn/quotes_service/view/cn_bill_sum.php
-    #http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_Bill.GetBillList?num=10000&page=1&sort=ticktime&asc=0&volume=100000&type=0
-    #http://vip.stock.finance.sina.com.cn/quotes_service/view/cn_bill_all.php?num=100&page=1&sort=ticktime&asc=0&volume=100000&type=0
-    """
-        一次性获取最近一个日交易日所有股票的交易数据
-    return
-    -------
-      DataFrame
-           属性：代码，名称，涨跌幅，现价，开盘价，最高价，最低价，最日收盘价，成交量，换手率
-    """
-    # return ''
-    h5_fname = 'get_sina_all_dd'
-    h5_table = 'all'+'_'+ct.DD_VOL_List[str(vol)]+'_'+str(num)
-    limit_time = ct.sina_dd_limit_time
-    h5 = h5a.load_hdf_db(h5_fname, table=h5_table,limit_time=limit_time)
-    if h5 is not None and not h5.empty and len(h5) > 100 and 'timel' in h5.columns:
-       o_time = h5[h5.timel != 0].timel
-       if len(o_time) > 0:
-           o_time = o_time[0]
-           l_time = time.time() - o_time
-           log.info(f'limit_time : {limit_time} l_time : {l_time}')
-           return_hdf_status = not cct.get_work_time() or (cct.get_work_time() and l_time < limit_time)
-           if return_hdf_status:
-               log.info("load hdf data:%s %s %s"%(h5_fname,h5_table,len(h5)))
-               return h5
-    log.info(f'limit_time:{limit_time}')
-    # ct._write_head()
-    url_list = _get_sina_json_dd_url(vol, type, num)
-    # print url_list
-    df = pd.DataFrame()
-    # import ipdb;ipdb.set_trace()
-
-    # data['code'] = symbol
-    # df = df.append(data, ignore_index=True)
-    if len(url_list)>0:
-        log.info("json_dd_url:%s"%url_list[0])
-        for url in url_list:
-            dd_l = _parsing_sina_dd_price_json(url)
-            if len(dd_l) > 2:
-                df = pd.concat([df,dd_l])
-            else:
-                log.error("_parsing_sina_dd_price_json is Null :%s"%(dd_l))
-
-
-
-
-        
-    # data = cct.to_mp_run(_parsing_sina_dd_price_json, url_list)
+# data = cct.to_mp_run(_parsing_sina_dd_price_json, url_list)
     # data = cct.to_mp_run_async(_parsing_sina_dd_price_json, url_list)
 
     # if len(url_list)>cct.get_cpu_count():
@@ -719,7 +640,50 @@ def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.
         #     #['code' 'name' 'ticktime' 'price' 'volume' 'prev_price' 'kind']
         #     log.debug("get_sina_all_json_dd:%s" % df[:1])
 
-
+def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.001):
+    start_t = time.time()
+    # url="http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=50&sort=changepercent&asc=0&node=sh_a&symbol="
+    # SINA_REAL_PRICE_DD = '%s%s/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=%s&sort=changepercent&asc=0&node=%s&symbol=%s'
+    #http://vip.stock.finance.sina.com.cn/quotes_service/view/cn_bill_sum.php
+    #http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_Bill.GetBillList?num=10000&page=1&sort=ticktime&asc=0&volume=100000&type=0
+    #http://vip.stock.finance.sina.com.cn/quotes_service/view/cn_bill_all.php?num=100&page=1&sort=ticktime&asc=0&volume=100000&type=0
+    """
+        一次性获取最近一个日交易日所有股票的交易数据
+    return
+    -------
+      DataFrame
+           属性：代码，名称，涨跌幅，现价，开盘价，最高价，最低价，最日收盘价，成交量，换手率
+    """
+    # return ''
+    h5_fname = 'get_sina_all_dd'
+    h5_table = 'all'+'_'+ct.DD_VOL_List[str(vol)]+'_'+str(num)
+    limit_time = cct.sina_dd_limit_time
+    h5 = h5a.load_hdf_db(h5_fname, table=h5_table,limit_time=limit_time)
+    if h5 is not None and not h5.empty and len(h5) > 100 and 'timel' in h5.columns:
+       o_time = h5[h5.timel != 0].timel
+       if len(o_time) > 0:
+           o_time = o_time[0]
+           l_time = time.time() - o_time
+           log.info(f'limit_time : {limit_time} l_time : {l_time}')
+           return_hdf_status = not cct.get_work_time() or (cct.get_work_time() and l_time < limit_time)
+           if return_hdf_status:
+               log.info("load hdf data:%s %s %s"%(h5_fname,h5_table,len(h5)))
+               return h5
+    log.info(f'limit_time:{limit_time}')
+    # ct._write_head()
+    url_list = _get_sina_json_dd_url(vol, type, num)
+    df = pd.DataFrame()
+    # import ipdb;ipdb.set_trace()
+    # data['code'] = symbol
+    # df = df.append(data, ignore_index=True)
+    if len(url_list)>0:
+        log.info("json_dd_url:%s"%url_list[0])
+        for url in url_list:
+            dd_l = _parsing_sina_dd_price_json(url)
+            if len(dd_l) > 2:
+                df = pd.concat([df,dd_l])
+            else:
+                log.error("_parsing_sina_dd_price_json is Null :%s"%(dd_l))
         if df is not None and not df.empty and len(df) > 50:
             # for i in range(2, ct.PAGE_NUM[0]):
             #     newdf = _parsing_dayprice_json(i)
