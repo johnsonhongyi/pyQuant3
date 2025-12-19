@@ -277,6 +277,10 @@ class Sina:
         if df is None or len(df) == 0:
             return df
             
+        # 集合竞价期间(09:15-09:25)不进行无效股剔除，因为此时价格/成交量可能为0但属于正常状态
+        if 915 <= cct.get_now_time_int() <= 925:
+             return df
+            
         # 判定条件：open, now 均为 0 表示停牌或无效。
         # 注意：format_response_data 中已将原始 close 映射为 llastp，并将 now 映射为新 close。
         # 因此 query 使用 close==0 or now==0 均可。
@@ -472,12 +476,31 @@ class Sina:
             h5_mi_table = 'all_' + str(limit_time_int)
             # 仅在交易时间内记录
             if cct.get_work_time():
-                # 构造 MultiIndex 格式: [code, ticktime]
-                mi_df = df_final.copy()
-                if isinstance(mi_df, pd.DataFrame) and 'ticktime' in mi_df.columns:
-                    h5a.write_hdf_db(h5_mi_fname, mi_df, table=h5_mi_table, MultiIndex=True)
+                # 构造 MultiIndex 精简格式轨迹: [code, ticktime, close, high, low, llastp, volume, lastbuy]
+                # 这必须与 format_response_data 中的 mi_cols 保持绝对一致以避免 ValueError
+                mi_cols = ['code', 'ticktime', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
+                mi_df = df_final.loc[:, [c for c in mi_cols if c in df_final.columns]].copy()
+                
+                if isinstance(mi_df, pd.DataFrame):
+                    # 1. 无条件 Reset Index，确保所有数据 flattened，防止 ticktime 藏在 Index 中漏过类型检查
+                    if not isinstance(mi_df.index, pd.RangeIndex):
+                         mi_df = mi_df.reset_index()
+
+                    # 2. 确保 'code' 和 'ticktime' 存在，并在 columns 中
+                    if 'code' in mi_df.columns and 'ticktime' in mi_df.columns:
+                        # 3. 强制转换 ticktime 为 datetime64，严格匹配 format_response_data 的写入类型
+                        if not pd.api.types.is_datetime64_any_dtype(mi_df['ticktime']):
+                             mi_df['ticktime'] = pd.to_datetime(mi_df['ticktime'], errors='coerce')
+                        
+                        # 4. 设置 MultiIndex
+                        mi_df = mi_df.set_index(['code', 'ticktime'])
+
+
+
+                    # 使用 index=True 强制保存索引，确保 MultiIndex 能被正确持久化
+                    h5a.write_hdf_db(h5_mi_fname, mi_df, table=h5_mi_table, index=True, MultiIndex=True)
                     self.agg_cache.setkey('last_mi_save_time', now_time)
-                    log.info("Saved MultiIndex history to %s" % h5_mi_fname)
+                    log.info("Saved MultiIndex history (sync) to %s cols:%s" % (h5_mi_fname, mi_df.columns.tolist()))
 
         return self._filter_suspended(df_final)
 
@@ -1143,22 +1166,38 @@ class Sina:
             #top_temp.loc['600903'][['lastbuy','now']]
             #spp.all_10.lastbuy.groupby(level=[0]).tail(1).reset_index().set_index('code')[-50:]
             dd = df.copy()
-            if 'lastbuy' in df.columns:
-                df = df.loc[:, ['close', 'high', 'low', 'llastp', 'volume', 'ticktime','lastbuy']]
-            else:
-                df = df.loc[:, ['close', 'high', 'low', 'llastp', 'volume', 'ticktime']]
-                df['lastbuy'] = df['close']
-            if 'code' not in df.columns:
-                df = df.reset_index()
-            if 'dt' in df.columns:
-                df = df.drop(['dt'], axis=1)
-                # df.dt = df.dt.astype(str)
-            if 'name' in df.columns:
-                # df.name = df.name.astype(str)
-                df = df.drop(['name'], axis=1)
-            df = df.set_index(['code', 'ticktime'])
-            h5a.write_hdf_db(h5_fname, df, table=h5_table, index=False, baseCount=500, append=False, MultiIndex=True)
-            log.info("hdf5 class all :%s  time:%0.2f" % (len(df), time.time() - time_s))
+            # --- 分别处理轨迹数据(mi)和实时数据(dd) ---
+            # 1. 轨迹历史数据 (仅精简 8 列) -> sina_MultiIndex_data.h5
+            # 注意: 使用独立的 df_mi 对象，避免干扰后续对 dd 的处理
+            df_mi = df.copy()
+            if 'code' not in df_mi.columns:
+                df_mi = df_mi.reset_index()
+            
+            mi_cols = ['code', 'ticktime', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
+            if 'lastbuy' not in df_mi.columns:
+                df_mi['lastbuy'] = df_mi['close'] if 'close' in df_mi.columns else 0
+            
+            # 严格筛选列，多余的不要
+            df_mi_write = df_mi.loc[:, [c for c in mi_cols if c in df_mi.columns]]
+            
+            # 存储前确保 'code' 和 'ticktime' 形成 MultiIndex，防止 write_hdf_db(index=False) 导致主键丢失
+            # 严格使用 MultiIndex + index=True 模式，以兼容 tdx_hdf5_api 的读取对比逻辑
+            if isinstance(df_mi_write.index, pd.RangeIndex):
+                if 'code' in df_mi_write.columns and 'ticktime' in df_mi_write.columns:
+                     df_mi_write = df_mi_write.set_index(['code', 'ticktime'])
+            
+            h5_mi_fname = 'sina_MultiIndex_data'
+            limit_time_int = int(self.sina_limit_time) if self.sina_limit_time else 60
+            h5_mi_table = 'all_' + str(limit_time_int)
+            
+            # 使用 index=True 强制保存索引
+            h5a.write_hdf_db(h5_mi_fname, df_mi_write, table=h5_mi_table, index=True, baseCount=500, append=False, MultiIndex=True)
+            log.info("Saved minimal mi_data: %s rows, cols: %s" % (len(df_mi_write), df_mi_write.columns.tolist()))
+            log.info("hdf5 class all (trajectory) time:%0.2f" % (time.time() - time_s))
+            
+            # 2. 准备实时全量数据 -> sina_data.h5 (保存在 dd 中)
+            dd = df.copy()
+            log.info("Prepared sina_data: %s rows" % (len(dd)))
         
         if ('nlow' not in df.columns or 'nhigh' not in df.columns) and  ((cct.get_trade_date_status() and 924 < cct.get_now_time_int() <= 1501)  or  cct.get_now_time_int() > 1500 ):
             h5 = h5a.load_hdf_db(h5_fname, h5_table, timelimit=False)
