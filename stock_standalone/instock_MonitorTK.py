@@ -4753,7 +4753,7 @@ class StockMonitorApp(tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","覆写TDX", "手札总览", "语音预警"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","复盘数据", "盈亏统计", "覆写TDX", "手札总览", "语音预警"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -4784,6 +4784,10 @@ class StockMonitorApp(tk.Tk):
                 self.open_handbook_overview()
             elif action == "语音预警":
                 self.open_voice_monitor_manager()
+            elif action == "盈亏统计":
+                self.open_trade_report_window()
+            elif action == "复盘数据":
+                self.open_strategy_backtest_view()
 
 
         def on_select(event=None):
@@ -7308,6 +7312,11 @@ class StockMonitorApp(tk.Tk):
             self.live_strategy = StockLiveStrategy(alert_cooldown=alert_cooldown)
             # 注册报警回调
             self.live_strategy.set_alert_callback(self.on_voice_alert)
+            # 注册语音开始播放的回调，用于同步闪烁
+            if hasattr(self.live_strategy, '_voice'):
+                self.live_strategy._voice.on_speak_start = self.on_voice_speak_start
+                self.live_strategy._voice.on_speak_end = self.on_voice_speak_end
+            
             logger.info("✅ 实时监控策略模块已启动")
         except Exception as e:
             logger.error(f"Failed to init live strategy: {e}")
@@ -7318,6 +7327,29 @@ class StockMonitorApp(tk.Tk):
         """
         # 必须回到主线程操作 GUI
         self.after(0, lambda: self._show_alert_popup(code, name, msg))
+
+    def on_voice_speak_start(self, code):
+        """语音开始播报时的回调 (在后台线程调用)"""
+        if not code: return
+        # 调度到主线程执行闪烁和震动
+        self.after(0, lambda: self._trigger_alert_visual_effects(code, start=True))
+
+    def on_voice_speak_end(self, code):
+        """语音播报结束的回调"""
+        if not code: return
+        self.after(0, lambda: self._trigger_alert_visual_effects(code, start=False))
+
+    def _trigger_alert_visual_effects(self, code, start=True):
+        """根据代码查找窗口并触发视觉效果"""
+        if not hasattr(self, 'code_to_alert_win'): return
+        win = self.code_to_alert_win.get(code)
+        if win and win.winfo_exists():
+            if start:
+                if hasattr(win, 'start_visual_effects'):
+                    win.start_visual_effects()
+            else:
+                if hasattr(win, 'stop_visual_effects'):
+                    win.stop_visual_effects()
 
     def _update_alert_positions(self):
         """重新排列所有报警弹窗"""
@@ -7351,10 +7383,60 @@ class StockMonitorApp(tk.Tk):
             except Exception as e:
                 logger.error(f"Resize alert error: {e}")
 
+    def _shake_window(self, win, distance=8):
+        """
+        震动窗口效果 - 持续震动直到 win.is_shaking 变为 False
+        """
+        if not win or not win.winfo_exists():
+            return
+        
+        # 标记正在震动
+        win.is_shaking = True
+
+        # 💥 关键点：在获取几何信息前强制更新 UI 布局
+        win.update_idletasks()
+
+        def do_shake(orig_wh, orig_x, orig_y):
+            if not win.winfo_exists() or not getattr(win, 'is_shaking', False):
+                if win.winfo_exists():
+                     try:
+                         win.geometry(f"{orig_wh}+{orig_x}+{orig_y}")
+                     except: pass
+                return
+            
+            import random
+            dx = random.randint(-distance, distance)
+            dy = random.randint(-distance, distance)
+            try:
+                win.geometry(f"{orig_wh}+{orig_x + dx}+{orig_y + dy}")
+            except: pass
+            
+            win.after(40, lambda: do_shake(orig_wh, orig_x, orig_y))
+
+        # 捕获初始位置
+        try:
+            geom = win.geometry()
+            parts = geom.split('+')
+            if len(parts) == 3:
+                wh = parts[0]
+                x = int(parts[1])
+                y = int(parts[2])
+                do_shake(wh, x, y)
+        except:
+            pass
+
     def _close_alert(self, win):
         """关闭弹窗并刷新布局"""
         if hasattr(self, 'active_alerts') and win in self.active_alerts:
             self.active_alerts.remove(win)
+        
+        # 清理映射
+        if hasattr(self, 'code_to_alert_win'):
+            for c, w in list(self.code_to_alert_win.items()):
+                if w == win:
+                    del self.code_to_alert_win[c]
+                    break
+
         win.destroy()
         self.after(100, self._update_alert_positions)
 
@@ -7381,17 +7463,65 @@ class StockMonitorApp(tk.Tk):
             # 关闭回调
             win.protocol("WM_DELETE_WINDOW", lambda: self._close_alert(win))
             
-            # 自动关闭 (60秒)
-            self.after(int(alert_cooldown/2)*1000, lambda: self._close_alert(win))
+            # 自动关闭逻辑：
+            # 如果语音功能有效，则等待播报结束后才开始计时关闭；
+            # 否则立即开始计时，以防窗口无限堆积。
+            has_voice = False
+            try:
+                if hasattr(self, 'live_strategy') and self.live_strategy:
+                    v = getattr(self.live_strategy, '_voice', None)
+                    if v and v._thread and v._thread.is_alive():
+                        # 检查队列容量，如果由于队列满而未加入，则视为无语音同步
+                        if v.queue.qsize() < 10: 
+                            has_voice = True
+            except: pass
+
+            if not has_voice:
+                self.after(int(alert_cooldown/2)*1000, lambda: self._close_alert(win))
+            else:
+                # 安全兜底：如果因为某种原因没触发回调（如语音引擎卡死），3分钟后强制关闭
+                win.safety_close_timer = self.after(180000, lambda: self._close_alert(win))
             
-            # 闪烁效果
+            # 闪烁与震动效果 (持续性同步)
             def flash(count=0):
-                if not win.winfo_exists(): return
-                if count > 6: return
+                if not win.winfo_exists() or not getattr(win, 'is_flashing', False):
+                    if win.winfo_exists(): win.configure(bg="#fff")
+                    return
                 bg = "#ffcdd2" if count % 2 == 0 else "#ffebee"
                 win.configure(bg=bg)
-                win.after(300, lambda: flash(count+1))
-            flash()
+                win.after(500, lambda: flash(count+1)) # 这里的 500 是闪烁频率（毫秒），数值越大闪得越慢
+            
+            # 定义供外部触发的方法
+            def start_effects():
+                if getattr(win, 'is_flashing', False): return # 防止重复触发
+                win.is_flashing = True
+                flash()
+                self._shake_window(win, distance=10) # 稍微加大震动幅度
+            
+            def stop_effects():
+                win.is_flashing = False
+                win.is_shaking = False
+                # 播报结束，启动正常的倒计时关闭 (30-60秒)
+                # 如果有安全倒计时，先取消它
+                if hasattr(win, 'safety_close_timer'):
+                    try: self.after_cancel(win.safety_close_timer)
+                    except: pass
+                
+                self.after(int(alert_cooldown/2)*1000, lambda: self._close_alert(win))
+            
+            win.start_visual_effects = start_effects
+            win.stop_visual_effects = stop_effects
+            win.is_flashing = False
+            win.is_shaking = False
+
+            # 记录映射用于同步播放
+            if not hasattr(self, 'code_to_alert_win'):
+                self.code_to_alert_win = {}
+            self.code_to_alert_win[code] = win
+
+            # 如果当前没有在排队，或者想立刻由于新窗口弹出而提醒，可以先闪一下（可选）
+            # 这里我们遵从用户要求：播放到哪个提示，闪屏哪个窗口
+            # 所以我们不在这里主动调用 flash()，而是等 on_voice_speak_start 回调触发
             
             # 内容框架
             frame = tk.Frame(win, bg="#fff", padx=10, pady=10)
@@ -7428,6 +7558,148 @@ class StockMonitorApp(tk.Tk):
             
         except Exception as e:
             logger.error(f"Show alert popup error: {e}")
+
+    def open_trade_report_window(self):
+        """打开买卖交易盈利计算查看视图"""
+        from trading_logger import TradingLogger
+        t_logger = TradingLogger()
+        
+        report_win = tk.Toplevel(self)
+        report_win.title("买卖交易盈亏统计报表")
+        report_win.geometry("900x650")
+        report_win.focus_force()
+
+        # --- 顶部统计栏 ---
+        header_frame = tk.Frame(report_win, relief="groove", borderwidth=1, padx=10, pady=10)
+        header_frame.pack(side="top", fill="x")
+        
+        summary_label = tk.Label(header_frame, text="正在加载统计数据...", font=("Arial", 12, "bold"))
+        summary_label.pack(side="left")
+
+        # --- 日期过滤区域 ---
+        filter_frame = tk.Frame(header_frame)
+        filter_frame.pack(side="right")
+        
+        tk.Label(filter_frame, text="日期筛选:").pack(side="left", padx=5)
+        start_var = tk.StringVar(value=(datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d'))
+        end_var = tk.StringVar(value=datetime.now().strftime('%Y-%m-%d'))
+        
+        tk.Entry(filter_frame, textvariable=start_var, width=12).pack(side="left", padx=2)
+        tk.Label(filter_frame, text="至").pack(side="left")
+        tk.Entry(filter_frame, textvariable=end_var, width=12).pack(side="left", padx=2)
+
+        def refresh_summary():
+            s_date = start_var.get()
+            e_date = end_var.get()
+            # 简单校验格式
+            try:
+                datetime.strptime(s_date, '%Y-%m-%d')
+                datetime.strptime(e_date, '%Y-%m-%d')
+            except:
+                messagebox.showerror("错误", "日期格式不正确，请使用 YYYY-MM-DD")
+                return
+
+            results = t_logger.get_summary() # summary 还是全局的，或者你可以后续给 get_summary 也加 start/end
+            profit = results[0] if results and results[0] is not None else 0
+            avg_pct = (results[1] if results and results[1] is not None else 0) * 100
+            count = results[2] if results and results[2] is not None else 0
+            summary_label.config(text=f"累计净利润: {profit:,.2f} | 平均收益率: {avg_pct:.2f}% | 总平仓笔数: {count}")
+            
+            load_stats()
+            load_details(s_date, e_date)
+
+        # --- 多日走势列表 ---
+        stats_frame = tk.LabelFrame(report_win, text="多日盈亏统计 (近30天)", padx=5, pady=5)
+        stats_frame.pack(side="top", fill="x", padx=10, pady=5)
+        
+        stats_tree = ttk.Treeview(stats_frame, columns=("day", "profit", "count"), show="headings", height=5)
+        stats_tree.heading("day", text="日期")
+        stats_tree.heading("profit", text="单日利润")
+        stats_tree.heading("count", text="成交笔数")
+        stats_tree.column("day", width=150, anchor="center")
+        stats_tree.column("profit", width=150, anchor="center")
+        stats_tree.column("count", width=100, anchor="center")
+        stats_tree.pack(fill="x")
+
+        def load_stats():
+            for item in stats_tree.get_children():
+                stats_tree.delete(item)
+            rows = t_logger.get_db_summary(days=30)
+            for day, profit, count in rows:
+                stats_tree.insert("", "end", values=(day, f"{profit:.2f}", count))
+
+        # --- 详细交易流水 ---
+        list_frame = tk.LabelFrame(report_win, text="交易明细记录", padx=5, pady=5)
+        list_frame.pack(side="top", fill="both", expand=True, padx=10, pady=5)
+        
+        cols = ("id", "code", "name", "buy_price", "sell_price", "profit", "pnl_pct", "sell_date", "feedback")
+        tree = ttk.Treeview(list_frame, columns=cols, show="headings")
+        
+        tree.heading("id", text="ID")
+        tree.heading("code", text="代码")
+        tree.heading("name", text="名称")
+        tree.heading("buy_price", text="买入价")
+        tree.heading("sell_price", text="卖出价")
+        tree.heading("profit", text="净利润")
+        tree.heading("pnl_pct", text="盈亏%")
+        tree.heading("sell_date", text="成交日期")
+        tree.heading("feedback", text="策略反馈")
+        
+        tree.column("id", width=40, anchor="center")
+        tree.column("code", width=80, anchor="center")
+        tree.column("name", width=100, anchor="center")
+        tree.column("buy_price", width=80, anchor="center")
+        tree.column("sell_price", width=80, anchor="center")
+        tree.column("profit", width=100, anchor="center")
+        tree.column("pnl_pct", width=80, anchor="center")
+        tree.column("sell_date", width=150, anchor="center")
+        tree.column("feedback", width=200, anchor="w")
+        
+        scrollbar = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
+        tree.configure(yscroll=scrollbar.set)
+        tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        def load_details(start_date=None, end_date=None):
+            for item in tree.get_children():
+                tree.delete(item)
+            trades = t_logger.get_closed_trades(start_date=start_date, end_date=end_date)
+            for t in trades:
+                tree.insert("", "end", values=(
+                    t['id'], t['code'], t['name'], t['buy_price'], t['sell_price'], 
+                    f"{t['profit']:.2f}", f"{t['pnl_pct']*100:.2f}%", t['sell_date'], t['feedback'] or ""
+                ))
+        
+        # --- 策略优化反馈按钮 ---
+        def add_feedback():
+            selected = tree.selection()
+            if not selected:
+                messagebox.showwarning("提醒", "请在明细中选择一笔交易进行反馈")
+                return
+            
+            item = tree.item(selected[0])
+            trade_id = item['values'][0]
+            stock_name = item['values'][2]
+            
+            feedback = simpledialog.askstring("策略优化反馈", f"针对 [{stock_name}] 的交易，请告知策略存在的问题或改进建议：\n(如：买入点过高、卖出过早、止损不及时等)")
+            if feedback:
+                if t_logger.update_trade_feedback(trade_id, feedback):
+                    messagebox.showinfo("成功", "感谢反馈，已记录。我们将基于此优化买卖逻辑。")
+                    load_details()
+                else:
+                    messagebox.showerror("错误", "反馈保存失败")
+
+        btn_bar = tk.Frame(report_win, pady=10)
+        btn_bar.pack(side="bottom", fill="x")
+        tk.Button(btn_bar, text="刷新数据", command=lambda: [refresh_summary(), load_stats(), load_details()], width=15).pack(side="left", padx=20)
+        tk.Button(btn_bar, text="问题反馈/优化策略", command=add_feedback, bg="#ffcccc", width=20).pack(side="right", padx=20)
+
+        # 初始加载
+        refresh_summary()
+
+    def open_strategy_backtest_view(self):
+        """预留：打开策略复盘与AI优化建议视图"""
+        messagebox.showinfo("敬请期待", "复盘功能正在开发中，将结合您的反馈进行模型微调。")
 
     def open_voice_monitor_manager(self):
         """语音预警管理窗口"""

@@ -14,6 +14,7 @@ from JohnsonUtil import LoggerFactory
 from concurrent.futures import ThreadPoolExecutor
 from intraday_decision_engine import IntradayDecisionEngine
 from risk_engine import RiskEngine
+from trading_logger import TradingLogger
 
 logger = LoggerFactory.getLogger()
 
@@ -33,6 +34,8 @@ class VoiceAnnouncer:
     """独立的语音播报引擎"""
     def __init__(self):
         self.queue = queue.Queue()
+        self.on_speak_start = None # 回调函数: func(code)
+        self.on_speak_end = None   # 回调函数: func(code)
         self._stop_event = threading.Event()
         # 仅当 pyttsx3 可用时启动线程
         if pyttsx3:
@@ -77,19 +80,29 @@ class VoiceAnnouncer:
             
         while not self._stop_event.is_set():
             try:
-                text = self.queue.get(timeout=1)
+                data = self.queue.get(timeout=1)
+                text = data.get('text')
+                code = data.get('code')
                 if text:
+                    if self.on_speak_start:
+                        try:
+                            self.on_speak_start(code)
+                        except: pass
                     self._speak_one(text)
+                    if self.on_speak_end:
+                        try:
+                            self.on_speak_end(code)
+                        except: pass
             except queue.Empty:
                 continue
             except Exception as e:
                 logger.error(f"Voice Loop Error: {e}")
                 time.sleep(1) # 防止死循环刷屏
 
-    def say(self, text):
+    def say(self, text, code=None):
         if self._thread and self._thread.is_alive():
-            if self.queue.qsize() < 5: # 防止堆积
-                self.queue.put(text)
+            if self.queue.qsize() < 10: # 稍微放宽堆积限制
+                self.queue.put({'text': text, 'code': code})
         else:
             logger.info(f"Voice (Disabled): {text}")
 
@@ -142,6 +155,9 @@ class StockLiveStrategy:
             trailing_stop_pct=trailing_stop_pct,
             max_position=max_single_stock_ratio
         )
+        
+        # 初始化记录器
+        self.trading_logger = TradingLogger()
         
         # 初始化风控引擎
         self._risk_engine = RiskEngine(
@@ -434,6 +450,9 @@ class StockLiveStrategy:
 
                 # ---------- 决策引擎 ----------
                 decision = self.decision_engine.evaluate(row, snap)
+                # 记录信号历史 (每秒更新，TradingLogger.log_signal 使用 INSERT OR REPLACE 保证每日每票唯一)
+                self.trading_logger.log_signal(code, data['name'], current_price, decision)
+
                 if decision["action"] != "持仓":
                     messages.append(("POSITION", f'{data["name"]} {decision["action"]} 仓位{int(decision["position"]*100)}% {decision["reason"]}'))
 
@@ -459,7 +478,7 @@ class StockLiveStrategy:
                     combined_msgs = "\n".join(list(unique_msgs.keys()) + list(last_duplicate.keys()))
 
                     logger.debug(f"{code} messages合并: {combined_msgs}")
-                    self._trigger_alert(code, data['name'], combined_msgs, action=action)
+                    self._trigger_alert(code, data['name'], combined_msgs, action=action, price=current_price)
                     data['last_alert'] = now
 
                     data['below_nclose_count'] = 0
@@ -701,7 +720,7 @@ class StockLiveStrategy:
         """测试特定报警"""
         self._trigger_alert(code, name, msg)
 
-    def _trigger_alert(self, code, name, message ,action='持仓'):
+    def _trigger_alert(self, code, name, message ,action='持仓', price=0.0):
         """触发报警"""
         logger.warning(f"🔔 ALERT: {message}")
         
@@ -709,9 +728,8 @@ class StockLiveStrategy:
         self._play_sound_async()
         
         # 2. 语音播报
-        # speak_text = f"注意，{name}，{message}"
         speak_text = f"注意{action}，{name}，{message}"
-        self._voice.say(speak_text)
+        self._voice.say(speak_text, code=code)
         
         # 3. 回调
         if self.alert_callback:
@@ -719,6 +737,11 @@ class StockLiveStrategy:
                 self.alert_callback(code, name, message)
             except Exception as e:
                 logger.error(f"Alert callback error: {e}")
+
+        # 4. 记录交易执行 (用于回测优化和收益计算)
+        if action in ("买入", "卖出") or "止" in action:
+            # 记录交易并计算单笔收益
+            self.trading_logger.record_trade(code, name, action, price, 100) 
 
     def _play_sound_async(self):
         try:

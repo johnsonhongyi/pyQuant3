@@ -69,12 +69,17 @@ class IntradayDecisionEngine:
         debug: dict[str, Any] = {}
         price = float(row.get("trade", 0))
         high = float(row.get("high", 0))
+        debug["high_val"] = high
         low = float(row.get("low", 0)) # 用于后续分析
         open_p = float(row.get("open", 0))
         volume = float(row.get("volume", 0))
         ratio = float(row.get("ratio", 0))
         ma5 = float(row.get("ma5d", 0))
         ma10 = float(row.get("ma10d", 0))
+        
+        # 💥 关键点：获取实时均价 nclose (VWAP)，优先从 row 取，其次从 snapshot 取
+        nclose = float(row.get("nclose", snapshot.get("nclose", 0)))
+        debug["nclose"] = nclose
 
         if price <= 0:
             return self._hold("价格无效", debug)
@@ -143,27 +148,39 @@ class IntradayDecisionEngine:
                 return self._hold(ma_reason, debug)
             
             if action == "买入":
-                # 1. 应用各种过滤器调整仓位
+                # 1. 应用基础过滤器
                 base_pos += self._yesterday_anchor(price, snapshot, debug)
                 base_pos += self._structure_filter(row, debug)
                 base_pos += self._extreme_filter(row, debug)
                 
-                # 2. 趋势强度及多日趋势加成
-                multiday_score = self._multiday_trend_score(snapshot, debug)
+                # 2. 趋势强度与多日情绪加成
+                multiday_score = self._multiday_trend_score(row, debug)
                 if trend_strength > 0.5 or multiday_score > 0.3:
                     base_pos += 0.1
                 elif trend_strength < -0.3:
                     base_pos -= 0.1
                 
-                # 3. 低位大仓位逻辑 (靠近 low10/low60 加成)
+                # 3. 量能与均价约束 (关键点)
+                base_pos += self._volume_bonus(row, debug)
+                
+                # 如果价格在今日均价（nclose）下方，严控买入（解决“华力创通”类衝高回落问题）
+                if nclose > 0 and price < nclose:
+                    penalty = 0.2
+                    if structure == "派发":
+                        penalty = 0.35 
+                    elif structure == "走弱":
+                        penalty = 0.25
+                    base_pos -= penalty
+                    debug["均价/结构约束"] = f"线下{structure}，扣减{penalty}"
+
+                # 4. 低位大仓位逻辑 (靠近 low10/low60 加成)
                 low10 = float(snapshot.get("low10", 0))
                 low60 = float(snapshot.get("low60", 0))
                 if (low10 > 0 and price < low10 * 1.02) or (low60 > 0 and price < low60 * 1.03):
-                    base_pos += 0.1
-                    debug["开仓权重"] = "低位加成"
-                
-                # 4. 量能加成
-                base_pos += self._volume_bonus(row, debug)
+                    # 如果不是在“严重派发”或“线下”结构中才加成
+                    if structure != "派发" and price > nclose:
+                        base_pos += 0.1
+                        debug["开仓权重"] = "低位加成"
 
                 final_pos = max(min(base_pos, self.max_position * 1.2), 0) # 低位允许略超 max_position
                 if final_pos <= 0:
@@ -193,6 +210,9 @@ class IntradayDecisionEngine:
         """
         sell_score = 0.0
         last_close = float(snapshot.get("last_close", 0))
+        high = float(debug.get("high_val", 0)) # 在 evaluate 中已通过 row 获取
+        if high <= 0: # 降级方案
+            high = price
         
         reasons: list[str] = []
         if price > ma5 * 1.05:
@@ -208,13 +228,25 @@ class IntradayDecisionEngine:
             sell_score += 0.2
             reasons.append(f"跌破昨收{last_close:.2f}")
             
-        # 额外加分项：反弹无力检测
-        nclose = float(snapshot.get("nclose", 0)) # 确保 nclose 已定义
-        if nclose > 0 and price < nclose * 0.985:
-            sell_score += 0.1
-            reasons.append("均价线下运行")
+        # 额外加分项：反弹无力/均价线压制检测
+        nclose = float(debug.get("nclose", snapshot.get("nclose", 0)))
+        if nclose > 0:
+             if price < nclose * 0.985:
+                 sell_score += 0.25 # 增加权重
+                 reasons.append("深跌均价线下")
+             elif price < nclose:
+                 # 衝高回落后的反抽无力
+                 if high > nclose * 1.005 and (high - price)/high > 0.03:
+                     # “华力创通”式：上午冲高失败，持续远离均价线
+                     sell_score += 0.35
+                     reasons.append("衝高回落且均价线压制(抛压大)")
+                 else:
+                     sell_score += 0.15
+                     reasons.append("均价线下运行")
             
         # “连阳持仓”保护逻辑：如果是强势连阳，且未出现结构走弱，略微调低卖出分数
+        # 注意：这里我们无法直接获取 row，但可以使用 debug 中缓存的信息或 snapshot
+        # 为了兼容性，我们修改 _multiday_trend_score 使其能处理 snapshot
         multiday_score = self._multiday_trend_score(snapshot, debug)
         if multiday_score > 0.3 and structure not in ["派发", "走弱"]:
             sell_score -= 0.15
@@ -238,7 +270,7 @@ class IntradayDecisionEngine:
         high = float(row.get("high", 0))
         low = float(row.get("low", 0))
         volume = float(row.get("volume", 0))
-        nclose = float(snapshot.get("nclose", 0))
+        nclose = float(debug.get("nclose", snapshot.get("nclose", 0)))
         cost_price = float(snapshot.get("cost_price", 0))
         highest_since_buy = float(snapshot.get("highest_since_buy", 0))
         
@@ -402,13 +434,18 @@ class IntradayDecisionEngine:
     
     def _intraday_structure(self, price: float, high: float, open_p: float, ratio: float) -> str:
         """判断盘中结构"""
-        if high > 0 and (high - price) / high > 0.02 and ratio > 8:
-            return "派发"  # 原 DISTRIBUTE
+        # 优化“派发”判定：即使换手率没到 8，如果回落严重且带量，也算派发
+        fall_from_high = (high - price) / high if high > 0 else 0
+        if high > 0 and fall_from_high > 0.02 and ratio > 5:
+            if fall_from_high > 0.04:
+                return "派发" # 回落超过 4% 属于严重派发
+            return "派发"  
+        
         if price > open_p and ratio > 5:
-            return "强势"  # 原 STRONG
-        if price < open_p and ratio > 5:
-            return "走弱"  # 原 WEAK
-        return "中性"  # 原 NEUTRAL
+            return "强势"
+        if price < open_p and ratio > 4:
+            return "走弱"
+        return "中性"
 
     def _ma_decision(self, price: float, ma5: float, ma10: float) -> tuple:
         """均线决策"""
@@ -874,9 +911,11 @@ class IntradayDecisionEngine:
         
         return result
 
-    def _multiday_trend_score(self, row: dict, debug: dict) -> float:
+    def _multiday_trend_score(self, source_data: dict, debug: dict) -> float:
         """
         多日情绪趋势评分
+        
+        source_data: 可以是 row 或 snapshot
         
         利用最近 5 天的 OHLC 数据分析趋势强度
         结合 MACD 序列和 KDJ 判断情绪方向
@@ -894,7 +933,7 @@ class IntradayDecisionEngine:
         # ---------- 1. 价格趋势分析（5日收盘价） ----------
         closes = []
         for i in range(1, 6):
-            c = float(row.get(f"lastp{i}d", 0))
+            c = float(source_data.get(f"lastp{i}d", 0))
             if c > 0:
                 closes.append(c)
         
@@ -931,8 +970,8 @@ class IntradayDecisionEngine:
                         reasons.append("价格偏低")
         
         # ---------- 2. 高低点趋势（5日最高/最低价） ----------
-        highs = [float(row.get(f"lasth{i}d", 0)) for i in range(1, 6) if row.get(f"lasth{i}d", 0)]
-        lows = [float(row.get(f"lastl{i}d", 0)) for i in range(1, 6) if row.get(f"lastl{i}d", 0)]
+        highs = [float(source_data.get(f"lasth{i}d", 0)) for i in range(1, 6) if source_data.get(f"lasth{i}d", 0)]
+        lows = [float(source_data.get(f"lastl{i}d", 0)) for i in range(1, 6) if source_data.get(f"lastl{i}d", 0)]
         
         if len(highs) >= 3 and len(lows) >= 3:
             # 高点抬升
@@ -952,9 +991,9 @@ class IntradayDecisionEngine:
                 reasons.append("低点下降")
         
         # ---------- 3. MACD 趋势分析 ----------
-        macd = float(row.get("macd", 0))
-        macd_dif = float(row.get("macddif", 0))
-        macd_dea = float(row.get("macddea", 0))
+        macd = float(source_data.get("macd", 0))
+        macd_dif = float(source_data.get("macddif", 0))
+        macd_dea = float(source_data.get("macddea", 0))
         
         # MACD 柱子方向
         if macd > 0:
@@ -975,7 +1014,7 @@ class IntradayDecisionEngine:
         # MACD 序列趋势（最近6日）
         macd_history = []
         for i in range(1, 7):
-            m = float(row.get(f"macdlast{i}", 0))
+            m = float(source_data.get(f"macdlast{i}", 0))
             if m != 0:
                 macd_history.append(m)
         
@@ -989,9 +1028,9 @@ class IntradayDecisionEngine:
                 reasons.append("MACD缩小")
         
         # ---------- 4. KDJ 超买超卖 ----------
-        kdj_j = float(row.get("kdj_j", 50))
-        kdj_k = float(row.get("kdj_k", 50))
-        kdj_d = float(row.get("kdj_d", 50))
+        kdj_j = float(source_data.get("kdj_j", 50))
+        kdj_k = float(source_data.get("kdj_k", 50))
+        kdj_d = float(source_data.get("kdj_d", 50))
         
         if kdj_j > 80 and kdj_k > 80:
             score -= 0.1
@@ -1009,9 +1048,9 @@ class IntradayDecisionEngine:
             reasons.append("KDJ死叉")
         
         # ---------- 5. 布林带位置 ----------
-        upper = float(row.get("upper", 0))
-        lower = float(row.get("lower", 0))
-        price = float(row.get("trade", 0))
+        upper = float(source_data.get("upper", 0))
+        lower = float(source_data.get("lower", 0))
+        price = float(source_data.get("trade", 0))
         
         if upper > 0 and lower > 0 and price > 0:
             boll_mid = (upper + lower) / 2
@@ -1028,10 +1067,10 @@ class IntradayDecisionEngine:
                     reasons.append("接近下轨")
         
         # ---------- 6. 多日最高价突破 ----------
-        hmax = float(row.get("hmax", 0))
-        high4 = float(row.get("high4", 0))
-        max5 = float(row.get("max5", 0))
-        current_high = float(row.get("high", 0))
+        hmax = float(source_data.get("hmax", 0))
+        high4 = float(source_data.get("high4", 0))
+        max5 = float(source_data.get("max5", 0))
+        current_high = float(source_data.get("high", 0))
         
         if hmax > 0 and current_high > hmax:
             score += 0.2
