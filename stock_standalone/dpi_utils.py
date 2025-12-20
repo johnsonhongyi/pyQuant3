@@ -17,6 +17,37 @@ def set_process_dpi_awareness():
     except Exception as e:
         logger.info(f"[DPI] 启用失败: {e}")
 
+# def set_process_dpi_awareness():
+#     """启用进程的 DPI 感知 (Windows)"""
+#     try:
+#         if sys.platform != "win32":
+#             return
+
+#         # 判断 PyQt 版本
+#         pyqt_version = None
+#         try:
+#             import PyQt6
+#             pyqt_version = 6
+#         except ImportError:
+#             try:
+#                 import PyQt5
+#                 pyqt_version = 5
+#             except ImportError:
+#                 pyqt_version = None
+
+#         if pyqt_version == 5:
+#             # PyQt5 下启用 Per-Monitor DPI Awareness
+#             import ctypes
+#             ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE = 2
+#             logger.info("[DPI] PyQt5: 已启用 Per-Monitor DPI Aware")
+#         elif pyqt_version == 6:
+#             # PyQt6 默认已经启用 Per-Monitor-V2
+#             logger.info("[DPI] PyQt6: 默认 Per-Monitor-V2，跳过设置")
+#         else:
+#             logger.warning("[DPI] 未检测到 PyQt5/6，跳过 DPI 设置")
+#     except Exception as e:
+#         logger.exception(f"[DPI] 启用 DPI 感知失败: {e}")
+
 def set_process_dpi_awareness_Close():
     """禁用进程的 DPI 感知"""
     if sys.platform.startswith('win'):
