@@ -194,11 +194,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 判断文件是否存在再加载
         if os.path.exists(icon_path):
-
             self.after(1000, lambda: self.iconbitmap(icon_path))
 
         else:
-            print(f"图标文件不存在: {icon_path}")
+            logger.error(f"图标文件不存在: {icon_path}")
 
         self.sortby_col = None
         self.sortby_col_ascend = None
@@ -372,6 +371,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.bind("<Alt-c>", lambda e:self.open_column_manager())
         self.bind("<Alt-d>", lambda event: self.open_handbook_overview())
         self.bind("<Alt-e>", lambda event: self.open_voice_monitor_manager())
+        self.bind("<Alt-g>", lambda event: self.open_trade_report_window())
         # 启动周期检测 RDP DPI 变化
         self.after(3000, self._check_dpi_change)
         self.auto_adjust_column = self.dfcf_var.get()
