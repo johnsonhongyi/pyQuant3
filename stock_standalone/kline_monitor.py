@@ -20,7 +20,7 @@ from history_manager import toast_message
 logger = LoggerFactory.getLogger("instock_TK.KLineMonitor")
 
 class KLineMonitor(tk.Toplevel):
-    def __init__(self, parent: tk.Widget, get_df_func: Callable[[], Optional[pd.DataFrame]], refresh_interval: int = 30, history3: Optional[Callable[[], List[str]]] = None) -> None:
+    def __init__(self, parent: tk.Widget, get_df_func: Callable[[], Optional[pd.DataFrame]], refresh_interval: int = 30, history3: Optional[Callable[[], List[str]]] = None,logger=logger) -> None :
         super().__init__(parent)
         self.master = parent
         self.get_df_func = get_df_func
