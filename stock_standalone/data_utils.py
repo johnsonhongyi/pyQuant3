@@ -57,7 +57,7 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
 def fetch_and_process_renewbug(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
                       marketInit: str = "all", marketblk: str = "boll",
-                      duration_sleep_time: int = 5, ramdisk_dir: str = "") -> None:
+                      duration_sleep_time: int = 5, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
     """后台数据获取与处理进程"""
     logger = LoggerFactory.getLogger()
     if log_level is not None:
@@ -199,7 +199,7 @@ def send_code_via_pipe(code: Union[str, Dict[str, Any]], logger: Any,pipe_name: 
 def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
                       marketInit: str = "all", marketblk: str = "boll",
-                      duration_sleep_time: int = 5, ramdisk_dir: str = "") -> None:
+                      duration_sleep_time: int = 5, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
     """后台数据获取与处理进程"""
     logger = LoggerFactory.getLogger()
     if log_level is not None:
@@ -239,6 +239,28 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                 # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
                 st_key_sort = g_values.getkey("st_key_sort")
             elif START_INIT > 0 and 830 <= cct.get_now_time_int() <= 915:
+                # today = cct.get_today()
+                # if not (g_values.getkey("tdx.init.done") is True and g_values.getkey("tdx.init.date") == today):
+                #     if clean_expired_tdx_file(logger, g_values, cct.get_trade_date_status, cct.get_today, 
+                #                             cct.get_now_time_int, cct.get_ramdisk_path, ramdisk_dir):
+                #         now_time = cct.get_now_time_int()
+                #         if now_time <= 915:
+                #             time_init = time.time()
+                #             start_init = 0
+                #             top_now = tdd.getSinaAlldf(market=market, vol=ct.json_countVol, vtype=ct.json_countType)
+                #             resamples = ['d', '3d', 'w', 'm'] if now_time <= 900 else ['3d']
+                #             for res_m in resamples:
+                #                 if res_m != resample:
+                #                     tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[res_m], resample=res_m)
+                #             g_values.setkey("tdx.init.done", True)
+                #             g_values.setkey("tdx.init.date", today)
+                #             logger.info(f"init_tdx done, elapsed: {time.time() - time_init:.2f}s")
+                        
+                #         for _ in range(30):
+                #             if flag and not flag.value: break
+                #             time.sleep(1)
+                #         continue
+
                 today = cct.get_today()
                 # 0️⃣ init 今天已经完成 → 直接跳过
                 if (
@@ -248,7 +270,8 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                     continue
 
                 # 1️⃣ 清理（未完成 → 不允许 init）
-                if not clean_expired_tdx_file(logger, g_values):
+                # if not clean_expired_tdx_file(logger, g_values):
+                if not clean_expired_tdx_file(logger, g_values, cct.get_trade_date_status, cct.get_today, cct.get_now_time_int, cct.get_ramdisk_path, ramdisk_dir):
                     logger.info(f"{today} 清理尚未完成，跳过 init_tdx")
                     continue
 
@@ -303,7 +326,6 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                     if not flag.value:
                         break
                     time.sleep(1)
-
                 continue
 
             elif START_INIT > 0 and (not cct.get_work_time()):
@@ -330,14 +352,6 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                 logger.info("top_now.empty no data fetched")
                 time.sleep(duration_sleep_time)
                 continue
-
-            # if top_all.empty:
-            #     if lastpTDX_DF.empty:
-            #         top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl= ct.Resample_LABELS_Days[resample], resample=resample,detect_calc_support=detect_calc_support.value)
-            #     else:
-            #         top_all = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF,detect_calc_support=detect_calc_support.value)
-            # else:
-            #     top_all = cct.combine_dataFrame(top_all, top_now, col="couts", compare="dff")
 
             # 合并与计算
             detect_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
