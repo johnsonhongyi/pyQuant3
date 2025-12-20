@@ -19,7 +19,7 @@ import win32file
 import win32con
 import tkinter as tk
 from tkinter import ttk, messagebox, font as tkfont
-
+from tkinter import filedialog,Menu,simpledialog
 from PyQt6 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 from prompt_toolkit import PromptSession
@@ -48,6 +48,7 @@ from data_utils import (
 from gui_utils import (
     bind_mouse_scroll, get_monitor_by_point, rearrange_monitors_per_screen
 )
+from stock_logic_utils import get_row_tags
 from tk_gui_modules.dpi_mixin import DPIMixin
 from tk_gui_modules.window_mixin import WindowMixin
 from tk_gui_modules.treeview_mixin import TreeviewMixin
@@ -58,7 +59,7 @@ from tk_gui_modules.gui_config import (
 from dpi_utils import set_process_dpi_awareness, get_windows_dpi_scale_factor
 from sys_utils import get_base_path
 from stock_handbook import StockHandbook
-
+from history_manager import QueryHistoryManager
 from stock_logic_utils import test_code_against_queries,is_generic_concept
 # from db_utils import load_all_concepts_pg_data
 from db_utils import *
@@ -2278,7 +2279,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             f"{'─' * 20}\n"
             f"📊 换手率: {stock_data.get('ratio', 'N/A')}\n"
             f"📊 成交量: {stock_data.get('volume', 'N/A')}\n"
-            f"🔴 连阳: {stock_data.get('red', 'N/A')}\n"
+            f"📈 连阳: {stock_data.get('red', 'N/A')} 🔺\n"
+            f"📉 连阴: {stock_data.get('gren', 'N/A')} 🔻\n"
             f"📈 突破布林: {boll}\n"
             f"  signal: {signal_icon} (low<10 & C>5)\n"
             f"  Upper:  {upper}\n"
@@ -4763,11 +4765,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # 加载保存的位置，或使用默认位置
         self.load_window_position(win, window_id, default_width=280, default_height=320)
-        
-        # 如果没有保存的位置，使用鼠标位置
-        # if not hasattr(self, '_window_positions') or window_id not in getattr(self, '_window_positions', {}):
-        #     win.geometry(f"+{event.x_root+15}+{event.y_root+15}")
-        
         self._current_tooltip = win
 
         # ESC / 关闭时保存位置
@@ -4890,7 +4887,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             "─" * 20,
             f"📊 换手率: {stock_data.get('ratio', 'N/A')}",
             f"📊 成交量: {stock_data.get('volume', 'N/A')}",
-            f"🔴 连阳: {stock_data.get('red', 'N/A')}",
+            f"📈 连阳: {stock_data.get('red', 'N/A')} 🔺",
+            f"📉 连阴: {stock_data.get('gren', 'N/A')} 🔻",
             f"📈 突破布林: {boll}",
             f"  signal: {signal_icon} (low<10 & C>5)",
             f"  Upper:  {stock_data.get('upper', 'N/A')}",
@@ -4906,6 +4904,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             'red',       # 换手率
             'green',       # 成交量
             'red',         # 连阳
+            'green',         # 连阴
             'orange',      # 布林带标题
             'orange',      # Upper
             'orange',      # Middle
@@ -5993,8 +5992,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-
-        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量","red":"连阳"}
+        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量","red":"连阳","gren":"连阴"}
         for col in columns:
             tree.heading(col, text=col_texts[col], anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
@@ -6348,7 +6346,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         vsb.pack(side="right", fill="y")
 
         # col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量"}
-        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量","red":"连阳"}
+        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量","red":"连阳","gren":"连阴"}
         for col in columns:
             tree.heading(col, text=col_texts[col], anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
@@ -6617,24 +6615,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # row_tags = []
             row_tags = get_row_tags(latest_row)
 
-            # low = latest_row.get("low")
-            # lastp1d = latest_row.get("lastp1d")
-            # high = latest_row.get("high")
-            # high4 = latest_row.get("high4")  # 假设 high4 在 latest_row 中
-
-            # row_tags = []
-
-            # # 红色条件
-            # if pd.notna(low) and pd.notna(lastp1d):
-            #     if low > lastp1d:
-            #         row_tags.append("red_row")
-
-            # # 橙色条件
-            # if pd.notna(high) and pd.notna(high4):
-            #     if high > high4 or (pd.notna(low) and low > high4):
-            #         row_tags.append("orange_row")
-
-
             if pd.isna(percent) or percent == 0:
                 percent = latest_row.get("per1d", row.get("per1d", 0))
 
@@ -6652,13 +6632,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 tags=tuple(row_tags)
             )
 
-            # tree.insert("", "end", iid=iid,
-            #             values=(code_row,
-            #                     latest_row.get("name", row.get("name", "")),
-            #                     # f"{latest_row.get('percent', row.get('percent', 0)):.2f}",
-            #                     f"{percent:.2f}",
-            #                     f"{latest_row.get('volume', row.get('volume', 0)):.1f}",
-            #                     latest_row.get("red", row.get("red", 0)) ))
 
             code_to_iid[code_row] = iid
 
@@ -6793,48 +6766,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tree.tag_configure("selected", background="#d0e0ff")
 
 
-    def _sort_treeview_column_newTop10_bug(self, tree, col, reverse=None):
-        if not hasattr(tree, "_full_df") or tree._full_df.empty:
-            return
-
-        # 初始化排序状态
-        if not hasattr(tree, "_sort_state"):
-            tree._sort_state = {}
-
-        # 切换排序顺序
-        if reverse is None:
-            reverse = not tree._sort_state.get(col, False)
-        tree._sort_state[col] = not reverse
-
-        # 排序完整数据
-        df_sorted = tree._full_df.sort_values(col, ascending=not reverse)
-
-        # 填充前 limit 条
-        limit = getattr(tree, "_display_limit", 50)
-        df_display = df_sorted.head(limit)
-
-        tree.delete(*tree.get_children())
-        for idx, (code_row, row) in enumerate(df_display.iterrows()):
-            iid = str(code_row)  # 使用原 DataFrame index 或股票 code 保证唯一
-            percent = row.get("percent")
-            if pd.isna(percent) or percent == 0:
-                percent = row.get("per1d")
-            tree.insert("", "end", iid=iid,
-                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}"))
-
-
-        # 保留选中状态
-        if hasattr(tree, "_selected_index") and tree.get_children():
-            sel_iid = str(getattr(tree, "_selected_index", tree.get_children()[0]))
-            if sel_iid in tree.get_children():
-                tree.selection_set(sel_iid)
-                tree.focus(sel_iid)
-                tree.see(sel_iid)
-
-        # 更新heading command
-        tree.heading(col, command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, not reverse))
-
-
     def _sort_treeview_column_newTop10(self, tree, col, reverse=None):
 
         if not hasattr(tree, "_full_df") or tree._full_df.empty:
@@ -6869,7 +6800,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if pd.isna(percent) or percent == 0:
                 percent = row.get("per1d")
             tree.insert("", "end", iid=iid,
-                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}"),tags=tuple(tags_for_row))
+                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}", f"{row.get('gren',0)}"),tags=tuple(tags_for_row))
 
         # 保留选中状态
         if hasattr(tree, "_selected_index") and tree.get_children():
@@ -7122,18 +7053,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     current_idx["value"] = idx
                     highlight_bar(idx)
 
-                    if event.button() == QtCore.Qt.LeftButton:
+                    if event.button() == QtCore.Qt.MouseButton.LeftButton:
                         self._call_concept_top10_win(code, concepts[idx])
                         win.raise_()
                         win.activateWindow()
 
-                    elif event.button() == QtCore.Qt.RightButton:
+                    elif event.button() == QtCore.Qt.MouseButton.RightButton:
                         concept_text = concepts[idx]
                         clipboard = QtWidgets.QApplication.clipboard()
                         copy_concept_text = f'category.str.contains("{concept_text}")'
                         clipboard.setText(copy_concept_text)
 
-                        from PyQt5.QtCore import QPoint
+                        from PyQt6.QtCore import QPoint
                         pos = event.screenPos()
                         pos_int = QPoint(int(pos.x()), int(pos.y()))
                         QtWidgets.QToolTip.showText(pos_int, f"已复制: {copy_concept_text}", win)
@@ -7172,15 +7103,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             data = plot._data_ref  # ✅ 动态读取最新数据
             concepts = data.get("concepts", [])
             
-            if key == QtCore.Qt.Key_R:
+            if key == QtCore.Qt.Key.Key_R:
                 self.plot_following_concepts_pg(code, top_n)
                 event.accept()
 
-            elif key in (QtCore.Qt.Key_Q, QtCore.Qt.Key_Escape):
+            elif key in (QtCore.Qt.Key.Key_Q, QtCore.Qt.Key.Key_Escape):
                 QtCore.QTimer.singleShot(0, win.close)
                 event.accept()
 
-            elif key == QtCore.Qt.Key_Up:
+            elif key == QtCore.Qt.Key.Key_Up:
                 current_idx["value"] = max(0, current_idx["value"] - 1)
                 highlight_bar(current_idx["value"])
                 self._call_concept_top10_win(code, concepts[current_idx["value"]])
@@ -7188,7 +7119,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 win.activateWindow()
                 event.accept()
 
-            elif key == QtCore.Qt.Key_Down:
+            elif key == QtCore.Qt.Key.Key_Down:
                 current_idx["value"] = min(len(concepts) - 1, current_idx["value"] + 1)
                 highlight_bar(current_idx["value"])
                 self._call_concept_top10_win(code, concepts[current_idx["value"]])
@@ -7196,7 +7127,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 win.activateWindow()
                 event.accept()
 
-            elif key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            elif key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
                 idx = current_idx["value"]
                 if 0 <= idx < len(concepts):
                     self._call_concept_top10_win(code, concepts[idx])
@@ -9101,10 +9032,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
 
-# class QueryHistoryManager(tk.Frame):
-#     def __init__(self, master, search_var1, search_var2, search_combo1, search_combo2, history_file):
-#         super().__init__(master)  
-class QueryHistoryManager:
+
+class QueryHistoryManager_old:
     def __init__(self, root=None,search_var1=None, search_var2=None, search_var3=None,search_combo1=None,search_combo2=None,search_combo3=None,auto_run=False,history_file="query_history.json",sync_history_callback=None,test_callback=None):
         """
         root=None 时不创建窗口，只管理数据
@@ -9327,101 +9256,6 @@ class QueryHistoryManager:
             else:
                 self.editor_frame.pack(fill="both", expand=True)  # 仅显示，不移动位置
 
-
-    # def save_search_history_h1h2(self, confirm_threshold=10):
-    #     #fix add test_code save clear history bug
-    #     """保存搜索历史，合并编辑记录到历史顶部，超过 confirm_threshold 条变动时提示确认"""
-    #     try:
-    #         # ---------- 工具函数 ----------
-    #         def dedup(history):
-    #             seen = set()
-    #             result = []
-    #             for r in history:
-    #                 q = r.get("query") if isinstance(r, dict) else str(r)
-    #                 if q not in seen:
-    #                     seen.add(q)
-    #                     result.append(r)
-    #             return result
-
-    #         def normalize_history(history):
-    #             normalized = []
-    #             for r in history:
-    #                 if not isinstance(r, dict):
-    #                     continue
-    #                 q = r.get("query", "")
-    #                 starred = r.get("starred", 0)
-    #                 note = r.get("note", "")
-    #                 if isinstance(starred, bool):
-    #                     starred = 1 if starred else 0
-    #                 elif not isinstance(starred, int):
-    #                     starred = 0
-    #                 normalized.append({"query": q, "starred": starred, "note": note})
-    #             return normalized
-
-    #         def merge_history(current, old):
-    #             seen = set()
-    #             result = []
-    #             for r in current:
-    #                 q = r.get("query") if isinstance(r, dict) else str(r)
-    #                 if q not in seen:
-    #                     seen.add(q)
-    #                     result.append(r)
-    #             for r in old:
-    #                 q = r.get("query") if isinstance(r, dict) else str(r)
-    #                 if q not in seen:
-    #                     seen.add(q)
-    #                     result.append(r)
-    #             return result[:self.MAX_HISTORY]
-
-    #         # ---------- 加载旧历史 ----------
-    #         old_data = {"history1": [], "history2": []}
-    #         if os.path.exists(self.history_file):
-    #             with open(self.history_file, "r", encoding="utf-8") as f:
-    #                 try:
-    #                     loaded_data = json.load(f)
-    #                     old_data["history1"] = dedup(loaded_data.get("history1", []))
-    #                     old_data["history2"] = dedup(loaded_data.get("history2", []))
-    #                 except json.JSONDecodeError:
-    #                     pass
-
-    #         # ---------- 规范当前历史 ----------
-    #         self.history1 = normalize_history(self.history1)
-    #         self.history2 = normalize_history(self.history2)
-
-    #         # ---------- 合并历史 ----------
-    #         merged_data = {
-    #             "history1": normalize_history(merge_history(self.history1, old_data.get("history1", []))),
-    #             "history2": normalize_history(merge_history(self.history2, old_data.get("history2", []))),
-    #         }
-
-    #         # ---------- 检测变动量 ----------
-    #         def changes_count(old_list, new_list):
-    #             old_set = {r['query'] for r in old_list}
-    #             new_set = {r['query'] for r in new_list}
-    #             return len(new_set - old_set) + len(old_set - new_set)
-
-    #         delta1 = changes_count(old_data.get("history1", []), merged_data["history1"])
-    #         delta2 = changes_count(old_data.get("history2", []), merged_data["history2"])
-
-    #         if delta1 + delta2 >= confirm_threshold:
-    #             if not messagebox.askyesno(
-    #                 "确认保存",
-    #                 f"搜索历史发生较大变动（{delta1 + delta2} 条），是否继续保存？"
-    #             ):
-    #                 logger.info("❌ 用户取消保存搜索历史")
-    #                 return
-
-    #         # ---------- 写回文件 ----------
-    #         with open(self.history_file, "w", encoding="utf-8") as f:
-    #             json.dump(merged_data, f, ensure_ascii=False, indent=2)
-
-    #         logger.info(f"✅ 搜索历史已保存 "
-    #               f"(history1: {len(merged_data['history1'])} 条 / "
-    #               f"history2: {len(merged_data['history2'])} 条)，starred 已统一为整数")
-
-    #     except Exception as e:
-    #         messagebox.showerror("错误", f"保存搜索历史失败: {e}")
-
     def save_search_history(self, confirm_threshold=10):
         #fix add test_code save clear history bug
         """保存搜索历史，合并编辑记录到历史顶部，超过 confirm_threshold 条变动时提示确认"""
@@ -9509,14 +9343,6 @@ class QueryHistoryManager:
                     logger.info("❌ 用户取消保存搜索历史")
                     return
 
-            # ---------- 写回文件 ----------
-            # with open(self.history_file, "w", encoding="utf-8") as f:
-            #     json.dump(merged_data, f, ensure_ascii=False, indent=2)
-
-            # logger.info(f"✅ 搜索历史已保存 "
-            #       f"(history1: {len(merged_data['history1'])} 条 / "
-            #       f"history2: {len(merged_data['history2'])} 条)，starred 已统一为整数")
-            # ---------- 写回文件 ----------
             with open(self.history_file, "w", encoding="utf-8") as f:
                 json.dump({
                     "history1": merged_data["history1"],
@@ -9671,17 +9497,6 @@ class QueryHistoryManager:
         else:
             return {"query": str(r), "starred":  0, "note": ""}
 
-    # def switch_group(self, event=None):
-    #     group = self.combo_group.get()
-    #     self.current_key = group
-    #     if group == "history1":
-    #         self.current_history = self.history1
-    #     elif group == "history2":
-    #         self.current_history = self.history2
-    #     elif group == "history3":
-    #         self.current_history = self.history3  # ✅ 新增
-    #     self.refresh_tree()
-
     def switch_group(self, event=None):
         self.clear_hits()
         if getattr(self, "_suppress_switch", False):
@@ -9712,7 +9527,6 @@ class QueryHistoryManager:
             return
 
         record = self.current_history[idx]
-        # new_query = self.askstring_at_parent(self.root, "修改 Query", "请输入新的 Query：", initialvalue=record.get("query", ""))
         new_query = askstring_at_parent_single(self.root, "修改 Query", "请输入新的 Query：", initialvalue=record.get("query", ""))
         if new_query and new_query.strip():
             new_query = new_query.strip()

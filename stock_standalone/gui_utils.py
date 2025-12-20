@@ -198,45 +198,104 @@ def get_centered_window_position_mainWin(parent: Union[tk.Tk, tk.Toplevel], win_
         
     return clamp_window_to_screens(x, y, win_width, win_height)
 
+# def askstring_at_parent_single(parent: Union[tk.Tk, tk.Toplevel], title: str, prompt: str, initialvalue: str = "") -> Optional[str]:
+#     """在父窗口位置弹出的自定义输入框"""
+#     result = {"value": None}
+#     dlg = tk.Toplevel(parent)
+#     dlg.title(title)
+    
+#     lbl = tk.Label(dlg, text=prompt)
+#     lbl.pack(pady=5, padx=10)
+    
+#     entry = tk.Entry(dlg, width=40)
+#     entry.pack(pady=5, padx=10)
+#     entry.insert(0, initialvalue)
+#     entry.select_range(0, tk.END)
+#     entry.focus_set()
+
+#     def on_ok(event=None):
+#         result["value"] = entry.get()
+#         dlg.destroy()
+
+#     def on_cancel(event=None):
+#         dlg.destroy()
+
+#     btn_frame = tk.Frame(dlg)
+#     btn_frame.pack(pady=10)
+#     tk.Button(btn_frame, text="确定", command=on_ok, width=10).pack(side="left", padx=5)
+#     tk.Button(btn_frame, text="取消", command=on_cancel, width=10).pack(side="left", padx=5)
+    
+#     dlg.bind("<Return>", on_ok)
+#     dlg.bind("<Escape>", on_cancel)
+    
+#     # 居中
+#     dlg.update_idletasks()
+#     w, h = dlg.winfo_width(), dlg.winfo_height()
+#     x, y = get_centered_window_position_mainWin(parent, w, h)
+#     dlg.geometry(f"+{x}+{y}")
+    
+#     dlg.grab_set()
+#     parent.wait_window(dlg)
+#     return result["value"]
+
+# def askstring_at_parent_single(parent, title, prompt, initialvalue=""):
 def askstring_at_parent_single(parent: Union[tk.Tk, tk.Toplevel], title: str, prompt: str, initialvalue: str = "") -> Optional[str]:
-    """在父窗口位置弹出的自定义输入框"""
-    result = {"value": None}
     dlg = tk.Toplevel(parent)
+    dlg.transient(parent)
     dlg.title(title)
-    
-    lbl = tk.Label(dlg, text=prompt)
-    lbl.pack(pady=5, padx=10)
-    
-    entry = tk.Entry(dlg, width=40)
-    entry.pack(pady=5, padx=10)
-    entry.insert(0, initialvalue)
-    entry.select_range(0, tk.END)
-    entry.focus_set()
+    dlg.resizable(True, True)
 
-    def on_ok(event=None):
-        result["value"] = entry.get()
+    # 屏幕宽度限制（你原本的逻辑）
+    screen = get_monitor_by_point(0, 0)
+    screen_width_limit = int(screen['width'] * 0.5)
+
+    base_width, base_height = 600, 300
+    char_width = 8
+    text_len = max(len(prompt), len(initialvalue))
+    win_width = min(max(base_width, text_len * char_width // 2), screen_width_limit)
+    win_height = base_height + (prompt.count("\n") * 20)
+
+    x, y = get_centered_window_position_single(parent, win_width, win_height)
+    dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
+
+    result = {"value": None}
+
+    lbl = tk.Label(dlg, text=prompt, anchor="w", justify="left", wraplength=win_width - 40)
+    lbl.pack(pady=5, padx=5, fill="x")
+
+    # ✅ 获取系统默认字体，统一字号
+    default_font = tkfont.nametofont("TkDefaultFont")
+    text_font = default_font.copy()
+    text_font.configure(size=default_font.cget("size"))  # 可加粗或放大
+    # text_font.configure(size=default_font.cget("size") + 1)
+
+    # ✅ 多行输入框 + 自动换行 + 指定字体
+    text = tk.Text(dlg, wrap="word", height=6, font=text_font)
+    text.pack(pady=5, padx=5, fill="both", expand=True)
+    if initialvalue:
+        text.insert("1.0", initialvalue)
+    text.focus_set()
+
+    def on_ok():
+        result["value"] = text.get("1.0", "end-1c").replace("\n", " ")
         dlg.destroy()
 
-    def on_cancel(event=None):
+    def on_cancel():
         dlg.destroy()
 
-    btn_frame = tk.Frame(dlg)
-    btn_frame.pack(pady=10)
-    tk.Button(btn_frame, text="确定", command=on_ok, width=10).pack(side="left", padx=5)
-    tk.Button(btn_frame, text="取消", command=on_cancel, width=10).pack(side="left", padx=5)
-    
-    dlg.bind("<Return>", on_ok)
-    dlg.bind("<Escape>", on_cancel)
-    
-    # 居中
-    dlg.update_idletasks()
-    w, h = dlg.winfo_width(), dlg.winfo_height()
-    x, y = get_centered_window_position_mainWin(parent, w, h)
-    dlg.geometry(f"+{x}+{y}")
-    
+    frame_btn = tk.Frame(dlg)
+    frame_btn.pack(pady=5)
+    tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
+    tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
+
+    dlg.bind("<Escape>", lambda e: on_cancel())
+    text.bind("<Return>",lambda e: on_ok())       # 回车确认
+    text.bind("<Shift-Return>", lambda e: text.insert("insert", "\n"))  # Shift+回车换行
+
     dlg.grab_set()
     parent.wait_window(dlg)
     return result["value"]
+
 def rearrange_monitors_per_screen(align: str = "left", sort_by: str = "id", layout: str = "horizontal", monitor_list: Optional[dict] = None, win_var: Optional[tk.BooleanVar] = None) -> None:
     """
     多屏幕窗口重排（自动换列/换行 + 左右对齐 + 屏幕内排序）
