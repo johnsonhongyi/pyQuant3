@@ -8628,7 +8628,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             messagebox.showerror("错误", "存档文件不存在")
             return
         if readfile:
-            initial_monitor_list = load_monitor_list(MONITOR_LIST_FILE=archive_file)
+            initial_monitor_list = load_monitor_list(monitor_list_file=archive_file)
             logger.info('readfile:{archive_file}')
             return initial_monitor_list
 
@@ -8998,73 +8998,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.error(f"加载 CSV 失败: {e}")
 
 
-    # def load_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500):
-    #     """从统一配置文件加载窗口位置"""
-    #     if os.path.exists(file_path):
-    #         try:
-    #             with open(file_path, "r", encoding="utf-8") as f:
-    #                 data = json.load(f)
-    #                 if window_name in data:
-    #                     pos = data[window_name]
-    #                     x, y = clamp_window_to_screens(pos['x'], pos['y'], pos['width'], pos['height'])
-    #                     win.geometry(f"{pos['width']}x{pos['height']}+{x}+{y}")
-    #                     # Tkinter geometry 格式
-    #                     return pos['width'],pos['height'],x,y
-    #         except Exception as e:
-    #             logger.error(f"读取窗口位置失败: {e}")
-    #     # 默认居中
-    #     self.center_window(win, default_width, default_height)
-
-    # def save_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE):
-    #     """保存指定窗口位置到统一配置文件"""
-    #     pos = {
-    #         "x": win.winfo_x(),
-    #         "y": win.winfo_y(),
-    #         "width": win.winfo_width(),
-    #         "height": win.winfo_height()
-    #     }
-
-    #     data = {}
-    #     if os.path.exists(file_path):
-    #         try:
-    #             with open(file_path, "r", encoding="utf-8") as f:
-    #                 data = json.load(f)
-    #         except Exception as e:
-    #             logger.error(f"读取窗口配置失败: {e}")
-
-    #     data[window_name] = pos
-
-    #     try:
-    #         with open(file_path, "w", encoding="utf-8") as f:
-    #             json.dump(data, f, ensure_ascii=False, indent=2)
-    #     except Exception as e:
-    #         logger.error(f"保存窗口位置失败: {e}")
-
-    # def load_window_position(self,win, window_name, file_path=WINDOW_CONFIG_FILE, default_width=500, default_height=500):
-    #     """从统一配置文件加载窗口位置"""
-    #     scale = get_windows_dpi_scale_factor()
-
-    #     if os.path.exists(file_path):
-    #         try:
-    #             with open(file_path, "r", encoding="utf-8") as f:
-    #                 data = json.load(f)
-    #                 if window_name in data:
-    #                     pos = data[window_name]
-    #                     # 根据当前 DPI 比例调整
-    #                     width = int(pos['width'] * scale)
-    #                     height = int(pos['height'] * scale)
-    #                     x = int(pos['x'] * scale)
-    #                     y = int(pos['y'] * scale)
-    #                     # x, y = clamp_window_to_screens(pos['x'], pos['y'], pos['width'], pos['height'])
-    #                     x, y = clamp_window_to_screens(x, y, width, height)
-    #                     win.geometry(f"{pos['width']}x{pos['height']}+{x}+{y}  {width}  {height}")
-    #                     # Tkinter geometry 格式
-    #                     return width,height,x,y
-    #         except Exception as e:
-    #             logger.error(f"读取窗口位置失败: {e}")
-    #     # 默认居中
-    #     self.center_window(win, default_width, default_height)
-
     def is_window_visible_on_top(self,tk_window):
         """判断 Tk 窗口是否仍在最前层"""
         hwnd = int(tk_window.frame(), 0) if isinstance(tk_window.frame(), str) else tk_window.frame()
@@ -9101,27 +9034,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 win_info["is_lifted"] = True
 
 
-    # def bring_monitor_to_front_pg(self, active_window):
-    #     for k, v in self._pg_windows.items():
-    #         win = v.get("win")
-    #         if win is None:
-    #             continue
-    #         if v.get("code") == active_window:
-    #             continue
-    #         # 如果窗口被最小化，恢复
-    #         if win.isMinimized():
-    #             win.setWindowState(QtCore.Qt.WindowNoState)
-
-    #         # 显示窗口
-    #         win.show()              # 如果窗口被隐藏
-    #         win.raise_()            # 提到最前
-    #         # win.activateWindow()    # 获取焦点
-
-    #         # 窗口置顶逻辑（短暂置顶）
-    #         win.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, True)
-    #         win.show()  # 需要调用 show 让 flag 生效
-    #         win.setWindowFlag(QtCore.Qt.WindowStaysOnTopHint, False)
-    #         win.show()  # 取消置顶后刷新
     def bring_monitor_to_front_pg(self, active_code):
         """仅在当前 PG 窗口被主窗口遮挡时才提升"""
         # main_win = self.main_window     # 主窗口
