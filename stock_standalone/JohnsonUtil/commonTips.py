@@ -31,13 +31,9 @@ import traceback
 import socket
 from configobj import ConfigObj
 import importlib
-# log = LoggerFactory.log
 from JohnsonUtil import LoggerFactory
 log = LoggerFactory.getLogger()
 from tqdm import tqdm
-# import win32MoveCom
-# log.setLevel(Log.DEBUG)
-# import numba as nb
 import numpy as np
 import subprocess
 import a_trade_calendar
@@ -132,11 +128,6 @@ def get_base_path() -> str:
     # 4. 极端脚本回退
     log.info(f"[DEBUG] Path Mode: Final Script Fallback.")
     return os.path.dirname(os.path.abspath(sys.argv[0]))
-
-
-# logger.info(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
-#print(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
-#print(f'get_base_path() : {get_base_path()}')
 
 def get_base_path_simple() -> str:
     """获取程序运行目录，兼容 PyInstaller / Nuitka / 普通脚本 (简化版)"""

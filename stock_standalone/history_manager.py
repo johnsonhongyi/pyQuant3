@@ -11,30 +11,30 @@ except ImportError:
     win32api = None
 
 from JohnsonUtil import LoggerFactory
-from gui_utils import askstring_at_parent_single
-from stock_logic_utils import test_code_against_queries
+from gui_utils import askstring_at_parent_single,clamp_window_to_screens
+from stock_logic_utils import test_code_against_queries,toast_message
 
 logger = LoggerFactory.getLogger('QueryHistoryManager')
 
-def toast_message(master, text, duration=1500):
-    """短暂提示信息（浮层，不阻塞）"""
-    toast = tk.Toplevel(master)
-    toast.overrideredirect(True)
-    toast.attributes("-topmost", True)
-    label = tk.Label(toast, text=text, bg="black", fg="white", padx=10, pady=1)
-    label.pack()
-    try:
-        master.update_idletasks()
-        master_x = master.winfo_rootx()
-        master_y = master.winfo_rooty()
-        master_w = master.winfo_width()
-    except Exception:
-        master_x, master_y, master_w = 100, 100, 400
-    toast.update_idletasks()
-    toast_w = toast.winfo_width()
-    toast_h = toast.winfo_height()
-    toast.geometry(f"{toast_w}x{toast_h}+{master_x + (master_w-toast_w)//2}+{master_y + 50}")
-    toast.after(duration, toast.destroy)
+# def toast_message(master, text, duration=1500):
+#     """短暂提示信息（浮层，不阻塞）"""
+#     toast = tk.Toplevel(master)
+#     toast.overrideredirect(True)
+#     toast.attributes("-topmost", True)
+#     label = tk.Label(toast, text=text, bg="black", fg="white", padx=10, pady=1)
+#     label.pack()
+#     try:
+#         master.update_idletasks()
+#         master_x = master.winfo_rootx()
+#         master_y = master.winfo_rooty()
+#         master_w = master.winfo_width()
+#     except Exception:
+#         master_x, master_y, master_w = 100, 100, 400
+#     toast.update_idletasks()
+#     toast_w = toast.winfo_width()
+#     toast_h = toast.winfo_height()
+#     toast.geometry(f"{toast_w}x{toast_h}+{master_x + (master_w-toast_w)//2}+{master_y + 50}")
+#     toast.after(duration, toast.destroy)
 
 class QueryHistoryManager:
     def __init__(self, root=None, search_var1=None, search_var2=None, search_var3=None,
@@ -420,7 +420,7 @@ class QueryHistoryManager:
             old_val = record.get("starred", 0)
             if isinstance(old_val, bool): old_val = 1 if old_val else 0
             record["starred"] = (old_val + 1) % 5
-            self.refresh_tree()
+            self.refresh_tree() 
 
     def get_centered_window_position_query(self, parent, win_width, win_height, margin=10):
         mx = parent.winfo_pointerx()

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any, Optional, Union, Callable
 from JohnsonUtil import LoggerFactory
 import logging
-
+import tkinter as tk
 # 获取或创建日志记录器
 logger: logging.Logger = LoggerFactory.getLogger("instock_TK.StockLogic")
 
@@ -260,6 +260,26 @@ def safe_prev_signal_array(df: Optional[pd.DataFrame]) -> np.ndarray:
             continue
         safe_vals.append(0)
     return np.array(safe_vals)
+
+def toast_message(master, text, duration=1500):
+    """短暂提示信息（浮层，不阻塞）"""
+    toast = tk.Toplevel(master)
+    toast.overrideredirect(True)
+    toast.attributes("-topmost", True)
+    label = tk.Label(toast, text=text, bg="black", fg="white", padx=10, pady=1)
+    label.pack()
+    try:
+        master.update_idletasks()
+        master_x = master.winfo_rootx()
+        master_y = master.winfo_rooty()
+        master_w = master.winfo_width()
+    except Exception:
+        master_x, master_y, master_w = 100, 100, 400
+    toast.update_idletasks()
+    toast_w = toast.winfo_width()
+    toast_h = toast.winfo_height()
+    toast.geometry(f"{toast_w}x{toast_h}+{master_x + (master_w-toast_w)//2}+{master_y + 50}")
+    toast.after(duration, toast.destroy)
 
 class RealtimeSignalManager:
     state: dict[str, Any]
