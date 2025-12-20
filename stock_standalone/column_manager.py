@@ -2,8 +2,12 @@
 import tkinter as tk
 from tkinter import ttk
 from stock_logic_utils import  toast_message
+from JohnsonUtil import LoggerFactory
+
+# 获取或创建日志记录器
+logger = LoggerFactory.getLogger("instock_TK.KLineMonitor")
 class ColumnSetManager(tk.Toplevel):
-    def __init__(self, master, all_columns, config, on_apply_callback, default_cols, auto_apply_on_init=False):
+    def __init__(self, master, all_columns, config, on_apply_callback, default_cols, auto_apply_on_init=False,logger=logger):
         super().__init__(master)
         self.master = master
         self.title("列组合管理器")
