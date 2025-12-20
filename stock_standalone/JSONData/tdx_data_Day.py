@@ -4091,8 +4091,8 @@ def compute_perd_df(dd, lastdays=3, resample='d'):
 
     df['lastdu'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
     dfupper = df[-ct.bollupperT:]
-    upperT = dfupper['close'][(dfupper['close'] > 0) & (dfupper['close'] > dfupper['upper'])]
-    upperL = dfupper['close'][(dfupper['low'] > dfupper['ma5d']) & (dfupper['ma5d'] > 0)]
+    upperT = dfupper['high'][(dfupper['high'] > 0) & (dfupper['high'] > dfupper['upper'])]
+    upperL = dfupper['low'][(dfupper['low'] > dfupper['ma5d']) & (dfupper['ma5d'] > 0)]
     upperLIS, posLIS = LIS_TDX(upperT) if len(upperT) > 0 else ([], [])
     dd['upperT'] = len(posLIS)
     dd['upperL'] = len(upperL)
@@ -4225,7 +4225,7 @@ def compute_perd_df_slow(dd,lastdays=3,resample ='d'):
     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.high > df.upper)].count()
     dfupper=df[-ct.bollupperT:]
 
-    upperT = dfupper.close[-ct.bollupperT:][ (dfupper.close > 0) & (dfupper.close > dfupper.upper)]
+    upperT = dfupper.high[-ct.bollupperT:][ (dfupper.high > 0) & (dfupper.high > dfupper.upper)]
     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.close > df.upper)].apply(lambda x: round(x, 0)).median()
     upperLIS, posLIS = LIS_TDX(upperT) if len(upperT) > 0 else ([],[])
     dd['upperT'] = len(posLIS) 

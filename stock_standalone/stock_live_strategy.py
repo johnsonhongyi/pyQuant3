@@ -9,6 +9,7 @@ import time
 import os
 import winsound
 from datetime import datetime
+from typing import Optional, Callable, Dict, Any, Union, List
 import pandas as pd
 from JohnsonUtil import LoggerFactory
 from concurrent.futures import ThreadPoolExecutor
@@ -32,10 +33,10 @@ except ImportError:
 
 class VoiceAnnouncer:
     """独立的语音播报引擎"""
-    def __init__(self):
-        self.queue = queue.Queue()
-        self.on_speak_start = None # 回调函数: func(code)
-        self.on_speak_end = None   # 回调函数: func(code)
+    def __init__(self) -> None:
+        self.queue: queue.Queue = queue.Queue()
+        self.on_speak_start: Optional[Callable[[str], None]] = None # 回调函数: func(code)
+        self.on_speak_end: Optional[Callable[[str], None]] = None   # 回调函数: func(code)
         self._stop_event = threading.Event()
         # 仅当 pyttsx3 可用时启动线程
         if pyttsx3:
@@ -99,7 +100,7 @@ class VoiceAnnouncer:
                 logger.error(f"Voice Loop Error: {e}")
                 time.sleep(1) # 防止死循环刷屏
 
-    def say(self, text, code=None):
+    def say(self, text: str, code: Optional[str] = None) -> None:
         if self._thread and self._thread.is_alive():
             if self.queue.qsize() < 10: # 稍微放宽堆积限制
                 self.queue.put({'text': text, 'code': code})
@@ -167,11 +168,11 @@ class StockLiveStrategy:
             risk_duration_threshold=risk_duration_threshold
         )
 
-    def set_alert_callback(self, callback):
+    def set_alert_callback(self, callback: Callable[[str, str, str], None]) -> None:
         """设置报警回调函数"""
         self.alert_callback = callback
     
-    def _calculate_position(self, stock, current_price, current_nclose, last_close, last_percent, last_nclose):
+    def _calculate_position(self, stock: dict, current_price: float, current_nclose: float, last_close: float, last_percent: Optional[float], last_nclose: float) -> tuple[str, float]:
         """根据今日/昨日数据计算动态仓位与操作"""
         position_ratio = round(1.0/self.stock_count,1)
         logger.debug(f'仓位分配:position_ratio:{position_ratio}')
@@ -343,7 +344,7 @@ class StockLiveStrategy:
         )
         return "added"
 
-    def process_data(self, df_all):
+    def process_data(self, df_all: pd.DataFrame) -> None:
         """
         处理每一帧的行情数据
         """
@@ -720,7 +721,7 @@ class StockLiveStrategy:
         """测试特定报警"""
         self._trigger_alert(code, name, msg)
 
-    def _trigger_alert(self, code, name, message ,action='持仓', price=0.0):
+    def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0) -> None:
         """触发报警"""
         logger.warning(f"🔔 ALERT: {message}")
         
