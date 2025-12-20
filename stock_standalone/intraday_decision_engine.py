@@ -4,7 +4,7 @@
 支持买入/卖出信号生成、动态仓位计算、趋势强度评估、止损止盈检测
 """
 import logging
-from typing import Optional, Any
+from typing import Optional, Any, Dict, List, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class IntradayDecisionEngine:
                    f"take_profit={take_profit_pct:.1%}, trailing={trailing_stop_pct:.1%}, "
                    f"max_pos={max_position:.1%}")
 
-    def evaluate(self, row: dict, snapshot: dict, mode: str = "full") -> dict:
+    def evaluate(self, row: dict[str, Any], snapshot: dict[str, Any], mode: str = "full") -> dict[str, Any]:
         """
         评估当前行情并生成买卖决策及详尽的调试信息
         
@@ -201,7 +201,7 @@ class IntradayDecisionEngine:
     # ==================== 卖出信号 ====================
     
     def _sell_decision(self, price: float, ma5: float, ma10: float, 
-                       snapshot: dict, structure: str, debug: dict) -> tuple:
+                       snapshot: dict[str, Any], structure: str, debug: dict[str, Any]) -> tuple[str, float, str]:
         """
         卖出信号判定
         
@@ -262,7 +262,7 @@ class IntradayDecisionEngine:
     
     # ==================== 止损止盈 ====================
     
-    def _stop_check(self, row: dict, snapshot: dict, debug: dict[str, Any]) -> dict:
+    def _stop_check(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any]:
         """
         全量止损止盈及技术位破位检测
         """
@@ -447,7 +447,7 @@ class IntradayDecisionEngine:
             return "走弱"
         return "中性"
 
-    def _ma_decision(self, price: float, ma5: float, ma10: float) -> tuple:
+    def _ma_decision(self, price: float, ma5: float, ma10: float) -> tuple[str, float, str]:
         """均线决策"""
         bias = (price - ma5) / ma5
         if price > ma5 > ma10 and bias < 0.015:
@@ -508,7 +508,7 @@ class IntradayDecisionEngine:
 
     # ==================== 实时行情高优先级决策 ====================
     
-    def _realtime_priority_check(self, row: dict, snapshot: dict, mode: str, debug: dict) -> dict:
+    def _realtime_priority_check(self, row: dict[str, Any], snapshot: dict[str, Any], mode: str, debug: dict[str, Any]) -> dict[str, Any]:
         """
         实时行情高优先级决策（优先级高于普通均线信号）
         
@@ -707,7 +707,7 @@ class IntradayDecisionEngine:
         debug["成交情绪理由"] = reasons
         return score
 
-    def _volume_price_signal(self, row: dict, snapshot: dict, mode: str, debug: dict) -> dict:
+    def _volume_price_signal(self, row: dict[str, Any], snapshot: dict[str, Any], mode: str, debug: dict[str, Any]) -> dict[str, Any]:
         """
         量价信号策略
         
@@ -911,7 +911,7 @@ class IntradayDecisionEngine:
         
         return result
 
-    def _multiday_trend_score(self, source_data: dict, debug: dict) -> float:
+    def _multiday_trend_score(self, source_data: Union[dict[str, Any], Any], debug: dict[str, Any]) -> float:
         """
         多日情绪趋势评分
         

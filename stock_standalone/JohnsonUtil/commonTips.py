@@ -20,6 +20,7 @@ import pandas as pd
 # from trollius.coroutines import From
 import asyncio
 import argparse
+from typing import Optional, List, Dict, Union, Any, Tuple, Callable
 
 
 from JohnsonUtil.prettytable import PrettyTable
@@ -63,13 +64,13 @@ import ctypes
 import shutil
 
 # --- Win32 API 用于获取 EXE 原始路径 (仅限 Windows) ---
-def _get_win32_exe_path():
+def _get_win32_exe_path() -> str:
     """
     使用 Win32 API 获取当前进程的主模块路径。
     这在 Nuitka/PyInstaller 的 Onefile 模式下能可靠地返回原始 EXE 路径。
     """
     # 假设是 32767 字符的路径长度是足够的
-    MAX_PATH_LENGTH = 32767 
+    MAX_PATH_LENGTH: int = 32767 
     buffer = ctypes.create_unicode_buffer(MAX_PATH_LENGTH)
     
     # 调用 GetModuleFileNameW(HMODULE hModule, LPWSTR lpFilename, DWORD nSize)
@@ -80,21 +81,21 @@ def _get_win32_exe_path():
     return os.path.dirname(os.path.abspath(buffer.value))
 
 
-def get_base_path():
+def get_base_path() -> str:
     """
     获取程序基准路径。在 Windows 打包环境 (Nuitka/PyInstaller) 中，
     使用 Win32 API 优先获取真实的 EXE 目录。
     """
     
     # 检查是否为 Python 解释器运行
-    is_interpreter = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
+    is_interpreter: bool = os.path.basename(sys.executable).lower() in ('python.exe', 'pythonw.exe')
     
     # 1. 普通 Python 脚本模式
     if is_interpreter and not getattr(sys, "frozen", False):
         # 只有当它是 python.exe 运行 且 没有 frozen 标志时，才进入脚本模式
         try:
             # 此时 __file__ 是可靠的
-            path = os.path.dirname(os.path.abspath(__file__))
+            path: str = os.path.dirname(os.path.abspath(__file__))
             log.info(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
             return path
         except NameError:
@@ -105,7 +106,7 @@ def get_base_path():
     if sys.platform.startswith('win'):
         try:
             # 无论是否 Onefile，Win32 API 都会返回真实 EXE 路径
-            real_path = _get_win32_exe_path()
+            real_path: str = _get_win32_exe_path()
             
             # 核心：确保我们返回的是 EXE 的真实目录
             if real_path != os.path.dirname(os.path.abspath(sys.executable)):
@@ -137,8 +138,8 @@ def get_base_path():
 #print(f'_get_win32_exe_path() : {_get_win32_exe_path()}')
 #print(f'get_base_path() : {get_base_path()}')
 
-def get_base_path():
-    """获取程序运行目录，兼容 PyInstaller / Nuitka / 普通脚本"""
+def get_base_path_simple() -> str:
+    """获取程序运行目录，兼容 PyInstaller / Nuitka / 普通脚本 (简化版)"""
     if getattr(sys, "frozen", False):
         # PyInstaller
         if hasattr(sys, "_MEIPASS"):
@@ -302,7 +303,7 @@ def get_base_path():
 #     log.error(f"获取配置文件失败: {fname}")
 #     return None
 
-def get_resource_file(rel_path, out_name=None,BASE_DIR=None,spec=None):
+def get_resource_file(rel_path: str, out_name: Optional[str] = None, BASE_DIR: Optional[str] = None, spec: Any = None) -> Optional[str]:
     """
     从 PyInstaller 内置资源释放文件到 EXE 同目录
 
@@ -312,15 +313,10 @@ def get_resource_file(rel_path, out_name=None,BASE_DIR=None,spec=None):
 
     if BASE_DIR is None:
         BASE_DIR = get_base_path()
-        # log.info(f"BASE_DIR配置文件: {BASE_DIR}")
 
     if out_name is None:
         out_name = os.path.basename(rel_path)
 
-    # BASE_DIR = os.path.dirname(
-    #     sys.executable if getattr(sys, "frozen", False)
-    #     else os.path.abspath(__file__)    # ✅ 修复点
-    # )
     target_path = os.path.join(BASE_DIR, out_name)
     log.info(f"target_path配置文件: {target_path}")
 
@@ -329,7 +325,7 @@ def get_resource_file(rel_path, out_name=None,BASE_DIR=None,spec=None):
         return target_path
 
     # 从 MEIPASS 复制
-    base = sys._MEIPASS if getattr(sys, "frozen", False) else os.path.abspath(".")
+    base = getattr(sys, "_MEIPASS", ".") if getattr(sys, "frozen", False) else os.path.abspath(".")
     src = os.path.join(base, rel_path)
 
     if not os.path.exists(src):
@@ -358,7 +354,7 @@ def get_resource_file(rel_path, out_name=None,BASE_DIR=None,spec=None):
 # --------------------------------------
 BASE_DIR = get_base_path()
 
-def get_conf_path(fname,rel_path=None):
+def get_conf_path(fname: str, rel_path: Optional[str] = None) -> Optional[str]:
     """
     获取并验证 stock_codes.conf
 
@@ -379,7 +375,7 @@ def get_conf_path(fname,rel_path=None):
             log.warning("配置文件存在但为空，将尝试重新释放")
 
     if rel_path is None:
-        rel_path=f"JohnsonUtil{os.sep}{fname}"
+        rel_path = f"JohnsonUtil{os.sep}{fname}"
     # --- 2. 释放默认资源 ---
     cfg_file = get_resource_file(
         rel_path=rel_path,
@@ -575,13 +571,14 @@ class GlobalConfig:
             self.save()
 
     # ===================== 新增 get_with_writeback =====================
-    def get_with_writeback(self, section, option, fallback, value_type="str"):
+    def get_with_writeback(self, section: str, option: str, fallback: Any, value_type: str = "str") -> Any:
         """
         读取配置，如果不存在则写入 fallback 到 ini
         value_type: "str", "int", "float", "bool"
         """
         if not self.cfg.has_option(section, option):
             # 写回默认值
+            val_str: str
             if value_type == "bool":
                 val_str = "True" if fallback else "False"
             else:
@@ -645,40 +642,40 @@ if not conf_ini:
 
 CFG = GlobalConfig(conf_ini)
 
-initGlobalValue = CFG.init_value
-clean_terminal = CFG.clean_terminal
+initGlobalValue: int = CFG.init_value
+clean_terminal: List[str] = CFG.clean_terminal
 
-root_path = [
+root_path: List[Optional[str]] = [
     CFG.get_path("root_path_windows"),
     CFG.get_path("root_path_mac"),
 ]
 
-dfcf_path = CFG.get_path("dfcf_path")
+dfcf_path: Optional[str] = CFG.get_path("dfcf_path")
 
-win10Lengend = CFG.get_path("win10lengend")
-win10Lixin = CFG.get_path("win10lixin")
-win10Triton = CFG.get_path("win10triton")
-win10pazq = CFG.get_path("win10pazq")
-win10dxzq = CFG.get_path("win10dxzq")
+win10Lengend: Optional[str] = CFG.get_path("win10lengend")
+win10Lixin: Optional[str] = CFG.get_path("win10lixin")
+win10Triton: Optional[str] = CFG.get_path("win10triton")
+win10pazq: Optional[str] = CFG.get_path("win10pazq")
+win10dxzq: Optional[str] = CFG.get_path("win10dxzq")
 
-win7rootAsus = CFG.get_path("win7rootasus")
-win7rootXunji = CFG.get_path("win7rootxunji")
-win7rootList = [win10Triton,win10Lixin, win7rootAsus, win7rootXunji, win10Lengend]
-macroot = CFG.get_path("macroot")
-macroot_vm = CFG.get_path("macroot_vm")
-xproot = CFG.get_path("xproot")
-tdx_all_df_path = CFG.get_path("tdx_all_df_path")
-compute_lastdays = CFG.compute_lastdays
-sina_limit_time = CFG.sina_limit_time
-sina_dd_limit_time = CFG.sina_dd_limit_time
-stop_loss_pct = CFG.stop_loss_pct
-take_profit_pct = CFG.take_profit_pct
-trailing_stop_pct = CFG.trailing_stop_pct
-max_single_stock_ratio = CFG.max_single_stock_ratio
-min_position_ratio = CFG.min_position_ratio
-risk_duration_threshold = CFG.risk_duration_threshold
+win7rootAsus: Optional[str] = CFG.get_path("win7rootasus")
+win7rootXunji: Optional[str] = CFG.get_path("win7rootxunji")
+win7rootList: List[Optional[str]] = [win10Triton, win10Lixin, win7rootAsus, win7rootXunji, win10Lengend]
+macroot: Optional[str] = CFG.get_path("macroot")
+macroot_vm: Optional[str] = CFG.get_path("macroot_vm")
+xproot: Optional[str] = CFG.get_path("xproot")
+tdx_all_df_path: Optional[str] = CFG.get_path("tdx_all_df_path")
+compute_lastdays: int = CFG.compute_lastdays
+sina_limit_time: int = CFG.sina_limit_time
+sina_dd_limit_time: int = CFG.sina_dd_limit_time
+stop_loss_pct: float = CFG.stop_loss_pct
+take_profit_pct: float = CFG.take_profit_pct
+trailing_stop_pct: float = CFG.trailing_stop_pct
+max_single_stock_ratio: float = CFG.max_single_stock_ratio
+min_position_ratio: float = CFG.min_position_ratio
+risk_duration_threshold: int = CFG.risk_duration_threshold
 
-def get_os_path_sep():
+def get_os_path_sep() -> str:
     return os.path.sep
 
     
@@ -758,18 +755,20 @@ evalcmdfpath = r'./sina_pandasSelectCmd.txt'.replace('\\',get_os_path_sep())
 
 
 class GlobalValues:
-    _instance = None
+    _instance: Optional['GlobalValues'] = None
+    _global_dict: Dict[str, Any]
+    _local_fallback: Dict[str, Any]
 
-    def __new__(cls, ext_dict=None):
+    def __new__(cls, ext_dict: Optional[Dict[str, Any]] = None) -> 'GlobalValues':
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._global_dict = ext_dict or {}
+            cls._global_dict = ext_dict if ext_dict is not None else {}
         elif ext_dict is not None:
             cls._global_dict = ext_dict
         cls._local_fallback = {}  # 本地兜底字典
         return cls._instance
 
-    def getkey(self, key, default=None):
+    def getkey(self, key: str, default: Any = None) -> Any:
         """
         获取 key，优先从全局共享字典获取，失败则回退到本地字典
         """
@@ -782,7 +781,7 @@ class GlobalValues:
             # 管道断开时，从本地 fallback 获取
             return self._local_fallback.get(key, default)
 
-    def setkey(self, key, value):
+    def setkey(self, key: str, value: Any) -> None:
         """
         设置 key，保证本地 fallback 始终更新
         """
@@ -794,12 +793,12 @@ class GlobalValues:
             # 无论共享字典是否可用，本地字典都更新
             self._local_fallback[key] = value
 
-    def getkey_status(self, key):
+    def getkey_status(self, key: str) -> bool:
         """
         检查 key 是否存在，优先共享字典
         """
         try:
-            exists = key in self._global_dict
+            exists: bool = key in self._global_dict
             # 同步 fallback
             if exists:
                 self._local_fallback[key] = self._global_dict[key]
@@ -807,12 +806,12 @@ class GlobalValues:
         except (BrokenPipeError, EOFError, OSError):
             return key in self._local_fallback
 
-    def getlist(self):
+    def getlist(self) -> List[str]:
         """
         返回所有 key 列表，优先共享字典
         """
         try:
-            keys = list(self._global_dict.keys())
+            keys: List[str] = list(self._global_dict.keys())
             # 同步 fallback
             for k in keys:
                 self._local_fallback[k] = self._global_dict[k]
@@ -1370,12 +1369,13 @@ function d(t) {
 #             return False
 #     else:
 #         return trade_status
-def read_ini(inifile='filter.ini',setrule=None,category='General',filterkey='filter_rule'):
+def read_ini(inifile: str = 'filter.ini', setrule: Optional[str] = None, category: str = 'General', filterkey: str = 'filter_rule') -> Optional[str]:
     from configobj import ConfigObj
-    baser = getcwd().split('stock')[0]
-    base = baser + 'stock' + path_sep
-    config_file_path = base + inifile
+    baser: str = getcwd().split('stock')[0]
+    base: str = baser + 'stock' + path_sep
+    config_file_path: str = base + inifile
     setrule = setrule.strip() if setrule is not None else None
+    rule: Optional[str] = None
     if not os.path.exists(config_file_path):
         # Define the path for the config file
         # --- Writing a config file ---
@@ -1450,30 +1450,25 @@ def read_ini(inifile='filter.ini',setrule=None,category='General',filterkey='fil
             read_config.write()
             print(f'config[{category}][{filterkey}] : {setrule}')
             print(f"Config file '{config_file_path}' updated successfully.")
-    if rule.find('top_all') >= 0 or rule.find('top_temp') >= 0:
-        rule = rule.replace('top_all.query','').replace('top_temp.query','')
+    
+    if rule is not None and (rule.find('top_all') >= 0 or rule.find('top_temp') >= 0):
+        rule = rule.replace('top_all.query', '').replace('top_temp.query', '')
     if rule == 'None':
         rule = None
     if setrule == 'default':
         rule = (f' category:{category} key:{read_config[category].keys()}\n{read_config[category][filterkey]}')
     return rule
 
-def is_trade_date(date=datetime.date.today()):
-    trade_status = None
+def is_trade_date(date: Union[datetime.date, str] = datetime.date.today()) -> Any:
+    trade_status: Any = None
     if isinstance(date, datetime.date):
-        date = date.strftime('%Y-%m-%d')
-        if date == get_today():
+        date_str: str = date.strftime('%Y-%m-%d')
+        if date_str == get_today():
             trade_status = GlobalValues().getkey('is_trade_date')
+        date = date_str
     if trade_status is None:
-        # trade_date = fetch_stocks_trade_date()
-        # if trade_date is None:
-        #     return None
-        # if date in trade_date:
-        #     return True
-        # else:
-        #     return False
         trade_status = get_day_istrade_date(date)
-        GlobalValues().setkey('is_trade_date',trade_status)
+        GlobalValues().setkey('is_trade_date', trade_status)
     return trade_status
 
 
@@ -1500,19 +1495,19 @@ def get_lastdays_trade_date(days=10):
     return(dt)
 
 
-def get_day_istrade_date(dt=None):
-    #2025
-    sep='-'
+def get_day_istrade_date(dt: Optional[Union[datetime.date, str]] = None) -> bool:
+    # 2025
+    sep: str = '-'
     if dt is None:
-        TODAY = datetime.date.today()
-        fstr = "%Y" + sep + "%m" + sep + "%d"
+        TODAY: datetime.date = datetime.date.today()
+        fstr: str = "%Y" + sep + "%m" + sep + "%d"
         dt = TODAY.strftime(fstr)
     else:
         if isinstance(dt, datetime.date):
             dt = dt.strftime('%Y-%m-%d')
-    is_trade_date = a_trade_calendar.is_trade_date(dt)
+    is_trade_date: bool = a_trade_calendar.is_trade_date(dt)
 
-    return(is_trade_date)
+    return is_trade_date
 
 
 # is_trade_date_today = get_day_istrade_date()
@@ -1526,20 +1521,17 @@ def check_file_exist(filepath):
     return filestatus
 
 
-def getcwd():
+def getcwd() -> str:
     dirname, filename = os.path.split(os.path.abspath(sys.argv[0]))
     return dirname
 
-def get_sys_system():
+def get_sys_system() -> str:
     return platform.system()
 
-def isMac():
+def isMac() -> bool:
     if get_sys_system().find('Darwin') == 0:
         return True
     else:
-        #python2
-        # import codecs
-        # sys.stdout = codecs.getwriter('utf-8')(sys.stdout)
         return False
 
 def get_run_path_stock(fp=None):
@@ -1661,7 +1653,7 @@ def get_tdx_dir():
     return basedir
 
 
-def get_sys_platform():
+def get_sys_platform() -> str:
     return platform.platform()
 
 
@@ -1717,9 +1709,9 @@ def isDigit(x):
     except ValueError:
         return False
 
-def get_ramdisk_dir():
-    os_platform = get_sys_platform()
-    basedir = None
+def get_ramdisk_dir() -> Optional[str]:
+    os_platform: str = get_sys_platform()
+    basedir: Optional[str] = None
     for root in ramdisk_rootList:
         basedir = root.replace('/', path_sep).replace('\\', path_sep)
         if os.path.exists(basedir):
@@ -1730,11 +1722,10 @@ def get_ramdisk_dir():
 RamBaseDir = get_ramdisk_dir()
 
 
-def get_ramdisk_path(filename, lock=False):
+def get_ramdisk_path(filename: str, lock: bool = False) -> Optional[str]:
     if filename:
-        basedir = RamBaseDir
-        # basedir = ramdisk_root.replace('/', path_sep).replace('\\',path_sep)
-        if not os.path.isdir(basedir):
+        basedir: Optional[str] = RamBaseDir
+        if basedir is None or not os.path.isdir(basedir):
             log.error("ramdisk Root Err:%s" % (basedir))
             return None
 
@@ -2379,27 +2370,17 @@ def get_file_size(path_to_file):
 
 
 
-def creation_date_duration(path_to_file):
+def creation_date_duration(path_to_file: str) -> int:
     """
     Try to get the date that a file was created, falling back to when it was
     last modified if that isn't possible.
     See http://stackoverflow.com/a/39501288/1709587 for explanation.
     """
-    # if platform.system() == 'Windows':
-    #     return os.path.getctime(path_to_file)
-    # else:
-    #     stat = os.stat(path_to_file)
-    #     try:
-    #         return stat.st_birthtime
-    #     except AttributeError:
-    #         # We're probably on Linux. No easy way to get creation dates here,
-    #         # so we'll settle for when its content was last modified.
-    #         return stat.st_mtime
     if os.path.exists(path_to_file):
         dt = os.path.getmtime(path_to_file)
         dtm = datetime.date.fromtimestamp(dt)
         today = datetime.date.today()
-        duration = (today - dtm).days
+        duration: int = (today - dtm).days
     else:
         duration = 0
     return duration
@@ -2825,10 +2806,10 @@ def get_time_to_date(times, format='%H:%M'):
     return time.strftime(format, time.localtime(times))
 
 
-def get_today(sep='-'):
-    TODAY = datetime.date.today()
-    fstr = "%Y" + sep + "%m" + sep + "%d"
-    today = TODAY.strftime(fstr)
+def get_today(sep: str = '-') -> str:
+    TODAY: datetime.date = datetime.date.today()
+    fstr: str = "%Y" + sep + "%m" + sep + "%d"
+    today: str = TODAY.strftime(fstr)
     return today
 
     # from dateutil import rrule
@@ -2845,7 +2826,7 @@ def get_today(sep='-'):
     # return days.count() - holidays
 
 
-def get_work_day_status():
+def get_work_day_status() -> bool:
     today = datetime.datetime.today().date()
     day_n = int(today.strftime("%w"))
 
@@ -2854,9 +2835,9 @@ def get_work_day_status():
     else:
         return False
     # return str(today)
-def get_work_day_idx():
+def get_work_day_idx() -> int:
     today = datetime.datetime.today().date()
-    day_n = int(today.strftime("%w"))
+    day_n: int = int(today.strftime("%w"))
     # if 0 < day_n < 6:
     #     return day_n
     # else:
@@ -3058,30 +3039,24 @@ def get_now_time():
     return d_time
 
 
-def get_now_time_int():
-    now_t = datetime.datetime.now().strftime("%H%M")
+def get_now_time_int() -> int:
+    now_t: str = datetime.datetime.now().strftime("%H%M")
     return int(now_t)
 
 def str2bool(s):
     return str(s).lower() in ("true", "1", "yes")
 
-def get_work_time(now_t = None):
-    # return True
-    # now_t = str(get_now_time()).replace(':', '')
-    # now_t = int(now_t)
-    if  not get_trade_date_status() :
-        # print(f'get_trade_date_status() : {get_trade_date_status()}')
+def get_work_time(now_t: Optional[int] = None) -> bool:
+    if not get_trade_date_status():
         return False
-    if now_t == None:
+    if now_t is None:
         now_t = get_now_time_int()
     if not get_work_day_status():
         return False
     if (now_t > 1132 and now_t < 1300) or now_t < 915 or now_t > 1502:
         return False
-        # return True
     else:
-        # if now_t > 1300 and now_t <1302:
-            # sleep(random.randint(5, 120))
+        return True
         return True
 
 def get_work_time_duration():
@@ -4392,7 +4367,7 @@ def code_to_index(code):
     return code2
 
 
-def code_to_symbol(code):
+def code_to_symbol(code: str) -> str:
     """
         生成symbol代码标志
     """
@@ -4402,12 +4377,9 @@ def code_to_symbol(code):
         if len(code) != 6:
             return ''
         else:
-            # return 'sh%s' % code if code[:1] in ['5', '6', '9'] else 'sz%s' % code
-            # if  code[:1] in ['5', '6', '9']:
-            if  code[:1] in ['5', '6']:
+            if code[:1] in ['5', '6']:
                 code = 'sh%s' % code
-            elif  code[:2] in ['43','83','87','92']:
-                # startswith('43','83','87','92')
+            elif code[:2] in ['43', '83', '87', '92']:
                 code = 'bj%s' % code
             else:
                 code = 'sz%s' % code
@@ -4509,24 +4481,24 @@ def get_config_value(fname, classtype, currvalue=0, limitvalue=1, xtype='limit',
     return False
 
 
-def get_config_value_ramfile(fname, currvalue=0, xtype='time', update=False,cfgfile='h5config.txt',readonly=False,int_time=False):
-    classtype = fname
-    conf_ini = get_ramdisk_dir() + os.path.sep+ cfgfile
+def get_config_value_ramfile(fname: str, currvalue: Any = 0, xtype: str = 'time', update: bool = False, cfgfile: str = 'h5config.txt', readonly: bool = False, int_time: bool = False) -> Any:
+    classtype: str = fname
+    conf_ini: str = get_ramdisk_dir() + os.path.sep + cfgfile
     if xtype == 'trade_date':
         if os.path.exists(conf_ini):
             config = ConfigObj(conf_ini, encoding='UTF8')
 
             if classtype in list(config.keys()):
                 if xtype in list(config[classtype].keys()):
-                    save_date =  config[classtype]['date']
+                    save_date = config[classtype]['date']
                 else:
                     save_date = None
             else:
                 save_date = None
-                
+
             if save_date is not None:
                 if save_date != get_today() or update:
-                    trade_status= is_trade_date()
+                    trade_status = is_trade_date()
                     if trade_status is not None or trade_status != 'None':
                         if 'rewrite' in list(config[classtype].keys()):
                             rewrite = int(config[classtype]['rewrite']) + 1
@@ -4668,7 +4640,7 @@ def get_config_value_wencai(fname, classtype, currvalue=0, xtype='limit', update
     return int(currvalue)
 
 
-def to_bool(value):
+def to_bool(value: Any) -> bool:
     """
     将输入转换为布尔值：
     - 如果已经是 bool，直接返回
@@ -4678,7 +4650,7 @@ def to_bool(value):
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        v = value.strip().lower()
+        v: str = value.strip().lower()
         if v == "true":
             return True
         elif v == "false":
@@ -4687,20 +4659,20 @@ def to_bool(value):
     return False
 
 
-def get_trade_date_status():
-    trade_date = GlobalValues().getkey('trade_date')
-    trade_status = GlobalValues().getkey('is_trade_date')
-    if  trade_status is None:
-        trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=get_day_istrade_date(),xtype='trade_date')
+def get_trade_date_status() -> bool:
+    trade_date: Optional[str] = GlobalValues().getkey('trade_date')
+    trade_status: Any = GlobalValues().getkey('is_trade_date')
+    if trade_status is None:
+        trade_status = get_config_value_ramfile(fname='is_trade_date', currvalue=get_day_istrade_date(), xtype='trade_date')
         if trade_status is None or trade_status == 'None':
-            trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=get_day_istrade_date(),xtype='trade_date',update=True)
-        GlobalValues().setkey('is_trade_date',trade_status)
-        GlobalValues().setkey('trade_date',get_today())
+            trade_status = get_config_value_ramfile(fname='is_trade_date', currvalue=get_day_istrade_date(), xtype='trade_date', update=True)
+        GlobalValues().setkey('is_trade_date', trade_status)
+        GlobalValues().setkey('trade_date', get_today())
     if trade_date is not None:
         if trade_date != get_today():
-            trade_status = get_config_value_ramfile(fname='is_trade_date',currvalue=get_day_istrade_date(),xtype='trade_date')
-            GlobalValues().setkey('is_trade_date',trade_status)
-            GlobalValues().setkey('trade_date',get_today())
+            trade_status = get_config_value_ramfile(fname='is_trade_date', currvalue=get_day_istrade_date(), xtype='trade_date')
+            GlobalValues().setkey('is_trade_date', trade_status)
+            GlobalValues().setkey('trade_date', get_today())
     return to_bool(trade_status)
 # wencai_count = cct.get_config_value_wencai(config_ini,fname,1,update=True)
 
@@ -4728,62 +4700,61 @@ def get_index_fibl(default=1):
     return default
 
 from collections import Counter,OrderedDict
-def counterCategory(df,col='category',table=False,limit=30):
-    topSort = []
+def counterCategory(df: pd.DataFrame, col: str = 'category', table: bool = False, limit: int = 30) -> Union[Counter, str]:
+    topSort: Union[Counter, str] = []
     if len(df) > 0:
-        categoryl = df[col][:limit].tolist()
-        dicSort = []
+        categoryl: list[Any] = df[col][:limit].tolist()
+        dicSort: list[str] = []
         for i in categoryl:
             if isinstance(i, str):
                 if col == 'category':
                     dicSort.extend(i.split(';'))
                 else:
                     dicSort.extend(i.split('+'))
-                # dicSort.extend([ 'u%s'%(co) for co in i.split(';')])
                 
         topSort = Counter(dicSort)
         if not table:
-            top5 = OrderedDict(topSort.most_common(5))
+            top5: OrderedDict[str, int] = OrderedDict(topSort.most_common(5))
             for i in list(top5.keys()):
                 if len(i) > 2:
                     print(f'{i}:{top5[i]}', end=' ')
             print('')
         else:
-            table_row=f''
-            top5 = OrderedDict(topSort.most_common(5))
+            table_row: str = f''
+            top5: OrderedDict[str, int] = OrderedDict(topSort.most_common(5))
             for i in list(top5.keys()):
                 if len(i) > 2:
-                    table_row +=f'{i}:{top5[i]} '
-            table_row +='\n'
+                    table_row += f'{i}:{top5[i]} '
+            table_row += '\n'
             topSort = table_row 
     return topSort
 
 # def write_to_dfcfnew(p_name=dfcf_path):
 #     pass
-def write_to_blkdfcf(codel,conf_ini=dfcf_path,blk='inboll1',append=True):
+def write_to_blkdfcf(codel: Union[list[str], str], conf_ini: str = dfcf_path, blk: str = 'inboll1', append: bool = True) -> None:
     import configparser
     if not isMac():
         if not os.path.exists(conf_ini):
             log.error('file is not exists:%s'%(conf_ini))
         else:
-            cf = configparser.ConfigParser()  # 实例化 ConfigParser 对象
+            cf: configparser.ConfigParser = configparser.ConfigParser()  # 实例化 ConfigParser 对象
             # cf.read("test.ini")
             cf.read(conf_ini,encoding='UTF-16')
             # cf.read(conf_ini,encoding='GB2312')
             # return all section
-            secs = cf.sections()
+            secs: list[str] = cf.sections()
             # print('sections:', secs, type(secs))
 
-            opts = cf.options("\\SelfSelect")  # 获取db section下的 options，返回list
+            opts: list[str] = cf.options("\\SelfSelect")  # 获取db section下的 options，返回list
             # print('options:', opts, type(opts))
             # 获取db section 下的所有键值对，返回list 如下，每个list元素为键值对元组
-            kvs = cf.items("\\SelfSelect")
+            kvs: list[tuple[str, str]] = cf.items("\\SelfSelect")
             # print('db:', dict(kvs).keys())
             # read by type
-            truer = cf.get("\\SelfSelect", blk)
+            truer: str = cf.get("\\SelfSelect", blk)
             # print('truer:',truer)
-            truer_n = truer
-            idx = 0
+            truer_n: str = truer
+            idx: int = 0
 
             if isinstance(codel, list):
                 for co in codel:
@@ -4807,23 +4778,26 @@ def write_to_blkdfcf(codel,conf_ini=dfcf_path,blk='inboll1',append=True):
             # print('instock:',cf.get("\\SelfSelect", "instock"))
             cf.write(open(conf_ini,"w",encoding='UTF-16'))
 
-def read_unicode_file(file_path):
+def read_unicode_file(file_path: str) -> list[str]:
     with open(file_path, 'r', encoding='utf-8') as file:
-        contents = file.readlines()
+        contents: list[str] = file.readlines()
         return contents
 
-def write_unicode_file(file_path, contents):
+def write_unicode_file(file_path: str, contents: Union[list[str], str]) -> None:
     with open(file_path, 'w', encoding='utf-8') as file:
-        file.writelines(contents)        
+        if isinstance(contents, str):
+            file.write(contents)
+        else:
+            file.writelines(contents)
 
-def write_evalcmd2file(file_path,content):
+def write_evalcmd2file(file_path: str, content: str) -> bool:
     content = content.strip()
     if not os.path.exists(file_path):
         write_unicode_file(file_path,content+'\n')
         # with open("history_data.json", "w+", encoding="utf-8") as f:
         #     f.write("[]")
     else:
-        contents=read_unicode_file(file_path)
+        contents: list[str] = read_unicode_file(file_path)
         if len(content) > 0 and content+'\n' not in contents:
             contents.append(content+'\n')
         write_unicode_file(file_path, contents)
@@ -5562,8 +5536,8 @@ def select_multiIndex_index_fast(df, index='ticktime', start=None, end=None, dat
 #     return df
 
 
-def from_list_to_dict(col, func_dict):
-    func = {}
+def from_list_to_dict(col: Union[List[str], Dict[str, str], str], func_dict: Dict[str, str]) -> Dict[str, str]:
+    func: Dict[str, str] = {}
     if isinstance(col, list):
         for k in col:
             if k in list(func_dict.keys()):
@@ -7607,7 +7581,7 @@ def select_dataFrame_isNull(df):
     is_null = df.isnull().stack()[lambda x: x].index.tolist() 
     return(is_null)
 
-def combine_dataFrame(maindf, subdf, col=None, compare=None, append=False, clean=True):
+def combine_dataFrame(maindf: Union[pd.DataFrame, pd.Series], subdf: Union[pd.DataFrame, pd.Series], col: Optional[str] = None, compare: Optional[str] = None, append: bool = False, clean: bool = True) -> pd.DataFrame:
     '''
 
     Function: combine_dataFrame

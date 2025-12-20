@@ -1,8 +1,8 @@
-
 import sqlite3
 import json
 import logging
 from datetime import datetime
+from typing import Any, Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -11,11 +11,11 @@ class TradingLogger:
     交易记录与信号持久化类
     使用 SQLite 存储每日决策、执行记录及收益统计
     """
-    def __init__(self, db_path="./trading_signals.db"):
+    def __init__(self, db_path: str = "./trading_signals.db"):
         self.db_path = db_path
         self._init_db()
 
-    def _init_db(self):
+    def _init_db(self) -> None:
         """初始化数据库表结构"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -56,7 +56,7 @@ class TradingLogger:
         conn.commit()
         conn.close()
 
-    def log_signal(self, code, name, price, decision_dict):
+    def log_signal(self, code: str, name: str, price: float, decision_dict: dict[str, Any]) -> None:
         """
         记录每日决策信号
         decision_dict 格式参考 IntradayDecisionEngine.evaluate 的输出
@@ -87,7 +87,7 @@ class TradingLogger:
         except Exception as e:
             logger.error(f"Error logging signal: {e}")
 
-    def record_trade(self, code, name, action, price, amount, fee_rate=0.0003):
+    def record_trade(self, code: str, name: str, action: str, price: float, amount: float, fee_rate: float = 0.0003) -> None:
         """
         记录买卖操作并计算单笔盈利
         fee_rate: 手续费率（默认万3）
@@ -128,7 +128,7 @@ class TradingLogger:
         except Exception as e:
             logger.error(f"Error recording trade: {e}")
 
-    def get_summary(self):
+    def get_summary(self) -> Optional[tuple[float, float, int]]:
         """获取盈亏概览"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -137,7 +137,7 @@ class TradingLogger:
         conn.close()
         return res # (总利润, 平均收益率, 总笔数)
 
-    def get_trades(self, start_date=None, end_date=None):
+    def get_trades(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> list[dict[str, Any]]:
         """获取交易记录（包含持仓中和已平仓）"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -162,7 +162,7 @@ class TradingLogger:
         conn.close()
         return results
 
-    def delete_trade(self, trade_id):
+    def delete_trade(self, trade_id: int) -> bool:
         """删除交易记录"""
         try:
             conn = sqlite3.connect(self.db_path)
@@ -175,7 +175,7 @@ class TradingLogger:
             logger.error(f"delete_trade error: {e}")
             return False
 
-    def manual_update_trade(self, trade_id, buy_p, buy_a, sell_p=None, fee_rate=0.0003):
+    def manual_update_trade(self, trade_id: int, buy_p: float, buy_a: float, sell_p: Optional[float] = None, fee_rate: float = 0.0003) -> bool:
         """手动更新交易数据并重算盈亏"""
         try:
             conn = sqlite3.connect(self.db_path)
@@ -194,13 +194,22 @@ class TradingLogger:
                 """, (buy_p, buy_a, fee, trade_id))
             else:
                 # CLOSED 状态需要重算全过程
-                total_fee = (buy_p * buy_a * fee_rate) + (sell_p * buy_a * fee_rate)
-                net_profit = (sell_p - buy_p) * buy_a - total_fee
+                if sell_p is None:
+                    # 如果状态是 CLOSED 但没有提供 sell_p，尝试从数据库获取现有 sell_price
+                    cur.execute("SELECT sell_price FROM trade_records WHERE id=?", (trade_id,))
+                    row_sell = cur.fetchone()
+                    sell_p = row_sell[0] if row_sell else 0.0
+                
+                # 确保 sell_p 不为 None (兜底)
+                effective_sell_p = sell_p if sell_p is not None else 0.0
+                
+                total_fee = (buy_p * buy_a * fee_rate) + (effective_sell_p * buy_a * fee_rate)
+                net_profit = (effective_sell_p - buy_p) * buy_a - total_fee
                 pnl_pct = net_profit / (buy_p * buy_a) if buy_p > 0 else 0
                 cur.execute("""
                     UPDATE trade_records SET buy_price=?, buy_amount=?, sell_price=?, fee=?, profit=?, pnl_pct=?
                     WHERE id=?
-                """, (buy_p, buy_a, sell_p, total_fee, net_profit, pnl_pct, trade_id))
+                """, (buy_p, buy_a, effective_sell_p, total_fee, net_profit, pnl_pct, trade_id))
             
             conn.commit()
             conn.close()
@@ -209,7 +218,7 @@ class TradingLogger:
             logger.error(f"manual_update_trade error: {e}")
             return False
 
-    def update_trade_feedback(self, trade_id, feedback):
+    def update_trade_feedback(self, trade_id: int, feedback: str) -> bool:
         """更新交易反馈，用于策略优化告知问题"""
         try:
             conn = sqlite3.connect(self.db_path)
@@ -222,7 +231,7 @@ class TradingLogger:
             logger.error(f"update_trade_feedback error: {e}")
             return False
 
-    def get_db_summary(self, days=30):
+    def get_db_summary(self, days: int = 30) -> list[tuple[Any, ...]]:
         """按天统计多日收益"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()

@@ -2,10 +2,17 @@
 # !/usr/bin/env python
 
 import os
-import pymysql
-from sqlalchemy import create_engine
-from sqlalchemy.types import NVARCHAR
-from sqlalchemy import inspect
+try:
+    import pymysql
+    from sqlalchemy import create_engine
+    from sqlalchemy.types import NVARCHAR
+    from sqlalchemy import inspect
+    MYSQL_AVAILABLE = True
+except ImportError:
+    MYSQL_AVAILABLE = False
+    import logging
+    logging.warning("pymysql or sqlalchemy not installed, MySQL functions will be disabled.")
+
 import datetime
 import sys
 
@@ -100,6 +107,8 @@ def conn_with_cursor():
 
 # DB Api -数据库连接对象connection，无游标
 def conn_not_cursor():
+    if not MYSQL_AVAILABLE:
+        return None
     try:
         _db = pymysql.connect(**MYSQL_CONN_DBAPI)
     except Exception as e:
@@ -200,7 +209,12 @@ def exe_sql_select(conn,sql):
     return data
 
 def selectlastDays(days=7):
-    conn = pymysql.connect(**MYSQL_CONN_DBAPI)
+    if not MYSQL_AVAILABLE:
+        return pd.DataFrame()
+    try:
+        conn = pymysql.connect(**MYSQL_CONN_DBAPI)
+    except Exception:
+        return pd.DataFrame()
 
     _selcolall = f''' `date`,`code`,`name`,`rate_1` '''
     _selcol = f'''  `date`,`code`,`name`,`rate_1` '''
@@ -210,96 +224,61 @@ def selectlastDays(days=7):
     lastday = last_tddate(1)
     today_now = last_tddate(0)
 
-    # sql = f'''SELECT '{_selcol}' FROM `{_table_name}` WHERE `date` = '{today_now}' and 
-    #                                 `kdjk` >= 80 and `kdjd` >= 70 and `kdjj` >= 100 and `rsi_6` >= 80 and 
-    #                                 `cci` >= 100 and `cr` >= 300 and `wr_6` >= -20 and `vr` >= 160'''
-
-    # sql_now_price = f'''SELECT {_selcol} FROM `{_table_name}` WHERE `date` = '{lastday}' AND rate_1 > 0 '''
-
     if days == 0:
-
-        # sql_now_today = f'''SELECT {_selcol} FROM `{_table_name}` WHERE `date` = '{today_now}' '''
         sql_now = f'''SELECT {_selcol} FROM `{_table_name}` WHERE `date` = '{today_now}' '''
-
-    # sql_now_today = f'''SELECT {_selcol} FROM `{_table_name}` WHERE `date` = '{lastday}' '''
-
     else:
-        # sql_now_last7day = f'''SELECT {_selcolall} FROM `{_table_name}` WHERE `date` >= '{last_tddate(days)}' '''
         sql_now = f'''SELECT {_selcolall} FROM `{_table_name}` WHERE `date` >= '{last_tddate(days)}' '''
 
-    # sql_now_alltoday = f'''SELECT {_selcolall} FROM `{_table_name}`  '''
-
-    # sql_tables_name =f'''select table_name from information_schema.tables where table_schema=`{db_database}` '''
-    # # sql_columns = f'''select COLUMN_NAME from information_schema.COLUMNS where TABLE_SCHEMA=`{db_database}` and table_name = `{_table_name}`'''
-
-    # sql_tables_name ='SHOW DATABASES'
-    # # print('当前库下所有表的名称')
-    # # sql_columns = "select COLUMN_NAME from information_schema.COLUMNS where table_name = '%s'"%(_table_name)
-    # sql_columns = f'''select COLUMN_NAME from information_schema.COLUMNS where table_name = '{_table_name}' '''
-    # print(sql_now_price)
-    # print(sql_now_today)
-
-    mycursor = conn.cursor()
-
     dflast = panda_df(conn,sql_now)
-    # x = 0
 
     while len(dflast) == 0:
+        found = False
         for x in range(1, 20):
-            # print(last_tddate(x))
-            sql_now = f'''SELECT {_selcolall} FROM `{_table_name}` WHERE `date` >= '{last_tddate(x)}' '''
-            dflast = panda_df(conn,sql_now)
+            sql_retry = f'''SELECT {_selcolall} FROM `{_table_name}` WHERE `date` >= '{last_tddate(x)}' '''
+            dflast = panda_df(conn,sql_retry)
             if len(dflast) > 5:
+                found = True
                 break
-    # mycursor.execute(sql_columns)
-    # mycursor.execute(sql_now)
-
-    # myresult = mycursor.fetchall()
-    # for x in myresult:
-    #   print(x)
+        if not found:
+            break
+            
     dflast['couts']=dflast.groupby(['code'])['code'].transform('count')
     conn.close()
     return dflast
 
 
 def showcount(dflast7d,sort_date=False):
-
+    if dflast7d.empty:
+        return dflast7d
     df7multiIndex = dflast7d.reset_index().set_index(['code','date'])
-    # print(df7multiIndex[:5])
     df7tail = df7multiIndex.groupby(level=[0]).tail(1)
-    # df7tail.reset_index().code
     if sort_date:
         df7tail= df7tail.reset_index().sort_values(by=['date','rate_1'],ascending=[0,0])
     else:
         df7tail =  df7tail.sort_values(by=['rate_1'],ascending=[0])
     return (df7tail)
 
+
 def show_macd_boll_up():
-    conn = pymysql.connect(**MYSQL_CONN_DBAPI)
-
-
-    lastday = last_tddate(1)
-    today_now = last_tddate(0)
-
-    mycursor = conn.cursor()
+    if not MYSQL_AVAILABLE:
+        return pd.DataFrame()
+    try:
+        conn = pymysql.connect(**MYSQL_CONN_DBAPI)
+    except Exception:
+        return pd.DataFrame()
 
     sql_select_code = f'''select date,code,name,close,macd,macds,macdh,kdjk,kdjd,kdjj,boll_ub,boll FROM cn_stock_indicators WHERE macd>0 AND macds >0 AND macdh >0 AND close >=boll_ub AND date=CURDATE()  '''
     dflast = panda_df(conn,sql_select_code)
-    # dflast = []
     while len(dflast) == 0:
+        found = False
         for x in range(1, 20):
-            # print(last_tddate(x))
-            # sql_now = f'''SELECT {_selcolall} FROM `{_table_name}` WHERE `date` >= '{last_tddate(x)}' '''
             sql_select_code_da = f'''select date,code,name,close,macd,macds,macdh,kdjk,kdjd,kdjj,boll_ub,boll FROM cn_stock_indicators WHERE macd>0 AND macds >0 AND macdh >0 AND close >=boll_ub AND date=CURRENT_DATE - INTERVAL %s DAY  '''%(x)
             dflast = panda_df(conn,sql_select_code_da)
             if len(dflast) > 3:
+                found = True
                 break
-    # mycursor.execute(sql_columns)
-    # mycursor.execute(sql_now)
-
-    # myresult = mycursor.fetchall()
-    # for x in myresult:
-    #   print(x)
+        if not found:
+            break
     conn.close()
     return dflast
 
