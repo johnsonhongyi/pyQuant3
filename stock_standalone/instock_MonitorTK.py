@@ -25,7 +25,6 @@ import win32con
 import tkinter as tk
 from tkinter import ttk, messagebox, font as tkfont
 from tkinter import filedialog,Menu,simpledialog
-from PyQt6 import QtWidgets, QtCore, QtGui
 import pyqtgraph as pg
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -53,7 +52,6 @@ from data_utils import (
 from gui_utils import (
     bind_mouse_scroll, get_monitor_by_point, rearrange_monitors_per_screen
 )
-from stock_logic_utils import get_row_tags
 from tk_gui_modules.dpi_mixin import DPIMixin
 from tk_gui_modules.window_mixin import WindowMixin
 from tk_gui_modules.treeview_mixin import TreeviewMixin
@@ -65,16 +63,33 @@ from dpi_utils import set_process_dpi_awareness, get_windows_dpi_scale_factor
 from sys_utils import get_base_path
 from stock_handbook import StockHandbook
 from history_manager import QueryHistoryManager
+
+from stock_logic_utils import get_row_tags,detect_signals,toast_message
 from stock_logic_utils import test_code_against_queries,is_generic_concept
 
 from db_utils import *
 from kline_monitor import KLineMonitor
+from column_manager import ColumnSetManager
 from collections import Counter, OrderedDict
 import hashlib
 
 # 全局单例
 logger = init_logging(log_file='instock_tk.log',redirect_print=False) 
+# Windows API 常量
+LOGPIXELSX = 88
+DEFAULT_DPI = 96.0
 
+if sys.platform.startswith('win'):
+    set_process_dpi_awareness()  # 假设设置为 Per-Monitor V2
+    # 1. 获取缩放因子
+    scale_factor = get_windows_dpi_scale_factor()
+    # 2. 设置环境变量（在导入 Qt 之前）
+    # 禁用 Qt 自动缩放，改为显式设置缩放因子
+    # 打印检查
+    logger.info(f"Windows 系统 DPI 缩放因子: {scale_factor}")
+    # logger.info(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
+
+from PyQt6 import QtWidgets, QtCore, QtGui
 
 # ✅ 性能优化模块导入
 try:
@@ -118,22 +133,6 @@ alert_cooldown = CFG.alert_cooldown
 
 saved_width,saved_height = CFG.saved_width,CFG.saved_height
 
-# Windows API 常量
-LOGPIXELSX = 88
-DEFAULT_DPI = 96.0
-
-if sys.platform.startswith('win'):
-    set_process_dpi_awareness()  # 假设设置为 Per-Monitor V2
-    # 1. 获取缩放因子
-    scale_factor = get_windows_dpi_scale_factor()
-    # 2. 设置环境变量（在导入 Qt 之前）
-    # 禁用 Qt 自动缩放，改为显式设置缩放因子
-
-
-    # 打印检查
-    logger.info(f"Windows 系统 DPI 缩放因子: {scale_factor}")
-    # logger.info(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
-
 # -------------------- 常量 -------------------- #
 sort_cols: list[str]
 sort_keys: list[str]
@@ -141,18 +140,12 @@ sort_cols, sort_keys = ct.get_market_sort_value_key('3 0')
 DISPLAY_COLS: list[str] = ct.get_Duration_format_Values(
     ct.Monitor_format_trade,sort_cols[:2])
 
-
-
 BASE_DIR = get_base_path()
-# BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 DARACSV_DIR = os.path.join(BASE_DIR, "datacsv")
 ARCHIVE_DIR = os.path.join(BASE_DIR, "archives")
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(DARACSV_DIR, exist_ok=True)
-
-
-
 
 
 if not icon_path:
@@ -166,74 +159,6 @@ DEFAULT_DISPLAY_COLS = [
     'percent', 'per1d', 'perc1d', 'ra', 'ral',
     'topR', 'volume', 'red', 'lastdu4', 'category'
 ]
-
-
-def askstring_at_parent_single_base(parent, title, prompt, initialvalue=""):
-    # 创建临时窗口
-    dlg = tk.Toplevel(parent)
-    dlg.transient(parent)
-    dlg.title(title)
-    dlg.resizable(True, True)
-
-    screen = get_monitor_by_point(0, 0)
-    screen_width_limit = int(screen['width'] * 0.5)
-
-    # --- 智能计算初始大小 ---
-    base_width, base_height = 300, 120
-    char_width = 9  # 每个字符大约宽 9 像素
-    text_len = max(len(prompt), len(initialvalue))
-    extra_width = min(text_len * char_width, screen_width_limit)
-    win_width = max(base_width, extra_width)
-    win_height = base_height + (prompt.count("\n") * 15)
-
-    # --- 居中定位 ---
-    x, y = get_centered_window_position_single(parent, win_width, win_height)
-    dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
-
-    result = {"value": None}
-
-    # --- 提示文字 ---
-    lbl = tk.Label(dlg, text=prompt, justify="left", anchor="w")
-    lbl.pack(pady=5, padx=5, fill="x")
-
-    # 初始化时设置一次 wraplength
-    lbl.update_idletasks()
-    lbl.config(wraplength=lbl.winfo_width() - 20)
-
-    # 当窗口大小变化时动态调整 wraplength
-    def on_resize(event):
-        new_width = event.width - 20
-        if new_width > 100:
-            lbl.config(wraplength=new_width)
-
-    dlg.bind("<Configure>", on_resize)
-
-    # --- 输入框 ---
-    entry = tk.Entry(dlg)
-    entry.pack(pady=5, padx=5, fill="x", expand=True)
-    entry.insert(0, initialvalue)
-    entry.focus_set()
-
-    # --- 按钮 ---
-    def on_ok():
-        result["value"] = entry.get()
-        dlg.destroy()
-
-    def on_cancel():
-        dlg.destroy()
-
-    frame_btn = tk.Frame(dlg)
-    frame_btn.pack(pady=5)
-    tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
-    tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
-
-    # --- ESC 键关闭 ---
-    dlg.bind("<Escape>", lambda e: on_cancel())
-
-    dlg.grab_set()
-    parent.wait_window(dlg)
-    return result["value"]
-
 
 from alerts_manager import AlertManager, open_alert_center, set_global_manager, check_alert
 
@@ -505,10 +430,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         finally:
             self._task_running = False
-
-
-        # if len(monitor_data) > 2:
-            # rearrange_monitors_per_screen(align="left", sort_by="id", layout="horizontal",monitor_list=self._pg_top10_window_simple, win_var=self.win_var)
 
     # --- DPI and Window management moved to Mixins ---
     def on_close(self):
@@ -1488,46 +1409,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
         else:
             query_dict = self.query_history[sel]['query']
-            # desc = self.query_history[sel].get('desc', '')
             # 更新查询说明
             # self.query_desc_label.config(text=desc)
             self.refresh_tree_with_query(query_dict)
 
-    # TreeView 刷新函数
-    # def refresh_tree_with_query(self, query_dict):
-    #     if not hasattr(self, 'temp_df'):
-    #         return
-    #     df = self.temp_df.copy()
-
-    #     # 根据 query_dict 自动过滤
-    #     for col, cond in query_dict.items():
-    #         if col in df.columns:
-    #             if isinstance(cond, str) and cond.startswith(('>', '<', '>=', '<=', '==')):
-    #                 df = df.query(f"{col}{cond}")
-    #             else:
-    #                 df = df[df[col]==cond]
-
-    #     # 只显示 DISPLAY_COLS 列
-    #     display_df = df[DISPLAY_COLS]
-    #     # 刷新 TreeView
-    #     self.tree.delete(*self.tree.get_children())
-    #     for idx, row in display_df.iterrows():
-    #         self.tree.insert("", "end", values=[row[col] for col in DISPLAY_COLS])
-
     # 将查询文本解析为 dict（可根据你需求改）
     def parse_query_text(self, text):
         # 简单示例：name=ABC;percent>1
-        # result = {}
-        # for part in text.split(';'):
-        #     if '=' in part:
-        #         k,v = part.split('=',1)
-        #         result[k.strip()] = v.strip()
-        #     elif '>' in part:
-        #         k,v = part.split('>',1)
-        #         result[k.strip()] = f">{v.strip()}"
-        #     elif '<' in part:
-        #         k,v = part.split('<',1)
-        #         result[k.strip()] = f"<{v.strip()}"
         query_dict = {}
         for cond in text.split(";"):
             cond = cond.strip()
@@ -1541,27 +1429,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         query_dict[key.strip()] = op + val.strip() if op in [">=", "<="] else val.strip()
                         break
         return query_dict
-    #old query_var
-    # def on_query(self):
-    #     query_text = self.query_var.get()
-    #     if not query_text.strip():
-    #         self.refresh_tree_with_query(None)
-    #         return
-    #     query_dict = {}
-    #     for cond in query_text.split(";"):
-    #         cond = cond.strip()
-    #         if not cond:
-    #             continue
-    #         # name%中信 -> key=name, val=%中信
-    #         if "%":
-    #             for op in [">=", "<=", "~", "%"]:
-    #                 if op in cond:
-    #                     key, val = cond.split(op, 1)
-    #                     query_dict[key.strip()] = op + val.strip() if op in [">=", "<="] else val.strip()
-    #                     break
-        
-    #     self.save_query_history()
-    #     self.refresh_tree_with_query(query_dict)
 
     def on_query(self):
         query_text = self.query_var.get().strip()
@@ -1735,41 +1602,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.current_df = self.df_all.loc[df_filtered.index].copy()
         self.refresh_tree()
 
-    # def refresh_tree1(self, df=None):
-    #     if df is None:
-    #         df = self.current_df.copy()
-
-    #     for i in self.tree.get_children():
-    #         self.tree.delete(i)
-
-    #     if df.empty:
-    #         self.current_df = df
-    #         self.update_status()
-    #         return
-
-    #     df = df.copy()
-    #     # 确保 code 列存在
-    #     if 'code' not in df.columns:
-    #         df.insert(0, "code", df.index)
-    #     cols_to_show = ['code'] + [c for c in DISPLAY_COLS if c != 'code']
-    #     df = df.reindex(columns=cols_to_show)
-
-    #     # 自动搜索过滤 初始版本的query
-    #     # query = self.search_var.get().strip()
-    #     # if query:
-    #     #     try:
-    #     #         df = df.query(query)
-    #     #     except Exception as e:
-    #     #         logger.error(f"自动搜索过滤错误: {e}")
-
-    #     # 插入到 TreeView
-    #     for _, row in df.iterrows():
-    #         self.tree.insert("", "end", values=list(row))
-
-    #     self.current_df = df
-    #     self.adjust_column_widths()
-    #     self.update_status()
-
 
     def open_column_selector(self, col_index):
         """弹出横排窗口选择新的列名"""
@@ -1815,123 +1647,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         win.grab_set()  # 模态
 
-    def get_centered_window_position_center(win_width, win_height, x_root=None, y_root=None, parent_win=None):
-        """
-       在多屏环境下，为新窗口选择合适位置，避免遮挡父窗口(root)。
-       优先顺序：右侧 -> 下方 -> 左侧 -> 上方 -> 居中
-       """
-       # 默认取主屏幕
-        screen = get_monitor_by_point(0, 0)
-        x = (screen['width'] - win_width) // 2
-        y = (screen['height'] - win_height) // 2
-
-        if parent_win:
-           parent_win.update_idletasks()
-           px, py = parent_win.winfo_x(), parent_win.winfo_y()
-           pw, ph = parent_win.winfo_width(), parent_win.winfo_height()
-           screen = get_monitor_by_point(px, py)
-
-           # --- 尝试放右侧 ---
-           if px + pw + win_width <= screen['right']:
-               x, y = px + pw + 10, py
-           # --- 尝试放下方 ---
-           elif py + ph + win_height <= screen['bottom']:
-               x, y = px, py + ph + 10
-           # --- 尝试放左侧 ---
-           elif px - win_width >= screen['left']:
-               x, y = px - win_width - 10, py
-           # --- 尝试放上方 ---
-           elif py - win_height >= screen['top']:
-               x, y = px, py - win_height - 10
-           # --- 实在不行，屏幕居中 ---
-           else:
-               x = (screen['width'] - win_width) // 2
-               y = (screen['height'] - win_height) // 2
-        elif x_root is not None and y_root is not None:
-           # 鼠标点的屏幕
-           screen = get_monitor_by_point(x_root, y_root)
-           x, y = x_root, y_root
-           if x + win_width > screen['right']:
-               x = max(screen['left'], x_root - win_width)
-           if y + win_height > screen['bottom']:
-               y = max(screen['top'], y_root - win_height)
-
-        # 边界检查
-        x = max(screen['left'], min(x, screen['right'] - win_width))
-        y = max(screen['top'], min(y, screen['bottom'] - win_height))
-
-        logger.info(f"[定位] x={x}, y={y}, screen={screen}")
-        return x, y
-
-
-    def get_centered_window_position(self,win_width, win_height, x_root=None, y_root=None, parent_win=None):
-        """
-        多屏环境下获取窗口显示位置
-        """
-        # 默认取主屏幕
-        screen = get_monitor_by_point(0, 0)
-        x = (screen['width'] - win_width) // 2
-        y = (screen['height'] - win_height) // 2
-
-        # 鼠标右键优先
-        if x_root is not None and y_root is not None:
-            screen = get_monitor_by_point(x_root, y_root)
-            x, y = x_root, y_root
-            if x + win_width > screen['right']:
-                x = max(screen['left'], x_root - win_width)
-            if y + win_height > screen['bottom']:
-                y = max(screen['top'], y_root - win_height)
-
-        # 父窗口位置
-        elif parent_win is not None:
-            parent_win.update_idletasks()
-            px, py = parent_win.winfo_x(), parent_win.winfo_y()
-            pw, ph = parent_win.winfo_width(), parent_win.winfo_height()
-            screen = get_monitor_by_point(px, py)
-            x = px + pw // 2 - win_width // 2
-            y = py + ph // 2 - win_height // 2
-
-        # 边界检查
-        x = max(screen['left'], min(x, screen['right'] - win_width))
-        y = max(screen['top'], min(y, screen['bottom'] - win_height))
-        # logger.info(x,y)
-        return x, y
-
-    # def on_single_click(self, event):
-    #     """统一处理 alert_tree 的单击和双击"""
-    #     sel_row = self.tree.identify_row(event.y)
-    #     sel_col = self.tree.identify_column(event.x)  # '#1', '#2' ...
-
-    #     if not sel_row or not sel_col:
-    #         return
-
-    #     values = self.tree.item(sel_row, "values")
-    #     if not values:
-    #         return
-
-    #     # item = self.tree.item(selected_item[0])
-    #     # values = item.get("values")
-
-    #     # 假设你的 tree 列是 (code, name, price, …)
-    #     stock_info = {
-    #         "code": values[0],
-    #         "name": values[1] if len(values) > 1 else "",
-    #         "extra": values  # 保留整行
-    #     }
-    #     self.selected_stock_info = stock_info
-
-    #     if values:
-    #         # stock_info = self.tree.item(selected_item, 'values')
-    #         stock_code = values[0]
-
-    #         send_tdx_Key = (self.select_code != stock_code)
-    #         self.select_code = stock_code
-
-    #         stock_code = str(stock_code).zfill(6)
-    #         logger.info(f'stock_code:{stock_code}')
-    #         # logger.info(f"选中股票代码: {stock_code}")
-    #         if send_tdx_Key and stock_code:
-    #             self.sender.send(stock_code)
     def on_single_click(self, event=None, values=None):
         """
         统一处理 alert_tree 的单击和双击
@@ -2046,19 +1761,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             self.load_window_position(self.detail_win, "detail_win_Category", default_width=400, default_height=200)
 
-            # win_width, win_height = 400, 200
-            # x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
-            # self.detail_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
             # 再显示出来
             self.detail_win.deiconify()
 
-            # logger.info(
-            #     f"位置: ({self.detail_win.winfo_x()}, {self.detail_win.winfo_y()}), "
-            #     f"大小: {self.detail_win.winfo_width()}x{self.detail_win.winfo_height()}"
-            # )
-            # logger.info("geometry:", self.detail_win.geometry())
-            # 字体设置
-            # font_style = tkfont.Font(family="微软雅黑", size=12)
             self.txt_widget = tk.Text(self.detail_win, wrap="word", font=self.default_font)
             self.txt_widget.pack(expand=True, fill="both")
             self.txt_widget.insert("1.0", category_content)
@@ -2112,65 +1817,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except KeyError:
             category_content = "未找到该股票的 category 信息"
 
-        self.show_category_detail(code,name,category_content)
+        # self.show_category_detail(code,name,category_content)
+        self.view_stock_remarks(code, name)
         pyperclip.copy(code)
-        # # 如果 detail_win 已经存在，则更新内容，否则创建新的
-        # if self.detail_win and self.detail_win.winfo_exists():
-        #     self.detail_win.title(f"{code} { name }- Category Details")
-        #     self.txt_widget.config(state="normal")
-        #     self.txt_widget.delete("1.0", tk.END)
-        #     self.txt_widget.insert("1.0", category_content)
-        #     self.txt_widget.config(state="disabled")
-        #     # self.detail_win.focus_force()           # 强制获得焦点
-        #     # self.detail_win.lift()
-        # else:
-        #     self.detail_win = tk.Toplevel(self)
-        #     self.detail_win.title(f"{code} { name }- Category Details")
-        #     # self.detail_win.geometry("400x200")
-
-        #     win_width, win_height = 400 , 200
-        #     x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
-        #     self.detail_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
-        #     # 字体设置
-        #     font_style = tkfont.Font(family="微软雅黑", size=12)
-        #     self.txt_widget = tk.Text(self.detail_win, wrap="word", font=font_style)
-        #     self.txt_widget.pack(expand=True, fill="both")
-        #     self.txt_widget.insert("1.0", category_content)
-        #     self.txt_widget.config(state="disabled")
-        #     self.detail_win.focus_force()           # 强制获得焦点
-        #     self.detail_win.lift()                  # 提升到顶层
-
-        #     # 右键菜单
-        #     menu = tk.Menu(self.detail_win, tearoff=0)
-        #     menu.add_command(label="复制", command=lambda: self.detail_win.clipboard_append(self.txt_widget.selection_get()))
-        #     menu.add_command(label="全选", command=lambda: self.txt_widget.tag_add("sel", "1.0", "end"))
-
-        #     def show_context_menu(event):
-        #         try:
-        #             menu.tk_popup(event.x_root, event.y_root)
-        #         finally:
-        #             menu.grab_release()
-
-        #     self.txt_widget.bind("<Button-3>", show_context_menu)
-        #     # 绑定 ESC 键关闭窗口
-        #     self.detail_win.bind("<Escape>", lambda e: self.detail_win.destroy())
-
-        # # 弹窗显示 category 内容
-        # detail_win = tk.Toplevel(self)
-        # detail_win.title(f"{code} - Category Details")
-        # # detail_win.geometry("400x200")
-
-        # win_width, win_height = 400 , 200
-        # x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
-        # detail_win.geometry(f"{win_width}x{win_height}+{x}+{y}")
-
-        # # 设置字体
-        # font_style = tkfont.Font(family="微软雅黑", size=12)  # 可以换成你想要的字体和大小
-
-        # txt = tk.Text(detail_win, wrap="word", font=font_style)
-        # txt.pack(expand=True, fill="both")
-        # txt.insert("1.0", category_content)
-        # txt.config(state="disabled")
 
 
 
@@ -2178,10 +1827,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """右键点击 TreeView 行"""
         # 确保选中行
         item_id = self.tree.identify_row(event.y)
-        # if item_id:
-        #     self.tree.selection_set(item_id)
-            # self.tree_menu.post(event.x_root, event.y_root)
-        # selected_item = self.tree.selection()
 
         if item_id:
             # 选中该行
@@ -3188,13 +2833,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win = tk.Toplevel(self)
             win.title(f"添加语音预警 - {name} ({code})")
             window_id = "添加语音预警"
-            # --- 窗口定位 & 尺寸调整 ---
-            # w, h = 750, 520# 增加高度以容纳更多数据
-            # mx, my = self.winfo_pointerx(), self.winfo_pointery()
-            # pos_x, pos_y = mx - w - 20, my - h - 20
-            # pos_x, pos_y = max(0, pos_x), max(0, pos_y)
-            # win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
-            # win.bind("<Escape>", lambda e: win.destroy())
             self.load_window_position(win, window_id, default_width=900, default_height=650)
             # --- 布局 ---
             main_frame = tk.Frame(win)
@@ -3205,8 +2843,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             right_frame = tk.LabelFrame(main_frame, text="参考数据 (点击自动填入)", width=380)
             right_frame.pack(side="right", fill="both", padx=(10, 0))
-            # right_frame.pack_propagate(False)
-
             # --- 左侧：输入区域 ---
             
             # 获取当前数据
@@ -4020,11 +3656,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                  edit_win = tk.Toplevel(win)
                  edit_win.title(f"编辑规则 - {name}")
                  edit_win_id = "编辑规则"
-                 # w, h = 750, 480
-                 # mx, my = self.winfo_pointerx(), self.winfo_pointery()
-                 # pos_x, pos_y = max(0, mx - w - 20), max(0, my - h - 20)
-                 # edit_win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
-                 # edit_win.bind("<Escape>", lambda e: edit_win.destroy())
                  self.load_window_position(edit_win, edit_win_id, default_width=900, default_height=600)
 
                  main_frame = tk.Frame(edit_win)
@@ -4204,121 +3835,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 col_name = self.tree["columns"][col_index]
                 self.show_column_menu(col_name,event)  # 弹出列选择菜单
 
-    # def show_column_menu(self, current_col=None):
-    #     """弹出列选择窗口，自动自适应行列布局"""
-    #     all_cols = list(self.df_all.columns)  # 全部列来源
-    #     selected_cols = getattr(self, "display_cols", list(self.tree["columns"]))
-
-    #     win = tk.Toplevel(self)
-    #     win.title("选择显示列")
-    #     win.geometry("500x400")
-    #     win.transient(self)
-    #     win.grab_set()
-
-    #     frm = tk.Frame(win)
-    #     frm.pack(fill="both", expand=True, padx=10, pady=10)
-
-    #     n = len(all_cols)
-    #     max_cols_per_row = 5  # 每行最多 5 个，可改
-    #     cols_per_row = min(n, max_cols_per_row)
-    #     nrows = math.ceil(n / cols_per_row)
-
-    #     var_map = {}
-    #     for i, col in enumerate(all_cols):
-    #         var = tk.BooleanVar(value=(col in selected_cols))
-    #         var_map[col] = var
-    #         r = i // cols_per_row
-    #         c = i % cols_per_row
-    #         cb = tk.Checkbutton(frm, text=col, variable=var, anchor="w")
-    #         cb.grid(row=r, column=c, sticky="w", padx=4, pady=2)
-
-    #     def apply_cols():
-    #         new_cols = [col for col, var in var_map.items() if var.get()]
-    #         if not new_cols:
-    #             tk.messagebox.showwarning("提示", "至少选择一列")
-    #             return
-    #         self.display_cols = new_cols
-    #         self.tree["columns"] = ["code"] + new_cols
-    #         for col in self.tree["columns"]:
-    #             self.tree.heading(col, text=col, anchor="center")
-    #         win.destroy()
-    #         self.refresh_tree()
-
-    #     tk.Button(win, text="应用", command=apply_cols).pack(side="bottom", pady=6)
-
-    # def show_column_menu1(self, col):
-    #     """表头点击后弹出列替换菜单"""
-    #     menu = Menu(self, tearoff=0)
-
-    #     # 显示 df_all 所有列（除了已经在 current_cols 的）
-    #     for new_col in self.df_all.columns:
-    #         if new_col not in self.current_cols:
-    #             menu.add_command(
-    #                 label=f"替换 {col} → {new_col}",
-    #                 command=lambda nc=new_col, oc=col: self.replace_column(oc, nc)
-    #             )
-
-    #     # 弹出菜单
-    #     menu.post(self.winfo_pointerx(), self.winfo_pointery())
-
-    # def show_column_menu(self, col):
-    #     # 弹出一个 Toplevel 网格窗口显示 df_all 的列，点击即可替换
-    #     win = tk.Toplevel(self)
-    #     win.transient(self)  # 弹窗在父窗口之上
-    #     win.grab_set()
-    #     win.title(f"替换列: {col}")
-
-    #     # 过滤掉已经在 current_cols 的列
-    #     all_cols = [c for c in self.df_all.columns if c not in self.current_cols or c == col]
-
-    #     # 网格排列参数
-    #     cols_per_row = 5  # 每行显示5个按钮，可根据需要调整
-    #     btn_width = 15
-    #     btn_height = 1
-
-    #     for i, c in enumerate(all_cols):
-    #         btn = tk.Button(win,
-    #                         text=c,
-    #                         width=btn_width,
-    #                         height=btn_height,
-    #                         command=lambda nc=c, oc=col: [self.replace_column(oc, nc), win.destroy()])
-    #         btn.grid(row=i // cols_per_row, column=i % cols_per_row, padx=2, pady=2)
-
-
-
-    # def _show_column_menu(self, col ,event):
-    #     # 找到列
-    #     # col = self.tree.identify_column(event.x)
-    #     # col_idx = int(col.replace('#','')) - 1
-    #     # col_name = self.current_cols[col_idx]
-    #     def default_filter(c):
-    #         if c in self.current_cols:
-    #             return False
-    #         if any(k in c.lower() for k in ["perc","percent","trade","volume","boll","macd","ma"]):
-    #             return True
-    #         return False
-    #     # 弹窗位置在鼠标指针
-    #     x = event.x_root
-    #     y = event.y_root
-
-    #     win = tk.Toplevel(self)
-    #     win.transient(self)
-    #     win.grab_set()
-    #     win.title(f"替换列: {col}")
-    #     win.geometry(f"+{x}+{y}")
-
-    #     # all_cols = [c for c in self.df_all.columns if c not in self.current_cols or c == col]
-    #     all_cols = [c for c in self.df_all.columns if default_filter(c)]
-    #     # 自动计算网格布局
-    #     n = len(all_cols)
-    #     if n <= 10:
-    #         cols_per_row = min(n, 5)
-    #     else:
-    #         cols_per_row = 5
-
-    #     for i, c in enumerate(all_cols):
-    #         btn = tk.Button(win, text=c, width=12, command=lambda nc=c, oc=col: [self.replace_column(oc, nc), win.destroy()])
-    #         btn.grid(row=i // cols_per_row, column=i % cols_per_row, padx=2, pady=2)
 
     def show_column_menu(self, col, event):
         """
@@ -4337,10 +3853,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 防止多次重复弹出
         if self._menu_frame and self._menu_frame.winfo_exists():
             self._menu_frame.destroy()
-
-        # # 获取当前鼠标指针位置
-        # x = event.x_root
-        # y = event.y_root
 
 
         # 创建顶级 Frame，用于承载按钮
@@ -4367,12 +3879,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # menu_frame.update()  
         win_w = 300
         win_h = 300
-        # win_w = menu_frame.winfo_width()
-        # win_h = menu_frame.winfo_height()
-
-        # 当前窗口宽度（相对坐标用 event.x）
-        # window_w = self.winfo_width()
-
        
         # 屏幕边界保护
         screen_w = self.winfo_screenwidth()
@@ -4401,45 +3907,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 设置菜单窗口位置
         menu_frame.geometry(f"+{x}+{y}")
 
-        # logger.info(f"[DEBUG] event.x={event.x}, window_w={window_w}, win_w={win_w}, win_h={win_h}, pos=({x},{y})")
-
-        # 更新 geometry 才能拿到真实宽高
-        # menu_frame.update_idletasks()
-        # menu_frame.withdraw()  # 先隐藏，避免闪到默认(50,50)
-
-        # x, y = self.get_centered_window_position(win_width, win_height, parent_win=self)
-        # menu_frame.geometry(f"{win_width}x{win_height}+{x}+{y}")
-        # 再显示出来
-        # menu_frame.deiconify()
-        # 屏幕大小
-
-        # menu_frame.geometry(f"+{x}+{y}")
-        # menu_frame.deiconify()
-
-
-
-        # 默认防抖刷新
-        # def refresh_buttons():
-        #     # 清空旧按钮
-        #     for w in btn_frame.winfo_children():
-        #         w.destroy()
-        #     # 获取搜索过滤
-        #     key = search_var.get().lower()
-        #     filtered = [c for c in all_cols if key in c.lower()]
-        #     # 自动计算行列布局
-        #     n = len(filtered)
-        #     if n == 0:
-        #         return
-        #     cols_per_row = min(6, n)  # 每行最多6个
-        #     rows = (n + cols_per_row - 1) // cols_per_row
-        #     for idx, c in enumerate(filtered):
-        #         btn = ttk.Button(btn_frame, text=c,
-        #                          command=lambda nc=c: self.replace_column(col, nc))
-        #         btn.grid(row=idx // cols_per_row, column=idx % cols_per_row, padx=2, pady=2, sticky="nsew")
-
-        #     # 自动扩展列宽
-        #     for i in range(cols_per_row):
-        #         btn_frame.columnconfigure(i, weight=1)
         def refresh_buttons():
             for w in btn_frame.winfo_children():
                 w.destroy()
@@ -4473,11 +3940,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.after_cancel(self._search_after_id)
             self._search_after_id = self.after(200, refresh_buttons)
 
-        # 获取可选列，排除当前已经显示的
-        # all_cols = [c for c in self.df_all.columns if c not in self.current_cols]   
         all_cols = [c for c in self.df_all.columns if default_filter(c)]
-        # logger.info(f'allcoulumns : {self.df_all.columns.values}')
-        # logger.info(f'all_cols : {all_cols}')
         search_var.trace_add("write", on_search_changed)
 
         # 初次填充
@@ -4509,54 +3972,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.tree["displaycolumns"] = new_columns
             self.tree.configure(show="headings")
 
-            # # 🔹 4. 重新设置表头和列宽
-            # for col in cols:
-            #     self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
-            #     width = 120 if col == "name" else 80
-            #     self.tree.column(col, width=width, anchor="center", minwidth=50)
-
-            # # 重新设置 tree 的列集合
-            # if "code" not in self.current_cols:
-            #     new_columns = ["code"] + self.current_cols
-            # else:
-            #     new_columns = self.current_cols
-
-            # self.tree.config(columns=new_columns)
             logger.info(f'replace_column get_scaled_value:{self.get_scaled_value()}')
-            # 重新设置表头
-            # for col in new_columns:
-            #     # self.tree.heading(col, text=col, anchor="center", command=lambda _col=col: self.sort_by_column(_col, False))
-            #     width = int(getattr(self, "_name_col_width", int(120*self.get_scaled_value()))) if col == "name" else int(60*self.get_scaled_value())
-            #     self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
-            #     self.tree.column(col, width=width, anchor="center", minwidth=int(60*self.get_scaled_value()))
-
-            # co2int = ['ra','ral','fib','fibl','op', 'ratio','ra']
-            # co2width = ['boll','kind','red']
-            # col_scaled = self.get_scaled_value() 
-            # for col in new_columns:
-            #     self.tree.heading(col, text=col, command=lambda _col=col: self.sort_by_column(_col, False))
-            #     if col == "name":
-            #         width = int(getattr(self, "_name_col_width", 100*col_scaled))  # 使用记录的 name 宽度
-            #         minwidth = int(60*col_scaled)
-            #         self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=False)
-            #     elif col in co2int:
-            #         width = int(60*col_scaled)  # 数字列宽度可小
-            #         minwidth = int(22*col_scaled)
-            #         self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
-            #     elif col in co2width:
-            #         width = int(60*col_scaled)  # 数字列宽度可小
-            #         minwidth = int(22*col_scaled)
-            #         self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
-            #     else:
-            #         width = int(80*col_scaled)
-            #         minwidth = int(50*col_scaled)
-            #         self.tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
 
             self._setup_tree_columns(self.tree,new_columns, sort_callback=self.sort_by_column, other={})
 
-
             # 重新加载数据
-            # self.refresh_tree(self.df_all)
             if apply_search:
                 self.apply_search()
             else:
@@ -4619,19 +4039,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 4️⃣ 为每个列重新设置 heading / column
         logger.info(f'reset_tree_columns self.scale_factor :{self.scale_factor} col_scaled:{self.get_scaled_value()}')
-        # for col in cols_to_show:
-        #     if sort_func:
-        #         tree.heading(col, text=col, command=lambda _c=col: sort_func(_c, False))
-        #     else:
-        #         tree.heading(col, text=col)
-        #     width = int(80*self.get_scaled_value()) if col == "name" else int(60*self.get_scaled_value())
-        #         width = int(60*col_scaled)  # 数字列宽度可小
-        #         minwidth = int(22*col_scaled)
-        #         tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
-        #     else:
-        #         width = int(80*col_scaled)
-        #         minwidth = int(50*col_scaled)
-        #         tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=True)
 
         self._setup_tree_columns(tree,cols_to_show, sort_callback=sort_func, other={})
 
@@ -5096,23 +4503,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 max_len = len(col)
             width = int(min(max(max_len * 8, int(60*self.get_scaled_value())) , 300))  # 经验值：每字符约8像素，可调整
 
-            # try:
-            #     max_len = max([len(str(x)) for x in self.current_df[col].fillna("").values] + [len(col)])
-            # except Exception:
-            #     max_len = len(col)
-
-            # # 使用 self.get_scaled_value() 代替 DPI 缩放比例
-            # scale = self.get_scaled_value()  # 返回 self.scale_factor - offset
-            # base_char_width = 8  # 每字符经验值
-            # width = int(max(max_len * base_char_width * scale, 60))  # 最小宽度 60
-            # width = min(width, 300)  # 最大宽度 300
-
             if col == 'name':
-                # width = int(width * 2)
-                # width = int(width * 1.5 * self.get_scaled_value())
                 width = int(getattr(self, "_name_col_width", 80*self.scale_factor))
-                # logger.info(f'col width: {width}')
-                # logger.info(f'col : {col} width: {width}')
             self.tree.column(col, width=int(width))
         logger.debug(f'adjust_column_widths done :{len(cols)}')
     # ----------------- 排序 ----------------- #
@@ -5124,8 +4516,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.sortby_col_ascend = not reverse
         logger.debug(f'self.sortby_col_ascend: {self.sortby_col_ascend}')
         if col in ['code']:
-            # df_sorted = self.current_df.reset_index().sort_values(
-            #     by=col, key=lambda s: s.astype(str), ascending=not reverse)
             df_sorted = self.current_df.reset_index(drop=True).sort_values(
                 by=col, key=lambda s: s.astype(str), ascending=not reverse)
 
@@ -5197,12 +4587,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if self._search_job:
             self.after_cancel(self._search_job)
         self._search_job = self.after(3000, self.apply_search)  # 3000ms后执行
-
-    # def sync_history_from_QM(self,search_history1=None,search_history2=None):
-    #     if search_history1:
-    #         self.search_history1 = [r["query"] for r in search_history1]
-    #     if search_history2:
-    #         self.search_history2 = [r["query"] for r in search_history2]
 
     def sync_history_from_QM(self, search_history1=None, search_history2=None, search_history3=None):
         self.query_manager.clear_hits()
@@ -5292,12 +4676,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.query_manager.current_history = new_history
             self.query_manager.refresh_tree()
 
-        # # --- 2️⃣ 如果编辑器已显示，直接写入 entry_query ---
-        # if self.query_manager.editor_frame.winfo_ismapped():
-        #     self.query_manager.entry_query.delete(0, tk.END)
-        #     self.query_manager.entry_query.insert(0, self._Categoryresult)
-        #     return
-
     def update_category_result(self, df_filtered):
         """统计概念异动，在主窗口上方显示摘要"""
         try:
@@ -5340,15 +4718,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             top5 = OrderedDict(counter.most_common(5))
 
             display_text = "  ".join([f"{k}:{v}" for k, v in top5.items()])
-            # logger.info(f'display_text : {display_text}  list(top5.keys()) : { list(top5.keys()) }')
-            # 取前5个类别
-            # current_categories = set(top5.keys())
             current_categories =  list(top5.keys())  #保持顺序
-
-            # 获取 Tk 默认字体
-            # default_font = tkfont.nametofont("TkDefaultFont").copy()
-            # default_font.configure(weight="bold")  # 只加粗，不修改字号或字体
-            # font=("微软雅黑", 10, "bold"),
 
             # --- 标签初始化 ---
             if not hasattr(self, "lbl_category_result"):
@@ -5371,8 +4741,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # --- 对比上次结果 ---
             old_categories = getattr(self, "_last_categories", set())
-            # added = current_categories - old_categories
-            # removed = old_categories - current_categories
             added = [c for c in current_categories if c not in old_categories]
             removed = [c for c in old_categories if c not in current_categories]
 
@@ -5552,8 +4920,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         added = [c for c in current_categories if c not in prev_categories]
         removed = [c for c in prev_categories if c not in current_categories]
-        # default_font = tkfont.nametofont("TkDefaultFont").copy()
-        # default_font.configure(weight="bold")  # 只加粗，不修改字号或字体
         # === 有新增或消失 ===
         if added or removed:
             if added:
@@ -5570,9 +4936,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         idx = len(self._label_widgets)
                         lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self._on_label_click(cd, i))
                         lbl.bind("<Button-3>", lambda e, cd=code, i=idx: self._on_label_right_click(cd, i))
-                        # lbl.bind("<Up>", self._on_key)
-                        # lbl.bind("<Down>", self._on_key)
-                        # lbl.bind("<Return>", self._on_key)
                         lbl.bind("<Double-Button-1>", lambda e, cd=code, i=idx: self._on_label_double_click(cd, i))
                         self._label_widgets.append(lbl)
 
@@ -5595,9 +4958,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     idx = len(self._label_widgets)
                     lbl.bind("<Button-1>", lambda e, cd=code, i=idx: self._on_label_click(cd, i))
                     lbl.bind("<Button-3>", lambda e, cd=code, i=idx: self._on_label_right_click(cd, i))
-                    # lbl.bind("<Up>", self._on_key)
-                    # lbl.bind("<Down>", self._on_key)
-                    # lbl.bind("<Return>", self._on_key)
                     lbl.bind("<Double-Button-1>", lambda e, cd=code, i=idx: self._on_label_double_click(cd, i))
                     self._label_widgets.append(lbl)
 
@@ -5665,10 +5025,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 先清空再黏贴
         if clipboard_text.isdigit() and len(clipboard_text) == 6:
             clipboard_text = f'index.str.contains("^{clipboard_text}")'
-            # clipboard_text = query_str = f'index.str.contains("^{clipboard_text}")'
         else:
-            # match = re.search(r'[\u4e00-\u9fa5A-Za-z0-9（）\(\)\-]+', clipboard_text)
-            # pattern = r'[\u4e00-\u9fa5]+[A-Za-z0-9\-\(\)（）]*'
             allowed = r'\-\(\)'
             pattern = rf'[\u4e00-\u9fa5]+[A-Za-z0-9{allowed}（）]*'
             matches = re.findall(r'[\u4e00-\u9fa5]+[A-Za-z0-9\-\(\)（）]*', clipboard_text)
@@ -5677,7 +5034,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         event.widget.delete(0, tk.END)
         event.widget.insert(0, clipboard_text)
-        # self.on_test_click()
 
 
     def _on_label_on_code_click(self, code,idx):
@@ -5685,7 +5041,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """点击异动窗口中的股票代码"""
         self.select_code = code
 
-        # logger.info(f"select_code: {code}")
         # ✅ 可改为打开详情逻辑，比如：
         self.sender.send(code)
         if hasattr(self._concept_top10_win, "_canvas_top10"):
@@ -5745,11 +5100,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             # ---------------- 原逻辑 ----------------
             concept_name = None
-            # if hasattr(self, "_label_widgets"):
-            #     try:
-            #         concept_name = getattr(self._label_widgets[idx], "_concept", None)
-            #     except Exception:
-            #         concept_name = None
 
             # ---------------- 回退逻辑 ----------------
             if not concept_name:
@@ -5772,7 +5122,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.plot_following_concepts_pg(code,top_n=1)
 
             # ---------------- 打开/复用 Top10 窗口 ----------------
-            # self.show_concept_top10_window(concept_name,code=code)
             self.show_concept_top10_window_simple(concept_name,code=code)
 
             if hasattr(self, "_concept_top10_win") and self._concept_top10_win:
@@ -5910,7 +5259,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not hasattr(self, "_pg_top10_window_simple"):
             self._pg_top10_window_simple = {}
 
-        # unique_code = f"{concept_name or ''}_{code or ''}"
         unique_code = f"{concept_name or ''}_"
         # --- 检查是否已有相同 code 的窗口 ---
         for k, v in self._pg_top10_window_simple.items():
@@ -5934,13 +5282,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         real_width = int(saved_width * self.scale_factor)
         real_height = int(saved_height * self.scale_factor)
         win.minsize(real_width, real_height)
-        # win.attributes('-toolwindow', True)  # 去掉最大化/最小化按钮，只留关闭按钮
-
-        # now = datetime.now()
-        # timestamp_suffix = f"{now:%M%S}{int(now.microsecond/1000):03d}"[:6]
-        # key = f"{concept_name}_{timestamp_suffix}"
-        # key = f"{concept_name}_{timestamp_suffix}"
-        # logger.info(f'show_concept_top10_window_simple : {unique_code}')
         # 缓存窗口
         # --- 如果传了code但没传stock_name，则从self.df_all查找 ---
         if code and not stock_name:
@@ -5967,8 +5308,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 这里可以继续填充窗口内容
 
-        # "plot": plot, "bars": bars, "texts": texts,
-        # "timer": timer, "chk_auto": chk_auto, "spin": spin_interval
         # 主体 Treeview
         frame = tk.Frame(win)
         frame.pack(fill="both", expand=True)
@@ -6470,15 +5809,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win._chk_auto = chk_auto
         win._spin_interval = spin_interval
         # # --- 复制表达式按钮 ---
-        # def _copy_expr():
-        #     import pyperclip
-        #     q = f'category.str.contains("{concept_name}", na=False)'
-        #     pyperclip.copy(q)
-        #     self.after(100, lambda: toast_message(self, f"已复制筛选条件：{q}"))
-
-        # tk.Button(btn_frame, text="复制筛选", command=_copy_expr).pack(side="left", padx=4)
-
-        
         # --- 在创建窗口或复用窗口后调用 ---
         self._bind_copy_expr(win)
 
@@ -6547,7 +5877,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 填充数据
         self._fill_concept_top10_content(win, concept_name, df_concept, code=code)
         # 窗口已创建 / 已复用
-        # logger.info(f"_focus_top10_tree = {self._focus_top10_tree}")
         self._focus_top10_tree(win)
 
     def _fill_concept_top10_content(self, win, concept_name, df_concept=None, code=None, limit=50):
@@ -6893,14 +6222,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(0)
 
-        # window_handle = win.windowHandle()
-        # if window_handle and window_handle.screen():
-            # screen = window_handle.screen()
-        # else:
-            # screen = self.app.primaryScreen()
-        # self._dpi_now = screen.logicalDotsPerInch()
         self.dpi_scale =  1
-        # logger.info(f'self.dpi_scale : {self.dpi_scale} self._dpi_now  : {self._dpi_now}')
 
         # 控制栏
         ctrl_layout = QtWidgets.QHBoxLayout()
@@ -6967,38 +6289,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                "code" : unique_code
            }
         
-
-        # # --- 同步更新到 plot._data_ref（给 tooltip / 点击事件使用）---
-        # if hasattr(plot, "_data_ref"):
-        #     plot._data_ref["concepts"] = concepts
-        #     plot._data_ref["scores"] = scores
-        #     plot._data_ref["avg_percents"] = avg_percents
-        #     plot._data_ref["follow_ratios"] = follow_ratios
-        #     plot._data_ref["bars"] = bars
-        #     plot._data_ref["brushes"] = brushes
-
-        # else:
-        #     # 如果第一次还没有绑定，就直接创建
-        #     plot._data_ref = {
-        #         "concepts": concepts,
-        #         "scores": scores,
-        #         "avg_percents": avg_percents,
-        #         "follow_ratios": follow_ratios,
-        #         "bars" : bars,
-        #         "brushes" : brushes
-        #     }
-
-        # def highlight_bar(index):
-        #     """高亮当前选中的 bar（通过改变颜色或添加边框实现）"""
-        #     if not (0 <= index < len(concepts)):
-        #         return
-        #     # 恢复所有 bar 的 brush
-        #     bars.setOpts(brushes=brushes)
-        #     # 高亮当前选中项
-        #     highlight_brushes = brushes.copy()
-        #     highlight_brushes[index] = pg.mkBrush((255, 255, 0, 180))  # 黄色高亮
-        #     bars.setOpts(brushes=highlight_brushes)
-        #     plot.update()
 
         def highlight_bar(index):
             """高亮当前选中的 bar（动态读取 plot._data_ref）"""
@@ -7190,19 +6480,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if screen != prev_screen or self._dpi_now  != prev_dpi:
                     logger.info(f'dpi_now :{self._dpi_now } prev_dpi :{prev_dpi}')
                     prev_screen, prev_dpi = screen, self._dpi_now
-                    # self.dpi_scale = self._dpi_now / prev_dpi
-                    # if self._dpi_now == 96 and font_size == self.base_font_size:
-                    #     self._font_size = int(self._font_size / self.scale_factor)
-                        # dpi_scale = dpi_now / prev_dpi if prev_dpi else 1
-                    # self._font_size = int(self.base_font_size * self.scale_factor)
-                        # logger.info(f'check_screen _font_size : {self._font_size}')
-                    # reposition_texts()
 
                     font = self.app.font()
                     self.dpi_scale =  1.5 if self._dpi_now / 96 > 1.5 else self._dpi_now / 96
                     font.setPointSize(int(base_font_size * self.dpi_scale))
                     self.app.setFont(font)
-                    # logger.info(f'dpi : {dpi} _dpi_now : {self._dpi_now} fontsize: {font.pointSize()} ratio :  {(self._dpi_now  / 96)}')
 
             else:
                 font = self.app.font()
@@ -7211,22 +6493,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.app.setFont(font)
                 logger.info(f'_dpi_now : {self._dpi_now} fontsize: {font.pointSize()} ratio :  {(self._dpi_now  / 96)}')
 
-                # self._font_size = int(self.base_font_size * self.dpi_scale)
-                # self._font_size = int(self.base_font_size * self.scale_factor)
-                # if self._dpi_now == 96:
-                #     # self.dpi_scale = self._dpi_now / (self.scale_factor*96)
-                #     logger.info(f'self.dpi_scale init: {self.dpi_scale}')
-                #     # if  font_size == self.base_font_size:
-                #     #     self._font_size = int(self._font_size / self.scale_factor)
                 logger.info(f'self._font_size init: {self._font_size}')
                 prev_screen, prev_dpi = screen, self._dpi_now 
 
-        # screen_timer = QtCore.QTimer(win)
-        # screen_timer.timeout.connect(check_screen)
-        # screen_timer.start(500)
-
         # 关闭事件
-
         def on_close(evt):
             timer.stop()
             # 遍历窗口涉及的 concept，只保存自己拥有的概念数据
@@ -7258,21 +6528,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win._init_prev_concepts_data = {}  # 每个 concept_name 对应初始数据
         if not hasattr(win, "_prev_concepts_data"):
             win._prev_concepts_data = {}       # 每个 concept_name 对应上次刷新数据
-
-            
-        # # --- 全局一次加载当天数据 ---
-        # if not hasattr(self, "_concept_data_loaded"):
-        #     self._concept_data_loaded = True
-        #     # 读取当天所有 concept 数据，一次性加载
-        #     all_data = load_all_concepts_pg_data()  # 自定义 NoSQL 函数，返回 dict: concept_name -> (init_data, prev_data)
-            
-        #     self._global_concept_init_data = {}
-        #     self._global_concept_prev_data = {}
-        #     for c_name, (init_data, prev_data) in all_data.items():
-        #         if init_data:
-        #             self._global_concept_init_data[c_name] = {k: np.array(v) for k, v in init_data.items()}
-        #         if prev_data:
-        #             self._global_concept_prev_data[c_name] = {k: np.array(v) for k, v in prev_data.items()}
 
         # # --- 窗口初始化各自 concept 数据 ---
         for i, c_name in enumerate(concepts):
@@ -7470,26 +6725,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         plot.addItem(main_bars)
         w_dict["bars"] = main_bars
 
-        # # --- 清除所有 TextItem ---
-        # for item in plot.items[:]:
-        #     if isinstance(item, pg.TextItem):
-        #         plot.removeItem(item)
-
-        # # --- 创建新的 TextItem ---
-        # texts = []
-        # max_score = max(scores.max(), 1)
-        # for i, (avg, score) in enumerate(zip(avg_percents, scores)):
-        #     # text = pg.TextItem(f"avg:{avg:.2f}%\nscore:{score:.2f}", anchor=(0, 0.5))
-        #     text = pg.TextItem(f"score:{score:.2f}\navg:{avg:.2f}%", anchor=(0, 0.5))
-        #     # text.setFont(QtGui.QFont("Microsoft YaHei", font_size))
-        #     text.setPos(score + 0.03 * max_score, y[i])
-        #     plot.addItem(text)
-        #     texts.append(text)
-        #     logger.info(f"update[DEBUG] : avg={avg:.2f}, score={score:.2f}")
-
-        # # --- 更新左轴刻度 ---
-        # plot.getAxis('left').setTicks([list(zip(y, concepts))])
-
         # --- 绘制增量条 ---
         delta_bars_list = []
         for i, c_name in enumerate(concepts):
@@ -7525,32 +6760,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 arrow = "→"
                 color = "gray"
 
-            # text.setText(f"{arrow} {delta} {score:.2f} \n ({avg_percents[i]:.2f}%)")
-            # text.setText(f"{arrow} {delta} {score:.2f} \n ({avg_percents[i]:.2f}%)")
             text.setText(f"{arrow}{delta:.1f} score:{score:.2f}\navg:{avg_percents[i]:.2f}%")
-            #     text = pg.TextItem(f"score:{score:.2f}\navg:{avg:.2f}%", anchor=(0, 0.5))
             text.setColor(QtGui.QColor(color))
-            # text.setFont(QtGui.QFont(font_family, self._font_size))
-            # text.setPos((score + 0.03 * max_score) * self.dpi_scale, y[i] * self.dpi_scale)
             text.setPos(score + 0.03 * max_score, y[i])
             text.setAnchor((0, 0.5))
 
         plot.getAxis('left').setTicks([list(zip(y, concepts))])
 
 
-
-        # texts = []
-        # max_score = max(scores.max(), 1)
-        # for i, (avg, score) in enumerate(zip(avg_percents, scores)):
-        #     text = pg.TextItem(f"avg:{avg:.2f}%\nscore:{score:.2f}", anchor=(0, 0.5))
-        #     text = pg.TextItem(f"score:{score:.2f}\navg:{avg:.2f}%", anchor=(0, 0.5))
-        #     # text.setFont(QtGui.QFont("Microsoft YaHei", font_size))
-        #     text.setPos(score + 0.03 * max_score, y[i])
-        #     plot.addItem(text)
-        #     texts.append(text)
-        #     logger.info(f"[DEBUG] : avg={avg:.2f}, score={score:.2f}")
-
-        # plot.getAxis('left').setTicks([list(zip(y, concepts))])
 
         plot._data_ref["concepts"] = concepts
         plot._data_ref["scores"] = scores
@@ -7582,130 +6799,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             win._flash_timer.timeout.connect(flash_delta)
             win._flash_timer.start(30000)  # 30 秒闪烁一次
-
-
-    # def update_pg_plot_no_sql(self, w_dict, concepts, scores, avg_percents, follow_ratios):
-    #     """
-    #     更新 PyQtGraph 条形图窗口：
-    #     1. 绘制主 BarGraphItem 显示当前分数。
-    #     2. 绘制增量条，比较当前分数与初始分数 (_init_prev_concepts_data)。
-    #     3. 增量条正增量绿色，负增量红色。
-    #     4. 条形闪烁，文字箭头显示增减方向。
-    #     """
-
-    #     win = w_dict["win"]
-    #     plot = w_dict["plot"]
-    #     texts = w_dict["texts"]
-
-    #     # --- 初始化：保存初始参考数据 (_init_prev_concepts_data) ---
-    #     # 用于计算每次刷新后的增量
-    #     if not hasattr(win, "_init_prev_concepts_data"):
-    #         win._init_prev_concepts_data = {
-    #             "concepts":concepts,
-    #             "avg_percents": np.array(avg_percents, copy=True),
-    #             "scores": np.array(scores, copy=True),
-    #             "follow_ratios": np.array(follow_ratios, copy=True)
-    #         }
-    #         logger.info("[DEBUG] 已保存初始概念数据(_init_prev_concepts_data)")
-
-    #     # --- 当前数据与上次刷新数据 (_prev_concepts_data) ---
-    #     # 用于比较上一次刷新后的变化（非初始参考）
-    #     if not hasattr(win, "_prev_concepts_data"):
-    #         win._prev_concepts_data = {
-    #             "concepts":concepts,
-    #             "avg_percents": np.zeros(len(avg_percents)),
-    #             "scores": np.zeros(len(scores)),
-    #             "follow_ratios": np.zeros(len(follow_ratios))
-    #         }
-
-    #     prev_data = win._prev_concepts_data
-    #     base_data = win._init_prev_concepts_data
-
-    #     y = np.arange(len(concepts))
-    #     max_score = max(scores) if len(scores) > 0 else 1
-
-    #     # --- 清除旧 BarGraphItem ---
-    #     for item in plot.items[:]:
-    #         if isinstance(item, pg.BarGraphItem):
-    #             plot.removeItem(item)
-
-    #     # --- 主 BarGraphItem ---
-    #     # 显示当前分数
-    #     color_map = pg.colormap.get('CET-R1')
-    #     brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
-    #     main_bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
-    #     plot.addItem(main_bars)
-    #     w_dict["bars"] = main_bars  # 保存引用
-
-    #     # --- 计算相对初始的变化（增量 delta_from_init） ---
-    #     # 用于绘制正负增量条
-    #     delta_from_init = np.array(scores) - base_data["scores"]
-
-    #     # --- 绘制增量条 ---
-    #     delta_bars_list = []
-    #     for i, d in enumerate(delta_from_init):
-    #         if abs(d) < 1e-6:  # 无变化则跳过
-    #             delta_bars_list.append(None)
-    #             continue
-    #         # 正增量绿色，负增量红色，半透明
-    #         color = (0, 255, 0, 150) if d > 0 else (255, 0, 0, 150)
-    #         # x0 起点：正增量从初始分数开始，负增量从当前分数开始
-    #         x0 = base_data["scores"][i] if d > 0 else scores[i]
-    #         bar = pg.BarGraphItem(x0=x0, y=[y[i]], height=0.6, width=[abs(d)], brushes=[pg.mkBrush(color)])
-    #         plot.addItem(bar)
-    #         delta_bars_list.append(bar)
-    #     w_dict["delta_bars"] = delta_bars_list  # 保存引用以便闪烁
-
-    #     # --- 更新文字显示 ---
-    #     app_font = QtWidgets.QApplication.font()
-    #     font_family = app_font.family()
-    #     for i, text in enumerate(texts):
-    #         if i >= len(concepts):
-    #             continue
-    #         avg = avg_percents[i]
-    #         score = scores[i]
-    #         diff_score = delta_from_init[i]
-
-    #         # 箭头和文字颜色表示增减方向
-    #         if diff_score > 0:
-    #             arrow = "↑"
-    #             color = "green"
-    #         elif diff_score < 0:
-    #             arrow = "↓"
-    #             color = "red"
-    #         else:
-    #             arrow = "→"
-    #             color = "gray"
-
-    #         text.setText(f"{arrow}{score:.2f} ({avg:.2f}%)")
-    #         text.setColor(QtGui.QColor(color))
-    #         text.setFont(QtGui.QFont(font_family, self._font_size))
-    #         text.setPos((scores[i] + 0.03 * max_score) * self.dpi_scale, y[i] * self.dpi_scale)
-    #         text.setAnchor((0, 0.5))  # 垂直居中
-
-        # # --- 保存当前刷新数据 (_prev_concepts_data) ---
-        # win._prev_concepts_data = {
-        #     "concepts":concepts,
-        #     "avg_percents": np.array(avg_percents, copy=True),
-        #     "scores": np.array(scores, copy=True),
-        #     "follow_ratios": np.array(follow_ratios, copy=True)
-        # }
-
-    #     # --- 增量条闪烁定时器 ---
-    #     if not hasattr(win, "_flash_timer"):
-    #         win._flash_state = True  # 控制可见性状态
-    #         win._flash_timer = QtCore.QTimer(win)
-
-    #         def flash_delta():
-    #             # 切换增量条显示状态
-    #             for bar in w_dict["delta_bars"]:
-    #                 if bar is not None:
-    #                     bar.setVisible(win._flash_state)
-    #             win._flash_state = not win._flash_state
-
-    #         win._flash_timer.timeout.connect(flash_delta)
-    #         win._flash_timer.start(30000)  # 每10秒闪烁一次
-
 
 
     # --- 定时刷新 ---
@@ -7744,12 +6837,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # --- 判断概念顺序是否变化 ---
         old_concepts = w_dict.get("_concepts", [])
         concept_changed = old_concepts != concepts
-        # if concept_changed:
-        #     logger.info(f"[DEBUG] 概念顺序变化，会重建文字:old_concepts {old_concepts} → concepts:{concepts}")
-        #     # w_dict["texts"] = []  # 强制重建文字
-        # else:
-        #     logger.info(f"[DEBUG] 概念顺序未变，仅更新文字内容")
-
         # --- 调试输出 ---
         # logger.info(f'_refresh_pg_window top_concepts_sorted : {top_concepts_sorted} unique_code: {unique_code} ')
         logger.info(f'更新图形: {unique_code} : {concepts}')
@@ -7758,163 +6845,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         logger.info(f"[Auto] 已自动刷新 {code}")
 
-
-    # def plot_following_concepts_mp(self, code=None, top_n=10):
-    #     if not hasattr(self, "_figs_opened"):
-    #         self._figs_opened = {}      # 保存 Figure 对象
-    #         self._figs_data_hash = {}   # 保存数据摘要
-
-    #     # 设置中文字体
-    #     plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
-    #     plt.rcParams['axes.unicode_minus'] = False
-    #     if code is None:
-    #         tcode, percent = self.get_stock_code_none()
-    #         logger.info(f'tcode: {tcode} percent :{percent}')
-    #         top_concepts = self.get_following_concepts_by_correlation(tcode, top_n=top_n)
-    #     else:
-    #         top_concepts = self.get_following_concepts_by_correlation(code, top_n=top_n)
-
-    #     if not top_concepts:
-    #         logger.info("未找到相关概念")
-    #         return
-
-    #     concepts = [c[0] for c in top_concepts]
-    #     scores = [c[1] for c in top_concepts]
-    #     avg_percents = [c[2] for c in top_concepts]
-    #     follow_ratios = [c[3] for c in top_concepts]
-
-    #     # --- 生成摘要，只检查这四个列表是否一致 ---
-
-    #     data_hash = tuple(concepts[:3])
-
-    #     logger.info(f'data_hash : {data_hash}')
-    #     # 如果数据完全一样且已有窗口，则不重复打开
-    #     to_delete = []
-    #     # --- 检查是否已有相同数据的窗口 ---
-    #     for key, hash_val in list(self._figs_data_hash.items()):
-    #         logger.info(f'key : {key} hash_val : {hash_val}')
-
-    #         fig = self._figs_opened.get(key, None)
-
-    #         # 如果图表已经被关闭或不存在，删除字典记录
-    #         if fig is None or not plt.fignum_exists(fig.number):
-    #             logger.info(f"[Info] 图表 {key} 已关闭，清理记录")
-    #             self._figs_opened.pop(key, None)
-    #             self._figs_data_hash.pop(key, None)
-    #             continue
-
-    #         # 如果数据完全一样，则不重复打开
-    #         if hash_val == data_hash:
-    #             try:
-    #                 fig.show()
-    #                 manager = plt.get_current_fig_manager()
-    #                 try:
-    #                     manager.window.attributes('-topmost', 1)
-    #                     manager.window.attributes('-topmost', 0)
-    #                 except Exception:
-    #                     pass
-    #             except Exception:
-    #                 # 图表异常或已关闭，再清理记录
-    #                 self._figs_opened.pop(key, None)
-    #                 self._figs_data_hash.pop(key, None)
-    #             else:
-    #                 logger.info("数据与已有窗口相同，不重复打开。")
-    #                 return
-
-
-    #     for k in to_delete:
-    #         del self._figs_opened[key]
-    #         del self._figs_data_hash[k]
-
-    #     colors = [plt.cm.Reds(r) for r in follow_ratios]
-    #     if code is None:
-    #         code = '总览'
-    #         name = 'All'
-    #     else:
-    #         name = self.df_all.loc[code]['name']
-    #     fig, ax = plt.subplots(figsize=(6, 4))
-    #     bars = ax.barh(concepts, scores, color=colors)
-    #     ax.set_xlabel('跟随指数 (score)')
-    #     ax.set_title(f'{code} {name} 今日可能跟随上涨概念前 {top_n}')
-    #     ax.invert_yaxis()
-
-    #     for bar, avg, ratio in zip(bars, avg_percents, follow_ratios):
-    #         width = bar.get_width()
-    #         ax.text(width + 0.01, bar.get_y() + bar.get_height()/2,
-    #                 f'avg: {avg:.2f}%, ratio: {ratio:.2f}', va='center')
-
-    #     # ✅ 点击事件
-    #     def on_click(event):
-    #         if event.inaxes != ax:
-    #             return
-    #         for i, bar in enumerate(bars):
-    #             if bar.contains(event)[0]:
-    #                 concept = concepts[i]
-    #                 avgp = avg_percents[i]
-    #                 ratio = follow_ratios[i]
-    #                 score = scores[i]
-
-    #                 msg = (f"概念: {concept}\n"
-    #                        f"平均涨幅: {avgp:.2f}%\n"
-    #                        f"跟随指数: {ratio:.2f}\n"
-    #                        f"综合得分: {score:.3f}")
-    #                 logger.info(f'[Click] {msg}')
-    #                 self._call_concept_top10_win(code, concept)
-    #                 break
-
-    #     fig.canvas.mpl_connect("button_press_event", on_click)
-
-    #     # 键盘事件
-    #     def on_key_press(event):
-    #         if event.key == "r":
-    #             logger.info(f"[Key] 刷新 {code} 概念分析")
-    #             plt.close(fig)
-    #             self.plot_following_concepts_pg(code, top_n=top_n)
-    #         elif event.key == "q":
-    #             logger.info("[Key] 退出图表")
-    #             plt.close(fig)
-    #         elif event.key == "n":
-    #             logger.info("[Key] 下一个概念")
-    #             if concepts:
-    #                 self._call_concept_top10_win(code, concepts[0])
-    #         elif event.key == "escape":
-    #             logger.info("[Key] ESC 按下，关闭图表并退出")
-    #             plt.close(fig)
-    #             try:
-    #                 del self._figs_opened[code]
-    #                 del self._figs_data_hash[code]
-    #             except KeyError:
-    #                 pass
-    #             # try:
-    #             #     # 如果希望主窗口也退出
-    #             #     import tkinter as tk
-    #             #     root = tk._default_root
-    #             #     if root:
-    #             #         root.quit()
-    #             # except Exception:
-    #             #     pass
-
-    #     fig.canvas.mpl_connect("key_press_event", on_key_press)
-    #     def on_close(event):
-    #         # fig 被关闭时自动删除记录
-    #         try:
-    #             del self._figs_opened[code]
-    #         except KeyError:
-    #             pass
-    #         try:
-    #             del self._figs_data_hash[code]
-    #         except KeyError:
-    #             pass
-
-    #     fig.canvas.mpl_connect('close_event', on_close)
-    #     # --- 记录当前打开的窗口 ---
-    #     self._figs_opened[code] = fig
-    #     self._figs_data_hash[code] = data_hash
-
-    #     plt.tight_layout()
-    #     # plt.show()
-    #     fig.show()
-    #     plt.pause(0.001)
 
     def _call_concept_top10_win(self,code,concept_name):
         # 打开或复用 Top10 窗口
@@ -7953,14 +6883,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 yview = canvas.yview()
                 canvas.focus_set()
                 canvas.yview_moveto(yview[0])
-                # --- 关键：强制聚焦并启用键盘捕获 ---
-                # try:
-                #     # 1. 激活窗口
-                #     win.focus_force()
-                #     # 2. 稍微延迟再聚焦 canvas，防止系统阻止焦点抢占
-                #     win.after(100, lambda: canvas.focus_set())
-                # except Exception as e:
-                #     logger.info("焦点设置失败：", e)
 
     def _on_label_double_click(self, code, idx):
         """
@@ -8227,13 +7149,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.status_var.set("当前数据为空")
             return
 
-        # # === 测试 ===
-        # expr = "(topR > 0 or (per1d > 1) and (per2d > 0)"
-        # result = ensure_parentheses_balanced(expr)
-        # logger.info("原始:", expr)
-        # logger.info("修正:", result)
-
-
         # ====== 条件清理 ======
         bracket_patterns = re.findall(r'\s+and\s+(\([^\(\)]*\))', query)
 
@@ -8245,14 +7160,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # logger.info(f'conditions {conditions}')
         valid_conditions = []
         removed_conditions = []
-        # logger.info(f'conditions: {conditions} bracket_patterns : {bracket_patterns}')
         for cond in conditions:
             cond_clean = cond.lstrip('(').rstrip(')')
-            # cond_clean = ensure_parentheses_balanced(cond_clean)
             if 'index.' in cond_clean.lower() or '.str.' in cond_clean.lower() or cond.find('==') >= 0 or cond.find('or') >= 0:
                 if not any(bp.strip('() ').strip() == cond_clean for bp in bracket_patterns):
                     ensure_cond = ensure_parentheses_balanced(cond)
-                    # logger.info(f'cond : {cond} ensure_cond : {ensure_cond}')
                     valid_conditions.append(ensure_cond)
                     continue
 
@@ -8264,7 +7176,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 valid_conditions.append(cond_clean)
             else:
                 removed_conditions.append(cond_clean)
-                # logger.info(f"剔除不存在的列条件: {cond_clean}")
 
         # 去掉在 bracket_patterns 中出现的内容
         removed_conditions = [
@@ -8365,9 +7276,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.update_category_result(df_filtered)
         if not hasattr(self, "_start_init_show_concept_detail_window"):
             # 已经创建过，直接显示
-            # self.kline_monitor.deiconify()
-            # self.kline_monitor.lift()
-            # self.kline_monitor.focus_force()
             self.show_concept_detail_window()
             self._start_init_show_concept_detail_window = True
 
@@ -9007,1410 +7915,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                # 提升逻辑
                if  win_info.get("is_lifted", True):
                    win_info["is_lifted"] = False
-                   
-                    
-    # --- DPI and Config methods moved to Mixins ---
-
-    # --- Duplicate window methods removed ---
-
-
-
-
-
-
-
-
-
-
-# toast_message （使用你给定的实现）
-def toast_message(master, text, duration=1500):
-    """短暂提示信息（浮层，不阻塞）"""
-    toast = tk.Toplevel(master)
-    toast.overrideredirect(True)
-    toast.attributes("-topmost", True)
-    label = tk.Label(toast, text=text, bg="black", fg="white", padx=10, pady=1)
-    label.pack()
-    try:
-        master.update_idletasks()
-        master_x = master.winfo_rootx()
-        master_y = master.winfo_rooty()
-        master_w = master.winfo_width()
-    except Exception:
-        master_x, master_y, master_w = 100, 100, 400
-    toast.update_idletasks()
-    toast_w = toast.winfo_width()
-    toast_h = toast.winfo_height()
-    toast.geometry(f"{toast_w}x{toast_h}+{master_x + (master_w-toast_w)//2}+{master_y + 50}")
-    toast.after(duration, toast.destroy)
-
-
-
-
-class ColumnSetManager(tk.Toplevel):
-    def __init__(self, master, all_columns, config, on_apply_callback, default_cols, auto_apply_on_init=False):
-        super().__init__(master)
-        self.master = master
-        self.title("列组合管理器")
-        # ---------- 基础尺寸 ----------
-        self.width = 800
-        self.height = 500
-        self.geometry(f"{self.width}x{self.height}")
-
-        # ---------- 参数 ----------
-        self.all_columns = list(all_columns)
-        self.config = config if isinstance(config, dict) else {}
-        self.on_apply_callback = on_apply_callback
-        self.default_cols = list(default_cols)
-        self.auto_apply_on_init = auto_apply_on_init
-
-        # ---------- 状态 ----------
-        self.current_set = list(self.config.get("current", self.default_cols.copy()))
-        self.saved_sets = list(self.config.get("sets", []))
-        self._chk_vars = {}
-        self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
-        self._resize_job = None
-
-        # ---------- 构建 UI ----------
-        self._build_ui()
-
-        # 延迟首次布局
-        self.after(80, self.update_grid)
-
-        # ---------- 自动应用列组合 ----------
-        if self.auto_apply_on_init:
-            try:
-                self.withdraw()  # 先隐藏
-                self.set_current_set()  # 调用回调更新列
-                # 可选择应用后显示或保持隐藏
-                # self.deiconify()
-            except Exception as e:
-                traceback.print_exc()
-                logger.info(f"⚠️ 自动应用列组合失败：{e}")
-
-    def _build_ui(self):
-        # ---------- 高 DPI 初始化 ----------
-        # try:
-        #     from ctypes import windll
-        #     windll.shcore.SetProcessDpiAwareness(1)  # Windows 高 DPI 感知
-        # except:
-        #     pass
-        # dpi_scale = self.winfo_fpixels('1i') / 72  # 获取 DPI 缩放比例
-        dpi_scale = self.master.scale_factor
-        # dpi_scale = get_windows_dpi_scale_factor()
-        base_width, base_height = 800, 500
-        self.width = int(base_width * dpi_scale)
-        self.height = int(base_height * dpi_scale)
-        self.geometry(f"{self.width}x{self.height}")
-
-        # ---------- 主容器 ----------
-        self.main = ttk.Frame(self)
-        self.main.pack(fill=tk.BOTH, expand=True)
-
-        top = ttk.Frame(self.main)
-        top.pack(fill=tk.BOTH, expand=True, padx=6, pady=1)
-
-        # 使用 grid 管理左右比例，左 3/4，右 1/4
-        top.grid_columnconfigure(0, weight=3)
-        top.grid_columnconfigure(1, weight=1)
-        top.grid_rowconfigure(0, weight=1)
-
-        # 左侧容器
-        left = ttk.Frame(top)
-        left.grid(row=0, column=0, sticky="nsew")
-
-        # 右侧容器
-        right = ttk.Frame(top)
-        right.grid(row=0, column=1, sticky="nsew")
-        right.grid_propagate(False)
-
-        # ---------- 搜索栏 ----------
-        search_frame = ttk.Frame(left)
-        search_frame.pack(fill=tk.X, pady=(0,6))
-        ttk.Label(search_frame, text="搜索:").pack(side=tk.LEFT)
-        self.search_var = tk.StringVar()
-        entry = ttk.Entry(search_frame, textvariable=self.search_var)
-        entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6,0))
-        entry.bind("<KeyRelease>", lambda e: self._debounced_update())
-
-        # ---------- 列选择区（Canvas + Scrollable Frame） ----------
-        grid_container = ttk.Frame(left)
-        grid_container.pack(fill=tk.BOTH, expand=True)
-
-        self.canvas = tk.Canvas(grid_container)
-        self.vscroll = ttk.Scrollbar(grid_container, orient="vertical", command=self.canvas.yview)
-        self.canvas.configure(yscrollcommand=self.vscroll.set)
-
-        self.inner_frame = ttk.Frame(self.canvas)
-        self.inner_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-
-        self.canvas.create_window((0,0), window=self.inner_frame, anchor="nw")
-        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self.vscroll.pack(side=tk.RIGHT, fill=tk.Y)
-
-        # 鼠标滚轮
-        self.canvas.bind("<Enter>", lambda e: self._bind_mousewheel(True))
-        self.canvas.bind("<Leave>", lambda e: self._bind_mousewheel(False))
-
-        # ---------- 当前组合标签 ----------
-        current_lf = ttk.LabelFrame(left, text="当前组合")
-        current_lf.pack(fill=tk.X, pady=(6,0))
-        self.current_frame = tk.Frame(current_lf)
-        self.current_frame.pack(fill=tk.X, padx=4, pady=6)
-        self.current_frame.bind("<Configure>", lambda e: self._debounced_refresh_tags())
-
-        # ---------- 右侧：已保存组合列表 ----------
-        ttk.Label(right, text="已保存组合").pack(anchor="w", padx=6, pady=(6,0))
-        self.sets_listbox = tk.Listbox(right, exportselection=False)
-        self.sets_listbox.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-        self.sets_listbox.bind("<<ListboxSelect>>", self.on_select_saved_set)
-        self.sets_listbox.bind("<Double-1>", lambda e: self.load_selected_set())
-
-        sets_btns = ttk.Frame(right)
-        sets_btns.pack(fill=tk.X, padx=6, pady=(0,6))
-        ttk.Button(sets_btns, text="加载", command=self.load_selected_set).pack(side=tk.LEFT, fill=tk.X, expand=True)
-        ttk.Button(sets_btns, text="删除", command=self.delete_selected_set).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
-
-        self.lbl_current_set = ttk.Label(right, text="当前选中: (无)")
-        self.lbl_current_set.pack(anchor="w", padx=6, pady=(0,4))
-
-        # ---------- 底部按钮 ----------
-        bottom = ttk.Frame(self)
-        bottom.pack(fill=tk.X, padx=6, pady=6)
-        ttk.Button(bottom, text="保存组合", command=self.save_current_set).pack(side=tk.LEFT, expand=True, fill=tk.X)
-        ttk.Button(bottom, text="应用组合", command=self.apply_current_set).pack(side=tk.LEFT, expand=True, fill=tk.X, padx=6)
-        ttk.Button(bottom, text="恢复默认", command=self.restore_default).pack(side=tk.LEFT, expand=True, fill=tk.X)
-
-        # ---------- 快捷键 ----------
-        self.bind("<Alt-c>", lambda e: self.open_column_manager_editor())
-        self.bind("<Escape>", lambda e: self.open_column_manager_editor())
-
-        # ---------- 填充保存组合列表 ----------
-        self.refresh_saved_sets()
-
-        # ---------- 自动应用当前列组合 ----------
-        if self.auto_apply_on_init:
-            try:
-                self.set_current_set()
-            except Exception as e:
-                traceback.print_exc()
-                logger.info(f"⚠️ 自动应用列组合失败：{e}")
-
-
-
-  
-
-
-    def open_column_manager_editor(self):
-        """切换显示/隐藏"""
-        if self.state() == "withdrawn":
-            # 已隐藏 → 显示
-            self.deiconify()
-            self.lift()
-            self.focus_set()
-        else:
-            # 已显示 → 隐藏
-            self.withdraw()
-
-
-    # ---------------------------
-    # 鼠标滚轮支持（只在 canvas 区生效）
-    # ---------------------------
-    def _bind_mousewheel(self, bind: bool):
-        # Windows: <MouseWheel> with event.delta; Linux: Button-4/5
-        if bind:
-            self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
-            self.canvas.bind_all("<Button-4>", self._on_mousewheel)
-            self.canvas.bind_all("<Button-5>", self._on_mousewheel)
-        else:
-            try:
-                self.canvas.unbind_all("<MouseWheel>")
-                self.canvas.unbind_all("<Button-4>")
-                self.canvas.unbind_all("<Button-5>")
-            except Exception:
-                pass
-
-    def _on_mousewheel(self, event):
-        # cross-platform wheel handling
-        if event.num == 4:  # Linux scroll up
-            self.canvas.yview_scroll(-1, "units")
-        elif event.num == 5:  # Linux scroll down
-            self.canvas.yview_scroll(1, "units")
-        else:
-            # Windows / Mac
-            delta = int(-1*(event.delta/120))
-            self.canvas.yview_scroll(delta, "units")
-
-    def _debounced_update(self):
-        self.update_grid()
-
-    def _debounced_refresh_tags(self):
-        if self._resize_job:
-            self.after_cancel(self._resize_job)
-        self._resize_job = self.after(180, self.refresh_current_tags)
-
-    def default_filter(self,c):
-        if c in self.current_set:
-            return True
-        # keywords = ["perc","percent","trade","volume","boll","macd","ma"]
-        keywords = ["perc","status","obs","hold","bull","has","lastdu","red","ma"]
-        return any(k in c.lower() for k in keywords)
-
-    # ---------------------------
-    # 列选择区更新（Checkbuttons 自动排列）
-    # ---------------------------
-    def update_grid(self):
-        # 清空旧的 checkbuttons
-        for w in self.inner_frame.winfo_children():
-            w.destroy()
-        self._chk_vars.clear()
-
-        # filter
-        search = (self.search_var.get() or "").lower()
-        # logger.info(f'search : {search}')
-        if search == "":
-            filtered = [c for c in self.all_columns if self.default_filter(c)]
-        elif search == "no" or search == "other":
-            filtered = [c for c in self.all_columns if not self.default_filter(c)]
-        else:
-            filtered = [c for c in self.all_columns if search in c.lower()]
-
-
-        filtered = filtered[:200]  # 可以扩展，但前面限制为 50/200
-
-        # 计算每行列数（使用 canvas 宽度 fallback）
-        self.update_idletasks()
-        total_width = self.canvas.winfo_width() if self.canvas.winfo_width() > 600 else self.width
-        col_w = 100
-        cols_per_row = max(3, total_width // col_w - 2)
-
-        # 计算高度（最多显示 max_rows 行）
-        rows_needed = (len(filtered) + cols_per_row - 1) // cols_per_row
-        max_rows = 4
-        row_h = 30
-        canvas_h = min(rows_needed, max_rows) * row_h
-        self.canvas.config(height=canvas_h)
-        # logger.info(f'max_rows:{max_rows} rows_needed:{rows_needed} canvas_h:{canvas_h}')
-        for i, col in enumerate(filtered):
-            var = tk.BooleanVar(value=(col in self.current_set))
-            self._chk_vars[col] = var
-            chk = ttk.Checkbutton(self.inner_frame, text=col, variable=var,
-                                  command=lambda c=col, v=var: self._on_check_toggle(c, v.get()))
-            chk.grid(row=i // cols_per_row, column=i % cols_per_row, sticky="w", padx=4, pady=3)
-
-        # 刷新当前组合标签显示
-        # logger.info(f'update_grid')
-        self.refresh_current_tags()
-
-    def _on_check_toggle(self, col, state):
-        if state:
-            if col not in self.current_set:
-                self.current_set.append(col)
-        else:
-            if col in self.current_set:
-                self.current_set.remove(col)
-        # logger.info(f'_on_check_toggle')
-        self.refresh_current_tags()
-
-    # ---------------------------
-    # 当前组合标签显示 + 拖拽重排
-    # ---------------------------
-    def refresh_current_tags(self):
-        # 清空
-        for w in self.current_frame.winfo_children():
-            try:
-                w.destroy()
-            except Exception:
-                pass
-
-        # 可能窗口刚弹出，宽度还没算好 -> fallback
-        max_w = self.current_frame.winfo_width()
-        if not max_w or max_w < 20:
-            max_w = self.width - 40
-
-        # 计算每个标签位置并 place
-        y = 0
-        x = 4
-        row_h = 28
-        padding = 6
-
-        # 用于存放标签和位置信息
-        self._tag_widgets = []
-
-        for idx, col in enumerate(self.current_set):
-            lbl = tk.Label(self.current_frame, text=col, bd=1, relief="solid", padx=6, pady=2, bg="#e8e8e8")
-            lbl.update_idletasks()
-            try:
-                w_req = lbl.winfo_reqwidth()
-            except tk.TclError:
-                w_req = 80
-            if x + w_req > max_w - 10:
-                # 换行
-                y += row_h
-                x = 4
-
-            # place at (x,y)
-            lbl.place(x=x, y=y)
-            # 保存 widget 及位置数据（仅用于拖拽计算）
-            self._tag_widgets.append({"widget": lbl, "x": x, "y": y, "w": w_req, "idx": idx})
-            # 绑定拖拽事件（闭包捕获 idx）
-            lbl.bind("<Button-1>", lambda e, i=idx: self._start_drag(e, i))
-            lbl.bind("<B1-Motion>", self._on_drag)
-            lbl.bind("<ButtonRelease-1>", self._end_drag)
-            x += w_req + padding
-
-        # 更新 frame 高度以容纳所有行
-        total_height = y + row_h + 4
-        try:
-            self.current_frame.config(height=total_height)
-            # logger.info(f'total_height:{total_height}')
-
-        except Exception:
-            pass
-
-    def _start_drag(self, event, idx):
-        """开始拖拽"""
-        widget = event.widget
-        widget.lift()
-        self._drag_data = {
-            "widget": widget,
-            "start_x": event.x_root,
-            "start_y": event.y_root,
-            "idx": idx,
-        }
-
-        # --- 安全创建提示线 ---
-        try:
-            if not hasattr(self, "_insert_line") or not self._insert_line.winfo_exists() \
-                    or self._insert_line.master != self.current_frame:
-                self._insert_line = tk.Frame(self.current_frame, bg="#0078d7", width=2, height=26)
-        except Exception:
-            self._insert_line = tk.Frame(self.current_frame, bg="#0078d7", width=2, height=26)
-
-        try:
-            self._insert_line.place_forget()
-        except Exception:
-            pass
-
-        logger.info(f"_start_drag {idx}")
-
-
-    def _on_drag(self, event):
-        """拖拽中"""
-        lbl = self._drag_data.get("widget")
-        if not lbl:
-            return
-
-        # --- 移动标签跟随光标 ---
-        frame_x = self.current_frame.winfo_rootx()
-        frame_y = self.current_frame.winfo_rooty()
-        new_x = event.x_root - frame_x - 10
-        new_y = event.y_root - frame_y - 8
-
-        try:
-            lbl.place(x=new_x, y=new_y)
-        except Exception:
-            return
-
-        # --- 计算插入位置 ---
-        drop_cx = event.x_root - frame_x
-        drop_cy = event.y_root - frame_y
-        centers = []
-
-        for info in getattr(self, "_tag_widgets", []):
-            w = info["widget"]
-            if not w.winfo_exists() or w is lbl:
-                continue
-            cx = w.winfo_x() + info["w"] / 2
-            cy = w.winfo_y() + 14  # 行中心
-            centers.append((cx, cy, w, info["idx"]))
-
-        if not centers:
-            if hasattr(self, "_insert_line") and self._insert_line.winfo_exists():
-                self._insert_line.place_forget()
-            return
-
-        # --- 找最近标签 ---
-        centers.sort(key=lambda x: ((x[0] - drop_cx) ** 2 + (x[1] - drop_cy) ** 2))
-        nearest_cx, nearest_cy, nearest_widget, nearest_idx = centers[0]
-
-        # 判断插入线位置（在前或在后）
-        if drop_cx < nearest_cx:
-            x_line = nearest_widget.winfo_x() - 2
-            y_line = nearest_widget.winfo_y()
-        else:
-            x_line = nearest_widget.winfo_x() + nearest_widget.winfo_width() + 2
-            y_line = nearest_widget.winfo_y()
-
-        # --- 显示插入提示线 ---
-        try:
-            if hasattr(self, "_insert_line") and self._insert_line.winfo_exists():
-                self._insert_line.place(x=x_line, y=y_line)
-                self._insert_line.lift()
-        except Exception:
-            pass
-
-
-    def _end_drag(self, event):
-        """拖拽结束"""
-        lbl = self._drag_data.get("widget")
-        orig_idx = self._drag_data.get("idx")
-
-        # 隐藏插入线
-        try:
-            if hasattr(self, "_insert_line") and self._insert_line.winfo_exists():
-                self._insert_line.place_forget()
-        except Exception:
-            pass
-
-        if not lbl or orig_idx is None:
-            self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
-            return
-
-        # --- 计算拖放位置 ---
-        frame_x = self.current_frame.winfo_rootx()
-        frame_y = self.current_frame.winfo_rooty()
-        drop_cx = event.x_root - frame_x
-        drop_cy = event.y_root - frame_y
-
-        centers = []
-        for info in getattr(self, "_tag_widgets", []):
-            w = info["widget"]
-            if not w.winfo_exists() or w is lbl:
-                continue
-            cx = w.winfo_x() + info["w"] / 2
-            cy = w.winfo_y() + 14
-            centers.append((cx, cy, info["idx"]))
-
-        if not centers:
-            new_idx = 0
-        else:
-            centers.sort(key=lambda x: ((x[0] - drop_cx) ** 2 + (x[1] - drop_cy) ** 2))
-            nearest_cx, nearest_cy, nearest_idx = centers[0]
-
-            if drop_cx < nearest_cx:
-                new_idx = nearest_idx
-            else:
-                new_idx = nearest_idx + 1
-
-            new_idx = max(0, min(len(self.current_set), new_idx))
-
-        # --- 调整顺序 ---
-        if new_idx != orig_idx:
-            try:
-                item = self.current_set.pop(orig_idx)
-                if new_idx > orig_idx:
-                    new_idx -= 1  # 因 pop 导致右移
-                self.current_set.insert(new_idx, item)
-            except Exception as e:
-                logger.info(f"Reorder error:{e}")
-
-        # logger.info(f"drag: {orig_idx} → {new_idx}")
-
-        # --- 清理 & 刷新 ---
-        self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
-        self.after(100, self.refresh_current_tags)
-
-
-
-    # def _start_drag(self, event, idx):
-    #     # 记录拖拽开始
-    #     widget = event.widget
-    #     widget.lift()
-    #     self._drag_data["widget"] = widget
-    #     self._drag_data["start_x"] = event.x_root
-    #     self._drag_data["start_y"] = event.y_root
-    #     # find index of widget in current_set
-    #     # safe mapping: find by widget reference in _tag_widgets
-    #     for info in getattr(self, "_tag_widgets", []):
-    #         if info["widget"] == widget:
-    #             self._drag_data["idx"] = info["idx"]
-    #             logger.info(f'_start_drag')
-    #             break
-
-    # def _on_drag(self, event):
-    #     lbl = self._drag_data.get("widget")
-    #     if not lbl:
-    #         return
-    #     # move label with cursor (relative to current_frame)
-    #     frame_x = self.current_frame.winfo_rootx()
-    #     frame_y = self.current_frame.winfo_rooty()
-    #     new_x = event.x_root - frame_x - 10
-    #     new_y = event.y_root - frame_y - 8
-    #     try:
-    #         lbl.place(x=new_x, y=new_y)
-    #     except Exception:
-    #         pass  # might be destroyed during rapid resize
-
-    # def _end_drag(self, event):
-    #     lbl = self._drag_data.get("widget")
-    #     orig_idx = self._drag_data.get("idx")
-    #     if not lbl or orig_idx is None:
-    #         self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
-    #         return
-
-    #     # 获取拖动中心点（相对 current_frame）
-    #     frame_x = self.current_frame.winfo_rootx()
-    #     frame_y = self.current_frame.winfo_rooty()
-    #     drop_cx = event.x_root - frame_x
-    #     drop_cy = event.y_root - frame_y
-
-    #     # 收集所有其他标签的中心坐标
-    #     centers = []
-    #     for info in getattr(self, "_tag_widgets", []):
-    #         w = info["widget"]
-    #         if not w.winfo_exists() or w is lbl:
-    #             continue
-    #         try:
-    #             cx = w.winfo_x() + info["w"]/2
-    #             cy = w.winfo_y() + 14  # 行高一半
-    #         except Exception:
-    #             continue
-    #         centers.append((cx, cy, info["idx"]))
-
-    #     if not centers:
-    #         new_idx = 0
-    #     else:
-    #         # 计算拖动点与各标签中心的距离（欧式距离）
-    #         centers.sort(key=lambda x: ((x[0]-drop_cx)**2 + (x[1]-drop_cy)**2))
-    #         nearest_cx, nearest_cy, nearest_idx = centers[0]
-
-    #         # 判断相对方向决定插在前还是后
-    #         if drop_cx < nearest_cx:
-    #             new_idx = nearest_idx
-    #         else:
-    #             new_idx = nearest_idx + 1
-
-    #         # 边界限制
-    #         new_idx = max(0, min(len(self.current_set)-1, new_idx))
-
-    #     # 如果有移动，调整顺序
-    #     if new_idx != orig_idx:
-    #         try:
-    #             item = self.current_set.pop(orig_idx)
-    #             self.current_set.insert(new_idx, item)
-    #         except Exception as e:
-    #             logger.info("Reorder error:", e)
-
-    #     # logger.info(f"drag: {orig_idx} -> {new_idx}")
-
-    #     # 重置 & 刷新
-    #     self._drag_data = {"widget": None, "start_x": 0, "start_y": 0, "idx": None}
-    #     self.after(100, self.refresh_current_tags)
-
-
-    # ---------------------------
-    # 已保存组合管理
-    # ---------------------------
-    def refresh_saved_sets(self):
-        self.sets_listbox.delete(0, tk.END)
-        for s in self.saved_sets:
-            name = s.get("name", "<noname>")
-            self.sets_listbox.insert(tk.END, name)
-
-    def get_centered_window_position(self, parent, win_width, win_height, margin=10):
-        # 获取鼠标位置
-        mx = parent.winfo_pointerx()
-        my = parent.winfo_pointery()
-
-        # 屏幕尺寸
-        screen_width = parent.winfo_screenwidth()
-        screen_height = parent.winfo_screenheight()
-
-        # 默认右边放置
-        x = mx + margin
-        y = my - win_height // 2  # 垂直居中鼠标位置
-
-        # 如果右边放不下，改到左边
-        if x + win_width > screen_width:
-            x = mx - win_width - margin
-
-        # 防止y超出屏幕
-        if y + win_height > screen_height:
-            y = screen_height - win_height - margin
-        if y < 0:
-            y = margin
-
-        return x, y
-
-    # def askstring_at_parent(self,parent, title, prompt, initialvalue=""):
-    #     # 创建临时窗口
-    #     dlg = tk.Toplevel(parent)
-    #     dlg.transient(parent)
-    #     dlg.title(title)
-    #     # ✅ 允许用户自由拉伸
-    #     dlg.resizable(True, True)
-    #     # 计算位置，靠父窗口右侧居中
-    #     win_width, win_height = 300, 120
-    #     x, y = self.get_centered_window_position(parent, win_width, win_height)
-    #     # dlg.geometry(f"{win_width}x{win_height}+{x}+{y}")
-    #     logger.info(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
-    #     dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
-    #     result = {"value": None}
-
-    #     tk.Label(dlg, text=prompt).pack(pady=5, padx=5)
-    #     entry = tk.Entry(dlg)
-    #     entry.pack(pady=5, padx=5, fill="x", expand=True)
-    #     entry.insert(0, initialvalue)
-    #     entry.focus_set()
-
-    #     def on_ok():
-    #         result["value"] = entry.get()
-    #         dlg.destroy()
-
-    #     def on_cancel():
-    #         dlg.destroy()
-
-    #     frame_btn = tk.Frame(dlg)
-    #     frame_btn.pack(pady=5)
-    #     tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
-    #     tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
-
-    #     dlg.grab_set()
-    #     parent.wait_window(dlg)
-    #     return result["value"]
-
-    def askstring_at_parent(self, parent, title, prompt, initialvalue=""):
-
-        # 创建临时窗口
-        dlg = tk.Toplevel(parent)
-        dlg.transient(parent)
-        dlg.title(title)
-        dlg.resizable(True, True)  # ✅ 可自由拉伸
-
-        # --- 智能计算初始大小 ---
-        base_width, base_height = 300, 120
-        char_width = 10
-        text_len = max(len(prompt), len(initialvalue))
-        extra_width = min(text_len * char_width, 600)
-        win_width = max(base_width, extra_width)
-        win_height = base_height + (prompt.count("\n") * 15)  # 多行时稍高
-
-        # --- 居中定位 ---
-        x, y = self.get_centered_window_position(parent, win_width, win_height)
-        logger.info(f"askstring_at_parent : {int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
-        dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
-
-        result = {"value": None}
-
-        # --- 提示文字（自动换行） ---
-        lbl = tk.Label(dlg, text=prompt, wraplength=win_width - 40, justify="left", anchor="w")
-        lbl.pack(pady=5, padx=5, fill="x")
-
-        # --- 输入框 ---
-        entry = tk.Entry(dlg)
-        entry.pack(pady=5, padx=5, fill="x", expand=True)
-        entry.insert(0, initialvalue)
-        entry.focus_set()
-
-        # --- 按钮 ---
-        def on_ok():
-            result["value"] = entry.get()
-            dlg.destroy()
-
-        def on_cancel():
-            dlg.destroy()
-
-        frame_btn = tk.Frame(dlg)
-        frame_btn.pack(pady=5)
-        tk.Button(frame_btn, text="确定", width=10, command=on_ok).pack(side="left", padx=5)
-        tk.Button(frame_btn, text="取消", width=10, command=on_cancel).pack(side="left", padx=5)
-
-        # --- ESC 键关闭 ---
-        dlg.bind("<Escape>", lambda e: on_cancel())
-        dlg.bind("<Return>",lambda e: on_ok())       # 回车确认
-
-        dlg.grab_set()
-        parent.wait_window(dlg)
-        return result["value"]
-
-
-    def save_current_set(self):
-        if not self.current_set:
-            toast_message(self, "当前组合为空")
-            return
-        # name = simpledialog.askstring("保存组合", "请输入组合名称:")
-        # 取当前组合名称（或默认空字符串）
-        current_name = getattr(self, "current_set_name", "") or ""
-        name = self.askstring_at_parent(self.main,"保存组合", "请输入组合名称:",initialvalue=current_name)
-
-        if not name:
-            return
-        # 覆盖同名
-        for s in self.saved_sets:
-            if s.get("name") == name:
-                s["cols"] = list(self.current_set)
-                toast_message(self, f"组合 {name} 已更新")
-                self.refresh_saved_sets()
-                return
-        self.saved_sets.append({"name": name, "cols": list(self.current_set)})
-        self.refresh_saved_sets()
-        try:
-            # save_display_config 是外部函数（如果定义则调用）
-            self.config["current"] = list(self.current_set)
-            self.config["sets"] = list(self.saved_sets)
-            save_display_config(config_file=CONFIG_FILE,config=self.config)
-        except Exception:
-            pass
-        # 回调主视图更新列
-        toast_message(self, f"组合 {name} 已保存")
-
-    def on_select_saved_set(self, event):
-        sel = self.sets_listbox.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        data = self.saved_sets[idx]
-        self.current_set_name = data.get("name", "")
-
-        # 可选：在界面上显示当前选择的组合名
-        if hasattr(self, "lbl_current_set"):
-            self.lbl_current_set.config(text=f"当前选中: {self.current_set_name}")
-        else:
-            logger.info(f"选中组合: {self.current_set_name}")
-
-
-    def load_selected_set(self):
-        sel = self.sets_listbox.curselection()
-        if not sel:
-            return
-        idx = sel[0]
-        data = self.saved_sets[idx]
-        self.current_set = list(data.get("cols", []))
-
-        # 保存当前组合名称（新增）
-        self.current_set_name = data.get("name", "")
-
-        # sync checkboxes (if visible)
-        for col, var in self._chk_vars.items():
-            var.set(col in self.current_set)
-        self.refresh_current_tags()
-        # also update grid so checked box matches
-        self.update_grid()
-
-    def delete_selected_set(self):
-        sel = self.sets_listbox.curselection()
-        if not sel:
-            toast_message(self, "请选择要删除的组合")
-            return
-        idx = sel[0]
-        name = self.saved_sets[idx].get("name", "")
-        # 执行删除
-        self.saved_sets.pop(idx)
-        self.refresh_saved_sets()
-        toast_message(self, f"组合 {name} 已删除")
-
-    # ---------------------------
-    # 应用 / 恢复默认
-    # ---------------------------
-
-    def set_current_set(self):
-        if not self.current_set:
-            toast_message(self, "当前组合为空")
-            return
-        # # 写回 config（如果调用方提供 save_display_config，会被调用）
-        # self.config["current"] = list(self.current_set)
-        # self.config["sets"] = list(self.saved_sets)
-        # try:
-        #     # save_display_config 是外部函数（如果定义则调用）
-        #     save_display_config(self.config)
-        # except Exception:
-        #     pass
-        # # 回调主视图更新列
-
-        try:
-            if callable(self.on_apply_callback):
-                self.on_apply_callback(list(self.current_set))
-        except Exception:
-            pass
-        # toast_message(self, "init组合已应用")
-        # self.destroy()
-        # self.open_column_manager_editor()
-
-    def apply_current_set(self):
-        if not self.current_set:
-            toast_message(self, "当前组合为空")
-            return
-        # 写回 config（如果调用方提供 save_display_config，会被调用）
-        self.config["current"] = list(self.current_set)
-        self.config["sets"] = list(self.saved_sets)
-        try:
-            # save_display_config 是外部函数（如果定义则调用）
-            save_display_config(config_file=CONFIG_FILE,config=self.config)
-        except Exception:
-            pass
-        # 回调主视图更新列
-        try:
-            if callable(self.on_apply_callback):
-                self.on_apply_callback(list(self.current_set))
-        except Exception:
-            pass
-        toast_message(self, "组合已应用")
-        # self.destroy()
-        self.open_column_manager_editor()
-
-    def restore_default(self):
-        self.current_set = list(self.default_cols)
-        # logger.info(f'restore_default self.default_cols : {self.default_cols}')
-        # sync checkboxes
-        for col, var in self._chk_vars.items():
-            var.set(col in self.current_set)
-        self.refresh_current_tags()
-        toast_message(self, "已恢复默认组合")
-
-
-# class RealtimeSignalManager:
-#     def __init__(self):
-#         # 用字典存储每只股票的状态，避免创建新的 df 列
-#         # 格式：{symbol: {'prev_now': float, 'today_high': float, 'today_low': float}}
-#         self.state = {}
-
-#     def update_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-#         """
-#         df: 当次最新数据，包含已存在的 columns
-#         返回 df，增加 'signal' 和 'signal_strength' 列
-#         """
-#         df = df.copy()
-#         df['signal_strength'] = 0
-#         df['signal'] = ""
-
-#         for i, row in df.iterrows():
-#             symbol = row['name']  # 股票标识
-
-#             # 获取或初始化状态
-#             if symbol not in self.state:
-#                 self.state[symbol] = {
-#                     'prev_now': row['now'],
-#                     'today_high': row['high'],
-#                     'today_low': row['low']
-#                 }
-
-#             prev_now = self.state[symbol]['prev_now']
-#             today_high = self.state[symbol]['today_high']
-#             today_low = self.state[symbol]['today_low']
-
-#             # --- 大趋势 ---
-#             trend_up = row['ma51d'] > row['ma10d']
-#             price_rise = (row['lastp1d'] > row['lastp2d']) & (row['lastp2d'] > row['lastp3d'])
-#             macd_bull = (row['macddif'] > row['macddea']) & (row['macd'] > 0)
-#             macd_accel = (row['macdlast1'] > row['macdlast2']) & (row['macdlast2'] > row['macdlast3'])
-#             rsi_mid = (row['rsi'] > 45) & (row['rsi'] < 75)
-#             rsi_up = row['rsi'] - row['rsi'] if pd.notnull(row['rsi']) else 0
-#             kdj_bull = (row['kdj_j'] > row['kdj_k']) & (row['kdj_k'] > row['kdj_d'])
-#             kdj_strong = row['kdj_j'] > 60
-
-#             # --- 当日迭代 high/low ---
-#             today_high = max(today_high, row['high'])
-#             today_low = min(today_low, row['low'])
-
-#             # --- 短线实时 ---
-#             morning_gap_up = row['open'] <= row['low'] * 1.001
-#             vol_boom_now = row['volume'] > 1  # 可改为短期均量
-#             intraday_up = row['now'] > prev_now
-#             intraday_high_break = row['now'] > today_high
-#             intraday_low_break = row['now'] < today_low
-
-#             # --- 打分 ---
-#             score = 0
-#             score += trend_up * 2
-#             score += price_rise * 1
-#             score += macd_bull * 1
-#             score += macd_accel * 2
-#             score += rsi_mid * 1
-#             score += rsi_up * 1
-#             score += kdj_bull * 1
-#             score += kdj_strong * 1
-#             score += morning_gap_up * 2
-#             score += intraday_up * 1
-#             score += intraday_high_break * 2
-#             score += vol_boom_now * 1
-
-#             df.at[i, 'signal_strength'] = score
-
-#             # === 信号等级 ===
-#             if score >= 9:
-#                 df.at[i, 'signal'] = 'BUY_S'
-#             elif score >= 6:
-#                 df.at[i, 'signal'] = 'BUY_N'
-#             elif score < 6 and row['macd'] < 0:
-#                 df.at[i, 'signal'] = 'SELL_WEAK'
-
-#             # 卖出条件
-#             sell_cond = (
-#                 ((row['macddif'] < row['macddea']) & (row['macd'] < 0)) |
-#                 ((row['rsi'] < 45) & (row['kdj_j'] < row['kdj_k'])) |
-#                 ((row['now'] < row['ma51d']) & (row['macdlast1'] < row['macdlast2'])) |
-#                 intraday_low_break
-#             )
-#             if sell_cond:
-#                 df.at[i, 'signal'] = 'SELL'
-
-#             # --- 更新全局状态 ---
-#             self.state[symbol]['prev_now'] = row['now']
-#             self.state[symbol]['today_high'] = today_high
-#             self.state[symbol]['today_low'] = today_low
-
-#         return df
-
-def safe_prev_signal_array(df):
-    """
-    生成 prev_signal_arr，确保不会因为 df 异常、空值、结构错误而崩溃。
-    """
-    # 情况 1：df 为空 → 返回空数组
-    if df is None or df.empty:
-        return np.array([])
-
-    # 情况 2：没有 prev_signal 列 → 创建空列
-    if 'prev_signal' not in df.columns:
-        df['prev_signal'] = None
-
-    # 确保列存在后，取值
-    raw_vals = df['prev_signal'].tolist()
-
-    safe_vals = []
-    for v in raw_vals:
-
-        # 若 v 是 Series / ndarray / list / tuple → 代表数据结构异常
-        # 直接视为无信号
-        if isinstance(v, (pd.Series, np.ndarray, list, tuple, dict)):
-            safe_vals.append(0)
-            continue
-
-        # 若 v 是字符串（通常的 BUY_N / BUY_S）
-        if isinstance(v, str):
-            safe_vals.append(1 if v in ('BUY_N', 'BUY_S') else 0)
-            continue
-
-        # 若 v 是 NaN 或 None
-        if v is None or (isinstance(v, float) and np.isnan(v)):
-            safe_vals.append(0)
-            continue
-
-        # 其它情况全部归零
-        safe_vals.append(0)
-
-    return np.array(safe_vals)
-
-
-class RealtimeSignalManager:
-    def __init__(self):
-        self.state = {}
-
-    import numpy as np
-    import pandas as pd
-
-    def update_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-        df = df.copy()
-        df['signal'] = ''
-        df['signal_strength'] = 0
-
-        # 保留 code 列为 index
-        if 'code' in df.columns:
-            df.set_index('code', inplace=True, drop=False)
-
-        # --- 准备状态 ---
-        # 如果 self.state 为空，初始化
-        for code, row in df.iterrows():
-            if code not in self.state:
-                self.state[code] = {
-                    'prev_now': row['now'],
-                    'today_high': row['high'],
-                    'today_low': row['low'],
-                    'prev_signal': None,
-                    'down_streak': 0,
-                    'recent_vols': [row['volume']]
-                }
-
-        # 转成 NumPy 数组加速
-        codes = df['code'].values
-        prev_now_arr = np.array([self.state[c]['prev_now'] for c in codes])
-        today_high_arr = np.array([self.state[c]['today_high'] for c in codes])
-        today_low_arr = np.array([self.state[c]['today_low'] for c in codes])
-        down_streak_arr = np.array([self.state[c]['down_streak'] for c in codes])
-        recent_vols_list = [self.state[c]['recent_vols'] for c in codes]
-        prev_signal_list = [self.state[c]['prev_signal'] for c in codes]
-
-        now_arr = df['now'].values
-        high_arr = df['high'].values
-        low_arr = df['low'].values
-        volume_arr = df['volume'].values
-        ma51d = df['ma51d'].values
-        ma10d = df['ma10d'].values
-        lastp1d = df['lastp1d'].values
-        lastp2d = df['lastp2d'].values
-        lastp3d = df['lastp3d'].values
-        macddif = df['macddif'].values
-        macddea = df['macddea'].values
-        macd = df['macd'].values
-        macdlast1 = df['macdlast1'].values
-        macdlast2 = df['macdlast2'].values
-        macdlast3 = df['macdlast3'].values
-        rsi = df['rsi'].values
-        kdj_j = df['kdj_j'].values
-        kdj_k = df['kdj_k'].values
-        kdj_d = df['kdj_d'].values
-        open_arr = df['open'].values
-
-        # --- 更新 high/low ---
-        today_high_arr = np.maximum(today_high_arr, high_arr)
-        today_low_arr = np.minimum(today_low_arr, low_arr)
-
-        # --- 计算最近 5 根 volume 均值 ---
-        avg_vol_arr = np.array([np.mean((recent + [v])[-5:]) for recent, v in zip(recent_vols_list, volume_arr)])
-        vol_boom_now = volume_arr > avg_vol_arr
-
-        # --- 大趋势指标 ---
-        trend_up = ma51d > ma10d
-        price_rise = (lastp1d > lastp2d) & (lastp2d > lastp3d)
-        macd_bull = (macddif > macddea) & (macd > 0)
-        macd_accel = (macdlast1 > macdlast2) & (macdlast2 > macdlast3)
-        rsi_mid = (rsi > 45) & (rsi < 75)
-        kdj_bull = (kdj_j > kdj_k) & (kdj_k > kdj_d)
-        kdj_strong = kdj_j > 60
-        morning_gap_up = open_arr <= low_arr * 1.001
-        intraday_up = now_arr > prev_now_arr
-        intraday_high_break = now_arr > today_high_arr
-        intraday_low_break = now_arr < today_low_arr
-
-        # 连续下跌 streak
-        down_streak_arr = np.where(now_arr < prev_now_arr, down_streak_arr + 1, 0)
-
-        # --- 计算 score ---
-        score = np.zeros(len(df))
-        score += trend_up * 2
-        score += price_rise * 1
-        score += macd_bull * 1
-        score += macd_accel * 2
-        score += rsi_mid * 1
-        score += np.nan_to_num(rsi - 50) * 0.05
-        score += kdj_bull * 1
-        score += kdj_strong * 1
-        score += morning_gap_up * 2
-        score += intraday_up * 1
-        score += intraday_high_break * 2
-        score += vol_boom_now * 1
-        score += ((down_streak_arr >= 2) & (now_arr > prev_now_arr * 1.005)) * 2
-
-        # 前置信号加权
-        # prev_signal_arr = np.array([1 if s in ['BUY_N', 'BUY_S'] else 0 for s in prev_signal_list])
-
-        prev_signal_arr = safe_prev_signal_array(df)
-        # # 确保 prev_signal_list 一律是列表
-        # prev_signal_list = df['prev_signal'].tolist()
-
-        # # 避免 Series、NaN、None 造成问题
-        # prev_signal_arr = np.array([
-        #     1 if isinstance(s, str) and s in ('BUY_N', 'BUY_S') else 0
-        #     for s in prev_signal_list
-        # ])
-
-
-        score += prev_signal_arr
-
-        df['signal_strength'] = score
-
-        # --- 信号等级 ---
-        df['signal'] = ''
-        df.loc[score >= 9, 'signal'] = 'BUY_S'
-        df.loc[(score >= 6) & (score < 9), 'signal'] = 'BUY_N'
-        df.loc[(score < 6) & (macd < 0), 'signal'] = 'SELL_WEAK'
-
-        # 卖出条件
-        sell_cond = ((macddif < macddea) & (macd < 0)) | ((rsi < 45) & (kdj_j < kdj_k)) | ((now_arr < ma51d) & (macdlast1 < macdlast2)) | intraday_low_break
-        df.loc[sell_cond, 'signal'] = 'SELL'
-
-        # --- 更新状态 ---
-        for i, code in enumerate(codes):
-            s = self.state[code]
-            s['prev_now'] = now_arr[i]
-            s['today_high'] = today_high_arr[i]
-            s['today_low'] = today_low_arr[i]
-            s['down_streak'] = down_streak_arr[i]
-            recent_vols_list[i].append(volume_arr[i])
-            if len(recent_vols_list[i]) > 5:
-                recent_vols_list[i] = recent_vols_list[i][-5:]
-            s['recent_vols'] = recent_vols_list[i]
-            s['prev_signal'] = df.at[code, 'signal']
-
-        return df
-
-    def calc_support_resistance(df):
-        """
-        根据通达信逻辑计算撑压位（压力）和支撑位
-        返回 df，包含 columns: ['pressure', 'support']
-        """
-        import pandas as pd
-        from pandas import Series
-
-        LLV = lambda x, n: x.rolling(n, min_periods=1).min()
-        HHV = lambda x, n: x.rolling(n, min_periods=1).max()
-        SMA = lambda x, n, m: x.ewm(alpha=m/n, adjust=False).mean()
-
-        # --- 短周期 ---
-        RSV13 = (df['close'] - LLV(df['low'], 13)) / (HHV(df['high'], 13) - LLV(df['low'], 13)) * 100
-        ARSV = SMA(RSV13, 3, 1)
-        AK = SMA(ARSV, 3, 1)
-        AD = 3 * ARSV - 2 * AK
-
-        # --- 长周期 ---
-        RSV55 = (df['close'] - LLV(df['low'], 55)) / (HHV(df['high'], 55) - LLV(df['low'], 55)) * 100
-        ARSV24 = SMA(RSV55, 3, 1)
-        AK24 = SMA(ARSV24, 3, 1)
-        AD24 = 3 * ARSV24 - 2 * AK24
-
-        # --- CROSS 计算 ---
-        cross_up = (AD24 > AD) & (AD24.shift(1) <= AD.shift(1))
-
-        # 最近一次上穿的 high 值
-        pressure = []
-        last_high = None
-        for i in range(len(df)):
-            if cross_up.iloc[i]:
-                last_high = df['high'].iloc[i]
-            pressure.append(last_high)
-        df['pressure'] = pressure
-
-        # --- 支撑位 ---
-        df['support'] = LLV(df['high'], 30)
-
-        return df
-
-
-def calc_breakout_signals(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["signal_strength"] = 0
-    df["signal"] = ""
-
-    # === 基础特征 ===
-    ma_short = df['ma51d']
-    ma_mid = df['ma10d']
-
-    # --- 趋势条件 ---
-    cond_trend_up = (df['close'] > ma_short) & (ma_short > ma_mid)
-    cond_trend_turn = (df['close'] > ma_short) & (df['ma51d'].diff() > 0)
-    cond_price_rise = (df['lastp1d'] > df['lastp2d']) & (df['lastp2d'] > df['lastp3d'])
-
-    # --- MACD 动能 ---
-    cond_macd_bull = (df['macddif'] > df['macddea']) & (df['macd'] > 0)
-    cond_macd_accel = (df['macdlast1'] > df['macdlast2']) & (df['macdlast2'] > df['macdlast3'])
-
-    # --- RSI 动能 ---
-    cond_rsi_mid = (df['rsi'] > 45) & (df['rsi'] < 75)
-    cond_rsi_up = df['rsi'].diff() > 2  # RSI加速上升
-
-    # --- KDJ 动量 ---
-    cond_kdj_bull = (df['kdj_j'] > df['kdj_k']) & (df['kdj_k'] > df['kdj_d'])
-    cond_kdj_strong = (df['kdj_j'] > 60)
-
-    # --- 突破条件 ---
-    cond_break_high = df['close'] > df['lasth3d']  # 突破近3日高点
-    # cond_break_mid = df['close'] > df['high'].rolling(6).max()
-    cond_break_mid = df['close'] > df['max5']
-
-    # --- 成交量放大 ---
-    cond_vol_boom = df['volume'] > 1
-
-    # === 打分系统 ===
-    score = 0
-    score += cond_trend_up * 2
-    score += cond_trend_turn * 1
-    score += cond_price_rise * 1
-    score += cond_macd_bull * 1
-    score += cond_macd_accel * 2
-    score += cond_rsi_mid * 1
-    score += cond_rsi_up * 1
-    score += cond_kdj_bull * 1
-    score += cond_kdj_strong * 1
-    score += cond_break_high * 2
-    score += cond_break_mid * 1
-    score += cond_vol_boom * 1
-
-    df['signal_strength'] = score
-
-    # === 信号等级 ===
-    df.loc[df['signal_strength'] >= 8, 'signal'] = 'BUY_S'   # 强势爆发（主升浪）
-    df.loc[(df['signal_strength'] >= 5) & (df['signal_strength'] < 8), 'signal'] = 'BUY_N'  # 底部反弹
-    df.loc[(df['signal_strength'] < 5) & (df['macd'] < 0), 'signal'] = 'SELL_WEAK'  # 弱势或衰退
-
-    # === 补充卖出逻辑（防止回落） ===
-    sell_cond = (
-        ((df['macddif'] < df['macddea']) & (df['macd'] < 0)) |
-        ((df['rsi'] < 45) & (df['kdj_j'] < df['kdj_k'])) |
-        ((df['close'] < ma_short) & (df['macdlast1'] < df['macdlast2']))
-    )
-    df.loc[sell_cond, "signal"] = "SELL"
-
-    return df
-
-# 全局管理器实例
-signal_manager = RealtimeSignalManager()
-# ========== 信号检测函数 ==========
-def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    if df.empty:
-        return df
-
-    if "code" not in df.columns:
-        df["code"] = df.index.astype(str).str.zfill(6)  # 补齐6位  # 如果没有code列，用name占位（最好是实际code）
-
-    df["signal"] = ""
-    df["emotion"] = "中性"
-
-    # df = calc_breakout_signals(df)
-    df = signal_manager.update_signals(df.copy())
-
-
-    df.loc[df.get("volume", 0) > 1.2, "emotion"] = "乐观"
-    df.loc[df.get("volume", 0) < 0.8, "emotion"] = "悲观"
-    return df
-
-    # # --- 保留 code 作为 index ---
-    # df = df.set_index('code', drop=False)  # drop=False 保留 code 列
-
-    # # 计算新旧信号
-    # df_vect  = signal_manager.update_signals(df.copy())
-    # df_orig = signal_manager.update_signals_old(df.copy())
-
-    # # 对齐索引，确保可以逐行比较
-    # df_vect = df_vect.sort_index()
-    # df_orig = df_orig.sort_index()
-
-    # # --- 比较 signal_strength ---
-    # mask_strength = df_vect['signal_strength'] != df_orig['signal_strength']
-    # diff_idx_strength = df_vect.index[mask_strength]
-
-    # if len(diff_idx_strength) > 0:
-    #     logger.info("signal_strength 不一致，行 code:", list(diff_idx_strength))
-    #     logger.info(df_vect.loc[diff_idx_strength, ['name','signal_strength']])
-    #     logger.info(df_orig.loc[diff_idx_strength, ['name','signal_strength']])
-    # else:
-    #     logger.info("signal_strength 一致 ✅")
-
-    # # --- 比较 signal ---
-    # mask_signal = df_vect['signal'] != df_orig['signal']
-    # diff_idx_signal = df_vect.index[mask_signal]
-
-    # if len(diff_idx_signal) > 0:
-    #     logger.info("signal 不一致，行 code:", list(diff_idx_signal))
-    #     logger.info(df_vect.loc[diff_idx_signal, ['name','signal']])
-    #     logger.info(df_orig.loc[diff_idx_signal, ['name','signal']])
-    # else:
-    #     logger.info("signal 一致 ✅")
-
-
-
-    # # 买入逻辑
-    # buy_cond = (
-    #     (df["now"] > df["ma5d"]) &
-    #     (df["ma5d"] > df["ma10d"]) &
-    #     (df["macddif"] > df["macddea"]) &
-    #     (df["rsi"] < 70) &
-    #     ((df["now"] > df["upperL"]) | (df["now"] > df["upper1"]))
-    # )
-
-    # # 卖出逻辑
-    # sell_cond = (
-    #     (df["now"] < df["ma5d"]) &
-    #     (df["macddif"] < df["macddea"]) &
-    #     (df["rsi"] > 50) &
-    #     (df["now"] < df["lastp1d"])
-    # )
-
-    # 示例逻辑：最近收盘价高于均线，MACD金叉，RSI<70，KDJ J > 50 -> BUY
-    # buy_cond = (
-    #     (df['close'] > df['close'].rolling(5).mean()) &
-    #     (df['macddif'] > df['macddea']) &
-    #     (df['rsi'] < 70) &
-    #     (df['kdj_j'] > 50)
-    # )
-
-    # sell_cond = (
-    #     (df['close'] < df['close'].rolling(10).mean()) &
-    #     (df['macddif'] < df['macddea']) &
-    #     (df['rsi'] > 50) &
-    #     (df['kdj_j'] < 50)
-    # )
-
-    # buy_cond = (
-    #     # 趋势共振
-    #     (df['close'] > df['ma51d']) &                 # 短期价格在均线之上
-    #     (df['close'] > df['ma10d']) &               # 中期趋势向上
-    #     (df['lastp1d'] > df['lastp2d']) & (df['lastp2d'] > df['lastp3d']) &  # 连续上涨3日
-        
-    #     # MACD 共振
-    #     (df['macddif'] > df['macddea']) &            # DIF上穿DEA（形成金叉）
-    #     (df['macd'] > 0) &                           # MACD柱为正，确认趋势
-    #     (df['macdlast1'] > df['macdlast2']) & (df['macdlast2'] > df['macdlast3']) &  # 柱线递增
-        
-    #     # RSI 动能支持
-    #     (df['rsi'] > 40) & (df['rsi'] < 70) &        # 适中区间（非过热）
-        
-    #     # KDJ 动量突破
-    #     (df['kdj_j'] > df['kdj_k']) & (df['kdj_k'] > df['kdj_d']) &  # 多头排列
-    #     (df['kdj_j'] > 50) &                         # 动能强于中值
-    #     (df['close'] < df['upper'])                  # 尚未过度上涨（未触上轨）
-    # )
-
-    # sell_cond = (
-    #     # 趋势转弱
-    #     (df['close'] < df['ma51d']) |                  # 跌破短期均线
-    #     (df['macddif'] < df['macddea']) |             # DIF下穿DEA死叉
-    #     ((df['macdlast1'] < df['macdlast2']) & (df['macdlast2'] < df['macdlast3'])) |  # 柱线递减
-        
-    #     # RSI 过热后回落
-    #     (df['rsi'] > 70) |                            # 超买
-    #     ((df['rsi'] < 50) & (df['macd'] < 0)) |        # RSI掉头向下
-        
-    #     # KDJ 死叉或动能衰竭
-    #     ((df['kdj_j'] < df['kdj_k']) & (df['kdj_k'] < df['kdj_d'])) |  # 空头排列
-    #     (df['kdj_j'] < 30) |                          # 动能偏弱
-    #     (df['close'] > df['upper'])                   # 价格触及上轨（可能见顶）
-    # )
-
-    # # 初始化信号列
-    # df["signal"] = ""
-
-    # # 买入条件：底部爆发 + 动能共振
-    # buy_cond = (
-    #     # 趋势确认
-    #     (df['close'] > df['ma51d']) &
-    #     (df['ma51d'] > df['ma10d']) &                      # 均线多头排列
-    #     (df['macddif'] > df['macddea']) &
-    #     (df['macd'] > 0) &
-
-    #     # 动能爆发
-    #     (df['close'] > df['lasth3d']) &                      # 突破近3日高点
-    #     ((df['lastp1d'] > df['lastp2d']) & (df['lastp2d'] > df['lastp3d'])) &  # 连涨三日
-    #     ((df['macdlast1'] > df['macdlast2']) & (df['macdlast2'] > df['macdlast3'])) &  # 柱线递增
-    #     (df['volume'] > df['volume'].rolling(5).mean() * 1.2) &  # 成交放大至少20%
-
-    #     # 动能共振
-    #     (df['rsi'] > 45) & (df['rsi'] < 80) &
-    #     (df['kdj_j'] > df['kdj_k']) & (df['kdj_k'] > df['kdj_d']) &
-    #     (df['kdj_j'] > 60)
-    # )
-
-    # # 卖出条件：动能衰竭或假突破回落
-    # sell_cond = (
-    #     ((df['close'] < df['ma51d']) & (df['macd'] < 0)) |
-    #     ((df['macddif'] < df['macddea']) & (df['macd'] < 0)) |
-    #     ((df['macdlast1'] < df['macdlast2']) & (df['macdlast2'] < df['macdlast3'])) |
-    #     (df['rsi'] > 80) |
-    #     ((df['kdj_j'] < df['kdj_k']) & (df['kdj_k'] < df['kdj_d'])) |
-    #     (df['kdj_j'] < 40)
-    # )
-
-    # df.loc[buy_cond, "signal"] = "BUY"
-    # df.loc[sell_cond, "signal"] = "SELL"
-
-
-    # signals = df[df['signal'].isin(['BUY_STRONG', 'BUY_NORMAL', 'SELL'])]
-    # logger.info(signals[['close', 'macd', 'rsi', 'kdj_j', 'signal_strength', 'signal']].tail(10))
-    # 情绪判定
-    # df.loc[df["vchange"] > 20, "emotion"] = "乐观"
-    # df.loc[df["vchange"] < -20, "emotion"] = "悲观"
-    # 使用 last6vol 或模拟量比
-
-
+                                    
+# --- DPI and Config methods moved to Mixins ---
+# --- Duplicate window methods removed ---
 
 # KLineMonitor class moved to kline_monitor.py
 
@@ -10433,27 +7940,6 @@ def test_single_thread():
     # 直接单线程调用
     fetch_and_process(shared_dict, q, blkname="boll", flag=flag ,log_level=log_level,detect_calc_support=detect_calc_support)
 
-
-# def parse_args():
-#     parser = argparse.ArgumentParser(description="Monitor Init Script")
-
-#     parser.add_argument(
-#         "--log",
-#         type=str,
-#         default="INFO",
-#         help="日志等级，可选：DEBUG, INFO, WARNING, ERROR, CRITICAL"
-#     )
-
-#     # ✅ 新增布尔开关参数
-#     parser.add_argument(
-#         "--write_to_hdf",
-#         action="store_true",
-#         help="执行 write_to_hdf() 并退出"
-#     )
-
-#     args, _ = parser.parse_known_args()   # ✅ 忽略 multiprocessing 私有参数
-#     return args
-
 # 常用命令示例列表
 COMMON_COMMANDS = [
     "tdd.get_tdx_Exp_day_to_df('000002', dl=60, newdays=0, resample='d')",
@@ -10466,12 +7952,6 @@ COMMON_COMMANDS = [
 
 # 格式化帮助信息，换行+缩进
 help_text = "传递 Python 命令字符串执行，例如:\n" + "\n".join([f"    {cmd}" for cmd in COMMON_COMMANDS])
-# import textwrap
-# 第一行紧跟说明，后续命令换行并缩进
-# # 使用 textwrap 格式化 help 文本
-# help_text = "传递 Python 命令字符串执行，例如:\n"
-# help_text += textwrap.indent("\n".join(COMMON_COMMANDS), "    ")
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Monitor Init Script")
 
@@ -10523,12 +8003,6 @@ def test_get_tdx():
             logger.info(f"成功获取 {code} 的数据，前5行:\n{df.head()}")
         else:
             logger.warning(f"{code} 返回数据为空")
-
-        # df = tdd.get_tdx_exp_low_or_high_power(code, dl=dl, newdays=newdays, resample=resample)
-        # if df is not None and not df.empty:
-        #     logger.info(f"成功获取 {code} 的数据，前5行:\n{df.head()}")
-        # else:
-        #     logger.warning(f"{code} 返回数据为空")
     except Exception as e:
         logger.error(f"获取 {code} 数据失败: {e}", exc_info=True)
 
@@ -10751,74 +8225,6 @@ if __name__ == "__main__":
                 print("\nEOF, 退出调试模式")
                 break
 
-        # while True:
-        #     try:
-        #         cmd = session.prompt(">>> ").strip()  # 使用 session.prompt 替代 input
-        #         if not cmd:
-        #             continue
-
-        #         if cmd.lower() in ['quit', 'q', 'exit', 'e']:
-        #             print("退出调试模式")
-        #             break
-
-        #         try:
-        #             # 尝试 eval 执行表达式
-        #             result = eval(cmd, globals(), locals())
-        #             print("结果:", len(result))
-        #         except Exception:
-        #             # 如果 eval 出错，尝试 exec
-        #             try:
-        #                 result = exec(cmd, globals(), locals())
-        #             except Exception:
-        #                 print("执行异常:\n", traceback.format_exc())
-
-        #     except KeyboardInterrupt:
-        #         print("\n手动中断，退出调试模式")
-        #         break
-
-        # import readline
-        # import rlcompleter
-
-        # # 启用 Tab 补全和历史记录
-        # # readline.parse_and_bind("tab: complete")
-        # # 可以选择保存历史文件
-        # history_file = ".cmd_history"
-        # try:
-        #     readline.read_history_file(history_file)
-        # except FileNotFoundError:
-        #     pass
-
-        # while True:
-        #     try:
-        #         cmd = input(">>> ").strip()
-        #         if not cmd:
-        #             continue
-
-        #         if cmd.lower() in ['quit', 'q', 'exit', 'e']:
-        #             print("退出调试模式")
-        #             break
-
-        #         # 尝试 eval 执行
-        #         try:
-        #             result = eval(cmd, globals(), locals())
-        #             print("结果:", result)
-        #         except Exception:
-        #             # 如果 eval 出错，尝试 exec（适合赋值或函数定义等）
-        #             try:
-        #                 exec(cmd, globals(), locals())
-        #             except Exception:
-        #                 print("执行异常:", traceback.format_exc())
-
-        #     except KeyboardInterrupt:
-        #         print("\n手动中断，退出调试模式")
-        #         break
-        #     finally:
-        #         # 保存历史命令
-        #         try:
-        #             readline.write_history_file(history_file)
-        #         except Exception:
-        #             pass
-
         sys.exit(0)        
     # ✅ 命令行触发 write_to_hdf
     if args.write_to_hdf:
@@ -10832,7 +8238,5 @@ if __name__ == "__main__":
         width, height = 100, 32
         cct.set_console(width, height)
 
-    # monitor_rdp_and_scale(app)
     app.mainloop()
-# --- 使用示例 ---
     

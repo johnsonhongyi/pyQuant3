@@ -5,6 +5,8 @@ import ctypes
 import platform
 import tkinter as tk
 from tkinter import ttk
+import tkinter.font as tkfont
+
 try:
     import win32api
 except ImportError:
@@ -237,6 +239,31 @@ def get_centered_window_position_mainWin(parent: Union[tk.Tk, tk.Toplevel], win_
 #     dlg.grab_set()
 #     parent.wait_window(dlg)
 #     return result["value"]
+
+def get_centered_window_position_single(parent, win_width, win_height, margin=10):
+    # 获取鼠标位置
+    mx = parent.winfo_pointerx()
+    my = parent.winfo_pointery()
+
+    # 屏幕尺寸
+    screen_width = parent.winfo_screenwidth()
+    screen_height = parent.winfo_screenheight()
+
+    # 默认右边放置
+    x = mx + margin
+    y = my - win_height // 2  # 垂直居中鼠标位置
+
+    # 如果右边放不下，改到左边
+    if x + win_width > screen_width:
+        x = mx - win_width - margin
+
+    # 防止y超出屏幕
+    if y + win_height > screen_height:
+        y = screen_height - win_height - margin
+    if y < 0:
+        y = margin
+    x,y = clamp_window_to_screens(x, y, win_width, win_height)
+    return x, y
 
 # def askstring_at_parent_single(parent, title, prompt, initialvalue=""):
 def askstring_at_parent_single(parent: Union[tk.Tk, tk.Toplevel], title: str, prompt: str, initialvalue: str = "") -> Optional[str]:
