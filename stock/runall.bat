@@ -52,6 +52,26 @@ REM ============================
 REM 启动后续程序
 REM ============================
 
+
+cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone\dist"
+set WORKDIRTK=%CD%
+echo 当前目录: %WORKDIRTK%
+
+if exist "%WORKDIRTK%\instock_MonitorTK.exe" (
+    echo 启动 EXE: instock_MonitorTK.exe
+    start cmd /k  "%WORKDIRTK%\instock_MonitorTK.exe"
+) else if exist "%WORKDIRTK%\instock_MonitorTK.py" (
+    echo 启动 Python: instock_MonitorTK
+    start cmd /k  python "%WORKDIRTK%\instock_MonitorTK.py"
+) else (
+    echo ERROR: 找不到 instock_MonitorTK.exe 或 instock_MonitorTK.py
+)
+
+
+cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock"
+set WORKDIR=%CD%
+echo 当前目录: %WORKDIR%
+
 REM 依次启动 exe 或 py 文件，保持延迟
 rem set PROGRAMS=instock_Monitor singleAnalyseUtil sina_Market-DurationUP LinePower filter_resample_Monitor
 rem set PROGRAMS= instock_MonitorTK singleAnalyseUtil  filter_resample_Monitor
