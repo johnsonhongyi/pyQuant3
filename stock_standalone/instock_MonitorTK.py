@@ -7636,90 +7636,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         cct.write_to_blocknew(block_path, codew,append=append,doubleFile=False,keep_last=0,dfcf=False,reappend=True)
         logger.info("wri ok:%s" % block_path)
         self.status_var2.set(f"wri ok: {self.blkname} count: {len(codew)}")
-        # if args.code == 'a':
-        #     cct.write_to_blocknew(block_path, codew,doubleFile=False,keep_last=0,dfcf=True,reappend=True)
-        # else:
-        #     cct.write_to_blocknew(block_path, codew, append=False,doubleFile=False,keep_last=0,dfcf=True,reappend=True)
-    # def delete_search_history(self, which, entry=None):
-    #     """
-    #     删除指定搜索框的历史条目
-    #     which = 1 -> 顶部搜索框
-    #     which = 2 -> 底部搜索框
-    #     entry: 指定要删除的条目，如果为空则用搜索框当前内容
-    #     """
-    #     if which == 1:
-    #         history = self.search_history1
-    #         combo = self.search_combo1
-    #         var = self.search_var1
-    #         if self.query_manager.current_key == "history1":
-    #             query_manager_his = self.query_manager.history1
-    #     else:
-    #         history = self.search_history2
-    #         combo = self.search_combo2
-    #         var = self.search_var2
-    #         if self.query_manager.current_key == "history2":
-    #             query_manager_his = self.query_manager.history2
-
-    #     target = entry or var.get().strip()
-    #     if not target:
-    #         self.status_var.set(f"搜索框 {which} 内容为空，无可删除项")
-    #         return
-
-    #     if target in history:
-    #         history.remove(target)
-    #         combo['values'] = history
-    #         query_manager_his= [{"query": q, "starred":  0, "note": ""} for q in history]
-
-    #         if self.query_manager.current_key == "history1" and which == 1:
-    #             self.query_manager.current_history = query_manager_his
-    #             self.query_manager.refresh_tree()
-    #         elif self.query_manager.current_key == "history2" and which == 2:
-    #             self.query_manager.current_history = query_manager_his
-    #             self.query_manager.refresh_tree()
-
-    #         self.query_manager.save_search_history()
-    #         self.status_var.set(f"搜索框 {which} 已删除历史: {target}")
-    #         if var.get() == target:
-    #             var.set('')
-    #     else:
-    #         self.status_var.set(f"搜索框 {which} 历史中没有: {target}")
-
-
-    # def clean_search(self, entry=None):
-    #     """删除指定历史，默认删除当前搜索框内容"""
-    #     self.search_var.set('')
-    #     self.select_code = None
-    #     self.sortby_col = None
-    #     self.sortby_col_ascend = None
-    #     self.refresh_tree(self.df_all)
-    #     resample = self.resample_combo.get()
-    #     self.status_var.set(f"Row 结果 {len(self.current_df)} 行 | resample: {resample} ")
-    
-    # def delete_search_history(self, entry=None):
-    #     """删除指定历史，默认删除当前搜索框内容"""
-    #     target = entry or self.search_var.get().strip()
-    #     if target in self.search_history:
-    #         self.search_history.remove(target)
-    #         self.search_combo['values'] = self.search_history
-    #         self.save_search_history()
-    #         self.status_var.set(f"已删除历史: {target}")
-
-
-    # ----------------- 搜索 ----------------- #
-    # def set_search(self):
-    #     query = self.search_entry.get().strip()
-    #     if query and not self.current_df.empty:
-    #         try:
-    #             df_filtered = self.current_df.query(query)
-    #             self.refresh_tree(df_filtered)
-    #         except Exception as e:
-    #             logger.error(f"Query error: {e}")
-
-    # # ----------------- Resample ----------------- #
-    # def set_resample(self, event=None):
-    #     val = self.resample_combo.get().strip()
-    #     if val:
-    #         cct.GlobalValues().setkey("resample", val)
 
     # ----------------- 状态栏 ----------------- #
     def update_status(self):
@@ -7730,27 +7646,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         search = self.search_var1.get()
         self.status_var.set(f"Rows: {cnt} | blkname: {self.blkname} | resample: {resample} | st: {self.st_key_sort} | search: {search}")
 
-    # ----------------- 数据刷新 ----------------- #
-    # def update_tree(self):
-    #     try:
-    #         while not self.queue.empty():
-    #             df = self.queue.get_nowait()
-    #             logger.debug(f'df:{df[:2]}')
-    #             self.refresh_tree(df)
-    #     except Exception as e:
-    #         logger.error(f"Error updating tree: {e}", exc_info=True)
-    #     finally:
-    #         self.after(1000, self.update_tree)
-
-    # ----------------- 数据存档 ----------------- #
-    # def save_data_to_csv(self):
-    #     if self.current_df.empty:
-    #         return
-    #     file_name = os.path.join(DARACSV_DIR, f"monitor_{self.resample_combo.get()}_{time.strftime('%Y%m%d_%H%M')}.csv")
-    #     self.current_df.to_csv(file_name, index=True, encoding="utf-8-sig")
-    #     idx =file_name.find('monitor')
-    #     status_txt = file_name[idx:]
-    #     self.status_var2.set(f"已保存数据到 {status_txt}")
 
     def save_data_to_csv(self):
         """保存当前 DataFrame 到 CSV 文件，并自动带上当前 query 的 note"""
