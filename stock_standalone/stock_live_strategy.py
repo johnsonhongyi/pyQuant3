@@ -220,6 +220,8 @@ class StockLiveStrategy:
                 for code, stock in self._monitored_stocks.items():
                     stock.setdefault('rules', [])
                     stock.setdefault('last_alert', 0)
+                    stock.setdefault('created_time', datetime.now().strftime("%Y-%m-%d %H"))
+                    stock.setdefault('tags', "")
                     stock.setdefault('snapshot', {})  # 快照信息
 
                     # ✅ 重建 rule_keys（不从文件读取）
@@ -265,7 +267,9 @@ class StockLiveStrategy:
                 record = {
                     'name': stock.get('name'),
                     'rules': stock.get('rules', []),
-                    'last_alert': stock.get('last_alert', 0)
+                    'last_alert': stock.get('last_alert', 0),
+                    'created_time': stock.get('created_time', datetime.now().strftime("%Y-%m-%d %H")),
+                    'tags': stock.get('tags', "")
                 }
 
                 # --- 可选：添加行情快照 ---
@@ -299,14 +303,26 @@ class StockLiveStrategy:
     def _rule_key(self, rule_type, value):
         return f"{rule_type}:{value:.4f}"
 
-    def add_monitor(self, code, name, rule_type, value):
+    def add_monitor(self, code, name, rule_type, value, tags=None):
         value = float(value)
 
-        stock = self._monitored_stocks.setdefault(code, {
-            'name': name,
-            'rules': [],
-            'last_alert': 0
-        })
+        if code not in self._monitored_stocks:
+            self._monitored_stocks[code] = {
+                'name': name,
+                'rules': [],
+                'last_alert': 0,
+                'created_time': datetime.now().strftime("%Y-%m-%d %H"),
+                'tags': tags or ""
+            }
+        
+        stock = self._monitored_stocks[code]
+        # 如果提供了 tags 且不为空，则更新（覆盖旧的或空的）
+        if tags:
+            stock['tags'] = tags
+        
+        # 确保 created_time 存在 (对于旧数据)
+        if 'created_time' not in stock:
+            stock['created_time'] = datetime.now().strftime("%Y-%m-%d %H")
 
         # 确保派生字段存在
         stock.setdefault('rule_keys', set())

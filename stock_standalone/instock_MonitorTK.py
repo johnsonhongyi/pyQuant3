@@ -2941,7 +2941,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     rtype = type_var.get()
                     
                     if hasattr(self, 'live_strategy') and self.live_strategy:
-                        self.live_strategy.add_monitor(code, name, rtype, val)
+                        tags = self.get_stock_info_text(code)
+                        self.live_strategy.add_monitor(code, name, rtype, val, tags=tags)
                         # 自动关闭，不再弹窗确认，提升效率 (或者用 toast)
                         # messagebox.showinfo("成功", f"已添加监控: {name} {rtype} {val}", parent=win)
                         logger.info(f"Monitor added: {name} {rtype} {val}")
@@ -3498,20 +3499,120 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             list_frame.pack(fill="both", expand=True, padx=5, pady=5)
             
             # 显示 ID 是为了方便管理 (code + rule_index)
-            columns = ("code", "name", "rule_type", "value", "id")
+            columns = ("code", "name", "rule_type", "value", "add_time", "tags", "id")
             tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
             
-            tree.heading("code", text="代码")
-            tree.heading("name", text="名称")
-            tree.heading("rule_type", text="规则类型")
-            tree.heading("value", text="阈值")
+            def treeview_sort_column(tv, col, reverse):
+                l = [(tv.set(k, col), k) for k in tv.get_children('')]
+                try:
+                    l.sort(key=lambda t: float(t[0]), reverse=reverse)
+                except ValueError:
+                    l.sort(reverse=reverse)
+
+                for index, (val, k) in enumerate(l):
+                    tv.move(k, '', index)
+
+                tv.heading(col, command=lambda: treeview_sort_column(tv, col, not reverse))
+
+            tree.heading("code", text="代码", command=lambda: treeview_sort_column(tree, "code", False))
+            tree.heading("name", text="名称", command=lambda: treeview_sort_column(tree, "name", False))
+            tree.heading("rule_type", text="规则类型", command=lambda: treeview_sort_column(tree, "rule_type", False))
+            tree.heading("value", text="阈值", command=lambda: treeview_sort_column(tree, "value", False))
+            tree.heading("add_time", text="时间", command=lambda: treeview_sort_column(tree, "add_time", False))
+            tree.heading("tags", text="简介", command=lambda: treeview_sort_column(tree, "tags", False))
             tree.heading("id", text="ID (Code_Idx)")
             
             tree.column("code", width=80, anchor="center")
             tree.column("name", width=100, anchor="center")
             tree.column("rule_type", width=150, anchor="center")
             tree.column("value", width=100, anchor="center")
+            tree.column("add_time", width=140, anchor="center")
+            tree.column("tags", width=50, anchor="center")
             tree.column("id", width=0, stretch=False) # 隐藏 ID 列
+
+            def show_tags_detail(values):
+                code, name = values[0], values[1]
+                tags_info = values[5]
+
+                top = tk.Toplevel(win)
+                top.title(f"{name}:{code} 详情")
+                top.geometry("600x400")
+                top.lift()
+                top.focus_force()
+                top.attributes("-topmost", True)
+                top.after(100, lambda: top.attributes("-topmost", False))
+                # 简单居中
+                wx = win.winfo_rootx() + 50
+                wy = win.winfo_rooty() + 50
+                top.geometry(f"+{wx}+{wy}")
+
+                from tkinter.scrolledtext import ScrolledText
+                st = ScrolledText(top, font=("Consolas", 10))
+                st.pack(fill="both", expand=True)
+                st.insert("end", tags_info)
+                def close_top(event=None):
+                    top.destroy()
+
+                top.bind("<Escape>", close_top)
+                top.protocol("WM_DELETE_WINDOW", close_top)
+
+            def on_voice_tree_double_click(event):
+                region = tree.identify_region(event.x, event.y)
+                if region != "cell":
+                    return
+
+                column = tree.identify_column(event.x)  # '#1', '#2', ...
+                col_idx = int(column[1:]) - 1           # 转为 0-based
+
+                item = tree.identify_row(event.y)
+                if not item:
+                    return
+
+                values = tree.item(item, "values")
+
+                TAGS_COL_INDEX = 5  # tags 在 values 中的索引
+
+                if col_idx == TAGS_COL_INDEX:
+                    tags_info = values[TAGS_COL_INDEX]
+                    if tags_info:
+                        show_tags_detail(values)
+                else:
+                    edit_selected(item, values)
+
+                def on_motion(event):
+                    region = tree.identify_region(event.x, event.y)
+                    if region == "cell":
+                        col = int(tree.identify_column(event.x)[1:]) - 1
+                        if col == TAGS_COL_INDEX:
+                            tree.configure(cursor="hand2")
+                            return
+                    tree.configure(cursor="")
+                tree.bind("<Motion>", on_motion)
+
+
+            # def on_double_click(event):
+            #     item = tree.selection()
+            #     if not item: return
+            #     values = tree.item(item[0], "values")
+            #     # (code, name, rule_type, value, add_time, tags, id)
+            #     tags_info = values[5]
+            #     if tags_info:
+            #          # 弹窗显示完整信息
+            #          top = tk.Toplevel(win)
+            #          top.title(f"{values[1]}:{values[0]} 详情")
+            #          top.geometry("600x400")
+            #          # 居中显示的简单逻辑
+            #          wx = win.winfo_rootx() + 50
+            #          wy = win.winfo_rooty() + 50
+            #          top.geometry(f"+{wx}+{wy}")
+                     
+            #          from tkinter.scrolledtext import ScrolledText
+            #          st = ScrolledText(top, font=("Consolas", 10))
+            #          st.pack(fill="both", expand=True)
+            #          st.insert("end", tags_info)
+            #          # st.config(state="disabled")
+
+            # tree.bind("<Double-1>", on_double_click)
             
             vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
             tree.configure(yscroll=vsb.set)
@@ -3528,6 +3629,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 for code, data in monitors.items():
                     name = data['name']
                     rules = data['rules']
+                    add_time = data.get('created_time', '')
+                    tags = data.get('tags', '')
+                    
                     for idx, rule in enumerate(rules):
                         rtype_map = {
                             "price_up": "价格突破 >=",
@@ -3537,7 +3641,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         display_type = rtype_map.get(rule['type'], rule['type'])
                         # unique id
                         uid = f"{code}_{idx}"
-                        tree.insert("", "end", values=(code, name, display_type, rule['value'], uid))
+                        tree.insert("", "end", values=(code, name, display_type, rule['value'], add_time, tags, uid))
 
             load_data()
             
@@ -3583,7 +3687,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 for item in selected:
                      values = tree.item(item, "values")
                      code = values[0]
-                     uid = values[4]
+                     uid = values[6]
                      # 由于 uid 是 'code_idx'，但如果删除了前面的，后面的 idx 会变
                      # 最稳妥的是：倒序删除，或者重新加载。
                      # 我们的界面是单选还是多选？Treeview 默认多选。
@@ -3634,15 +3738,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # logger.info(f'on_voice_on_click stock_code:{stock_code} name:{name}')
                     self.sender.send(stock_code)
 
-            def edit_selected(event=None):
-                 selected = tree.selection()
-                 if not selected: return
-                 item = selected[0]
-                 values = tree.item(item, "values")
+            # def edit_selected(event=None):
+            #      selected = tree.selection()
+            #      if not selected: return
+            #      item = selected[0]
+            #      values = tree.item(item, "values")
+            def edit_selected(item=None, values=None):
+                 if values is None:
+                    selected = tree.selection()
+                    if not selected:
+                        return
+                    item = selected[0]
+                    values = tree.item(item, "values")
                  code = values[0]
                  name = values[1]
                  old_val = values[3]
-                 uid = values[4]
+                 uid = values[6]
                  idx = int(uid.split('_')[1])
                  # logger.info(f'on_voice_edit_selected stock_code:{code} name:{name}')
                  
@@ -3654,20 +3765,46 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                          current_type = rules[idx]['type']
 
                  # 弹出编辑框 (UI 与 Add 保持一致)
+                 # edit_win = tk.Toplevel(win)
+                 # edit_win.title(f"编辑规则 - {name}")
+                 # edit_win_id = "编辑规则"
+                 # self.load_window_position(edit_win, edit_win_id, default_width=900, default_height=600)
+
+                 # main_frame = tk.Frame(edit_win)
+                 # main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+                 
+                 # left_frame = tk.Frame(main_frame) 
+                 # left_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
+                 
+                 # right_frame = tk.LabelFrame(main_frame, text="参考数据 (点击自动填入)", width=450)
+                 # right_frame.pack(side="right", fill="both", padx=(10, 0))
+                 # # right_frame.pack_propagate(False)
+
                  edit_win = tk.Toplevel(win)
                  edit_win.title(f"编辑规则 - {name}")
                  edit_win_id = "编辑规则"
                  self.load_window_position(edit_win, edit_win_id, default_width=900, default_height=600)
+                 edit_win.minsize(800, 500)
 
                  main_frame = tk.Frame(edit_win)
                  main_frame.pack(fill="both", expand=True, padx=10, pady=10)
-                 
-                 left_frame = tk.Frame(main_frame) 
-                 left_frame.pack(side="left", fill="both", expand=True, padx=(0, 10))
-                 
-                 right_frame = tk.LabelFrame(main_frame, text="参考数据 (点击自动填入)", width=350)
-                 right_frame.pack(side="right", fill="both", padx=(10, 0))
-                 # right_frame.pack_propagate(False)
+
+                 main_frame.grid_rowconfigure(0, weight=1)
+                 main_frame.grid_columnconfigure(0, weight=3)
+                 main_frame.grid_columnconfigure(1, weight=2)
+
+                 left_frame = tk.Frame(main_frame)
+                 left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+
+                 right_frame = tk.LabelFrame(
+                     main_frame,
+                     text="参考数据 (点击自动填入)",
+                     width=350
+                 )
+                 right_frame.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+                 right_frame.grid_propagate(False)
+                 # right_frame.minsize(350, 200)
+
 
                  # --- 左侧 ---
                  curr_price = 0.0
@@ -3683,7 +3820,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                  tk.Label(left_frame, text=f"当前价格: {curr_price}", font=("Arial", 12, "bold"), fg="#1a237e").pack(pady=10, anchor="w")
                  # tk.Label(left_frame, text=f"当前涨幅: {curr_change:.2f}%", font=("Arial", 10)).pack(pady=5, anchor="w")
 
-                 tk.Label(left_frame, text="规则类型:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(15, 5))
+                 tk.Label(left_frame, text="规则类型:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(5, 5))
                  
                  new_type_var = tk.StringVar(value=current_type)
                  val_var = tk.StringVar(value=str(old_val))
@@ -3703,11 +3840,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                  for text, val in types:
                      tk.Radiobutton(left_frame, text=text, variable=new_type_var, value=val, command=on_type_change).pack(anchor="w", padx=10, pady=2)
 
-                 tk.Label(left_frame, text="触发阈值:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(15, 5))
+                 tk.Label(left_frame, text="触发阈值:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(5, 5))
                  
                  # 阈值输入区域 (包含 +/- 按钮)
                  val_frame = tk.Frame(left_frame)
-                 val_frame.pack(fill="x", padx=10, pady=5)
+                 val_frame.pack(fill="x", padx=5, pady=5)
 
                  e_new = tk.Entry(val_frame, textvariable=val_var, font=("Arial", 12))
                  e_new.pack(side="left", fill="x", expand=True)
@@ -3741,7 +3878,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             new_type_var.set("price_down")
 
                  self._create_monitor_ref_panel(right_frame, row_data, curr_price, set_val_callback)
+                 # ESC / 关闭
+                 def on_close(event=None):
+                     # update_window_position(window_id)
+                     self.save_window_position(edit_win, edit_win_id)
+                     edit_win.destroy()
                  
+                 # 🔑 关键：挂到 Toplevel 对象上
+                 edit_win.on_close = on_close
                  def confirm_edit(event=None):
                      try:
                          val = float(e_new.get())
@@ -3753,11 +3897,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                          edit_win.on_close()
                      except ValueError:
                          messagebox.showerror("错误", "无效数字", parent=edit_win)
-                 # ESC / 关闭
-                 def on_close(event=None):
-                     # update_window_position(window_id)
-                     self.save_window_position(edit_win, edit_win_id)
-                     edit_win.destroy()
 
                  edit_win.bind("<Escape>", on_close)
                  edit_win.protocol("WM_DELETE_WINDOW", on_close)
@@ -3774,7 +3913,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.bind("<Button-1>", on_voice_on_click)
             tree.bind("<Button-3>", on_voice_right_click)
             # 双击编辑
-            tree.bind("<Double-1>", lambda e: edit_selected())
+            # tree.bind("<Double-1>", lambda e: edit_selected())
+            tree.bind("<Double-1>", on_voice_tree_double_click)
             tree.bind("<<TreeviewSelect>>", on_voice_tree_select) 
             # 按 Delete 键删除
             tree.bind("<Delete>", delete_selected)
