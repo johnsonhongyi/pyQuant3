@@ -211,8 +211,8 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
     resample = g_values.getkey("resample") or "d"
     market = g_values.getkey("market", marketInit)
     blkname = g_values.getkey("blkname", marketblk)
-    logger.info(f"当前选择市场: {market}, blkname={blkname}")
     st_key_sort = g_values.getkey("st_key_sort", "3 0")
+    logger.info(f"当前选择市场: {market}, blkname={blkname} st_key_sort:{st_key_sort}")
     
     lastpTDX_DF, top_all = pd.DataFrame(), pd.DataFrame()
     detect_calc_support_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
@@ -229,10 +229,12 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                    continue
             elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
                 logger.info(f'resample : new : {g_values.getkey("resample")} last : {resample} ')
+                top_now = pd.DataFrame()
                 top_all = pd.DataFrame()
                 lastpTDX_DF = pd.DataFrame()
             elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
                 # logger.info(f'market : new : {g_values.getkey("market")} last : {market} ')
+                top_now = pd.DataFrame()
                 top_all = pd.DataFrame()
                 lastpTDX_DF = pd.DataFrame()
             elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
@@ -324,7 +326,8 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             resample = g_values.getkey("resample") or "d"
             market = g_values.getkey("market", marketInit)        # all / sh / cyb / kcb / bj
             blkname = g_values.getkey("blkname", marketblk)  # 对应的 blk 文件
-            logger.info(f"resample Main: {resample} flag.value : {flag.value} market : {market} blkname :{blkname} ")
+            st_key_sort = g_values.getkey("st_key_sort", st_key_sort)  # 对应的 blk 文件
+            logger.info(f"resample Main  market : {market}  {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
 
             if market == 'indb':
                 indf = get_indb_df()
@@ -336,6 +339,7 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                 logger.info("top_now.empty no data fetched")
                 time.sleep(duration_sleep_time)
                 continue
+            logger.info(f"resample Main  top_now:{len(top_now)} market : {market}  {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
 
             # 合并与计算
             detect_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
@@ -349,6 +353,7 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                 top_all = cct.combine_dataFrame(top_all, top_now, col="couts", compare="dff")
 
             top_all = calc_indicators(top_all, logger, resample)
+            logger.info(f"resample Main  top_all:{len(top_all)} market : {market}  {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
 
             # top_all = calc_indicators(top_all, resample)
 
@@ -366,14 +371,22 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             df_all = sanitize(df_all)
             queue.put(df_all)
             gc.collect()
-            logger.info(f'process now: {cct.get_now_time_int()} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+            logger.info(f'process now: {cct.get_now_time_int()} resample Main:{len(df_all)} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
             if cct.get_now_time_int() < 945:
                 sleep_step = 0.5
             else:
                 sleep_step = 1
             # cout_time = 0
             for _ in range(duration_sleep_time):
-                if not flag.value: break
+                if not flag.value:
+                    break
+                elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
+                    break
+                elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
+                    # logger.info(f'market : new : {g_values.getkey("market")} last : {market} ')
+                    break
+                elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
+                    break
                 time.sleep(sleep_step)
                 # cout_time +=sleep_step
                 # logger.info(f'cout_time:{cout_time} duration_sleep_time:{duration_sleep_time} sleep_step:{sleep_step}')

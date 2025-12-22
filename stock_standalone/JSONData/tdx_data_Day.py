@@ -3236,6 +3236,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     ### Sina获取 Ratio 和tdx数据
     print("initdx", end=' ')
     market_all = False
+    log.info(f'tdd_market: {market}')
     if not isinstance(market, list):
         # m_mark = market.split(',')
         m_mark = market.split('+')
@@ -3298,13 +3299,13 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         #     df = wcd.get_wcbk_df(filter=market, market=filename,
         #                      perpage=1000, days=ct.wcd_limit_day)
         # df = pd.read_csv(block_path,dtype={'code':str},encoding = 'gbk')
-    elif market in ['kcb','sh', 'sz', 'cyb']:
+    elif market in ['kcb','sh', 'sz', 'cyb' ,'kcb' ,'bj']:
         df = rl.get_sina_Market_json(market)
         # df = sina_data.Sina().market(market)
     elif market in ['all','bj']:
         df = sina_data.Sina().all
         if market in ['bj']:
-            co_inx = [inx for inx in df.index if str(inx).startswith(('43','83','87','92','688'))]
+            co_inx = [inx for inx in df.index if str(inx).startswith(('43','83','87','92'))]
             df = df.loc[co_inx]
         else:
             market_all = True
@@ -3340,7 +3341,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         dfw = sina_data.Sina().get_stock_list_data(dfw_codel)
         df = cct.combine_dataFrame(df,dfw,append=True)
         codelist = df.index.astype(str).tolist()
-    
+        
 
     if trend and isinstance(df, pd.DataFrame):
         code_l = cct.read_to_blocknew('060')
@@ -3435,6 +3436,7 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     # print 'ratio' in dm.columns
     # print time.time()-time_s
     dm['nvol'] = dm['volume']
+
     if cct.get_now_time_int() > 932 and market not in ['sh', 'sz', 'cyb']:
         dd = rl.get_sina_Market_json('all')
         if isinstance(dd, pd.DataFrame):
@@ -6886,7 +6888,9 @@ if __name__ == '__main__':
     df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     # compute_lastdays_percent_profile(df, lastdays=5)
 
-
+    # import ipdb;ipdb.set_trace()
+    df=(getSinaAlldf('bj'))
+    import ipdb;ipdb.set_trace()
 
     # tdx_profile_test()
     # pyprof2calltree -k -i tdx.profile
@@ -7366,7 +7370,6 @@ if __name__ == '__main__':
 
     # print get_tdx_append_now_df_api_tofile('300583')
     sys.exit(0)
-#    print getSinaAlldf('cx')
 #    get_append_lastp_to_df(None,end='2017-03-20',ptype='high')
 #    print get_tdx_exp_low_or_high_power('603169',dl=10,ptype='high')
     print(get_tdx_exp_low_or_high_power('603169', None, 'high', 14, '2017-03-20', True, True, None))

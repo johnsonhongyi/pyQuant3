@@ -132,6 +132,7 @@ write_all_day_date = CFG.write_all_day_date
 detect_calc_support = CFG.detect_calc_support
 alert_cooldown = CFG.alert_cooldown
 pending_alert_cycles = CFG.pending_alert_cycles
+st_key_sort = CFG.st_key_sort
 
 saved_width,saved_height = CFG.saved_width,CFG.saved_height
 
@@ -233,7 +234,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         ctrl_frame = tk.Frame(self)
         ctrl_frame.pack(fill="x", padx=5, pady=1)
 
-        self.st_key_sort = self.global_values.getkey("st_key_sort") or "3 0"
+        self.st_key_sort = self.global_values.getkey("st_key_sort") or st_key_sort
 
         # ====== 底部状态栏 ======
         status_frame = tk.Frame(self, relief="sunken", bd=1)
@@ -897,14 +898,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 绑定选择事件，存入 GlobalValues
         def on_market_select(event=None):
             market_cn = self.market_combo.get()
-            market_info = self.market_map.get(market_cn, {"code": "all", "blkname": "061.blk"})
+            market_info = self.market_map.get(market_cn, {"code": marketInit, "blkname": marketblk})
             self.global_values.setkey("market", market_info["code"])
             self.global_values.setkey("blkname", market_info["blkname"])
-            logger.info(f"选择市场: {market_cn}, code={market_info['code']}, blkname={market_info['blkname']}")
+            self.global_values.setkey("st_key_sort", self.st_key_sort_value.get())
+            logger.info(f"选择市场: {market_cn}, code={market_info['code']}, blkname={market_info['blkname']} st_key_sort_value:{self.st_key_sort_value.get()}")
 
         self.market_combo.bind("<<ComboboxSelected>>", on_market_select)
-        # ✅ 关键：同步一次状态
-        on_market_select()
         
         tk.Label(ctrl_frame, text="stkey:").pack(side="left", padx=2)
         self.st_key_sort_value = tk.StringVar()
@@ -924,7 +924,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 在初始化时（StockMonitorApp.__init__）创建并注册：
         self.alert_manager = AlertManager(storage_dir=DARACSV_DIR, logger=logger)
-        set_global_manager(self.alert_manager)
+        set_global_manager(self.alert_manager)  
+
+        # ✅ 关键：同步一次状态
+        on_market_select()
 
         # --- 底部搜索框 2 ---
         bottom_search_frame = tk.Frame(self)
@@ -1136,7 +1139,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.global_values.setkey("resample", resample)
         self.blkname = ct.Resample_LABELS_Blk[resample] or "060.blk"
         self.global_values.setkey("blkname", self.blkname)
-        
+        self.global_values.setkey("st_key_sort", self.st_key_sort_value.get())
+        market_cn = self.market_combo.get()
+        market_info = self.market_map.get(market_cn, {"code": marketInit, "blkname": marketblk})
+        self.global_values.setkey("market", market_info["code"])
+        self.global_values.setkey("blkname", market_info["blkname"])
+
         self.refresh_flag.value = False
         time.sleep(0.6)
         self.refresh_flag.value = True
@@ -1151,7 +1159,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         #                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
         #                       marketInit: str = "all", marketblk: str = "boll",
         #                       duration_sleep_time: int = 5, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
-        self.proc = mp.Process(target=fetch_and_process, args=(self.global_dict,self.queue, "boll", self.refresh_flag,self.log_level, self.detect_calc_support,marketInit,marketblk,duration_sleep_time))
+        self.proc = mp.Process(target=fetch_and_process, args=(self.global_dict,self.queue, self.blkname , self.refresh_flag,self.log_level, self.detect_calc_support,marketInit,marketblk,duration_sleep_time))
         # self.proc.daemon = True
         self.proc.daemon = False 
         self.proc.start()
@@ -1409,14 +1417,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         write_all_day_date = CFG.write_all_day_date
         detect_calc_support = CFG.detect_calc_support
         alert_cooldown = CFG.alert_cooldown
-        pending_alert_cycles = CFG.pending_alert_cycles 
+        pending_alert_cycles = CFG.pending_alert_cycles
+        st_key_sort = CFG.st_key_sort 
         saved_width,saved_height = CFG.saved_width,CFG.saved_height 
         logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} \
             scale_offset: {scale_offset} saved_width:{saved_width},{saved_height} \
             duration_sleep_time:{duration_sleep_time} \
             detect_calc_support:{detect_calc_support} \
             alert_cooldown:{alert_cooldown}\
-            pending_alert_cycles:{pending_alert_cycles}")
+            pending_alert_cycles:{pending_alert_cycles} st_key_sort:{st_key_sort}")
 
     def update_linkage_status(self):
         # 此处处理 checkbuttons 状态
