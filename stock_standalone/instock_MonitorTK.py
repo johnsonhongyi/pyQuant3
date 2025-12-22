@@ -130,6 +130,7 @@ duration_sleep_time = CFG.duration_sleep_time
 write_all_day_date = CFG.write_all_day_date
 detect_calc_support = CFG.detect_calc_support
 alert_cooldown = CFG.alert_cooldown
+pending_alert_cycles = CFG.pending_alert_cycles
 
 saved_width,saved_height = CFG.saved_width,CFG.saved_height
 
@@ -1402,6 +1403,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         write_all_day_date = CFG.write_all_day_date
         detect_calc_support = CFG.detect_calc_support
         alert_cooldown = CFG.alert_cooldown
+        pending_alert_cycles = CFG.pending_alert_cycles 
         saved_width,saved_height = CFG.saved_width,CFG.saved_height 
         logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} \
             scale_offset: {scale_offset} saved_width:{saved_width},{saved_height} \
@@ -3113,7 +3115,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except:
             pass
 
-    def _close_alert(self, win):
+    def _close_alert(self, win, is_manual=False):
         """关闭弹窗并刷新布局，并停止关联的语音报警"""
         if hasattr(self, 'active_alerts') and win in self.active_alerts:
             self.active_alerts.remove(win)
@@ -3129,6 +3131,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 停止该代码的语音播报 (以便立即播放队列中的下一个)
         if target_code and hasattr(self, 'live_strategy') and self.live_strategy:
+             # 如果是手动关闭，则延迟 10 个周期再报
+             if is_manual:
+                 self.live_strategy.snooze_alert(target_code, cycles=pending_alert_cycles)
+
              v = getattr(self.live_strategy, '_voice', None)
              if v and hasattr(v, 'cancel_for_code'):
                  v.cancel_for_code(target_code)
@@ -3156,8 +3162,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.active_alerts.append(win)
             self._update_alert_positions()
             
-            # 关闭回调
-            win.protocol("WM_DELETE_WINDOW", lambda: self._close_alert(win))
+            # 关闭回调 (手动关闭，设为 True)
+            win.protocol("WM_DELETE_WINDOW", lambda: self._close_alert(win, is_manual=True))
             
             # 自动关闭逻辑：
             # 如果语音功能有效，则等待播报结束后才开始计时关闭；
@@ -3240,7 +3246,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             btn_send = tk.Button(btn_frame, text="🚀 发送到通达信", command=send_to_tdx, bg="#e0f7fa", font=("Arial", 10, "bold"), cursor="hand2")
             btn_send.pack(side="left", fill="x", expand=True, padx=5)
             
-            tk.Button(btn_frame, text="关闭", command=lambda: self._close_alert(win), bg="#eee").pack(side="right", padx=5)
+            tk.Button(btn_frame, text="关闭", command=lambda: self._close_alert(win, is_manual=True), bg="#eee").pack(side="right", padx=5)
 
             # --- 上部内容 ---
             tk.Label(frame, text=f"⚠️{code} {msg}", font=("Microsoft YaHei", 12, "bold"), fg="#d32f2f", bg="#fff", wraplength=380).pack(pady=5)

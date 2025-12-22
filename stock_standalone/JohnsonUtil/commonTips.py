@@ -536,7 +536,7 @@ class GlobalConfig:
         self.max_single_stock_ratio = self.get_with_writeback("general", "max_single_stock_ratio", fallback=0.3, value_type="float")
         self.min_position_ratio = self.get_with_writeback("general", "min_position_ratio", fallback=0.05, value_type="float")
         self.risk_duration_threshold = self.get_with_writeback("general", "risk_duration_threshold", fallback=300, value_type="int")
-
+        self.pending_alert_cycles = self.get_with_writeback("general", "pending_alert_cycles", fallback=10, value_type="int")
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="260x180")
         try:
             if "x" in saved_wh_str:
