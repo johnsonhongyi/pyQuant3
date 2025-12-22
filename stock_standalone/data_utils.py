@@ -54,130 +54,130 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
         
     return top_all.sort_values(by=['dff','percent','volume','ratio','couts'], ascending=[0,0,0,1,1])
 
-def fetch_and_process_renewbug(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
-                      flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
-                      marketInit: str = "all", marketblk: str = "boll",
-                      duration_sleep_time: int = 5, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
-    """后台数据获取与处理进程"""
-    logger = LoggerFactory.getLogger()
-    if log_level is not None:
-        logger.setLevel(log_level.value)
-    logger.info(f"子进程开始，日志等级: {log_level.value if hasattr(log_level, 'value') else log_level}")
+# def fetch_and_process_renewbug(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
+#                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
+#                       marketInit: str = "all", marketblk: str = "boll",
+#                       duration_sleep_time: int = 5, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
+#     """后台数据获取与处理进程"""
+#     logger = LoggerFactory.getLogger()
+#     if log_level is not None:
+#         logger.setLevel(log_level.value)
+#     logger.info(f"子进程开始，日志等级: {log_level.value if hasattr(log_level, 'value') else log_level}")
     
-    global START_INIT
-    g_values = cct.GlobalValues(shared_dict)
-    resample = g_values.getkey("resample") or "d"
-    market = g_values.getkey("market", marketInit)
-    blkname = g_values.getkey("blkname", marketblk)
-    logger.info(f"当前选择市场: {market}, blkname={blkname}")
-    st_key_sort = g_values.getkey("st_key_sort", "3 0")
+#     global START_INIT
+#     g_values = cct.GlobalValues(shared_dict)
+#     resample = g_values.getkey("resample") or "d"
+#     market = g_values.getkey("market", marketInit)
+#     blkname = g_values.getkey("blkname", marketblk)
+#     logger.info(f"当前选择市场: {market}, blkname={blkname}")
+#     st_key_sort = g_values.getkey("st_key_sort", "3 0")
     
-    lastpTDX_DF, top_all = pd.DataFrame(), pd.DataFrame()
-    detect_calc_support_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
-    logger.info(f"init resample: {resample} flag: {flag.value if flag else 'None'} detect_calc_support: {detect_calc_support_val}")
+#     lastpTDX_DF, top_all = pd.DataFrame(), pd.DataFrame()
+#     detect_calc_support_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
+#     logger.info(f"init resample: {resample} flag: {flag.value if flag else 'None'} detect_calc_support: {detect_calc_support_val}")
     
-    while True:
-        try:
-            time_s = time.time()
-            if flag is not None and not flag.value:
-                for _ in range(5):
-                    if flag.value: break
-                    time.sleep(1)
-                continue
+#     while True:
+#         try:
+#             time_s = time.time()
+#             if flag is not None and not flag.value:
+#                 for _ in range(5):
+#                     if flag.value: break
+#                     time.sleep(1)
+#                 continue
             
-            # 检查配置更新
-            new_resample = g_values.getkey("resample") or "d"
-            if new_resample != resample:
-                logger.info(f'resample changed: {resample} -> {new_resample}')
-                resample = new_resample
-                top_all = pd.DataFrame()
-                lastpTDX_DF = pd.DataFrame()
+#             # 检查配置更新
+#             new_resample = g_values.getkey("resample") or "d"
+#             if new_resample != resample:
+#                 logger.info(f'resample changed: {resample} -> {new_resample}')
+#                 resample = new_resample
+#                 top_all = pd.DataFrame()
+#                 lastpTDX_DF = pd.DataFrame()
             
-            new_market = g_values.getkey("market", marketInit)
-            if new_market != market:
-                logger.info(f'market changed: {market} -> {new_market}')
-                market = new_market
-                top_all = pd.DataFrame()
-                lastpTDX_DF = pd.DataFrame()
+#             new_market = g_values.getkey("market", marketInit)
+#             if new_market != market:
+#                 logger.info(f'market changed: {market} -> {new_market}')
+#                 market = new_market
+#                 top_all = pd.DataFrame()
+#                 lastpTDX_DF = pd.DataFrame()
             
-            st_key_sort = g_values.getkey("st_key_sort", "3 0")
+#             st_key_sort = g_values.getkey("st_key_sort", "3 0")
             
-            # 清理逻辑
-            if start_init > 0 and 830 <= cct.get_now_time_int() <= 915:
-                today = cct.get_today()
-                if not (g_values.getkey("tdx.init.done") is True and g_values.getkey("tdx.init.date") == today):
-                    if clean_expired_tdx_file(logger, g_values, cct.get_trade_date_status, cct.get_today, 
-                                            cct.get_now_time_int, cct.get_ramdisk_path, ramdisk_dir):
-                        now_time = cct.get_now_time_int()
-                        if now_time <= 915:
-                            time_init = time.time()
-                            start_init = 0
-                            top_now = tdd.getSinaAlldf(market=market, vol=ct.json_countVol, vtype=ct.json_countType)
-                            resamples = ['d', '3d', 'w', 'm'] if now_time <= 900 else ['3d']
-                            for res_m in resamples:
-                                if res_m != resample:
-                                    tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[res_m], resample=res_m)
-                            g_values.setkey("tdx.init.done", True)
-                            g_values.setkey("tdx.init.date", today)
-                            logger.info(f"init_tdx done, elapsed: {time.time() - time_init:.2f}s")
+#             # 清理逻辑
+#             if start_init > 0 and 830 <= cct.get_now_time_int() <= 915:
+#                 today = cct.get_today()
+#                 if not (g_values.getkey("tdx.init.done") is True and g_values.getkey("tdx.init.date") == today):
+#                     if clean_expired_tdx_file(logger, g_values, cct.get_trade_date_status, cct.get_today, 
+#                                             cct.get_now_time_int, cct.get_ramdisk_path, ramdisk_dir):
+#                         now_time = cct.get_now_time_int()
+#                         if now_time <= 915:
+#                             time_init = time.time()
+#                             start_init = 0
+#                             top_now = tdd.getSinaAlldf(market=market, vol=ct.json_countVol, vtype=ct.json_countType)
+#                             resamples = ['d', '3d', 'w', 'm'] if now_time <= 900 else ['3d']
+#                             for res_m in resamples:
+#                                 if res_m != resample:
+#                                     tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[res_m], resample=res_m)
+#                             g_values.setkey("tdx.init.done", True)
+#                             g_values.setkey("tdx.init.date", today)
+#                             logger.info(f"init_tdx done, elapsed: {time.time() - time_init:.2f}s")
                         
-                        for _ in range(30):
-                            if flag and not flag.value: break
-                            time.sleep(1)
-                        continue
+#                         for _ in range(30):
+#                             if flag and not flag.value: break
+#                             time.sleep(1)
+#                         continue
 
-            if start_init > 0 and (not cct.get_work_time()):
-                for _ in range(5):
-                    if flag and not flag.value: break
-                    time.sleep(1)
-                continue
+#             if start_init > 0 and (not cct.get_work_time()):
+#                 for _ in range(5):
+#                     if flag and not flag.value: break
+#                     time.sleep(1)
+#                 continue
 
-            # 获取数据
-            if market == 'indb':
-                indf = get_indb_df()
-                stock_code_list = indf.code.tolist()
-                top_now = tdd.getSinaAlldf(market=stock_code_list, vol=ct.json_countVol, vtype=ct.json_countType)
-            else:
-                top_now = tdd.getSinaAlldf(market=market, vol=ct.json_countVol, vtype=ct.json_countType)
+#             # 获取数据
+#             if market == 'indb':
+#                 indf = get_indb_df()
+#                 stock_code_list = indf.code.tolist()
+#                 top_now = tdd.getSinaAlldf(market=stock_code_list, vol=ct.json_countVol, vtype=ct.json_countType)
+#             else:
+#                 top_now = tdd.getSinaAlldf(market=market, vol=ct.json_countVol, vtype=ct.json_countType)
                 
-            if top_now.empty:
-                time.sleep(duration_sleep_time)
-                continue
+#             if top_now.empty:
+#                 time.sleep(duration_sleep_time)
+#                 continue
 
-            # 合并与计算
-            detect_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
-            if top_all.empty:
-                if lastpTDX_DF.empty:
-                    top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[resample], 
-                                                                   resample=resample, detect_calc_support=detect_val)
-                else:
-                    top_all = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF, detect_calc_support=detect_val)
-            else:
-                top_all = cct.combine_dataFrame(top_all, top_now, col="couts", compare="dff")
+#             # 合并与计算
+#             detect_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
+#             if top_all.empty:
+#                 if lastpTDX_DF.empty:
+#                     top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[resample], 
+#                                                                    resample=resample, detect_calc_support=detect_val)
+#                 else:
+#                     top_all = tdd.get_append_lastp_to_df(top_now, lastpTDX_DF, detect_calc_support=detect_val)
+#             else:
+#                 top_all = cct.combine_dataFrame(top_all, top_now, col="couts", compare="dff")
 
-            top_all = calc_indicators(top_all, logger, resample)
+#             top_all = calc_indicators(top_all, logger, resample)
             
-            # 过滤与排序
-            sort_cols, sort_keys = ct.get_market_sort_value_key(st_key_sort, top_all) if not top_all.empty else ct.get_market_sort_value_key(st_key_sort)
+#             # 过滤与排序
+#             sort_cols, sort_keys = ct.get_market_sort_value_key(st_key_sort, top_all) if not top_all.empty else ct.get_market_sort_value_key(st_key_sort)
             
-            top_temp = top_all.copy()
-            top_temp = stf.getBollFilter(df=top_temp, resample=resample, down=False)
-            top_temp = top_temp.sort_values(by=sort_cols, ascending=sort_keys)
+#             top_temp = top_all.copy()
+#             top_temp = stf.getBollFilter(df=top_temp, resample=resample, down=False)
+#             top_temp = top_temp.sort_values(by=sort_cols, ascending=sort_keys)
             
-            df_all = clean_bad_columns(top_temp)
-            df_all = sanitize(df_all)
-            queue.put(df_all)
-            gc.collect()
+#             df_all = clean_bad_columns(top_temp)
+#             df_all = sanitize(df_all)
+#             queue.put(df_all)
+#             gc.collect()
             
-            logger.info(f'now: {cct.get_now_time_int()} elapsed: {time.time() - time_s:.1f}s, count: {len(df_all)}, next sleep: {duration_sleep_time}')
-            for _ in range(duration_sleep_time):
-                if flag and not flag.value: break
-                time.sleep(0.5)
-            start_init = 1
+#             logger.info(f'now: {cct.get_now_time_int()} elapsed: {time.time() - time_s:.1f}s, count: {len(df_all)}, next sleep: {duration_sleep_time}')
+#             for _ in range(duration_sleep_time):
+#                 if flag and not flag.value: break
+#                 time.sleep(0.5)
+#             start_init = 1
 
-        except Exception as e:
-            logger.error(f"Error in background process: {e}", exc_info=True)
-            time.sleep(duration_sleep_time)
+#         except Exception as e:
+#             logger.error(f"Error in background process: {e}", exc_info=True)
+#             time.sleep(duration_sleep_time)
 
 def send_code_via_pipe(code: Union[str, Dict[str, Any]], logger: Any,pipe_name: str=PIPE_NAME) -> bool:
     """通过命名管道发送股票代码"""
@@ -199,12 +199,12 @@ def send_code_via_pipe(code: Union[str, Dict[str, Any]], logger: Any,pipe_name: 
 def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
                       marketInit: str = "all", marketblk: str = "boll",
-                      duration_sleep_time: int = 5, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
+                      duration_sleep_time: int = 120, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
     """后台数据获取与处理进程"""
     logger = LoggerFactory.getLogger()
     if log_level is not None:
         logger.setLevel(log_level.value)
-    logger.info(f"子进程开始，日志等级: {log_level.value if hasattr(log_level, 'value') else log_level}")
+    logger.info(f"子进程开始，日志等级: {log_level.value if hasattr(log_level, 'value') else log_level} duration_sleep_time:{duration_sleep_time}")
     
     START_INIT = 0
     g_values = cct.GlobalValues(shared_dict)
@@ -239,28 +239,6 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                 # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
                 st_key_sort = g_values.getkey("st_key_sort")
             elif START_INIT > 0 and 830 <= cct.get_now_time_int() <= 915:
-                # today = cct.get_today()
-                # if not (g_values.getkey("tdx.init.done") is True and g_values.getkey("tdx.init.date") == today):
-                #     if clean_expired_tdx_file(logger, g_values, cct.get_trade_date_status, cct.get_today, 
-                #                             cct.get_now_time_int, cct.get_ramdisk_path, ramdisk_dir):
-                #         now_time = cct.get_now_time_int()
-                #         if now_time <= 915:
-                #             time_init = time.time()
-                #             start_init = 0
-                #             top_now = tdd.getSinaAlldf(market=market, vol=ct.json_countVol, vtype=ct.json_countType)
-                #             resamples = ['d', '3d', 'w', 'm'] if now_time <= 900 else ['3d']
-                #             for res_m in resamples:
-                #                 if res_m != resample:
-                #                     tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[res_m], resample=res_m)
-                #             g_values.setkey("tdx.init.done", True)
-                #             g_values.setkey("tdx.init.date", today)
-                #             logger.info(f"init_tdx done, elapsed: {time.time() - time_init:.2f}s")
-                        
-                #         for _ in range(30):
-                #             if flag and not flag.value: break
-                #             time.sleep(1)
-                #         continue
-
                 today = cct.get_today()
                 # 0️⃣ init 今天已经完成 → 直接跳过
                 if (
@@ -273,6 +251,11 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                 # if not clean_expired_tdx_file(logger, g_values):
                 if not clean_expired_tdx_file(logger, g_values, cct.get_trade_date_status, cct.get_today, cct.get_now_time_int, cct.get_ramdisk_path, ramdisk_dir):
                     logger.info(f"{today} 清理尚未完成，跳过 init_tdx")
+                    # 5️⃣ 节流
+                    for _ in range(30):
+                        if not flag.value:
+                            break
+                        time.sleep(1)
                     continue
 
                 # 2️⃣ 再次确认时间（防止跨 09:15）
@@ -316,13 +299,14 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                 # 4️⃣ 关键：标记 init 已完成（跨循环）
                 g_values.setkey("tdx.init.done", True)
                 g_values.setkey("tdx.init.date", today)
-
+                top_all = pd.DataFrame()
+                lastpTDX_DF = pd.DataFrame()
                 logger.info(
                     f"init_tdx tdx.init.done:{g_values.getkey('tdx.init.done')} tdx.init.date:{g_values.getkey('tdx.init.date')} 总用时: {time.time() - time_init:.2f}s"
                 )
 
                 # 5️⃣ 节流
-                for _ in range(30):
+                for _ in range(duration_sleep_time):
                     if not flag.value:
                         break
                     time.sleep(1)
@@ -382,10 +366,17 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             df_all = sanitize(df_all)
             queue.put(df_all)
             gc.collect()
-            logger.info(f'now: {cct.get_now_time_int()}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+            logger.info(f'process now: {cct.get_now_time_int()} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+            if cct.get_now_time_int() < 945:
+                sleep_step = 0.5
+            else:
+                sleep_step = 1
+            # cout_time = 0
             for _ in range(duration_sleep_time):
                 if not flag.value: break
-                time.sleep(0.5)
+                time.sleep(sleep_step)
+                # cout_time +=sleep_step
+                # logger.info(f'cout_time:{cout_time} duration_sleep_time:{duration_sleep_time} sleep_step:{sleep_step}')
             START_INIT = 1
 
         except Exception as e:

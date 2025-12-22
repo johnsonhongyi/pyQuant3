@@ -38,6 +38,9 @@ class VoiceAnnouncer:
         self.on_speak_start: Optional[Callable[[str], None]] = None # 回调函数: func(code)
         self.on_speak_end: Optional[Callable[[str], None]] = None   # 回调函数: func(code)
         self._stop_event = threading.Event()
+        self.current_code = None
+        self.current_engine = None
+        
         # 仅当 pyttsx3 可用时启动线程
         if pyttsx3:
             self._thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -53,6 +56,8 @@ class VoiceAnnouncer:
                 pythoncom.CoInitialize()
             
             engine = pyttsx3.init()
+            self.current_engine = engine
+            
             # 设置语速
             rate = engine.getProperty('rate')
             engine.setProperty('rate', rate + 20)
@@ -64,6 +69,7 @@ class VoiceAnnouncer:
         except Exception as e:
             logger.error(f"TTS Play Error: {e}")
         finally:
+            self.current_engine = None
             # 尝试清理
             if engine:
                 try:
@@ -84,20 +90,29 @@ class VoiceAnnouncer:
                 data = self.queue.get(timeout=1)
                 text = data.get('text')
                 code = data.get('code')
+                
+                self.current_code = code
+                
                 if text:
                     if self.on_speak_start:
                         try:
                             self.on_speak_start(code)
                         except: pass
+                    
                     self._speak_one(text)
+                    
                     if self.on_speak_end:
                         try:
                             self.on_speak_end(code)
                         except: pass
+                
+                self.current_code = None
+                
             except queue.Empty:
                 continue
             except Exception as e:
                 logger.error(f"Voice Loop Error: {e}")
+                self.current_code = None
                 time.sleep(1) # 防止死循环刷屏
 
     def say(self, text: str, code: Optional[str] = None) -> None:
@@ -106,6 +121,31 @@ class VoiceAnnouncer:
                 self.queue.put({'text': text, 'code': code})
         else:
             logger.info(f"Voice (Disabled): {text}")
+
+    def cancel_for_code(self, target_code: str):
+        """停止指定代码的语音播报并清除队列中相关项"""
+        # 1. 如果当前正在播报该代码，尝试停止
+        if self.current_code == target_code and self.current_engine:
+            try:
+                logger.info(f"🛑 Stopping voice for {target_code}")
+                self.current_engine.stop()
+            except Exception as e:
+                logger.error(f"Failed to stop engine: {e}")
+        
+        # 2. 清除队列中的等待项
+        temp_list = []
+        try:
+            while True:
+                item = self.queue.get_nowait()
+                if item.get('code') != target_code:
+                    temp_list.append(item)
+                else:
+                    logger.info(f"🗑️ Removed pending voice for {target_code}")
+        except queue.Empty:
+            pass
+        
+        for item in temp_list:
+            self.queue.put(item)
 
     def stop(self):
         self._stop_event.set()
