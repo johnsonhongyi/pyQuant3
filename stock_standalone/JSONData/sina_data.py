@@ -404,7 +404,7 @@ class Sina:
                                         hdf_data_valid = False
                                         log.warning("HDF5 data quality poor (zero_ratio of %s: %.2f), bypassing early return" % (c_check, zero_ratio))
                                         break
-                        
+                                        
                         if hdf_data_valid and ((sina_time_status and l_time < 6) or (not sina_time_status and return_hdf_status)):
                             log.info("Return HDF5 data early (recent:%0.2f)" % l_time)
                             # 兼容转成 HH:MM:SS 格式
@@ -457,7 +457,8 @@ class Sina:
                         break
         
         # 4. 如果缓存缺失，优先从 MultiIndex 历史恢复，然后再应用当前 Tick
-        if cache_needs_rebuild:
+        now_int = cct.get_now_time_int()
+        if cache_needs_rebuild or 920 < now_int <= 1030 :
             log.info("AggregatorCache poor or missing, rebuilding from MultiIndex HDF5...")
             l_limit_time = int(cct.sina_limit_time)
             h5_mi_fname = 'sina_MultiIndex_data'
@@ -467,7 +468,11 @@ class Sina:
             # 此时内存缓存已由 _rebuild_agg_cache 设置好
         else:
             # 正常更新逻辑：先更新增量，再合并
-            self._update_agg_cache(df)
+            h5_mi_fname = 'sina_MultiIndex_data'
+            l_limit_time = int(cct.sina_limit_time)
+            h5_mi_table = 'all_' + str(l_limit_time)
+            h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
+            self._update_agg_cache(df,h5_hist)
             agg_data = self.agg_cache.getkey('agg_metrics')
             df_final = cct.combine_dataFrame(df, agg_data)
 
@@ -539,7 +544,7 @@ class Sina:
 
         return self._filter_suspended(df_final)
 
-    def _update_agg_cache(self, df_latest: pd.DataFrame) -> None:
+    def _update_agg_cache(self, df_latest: pd.DataFrame,h5_hist: pd.DataFrame) -> None:
         """增量更新内存中的聚合指标 (带时间窗口控制)"""
         if df_latest is None or len(df_latest) == 0:
             return
@@ -598,11 +603,31 @@ class Sina:
             #无条件覆盖nclose
             # agg_metrics.loc[common_codes, 'nclose'] = stats.loc[common_codes, 'close']
 
-            # nclose：仅在缺失或非法时才用 close 兜底
-            mask_nclose = agg_metrics.loc[common_codes, 'nclose'].fillna(0) <= 0
-            if mask_nclose.any():
-                fix_codes = common_codes[mask_nclose]
-                agg_metrics.loc[fix_codes, 'nclose'] = stats.loc[fix_codes, 'close']
+            # # nclose：仅在缺失或非法时才用 close 兜底
+            # mask_nclose = agg_metrics.loc[common_codes, 'nclose'].fillna(0) <= 0
+            # # if mask_nclose.any():
+            # #     fix_codes = common_codes[mask_nclose]
+            # #     agg_metrics.loc[fix_codes, 'nclose'] = stats.loc[fix_codes, 'close']
+
+            # if mask_nclose.any():
+            #     time_h5_hist = time.time()
+            #     all_func = {'low': 'nlow', 'high': 'nhigh', 'close': 'nclose'}
+            #     startime = None
+            #     endtime = '15:00:00'
+            #     run_col = ['close']
+            #     fix_codes = common_codes[mask_nclose]
+            #     # agg_metrics.loc[fix_codes, 'nclose'] = stats.loc[fix_codes, 'close']
+            #     agg_df = self.get_col_agg_df(h5_hist, df_latest, run_col, all_func, startime, endtime)
+            #     agg_metrics.loc[fix_codes, 'nclose'] = agg_df.loc[fix_codes, 'nclose']
+            #     log.info(f'update_agg_cache get_col_agg_df_duration_time:{time.time()-time_h5_hist:.1f}')
+        
+        time_h5_hist = time.time()
+        all_func = {'low': 'nlow', 'high': 'nhigh', 'close': 'nclose'}
+        startime = None
+        endtime = '15:00:00'
+        run_col = ['close']
+        df_latest = self.get_col_agg_df(h5_hist, df_latest, run_col, all_func, startime, endtime)
+        log.info(f'update_agg_cache df_latest get_col_agg_df_duration_time:{time.time()-time_h5_hist:.1f}')
 
         new_codes = stats.index.difference(agg_metrics.index)
         if len(new_codes) > 0:
@@ -651,8 +676,7 @@ class Sina:
             all_func = {'low': 'nlow', 'high': 'nhigh', 'close': 'nclose'}
             startime = None
             # endtime = '10:00:00'
-            endtime = '09:45:00'
-            # dd = get_col_agg_df_Test(h5, dd, run_col, all_func, startime, endtime)
+            endtime = '10:30:00'
             # 使用 get_col_agg_df 计算 nclose/nlow/nhigh/nstd
             agg_df = self.get_col_agg_df(h5_hist, df_current, run_col, all_func, startime, endtime)
 
