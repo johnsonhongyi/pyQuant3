@@ -1308,7 +1308,27 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
             l_time = time.time() - o_time.iloc[0]
             if force_cache or l_time < limit_time:
                 log.warning(f"[HDF-USE] rows={len(h5)} l_time={l_time:.1f}")
-                return h5
+                if market == 'all':
+                    co_inx = [inx for inx in h5.index if str(inx).startswith(('6','30','00','688','43','83','87','92'))]
+                elif market == 'sh':
+                    co_inx = [inx for inx in h5.index if str(inx).startswith(('6'))]
+                elif market == 'sz':
+                    co_inx = [inx for inx in h5.index if str(inx).startswith(('00'))]
+                elif market == 'cyb':
+                    co_inx = [inx for inx in h5.index if str(inx).startswith(('30'))]
+                elif market == 'kcb':
+                    co_inx = [inx for inx in h5.index if str(inx).startswith(('688'))]
+                elif market == 'bj':  
+                #elem.startswith('43') or elem.startswith('83') or elem.startswith('87') or elem.startswith('92')
+                    co_inx = [inx for inx in h5.index if str(inx).startswith(('43','83','87','92'))]
+                else:
+                    log.error('market is not Find:%s'%(market))
+                    codel = cct.read_to_blocknew(market)
+                    co_inx = [inx for inx in codel if inx in h5.index]
+                dd = h5.loc[co_inx]
+                if len(dd) > 100:
+                    log.info(f"return sina_ratio market:{market} count:{len(dd)}")
+                    return dd
 
     # --------- URL 构建 ---------
     url_list = []
@@ -1353,7 +1373,43 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
         df['percent'] = df['percent'].astype(float).round(2)
     df = df.drop_duplicates('code').set_index('code')
 
-    h5a.write_hdf_db(h5_fname, df, table=h5_table, append=False)
+    if df is not None and len(df) > 0:
+        if 'code' in df.columns:
+            df = df.drop_duplicates('code').set_index('code')
+        if market=='all':
+            h5 = h5a.write_hdf_db(h5_fname, df, table=h5_table,append=False)
+        else:
+            h5 = h5a.write_hdf_db(h5_fname, df, table=h5_table,append=True)
+        # if showtime: print(("Market-df:%s %s" % (format((time.time() - start_t), '.1f'), len(df))), end=' ')
+        if market == 'all':
+            co_inx = [inx for inx in df.index if str(inx).startswith(('6','30','00','688','43','83','87','92'))]
+            df = df.loc[co_inx]            
+        elif market == 'sh':
+            co_inx = [inx for inx in df.index if str(inx).startswith(('6'))]
+            df = df.loc[co_inx]            
+        elif market == 'sz':
+            co_inx = [inx for inx in df.index if str(inx).startswith(('00'))]
+            df = df.loc[co_inx]            
+        elif market == 'cyb':
+            co_inx = [inx for inx in df.index if str(inx).startswith(('30'))]
+            df = df.loc[co_inx]            
+        elif market == 'kcb':
+            co_inx = [inx for inx in df.index if str(inx).startswith(('688'))]
+            df = df.loc[co_inx]  
+        elif market == 'bj':  
+            co_inx = [inx for inx in df.index if str(inx).startswith(('43','83','87','92'))]
+            df = df.loc[co_inx]
+        else:
+            log.error('market is not Find:%s'%(market))
+            codel = cct.read_to_blocknew(market)
+            co_inx = [inx for inx in codel if inx in df.index]
+            df = df.loc[co_inx]
+        log.info(f"return sina_ratio market:{market} count:{len(df)}")
+
+    else:
+        if showtime:print(("no data Market-df:%s" % (format((time.time() - start_t), '.2f'))))
+        log.error("no data Market-df:%s"%(url_list[0]))
+        return []
 
     if showtime:
         print(f"Market-df:{time.time() - start:.1f}s {len(df)}", end=' ')
@@ -1393,7 +1449,7 @@ if __name__ == '__main__':
 
     print("getconfigBigCount:",getconfigBigCount(count=None, write=False))
     log.setLevel(LoggerFactory.INFO)
-    df = get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, pause=0.001)
+    df = get_sina_Market_json(market='bj', showtime=True, num='100', retry_count=3, pause=0.001)
     print(df)
     import ipdb;ipdb.set_trace()
 
