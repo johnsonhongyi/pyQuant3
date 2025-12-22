@@ -4,7 +4,6 @@ import json
 import shutil
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Union
-
 # Note: These should ideally be imported or passed in. 
 # For now, we will expect them to be provided or we'll define them here if they are static.
 
@@ -74,30 +73,36 @@ def list_archives(archive_dir: str, prefix: str = "search_history") -> List[str]
     return files
 
 def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any, max_keep: int = 15) -> None:
-    """通用备份函数"""
+    """通用备份函数，支持 JSON 和 SQLite 数据库文件"""
     if not os.path.exists(src_file):
         logger.info(f"⚠ {src_file} 不存在，跳过存档")
         return
 
-    try:
-        with open(src_file, "r", encoding="utf-8") as f:
-            content = f.read().strip()
-    except Exception as e:
-        logger.info(f"⚠ 无法读取 {src_file}: {e}")
-        return
+    # 对 JSON 文件进行内容读取比对
+    is_json = src_file.lower().endswith(".json")
+    content = None
+    if is_json:
+        try:
+            with open(src_file, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+        except Exception as e:
+            logger.info(f"⚠ 无法读取 {src_file}: {e}")
+            return
 
-    if not content or content in ("[]", "{}", ""):
-        logger.info(f"⚠ {src_file} 内容为空，跳过存档")
-        return
+        if not content or content in ("[]", "{}", ""):
+            logger.info(f"⚠ {src_file} 内容为空，跳过存档")
+            return
 
     os.makedirs(archive_dir, exist_ok=True)
 
+    # 获取已有归档列表
     files = sorted(
         [f for f in os.listdir(archive_dir) if f.startswith(prefix + "_")],
         reverse=True
     )
 
-    if files:
+    # JSON 文件做重复检查
+    if is_json and files:
         last_file = os.path.join(archive_dir, files[0])
         try:
             with open(last_file, "r", encoding="utf-8") as f:
@@ -108,13 +113,20 @@ def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any
         except Exception as e:
             logger.info(f"⚠ 无法读取最近存档: {e}")
 
-    today = datetime.now().strftime("%Y-%m-%d")
-    filename = f"{prefix}_{today}.json"
+    # 构建归档文件名
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    ext = os.path.splitext(src_file)[1]
+    filename = f"{prefix}_{timestamp}{ext}"
     dest = os.path.join(archive_dir, filename)
 
-    shutil.copy2(src_file, dest)
-    logger.info(f"✅ 已归档：{os.path.relpath(dest)}")
+    try:
+        shutil.copy2(src_file, dest)
+        logger.info(f"✅ 已归档：{os.path.relpath(dest)}")
+    except Exception as e:
+        logger.info(f"⚠ 归档失败 {src_file} -> {e}")
+        return
 
+    # 清理旧归档
     files = sorted(
         [os.path.join(archive_dir, f) for f in os.listdir(archive_dir) if f.startswith(prefix + "_")],
         key=os.path.getmtime,
@@ -126,6 +138,60 @@ def archive_file_tools(src_file: str, prefix: str, archive_dir: str, logger: Any
             logger.info(f"🗑 删除旧归档: {os.path.basename(old_file)}")
         except Exception as e:
             logger.info(f"⚠ 删除失败 {old_file} -> {e}")
+                
+# def archive_file_tools_old(src_file: str, prefix: str, archive_dir: str, logger: Any, max_keep: int = 15) -> None:
+#     """通用备份函数"""
+#     if not os.path.exists(src_file):
+#         logger.info(f"⚠ {src_file} 不存在，跳过存档")
+#         return
+
+#     try:
+#         with open(src_file, "r", encoding="utf-8") as f:
+#             content = f.read().strip()
+#     except Exception as e:
+#         logger.info(f"⚠ 无法读取 {src_file}: {e}")
+#         return
+
+#     if not content or content in ("[]", "{}", ""):
+#         logger.info(f"⚠ {src_file} 内容为空，跳过存档")
+#         return
+
+#     os.makedirs(archive_dir, exist_ok=True)
+
+#     files = sorted(
+#         [f for f in os.listdir(archive_dir) if f.startswith(prefix + "_")],
+#         reverse=True
+#     )
+
+#     if files:
+#         last_file = os.path.join(archive_dir, files[0])
+#         try:
+#             with open(last_file, "r", encoding="utf-8") as f:
+#                 last_content = f.read().strip()
+#             if content == last_content:
+#                 logger.info(f"⚠ {src_file} 与上一次 {prefix} 存档相同，跳过存档")
+#                 return
+#         except Exception as e:
+#             logger.info(f"⚠ 无法读取最近存档: {e}")
+
+#     today = datetime.now().strftime("%Y-%m-%d")
+#     filename = f"{prefix}_{today}.json"
+#     dest = os.path.join(archive_dir, filename)
+
+#     shutil.copy2(src_file, dest)
+#     logger.info(f"✅ 已归档：{os.path.relpath(dest)}")
+
+#     files = sorted(
+#         [os.path.join(archive_dir, f) for f in os.listdir(archive_dir) if f.startswith(prefix + "_")],
+#         key=os.path.getmtime,
+#         reverse=True
+#     )
+#     for old_file in files[max_keep:]:
+#         try:
+#             os.remove(old_file)
+#             logger.info(f"🗑 删除旧归档: {os.path.basename(old_file)}")
+#         except Exception as e:
+#             logger.info(f"⚠ 删除失败 {old_file} -> {e}")
 
 def archive_search_history_list(monitor_list_file: str, search_history_file: str, archive_dir: str, logger: Any) -> None:
     """归档监控文件，避免空或重复存档"""
