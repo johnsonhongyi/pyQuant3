@@ -777,6 +777,21 @@ class StockLiveStrategy:
         """测试特定报警"""
         self._trigger_alert(code, name, msg)
 
+    def snooze_alert(self, code, cycles=10):
+        """
+        暂停报警一段时间
+        :param code: 股票代码
+        :param cycles: 暂停的周期数 (总时长 = cycles * alert_cooldown)
+        """
+        if code in self._monitored_stocks:
+            # 逻辑: last_alert 设为未来时间，使得 now - last_alert < cooldown 持续成立
+            # 想要暂停 N 个周期，即 N * cooldown 时间
+            # 在 t = now + N * cooldown 时，恢复报警 => (now + N*cooldown) - last_alert >= cooldown
+            # => last_alert <= now + (N-1)*cooldown
+            future_offset = (cycles - 1) * self._alert_cooldown
+            self._monitored_stocks[code]['last_alert'] = time.time() + future_offset
+            logger.info(f"😴 Snoozed alert for {code} for {cycles} cycles ({cycles * self._alert_cooldown}s)")
+
     def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0) -> None:
         """触发报警"""
         logger.warning(f"🔔 ALERT: {message}")
