@@ -790,7 +790,8 @@ class StockLiveStrategy:
             # => last_alert <= now + (N-1)*cooldown
             future_offset = (cycles - 1) * self._alert_cooldown
             self._monitored_stocks[code]['last_alert'] = time.time() + future_offset
-            logger.info(f"😴 Snoozed alert for {code} for {cycles} cycles ({cycles * self._alert_cooldown}s)")
+            dt_str = datetime.fromtimestamp(self._monitored_stocks[code]['last_alert']).strftime("%Y-%m-%d %H:%M:%S")
+            logger.info(f"😴 Snoozed alert for {code}  in {cycles} cycles ({cycles * self._alert_cooldown}s next_alert_time:{dt_str})")
 
     def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0) -> None:
         """触发报警"""
@@ -800,7 +801,7 @@ class StockLiveStrategy:
         self._play_sound_async()
         
         # 2. 语音播报
-        speak_text = f"注意{action}，{name}，{message}"
+        speak_text = f"注意{action}，{code} ，{message}"
         self._voice.say(speak_text, code=code)
         
         # 3. 回调
