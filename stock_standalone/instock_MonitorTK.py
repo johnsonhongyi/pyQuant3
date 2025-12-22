@@ -1140,7 +1140,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.log_level = mp.Value('i', log_level)  # 'i' 表示整数
         self.detect_calc_support = mp.Value('b', detect_calc_support)  # 'i' 表示整数
         # self.proc = mp.Process(target=fetch_and_process, args=(self.queue,))
-        self.proc = mp.Process(target=fetch_and_process, args=(self.global_dict,self.queue, "boll", self.refresh_flag,self.log_level, self.detect_calc_support))
+        # def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
+        #                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
+        #                       marketInit: str = "all", marketblk: str = "boll",
+        #                       duration_sleep_time: int = 5, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
+        self.proc = mp.Process(target=fetch_and_process, args=(self.global_dict,self.queue, "boll", self.refresh_flag,self.log_level, self.detect_calc_support,marketInit,marketblk,duration_sleep_time))
         # self.proc.daemon = True
         self.proc.daemon = False 
         self.proc.start()
@@ -1201,7 +1205,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self.refresh_tree(self.df_all)
                             
                 # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
-                if has_update and hasattr(self, 'live_strategy'):
+                if not self.tip_var.get() and has_update and hasattr(self, 'live_strategy'):
                         self.live_strategy.process_data(self.df_all)
                 # -------------------------
 
@@ -1380,6 +1384,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # padx=0, pady=0, bd=0, highlightthickness=0
             )
             cb.pack(side=tk.LEFT, padx=1)
+
+    def reload_cfg_value(self):
+        global marketInit,marketblk,scale_offset,resampleInit
+        global duration_sleep_time,write_all_day_date,detect_calc_support
+        conf_ini= cct.get_conf_path('global.ini')
+        if not conf_ini:
+            logger.info("global.ini 加载失败，程序无法继续运行")
+
+        CFG = cct.GlobalConfig(conf_ini)
+
+        marketInit = CFG.marketInit
+        marketblk = CFG.marketblk
+        scale_offset = CFG.scale_offset
+        resampleInit = CFG.resampleInit
+        duration_sleep_time = CFG.duration_sleep_time
+        write_all_day_date = CFG.write_all_day_date
+        detect_calc_support = CFG.detect_calc_support
+        alert_cooldown = CFG.alert_cooldown
+        saved_width,saved_height = CFG.saved_width,CFG.saved_height 
+        logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} \
+            scale_offset: {scale_offset} saved_width:{saved_width},{saved_height} \
+            duration_sleep_time:{duration_sleep_time} \
+            detect_calc_support:{detect_calc_support}")
 
     def update_linkage_status(self):
         # 此处处理 checkbuttons 状态
@@ -3087,16 +3114,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             pass
 
     def _close_alert(self, win):
-        """关闭弹窗并刷新布局"""
+        """关闭弹窗并刷新布局，并停止关联的语音报警"""
         if hasattr(self, 'active_alerts') and win in self.active_alerts:
             self.active_alerts.remove(win)
         
-        # 清理映射
+        # 清理映射并获取关联代码
+        target_code = None
         if hasattr(self, 'code_to_alert_win'):
             for c, w in list(self.code_to_alert_win.items()):
                 if w == win:
+                    target_code = c
                     del self.code_to_alert_win[c]
                     break
+
+        # 停止该代码的语音播报 (以便立即播放队列中的下一个)
+        if target_code and hasattr(self, 'live_strategy') and self.live_strategy:
+             v = getattr(self.live_strategy, '_voice', None)
+             if v and hasattr(v, 'cancel_for_code'):
+                 v.cancel_for_code(target_code)
 
         win.destroy()
         self.after(100, self._update_alert_positions)
@@ -7974,7 +8009,7 @@ def test_single_thread():
     log_level = mp.Value('i', LoggerFactory.DEBUG)  # 'i' 表示整数
     detect_calc_support = mp.Value('b', False)  # 'i' 表示整数
     # 直接单线程调用
-    fetch_and_process(shared_dict, q, blkname="boll", flag=flag ,log_level=log_level,detect_calc_support=detect_calc_support)
+    fetch_and_process(shared_dict, q, blkname="boll", flag=flag ,log_level=log_level,detect_calc_support_var=detect_calc_support)
 
 # 常用命令示例列表
 COMMON_COMMANDS = [

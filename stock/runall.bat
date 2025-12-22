@@ -16,14 +16,14 @@ echo 当前目录: %WORKDIR%
 REM ============================
 REM 启动第一个程序 sina_Monitor
 REM ============================
-if exist "%WORKDIR%\sina_Monitor.exe" (
+if exist "%WORKDIR%\sina_Monitor1.exe" (
     echo 启动 EXE: sina_Monitor.exe
     start cmd /k  "%WORKDIR%\sina_Monitor.exe"
-) else if exist "%WORKDIR%\sina_Monitor.py" (
+) else if exist "%WORKDIR%\sina_Monitor1.py" (
     echo 启动 Python: sina_Monitor.py
-    start cmd /k  python "%WORKDIR%\sina_Monitor.py"
+    start cmd /k  python "%WORKDIR%\sina_Monitor1.py"
 ) else (
-    echo ERROR: 找不到 sina_Monitor.exe 或 sina_Monitor.py
+    echo ERROR: 找不到 sina_Monitor1.exe 或 sina_Monitor1.py
 )
 
 REM ============================

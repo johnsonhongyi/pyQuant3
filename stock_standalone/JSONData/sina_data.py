@@ -21,6 +21,7 @@ log = LoggerFactory.getLogger("sina_data")
 import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union, Callable
 import aiohttp
+import asyncio
 
 def get_base_path() -> str:
     """

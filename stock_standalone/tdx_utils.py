@@ -3,6 +3,7 @@ import os
 import pandas as pd
 from datetime import datetime
 from typing import Any, Optional, Union
+import re
 
 def clean_bad_columns(df: pd.DataFrame) -> pd.DataFrame:
     """清理异常列名"""
@@ -24,12 +25,20 @@ def cross_process_lock(date_str: str, lock_pattern: str = "clean_once_{date}.loc
     except FileExistsError:
         return None
 
+# def get_clean_flag_path(today_str: str, ramdisk_dir: str) -> str:
+#     """当天清理完成的跨进程标记文件路径"""
+#     return os.path.join(
+#         ramdisk_dir,
+#         f".tdx_last_df.cleaned.{today_str}"
+#     )
+
 def get_clean_flag_path(today_str: str, ramdisk_dir: str) -> str:
-    """当天清理完成的跨进程标记文件路径"""
+    ramdisk_dir = normalize_windows_root(ramdisk_dir)
     return os.path.join(
         ramdisk_dir,
         f".tdx_last_df.cleaned.{today_str}"
     )
+
 
 def cleanup_old_clean_flags(ramdisk_dir: str, keep_days: int = 5) -> None:
     """清理过期的 clean flag 文件"""
@@ -46,6 +55,15 @@ def cleanup_old_clean_flags(ramdisk_dir: str, keep_days: int = 5) -> None:
                 os.remove(os.path.join(ramdisk_dir, fn))
         except Exception:
             pass
+
+def normalize_windows_root(path: str) -> str:
+    """
+    确保 Windows 盘符路径为 G:\\ 形式
+    """
+    if re.fullmatch(r"[A-Za-z]:", path):
+        return path + "\\"
+    return os.path.abspath(path)
+
 
 def clean_expired_tdx_file(logger: Any, g_values: Any, get_trade_date_status_func: Any, 
                           get_today_func: Any, get_now_time_int_func: Any, 
@@ -79,7 +97,6 @@ def clean_expired_tdx_file(logger: Any, g_values: Any, get_trade_date_status_fun
         f"[CLEAN_CHECK] pid={os.getpid()} today={today} now={now_time} "
         f"file_exists={os.path.exists(fname)} flag_exists={os.path.exists(flag_path)}"
     )
-
     # ④ 跨进程：今天已完成
     if os.path.exists(flag_path):
         g_values.setkey("tdx.clean.done", True)
