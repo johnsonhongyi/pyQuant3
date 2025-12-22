@@ -1408,7 +1408,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         logger.info(f"reload cfg marketInit : {marketInit} marketblk: {marketblk} \
             scale_offset: {scale_offset} saved_width:{saved_width},{saved_height} \
             duration_sleep_time:{duration_sleep_time} \
-            detect_calc_support:{detect_calc_support}")
+            detect_calc_support:{detect_calc_support} \
+            alert_cooldown:{alert_cooldown}\
+            pending_alert_cycles:{pending_alert_cycles}")
 
     def update_linkage_status(self):
         # 此处处理 checkbuttons 状态

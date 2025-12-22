@@ -595,7 +595,14 @@ class Sina:
             if now_int <= 1030:
                  agg_metrics.loc[common_codes, 'nhigh'] = agg_metrics.loc[common_codes, 'nhigh'].combine(stats.loc[common_codes, 'high'], max)
 
-            agg_metrics.loc[common_codes, 'nclose'] = stats.loc[common_codes, 'close']
+            #无条件覆盖nclose
+            # agg_metrics.loc[common_codes, 'nclose'] = stats.loc[common_codes, 'close']
+
+            # nclose：仅在缺失或非法时才用 close 兜底
+            mask_nclose = agg_metrics.loc[common_codes, 'nclose'].fillna(0) <= 0
+            if mask_nclose.any():
+                fix_codes = common_codes[mask_nclose]
+                agg_metrics.loc[fix_codes, 'nclose'] = stats.loc[fix_codes, 'close']
 
         new_codes = stats.index.difference(agg_metrics.index)
         if len(new_codes) > 0:
@@ -609,27 +616,50 @@ class Sina:
 
     def _rebuild_agg_cache(self, h5_hist: Optional[pd.DataFrame], df_current: pd.DataFrame) -> pd.DataFrame:
         """从历史 MultiIndex 数据中重建聚合缓存 (优化兼容日期前缀)"""
+        # time_s = time.time()
+        # agg_df: pd.DataFrame
+        # if h5_hist is not None and not h5_hist.empty:
+        #     if not isinstance(h5_hist.index, pd.MultiIndex):
+        #          h5_hist = h5_hist.set_index(['code', 'ticktime'], append=False)
+            
+        #     # 提取时间部分 HH:MM:SS，兼容 '2025-12-18 09:25:00' 格式
+        #     tick_times = h5_hist.index.get_level_values('ticktime').astype(str)
+        #     time_only = tick_times.str.split().str[-1]
+            
+        #     agg_low = h5_hist[time_only <= '09:45:00'].groupby(level=0)['low'].min().to_frame('nlow')
+        #     agg_high = h5_hist[time_only <= '10:30:00'].groupby(level=0)['high'].max().to_frame('nhigh')
+        #     agg_close = h5_hist.groupby(level=0)['close'].last().to_frame('nclose')
+            
+        #     h5_std = h5_hist[(time_only >= '09:25:00') & (time_only <= '09:35:00')]
+        #     agg_std: pd.DataFrame
+        #     if not h5_std.empty:
+        #         agg_std = h5_std.groupby(level=0)['close'].std().to_frame('nstd').round(2)
+        #     else:
+        #         agg_std = pd.DataFrame(columns=['nstd'])
+        #     agg_df = pd.concat([agg_low, agg_high, agg_close, agg_std], axis=1)
+        # else:
+        #     agg_df = pd.DataFrame(columns=['nlow', 'nhigh', 'nclose', 'nstd'])
+        """从历史 MultiIndex 数据中重建聚合缓存，nclose/nlow/nhigh/nstd 使用 get_col_agg_df 计算"""
         time_s = time.time()
         agg_df: pd.DataFrame
+
         if h5_hist is not None and not h5_hist.empty:
             if not isinstance(h5_hist.index, pd.MultiIndex):
-                 h5_hist = h5_hist.set_index(['code', 'ticktime'], append=False)
-            
-            # 提取时间部分 HH:MM:SS，兼容 '2025-12-18 09:25:00' 格式
-            tick_times = h5_hist.index.get_level_values('ticktime').astype(str)
-            time_only = tick_times.str.split().str[-1]
-            
-            agg_low = h5_hist[time_only <= '09:45:00'].groupby(level=0)['low'].min().to_frame('nlow')
-            agg_high = h5_hist[time_only <= '10:30:00'].groupby(level=0)['high'].max().to_frame('nhigh')
-            agg_close = h5_hist.groupby(level=0)['close'].last().to_frame('nclose')
-            
-            h5_std = h5_hist[(time_only >= '09:25:00') & (time_only <= '09:35:00')]
-            agg_std: pd.DataFrame
-            if not h5_std.empty:
-                agg_std = h5_std.groupby(level=0)['close'].std().to_frame('nstd').round(2)
-            else:
-                agg_std = pd.DataFrame(columns=['nstd'])
-            agg_df = pd.concat([agg_low, agg_high, agg_close, agg_std], axis=1)
+                h5_hist = h5_hist.set_index(['code', 'ticktime'], append=False)
+            time_h5_hist = time.time()
+            run_col = ['low', 'high']
+            all_func = {'low': 'nlow', 'high': 'nhigh', 'close': 'nclose'}
+            startime = None
+            # endtime = '10:00:00'
+            endtime = '09:45:00'
+            # dd = get_col_agg_df_Test(h5, dd, run_col, all_func, startime, endtime)
+            # 使用 get_col_agg_df 计算 nclose/nlow/nhigh/nstd
+            agg_df = self.get_col_agg_df(h5_hist, df_current, run_col, all_func, startime, endtime)
+
+            endtime = '15:00:00'
+            run_col = ['close']
+            agg_df = self.get_col_agg_df(h5_hist, agg_df, run_col, all_func, startime, endtime)
+            log.info(f'get_col_agg_df_duration_time:{time.time()-time_h5_hist:.1f}')
         else:
             agg_df = pd.DataFrame(columns=['nlow', 'nhigh', 'nclose', 'nstd'])
 
@@ -678,11 +708,21 @@ class Sina:
         if now_int <= 1030:
             rebuild_df['nhigh'] = rebuild_df['nhigh'].combine(curr_stats['high'].reindex(rebuild_df.index), max)
             
-        # nclose: 直接用当前价更新
-        rebuild_df['nclose'] = curr_stats['close'].reindex(rebuild_df.index).fillna(agg_df['nclose'].reindex(rebuild_df.index))
-        # 三次兜底：确保 nclose 不为 0
-        rebuild_df.loc[rebuild_df['nclose'] <= 0, 'nclose'] = curr_stats['close'].reindex(rebuild_df.index)
-        
+        # # nclose: 直接用当前价更新
+        # rebuild_df['nclose'] = curr_stats['close'].reindex(rebuild_df.index).fillna(agg_df['nclose'].reindex(rebuild_df.index))
+        # # 三次兜底：确保 nclose 不为 0
+        # rebuild_df.loc[rebuild_df['nclose'] <= 0, 'nclose'] = curr_stats['close'].reindex(rebuild_df.index)
+
+
+        # nclose：优先使用历史聚合值，仅在缺失 / 非法时才用当前 close 兜底
+        rebuild_df['nclose'] = agg_df['nclose'].reindex(rebuild_df.index)
+
+        mask_nclose_fix = rebuild_df['nclose'].fillna(0) <= 0
+        if mask_nclose_fix.any():
+            rebuild_df.loc[mask_nclose_fix, 'nclose'] = \
+                curr_stats['close'].reindex(rebuild_df.index)[mask_nclose_fix]
+
+
         if 'nstd' in agg_df.columns:
              rebuild_df['nstd'] = agg_df['nstd'].reindex(rebuild_df.index)
         else:
@@ -983,50 +1023,91 @@ class Sina:
 
         return (time.time() - float(logtime) > float(ct.sina_lastbuy_logtime))
 
+
     def combine_lastbuy(self, h5: pd.DataFrame) -> pd.DataFrame:
-        """合并上次买入价格与聚合指标 (优化版：彻底移除热路径 HDF5 加载)"""
-        time_s = time.time()
-        
-        # 1. 基础预处理 (不再全局 fillna(0))
-        if 'lastbuy' in h5.columns:
-             h5.loc[:, 'lastbuy'] = h5['lastbuy'].fillna(0)
-        
-        # 2. 检查 lastbuy (优先使用内存中的 lastbuydf)
-        if 'lastbuy' not in h5.columns or (h5['lastbuy'] <= 0).any():
+        if h5 is None or h5.empty:
+            return h5
+
+        agg_metrics = self.agg_cache.getkey('agg_metrics')
+
+        # 1. lastbuy 兜底
+        if 'lastbuy' not in h5.columns or (h5['lastbuy'].fillna(0) <= 0).any():
             lastbuydf = cct.GlobalValues().getkey('lastbuydf')
             if lastbuydf is not None:
-                # 对齐索引并合并
-                if isinstance(h5.index, pd.MultiIndex):
-                    codes = h5.index.get_level_values(0)
-                    h5['lastbuy'] = lastbuydf.reindex(codes).values
-                else:
-                    h5['lastbuy'] = lastbuydf.reindex(h5.index).values
-            else:
-                # 如果全局缓存也没有，则作为兜底逻辑尝试从指标缓存中提取
-                agg_metrics = self.agg_cache.getkey('agg_metrics')
-                if agg_metrics is not None and 'nclose' in agg_metrics.columns:
-                     if isinstance(h5.index, pd.MultiIndex):
-                         codes = h5.index.get_level_values(0)
-                         h5['lastbuy'] = agg_metrics.reindex(codes)['nclose'].values
-                     else:
-                         h5['lastbuy'] = agg_metrics.reindex(h5.index)['nclose'].values
-                     log.debug("lastbuy from agg_metrics")
-        
-        # 3. 检查聚合指标 (nclose, nstd, nlow, nhigh)
-        # 只要存在 0 值且缓存有数据，就进行合并更新
-        if 'nclose' not in h5.columns or (h5['nclose'] <= 0).any():
-             agg_metrics = self.agg_cache.getkey('agg_metrics')
-             if agg_metrics is not None:
-                 h5 = cct.combine_dataFrame(h5, agg_metrics)
-                 
-        # 4. 强制清洗指标，杜绝 0.0
-        h5 = self._sanitize_indicators(h5)
+                h5['lastbuy'] = lastbuydf.reindex(h5.index).fillna(0)
+            elif agg_metrics is not None and 'nclose' in agg_metrics.columns:
+                h5['lastbuy'] = agg_metrics.reindex(h5.index)['nclose'].fillna(0)
 
-        time_use = round((time.time() - time_s), 2)
-        if time_use > 0.5:
-             log.info("combine_lastbuy (cache) time: %0.2f" % time_use)
+        # 2. nclose 只在缺失时修复（方案三）
+        if agg_metrics is not None and 'nclose' in agg_metrics.columns:
+            if 'nclose' not in h5.columns:
+                h5['nclose'] = np.nan
+
+            mask = h5['nclose'].fillna(0) <= 0
+            if mask.any():
+                h5.loc[mask, 'nclose'] = agg_metrics.reindex(h5.index)['nclose']
+
+        return self._sanitize_indicators(h5)
+
+
+    # def combine_lastbuy_old(self, h5: pd.DataFrame) -> pd.DataFrame:
+    #     """合并上次买入价格与聚合指标 (优化版：彻底移除热路径 HDF5 加载)"""
+    #     time_s = time.time()
+        
+    #     # 1. 基础预处理 (不再全局 fillna(0))
+    #     if 'lastbuy' in h5.columns:
+    #          h5.loc[:, 'lastbuy'] = h5['lastbuy'].fillna(0)
+        
+    #     # 2. 检查 lastbuy (优先使用内存中的 lastbuydf)
+    #     if 'lastbuy' not in h5.columns or (h5['lastbuy'] <= 0).any():
+    #         lastbuydf = cct.GlobalValues().getkey('lastbuydf')
+    #         if lastbuydf is not None:
+    #             # 对齐索引并合并
+    #             if isinstance(h5.index, pd.MultiIndex):
+    #                 codes = h5.index.get_level_values(0)
+    #                 h5['lastbuy'] = lastbuydf.reindex(codes).values
+    #             else:
+    #                 h5['lastbuy'] = lastbuydf.reindex(h5.index).values
+    #         else:
+    #             # 如果全局缓存也没有，则作为兜底逻辑尝试从指标缓存中提取
+    #             agg_metrics = self.agg_cache.getkey('agg_metrics')
+    #             if agg_metrics is not None and 'nclose' in agg_metrics.columns:
+    #                  if isinstance(h5.index, pd.MultiIndex):
+    #                      codes = h5.index.get_level_values(0)
+    #                      h5['lastbuy'] = agg_metrics.reindex(codes)['nclose'].values
+    #                  else:
+    #                      h5['lastbuy'] = agg_metrics.reindex(h5.index)['nclose'].values
+    #                  log.debug("lastbuy from agg_metrics")
+        
+    #     # 3. 检查聚合指标 (nclose, nstd, nlow, nhigh)
+    #     # 只要存在 0 值且缓存有数据，就进行合并更新
+    #     # if 'nclose' not in h5.columns or (h5['nclose'] <= 0).any():
+    #     #      agg_metrics = self.agg_cache.getkey('agg_metrics')
+    #     #      if agg_metrics is not None:
+    #     #          h5 = cct.combine_dataFrame(h5, agg_metrics)
+
+    #     agg_metrics = self.agg_cache.getkey('agg_metrics')
+    #     if agg_metrics is not None and 'nclose' in agg_metrics.columns:
+    #         if 'nclose' not in h5.columns:
+    #             h5['nclose'] = np.nan
+
+    #         mask_fix = h5['nclose'].fillna(0) <= 0
+    #         if mask_fix.any():
+    #             if isinstance(h5.index, pd.MultiIndex):
+    #                 codes = h5.index.get_level_values(0)
+    #                 h5.loc[mask_fix, 'nclose'] = agg_metrics.reindex(codes)['nclose'].values[mask_fix]
+    #             else:
+    #                 h5.loc[mask_fix, 'nclose'] = agg_metrics.reindex(h5.index)['nclose']
+
+                 
+    #     # 4. 强制清洗指标，杜绝 0.0
+    #     h5 = self._sanitize_indicators(h5)
+
+    #     time_use = round((time.time() - time_s), 2)
+    #     if time_use > 0.5:
+    #          log.info("combine_lastbuy (cache) time: %0.2f" % time_use)
              
-        return h5
+    #     return h5
 
     def _sanitize_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """统一清洗指标列中的 0.0 或 NaN 值，确保所有返回的数据都是健康的"""
@@ -1289,35 +1370,7 @@ if __name__ == "__main__":
     print((dd.loc[:, ['name','open','low','high','close', 'ticktime']], dd.shape))
     # print((dd.loc[:, ['name','open','low','high','close', 'nclose', 'nlow', 'nhigh', 'nstd', 'ticktime']], dd.shape))
 
-    sys.exit(0)
     
-    # print dd.loc[code_agg].T
-
-    # print df.columns
-    # df = sina.all
-    # print df.nlow[:5]
-    # print sina.get_stock_code_data('600199,300334',index=False)
-    # print len(sina.market('sh'))
-
-    # def compute_lastdays_percent(df=None, step=3):
-    #     if df is not None and len(df) > step:
-    #         df = df.sort_index(ascending=True)
-    #         # if cct.get_work_day_status() and 915 < cct.get_now_time_int() < 1500:
-    #         # df = df[df.index < cct.get_today()]
-    #         df = df.fillna(0)
-    #         da = step
-    #         if 'close' in df.columns:
-    #             df['lastp%sd' % da] = df['close'].shift(da)
-    #         if 'volume' in df.columns:
-    #             df['lastv%sd' % da] = df['volume'].shift(da)
-    #         if 'close' in df.columns and 'lastp%sd' % da in df.columns:
-    #             df['per%sd' % da] = ((df['close'] - df['lastp%sd' % da]) / df['lastp%sd' % da]).map(lambda x: round(x * 100, 2))
-    #         if 'volume' in df.columns and 'lastv%sd' % da in df.columns:
-    #             df['vol%sd' % da] = ((df['volume'] - df['lastv%sd' % da])).map(lambda x: round(x / 100, 1))
-    #     else:
-    #         log.info("compute df is none")
-    #     return df
-
     def get_col_agg_df_Test(h5, dd, run_col, all_func, startime, endtime, freq=None):
         if isinstance(run_col, list):
             now_col = [all_func[co] for co in run_col if co in list(all_func.keys())]
@@ -1352,12 +1405,13 @@ if __name__ == "__main__":
 
     h5 = h5a.load_hdf_db(h5_fname, table=h5_table, code_l=None, timelimit=False, dratio_limit=0.12)
     print(('h5:', len(h5)))
-    
-    if cct.get_trade_date_status() and cct.get_now_time_int() <= 1000:
+    import ipdb;ipdb.set_trace()
+
+    if cct.get_trade_date_status() and cct.get_now_time_int() <= 945:
         run_col = ['low', 'high', 'close']
         startime = None
         # endtime = '10:00:00'
-        endtime = '09:35:00'
+        endtime = '09:45:00'
         dd = get_col_agg_df_Test(h5, dd, run_col, all_func, startime, endtime)
     else:
         run_col = ['low', 'high']
