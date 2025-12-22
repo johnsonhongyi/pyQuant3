@@ -63,14 +63,42 @@ class StockHandbook:
         """Get all remarks for a specific stock."""
         return self.data.get(code, [])
 
+    # def delete_remark(self, code, timestamp):
+    #     """Delete a specific remark by timestamp."""
+    #     if code in self.data:
+    #         initial_len = len(self.data[code])
+    #         self.data[code] = [r for r in self.data[code] if r.get("timestamp") != timestamp]
+    #         if len(self.data[code]) != initial_len:
+    #             self._save_data()
+    #             logger.info(f"Deleted remark for {code}")
+    #         return True
+    #     else:
+    #         return False
+
     def delete_remark(self, code, timestamp):
-        """Delete a specific remark by timestamp."""
-        if code in self.data:
-            initial_len = len(self.data[code])
-            self.data[code] = [r for r in self.data[code] if r.get("timestamp") != timestamp]
-            if len(self.data[code]) != initial_len:
-                self._save_data()
-                logger.info(f"Deleted remark for {code}")
+        if code not in self.data:
+            return False
+
+        def normalize(ts):
+            if isinstance(ts, str):
+                return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").timestamp()
+            return float(ts)
+
+        target_ts = normalize(timestamp)
+
+        before = len(self.data[code])
+        self.data[code] = [
+            r for r in self.data[code]
+            if abs(float(r.get("timestamp", 0)) - target_ts) > 1
+        ]
+        after = len(self.data[code])
+
+        if after < before:
+            self._save_data()
+            return True
+
+        return False
+
 
     def get_all_remarks(self):
         """Get all remarks (for searching)."""
