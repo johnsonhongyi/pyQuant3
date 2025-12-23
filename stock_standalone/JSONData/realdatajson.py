@@ -38,7 +38,6 @@ log = LoggerFactory.log
 # log.setLevel(LoggerFactory.INFO)
 # log=LoggerFactory.JohnsonLoger('Realdata')
 
-
 sinaheader = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:84.0) Gecko/20100101 Firefox/84.0',
     'Host': 'vip.stock.finance.sina.com.cn',
@@ -1104,7 +1103,8 @@ def _get_dynamic_fetch_params(base_batch, base_pause, base_limit):
         # ✅ 完全正常，允许尝试缩减
         shrink_factor = 0.9 if is_trade else 0.65
         limit_time = max(int(base_limit * shrink_factor), int(base_limit * 0.3))
-
+    if not cct.get_work_time():
+        force_cache = True
     return batch_size, pause_range, force_cache, limit_time
 
 # =========================
@@ -1449,7 +1449,8 @@ if __name__ == '__main__':
 
     print("getconfigBigCount:",getconfigBigCount(count=None, write=False))
     log.setLevel(LoggerFactory.INFO)
-    df = get_sina_Market_json(market='bj', showtime=True, num='100', retry_count=3, pause=0.001)
+    # df = get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, pause=0.001)
+    df = get_sina_Market_json()
     print(df)
     import ipdb;ipdb.set_trace()
 

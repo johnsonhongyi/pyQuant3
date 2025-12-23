@@ -11,7 +11,7 @@ import numpy as np
 import requests
 
 from JSONData import tdx_hdf5_api as h5a
-
+from JSONData import realdatajson as rl
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import LoggerFactory
@@ -22,6 +22,15 @@ import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union, Callable
 import aiohttp
 import asyncio
+
+def file_modified_days_ago(path: str) -> int:
+    """
+    返回文件最后修改时间距离现在的天数
+    """
+    mtime = os.path.getmtime(path)  # 秒级时间戳
+    modified_time = datetime.datetime.fromtimestamp(mtime)
+    now = datetime.datetime.now()
+    return (now - modified_time).days
 
 def get_base_path() -> str:
     """
@@ -141,15 +150,15 @@ class StockCode:
         self.encoding = 'gbk'
         self.stock_code_path = self.get_stock_code_path_func()
         self.exceptCount = cct.GlobalValues().getkey('exceptCount')
-        # print os.path.getsize(self.stock_code_path)
-        if self.exceptCount is None and (not os.path.exists(self.stock_code_path) or os.path.getsize(self.stock_code_path) < 500):
-            stock_codes = self.get_stock_codes(True)
-            print(("create:%s counts:%s" % (self.stock_code_path, len(stock_codes))))
-        if self.exceptCount is None and cct.creation_date_duration(self.stock_code_path) > 60:
-            stock_codes = self.get_stock_codes(True)
-            print(("days:%s %s update stock_codes.conf" % (cct.creation_date_duration(self.stock_code_path), len(stock_codes))))
+        log.info(f'stock_code_path: {os.path.getsize(self.stock_code_path)}')
+        # file_days = file_modified_days_ago(self.stock_code_path)
 
-        
+        if  self.exceptCount is None and (not os.path.exists(self.stock_code_path) or os.path.getsize(self.stock_code_path) < 500):
+            stock_codes = self.get_stock_codes(True)
+            log.info(("create:%s counts:%s" % (self.stock_code_path, len(stock_codes))))
+        if self.exceptCount is None and cct.creation_date_duration(self.stock_code_path) > 5:
+            stock_codes = self.get_stock_codes(True)
+        log.info(("date_duration days:%s %s read stock_codes.conf" % (cct.creation_date_duration(self.stock_code_path), len(self.get_stock_codes()))))
 
         self.stock_codes = None
 
@@ -161,6 +170,7 @@ class StockCode:
         """获取所有股票 ID 到 all_stock_code 目录下"""
         # 122.10.4.234 www.shdjt.com
         # https://site.ip138.com/www.shdjt.com/
+        '''
         all_stock_codes_url = 'http://www.shdjt.com/js/lib/astock.js'
         grep_stock_codes = re.compile('~(\d+)`')
         try:
@@ -173,16 +183,18 @@ class StockCode:
             with open(self.stock_code_path) as f:
                 self.stock_codes = json.load(f)['stock']
                 return self.stock_codes
-            # raise e
         
         stock_codes = grep_stock_codes.findall(response.text)
         stock_codes = list(set([elem for elem in stock_codes if elem.startswith(('60', '30', '00','688','43','83','87','92'))]))
-        # df=rl.get_sina_Market_json('all')
-        # stock_codes = df.index.tolist()
-        # '301397'
+        '''
+
+        
+        df = rl.get_sina_Market_json('all')
+        stock_codes = df.index.tolist()
         # stock_info_bj_name_code_df = stock_info_bj_name_code()
-        # bj_list = stock_info_bj_name_code_df['证券代码'].tolist(
+        # bj_list = stock_info_bj_name_code_df['证券代码'].tolist()
         # stock_codes.extend(bj_list)
+        log.error("update_stock_codes codes:%s" % (len(stock_codes)))
         with open(self.stock_code_path, 'w') as f:
             f.write(json.dumps(dict(stock=stock_codes)))
         return stock_codes
@@ -200,13 +212,14 @@ class StockCode:
             [type] -- [description]
         """
         # print "days:",cct.creation_date_duration(self.stock_code_path)
+
         if realtime:
             # all_stock_codes_url = 'http://www.shdjt.com/js/lib/astock.js'
             # grep_stock_codes = re.compile('~(\d+)`')
             # response = requests.get(all_stock_codes_url)
             # stock_codes = grep_stock_codes.findall(response.text)
             # stock_codes = [elem for elem in stock_codes if elem.startswith(('6','30','00'))]
-            # df=rl.get_sina_Market_json('all')
+            # df= rl.get_sina_Market_json('all')
             # stock_codes = df.index.tolist()
             stock_codes = self.update_stock_codes()
             log.info("readltime codes:%s" % (len(stock_codes)))
@@ -1354,8 +1367,9 @@ if __name__ == "__main__":
     # print((sina.get_stock_code_data('300107').T))
 
     df =sina.all
-    print(df.loc['300245'][['close','nclose','nlow','nhigh']])
-    print(df.loc['300516'][['close','nclose','nlow','nhigh']])
+
+    print(df.loc['920274'][['close','nclose','nlow','nhigh']])
+    print(df.loc['920274'][['close','nclose','nlow','nhigh']])
     # print(df.loc['300245'].close.mean())
     import ipdb;ipdb.set_trace()
     

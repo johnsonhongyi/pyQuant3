@@ -6883,14 +6883,13 @@ if __name__ == '__main__':
     log.setLevel(log_level)
     # tdx_profile_test_tdx()
     resample = 'd'
-    code = '000002'
+    code = '920274'
     # (get_tdx_Exp_day_to_df_performance(code,dl=ct.Resample_LABELS_Days[resample],resample=resample))
     df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     # compute_lastdays_percent_profile(df, lastdays=5)
 
-    # import ipdb;ipdb.set_trace()
-    df=(getSinaAlldf('bj'))
-    import ipdb;ipdb.set_trace()
+    df=(getSinaAlldf('all'))
+    print(f'check code: {df.loc["920023"]}')
 
     # tdx_profile_test()
     # pyprof2calltree -k -i tdx.profile
