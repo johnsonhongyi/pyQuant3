@@ -173,8 +173,10 @@ class StockLiveStrategy:
                  trailing_stop_pct: float = 0.03,
                  max_single_stock_ratio: float = 0.3,
                  min_position_ratio: float = 0.05,
-                 risk_duration_threshold: float = 300):
+                 risk_duration_threshold: float = 300,
+                 voice_enabled: bool = True):
         self._voice = VoiceAnnouncer()
+        self.voice_enabled = voice_enabled      # ★ 新增状态
         self._monitored_stocks = {} 
         self._last_process_time = 0
         self._alert_cooldown = alert_cooldown
@@ -207,6 +209,11 @@ class StockLiveStrategy:
             alert_cooldown=alert_cooldown,
             risk_duration_threshold=risk_duration_threshold
         )
+
+    def set_voice_enabled(self, enabled: bool):
+        """运行时开启/关闭语音播报"""
+        self.voice_enabled = bool(enabled)
+        logger.info(f"Voice announcer enabled = {self.voice_enabled}")
 
     def set_alert_callback(self, callback: Callable[[str, str, str], None]) -> None:
         """设置报警回调函数"""
@@ -800,9 +807,15 @@ class StockLiveStrategy:
         # 1. 声音
         self._play_sound_async()
         
-        # 2. 语音播报
-        speak_text = f"注意{action}，{code} ，{message}"
-        self._voice.say(speak_text, code=code)
+        # # 2. 语音播报
+        # speak_text = f"注意{action}，{code} ，{message}"
+        # self._voice.say(speak_text, code=code)
+        # 2. 语音播报（★ 受控）
+        if self.voice_enabled:
+            speak_text = f"注意{action}，{code} ，{message}"
+            self._voice.say(speak_text, code=code)
+        else:
+            logger.debug(f"Voice muted for {code}")
         
         # 3. 回调
         if self.alert_callback:

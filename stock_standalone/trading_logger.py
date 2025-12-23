@@ -247,3 +247,92 @@ class TradingLogger:
         rows = cur.fetchall()
         conn.close()
         return rows
+
+
+if __name__ == '__main__':
+    logger = TradingLogger()
+    from collections import defaultdict
+    from trading_analyzer import TradingAnalyzer
+
+    trades = logger.get_trades(start_date="2025-01-01")
+
+    # # 按 code 归类
+    # agg_trades = defaultdict(lambda: {"name": "", "status": "", "price": 0, "amount": 0, "count": 0})
+
+    # for t in trades:
+    #     code = t['code']
+    #     agg_trades[code]["name"] = t['name']
+    #     agg_trades[code]["status"] = t['status']
+    #     agg_trades[code]["price"] += t['buy_price'] * t['buy_amount']
+    #     agg_trades[code]["amount"] += t['buy_amount']
+    #     agg_trades[code]["count"] += 1
+    #     # 累计盈亏，若有当前价可用
+    #     if 'current_price' in t:
+    #         agg_trades[code]["profit"] += (t['current_price'] - t['buy_price']) * t['buy_amount']
+
+    # # 输出归类后的结果
+    # total_amount = sum(info['amount'] for info in agg_trades.values())
+    # for code, info in agg_trades.items():
+    #     avg_price = info["price"] / info["amount"] if info["amount"] > 0 else 0
+    #     pct = info['amount'] / total_amount * 100
+    #     print(f"{code} {info['status']} 平均价:{avg_price:.2f} 总量:{info['amount']} 笔数:{info['count']} 占比:{pct:.1f}%")
+
+    # total_profit, avg_pnl, total_count = logger.get_summary()
+    # print(f"总收益: {total_profit:.2f}, 平均收益率: {avg_pnl:.2%}, 总笔数: {total_count}")
+
+    # daily_summary = logger.get_db_summary(days=30)
+    # for day, profit, count in daily_summary:
+    #     print(day, profit, count)
+
+
+    logger = TradingLogger("./trading_signals.db")
+    analyzer = TradingAnalyzer(logger)
+
+    # 汇总每只股票
+    df_summary = analyzer.summarize_by_stock()
+    print(df_summary)
+
+    # 查询单只股票明细
+    df_002361 = analyzer.get_stock_detail("002361")
+    print(df_002361)
+
+    # 每日策略统计
+    df_daily = analyzer.daily_summary()
+    print(df_daily)
+
+    # top 盈利交易
+    df_top = analyzer.top_trades(n=5, largest=True)
+    print(df_top)
+
+    # 股票表现概览
+    df_perf = analyzer.stock_performance()
+    print(df_perf)
+
+
+    # analyzer = TradingAnalyzer(logger)
+
+    # # 1. 总体汇总
+    # summary = analyzer.summary()
+    # print(summary['total_profit'], summary['avg_pnl_pct'], summary['total_trades'])
+
+    # # 2. 每只股票归类
+    # stock_summary = analyzer.per_stock_analysis()
+    # print(stock_summary)
+
+    # # 3. 查看某只股票交易明细
+    # stock_detail = analyzer.stock_detail('002361')
+    # print(stock_detail)
+
+    # # 4. 最近每日收益
+    # daily_profit = analyzer.daily_profit(30)
+    # print(daily_profit)
+
+    # # 5. 前5盈利和亏损交易
+    # top_trades = analyzer.top_winners_losers(5)
+    # print(top_trades['winners'])
+    # print(top_trades['losers'])
+
+    # # 6. 每日开仓笔数分析
+    # timing = analyzer.trade_timing_analysis()
+    # print(timing)
+
