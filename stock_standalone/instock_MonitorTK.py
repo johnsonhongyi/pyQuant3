@@ -1379,6 +1379,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.ths_var = tk.BooleanVar(value=True)
         self.dfcf_var = tk.BooleanVar(value=False)
         self.tip_var = tk.BooleanVar(value=False)
+        self.voice_var = tk.BooleanVar(value=False)
         checkbuttons_info = [
             ("Win", self.win_var),
             ("TDX", self.tdx_var),
@@ -1400,6 +1401,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # padx=0, pady=0, bd=0, highlightthickness=0
             )
             cb.pack(side=tk.LEFT, padx=1)
+
+        ttk.Checkbutton(
+            frame_right,
+            text="Vo",
+            variable=self.voice_var,
+            command=self.on_voice_toggle
+        ).pack(side=tk.LEFT, padx=1)
+
+    def on_voice_toggle(self):
+        self.live_strategy.set_voice_enabled(self.voice_var.get())
 
     def reload_cfg_value(self):
         global marketInit,marketblk,scale_offset,resampleInit
@@ -3090,7 +3101,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _init_live_strategy(self):
         """延迟初始化策略模块"""
         try:
-            self.live_strategy = StockLiveStrategy(alert_cooldown=alert_cooldown)
+            self.live_strategy = StockLiveStrategy(alert_cooldown=alert_cooldown,voice_enabled=self.voice_var.get())
             # 注册报警回调
             self.live_strategy.set_alert_callback(self.on_voice_alert)
             # 注册语音开始播放的回调，用于同步闪烁
@@ -3133,40 +3144,68 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     win.stop_visual_effects()
 
     def _update_alert_positions(self):
-        """重新排列所有报警弹窗"""
+        """
+        重新排列所有报警弹窗。
+        优化点：使用 update_idletasks 确保所有窗口位置同时刷新，减少初始化时的视觉闪烁。
+        """
         if not hasattr(self, 'active_alerts'):
             self.active_alerts = []
             
-        # Right-Bottom origin
-        w, h = 400, 260 # 稍微增高
+        # 定义固定的窗口尺寸和边距
+        alert_width, alert_height = 400, 260 
         margin = 10
-        taskbar = 100 # 避开任务栏
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
+        taskbar_height = 100 # 避开任务栏高度
         
-        # Max columns that fit
-        max_cols = (sw - 100) // (w + margin)
-        if max_cols < 1: max_cols = 1
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        
+        # 根据屏幕宽度计算最大列数
+        max_cols = (screen_width - margin) // (alert_width + margin)
+        if max_cols < 1: 
+            max_cols = 1
         
         # 清理已销毁的窗口
         self.active_alerts = [win for win in self.active_alerts if win.winfo_exists()]
 
+        # 限制最大行数以避免超出屏幕范围
+        max_rows = (screen_height - taskbar_height - margin) // (alert_height + margin)
+        
         for i, win in enumerate(self.active_alerts):
+            if i >= max_cols * max_rows:
+                # 超出显示区域，隐藏窗口
+                try:
+                    # 只有当窗口当前处于显示状态时才调用 withdraw()
+                    if win.winfo_ismapped(): 
+                         win.withdraw() 
+                except Exception as e:
+                    logger.error(f"无法隐藏超出范围的窗口: {e}")
+                continue
+            
             try:
                 col = i % max_cols
                 row = i // max_cols
                 
-                # 从右向左排列
-                x = sw - (col + 1) * (w + margin)
-                y = sh - taskbar - (row + 1) * (h + margin)
+                x = screen_width - (col + 1) * (alert_width + margin)
+                y = screen_height - taskbar_height - (row + 1) * (alert_height + margin)
                 
-                win.geometry(f"{w}x{h}+{x}+{y}")
+                win.geometry(f"{alert_width}x{alert_height}+{x}+{y}")
+                # 确保窗口是可见的（如果之前被隐藏了）
+                if not win.winfo_ismapped():
+                    win.deiconify() 
             except Exception as e:
-                logger.error(f"Resize alert error: {e}")
+                logger.error(f"调整索引 {i} 的警报窗口位置时出错: {e}")
 
-    def _shake_window(self, win, distance=8):
+        # *** 关键优化 ***
+        # 强制 Tkinter 立即处理所有待定的 geometry() 更新。
+        # 这使得所有窗口的位置变化在视觉上是同步的，消除了逐个移动的闪烁感。
+        self.update_idletasks()
+
+    def _shake_window(self, win, distance=8, interval_ms=60):
         """
         震动窗口效果 - 持续震动直到 win.is_shaking 变为 False
+        :param win: 要震动的 Tkinter 窗口实例
+        :param distance: 每次晃动的最大像素距离
+        :param interval_ms: 两次晃动之间的延迟毫秒数 (越大越温和/慢)
         """
         if not win or not win.winfo_exists():
             return
@@ -3178,21 +3217,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win.update_idletasks()
 
         def do_shake(orig_wh, orig_x, orig_y):
+            # 检查窗口是否存在且是否应继续晃动
             if not win.winfo_exists() or not getattr(win, 'is_shaking', False):
+                # 停止晃动时，尝试将窗口恢复到原始位置（如果可能）
                 if win.winfo_exists():
                      try:
                          win.geometry(f"{orig_wh}+{orig_x}+{orig_y}")
-                     except: pass
+                     except: 
+                         pass
                 return
             
             import random
+            # 计算随机偏移量
             dx = random.randint(-distance, distance)
             dy = random.randint(-distance, distance)
             try:
+                # 应用新的位置
                 win.geometry(f"{orig_wh}+{orig_x + dx}+{orig_y + dy}")
-            except: pass
+            except: 
+                pass
             
-            win.after(40, lambda: do_shake(orig_wh, orig_x, orig_y))
+            # 安排下一次晃动。使用新的 interval_ms 参数控制频率。
+            win.after(interval_ms, lambda: do_shake(orig_wh, orig_x, orig_y))
 
         # 捕获初始位置
         try:
@@ -3204,34 +3250,158 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 y = int(parts[2])
                 do_shake(wh, x, y)
         except:
+            # 如果获取几何信息失败，则不执行晃动
             pass
+
+    # def _update_alert_positions_bug(self):
+    #     """重新排列所有报警弹窗"""
+    #     if not hasattr(self, 'active_alerts'):
+    #         self.active_alerts = []
+            
+    #     # Right-Bottom origin
+    #     w, h = 400, 260 # 稍微增高
+    #     margin = 10
+    #     taskbar = 100 # 避开任务栏
+    #     sw = self.winfo_screenwidth()
+    #     sh = self.winfo_screenheight()
+        
+    #     # Max columns that fit
+    #     max_cols = (sw - 100) // (w + margin)
+    #     if max_cols < 1: max_cols = 1
+        
+    #     # 清理已销毁的窗口
+    #     self.active_alerts = [win for win in self.active_alerts if win.winfo_exists()]
+
+    #     for i, win in enumerate(self.active_alerts):
+    #         try:
+    #             col = i % max_cols
+    #             row = i // max_cols
+                
+    #             # 从右向左排列
+    #             x = sw - (col + 1) * (w + margin)
+    #             y = sh - taskbar - (row + 1) * (h + margin)
+                
+    #             win.geometry(f"{w}x{h}+{x}+{y}")
+    #         except Exception as e:
+    #             logger.error(f"Resize alert error: {e}")
+
+    # def _shake_window(self, win, distance=8):
+    #     """
+    #     震动窗口效果 - 持续震动直到 win.is_shaking 变为 False
+    #     """
+    #     if not win or not win.winfo_exists():
+    #         return
+        
+    #     # 标记正在震动
+    #     win.is_shaking = True
+
+    #     # 💥 关键点：在获取几何信息前强制更新 UI 布局
+    #     win.update_idletasks()
+
+    #     def do_shake(orig_wh, orig_x, orig_y):
+    #         if not win.winfo_exists() or not getattr(win, 'is_shaking', False):
+    #             if win.winfo_exists():
+    #                  try:
+    #                      win.geometry(f"{orig_wh}+{orig_x}+{orig_y}")
+    #                  except: pass
+    #             return
+            
+    #         import random
+    #         dx = random.randint(-distance, distance)
+    #         dy = random.randint(-distance, distance)
+    #         try:
+    #             win.geometry(f"{orig_wh}+{orig_x + dx}+{orig_y + dy}")
+    #         except: pass
+            
+    #         win.after(40, lambda: do_shake(orig_wh, orig_x, orig_y))
+
+    #     # 捕获初始位置
+    #     try:
+    #         geom = win.geometry()
+    #         parts = geom.split('+')
+    #         if len(parts) == 3:
+    #             wh = parts[0]
+    #             x = int(parts[1])
+    #             y = int(parts[2])
+    #             do_shake(wh, x, y)
+    #     except:
+    #         pass
+
+    # def _close_alert_src(self, win, is_manual=False):
+    #     """关闭弹窗并刷新布局，并停止关联的语音报警"""
+    #     if hasattr(self, 'active_alerts') and win in self.active_alerts:
+    #         self.active_alerts.remove(win)
+        
+    #     # 清理映射并获取关联代码
+    #     target_code = None
+    #     if hasattr(self, 'code_to_alert_win'):
+    #         for c, w in list(self.code_to_alert_win.items()):
+    #             if w == win:
+    #                 target_code = c
+    #                 del self.code_to_alert_win[c]
+    #                 break
+
+    #     # 停止该代码的语音播报 (以便立即播放队列中的下一个)
+    #     if target_code and hasattr(self, 'live_strategy') and self.live_strategy:
+    #          # 如果是手动关闭，则延迟 10 个周期再报
+    #          if is_manual:
+    #              self.live_strategy.snooze_alert(target_code, cycles=pending_alert_cycles)
+
+    #          v = getattr(self.live_strategy, '_voice', None)
+    #          if v and hasattr(v, 'cancel_for_code'):
+    #              v.cancel_for_code(target_code)
+
+    #     win.destroy()
+    #     # self.after(50, self._update_alert_positions)
+    #     # 5. 立即調用重排佈局 (不需要 after() 延遲)
+    #     self._update_alert_positions()
 
     def _close_alert(self, win, is_manual=False):
         """关闭弹窗并刷新布局，并停止关联的语音报警"""
+
+        # ===== [修改点 1] =====
+        # 关闭时，立即从 active_alerts 移除（避免后续布局和引用错误）
         if hasattr(self, 'active_alerts') and win in self.active_alerts:
             self.active_alerts.remove(win)
-        
-        # 清理映射并获取关联代码
+
+        # ===== [修改点 2] =====
+        # 统一在这里清理 code -> window 映射，并获取 target_code
         target_code = None
         if hasattr(self, 'code_to_alert_win'):
             for c, w in list(self.code_to_alert_win.items()):
-                if w == win:
+                if w is win:
                     target_code = c
                     del self.code_to_alert_win[c]
                     break
 
-        # 停止该代码的语音播报 (以便立即播放队列中的下一个)
-        if target_code and hasattr(self, 'live_strategy') and self.live_strategy:
-             # 如果是手动关闭，则延迟 10 个周期再报
-             if is_manual:
-                 self.live_strategy.snooze_alert(target_code, cycles=pending_alert_cycles)
+        # ===== [修改点 3] =====
+        # 语音 / 策略处理逻辑统一放在一个块中，避免分支遗漏
+        if target_code and getattr(self, 'live_strategy', None):
 
-             v = getattr(self.live_strategy, '_voice', None)
-             if v and hasattr(v, 'cancel_for_code'):
-                 v.cancel_for_code(target_code)
+            # ===== [修改点 3.1] =====
+            # 手动关闭：只负责“延迟再报”，不负责停当前语音
+            if is_manual:
+                self.live_strategy.snooze_alert(
+                    target_code,
+                    cycles=pending_alert_cycles
+                )
 
+            # ===== [修改点 3.2 - 关键修复点] =====
+            # 无论手动 / 自动关闭，都必须立即 cancel 当前语音
+            # （这是 new 版本出问题的根因）
+            v = getattr(self.live_strategy, '_voice', None)
+            if v and hasattr(v, 'cancel_for_code'):
+                v.cancel_for_code(target_code)
+
+        # ===== [修改点 4] =====
+        # 在所有状态清理完成后，再销毁窗口
         win.destroy()
-        self.after(100, self._update_alert_positions)
+
+        # ===== [修改点 5] =====
+        # 立即重排弹窗位置（不使用 after，避免顺序错乱）
+        self._update_alert_positions()
+
+
 
     def _show_alert_popup(self, code, name, msg):
         """显示报警弹窗"""
@@ -3260,17 +3430,40 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 如果语音功能有效，则等待播报结束后才开始计时关闭；
             # 否则立即开始计时，以防窗口无限堆积。
             has_voice = False
+            # try:
+            #     if hasattr(self, 'live_strategy') and self.live_strategy:
+            #         v = getattr(self.live_strategy, '_voice', None)
+            #         if v and v._thread and v._thread.is_alive():
+            #             # 检查队列容量，如果由于队列满而未加入，则视为无语音同步
+            #             if v.queue.qsize() < 10: 
+            #                 has_voice = True
+            # except: pass
             try:
                 if hasattr(self, 'live_strategy') and self.live_strategy:
-                    v = getattr(self.live_strategy, '_voice', None)
-                    if v and v._thread and v._thread.is_alive():
-                        # 检查队列容量，如果由于队列满而未加入，则视为无语音同步
-                        if v.queue.qsize() < 10: 
+                    # ✅ 关键：语音开关
+                    if not getattr(self.live_strategy, 'voice_enabled', True):
+                        has_voice = False
+                    else:
+                        v = getattr(self.live_strategy, '_voice', None)
+                        if (
+                            v
+                            and v._thread
+                            and v._thread.is_alive()
+                            and v.queue.qsize() < 10
+                        ):
                             has_voice = True
-            except: pass
+            except Exception as e:
+                logger.debug(f"voice detect failed: {e}")
+
+            # 【新增】自动关闭时间兜底
+            def _get_alert_close_delay_ms():
+                seconds = max(60, int(alert_cooldown / 2))
+                return seconds * 1000
+
+            delay_ms = _get_alert_close_delay_ms()
 
             if not has_voice:
-                self.after(int(alert_cooldown/2)*1000, lambda: self._close_alert(win))
+                self.after(delay_ms, lambda: self._close_alert(win))
             else:
                 # 安全兜底：如果因为某种原因没触发回调（如语音引擎卡死），3分钟后强制关闭
                 win.safety_close_timer = self.after(180000, lambda: self._close_alert(win))
@@ -3289,7 +3482,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if getattr(win, 'is_flashing', False): return # 防止重复触发
                 win.is_flashing = True
                 flash()
-                self._shake_window(win, distance=10) # 稍微加大震动幅度
+                self._shake_window(win, distance=8,interval_ms=60) # 稍微加大震动幅度
             
             def stop_effects():
                 win.is_flashing = False
@@ -3430,45 +3623,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 sort_treeview_column(tree, self._trade_sort_col, self._trade_sort_reverse)
 
         # --- 删除记录 ---
-        # def delete_selected_trade(event=None):
-        #     selected = tree.selection()
-        #     if not selected:
-        #         messagebox.showwarning("提醒", "请先选择要删除的记录")
-        #         return
-
-        #     item_id = selected[0]
-        #     item = tree.item(item_id)
-        #     trade_id = item['values'][0]
-        #     stock_name = item['values'][2]
-
-        #     next_item = tree.next(item_id) or tree.prev(item_id)
-
-        #     if not messagebox.askyesno(
-        #         "确认删除",
-        #         f"确定要永久删除 [{stock_name}] (ID:{trade_id}) 的这笔交易记录吗？"
-        #     ):
-        #         return
-
-        #     try:
-        #         if t_logger.delete_trade(trade_id):
-        #             toast_message(self, "成功，记录已从数据库物理删除")
-        #             refresh_summary()
-
-        #             # 删除后选中下一行
-        #             if next_item and tree.exists(next_item):
-        #                 tree.selection_set(next_item)
-        #                 tree.focus(next_item)
-        #                 tree.see(next_item)
-
-        #             report_win.lift()
-        #             report_win.focus_force()
-        #             tree.focus_set()  # 保证键盘焦点仍在 treeview
-        #         else:
-        #             messagebox.showerror("错误", "删除失败")
-
-        #     except Exception as e:
-        #         logger.error(f"delete trade error: {e}")
-        #         messagebox.showerror("错误", f"删除异常: {e}")
         def delete_selected_trade(event=None):
             selected = tree.selection()
             if not selected:
@@ -3518,6 +3672,51 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.error(f"delete trade error: {e}")
                 messagebox.showerror("错误", f"删除异常: {e}")
 
+        # def on_trade_report_double_click(event):
+        #         item = tree.selection()
+        #         if not item: return
+        #         values = tree.item(item[0], "values")
+        #         # (code, name, rule_type, value, add_time, tags, id)
+        #         tags_info = values[5]
+        #         if tags_info:
+        #              # 弹窗显示完整信息
+        #              top = tk.Toplevel(win)
+        #              top.title(f"{values[1]}:{values[0]} 详情")
+        #              top.geometry("600x400")
+        #              # 居中显示的简单逻辑
+        #              wx = win.winfo_rootx() + 50
+        #              wy = win.winfo_rooty() + 50
+        #              top.geometry(f"+{wx}+{wy}")
+                     
+        #              from tkinter.scrolledtext import ScrolledText
+        #              st = ScrolledText(top, font=("Consolas", 10))
+        #              st.pack(fill="both", expand=True)
+        #              st.insert("end", tags_info)
+
+        def on_trade_report_tree_select(event):
+                selected = tree.selection()
+                if not selected: return
+                item = selected[0]
+                values = tree.item(item, "values")
+                target_code = values[1]
+                name = values[2]
+                stock_code = str(target_code).zfill(6)
+                # logger.info(f'on_handbook_on_click stock_code:{stock_code} name:{target_name}')
+                self.sender.send(stock_code)
+
+        def on_trade_report_on_click(event):
+                item_id = tree.identify_row(event.y)
+                if not item_id:
+                    return
+
+                values = tree.item(item_id, "values")
+                code = values[1]
+                name = values[2]
+
+                stock_code = str(code).zfill(6)
+                if stock_code:
+                    # logger.info(f'on_voice_on_click stock_code:{stock_code} name:{name}')
+                    self.sender.send(stock_code)
 
         # --- 编辑交易 ---
         def edit_selected_trade():
@@ -3658,7 +3857,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # Delete 键绑定
         tree.bind("<Delete>", delete_selected_trade)
-
+        tree.bind("<Button-1>", on_trade_report_on_click)
+        tree.bind("<<TreeviewSelect>>", on_trade_report_tree_select) 
         # 关闭事件
         def on_close(event=None):
             self.save_window_position(report_win, window_id)
@@ -3801,30 +4001,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 tree.bind("<Motion>", on_motion)
 
 
-            # def on_double_click(event):
-            #     item = tree.selection()
-            #     if not item: return
-            #     values = tree.item(item[0], "values")
-            #     # (code, name, rule_type, value, add_time, tags, id)
-            #     tags_info = values[5]
-            #     if tags_info:
-            #          # 弹窗显示完整信息
-            #          top = tk.Toplevel(win)
-            #          top.title(f"{values[1]}:{values[0]} 详情")
-            #          top.geometry("600x400")
-            #          # 居中显示的简单逻辑
-            #          wx = win.winfo_rootx() + 50
-            #          wy = win.winfo_rooty() + 50
-            #          top.geometry(f"+{wx}+{wy}")
-                     
-            #          from tkinter.scrolledtext import ScrolledText
-            #          st = ScrolledText(top, font=("Consolas", 10))
-            #          st.pack(fill="both", expand=True)
-            #          st.insert("end", tags_info)
-            #          # st.config(state="disabled")
-
-            # tree.bind("<Double-1>", on_double_click)
-            
             vsb = ttk.Scrollbar(list_frame, orient="vertical", command=tree.yview)
             tree.configure(yscroll=vsb.set)
             
@@ -3949,11 +4125,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # logger.info(f'on_voice_on_click stock_code:{stock_code} name:{name}')
                     self.sender.send(stock_code)
 
-            # def edit_selected(event=None):
-            #      selected = tree.selection()
-            #      if not selected: return
-            #      item = selected[0]
-            #      values = tree.item(item, "values")
             def edit_selected(item=None, values=None):
                  if values is None:
                     selected = tree.selection()
