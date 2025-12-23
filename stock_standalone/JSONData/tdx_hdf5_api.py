@@ -2116,8 +2116,8 @@ if __name__ == "__main__":
 
     # sina_MultiD_path = "D:\\RamDisk\\sina_MultiIndex_data.h5"
     sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
-    freq='30T'
-    startime = '09:25:00'
+    freq='5T'
+    startime = None
     endtime = '15:01:00'
     def readHdf5(fpath, root=None):
         store = pd.HDFStore(fpath, "r")
@@ -2130,15 +2130,16 @@ if __name__ == "__main__":
 
     # runcol=['low','high','close']
     h5 = readHdf5(sina_MultiD_path)
-
-    import ipdb;ipdb.set_trace()
-    
     h5.shape
+
+    print(h5.loc['300245'])
+    
     mdf = cct.get_limit_multiIndex_freq(h5, freq=freq.upper(),  col='all', start=startime, end=endtime, code=None)
-
+    print(mdf.loc['300245'])
+    print(mdf.loc['300516'])
+    print(mdf.loc['300245'].close.mean())
+    print(mdf.loc['300516'].close.mean())
     import ipdb;ipdb.set_trace()
-
-
 
     a = np.random.standard_normal((9000,4))
     df = pd.DataFrame(a)

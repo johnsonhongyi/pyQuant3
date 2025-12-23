@@ -5667,11 +5667,13 @@ def get_limit_multiIndex_Row(df, col=None, index='ticktime', start=None, end='10
 
 
 
-def get_limit_multiIndex_freq(df, freq='5T', col='low', index='ticktime', start=None, end='10:00:00', code=None):
+def get_limit_multiIndex_freq(df, freq='5T', col='low', index='ticktime', start='09:25:00', end='10:00:00', code=None):
     # quotes = cct.get_limit_multiIndex_freq(h5, freq=resample.upper(), col='all', start=start, end=end, code=code)
     # isinstance(spp.all_10.index[:1], pd.core.index.MultiIndex)
     if df is not None:
-        dd = select_multiIndex_index(df, index=index, start=start, end=end, code=code)
+        if start is None:
+            start = '09:25:00'
+        dd = select_multiIndex_index_fast(df, index=index, start=start, end=end, code=code)
         if code is not None:
             df = dd.copy()
             df['open'] =  dd['close']

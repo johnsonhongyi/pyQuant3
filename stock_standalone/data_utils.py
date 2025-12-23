@@ -304,7 +304,7 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                 top_all = pd.DataFrame()
                 lastpTDX_DF = pd.DataFrame()
                 logger.info(
-                    f"init_tdx tdx.init.done:{g_values.getkey('tdx.init.done')} tdx.init.date:{g_values.getkey('tdx.init.date')} 总用时: {time.time() - time_init:.2f}s"
+                    f"init_tdx 总用时: {time.time() - time_init:.2f}s tdx.init.done:{g_values.getkey('tdx.init.done')} tdx.init.date:{g_values.getkey('tdx.init.date')} "
                 )
 
                 # 5️⃣ 节流

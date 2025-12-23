@@ -1221,6 +1221,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             
                 # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
                 if not self.tip_var.get() and has_update and hasattr(self, 'live_strategy'):
+                    if not (915 < cct.get_now_time_int() < 920):
                         self.live_strategy.process_data(self.df_all)
                 # -------------------------
 
