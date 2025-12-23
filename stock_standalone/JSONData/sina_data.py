@@ -1354,9 +1354,13 @@ if __name__ == "__main__":
     # print((sina.get_stock_code_data('300107').T))
 
     df =sina.all
+    print(df.loc['300245'][['close','nclose','nlow','nhigh']])
+    print(df.loc['300516'][['close','nclose','nlow','nhigh']])
+    # print(df.loc['300245'].close.mean())
     import ipdb;ipdb.set_trace()
     
     print(len(df))
+    print(df[['close','nclose','nlow','nhigh']])
     print(f"df.loc['002786']: {df.loc['002786']}")
     print((df[-5:][['open','close']].T))
 
