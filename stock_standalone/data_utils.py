@@ -228,15 +228,16 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                    # logger.info(f'flag.value : {flag.value} 停止更新')
                    continue
             elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
-                logger.info(f'resample : new : {g_values.getkey("resample")} last : {resample} ')
                 top_now = pd.DataFrame()
                 top_all = pd.DataFrame()
                 lastpTDX_DF = pd.DataFrame()
+                logger.info(f'resample : new resample : {g_values.getkey("resample")} last resample : {resample} top_now:{len(top_now)} top_all:{len(top_all)} lastpTDX_DF:{len(lastpTDX_DF)}')
             elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
                 # logger.info(f'market : new : {g_values.getkey("market")} last : {market} ')
                 top_now = pd.DataFrame()
                 top_all = pd.DataFrame()
                 lastpTDX_DF = pd.DataFrame()
+                logger.info(f'market : new resample: {g_values.getkey("market")} last resample: {resample} top_now:{len(top_now)} top_all:{len(top_all)} lastpTDX_DF:{len(lastpTDX_DF)}')
             elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
                 # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
                 st_key_sort = g_values.getkey("st_key_sort")
@@ -327,7 +328,7 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             market = g_values.getkey("market", marketInit)        # all / sh / cyb / kcb / bj
             blkname = g_values.getkey("blkname", marketblk)  # 对应的 blk 文件
             st_key_sort = g_values.getkey("st_key_sort", st_key_sort)  # 对应的 blk 文件
-            logger.info(f"resample Main  market : {market}  {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
+            logger.info(f"resample Main  market : {market} resample: {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
 
             if market == 'indb':
                 indf = get_indb_df()
@@ -340,7 +341,6 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                 time.sleep(duration_sleep_time)
                 continue
             logger.info(f"resample Main  top_now:{len(top_now)} market : {market}  {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
-
             # 合并与计算
             detect_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
             if top_all.empty:

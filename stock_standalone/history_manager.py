@@ -671,8 +671,6 @@ class QueryHistoryManager:
         for record in self.current_history: record.pop("hit", None)
 
     def on_test_click(self):
-        import ipdb;ipdb.set_trace()
-        
         if callable(self.test_callback): self.test_callback(onclick=True)
 
     def test_code(self, code_data):

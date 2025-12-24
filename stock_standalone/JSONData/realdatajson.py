@@ -183,7 +183,8 @@ def get_sina_Market_json_src(market='all', showtime=True, num='100', retry_count
                 log.info("load hdf data:%s %s %s"%(h5_fname,h5_table,len(h5)))
                 dd = None
                 if market == 'all':
-                    co_inx = [inx for inx in h5.index if str(inx).startswith(('6','30','00','688','43','83','87','92'))]
+                    # co_inx = [inx for inx in h5.index if str(inx).startswith(('6','30','00','688','43','83','87','92'))]
+                    co_inx = [inx for inx in h5.index if str(inx).startswith(cct.code_startswith)]
                 elif market == 'sh':
                     co_inx = [inx for inx in h5.index if str(inx).startswith(('6'))]
                 elif market == 'sz':
@@ -238,7 +239,7 @@ def get_sina_Market_json_src(market='all', showtime=True, num='100', retry_count
         if showtime: print(("Market-df:%s %s" % (format((time.time() - start_t), '.1f'), len(df))), end=' ')
 
         if market == 'all':
-            co_inx = [inx for inx in df.index if str(inx).startswith(('6','30','00'))]
+            co_inx = [inx for inx in df.index if str(inx).startswith(cct.code_startswith)]
             df = df.loc[co_inx]            
         elif market == 'sh':
             co_inx = [inx for inx in df.index if str(inx).startswith(('6'))]
@@ -1309,7 +1310,8 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
             if force_cache or l_time < limit_time:
                 log.warning(f"[HDF-USE] rows={len(h5)} l_time={l_time:.1f}")
                 if market == 'all':
-                    co_inx = [inx for inx in h5.index if str(inx).startswith(('6','30','00','688','43','83','87','92'))]
+                    # co_inx = [inx for inx in h5.index if str(inx).startswith(('6','30','00','688','43','83','87','92'))]
+                    co_inx = [inx for inx in h5.index if str(inx).startswith(cct.code_startswith)]
                 elif market == 'sh':
                     co_inx = [inx for inx in h5.index if str(inx).startswith(('6'))]
                 elif market == 'sz':
@@ -1452,6 +1454,7 @@ if __name__ == '__main__':
     # df = get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, pause=0.001)
     df = get_sina_Market_json()
     print(df)
+    print(df.loc['920274'])
     import ipdb;ipdb.set_trace()
 
     print(f'300502 ratio:{df.loc["300502"].ratio}')

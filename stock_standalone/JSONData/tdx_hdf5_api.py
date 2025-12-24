@@ -25,47 +25,92 @@ Debug_is_not_find = 0
 # Compress_Count = 1
 BaseDir = cct.get_ramdisk_dir()
 import tables
-
-#import fcntl linux
-#lock：
-# fcntl.flock(f,fcntl.LOCK_EX)
-# unlock
-# fcntl.flock(f,fcntl.LOCK_UN)
-
-# for win
-# with portalocker.Lock('some_file', 'rb+', timeout=60) as fh:
-#     # do what you need to do
-#     ...
- 
-#     # flush and sync to filesystem
-#     fh.flush()
-#     os.fsync(fh.fileno())
-# import os, time, random, subprocess, logging
-# from pandas import HDFStore
-
-
-# 日志配置
-
-# log_file = os.path.join(BaseDir, "tdx_hdf5.log")
-# logging.basicConfig(
-#     level=logging.INFO,
-#     format="%(asctime)s [%(levelname)s] %(message)s",
-#     handlers=[
-#         logging.FileHandler(log_file, encoding="utf-8"),
-#         logging.StreamHandler()
-#     ]
-# )
-# log = logging.getLogger(__name__)
-
-
-
-
-
-
-
-
 import psutil
 
+# import pandas as pd
+# import numpy as np
+
+# def prepare_df_for_hdf5(df, verbose=False):
+#     if df is None or df.empty:
+#         return df
+
+#     start_mem = df.memory_usage().sum() / 1024 ** 2
+
+#     # -----------------------------
+#     # 1. 处理 categorical 列
+#     # -----------------------------
+#     for col in df.select_dtypes('category'):
+#         # 如果会填充 0，则先确保类别包含 0
+#         if 0 not in df[col].cat.categories:
+#             df[col] = df[col].cat.add_categories([0])
+
+#     # -----------------------------
+#     # 2. 处理 object 列
+#     # -----------------------------
+#     for col in df.select_dtypes('object'):
+#         # if col == 'MainU':
+#         #     # 转掩码
+#         #     df[col] = df[col].apply(
+#         #         lambda x: sum(1 << int(i) for i in str(x).split(',') if i.isdigit()) if pd.notna(x) and x != '0' else 0
+#         #     ).astype('int32')
+#         if col == 'status':
+#             df[col] = df[col].astype('category')
+#         elif col == 'hangye':
+#             df[col] = df[col].replace(0, '未知').astype('category')
+#         elif col == 'date':
+#             df[col] = pd.to_datetime(df[col], errors='coerce')
+#         else:
+#             # 混合类型列统一转字符串
+#             df[col] = df[col].astype(str)
+
+#     # -----------------------------
+#     # 3. 数值列瘦身
+#     # -----------------------------
+#     numerics = ["int8","int16","int32","int64","float16","float32","float64"]
+#     for col in df.select_dtypes(include=numerics).columns:
+#         col_type = df[col].dtype
+#         c_min = df[col].min()
+#         c_max = df[col].max()
+#         if str(col_type)[:3] == 'int':
+#             if c_min >= np.iinfo(np.int8).min and c_max <= np.iinfo(np.int8).max:
+#                 df[col] = df[col].astype(np.int8)
+#             elif c_min >= np.iinfo(np.int16).min and c_max <= np.iinfo(np.int16).max:
+#                 df[col] = df[col].astype(np.int16)
+#             elif c_min >= np.iinfo(np.int32).min and c_max <= np.iinfo(np.int32).max:
+#                 df[col] = df[col].astype(np.int32)
+#             else:
+#                 df[col] = df[col].astype(np.int64)
+#         else:  # float
+#             if c_min >= np.finfo(np.float16).min and c_max <= np.finfo(np.float16).max:
+#                 df[col] = df[col].astype(np.float16).round(2)
+#             elif c_min >= np.finfo(np.float32).min and c_max <= np.finfo(np.float32).max:
+#                 df[col] = df[col].astype(np.float32).round(2)
+#             else:
+#                 df[col] = df[col].astype(np.float64).round(2)
+
+#     # -----------------------------
+#     # 4. 填充缺失值
+#     # -----------------------------
+#     for col in df.columns:
+#         if pd.api.types.is_categorical_dtype(df[col]):
+#             # categorical 填充 0 或 '未知' 必须在类别中已存在
+#             if 0 in df[col].cat.categories:
+#                 df[col] = df[col].fillna(0)
+#             else:
+#                 df[col] = df[col].fillna(df[col].mode().iloc[0])
+#         elif pd.api.types.is_numeric_dtype(df[col]):
+#             df[col] = df[col].fillna(0)
+#         elif pd.api.types.is_datetime64_any_dtype(df[col]):
+#             df[col] = df[col].fillna(pd.Timestamp('1970-01-01'))
+#         else:
+#             df[col] = df[col].fillna('')
+
+#     end_mem = df.memory_usage().sum() / 1024 ** 2
+#     if verbose:
+#         log.info(f"Memory usage reduced from {start_mem:.2f} MB to {end_mem:.2f} MB "
+#                  f"({100 * (start_mem - end_mem) / start_mem:.1f}% reduction)")
+
+#     return df
 
 
 # # ===== 日志初始化 =====
@@ -985,13 +1030,147 @@ def write_hdf_db_safe(fname, df, table='all', index=False, complib='blosc', base
 #              fname, table, len(df))
 #     return True
 
+def write_hdf_db_newbug(fname, df, table='all', index=False, complib='blosc', baseCount=500,
+                 append=True, MultiIndex=False, rewrite=False, showtable=False):
+#     [12-24 09:45:12] ERROR:data_utils.py(fetch_and_process:395): resample: d Error in background process: Setting a MultiIndex dtype to anything other than object is not supported
+# Traceback (most recent call last):
+#   File "data_utils.py", line 337, in fetch_and_process
+#   File "JSONData\tdx_data_Day.py", line 3306, in getSinaAlldf
+#   File "JSONData\sina_data.py", line 451, in all
+#   File "JSONData\sina_data.py", line 900, in get_stock_data
+#   File "JSONData\sina_data.py", line 1052, in format_response_data
+#   File "JSONData\tdx_hdf5_api.py", line 1093, in write_hdf_db
+#   File "pandas\core\indexes\multi.py", line 3727, in astype
+# TypeError: Setting a MultiIndex dtype to anything other than object is not supported
+    time_t = time.time()
+
+    if df is None or df.empty:
+        log.warning("write_hdf_db: df is None or empty, skip write")
+        return pd.DataFrame()  # 返回空 DF 避免 NoneType
+
+    # 处理索引
+    if 'code' in df.columns and not MultiIndex:
+        df = df.set_index('code')
+
+    df = df.fillna(0)
+    df = df[~df.index.duplicated(keep='first')]
+
+    tmpdf = pd.DataFrame()
+
+    with SafeHDFStore(fname, mode='a') as store:
+        if store is None:
+            log.error("HDF5 store is None: %s", fname)
+            return False
+
+        table_key = '/' + table
+        keys = store.keys()
+        if showtable:
+            log.info("fname: %s keys:%s", fname, keys)
+            print(f"fname: {fname} keys:{keys}")
+
+        # 读取已有数据
+        if append and table_key in keys:
+            try:
+                tmpdf = store.get(table)
+                if tmpdf is None or not isinstance(tmpdf, pd.DataFrame):
+                    log.warning("HDF5 key %s invalid or None, resetting tmpdf to empty", table_key)
+                    tmpdf = pd.DataFrame()
+                else:
+                    tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
+            except Exception as e:
+                log.error("Error reading HDF5 key %s: %s", table_key, e)
+                tmpdf = pd.DataFrame()
+
+        # MultiIndex 或普通 DataFrame 合并逻辑
+        if append and not tmpdf.empty:
+            # MultiIndex 分支
+            if MultiIndex:
+                try:
+                    multi_code = tmpdf.index.get_level_values('code').unique().tolist()
+                    df_multi_code = df.index.get_level_values('code').unique().tolist()
+                    dratio = cct.get_diff_dratio(multi_code, df_multi_code)
+                    if dratio < ct.dratio_limit:
+                        comm_code = list(set(df_multi_code) & set(multi_code))
+                        if comm_code:
+                            inx_key = comm_code[np.random.randint(0, len(comm_code))]
+                            if inx_key in df.index.get_level_values('code'):
+                                now_time = df.loc[inx_key].index[-1]
+                                tmp_time = tmpdf.loc[inx_key].index[-1]
+                                if now_time == tmp_time:
+                                    log.debug("%s %s Multi out %s hdf5:%s No Write!!!" %
+                                              (fname, table, inx_key, now_time))
+                                    return False
+                    elif dratio == 1:
+                        log.info("newData ratio: %s all:%s", dratio, len(df))
+                    else:
+                        log.debug("dratio:%s main:%s new:%s %s %s Multi All Write" %
+                                  (dratio, len(multi_code), len(df_multi_code), fname, table))
+                except Exception as e:
+                    log.error("MultiIndex merge error: %s", e)
+            else:
+                # 普通 DataFrame 合并逻辑
+                try:
+                    if 'code' in tmpdf.columns:
+                        tmpdf = tmpdf.set_index('code')
+                    if 'code' in df.columns:
+                        df = df.set_index('code')
+
+                    diff_columns = set(df.columns) - set(tmpdf.columns)
+                    if diff_columns:
+                        log.error("columns diff:%s", diff_columns)
+
+                    limit_t = time.time()
+                    df['timel'] = limit_t
+                    df = cct.combine_dataFrame(tmpdf, df, col=None, append=append)
+
+                    if not append:
+                        df['timel'] = time.time()
+                    elif fname == 'powerCompute':
+                        o_time = df[df.timel < limit_t].timel.tolist()
+                        o_time = sorted(set(o_time), reverse=False)
+                        if len(o_time) >= ct.h5_time_l_count:
+                            o_time = [time.time() - t_x for t_x in o_time]
+                            o_timel = len(o_time)
+                            o_time = np.mean(o_time)
+                            if o_time > ct.h5_power_limit_time:
+                                df['timel'] = time.time()
+                                log.error("%s %s o_time:%.1f timel:%s" %
+                                          (fname, table, o_time, o_timel))
+                    log.info("read hdf merge time: %.2f", time.time() - time_t)
+                except Exception as e:
+                    log.error("DataFrame merge error: %s", e)
+
+        # Object 类型列处理
+        obj_cols = df.select_dtypes(include=['object']).columns.tolist()
+        if obj_cols:
+            df[obj_cols] = df[obj_cols].astype(str)
+        df.index = df.index.astype(str)
+        df = df.fillna(0)
+
+        # 写入 HDF5
+        try:
+            if table_key in keys and rewrite:
+                store.remove(table)
+            store.put(table, df, format='table', index=not MultiIndex, append=False,
+                      complib=complib, data_columns=True)
+            store.flush()
+        except Exception as e:
+            log.error("write_hdf_db HDF5 put error: %s", e)
+            return False
+
+    log.info("write_hdf_db done: table=%s, rows=%d, time=%.2f",
+             table, len(df), time.time() - time_t)
+    return df
+
+
 def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False,showtable=False):
 
     if 'code' in df.columns:
         df=df.set_index('code')
     time_t=time.time()
-    df=df.fillna(0)
     df=df[~df.index.duplicated(keep='first')]
+    # df=prepare_df_for_hdf5(df)
+    df=df.fillna(0)
     code_subdf=df.index.tolist()
     global RAMDISK_KEY
     if not RAMDISK_KEY < 1:
@@ -1121,9 +1300,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                 h5.flush()
             else:
                 log.error("HDFile is None,Pls check:%s" % (fname))
-
     log.info("write hdf time:%0.2f" % (time.time() - time_t))
-
     return True
 
 # def lo_hdf_db_old(fname,table='all',code_l=None,timelimit=True,index=False):
@@ -1185,25 +1362,63 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
         if table is not None:
             with SafeHDFStore(fname, mode='r') as store:
                 if store is not None:
-                    log.debug("fname: %s keys:%s", fname, store.keys())
+                    keys = store.keys()
+                    log.debug("HDF5 file: %s, keys: %s", fname, keys)
                     if showtable:
-                        log.debug("fname: %s keys:%s", fname, store.keys())
+                        log.debug("HDF5 file %s contents keys: %s", fname, keys)
 
                     try:
                         table_key = '/' + table
-                        if table_key in store.keys():
+                        log.debug("Trying to access table key: %s", table_key)
+
+                        if table_key in keys:
                             # 直接读取对象（避免无谓 copy）
                             obj = store.get(table)
                             if isinstance(obj, pd.DataFrame):
                                 dd = obj
+                                log.debug("Loaded DataFrame shape: %s", dd.shape)
+                                # 可选：显示前几行预览
+                                log.debug("DataFrame preview:\n%s", dd.head())
                             else:
-                                log.error("Unexpected object type from HDF5: %s", type(obj))
+                                log.error(
+                                    "Unexpected object type from HDF5: %s, key: %s, fname: %s",
+                                    type(obj), table_key, fname
+                                )
                                 dd = pd.DataFrame()
                         else:
+                            log.warning(
+                                "Table key not found in HDF5: %s, available keys: %s", table_key, keys
+                            )
                             dd = pd.DataFrame()
+
                     except Exception as e:
-                        log.error("load_hdf_db Error: %s %s", fname, e)
+                        log.exception("load_hdf_db exception for file %s, table %s", fname, table)
                         dd = pd.DataFrame()
+                else:
+                    log.error("SafeHDFStore returned None for file: %s", fname)
+                    dd = pd.DataFrame()
+
+            # with SafeHDFStore(fname, mode='r') as store:
+            #     if store is not None:
+            #         log.debug("fname: %s keys:%s", fname, store.keys())
+            #         if showtable:
+            #             log.debug("fname: %s keys:%s", fname, store.keys())
+
+            #         try:
+            #             table_key = '/' + table
+            #             if table_key in store.keys():
+            #                 # 直接读取对象（避免无谓 copy）
+            #                 obj = store.get(table)
+            #                 if isinstance(obj, pd.DataFrame):
+            #                     dd = obj
+            #                 else:
+            #                     log.error("Unexpected object type from HDF5: %s", type(obj))
+            #                     dd = pd.DataFrame()
+            #             else:
+            #                 dd = pd.DataFrame()
+            #         except Exception as e:
+            #             log.error("load_hdf_db Error: %s %s", fname, e)
+            #             dd = pd.DataFrame()
 
             if dd is not None and len(dd) > 0:
                 if not MultiIndex:
@@ -2025,13 +2240,56 @@ if __name__ == "__main__":
     # import ipdb;ipdb.set_trace()
 
     #pip install pandas==1.4.4
-    #OSError: [WinError 1] 函数不正确。: 'G:\\'   imdisk error 
+    #OSError: [WinError 1] 函数不正确。: 'G:\\'   imdisk error
+    def df_diagnose(df, name='df'):
+        print(f'[{name}] shape:', df.shape)
+        print('- index:', type(df.index), 
+              'unique:', df.index.is_unique)
+        print('- memory(MB):', df.memory_usage(deep=True).sum()/1024**2)
+        print('- df.dtypes.value_counts() dtypes:\n', df.dtypes.value_counts())
+        obj_cols = df.select_dtypes(include='object').columns
+        if len(obj_cols):
+            print('- object cols:', list(obj_cols)[:10])
+        print(f'show table 5:{df.loc[:,obj_cols][:5]}')
 
-    def get_tdx_all_from_h5(showtable=True):
+    def encode_mainu_bitmask(df, col='MainU'):
+        df[col + '_mask'] = df[col].apply(lambda x: sum(1 << int(i) for i in str(x).split(',') if i.isdigit()) if pd.notna(x) and x != '0' else 0).astype('int32')
+        # 原列保留，不 drop
+        return df
+
+    def normalize_object_columns(df):
+        # status -> category
+        if 'status' in df.columns:
+            df['status'] = df['status'].astype('category')
+
+        # MainU -> 直接转换成 mask（覆盖原列）
+        if 'MainU' in df.columns:
+            df['MainU'] = df['MainU'].apply(
+                lambda x: sum(1 << int(i) for i in str(x).split(',') if i.isdigit()) 
+                          if pd.notna(x) and x != '0' else 0
+            ).astype('int32')
+
+        # date -> datetime
+        if 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+
+        # category -> int16
+        if 'category' in df.columns:
+            df['category'] = pd.to_numeric(df['category'], errors='coerce').fillna(0).astype('int16')
+
+        # hangye -> category
+        if 'hangye' in df.columns:
+            df['hangye'] = df['hangye'].replace(0, '未知').astype('category')
+
+        return df
+
+    def get_tdx_all_from_h5(showtable=True,resample='d',dl=ct.Resample_LABELS_Days['d']):
         #sina_monitor
         h5_fname = 'tdx_last_df'
-        resample='d'
-        dl='60'
+        # resample='d'
+        resample=resample
+        # dl='60'
+        dl= dl
         filter='y'
         h5_table = 'low' + '_' + resample + '_' + str(dl) + '_' + filter + '_' + 'all'
         h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
@@ -2056,6 +2314,10 @@ if __name__ == "__main__":
         if new_path:
             hm5.to_hdf(f"G:\\{new_path}", key=f"{h5_table}/table", mode="w", format="table", complib="blosc", complevel=9)
 
+    def read_sina_df(h5_fname,h5_table,showtable=True,new_path=None):
+        print(f'fname : {h5_fname}')
+        h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
+        return h5
     # hm5=get_tdx_all_MultiIndex_h5()
     # with tables.open_file(r"G:\sina_MultiIndex_data.h5") as f: print(f)
     # with tables.open_file(r"G:\sina_data.h5") as f: print(f)
@@ -2066,18 +2328,9 @@ if __name__ == "__main__":
     print(f"sina_data:{check_hdf(h5_fname='sina_data',h5_table='all')}")
     # print(f"sina_data:{check_hdf(h5_fname='tdx_all_df_300',h5_table='all')}")
 
+    sina = read_sina_df(h5_fname='sina_data',h5_table='all')
+    df_diagnose(sina)
 
-    # def check_tdx_all_df(fname='300'):
-    #     tdx_hd5_name = f'tdx_all_df_{fname}'
-    #     tdx_hd5_path = cct.get_run_path_tdx(tdx_hd5_name)
-    #     print(f'tdx_hd5_path: {tdx_hd5_path}')
-    #     import h5py
-    #     try:
-    #         f = h5py.File(tdx_hd5_path,"r")
-    #         table_name = list(f.keys())[0]
-    #         print(f"顶层keys: {list(f.keys())} {f.get(table_name).shape}")
-    #     except Exception as e:
-    #         print("H5PY无法打开:", e)
 
     def check_tdx_all_df1(fname='300'):
         import h5py
@@ -2128,12 +2381,115 @@ if __name__ == "__main__":
         store.close()
         return df
 
-    # runcol=['low','high','close']
     h5 = readHdf5(sina_MultiD_path)
     h5.shape
-
     print(h5.loc['300245'])
-    
+    df_diagnose(h5)
+
+    for re in ct.Resample_LABELS:
+        print(f're: {re}')
+        if re in ct.Resample_LABELS_Days:
+            dl = ct.Resample_LABELS_Days[re]
+            print(f'dl :{dl}')
+
+
+   
+
+    # import pandas as pd
+    # import numpy as np
+
+    # def prepare_df_for_hdf5(df, verbose=True):
+    #     if df is None or df.empty:
+    #         return df
+
+    #     start_mem = df.memory_usage().sum() / 1024 ** 2
+
+    #     # -----------------------------
+    #     # 1. 归一化对象列
+    #     # -----------------------------
+    #     if 'status' in df.columns:
+    #         df['status'] = df['status'].astype('category')
+
+    #     # if 'MainU' in df.columns:
+    #     #     df['MainU'] = df['MainU'].apply(
+    #     #         lambda x: sum(1 << int(i) for i in str(x).split(',') if i.isdigit()) if pd.notna(x) and x != '0' else 0
+    #     #     ).astype('int32')
+
+    #     if 'date' in df.columns:
+    #         df['date'] = pd.to_datetime(df['date'], errors='coerce')
+
+    #     if 'category' in df.columns:
+    #         df['category'] = pd.to_numeric(df['category'], errors='coerce').fillna(0).astype('int16')
+
+    #     if 'hangye' in df.columns:
+    #         df['hangye'] = df['hangye'].replace(0, '未知').astype('category')
+
+    #     # -----------------------------
+    #     # 2. 数值列瘦身
+    #     # -----------------------------
+    #     numerics = ["int8","int16","int32","int64","float16","float32","float64"]
+    #     for col in df.select_dtypes(include=numerics).columns:
+    #         col_type = df[col].dtype
+    #         c_min = df[col].min()
+    #         c_max = df[col].max()
+    #         if str(col_type)[:3] == 'int':
+    #             if c_min >= np.iinfo(np.int8).min and c_max <= np.iinfo(np.int8).max:
+    #                 df[col] = df[col].astype(np.int8)
+    #             elif c_min >= np.iinfo(np.int16).min and c_max <= np.iinfo(np.int16).max:
+    #                 df[col] = df[col].astype(np.int16)
+    #             elif c_min >= np.iinfo(np.int32).min and c_max <= np.iinfo(np.int32).max:
+    #                 df[col] = df[col].astype(np.int32)
+    #             else:
+    #                 df[col] = df[col].astype(np.int64)
+    #         else:  # float
+    #             if c_min >= np.finfo(np.float16).min and c_max <= np.finfo(np.float16).max:
+    #                 df[col] = df[col].astype(np.float16).round(2)
+    #             elif c_min >= np.finfo(np.float32).min and c_max <= np.finfo(np.float32).max:
+    #                 df[col] = df[col].astype(np.float32).round(2)
+    #             else:
+    #                 df[col] = df[col].astype(np.float64).round(2)
+
+    #     end_mem = df.memory_usage().sum() / 1024 ** 2
+    #     if verbose:
+    #         log.info(f"Memory usage reduced from {start_mem:.2f} MB to {end_mem:.2f} MB "
+    #               f"({100 * (start_mem - end_mem) / start_mem:.1f}% reduction)")
+
+    #     return df
+
+
+
+    import warnings
+    import tables
+
+    # 忽略 PyTables 的性能警告
+    warnings.filterwarnings("ignore", category=tables.exceptions.PerformanceWarning)
+
+    tdx_hd5_name = r"G:\\tdx_last_df.h5"
+    tablename = 'low_d_70_y_all'
+    df=readHdf5(tdx_hd5_name,tablename)
+    # print(df.loc['300245'])
+    df_diagnose(df)
+
+    print(f'show src df.dtypes.value_counts(): {df.dtypes.value_counts()}')
+
+    # df = normalize_object_columns(df)
+    # print(f'show normalize_object_columns df.dtypes.value_counts(): {df.dtypes.value_counts()}')
+    print(f'show reduce_memory_usage-----------------\n')
+    df2 = cct.reduce_memory_usage(df,verbose=True)
+    df_diagnose(df2)
+    print(f'show reduce_memory_usage df.dtypes.value_counts(): {df2.dtypes.value_counts()}----\n')
+    print(f"show reduce_memory_usage table 5:{df2.loc[:,['status', 'MainU', 'date', 'category', 'hangye']][:5]}")
+    print(f'show reduce_memory_usage-----------------\n')
+
+    df = cct.prepare_df_for_hdf5(df)
+    df_diagnose(df)
+    print(f'show prepare_df_for_hdf5 df.dtypes.value_counts(): {df.dtypes.value_counts()}----\n')
+    print(f"show prepare_df_for_hdf5 table 5:{df.loc[:,['status', 'MainU', 'date', 'category', 'hangye']][:5]}")
+    print(f'show prepare_df_for_hdf5-----------------\n')
+
+    # print(f'df.memory_usage(deep=True): {df.memory_usage(deep=True)} df.memory_usage(deep=True).sum: {df.memory_usage(deep=True).sum() / 1024**2}')
+    import ipdb;ipdb.set_trace()
+
     mdf = cct.get_limit_multiIndex_freq(h5, freq=freq.upper(),  col='all', start=startime, end=endtime, code=None)
     print(mdf.loc['300245'])
     print(mdf.loc['300516'])

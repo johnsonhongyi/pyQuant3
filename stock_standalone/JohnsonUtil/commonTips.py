@@ -537,8 +537,10 @@ class GlobalConfig:
         self.min_position_ratio = self.get_with_writeback("general", "min_position_ratio", fallback=0.05, value_type="float")
         self.risk_duration_threshold = self.get_with_writeback("general", "risk_duration_threshold", fallback=300, value_type="int")
         self.pending_alert_cycles = self.get_with_writeback("general", "pending_alert_cycles", fallback=10, value_type="int")
-        self.st_key_sort = self.get_with_writeback("general", "st_key_sort", fallback="3 2", value_type="str")
-        saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="260x180")
+        self.st_key_sort = self.get_with_writeback("general", "st_key_sort", fallback="2 1", value_type="str")
+        self.code_startswith = self.get_with_writeback("general", "code_startswith", fallback='"6", "30", "00", "688", "43", "83", "87", "92"', value_type="tuple_str")
+
+        saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         try:
             if "x" in saved_wh_str:
                 self.saved_width, self.saved_height = map(int, saved_wh_str.split("x"))
@@ -563,33 +565,101 @@ class GlobalConfig:
             self.save()
 
     # ===================== 新增 get_with_writeback =====================
+
     def get_with_writeback(self, section: str, option: str, fallback: Any, value_type: str = "str") -> Any:
         """
-        读取配置，如果不存在则写入 fallback 到 ini
-        value_type: "str", "int", "float", "bool"
+        读取配置项，如果不存在则写入 fallback 并返回 fallback
+
+        value_type 支持：
+            - "str"
+            - "int"
+            - "float"
+            - "bool"
+            - "tuple_str"   # ('6','30') 或 6,30
         """
+
+        # ===== 1. 确保 section 存在（绝对安全）=====
+        if not self.cfg.has_section(section):
+            self.cfg.add_section(section)
+
+        # ===== 2. option 不存在：写回 fallback =====
         if not self.cfg.has_option(section, option):
-            # 写回默认值
-            val_str: str
-            if value_type == "bool":
-                val_str = "True" if fallback else "False"
-            else:
-                val_str = str(fallback)
-            if not self.cfg.has_section(section):
-                self.cfg.add_section(section)
-            self.cfg.set(section, option, val_str)
-            self.save()
+            try:
+                if value_type == "bool":
+                    val_str = "True" if bool(fallback) else "False"
+                else:
+                    val_str = str(fallback)
+
+                self.cfg.set(section, option, val_str)
+                self.save()
+            except Exception:
+                # 写配置失败也不能影响程序运行
+                pass
+
             return fallback
-        else:
-            # 已存在，按类型返回
+
+        # ===== 3. option 已存在：读取 raw =====
+        try:
+            raw = self.cfg.get(section, option)
+        except Exception:
+            return fallback
+
+        # ===== 4. 按类型安全解析 =====
+        try:
             if value_type == "int":
-                return self.cfg.getint(section, option)
+                return int(raw)
+
             elif value_type == "float":
-                return self.cfg.getfloat(section, option)
+                return float(raw)
+
             elif value_type == "bool":
-                return self.cfg.getboolean(section, option)
+                return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+            # ===== tuple_str（重点增强）=====
+            elif value_type == "tuple_str":
+                raw = str(raw).strip()
+
+                # 4.1 兼容老格式：('6','30','00')
+                if raw.startswith("("):
+                    try:
+                        value = ast.literal_eval(raw)
+                        if isinstance(value, (list, tuple)):
+                            return tuple(str(x) for x in value)
+                    except Exception:
+                        pass
+
+                # 4.2 新推荐格式：6,30,00,688
+                parts = [
+                    s.strip()
+                    for s in raw.replace("'", "").replace('"', "").split(",")
+                    if s.strip()
+                ]
+                if parts:
+                    return tuple(parts)
+
+                raise ValueError("empty tuple_str")
+
+            # ===== 默认字符串 =====
             else:
-                return self.cfg.get(section, option)
+                return raw
+
+        except Exception:
+            # ===== 5. 所有异常统一兜底 fallback =====
+            if value_type == "tuple_str":
+                if isinstance(fallback, (list, tuple)):
+                    return tuple(str(x) for x in fallback)
+                if isinstance(fallback, str):
+                    return tuple(
+                        s.strip()
+                        for s in fallback.strip("()")
+                        .replace("'", "")
+                        .replace('"', "")
+                        .split(",")
+                        if s.strip()
+                    )
+                return ()
+
+            return fallback
     # =====================================================================
 
     def _split(self, s):
@@ -666,7 +736,8 @@ trailing_stop_pct: float = CFG.trailing_stop_pct
 max_single_stock_ratio: float = CFG.max_single_stock_ratio
 min_position_ratio: float = CFG.min_position_ratio
 risk_duration_threshold: int = CFG.risk_duration_threshold
-
+code_startswith: str = CFG.code_startswith
+# log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:
     return os.path.sep
 
@@ -5156,7 +5227,94 @@ def write_to_blocknewOld(p_name, data, append=True, doubleFile=True, keep_last=N
             writeBlocknew(blockNewStart, data, append)
         # print "write to append:%s :%s :%s"%(append,p_name,len(data))
 
+def prepare_df_for_hdf5(df, verbose=False):
+    if df is None or df.empty:
+        return df
+
+    start_mem = df.memory_usage().sum() / 1024 ** 2
+
+    # -----------------------------
+    # 1. 处理 categorical 列
+    # -----------------------------
+    for col in df.select_dtypes('category'):
+        # 如果会填充 0，则先确保类别包含 0
+        if 0 not in df[col].cat.categories:
+            df[col] = df[col].cat.add_categories([0])
+
+    # -----------------------------
+    # 2. 处理 object 列
+    # -----------------------------
+
+    # for col in df.select_dtypes('object'):
+    #     # if col == 'MainU':
+    #     #     # 转掩码
+    #     #     df[col] = df[col].apply(
+    #     #         lambda x: sum(1 << int(i) for i in str(x).split(',') if i.isdigit()) if pd.notna(x) and x != '0' else 0
+    #     #     ).astype('int32')
+    #     if col == 'status':
+    #         df[col] = df[col].astype('category')
+    #     elif col == 'hangye':
+    #         df[col] = df[col].replace(0, '未知').astype('category')
+    #     elif col == 'date':
+    #         df[col] = pd.to_datetime(df[col], errors='coerce')
+    #     else:
+    #         # 混合类型列统一转字符串
+    #         df[col] = df[col].astype(str)
+    for col in ['status', 'MainU', 'date', 'category', 'hangye']:
+        if col in df.columns:
+            df[col] = df[col].astype(str).replace('nan', '0')
+
+    # -----------------------------
+    # 3. 数值列瘦身
+    # -----------------------------
+    numerics = ["int8","int16","int32","int64","float16","float32","float64"]
+    for col in df.select_dtypes(include=numerics).columns:
+        col_type = df[col].dtype
+        c_min = df[col].min()
+        c_max = df[col].max()
+        if str(col_type)[:3] == 'int':
+            if c_min >= np.iinfo(np.int8).min and c_max <= np.iinfo(np.int8).max:
+                df[col] = df[col].astype(np.int8)
+            elif c_min >= np.iinfo(np.int16).min and c_max <= np.iinfo(np.int16).max:
+                df[col] = df[col].astype(np.int16)
+            elif c_min >= np.iinfo(np.int32).min and c_max <= np.iinfo(np.int32).max:
+                df[col] = df[col].astype(np.int32)
+            else:
+                df[col] = df[col].astype(np.int64)
+        else:  # float
+            if c_min >= np.finfo(np.float16).min and c_max <= np.finfo(np.float16).max:
+                df[col] = df[col].astype(np.float16).round(2)
+            elif c_min >= np.finfo(np.float32).min and c_max <= np.finfo(np.float32).max:
+                df[col] = df[col].astype(np.float32).round(2)
+            else:
+                df[col] = df[col].astype(np.float64).round(2)
+
+    # -----------------------------
+    # 4. 填充缺失值
+    # -----------------------------
+    for col in df.columns:
+        if pd.api.types.is_categorical_dtype(df[col]):
+            # categorical 填充 0 或 '未知' 必须在类别中已存在
+            if 0 in df[col].cat.categories:
+                df[col] = df[col].fillna(0)
+            else:
+                df[col] = df[col].fillna(df[col].mode().iloc[0])
+        elif pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].fillna(0)
+        elif pd.api.types.is_datetime64_any_dtype(df[col]):
+            df[col] = df[col].fillna(pd.Timestamp('1970-01-01'))
+        else:
+            df[col] = df[col].fillna('')
+
+    end_mem = df.memory_usage().sum() / 1024 ** 2
+    if verbose:
+        log.info(f"Memory usage reduced from {start_mem:.2f} MB to {end_mem:.2f} MB "
+                 f"({100 * (start_mem - end_mem) / start_mem:.1f}% reduction)")
+
+    return df
+
 def reduce_memory_usage(df, verbose=False):
+
     numerics = ["int8", "int16", "int32", "int64", "float16", "float32", "float64"]
     if df is not None:
         start_mem = df.memory_usage().sum() / 1024 ** 2
