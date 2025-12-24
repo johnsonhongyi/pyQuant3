@@ -793,119 +793,6 @@ def track_bullish_signals_vectorized_full(
     return df
 
 
-    # if len(df) < 10:
-    #     df['upper'] = 0
-    #     df['lower'] = 0
-    #     df['ene'] = 0
-    #     df['bandwidth'] = 0
-    #     df['bollpect'] = 0
-    #     log.debug(f'code:{df[-1:]} df count < 6:{len(df)}')
-    #     return df
-
-    # if len(df) > 33:
-    #         df[['lower', 'ene', 'upper','bandwidth','bollpect']] = ta.bbands(df['close'], length=20, std=2, ddof=0)
-
-    # else:
-    #     df['upper'] = [round((1 + 11.0 / 100) * x, 1) for x in df.ma10d]
-    #     df['lower'] = [round((1 - 9.0 / 100) * x, 1) for x in df.ma10d]
-    #     df['ene'] = list(map(lambda x, y: round((x + y) / 2, 1), df.upper, df.lower))
-    #     df['bandwidth'] = 0
-    #     df['bollpect'] = 0
-
-    # df['upper'] = df['upper'].apply(lambda x: round(x,1))   
-    # df['lower'] = df['lower'].apply(lambda x: round(x,1))   
-    # df['ene'] =  df['ene'].apply(lambda x: round(x,1))  
-
-    # df[['macd','macddif','macddea']] = ta.macd(
-    #     df['close'], fastperiod=12, slowperiod=26, signalperiod=9) 
-    # df = df.fillna(0)
-    # df['macddif'] = round( df['macddif'], 2)
-    # df['macddea'] = round( df['macddea'], 2)
-    # df['macd'] = df['macd'].apply(lambda x:round(x,2))
-    # df['macdlast1'] = df.iloc[-1]['macd']
-    # df['macdlast2'] = df.iloc[-2]['macd']
-    # df['macdlast3'] = df.iloc[-3]['macd']
-    # df['macdlast4'] = df.iloc[-4]['macd']
-    # df['macdlast5'] = df.iloc[-5]['macd']
-    # df['macdlast6'] = df.iloc[-6]['macd']   
-    # df['macd'] = df.iloc[-1]['macd']
-
-
-def get_tdx_macd_no_sws(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_period: int = 9) -> pd.DataFrame:
-
-    if df.empty or not all(col in df.columns for col in ['close', 'high', 'low']):
-        return df.copy()
-
-    increasing = None
-    id_cout = len(df)
-    limit = min_len
-    
-    if 'macd' in df.columns and 'macdlast6' in df.columns:
-        log.debug(f'macd is exists macd:{df.macd[-2:]}  macdlast6:{df.macdlast6[-2:]}')
-        # return df
-
-    if id_cout < limit:
-        if  df.index.is_monotonic_increasing:
-            increasing = True
-            df = df.sort_index(ascending=False)
-        else:
-            increasing = False
-
-        # temp_df = df.iloc[0]
-
-        runtimes = limit-id_cout
-        df = df.reset_index()
-        # for t in range(runtimes):
-        #     df.loc[df.shape[0]] = temp_df
-        temp = df.loc[np.repeat(df.index[-1], runtimes)].reset_index(drop=True)
-        # df = df.append(temp)
-        df = pd.concat([df, temp], axis=0)
-
-        df = df.reset_index(drop=True)
-
-        df=df.sort_index(ascending=False)
-
-    
-
-    # --- BOLLINGER BANDS ---
-    bb = ta.bbands(df['close'], length=20, std=2, mamode='sma')
-    df['lower'] = bb['BBL_20_2.0'].round(2)
-    df['upper'] = bb['BBU_20_2.0'].round(2)
-    df['ene'] = bb['BBM_20_2.0'].round(2)
-    df['bandwidth'] = (df['upper'] - df['lower']).round(2)
-    df['bollpect'] = ((df['close'] - df['lower']) / df['bandwidth'] * 100).round(2)
-
-    # --- MACD ---
-    macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
-    df['macddif'] = macd['MACD_12_26_9'].round(2)
-    df['macddea'] = macd['MACDs_12_26_9'].round(2)
-    df['macd'] = macd['MACDh_12_26_9'].round(2)
-
-    # 保留最近 6 个 macd 值
-    for i in range(1, 7):
-        df[f'macdlast{i}'] = df['macd'].shift(i-1).round(2)
-
-    # --- RSI ---
-    df['rsi'] = ta.rsi(df['close'], length=rsi_period).round(2)
-
-    # --- KDJ ---
-    kdj = ta.stoch(high=df['high'], low=df['low'], close=df['close'], k=3, d=3, smooth_k=3)
-    df['kdj_k'] = kdj['STOCHk_3_3_3'].round(2)
-    df['kdj_d'] = kdj['STOCHd_3_3_3'].round(2)
-    df['kdj_j'] = (3*df['kdj_k'] - 2*df['kdj_d']).round(2)
-
-    df = df.fillna(0)
-
-    if df.index.name != 'date':
-        df=df[-id_cout:].set_index('date')
-    else:
-        df=df[-id_cout:]
-
-    if increasing is not None:
-        df = df.sort_index(ascending=increasing)
-    return df
-
-
 def detect_local_extremes_filtered(df, N=10, tol_pct=0.01):
     """
     动态识别局部高低点和极点，并只在最后一天放置中枢相关值。
@@ -1132,6 +1019,290 @@ def check_conditions_auto(df, days=6):
     
     return df
 
+def boll_probe_stage(df, n=5, m=2):
+    """
+    Bollinger 试盘期（使用 high）
+    """
+    cond_probe_daily = (df['high'] >= df['upper']) & (df['close'] < df['upper']) & (df['upper'] > df['upper'].shift(1))
+
+    cond_probe_continue = cond_probe_daily.rolling(n).sum() >= m
+
+    cond_probe_alive = df['close'] >= df['mid']
+
+    df['boll_probe'] = cond_probe_continue & cond_probe_alive
+
+    return df
+
+def boll_boost_stage(df, n=5, m=3):
+    """
+    Bollinger 主升期（使用 close）
+    """
+    cond_boost_daily = (df['close'] > df['upper']) & (df['upper'] > df['upper'].shift(1))
+
+    cond_boost_continue = cond_boost_daily.rolling(n).sum() >= m
+
+    cond_boost_alive = df['close'] >= df['mid']
+
+    df['boll_boost'] = cond_boost_continue & cond_boost_alive
+
+    return df
+
+def boll_stage(df):
+    """
+    0: 非趋势
+    1: 试盘期
+    2: 主升期
+    """
+    stage = np.zeros(len(df), dtype=int)
+
+    stage[df['boll_probe']] = 1
+    stage[df['boll_boost']] = 2
+
+    # 主升优先级最高
+    stage[df['boll_boost']] = 2
+
+    df['boll_stage'] = stage
+    return df
+
+def boll_trend_breakout(df, n=5, m=3):
+    """
+    趋势型 Bollinger 连续上轨突破判定
+    返回：df['boll_trend_up']  (bool)
+    """
+    # 1. 单日基础条件
+    cond_daily = (df['close'] > df['upper']) & (df['upper'] > df['upper'].shift(1))
+
+    # 2. N 日内满足 M 次
+    cond_continue = cond_daily.rolling(n).sum() >= m
+
+    # 3. 趋势未被破坏（不跌破中轨）
+    cond_trend_alive = df['close'] >= df['ene']
+
+    df['boll_signal'] = cond_continue & cond_trend_alive
+
+    return df
+
+def intraday_trade_signal(df, vol_threshold=1.2, pullback_ratio=0.3):
+    """
+    盘中快速买卖信号
+    df 必须包含字段: ['open','close','high','low','upper','amount','ma5d','ma10d','EVAL_STATE']
+    trade_signal:
+        1  -> 集合竞价高开买入
+        2  -> 回撤低吸买入
+        0  -> 保持/等待
+       -1  -> 止损离场
+    vol_threshold: 集合竞价量放大倍数
+    pullback_ratio: 回撤低吸参考比例（相对前两日涨幅）
+    """
+    df = df.copy()
+    df['trade_signal'] = 0
+
+    for i in range(1, len(df)):
+        state = df.at[df.index[i], 'EVAL_STATE']
+        open_price = df.at[df.index[i], 'open']
+        close_price = df.at[df.index[i], 'close']
+        ma5 = df.at[df.index[i], 'ma5d']
+        ma10 = df.at[df.index[i], 'ma10d']
+        amount = df.at[df.index[i], 'amount']
+        
+        prev_close = df.at[df.index[i-1], 'close']
+        prev_amount = df.at[df.index[i-1], 'amount']
+        # 上两日涨幅参考
+        if i >= 2:
+            prev2_close = df.at[df.index[i-2], 'close']
+            prev2_high = df.at[df.index[i-2], 'high']
+        else:
+            prev2_close = prev_close
+            prev2_high = df.at[df.index[i-1], 'high']
+        
+        # 1️⃣ 集合竞价高开买入（快速响应）
+        if state == 1 and open_price > prev_close and amount > prev_amount * vol_threshold and close_price > ma10:
+            df.at[df.index[i], 'trade_signal'] = 1
+        
+        # 2️⃣ 回撤低吸
+        elif state in [2,3]:
+            # 前两日涨幅
+            recent_gain = max(prev_close, prev2_high) - prev2_close
+            pullback_level = prev2_close + recent_gain * (1 - pullback_ratio)
+            if close_price <= pullback_level and close_price > ma10:
+                df.at[df.index[i], 'trade_signal'] = 2
+        
+        # 3️⃣ 快速止损离场
+        if close_price < ma5:
+            df.at[df.index[i], 'trade_signal'] = -1
+
+    return df
+
+def extract_all_features(df, lastdays=5, code=None):
+    """单只股票
+    从 df 中提取最近 lastdays 的所有字段，返回一个字典：
+    open/close/high/low/vol/ma/upper/per + evalNd/signalNd
+    每个列做安全检查，更健壮
+    code: 可选，单只股票代码，会加入字典中
+    """
+    features = {}
+    # if code is not None:
+    #     features['code'] = code  # 添加股票代码
+
+    # 定义字段映射
+    cols_map = {
+        'open': 'lasto',
+        'high': 'lasth',
+        'low': 'lastl',
+        'close': 'lastp',
+        'vol': 'lastv',
+        'upper': 'upper',
+        'ma5d': 'ma5',
+        'ma20d': 'ma20',
+        'ma60d': 'ma60',
+        'perlastp': 'perc',
+        'perd': 'per'
+    }
+
+    # 安全获取倒数 idx 行
+    def safe_get(colname, idx, default=0):
+        if colname in df.columns and len(df) >= idx:
+            return df[colname].iloc[-idx]
+        return default
+
+    # 遍历最近 lastdays
+    for da in range(1, lastdays + 1):
+        for col, prefix in cols_map.items():
+            features[f'{prefix}{da}d'] = safe_get(col, da)
+        
+        # eval 和 signal
+        features[f'eval{da}d'] = safe_get(f'eval{da}d', 1)
+        features[f'signal{da}d'] = safe_get(f'signal{da}d', 1)
+
+    return features
+
+
+
+def generate_df_vect_daily_features(df, lastdays=5):
+    """
+    df: 多股票 DataFrame，index 为 (code, date)，多列 open/close/high/low/vol/ma/upper/eval/signal
+    lastdays: 提取最近 N 天特征
+    返回: 每只股票一行字典，字段格式 lasto1d,lastp1d,...,eval1d,signal1d,...，并带 'code' 字段
+    """
+    features_list = []
+    cols_map = {
+        'open': 'lasto',
+        'high': 'lasth',
+        'low': 'lastl',
+        'close': 'lastp',
+        'vol': 'lastv',
+        'upper': 'upper',
+        'ma5d': 'ma5',
+        'ma20d': 'ma20',
+        'ma60d': 'ma60',
+        'perlastp': 'perc',
+        'perd': 'per'
+    }
+
+    for code, df_stock in df.groupby(level=0):
+        feat = {'code': code}  # 添加股票 code
+        df_stock = df_stock.sort_index(level=1)
+        n_rows = len(df_stock)
+
+        for da in range(1, lastdays + 1):
+            for col, prefix in cols_map.items():
+                if col in df_stock.columns and da <= n_rows:
+                    feat[f'{prefix}{da}d'] = df_stock[col].iloc[-da]
+                else:
+                    feat[f'{prefix}{da}d'] = 0
+
+            # eval / signal
+            for suffix in ['eval', 'signal']:
+                colname = f'{suffix}{da}d'
+                if colname in df_stock.columns and da <= n_rows:
+                    feat[colname] = df_stock[colname].iloc[-da]
+                else:
+                    feat[colname] = 0
+
+        features_list.append(feat)
+
+    return features_list
+
+
+
+
+def extract_eval_signal_dict(df, lastdays=5):
+    """
+    将 df 中 evalNd 和 signalNd 列提取成一个字典，用于每日早盘汇总
+    lastdays: 提取最近 N 天的数据
+    返回: dict {'eval1d':..., 'signal1d':..., 'eval2d':..., ...}
+    """
+    result = {}
+    for da in range(1, lastdays + 1):
+        eval_col = f'eval{da}d'
+        signal_col = f'signal{da}d'
+
+        # 安全获取最后 da 天的数据，如果列不存在则默认 0
+        result[eval_col] = df[eval_col].iloc[-1] if eval_col in df.columns else 0
+        result[signal_col] = df[signal_col].iloc[-1] if signal_col in df.columns else 0
+
+    return result
+
+
+def evaluate_trading_signal(df):
+    """
+    修正版交易信号生成（upper=0 时不判定）
+    EVAL_STATE:
+        0 = 空头 / 禁止交易
+        1 = 趋势启动确认期
+        2 = 主升趋势持仓期
+        3 = 回撤确认期（允许低吸）
+    trade_signal:
+        0 = HOLD
+        1 = BUY_1 (趋势确认买)
+        2 = BUY_2 (回撤低吸)
+       -1 = SELL
+    """
+    df = df.copy()
+    
+    # 只计算 upper > 0 的行
+    valid = df['upper'] > 0
+
+    # 条件定义
+    cond_trend_start = valid & (df['close'] > df['upper']) & (df['close'].shift(1) <= df['upper'].shift(1)) & (df['amount'] > df['amount'].shift(1) * 1.1)
+    cond_trend_continue = valid & (df['close'] > df['upper']) & (df['close'].shift(1) > df['upper'].shift(1))
+    cond_pullback = valid & (df['close'] < df['close'].shift(1)) & (df['low'] >= df['ma10d']) & (df['amount'] < df['amount'].shift(1))
+    cond_bear = valid & ((df['close'] < df['ma10d']) | ((df['open'] > df['close'].shift(1)) & (df['close'] < df['ma10d'])))
+
+    # 初始化状态
+    df['EVAL_STATE'] = 0
+
+    # 状态机逻辑
+    for i in range(len(df)):
+        prev_state = df['EVAL_STATE'].iloc[i-1] if i > 0 else 0
+
+        if cond_trend_start.iloc[i]:
+            df.at[df.index[i], 'EVAL_STATE'] = 1
+        elif cond_trend_continue.iloc[i]:
+            df.at[df.index[i], 'EVAL_STATE'] = 2
+        elif cond_pullback.iloc[i] and prev_state == 2:
+            df.at[df.index[i], 'EVAL_STATE'] = 3
+        elif prev_state == 3 and df['low'].iloc[i] >= df['ma10d'].iloc[i]:
+            df.at[df.index[i], 'EVAL_STATE'] = 2
+        elif cond_bear.iloc[i]:
+            df.at[df.index[i], 'EVAL_STATE'] = 0
+        else:
+            df.at[df.index[i], 'EVAL_STATE'] = prev_state
+
+    # 前一日状态
+    df['EVAL_STATE_PREV'] = df['EVAL_STATE'].shift(1).fillna(0).astype(int)
+
+    # 生成交易信号
+    df['trade_signal'] = 0
+    df.loc[(df['EVAL_STATE_PREV'] == 1) & (df['EVAL_STATE'] == 2) & (df['open'] <= df['close'].shift(1) * 1.03), 'trade_signal'] = 1
+    df.loc[(df['EVAL_STATE_PREV'] == 2) & (df['EVAL_STATE'] == 3), 'trade_signal'] = 2
+    df.loc[(df['EVAL_STATE_PREV'].isin([2,3])) & (df['EVAL_STATE'] == 0), 'trade_signal'] = -1
+
+    # upper=0 时强制状态和信号为0
+    df.loc[~valid, ['EVAL_STATE','trade_signal']] = 0
+
+    # return df[['open','close','high','low','upper','amount','ma5d','ma10d','EVAL_STATE','trade_signal']]
+    return df
 
 
 def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_period: int = 9 ,detect_calc_support=False) -> pd.DataFrame:
@@ -1174,7 +1345,12 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
     df['ene'] = bb['BBM_20_2.0']
     df['bandwidth'] = df['upper'] - df['lower']
     df['bollpect'] = (df['close'] - df['lower']) / df['bandwidth'] * 100
+    df['boll_sq'] = ((df['close'] - df['ene']) / df['bandwidth'] * 100).round(2)
+    # boll_strength_quant
+    # 结果正值 → 股价在中轨上方，越大越强
+    # 结果负值 → 股价在中轨下方，越小越弱
 
+    df = boll_trend_breakout(df)
     # --- MACD ---
     macd = ta.macd(df['close'], fast=12, slow=26, signal=9)
     df['macddif'] = macd['MACD_12_26_9']
@@ -4712,8 +4888,14 @@ def compute_ma_cross_slow(dd,ma1='ma5d',ma2='ma10d',ratio=0.02,resample='d'):
             dd['ldate'] = -1
     return dd
 
-def safe_get(df, col, idx=-1, default=0):
-    if col in df.columns:
+# def safe_get(df, col, idx=-1, default=0):
+#     if col in df.columns:
+#         return df[col].iloc[idx]
+#     return default
+
+def safe_get(df, col, idx, default=0):
+    """安全获取 df[col] 的倒数 idx 行，如果不存在返回 default"""
+    if col in df.columns and len(df) >= abs(idx):
         return df[col].iloc[idx]
     return default
 
@@ -5097,6 +5279,112 @@ def compare_compute_perd(df, func1, func2, key_cols=None, verbose=True):
 # result = compare_compute_perd(dd, compute_perd_df_ver, compute_perd_df_fast)
 # 如果有不匹配的列，可查看 result['diffs']['列名']
 
+def generate_lastN_features_dict(df, lastdays=5):
+    """
+    将 df 的最近 lastdays 天生成字典特征，每个字段 lastN 作为键
+    包含 EVAL_STATE 和 trade_signal
+    """
+    COL_MAPPING = {
+        'open': 'lasto',
+        'high': 'lasth',
+        'low': 'lastl',
+        'close': 'lastp',
+        'vol': 'lastv',
+        'perd': 'per',
+        'upper': 'upper',
+        'ma5d': 'ma5',
+        'ma20d': 'ma20',
+        'ma60d': 'ma60',
+        'perlastp': 'perc',
+        'high4': 'high4',
+        'hmax': 'hmax',
+        'EVAL_STATE': 'eval',
+        'trade_signal': 'signal',
+        'truer': 'truer'
+    }
+
+    data = {}
+    for da in range(1, lastdays + 1):
+        for col, prefix in COL_MAPPING.items():
+            # 倒数索引为 -da
+            if col in df.columns and len(df) >= da:
+                val = df[col].iloc[-da]
+            else:
+                val = 0
+            # upper 不加 d 后缀
+            if prefix == 'upper':
+                key = f'{prefix}{da}' if da > 1 else prefix
+            else:
+                key = f'{prefix}{da}d'
+            data[key] = val
+
+    return data
+
+COL_MAPPING = {
+    'open': 'lasto',
+    'high': 'lasth',
+    'low': 'lastl',
+    'close': 'lastp',
+    'vol': 'lastv',
+    'perd': 'per',
+    'upper': 'upper',
+    'ma5d': 'ma5',
+    'ma20d': 'ma20',
+    'ma60d': 'ma60',
+    'perlastp': 'perc',
+    'high4': 'high4',
+    'hmax': 'hmax',
+    'EVAL_STATE': 'eval',
+    'trade_signal': 'signal'
+}
+
+def generate_lastN_features(df, lastdays=6):
+    df_temp = pd.DataFrame()
+    for col, prefix in COL_MAPPING.items():
+        if col in df.columns:
+            col_values = df[col].iloc[-lastdays:]
+            if len(col_values) < lastdays:
+                col_values = pd.concat([pd.Series([0]*(lastdays-len(col_values))), col_values])
+        else:
+            col_values = pd.Series([0]*lastdays)
+        
+        for i in range(1, lastdays+1):
+            df_temp[f'{prefix}{i}d'] = [col_values.iloc[-i]]
+    
+    return df_temp
+# def generate_lastN_features(df, lastdays=6, feature_cols=None):
+#     """
+#     生成 df 的过去 lastdays 天的多列特征，向量化处理。
+#     df: 原始DataFrame，必须按时间升序排列
+#     lastdays: 要取的过去天数
+#     feature_cols: list, 需要生成的特征列，如果 None，使用默认列
+#     返回: df_temp，单行 DataFrame，包含 lastdays 天的所有特征
+#     """
+#     if feature_cols is None:
+#         feature_cols = [
+#             'open', 'close', 'high', 'low', 'vol', 'perd', 'upper',
+#             'ma5d', 'ma20d', 'ma60d', 'perlastp', 'high4', 'hmax',
+#             'EVAL_STATE', 'trade_signal'
+#         ]
+
+#     df_temp = pd.DataFrame()
+
+#     for c in feature_cols:
+#         if c in df.columns:
+#             col_values = df[c].iloc[-lastdays:]  # 取最后 N 行
+#             # 如果不足 lastdays，用 NaN 填充
+#             if len(col_values) < lastdays:
+#                 col_values = pd.concat([pd.Series([np.nan]*(lastdays - len(col_values))), col_values])
+#         else:
+#             # 列不存在，全用 NaN 填充
+#             col_values = pd.Series([np.nan]*lastdays)
+
+#         # 给每一天生成列名
+#         for i in range(1, lastdays+1):
+#             df_temp[f'{c}{i}d'] = [col_values.iloc[-i]]
+
+#     return df_temp
+
 def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
     if df is not None and len(df) > lastdays:
         if len(df) > lastdays + 1:
@@ -5165,26 +5453,36 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         # df['meann'] = ((df['high'] + df['low']) / 2).map(lambda x: round(x, 1))
 
 
-        df_temp = {}
-        for da in range(1, lastdays + 1, 1):
-            if da <=6:
-                df_temp['lasto%sd' % da] = df['open'][-da]
-                df_temp['lastl%sd' % da] = df['low'][-da]
-                df_temp['truer%sd' % da] = df['truer'][-da]
+        # df_temp = {}
+        # for da in range(1, lastdays + 1, 1):
+        #     if da <=6:
+        #         df_temp['lasto%sd' % da] = df['open'][-da]
+        #         df_temp['lastl%sd' % da] = df['low'][-da]
+        #         df_temp['truer%sd' % da] = df['truer'][-da]
 
-            # df['truer%sd' % da] = df['truer'][-da]
-            df_temp['lasth%sd' % da] = df['high'][-da]
-            df_temp['lastp%sd' % da] = df['close'][-da]
+        #     # df['truer%sd' % da] = df['truer'][-da]
+        #     df_temp['lasth%sd' % da] = df['high'][-da]
+        #     df_temp['lastp%sd' % da] = df['close'][-da]
 
-            df_temp['lastv%sd' % da] = df['vol'][-da]
-            df_temp['per%sd' % da] = df['perd'][-da]
-            df_temp['upper%s' % da] = df['upper'][-da]
-            df_temp['ma5%sd' % da] = df['ma5d'][-da]
-            df_temp['ma20%sd' % da] = df['ma20d'][-da]
-            df_temp['ma60%sd' % da] = df['ma60d'][-da]
-            df_temp['perc%sd' % da] = df['perlastp'][-da]
-            df_temp[f'high4{da}d'] = safe_get(df, 'high4', -da)
-            df_temp[f'hmax{da}d']  = safe_get(df, 'hmax', -da)
+        #     df_temp['lastv%sd' % da] = df['vol'][-da]
+        #     df_temp['per%sd' % da] = df['perd'][-da]
+        #     df_temp['upper%s' % da] = df['upper'][-da]
+        #     df_temp['ma5%sd' % da] = df['ma5d'][-da]
+        #     df_temp['ma20%sd' % da] = df['ma20d'][-da]
+        #     df_temp['ma60%sd' % da] = df['ma60d'][-da]
+        #     df_temp['perc%sd' % da] = df['perlastp'][-da]
+        #     df_temp[f'high4{da}d'] = safe_get(df, 'high4', -da)
+        #     df_temp[f'hmax{da}d']  = safe_get(df, 'hmax', -da)
+        #     # 新增信号列
+        #     df_temp[f'eval{da}d'] = safe_get(df, 'EVAL_STATE', -da)
+        #     df_temp[f'signal{da}d'] = safe_get(df, 'trade_signal', -da)
+        # feature_cols = [
+        #             'open', 'close', 'high', 'low', 'vol', 'perd', 'upper',
+        #             'ma5d', 'ma20d', 'ma60d', 'perlastp', 'high4', 'hmax',
+        #             'EVAL_STATE', 'trade_signal'
+        #         ]
+        df = evaluate_trading_signal(df)
+        df_temp = generate_lastN_features_dict(df, lastdays=lastdays)
         df_repeat = pd.DataFrame([df_temp]).loc[np.repeat(0, len(df))].reset_index(drop=True)
         df = pd.concat([df.reset_index(), df_repeat], axis=1)
         df = df.loc[:,~df.columns.duplicated()]
@@ -5914,7 +6212,6 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
         # h5 = top_hdf_api(fname=h5_fname,table=market,df=None)
         h5 = h5a.load_hdf_db(h5_fname, table=h5_table,
                              code_l=codelist, timelimit=False,showtable=showtable)
-        
         print(("%s:%0.2f" % (h5_fname,time.time() - time_s)), end=' ')
         if h5 is not None and not h5.empty:
             #            o_time = h5[h5.time <> 0].time
@@ -5949,8 +6246,6 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
             #         tdx_diff = get_tdx_exp_all_LastDF_DL(diff_code,dt=dl,end=end,ptype=ptype,filter=filter,power=power,lastp=lastp,newdays=0)
             #         if tdx_diff is not None and len(tdx_diff) >0:
             #             tdxdata = pd.concat([tdxdata, tdx_diff],axis=0)
-
-            # tdxdata.rename(columns={'close': 'llow'}, inplace=True)
             
             tdxdata.rename(columns={'open': 'lopen'}, inplace=True)
             tdxdata.rename(columns={'high': 'lhigh'}, inplace=True)
@@ -5973,6 +6268,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
             if cct.GlobalValues().getkey('tdx_Index_Tdxdata') is None:
                 if tdx_index_code_list[0] in tdxdata.index:
                     cct.GlobalValues().setkey('tdx_Index_Tdxdata', tdxdata.loc[tdx_index_code_list])
+            tdxdata = tdxdata.drop_duplicates(keep='first')  # 保留第一次出现的行
             h5 = h5a.write_hdf_db(
                 h5_fname, tdxdata, table=h5_table, append=True)
 
@@ -5986,7 +6282,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
         tdx_list = tdxdata.index.tolist()
         diff_code = list(set(codelist) - set(tdx_list))
         diff_code = [
-            co for co in diff_code if co.startswith(('6', '00', '30'))]
+            co for co in diff_code if co.startswith(cct.code_startswith)]
         # tdx_diff = None
         if len(diff_code) > 0:
             log.error("tdx Out:%s code:%s" % (len(diff_code), diff_code[:2]))
@@ -6005,6 +6301,7 @@ def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=No
                 # tdx_diff.rename(columns={'cumin': 'df2'}, inplace=True)
                 # tdx_diff = compute_top10_count(tdx_diff)
                 # wcdf = wcd.get_wencai_data(top_all.loc[tdx_diff.index,'name'], 'wencai',days='N')
+                tdx_diff = tdx_diff.drop_duplicates(keep='first')  # 保留第一次出现的行
                 wcdf = wcd.get_wencai_data(top_all.name)
                 wcdf['category'] = wcdf['category'].apply(lambda x:x.replace('\r','').replace('\n',''))
                 tdx_diff = cct.combine_dataFrame(tdx_diff, wcdf.loc[:, ['category']])
@@ -6883,13 +7180,35 @@ if __name__ == '__main__':
     log.setLevel(log_level)
     # tdx_profile_test_tdx()
     resample = 'd'
-    code = '920274'
+    code = '300696'
+    # code_l=['920274','300342','300696', '603091', '605167']
+    code_l=['920274']
+    df=get_tdx_exp_all_LastDF_DL(code_l, dt='80',filter='y', resample='d')
+    print(f'{df[:2]} ')
+    time_s = time.time()
+    signal_dict = extract_eval_signal_dict(df,lastdays=cct.compute_lastdays)
+    print(f'time: {time.time() - time_s :.8f}  check code: {code_l} signal_dict:{(signal_dict)} ')
+    time_s = time.time()
+    all_features = extract_all_features(df,lastdays=cct.compute_lastdays)
+    print(f'time: {time.time() - time_s :.8f}  check code: {code_l} all_features:{len(all_features)} ')
+    time_s = time.time()
+    generate_df_vect_daily_features = generate_df_vect_daily_features(df,lastdays=cct.compute_lastdays)
+    # pd.DataFrame(generate_df_vect_daily_features).set_index('code')
+    print(f'time: {time.time() - time_s :.8f}  check code: {code_l} generate_df_vect_daily_features:{len(generate_df_vect_daily_features)} ')
+    import ipdb;ipdb.set_trace()
+
     # (get_tdx_Exp_day_to_df_performance(code,dl=ct.Resample_LABELS_Days[resample],resample=resample))
+    code = '920274'
     df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     # compute_lastdays_percent_profile(df, lastdays=5)
+    evtdf = evaluate_trading_signal(df)
+    print(f"evtdf: {evtdf[['open', 'close','upper','EVAL_STATE','trade_signal']].tail(60)}")
+    import ipdb;ipdb.set_trace(),
+
+    print(f'check code: {code}  boll_Signal: {df.boll_signal}')
 
     df=(getSinaAlldf('all'))
-    print(f'check code: {df.loc["920023"]}')
+    print(f'check code: {df.loc["920023"]}  ')
 
     # tdx_profile_test()
     # pyprof2calltree -k -i tdx.profile
@@ -7003,9 +7322,9 @@ if __name__ == '__main__':
     dfw.index = dfw.index - pd.tseries.frequencies.to_offset("6D")
     '''
     
-    sh_index = '920799'
+    sh_index = '300696'
     dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
-    print(f'dd : {dd}')
+    print(f'dd : {dd} ')
     # dd=pd.read_clipboard(parse_dates=['Date'], index_col=['Date'])
     code='601028'
     # df = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'], end=None, newdays=0, resample='d')
@@ -7086,25 +7405,10 @@ if __name__ == '__main__':
     code='600392'
     code='688189'
     code='300085'
-    code_l=['920799', '603091', '605167']
-    # df = get_kdate_data(code,ascending=True)
-    
-    # df = get_tdx_append_now_df_api_tofile(code)
-    
-    # start = cct.last_tddate(120)
-    # dtype = 'w'
-    # df=get_tdx_append_now_df_api(code, start=start, end=None).sort_index(ascending=True)
-    # print(f'check col is Null:{cct.select_dataFrame_isNull(df[-10:])}')
-    # df2 = get_tdx_stock_period_to_type(df, dtype).sort_index(ascending=True)
-    # dd = get_tdx_Exp_day_to_df(code,dl=ct.duration_date_day,resample='d')
-    # print(f'ral:{dd.ral}')
-    # import ipdb;ipdb.set_trace()
-    code='920799'
-    
-
+    code_l=['300696', '603091', '605167']
     df=get_tdx_exp_all_LastDF_DL(code_l, dt='80',filter='y', resample='d')
-    print(df[:2])
-
+    print(f'{df[:2]} ')
+    print(f'check code: {code_l}  boll_Signal: {df.boll_signal}')
     # write_to_all()
 
     # # dd = compute_ma_cross(dd,resample='d')

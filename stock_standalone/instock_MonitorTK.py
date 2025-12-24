@@ -4496,9 +4496,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.tree.configure(show="headings")
 
             logger.info(f'replace_column get_scaled_value:{self.get_scaled_value()}')
-
             self._setup_tree_columns(self.tree,new_columns, sort_callback=self.sort_by_column, other={})
-
+            self.adjust_column_widths()
             # 重新加载数据
             if apply_search:
                 self.apply_search()
@@ -7738,9 +7737,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # ====== 决定 engine ======
         df_filtered = pd.DataFrame()
-        query_engine = 'numexpr'
+        # query_engine = 'numexpr'
+        # if any('index.' in c.lower() for c in valid_conditions):
+        #     query_engine = 'python'
+        # 1️⃣ index 条件 → python
         if any('index.' in c.lower() for c in valid_conditions):
             query_engine = 'python'
+        
+        # 2️⃣ 字符串条件 → 禁止进 query
+        STR_OPS = ('.str.', 'contains(', 'startswith(', 'endswith(')
+        has_str_op = any(any(op in c.lower() for op in STR_OPS) for c in valid_conditions)
+
+        if has_str_op:
+            query_engine = 'python'   # 即便 python，也不能放进 query
+
         # ====== 数据过滤 ======
         try:
 
@@ -8342,8 +8352,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 def test_single_thread():
     import queue
     # 用普通 dict 代替 manager.dict()
+    global marketInit
     shared_dict = {}
     shared_dict["resample"] = "d"
+    shared_dict["market"] = marketInit
 
     # 用 Python 内置 queue 代替 multiprocessing.Queue
     q = queue.Queue()
@@ -8387,6 +8399,12 @@ def parse_args():
         help="执行 write_to_hdf() 并退出"
     )
 
+    # 布尔开关参数
+    parser.add_argument(
+        "--test_single_thread",
+        action="store_true",
+        help="执行 test_single_thread() 并退出"
+    )
     # 新增测试开关
     parser.add_argument(
         "--test",
@@ -8648,6 +8666,10 @@ if __name__ == "__main__":
     if args.write_to_hdf:
         write_to_hdf()
         sys.exit(0)
+    if args.test_single_thread:
+        logger.info(f'b fetch_and_process')
+        test_single_thread()
+        sys.exit(0) 
     app = StockMonitorApp()
     if cct.isMac():
         width, height = 100, 32
