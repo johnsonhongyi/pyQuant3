@@ -210,6 +210,28 @@ class StockLiveStrategy:
             risk_duration_threshold=risk_duration_threshold
         )
 
+    # ------------------------------------------------------------------
+    # Alert Cooldown 控制
+    # ------------------------------------------------------------------
+    def set_alert_cooldown(self, cooldown: float):
+        """
+        动态设置告警冷却时间（秒）
+        可在运行中安全调用
+        """
+        if cooldown is None:
+            raise ValueError("alert_cooldown cannot be None")
+
+        cooldown = float(cooldown)
+        if cooldown < 0:
+            raise ValueError("alert_cooldown must be >= 0")
+
+        with self._lock:
+            self._alert_cooldown = cooldown
+
+    def get_alert_cooldown(self) -> float:
+        """读取当前告警冷却时间"""
+        return self._alert_cooldown
+        
     def set_voice_enabled(self, enabled: bool):
         """运行时开启/关闭语音播报"""
         self.voice_enabled = bool(enabled)

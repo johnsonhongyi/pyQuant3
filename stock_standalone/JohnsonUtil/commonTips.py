@@ -6,6 +6,7 @@ import os
 import platform
 import re
 import sys
+import gc
 sys.path.append("..")
 import time
 import random
@@ -34,6 +35,8 @@ import importlib
 from JohnsonUtil import LoggerFactory
 log = LoggerFactory.getLogger()
 from tqdm import tqdm
+from tqdm.contrib.concurrent import process_map
+
 import numpy as np
 import subprocess
 import a_trade_calendar
@@ -3719,7 +3722,7 @@ def to_mp_run_tqdm_err(cmd, urllist,*args,**kwargs):
 
 # from multiprocessing import Pool
 
-def imap_tqdm(function, iterable, processes, chunksize=5, desc=None, disable=False, **kwargs):
+def imap_tqdm(function, iterable, processes, chunksize=20, desc=None, disable=False, **kwargs):
     """
     Run a function in parallel with a tqdm progress bar and an arbitrary number of arguments.
     Results are always ordered and the performance should be the same as of Pool.map.
@@ -3883,44 +3886,6 @@ def to_mp_run_async_old2025(cmd, urllist, *args,**kwargs):
     print("time:%s"%(round(time.time()-time_s,2)),)
     return result
 
-# def format_func_call(func, *args, **kwargs):
-#     """把函数调用转换成可读字符串"""
-#     func_name = func.__name__
-    
-#     # 位置参数
-#     args_str = ", ".join(repr(a) for a in args)
-
-#     # 关键字参数
-#     kwargs_str = ", ".join(f"{k}={repr(v)}" for k, v in kwargs.items())
-
-#     # 拼接
-#     if args_str and kwargs_str:
-#         s = f"{func_name}({args_str}, {kwargs_str})"
-#     elif args_str:
-#         s = f"{func_name}({args_str})"
-#     elif kwargs_str:
-#         s = f"{func_name}({kwargs_str})"
-#     else:
-#         s = f"{func_name}()"
-
-#     return s
-
-# def format_func_call(func, *args, **kwargs):
-#     """
-#     把函数调用转换成可读字符串。
-#     如果 func 是 functools.partial，没有 __name__，自动取原函数名。
-#     """
-#     import functools
-#     func_name = getattr(func, '__name__', None)
-#     if func_name is None and isinstance(func, functools.partial):
-#         func_name = getattr(func.func, '__name__', str(func))
-
-#     # 构建 args 字符串
-#     args_str = ", ".join([repr(a) for a in args])
-#     kwargs_str = ", ".join([f"{k}={v!r}" for k, v in kwargs.items()])
-#     all_args = ", ".join(filter(None, [args_str, kwargs_str]))
-
-#     return f"{func_name}({all_args})"
 
 def get_func_name(func):
     """
@@ -4010,6 +3975,83 @@ def process_file_exc(func=None, code=None):
         return None # 不要返回 Exception 对象
 
 error_codes = []
+def to_mp_run_async_newOK(cmd, urllist, *args, **kwargs):
+    result = []  
+    time_s = time.time()
+    
+    # 1. 禁用 tqdm 监控 (防止进度条线程报错)
+    try:
+        tqdm.monitor_interval = 0
+    except:
+        pass
+    
+    # 2. 获取根日志记录器，临时屏蔽 INFO 级别的日志传输
+    # 这一步是解决 BrokenPipeError: WinError 109 的核心
+    logger = log
+    old_level = logger.level 
+
+    urllist = list(set(urllist))
+    data_count = len(urllist)
+    if data_count == 0: return []
+
+    if data_count > 200:
+        cpu_used = int(cpu_count() / 2) + 1
+        pool_count = min(max(1, int(data_count / 100)), cpu_used)
+        
+        func = partial(cmd, **kwargs)
+        partialfunc = partial(process_file_exc, func)
+
+        try:
+            # --- 关键：在多进程运行期间，只允许 WARNING 以上级别的日志进入管道 ---
+            # 这样可以极大减少管道通信负担，避免结束时管道破裂
+            logger.setLevel(LoggerFactory.WARNING) 
+            # process_map(partialfunc,
+            #             urllist, 
+            #             unit='%',
+            #             mininterval=ct.tqdm_mininterval,
+            #             unit_scale=True,
+            #             ncols=ct.ncols ,
+            #             total=data_count,
+            #             max_workers=pool_count)
+            results = process_map(
+                partialfunc, 
+                urllist, 
+                unit='it', 
+                mininterval=ct.tqdm_mininterval,
+                unit_scale=True,
+                total=data_count,
+                max_workers=pool_count,
+                #chunksize=1,        # 增大块大小，减少通信频次
+                #miniters=1,
+                ncols=getattr(ct, 'ncols', 80),
+                desc="Running_MP"
+            )
+            
+            # --- 在这里添加 GC 清理 ---
+            # 此时 results 已拿到，子进程已基本退出，强制清理内存和句柄
+            gc.collect() 
+            # -----------------------
+            # 执行完后立即恢复原始日志等级
+            logger.setLevel(old_level)
+
+            # 过滤结果，解决 IndexError
+            result = [r for r in results if r is not None and (not hasattr(r, 'empty') or not r.empty)]
+            
+        except (BrokenPipeError, EOFError):
+            logger.setLevel(old_level)
+            # 即使报错，results 变量里通常已经拿到了 100% 的数据
+            if 'results' in locals():
+                result = [r for r in results if r is not None and (not hasattr(r, 'empty') or not r.empty)]
+        except Exception as e:
+            logger.setLevel(old_level)
+            log.error(f"MP Error: {e}")
+    else:
+        # 数量少时不走多进程，最稳定
+        result = [cmd(c, **kwargs) for c in urllist if c]
+        result = [r for r in result if r is not None and (not hasattr(r, 'empty') or not r.empty)]
+
+    log.info(f"Time: {round(time.time()-time_s, 2)}s | Total: {len(result)}")
+    return result
 
 # https://stackoverflow.com/questions/68065937/how-to-show-progress-bar-tqdm-while-using-multiprocessing-in-python
 def to_mp_run_async(cmd, urllist, *args,**kwargs):
@@ -4020,6 +4062,7 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
     # https://stackoverflow.com/questions/72766345/attributeerror-cant-pickle-local-object-in-multiprocessing
     urllist = list(set(urllist))
     data_count =len(urllist)
+
     if data_count > 200:
         if int(round(data_count/100,0)) < 2:
             cpu_co = 1
@@ -4038,21 +4081,9 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                 log.debug(f'cmd:{cmd} kwargs:{kwargs}')
                 func = partial(cmd, **kwargs)
                 partialfunc = partial(process_file_exc, func)
-                # GlobalValues().setkey('partialfunc',func)
-                # partialfunc=GlobalValues().getkey('partialfunc')
-                # print(f"func getkey:{partialfunc('000002')}")
-
-                # TDXE:44.26  cpu 1   
-                # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=data_count,ncols=5):
-                # results = pool.map(func, urllist)
-                # try:
-                #     for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=data_count,ncols=ct.ncols):
-                #         results.append(y)
-                # except Exception as e:
-                #     log.error("except:%s"%(e))
-                # 用来收集错误 code
                 global error_codes
-
+                old_level = log.level 
+                log.setLevel(LoggerFactory.WARNING) 
                 def log_idx_none(idx, code, count_all, result_count):
                     global error_codes
                     error_codes.append(code)
@@ -4064,13 +4095,15 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                 try:
                     progress_bar = tqdm(total=data_count)
                     log.debug(f'data_count:{data_count},mininterval:{ct.tqdm_mininterval},ncols={ct.ncols}')
-                    from tqdm.contrib.concurrent import process_map
+                    # 核心修复：防止监控线程在 Windows 管道关闭时抛出 EOFError
+                    tqdm.monitor_interval = 0
                     # from multiprocessing import Manager
                     # manager = Manager()
                     # shared_list = manager.list()
                     # https://stackoverflow.com/questions/67957266/python-tqdm-process-map-append-list-shared-between-processes
 
                     # tqdm.monitor_interval = 0
+                    # results = process_map(partialfunc, urllist, unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count,max_workers=pool_count,chunksize=20,miniters=10)
                     results = process_map(partialfunc, urllist, unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count,max_workers=pool_count)
                     result = []
                     # for data in results:
@@ -4084,9 +4117,20 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     #             log.error(f'data is None,last code:{result[-1].code}')
                     
                     # index_counts = len(results[0].index) if len(results[0]) > 10 else len(results[1].index)
-                    
+                    # --- 在这里添加 GC 清理 ---
+                    # 此时 results 已拿到，子进程已基本退出，强制清理内存和句柄
+                    gc.collect() 
+                    # -----------------------
+                    # 执行完后立即恢复原始日志等级
+                    log.setLevel(old_level)
+
                     try:
-                        index_counts = len(results[0].index) if len(results[0]) > 10 else len(results[1].index)
+                        # index_counts = len(results[0].index) if len(results[0]) > 10 else len(results[1].index)
+                        valid_results = [r for r in results if r is not None and not isinstance(r, Exception)]
+                        if valid_results:
+                            index_counts = len(valid_results[0].index)
+                        else:
+                            index_counts = 0
                     except Exception:
                         index_counts = 0  # 或 log.error(...)
                     log.debug(f'index_counts:{index_counts}')
@@ -4118,8 +4162,13 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                         log.error(f"idx is None, codes: {error_codes[-(len(error_codes)%30):]}")
                         error_codes = []
                     log.debug(f'result:{len(result)}')
-                            
+                except (BrokenPipeError, EOFError):
+                    log.setLevel(old_level)
+                    # 即使报错，results 变量里通常已经拿到了 100% 的数据
+                    if 'results' in locals():
+                        result = [r for r in results if r is not None and (not hasattr(r, 'empty') or not r.empty)]  
                 except Exception as e:
+                    log.setLevel(old_level)
                     log.error("except:%s"%(e))
                     # traceback.print_exc()
                     msg = traceback.format_exc()
@@ -4136,46 +4185,8 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                         results.append(res)
                     result=results
                 
-                '''
-                try:
-                    with Pool(processes=pool_count) as pool:
-                        data_count=len(urllist)
-                        progress_bar = tqdm(total=data_count)
-                        # print("mapping ...")
-
-                        log.debug(f'data_count:{data_count},mininterval:{ct.tqdm_mininterval},ncols={ct.ncols}')
-                        # tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols)
-                        print(f"{os.getpid()=}")
-                        # results = tqdm(pool.imap_unordered(partialfunc, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count)
-                        
-                        # from tqdm.contrib.concurrent import process_map
-                        # tqdm.monitor_interval = 0
-                        # results = process_map(partialfunc, urllist, unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count,max_workers=pool_count)
-
-                        # print("running ...")
-                        # result = tuple(results)  # fetch the lazy results
-                        result = []
-                        for data in results:
-                            if isinstance(data, Exception):
-                                print("Got exception: {}".format(data))
-                            else:
-                                # print("Got OK result: {}".format(result))
-                                result.append(data)
-
-                        pool.close()
-                        pool.join()
-                '''
-                    #debug:
-                    # results=[]
-                    # for code in urllist:
-                    #     print("code:%s "%(code), end=' ')
-                    #     res=cmd(code,**kwargs)
-                    #     print("status:%s\t"%(len(res)), end=' ')
-                    #     results.append(res)
-                    # result=results
                 
         else:
-
             try:
                 with Pool(processes=pool_count) as pool:
                     data_count=len(urllist)
@@ -4215,6 +4226,43 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
     print("time:%s"%(round(time.time()-time_s,2)),)
     return result
 
+'''
+                try:
+                    with Pool(processes=pool_count) as pool:
+                        data_count=len(urllist)
+                        progress_bar = tqdm(total=data_count)
+                        # print("mapping ...")
+
+                        log.debug(f'data_count:{data_count},mininterval:{ct.tqdm_mininterval},ncols={ct.ncols}')
+                        # tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols)
+                        print(f"{os.getpid()=}")
+                        # results = tqdm(pool.imap_unordered(partialfunc, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count)
+                        
+                        # from tqdm.contrib.concurrent import process_map
+                        # tqdm.monitor_interval = 0
+                        # results = process_map(partialfunc, urllist, unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count,max_workers=pool_count)
+
+                        # print("running ...")
+                        # result = tuple(results)  # fetch the lazy results
+                        result = []
+                        for data in results:
+                            if isinstance(data, Exception):
+                                print("Got exception: {}".format(data))
+                            else:
+                                # print("Got OK result: {}".format(result))
+                                result.append(data)
+
+                        pool.close()
+                        pool.join()
+'''
+                    #debug:
+                    # results=[]
+                    # for code in urllist:
+                    #     print("code:%s "%(code), end=' ')
+                    #     res=cmd(code,**kwargs)
+                    #     print("status:%s\t"%(len(res)), end=' ')
+                    #     results.append(res)
+                    # result=results
 
 
 def to_mp_run_async_outdate2023(cmd, urllist, *args,**kwargs):

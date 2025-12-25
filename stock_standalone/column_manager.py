@@ -1,9 +1,15 @@
 # -*- coding:utf-8 -*-
 import tkinter as tk
 from tkinter import ttk
+import os
+import json
+from pathlib import Path
 from stock_logic_utils import  toast_message
 from JohnsonUtil import LoggerFactory
 
+from monitor_utils import save_display_config
+
+from tk_gui_modules.gui_config import (CONFIG_FILE)
 # 获取或创建日志记录器
 logger = LoggerFactory.getLogger("instock_TK.KLineMonitor")
 class ColumnSetManager(tk.Toplevel):
@@ -18,10 +24,37 @@ class ColumnSetManager(tk.Toplevel):
 
         # ---------- 参数 ----------
         self.all_columns = list(all_columns)
-        self.config = config if isinstance(config, dict) else {}
+        # self.config = config if isinstance(config, dict) else {}
         self.on_apply_callback = on_apply_callback
         self.default_cols = list(default_cols)
         self.auto_apply_on_init = auto_apply_on_init
+
+
+        # ---------- config 处理（支持 dict / 文件路径） ----------
+        self.config_file = None
+        self.config = {}
+
+        if isinstance(config, dict):
+            # 直接使用
+            self.config = config
+
+        elif isinstance(config, (str, Path)):
+            cfg_path = Path(config)
+            self.config_file = str(cfg_path)
+
+            if cfg_path.exists():
+                try:
+                    with open(cfg_path, "r", encoding="utf-8") as f:
+                        self.config = json.load(f)
+                except Exception as e:
+                    logger.info(f"⚠️ 配置文件读取失败: {cfg_path} ({e})")
+                    self.config = {}
+            else:
+                # 文件不存在：允许后续保存时创建
+                self.config = {}
+
+        else:
+            self.config = {}
 
         # ---------- 状态 ----------
         self.current_set = list(self.config.get("current", self.default_cols.copy()))
@@ -678,3 +711,81 @@ class ColumnSetManager(tk.Toplevel):
             var.set(col in self.current_set)
         self.refresh_current_tags()
         toast_message(self, "已恢复默认组合")
+
+if __name__ == "__main__":
+    import traceback
+
+    # ---------------------------
+    # Mock 外部依赖（仅测试用）
+    # ---------------------------
+    # CONFIG_FILE = "column_test_config.json"
+
+    # def save_display_config(config_file=None, config=None):
+    #     logger.info(f"[MOCK save_display_config] file={config_file}, config={config}")
+
+    # def toast_message(parent, msg, duration=1500):
+    #     # 简单 toast 替代：打印 + tk message
+    #     logger.info(f"[TOAST] {msg}")
+
+    # # ---------------------------
+    # # 测试数据
+    # # ---------------------------
+    ALL_COLUMNS = [
+        "code", "name", "price", "open", "high", "low",
+        "volume", "amount", "percent", "status",
+        "ma5", "ma10", "ma20", "ma60",
+        "macd", "dif", "dea",
+        "boll_upper", "boll_mid", "boll_lower",
+        "lastdu", "hold", "bull", "red",
+    ]
+
+    DEFAULT_COLS = ["code", "name", "price", "percent", "volume"]
+
+    TEST_CONFIG = {
+        "current": ["code", "name", "price", "percent"],
+        "sets": [
+            {"name": "基础行情", "cols": ["code", "name", "price", "percent"]},
+            {"name": "技术指标", "cols": ["code", "name", "ma5", "ma10", "macd"]},
+        ]
+    }
+
+    # ---------------------------
+    # 回调函数（模拟主表列更新）
+    # ---------------------------
+    def on_apply(cols):
+        logger.info(f"[APPLY CALLBACK] 当前应用列: {cols}")
+
+    # ---------------------------
+    # Tk 主程序
+    # ---------------------------
+    root = tk.Tk()
+    root.title("ColumnSetManager Test")
+    root.geometry("900x600")
+
+    # 模拟你主程序中的 scale_factor
+    root.scale_factor = 1.0
+
+    ttk.Label(
+        root,
+        text="这是主窗口（ColumnSetManager 作为 Toplevel 打开）",
+        font=("Arial", 12)
+    ).pack(pady=20)
+
+    def open_manager():
+        ColumnSetManager(
+            master=root,
+            all_columns=ALL_COLUMNS,
+            config=CONFIG_FILE,
+            on_apply_callback=on_apply,
+            default_cols=DEFAULT_COLS,
+            auto_apply_on_init=False,
+        )
+
+    ttk.Button(
+        root,
+        text="打开列组合管理器",
+        command=open_manager,
+        width=30
+    ).pack(pady=10)
+
+    root.mainloop()

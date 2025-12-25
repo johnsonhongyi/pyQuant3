@@ -1450,6 +1450,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # self.after(50, self.adjust_column_widths)
             self._setup_tree_columns(self.tree,self.current_cols, sort_callback=self.sort_by_column, other={})
             self.reload_cfg_value()
+            self.live_strategy.set_alert_cooldown(pending_alert_cycles)
             # self.update_treeview_cols(self.current_cols)
 
         logger.info(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
@@ -7737,7 +7738,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # ====== 决定 engine ======
         df_filtered = pd.DataFrame()
-        # query_engine = 'numexpr'
+        query_engine = 'numexpr'
         # if any('index.' in c.lower() for c in valid_conditions):
         #     query_engine = 'python'
         # 1️⃣ index 条件 → python
@@ -8352,9 +8353,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 def test_single_thread():
     import queue
     # 用普通 dict 代替 manager.dict()
-    global marketInit
+    global marketInit,resampleInit
     shared_dict = {}
-    shared_dict["resample"] = "d"
+    shared_dict["resample"] = resampleInit
     shared_dict["market"] = marketInit
 
     # 用 Python 内置 queue 代替 multiprocessing.Queue
@@ -8401,7 +8402,7 @@ def parse_args():
 
     # 布尔开关参数
     parser.add_argument(
-        "--test_single_thread",
+        "--test_single",
         action="store_true",
         help="执行 test_single_thread() 并退出"
     )
@@ -8666,7 +8667,7 @@ if __name__ == "__main__":
     if args.write_to_hdf:
         write_to_hdf()
         sys.exit(0)
-    if args.test_single_thread:
+    if args.test_single:
         logger.info(f'b fetch_and_process')
         test_single_thread()
         sys.exit(0) 
