@@ -1176,6 +1176,129 @@ def extract_all_features(df, lastdays=5, code=None):
 
     return features
 
+def evaluate_realtime_signal_tick(rt_tick, daily_feat, mode='A'):
+    """
+    实时计算单个标的的交易信号
+    :param rt_tick: 字典，包含当前实时行情 {'open', 'close', 'high', 'low', 'amount'}
+    :param daily_feat: 字典，generate_df_vect_daily_features 返回的 1d 特征 (list中的第一个元素)
+    :param mode: 'A' 强势优先, 'B' 风控优先
+    :return: (current_state, trade_signal)
+    """
+        
+    """
+    自适应版本：自动处理数据类型
+    """
+    # --- 1. 类型自适应处理 ---
+    # 如果 rt_tick 是 DataFrame 或 Series，提取标量值
+    def get_val(obj, key):
+        val = obj[key]
+        # 如果是 Series 或数组，取第一个值 (.item() 或 .iloc[0])
+        return val.iloc[0] if hasattr(val, 'iloc') else val
+
+    # 映射字段（适配你的 sina 结构）
+    curr_o = float(get_val(rt_tick, 'open'))
+    curr_c = float(get_val(rt_tick, 'now'))   # 对应你 sina 里的 now
+    curr_l = float(get_val(rt_tick, 'low'))
+    # 优先取 amount，没有则取 volume
+    curr_a = float(get_val(rt_tick, 'volume'))
+
+
+    # 1. 数据映射 (实时数据与历史特征)
+
+    # curr_o = rt_tick['open']
+    # curr_c = rt_tick['close']
+    # curr_l = rt_tick['low']
+    # curr_a = rt_tick['volume']
+    
+    # 历史特征 (1d 代表昨天)
+    upper_1d = daily_feat['upper1d']
+    close_1d = daily_feat['lastp1d']
+    amount_1d = daily_feat['lastv1d']
+    eval_1d = int(daily_feat['eval1d'])
+    ma10d_curr = daily_feat['ma51d'] # 假设实时判断的生命线使用昨日MA5作为参考
+
+    if upper_1d <= 0:
+        return 9, 5
+
+    # 2. 条件判定 (基于实时 Tick)
+    cond_trend_start = (curr_c > upper_1d) and (close_1d <= upper_1d) and (curr_a > amount_1d * 1.1)
+    cond_trend_continue = (curr_c > upper_1d) and (close_1d > upper_1d)
+    cond_pullback = (curr_c < close_1d) and (curr_l >= ma10d_curr) and (curr_a < amount_1d)
+    cond_bear = (curr_c < ma10d_curr)
+
+    # 3. 状态转移逻辑 (EVAL_STATE)
+    curr_state = 9 # 默认值
+    
+    if mode == 'A': # 强势优先逻辑
+        if cond_trend_start:
+            curr_state = 1
+        elif cond_bear:
+            curr_state = 9
+        elif cond_trend_continue:
+            curr_state = 2
+        elif cond_pullback and eval_1d in [2, 3]:
+            curr_state = 3
+        elif eval_1d == 3 and curr_l >= ma10d_curr:
+            curr_state = 2
+        else:
+            curr_state = eval_1d # 维持昨日状态
+            
+    elif mode == 'B': # 风控优先逻辑
+        if cond_bear:
+            curr_state = 9
+        elif cond_trend_start:
+            curr_state = 1
+        elif cond_trend_continue:
+            curr_state = 2
+        elif cond_pullback and eval_1d in [2, 3]:
+            curr_state = 3
+        elif eval_1d == 3 and curr_l >= ma10d_curr:
+            curr_state = 2
+        else:
+            curr_state = eval_1d
+
+    # 4. 交易信号推演 (trade_signal)
+    # EVAL_STATE: 9=空头, 1=启动, 2=主升, 3=回撤
+    # trade_signal: 5=HOLD, 1=买一, 2=买二, -1=卖出
+    trade_signal = 5
+    
+    # 买一：从启动(1)确认转入主升(2)，且开盘未大幅跳空
+    if eval_1d == 1 and curr_state == 2 and curr_o <= close_1d * 1.03:
+        trade_signal = 1
+    # 买二：从主升(2)进入缩量回撤(3)
+    elif eval_1d == 2 and curr_state == 3:
+        trade_signal = 2
+    # 卖出：持有状态(1,2,3)下触发破位(9)
+    elif eval_1d in [1, 2, 3] and curr_state == 9:
+        trade_signal = -1
+
+    return curr_state, trade_signal
+
+
+
+def generate_simple_vect_features(df):
+    """
+    极简矢量化版本
+    仅提取最新日的: open, close, high, low, nlow, nhigh 和 过去6日均量 last6vol
+    """
+    # 确保索引排序正确
+    df = df.sort_index(level=[0, 1])
+    
+    # 1. 提取最新一行的原始数据
+    # last() 会自动按第一个索引(code)分组并取每个代码的最后一行
+    feat_df = df.groupby(level=0)[['open', 'close', 'high', 'low', 'nlow', 'nhigh']].last()
+
+    # 2. 计算过去6日均量 (包含当日)
+    # rolling(6) 计算滚动均值，然后再取最后一行
+    vol_col = 'vol' if 'vol' in df.columns else 'volume'
+    last6vol = df.groupby(level=0)[vol_col].rolling(window=6, min_periods=1).mean()
+    
+    # 因为 rolling 会增加一层索引，我们需要对齐后提取最后一行
+    feat_df['last6vol'] = last6vol.groupby(level=0).last()
+
+    # 3. 转换为你需要的字典列表格式
+    # reset_index() 将 code 变成一列，to_dict('records') 转为字典列表
+    return feat_df.reset_index().to_dict('records')
 
 
 def generate_df_vect_daily_features(df, lastdays=5):
@@ -1244,65 +1367,226 @@ def extract_eval_signal_dict(df, lastdays=5):
     return result
 
 
-def evaluate_trading_signal(df):
+def evaluate_trading_signal_vB(df):
     """
-    修正版交易信号生成（upper=0 时不判定）
-    EVAL_STATE:
-        0 = 空头 / 禁止交易
-        1 = 趋势启动确认期
-        2 = 主升趋势持仓期
-        3 = 回撤确认期（允许低吸）
-    trade_signal:
-        0 = HOLD
-        1 = BUY_1 (趋势确认买)
-        2 = BUY_2 (回撤低吸)
-       -1 = SELL
+    版本 B: 風控優先（保守型）。
+    EVAL_STATE: 9=空頭, 1=啟動, 2=主升, 3=回撤, 0=無效數據
+    trade_signal: 5=HOLD, 1=買一(啟動), 2=買二(低吸), -1=賣出, 0=無效數據
     """
     df = df.copy()
-    
-    # 只计算 upper > 0 的行
+    valid = df['upper'] > 0
+
+    # 1. 條件定義（已單行化）
+    cond_trend_start = valid & (df['close'] > df['upper']) & (df['close'].shift(1) <= df['upper'].shift(1)) & (df['amount'] > df['amount'].shift(1) * 1.1)
+    cond_trend_continue = valid & (df['close'] > df['upper']) & (df['close'].shift(1) > df['upper'].shift(1))
+    cond_pullback = valid & (df['close'] < df['close'].shift(1)) & (df['low'] >= df['ma10d']) & (df['amount'] < df['amount'].shift(1))
+    # 使用原始 cond_bear 邏輯
+    cond_bear = valid & ((df['close'] < df['ma10d']) | ((df['open'] > df['close'].shift(1)) & (df['close'] < df['ma10d'])))
+
+    # 2. 狀態機邏輯
+    df['EVAL_STATE'] = 9 # 默認空頭/禁止交易
+    for i in range(len(df)):
+        if not valid.iloc[i]: continue
+        prev_state = df['EVAL_STATE'].iloc[i-1] if i > 0 else 9
+
+        if cond_bear.iloc[i]:       # <-- 風控邏輯優先級最高，會錯過強勢反轉信號
+            df.at[df.index[i], 'EVAL_STATE'] = 9
+        elif cond_trend_start.iloc[i]: # <-- 強勢啟動次之
+            df.at[df.index[i], 'EVAL_STATE'] = 1
+        elif cond_trend_continue.iloc[i]:
+            df.at[df.index[i], 'EVAL_STATE'] = 2
+        elif cond_pullback.iloc[i] and prev_state in [2, 3]:
+            df.at[df.index[i], 'EVAL_STATE'] = 3
+        elif prev_state == 3 and df['low'].iloc[i] >= df['ma10d'].iloc[i]:
+            df.at[df.index[i], 'EVAL_STATE'] = 2
+        else:
+            df.at[df.index[i], 'EVAL_STATE'] = prev_state
+
+    # 3. 生成交易訊號
+    df['EVAL_STATE_PREV'] = df['EVAL_STATE'].shift(1).fillna(9).astype(int)
+    df['trade_signal'] = 5 # 預設 HOLD
+    df.loc[(df['EVAL_STATE_PREV'] == 1) & (df['EVAL_STATE'] == 2) & (df['open'] <= df['close'].shift(1) * 1.03), 'trade_signal'] = 1
+    df.loc[(df['EVAL_STATE_PREV'] == 2) & (df['EVAL_STATE'] == 3), 'trade_signal'] = 2
+    df.loc[(df['EVAL_STATE_PREV'].isin([1, 2, 3])) & (df['EVAL_STATE'] == 9), 'trade_signal'] = -1
+
+    # 4. 無效數據強制歸零
+    df.loc[~valid, ['EVAL_STATE', 'trade_signal']] = 0
+
+    return df
+
+
+def evaluate_trading_signal_vA(df):
+    """
+    版本 A: 強勢反轉優先捕捉大行情。
+    EVAL_STATE: 9=空頭, 1=啟動, 2=主升, 3=回撤, 0=無效數據
+    trade_signal: 5=HOLD, 1=買一(啟動), 2=買二(低吸), -1=賣出, 0=無效數據
+    """
+    df = df.copy()
+    valid = df['upper'] > 0
+
+    # 1. 條件定義（已單行化）
+    # cond_bear 修正為「收盤價」必須確立跌破 10 日線才算轉熊
+    cond_trend_start = valid & (df['close'] > df['upper']) & (df['close'].shift(1) <= df['upper'].shift(1)) & (df['amount'] > df['amount'].shift(1) * 1.1)
+    cond_trend_continue = valid & (df['close'] > df['upper']) & (df['close'].shift(1) > df['upper'].shift(1))
+    cond_pullback = valid & (df['close'] < df['close'].shift(1)) & (df['low'] >= df['ma10d']) & (df['amount'] < df['amount'].shift(1))
+    cond_bear = valid & (df['close'] < df['ma10d']) 
+
+    # 2. 狀態機邏輯
+    df['EVAL_STATE'] = 9 # 默認空頭/禁止交易
+    for i in range(len(df)):
+        if not valid.iloc[i]: continue 
+        prev_state = df['EVAL_STATE'].iloc[i-1] if i > 0 else 9
+
+        if cond_trend_start.iloc[i]: # <-- 捕捉「水下起跳」的大陽線，優先級最高
+            df.at[df.index[i], 'EVAL_STATE'] = 1
+        elif cond_bear.iloc[i]:       # <-- 其次判斷風控條件
+            df.at[df.index[i], 'EVAL_STATE'] = 9
+        elif cond_trend_continue.iloc[i]:
+            df.at[df.index[i], 'EVAL_STATE'] = 2
+        elif cond_pullback.iloc[i] and prev_state in [2, 3]:
+            df.at[df.index[i], 'EVAL_STATE'] = 3
+        elif prev_state == 3 and df['low'].iloc[i] >= df['ma10d'].iloc[i]:
+            df.at[df.index[i], 'EVAL_STATE'] = 2
+        else:
+            df.at[df.index[i], 'EVAL_STATE'] = prev_state
+
+    # 3. 生成交易訊號
+    df['EVAL_STATE_PREV'] = df['EVAL_STATE'].shift(1).fillna(9).astype(int)
+    df['trade_signal'] = 5 # 預設 HOLD
+    df.loc[(df['EVAL_STATE_PREV'] == 1) & (df['EVAL_STATE'] == 2) & (df['open'] <= df['close'].shift(1) * 1.03), 'trade_signal'] = 1
+    df.loc[(df['EVAL_STATE_PREV'] == 2) & (df['EVAL_STATE'] == 3), 'trade_signal'] = 2
+    df.loc[(df['EVAL_STATE_PREV'].isin([1, 2, 3])) & (df['EVAL_STATE'] == 9), 'trade_signal'] = -1
+
+    # 4. 無效數據強制歸零
+    df.loc[~valid, ['EVAL_STATE', 'trade_signal']] = 0
+
+    return df
+
+
+def evaluate_trading_signal(df, mode='A'):
+    """
+    优化结构版（版本 C）
+    mode: 'A'=强势反转优先, 'B'=风控优先
+    EVAL_STATE: 9=空头, 1=启动, 2=主升, 3=回撤, 0=无效
+    trade_signal: 5=HOLD, 1=买一, 2=买二, -1=卖出, 0=无效
+    """
+    df = df.copy()
     valid = df['upper'] > 0
 
     # 条件定义
     cond_trend_start = valid & (df['close'] > df['upper']) & (df['close'].shift(1) <= df['upper'].shift(1)) & (df['amount'] > df['amount'].shift(1) * 1.1)
     cond_trend_continue = valid & (df['close'] > df['upper']) & (df['close'].shift(1) > df['upper'].shift(1))
     cond_pullback = valid & (df['close'] < df['close'].shift(1)) & (df['low'] >= df['ma10d']) & (df['amount'] < df['amount'].shift(1))
-    cond_bear = valid & ((df['close'] < df['ma10d']) | ((df['open'] > df['close'].shift(1)) & (df['close'] < df['ma10d'])))
+    cond_bear = valid & (df['close'] < df['ma10d'])
 
-    # 初始化状态
-    df['EVAL_STATE'] = 0
-
-    # 状态机逻辑
+    df['EVAL_STATE'] = 9  # 默认空头
     for i in range(len(df)):
-        prev_state = df['EVAL_STATE'].iloc[i-1] if i > 0 else 0
+        if not valid.iloc[i]:
+            continue
+        prev_state = df['EVAL_STATE'].iloc[i-1] if i > 0 else 9
 
-        if cond_trend_start.iloc[i]:
-            df.at[df.index[i], 'EVAL_STATE'] = 1
-        elif cond_trend_continue.iloc[i]:
-            df.at[df.index[i], 'EVAL_STATE'] = 2
-        elif cond_pullback.iloc[i] and prev_state == 2:
-            df.at[df.index[i], 'EVAL_STATE'] = 3
-        elif prev_state == 3 and df['low'].iloc[i] >= df['ma10d'].iloc[i]:
-            df.at[df.index[i], 'EVAL_STATE'] = 2
-        elif cond_bear.iloc[i]:
-            df.at[df.index[i], 'EVAL_STATE'] = 0
-        else:
-            df.at[df.index[i], 'EVAL_STATE'] = prev_state
+        if mode == 'A':  # 强势优先
+            if cond_trend_start.iloc[i]:
+                df.at[df.index[i], 'EVAL_STATE'] = 1
+            elif cond_bear.iloc[i]:
+                df.at[df.index[i], 'EVAL_STATE'] = 9
+            elif cond_trend_continue.iloc[i]:
+                df.at[df.index[i], 'EVAL_STATE'] = 2
+            elif cond_pullback.iloc[i] and prev_state in [2,3]:
+                df.at[df.index[i], 'EVAL_STATE'] = 3
+            elif prev_state == 3 and df['low'].iloc[i] >= df['ma10d'].iloc[i]:
+                df.at[df.index[i], 'EVAL_STATE'] = 2
+            else:
+                df.at[df.index[i], 'EVAL_STATE'] = prev_state
+
+        elif mode == 'B':  # 风控优先
+            if cond_bear.iloc[i]:
+                df.at[df.index[i], 'EVAL_STATE'] = 9
+            elif cond_trend_start.iloc[i]:
+                df.at[df.index[i], 'EVAL_STATE'] = 1
+            elif cond_trend_continue.iloc[i]:
+                df.at[df.index[i], 'EVAL_STATE'] = 2
+            elif cond_pullback.iloc[i] and prev_state in [2,3]:
+                df.at[df.index[i], 'EVAL_STATE'] = 3
+            elif prev_state == 3 and df['low'].iloc[i] >= df['ma10d'].iloc[i]:
+                df.at[df.index[i], 'EVAL_STATE'] = 2
+            else:
+                df.at[df.index[i], 'EVAL_STATE'] = prev_state
 
     # 前一日状态
-    df['EVAL_STATE_PREV'] = df['EVAL_STATE'].shift(1).fillna(0).astype(int)
+    df['EVAL_STATE_PREV'] = df['EVAL_STATE'].shift(1).fillna(9).astype(int)
 
-    # 生成交易信号
-    df['trade_signal'] = 0
+    # 交易信号
+    df['trade_signal'] = 5  # 默认HOLD
     df.loc[(df['EVAL_STATE_PREV'] == 1) & (df['EVAL_STATE'] == 2) & (df['open'] <= df['close'].shift(1) * 1.03), 'trade_signal'] = 1
     df.loc[(df['EVAL_STATE_PREV'] == 2) & (df['EVAL_STATE'] == 3), 'trade_signal'] = 2
-    df.loc[(df['EVAL_STATE_PREV'].isin([2,3])) & (df['EVAL_STATE'] == 0), 'trade_signal'] = -1
+    df.loc[(df['EVAL_STATE_PREV'].isin([1,2,3])) & (df['EVAL_STATE'] == 9), 'trade_signal'] = -1
 
-    # upper=0 时强制状态和信号为0
-    df.loc[~valid, ['EVAL_STATE','trade_signal']] = 0
+    # 无效数据
+    df.loc[~valid, ['EVAL_STATE','trade_signal']] = [9,5]
 
-    # return df[['open','close','high','low','upper','amount','ma5d','ma10d','EVAL_STATE','trade_signal']]
     return df
+
+
+# def evaluate_trading_signal(df):
+#     """
+#       gpt基础版,google优化信号
+#     修正版交易信号生成（upper=0 时不判定）
+#     EVAL_STATE:
+#         9 = 空头 / 禁止交易
+#         1 = 趋势启动确认期
+#         2 = 主升趋势持仓期
+#         3 = 回撤确认期（允许低吸）
+#     trade_signal:
+#         5 = HOLD
+#         1 = BUY_1 (趋势确认买)
+#         2 = BUY_2 (回撤低吸)
+#        -1 = SELL
+#     """
+#     df = df.copy()
+    
+#     # 只计算 upper > 0 的行
+#     valid = df['upper'] > 0
+
+#     # 条件定义
+#     cond_trend_start = valid & (df['close'] > df['upper']) & (df['close'].shift(1) <= df['upper'].shift(1)) & (df['amount'] > df['amount'].shift(1) * 1.1)
+#     cond_trend_continue = valid & (df['close'] > df['upper']) & (df['close'].shift(1) > df['upper'].shift(1))
+#     cond_pullback = valid & (df['close'] < df['close'].shift(1)) & (df['low'] >= df['ma10d']) & (df['amount'] < df['amount'].shift(1))
+#     cond_bear = valid & ((df['close'] < df['ma10d']) | ((df['open'] > df['close'].shift(1)) & (df['close'] < df['ma10d'])))
+
+#     # 初始化状态
+#     df['EVAL_STATE'] = 9
+
+#     # 状态机逻辑
+#     for i in range(len(df)):
+#         prev_state = df['EVAL_STATE'].iloc[i-1] if i > 0 else 0
+
+#         if cond_trend_start.iloc[i]:
+#             df.at[df.index[i], 'EVAL_STATE'] = 1
+#         elif cond_trend_continue.iloc[i]:
+#             df.at[df.index[i], 'EVAL_STATE'] = 2
+#         elif cond_pullback.iloc[i] and prev_state == 2:
+#             df.at[df.index[i], 'EVAL_STATE'] = 3
+#         elif prev_state == 3 and df['low'].iloc[i] >= df['ma10d'].iloc[i]:
+#             df.at[df.index[i], 'EVAL_STATE'] = 2
+#         elif cond_bear.iloc[i]:
+#             df.at[df.index[i], 'EVAL_STATE'] = 9
+#         else:
+#             df.at[df.index[i], 'EVAL_STATE'] = prev_state
+
+#     # 前一日状态
+#     df['EVAL_STATE_PREV'] = df['EVAL_STATE'].shift(1).fillna(9).astype(int)
+
+#     # 生成交易信号
+#     df['trade_signal'] = 5
+#     df.loc[(df['EVAL_STATE_PREV'] == 1) & (df['EVAL_STATE'] == 2) & (df['open'] <= df['close'].shift(1) * 1.03), 'trade_signal'] = 1
+#     df.loc[(df['EVAL_STATE_PREV'] == 2) & (df['EVAL_STATE'] == 3), 'trade_signal'] = 2
+#     df.loc[(df['EVAL_STATE_PREV'].isin([2,3])) & (df['EVAL_STATE'] == 9), 'trade_signal'] = -1
+
+#     # upper=0 时强制状态和信号为0
+#     df.loc[~valid, ['EVAL_STATE','trade_signal']] = 0
+
+#     return df
 
 
 def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_period: int = 9 ,detect_calc_support=False) -> pd.DataFrame:
@@ -5313,7 +5597,7 @@ def generate_lastN_features_dict(df, lastdays=5):
                 val = 0
             # upper 不加 d 后缀
             if prefix == 'upper':
-                key = f'{prefix}{da}' if da > 1 else prefix
+                key = f'{prefix}{da}' if da > 0 else prefix
             else:
                 key = f'{prefix}{da}d'
             data[key] = val
@@ -5401,9 +5685,9 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
 
 #        df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
 
-        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
-        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
+        df['ma5d'] = talib.EMA(df['close'], timeperiod=5)
+        df['ma10d'] = talib.EMA(df['close'], timeperiod=10)
+        df['ma20d'] = talib.EMA(df['close'], timeperiod=26)
         df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
 
         # safe_SMA(df, 'close', 5,  'ma5d')
@@ -6181,8 +6465,10 @@ def get_index_percd(codeList=tdx_index_code_list, dt=60, end=None, ptype='low', 
     return tdxdata
 
 
-def get_append_lastp_to_df(top_all, lastpTDX_DF=None, dl=ct.PowerCountdl, end=None, ptype='low', filter='y', power=True, lastp=False, newdays=None, checknew=True, resample='d',showtable=False,detect_calc_support=False):
+def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS_Days['d'], end=None, ptype='low', filter='y', power=True, lastp=False, newdays=None, checknew=True, resample='d',showtable=False,detect_calc_support=False):
     time_s = time.time()
+    if top_all is None or top_all.empty:
+        top_all = getSinaAlldf(market='all')
     codelist = top_all.index.tolist()
     # append INDEX tdxdata
     codelist.extend(tdx_index_code_list)
@@ -7181,8 +7467,8 @@ if __name__ == '__main__':
     # tdx_profile_test_tdx()
     resample = 'd'
     code = '300696'
-    # code_l=['920274','300342','300696', '603091', '605167']
-    code_l=['920274']
+    code_l=['920274','300342','300696', '603091', '605167']
+    # code_l=['920274']
     df=get_tdx_exp_all_LastDF_DL(code_l, dt='80',filter='y', resample='d')
     print(f'{df[:2]} ')
     time_s = time.time()
@@ -7191,6 +7477,13 @@ if __name__ == '__main__':
     time_s = time.time()
     all_features = extract_all_features(df,lastdays=cct.compute_lastdays)
     print(f'time: {time.time() - time_s :.8f}  check code: {code_l} all_features:{len(all_features)} ')
+    sina = get_sina_data_df('920274')
+
+    realtime_signal = evaluate_realtime_signal_tick(sina,all_features)
+    print(f'evaluate_realtime_signal_tick: {realtime_signal}')
+
+    import ipdb;ipdb.set_trace()
+
     time_s = time.time()
     generate_df_vect_daily_features = generate_df_vect_daily_features(df,lastdays=cct.compute_lastdays)
     # pd.DataFrame(generate_df_vect_daily_features).set_index('code')
@@ -7199,7 +7492,9 @@ if __name__ == '__main__':
 
     # (get_tdx_Exp_day_to_df_performance(code,dl=ct.Resample_LABELS_Days[resample],resample=resample))
     code = '920274'
-    df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+    # df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+    df=get_tdx_Exp_day_to_df(code,dl='120',resample=resample)
+    import ipdb;ipdb.set_trace()
     # compute_lastdays_percent_profile(df, lastdays=5)
     evtdf = evaluate_trading_signal(df)
     print(f"evtdf: {evtdf[['open', 'close','upper','EVAL_STATE','trade_signal']].tail(60)}")
