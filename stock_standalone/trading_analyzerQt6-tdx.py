@@ -9,7 +9,7 @@ import pandas as pd
 # 假设 TradingAnalyzer 已经在同一目录
 from trading_logger import TradingLogger
 from trading_analyzer import TradingAnalyzer
-
+from JohnsonUtil.stock_sender import StockSender
 class TradingGUI(QWidget):
     def __init__(self, logger_path="./trading_signals.db"):
         super().__init__()
@@ -62,6 +62,17 @@ class TradingGUI(QWidget):
         self.report_area.setReadOnly(True)
         self.report_area.setVisible(False)
         self.layout.addWidget(self.report_area)
+
+        # === 股票发送器 ===
+        self.sender = StockSender(
+            # self.tdx_var,
+            # self.ths_var,
+            # self.dfcf_var,
+            callback=self.update_send_status
+        )
+
+        # 表格点击信号
+        self.table.cellClicked.connect(self.on_table_row_clicked)
 
         # 初始化表格数据
         self.refresh_table()
@@ -121,10 +132,18 @@ class TradingGUI(QWidget):
             df = pd.DataFrame()
 
         # 显示表格
+        self.current_df = df
         self.display_df(df)
 
         # 更新总收益摘要
         self.refresh_summary_label()
+
+    def get_current_df(self):
+        return getattr(self, "current_df", None)
+
+    def update_send_status(self, msg: str):
+        self.label_summary.setText(f"发送状态: {msg}")
+
 
     def refresh_summary_label(self):
         df_all = self.analyzer.get_all_trades_df()
@@ -197,6 +216,64 @@ class TradingGUI(QWidget):
                 self.table.setItem(i, j, item)
         
         self.table.resizeColumnsToContents()
+
+    def on_table_row_clicked(self, row: int, column: int):
+        """
+        仅当点击 code / name 列时，发送股票代码
+        """
+        df = self.get_current_df()
+        if df is None or df.empty:
+            return
+
+        # 当前点击的列名
+        try:
+            clicked_col = df.columns[column].lower()
+        except Exception:
+            return
+
+        # 只允许这些列触发
+        trigger_cols = {"code", "stock_code", "ts_code", "name"}
+        if clicked_col not in trigger_cols:
+            return
+
+        # 找到 code 列（发送始终以 code 为准）
+        code_col = None
+        for c in df.columns:
+            if c.lower() in ("code", "stock_code", "ts_code"):
+                code_col = c
+                break
+
+        if not code_col:
+            return
+
+        stock_code = str(df.iloc[row][code_col]).strip()
+        if not stock_code:
+            return
+
+        self.sender.send(stock_code)
+
+
+    def on_table_row_clicked_old(self, row: int, column: int):
+        """
+        点击表格行 → 发送股票代码
+        """
+        df = self.get_current_df()
+        if df is None or df.empty:
+            return
+
+        # 尝试识别 code 列
+        code_col = None
+        for c in df.columns:
+            if c.lower() in ("code", "stock_code", "ts_code"):
+                code_col = c
+                break
+
+        if not code_col:
+            return
+
+        stock_code = str(df.iloc[row][code_col]).strip()
+        if stock_code:
+            self.sender.send(stock_code)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
