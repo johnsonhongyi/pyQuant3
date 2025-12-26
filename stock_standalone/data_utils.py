@@ -366,6 +366,99 @@ def process_merged_sina_with_history(df, mode='A'):
     return df
     # return df[['name', 'now', 'curr_eval', 'trade_signal']]
 
+
+def strong_momentum_today_plus_history_sum_opt(df, max_days=9):
+    """
+    向量化优化版本
+    - 严格连续 2~max_days 天高低收盘升高
+    - sum_percent = 今天 high - lastl{window-1}d 的百分比
+    - 避免 low=0，自动替代为当天 low
+    """
+    result_dict = {}
+
+    for window in range(2, max_days+1):
+        df_window = df.copy()
+        mask = pd.Series(True, index=df.index)
+
+        # 严格连续升高判断
+        for d in range(1, window):
+            today_high = df_window['high'] if d == 1 else df_window[f'lasth{d-1}d']
+            today_close = df_window['close'] if d == 1 else df_window[f'lastp{d-1}d']
+            today_low = df_window['low'] if d == 1 else df_window[f'lastl{d-1}d']
+
+            prev_high = df_window[f'lasth{d}d']
+            prev_close = df_window[f'lastp{d}d']
+            prev_low = df_window[f'lastl{d}d']
+
+            # 避免缺失或0
+            mask &= (today_high > prev_high) & (today_close > prev_close) & (today_low > prev_low) & (prev_low > 0)
+
+        df_window = df_window[mask]
+        if df_window.empty:
+            continue
+
+        # 计算 sum_percent
+        compare_low = df_window.get(f'lastl{window-1}d', df_window['low']).copy()
+        mask_zero = compare_low == 0
+        compare_low.loc[mask_zero] = df_window.loc[mask_zero, 'low']
+
+        sum_percent = ((df_window['high'] - compare_low) / compare_low * 100).round(2)
+        df_window['sum_perc'] = sum_percent
+
+        df_window = df_window.sort_values('sum_perc', ascending=False)
+        result_dict[window] = df_window
+
+    return result_dict
+
+# def merge_strong_momentum_results(results, min_days=2, columns=['name','lastp1d','lasth1d','lastl1d','sum_percent']):
+def merge_strong_momentum_results(results, min_days=2, columns=['sum_perc']):
+    """
+    将 strong_momentum_strict_single_percent 的结果合并为一个 DataFrame
+    - 只保留连续天数 >= min_days
+    - 添加一列 'window' 表示连续天数
+    - 按 window 从大到小去重，避免重复显示
+    """
+    merged_list = []
+    seen = set()  # 已加入的股票 name
+
+    for window in sorted(results.keys(), reverse=True):  # 大到小
+        if window < min_days:
+            continue
+        df_window = results[window].copy()
+        # 过滤已经出现过的股票
+        df_window = df_window[~df_window['name'].isin(seen)]
+        if df_window.empty:
+            continue
+        df_window['win'] = window
+        merged_list.append(df_window)
+        seen.update(df_window['name'].tolist())
+
+    if merged_list:
+        merged_df = pd.concat(merged_list, ignore_index=False)
+        merged_df = merged_df.sort_values(['win','sum_perc'], ascending=[False, False])
+        return merged_df[columns + ['win']]
+    else:
+        return pd.DataFrame(columns=columns + ['win'])
+
+def align_sum_percent(df, merged_df):
+    """
+    将 merged_df 的 sum_percent 和 window 对齐到原始 df
+    - df: 原始 DataFrame，index 为 code 或包含 'code' 列
+    - merged_df: merged strong momentum DataFrame，index 为 code
+    - 对缺失的 sum_percent 填 0，window 填 NaN
+    """
+    df_copy = df.copy()
+    
+    # 如果 df 没有 code 作为索引，则设为索引
+    if 'code' in df_copy.columns and df_copy.index.name != 'code':
+        df_copy = df_copy.set_index('code')
+    
+    # 对齐 sum_percent 和 window
+    df_copy['sum_perc'] = merged_df['sum_perc'].reindex(df_copy.index).fillna(0)
+    df_copy['win'] = merged_df['win'].reindex(df_copy.index).replace([np.inf, -np.inf], 0).fillna(0).astype(int)
+    
+    return df_copy
+
 def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
                       marketInit: str = "all", marketblk: str = "boll",
@@ -414,11 +507,6 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             elif START_INIT > 0 and 830 <= cct.get_now_time_int() <= 915:
                 today = cct.get_today()
                 # 0️⃣ init 今天已经完成 → 直接跳过
-                if (
-                    g_values.getkey("tdx.init.done") is True
-                    and g_values.getkey("tdx.init.date") == today
-                ):
-                    continue
 
                 # 1️⃣ 清理（未完成 → 不允许 init）
                 # if not clean_expired_tdx_file(logger, g_values):
@@ -429,6 +517,12 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                         if not flag.value:
                             break
                         time.sleep(1)
+                    continue
+
+                if (
+                    g_values.getkey("tdx.init.done") is True
+                    and g_values.getkey("tdx.init.date") == today
+                ):
                     continue
 
                 # 2️⃣ 再次确认时间（防止跨 09:15）
@@ -524,6 +618,11 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
 
 
             top_all = process_merged_sina_with_history(top_all)
+            time_sum = time.time()
+            result_opt = strong_momentum_today_plus_history_sum_opt(top_all,max_days=cct.compute_lastdays)
+            clean_sum = merge_strong_momentum_results(result_opt,min_days=2)
+            top_all = align_sum_percent(top_all,clean_sum)
+            logger.info(f'clean_sum: {time.time() - time_sum:.2f}')
 
             top_all = calc_indicators(top_all, logger, resample)
             logger.info(f"resample Main  top_all:{len(top_all)} market : {market}  resample: {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")

@@ -63,6 +63,27 @@ class StockHandbook:
         """Get all remarks for a specific stock."""
         return self.data.get(code, [])
 
+    def update_remark(self, code, timestamp, new_content):
+        """
+        Update remark content by timestamp.
+
+        Args:
+            code (str): Stock code.
+            timestamp (float): Original timestamp of the remark.
+            new_content (str): Updated content.
+        """
+        if code not in self.data:
+            return False
+
+        for r in self.data[code]:
+            if r.get("timestamp") == timestamp:
+                r["content"] = new_content
+                self._save_data()
+                logger.info(f"Updated remark for {code} at {timestamp}")
+                return True
+
+        return False
+
     # def delete_remark(self, code, timestamp):
     #     """Delete a specific remark by timestamp."""
     #     if code in self.data:
