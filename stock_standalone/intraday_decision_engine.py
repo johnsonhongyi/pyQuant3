@@ -581,11 +581,35 @@ class IntradayDecisionEngine:
         last_v1 = float(snapshot.get("lastv1d", 0))
         last_v2 = float(snapshot.get("lastv2d", 0))
         last_v3 = float(snapshot.get("lastv3d", 0))
+
+        # 提取最近 5 日 OHLC 数据
+        last_closes = [float(snapshot.get(f"lastp{i}d", 0)) for i in range(1, 6)]
+        last_lows = [float(snapshot.get(f"lastl{i}d", 0)) for i in range(1, 6)]
+        last_highs = [float(snapshot.get(f"lasth{i}d", 0)) for i in range(1, 6)]
+        last_opens = [float(snapshot.get(f"lasto{i}d", 0)) for i in range(1, 6)]
         
         # 数据有效性检查
         if price <= 0 or open_p <= 0 or last_close <= 0:
             debug["realtime_skip"] = "数据无效"
             return result
+
+        # ========== 0. 预研分析：超跌与泵感检测 ==========
+        is_oversold = False
+        oversold_reason = ""
+        if last_closes[0] > 0 and last_closes[4] > 0:
+            # 5日累计跌幅
+            drop_5d = (last_closes[0] - last_closes[4]) / last_closes[4]
+            # 快速下跌定义：5日跌 > 10% 且最近3日低点下移
+            if drop_5d < -0.10 and last_lows[0] < last_lows[1] < last_lows[2]:
+                is_oversold = True
+                oversold_reason = f"5日超跌{abs(drop_5d):.1%}"
+
+        morning_pump = False
+        pump_height = 0.0
+        if open_p > 0 and high > open_p:
+            pump_height = (high - open_p) / open_p
+            if pump_height > 0.025: # 早盘泵高超过 2.5%
+                morning_pump = True
         
         # ========== 1. 开盘高走买入策略 ==========
         if mode in ("full", "buy_only"):
@@ -654,6 +678,12 @@ class IntradayDecisionEngine:
             elif multiday_score < -0.1:
                 buy_score -= 0.1
                 buy_reasons.append(f"趋势偏空({multiday_score:.1f})")
+
+            # 条件7: 超跌反弹模式 (高优先级加分)
+            if is_oversold and price > nclose:
+                # 如果超跌后今日站上均线，是一个极佳的反弹切入点
+                buy_score += 0.3
+                buy_reasons.append(f"超跌反弹({oversold_reason})")
             
             debug["实时买入分"] = buy_score
             debug["实时买入理由"] = buy_reasons
@@ -681,16 +711,34 @@ class IntradayDecisionEngine:
             if nclose > 0 and price < nclose:
                 # 计算偏离度
                 deviation = (nclose - price) / nclose
-                
+
+                # 【核心增强】早盘诱多后跌破均线逻辑
+                if morning_pump:
+                    # 如果有过显著泵高 (>2.5%) 随后跌破均线，大概率是分时诱多
+                    # 使用泵高作为提前量的乘利率：泵得越高，跌破时卖得越狠
+                    sell_multiplier = 1.0 + (pump_height * 10.0) # 泵 3% 乘率为 1.3
+                    urgency = min(deviation / 0.02 * sell_multiplier, 1.0)
+                    sell_pos = 1.0 - (1.0 - urgency) * 0.5 # 更加果断的减仓，至少减 50%
+
+                    result = {
+                        "triggered": True,
+                        "action": "卖出",
+                        "position": round(sell_pos, 2),
+                        "reason": f"早盘诱多跌破均线(泵高{pump_height:.1%}, 乘率{sell_multiplier:.1f})"
+                    }
+                    debug["morning_pump_failure"] = True
+                    return result
+
+                # 普通跌破均价逻辑
                 # 根据昨日涨幅动态调整阈值
                 max_normal_pullback = abs(last_percent) / 500 if abs(last_percent) < 10 else 0.02
                 threshold = max(max_normal_pullback, 0.005) + 0.003
-                
+
                 if deviation > threshold:
                     # 偏离度越大，仓位越低
                     urgency = min(deviation / 0.03, 1.0)  # 偏离 3% 时最紧急
                     sell_pos = 1.0 - urgency * 0.5  # 最低保留 50%
-                    
+
                     result = {
                         "triggered": True,
                         "action": "卖出",
