@@ -11,6 +11,24 @@ from trading_logger import TradingLogger
 from trading_analyzer import TradingAnalyzer
 from JohnsonUtil.stock_sender import StockSender
 
+class NumericTableWidgetItem(QTableWidgetItem):
+    """自定义 TableWidgetItem，支持正确的数值排序"""
+    def __init__(self, value):
+        if isinstance(value, (int, float)):
+            # 格式化显示，但保留原始数值用于比较
+            display_val = f"{value:.2f}" if isinstance(value, float) else str(value)
+            super().__init__(display_val)
+            self.sort_value = value
+        else:
+            super().__init__(str(value))
+            self.sort_value = str(value)
+
+    def __lt__(self, other):
+        if isinstance(other, NumericTableWidgetItem):
+            if isinstance(self.sort_value, (int, float)) and isinstance(other.sort_value, (int, float)):
+                return self.sort_value < other.sort_value
+        return super().__lt__(other)
+
 class TradingGUI(QWidget):
     def __init__(self, logger_path="./trading_signals.db"):
         super().__init__()
@@ -208,23 +226,20 @@ class TradingGUI(QWidget):
             self.table.setColumnCount(0)
             return
 
+        # 填充数据期间关闭排序，避免干扰和性能下降
+        self.table.setSortingEnabled(False)
         self.table.setColumnCount(len(df.columns))
         self.table.setRowCount(len(df))
         self.table.setHorizontalHeaderLabels(df.columns)
 
         for i, row in enumerate(df.itertuples(index=False)):
             for j, value in enumerate(row):
-                # 优化数字显示
-                if isinstance(value, float):
-                    display_val = f"{value:.2f}"
-                else:
-                    display_val = str(value)
-                
-                item = QTableWidgetItem(display_val)
+                item = NumericTableWidgetItem(value)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
                 # 特色染色逻辑：盈亏染色
-                if "profit" in df.columns[j].lower() or "pnl" in df.columns[j].lower() or "return" in df.columns[j].lower():
+                col_name = df.columns[j].lower()
+                if "profit" in col_name or "pnl" in col_name or "return" in col_name or "percent" in col_name:
                     try:
                         f_val = float(value)
                         if f_val > 0: item.setForeground(Qt.GlobalColor.red)
@@ -233,6 +248,8 @@ class TradingGUI(QWidget):
                 
                 self.table.setItem(i, j, item)
         
+        # 填充完成后开启排序
+        self.table.setSortingEnabled(True)
         self.table.resizeColumnsToContents()
 
     def get_current_df(self):
