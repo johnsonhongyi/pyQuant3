@@ -102,17 +102,38 @@ class IntradayDecisionEngine:
             debug["trend_strength"] = trend_strength
             debug["analysis_skip"] = "均线数据无效"
         
-        # ---------- T+1 限制检查 ----------
-        is_t1_restricted = False
-        buy_date = snapshot.get("buy_date")
-        if buy_date:
-            today_str = datetime.datetime.now().strftime('%Y-%m-%d')
-            if buy_date.startswith(today_str):
-                is_t1_restricted = True
-                debug["t1_restricted"] = True
-                debug["restriction_reason"] = f"T+1限制: {buy_date} 买入"
+        # ---------- 💥 涨跌停与一字板过滤 (New) ----------
+        last_close = float(snapshot.get("last_close", 0))
+        limit_info = self._is_price_limit(row.get("code", ""), price, last_close, high, low, open_p, ratio, snapshot)
+        debug.update(limit_info)
+        
+        # 1. 一字涨停或封死涨停：持仓不动，信号无效
+        if limit_info["limit_up"]:
+            if limit_info["one_word"]:
+                return self._hold("一字涨停，持仓观望", debug)
+            if mode != "buy_only":
+                return self._hold("封死涨停，利润奔跑", debug)
+            else:
+                return self._hold("已封涨停，无法买入", debug)
+        
+        # 2. 跌停状态：信号通常无效 (排队想卖也卖不掉，买入则大忌)
+        if limit_info["limit_down"]:
+            return self._hold("处于跌停状态，信号无效", debug)
 
-        # ---------- 止损止盈检测（优先级最高） ----------
+        # ---------- 实时高优先级决策（包含跌破均价、开盘高开下杀等） ----------
+        is_t1_restricted = False
+        if snapshot.get('buy_date'):
+            import datetime as dt
+            today_str = dt.datetime.now().strftime('%Y-%m-%d')
+            if snapshot['buy_date'].startswith(today_str):
+                is_t1_restricted = True
+
+        priority_result = self._realtime_priority_check(row, snapshot, mode, debug, is_t1_restricted)
+        if priority_result["triggered"]:
+            # 【优化】如果卖出是因为"高开下杀放量"，且未返回均线，则执行
+            return priority_result
+
+        # ---------- 基础止损止盈检查 (New: 增加 T+1 限制) ----------
         if mode in ("full", "sell_only"):
             if is_t1_restricted:
                 debug["sell_skip"] = "T+1限制，跳过止损检测"
@@ -827,7 +848,23 @@ class IntradayDecisionEngine:
                 already_broken = snapshot.get("sell_triggered_today", False)
                 prefix = "[破位持续] " if already_broken else ""
                 
-                # 如果诱多后跌破，卖得更狠
+                # 【优化逻辑】只有高开下杀带量且没返回均线的是核心卖点
+                # 判断是否为“高开下杀放量”场景
+                is_high_open = open_p > last_close * 1.02 # 高开 2%+
+                is_heavy_vol = ratio > 5.0 or (snapshot.get('lastv1d', 0) > 0 and volume > snapshot['lastv1d'] * 0.8) # 换手大或成交量接近昨日 80%
+
+                if is_high_open and is_heavy_vol:
+                    # 这就是用户强调的：高开下杀放量且跌破均线 (致命信号)
+                    sell_pos = 0.0 # 建议全清
+                    return {
+                        "triggered": True,
+                        "action": "卖出",
+                        "position": sell_pos,
+                        "reason": f"高开下杀带量破位(泵高{pump_height:.1%}, 偏离{deviation:.1%})",
+                        "debug": debug
+                    }
+
+                # 普通破位逻辑
                 if morning_pump:
                     sell_multiplier = 1.0 + (pump_height * 10.0)
                     urgency = min(deviation / 0.02 * sell_multiplier, 1.0)
@@ -1172,6 +1209,17 @@ class IntradayDecisionEngine:
                     elif price_position < -0.02:
                         score -= 0.1
                         reasons.append("价格偏低")
+            
+            # 【新增】5日线回补逻辑 (次日反包/收回均线)
+            # 判断逻辑：昨日收盘 < 昨日MA5，但今日 (price) > 当前MA5 且 今日价格 > 昨日收盘
+            last_close = float(source_data.get("last_close", 0))
+            last_ma5 = float(source_data.get("lastma5d", 0))
+            current_ma5 = float(source_data.get("ma5d", 0))
+            if last_ma5 > 0 and last_close < last_ma5 and price > current_ma5 and price > last_close:
+                # 配合成交量判断回补有效性
+                score += 0.25 # 给予显著加分
+                reasons.append("5日线回补")
+                # 如果还站稳了均价线，信心更强 (在 _realtime_priority_check 中会进一步加分)
         
         # ---------- 2. 高低点趋势（5日最高/最低价） ----------
         highs = [float(source_data.get(f"lasth{i}d", 0)) for i in range(1, 6) if source_data.get(f"lasth{i}d", 0)]
@@ -1337,3 +1385,36 @@ class IntradayDecisionEngine:
             "debug": debug
         }
 
+
+    def _is_price_limit(self, code: str, price: float, last_close: float, high: float, low: float, open_p: float, ratio: float, snapshot: dict) -> dict:
+        """
+        判断是否处于涨跌停状态，并识别一字板
+        """
+        if last_close <= 0:
+            return {"limit_up": False, "limit_down": False, "one_word": False}
+            
+        # 涨停比例 (主板 10%, 创业/科创 20%, ST 5%)
+        limit_ratio = 0.10
+        if code.startswith(('30', '68')):
+            limit_ratio = 0.20
+        # 简单通过名称判断 ST
+        if "ST" in snapshot.get("name", "").upper():
+            limit_ratio = 0.05
+            
+        # 计算价格上限和下限 (考虑四舍五入偏差，增加 0.01 冗余)
+        limit_up_price = round(last_close * (1 + limit_ratio), 2)
+        limit_down_price = round(last_close * (1 - limit_ratio), 2)
+        
+        is_up = price >= limit_up_price - 0.005 # 兼容极小波动
+        is_down = price <= limit_down_price + 0.005
+        
+        # 一字板判定：开盘=最高=最低=当前，且成交极小 (或振幅为0)
+        is_one_word = False
+        if is_up or is_down:
+            # 振幅为 0 且成交换手极低
+            if high == low == open_p == price:
+                is_one_word = True
+            elif ratio < 0.2 and high == low:
+                 is_one_word = True
+                
+        return {"limit_up": is_up, "limit_down": is_down, "one_word": is_one_word}
