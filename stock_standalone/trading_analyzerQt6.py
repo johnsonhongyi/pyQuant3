@@ -32,7 +32,7 @@ class TradingGUI(QWidget):
 
         self.view_combo = QComboBox()
         self.view_combo.addItems([
-            "股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史"
+            "股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史", "实时指标详情"
         ])
         self.view_combo.currentTextChanged.connect(self.refresh_table)
         self.top_layout.addWidget(QLabel("视图选择:"))
@@ -117,6 +117,19 @@ class TradingGUI(QWidget):
             df = self.analyzer.get_signal_history_df()
             if code:
                 df = df[df['code'] == code]
+        elif view == "实时指标详情":
+            # 专门展示增强后的指标数据（ma5d, ma10d, pump_height 等）
+            df = self.analyzer.get_signal_history_df()
+            if code:
+                df = df[df['code'] == code]
+            # 只保留指标相关列
+            indicator_cols = ['date', 'code', 'name', 'price', 'action', 'reason',
+                            'ma5d', 'ma10d', 'ratio', 'volume', 'percent',
+                            'high', 'low', 'open', 'nclose',
+                            'highest_today', 'pump_height', 'pullback_depth',
+                            'win', 'red', 'gren', 'structure']
+            existing_cols = [c for c in indicator_cols if c in df.columns]
+            df = df[existing_cols] if existing_cols else df
         else:
             df = pd.DataFrame()
 

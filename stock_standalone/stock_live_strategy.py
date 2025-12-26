@@ -504,6 +504,20 @@ class StockLiveStrategy:
                 snap['red'] = row.get('red', snap.get('red', 0)) #五日线上数据
                 snap['gren'] = row.get('gren', snap.get('gren', 0)) #弱势绿柱数据
 
+                # 【新增】日内实时追踪字段（用于冲高回落检测和盈利最大化）
+                open_price = float(row.get('open', 0))
+                # 追踪日内最高价
+                if current_high > snap.get('highest_today', 0):
+                    snap['highest_today'] = current_high
+                # 追踪日内最大泵高幅度 (相对于开盘价)
+                if open_price > 0:
+                    pump_height = (snap.get('highest_today', current_high) - open_price) / open_price
+                    snap['pump_height'] = max(snap.get('pump_height', 0), pump_height)
+                # 计算从日高回撤深度
+                highest_today = snap.get('highest_today', current_high)
+                if highest_today > 0:
+                    snap['pullback_depth'] = (highest_today - current_price) / highest_today
+
                 last_close = snap.get('last_close', 0)
                 last_percent = snap.get('percent', None)
                 last_nclose = snap.get('nclose', 0)
@@ -572,8 +586,27 @@ class StockLiveStrategy:
                 # 记录最高分作为今日目标追踪
                 snap["max_score_today"] = max(snap.get("max_score_today", 0), decision["debug"].get("实时买入分", 0))
 
-                # 记录信号历史
-                self.trading_logger.log_signal(code, data['name'], current_price, decision)
+                # 记录信号历史 (增强版：传递完整行情数据以便后续分析)
+                row_data = {
+                    'ma5d': float(row.get('ma5d', 0)),
+                    'ma10d': float(row.get('ma10d', 0)),
+                    'ratio': float(row.get('ratio', 0)),
+                    'volume': float(row.get('volume', 0)),
+                    'nclose': current_nclose,
+                    'high': current_high,
+                    'low': float(row.get('low', 0)),
+                    'open': float(row.get('open', 0)),
+                    'percent': current_change,
+                    'turnover': float(row.get('turnover', 0)),
+                    'win': snap.get('win', 0),
+                    'red': snap.get('red', 0),
+                    'gren': snap.get('gren', 0),
+                    'sum_perc': snap.get('sum_perc', 0),
+                    'highest_today': snap.get('highest_today', current_high),
+                    'pump_height': snap.get('pump_height', 0),
+                    'pullback_depth': snap.get('pullback_depth', 0),
+                }
+                self.trading_logger.log_signal(code, data['name'], current_price, decision, row_data=row_data)
 
                 if decision["action"] != "持仓":
                     messages.append(("POSITION", f'{data["name"]} {decision["action"]} 仓位{int(decision["position"]*100)}% {decision["reason"]}'))

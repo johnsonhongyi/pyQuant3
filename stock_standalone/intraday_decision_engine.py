@@ -259,12 +259,28 @@ class IntradayDecisionEngine:
              elif price < nclose:
                  # 衝高回落后的反抽无力
                  if high > nclose * 1.005 and (high - price)/high > 0.03:
-                     # “华力创通”式：上午冲高失败，持续远离均价线
+                     # "华力创通"式：上午冲高失败，持续远离均价线
                      sell_score += 0.35
                      reasons.append("衝高回落且均价线压制(抛压大)")
                  else:
                      sell_score += 0.15
                      reasons.append("均价线下运行")
+        
+        # 【新增】利用 snapshot 中的日内追踪字段进行更精确的冲高回落检测
+        pump_height = float(snapshot.get('pump_height', 0))
+        pullback_depth = float(snapshot.get('pullback_depth', 0))
+        
+        # 急速冲高回落检测：泵高 > 3%，回撤 > 2.5%，且已跌破均价
+        if pump_height > 0.03 and pullback_depth > 0.025 and price < nclose:
+            sell_score += 0.45  # 高权重
+            reasons.append(f"急速冲高回落(泵高{pump_height:.1%}回撤{pullback_depth:.1%})")
+            
+        # 二次冲高失败检测：如果 high 距离日内最高还有较大差距，说明反弹乏力
+        highest_today = float(snapshot.get('highest_today', high))
+        if highest_today > 0 and high < highest_today * 0.985 and price < nclose:
+            # 日内次高点也无法触及前高的 98.5%，反弹乏力
+            sell_score += 0.2
+            reasons.append("二次冲高失败")
             
         # “连阳持仓”保护逻辑：如果是强势连阳，且未出现结构走弱，略微调低卖出分数
         # 注意：这里我们无法直接获取 row，但可以使用 debug 中缓存的信息或 snapshot
@@ -325,11 +341,30 @@ class IntradayDecisionEngine:
             debug["分步止盈"] = "第一目标已达"
             # 保持盈利 5% 的减仓建议可以通过实时判断后续给出
 
-        # 3. 移动止盈 (回撤保护)
+        # 3. 分级移动止盈 (回撤保护，根据盈利幅度动态调整回撤容忍度)
         if highest_since_buy > 0 and highest_since_buy > cost_price:
             drawdown = (highest_since_buy - price) / highest_since_buy
-            if pnl_pct > 0.03 and drawdown > self.trailing_stop_pct:
-                return {"triggered": True, "action": "移动止盈", "position": 0.3, "reason": f"最高回撤{drawdown:.1%}"}
+            
+            # 分级回撤阈值：盈利越高，容忍度越大
+            if pnl_pct >= 0.08:
+                # 盈利 > 8%：容忍 5% 回撤
+                trailing_threshold = 0.05
+                debug["移动止盈档位"] = "高盈利档(8%+)"
+            elif pnl_pct >= 0.05:
+                # 盈利 5-8%：容忍 4% 回撤
+                trailing_threshold = 0.04
+                debug["移动止盈档位"] = "中盈利档(5-8%)"
+            elif pnl_pct >= 0.03:
+                # 盈利 3-5%：容忍 3% 回撤
+                trailing_threshold = 0.03
+                debug["移动止盈档位"] = "低盈利档(3-5%)"
+            else:
+                trailing_threshold = self.trailing_stop_pct  # 默认阈值
+                
+            if pnl_pct > 0.03 and drawdown > trailing_threshold:
+                # 保留部分仓位让利润继续奔跑
+                retain_pos = 0.2 if pnl_pct >= 0.05 else 0.3
+                return {"triggered": True, "action": "移动止盈", "position": retain_pos, "reason": f"最高回撤{drawdown:.1%}(阈值{trailing_threshold:.1%})"}
 
         # 4. 技术位破位检测 (大开大合)
         low10 = float(snapshot.get("low10", 0))
@@ -722,6 +757,33 @@ class IntradayDecisionEngine:
             if win >= 5 and price > nclose:
                 buy_score += 0.15
                 buy_reasons.append("极强波段确认")
+            
+            # 【新增】条件9: 早盘 MA5/MA10 回踩买入检测 (预埋单策略)
+            # 早盘黄金窗口: 09:30-10:00，价格回踩均线附近是最佳买点
+            import datetime as dt
+            now_time = dt.datetime.now()
+            is_morning_window = 930 <= int(now_time.strftime('%H%M')) <= 1000
+            
+            ma5 = float(row.get("ma5d", 0))
+            ma10 = float(row.get("ma10d", 0))
+            
+            if is_morning_window and ma5 > 0 and ma10 > 0 and price > nclose and structure != "派发":
+                # MA5 回踩检测：价格在 MA5 ± 1% 区间
+                ma5_bias = abs(price - ma5) / ma5
+                if ma5_bias < 0.01:  # 距离 MA5 在 1% 以内
+                    buy_score += 0.25
+                    buy_reasons.append(f"早盘回踩MA5({ma5_bias:.1%})")
+                    
+                # MA10 回踩检测：价格在 MA10 ± 1.5% 区间
+                ma10_bias = abs(price - ma10) / ma10
+                if ma10_bias < 0.015:  # 距离 MA10 在 1.5% 以内
+                    buy_score += 0.20
+                    buy_reasons.append(f"早盘回踩MA10({ma10_bias:.1%})")
+                    
+                # 如果同时满足靠近 MA5 和 MA10，且价格在两者之间，是极佳买点
+                if ma10 < price < ma5 and price > nclose:
+                    buy_score += 0.15
+                    buy_reasons.append("MA5/MA10夹板支撑")
             
             debug["实时买入分"] = buy_score
             debug["实时买入理由"] = buy_reasons
