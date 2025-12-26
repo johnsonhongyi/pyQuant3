@@ -4,6 +4,7 @@
 支持买入/卖出信号生成、动态仓位计算、趋势强度评估、止损止盈检测
 """
 import logging
+import datetime
 from typing import Optional, Any, Dict, List, Tuple, Union
 
 logger = logging.getLogger(__name__)
@@ -100,20 +101,33 @@ class IntradayDecisionEngine:
             debug["structure"] = structure
             debug["trend_strength"] = trend_strength
             debug["analysis_skip"] = "均线数据无效"
+        
+        # ---------- T+1 限制检查 ----------
+        is_t1_restricted = False
+        buy_date = snapshot.get("buy_date")
+        if buy_date:
+            today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+            if buy_date.startswith(today_str):
+                is_t1_restricted = True
+                debug["t1_restricted"] = True
+                debug["restriction_reason"] = f"T+1限制: {buy_date} 买入"
 
         # ---------- 止损止盈检测（优先级最高） ----------
         if mode in ("full", "sell_only"):
-            stop_result = self._stop_check(row, snapshot, debug)
-            if stop_result["triggered"]:
-                return {
-                    "action": stop_result["action"],
-                    "position": stop_result["position"],
-                    "reason": stop_result["reason"],
-                    "debug": debug
-                }
+            if is_t1_restricted:
+                debug["sell_skip"] = "T+1限制，跳过止损检测"
+            else:
+                stop_result = self._stop_check(row, snapshot, debug)
+                if stop_result["triggered"]:
+                    return {
+                        "action": stop_result["action"],
+                        "position": stop_result["position"],
+                        "reason": stop_result["reason"],
+                        "debug": debug
+                    }
         
         # ========== 实时行情高优先级决策（优先级次高） ==========
-        realtime_result = self._realtime_priority_check(row, snapshot, mode, debug)
+        realtime_result = self._realtime_priority_check(row, snapshot, mode, debug, is_t1_restricted)
         if realtime_result["triggered"]:
             return {
                 "action": realtime_result["action"],
@@ -128,16 +142,18 @@ class IntradayDecisionEngine:
 
         # ---------- 卖出信号检测 ----------
         if mode in ("full", "sell_only"):
-
-            sell_action, sell_pos, sell_reason = self._sell_decision(price, ma5, ma10, snapshot, structure, debug)
-            if sell_action == "卖出":
-                debug["sell_reason"] = sell_reason
-                return {
-                    "action": "卖出",
-                    "position": sell_pos,
-                    "reason": sell_reason,
-                    "debug": debug
-                }
+            if is_t1_restricted:
+                debug["sell_skip"] = "T+1限制，跳过卖出信号检测"
+            else:
+                sell_action, sell_pos, sell_reason = self._sell_decision(price, ma5, ma10, snapshot, structure, debug)
+                if sell_action == "卖出":
+                    debug["sell_reason"] = sell_reason
+                    return {
+                        "action": "卖出",
+                        "position": sell_pos,
+                        "reason": sell_reason,
+                        "debug": debug
+                    }
 
         # ---------- 买入信号检测 ----------
         if mode in ("full", "buy_only"):
@@ -524,7 +540,7 @@ class IntradayDecisionEngine:
 
     # ==================== 实时行情高优先级决策 ====================
     
-    def _realtime_priority_check(self, row: dict[str, Any], snapshot: dict[str, Any], mode: str, debug: dict[str, Any]) -> dict[str, Any]:
+    def _realtime_priority_check(self, row: dict[str, Any], snapshot: dict[str, Any], mode: str, debug: dict[str, Any], is_t1_restricted: bool = False) -> dict[str, Any]:
         """
         实时行情高优先级决策（优先级高于普通均线信号）
         
@@ -661,7 +677,7 @@ class IntradayDecisionEngine:
                 return result
         
         # ========== 2. 跌破均价卖出策略 ==========
-        if mode in ("full", "sell_only"):
+        if mode in ("full", "sell_only") and not is_t1_restricted:
             if nclose > 0 and price < nclose:
                 # 计算偏离度
                 deviation = (nclose - price) / nclose
