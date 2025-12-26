@@ -163,15 +163,21 @@ class IntradayDecisionEngine:
                 # 3. 量能与均价约束 (关键点)
                 base_pos += self._volume_bonus(row, debug)
                 
-                # 如果价格在今日均价（nclose）下方，严控买入（解决“华力创通”类衝高回落问题）
+                # 如果价格在今日今日成交均价（nclose）下方，极大程度严控买入（解决“衝高回落”及“水下徘徊”问题）
                 if nclose > 0 and price < nclose:
-                    penalty = 0.2
+                    penalty = 0.3  # 进一步加大惩罚
                     if structure == "派发":
-                        penalty = 0.35 
+                        penalty = 0.5  # 派发结构下线下，基本禁止开仓
                     elif structure == "走弱":
-                        penalty = 0.25
+                        penalty = 0.4 
                     base_pos -= penalty
                     debug["均价/结构约束"] = f"线下{structure}，扣减{penalty}"
+                    
+                # 【新增】昨日均价线约束：如果价格在昨日平均成本下方，说明套牢盘多，开仓需更谨慎
+                last_nclose = float(snapshot.get("nclose", 0))
+                if last_nclose > 0 and price < last_nclose:
+                    base_pos -= 0.15
+                    debug["昨日锚点约束"] = "低于昨均价"
 
                 # 4. 低位大仓位逻辑 (靠近 low10/low60 加成)
                 low10 = float(snapshot.get("low10", 0))
@@ -255,8 +261,9 @@ class IntradayDecisionEngine:
         debug["sell_score"] = sell_score
         debug["sell_reasons"] = reasons
         
-        if sell_score >= 0.5:
-            return ("卖出", -sell_score, " | ".join(reasons))
+        if sell_score >= 0.5 or (structure == "派发" and sell_score >= 0.35):
+            # 派发结构下，更低的分数即可触发卖出
+            return ("卖出", -max(sell_score, 0.5), " | ".join(reasons))
         
         return ("持仓", 0, "")
     
@@ -285,10 +292,13 @@ class IntradayDecisionEngine:
             # 达到硬止损线，全清
             return {"triggered": True, "action": "止损", "position": 0.0, "reason": f"硬止损触发: 亏损{abs(pnl_pct):.1%}"}
         
-        if pnl_pct < -0.03: # 预警止损（亏损 3%）
-            # 检查是否有反弹无力迹象（低于均价）
-            if nclose > 0 and price < nclose:
-                return {"triggered": True, "action": "预警减仓", "position": 0.5, "reason": f"亏损{abs(pnl_pct):.1%}且均价下方"}
+        if pnl_pct < -0.025: # 预警止损收紧到 2.5%
+            # 检查是否有反弹无力迹象（低于均价）或结构走弱
+            structure = debug.get("structure", "UNKNOWN")
+            if (nclose > 0 and price < nclose) or structure in ["派发", "走弱"]:
+                # 如果是派发，直接全清，不再减半
+                target_pos = 0.0 if structure == "派发" else 0.4
+                return {"triggered": True, "action": "预警止损", "position": target_pos, "reason": f"结构{structure}且亏损{abs(pnl_pct):.1%}"}
 
         # 2. 基础百分比止盈 (分三步)
         if pnl_pct >= self.take_profit_pct:
@@ -436,15 +446,21 @@ class IntradayDecisionEngine:
         """判断盘中结构"""
         # 优化“派发”判定：即使换手率没到 8，如果回落严重且带量，也算派发
         fall_from_high = (high - price) / high if high > 0 else 0
-        if high > 0 and fall_from_high > 0.02 and ratio > 5:
-            if fall_from_high > 0.04:
-                return "派发" # 回落超过 4% 属于严重派发
-            return "派发"  
+        
+        # 增加对“冲高回落”的敏感度
+        if high > 0:
+            # 1. 严重回落：回落 > 3.5% 直接派发
+            if fall_from_high > 0.035:
+                return "派发"
+            # 2. 较大量能下的回落：回落 > 2% 且换手 > 4
+            if fall_from_high > 0.02 and ratio > 4:
+                return "派发"
         
         if price > open_p and ratio > 5:
             return "强势"
-        if price < open_p and ratio > 4:
+        if price < open_p and ratio > 3.5: # 降低走弱判断的换手阈值，更早识别走弱
             return "走弱"
+        
         return "中性"
 
     def _ma_decision(self, price: float, ma5: float, ma10: float) -> tuple[str, float, str]:
@@ -560,11 +576,20 @@ class IntradayDecisionEngine:
             buy_score = 0.0
             buy_reasons = []
             
+            # 风险熔断：如果是派发结构，严禁开盘高走买入
+            structure = debug.get("structure", "UNKNOWN")
+            if structure == "派发":
+                debug["realtime_skip"] = "派发结构禁买"
+                return result
+
             # 条件1: 开盘价高于昨日收盘（跳空高开）
             gap_up = (open_p - last_close) / last_close
-            if gap_up > 0.002:  # 高开 0.2% 以上
+            if gap_up > 0.01:  # 提高到 1.0% 以上才算有效高开
                 buy_score += 0.15
-                buy_reasons.append(f"跳空高开{gap_up:.1%}")
+                buy_reasons.append(f"显著高开{gap_up:.1%}")
+            elif gap_up > 0.003:
+                buy_score += 0.05
+                buy_reasons.append(f"微幅高开{gap_up:.1%}")
             
             # 条件2: 开盘价接近当日最低价（开盘即最低，无回调空间）
             if low > 0 and open_p > 0:
@@ -576,16 +601,24 @@ class IntradayDecisionEngine:
             # 条件3: 当前价高于均价（高走态势）
             if nclose > 0 and price > nclose:
                 price_above_nclose = (price - nclose) / nclose
-                if price_above_nclose > 0.003:  # 高于均价 0.3%
+                if price_above_nclose > 0.008:  # 提高到 0.8% 以上
                     buy_score += 0.15
-                    buy_reasons.append(f"高走{price_above_nclose:.1%}")
+                    buy_reasons.append(f"稳步高走{price_above_nclose:.1%}")
+                elif price_above_nclose > 0.003:
+                    buy_score += 0.05
+                    buy_reasons.append(f"站稳均价")
+            
+            # 【新增】风险项：如果虽然高开但已经跌破今日均价，大幅扣分
+            if nclose > 0 and price < nclose:
+                buy_score -= 0.35
+                buy_reasons.append("已跌破今日均价")
             
             # 条件4: 当前价高于开盘价（持续上攻）
             if price > open_p:
                 price_above_open = (price - open_p) / open_p
-                if price_above_open > 0.005:
+                if price_above_open > 0.01: # 提高到 1% 以上
                     buy_score += 0.1
-                    buy_reasons.append(f"上攻{price_above_open:.1%}")
+                    buy_reasons.append(f"显著上攻{price_above_open:.1%}")
             
             # 条件5: 量能配合（换手率健康）
             volume_bonus = self._volume_emotion_score(volume, ratio, last_v1, last_v2, last_v3, debug)
@@ -609,8 +642,14 @@ class IntradayDecisionEngine:
             debug["实时买入分"] = buy_score
             debug["实时买入理由"] = buy_reasons
             
-            # 触发条件：得分 >= 0.4
-            if buy_score >= 0.4:
+            # 触发条件：得分 >= 0.55 (提高门槛，减少噪音)
+            if buy_score >= 0.55:
+                # 【新增】追高过滤：如果偏离 MA5 超过 3.5%，实时策略也不宜直接切入
+                bias_ma5 = (price - float(row.get("ma5d", 0))) / float(row.get("ma5d", 1)) if float(row.get("ma5d", 0)) > 0 else 0
+                if bias_ma5 > 0.035:
+                    debug["realtime_skip"] = f"追高风险(MA5偏离{bias_ma5:.1%})"
+                    return result
+
                 pos = min(buy_score, self.max_position)
                 result = {
                     "triggered": True,
@@ -682,8 +721,8 @@ class IntradayDecisionEngine:
             score -= 0.1
             reasons.append("换手过高")
         elif ratio < 0.5:
-            score -= 0.05
-            reasons.append("换手过低")
+            score -= 0.15 # 加大惩罚
+            reasons.append("极低换手")
         
         # 量能放大检查（与前几日对比）
         avg_prev_vol = 0.0
