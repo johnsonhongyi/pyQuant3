@@ -9,6 +9,7 @@ import pandas as pd
 # 假设 TradingAnalyzer 已经在同一目录
 from trading_logger import TradingLogger
 from trading_analyzer import TradingAnalyzer
+from JohnsonUtil.stock_sender import StockSender
 
 class TradingGUI(QWidget):
     def __init__(self, logger_path="./trading_signals.db"):
@@ -62,6 +63,17 @@ class TradingGUI(QWidget):
         self.report_area.setReadOnly(True)
         self.report_area.setVisible(False)
         self.layout.addWidget(self.report_area)
+
+        # === 股票发送器 ===
+        self.sender = StockSender(
+            # self.tdx_var,
+            # self.ths_var,
+            # self.dfcf_var,
+            callback=self.update_send_status
+        )
+
+        # 表格点击信号
+        self.table.cellClicked.connect(self.on_table_row_clicked)
 
         # 初始化表格数据
         self.refresh_table()
@@ -134,6 +146,7 @@ class TradingGUI(QWidget):
             df = pd.DataFrame()
 
         # 显示表格
+        self.current_df = df
         self.display_df(df)
 
         # 更新总收益摘要
@@ -155,14 +168,23 @@ class TradingGUI(QWidget):
     def update_stock_list(self):
         # 仅在需要代码过滤的视图下更新下拉列表
         view = self.view_combo.currentText()
-        if view not in ["单只股票明细", "信号探测历史"]:
+        if view not in ["单只股票明细", "信号探测历史", "实时指标详情"]:
             return
 
-        df_all = self.analyzer.get_all_trades_df()
-        if df_all.empty:
+        # 根据视图类型决定数据源
+        if view in ["信号探测历史", "实时指标详情"]:
+            df_source = self.analyzer.get_signal_history_df()
+        else:
+            df_source = self.analyzer.get_all_trades_df()
+
+        if df_source.empty:
             codes = []
         else:
-            codes = sorted(df_all['code'].unique().tolist())
+            codes = sorted(df_source['code'].unique().tolist())
+        
+        # 添加一个空选项，方便用户取消过滤
+        if codes and "" not in codes:
+            codes.insert(0, "")
 
         # 保存当前选中值
         current_code = self.stock_input.currentText().strip()
@@ -175,6 +197,8 @@ class TradingGUI(QWidget):
             self.stock_input.addItems(codes)
             if current_code in codes:
                 self.stock_input.setCurrentText(current_code)
+            else:
+                self.stock_input.setCurrentText("")
             self.stock_input.blockSignals(False)
 
     def display_df(self, df: pd.DataFrame):
@@ -210,6 +234,48 @@ class TradingGUI(QWidget):
                 self.table.setItem(i, j, item)
         
         self.table.resizeColumnsToContents()
+
+    def get_current_df(self):
+        return getattr(self, "current_df", None)
+
+    def update_send_status(self, msg: str):
+        self.label_summary.setText(f"发送状态: {msg}")
+
+    def on_table_row_clicked(self, row: int, column: int):
+        """
+        仅当点击 code / name 列时，发送股票代码
+        """
+        df = self.get_current_df()
+        if df is None or df.empty:
+            return
+
+        # 当前点击的列名
+        try:
+            clicked_col = df.columns[column].lower()
+        except Exception:
+            return
+
+        # 只允许这些列触发
+        trigger_cols = {"code", "stock_code", "ts_code", "name"}
+        if clicked_col not in trigger_cols:
+            return
+
+        # 找到 code 列（发送始终以 code 为准）
+        code_col = None
+        for c in df.columns:
+            if c.lower() in ("code", "stock_code", "ts_code"):
+                code_col = c
+                break
+
+        if not code_col:
+            return
+
+        stock_code = str(df.iloc[row][code_col]).strip()
+        if not stock_code:
+            return
+
+        self.sender.send(stock_code)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
