@@ -38,6 +38,7 @@ class TradingAnalyzer:
             try:
                 d = json.loads(x) if x else {}
                 return pd.Series({
+                    # 原有字段
                     'win': d.get('win', 0),
                     'red': d.get('red', 0),
                     'gren': d.get('gren', 0),
@@ -46,12 +47,28 @@ class TradingAnalyzer:
                     'nclose': d.get('nclose', 0),
                     'price_at_sig': d.get('price', 0),
                     'structure': d.get('structure', 'UNKNOWN'),
-                    'trend_strength': d.get('trend_strength', 0)
+                    'trend_strength': d.get('trend_strength', 0),
+                    # 新增行情指标字段
+                    'ma5d': round(d.get('ma5d', 0), 2),
+                    'ma10d': round(d.get('ma10d', 0), 2),
+                    'ratio': round(d.get('ratio', 0), 2),
+                    'volume': round(d.get('volume', 0), 2),
+                    'percent': round(d.get('percent', 0), 2),
+                    'high': round(d.get('high', 0), 2),
+                    'low': round(d.get('low', 0), 2),
+                    'open': round(d.get('open', 0), 2),
+                    # 新增日内追踪字段
+                    'highest_today': round(d.get('highest_today', 0), 2),
+                    'pump_height': round(d.get('pump_height', 0) * 100, 2),  # 转为百分比
+                    'pullback_depth': round(d.get('pullback_depth', 0) * 100, 2),  # 转为百分比
                 })
             except:
                 return pd.Series({
                     'win': 0, 'red': 0, 'gren': 0, 'sum_perc': 0, 'buy_score': 0.0,
-                    'nclose': 0, 'price_at_sig': 0, 'structure': 'UNKNOWN', 'trend_strength': 0
+                    'nclose': 0, 'price_at_sig': 0, 'structure': 'UNKNOWN', 'trend_strength': 0,
+                    'ma5d': 0, 'ma10d': 0, 'ratio': 0, 'volume': 0, 'percent': 0,
+                    'high': 0, 'low': 0, 'open': 0,
+                    'highest_today': 0, 'pump_height': 0, 'pullback_depth': 0
                 })
 
         expanded = df['indicators'].apply(expand_indicators)

@@ -56,18 +56,26 @@ class TradingLogger:
         conn.commit()
         conn.close()
 
-    def log_signal(self, code: str, name: str, price: float, decision_dict: dict[str, Any]) -> None:
+    def log_signal(self, code: str, name: str, price: float, decision_dict: dict[str, Any], row_data: Optional[dict[str, Any]] = None) -> None:
         """
         记录每日决策信号
         decision_dict 格式参考 IntradayDecisionEngine.evaluate 的输出
+        row_data: 可选的行情数据字典，包含 ma5d, ma10d, ratio, volume 等指标
         """
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
             date_str = datetime.now().strftime('%Y-%m-%d')
             
-            # 序列化指标数据以供后续 AI 分析优化
-            indicators_json = json.dumps(decision_dict.get('debug', {}), ensure_ascii=False)
+            # 合并 debug 信息和行情数据以供后续 AI 分析优化
+            indicators = decision_dict.get('debug', {}).copy()
+            if row_data:
+                # 将行情数据合并进来，便于分析时直接使用
+                for key, value in row_data.items():
+                    if key not in indicators:  # 避免覆盖 debug 中已有的字段
+                        indicators[key] = value
+            
+            indicators_json = json.dumps(indicators, ensure_ascii=False)
             
             cur.execute("""
                 INSERT OR REPLACE INTO signal_history (date, code, name, price, action, position, reason, indicators)
