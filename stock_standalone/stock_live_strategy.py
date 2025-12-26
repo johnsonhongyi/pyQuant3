@@ -457,6 +457,9 @@ class StockLiveStrategy:
     def _check_strategies(self, df):
         try:
             now = time.time()
+            # 从数据库同步实时持仓信息
+            open_trades = {t['code']: t for t in self.trading_logger.get_trades() if t['status'] == 'OPEN'}
+            
             valid_codes = [c for c in self._monitored_stocks.keys() if c in df.index]
 
             for code in valid_codes:
@@ -485,8 +488,16 @@ class StockLiveStrategy:
                     logger.warning(f"{code} 行情数据异常: {e}")
                     continue
 
-                # ---------- 历史 snapshot ----------
+                # ---------- 历史 snapshot 与 持仓同步 ----------
                 snap = data.get('snapshot', {})
+                if code in open_trades:
+                    trade = open_trades[code]
+                    snap['cost_price'] = trade.get('buy_price', 0)
+                    snap['buy_date'] = trade.get('buy_date', '')
+                    # 追踪买入后最高价 (用于移动止盈)
+                    if current_price > snap.get('highest_since_buy', 0):
+                        snap['highest_since_buy'] = current_price
+                
                 last_close = snap.get('last_close', 0)
                 last_percent = snap.get('percent', None)
                 last_nclose = snap.get('nclose', 0)
@@ -497,11 +508,18 @@ class StockLiveStrategy:
                 data.setdefault('below_last_close_count', 0)
                 data.setdefault('below_last_close_start', 0)
 
+                # ---------- T+1 状态感知 ----------
+                is_t1_restricted = False
+                if snap.get('buy_date'):
+                    today_str = datetime.now().strftime('%Y-%m-%d')
+                    if snap['buy_date'].startswith(today_str):
+                        is_t1_restricted = True
+
                 messages = []
 
                 # ---------- 今日均价风控 ----------
                 max_normal_pullback = (last_percent / 5 / 100 if last_percent else 0.01)
-                if current_price > 0 and current_nclose > 0:
+                if not is_t1_restricted and current_price > 0 and current_nclose > 0:
                     deviation = (current_nclose - current_price) / current_nclose
                     if deviation > max_normal_pullback + 0.0005:
                         if data['below_nclose_start'] == 0:
@@ -515,7 +533,7 @@ class StockLiveStrategy:
                         messages.append(("RISK", f"卖出 {data['name']} 价格连续低于今日均价 {current_nclose} ({current_price})"))
 
                 # ---------- 昨日收盘风控 ----------
-                if last_close > 0:
+                if not is_t1_restricted and last_close > 0:
                     deviation_last = (last_close - current_price) / last_close
                     if deviation_last > max_normal_pullback + 0.0005:
                         if data['below_last_close_start'] == 0:
@@ -562,7 +580,8 @@ class StockLiveStrategy:
                             unique_msgs[msg] = mtype
                         else:
                             last_duplicate[msg] = mtype  # 保留重复在最后
-                    combined_msgs = "\n".join(list(unique_msgs.keys()) + list(last_duplicate.keys()))
+                    t1_prefix = "[T+1限制] " if is_t1_restricted else ""
+                    combined_msgs = t1_prefix + "\n".join(list(unique_msgs.keys()) + list(last_duplicate.keys()))
 
                     logger.debug(f"{code} messages合并: {combined_msgs}")
                     self._trigger_alert(code, data['name'], combined_msgs, action=action, price=current_price)
