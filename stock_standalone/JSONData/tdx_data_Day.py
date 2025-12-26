@@ -4543,6 +4543,7 @@ def compute_perd_df(dd, lastdays=3, resample='d'):
         )
 
     red_cout = df[red_mask]
+    
     df2 = df[df.index >= (df[df['high'] > df['upper']].index[0] if len(df[df['high'] > df['upper']]) > 0 else df['high'].idxmax())]
 
     green_mask = (
@@ -4604,336 +4605,336 @@ def compute_perd_df(dd, lastdays=3, resample='d'):
 
     return dd
 
-def compute_perd_df_slow(dd,lastdays=3,resample ='d'):
-    if resample == 'd':
-        last_TopR_days = cct.compute_lastdays
-    else:
-        # last_TopR_days = 5
-        last_TopR_days = cct.compute_lastdays
+# def compute_perd_df_slow(dd,lastdays=3,resample ='d'):
+#     if resample == 'd':
+#         last_TopR_days = cct.compute_lastdays
+#     else:
+#         # last_TopR_days = 5
+#         last_TopR_days = cct.compute_lastdays
 
-    np.seterr(divide='ignore',invalid='ignore')  #RuntimeWarning: invalid value encountered in greater
+#     np.seterr(divide='ignore',invalid='ignore')  #RuntimeWarning: invalid value encountered in greater
     
-    # Reverted slicing optimization to ensure full history is returned as expected by caller
-    # Using vectorized track_bullish_signals_startpos is fast enough (~0.01s vs 0.7s) even on full data
-    dd = track_bullish_signals_startpos(dd)
+#     # Reverted slicing optimization to ensure full history is returned as expected by caller
+#     # Using vectorized track_bullish_signals_startpos is fast enough (~0.01s vs 0.7s) even on full data
+#     dd = track_bullish_signals_startpos(dd)
 
-    df = dd.copy()
-    # df['max5'] = df['high'].rolling(5).max()
-    # df['high4'] = df['high'].rolling(4).max()
-    # df['low4'] = df['low'].rolling(4).min()
-    # df['hmax'] = df['high'].rolling(10).max()
-    # df['lastdu4'] = (df['high'].rolling(4).max()-df['low'].rolling(4).min())/df['low'].rolling(4).min()
-    df['max5'] = df['close'].shift(1).rolling(window=5).max()
-    df['max10'] = df['close'].shift(1).rolling(window=10).max()
-    # df['hmax'] = df.high[-6:-1].max()
-    df['hmax'] = df['close'].shift(1).rolling(window=30).max()
-    # df['hmax60'] = df.high[:-1].max()
-    df['high4'] =  df['close'].shift(1).rolling(window=4).max()
-    df['low4'] = df['low'].shift(1).rolling(window=4).min()
-    # df['lastdu4'] = (df['high4'][0] -df['low4'][0]) /df['low4'][0]
-    df['lastdu4'] = (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
+#     df = dd.copy()
+#     # df['max5'] = df['high'].rolling(5).max()
+#     # df['high4'] = df['high'].rolling(4).max()
+#     # df['low4'] = df['low'].rolling(4).min()
+#     # df['hmax'] = df['high'].rolling(10).max()
+#     # df['lastdu4'] = (df['high'].rolling(4).max()-df['low'].rolling(4).min())/df['low'].rolling(4).min()
+#     df['max5'] = df['close'].shift(1).rolling(window=5).max()
+#     df['max10'] = df['close'].shift(1).rolling(window=10).max()
+#     # df['hmax'] = df.high[-6:-1].max()
+#     df['hmax'] = df['close'].shift(1).rolling(window=30).max()
+#     # df['hmax60'] = df.high[:-1].max()
+#     df['high4'] =  df['close'].shift(1).rolling(window=4).max()
+#     df['low4'] = df['low'].shift(1).rolling(window=4).min()
+#     # df['lastdu4'] = (df['high4'][0] -df['low4'][0]) /df['low4'][0]
+#     df['lastdu4'] = (df['high4'][0] - (df['low4'][0]+0.1)) /(df['low4'][0]+0.1) * 100
 
-    df['lastupper'] = len(df[(df.close > df.upper) & (df.upper > 0)])
+#     df['lastupper'] = len(df[(df.close > df.upper) & (df.upper > 0)])
     
-    df = df[-(last_TopR_days+1):]
-    # df['perlastp'] = list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'],df['open'].shift(1), 
-    #                         df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df.index))
+#     df = df[-(last_TopR_days+1):]
+#     # df['perlastp'] = list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'],df['open'].shift(1), 
+#     #                         df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df.index))
 
-    # df['perlastp'] = list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'],df['open'].shift(1), 
-    #                         df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df['high4'],df['max5'],df['hmax'],df['lastdu4'],df['code'],df.index))
+#     # df['perlastp'] = list(map(cct.func_compute_percd2021, df['open'], df['close'], df['high'], df['low'],df['open'].shift(1), 
+#     #                         df['close'].shift(1), df['high'].shift(1), df['low'].shift(1),df['ma5d'],df['ma10d'],df['vol'],df['vol'].shift(1),df['upper'],df['high4'],df['max5'],df['hmax'],df['lastdu4'],df['code'],df.index))
     
-    # df['high4'],df['max5'],df['hmax'],df['lastdu4']
-    # df.high[-2:-1].max(),df.high[-3:-1].max(),df.high[-5:-1].max(),df.high[-2:-1].max()/df.low[-2:-1].min()
-    #df['high'].rolling(2).max(),df['high'].rolling(3).max(),df['high'].rolling(5).max(),df['high'].rolling(2).max()/df['low'].rolling(2).min()
+#     # df['high4'],df['max5'],df['hmax'],df['lastdu4']
+#     # df.high[-2:-1].max(),df.high[-3:-1].max(),df.high[-5:-1].max(),df.high[-2:-1].max()/df.low[-2:-1].min()
+#     #df['high'].rolling(2).max(),df['high'].rolling(3).max(),df['high'].rolling(5).max(),df['high'].rolling(2).max()/df['low'].rolling(2).min()
 
-    df['perlastp'] = cct.func_compute_percd2021_vectorized(df)
-    df['perlastp'] = df['perlastp'].apply(lambda x: round(x, 1))
+#     df['perlastp'] = cct.func_compute_percd2021_vectorized(df)
+#     df['perlastp'] = df['perlastp'].apply(lambda x: round(x, 1))
 
-    df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1))
-    # df['perd'] = ((df['low'] - df['low'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1))
-    # df = df.dropna(subset=['perd'])
-    # idx_close = df.query('perd == perd.max()')[:1].close
-    idx_close_temp = df.query('high > upper')
+#     df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1))
+#     # df['perd'] = ((df['low'] - df['low'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1))
+#     # df = df.dropna(subset=['perd'])
+#     # idx_close = df.query('perd == perd.max()')[:1].close
+#     idx_close_temp = df.query('high > upper')
 
-    # idx_close = idx_close_temp.close[0] if len(idx_close_temp) > 0 else df[df.perd == df.perd.max()].close[0]
-    idx_close = idx_close_temp.close.iloc[0] if len(idx_close_temp) > 0 else df[df.perd == df.perd.max()].close.iloc[0]
-    idx_date_temp = df.query('high > upper')
-    idx_date  = idx_date_temp.index[0] if len(idx_date_temp) > 0 else df[df.high == df.high.max()].index[0]
-    # idx_top = df[df.high]
-    # red_cout = df.query('(high > high.shift(1) and low > low.shift(1)) or (close > upper and close > low*1.05) or (low >= open*0.992 and close >= open)')
+#     # idx_close = idx_close_temp.close[0] if len(idx_close_temp) > 0 else df[df.perd == df.perd.max()].close[0]
+#     idx_close = idx_close_temp.close.iloc[0] if len(idx_close_temp) > 0 else df[df.perd == df.perd.max()].close.iloc[0]
+#     idx_date_temp = df.query('high > upper')
+#     idx_date  = idx_date_temp.index[0] if len(idx_date_temp) > 0 else df[df.high == df.high.max()].index[0]
+#     # idx_top = df[df.high]
+#     # red_cout = df.query('(high > high.shift(1) and low > low.shift(1)) or (close > upper and close > low*1.05) or (low >= open*0.992 and close >= open)')
 
-    # red_cout = eval(f"df.query('close >={idx_close}  and ((high > high.shift(1) and low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > low*1.05) or (low >= open*0.992 and close >= open ))')")
-    # print(f'count:{len(df)}')
-    # print(idx_close)
+#     # red_cout = eval(f"df.query('close >={idx_close}  and ((high > high.shift(1) and low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > low*1.05) or (low >= open*0.992 and close >= open ))')")
+#     # print(f'count:{len(df)}')
+#     # print(idx_close)
 
-    if resample == 'd':
-        # red_cout = eval(f"df.query('close >={idx_close}  and high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
-        red_cout = eval(f"df.query('close > ma5d or high > high.shift(1) or (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
-    else:
-        red_cout = eval(f"df.query('close > ma5d or high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.03) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.03 ))')")
-    log.debug('red_cout:%s idx_close:%s'%(red_cout[:1],idx_close))
-    # red_cout = eval(f"df.query('close >={idx_close}  and high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
-    df2 = df[df.index >= idx_date]
+#     if resample == 'd':
+#         # red_cout = eval(f"df.query('close >={idx_close}  and high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
+#         red_cout = eval(f"df.query('close > ma5d or high > high.shift(1) or (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
+#     else:
+#         red_cout = eval(f"df.query('close > ma5d or high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.03) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.03 ))')")
+#     log.debug('red_cout:%s idx_close:%s'%(red_cout[:1],idx_close))
+#     # red_cout = eval(f"df.query('close >={idx_close}  and high > high.shift(1) and (( low > low.shift(1) and close > close.shift(1)*1.01) or (close > upper and close > open*1.01) or (low >= open*0.992 and close >= close.shift(1)*1.005 ))')")
+#     df2 = df[df.index >= idx_date]
 
-    green_cout = df2[-ct.green_cout:].query('(low < low.shift(1) and high < high.shift(1)) or (close < open)')
+#     green_cout = df2[-ct.green_cout:].query('(low < low.shift(1) and high < high.shift(1)) or (close < open)')
     
-    # df = df.dropna(subset=['perd'])
+#     # df = df.dropna(subset=['perd'])
 
-    # df['red'] = ((df['close'] - df['open']) / df['close'] * 100).map(lambda x: round(x, 1))
-    df['lastdu'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
-    # df['perddu'] = ((df['high'] - df['low']) / df['low'] * 100).map(lambda x: round(x, 1))
-    # dd['upperT'] = dd.close[ (dd.upper > 0) & (dd.high > dd.upper)].count()
+#     # df['red'] = ((df['close'] - df['open']) / df['close'] * 100).map(lambda x: round(x, 1))
+#     df['lastdu'] = ((df['high'].rolling(4).max() - df['low'].rolling(4).min()) / df['close'].rolling(4).mean() * 100).round(1)
+#     # df['perddu'] = ((df['high'] - df['low']) / df['low'] * 100).map(lambda x: round(x, 1))
+#     # dd['upperT'] = dd.close[ (dd.upper > 0) & (dd.high > dd.upper)].count()
 
-    # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.high > df.upper)].count()
-    dfupper=df[-ct.bollupperT:]
+#     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.high > df.upper)].count()
+#     dfupper=df[-ct.bollupperT:]
 
-    upperT = dfupper.high[-ct.bollupperT:][ (dfupper.high > 0) & (dfupper.high > dfupper.upper)]
-    # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.close > df.upper)].apply(lambda x: round(x, 0)).median()
-    upperLIS, posLIS = LIS_TDX(upperT) if len(upperT) > 0 else ([],[])
-    dd['upperT'] = len(posLIS) 
-    df = df[~df.index.duplicated()]
+#     upperT = dfupper.high[-ct.bollupperT:][ (dfupper.high > 0) & (dfupper.high > dfupper.upper)]
+#     # dd['upperT'] = df.close[-10:][ (df.upper > 0) & (df.close > df.upper)].apply(lambda x: round(x, 0)).median()
+#     upperLIS, posLIS = LIS_TDX(upperT) if len(upperT) > 0 else ([],[])
+#     dd['upperT'] = len(posLIS) 
+#     df = df[~df.index.duplicated()]
 
-    # upperL = dd.close[ (dd.upper > 0) & (dd.close >= dd.upper)]
+#     # upperL = dd.close[ (dd.upper > 0) & (dd.close >= dd.upper)]
 
-    # upperL = df.close[ (df.close > df.open) & (df.close > df.ene)]
-    # upperL = df.close[ (df.high > df.upper) & (df.close > df.ma5d*0.99) ]
+#     # upperL = df.close[ (df.close > df.open) & (df.close > df.ene)]
+#     # upperL = df.close[ (df.high > df.upper) & (df.close > df.ma5d*0.99) ]
 
-    # upperL = df.close[ ((df.high > df.upper) | (df.upper > df.upper.shift(1)) ) & (df.close >= df.ma5d*0.99) ]
+#     # upperL = df.close[ ((df.high > df.upper) | (df.upper > df.upper.shift(1)) ) & (df.close >= df.ma5d*0.99) ]
 
-    upperL = dfupper.close[ (dfupper.low > dfupper.ma5d) & (dfupper.ma5d >0) ]
-
-
-    # upperL = df.close[ (df.high > df.upper) & (df.close > df.ma5d) & (df.close > df.close.shift(1)) ]
-
-    # top_10 = df[df.perd >9.9]
-    # if len(top_10) >0:
-    #     if len(top_10) == len(df[df.index >= top_10.index[0]]):
-    #         top_ten = len(top_10)
-    #     else:
-    #         top_ten = 0
-    # else:
-    #     top_ten = 0
-
-    dd['upperL'] = len(upperL) 
+#     upperL = dfupper.close[ (dfupper.low > dfupper.ma5d) & (dfupper.ma5d >0) ]
 
 
-    # dd['df2'] = round(df.truer[2:].mean(),1)
+#     # upperL = df.close[ (df.high > df.upper) & (df.close > df.ma5d) & (df.close > df.close.shift(1)) ]
 
-    # if len(upperT) > 1:
-    #     dd['df2'] = upperT.apply(lambda x: round(x, 0)).median()
-    # elif len(upperL) > 0:
-    #     dd['df2'] = upperL.apply(lambda x: round(x, 0)).median()
-    # else:
-    #     dd['df2'] = dd.upper[-5:].apply(lambda x: round(x, 0)).median()
-    # df['percent'] =((df.close - df.open)/df.open*100).apply(lambda x:int(x) if x < 10 else 10)  
-    # df['percent'] =((df.close - df.close.shift(1))/df.close.shift(1)*100).apply(lambda x:int(x) if x < 30 else 0)
-    df['percent'] =((df.close - df.close.shift(1))/df.close.shift(1)*100).apply(lambda x:int(x) if x < 200 else 0)
-    # dd['df2'] = df[df.lastdu == df.lastdu.max()].close.values[0]
-    dd['percmax'] = df.percent[:-1].max()
-    # dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0],1)
-    # dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0] if len(df.query('high > upper')) == 0 else df.query('high > upper').close[0],1)
-    dd['df2'] = round(
-        df[df.percent == df.percent.max()].close.iloc[0] 
-        if len(df.query('high > upper')) == 0 
-        else df.query('high > upper').close.iloc[0],
-        1
-    )
+#     # top_10 = df[df.perd >9.9]
+#     # if len(top_10) >0:
+#     #     if len(top_10) == len(df[df.index >= top_10.index[0]]):
+#     #         top_ten = len(top_10)
+#     #     else:
+#     #         top_ten = 0
+#     # else:
+#     #     top_ten = 0
 
-    df = df.dropna(subset=['perd'])
-
-    # if len(upperT) > 0:
-    #     dd['df2'] = len(dd) - dd.index.tolist().index(upperT.index[-1])
-    # elif len(upperL) > 0:
-    #     dd['df2'] = len(dd) - dd.index.tolist().index(upperL.index[-1])
-    # else:
-    #     dd['df2'] = dd.upper[-5:].apply(lambda x: round(x, 0)).median()
-
-    # LIS_TDX(df.truer)
+#     dd['upperL'] = len(upperL) 
 
 
+#     # dd['df2'] = round(df.truer[2:].mean(),1)
 
-    # if len(df.truer) > 0:
-    #     cum_maxf, posf = LIS_TDX(df.truer)
-    #     if len(df.truer) == len(df[df.index >= upperL.index[0]]):
-    #         if len(cum_maxf) == len(upperL):
-    #             dd['upperT'] = len(upperL) + top_ten
-    #         else:
-    #             dd['upperT'] = top_ten
-    #     else:
-    #         dd['upperT'] = len(cum_maxf) 
-    # else:
-    #     dd['upperT'] = -1
+#     # if len(upperT) > 1:
+#     #     dd['df2'] = upperT.apply(lambda x: round(x, 0)).median()
+#     # elif len(upperL) > 0:
+#     #     dd['df2'] = upperL.apply(lambda x: round(x, 0)).median()
+#     # else:
+#     #     dd['df2'] = dd.upper[-5:].apply(lambda x: round(x, 0)).median()
+#     # df['percent'] =((df.close - df.open)/df.open*100).apply(lambda x:int(x) if x < 10 else 10)  
+#     # df['percent'] =((df.close - df.close.shift(1))/df.close.shift(1)*100).apply(lambda x:int(x) if x < 30 else 0)
+#     df['percent'] =((df.close - df.close.shift(1))/df.close.shift(1)*100).apply(lambda x:int(x) if x < 200 else 0)
+#     # dd['df2'] = df[df.lastdu == df.lastdu.max()].close.values[0]
+#     dd['percmax'] = df.percent[:-1].max()
+#     # dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0],1)
+#     # dd['df2'] = round(df[df.percent == df.percent.max()].close.values[0] if len(df.query('high > upper')) == 0 else df.query('high > upper').close[0],1)
+#     dd['df2'] = round(
+#         df[df.percent == df.percent.max()].close.iloc[0] 
+#         if len(df.query('high > upper')) == 0 
+#         else df.query('high > upper').close.iloc[0],
+#         1
+#     )
 
-    # dd['upperT'] = round(df.truer.max(),1)
+#     df = df.dropna(subset=['perd'])
 
+#     # if len(upperT) > 0:
+#     #     dd['df2'] = len(dd) - dd.index.tolist().index(upperT.index[-1])
+#     # elif len(upperL) > 0:
+#     #     dd['df2'] = len(dd) - dd.index.tolist().index(upperL.index[-1])
+#     # else:
+#     #     dd['df2'] = dd.upper[-5:].apply(lambda x: round(x, 0)).median()
 
-    # truer_idx = df[df.truer == df.truer.max()].index[0]
-    # dd['upperT'] = len(df[df.index <= truer_idx])
-
-
-    # dd['upperL'] = df.close[df.low > df.upper].count()
-
-    dd['red'] = len(red_cout)
-    dd['gren'] = len(green_cout)
-
-    #old ra max
-    # ra = round((df.close[-1]-dd.close.max())/df.close[-1]*100,1)
-    # if ra == 0.0:
-    #     ra = round((df.close[-1]-df.close.min())/df.close[-1]*100,1)
-    # dd['ra'] = ra
-
-    # temp_du = df['perd'] - df['lastdu']
-    # print df[df.close > df.ma5d]
-
-
-    # condition_up = df[df['low'] > df['high'].shift()]
-    # top0 = df[(df['low'] == df['high']) & (df['low'] <> 0)]
-
-    # # dd['topR']=temp_du.T[temp_du.T >= 0].count()    #跳空缺口
-    # # dd['top0']=temp_du.T[temp_du.T == 0].count()    #一字涨停
-    # dd['topR'] = condition_up.count()
-    # dd['top0'] = top0.count()
-
-    # https://blog.csdn.net/xingbuxing_py/article/details/89323460
-    # print(len(dd),dd.code[0])  #fix np.seterr(divide='ignore',invalid='ignore') 
-
-    top15 = dd[-ct.ddtop0:].query('(low >= open*0.992 or open > open.shift(1)) and close > open and ((high > upper or high > high.shift(1)) and close > close.shift(1)*1.04)')
-    top0 = dd[-ct.ddtop0:].query('low == high and low != 0')
-    # top0 = dd[(dd['low'] == dd['high']) & (dd['low'] != 0)]  #一字涨停
+#     # LIS_TDX(df.truer)
 
 
-    ''' 旧的跳空未计算回补
-    condition_up = dd[dd['low'] > dd['high'].shift()]        #向上跳空缺口
-    condition_down = dd[dd['high'] < dd['low'].shift()]      #向下跳空缺口
 
-    # hop_df = compute_condition_up(dd)
+#     # if len(df.truer) > 0:
+#     #     cum_maxf, posf = LIS_TDX(df.truer)
+#     #     if len(df.truer) == len(df[df.index >= upperL.index[0]]):
+#     #         if len(cum_maxf) == len(upperL):
+#     #             dd['upperT'] = len(upperL) + top_ten
+#     #         else:
+#     #             dd['upperT'] = top_ten
+#     #     else:
+#     #         dd['upperT'] = len(cum_maxf) 
+#     # else:
+#     #     dd['upperT'] = -1
 
-    dd['topR'] = len(condition_up)
-    dd['topD'] = len(condition_down)
-    dd['top0'] = len(top0)
+#     # dd['upperT'] = round(df.truer.max(),1)
 
-    if len(condition_up) > 0 and len(condition_down) > 0:
-        if condition_up.index[-1] > condition_down.index[-1]:
-            close_idx_up = condition_up.low[0]
-        else:
-            close_idx_up = condition_down.high[0]
-            dd['topR'] = -len(condition_down)
-    else:
-        close_idx_up = condition_up.low[0] if len(condition_up) > 0 else dd.close.max()
 
-    '''
+#     # truer_idx = df[df.truer == df.truer.max()].index[0]
+#     # dd['upperT'] = len(df[df.index <= truer_idx])
 
-    #计算回补
-    # last_TopR_days -> 15
 
-    hop_df = compute_condition_up(dd[-15:])
-    # condition_up = hop_df[hop_df.hop == 'up']
-    condition_up = hop_df[(hop_df.fill_day.isnull() ) & (hop_df.hop == 'up')]   if len(hop_df) > 0  else pd.DataFrame()
-    condition_down = hop_df[ (hop_df.fill_day.isnull() ) & (hop_df.hop == 'down')] if len(hop_df) > 0  else pd.DataFrame()
-    c_up=len(condition_up)
-    c_down=len(condition_down)
+#     # dd['upperL'] = df.close[df.low > df.upper].count()
 
-    # condition_up2 = compute_condition_up_add_up(dd[-6:],hop_df) if c_up > 0 else pd.DataFrame()
+#     dd['red'] = len(red_cout)
+#     dd['gren'] = len(green_cout)
+
+#     #old ra max
+#     # ra = round((df.close[-1]-dd.close.max())/df.close[-1]*100,1)
+#     # if ra == 0.0:
+#     #     ra = round((df.close[-1]-df.close.min())/df.close[-1]*100,1)
+#     # dd['ra'] = ra
+
+#     # temp_du = df['perd'] - df['lastdu']
+#     # print df[df.close > df.ma5d]
+
+
+#     # condition_up = df[df['low'] > df['high'].shift()]
+#     # top0 = df[(df['low'] == df['high']) & (df['low'] <> 0)]
+
+#     # # dd['topR']=temp_du.T[temp_du.T >= 0].count()    #跳空缺口
+#     # # dd['top0']=temp_du.T[temp_du.T == 0].count()    #一字涨停
+#     # dd['topR'] = condition_up.count()
+#     # dd['top0'] = top0.count()
+
+#     # https://blog.csdn.net/xingbuxing_py/article/details/89323460
+#     # print(len(dd),dd.code[0])  #fix np.seterr(divide='ignore',invalid='ignore') 
+
+#     top15 = dd[-ct.ddtop0:].query('(low >= open*0.992 or open > open.shift(1)) and close > open and ((high > upper or high > high.shift(1)) and close > close.shift(1)*1.04)')
+#     top0 = dd[-ct.ddtop0:].query('low == high and low != 0')
+#     # top0 = dd[(dd['low'] == dd['high']) & (dd['low'] != 0)]  #一字涨停
+
+
+#     ''' 旧的跳空未计算回补
+#     condition_up = dd[dd['low'] > dd['high'].shift()]        #向上跳空缺口
+#     condition_down = dd[dd['high'] < dd['low'].shift()]      #向下跳空缺口
+
+#     # hop_df = compute_condition_up(dd)
+
+#     dd['topR'] = len(condition_up)
+#     dd['topD'] = len(condition_down)
+#     dd['top0'] = len(top0)
+
+#     if len(condition_up) > 0 and len(condition_down) > 0:
+#         if condition_up.index[-1] > condition_down.index[-1]:
+#             close_idx_up = condition_up.low[0]
+#         else:
+#             close_idx_up = condition_down.high[0]
+#             dd['topR'] = -len(condition_down)
+#     else:
+#         close_idx_up = condition_up.low[0] if len(condition_up) > 0 else dd.close.max()
+
+#     '''
+
+#     #计算回补
+#     # last_TopR_days -> 15
+
+#     hop_df = compute_condition_up(dd[-15:])
+#     # condition_up = hop_df[hop_df.hop == 'up']
+#     condition_up = hop_df[(hop_df.fill_day.isnull() ) & (hop_df.hop == 'up')]   if len(hop_df) > 0  else pd.DataFrame()
+#     condition_down = hop_df[ (hop_df.fill_day.isnull() ) & (hop_df.hop == 'down')] if len(hop_df) > 0  else pd.DataFrame()
+#     c_up=len(condition_up)
+#     c_down=len(condition_down)
+
+#     # condition_up2 = compute_condition_up_add_up(dd[-6:],hop_df) if c_up > 0 else pd.DataFrame()
     
 
-    # condition_down = hop_df[hop_df.hop == 'down']
-    # fill_day_up = hop_df[( hop_df.fill_day.notnull() ) & (hop_df.hop == 'up')] if len(hop_df) > 0  else pd.DataFrame()
-    # fill_day_down = hop_df[ (hop_df.fill_day.notnull() ) & (hop_df.hop == 'down') ] if len(hop_df) > 0  else pd.DataFrame()
+#     # condition_down = hop_df[hop_df.hop == 'down']
+#     # fill_day_up = hop_df[( hop_df.fill_day.notnull() ) & (hop_df.hop == 'up')] if len(hop_df) > 0  else pd.DataFrame()
+#     # fill_day_down = hop_df[ (hop_df.fill_day.notnull() ) & (hop_df.hop == 'down') ] if len(hop_df) > 0  else pd.DataFrame()
 
-    dd['top0'] = len(top0)
-    dd['top15'] = len(top15)
+#     dd['top0'] = len(top0)
+#     dd['top15'] = len(top15)
 
-    # if len(fill_day_down) > 0 and len(fill_day_up) > 0:
+#     # if len(fill_day_down) > 0 and len(fill_day_up) > 0:
 
-    # if len(condition_up) >= len(condition_down) :
+#     # if len(condition_up) >= len(condition_down) :
 
-    if c_up > 0 :
-        # dd['topR'] = c_up + len(condition_up2) - dd.gren.values[-1]
-        # dd['topR'] = c_up + len(condition_up2)
-        dd['topR'] = c_up
-        dd['topD'] = c_down
-    else:
+#     if c_up > 0 :
+#         # dd['topR'] = c_up + len(condition_up2) - dd.gren.values[-1]
+#         # dd['topR'] = c_up + len(condition_up2)
+#         dd['topR'] = c_up
+#         dd['topD'] = c_down
+#     else:
 
-        dd['topR'] = -c_down if c_down > 0 else 0
-        dd['topD'] = c_down
+#         dd['topR'] = -c_down if c_down > 0 else 0
+#         dd['topD'] = c_down
 
-    # if len(condition_up) > 0 and len(condition_down) > 0:
-    #     if condition_up.jop_date.values[-1] > condition_down.jop_date.values[-1]:
-    #         close_idx_up = dd[dd.index == condition_up.jop_date.values[0]].low[0]
-    #     else:
-    #         close_idx_up = dd[dd.index == condition_down.jop_date.values[0]].high[0]
-    #         dd['topR'] = -len(condition_down)
-    # else:
-    #     if len(condition_up) > 0:
-    #         close_idx_up = dd[dd.index == condition_up.jop_date.values[0]].low[0] 
-    #         # close_idx_up = dd[dd.index == condition_up.jop_date.values[0]].low[0] if len(condition_up) > 0 else dd.close.max()
-    #     elif len(condition_down) > 0:
-    #         close_idx_up = dd[dd.index == condition_down.jop_date.values[0]].high[0] 
-    #     else:
-    #         close_idx_up = dd.close.min()
+#     # if len(condition_up) > 0 and len(condition_down) > 0:
+#     #     if condition_up.jop_date.values[-1] > condition_down.jop_date.values[-1]:
+#     #         close_idx_up = dd[dd.index == condition_up.jop_date.values[0]].low[0]
+#     #     else:
+#     #         close_idx_up = dd[dd.index == condition_down.jop_date.values[0]].high[0]
+#     #         dd['topR'] = -len(condition_down)
+#     # else:
+#     #     if len(condition_up) > 0:
+#     #         close_idx_up = dd[dd.index == condition_up.jop_date.values[0]].low[0] 
+#     #         # close_idx_up = dd[dd.index == condition_up.jop_date.values[0]].low[0] if len(condition_up) > 0 else dd.close.max()
+#     #     elif len(condition_down) > 0:
+#     #         close_idx_up = dd[dd.index == condition_down.jop_date.values[0]].high[0] 
+#     #     else:
+#     #         close_idx_up = dd.close.min()
 
 
-    # ra = round((df.close[-1]-dd.close.max())/df.close[-1]*100,1)
-    # ra = round((df.close[-1]-close_idx_up)/df.close[-1]*100,1)
+#     # ra = round((df.close[-1]-dd.close.max())/df.close[-1]*100,1)
+#     # ra = round((df.close[-1]-close_idx_up)/df.close[-1]*100,1)
 
-    # ra = round((df.close[-1]-close_idx_up)/close_idx_up*100,1)
-    #跳空缺口的价差diff
+#     # ra = round((df.close[-1]-close_idx_up)/close_idx_up*100,1)
+#     #跳空缺口的价差diff
 
-    # ra = round((df.close[-1]-df.close.min())/df.close.min()*100,1)
+#     # ra = round((df.close[-1]-df.close.min())/df.close.min()*100,1)
     
-    # ra = round((dd.close[-1]-dd.close.min())/dd.close.min()*100,1)
-    # LIS_TDX_Cum(df2.ma5d[:10])
+#     # ra = round((dd.close[-1]-dd.close.min())/dd.close.min()*100,1)
+#     # LIS_TDX_Cum(df2.ma5d[:10])
 
 
-    upper_dd = dd[(dd.upper > 0) & (dd.high > dd.upper)]
-    # upper_start = upper_dd.high[0] if len(upper_dd) > 0 else dd.high.max()
-    upper_start = upper_dd.high.iloc[0] if len(upper_dd) > 0 else dd.high.max()
-    if resample == 'd' :
-        ral = round((dd.close.iloc[-1]-upper_start)/upper_start*100,1)
-        # ral = round((dd.close[-1]-dd.high[:-1].max())/dd.high[:-1].max()*100,1)
-    else:
-        # ral = round((dd.close[-1]-dd.high.max())/dd.high.max()*100,1)
-        ral = round((dd.close.iloc[-1]-upper_start)/upper_start*100,1)
+#     upper_dd = dd[(dd.upper > 0) & (dd.high > dd.upper)]
+#     # upper_start = upper_dd.high[0] if len(upper_dd) > 0 else dd.high.max()
+#     upper_start = upper_dd.high.iloc[0] if len(upper_dd) > 0 else dd.high.max()
+#     if resample == 'd' :
+#         ral = round((dd.close.iloc[-1]-upper_start)/upper_start*100,1)
+#         # ral = round((dd.close[-1]-dd.high[:-1].max())/dd.high[:-1].max()*100,1)
+#     else:
+#         # ral = round((dd.close[-1]-dd.high.max())/dd.high.max()*100,1)
+#         ral = round((dd.close.iloc[-1]-upper_start)/upper_start*100,1)
 
 
-    df_ma20d=dd[-20:]
+#     df_ma20d=dd[-20:]
 
-    if  resample == 'd':
-        ma20d_upper = len(df_ma20d.query('low > ma20d'))
-    elif resample == '3d' or resample == 'w':
-        ma20d_upper = len(df_ma20d.query('low > ma10d'))
-    else:
-        ma20d_upper = len(df_ma20d.query('low > ma5d'))
+#     if  resample == 'd':
+#         ma20d_upper = len(df_ma20d.query('low > ma20d'))
+#     elif resample == '3d' or resample == 'w':
+#         ma20d_upper = len(df_ma20d.query('low > ma10d'))
+#     else:
+#         ma20d_upper = len(df_ma20d.query('low > ma5d'))
 
 
-    # if ra == 0.0:
-    #     ra = round((df.close[-1]-df.close.min())/dd.close.min()*100,1)
+#     # if ra == 0.0:
+#     #     ra = round((df.close[-1]-df.close.min())/dd.close.min()*100,1)
 
-    # dd['ra'] = ra
-    # dd['ral'] = ral
+#     # dd['ra'] = ra
+#     # dd['ral'] = ral
 
-    dd['ral'] = ma20d_upper
+#     dd['ral'] = ma20d_upper
     
-    # cum_maxf, posf = LIS_TDX(dd.high[-5:])
-    # dd['up5'] = len(posf)
+#     # cum_maxf, posf = LIS_TDX(dd.high[-5:])
+#     # dd['up5'] = len(posf)
 
-    if resample == 'd':
-        df['perd'] = df['perd'].apply(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
+#     if resample == 'd':
+#         df['perd'] = df['perd'].apply(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
 
-    dd['perd'] = df['perd'][~df.index.duplicated()]
-    dd.fillna(ct.FILLNA,inplace=True)    #ct.FILLNA -101
+#     dd['perd'] = df['perd'][~df.index.duplicated()]
+#     dd.fillna(ct.FILLNA,inplace=True)    #ct.FILLNA -101
 
-    # print dataframe_mode_round(df.high)
-    # print dataframe_mode_round(df.low)
+#     # print dataframe_mode_round(df.high)
+#     # print dataframe_mode_round(df.low)
 
-    # dd['lastdu'] = df[-4:]['lastdu'].max()
-    # dd['lastdu'] = df[-ct.tdx_high_da:]['lastdu'].mean()
-    # dd['lastdu'] = dd['lastdu'] .apply(lambda x:round(x,1))
-    dd['perlastp'] = df['perlastp']
+#     # dd['lastdu'] = df[-4:]['lastdu'].max()
+#     # dd['lastdu'] = df[-ct.tdx_high_da:]['lastdu'].mean()
+#     # dd['lastdu'] = dd['lastdu'] .apply(lambda x:round(x,1))
+#     dd['perlastp'] = df['perlastp']
 
-    dd = compute_power_tdx_df(df, dd)
+#     dd = compute_power_tdx_df(df, dd)
     
-    return dd
+#     return dd
 
 def resample_dataframe_recut(temp,resample='d',increasing=True,check=False):
 

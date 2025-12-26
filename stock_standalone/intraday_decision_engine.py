@@ -684,6 +684,39 @@ class IntradayDecisionEngine:
                 # 如果超跌后今日站上均线，是一个极佳的反弹切入点
                 buy_score += 0.3
                 buy_reasons.append(f"超跌反弹({oversold_reason})")
+
+            # 条件8: 大阳变盘点/惜售爆发检测 (Consolidation & Momentum Breakout)
+            win = int(snapshot.get("win", 0))
+            sum_perc = float(snapshot.get("sum_perc", 0))
+            red = int(snapshot.get("red", 0))
+            
+            # 情况 A: 强势惜售后的加速 (win >= 3，小幅连阳后爆发)
+            if win >= 3 and (sum_perc / win < 3.5):
+                # 盘中表现：突破分时均价且已经产生一定涨幅
+                if price > nclose and (price - last_close) / last_close > 0.01:
+                    buy_score += 0.25
+                    buy_reasons.append(f"惜售连阳({win}d)加速")
+
+            # 情况 B: 中线走红后的变盘突破 (red >= 5，站稳5日线后横盘爆发)
+            gren = int(snapshot.get("gren", 0))
+            if red >= 5 and abs(sum_perc) < 12:
+                # 变盘信号：价格拉升封锁波动，突破今日开盘价并站稳均线
+                if price > open_p * 1.005 and price > nclose:
+                    # 趋势纯度加成
+                    purity_bonus = 0.1 if (red - gren) >= 5 else 0.0
+                    
+                    # 分别处理：“高开高走”和“低开高走”
+                    if open_p >= last_close: # 高开/平开
+                        buy_score += (0.2 + purity_bonus)
+                        buy_reasons.append(f"中线红柱({red}d)突破")
+                    elif price > last_close * 1.005: # 低开反转大阳
+                        buy_score += (0.3 + purity_bonus)
+                        buy_reasons.append(f"低开爆发反转")
+            
+            # 情况 C: 极强趋势确认 (win >= 5 + 站稳均价)
+            if win >= 5 and price > nclose:
+                buy_score += 0.15
+                buy_reasons.append("极强波段确认")
             
             debug["实时买入分"] = buy_score
             debug["实时买入理由"] = buy_reasons
@@ -1181,6 +1214,44 @@ class IntradayDecisionEngine:
         elif max5 > 0 and current_high > max5:
             score += 0.1
             reasons.append("突破5日高")
+
+        # ---------- 7. 连阳加速与五日线强度 (New) ----------
+        win = int(source_data.get("win", 0))
+        sum_perc = float(source_data.get("sum_perc", 0))
+        red = int(source_data.get("red", 0))
+
+        if win >= 2:
+            # 强势惜售：高低点持续抬升
+            win_score = min(win * 0.1, 0.4)
+            score += win_score
+            reasons.append(f"加速连阳({win}d)")
+            
+            # 惜售待变盘判断：如果连阳天数多但涨幅不大 (sum_perc / win < 3%)
+            if win >= 3 and (sum_perc / win < 3.0):
+                score += 0.15
+                reasons.append("强势惜售")
+
+        if red >= 3:
+            # 长期站稳五日线，通常意味着强撑或主力控盘
+            gren = int(source_data.get("gren", 0))
+            net_strength = red - gren
+            
+            if red >= 5:
+                # 连续5日以上红（站稳5日线），如果是窄幅震荡，则变盘概率大
+                if abs(sum_perc) < 10: 
+                    score += 0.2
+                    reasons.append(f"中线走红({red}d)")
+                else:
+                    score += 0.1
+                    reasons.append(f"站稳5日线({red}d)")
+            
+            # 趋势纯度加成：红多绿少代表趋势极为平滑
+            if net_strength >= 6:
+                score += 0.15
+                reasons.append("极强趋势纯度")
+            elif net_strength <= 0 and red > 0:
+                score -= 0.1
+                reasons.append("趋势震荡不稳")
         
         # 限制得分范围
         score = max(-1.0, min(1.0, score))

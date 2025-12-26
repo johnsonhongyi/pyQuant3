@@ -498,6 +498,12 @@ class StockLiveStrategy:
                     if current_price > snap.get('highest_since_buy', 0):
                         snap['highest_since_buy'] = current_price
                 
+                # 注入加速连阳与五日线强度数据
+                snap['win'] = row.get('win', snap.get('win', 0)) #加速连阳
+                snap['sum_perc'] = row.get('sum_perc', snap.get('sum_perc', 0)) #加速连阳涨幅
+                snap['red'] = row.get('red', snap.get('red', 0)) #五日线上数据
+                snap['gren'] = row.get('gren', snap.get('gren', 0)) #弱势绿柱数据
+
                 last_close = snap.get('last_close', 0)
                 last_percent = snap.get('percent', None)
                 last_nclose = snap.get('nclose', 0)

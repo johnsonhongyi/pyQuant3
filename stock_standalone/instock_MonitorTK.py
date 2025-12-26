@@ -2110,6 +2110,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             snapshot['lastv3d'] = snapshot.get('lastv3d', 0)
             snapshot['lasth1d'] = snapshot.get('lasth1d', 0)
             snapshot['lastl1d'] = snapshot.get('lastl1d', 0)
+            snapshot['win'] = snapshot.get('win', 0)            # 加速连阳
+            snapshot['sum_perc'] = snapshot.get('sum_perc', 0)  # 加速连阳涨幅
+            snapshot['red'] = snapshot.get('red', 0)            # 五日线上数据
+            snapshot['gren'] = snapshot.get('gren', 0)          # 弱势绿柱数据
+            snapshot['red'] = snapshot.get('red', 0)  #5日线上日线
             
             # 创建决策引擎实例
             engine = IntradayDecisionEngine()
