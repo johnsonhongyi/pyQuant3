@@ -27,6 +27,12 @@ except ImportError:
     logger.warning("pyttsx3 not found, voice disabled.")
 
 try:
+    from stock_selector import StockSelector
+except ImportError:
+    StockSelector = None
+    logger.warning("StockSelector not found.")
+
+try:
     import pythoncom
 except ImportError:
     pythoncom = None
@@ -324,6 +330,46 @@ class StockLiveStrategy:
 
         except Exception as e:
             logger.error(f"Failed to load voice monitors: {e}")
+
+    def import_daily_candidates(self) -> str:
+        """
+        调用 StockSelector 筛选强势股，并合并到当前监控列表
+        """
+        if not StockSelector:
+            return "StockSelector 模块不可用"
+        
+        try:
+            selector = StockSelector()
+            candidates = selector.get_candidate_codes()
+            if not candidates:
+                return "筛选器未返回任何标的"
+            
+            added_count = 0
+            existing_codes = set(self._monitored_stocks.keys())
+            
+            for code in candidates:
+                if code not in existing_codes:
+                    self._monitored_stocks[code] = {
+                        "rules": [],
+                        "last_alert": 0,
+                        "created_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                        "tags": "auto_select",
+                        "snapshot": {},
+                        "name": "" # 名称后续补全
+                    }
+                    added_count += 1
+            
+            if added_count > 0:
+                self._save_monitors()
+                logger.info(f"已导入 {added_count} 只强势股")
+                return f"成功导入 {added_count} 只强势股"
+            else:
+                return "所有标的已在监控列表中"
+                
+        except Exception as e:
+            logger.error(f"导入筛选股失败: {e}")
+            return f"导入失败: {e}"
+
 
 
     def _save_monitors(self):

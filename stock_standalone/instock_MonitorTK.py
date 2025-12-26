@@ -4114,9 +4114,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         tree.insert("", "end", values=(code, name, display_type, rule['value'], add_time, tags, uid))
 
             load_data()
-            
+
+            # --- 动态添加 "策略选股" 按钮 (New) ---
+            def open_selector_window():
+                """打开策略选股与人工复核窗口"""
+                if not hasattr(self.live_strategy, 'import_daily_candidates'):
+                    messagebox.showwarning("错误", "当前策略不支持选股功能", parent=win)
+                    return
+
+                try:
+                    # 延迟导入以避免循环引用
+                    from stock_selection_window import StockSelectionWindow
+                    from stock_selector import StockSelector
+
+                    # 实例化选择器
+                    selector = StockSelector()
+                    # 打开窗口
+                    selection_win = StockSelectionWindow(win, self.live_strategy, selector)
+                    # 窗口关闭后刷新列表 (如果用户导入了新股)
+                    win.wait_window(selection_win) 
+                    load_data() # 刷新当前列表
+                    
+                except Exception as e:
+                    logger.error(f"打开选股窗口失败: {e}")
+                    messagebox.showerror("错误", f"打开选股窗口失败: {e}", parent=win)
+
+            tk.Button(top_frame, text="策略选股...", command=open_selector_window, bg="#fff9c4", font=("Arial", 9, "bold")).pack(side="right", padx=5)
+
             # --- 底部按钮 ---
             btn_frame = tk.Frame(win)
+
             btn_frame.pack(pady=10)
             
             def add_new():
