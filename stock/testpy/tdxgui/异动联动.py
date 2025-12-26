@@ -2990,6 +2990,8 @@ def get_bottom_taskbar_height():
     ctypes.windll.user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(rect), 0)
     screen_height = ctypes.windll.user32.GetSystemMetrics(1)  # SM_CYSCREEN
     taskbar_height = screen_height - rect.bottom
+    taskbar_height = taskbar_height*2 if taskbar_height < 50 else taskbar_height
+    logger.info(f"⚠ taskbar_height: {taskbar_height} screen_height:{screen_height} rect.bottom:{rect.bottom}")
     return max(taskbar_height, 0)
 
 def rearrange_monitors_per_screen(align="left", sort_by="create_time", layout="horizontal"):
