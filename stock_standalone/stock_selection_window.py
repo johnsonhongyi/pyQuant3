@@ -1,0 +1,289 @@
+import tkinter as tk
+from tkinter import ttk, messagebox
+import pandas as pd
+import os
+from datetime import datetime
+
+class StockSelectionWindow(tk.Toplevel):
+    """
+    策略选股确认视窗
+    允许用户在导入监控前人工筛选、标注
+    """
+    def __init__(self, master, live_strategy, stock_selector):
+        """
+        初始化
+        :param master: 主窗口 (通常是 StockMonitorApp)
+        :param live_strategy: 实时策略对象
+        :param stock_selector: 选股器对象
+        """
+        super().__init__(master)
+        self.title("策略选股 & 人工复核")
+        self.geometry("1100x600")
+        
+        self.live_strategy = live_strategy
+        self.selector = stock_selector
+        # 获取主窗口的 sender 用于联动
+        self.sender = getattr(master, 'sender', None)
+        if self.sender is None and hasattr(master, 'master'):
+            self.sender = getattr(master.master, 'sender', None)
+        self.df_candidates = pd.DataFrame()
+        
+        self._init_ui()
+        self.load_data()
+
+        # Center window
+        self._center_window()
+
+    def _center_window(self):
+        self.update_idletasks()
+        width = self.winfo_width()
+        height = self.winfo_height()
+        x = (self.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.winfo_screenheight() // 2) - (height // 2)
+        self.geometry('{}x{}+{}+{}'.format(width, height, x, y))
+
+    def _init_ui(self):
+        # --- Toolbar ---
+        toolbar = tk.Frame(self, bd=1, relief="raised")
+        toolbar.pack(fill="x", padx=5, pady=5)
+        
+        # Actions
+        tk.Button(toolbar, text="🔄 重新运行策略", command=self.load_data).pack(side="left", padx=5, pady=5)
+        
+        tk.Frame(toolbar, width=20).pack(side="left") # Spacer
+
+        # Feedback controls
+        tk.Label(toolbar, text="人工标注:", font=("Arial", 10, "bold")).pack(side="left", padx=5)
+        
+        self.reason_var = tk.StringVar()
+        self.reason_combo = ttk.Combobox(toolbar, textvariable=self.reason_var, width=15, state="readonly")
+        self.reason_combo['values'] = [
+            "符合策略", "形态完美", "量能配合", "板块热点", # Positive
+            "风险过高", "趋势破坏", "非热点", "量能不足", "位置过高", "其他" # Negative
+        ]
+        self.reason_combo.current(0)
+        self.reason_combo.pack(side="left", padx=2)
+        
+        
+        tk.Button(toolbar, text="✅ 标记[选中]", command=lambda: self.mark_status("选中"), bg="#c8e6c9").pack(side="left", padx=2)
+        tk.Button(toolbar, text="❌ 标记[丢弃]", command=lambda: self.mark_status("丢弃"), bg="#ffcdd2").pack(side="left", padx=2)
+        
+        tk.Frame(toolbar, width=30).pack(side="left") # Spacer
+        
+        # Concept Filter
+        tk.Label(toolbar, text="板块筛选:", font=("Arial", 10)).pack(side="left", padx=2)
+        self.concept_filter_var = tk.StringVar()
+        entry = tk.Entry(toolbar, textvariable=self.concept_filter_var, width=15)
+        entry.pack(side="left", padx=2)
+        entry.bind('<Return>', lambda e: self.load_data())
+        tk.Button(toolbar, text="🔍", command=self.load_data, width=3).pack(side="left", padx=1)
+
+        tk.Button(toolbar, text="🚀 确认导入选中股", command=self.import_selected, bg="#ffd54f", font=("Arial", 10, "bold")).pack(side="right", padx=10, pady=5)
+
+        # --- Main List ---
+        # Columns
+        columns = ("code", "name", "score", "price", "percent", "volume", "category", "auto_reason", "user_status", "user_reason")
+        
+        tree_frame = tk.Frame(self)
+        tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
+        
+        # Scrollbars
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        self.tree.configure(yscroll=vsb.set, xscroll=hsb.set)
+        
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        
+        # Headings
+        headers = {
+            "code": "代码", "name": "名称", "score": "机选分", 
+            "price": "现价", "percent": "涨幅%", "volume": "成交量",
+            "category": "板块/概念",
+            "auto_reason": "机选理由", "user_status": "人工状态", "user_reason": "人工理由"
+        }
+        
+        for col, text in headers.items():
+            self.tree.heading(col, text=text, command=lambda c=col: self.sort_tree(c, False))
+            self.tree.column(col, anchor="center")
+
+        # Column Widths
+        self.tree.column("code", width=80)
+        self.tree.column("name", width=80)
+        self.tree.column("score", width=60)
+        self.tree.column("price", width=60)
+        self.tree.column("percent", width=60)
+        self.tree.column("volume", width=80)
+        self.tree.column("category", width=150)
+        self.tree.column("auto_reason", width=250)
+        self.tree.column("user_status", width=80)
+        self.tree.column("user_reason", width=150)
+        
+        # Tags for coloring
+        self.tree.tag_configure("selected", background="#dcedc8")  # Light Green
+        self.tree.tag_configure("ignored", background="#ffcdd2")   # Light Red
+        self.tree.tag_configure("pending", background="#ffffff")   # White
+
+        # Bindings
+        self.tree.bind("<ButtonRelease-1>", self.on_select)
+
+    def load_data(self):
+        # Clear
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+            
+        try:
+            self.df_candidates = self.selector.get_candidates_df()
+            if self.df_candidates.empty:
+                messagebox.showinfo("提示", "策略未筛选出任何标的")
+                return
+
+            # Apply Concept Filter
+            filter_str = self.concept_filter_var.get().strip()
+            if filter_str:
+                # Support multi-keywords with space
+                keywords = filter_str.split()
+                for kw in keywords:
+                    self.df_candidates = self.df_candidates[
+                        self.df_candidates['category'].str.contains(kw, na=False)
+                    ]
+            
+            if self.df_candidates.empty:
+                 # Don't show info if it's just a filter result
+                 # messagebox.showinfo("提示", "筛选后无数据")
+                 return
+
+            # Init user columns
+            self.df_candidates['user_status'] = "待定"
+            self.df_candidates['user_reason'] = ""
+            
+            for index, row in self.df_candidates.iterrows():
+                self.tree.insert("", "end", iid=row['code'], values=(
+                    row['code'], row['name'], row['score'], row['price'], 
+                    row['percent'], row['volume'], row.get('category', ''), row['reason'], 
+                    "待定", ""
+                ), tags=("pending",))
+                
+        except Exception as e:
+            messagebox.showerror("错误", f"加载数据失败: {e}")
+
+    def on_select(self, event):
+        """
+        选中事件：获取选中代码并尝试发送联动
+        """
+        selection = self.tree.selection()
+        if not selection:
+            return
+            
+        # 获取第一项
+        item_id = selection[0]
+        values = self.tree.item(item_id, "values")
+        if values:
+            stock_code = values[0]
+            # 发送联动
+            if stock_code and hasattr(self, 'sender') and self.sender:
+                self.sender.send(stock_code)
+
+    def mark_status(self, status):
+        selected_items = self.tree.selection()
+        if not selected_items:
+            messagebox.showwarning("提示", "请先选择股票")
+            return
+            
+        reason = self.reason_var.get()
+        tag = "selected" if status == "选中" else "ignored"
+        
+        for item_id in selected_items:
+            cur_values = self.tree.item(item_id, "values")
+            # Create new values tuple
+            new_values = list(cur_values)
+            new_values[7] = status
+            new_values[8] = reason
+            
+            self.tree.item(item_id, values=new_values, tags=(tag,))
+
+    def import_selected(self):
+        to_import = []
+        feedback_data = []
+        
+        # Iterate all items to collect feedback and imports
+        for item_id in self.tree.get_children():
+            values = self.tree.item(item_id, "values")
+            code = values[0]
+            name = values[1]
+            status = values[7]
+            user_reason = values[8]
+            
+            # 只要不是默认状态，就记录反馈以便优化
+            if status != "待定":
+                feedback_data.append({
+                    "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "code": code,
+                    "name": name,
+                    "auto_score": values[2],
+                    "auto_reason": values[6],
+                    "user_status": status,
+                    "user_reason": user_reason
+                })
+            
+            if status == "选中":
+                to_import.append(code)
+        
+        if not to_import:
+            if not messagebox.askyesno("确认", "未标记任何[选中]的股票。\n是否仅保存反馈并关闭？"):
+                return
+        
+        # 1. Update Monitor List
+        if to_import:
+            count = 0
+            if hasattr(self.live_strategy, '_monitored_stocks'):
+                existing = self.live_strategy._monitored_stocks
+                for code in to_import:
+                    if code not in existing:
+                        existing[code] = {
+                            "rules": [], # Empty rules, will be auto-filled or manual
+                            "last_alert": 0,
+                            "created_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "tags": "auto_verify", 
+                            "snapshot": {},
+                            "name": "" # Name will be filled by system
+                        }
+                        count += 1
+                
+                if count > 0:
+                    self.live_strategy._save_monitors()
+                    messagebox.showinfo("成功", f"成功导入 {count} 只新股票到监控列表！")
+                else:
+                    messagebox.showinfo("提示", "所选股票已在监控列表中。")
+        
+        # 2. Save Feedback
+        self.save_feedback(feedback_data)
+        
+        # Close
+        self.destroy()
+
+    def save_feedback(self, data):
+        if not data: return
+        try:
+            df = pd.DataFrame(data)
+            file_path = "stock_selection_feedback.csv"
+            header = not os.path.exists(file_path)
+            df.to_csv(file_path, mode='a', header=header, index=False, encoding='utf-8')
+            print(f"反馈日志已保存: {file_path}")
+        except Exception as e:
+            messagebox.showerror("日志错误", f"保存反馈日志失败: {e}")
+
+    def sort_tree(self, col, reverse):
+        l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
+        try:
+            l.sort(key=lambda t: float(t[0]), reverse=reverse)
+        except ValueError:
+            l.sort(reverse=reverse)
+
+        for index, (val, k) in enumerate(l):
+            self.tree.move(k, '', index)
+
+        self.tree.heading(col, command=lambda: self.sort_tree(col, not reverse))

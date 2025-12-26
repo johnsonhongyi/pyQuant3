@@ -6,6 +6,21 @@ from typing import Any, Optional, Union
 
 logger = logging.getLogger(__name__)
 
+import numpy as np
+
+class NumpyEncoder(json.JSONEncoder):
+    """
+    专门用于处理 Numpy 数据类型的 JSON Encoder
+    """
+    def default(self, o):
+        if isinstance(o, np.integer):
+            return int(o)
+        elif isinstance(o, np.floating):
+            return float(o)
+        elif isinstance(o, np.ndarray):
+            return o.tolist()
+        return super(NumpyEncoder, self).default(o)
+
 class TradingLogger:
     """
     交易记录与信号持久化类
@@ -17,44 +32,47 @@ class TradingLogger:
 
     def _init_db(self) -> None:
         """初始化数据库表结构"""
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-        
-        # 1. 信号记录表 (每日每只票的决策快照)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS signal_history (
-                date TEXT,
-                code TEXT,
-                name TEXT,
-                price REAL,
-                action TEXT,
-                position REAL,
-                reason TEXT,
-                indicators TEXT, -- JSON 格式存储当时的 MA, MACD, Structure 等指标
-                PRIMARY KEY (date, code)
-            )
-        """)
-        
-        # 2. 交易执行与持仓统计表 (用于计算盈利)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS trade_records (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                code TEXT,
-                name TEXT,
-                buy_date TEXT,
-                buy_price REAL,
-                buy_amount REAL, -- 股数
-                sell_date TEXT,
-                sell_price REAL,
-                fee REAL,        -- 手续费累计
-                profit REAL,     -- 净利润
-                pnl_pct REAL,    -- 盈亏比例
-                status TEXT,     -- 'OPEN' or 'CLOSED'
-                feedback TEXT    -- 策略反馈 (用户点评)
-            )
-        """)
-        conn.commit()
-        conn.close()
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            
+            # 1. 信号记录表 (每日每只票的决策快照)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS signal_history (
+                    date TEXT,
+                    code TEXT,
+                    name TEXT,
+                    price REAL,
+                    action TEXT,
+                    position REAL,
+                    reason TEXT,
+                    indicators TEXT, -- JSON 格式存储当时的 MA, MACD, Structure 等指标
+                    PRIMARY KEY (date, code)
+                )
+            """)
+            
+            # 2. 交易执行与持仓统计表 (用于计算盈利)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS trade_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT,
+                    name TEXT,
+                    buy_date TEXT,
+                    buy_price REAL,
+                    buy_amount REAL, -- 股数
+                    sell_date TEXT,
+                    sell_price REAL,
+                    fee REAL,        -- 手续费累计
+                    profit REAL,     -- 净利润
+                    pnl_pct REAL,    -- 盈亏比例
+                    status TEXT,     -- 'OPEN' or 'CLOSED'
+                    feedback TEXT    -- 策略反馈 (用户点评)
+                )
+            """)
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"DB Init Error: {e}")
 
     def log_signal(self, code: str, name: str, price: float, decision_dict: dict[str, Any], row_data: Optional[dict[str, Any]] = None) -> None:
         """
@@ -75,7 +93,8 @@ class TradingLogger:
                     if key not in indicators:  # 避免覆盖 debug 中已有的字段
                         indicators[key] = value
             
-            indicators_json = json.dumps(indicators, ensure_ascii=False)
+            # 使用自定义 Encoder 处理 Numpy 类型
+            indicators_json = json.dumps(indicators, ensure_ascii=False, cls=NumpyEncoder)
             
             cur.execute("""
                 INSERT OR REPLACE INTO signal_history (date, code, name, price, action, position, reason, indicators)

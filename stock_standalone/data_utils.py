@@ -440,6 +440,29 @@ def merge_strong_momentum_results(results, min_days=2, columns=['sum_perc']):
     else:
         return pd.DataFrame(columns=columns + ['win'])
 
+def save_top_all_to_hdf(top_all, file_path=r'g:\top_all.h5'):
+    # 如果 top_all 是字典，先合并成一个大的 DataFrame，或者逐个处理
+    if isinstance(top_all, dict):
+        # 推荐：先合并，方便后续统一管理
+        df_to_save = pd.concat(top_all.values(), keys=top_all.keys())
+    else:
+        df_to_save = top_all.copy()
+
+    # --- 核心修复逻辑 ---
+    # 找到所有 object 类型的列（包括那个报错的 'kind'）
+    for col in df_to_save.select_dtypes(include=['object']).columns:
+        # 强制转换为字符串，并将 NaN 填充为空字符串，确保类型纯净
+        df_to_save[col] = df_to_save[col].astype(str).replace('nan', '')
+
+    try:
+        # 使用 blosc 压缩可以大幅减小体积，complevel=9 是最高压缩率
+        df_to_save.to_hdf(file_path, key='top_all', mode='w', format='table', complib='blosc', complevel=9)
+        print(f"Successfully saved to {file_path} 读取: pd.read_hdf(r'g:\top_all.h5', 'top_all')")
+    except Exception as e:
+        print(f"Table format failed: {e}. Trying fixed format... 读取: pd.read_hdf(r'g:\top_all.h5', 'top_all') ")
+        # 如果 table 格式依然报错，使用 fixed 格式（兼容性最强，但不开启搜索索引）
+        df_to_save.to_hdf(file_path, key='top_all', mode='w', format='fixed')
+
 def align_sum_percent(df, merged_df):
     """
     将 merged_df 的 sum_percent 和 window 对齐到原始 df
@@ -626,7 +649,6 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
 
             top_all = calc_indicators(top_all, logger, resample)
             logger.info(f"resample Main  top_all:{len(top_all)} market : {market}  resample: {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
-
             # top_all = calc_indicators(top_all, resample)
 
             if top_all is not None and not top_all.empty:
