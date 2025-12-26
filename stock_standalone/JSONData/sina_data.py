@@ -471,7 +471,7 @@ class Sina:
         
         # 4. 如果缓存缺失，优先从 MultiIndex 历史恢复，然后再应用当前 Tick
         now_int = cct.get_now_time_int()
-        if cache_needs_rebuild or 920 < now_int <= 1030 :
+        if cache_needs_rebuild or 915 < now_int <= 1030 :
             log.info("AggregatorCache poor or missing, rebuilding from MultiIndex HDF5...")
             l_limit_time = int(cct.sina_limit_time)
             h5_mi_fname = 'sina_MultiIndex_data'
@@ -716,7 +716,29 @@ class Sina:
         now_int = cct.get_now_time_int()
 
         # nlow: 优先使用历史记录，修正 0.0 或 NaN
-        rebuild_df['nlow'] = agg_df['nlow'].reindex(rebuild_df.index).fillna(0)
+        if 'nlow' in agg_df.columns:
+            src = agg_df['nlow']
+        elif 'low' in agg_df.columns:
+            src = agg_df['low']
+        elif 'close' in agg_df.columns:
+            src = agg_df['close']
+        else:
+            src = 0
+
+        rebuild_df['nlow'] = (
+            src.reindex(rebuild_df.index)
+               .fillna(0)
+            if hasattr(src, 'reindex')
+            else 0
+        )
+        rebuild_df['nlow'] = (
+            src.reindex(rebuild_df.index)
+               .fillna(0)
+            if hasattr(src, 'reindex')
+            else 0
+        )
+        # rebuild_df['nlow'] = agg_df['nlow'].reindex(rebuild_df.index).fillna(0)
+
         idx_low_fix = (rebuild_df['nlow'] <= 0)
         if idx_low_fix.any():
             codes_fix = rebuild_df.index[idx_low_fix]

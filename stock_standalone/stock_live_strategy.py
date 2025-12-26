@@ -225,8 +225,9 @@ class StockLiveStrategy:
         if cooldown < 0:
             raise ValueError("alert_cooldown must be >= 0")
 
-        with self._lock:
-            self._alert_cooldown = cooldown
+        # with self._lock:
+        self._alert_cooldown = cooldown
+        logger.info(f"set_alert_cooldown : {self._alert_cooldown}")
 
     def get_alert_cooldown(self) -> float:
         """读取当前告警冷却时间"""
@@ -820,7 +821,7 @@ class StockLiveStrategy:
             future_offset = (cycles - 1) * self._alert_cooldown
             self._monitored_stocks[code]['last_alert'] = time.time() + future_offset
             dt_str = datetime.fromtimestamp(self._monitored_stocks[code]['last_alert']).strftime("%Y-%m-%d %H:%M:%S")
-            logger.info(f"😴 Snoozed alert for {code}  in {cycles} cycles ({cycles * self._alert_cooldown}s next_alert_time:{dt_str})")
+            logger.info(f"😴 Snoozed alert for {code}  in {cycles} cycles ({cycles * self._alert_cooldown}s alert_cooldown: {self._alert_cooldown}s next_alert_time:{dt_str})")
 
     def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0) -> None:
         """触发报警"""

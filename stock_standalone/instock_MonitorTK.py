@@ -29,6 +29,7 @@ import pyqtgraph as pg
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.completion import WordCompleter
+from types import SimpleNamespace
 
 from JohnsonUtil.stock_sender import StockSender
 from JohnsonUtil import commonTips as cct
@@ -164,6 +165,25 @@ DEFAULT_DISPLAY_COLS = [
 ]
 
 from alerts_manager import AlertManager, open_alert_center, set_global_manager, check_alert
+def ___toast_message(master, text, duration=1500):
+    """短暂提示信息（浮层，不阻塞）"""
+    toast = tk.Toplevel(master)
+    toast.overrideredirect(True)
+    toast.attributes("-topmost", True)
+    label = tk.Label(toast, text=text, bg="black", fg="white", padx=10, pady=1)
+    label.pack()
+    try:
+        master.update_idletasks()
+        master_x = master.winfo_rootx()
+        master_y = master.winfo_rooty()
+        master_w = master.winfo_width()
+    except Exception:
+        master_x, master_y, master_w = 100, 100, 400
+    toast.update_idletasks()
+    toast_w = toast.winfo_width()
+    toast_h = toast.winfo_height()
+    toast.geometry(f"{toast_w}x{toast_h}+{master_x + (master_w-toast_w)//2}+{master_y + 50}")
+    toast.after(duration, toast.destroy)
 
 class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def __init__(self):
@@ -1320,40 +1340,40 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if send_tdx_Key and stock_code:
                 self.sender.send(stock_code)
 
-            # =========================
-            # ✅ 构造 fake mouse event
-            # =========================
-            from types import SimpleNamespace
-            try:
-                # ==========================
-                # ✅ 构造模拟 event
-                # ==========================
+            if self.voice_var.get():
+                # =========================
+                # ✅ 构造 fake mouse event
+                # =========================
+                try:
+                    # ==========================
+                    # ✅ 构造模拟 event
+                    # ==========================
 
-                x_root = getattr(self, "event_x_root", None)
-                y_root = getattr(self, "event_y_root", None)
+                    x_root = getattr(self, "event_x_root", None)
+                    y_root = getattr(self, "event_y_root", None)
 
-                # 没有鼠标坐标就退回到行中心
-                if x_root is None or y_root is None:
-                    bbox = self.tree.bbox(item_id)
-                    if not bbox:
-                        return
-                    x, y, w, h = bbox
+                    # 没有鼠标坐标就退回到行中心
+                    if x_root is None or y_root is None:
+                        bbox = self.tree.bbox(item_id)
+                        if not bbox:
+                            return
+                        x, y, w, h = bbox
 
-                    x_root = self.tree.winfo_rootx() + x + w + 10
-                    y_root = self.tree.winfo_rooty() + y + h // 2
+                        x_root = self.tree.winfo_rootx() + x + w + 10
+                        y_root = self.tree.winfo_rooty() + y + h // 2
 
-                fake_event = SimpleNamespace(
-                    x=0,
-                    y=0,
-                    x_root=x_root,
-                    y_root=y_root
-                )
+                    fake_event = SimpleNamespace(
+                        x=0,
+                        y=0,
+                        x_root=x_root,
+                        y_root=y_root
+                    )
 
-                # ✅ 复用 Tooltip 入口
-                self.on_tree_click_for_tooltip(fake_event,stock_code,stock_name)
+                    # ✅ 复用 Tooltip 入口
+                    self.on_tree_click_for_tooltip(fake_event,stock_code,stock_name)
 
-            except Exception as e:
-                logger.warning(f"Tooltip select trigger failed: {e}")
+                except Exception as e:
+                    logger.warning(f"Tooltip select trigger failed: {e}")
 
     def update_send_status(self, status_dict):
         # 更新状态栏
@@ -1450,7 +1470,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # self.after(50, self.adjust_column_widths)
             self._setup_tree_columns(self.tree,self.current_cols, sort_callback=self.sort_by_column, other={})
             self.reload_cfg_value()
-            self.live_strategy.set_alert_cooldown(pending_alert_cycles)
+            self.live_strategy.set_alert_cooldown(alert_cooldown)
             # self.update_treeview_cols(self.current_cols)
 
         logger.info(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
@@ -2383,16 +2403,33 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win.title(f"添加备注 - {name} ({code})")
             
             # --- 窗口定位: 右下角在鼠标附近 ---
-            w, h = 500, 300
+            w, h = 550, 320
             mx, my = self.winfo_pointerx(), self.winfo_pointery()
             pos_x, pos_y = mx - w - 20, my - h - 20
             pos_x, pos_y = max(0, pos_x), max(0, pos_y)
             win.geometry(f"{w}x{h}+{pos_x}+{pos_y}")
-            
-            tk.Label(win, text="请输入备注/心得 (支持多行/粘贴，Ctrl+Enter保存):").pack(anchor="w", padx=10, pady=5)
-            
-            text_area = tk.Text(win, wrap="word", height=10, font=("Arial", 10))
-            text_area.pack(fill="both", expand=True, padx=10, pady=5)
+            win.minsize(480, 260)
+            # Label
+            tk.Label(
+                win,
+                text="请输入备注/心得 (支持多行/粘贴，Ctrl+Enter保存):"
+            ).pack(anchor="w", padx=10, pady=5)
+
+            # Text
+            text_area = tk.Text(
+                win,
+                wrap="word",
+                height=6,
+                font=("Arial", 10)
+            )
+            text_area.pack(
+                side="top",
+                fill="both",
+                expand=True,
+                padx=10,
+                pady=5
+            )
+
             text_area.focus_set()
             
             # --- 1. 右键菜单 (支持粘贴) ---
@@ -2429,7 +2466,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win.bind("<Escape>", cancel)
 
             btn_frame = tk.Frame(win)
-            btn_frame.pack(pady=10)
+            btn_frame.pack(side="bottom", fill="x", pady=10)   # ★ 关键
             tk.Button(btn_frame, text="保存 (Ctrl+Enter)", width=15, command=save, bg="#e1f5fe").pack(side="left", padx=10)
             tk.Button(btn_frame, text="取消 (ESC)", width=10, command=cancel).pack(side="left", padx=10)
         except Exception as e:
@@ -2537,7 +2574,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 txt_scroll.pack(side="right", fill="y")
                 
                 txt.insert("1.0", content)
-                txt.config(state="disabled") 
+                # txt.config(state="disabled") 
                 
                 def copy_content():
                     try:
@@ -2546,12 +2583,32 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         messagebox.showinfo("提示", "内容已复制", parent=d_win)
                     except:
                         pass
-                
+                def save_edit():
+                    new_content = txt.get("1.0", "end-1c").strip()
+                    if not new_content:
+                        messagebox.showwarning("提示", "内容不能为空", parent=d_win)
+                        return
+
+                    # 找到对应 remark
+                    for r in self.handbook.get_remarks(code):
+                        if r['time'] == time_str:
+                            # 假设 handbook 支持 update
+                            self.handbook.update_remark(code, r['timestamp'], new_content)
+                            break
+
+                    # 同步更新列表显示（只更新概要）
+                    short = new_content.replace('\n', ' ')
+                    if len(short) > 50:
+                        short = short[:50] + "..."
+                    tree.item(tree.selection()[0], values=(time_str, short))
+                    toast_message(d_win, "成功备注已更新")
+
                 btn_frame = tk.Frame(d_win)
                 btn_frame.pack(pady=5)
+                tk.Button(btn_frame, text="保存修改", command=lambda: save_edit()).pack(side="left", padx=10)
                 tk.Button(btn_frame, text="复制全部", command=copy_content).pack(side="left", padx=10)
                 tk.Button(btn_frame, text="关闭 (ESC)", command=d_win.destroy).pack(side="left", padx=10)
-
+                
             def on_double_click(event):
                 item = tree.selection()
                 if not item: return
