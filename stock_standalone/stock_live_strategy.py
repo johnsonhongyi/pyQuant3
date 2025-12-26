@@ -561,7 +561,18 @@ class StockLiveStrategy:
 
                 # ---------- 决策引擎 ----------
                 decision = self.decision_engine.evaluate(row, snap)
-                # 记录信号历史 (每秒更新，TradingLogger.log_signal 使用 INSERT OR REPLACE 保证每日每票唯一)
+                
+                # --- 状态记忆持久化 (New) ---
+                if decision["action"] == "买入":
+                    snap["last_buy_score"] = decision["debug"].get("实时买入分", 0)
+                    snap["buy_triggered_today"] = True
+                elif decision["action"] == "卖出":
+                    snap["sell_triggered_today"] = True
+                
+                # 记录最高分作为今日目标追踪
+                snap["max_score_today"] = max(snap.get("max_score_today", 0), decision["debug"].get("实时买入分", 0))
+
+                # 记录信号历史
                 self.trading_logger.log_signal(code, data['name'], current_price, decision)
 
                 if decision["action"] != "持仓":

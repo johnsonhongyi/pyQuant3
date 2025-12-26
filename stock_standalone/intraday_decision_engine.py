@@ -594,6 +594,11 @@ class IntradayDecisionEngine:
             return result
 
         # ========== 0. 预研分析：超跌与泵感检测 ==========
+        debug["win"] = snapshot.get("win", 0)
+        debug["sum_perc"] = snapshot.get("sum_perc", 0)
+        debug["red"] = snapshot.get("red", 0)
+        debug["gren"] = snapshot.get("gren", 0)
+
         is_oversold = False
         oversold_reason = ""
         if last_closes[0] > 0 and last_closes[4] > 0:
@@ -730,58 +735,59 @@ class IntradayDecisionEngine:
                     return result
 
                 pos = min(buy_score, self.max_position)
-                result = {
+                
+                # --- 信号迭代逻辑：跟单与加强 ---
+                if snapshot.get("buy_triggered_today", False):
+                    prev_score = float(snapshot.get("last_buy_score", 0))
+                    msg_prefix = "[持续跟单]"
+                    if buy_score > prev_score and volume > last_v1 * 0.5:
+                        msg_prefix = "[跟单放量]"
+                    buy_reasons.insert(0, msg_prefix)
+                
+                return {
                     "triggered": True,
                     "action": "买入",
                     "position": round(pos, 2),
-                    "reason": "实时高走买入: " + ", ".join(buy_reasons)
+                    "reason": "实时高走买入: " + ", ".join(buy_reasons),
+                    "debug": debug
                 }
-                logger.debug(f"实时买入触发: score={buy_score:.2f} reasons={buy_reasons}")
-                return result
-        
-        # ========== 2. 跌破均价卖出策略 ==========
-        if mode in ("full", "sell_only") and not is_t1_restricted:
-            if nclose > 0 and price < nclose:
-                # 计算偏离度
-                deviation = (nclose - price) / nclose
 
-                # 【核心增强】早盘诱多后跌破均线逻辑
+        # ========== 2. 跌破均价卖出策略 (具备记忆与诱多识别) ==========
+        if mode in ("full", "sell_only"):
+            # A. 核心偏离检测
+            deviation = (nclose - price) / nclose if nclose > 0 else 0
+            # 动态阈值建议：昨涨 5% 容忍 1.5%，昨涨 10% 容忍 2.5% 左右的非典型波动
+            max_normal_pullback = abs(last_percent) / 500 if abs(last_percent) < 10 else 0.02
+            threshold = max(max_normal_pullback, 0.005) + 0.003
+
+            if price < nclose and (deviation > threshold or snapshot.get("sell_triggered_today", False)):
+                # 如果曾经破位且现在还没收回均线，持续报警
+                already_broken = snapshot.get("sell_triggered_today", False)
+                prefix = "[破位持续] " if already_broken else ""
+                
+                # 如果诱多后跌破，卖得更狠
                 if morning_pump:
-                    # 如果有过显著泵高 (>2.5%) 随后跌破均线，大概率是分时诱多
-                    # 使用泵高作为提前量的乘利率：泵得越高，跌破时卖得越狠
-                    sell_multiplier = 1.0 + (pump_height * 10.0) # 泵 3% 乘率为 1.3
+                    sell_multiplier = 1.0 + (pump_height * 10.0)
                     urgency = min(deviation / 0.02 * sell_multiplier, 1.0)
-                    sell_pos = 1.0 - (1.0 - urgency) * 0.5 # 更加果断的减仓，至少减 50%
+                    sell_pos = 1.0 - (1.0 - urgency) * 0.5
+                    reason = f"{prefix}诱多后破位(泵高{pump_height:.1%}, 偏离{deviation:.1%})"
+                else:
+                    urgency = min(deviation / 0.03, 1.0)
+                    sell_pos = 1.0 - urgency * 0.5
+                    reason = f"{prefix}跌破均线 {deviation:.1%} (阈值{threshold:.1%})"
+                
+                return {
+                    "triggered": True,
+                    "action": "卖出",
+                    "position": round(sell_pos, 2),
+                    "reason": reason,
+                    "debug": debug
+                }
+            
+            # 修复逻辑：如果曾经破位，但现在稳稳站回均线 1%，可解除报警 (StockLiveStrategy 侧维护 snapshot)
+            if snapshot.get("sell_triggered_today", False) and price > nclose * 1.01:
+                debug["sell_memory_reset"] = True
 
-                    result = {
-                        "triggered": True,
-                        "action": "卖出",
-                        "position": round(sell_pos, 2),
-                        "reason": f"早盘诱多跌破均线(泵高{pump_height:.1%}, 乘率{sell_multiplier:.1f})"
-                    }
-                    debug["morning_pump_failure"] = True
-                    return result
-
-                # 普通跌破均价逻辑
-                # 根据昨日涨幅动态调整阈值
-                max_normal_pullback = abs(last_percent) / 500 if abs(last_percent) < 10 else 0.02
-                threshold = max(max_normal_pullback, 0.005) + 0.003
-
-                if deviation > threshold:
-                    # 偏离度越大，仓位越低
-                    urgency = min(deviation / 0.03, 1.0)  # 偏离 3% 时最紧急
-                    sell_pos = 1.0 - urgency * 0.5  # 最低保留 50%
-
-                    result = {
-                        "triggered": True,
-                        "action": "卖出",
-                        "position": round(sell_pos, 2),
-                        "reason": f"跌破均价{deviation:.1%} (阈值{threshold:.1%})"
-                    }
-                    debug["实时卖出偏离"] = deviation
-                    logger.debug(f"实时卖出触发: deviation={deviation:.2%} threshold={threshold:.2%}")
-                    return result
-        
         # ========== 3. 量价信号策略 ==========
         volume_price_result = self._volume_price_signal(row, snapshot, mode, debug)
         if volume_price_result["triggered"]:
