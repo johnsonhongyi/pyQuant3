@@ -34,7 +34,7 @@ GetClassNameW.restype = ctypes.c_int
 # RegisterWindowMessageW.restype = ctypes.c_uint
 
 class StockSender:
-    def __init__(self, tdx_var, ths_var, dfcf_var, base_dir=None, callback=None):
+    def __init__(self, tdx_var=True, ths_var=True, dfcf_var=False, base_dir=None, callback=None):
         self.tdx_var = tdx_var
         self.ths_var = ths_var
         self.dfcf_var = dfcf_var
@@ -68,26 +68,72 @@ class StockSender:
         # if self.dfcf_var.get():
         self.find_dfcf_handle()
 
+    def _get_flag(self, var):
+        """
+        兼容 tk.BooleanVar / bool
+        """
+        if hasattr(var, "get"):
+            try:
+                return bool(var.get())
+            except Exception:
+                return False
+        return bool(var)
+
+    # def reload_old(self):
+    #     # 句柄初始化
+    #     # print(f'reload process_hwnd')
+    #     # print(f'self.tdx_var : {self.tdx_var.get()} self.ths_var : {self.ths_var.get()} self.dfcf_var : {self.dfcf_var.get()}')
+    #     if  self.tdx_var.get():
+    #         self.tdx_window_handle = 0
+    #         self.find_tdx_window()
+    #         print(f'reload  tdx_window_handle: {self.tdx_window_handle}')
+    #     if  self.ths_var.get():
+    #         self.ths_process_hwnd = 0
+    #         self.ths_window_handle = 0
+    #         self.find_ths_window()
+    #         print(f'reload ths_process_hwnd: {self.ths_process_hwnd} ths_window_handle :{self.ths_window_handle}')
+
+    #     if  self.dfcf_var.get():
+    #         self.dfcf_process_hwnd = 0
+    #         self.ahk_process_hwnd = 0
+    #         # self.thsweb_process_hwnd = 0
+    #         self.find_dfcf_handle()
+    #         print(f'reload dfcf_process_hwnd: {self.dfcf_process_hwnd} ahk_process_hwnd: {self.ahk_process_hwnd}')
+
     def reload(self):
-        # 句柄初始化
-        # print(f'reload process_hwnd')
-        # print(f'self.tdx_var : {self.tdx_var.get()} self.ths_var : {self.ths_var.get()} self.dfcf_var : {self.dfcf_var.get()}')
-        if  self.tdx_var.get():
+        """
+        重新查找各交易软件窗口句柄
+        兼容 Tk BooleanVar / bool
+        """
+
+        # print('reload process_hwnd')
+        # print(f'tdx:{self._get_flag(self.tdx_var)} '
+        #       f'ths:{self._get_flag(self.ths_var)} '
+        #       f'dfcf:{self._get_flag(self.dfcf_var)}')
+
+        if self._get_flag(self.tdx_var):
             self.tdx_window_handle = 0
             self.find_tdx_window()
-            print(f'reload  tdx_window_handle: {self.tdx_window_handle}')
-        if  self.ths_var.get():
+            print(f'reload tdx_window_handle: {self.tdx_window_handle}')
+
+        if self._get_flag(self.ths_var):
             self.ths_process_hwnd = 0
             self.ths_window_handle = 0
             self.find_ths_window()
-            print(f'reload ths_process_hwnd: {self.ths_process_hwnd} ths_window_handle :{self.ths_window_handle}')
+            print(
+                f'reload ths_process_hwnd: {self.ths_process_hwnd} '
+                f'ths_window_handle: {self.ths_window_handle}'
+            )
 
-        if  self.dfcf_var.get():
+        if self._get_flag(self.dfcf_var):
             self.dfcf_process_hwnd = 0
             self.ahk_process_hwnd = 0
             # self.thsweb_process_hwnd = 0
             self.find_dfcf_handle()
-            print(f'reload dfcf_process_hwnd: {self.dfcf_process_hwnd} ahk_process_hwnd: {self.ahk_process_hwnd}')
+            print(
+                f'reload dfcf_process_hwnd: {self.dfcf_process_hwnd} '
+                f'ahk_process_hwnd: {self.ahk_process_hwnd}'
+            )
 
         # 查找窗口
     # ----------------- 统一发送 ----------------- #
@@ -96,19 +142,29 @@ class StockSender:
         threading.Thread(target=self._send_thread, args=(stock_code,)).start()
 
     def _send_thread(self, stock_code):
-        # print(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
-        if self.tdx_var.get():
+        """
+        发送股票代码到各客户端
+        兼容 tk.BooleanVar / bool
+        """
+
+        # === TDX ===
+        if self._get_flag(self.tdx_var):
             self.send_to_tdx(stock_code)
+            self.tdx_status = f"TDX-> 已发送 {stock_code}"
         else:
             self.tdx_status = "TDX-> 未选中"
 
-        if self.ths_var.get():
+        # === THS ===
+        if self._get_flag(self.ths_var):
             self.send_to_ths(stock_code)
+            self.ths_status = f"THS-> 已发送 {stock_code}"
         else:
             self.ths_status = "THS-> 未选中"
 
-        if self.dfcf_var.get():
+        # === 东方财富 ===
+        if self._get_flag(self.dfcf_var):
             self.send_to_dfcf(stock_code)
+            self.dfcf_status = f"DC-> 已发送 {stock_code}"
         else:
             self.dfcf_status = "DC-> 未选中"
 
@@ -118,9 +174,36 @@ class StockSender:
             "DC": self.dfcf_status
         }
 
-        # 回调 UI 更新状态栏
+        # === 回调 UI ===
         if self.callback:
             self.callback(status_dict)
+
+    # def _send_thread_old(self, stock_code):
+    #     # print(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
+    #     if self.tdx_var.get():
+    #         self.send_to_tdx(stock_code)
+    #     else:
+    #         self.tdx_status = "TDX-> 未选中"
+
+    #     if self.ths_var.get():
+    #         self.send_to_ths(stock_code)
+    #     else:
+    #         self.ths_status = "THS-> 未选中"
+
+    #     if self.dfcf_var.get():
+    #         self.send_to_dfcf(stock_code)
+    #     else:
+    #         self.dfcf_status = "DC-> 未选中"
+
+    #     status_dict = {
+    #         "TDX": self.tdx_status,
+    #         "THS": self.ths_status,
+    #         "DC": self.dfcf_status
+    #     }
+
+    #     # 回调 UI 更新状态栏
+    #     if self.callback:
+    #         self.callback(status_dict)
 
     # ----------------- 加载 THS 股票列表 ----------------- #
     def load_ths_code(self):
