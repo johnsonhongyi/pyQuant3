@@ -6,12 +6,13 @@ from datetime import datetime
 from typing import Optional, Any, TYPE_CHECKING
 from collections import Counter
 import pandas as pd
+from tk_gui_modules.window_mixin import WindowMixin
 
 if TYPE_CHECKING:
     from stock_live_strategy import StockLiveStrategy
     from stock_selector import StockSelector
 
-class StockSelectionWindow(tk.Toplevel):
+class StockSelectionWindow(tk.Toplevel, WindowMixin):
     """
     策略选股确认视窗
     允许用户在导入监控前人工筛选、标注
@@ -25,7 +26,11 @@ class StockSelectionWindow(tk.Toplevel):
         """
         super().__init__(master)
         self.title("策略选股 & 人工复核")
-        self.geometry("1100x600")
+        self.scale_factor: float = getattr(master, 'scale_factor', 1.0)
+        
+        window_id = "策略选股"
+        # 加载窗口位置
+        self.load_window_position(self, window_id, default_width=1200, default_height=700)
         
         self.live_strategy: Optional['StockLiveStrategy'] = live_strategy
         self.selector: Optional['StockSelector'] = stock_selector
@@ -48,8 +53,16 @@ class StockSelectionWindow(tk.Toplevel):
             
         self.load_data()
 
-        # Center window
-        self._center_window()
+        # 绑定关闭事件以保存位置
+        self.protocol("WM_DELETE_WINDOW", lambda: self._on_close(window_id))
+
+    def _on_close(self, window_id: str):
+        """关闭时保存状态并销毁窗口"""
+        try:
+            self.save_window_position(self, window_id)
+        except Exception as e:
+            print(f"保存窗口位置失败: {e}")
+        self.destroy()
 
     def _center_window(self):
         self.update_idletasks()
@@ -60,6 +73,12 @@ class StockSelectionWindow(tk.Toplevel):
         self.geometry('{}x{}+{}+{}'.format(width, height, x, y))
 
     def _init_ui(self):
+        # --- Custom Styles ---
+        style = ttk.Style(self)
+        # 减小滚动条宽度 (12 像素比较适中)
+        style.configure("Small.Vertical.TScrollbar", width=12)
+        style.configure("Small.Horizontal.TScrollbar", width=12)
+
         # --- Toolbar ---
         toolbar = tk.Frame(self, bd=1, relief="raised")
         toolbar.pack(fill="x", padx=5, pady=5)
@@ -97,10 +116,13 @@ class StockSelectionWindow(tk.Toplevel):
         self.concept_combo.bind('<<ComboboxSelected>>', self.on_filter_search)
         
         # Actions
-        tk.Button(toolbar, text="🔄 运行策略", command=lambda: self.load_data(force=True)).pack(side="left", padx=5, pady=5)
+        tk.Button(toolbar, text="🔄 运行策略", command=lambda: self.load_data(force=True)).pack(side="right", padx=5, pady=5)
         tk.Frame(toolbar, width=20).pack(side="right") # Spacer
 
         tk.Button(toolbar, text="🚀 导入选中", command=self.import_selected, bg="#ffd54f", font=("Arial", 10, "bold")).pack(side="right", padx=10, pady=5)
+        
+        # 绑定双击顶部工具栏自动调整窗口大小
+        _ = toolbar.bind("<Double-1>", self._on_toolbar_double_click)
 
         # --- Main List ---
         # Columns
@@ -112,13 +134,17 @@ class StockSelectionWindow(tk.Toplevel):
         self.tree = ttk.Treeview(tree_frame, columns=columns, show="headings")
         
         # Scrollbars
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
-        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview)
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview, style="Small.Vertical.TScrollbar")
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self.tree.xview, style="Small.Horizontal.TScrollbar")
         self.tree.configure(yscroll=vsb.set, xscroll=hsb.set)
         
-        self.tree.pack(side="left", fill="both", expand=True)
-        vsb.pack(side="right", fill="y")
-        hsb.pack(side="bottom", fill="x")
+        # Grid layout for precise alignment
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
+        
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
         
         # Headings
         headers = {
@@ -132,17 +158,17 @@ class StockSelectionWindow(tk.Toplevel):
             self.tree.heading(col, text=text, command=lambda c=col: self.sort_tree(c, False))
             self.tree.column(col, anchor="center")
 
-        # Column Widths
-        self.tree.column("code", width=80)
-        self.tree.column("name", width=80)
-        self.tree.column("score", width=60)
-        self.tree.column("price", width=60)
-        self.tree.column("percent", width=60)
-        self.tree.column("volume", width=80)
-        self.tree.column("category", width=150)
-        self.tree.column("auto_reason", width=250)
-        self.tree.column("user_status", width=80)
-        self.tree.column("user_reason", width=150)
+        # Column Configurations (Default initial widths)
+        self.tree.column("code", width=70, minwidth=60, stretch=False)
+        self.tree.column("name", width=80, minwidth=70, stretch=False)
+        self.tree.column("score", width=60, minwidth=50, stretch=False)
+        self.tree.column("price", width=70, minwidth=60, stretch=False)
+        self.tree.column("percent", width=70, minwidth=60, stretch=False)
+        self.tree.column("volume", width=90, minwidth=80, stretch=False)
+        self.tree.column("category", width=160, minwidth=100, stretch=True)
+        self.tree.column("auto_reason", width=260, minwidth=150, stretch=True)
+        self.tree.column("user_status", width=80, minwidth=60, stretch=False)
+        self.tree.column("user_reason", width=150, minwidth=100, stretch=True)
         
         # Tags for coloring
         self.tree.tag_configure("selected", background="#dcedc8")  # Light Green
@@ -196,9 +222,58 @@ class StockSelectionWindow(tk.Toplevel):
                     row['percent'], row['volume'], row.get('category', ''), row['reason'], 
                     "待定", ""
                 ), tags=("pending",))
+            
+            # 渲染完成后自动调整列宽
+            self.after(100, self._auto_fit_columns)
                 
         except Exception as e:
             messagebox.showerror("错误", f"加载数据失败: {e}")
+
+    def _auto_fit_columns(self):
+        """根据内容自动调整列宽"""
+        import tkinter.font as tkfont
+        f: tkfont.Font = tkfont.Font(font='Arial 9') # 与 treeview 字体保持一致
+        
+        cols: Any = self.tree["columns"]
+        # 为每列计算最大宽度
+        for col in cols:
+            # 获取表头文字宽度 (加一点 padding)
+            header_text: str = self.tree.heading(col)["text"]
+            max_w: int = f.measure(header_text) + 20
+            
+            # 获取所有行该列的内容
+            for item in self.tree.get_children():
+                cell_val: str = str(self.tree.set(item, col))
+                max_w = max(max_w, f.measure(cell_val) + 20)
+            
+            # 限制合理范围并应用
+            if col in ["auto_reason", "category", "user_reason"]:
+                max_w = min(max_w, 450)
+            else:
+                max_w = min(max_w, 200)
+            
+            _ = self.tree.column(col, width=max_w)
+
+    def _on_toolbar_double_click(self, event: Any):
+        """双击顶部工具栏调整窗口宽度"""
+        _ = event
+        self._auto_fit_columns()
+        # 计算所有列的总宽度
+        total_w: float = 0
+        for col in self.tree["columns"]:
+            total_w += float(self.tree.column(col, "width"))
+        
+        # 加上边框和滚动条的宽度
+        total_w += 40 
+        # 保持高度，限制最大宽度
+        screen_w = self.winfo_screenwidth()
+        final_w = min(int(total_w), int(screen_w * 0.95))
+        final_h = self.winfo_height()
+        
+        # 获取当前 x, y 坐标，尽量保持居中
+        curr_x = self.winfo_x()
+        curr_y = self.winfo_y()
+        self.geometry(f"{final_w}x{final_h}+{curr_x}+{curr_y}")
 
     def _update_title_stats(self):
         """更新窗口标题统计信息：显示总数与最主要的Top 3机选理由"""
