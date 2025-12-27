@@ -30,7 +30,7 @@ class NumericTableWidgetItem(QTableWidgetItem):
         return super().__lt__(other)
 
 class TradingGUI(QWidget):
-    def __init__(self, logger_path="./trading_signals.db"):
+    def __init__(self, logger_path="./trading_signals.db", sender=None):
         super().__init__()
         self.setWindowTitle("策略交易分析工具")
         self.setGeometry(100, 100, 1000, 600)
@@ -51,7 +51,7 @@ class TradingGUI(QWidget):
 
         self.view_combo = QComboBox()
         self.view_combo.addItems([
-            "股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史", "实时指标详情"
+            "实时指标详情","股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史"
         ])
         self.view_combo.currentTextChanged.connect(self.refresh_table)
         self.top_layout.addWidget(QLabel("视图选择:"))
@@ -83,12 +83,15 @@ class TradingGUI(QWidget):
         self.layout.addWidget(self.report_area)
 
         # === 股票发送器 ===
-        self.sender = StockSender(
-            # self.tdx_var,
-            # self.ths_var,
-            # self.dfcf_var,
-            callback=self.update_send_status
-        )
+        if sender is not None:
+            self.sender = sender
+        else:
+            self.sender = StockSender(
+                # self.tdx_var,
+                # self.ths_var,
+                # self.dfcf_var,
+                callback=self.update_send_status
+            )
 
         # 表格点击信号
         self.table.cellClicked.connect(self.on_table_row_clicked)
