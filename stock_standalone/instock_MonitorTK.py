@@ -351,6 +351,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         else:
             self._use_feature_marking = False
         
+        #总览概念分析前5板块
+        self.concept_top5 = None
+        #初始化延迟运行live_strategy
+        self._live_strategy_first_run = True
         # ✅ 初始化标注手札
         self.handbook = StockHandbook()
         # ✅ 初始化实时监控策略 (延迟初始化，防止阻塞主窗口显示)
@@ -797,6 +801,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.init_global_concept_data(concept_score, avg_percents, scores, follow_ratios, force_reset)
 
         # logger.info(f'concept_score[:10]:{concept_score[:10]}')
+        self.concept_top5 = concept_score[:5]
         return concept_score[:10]
 
 
@@ -1249,7 +1254,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
                 if not self.tip_var.get() and has_update and hasattr(self, 'live_strategy'):
                     if not (915 < cct.get_now_time_int() < 920):
-                        self.live_strategy.process_data(self.df_all)
+                        # self.after(90 * 1000, lambda: self.live_strategy.process_data(self.df_all))
+                        if self._live_strategy_first_run:
+                            # 第一次：延迟执行
+                            self._live_strategy_first_run = False
+                            self.after(90 * 1000,lambda: self.live_strategy.process_data(self.df_all))
+                        else:
+                            # 后续：立即执行
+                            self.live_strategy.process_data(self.df_all)
+
                 # -------------------------
 
                 self.status_var2.set(f'queue update: {self.format_next_time()}')
