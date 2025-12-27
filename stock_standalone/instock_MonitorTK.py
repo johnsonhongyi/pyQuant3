@@ -1268,7 +1268,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if self._live_strategy_first_run:
                             # 第一次：延迟执行
                             self._live_strategy_first_run = False
-                            self.after(90 * 1000,lambda: self.live_strategy.process_data(self.df_all))
+                            self.after(35 * 1000,lambda: self.live_strategy.process_data(self.df_all))
                         else:
                             # 后续：立即执行
                             self.live_strategy.process_data(self.df_all)
@@ -3226,53 +3226,72 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Failed to init live strategy: {e}")
 
+    # def on_voice_alert(self, code, name, msg):
+    #     """
+    #     处理语音报警触发: 弹窗显示股票详情 - 线程安全版本
+    #     """
+    #     # 线程安全:避免在后台线程中调用 Tkinter
+    #     try:
+    #         import threading
+    #         if threading.current_thread() is threading.main_thread():
+    #             self._show_alert_popup(code, name, msg)
+    #         else:
+    #             # 后台线程:忽略,避免 GIL 问题
+    #             pass
+    #     except Exception as e:
+    #         # 静默失败
+    #         pass
+
+    # def on_voice_speak_start(self, code):
+    #     """语音开始播报时的回调 (在后台线程调用) - 线程安全版本"""
+    #     if not code: 
+    #         return
+    #     # 使用线程安全的方式调度到主线程
+    #     try:
+    #         # 检查是否在主线程
+    #         import threading
+    #         if threading.current_thread() is threading.main_thread():
+    #             self._trigger_alert_visual_effects(code, start=True)
+    #         else:
+    #             # 后台线程:不直接调用 after,而是通过事件标志
+    #             # 避免 GIL 问题,简单忽略或使用其他机制
+    #             pass
+    #     except Exception as e:
+    #         # 静默失败,避免崩溃
+    #         pass
+
+    # def on_voice_speak_end(self, code):
+    #     """语音播报结束的回调 - 线程安全版本"""
+    #     if not code: 
+    #         return
+    #     try:
+    #         import threading
+    #         if threading.current_thread() is threading.main_thread():
+    #             self._trigger_alert_visual_effects(code, start=False)
+    #         else:
+    #             # 后台线程:简单忽略
+    #             pass
+    #     except Exception as e:
+    #         pass
+
     def on_voice_alert(self, code, name, msg):
         """
-        处理语音报警触发: 弹窗显示股票详情 - 线程安全版本
+        处理语音报警触发: 弹窗显示股票详情
         """
-        # 线程安全:避免在后台线程中调用 Tkinter
-        try:
-            import threading
-            if threading.current_thread() is threading.main_thread():
-                self._show_alert_popup(code, name, msg)
-            else:
-                # 后台线程:忽略,避免 GIL 问题
-                pass
-        except Exception as e:
-            # 静默失败
-            pass
+        # 必须回到主线程操作 GUI
+        self.after(0, lambda: self._show_alert_popup(code, name, msg))
 
     def on_voice_speak_start(self, code):
-        """语音开始播报时的回调 (在后台线程调用) - 线程安全版本"""
-        if not code: 
-            return
-        # 使用线程安全的方式调度到主线程
-        try:
-            # 检查是否在主线程
-            import threading
-            if threading.current_thread() is threading.main_thread():
-                self._trigger_alert_visual_effects(code, start=True)
-            else:
-                # 后台线程:不直接调用 after,而是通过事件标志
-                # 避免 GIL 问题,简单忽略或使用其他机制
-                pass
-        except Exception as e:
-            # 静默失败,避免崩溃
-            pass
+        """语音开始播报时的回调 (在后台线程调用)"""
+        if not code: return
+        # 调度到主线程执行闪烁和震动
+        self.after(0, lambda: self._trigger_alert_visual_effects(code, start=True))
 
     def on_voice_speak_end(self, code):
-        """语音播报结束的回调 - 线程安全版本"""
-        if not code: 
-            return
-        try:
-            import threading
-            if threading.current_thread() is threading.main_thread():
-                self._trigger_alert_visual_effects(code, start=False)
-            else:
-                # 后台线程:简单忽略
-                pass
-        except Exception as e:
-            pass
+        """语音播报结束的回调"""
+        if not code: return
+        self.after(0, lambda: self._trigger_alert_visual_effects(code, start=False))
+
 
     def _trigger_alert_visual_effects(self, code, start=True):
         """根据代码查找窗口并触发视觉效果"""
