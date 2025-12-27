@@ -4,6 +4,7 @@ import os
 import json
 from datetime import datetime
 from typing import Optional, Any, TYPE_CHECKING
+from collections import Counter
 import pandas as pd
 
 if TYPE_CHECKING:
@@ -63,16 +64,27 @@ class StockSelectionWindow(tk.Toplevel):
         toolbar = tk.Frame(self, bd=1, relief="raised")
         toolbar.pack(fill="x", padx=5, pady=5)
         
-        # Actions
-        tk.Button(toolbar, text="🔄 重新运行策略", command=lambda: self.load_data(force=True)).pack(side="left", padx=5, pady=5)
+        # Concept Filter
+        tk.Label(toolbar, text="板块筛选:", font=("Arial", 10)).pack(side="left", padx=2)
+        tk.Button(toolbar, text="🧹", command=self.clear_filter, width=2).pack(side="left", padx=1)
+        self.concept_filter_var: tk.StringVar = tk.StringVar()
+        self.concept_combo: ttk.Combobox = ttk.Combobox(toolbar, textvariable=self.concept_filter_var, width=10)
+        self.concept_combo['values'] = self.history
+        self.concept_combo.pack(side="left", padx=2)
+
+        tk.Button(toolbar, text="🔍", command=self.on_filter_search, width=3).pack(side="left", padx=1)
+        tk.Button(toolbar, text="🗑️", command=self.delete_current_history, width=2, fg="red").pack(side="left", padx=1)
+
+        tk.Button(toolbar, text="✅[选中]", command=lambda: self.mark_status("选中"), bg="#c8e6c9").pack(side="left", padx=1)
+        tk.Button(toolbar, text="❌[丢弃]", command=lambda: self.mark_status("丢弃"), bg="#ffcdd2").pack(side="left", padx=1)
         
-        tk.Frame(toolbar, width=20).pack(side="left") # Spacer
+        tk.Frame(toolbar, width=10).pack(side="left") # Spacer
 
         # Feedback controls
-        tk.Label(toolbar, text="人工标注:", font=("Arial", 10, "bold")).pack(side="left", padx=5)
+        tk.Label(toolbar, text="标注:", font=("Arial", 10, "bold")).pack(side="left", padx=5)
         
         self.reason_var: tk.StringVar = tk.StringVar()
-        self.reason_combo: ttk.Combobox = ttk.Combobox(toolbar, textvariable=self.reason_var, width=15, state="readonly")
+        self.reason_combo: ttk.Combobox = ttk.Combobox(toolbar, textvariable=self.reason_var, width=8, state="readonly")
         self.reason_combo['values'] = [
             "符合策略", "形态完美", "量能配合", "板块热点", # Positive
             "风险过高", "趋势破坏", "非热点", "量能不足", "位置过高", "其他" # Negative
@@ -80,26 +92,15 @@ class StockSelectionWindow(tk.Toplevel):
         self.reason_combo.current(0)
         self.reason_combo.pack(side="left", padx=2)
         
-        
-        tk.Button(toolbar, text="✅ 标记[选中]", command=lambda: self.mark_status("选中"), bg="#c8e6c9").pack(side="left", padx=2)
-        tk.Button(toolbar, text="❌ 标记[丢弃]", command=lambda: self.mark_status("丢弃"), bg="#ffcdd2").pack(side="left", padx=2)
-        
-        tk.Frame(toolbar, width=30).pack(side="left") # Spacer
-        
-        # Concept Filter
-        tk.Label(toolbar, text="板块筛选:", font=("Arial", 10)).pack(side="left", padx=2)
-        self.concept_filter_var: tk.StringVar = tk.StringVar()
-        self.concept_combo: ttk.Combobox = ttk.Combobox(toolbar, textvariable=self.concept_filter_var, width=15)
-        self.concept_combo['values'] = self.history
-        self.concept_combo.pack(side="left", padx=2)
-        
         # 绑定回车和选中事件
         self.concept_combo.bind('<Return>', self.on_filter_search)
         self.concept_combo.bind('<<ComboboxSelected>>', self.on_filter_search)
         
-        tk.Button(toolbar, text="🔍", command=self.on_filter_search, width=3).pack(side="left", padx=1)
+        # Actions
+        tk.Button(toolbar, text="🔄 运行策略", command=lambda: self.load_data(force=True)).pack(side="left", padx=5, pady=5)
+        tk.Frame(toolbar, width=20).pack(side="right") # Spacer
 
-        tk.Button(toolbar, text="🚀 确认导入选中股", command=self.import_selected, bg="#ffd54f", font=("Arial", 10, "bold")).pack(side="right", padx=10, pady=5)
+        tk.Button(toolbar, text="🚀 导入选中", command=self.import_selected, bg="#ffd54f", font=("Arial", 10, "bold")).pack(side="right", padx=10, pady=5)
 
         # --- Main List ---
         # Columns
@@ -163,6 +164,7 @@ class StockSelectionWindow(tk.Toplevel):
                 self.df_candidates = pd.DataFrame()
                 
             if self.df_candidates.empty:
+                self._update_title_stats()
                 # messagebox.showinfo("提示", "策略未筛选出任何标的")
                 return
 
@@ -177,9 +179,12 @@ class StockSelectionWindow(tk.Toplevel):
                     ]
             
             if self.df_candidates.empty:
+                 self._update_title_stats()
                  # Don't show info if it's just a filter result
                  # messagebox.showinfo("提示", "筛选后无数据")
                  return
+            
+            self._update_title_stats()
 
             # Init user columns
             self.df_candidates['user_status'] = "待定"
@@ -195,6 +200,32 @@ class StockSelectionWindow(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("错误", f"加载数据失败: {e}")
 
+    def _update_title_stats(self):
+        """更新窗口标题统计信息：显示总数与最主要的Top 3机选理由"""
+        base_title = "策略选股 & 人工复核"
+        if self.df_candidates.empty:
+            self.title(f"{base_title} (结果: 0)")
+            return
+            
+        all_tags = []
+        # 'reason' 列存储了机选理由，可能由 '|' 分隔
+        for r in self.df_candidates['reason'].dropna():
+            tags = [t.strip() for t in str(r).split('|') if t.strip()]
+            all_tags.extend(tags)
+            
+        counter = Counter(all_tags)
+        # 获取 Top 3 理由
+        top3 = counter.most_common(3)
+        
+        total = len(self.df_candidates)
+        if top3:
+            stats_str = " | ".join([f"{tag}({count})" for tag, count in top3])
+            new_title = f"{base_title} - [共{total}条 | 理由频次: {stats_str}]"
+        else:
+            new_title = f"{base_title} - [共{total}条]"
+            
+        self.title(new_title)
+
     # === 历史记录与筛选逻辑 ===
     def load_history(self) -> list[str]:
         """从文件加载查询历史"""
@@ -203,11 +234,9 @@ class StockSelectionWindow(tk.Toplevel):
             if os.path.exists(self.history_file):
                 with open(self.history_file, 'r', encoding='utf-8') as f:
                     history = json.load(f)
-                    # 确保预设的热点在列表里（如果历史为空或旧）
-                    for hs in reversed(default_hotspots):
-                        if hs not in history:
-                            history.insert(0, hs)
-                    return history
+                    if isinstance(history, list):
+                        return history
+            # 文件不存在或格式错误，返回默认热点
             return default_hotspots
         except Exception as e:
             print(f"加载历史失败: {e}")
@@ -234,6 +263,34 @@ class StockSelectionWindow(tk.Toplevel):
                 json.dump(self.history, f, ensure_ascii=False, indent=4)
         except Exception as e:
             print(f"保存历史失败: {e}")
+
+    def clear_filter(self):
+        """清空筛选条件并查看全部结果"""
+        self.concept_filter_var.set("")
+        self.load_data()
+
+    def delete_current_history(self):
+        """删除当前选中的历史记录"""
+        query = self.concept_filter_var.get().strip()
+        if not query:
+            return
+            
+        if query in self.history:
+            if messagebox.askyesno("确认", f"确定要从历史记录中删除 '{query}' 吗？", parent=self):
+                self.history.remove(query)
+                # 更新 UI
+                self.concept_combo['values'] = self.history
+                self.concept_filter_var.set("") # 清空输入框
+                
+                # 保存到文件
+                try:
+                    with open(self.history_file, 'w', encoding='utf-8') as f:
+                        json.dump(self.history, f, ensure_ascii=False, indent=4)
+                except Exception as e:
+                    print(f"删除历史失败: {e}")
+                
+                # 重新加载数据（因为关键词清空了）
+                self.load_data()
 
     def on_filter_search(self, event: Optional[Any] = None):
         """执行查询并记录历史"""
