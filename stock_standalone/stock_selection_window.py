@@ -193,6 +193,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         # Bindings
         self.tree.bind("<ButtonRelease-1>", self.on_select)
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
+        self.tree.bind("<Button-3>", self.show_context_menu)
     def load_data(self, force=False):
         # Clear
         for item in self.tree.get_children():
@@ -215,9 +216,13 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 # Support multi-keywords with space
                 keywords = filter_str.split()
                 for kw in keywords:
-                    self.df_candidates = self.df_candidates[
-                        self.df_candidates['category'].str.contains(kw, na=False)
-                    ]
+                    # Generic search: Code, Name, or Category
+                    mask = (
+                        self.df_candidates['category'].str.contains(kw, na=False) | 
+                        self.df_candidates['code'].str.contains(kw, na=False) | 
+                        self.df_candidates['name'].str.contains(kw, na=False)
+                    )
+                    self.df_candidates = self.df_candidates[mask]
             
             if self.df_candidates.empty:
                  self._update_title_stats()
@@ -540,3 +545,40 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             self.tree.move(k, '', index)
 
         self.tree.heading(col, command=lambda: self.sort_tree(col, not reverse))
+
+    def show_context_menu(self, event):
+        """显示右键菜单"""
+        item_id = self.tree.identify_row(event.y)
+        if not item_id:
+            return
+
+        self.tree.selection_set(item_id)
+        code = item_id
+
+        menu = tk.Menu(self, tearoff=0)
+
+        # 定义命令（先保存）
+        cmd = lambda: self.tree_scroll_to_code(code)
+
+        menu.add_command(
+            label=f"定位股票代码: {code}",
+            command=cmd
+        )
+
+        # === 关键逻辑 ===
+        if menu.index("end") == 0:
+            # 只有一项，直接执行
+            cmd()
+        else:
+            # 多项才弹出菜单
+            menu.post(event.x_root, event.y_root)
+    
+
+    def tree_scroll_to_code(self, code: str):
+        """定位股票代码 (通过筛选器)"""
+        if hasattr(self, 'master') and hasattr(self.master, 'tree_scroll_to_code'):
+            self.master.tree_scroll_to_code(code)
+        # elif hasattr(self, 'concept_filter_var'):
+        #     self.concept_filter_var.set(code)
+        #     self.on_filter_search()
+

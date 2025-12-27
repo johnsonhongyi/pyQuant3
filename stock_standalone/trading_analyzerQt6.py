@@ -1,8 +1,11 @@
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
-    QTableWidgetItem, QLabel, QComboBox
+    QTableWidgetItem, QLabel, QComboBox, QMenu
 )
+from PyQt6.QtCore import pyqtSignal, QObject
+from PyQt6.QtGui import QAction
 from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QTimer
 import sys
 import pandas as pd
 
@@ -30,7 +33,10 @@ class NumericTableWidgetItem(QTableWidgetItem):
         return super().__lt__(other)
 
 class TradingGUI(QWidget):
-    def __init__(self, logger_path="./trading_signals.db", sender=None):
+    # 声明信号
+    scroll_to_code_signal = pyqtSignal(str)
+    send_status_signal = pyqtSignal(object)  # 可以接收任意对象，包括 dict
+    def __init__(self, logger_path="./trading_signals.db", sender=None,on_tree_scroll_to_code =None):
         super().__init__()
         self.setWindowTitle("策略交易分析工具")
         self.setGeometry(100, 100, 1000, 600)
@@ -82,20 +88,32 @@ class TradingGUI(QWidget):
         self.report_area.setVisible(False)
         self.layout.addWidget(self.report_area)
 
+        self.on_tree_scroll_to_code = on_tree_scroll_to_code 
+
+        # 绑定信号
+        self.scroll_to_code_signal.connect(self._safe_scroll_to_code)
+        self.send_status_signal.connect(self._safe_update_send_status)
+        
         # === 股票发送器 ===
         if sender is not None:
             self.sender = sender
+            if hasattr(self.sender, "callback"):
+                original_cb = self.sender.callback
+                def safe_callback(status_dict):
+                    self.send_status_signal.emit(status_dict)
+                    if callable(original_cb):
+                        original_cb(status_dict)
+                self.sender.callback = safe_callback
         else:
-            self.sender = StockSender(
-                # self.tdx_var,
-                # self.ths_var,
-                # self.dfcf_var,
-                callback=self.update_send_status
-            )
+            self.sender = StockSender(callback=self.update_send_status)
 
         # 表格点击与切换信号
         _ = self.table.cellClicked.connect(self.on_table_row_clicked)
         _ = self.table.currentCellChanged.connect(self.on_current_cell_changed)
+        
+        # 添加右键菜单策略
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        _ = self.table.customContextMenuRequested.connect(self.show_context_menu)
 
         # 初始化表格数据
         self.refresh_table()
@@ -312,8 +330,63 @@ class TradingGUI(QWidget):
             if stock_code:
                 self.sender.send(stock_code)
         except Exception as e:
-            print(f"Error sending stock code from table: {e}")
+            print(f"Error sending stock code: {e}")
 
+    def show_context_menu(self, pos):
+        """显示右键菜单"""
+        item = self.table.itemAt(pos)
+        if item is None:
+            return
+
+        row = item.row()
+        df = self.get_current_df()
+        if df is None or df.empty:
+            return
+
+        code_col = None
+        for c in df.columns:
+            if c.lower() in ("code", "stock_code", "ts_code"):
+                code_col = c
+                break
+        if not code_col:
+            return
+
+        try:
+            stock_code = str(df.iloc[row][code_col]).strip()
+        except Exception:
+            return
+        if not stock_code:
+            return
+
+        menu = QMenu(self)
+        locate_action = QAction(f"定位股票代码: {stock_code}", self)
+        locate_action.triggered.connect(
+            lambda: self.tree_scroll_to_code(stock_code)
+        )
+        menu.addAction(locate_action)
+        
+        # 只有一项菜单时直接执行
+        if menu.actions():
+            if len(menu.actions()) == 1:
+                QTimer.singleShot(0, lambda: self.tree_scroll_to_code(stock_code))
+            else:
+                menu.exec(self.table.mapToGlobal(pos))
+        
+
+    def tree_scroll_to_code(self, stock_code):
+        """线程安全调用"""
+        self.scroll_to_code_signal.emit(stock_code)
+
+    def _safe_scroll_to_code(self, stock_code):
+        """Qt 主线程执行"""
+        if callable(self.on_tree_scroll_to_code):
+            self.on_tree_scroll_to_code(stock_code)
+        else:
+            self.stock_input.setCurrentText(stock_code)
+            
+    def _safe_update_send_status(self, msg):
+        """Qt 主线程安全更新状态"""
+        self.label_summary.setText(f"发送状态: {msg}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
