@@ -95,6 +95,7 @@ if sys.platform.startswith('win'):
     # logger.info(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
 
 from PyQt6 import QtWidgets, QtCore, QtGui
+from trading_analyzerQt6 import TradingGUI
 
 # ✅ 性能优化模块导入
 try:
@@ -1014,7 +1015,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","复盘数据", "盈亏统计", "覆写TDX", "手札总览", "语音预警"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","复盘数据", "盈亏统计", "交易分析Qt6", "覆写TDX", "手札总览", "语音预警"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -1047,6 +1048,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.open_voice_monitor_manager()
             elif action == "盈亏统计":
                 self.open_trade_report_window()
+            elif action == "交易分析Qt6":
+                self.open_trading_analyzer_qt6()
             elif action == "复盘数据":
                 self.open_strategy_backtest_view()
 
@@ -3973,7 +3976,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         refresh_summary()
 
 
-    
+    def open_trading_analyzer_qt6(self):
+        """打开 Qt6 版本的交易分析工具"""
+        try:
+            if not hasattr(self, "_trading_gui_qt6") or self._trading_gui_qt6 is None:
+                # 确保 Qt 环境已初始化
+                if not QtWidgets.QApplication.instance():
+                    _ = pg.mkQApp()
+                
+                self._trading_gui_qt6 = TradingGUI(sender=self.sender)
+                
+            self._trading_gui_qt6.show()
+            self._trading_gui_qt6.raise_()
+            self._trading_gui_qt6.activateWindow()
+            toast_message(self, "交易分析工具(Qt6) 已启动")
+        except Exception as e:
+            logger.error(f"Failed to open TradingGUI Qt6: {e}")
+            messagebox.showerror("错误", f"启动 Qt6 分析工具失败: {e}")
+
     def open_strategy_backtest_view(self):
         """预留：打开策略复盘与AI优化建议视图"""
         messagebox.showinfo("敬请期待", "复盘功能正在开发中，将结合您的反馈进行模型微调。")
