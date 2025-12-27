@@ -93,8 +93,9 @@ class TradingGUI(QWidget):
                 callback=self.update_send_status
             )
 
-        # 表格点击信号
-        self.table.cellClicked.connect(self.on_table_row_clicked)
+        # 表格点击与切换信号
+        _ = self.table.cellClicked.connect(self.on_table_row_clicked)
+        _ = self.table.currentCellChanged.connect(self.on_current_cell_changed)
 
         # 初始化表格数据
         self.refresh_table()
@@ -261,24 +262,40 @@ class TradingGUI(QWidget):
     def update_send_status(self, msg: str):
         self.label_summary.setText(f"发送状态: {msg}")
 
+    def on_current_cell_changed(self, row: int, column: int, prev_row: int, _: int):
+        """
+        当通过键盘上下键切换行时，也触发发送
+        """
+        if row < 0 or row == prev_row:
+            return
+        
+        # 对于按键切换，我们放宽限制：只要行变了，就尝试发送（不强制要求特定列）
+        self._trigger_stock_linkage(row, column, force_send=True)
+
     def on_table_row_clicked(self, row: int, column: int):
         """
         仅当点击 code / name 列时，发送股票代码
+        """
+        self._trigger_stock_linkage(row, column, force_send=False)
+
+    def _trigger_stock_linkage(self, row: int, column: int, force_send: bool = False):
+        """
+        统一的触发发送逻辑
+        :param force_send: 如果为 True，则忽略列过滤
         """
         df = self.get_current_df()
         if df is None or df.empty:
             return
 
-        # 当前点击的列名
-        try:
-            clicked_col = df.columns[column].lower()
-        except Exception:
-            return
-
-        # 只允许这些列触发
-        trigger_cols = {"code", "stock_code", "ts_code", "name"}
-        if clicked_col not in trigger_cols:
-            return
+        # 检查触发列
+        if not force_send:
+            try:
+                clicked_col = df.columns[column].lower()
+            except Exception:
+                return
+            trigger_cols = {"code", "stock_code", "ts_code", "name"}
+            if clicked_col not in trigger_cols:
+                return
 
         # 找到 code 列（发送始终以 code 为准）
         code_col = None
@@ -290,11 +307,12 @@ class TradingGUI(QWidget):
         if not code_col:
             return
 
-        stock_code = str(df.iloc[row][code_col]).strip()
-        if not stock_code:
-            return
-
-        self.sender.send(stock_code)
+        try:
+            stock_code = str(df.iloc[row][code_col]).strip()
+            if stock_code:
+                self.sender.send(stock_code)
+        except Exception as e:
+            print(f"Error sending stock code from table: {e}")
 
 
 if __name__ == "__main__":

@@ -70,9 +70,87 @@ class TradingLogger:
                 )
             """)
             conn.commit()
+            # 3. 每日选股记录表 (StockSelector 结果)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS selection_history (
+                    date TEXT,
+                    code TEXT,
+                    name TEXT,
+                    score REAL,
+                    price REAL,
+                    percent REAL,
+                    volume REAL,
+                    reason TEXT,
+                    ma5 REAL,
+                    ma10 REAL,
+                    category TEXT,
+                    PRIMARY KEY (date, code)
+                )
+            """)
+            conn.commit()
             conn.close()
         except Exception as e:
             logger.error(f"DB Init Error: {e}")
+
+    def log_selection(self, records: list[dict[str, Any]]) -> None:
+        """
+        批量记录选股结果
+        records: 包含 date, code, name, score, price, percent, volume, reason, ma5, ma10, category 的字典列表
+        """
+        if not records:
+            return
+            
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            
+            # 使用事务批量插入
+            cur.executemany("""
+                INSERT OR REPLACE INTO selection_history (date, code, name, score, price, percent, volume, reason, ma5, ma10, category)
+                VALUES (:date, :code, :name, :score, :price, :percent, :volume, :reason, :ma5, :ma10, :category)
+            """, records)
+            
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error logging selections: {e}")
+
+    def get_selections_df(self, date: Optional[str] = None) -> Any:
+        """
+        获取选股历史，返回 DataFrame (为了解耦不强制在此文件 import pandas，返回 list[dict] 或由调用方转 df)
+        但考虑到便利性，这里如果环境有 pandas 则返回 df，否则返回 list
+        """
+        try:
+            import pandas as pd
+        except ImportError:
+            pd = None
+
+        conn = sqlite3.connect(self.db_path)
+        query = "SELECT * FROM selection_history WHERE 1=1"
+        params = []
+        if date:
+            query += " AND date = ?"
+            params.append(date)
+        
+        # 按分数倒序
+        query += " ORDER BY date DESC, score DESC"
+        
+        try:
+            if pd:
+                df = pd.read_sql_query(query, conn, params=params)
+                conn.close()
+                return df
+            else:
+                cur = conn.cursor()
+                cur.execute(query, params)
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                results = [dict(zip(cols, row)) for row in rows]
+                conn.close()
+                return results
+        except Exception as e:
+            logger.error(f"Error getting selections: {e}")
+            return pd.DataFrame() if pd else []
 
     def log_signal(self, code: str, name: str, price: float, decision_dict: dict[str, Any], row_data: Optional[dict[str, Any]] = None) -> None:
         """

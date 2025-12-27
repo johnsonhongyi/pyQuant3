@@ -26,12 +26,22 @@ class StockSelector:
     1. 读取 g:\\top_all.h5 数据
     2. 基于技术指标筛选强势股 (趋势、量能、结构)
     3. 生成筛选日志，用于后续分析优化
-    """
-    def __init__(self, log_path="selection_log.csv", df: Optional[pd.DataFrame] = None):
+    """
+    # def __init__(self, log_path="selection_log.csv", df: Optional[pd.DataFrame] = None):
+    def __init__(self, df: Optional[pd.DataFrame] = None):
         self.data_path = r'g:\top_all.h5'
-        self.log_path = log_path
+        # self.log_path = log_path # Deprecated: moved to SQLite
         self.df_all_realtime = df  # 实时数据引用
         self._setup_logger()
+        
+        self.db_logger: Optional['TradingLogger'] = None
+        # 初始化数据库记录器
+        try:
+            from trading_logger import TradingLogger
+            self.db_logger = TradingLogger()
+        except ImportError:
+            self.logger.error("无法导入 TradingLogger，无法使用数据库存储功能")
+
         # 初始化决策引擎（可选，用于辅助判断）
         self.decision_engine = IntradayDecisionEngine() if IntradayDecisionEngine else None
 
@@ -117,7 +127,8 @@ class StockSelector:
         for code, row in df_active.iterrows():
             # 将 Series 转为 dict 方便处理
             data = row.to_dict()
-            data['code'] = code
+            code_str = str(code).zfill(6)
+            data['code'] = code_str
             
             # --- 筛选核心逻辑 ---
             # 利用 data_utils.py 生成的预处理字段: upper1d, lastp1d, lastl1d 等
@@ -261,7 +272,7 @@ class StockSelector:
                 
                 record = {
                     'date': today,
-                    'code': code,
+                    'code': code_str,
                     'name': data.get('name', ''),
                     'score': score,
                     'price': price,
@@ -284,33 +295,21 @@ class StockSelector:
             df_selected.sort_values(by='score', ascending=False, inplace=True)
             self.logger.info(f"筛选完成，命中 {len(df_selected)} 只股票")
             
-            # 保存日志
+            # 保存日志 (升级为 SQLite)
             self.save_selection_log(df_selected)
             
         return df_selected
 
     def save_selection_log(self, df_selected: pd.DataFrame):
-        """保存筛选结果到日志文件, 每天只保留最后一次运行的数据"""
-        if df_selected.empty:
+        """保存筛选结果到数据库"""
+        if df_selected.empty or self.db_logger is None:
             return
             
-        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        # 强制 key 为 str
+        records = [{str(k): v for k, v in record.items()} for record in df_selected.to_dict('records')]
+        self.db_logger.log_selection(records)
         
-        if os.path.exists(self.log_path):
-            try:
-                df_old = pd.read_csv(self.log_path, encoding='utf-8', dtype={'code': str})
-                # 删除今日旧数据
-                df_old = df_old[df_old['date'] != today]
-                # 合并
-                df_new = pd.concat([df_old, df_selected], ignore_index=True)
-                df_new.to_csv(self.log_path, index=False, encoding='utf-8')
-            except Exception as e:
-                self.logger.error(f"更新日志失败, 尝试直接保存: {e}")
-                df_selected.to_csv(self.log_path, index=False, encoding='utf-8')
-        else:
-            df_selected.to_csv(self.log_path, index=False, encoding='utf-8')
-        
-        self.logger.info(f"筛选日志已更新 (今日数据已覆盖): {self.log_path}")
+        self.logger.info(f"筛选结果已保存至数据库 (SQLite): {len(records)} 条")
         
     def get_candidate_codes(self) -> List[str]:
         """获取筛选出的代码列表，供 stock_live_strategy 调用"""
@@ -322,18 +321,21 @@ class StockSelector:
     def get_candidates_df(self, force=False) -> pd.DataFrame:
         """
         获取筛选结果。
-        :param force: 是否强制重新运行策略。如果为 False，则优先从本地日志加载今日已存数据。
+        :param force: 是否强制重新运行策略。如果为 False，则优先从数据库加载今日已存数据。
         """
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         
-        # 非强制模式下，先检查今日是否有存量数据
-        if not force and os.path.exists(self.log_path):
+        # 非强制模式下，先检查今日是否有存量数据 (From SQLite)
+        if not force and self.db_logger:
             try:
-                df_log = pd.read_csv(self.log_path, encoding='utf-8', dtype={'code': str})
-                df_today = df_log[df_log['date'] == today].copy()
+                df_today = self.db_logger.get_selections_df(date=today)
+                
+                # 如果返回的是 list (pandas import fail)，转 df
+                if isinstance(df_today, list):
+                    df_today = pd.DataFrame(df_today)
+
                 if not df_today.empty:
-                    self.logger.info(f"检测到今日已运行过策略，加载存量数据: {len(df_today)} 条")
-                    # 补充必要的 code zfill
+                    self.logger.info(f"检测到今日已运行过策略 (DB)，加载存量数据: {len(df_today)} 条")
                     if 'code' in df_today.columns:
                         df_today['code'] = df_today['code'].apply(lambda x: str(x).zfill(6))
                     return df_today
