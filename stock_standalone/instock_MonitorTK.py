@@ -4130,18 +4130,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     add_time = data.get('created_time', '')
                     tags = data.get('tags', '')
                     
-                    for idx, rule in enumerate(rules):
-                        rtype_map = {
-                            "price_up": "价格突破 >=",
-                            "price_down": "价格跌破 <=",
-                            "change_up": "涨幅超过 >="
-                        }
-                        display_type = rtype_map.get(rule['type'], rule['type'])
-                        # unique id
-                        uid = f"{code}_{idx}"
-                        tree.insert("", "end", values=(code, name, display_type, rule['value'], add_time, tags, uid))
+                    if not rules:
+                        # 对于没有规则的股票，显示一行占位，方便管理
+                        uid = f"{code}_none"
+                        tree.insert("", "end", values=(code, name, "⚠️(未设规则)", "-", add_time, tags, uid))
+                    else:
+                        for idx, rule in enumerate(rules):
+                            rtype_map = {
+                                "price_up": "价格突破 >=",
+                                "price_down": "价格跌破 <=",
+                                "change_up": "涨幅超过 >="
+                            }
+                            display_type = rtype_map.get(rule['type'], rule['type'])
+                            # unique id
+                            uid = f"{code}_{idx}"
+                            tree.insert("", "end", values=(code, name, display_type, rule['value'], add_time, tags, uid))
 
             load_data()
+            win.refresh_list = load_data
+            self._voice_monitor_window = win
 
             # --- 动态添加 "策略选股" 按钮 (New) ---
             tk.Button(top_frame, text="策略选股...", command=self.open_stock_selection_window, bg="#fff9c4", font=("Arial", 9, "bold")).pack(side="right", padx=5)
@@ -4194,11 +4201,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                      # 最稳妥的是：倒序删除，或者重新加载。
                      # 我们的界面是单选还是多选？Treeview 默认多选。
                      # 简单处理：只处理第一个
-                     try:
-                        idx = int(uid.split('_')[1])
-                        self.live_strategy.remove_rule(code, idx)
-                     except:
-                        pass
+                     # 简单处理：只处理第一个
+                     # 处理特殊标记 'code_none'
+                     if self.live_strategy:
+                         if uid.endswith('_none'):
+                             # 如果没有规则，删除操作即移除该监控项
+                             self.live_strategy.remove_monitor(code)
+                         else:
+                             try:
+                                 idx = int(uid.split('_')[1])
+                                 self.live_strategy.remove_rule(code, idx)
+                             except:
+                                 pass
                      break # 仅删一个，防止索引错乱
                 
                 load_data()
@@ -4251,7 +4265,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                  name = values[1]
                  old_val = values[3]
                  uid = values[6]
-                 idx = int(uid.split('_')[1])
+                 if uid.endswith('_none'):
+                     idx = -1
+                 else:
+                     try:
+                         idx = int(uid.split('_')[1])
+                     except:
+                         idx = -1
                  # logger.info(f'on_voice_edit_selected stock_code:{code} name:{name}')
                  
                  current_type = "price_up"
@@ -4388,7 +4408,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                          val = float(e_new.get())
                          new_type = new_type_var.get()
                          
-                         self.live_strategy.update_rule(code, idx, new_type, val)
+                         if self.live_strategy:
+                             if idx >= 0:
+                                 self.live_strategy.update_rule(code, idx, new_type, val)
+                             else:
+                                 # 新增规则 (原来的占位行)
+                                 self.live_strategy.add_monitor(code, name, new_type, val)
                          
                          load_data()
                          edit_win.on_close()

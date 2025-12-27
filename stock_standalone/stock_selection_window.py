@@ -30,7 +30,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         
         window_id = "策略选股"
         # 加载窗口位置
-        self.load_window_position(self, window_id, default_width=1200, default_height=700)
+        self.load_window_position(self, window_id, default_width=900, default_height=500)
         
         self.live_strategy: Optional['StockLiveStrategy'] = live_strategy
         self.selector: Optional['StockSelector'] = stock_selector
@@ -465,7 +465,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 })
             
             if status == "选中":
-                to_import.append(code)
+                price = values[3]
+                to_import.append((code, name, price))
         
         if not to_import:
             if not messagebox.askyesno("确认", "未标记任何[选中]的股票。\n是否仅保存反馈并关闭？"):
@@ -476,24 +477,40 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             count = 0
             if hasattr(self.live_strategy, '_monitored_stocks'):
                 existing = self.live_strategy._monitored_stocks
-                for code in to_import:
+                for code, name, price in to_import:
                     if code not in existing:
                         existing[code] = {
-                            "rules": [], # Empty rules, will be auto-filled or manual
+                            "rules": [
+                                {"type": "price_up", "value": float(price)}
+                            ],
                             "last_alert": 0,
                             "created_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
                             "tags": "auto_verify", 
                             "snapshot": {},
-                            "name": "" # Name will be filled by system
+                            "name": name
                         }
                         count += 1
+                    else:
+                        # 如果已存在但没有规则，添加默认规则
+                        if not existing[code].get('rules'):
+                            existing[code]['rules'] = [{"type": "price_up", "value": float(price)}]
+                            count += 1
+                        # 确保名称不为空
+                        if not existing[code].get('name'):
+                            existing[code]['name'] = name
                 
                 if count > 0:
                     if hasattr(self.live_strategy, '_save_monitors'):
                         self.live_strategy._save_monitors()
+                    
+                    # 尝试通知语音监控窗口刷新 (如果已打开)
+                    vm_win = getattr(self.master, '_voice_monitor_window', None)
+                    if vm_win and vm_win.winfo_exists() and hasattr(vm_win, 'refresh_list'):
+                        vm_win.refresh_list()
+                        
                     messagebox.showinfo("成功", f"成功导入 {count} 只新股票到监控列表！")
                 else:
-                    messagebox.showinfo("提示", "所选股票已在监控列表中。")
+                    messagebox.showinfo("提示", "所选股票已在监控列表中且已有活跃规则。")
         
         # 2. Save Feedback
         self.save_feedback(feedback_data)
