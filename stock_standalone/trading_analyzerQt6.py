@@ -379,10 +379,11 @@ class TradingGUI(QWidget):
 
     def _safe_scroll_to_code(self, stock_code):
         """Qt 主线程执行"""
-        if callable(self.on_tree_scroll_to_code):
-            self.on_tree_scroll_to_code(stock_code)
-        else:
-            self.stock_input.setCurrentText(stock_code)
+        # if callable(self.on_tree_scroll_to_code):
+        #     self.on_tree_scroll_to_code(stock_code)
+        # else:
+        #     self.stock_input.setCurrentText(stock_code)
+        pass
             
     def _safe_update_send_status(self, msg):
         """Qt 主线程安全更新状态"""
