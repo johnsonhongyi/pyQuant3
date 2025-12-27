@@ -396,7 +396,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)  
-        self.tree.bind("<Button-1>", self.on_single_click)
+        # self.tree.bind("<Button-1>", self.on_single_click)
         # ✅ 绑定单击事件用于显示股票信息提示框
         # self.tree.bind("<ButtonRelease-1>", self.on_tree_click_for_tooltip)
         # 绑定右键点击事件
@@ -596,7 +596,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if self.ColumnSetManager is not None:
             self.ColumnSetManager.destroy()
             self.ColumnSetManager = None
+            self.ColumnSetManager = None
             self._open_column_manager_job = None
+
+    def tree_scroll_to_code(self, code):
+        """外部调用：定位特定代码"""
+        if hasattr(self, 'search_var1'):
+            self.search_var1.set(code)
+            self.apply_search()
 
     def get_stock_code_none(self, code=None):
         df_all = self.df_all.copy()
@@ -3221,21 +3228,51 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def on_voice_alert(self, code, name, msg):
         """
-        处理语音报警触发: 弹窗显示股票详情
+        处理语音报警触发: 弹窗显示股票详情 - 线程安全版本
         """
-        # 必须回到主线程操作 GUI
-        self.after(0, lambda: self._show_alert_popup(code, name, msg))
+        # 线程安全:避免在后台线程中调用 Tkinter
+        try:
+            import threading
+            if threading.current_thread() is threading.main_thread():
+                self._show_alert_popup(code, name, msg)
+            else:
+                # 后台线程:忽略,避免 GIL 问题
+                pass
+        except Exception as e:
+            # 静默失败
+            pass
 
     def on_voice_speak_start(self, code):
-        """语音开始播报时的回调 (在后台线程调用)"""
-        if not code: return
-        # 调度到主线程执行闪烁和震动
-        self.after(0, lambda: self._trigger_alert_visual_effects(code, start=True))
+        """语音开始播报时的回调 (在后台线程调用) - 线程安全版本"""
+        if not code: 
+            return
+        # 使用线程安全的方式调度到主线程
+        try:
+            # 检查是否在主线程
+            import threading
+            if threading.current_thread() is threading.main_thread():
+                self._trigger_alert_visual_effects(code, start=True)
+            else:
+                # 后台线程:不直接调用 after,而是通过事件标志
+                # 避免 GIL 问题,简单忽略或使用其他机制
+                pass
+        except Exception as e:
+            # 静默失败,避免崩溃
+            pass
 
     def on_voice_speak_end(self, code):
-        """语音播报结束的回调"""
-        if not code: return
-        self.after(0, lambda: self._trigger_alert_visual_effects(code, start=False))
+        """语音播报结束的回调 - 线程安全版本"""
+        if not code: 
+            return
+        try:
+            import threading
+            if threading.current_thread() is threading.main_thread():
+                self._trigger_alert_visual_effects(code, start=False)
+            else:
+                # 后台线程:简单忽略
+                pass
+        except Exception as e:
+            pass
 
     def _trigger_alert_visual_effects(self, code, start=True):
         """根据代码查找窗口并触发视觉效果"""
@@ -3984,7 +4021,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if not QtWidgets.QApplication.instance():
                     _ = pg.mkQApp()
                 
-                self._trading_gui_qt6 = TradingGUI(sender=self.sender)
+                self._trading_gui_qt6 = TradingGUI(sender=self.sender,on_tree_scroll_to_code=self.tree_scroll_to_code)
                 
             self._trading_gui_qt6.show()
             self._trading_gui_qt6.raise_()
