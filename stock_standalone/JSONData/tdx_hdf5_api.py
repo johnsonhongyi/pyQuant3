@@ -12,6 +12,7 @@ from JohnsonUtil import LoggerFactory
 # from JohnsonUtil.commonTips import get_ramdisk_dir
 # print get_ramdisk_dir()
 from JohnsonUtil import commonTips as cct
+from JohnsonUtil.commonTips import timed_ctx
 from JohnsonUtil import johnson_cons as ct
 import random
 import numpy as np
@@ -27,106 +28,403 @@ BaseDir = cct.get_ramdisk_dir()
 import tables
 import psutil
 
-# import pandas as pd
-# import numpy as np
+from contextlib import contextmanager
 
-# def prepare_df_for_hdf5(df, verbose=False):
-#     if df is None or df.empty:
-#         return df
-
-#     start_mem = df.memory_usage().sum() / 1024 ** 2
-
-#     # -----------------------------
-#     # 1. 处理 categorical 列
-#     # -----------------------------
-#     for col in df.select_dtypes('category'):
-#         # 如果会填充 0，则先确保类别包含 0
-#         if 0 not in df[col].cat.categories:
-#             df[col] = df[col].cat.add_categories([0])
-
-#     # -----------------------------
-#     # 2. 处理 object 列
-#     # -----------------------------
-#     for col in df.select_dtypes('object'):
-#         # if col == 'MainU':
-#         #     # 转掩码
-#         #     df[col] = df[col].apply(
-#         #         lambda x: sum(1 << int(i) for i in str(x).split(',') if i.isdigit()) if pd.notna(x) and x != '0' else 0
-#         #     ).astype('int32')
-#         if col == 'status':
-#             df[col] = df[col].astype('category')
-#         elif col == 'hangye':
-#             df[col] = df[col].replace(0, '未知').astype('category')
-#         elif col == 'date':
-#             df[col] = pd.to_datetime(df[col], errors='coerce')
-#         else:
-#             # 混合类型列统一转字符串
-#             df[col] = df[col].astype(str)
-
-#     # -----------------------------
-#     # 3. 数值列瘦身
-#     # -----------------------------
-#     numerics = ["int8","int16","int32","int64","float16","float32","float64"]
-#     for col in df.select_dtypes(include=numerics).columns:
-#         col_type = df[col].dtype
-#         c_min = df[col].min()
-#         c_max = df[col].max()
-#         if str(col_type)[:3] == 'int':
-#             if c_min >= np.iinfo(np.int8).min and c_max <= np.iinfo(np.int8).max:
-#                 df[col] = df[col].astype(np.int8)
-#             elif c_min >= np.iinfo(np.int16).min and c_max <= np.iinfo(np.int16).max:
-#                 df[col] = df[col].astype(np.int16)
-#             elif c_min >= np.iinfo(np.int32).min and c_max <= np.iinfo(np.int32).max:
-#                 df[col] = df[col].astype(np.int32)
-#             else:
-#                 df[col] = df[col].astype(np.int64)
-#         else:  # float
-#             if c_min >= np.finfo(np.float16).min and c_max <= np.finfo(np.float16).max:
-#                 df[col] = df[col].astype(np.float16).round(2)
-#             elif c_min >= np.finfo(np.float32).min and c_max <= np.finfo(np.float32).max:
-#                 df[col] = df[col].astype(np.float32).round(2)
-#             else:
-#                 df[col] = df[col].astype(np.float64).round(2)
-
-#     # -----------------------------
-#     # 4. 填充缺失值
-#     # -----------------------------
-#     for col in df.columns:
-#         if pd.api.types.is_categorical_dtype(df[col]):
-#             # categorical 填充 0 或 '未知' 必须在类别中已存在
-#             if 0 in df[col].cat.categories:
-#                 df[col] = df[col].fillna(0)
-#             else:
-#                 df[col] = df[col].fillna(df[col].mode().iloc[0])
-#         elif pd.api.types.is_numeric_dtype(df[col]):
-#             df[col] = df[col].fillna(0)
-#         elif pd.api.types.is_datetime64_any_dtype(df[col]):
-#             df[col] = df[col].fillna(pd.Timestamp('1970-01-01'))
-#         else:
-#             df[col] = df[col].fillna('')
-
-#     end_mem = df.memory_usage().sum() / 1024 ** 2
-#     if verbose:
-#         log.info(f"Memory usage reduced from {start_mem:.2f} MB to {end_mem:.2f} MB "
-#                  f"({100 * (start_mem - end_mem) / start_mem:.1f}% reduction)")
-
-#     return df
-
-
-# # ===== 日志初始化 =====
-# log = logging.getLogger("SafeHDF")
-# log.setLevel(logging.DEBUG)
-# console_handler = logging.StreamHandler()
-# console_handler.setLevel(logging.DEBUG)
-# formatter = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s")
-# console_handler.setFormatter(formatter)
-# if not log.hasHandlers():
-#     log.addHandler(console_handler)
-
-
-
-
+# class SafeHDFStore_timed_ctx(pd.HDFStore):
 class SafeHDFStore(pd.HDFStore):
+    def __init__(self, fname, mode='a', **kwargs):
+        @contextmanager
+        def timed_ctx(name):
+            start = time.time()
+            try:
+                yield
+            finally:
+                end = time.time()
+                self.log.info(f"[timed] {name}: {end - start:.3f}s")
+
+        self.fname_o = fname
+        self.mode = mode
+        self.probe_interval = kwargs.pop("probe_interval", 2)  
+        self.lock_timeout = kwargs.pop("lock_timeout", 10)  
+        self.max_wait = 60
+        self.multiIndexsize = False
+        self.log = log
+        self.basedir = BaseDir
+        self.log.info(f'{self.fname_o.lower()} {self.basedir.lower()}')
+        self.start_time = time.time()
+        self.config_ini = os.path.join(self.basedir, 'h5config.txt')
+
+        self.complevel = 9
+        self.complib = 'zlib'
+        self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s"
+        self.h5_size_org = 0
+        global RAMDISK_KEY
+
+        # 文件路径处理
+        if self.fname_o.lower().find(self.basedir.lower()) < 0 and (self.fname_o == cct.tdx_hd5_name or self.fname_o.find('tdx_all_df') >= 0):
+            self.multiIndexsize = True
+            self.fname = cct.get_run_path_tdx(self.fname_o)
+            self.basedir = self.fname.split(self.fname_o)[0]
+            self.log.info(f"tdx_hd5: {self.fname}")
+        else:
+            self.fname = cct.get_ramdisk_path(self.fname_o)
+            self.basedir = self.fname.split(self.fname_o)[0]
+            self.log.info(f"ramdisk_hd5: {self.fname}")
+
+        if self.multiIndexsize or self.fname_o.find('sina_MultiIndex') >= 0:
+            self.big_H5_Size_limit = ct.big_H5_Size_limit * 6
+        else:
+            self.big_H5_Size_limit = ct.big_H5_Size_limit
+        self.log.info(f'self.big_H5_Size_limit :{self.big_H5_Size_limit} self.multiIndexsize :{self.multiIndexsize}')
+
+        if not os.path.exists(self.basedir):
+            if RAMDISK_KEY < 1:
+                log.error("NO RamDisk Root:%s" % (baseDir))
+                RAMDISK_KEY += 1
+        else:
+            self.temp_file = self.fname + '_tmp'
+            if os.path.exists(self.fname):
+                self.h5_size_org = os.path.getsize(self.fname) / 1e6
+
+        self._lock = self.fname + ".lock"
+        self._flock = None
+        self.write_status = os.path.exists(self.fname)
+        self.my_pid = os.getpid()
+        self.log.info(f"self.fname: {self.fname} self.basedir:{self.basedir}")
+
+        # 确保 HDF5 文件存在
+        with timed_ctx("ensure_hdf_file"):
+            self.ensure_hdf_file() 
+
+        # 父类初始化
+        with timed_ctx("hdfstore_init"):
+            super().__init__(self.fname, **kwargs)
+
+        # 锁处理
+        if self.mode != 'r':
+            with timed_ctx("acquire_lock"):
+                self._acquire_lock()
+        else:
+            with timed_ctx("wait_for_lock"):
+                self._wait_for_lock()
+
+        # 检查损坏 key
+        # with timed_ctx("check_corrupt_keys"):
+        #     self._check_and_clean_corrupt_keys()
+
+    def ensure_hdf_file(self):
+        """确保 HDF5 文件存在"""
+        if not os.path.exists(self.fname):
+            # 使用 'w' 创建空文件
+            with timed_ctx("ensure_hdf_file"):
+                pd.HDFStore(self.fname, mode='w').close()
+
+    def _check_and_clean_corrupt_keys(self, keys=None):
+        """
+        检查 HDF5 文件中的损坏 key。
+        keys: 可选，只检查传入的 key，默认检查所有 key。
+        延迟检查：只在访问或写入时才检查 key。
+        """
+        corrupt_keys = []
+        try:
+            with timed_ctx("check_corrupt_keys read"):
+                with pd.HDFStore(self.fname, mode='a') as store:
+                    keys_to_check = keys if keys else store.keys()
+                    for key in keys_to_check:
+                        try:
+                            _ = store.get(key)
+                        except Exception as e:
+                            self.log.error(f"Failed to read key {key}: {e}")
+                            corrupt_keys.append(key)
+        except Exception as e:
+            self.log.error(f"Error opening HDF5 file {self.fname}: {e}")
+            return
+
+        if corrupt_keys:
+            self.log.warning(f"Corrupt keys detected: {corrupt_keys}, removing...")
+            with timed_ctx("check_corrupt_keys remove"):
+                for key in corrupt_keys:
+                    try:
+                        with pd.HDFStore(self.fname, mode='a') as store:
+                            store.remove(key)
+                        self.log.info(f"Removed corrupted key: {key}")
+                    except Exception as e:
+                        self.log.error(f"Failed to remove key {key}: {e}")
+
+
+    def _check_and_clean_corrupt_keys_all_key(self):
+            corrupt_keys = []
+            try:
+                # 使用 with 打开 HDF5 文件，确保在操作完成后关闭文件
+                with timed_ctx("check_corrupt_keys read"):
+                    with pd.HDFStore(self.fname, mode='a') as store:
+                        keys = store.keys()
+
+                        for key in keys:
+                            try:
+                                _ = store.get(key)
+                            except Exception as e:  # 捕获所有异常
+                                log.error(f"Failed to read key {key}: {e}")
+                                corrupt_keys.append(key)
+
+            except Exception as e:
+                log.error(f"Error opening HDF5 file {self.fname}: {e}")
+                return
+
+            # 处理发现的损坏 keys
+            if corrupt_keys:
+                log.warning(f"Corrupt keys detected: {corrupt_keys}, removing...")
+                with timed_ctx("check_corrupt_keys remove"):
+                    for key in corrupt_keys:
+                        try:
+                            with pd.HDFStore(self.fname, mode='a') as store:
+                                store.remove(key)
+                            log.info(f"Removed corrupted key: {key}")
+                        except Exception as e:
+                            log.error(f"Failed to remove key {key}: {e}")
+                            # 删除损坏的文件
+                            self._delete_file()
+
+    def _delete_file(self):
+        """删除损坏的文件"""
+        try:
+            with timed_ctx("_delete_file"):
+                if os.path.isfile(self.fname):
+                    os.remove(self.fname)
+                    log.info(f"文件删除成功: {self.fname}")
+                else:
+                    log.error(f"文件 {self.fname} 不存在，无法删除")
+        except Exception as e:
+            log.error(f"删除文件失败: {e}")
+            # 在这里添加一些逻辑，比如稍后再重试等
+
+    def _acquire_lock(self):
+        my_pid = os.getpid()
+        retries = 0
+        try:
+            while True:
+                # 检查锁文件是否存在
+                with timed_ctx("_acquire_lock"):
+                    if os.path.exists(self._lock):
+                        with open(self._lock, "r") as f:
+                            content = f.read().strip()
+                        pid_str, ts_str = (content.split("|") + ["0", "0"])[:2]
+                        pid = int(pid_str) if pid_str.isdigit() else -1
+                        ts = float(ts_str) if ts_str.replace(".", "", 1).isdigit() else 0.0
+                        elapsed = time.time() - ts
+                        total_wait = time.time() - self.start_time
+                        pid_alive = psutil.pid_exists(pid)
+
+                        if pid == my_pid:
+                            # 自己持有锁，直接清理并重建锁
+                            self.log.info(f"[Lock] 超时自解锁 (pid={pid}) (my_pid:{my_pid}), removing and reacquiring")
+                            try:
+                                os.remove(self._lock)
+                            except Exception as e:
+                                self.log.error(f"[Lock] failed to remove self lock: {e}")
+                            continue
+
+                        if not pid_alive or elapsed > self.lock_timeout or total_wait > self.max_wait:
+                            # 锁超时或持有锁进程不存在，可以删除锁
+                            self.log.warning(f"[Lock] 强制解超时锁 pid={pid} (my_pid:{my_pid}), removing {self._lock}")
+                            try:
+                                os.remove(self._lock)
+                            except Exception as e:
+                                self.log.error(f"[Lock] 强制解超时锁 失败: {e}")
+                            continue
+
+                        # 其他进程持有锁，等待
+                        retries += 1
+                        if retries % 3 == 0:
+                            self.log.info(f"[Lock] 重试:{retries} 等待 进程锁, pid={pid},(my_pid:{my_pid}), alive={pid_alive}, elapsed={elapsed:.1f}s, total_wait={total_wait:.1f}s")
+                        time.sleep(self.probe_interval)
+
+                    else:
+                        # 创建锁文件
+                        try:
+                            with open(self._lock, "w") as f:
+                                f.write(f"{my_pid}|{time.time()}")
+                            self.log.info(f"[Lock] 创建锁文件 {self._lock} by pid={my_pid}")
+                            return True
+                        except Exception as e:
+                            self.log.error(f"[Lock] 创建锁文件 失败: {e}")
+                            time.sleep(self.probe_interval)
+        except Exception as e:
+                self.log.warning(f"[Lock] KeyboardInterrupt during lock acquire, releasing lock:{e}")
+                self._release_lock()
+                raise
+
+    def _forced_unlock(self):
+        my_pid = os.getpid()
+        retries = 0
+        while True:
+            # 检查锁文件是否存在
+            with timed_ctx("_forced_unlock"):
+                if os.path.exists(self._lock):
+                    with open(self._lock, "r") as f:
+                        content = f.read().strip()
+                    pid_str, ts_str = (content.split("|") + ["0", "0"])[:2]
+                    pid = int(pid_str) if pid_str.isdigit() else -1
+                    ts = float(ts_str) if ts_str.replace(".", "", 1).isdigit() else 0.0
+                    elapsed = time.time() - ts
+                    total_wait = time.time() - self.start_time
+                    pid_alive = psutil.pid_exists(pid)
+
+                    if pid == my_pid:
+                        # 自己持有锁，直接清理并重建锁
+                        self.log.info(f"[Lock] 超时解自锁 (pid={pid}) (my_pid:{my_pid}), removing and reacquiring")
+                        try:
+                            os.remove(self._lock)
+                            return True
+                        except Exception as e:
+                            self.log.error(f"[Lock] failed to remove self lock: {e}")
+                            if retries > 3:
+                                return False
+                        continue
+
+                    if not pid_alive or elapsed > self.lock_timeout or total_wait > self.max_wait:
+                        # 锁超时或持有锁进程不存在，可以删除锁
+                        self.log.warning(f"[Lock] 强制解超时锁 pid={pid} (my_pid:{my_pid}), removing {self._lock}")
+                        try:
+                            os.remove(self._lock)
+                            return True
+                        except Exception as e:
+                            self.log.error(f"[Lock] 强制解超时锁 失败: {e}")
+                            if retries > 3:
+                                return False
+                        continue
+
+                    # 其他进程持有锁，等待
+                    retries += 1
+                    if retries % 3 == 0:
+                        self.log.info(f"[Lock] exists, pid={pid},(my_pid:{my_pid}), alive={pid_alive}, elapsed={elapsed:.1f}s, total_wait={total_wait:.1f}s, retry={retries}")
+                    time.sleep(self.probe_interval)
+
+    def _wait_for_lock(self):
+        """读取模式等待锁释放"""
+        # start_time = time.time()
+        with timed_ctx("_wait_for_lock"):
+            while os.path.exists(self._lock):
+                try:
+                    with open(self._lock, "r") as f:
+                        pid_str, ts_str = f.read().strip().split("|")
+                        lock_pid = int(pid_str)
+                        ts = float(ts_str)
+                except Exception:
+                    lock_pid = None
+                    ts = 0
+                elapsed = time.time() - ts
+                total_wait = time.time() - self.start_time
+                if elapsed > self.lock_timeout: 
+                    self._forced_unlock()
+                self.log.info(f"[{self.my_pid}] Waiting for lock held by pid={lock_pid}, elapsed={elapsed:.1f}s total_wait={total_wait:.1f}s")
+                time.sleep(self.probe_interval)
+
+    def _release_lock(self):
+        if os.path.exists(self._lock):
+            try:
+                with open(self._lock, "r") as f:
+                    pid_in_lock = int(f.read().split("|")[0])
+                if pid_in_lock == self.my_pid:
+                    os.remove(self._lock)
+                    self.log.info(f"[{self.my_pid}] Lock released: {self._lock}")
+            except Exception as e:
+                self.log.error(f"[{self.my_pid}] Failed to release lock: {e}")
+
+
+    def close(self):
+        super().close()
+        # self._release_lock()
+
+    def write_safe(self, key, df, **kwargs):
+        # from contextlib import contextmanager
+        # def timed_ctx(name):
+        #     start = time.time()
+        #     yield
+        #     end = time.time()
+        #     self.log.info(f"[timed] {name}: {end - start:.3f}s")
+
+        corrupt = False
+        if key in self.keys():
+            try:
+                _ = self.get(key)
+            except (tables.exceptions.HDF5ExtError, AttributeError):
+                corrupt = True
+        if corrupt:
+            try:
+                self.remove(key)
+            except Exception:
+                pass
+
+        if 'chunksize' not in kwargs:
+            col_bytes = sum(8 if pd.api.types.is_numeric_dtype(dt) else 1 if pd.api.types.is_bool_dtype(dt) else 50 for dt in df.dtypes)
+            target_chunk_size = 5 * 1024 * 1024
+            kwargs['chunksize'] = max(1000, int(target_chunk_size / col_bytes))
+        with timed_ctx(f"write_key_{key}"):
+            self.put(key, df, format='table', **kwargs)
+
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self.write_status:
+            try:
+                self.close()
+                super().__exit__(exc_type, exc_val, exc_tb)
+                if self.mode != 'r':
+                    with timed_ctx("release_lock"):
+                        # ===== 压缩逻辑 =====
+                        h5_size = int(os.path.getsize(self.fname) / 1e6)
+                        h5_size_limit =  h5_size*2 if h5_size > 10 else 10
+                        if self.fname_o.find('tdx_all_df') >= 0 or self.fname_o.find('sina_MultiIndex_data') >= 0:
+                            h5_size = 40 if h5_size < 40 else h5_size
+                            new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit) if h5_size > self.big_H5_Size_limit else self.big_H5_Size_limit
+                        else:
+                            new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit) if h5_size > self.big_H5_Size_limit else h5_size_limit
+                            
+                        read_ini_limit = cct.get_config_value(self.config_ini,self.fname_o,read=True)
+                        self.log.info(f"fname: {self.fname} h5_size: {h5_size} big_limit: {self.big_H5_Size_limit} conf:{read_ini_limit}")
+                        # if (read_ini_limit is  None and h5_size > self.big_H5_Size_limit) or cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
+                        if cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
+                            if self.mode == 'r':
+                                self._acquire_lock()
+                            if os.path.exists(self.fname) and os.path.exists(self.temp_file):
+                                log.error(f"Remove tmp file exists: {self.temp_file}")
+                                os.remove(self.temp_file)
+                            os.rename(self.fname, self.temp_file)
+                            if cct.get_os_system() == 'mac':
+                                p = subprocess.Popen(
+                                    self.ptrepack_cmds % (self.complib, self.temp_file, self.fname),
+                                    shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+                                )
+                            else:
+                                back_path = os.getcwd()
+                                os.chdir(self.basedir)
+                                pt_cmd = self.ptrepack_cmds % (
+                                    self.complib,
+                                    self.temp_file.split(self.basedir)[1],
+                                    self.fname.split(self.basedir)[1]
+                                )
+                                p = subprocess.Popen(pt_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+                            p.wait()
+                            if p.returncode != 0:
+                                log.error(f"ptrepack error {p.communicate()}, src {self.temp_file}, dest {self.fname}")
+                            else:
+                                if os.path.exists(self.temp_file):
+                                    os.remove(self.temp_file)
+                            if cct.get_os_system() != 'mac':
+                                os.chdir(back_path)
+            finally:
+                time.sleep(0.1)
+                with timed_ctx("release_lock"):
+                    self._release_lock()
+                self.log.info(f'clean:{self.fname}')
+        else:
+            with timed_ctx("exit close"):
+                self.close()
+                super().__exit__(exc_type, exc_val, exc_tb)
+
+
+class SafeHDFStore_no_timed_ctx(pd.HDFStore):
+# class SafeHDFStore(pd.HDFStore):
     def __init__(self, fname, mode='a', **kwargs):
         self.fname_o = fname
         self.mode = mode
@@ -178,19 +476,14 @@ class SafeHDFStore(pd.HDFStore):
         self.write_status = True if os.path.exists(self.fname) else False
         self.my_pid = os.getpid()
         self.log.info(f"self.fname: {self.fname} self.basedir:{self.basedir}")
-        # if not os.path.exists(self.fname):
-        #     log.warning(f"HDF5 file {self.fname} not found. Creating empty file.")
-        #     with pd.HDFStore(self.fname, mode='a') as store:
-        #         pass
 
         if self.mode != 'r':
             self._acquire_lock()
         elif self.mode == 'r':
             self._wait_for_lock()
         self.log.info(f'mode : {self.mode}  fname:{self.fname}')
-        self._check_and_clean_corrupt_keys()
+        # self._check_and_clean_corrupt_keys()
         self.ensure_hdf_file() 
-        # super().__init__(self.fname, mode=self.mode, **kwargs)
         super().__init__(self.fname, **kwargs)
 
     def ensure_hdf_file(self):
@@ -223,74 +516,10 @@ class SafeHDFStore(pd.HDFStore):
 
         # 写入
         try:
-            # if append:
-            #      # 如果传了 chunksize 自动切 table
-            #     if 'chunksize' in kwargs and 'format' not in kwargs:
-            #         kwargs['format'] = 'table'
-
-            #     if 'chunksize' not in kwargs:
-            #         col_bytes = sum(
-            #             8 if pd.api.types.is_numeric_dtype(dt) else 50
-            #             for dt in df.dtypes
-            #         )
-            #         target_chunk_size = 5 * 1024 * 1024  # 5MB
-            #         kwargs['chunksize'] = max(1000, int(target_chunk_size / col_bytes))
-            #         self.log.info(f"Auto chunksize for key {key}: {kwargs['chunksize']} rows")
-
-            #     # 使用 append 写入，支持 chunksize
-            #     self.append(key, df, **kwargs, chunksize=chunksize)
-            # else:
-            #     # 覆盖写入，使用 put，不支持 chunksize
-            #     self.put(key, df, **kwargs)
             self.put(key, df, format='table', **kwargs)
             self.log.info(f"Successfully wrote key: {key}")
         except Exception as e:
             self.log.error(f"Failed to write key {key}: {e}")
-
-    def write_safe1(self, key, df, **kwargs):
-        """安全写入 HDF5，自动计算合理 chunksize"""
-        corrupt = False
-        if key in self.keys():
-            try:
-                _ = self.get(key)
-            except (tables.exceptions.HDF5ExtError, AttributeError) as e:
-                self.log.warning(f"Key {key} corrupted: {e}, removing before rewrite")
-                corrupt = True
-
-        if corrupt:
-            try:
-                self.remove(key)
-                self.log.info(f"Removed corrupted key: {key}")
-            except Exception as e:
-                self.log.error(f"Failed to remove key {key}: {e}")
-
-        # 自动计算 chunksize
-        if 'chunksize' not in kwargs:
-            # 每列字节大小估算
-            col_bytes = 0
-            for dtype in df.dtypes:
-                if pd.api.types.is_float_dtype(dtype):
-                    col_bytes += 8
-                elif pd.api.types.is_integer_dtype(dtype):
-                    col_bytes += 8  # 用 int64 计算
-                elif pd.api.types.is_bool_dtype(dtype):
-                    col_bytes += 1
-                else:
-                    # object 或 category 类型，估算每值 50 字节
-                    col_bytes += 50
-            # 目标每 chunk 约 5MB
-            target_chunk_size = 5 * 1024 * 1024
-            chunksize = max(1000, int(target_chunk_size / col_bytes))
-            kwargs['chunksize'] = chunksize
-            self.log.info(f"Auto chunksize for key {key}: {chunksize} rows (≈ {target_chunk_size/1024/1024} MB)")
-
-        try:
-            self.put(key, df, format='table', **kwargs)
-            self.log.info(f"Successfully wrote key: {key}")
-        except Exception as e:
-            self.log.error(f"Failed to write key {key}: {e}")
-
-
 
     def _check_and_clean_corrupt_keys(self):
             corrupt_keys = []
@@ -334,36 +563,6 @@ class SafeHDFStore(pd.HDFStore):
         except Exception as e:
             log.error(f"删除文件失败: {e}")
             # 在这里添加一些逻辑，比如稍后再重试等
-
-    def _check_and_clean_corrupt_keys_old(self):
-        try:
-            with pd.HDFStore(self.fname, mode='a') as store:
-                keys = store.keys()
-                corrupt_keys = []
-                for key in keys:
-                    try:
-                        _ = store.get(key)
-                    except Exception as e:  # 捕获所有异常
-                        log.error(f"Failed to read key {key}: {e}")
-                        corrupt_keys.append(key)
-
-                if corrupt_keys:
-                    log.warning(f"Corrupt keys detected: {corrupt_keys}, removing...")
-                    for key in corrupt_keys:
-                        try:
-                            store.remove(key)
-                            log.info(f"Removed corrupted key: {key}")
-                        except Exception as e:
-                            log.error(f"Failed to remove key {key}: {e}")
-
-        except Exception as e:
-            log.error(f"HDF5 file {self.fname} corrupted, recreating: {e}")
-            try:
-                with pd.HDFStore(self.fname, mode='w') as store:
-                    log.info(f"Recreated empty HDF5 file: {self.fname}")
-            except Exception as e2:
-                log.error(f"Failed to recreate HDF5 file: {e2}")
-
 
     def _acquire_lock(self):
         my_pid = os.getpid()
@@ -696,209 +895,7 @@ def get_hdf5_file(fpath, wr_mode='r', complevel=9, complib='blosc', mutiindx=Fal
     # store.select("Year2015", where=['dt<Timestamp("2015-01-07")','code=="000570"'])
     # return store
 
-def write_hdf_db_gpt_error(fname, df, table='all', index=False, complib='blosc',
-                 baseCount=500, append=True, MultiIndex=False,
-                 rewrite=False, showtable=False):
-    """安全写入 HDF5 文件（单次打开），保留所有原有逻辑"""
-    # df.index = df.index.astype(str)
-    # TypeError: Setting a MultiIndex dtype to anything other than object is not supported
-    # df.index 其实是 MultiIndex，但是你的 write_hdf_db 里强行 `
-    if 'code' in df.columns:
-        df = df.set_index('code')
 
-    time_t = time.time()
-    df = df.fillna(0)
-    df = df[~df.index.duplicated(keep='first')]
-
-    global RAMDISK_KEY
-    if not RAMDISK_KEY < 1:
-        return df
-
-    if not MultiIndex:
-        df['timel'] = time.time()
-
-    # fname = f'G:\\{fname}.h5'
-    # if not os.path.exists(f'G:\\{fname}.h5'):
-    #     with pd.HDFStore(fname, mode='w') as store:
-    #         pass
-    # 打开 HDF5 文件一次完成所有操作
-    with SafeHDFStore(fname, mode='a') as store:
-        tmpdf = None
-        keys = store.keys()
-        log.debug(f"fname: {fname} keys:{keys}")
-        if showtable:
-            print(f"fname: {fname} keys:{keys}")
-
-        # 读取已有表数据
-        if '/' + table in keys:
-            tmpdf = store[table].copy()
-            tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
-
-        # MultiIndex 特殊逻辑
-        if MultiIndex and tmpdf is not None and len(tmpdf) > 0 and not rewrite:
-            multi_code = tmpdf.index.get_level_values('code').unique().tolist()
-            df_multi_code = df.index.get_level_values('code').unique().tolist()
-            dratio = cct.get_diff_dratio(multi_code, df_multi_code)
-            if dratio < ct.dratio_limit:
-                comm_code = list(set(df_multi_code) & set(multi_code))
-                inx_key = comm_code[random.randint(0, len(comm_code) - 1)]
-                if inx_key in df.index.get_level_values('code'):
-                    now_time = df.loc[inx_key].index[-1]
-                    tmp_time = tmpdf.loc[inx_key].index[-1]
-                    if now_time == tmp_time:
-                        log.debug("%s %s Multi out %s hdf5:%s No Wri!!!" %
-                                  (fname, table, inx_key, now_time))
-                        return False
-
-        # 合并已有数据
-        if tmpdf is not None and len(tmpdf) > 0 and not MultiIndex:
-            limit_t = time.time()
-            df['timel'] = limit_t
-            df = cct.combine_dataFrame(tmpdf, df, col=None, append=append)
-            if not append:
-                df['timel'] = time.time()
-            elif fname == 'powerCompute':
-                o_time = df[df.timel < limit_t].timel.tolist()
-                o_time = sorted(set(o_time))
-                if len(o_time) >= ct.h5_time_l_count:
-                    o_time = [time.time() - t_x for t_x in o_time]
-                    o_timel = len(o_time)
-                    o_time = np.mean(o_time)
-                    if o_time > ct.h5_power_limit_time:
-                        df['timel'] = time.time()
-                        log.error("%s %s o_time:%.1f timel:%s" %
-                                  (fname, table, o_time, o_timel))
-
-        # 对 object 类型列进行处理
-        dd = df.dtypes.to_frame()
-        if 'object' in dd.values:
-            dd = dd[dd == 'object'].dropna()
-            col = dd.index.tolist()
-            log.info("col:%s" % col)
-            df[col] = df[col].astype(str)
-
-        df.index = df.index.astype(str)
-        df = df.fillna(0)
-        df = cct.reduce_memory_usage(df, verbose=False)
-        log.info(f'df.shape: {df.shape}')
-
-        # 写回 HDF5
-        if '/' + table in store.keys():
-            if not MultiIndex:
-                store.remove(table)
-                store.put(table, df, format='table', append=False,
-                          complib=complib, data_columns=True)
-            else:
-                if rewrite or len(store[table]) < 1:
-                    store.remove(table)
-                store.put(table, df, format='table', index=False,
-                          complib=complib, data_columns=True, append=True)
-        else:
-            store.put(table, df, format='table',
-                      index=MultiIndex is False,
-                      complib=complib,
-                      data_columns=True,
-                      append=MultiIndex)
-
-        store.flush()
-
-    log.info("write hdf time:%0.2f" % (time.time() - time_t))
-    return True
-
-
-def write_hdf_db_gptmod1(fname, df, table='all', index=False, complib='blosc',
-                 baseCount=500, append=True, MultiIndex=False,
-                 rewrite=False, showtable=False):
-    """安全写入 HDF5 文件，保留原功能"""
-
-    if 'code' in df.columns:
-        df = df.set_index('code')
-    time_t = time.time()
-    df = df.fillna(0)
-    df = df[~df.index.duplicated(keep='first')]
-    global RAMDISK_KEY
-    if not RAMDISK_KEY < 1:
-        return df
-
-    if not MultiIndex:
-        df['timel'] = time.time()
-
-    # 打开一次 HDF5 文件，读 + 写都在这里完成
-    with SafeHDFStore(fname, mode='a') as store:
-        tmpdf = None
-        # 检查表是否存在
-        if store is not None:
-            keys = store.keys()
-            log.debug(f"fname: {fname} keys:{keys}")
-            if showtable:
-                print(f"fname: {fname} keys:{keys}")
-            if '/' + table in keys:
-                tmpdf = store[table].copy()
-                tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
-
-        # MultiIndex 逻辑
-        if MultiIndex and tmpdf is not None and len(tmpdf) > 0 and not rewrite:
-            multi_code = tmpdf.index.get_level_values('code').unique().tolist()
-            df_multi_code = df.index.get_level_values('code').unique().tolist()
-            dratio = cct.get_diff_dratio(multi_code, df_multi_code)
-            if dratio < ct.dratio_limit:
-                comm_code = list(set(df_multi_code) & set(multi_code))
-                inx_key = comm_code[random.randint(0, len(comm_code) - 1)]
-                if inx_key in df.index.get_level_values('code'):
-                    now_time = df.loc[inx_key].index[-1]
-                    tmp_time = tmpdf.loc[inx_key].index[-1]
-                    if now_time == tmp_time:
-                        log.debug("%s %s Multi out %s hdf5:%s No Wri!!!" % (fname, table, inx_key, now_time))
-                        return False
-
-        # 普通逻辑
-        if tmpdf is not None and len(tmpdf) > 0 and not MultiIndex:
-            limit_t = time.time()
-            df['timel'] = limit_t
-            df = cct.combine_dataFrame(tmpdf, df, col=None, append=append)
-            if not append:
-                df['timel'] = time.time()
-            elif fname == 'powerCompute':
-                o_time = df[df.timel < limit_t].timel.tolist()
-                o_time = sorted(set(o_time))
-                if len(o_time) >= ct.h5_time_l_count:
-                    o_time = [time.time() - t_x for t_x in o_time]
-                    o_timel = len(o_time)
-                    o_time = np.mean(o_time)
-                    if o_time > ct.h5_power_limit_time:
-                        df['timel'] = time.time()
-                        log.error("%s %s o_time:%.1f timel:%s" % (fname, table, o_time, o_timel))
-
-        # 类型转换
-        dd = df.dtypes.to_frame()
-        if 'object' in dd.values:
-            dd = dd[dd == 'object'].dropna()
-            col = dd.index.tolist()
-            log.info("col:%s" % col)
-            df[col] = df[col].astype(str)
-        df.index = df.index.astype(str)
-        df = df.fillna(0)
-        df = cct.reduce_memory_usage(df, verbose=False)
-        log.info(f'df.shape: {df.shape}')
-
-        # 写回 HDF5
-        if '/' + table in store.keys():
-            if not MultiIndex:
-                store.remove(table)
-                store.put(table, df, format='table', append=False, complib=complib, data_columns=True)
-            else:
-                if rewrite or len(store[table]) < 1:
-                    store.remove(table)
-                store.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
-        else:
-            store.put(table, df, format='table',
-                      index=MultiIndex is False, complib=complib, data_columns=True,
-                      append=MultiIndex)
-
-        store.flush()
-
-    log.info("write hdf time:%0.2f" % (time.time() - time_t))
-    return True
 
 import shutil, os
 from pathlib import Path
@@ -957,78 +954,6 @@ def write_hdf_db_safe(fname, df, table='all', index=False, complib='blosc', base
     return True
 
 
-# def write_hdf_db_safe(
-#         fname, df,
-#         table='all',
-#         index=False,
-#         complib='blosc',
-#         baseCount=500,
-#         append=True,
-#         MultiIndex=False,
-#         rewrite=False,
-#         showtable=False):
-
-#     # ====== 你原有的 dataframe 清洗逻辑不动 ======
-#     if df is None or df.empty:
-#         return False
-
-#     if 'code' in df.columns:
-#         df = df.set_index('code')
-
-#     df = df.fillna(0)
-#     df = df[~df.index.duplicated(keep='first')]
-
-#     if not MultiIndex:
-#         df['timel'] = time.time()
-
-#     # dtype 修复
-#     dd = df.dtypes.to_frame()
-
-#     if 'object' in dd.values:
-#         cols = dd[dd == 'object'].dropna().index.tolist()
-#         df[cols] = df[cols].astype(str)
-#         df.index = df.index.astype(str)
-
-#     df = df.fillna(0)
-#     df = cct.reduce_memory_usage(df, verbose=False)
-
-#     fname = Path(fname)
-
-#     # ====== ★★★ 安全原子写入开始 ★★★ ======
-
-#     with SafeHDFWriter(fname) as tmp:
-
-#         # 始终只在 tmp 上写
-#         with SafeHDFStore(tmp, mode='a') as h5:
-
-#             if '/' + table in h5.keys():
-#                 h5.remove(table)
-
-#             if not MultiIndex:
-#                 h5.put(
-#                     table, df,
-#                     format='table',
-#                     append=False,
-#                     complib=complib,
-#                     data_columns=True
-#                 )
-#             else:
-#                 h5.put(
-#                     table, df,
-#                     format='table',
-#                     index=False,
-#                     append=True,
-#                     complib=complib,
-#                     data_columns=True
-#                 )
-
-#             h5.flush()
-
-#     # ====== ★★★ 原子写完成并自动校验替换 ★★★ ======
-
-#     log.info("Safe HDF write OK => %s[%s] rows:%s",
-#              fname, table, len(df))
-#     return True
 
 def write_hdf_db_newbug(fname, df, table='all', index=False, complib='blosc', baseCount=500,
                  append=True, MultiIndex=False, rewrite=False, showtable=False):
@@ -1272,7 +1197,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 
         with SafeHDFStore(fname,mode='a') as h5:
             df=df.fillna(0)
-            df=cct.reduce_memory_usage(df,verbose=False)
+            # df=cct.reduce_memory_usage(df,verbose=False)
             log.info(f'df.shape:{df.shape}')
             if h5 is not None:
                 if '/' + table in list(h5.keys()):
@@ -1303,42 +1228,142 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
     log.info("write hdf time:%0.2f" % (time.time() - time_t))
     return True
 
-# def lo_hdf_db_old(fname,table='all',code_l=None,timelimit=True,index=False):
-#    h_t = time.time()
-#    h5=top_hdf_api(fname=fname, table=table, df=None,index=index)
-#    if h5 is not None and code_l is not None:
-#        if len(code_l) == 0:
-#            return None
-#        if h5 is not None:
-#            diffcode = set(code_l) - set(h5.index)
-#            if len(diffcode) > 10 and len(h5) <> 0 and float(len(diffcode))/float(len(code_l)) > ct.diffcode:
-#                log.error("f:%s t:%s dfc:%s %s co:%s h5:%s"%(fname,table,len(diffcode),h5.index.values[0],code_l[:2],h5.index.values[:2]))
-#                return None
-#
-#    if h5 is not None and not h5.empty and 'timel' in h5.columns:
-#            o_time = h5[h5.timel <> 0].timel
-#            if len(o_time) > 0:
-#                o_time = o_time[0]
-#    #            print time.time() - o_time
-#                # if cct.get_work_hdf_status() and (not (915 < cct.get_now_time_int() < 930) and time.time() - o_time < ct.h5_limit_time):
-#                if not cct.get_work_time() or (not timelimit or time.time() - o_time < ct.h5_limit_time):
-#                    log.info("time hdf:%s %s"%(fname,len(h5))),
-# if 'timel' in h5.columns:
-# h5=h5.drop(['timel'],axis=1)
-#                    if code_l is not None:
-#                        if 'code' in h5.columns:
-#                            h5 = h5.set_index('code')
-#                        h5.drop([inx for inx in h5.index  if inx not in code_l], axis=0, inplace=True)
-#                            # log.info("time in idx hdf:%s %s"%(fname,len(h5))),
-#                    # if index == 'int' and 'code' not in h5.columns:
-#                    #     h5=h5.reset_index()
-#                    log.info("load hdf time:%0.2f"%(time.time()-h_t))
-#                    return h5
-#    else:
-#        if h5 is not None:
-#            return h5
-#    return None
 
+def load_hdf_db_timed_ctx(fname, table='all', code_l=None, timelimit=True, index=False,
+                limit_time=ct.h5_limit_time, dratio_limit=ct.dratio_limit,
+                MultiIndex=False, showtable=False):
+    """
+    优化版 load_hdf_db — 保留原有行为与参数，添加 timed_ctx 自动统计耗时
+    """
+    time_t = time.time()
+    global RAMDISK_KEY, INIT_LOG_Error
+    df = None
+    dd = None
+
+    # RAMDISK_KEY 非 0 时直接返回
+    if not RAMDISK_KEY < 1:
+        return None
+
+    # -------------------------
+    # 打开 HDF5 并读取表
+    # -------------------------
+    with timed_ctx("hdf_open_and_read"):
+        try:
+            with SafeHDFStore(fname, mode='r') as store:
+                if store is not None:
+                    keys = store.keys()
+                    log.debug("HDF5 file: %s, keys: %s", fname, keys)
+                    if showtable:
+                        log.debug("HDF5 file contents keys: %s", keys)
+                    table_key = '/' + table
+                    if table_key in keys:
+                        dd = store.get(table)
+                        log.debug("Loaded DataFrame shape: %s", dd.shape)
+                    else:
+                        dd = pd.DataFrame()
+                        log.warning("Table key not found: %s", table_key)
+                else:
+                    dd = pd.DataFrame()
+                    log.error("SafeHDFStore returned None for file: %s", fname)
+        except Exception as e:
+            dd = pd.DataFrame()
+            log.exception("load_hdf_db exception for file %s, table %s", fname, table)
+
+    # -------------------------
+    # 按 code_l 过滤
+    # -------------------------
+    with timed_ctx("filter_by_code"):
+        if code_l is not None and not dd.empty:
+            try:
+                if not MultiIndex:
+                    dif_co = list(dd.index.intersection(code_l))
+                    dd = dd.loc[dif_co] if dif_co else dd.iloc[0:0]
+                else:
+                    mask = dd.index.get_level_values('code').isin(code_l)
+                    dd = dd.loc[mask]
+            except Exception as e:
+                log.exception("filter_by_code failed: %s", e)
+                dd = pd.DataFrame()
+
+    # -------------------------
+    # timelimit 检查逻辑
+    # -------------------------
+    with timed_ctx("timelimit_check"):
+        if timelimit and not dd.empty and not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300):
+            o_time = []
+            if 'timel' in dd.columns:
+                timel_vals = dd.loc[dd['timel'] != 0, 'timel'].values
+                if timel_vals.size > 0:
+                    unique_timel = np.unique(timel_vals)
+                    now_t = time.time()
+                    o_time = [now_t - float(t) for t in unique_timel]
+                    o_time.sort()
+            l_time = np.mean(o_time) if o_time else 0.0
+
+            dratio = 0.0
+            if 'ticktime' in dd.columns and 'kind' not in dd.columns:
+                try:
+                    late_count = int((dd['ticktime'] >= "15:00:00").sum())
+                except Exception:
+                    late_count = 0
+                dratio = (float(len(dd)) - float(late_count)) / float(len(dd)) if len(dd) > 0 else 0.0
+
+            return_hdf_status = (not cct.get_work_time() and dratio < dratio_limit) or \
+                                (cct.get_work_time() and l_time < limit_time)
+            if not return_hdf_status:
+                dd = dd.iloc[0:0]
+
+    # -------------------------
+    # MultiIndex 或去重
+    # -------------------------
+    with timed_ctx("multiindex_drop"):
+        if MultiIndex and not dd.empty:
+            try:
+                dd = dd.drop_duplicates()
+            except Exception:
+                pass
+
+    # -------------------------
+    # 填充空值 & timel 核心字段
+    # -------------------------
+    with timed_ctx("post_process"):
+        if dd is not None and not dd.empty:
+            try:
+                dd.fillna(0, inplace=True)
+            except Exception:
+                dd = dd.fillna(0)
+            if 'timel' in dd.columns:
+                try:
+                    first_timel = float(np.min(np.unique(dd['timel'].values)))
+                    dd['timel'] = first_timel
+                except Exception:
+                    pass
+
+    # -------------------------
+    # 去重 & MultiIndex 检查
+    # -------------------------
+    with timed_ctx("deduplicate_index"):
+        if dd is not None and not dd.empty:
+            try:
+                dd = dd[~dd.index.duplicated(keep='last')]
+            except Exception:
+                pass
+
+    # -------------------------
+    # 内存优化
+    # -------------------------
+    # with timed_ctx("reduce_memory"):
+    #     try:
+    #         df = cct.reduce_memory_usage(dd)
+    #     except Exception:
+    #         df = dd
+
+    log.debug("load_hdf_time total:%0.2f s", (time.time() - time_t))
+    return dd
+
+
+
+# def load_hdf_db_no_timed_ctx(fname, table='all', code_l=None, timelimit=True, index=False,
 def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                 limit_time=ct.h5_limit_time, dratio_limit=ct.dratio_limit,
                 MultiIndex=False, showtable=False):
@@ -1366,7 +1391,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                     log.debug("HDF5 file: %s, keys: %s", fname, keys)
                     if showtable:
                         log.debug("HDF5 file %s contents keys: %s", fname, keys)
-
                     try:
                         table_key = '/' + table
                         log.debug("Trying to access table key: %s", table_key)
@@ -1397,28 +1421,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                 else:
                     log.error("SafeHDFStore returned None for file: %s", fname)
                     dd = pd.DataFrame()
-
-            # with SafeHDFStore(fname, mode='r') as store:
-            #     if store is not None:
-            #         log.debug("fname: %s keys:%s", fname, store.keys())
-            #         if showtable:
-            #             log.debug("fname: %s keys:%s", fname, store.keys())
-
-            #         try:
-            #             table_key = '/' + table
-            #             if table_key in store.keys():
-            #                 # 直接读取对象（避免无谓 copy）
-            #                 obj = store.get(table)
-            #                 if isinstance(obj, pd.DataFrame):
-            #                     dd = obj
-            #                 else:
-            #                     log.error("Unexpected object type from HDF5: %s", type(obj))
-            #                     dd = pd.DataFrame()
-            #             else:
-            #                 dd = pd.DataFrame()
-            #         except Exception as e:
-            #             log.error("load_hdf_db Error: %s %s", fname, e)
-            #             dd = pd.DataFrame()
 
             if dd is not None and len(dd) > 0:
                 if not MultiIndex:
@@ -1636,11 +1638,12 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
             except Exception:
                 pass
 
+    return df
     # 与原函数保持一致：返回 reduce_memory_usage(df)
-    try:
-        return cct.reduce_memory_usage(df)
-    except Exception:
-        return df
+    # try:
+    #     return cct.reduce_memory_usage(df)
+    # except Exception:
+        # return df
 
 
 def load_hdf_db_src_OK(fname, table='all', code_l=None, timelimit=True, index=False, limit_time=ct.h5_limit_time, dratio_limit=ct.dratio_limit,MultiIndex=False,showtable=False):
@@ -1845,7 +1848,8 @@ def load_hdf_db_src_OK(fname, table='all', code_l=None, timelimit=True, index=Fa
                 if isinstance(df.index, pd.MultiIndex):
                     write_hdf_db(fname, df, table=table, index=index, MultiIndex=True,rewrite=True)
 
-    return  cct.reduce_memory_usage(df)
+    return  df
+    # return  cct.reduce_memory_usage(df)
 
 
 
