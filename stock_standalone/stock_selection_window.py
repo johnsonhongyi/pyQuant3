@@ -82,6 +82,21 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         # --- Toolbar ---
         toolbar = tk.Frame(self, bd=1, relief="raised")
         toolbar.pack(fill="x", padx=5, pady=5)
+
+        # Today's Hotspots (Quick Filter Buttons)
+        hotspots = getattr(self.master, 'concept_top5', None)
+        if hotspots:
+            tk.Label(toolbar, text="🔥今日热点:", font=("Arial", 9, "bold"), fg="red").pack(side="left", padx=(5, 2))
+            for h in hotspots:
+                # h = ('海南自贸区', 3.995, 4.17, 0.95)
+                name = h[0]
+                pct = h[2]
+                btn_text = f"{name}({pct:.1f}%)"
+                btn = tk.Button(toolbar, text=btn_text, font=("Arial", 8), 
+                                relief="flat", bg="#e8f5e9", fg="#2e7d32",
+                                command=lambda n=name: self._quick_filter(n))
+                btn.pack(side="left", padx=1)
+            tk.Frame(toolbar, width=10).pack(side="left") # Spacer
         
         # Concept Filter
         tk.Label(toolbar, text="板块筛选:", font=("Arial", 10)).pack(side="left", padx=2)
@@ -116,7 +131,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.concept_combo.bind('<<ComboboxSelected>>', self.on_filter_search)
         
         # Actions
-        tk.Button(toolbar, text="🔄 运行策略", command=lambda: self.load_data(force=True)).pack(side="right", padx=5, pady=5)
+        tk.Button(toolbar, text="🔄 运行策略", command=lambda: self.load_data(force=True)).pack(side="left", padx=5, pady=5)
         tk.Frame(toolbar, width=20).pack(side="right") # Spacer
 
         tk.Button(toolbar, text="🚀 导入选中", command=self.import_selected, bg="#ffd54f", font=("Arial", 10, "bold")).pack(side="right", padx=10, pady=5)
@@ -366,6 +381,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 
                 # 重新加载数据（因为关键词清空了）
                 self.load_data()
+
+    def _quick_filter(self, name: str):
+        """点击热点按钮快速筛选"""
+        self.concept_filter_var.set(name)
+        self.on_filter_search()
 
     def on_filter_search(self, event: Optional[Any] = None):
         """执行查询并记录历史"""
