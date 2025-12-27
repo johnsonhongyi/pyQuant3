@@ -6,6 +6,7 @@ import numpy as np
 from typing import Any, Optional, Union, Dict, List
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import commonTips as cct
+from JohnsonUtil.commonTips import timed_ctx
 from JohnsonUtil import LoggerFactory
 from JSONData import tdx_data_Day as tdd
 from JSONData import stockFilter as stf
@@ -484,7 +485,246 @@ def align_sum_percent(df, merged_df):
     
     return df_copy
 
+def _prepare_runtime_state(
+    logger, g_values, flag,
+    resample, market, st_key_sort,
+    marketInit, marketblk
+):
+    if not flag.value:
+        for _ in range(5):
+            if flag.value:
+                break
+            time.sleep(1)
+        return None, None, None, "PAUSE"
+
+    new_resample = g_values.getkey("resample") or "d"
+    new_market = g_values.getkey("market", marketInit)
+    new_sort = g_values.getkey("st_key_sort", st_key_sort)
+
+    if new_resample != resample or new_market != market:
+        logger.info(
+            f"runtime changed reset: market {market}->{new_market}, "
+            f"resample {resample}->{new_resample}"
+        )
+        return new_resample, new_market, new_sort, "RESET"
+
+    if new_sort != st_key_sort:
+        return resample, market, new_sort, "SORT_ONLY"
+
+    return resample, market, st_key_sort, "RUN"
+
+def _handle_init_tdx(
+    logger, g_values, market, resample,
+    flag, duration_sleep_time, ramdisk_dir
+):
+    today = cct.get_today()
+    now_time = cct.get_now_time_int()
+
+    if (
+        g_values.getkey("tdx.init.done") is True
+        and g_values.getkey("tdx.init.date") == today
+    ):
+        return False
+
+    if not clean_expired_tdx_file(
+        logger, g_values,
+        cct.get_trade_date_status,
+        cct.get_today,
+        cct.get_now_time_int,
+        cct.get_ramdisk_path,
+        ramdisk_dir
+    ):
+        logger.info(f"{today} 清理未完成，跳过 init_tdx")
+        for _ in range(30):
+            if not flag.value:
+                break
+            time.sleep(1)
+        return False
+
+    with timed_ctx("init_tdx_total", warn_ms=3000):
+        top_now = tdd.getSinaAlldf(
+            market=market,
+            vol=ct.json_countVol,
+            vtype=ct.json_countType
+        )
+
+        resamples = ['d', '3d', 'w', 'm'] if now_time <= 900 else ['3d']
+
+        for res_m in resamples:
+            if res_m == resample:
+                continue
+            if cct.get_now_time_int() > 905:
+                break
+            with timed_ctx(f"init_tdx_{res_m}", warn_ms=1000):
+                tdd.get_append_lastp_to_df(
+                    top_now,
+                    dl=ct.Resample_LABELS_Days[res_m],
+                    resample=res_m
+                )
+
+    g_values.setkey("tdx.init.done", True)
+    g_values.setkey("tdx.init.date", today)
+    logger.info(f"{today} init_tdx 完成")
+
+    for _ in range(duration_sleep_time):
+        if not flag.value:
+            break
+        time.sleep(1)
+
+    return True
+
+def _run_main_pipeline(
+    logger, g_values, queue,
+    market, resample, st_key_sort,
+    lastpTDX_DF, top_all,
+    detect_calc_support_var
+):
+    with timed_ctx("fetch_market", warn_ms=800):
+        if market == 'indb':
+            indf = get_indb_df()
+            top_now = tdd.getSinaAlldf(
+                market=indf.code.tolist(),
+                vol=ct.json_countVol,
+                vtype=ct.json_countType
+            )
+        else:
+            top_now = tdd.getSinaAlldf(
+                market=market,
+                vol=ct.json_countVol,
+                vtype=ct.json_countType
+            )
+
+    if top_now.empty:
+        return top_all, lastpTDX_DF
+
+    detect_val = (
+        detect_calc_support_var.value
+        if hasattr(detect_calc_support_var, "value")
+        else False
+    )
+
+    if top_all.empty:
+        if lastpTDX_DF.empty:
+            with timed_ctx("get_append_lastp_to_df empty", warn_ms=1000):
+                top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(
+                    top_now,
+                    dl=ct.Resample_LABELS_Days[resample],
+                    resample=resample,
+                    detect_calc_support=detect_val
+                )
+        else:
+            with timed_ctx("get_append_lastp_to_df", warn_ms=1000):
+                top_all = tdd.get_append_lastp_to_df(
+                    top_now,
+                    lastpTDX_DF,
+                    detect_calc_support=detect_val
+                )
+    else:
+        with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
+            top_all = cct.combine_dataFrame(
+                top_all, top_now, col="couts", compare="dff"
+            )
+
+    with timed_ctx("calc_pipeline", warn_ms=1500):
+        top_all = process_merged_sina_with_history(top_all)
+        result_opt = strong_momentum_today_plus_history_sum_opt(
+            top_all, max_days=cct.compute_lastdays
+        )
+        clean_sum = merge_strong_momentum_results(result_opt, min_days=2)
+        top_all = align_sum_percent(top_all, clean_sum)
+        top_all = calc_indicators(top_all, logger, resample)
+
+    sort_cols, sort_keys = ct.get_market_sort_value_key(
+        st_key_sort, top_all
+    )
+
+    with timed_ctx("getBollFilter", warn_ms=800):
+        df_out = (
+            stf.getBollFilter(top_all.copy(), resample=resample, down=False)
+            .sort_values(by=sort_cols, ascending=sort_keys)
+        )
+    with timed_ctx("sanitize", warn_ms=800):
+
+        df_out = sanitize(clean_bad_columns(df_out))
+        queue.put(df_out)
+
+    return top_all, lastpTDX_DF
+
+# def fetch_and_process_timed_ctx(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
 def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
+                      flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
+                      marketInit: str = "all", marketblk: str = "boll",
+                      duration_sleep_time: int = 120, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
+    logger = LoggerFactory.getLogger()
+    if log_level:
+        logger.setLevel(log_level.value)
+
+    g_values = cct.GlobalValues(shared_dict)
+    resample = g_values.getkey("resample") or "d"
+    market = g_values.getkey("market", marketInit)
+    st_key_sort = g_values.getkey("st_key_sort", "3 0")
+
+    top_all = pd.DataFrame()
+    lastpTDX_DF = pd.DataFrame()
+    START_INIT = 0
+
+    while True:
+        try:
+            time_s = time.time()
+
+            resample, market, st_key_sort, state = _prepare_runtime_state(
+                logger, g_values, flag,
+                resample, market, st_key_sort,
+                marketInit, marketblk
+            )
+
+            if state in ("PAUSE", "RESET"):
+                top_all = pd.DataFrame()
+                lastpTDX_DF = pd.DataFrame()
+                START_INIT = 0
+                continue
+
+            if (
+                cct.get_trade_date_status()
+                and START_INIT > 0
+                and 830 <= cct.get_now_time_int() <= 915
+            ):
+                if _handle_init_tdx(
+                    logger, g_values, market, resample,
+                    flag, duration_sleep_time, ramdisk_dir
+                ):
+                    top_all = pd.DataFrame()
+                    lastpTDX_DF = pd.DataFrame()
+                    START_INIT = 0
+                continue
+
+            if START_INIT > 0 and not cct.get_work_time():
+                time.sleep(5)
+                continue
+
+            top_all, lastpTDX_DF = _run_main_pipeline(
+                logger, g_values, queue,
+                market, resample, st_key_sort,
+                lastpTDX_DF, top_all,
+                detect_calc_support_var
+            )
+
+            START_INIT = 1
+            cct.print_timing_summary()
+            cct.df_memory_usage(top_all)
+            logger.info(
+                    f"init_tdx 总用时: {time.time() - time_s:.2f}s tdx.init.done:{g_values.getkey('tdx.init.done')} tdx.init.date:{g_values.getkey('tdx.init.date')} "
+                )
+            time.sleep(1)
+
+        except Exception as e:
+            logger.error("background error", exc_info=True)
+            time.sleep(duration_sleep_time)
+
+
+
+def fetch_and_process_no_timed_ctx(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
+# def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
                       marketInit: str = "all", marketblk: str = "boll",
                       duration_sleep_time: int = 120, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
@@ -529,7 +769,7 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
                 # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
                 st_key_sort = g_values.getkey("st_key_sort")
-            elif START_INIT > 0 and 830 <= cct.get_now_time_int() <= 915:
+            elif cct.get_trade_date_status() and START_INIT > 0 and 830 <= cct.get_now_time_int() <= 915:
                 today = cct.get_today()
                 # 0️⃣ init 今天已经完成 → 直接跳过
 
@@ -668,6 +908,8 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             # df_all = process_merged_sina_signal(df_all)  #single 
             queue.put(df_all)
             gc.collect()
+            cct.print_timing_summary()
+            cct.df_memory_usage(df_all)
             logger.info(f'process now: {cct.get_now_time_int()} resample Main:{len(df_all)} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
             if cct.get_now_time_int() < 945:
                 sleep_step = 0.5
@@ -685,8 +927,6 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                 elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
                     break
                 time.sleep(sleep_step)
-                # cout_time +=sleep_step
-                # logger.info(f'cout_time:{cout_time} duration_sleep_time:{duration_sleep_time} sleep_step:{sleep_step}')
             START_INIT = 1
 
         except Exception as e:

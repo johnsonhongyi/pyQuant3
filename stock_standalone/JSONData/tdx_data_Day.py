@@ -3932,24 +3932,14 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         top_now['prev_p'] = 0
         top_now['kind'] = 0
 
-#    h5 = h5a.write_hdf_db(h5_fname, top_now, table=h5_table)
-    # top_hdf_api(fname='tdx',wr_mode='w', table=None, df=None)
-    #
-    # if 'time' in h5.columns:
-    #     o_time = h5[h5.time <> 0].time
-    #     if len(o_time) > 0:
-    #         o_time = o_time[0]
-    #         print time.time() - o_time
-    #         if time.time() - o_time < h5_limit_time:
-    #             top_now = h5
-    #             return h5
     print(":%s b1>:%s it:%s" % (initTdxdata, len(top_now), round(time.time() - time_s, 1)), end=' ')
     if top_now is None or len(top_now) == 0:
         log.error("top_all is None :%s" % (top_now))
     if isinstance(top_now,pd.DataFrame) and not 'ratio' in top_now.columns:
         top_now['ratio'] = 0.0
     # top_now = top_now.query('open != 0 and close != 0')
-    return cct.reduce_memory_usage(top_now)
+    # return cct.reduce_memory_usage(top_now)
+    return top_now
 
 
 def get_tdx_day_to_df(code):
@@ -6521,37 +6511,16 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
 
             tdxdata = get_tdx_exp_all_LastDF_DL(
                 codelist, dt=dl, end=end, ptype=ptype, filter=filter, power=power, lastp=lastp, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support)
-            # if checknew:
-            #     tdx_list = tdxdata.index.tolist()
-            #     diff_code = list(set(codelist) - set(tdx_list))
-            #     diff_code = [ co for co in diff_code if co.startswith(('6','00','30'))]
-            #     # tdx_diff = None
-            #     if len(diff_code) > 0:
-            #         # diff_sina = set(top_all.index.values) - set(diff_code)
-            #         log.error("tdx Out:%s code:%s"%(len(diff_code),diff_code[:2]))
-            #         log.debug("diff_code:%s"%(diff_code))
-            #         tdx_diff = get_tdx_exp_all_LastDF_DL(diff_code,dt=dl,end=end,ptype=ptype,filter=filter,power=power,lastp=lastp,newdays=0)
-            #         if tdx_diff is not None and len(tdx_diff) >0:
-            #             tdxdata = pd.concat([tdxdata, tdx_diff],axis=0)
             
             tdxdata.rename(columns={'open': 'lopen'}, inplace=True)
             tdxdata.rename(columns={'high': 'lhigh'}, inplace=True)
             tdxdata.rename(columns={'close': 'lastp'}, inplace=True)
-            # tdxdata.rename(columns={'low': 'lastp'}, inplace=True)
             tdxdata.rename(columns={'low': 'llow'}, inplace=True)
             tdxdata.rename(columns={'vol': 'lvol'}, inplace=True)
             tdxdata.rename(columns={'amount': 'lamount'}, inplace=True)
-            # tdxdata.rename(columns={'cumin': 'df2'}, inplace=True)
-
-            # # aa=df[df.columns[(df.columns >= 'per1d') & (df.columns <= 'per9d')]]
-            # aa.T[aa.T >=10].count()
-            # df['top1']=aa.T[aa.T >=10].count()
-            # tdxdata = compute_top10_count(tdxdata)
             wcdf = wcd.get_wencai_data(top_all.name)
             wcdf['category'] = wcdf['category'].apply(lambda x:x.replace('\r','').replace('\n',''))
-            # wcdf['hangye'] = wcdf['hangye'].apply(lambda x:x.replace('\r','').replace('\n',''))
             tdxdata = cct.combine_dataFrame(tdxdata, wcdf.loc[:, ['category','hangye']])
-            # tdxdata = cct.combine_dataFrame(tdxdata, top_all.loc[:, ['name']])
             if cct.GlobalValues().getkey('tdx_Index_Tdxdata') is None:
                 if tdx_index_code_list[0] in tdxdata.index:
                     cct.GlobalValues().setkey('tdx_Index_Tdxdata', tdxdata.loc[tdx_index_code_list])
@@ -6570,10 +6539,8 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
         diff_code = list(set(codelist) - set(tdx_list))
         diff_code = [
             co for co in diff_code if co.startswith(cct.code_startswith)]
-        # tdx_diff = None
-        if len(diff_code) > 0:
+        if len(diff_code) > 5:
             log.error("tdx Out:%s code:%s" % (len(diff_code), diff_code[:2]))
-            # log.debug("diff_code:%s" % (diff_code[-2]))
             print(f"diff_code: {len(diff_code)} resample:{resample} ",end='')
             tdx_diff = get_tdx_exp_all_LastDF_DL(
                 diff_code, dt=dl, end=end, ptype=ptype, filter=filter, power=power, lastp=lastp, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support)
@@ -6581,13 +6548,9 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                 tdx_diff.rename(columns={'open': 'lopen'}, inplace=True)
                 tdx_diff.rename(columns={'high': 'lhigh'}, inplace=True)
                 tdx_diff.rename(columns={'close': 'lastp'}, inplace=True)
-                # tdxdata.rename(columns={'low': 'lastp'}, inplace=True)
                 tdx_diff.rename(columns={'low': 'llow'}, inplace=True)
                 tdx_diff.rename(columns={'vol': 'lvol'}, inplace=True)
                 tdx_diff.rename(columns={'amount': 'lamount'}, inplace=True)
-                # tdx_diff.rename(columns={'cumin': 'df2'}, inplace=True)
-                # tdx_diff = compute_top10_count(tdx_diff)
-                # wcdf = wcd.get_wencai_data(top_all.loc[tdx_diff.index,'name'], 'wencai',days='N')
                 tdx_diff = tdx_diff.drop_duplicates(keep='first')  # 保留第一次出现的行
                 wcdf = wcd.get_wencai_data(top_all.name)
                 wcdf['category'] = wcdf['category'].apply(lambda x:x.replace('\r','').replace('\n',''))
@@ -6596,19 +6559,14 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                 if newdays is None or newdays > 0:
                     h5 = h5a.write_hdf_db(h5_fname, tdx_diff, table=h5_table, append=True)
                 tdxdata = pd.concat([tdxdata, tdx_diff], axis=0)
-
-                # tdxdata = cct.combine_dataFrame(tdxdata, top_all.loc[:, ['name']])
                 
     top_all = cct.combine_dataFrame(
         top_all, tdxdata, col=None, compare=None, append=False)
-    # cct.combine_dataFrame(top_all, tdxdata, col=['b1_v','a1_v'], compare=None, append=False).query('9 <percent < 10.2 ')
-
     # log.info('Top-merge_now:%s' % (top_all[:1]))
     top_all['llow'] = top_all.get('llow', 0)  # 列不存在时用默认0
     top_all = top_all[top_all['llow'] > 0]
     #20231110 add today topR
     #20250607 mod today topR
-
     if cct.get_day_istrade_date() and len(top_all) > 2:
         if not cct.get_trade_date_status():
             top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if x > 0 and y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
@@ -6633,24 +6591,11 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
     if 'llastp' not in top_all.columns:
         log.error("why not llastp in topall:%s" % (top_all.columns))
 
-    # co2int.extend(['top10','ra'])
-    # co2int= [inx for inx in co2int if inx in df.columns]
-    # for co in co2int:
-    #     df[co]= df[co].astype(int)
-
     co2int = ['boll','dff','ra','ral','fib','fibl','op','red','ra']    
     # co2int = ['boll','dff','ra','ral','fib','fibl','op', 'ratio','red','top5','top10','ra']    
     for col in co2int:
         if col in top_all.columns:
             top_all[col] = top_all[col].astype(int)
-    # top_all['topR']=top_all['topR'].apply(lambda x:round(x,1))
-    # if ('dff' in top_all.columns and top_all.dff[0] == 0) or top_all.close[0] == top_all.lastp1d[0]:            
-    #     top_all['dff'] = (list(map(lambda x, y: round((x - y) / y * 100, 1),top_all['buy'].values, top_all['df2'].values)))
-
-    # 1️⃣ 安全处理 topR
-    # topR_series = top_all.get('topR', pd.Series(np.nan, index=top_all.index))
-    # top_all['topR'] = topR_series.apply(lambda x: round(x, 1) if pd.notnull(x) else np.nan)
-    # 安全获取 topR 列，如果不存在则创建，默认值 0
     topR_series = top_all.get('topR', pd.Series(0, index=top_all.index))
     # 四舍五入处理
     top_all['topR'] = topR_series.apply(lambda x: round(x, 1))
@@ -6677,11 +6622,11 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
     for col in co2int:
         if col in tdxdata.columns:
             tdxdata[col] = tdxdata[col].astype(int)
-    top_all = cct.reduce_memory_usage(top_all)       
+    # top_all = cct.reduce_memory_usage(top_all)       
     if lastpTDX_DF is None:
         tdx_code = [co for co in codelist if co in tdxdata.index]
         tdxdata = tdxdata.loc[tdx_code]
-        tdxdata = cct.reduce_memory_usage(tdxdata)
+        # tdxdata = cct.reduce_memory_usage(tdxdata)
         return top_all, tdxdata
     else:
         return top_all

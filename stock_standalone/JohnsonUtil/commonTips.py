@@ -43,6 +43,9 @@ import a_trade_calendar
 # from py_mini_racer import py_mini_racer
 from textwrap import fill
 from JohnsonUtil.prettytable import ALL as ALL
+# from functools import partial
+import functools
+from multiprocessing import Pool
 
 try:
     from urllib.request import urlopen, Request
@@ -61,7 +64,99 @@ global last_trade_date,is_trade_date_today
 
 import ctypes
 import shutil
+from collections import defaultdict
 
+_TIMING_STATS = defaultdict(list)
+
+class timed_ctx:
+    def __init__(self, name, warn_ms=None, log_debug=True,logger=log):
+        """
+        :param name: 统计名称
+        :param warn_ms: 超过该时间则 warning（None 表示不报警）
+        :param log_debug: 是否输出 debug 日志
+        """
+        self.name = name
+        self.warn_ms = warn_ms
+        self.log_debug = log_debug
+        self.logger = logger or log   # ✅ 关键修复点
+
+    def __enter__(self):
+        self.start = time.perf_counter()
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        cost_ms = (time.perf_counter() - self.start) * 1000
+
+        # 1️⃣ 汇总统计（一定保留）
+        _TIMING_STATS[self.name].append(cost_ms)
+
+        # 2️⃣ 实时日志（可控）
+        if self.warn_ms is not None and cost_ms >= self.warn_ms:
+            self.logger.warning(f"[SLOW] {self.name} cost={cost_ms:.2f} ms")
+        elif self.log_debug:
+            self.logger.debug(f"[TIME] {self.name} cost={cost_ms:.2f} ms")
+
+#使用方式:1普通监控（不刷日志）
+# with timed_ctx("combine_dataFrame"):
+#     df = combine_dataFrame(df1, df2)
+# 2:重点怀疑对象（慢就报警）
+# with timed_ctx("TDX last df load", warn_ms=1000):
+#     df_last = get_append_lastp_to_df(...)
+# 3:fetch_and_process 末尾输出汇总
+def dump_timing_stats(top=10,logger=log):
+    items = sorted(
+        ((k, sum(v), len(v)) for k, v in _TIMING_STATS.items()),
+        key=lambda x: x[1],
+        reverse=True
+    )
+
+    logger.info("==== Timing Summary ====")
+    for name, total_ms, cnt in items[:top]:
+        logger.info(
+            f"{name:<30} total={total_ms/1000:.2f}s count={cnt} avg={total_ms/cnt:.1f}ms"
+        )
+
+#使用方式2:
+# @timed_block("fetch_and_process", warn_ms=1000)
+# def fetch_and_process(...):
+
+def print_timing_summary(top_n=10, unit="ms"):
+    """
+    汇总 _TIMING_STATS 并打印 top_n 慢函数
+    :param top_n: 显示前 top_n 个慢函数
+    :param unit: 时间单位 'ms' 或 's'
+    """
+    summary = []
+
+    # 遍历所有统计项
+    for name, times in _TIMING_STATS.items():
+        if not times:
+            continue
+        arr = np.array(times)
+        if unit == "ms":
+            arr_display = arr
+        else:  # 秒
+            arr_display = arr / 1000.0
+
+        summary.append({
+            "name": name,
+            "count": len(times),
+            "mean": np.mean(arr_display),
+            "max": np.max(arr_display),
+            "p95": np.percentile(arr_display, 95)
+        })
+
+    # 按平均耗时排序
+    summary_sorted = sorted(summary, key=lambda x: x["mean"], reverse=True)
+
+    print(f"{'Function':40} {'count':>6} {'mean':>10} {'max':>10} {'p95':>10}")
+    print("-"*80)
+    for item in summary_sorted[:top_n]:
+        print(f"{item['name'][:40]:40} {item['count']:6d} "
+              f"{item['mean']:10.2f} {item['max']:10.2f} {item['p95']:10.2f}")
+
+# 使用示例
+# 在程序任意位置调用
+# print_timing_summary(top_n=5, unit="ms")
 # --- Win32 API 用于获取 EXE 原始路径 (仅限 Windows) ---
 def _get_win32_exe_path() -> str:
     """
@@ -145,6 +240,34 @@ def get_base_path_simple() -> str:
         # 普通脚本
         return os.path.dirname(os.path.abspath(__file__))
 
+
+
+def timed_block(name=None, warn_ms=500, log_level=LoggerFactory.INFO,logger=log):
+    """
+    自动耗时统计装饰器
+    :param name: 模块名称（默认函数名）
+    :param warn_ms: 超过多少毫秒报警
+    """
+    def decorator(func):
+        tag = name or func.__name__
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            start = time.perf_counter()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                cost_ms = (time.perf_counter() - start) * 1000
+                if cost_ms >= warn_ms:
+                    logger.warning(f"[SLOW] {tag} cost={cost_ms:.2f} ms")
+                else:
+                    logger.log(log_level, f"[TIME] {tag} cost={cost_ms:.2f} ms")
+        return wrapper
+    return decorator
+
+#使用方式:
+# @timed_block("fetch_and_process", warn_ms=1000)
+# def fetch_and_process(...):
 
 #mode 2 统一是否 py and nui
 # ----------------------------
@@ -3702,7 +3825,7 @@ def to_mp_run_tqdm_err(cmd, urllist,*args,**kwargs):
     # workerfunc = partial(worker, **kwargs)
     # results = pool.map(workerfunc, urllist)
     # for y in tqdm(pool.imap_unordered(func, urllisttq),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
-    func = partial(cmd, **kwargs)
+    func = functools.partial(cmd, **kwargs)
     for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
             result.append(y)
 
@@ -3735,9 +3858,9 @@ def imap_tqdm(function, iterable, processes, chunksize=20, desc=None, disable=Fa
     :param kwargs: Any additional arguments that should be passed to the function.
     """ 
     if kwargs:
-        function_wrapper = partial(_wrapper, function=function, **kwargs)
+        function_wrapper = functools.partial(_wrapper, function=function, **kwargs)
     else:
-        function_wrapper = partial(_wrapper, function=function)
+        function_wrapper = functools.partial(_wrapper, function=function)
 
     results = [None] * len(iterable)
     # results = []
@@ -3758,8 +3881,7 @@ def _wrapper(enum_iterable, function, **kwargs):
     return i, result
 
 
-from functools import partial
-from multiprocessing import Pool
+
 def to_mp_run_async_old2025(cmd, urllist, *args,**kwargs):
     # https://stackoverflow.com/questions/68065937/how-to-show-progress-bar-tqdm-while-using-multiprocessing-in-python
     #other  apply the as_completed 
@@ -3805,7 +3927,7 @@ def to_mp_run_async_old2025(cmd, urllist, *args,**kwargs):
         if len(kwargs) > 0 :
                 # pool = ThreadPool(12)
                 log.debug(f'cmd:{cmd} kwargs:{kwargs}')
-                func = partial(cmd, **kwargs)
+                func = functools.partial(cmd, **kwargs)
                 # TDXE:44.26  cpu 1   
                 # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
                 # results = pool.map(func, urllist)
@@ -3864,7 +3986,7 @@ def to_mp_run_async_old2025(cmd, urllist, *args,**kwargs):
     else:
         if len(kwargs) > 0 :
             pool = ThreadPool(1)
-            func = partial(cmd, **kwargs)
+            func = functools.partial(cmd, **kwargs)
             # TDXE:40.63  cpu 1    cpu_count() 107.14
             # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
             # results = pool.map(func, urllist)
@@ -3998,8 +4120,8 @@ def to_mp_run_async_newOK(cmd, urllist, *args, **kwargs):
         cpu_used = int(cpu_count() / 2) + 1
         pool_count = min(max(1, int(data_count / 100)), cpu_used)
         
-        func = partial(cmd, **kwargs)
-        partialfunc = partial(process_file_exc, func)
+        func = functools.partial(cmd, **kwargs)
+        partialfunc = functools.partial(process_file_exc, func)
 
         try:
             # --- 关键：在多进程运行期间，只允许 WARNING 以上级别的日志进入管道 ---
@@ -4079,8 +4201,8 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
         if len(kwargs) > 0 :
                 # pool = ThreadPool(12)
                 log.debug(f'cmd:{cmd} kwargs:{kwargs}')
-                func = partial(cmd, **kwargs)
-                partialfunc = partial(process_file_exc, func)
+                func = functools.partial(cmd, **kwargs)
+                partialfunc = functools.partial(process_file_exc, func)
                 global error_codes
                 old_level = log.level 
                 log.setLevel(LoggerFactory.WARNING) 
@@ -4204,7 +4326,7 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
     else:
         if len(kwargs) > 0 :
             pool = ThreadPool(1)
-            func = partial(cmd, **kwargs)
+            func = functools.partial(cmd, **kwargs)
             # TDXE:40.63  cpu 1    cpu_count() 107.14
             # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
             # results = pool.map(func, urllist)
@@ -4305,7 +4427,7 @@ def to_mp_run_async_outdate2023(cmd, urllist, *args,**kwargs):
         if len(kwargs) > 0 :
             pool = ThreadPool(1)
             # pool = ThreadPool(12)
-            func = partial(cmd, **kwargs)
+            func = functools.partial(cmd, **kwargs)
             # TDXE:44.26  cpu 1   
             # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
             # results = pool.map(func, urllist)
@@ -4329,7 +4451,7 @@ def to_mp_run_async_outdate2023(cmd, urllist, *args,**kwargs):
     else:
         if len(kwargs) > 0 :
             pool = ThreadPool(1)
-            func = partial(cmd, **kwargs)
+            func = functools.partial(cmd, **kwargs)
             # TDXE:40.63  cpu 1    cpu_count() 107.14
             # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
             # results = pool.map(func, urllist)
@@ -5361,8 +5483,8 @@ def prepare_df_for_hdf5(df, verbose=False):
 
     return df
 
+# @timed_block("reduce_memory_usage", warn_ms=1000)
 def reduce_memory_usage(df, verbose=False):
-
     numerics = ["int8", "int16", "int32", "int64", "float16", "float32", "float64"]
     if df is not None:
         start_mem = df.memory_usage().sum() / 1024 ** 2
@@ -5415,6 +5537,14 @@ def reduce_memory_usage(df, verbose=False):
             )
     return df
 
+def df_memory_usage(df, verbose=False):
+    end_mem = df.memory_usage().sum() / 1024 ** 2
+    log.info(
+                "Mem. usage decreased to {:.2f} Mb ".format(
+                    end_mem
+                )
+            )
+    return df
 # def read_to_indb(days=20,duplicated=False):
 #     df = inDb.selectlastDays(days)
 
@@ -7781,6 +7911,7 @@ def select_dataFrame_isNull(df):
     is_null = df.isnull().stack()[lambda x: x].index.tolist() 
     return(is_null)
 
+# @timed_block("combine_dataFrame", warn_ms=1000)
 def combine_dataFrame(maindf: Union[pd.DataFrame, pd.Series], subdf: Union[pd.DataFrame, pd.Series], col: Optional[str] = None, compare: Optional[str] = None, append: bool = False, clean: bool = True) -> pd.DataFrame:
     '''
 
@@ -7821,11 +7952,6 @@ def combine_dataFrame(maindf: Union[pd.DataFrame, pd.Series], subdf: Union[pd.Da
     subdf_co = subdf.columns
     maindf = maindf.fillna(0)
     subdf = subdf.fillna(0)
-#    if 'ticktime' in maindf.columns:
-#        maindf = maindf.dropna()
-#        maindf.ticktime = maindf.ticktime.apply(lambda x:str(x).replace(':','')[:4] if len(str(x))==8 else x)
-#        maindf.ticktime = maindf.ticktime.astype(int)
-#        maindf = maindf[maindf.ticktime < get_now_time_int()+5]
     if not append:
 
         if 'code' in maindf.columns:
@@ -7834,21 +7960,6 @@ def combine_dataFrame(maindf: Union[pd.DataFrame, pd.Series], subdf: Union[pd.Da
             subdf = subdf.set_index('code')
 
         no_index = maindf.drop([inx for inx in maindf.index if inx not in subdf.index], axis=0)
-        # 遍历Maindf中subdf没有的index并删除
-
-#        no_index = maindf.loc[subdf.index]
-        # if col is not None and compare is not None:
-        #     # if col in subdf.columns:
-        #     # sub_col = list(set(subdf.columns) - set([col]))
-
-        #     # sub_dif_inx = list(set(subdf.index) - set(maindf.index))
-        #     # trandf = subdf.drop(sub_dif_inx,axis=0)
-        #     # no_index[compare]=map((lambda x,y:y-x),no_index.couts,trandf.couts)
-        #     pass
-        #     # no_index[compare]=map((lambda x,y:y-x),eval("subdf.%s"%(col)),eval("no_index.%s"%(col)))
-        # else:
-        #     sub_col = list(set(subdf.columns) - set())
-
         drop_sub_col = [col for col in no_index.columns if col in subdf.columns]
         #比较主从的col,两边都有的需要清理一个
         if clean:
@@ -7862,20 +7973,13 @@ def combine_dataFrame(maindf: Union[pd.DataFrame, pd.Series], subdf: Union[pd.Da
             maindf = maindf.drop([inx for inx in maindf.index if inx in subdf.index], axis=0)
             maindf = pd.concat([maindf, no_index], axis=0)
     else:
-        #        if len(list(set(maindf.columns)-set()))
-        #        if len(maindf) < len(subdf):
-        #            maindf,subdf =subdf,maindf
         maindf = maindf.drop([col for col in maindf.index if col in subdf.index], axis=0)
         co_mod = maindf.dtypes[(maindf.dtypes == int) & (list(maindf.dtypes.keys()) != 'ldate') & (list(maindf.dtypes.keys()) != 'kind')]
 
         for co_t in list(co_mod.keys()):
             if co_t in subdf.columns:
                 if maindf.dtypes[co_t] != subdf.dtypes[co_t]:
-                    # print maindf.dtypes[co_t] , subdf.dtypes[co_t]
-                    # print maindf[co_t],subdf[co_t]
-                    # print co_t,maindf.dtypes[co_t]
                     subdf[co_t] = subdf[co_t].astype(maindf.dtypes[co_t])
-                    # log.error("col to types:%s" % (maindf.dtypes[co_t]))
             else:
                 if append:
                     subdf[co_t] = 0
@@ -7889,36 +7993,9 @@ def combine_dataFrame(maindf: Union[pd.DataFrame, pd.Series], subdf: Union[pd.Da
         maindf.reset_index(inplace=True)
         maindf.drop_duplicates('code', inplace=True)
         maindf.set_index('code', inplace=True)
-#        maindf['timel']=time.time()
-    '''
-        if 'code' in maindf.columns:
-            maindf = maindf.set_index('code')
-        if 'code' in subdf.columns:
-            subdf = subdf.set_index('code')
-
-        diff_m_sub = list(set(maindf.index) - set(subdf.index))
-        same_sub = list(set(subdf.index) & set(maindf.index))
-    #    no_index = maindf.drop([inx for inx in maindf.index  if inx not in subdf.index], axis=0)
-        maindf = maindf.drop(same_sub, axis=0)
-
-        if col is None:
-            sub_col = subdf.columns
-        else:
-            sub_col = list(set(subdf.columns)-set(maindf.columns))
-
-        same_columns = list(set(subdf.columns) & set(maindf.columns))
-    #    maindf.drop([col for col in no_index.columns if col in subdf.columns], axis=1,inplace=True)
-        maindf.drop(same_columns, axis=1,inplace=True)
-        no_index = no_index.merge(subdf, left_index=True, right_index=True, how='left')
-        maindf = maindf.drop([inx for inx in maindf.index  if inx in subdf.index], axis=0)
-        maindf = pd.concat([maindf, no_index],axis=0)
-    '''
-    # maindf = maindf.drop_duplicates()
     log.info("combine df :%0.2f" % (time.time() - times))
     if append:
         dif_co = list(set(maindf_co) - set(subdf_co))
-        # if set(dif_co) - set(['nhigh', 'nlow', 'nclose']) > 0 and len(dif_co) > 1:
-            # log.info("col:%s %s" % (dif_co[:3], eval(("maindf.%s") % (dif_co[0]))[1]))
     return maindf
 
 get_config_value_ramfile(fname='is_trade_date',update=True,currvalue=get_day_istrade_date(),xtype='trade_date')

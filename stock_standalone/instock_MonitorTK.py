@@ -455,12 +455,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
         self._task_running = True
         try:
-            logger.info(f'start Write_market_all_day_mp OK')
-            tdd.Write_market_all_day_mp('all')
-            logger.info(f'run Write_market_all_day_mp OK')
-            CFG = cct.GlobalConfig(conf_ini)
-            # cct.GlobalConfig(conf_ini, write_all_day_date=20251205)
-            CFG.set_and_save("general", "write_all_day_date", today)
+            if  cct.get_trade_date_status():
+                logger.info(f'start Write_market_all_day_mp OK')
+                tdd.Write_market_all_day_mp('all')
+                logger.info(f'run Write_market_all_day_mp OK')
+                CFG = cct.GlobalConfig(conf_ini)
+                # cct.GlobalConfig(conf_ini, write_all_day_date=20251205)
+                CFG.set_and_save("general", "write_all_day_date", today)
+            else:
+                logger.info(f"today: {today} is trade_date :{cct.get_trade_date_status()} not to Write_market_all_day_mp")
 
         finally:
             self._task_running = False
