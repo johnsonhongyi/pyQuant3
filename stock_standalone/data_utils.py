@@ -31,6 +31,8 @@ def calc_compute_volume(top_all: pd.DataFrame, logger: Any, resample: str = 'd',
 
 def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.DataFrame:
     """指标计算"""
+    
+    top_all['amount'] = top_all['volume'] * top_all['close']
     top_all['volume'] = calc_compute_volume(top_all, logger, resample=resample, virtual=True)
 
     now_time = cct.get_now_time_int()

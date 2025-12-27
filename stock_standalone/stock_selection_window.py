@@ -1,8 +1,14 @@
 import tkinter as tk
 from tkinter import ttk, messagebox
-import pandas as pd
 import os
+import json
 from datetime import datetime
+from typing import Optional, Any, TYPE_CHECKING
+import pandas as pd
+
+if TYPE_CHECKING:
+    from stock_live_strategy import StockLiveStrategy
+    from stock_selector import StockSelector
 
 class StockSelectionWindow(tk.Toplevel):
     """
@@ -20,15 +26,25 @@ class StockSelectionWindow(tk.Toplevel):
         self.title("策略选股 & 人工复核")
         self.geometry("1100x600")
         
-        self.live_strategy = live_strategy
-        self.selector = stock_selector
+        self.live_strategy: Optional['StockLiveStrategy'] = live_strategy
+        self.selector: Optional['StockSelector'] = stock_selector
+        
+        # --- History Config ---
+        self.history_file: str = "stock_sector_history.json"
+        self.history: list[str] = self.load_history()
+        
         # 获取主窗口的 sender 用于联动
-        self.sender = getattr(master, 'sender', None)
+        self.sender: Optional[Any] = getattr(master, 'sender', None)
         if self.sender is None and hasattr(master, 'master'):
             self.sender = getattr(master.master, 'sender', None)
-        self.df_candidates = pd.DataFrame()
+        self.df_candidates: pd.DataFrame = pd.DataFrame()
         
         self._init_ui()
+        
+        # 默认使用最近一次查询
+        if self.history:
+            self.concept_filter_var.set(self.history[0])
+            
         self.load_data()
 
         # Center window
@@ -48,15 +64,15 @@ class StockSelectionWindow(tk.Toplevel):
         toolbar.pack(fill="x", padx=5, pady=5)
         
         # Actions
-        tk.Button(toolbar, text="🔄 重新运行策略", command=self.load_data).pack(side="left", padx=5, pady=5)
+        tk.Button(toolbar, text="🔄 重新运行策略", command=lambda: self.load_data(force=True)).pack(side="left", padx=5, pady=5)
         
         tk.Frame(toolbar, width=20).pack(side="left") # Spacer
 
         # Feedback controls
         tk.Label(toolbar, text="人工标注:", font=("Arial", 10, "bold")).pack(side="left", padx=5)
         
-        self.reason_var = tk.StringVar()
-        self.reason_combo = ttk.Combobox(toolbar, textvariable=self.reason_var, width=15, state="readonly")
+        self.reason_var: tk.StringVar = tk.StringVar()
+        self.reason_combo: ttk.Combobox = ttk.Combobox(toolbar, textvariable=self.reason_var, width=15, state="readonly")
         self.reason_combo['values'] = [
             "符合策略", "形态完美", "量能配合", "板块热点", # Positive
             "风险过高", "趋势破坏", "非热点", "量能不足", "位置过高", "其他" # Negative
@@ -72,11 +88,16 @@ class StockSelectionWindow(tk.Toplevel):
         
         # Concept Filter
         tk.Label(toolbar, text="板块筛选:", font=("Arial", 10)).pack(side="left", padx=2)
-        self.concept_filter_var = tk.StringVar()
-        entry = tk.Entry(toolbar, textvariable=self.concept_filter_var, width=15)
-        entry.pack(side="left", padx=2)
-        entry.bind('<Return>', lambda e: self.load_data())
-        tk.Button(toolbar, text="🔍", command=self.load_data, width=3).pack(side="left", padx=1)
+        self.concept_filter_var: tk.StringVar = tk.StringVar()
+        self.concept_combo: ttk.Combobox = ttk.Combobox(toolbar, textvariable=self.concept_filter_var, width=15)
+        self.concept_combo['values'] = self.history
+        self.concept_combo.pack(side="left", padx=2)
+        
+        # 绑定回车和选中事件
+        self.concept_combo.bind('<Return>', self.on_filter_search)
+        self.concept_combo.bind('<<ComboboxSelected>>', self.on_filter_search)
+        
+        tk.Button(toolbar, text="🔍", command=self.on_filter_search, width=3).pack(side="left", padx=1)
 
         tk.Button(toolbar, text="🚀 确认导入选中股", command=self.import_selected, bg="#ffd54f", font=("Arial", 10, "bold")).pack(side="right", padx=10, pady=5)
 
@@ -129,16 +150,20 @@ class StockSelectionWindow(tk.Toplevel):
 
         # Bindings
         self.tree.bind("<ButtonRelease-1>", self.on_select)
-
-    def load_data(self):
+        self.tree.bind("<<TreeviewSelect>>", self.on_select)
+    def load_data(self, force=False):
         # Clear
         for item in self.tree.get_children():
             self.tree.delete(item)
             
         try:
-            self.df_candidates = self.selector.get_candidates_df()
+            if self.selector:
+                self.df_candidates = self.selector.get_candidates_df(force=force)
+            else:
+                self.df_candidates = pd.DataFrame()
+                
             if self.df_candidates.empty:
-                messagebox.showinfo("提示", "策略未筛选出任何标的")
+                # messagebox.showinfo("提示", "策略未筛选出任何标的")
                 return
 
             # Apply Concept Filter
@@ -170,6 +195,54 @@ class StockSelectionWindow(tk.Toplevel):
         except Exception as e:
             messagebox.showerror("错误", f"加载数据失败: {e}")
 
+    # === 历史记录与筛选逻辑 ===
+    def load_history(self) -> list[str]:
+        """从文件加载查询历史"""
+        default_hotspots: list[str] = ['商业航天', '有色', '海峡两岸']
+        try:
+            if os.path.exists(self.history_file):
+                with open(self.history_file, 'r', encoding='utf-8') as f:
+                    history = json.load(f)
+                    # 确保预设的热点在列表里（如果历史为空或旧）
+                    for hs in reversed(default_hotspots):
+                        if hs not in history:
+                            history.insert(0, hs)
+                    return history
+            return default_hotspots
+        except Exception as e:
+            print(f"加载历史失败: {e}")
+            return default_hotspots
+
+    def update_history(self, query: str):
+        """更新查询历史并保存"""
+        query = query.strip()
+        if not query:
+            return
+            
+        if query in self.history:
+            self.history.remove(query)
+        
+        self.history.insert(0, query)
+        self.history = self.history[:20]  # 保留最近20个
+        
+        # 更新 UI
+        if hasattr(self, 'concept_combo'):
+            self.concept_combo['values'] = self.history
+            
+        try:
+            with open(self.history_file, 'w', encoding='utf-8') as f:
+                json.dump(self.history, f, ensure_ascii=False, indent=4)
+        except Exception as e:
+            print(f"保存历史失败: {e}")
+
+    def on_filter_search(self, event: Optional[Any] = None):
+        """执行查询并记录历史"""
+        _ = event # Avoid unused variable warning
+        query = self.concept_filter_var.get().strip()
+        if query:
+            self.update_history(query)
+        self.load_data()
+
     def on_select(self, event):
         """
         选中事件：获取选中代码并尝试发送联动
@@ -186,6 +259,16 @@ class StockSelectionWindow(tk.Toplevel):
             # 发送联动
             if stock_code and hasattr(self, 'sender') and self.sender:
                 self.sender.send(stock_code)
+    # === 行选择逻辑 ===
+    # def on_tree_select(self,event):
+    #     sel = self.tree.selection()
+    #     if not sel:
+    #         return
+    #     vals = tree.item(sel[0], "values")
+    #     if not vals:
+    #         return
+    #     code = str(vals[0]).zfill(6)
+    #     self.sender.send(str(vals[0]).zfill(6))
 
     def mark_status(self, status):
         selected_items = self.tree.selection()
@@ -200,8 +283,8 @@ class StockSelectionWindow(tk.Toplevel):
             cur_values = self.tree.item(item_id, "values")
             # Create new values tuple
             new_values = list(cur_values)
-            new_values[7] = status
-            new_values[8] = reason
+            new_values[8] = status
+            new_values[9] = reason
             
             self.tree.item(item_id, values=new_values, tags=(tag,))
 
@@ -214,8 +297,8 @@ class StockSelectionWindow(tk.Toplevel):
             values = self.tree.item(item_id, "values")
             code = values[0]
             name = values[1]
-            status = values[7]
-            user_reason = values[8]
+            status = values[8]
+            user_reason = values[9]
             
             # 只要不是默认状态，就记录反馈以便优化
             if status != "待定":
@@ -224,7 +307,7 @@ class StockSelectionWindow(tk.Toplevel):
                     "code": code,
                     "name": name,
                     "auto_score": values[2],
-                    "auto_reason": values[6],
+                    "auto_reason": values[7],
                     "user_status": status,
                     "user_reason": user_reason
                 })
@@ -237,7 +320,7 @@ class StockSelectionWindow(tk.Toplevel):
                 return
         
         # 1. Update Monitor List
-        if to_import:
+        if to_import and self.live_strategy:
             count = 0
             if hasattr(self.live_strategy, '_monitored_stocks'):
                 existing = self.live_strategy._monitored_stocks
@@ -254,7 +337,8 @@ class StockSelectionWindow(tk.Toplevel):
                         count += 1
                 
                 if count > 0:
-                    self.live_strategy._save_monitors()
+                    if hasattr(self.live_strategy, '_save_monitors'):
+                        self.live_strategy._save_monitors()
                     messagebox.showinfo("成功", f"成功导入 {count} 只新股票到监控列表！")
                 else:
                     messagebox.showinfo("提示", "所选股票已在监控列表中。")
