@@ -44,6 +44,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         if self.sender is None and hasattr(master, 'master'):
             self.sender = getattr(master.master, 'sender', None)
         self.df_candidates: pd.DataFrame = pd.DataFrame()
+        self.df_full_candidates: pd.DataFrame = pd.DataFrame()  # 缓存完整的候选股数据
+        self._data_loaded: bool = False  # 标记数据是否已从策略加载
         
         self._init_ui()
         
@@ -195,20 +197,38 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Button-3>", self.show_context_menu)
     def load_data(self, force=False):
-        # Clear
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        # Clear items in batch for performance
+        children = self.tree.get_children()
+        if children:
+            self.tree.delete(*children)
             
         try:
-            if self.selector:
-                self.df_candidates = self.selector.get_candidates_df(force=force)
+            # --- Load Data Phase ---
+            # 如果不是强制加载，且数据已经加载过一次，则跳过耗时的策略计算
+            if not force and self._data_loaded and not self.df_full_candidates.empty:
+                # 使用缓存数据
+                pass
             else:
-                self.df_candidates = pd.DataFrame()
+                if self.selector:
+                    self.df_full_candidates = self.selector.get_candidates_df(force=force)
+                else:
+                    self.df_full_candidates = pd.DataFrame()
                 
-            if self.df_candidates.empty:
+                self._data_loaded = True
+                
+                # 在首次加载或强制刷新时初始化用户标注列 (如果策略返回了数据)
+                if not self.df_full_candidates.empty:
+                    self.df_full_candidates['user_status'] = "待定"
+                    self.df_full_candidates['user_reason'] = ""
+
+            # --- Filter & Display Phase ---
+            if self.df_full_candidates.empty:
+                self.df_candidates = pd.DataFrame()
                 self._update_title_stats()
-                # messagebox.showinfo("提示", "策略未筛选出任何标的")
                 return
+
+            # 从全量缓存中复制，用于当前视窗的筛选/显示
+            self.df_candidates = self.df_full_candidates.copy()
 
             # Apply Concept Filter
             filter_str = self.concept_filter_var.get().strip()
@@ -232,16 +252,24 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             
             self._update_title_stats()
 
-            # Init user columns
-            self.df_candidates['user_status'] = "待定"
-            self.df_candidates['user_reason'] = ""
+            # self.df_candidates['user_status'] = "待定"
+            # self.df_candidates['user_reason'] = ""
             
             for index, row in self.df_candidates.iterrows():
+                # 获取已有的用户标注（如果存在）
+                user_status = row.get('user_status', "待定")
+                user_reason = row.get('user_reason', "")
+                
+                # 设置对应的标签记录颜色
+                tag = "pending"
+                if user_status == "选中": tag = "selected"
+                elif user_status == "丢弃": tag = "ignored"
+
                 self.tree.insert("", "end", iid=row['code'], values=(
                     row['code'], row['name'], row['score'], row['price'], 
                     row['percent'], row['volume'], row.get('category', ''), row['reason'], 
-                    "待定", ""
-                ), tags=("pending",))
+                    user_status, user_reason
+                ), tags=(tag,))
             
             # 渲染完成后自动调整列宽
             self.after(100, self._auto_fit_columns)
@@ -261,8 +289,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             header_text: str = self.tree.heading(col)["text"]
             max_w: int = f.measure(header_text) + 20
             
-            # 获取所有行该列的内容
-            for item in self.tree.get_children():
+            # 获取采样行该列的内容 (限制数量以提升性能)
+            all_items = self.tree.get_children()
+            sample_items = all_items[:100] if len(all_items) > 100 else all_items
+            for item in sample_items:
                 cell_val: str = str(self.tree.set(item, col))
                 max_w = max(max_w, f.measure(cell_val) + 20)
             
@@ -362,7 +392,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
     def clear_filter(self):
         """清空筛选条件并查看全部结果"""
         self.concept_filter_var.set("")
-        self.load_data()
+        # self.load_data()
+        self.on_filter_search()
 
     def delete_current_history(self):
         """删除当前选中的历史记录"""
@@ -444,6 +475,15 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             new_values[9] = reason
             
             self.tree.item(item_id, values=new_values, tags=(tag,))
+            
+            # 同步更新缓存 DataFrame，以便在筛选后仍能保持标记状态
+            code = cur_values[0]
+            if not self.df_full_candidates.empty:
+                # 寻找对应的代码并更新
+                mask = self.df_full_candidates['code'] == code
+                if mask.any():
+                    self.df_full_candidates.loc[mask, 'user_status'] = status
+                    self.df_full_candidates.loc[mask, 'user_reason'] = reason
 
     def import_selected(self):
         to_import = []
