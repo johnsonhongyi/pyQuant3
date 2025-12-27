@@ -27,9 +27,10 @@ class StockSelector:
     2. 基于技术指标筛选强势股 (趋势、量能、结构)
     3. 生成筛选日志，用于后续分析优化
     """
-    def __init__(self, log_path="selection_log.csv"):
+    def __init__(self, log_path="selection_log.csv", df: Optional[pd.DataFrame] = None):
         self.data_path = r'g:\top_all.h5'
         self.log_path = log_path
+        self.df_all_realtime = df  # 实时数据引用
         self._setup_logger()
         # 初始化决策引擎（可选，用于辅助判断）
         self.decision_engine = IntradayDecisionEngine() if IntradayDecisionEngine else None
@@ -39,7 +40,12 @@ class StockSelector:
         # self.logger.setLevel(logging.INFO)
 
     def load_data(self) -> pd.DataFrame:
-        """加载 top_all.h5 数据"""
+        """加载数据：优先使用传入的实时数据，否则读取 top_all.h5"""
+        if self.df_all_realtime is not None and not self.df_all_realtime.empty:
+            self.logger.info(f"使用实时传入的数据进行筛选: {len(self.df_all_realtime)} 条")
+            # 这里的 df_all 已经是 DataFrame 了，直接返回（或者 copy 以防修改原数据）
+            return self.df_all_realtime.copy()
+
         try:
             if not os.path.exists(self.data_path):
                 self.logger.error(f"数据文件不存在: {self.data_path}")
@@ -76,9 +82,11 @@ class StockSelector:
         if df.empty:
             return df
 
-        # 1. 基础过滤 (非停牌，非极小盘等)
-        # 假设 exclusion 逻辑 (比如 percent = 0 可能是停牌)
-        df_active = df[df['volume'] > 0].copy()
+        # 1. 基础过滤 (非停牌，非极小盘，成交额需大于 5000万 确保流动性)
+        df_active = df[(df['volume'] > 0) & (df['amount'] > 50000000)].copy()
+        if df_active.empty:
+            self.logger.info("无活跃且成交额达标的股票")
+            return pd.DataFrame()
         
         # --- Pre-calculate Market Hot Concepts ---
         concept_dict = {}
@@ -127,55 +135,84 @@ class StockSelector:
                 ma20 = float(data.get('ma20d', 0)) 
                 price = float(data.get('trade', data.get('close', 0.0))) 
                 
-                # 1. 多头排列
+                # 1. 均线状态与斜率
                 if ma5 > 0 and ma10 > 0:
+                    ma5_1d = float(data.get('ma5d', 0)) 
+                    # 检查 MA5 是否向上偏转
                     if price > ma5 and ma5 > ma10:
-                        trend_score = 10
+                        score += 5
+                        if ma5 > ma5_1d > 0:
+                            score += 5
+                            reason.append("趋势向上")
+                        else:
+                            reason.append("均线多排")
+                        
                         if ma20 > 0 and ma10 > ma20:
-                            trend_score += 10 # 完美多头
-                            
-                        # 检查是否突破上轨 (upper1d)
-                        upper1d = float(data.get('upper1d', 0))
-                        if upper1d > 0 and price > upper1d:
-                            trend_score += 10
-                            reason.append("突破上轨")
-                            
-                        score += trend_score
-                        if trend_score >= 10:
-                            reason.append("多头趋势")
+                            score += 10
+                            reason.append("中期强势")
 
-                # 2. 动能 (基于 data_utils 的强动能逻辑)
-                # 动态检查最近 cct.compute_lastdays 天的趋势
-                # 要求: 每天的收盘价和低点都抬高 (或宽松一点)
-                
+                    # 2. 突破判断
+                    upper1d = float(data.get('upper1d', 0))
+                    if upper1d > 0 and price > upper1d:
+                        ratio = float(data.get('ratio', 1.0))
+                        if ratio > 1.2:
+                            score += 20
+                            reason.append("放量突破")
+                        else:
+                            score += 10
+                            reason.append("缩量尝试突破")
+
+                # 3. 动能：N连涨 + 价格结构
                 limit_days = getattr(cct, 'compute_lastdays', 5)
                 consecutive_rise = 0
                 
-                # Check current day vs 1d
                 lastp1d = float(data.get('lastp1d', 0))
-                lastl1d = float(data.get('lastl1d', 0))
                 
-                # 如果今日比昨日强 (现价>昨收 且 现价>昨上轨?) -> 简单比较 Close 和 Low
-                if lastp1d > 0 and price > lastp1d and (lastl1d == 0 or float(data.get('low', 0)) > lastl1d):
+                if lastp1d > 0 and price > lastp1d:
                     consecutive_rise += 1
-                    
-                    # Check history backwards
                     for d in range(1, limit_days):
-                        # Compare d with d+1 (e.g., 1d vs 2d)
                         curr_p = float(data.get(f'lastp{d}d', 0))
                         prev_p = float(data.get(f'lastp{d+1}d', 0))
-                        curr_l = float(data.get(f'lastl{d}d', 0))
-                        prev_l = float(data.get(f'lastl{d+1}d', 0))
-                        
-                        if prev_p > 0 and curr_p > prev_p and (prev_l == 0 or curr_l > prev_l):
+                        if prev_p > 0 and curr_p > prev_p:
                             consecutive_rise += 1
                         else:
                             break
                 
-                
-                if consecutive_rise >= 2:
-                    score += consecutive_rise * 5 # 连涨天数越多分越高
+                if consecutive_rise >= 3:
+                    score += consecutive_rise * 5 
                     reason.append(f"{consecutive_rise}连涨")
+                
+                # 4. 回调买点判断 (价格回调至 MA5/MA10 附近且量能萎缩)
+                is_pullback = False
+                if ma5 > 0 and 0 < (price - ma5) / ma5 < 0.015: 
+                    ratio = float(data.get('ratio', 1.0))
+                    if ratio < 0.9: # 明确缩量
+                        score += 20
+                        reason.append("缩量回踩")
+                        is_pullback = True
+                
+                # 5. 极度活跃 (成交额 > 3亿)
+                amount = float(data.get('amount', 0))
+                if amount > 300000000:
+                    score += 10
+                    reason.append("资金活跃")
+
+                # --- 动态生成操作建议 (Advice) ---
+                advice = []
+                if is_pullback:
+                    advice.append("建议:回踩买入")
+                elif "放量突破" in reason:
+                    advice.append("建议:强势追涨")
+                elif "缩量尝试突破" in reason:
+                    advice.append("建议:观察量能配合")
+                elif consecutive_rise >= 4:
+                    advice.append("建议:高位减仓")
+                elif "均线多排" in reason and len(reason) == 1:
+                    # 仅有多头而无其他动能，降级处理
+                    score -= 5
+                
+                if advice:
+                    reason.extend(advice)
 
             except Exception as e:
                 self.logger.error(f"Error filtering {code}: {e}")
@@ -206,17 +243,22 @@ class StockSelector:
             strong_sector_hit = [c for c in stock_cats if c in top_concepts]
             if strong_sector_hit:
                 score += 10 * len(strong_sector_hit)
-                # reason.append(f"板块:{','.join(strong_sector_hit)}")
-                # 仅添加前3个强板块
-                for hit in strong_sector_hit[:3]:
-                    reason.append(f"强板块:{hit}")
+                reason.append(f"热点:{strong_sector_hit[0]}") # 仅显示最强一个增加辨识度
 
             # D. 利用 Decision Engine (如果可用)
             if self.decision_engine:
                  pass
 
-            # 阈值筛选
-            if score >= 25: # 调整阈值
+            # 阈值筛选 (必须有明确理由且分值达标)
+            if score >= 30 and reason: 
+                # 理由去重并保持顺序
+                reason = list(dict.fromkeys(reason))
+                
+                # 优化建议排序，确保“建议”在最后
+                advices = [r for r in reason if r.startswith("建议:")]
+                others = [r for r in reason if not r.startswith("建议:")]
+                final_reason = "|".join(others + advices)
+                
                 record = {
                     'date': today,
                     'code': code,
@@ -225,7 +267,7 @@ class StockSelector:
                     'price': price,
                     'percent': pct,
                     'volume': float(data.get('volume', 0)),
-                    'reason': "|".join(reason),
+                    'reason': final_reason,
                     'ma5': ma5,
                     'ma10': ma10,
                     'category': str(data.get('category', '')) if pd.notna(data.get('category')) else ''
@@ -248,14 +290,27 @@ class StockSelector:
         return df_selected
 
     def save_selection_log(self, df_selected: pd.DataFrame):
-        """保存筛选结果到日志文件 (CSV / DB)"""
-        # CSV append mode
-        if os.path.exists(self.log_path):
-            df_selected.to_csv(self.log_path, mode='a', header=False, index=False, encoding='utf-8')
-        else:
-            df_selected.to_csv(self.log_path, mode='w', header=True, index=False, encoding='utf-8')
+        """保存筛选结果到日志文件, 每天只保留最后一次运行的数据"""
+        if df_selected.empty:
+            return
+            
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
         
-        self.logger.info(f"筛选日志已更新: {self.log_path}")
+        if os.path.exists(self.log_path):
+            try:
+                df_old = pd.read_csv(self.log_path, encoding='utf-8', dtype={'code': str})
+                # 删除今日旧数据
+                df_old = df_old[df_old['date'] != today]
+                # 合并
+                df_new = pd.concat([df_old, df_selected], ignore_index=True)
+                df_new.to_csv(self.log_path, index=False, encoding='utf-8')
+            except Exception as e:
+                self.logger.error(f"更新日志失败, 尝试直接保存: {e}")
+                df_selected.to_csv(self.log_path, index=False, encoding='utf-8')
+        else:
+            df_selected.to_csv(self.log_path, index=False, encoding='utf-8')
+        
+        self.logger.info(f"筛选日志已更新 (今日数据已覆盖): {self.log_path}")
         
     def get_candidate_codes(self) -> List[str]:
         """获取筛选出的代码列表，供 stock_live_strategy 调用"""
@@ -264,8 +319,28 @@ class StockSelector:
             return []
         return df['code'].tolist()
 
-    def get_candidates_df(self) -> pd.DataFrame:
-        """获取筛选结果完整 DataFrame"""
+    def get_candidates_df(self, force=False) -> pd.DataFrame:
+        """
+        获取筛选结果。
+        :param force: 是否强制重新运行策略。如果为 False，则优先从本地日志加载今日已存数据。
+        """
+        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        
+        # 非强制模式下，先检查今日是否有存量数据
+        if not force and os.path.exists(self.log_path):
+            try:
+                df_log = pd.read_csv(self.log_path, encoding='utf-8', dtype={'code': str})
+                df_today = df_log[df_log['date'] == today].copy()
+                if not df_today.empty:
+                    self.logger.info(f"检测到今日已运行过策略，加载存量数据: {len(df_today)} 条")
+                    # 补充必要的 code zfill
+                    if 'code' in df_today.columns:
+                        df_today['code'] = df_today['code'].apply(lambda x: str(x).zfill(6))
+                    return df_today
+            except Exception as e:
+                self.logger.error(f"读取今日历史数据失败: {e}, 将重新运行策略")
+
+        # 运行策略逻辑
         df = self.load_data()
         df = self.calculate_indicators(df)
         df_res = self.filter_strong_stocks(df)
@@ -273,6 +348,7 @@ class StockSelector:
 
 if __name__ == '__main__':
     # 测试运行
+    # 可以传入 df 进行测试: selector = StockSelector(df=some_df)
     selector = StockSelector()
     candidates = selector.get_candidate_codes()
     print(f"Candidates: {candidates[:10]} ... Total: {len(candidates)}")

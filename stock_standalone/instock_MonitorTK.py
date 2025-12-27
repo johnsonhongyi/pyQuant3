@@ -17,6 +17,7 @@ import multiprocessing as mp
 import ctypes
 import pyperclip
 from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any, Union, Callable
 import pandas as pd
 import numpy as np
 import win32api
@@ -71,6 +72,8 @@ from stock_logic_utils import test_code_against_queries,is_generic_concept
 
 from db_utils import *
 from kline_monitor import KLineMonitor
+from stock_selection_window import StockSelectionWindow
+from stock_selector import StockSelector
 from column_manager import ColumnSetManager
 from collections import Counter, OrderedDict
 import hashlib
@@ -248,6 +251,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 用于保存 detail_win
         self.detail_win = None
         self.strategy_report_win = None
+        # ✅ 初始化复用窗口引用
+        self._voice_monitor_win: Optional[tk.Toplevel] = None
+        self._stock_selection_win: Optional[tk.Toplevel] = None
         self.txt_widget = None
 
         # ----------------- 控件框 ----------------- #
@@ -1051,6 +1057,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="清空", command=lambda: self.clean_search(2)).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="删除", command=lambda: self.delete_search_history(2)).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="监控", command=lambda: self.KLineMonitor_init()).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="选股", command=lambda: self.open_stock_selection_window()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="存档", command=lambda: self.open_archive_loader(), font=('Microsoft YaHei', 9), padx=2, pady=2).pack(side="left", padx=2)
 
@@ -3959,13 +3966,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         messagebox.showinfo("敬请期待", "复盘功能正在开发中，将结合您的反馈进行模型微调。")
 
     def open_voice_monitor_manager(self):
-        """语音预警管理窗口"""
+        """语音预警管理窗口 (支持窗口复用)"""
         if not hasattr(self, 'live_strategy') or self.live_strategy is None:
             messagebox.showwarning("提示", "实时监控模块尚未启动，请稍后再试")
             return
 
+        # ✅ 窗口复用逻辑
+        if self._voice_monitor_win and self._voice_monitor_win.winfo_exists():
+            self._voice_monitor_win.deiconify()
+            self._voice_monitor_win.lift()
+            self._voice_monitor_win.focus_force()
+            return
+
         try:
             win = tk.Toplevel(self)
+            self._voice_monitor_win = win
             win.title("语音预警管理")
             window_id = "语音预警管理"
             # --- 窗口定位 ---
@@ -4116,30 +4131,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             load_data()
 
             # --- 动态添加 "策略选股" 按钮 (New) ---
-            def open_selector_window():
-                """打开策略选股与人工复核窗口"""
-                if not hasattr(self.live_strategy, 'import_daily_candidates'):
-                    messagebox.showwarning("错误", "当前策略不支持选股功能", parent=win)
-                    return
-
-                try:
-                    # 延迟导入以避免循环引用
-                    from stock_selection_window import StockSelectionWindow
-                    from stock_selector import StockSelector
-
-                    # 实例化选择器
-                    selector = StockSelector()
-                    # 打开窗口
-                    selection_win = StockSelectionWindow(win, self.live_strategy, selector)
-                    # 窗口关闭后刷新列表 (如果用户导入了新股)
-                    win.wait_window(selection_win) 
-                    load_data() # 刷新当前列表
-                    
-                except Exception as e:
-                    logger.error(f"打开选股窗口失败: {e}")
-                    messagebox.showerror("错误", f"打开选股窗口失败: {e}", parent=win)
-
-            tk.Button(top_frame, text="策略选股...", command=open_selector_window, bg="#fff9c4", font=("Arial", 9, "bold")).pack(side="right", padx=5)
+            tk.Button(top_frame, text="策略选股...", command=self.open_stock_selection_window, bg="#fff9c4", font=("Arial", 9, "bold")).pack(side="right", padx=5)
 
             # --- 底部按钮 ---
             btn_frame = tk.Frame(win)
@@ -4439,6 +4431,40 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Voice Monitor Manager Error: {e}")
             messagebox.showerror("错误", f"打开管理窗口失败: {e}")
+
+    def open_stock_selection_window(self):
+        """打开策略选股与人工复核窗口 (支持窗口复用)"""
+        # ✅ 确保策略模块已尝试初始化
+        if not hasattr(self, 'live_strategy') or self.live_strategy is None:
+            # 尝试提前初始化 selector
+            if not hasattr(self, 'selector'):
+                try:
+                    self.selector = StockSelector(df=getattr(self, 'df_all', None))
+                except Exception as e:
+                    logger.error(f"StockSelector 初始化失败: {e}")
+                    self.selector = None
+        
+        # ✅ 窗口复用逻辑
+        if self._stock_selection_win and self._stock_selection_win.winfo_exists():
+            try:
+                self._stock_selection_win.deiconify()
+                self._stock_selection_win.lift()
+                self._stock_selection_win.focus_force()
+                return
+            except Exception:
+                pass
+
+        try:
+            # 实例化选择器 (如果还没有)
+            if not hasattr(self, 'selector') or self.selector is None:
+                self.selector = StockSelector(df=getattr(self, 'df_all', None))
+            
+            # 打开窗口
+            self._stock_selection_win = StockSelectionWindow(self, self.live_strategy, self.selector)
+            
+        except Exception as e:
+            logger.error(f"打开选股窗口失败: {e}")
+            messagebox.showerror("错误", f"打开选股窗口失败: {e}")
             
     def copy_code(self,event):
         region = self.tree.identify_region(event.x, event.y)
