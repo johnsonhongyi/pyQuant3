@@ -3956,8 +3956,8 @@ def format_func_call(func, *args, **kwargs):
 #         # return e  # 或 return Exception(...)
 
 
-def to_mp_run_async_gpt(cmd, urllist, *args, **kwargs):
-# def to_mp_run_async(cmd, urllist, *args, **kwargs):
+# def to_mp_run_async_gpt(cmd, urllist, *args, **kwargs):
+def to_mp_run_async(cmd, urllist, *args, **kwargs):
     #gpt
     t0 = time.time()
     result = []
@@ -4127,8 +4127,8 @@ def to_mp_run_async_newOK(cmd, urllist, *args, **kwargs):
     return result
 
 # https://stackoverflow.com/questions/68065937/how-to-show-progress-bar-tqdm-while-using-multiprocessing-in-python
-# def to_mp_run_async_me_ok(cmd, urllist, *args,**kwargs):
-def to_mp_run_async(cmd, urllist, *args,**kwargs):
+def to_mp_run_async_me_ok(cmd, urllist, *args,**kwargs):
+# def to_mp_run_async(cmd, urllist, *args,**kwargs):
     result = []  
     time_s = time.time()
     # func = partial(cmd, **kwargs)
