@@ -25,7 +25,7 @@ from JSONData import sina_data
 # import numba as nb
 import datetime
 import random
-
+from collections import deque
 import traceback
 # import logbook
 
@@ -1887,181 +1887,181 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
         df = calc_support_resistance_vec(df)
     return df
 
-def get_tdx_Exp_day_to_df_debug(code, start=None, end=None, dl=None, newdays=None,
-                          type='f', wds=True, lastdays=3, resample='d',
-                          MultiIndex=False, lastday=None, detect_calc_support=True):
-    """
-    获取指定股票的日线数据，并计算各类指标
-    保留原有逻辑和所有变量
-    """
-    code_u = cct.code_to_symbol(code)
-    if type == 'f':
-        file_path = os.path.join(exp_path, 'forwardp', f"{code_u.upper()}.txt")
-    elif type == 'b':
-        file_path = os.path.join(exp_path, 'backp', f"{code_u.upper()}.txt")
-    else:
-        return pd.DataFrame()
+# def get_tdx_Exp_day_to_df_debug(code, start=None, end=None, dl=None, newdays=None,
+#                           type='f', wds=True, lastdays=3, resample='d',
+#                           MultiIndex=False, lastday=None, detect_calc_support=True):
+#     """
+#     获取指定股票的日线数据，并计算各类指标
+#     保留原有逻辑和所有变量
+#     """
+#     code_u = cct.code_to_symbol(code)
+#     if type == 'f':
+#         file_path = os.path.join(exp_path, 'forwardp', f"{code_u.upper()}.txt")
+#     elif type == 'b':
+#         file_path = os.path.join(exp_path, 'backp', f"{code_u.upper()}.txt")
+#     else:
+#         return pd.DataFrame()
 
-    global initTdxdata
-    write_k_data_status = False
+#     global initTdxdata
+#     write_k_data_status = False
 
-    if dl is not None:
-        start = cct.last_tddate(dl)
-    start = cct.day8_to_day10(start)
-    end = cct.day8_to_day10(end)
+#     if dl is not None:
+#         start = cct.last_tddate(dl)
+#     start = cct.day8_to_day10(start)
+#     end = cct.day8_to_day10(end)
 
-    tdx_max_int = ct.tdx_max_int
-    tdx_max_int_end = ct.tdx_max_int_end
-    tdx_high_da = ct.tdx_high_da
-    newstockdayl = newdays if newdays is not None else newdaysinit
+#     tdx_max_int = ct.tdx_max_int
+#     tdx_max_int_end = ct.tdx_max_int_end
+#     tdx_high_da = ct.tdx_high_da
+#     newstockdayl = newdays if newdays is not None else newdaysinit
 
-    df = None
+#     df = None
 
-    # if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
-    #     # 只有当日志等级是 DEBUG 或更低才进入 ipdb
-    #     import ipdb; ipdb.set_trace()
-    log.debug(f'file_path:{file_path}')
+#     # if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
+#     #     # 只有当日志等级是 DEBUG 或更低才进入 ipdb
+#     #     import ipdb; ipdb.set_trace()
+#     log.debug(f'file_path:{file_path}')
     
-    # ------------------------------
-    # 文件不存在或为空
-    # ------------------------------
-    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        log.error(f'{code_u} file not exists: {file_path}')
-        tmp_df = get_kdate_data(code, start='', end='', ktype='D')
-        if len(tmp_df) > 0:
-            write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
-            log.error(f'{code_u} file created: {file_path}')
-        else:
-            if initTdxdata < 10:
-                log.error(f"file_path not exists code: {code}")
-            else:
-                print('.', end=' ')
-            initTdxdata += 1
-        return pd.DataFrame()
+#     # ------------------------------
+#     # 文件不存在或为空
+#     # ------------------------------
+#     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+#         log.error(f'{code_u} file not exists: {file_path}')
+#         tmp_df = get_kdate_data(code, start='', end='', ktype='D')
+#         if len(tmp_df) > 0:
+#             write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
+#             log.error(f'{code_u} file created: {file_path}')
+#         else:
+#             if initTdxdata < 10:
+#                 log.error(f"file_path not exists code: {code}")
+#             else:
+#                 print('.', end=' ')
+#             initTdxdata += 1
+#         return pd.DataFrame()
 
-    # ------------------------------
-    # dl == 1 的特殊处理
-    # ------------------------------
-    if dl is not None and int(dl) == 1:
-        data = cct.read_last_lines(file_path, int(dl) + 3)
-        data_l = data.split('\n')
-        data_l.reverse()
-        for line in data_l:
-            a = line.split(',')
-            if len(a) == 7:
-                tdate, topen, thigh, tlow, tclose, tvol, amount = a
-                try:
-                    topen = round(float(topen), 2)
-                    thigh = round(float(thigh), 2)
-                    tlow = round(float(tlow), 2)
-                    tclose = round(float(tclose), 2)
-                    tvol = round(float(tvol), 2)
-                    amount = round(float(amount.replace('\r','').replace('\n','')), 1)
-                except Exception:
-                    continue
-                if topen == 0 or amount == 0:
-                    continue
-                df = pd.Series({
-                    'code': code, 'date': tdate, 'open': topen, 'high': thigh,
-                    'low': tlow, 'close': tclose, 'amount': amount, 'vol': tvol
-                })
-                return df
-        return pd.Series([], dtype='float64')
+#     # ------------------------------
+#     # dl == 1 的特殊处理
+#     # ------------------------------
+#     if dl is not None and int(dl) == 1:
+#         data = cct.read_last_lines(file_path, int(dl) + 3)
+#         data_l = data.split('\n')
+#         data_l.reverse()
+#         for line in data_l:
+#             a = line.split(',')
+#             if len(a) == 7:
+#                 tdate, topen, thigh, tlow, tclose, tvol, amount = a
+#                 try:
+#                     topen = round(float(topen), 2)
+#                     thigh = round(float(thigh), 2)
+#                     tlow = round(float(tlow), 2)
+#                     tclose = round(float(tclose), 2)
+#                     tvol = round(float(tvol), 2)
+#                     amount = round(float(amount.replace('\r','').replace('\n','')), 1)
+#                 except Exception:
+#                     continue
+#                 if topen == 0 or amount == 0:
+#                     continue
+#                 df = pd.Series({
+#                     'code': code, 'date': tdate, 'open': topen, 'high': thigh,
+#                     'low': tlow, 'close': tclose, 'amount': amount, 'vol': tvol
+#                 })
+#                 return df
+#         return pd.Series([], dtype='float64')
 
-    # ------------------------------
-    # 读取文件数据
-    # ------------------------------
-    try:
-        # if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
-        #     # 只有当日志等级是 DEBUG 或更低才进入 ipdb
-        #     import ipdb; ipdb.set_trace()
-        log.debug(f'file_path:{file_path}')
-        df = pd.read_csv(
-            file_path,
-            names=ct.TDX_Day_columns[1:],
-            header=None,
-            engine='c',
-            encoding='gb18030',
-            encoding_errors='replace',
-            on_bad_lines='skip'
-        )
-        log.debug(f"{code}: 文件读取完成, 行数={len(df)}, 前5行:\n{df.head()}")
-    except Exception as e:
-        log.error(f"{code}: 读取文件异常: {e}\n{traceback.format_exc()}")
-        return pd.DataFrame()
+#     # ------------------------------
+#     # 读取文件数据
+#     # ------------------------------
+#     try:
+#         # if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
+#         #     # 只有当日志等级是 DEBUG 或更低才进入 ipdb
+#         #     import ipdb; ipdb.set_trace()
+#         log.debug(f'file_path:{file_path}')
+#         df = pd.read_csv(
+#             file_path,
+#             names=ct.TDX_Day_columns[1:],
+#             header=None,
+#             engine='c',
+#             encoding='gb18030',
+#             encoding_errors='replace',
+#             on_bad_lines='skip'
+#         )
+#         log.debug(f"{code}: 文件读取完成, 行数={len(df)}, 前5行:\n{df.head()}")
+#     except Exception as e:
+#         log.error(f"{code}: 读取文件异常: {e}\n{traceback.format_exc()}")
+#         return pd.DataFrame()
 
-    # ------------------------------
-    # 强制数值化 & drop NaN
-    # ------------------------------
-    for col in ['open','high','low','close','vol','amount']:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors='coerce')
-    df.dropna(subset=['open','high','low','close','vol','amount'], inplace=True)
-    df = df[(df['open'] != 0) & (df['amount'] != 0)]
-    df['code'] = code
-    df['date'] = df['date'].astype(str)
-    df = df[df['date'].str.len() == 10]
-    log.debug(f"{code}: 数值化完成, 行数={len(df)}, 前5行:\n{df.head()}")
+#     # ------------------------------
+#     # 强制数值化 & drop NaN
+#     # ------------------------------
+#     for col in ['open','high','low','close','vol','amount']:
+#         if col in df.columns:
+#             df[col] = pd.to_numeric(df[col], errors='coerce')
+#     df.dropna(subset=['open','high','low','close','vol','amount'], inplace=True)
+#     df = df[(df['open'] != 0) & (df['amount'] != 0)]
+#     df['code'] = code
+#     # df['date'] = df['date'].astype(str)
+#     # df = df[df['date'].str.len() == 10]
+#     log.debug(f"{code}: 数值化完成, 行数={len(df)}, 前5行:\n{df.head()}")
 
-    df = df[ct.TDX_Day_columns] if all(c in df.columns for c in ct.TDX_Day_columns) else df
-    df = df[~df.date.duplicated()]
+#     df = df[ct.TDX_Day_columns] if all(c in df.columns for c in ct.TDX_Day_columns) else df
+#     df = df[~df.date.duplicated()]
 
-    # ------------------------------
-    # 筛选日期
-    # ------------------------------
-    if start is not None:
-        df = df[df.date >= start]
-    if end is not None:
-        df = df[df.date <= end]
+#     # ------------------------------
+#     # 筛选日期
+#     # ------------------------------
+#     if start is not None:
+#         df = df[df.date >= start]
+#     if end is not None:
+#         df = df[df.date <= end]
 
-    if len(df) == 0:
-        return pd.DataFrame()
+#     if len(df) == 0:
+#         return pd.DataFrame()
 
-    df = df.set_index('date').sort_index(ascending=True)
-    if lastday is not None:
-        df = df[:-lastday]
+#     df = df.set_index('date').sort_index(ascending=True)
+#     if lastday is not None:
+#         df = df[:-lastday]
 
-    # ------------------------------
-    # 非日线重采样
-    # ------------------------------
-    if not MultiIndex and resample != 'd':
-        df = get_tdx_stock_period_to_type(df, period_day=resample)
-        if 'date' in df.columns:
-            df['date'] = df['date'].astype(str)
-            df = df.set_index('date')
+#     # ------------------------------
+#     # 非日线重采样
+#     # ------------------------------
+#     if not MultiIndex and resample != 'd':
+#         df = get_tdx_stock_period_to_type(df, period_day=resample)
+#         if 'date' in df.columns:
+#             # df['date'] = df['date'].astype(str)
+#             df = df.set_index('date')
 
-    # ------------------------------
-    # SMA计算
-    # ------------------------------
-    try:
-        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
-        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
-        df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
-        log.debug(f"{code}: SMA计算完成, 前5行:\n{df[['close','ma5d','ma10d','ma20d','ma60d']].head()}")
-    except Exception as e:
-        log.error(f"{code}: SMA计算异常: {e}\n{traceback.format_exc()}\n前5行close:\n{df['close'].head()}")
+#     # ------------------------------
+#     # SMA计算
+#     # ------------------------------
+#     try:
+#         df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
+#         df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
+#         df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
+#         df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
+#         log.debug(f"{code}: SMA计算完成, 前5行:\n{df[['close','ma5d','ma10d','ma20d','ma60d']].head()}")
+#     except Exception as e:
+#         log.error(f"{code}: SMA计算异常: {e}\n{traceback.format_exc()}\n前5行close:\n{df['close'].head()}")
 
-    # ------------------------------
-    # 滚动指标 / lastdays_percent / MACD
-    # ------------------------------
-    try:
-        df['max5'] = df.close.shift(1).rolling(5).max()
-        df['max10'] = df.close.shift(1).rolling(10).max()
-        log.debug(f"{code}: 滚动指标完成, 前5行:\n{df[['close','max5','max10']].head()}")
+#     # ------------------------------
+#     # 滚动指标 / lastdays_percent / MACD
+#     # ------------------------------
+#     try:
+#         df['max5'] = df.close.shift(1).rolling(5).max()
+#         df['max10'] = df.close.shift(1).rolling(10).max()
+#         log.debug(f"{code}: 滚动指标完成, 前5行:\n{df[['close','max5','max10']].head()}")
 
-        if f'perc{lastdays}d' not in df.columns:
-            df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
-            log.debug(f"{code}: lastdays_percent计算完成, 前5行:\n{df.head()}")
+#         if f'perc{lastdays}d' not in df.columns:
+#             df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
+#             log.debug(f"{code}: lastdays_percent计算完成, 前5行:\n{df.head()}")
 
-        if 'macd' not in df.columns:
-            df = get_tdx_macd(df, detect_calc_support=detect_calc_support)
-            log.debug(f"{code}: MACD计算完成, 前5行:\n{df.head()}")
-    except Exception as e:
-        log.error(f"{code}: 指标计算异常: {e}\n{traceback.format_exc()}\n前5行:\n{df.head()}")
+#         if 'macd' not in df.columns:
+#             df = get_tdx_macd(df, detect_calc_support=detect_calc_support)
+#             log.debug(f"{code}: MACD计算完成, 前5行:\n{df.head()}")
+#     except Exception as e:
+#         log.error(f"{code}: 指标计算异常: {e}\n{traceback.format_exc()}\n前5行:\n{df.head()}")
 
-    log.info(f"{code}: get_tdx_Exp_day_to_df完成, 行数={len(df)}, 列={df.columns.tolist()}")
-    return df
+#     log.info(f"{code}: get_tdx_Exp_day_to_df完成, 行数={len(df)}, 列={df.columns.tolist()}")
+#     return df
 
 
 # def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
@@ -2172,17 +2172,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         return pd.Series([], dtype='float64')
 
     # ------------------------------
-    # 读取文件数据
-    # ------------------------------
-    # 计算阶段耗时
-    # t_io_end = 0
-    # t_macd_start = 0
-    # t_macd_end = 0
-    # t_perc_start = 0
-    # t_perc_end = 0
-    # t_start = time.time()
-
-    # ------------------------------
     # 读取文件数据 (Refactored to use read_csv)
     # ------------------------------
     try:
@@ -2192,18 +2181,35 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         # So we must NOT use the first column name 'code' for reading.
         
         file_cols = ct.TDX_Day_columns[1:] # Exclude 'code'
-        
+        # df = pd.read_csv(
+        #     file_path, 
+        #     names=file_cols, 
+        #     header=None, 
+        #     index_col=False, 
+        #     # usecols=range(len(file_cols)), # Only read the first len(file_cols) columns (0 to 6)
+        #     engine='c',
+        #     encoding='gb18030', # Use broadly compatible encoding
+        #     encoding_errors='replace', # Ignore encoding errors
+        #     on_bad_lines='skip', 
+        # )
+
+        # # 倒序取最后 dl+3 行
+        # df = df.iloc[-(dl+3):].iloc[::-1].reset_index(drop=True)
+
+        # 用 deque 高效读取文件尾 dl+1 行
+        with open(file_path, 'r', encoding='gb18030', errors='replace') as f:
+            last_lines = deque(f, maxlen=dl+1)
+
         df = pd.read_csv(
-            file_path, 
-            names=file_cols, 
-            header=None, 
-            index_col=False, 
-            # usecols=range(len(file_cols)), # Only read the first len(file_cols) columns (0 to 6)
+            pd.io.common.StringIO(''.join(last_lines)),
+            names=file_cols,
+            header=None,
+            index_col=False,
             engine='c',
-            encoding='gb18030', # Use broadly compatible encoding
-            encoding_errors='replace', # Ignore encoding errors
-            on_bad_lines='skip', 
+            on_bad_lines='skip'
         )
+        # 倒序
+        df = df.iloc[::-1].reset_index(drop=True)
         # t1 = time.time()
         
         # Ensure numeric columns are numeric (coerce errors to NaN)
@@ -2212,7 +2218,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         
         # t2 = time.time()
 
-        
         # Drop NaNs created by coercion
         df.dropna(subset=cols_to_numeric, inplace=True)
         
@@ -2221,12 +2226,12 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         
         # Add 'code' column
         df['code'] = code
-        t_io_end = time.time()
-        
+        # t_io_end = time.time()
         # Format 'date' to string
-        df['date'] = df['date'].astype(str)
-        df = df[df['date'].str.len() == 10]
-        
+
+        # df['date'] = df['date'].astype(str)
+        # df = df[df['date'].str.len() == 10]
+
         # Reorder columns to match ct.TDX_Day_columns exactly
         # This puts 'code' back at the first position
         final_cols = [c for c in ct.TDX_Day_columns if c in df.columns]
@@ -2241,26 +2246,35 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     # ------------------------------
     # 筛选日期
     # ------------------------------
-    if start is not None:
-        df = df[df.date >= start]
-    if end is not None:
-        df = df[df.date <= end]
+    # if start is not None:
+    #     df = df[df.date >= start]
+    # if end is not None:
+    #     df = df[df.date <= end]
+    if start is not None or end is not None:
+        mask = pd.Series(True, index=df.index)
+        if start is not None:
+            mask &= df['date'] >= start
+        if end is not None:
+            mask &= df['date'] <= end
+        df = df.loc[mask]
 
     if len(df) == 0:
         return pd.DataFrame()
 
-    df['date'] = df['date'].astype(str)
+    # df['date'] = df['date'].astype(str)
     df = df.set_index('date').sort_index(ascending=True)
 
+    # if lastday is not None:
+    #     df = df[:-lastday]
     if lastday is not None:
-        df = df[:-lastday]
+        df = df.iloc[:-lastday] if lastday > 0 else df
     # ------------------------------
     # 非日线重采样
     # ------------------------------
     if not MultiIndex and resample != 'd':
         df = get_tdx_stock_period_to_type(df, period_day=resample)
         if 'date' in df.columns:
-            df['date'] = df['date'].astype(str)
+            # df['date'] = df['date'].astype(str)
             df = df.set_index('date')
 
     # ------------------------------
@@ -2339,12 +2353,9 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
 
     if len(df) > 10:
         # 2. 调用自动检查函数
-
         df_checked = check_conditions_auto(df[-1:])
-
         # 3. 直接赋值给原始 df 的 'MainU' 列对应最后一行
         # df.loc[df.index[-1], 'MainU'] = df_checked.loc[df_checked.index[-1], '符合条件']
-
         df.loc[df.index[-1], 'MainU'] = df_checked.loc[df_checked.index[-1], 'MainU']
 
         # 索引设置与排序
@@ -2387,7 +2398,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
                             code, start=start, end=end, dl=dl, newdays=newdays, type='f', wds=False, MultiIndex=MultiIndex
                         )
 
-
+    return df
     # t_end = time.time()
     # t_total = t_end - t_start
     # if t_start > 0 and t_total > 0.1: # Threshold 50ms
@@ -2396,198 +2407,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     #     perc_time = t_perc_end - t_perc_start if t_perc_end > 0 else 0
     #     other_time = t_total - io_time - macd_time - perc_time
     #     log.info(f"SLOW_LOG: {code} Total:{t_total:.3f}s | IO:{io_time:.3f}s | MACD:{macd_time:.3f}s | PERC:{perc_time:.3f}s | Other:{other_time:.3f}s")
-
-    return df
-
-# import cProfile
-# import pstats
-# import io
-
-# def get_tdx_Exp_day_to_df_performance(code, start=None, end=None, dl=None, newdays=None,
-#                           type='f', wds=True, lastdays=3, resample='d',
-#                           MultiIndex=False, lastday=None, detect_calc_support=True):
-#     """
-#     使用 cProfile 分析性能的版本
-#     """
-
-#     # =====================================================
-#     # cProfile 启动
-#     # =====================================================
-#     profiler = cProfile.Profile()
-#     profiler.enable()
-
-#     # -------------------------------------------------------
-#     # 初始化参数
-#     # -------------------------------------------------------
-#     code_u = cct.code_to_symbol(code)
-#     if type == 'f':
-#         file_path = os.path.join(exp_path, 'forwardp', f"{code_u.upper()}.txt")
-#     elif type == 'b':
-#         file_path = os.path.join(exp_path, 'backp', f"{code_u.upper()}.txt")
-#     else:
-#         return pd.DataFrame()
-
-#     global initTdxdata
-#     write_k_data_status = False
-
-#     if dl is not None:
-#         start = cct.last_tddate(dl)
-#     start = cct.day8_to_day10(start)
-#     end   = cct.day8_to_day10(end)
-
-#     log.debug(f'file_path:{file_path}')
-
-#     # -------------------------------------------------------
-#     # 文件不存在
-#     # -------------------------------------------------------
-#     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-#         tmp_df = get_kdate_data(code, start='', end='', ktype='D')
-#         if len(tmp_df) > 0:
-#             write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
-#         else:
-#             if initTdxdata < 10:
-#                 log.error(f"file_path not exists code: {code}")
-#             else:
-#                 print('.', end=' ')
-#             initTdxdata += 1
-#         profiler.disable()
-#         return pd.DataFrame()
-
-#     # -------------------------------------------------------
-#     # 最后一条读取特例
-#     # -------------------------------------------------------
-#     if dl is not None and int(dl) == 1:
-#         data = cct.read_last_lines(file_path, int(dl) + 3)
-#         data_l = data.split('\n')
-#         data_l.reverse()
-#         for line in data_l:
-#             a = line.split(',')
-#             if len(a) == 7:
-#                 tdate = a[0]
-#                 if len(tdate) != 10:
-#                     continue
-#                 try:
-#                     topen = round(float(a[1]), 2)
-#                     thigh = round(float(a[2]), 2)
-#                     tlow  = round(float(a[3]), 2)
-#                     tclose = round(float(a[4]), 2)
-#                     tvol = round(float(a[5]), 2)
-#                     amount = round(float(a[6].replace('\r\n','')), 1)
-#                 except:
-#                     continue
-#                 if int(topen) == 0 or int(amount) == 0:
-#                     continue
-
-#                 profiler.disable()
-#                 return pd.Series({
-#                     'code': code, 'date': tdate, 'open': topen,
-#                     'high': thigh, 'low': tlow, 'close': tclose,
-#                     'amount': amount, 'vol': tvol
-#                 })
-#         profiler.disable()
-#         return pd.Series([], dtype='float64')
-
-#     # -------------------------------------------------------
-#     # 文件读取
-#     # -------------------------------------------------------
-#     try:
-#         file_cols = ct.TDX_Day_columns[1:]
-#         df = pd.read_csv(
-#             file_path,
-#             names=file_cols,
-#             header=None,
-#             engine='c',
-#             encoding='gb18030',
-#             encoding_errors='replace',
-#             on_bad_lines='skip',
-#         )
-
-#         numeric_cols = ['open', 'high', 'low', 'close', 'vol', 'amount']
-#         for col in numeric_cols:
-#             if col in df.columns:
-#                 df[col] = pd.to_numeric(df[col], errors='coerce')
-
-#         df.dropna(subset=numeric_cols, inplace=True)
-#         df = df[(df['open'] != 0) & (df['amount'] != 0)]
-#         df['code'] = code
-#         df['date'] = df['date'].astype(str)
-#         df = df[df['date'].str.len() == 10]
-#         df = df[[c for c in ct.TDX_Day_columns if c in df.columns]]
-
-#     except Exception as e:
-#         log.error(f"Error reading file {file_path}: {e}")
-#         profiler.disable()
-#         return pd.DataFrame()
-
-#     df = df[~df.date.duplicated()]
-
-#     # -------------------------------------------------------
-#     # 数据预处理
-#     # -------------------------------------------------------
-#     if start is not None:
-#         df = df[df.date >= start]
-#     if end is not None:
-#         df = df[df.date <= end]
-#     if len(df) == 0:
-#         profiler.disable()
-#         return pd.DataFrame()
-
-#     df = df.set_index('date').sort_index()
-
-#     if lastday is not None:
-#         df = df[:-lastday]
-
-#     if not MultiIndex and resample != 'd':
-#         df = get_tdx_stock_period_to_type(df, period_day=resample)
-#         if 'date' in df.columns:
-#             df = df.set_index('date')
-
-#     # -------------------------------------------------------
-#     # MACD
-#     # -------------------------------------------------------
-#     if 'macd' not in df.columns:
-#         df = get_tdx_macd(df, detect_calc_support=detect_calc_support)
-
-#     # -------------------------------------------------------
-#     # 涨幅
-#     # -------------------------------------------------------
-#     if f'perc{lastdays}d' not in df.columns:
-#         df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample)
-
-#     # -------------------------------------------------------
-#     # 高低指标
-#     # -------------------------------------------------------
-#     if len(df) > 10:
-#         df['lmin']    = df.low[-ct.tdx_max_int_end:-ct.tdx_high_da].min()
-#         df['min5']    = df.low[-6:-1].min()
-#         df['cmean']   = round(df.close[-10:-ct.tdx_high_da].mean(), 2)
-#         df['hv']      = df.vol[-ct.tdx_max_int:-ct.tdx_high_da].max()
-#         df['lv']      = df.vol[-ct.tdx_max_int:-ct.tdx_high_da].min()
-
-#         df['max5']    = df.close.shift(1).rolling(5).max()
-#         df['max10']   = df.close.shift(1).rolling(10).max()
-#         df['hmax']    = df.close.shift(1).rolling(30).max()
-#         df['hmax60']  = df.close.shift(1).rolling(60).max()
-#         df['high4']   = df.close.shift(1).rolling(4).max()
-
-#         df_checked = check_conditions_auto(df[-1:])
-#         df.loc[df.index[-1], 'MainU'] = df_checked.iloc[-1]['MainU']
-
-#     df = df.sort_index()
-
-#     # =====================================================
-#     # 结束 profile 并输出
-#     # =====================================================
-#     profiler.disable()
-
-#     s = io.StringIO()
-#     ps = pstats.Stats(profiler, stream=s).sort_stats('cumulative')
-#     ps.print_stats(30)       # 只输出前 30 个函数
-#     log.info(f"[PROFILE] {code}\n{s.getvalue()}")
-
-#     return df
-
-
 
 
 INDEX_LIST = {'sh': 'sh000001', 'sz': 'sz399001', 'hs300': 'sz399300',
@@ -7041,15 +6860,14 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             results = cct.to_mp_run_async(
                 get_tdx_exp_low_or_high_power, codeList, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support)
                 
-                # get_tdx_exp_low_or_high_power, codeList, dt, ptype, dl, end, power, lastp, newdays, resample)
             
-            # # codeList = ['300055','002443']
-            # results=[]
-            # from tqdm import tqdm
-            # for inx in tqdm(list(range(len(codeList))),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(codeList),ncols=ct.ncols):
-            #     code = codeList[inx]
-            #     print(code,)
-            #     results.append(get_tdx_exp_low_or_high_power(code, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample))
+            # codeList = ['300055','002443']
+            # # results=[]
+            # # from tqdm import tqdm
+            # # for inx in tqdm(list(range(len(codeList))),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(codeList),ncols=ct.ncols):
+            # #     code = codeList[inx]
+            # #     print(code,)
+            # #     results.append(get_tdx_exp_low_or_high_power(code, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample))
                 
             # results=[]
             # for code in codeList:
@@ -7268,8 +7086,50 @@ def get_tdx_stock_period_to_type_in(df, period_day='W-FRI', periods=5, ncol=None
             period_stock_data = period_stock_data.drop(['date'], axis=1)
     return period_stock_data.reset_index()
 
-
 def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=None):
+    """
+    将日K数据转换为周K/月K等周期数据，保留必要列，支持 sum 聚合。
+    """
+    # 1️⃣ 周期类型
+    period_type = period_type_dic.get(period_day.lower(), period_day)
+
+    # 2️⃣ 缓存交易日判断
+    now_time = cct.get_now_time_int()
+    is_trade_day = cct.get_trade_date_status()
+    is_work_day = cct.get_work_day_status()
+    
+    if 915 < now_time < 1500 and is_trade_day and is_work_day:
+        stock_data = stock_data[stock_data.index < cct.get_today()]
+
+    # 3️⃣ 确保索引为 datetime
+    stock_data.index = pd.to_datetime(stock_data.index)
+    stock_data = stock_data.sort_index()
+
+    # 4️⃣ 构建 agg_dict
+    agg_dict = {
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'vol': 'sum',
+        'amount': 'sum'
+    }
+    if 'code' in stock_data.columns:
+        agg_dict['code'] = 'last'
+    if ncol:
+        agg_dict.update({co: 'sum' for co in ncol})
+
+    # 5️⃣ resample 并聚合
+    period_stock_data = stock_data.resample(period_type, label='right', closed='right').agg(agg_dict)
+
+    # 6️⃣ 清理无效数据
+    if 'code' in period_stock_data.columns:
+        period_stock_data = period_stock_data[period_stock_data['code'].notnull()]
+    period_stock_data = period_stock_data.dropna()
+
+    return period_stock_data
+
+def get_tdx_stock_period_to_type_ok(stock_data, period_day='w', periods=5, ncol=None):
     """
     将股票日K数据转换为周K/月K等周期数据。
 
@@ -7338,91 +7198,6 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
 
     return period_stock_data
 
-
-def get_tdx_stock_period_to_type_SRC(stock_data, period_day='w', periods=5, ncol=None):
-    """_周期转换周K,月K_
-
-    Returns:
-        _type_: _description_
-    """
-
-
-    if period_day.lower() in period_type_dic.keys():
-
-        period_type = period_type_dic[period_day.lower()]
-    else:
-        period_type = period_day
-
-    indextype = True if stock_data.index.dtype == 'datetime64[ns]' else False
-    
-    if 915 < cct.get_now_time_int() < 1500 and cct.get_trade_date_status() and  cct.get_work_day_status():
-    # if cct.get_work_day_status() and 915 < cct.get_now_time_int() < 1500:
-        stock_data = stock_data[stock_data.index < cct.get_today()]
-    stock_data['date'] = stock_data.index
-    if stock_data.index.name == 'date':
-        stock_data.index = pd.to_datetime(stock_data.index, format='%Y-%m-%d')
-    elif 'date' in stock_data.columns:
-        stock_data = stock_data.set_index('date')
-        stock_data = stock_data.sort_index(ascending=True)
-        stock_data.index = pd.to_datetime(stock_data.index, format='%Y-%m-%d')
-    else:
-        log.error("index.name not date,pls check:%s" % (stock_data[:1]))
-
-    period_stock_data = stock_data.resample(period_type).last()
-    # ÖÜÊý¾ÝµÄÃ¿ÈÕchangeÁ¬ÐøÏà³Ë
-    # period_stock_data['percent']=stock_data['percent'].resample(period_type,how=lambda x:(x+1.0).prod()-1.0)
-    # ÖÜÊý¾ÝopenµÈÓÚµÚÒ»ÈÕ
-    # print stock_data.index[0],stock_data.index[-1]
-    # period_stock_data.index =
-    # pd.DatetimeIndex(start=stock_data.index.values[0],end=stock_data.index.values[-1],freq='BM')
-
-    period_stock_data['open'] = stock_data[
-        'open'].resample(period_type).first()
-        # 'open'].resample(period_type).last()
-    # ÖÜhighµÈÓÚMax high
-    period_stock_data['high'] = stock_data[
-        'high'].resample(period_type).max()
-    period_stock_data['low'] = stock_data[
-        'low'].resample(period_type).min()
-    # volumeµÈÓÚËùÓÐÊý¾ÝºÍ
-    if ncol is not None:
-        for co in ncol:
-            period_stock_data[co] = stock_data[co].resample(period_type).sum()
-    else:
-        period_stock_data['amount'] = stock_data[
-            'amount'].resample(period_type).sum()
-        period_stock_data['vol'] = stock_data[
-            'vol'].resample(period_type).sum()
-    # period_stock_data['turnover']=period_stock_data['vol']/(period_stock_data['traded_market_value'])/period_stock_data['close']
-    
-    period_stock_data.index = stock_data['date'].resample(period_type).last().index
-    # print period_stock_data.index[:1]
-    if 'code' in period_stock_data.columns:
-        period_stock_data = period_stock_data[period_stock_data['code'].notnull()]
-    period_stock_data = period_stock_data.dropna()
-    # period_stock_data.reset_index(inplace=True)
-    # period_stock_data.set_index('date',inplace=True)
-    # print period_stock_data.columns,period_stock_data.index.name
-    # and period_stock_data.index.dtype != 'datetime64[ns]')
-    
-
-    # if period_day.lower() in period_type_dic.keys() and not indextype and period_stock_data.index.name == 'date' and 'date' in period_stock_data.columns:
-    if not indextype and period_stock_data.index.name == 'date' and 'date' in period_stock_data.columns:
-        # stock_data.index = pd.to_datetime(stock_data.index, format='%Y-%m-%d')
-        # period_stock_data = period_stock_data.set_index('date')
-
-        period_stock_data.index = period_stock_data.date
-        period_stock_data = period_stock_data.drop(['date'], axis=1)
-        # period_stock_data.index = [str(x)[:10] for x in period_stock_data.date]
-        # period_stock_data.index.name = 'date'
-    else:
-        if 'date' in period_stock_data.columns:
-            # period_stock_data = period_stock_data.set_index('date')
-            # period_stock_data.index = period_stock_data.date
-            period_stock_data = period_stock_data.drop(['date'], axis=1)
-
-    # print period_stock_data
-    return period_stock_data
 
 
 '''
@@ -7597,8 +7372,10 @@ if __name__ == '__main__':
     code = '300696'
     code_l=['920274','300342','300696', '603091', '605167']
     # code_l=['920274']
-    df=get_tdx_exp_all_LastDF_DL(code_l, dt='80',filter='y', resample='d')
+    df=get_tdx_exp_all_LastDF_DL(code_l, dt=ct.Resample_LABELS_Days['d'],filter='y', resample='d')
     print(f'{df[:2]} ')
+    import ipdb;ipdb.set_trace()
+
     time_s = time.time()
     signal_dict = extract_eval_signal_dict(df,lastdays=cct.compute_lastdays)
     print(f'time: {time.time() - time_s :.8f}  check code: {code_l} signal_dict:{(signal_dict)} ')
