@@ -196,7 +196,7 @@ class StockLiveStrategy:
         self.config_file = "voice_alert_config.json"
         self._load_monitors()
         self.alert_callback = None
-        
+        self.df = None
         # 初始化决策引擎（带止损止盈配置）
         self.decision_engine = IntradayDecisionEngine(
             stop_loss_pct=stop_loss_pct,

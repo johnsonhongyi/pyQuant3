@@ -52,7 +52,7 @@ from data_utils import (
     calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe
 )
 from gui_utils import (
-    bind_mouse_scroll, get_monitor_by_point, rearrange_monitors_per_screen
+    bind_mouse_scroll, get_monitor_by_point, rearrange_monitors_per_screen,get_monitor_index_for_window
 )
 from tk_gui_modules.dpi_mixin import DPIMixin
 from tk_gui_modules.window_mixin import WindowMixin
@@ -1271,7 +1271,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if self._live_strategy_first_run:
                             # 第一次：延迟执行
                             self._live_strategy_first_run = False
-                            self.after(35 * 1000,lambda: self.live_strategy.process_data(self.df_all))
+                            self.after(15 * 1000,lambda: self.live_strategy.process_data(self.df_all))
                         else:
                             # 后续：立即执行
                             self.live_strategy.process_data(self.df_all)

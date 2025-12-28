@@ -619,7 +619,7 @@ class IntradayDecisionEngine:
                 "reason": str
             }
         """
-        result = {"triggered": False, "action": "持仓", "position": 0.0, "reason": ""}
+        result = {"triggered": False, "action": "持仓", "position": 0.0, "reason": "", "debug": debug}
         
         # ---------- 数据安全获取（防止除零） ----------
         price = float(row.get("trade", 0))
@@ -970,7 +970,7 @@ class IntradayDecisionEngine:
         Returns:
             dict: 包含 triggered, action, position, reason
         """
-        result = {"triggered": False, "action": "持仓", "position": 0.0, "reason": ""}
+        result = {"triggered": False, "action": "持仓", "position": 0.0, "reason": "", "debug": debug}
         
         # ---------- 数据获取 ----------
         price = float(row.get("trade", 0))
@@ -1096,7 +1096,8 @@ class IntradayDecisionEngine:
                     "triggered": True,
                     "action": "买入",
                     "position": min(buy_score + 0.2, 0.8),
-                    "reason": "量价买入: " + ", ".join(signals)
+                    "reason": "量价买入: " + ", ".join(signals),
+                    "debug": debug
                 }
                 logger.debug(f"量价买入触发: score={buy_score:.2f} signals={signals}")
                 return result
@@ -1145,7 +1146,8 @@ class IntradayDecisionEngine:
                     "triggered": True,
                     "action": "卖出",
                     "position": max(0.3, 1.0 - sell_score),
-                    "reason": "量价卖出: " + ", ".join(sell_signals)
+                    "reason": "量价卖出: " + ", ".join(sell_signals),
+                    "debug": debug
                 }
                 logger.debug(f"量价卖出触发: score={sell_score:.2f} signals={sell_signals}")
                 return result
