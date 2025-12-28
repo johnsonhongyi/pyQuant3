@@ -541,7 +541,7 @@ def _handle_init_tdx(
             time.sleep(1)
         return False
 
-    with timed_ctx("init_tdx_total", warn_ms=3000):
+    with timed_ctx("init_tdx_total", warn_ms=1000):
         top_now = tdd.getSinaAlldf(
             market=market,
             vol=ct.json_countVol,

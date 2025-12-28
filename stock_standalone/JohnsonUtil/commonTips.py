@@ -3882,133 +3882,6 @@ def _wrapper(enum_iterable, function, **kwargs):
 
 
 
-def to_mp_run_async_old2025(cmd, urllist, *args,**kwargs):
-    # https://stackoverflow.com/questions/68065937/how-to-show-progress-bar-tqdm-while-using-multiprocessing-in-python
-    #other  apply the as_completed 
-    '''
-    import tqdm
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-    import pandas as pd
-    import os
-
-    with ProcessPoolExecutor(max_workers=os.cpu_count()) as executor:
-        # total argument for tqdm is just the number of submitted tasks:
-        with tqdm.tqdm(total=len(date)) as progress_bar:
-            futures = {}
-            for idx, dt in enumerate(date):
-                future = executor.submit(create_data, dt)
-                futures[future] = idx
-            results = [None] * len(date) # pre_allocate slots
-            for future in as_completed(futures):
-                idx = futures[future] # order of submission
-                results[idx] = future.result()
-                progress_bar.update(1) # advance by 1
-        data = [ent for sublist in results for ent in sublist]
-        data = pd.DataFrame(data, columns = cols)
-    '''
-    # if len(urllist) > 150:
-    #     pool_count = (cpu_count()-2)
-    # else:
-    #     pool_count = 2
-    result = []  
-    time_s = time.time()
-
-    if len(urllist) > 200:
-        if int(round(len(urllist)/100,0)) < 2:
-            cpu_co = 1
-        else:
-            cpu_co = int(round(len(urllist)/100,0))
-        cpu_used = int(cpu_count()/2) - 1 
-        log.debug(f'count:{len(urllist)} cpu_co:{cpu_co}')
-        pool_count = (cpu_used) if cpu_co > (cpu_used) else cpu_co
-        # pool_count = (cpu_count()-2) if cpu_co > (cpu_count()-2) else cpu_co
-        if  cpu_co > 1 and 1300 < get_now_time_int() < 1500:
-            pool_count = int(cpu_count() / 2) - 1
-        if len(kwargs) > 0 :
-                # pool = ThreadPool(12)
-                log.debug(f'cmd:{cmd} kwargs:{kwargs}')
-                func = functools.partial(cmd, **kwargs)
-                # TDXE:44.26  cpu 1   
-                # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
-                # results = pool.map(func, urllist)
-                # try:
-                #     for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
-                #         results.append(y)
-                # except Exception as e:
-                #     log.error("except:%s"%(e))
-                try:
-                    with Pool(processes=pool_count) as pool:
-                        data_count=len(urllist)
-                        progress_bar = tqdm(total=data_count)
-                        # print("mapping ...")
-                        log.debug(f'data_count:{data_count}')
-                        # tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols)
-                        results = tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count)
-                        # print("running ...")
-                        result = tuple(results)  # fetch the lazy results
-
-                    #debug:
-                    # results=[]
-                    # for code in urllist:
-                    #     print("code:%s "%(code), end=' ')
-                    #     res=cmd(code,**kwargs)
-                    #     print("status:%s\t"%(len(res)), end=' ')
-                    #     results.append(res)
-                    # result=results
-                except Exception as e:
-                    log.error("except:%s"%(e))
-                    traceback.print_exc()
-                    # log.error("except:results%s"%(results[-1]))
-                    # import ipdb;ipdb.set_trace()
-                    results=[]
-                    for code in urllist:
-                        print(f"code:{code},count:{len(urllist)} idx:{urllist.index(code)}", end=' ')
-                        res=cmd(code,**kwargs)
-                        print("status:%s\t"%(len(res)), end=' ')
-                        results.append(res)
-                    result=results
-        else:
-
-            try:
-                with Pool(processes=pool_count) as pool:
-                    data_count=len(urllist)
-                    progress_bar = tqdm(total=data_count)
-                    # print("mapping ...")
-                    # tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols)
-                    results = tqdm(pool.imap_unordered(cmd, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count)
-                    # print("running ...")
-                    result=tuple(results)  # fetch the lazy results
-                    # print("done")
-            except Exception as e:
-                log.error("except:%s"%(e))
-
-
-    else:
-        if len(kwargs) > 0 :
-            pool = ThreadPool(1)
-            func = functools.partial(cmd, **kwargs)
-            # TDXE:40.63  cpu 1    cpu_count() 107.14
-            # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
-            # results = pool.map(func, urllist)
-            try:
-                results = pool.map(func, urllist)
-            except Exception as e:
-                log.error("except:%s"%(e))
-        else:
-            pool = ThreadPool(int(cpu_count())/ 2 - 1 if int(cpu_count()) > 2 else 2)
-            for code in urllist:
-                try:
-                    # result = pool.apply_async(cmd, (code,) + args).get()
-                    results.append(pool.apply_async(cmd, (code,) + args).get())
-                except Exception as e:
-                    log.error("except:%s code:%s"%(e,code))
-        pool.close()
-        pool.join()
-        result=results
-    print("time:%s"%(round(time.time()-time_s,2)),)
-    return result
-
-
 def get_func_name(func):
     """
     获取函数名称，对 functools.partial 对象自动获取原始函数名。
@@ -4083,21 +3956,99 @@ def format_func_call(func, *args, **kwargs):
 #         # return e  # 或 return Exception(...)
 
 
+def to_mp_run_async_gpt(cmd, urllist, *args, **kwargs):
+# def to_mp_run_async(cmd, urllist, *args, **kwargs):
+    #gpt
+    t0 = time.time()
+    result = []
+    errors = []
+
+    urllist = list(set(urllist))
+    data_count = len(urllist)
+    if data_count == 0:
+        return []
+
+    # 少量任务直接单进程，最稳
+    if data_count <= 200:
+        for c in tqdm(urllist, desc="Running", ncols=getattr(ct, 'ncols', 80)):
+            try:
+                r = cmd(c, **kwargs)
+                if r is not None and (not hasattr(r, 'empty') or not r.empty):
+                    result.append(r)
+            except Exception as e:
+                errors.append((c, type(e).__name__, str(e)))
+    else:
+        cpu_used = cpu_count() // 2 + 1
+        pool_count = min(max(1, data_count // 100), cpu_used)   #2
+        # pool_count = min(cpu_count(), max(4, data_count // 50)) #5
+        # pool_count = min(cpu_count() // 2 + 1, max(4, data_count // 80)) #4
+        func = functools.partial(cmd, **kwargs)
+        worker = functools.partial(process_file_exc, func)
+
+        with Pool(processes=pool_count) as pool:
+            for r in tqdm(
+                pool.imap_unordered(worker, urllist, chunksize=10),
+                total=data_count,
+                unit='it', 
+                mininterval=ct.tqdm_mininterval,
+                unit_scale=True,
+                desc="Running_MP",
+                ncols=getattr(ct, 'ncols', 80),
+            ):
+                if r is None:
+                    continue
+
+                if isinstance(r, dict) and r.get("__error__"):
+                    errors.append(
+                        (r["code"], r["exc_type"], r["exc_msg"])
+                    )
+                    continue
+
+                if not hasattr(r, 'empty') or not r.empty:
+                    result.append(r)
+
+    # 主进程统一记录错误（安全）
+    for code, etype, emsg in errors:
+        log.error("Worker failed | code=%s | %s: %s", code, etype, emsg)
+
+    log.info(
+        "Cpu_count: {%d} Time: %.2fs | Total OK: %d | Errors: %d",
+        pool_count,
+        time.time() - t0,
+        len(result),
+        len(errors),
+    )
+    return result
+
 def process_file_exc(func=None, code=None):
     try:
-        # 尝试执行函数
-        return func(code) 
+        return func(code)
     except Exception as ex:
-        msg = f"Exception on code:{code} " + os.linesep + traceback.format_exc()
-        runcmd = format_func_call(func, code)
-        # 在工作进程中记录详细错误
-        log.error(f'Work process failed: msg:{msg} \n runcmd:{runcmd}')
-        # log.error(f'Work process failed: msg:{msg}')
-        # 返回 None 或一个特定的失败标记
-        return None # 不要返回 Exception 对象
+        # 子进程只返回轻量错误信息，禁止 logging / traceback
+        return {
+            "__error__": True,
+            "code": code,
+            "exc_type": type(ex).__name__,
+            "exc_msg": str(ex),
+        }
+
+# def process_file_exc_last(func=None, code=None):
+#     try:
+#         # 尝试执行函数
+#         return func(code) 
+#     except Exception as ex:
+#         msg = f"Exception on code:{code} " + os.linesep + traceback.format_exc()
+#         runcmd = format_func_call(func, code)
+#         # 在工作进程中记录详细错误
+#         log.error(f'Work process failed: msg:{msg} \n runcmd:{runcmd}')
+#         # log.error(f'Work process failed: msg:{msg}')
+#         # 返回 None 或一个特定的失败标记
+#         return None # 不要返回 Exception 对象
 
 error_codes = []
+
 def to_mp_run_async_newOK(cmd, urllist, *args, **kwargs):
+    #G Flash 
     result = []  
     time_s = time.time()
     
@@ -4143,7 +4094,7 @@ def to_mp_run_async_newOK(cmd, urllist, *args, **kwargs):
                 unit_scale=True,
                 total=data_count,
                 max_workers=pool_count,
-                #chunksize=1,        # 增大块大小，减少通信频次
+                chunksize=10,        # 增大块大小，减少通信频次
                 #miniters=1,
                 ncols=getattr(ct, 'ncols', 80),
                 desc="Running_MP"
@@ -4172,10 +4123,11 @@ def to_mp_run_async_newOK(cmd, urllist, *args, **kwargs):
         result = [cmd(c, **kwargs) for c in urllist if c]
         result = [r for r in result if r is not None and (not hasattr(r, 'empty') or not r.empty)]
 
-    log.info(f"Time: {round(time.time()-time_s, 2)}s | Total: {len(result)}")
+    log.info(f"Cpu_count: {pool_count} Time: {round(time.time()-time_s, 2)}s | Total: {len(result)}")
     return result
 
 # https://stackoverflow.com/questions/68065937/how-to-show-progress-bar-tqdm-while-using-multiprocessing-in-python
+# def to_mp_run_async_me_ok(cmd, urllist, *args,**kwargs):
 def to_mp_run_async(cmd, urllist, *args,**kwargs):
     result = []  
     time_s = time.time()
@@ -4226,7 +4178,7 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
 
                     # tqdm.monitor_interval = 0
                     # results = process_map(partialfunc, urllist, unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count,max_workers=pool_count,chunksize=20,miniters=10)
-                    results = process_map(partialfunc, urllist, unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,ncols=ct.ncols , total=data_count,max_workers=pool_count)
+                    results = process_map(partialfunc, urllist, unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,chunksize=10,ncols=ct.ncols , total=data_count,max_workers=pool_count)
                     result = []
                     # for data in results:
                     #     if isinstance(data, Exception):
@@ -4345,7 +4297,7 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
         pool.close()
         pool.join()
         result=results
-    print("time:%s"%(round(time.time()-time_s,2)),)
+    log.info("Cpu_count: {pool_count}  time:%s"%(round(time.time()-time_s,2)),)
     return result
 
 '''
@@ -4386,92 +4338,6 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
                     #     results.append(res)
                     # result=results
 
-
-def to_mp_run_async_outdate2023(cmd, urllist, *args,**kwargs):
-    # n_t=time.time()
-    # print "mp_async:%s" % len(urllist),
-    # print "a!!!!:",status
-
-    # n_t = time.time()
-    results = []
-    # stock_list = []
-    # pool_count = (cpu_count()-2)
-    pool_count = 1
-    time_s = time.time()
-
-    # max_num = 850
-    # request_num = len(urllist) // max_num
-    # for range_start in range(request_num):
-    #     num_start = max_num * range_start
-    #     num_end = max_num * (range_start + 1)
-    #     request_list = urllist[num_start:num_end]
-    #     stock_list.append(request_list)
-    # # print len(self.stock_with_exchange_list), num_endzzzzzzzzzz
-    # if len(urllist) > num_end:
-    #     request_list = urllist[num_end:]
-    #     stock_list.append(request_list)
-    #     request_num += 1
-
-    # results=to_mp_run_tqdm(cmd,stock_list, *args,**kwargs)
-
-    # imap_tqdm
-    # func = partial(cmd, **kwargs)
-    # result = imap_tqdm(cmd, urllist,processes=pool_count,**kwargs)
-
-    # results = flatten(results)
-
-
-    # '''
-    
-    if len(urllist) > 50:
-        if len(kwargs) > 0 :
-            pool = ThreadPool(1)
-            # pool = ThreadPool(12)
-            func = functools.partial(cmd, **kwargs)
-            # TDXE:44.26  cpu 1   
-            # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
-            # results = pool.map(func, urllist)
-            try:
-                for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
-                    results.append(y)
-            except Exception as e:
-                log.error("except:%s"%(e))
-        else:
-            pool = ThreadPool(cpu_count())
-            # log.error("to_mp_run args is not None")
-            for inx in tqdm(list(range(len(urllist))),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
-                code = urllist[inx]
-            # for code in urllist:
-                try:
-                    # result = pool.apply_async(cmd, (code,) + args).get()
-                    results.append(pool.apply_async(cmd, (code,) + args).get())
-                except Exception as e:
-                    log.error("except:%s code:%s"%(e,code))
-
-    else:
-        if len(kwargs) > 0 :
-            pool = ThreadPool(1)
-            func = functools.partial(cmd, **kwargs)
-            # TDXE:40.63  cpu 1    cpu_count() 107.14
-            # for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=5):
-            # results = pool.map(func, urllist)
-            try:
-                results = pool.map(func, urllist)
-            except Exception as e:
-                log.error("except:%s"%(e))
-        else:
-            pool = ThreadPool(cpu_count())
-            for code in urllist:
-                try:
-                    # result = pool.apply_async(cmd, (code,) + args).get()
-                    results.append(pool.apply_async(cmd, (code,) + args).get())
-                except Exception as e:
-                    log.error("except:%s code:%s"%(e,code))
-    pool.close()
-    pool.join()
-    # '''
-    print("time:%s"%(round(time.time()-time_s,2)),)
-    return results
 
 
 def f_print(lens, datastr, type=None):
