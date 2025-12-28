@@ -825,7 +825,8 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     # for col in ['boll','dff','df2','ra','ral','fib','fibl']:
     #     df[col] = df[col].astype(int)
 
-    return cct.reduce_memory_usage(df)
+    # return cct.reduce_memory_usage(df)
+    return df
 
     # df = df[df.buy > df.cmean * ct.changeRatio]
     # else:

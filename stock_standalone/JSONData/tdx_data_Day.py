@@ -1301,13 +1301,176 @@ def generate_simple_vect_features(df):
     # reset_index() 将 code 变成一列，to_dict('records') 转为字典列表
     return feat_df.reset_index().to_dict('records')
 
+def generate_df_vect_daily_features(df, lastdays=cct.compute_lastdays):
+    """
+    df:
+        index = code
+        columns 包含 open/high/low/close/... 以及可能存在的 lasto2d, lasto3d ...
+        必须包含 'name' 列
+    返回:
+        List[dict]，每个 dict 对应一只股票
+    """
+    features_list = []
 
-def generate_df_vect_daily_features(df, lastdays=5):
+    cols_map_today = {
+        'open': 'lasto',
+        'high': 'lasth',
+        'low': 'lastl',
+        'close': 'lastp',
+        'vol': 'lastv',
+        'upper': 'upper',
+        'ma5d': 'ma5',
+        'ma20d': 'ma20',
+        'ma60d': 'ma60',
+        'perlastp': 'perc',
+        'perd': 'per'
+    }
+
+    for code, row in df.iterrows():
+
+        feat = {'code': code, 'name': row['name'] if 'name' in df.columns else code}
+        # ========= 0️⃣ today（实时 OHLC） =========
+        for col in ('open', 'high', 'low', 'close', 'vol'):
+            feat[col] = row[col] if col in df.columns else 0
+
+        # ===== 1️⃣ 当天 (1d) =====
+        for col, prefix in cols_map_today.items():
+            feat[f'{prefix}1d'] = row[col] if col in df.columns else 0
+        for suffix in ('eval', 'signal'):
+            colname = f'{suffix}1d'
+            feat[colname] = row[colname] if colname in df.columns else 0
+
+        # ===== 2️⃣ 历史 (2d ~ lastdays) =====
+        for d in range(2, lastdays + 1):
+            for _, prefix in cols_map_today.items():
+                colname = f'{prefix}{d}d'
+                feat[colname] = row[colname] if colname in df.columns else 0
+            for suffix in ('eval', 'signal'):
+                colname = f'{suffix}{d}d'
+                feat[colname] = row[colname] if colname in df.columns else 0
+
+        features_list.append(feat)
+
+    return features_list
+
+
+def generate_df_vect_daily_features_noname(df, lastdays=cct.compute_lastdays):
+    """
+    df:
+        index = code
+        columns:
+            today: open/high/low/close/vol
+            history: lasto1d, lasto2d, ..., lasth1d, lastp1d ...
+    返回:
+        List[dict]，每个 dict 对应一只股票
+    """
+
+    features_list = []
+
+    # history 字段前缀
+    hist_prefixes = (
+        'lasto', 'lasth', 'lastl', 'lastp', 'lastv',
+        'upper', 'ma5', 'ma20', 'ma60',
+        'perc', 'per'
+    )
+
+    for code, row in df.iterrows():
+        feat = {'code': code}
+
+        # ========= 0️⃣ today（实时 OHLC） =========
+        for col in ('open', 'high', 'low', 'close', 'vol'):
+            feat[col] = row[col] if col in df.columns else 0
+
+        # eval / signal（若是实时）
+        for suffix in ('eval', 'signal'):
+            if suffix in df.columns:
+                feat[suffix] = row[suffix]
+            else:
+                feat[suffix] = 0
+
+        # ========= 1️⃣ history：last*1d ~ last*Nd =========
+        for d in range(1, lastdays + 1):
+            for prefix in hist_prefixes:
+                colname = f'{prefix}{d}d'
+                feat[colname] = row[colname] if colname in df.columns else 0
+
+            for suffix in ('eval', 'signal'):
+                colname = f'{suffix}{d}d'
+                feat[colname] = row[colname] if colname in df.columns else 0
+
+        features_list.append(feat)
+
+    return features_list
+
+
+def generate_df_vect_daily_features_lastday(df, lastdays=cct.compute_lastdays):
+    """
+    df:
+        index = code
+        columns 包含 open/high/low/close/... 以及可能存在的 lasto2d, lasto3d ...
+    返回:
+        List[dict]，每个 dict 对应一只股票
+    """
+
+    features_list = []
+
+    # 映射：今天字段 → last*1d
+    cols_map_today = {
+        'open': 'lasto',
+        'high': 'lasth',
+        'low': 'lastl',
+        'close': 'lastp',
+        'vol': 'lastv',
+        'upper': 'upper',
+        'ma5d': 'ma5',
+        'ma20d': 'ma20',
+        'ma60d': 'ma60',
+        'perlastp': 'perc',
+        'perd': 'per'
+    }
+
+    for code, row in df.iterrows():
+        feat = {'code': code}
+
+        # ===== 1️⃣ 当天 (1d) =====
+        for col, prefix in cols_map_today.items():
+            feat[f'{prefix}1d'] = row[col] if col in df.columns else 0
+
+        for suffix in ('eval', 'signal'):
+            colname = f'{suffix}1d'
+            feat[colname] = row[colname] if colname in df.columns else 0
+
+        # ===== 2️⃣ 历史 (2d ~ lastdays) =====
+        for d in range(2, lastdays + 1):
+            for _, prefix in cols_map_today.items():
+                colname = f'{prefix}{d}d'
+                feat[colname] = row[colname] if colname in df.columns else 0
+
+            for suffix in ('eval', 'signal'):
+                colname = f'{suffix}{d}d'
+                feat[colname] = row[colname] if colname in df.columns else 0
+
+        features_list.append(feat)
+
+    return features_list
+
+
+def generate_df_vect_daily_features_MultiIndex(df, lastdays=5):
     """
     df: 多股票 DataFrame，index 为 (code, date)，多列 open/close/high/low/vol/ma/upper/eval/signal
     lastdays: 提取最近 N 天特征
     返回: 每只股票一行字典，字段格式 lasto1d,lastp1d,...,eval1d,signal1d,...，并带 'code' 字段
     """
+
+     # === 关键修复：统一 index 结构 ===
+    if isinstance(df.index, pd.MultiIndex):
+        pass
+    elif 'code' in df.columns:
+        # 单 index，但 code 在列里
+        df = df.set_index(['code', df.index])
+    else:
+        raise ValueError("df index 必须是 MultiIndex(code, date) 或包含 code 列")
+
     features_list = []
     cols_map = {
         'open': 'lasto',
