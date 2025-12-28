@@ -16,6 +16,7 @@ from JSONData import wencaiData as wcd
 from JSONData import tdxbk
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
+from JohnsonUtil.commonTips import timed_ctx
 from JohnsonUtil import johnson_cons as ct
 import tushare as ts
 import pandas_ta as ta
@@ -1900,6 +1901,12 @@ def get_tdx_Exp_day_to_df_debug(code, start=None, end=None, dl=None, newdays=Non
     return df
 
 
+# def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
+#                           type='f', wds=True, lastdays=3, resample='d', MultiIndex=False,lastday=None,detect_calc_support=True):
+#     with timed_ctx("get_tdx_Exp_day_to_df", warn_ms=1000):
+#         return get_tdx_Exp_day_to_df_impl(code, start, end, dl, newdays, type, wds, lastdays, resample, MultiIndex, lastday, detect_calc_support)
+
+# def get_tdx_Exp_day_to_df_impl(code, start=None, end=None, dl=None, newdays=None,
 def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
                           type='f', wds=True, lastdays=3, resample='d', MultiIndex=False,lastday=None,detect_calc_support=True):
     """
@@ -2038,9 +2045,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         
         # Ensure numeric columns are numeric (coerce errors to NaN)
         cols_to_numeric = ['open', 'high', 'low', 'close', 'vol', 'amount']
-        for col in cols_to_numeric:
-             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+        df[cols_to_numeric] = df[cols_to_numeric].apply(pd.to_numeric, errors='coerce')
         
         # t2 = time.time()
 
@@ -2065,11 +2070,11 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         df = df[final_cols]
 
     except Exception as e:
-        log.error(f"Error reading file {file_path} with read_csv: {e}")
-        print(f"DEBUG Error: {e}") # Print to stdout for visibility in test logs
+        log.error(f"Error {code} reading file {file_path} with read_csv: {e}")
+        # print(f"DEBUG Error: {e}") # Print to stdout for visibility in test logs
         return pd.DataFrame()
     df = df[~df.date.duplicated()]
-
+    # print(f'code: {code} df:{len(df)}', end=' ')
     # ------------------------------
     # 筛选日期
     # ------------------------------
@@ -3692,11 +3697,12 @@ def getSinaIndexdf():
 
 tdxbkdict={'近期新高':'880865','近期异动':'880884'}
 
-def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, filename='mnbk', table='top_now', trend=False):
+def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, filename='mnbk', table='top_now', trend=False):
     ### Sina获取 Ratio 和tdx数据
-    print("initdx", end=' ')
-    market_all = False
-    log.info(f'tdd_market: {market}')
+    with timed_ctx("getSinaAlldf", warn_ms=1000):
+        print("initdx", end=' ')
+        market_all = False
+        log.info(f'tdd_market: {market}')
     if not isinstance(market, list):
         # m_mark = market.split(',')
         m_mark = market.split('+')
@@ -3863,35 +3869,36 @@ def getSinaAlldf(market='cyb', vol=ct.json_countVol, vtype=ct.json_countType, fi
 
     # if cct.get_work_time() or (cct.get_now_time_int() > 915) :
     # dm['percent'] = map(lambda x, y: round((x - y) / y * 100, 2), dm.close.values, dm.llastp.values)
-    dm['percent'] = ((dm['close'] - dm['llastp']) / dm['llastp'] * 100).map(lambda x: round(x, 2))
+    dm['percent'] = ((dm['close'] - dm['llastp']) / dm['llastp'] * 100).round(2)
     log.debug("dm percent:%s" % (dm[:1]))
     # dm['volume'] = map(lambda x: round(x / 100, 1), dm.volume.values)
     # dm['trade'] = dm['close'] if dm['b1'] ==0 else dm['b1']
     
-    dm['trade'] = list(map(lambda x, y: x if int(x) > 0 else y, dm.now, dm.b1))
+    dm['trade'] = np.where(dm['now'] > 0, dm['now'], dm['b1'])
 
-    dm['buy'] = list(map(lambda x, y: x if int(x) > 0 else y, dm.now, dm.b1))
+    dm['buy'] = dm['trade']
 
     if market != 'index':
-        if cct.get_now_time_int() > 920 and cct.get_now_time_int() < 926:
+        now_time_int = cct.get_now_time_int()
+        if now_time_int > 920 and now_time_int < 926:
             # print dm[dm.code=='000001'].b1
             # print dm[dm.code=='000001'].a1
             # print dm[dm.code=='000001'].a1_v
             # print dm[dm.code=='000001'].b1_v
-            dm['volume'] = list(map(lambda x, y: x + y, dm.b1_v.values, dm.b2_v.values))
+            dm['volume'] = dm['b1_v'].values + dm['b2_v'].values
             dm = dm[(dm.b1 > 0) | (dm.a1 > 0)]
-            dm['b1_v'] = ((dm['b1_v'] + dm['b2_v']) / 100 / 10000).map(lambda x: round(x, 1) + 0.01)
+            dm['b1_v'] = ((dm['b1_v'] + dm['b2_v']) / 1000000.0).round(1) + 0.01
 
-        elif 926 < cct.get_now_time_int() < 1502 :
+        elif 926 < now_time_int < 1502 :
             # dm = dm[dm.open > 0]
             dm = dm[(dm.b1 > 0) | (dm.a1 > 0)]
-            dm['b1_v'] = ((dm['b1_v']) / dm['volume'] * 100).map(lambda x: round(x, 1))
+            dm['b1_v'] = (dm['b1_v'] / dm['volume'] * 100).round(1)
 
             # dm['b1_v'] = map(lambda x, y: round(x / y * 100, 1), dm['b1_v'], dm['volume'])
 
         else:
             # dm = dm[(dm.buy > 0) | (dm.b1 > 0) | (dm.a1 > 0)]
-            dm['b1_v'] = ((dm['b1_v']) / dm['volume'] * 100).map(lambda x: round(x, 1))
+            dm['b1_v'] = (dm['b1_v'] / dm['volume'] * 100).round(1)
 
     # print 'ratio' in dm.columns
     # print time.time()-time_s
@@ -5718,7 +5725,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
         # compare_compute_perd(dd,compute_perd_df,compute_perd_df_fast)
         # compare_compute_perd(dd,compute_perd_df_ver,compute_perd_df_fast)
 
-        df['vchange'] = ((df['vol'] - df['vol'].shift(1)) / df['vol'].shift(1) * 100).map(lambda x: round(x, 1))
+        df['vchange'] = ((df['vol'] - df['vol'].shift(1)) / df['vol'].shift(1) * 100).round(1)
         df = df.fillna(0)
         df['vcra'] = len(df[df.vchange > vc_radio])
         # df['ma5vol'] = df.vol[-df.fib[0]]
@@ -6471,7 +6478,6 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
     log.info('toTDXlist:%s dl=%s end=%s ptype=%s' % (len(codelist), dl, end, ptype))
     # print codelist[5]
     h5_fname = 'tdx_last_df'
-    # market=ptype+'_'+str(dl)+'_'+filter+'_'+str(len(codelist))
     if end is not None:
         h5_table = ptype + '_' + resample + '_' + str(dl) + '_' + filter + \
             '_' + end.replace('-', '') + '_' + 'all'
@@ -6568,25 +6574,34 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
     #20231110 add today topR
     #20250607 mod today topR
     if cct.get_day_istrade_date() and len(top_all) > 2:
-        if not cct.get_trade_date_status():
-            top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if x > 0 and y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
-        # elif 915 < cct.get_now_time_int() < 1500:
-        #     top_all['topR'] =  list(map(lambda x, y, z: (x + 1.1 if y > z else x),top_all.topR, top_all.low, top_all.lasth1d))
-        elif cct.get_now_time_int() < 915:
-            top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if x > 0 and y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
-        else:
-            if (top_all['open'][-1] == top_all['lasto1d'][-1]) and (top_all['open'][0] == top_all['lasto1d'][0]):
-                top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if x > 0 and y >= z else x),top_all.topR, top_all.low, top_all.lasth2d))
+        with timed_ctx("topR_compute_vec", warn_ms=100):
+            now_time = cct.get_now_time_int()
+            # Determine reference column
+            if not cct.get_trade_date_status() or now_time < 915:
+                ref_col = 'lasth2d'
             else:
-                top_all['topR'] =  list(map(lambda x, y, z: (round(x + 1.1,1) if x > 0 and y >= z else x),top_all.topR, top_all.low, top_all.lasth1d))
-
-        if cct.get_work_time_duration():
-            top_all['topR'] =  list(map(lambda x, y, z,op,high,close: (x + 1.1 if x > 0 and (y > z or (z < op*0.99 and high > z)) else x),top_all.topR, top_all.low, top_all.lasth1d,top_all.open,top_all.high,top_all.close))
-        else:
-            if (top_all['open'][-1] == top_all['lasto1d'][-1]) and (top_all['open'][0] == top_all['lasto1d'][0]):
-                top_all['topR'] =  list(map(lambda x, y, z,op,high,close: (x + 1.1 if x > 0 and ( (y > z and high > z) or (z < op*0.99 and high > z and close > z)) else x),top_all.topR, top_all.low, top_all.lasth2d,top_all.open,top_all.high,top_all.close))
-            else: 
-                top_all['topR'] =  list(map(lambda x, y, z,op,high,close: (x + 1.1 if x > 0 and ( (y > z and high > z) or (z < op*0.99 and high > z and close > z))  else x),top_all.topR, top_all.low, top_all.lasth1d,top_all.open,top_all.high,top_all.close))
+                if (top_all['open'].iloc[-1] == top_all['lasto1d'].iloc[-1]) and (top_all['open'].iloc[0] == top_all['lasto1d'].iloc[0]):
+                    ref_col = 'lasth2d'
+                else:
+                    ref_col = 'lasth1d'
+            
+            if ref_col in top_all.columns and 'topR' in top_all.columns:
+                tr = top_all['topR'].values
+                low = top_all['low'].values
+                ref = top_all[ref_col].values
+                
+                if cct.get_work_time_duration():
+                    op = top_all['open'].values
+                    hi = top_all['high'].values
+                    mask = (tr > 0) & ((low > ref) | ((ref < op * 0.99) & (hi > ref)))
+                else:
+                    hi = top_all['high'].values
+                    cl = top_all['close'].values
+                    op = top_all['open'].values
+                    mask = (tr > 0) & (((low > ref) & (hi > ref)) | ((ref < op * 0.99) & (hi > ref) & (cl > ref)))
+                
+                top_all['topR'] = np.where(mask, (tr + 1.1), tr)
+                top_all['topR'] = top_all['topR'].round(1)
     
     if 'llastp' not in top_all.columns:
         log.error("why not llastp in topall:%s" % (top_all.columns))
@@ -7125,18 +7140,22 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
     stock_data = stock_data.sort_index(ascending=True)
 
     # 5. 生成周期数据
-    period_stock_data = stock_data.resample(period_type).last()
-    period_stock_data['open'] = stock_data['open'].resample(period_type).first()
-    period_stock_data['high'] = stock_data['high'].resample(period_type).max()
-    period_stock_data['low'] = stock_data['low'].resample(period_type).min()
-
-    # 6. 处理成交量和其他数值列
+    agg_dict = {
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'vol': 'sum',
+        'amount': 'sum'
+    }
+    if 'code' in stock_data.columns:
+        agg_dict['code'] = 'last'
+    
     if ncol:
         for co in ncol:
-            period_stock_data[co] = stock_data[co].resample(period_type).sum()
-    else:
-        period_stock_data['amount'] = stock_data['amount'].resample(period_type).sum()
-        period_stock_data['vol'] = stock_data['vol'].resample(period_type).sum()
+            agg_dict[co] = 'sum'
+
+    period_stock_data = stock_data.resample(period_type).agg(agg_dict)
 
     # 7. 设置索引为周期最后一天
     period_stock_data.index = stock_data['date'].resample(period_type).last().index

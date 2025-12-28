@@ -891,22 +891,20 @@ class Sina:
 
 
     # https://github.com/jinrongxiaoe/easyquotation
-    async def get_stocks_by_range(self, index: int) -> None:
+    async def get_stocks_by_range(self, index: int, session: aiohttp.ClientSession) -> None:
         url = self.sina_stock_api + self.stock_list[index]
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url=url, headers=self.sinaheader) as response:
-                response.encoding = self.encoding
-                result = await response.text()
-                self.stock_data.append(result)
+        async with session.get(url=url, headers=self.sinaheader) as response:
+            response.encoding = self.encoding
+            result = await response.text()
+            self.stock_data.append(result)
+
+    async def _fetch_all_stocks(self, session: aiohttp.ClientSession):
+        tasks = [self.get_stocks_by_range(i, session) for i in range(self.request_num)]
+        if not tasks:
+            tasks = [self.get_stocks_by_range(0, session)]
+        await asyncio.gather(*tasks)
 
     def get_stock_data(self, retry_count: int = 3, pause: float = 0.01) -> pd.DataFrame:
-        threads = []
-        for index in range(self.request_num):
-            threads.append(self.get_stocks_by_range(index))
-            log.debug("url len:%s" % (len(self.stock_list[index])))
-        if self.request_num == 0:
-            threads.append(self.get_stocks_by_range(0))
-
         for _ in range(retry_count):
             time.sleep(pause)
             try:
@@ -915,8 +913,11 @@ class Sina:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
             
-            # Use asyncio.gather for cleaner async execution if possible, but wait() is okay
-            loop.run_until_complete(asyncio.wait(threads))
+            async def run():
+                async with aiohttp.ClientSession() as session:
+                    await self._fetch_all_stocks(session)
+            
+            loop.run_until_complete(run())
             log.debug('get_stock_data_loop')
             
             df = self.format_response_data()
@@ -1032,22 +1033,18 @@ class Sina:
 
         if now_time_int > 925 and (not index and len(df) > 3000 and ( cct.get_work_time(otime) or cct.get_work_time())):
             time_s = time.time()
-            df.index = df.index.astype(str)
-            df.ticktime = df.ticktime.astype(str)
-            df.ticktime = list(map(lambda x, y: str(x) + ' ' + str(y), df.dt, df.ticktime))
-            df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S')
+            df.ticktime = df.dt.astype(str) + ' ' + df.ticktime.astype(str)
+            df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S', errors='coerce')
 
             if logtime == 0:
                 cct.get_config_value_ramfile('sina_logtime',currvalue=time.time(),xtype='time',update=True)
-                df['lastbuy'] = (list(map(lambda x, y: y if int(x) == 0 else x,
-                                          df['close'].values, df['llastp'].values)))
+                df['lastbuy'] = np.where(df['close'] == 0, df['llastp'], df['close'])
                 cct.GlobalValues().setkey('lastbuydf', df['lastbuy']) 
 
             else:
                 if (cct.GlobalValues().getkey('lastbuylogtime') is not None ) or self.lastbuy_timeout_status(logtime):
                     cct.get_config_value_ramfile('sina_logtime',currvalue=time.time(),xtype='time',update=True)
-                    df['lastbuy'] = (list(map(lambda x, y: y if int(x) == 0 else x,
-                                              df['close'].values, df['llastp'].values)))
+                    df['lastbuy'] = np.where(df['close'] == 0, df['llastp'], df['close'])
                     cct.GlobalValues().setkey('lastbuylogtime', None) 
                     cct.GlobalValues().setkey('lastbuydf', df['lastbuy']) 
                 else:
