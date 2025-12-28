@@ -119,7 +119,7 @@ def dump_timing_stats(top=10,logger=log):
 # @timed_block("fetch_and_process", warn_ms=1000)
 # def fetch_and_process(...):
 
-def print_timing_summary(top_n=10, unit="ms"):
+def print_timing_summary(top_n=5, unit="ms"):
     """
     汇总 _TIMING_STATS 并打印 top_n 慢函数
     :param top_n: 显示前 top_n 个慢函数
@@ -665,6 +665,7 @@ class GlobalConfig:
         self.pending_alert_cycles = self.get_with_writeback("general", "pending_alert_cycles", fallback=10, value_type="int")
         self.st_key_sort = self.get_with_writeback("general", "st_key_sort", fallback="2 1", value_type="str")
         self.code_startswith = self.get_with_writeback("general", "code_startswith", fallback='"6", "30", "00", "688", "43", "83", "87", "92"', value_type="tuple_str")
+        self.winlimit = self.get_with_writeback("general", "winlimit", fallback=1, value_type="int")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         try:
@@ -863,6 +864,7 @@ max_single_stock_ratio: float = CFG.max_single_stock_ratio
 min_position_ratio: float = CFG.min_position_ratio
 risk_duration_threshold: int = CFG.risk_duration_threshold
 code_startswith: str = CFG.code_startswith
+winlimit: int = CFG.winlimit
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:
     return os.path.sep

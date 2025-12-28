@@ -6087,13 +6087,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         frame = tk.Frame(win)
         frame.pack(fill="both", expand=True)
 
-        columns = ("code", "name", "percent", "volume","red")
+        columns = ("code", "name", "percent", "volume","red","win")
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量","red":"连阳","gren":"连阴"}
+        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量","red":"连阳","win":"主升"}
         for col in columns:
             tree.heading(col, text=col_texts[col], anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
@@ -6439,7 +6439,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         frame = tk.Frame(win)
         frame.pack(fill="both", expand=True)
 
-        columns = ("code", "name", "percent", "volume","red")
+        columns = ("code", "name", "percent", "volume","red","win")
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
@@ -6447,7 +6447,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         vsb.pack(side="right", fill="y")
 
         # col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量"}
-        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量","red":"连阳","gren":"连阴"}
+        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量","red":"连阳","win":"主升"}
         for col in columns:
             tree.heading(col, text=col_texts[col], anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
@@ -6719,6 +6719,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     f"{percent:.2f}",
                     f"{latest_row.get('volume', row.get('volume', 0)):.1f}",
                     latest_row.get("red", row.get("red", 0)),
+                    latest_row.get("win", row.get("win", 0)),
                 ),
                 tags=tuple(row_tags)
             )
@@ -6891,7 +6892,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if pd.isna(percent) or percent == 0:
                 percent = row.get("per1d")
             tree.insert("", "end", iid=iid,
-                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}", f"{row.get('gren',0)}"),tags=tuple(tags_for_row))
+                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}", f"{row.get('win',0)}"),tags=tuple(tags_for_row))
 
         # 保留选中状态
         if hasattr(tree, "_selected_index") and tree.get_children():
@@ -8131,7 +8132,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         resample = self.resample_combo.get()
         # self.status_var.set(f"搜索框 {which} 已清空")
         # self.status_var.set(f"Row 结果 {len(self.current_df)} 行 | resample: {resample} ")
-        self.query_manager.entry_query.delete(0, tk.END)
+        #清空query_manager-entry_query
+        # self.query_manager.entry_query.delete(0, tk.END)
 
     def delete_search_history(self, which, entry=None):
         """

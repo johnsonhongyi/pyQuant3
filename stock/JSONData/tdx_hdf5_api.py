@@ -1919,7 +1919,7 @@ def write_hdf_db_gpt_error(fname, df, table='all', index=False, complib='blosc',
 
         df.index = df.index.astype(str)
         df = df.fillna(0)
-        df = cct.reduce_memory_usage(df, verbose=False)
+        # df = cct.reduce_memory_usage(df, verbose=False)
         log.info(f'df.shape: {df.shape}')
 
         # 写回 HDF5
@@ -2018,7 +2018,7 @@ def write_hdf_db_gptmod1(fname, df, table='all', index=False, complib='blosc',
             df[col] = df[col].astype(str)
         df.index = df.index.astype(str)
         df = df.fillna(0)
-        df = cct.reduce_memory_usage(df, verbose=False)
+        # df = cct.reduce_memory_usage(df, verbose=False)
         log.info(f'df.shape: {df.shape}')
 
         # 写回 HDF5
@@ -2180,7 +2180,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 
         with SafeHDFStore(fname,mode='a') as h5:
             df=df.fillna(0)
-            df=cct.reduce_memory_usage(df,verbose=False)
+            # df=cct.reduce_memory_usage(df,verbose=False)
             log.info(f'df.shape:{df.shape}')
             if h5 is not None:
                 if '/' + table in list(h5.keys()):
@@ -2509,10 +2509,10 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                 pass
 
     # 与原函数保持一致：返回 reduce_memory_usage(df)
-    try:
-        return cct.reduce_memory_usage(df)
-    except Exception:
-        return df
+    # try:
+    #     return cct.reduce_memory_usage(df)
+    # except Exception:
+    return df
 
 
 def load_hdf_db_src_OK(fname, table='all', code_l=None, timelimit=True, index=False, limit_time=ct.h5_limit_time, dratio_limit=ct.dratio_limit,MultiIndex=False,showtable=False):
@@ -2717,7 +2717,8 @@ def load_hdf_db_src_OK(fname, table='all', code_l=None, timelimit=True, index=Fa
                 if isinstance(df.index, pd.MultiIndex):
                     write_hdf_db(fname, df, table=table, index=index, MultiIndex=True,rewrite=True)
 
-    return  cct.reduce_memory_usage(df)
+    return  df
+    # return  cct.reduce_memory_usage(df)
 
 # def load_hdf_db_old_outdate(fname,table='all',code_l=None,timelimit=True,index=False,limit_time=ct.h5_limit_time):
 #     time_t = time.time()
