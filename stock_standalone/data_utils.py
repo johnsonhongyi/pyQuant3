@@ -16,6 +16,7 @@ from db_utils import get_indb_df
 winlimit = cct.winlimit
 START_INIT = 0
 PIPE_NAME = r"\\.\pipe\my_named_pipe"
+logger = LoggerFactory.getLogger()
 
 def calc_compute_volume(top_all: pd.DataFrame, logger: Any, resample: str = 'd', virtual: bool = True) -> pd.Series:
     """计算成交量（虚拟量或原始量）"""
@@ -399,12 +400,99 @@ def check_real_time(df, codes):
             row['high'] == row.get('lasth1d', row['high']) and
             row['close'] == row.get('lastp1d', row['close'])
         )
-        print(f"{row['code']} - 实盘模式: {not ohlc_same_as_last1d}, ohlc_same_as_last1d={ohlc_same_as_last1d}")
+        logger.debug(f"{row['code']} - 实盘模式: {not ohlc_same_as_last1d}, ohlc_same_as_last1d={ohlc_same_as_last1d}")
 
 # 使用示例：
 # df = pd.DataFrame(vect_daily_t)
 # check_real_time(df, ['688239', '601360'])
 
+
+def strong_momentum_today_plus_history_sum_opt_resample(df, max_days=cct.compute_lastdays, winlimit=winlimit):
+    """
+    完全向量化版本，用 NumPy 计算严格连续上涨和 sum_percent 25ms
+    """
+    result_dict = {}
+
+    # ===== 0️⃣ 判断今天状态，只做一次 =====
+    is_trade_day = cct.get_trade_date_status()
+    in_market_hours = 915 < cct.get_now_time_int() < 1500
+    real_time_mode = is_trade_day and in_market_hours
+
+    ohlc_same_as_last1d = (
+        (df['close'] == df.get('lastp1d', df['close']))
+    )
+    use_real_ohlc = real_time_mode & (~ohlc_same_as_last1d)
+
+    # ===== 1️⃣ 今天数据列 =====
+    today_open  = df['open'].where(use_real_ohlc, df['lasto1d']).to_numpy()
+    today_high  = df['high'].where(use_real_ohlc, df['lasth1d']).to_numpy()
+    today_low   = df['low'].where(use_real_ohlc, df['lastl1d']).to_numpy()
+    today_close = df['close'].where(use_real_ohlc, df['lastp1d']).to_numpy()
+
+    codes = df.index.to_numpy()
+
+    # ===== 2️⃣ 历史收盘/高/低 =====
+    # 构建 N x max_days 的 NumPy array
+    lastp = np.zeros((len(df), max_days))
+    lasth = np.zeros((len(df), max_days))
+    lastl = np.zeros((len(df), max_days))
+    lastv = np.zeros((len(df), max_days))
+
+    for i in range(1, max_days+1):
+        lastp[:, i-1] = df.get(f'lastp{i}d', 0).to_numpy()
+        lasth[:, i-1] = df.get(f'lasth{i}d', 0).to_numpy()
+        lastl[:, i-1] = df.get(f'lastl{i}d', 0).to_numpy()
+        lastv[:, i-1] = df.get(f'lastv{i}d', 0).to_numpy()
+
+    # ===== 3️⃣ 遍历窗口 =====
+    start_window = winlimit
+
+    # 盘后：today == last1d，window=1 没有策略意义
+    if not use_real_ohlc.any():
+        start_window = max(2, winlimit)
+    # ===== 3️⃣ 遍历窗口 =====
+    for window in range(start_window, max_days+1):
+        if window == 1:
+            mask = np.where(
+                use_real_ohlc.to_numpy(),
+                today_close > lastp[:, 0],              # 实时 vs 昨天收盘
+                lastp[:, 0] > df.get('lastp2d', lastp[:, 0]).to_numpy()  # 收盘后 vs 前天收盘
+            )
+            # logger.debug(f"use_real_ohlc: {use_real_ohlc.all()} window={window}, mask_close={mask}")
+            # print(f"use_real_ohlc: {use_real_ohlc.all()} window={window}, mask_close={mask}")
+
+        else:
+            # 严格连续上涨，只用 lastp 数组
+            mask_close = np.all(lastp[:, :window-1] > lastp[:, 1:window], axis=1)
+            mask_high  = np.all(lasth[:, :window-1] > lasth[:, 1:window], axis=1)
+            # mask_low   = np.all(lastl[:, :window-1] > lastl[:, 1:window], axis=1)
+            cond_low = lastl[:, :window-1] > lastl[:, 1:window]
+            cond_vol = lastv[:, :window-1] > lastv[:, 1:window]
+            mask_low_or_vol = np.all(cond_low | cond_vol, axis=1)
+            mask = mask_close & mask_high & mask_low_or_vol
+            # logger.debug(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close}, mask_high={mask_high}, mask_low={mask_low_or_vol} cond_low:{cond_low} cond_vol:{cond_vol}")
+            # print(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close},mask_high={mask_high}, mask_low={mask_low_or_vol}")
+
+
+        if not mask.any():
+            continue
+
+        # ===== 4️⃣ sum_percent =====
+        compare_low = lastl[:, window-1].copy()
+        compare_low[compare_low==0] = today_low[compare_low==0]  # 避免0
+        sum_percent = ((today_high - compare_low) / compare_low * 100).round(2)
+        sum_percent = sum_percent[mask]
+
+        # ===== 5️⃣ 构建 df 矩阵 =====
+        df_window = df.iloc[mask].copy()
+        df_window['sum_perc'] = sum_percent
+        df_window = df_window.sort_values('sum_perc', ascending=False)
+        # result_dict[window] = df_window
+        # ===== 修正 window 输出 =====
+        effective_window = window - (0 if use_real_ohlc.any() else 1)
+        result_dict[effective_window] = df_window
+
+    return result_dict
 
 def strong_momentum_today_plus_history_sum_opt(df, max_days=cct.compute_lastdays, winlimit=winlimit):
     """
@@ -430,6 +518,7 @@ def strong_momentum_today_plus_history_sum_opt(df, max_days=cct.compute_lastdays
     today_high  = df['high'].where(use_real_ohlc, df['lasth1d']).to_numpy()
     today_low   = df['low'].where(use_real_ohlc, df['lastl1d']).to_numpy()
     today_close = df['close'].where(use_real_ohlc, df['lastp1d']).to_numpy()
+    # today_vol = df['volume'].where(use_real_ohlc, df['lastv1d']).to_numpy()
 
     codes = df.index.to_numpy()
 
@@ -438,14 +527,23 @@ def strong_momentum_today_plus_history_sum_opt(df, max_days=cct.compute_lastdays
     lastp = np.zeros((len(df), max_days))
     lasth = np.zeros((len(df), max_days))
     lastl = np.zeros((len(df), max_days))
+    lastv = np.zeros((len(df), max_days))
 
     for i in range(1, max_days+1):
         lastp[:, i-1] = df.get(f'lastp{i}d', 0).to_numpy()
         lasth[:, i-1] = df.get(f'lasth{i}d', 0).to_numpy()
         lastl[:, i-1] = df.get(f'lastl{i}d', 0).to_numpy()
+        lastv[:, i-1] = df.get(f'lastv{i}d', 0).to_numpy()
 
     # ===== 3️⃣ 遍历窗口 =====
-    for window in range(winlimit, max_days+1):
+    start_window = winlimit
+
+    # 盘后：today == last1d，window=1 没有策略意义
+    if not use_real_ohlc.any():
+        start_window = max(2, winlimit)
+
+    # ===== 3️⃣ 遍历窗口 =====
+    for window in range(start_window, max_days+1):
         if window == 1:
             # window=1 特殊处理
             # mask = (today_high > lastp[:, 0]) & (today_close > lastp[:, 0])
@@ -456,13 +554,22 @@ def strong_momentum_today_plus_history_sum_opt(df, max_days=cct.compute_lastdays
                 (lastp[:, 0] > df.get('lastp2d', lastp[:, 0]).to_numpy()) &
                 (lasth[:, 0] > df.get('lasth2d', lasth[:, 0]).to_numpy())  # 收盘后 vs 前天
             )
+            # logger.debug(f"use_real_ohlc: {use_real_ohlc.all()} window={window}, mask_close={mask}")
+            # print(f"use_real_ohlc: {use_real_ohlc.all()} window={window}, mask_close={mask}")
+
         else:
             # 严格连续上涨
             # lastp[:, 0:window-1] > lastp[:, 1:window] for close
             mask_close = np.all(lastp[:, :window-1] > lastp[:, 1:window], axis=1)
             mask_high  = np.all(lasth[:, :window-1] > lasth[:, 1:window], axis=1)
-            mask_low   = np.all(lastl[:, :window-1] > lastl[:, 1:window], axis=1)
-            mask = mask_close & mask_high & mask_low
+            # mask_low   = np.all(lastl[:, :window-1] > lastl[:, 1:window], axis=1)
+            cond_low = lastl[:, :window-1] > lastl[:, 1:window]
+            cond_vol = lastv[:, :window-1] > lastv[:, 1:window]
+            mask_low_or_vol = np.all(cond_low | cond_vol, axis=1)
+            mask = mask_close & mask_high & mask_low_or_vol
+            # logger.debug(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close},mask_high={mask_high}, mask_low={mask_low_or_vol} cond_low:{np.all(cond_low)} cond_vol:{np.all(cond_vol)}")
+            # print(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close},mask_high={mask_high}, mask_low={mask_low_or_vol} cond_low:{cond_low[0, i]} cond_vol:{cond_vol[0, i]}")
+            # print(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close},mask_high={mask_high}, mask_low={mask_low_or_vol}")
 
         if not mask.any():
             continue
@@ -477,7 +584,10 @@ def strong_momentum_today_plus_history_sum_opt(df, max_days=cct.compute_lastdays
         df_window = df.iloc[mask].copy()
         df_window['sum_perc'] = sum_percent
         df_window = df_window.sort_values('sum_perc', ascending=False)
-        result_dict[window] = df_window
+        # result_dict[window] = df_window
+        # ===== 修正 window 输出 =====
+        effective_window = window - (0 if use_real_ohlc.any() else 1)
+        result_dict[effective_window] = df_window
 
     return result_dict
 
@@ -554,88 +664,6 @@ def strong_momentum_today_plus_history_sum_opt_27(df, max_days=cct.compute_lastd
         result_dict[window] = df_window
 
     return result_dict
-
-
-def strong_momentum_today_plus_history_sum_opt_no_vect_600(df, max_days=cct.compute_lastdays, winlimit=winlimit):
-    """
-    向量化优化版本，优化逻辑：
-    1️⃣ 判断今天状态只做一次
-      - 是否交易日、交易时间
-      - OHLC 是否实时更新 (open != lasto1d 或 low != lastl1d)
-    2️⃣ 使用今天 OHLC 或 last1d
-    3️⃣ 严格连续 2~max_days 天高低收盘升高
-    4️⃣ sum_percent = 今天 high - lastl{window-1}d 百分比
-    """
-    result_dict = {}
-
-    # ===== 0️⃣ 判断今天状态，只做一次 =====
-    is_trade_day = cct.get_trade_date_status()
-    in_market_hours = 915 < cct.get_now_time_int() < 1500
-    real_time_mode = is_trade_day and in_market_hours
-
-    # ===== 1️⃣ 判断是否 OHLC 真在更新 =====
-    with timed_ctx("ohlc_same_as_last1d", warn_ms=1000):
-        ohlc_same_as_last1d = (
-            (df['open'] == df.get('lasto1d', df['open'])) &
-            (df['low'] == df.get('lastl1d', df['low'])) &
-            (df['high'] == df.get('lasth1d', df['high'])) &
-            (df['close'] == df.get('lastp1d', df['close']))
-        )
-    use_real_ohlc = real_time_mode & (~ohlc_same_as_last1d)
-
-    # ===== 2️⃣ 准备今天数据列 =====
-    today_open  = df['open'].where(use_real_ohlc, df['lasto1d'])
-    today_high  = df['high'].where(use_real_ohlc, df['lasth1d'])
-    today_low   = df['low'].where(use_real_ohlc, df['lastl1d'])
-    today_close = df['close'].where(use_real_ohlc, df['lastp1d'])
-
-    # ===== 3️⃣ 遍历窗口计算严格连续上涨 =====
-    for window in range(winlimit, max_days + 1):
-        df_window = df.copy()
-
-        if window == 1:
-            # ===== 特殊处理 window=1 =====
-            # 判断今天是否有实时更新
-            if use_real_ohlc.any():  # 有实时更新的样本
-                mask = (today_high > df['lasth1d']) & (today_close > df['lastp1d'])
-            else:
-                # 没有实时更新，使用昨天 vs 前天数据
-                mask = (df['lasth1d'] > df.get('lasth2d', df['lasth1d'])) & \
-                       (df['lastp1d'] > df.get('lastp2d', df['lastp1d']))
-            df_window = df[mask]
-        else:
-            # 严格连续上涨判断
-            def is_strict_consecutive_up(row):
-                for i in range(1, window):
-                    if not (
-                        row[f'lastp{i}d'] > row[f'lastp{i+1}d'] and
-                        row[f'lasth{i}d'] > row[f'lasth{i+1}d'] and
-                        row[f'lastl{i}d'] > row[f'lastl{i+1}d']
-                    ):
-                        return False
-                return True
-
-            mask = df.apply(is_strict_consecutive_up, axis=1)
-            df_window = df[mask]
-
-        if df_window.empty:
-            continue
-
-        # ===== 4️⃣ 计算 sum_percent =====
-        compare_low = df_window.get(f'lastl{window-1}d', df_window['low']).copy()
-        mask_zero = compare_low == 0
-        compare_low.loc[mask_zero] = df_window.loc[mask_zero, 'low']
-
-        sum_percent = ((today_high[mask] - compare_low) / compare_low * 100).round(2)
-        df_window = df_window.copy()
-        df_window['sum_perc'] = sum_percent
-
-        # ===== 5️⃣ 排序并存储 =====
-        df_window = df_window.sort_values('sum_perc', ascending=False)
-        result_dict[window] = df_window
-
-    return result_dict
-
 
 
 # def merge_strong_momentum_results(results, min_days=2, columns=['name','lastp1d','lasth1d','lastl1d','sum_percent']):
@@ -806,7 +834,8 @@ def print_strong_stocks_by_window(results, columns=['name','lastp1d','lasth1d','
     - results: dict, key=连续天数, value=对应DataFrame
     - columns: list, 要显示的列
     - top_n: int 或 None, 每个窗口显示前 N 条股票，None 显示全部
-    """
+    """
+
     logger = LoggerFactory.getLogger()
     seen = set()  # 已加入的股票
 
@@ -828,16 +857,20 @@ def print_strong_stocks_by_window(results, columns=['name','lastp1d','lasth1d','
     return seen
         
 def test_opt(top_all):
-    code_list = ['688239','601360']
+    # code_list = ['002151','601360']
+    code_list = ['002151']
     vect_daily_t = tdd.generate_df_vect_daily_features(top_all.loc[code_list])
     # data_t = top_all.loc[code_list]
-    data_t  = pd.DataFrame(vect_daily_t)
+    data_tw  = pd.DataFrame(vect_daily_t)
     # generate_df_vect_daily_features(data_t)
-    # results_t = strong_momentum_today_plus_history_sum_opt(data_t, max_days=cct.compute_lastdays)
+    # results_tw = strong_momentum_today_plus_history_sum_opt_resample(data_tw, max_days=cct.compute_lastdays)
+    results_tw = strong_momentum_today_plus_history_sum_opt(data_tw, max_days=cct.compute_lastdays)
+    print_strong_stocks_by_window(results_tw, top_n=10)
+    import ipdb;ipdb.set_trace()
     with timed_ctx("plus_history_sum_opt", warn_ms=3000):
         results_t = strong_momentum_today_plus_history_sum_opt(top_all, max_days=cct.compute_lastdays)
     print_strong_stocks_by_window(results_t, top_n=10)
-    # import ipdb;ipdb.set_trace()
+    import ipdb;ipdb.set_trace()
 
 def _run_main_pipeline(
     logger, g_values, queue,
@@ -895,9 +928,13 @@ def _run_main_pipeline(
         top_all = process_merged_sina_with_history(top_all)
         # test_opt(top_all)
         with timed_ctx("plus_history_sum_opt", warn_ms=3000):
-            result_opt = strong_momentum_today_plus_history_sum_opt(
-                top_all, max_days=cct.compute_lastdays
-            )
+            if resample == 'd':
+                # result_opt = strong_momentum_today_plus_history_sum_opt(top_all,max_days=cct.compute_lastdays)
+                result_opt = strong_momentum_today_plus_history_sum_opt(
+                    top_all, max_days=cct.compute_lastdays
+                )
+            else:
+                result_opt = strong_momentum_today_plus_history_sum_opt_resample(top_all,max_days=cct.compute_lastdays)
         clean_sum = merge_strong_momentum_results(result_opt, min_days=winlimit)
         top_all = align_sum_percent(top_all, clean_sum)
         top_all = calc_indicators(top_all, logger, resample)
@@ -1156,9 +1193,13 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
 
             with timed_ctx("sina_with_history", warn_ms=1000):
                 top_all = process_merged_sina_with_history(top_all)
+            # test_opt(top_all)
             time_sum = time.time()
             with timed_ctx("plus_history_sum_opt", warn_ms=3000):
-                result_opt = strong_momentum_today_plus_history_sum_opt(top_all,max_days=cct.compute_lastdays)
+                if resample == 'd':
+                    result_opt = strong_momentum_today_plus_history_sum_opt(top_all,max_days=cct.compute_lastdays)
+                else:
+                    result_opt = strong_momentum_today_plus_history_sum_opt_resample(top_all,max_days=cct.compute_lastdays)
             clean_sum = merge_strong_momentum_results(result_opt,min_days=winlimit)
             top_all = align_sum_percent(top_all,clean_sum)
             logger.info(f'clean_sum: {time.time() - time_sum:.2f}')

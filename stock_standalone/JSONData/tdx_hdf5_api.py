@@ -2299,6 +2299,14 @@ if __name__ == "__main__":
         h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
         return h5
 
+    def readHdf5(fpath, root=None):
+        store = pd.HDFStore(fpath, "r")
+        print(list(store.keys()))
+        if root is None:
+            root = list(store.keys())[0].replace("/", "")
+        df = store[root]
+        store.close()
+        return df
 
     def get_tdx_all_MultiIndex_h5(showtable=True):
         #sina_monitor
@@ -2371,24 +2379,6 @@ if __name__ == "__main__":
     check_tdx_all_df('900')
     check_tdx_all_df_read('900')
 
-    # sina_MultiD_path = "D:\\RamDisk\\sina_MultiIndex_data.h5"
-    sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
-    freq='5T'
-    startime = None
-    endtime = '15:01:00'
-    def readHdf5(fpath, root=None):
-        store = pd.HDFStore(fpath, "r")
-        print(list(store.keys()))
-        if root is None:
-            root = list(store.keys())[0].replace("/", "")
-        df = store[root]
-        store.close()
-        return df
-
-    h5 = readHdf5(sina_MultiD_path)
-    h5.shape
-    print(h5.loc['300245'])
-    df_diagnose(h5)
 
     for re in ct.Resample_LABELS:
         print(f're: {re}')
@@ -2396,78 +2386,12 @@ if __name__ == "__main__":
             dl = ct.Resample_LABELS_Days[re]
             print(f'dl :{dl}')
 
-
-   
-
-    # import pandas as pd
-    # import numpy as np
-
-    # def prepare_df_for_hdf5(df, verbose=True):
-    #     if df is None or df.empty:
-    #         return df
-
-    #     start_mem = df.memory_usage().sum() / 1024 ** 2
-
-    #     # -----------------------------
-    #     # 1. 归一化对象列
-    #     # -----------------------------
-    #     if 'status' in df.columns:
-    #         df['status'] = df['status'].astype('category')
-
-    #     # if 'MainU' in df.columns:
-    #     #     df['MainU'] = df['MainU'].apply(
-    #     #         lambda x: sum(1 << int(i) for i in str(x).split(',') if i.isdigit()) if pd.notna(x) and x != '0' else 0
-    #     #     ).astype('int32')
-
-    #     if 'date' in df.columns:
-    #         df['date'] = pd.to_datetime(df['date'], errors='coerce')
-
-    #     if 'category' in df.columns:
-    #         df['category'] = pd.to_numeric(df['category'], errors='coerce').fillna(0).astype('int16')
-
-    #     if 'hangye' in df.columns:
-    #         df['hangye'] = df['hangye'].replace(0, '未知').astype('category')
-
-    #     # -----------------------------
-    #     # 2. 数值列瘦身
-    #     # -----------------------------
-    #     numerics = ["int8","int16","int32","int64","float16","float32","float64"]
-    #     for col in df.select_dtypes(include=numerics).columns:
-    #         col_type = df[col].dtype
-    #         c_min = df[col].min()
-    #         c_max = df[col].max()
-    #         if str(col_type)[:3] == 'int':
-    #             if c_min >= np.iinfo(np.int8).min and c_max <= np.iinfo(np.int8).max:
-    #                 df[col] = df[col].astype(np.int8)
-    #             elif c_min >= np.iinfo(np.int16).min and c_max <= np.iinfo(np.int16).max:
-    #                 df[col] = df[col].astype(np.int16)
-    #             elif c_min >= np.iinfo(np.int32).min and c_max <= np.iinfo(np.int32).max:
-    #                 df[col] = df[col].astype(np.int32)
-    #             else:
-    #                 df[col] = df[col].astype(np.int64)
-    #         else:  # float
-    #             if c_min >= np.finfo(np.float16).min and c_max <= np.finfo(np.float16).max:
-    #                 df[col] = df[col].astype(np.float16).round(2)
-    #             elif c_min >= np.finfo(np.float32).min and c_max <= np.finfo(np.float32).max:
-    #                 df[col] = df[col].astype(np.float32).round(2)
-    #             else:
-    #                 df[col] = df[col].astype(np.float64).round(2)
-
-    #     end_mem = df.memory_usage().sum() / 1024 ** 2
-    #     if verbose:
-    #         log.info(f"Memory usage reduced from {start_mem:.2f} MB to {end_mem:.2f} MB "
-    #               f"({100 * (start_mem - end_mem) / start_mem:.1f}% reduction)")
-
-    #     return df
-
-
-
     import warnings
     import tables
 
     # 忽略 PyTables 的性能警告
     warnings.filterwarnings("ignore", category=tables.exceptions.PerformanceWarning)
-
+    print('tdx_hd5_name: {tdx_hd5_name}-------------------')
     tdx_hd5_name = r"G:\\tdx_last_df.h5"
     tablename = 'low_d_70_y_all'
     df=readHdf5(tdx_hd5_name,tablename)
@@ -2507,6 +2431,17 @@ if __name__ == "__main__":
     h5_table = 'all'
     h5 = write_hdf_db(h5_fname, df, table=h5_table, index=False, baseCount=500, append=False, MultiIndex=False)
     import ipdb;ipdb.set_trace()
+
+    sina_MultiD_path = "G:\\sina_MultiIndex_data.h5"
+    freq='5T'
+    startime = None
+    endtime = '15:01:00'
+
+    h5 = readHdf5(sina_MultiD_path)
+    h5.shape
+    print(h5.loc['300245'])
+    df_diagnose(h5)
+
 
     fname=['sina_data.h5', 'tdx_last_df', 'powerCompute.h5', 'get_sina_all_ratio']
     # fname=['test_s.h5','sina_data.h5', 'tdx_last_df', 'powerCompute.h5', 'get_sina_all_ratio']

@@ -3792,61 +3792,6 @@ def to_mp_run(cmd, urllist):
     return results
 
 
-
-
-
-
-def to_mp_run_tqdm_err(cmd, urllist,*args,**kwargs):
-    #no work map tqdm
-    # n_t=time.time()
-    print("mp:%s" % len(urllist), end=' ')
-
-    # pool = ThreadPool(2)
-    # pool = ThreadPool(4)
-    cpu_used = int(cpu_count()/2)
-    print(cpu_count(),cpu_use)
-
-    pool = ThreadPool(processes=cpu_used)
-    # for code in codes:
-    #     results=pool.apply_async(sl.get_multiday_ave_compare_silent_noreal,(code,60))
-
-    # def worker(cmd,urllisttq):
-    #     # for i in tqdm(range(100), desc=f'Worker {num}'):
-    #     func = partial(cmd, **kwargs)
-    #     resultstq = []   
-    #     for y in tqdm(pool.imap_unordered(func, urllisttq),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
-    #         resultstq.append(y)
-    #     return resultstq
-
-    # with multiprocessing.Pool(4) as p:
-    #     p.map(worker, [1, 2, 3, 4])
-
-
-    result=[]
-    # kwargs['cmd']=cmd
-    # workerfunc = partial(worker, **kwargs)
-    # results = pool.map(workerfunc, urllist)
-    # for y in tqdm(pool.imap_unordered(func, urllisttq),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
-    func = functools.partial(cmd, **kwargs)
-    for y in tqdm(pool.imap_unordered(func, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
-            result.append(y)
-
-
-    # results = []
-    # for y in tqdm(pool.imap_unordered(cmd, urllist),unit='%',mininterval=ct.tqdm_mininterval,unit_scale=True,total=len(urllist),ncols=ct.ncols):
-    #     results.append(y)
-
-    # for code in urllist:
-    # result.append(pool.apply_async(cmd,(code,)))
-
-    pool.close()
-    pool.join()
-    # results = flatten(results)
-    # print "time:MP", (time.time() - n_t)
-    return results
-
-# from multiprocessing import Pool
-
 def imap_tqdm(function, iterable, processes, chunksize=20, desc=None, disable=False, **kwargs):
     """
     Run a function in parallel with a tqdm progress bar and an arbitrary number of arguments.
@@ -3892,25 +3837,6 @@ def get_func_name(func):
         func = func.func
     return getattr(func, '__name__', str(func))
 
-# def format_func_call(func, *args, **kwargs):
-#     import functools
-
-#     # 累积 partial 的 args 和 kwargs
-#     combined_args = list(args)
-#     combined_kwargs = dict(kwargs)
-
-#     while isinstance(func, functools.partial):
-#         combined_args = list(func.args) + combined_args
-#         combined_kwargs = {**func.keywords, **combined_kwargs} if func.keywords else combined_kwargs
-#         func = func.func
-
-#     func_name = getattr(func, '__name__', str(func))
-#     args_str = ", ".join(repr(a) for a in combined_args)
-#     kwargs_str = ", ".join(f"{k}={v!r}" for k, v in combined_kwargs.items())
-#     all_args = ", ".join(filter(None, [args_str, kwargs_str]))
-#     return f"{func_name}({all_args})"
-
-
 def format_func_call(func, *args, **kwargs):
     """
     将函数调用转换成可读字符串。
@@ -3936,28 +3862,6 @@ def format_func_call(func, *args, **kwargs):
     return f"{func_name}({all_args})"
 
     
-# def process_file_exc(func=None,code=None):
-#     # partialfunc=GlobalValues().getkey('partialfunc')
-#     try:
-#         # if func is None:
-#         #     return Exception("func is None code: {}".format(code))
-#         # log.debug(f'code:{code},func:{func}')
-#         return func(code)
-#     except Exception as ex:
-#         # print("Exception on code: {}".format(code)+ os.linesep + traceback.format_exc())
-#         # return Exception("Exception on code {}".format(code)+ os.linesep + traceback.format_exc())
-
-#         msg = "Exception on code {}".format(code)+ os.linesep + traceback.format_exc()
-#         # runcmd = format_func_call(func, code)
-#         # log.error(f'msg:{msg} runcmd:{runcmd}')
-#         log.error(f'msg:{msg}')
-#         return Exception(msg)
-
-#         # tb = traceback.format_exc()
-#         # logger.exception("Exception on code %s\n%s", code, tb)  # 自动带 traceback
-#         # return e  # 或 return Exception(...)
-
-
 # def to_mp_run_async_gpt(cmd, urllist, *args, **kwargs):
 def to_mp_run_async(cmd, urllist, *args, **kwargs):
     #gpt
@@ -3980,10 +3884,12 @@ def to_mp_run_async(cmd, urllist, *args, **kwargs):
             except Exception as e:
                 errors.append((c, type(e).__name__, str(e)))
     else:
-        cpu_used = cpu_count() // 2 + 1
-        pool_count = min(max(1, data_count // 100), cpu_used)   #2
-        # pool_count = min(cpu_count(), max(4, data_count // 50)) #5
-        # pool_count = min(cpu_count() // 2 + 1, max(4, data_count // 80)) #4
+        # cpu_used = cpu_count() // 2 + 1 #7
+        # pool_count7 = min(max(1, data_count // 100), cpu_used)   #7
+        pool_count = min(int(cpu_count() // 1.3), max(4, data_count // 50)) #9
+        # pool_count7 = min(cpu_count() // 2 + 1, max(4, data_count // 60)) #7
+        # log.info(f'count:{data_count} pool_count:{pool_count} pool_count5: {pool_count5} pool_count4:{pool_count4}')
+        log.info(f'count:{data_count} pool_count:{pool_count}')
         func = functools.partial(cmd, **kwargs)
         worker = functools.partial(process_file_exc, func)
 
@@ -4138,6 +4044,7 @@ def to_mp_run_async_me_ok(cmd, urllist, *args,**kwargs):
     # https://stackoverflow.com/questions/72766345/attributeerror-cant-pickle-local-object-in-multiprocessing
     urllist = list(set(urllist))
     data_count =len(urllist)
+    global error_codes
 
     if data_count > 200:
         if int(round(data_count/100,0)) < 2:
@@ -4146,8 +4053,11 @@ def to_mp_run_async_me_ok(cmd, urllist, *args,**kwargs):
             cpu_co = int(round(data_count/100,0))
         cpu_used = int(cpu_count()/2)  + 1
         # cpu_used = int(cpu_count()) - 2
-        pool_count = (cpu_used) if cpu_co > (cpu_used) else cpu_co
-        log.debug(f'count:{data_count} pool_count:{pool_count} cpu_co:{cpu_co}')
+        # pool_count = min(cpu_count(), max(4, data_count // 50)) #5
+        # pool_count = min(cpu_count() // 2 + 1, max(4, data_count // 80)) #4
+        # pool_count = (cpu_used) if cpu_co > (cpu_used) else cpu_co
+        pool_count = min(int(cpu_count() // 1.3), max(4, data_count // 50)) #9
+        log.info(f'count:{data_count} pool_count:{pool_count} cpu_co:{cpu_used}')
         # pool_count = (cpu_count()-2) if cpu_co > (cpu_count()-2) else cpu_co
         if  cpu_co > 1 and 1300 < get_now_time_int() < 1500:
             pool_count = int(cpu_count() / 2) + 1
@@ -4157,7 +4067,6 @@ def to_mp_run_async_me_ok(cmd, urllist, *args,**kwargs):
                 log.debug(f'cmd:{cmd} kwargs:{kwargs}')
                 func = functools.partial(cmd, **kwargs)
                 partialfunc = functools.partial(process_file_exc, func)
-                global error_codes
                 old_level = log.level 
                 log.setLevel(LoggerFactory.WARNING) 
                 def log_idx_none(idx, code, count_all, result_count):
@@ -4299,7 +4208,7 @@ def to_mp_run_async_me_ok(cmd, urllist, *args,**kwargs):
         pool.close()
         pool.join()
         result=results
-    log.info("Cpu_count: {pool_count}  time:%s"%(round(time.time()-time_s,2)),)
+    log.info(f"Cpu_count: {pool_count} Time: {round(time.time()-time_s, 2)}s | Total OK: {len(result)} | Errors: {len(error_codes)}")
     return result
 
 '''

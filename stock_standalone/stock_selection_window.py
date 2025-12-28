@@ -146,7 +146,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
         # --- Main List ---
         # Columns
-        columns = ("code", "name", "score", "price", "percent", "连阳涨幅", "volume", "category", "auto_reason", "user_status", "user_reason")
+        columns = ("code", "name", "score", "price", "percent", "连阳涨幅", "win", "volume", "category", "auto_reason", "user_status", "user_reason")
         
         tree_frame = tk.Frame(self)
         tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
@@ -169,7 +169,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         # Headings
         headers = {
             "code": "代码", "name": "名称", "score": "机选分", 
-            "price": "现价", "percent": "涨幅%", "连阳涨幅": "连阳涨幅", "volume": "成交量",
+            "price": "现价", "percent": "涨幅%", "连阳涨幅": "连阳涨幅","win":"win","volume": "成交量",
             "category": "板块/概念",
             "auto_reason": "机选理由", "user_status": "人工状态", "user_reason": "人工理由"
         }
@@ -185,6 +185,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.tree.column("price", width=70, minwidth=60, stretch=False)
         self.tree.column("percent", width=70, minwidth=60, stretch=False)
         self.tree.column("连阳涨幅", width=80, minwidth=60, stretch=False)
+        self.tree.column("win", width=40, minwidth=30, stretch=False)
         self.tree.column("volume", width=90, minwidth=80, stretch=False)
         self.tree.column("category", width=160, minwidth=100, stretch=True)
         self.tree.column("auto_reason", width=260, minwidth=150, stretch=True)
@@ -234,9 +235,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             if self.live_strategy is not None and hasattr(self.live_strategy, 'df') and 'sum_perc' in self.live_strategy.df.columns:
                 # 按索引对齐取值
                 self.df_full_candidates['连阳涨幅'] = self.df_full_candidates['code'].map(self.live_strategy.df['sum_perc']).fillna(0)
+                self.df_full_candidates['win'] = self.df_full_candidates['code'].map(self.live_strategy.df['win']).fillna(0)
             else:
                 # live_strategy 不存在或列缺失，全部填 0
                 self.df_full_candidates['连阳涨幅'] = 0
+                self.df_full_candidates['win'] = 0
             # 从全量缓存中复制，用于当前视窗的筛选/显示
             self.df_candidates = self.df_full_candidates.copy()
 
@@ -277,7 +280,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
                 self.tree.insert("", "end", iid=row['code'], values=(
                     row['code'], row['name'], row['score'], row['price'], 
-                    row['percent'], row.get('连阳涨幅', 0), row['volume'], row.get('category', ''), row['reason'], 
+                    row['percent'], row.get('连阳涨幅', 0),row.get('win', 0), row['volume'], row.get('category', ''), row['reason'], 
                     user_status, user_reason
                 ), tags=(tag,))
             
@@ -481,8 +484,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             cur_values = self.tree.item(item_id, "values")
             # Create new values tuple
             new_values = list(cur_values)
-            new_values[9] = status
-            new_values[10] = reason
+            new_values[10] = status
+            new_values[11] = reason
             
             self.tree.item(item_id, values=new_values, tags=(tag,))
             
@@ -504,8 +507,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             values = self.tree.item(item_id, "values")
             code = values[0]
             name = values[1]
-            status = values[9]
-            user_reason = values[10]
+            status = values[10]
+            user_reason = values[11]
             
             # 只要不是默认状态，就记录反馈以便优化
             if status != "待定":
@@ -514,7 +517,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                     "code": code,
                     "name": name,
                     "auto_score": values[2],
-                    "auto_reason": values[8],
+                    "auto_reason": values[9],
                     "user_status": status,
                     "user_reason": user_reason
                 })
