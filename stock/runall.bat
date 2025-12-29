@@ -71,12 +71,9 @@ REM 启动后续程序
 REM ============================
 
 
-
-
-
-cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock"
-set WORKDIR=%CD%
-echo 当前目录: %WORKDIR%
+cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock_standalone\dist"
+set WORKDIRTK=%CD%
+echo 当前目录: %WORKDIRTK%
 
 REM 依次启动 exe 或 py 文件，保持延迟
 rem set PROGRAMS=instock_Monitor singleAnalyseUtil sina_Market-DurationUP LinePower filter_resample_Monitor
@@ -94,6 +91,11 @@ for %%P in (%PROGRAMS%) do (
     )
     timeout /t 15 /nobreak >nul
 )
+
+
+cd "D:\MacTools\WorkFile\WorkSpace\pyQuant3\stock"
+set WORKDIR=%CD%
+echo 当前目录: %WORKDIR%
 
 REM dataBarFeed 目录启动 chantdxpower
 cd dataBarFeed

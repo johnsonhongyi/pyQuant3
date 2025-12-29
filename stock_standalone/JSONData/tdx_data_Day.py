@@ -3491,7 +3491,8 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=False,detect_cal
             dm = dm[((dm.open > 0) | (dm.a1 > 0))]
             print(("market:%s A:%s open_dm:%s" % (mk, len(df),len(dm))), end=' ')
             log.info(("market:%s A:%s open_dm:%s" % (mk, len(df),len(dm))))
-            log.info('code_list:%s df:%s' % (len(code_list), len(df)))
+            count_list = len(code_list)
+            log.info('code_list:%s df:%s' % (code_list if count_list < 10 else count_list, len(df)))
 
 
             if len(dm) > 0:

@@ -28,6 +28,7 @@ import queue
 import importlib.util
 import win32pipe, win32file
 import a_trade_calendar
+from filelock import FileLock, Timeout
 # 全局变量
 monitor_windows = {}  # 存储监控窗口实例
 
@@ -4750,9 +4751,10 @@ def _get_sina_data_realtime(stock_code=None):
     df = None
     if pytables_status:
         if sina_data_last_updated_time is None or current_time - sina_data_last_updated_time >= timedelta(minutes=3):
+            sina_data_last_updated_time = datetime.now()
+            logger.info(f'sina_data_last_updated_time:{sina_data_last_updated_time}  current_time: {current_time} sina_data_last_updated_time: {sina_data_last_updated_time}')
             sina_data = read_hdf_table(fname,table)
             if sina_data is not None and not sina_data.empty:
-                sina_data_last_updated_time = current_time
                 sina_data_df = sina_data.copy()
                 if stock_code is not None:
                     df = sina_data.loc[stock_code]
@@ -9528,10 +9530,10 @@ def bind_hotkeys(root):
     logger.info("✅ 已绑定 F6：一键重排列窗口")
 
 
-def read_hdf_table(fname, key='all', columns=None):
+def read_hdf_table(fname, key='all', columns=None, timeout=10):
     """
-    精简读取 PyTables HDF5 文件的表格数据，只读，返回 DataFrame。
-    
+    精简读取 PyTables HDF5 文件的表格数据，只读，返回 DataFrame，带文件锁。
+
     Parameters
     ----------
     fname : str
@@ -9540,59 +9542,152 @@ def read_hdf_table(fname, key='all', columns=None):
         表名（HDF5 group key）
     columns : list, optional
         指定列读取，默认读取全部
+    timeout : int
+        文件锁超时时间（秒）
     
     Returns
     -------
     pd.DataFrame
         表格数据
     """
-    # try:
-    #     df = pd.read_hdf(fname, key=key, columns=columns)
-    #     return df
-    # except FileNotFoundError:
-    #     logger.info(f"文件不存在: {fname}")
-    #     return None
-    # except KeyError:
-    #     logger.info(f"表不存在: {key}")
-    #     return None
-    # except Exception as e:
-    #     logger.info(f"HDF读取出错: {e}")
-    #     return None
 
-    # 自动确保 key 以 '/'
-    if not key.startswith('/'):
-        key = '/' + key
-
-    try:
-        with SafeHDFStore(fname, mode='r') as h5:
-            if h5 is None:
-                logger.info(f"HDF文件无法读取（锁定或不存在）: {fname}")
-                return None
-            if key not in h5.keys():
-                logger.info(f"表不存在: {key}")
-                return None
-            df = h5[key]  # 读取整个表
-            if columns is not None:
-                df = df[columns]
-
-            # 如果需要转换 ticktime
-            # if convert_ticktime and 'ticktime' in df.columns:
-            #     df = df.copy()
-            #     df['ticktime'] = df['ticktime'].apply(
-            #         lambda x: int(x.strftime('%H%M%S')) if isinstance(x, pd.Timestamp) else x
-            #     )
-            
+    def safe_load_table(store, table_name, chunk_size=1000,MultiIndex=False,complib='blosc'):
+        """
+        尝试读取 HDF5 table，如果读取失败，则逐块读取。
+        返回 DataFrame。
+        """
+        try:
+            # 直接读取整个 table
+            df = store[table_name]
+            df = df[~df.index.duplicated(keep='first')]
             return df
+        except tables.exceptions.HDF5ExtError as e:
+            log.error(f"{table_name} read error: {e}, attempting chunked read...")
+            # 逐块读取
+            dfs = []
+            start = 0
+            while True:
+                try:
+                    storer = store.get_storer(table_name)
+                    if not storer.is_table:
+                        raise RuntimeError(f"{table_name} is not a table format")
+                    df_chunk = store.select(table_name, start=start, stop=start+chunk_size)
+                    if df_chunk.empty:
+                        break
+                    dfs.append(df_chunk)
+                    start += chunk_size
+                except tables.exceptions.HDF5ExtError:
+                    # 跳过损坏块
+                    logger.error(f"Skipping corrupted chunk {start}-{start+chunk_size}")
+                    start += chunk_size
+            if dfs:
+                df = pd.concat(dfs)
+                df = df[~df.index.duplicated(keep='first')]
+                # rebuild_table(store, table_name, df, MultiIndex=MultiIndex, complib=complib)
+                return df
+            else:
+                logger.error(f"All chunks of {table_name} are corrupted")
+                return pd.DataFrame()
 
+    def rebuild_table(store, table_name, new_df,MultiIndex=False,complib='blosc'):
+        """
+        删除旧 table 并重建
+        """
+        # with SafeHDFStore(fname, mode='a') as store:
+        if '/' + table_name in store.keys():
+            log.error(f"Removing corrupted table {table_name}")
+            store.remove(table_name)
+        if not new_df.empty:
+            # store.put(table_name, new_df, format='table',complib=complib, data_columns=True)
+            if not MultiIndex:
+                store.put(table_name, new_df, format='table', append=False, complib=complib, data_columns=True)
+            else:
+                store.put(table_name, new_df, format='table', index=False, complib=complib, data_columns=True, append=False)
+            store.flush()
+
+    # if not key.startswith('/'):
+    #     key = '/' + key
+
+    lock_path = fname + ".lock"
+    lock = FileLock(lock_path, timeout=timeout)
+    df = None
+    try:
+        with lock:
+            # 使用 pandas 只读方式打开 HDF5
+            with pd.HDFStore(fname, mode='r') as store:
+                if store is not None:
+                    logger.debug(f"fname: {(fname)} keys:{store.keys()}")
+                    print(f"fname: {(fname)} keys:{store.keys()}")
+                    if '/' + key in list(store.keys()):
+                        df = safe_load_table(store, key, chunk_size=5000,MultiIndex=False,complib='blosc')
+                        if df.empty:
+                            log.info(f"{key} : table is corrupted, will rebuild after fetching new data")
+                # if key not in h5.keys():
+                #     logger.info(f"表不存在: {key}")
+                #     return None
+                # df = h5[key]
+                # if columns is not None:
+                #     df = df[columns]
+                        return df
+
+    except Timeout:
+        logger.info(f"HDF 文件被占用，获取锁超时: {fname}")
     except FileNotFoundError:
         logger.info(f"文件不存在: {fname}")
-        return None
     except KeyError:
         logger.info(f"表不存在: {key}")
-        return None
     except Exception as e:
-        logger.info(f"HDF读取出错: {e}")
-        return None
+        logger.info(f"HDF 读取出错: {e}")
+    finally:
+        return df
+
+# def read_hdf_table(fname, key='all', columns=None):
+#     """
+#     精简读取 PyTables HDF5 文件的表格数据，只读，返回 DataFrame。
+    
+#     Parameters
+#     ----------
+#     fname : str
+#         HDF5 文件路径
+#     key : str
+#         表名（HDF5 group key）
+#     columns : list, optional
+#         指定列读取，默认读取全部
+    
+#     Returns
+#     -------
+#     pd.DataFrame
+#         表格数据
+#     """
+
+#     # 自动确保 key 以 '/'
+#     if not key.startswith('/'):
+#         key = '/' + key
+
+#     try:
+#         _lock = fname + ".lock"
+#         with SafeHDFStore(fname, mode='r') as h5:
+#             if h5 is None:
+#                 logger.info(f"HDF文件无法读取（锁定或不存在）: {fname}")
+#                 return None
+#             if key not in h5.keys():
+#                 logger.info(f"表不存在: {key}")
+#                 return None
+#             df = h5[key]  # 读取整个表
+#             if columns is not None:
+#                 df = df[columns]
+
+#             return df
+
+#     except FileNotFoundError:
+#         logger.info(f"文件不存在: {fname}")
+#         return None
+#     except KeyError:
+#         logger.info(f"表不存在: {key}")
+#         return None
+#     except Exception as e:
+#         logger.info(f"HDF读取出错: {e}")
+#         return None
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Monitor Init Script")
