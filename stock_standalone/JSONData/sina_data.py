@@ -488,7 +488,10 @@ class Sina:
             self._update_agg_cache(df,h5_hist)
             agg_data = self.agg_cache.getkey('agg_metrics')
             df_final = cct.combine_dataFrame(df, agg_data)
-
+            if 'nhigh' not in df_final.columns:
+                df_final['nhigh'] = df_final['close']
+            if 'nclose' not in df_final.columns:
+                df_final['nclose'] = df_final['close']
         # 5. 合并 lastbuy 并持久化
         df_final = self.combine_lastbuy(df_final)
         # 使用 index=False 避免反转索引，且先 copy 避免影响返回的对象
@@ -680,7 +683,6 @@ class Sina:
         """从历史 MultiIndex 数据中重建聚合缓存，nclose/nlow/nhigh/nstd 使用 get_col_agg_df 计算"""
         time_s = time.time()
         agg_df: pd.DataFrame
-
         if h5_hist is not None and not h5_hist.empty:
             if not isinstance(h5_hist.index, pd.MultiIndex):
                 h5_hist = h5_hist.set_index(['code', 'ticktime'], append=False)
@@ -751,7 +753,10 @@ class Sina:
         
         if now_int <= 945:
             rebuild_df['nlow'] = rebuild_df['nlow'].combine(curr_stats['low'].reindex(rebuild_df.index), min)
-            
+        if 'nhigh' not in agg_df.columns:
+            agg_df['nhigh'] = agg_df['close']
+        if 'nclose' not in agg_df.columns:
+            agg_df['nclose'] = agg_df['close']
         # nhigh: 优先使用历史记录，修正 0.0 或 NaN
         rebuild_df['nhigh'] = agg_df['nhigh'].reindex(rebuild_df.index).fillna(0)
         idx_high_fix = (rebuild_df['nhigh'] <= 0)

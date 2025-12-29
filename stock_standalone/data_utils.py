@@ -1118,21 +1118,25 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                 else:
                     resamples = ['3d']
 
+                init_res_m = resample
                 for res_m in resamples:
                     time_init_m = time.time()
                     if res_m != g_values.getkey("resample"):
                         now_time = cct.get_now_time_int()
                         if now_time <= 905:
+                            init_res_m = resample
                             logger.info(f"start init_tdx resample: {res_m}")
                             tdd.get_append_lastp_to_df(
                                 top_now,
                                 dl=ct.Resample_LABELS_Days[res_m],
                                 resample=res_m)
                         else:
+                            init_res_m = resample
                             logger.info(f'resample:{res_m} now_time:{now_time} > 905 终止初始化 init_tdx 用时:{time.time()-time_init_m:.2f}')
                             break
                         logger.info(f'resample:{res_m} init_tdx 用时:{time.time()-time_init_m:.2f}')
-                
+                #还原最后的初始化的init_res_m
+                resample = init_res_m
                 # 4️⃣ 关键：标记 init 已完成（跨循环）
                 g_values.setkey("tdx.init.done", True)
                 g_values.setkey("tdx.init.date", today)
@@ -1232,7 +1236,11 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             else:
                 sleep_step = 1
             # cout_time = 0
-            for _ in range(duration_sleep_time):
+            loop_sleep_time = duration_sleep_time
+            if 915 < cct.get_now_time_int() < 925:
+                loop_sleep_time = int(duration_sleep_time/2)
+            logger.info(f'loop_sleep_time: {loop_sleep_time}')
+            for _ in range(loop_sleep_time):
                 if not flag.value:
                     break
                 elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
