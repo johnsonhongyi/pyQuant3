@@ -1,10 +1,12 @@
 import sqlite3
 import json
-import logging
+# import logging
 from datetime import datetime
 from typing import Any, Optional, Union
+from JohnsonUtil import LoggerFactory
 
-logger = logging.getLogger(__name__)
+# logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger()
 
 import numpy as np
 
@@ -90,6 +92,31 @@ class TradingLogger:
                     PRIMARY KEY (date, code)
                 )
             """)
+            
+            # --- Schema Evolution/Migration (New) ---
+            # 检查字段是否缺失 (针对已存在数据库升级)
+            cur.execute("PRAGMA table_info(selection_history)")
+            existing_cols = [col[1] for col in cur.fetchall()]
+            
+            check_cols = {
+                "score": "REAL",
+                "reason": "TEXT",
+                "ratio": "REAL",
+                "amount": "REAL",
+                "status": "TEXT",
+                "ma5": "REAL",
+                "ma10": "REAL",
+                "category": "TEXT"
+            }
+            
+            for col_name, col_type in check_cols.items():
+                if col_name not in existing_cols:
+                    logger.error(f"DB Migration: Adding missing column '{col_name}' to selection_history")
+                    try:
+                        cur.execute(f"ALTER TABLE selection_history ADD COLUMN {col_name} {col_type}")
+                    except Exception as e:
+                        logger.error(f"Failed to add column {col_name}: {e}")
+
             conn.commit()
             conn.close()
         except Exception as e:

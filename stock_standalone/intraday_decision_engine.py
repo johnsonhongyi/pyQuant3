@@ -102,6 +102,22 @@ class IntradayDecisionEngine:
             debug["trend_strength"] = trend_strength
             debug["analysis_skip"] = "均线数据无效"
         
+        # ---------- 0. 选股分权重加成 (New: 对应 “反向验证” 需求) ----------
+        # 根据 StockSelector 的评分增加基础权重，评分越高，买入信心越足
+        selection_score = float(snapshot.get("score", 0))
+        selection_bonus = 0.0
+        if selection_score >= 65:
+            selection_bonus = 0.2
+            debug["选股加成"] = f"顶格推荐({selection_score})"
+        elif selection_score >= 55:
+            selection_bonus = 0.15
+            debug["选股加成"] = f"高分推荐({selection_score})"
+        elif selection_score >= 45:
+            selection_bonus = 0.08
+            debug["选股加成"] = f"强势入选({selection_score})"
+        
+        debug["selection_bonus"] = selection_bonus
+        
         # ---------- 💥 涨跌停与一字板过滤 (New) ----------
         last_close = float(snapshot.get("last_close", 0))
         limit_info = self._is_price_limit(row.get("code", ""), price, last_close, high, low, open_p, ratio, snapshot)
@@ -199,6 +215,9 @@ class IntradayDecisionEngine:
                 
                 # 3. 量能与均价约束 (关键点)
                 base_pos += self._volume_bonus(row, debug)
+                
+                # 4. 选股分加成 (New)
+                base_pos += selection_bonus
                 
                 # 如果价格在今日今日成交均价（nclose）下方，极大程度严控买入（解决“衝高回落”及“水下徘徊”问题）
                 if nclose > 0 and price < nclose:
