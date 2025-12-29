@@ -1155,7 +1155,7 @@ def write_hdf_db_newbug(fname, df, table='all', index=False, complib='blosc', ba
 #     else:
 #         return pd.DataFrame()
 
-def safe_load_table(store, table_name, chunk_size=1000,MultiIndex=False,complib='blosc'):
+def safe_load_table(store, table_name, chunk_size=1000,MultiIndex=False,complib='blosc',fix=False):
     """
     尝试读取 HDF5 table，如果读取失败，则逐块读取。
     返回 DataFrame。
@@ -1187,7 +1187,8 @@ def safe_load_table(store, table_name, chunk_size=1000,MultiIndex=False,complib=
         if dfs:
             df = pd.concat(dfs)
             df = df[~df.index.duplicated(keep='first')]
-            rebuild_table(store, table_name, df, MultiIndex=MultiIndex, complib=complib)
+            if fix:
+                rebuild_table(store, table_name, df, MultiIndex=MultiIndex, complib=complib)
             return df
         else:
             print(f"All chunks of {table_name} are corrupted")
@@ -1247,7 +1248,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                         if showtable:
                             print(f"fname: {(fname)} keys:{store.keys()}")
                         if '/' + table in list(store.keys()):
-                            tmpdf = safe_load_table(store, table, chunk_size=5000,MultiIndex=MultiIndex,complib=complib)
+                            tmpdf = safe_load_table(store, table, chunk_size=5000,MultiIndex=MultiIndex,complib=complib,fix=True)
                             if tmpdf.empty:
                                 log.info(f"{table} : table is corrupted, will rebuild after fetching new data")
                                 # tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
@@ -2455,13 +2456,21 @@ if __name__ == "__main__":
         h5 = load_hdf_db(h5_fname, table=h5_table,code_l=None, timelimit=False,showtable=showtable)
         return h5
 
-    def readHdf5(fpath, root=None):
+    def readHdf5(fpath, root=None,refix=False):
         store = pd.HDFStore(fpath, "r")
         print(list(store.keys()))
+        df = None
         if root is None:
             root = list(store.keys())[0].replace("/", "")
-        df = store[root]
+            df = store[root]
         store.close()
+        if refix:
+            with HDFStore(fpath, mode='a') as store:
+                if len(store.keys()) > 0:
+                    df = safe_load_table(store,root,fix=refix)
+                    # df = store[root]
+                else:
+                    print('df is None')
         return df
 
     def get_tdx_all_MultiIndex_h5(showtable=True):
@@ -2490,7 +2499,8 @@ if __name__ == "__main__":
     # with tables.open_file(r"G:\sina_MultiIndex_data.h5") as f: print(f)
     # with tables.open_file(r"G:\sina_data.h5") as f: print(f)
     # h5=get_tdx_all_from_h5()
-    
+    sina = readHdf5(fpath='G:\\sina_data.h5',root='all',refix=False)
+
     # print(hm5.memory_usage(deep=True).sum() / 1024**2, "MB")
     # hm5.to_hdf(r"G:\sina_MultiIndex_data_clean.h5", key="all_30/table", mode="w", format="table", complib="blosc", complevel=9)
     print(f"sina_data:{check_hdf(h5_fname='sina_data',h5_table='all')}")
@@ -2504,7 +2514,7 @@ if __name__ == "__main__":
     startime = None
     endtime = '15:01:00'
 
-    print('sina_MultiD_path:{sina_MultiD_path}')
+    print(f'sina_MultiD_path:{sina_MultiD_path}')
     h5 = readHdf5(sina_MultiD_path)
     h5.shape
     print(h5.loc['300245'])
