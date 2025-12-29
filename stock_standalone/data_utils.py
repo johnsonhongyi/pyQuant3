@@ -19,24 +19,48 @@ PIPE_NAME = r"\\.\pipe\my_named_pipe"
 logger = LoggerFactory.getLogger()
 
 def calc_compute_volume(top_all: pd.DataFrame, logger: Any, resample: str = 'd', virtual: bool = True) -> pd.Series:
-    """计算成交量（虚拟量或原始量）"""
+    """计算成交量（量比或原始量）"""
+    # 逻辑置换：优先使用 'vol'(镜像原始量) 进行计算。
+    vol_data = top_all['vol'] if 'vol' in top_all.columns else top_all['volume']
+    
     ratio_t = cct.get_work_time_ratio(resample=resample)
-    logger.info(f'ratio_t: {round(ratio_t, 2)}')
+    # logger.info(f'ratio_t: {round(ratio_t, 2)}')
 
     if virtual:
-        # 虚拟量 = volume / last6vol / ratio_t
-        volumes = top_all['volume'] / top_all['last6vol'] / ratio_t
-        return volumes.round(1)
+        # 为了防止盘后数据 (vol == lastv1d) 在开盘初期由于 ratio_t 极小而导致虚拟成交量暴涨
+        # 对 stale 数据不应用 ratio_t 除法
+        l6vol = top_all['last6vol'].replace(0, np.nan)
+        v_ratio = vol_data / l6vol
+        
+        if 'lastv1d' in top_all.columns and ratio_t < 1.0:
+            # 只有当 vol 不同于昨日全天量时，才认定为今日有实时变动的数据
+            mask_active = (vol_data != top_all['lastv1d']) & (vol_data > 0)
+            
+            # 使用 pandas 矢量化操作，避免 np.where 转换成 ndarray
+            v_ratio = v_ratio.copy()
+            # 活跃股票进行虚拟量比放大
+            v_ratio[mask_active] = v_ratio[mask_active] / ratio_t
+        else:
+            # 盘后或缺少对比列时，按照当前时间比例正常缩放
+            v_ratio = v_ratio / (ratio_t if ratio_t > 0 else 1.0)
+            
+        return v_ratio.fillna(0).round(1)
     else:
-        # 原始量 = 虚拟量 * last6vol * ratio_t
-        volumes = top_all['volume'] * top_all['last6vol'] * ratio_t
-        return volumes.round(1)
+        # 原始量还原 = 虚拟量比 * last6vol * ratio_t
+        return (top_all['volume'] * top_all.get('last6vol', 1) * ratio_t).round(1)
 
 def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.DataFrame:
     """指标计算"""
-    
-    top_all['amount'] = top_all['volume'] * top_all['close']
+    # 确保 vol 列镜像原始成交量。
+    # 判定准则：如果 vol 列不存在，或者 volume 列显示出明显的原始成交量特征（通常远大于100）
+    if 'vol' not in top_all.columns or (top_all['volume'] > 500).any():
+        top_all['vol'] = top_all['volume'] 
+        
+    top_all['amount'] = top_all['vol'] * top_all['close']
+    # 这里的 volume 将被更新为虚拟量比信号强度
     top_all['volume'] = calc_compute_volume(top_all, logger, resample=resample, virtual=True)
+    # 同步到 ratio 列，确保兼容性
+    top_all['ratio'] = top_all['volume']
 
     now_time = cct.get_now_time_int()
     if cct.get_trade_date_status():
@@ -104,10 +128,15 @@ def evaluate_realtime_signal_tick(rt_tick, daily_feat, mode='A'):
     if upper_1d <= 0:
         return 9, 5
 
+    # 计算虚拟估算成交量 (将当前累积量映射到全天)
+    ratio_t = cct.get_work_time_ratio()
+    virtual_a = curr_a / ratio_t if ratio_t > 0 else curr_a
+
     # 2. 条件判定 (基于实时 Tick)
-    cond_trend_start = (curr_c > upper_1d) and (close_1d <= upper_1d) and (curr_a > amount_1d * 1.1)
+    # 使用估算的全天成交量与昨日全天量进行对比
+    cond_trend_start = (curr_c > upper_1d) and (close_1d <= upper_1d) and (virtual_a > amount_1d * 1.1)
     cond_trend_continue = (curr_c > upper_1d) and (close_1d > upper_1d)
-    cond_pullback = (curr_c < close_1d) and (curr_l >= ma10d_curr) and (curr_a < amount_1d)
+    cond_pullback = (curr_c < close_1d) and (curr_l >= ma10d_curr) and (virtual_a < amount_1d)
     cond_bear = (curr_c < ma10d_curr)
 
     # 3. 状态转移逻辑 (EVAL_STATE)
@@ -208,11 +237,10 @@ def process_merged_sina_signal_eval(df, mode='A'):
       实时列: open, now, high, low, volume
       历史列: upper, lastp1d (昨日收), lastv1d (昨日量), ma5d (或ma10d), EVAL_STATE (昨日状态)
     """
-    # 1. 提取核心变量
-    curr_c = df['now']
-    curr_o = df['open']
-    curr_l = df['low']
-    curr_a = df['volume']
+    # 逻辑置换：vol 是累积原始成交量，volume 此时可能是已经计算好的量比
+    curr_vol_raw = df['vol'] if 'vol' in df.columns else df['volume']
+    ratio_t = cct.get_work_time_ratio()
+    virtual_a = curr_vol_raw / ratio_t if ratio_t > 0 else curr_vol_raw
     
     # 历史参考值
     upper_1d = df['upper']
@@ -222,9 +250,9 @@ def process_merged_sina_signal_eval(df, mode='A'):
     ma_ref = df['ma5d'] # 假设 ma5d 是你的生命线
 
     # 2. 判定条件 (矢量化)
-    cond_trend_start = (curr_c > upper_1d) & (close_1d <= upper_1d) & (curr_a > amount_1d * 1.1)
+    cond_trend_start = (curr_c > upper_1d) & (close_1d <= upper_1d) & (virtual_a > amount_1d * 1.1)
     cond_trend_continue = (curr_c > upper_1d) & (close_1d > upper_1d)
-    cond_pullback = (curr_c < close_1d) & (curr_l >= ma_ref) & (curr_a < amount_1d)
+    cond_pullback = (curr_c < close_1d) & (curr_l >= ma_ref) & (virtual_a < amount_1d)
     cond_bear = (curr_c < ma_ref)
 
     # 3. 状态转移逻辑 (EVAL_STATE)

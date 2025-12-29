@@ -19,6 +19,8 @@ try:
 except ImportError:
     IntradayDecisionEngine = None
 
+import data_utils
+
 class StockSelector:
     """
     强势股筛选器
@@ -73,20 +75,19 @@ class StockSelector:
             return pd.DataFrame()
 
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        """补充必要的计算指标 (如果 top_all 中缺少)"""
-        # 假设 df 包含: close, open, high, low, volume
-        # 这里进行简单的向量化计算，或者依赖 provided columns
-        
-        # 确保数值列为 float
-        cols = ['close', 'open', 'high', 'low', 'volume', 'amount']
-        for col in cols:
+        """补充必要的计算指标 (明确调用数据中心计算链)"""
+        if df.empty:
+            return df
+            
+        # 确保基础数值转换
+        cols_to_fix = ['close', 'open', 'high', 'low', 'volume', 'amount']
+        for col in cols_to_fix:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-        # 示例：计算简单的均线（如果数据是 Snapshot day data，通常需要历史数据才能算 MA）
-        # 注意：top_all.h5 通常是一张快照表 (One row per stock)。
-        # 如果没有历史 ma5/ma10/ma20 列，我们只能基于当前状态做筛选，或者假设 top_all 已经包含了这些指标。
-        # 常见的 pyQuant/JohnsonUtil 架构中，top_all 可能已经包含了 ma5d, ma10d 等。
+        # 调用 data_utils 中的标准计算链 (包含量能扩缩逻辑)
+        # resample 默认为 'd'
+        df = data_utils.calc_indicators(df, self.logger, resample='d')
         
         return df
 

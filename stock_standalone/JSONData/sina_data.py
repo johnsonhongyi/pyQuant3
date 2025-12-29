@@ -447,11 +447,14 @@ class Sina:
             self.stock_list.append(request_list)
             self.request_num += 1
         
+        log.info(f"Sina.all: Requesting {len(self.stock_with_exchange_list)} stocks (chunked into {len(self.stock_list)} requests)")
         df = self.get_stock_data()
         
         if df is None or len(df) == 0:
-            log.warning("Failed to fetch fresh data from Sina")
+            log.warning("Sina.all: Failed to fetch fresh data from Sina")
             return self._filter_suspended(h5) if h5 is not None else pd.DataFrame()
+        
+        log.info(f"Sina.all: Fetched {len(df)} fresh results from Sina")
 
         # 3. 确定是否需要从历史轨迹重建 (Anytime Recovery)
         agg_data = self.agg_cache.getkey('agg_metrics')
@@ -493,8 +496,8 @@ class Sina:
                 df_final['nclose'] = df_final['close']
         # 5. 合并 lastbuy 并持久化
         df_final = self.combine_lastbuy(df_final)
-        # 使用 index=False 避免反转索引，且先 copy 避免影响返回的对象
-        h5a.write_hdf_db(self.hdf_name, df_final.copy(), self.table, index=False)
+        # 使用 write_hdf_db_safe 进行原子写入，防止高频更新(30s/次)导致 HDF5 损坏
+        h5a.write_hdf_db_safe(self.hdf_name, df_final.copy(), self.table, index=False)
 
         if df_final is not None and len(df_final) > 0:
             # 格式化数值
@@ -555,7 +558,7 @@ class Sina:
                     # 使用 index=True 强制保存索引，确保 MultiIndex 能被正确持久化
                     h5a.write_hdf_db(h5_mi_fname, mi_df, table=h5_mi_table, index=True, MultiIndex=True)
                     self.agg_cache.setkey('last_mi_save_time', now_time)
-                    log.info("Saved MultiIndex history (sync) to %s cols:%s" % (h5_mi_fname, mi_df.columns.tolist()))
+                    log.info(f"Sina.all: Saved MultiIndex history to {h5_mi_fname}[{h5_mi_table}], rows={len(mi_df)}, cols={list(mi_df.columns)}")
 
         return self._filter_suspended(df_final)
 

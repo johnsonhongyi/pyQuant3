@@ -67,6 +67,7 @@ class IntradayDecisionEngine:
                 "debug": dict (盘中结构、趋势强度等分析信息)
             }
         """
+        code = row.get("code", "unknown")
         debug: dict[str, Any] = {}
         price = float(row.get("trade", 0))
         high = float(row.get("high", 0))
@@ -83,6 +84,7 @@ class IntradayDecisionEngine:
         debug["nclose"] = nclose
 
         if price <= 0:
+            logger.warning(f"Engine: {code} price is 0, skip evaluate")
             return self._hold("价格无效", debug)
         
         # ---------- 基础行情分析（提前进行以填充调试信息） ----------
@@ -1397,11 +1399,12 @@ class IntradayDecisionEngine:
         debug["multiday_trend_reasons"] = reasons
         return score
 
-    def _hold(self, reason: str, debug: dict) -> dict:
+    def _hold(self, reason: str, debug: dict[str, Any], position: float = 0.0) -> dict[str, Any]:
         """返回持仓决策"""
+        # logger.debug(f"Engine HOLD: {reason}")
         return {
             "action": "持仓",
-            "position": 0.0,
+            "position": position,
             "reason": reason,
             "debug": debug
         }
