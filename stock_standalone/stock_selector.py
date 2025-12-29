@@ -48,7 +48,8 @@ class StockSelector:
         self.decision_engine = IntradayDecisionEngine() if IntradayDecisionEngine else None
 
     def _setup_logger(self):
-        self.logger = LoggerFactory.getLogger('StockSelector')
+        self.logger = LoggerFactory.getLogger()
+        # self.logger = LoggerFactory.getLogger('StockSelector')
         # self.logger.setLevel(logging.INFO)
 
     def load_data(self) -> pd.DataFrame:
@@ -107,10 +108,13 @@ class StockSelector:
             self.logger.error(f"获取历史选股统计失败: {e}")
             return {}
 
-    def filter_strong_stocks(self, df: pd.DataFrame) -> pd.DataFrame:
+    def filter_strong_stocks(self, df: pd.DataFrame, today: Optional[str] = None) -> pd.DataFrame:
         """执行优化后的筛选逻辑"""
         if df.empty:
             return df
+
+        if today is None:
+            today = datetime.datetime.now().strftime("%Y-%m-%d")
 
         # 1. 基础过滤 (非停牌，成交额需大于 8000万 提高流动性门槛)
         df_active = df[(df['volume'] > 0) & (df['amount'] > 80000000)].copy()
@@ -142,7 +146,6 @@ class StockSelector:
         self.logger.info(f"Top 5 Concepts: {[x[0] for x in concept_scores[:5]]}")
 
         selected_records = []
-        today = datetime.datetime.now().strftime("%Y-%m-%d")
 
         for code, row in df_active.iterrows():
             data = row.to_dict()
@@ -338,12 +341,13 @@ class StockSelector:
             return []
         return df['code'].tolist()
 
-    def get_candidates_df(self, force=False) -> pd.DataFrame:
+    def get_candidates_df(self, force: bool = False, logical_date: Optional[str] = None) -> pd.DataFrame:
         """
         获取筛选结果。
         :param force: 是否强制重新运行策略。如果为 False，则优先从数据库加载今日已存数据。
+        :param logical_date: 逻辑日期，格式 'YYYY-MM-DD'。如果提供，则使用此日期进行数据查询；否则使用系统当前日期。
         """
-        today = datetime.datetime.now().strftime("%Y-%m-%d")
+        today = logical_date if logical_date else datetime.datetime.now().strftime("%Y-%m-%d")
         
         # 非强制模式下，先检查今日是否有存量数据 (From SQLite)
         if not force and self.db_logger:
@@ -365,7 +369,7 @@ class StockSelector:
         # 运行策略逻辑
         df = self.load_data()
         df = self.calculate_indicators(df)
-        df_res = self.filter_strong_stocks(df)
+        df_res = self.filter_strong_stocks(df, today=today)
         return df_res
 
 if __name__ == '__main__':

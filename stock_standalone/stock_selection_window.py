@@ -236,10 +236,12 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 self._update_title_stats()
                 return
 
-            if self.live_strategy is not None and hasattr(self.live_strategy, 'df') and 'sum_perc' in self.live_strategy.df.columns:
+            # if self.live_strategy is not None and hasattr(self.live_strategy, 'df') and 'sum_perc' in self.live_strategy.df.columns:
+            if self.selector is not None and hasattr(self.selector, 'df_all_realtime') and 'sum_perc' in self.selector.df_all_realtime.columns:
                 # 按索引对齐取值
-                self.df_full_candidates['连阳涨幅'] = self.df_full_candidates['code'].map(self.live_strategy.df['sum_perc']).fillna(0)
-                self.df_full_candidates['win'] = self.df_full_candidates['code'].map(self.live_strategy.df['win']).fillna(0)
+                # 使用 selector 缓存的实时数据进行映射，避免 live_strategy 为 None 时报错
+                self.df_full_candidates['连阳涨幅'] = self.df_full_candidates['code'].map(self.selector.df_all_realtime['sum_perc']).fillna(0)
+                self.df_full_candidates['win'] = self.df_full_candidates['code'].map(self.selector.df_all_realtime['win']).fillna(0)
             else:
                 # live_strategy 不存在或列缺失，全部填 0
                 self.df_full_candidates['连阳涨幅'] = 0
@@ -531,8 +533,17 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 })
             
             if status == "选中":
-                price = values[4]
-                to_import.append((code, name, price))
+                to_import.append({
+                    "code": code,
+                    "name": name,
+                    "price": float(values[4]),
+                    "score": float(values[3]),
+                    "percent": float(values[5].replace('%', '') if isinstance(values[5], str) else values[5]),
+                    "ratio": float(values[6]),
+                    "amount": values[7],
+                    "auto_reason": values[12],
+                    "user_reason": values[14]
+                })
         
         if not to_import:
             if not messagebox.askyesno("确认", "未标记任何[选中]的股票。\n是否仅保存反馈并关闭？"):
@@ -543,27 +554,43 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             count = 0
             if hasattr(self.live_strategy, '_monitored_stocks'):
                 existing = self.live_strategy._monitored_stocks
-                for code, name, price in to_import:
+                for item in to_import:
+                    code = item["code"]
                     if code not in existing:
                         existing[code] = {
+                            "name": item["name"],
                             "rules": [
-                                {"type": "price_up", "value": float(price)}
+                                {"type": "price_up", "value": item["price"]}
                             ],
                             "last_alert": 0,
                             "created_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                            "tags": "auto_verify", 
-                            "snapshot": {},
-                            "name": name
+                            "tags": "manual_verified", 
+                            "snapshot": {
+                                "trade": item["price"],
+                                "percent": item["percent"],
+                                "ratio": item["ratio"],
+                                "amount_desc": item["amount"],
+                                "score": item["score"],
+                                "reason": item["auto_reason"],
+                                "user_reason": item["user_reason"]
+                            }
                         }
                         count += 1
                     else:
-                        # 如果已存在但没有规则，添加默认规则
+                        # 如果已存在，更新规则和快照（权重更新）
                         if not existing[code].get('rules'):
-                            existing[code]['rules'] = [{"type": "price_up", "value": float(price)}]
-                            count += 1
-                        # 确保名称不为空
-                        if not existing[code].get('name'):
-                            existing[code]['name'] = name
+                            existing[code]['rules'] = [{"type": "price_up", "value": item["price"]}]
+                        
+                        # 更新快照以反映最新的权重和评分
+                        existing[code]['snapshot'].update({
+                            "score": item["score"],
+                            "reason": item["auto_reason"],
+                            "user_reason": item["user_reason"]
+                        })
+                        # 重新标记为人工确认
+                        if "manual_verified" not in str(existing[code].get('tags', '')):
+                            existing[code]['tags'] = "manual_verified"
+                        count += 1
                 
                 if count > 0:
                     if hasattr(self.live_strategy, '_save_monitors'):

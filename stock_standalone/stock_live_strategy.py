@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from intraday_decision_engine import IntradayDecisionEngine
 from risk_engine import RiskEngine
 from trading_logger import TradingLogger
+from JohnsonUtil import commonTips as cct
 
 logger = LoggerFactory.getLogger()
 
@@ -215,6 +216,7 @@ class StockLiveStrategy:
             alert_cooldown=alert_cooldown,
             risk_duration_threshold=risk_duration_threshold
         )
+        self._last_import_logical_date: Optional[str] = None
 
     # ------------------------------------------------------------------
     # Alert Cooldown 控制
@@ -334,40 +336,78 @@ class StockLiveStrategy:
     def import_daily_candidates(self) -> str:
         """
         调用 StockSelector 筛选强势股，并合并到当前监控列表
+        报警中选股需要根据实际判断是重复筛选还是有效筛选
         """
         if not StockSelector:
             return "StockSelector 模块不可用"
         
         try:
-            selector = StockSelector()
-            candidates = selector.get_candidate_codes()
-            if not candidates:
-                return "筛选器未返回任何标的"
+            # 确定逻辑日期
+            is_trading = cct.get_work_time_duration()
+            # 如果是非交易期，通常获取前一交易日数据
+            logical_date = cct.get_today() if is_trading else cct.get_last_trade_date()
             
+            # 记录最后一次成功导入的逻辑日期，避免重复筛选
+            if hasattr(self, '_last_import_logical_date') and self._last_import_logical_date == logical_date:
+                # 如果是交易期间且强制刷新，可以在这里增加 force 参数支持，目前暂定跳过
+                if not is_trading:
+                    return f"非交易时段：逻辑日期 {logical_date} 已在监控列表，无需重复筛选"
+                else:
+                    logger.info(f"交易时段：逻辑日期 {logical_date} 已有记录，尝试更新行情...")
+
+            selector = StockSelector()
+            # 传入逻辑日期 (需要修改 selector.get_candidates_df 支持 date 参数)
+            df_candidates = selector.get_candidates_df(logical_date=logical_date)
+            
+            if df_candidates.empty:
+                return f"筛选器未返回逻辑日期 {logical_date} 的任何标的"
+            
+            candidates = df_candidates['code'].tolist()
             added_count = 0
             existing_codes = set(self._monitored_stocks.keys())
             
-            for code in candidates:
+            for _, row in df_candidates.iterrows():
+                code = row['code']
+                name = row.get('name', '')
                 if code not in existing_codes:
                     self._monitored_stocks[code] = {
+                        "name": name,
                         "rules": [],
                         "last_alert": 0,
                         "created_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "tags": "auto_select",
-                        "snapshot": {},
-                        "name": "" # 名称后续补全
+                        "tags": f"auto_{logical_date}",
+                        "snapshot": {
+                            "trade": row.get('price', 0),
+                            "percent": row.get('percent', 0),
+                            "ratio": row.get('ratio', 0),
+                            "amount_desc": row.get('amount', 0),
+                            "status": row.get('status', ''),
+                            "score": row.get('score', 0),
+                            "reason": row.get('reason', '')
+                        }
                     }
                     added_count += 1
+                else:
+                    # 如果已存在，更新其 snapshot
+                    self._monitored_stocks[code]['snapshot'].update({
+                        "status": row.get('status', self._monitored_stocks[code]['snapshot'].get('status', '')),
+                        "score": row.get('score', self._monitored_stocks[code]['snapshot'].get('score', 0)),
+                        "reason": row.get('reason', self._monitored_stocks[code]['snapshot'].get('reason', ''))
+                    })
+            
+            self._last_import_logical_date = logical_date
             
             if added_count > 0:
                 self._save_monitors()
-                logger.info(f"已导入 {added_count} 只强势股")
-                return f"成功导入 {added_count} 只强势股"
+                logger.info(f"逻辑日期 {logical_date}: 已导入 {added_count} 只强势股")
+                return f"成功导入 {added_count} 只标的 (日期:{logical_date})"
             else:
-                return "所有标的已在监控列表中"
+                return f"逻辑日期 {logical_date}: 标的已在监控列表中"
                 
         except Exception as e:
             logger.error(f"导入筛选股失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             return f"导入失败: {e}"
 
 
@@ -483,9 +523,13 @@ class StockLiveStrategy:
         if not self.enabled or df_all is None or df_all.empty:
             return
 
+        # 1. 交易期间判断: 0915 至 1502
+        if not cct.get_work_time_duration():
+            return
+
         # 限制频率: 至少间隔 1s 处理一次，避免 UI 线程密集调用导致积压
         now = time.time()
-        if now - self._last_process_time < 1.0:
+        if now - self._last_process_time < 2.0:
             return
         
         self._last_process_time = now

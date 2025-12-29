@@ -3897,7 +3897,7 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     # print time.time()-time_s
     dm['nvol'] = dm['volume']
 
-    if cct.get_now_time_int() > 932 and market not in ['sh', 'sz', 'cyb']:
+    if (cct.get_now_time_int() < 830 or cct.get_now_time_int() > 932) and market not in ['sh', 'sz', 'cyb']:
         dd = rl.get_sina_Market_json('all')
         if isinstance(dd, pd.DataFrame):
             dd.drop([inx for inx in dd.index if inx not in dm.index],
