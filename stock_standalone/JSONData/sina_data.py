@@ -1263,6 +1263,15 @@ class Sina:
         self.dataframe = self.format_response_data(index)
         if self.dataframe is None:
             return pd.DataFrame()
+        cols = ['code', 'open', 'high', 'low', 'close']
+        # code 通常是字符串或整数，先排除
+        num_cols = ['open', 'high', 'low', 'close']
+        # ds.loc[:, num_cols] = ds.loc[:, num_cols].round(2)
+        self.dataframe.loc[:, num_cols] = (
+            self.dataframe.loc[:, num_cols]
+            .apply(pd.to_numeric, errors='coerce')
+            .round(2)
+        )
         return self.dataframe
 
 

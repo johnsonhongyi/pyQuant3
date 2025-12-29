@@ -17,7 +17,7 @@ from JSONData import powerCompute as pct
 from JSONData import get_macd_kdj_rsi as getab
 from JSONData import tdx_data_Day as tdd
 from JSONData import sina_data
-from JohnsonUtil import emacount as ema
+# from JohnsonUtil import emacount as ema
 from JohnsonUtil import LoggerFactory
 # log = LoggerFactory.getLogger("SingleSAU")
 # log.setLevel(LoggerFactory.DEBUG)
@@ -96,86 +96,87 @@ def _write_to_csv(df, filename, indexCode='code'):
 
 
 def get_multiday_ave_compare(code, dayl='10'):
-    dtick = ts.get_today_ticks(code)
-    d_hist = ema.getdata_ema_trend(code, dayl, 'd')
-    # print d_hist
-    day_t = ema.get_today()
-    if d_hist is not None:
-        if day_t in d_hist.index:
-            dl = d_hist.drop(day_t).index
-        else:
-            dl = d_hist.index
-    else:
-        return 0
-    # print dl
-    # print dl
-    ep_list = []
-    for da in dl.values:
-        # print da
-        td = ts.get_tick_data(code, da)
-        # print td
-        if not type(td) == type(None):
-            ep = td['amount'].sum() / td['volume'].sum()
-            ep_list.append(ep)
-            print(("D: %s P: %s" % (da[-5:], ep)))
+    pass
+#     dtick = ts.get_today_ticks(code)
+#     d_hist = ema.getdata_ema_trend(code, dayl, 'd')
+#     # print d_hist
+#     day_t = ema.get_today()
+#     if d_hist is not None:
+#         if day_t in d_hist.index:
+#             dl = d_hist.drop(day_t).index
+#         else:
+#             dl = d_hist.index
+#     else:
+#         return 0
+#     # print dl
+#     # print dl
+#     ep_list = []
+#     for da in dl.values:
+#         # print da
+#         td = ts.get_tick_data(code, da)
+#         # print td
+#         if not type(td) == type(None):
+#             ep = td['amount'].sum() / td['volume'].sum()
+#             ep_list.append(ep)
+#             print(("D: %s P: %s" % (da[-5:], ep)))
 
-    ave = ema.less_average(ep_list)
-    if len(dtick.index) > 0:
-        ep = dtick['amount'].sum() / dtick['volume'].sum()
-        p_now = dtick['price'].values[0] * 100
-        if p_now > ave and ep > ave:
-            print(("GOLD:%s ep:%s UP:%s!!! A:%s %s !!!" %
-                  (code, ep, p_now, ave, cct.get_now_time())))
-        elif p_now > ave and ep < ave:
-            print(("gold:%s ep:%s UP:%s! A:%s %s !" %
-                  (code, ep, p_now, ave, cct.get_now_time())))
-        elif p_now < ave and ep > ave:
-            print(("down:%s ep:%s Dow:%s? A:%s %s ?" %
-                  (code, ep, p_now, ave, cct.get_now_time())))
-        else:
-            print(("DOWN:%s ep:%s now:%s??? A:%s %s ???" %
-                  (code, ep, p_now, ave, cct.get_now_time())))
-    return ave
+#     ave = ema.less_average(ep_list)
+#     if len(dtick.index) > 0:
+#         ep = dtick['amount'].sum() / dtick['volume'].sum()
+#         p_now = dtick['price'].values[0] * 100
+#         if p_now > ave and ep > ave:
+#             print(("GOLD:%s ep:%s UP:%s!!! A:%s %s !!!" %
+#                   (code, ep, p_now, ave, cct.get_now_time())))
+#         elif p_now > ave and ep < ave:
+#             print(("gold:%s ep:%s UP:%s! A:%s %s !" %
+#                   (code, ep, p_now, ave, cct.get_now_time())))
+#         elif p_now < ave and ep > ave:
+#             print(("down:%s ep:%s Dow:%s? A:%s %s ?" %
+#                   (code, ep, p_now, ave, cct.get_now_time())))
+#         else:
+#             print(("DOWN:%s ep:%s now:%s??? A:%s %s ???" %
+#                   (code, ep, p_now, ave, cct.get_now_time())))
+#     return ave
 
 
 def get_multiday_ave_compare_silent(code, dayl='10'):
-    dtick = ts.get_today_ticks(code)
-    d_hist = ema.getdata_ema_trend_silent(code, dayl, 'd')
-    # print d_hist
-    day_t = ema.get_today()
-    if day_t in d_hist.index:
-        dl = d_hist.drop(day_t).index
-    else:
-        dl = d_hist.index
-    # print dl
-    # print dl
-    ep_list = []
-    for da in dl.values:
-        # print code,da
-        td = ts.get_tick_data(code, da)
-        # print td
-        if not type(td) == type(None):
-            ep = td['amount'].sum() / td['volume'].sum()
-            ep_list.append(ep)
-            # print ("D: %s P: %s" % (da[-5:], ep))
-    ave = ema.less_average(ep_list)
-    if len(dtick.index) > 0:
-        ep = dtick['amount'].sum() / dtick['volume'].sum()
-        p_now = dtick['price'].values[0] * 100
-        if p_now > ave or ep > ave:
-            print(("GOLD:%s ep:%s UP:%s!!! A:%s %s !!!" %
-                  (code, ep, p_now, ave, get_now_time())))
-            # elif p_now > ave and ep < ave:
-            #     print ("gold:%s ep:%s UP:%s! A:%s %s !" % (code, ep, p_now, ave, get_now_time()))
-            # elif p_now < ave and ep > ave:
-            #     print ("down:%s ep:%s Dow:%s? A:%s %s ?" % (code, ep, p_now, ave, get_now_time()))
-            return True
-        else:
-            if p_now < ave and ep < ave:
-                print(("DOWN:%s ep:%s now:%s??? A:%s %s ???" %
-                      (code, ep, p_now, ave, get_now_time())))
-            return False
-            # return ave
+    pass
+    # dtick = ts.get_today_ticks(code)
+    # d_hist = ema.getdata_ema_trend_silent(code, dayl, 'd')
+    # # print d_hist
+    # day_t = ema.get_today()
+    # if day_t in d_hist.index:
+    #     dl = d_hist.drop(day_t).index
+    # else:
+    #     dl = d_hist.index
+    # # print dl
+    # # print dl
+    # ep_list = []
+    # for da in dl.values:
+    #     # print code,da
+    #     td = ts.get_tick_data(code, da)
+    #     # print td
+    #     if not type(td) == type(None):
+    #         ep = td['amount'].sum() / td['volume'].sum()
+    #         ep_list.append(ep)
+    #         # print ("D: %s P: %s" % (da[-5:], ep))
+    # ave = ema.less_average(ep_list)
+    # if len(dtick.index) > 0:
+    #     ep = dtick['amount'].sum() / dtick['volume'].sum()
+    #     p_now = dtick['price'].values[0] * 100
+    #     if p_now > ave or ep > ave:
+    #         print(("GOLD:%s ep:%s UP:%s!!! A:%s %s !!!" %
+    #               (code, ep, p_now, ave, get_now_time())))
+    #         # elif p_now > ave and ep < ave:
+    #         #     print ("gold:%s ep:%s UP:%s! A:%s %s !" % (code, ep, p_now, ave, get_now_time()))
+    #         # elif p_now < ave and ep > ave:
+    #         #     print ("down:%s ep:%s Dow:%s? A:%s %s ?" % (code, ep, p_now, ave, get_now_time()))
+    #         return True
+    #     else:
+    #         if p_now < ave and ep < ave:
+    #             print(("DOWN:%s ep:%s now:%s??? A:%s %s ???" %
+    #                   (code, ep, p_now, ave, get_now_time())))
+    #         return False
 
 
 def get_yestoday_tick_status(code, ave=None):
@@ -635,7 +636,8 @@ def get_code_search_loop(num_input, code='', timed=60, dayl='10', ave=None):
 if __name__ == '__main__':
     # get_multiday_ave_compare('601198')
     from docopt import docopt
-    log = LoggerFactory.log
+    # log = LoggerFactory.log
+    log = LoggerFactory.getLogger()
     args = docopt(cct.sina_doc, version='sina_cxdn')
     # print args,args['-d']
     if args['-d'] == 'debug':
@@ -775,13 +777,6 @@ if __name__ == '__main__':
                                 top_temp = cct.GlobalValues().getkey('top_max')
                                 codew = stf.WriteCountFilter(
                                     top_temp, writecount='all')
-                                # cct.write_to_blocknew(
-                                #     block_path, codew, append=False, doubleFile=False)
-
-                                
-                                # print("Now append sina to tdx 300 hdf:")
-                                # tdd.Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=300)
-                                # tdd.Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300)
                             break
                         else:
                             print(".")
@@ -793,13 +788,6 @@ if __name__ == '__main__':
                         top_temp = cct.GlobalValues().getkey('top_max')
                         codew = stf.WriteCountFilter(
                             top_temp, writecount='all')
-                        # cct.write_to_blocknew(
-                        #     block_path, codew, append=False, doubleFile=False)
-
-                        
-                        # print("Now append sina to tdx 300 hdf:")
-                        # tdd.Write_sina_to_tdx(market='all', h5_fname='tdx_all_df', h5_table='all', dl=300)
-                        # tdd.Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300)
                         break
 
 
