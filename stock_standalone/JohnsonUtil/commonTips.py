@@ -666,7 +666,7 @@ class GlobalConfig:
         self.st_key_sort = self.get_with_writeback("general", "st_key_sort", fallback="2 1", value_type="str")
         self.code_startswith = self.get_with_writeback("general", "code_startswith", fallback='"6", "30", "00", "688", "43", "83", "87", "92"', value_type="tuple_str")
         self.winlimit = self.get_with_writeback("general", "winlimit", fallback=1, value_type="int")
-        self.loglevel = self.get_with_writeback("general", "loglevel", fallback='ERROR', value_type="str")
+        self.loglevel = self.get_with_writeback("general", "loglevel", fallback='INFO', value_type="str")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         try:
@@ -3864,8 +3864,8 @@ def format_func_call(func, *args, **kwargs):
     return f"{func_name}({all_args})"
 
     
-# def to_mp_run_async_gpt(cmd, urllist, *args, **kwargs):
-def to_mp_run_async(cmd, urllist, *args, **kwargs):
+def to_mp_run_async_gpt(cmd, urllist, *args, **kwargs):
+# def to_mp_run_async(cmd, urllist, *args, **kwargs):
     #gpt
     t0 = time.time()
     result = []
@@ -4037,8 +4037,8 @@ def to_mp_run_async_newOK(cmd, urllist, *args, **kwargs):
     return result
 
 # https://stackoverflow.com/questions/68065937/how-to-show-progress-bar-tqdm-while-using-multiprocessing-in-python
-def to_mp_run_async_me_ok(cmd, urllist, *args,**kwargs):
-# def to_mp_run_async(cmd, urllist, *args,**kwargs):
+# def to_mp_run_async_me_ok(cmd, urllist, *args,**kwargs):
+def to_mp_run_async(cmd, urllist, *args,**kwargs):
     result = []  
     time_s = time.time()
     # func = partial(cmd, **kwargs)
@@ -4083,7 +4083,7 @@ def to_mp_run_async_me_ok(cmd, urllist, *args,**kwargs):
                     progress_bar = tqdm(total=data_count)
                     log.debug(f'data_count:{data_count},mininterval:{ct.tqdm_mininterval},ncols={ct.ncols}')
                     # 核心修复：防止监控线程在 Windows 管道关闭时抛出 EOFError
-                    tqdm.monitor_interval = 0
+                    # tqdm.monitor_interval = 0
                     # from multiprocessing import Manager
                     # manager = Manager()
                     # shared_list = manager.list()

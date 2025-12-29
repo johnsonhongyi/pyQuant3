@@ -79,8 +79,11 @@ class TradingLogger:
                     score REAL,
                     price REAL,
                     percent REAL,
+                    ratio REAL,
                     volume REAL,
+                    amount REAL,
                     reason TEXT,
+                    status TEXT,
                     ma5 REAL,
                     ma10 REAL,
                     category TEXT,
@@ -106,8 +109,8 @@ class TradingLogger:
             
             # 使用事务批量插入
             cur.executemany("""
-                INSERT OR REPLACE INTO selection_history (date, code, name, score, price, percent, volume, reason, ma5, ma10, category)
-                VALUES (:date, :code, :name, :score, :price, :percent, :volume, :reason, :ma5, :ma10, :category)
+                INSERT OR REPLACE INTO selection_history (date, code, name, score, price, percent, ratio, volume, amount, reason, status, ma5, ma10, category)
+                VALUES (:date, :code, :name, :score, :price, :percent, :ratio, :volume, :amount, :reason, :status, :ma5, :ma10, :category)
             """, records)
             
             conn.commit()
