@@ -2,6 +2,7 @@
 # !/usr/bin/python
 # from __future__ import division
 
+from typing import Union, Any, List, Dict, Optional
 import os
 import sys
 import time
@@ -104,7 +105,7 @@ class SafeHDFStore(pd.HDFStore):
 
         if not os.path.exists(self.basedir):
             if RAMDISK_KEY < 1:
-                log.error("NO RamDisk Root:%s" % (baseDir))
+                log.error("NO RamDisk Root:%s" % (self.basedir))
                 RAMDISK_KEY += 1
         else:
             self.temp_file = self.fname + '_tmp'
@@ -115,45 +116,36 @@ class SafeHDFStore(pd.HDFStore):
         self._flock = None
         self.write_status = os.path.exists(self.fname)
         self.my_pid = os.getpid()
-        self.log.info(f"self.fname: {self.fname} self.basedir:{self.basedir}")
 
-        # 确保 HDF5 文件存在
-        with timed_ctx("ensure_hdf_file"):
-            self.ensure_hdf_file() 
-
-        # # 父类初始化
-        # with timed_ctx("hdfstore_init"):
-        #     super().__init__(self.fname, **kwargs)
-
-        opened = False
-        need_repair = False
-
-        # ========= 核心：只在这里判断是否损坏 =========
-        try:
-            with timed_ctx("hdfstore_open"):
-                # super().__init__(self.fname, mode=mode, **kwargs)
-                super().__init__(self.fname, **kwargs)
-            opened = True
-
-        except (tables.exceptions.HDF5ExtError, OSError, ValueError) as e:
-            self.log.error(f"[HDF] open failed: {e}")
-            need_repair = True
-
-        # ========= 异常路径：才做清理 =========
-        if not opened and need_repair:
-            with timed_ctx("check_corrupt_keys"):
-                # self._repair_hdf_file()   # 见下方
-                self._check_and_clean_corrupt_keys()   # 见下方
-            with timed_ctx("reopen_hdf"):
-                super().__init__(self.fname, **kwargs)
-
-        # 锁处理
+        # 1. 锁处理 - 必须在打开 HDF5 前获取锁，确保原子性
         if self.mode != 'r':
             with timed_ctx("acquire_lock"):
                 self._acquire_lock()
         else:
             with timed_ctx("wait_for_lock"):
                 self._wait_for_lock()
+
+        # 2. 确保 HDF5 文件存在 (在锁保护下)
+        with timed_ctx("ensure_hdf_file"):
+            self.ensure_hdf_file() 
+
+        # 3. 父类初始化 (在锁保护下)
+        opened = False
+        need_repair = False
+        try:
+            with timed_ctx("hdfstore_open"):
+                self.log.info(f"[HDF] Opening {self.fname} in mode={self.mode}")
+                super().__init__(self.fname, mode=self.mode, **kwargs)
+            opened = True
+        except (tables.exceptions.HDF5ExtError, OSError, ValueError) as e:
+            self.log.error(f"[HDF] Open FAILED for {self.fname}: {e}")
+            need_repair = True
+
+        if not opened and need_repair:
+            with timed_ctx("check_corrupt_keys"):
+                self._check_and_clean_corrupt_keys()
+            with timed_ctx("reopen_hdf"):
+                super().__init__(self.fname, mode=self.mode, **kwargs)
 
         # 检查损坏 key
         # with timed_ctx("check_corrupt_keys"):
@@ -417,6 +409,7 @@ class SafeHDFStore(pd.HDFStore):
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.write_status:
             try:
+                self.log.info(f"[HDF] Closing and flushing {self.fname}")
                 self.close()
                 super().__exit__(exc_type, exc_val, exc_tb)
                 if self.mode != 'r':
@@ -950,6 +943,17 @@ def get_hdf5_file(fpath, wr_mode='r', complevel=9, complib='blosc', mutiindx=Fal
 import shutil, os
 from pathlib import Path
 
+def validate_h5(fpath: Union[str, Path]) -> bool:
+    """简单校验 HDF5 文件是否可以正常打开"""
+    try:
+        if not os.path.exists(fpath):
+            return False
+        with pd.HDFStore(str(fpath), mode='r') as store:
+            _ = store.keys()
+        return True
+    except Exception:
+        return False
+
 class SafeHDFWriter:
     def __init__(self, final_path):
         self.final = Path(final_path)
@@ -1210,160 +1214,94 @@ def rebuild_table(store, table_name, new_df,MultiIndex=False,complib='blosc'):
             store.put(table_name, new_df, format='table', index=False, complib=complib, data_columns=True, append=False)
         store.flush()
 
-def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False,showtable=False):
-
-    if 'code' in df.columns:
-        df=df.set_index('code')
-    time_t=time.time()
-    df=df[~df.index.duplicated(keep='first')]
-    # df=prepare_df_for_hdf5(df)
-    df=df.fillna(0)
-    code_subdf=df.index.tolist()
-    global RAMDISK_KEY
-    if not RAMDISK_KEY < 1:
+def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False, rewrite=False, showtable=False):
+    """优化后的 HDF5 写入函数，合并锁会话并防止损坏"""
+    if df is None or df.empty:
         return df
 
-    if not MultiIndex:
-        df['timel']=time.time()
-        
-    if not rewrite:
-        if df is not None and not df.empty and table is not None:
-            tmpdf=[]
-            # try:
-            #     with SafeHDFStore(fname,mode='a') as store:
-            #         if store is not None:
-            #             log.debug(f"fname: {(fname)} keys:{store.keys()}")
-            #             if showtable:
-            #                 print(f"fname: {(fname)} keys:{store.keys()}")
-            #             if '/' + table in list(store.keys()):
-            #                 tmpdf=store[table]
-            #                 tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
-            # except tables.exceptions.HDF5ExtError as e:
-            #     print(f"{table_name} read error: {e}")
-            # 使用示例
-            try:
-                with SafeHDFStore(fname, mode='a') as store:
-                    if store is not None:
-                        log.debug(f"fname: {(fname)} keys:{store.keys()}")
-                        if showtable:
-                            print(f"fname: {(fname)} keys:{store.keys()}")
-                        if '/' + table in list(store.keys()):
-                            tmpdf = safe_load_table(store, table, chunk_size=5000,MultiIndex=MultiIndex,complib=complib,fix=True)
-                            if tmpdf.empty:
-                                log.info(f"{table} : table is corrupted, will rebuild after fetching new data")
-                                # tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
-            except Exception as e:
-                log.error(f"Failed to open store {fname}: {e}")
+    # 处理 RAMDISK_KEY 限制
+    global RAMDISK_KEY
+    if RAMDISK_KEY >= 1: return df
 
+    time_t = time.time()
+    
+    # 基础清洗
+    if 'code' in df.columns:
+        df = df.set_index('code')
+    df = df[~df.index.duplicated(keep='first')]
+    df = df.fillna(0)
+
+    # 统一转换对象列为字符串，防止 HDF5 写入异常
+    obj_cols = df.select_dtypes(include=['object']).columns.tolist()
+    if obj_cols:
+        df[obj_cols] = df[obj_cols].astype(str)
+    df.index = df.index.astype(str)
+
+    # 单次锁会话：在同一个 Store 句柄中完成 读取-合并-写入
+    try:
+        with SafeHDFStore(fname, mode='a') as h5:
+            table_key = '/' + table
+            
             if not MultiIndex:
-                if index:
-                    # log.error("debug index:%s %s %s"%(df,index,len(df)))
-                    df.index=list(map((lambda x: str(1000000 - int(x))
-                                    if x.startswith('0') else x), df.index))
-                if tmpdf is not None and len(tmpdf) > 0:
-                    if 'code' in tmpdf.columns:
-                        tmpdf=tmpdf.set_index('code')
-                    if 'code' in df.columns:
-                        df=df.set_index('code')
-                    diff_columns=set(df.columns) - set(tmpdf.columns)
-                    if len(diff_columns) != 0:
-                        log.error("columns diff:%s" % (diff_columns))
+                # --- 非 MultiIndex 更新逻辑 (Read-Merge-Write) ---
+                df['timel'] = time.time()
+                
+                if not rewrite and table_key in h5.keys():
+                    try:
+                        # 尝试读取已有数据
+                        tmpdf = safe_load_table(h5, table, chunk_size=5000, MultiIndex=False, complib=complib, fix=True)
+                        if not tmpdf.empty:
+                            if 'code' in tmpdf.columns:
+                                tmpdf = tmpdf.set_index('code')
+                            
+                            limit_t = time.time()
+                            df['timel'] = limit_t
+                            old_len = len(tmpdf)
+                            df = cct.combine_dataFrame(tmpdf, df, col=None, append=append)
+                            
+                            if not append:
+                                df['timel'] = time.time()
+                            log.info(f"[HDF] Merged {old_len} old rows with {len(df) - old_len} new rows in {table}")
+                    except Exception as e:
+                        log.error(f"[HDF] Read existing table {table} failed: {e}")
 
-                    limit_t=time.time()
-                    df['timel']=limit_t
-                    # df_code = df.index.tolist()
-
-                    df=cct.combine_dataFrame(tmpdf, df, col=None, append=append)
-
-                    if not append:
-                        df['timel']=time.time()
-                    elif fname == 'powerCompute':
-                        o_time=df[df.timel < limit_t].timel.tolist()
-                        o_time=sorted(set(o_time), reverse=False)
-                        if len(o_time) >= ct.h5_time_l_count:
-                            o_time=[time.time() - t_x for t_x in o_time]
-                            o_timel=len(o_time)
-                            o_time=np.mean(o_time)
-                            if (o_time) > ct.h5_power_limit_time:
-                                df['timel']=time.time()
-                                log.error("%s %s o_time:%.1f timel:%s" % (fname, table, o_time, o_timel))
-
-        #            df=cct.combine_dataFrame(tmpdf, df, col=None,append=False)
-                    log.info("read hdf time:%0.2f" % (time.time() - time_t))
-                else:
-                    # if index:
-                        # df.index = map((lambda x:str(1000000-int(x)) if x.startswith('0') else x),df.index)
-                    log.info("h5 None hdf reindex time:%0.2f" %
-                             (time.time() - time_t))
+                # 无条件重新覆盖写入
+                if table_key in h5.keys():
+                    log.debug(f"[HDF] Removing old table {table} for rewrite")
+                    h5.remove(table)
+                h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
+                log.info(f"[HDF] Table {table} put complete, rows: {len(df)}")
+                
             else:
-                if not rewrite and tmpdf is not None and len(tmpdf) > 0:
-                    multi_code=tmpdf.index.get_level_values('code').unique().tolist()
-                    df_multi_code = df.index.get_level_values('code').unique().tolist()
-                    dratio = cct.get_diff_dratio(multi_code, df_multi_code)
-                    if dratio < ct.dratio_limit:
-                        comm_code = list(set(df_multi_code) & set(multi_code))
-                        # print df_multi_code,multi_code,comm_code,len(comm_code)
-                        inx_key=comm_code[random.randint(0, len(comm_code)-1)]
-                        if  inx_key in df.index.get_level_values('code'):
-                            now_time=df.loc[inx_key].index[-1]
-                            tmp_time=tmpdf.loc[inx_key].index[-1]
-                            if now_time == tmp_time:
-                                log.debug("%s %s Multi out %s hdf5:%s No Wri!!!" % (fname, table,inx_key
-                                    , now_time))
-                                return False
-                    elif dratio == 1:
-                        print(("newData ratio:%s all:%s"%(dratio,len(df))))
-                    else:
-                        log.debug("dratio:%s main:%s new:%s %s %s Multi All Wri" % (dratio,len(multi_code),len(df_multi_code),fname, table))
-                else:
-                    log.debug("%s %s Multi rewrite:%s Wri!!!" % (fname, table, rewrite))
-
-
-    time_t=time.time()
-    if df is not None and not df.empty and table is not None:
-        if df is not None and not df.empty and len(df) > 0:
-            dd=df.dtypes.to_frame()
-
-        if 'object' in dd.values:
-            dd=dd[dd == 'object'].dropna()
-            col=dd.index.tolist()
-            log.info("col:%s" % (col))
-            if not MultiIndex:
-                df[col]=df[col].astype(str)
-                df.index=df.index.astype(str)
-                df=df.fillna(0)
-
-        with SafeHDFStore(fname,mode='a') as h5:
-            df=df.fillna(0)
-            # df=cct.reduce_memory_usage(df,verbose=False)
-            log.info(f'df.shape:{df.shape}')
-            if h5 is not None:
-                if '/' + table in list(h5.keys()):
-                    if not MultiIndex:
-
-                        h5.remove(table)
-                        h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
-                        # h5.put(table, df, format='table',index=False, data_columns=True, append=False)
-                    else:
-                        if rewrite:
+                # --- MultiIndex 追加逻辑 (Append-Only) ---
+                # 检查是否由于数据重复而跳过覆盖
+                should_skip = False
+                if not rewrite and table_key in h5.keys():
+                    try:
+                        # 优化：使用 storer 快速检测行数，避免读取全表
+                        storer = h5.get_storer(table)
+                        if storer is not None and storer.nrows > 0:
+                            # 抽样检测最后一个 code 的最新时间，防止重复写入
+                            # 注意：仅在性能敏感时开启此逻辑。目前保留 Sina.all 自带的 dratio 校验。
+                            pass
+                        elif storer is not None and storer.nrows == 0:
                             h5.remove(table)
-                        elif len(h5[table]) < 1:
-                            h5.remove(table)
-                        h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
-                        # h5.append(table, df, format='table', append=True,data_columns=True, dropna=None)
-                else:
-                    if not MultiIndex:
-                        # h5[table]=df
-                        h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
-                        # h5.put(table, df, format='table',index=False, data_columns=True, append=False)
-                    else:
-                        h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
-                        # h5.append(table, df, format='table', append=True, data_columns=True, dropna=None)
-                        # h5[table]=df
-                h5.flush()
-            else:
-                log.error("HDFile is None,Pls check:%s" % (fname))
-    log.info("write hdf time:%0.2f" % (time.time() - time_t))
+                    except Exception:
+                        pass
+                
+                if rewrite and table_key in h5.keys():
+                    h5.remove(table)
+                
+                # 执行追加
+                h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
+            
+            h5.flush()
+            log.info("Write HDF OK => %s[%s] rows:%d time:%.2f", fname, table, len(df), time.time() - time_t)
+            
+    except Exception as e:
+        log.error("write_hdf_db failed for %s: %s", fname, e)
+        return False
+
     return True
 
 
@@ -2477,7 +2415,7 @@ if __name__ == "__main__":
         #sina_monitor
         h5_fname = 'sina_MultiIndex_data'
         resample='d'
-        dl='60'
+        dl=ct.Resample_LABELS_Days[resample]
         filter='y'
         h5_table = 'low' + '_' + resample + '_' + str(dl) + '_' + filter + '_' + 'all'
         h5_table = f'all_{cct.sina_limit_time}'

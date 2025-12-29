@@ -534,15 +534,10 @@ class StockLiveStrategy:
         
         self._last_process_time = now
         
-        # 异步执行，传递 df 的轻量副本(如果 df 很大，这依然耗时，建议只传需要的行)
-        # 这里为了简单，假设 row access 是安全的。但 df_all 在主线程可能被修改 (pandas 不是线程安全的)
-        # 最好是 copy，但 copy 耗时。
-        # 妥协：copy()
-        
-        # 提交前检查 executor 队列是否太满？Executor 不支持直接检查。
-        # 简单策略：try submit
+        # 异步执行
         self.df = df_all.copy()
-        self.executor.submit(self._check_strategies, df_all.copy())
+        logger.info(f"Strategy: Processing cycle for {len(self._monitored_stocks)} monitored stocks")
+        self.executor.submit(self._check_strategies, self.df)
 
     def _check_strategies(self, df):
         try:
@@ -665,6 +660,7 @@ class StockLiveStrategy:
 
                 # ---------- 决策引擎 ----------
                 decision = self.decision_engine.evaluate(row, snap)
+                logger.debug(f"Strategy: {code} ({data['name']}) Engine Result: {decision['action']} Score: {decision['debug'].get('实时买入分', 0)} Reason: {decision['reason']}")
                 
                 # --- 状态记忆持久化 (New) ---
                 if decision["action"] == "买入":
@@ -723,7 +719,8 @@ class StockLiveStrategy:
                     t1_prefix = "[T+1限制] " if is_t1_restricted else ""
                     combined_msgs = t1_prefix + "\n".join(list(unique_msgs.keys()) + list(last_duplicate.keys()))
 
-                    logger.debug(f"{code} messages合并: {combined_msgs}")
+                    log_msg = combined_msgs.replace('\n', ' | ')
+                    logger.info(f"Strategy ALERT: {code} ({data['name']}) Triggered. Action: {action} Msg: {log_msg}")
                     self._trigger_alert(code, data['name'], combined_msgs, action=action, price=current_price)
                     data['last_alert'] = now
 
