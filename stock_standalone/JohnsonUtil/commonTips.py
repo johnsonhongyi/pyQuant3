@@ -1671,21 +1671,25 @@ def get_last_trade_date(dt=None):
         dt = datetime.date.today().strftime('%Y-%m-%d')
     return(a_trade_calendar.get_pre_trade_date(dt))
 
-def get_lastdays_trade_date(days=10):
+def get_lastdays_trade_date(days=1, base_date=None):
+    """
+    days = 1 -> 上一个交易日
+    days = 2 -> 上两个交易日
+    """
     days = int(days)
-    if days is None:
-        dt = get_last_trade_date()
-    else:
-        today = datetime.date.today()
-        dt = (today + datetime.timedelta(-(days+1))).strftime('%Y-%m-%d')
-        duration = a_trade_calendar.get_trade_count(dt,get_today())
-        if duration > days:
-            for da in range(1,duration-days+1):
-                dt =  a_trade_calendar.get_next_trade_date(dt)
-        elif duration < days:
-            for da in range(1,days-duration+1):
-                dt =  a_trade_calendar.get_pre_trade_date(dt)
-    return(dt)
+    if days < 1:
+        raise ValueError("days must be >= 1")
+
+    if base_date is None:
+        base_date = datetime.date.today().strftime('%Y-%m-%d')
+
+    dt = base_date
+
+    for _ in range(days):
+        dt = a_trade_calendar.get_pre_trade_date(dt)
+
+    return dt
+
 
 
 def get_day_istrade_date(dt: Optional[Union[datetime.date, str]] = None) -> bool:
@@ -3059,7 +3063,7 @@ def get_work_day_idx() -> int:
     
 def last_tddate(days=1):
     return get_lastdays_trade_date(days)
-   
+
 # def last_tddate(days=1):
 #     # today = datetime.datetime.today().date() + datetime.timedelta(-days)
 #     if days is None:
@@ -3090,18 +3094,18 @@ def last_tddate(days=1):
 #         today = lastday
 #     return str(lastday)
 
-    '''
-    oday = lasd - datetime.timedelta(days)
-    day_n = int(oday.strftime("%w"))
-    # print oday,day_n
-    if day_n == 0:
-        # print day_last_week(-2)
-        return str(datetime.datetime.today().date() + datetime.timedelta(-2))
-    elif day_n == 6:
-        return str(datetime.datetime.today().date() + datetime.timedelta(-1))
-    else:
-        return str(oday)
-    '''
+'''
+oday = lasd - datetime.timedelta(days)
+day_n = int(oday.strftime("%w"))
+# print oday,day_n
+if day_n == 0:
+    # print day_last_week(-2)
+    return str(datetime.datetime.today().date() + datetime.timedelta(-2))
+elif day_n == 6:
+    return str(datetime.datetime.today().date() + datetime.timedelta(-1))
+else:
+    return str(oday)
+'''
 
 # def is_holiday(date):
 #     if isinstance(date, str):
@@ -3163,7 +3167,82 @@ def parse_date_safe(date_str):
 
     raise ValueError(f"无法识别的日期格式: {date_str}")
 
+def get_trade_day_distance(datastr, endday=None):
+    """
+    交易日“间隔数”
+    上一个交易日 -> 今天 = 1
+    """
+    if not datastr:
+        return None
+
+    datastr = str(datastr)
+    if len(datastr) < 8:
+        return None
+
+    start = parse_date_safe(datastr)
+    if start is None:
+        return None
+
+    if endday:
+        end = parse_date_safe(day8_to_day10(endday))
+    else:
+        end = parse_date_safe(get_today())
+
+    if start >= end:
+        return 0
+
+    cnt = a_trade_calendar.get_trade_count(
+        start.strftime('%Y-%m-%d'),
+        end.strftime('%Y-%m-%d')
+    )
+
+    # 关键：点位数 → 间隔数
+    return max(cnt - 1, 0)
+
+
+
 def get_today_duration(datastr, endday=None, tdx=False):
+    """
+    计算 datastr 到参考日期的自然日差
+
+    datastr : str | int
+        支持 YYYYMMDD / YYYY-MM-DD
+    endday : str | None
+        指定结束日期（YYYYMMDD / YYYY-MM-DD）
+    tdx : bool
+        是否启用 TDX 行情未收盘规则
+    """
+    if datastr is None:
+        return None
+
+    datastr = str(datastr)
+    if len(datastr) < 8:
+        return None
+
+    # 起始日期
+    last_day = parse_date_safe(datastr)
+    if last_day is None:
+        return None
+
+    # 结束日期
+    if endday:
+        today = parse_date_safe(day8_to_day10(endday))
+    else:
+        today = datetime.date.today()
+
+        if tdx:
+            is_trade_today = get_day_istrade_date()
+            last_trade_date = get_last_trade_date()
+
+            # TDX：未收盘 or 非交易日，且 datastr 是最近交易日
+            if datastr == last_trade_date:
+                if (is_trade_today and get_now_time_int() < 1500) or not is_trade_today:
+                    return 0
+
+    return (today - last_day).days
+
+
+def get_today_duration_old(datastr, endday=None, tdx=False):
     if isinstance(datastr, int):
         datastr = str(datastr)
 
@@ -3490,54 +3569,17 @@ def decode_bytes_type(data):
 global ReqErrorCount
 ReqErrorCount = 1
 def get_url_data_R(url, timeout=15,headers=None):
-    # headers = {'User-Agent':'Mozilla/5.0 (Windows; U; Windows NT 6.1; en-US; rv:1.9.1.6) Gecko/20091201 Firefox/3.5.6'}
-    # headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 6.2; rv:16.0) Gecko/20100101 Firefox/16.0',
-    #            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    #            'Connection': 'keep-alive'}
-    
-    # dictMerged2 = dict( dict1, **dict2 )
-    # headersrc = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0',
-    #        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    #        'Connection': 'keep-alive'}
-
     if headers is None:
-        # headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 6.2; rv:16.0) Gecko/20100101 Firefox/16.0',
-        #            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        #            'Connection': 'keep-alive'}
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0',
                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                    'Connection': 'keep-alive'}
-    # else:
-
-    #     headers = dict({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0',
-    #                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-    #                'Connection': 'keep-alive'},**headers)
-
-               # 'Referer':'http://vip.stock.finance.sina.com.cn'
-    # headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0',
-    #             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    #             'Accept-Language': 'zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2',
-    #             'Accept-Encoding': 'gzip, deflate',
-    #             }
-    # headers = {'Host': 'dcfm.eastmoney.com',
-    #             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0',
-    #             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-    #             'Accept-Language': 'zh-CN,zh;q=0.8,zh-TW;q=0.7,zh-HK;q=0.5,en-US;q=0.3,en;q=0.2',
-    #             'Accept-Encoding': 'gzip, deflate',
-    #             'Connection': 'keep-alive',
-    #             'Cookie': 'qgqp_b_id=91b04a5f938180fcd61ff487773f9fdd; st_si=44229608519229; st_sn=17; st_psi=20200422151145626-113300300968-3614946978; st_asi=delete; emshistory=%5B%22%E8%9E%8D%E8%B5%84%E4%BD%99%E9%A2%9D617%22%2C%22%E8%9E%8D%E8%B5%84%E4%BD%99%E9%A2%9D%22%5D; cowCookie=true; intellpositionL=1380px; intellpositionT=1085px; st_pvi=50723143362736; st_sp=2020-04-22%2013%3A25%3A58; st_inirUrl=http%3A%2F%2Figuba.eastmoney.com%2F2822094037475512'
-    #         }           
-               
     req = Request(url, headers=headers)
     req.keep_alive = False
     try:
         fp = urlopen(req, timeout=timeout)
         data = fp.read()
         fp.close()
-    # except (HTTPError, URLError) as error:
-        # log.error('Data of %s not retrieved because %s\nURL: %s', name, error, url)
     except (socket.timeout, socket.error) as e:
-        # print data.encoding
         data = ''
         log.error('socket timed out error:%s - URL %s ' % (e, url))
         if str(e).find('HTTP Error 456') >= 0:
@@ -3548,11 +3590,7 @@ def get_url_data_R(url, timeout=15,headers=None):
     except Exception as e:
         data = ''
         log.error('url Exception Error:%s - URL %s ' % (e, url))
-        # sleeprandom(60)
         sleep(30)
-    # else:
-    #     log.info('Access successful.')
-
     if isinstance(data,bytes):
         try:
             data = data.decode('utf8')
@@ -3560,9 +3598,39 @@ def get_url_data_R(url, timeout=15,headers=None):
             data = data.decode('gbk')
     return data
 
-# import urllib.request
-# import urllib.error
-# import time
+def get_url_data_requests(url, timeout=30, headers=None, retry=3):
+    """
+    使用 requests 获取 URL 内容，支持自定义 headers、超时和重试
+    """
+    if headers is None:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0'
+        }
+
+    for attempt in range(retry):
+        try:
+            response = requests.get(url, headers=headers, timeout=timeout)
+            response.raise_for_status()
+            return response.text
+        except requests.exceptions.RequestException as e:
+            log.error(f'Attempt {attempt+1}/{retry} - requests error: {e} URL: {url}')
+            # 递增等待时间
+            time.sleep(3 + attempt * 3)
+    return ''
+
+# def get_url_data_requests(url, timeout=30, retry=3):
+#     headers = {
+#         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:75.0) Gecko/20100101 Firefox/75.0'
+#     }
+#     for attempt in range(retry):
+#         try:
+#             r = requests.get(url, headers=headers, timeout=timeout)
+#             r.raise_for_status()
+#             return r.text
+#         except requests.exceptions.RequestException as e:
+#             log.error(f'Attempt {attempt+1} - requests error: {e}')
+#             time.sleep(5 + attempt * 5)
+#     return ''
 
 def urlopen_with_retry(url, max_retries=3, initial_delay=1):
     """
@@ -3864,8 +3932,8 @@ def format_func_call(func, *args, **kwargs):
     return f"{func_name}({all_args})"
 
     
-def to_mp_run_async_gpt(cmd, urllist, *args, **kwargs):
-# def to_mp_run_async(cmd, urllist, *args, **kwargs):
+# def to_mp_run_async_gpt(cmd, urllist, *args, **kwargs):
+def to_mp_run_async(cmd, urllist, *args, **kwargs):
     #gpt
     t0 = time.time()
     result = []
@@ -3876,9 +3944,12 @@ def to_mp_run_async_gpt(cmd, urllist, *args, **kwargs):
     if data_count == 0:
         return []
 
+    pool_count = min(int(cpu_count() // 1.3), max(4, data_count // 50)) #9
+
     # 少量任务直接单进程，最稳
     if data_count <= 200:
-        for c in tqdm(urllist, desc="Running", ncols=getattr(ct, 'ncols', 80)):
+        log.debug(f'code: {urllist}')
+        for c in tqdm(urllist, desc="mp_run_async-Running", ncols=getattr(ct, 'ncols', 80)):
             try:
                 r = cmd(c, **kwargs)
                 if r is not None and (not hasattr(r, 'empty') or not r.empty):
@@ -3888,7 +3959,6 @@ def to_mp_run_async_gpt(cmd, urllist, *args, **kwargs):
     else:
         # cpu_used = cpu_count() // 2 + 1 #7
         # pool_count7 = min(max(1, data_count // 100), cpu_used)   #7
-        pool_count = min(int(cpu_count() // 1.3), max(4, data_count // 50)) #9
         # pool_count7 = min(cpu_count() // 2 + 1, max(4, data_count // 60)) #7
         # log.info(f'count:{data_count} pool_count:{pool_count} pool_count5: {pool_count5} pool_count4:{pool_count4}')
         log.info(f'count:{data_count} pool_count:{pool_count}')
@@ -4037,8 +4107,8 @@ def to_mp_run_async_newOK(cmd, urllist, *args, **kwargs):
     return result
 
 # https://stackoverflow.com/questions/68065937/how-to-show-progress-bar-tqdm-while-using-multiprocessing-in-python
-# def to_mp_run_async_me_ok(cmd, urllist, *args,**kwargs):
-def to_mp_run_async(cmd, urllist, *args,**kwargs):
+def to_mp_run_async_me_ok(cmd, urllist, *args,**kwargs):
+# def to_mp_run_async(cmd, urllist, *args,**kwargs):
     result = []  
     time_s = time.time()
     # func = partial(cmd, **kwargs)
@@ -4047,18 +4117,17 @@ def to_mp_run_async(cmd, urllist, *args,**kwargs):
     urllist = list(set(urllist))
     data_count =len(urllist)
     global error_codes
-
+    cpu_used = int(cpu_count()/2)  + 1
+    pool_count = min(int(cpu_count() // 1.3), max(4, data_count // 50)) #9
     if data_count > 200:
         if int(round(data_count/100,0)) < 2:
             cpu_co = 1
         else:
             cpu_co = int(round(data_count/100,0))
-        cpu_used = int(cpu_count()/2)  + 1
         # cpu_used = int(cpu_count()) - 2
         # pool_count = min(cpu_count(), max(4, data_count // 50)) #5
         # pool_count = min(cpu_count() // 2 + 1, max(4, data_count // 80)) #4
         # pool_count = (cpu_used) if cpu_co > (cpu_used) else cpu_co
-        pool_count = min(int(cpu_count() // 1.3), max(4, data_count // 50)) #9
         log.info(f'count:{data_count} pool_count:{pool_count} cpu_co:{cpu_used}')
         # pool_count = (cpu_count()-2) if cpu_co > (cpu_count()-2) else cpu_co
         if  cpu_co > 1 and 1300 < get_now_time_int() < 1500:

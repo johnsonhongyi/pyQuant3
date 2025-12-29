@@ -8641,7 +8641,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Monitor Init Script")
 
     parser.add_argument(
-        "--log",
+        "-log",
         type=str,
         default=str(cct.loglevel).upper(),
         help="日志等级，可选：DEBUG, INFO, WARNING, ERROR, CRITICAL"
@@ -8649,26 +8649,31 @@ def parse_args():
 
     # 布尔开关参数
     parser.add_argument(
-        "--write_to_hdf",
+        "-write_to_hdf",
         action="store_true",
         help="执行 write_to_hdf() 并退出"
     )
-
+    # TDX开关参数
+    parser.add_argument(
+        "-write_today_tdx",
+        action="store_true",
+        help="执行 write_today_tdx() 并退出"
+    )
     # 布尔开关参数
     parser.add_argument(
-        "--test_single",
+        "-test_single",
         action="store_true",
         help="执行 test_single_thread() 并退出"
     )
     # 新增测试开关
     parser.add_argument(
-        "--test",
+        "-test",
         action="store_true",
         help="执行测试数据流程"
     )
 
     parser.add_argument(
-        "--cmd",
+        "-cmd",
         type=str,
         nargs='?',          # 表示参数可选
         const=COMMON_COMMANDS[0],  # 默认无值时使用第一个常用命令  # 当没有值时使用 const
@@ -8697,6 +8702,25 @@ def test_get_tdx():
     except Exception as e:
         logger.error(f"获取 {code} 数据失败: {e}", exc_info=True)
 
+def write_today_tdx():
+    global write_all_day_date
+    today = cct.get_today('')
+    if write_all_day_date == today:
+        logger.info(f'Write_market_all_day_mp 已经完成')
+        return
+    try:
+        if  cct.get_trade_date_status():
+            logger.info(f'start Write_market_all_day_mp OK')
+            tdd.Write_market_all_day_mp('all')
+            logger.info(f'run Write_market_all_day_mp OK')
+            CFG = cct.GlobalConfig(conf_ini)
+            # cct.GlobalConfig(conf_ini, write_all_day_date=20251205)
+            CFG.set_and_save("general", "write_all_day_date", today)
+        else:
+            logger.info(f"today: {today} is trade_date :{cct.get_trade_date_status()} not to Write_market_all_day_mp")
+    finally:
+        # self._task_running = False
+        pass
 def write_to_hdf():
     while 1:
         market = cct.cct_raw_input("1Day-Today check Duration Single write all TDXdata append [all,sh,sz,cyb,alla,q,n] :")
@@ -8920,6 +8944,9 @@ if __name__ == "__main__":
     # ✅ 命令行触发 write_to_hdf
     if args.write_to_hdf:
         write_to_hdf()
+        sys.exit(0)
+    if args.write_today_tdx:
+        write_today_tdx()
         sys.exit(0)
     if args.test_single:
         logger.info(f'b fetch_and_process')

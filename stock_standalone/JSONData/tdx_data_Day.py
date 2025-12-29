@@ -2671,13 +2671,12 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
             tdx_last_day = None
 
     if tdx_last_day is not None:
-        duration = cct.get_today_duration(tdx_last_day)
-
+        # duration = cct.get_today_duration(tdx_last_day)
+        duration = cct.get_trade_day_distance(tdx_last_day)
     else:
         duration = 1
-    log.debug("duration:%s" % duration)
-    log.debug("tdx_last_day:%s" % tdx_last_day)
-    log.debug("duration:%s" % duration)
+
+    log.debug(f"duration: {duration} tdx_last_day: {tdx_last_day} lastdays_trade_date: {cct.get_lastdays_trade_date(1)}" )
     if end is not None:
         # print end,df.index[-1]
         if len(df) == 0:
@@ -2689,14 +2688,14 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
         else:
             today = end
 
-    if duration > 1 and (tdx_last_day != cct.last_tddate(1)):
+    if duration > 1 and (tdx_last_day != cct.get_lastdays_trade_date(1)):
         try:
             ds = get_kdate_data(code_ts, start=tdx_last_day,
                                 end=today, index=index_status)
             if ds is None:
                 return df
             if index_status:
-                ds['volume'] = [round(x / 100,1) for x in ds['volume']]
+                ds['volume'] = [round(x / 100 /100,1) for x in ds['volume']]
             # ds['volume'] = ds.volume.apply(lambda x: x * 100)
             # ds = ts.get_h_data('000001', start=tdx_last_day, end=today,index=index_status)
             # df.index = pd.to_datetime(df.index)
@@ -2723,6 +2722,15 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
 
             ds = ds.loc[:, ['code', 'open', 'high',
                             'low', 'close', 'volume', 'amount']]
+            cols = ['code', 'open', 'high', 'low', 'close']
+            # code 通常是字符串或整数，先排除
+            num_cols = ['open', 'high', 'low', 'close']
+            # ds.loc[:, num_cols] = ds.loc[:, num_cols].round(2)
+            ds.loc[:, num_cols] = (
+                ds.loc[:, num_cols]
+                .apply(pd.to_numeric, errors='coerce')
+                .round(2)
+            )
 
             # ds.rename(columns={'volume': 'amount'}, inplace=True)
             ds.rename(columns={'volume': 'vol'}, inplace=True)
@@ -2806,7 +2814,6 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
                     return df
         dm.rename(columns={'volume': 'vol',
                            'turnover': 'amount'}, inplace=True)
-        # dm.rename(columns={'volume': 'amount', 'turnover': 'vol'}, inplace=True)
         c_name = dm.loc[code, ['name']].values[0]
         dm_code = (dm.loc[code, ['open', 'high', 'low',
                                  'close', 'amount', 'vol']]).to_frame().T
@@ -3419,10 +3426,10 @@ def check_tdx_Exp_day_duration(market='all'):
             duration_other.append(code)
     duration_zero =list(set(duration_zero))
     duration_other = list(set(duration_other))
-    print(("duration_zero:%s duration_other:%s"%(len(duration_zero),len(duration_other))))
+    log.info(("duration_zero:%s duration_other:%s"%(len(duration_zero),len(duration_other))))
     return duration_other
 
-def Write_market_all_day_mp(market='all', rewrite=False,recheck=True,detect_calc_support=False):
+def Write_market_all_day_mp(market='all', rewrite=False,recheck=False,detect_calc_support=False):
     """
     rewrite True: history date ?
     rewrite False: Now Sina date
@@ -3431,7 +3438,7 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True,detect_calc
     sh_index = '000002'
     dd = get_tdx_Exp_day_to_df(sh_index, dl=1)
 
-
+    log.info(f'check_tdx_Exp_day_duration:{market}')
     duration_code=check_tdx_Exp_day_duration(market)
 
     # print dt,dd.date
@@ -3444,7 +3451,10 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=True,detect_calc
             print("Duration:%s is OK" % (len(duration_code)))
             # return False
         else:
-            print("Write duration_code:%s " %(len(duration_code)))
+            if len(duration_code) < 10:
+                print(f"Write duration_code: {len(duration_code)} code:{duration_code}")
+            else:
+                print("Write duration_code:%s " %(len(duration_code)))
             log.info("duration to write :%s"%(len(duration_code)))
     if len(duration_code) == 0:
         dfs = search_Tdx_multi_data_duration(code_l=[sh_index],tail=1)
@@ -6903,8 +6913,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
         df = df.set_index('code')
         # df.loc[:, 'open':'amount'] = df.loc[:, 'open':'amount'].astype(float)
     # df.vol = df.vol.apply(lambda x: x / 100)
-    log.info("get_to_mp:%s" % (len(df)))
-    log.info(f"TDXTime:{time.time() - time_t:.3f}")
+    log.info(f"Get_to_mp: {len(df)} TDXTime:{time.time() - time_t:.3f}")
 
     # if power and 'op' in df.columns:
     #     df=df[df.op >10]

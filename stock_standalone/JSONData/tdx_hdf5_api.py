@@ -998,7 +998,7 @@ def write_hdf_db_safe(fname, df, table='all', index=False, complib='blosc', base
             if not MultiIndex:
                 h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
             else:
-                h5.put(table, df, format='table', index=False, append=True, complib=complib, data_columns=True)
+                h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
             h5.flush()
     log.info("Safe HDF write OK => %s[%s] rows:%s", fname, table, len(df))
     return True
@@ -1155,7 +1155,7 @@ def write_hdf_db_newbug(fname, df, table='all', index=False, complib='blosc', ba
 #     else:
 #         return pd.DataFrame()
 
-def safe_load_table(store, table_name, chunk_size=1000):
+def safe_load_table(store, table_name, chunk_size=1000,MultiIndex=False,complib='blosc'):
     """
     尝试读取 HDF5 table，如果读取失败，则逐块读取。
     返回 DataFrame。
@@ -1166,12 +1166,15 @@ def safe_load_table(store, table_name, chunk_size=1000):
         df = df[~df.index.duplicated(keep='first')]
         return df
     except tables.exceptions.HDF5ExtError as e:
-        print(f"{table_name} read error: {e}, attempting chunked read...")
+        log.error(f"{table_name} read error: {e}, attempting chunked read...")
         # 逐块读取
         dfs = []
         start = 0
         while True:
             try:
+                storer = store.get_storer(table_name)
+                if not storer.is_table:
+                    raise RuntimeError(f"{table_name} is not a table format")
                 df_chunk = store.select(table_name, start=start, stop=start+chunk_size)
                 if df_chunk.empty:
                     break
@@ -1184,21 +1187,27 @@ def safe_load_table(store, table_name, chunk_size=1000):
         if dfs:
             df = pd.concat(dfs)
             df = df[~df.index.duplicated(keep='first')]
+            rebuild_table(store, table_name, df, MultiIndex=MultiIndex, complib=complib)
             return df
         else:
             print(f"All chunks of {table_name} are corrupted")
             return pd.DataFrame()
 
-def rebuild_table(fname, table_name, new_df):
+def rebuild_table(store, table_name, new_df,MultiIndex=False,complib='blosc'):
     """
     删除旧 table 并重建
     """
-    with SafeHDFStore(fname, mode='a') as store:
-        if '/' + table_name in store.keys():
-            print(f"Removing corrupted table {table_name}")
-            store.remove(table_name)
-        if not new_df.empty:
-            store.put(table_name, new_df, format='table')
+    # with SafeHDFStore(fname, mode='a') as store:
+    if '/' + table_name in store.keys():
+        log.error(f"Removing corrupted table {table_name}")
+        store.remove(table_name)
+    if not new_df.empty:
+        # store.put(table_name, new_df, format='table',complib=complib, data_columns=True)
+        if not MultiIndex:
+            store.put(table_name, new_df, format='table', append=False, complib=complib, data_columns=True)
+        else:
+            store.put(table_name, new_df, format='table', index=False, complib=complib, data_columns=True, append=False)
+        store.flush()
 
 def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False,showtable=False):
 
@@ -1238,16 +1247,12 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                         if showtable:
                             print(f"fname: {(fname)} keys:{store.keys()}")
                         if '/' + table in list(store.keys()):
-                            tmpdf = safe_load_table(store, table, chunk_size=5000)
+                            tmpdf = safe_load_table(store, table, chunk_size=5000,MultiIndex=MultiIndex,complib=complib)
                             if tmpdf.empty:
-                                print("all_30 table is corrupted, will rebuild after fetching new data")
-                            else:
-                                # 如果需要，可以直接 rebuild 修复
-                                rebuild_table(fname, table, tmpdf)
+                                log.info(f"{table} : table is corrupted, will rebuild after fetching new data")
                                 # tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
-
             except Exception as e:
-                print(f"Failed to open store {fname}: {e}")
+                log.error(f"Failed to open store {fname}: {e}")
 
             if not MultiIndex:
                 if index:
@@ -2490,7 +2495,6 @@ if __name__ == "__main__":
     # hm5.to_hdf(r"G:\sina_MultiIndex_data_clean.h5", key="all_30/table", mode="w", format="table", complib="blosc", complevel=9)
     print(f"sina_data:{check_hdf(h5_fname='sina_data',h5_table='all')}")
     # print(f"sina_data:{check_hdf(h5_fname='tdx_all_df_300',h5_table='all')}")
-
     sina = read_sina_df(h5_fname='sina_data',h5_table='all')
     df_diagnose(sina)
     import ipdb;ipdb.set_trace()
@@ -2500,11 +2504,12 @@ if __name__ == "__main__":
     startime = None
     endtime = '15:01:00'
 
+    print('sina_MultiD_path:{sina_MultiD_path}')
     h5 = readHdf5(sina_MultiD_path)
     h5.shape
     print(h5.loc['300245'])
     df_diagnose(h5)
-    
+
     mdf = cct.get_limit_multiIndex_freq(h5, freq=freq.upper(),  col='all', start=startime, end=endtime, code=None)
     print(mdf.loc['300245'])
     print(mdf.loc['300516'])
