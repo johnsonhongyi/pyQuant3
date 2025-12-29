@@ -2181,35 +2181,35 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         # So we must NOT use the first column name 'code' for reading.
         
         file_cols = ct.TDX_Day_columns[1:] # Exclude 'code'
-        # df = pd.read_csv(
-        #     file_path, 
-        #     names=file_cols, 
-        #     header=None, 
-        #     index_col=False, 
-        #     # usecols=range(len(file_cols)), # Only read the first len(file_cols) columns (0 to 6)
-        #     engine='c',
-        #     encoding='gb18030', # Use broadly compatible encoding
-        #     encoding_errors='replace', # Ignore encoding errors
-        #     on_bad_lines='skip', 
-        # )
+        df = pd.read_csv(
+            file_path, 
+            names=file_cols, 
+            header=None, 
+            index_col=False, 
+            # usecols=range(len(file_cols)), # Only read the first len(file_cols) columns (0 to 6)
+            engine='c',
+            encoding='gb18030', # Use broadly compatible encoding
+            encoding_errors='replace', # Ignore encoding errors
+            on_bad_lines='skip', 
+        )
 
         # # 倒序取最后 dl+3 行
         # df = df.iloc[-(dl+3):].iloc[::-1].reset_index(drop=True)
 
-        # 用 deque 高效读取文件尾 dl+1 行
-        with open(file_path, 'r', encoding='gb18030', errors='replace') as f:
-            last_lines = deque(f, maxlen=dl+1)
+        # # 用 deque 高效读取文件尾 dl+1 行
+        # with open(file_path, 'r', encoding='gb18030', errors='replace') as f:
+        #     last_lines = deque(f, maxlen=dl+1)
 
-        df = pd.read_csv(
-            pd.io.common.StringIO(''.join(last_lines)),
-            names=file_cols,
-            header=None,
-            index_col=False,
-            engine='c',
-            on_bad_lines='skip'
-        )
-        # 倒序
-        df = df.iloc[::-1].reset_index(drop=True)
+        # df = pd.read_csv(
+        #     pd.io.common.StringIO(''.join(last_lines)),
+        #     names=file_cols,
+        #     header=None,
+        #     index_col=False,
+        #     engine='c',
+        #     on_bad_lines='skip'
+        # )
+        # # 倒序
+        # df = df.iloc[::-1].reset_index(drop=True)
         # t1 = time.time()
         
         # Ensure numeric columns are numeric (coerce errors to NaN)

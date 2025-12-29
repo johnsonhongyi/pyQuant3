@@ -574,7 +574,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.save_feedback(feedback_data)
         
         # Close
-        self.destroy()
+        # self.destroy()
 
     def save_feedback(self, data):
         if not data: return
