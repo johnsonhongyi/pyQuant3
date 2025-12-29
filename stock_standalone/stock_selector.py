@@ -5,6 +5,7 @@ import os
 import sys
 import datetime
 import logging
+import sqlite3
 from typing import List, Dict, Any, Optional
 
 # 添加项目根目录到路径
@@ -26,7 +27,8 @@ class StockSelector:
     1. 读取 g:\\top_all.h5 数据
     2. 基于技术指标筛选强势股 (趋势、量能、结构)
     3. 生成筛选日志，用于后续分析优化
-    """
+    """
+
     # def __init__(self, log_path="selection_log.csv", df: Optional[pd.DataFrame] = None):
     def __init__(self, df: Optional[pd.DataFrame] = None):
         self.data_path = r'g:\top_all.h5'
@@ -87,17 +89,38 @@ class StockSelector:
         
         return df
 
+    def get_historical_selected_codes(self, days: int = 5) -> Dict[str, int]:
+        """获取过去 N 天被选中的股票频次"""
+        if self.db_logger is None:
+            return {}
+        
+        try:
+            # 获取最近 N 天的所有记录
+            # 简单起见，从 signal_history 或 selection_history 中取
+            # 这里使用 selection_history 比较贴切
+            conn = sqlite3.connect(self.db_logger.db_path)
+            query = f"SELECT code, COUNT(*) as cnt FROM selection_history WHERE date >= date('now', '-{days} days') AND date < date('now') GROUP BY code"
+            df_hist = pd.read_sql_query(query, conn)
+            conn.close()
+            return dict(zip(df_hist['code'], df_hist['cnt']))
+        except Exception as e:
+            self.logger.error(f"获取历史选股统计失败: {e}")
+            return {}
+
     def filter_strong_stocks(self, df: pd.DataFrame) -> pd.DataFrame:
-        """执行筛选逻辑"""
+        """执行优化后的筛选逻辑"""
         if df.empty:
             return df
 
-        # 1. 基础过滤 (非停牌，非极小盘，成交额需大于 5000万 确保流动性)
-        df_active = df[(df['volume'] > 0) & (df['amount'] > 50000000)].copy()
+        # 1. 基础过滤 (非停牌，成交额需大于 8000万 提高流动性门槛)
+        df_active = df[(df['volume'] > 0) & (df['amount'] > 80000000)].copy()
         if df_active.empty:
-            self.logger.info("无活跃且成交额达标的股票")
+            self.logger.info("无满足基础流动性要求的股票 (amount > 80M)")
             return pd.DataFrame()
         
+        # 获取历史选股频次
+        hist_counts = self.get_historical_selected_codes(days=5)
+
         # --- Pre-calculate Market Hot Concepts ---
         concept_dict = {}
         for _, row in df_active.iterrows():
@@ -108,77 +131,66 @@ class StockSelector:
             for c in cats:
                 concept_dict.setdefault(c, []).append(pct)
         
-        # Calculate avg percent and filter valid concepts (e.g. at least 3 stocks)
         concept_scores = []
         for c, pcts in concept_dict.items():
-            if len(pcts) >= 3: # Min 3 stocks in concept
+            if len(pcts) >= 3: 
                 avg = sum(pcts) / len(pcts)
-                # Count positive ratio or just use avg
                 concept_scores.append((c, avg))
         
-        # Get Top 20 concepts
         concept_scores.sort(key=lambda x: x[1], reverse=True)
-        top_concepts = set([x[0] for x in concept_scores[:20]])
+        top_concepts = set([x[0] for x in concept_scores[:15]]) # 缩小到 Top 15
         self.logger.info(f"Top 5 Concepts: {[x[0] for x in concept_scores[:5]]}")
 
         selected_records = []
         today = datetime.datetime.now().strftime("%Y-%m-%d")
 
         for code, row in df_active.iterrows():
-            # 将 Series 转为 dict 方便处理
             data = row.to_dict()
             code_str = str(code).zfill(6)
             data['code'] = code_str
             
-            # --- 筛选核心逻辑 ---
-            # 利用 data_utils.py 生成的预处理字段: upper1d, lastp1d, lastl1d 等
-            
             reason = []
             score = 0
             
+            # --- 预设默认值避免 UnboundError ---
+            ma5 = ma10 = ma20 = 0.0
+            price = 0.0
+            amount = 0.0
+            ratio = 0.0
+            is_pullback = False
+
             # A. 趋势判断
             try:
-                # 动态获取最近 N 天的 upper 和 close 与当前价格比较
-                # cct.compute_lastdays 是预定义的天数，例如 5
-                
                 ma5 = float(data.get('ma5d', 0))
                 ma10 = float(data.get('ma10d', 0))
                 ma20 = float(data.get('ma20d', 0)) 
                 price = float(data.get('trade', data.get('close', 0.0))) 
+                amount = float(data.get('amount', 0))
                 
-                # 1. 均线状态与斜率
-                if ma5 > 0 and ma10 > 0:
-                    ma5_1d = float(data.get('ma5d', 0)) 
-                    # 检查 MA5 是否向上偏转
-                    if price > ma5 and ma5 > ma10:
+                # 1. 均线状态：三线顺排是强势基础
+                if ma5 > 0 and ma10 > 0 and ma20 > 0:
+                    if ma5 > ma10 > ma20:
+                        score += 15
+                        reason.append("三线多排")
+                    elif ma5 > ma10:
                         score += 5
-                        if ma5 > ma5_1d > 0:
-                            score += 5
-                            reason.append("趋势向上")
-                        else:
-                            reason.append("均线多排")
-                        
-                        if ma20 > 0 and ma10 > ma20:
-                            score += 10
-                            reason.append("中期强势")
+                        reason.append("均线多排")
 
-                    # 2. 突破判断
-                    upper1d = float(data.get('upper1d', 0))
-                    if upper1d > 0 and price > upper1d:
-                        ratio = float(data.get('ratio', 1.0))
-                        if ratio > 1.2:
-                            score += 20
-                            reason.append("放量突破")
-                        else:
-                            score += 10
-                            reason.append("缩量尝试突破")
+                # 2. 突破历史高点判断
+                upper1d = float(data.get('upper1d', 0))
+                if upper1d > 0 and price > upper1d:
+                    ratio = float(data.get('ratio', 1.0))
+                    if ratio > 1.5: # 适度放量突破
+                        score += 25
+                        reason.append("放量突破")
+                    else:
+                        score += 10
+                        reason.append("尝试突破")
 
-                # 3. 动能：N连涨 + 价格结构
+                # 3. 动能：连涨逻辑
                 limit_days = getattr(cct, 'compute_lastdays', 5)
                 consecutive_rise = 0
-                
                 lastp1d = float(data.get('lastp1d', 0))
-                
                 if lastp1d > 0 and price > lastp1d:
                     consecutive_rise += 1
                     for d in range(1, limit_days):
@@ -193,59 +205,49 @@ class StockSelector:
                     score += consecutive_rise * 5 
                     reason.append(f"{consecutive_rise}连涨")
                 
-                # 4. 回调买点判断 (价格回调至 MA5/MA10 附近且量能萎缩)
+                # 4. 回调买点 (缩量企稳)
                 is_pullback = False
-                if ma5 > 0 and 0 < (price - ma5) / ma5 < 0.015: 
+                if ma5 > 0 and 0 < (price - ma5) / ma5 < 0.012: 
                     ratio = float(data.get('ratio', 1.0))
-                    if ratio < 0.9: # 明确缩量
+                    if ratio < 1.0 and price >= ma5: # 缩量且守住 MA5
                         score += 20
-                        reason.append("缩量回踩")
+                        reason.append("缩量企稳")
                         is_pullback = True
                 
-                # 5. 极度活跃 (成交额 > 3亿)
+                # 5. 资金强度 (成交额权重)
                 amount = float(data.get('amount', 0))
-                if amount > 300000000:
-                    score += 10
-                    reason.append("资金活跃")
-
-                # --- 动态生成操作建议 (Advice) ---
-                advice = []
-                if is_pullback:
-                    advice.append("建议:回踩买入")
-                elif "放量突破" in reason:
-                    advice.append("建议:强势追涨")
-                elif "缩量尝试突破" in reason:
-                    advice.append("建议:观察量能配合")
-                elif consecutive_rise >= 4:
-                    advice.append("建议:高位减仓")
-                elif "均线多排" in reason and len(reason) == 1:
-                    # 仅有多头而无其他动能，降级处理
-                    score -= 5
-                
-                if advice:
-                    reason.extend(advice)
+                if amount > 500000000: # 5亿以上大资金
+                    score += 15
+                    reason.append("主力活跃")
+                elif amount > 200000000:
+                    score += 5
 
             except Exception as e:
                 self.logger.error(f"Error filtering {code}: {e}")
 
-            # B. 形态判断 (N日新高 / 突破)
+            # B. 今日涨跌与量能精细判断
             pct = float(data.get('percent', 0))
-            if pct > 3.0:
-                score += 10
-            if pct > 9.0: 
-                score += 5
-                reason.append("涨停冲击")
-            
-            # C. 量能判断
             ratio = float(data.get('ratio', 0))
-            if 3 < ratio < 15:
-                score += 10
-            elif ratio > 15:
-                score += 5
-                reason.append("放量")
             
-            # D. 板块效应 (Concept/Category Analysis)
-            # Check if stock belongs to top performing sectors
+            # 优选 3% - 8% 的稳健涨幅，避免已涨停难以介入，也避免冲高回落
+            if 3.0 <= pct <= 8.5:
+                score += 15
+                if ratio > 1.2: score += 10 # 量价齐升
+            elif pct > 9.5:
+                score += 10
+                reason.append("冲击涨停")
+            elif -2.0 <= pct < 2.0 and is_pullback:
+                score += 10 # 强势回调震荡
+            
+            # C. 放量情况 (量比)
+            if 1.5 < ratio < 4.0: # 健康放量
+                score += 15
+                reason.append("健康放量")
+            elif ratio >= 4.0: # 巨量
+                score += 10
+                reason.append("巨量成交")
+            
+            # D. 板块效应
             stock_cats = []
             raw_c_val = data.get('category', '')
             if pd.notna(raw_c_val) and str(raw_c_val).lower() != 'nan':
@@ -253,19 +255,38 @@ class StockSelector:
             
             strong_sector_hit = [c for c in stock_cats if c in top_concepts]
             if strong_sector_hit:
-                score += 10 * len(strong_sector_hit)
-                reason.append(f"热点:{strong_sector_hit[0]}") # 仅显示最强一个增加辨识度
+                score += 10 
+                reason.append(f"热点:{strong_sector_hit[0]}")
 
-            # D. 利用 Decision Engine (如果可用)
-            if self.decision_engine:
-                 pass
+            # E. 历史对比：标签化
+            hist_cnt = hist_counts.get(code_str, 0)
+            status_tag = ""
+            if hist_cnt >= 3:
+                score += 20
+                reason.append("多日持续强势")
+                status_tag = "持续型"
+            elif hist_cnt == 0 and score > 40:
+                score += 10
+                reason.append("新晋热股")
+                status_tag = "新晋型"
+            elif hist_cnt > 0:
+                score += 5
+                reason.append("反复走强")
+                status_tag = "反复型"
 
-            # 阈值筛选 (必须有明确理由且分值达标)
-            if score >= 30 and reason: 
-                # 理由去重并保持顺序
+            # 最终筛选阈值提高 (score >= 45)
+            if score >= 45 and reason: 
                 reason = list(dict.fromkeys(reason))
                 
-                # 优化建议排序，确保“建议”在最后
+                # 自动生成建议
+                if is_pullback and pct < 2:
+                    reason.append("建议:低吸关注")
+                elif "放量突破" in reason and pct > 4:
+                    reason.append("建议:右侧追入")
+                elif hist_cnt >= 3 and pct > 0:
+                    reason.append("建议:强者恒强")
+                
+                # 拼接理由
                 advices = [r for r in reason if r.startswith("建议:")]
                 others = [r for r in reason if not r.startswith("建议:")]
                 final_reason = "|".join(others + advices)
@@ -277,25 +298,24 @@ class StockSelector:
                     'score': score,
                     'price': price,
                     'percent': pct,
+                    'ratio': ratio,
                     'volume': float(data.get('volume', 0)),
+                    'amount': amount,
                     'reason': final_reason,
+                    'status': status_tag,
                     'ma5': ma5,
                     'ma10': ma10,
-                    'category': str(data.get('category', '')) if pd.notna(data.get('category')) else ''
+                    'category': "|".join(stock_cats[:3])
                 }
                 selected_records.append(record)
 
-        # 转换为 DataFrame
         df_selected = pd.DataFrame(selected_records)
         if not df_selected.empty:
-            # 统计同类型理由的数量，便于优先级查找
-            reason_counts = df_selected['reason'].value_counts().to_dict()
-            df_selected['reason'] = df_selected['reason'].apply(lambda x: f"{x} [同类:{reason_counts.get(x, 0)}]")
+            # 理由去重
+            df_selected.sort_values(by=['score', 'amount'], ascending=False, inplace=True)
+            self.logger.info(f"筛选完成，命中 {len(df_selected)} 只股票 (阈值>=45)")
             
-            df_selected.sort_values(by='score', ascending=False, inplace=True)
-            self.logger.info(f"筛选完成，命中 {len(df_selected)} 只股票")
-            
-            # 保存日志 (升级为 SQLite)
+            # 保存日志
             self.save_selection_log(df_selected)
             
         return df_selected

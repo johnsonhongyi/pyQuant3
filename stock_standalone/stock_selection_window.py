@@ -146,7 +146,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
         # --- Main List ---
         # Columns
-        columns = ("code", "name", "score", "price", "percent", "连阳涨幅", "win", "volume", "category", "auto_reason", "user_status", "user_reason")
+        columns = ("code", "name", "status", "score", "price", "percent", "ratio", "amount", "连阳涨幅", "win", "volume", "category", "auto_reason", "user_status", "user_reason")
         
         tree_frame = tk.Frame(self)
         tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
@@ -168,26 +168,30 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         
         # Headings
         headers = {
-            "code": "代码", "name": "名称", "score": "机选分", 
-            "price": "现价", "percent": "涨幅%", "连阳涨幅": "连阳涨幅","win":"win","volume": "成交量",
+            "code": "代码", "name": "名称", "status": "类型", "score": "分值", 
+            "price": "现价", "percent": "涨幅%", "ratio": "量比", "amount": "成交额",
+            "连阳涨幅": "连阳", "win": "胜率", "volume": "成交量",
             "category": "板块/概念",
-            "auto_reason": "机选理由", "user_status": "人工状态", "user_reason": "人工理由"
+            "auto_reason": "机选理由", "user_status": "复核状态", "user_reason": "复核标注"
         }
         
         for col, text in headers.items():
             self.tree.heading(col, text=text, command=lambda c=col: self.sort_tree(c, False))
             self.tree.column(col, anchor="center")
 
-        # Column Configurations (Default initial widths)
+        # Column Configurations
         self.tree.column("code", width=70, minwidth=60, stretch=False)
         self.tree.column("name", width=80, minwidth=70, stretch=False)
-        self.tree.column("score", width=60, minwidth=50, stretch=False)
+        self.tree.column("status", width=60, minwidth=50, stretch=False)
+        self.tree.column("score", width=50, minwidth=40, stretch=False)
         self.tree.column("price", width=70, minwidth=60, stretch=False)
         self.tree.column("percent", width=70, minwidth=60, stretch=False)
-        self.tree.column("连阳涨幅", width=80, minwidth=60, stretch=False)
+        self.tree.column("ratio", width=60, minwidth=50, stretch=False)
+        self.tree.column("amount", width=80, minwidth=70, stretch=False)
+        self.tree.column("连阳涨幅", width=60, minwidth=50, stretch=False)
         self.tree.column("win", width=40, minwidth=30, stretch=False)
         self.tree.column("volume", width=90, minwidth=80, stretch=False)
-        self.tree.column("category", width=160, minwidth=100, stretch=True)
+        self.tree.column("category", width=140, minwidth=100, stretch=True)
         self.tree.column("auto_reason", width=260, minwidth=150, stretch=True)
         self.tree.column("user_status", width=80, minwidth=60, stretch=False)
         self.tree.column("user_reason", width=150, minwidth=100, stretch=True)
@@ -278,9 +282,13 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 if user_status == "选中": tag = "selected"
                 elif user_status == "丢弃": tag = "ignored"
 
+                amount_raw = float(row.get('amount', 0))
+                amount_str = f"{amount_raw/100000000:.2f}亿" if amount_raw >= 100000000 else f"{amount_raw/10000:.0f}万"
+
                 self.tree.insert("", "end", iid=row['code'], values=(
-                    row['code'], row['name'], row['score'], row['price'], 
-                    row['percent'], row.get('连阳涨幅', 0),row.get('win', 0), row['volume'], row.get('category', ''), row['reason'], 
+                    row['code'], row['name'], row.get('status', ''), row['score'], row['price'], 
+                    f"{row['percent']:.2f}", f"{row.get('ratio', 0):.2f}", amount_str,
+                    row.get('连阳涨幅', 0), row.get('win', 0), row['volume'], row.get('category', ''), row['reason'], 
                     user_status, user_reason
                 ), tags=(tag,))
             
@@ -484,8 +492,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             cur_values = self.tree.item(item_id, "values")
             # Create new values tuple
             new_values = list(cur_values)
-            new_values[10] = status
-            new_values[11] = reason
+            new_values[13] = status
+            new_values[14] = reason
             
             self.tree.item(item_id, values=new_values, tags=(tag,))
             
@@ -507,8 +515,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             values = self.tree.item(item_id, "values")
             code = values[0]
             name = values[1]
-            status = values[10]
-            user_reason = values[11]
+            status = values[13]
+            user_reason = values[14]
             
             # 只要不是默认状态，就记录反馈以便优化
             if status != "待定":
@@ -516,14 +524,14 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                     "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "code": code,
                     "name": name,
-                    "auto_score": values[2],
-                    "auto_reason": values[9],
+                    "auto_score": values[3],
+                    "auto_reason": values[12],
                     "user_status": status,
                     "user_reason": user_reason
                 })
             
             if status == "选中":
-                price = values[3]
+                price = values[4]
                 to_import.append((code, name, price))
         
         if not to_import:
