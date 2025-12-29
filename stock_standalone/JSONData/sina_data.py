@@ -355,7 +355,6 @@ class Sina:
         # 1. 尝试从 HDF5 加载历史数据
         sina_limit_time_val: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
         h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=sina_limit_time_val)
-        
         if h5 is not None and len(h5) > 0:
             # 基础预处理
             if 'ticktime' in h5.columns:
@@ -447,7 +446,7 @@ class Sina:
             request_list = ','.join(self.stock_with_exchange_list[num_end:])
             self.stock_list.append(request_list)
             self.request_num += 1
-            
+        
         df = self.get_stock_data()
         
         if df is None or len(df) == 0:
@@ -1036,25 +1035,30 @@ class Sina:
         logtime = cct.get_config_value_ramfile('sina_logtime')
         otime =  cct.get_config_value_ramfile('sina_logtime',int_time=True)
 
+        
         if now_time_int > 925 and (not index and len(df) > 3000 and ( cct.get_work_time(otime) or cct.get_work_time())):
             time_s = time.time()
-            df.ticktime = df.dt.astype(str) + ' ' + df.ticktime.astype(str)
-            df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S', errors='coerce')
+            df.index = df.index.astype(str)
+            df.ticktime = df.ticktime.astype(str)
+            df.ticktime = list(map(lambda x, y: str(x) + ' ' + str(y), df.dt, df.ticktime))
+            df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S')
 
             if logtime == 0:
                 cct.get_config_value_ramfile('sina_logtime',currvalue=time.time(),xtype='time',update=True)
-                df['lastbuy'] = np.where(df['close'] == 0, df['llastp'], df['close'])
+                df['lastbuy'] = (list(map(lambda x, y: y if int(x) == 0 else x,
+                                          df['close'].values, df['llastp'].values)))
                 cct.GlobalValues().setkey('lastbuydf', df['lastbuy']) 
 
             else:
                 if (cct.GlobalValues().getkey('lastbuylogtime') is not None ) or self.lastbuy_timeout_status(logtime):
                     cct.get_config_value_ramfile('sina_logtime',currvalue=time.time(),xtype='time',update=True)
-                    df['lastbuy'] = np.where(df['close'] == 0, df['llastp'], df['close'])
+                    df['lastbuy'] = (list(map(lambda x, y: y if int(x) == 0 else x,
+                                              df['close'].values, df['llastp'].values)))
                     cct.GlobalValues().setkey('lastbuylogtime', None) 
                     cct.GlobalValues().setkey('lastbuydf', df['lastbuy']) 
                 else:
                     df = self.combine_lastbuy(df)
-
+                            
             df_mi = df.copy()
             if 'code' not in df_mi.columns:
                 df_mi = df_mi.reset_index()
@@ -1064,7 +1068,9 @@ class Sina:
                 df_mi['lastbuy'] = df_mi['close'] if 'close' in df_mi.columns else 0
             
             df_mi_write = df_mi.loc[:, [c for c in mi_cols if c in df_mi.columns]]
-            
+            # 直接 reindex 取需要的列
+            # df_mi_write = df_mi.reindex(columns=[c for c in mi_cols if c in df_mi.columns])
+
             if isinstance(df_mi_write.index, pd.RangeIndex):
                 if 'code' in df_mi_write.columns and 'ticktime' in df_mi_write.columns:
                      df_mi_write = df_mi_write.set_index(['code', 'ticktime'])
@@ -1391,9 +1397,9 @@ if __name__ == "__main__":
     # print((sina.get_stock_code_data('300107').T))
 
     df =sina.all
-
-    print(df.loc['920274'][['close','nclose','nlow','nhigh']])
-    print(df.loc['920274'][['close','nclose','nlow','nhigh']])
+    print(f'ticktime: {df.ticktime[:5]}')    
+    # print(df.loc['920274'][['close','nclose','nlow','nhigh']])
+    # print(df.loc['920274'][['close','nclose','nlow','nhigh']])
     # print(df.loc['300245'].close.mean())
     import ipdb;ipdb.set_trace()
     

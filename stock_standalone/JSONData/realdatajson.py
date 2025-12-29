@@ -1353,9 +1353,11 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
     loop = asyncio.get_event_loop()
 
     for i in range(0, len(url_list), batch_size):
+        log.debug(f"Processing batch {i//batch_size + 1} / {len(url_list)//batch_size + 1}")
         tasks = [_fetch_with_delay(u, pause_range) for u in url_list[i:i + batch_size]]
         try:
             rs = loop.run_until_complete(asyncio.gather(*tasks))
+            log.debug(f"Batch {i//batch_size + 1} completed")
         except Exception as e:
             set_blocked(120, f"batch error:{e}")
             break

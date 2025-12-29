@@ -8643,7 +8643,7 @@ def parse_args():
     parser.add_argument(
         "--log",
         type=str,
-        default="INFO",
+        default=str(cct.loglevel).upper(),
         help="日志等级，可选：DEBUG, INFO, WARNING, ERROR, CRITICAL"
     )
 

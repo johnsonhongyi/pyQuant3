@@ -30,6 +30,31 @@ import psutil
 
 from contextlib import contextmanager
 
+from datetime import datetime
+
+def normalize_ticktime(df, default_date=None):
+    """
+    将 ticktime 列统一为 datetime64[ns]
+    - df: 包含 ticktime 列的 DataFrame
+    - default_date: 如果时间缺少日期，使用这个日期，默认今天
+    """
+    if default_date is None:
+        default_date = datetime.today().strftime('%Y-%m-%d')
+    
+    def parse_ticktime(val):
+        # 如果是完整日期时间字符串，直接解析
+        try:
+            return pd.to_datetime(val)
+        except Exception:
+            # 如果是时间字符串，拼接默认日期再解析
+            return pd.to_datetime(f"{default_date} {val}")
+
+    df['ticktime'] = df['ticktime'].apply(parse_ticktime)
+    return df
+
+# 使用方法
+# df = normalize_ticktime(df)
+
 # class SafeHDFStore_timed_ctx(pd.HDFStore):
 class SafeHDFStore(pd.HDFStore):
     def __init__(self, fname, mode='a', **kwargs):
@@ -1112,6 +1137,68 @@ def write_hdf_db_newbug(fname, df, table='all', index=False, complib='blosc', ba
              table, len(df), time.time() - time_t)
     return df
 
+# def read_hdf_safe(store, table_name, chunk_size=1000):
+#     dfs = []
+#     start = 0
+#     while True:
+#         try:
+#             df_chunk = store.select(table_name, start=start, stop=start+chunk_size)
+#             if df_chunk.empty:
+#                 break
+#             dfs.append(df_chunk)
+#             start += chunk_size
+#         except tables.exceptions.HDF5ExtError as e:
+#             print(f"Chunk read error at rows {start}-{start+chunk_size}: {e}")
+#             start += chunk_size  # 跳过损坏 chunk
+#     if dfs:
+#         return pd.concat(dfs)
+#     else:
+#         return pd.DataFrame()
+
+def safe_load_table(store, table_name, chunk_size=1000):
+    """
+    尝试读取 HDF5 table，如果读取失败，则逐块读取。
+    返回 DataFrame。
+    """
+    try:
+        # 直接读取整个 table
+        df = store[table_name]
+        df = df[~df.index.duplicated(keep='first')]
+        return df
+    except tables.exceptions.HDF5ExtError as e:
+        print(f"{table_name} read error: {e}, attempting chunked read...")
+        # 逐块读取
+        dfs = []
+        start = 0
+        while True:
+            try:
+                df_chunk = store.select(table_name, start=start, stop=start+chunk_size)
+                if df_chunk.empty:
+                    break
+                dfs.append(df_chunk)
+                start += chunk_size
+            except tables.exceptions.HDF5ExtError:
+                # 跳过损坏块
+                print(f"Skipping corrupted chunk {start}-{start+chunk_size}")
+                start += chunk_size
+        if dfs:
+            df = pd.concat(dfs)
+            df = df[~df.index.duplicated(keep='first')]
+            return df
+        else:
+            print(f"All chunks of {table_name} are corrupted")
+            return pd.DataFrame()
+
+def rebuild_table(fname, table_name, new_df):
+    """
+    删除旧 table 并重建
+    """
+    with SafeHDFStore(fname, mode='a') as store:
+        if '/' + table_name in store.keys():
+            print(f"Removing corrupted table {table_name}")
+            store.remove(table_name)
+        if not new_df.empty:
+            store.put(table_name, new_df, format='table')
 
 def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False,showtable=False):
 
@@ -1132,15 +1219,35 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
     if not rewrite:
         if df is not None and not df.empty and table is not None:
             tmpdf=[]
+            # try:
+            #     with SafeHDFStore(fname,mode='a') as store:
+            #         if store is not None:
+            #             log.debug(f"fname: {(fname)} keys:{store.keys()}")
+            #             if showtable:
+            #                 print(f"fname: {(fname)} keys:{store.keys()}")
+            #             if '/' + table in list(store.keys()):
+            #                 tmpdf=store[table]
+            #                 tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
+            # except tables.exceptions.HDF5ExtError as e:
+            #     print(f"{table_name} read error: {e}")
+            # 使用示例
+            try:
+                with SafeHDFStore(fname, mode='a') as store:
+                    if store is not None:
+                        log.debug(f"fname: {(fname)} keys:{store.keys()}")
+                        if showtable:
+                            print(f"fname: {(fname)} keys:{store.keys()}")
+                        if '/' + table in list(store.keys()):
+                            tmpdf = safe_load_table(store, table, chunk_size=5000)
+                            if tmpdf.empty:
+                                print("all_30 table is corrupted, will rebuild after fetching new data")
+                            else:
+                                # 如果需要，可以直接 rebuild 修复
+                                rebuild_table(fname, table, tmpdf)
+                                # tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
 
-            with SafeHDFStore(fname,mode='a') as store:
-                if store is not None:
-                    log.debug(f"fname: {(fname)} keys:{store.keys()}")
-                    if showtable:
-                        print(f"fname: {(fname)} keys:{store.keys()}")
-                    if '/' + table in list(store.keys()):
-                        tmpdf=store[table]
-                        tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
+            except Exception as e:
+                print(f"Failed to open store {fname}: {e}")
 
             if not MultiIndex:
                 if index:
@@ -1404,7 +1511,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
 
     df = None
     dd = None
-
     # -------------------------
     # When filtering by code list
     # -------------------------
@@ -1414,6 +1520,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                 if store is not None:
                     keys = store.keys()
                     log.debug("HDF5 file: %s, keys: %s", fname, keys)
+                    
                     if showtable:
                         log.debug("HDF5 file %s contents keys: %s", fname, keys)
                     try:
@@ -1427,7 +1534,7 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                                 dd = obj
                                 log.debug("Loaded DataFrame shape: %s", dd.shape)
                                 # 可选：显示前几行预览
-                                log.debug("DataFrame preview:\n%s", dd.head())
+                                log.debug("DataFrame preview:\n%s", dd.head(2))
                             else:
                                 log.error(
                                     "Unexpected object type from HDF5: %s, key: %s, fname: %s",
@@ -1464,6 +1571,20 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                     # 保持原变量名 dif_co（列表形式）以兼容后续逻辑
                     dif_co = list(dif_index)
 
+                    # try:
+                    #     # 强制统一类型为字符串
+                    #     dd_list = dd.index.tolist()
+                    #     dd_set   = set(map(str, dd_list))
+                    #     code_set = set(map(str, code_l))
+                    #     dif_index = code_set - dd_set
+                    # except Exception:
+                    #     # 兼容性回退（极少见）
+                    #     dif_index = pd.Index(list(set(dd_index_str) & set(code_l_str)))
+
+                    # # 保持原变量名 dif_co（列表形式）以兼容后续逻辑
+
+                    # dif_co = list(dif_index)
+
                     if len(code_l) > 0:
                         dratio = (float(len(code_l)) - float(len(dif_co))) / float(len(code_l))
                     else:
@@ -1493,8 +1614,10 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
 
                         if len(dd) > 0:
                             l_time = np.mean(o_time) if len(o_time) > 0 else 0.0
-
+                            # dd = normalize_ticktime(dd)
+                            # log.info(f'dd normalize_ticktime:{dd.ticktime[0]}')
                             # 原先在极高命中率时用 ticktime 重新计算 dratio
+                            # print(f"ticktime: {dd['ticktime'][:5]} , l_time: {l_time} limit_time: {limit_time}")
                             if len(code_l) / len(dd) > 0.95 and 'ticktime' in dd.columns and 'kind' not in dd.columns:
                                 try:
                                     late_count = int((dd['ticktime'] >= "15:00:00").sum())
