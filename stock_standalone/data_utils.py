@@ -1230,7 +1230,10 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             gc.collect()
             cct.print_timing_summary()
             cct.df_memory_usage(df_all)
-            logger.info(f'process now: {cct.get_now_time_int()} resample Main:{len(df_all)} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+            if logger.level <= LoggerFactory.INFO:
+                logger.info(f'process now: {cct.get_now_time_int()} resample Main:{len(df_all)} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+            else:
+                print(f'process now: {cct.get_now_time_int()} resample Main:{len(df_all)} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
             if cct.get_now_time_int() < 945:
                 sleep_step = 0.5
             else:
@@ -1239,7 +1242,7 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             loop_sleep_time = duration_sleep_time
             if 915 < cct.get_now_time_int() < 925:
                 loop_sleep_time = int(duration_sleep_time/2)
-            logger.info(f'loop_sleep_time: {loop_sleep_time}')
+            # logger.info(f'loop_sleep_time: {loop_sleep_time}')
             for _ in range(loop_sleep_time):
                 if not flag.value:
                     break

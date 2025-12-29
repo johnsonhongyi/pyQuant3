@@ -148,7 +148,7 @@ def print_timing_summary(top_n=5, unit="ms"):
     # 按平均耗时排序
     summary_sorted = sorted(summary, key=lambda x: x["mean"], reverse=True)
 
-    print(f"{'Function':40} {'count':>6} {'mean':>10} {'max':>10} {'p95':>10}")
+    print(f"\n{'Function':40} {'count':>6} {'mean':>10} {'max':>10} {'p95':>10}")
     print("-"*80)
     for item in summary_sorted[:top_n]:
         print(f"{item['name'][:40]:40} {item['count']:6d} "
@@ -666,6 +666,7 @@ class GlobalConfig:
         self.st_key_sort = self.get_with_writeback("general", "st_key_sort", fallback="2 1", value_type="str")
         self.code_startswith = self.get_with_writeback("general", "code_startswith", fallback='"6", "30", "00", "688", "43", "83", "87", "92"', value_type="tuple_str")
         self.winlimit = self.get_with_writeback("general", "winlimit", fallback=1, value_type="int")
+        self.loglevel = self.get_with_writeback("general", "loglevel", fallback='ERROR', value_type="str")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         try:
@@ -865,6 +866,7 @@ min_position_ratio: float = CFG.min_position_ratio
 risk_duration_threshold: int = CFG.risk_duration_threshold
 code_startswith: str = CFG.code_startswith
 winlimit: int = CFG.winlimit
+loglevel: str = CFG.loglevel
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:
     return os.path.sep
