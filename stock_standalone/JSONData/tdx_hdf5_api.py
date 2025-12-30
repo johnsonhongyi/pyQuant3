@@ -2508,6 +2508,7 @@ if __name__ == "__main__":
     h5 = readHdf5(sina_MultiD_path)
     h5.shape
     print(h5.loc['300245'])
+    print(h5.loc['000002'])
     df_diagnose(h5)
 
     mdf = cct.get_limit_multiIndex_freq(h5, freq=freq.upper(),  col='all', start=startime, end=endtime, code=None)

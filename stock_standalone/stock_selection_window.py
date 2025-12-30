@@ -46,6 +46,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.df_candidates: pd.DataFrame = pd.DataFrame()
         self.df_full_candidates: pd.DataFrame = pd.DataFrame()  # 缓存完整的候选股数据
         self._data_loaded: bool = False  # 标记数据是否已从策略加载
+        self._last_hotspots: list[tuple[str, float, float, float]] = []   # 缓存热点数据，避免重复刷新UI
+        self.hotspots_frame: Optional[tk.Frame] = None
         
         self._init_ui()
         
@@ -86,19 +88,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         toolbar.pack(fill="x", padx=5, pady=5)
 
         # Today's Hotspots (Quick Filter Buttons)
-        hotspots = getattr(self.master, 'concept_top5', None)
-        if hotspots:
-            tk.Label(toolbar, text="🔥今日热点:", font=("Arial", 9, "bold"), fg="red").pack(side="left", padx=(5, 2))
-            for h in hotspots:
-                # h = ('海南自贸区', 3.995, 4.17, 0.95)
-                name = h[0]
-                pct = h[2]
-                btn_text = f"{name}({pct:.1f}%)"
-                btn = tk.Button(toolbar, text=btn_text, font=("Arial", 8), 
-                                relief="flat", bg="#e8f5e9", fg="#2e7d32",
-                                command=lambda n=name: self._quick_filter(n))
-                btn.pack(side="left", padx=1)
-            tk.Frame(toolbar, width=10).pack(side="left") # Spacer
+        # Today's Hotspots (Quick Filter Buttons)
+        # Today's Hotspots (Quick Filter Buttons)
+        self.hotspots_frame = tk.Frame(toolbar)
+        self.hotspots_frame.pack(side="left")
+        # Initial update handled in load_data or explicit call if needed (load_data is called at end of init)
         
         # Concept Filter
         tk.Label(toolbar, text="板块筛选:", font=("Arial", 10)).pack(side="left", padx=2)
@@ -201,11 +195,45 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.tree.tag_configure("ignored", background="#ffcdd2")   # Light Red
         self.tree.tag_configure("pending", background="#ffffff")   # White
 
-        # Bindings
         self.tree.bind("<ButtonRelease-1>", self.on_select)
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
         self.tree.bind("<Button-3>", self.show_context_menu)
-    def load_data(self, force=False):
+
+    def _update_hotspots(self):
+        """更新今日热点按钮"""
+        if self.hotspots_frame is None:
+            return
+
+        hotspots: Optional[list[tuple[str, float, float, float]]] = getattr(self.master, 'concept_top5', None)
+        
+        # UI防抖: 如果数据没有变化，则跳过重绘
+        new_sig = list(hotspots) if hotspots else []
+        if getattr(self, '_last_hotspots', None) == new_sig:
+            return
+        self._last_hotspots = new_sig
+            
+        # 清空现有控件
+        # assert self.hotspots_frame is not None
+        for widget in self.hotspots_frame.winfo_children():
+            widget.destroy()
+
+        if hotspots:
+            tk.Label(self.hotspots_frame, text="🔥今日热点:", font=("Arial", 9, "bold"), fg="red").pack(side="left", padx=(5, 2))
+            for h in hotspots:
+                # h = ('海南自贸区', 3.995, 4.17, 0.95)
+                name: str = h[0]
+                pct: float = h[2]
+                btn_text = f"{name}({pct:.1f}%)"
+                btn = tk.Button(self.hotspots_frame, text=btn_text, font=("Arial", 8), 
+                                relief="flat", bg="#e8f5e9", fg="#2e7d32",
+                                command=lambda n=name: self._quick_filter(n))
+                btn.pack(side="left", padx=1)
+            
+            # Spacer at the end of the group
+            tk.Frame(self.hotspots_frame, width=10).pack(side="left")
+
+    def load_data(self, force: bool = False):
+        self._update_hotspots()
         # Clear items in batch for performance
         children = self.tree.get_children()
         if children:
@@ -269,6 +297,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                  # messagebox.showinfo("提示", "筛选后无数据")
                  return
             
+            # Default sorting: 连阳涨幅 descending
+            if '连阳涨幅' in self.df_candidates.columns:
+                self.df_candidates = self.df_candidates.sort_values(by='连阳涨幅', ascending=False)
+
             self._update_title_stats()
 
             # self.df_candidates['user_status'] = "待定"
