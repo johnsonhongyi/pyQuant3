@@ -23,6 +23,7 @@ import asyncio
 import argparse
 from typing import Optional, List, Dict, Union, Any, Tuple, Callable
 
+
 from JohnsonUtil.prettytable import PrettyTable
 from JohnsonUtil import johnson_cons as ct
 # from JohnsonUtil import inStockDb as inDb
@@ -1689,33 +1690,6 @@ def get_lastdays_trade_date(days=1, base_date=None):
 
     return dt
 
-
-def get_day_istrade_date_gpt(dt: Optional[Union[datetime.date, str]] = None) -> bool:
-    """
-    判断指定日期是否为交易日。
-
-    Parameters
-    ----------
-    dt : datetime.date 或 'YYYY-MM-DD' 字符串，可选
-        需要判断的日期，默认今天
-
-    Returns
-    -------
-    bool
-        True 表示是交易日，False 表示非交易日
-    """
-    # 默认今天
-    if dt is None:
-        dt_obj = datetime.date.today()
-    elif isinstance(dt, str):
-        dt_obj = datetime.datetime.strptime(dt, '%Y-%m-%d').date()
-    elif isinstance(dt, datetime.date):
-        dt_obj = dt
-    else:
-        raise ValueError(f"不支持的日期类型: {type(dt)}")
-
-    # 判断是否交易日
-    return a_trade_calendar.is_trade_date(dt_obj)
 
 
 def get_day_istrade_date(dt: Optional[Union[datetime.date, str]] = None) -> bool:
