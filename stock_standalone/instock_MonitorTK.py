@@ -49,7 +49,7 @@ from tdx_utils import (
     cleanup_old_clean_flags, clean_expired_tdx_file, is_tdx_clean_done, sanitize
 )
 from data_utils import (
-    calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe
+    calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe,test_opt
 )
 from gui_utils import (
     bind_mouse_scroll, get_monitor_by_point, rearrange_monitors_per_screen,get_monitor_index_for_window
@@ -2035,7 +2035,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         )
         return info_text
 
-    def original_push_logic(self, stock_code):
+    def original_push_logic(self, stock_code,select_win=False):
         """原有的推送逻辑 + 自动添加手札"""
         try:
             # 1. 尝试获取价格和信息，用于自动添加备注
@@ -4821,7 +4821,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # logger.info(f"[Tree Reset] applied cols={list(tree['columns'])}")
 
 
-    def tree_scroll_to_code(self, code):
+    def tree_scroll_to_code(self, code,select_win=False):
         """在 Treeview 中自动定位到指定 code 行"""
         if not code or not (code.isdigit() and len(code) == 6):
             return
@@ -4839,6 +4839,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.tree.see(iid)             # 自动滚动，使其可见
                     return True
             toast_message(self, f"{code} is not Found Main")
+            if select_win:
+                self.original_push_logic(code)
         except Exception as e:
             logger.info(f"[tree_scroll_to_code] Error: {e}")
             return False
@@ -8632,7 +8634,8 @@ COMMON_COMMANDS = [
     "tdd.get_tdx_exp_low_or_high_power('000002', dl=60, newdays=0, resample='d')",
     "tdd.h5a.check_tdx_all_df_Sina('sina_data')",
     "tdd.h5a.check_tdx_all_df_Sina('get_sina_all_ratio')",
-    "write_to_hdf()"
+    "write_to_hdf()",
+    "test_opt(top_all,resample='d',code='002151')"
 ]
 
 # 格式化帮助信息，换行+缩进
