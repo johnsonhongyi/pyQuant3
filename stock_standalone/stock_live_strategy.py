@@ -589,6 +589,24 @@ class StockLiveStrategy:
                 snap['red'] = row.get('red', snap.get('red', 0)) #五日线上数据
                 snap['gren'] = row.get('gren', snap.get('gren', 0)) #弱势绿柱数据
 
+                # --- 策略进化：注入反馈记忆 (Feedback Injection) ---
+                # 1. 记仇机制：查询该股最近连续亏损次数
+                if 'loss_streak' not in snap: # 避免每秒查库，简单缓存(实际应有过期机制，这里简化)
+                     # 只有当 snapshot 里没有或者是新的一天时才查(略复杂，这里暂且每次循环查，因为 execute 轻量)
+                     # 为了性能考虑，其实应该每分钟只更新一次。这里暂且假设 sqlite 够快。
+                     # Better: 在外层定时更新 self.blacklist_cache
+                     pass
+                
+                # 实时查询 (耗时较小，Sqlite PK查询极快)
+                snap['loss_streak'] = self.trading_logger.get_consecutive_losses(code, days=15)
+                
+                # 2. 环境感知：查询最近市场胜率 (可用类变量缓存，每分钟更新一次)
+                if not hasattr(self, '_market_win_rate_cache') or now - getattr(self, '_market_win_rate_ts', 0) > 300:
+                    self._market_win_rate_cache = self.trading_logger.get_market_sentiment(days=3)
+                    self._market_win_rate_ts = now
+                snap['market_win_rate'] = self._market_win_rate_cache
+
+
                 # 【新增】日内实时追踪字段（用于冲高回落检测和盈利最大化）
                 open_price = float(row.get('open', 0))
                 # 追踪日内最高价
@@ -676,6 +694,8 @@ class StockLiveStrategy:
                 row_data = {
                     'ma5d': float(row.get('ma5d', 0)),
                     'ma10d': float(row.get('ma10d', 0)),
+                    'ma20d': float(row.get('ma20d', 0)),
+                    'ma60d': float(row.get('ma60d', 0)),
                     'ratio': float(row.get('ratio', 0)),
                     'volume': float(row.get('volume', 0)),
                     'nclose': current_nclose,
@@ -688,6 +708,8 @@ class StockLiveStrategy:
                     'red': snap.get('red', 0),
                     'gren': snap.get('gren', 0),
                     'sum_perc': snap.get('sum_perc', 0),
+                    'low10': snap.get('low10', 0),
+                    'lower': snap.get('lower', 0),
                     'highest_today': snap.get('highest_today', current_high),
                     'pump_height': snap.get('pump_height', 0),
                     'pullback_depth': snap.get('pullback_depth', 0),

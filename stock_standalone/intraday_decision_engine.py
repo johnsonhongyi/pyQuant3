@@ -4,8 +4,8 @@
 支持买入/卖出信号生成、动态仓位计算、趋势强度评估、止损止盈检测
 """
 import logging
-import datetime
-from typing import Optional, Any, Dict, List, Tuple, Union
+import datetime as dt
+from typing import Any, Union
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +26,10 @@ class IntradayDecisionEngine:
     - trailing_stop_pct: 移动止盈回撤百分比（默认 3%）
     - max_position: 最大仓位（默认 0.4）
     """
+    stop_loss_pct: float
+    take_profit_pct: float
+    trailing_stop_pct: float
+    max_position: float
     
     def __init__(self, 
                  stop_loss_pct: float = 0.05,
@@ -46,8 +50,8 @@ class IntradayDecisionEngine:
         self.trailing_stop_pct = trailing_stop_pct
         self.max_position = max_position
         
-        logger.info(f"IntradayDecisionEngine 初始化: stop_loss={stop_loss_pct:.1%}, "
-                   f"take_profit={take_profit_pct:.1%}, trailing={trailing_stop_pct:.1%}, "
+        logger.info(f"IntradayDecisionEngine 初始化: stop_loss={stop_loss_pct:.1%}, " +
+                   f"take_profit={take_profit_pct:.1%}, trailing={trailing_stop_pct:.1%}, " +
                    f"max_pos={max_position:.1%}")
 
     def evaluate(self, row: dict[str, Any], snapshot: dict[str, Any], mode: str = "full") -> dict[str, Any]:
@@ -103,6 +107,32 @@ class IntradayDecisionEngine:
             debug["structure"] = structure
             debug["trend_strength"] = trend_strength
             debug["analysis_skip"] = "均线数据无效"
+            debug["trend_strength"] = trend_strength
+            debug["analysis_skip"] = "均线数据无效"
+        
+        # ---------- 策略进化：痛感与防御机制 (Pain & Defense) ----------
+        # 1. 记仇机制 (PTSD)：如果这只票最近连续让你亏钱，就别碰它！
+        loss_streak = int(snapshot.get("loss_streak", 0))
+        if loss_streak >= 2:
+            # 连续亏损 2 次：进入"冷宫"
+            if mode != "sell_only":
+                return self._hold(f"黑名单:连续亏损{loss_streak}次", debug)
+        elif loss_streak == 1:
+            # 刚亏过 1 次：在此基础上买入需加倍谨慎 (扣分)
+            debug["PTSD扣分"] = -0.15
+
+        # 2. 环境感知 (Sensing)：如果全市场胜率低，开启防御模式
+        market_win_rate = float(snapshot.get("market_win_rate", 0.5))
+        defense_level = 0.0
+        if market_win_rate < 0.3:
+            defense_level = 0.2 # 极难买入
+            debug["环境防御"] = "极高(胜率<30%)"
+        elif market_win_rate < 0.45:
+            defense_level = 0.1 # 提高门槛
+            debug["环境防御"] = "中等(胜率<45%)"
+        
+        # 将防御等级存入 snapshot/debug 供后续买入逻辑扣减
+        debug["defense_level"] = defense_level
         
         # ---------- 0. 选股分权重加成 (New: 对应 “反向验证” 需求) ----------
         # 根据 StockSelector 的评分增加基础权重，评分越高，买入信心越足
@@ -141,7 +171,7 @@ class IntradayDecisionEngine:
         # ---------- 实时高优先级决策（包含跌破均价、开盘高开下杀等） ----------
         is_t1_restricted = False
         if snapshot.get('buy_date'):
-            import datetime as dt
+            # import datetime as dt
             today_str = dt.datetime.now().strftime('%Y-%m-%d')
             if snapshot['buy_date'].startswith(today_str):
                 is_t1_restricted = True
@@ -197,12 +227,34 @@ class IntradayDecisionEngine:
         # ---------- 买入信号检测 ----------
         if mode in ("full", "buy_only"):
             action, base_pos, ma_reason = self._ma_decision(price, ma5, ma10)
+            
+            # 【新增】支撑位开仓检测 (Support Rebound)
+            # 即使均线信号平平，如果跌到了强支撑位且企稳，也是高胜率开仓点
+            support_score, support_reason = self._support_rebound_check(row, snapshot, debug)
+            if support_score > 0.1:
+                if action == "持仓":
+                    # 支撑位反转：覆盖原有的观望信号
+                    action = "买入"
+                    base_pos = 0.2  # 基础仓位
+                    ma_reason = f"[支撑反弹] {support_reason}"
+                elif action == "买入":
+                    # 双重确认
+                    base_pos += 0.1
+                    ma_reason += f" & {support_reason}"
+            
             debug["ma_decision"] = ma_reason
 
             if action == "持仓":
                 return self._hold(ma_reason, debug)
             
             if action == "买入":
+                # 💥 核心修正：结构性熔断机制 💥
+                # 如果盘中结构判定为"派发"(冲高大幅回落)，坚决禁止开仓，无论其他指标多好
+                # 这直接解决了"冲高回落收盘还是大于前日收盘加是加仓信号"的非理性行为
+                if structure == "派发":
+                    debug["refuse_buy"] = "结构为派发(冲高回落)"
+                    return self._hold(f"结构{structure}禁买", debug)
+                
                 # 1. 应用基础过滤器
                 base_pos += self._yesterday_anchor(price, snapshot, debug)
                 base_pos += self._structure_filter(row, debug)
@@ -218,35 +270,64 @@ class IntradayDecisionEngine:
                 # 3. 量能与均价约束 (关键点)
                 base_pos += self._volume_bonus(row, debug)
                 
-                # 4. 选股分加成 (New)
+                # --- 进化: 应用防御惩罚 ---
+                base_pos -= defense_level
+                if "PTSD扣分" in debug:
+                    base_pos += debug["PTSD扣分"] # 这是一个负数
+                
+                # 4. 选股分加成
                 base_pos += selection_bonus
                 
-                # 如果价格在今日今日成交均价（nclose）下方，极大程度严控买入（解决“衝高回落”及“水下徘徊”问题）
+                # 5. 支撑位得分加成
+                if support_score > 0:
+                    base_pos += support_score
+                    debug["支撑加成"] = support_score
+                
+                # 如果价格在今日今日成交均价（nclose）下方，极大程度严控买入
                 if nclose > 0 and price < nclose:
-                    penalty = 0.3  # 进一步加大惩罚
-                    if structure == "派发":
-                        penalty = 0.5  # 派发结构下线下，基本禁止开仓
-                    elif structure == "走弱":
-                        penalty = 0.4 
-                    base_pos -= penalty
-                    debug["均价/结构约束"] = f"线下{structure}，扣减{penalty}"
+                    penalty = 0.3
+                    if structure == "走弱":
+                        penalty = 0.4
+                    # 注意：派发已被熔断，这里不需要重复 check
                     
-                # 【新增】昨日均价线约束：如果价格在昨日平均成本下方，说明套牢盘多，开仓需更谨慎
+                    # 例外：如果是强支撑位抄底(score>0.2)且偏离均价不远，由于是左侧交易，允许在均价线下
+                    if support_score > 0.2 and (nclose - price)/nclose < 0.01:
+                         penalty = 0.1 # 减轻惩罚
+                         debug["均价约束"] = "支撑位豁免"
+                    
+                    base_pos -= penalty
+                    if "均价约束" not in debug:
+                        debug["均价/结构约束"] = f"线下{structure}，扣减{penalty}"
+                    
+                # 【新增】昨日均价线约束
                 last_nclose = float(snapshot.get("nclose", 0))
                 if last_nclose > 0 and price < last_nclose:
-                    base_pos -= 0.15
-                    debug["昨日锚点约束"] = "低于昨均价"
+                    # 同样，若有强支撑，减轻惩罚
+                    if support_score > 0.2:
+                        base_pos -= 0.05
+                    else:
+                        base_pos -= 0.15
+                        debug["昨日锚点约束"] = "低于昨均价"
 
-                # 4. 低位大仓位逻辑 (靠近 low10/low60 加成)
+                # 6. 低位大仓位逻辑 (靠近 low10/low60 加成)
                 low10 = float(snapshot.get("low10", 0))
                 low60 = float(snapshot.get("low60", 0))
                 if (low10 > 0 and price < low10 * 1.02) or (low60 > 0 and price < low60 * 1.03):
-                    # 如果不是在“严重派发”或“线下”结构中才加成
                     if structure != "派发" and price > nclose:
                         base_pos += 0.1
                         debug["开仓权重"] = "低位加成"
 
-                final_pos = max(min(base_pos, self.max_position * 1.2), 0) # 低位允许略超 max_position
+                # 【新增】VWAP (成交均价) 趋势判定：过滤无效震荡单
+                # 逻辑：均价线代表当日/昨日的市场平均成本。成本下移说明趋势走弱。
+                # 只有在 "重心上移" 或 "低位企稳" 时才开仓。
+                vwap_score = self._vwap_trend_check(row, snapshot, debug)
+                base_pos += vwap_score
+                
+                # 如果 VWAP 趋势严重走坏 (score < -0.2) 且没有强支撑豁免，直接熔断
+                if vwap_score < -0.2 and support_score < 0.15:
+                    return self._hold(f"趋势重心下移({debug.get('VWAP趋势', '')})", debug)
+
+                final_pos = max(min(base_pos, self.max_position * 1.2), 0)
                 if final_pos <= 0:
                     return self._hold("仓位被限制为0", debug)
 
@@ -542,9 +623,16 @@ class IntradayDecisionEngine:
         
         # 增加对“冲高回落”的敏感度
         if high > 0:
-            # 1. 严重回落：回落 > 3.5% 直接派发
+            # 1. 严重回落：回落 > 3.5%
             if fall_from_high > 0.035:
+                # 【修正逻辑】如果回落虽然大，但依然保持在 昨日收盘 2% 以上，且高于开盘价，视为“强洗盘”而非完全派发
+                # 用户需求: "冲高回落收盘还是大于前日收盘加是加仓信号"
+                # 我们这里放宽对“强洗盘”的判定，交给后续逻辑去决定是否买入
+                if open_p > 0 and price > open_p and ratio > 2:
+                     return "震荡" # 中性偏强
+                
                 return "派发"
+
             # 2. 较大量能下的回落：回落 > 2% 且换手 > 4
             if fall_from_high > 0.02 and ratio > 4:
                 return "派发"
@@ -615,32 +703,64 @@ class IntradayDecisionEngine:
         debug["指标约束"] = penalty
         return penalty
 
+    def _vwap_trend_check(self, row: dict, snapshot: dict, debug: dict) -> float:
+        """
+        VWAP (均价) 趋势过滤器
+        User Requirement: 通过实时数据的均价线和昨天的均价来判定小趋势走高还是小转大
+        """
+        current_nclose = float(row.get("nclose", 0))
+        last_nclose = float(snapshot.get("nclose", 0)) # 昨日均价
+        price = float(row.get("trade", 0))
+        
+        score = 0.0
+        
+        if current_nclose > 0 and last_nclose > 0:
+            # 1. 重心上移 (Trend Up)
+            if current_nclose > last_nclose:
+                # 趋势健康：均价上移且价格在均价之上
+                if price > current_nclose:
+                    score += 0.15
+                    debug["VWAP趋势"] = f"重心上移(>{last_nclose:.2f})+价强"
+                else:
+                    score += 0.05
+                    debug["VWAP趋势"] = "重心上移+震荡"
+            
+            # 2. 重心下移 (Trend Down)
+            elif current_nclose < last_nclose:
+                # 趋势走弱：均价下移
+                debug["VWAP趋势"] = f"重心下移(<{last_nclose:.2f})"
+                
+                # 如果价格在今日均价之下，且均价低于昨日均价 -> 双重空头趋势
+                if price < current_nclose:
+                    score -= 0.3  # 重罚，过滤大部分无效买单
+                    debug["VWAP趋势"] += "+价弱"
+                else:
+                    # 价格在均价之上，可能是反抽，需谨慎
+                    score -= 0.1
+                    debug["VWAP趋势"] += "+反抽"
+                    
+            # 3. 小转大判定 (Small turning Big)
+            # 如果昨日均价和前日均价接近(震荡)，今日突然大幅拉离昨日均价
+            last_nclose_2 = float(snapshot.get("lastnclose1d", last_nclose)) # 暂无lastnclose1d字段，用last_nclose兜底
+            # 这里简化为：如果重心上移幅度超过 1.5%，确认为趋势爆发
+            if current_nclose > last_nclose * 1.015:
+                score += 0.1
+                debug["VWAP趋势"] += "|爆发"
+
+        return score
+
     # ==================== 实时行情高优先级决策 ====================
     
     def _realtime_priority_check(self, row: dict[str, Any], snapshot: dict[str, Any], mode: str, debug: dict[str, Any], is_t1_restricted: bool = False) -> dict[str, Any]:
         """
         实时行情高优先级决策（优先级高于普通均线信号）
-        
-        检测内容：
-        1. 开盘高走买入：open > last_close, open ≈ low, trade > nclose
-        2. 跌破均价卖出：trade < nclose 且偏离超过阈值
-        3. 量能情绪分析：volume/ratio 与前几日对比
-        
-        Args:
-            row: 当前行情数据
-            snapshot: 历史快照
-            mode: 评估模式
-            debug: 调试信息字典
-        
-        Returns:
-            dict: {
-                "triggered": bool,
-                "action": str,
-                "position": float,
-                "reason": str
-            }
         """
         result = {"triggered": False, "action": "持仓", "position": 0.0, "reason": "", "debug": debug}
+        
+        # 引入 VWAP 趋势检查，作为实时决策的基石
+        # User Rule: 有效买卖单需参考均价线趋势
+        vwap_score = self._vwap_trend_check(row, snapshot, debug)
+        vwap_trend_ok = vwap_score >= -0.05 # 允许 mild weakness, 但 heavy weakness (-0.3) 免谈
         
         # ---------- 数据安全获取（防止除零） ----------
         price = float(row.get("trade", 0))
@@ -703,6 +823,12 @@ class IntradayDecisionEngine:
             if structure == "派发":
                 debug["realtime_skip"] = "派发结构禁买"
                 return result
+            
+            # 趋势熔断：如果重心显著下移，禁止普通高开买入 (User Requirement)
+            if not vwap_trend_ok:
+                 # 除非是超跌反弹或极强突破，否则不买
+                 # 这里我们设置一个标记，后续如果有强力理由才放行
+                 debug["realtime_warn"] = "VWAP重心下移，需极强信号"
 
             # 条件1: 开盘价高于昨日收盘（跳空高开）
             gap_up = (open_p - last_close) / last_close
@@ -799,10 +925,20 @@ class IntradayDecisionEngine:
             if win >= 5 and price > nclose:
                 buy_score += 0.15
                 buy_reasons.append("极强波段确认")
+
+            # 【新增】条件9: 冲高回落企稳买入 (User Request: 冲高回落收盘还是大于前日收盘加是加仓信号)
+            # 逻辑：当日由高点回落，但 Price > Last Close * 1.02 (保持强势)，且 Price > Nclose (均价支撑)
+            if high > 0 and (high - price) / high > 0.025: # 回落幅度 > 2.5%
+                if price > last_close * 1.02 and price > nclose:
+                     # 必须有量能配合，证明是换手而非出货
+                     if ratio > 3:
+                         buy_score += 0.25
+                         buy_reasons.append(f"冲高回落企稳(>{last_close:.2f})")
+            
             
             # 【新增】条件9: 早盘 MA5/MA10 回踩买入检测 (预埋单策略)
             # 早盘黄金窗口: 09:30-10:00，价格回踩均线附近是最佳买点
-            import datetime as dt
+            # import datetime as dt
             now_time = dt.datetime.now()
             is_morning_window = 930 <= int(now_time.strftime('%H%M')) <= 1000
             
@@ -830,8 +966,18 @@ class IntradayDecisionEngine:
             debug["实时买入分"] = buy_score
             debug["实时买入理由"] = buy_reasons
             
-            # 触发条件：得分 >= 0.55 (提高门槛，减少噪音)
-            if buy_score >= 0.55:
+            # --- 动态阈值判定 ---
+            threshold = 0.55
+            
+            # 进化: 叠加防御等级
+            defense_level = float(debug.get("defense_level", 0.0))
+            threshold += defense_level # 胜率越低，门槛越高 e.g. 0.55 + 0.2 = 0.75
+            
+            if not vwap_trend_ok:
+                 threshold = max(threshold, 0.8) # 趋势不好时，至少需要 0.8
+            
+            # 触发条件
+            if buy_score >= threshold:
                 # 【新增】追高过滤：如果偏离 MA5 超过 3.5%，实时策略也不宜直接切入
                 bias_ma5 = (price - float(row.get("ma5d", 0))) / float(row.get("ma5d", 1)) if float(row.get("ma5d", 0)) > 0 else 0
                 if bias_ma5 > 0.035:
@@ -1175,7 +1321,7 @@ class IntradayDecisionEngine:
         
         return result
 
-    def _multiday_trend_score(self, source_data: Union[dict[str, Any], Any], debug: dict[str, Any]) -> float:
+    def _multiday_trend_score(self, source_data: dict[str, Any], debug: dict[str, Any]) -> float:
         """
         多日情绪趋势评分
         
@@ -1193,6 +1339,7 @@ class IntradayDecisionEngine:
         """
         score = 0.0
         reasons = []
+        price = float(source_data.get("trade", 0))
         
         # ---------- 1. 价格趋势分析（5日收盘价） ----------
         closes = []
@@ -1325,7 +1472,7 @@ class IntradayDecisionEngine:
         # ---------- 5. 布林带位置 ----------
         upper = float(source_data.get("upper", 0))
         lower = float(source_data.get("lower", 0))
-        price = float(source_data.get("trade", 0))
+        # price = float(source_data.get("trade", 0)) # Moved to top
         
         if upper > 0 and lower > 0 and price > 0:
             boll_mid = (upper + lower) / 2
@@ -1410,7 +1557,7 @@ class IntradayDecisionEngine:
         }
 
 
-    def _is_price_limit(self, code: str, price: float, last_close: float, high: float, low: float, open_p: float, ratio: float, snapshot: dict) -> dict:
+    def _is_price_limit(self, code: str, price: float, last_close: float, high: float, low: float, open_p: float, ratio: float, snapshot: dict[str, Any]) -> dict[str, bool]:
         """
         判断是否处于涨跌停状态，并识别一字板
         """
@@ -1442,3 +1589,95 @@ class IntradayDecisionEngine:
                  is_one_word = True
                 
         return {"limit_up": is_up, "limit_down": is_down, "one_word": is_one_word}
+
+    # ==================== 支撑位开仓策略 (New) ====================
+    
+    def _support_rebound_check(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> tuple[float, str]:
+        """
+        支撑位企稳检测
+        
+        检测价格是否回踩重要均线(MA20/MA60)或重要低点(Low10)并获得支撑
+        
+        Returns:
+            (score, reason_str)
+        """
+        score = 0.0
+        reasons = []
+        
+        price = float(row.get("trade", 0))
+        if price <= 0:
+            return 0.0, ""
+            
+        # 1. 均线支撑 (MA10/MA20/MA60)
+        ma10 = float(row.get("ma10d", 0))
+        ma20 = float(row.get("ma20d", 0))
+        ma60 = float(row.get("ma60d", 0))
+        
+        # MA20: 趋势线 (俗称生命线)
+        if ma20 > 0 and price > ma20:
+            # 回踩幅度 < 1.0%
+            if abs(price - ma20) / ma20 < 0.01:
+                score += 0.20
+                reasons.append(f"踩MA20趋势线")
+        
+        # MA60: 牛熊线 (强支撑)
+        if ma60 > 0 and price > ma60:
+            # 回踩幅度 < 1.5%
+            if abs(price - ma60) / ma60 < 0.015:
+                # 只有在趋势还未完全崩坏时才有效
+                if price > ma60 * 1.05: # 之前涨过，现在回踩
+                     pass 
+                score += 0.25
+                reasons.append(f"踩MA60牛熊线")
+                
+        # MA10: 短线支撑 (只在强趋势中有效)
+        if ma10 > 0 and price > ma10:
+             if abs(price - ma10) / ma10 < 0.008:
+                 # 需结合多日趋势分
+                 trend_score = debug.get("trend_strength", 0)
+                 if trend_score > 0.3:
+                     score += 0.15
+                     reasons.append(f"踩MA10短线撑")
+
+        # 2. 结构支撑 (前低/布林/缺口)
+        low10 = float(snapshot.get("low10", 0))
+        hmax = float(snapshot.get("hmax", 0)) # 近期高点
+        lower = float(snapshot.get("lower", 0)) # 布林下轨
+        
+        # 10日低点支撑 (双底预期)
+        if low10 > 0 and price >= low10:
+            if (price - low10) / low10 < 0.015:
+                score += 0.2
+                reasons.append("10日双底支撑")
+
+        # 平台突破后的回踩 (Price near Max5 or Hmax but still above)
+        # 这里逻辑稍微复杂，暂且略过，重点在均线和低点
+        
+        # 布林下轨支撑 (超跌反弹)
+        if lower > 0 and price <= lower * 1.01:
+            score += 0.15
+            reasons.append("布林下轨超跌")
+            
+        # 3. 辅助验证
+        # 必须是非单边下跌 (Looking for stabilization)
+        # 简单判断：当前价格 > 今日开盘价 (收阳) OR 下影线较长
+        open_p = float(row.get("open", 0))
+        low = float(row.get("low", 0))
+        
+        is_stable = False
+        if open_p > 0:
+            if price > open_p: # 阳线
+                is_stable = True
+            elif low > 0 and (price - low) / low > 0.005: # 长下影线 > 0.5%
+                is_stable = True
+                reasons.append("长下影企稳")
+        
+        if score > 0 and not is_stable:
+             # 如果到了支撑位但还在阴跌，打折
+             score *= 0.5
+             reasons.append("(未企稳)")
+        
+        if score > 0:
+            return score, "+".join(reasons)
+            
+        return 0.0, ""

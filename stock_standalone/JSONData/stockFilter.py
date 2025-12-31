@@ -284,7 +284,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     else:
 
         if resample in ['d','w'] and len(df) > 2:
-            df.loc[((df.percent >= 9.94) & (df.percent < 10.1)), 'percent'] = 10
+            # df.loc[((df.percent >= 9.94) & (df.percent < 10.1)), 'percent'] = 10
             df['percent'] = df['percent'].apply(lambda x: round(x, 2))
             # time_ss = time.time()
             perc_col = [co for co in df.columns if co.find('perc') == 0]
