@@ -107,7 +107,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         tk.Button(toolbar, text="🔍", command=self.on_filter_search, width=3, font=("Segoe UI Emoji", 10), pady=0).pack(side="left", padx=1)
         tk.Button(toolbar, text="🗑️", command=self.delete_current_history, width=2, fg="red", font=("Segoe UI Emoji", 10), pady=0).pack(side="left", padx=1)
 
-        tk.Button(toolbar, text="🚀 导入报警", command=self.import_selected, bg="#ffd54f", font=("Arial", 10, "bold")).pack(side="left", padx=10, pady=5)
+        tk.Button(toolbar, text="🚀 导入", command=self.import_selected, bg="#ffd54f", font=("Arial", 10, "bold")).pack(side="left", padx=10, pady=5)
 
 
         tk.Button(toolbar, text="✅[选中]", command=lambda: self.mark_status("选中"), bg="#c8e6c9").pack(side="left", padx=1)
@@ -140,7 +140,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
         # --- Main List ---
         # Columns
-        columns = ("code", "name", "status", "score", "price", "percent", "ratio", "amount", "连阳涨幅", "win", "volume", "category", "auto_reason", "user_status", "user_reason")
+        columns = ("code", "name", "status", "score", "price", "percent", "昨日涨幅", "ratio", "amount", "连阳涨幅", "win", "volume", "category", "auto_reason", "user_status", "user_reason")
         
         tree_frame = tk.Frame(self)
         tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
@@ -163,7 +163,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         # Headings
         headers = {
             "code": "代码", "name": "名称", "status": "类型", "score": "分值", 
-            "price": "现价", "percent": "涨幅%", "ratio": "量比", "amount": "成交额",
+            "price": "现价", "percent": "涨幅%", "昨日涨幅": "昨日%", "ratio": "量比", "amount": "成交额",
             "连阳涨幅": "连阳", "win": "胜率", "volume": "成交量",
             "category": "板块/概念",
             "auto_reason": "机选理由", "user_status": "复核状态", "user_reason": "复核标注"
@@ -180,6 +180,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.tree.column("score", width=50, minwidth=40, stretch=False)
         self.tree.column("price", width=70, minwidth=60, stretch=False)
         self.tree.column("percent", width=70, minwidth=60, stretch=False)
+        self.tree.column("昨日涨幅", width=70, minwidth=60, stretch=False)
         self.tree.column("ratio", width=60, minwidth=50, stretch=False)
         self.tree.column("amount", width=80, minwidth=70, stretch=False)
         self.tree.column("连阳涨幅", width=60, minwidth=50, stretch=False)
@@ -268,10 +269,12 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             if self.selector is not None and hasattr(self.selector, 'df_all_realtime') and 'sum_perc' in self.selector.df_all_realtime.columns:
                 # 按索引对齐取值
                 # 使用 selector 缓存的实时数据进行映射，避免 live_strategy 为 None 时报错
+                self.df_full_candidates['昨日涨幅'] = self.df_full_candidates['code'].map(self.selector.df_all_realtime['per1d']).fillna(0)
                 self.df_full_candidates['连阳涨幅'] = self.df_full_candidates['code'].map(self.selector.df_all_realtime['sum_perc']).fillna(0)
                 self.df_full_candidates['win'] = self.df_full_candidates['code'].map(self.selector.df_all_realtime['win']).fillna(0)
             else:
                 # live_strategy 不存在或列缺失，全部填 0
+                self.df_full_candidates['昨日涨幅'] = 0
                 self.df_full_candidates['连阳涨幅'] = 0
                 self.df_full_candidates['win'] = 0
             # 从全量缓存中复制，用于当前视窗的筛选/显示
@@ -321,7 +324,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
                 self.tree.insert("", "end", iid=row['code'], values=(
                     row['code'], row['name'], row.get('status', ''), row['score'], row['price'], 
-                    f"{row['percent']:.2f}", f"{row.get('ratio', 0):.2f}", amount_str,
+                    f"{row['percent']:.2f}", f"{row.get('昨日涨幅', 0):.2f}", f"{row.get('ratio', 0):.2f}", amount_str,
                     row.get('连阳涨幅', 0), row.get('win', 0), row['volume'], row.get('category', ''), row['reason'], 
                     user_status, user_reason
                 ), tags=(tag,))
@@ -526,8 +529,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             cur_values = self.tree.item(item_id, "values")
             # Create new values tuple
             new_values = list(cur_values)
-            new_values[13] = status
-            new_values[14] = reason
+            new_values[14] = status
+            new_values[15] = reason
             
             self.tree.item(item_id, values=new_values, tags=(tag,))
             
@@ -549,8 +552,8 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             values = self.tree.item(item_id, "values")
             code = values[0]
             name = values[1]
-            status = values[13]
-            user_reason = values[14]
+            status = values[14]
+            user_reason = values[15]
             
             # 只要不是默认状态，就记录反馈以便优化
             if status != "待定":
@@ -559,7 +562,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                     "code": code,
                     "name": name,
                     "auto_score": values[3],
-                    "auto_reason": values[12],
+                    "auto_reason": values[13],
                     "user_status": status,
                     "user_reason": user_reason
                 })
@@ -571,10 +574,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                     "price": float(values[4]),
                     "score": float(values[3]),
                     "percent": float(values[5].replace('%', '') if isinstance(values[5], str) else values[5]),
-                    "ratio": float(values[6]),
-                    "amount": values[7],
-                    "auto_reason": values[12],
-                    "user_reason": values[14]
+                    "ratio": float(values[7]),
+                    "amount": values[8],
+                    "auto_reason": values[13],
+                    "user_reason": values[15]
                 })
         
         if not to_import:
@@ -697,7 +700,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
     def tree_scroll_to_code(self, code: str):
         """定位股票代码 (通过筛选器)"""
         if hasattr(self, 'master') and hasattr(self.master, 'tree_scroll_to_code'):
-            self.master.tree_scroll_to_code(code)
+            self.master.tree_scroll_to_code(code,select_win=True)
         # elif hasattr(self, 'concept_filter_var'):
         #     self.concept_filter_var.set(code)
         #     self.on_filter_search()

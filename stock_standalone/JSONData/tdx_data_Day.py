@@ -1301,6 +1301,52 @@ def generate_simple_vect_features(df):
     # reset_index() 将 code 变成一列，to_dict('records') 转为字典列表
     return feat_df.reset_index().to_dict('records')
 
+
+def dump_vect_daily_ohlcv(vect_daily_t, max_days=6, title=True):
+    """
+    将 vect_daily_t 中的 lastoNd / lasthNd / lastlNd / lastpNd / lastvNd
+    按时间顺序展开打印，方便人工校验
+    # dump_vect_daily_ohlcv(vect_daily_t, max_days=6)
+    1d = 昨天
+    2d = 前天
+    ...
+
+    Parameters
+    ----------
+    vect_daily_t : list[dict] | dict
+        单只或多只股票的 vect 数据
+    max_days : int
+        展示多少天（从 1d 开始）
+    """
+
+    if isinstance(vect_daily_t, dict):
+        vect_daily_t = [vect_daily_t]
+
+    for item in vect_daily_t:
+        code = item.get("code", "")
+        name = item.get("name", "")
+        if title:
+            print(f"\n=== {code} {name} ===")
+            print("day |   open     high     low      close        vol")
+            print("-" * 62)
+
+        for d in range(1, max_days + 1):
+            o = item.get(f"lasto{d}d")
+            h = item.get(f"lasth{d}d")
+            l = item.get(f"lastl{d}d")
+            c = item.get(f"lastp{d}d")
+            v = item.get(f"lastv{d}d")
+
+            print(
+                f"{d:>3}d | "
+                f"{o:>8.2f} "
+                f"{h:>8.2f} "
+                f"{l:>8.2f} "
+                f"{c:>8.2f} "
+                f"{int(v) if v else 0:>12}"
+            )
+            
+
 def generate_df_vect_daily_features(df, lastdays=cct.compute_lastdays):
     """
     df:
@@ -2122,7 +2168,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     # if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
     #     # 只有当日志等级是 DEBUG 或更低才进入 ipdb
     #     import ipdb; ipdb.set_trace()
-    log.debug(f'file_path:{file_path}')
+    log.debug(f'file_path:{file_path} code: {code}')
 
     # ------------------------------
     # 文件不存在或为空
@@ -2181,6 +2227,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         # So we must NOT use the first column name 'code' for reading.
         
         file_cols = ct.TDX_Day_columns[1:] # Exclude 'code'
+        
         df = pd.read_csv(
             file_path, 
             names=file_cols, 
@@ -5791,7 +5838,7 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100):
 
         df = df.reset_index()
     else:
-        log.info("compute df is none")
+        log.info("compute df is None")
 
     return df
 
@@ -6889,7 +6936,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             results = []
             ts = time.time()
             for code in codeList:
-                log.debug(f'codeList:{len(codeList)}: idx:{codeList.index(code)} code:{code} :dt')
+                log.debug(f'codeList: {len(codeList)}: idx: {codeList.index(code)} code: {code} dt: {dt}')
                 results.append(get_tdx_exp_low_or_high_power(code, dt, ptype, dl, end, power, lastp, newdays, resample,ct.lastdays * 3,detect_calc_support))
             # print("tdxdataT:%s"%(round(time.time()-ts,2)),)
 #        print round(time.time()-ts,2),

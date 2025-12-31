@@ -3936,6 +3936,16 @@ def format_func_call(func, *args, **kwargs):
 def to_mp_run_async(cmd, urllist, *args, **kwargs):
     #gpt
     t0 = time.time()
+
+    logger = log
+    old_level = logger.level 
+
+    # 1. 禁用 tqdm 监控 (防止进度条线程报错)
+    try:
+        tqdm.monitor_interval = 0
+    except:
+        pass
+        
     result = []
     errors = []
 
@@ -3945,7 +3955,8 @@ def to_mp_run_async(cmd, urllist, *args, **kwargs):
         return []
 
     pool_count = min(int(cpu_count() // 1.3), max(4, data_count // 50)) #9
-
+    # pool_count = min(cpu_count() // 2 + 1, max(4, data_count // 50)) #5
+    log.info("Cpu_count: {pool_count}")
     # 少量任务直接单进程，最稳
     if data_count <= 200:
         log.debug(f'code: {urllist}')
@@ -3964,28 +3975,46 @@ def to_mp_run_async(cmd, urllist, *args, **kwargs):
         log.info(f'count:{data_count} pool_count:{pool_count}')
         func = functools.partial(cmd, **kwargs)
         worker = functools.partial(process_file_exc, func)
+        try:
+            # --- 关键：在多进程运行期间，只允许 WARNING 以上级别的日志进入管道 ---
+            # 这样可以极大减少管道通信负担，避免结束时管道破裂
+            logger.setLevel(LoggerFactory.WARNING) 
+            with Pool(processes=pool_count) as pool:
+                for r in tqdm(
+                    pool.imap_unordered(worker, urllist, chunksize=10),
+                    total=data_count,
+                    unit='it', 
+                    mininterval=ct.tqdm_mininterval,
+                    unit_scale=True,
+                    desc="Running_MP",
+                    ncols=getattr(ct, 'ncols', 80),
+                ):
+                    if r is None:
+                        continue
 
-        with Pool(processes=pool_count) as pool:
-            for r in tqdm(
-                pool.imap_unordered(worker, urllist, chunksize=10),
-                total=data_count,
-                unit='it', 
-                mininterval=ct.tqdm_mininterval,
-                unit_scale=True,
-                desc="Running_MP",
-                ncols=getattr(ct, 'ncols', 80),
-            ):
-                if r is None:
-                    continue
+                    if isinstance(r, dict) and r.get("__error__"):
+                        errors.append(
+                            (r["code"], r["exc_type"], r["exc_msg"])
+                        )
+                        continue
 
-                if isinstance(r, dict) and r.get("__error__"):
-                    errors.append(
-                        (r["code"], r["exc_type"], r["exc_msg"])
-                    )
-                    continue
+                    if not hasattr(r, 'empty') or not r.empty:
+                        result.append(r)
+            # 执行完后立即恢复原始日志等级
+            logger.setLevel(old_level)
 
-                if not hasattr(r, 'empty') or not r.empty:
-                    result.append(r)
+            # # 过滤结果，解决 IndexError
+            # result = [r for r in results if r is not None and (not hasattr(r, 'empty') or not r.empty)]
+            
+        except (BrokenPipeError, EOFError):
+            logger.setLevel(old_level)
+            log.error(f"MP Error: {e}")
+            # 即使报错，results 变量里通常已经拿到了 100% 的数据
+            # if 'results' in locals():
+            #     result = [r for r in results if r is not None and (not hasattr(r, 'empty') or not r.empty)]
+        except Exception as e:
+            logger.setLevel(old_level)
+            log.error(f"MP Error: {e}")
 
     # 主进程统一记录错误（安全）
     for code, etype, emsg in errors:

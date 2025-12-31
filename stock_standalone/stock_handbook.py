@@ -37,27 +37,63 @@ class StockHandbook:
 
     def add_remark(self, code, content):
         """
-        Add a remark for a stock.
+        Add or update a remark for a stock.
+        If the same code already has a remark on the same day, overwrite it.
         
         Args:
             code (str): Stock code (e.g., "600519").
             content (str): The remark content.
         """
         timestamp = time.time()
-        time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
-        
+        time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
+
         if code not in self.data:
             self.data[code] = []
-            
+
+        # 查找是否已存在同一天的记录
+        for entry in self.data[code]:
+            if entry.get("time") == time_str:
+                # 覆盖内容与时间戳
+                entry["content"] = content
+                entry["timestamp"] = timestamp
+                self._save_data()
+                logger.info(f"Updated remark for {code} on {time_str}")
+                return
+
+        # 不存在则新增（插入到最前，最新在前）
         entry = {
             "time": time_str,
             "timestamp": timestamp,
             "content": content
         }
-        # Insert at the beginning (newest first)
         self.data[code].insert(0, entry)
         self._save_data()
         logger.info(f"Added remark for {code}")
+
+    # def add_remark(self, code, content):
+    #     """
+    #     Add a remark for a stock.
+        
+    #     Args:
+    #         code (str): Stock code (e.g., "600519").
+    #         content (str): The remark content.
+    #     """
+    #     timestamp = time.time()
+    #     # time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    #     time_str = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
+        
+    #     if code not in self.data:
+    #         self.data[code] = []
+            
+    #     entry = {
+    #         "time": time_str,
+    #         "timestamp": timestamp,
+    #         "content": content
+    #     }
+    #     # Insert at the beginning (newest first)
+    #     self.data[code].insert(0, entry)
+    #     self._save_data()
+    #     logger.info(f"Added remark for {code}")
 
     def get_remarks(self, code):
         """Get all remarks for a specific stock."""
@@ -96,22 +132,52 @@ class StockHandbook:
     #     else:
     #         return False
 
-    def delete_remark(self, code, timestamp):
+    # def delete_remark(self, code, timestamp):
+    #     if code not in self.data:
+    #         return False
+
+    #     def normalize(ts):
+    #         if isinstance(ts, str):
+    #             # return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").timestamp()
+    #             return datetime.strptime(ts, "%Y-%m-%d").timestamp()
+    #         return float(ts)
+
+    #     target_ts = normalize(timestamp)
+
+    #     before = len(self.data[code])
+    #     self.data[code] = [
+    #         r for r in self.data[code]
+    #         if abs(float(r.get("timestamp", 0)) - target_ts) > 1
+    #     ]
+    #     after = len(self.data[code])
+
+    #     if after < before:
+    #         self._save_data()
+    #         return True
+
+    #     return False
+
+    def delete_remark(self, code, day):
+        """
+        Delete remark by code + day (YYYY-MM-DD),
+        compatible with old time formats.
+        """
         if code not in self.data:
             return False
 
-        def normalize(ts):
-            if isinstance(ts, str):
-                return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").timestamp()
-            return float(ts)
-
-        target_ts = normalize(timestamp)
+        # 统一成 YYYY-MM-DD
+        if isinstance(day, str):
+            day_str = day[:10]
+        else:
+            day_str = datetime.fromtimestamp(float(day)).strftime("%Y-%m-%d")
 
         before = len(self.data[code])
+
         self.data[code] = [
             r for r in self.data[code]
-            if abs(float(r.get("timestamp", 0)) - target_ts) > 1
+            if r.get("time", "")[:10] != day_str
         ]
+
         after = len(self.data[code])
 
         if after < before:
