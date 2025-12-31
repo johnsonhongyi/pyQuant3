@@ -217,6 +217,15 @@ class StockLiveStrategy:
             risk_duration_threshold=risk_duration_threshold
         )
         self._last_import_logical_date: Optional[str] = None
+        self._last_settlement_date: Optional[str] = None # 用于防止重复结算
+
+        # --- Automatic Trading Loop State ---
+        self.auto_loop_enabled = False
+        self.batch_state = "IDLE"  # IDLE, WAITING_ENTRY, IN_PROGRESS
+        self.current_batch: List[str] = []
+        self.batch_start_time = 0
+        self.batch_last_check = 0
+
 
     # ------------------------------------------------------------------
     # Alert Cooldown 控制
@@ -524,8 +533,26 @@ class StockLiveStrategy:
             return
 
         # 1. 交易期间判断: 0915 至 1502
-        if not cct.get_work_time_duration():
-            return
+        is_trading = cct.get_work_time_duration()
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        now_time_str = datetime.now().strftime('%H:%M')
+
+        # --- 自动启动判断 (Auto Start) ---
+        # 交易时段 + 未启用 + 今日未结算过
+        if is_trading and not self.auto_loop_enabled:
+            if self._last_settlement_date != today_str:
+                self.start_auto_trading_loop()
+
+        # --- 自动收盘结算判断 (Auto Settlement) ---
+        if not is_trading:
+             # 判断是否收盘 (15:00 以后) 且今日未结算
+             # 注意：需排除中午休市 (11:30-13:00)
+             if now_time_str >= "15:00":
+                 if self._last_settlement_date != today_str:
+                     self._perform_daily_settlement()
+             
+             # 非交易时间停止策略计算
+             return
 
         # 限制频率: 至少间隔 1s 处理一次，避免 UI 线程密集调用导致积压
         now = time.time()
@@ -534,9 +561,15 @@ class StockLiveStrategy:
         
         self._last_process_time = now
         
+        
         # 异步执行
         self.df = df_all.copy()
         logger.info(f"Strategy: Processing cycle for {len(self._monitored_stocks)} monitored stocks")
+
+        # --- Auto Loop Check ---
+        if self.auto_loop_enabled:
+             self.executor.submit(self._process_auto_loop, df_all)
+
         self.executor.submit(self._check_strategies, self.df)
 
     def _check_strategies(self, df):
@@ -1040,3 +1073,171 @@ class StockLiveStrategy:
         self.enabled = False
         self._voice.stop()
         self.executor.shutdown(wait=False)
+
+    def start_auto_trading_loop(self):
+        """开启自动循环优选交易"""
+        self.auto_loop_enabled = True
+        self.batch_state = "IDLE"
+        self._voice.say("自动循环交易模式已启动")
+        logger.info("Auto Trading Loop STARTED")
+        # 立即触发一次检查
+        if hasattr(self, 'df'):
+            self.executor.submit(self._process_auto_loop, self.df)
+
+    def stop_auto_trading_loop(self):
+        """停止自动循环"""
+        self.auto_loop_enabled = False
+        self.batch_state = "IDLE"
+        self._voice.say("自动循环交易已停止")
+        logger.info("Auto Trading Loop STOPPED")
+
+    def _process_auto_loop(self, df):
+        """
+        自动循环核心逻辑：
+        IDLE -> 选股(Wait Entry) -> 持仓(In Progress) -> 清仓(Cleared) -> IDLE
+        """
+        try:
+            now = time.time()
+            if now - self.batch_last_check < 5: # 5秒检查一次
+                return
+            self.batch_last_check = now
+
+            # 1. State: IDLE - 需要选股
+            if self.batch_state == "IDLE":
+                msg = self._import_hotspot_candidates()
+                if "成功导入" in msg:
+                    self.batch_state = "WAITING_ENTRY"
+                    self.batch_start_time = now
+                    self._voice.say(f"新一轮五只优选股已就位")
+                elif "StockSelector不可用" in msg:
+                    pass
+                else:
+                    logger.info(f"Auto Loop: Import failed/skipped: {msg}")
+
+            # 2. State: WAITING_ENTRY - 等待建仓
+            elif self.batch_state == "WAITING_ENTRY":
+                # 检查是否已买入
+                open_counts = self._get_batch_open_count()
+                if open_counts > 0:
+                    self.batch_state = "IN_PROGRESS"
+                    self._voice.say("目标股已建仓，进入持仓监控模式")
+                    logger.info(f"Auto Loop: State -> IN_PROGRESS. Holding {open_counts}")
+                else:
+                    # 超时检查 (例如 60分钟无建仓，且非盘中休息)
+                    # 简化：如果不买，一直监控，直到人工干预或第二天重置
+                    pass
+
+            # 3. State: IN_PROGRESS - 持仓中
+            elif self.batch_state == "IN_PROGRESS":
+                open_counts = self._get_batch_open_count()
+                if open_counts == 0:
+                     # 全部清仓
+                     self.batch_state = "IDLE"
+                     self._voice.say("本轮目标全部清仓，正在优化下一批策略")
+                     logger.info("Auto Loop: All cleared. State -> IDLE")
+                     # 可以在这里增加一个短暂冷却，避免瞬间重选
+                     # self.batch_last_check = now + 60 
+                     
+        except Exception as e:
+            logger.error(f"Auto Loop Error: {e}")
+
+    def _get_batch_open_count(self) -> int:
+        """检查当前 Batch 中有多少只处于持仓状态"""
+        if not self.current_batch:
+            return 0
+        trades = self.trading_logger.get_trades()
+        # 过滤出 status='OPEN' 且 code 在 self.current_batch 中的
+        holding = [t for t in trades if t['status'] == 'OPEN' and str(t.get('code')).zfill(6) in self.current_batch]
+        return len(holding)
+
+    def _import_hotspot_candidates(self) -> str:
+        """
+        专用的自动选股方法：
+        优选“今日热点”中评分最高的5只
+        """
+        if not StockSelector:
+            return "StockSelector不可用"
+
+        try:
+           selector = StockSelector()
+           date_str = cct.get_today()
+           # 获取全部候选
+           df = selector.get_candidates_df(logical_date=date_str)
+           
+           if df.empty:
+               return "无标的"
+           
+           # 筛选 Top 5: 
+           # 1. 优先包含 '热点' 字样的理由
+           # 2. 按分数排序
+           
+           # 识别热点股 (确保 reason 列存在且为 str)
+           if 'reason' in df.columns:
+                df['is_hot'] = df['reason'].fillna('').astype(str).apply(lambda x: 1 if '热点' in x else 0)
+           else:
+                df['is_hot'] = 0
+
+           # 排序：热点优先 -> 分数 -> 成交额
+           df_sorted = df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False])
+           
+           # 取 Top 5
+           top5 = df_sorted.head(5)
+           self.current_batch = top5['code'].apply(lambda x: str(x).zfill(6)).tolist()
+           
+           # 导入监控列表
+           added_count = 0
+           for _, row in top5.iterrows():
+                code = str(row['code']).zfill(6)
+                name = row['name']
+                # Add to monitor
+                self._monitored_stocks[code] = {
+                    "name": name,
+                    "rules": [], # 默认规则
+                    "last_alert": 0,
+                    "created_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "tags": "auto_hotspot_loop",
+                    "snapshot": {
+                        "score": row.get('score', 0),
+                        "reason": row.get('reason', ''),
+                        "category": row.get('category', '')
+                    }
+                }
+                added_count += 1
+           
+           if added_count > 0:
+               self._save_monitors()
+               names = ",".join(top5['name'].tolist())
+               logger.info(f"Auto Loop: Selected 5 Hotspots: {names}")
+               return f"成功导入 {added_count} 只 (Hotspots)"
+           return "无新标的导入"
+
+        except Exception as e:
+            logger.error(f"Auto Import Error: {e}")
+            import traceback
+            # logger.error(traceback.format_exc())
+            return f"Error: {e}"
+
+    def _perform_daily_settlement(self):
+        """执行每日收盘结算与准备"""
+        try:
+            logger.info("Starting Daily Settlement & Preparation...")
+            
+            # 1. 停止自动交易
+            if self.auto_loop_enabled:
+                self.stop_auto_trading_loop()
+            
+            # 2. 标记今日已结算
+            self._last_settlement_date = datetime.now().strftime('%Y-%m-%d')
+            
+            # 3. 运行选股逻辑，为次日准备
+            # 注意：此时获取的应是今日收盘后的数据 (T日数据)
+            msg = self.import_daily_candidates()
+            
+            # 4. 语音播报
+            settle_msg = f"今日交易结束，收盘结算完成。{msg}。已准备好次日交易。"
+            self._voice.say(settle_msg)
+            logger.info(f"Daily Settlement Done. {msg}")
+
+        except Exception as e:
+            logger.error(f"Daily Settlement Error: {e}")
+
