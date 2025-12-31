@@ -4,21 +4,22 @@ Stock Live Strategy & Alert System
 高性能实时股票跟踪与语音报警模块
 """
 import threading
-import queue
 import time
 import os
 import winsound
 from datetime import datetime
-from typing import Optional, Callable, Dict, Any, Union, List
 import pandas as pd
-from JohnsonUtil import LoggerFactory
+import numpy as np
+from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Any, Union, Optional, Callable
 from intraday_decision_engine import IntradayDecisionEngine
 from risk_engine import RiskEngine
 from trading_logger import TradingLogger
 from JohnsonUtil import commonTips as cct
+from JohnsonUtil import LoggerFactory
 
-logger = LoggerFactory.getLogger()
+logger = LoggerFactory.getLogger(name="stock_live_strategy")
 
 # Optional imports
 try:
@@ -40,10 +41,18 @@ except ImportError:
 
 class VoiceAnnouncer:
     """独立的语音播报引擎"""
+    queue: Queue[dict[str, Optional[str]]]
+    on_speak_start: Optional[Callable[[str], None]]
+    on_speak_end: Optional[Callable[[str], None]]
+    _stop_event: threading.Event
+    current_code: Optional[str]
+    current_engine: Any # pyttsx3.Engine
+    _thread: Optional[threading.Thread]
+
     def __init__(self) -> None:
-        self.queue: queue.Queue = queue.Queue()
-        self.on_speak_start: Optional[Callable[[str], None]] = None # 回调函数: func(code)
-        self.on_speak_end: Optional[Callable[[str], None]] = None   # 回调函数: func(code)
+        self.queue = Queue()
+        self.on_speak_start = None # 回调函数: func(code)
+        self.on_speak_end = None   # 回调函数: func(code)
         self._stop_event = threading.Event()
         self.current_code = None
         self.current_engine = None
@@ -55,7 +64,7 @@ class VoiceAnnouncer:
         else:
             self._thread = None
 
-    def _speak_one(self, text):
+    def _speak_one(self, text: str):
         """单次播报，每次重新初始化以避免 COM 状态问题"""
         engine = None
         try:
@@ -115,7 +124,7 @@ class VoiceAnnouncer:
                 
                 self.current_code = None
                 
-            except queue.Empty:
+            except Empty:
                 continue
             except Exception as e:
                 logger.error(f"Voice Loop Error: {e}")
@@ -148,7 +157,7 @@ class VoiceAnnouncer:
                     temp_list.append(item)
                 else:
                     logger.info(f"🗑️ Removed pending voice for {target_code}")
-        except queue.Empty:
+        except Empty:
             pass
         
         for item in temp_list:
@@ -182,6 +191,28 @@ class StockLiveStrategy:
                  min_position_ratio: float = 0.05,
                  risk_duration_threshold: float = 300,
                  voice_enabled: bool = True):
+        # --- 实例属性注解 (PEP 526) ---
+        self._voice: VoiceAnnouncer
+        self.voice_enabled: bool
+        self._monitored_stocks: dict[str, Any]
+        self._last_process_time: float
+        self._alert_cooldown: float
+        self.enabled: bool
+        self.executor: ThreadPoolExecutor
+        self.config_file: str
+        self.alert_callback: Optional[Callable]
+        self.df: Optional[pd.DataFrame]
+        self.decision_engine: IntradayDecisionEngine
+        self.trading_logger: TradingLogger
+        self.risk_engine: RiskEngine
+        self.auto_loop_enabled: bool
+        self.batch_state: str
+        self.current_batch: list[str]
+        self._settlement_prep_done: bool
+        self._last_settlement_date: Optional[str]
+        self._market_win_rate_cache: float
+        self._market_win_rate_ts: float
+
         self._voice = VoiceAnnouncer()
         self.voice_enabled = voice_enabled      # ★ 新增状态
         self._monitored_stocks = {} 
@@ -525,7 +556,7 @@ class StockLiveStrategy:
         )
         return "added"
 
-    def process_data(self, df_all: pd.DataFrame) -> None:
+    def process_data(self, df_all: pd.DataFrame, concept_top5: list = None) -> None:
         """
         处理每一帧的行情数据
         """
@@ -561,14 +592,13 @@ class StockLiveStrategy:
         
         self._last_process_time = now
         
-        
         # 异步执行
         self.df = df_all.copy()
         logger.info(f"Strategy: Processing cycle for {len(self._monitored_stocks)} monitored stocks")
 
         # --- Auto Loop Check ---
         if self.auto_loop_enabled:
-             self.executor.submit(self._process_auto_loop, df_all)
+             self.executor.submit(self._process_auto_loop, df_all, concept_top5)
 
         self.executor.submit(self._check_strategies, self.df)
 
@@ -1074,14 +1104,25 @@ class StockLiveStrategy:
         self._voice.stop()
         self.executor.shutdown(wait=False)
 
-    def start_auto_trading_loop(self):
-        """开启自动循环优选交易 (支持断点恢复/自动补作业)"""
+    def start_auto_trading_loop(self, force=False, concept_top5=None):
+        """开启自动循环优选交易 (支持断点恢复/自动补作业/强制启动)"""
         self.auto_loop_enabled = True
         
+        # --- 0. 强制启动逻辑 (用于测试) ---
+        if force:
+            self.batch_state = "IDLE"
+            self.current_batch = []
+            self._cleanup_auto_monitors(force_all=True)
+            self._voice.say("自动交易强制选股启动")
+            logger.info("Auto Trading Loop FORCED START (New Batch)")
+            if hasattr(self, 'df'):
+                 self._process_auto_loop(self.df, concept_top5=concept_top5)
+            return True
+
         # --- 1. 持仓恢复检测 ---
         trades = self.trading_logger.get_trades()
         holding_codes = set([t['code'] for t in trades if t['status'] == 'OPEN'])
-        
+        # ... (rest of the logic) ...
         restored_batch = []
         for code, data in self._monitored_stocks.items():
             if str(data.get('tags', '')).startswith('auto_') and code in holding_codes:
@@ -1089,38 +1130,26 @@ class StockLiveStrategy:
 
         # --- 2. 时间状态检测 ---
         now_time = datetime.now()
-        # 简单判断: 15:00 以后算盘后 (不精确，但足够用于启动判断)
         is_after_close = now_time.strftime('%H:%M') >= "15:00"
         
         if restored_batch:
-            # [场景A] 有持仓：直接恢复
             self.batch_state = "IN_PROGRESS"
             self.current_batch = restored_batch
             msg = f"恢复自动交易：检测到 {len(restored_batch)} 只持仓股，继续监控"
             logger.info(msg)
             self._voice.say(msg)
-        
         else:
-            # [场景B] 无持仓
             self.batch_state = "IDLE"
             self.current_batch = []
-            
-            # 无论何时，先清理未持仓的自动股
             self._cleanup_auto_monitors(force_all=True)
             
             if is_after_close:
-                # [场景B-1] 盘后无持仓 -> 执行“收盘作业/准备工作”
                 logger.info("Auto Loop: Startup after close. Performing settlement prep.")
-                # 标记今日已做过
                 self._last_settlement_date = now_time.strftime('%Y-%m-%d')
                 self._voice.say("自动交易：盘后数据整理完成，等待次日开盘")
-                # 此时不需要立即触发 _process_auto_loop，反正也没行情。
-                # 保持 IDLE 状态，第二天早上 process_data 会自动叫起 loop
             else:
-                # [场景B-2] 盘中/盘前无持仓 -> 启动选股循环
                 self._voice.say("自动循环交易模式已启动")
                 logger.info("Auto Trading Loop STARTED (New Batch)")
-                # 立即触发一次检查
                 if hasattr(self, 'df'):
                     self.executor.submit(self._process_auto_loop, self.df)
 
@@ -1131,7 +1160,7 @@ class StockLiveStrategy:
         self._voice.say("自动循环交易已停止")
         logger.info("Auto Trading Loop STOPPED")
 
-    def _process_auto_loop(self, df):
+    def _process_auto_loop(self, df, concept_top5=None):
         """
         自动循环核心逻辑：
         IDLE -> 选股(Wait Entry) -> 持仓(In Progress) -> 清仓(Cleared) -> IDLE
@@ -1144,7 +1173,7 @@ class StockLiveStrategy:
 
             # 1. State: IDLE - 需要选股
             if self.batch_state == "IDLE":
-                msg = self._import_hotspot_candidates()
+                msg = self._import_hotspot_candidates(concept_top5=concept_top5)
                 if "成功导入" in msg:
                     self.batch_state = "WAITING_ENTRY"
                     self.batch_start_time = now
@@ -1190,15 +1219,16 @@ class StockLiveStrategy:
         holding = [t for t in trades if t['status'] == 'OPEN' and str(t.get('code')).zfill(6) in self.current_batch]
         return len(holding)
 
-    def _import_hotspot_candidates(self) -> str:
+    def _import_hotspot_candidates(self, concept_top5=None) -> str:
         """
         专用的自动选股方法：
-        优选“今日热点”中评分最高的5只
+        优选“今日热点”中评分最高的5只标的
+        策略：5个重点板块，每个板块挑选1只最强的个股 (权衡分数、量能、联动)
         """
         if not StockSelector:
             return "StockSelector不可用"
         
-        # 1. 强力清理：除了持仓股之外的所有 auto_ 类股票都移除，确保只保留 5 只
+        # 1. 强力清理：除了持仓股之外的所有 auto_ 类股票都移除
         self._cleanup_auto_monitors(force_all=True)
 
         try:
@@ -1210,26 +1240,57 @@ class StockLiveStrategy:
            if df.empty:
                return "无标的"
            
-           # 筛选 Top 5: 
-           # 1. 优先包含 '热点' 字样的理由
-           # 2. 按分数排序
-           
-           # 识别热点股 (确保 reason 列存在且为 str)
+           # 识别热点股 (确保 reason 列存在)
            if 'reason' in df.columns:
                 df['is_hot'] = df['reason'].fillna('').astype(str).apply(lambda x: 1 if '热点' in x else 0)
            else:
                 df['is_hot'] = 0
 
-           # 排序：热点优先 -> 分数 -> 成交额
-           df_sorted = df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False])
-           
-           # 取 Top 5
-           top5 = df_sorted.head(5)
-           self.current_batch = top5['code'].apply(lambda x: str(x).zfill(6)).tolist()
+           selected_codes = []
+           final_top5_df = pd.DataFrame()
+
+           # --- 策略演进：一个板块一只股 ---
+           if concept_top5 and len(concept_top5) > 0:
+               logger.info(f"Auto Loop: Picking 1 stock per sector from {len(concept_top5)} concepts")
+               for sector_info in concept_top5[:5]:
+                   sector_name = sector_info[0]
+                   # 匹配板块
+                   sub_df = df[df['category'].fillna('').str.contains(sector_name)].copy()
+                   
+                   if not sub_df.empty:
+                       # 权衡选择逻辑: 
+                       # 1. 情绪价值 (score) 
+                       # 2. 量能 (amount)
+                       # 3. 联动强度 (is_hot)
+                       # 4. 价格稳定性 
+                       # 统一归一化简单的排序权重: score:0.5, amount:0.3, ratio:0.2
+                       # 这里简化直接通过多级排序实现
+                       sub_df = sub_df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False])
+                       pick = sub_df.head(1)
+                       if pick['code'].values[0] not in selected_codes:
+                           final_top5_df = pd.concat([final_top5_df, pick])
+                           selected_codes.append(pick['code'].values[0])
+               
+               # 如果板块覆盖不足5个，用全局 Top 补充
+               if len(final_top5_df) < 5:
+                  remaining_needed = 5 - len(final_top5_df)
+                  global_top = df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False])
+                  for _, row in global_top.iterrows():
+                      if row['code'] not in selected_codes:
+                          final_top5_df = pd.concat([final_top5_df, pd.DataFrame([row])])
+                          selected_codes.append(row['code'])
+                          if len(final_top5_df) >= 5: break
+           else:
+               # 降级：无板块信息则直接全局 Top 5
+               final_top5_df = df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False]).head(5)
+
+           # 最终取 Top 5
+           final_top5_df = final_top5_df.head(5)
+           self.current_batch = final_top5_df['code'].apply(lambda x: str(x).zfill(6)).tolist()
            
            # 导入监控列表
            added_count = 0
-           for _, row in top5.iterrows():
+           for _, row in final_top5_df.iterrows():
                 code = str(row['code']).zfill(6)
                 name = row['name']
                 # Add to monitor
@@ -1249,8 +1310,8 @@ class StockLiveStrategy:
            
            if added_count > 0:
                self._save_monitors()
-               names = ",".join(top5['name'].tolist())
-               logger.info(f"Auto Loop: Selected 5 Hotspots: {names}")
+               names = ",".join(final_top5_df['name'].tolist())
+               logger.info(f"Auto Loop: Selected 5 Stocks (1/sector-ish): {names}")
                return f"成功导入 {added_count} 只 (Hotspots)"
            return "无新标的导入"
 
