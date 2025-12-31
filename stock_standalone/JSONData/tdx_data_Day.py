@@ -1988,18 +1988,28 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         # So we must NOT use the first column name 'code' for reading.
         
         file_cols = ct.TDX_Day_columns[1:] # Exclude 'code'
+        try:
+            df = pd.read_csv(
+                    file_path, 
+                    names=file_cols, 
+                    header=None, 
+                    index_col=False, 
+                    # usecols=range(len(file_cols)), # Only read the first len(file_cols) columns (0 to 6)
+                    engine='c',
+                    encoding='gb18030', # Use broadly compatible encoding
+                    encoding_errors='replace', # Ignore encoding errors
+                    on_bad_lines='skip', 
+                    )
+        except pd.errors.ParserError as e:
+            log.warning(f"{code} ParserError reading file {file_path}: {e}")
+            df_err = pd.DataFrame()
+            df_err.attrs['__error__'] = {
+                "code": code,
+                "exc_type": "EmptyFile",
+                "exc_msg": "通达信 TXT 文件为空或格式错误",
+            }
+            return df_err
         
-        df = pd.read_csv(
-            file_path, 
-            names=file_cols, 
-            header=None, 
-            index_col=False, 
-            # usecols=range(len(file_cols)), # Only read the first len(file_cols) columns (0 to 6)
-            engine='c',
-            encoding='gb18030', # Use broadly compatible encoding
-            encoding_errors='replace', # Ignore encoding errors
-            on_bad_lines='skip', 
-        )
 
         # # 倒序取最后 dl+3 行
         # df = df.iloc[-(dl+3):].iloc[::-1].reset_index(drop=True)
@@ -2046,9 +2056,23 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         df = df[final_cols]
 
     except Exception as e:
-        log.error(f"Error {code} reading file {file_path} with read_csv: {e}")
-        # print(f"DEBUG Error: {e}") # Print to stdout for visibility in test logs
-        return pd.DataFrame()
+        # log.error(f"Error {code} reading file {file_path} with read_csv: {e}")
+        # # print(f"DEBUG Error: {e}") # Print to stdout for visibility in test logs
+        # return pd.DataFrame()
+        # return {
+        #         "__error__": True,
+        #         "code": code,
+        #         "exc_type": type(e).__name__,
+        #         "exc_msg": str(e),
+        #     }
+        df_err = pd.DataFrame()
+        df_err.attrs['__error__'] = {
+            "code": code,
+            "exc_type": type(e).__name__,
+            "exc_msg": str(e),
+        }
+        return df_err
+
     df = df[~df.date.duplicated()]
     # print(f'code: {code} df:{len(df)}', end=' ')
     # ------------------------------
@@ -2088,21 +2112,6 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     # ------------------------------
     # 数据完整性检查
     # ------------------------------
-    if resample == 'd' and len(df) >= 3:
-        cond = cct.get_today_duration(df.index[-1]) > 20 or df.close[-3:].max() / df.open[-3:].min() > 1.9
-        if cond:
-            tdx_err_code = cct.GlobalValues().getkey('tdx_err_code') or []
-            if code not in tdx_err_code:
-                tdx_err_code.append(code)
-                cct.GlobalValues().setkey('tdx_err_code', tdx_err_code)
-                log.error(f"{code} dl None outdata!")
-                initTdxdata += 1
-                if write_k_data_status:
-                    write_all_kdata_to_file(code, f_path=file_path)
-                    return get_tdx_Exp_day_to_df(
-                        code, start=start, end=end, dl=dl, newdays=newdays,
-                        type=type, wds=False, lastdays=lastdays, resample=resample, MultiIndex=MultiIndex
-                    )
 
     # ------------------------------
     # MACD 和涨幅
@@ -2177,7 +2186,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     # ------------------------------
     if resample == 'd':
         try:
-            cond = cct.get_today_duration(df.index[-1]) > 20 or df.close[-3:].max() / df.open[-3:].min() > 1.9
+            cond = cct.get_today_duration(df.index[-1]) > 20 or df.close[-3:].max() / df.open[-3:].min() > 5
         except Exception as e:
             log.error(f"tdx_err_code cond check failed: {e}")
             cond = False
@@ -3567,7 +3576,8 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         #                      perpage=1000, days=ct.wcd_limit_day)
         # df = pd.read_csv(block_path,dtype={'code':str},encoding = 'gbk')
     elif market in ['kcb','sh', 'sz', 'cyb' ,'kcb' ,'bj']:
-        df = rl.get_sina_Market_json(market)
+        # df = rl.get_sina_Market_json(market)
+        df = sina_data.Sina().market(market)
         # df = sina_data.Sina().market(market)
     elif market in ['all','bj']:
         df = sina_data.Sina().all
@@ -6351,7 +6361,7 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
         diff_code = [
             co for co in diff_code if co.startswith(cct.code_startswith)]
         if len(diff_code) > 5:
-            log.error("tdx Out:%s code:%s" % (len(diff_code), diff_code[:2]))
+            log.error("tdx Out:%s code:%s" % (len(diff_code), diff_code))
             print(f"diff_code: {len(diff_code)} resample:{resample} ",end='')
             tdx_diff = get_tdx_exp_all_LastDF_DL(
                 diff_code, dt=dl, end=end, ptype=ptype, filter=filter, power=power, lastp=lastp, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support)
@@ -7218,9 +7228,10 @@ if __name__ == '__main__':
     # print(f'time: {time.time() - time_s :.8f}  check code: {code_l} generate_df_vect_daily_features:{len(generate_df_vect_daily_features)} ')
 
     # (get_tdx_Exp_day_to_df_performance(code,dl=ct.Resample_LABELS_Days[resample],resample=resample))
-    code = '300503'
+    code = '300379'
     # df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
-    df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+    # df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+    df=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     import ipdb;ipdb.set_trace()
     # compute_lastdays_percent_profile(df, lastdays=5)
     evtdf = evaluate_trading_signal(df)
