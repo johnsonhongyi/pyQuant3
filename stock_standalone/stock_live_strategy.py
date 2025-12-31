@@ -1075,14 +1075,54 @@ class StockLiveStrategy:
         self.executor.shutdown(wait=False)
 
     def start_auto_trading_loop(self):
-        """开启自动循环优选交易"""
+        """开启自动循环优选交易 (支持断点恢复/自动补作业)"""
         self.auto_loop_enabled = True
-        self.batch_state = "IDLE"
-        self._voice.say("自动循环交易模式已启动")
-        logger.info("Auto Trading Loop STARTED")
-        # 立即触发一次检查
-        if hasattr(self, 'df'):
-            self.executor.submit(self._process_auto_loop, self.df)
+        
+        # --- 1. 持仓恢复检测 ---
+        trades = self.trading_logger.get_trades()
+        holding_codes = set([t['code'] for t in trades if t['status'] == 'OPEN'])
+        
+        restored_batch = []
+        for code, data in self._monitored_stocks.items():
+            if str(data.get('tags', '')).startswith('auto_') and code in holding_codes:
+                restored_batch.append(code)
+
+        # --- 2. 时间状态检测 ---
+        now_time = datetime.now()
+        # 简单判断: 15:00 以后算盘后 (不精确，但足够用于启动判断)
+        is_after_close = now_time.strftime('%H:%M') >= "15:00"
+        
+        if restored_batch:
+            # [场景A] 有持仓：直接恢复
+            self.batch_state = "IN_PROGRESS"
+            self.current_batch = restored_batch
+            msg = f"恢复自动交易：检测到 {len(restored_batch)} 只持仓股，继续监控"
+            logger.info(msg)
+            self._voice.say(msg)
+        
+        else:
+            # [场景B] 无持仓
+            self.batch_state = "IDLE"
+            self.current_batch = []
+            
+            # 无论何时，先清理未持仓的自动股
+            self._cleanup_auto_monitors(force_all=True)
+            
+            if is_after_close:
+                # [场景B-1] 盘后无持仓 -> 执行“收盘作业/准备工作”
+                logger.info("Auto Loop: Startup after close. Performing settlement prep.")
+                # 标记今日已做过
+                self._last_settlement_date = now_time.strftime('%Y-%m-%d')
+                self._voice.say("自动交易：盘后数据整理完成，等待次日开盘")
+                # 此时不需要立即触发 _process_auto_loop，反正也没行情。
+                # 保持 IDLE 状态，第二天早上 process_data 会自动叫起 loop
+            else:
+                # [场景B-2] 盘中/盘前无持仓 -> 启动选股循环
+                self._voice.say("自动循环交易模式已启动")
+                logger.info("Auto Trading Loop STARTED (New Batch)")
+                # 立即触发一次检查
+                if hasattr(self, 'df'):
+                    self.executor.submit(self._process_auto_loop, self.df)
 
     def stop_auto_trading_loop(self):
         """停止自动循环"""
@@ -1157,6 +1197,9 @@ class StockLiveStrategy:
         """
         if not StockSelector:
             return "StockSelector不可用"
+        
+        # 1. 强力清理：除了持仓股之外的所有 auto_ 类股票都移除，确保只保留 5 只
+        self._cleanup_auto_monitors(force_all=True)
 
         try:
            selector = StockSelector()
@@ -1192,7 +1235,7 @@ class StockLiveStrategy:
                 # Add to monitor
                 self._monitored_stocks[code] = {
                     "name": name,
-                    "rules": [], # 默认规则
+                    "rules": [{'type': 'price_up', 'value': float(row.get('price', 0))}], # 默认添加价格突破报警
                     "last_alert": 0,
                     "created_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
                     "tags": "auto_hotspot_loop",
@@ -1230,8 +1273,10 @@ class StockLiveStrategy:
             self._last_settlement_date = datetime.now().strftime('%Y-%m-%d')
             
             # 3. 运行选股逻辑，为次日准备
-            # 注意：此时获取的应是今日收盘后的数据 (T日数据)
-            msg = self.import_daily_candidates()
+            # 修正：收盘结算只清理自动交易状态，不自动导入全量数据，
+            # 而是让 auto_loop 在次日启动时重新筛选 Top 5
+            self._cleanup_auto_monitors(force_all=True) # 清理未持仓的自动股，为明天腾空间
+            msg = "清理完成，等待次日自动选股"
             
             # 4. 语音播报
             settle_msg = f"今日交易结束，收盘结算完成。{msg}。已准备好次日交易。"
@@ -1240,4 +1285,40 @@ class StockLiveStrategy:
 
         except Exception as e:
             logger.error(f"Daily Settlement Error: {e}")
+
+    def _cleanup_auto_monitors(self, force_all: bool = False):
+        """
+        清理自动添加的监控标的
+        策略：
+        1. 找出所有 tag 以 'auto_' 开头的股票
+        2. 检查持仓状态：
+           - 如果有持仓 (OPEN)，保留
+           - 如果无持仓，删除
+        :param force_all: 是否强力清理 (只要没持仓全删，不仅限于 tag 判断) - 慎用, 这里主要用于清理 auto_ 标签
+        """
+        try:
+            # 获取当前持仓代码
+            trades = self.trading_logger.get_trades()
+            holding_codes = set([t['code'] for t in trades if t['status'] == 'OPEN'])
+            
+            to_remove = []
+            
+            for code, data in self._monitored_stocks.items():
+                tags = str(data.get('tags', ''))
+                # 识别 auto 标签 (包括 auto_hotspot_loop 和 auto_YYYY-MM-DD)
+                if tags.startswith('auto_'):
+                    if code not in holding_codes:
+                        to_remove.append(code)
+            
+            if to_remove:
+                for code in to_remove:
+                    del self._monitored_stocks[code]
+                
+                self._save_monitors()
+                logger.info(f"Auto Loop Cleanup: Removed {len(to_remove)} unheld stocks: {to_remove}")
+            else:
+                logger.info("Auto Loop Cleanup: No unheld auto-stocks found.")
+                
+        except Exception as e:
+            logger.error(f"Cleanup Error: {e}")
 
