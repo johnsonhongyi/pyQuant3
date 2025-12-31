@@ -965,8 +965,10 @@ def check_conditions_auto(df, days=6):
         lasth_col = f'lasth{str_i}d'
         lastp2d_col = f'lastp{i+1}d'
         per_col   = f'per{str_i}d'
-        high4_col = f'high4{str_i}d'
-        hmax_col = f'hmax{str_i}d'
+        # high4_col = f'high4{str_i}d'
+        # hmax_col = f'hmax{str_i}d'
+        high4_col = f'high4'
+        hmax_col = f'hmax'
         ma5d_col = f'ma5{str_i}d'
 
         # Get columns efficiently, defaulting to 0
@@ -5045,9 +5047,9 @@ def compare_shifted_df(df, df_aug, lastdays=6):
         'ma20': 'ma20d',
         'ma60': 'ma60d',
         'perc': 'perlastp',
-        'high4': 'high4',
-        'hmax': 'hmax'
     }
+        # 'high4': 'high4',
+        # 'hmax': 'hmax'
 
     for da in range(1, lastdays+1):
         for aug_prefix, orig_col in general_cols_map.items():
@@ -5133,8 +5135,9 @@ def build_aug_from_last_row(df, lastdays=6):
     general_cols = {
         'high':'lasth','close':'lastp','vol':'lastv','perd':'per',
         'upper':'upper','ma5d':'ma5','ma20d':'ma20','ma60d':'ma60',
-        'perlastp':'perc','high4':'high4','hmax':'hmax'
+        'perlastp':'perc'
     }
+    # ,'high4':'high4','hmax':'hmax'
     for da in range(1, lastdays+1):
         for col, prefix in general_cols.items():
             if col in df.columns:
@@ -5177,8 +5180,8 @@ def add_last_days_features(df, lastdays=10):
         df_new[f'perc{da}d'] = df_new['perlastp'].shift(da-1)
 
         # safe_get 列，如果不存在返回 NaN
-        for col in ['high4', 'hmax']:
-            df_new[f'{col}{da}d'] = df_new[col].shift(da-1) if col in df_new else np.nan
+        # for col in ['high4', 'hmax']:
+        #     df_new[f'{col}{da}d'] = df_new[col].shift(da-1) if col in df_new else np.nan
 
     return df_new
 
@@ -5381,8 +5384,8 @@ def generate_lastN_features_dict(df, lastdays=5):
         'ma20d': 'ma20',
         'ma60d': 'ma60',
         'perlastp': 'perc',
-        'high4': 'high4',
-        'hmax': 'hmax',
+        # 'high4': 'high4',
+        # 'hmax': 'hmax',
         'EVAL_STATE': 'eval',
         'trade_signal': 'signal',
         'truer': 'truer'
@@ -5417,8 +5420,8 @@ COL_MAPPING = {
     'ma20d': 'ma20',
     'ma60d': 'ma60',
     'perlastp': 'perc',
-    'high4': 'high4',
-    'hmax': 'hmax',
+    # 'high4': 'high4',
+    # 'hmax': 'hmax',
     'EVAL_STATE': 'eval',
     'trade_signal': 'signal'
 }

@@ -5218,7 +5218,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     row_data = {
                         'percent': row.get('percent', 0),
                         'volume': row.get('volume', 0),
-                        'category': row.get('category', '')
+                        'category': row.get('category', ''),
+                        'price': row.get('price', row.get('trade', 0)),
+                        'high4': row.get('high4', 0),
+                        'max5': row.get('max5', 0),
+                        'max10': row.get('max10', 0),
+                        'hmax': row.get('hmax', 0),
+                        'hmax60': row.get('hmax60', 0),
+                        'low4': row.get('low4', 0),
+                        'low10': row.get('low10', 0),
+                        'low60': row.get('low60', 0),
+                        'lmin': row.get('lmin', 0),
+                        'min5': row.get('min5', 0),
+                        'cmean': row.get('cmean', 0),
+                        'hv': row.get('hv', 0),
+                        'lv': row.get('lv', 0),
+                        'llowvol': row.get('llowvol', 0),
+                        'lastdu4': row.get('lastdu4', 0)
                     }
                     
                     # 获取图标
@@ -5282,7 +5298,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             width = int(min(max(max_len * 8, int(60*self.get_scaled_value())) , 300))  # 经验值：每字符约8像素，可调整
 
             if col == 'name':
-                width = int(getattr(self, "_name_col_width", 80*self.scale_factor))
+                width = int(getattr(self, "_name_col_width", 120*self.scale_factor))
             self.tree.column(col, width=int(width))
         logger.debug(f'adjust_column_widths done :{len(cols)}')
     # ----------------- 排序 ----------------- #
@@ -5299,6 +5315,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         elif pd.api.types.is_numeric_dtype(self.current_df[col]):
             df_sorted = self.current_df.sort_values(by=col, ascending=not reverse)
+        elif col == 'name' and getattr(self, '_use_feature_marking', False) and hasattr(self, 'feature_marker'):
+            # ✅ 名称排序支持图标优先级（与选股窗口逻辑一致）
+            # 生成带图标的辅助排序序列
+            def _name_icon_key(row):
+                row_data = {
+                    'percent': row.get('percent', 0),
+                    'volume': row.get('volume', 0),
+                    'category': row.get('category', ''),
+                    'price': row.get('price', row.get('trade', 0)),
+                    'high4': row.get('high4', 0),
+                    'max5': row.get('max5', 0),
+                    'max10': row.get('max10', 0),
+                    'hmax': row.get('hmax', 0),
+                    'hmax60': row.get('hmax60', 0),
+                    'low4': row.get('low4', 0),
+                    'low10': row.get('low10', 0),
+                    'low60': row.get('low60', 0),
+                    'lmin': row.get('lmin', 0),
+                    'min5': row.get('min5', 0),
+                    'cmean': row.get('cmean', 0),
+                    'hv': row.get('hv', 0),
+                    'lv': row.get('lv', 0),
+                    'llowvol': row.get('llowvol', 0),
+                    'lastdu4': row.get('lastdu4', 0)
+                }
+                icon = self.feature_marker.get_icon_for_row(row_data)
+                return f"{icon} {row['name']}" if icon else row['name']
+            
+            sort_aux = self.current_df.apply(_name_icon_key, axis=1)
+            df_sorted = self.current_df.sort_values(by=col, key=lambda _: sort_aux, ascending=not reverse)
         else:
             df_sorted = self.current_df.sort_values(by=col, key=lambda s: s.astype(str), ascending=not reverse)
 

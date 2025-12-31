@@ -84,25 +84,31 @@ class StockFeatureMarker:
         根据行数据获取应用的标签
         
         Args:
-            row_data: 行数据字典,包含percent, volume等字段
+            row_data: 行数据字典,包含多个技术指标
             
         Returns:
             标签列表
         """
         tags = []
         
-        # 获取数据
+        # 获取所有关键指标
         percent = row_data.get('percent', 0)
         volume = row_data.get('volume', 0)
+        # price = row_data.get('price', 0)
+        # high4 = row_data.get('high4', 0)
+        # max5 = row_data.get('max5', 0)
+        # hmax = row_data.get('hmax', 0)
+        # low4 = row_data.get('low4', 0)
+        # lastdu4 = row_data.get('lastdu4', 0)
         
-        # 1. 涨跌停判断
-        if percent >= 9.9:
+        # 1. 涨跌停与强势判断 (用户定制逻辑)
+        if percent >= 6 and volume > 2:
             tags.append('limit_up')
-        elif percent >= 8.0:
+        elif percent >= 4.0:
             tags.append('near_limit_up')
         elif percent <= -9.9:
             tags.append('limit_down')
-        elif percent <= -8.0:
+        elif percent <= -7.0:
             tags.append('near_limit_down')
         
         # 2. 成交量判断
@@ -121,16 +127,8 @@ class StockFeatureMarker:
     def _is_hot_concept(self, category: str) -> bool:
         """
         判断是否为热门概念
-        
-        Args:
-            category: 概念字符串
-            
-        Returns:
-            是否为热门概念
         """
-        # 热门概念关键词
-        hot_keywords = ['AI', '芯片', '新能源', '军工', '半导体', '锂电池']
-        
+        hot_keywords = ['AI', '芯片', '新能源', '军工', '半导体', '锂电池', '固态电池', '机器人']
         for keyword in hot_keywords:
             if keyword in category:
                 return True
@@ -138,35 +136,57 @@ class StockFeatureMarker:
     
     def get_icon_for_row(self, row_data: dict) -> str:
         """
-        根据行数据获取图标
-        
-        Args:
-            row_data: 行数据字典
-            
-        Returns:
-            图标字符串
+        根据详细技术指标获取复合图标
         """
         icons = []
         
+        # 提取数据点
         percent = row_data.get('percent', 0)
         volume = row_data.get('volume', 0)
-        
-        # 涨跌停图标
-        if percent >= 9.9:
+        price = row_data.get('price', 0)
+        max5 = row_data.get('max5', 0)
+        hmax = row_data.get('hmax', 0)
+        min5 = row_data.get('min5', 0)
+        lmin = row_data.get('lmin', 0)
+        lastdu4 = row_data.get('lastdu4', 0)
+        low4 = row_data.get('low4', 0)
+        category = row_data.get('category', '')
+
+        # 1. 强势/涨停图标 (🔴)
+        if percent >= 6 and volume > 2:
             icons.append(self.ICONS['limit_up'])
-        elif percent <= -9.9:
+        
+        # 2. 弱势/跌停图标 (🟢)
+        if percent <= -9.9:
             icons.append(self.ICONS['limit_down'])
         
-        # 成交量图标
-        if volume >= 5.0:
+        # 3. 成交量异常 (📊)
+        if volume >= 2.0:
             icons.append(self.ICONS['high_volume'])
         
-        # 概念热点图标
-        category = row_data.get('category', '')
+        # 4. 概念热点 (🔥)
         if category and self._is_hot_concept(category):
             icons.append(self.ICONS['hot_concept'])
-        
-        return ' '.join(icons)
+
+        # 5. 突破新高 (⬆️)
+        if price > 0:
+            if (hmax > 0 and price >= hmax) or (max5 > 0 and price >= max5):
+                icons.append(self.ICONS['new_high'])
+
+        # 6. 跌破新低 (⬇️)
+        if price > 0:
+            if (lmin > 0 and price <= lmin) or (min5 > 0 and price <= min5):
+                icons.append(self.ICONS['new_low'])
+
+        # 7. 连阳/星标 (⭐)
+        if lastdu4 >= 3:
+            icons.append(self.ICONS['starred'])
+
+        # 8. 预警/破位 (⚠️)
+        if price > 0 and low4 > 0 and price < low4:
+            icons.append(self.ICONS['alert'])
+            
+        return ''.join(icons)
     
     def apply_marks(self, item_id: str, row_data: dict, add_icon: bool = False):
         """

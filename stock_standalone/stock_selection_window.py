@@ -7,6 +7,16 @@ from typing import Optional, Any, TYPE_CHECKING
 from collections import Counter
 import pandas as pd
 from tk_gui_modules.window_mixin import WindowMixin
+import logging
+
+logger = logging.getLogger(__name__)
+
+# ✅ 股票特征标记模块导入
+try:
+    from stock_feature_marker import StockFeatureMarker
+    FEATURE_MARKER_AVAILABLE = True
+except ImportError:
+    FEATURE_MARKER_AVAILABLE = False
 
 if TYPE_CHECKING:
     from stock_live_strategy import StockLiveStrategy
@@ -51,6 +61,23 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         
         self._init_ui()
         
+        # ✅ 初始化股票特征标记器
+        self.feature_marker = None
+        if FEATURE_MARKER_AVAILABLE:
+            try:
+                # 遵循主窗口的 enable_colors 逻辑: not master.win_var.get()
+                enable_colors = True
+                if hasattr(master, 'win_var'):
+                    enable_colors = not master.win_var.get()
+                self.feature_marker = StockFeatureMarker(self.tree, enable_colors=enable_colors)
+                logger.info(f"✅ 选股窗口股票特征标记器已初始化 (颜色显示: {enable_colors})")
+                
+                # ✅ 绑定主窗口 win_var 变化同步颜色开关
+                if hasattr(master, 'win_var'):
+                    self._win_var_trace_id = master.win_var.trace_add('write', lambda *args: self._sync_feature_colors())
+            except Exception as e:
+                logger.warning(f"⚠️ 选股窗口特征标记器初始化失败: {e}")
+        
         # 默认使用最近一次查询
         if self.history:
             self.concept_filter_var.set(self.history[0])
@@ -62,11 +89,35 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
     def _on_close(self, window_id: str):
         """关闭时保存状态并销毁窗口"""
+        # ✅ 移除 win_var 绑定
+        if hasattr(self, '_win_var_trace_id') and hasattr(self.master, 'win_var'):
+            try:
+                self.master.win_var.trace_remove('write', self._win_var_trace_id)
+            except:
+                pass
         try:
             self.save_window_position(self, window_id)
         except Exception as e:
             print(f"保存窗口位置失败: {e}")
         self.destroy()
+
+    def _sync_feature_colors(self):
+        """响应主窗口 win_var 变化，同步切换颜色集"""
+        if not self.feature_marker or not hasattr(self.master, 'win_var'):
+            return
+        
+        enable = not self.master.win_var.get()
+        self.feature_marker.set_enable_colors(enable)
+        # 记录当前选中项
+        selection = self.tree.selection()
+        # 重新加载数据以应用颜色 (load_data 会循环 tree 并设置 tags)
+        # 注意：这里调用 load_data(force=False) 即可利用缓存快速重绘
+        self.load_data(force=False)
+        # 恢复选中项
+        if selection:
+            try:
+                self.tree.selection_set(selection)
+            except: pass
 
     def _center_window(self):
         self.update_idletasks()
@@ -322,12 +373,58 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 amount_raw = float(row.get('amount', 0))
                 amount_str = f"{amount_raw/100000000:.2f}亿" if amount_raw >= 100000000 else f"{amount_raw/10000:.0f}万"
 
+                # ✅ 整合 StockFeatureMarker 颜色标记与图标
+                all_tags = [tag]
+                display_name = row['name']
+                if self.feature_marker:
+                    code = row['code']
+                    # 🚀 关键：优先从 selector.df_all_realtime 中获取最新且完整的技术指标
+                    # df_candidates 可能只包含基础字段，而 df_all_realtime 包含 high4, max5 等全量计算结果
+                    if self.selector is not None and hasattr(self.selector, 'df_all_realtime') and code in self.selector.df_all_realtime.index:
+                        s_data = self.selector.df_all_realtime.loc[code]
+                    else:
+                        s_data = row
+                        
+                    row_dict = {
+                        'percent': s_data.get('percent', 0),
+                        'volume': s_data.get('volume', 0),
+                        'category': s_data.get('category', ''),
+                        # 详细指标支持（从实时全量库中提取）
+                        'price': s_data.get('price', s_data.get('trade', 0)),
+                        'high4': s_data.get('high4', 0),
+                        'max5': s_data.get('max5', 0),
+                        'max10': s_data.get('max10', 0),
+                        'hmax': s_data.get('hmax', 0),
+                        'hmax60': s_data.get('hmax60', 0),
+                        'low4': s_data.get('low4', 0),
+                        'low10': s_data.get('low10', 0),
+                        'low60': s_data.get('low60', 0),
+                        'lmin': s_data.get('lmin', 0),
+                        'min5': s_data.get('min5', 0),
+                        'cmean': s_data.get('cmean', 0),
+                        'hv': s_data.get('hv', 0),
+                        'lv': s_data.get('lv', 0),
+                        'llowvol': s_data.get('llowvol', 0),
+                        'lastdu4': s_data.get('lastdu4', 0)
+                    }
+                    
+                    # 应用颜色标签
+                    if self.feature_marker.enable_colors:
+                        extra_tags = self.feature_marker.get_tags_for_row(row_dict)
+                        if extra_tags:
+                            all_tags.extend(extra_tags)
+                    
+                    # 应用图标
+                    icon = self.feature_marker.get_icon_for_row(row_dict)
+                    if icon:
+                        display_name = f"{icon} {display_name}"
+
                 self.tree.insert("", "end", iid=row['code'], values=(
-                    row['code'], row['name'], row.get('status', ''), row['score'], row['price'], 
+                    row['code'], display_name, row.get('status', ''), row['score'], row['price'], 
                     f"{row['percent']:.2f}", f"{row.get('昨日涨幅', 0):.2f}", f"{row.get('ratio', 0):.2f}", amount_str,
                     row.get('连阳涨幅', 0), row.get('win', 0), row['volume'], row.get('category', ''), row['reason'], 
                     user_status, user_reason
-                ), tags=(tag,))
+                ), tags=tuple(all_tags))
             
             # 渲染完成后自动调整列宽
             self.after(100, self._auto_fit_columns)
@@ -526,13 +623,21 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         tag = "selected" if status == "选中" else "ignored"
         
         for item_id in selected_items:
+            # 获取当前值与标签
             cur_values = self.tree.item(item_id, "values")
-            # Create new values tuple
+            cur_tags = list(self.tree.item(item_id, "tags"))
+            
+            # 移除旧的状态标签 (selected, ignored, pending)
+            filtered_tags = [t for t in cur_tags if t not in ("selected", "ignored", "pending")]
+            # 将新的状态标签放在最前面（优先级最高）
+            filtered_tags.insert(0, tag)
+            
+            # 更新显示值
             new_values = list(cur_values)
             new_values[14] = status
             new_values[15] = reason
             
-            self.tree.item(item_id, values=new_values, tags=(tag,))
+            self.tree.item(item_id, values=new_values, tags=tuple(filtered_tags))
             
             # 同步更新缓存 DataFrame，以便在筛选后仍能保持标记状态
             code = cur_values[0]
