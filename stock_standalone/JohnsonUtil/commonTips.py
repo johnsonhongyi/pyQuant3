@@ -3956,7 +3956,7 @@ def to_mp_run_async(cmd, urllist, *args, **kwargs):
 
     pool_count = min(int(cpu_count() // 1.3), max(4, data_count // 50)) #9
     # pool_count = min(cpu_count() // 2 + 1, max(4, data_count // 50)) #5
-    log.info("Cpu_count: {pool_count}")
+    log.info(f"Cpu_count: {pool_count}")
     # 少量任务直接单进程，最稳
     if data_count <= 200:
         log.debug(f'code: {urllist}')

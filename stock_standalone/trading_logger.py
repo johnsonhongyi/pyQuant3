@@ -404,11 +404,87 @@ class TradingLogger:
         conn.close()
         return rows
 
+    def get_consecutive_losses(self, code: str, days: int = 10) -> int:
+        """
+        获取某只股票最近连续亏损的次数 (用于“记仇”机制)
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            # 获取最近N天的已平仓记录，按时间倒序
+            cur.execute("""
+                SELECT profit, buy_date FROM trade_records 
+                WHERE code=? AND status='CLOSED' AND date(buy_date) >= date('now', ?)
+                ORDER BY sell_date DESC
+            """, (code, f'-{days} days'))
+            rows = cur.fetchall()
+            conn.close()
+            
+            loss_count = 0
+            for profit, _ in rows:
+                if profit < 0:
+                    loss_count += 1
+                else:
+                    # 一旦遇到盈利，连续亏损中断
+                    break
+            return loss_count
+        except Exception as e:
+            logger.error(f"get_consecutive_losses error: {e}")
+            return 0
+
+    def get_market_sentiment(self, days: int = 5) -> float:
+        """
+        获取最近 N 天的全市场交易胜率 (用于感知市场环境)
+        Returns: 0.0 - 1.0
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT profit FROM trade_records 
+                WHERE status='CLOSED' AND date(sell_date) >= date('now', ?)
+            """, (f'-{days} days',))
+            rows = cur.fetchall()
+            conn.close()
+            
+            if not rows:
+                return 0.5 # 无记录默认中性
+            
+            wins = sum(1 for r in rows if r[0] > 0)
+            return wins / len(rows)
+        except Exception as e:
+            logger.error(f"get_market_sentiment error: {e}")
+            return 0.5
+
 
 if __name__ == '__main__':
     from trading_analyzer import TradingAnalyzer
     
     logger = TradingLogger("./trading_signals.db")
+    
+    # 简单的查看器
+    def view_records(limit=20):
+        try:
+            import pandas as pd
+        except ImportError:
+            print("Pandas not found.")
+            return
+
+        print(f"\n=== 最近 {limit} 笔交易记录 ===")
+        trades = logger.get_trades()
+        if not trades:
+            print("无记录")
+            return
+        
+        df = pd.DataFrame(trades)
+        # 简单格式化
+        cols = ['code', 'name', 'buy_date', 'buy_price', 'sell_date', 'sell_price', 'profit', 'pnl_pct', 'status']
+        # 仅显示存在的列
+        show_cols = [c for c in cols if c in df.columns]
+        print(df[show_cols].head(limit).to_string(index=False))
+
+    view_records()
+    
     analyzer = TradingAnalyzer(logger)
 
     print("--- 股票汇总 ---")
