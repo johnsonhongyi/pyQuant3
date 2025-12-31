@@ -1147,12 +1147,22 @@ class StockLiveStrategy:
         
         for code, data in self._monitored_stocks.items():
             tags = str(data.get('tags', ''))
-            # 只有自动化循环标签的个股才进入 current_batch 进行状态管理
-            if tags == 'auto_hotspot_loop':
+            # 只有自动化/手动循环标签的个股且满足条件才进入 current_batch 进行状态管理
+            if tags.startswith('auto_'):
                 if code in holding_codes:
                     restored_batch_held.append(code)
                 elif str(data.get('created_time', '')).startswith(today_str):
                     restored_batch_today.append(code)
+                # 特殊逻辑：如果是昨日盘后手动选的(15:00后)，也视为今日待建仓任务进行找回
+                elif tags == 'auto_manual_hotspot':
+                    created_time = str(data.get('created_time', ''))
+                    try:
+                        if " " in created_time:
+                            hour = int(created_time.split(" ")[1].split(":")[0])
+                            if hour >= 15:
+                                restored_batch_today.append(code)
+                                logger.info(f"找回昨日收盘后手动选股: {code}")
+                    except: pass
 
         # --- 2. 状态恢复决策 ---
         if restored_batch_held:
@@ -1173,7 +1183,7 @@ class StockLiveStrategy:
             # 确实没作业，重头开始
             self.batch_state = "IDLE"
             self.current_batch = []
-            self._cleanup_auto_monitors(force_all=True)
+            self._cleanup_auto_monitors(force_all=True, tag_filter="auto_hotspot_loop")
 
         # --- 3. 盘后补救逻辑 ---
         if is_after_close:
@@ -1380,9 +1390,8 @@ class StockLiveStrategy:
             self._last_settlement_date = datetime.now().strftime('%Y-%m-%d')
             
             # 3. 运行选股逻辑，为次日准备
-            # 修正：收盘结算只清理自动交易状态，不自动导入全量数据，
-            # 而是让 auto_loop 在次日启动时重新筛选 Top 5
-            self._cleanup_auto_monitors(force_all=True) # 清理未持仓的自动股，为明天腾空间
+            # 修正：收盘结算只清理自动循环逻辑中的监控
+            self._cleanup_auto_monitors(force_all=True, tag_filter="auto_hotspot_loop") # 清理未持仓的自动股，为明天腾空间
             msg = "清理完成，等待次日自动选股"
             
             # 4. 语音播报
