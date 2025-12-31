@@ -5295,10 +5295,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 max_len = max([len(str(x)) for x in self.current_df[col].fillna("").values] + [len(col)])
             except Exception:
                 max_len = len(col)
-            width = int(min(max(max_len * 8, int(60*self.get_scaled_value())) , 300))  # 经验值：每字符约8像素，可调整
+            # 基础集约化：7像素/字符，最小宽45
+            width = int(min(max(max_len * 7, int(45 * self.get_scaled_value())), 350))
 
             if col == 'name':
-                width = int(getattr(self, "_name_col_width", 120*self.scale_factor))
+                width = int(getattr(self, "_name_col_width", 120 * self.scale_factor))
+            elif col == 'code':
+                # 代码列 6 位，80 像素足够
+                width = int(80 * self.scale_factor)
+            elif col in ['ra', 'ral', 'win', 'red', 'kind', 'fib', 'fibl', 'op']:
+                # 极窄技术指标列
+                width = int(45 * self.scale_factor)
+
             self.tree.column(col, width=int(width))
         logger.debug(f'adjust_column_widths done :{len(cols)}')
     # ----------------- 排序 ----------------- #
