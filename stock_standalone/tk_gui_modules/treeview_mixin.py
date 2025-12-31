@@ -58,8 +58,8 @@ class TreeviewMixin:
                 minwidth = int(60 * col_scaled)
                 stretch = False
             elif col == "name":
-                width = int(getattr(self, "_name_col_width", 80 * col_scaled))
-                minwidth = int(60 * col_scaled)
+                width = int(getattr(self, "_name_col_width", 120 * col_scaled))
+                minwidth = int(80 * col_scaled)
                 stretch = False
             elif col in co3other:
                 width = int(60 * col_scaled)
