@@ -40,11 +40,14 @@ class TreeviewMixin:
 
     def _setup_tree_columns(self, tree: ttk.Treeview, cols: Union[list[str], tuple[str, ...]], sort_callback: Optional[Any] = None, other: dict[str, Any] = {}) -> None:
         """
-        通用 Treeview 列初始化函数
+        通用 Treeview 列初始化函数，优化宽度使其更紧凑
         """
-        co2int = ['ra', 'ral', 'fib', 'fibl', 'op', 'ra']
-        co2width = ['boll', 'kind', 'red']
-        co3other = ['MainU']
+        # 定义列宽分类
+        # 极窄列
+        co_narrow = ['ra', 'ral', 'fib', 'fibl', 'op', 'red', 'kind', 'win']
+        # 中等窄列
+        co_mid = ['trade', 'percent', 'per1d', 'perc1d', 'couts', 'boll', 'dff', 'df2', 'MainU']
+        
         col_scaled = self.get_scaled_value() 
 
         for col in cols:
@@ -53,26 +56,26 @@ class TreeviewMixin:
             else:
                 tree.heading(col, text=col)
             
+            # 基础拉伸设置为 True，除非特定列
+            stretch = not getattr(self, 'dfcf_var', tk.BooleanVar(value=False)).get()
+
             if col == "code":
-                width = int(100 * col_scaled)
+                width = int(80 * col_scaled)
                 minwidth = int(60 * col_scaled)
                 stretch = False
             elif col == "name":
                 width = int(getattr(self, "_name_col_width", 120 * col_scaled))
-                minwidth = int(80 * col_scaled)
+                minwidth = int(90 * col_scaled)
                 stretch = False
-            elif col in co3other:
-                width = int(60 * col_scaled)
+            elif col in co_narrow:
+                width = int(45 * col_scaled)
                 minwidth = int(30 * col_scaled)
-                stretch = False
-            elif col in co2int or col in co2width:
-                width = int(40 * col_scaled)
-                minwidth = int(25 * col_scaled)
-                stretch = not getattr(self, 'dfcf_var', tk.BooleanVar(value=False)).get()
+            elif col in co_mid:
+                width = int(55 * col_scaled)
+                minwidth = int(40 * col_scaled)
             else:
-                width = int(60 * col_scaled)
-                minwidth = int(30 * col_scaled)
-                stretch = not getattr(self, 'dfcf_var', tk.BooleanVar(value=False)).get()
+                width = int(50 * col_scaled)
+                minwidth = int(35 * col_scaled)
             tree.column(col, width=width, anchor="center", minwidth=minwidth, stretch=stretch)
 
     def update_treeview_cols(self, new_cols: list[str]) -> None:
