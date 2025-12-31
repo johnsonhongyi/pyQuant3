@@ -309,6 +309,7 @@ class StockSelector:
                     'status': status_tag,
                     'ma5': ma5,
                     'ma10': ma10,
+                    'open': float(data.get('open', 0)),
                     'category': "|".join(stock_cats[:3])
                 }
                 selected_records.append(record)

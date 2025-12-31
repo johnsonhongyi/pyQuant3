@@ -1271,10 +1271,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if self._live_strategy_first_run:
                             # 第一次：延迟执行
                             self._live_strategy_first_run = False
-                            self.after(15 * 1000,lambda: self.live_strategy.process_data(self.df_all))
+                            self.after(15 * 1000,lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None)))
                         else:
                             # 后续：立即执行
-                            self.live_strategy.process_data(self.df_all)
+                            self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None))
 
                 # -------------------------
 
@@ -4090,6 +4090,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             tk.Label(top_frame, text="🔔 实时语音监控列表", font=("Arial", 12, "bold")).pack(side="left")
             
+            tk.Button(top_frame, text="开启自动交易", command=lambda: self.live_strategy.start_auto_trading_loop(force=True, concept_top5=getattr(self, 'concept_top5', None)), bg="#fff9c4").pack(side="right", padx=5)
             tk.Button(top_frame, text="测试报警音", command=lambda: self.live_strategy.test_alert(), bg="#e0f7fa").pack(side="right", padx=5)
             win.lift()
             win.focus_force()
