@@ -214,13 +214,27 @@ class StockLiveStrategy:
         self._market_win_rate_ts: float
 
         self._voice = VoiceAnnouncer()
-        self.voice_enabled = voice_enabled      # ★ 新增状态
+        self.voice_enabled = voice_enabled
         self._monitored_stocks = {} 
-        self._last_process_time = 0
+        self._last_process_time = 0.0
         self._alert_cooldown = alert_cooldown
+        self.enabled = True
+        self.config_file = "voice_alert_config.json"
+        self.alert_callback = None
+        self.df = None
+        
+        # --- 自动交易相关状态初始化 ---
+        self.auto_loop_enabled = False
+        self.batch_state = "IDLE"
+        self.current_batch = []
+        self.batch_last_check = 0.0
+        self._settlement_prep_done = False
+        self._last_settlement_date = None
+        self._market_win_rate_cache = 0.5
+        self._market_win_rate_ts = 0.0
+
         logger.info(f'StockLiveStrategy 初始化: alert_cooldown={alert_cooldown}s, '
                    f'stop_loss={stop_loss_pct:.1%}, take_profit={take_profit_pct:.1%}')
-        self.enabled = True
         
         # 使用 max_workers=1 避免并发资源竞争，本身计算量很小
         self.executor = ThreadPoolExecutor(max_workers=1)
@@ -1107,51 +1121,75 @@ class StockLiveStrategy:
     def start_auto_trading_loop(self, force=False, concept_top5=None):
         """开启自动循环优选交易 (支持断点恢复/自动补作业/强制启动)"""
         self.auto_loop_enabled = True
-        
-        # --- 0. 强制启动逻辑 (用于测试) ---
+        now_time = datetime.now()
+        today_str = now_time.strftime('%Y-%m-%d')
+        is_after_close = now_time.strftime('%H:%M') >= "15:00"
+
+        # --- 0. 手动/强制启动逻辑 (与每日自动循环独立) ---
         if force:
-            self.batch_state = "IDLE"
-            self.current_batch = []
-            self._cleanup_auto_monitors(force_all=True)
-            self._voice.say("自动交易强制选股启动")
-            logger.info("Auto Trading Loop FORCED START (New Batch)")
+            # 手动触发不再重置自动循环的状态，而是作为独立的批次导入
+            self._voice.say("手动热点选股强制启动")
+            logger.info("Manual Hotspot Selection Triggered (Independent Batch)")
             if hasattr(self, 'df'):
-                 self._process_auto_loop(self.df, concept_top5=concept_top5)
+                 self._import_hotspot_candidates(concept_top5=concept_top5, is_manual=True)
+            
+            # 如果是盘后强制启动，标记今日已结算，防止后续 tick 再次触发 Settlement
+            if is_after_close:
+                self._last_settlement_date = today_str
             return True
 
-        # --- 1. 持仓恢复检测 ---
+        # --- 1. 恢复与找回逻辑 ---
         trades = self.trading_logger.get_trades()
         holding_codes = set([t['code'] for t in trades if t['status'] == 'OPEN'])
-        # ... (rest of the logic) ...
-        restored_batch = []
-        for code, data in self._monitored_stocks.items():
-            if str(data.get('tags', '')).startswith('auto_') and code in holding_codes:
-                restored_batch.append(code)
-
-        # --- 2. 时间状态检测 ---
-        now_time = datetime.now()
-        is_after_close = now_time.strftime('%H:%M') >= "15:00"
         
-        if restored_batch:
+        restored_batch_held = []   # 已持仓的 auto 股
+        restored_batch_today = []  # 今日选出但未持仓的 auto 股
+        
+        for code, data in self._monitored_stocks.items():
+            tags = str(data.get('tags', ''))
+            # 只有自动化循环标签的个股才进入 current_batch 进行状态管理
+            if tags == 'auto_hotspot_loop':
+                if code in holding_codes:
+                    restored_batch_held.append(code)
+                elif str(data.get('created_time', '')).startswith(today_str):
+                    restored_batch_today.append(code)
+
+        # --- 2. 状态恢复决策 ---
+        if restored_batch_held:
+            # 优先恢复持仓状态
             self.batch_state = "IN_PROGRESS"
-            self.current_batch = restored_batch
-            msg = f"恢复自动交易：检测到 {len(restored_batch)} 只持仓股，继续监控"
+            self.current_batch = restored_batch_held
+            msg = f"恢复自动交易：检测到 {len(restored_batch_held)} 只持仓股，继续监控"
+            logger.info(msg)
+            self._voice.say(msg)
+        elif restored_batch_today:
+            # 其次找回今日观察名单 (Survival after restart)
+            self.batch_state = "WAITING_ENTRY"
+            self.current_batch = restored_batch_today
+            msg = f"找回自动交易：记录到今日选出的 {len(restored_batch_today)} 只观察股"
             logger.info(msg)
             self._voice.say(msg)
         else:
+            # 确实没作业，重头开始
             self.batch_state = "IDLE"
             self.current_batch = []
             self._cleanup_auto_monitors(force_all=True)
-            
-            if is_after_close:
-                logger.info("Auto Loop: Startup after close. Performing settlement prep.")
-                self._last_settlement_date = now_time.strftime('%Y-%m-%d')
-                self._voice.say("自动交易：盘后数据整理完成，等待次日开盘")
-            else:
+
+        # --- 3. 盘后补救逻辑 ---
+        if is_after_close:
+            # 如果是盘后启动，无论是否找回，都要确保 Settlement 标志位，防止被主循环重置
+            if self._last_settlement_date != today_str:
+                logger.info("Auto Loop: Startup after close. Marking settlement for today.")
+                self._last_settlement_date = today_str
+                if not restored_batch_held and not restored_batch_today:
+                    self._voice.say("自动交易：今日已收盘，等待次日自动选股")
+        else:
+            if not restored_batch_held and not restored_batch_today:
                 self._voice.say("自动循环交易模式已启动")
                 logger.info("Auto Trading Loop STARTED (New Batch)")
-                if hasattr(self, 'df'):
-                    self.executor.submit(self._process_auto_loop, self.df)
+            
+            if hasattr(self, 'df'):
+                self._process_auto_loop(self.df)
 
     def stop_auto_trading_loop(self):
         """停止自动循环"""
@@ -1219,87 +1257,96 @@ class StockLiveStrategy:
         holding = [t for t in trades if t['status'] == 'OPEN' and str(t.get('code')).zfill(6) in self.current_batch]
         return len(holding)
 
-    def _import_hotspot_candidates(self, concept_top5=None) -> str:
+    def _import_hotspot_candidates(self, concept_top5=None, is_manual: bool = False) -> str:
         """
         专用的自动选股方法：
         优选“今日热点”中评分最高的5只标的
         策略：5个重点板块，每个板块挑选1只最强的个股 (权衡分数、量能、联动)
+        
+        :param is_manual: 是否为手动触发。手动触发使用独立标签，不占用/重置每日自动循环的 current_batch。
         """
         if not StockSelector:
             return "StockSelector不可用"
         
-        # 1. 强力清理：除了持仓股之外的所有 auto_ 类股票都移除
-        self._cleanup_auto_monitors(force_all=True)
+        # 1. 标签与清理策略
+        if is_manual:
+            tag = "auto_manual_hotspot"
+            # 手动触发时，清理之前的“非持仓手动股”，但不碰自动循环的标签
+            self._cleanup_auto_monitors(force_all=True, tag_filter="auto_manual_hotspot")
+        else:
+            tag = "auto_hotspot_loop"
+            # 自动循环触发时，只清理自动标签的“非持仓股”
+            self._cleanup_auto_monitors(force_all=True, tag_filter="auto_hotspot_loop")
 
         try:
-           selector = StockSelector()
-           date_str = cct.get_today()
-           # 获取全部候选
-           df = selector.get_candidates_df(logical_date=date_str)
-           
-           if df.empty:
-               return "无标的"
-           
-           # 识别热点股 (确保 reason 列存在)
-           if 'reason' in df.columns:
+            selector = StockSelector()
+            date_str = cct.get_today()
+            # 获取全部候选
+            df = selector.get_candidates_df(logical_date=date_str)
+            
+            if df.empty:
+                return "无标的"
+            
+            # 识别热点股 (确保 reason 列存在)
+            if 'reason' in df.columns:
                 df['is_hot'] = df['reason'].fillna('').astype(str).apply(lambda x: 1 if '热点' in x else 0)
-           else:
+            else:
                 df['is_hot'] = 0
 
-           selected_codes = []
-           final_top5_df = pd.DataFrame()
+            selected_codes = []
+            final_top5_df = pd.DataFrame()
 
-           # --- 策略演进：一个板块一只股 ---
-           if concept_top5 and len(concept_top5) > 0:
-               logger.info(f"Auto Loop: Picking 1 stock per sector from {len(concept_top5)} concepts")
-               for sector_info in concept_top5[:5]:
-                   sector_name = sector_info[0]
-                   # 匹配板块
-                   sub_df = df[df['category'].fillna('').str.contains(sector_name)].copy()
-                   
-                   if not sub_df.empty:
-                       # 权衡选择逻辑: 
-                       # 1. 情绪价值 (score) 
-                       # 2. 量能 (amount)
-                       # 3. 联动强度 (is_hot)
-                       # 4. 价格稳定性 
-                       # 统一归一化简单的排序权重: score:0.5, amount:0.3, ratio:0.2
-                       # 这里简化直接通过多级排序实现
-                       sub_df = sub_df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False])
-                       pick = sub_df.head(1)
-                       if pick['code'].values[0] not in selected_codes:
-                           final_top5_df = pd.concat([final_top5_df, pick])
-                           selected_codes.append(pick['code'].values[0])
-               
-               # 如果板块覆盖不足5个，用全局 Top 补充
-               if len(final_top5_df) < 5:
-                  remaining_needed = 5 - len(final_top5_df)
-                  global_top = df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False])
-                  for _, row in global_top.iterrows():
-                      if row['code'] not in selected_codes:
-                          final_top5_df = pd.concat([final_top5_df, pd.DataFrame([row])])
-                          selected_codes.append(row['code'])
-                          if len(final_top5_df) >= 5: break
-           else:
-               # 降级：无板块信息则直接全局 Top 5
-               final_top5_df = df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False]).head(5)
+            # --- 策略演进：一个板块一只股 ---
+            if concept_top5 and len(concept_top5) > 0:
+                logger.info(f"Auto Loop: Picking 1 stock per sector from {len(concept_top5)} concepts")
+                for sector_info in concept_top5[:5]:
+                    sector_name = sector_info[0]
+                    # 匹配板块
+                    sub_df = df[df['category'].fillna('').str.contains(sector_name)].copy()
+                    
+                    if not sub_df.empty:
+                        # 权衡选择逻辑: 
+                        # 1. 情绪价值 (score) 
+                        # 2. 量能 (amount)
+                        # 3. 联动强度 (is_hot)
+                        # 排序权重: is_hot > score > amount
+                        sub_df = sub_df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False])
+                        pick = sub_df.head(1)
+                        if pick['code'].values[0] not in selected_codes:
+                            final_top5_df = pd.concat([final_top5_df, pick])
+                            selected_codes.append(pick['code'].values[0])
+                
+                # 如果板块覆盖不足5个，用全局 Top 补充
+                if len(final_top5_df) < 5:
+                    global_top = df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False])
+                    for _, row in global_top.iterrows():
+                        if row['code'] not in selected_codes:
+                            final_top5_df = pd.concat([final_top5_df, pd.DataFrame([row])])
+                            selected_codes.append(row['code'])
+                            if len(final_top5_df) >= 5: break
+            else:
+                # 降级：无板块信息则直接全局 Top 5
+                final_top5_df = df.sort_values(by=['is_hot', 'score', 'amount'], ascending=[False, False, False]).head(5)
 
-           # 最终取 Top 5
-           final_top5_df = final_top5_df.head(5)
-           self.current_batch = final_top5_df['code'].apply(lambda x: str(x).zfill(6)).tolist()
-           
-           # 导入监控列表
-           added_count = 0
-           for _, row in final_top5_df.iterrows():
+            # 最终取 Top 5
+            final_top5_df = final_top5_df.head(5)
+            
+            # 手动执行不干扰自动化状态机的 Batch 限制
+            if not is_manual:
+                self.current_batch = final_top5_df['code'].apply(lambda x: str(x).zfill(6)).tolist()
+            
+            # 导入监控列表
+            added_count = 0
+            for _, row in final_top5_df.iterrows():
                 code = str(row['code']).zfill(6)
                 name = row['name']
                 # Add to monitor
                 self._monitored_stocks[code] = {
                     "name": name,
-                    "rules": [{'type': 'price_up', 'value': float(row.get('price', 0))}], # 默认添加价格突破报警
+                    "rules": [{'type': 'price_up', 'value': float(row.get('price', 0))}], 
                     "last_alert": 0,
                     "created_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "tags": "auto_hotspot_loop",
+                    "tags": tag,
                     "snapshot": {
                         "score": row.get('score', 0),
                         "reason": row.get('reason', ''),
@@ -1308,17 +1355,16 @@ class StockLiveStrategy:
                 }
                 added_count += 1
            
-           if added_count > 0:
-               self._save_monitors()
-               names = ",".join(final_top5_df['name'].tolist())
-               logger.info(f"Auto Loop: Selected 5 Stocks (1/sector-ish): {names}")
-               return f"成功导入 {added_count} 只 (Hotspots)"
-           return "无新标的导入"
+            if added_count > 0:
+                self._save_monitors()
+                names = ",".join(final_top5_df['name'].tolist())
+                mode_str = "Manual" if is_manual else "Auto"
+                logger.info(f"{mode_str} Hotspots: Selected {added_count} Stocks: {names}")
+                return f"成功导入 {added_count} 只 ({mode_str})"
+            return "无新标的导入"
 
         except Exception as e:
             logger.error(f"Auto Import Error: {e}")
-            import traceback
-            # logger.error(traceback.format_exc())
             return f"Error: {e}"
 
     def _perform_daily_settlement(self):
@@ -1347,15 +1393,11 @@ class StockLiveStrategy:
         except Exception as e:
             logger.error(f"Daily Settlement Error: {e}")
 
-    def _cleanup_auto_monitors(self, force_all: bool = False):
+    def _cleanup_auto_monitors(self, force_all: bool = False, tag_filter: str = "auto_"):
         """
-        清理自动添加的监控标的
-        策略：
-        1. 找出所有 tag 以 'auto_' 开头的股票
-        2. 检查持仓状态：
-           - 如果有持仓 (OPEN)，保留
-           - 如果无持仓，删除
-        :param force_all: 是否强力清理 (只要没持仓全删，不仅限于 tag 判断) - 慎用, 这里主要用于清理 auto_ 标签
+        清理自动/手动添加的监控标的
+        :param force_all: 是否强力清理 (不考虑今日创建时间)
+        :param tag_filter: 标签过滤前缀，默认清理所有 auto_ 开头的
         """
         try:
             # 获取当前持仓代码
@@ -1364,12 +1406,19 @@ class StockLiveStrategy:
             
             to_remove = []
             
+            today_str = datetime.now().strftime('%Y-%m-%d')
             for code, data in self._monitored_stocks.items():
                 tags = str(data.get('tags', ''))
-                # 识别 auto 标签 (包括 auto_hotspot_loop 和 auto_YYYY-MM-DD)
-                if tags.startswith('auto_'):
-                    if code not in holding_codes:
-                        to_remove.append(code)
+                # 识别标签
+                if tags.startswith(tag_filter):
+                    if code in holding_codes:
+                        continue
+                    # 如果不是强制清理（如盘中维护），且是今天刚添加的，则保留
+                    if not force_all:
+                        created_time = str(data.get('created_time', ''))
+                        if created_time.startswith(today_str):
+                            continue
+                    to_remove.append(code)
             
             if to_remove:
                 for code in to_remove:
