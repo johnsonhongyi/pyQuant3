@@ -103,7 +103,7 @@ def get_stock_code_path() -> Optional[str]:
 
     # --- 1. 直接存在 ---
     if os.path.exists(default_path):
-        if os.path.getsize(default_path) > 0:
+        if os.path.getsize(default_path) >= 0:
             log.info(f"使用本地配置: {default_path}")
             return default_path
         else:
@@ -134,7 +134,7 @@ def get_stock_code_path() -> Optional[str]:
 
 class StockCode:
     start_t: float
-    STOCK_CODE_PATH: Optional[str]
+    STOCK_CODE_PATH: Optional[str] = "stock_codes.conf"
     encoding: str
     stock_code_path: str
     exceptCount: Optional[int]
@@ -145,7 +145,7 @@ class StockCode:
         # self.STOCK_CODE_PATH = os.path.join(BASE_DIR,"stock_codes.conf")
         self.STOCK_CODE_PATH = get_stock_code_path()
         if not self.STOCK_CODE_PATH:
-            log.critical("stock_codes.conf 加载失败，程序无法继续运行")
+            log.error("stock_codes.conf 加载失败，程序无法继续运行")
 
         self.encoding = 'gbk'
         self.stock_code_path = self.get_stock_code_path_func()
@@ -280,6 +280,7 @@ class Sina:
         self.table = 'all'
         self.sina_limit_time = cct.sina_limit_time
         pd.options.mode.chained_assignment = None
+        self.market_type = None
         self.cname = False
         self.encoding = 'gbk'
         self.sinaheader = {
@@ -351,7 +352,7 @@ class Sina:
         all_codes = self.stockcode.get_stock_codes()
         self.load_stock_codes(all_codes)
         time_s = time.time()
-        
+        self.market_type = 'all'
         # 1. 尝试从 HDF5 加载历史数据
         sina_limit_time_val: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
         h5 = h5a.load_hdf_db(self.hdf_name, self.table, code_l=self.stock_codes, limit_time=sina_limit_time_val)
@@ -449,115 +450,114 @@ class Sina:
         
         df = self.get_stock_data()
         
-        if df is None or len(df) == 0:
-            log.warning("Failed to fetch fresh data from Sina")
-            return self._filter_suspended(h5) if h5 is not None else pd.DataFrame()
+        # if df is None or len(df) == 0:
+        #     log.warning("Failed to fetch fresh data from Sina")
+        #     return self._filter_suspended(h5) if h5 is not None else pd.DataFrame()
 
-        # 3. 确定是否需要从历史轨迹重建 (Anytime Recovery)
-        agg_data = self.agg_cache.getkey('agg_metrics')
-        cache_needs_rebuild = False
-        if agg_data is None or agg_data.empty:
-            cache_needs_rebuild = True
-        else:
-            # 质量校验：如果 0.0 比例过高，强制重建
-            for c_check in ['nlow', 'nhigh']:
-                if c_check in agg_data.columns:
-                    zero_ratio = (agg_data[c_check] <= 0).sum() / len(agg_data)
-                    if zero_ratio > 0.3:
-                        log.warning("In-memory agg_metrics poor (zero_ratio %s: %.2f), rebuilding" % (c_check, zero_ratio))
-                        cache_needs_rebuild = True
-                        break
+        # # 3. 确定是否需要从历史轨迹重建 (Anytime Recovery)
+        # agg_data = self.agg_cache.getkey('agg_metrics')
+        # cache_needs_rebuild = False
+        # if agg_data is None or agg_data.empty:
+        #     cache_needs_rebuild = True
+        # else:
+        #     # 质量校验：如果 0.0 比例过高，强制重建
+        #     for c_check in ['nlow', 'nhigh']:
+        #         if c_check in agg_data.columns:
+        #             zero_ratio = (agg_data[c_check] <= 0).sum() / len(agg_data)
+        #             if zero_ratio > 0.3:
+        #                 log.warning("In-memory agg_metrics poor (zero_ratio %s: %.2f), rebuilding" % (c_check, zero_ratio))
+        #                 cache_needs_rebuild = True
+        #                 break
         
-        # 4. 如果缓存缺失，优先从 MultiIndex 历史恢复，然后再应用当前 Tick
-        now_int = cct.get_now_time_int()
-        if cache_needs_rebuild or 915 < now_int <= 1030 :
-            log.info("AggregatorCache poor or missing, rebuilding from MultiIndex HDF5...")
-            l_limit_time = int(cct.sina_limit_time)
-            h5_mi_fname = 'sina_MultiIndex_data'
-            h5_mi_table = 'all_' + str(l_limit_time)
-            h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
-            df_final = self._rebuild_agg_cache(h5_hist, df)
-            # 此时内存缓存已由 _rebuild_agg_cache 设置好
-        else:
-            # 正常更新逻辑：先更新增量，再合并
-            h5_mi_fname = 'sina_MultiIndex_data'
-            l_limit_time = int(cct.sina_limit_time)
-            h5_mi_table = 'all_' + str(l_limit_time)
-            h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
-            self._update_agg_cache(df,h5_hist)
-            agg_data = self.agg_cache.getkey('agg_metrics')
-            df_final = cct.combine_dataFrame(df, agg_data)
-            if 'nhigh' not in df_final.columns:
-                df_final['nhigh'] = df_final['close']
-            if 'nclose' not in df_final.columns:
-                df_final['nclose'] = df_final['close']
-        # 5. 合并 lastbuy 并持久化
-        df_final = self.combine_lastbuy(df_final)
-        # 使用 index=False 避免反转索引，且先 copy 避免影响返回的对象
-        h5a.write_hdf_db(self.hdf_name, df_final.copy(), self.table, index=False)
+        # # 4. 如果缓存缺失，优先从 MultiIndex 历史恢复，然后再应用当前 Tick
+        # now_int = cct.get_now_time_int()
+        # if cache_needs_rebuild or 915 < now_int <= 1030 :
+        #     log.info("AggregatorCache poor or missing, rebuilding from MultiIndex HDF5...")
+        #     l_limit_time = int(cct.sina_limit_time)
+        #     h5_mi_fname = 'sina_MultiIndex_data'
+        #     h5_mi_table = 'all_' + str(l_limit_time)
+        #     h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
+        #     df_final = self._rebuild_agg_cache(h5_hist, df)
+        #     # 此时内存缓存已由 _rebuild_agg_cache 设置好
+        # else:
+        #     # 正常更新逻辑：先更新增量，再合并
+        #     h5_mi_fname = 'sina_MultiIndex_data'
+        #     l_limit_time = int(cct.sina_limit_time)
+        #     h5_mi_table = 'all_' + str(l_limit_time)
+        #     h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
+        #     self._update_agg_cache(df,h5_hist)
+        #     agg_data = self.agg_cache.getkey('agg_metrics')
+        #     df_final = cct.combine_dataFrame(df, agg_data)
+        #     if 'nhigh' not in df_final.columns:
+        #         df_final['nhigh'] = df_final['close']
+        #     if 'nclose' not in df_final.columns:
+        #         df_final['nclose'] = df_final['close']
+        # # 5. 合并 lastbuy 并持久化
+        # df_final = self.combine_lastbuy(df_final)
+        # # 使用 index=False 避免反转索引，且先 copy 避免影响返回的对象
+        # h5a.write_hdf_db(self.hdf_name, df_final.copy(), self.table, index=False)
 
-        if df_final is not None and len(df_final) > 0:
-            # 格式化数值
-            for col in ['nclose', 'nstd']:
-                if col in df_final.columns:
-                    df_final[col] = df_final[col].round(2)
+        # if df_final is not None and len(df_final) > 0:
+        #     # 格式化数值
+        #     for col in ['nclose', 'nstd']:
+        #         if col in df_final.columns:
+        #             df_final[col] = df_final[col].round(2)
             
-            if 'ticktime' in df_final.columns:
-                if df_final is not None and not df_final.empty:
-                    df_final.loc[:, 'ticktime'] = df_final['ticktime'].astype(str).apply(lambda x: x if ':' in x else f"{x.zfill(6)[:2]}:{x.zfill(6)[2:4]}:{x.zfill(6)[4:6]}")
+        #     if 'ticktime' in df_final.columns:
+        #         if df_final is not None and not df_final.empty:
+        #             df_final.loc[:, 'ticktime'] = df_final['ticktime'].astype(str).apply(lambda x: x if ':' in x else f"{x.zfill(6)[:2]}:{x.zfill(6)[2:4]}:{x.zfill(6)[4:6]}")
 
-        log.info("Sina.all (optimized) total time:%0.2f" % (time.time() - time_s))
-        if df_final is None or df_final.empty:
-             return pd.DataFrame()
+        # log.info("Sina.all (optimized) total time:%0.2f" % (time.time() - time_s))
+        # if df_final is None or df_final.empty:
+        #      return pd.DataFrame()
              
-        df_final = self._sanitize_indicators(df_final)
+        # df_final = self._sanitize_indicators(df_final)
              
-        # 6. 定期保存 MultiIndex 轨迹数据 (用于程序重启后重建 nlow/nhigh)
-        # 每 5 分钟保存一次，避免 I/O 过载
-        now_time = time.time()
-        # 显式转换以消除 Pylance 类型警告
-        last_mi_save_val: float = 0.0
-        last_mi_save_obj = self.agg_cache.getkey('last_mi_save_time')
-        if last_mi_save_obj is not None:
-            try:
-                last_mi_save_val = float(last_mi_save_obj)
-            except (ValueError, TypeError):
-                last_mi_save_val = 0.0
+        # # 6. 定期保存 MultiIndex 轨迹数据 (用于程序重启后重建 nlow/nhigh)
+        # # 每 5 分钟保存一次，避免 I/O 过载
+        # now_time = time.time()
+        # # 显式转换以消除 Pylance 类型警告
+        # last_mi_save_val: float = 0.0
+        # last_mi_save_obj = self.agg_cache.getkey('last_mi_save_time')
+        # if last_mi_save_obj is not None:
+        #     try:
+        #         last_mi_save_val = float(last_mi_save_obj)
+        #     except (ValueError, TypeError):
+        #         last_mi_save_val = 0.0
         
-        if now_time - last_mi_save_val > 300:
-            h5_mi_fname = 'sina_MultiIndex_data'
-            # 显式转换为 int 以消除类型警告
-            limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
-            h5_mi_table = 'all_' + str(limit_time_int)
-            # 仅在交易时间内记录
-            if cct.get_work_time():
-                # 构造 MultiIndex 精简格式轨迹: [code, ticktime, close, high, low, llastp, volume, lastbuy]
-                # 这必须与 format_response_data 中的 mi_cols 保持绝对一致以避免 ValueError
-                mi_cols = ['code', 'ticktime', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
-                mi_df = df_final.loc[:, [c for c in mi_cols if c in df_final.columns]].copy()
+        # if now_time - last_mi_save_val > 300:
+        #     h5_mi_fname = 'sina_MultiIndex_data'
+        #     # 显式转换为 int 以消除类型警告
+        #     limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
+        #     h5_mi_table = 'all_' + str(limit_time_int)
+        #     # 仅在交易时间内记录
+        #     if cct.get_work_time():
+        #         # 构造 MultiIndex 精简格式轨迹: [code, ticktime, close, high, low, llastp, volume, lastbuy]
+        #         # 这必须与 format_response_data 中的 mi_cols 保持绝对一致以避免 ValueError
+        #         mi_cols = ['code', 'ticktime', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
+        #         mi_df = df_final.loc[:, [c for c in mi_cols if c in df_final.columns]].copy()
                 
-                if isinstance(mi_df, pd.DataFrame):
-                    # 1. 无条件 Reset Index，确保所有数据 flattened，防止 ticktime 藏在 Index 中漏过类型检查
-                    if not isinstance(mi_df.index, pd.RangeIndex):
-                         mi_df = mi_df.reset_index()
+        #         if isinstance(mi_df, pd.DataFrame):
+        #             # 1. 无条件 Reset Index，确保所有数据 flattened，防止 ticktime 藏在 Index 中漏过类型检查
+        #             if not isinstance(mi_df.index, pd.RangeIndex):
+        #                  mi_df = mi_df.reset_index()
 
-                    # 2. 确保 'code' 和 'ticktime' 存在，并在 columns 中
-                    if 'code' in mi_df.columns and 'ticktime' in mi_df.columns:
-                        # 3. 强制转换 ticktime 为 datetime64，严格匹配 format_response_data 的写入类型
-                        if not pd.api.types.is_datetime64_any_dtype(mi_df['ticktime']):
-                             mi_df['ticktime'] = pd.to_datetime(mi_df['ticktime'], errors='coerce')
+        #             # 2. 确保 'code' 和 'ticktime' 存在，并在 columns 中
+        #             if 'code' in mi_df.columns and 'ticktime' in mi_df.columns:
+        #                 # 3. 强制转换 ticktime 为 datetime64，严格匹配 format_response_data 的写入类型
+        #                 if not pd.api.types.is_datetime64_any_dtype(mi_df['ticktime']):
+        #                      mi_df['ticktime'] = pd.to_datetime(mi_df['ticktime'], errors='coerce')
                         
-                        # 4. 设置 MultiIndex
-                        mi_df = mi_df.set_index(['code', 'ticktime'])
+        #                 # 4. 设置 MultiIndex
+        #                 mi_df = mi_df.set_index(['code', 'ticktime'])
 
+        #             # 使用 index=True 强制保存索引，确保 MultiIndex 能被正确持久化
+        #             h5a.write_hdf_db(h5_mi_fname, mi_df, table=h5_mi_table, index=True, MultiIndex=True)
+        #             self.agg_cache.setkey('last_mi_save_time', now_time)
+        #             log.info("Saved MultiIndex history (sync) to %s cols:%s" % (h5_mi_fname, mi_df.columns.tolist()))
 
-
-                    # 使用 index=True 强制保存索引，确保 MultiIndex 能被正确持久化
-                    h5a.write_hdf_db(h5_mi_fname, mi_df, table=h5_mi_table, index=True, MultiIndex=True)
-                    self.agg_cache.setkey('last_mi_save_time', now_time)
-                    log.info("Saved MultiIndex history (sync) to %s cols:%s" % (h5_mi_fname, mi_df.columns.tolist()))
-
-        return self._filter_suspended(df_final)
+        return self._filter_suspended(df)
+        # return self._filter_suspended(df_final)
 
     def _update_agg_cache(self, df_latest: pd.DataFrame,h5_hist: pd.DataFrame) -> None:
         """增量更新内存中的聚合指标 (带时间窗口控制)"""
@@ -820,11 +820,12 @@ class Sina:
         if market in ['all']:
             return self.all
         else:
+
+            self.market_type = market
             self.stockcode = StockCode()
             self.stock_code_path = self.stockcode.stock_code_path
             all_codes = self.stockcode.get_stock_codes()
             self.load_stock_codes(all_codes)
-            
             if market == 'sh':
                 self.stock_codes = [elem for elem in self.stock_codes if elem.startswith('60') or elem.startswith('688')]
                 self.stock_with_exchange_list = [('sh%s') % stock_code for stock_code in self.stock_codes]
@@ -890,7 +891,7 @@ class Sina:
                 request_list_final = ','.join(self.stock_with_exchange_list)
                 self.stock_list.append(request_list_final)
                 self.request_num = 1
-                
+            
             return self._filter_suspended(self.get_stock_data())
 
 
@@ -907,6 +908,118 @@ class Sina:
         if not tasks:
             tasks = [self.get_stocks_by_range(0, session)]
         await asyncio.gather(*tasks)
+
+    def fill_other_data(self, df):
+        time_s = time.time()
+        if df is None or len(df) == 0:
+            log.warning("Failed to fetch fresh data from Sina")
+            return self._filter_suspended(h5) if h5 is not None else pd.DataFrame()
+
+        # 3. 确定是否需要从历史轨迹重建 (Anytime Recovery)
+        agg_data = self.agg_cache.getkey('agg_metrics')
+        cache_needs_rebuild = False
+        if agg_data is None or agg_data.empty:
+            cache_needs_rebuild = True
+        else:
+            # 质量校验：如果 0.0 比例过高，强制重建
+            for c_check in ['nlow', 'nhigh']:
+                if c_check in agg_data.columns:
+                    zero_ratio = (agg_data[c_check] <= 0).sum() / len(agg_data)
+                    if zero_ratio > 0.3:
+                        log.warning("In-memory agg_metrics poor (zero_ratio %s: %.2f), rebuilding" % (c_check, zero_ratio))
+                        cache_needs_rebuild = True
+                        break
+        
+        # 4. 如果缓存缺失，优先从 MultiIndex 历史恢复，然后再应用当前 Tick
+        now_int = cct.get_now_time_int()
+        if cache_needs_rebuild or 915 < now_int <= 1030 :
+            log.info("AggregatorCache poor or missing, rebuilding from MultiIndex HDF5...")
+            l_limit_time = int(cct.sina_limit_time)
+            h5_mi_fname = 'sina_MultiIndex_data'
+            h5_mi_table = 'all_' + str(l_limit_time)
+            h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
+            df_final = self._rebuild_agg_cache(h5_hist, df)
+            # 此时内存缓存已由 _rebuild_agg_cache 设置好
+        else:
+            # 正常更新逻辑：先更新增量，再合并
+            h5_mi_fname = 'sina_MultiIndex_data'
+            l_limit_time = int(cct.sina_limit_time)
+            h5_mi_table = 'all_' + str(l_limit_time)
+            h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
+            self._update_agg_cache(df,h5_hist)
+            agg_data = self.agg_cache.getkey('agg_metrics')
+            df_final = cct.combine_dataFrame(df, agg_data)
+            if 'nhigh' not in df_final.columns:
+                df_final['nhigh'] = df_final['close']
+            if 'nclose' not in df_final.columns:
+                df_final['nclose'] = df_final['close']
+        # 5. 合并 lastbuy 并持久化
+        df_final = self.combine_lastbuy(df_final)
+        # 使用 index=False 避免反转索引，且先 copy 避免影响返回的对象
+        if self.market_type is not None and self.market_type == 'all':
+            h5a.write_hdf_db(self.hdf_name, df_final.copy(), self.table, index=False)
+
+        if df_final is not None and len(df_final) > 0:
+            # 格式化数值
+            for col in ['nclose', 'nstd']:
+                if col in df_final.columns:
+                    df_final[col] = df_final[col].round(2)
+            
+            if 'ticktime' in df_final.columns:
+                if df_final is not None and not df_final.empty:
+                    df_final.loc[:, 'ticktime'] = df_final['ticktime'].astype(str).apply(lambda x: x if ':' in x else f"{x.zfill(6)[:2]}:{x.zfill(6)[2:4]}:{x.zfill(6)[4:6]}")
+
+        log.info("Sina.all (optimized) total time:%0.2f" % (time.time() - time_s))
+        if df_final is None or df_final.empty:
+             return pd.DataFrame()
+             
+        df_final = self._sanitize_indicators(df_final)
+             
+        # 6. 定期保存 MultiIndex 轨迹数据 (用于程序重启后重建 nlow/nhigh)
+        # 每 5 分钟保存一次，避免 I/O 过载
+        now_time = time.time()
+        # 显式转换以消除 Pylance 类型警告
+        last_mi_save_val: float = 0.0
+        last_mi_save_obj = self.agg_cache.getkey('last_mi_save_time')
+        if last_mi_save_obj is not None:
+            try:
+                last_mi_save_val = float(last_mi_save_obj)
+            except (ValueError, TypeError):
+                last_mi_save_val = 0.0
+        
+        if now_time - last_mi_save_val > 300:
+            h5_mi_fname = 'sina_MultiIndex_data'
+            # 显式转换为 int 以消除类型警告
+            limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
+            h5_mi_table = 'all_' + str(limit_time_int)
+            # 仅在交易时间内记录
+            if cct.get_work_time():
+                # 构造 MultiIndex 精简格式轨迹: [code, ticktime, close, high, low, llastp, volume, lastbuy]
+                # 这必须与 format_response_data 中的 mi_cols 保持绝对一致以避免 ValueError
+                mi_cols = ['code', 'ticktime', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
+                mi_df = df_final.loc[:, [c for c in mi_cols if c in df_final.columns]].copy()
+                
+                if isinstance(mi_df, pd.DataFrame):
+                    # 1. 无条件 Reset Index，确保所有数据 flattened，防止 ticktime 藏在 Index 中漏过类型检查
+                    if not isinstance(mi_df.index, pd.RangeIndex):
+                         mi_df = mi_df.reset_index()
+
+                    # 2. 确保 'code' 和 'ticktime' 存在，并在 columns 中
+                    if 'code' in mi_df.columns and 'ticktime' in mi_df.columns:
+                        # 3. 强制转换 ticktime 为 datetime64，严格匹配 format_response_data 的写入类型
+                        if not pd.api.types.is_datetime64_any_dtype(mi_df['ticktime']):
+                             mi_df['ticktime'] = pd.to_datetime(mi_df['ticktime'], errors='coerce')
+                        
+                        # 4. 设置 MultiIndex
+                        mi_df = mi_df.set_index(['code', 'ticktime'])
+
+                    # 使用 index=True 强制保存索引，确保 MultiIndex 能被正确持久化
+                    if self.market_type is not None and self.market_type == 'all':
+                        h5a.write_hdf_db(h5_mi_fname, mi_df, table=h5_mi_table, index=True, MultiIndex=True)
+                    self.agg_cache.setkey('last_mi_save_time', now_time)
+                    log.info("Saved MultiIndex history (sync) to %s cols:%s" % (h5_mi_fname, mi_df.columns.tolist()))
+
+        return df_final
 
     def get_stock_data(self, retry_count: int = 3, pause: float = 0.01) -> pd.DataFrame:
         for _ in range(retry_count):
@@ -926,6 +1039,7 @@ class Sina:
             
             df = self.format_response_data()
             if df is not None:
+                df = self.fill_other_data(df)
                 return self._filter_suspended(df)
             else:
                 return pd.DataFrame()

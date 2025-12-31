@@ -3958,14 +3958,35 @@ def to_mp_run_async(cmd, urllist, *args, **kwargs):
     # pool_count = min(cpu_count() // 2 + 1, max(4, data_count // 50)) #5
     log.info(f"Cpu_count: {pool_count}")
     # 少量任务直接单进程，最稳
+    # if data_count <= 200:
+    #     log.debug(f'code: {urllist}')
+    #     for c in tqdm(urllist, desc="mp_run_async-Running", ncols=getattr(ct, 'ncols', 80)):
+    #         try:
+    #             r = cmd(c, **kwargs)
+    #             if r is not None and (not hasattr(r, 'empty') or not r.empty):
+    #                 result.append(r)
+    #         except Exception as e:
+    #             errors.append((c, type(e).__name__, str(e)))
     if data_count <= 200:
         log.debug(f'code: {urllist}')
         for c in tqdm(urllist, desc="mp_run_async-Running", ncols=getattr(ct, 'ncols', 80)):
             try:
                 r = cmd(c, **kwargs)
-                if r is not None and (not hasattr(r, 'empty') or not r.empty):
+                if r is None:
+                    continue
+                # 1️⃣ 子进程返回的 dict 错误
+                elif isinstance(r, dict) and r.get("__error__"):
+                    errors.append((r["code"], r["exc_type"], r["exc_msg"]))
+                # 2️⃣ DataFrame 错误通过 attrs
+                elif hasattr(r, 'attrs') and '__error__' in r.attrs:
+                    err_info = r.attrs['__error__']
+                    errors.append((err_info['code'], err_info['exc_type'], err_info['exc_msg']))
+                # 3️⃣ 有效 DataFrame
+                elif not hasattr(r, 'empty') or not r.empty:
                     result.append(r)
+
             except Exception as e:
+                # 这里捕获 cmd 函数本身异常
                 errors.append((c, type(e).__name__, str(e)))
     else:
         # cpu_used = cpu_count() // 2 + 1 #7
@@ -3989,17 +4010,35 @@ def to_mp_run_async(cmd, urllist, *args, **kwargs):
                     desc="Running_MP",
                     ncols=getattr(ct, 'ncols', 80),
                 ):
+                    # if r is None:
+                    #     continue
+
+                    # if isinstance(r, dict) and r.get("__error__"):
+                    #     errors.append(
+                    #         (r["code"], r["exc_type"], r["exc_msg"])
+                    #     )
+                    #     continue
+
+                    # if not hasattr(r, 'empty') or not r.empty:
+                    #     result.append(r)
+
+                    # r 是子进程返回
                     if r is None:
                         continue
 
-                    if isinstance(r, dict) and r.get("__error__"):
-                        errors.append(
-                            (r["code"], r["exc_type"], r["exc_msg"])
-                        )
-                        continue
+                    # 1️⃣ 判断 r 是否是 dict 错误
+                    elif isinstance(r, dict) and r.get("__error__"):
+                        errors.append((r["code"], r["exc_type"], r["exc_msg"]))
 
-                    if not hasattr(r, 'empty') or not r.empty:
+                    # 2️⃣ 判断 r 是否是 pd.DataFrame 的错误标记
+                    elif hasattr(r, 'attrs') and '__error__' in r.attrs:
+                        err_info = r.attrs['__error__']
+                        errors.append((err_info['code'], err_info['exc_type'], err_info['exc_msg']))
+
+                    # 3️⃣ 否则 r 是正常 DataFrame
+                    elif not hasattr(r, 'empty') or not r.empty:
                         result.append(r)
+
             # 执行完后立即恢复原始日志等级
             logger.setLevel(old_level)
 
@@ -4056,84 +4095,84 @@ def process_file_exc(func=None, code=None):
 
 error_codes = []
 
-def to_mp_run_async_newOK(cmd, urllist, *args, **kwargs):
-    #G Flash 
-    result = []  
-    time_s = time.time()
+# def to_mp_run_async_newOK(cmd, urllist, *args, **kwargs):
+#     #G Flash 
+#     result = []  
+#     time_s = time.time()
     
-    # 1. 禁用 tqdm 监控 (防止进度条线程报错)
-    try:
-        tqdm.monitor_interval = 0
-    except:
-        pass
+#     # 1. 禁用 tqdm 监控 (防止进度条线程报错)
+#     try:
+#         tqdm.monitor_interval = 0
+#     except:
+#         pass
     
-    # 2. 获取根日志记录器，临时屏蔽 INFO 级别的日志传输
-    # 这一步是解决 BrokenPipeError: WinError 109 的核心
-    logger = log
-    old_level = logger.level 
+#     # 2. 获取根日志记录器，临时屏蔽 INFO 级别的日志传输
+#     # 这一步是解决 BrokenPipeError: WinError 109 的核心
+#     logger = log
+#     old_level = logger.level 
 
-    urllist = list(set(urllist))
-    data_count = len(urllist)
-    if data_count == 0: return []
+#     urllist = list(set(urllist))
+#     data_count = len(urllist)
+#     if data_count == 0: return []
 
-    if data_count > 200:
-        cpu_used = int(cpu_count() / 2) + 1
-        pool_count = min(max(1, int(data_count / 100)), cpu_used)
+#     if data_count > 200:
+#         cpu_used = int(cpu_count() / 2) + 1
+#         pool_count = min(max(1, int(data_count / 100)), cpu_used)
         
-        func = functools.partial(cmd, **kwargs)
-        partialfunc = functools.partial(process_file_exc, func)
+#         func = functools.partial(cmd, **kwargs)
+#         partialfunc = functools.partial(process_file_exc, func)
 
-        try:
-            # --- 关键：在多进程运行期间，只允许 WARNING 以上级别的日志进入管道 ---
-            # 这样可以极大减少管道通信负担，避免结束时管道破裂
-            logger.setLevel(LoggerFactory.WARNING) 
-            # process_map(partialfunc,
-            #             urllist, 
-            #             unit='%',
-            #             mininterval=ct.tqdm_mininterval,
-            #             unit_scale=True,
-            #             ncols=ct.ncols ,
-            #             total=data_count,
-            #             max_workers=pool_count)
-            results = process_map(
-                partialfunc, 
-                urllist, 
-                unit='it', 
-                mininterval=ct.tqdm_mininterval,
-                unit_scale=True,
-                total=data_count,
-                max_workers=pool_count,
-                chunksize=10,        # 增大块大小，减少通信频次
-                #miniters=1,
-                ncols=getattr(ct, 'ncols', 80),
-                desc="Running_MP"
-            )
+#         try:
+#             # --- 关键：在多进程运行期间，只允许 WARNING 以上级别的日志进入管道 ---
+#             # 这样可以极大减少管道通信负担，避免结束时管道破裂
+#             logger.setLevel(LoggerFactory.WARNING) 
+#             # process_map(partialfunc,
+#             #             urllist, 
+#             #             unit='%',
+#             #             mininterval=ct.tqdm_mininterval,
+#             #             unit_scale=True,
+#             #             ncols=ct.ncols ,
+#             #             total=data_count,
+#             #             max_workers=pool_count)
+#             results = process_map(
+#                 partialfunc, 
+#                 urllist, 
+#                 unit='it', 
+#                 mininterval=ct.tqdm_mininterval,
+#                 unit_scale=True,
+#                 total=data_count,
+#                 max_workers=pool_count,
+#                 chunksize=10,        # 增大块大小，减少通信频次
+#                 #miniters=1,
+#                 ncols=getattr(ct, 'ncols', 80),
+#                 desc="Running_MP"
+#             )
             
-            # --- 在这里添加 GC 清理 ---
-            # 此时 results 已拿到，子进程已基本退出，强制清理内存和句柄
-            gc.collect() 
-            # -----------------------
-            # 执行完后立即恢复原始日志等级
-            logger.setLevel(old_level)
+#             # --- 在这里添加 GC 清理 ---
+#             # 此时 results 已拿到，子进程已基本退出，强制清理内存和句柄
+#             gc.collect() 
+#             # -----------------------
+#             # 执行完后立即恢复原始日志等级
+#             logger.setLevel(old_level)
 
-            # 过滤结果，解决 IndexError
-            result = [r for r in results if r is not None and (not hasattr(r, 'empty') or not r.empty)]
+#             # 过滤结果，解决 IndexError
+#             result = [r for r in results if r is not None and (not hasattr(r, 'empty') or not r.empty)]
             
-        except (BrokenPipeError, EOFError):
-            logger.setLevel(old_level)
-            # 即使报错，results 变量里通常已经拿到了 100% 的数据
-            if 'results' in locals():
-                result = [r for r in results if r is not None and (not hasattr(r, 'empty') or not r.empty)]
-        except Exception as e:
-            logger.setLevel(old_level)
-            log.error(f"MP Error: {e}")
-    else:
-        # 数量少时不走多进程，最稳定
-        result = [cmd(c, **kwargs) for c in urllist if c]
-        result = [r for r in result if r is not None and (not hasattr(r, 'empty') or not r.empty)]
+#         except (BrokenPipeError, EOFError):
+#             logger.setLevel(old_level)
+#             # 即使报错，results 变量里通常已经拿到了 100% 的数据
+#             if 'results' in locals():
+#                 result = [r for r in results if r is not None and (not hasattr(r, 'empty') or not r.empty)]
+#         except Exception as e:
+#             logger.setLevel(old_level)
+#             log.error(f"MP Error: {e}")
+#     else:
+#         # 数量少时不走多进程，最稳定
+#         result = [cmd(c, **kwargs) for c in urllist if c]
+#         result = [r for r in result if r is not None and (not hasattr(r, 'empty') or not r.empty)]
 
-    log.info(f"Cpu_count: {pool_count} Time: {round(time.time()-time_s, 2)}s | Total: {len(result)}")
-    return result
+#     log.info(f"Cpu_count: {pool_count} Time: {round(time.time()-time_s, 2)}s | Total: {len(result)}")
+#     return result
 
 # https://stackoverflow.com/questions/68065937/how-to-show-progress-bar-tqdm-while-using-multiprocessing-in-python
 def to_mp_run_async_me_ok(cmd, urllist, *args,**kwargs):

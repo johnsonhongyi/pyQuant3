@@ -27,6 +27,8 @@ Debug_is_not_find = 0
 BaseDir = cct.get_ramdisk_dir()
 import tables
 import psutil
+import shutil, os
+from pathlib import Path
 
 from contextlib import contextmanager
 
@@ -81,7 +83,9 @@ class SafeHDFStore(pd.HDFStore):
 
         self.complevel = 9
         self.complib = 'zlib'
-        self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s"
+        # self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --complevel=9 --complib=%s %s %s"
+        self.ptrepack_cmds = "ptrepack --overwrite-nodes --chunkshape=auto --alignment=1024 --complevel=9 --complib=%s %s %s"
+
         self.h5_size_org = 0
         global RAMDISK_KEY
 
@@ -419,10 +423,11 @@ class SafeHDFStore(pd.HDFStore):
             try:
                 self.close()
                 super().__exit__(exc_type, exc_val, exc_tb)
-                if self.mode != 'r':
+                h5_size = int(os.path.getsize(self.fname) / 1e6)
+                if h5_size > 10 and self.mode != 'r':
                     with timed_ctx("release_lock"):
                         # ===== 压缩逻辑 =====
-                        h5_size = int(os.path.getsize(self.fname) / 1e6)
+                        # h5_size = int(os.path.getsize(self.fname) / 1e6)
                         h5_size_limit =  h5_size*2 if h5_size > 10 else 10
                         if self.fname_o.find('tdx_all_df') >= 0 or self.fname_o.find('sina_MultiIndex_data') >= 0:
                             h5_size = 40 if h5_size < 40 else h5_size
@@ -431,37 +436,52 @@ class SafeHDFStore(pd.HDFStore):
                             new_limit = ((h5_size / self.big_H5_Size_limit + 1) * self.big_H5_Size_limit) if h5_size > self.big_H5_Size_limit else h5_size_limit
                             
                         read_ini_limit = cct.get_config_value(self.config_ini,self.fname_o,read=True)
-                        self.log.info(f"fname: {self.fname} h5_size: {h5_size} big_limit: {self.big_H5_Size_limit} conf:{read_ini_limit}")
+                        self.log.info(f"fname: {self.fname} read_ini_limit:{read_ini_limit} h5_size: {h5_size} new_limit:{new_limit} big_limit: {self.big_H5_Size_limit} conf:{read_ini_limit}")
                         # if (read_ini_limit is  None and h5_size > self.big_H5_Size_limit) or cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
+                        config_status = cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit)
                         if cct.get_config_value(self.config_ini, self.fname_o, h5_size, new_limit):
+                            self.log.info(f"to temp fname: {self.fname} read_ini_limit config_status: {config_status} to {self.temp_file}") 
                             if self.mode == 'r':
                                 self._acquire_lock()
                             if os.path.exists(self.fname) and os.path.exists(self.temp_file):
                                 log.error(f"Remove tmp file exists: {self.temp_file}")
                                 os.remove(self.temp_file)
-                            os.rename(self.fname, self.temp_file)
-                            if cct.get_os_system() == 'mac':
-                                p = subprocess.Popen(
-                                    self.ptrepack_cmds % (self.complib, self.temp_file, self.fname),
-                                    shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
-                                )
-                            else:
-                                back_path = os.getcwd()
+                            back_path = os.getcwd()
+                            try:
+                                # 1️⃣ 原文件 → temp
+                                os.rename(self.fname, self.temp_file)
+                                # 2️⃣ 构造安全相对路径
                                 os.chdir(self.basedir)
-                                pt_cmd = self.ptrepack_cmds % (
-                                    self.complib,
-                                    self.temp_file.split(self.basedir)[1],
-                                    self.fname.split(self.basedir)[1]
+                                temp_rel = os.path.relpath(self.temp_file, self.basedir)
+                                fname_rel = os.path.relpath(self.fname, self.basedir)
+                                log.info(f'basedir: {self.basedir} rename : {self.fname} to {self.temp_file} temp_rel: {temp_rel} fname_rel: {fname_rel}')
+
+                                pt_cmd = self.ptrepack_cmds % (self.complib, temp_rel, fname_rel)
+                                log.info(f'pt_cmd: {pt_cmd}')
+
+                                p = subprocess.Popen(
+                                    pt_cmd, shell=True,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT
                                 )
-                                p = subprocess.Popen(pt_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                            p.wait()
-                            if p.returncode != 0:
-                                log.error(f"ptrepack error {p.communicate()}, src {self.temp_file}, dest {self.fname}")
-                            else:
+                                out = p.communicate()[0]
+
+                                if p.returncode != 0:
+                                    raise RuntimeError(f"ptrepack failed: {out}")
+
+                                # 3️⃣ 成功：删除 temp
                                 if os.path.exists(self.temp_file):
                                     os.remove(self.temp_file)
-                            if cct.get_os_system() != 'mac':
+
+                            except Exception as e:
+                                log.error(f"ptrepack exception: {e}")
+
+                                # 🔥 关键：回滚
+                                if os.path.exists(self.temp_file) and not os.path.exists(self.fname):
+                                    os.rename(self.temp_file, self.fname)
+
+                            finally:
                                 os.chdir(back_path)
+
             finally:
                 time.sleep(0.1)
                 with timed_ctx("release_lock"):
@@ -947,8 +967,7 @@ def get_hdf5_file(fpath, wr_mode='r', complevel=9, complib='blosc', mutiindx=Fal
 
 
 
-import shutil, os
-from pathlib import Path
+
 
 class SafeHDFWriter:
     def __init__(self, final_path):
@@ -2456,6 +2475,9 @@ if __name__ == "__main__":
         return h5
 
     def readHdf5(fpath, root=None):
+        if not os.path.exists(fpath):
+            print(f'no fpath:{fpath}')
+            return
         store = pd.HDFStore(fpath, "r")
         print(list(store.keys()))
         if root is None:
@@ -2505,18 +2527,21 @@ if __name__ == "__main__":
     endtime = '15:01:00'
 
     print('sina_MultiD_path:{sina_MultiD_path}')
-    h5 = readHdf5(sina_MultiD_path)
-    h5.shape
-    print(h5.loc['300245'])
-    print(h5.loc['000002'])
-    df_diagnose(h5)
+    os.path.getsize(sina_MultiD_path) > 500
 
-    mdf = cct.get_limit_multiIndex_freq(h5, freq=freq.upper(),  col='all', start=startime, end=endtime, code=None)
-    print(mdf.loc['300245'])
-    print(mdf.loc['300516'])
-    print(mdf.loc['300245'].close.mean())
-    print(mdf.loc['300516'].close.mean())
-    import ipdb;ipdb.set_trace()
+    if os.path.exists(sina_MultiD_path) and os.path.getsize(sina_MultiD_path) > 5000:
+        h5 = readHdf5(sina_MultiD_path)
+        h5.shape
+        print(h5.loc['300245'])
+        print(h5.loc['000002'])
+        df_diagnose(h5)
+
+        mdf = cct.get_limit_multiIndex_freq(h5, freq=freq.upper(),  col='all', start=startime, end=endtime, code=None)
+        print(mdf.loc['300245'])
+        print(mdf.loc['300516'])
+        print(mdf.loc['300245'].close.mean())
+        print(mdf.loc['300516'].close.mean())
+        import ipdb;ipdb.set_trace()
 
 
     def check_tdx_all_df1(fname='300'):
@@ -2566,12 +2591,13 @@ if __name__ == "__main__":
 
     # 忽略 PyTables 的性能警告
     warnings.filterwarnings("ignore", category=tables.exceptions.PerformanceWarning)
-    print('tdx_hd5_name: {tdx_hd5_name}-------------------')
+    print(f'tdx_hd5_name: {tdx_hd5_name}-------------------')
     tdx_hd5_name = r"G:\\tdx_last_df.h5"
     tablename = 'low_d_70_y_all'
     df=readHdf5(tdx_hd5_name,tablename)
     # print(df.loc['300245'])
     df_diagnose(df)
+    
     import ipdb;ipdb.set_trace()
 
     print(f'show src df.dtypes.value_counts(): {df.dtypes.value_counts()}')
