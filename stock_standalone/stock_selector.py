@@ -26,7 +26,7 @@ class StockSelector:
     强势股筛选器
     
     功能：
-    1. 读取 g:\\top_all.h5 数据
+    1. 读取 df_all_realtime 数据
     2. 基于技术指标筛选强势股 (趋势、量能、结构)
     3. 生成筛选日志，用于后续分析优化
     """

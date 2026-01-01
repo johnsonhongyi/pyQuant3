@@ -61,6 +61,8 @@ class TradingAnalyzer:
                     'highest_today': round(d.get('highest_today', 0), 2),
                     'pump_height': round(d.get('pump_height', 0) * 100, 2),  # 转为百分比
                     'pullback_depth': round(d.get('pullback_depth', 0) * 100, 2),  # 转为百分比
+                    'hvolume': round(d.get('hvolume', 0), 2),
+                    'lvolume': round(d.get('lvolume', 0), 2),
                 })
             except:
                 return pd.Series({
@@ -68,7 +70,8 @@ class TradingAnalyzer:
                     'nclose': 0, 'price_at_sig': 0, 'structure': 'UNKNOWN', 'trend_strength': 0,
                     'ma5d': 0, 'ma10d': 0, 'ratio': 0, 'volume': 0, 'percent': 0,
                     'high': 0, 'low': 0, 'open': 0,
-                    'highest_today': 0, 'pump_height': 0, 'pullback_depth': 0
+                    'highest_today': 0, 'pump_height': 0, 'pullback_depth': 0,
+                    'hvolume': 0, 'lvolume': 0
                 })
 
         expanded = df['indicators'].apply(expand_indicators)
