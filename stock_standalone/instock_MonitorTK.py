@@ -2128,6 +2128,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 'lasto5d': row_dict.get('lasto5d', 0),
                 'highest_since_buy': row_dict.get('high', 0),
                 'cost_price': row_dict.get('lastp3d', 0),  # 默认三天前收盘价为成本
+                'hvolume': row.get('hv', 0),
+                'lvolume': row.get('lv', 0),
             }
             
             # 自动填充 1-15 日的历史 OHLCV 数据
@@ -2226,6 +2228,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 f"  成交量: {row_dict.get('volume', 'N/A')}",
                 f"  换手率: {row_dict.get('ratio', 'N/A')}%",
                 f"  昨日量: {snapshot.get('lastv1d', 'N/A')}",
+                f"  最近高量: {snapshot.get('hvolume', 'N/A')}",
+                f"  最近地量: {snapshot.get('lvolume', 'N/A')}",
             ])
             
             report_text = "\n".join(report_lines)

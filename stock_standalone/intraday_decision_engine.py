@@ -1153,6 +1153,12 @@ class IntradayDecisionEngine:
         lowvol = float(snapshot.get("lowvol", 0))      # 最近最低价的地量
         llowvol = float(snapshot.get("llowvol", 0))    # 30日内地量
         
+        # 最近极大/极小成交量量比
+        hvolume = float(snapshot.get("hvolume", 0))
+        lvolume = float(snapshot.get("lvolume", 0))
+        debug["hvolume"] = hvolume
+        debug["lvolume"] = lvolume
+        
         # 历史量能
         v1 = float(snapshot.get("lastv1d", 0))
         v2 = float(snapshot.get("lastv2d", 0))
@@ -1182,8 +1188,8 @@ class IntradayDecisionEngine:
         if mode in ("full", "buy_only"):
             
             # 1. 地量低价买入：当前量比很低（接近地量）+ 价格接近 3 日低点
-            # 量比 < 0.6 认为是地量水平
-            is_current_low_vol = volume < 0.6
+            # 量比 < 0.6 认为是地量水平，或者接近历史纪录的地量
+            is_current_low_vol = volume < 0.6 or (lvolume > 0 and volume <= lvolume * 1.1)
             
             if low_3d > 0:
                 # 价格接近 3 日低点
@@ -1199,16 +1205,16 @@ class IntradayDecisionEngine:
             # 2. 地量放大爬坡：昨日量比低 + 今日放量上涨
             # 由于 v1 是真实成交量，需要将 llowvol 和 v1 比较
             if llowvol > 0 and v1 > 0 and volume > 0:
-                # 昨日接近 30 日地量
-                was_low_vol = v1 <= llowvol * 1.3
-                # 今日放量（量比 > 1.5）
-                is_volume_up = volume > 1.5
+                # 昨日接近 30 日地量，或者接近纪录地量
+                was_low_vol = (v1 <= llowvol * 1.3) or (lvolume > 0 and v1 <= lvolume * 1.2)
+                # 今日开始温和放量（量比 > 1.25 且比昨日大）
+                is_volume_up = volume > 1.25 and (v1 > 0 and volume > v1)
                 # 价格上涨
                 is_price_up = price > float(snapshot.get("last_close", 0)) * 1.005 if snapshot.get("last_close") else False
                 
                 if was_low_vol and is_volume_up and is_price_up:
-                    buy_score += 0.3
-                    signals.append(f"地量放大爬坡(量比{volume:.1f})")
+                    buy_score += 0.35 # 稍微提高分值
+                    signals.append(f"地量突破(量比{volume:.1f})")
             
             # 3. 均线金叉蓄能 / 平行均线蓄势
             if ma5 > 0 and ma20 > 0:
@@ -1275,8 +1281,8 @@ class IntradayDecisionEngine:
             
             # 1. 天量高价：成交量异常放大 + 价格接近 3 日高点
             if volume > 0 and high_3d > 0:
-                # 量比异常放大（> 3 倍）
-                is_high_vol = volume > 3.0
+                # 量比异常放大（> 3 倍），或者触及/超过最近最高量量比
+                is_high_vol = volume > 3.0 or (hvolume > 0 and volume >= hvolume * 0.95)
                 # 价格接近 3 日高点
                 is_near_high = high >= high_3d * 0.98
                 
