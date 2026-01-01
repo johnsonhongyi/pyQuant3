@@ -270,16 +270,32 @@ class WindowMixin:
         win.geometry(f"{width}x{height}+{x}+{y}")
 
     def update_status_bar_width(self, pw: tk.PanedWindow, left_frame: tk.Frame, right_frame: tk.Frame) -> None:
-        """ 根据 DPI 缩放调整左右面板的宽度比例 """
+        """ 根据 DPI 缩放调整左右面板的宽度比例，使用 paneconfig 避免重新构造 """
         sf = self._get_dpi_scale_factor()
         left_width = int(900 * sf)
         right_width = int(100 * sf)
-
-        pw.forget(left_frame)
-        pw.forget(right_frame)
-
-        pw.add(left_frame, minsize=100, width=left_width)
-        pw.add(right_frame, minsize=100, width=right_width)
+        
+        try:
+            # 检查面板是否已添加
+            panes = pw.panes()
+            if str(left_frame) in panes and str(right_frame) in panes:
+                # 已存在则仅更新宽度和最小宽度
+                pw.paneconfig(left_frame, minsize=int(100 * sf), width=left_width)
+                pw.paneconfig(right_frame, minsize=int(100 * sf), width=right_width)
+            else:
+                # 不存在则添加
+                pw.add(left_frame, minsize=int(100 * sf), width=left_width)
+                pw.add(right_frame, minsize=int(100 * sf), width=right_width)
+        except Exception as e:
+            logger.warning(f"[update_status_bar_width] 更新状态栏宽度失败: {e}")
+            # 降级方案：传统的 forget/add
+            try:
+                pw.forget(left_frame)
+                pw.forget(right_frame)
+                pw.add(left_frame, minsize=100, width=left_width)
+                pw.add(right_frame, minsize=100, width=right_width)
+            except:
+                pass
 
     def correct_window_geometry(self) -> None:
         """在 Qt 初始化后运行，修复 Tkinter 窗口的位置错乱问题。"""
