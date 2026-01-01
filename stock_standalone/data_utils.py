@@ -1424,6 +1424,14 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
     
     lastpTDX_DF, top_all = pd.DataFrame(), pd.DataFrame()
     detect_calc_support_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
+    
+    # 获取 RealtimeDataService 代理对象
+    realtime_service = shared_dict.get('realtime_service')
+    if realtime_service:
+        logger.info("✅ fetch_and_process acquired RealtimeDataService proxy")
+    else:
+        logger.info("Note: RealtimeDataService not found in shared_dict")
+
     logger.info(f"init resample: {resample} flag: {flag.value if flag else 'None'} detect_calc_support: {detect_calc_support_val}")
     
     while True:
@@ -1606,6 +1614,14 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             df_all = clean_bad_columns(top_temp)
             df_all = sanitize(df_all)
             # df_all = process_merged_sina_signal(df_all)  #single 
+
+            # 🔌 RealtimeDataService 注入点
+            if realtime_service:
+                try:
+                    realtime_service.update_batch(df_all)
+                except Exception as e:
+                    logger.error(f"RealtimeService update error: {e}")
+
             queue.put(df_all)
             gc.collect()
             cct.print_timing_summary()
@@ -1626,22 +1642,52 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                     f"detect_calc_support: {detect_val}"
                 )
                 print(f'process now: {cct.get_now_time_int()} resample Main:{len(df_all)} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+            # --- 智能频率自适应 (Intelligent Frequency Adaptation) ---
+            # 1. 动态获取配置
+            sina_limit_val = g_values.getkey("sina_limit_time")
+            if sina_limit_val is None:
+                sina_limit_val = cct.sina_limit_time if hasattr(cct, 'sina_limit_time') else 30
+            sina_limit = int(sina_limit_val)
+
+            cfg_sleep_val = g_values.getkey("duration_sleep_time")
+            if cfg_sleep_val is None:
+                cfg_sleep_val = duration_sleep_time
+            cfg_sleep = int(cfg_sleep_val)
+
+            # 2. 判断是否为交易时段 (9:15 - 15:00)
+            now_int = cct.get_now_time_int()
+            is_trading_time = cct.get_trade_date_status() and (915 <= now_int <= 1500)
+
+            # 3. 动态决定 Loop Sleep Time
+            if is_trading_time:
+                # 交易时段：优先满足数据源频率 (sina_limit)，确保高颗粒度
+                # 取 min(sina_limit, cfg_sleep)，防止配置过大导致漏数据
+                loop_sleep_time = min(sina_limit, cfg_sleep)
+                if loop_sleep_time < 5: 
+                    loop_sleep_time = 5 # 最小保护
+                
+                # 开盘前夕 (9:15-9:25) 加速刷新 (可选优化)
+                if 915 <= now_int < 925:
+                   loop_sleep_time = min(loop_sleep_time, 15)
+            else:
+                # 非交易时段：使用低频刷新，降低资源消耗
+                loop_sleep_time = cfg_sleep
+
+            if logger.level <= LoggerFactory.INFO:
+               logger.info(f"[FreqAdapt] Trading:{is_trading_time} SinaLimit:{sina_limit}s CfgSleep:{cfg_sleep}s -> ActualSleep:{loop_sleep_time}s")
+
+            # 4. 执行分段 Sleep (保持灵敏度)
             if cct.get_now_time_int() < 945:
                 sleep_step = 0.5
             else:
                 sleep_step = 1
-            # cout_time = 0
-            loop_sleep_time = duration_sleep_time
-            if 915 < cct.get_now_time_int() < 925:
-                loop_sleep_time = int(duration_sleep_time/2)
-            # logger.info(f'loop_sleep_time: {loop_sleep_time}')
-            for _ in range(loop_sleep_time):
+
+            for _ in range(int(loop_sleep_time / sleep_step)):
                 if not flag.value:
                     break
                 elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
                     break
                 elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
-                    # logger.info(f'market : new : {g_values.getkey("market")} last : {market} ')
                     break
                 elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
                     break

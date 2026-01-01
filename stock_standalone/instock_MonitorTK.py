@@ -14,6 +14,8 @@ import shutil
 import traceback
 import threading
 import multiprocessing as mp
+from multiprocessing.managers import BaseManager, SyncManager
+class StockManager(SyncManager): pass
 import ctypes
 import pyperclip
 from datetime import datetime, timedelta
@@ -39,6 +41,7 @@ from JSONData import tdx_data_Day as tdd
 from JSONData import stockFilter as stf
 from logger_utils import LoggerFactory, init_logging
 from stock_live_strategy import StockLiveStrategy
+from realtime_data_service import DataPublisher
 from monitor_utils import (
     load_display_config, save_display_config, save_monitor_list, 
     load_monitor_list, list_archives, archive_file_tools, archive_search_history_list,
@@ -237,11 +240,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 刷新开关标志
         self.refresh_enabled = True
-        from multiprocessing import Manager
-        self.manager = Manager()
-        self.global_dict = self.manager.dict()  # 共享字典
-        self.global_dict["resample"] = resampleInit   
+        try:
+            from realtime_data_service import DataPublisher
+            # Register DataPublisher with the custom manager
+            StockManager.register('DataPublisher', DataPublisher)
+            self.manager = StockManager()
+            self.manager.start()
+            
+            # Re-bind global_dict to the new manager
+            self.global_dict = self.manager.dict()  # 共享字典
+            self.global_dict["resample"] = resampleInit
 
+            self.realtime_service = self.manager.DataPublisher()
+            self.global_dict['realtime_service'] = self.realtime_service
+            logger.info("✅ RealtimeDataService Initialized (Shared via Manager)")
+        except Exception as e:
+            logger.error(f"❌ RealtimeDataService Init Failed: {e}")
+            self.realtime_service = None
+            # Fallback to standard manager if custom fails (though functionality will be limited)
+            self.manager = mp.Manager()
+            self.global_dict = self.manager.dict()
+            self.global_dict["resample"] = resampleInit
+        # Restore global_values initialization
         self.global_values = cct.GlobalValues(self.global_dict)
         resample = self.global_values.getkey("resample")
         logger.info(f'app init getkey resample:{self.global_values.getkey("resample")}')
@@ -249,6 +269,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self.blkname = ct.Resample_LABELS_Blk[resample] or "060.blk"
         self.global_values.setkey("blkname", self.blkname)
+
         # 用于保存 detail_win
         self.detail_win = None
         self.strategy_report_win = None
@@ -360,6 +381,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.handbook = StockHandbook()
         # ✅ 初始化实时监控策略 (延迟初始化，防止阻塞主窗口显示)
         self.live_strategy = None
+        self.realtime_service = None
         self.after(3000, self._init_live_strategy)
         
         # ✅ 性能优化器初始化
@@ -470,76 +492,138 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     # --- DPI and Window management moved to Mixins ---
     def on_close(self):
-        self.alert_manager.save_all()
-        t_logger = TradingLogger()
-        
-        archive_file_tools(t_logger.db_path, "trading_signals", ARCHIVE_DIR, logger)
-        archive_file_tools(self.handbook.data_file, "stock_handbook", ARCHIVE_DIR, logger)
-
-        # 3. 如果 concept 窗口存在，也保存位置并隐藏
-        if hasattr(self, "_concept_win") and self._concept_win:
-            if self._concept_win.winfo_exists():
-                self.save_window_position(self._concept_win, "detail_window")
-                self._concept_win.destroy()
-        # 如果 KLineMonitor 存在且还没销毁，保存位置
-        if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
+        try:
+            logger.info("程序正在退出，执行保存与清理...")
+            
+            # 1. 保存预警规则
+            if hasattr(self, 'alert_manager'):
+                self.alert_manager.save_all()
+                logger.info("预警规则已保存")
+                
+            # 2. 存档交易日志 (TradingLogger)
             try:
-                self.save_window_position(self.kline_monitor, "KLineMonitor")
-                self.kline_monitor.on_kline_monitor_close()
-                self.kline_monitor.destroy()
-            except Exception:
-                pass
-
-        # --- 保存并关闭所有 monitor_windows（概念前10窗口）---
-        if hasattr(self, "live_strategy"):
-            try:
-                now_time = cct.get_now_time_int()
-                if now_time > 1500:
-                    self.live_strategy._save_monitors()
-                    logger.info(f"[on_close] self.live_strategy._save_monitors SAVE OK")
-                else:
-                    logger.info(f"[on_close] now:{now_time} 不到收盘时间 未进行_save_monitors SAVE OK")
+                t_logger = TradingLogger()
+                archive_file_tools(t_logger.db_path, "trading_signals", ARCHIVE_DIR, logger)
             except Exception as e:
-                logger.warning(f"[on_close] self.live_strategy._save_monitors 失败: {e}")
+                logger.warning(f"交易日志存档失败: {e}")
+            
+            # 3. 存档手札
+            if hasattr(self, 'handbook'):
+                try:
+                    archive_file_tools(self.handbook.data_file, "stock_handbook", ARCHIVE_DIR, logger)
+                except Exception as e:
+                    logger.warning(f"手札存档失败: {e}")
 
-        # --- 关闭所有 concept top10 窗口 ---
-        if hasattr(self, "_pg_top10_window_simple"):
-            self.save_all_monitor_windows()
-            for key, win_info in list(self._pg_top10_window_simple.items()):
-                win = win_info.get("win")
-                if win and win.winfo_exists():
-                    try:
-                        if hasattr(win, "on_close") and callable(win.on_close):
-                            win.on_close()
-                        else:
-                            win.destroy()
-                    except Exception as e:
-                        logger.info(f"关闭窗口 {key} 出错: {e}")
-            self._pg_top10_window_simple.clear()
+            # 4. 如果 concept 窗口存在，也保存位置并隐藏
+            if hasattr(self, "_concept_win") and self._concept_win:
+                if self._concept_win.winfo_exists():
+                    self.save_window_position(self._concept_win, "detail_window")
+                    self._concept_win.destroy()
+            
+            # 5. 如果 KLineMonitor 存在且还没销毁，保存位置
+            if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
+                try:
+                    self.save_window_position(self.kline_monitor, "KLineMonitor")
+                    self.kline_monitor.on_kline_monitor_close()
+                    self.kline_monitor.destroy()
+                except Exception:
+                    pass
 
-        # --- 关闭所有 concept top10 窗口 (PyQt 版) ---
-        if hasattr(self, "_pg_windows"):
-            for key, win_info in list(self._pg_windows.items()):
-                win = win_info.get("win")
-                if win is not None:
-                    try:
-                        if hasattr(win, "on_close") and callable(win.on_close):
-                            win.on_close()
-                        else:
-                            win.close()
-                    except Exception as e:
-                        logger.info(f"关闭窗口 {key} 出错: {e}")
-            self._pg_windows.clear()
+            # 6. 保存并关闭所有 monitor_windows（概念前10窗口）
+            if hasattr(self, "live_strategy"):
+                try:
+                    now_time = cct.get_now_time_int()
+                    if now_time > 1500:
+                        self.live_strategy._save_monitors()
+                        logger.info(f"[on_close] self.live_strategy._save_monitors SAVE OK")
+                    else:
+                        logger.info(f"[on_close] now:{now_time} 不到收盘时间 未进行_save_monitors SAVE OK")
+                except Exception as e:
+                    logger.warning(f"[on_close] self.live_strategy._save_monitors 失败: {e}")
 
-        self.save_window_position(self, "main_window")
-        self.query_manager.save_search_history()
-        archive_search_history_list(monitor_list_file=MONITOR_LIST_FILE, search_history_file=SEARCH_HISTORY_FILE, archive_dir=ARCHIVE_DIR, logger=logger)
-        self.stop_refresh()
-        if hasattr(self, "proc") and self.proc.is_alive():
-            self.proc.join(timeout=1)
-            if self.proc.is_alive():
-                self.proc.terminate()
-        self.destroy()
+            # 7. 关闭所有 concept top10 窗口 (Tkinter 版)
+            if hasattr(self, "_pg_top10_window_simple"):
+                try:
+                    self.save_all_monitor_windows()
+                    for key, win_info in list(self._pg_top10_window_simple.items()):
+                        win = win_info.get("win")
+                        if win and win.winfo_exists():
+                            try:
+                                if hasattr(win, "on_close") and callable(win.on_close):
+                                    win.on_close()
+                                else:
+                                    win.destroy()
+                            except Exception as e:
+                                logger.info(f"关闭窗口 {key} 出错: {e}")
+                    self._pg_top10_window_simple.clear()
+                except Exception as e:
+                    logger.warning(f"关闭 TK 监控窗口异常: {e}")
+
+            # 8. 关闭所有监视窗口 (PyQt 版)
+            if hasattr(self, "_pg_windows"):
+                try:
+                    for key, win_info in list(self._pg_windows.items()):
+                        win = win_info.get("win")
+                        if win is not None:
+                            try:
+                                if hasattr(win, "on_close") and callable(win.on_close):
+                                    win.on_close()
+                                else:
+                                    win.close()
+                            except Exception as e:
+                                logger.info(f"关闭 Qt 窗口 {key} 出错: {e}")
+                    self._pg_windows.clear()
+                except Exception as e:
+                    logger.warning(f"关闭 Qt 监控窗口异常: {e}")
+
+            # 9. 保存主窗口位置与搜索记录
+            self.save_window_position(self, "main_window")
+            if hasattr(self, 'query_manager'):
+                self.query_manager.save_search_history()
+            
+            try:
+                archive_search_history_list(
+                    monitor_list_file=MONITOR_LIST_FILE, 
+                    search_history_file=SEARCH_HISTORY_FILE, 
+                    archive_dir=ARCHIVE_DIR, 
+                    logger=logger
+                )
+            except Exception as e:
+                logger.warning(f"搜索历史归档失败: {e}")
+
+            # 10. 停止后台进程与管理器 (关键顺序：先停进程，再停管理器)
+            self.stop_refresh()
+            
+            if hasattr(self, "proc") and self.proc.is_alive():
+                logger.info("正在停止后台数据扫描进程...")
+                self.proc.join(timeout=1.5)
+                if self.proc.is_alive():
+                    self.proc.terminate()
+                    logger.info("后台进程已强制终止")
+                else:
+                    logger.info("后台进程已安全退出")
+
+            if hasattr(self, "manager"):
+                try:
+                    # 断开代理引用，防止 shutdown 时的 BrokenPipe
+                    self.realtime_service = None
+                    self.global_dict = None
+                    self.manager.shutdown()
+                    logger.info("SyncManager 已安全关闭")
+                except Exception as e:
+                    # Windows 下退出时常有管道异常，此处捕获不抛出
+                    logger.debug(f"SyncManager shutdown suppressed exception: {e}")
+
+            # 11. 最后销毁主窗口
+            self.destroy()
+            logger.info("程序正常退出完成")
+            
+        except Exception as e:
+            logger.error(f"退出过程发生严重异常: {e}\n{traceback.format_exc()}")
+            try:
+                self.destroy()
+            except:
+                pass
 
 
     # 防抖 resize（避免重复刷新）
@@ -1078,6 +1162,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="选股", command=lambda: self.open_stock_selection_window()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="存档", command=lambda: self.open_archive_loader(), font=('Microsoft YaHei', 9), padx=2, pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="实时", command=lambda: self.open_realtime_monitor(), font=('Microsoft YaHei', 9), padx=2, pady=2).pack(side="left", padx=2)
 
         if len(self.search_history1) > 0:
             self.search_var1.set(self.search_history1[0])
@@ -1238,6 +1323,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 has_update = False
                 while not self.queue.empty():
                     df = self.queue.get_nowait()
+                    
+                    # ✅ 注入 RealtimeDataService 更新 (先于 UI 更新)
+                    if self.realtime_service and df is not None and not df.empty:
+                        try:
+                            # 异步或放在主线程看性能。目前先同步调用。
+                            self.realtime_service.update_batch(df)
+                        except Exception as e:
+                            logger.error(f"RealtimeService update failed: {e}")
+
                     # logger.info(f'df:{df[:1]}')
                     if self.sortby_col is not None:
                         logger.info(f'update_tree sortby_col : {self.sortby_col} sortby_col_ascend : {self.sortby_col_ascend}')
@@ -3221,7 +3315,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _init_live_strategy(self):
         """延迟初始化策略模块"""
         try:
-            self.live_strategy = StockLiveStrategy(alert_cooldown=alert_cooldown,voice_enabled=self.voice_var.get())
+            self.live_strategy = StockLiveStrategy(alert_cooldown=alert_cooldown,
+                                                   voice_enabled=self.voice_var.get(),
+                                                   realtime_service=self.realtime_service)
+            
+            logger.info("RealtimeDataService injected into StockLiveStrategy.")
+            
             # 注册报警回调
             self.live_strategy.set_alert_callback(self.on_voice_alert)
             # 注册语音开始播放的回调，用于同步闪烁
@@ -8091,7 +8190,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if 'category' in self.df_all.columns:
                     # 强制转换为字符串，避免 str.contains 报错
                     if not pd.api.types.is_string_dtype(self.df_all['category']):
-                        self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
+                        self.df_all['category'] = self.df_all['category'].astype('string')
+                        # self.df_all['category'] = self.df_all['category'].astype(str).str.strip()
                         # self.df_all['category'] = self.df_all['category'].astype(str)
                         # 可选：去掉前后空格
                         # self.df_all['category'] = self.df_all['category'].str.strip()
@@ -8114,7 +8214,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.info(f'final_query: {final_query}')
         except Exception as e:
             traceback.print_exc()
-            logger.error(f"query_check: {([c for c in self.df_all.columns if not c.isidentifier()])}")
+            logger.error(f"final_query: {final_query} query_check: {([c for c in self.df_all.columns if not c.isidentifier()])}")
             logger.error(f"Query error: {e}")
             self.status_var.set(f"查询错误: {e}")
         if df_filtered.empty:
@@ -8438,6 +8538,80 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 默认按时间倒序
         win.after(10, lambda: self.sort_column_archive_view(tree, "time", True))
 
+
+    def open_realtime_monitor(self):
+        """打开实时数据服务监控窗口"""
+        try:
+            log_win = tk.Toplevel(self)
+            log_win.title("Realtime Data Service Monitor")
+            
+            # 使用 WindowMixin 加载位置
+            window_id = "RealtimeData"
+            if hasattr(self, 'load_window_position'):
+                self.load_window_position(log_win, window_id, default_width=300, default_height=300)
+            else:
+                log_win.geometry("300x300")
+            
+            # Simple text area for status
+            text_area = tk.Text(log_win, font=("Consolas", 10), bg="#f0f0f0")
+            text_area.pack(fill="both", expand=True, padx=5, pady=5)
+            
+            # 定义关闭回调
+            def on_close():
+                if hasattr(self, 'save_window_position'):
+                    try:
+                        self.save_window_position(log_win, window_id)
+                    except Exception as e:
+                        logger.error(f"Save window pos error: {e}")
+                log_win.destroy()
+                
+            log_win.protocol("WM_DELETE_WINDOW", on_close)
+            
+            def update_status():
+                if not log_win.winfo_exists():
+                    return
+                    
+                status = {}
+                if hasattr(self, 'realtime_service') and self.realtime_service:
+                    try:
+                        status = self.realtime_service.get_status()
+                    except Exception as e:
+                        status = {"error": f"IPC Error: {e}"}
+                else:
+                    status = {"status": "Service Not Initialized"}
+                
+                # Format Output
+                uptime = status.get('uptime_seconds', 0)
+                uptime_str = f"{uptime // 3600:02d}:{(uptime % 3600) // 60:02d}:{uptime % 60:02d}"
+                
+                msg = f"=== Realtime Service Status ===\n"
+                msg += f"PID            : {status.get('pid', 'N/A')}\n"
+                msg += f"Client Time    : {time.strftime('%H:%M:%S')}\n"
+                msg += f"Server Time    : {time.strftime('%H:%M:%S', time.localtime(status.get('server_time', 0))) if status.get('server_time') else 'N/A'}\n"
+                msg += f"Uptime         : {uptime_str}\n"
+                msg += "-" * 30 + "\n"
+                msg += f"Stocks Cached  : {status.get('klines_cached', 0)}\n"
+                msg += f"Active Subs    : {status.get('subscribers', 0)}\n"
+                msg += f"Emotions Track : {status.get('emotions_tracked', 0)}\n"
+                msg += "-" * 30 + "\n"
+                msg += f"Memory Usage   : {status.get('memory_usage', 'N/A')}\n"
+                msg += f"Process Speed  : {status.get('processing_speed_row_per_sec', 0)} rows/sec\n"
+                msg += f"Total Processed: {status.get('total_rows_processed', 0)}\n"
+                msg += f"Batch Updates  : {status.get('update_count', 0)}\n"
+                msg += f"Last Global Upd: {status.get('last_update', 'N/A')}\n"
+                
+                if "error" in status:
+                    msg += f"\n[!] ERROR: {status['error']}\n"
+                    
+                text_area.delete("1.0", tk.END)
+                text_area.insert("1.0", msg)
+                
+                log_win.after(1000, update_status)
+                
+            update_status()
+            
+        except Exception as e:
+            logger.error(f"Failed to open realtime monitor: {e}")
 
     def open_archive_loader(self):
         """打开存档选择窗口"""

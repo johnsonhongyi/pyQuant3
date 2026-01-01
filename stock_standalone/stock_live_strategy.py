@@ -190,7 +190,8 @@ class StockLiveStrategy:
                  max_single_stock_ratio: float = 0.3,
                  min_position_ratio: float = 0.05,
                  risk_duration_threshold: float = 300,
-                 voice_enabled: bool = True):
+                 voice_enabled: bool = True,
+                 realtime_service: Any = None):
         # --- 实例属性注解 (PEP 526) ---
         self._voice: VoiceAnnouncer
         self.voice_enabled: bool
@@ -198,6 +199,7 @@ class StockLiveStrategy:
         self._last_process_time: float
         self._alert_cooldown: float
         self.enabled: bool
+        self.realtime_service = realtime_service
         self.executor: ThreadPoolExecutor
         self.config_file: str
         self.alert_callback: Optional[Callable]
@@ -205,6 +207,7 @@ class StockLiveStrategy:
         self.decision_engine: IntradayDecisionEngine
         self.trading_logger: TradingLogger
         self.risk_engine: RiskEngine
+        self.realtime_service: Any # RealtimeDataService
         self.auto_loop_enabled: bool
         self.batch_state: str
         self.current_batch: list[str]
@@ -221,7 +224,9 @@ class StockLiveStrategy:
         self.enabled = True
         self.config_file = "voice_alert_config.json"
         self.alert_callback = None
+        self.alert_callback = None
         self.df = None
+        self.realtime_service = None
         
         # --- 自动交易相关状态初始化 ---
         self.auto_loop_enabled = False
@@ -303,6 +308,11 @@ class StockLiveStrategy:
     def set_alert_callback(self, callback: Callable[[str, str, str], None]) -> None:
         """设置报警回调函数"""
         self.alert_callback = callback
+
+    def set_realtime_service(self, service):
+        """注入实时数据服务"""
+        self.realtime_service = service
+
     
     def _calculate_position(self, stock: dict, current_price: float, current_nclose: float, last_close: float, last_percent: Optional[float], last_nclose: float) -> tuple[str, float]:
         """根据今日/昨日数据计算动态仓位与操作"""
@@ -615,6 +625,79 @@ class StockLiveStrategy:
              self.executor.submit(self._process_auto_loop, df_all, concept_top5)
 
         self.executor.submit(self._check_strategies, self.df)
+        
+        # --- Top 5 Hot Concepts Strategy ---
+        if concept_top5:
+            self.executor.submit(self._scan_hot_concepts, df_all, concept_top5)
+
+    def _scan_hot_concepts(self, df: pd.DataFrame, concept_top5: list):
+        """
+        扫描五大热点板块，识别龙头
+        """
+        try:
+            if df.empty or not concept_top5:
+                # logger.debug("No data or concept_top5 is empty.")
+                return
+
+            # Extract concept names
+            top_concepts = set()
+            for item in concept_top5:
+                if isinstance(item, (list, tuple)):
+                    top_concepts.add(str(item[0]))
+                else:
+                    top_concepts.add(str(item))
+            
+            if not top_concepts:
+                return
+
+            # logger.info(f"Scanning hot concepts: {top_concepts}")
+
+            # Filter stocks belonging to hot concepts and showing strength
+            # Using iteration for flexibility with 'category' field format (assuming 'ConceptA;ConceptB')
+            current_time = datetime.now()
+            
+            # Optimization: Pre-filter by pct to reduce loop count
+            # Only check stocks with > 4% gain
+            if 'percent' not in df.columns:
+                return
+                
+            strong_df = df[df['percent'] > 5.0]
+            
+            if strong_df.empty:
+                return
+
+            for code, row in strong_df.iterrows():
+                # Avoid re-adding if already monitored recently (check not needed if add_monitor handles idempotency or updates)
+                if code in self._monitored_stocks:
+                    continue
+
+                raw_cats = str(row.get('category', ''))
+                if not raw_cats: 
+                    continue
+                
+                stock_cats = set(raw_cats.split(';'))
+                
+                # Intersection
+                matched_concepts = stock_cats.intersection(top_concepts)
+                if matched_concepts:
+                    concept_name = list(matched_concepts)[0]
+                    pct = row.get('percent', 0.0)
+                    name = row.get('name', code)
+                    
+                    # Logic: Add to monitor if it's a strong performer in a hot sector
+                    # Type: 'hot_concept', Value: pct
+                    logger.info(f"🔥 Found Hot Leader: {name}({code}) in {concept_name} +{pct}%")
+                    
+                    self.add_monitor(
+                        code=str(code),
+                        name=name,
+                        rule_type='hot_concept',
+                        value=pct,
+                        tags=f"Hot:{concept_name}"
+                    )
+        except Exception as e:
+            logger.error(f"Error in _scan_hot_concepts: {e}")
+            pass
 
     def _check_strategies(self, df):
         try:
@@ -752,6 +835,35 @@ class StockLiveStrategy:
                     if (rtype == 'price_up' and current_price >= rval) or (rtype == 'price_down' and current_price <= rval) or (rtype == 'change_up' and current_change >= rval):
                         msg = f"{data['name']} {('价格突破' if rtype=='price_up' else '价格跌破' if rtype=='price_down' else '涨幅达到')} {current_price} 涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
                         messages.append(("RULE", msg))
+
+                # --- 3. 实时情绪感知 & K线形态 (Realtime Analysis) ---
+                if self.realtime_service:
+                    try:
+                        # Emotion Score
+                        rt_emotion = self.realtime_service.get_emotion_score(code)
+                        snap['rt_emotion'] = rt_emotion
+
+                        # K-Line Pattern (V-Shape Reversal)
+                        klines = self.realtime_service.get_minute_klines(code, n=30)
+                        if len(klines) >= 15:
+                            lows = [k['low'] for k in klines]
+                            closes = [k['close'] for k in klines]
+                            p_curr = closes[-1]
+                            p_low = min(lows)
+                            
+                            # Logic: Deep drop from start of window (>2%) + Significant Rebound (>1.5%)
+                            p_start = closes[0]
+                            if p_start > 0 and p_low > 0:
+                                drop = (p_low - p_start) / p_start
+                                rebound = (p_curr - p_low) / p_low
+                                
+                                if drop < -0.02 and rebound > 0.015:
+                                    snap['v_shape_signal'] = True
+                                    snap['rt_emotion'] += 15 # Bonus for reversal
+                                    logger.info(f"V-Shape Detected {code}: Drop {drop:.1%} Rebound {rebound:.1%}")
+
+                    except Exception as e:
+                        logger.debug(f"Realtime service fetch error: {e}")
 
                 # ---------- 决策引擎 ----------
                 decision = self.decision_engine.evaluate(row, snap)

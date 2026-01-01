@@ -436,7 +436,8 @@ def get_resource_file(rel_path: str, out_name: Optional[str] = None, BASE_DIR: O
 
     target_path = os.path.join(BASE_DIR, out_name)
     log.info(f"target_path配置文件: {target_path}")
-
+    import ipdb;ipdb.set_trace()
+    
     # 已存在 → 直接返回
     if os.path.exists(target_path):
         return target_path
@@ -667,6 +668,7 @@ class GlobalConfig:
         self.code_startswith = self.get_with_writeback("general", "code_startswith", fallback='"6", "30", "00", "688", "43", "83", "87", "92"', value_type="tuple_str")
         self.winlimit = self.get_with_writeback("general", "winlimit", fallback=1, value_type="int")
         self.loglevel = self.get_with_writeback("general", "loglevel", fallback='INFO', value_type="str")
+        self.cleanRAMdiskTemp = self.get_with_writeback("general", "cleanRAMdiskTemp", fallback='True', value_type="str")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         try:
@@ -867,6 +869,7 @@ risk_duration_threshold: int = CFG.risk_duration_threshold
 code_startswith: str = CFG.code_startswith
 winlimit: int = CFG.winlimit
 loglevel: str = CFG.loglevel
+cleanRAMdiskTemp: str = CFG.cleanRAMdiskTemp
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:
     return os.path.sep
