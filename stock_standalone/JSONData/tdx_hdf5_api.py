@@ -57,6 +57,39 @@ def normalize_ticktime(df, default_date=None):
 # 使用方法
 # df = normalize_ticktime(df)
 
+def cleanup_temp_dir(base_dir: str, temp_name: str = "Temp") -> None:
+    """
+    清理 base_dir 下的 Temp 目录内容（不确认、不抛异常、尽力而为）
+
+    :param base_dir: 如 G:\\
+    :param temp_name: 默认 Temp
+    """
+    try:
+        base_dir = os.path.abspath(base_dir)
+        temp_dir = os.path.join(base_dir, temp_name)
+
+        if not os.path.isdir(temp_dir):
+            return
+
+        for name in os.listdir(temp_dir):
+            path = os.path.join(temp_dir, name)
+
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path, ignore_errors=False)
+                    log.info(f"[TempCleanup] removed dir: {path}")
+                else:
+                    os.remove(path)
+                    log.info(f"[TempCleanup] removed file: {path}")
+            except Exception as e:
+                # 关键策略：只记录，不中断
+                log.warning(f"[TempCleanup] skip: {path}, reason: {e}")
+
+    except Exception as e:
+        # base_dir 本身异常，也不能影响主流程
+        log.error(f"[TempCleanup] fatal error on base_dir={base_dir}: {e}")
+
+
 # class SafeHDFStore_timed_ctx(pd.HDFStore):
 class SafeHDFStore(pd.HDFStore):
     def __init__(self, fname, mode='a', **kwargs):
@@ -77,6 +110,10 @@ class SafeHDFStore(pd.HDFStore):
         self.multiIndexsize = False
         self.log = log
         self.basedir = BaseDir
+        # 启动即清理（一次即可）
+        if cct.cleanRAMdiskTemp:
+            cleanup_temp_dir(self.basedir)
+
         self.log.info(f'{self.fname_o.lower()} {self.basedir.lower()}')
         self.start_time = time.time()
         self.config_ini = os.path.join(self.basedir, 'h5config.txt')
