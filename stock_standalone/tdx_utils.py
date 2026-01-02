@@ -1,9 +1,20 @@
-# -*- coding:utf-8 -*-
 import os
+import sys
+import time
+import asyncio
+import threading
+import logging
+try:
+    import pyperclip
+except ImportError:
+    pyperclip = None
+
 import pandas as pd
 from datetime import datetime
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, Callable
 import re
+
+logger = logging.getLogger()
 
 def clean_bad_columns(df: pd.DataFrame) -> pd.DataFrame:
     """清理异常列名"""
@@ -166,3 +177,91 @@ def sanitize(df: pd.DataFrame) -> pd.DataFrame:
     if df.index.isna().any():
         df = df.loc[~df.index.isna()]
     return df
+
+def isDigit(x):
+    #re def isdigit()
+    try:
+        if str(x) == 'nan' or x is None:
+            return False
+        else:
+            float(x)
+            return True
+    except ValueError:
+        return False
+
+async def get_clipboard_contents(timesleep=0.5, code_startswith=None):
+    """
+    异步生成器：监控剪贴板并返回符合条件的股票代码。
+    支持在后台线程中运行的 asyncio 任务环境，通过 to_thread 避免剪贴板操作阻塞循环。
+    """
+    if pyperclip is None:
+        logger.error("pyperclip is not installed. Clipboard monitoring disabled.")
+        return
+
+    if code_startswith is None:
+        # 默认匹配 A股/ETF/北证 (00, 30, 60, 68, 8, 4, 1, 5)
+        code_startswith = ('00', '1', '3', '5', '6', '8', '9')
+    elif isinstance(code_startswith, str):
+        # 兼容 "'00','30'..." 格式
+        code_startswith = tuple(x.strip().strip("'").strip('"') for x in code_startswith.split(',') if x.strip())
+
+    last_code = None
+    while True:
+        try:
+            # 剪贴板操作在 Windows 下是阻塞的且容易冲突，使用 to_thread 提高并发性
+            content = await asyncio.to_thread(pyperclip.paste)
+            if content:
+                text = content.strip()
+                # 兼容格式如 "600000 浦发银行"
+                parts = text.split()
+                if parts:
+                    code = parts[0]
+                    if len(code) == 6 and isDigit(code) and code.startswith(code_startswith):
+                        if code != last_code:
+                            yield code
+                            last_code = code
+        except Exception:
+            # 捕获剪贴板锁定异常，稍后重试
+            await asyncio.sleep(timesleep)
+            continue
+            
+        await asyncio.sleep(timesleep)
+
+def start_clipboard_listener(sender: Any, timesleep: float = 0.5, code_startswith: Any = None, ignore_func: Optional[Callable[[str], bool]] = None) -> threading.Thread:
+    """
+    在后台线程中启动剪贴板监听，并尝试通过 sender.send(code) 发送代码。
+    ignore_func: 接收代码字符串，返回 True 则忽略发送。
+    """
+    def _run_monitor():
+        # 为子线程创建新的事件循环
+        new_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(new_loop)
+        
+        async def _task():
+            async for code in get_clipboard_contents(timesleep, code_startswith):
+                try:
+                    # 如果提供了外部逻辑检查（如：与 UI 选中代码重复），则忽略
+                    if ignore_func and ignore_func(code):
+                        logger.debug(f"📋 Clipboard Monitoring: Ignored (Current Selection: {code})")
+                        continue
+                        
+                    if hasattr(sender, 'send'):
+                        logger.info(f"📋 Clipboard Monitoring: Sending detected code {code}")
+                        sender.send(code)
+                except Exception as e:
+                    # Assuming 'logger' is available in this scope (e.g., imported globally)
+                    logger.error(f"ClipboardListener send error: {e}")
+        
+        new_loop.run_until_complete(_task())
+
+    thread = threading.Thread(target=_run_monitor, daemon=True, name="ClipboardMonitor")
+    thread.start()
+    return thread
+
+if __name__ == '__main__':
+    # from tdx_utils import start_clipboard_listener
+    # 假设主类中有 self.sender
+    from JohnsonUtil.stock_sender import StockSender
+    sender=StockSender()
+    print(f'start start_clipboard_listener')
+    clipboard_thread = start_clipboard_listener(sender, timesleep=0.8)

@@ -50,7 +50,8 @@ from monitor_utils import (
 )
 from tdx_utils import (
     clean_bad_columns, cross_process_lock, get_clean_flag_path,
-    cleanup_old_clean_flags, clean_expired_tdx_file, is_tdx_clean_done, sanitize
+    cleanup_old_clean_flags, clean_expired_tdx_file, is_tdx_clean_done, sanitize,
+    start_clipboard_listener
 )
 from data_utils import (
     calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe,test_opt
@@ -430,6 +431,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.after(1000, self.update_tree)
 
         self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=self.update_send_status)
+        # 📋 启动后台剪贴板监听服务 (包含自动查重逻辑，避免重复发送当前已选中代码)
+        self.clipboard_monitor = start_clipboard_listener(
+            self.sender, 
+            ignore_func=lambda code: code == getattr(self, 'select_code', None)
+        )
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.tree.bind("<<TreeviewSelect>>", self.on_tree_select)  
