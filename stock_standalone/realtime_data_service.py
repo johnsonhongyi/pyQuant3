@@ -239,17 +239,23 @@ class DataPublisher:
     """
     def __init__(self, high_performance: bool = True):
         self.paused = False
-        self.high_performance = high_performance # True: 240 nodes, False: 60 nodes
+        self.high_performance = high_performance # HP: ~4.0h, Legacy: ~2.0h (Dynamic nodes)
         self.auto_switch_enabled = True
         self.mem_threshold_mb = 500.0 # 阈值调低至 500MB
         self.node_threshold = 1000000 # 默认 100万个节点触发降级
         
-        # Interval Detection
+        # Interval Settings
+        self.expected_interval = 60 # 默认 1分钟
         self.last_batch_clock = 0.0
         self.batch_intervals = deque(maxlen=20) # 最近 20 批次的间隔(秒)
 
-        # Mode-based settings: 240 vs 120 (Both use Slots now)
-        cache_len = 240 if high_performance else 120
+        # Time-based goals (Hours)
+        self.TARGET_HOURS_HP = 4.0
+        self.TARGET_HOURS_LEGACY = 2.0
+
+        # Mode-based settings: Calculate max_len based on default 60s first
+        default_interval = 60
+        cache_len = int((self.TARGET_HOURS_HP * 3600) / default_interval) if high_performance else int((self.TARGET_HOURS_LEGACY * 3600) / default_interval)
         self.kline_cache = MinuteKlineCache(max_len=cache_len)
         
         self.emotion_tracker = IntradayEmotionTracker()
@@ -303,13 +309,33 @@ class DataPublisher:
         """获取服务是否暂停"""
         return self.paused
 
+    def set_expected_interval(self, seconds: int):
+        """由外部 UI 同步当前抓取频率，用于辅助计算 K线所需数量"""
+        if seconds > 0 and self.expected_interval != seconds:
+            logger.info(f"⏱️ DataPublisher expected interval updated: {seconds}s")
+            self.expected_interval = seconds
+            # 立即触发一次缓存长度重算
+            self.set_high_performance(self.high_performance)
+
     def set_high_performance(self, enabled: bool):
-        """动态切换回溯时长"""
-        if self.high_performance == enabled: return
+        """动态切换回溯时长：基于目标小时数和抓取频率平衡内存"""
         self.high_performance = enabled
-        cache_len = 240 if enabled else 120
+        target_h = self.TARGET_HOURS_HP if enabled else self.TARGET_HOURS_LEGACY
+        
+        # 优先级：外部设定的频率 > 观测到的频率 > 60s
+        interval = self.expected_interval
+        if interval <= 0:
+            status = self.get_status()
+            interval = status.get('avg_interval_sec', 60)
+        
+        if interval <= 0: interval = 60
+        
+        # 4h @ 60s = 240, 4h @ 120s = 120
+        cache_len = int((target_h * 3600) / interval)
+        cache_len = max(60, cache_len) # 兜底最小 60
+        
         self.kline_cache.set_mode(max_len=cache_len)
-        logger.info(f"🚀 DataPublisher changed history limit to {'240 nodes' if enabled else '120 nodes'}")
+        logger.info(f"🚀 Mode: {'HP' if enabled else 'Legacy'} | Target: {target_h}h | Interval: {interval}s | Limit: {cache_len}K")
 
     def set_auto_switch(self, enabled: bool, threshold_mb: float = 500.0, node_limit: int = 1000000):
         """设置自动切换规则"""
@@ -482,7 +508,14 @@ class DataPublisher:
             avg_nodes = total_nodes / len(self.kline_cache.cache) if self.kline_cache.cache else 0
             
             # Estimate History Coverage
-            avg_interval = sum(self.batch_intervals) / len(self.batch_intervals) if self.batch_intervals else 60
+            # 优先级：直接使用预期的抓取频率，如果没有抓取过数据，则使用 expected_interval
+            # 只有在预期频率和观测频率都缺失时才默认 60s
+            avg_interval = self.expected_interval
+            if self.batch_intervals:
+                avg_interval = sum(self.batch_intervals) / len(self.batch_intervals)
+            
+            if avg_interval <= 0: avg_interval = 60
+            
             history_sec = avg_nodes * avg_interval
             
             return {
@@ -490,17 +523,20 @@ class DataPublisher:
                 "total_nodes": total_nodes,
                 "avg_nodes_per_stock": avg_nodes,
                 "avg_interval_sec": int(avg_interval),
+                "expected_interval": self.expected_interval,
                 "history_coverage_minutes": int(history_sec / 60),
                 "subscribers": sum(len(v) for v in self.subscribers.values()),
                 "emotions_tracked": len(self.emotion_tracker.scores),
                 "paused": self.paused,
                 "high_performance_mode": self.high_performance,
+                "target_hours": self.TARGET_HOURS_HP if self.high_performance else self.TARGET_HOURS_LEGACY,
                 "auto_switch": self.auto_switch_enabled,
                 "mem_threshold": self.mem_threshold_mb,
                 "node_threshold": self.node_threshold,
                 "node_capacity_pct": (total_nodes / self.node_threshold * 100) if self.node_threshold else 0,
                 "cpu_usage": cpu_usage,
                 "max_batch_time_ms": int(self.max_batch_time * 1000),
+                "last_batch_time_ms": int(self.last_batch_time * 1000),
                 "cache_history_limit": self.kline_cache.max_len,
                 "last_update": self.kline_cache.last_update_ts.get("global", 0),
                 "server_time": time.time(),
