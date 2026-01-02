@@ -41,12 +41,11 @@ class MinuteKlineCache:
         if self.max_len != max_len:
             logger.info(f"✂️ MinuteKlineCache Trimming: {self.max_len} -> {max_len} nodes")
             self.max_len = max_len
-            # 对现有数据进行裁剪
+            # 对所有现有数据进行重建以同步 maxlen 属性
             for code in list(self.cache.keys()):
                 dq = self.cache[code]
-                if len(dq) > max_len:
-                    # 重新创建固定长度的 deque 触发旧对象回收
-                    self.cache[code] = deque(list(dq)[-max_len:], maxlen=max_len)
+                # 无论当前长度如何，都必须重建 deque 以修改只读的 maxlen 属性
+                self.cache[code] = deque(list(dq)[-max_len:], maxlen=max_len)
 
     def clear(self):
         """完全清空缓存"""
@@ -249,8 +248,8 @@ class DataPublisher:
         self.last_batch_clock = 0.0
         self.batch_intervals = deque(maxlen=20) # 最近 20 批次的间隔(秒)
 
-        # Mode-based settings: 240m vs 60m (Both use Slots now)
-        cache_len = 240 if high_performance else 60
+        # Mode-based settings: 240 vs 120 (Both use Slots now)
+        cache_len = 240 if high_performance else 120
         self.kline_cache = MinuteKlineCache(max_len=cache_len)
         
         self.emotion_tracker = IntradayEmotionTracker()
@@ -308,9 +307,9 @@ class DataPublisher:
         """动态切换回溯时长"""
         if self.high_performance == enabled: return
         self.high_performance = enabled
-        cache_len = 240 if enabled else 60
+        cache_len = 240 if enabled else 120
         self.kline_cache.set_mode(max_len=cache_len)
-        logger.info(f"🚀 DataPublisher changed history limit to {'240 nodes' if enabled else '60 nodes'}")
+        logger.info(f"🚀 DataPublisher changed history limit to {'240 nodes' if enabled else '120 nodes'}")
 
     def set_auto_switch(self, enabled: bool, threshold_mb: float = 500.0, node_limit: int = 1000000):
         """设置自动切换规则"""
