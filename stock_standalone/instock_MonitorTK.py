@@ -8676,7 +8676,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # Perf Mode info
                 is_hp = status.get('high_performance_mode', True)
-                perf_str = "全天覆盖 (240节)" if is_hp else "内存裁剪 (仅留 60节)"
+                perf_str = "全天覆盖 (240节)" if is_hp else "内存裁剪 (仅留 120节)"
                 auto_str = "ON" if status.get('auto_switch') else "OFF"
                 msg += f"Perf Mode      : {perf_str}\n"
                 
