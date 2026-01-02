@@ -8627,7 +8627,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if hasattr(self, 'realtime_service') and self.realtime_service:
                     self.realtime_service.set_auto_switch(auto_var.get())
 
-            auto_chk = tk.Checkbutton(perf_frame, text="Auto Mode Switch (Wait 800MB)", variable=auto_var, command=on_auto_switch, font=("Microsoft YaHei", 9))
+            auto_chk = tk.Checkbutton(perf_frame, text="Auto Guard (Clip history at 500MB)", variable=auto_var, command=on_auto_switch, font=("Microsoft YaHei", 9))
             auto_chk.pack(side="left", padx=5)
 
             # Simple text area for status and logs
@@ -8676,7 +8676,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # Perf Mode info
                 is_hp = status.get('high_performance_mode', True)
-                perf_str = "高性能 (全天 240节)" if is_hp else "极致省内存 (最近 60节)"
+                perf_str = "全天覆盖 (240节)" if is_hp else "内存裁剪 (仅留 60节)"
                 auto_str = "ON" if status.get('auto_switch') else "OFF"
                 msg += f"Perf Mode      : {perf_str}\n"
                 
@@ -8726,9 +8726,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 text_area.delete("1.0", tk.END)
                 text_area.insert("1.0", msg)
-                text_area.see(tk.END) # Auto-scroll to show latest logs
+                # Removed see(END) to keep view at the top for diagnostic info
                 
-                log_win.after(1000, update_status)
+                log_win.after(30000, update_status) # 降低刷新频率至 30 秒
                 
             update_status()
             

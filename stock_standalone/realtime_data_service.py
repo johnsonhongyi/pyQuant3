@@ -37,11 +37,16 @@ class MinuteKlineCache:
         self.last_update_ts: dict[str, float] = {}
 
     def set_mode(self, max_len: int):
-        """动态切换回溯时长并清空旧数据以确保内存回收"""
+        """动态切换回溯时长：不清除数据，仅裁剪旧节点以回收内存"""
         if self.max_len != max_len:
-            logger.info(f"🔄 MinuteKlineCache switching history limit: max_len={max_len}")
+            logger.info(f"✂️ MinuteKlineCache Trimming: {self.max_len} -> {max_len} nodes")
             self.max_len = max_len
-            self.clear() # 必须清空以确保内存立即释放
+            # 对现有数据进行裁剪
+            for code in list(self.cache.keys()):
+                dq = self.cache[code]
+                if len(dq) > max_len:
+                    # 重新创建固定长度的 deque 触发旧对象回收
+                    self.cache[code] = deque(list(dq)[-max_len:], maxlen=max_len)
 
     def clear(self):
         """完全清空缓存"""
@@ -237,7 +242,7 @@ class DataPublisher:
         self.paused = False
         self.high_performance = high_performance # True: 240 nodes, False: 60 nodes
         self.auto_switch_enabled = True
-        self.mem_threshold_mb = 800.0 
+        self.mem_threshold_mb = 500.0 # 阈值调低至 500MB
         self.node_threshold = 1000000 # 默认 100万个节点触发降级
         
         # Interval Detection
@@ -307,7 +312,7 @@ class DataPublisher:
         self.kline_cache.set_mode(max_len=cache_len)
         logger.info(f"🚀 DataPublisher changed history limit to {'240 nodes' if enabled else '60 nodes'}")
 
-    def set_auto_switch(self, enabled: bool, threshold_mb: float = 800.0, node_limit: int = 1000000):
+    def set_auto_switch(self, enabled: bool, threshold_mb: float = 500.0, node_limit: int = 1000000):
         """设置自动切换规则"""
         self.auto_switch_enabled = enabled
         self.mem_threshold_mb = threshold_mb
