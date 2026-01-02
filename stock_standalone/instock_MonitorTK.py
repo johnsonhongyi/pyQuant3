@@ -276,15 +276,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.blkname = ct.Resample_LABELS_Blk[resample] or "060.blk"
         self.global_values.setkey("blkname", self.blkname)
 
-        # 用于保存 detail_win
-        self.detail_win = None
-        self.strategy_report_win = None
-        # ✅ 初始化复用窗口引用
-        self._voice_monitor_win: Optional[tk.Toplevel] = None
-        self._stock_selection_win: Optional[tk.Toplevel] = None
-        self._realtime_monitor_win: Optional[tk.Toplevel] = None
         self._detailed_analysis_win: Optional[tk.Toplevel] = None
+        self.strategy_report_win: Optional[tk.Toplevel] = None
         self.txt_widget = None
+
+        # 🛡️ 动态列订阅管理
+        self.mandatory_cols: set[str] = {
+            'code', 'name', 'trade', 'high', 'low', 'open', 'ratio', 'volume', 'amount',
+            'percent', 'per1d', 'perc1d', 'nclose', 'ma5d', 'ma10d', 'ma20d', 'ma60d',
+            'ma51d', 'lastp1d', 'lastp2d', 'lastp3d', 'lastl1d', 'lasto1d', 'lastv1d', 'lasth1d',
+            'macddif', 'macddea', 
+            'macd', 'macdlast1', 'macdlast2', 'macdlast3', 'rsi', 'kdj_j', 'kdj_k', 
+            'kdj_d', 'upper', 'lower', 'max5', 'high4', 'curr_eval', 'trade_signal',
+            'now', 'signal', 'signal_strength', 'emotion', 'win', 'sum_perc', 'slope',
+            'vol_ratio', 'power_idx', 'category', 'lastdu4'
+        }
+        self.update_required_columns()
 
         # ----------------- 控件框 ----------------- #
         ctrl_frame = tk.Frame(self)
@@ -656,6 +663,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not self.df_all.empty:
                 self.ColManagerconfig = load_display_config(config_file=CONFIG_FILE,default_cols=DEFAULT_DISPLAY_COLS)
                 # 创建新窗口
+                self.global_dict['keep_all_columns'] = True  # 开启"发现模式": 允许后台获取所有列供用户选择
                 self.ColumnSetManager = ColumnSetManager(
                     self,
                     self.df_all.columns,
@@ -681,6 +689,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not self.df_all.empty:
                 self.ColManagerconfig = load_display_config(config_file=CONFIG_FILE,default_cols=DEFAULT_DISPLAY_COLS)
                 # 创建新窗口
+                if hasattr(self, 'global_dict') and self.global_dict is not None:
+                    self.global_dict['keep_all_columns'] = True
                 self.ColumnSetManager = ColumnSetManager(
                     self,
                     self.df_all.columns,
@@ -699,8 +709,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if self.ColumnSetManager is not None:
             self.ColumnSetManager.destroy()
             self.ColumnSetManager = None
-            self.ColumnSetManager = None
             self._open_column_manager_job = None
+            if hasattr(self, 'global_dict') and self.global_dict is not None:
+                 self.global_dict['keep_all_columns'] = False  # 关闭发现模式
+            self.update_required_columns() # 恢复按需裁剪
+
+    def update_required_columns(self, refresh_ui=False) -> None:
+        """同步当前 UI 和策略所需的列到后台进程"""
+        try:
+            if not refresh_ui or not hasattr(self, 'global_dict') or self.global_dict is None:
+                return
+            
+            # 这里的 self.current_cols 存储了当前 UI 真正显示的列
+            current_ui_cols = set(getattr(self, 'current_cols', []))
+            
+            # 使用更严谨的获取方式
+            mandatory = getattr(self, 'mandatory_cols', set())
+            required = set(mandatory).union(current_ui_cols)
+            
+            # 更新到 global_dict 供后台进程读取
+            self.global_dict['required_cols'] = list(required)
+            logger.debug(f"Dynamic Trimming: Subscribed to {len(required)} columns.")
+        except Exception as e:
+            logger.error(f"Failed to update required columns: {e}")
 
     def tree_scroll_to_code(self, code):
         """外部调用：定位特定代码"""
@@ -1606,7 +1637,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 同步频率变动到实时服务(如果已连接)
         if hasattr(self, 'realtime_service') and self.realtime_service:
             try:
-                self.realtime_service.set_expected_interval(duration_sleep_time)
+                self.realtime_service.set_expected_interval(int(duration_sleep_time))
             except:
                 pass
 
@@ -8727,7 +8758,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     except Exception as e:
                         analysis_text.insert(tk.END, f"\nFatal Error in Analysis: {e}")
                     
-                    analysis_win.after(2000, refresh_analysis) # Update every 2s
+                    analysis_win.after(5000, refresh_analysis) # Update every 2s
                 
                 def on_analysis_close():
                     if hasattr(self, 'save_window_position'):
@@ -8796,7 +8827,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     try:
                         # 同步当前的全局频率
                         if 'duration_sleep_time' in globals():
-                            self.realtime_service.set_expected_interval(globals()['duration_sleep_time'])
+                            dst = globals()['duration_sleep_time']
+                            if isinstance(dst, (int, float)):
+                                self.realtime_service.set_expected_interval(int(dst))
                         status = self.realtime_service.get_status()
                     except Exception as e:
                         status = {"error": f"IPC Communication Failed: {e}"}
@@ -8806,7 +8839,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # Format Output
                 uptime = status.get('uptime_seconds', 0)
-                uptime_str = f"{uptime // 3600:02d}:{(uptime % 3600) // 60:02d}:{uptime % 60:02d}"
+                try:
+                    uptime_val = int(uptime) if uptime is not None else 0
+                except (ValueError, TypeError):
+                    uptime_val = 0
+                
+                uptime_str = f"{uptime_val // 3600:02d}:{(uptime_val % 3600) // 60:02d}:{uptime_val % 60:02d}"
                 
                 is_paused = status.get('paused', False)
                 if is_paused:

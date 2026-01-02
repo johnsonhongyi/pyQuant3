@@ -114,6 +114,9 @@ class TreeviewMixin:
  
             self.tree.after(100, getattr(self, 'refresh_tree', lambda: None))
             self.tree.after(500, getattr(self, 'bind_treeview_column_resize', lambda: None))
+            # 🔌 动态列订阅：通知后台进程 UI 需要的新列
+            if hasattr(self, 'update_required_columns'):
+                self.update_required_columns()
  
         except Exception as e:
             logger.error(f"❌ 更新 Treeview 列失败：{e}")
