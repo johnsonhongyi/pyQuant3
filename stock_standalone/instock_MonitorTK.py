@@ -279,7 +279,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         self._detailed_analysis_win: Optional[tk.Toplevel] = None
         self.strategy_report_win: Optional[tk.Toplevel] = None
+        self._voice_monitor_win: Optional[tk.Toplevel] = None
+        self._realtime_monitor_win: Optional[tk.Toplevel] = None
+        self._stock_selection_win: Optional[tk.Toplevel] = None
         self.txt_widget = None
+        self.select_code = None
 
         # 🛡️ 动态列订阅管理
         self.mandatory_cols: set[str] = {
@@ -4223,6 +4227,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_voice_monitor_manager(self):
         """语音预警管理窗口 (支持窗口复用)"""
+
         if not hasattr(self, 'live_strategy') or self.live_strategy is None:
             messagebox.showwarning("提示", "实时监控模块尚未启动，请稍后再试")
             return
@@ -4392,7 +4397,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             load_data()
             win.refresh_list = load_data
-            self._voice_monitor_window = win
+            self._voice_monitor_win = win
 
             # --- 动态添加 "策略选股" 按钮 (New) ---
             tk.Button(top_frame, text="策略选股...", command=self.open_stock_selection_window, bg="#fff9c4", font=("Arial", 9, "bold")).pack(side="right", padx=5)
