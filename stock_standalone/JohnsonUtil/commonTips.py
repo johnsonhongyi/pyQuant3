@@ -436,7 +436,6 @@ def get_resource_file(rel_path: str, out_name: Optional[str] = None, BASE_DIR: O
 
     target_path = os.path.join(BASE_DIR, out_name)
     log.info(f"target_path配置文件: {target_path}")
-    import ipdb;ipdb.set_trace()
     
     # 已存在 → 直接返回
     if os.path.exists(target_path):
