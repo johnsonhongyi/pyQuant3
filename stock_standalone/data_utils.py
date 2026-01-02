@@ -1425,12 +1425,8 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
     lastpTDX_DF, top_all = pd.DataFrame(), pd.DataFrame()
     detect_calc_support_val = detect_calc_support_var.value if hasattr(detect_calc_support_var, 'value') else False
     
-    # 获取 RealtimeDataService 代理对象
-    realtime_service = shared_dict.get('realtime_service')
-    if realtime_service:
-        logger.info("✅ fetch_and_process acquired RealtimeDataService proxy")
-    else:
-        logger.info("Note: RealtimeDataService not found in shared_dict")
+    # RealtimeDataService is now handled by the Main UI process to save memory
+    logger.info("ℹ️ fetch_and_process running in data-only mode (IPC via Queue)")
 
     logger.info(f"init resample: {resample} flag: {flag.value if flag else 'None'} detect_calc_support: {detect_calc_support_val}")
     
@@ -1613,14 +1609,24 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             
             df_all = clean_bad_columns(top_temp)
             df_all = sanitize(df_all)
-            # df_all = process_merged_sina_signal(df_all)  #single 
+            
+            # # 🛡️ 内存优化：裁剪不必要的列 (Trim unused columns)
+            # # 仅保留 UI 显示、策略计算和实时服务所需的列
+            # keep_cols = [
+            #     'name', 'trade', 'boll', 'dff', 'df2', 'couts',
+            #     'percent', 'per1d', 'perc1d', 'ra', 'ral',
+            #     'topR', 'volume', 'red', 'lastdu4', 'category',
+            #     'now', 'open', 'high', 'low', 'amount', 'vol',
+            #     'upper1','lastl1d', 'lasto1d','lastp1d', 'lastv1d', 
+            #     'eval1d', 'eval2d',
+            #     'signal1d', 'ma51d', 'curr_eval', 'trade_signal',
+            #     'win', 'sum_perc', 'slope', 'vol_ratio', 'power_idx'
+            # ]
+            # actual_keep = [c for c in keep_cols if c in df_all.columns]
+            # df_all = df_all[actual_keep]
 
-            # 🔌 RealtimeDataService 注入点
-            if realtime_service:
-                try:
-                    realtime_service.update_batch(df_all)
-                except Exception as e:
-                    logger.error(f"RealtimeService update error: {e}")
+            # 🔌 RealtimeDataService updates are now handled by the Main process
+            # inside update_tree() to eliminate cross-process proxy overhead.
 
             queue.put(df_all)
             gc.collect()

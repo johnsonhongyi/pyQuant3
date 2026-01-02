@@ -42,8 +42,7 @@ from JSONData import stockFilter as stf
 from logger_utils import LoggerFactory, init_logging
 from stock_live_strategy import StockLiveStrategy
 from realtime_data_service import DataPublisher
-# ✅ Register DataPublisher at module level for Windows 'spawn' compatibility
-StockManager.register('DataPublisher', DataPublisher)
+# DataPublisher is now handled locally in the Main process for resource efficiency
 from monitor_utils import (
     load_display_config, save_display_config, save_monitor_list, 
     load_monitor_list, list_archives, archive_file_tools, archive_search_history_list,
@@ -246,26 +245,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.live_strategy = None
         self.after(3000, self._init_live_strategy)
         
-        # 4. 初始化 Realtime Data Service (Shared Manager)
+        # 4. 初始化 Realtime Data Service
         try:
-            logger.info("正在启动 StockManager (SyncManager)...")
-            # Manager implicitly uses the registered classes from module level
+            # 启动 Manager 仅用于同步设置 (global_dict)
+            logger.info("正在启动 StockManager (SyncManager) 用于状态共享...")
             self.manager = StockManager()
             self.manager.start()
             
             self.global_dict = self.manager.dict()
             self.global_dict["resample"] = resampleInit
             
-            # Create the proxy instance
-            self.realtime_service = self.manager.DataPublisher()
-            self.global_dict['realtime_service'] = self.realtime_service
-            
-            # Verify Proxy
-            try:
-                test_pid = self.realtime_service.get_status().get('pid')
-                logger.info(f"✅ RealtimeDataService 已就绪 (Manager PID: {test_pid})")
-            except Exception as proxy_e:
-                logger.error(f"⚠️ RealtimeDataService 代理验证失败: {proxy_e}")
+            # 🔥 直接在主进程实例化 DataPublisher 以减少跨进程开销和内存占用
+            # 这样避免了在 SyncManager 进程中维护一个庞大的数据对象副本
+            self.realtime_service = DataPublisher(high_performance=False)
+            logger.info(f"✅ RealtimeDataService (Local) 已就绪 (Main PID: {os.getpid()})")
 
         except Exception as e:
             logger.error(f"❌ RealtimeDataService 初始化失败: {e}\n{traceback.format_exc()}")
@@ -289,6 +282,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # ✅ 初始化复用窗口引用
         self._voice_monitor_win: Optional[tk.Toplevel] = None
         self._stock_selection_win: Optional[tk.Toplevel] = None
+        self._realtime_monitor_win: Optional[tk.Toplevel] = None
+        self._detailed_analysis_win: Optional[tk.Toplevel] = None
         self.txt_widget = None
 
         # ----------------- 控件框 ----------------- #
@@ -1344,6 +1339,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 has_update = False
                 while not self.queue.empty():
                     df = self.queue.get_nowait()
+                    # 🔌 在主进程同步更新 DataPublisher
+                    if hasattr(self, 'realtime_service') and self.realtime_service:
+                        try:
+                            self.realtime_service.update_batch(df)
+                        except Exception as e:
+                            logger.error(f"Main process realtime update error: {e}")
                     
 
                     # logger.info(f'df:{df[:1]}')
@@ -8563,9 +8564,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
     def open_realtime_monitor(self):
-        """打开实时数据服务监控窗口"""
+        """打开实时数据服务监控窗口 (支持窗口复用)"""
+        if hasattr(self, '_realtime_monitor_win') and self._realtime_monitor_win and self._realtime_monitor_win.winfo_exists():
+            self._realtime_monitor_win.lift()
+            self._realtime_monitor_win.focus_force()
+            return
+
         try:
             log_win = tk.Toplevel(self)
+            self._realtime_monitor_win = log_win
             log_win.title("Realtime Data Service Monitor")
             
             # 使用 WindowMixin 加载位置
@@ -8613,6 +8620,130 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             reset_btn = tk.Button(btn_frame, text="↺ Reset State", command=manual_reset, font=("Microsoft YaHei", 9), bg="#eeeeee")
             reset_btn.pack(side="left", padx=5)
 
+            def open_detailed_analysis():
+                """打开详细系统分析窗口 (支持窗口复用与自动恢复位置)"""
+                if hasattr(self, '_detailed_analysis_win') and self._detailed_analysis_win and self._detailed_analysis_win.winfo_exists():
+                    self._detailed_analysis_win.lift()
+                    self._detailed_analysis_win.focus_force()
+                    return
+
+                analysis_win = tk.Toplevel(log_win)
+                self._detailed_analysis_win = analysis_win
+                analysis_win.title("Realtime System Analysis (PID: %d)" % os.getpid())
+                
+                # 使用 WindowMixin 加载位置
+                window_id = "SystemAnalysis"
+                if hasattr(self, 'load_window_position'):
+                    self.load_window_position(analysis_win, window_id, default_width=700, default_height=280)
+                else:
+                    analysis_win.geometry("700x280")
+                
+                # Add scrollbar to text area
+                atext_frame = tk.Frame(analysis_win)
+                atext_frame.pack(fill="both", expand=True, padx=10, pady=10)
+                
+                analysis_text = tk.Text(atext_frame, font=("Consolas", 10), wrap="none")
+                as_vsb = tk.Scrollbar(atext_frame, orient="vertical", command=analysis_text.yview)
+                as_hsb = tk.Scrollbar(atext_frame, orient="horizontal", command=analysis_text.xview)
+                analysis_text.configure(yscrollcommand=as_vsb.set, xscrollcommand=as_hsb.set)
+                
+                as_vsb.pack(side="right", fill="y")
+                as_hsb.pack(side="bottom", fill="x")
+                analysis_text.pack(side="left", fill="both", expand=True)
+                
+                def refresh_analysis():
+                    if not analysis_win.winfo_exists():
+                        return
+                    
+                    try:
+                        import psutil
+                        current_process = psutil.Process()
+                        children = current_process.children(recursive=True)
+                        
+                        report = [
+                            f"=== System Resource Report ({time.strftime('%Y-%m-%d %H:%M:%S')}) ===",
+                            f"OS: {sys.platform} | Main PID: {current_process.pid}",
+                            "-" * 60
+                        ]
+                        
+                        # Process breakdown
+                        procs = [(current_process, "Main UI Window")]
+                        for c in children:
+                            try:
+                                cmdline = " ".join(c.cmdline())
+                                role = "Sub-Process"
+                                if "resource_tracker" in cmdline: role = "Resource Tracker"
+                                elif "multiprocessing.managers" in cmdline: role = "SyncManager (Proxy Server)"
+                                elif "fetch_and_process" in cmdline or any("data_utils" in arg for arg in c.cmdline()): role = "Data Fetcher Process"
+                                procs.append((c, role))
+                            except: continue
+                            
+                        total_rss = 0
+                        total_uss = 0
+                        total_commit = 0
+                        for p, role in procs:
+                            try:
+                                full_info = p.memory_full_info()
+                                rss = full_info.rss / 1024 / 1024
+                                uss = full_info.uss / 1024 / 1024  # Private Working Set
+                                # 'private' in memory_full_info on Windows is the Commit Size (Total Requested)
+                                commit = full_info.private / 1024 / 1024
+                                
+                                cpu = p.cpu_percent(interval=None)
+                                p_name = p.name()
+                                report.append(f"PID: {p.pid:<6} | {p_name:<10} | {uss:>6.1f} MB (RAM) | {rss:>6.1f} MB (Shared) | {cpu:>4.1f}% | {role:<20}")
+                                total_rss += rss
+                                total_uss += uss
+                                total_commit += commit
+                            except: report.append(f"PID: {p.pid:<6} | Failed to read process info")
+                        
+                        report.append("-" * 75)
+                        report.append(f"TASK MANAGER ESTIMATE (ACTIVE RAM): {total_uss:.1f} MB")
+                        report.append(f"TOTAL PHYSICAL RESIDENT (RSS):     {total_rss:.1f} MB")
+                        report.append(f"SYSTEM COMMIT MEMORY (REQUESTED):  {total_commit:.1f} MB")
+                        report.append("\nℹ️ Note: 'RAM' is primary memory. 'Requested' (~1.5GB) is virtual reserved space.")
+                        report.append("=" * 75)
+                        
+                        # Service Statistics
+                        if hasattr(self, 'realtime_service') and self.realtime_service:
+                            try:
+                                svc_status = self.realtime_service.get_status()
+                                report.append("=== Realtime Data Service (DataPublisher) Statistics ===")
+                                report.append(f"Performance Mode: {'HIGH (4h)' if svc_status.get('high_performance_mode') else 'NORMAL (2h)'}")
+                                report.append(f"Auto-Downgrade:   {'Enabled' if svc_status.get('auto_switch') else 'Disabled'}")
+                                report.append(f"Service Guard:    Threshold {svc_status.get('mem_threshold_mb',0)}MB / {svc_status.get('node_threshold',0)} nodes")
+                                report.append("-" * 40)
+                                report.append(f"Cached Stocks:    {svc_status.get('total_stocks', 0):,}")
+                                report.append(f"Total Segments:   {svc_status.get('total_nodes', 0):,}")
+                                report.append(f"K-line Data:      {svc_status.get('kline_nodes', 0):,} nodes")
+                                report.append(f"Emotion Data:     {svc_status.get('emotion_nodes', 0):,} nodes")
+                                report.append(f"Queue/Pipe Depth: {svc_status.get('queue_depth', 0)}")
+                                report.append(f"Last Loop Delay:  {svc_status.get('expected_interval', 0)}s")
+                            except Exception as e:
+                                report.append(f"Failed to fetch service stats: {e}")
+                        
+                        analysis_text.delete(1.0, tk.END)
+                        analysis_text.insert(tk.END, "\n".join(report))
+                    except Exception as e:
+                        analysis_text.insert(tk.END, f"\nFatal Error in Analysis: {e}")
+                    
+                    analysis_win.after(2000, refresh_analysis) # Update every 2s
+                
+                def on_analysis_close():
+                    if hasattr(self, 'save_window_position'):
+                        try:
+                            self.save_window_position(analysis_win, "SystemAnalysis")
+                        except Exception as e:
+                            logger.error(f"Save analysis window pos error: {e}")
+                    self._detailed_analysis_win = None
+                    analysis_win.destroy()
+
+                analysis_win.protocol("WM_DELETE_WINDOW", on_analysis_close)
+                refresh_analysis()
+
+            analysis_btn = tk.Button(btn_frame, text="📊 Detailed Analysis", command=open_detailed_analysis, font=("Microsoft YaHei", 9, "bold"), fg="blue")
+            analysis_btn.pack(side="left", padx=5)
+
             # Performance controls frame
             perf_frame = tk.Frame(log_win)
             perf_frame.pack(fill="x", padx=5, pady=2)
@@ -8636,8 +8767,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if hasattr(self, 'realtime_service') and self.realtime_service:
                     self.realtime_service.set_auto_switch(auto_var.get())
 
-            auto_chk = tk.Checkbutton(perf_frame, text="Auto Guard (Clip history at 500MB)", variable=auto_var, command=on_auto_switch, font=("Microsoft YaHei", 9))
+            auto_chk = tk.Checkbutton(perf_frame, text="Auto Guard(Clip at 500MB)", variable=auto_var, command=on_auto_switch, font=("Microsoft YaHei", 9))
             auto_chk.pack(side="left", padx=5)
+
 
             # Simple text area for status and logs
             text_area = tk.Text(log_win, font=("Consolas", 10), bg="#f0f0f0")
@@ -8650,6 +8782,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self.save_window_position(log_win, window_id)
                     except Exception as e:
                         logger.error(f"Save window pos error: {e}")
+                self._realtime_monitor_win = None
                 log_win.destroy()
                 
             log_win.protocol("WM_DELETE_WINDOW", on_close)
