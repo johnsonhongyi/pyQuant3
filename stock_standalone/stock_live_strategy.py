@@ -9,10 +9,10 @@ import os
 import winsound
 from datetime import datetime
 import pandas as pd
-import numpy as np
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Any, Union, Optional, Callable
+
 from intraday_decision_engine import IntradayDecisionEngine
 from risk_engine import RiskEngine
 from trading_logger import TradingLogger
@@ -41,7 +41,7 @@ except ImportError:
 
 class VoiceAnnouncer:
     """独立的语音播报引擎"""
-    queue: Queue[dict[str, Optional[str]]]
+    queue: Queue
     on_speak_start: Optional[Callable[[str], None]]
     on_speak_end: Optional[Callable[[str], None]]
     _stop_event: threading.Event
@@ -199,7 +199,6 @@ class StockLiveStrategy:
         self._last_process_time: float
         self._alert_cooldown: float
         self.enabled: bool
-        self.realtime_service = realtime_service
         self.executor: ThreadPoolExecutor
         self.config_file: str
         self.alert_callback: Optional[Callable]
@@ -388,7 +387,7 @@ class StockLiveStrategy:
                     stock['ma5d'] = snap.get('ma5d', 0)
                     stock['ma10d'] = snap.get('ma10d', 0)
 
-                self.stock_count = len(self._monitored_stocks) 
+                self.stock_count: int = len(self._monitored_stocks) 
                 logger.info(
                     f"Loaded voice monitors from {self.config_file}, "
                     f"总计持仓stocks={len(self._monitored_stocks)}"
@@ -441,22 +440,23 @@ class StockLiveStrategy:
                         "created_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
                         "tags": f"auto_{logical_date}",
                         "snapshot": {
-                            "trade": row.get('price', 0),
-                            "percent": row.get('percent', 0),
-                            "ratio": row.get('ratio', 0),
+                            "trade": float(row.get('price', 0.0)),
+                            "percent": float(row.get('percent', 0.0)),
+                            "ratio": float(row.get('ratio', 0.0)),
                             "amount_desc": row.get('amount', 0),
-                            "status": row.get('status', ''),
-                            "score": row.get('score', 0),
-                            "reason": row.get('reason', '')
+                            "status": str(row.get('status', '')),
+                            "score": float(row.get('score', 0.0)),
+                            "reason": str(row.get('reason', ''))
                         }
                     }
                     added_count += 1
                 else:
                     # 如果已存在，更新其 snapshot
-                    self._monitored_stocks[code]['snapshot'].update({
-                        "status": row.get('status', self._monitored_stocks[code]['snapshot'].get('status', '')),
-                        "score": row.get('score', self._monitored_stocks[code]['snapshot'].get('score', 0)),
-                        "reason": row.get('reason', self._monitored_stocks[code]['snapshot'].get('reason', ''))
+                    snap = self._monitored_stocks[code]['snapshot']
+                    snap.update({
+                        "status": str(row.get('status', snap.get('status', ''))),
+                        "score": float(row.get('score', snap.get('score', 0.0))),
+                        "reason": str(row.get('reason', snap.get('reason', '')))
                     })
             
             self._last_import_logical_date = logical_date
@@ -749,6 +749,27 @@ class StockLiveStrategy:
                 snap['red'] = row.get('red', snap.get('red', 0)) #五日线上数据
                 snap['gren'] = row.get('gren', snap.get('gren', 0)) #弱势绿柱数据
 
+                # --- 实时情绪与形态注入 (Realtime Signal Injection) ---
+                if self.realtime_service:
+                    try:
+                        # 注入实时情绪 (0-100)
+                        rt_emotion = self.realtime_service.get_emotion_score(code)
+                        snap['rt_emotion'] = rt_emotion
+                        
+                        # 注入 V 型反转信号 (True/False)
+                        v_shape = self.realtime_service.get_v_shape_signal(code)
+                        snap['v_shape_signal'] = v_shape
+                        
+                        if v_shape:
+                             logger.info(f"⚡ {code} 触发 V 型反转信号")
+                             
+                    except Exception as e:
+                        logger.warning(f"无法获取 {code} 实时数据: {e}")
+                else:
+                    # 默认值
+                    snap['rt_emotion'] = 50
+                    snap['v_shape_signal'] = False
+
                 # --- 策略进化：注入反馈记忆 (Feedback Injection) ---
                 # 1. 记仇机制：查询该股最近连续亏损次数
                 if 'loss_streak' not in snap: # 避免每秒查库，简单缓存(实际应有过期机制，这里简化)
@@ -1034,6 +1055,8 @@ class StockLiveStrategy:
                     rtype = rule['type']
                     rval = rule['value']
                     rule_triggered = False
+                    msg = ""
+                    msg = ""
                     if rtype == 'price_up' and current_price >= rval:
                         rule_triggered = True
                         msg = f"{data['name']} 价格突破 {current_price} 涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"

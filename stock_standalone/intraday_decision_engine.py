@@ -5,7 +5,7 @@
 """
 import logging
 import datetime as dt
-from typing import Any, Union
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ class IntradayDecisionEngine:
         debug["high_val"] = high
         low = float(row.get("low", 0)) # 用于后续分析
         open_p = float(row.get("open", 0))
-        volume = float(row.get("volume", 0))
+
         ratio = float(row.get("ratio", 0))
         ma5 = float(row.get("ma5d", 0))
         ma10 = float(row.get("ma10d", 0))
@@ -133,6 +133,27 @@ class IntradayDecisionEngine:
         
         # 将防御等级存入 snapshot/debug 供后续买入逻辑扣减
         debug["defense_level"] = defense_level
+
+        # 3. 实时情绪感知 (Realtime Emotion & Pattern)
+        # rt_emotion: 0-100, >60 偏强, <40 偏弱
+        rt_emotion = float(snapshot.get("rt_emotion", 50))
+        rt_bonus = 0.0
+        if rt_emotion > 75:
+            rt_bonus = 0.1
+            debug["实时情绪加成"] = f"高涨({rt_emotion})"
+        elif rt_emotion < 30:
+            rt_bonus = -0.1
+            debug["实时情绪扣分"] = f"低迷({rt_emotion})"
+        
+        # 4. V型反转信号 (V-Shape Reversal)
+        v_shape_signal = bool(snapshot.get("v_shape_signal", False))
+        v_shape_bonus = 0.0
+        if v_shape_signal:
+            v_shape_bonus = 0.15
+            debug["形态加成"] = "V型反转"
+
+        debug["rt_bonus"] = rt_bonus
+        debug["v_shape_bonus"] = v_shape_bonus
         
         # ---------- 0. 选股分权重加成 (New: 对应 “反向验证” 需求) ----------
         # 根据 StockSelector 的评分增加基础权重，评分越高，买入信心越足
@@ -278,10 +299,14 @@ class IntradayDecisionEngine:
                 # 4. 选股分加成
                 base_pos += selection_bonus
                 
-                # 5. 支撑位得分加成
+                # 5. 支撑位得分加成 & 实时信号加成
                 if support_score > 0:
                     base_pos += support_score
                     debug["支撑加成"] = support_score
+                
+                # 注入实时信号加成
+                base_pos += rt_bonus
+                base_pos += v_shape_bonus
                 
                 # 如果价格在今日今日成交均价（nclose）下方，极大程度严控买入
                 if nclose > 0 and price < nclose:
@@ -741,7 +766,6 @@ class IntradayDecisionEngine:
                     
             # 3. 小转大判定 (Small turning Big)
             # 如果昨日均价和前日均价接近(震荡)，今日突然大幅拉离昨日均价
-            last_nclose_2 = float(snapshot.get("lastnclose1d", last_nclose)) # 暂无lastnclose1d字段，用last_nclose兜底
             # 这里简化为：如果重心上移幅度超过 1.5%，确认为趋势爆发
             if current_nclose > last_nclose * 1.015:
                 score += 0.1
@@ -751,7 +775,7 @@ class IntradayDecisionEngine:
 
     # ==================== 实时行情高优先级决策 ====================
     
-    def _realtime_priority_check(self, row: dict[str, Any], snapshot: dict[str, Any], mode: str, debug: dict[str, Any], is_t1_restricted: bool = False) -> dict[str, Any]:
+    def _realtime_priority_check(self, row: dict[str, Any], snapshot: dict[str, Any], mode: str, debug: dict[str, Any], _is_t1_restricted: bool = False) -> dict[str, Any]:
         """
         实时行情高优先级决策（优先级高于普通均线信号）
         """
@@ -782,13 +806,28 @@ class IntradayDecisionEngine:
         # 提取最近 5 日 OHLC 数据
         last_closes = [float(snapshot.get(f"lastp{i}d", 0)) for i in range(1, 6)]
         last_lows = [float(snapshot.get(f"lastl{i}d", 0)) for i in range(1, 6)]
-        last_highs = [float(snapshot.get(f"lasth{i}d", 0)) for i in range(1, 6)]
-        last_opens = [float(snapshot.get(f"lasto{i}d", 0)) for i in range(1, 6)]
+
         
         # 数据有效性检查
         if price <= 0 or open_p <= 0 or last_close <= 0:
             debug["realtime_skip"] = "数据无效"
+        # 数据有效性检查
+        if price <= 0 or open_p <= 0 or last_close <= 0:
+            debug["realtime_skip"] = "数据无效"
             return result
+
+        # ========== Priority 0. V型反转直接介入 Check ==========
+        # 如果出现 V型反转信号，且当前不是下跌趋势(MACD>0 或 价格>均价)，立即买入
+        if snapshot.get("v_shape_signal", False):
+            # 简单趋势过滤：均价必须上移 且 价格 > 均价
+            if vwap_trend_ok and price > nclose:
+                 return {
+                    "triggered": True,
+                    "action": "买入",
+                    "position": 0.4, # 初始仓位不错
+                    "reason": "V型反转确立+趋势向上",
+                    "debug": debug
+                }
 
         # ========== 0. 预研分析：超跌与泵感检测 ==========
         debug["win"] = snapshot.get("win", 0)
@@ -1142,7 +1181,7 @@ class IntradayDecisionEngine:
         # ---------- 数据获取 ----------
         price = float(row.get("trade", 0))
         high = float(row.get("high", 0))
-        low = float(row.get("low", 0))
+
         volume = float(row.get("volume", 0))  # 当日量比（已处理过）
         
         # MA 均线
@@ -1150,7 +1189,7 @@ class IntradayDecisionEngine:
         ma20 = float(snapshot.get("ma20d", 0) or row.get("ma20d", 0))
         
         # 地量数据
-        lowvol = float(snapshot.get("lowvol", 0))      # 最近最低价的地量
+
         llowvol = float(snapshot.get("llowvol", 0))    # 30日内地量
         
         # 最近极大/极小成交量量比
@@ -1161,8 +1200,7 @@ class IntradayDecisionEngine:
         
         # 历史量能
         v1 = float(snapshot.get("lastv1d", 0))
-        v2 = float(snapshot.get("lastv2d", 0))
-        v3 = float(snapshot.get("lastv3d", 0))
+
         
         # 3日高低价
         h1 = float(snapshot.get("lasth1d", 0))
@@ -1647,7 +1685,7 @@ class IntradayDecisionEngine:
 
         # 2. 结构支撑 (前低/布林/缺口)
         low10 = float(snapshot.get("low10", 0))
-        hmax = float(snapshot.get("hmax", 0)) # 近期高点
+
         lower = float(snapshot.get("lower", 0)) # 布林下轨
         
         # 10日低点支撑 (双底预期)
