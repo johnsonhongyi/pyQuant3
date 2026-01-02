@@ -80,7 +80,7 @@ from kline_monitor import KLineMonitor
 from stock_selection_window import StockSelectionWindow
 from stock_selector import StockSelector
 from column_manager import ColumnSetManager
-from collections import Counter, OrderedDict
+from collections import Counter, OrderedDict, deque
 import hashlib
 
 # 全局单例
@@ -469,6 +469,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def run_15_30_task(self):
         if getattr(self, "_task_running", False):
             return
+
+        # ✅ 每日重置实时服务状态
+        # if self.realtime_service:
+        #     try:
+        #         self.realtime_service.reset_state()
+        #         logger.info("✅ RealtimeService daily reset triggered.")
+        #     except Exception as e:
+        #         logger.error(f"❌ RealtimeService reset failed: {e}")
 
         if hasattr(self, "live_strategy"):
             try:
@@ -8558,7 +8566,71 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             else:
                 log_win.geometry("300x300")
             
-            # Simple text area for status
+            # Control frame
+            btn_frame = tk.Frame(log_win)
+            btn_frame.pack(fill="x", padx=5, pady=2)
+            
+            log_messages: deque[str] = deque(maxlen=20)  # Store last 20 log entries
+            log_messages.append(f"[{time.strftime('%H:%M:%S')}] Monitor Started.")
+
+            def add_log(msg: str):
+                log_messages.append(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+            def toggle_pause():
+                if hasattr(self, 'realtime_service') and self.realtime_service:
+                    try:
+                        status = self.realtime_service.get_status()
+                        current_paused = status.get('paused', False)
+                        new_state = not current_paused
+                        self.realtime_service.set_paused(new_state)
+                        action = "Paused" if new_state else "Resumed"
+                        add_log(f"Service {action} manually.")
+                    except Exception as e:
+                        logger.error(f"Toggle pause failed: {e}")
+
+            def manual_reset():
+                if hasattr(self, 'realtime_service') and self.realtime_service:
+                    if messagebox.askyesno("Confirm Reset", "Are you sure you want to reset the Realtime Service state?\nThis will clear all cached K-lines and emotions."):
+                        try:
+                            self.realtime_service.reset_state()
+                            add_log("Service state RESET manually.")
+                        except Exception as e:
+                            logger.error(f"Manual reset failed: {e}")
+                            add_log(f"Reset FAILED: {e}")
+
+            pause_btn = tk.Button(btn_frame, text="Pause Service", command=toggle_pause, font=("Microsoft YaHei", 9))
+            pause_btn.pack(side="left", padx=5)
+
+            reset_btn = tk.Button(btn_frame, text="↺ Reset State", command=manual_reset, font=("Microsoft YaHei", 9), bg="#eeeeee")
+            reset_btn.pack(side="left", padx=5)
+
+            # Performance controls frame
+            perf_frame = tk.Frame(log_win)
+            perf_frame.pack(fill="x", padx=5, pady=2)
+
+            def toggle_perf_mode():
+                if hasattr(self, 'realtime_service') and self.realtime_service:
+                    try:
+                        status = self.realtime_service.get_status()
+                        is_hp = status.get('high_performance_mode', True)
+                        new_hp = not is_hp
+                        self.realtime_service.set_high_performance(new_hp)
+                        add_log(f"Mode switched to {'HighPerf' if new_hp else 'Legacy'}")
+                    except Exception as e:
+                        logger.error(f"Toggle perf mode failed: {e}")
+
+            perf_btn = tk.Button(perf_frame, text="Toggle Performance", command=toggle_perf_mode, font=("Microsoft YaHei", 9))
+            perf_btn.pack(side="left", padx=5)
+
+            auto_var = tk.BooleanVar(value=True)
+            def on_auto_switch():
+                if hasattr(self, 'realtime_service') and self.realtime_service:
+                    self.realtime_service.set_auto_switch(auto_var.get())
+
+            auto_chk = tk.Checkbutton(perf_frame, text="Auto Mode Switch (Wait 800MB)", variable=auto_var, command=on_auto_switch, font=("Microsoft YaHei", 9))
+            auto_chk.pack(side="left", padx=5)
+
+            # Simple text area for status and logs
             text_area = tk.Text(log_win, font=("Consolas", 10), bg="#f0f0f0")
             text_area.pack(fill="both", expand=True, padx=5, pady=5)
             
@@ -8591,14 +8663,49 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 uptime = status.get('uptime_seconds', 0)
                 uptime_str = f"{uptime // 3600:02d}:{(uptime % 3600) // 60:02d}:{uptime % 60:02d}"
                 
+                is_paused = status.get('paused', False)
+                if is_paused:
+                    pause_btn.config(text="▶ Resume Service", bg="#c0ffc0") # Light green
+                    status_text = "PAUSED (Wait)"
+                else:
+                    pause_btn.config(text="⏸ Pause Service", bg="#ffc0c0") # Light red
+                    status_text = "RUNNING"
+
                 msg = f"=== Realtime Service Status ===\n"
-                msg += f"Status         : {status.get('status', 'RUNNING')}\n"
+                msg += f"Status         : {status_text}\n"
+                
+                # Perf Mode info
+                is_hp = status.get('high_performance_mode', True)
+                perf_str = "高性能 (全天 240节)" if is_hp else "极致省内存 (最近 60节)"
+                auto_str = "ON" if status.get('auto_switch') else "OFF"
+                msg += f"Perf Mode      : {perf_str}\n"
+                
+                # History Depth info
+                coverage = status.get('history_coverage_minutes', 0)
+                interval = status.get('avg_interval_sec', 0)
+                msg += f"History Depth  : ~{coverage//60}h {coverage%60}m (at {interval}s interval)\n"
+                msg += f"Auto Guard     : {auto_str} (>{status.get('mem_threshold')}MB / {status.get('node_threshold')} nodes)\n"
+                msg += f"Load Factor    : {status.get('node_capacity_pct', 0):.1f}% Capacity\n"
+                msg += "-" * 35 + "\n"
+                
+                # Update UI elements
+                perf_btn.config(text="Switch to " + ("Legacy Mode" if is_hp else "High Performance"), 
+                                bg="#ffffff" if is_hp else "#ffffc0")
+                auto_var.set(status.get('auto_switch', True))
+
                 msg += f"PID            : {status.get('pid', 'N/A')}\n"
+                msg += f"CPU Usage      : {status.get('cpu_usage', 0):.1f}%\n"
                 msg += f"Client Time    : {time.strftime('%H:%M:%S')}\n"
                 msg += f"Server Time    : {time.strftime('%H:%M:%S', time.localtime(status.get('server_time', 0))) if status.get('server_time') else 'N/A'}\n"
                 msg += f"Uptime         : {uptime_str}\n"
                 msg += "-" * 35 + "\n"
                 msg += f"Stocks Cached  : {status.get('klines_cached', 0)}\n"
+                msg += f"Total Nodes    : {status.get('total_nodes', 0)}\n"
+                msg += f"Avg Node/Stock : {status.get('avg_nodes_per_stock', 0):.1f}\n"
+                msg += "-" * 35 + "\n"
+                msg += f"Last Batch     : {status.get('last_processing_time_ms', 0)}ms (Max: {status.get('max_batch_time_ms', 0)}ms)\n"
+                msg += f"Process Speed  : {status.get('processing_speed_row_per_sec', 0)} rows/sec\n"
+                msg += f"Total Processed: {status.get('total_rows_processed', 0)}\n"
                 msg += f"Active Subs    : {status.get('subscribers', 0)}\n"
                 msg += f"Emotions Track : {status.get('emotions_tracked', 0)}\n"
                 msg += "-" * 35 + "\n"
@@ -8612,19 +8719,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 msg += f"Last Global Upd: {last_upd_str}\n"
                 
                 if "error" in status:
-                    msg += f"\n[!] ERROR:\n{status['error']}\n"
-                    msg += "\nWait for first scan (5-10s)..." if status.get('update_count', 0) == 0 else ""
-                elif status.get('update_count', 0) == 0:
-                     msg += "\n(Waiting for first data batch from scanner...)\n"
+                    msg += f"\n[!] ERROR: {status['error']}\n"
                 
-                # Debug Info for Troubleshooting
-                if not hasattr(self, 'realtime_service') or not self.realtime_service:
-                    msg += f"\n[DEBUG] Service Object Missing!\n"
-                    msg += f"Has attr: {hasattr(self, 'realtime_service')}\n"
-                    msg += f"Object: {getattr(self, 'realtime_service', 'None')}\n"
-                    
+                msg += "\n" + "="*10 + " RECENT LOGS " + "="*10 + "\n"
+                msg += "\n".join(list(log_messages))
+                
                 text_area.delete("1.0", tk.END)
                 text_area.insert("1.0", msg)
+                text_area.see(tk.END) # Auto-scroll to show latest logs
                 
                 log_win.after(1000, update_status)
                 
