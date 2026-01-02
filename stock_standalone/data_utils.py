@@ -1610,20 +1610,20 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             df_all = clean_bad_columns(top_temp)
             df_all = sanitize(df_all)
             
-            # # 🛡️ 内存优化：裁剪不必要的列 (Trim unused columns)
-            # # 仅保留 UI 显示、策略计算和实时服务所需的列
-            # keep_cols = [
-            #     'name', 'trade', 'boll', 'dff', 'df2', 'couts',
-            #     'percent', 'per1d', 'perc1d', 'ra', 'ral',
-            #     'topR', 'volume', 'red', 'lastdu4', 'category',
-            #     'now', 'open', 'high', 'low', 'amount', 'vol',
-            #     'upper1','lastl1d', 'lasto1d','lastp1d', 'lastv1d', 
-            #     'eval1d', 'eval2d',
-            #     'signal1d', 'ma51d', 'curr_eval', 'trade_signal',
-            #     'win', 'sum_perc', 'slope', 'vol_ratio', 'power_idx'
-            # ]
-            # actual_keep = [c for c in keep_cols if c in df_all.columns]
-            # df_all = df_all[actual_keep]
+            # 🛡️ 动态列裁剪 (Dynamic Column Trimming)
+            keep_all = shared_dict.get('keep_all_columns', False)
+            if not keep_all:
+                required_cols = shared_dict.get('required_cols', [])
+                if required_cols:
+                    # 获取 df_all 中存在的列
+                    actual_keep = [c for c in required_cols if c in df_all.columns]
+                    # 如果结果集包含基本的 'name' 列，确保裁剪是安全的
+                    if 'name' in actual_keep or 'code' in actual_keep:
+                        df_all = df_all[actual_keep]
+                    else:
+                        logger.debug("Dynamic Trimming: required_cols missing core columns, skipping trim.")
+            else:
+                logger.debug("Dynamic Trimming: 'keep_all_columns' active, skipping trim.")
 
             # 🔌 RealtimeDataService updates are now handled by the Main process
             # inside update_tree() to eliminate cross-process proxy overhead.
