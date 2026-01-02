@@ -42,6 +42,8 @@ from JSONData import stockFilter as stf
 from logger_utils import LoggerFactory, init_logging
 from stock_live_strategy import StockLiveStrategy
 from realtime_data_service import DataPublisher
+# ✅ Register DataPublisher at module level for Windows 'spawn' compatibility
+StockManager.register('DataPublisher', DataPublisher)
 from monitor_utils import (
     load_display_config, save_display_config, save_monitor_list, 
     load_monitor_list, list_archives, archive_file_tools, archive_search_history_list,
@@ -240,27 +242,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 刷新开关标志
         self.refresh_enabled = True
+        # ✅ 初始化实时监控策略 (延迟初始化，防止阻塞主窗口显示)
+        self.live_strategy = None
+        self.after(3000, self._init_live_strategy)
+        
+        # 4. 初始化 Realtime Data Service (Shared Manager)
         try:
-            from realtime_data_service import DataPublisher
-            # Register DataPublisher with the custom manager
-            StockManager.register('DataPublisher', DataPublisher)
+            logger.info("正在启动 StockManager (SyncManager)...")
+            # Manager implicitly uses the registered classes from module level
             self.manager = StockManager()
             self.manager.start()
             
-            # Re-bind global_dict to the new manager
-            self.global_dict = self.manager.dict()  # 共享字典
+            self.global_dict = self.manager.dict()
             self.global_dict["resample"] = resampleInit
-
+            
+            # Create the proxy instance
             self.realtime_service = self.manager.DataPublisher()
             self.global_dict['realtime_service'] = self.realtime_service
-            logger.info("✅ RealtimeDataService Initialized (Shared via Manager)")
+            
+            # Verify Proxy
+            try:
+                test_pid = self.realtime_service.get_status().get('pid')
+                logger.info(f"✅ RealtimeDataService 已就绪 (Manager PID: {test_pid})")
+            except Exception as proxy_e:
+                logger.error(f"⚠️ RealtimeDataService 代理验证失败: {proxy_e}")
+
         except Exception as e:
-            logger.error(f"❌ RealtimeDataService Init Failed: {e}")
+            logger.error(f"❌ RealtimeDataService 初始化失败: {e}\n{traceback.format_exc()}")
             self.realtime_service = None
-            # Fallback to standard manager if custom fails (though functionality will be limited)
             self.manager = mp.Manager()
             self.global_dict = self.manager.dict()
             self.global_dict["resample"] = resampleInit
+            self.global_dict['init_error'] = str(e)
         # Restore global_values initialization
         self.global_values = cct.GlobalValues(self.global_dict)
         resample = self.global_values.getkey("resample")
@@ -1324,13 +1337,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 while not self.queue.empty():
                     df = self.queue.get_nowait()
                     
-                    # ✅ 注入 RealtimeDataService 更新 (先于 UI 更新)
-                    if self.realtime_service and df is not None and not df.empty:
-                        try:
-                            # 异步或放在主线程看性能。目前先同步调用。
-                            self.realtime_service.update_batch(df)
-                        except Exception as e:
-                            logger.error(f"RealtimeService update failed: {e}")
 
                     # logger.info(f'df:{df[:1]}')
                     if self.sortby_col is not None:
@@ -8576,32 +8582,46 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     try:
                         status = self.realtime_service.get_status()
                     except Exception as e:
-                        status = {"error": f"IPC Error: {e}"}
+                        status = {"error": f"IPC Communication Failed: {e}"}
                 else:
-                    status = {"status": "Service Not Initialized"}
+                    init_err = self.global_dict.get('init_error', 'Not Initialized (Unknown Reason)')
+                    status = {"status": "Closed / Not Ready", "error": init_err}
                 
                 # Format Output
                 uptime = status.get('uptime_seconds', 0)
                 uptime_str = f"{uptime // 3600:02d}:{(uptime % 3600) // 60:02d}:{uptime % 60:02d}"
                 
                 msg = f"=== Realtime Service Status ===\n"
+                msg += f"Status         : {status.get('status', 'RUNNING')}\n"
                 msg += f"PID            : {status.get('pid', 'N/A')}\n"
                 msg += f"Client Time    : {time.strftime('%H:%M:%S')}\n"
                 msg += f"Server Time    : {time.strftime('%H:%M:%S', time.localtime(status.get('server_time', 0))) if status.get('server_time') else 'N/A'}\n"
                 msg += f"Uptime         : {uptime_str}\n"
-                msg += "-" * 30 + "\n"
+                msg += "-" * 35 + "\n"
                 msg += f"Stocks Cached  : {status.get('klines_cached', 0)}\n"
                 msg += f"Active Subs    : {status.get('subscribers', 0)}\n"
                 msg += f"Emotions Track : {status.get('emotions_tracked', 0)}\n"
-                msg += "-" * 30 + "\n"
+                msg += "-" * 35 + "\n"
                 msg += f"Memory Usage   : {status.get('memory_usage', 'N/A')}\n"
                 msg += f"Process Speed  : {status.get('processing_speed_row_per_sec', 0)} rows/sec\n"
                 msg += f"Total Processed: {status.get('total_rows_processed', 0)}\n"
                 msg += f"Batch Updates  : {status.get('update_count', 0)}\n"
-                msg += f"Last Global Upd: {status.get('last_update', 'N/A')}\n"
+                
+                last_upd = status.get('last_update', 0)
+                last_upd_str = time.strftime('%H:%M:%S', time.localtime(last_upd)) if last_upd > 0 else "Never"
+                msg += f"Last Global Upd: {last_upd_str}\n"
                 
                 if "error" in status:
-                    msg += f"\n[!] ERROR: {status['error']}\n"
+                    msg += f"\n[!] ERROR:\n{status['error']}\n"
+                    msg += "\nWait for first scan (5-10s)..." if status.get('update_count', 0) == 0 else ""
+                elif status.get('update_count', 0) == 0:
+                     msg += "\n(Waiting for first data batch from scanner...)\n"
+                
+                # Debug Info for Troubleshooting
+                if not hasattr(self, 'realtime_service') or not self.realtime_service:
+                    msg += f"\n[DEBUG] Service Object Missing!\n"
+                    msg += f"Has attr: {hasattr(self, 'realtime_service')}\n"
+                    msg += f"Object: {getattr(self, 'realtime_service', 'None')}\n"
                     
                 text_area.delete("1.0", tk.END)
                 text_area.insert("1.0", msg)
