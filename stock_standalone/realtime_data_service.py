@@ -237,7 +237,7 @@ class DataPublisher:
     """
     数据分发器 (核心入口)
     """
-    def __init__(self, high_performance: bool = True):
+    def __init__(self, high_performance: bool = False):
         self.paused = False
         self.high_performance = high_performance # HP: ~4.0h, Legacy: ~2.0h (Dynamic nodes)
         self.auto_switch_enabled = True
