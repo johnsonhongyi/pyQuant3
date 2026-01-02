@@ -147,3 +147,4 @@ stock/jupyterAlgo/Quant2023/TradingTutorial
 stock/concept_pg_data.db
 *.bak
 stock_standalone/.cmd_history
+stock_standalone/instock_tk.*
