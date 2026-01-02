@@ -1373,7 +1373,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self.refresh_tree(self.df_all)
                             
                 # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
-                if not self.tip_var.get() and has_update and hasattr(self, 'live_strategy'):
+                # if not self.tip_var.get() and has_update and hasattr(self, 'live_strategy'):
+                if has_update and hasattr(self, 'live_strategy'):
                     if not (915 < cct.get_now_time_int() < 920):
                         # self.after(90 * 1000, lambda: self.live_strategy.process_data(self.df_all))
                         if self._live_strategy_first_run:
@@ -1481,7 +1482,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if send_tdx_Key and stock_code:
                 self.sender.send(stock_code)
 
-            if self.voice_var.get():
+            # if self.voice_var.get():
+            if self.tip_var.get():
                 # =========================
                 # ✅ 构造 fake mouse event
                 # =========================
@@ -1599,6 +1601,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             detect_calc_support:{detect_calc_support} \
             alert_cooldown:{alert_cooldown}\
             pending_alert_cycles:{pending_alert_cycles} st_key_sort:{st_key_sort}")
+        
+        # 同步频率变动到实时服务(如果已连接)
+        if hasattr(self, 'realtime_service') and self.realtime_service:
+            try:
+                self.realtime_service.set_expected_interval(duration_sleep_time)
+            except:
+                pass
 
     def update_linkage_status(self):
         # 此处处理 checkbuttons 状态
@@ -4969,7 +4978,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def on_tree_click_for_tooltip(self, event,stock_code=None,stock_name=None):
         """处理树视图点击事件，延迟显示提示框"""
         logger.debug(f"[Tooltip] 点击事件触发: x={event.x}, y={event.y}")
-        if self.tip_var.get():
+        if not self.tip_var.get():
             return
         # 取消之前的定时器
         if getattr(self, '_tooltip_timer', None):
@@ -8652,6 +8661,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 status = {}
                 if hasattr(self, 'realtime_service') and self.realtime_service:
                     try:
+                        # 同步当前的全局频率
+                        if 'duration_sleep_time' in globals():
+                            self.realtime_service.set_expected_interval(globals()['duration_sleep_time'])
                         status = self.realtime_service.get_status()
                     except Exception as e:
                         status = {"error": f"IPC Communication Failed: {e}"}
@@ -8676,15 +8688,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # Perf Mode info
                 is_hp = status.get('high_performance_mode', True)
-                perf_str = "全天覆盖 (240节)" if is_hp else "内存裁剪 (仅留 120节)"
+                max_len = status.get('cache_history_limit', 240)
+                interval = status.get('avg_interval_sec', 60)
+                # 计算该模式下的理论最大覆盖时间 (小时)
+                max_hours = (max_len * interval) / 3600
+                
+                perf_name = "全天覆盖" if is_hp else "内存裁剪"
+                target_h = status.get('target_hours', 4.0 if is_hp else 2.0)
+                perf_str = f"{perf_name} (目标 {target_h:.0f}h -> {max_len}K @ {interval}s)"
                 auto_str = "ON" if status.get('auto_switch') else "OFF"
                 msg += f"Perf Mode      : {perf_str}\n"
                 
-                # History Depth info
+                # History Depth info (Current actual coverage)
                 coverage = status.get('history_coverage_minutes', 0)
-                interval = status.get('avg_interval_sec', 0)
-                msg += f"History Depth  : ~{coverage//60}h {coverage%60}m (at {interval}s interval)\n"
-                msg += f"Auto Guard     : {auto_str} (>{status.get('mem_threshold')}MB / {status.get('node_threshold')} nodes)\n"
+                mem_th = status.get('mem_threshold', 500)
+                node_th = status.get('node_threshold', 1000000)
+                msg += f"History Depth  : ~{coverage//60}h {coverage%60}m (当前已入库时长)\n"
+                msg += f"Auto Guard     : {auto_str} (>{mem_th}MB / {node_th} nodes)\n"
                 msg += f"Load Factor    : {status.get('node_capacity_pct', 0):.1f}% Capacity\n"
                 msg += "-" * 35 + "\n"
                 
