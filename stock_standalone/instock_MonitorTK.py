@@ -68,6 +68,7 @@ from tk_gui_modules.gui_config import (
 )
 from trading_logger import TradingLogger
 from dpi_utils import set_process_dpi_awareness, get_windows_dpi_scale_factor
+from ext_data_viewer import ExtDataViewer
 from sys_utils import get_base_path
 from stock_handbook import StockHandbook
 from history_manager import QueryHistoryManager
@@ -401,8 +402,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.handbook = StockHandbook()
         # ✅ 初始化实时监控策略 (延迟初始化，防止阻塞主窗口显示)
         self.live_strategy = None
-        self.realtime_service = None
         self.after(3000, self._init_live_strategy)
+        
+        # ✅ 初始化 55188 数据更新监听状态
+        self.last_ext_data_ts_local = 0
+        self.after(5000, self._check_ext_data_update)
         
         # ✅ 性能优化器初始化
         if PERFORMANCE_OPTIMIZER_AVAILABLE:
@@ -456,6 +460,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 启动周期检测 RDP DPI 变化
         self.after(3000, self._check_dpi_change)
         self.auto_adjust_column = self.dfcf_var.get()
+        # self.bind("<Configure>", self.on_resize)
+
+    def on_resize(self, event):
+        if event.widget != self:
+            return
+        # 标记 resize 进行中
+        self._is_resizing = True
+        if hasattr(self, "_resize_after_id") and self._resize_after_id:
+            self.after_cancel(self._resize_after_id)
+        # 只有“停下来”才触发真正刷新
+        self._resize_after_id = self.after(
+            300,
+            self._on_resize_finished
+        )
+    def _on_resize_finished(self):
+        self._is_resizing = False
+        logger.info("[resize] finished, apply")
+        # self.refresh_tree()
+        # self._refresh_visible_rows()
 
     # scheduler
     def schedule_15_30_job(self):
@@ -1220,6 +1243,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="存档", command=lambda: self.open_archive_loader(), font=('Microsoft YaHei', 9), padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="实时", command=lambda: self.open_realtime_monitor(), font=('Microsoft YaHei', 9), padx=2, pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="55188数据", command=lambda: self.open_ext_data_viewer(), font=('Microsoft YaHei', 9, 'bold'), fg="darkgreen", padx=2, pady=2).pack(side="left", padx=2)
 
         if len(self.search_history1) > 0:
             self.search_var1.set(self.search_history1[0])
@@ -8819,7 +8843,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             auto_chk = tk.Checkbutton(perf_frame, text="Auto Guard(Clip at 500MB)", variable=auto_var, command=on_auto_switch, font=("Microsoft YaHei", 9))
             auto_chk.pack(side="left", padx=5)
 
-
             # Simple text area for status and logs
             text_area = tk.Text(log_win, font=("Consolas", 10), bg="#f0f0f0")
             text_area.pack(fill="both", expand=True, padx=5, pady=5)
@@ -8829,11 +8852,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if hasattr(self, 'save_window_position'):
                     try:
                         self.save_window_position(log_win, window_id)
-                    except Exception as e:
-                        logger.error(f"Save window pos error: {e}")
+                    except: pass
                 self._realtime_monitor_win = None
                 log_win.destroy()
-                
+
             log_win.protocol("WM_DELETE_WINDOW", on_close)
             
             def update_status():
@@ -8843,89 +8865,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 status = {}
                 if hasattr(self, 'realtime_service') and self.realtime_service:
                     try:
-                        # 同步当前的全局频率
-                        if 'duration_sleep_time' in globals():
-                            dst = globals()['duration_sleep_time']
-                            if isinstance(dst, (int, float)):
-                                self.realtime_service.set_expected_interval(int(dst))
                         status = self.realtime_service.get_status()
                     except Exception as e:
                         status = {"error": f"IPC Communication Failed: {e}"}
-                else:
-                    init_err = self.global_dict.get('init_error', 'Not Initialized (Unknown Reason)')
-                    status = {"status": "Closed / Not Ready", "error": init_err}
                 
                 # Format Output
                 uptime = status.get('uptime_seconds', 0)
-                try:
-                    uptime_val = int(uptime) if uptime is not None else 0
-                except (ValueError, TypeError):
-                    uptime_val = 0
-                
+                uptime_val = int(uptime) if isinstance(uptime, (int, float)) else 0
                 uptime_str = f"{uptime_val // 3600:02d}:{(uptime_val % 3600) // 60:02d}:{uptime_val % 60:02d}"
                 
                 is_paused = status.get('paused', False)
-                if is_paused:
-                    pause_btn.config(text="▶ Resume Service", bg="#c0ffc0") # Light green
-                    status_text = "PAUSED (Wait)"
-                else:
-                    pause_btn.config(text="⏸ Pause Service", bg="#ffc0c0") # Light red
-                    status_text = "RUNNING"
-
+                status_text = "PAUSED" if is_paused else "RUNNING"
+                
                 msg = f"=== Realtime Service Status ===\n"
                 msg += f"Status         : {status_text}\n"
-                
-                # Perf Mode info
-                is_hp = status.get('high_performance_mode', True)
-                max_len = status.get('cache_history_limit', 240)
-                interval = status.get('avg_interval_sec', 60)
-                # 计算该模式下的理论最大覆盖时间 (小时)
-                max_hours = (max_len * interval) / 3600
-                
-                perf_name = "全天覆盖" if is_hp else "内存裁剪"
-                target_h = status.get('target_hours', 4.0 if is_hp else 2.0)
-                perf_str = f"{perf_name} (目标 {target_h:.0f}h -> {max_len}K @ {interval}s)"
-                auto_str = "ON" if status.get('auto_switch') else "OFF"
-                msg += f"Perf Mode      : {perf_str}\n"
-                
-                # History Depth info (Current actual coverage)
-                coverage = status.get('history_coverage_minutes', 0)
-                mem_th = status.get('mem_threshold', 500)
-                node_th = status.get('node_threshold', 1000000)
-                msg += f"History Depth  : ~{coverage//60}h {coverage%60}m (当前已入库时长)\n"
-                msg += f"Auto Guard     : {auto_str} (>{mem_th}MB / {node_th} nodes)\n"
-                msg += f"Load Factor    : {status.get('node_capacity_pct', 0):.1f}% Capacity\n"
-                msg += "-" * 35 + "\n"
-                
-                # Update UI elements
-                perf_btn.config(text="Switch to " + ("Legacy Mode" if is_hp else "High Performance"), 
-                                bg="#ffffff" if is_hp else "#ffffc0")
-                auto_var.set(status.get('auto_switch', True))
-
-                msg += f"PID            : {status.get('pid', 'N/A')}\n"
-                msg += f"CPU Usage      : {status.get('cpu_usage', 0):.1f}%\n"
-                msg += f"Client Time    : {time.strftime('%H:%M:%S')}\n"
-                msg += f"Server Time    : {time.strftime('%H:%M:%S', time.localtime(status.get('server_time', 0))) if status.get('server_time') else 'N/A'}\n"
                 msg += f"Uptime         : {uptime_str}\n"
+                msg += f"Memory Usage   : {status.get('memory_usage', 'N/A')}\n"
+                msg += f"CPU Usage      : {status.get('cpu_usage', 0):.1f}%\n"
                 msg += "-" * 35 + "\n"
                 msg += f"Stocks Cached  : {status.get('klines_cached', 0)}\n"
-                msg += f"Total Nodes    : {status.get('total_nodes', 0)}\n"
-                msg += f"Avg Node/Stock : {status.get('avg_nodes_per_stock', 0):.1f}\n"
-                msg += "-" * 35 + "\n"
-                msg += f"Last Batch     : {status.get('last_processing_time_ms', 0)}ms (Max: {status.get('max_batch_time_ms', 0)}ms)\n"
-                msg += f"Process Speed  : {status.get('processing_speed_row_per_sec', 0)} rows/sec\n"
-                msg += f"Total Processed: {status.get('total_rows_processed', 0)}\n"
-                msg += f"Active Subs    : {status.get('subscribers', 0)}\n"
-                msg += f"Emotions Track : {status.get('emotions_tracked', 0)}\n"
-                msg += "-" * 35 + "\n"
-                msg += f"Memory Usage   : {status.get('memory_usage', 'N/A')}\n"
-                msg += f"Process Speed  : {status.get('processing_speed_row_per_sec', 0)} rows/sec\n"
-                msg += f"Total Processed: {status.get('total_rows_processed', 0)}\n"
-                msg += f"Batch Updates  : {status.get('update_count', 0)}\n"
-                
-                last_upd = status.get('last_update', 0)
-                last_upd_str = time.strftime('%H:%M:%S', time.localtime(last_upd)) if last_upd > 0 else "Never"
-                msg += f"Last Global Upd: {last_upd_str}\n"
                 
                 if "error" in status:
                     msg += f"\n[!] ERROR: {status['error']}\n"
@@ -8935,14 +8893,67 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 text_area.delete("1.0", tk.END)
                 text_area.insert("1.0", msg)
-                # Removed see(END) to keep view at the top for diagnostic info
-                
-                log_win.after(30000, update_status) # 降低刷新频率至 30 秒
+                log_win.after(5000, update_status) 
                 
             update_status()
             
         except Exception as e:
             logger.error(f"Failed to open realtime monitor: {e}")
+
+    def open_ext_data_viewer(self, auto_update=False):
+        """打开/复用 55188 外部数据查看器"""
+        if hasattr(self, '_ext_data_viewer_win') and self._ext_data_viewer_win and self._ext_data_viewer_win.winfo_exists():
+            if not auto_update:
+                self._ext_data_viewer_win.lift()
+                self._ext_data_viewer_win.focus_force()
+        else:
+            self._ext_data_viewer_win = ExtDataViewer(self)
+            
+        if self.realtime_service:
+            try:
+                # 优先直接从服务拉取最新全量数据
+                ext_status = self.realtime_service.get_55188_data()
+                if ext_status and 'df' in ext_status:
+                    df_ext = ext_status['df']
+                    self._ext_data_viewer_win.update_data(df_ext)
+                    # 同时同步给策略模块，确保一致性
+                    if hasattr(self, 'live_strategy') and self.live_strategy:
+                        self.live_strategy.ext_data_55188 = df_ext
+                        self.live_strategy.last_ext_update_ts = ext_status.get('last_update', 0)
+                
+                if auto_update:
+                    logger.debug("55188 Data auto-pop/refresh triggered.")
+            except Exception as e:
+                logger.error(f"Update ExtDataViewer failed: {e}")
+
+    def _check_ext_data_update(self):
+        """周期性检查 55188 外部数据是否有更新，触发 UI 同步或弹窗"""
+        try:
+            if self.realtime_service:
+                # 即使没有主行情更新，也尝试同步外部数据
+                ext_status = self.realtime_service.get_55188_data()
+                if ext_status and 'df' in ext_status:
+                    df_ext = ext_status['df']
+                    remote_ts = ext_status.get('last_update', 0)
+                    
+                    # 同步给策略模块
+                    if hasattr(self, 'live_strategy') and self.live_strategy:
+                        self.live_strategy.ext_data_55188 = df_ext
+                        self.live_strategy.last_ext_update_ts = remote_ts
+                    
+                    if remote_ts > self.last_ext_data_ts_local:
+                        logger.info(f"🆕 Detected 55188 data update (ts={remote_ts}). Syncing UI...")
+                        self.last_ext_data_ts_local = remote_ts
+                        
+                        if hasattr(self, '_ext_data_viewer_win') and self._ext_data_viewer_win.winfo_exists():
+                            self._ext_data_viewer_win.update_data(df_ext)
+                        else:
+                            # 数据更新且窗口未打开时，触发自动弹窗
+                            self.open_ext_data_viewer(auto_update=True)
+        except Exception as e:
+            logger.debug(f"[_check_ext_data_update] error: {e}")
+        finally:
+            self.after(5000, self._check_ext_data_update)
 
     def open_archive_loader(self):
         """打开存档选择窗口"""

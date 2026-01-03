@@ -7,6 +7,7 @@ from typing import Callable, Any, Dict, List, Union, Optional
 from JohnsonUtil import LoggerFactory
 import psutil
 import os
+import sqlite3
 
 logger = LoggerFactory.getLogger()
 
@@ -227,17 +228,19 @@ class IntradayEmotionTracker:
     def get_score(self, code: str) -> float:
         return self.scores.get(code, 50.0) # 默认 50 中性
 
-import os
 try:
     import psutil
 except ImportError:
     psutil = None
 
+from scraper_55188 import Scraper55188
+from JohnsonUtil import commonTips as cct
+
 class DataPublisher:
     """
     数据分发器 (核心入口)
     """
-    def __init__(self, high_performance: bool = False):
+    def __init__(self, high_performance: bool = False, scraper_interval: int = 600):
         self.paused = False
         self.high_performance = high_performance # HP: ~4.0h, Legacy: ~2.0h (Dynamic nodes)
         self.auto_switch_enabled = True
@@ -248,6 +251,16 @@ class DataPublisher:
         self.expected_interval = 60 # 默认 1分钟
         self.last_batch_clock = 0.0
         self.batch_intervals = deque(maxlen=20) # 最近 20 批次的间隔(秒)
+        
+        # 55188 Scraper Settings
+        self.scraper_interval = scraper_interval
+        self.current_scraper_wait = scraper_interval
+        self.max_scraper_wait = 1800 # 最大 30 分钟
+        
+        # Sector Persistence Settings
+        self.db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "concept_pg_data.db")
+        self.sector_cache = {} # {name: score}
+        self.last_db_check = 0.0
 
         # Time-based goals (Hours)
         self.TARGET_HOURS_HP = 4.0
@@ -269,9 +282,18 @@ class DataPublisher:
         self.max_batch_time = 0.0
         self.batch_rates_dq = deque(maxlen=10) # Last 10 batch rates (rows/sec)
         
+        # 55188 External Data Integration
+        self.scraper_55188 = Scraper55188()
+        self.ext_data_55188 = pd.DataFrame()
+        self.last_ext_update_ts = 0.0
+
         # Start maintenance thread
         self.maintenance_thread = threading.Thread(target=self._maintenance_task, daemon=True)
         self.maintenance_thread.start()
+        
+        # Start external data scraper thread
+        self.scraper_thread = threading.Thread(target=self._scraper_task, daemon=True)
+        self.scraper_thread.start()
 
     def reset_state(self):
         """
@@ -376,8 +398,105 @@ class DataPublisher:
                             f"Klines: {status.get('klines_cached')} | "
                             f"Updates: {status.get('update_count')}")
                 
+                # 每小时更新一次板块持续性缓存
+                if time.time() - self.last_db_check > 3600:
+                    self._update_sector_cache()
+                    self.last_db_check = time.time()
+                
             except Exception as e:
                 logger.error(f"Maintenance task error: {e}")
+
+    def _update_sector_cache(self):
+        """更新板块持续性得分"""
+        from datetime import datetime, timedelta
+        if not os.path.exists(self.db_path):
+            return
+        
+        try:
+            conn = sqlite3.connect(self.db_path)
+            # 获取最近 5 天的数据，计算出现频次
+            five_days_ago = (datetime.now() - timedelta(days=5)).strftime('%Y%m%d')
+            query = f"""
+                SELECT concept_name, COUNT(*) as freq 
+                FROM concept_data 
+                WHERE date >= '{five_days_ago}'
+                GROUP BY concept_name 
+                HAVING freq >= 2
+                ORDER BY freq DESC
+            """
+            df_sec = pd.read_sql(query, conn)
+            conn.close()
+            
+            if not df_sec.empty:
+                # 将频次映射为得分 (2次: 0.5, 3次: 0.8, 4+: 1.0)
+                self.sector_cache = {}
+                for row in df_sec.itertuples():
+                    score = min(row.freq * 0.25, 1.0)
+                    self.sector_cache[row.concept_name] = score
+                logger.info(f"📊 Sector persistence cache updated: {len(self.sector_cache)} sectors.")
+        except Exception as e:
+            logger.error(f"Error updating sector cache: {e}")
+
+    def get_sector_score(self, sector_name: str) -> float:
+        """获取板块持续性得分"""
+        if not sector_name: return 0.0
+        # 模糊匹配或精确匹配
+        score = self.sector_cache.get(sector_name, 0.0)
+        if score == 0:
+            # 简单尝试包含匹配
+            for name, s in self.sector_cache.items():
+                if name in sector_name or sector_name in name:
+                    return s
+        return score
+
+    def _scraper_task(self):
+        """
+        后台抓取任务：定期抓取 55188 数据
+        仅在交易时段运行，遇到封禁迹象自动“翻倍延迟” (Exponential Backoff)
+        """
+        while True:
+            try:
+                is_trading = cct.get_work_time_duration()
+                now = time.time()
+                
+                # 逻辑：程序启动时强制执行第一次抓取（last_ext_update_ts == 0）
+                # 之后仅在交易时段（is_trading）按间隔（current_scraper_wait）抓取
+                do_fetch = False
+                if self.last_ext_update_ts == 0:
+                    do_fetch = True
+                elif is_trading:
+                    delta = now - self.last_ext_update_ts
+                    if delta >= self.current_scraper_wait:
+                        do_fetch = True
+
+                if do_fetch:
+                    logger.info(f"🕸️ Fetching 55188 external data (init={self.last_ext_update_ts == 0}, wait={self.current_scraper_wait}s)...")
+                    df_ext = self.scraper_55188.get_combined_data()
+                    
+                    if not df_ext.empty:
+                        self.ext_data_55188 = df_ext
+                        self.last_ext_update_ts = now
+                        # 成功后恢复默认延迟
+                        if self.current_scraper_wait != self.scraper_interval:
+                            logger.info(f"✅ Fetch success. Resetting scraper interval to {self.scraper_interval}s.")
+                        self.current_scraper_wait = self.scraper_interval
+                    else:
+                        # 失败或被封禁迹象 (返回空) -> Double the wait
+                        self.current_scraper_wait = min(self.current_scraper_wait * 2, self.max_scraper_wait)
+                        # 如果是初始化失败，也标记一下，防止死循环在这个 if 块（虽然 sleep 10s 会缓解）
+                        if self.last_ext_update_ts == 0:
+                            self.last_ext_update_ts = now - (self.current_scraper_wait / 2)
+                        else:
+                            self.last_ext_update_ts = now
+                        logger.warning(f"⚠️ Fetch failed/Empty result. Doubling wait to {self.current_scraper_wait}s.")
+                
+            except Exception as e:
+                # 异常也触发 Backoff
+                self.current_scraper_wait = min(self.current_scraper_wait * 2, self.max_scraper_wait)
+                self.last_ext_update_ts = time.time()
+                logger.error(f"Scraper task error: {e}. Backoff delay: {self.current_scraper_wait}s.")
+            
+            time.sleep(10) # 维持心跳检查频率
         
     def update_batch(self, df: pd.DataFrame):
         """
@@ -462,6 +581,32 @@ class DataPublisher:
     def get_v_shape_signal(self, code: str, window: int = 30) -> bool:
         """获取个股是否有 V 型反转信号"""
         return self.kline_cache.detect_v_shape(code, window)
+
+    def get_55188_data(self, code: Optional[str] = None) -> Union[dict, dict[str, Any]]:
+        """获取指定的 55188 外部数据 (人气、主力排名、题材、板块得分等)"""
+        if self.ext_data_55188.empty:
+            return {}
+        
+        # 如果不传 code，返回全量数据快照汇总
+        if code is None:
+            return {
+                'df': self.ext_data_55188.copy(),
+                'last_update': self.last_ext_update_ts
+            }
+            
+        # 统一按字符串索引处理
+        code_str = str(code).zfill(6)
+        # 如果 code 不在索引但在列中，重新设为索引
+        if 'code' in self.ext_data_55188.columns and self.ext_data_55188.index.name != 'code':
+            self.ext_data_55188 = self.ext_data_55188.set_index('code')
+            
+        if code_str in self.ext_data_55188.index:
+            data = self.ext_data_55188.loc[code_str].to_dict()
+            # 注入板块持续性得分
+            theme_name = data.get('theme_name', '')
+            data['sector_score'] = self.get_sector_score(theme_name)
+            return data
+        return {}
 
     def stress_test(self, num_stocks=4000, n_klines=240):
         """内存压力测试"""

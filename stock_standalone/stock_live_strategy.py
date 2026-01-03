@@ -227,6 +227,10 @@ class StockLiveStrategy:
         self.df = None
         self.realtime_service = None
         
+        # --- 外部数据缓存 (55188.cn) ---
+        self.ext_data_55188: pd.DataFrame = pd.DataFrame()
+        self.last_ext_update_ts: float = 0
+        
         # --- 自动交易相关状态初始化 ---
         self.auto_loop_enabled = False
         self.batch_state = "IDLE"
@@ -751,15 +755,43 @@ class StockLiveStrategy:
 
                 # --- 实时情绪与形态注入 (Realtime Signal Injection) ---
                 if self.realtime_service:
+                    # ✅ 1. 同步 55188 全量数据 (用于 UI 查看器和全局感知)
                     try:
-                        # 注入实时情绪 (0-100)
+                        ext_status = self.realtime_service.get_55188_data() # 不传 code 获取全量字典
+                        if isinstance(ext_status, dict):
+                            df_ext = ext_status.get('df')
+                            if df_ext is not None and not df_ext.empty:
+                                self.ext_data_55188 = df_ext
+                                self.last_ext_update_ts = ext_status.get('last_update', time.time())
+                    except Exception as e:
+                        logger.debug(f"Sync full 55188 data failed: {e}")
+
+                    try:
+                        # 1. 注入实时情绪 (0-100)
                         rt_emotion = self.realtime_service.get_emotion_score(code)
                         snap['rt_emotion'] = rt_emotion
                         
-                        # 注入 V 型反转信号 (True/False)
+                        # 2. 注入 V 型反转信号 (True/False)
                         v_shape = self.realtime_service.get_v_shape_signal(code)
                         snap['v_shape_signal'] = v_shape
                         
+                        # 3. 注入 55188 外部数据 (人气、主力、题材)
+                        ext_55188 = self.realtime_service.get_55188_data(code)
+                        if ext_55188:
+                            snap['hot_rank'] = ext_55188.get('hot_rank', 999)
+                            snap['zhuli_rank'] = ext_55188.get('zhuli_rank', 999)
+                            snap['net_ratio_ext'] = ext_55188.get('net_ratio', 0)
+                            snap['hot_tag'] = ext_55188.get('hot_tag', "")
+                            # 新增题材与板块持续性
+                            snap['theme_name'] = ext_55188.get('theme_name', "")
+                            snap['theme_logic'] = ext_55188.get('theme_logic', "")
+                            snap['sector_score'] = ext_55188.get('sector_score', 0.0)
+                        else:
+                            snap['hot_rank'] = 999
+                            snap['zhuli_rank'] = 999
+                            snap['net_ratio_ext'] = 0
+                            snap['sector_score'] = 0.0
+
                         if v_shape:
                              logger.info(f"⚡ {code} 触发 V 型反转信号")
                              
@@ -769,6 +801,9 @@ class StockLiveStrategy:
                     # 默认值
                     snap['rt_emotion'] = 50
                     snap['v_shape_signal'] = False
+                    snap['hot_rank'] = 999
+                    snap['zhuli_rank'] = 999
+                    snap['net_ratio_ext'] = 0
 
                 # --- 策略进化：注入反馈记忆 (Feedback Injection) ---
                 # 1. 记仇机制：查询该股最近连续亏损次数

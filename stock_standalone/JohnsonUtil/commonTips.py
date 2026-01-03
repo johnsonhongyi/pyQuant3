@@ -668,6 +668,7 @@ class GlobalConfig:
         self.winlimit = self.get_with_writeback("general", "winlimit", fallback=1, value_type="int")
         self.loglevel = self.get_with_writeback("general", "loglevel", fallback='INFO', value_type="str")
         self.cleanRAMdiskTemp = self.get_with_writeback("general", "cleanRAMdiskTemp", fallback='True', value_type="str")
+        self.sina_dd_limit_day = self.get_with_writeback("general", "sina_dd_limit_day", fallback='0', value_type="str")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         try:

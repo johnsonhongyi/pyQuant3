@@ -155,6 +155,43 @@ class IntradayDecisionEngine:
         debug["rt_bonus"] = rt_bonus
         debug["v_shape_bonus"] = v_shape_bonus
         
+        # 5. 55188 外部加分 (外部人气与资金流向)
+        # 人气排名 (1-100), 主力排名 (1-100), 主力净占比%
+        hot_rank = int(snapshot.get('hot_rank', 999))
+        zhuli_rank = int(snapshot.get('zhuli_rank', 999))
+        net_ratio_ext = float(snapshot.get('net_ratio_ext', 0))
+        hot_tag = snapshot.get('hot_tag', "")
+        
+        popularity_bonus = 0.0
+        if 1 <= hot_rank <= 20: popularity_bonus = 0.15
+        elif 1 <= hot_rank <= 50: popularity_bonus = 0.10
+        elif 1 <= hot_rank <= 100: popularity_bonus = 0.05
+        
+        capital_bonus = min(max(net_ratio_ext * 0.005, -0.1), 0.15) # 映射主力净占比到仓位加成
+        if 1 <= zhuli_rank <= 100:
+             capital_bonus += 0.05
+             
+        debug["popularity_bonus"] = popularity_bonus
+        debug["capital_bonus"] = round(capital_bonus, 2)
+        debug["hot_info"] = {"rank": hot_rank, "tag": hot_tag}
+        debug["zhuli_info"] = {"rank": zhuli_rank, "ratio": net_ratio_ext}
+        
+        # 5.1 题材挖掘与板块持续性 (Concept Mining & Persistence)
+        theme_name = snapshot.get('theme_name', "")
+        theme_logic = snapshot.get('theme_logic', "")
+        sector_score = float(snapshot.get('sector_score', 0.0))
+        
+        sector_bonus = 0.0
+        if theme_name:
+            # 基础加成 (只要有题材)
+            sector_bonus = 0.05
+            # 持续性加成 (倍率提升)
+            sector_bonus += sector_score * 0.15 # 0 -> 0.15
+            debug["题材名称"] = theme_name
+            debug["题材逻辑"] = theme_logic[:30] + "..." if len(theme_logic) > 30 else theme_logic
+        
+        debug["sector_bonus"] = round(sector_bonus, 2)
+        
         # ---------- 0. 选股分权重加成 (New: 对应 “反向验证” 需求) ----------
         # 根据 StockSelector 的评分增加基础权重，评分越高，买入信心越足
         selection_score = float(snapshot.get("score", 0))
@@ -307,6 +344,11 @@ class IntradayDecisionEngine:
                 # 注入实时信号加成
                 base_pos += rt_bonus
                 base_pos += v_shape_bonus
+                
+                # 注入 55188 外部信号加成
+                base_pos += popularity_bonus
+                base_pos += capital_bonus
+                base_pos += sector_bonus
                 
                 # 如果价格在今日今日成交均价（nclose）下方，极大程度严控买入
                 if nclose > 0 and price < nclose:

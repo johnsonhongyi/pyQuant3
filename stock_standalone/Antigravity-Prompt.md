@@ -1,3 +1,5 @@
+# Role:高级全栈开发专家
+## 0. important 使用中文交互
 ---trigger: always_on
 alwaysApply: true
 ---
