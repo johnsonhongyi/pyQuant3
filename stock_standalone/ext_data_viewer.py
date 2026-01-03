@@ -320,19 +320,24 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
             
             # 提取需要的列
             actual_master = [c for c in master_cols_to_use if c in df_main.columns]
-            
             if actual_master:
                 df = df.merge(df_main[['code'] + actual_master].drop_duplicates('code'), on='code', how='left', suffixes=('', '_all'))
                 
                 # 建立 UI 字段补齐逻辑
+                # mapping = {
+                #     'percent': 'percent_all',
+                #     'win': 'win_all',
+                #     'sum_perc': 'sum_perc_all',
+                #     'price': f"{price_col}_all" if price_col else None,
+                #     'change_pct': f"{change_col}_all" if change_col else None
+                # }
                 mapping = {
-                    'percent': 'percent_all',
-                    'win': 'win_all',
-                    'sum_perc': 'sum_perc_all',
-                    'price': f"{price_col}_all" if price_col else None,
-                    'change_pct': f"{change_col}_all" if change_col else None
+                    'percent': 'percent',
+                    'win': 'win',
+                    'sum_perc': 'sum_perc',
+                    'price': f"{price_col}" if price_col else None,
+                    'change_pct': f"{change_col}" if change_col else None
                 }
-                
                 for ui_col, master_suffix_col in mapping.items():
                     if master_suffix_col and master_suffix_col in df.columns:
                         if ui_col in df.columns:

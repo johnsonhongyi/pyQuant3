@@ -7,7 +7,8 @@ import re
 from typing import Dict, Any, Optional
 from JohnsonUtil import LoggerFactory
 
-logger = LoggerFactory.getLogger(name="scraper_55188")
+# logger = LoggerFactory.getLogger(name="scraper_55188")
+logger = LoggerFactory.getLogger()
 
 class Scraper55188:
     """
@@ -184,11 +185,11 @@ class Scraper55188:
                     
                     # 提取日期：尝试更多可能字段并处理时间戳
                     # 优先级：effectiveTime > sDate > uiDate > uiUpdateDate > sUpdateDate > sDriveTime > ...
-                    raw_date = (theme.get("effectiveTime") or theme.get("sEffectiveTime") or
-                                theme.get("sDate") or theme.get("uiDate") or 
-                                theme.get("uiUpdateDate") or theme.get("sUpdateDate") or
-                                theme.get("sDriveTime") or theme.get("sDriveDate") or 
-                                theme.get("sTime") or theme.get("dt") or theme.get("uiTime") or "")
+                    raw_date = (theme.get("effectiveTime") or theme.get("sEffectiveTime"))  # or
+                                # theme.get("sDate") or theme.get("uiDate") or 
+                                # theme.get("uiUpdateDate") or theme.get("sUpdateDate") or
+                                # theme.get("sDriveTime") or theme.get("sDriveDate") or 
+                                # theme.get("sTime") or theme.get("dt") or theme.get("uiTime") or "")
                     
                     theme_date = ""
                     try:
@@ -207,13 +208,13 @@ class Scraper55188:
                                 # 简单正则提取前 10 位
                                 m = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', s_date)
                                 if m: theme_date = f"{m.group(1)}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
-                        
+                        logger.debug(f'p_code: {p_code} raw_date: {raw_date} theme_date: {theme_date}')
                         if not theme_date:
                             # 最后的兜底：如果完全没抓到，记录一下可能存在的 key
                             pass 
-                    except:
+                    except Exception as e:
                         theme_date = ""
-
+                        logger.error(f'raw_date: {e}')
                     df_t["theme_date"] = theme_date
 
                     # 题材逻辑兜底：如果个股 logic 为空，使用该题材的 driveLogic

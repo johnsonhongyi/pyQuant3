@@ -406,7 +406,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # ✅ 初始化 55188 数据更新监听状态
         self.last_ext_data_ts_local = 0
-        self.after(5000, self._check_ext_data_update)
+        self.after(10000, self._check_ext_data_update)
         
         # ✅ 性能优化器初始化
         if PERFORMANCE_OPTIMIZER_AVAILABLE:
@@ -8931,6 +8931,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             if self.realtime_service:
                 # 即使没有主行情更新，也尝试同步外部数据
+                time_start_55188 = time.time()
                 ext_status = self.realtime_service.get_55188_data()
                 if ext_status and 'df' in ext_status:
                     df_ext = ext_status['df']
@@ -8942,7 +8943,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self.live_strategy.last_ext_update_ts = remote_ts
                     
                     if remote_ts > self.last_ext_data_ts_local:
-                        logger.info(f"🆕 Detected 55188 data update (ts={remote_ts}). Syncing UI...")
+                        local_time = datetime.datetime.fromtimestamp(int(ts))
+                        local_time = local_time.strftime("%Y-%m-%d %H:%M:%S")
+                        duration_time = time_start_55188
+                        logger.info(f"🆕 Detected 55188 data update (ts={local_time}) use time: {remote_ts-time_start_55188:.2f}. Syncing UI...")
                         self.last_ext_data_ts_local = remote_ts
                         
                         if hasattr(self, '_ext_data_viewer_win') and self._ext_data_viewer_win.winfo_exists():
