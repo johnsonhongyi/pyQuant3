@@ -54,7 +54,7 @@ exe = EXE(
     a.scripts,
     [],                 # Onedir 模式下，此处保持为空
     exclude_binaries=True,
-    name='instock_MonitorTK',
+    name='StockMonitor',
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
