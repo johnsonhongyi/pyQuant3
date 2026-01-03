@@ -121,125 +121,115 @@ class TreeviewIncrementalUpdater:
     
     def _prepare_rows_fast(self, df: pd.DataFrame) -> list:
         """
-        快速预处理所有行数据 - 使用向量化操作 + 特征标记支持
+        极速预处理 - 最大化性能优化版本
         
-        性能优化:
-        1. 使用 df.values 替代 iterrows()（10x 速度提升）
-        2. 预计算列索引，避免重复查找
-        3. 批量提取特征数据
-        
-        Returns:
-            List of (code, values, row_data) tuples
+        优化策略:
+        1. 预提取所有需要的列为独立数组（避免循环内索引）
+        2. 使用 numpy tolist() 批量转换
+        3. 本地变量缓存减少属性查找
+        4. 最小化循环内函数调用
         """
         import time
+        import numpy as np
         prep_start = time.time()
         
-        # 预计算列索引映射
-        df_columns = list(df.columns)
-        col_indices: dict = {}
-        for col in self.columns:
-            if col in df_columns:
-                col_indices[col] = df_columns.index(col)
+        n_rows = len(df)
+        if n_rows == 0:
+            return []
+        
+        # 本地变量缓存
+        columns = self.columns
+        feature_marker = self.feature_marker
+        
+        # 预提取 code 列
+        if 'code' in df.columns:
+            codes = df['code'].astype(str).tolist()
+        else:
+            codes = [str(i) for i in df.index]
+        
+        # 预提取显示列的值（使用 numpy 提取每列，然后组装）
+        col_arrays = []
+        for col in columns:
+            if col in df.columns:
+                # fillna 处理 NaN
+                arr = df[col].fillna('').tolist()
             else:
-                col_indices[col] = -1  # 列不存在
+                arr = [''] * n_rows
+            col_arrays.append(arr)
         
-        # code 列索引
-        code_idx = df_columns.index('code') if 'code' in df_columns else -1
-        
-        # 特征标记所需字段的列索引（预计算）
-        feature_fields = [
-            'percent', 'volume', 'category', 'price', 'trade',
-            'high4', 'max5', 'max10', 'hmax', 'hmax60',
-            'low4', 'low10', 'low60', 'lmin', 'min5',
-            'cmean', 'hv', 'lv', 'llowvol', 'lastdu4'
-        ]
-        feature_indices: dict = {}
-        for field in feature_fields:
-            if field in df_columns:
-                feature_indices[field] = df_columns.index(field)
-            else:
-                feature_indices[field] = -1
-        
-        # name 列索引（用于添加图标）
-        name_idx_in_columns = self.columns.index('name') if 'name' in self.columns else -1
-        
-        # 使用 df.values 获取 numpy 数组（比 iterrows 快 10x+）
-        data_array = df.values
-        n_rows = len(data_array)
-        
-        # 预分配结果列表
-        rows_data = []
-        
-        # 快速遍历
-        for i in range(n_rows):
-            row_arr = data_array[i]
-            
-            # 获取 code
-            if code_idx >= 0:
-                code = str(row_arr[code_idx])
-            else:
-                code = str(df.index[i])
-            
-            # 构建 values 列表
-            values = []
-            for col in self.columns:
-                idx = col_indices[col]
-                if idx >= 0:
-                    val = row_arr[idx]
-                    # 处理 NaN
-                    if pd.isna(val):
-                        values.append("")
+        # 预提取特征标记需要的列（如果启用）
+        feature_data = None
+        if feature_marker:
+            feature_cols = {
+                'percent': None, 'volume': None, 'category': None,
+                'price': None, 'trade': None,
+                'high4': None, 'max5': None, 'max10': None,
+                'hmax': None, 'hmax60': None,
+                'low4': None, 'low10': None, 'low60': None,
+                'lmin': None, 'min5': None, 'cmean': None,
+                'hv': None, 'lv': None, 'llowvol': None, 'lastdu4': None
+            }
+            for k in feature_cols:
+                if k in df.columns:
+                    # fillna(0) 用于数值，fillna('') 用于字符串
+                    if k == 'category':
+                        feature_cols[k] = df[k].fillna('').tolist()
                     else:
-                        values.append(val)
+                        feature_cols[k] = df[k].fillna(0).tolist()
                 else:
-                    values.append("")
+                    feature_cols[k] = None
+            feature_data = feature_cols
+        
+        # name 列在 columns 中的索引
+        name_idx = columns.index('name') if 'name' in columns else -1
+        
+        # 构建结果（最小化循环内操作）
+        rows_data = []
+        n_cols = len(columns)
+        
+        for i in range(n_rows):
+            code = codes[i]
             
-            # 构建特征数据字典（用于特征标记）
-            row_data: Optional[dict] = None
-            if self.feature_marker:
+            # 构建 values 列表（使用预提取的列数组）
+            values = [col_arrays[j][i] for j in range(n_cols)]
+            
+            # 特征标记处理
+            row_data = None
+            if feature_data:
                 try:
-                    # 快速提取特征值的辅助函数
-                    def get_val(field: str, default=None):
-                        idx = feature_indices.get(field, -1)
-                        if idx >= 0:
-                            v = row_arr[idx]
-                            if pd.isna(v):
-                                return default
-                            return v
-                        return default
-                    
-                    # price 优先使用 price 列，其次 trade 列
-                    price_val = get_val('price', 0)
-                    if price_val == 0:
-                        price_val = get_val('trade', 0)
+                    # 快速构建 row_data 字典
+                    fd = feature_data
+                    price_val = fd['price'][i] if fd['price'] else 0
+                    if price_val == 0 and fd['trade']:
+                        price_val = fd['trade'][i]
                     
                     row_data = {
-                        'percent': get_val('percent', 0),
-                        'volume': get_val('volume', 0),
-                        'category': get_val('category', ''),
+                        'percent': fd['percent'][i] if fd['percent'] else 0,
+                        'volume': fd['volume'][i] if fd['volume'] else 0,
+                        'category': fd['category'][i] if fd['category'] else '',
                         'price': price_val,
-                        'high4': get_val('high4', 0),
-                        'max5': get_val('max5', 0),
-                        'max10': get_val('max10', 0),
-                        'hmax': get_val('hmax', 0),
-                        'hmax60': get_val('hmax60', 0),
-                        'low4': get_val('low4', 0),
-                        'low10': get_val('low10', 0),
-                        'low60': get_val('low60', 0),
-                        'lmin': get_val('lmin', 0),
-                        'min5': get_val('min5', 0),
-                        'cmean': get_val('cmean', 0),
-                        'hv': get_val('hv', 0),
-                        'lv': get_val('lv', 0),
-                        'llowvol': get_val('llowvol', 0),
-                        'lastdu4': get_val('lastdu4', 0)
+                        'high4': fd['high4'][i] if fd['high4'] else 0,
+                        'max5': fd['max5'][i] if fd['max5'] else 0,
+                        'max10': fd['max10'][i] if fd['max10'] else 0,
+                        'hmax': fd['hmax'][i] if fd['hmax'] else 0,
+                        'hmax60': fd['hmax60'][i] if fd['hmax60'] else 0,
+                        'low4': fd['low4'][i] if fd['low4'] else 0,
+                        'low10': fd['low10'][i] if fd['low10'] else 0,
+                        'low60': fd['low60'][i] if fd['low60'] else 0,
+                        'lmin': fd['lmin'][i] if fd['lmin'] else 0,
+                        'min5': fd['min5'][i] if fd['min5'] else 0,
+                        'cmean': fd['cmean'][i] if fd['cmean'] else 0,
+                        'hv': fd['hv'][i] if fd['hv'] else 0,
+                        'lv': fd['lv'][i] if fd['lv'] else 0,
+                        'llowvol': fd['llowvol'][i] if fd['llowvol'] else 0,
+                        'lastdu4': fd['lastdu4'][i] if fd['lastdu4'] else 0
                     }
                     
-                    # 添加图标到 name 列
-                    icon = self.feature_marker.get_icon_for_row(row_data)
-                    if icon and name_idx_in_columns >= 0 and name_idx_in_columns < len(values):
-                        values[name_idx_in_columns] = f"{icon} {values[name_idx_in_columns]}"
-                        
+                    # 添加图标
+                    if name_idx >= 0:
+                        icon = feature_marker.get_icon_for_row(row_data)
+                        if icon:
+                            values[name_idx] = f"{icon} {values[name_idx]}"
                 except Exception:
                     row_data = None
             
@@ -248,6 +238,8 @@ class TreeviewIncrementalUpdater:
         prep_time = time.time() - prep_start
         if prep_time > 0.1:
             logger.debug(f"[TreeviewUpdater] 数据预处理: {n_rows}行, 耗时{prep_time:.3f}s")
+        
+        return rows_data
         
         return rows_data
     
