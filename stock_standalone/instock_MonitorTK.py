@@ -5372,6 +5372,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     
     def _refresh_tree_traditional(self, df, cols_to_show):
         """传统的全量刷新方式(作为增量更新的备用方案)"""
+        cols = self.tree["displaycolumns"]
+        self.tree["displaycolumns"] = ()
+
         # 清空所有行
         for iid in self.tree.get_children():
             self.tree.delete(iid)
@@ -5433,7 +5436,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self.tree.item(iid, tags=tuple(tags))
                 except Exception as e:
                     logger.debug(f"应用颜色标记失败: {e}")
-        
+
+        self.tree["displaycolumns"] = cols
         # 恢复选中状态
         if self.select_code:
             for iid in self.tree.get_children():

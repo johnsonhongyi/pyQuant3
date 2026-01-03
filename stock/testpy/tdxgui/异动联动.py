@@ -346,6 +346,103 @@ def get_base_path():
 #         return os.path.dirname(os.path.abspath(__file__))
 
 
+def open_detailed_analysis(root):
+    """打开详细系统分析窗口 (支持窗口复用与自动恢复位置)
+    
+    该窗口独立于 open_realtime_monitor 窗口，关闭实时监控窗口时不会一并关闭。
+    """
+
+    analysis_win = tk.Toplevel(root)  # 父窗口为主窗口，而非 log_win
+    _detailed_analysis_win = analysis_win
+    analysis_win.title("Realtime System Analysis (PID: %d)" % os.getpid())
+    
+    # 使用 WindowMixin 加载位置
+    # window_id = "SystemAnalysis"
+    # load_window_position(analysis_win, window_id, default_width=700, default_height=280)
+    # Add scrollbar to text area
+    analysis_win.geometry("700x280")
+    atext_frame = tk.Frame(analysis_win)
+    atext_frame.pack(fill="both", expand=True, padx=10, pady=10)
+    
+    analysis_text = tk.Text(atext_frame, font=("Consolas", 10), wrap="none")
+    as_vsb = tk.Scrollbar(atext_frame, orient="vertical", command=analysis_text.yview)
+    as_hsb = tk.Scrollbar(atext_frame, orient="horizontal", command=analysis_text.xview)
+    analysis_text.configure(yscrollcommand=as_vsb.set, xscrollcommand=as_hsb.set)
+    
+    as_vsb.pack(side="right", fill="y")
+    as_hsb.pack(side="bottom", fill="x")
+    analysis_text.pack(side="left", fill="both", expand=True)
+    
+    def refresh_analysis():
+        if not analysis_win.winfo_exists():
+            return
+        
+        try:
+            import psutil
+            current_process = psutil.Process()
+            children = current_process.children(recursive=True)
+            
+            report = [
+                f"=== System Resource Report ({time.strftime('%Y-%m-%d %H:%M:%S')}) ===",
+                f"OS: {sys.platform} | Main PID: {current_process.pid}",
+                "-" * 60
+            ]
+            
+            # Process breakdown
+            procs = [(current_process, "Main UI Window")]
+            for c in children:
+                try:
+                    cmdline = " ".join(c.cmdline())
+                    role = "Sub-Process"
+                    if "resource_tracker" in cmdline: role = "Resource Tracker"
+                    elif "multiprocessing.managers" in cmdline: role = "SyncManager (Proxy Server)"
+                    elif "fetch_and_process" in cmdline or any("data_utils" in arg for arg in c.cmdline()): role = "Data Fetcher Process"
+                    procs.append((c, role))
+                except: continue
+                
+            total_rss = 0
+            total_uss = 0
+            total_commit = 0
+            for p, role in procs:
+                try:
+                    full_info = p.memory_full_info()
+                    rss = full_info.rss / 1024 / 1024
+                    uss = full_info.uss / 1024 / 1024  # Private Working Set
+                    # 'private' in memory_full_info on Windows is the Commit Size (Total Requested)
+                    commit = full_info.private / 1024 / 1024
+                    
+                    cpu = p.cpu_percent(interval=None)
+                    p_name = p.name()
+                    report.append(f"PID: {p.pid:<6} | {p_name:<10} | {uss:>6.1f} MB (RAM) | {rss:>6.1f} MB (Shared) | {cpu:>4.1f}% | {role:<20}")
+                    total_rss += rss
+                    total_uss += uss
+                    total_commit += commit
+                except: report.append(f"PID: {p.pid:<6} | Failed to read process info")
+            
+            report.append("-" * 75)
+            report.append(f"TASK MANAGER ESTIMATE (ACTIVE RAM): {total_uss:.1f} MB")
+            report.append(f"TOTAL PHYSICAL RESIDENT (RSS):     {total_rss:.1f} MB")
+            report.append(f"SYSTEM COMMIT MEMORY (REQUESTED):  {total_commit:.1f} MB")
+            report.append("\nℹ️ Note: 'RAM' is primary memory. 'Requested' (~1.5GB) is virtual reserved space.")
+            report.append("=" * 75)
+            
+            
+            analysis_text.delete(1.0, tk.END)
+            analysis_text.insert(tk.END, "\n".join(report))
+        except Exception as e:
+            analysis_text.insert(tk.END, f"\nFatal Error in Analysis: {e}")
+        
+        analysis_win.after(5000, refresh_analysis)  # Update every 5s
+    
+    def on_analysis_close():
+        # save_window_position(analysis_win, "SystemAnalysis")
+        _detailed_analysis_win = None
+        analysis_win.destroy()
+
+    analysis_win.protocol("WM_DELETE_WINDOW", on_analysis_close)
+    analysis_win.bind("<Escape>", lambda e: on_analysis_close())
+    refresh_analysis()
+
 class SafeHDFStore(HDFStore):
     """
     精简只读版本的 SafeHDFStore：
@@ -9909,12 +10006,20 @@ if __name__ == "__main__":
                          command=clear_code_entry,
                          font=('Microsoft YaHei', 9), 
                          padx=2, pady=2)
+
     clear_btn.pack(side=tk.LEFT, padx=2)
-    clear_btn = tk.Button(search_frame, text="清除", 
+    clear_all_btn = tk.Button(search_frame, text="清除", 
                          command=lambda: [type_var.set(""), search_by_type()],
                          font=('Microsoft YaHei', 9), 
                          padx=2, pady=2)
-    clear_btn.pack(side=tk.RIGHT, padx=2)
+    clear_all_btn.pack(side=tk.RIGHT, padx=2)
+
+
+    analysi = tk.Button(search_frame, text="分析", 
+                         command=lambda r=root: open_detailed_analysis(r),
+                         font=('Microsoft YaHei', 9), 
+                         padx=2, pady=2)
+    analysi.pack(side=tk.RIGHT, padx=2)
 
     btn_rearrange = tk.Button(search_frame, text="重排", command=rearrange_monitors_per_screen,font=('Microsoft YaHei', 9), 
                          padx=2, pady=2)

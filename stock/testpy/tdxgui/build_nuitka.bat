@@ -108,12 +108,12 @@ rem --lto=yes ^
 
 rem :: ===== 构建 Nuitka 命令 =====
 rem set CMD="%PYTHON_EXEC%" -m nuitka --standalone --onefile "%MAIN_SCRIPT%" ^
+    rem --plugin-enable=upx ^
+    rem --upx-binary="C:\JohnsonProgram\SetDisplayMode\init\upx.exe" ^
 set CMD="%PYTHON_EXEC%" -m nuitka --onefile "%MAIN_SCRIPT%" ^
     --output-filename="%OUTPUT_NAME%" ^
     --output-dir="%OUTPUT_DIR%" ^
     --enable-plugin=tk-inter ^
-    --plugin-enable=upx ^
-    --upx-binary="C:\JohnsonProgram\SetDisplayMode\init\upx.exe" ^
     --include-data-file="%CSV_PATH%=a_trade_calendar\a_trade_calendar.csv" ^
     --windows-icon-from-ico="%ICON_FILE%" ^
     --windows-company-name="Johnson QuantLab" ^
