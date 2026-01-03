@@ -159,7 +159,7 @@ class TreeviewIncrementalUpdater:
         
         # 预提取特征标记需要的列（如果启用）
         feature_data = None
-        if feature_marker:
+        if feature_marker and feature_marker.enable_colors:
             feature_cols = {
                 'percent': None, 'volume': None, 'category': None,
                 'price': None, 'trade': None,

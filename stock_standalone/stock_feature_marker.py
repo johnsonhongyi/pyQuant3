@@ -142,6 +142,7 @@ class StockFeatureMarker:
         
         # 提取数据点
         percent = row_data.get('percent', 0)
+        percent = 0 if percent == -100 else percent
         volume = row_data.get('volume', 0)
         price = row_data.get('price', 0)
         max5 = row_data.get('max5', 0)
@@ -157,7 +158,7 @@ class StockFeatureMarker:
             icons.append(self.ICONS['limit_up'])
         
         # 2. 弱势/跌停图标 (🟢)
-        if percent <= -9.9:
+        if percent <= -9.9 and percent > -31:
             icons.append(self.ICONS['limit_down'])
         
         # 3. 成交量异常 (📊)
