@@ -179,42 +179,42 @@ def get_multiday_ave_compare_silent(code, dayl='10'):
     #         return False
 
 
-def get_yestoday_tick_status(code, ave=None):
-    try:
-        dn = get_realtime_quotes(code)
+# def get_yestoday_tick_status(code, ave=None):
+#     try:
+#         dn = get_realtime_quotes(code)
 
-        dtick = ts.get_today_ticks(code)
-        # try:
-        if len(dtick.index) > 0:
-            p_now = dtick['price'].values[0] * 100
-            ep = dtick['amount'].sum() / dtick['volume'].sum()
-            if not ave == None:
-                if p_now > ave and ep > ave:
-                    print(("GOLD:%s ep:%s UP:%s!!! A:%s %s !!!" %
-                          (code, ep, p_now, ave, get_now_time())))
-                elif p_now > ave and ep < ave:
-                    print(("gold:%s ep:%s UP:%s! A:%s %s !" %
-                          (code, ep, p_now, ave, get_now_time())))
-                elif p_now < ave and ep > ave:
-                    print(("down:%s ep:%s Dow:%s? A:%s %s ?" %
-                          (code, ep, p_now, ave, get_now_time())))
-                else:
-                    print(("DOWN:%s ep:%s now:%s??? A:%s %s ???" %
-                          (code, ep, p_now, ave, get_now_time())))
-            else:
-                if ep > ave:
-                    print(("GOLD:%s ep:%s UP:%s!!! A:%s %s !!!" %
-                          (code, ep, p_now, ave, get_now_time())))
-                else:
-                    print(("down:%s ep:%s now:%s??? A:%s %s ?" %
-                          (code, ep, p_now, ave, get_now_time())))
+#         dtick = ts.get_today_ticks(code)
+#         # try:
+#         if len(dtick.index) > 0:
+#             p_now = dtick['price'].values[0] * 100
+#             ep = dtick['amount'].sum() / dtick['volume'].sum()
+#             if not ave == None:
+#                 if p_now > ave and ep > ave:
+#                     print(("GOLD:%s ep:%s UP:%s!!! A:%s %s !!!" %
+#                           (code, ep, p_now, ave, get_now_time())))
+#                 elif p_now > ave and ep < ave:
+#                     print(("gold:%s ep:%s UP:%s! A:%s %s !" %
+#                           (code, ep, p_now, ave, get_now_time())))
+#                 elif p_now < ave and ep > ave:
+#                     print(("down:%s ep:%s Dow:%s? A:%s %s ?" %
+#                           (code, ep, p_now, ave, get_now_time())))
+#                 else:
+#                     print(("DOWN:%s ep:%s now:%s??? A:%s %s ???" %
+#                           (code, ep, p_now, ave, get_now_time())))
+#             else:
+#                 if ep > ave:
+#                     print(("GOLD:%s ep:%s UP:%s!!! A:%s %s !!!" %
+#                           (code, ep, p_now, ave, get_now_time())))
+#                 else:
+#                     print(("down:%s ep:%s now:%s??? A:%s %s ?" %
+#                           (code, ep, p_now, ave, get_now_time())))
 
-        else:
-            df = ts.get_realtime_quotes(code)
-            print("name:%s op:%s  price:%s" % (df['name'].values[0], df['open'].values[0], df['price'].values[0]))
-    except (IOError, EOFError, KeyboardInterrupt) as e:
-        print(("Except:%s" % (e)))
-        # print "IOError"
+#         else:
+#             df = ts.get_realtime_quotes(code)
+#             print("name:%s op:%s  price:%s" % (df['name'].values[0], df['open'].values[0], df['price'].values[0]))
+#     except (IOError, EOFError, KeyboardInterrupt) as e:
+#         print(("Except:%s" % (e)))
+#         # print "IOError"
 
 
 def get_today_tick_ave(code, ave=None):
@@ -311,6 +311,7 @@ def fibonacciCount(code, dl=60, start=None, days=0):
             # log.debug('st:%s days:%s fib:%s'%(st,days,fib))
             # print "%s op:%s ra:%s days:%s fib:%s %s" % (code, op,
             # ra,days,fib, st)
+            st = cct.parse_date_safe(st)
             if not daysData[1].ma5d[0]:
                 daysData[1].ma5d[0] = 0
             fibl.append(

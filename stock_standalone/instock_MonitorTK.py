@@ -406,7 +406,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # ✅ 初始化 55188 数据更新监听状态
         self.last_ext_data_ts_local = 0
-        self.after(10000, self._check_ext_data_update)
+        # self.after(10000, self._check_ext_data_update)
         
         # ✅ 性能优化器初始化
         if PERFORMANCE_OPTIMIZER_AVAILABLE:
@@ -1428,9 +1428,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if not hasattr(self, "_restore_done"):
                             self._restore_done = True
                             logger.info("首次数据加载完成，开始恢复监控窗口...")
-                            self.after(1000,self.restore_all_monitor_windows)
-                            logger.info("首次数据加载完成，开始监控...")
-                            self.after(30*1000,self.KLineMonitor_init)
+                            self.after(2*1000,self.restore_all_monitor_windows)
+                            logger.info("首次数据加载完成，开始55188监控...")
+                            self.after(10*1000, self._check_ext_data_update)
+                            logger.info("首次数据加载完成，延迟开启KLineMonitor...")
+                            self.after(30*1000, self.KLineMonitor_init)
                             self.after(60*1000, self.schedule_15_30_job)
 
                         if self.search_var1.get() or self.search_var2.get():

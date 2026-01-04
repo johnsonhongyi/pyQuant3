@@ -322,9 +322,9 @@ if __name__ == '__main__':
     #     # run_system_fpath('%s\\tdxw.exe'%(cct.win10dxzq.))
     #     time.sleep(8)
     
-    if not find_window_by_title_safe('pywin32_mouse'):
-        os.system('start cmd /k python pywin32_mouse.py')
-        time.sleep(5)
+    # if not find_window_by_title_safe('pywin32_mouse'):
+    #     os.system('start cmd /k python pywin32_mouse.py')
+    #     time.sleep(5)
 
     # if not find_window_by_title_safe('交易信号监控'):
     #     # os.system('cmd /c start /min D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
@@ -368,6 +368,7 @@ if __name__ == '__main__':
     if not find_window_by_title_background('涨停采集工具共享版'): 
         run_system_fpath('C:\\Users\\Johnson\\Documents\\TDX\\55188\\涨停采集工具共享版.exe')
         time.sleep(2)
+
     # if not find_proc_window_tasklist('link.exe'):
     #     # os.system('cmd /c start /min D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
     #     # os.system('cmd /c start D:\\MacTools\\WinTools\\联动精灵V2\\link.exe')
@@ -375,7 +376,6 @@ if __name__ == '__main__':
     #     run_system_fpath('D:\\JohnsonProgram\\联动精灵\\link.exe')
 
 
-    #     time.sleep(3)
     
     # os.system('cmd /c start "" "http://127.0.0.1:8080/"')
 
@@ -414,42 +414,31 @@ if __name__ == '__main__':
         #     hwnd, GUID_SYSTEM_RESUME, win32con.DEVICE_NOTIFY_WINDOW_HANDLE
         # )
         print("Listening for system wake-up events...")
-    start_edge = 0
-    port_to_check = 8080
-    while 1:
-        try:
-            # status = find_proc_windows('ths-tdx-web')
-            check_info, is_port_used = check_port_in_use(port_to_check)
-            print(check_info)
-            # print("端口是否使用:", is_port_used)
 
-            # status = find_proc_windows('ths-tdx-web')
-            # if len(status) == 0:
+    # start_edge = 0
+    # port_to_check = 8080
+    # while 1:
+    #     try:
+    #         # status = find_proc_windows('ths-tdx-web')
+    #         check_info, is_port_used = check_port_in_use(port_to_check)
+    #         print(check_info)
+    #         # print("端口是否使用:", is_port_used)
 
-            if not is_port_used and start_edge < 10:
-                os.system('cmd /c start "" "http://127.0.0.1:%s/"'%(port_to_check))
-                start_server(main, port=port_to_check, debug=True)
-                start_edge += 1
-            else:
-                port_to_check +=1
-                print("Find %s no run start_server"%(find_window_by_title_safe('ths-tdx-web.py')))
-                time.sleep(30)
-        except Exception as e:
-            time.sleep(6)
-            print(e)
-            if start_edge > 10:
-                print("start_edge:{start_edge}")
-                break
-                # time.sleep(10)
+    #         # status = find_proc_windows('ths-tdx-web')
+    #         # if len(status) == 0:
 
-            # raise e
-        # finally:
-        #     print("TryCatch:finally:")
-        #     check_info, is_port_used = check_port_in_use(port_to_check)
-
-        #     if not is_port_used:
-        #         os.system('cmd /c start "" "http://127.0.0.1:%s/"'%(port_to_check))
-        #         start_server(main, port=port_to_check, debug=False)
-        #     else:
-        #         print("ths-tdx-web already Running and Done")
-        #         time.sleep(30)
+    #         if not is_port_used and start_edge < 10:
+    #             os.system('cmd /c start "" "http://127.0.0.1:%s/"'%(port_to_check))
+    #             start_server(main, port=port_to_check, debug=True)
+    #             start_edge += 1
+    #         else:
+    #             port_to_check +=1
+    #             print("Find %s no run start_server"%(find_window_by_title_safe('ths-tdx-web.py')))
+    #             time.sleep(30)
+    #     except Exception as e:
+    #         time.sleep(6)
+    #         print(e)
+    #         if start_edge > 10:
+    #             print("start_edge:{start_edge}")
+    #             break
+               

@@ -698,22 +698,6 @@ def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
             else:
                 data2 = ''
 
-            # while rzrq_status:
-            #     for x in range(days, 20):
-            #         yestoday = cct.last_tddate(x)
-            #         # print("yestoday:%s"%(yestoday))
-
-            #         if yestoday in df.index:
-            #             data2 = df.loc[yestoday]
-            #             # log.info("yestoday:%s data:%s" % (yestoday, data2))
-
-            #             # days -=1
-            #             if (days - x) <= 0:
-            #                 break
-            #             # print da
-            #         else:
-            #             log.info("%s:None" % (yestoday))
-            #     rzrq_status = 0
             return data2
 
 
@@ -752,86 +736,10 @@ def get_dfcfw_rzrq_SHSZ(url=ct.DFCFW_RZYE):
     return data
 
 
-def get_dfcfw_rzrq_SHSZ_Outdate(url=ct.DFCFW_RZRQ_SHSZ):
-    data = {}
-    log.info("http://data.eastmoney.com/rzrq/total.html")
-    ct.DFCFW_RZYE
-    def get_tzrq(url, today):
-        global rzrqCount
-        url = url % today
-        if rzrqCount < 3:
-            data = cct.get_url_data(url)
-            # data = cct.get_url_data_R(url)
-            if len(data) < 1:
-                rzrqCount +=1
-                vol_l =[]
-            # vollist=re.findall('{data:(\d+)',code)
-            else:
-                vol_l = re.findall('\"([\d\D]+?)\"', data)
-        else:
-            vol_l = []
-        # print vol_l
-        dd = {}
-        # print vol_l
-        # print len(vol_l)
-        if len(vol_l) == 3:
-            data = vol_l[0].split(',')
-            data2 = vol_l[1].split(',')
-            dataall = vol_l[2].split(',')
-            dd['sh'] = round(
-                float(data[5]) / 100000000, 1) if len(data[5]) > 0 else 0
-            dd['sz'] = round(
-                float(data2[5]) / 100000000, 1) if len(data2[5]) > 0 else 0
-            dd['all'] = round(
-                float(dataall[5]) / 100000000, 1) if len(dataall[5]) > 0 else 0
-        return dd
-
-    def get_days_data(days=1):
-        rzrq_status = 1
-        # data=''
-        da = 0
-        i = 0
-        while rzrq_status:
-            for x in range(days, 20):
-                yestoday = cct.get_trade_day_before_dl(x).replace('-', '/')
-                data2 = get_tzrq(url, yestoday)
-                log.info("yestoday:%s data:%s" % (yestoday, data2))
-                if len(data2) > 0:
-                    i += 1
-                    # if da ==days and days==0:
-                    # i +=1
-#                    if i >= days-1:
-                    break
-                    # elif da > days:
-                        # break
-                # else:    da+=1
-                    # print da
-                else:
-                    log.info("%s:%s" % (yestoday, data2))
-            rzrq_status = 0
-        return data2
-
-    # today=cct.last_tddate().replace('-','/')
-    # data=get_tzrq(url,today)
-    data = get_days_data(1)
-    # log.debug(today)
-    data2 = get_days_data(2)
-    log.info("data:%s,data2:%s", data, data2)
-    if len(data2) > 0:
-        # print data2
-        data['dff'] = round(data['all'] - data2['all'], 2)
-        data['shrz'] = round(data['sh'] - data2['sh'], 2)
-        data['szrz'] = round(data['sz'] - data2['sz'], 2)
-    else:
-        data['dff'] = 'error'
-    if len(data) == 0:
-        log.info("Fund_f NO Url:%s" % url)
-    return data
-
-
 def get_zs_VolRatio():
     ilist = ['999999', '399001']
     # list=['000001','399001','399006','399005']
+    
     df = tdd.get_tdx_all_day_LastDF(ilist)
     if not len(df) == len(ilist):
         return ''
@@ -958,6 +866,8 @@ if __name__ == "__main__":
 
     rzrq = get_dfcfw_rzrq_SHSZ()
     print(rzrq)
+    import ipdb;ipdb.set_trace()
+    
     ff = get_dfcfw_fund_SHSZ()
 
     import ipdb;ipdb.set_trace()
