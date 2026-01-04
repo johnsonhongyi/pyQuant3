@@ -5346,8 +5346,6 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
         if cct.get_work_day_status() and 915 < cct.get_now_time_int() < 1500:
             df = df[df.index < cct.get_today()]
 
-#        df['perd'] = ((df['close'] - df['close'].shift(1)) / df['close'].shift(1) * 100).map(lambda x: round(x, 1) if ( x < 9.85)  else 10.0)
-
         df['ma5d'] = talib.EMA(df['close'], timeperiod=5)
         df['ma10d'] = talib.EMA(df['close'], timeperiod=10)
         df['ma20d'] = talib.EMA(df['close'], timeperiod=26)
@@ -5360,94 +5358,21 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
 
         df['truer'] = ta.true_range(df.high, df.low, df.close)
 
-        # # df_orig = compute_ma_cross_slow(df,resample=resample)
-        # df_orig = compute_ma_cross(df,resample=resample)
-        # # df_orig = compute_upper_cross_slow(df,resample=resample)
-        # df_orig = compute_upper_cross(df_orig,resample=resample)
 
         df = compute_cross_indicators(df, [('ma5d', 'ma10d', 'op')], [('upper', 'ma5d', 'topU', 'eneU')])
 
-        # result = compare_perd_df_results(df_orig, df, columns=None)
-        # # 查看匹配统计
-        # # print(result['match_stats'])
-        # print(result['mismatch_details'])
-
-        # df_orig = compute_perd_df(df,lastdays=lastdays,resample=resample)
-        # df = compute_perd_df_vert(df,lastdays=lastdays,resample=resample)
         df = compute_perd_df(df,lastdays=lastdays,resample=resample,normalized=normalized)
 
-        # result = compare_perd_df_results(df_orig, df, columns=['perlastp','perd','red','gren','upperT','upperL','topR','topD','ral'])
-        # # 查看匹配统计
-        # print(result['match_stats'])
-        # print(result['mismatch_details'])
-
-        # # 查看某列不匹配详细信息
-        # if 'perlastp' in result['mismatch_details']:
-        #     print(result['mismatch_details']['perlastp'])
-
-
-        # compare_compute_perd(dd,compute_perd_df,compute_perd_df_fast)
-        # compare_compute_perd(dd,compute_perd_df_ver,compute_perd_df_fast)
 
         df['vchange'] = ((df['vol'] - df['vol'].shift(1)) / df['vol'].shift(1) * 100).round(1)
         df = df.fillna(0)
         df['vcra'] = len(df[df.vchange > vc_radio])
-        # df['ma5vol'] = df.vol[-df.fib[0]]
-        # df['ma5vol'] = df.vol[-df.fib[0]]
         df['vcall'] = df['vchange'].max()
-        # df['vchange'] = df['vchange'][-1]
-        # df['meann'] = ((df['high'] + df['low']) / 2).map(lambda x: round(x, 1))
-
-
-        # df_temp = {}
-        # for da in range(1, lastdays + 1, 1):
-        #     if da <=6:
-        #         df_temp['lasto%sd' % da] = df['open'][-da]
-        #         df_temp['lastl%sd' % da] = df['low'][-da]
-        #         df_temp['truer%sd' % da] = df['truer'][-da]
-
-        #     # df['truer%sd' % da] = df['truer'][-da]
-        #     df_temp['lasth%sd' % da] = df['high'][-da]
-        #     df_temp['lastp%sd' % da] = df['close'][-da]
-
-        #     df_temp['lastv%sd' % da] = df['vol'][-da]
-        #     df_temp['per%sd' % da] = df['perd'][-da]
-        #     df_temp['upper%s' % da] = df['upper'][-da]
-        #     df_temp['ma5%sd' % da] = df['ma5d'][-da]
-        #     df_temp['ma20%sd' % da] = df['ma20d'][-da]
-        #     df_temp['ma60%sd' % da] = df['ma60d'][-da]
-        #     df_temp['perc%sd' % da] = df['perlastp'][-da]
-        #     df_temp[f'high4{da}d'] = safe_get(df, 'high4', -da)
-        #     df_temp[f'hmax{da}d']  = safe_get(df, 'hmax', -da)
-        #     # 新增信号列
-        #     df_temp[f'eval{da}d'] = safe_get(df, 'EVAL_STATE', -da)
-        #     df_temp[f'signal{da}d'] = safe_get(df, 'trade_signal', -da)
-        # feature_cols = [
-        #             'open', 'close', 'high', 'low', 'vol', 'perd', 'upper',
-        #             'ma5d', 'ma20d', 'ma60d', 'perlastp', 'high4', 'hmax',
-        #             'EVAL_STATE', 'trade_signal'
-        #         ]
         df = evaluate_trading_signal(df)
         df_temp = generate_lastN_features_dict(df, lastdays=lastdays)
         df_repeat = pd.DataFrame([df_temp]).loc[np.repeat(0, len(df))].reset_index(drop=True)
         df = pd.concat([df.reset_index(), df_repeat], axis=1)
         df = df.loc[:,~df.columns.duplicated()]
-        # df = df.set_index('date').sort_index(ascending=True)
-
-        # # df_aug = add_last_days_features(df, lastdays=lastdays)   #全数据
-        # df_aug = build_aug_from_last_row(df, lastdays=lastdays)   #最后一行数据
-        # # 2. 合并 df 与 df_aug，按列对齐
-        # df = df.join(df_aug)
-        # # 3. 去重列（如果有重复列名）
-        # df = df.loc[:, ~df.columns.duplicated()]
-        # # 4. 保证索引为 date 并升序排序
-        # df = df.sort_index(ascending=True)
-
-        # df_orig = compute_top10_count(df)
-        # df_orig = compute_ma5d_count(df,madays='5')     #ma5dcum
-        # # # df = compute_ma5d_count(df,madays='20')   #ma20dcum
-        # # # df = compute_ma5d_ra(df,madays='5')   #ma5d ra
-
         df = compute_cum_and_top_stats(
                 df,
                 ma_days_list=['5','10'],            # 计算 ma5dcum 和 ma10dcum
@@ -5462,9 +5387,6 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
 
         if not isinstance(df.index, pd.DatetimeIndex) and 'date' in df.columns:
             df.index = pd.to_datetime(df.pop('date'), errors='coerce')
-        # df = df.reset_index()
-    else:
-        log.info("compute df is None")
 
     return df
 
@@ -7156,7 +7078,7 @@ if __name__ == '__main__':
     # print(f'time: {time.time() - time_s :.8f}  check code: {code_l} generate_df_vect_daily_features:{len(generate_df_vect_daily_features)} ')
 
     # (get_tdx_Exp_day_to_df_performance(code,dl=ct.Resample_LABELS_Days[resample],resample=resample))
-    code = '605255'
+    code = '920101'
     df2 = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )
     df=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     import ipdb;ipdb.set_trace()
