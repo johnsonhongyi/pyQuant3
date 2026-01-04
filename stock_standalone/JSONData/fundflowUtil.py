@@ -469,7 +469,7 @@ def get_dfcfw_rzrq_SHSZ2(url=ct.DFCFW_RZYE2sh):
             data2 = ''
             while rzrq_status:
                 for x in range(days, 10):
-                    yestoday = cct.last_tddate(x)
+                    yestoday = cct.get_trade_day_before_dl(x)
                     if yestoday in df.index:
                         data2 = df.loc[yestoday]
                         # log.info("yestoday:%s data:%s" % (yestoday, data2))
@@ -561,7 +561,7 @@ def get_dfcfw_rzrq_SHSZ2_(url=ct.DFCFW_RZYE2):
             data2 = ''
             while rzrq_status:
                 for x in range(days, 10):
-                    yestoday = cct.last_tddate(x)
+                    yestoday = cct.get_trade_day_before_dl(x)
                     if yestoday in df.index:
                         data2 = df.loc[yestoday]
                         # log.info("yestoday:%s data:%s" % (yestoday, data2))
@@ -793,7 +793,7 @@ def get_dfcfw_rzrq_SHSZ_Outdate(url=ct.DFCFW_RZRQ_SHSZ):
         i = 0
         while rzrq_status:
             for x in range(days, 20):
-                yestoday = cct.last_tddate(x).replace('-', '/')
+                yestoday = cct.get_trade_day_before_dl(x).replace('-', '/')
                 data2 = get_tzrq(url, yestoday)
                 log.info("yestoday:%s data:%s" % (yestoday, data2))
                 if len(data2) > 0:

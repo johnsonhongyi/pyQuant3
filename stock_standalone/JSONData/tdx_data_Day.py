@@ -3373,7 +3373,8 @@ def get_tdx_power_now_df(code, start=None, end=None, type='f', df=None, dm=None,
     if code == '999999' or code.startswith('399'):
 
         if start is None and dl is not None:
-            start = cct.last_tddate(days=dl)
+            start = cct.get_trade_day_before_dl(dl)
+            # start = cct.last_tddate(days=dl)
         df = get_tdx_append_now_df_api(
             code, start=start, end=end, type=type, df=df, dm=dm,detect_calc_support=detect_calc_support)
         return df
