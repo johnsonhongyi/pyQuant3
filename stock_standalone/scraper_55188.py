@@ -155,15 +155,33 @@ class Scraper55188:
                 if not code.isnumeric(): continue
                 
                 logic = ""
-                m2 = item.get("m2", {})
-                if isinstance(m2, dict) and "49" in m2:
-                    val = m2["49"]
-                    if isinstance(val, list) and len(val) > 1: logic = val[1]
-                    else: logic = str(val)
+                m2 = item.get("vLatestData", {})
+                logic2 = item.get("position", "")
+                updateDate = ""
+
+                if isinstance(m2, list) and m2 and isinstance(m2[0], dict):
+                    val = m2[0].get("driveContent")
+                    updateDate = m2[0].get("updateDate", "")
+        
+                    if isinstance(val, str):
+                        logic = val.strip()
+                        
+                    if not logic and len(m2) > 1 and isinstance(m2[1], dict):
+                        val2 = m2[1].get("driveContent")
+                        if isinstance(val2, str):
+                            logic = val2.strip()
+                            
+                    if isinstance(logic2, str) and logic2 and '地址' not in logic2:
+                        logic = f"{logic} {logic2}"
+                    # else:
+                        # print(f'position: {logic2}')
+                    # if isinstance(val, list) and len(val) > 1: logic = val[1]
+                    # else: logic = str(val)
                 
-                items.append({"code": code, "theme_logic": logic})
+                items.append({"code": code, "theme_logic": logic ,"updateDate": updateDate})
             return pd.DataFrame(items)
         except Exception as e:
+            logger.error("Exception", e)
             return pd.DataFrame()
 
     def get_combined_data(self) -> pd.DataFrame:
@@ -176,6 +194,8 @@ class Scraper55188:
         # 题材与逻辑整合 (增加抓取数量以覆盖更久之前的题材)
         themes = self.fetch_concept_mining_themes(count=30) 
         theme_dfs = []
+        # logger.info(f'themes: {themes}')
+        last_date = None
         for theme in themes:
             p_code = theme.get("sPlateCode")
             if p_code:
@@ -185,11 +205,13 @@ class Scraper55188:
                     
                     # 提取日期：尝试更多可能字段并处理时间戳
                     # 优先级：effectiveTime > sDate > uiDate > uiUpdateDate > sUpdateDate > sDriveTime > ...
-                    raw_date = (theme.get("effectiveTime") or theme.get("sEffectiveTime"))  # or
-                                # theme.get("sDate") or theme.get("uiDate") or 
-                                # theme.get("uiUpdateDate") or theme.get("sUpdateDate") or
-                                # theme.get("sDriveTime") or theme.get("sDriveDate") or 
-                                # theme.get("sTime") or theme.get("dt") or theme.get("uiTime") or "")
+                    # raw_date = (theme.get("effectiveTime") or theme.get("sEffectiveTime"))
+                    raw_date = (theme.get("effectiveTime") or theme.get("sEffectiveTime")  or
+                                theme.get("sDate") or theme.get("uiDate") or 
+                                theme.get("uiUpdateDate") or theme.get("sUpdateDate") or
+                                theme.get("sDriveTime") or theme.get("sDriveDate") or 
+                                theme.get("sTime") or theme.get("dt") or theme.get("uiTime") or ""
+                                )
                     
                     theme_date = ""
                     try:
@@ -208,10 +230,13 @@ class Scraper55188:
                                 # 简单正则提取前 10 位
                                 m = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', s_date)
                                 if m: theme_date = f"{m.group(1)}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
-                        logger.debug(f'p_code: {p_code} raw_date: {raw_date} theme_date: {theme_date}')
+                        else:
+                            logger.info(f'p_code: {p_code} raw_date: {raw_date} theme_date: {theme_date}')
                         if not theme_date:
                             # 最后的兜底：如果完全没抓到，记录一下可能存在的 key
-                            pass 
+                            pass
+                        else:
+                            pass
                     except Exception as e:
                         theme_date = ""
                         logger.error(f'raw_date: {e}')
@@ -279,13 +304,13 @@ class Scraper55188:
             else: result[col] = ''
             
         # 补位策略
-        # 1. 如果题材名为空但有人气标签，尝试回填
-        mask_theme_name = (result['theme_name'] == '') & (result['hot_tag'] != '')
-        result.loc[mask_theme_name, 'theme_name'] = result.loc[mask_theme_name, 'hot_tag'].apply(lambda x: x.split(',')[0])
+        # # 1. 如果题材名为空但有人气标签，尝试回填
+        # mask_theme_name = (result['theme_name'] == '') & (result['hot_tag'] != '')
+        # result.loc[mask_theme_name, 'theme_name'] = result.loc[mask_theme_name, 'hot_tag'].apply(lambda x: x.split(',')[0])
         
-        # 2. 如果题材逻辑为空但有人气推导逻辑，回填推导逻辑作为分析参考
-        mask_theme_logic = (result['theme_logic'] == '') & (result['hot_reason'] != '')
-        result.loc[mask_theme_logic, 'theme_logic'] = result.loc[mask_theme_logic, 'hot_reason']
+        # # 2. 如果题材逻辑为空但有人气推导逻辑，回填推导逻辑作为分析参考
+        # mask_theme_logic = (result['theme_logic'] == '') & (result['hot_reason'] != '')
+        # result.loc[mask_theme_logic, 'theme_logic'] = result.loc[mask_theme_logic, 'hot_reason']
 
         return result.reset_index()
 
