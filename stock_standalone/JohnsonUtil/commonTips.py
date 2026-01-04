@@ -955,14 +955,26 @@ class GlobalValues:
     _global_dict: Dict[str, Any]
     _local_fallback: Dict[str, Any]
 
+    # def __new__(cls, ext_dict: Optional[Dict[str, Any]] = None) -> 'GlobalValues':
+    #     if cls._instance is None:
+    #         cls._instance = super().__new__(cls)
+    #         cls._global_dict = ext_dict if ext_dict is not None else {}
+    #     elif ext_dict is not None:
+    #         cls._global_dict = ext_dict
+    #     cls._local_fallback = {}  # 本地兜底字典
+    #     return cls._instance
+    
     def __new__(cls, ext_dict: Optional[Dict[str, Any]] = None) -> 'GlobalValues':
         if cls._instance is None:
             cls._instance = super().__new__(cls)
             cls._global_dict = ext_dict if ext_dict is not None else {}
+            cls._local_fallback = {}
         elif ext_dict is not None:
             cls._global_dict = ext_dict
-        cls._local_fallback = {}  # 本地兜底字典
+        if not hasattr(cls, '_local_fallback'):
+            cls._local_fallback = {}
         return cls._instance
+
 
     def getkey(self, key: str, default: Any = None) -> Any:
         """
@@ -977,17 +989,31 @@ class GlobalValues:
             # 管道断开时，从本地 fallback 获取
             return self._local_fallback.get(key, default)
 
+    # def setkey(self, key: str, value: Any) -> None:
+    #     """
+    #     设置 key，保证本地 fallback 始终更新
+    #     """
+    #     try:
+    #         self._global_dict[key] = value
+    #     except (BrokenPipeError, EOFError, OSError) as e:
+    #         log.error(f"setkey 管道断开: {e}, key={key}, value={value}")
+    #     finally:
+    #         # 无论共享字典是否可用，本地字典都更新
+    #         self._local_fallback[key] = value
     def setkey(self, key: str, value: Any) -> None:
         """
-        设置 key，保证本地 fallback 始终更新
+        设置 key，保证本地 fallback 始终更新。
+        管道断开时自动重试 3 次。
         """
-        try:
-            self._global_dict[key] = value
-        except (BrokenPipeError, EOFError, OSError) as e:
-            log.error(f"setkey 管道断开: {e}, key={key}, value={value}")
-        finally:
-            # 无论共享字典是否可用，本地字典都更新
-            self._local_fallback[key] = value
+        for attempt in range(3):
+            try:
+                self._global_dict[key] = value
+                break
+            except (BrokenPipeError, EOFError, OSError) as e:
+                log.warning(f"setkey 管道断开, 尝试 {attempt+1}: {e}, key={key}, value={value}")
+                time.sleep(0.05)  # 50ms 再试
+        self._local_fallback[key] = value
+
 
     def getkey_status(self, key: str) -> bool:
         """
@@ -3254,16 +3280,67 @@ def testdf2(df):
     else:
         pass
 
-def parse_date_safe(date_str):
-    if not date_str:
+def get_timestamp_to_fms(ts: Union[pd.Timestamp, datetime.datetime, str], to_str: bool = True) -> Union[datetime.date, str]:
+    """
+    将 Timestamp 或 datetime 转换为日期或字符串格式 YYYY-MM-DD
+
+    Args:
+        ts: pd.Timestamp, datetime.datetime 或可解析日期的字符串
+        to_str: 是否返回字符串格式 (默认 False 返回 datetime.date)
+
+    Returns:
+        datetime.date 或 str
+    """
+    if isinstance(ts, pd.Timestamp) or isinstance(ts, datetime.datetime):
+        dt = ts.date()
+    elif isinstance(ts, str):
+        dt = pd.to_datetime(ts).date()
+    else:
+        raise ValueError(f"无法识别的类型: {type(ts)}")
+
+    if to_str:
+        return dt.strftime('%Y-%m-%d')
+    return dt
+
+def parse_date_safe(date_input,to_str=True):
+    """
+    安全解析日期，支持多种格式：
+    - 'YYYY-MM-DD', 'YYYY/MM/DD', 'YYYYMMDD'
+    - 'YYYY-MM-DD HH:MM:SS', 'YYYY-MM-DD HH:MM'
+    - 'YYYY-MM-DDTHH:MM:SS'
+    - Excel 浮点型日期
+    返回 datetime.date
+    """
+    if date_input is None:
         return None
 
-    if isinstance(date_str, int):
-        date_str = str(date_str)
+    # 1️⃣ 处理 int / float 类型（如 20251231 或 Excel 日期浮点数）
+    if isinstance(date_input, int):
+        date_input = str(date_input)
+    elif isinstance(date_input, float):
+        # Excel 日期转 datetime
+        base = datetime.datetime(1899, 12, 30)  # Excel 基准日
+        return (base + datetime.timedelta(days=int(date_input))).date()
 
-    date_str = str(date_str).strip().replace("/", "-")
+    # 2️⃣ 转字符串
+    date_str = str(date_input).strip()
 
-    fmts = ("%Y-%m-%d", "%Y%m%d")
+    # 去掉尾部 .0
+    if date_str.endswith(".0"):
+        date_str = date_str[:-2]
+
+    # 替换常见分隔符
+    date_str = date_str.replace("/", "-").replace("T", " ")
+
+    # 3️⃣ 常见格式列表
+    fmts = [
+        "%Y-%m-%d",
+        "%Y%m%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d %H:%M",
+        "%Y%m%d %H:%M:%S",
+        "%Y%m%d %H:%M",
+    ]
 
     for fmt in fmts:
         try:
@@ -3271,7 +3348,38 @@ def parse_date_safe(date_str):
         except ValueError:
             continue
 
-    raise ValueError(f"无法识别的日期格式: {date_str}")
+    # 4️⃣ 万能 fallback：截取前 10 个字符尝试 YYYY-MM-DD
+    if len(date_str) >= 10:
+        try:
+            if to_str:
+                return datetime.datetime.strptime(date_str[:10], "%Y-%m-%d").date().strftime('%Y-%m-%d')
+            else:
+                return datetime.datetime.strptime(date_str[:10], "%Y-%m-%d").date()
+        except ValueError:
+            pass
+
+    # 5️⃣ 无法识别
+    raise ValueError(f"无法识别的日期格式: {date_input}")
+
+
+# def parse_date_safe(date_str):
+#     if not date_str:
+#         return None
+
+#     if isinstance(date_str, int):
+#         date_str = str(date_str)
+
+#     date_str = str(date_str).strip().replace("/", "-")
+
+#     fmts = ("%Y-%m-%d", "%Y%m%d")
+
+#     for fmt in fmts:
+#         try:
+#             return datetime.datetime.strptime(date_str, fmt).date()
+#         except ValueError:
+#             continue
+
+#     raise ValueError(f"无法识别的日期格式: {date_str}")
 
 def get_trade_day_distance(datastr, endday=None):
     """

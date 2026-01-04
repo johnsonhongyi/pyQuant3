@@ -196,7 +196,7 @@ tdx_ths_position1920={'Edge': '909,0,680,776','交易信号监控': '1335,180,56
         'sina_Monitor-Market-LH.py': '662,318,1307,409','sina_Monitor.py': '109,20,1356,519','singleAnalyseUtil.py': '1001,0,897,359',\
         'LinePower.py': '29,103,761,407','instock_Monitor.py': '70,79,1356,502','chantdxpower.exe': '65,87,646,415',\
         'ths-tdx-web.py': '70,200,159,27','pywin32_mouse.py': '53,135,150,36','开盘啦竞价板块观察1.0': '34,34,898,307',\
-        '股票异动数据监控': '1321,67,516,972','instock_MonitorTK.py': '6,431,758,415',}
+        '股票异动数据监控': '1400,145,494,825','instock_MonitorTK.py': '6,431,758,415',}
 # tdx_ths_positionDouble={'通达信': '-1334,37,878,828','东方财富': '21,249,1067,833','同花顺': '825,216,1075,864','Firefox': '-1925,37,602,831','sina_Market-DurationDn.py': '-1902,226,1306,438','sina_Market-DurationCXDN.py': '-1871,90,1329,438','sina_Market-DurationUP.py': '-1818,411,1323,438','sina_Monitor-Market-LH.py': '576,680,1307,407','sina_Monitor.py': '136,25,1321,519','singleAnalyseUtil.py': '949,0,897,359','LinePower.py': '55,233,761,407','instock_Monitor.py': '78,108,1319,439','chantdxpower.py': '108,232,649,407','ths-tdx-web.py': '88,250,313,199','pywin32_mouse.py': '88,250,217,151'}
 #双屏
 # tdx_ths_positionDouble={'行业跟随1.0':'-676,924,677,404','东兴证券': '-1536,877,1100,842','人气综合排行榜2.22': '-477,967,478,753',\

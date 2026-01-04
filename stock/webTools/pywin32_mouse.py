@@ -200,12 +200,8 @@ def key_copy():
     win32api.keybd_event(VK_CODE["c"], 0, 0, 0)
     win32api.keybd_event(VK_CODE["c"], 0, win32con.KEYEVENTF_KEYUP, 0)
     win32api.keybd_event(VK_CODE["ctrl"], 0, win32con.KEYEVENTF_KEYUP, 0)
-    '''
-    
-# def get_content():
-#     content = pyperclip.paste()
-#     print("content:",content)
-#     return content
+    '''
+
 
 def mouse_click():
     '''  delay mouse action to allow for double click to occur
@@ -228,7 +224,6 @@ def mouse_click():
         elif mouse_click_count > 1:
             double_click_flag = False
 
-    # return time_s
 
 def double_click():
     '''  set the double click status flag

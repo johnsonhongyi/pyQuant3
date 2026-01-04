@@ -1947,6 +1947,8 @@ def get_tdx_Exp_day_to_df(
     if lastday:
         df = df.iloc[:-lastday]
     df = df.iloc[-dl:]
+    if dl == 1:
+        return df.squeeze() 
 
     if df.empty:
         return pd.DataFrame()
@@ -2050,7 +2052,7 @@ def get_tdx_Exp_day_to_df(
 
 
 # def get_tdx_Exp_day_to_df_impl(code, start=None, end=None, dl=None, newdays=None,
-def get_tdx_Exp_day_to_df_little_fast(code, start=None, end=None, dl=None, newdays=None,
+def get_tdx_Exp_day_to_df_slow(code, start=None, end=None, dl=None, newdays=None,
                           type='f', wds=True, lastdays=3, resample='d', MultiIndex=False,lastday=None,detect_calc_support=True,normalized=False):
     """
     获取指定股票的日线数据，并计算各类指标
@@ -2433,15 +2435,15 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
     else:
         index_status = False
         code_ts = code
-
     if not power:
-
         return get_tdx_macd(df,detect_calc_support=detect_calc_support)
 
     today = cct.get_today()
 
     if len(df) > 0:
         tdx_last_day = df.index[-1]
+        tdx_last_day = cct.get_timestamp_to_fms(tdx_last_day)
+        
         if tdx_last_day == today:
             return get_tdx_macd(df,detect_calc_support=detect_calc_support)
     else:
@@ -2467,36 +2469,21 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
             duration = 0
         else:
             today = end
-#    print cct.last_tddate(duration)
-# if duration >= 1 and (tdx_last_day != cct.last_tddate(1) or
-# cct.get_now_time_int() > 1530):
     if duration > 1 and (tdx_last_day != cct.last_tddate(1)):
         import urllib.request, urllib.error, urllib.parse
         ds = None
         try:
             ds = get_kdate_data(code_ts, start=tdx_last_day,
                                 end=today, index=index_status)
-            # ds['volume'] = ds.volume.apply(lambda x: x * 100)
-            # ds = ts.get_h_data('000001', start=tdx_last_day, end=today,index=index_status)
-            # df.index = pd.to_datetime(df.index)
         except (IOError, EOFError, Exception, urllib.error.URLError) as e:
             print("Error Duration:", e, end=' ')
             print("code:%s" % (code_ts))
             cct.sleep(0.1)
-#            ds = ts.get_hist_data(code_ts, start=tdx_last_day, end=today, index=index_status)
-#            df.index = pd.to_datetime(df.index)
         if ds is not None and len(ds) > 1:
             if len(df) > 0:
                 lends = len(ds)
             else:
                 lends = len(ds) + 1
-#            if index_status:
-#                if code == 'sh':
-#                    code_ts = '999999'
-#                else:
-#                    code_ts = code_t
-#                ds['code'] = int(code_ts)
-#            else:
             ds['code'] = code
             ds = ds[:lends - 1]
 
@@ -2536,8 +2523,6 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
         return get_tdx_macd(df,detect_calc_support=detect_calc_support)
 
     if dm is None and end is None:
-        # if dm is None and today != df.index[-1]:
-        # log.warn('today != end:%s'%(df.index[-1]))
         if index_status:
             dm = sina_data.Sina().get_stock_code_data(code, index=index_status)
 
@@ -2566,8 +2551,6 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
             else:
                 writedm = True
 
-    # if not writedm and cct.get_now_time_int() > 1530 or cct.get_now_time_int() < 925:
-    #     return df
     if dm is not None and df is not None and not dm.empty and len(df) > 0:
         dm.rename(columns={'volume': 'vol',
                            'turnover': 'amount'}, inplace=True)
@@ -5861,12 +5844,15 @@ def get_tdx_all_day_LastDF(codeList, dt=None, ptype='close',detect_calc_support=
             log.info("LastDF:%s" % dt)
     else:
         dl = None
-    results = cct.to_mp_run_async(
-        get_tdx_Exp_day_to_df, codeList, start=None, end=None, dl=1, newdays=0,detect_calc_support=detect_calc_support)
-    # get_tdx_day_to_df_last, codeList, 1, type, dt, ptype, dl)
-    # results=[]
-    # for code in codeList:
-    # results.append(get_tdx_day_to_df_last(code, 1, type, dt,ptype))
+
+    if len(codeList) > 100:
+        results = cct.to_mp_run_async(
+            get_tdx_Exp_day_to_df, codeList, start=None, end=None, dl=1, newdays=0,detect_calc_support=detect_calc_support)
+        # get_tdx_day_to_df_last, codeList, 1, type, dt, ptype, dl)
+    else:
+        results=[]
+        for code in codeList:
+            results.append(get_tdx_Exp_day_to_df(code, dl=1))
 
 
 #    df = pd.DataFrame(results, columns=ct.TDX_Day_columns)
@@ -7079,9 +7065,11 @@ if __name__ == '__main__':
 
     # (get_tdx_Exp_day_to_df_performance(code,dl=ct.Resample_LABELS_Days[resample],resample=resample))
     code = '920101'
-    df2 = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )
-    df=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+    code = '399001'
+    df2 = get_tdx_Exp_day_to_df(code,dl=1,newdays=0)
+    # df2 = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )
     import ipdb;ipdb.set_trace()
+    df=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     
     # df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
