@@ -311,7 +311,7 @@ class Scraper55188:
         # # 2. 如果题材逻辑为空但有人气推导逻辑，回填推导逻辑作为分析参考
         # mask_theme_logic = (result['theme_logic'] == '') & (result['hot_reason'] != '')
         # result.loc[mask_theme_logic, 'theme_logic'] = result.loc[mask_theme_logic, 'hot_reason']
-
+        logger.info(f'fetching: {len(result)}')
         return result.reset_index()
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import pandas as pd
 from collections import deque, defaultdict
 from typing import Callable, Any, Dict, List, Union, Optional
 from JohnsonUtil import LoggerFactory
+from JohnsonUtil import commonTips  as cct
 import psutil
 import os
 import sqlite3
@@ -591,7 +592,7 @@ class DataPublisher:
         if code is None:
             return {
                 'df': self.ext_data_55188.copy(),
-                'last_update': self.last_ext_update_ts
+                'last_update': cct.get_unixtime_to_time(self.last_ext_update_ts)
             }
             
         # 统一按字符串索引处理

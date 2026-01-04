@@ -8933,6 +8933,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 即使没有主行情更新，也尝试同步外部数据
                 time_start_55188 = time.time()
                 ext_status = self.realtime_service.get_55188_data()
+                # retry = 0
+                # while not ext_status and retry < 5:
+                #     time.sleep(0.2)  # 等 200ms
+                #     ext_status = self.realtime_service.get_55188_data()
+                #     retry += 1
                 if ext_status and 'df' in ext_status:
                     df_ext = ext_status['df']
                     remote_ts = ext_status.get('last_update', 0)
@@ -8943,9 +8948,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self.live_strategy.last_ext_update_ts = remote_ts
                     
                     if remote_ts > self.last_ext_data_ts_local:
-                        local_time = datetime.datetime.fromtimestamp(int(ts))
-                        local_time = local_time.strftime("%Y-%m-%d %H:%M:%S")
-                        duration_time = time_start_55188
+                        # local_time = datetime.datetime.fromtimestamp(int(ts))
+                        # local_time = local_time.strftime("%Y-%m-%d %H:%M:%S")
+                        local_time = cct.get_unixtime_to_time(int(ts))
                         logger.info(f"🆕 Detected 55188 data update (ts={local_time}) use time: {remote_ts-time_start_55188:.2f}. Syncing UI...")
                         self.last_ext_data_ts_local = remote_ts
                         

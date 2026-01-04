@@ -3303,6 +3303,23 @@ def get_today_duration_old(datastr, endday=None, tdx=False):
 #         duration_day = None
 #     return (duration_day)
 
+def get_unixtime_to_time(ts):
+    from datetime import datetime
+    """
+    将时间戳（秒级浮点或整数）转换为本地时间字符串到秒。
+    
+    参数:
+        ts (float|int): Unix 时间戳，例如 1767496028.3023703
+        
+    返回:
+        str: 格式化时间 'YYYY-MM-DD HH:MM:SS'
+    """
+    if ts is None:
+        return ""
+    try:
+        return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    except (OSError, ValueError, TypeError):
+        return ""
 
 def get_now_time():
     # now = time.time()
