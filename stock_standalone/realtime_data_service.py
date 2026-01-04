@@ -395,7 +395,7 @@ class DataPublisher:
                 perf_str = "高性能 (全天 240m)" if is_hp else "极致省内存 (最近 60m)"
                 auto_str = "ON" if status.get('auto_switch') else "OFF"
                 
-                logger.info(f"🔧 [Maintenance] Mem: {status.get('memory_usage')} | "
+                logger.info(f"🔧 [Maintenance] Pid: {status.get('pid')} Mem: {status.get('memory_usage')} | "
                             f"Klines: {status.get('klines_cached')} | "
                             f"Updates: {status.get('update_count')}")
                 
