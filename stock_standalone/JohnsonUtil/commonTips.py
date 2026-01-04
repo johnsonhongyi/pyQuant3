@@ -1667,7 +1667,109 @@ def is_trade_date(date: Union[datetime.date, str] = datetime.date.today()) -> An
         GlobalValues().setkey('is_trade_date', trade_status)
     return trade_status
 
+def get_trade_day_before(dl: int, endday=None) -> str:
+    """
+    获取 endday（默认今天）往前第 dl 个交易日
+    dl=1 -> 上一个交易日
+    dl=70 -> 70 个交易日前
+    返回 YYYY-MM-DD 字符串
+    """
+    if not dl or dl <= 0:
+        return None
 
+    # 结束日期（默认为今天）
+    if endday:
+        end = parse_date_safe(day8_to_day10(endday))
+    else:
+        end = parse_date_safe(get_today())
+
+    if end is None:
+        return None
+
+    # 估算一个足够的开始日期（避免循环过长）
+    # 假设一年 250 交易日 → dl*2 天足够
+    start_guess = end - pd.Timedelta(days=dl * 2)
+
+    # 获取区间交易日列表
+    trade_days = a_trade_calendar.get_trade_days(
+        start_guess.strftime('%Y-%m-%d'),
+        end.strftime('%Y-%m-%d')
+    )
+
+    if not trade_days or len(trade_days) < dl:
+        # 如果列表太短，继续向前扩展
+        while len(trade_days) < dl:
+            start_guess -= pd.Timedelta(days=dl)  # 每次向前 dl 天
+            trade_days = a_trade_calendar.get_trade_days(
+                start_guess.strftime('%Y-%m-%d'),
+                end.strftime('%Y-%m-%d')
+            )
+            if start_guess.year < 1990:  # 防止死循环
+                return None
+
+    # 倒数第 dl 个就是目标交易日
+    return trade_days[-dl]
+
+def show_func_tools(func_name='a_trade_calendar'):
+    functions = [f for f in dir(eval(func_name)) if not f.startswith('_')]
+    print(functions)
+
+    for fun in functions:
+        cmd = f'a_trade_calendar.{fun}()'
+        try:
+            result = eval(cmd)
+            print(f"{fun}() => {result}")
+        except Exception as e:
+            import traceback
+            print(f"{fun}() => ERROR: {e}")
+            print(traceback.format_exc())
+
+def get_trade_day_before_dl(dl, endday=None):
+    if not dl or dl <= 0:
+        return None
+
+    # 默认结束日
+    if endday:
+        end = parse_date_safe(day8_to_day10(endday))
+    else:
+        end = parse_date_safe(get_today())
+
+    if end is None:
+        return None
+
+    # 初步猜测开始日期（dl*2 天前足够）
+    start = end - pd.Timedelta(days=dl*2)
+
+    left = start
+    right = end
+    result = None
+
+    while left <= right:
+        mid = left + (right - left)//2
+        try:
+            count = a_trade_calendar.get_trade_days_interval(mid.strftime('%Y-%m-%d'),
+                                                             end.strftime('%Y-%m-%d'))
+        except Exception:
+            # 出错 fallback
+            break
+
+        if count < dl:
+            right = mid - pd.Timedelta(days=1)
+        elif count > dl:
+            left = mid + pd.Timedelta(days=1)
+        else:
+            # 找到恰好 dl 个交易日 → 返回 mid
+            result = mid
+            right = mid - pd.Timedelta(days=1)
+
+    if result:
+        return result.strftime('%Y-%m-%d')
+
+    # fallback：循环调用 get_pre_trade_date
+    cur = end
+    for _ in range(dl):
+        cur = a_trade_calendar.get_pre_trade_date(cur)
+    return cur.strftime('%Y-%m-%d')
 
 def get_last_trade_date(dt=None):
     if dt is None:
@@ -1678,6 +1780,7 @@ def get_lastdays_trade_date(days=1, base_date=None):
     """
     days = 1 -> 上一个交易日
     days = 2 -> 上两个交易日
+    # get_trade_day_before_dl
     """
     days = int(days)
     if days < 1:
@@ -3244,64 +3347,6 @@ def get_today_duration(datastr, endday=None, tdx=False):
 
     return (today - last_day).days
 
-
-def get_today_duration_old(datastr, endday=None, tdx=False):
-    if isinstance(datastr, int):
-        datastr = str(datastr)
-
-    if datastr and len(datastr) > 6:
-
-        if endday:
-            today = parse_date_safe(day8_to_day10(endday))
-        else:
-            is_trade_date_today = get_day_istrade_date()
-            last_trade_date = get_last_trade_date()
-
-            if tdx and (
-                (is_trade_date_today and get_now_time_int() < 1500)
-                or not is_trade_date_today
-            ) and datastr == last_trade_date:
-                return 0
-            else:
-                today = datetime.date.today()
-
-        # ✅ 统一用安全解析
-        last_day = parse_date_safe(datastr)
-
-        duration_day = int((today - last_day).days)
-
-    else:
-        duration_day = None
-
-    return duration_day
-
-
-# def get_today_duration(datastr, endday=None,tdx=False):
-#     if isinstance(datastr, int):
-#         datastr = str(datastr)
-#     if datastr is not None and len(datastr) > 6:
-#         if endday:
-#             today = datetime.datetime.strptime(day8_to_day10(endday), '%Y-%m-%d').date()
-#         else:
-#             is_trade_date_today = get_day_istrade_date()
-#             last_trade_date = get_last_trade_date()
-#             if tdx and ((is_trade_date_today and get_now_time_int() < 1500) or not is_trade_date_today) and datastr == last_trade_date:
-#                 return 0 
-#                 # today = last_trade_date
-#             else:
-#                 today = datetime.date.today()
-#         # if get_os_system() == 'mac':
-#         #     # last_day = datetime.datetime.strptime(datastr, '%Y/%m/%d').date()
-#         #     last_day = datetime.datetime.strptime(datastr, '%Y-%m-%d').date()
-#         # else:
-#         #     # last_day = datetime.datetime.strptime(datastr, '%Y/%m/%d').date()
-#         #     last_day = datetime.datetime.strptime(datastr, '%Y-%m-%d').date()
-#         last_day = datetime.datetime.strptime(datastr, '%Y-%m-%d').date()
-        
-#         duration_day = int((today - last_day).days)
-#     else:
-#         duration_day = None
-#     return (duration_day)
 
 def get_unixtime_to_time(ts):
     from datetime import datetime
