@@ -7974,7 +7974,7 @@ def combine_dataFrame(maindf: Union[pd.DataFrame, pd.Series], subdf: Union[pd.Da
         maindf.reset_index(inplace=True)
         maindf.drop_duplicates('code', inplace=True)
         maindf.set_index('code', inplace=True)
-    log.info("combine df :%0.2f" % (time.time() - times))
+    log.debug("combine df :%0.2f" % (time.time() - times))
     if append:
         dif_co = list(set(maindf_co) - set(subdf_co))
     return maindf
