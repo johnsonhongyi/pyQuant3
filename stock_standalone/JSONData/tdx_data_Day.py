@@ -1914,8 +1914,9 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     global initTdxdata
     write_k_data_status = False #wds and not code_u.startswith('bj')
 
-    if dl is not None:
-        start = cct.last_tddate(dl)
+    # if dl is not None:
+    #     start = cct.get_trade_day_before_dl(dl)
+        # start = cct.last_tddate(dl)
     start = cct.day8_to_day10(start)
     end = cct.day8_to_day10(end)
 
@@ -2082,6 +2083,7 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
     #     df = df[df.date >= start]
     # if end is not None:
     #     df = df[df.date <= end]
+
     if start is not None or end is not None:
         mask = pd.Series(True, index=df.index)
         if start is not None:
@@ -2089,6 +2091,8 @@ def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
         if end is not None:
             mask &= df['date'] <= end
         df = df.loc[mask]
+    elif dl is not None:
+        df = df[-dl:]
 
     if len(df) == 0:
         return pd.DataFrame()
@@ -7228,7 +7232,10 @@ if __name__ == '__main__':
     # print(f'time: {time.time() - time_s :.8f}  check code: {code_l} generate_df_vect_daily_features:{len(generate_df_vect_daily_features)} ')
 
     # (get_tdx_Exp_day_to_df_performance(code,dl=ct.Resample_LABELS_Days[resample],resample=resample))
-    code = '920753'
+    code = '605255'
+    df2 = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )
+    import ipdb;ipdb.set_trace()
+    
     # df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     df=get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
     import ipdb;ipdb.set_trace()

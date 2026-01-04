@@ -33,10 +33,12 @@ DD_VOL_List = {'0': '40000', '1': '100000',
 
 # duration_date_l = 60
 duration_date_day = 70
-duration_date_up = 190
+duration_date_up = 150      #
+# duration_date_up = 190
 # duration_date_up = 120
-duration_date_week = 280
-duration_date_month = 300
+duration_date_week = 300    #3-ma60d
+# duration_date_month = 300
+duration_date_month = 550    #3-ma20d
 #m : 510 ma26
 
 Resample_LABELS_Days = {'d':duration_date_day,'3d':duration_date_up,
