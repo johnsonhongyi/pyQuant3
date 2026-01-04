@@ -8879,6 +8879,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 msg = f"=== Realtime Service Status ===\n"
                 msg += f"Status         : {status_text}\n"
+                msg += f"Pid            : {status.get('pid', 'N/A')}\n"
                 msg += f"Uptime         : {uptime_str}\n"
                 msg += f"Memory Usage   : {status.get('memory_usage', 'N/A')}\n"
                 msg += f"CPU Usage      : {status.get('cpu_usage', 0):.1f}%\n"
