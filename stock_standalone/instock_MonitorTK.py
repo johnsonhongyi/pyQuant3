@@ -8957,7 +8957,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.debug(f"[_check_ext_data_update] error: {e}")
         finally:
-            self.after(5000, self._check_ext_data_update)
+            self.after(duration_sleep_time*1000, self._check_ext_data_update)
 
     def open_archive_loader(self):
         """打开存档选择窗口"""

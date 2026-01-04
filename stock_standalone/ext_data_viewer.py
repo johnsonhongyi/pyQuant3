@@ -65,7 +65,7 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
         self.tree_theme = self._create_treeview(self.tab_theme, [
             ("code", "代码", 70),
             ("name", "名称", 100),
-            ("theme_date", "日期", 90),
+            ("theme_date", "日期", 100),
             ("price", "现价", 70),
             ("change_pct", "涨幅%", 80),
             ("percent", "盯盘%", 80),
@@ -377,7 +377,7 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
         self._fill_tree(self.tree_hot, df_hot, ['code', 'name', 'hot_rank', 'price', 'change_pct', 'percent', 'win', 'sum_perc', 'hot_tag', 'hot_reason'])
         
         # 3. 更新题材 (有题材标签的个股)
-        df_theme = df[df['theme_name'] != ""].sort_values(['theme_date', 'hot_rank'], ascending=[False, True])
+        df_theme = df[(df['theme_name'] != "") & (df['theme_date'] != "")].sort_values(['theme_date', 'hot_rank'], ascending=[False, True])
         self._fill_tree(self.tree_theme, df_theme, ['code', 'name', 'theme_date', 'price', 'change_pct', 'percent', 'win', 'sum_perc', 'theme_name', 'theme_logic'])
         
         # 更新计数器并刷新当前状态栏
