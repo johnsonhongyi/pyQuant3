@@ -3404,7 +3404,7 @@ def code_to_index(code):
     return code2
 
 
-def code_to_symbol(code):
+def code_to_symbol(code: str) -> str:
     """
         生成symbol代码标志
     """
@@ -3414,12 +3414,11 @@ def code_to_symbol(code):
         if len(code) != 6:
             return ''
         else:
-            # return 'sh%s' % code if code[:1] in ['5', '6', '9'] else 'sz%s' % code
-            # if  code[:1] in ['5', '6', '9']:
-            if  code[:1] in ['5', '6']:
+            if code[:1] in ['5', '6']:
                 code = 'sh%s' % code
-            elif  code[:2] in ['43','83','87','92']:
-                # startswith('43','83','87','92')
+            elif code[:2] in ['99']:
+                code = 'sh%s' % code
+            elif code[:2] in ['43', '83', '87', '92']:
                 code = 'bj%s' % code
             else:
                 code = 'sz%s' % code

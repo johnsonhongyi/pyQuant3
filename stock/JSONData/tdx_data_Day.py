@@ -1439,8 +1439,220 @@ def get_tdx_Exp_day_to_df_debug(code, start=None, end=None, dl=None, newdays=Non
     log.info(f"{code}: get_tdx_Exp_day_to_df完成, 行数={len(df)}, 列={df.columns.tolist()}")
     return df
 
+tdx_max_int = ct.tdx_max_int
+tdx_max_int_end = ct.tdx_max_int_end
+tdx_high_da = ct.tdx_high_da
 
-def get_tdx_Exp_day_to_df(code, start=None, end=None, dl=None, newdays=None,
+# DAY_DTYPE = np.dtype([
+#     ('date',   '<u4'),   # YYYYMMDD
+#     ('open',   '<u4'),
+#     ('high',   '<u4'),
+#     ('low',    '<u4'),
+#     ('close',  '<u4'),
+#     ('amount', '<f4'),
+#     ('vol',    '<u4'),
+#     ('_skip',  '<u4'),
+# ])
+
+DAY_DTYPE = np.dtype([
+    ('date', np.uint32),
+    ('open', np.uint32),
+    ('high', np.uint32),
+    ('low', np.uint32),
+    ('close', np.uint32),
+    ('amount', np.uint32),
+    ('vol', np.uint32),
+    ('_skip', np.uint32)
+])
+
+def read_tdx_day_fast(fname: str, dl: int) -> pd.DataFrame:
+    arr = np.fromfile(fname, dtype=DAY_DTYPE)
+    if arr.size == 0:
+        return pd.DataFrame()
+
+    if dl:
+        arr = arr[-dl:]
+
+    df = pd.DataFrame(arr)
+
+    # 数值缩放（向量化）
+    df[['open','high','low','close']] /= 100.0
+
+    df.drop(columns=['_skip'], inplace=True)
+
+    # 基础清洗（等价你原来的）
+    df = df[(df.open != 0) & (df.amount != 0)]
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # # date 直接当 index（int，最快）
+    # df['date'] = df['date'].astype(str)
+    # df['date'] = pd.to_datetime(df['date'].astype(str), format='%Y%m%d')  # 转为 datetime
+    df['date'] = (
+        df['date'].astype(str).str[:4] + '-' +
+        df['date'].astype(str).str[4:6] + '-' +
+        df['date'].astype(str).str[6:8]
+    )
+    df.set_index('date', inplace=True)
+
+    return df
+
+def get_tdx_Exp_day_to_df(
+    code, start=None, end=None, dl=None, newdays=None,
+    type='f', wds=True, lastdays=3, resample='d',
+    MultiIndex=False, lastday=None,
+    detect_calc_support=True, normalized=False,
+):
+    """
+    全极速稳定版（二进制 .day 路径）
+    """
+
+    # =========================
+    # 1. 文件定位（.day）
+    # =========================
+    code_u = cct.code_to_symbol(code)
+    # market = 'sh' if code_u.startswith('6') else 'sz'
+    market = code_u[:2]
+    day_path = os.path.join(
+        basedir,'Vipdoc',market, 'lday', f'{market}{code_u}.day'
+    )
+    if not code_u:
+        return None  # 或者 raise ValueError("Invalid code")
+    market = code_u[:2]  # 'sh', 'sz', 'bj'
+    day_path = os.path.join(
+        basedir,'Vipdoc',market, 'lday', f'{code_u}.day'
+    )
+
+    if not os.path.exists(day_path):
+        return pd.DataFrame()
+
+    if dl is None:
+        dl = 70
+
+    # =========================
+    # 2. 极速二进制读取
+    # =========================
+    df = read_tdx_day_fast(day_path, dl + 10)
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # =========================
+    # 3. 裁剪
+    # =========================
+    if lastday:
+        df = df.iloc[:-lastday]
+
+    df = df.iloc[-dl:]
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df['code'] = code
+
+    if dl == 1:
+        # 找到最后一条有效记录
+        valid = df[(df['open'] != 0) & (df['amount'] != 0)]
+        if valid.empty:
+            return pd.Series([], dtype='float64')
+        last_row = valid.iloc[-1]
+        return pd.Series({
+            'code': last_row['code'],          # 股票代码
+            'date': last_row.name,     # 交易日
+            'open': last_row['open'],
+            'high': last_row['high'],
+            'low': last_row['low'],
+            'close': last_row['close'],
+            'amount': last_row['amount'],
+            'vol': last_row['vol']
+        })
+
+
+    # df = df.set_index('date').sort_index()
+    # =========================
+    # 4. 非日线 resample
+    # =========================
+    if resample != 'd':
+        df = get_tdx_stock_period_to_type(df, period_day=resample)
+        if 'date' in df.columns:
+            df = df.set_index('date')
+
+    # =========================
+    # 5. 技术指标（原样保留）
+    # =========================
+    df = get_tdx_macd(df, detect_calc_support=detect_calc_support)
+
+    df = compute_lastdays_percent(
+        df, lastdays=lastdays,
+        resample=resample
+    )
+
+    # =========================
+    # 6. fib / maxp
+    # =========================
+    per_cols = [c for c in df.columns if c.startswith('per') and c.endswith('d')]
+    if per_cols:
+        last = df.iloc[-1][per_cols]
+        df.loc[df.index[-1], 'maxp'] = last.max()
+        fib = (last > (10 if resample != 'd' else 2)).sum()
+        df.loc[df.index[-1], 'fib'] = fib
+        df.loc[df.index[-1], 'maxpcout'] = fib
+    else:
+        df[['maxp', 'fib', 'maxpcout']] = 0
+
+    # =========================
+    # 7. 结构指标（完全向量化）
+    # =========================
+    c1 = df.close.shift(1)
+    df['max5']  = c1.rolling(5).max()
+    df['max10'] = c1.rolling(10).max()
+    df['hmax']  = c1.rolling(30).max()
+    df['low10'] = df.low.shift(1).rolling(10).min()
+    df['low4']  = df.low.shift(1).rolling(4).min()
+
+    if len(df) > 10:
+        df['high4']  = c1.rolling(4).max()
+        df['hmax60'] = c1.rolling(60).max()
+        # lmin
+        try:
+            df['lmin'] = df.low.iloc[-tdx_max_int_end:-tdx_high_da].min()
+        except: 
+            df['lmin'] = 0
+
+        # min5
+        df['min5'] = df.low.iloc[-6:-1].min() if len(df) >= 6 else df.low.min()
+
+        # cmean
+        df['cmean'] = round(df.close.iloc[-10:-tdx_high_da].mean(), 2) if len(df) >= 10 else round(df.close.mean(), 2)
+
+        # hv / lv / llowvol
+        df['hv'] = df.vol.iloc[-tdx_max_int:-tdx_high_da].max() if len(df) >= tdx_max_int else df.vol.max()
+        df['lv'] = df.vol.iloc[-tdx_max_int:-tdx_high_da].min() if len(df) >= tdx_max_int else df.vol.min()
+        df['llowvol'] = df['lv']
+
+        # low60
+        df['low60'] = df.close.iloc[-tdx_max_int_end*2:-tdx_max_int_end].min() if len(df) >= tdx_max_int_end*2 else df.close.min()
+
+        # lastdu4
+        df['lastdu4'] = (
+            (df.high.rolling(4).max() - df.low.rolling(4).min()) / df.close.rolling(4).mean() * 100
+        ).round(1).fillna(0)
+
+        # high4 / hmax60 已有，保留
+    # =========================
+    # 8. MainU（最后一行）
+    # =========================
+    if len(df) > 10:
+        chk = check_conditions_auto(df.iloc[-1:])
+        df.loc[df.index[-1], 'MainU'] = chk['MainU'].iloc[0]
+
+    if 'date' in df.columns:
+        df.index = df.pop('date')
+
+    return df
+
+def get_tdx_Exp_day_to_df_txt(code, start=None, end=None, dl=None, newdays=None,
                           type='f', wds=True, lastdays=3, resample='d', MultiIndex=False,lastday=None,detect_calc_support=True):
     """
     获取指定股票的日线数据，并计算各类指标

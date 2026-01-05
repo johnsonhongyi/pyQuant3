@@ -66,12 +66,20 @@ blocknew = get_tdx_dir_blocknew()
 lc5_dir_sh = basedir + r'\Vipdoc\sh\fzline'
 lc5_dir_sz = basedir + r'\Vipdoc\sz\fzline'
 lc5_dir = basedir + r'\Vipdoc\%s\fzline'
-day_dir = basedir + r'\Vipdoc\%s\lday/'
-day_dir_sh = basedir + r'\Vipdoc\sh\lday/'
-day_dir_sz = basedir + r'/Vipdoc/sz/lday/'
-exp_path = basedir + \
-    "/T0002/export/".replace('/', path_sep).replace('\\', path_sep)
-day_path = {'sh': day_dir_sh, 'sz': day_dir_sz}
+ # "D:\MacTools\WinTools\new_tdx2\vipdoc\bj\lday\\sh601628.day"
+# day_dir = basedir + r'\Vipdoc\%s\lday/'
+# day_dir = os.path.join(basedir, "Vipdoc", market, "lday")
+# day_dir_sh = basedir + r'\Vipdoc\sh\lday/'
+# day_dir_sz = basedir + r'/Vipdoc/sz/lday/'
+day_dir_sh = os.path.join(basedir, "Vipdoc", "sh", "lday")
+day_dir_sz = os.path.join(basedir, "Vipdoc", "sz", "lday")
+day_dir_bj = os.path.join(basedir, "Vipdoc", "bj", "lday")
+
+# exp_path = basedir + \
+#     "/T0002/export/".replace('/', path_sep).replace('\\', path_sep)
+exp_path = os.path.join(basedir, "T0002", "export")
+
+day_path = {'sh': day_dir_sh, 'sz': day_dir_sz ,'bj': day_dir_bj}
 resample_dtype = ['d', 'w', 'm','3d','5d']
 # http://www.douban.com/note/504811026/
 
@@ -81,12 +89,14 @@ def get_code_file_path(code, type='f'):
         raise Exception("code is None")
     # os.path.getmtime(ff)
     code_u = cct.code_to_symbol(code)
-    if type == 'f':
-        file_path = exp_path + 'forwardp' + path_sep + code_u.upper() + ".txt"
-    elif type == 'b':
-        file_path = exp_path + 'backp' + path_sep + code_u.upper() + ".txt"
-    else:
-        return None
+    # if type == 'f':
+    #     file_path = exp_path + 'forwardp' + path_sep + code_u.upper() + ".txt"
+    # elif type == 'b':
+    #     file_path = exp_path + 'backp' + path_sep + code_u.upper() + ".txt"
+    # else:
+    #     return None
+    base = 'forwardp' if type == 'f' else 'backp'
+    file_path = os.path.join(exp_path, base, f"{code_u.upper()}.txt")
 
     return file_path
 
@@ -1887,6 +1897,217 @@ tdx_max_int = ct.tdx_max_int
 tdx_max_int_end = ct.tdx_max_int_end
 tdx_high_da = ct.tdx_high_da
 
+# DAY_DTYPE = np.dtype([
+#     ('date',   '<u4'),   # YYYYMMDD
+#     ('open',   '<u4'),
+#     ('high',   '<u4'),
+#     ('low',    '<u4'),
+#     ('close',  '<u4'),
+#     ('amount', '<f4'),
+#     ('vol',    '<u4'),
+#     ('_skip',  '<u4'),
+# ])
+
+DAY_DTYPE = np.dtype([
+    ('date', np.uint32),
+    ('open', np.uint32),
+    ('high', np.uint32),
+    ('low', np.uint32),
+    ('close', np.uint32),
+    ('amount', np.uint32),
+    ('vol', np.uint32),
+    ('_skip', np.uint32)
+])
+
+def read_tdx_day_fast(fname: str, dl: int) -> pd.DataFrame:
+    arr = np.fromfile(fname, dtype=DAY_DTYPE)
+    if arr.size == 0:
+        return pd.DataFrame()
+
+    if dl:
+        arr = arr[-dl:]
+
+    df = pd.DataFrame(arr)
+
+    # 数值缩放（向量化）
+    df[['open','high','low','close']] /= 100.0
+
+    df.drop(columns=['_skip'], inplace=True)
+
+    # 基础清洗（等价你原来的）
+    df = df[(df.open != 0) & (df.amount != 0)]
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # # date 直接当 index（int，最快）
+    # df['date'] = df['date'].astype(str)
+    # df['date'] = pd.to_datetime(df['date'].astype(str), format='%Y%m%d')  # 转为 datetime
+    df['date'] = (
+        df['date'].astype(str).str[:4] + '-' +
+        df['date'].astype(str).str[4:6] + '-' +
+        df['date'].astype(str).str[6:8]
+    )
+    df.set_index('date', inplace=True)
+
+    return df
+
+def get_tdx_Exp_day_to_df_lday(
+    code, start=None, end=None, dl=None, newdays=None,
+    type='f', wds=True, lastdays=3, resample='d',
+    MultiIndex=False, lastday=None,
+    detect_calc_support=True, normalized=False,
+):
+    """
+    全极速稳定版（二进制 .day 路径）
+    """
+
+    # =========================
+    # 1. 文件定位（.day）
+    # =========================
+    code_u = cct.code_to_symbol(code)
+    # market = 'sh' if code_u.startswith('6') else 'sz'
+    market = code_u[:2]
+    day_path = os.path.join(
+        basedir,'Vipdoc',market, 'lday', f'{market}{code_u}.day'
+    )
+    if not code_u:
+        return None  # 或者 raise ValueError("Invalid code")
+    market = code_u[:2]  # 'sh', 'sz', 'bj'
+    day_path = os.path.join(
+        basedir,'Vipdoc',market, 'lday', f'{code_u}.day'
+    )
+
+    if not os.path.exists(day_path):
+        return pd.DataFrame()
+
+    if dl is None:
+        dl = 70
+
+    # =========================
+    # 2. 极速二进制读取
+    # =========================
+    df = read_tdx_day_fast(day_path, dl + 10)
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # =========================
+    # 3. 裁剪
+    # =========================
+    if lastday:
+        df = df.iloc[:-lastday]
+
+    df = df.iloc[-dl:]
+
+    if df.empty:
+        return pd.DataFrame()
+
+    df['code'] = code
+
+    if dl == 1:
+        # 找到最后一条有效记录
+        valid = df[(df['open'] != 0) & (df['amount'] != 0)]
+        if valid.empty:
+            return pd.Series([], dtype='float64')
+        last_row = valid.iloc[-1]
+        return pd.Series({
+            'code': last_row['code'],          # 股票代码
+            'date': last_row.name,     # 交易日
+            'open': last_row['open'],
+            'high': last_row['high'],
+            'low': last_row['low'],
+            'close': last_row['close'],
+            'amount': last_row['amount'],
+            'vol': last_row['vol']
+        })
+
+
+    # df = df.set_index('date').sort_index()
+    # =========================
+    # 4. 非日线 resample
+    # =========================
+    if resample != 'd':
+        df = get_tdx_stock_period_to_type(df, period_day=resample)
+        if 'date' in df.columns:
+            df = df.set_index('date')
+
+    # =========================
+    # 5. 技术指标（原样保留）
+    # =========================
+    df = get_tdx_macd(df, detect_calc_support=detect_calc_support)
+
+    df = compute_lastdays_percent(
+        df, lastdays=lastdays,
+        resample=resample, normalized=normalized
+    )
+
+    # =========================
+    # 6. fib / maxp
+    # =========================
+    per_cols = [c for c in df.columns if c.startswith('per') and c.endswith('d')]
+    if per_cols:
+        last = df.iloc[-1][per_cols]
+        df.loc[df.index[-1], 'maxp'] = last.max()
+        fib = (last > (10 if resample != 'd' else 2)).sum()
+        df.loc[df.index[-1], 'fib'] = fib
+        df.loc[df.index[-1], 'maxpcout'] = fib
+    else:
+        df[['maxp', 'fib', 'maxpcout']] = 0
+
+    # =========================
+    # 7. 结构指标（完全向量化）
+    # =========================
+    c1 = df.close.shift(1)
+    df['max5']  = c1.rolling(5).max()
+    df['max10'] = c1.rolling(10).max()
+    df['hmax']  = c1.rolling(30).max()
+    df['low10'] = df.low.shift(1).rolling(10).min()
+    df['low4']  = df.low.shift(1).rolling(4).min()
+
+    if len(df) > 10:
+        df['high4']  = c1.rolling(4).max()
+        df['hmax60'] = c1.rolling(60).max()
+        # lmin
+        try:
+            df['lmin'] = df.low.iloc[-tdx_max_int_end:-tdx_high_da].min()
+        except: 
+            df['lmin'] = 0
+
+        # min5
+        df['min5'] = df.low.iloc[-6:-1].min() if len(df) >= 6 else df.low.min()
+
+        # cmean
+        df['cmean'] = round(df.close.iloc[-10:-tdx_high_da].mean(), 2) if len(df) >= 10 else round(df.close.mean(), 2)
+
+        # hv / lv / llowvol
+        df['hv'] = df.vol.iloc[-tdx_max_int:-tdx_high_da].max() if len(df) >= tdx_max_int else df.vol.max()
+        df['lv'] = df.vol.iloc[-tdx_max_int:-tdx_high_da].min() if len(df) >= tdx_max_int else df.vol.min()
+        df['llowvol'] = df['lv']
+
+        # low60
+        df['low60'] = df.close.iloc[-tdx_max_int_end*2:-tdx_max_int_end].min() if len(df) >= tdx_max_int_end*2 else df.close.min()
+
+        # lastdu4
+        df['lastdu4'] = (
+            (df.high.rolling(4).max() - df.low.rolling(4).min()) / df.close.rolling(4).mean() * 100
+        ).round(1).fillna(0)
+
+        # high4 / hmax60 已有，保留
+    # =========================
+    # 8. MainU（最后一行）
+    # =========================
+    if len(df) > 10:
+        chk = check_conditions_auto(df.iloc[-1:])
+        df.loc[df.index[-1], 'MainU'] = chk['MainU'].iloc[0]
+
+    if 'date' in df.columns:
+        df.index = df.pop('date')
+
+    return df
+
+
+
 def get_tdx_Exp_day_to_df(
     code, start=None, end=None, dl=None, newdays=None,
     type='f', wds=True, lastdays=3, resample='d',
@@ -1928,7 +2149,6 @@ def get_tdx_Exp_day_to_df(
                 amount = round(float(a[6].replace('\r\n','')), 1)
                 if int(topen) == 0 or int(amount) == 0:
                     continue
-                # 返回 pd.Series
                 df = pd.Series({
                     'code': code, 'date': tdate, 'open': topen, 'high': thigh,
                     'low': tlow, 'close': tclose, 'amount': amount, 'vol': tvol
@@ -2010,6 +2230,7 @@ def get_tdx_Exp_day_to_df(
         df.loc[df.index[-1], 'maxpcout'] = fib
     else:
         df[['maxp', 'fib', 'maxpcout']] = 0
+
 
     # =========================
     # 7. 结构指标（向量化）
@@ -2879,12 +3100,16 @@ def write_tdx_tushare_to_file(code, df=None, start=None, type='f',rewrite=False)
     if code_u.startswith('bj'):
         return None
     log.debug("tushare code:%s code_u:%s" % (code, code_u))
-    if type == 'f':
-        file_path = exp_path + 'forwardp' + path_sep + code_u.upper() + ".txt"
-    elif type == 'b':
-        file_path = exp_path + 'backp' + path_sep + code_u.upper() + ".txt"
-    else:
-        return None
+    # if type == 'f':
+    #     file_path = exp_path + 'forwardp' + path_sep + code_u.upper() + ".txt"
+    # elif type == 'b':
+    #     file_path = exp_path + 'backp' + path_sep + code_u.upper() + ".txt"
+    # else:
+    #     return None
+    # file_path = get_code_file_path(code)
+
+    base = 'forwardp' if type == 'f' else 'backp'
+    file_path = os.path.join(exp_path, base, f"{code_u.upper()}.txt")
 
     #add 250527 johnson
     if rewrite:
@@ -3033,12 +3258,14 @@ def write_tdx_sina_data_to_file(code, dm=None, df=None, dl=2, type='f'):
 
     code_u = cct.code_to_symbol(code)
     log.debug("code:%s code_u:%s" % (code, code_u))
-    if type == 'f':
-        file_path = exp_path + 'forwardp' + path_sep + code_u.upper() + ".txt"
-    elif type == 'b':
-        file_path = exp_path + 'backp' + path_sep + code_u.upper() + ".txt"
-    else:
-        return None
+    # if type == 'f':
+    #     file_path = exp_path + 'forwardp' + path_sep + code_u.upper() + ".txt"
+    # elif type == 'b':
+    #     file_path = exp_path + 'backp' + path_sep + code_u.upper() + ".txt"
+    # else:
+    #     return None
+    base = 'forwardp' if type == 'f' else 'backp'
+    file_path = os.path.join(exp_path, base, f"{code_u.upper()}.txt")
 
     if not os.path.exists(file_path) and len(df) > 0:
         fo = open(file_path, "w+")
@@ -3434,6 +3661,12 @@ def check_tdx_Exp_day_duration(market='all'):
     duration_other = list(set(duration_other))
     log.info(("duration_zero:%s duration_other:%s"%(len(duration_zero),len(duration_other))))
     return duration_other
+
+def write_market_index_to_df():
+    dm_index = sina_data.Sina().get_stock_list_data(tdx_index_code_list,index=True)
+    for inx in tdx_index_code_list:
+        log.info(f'write index append to df:{inx}')
+        get_tdx_append_now_df_api_tofile(inx,dm=dm_index)
 
 def Write_market_all_day_mp(market='all', rewrite=False,recheck=False,detect_calc_support=False):
     """
@@ -6735,10 +6968,11 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
     - 避免重复 datetime 解析和排序
     - 使用 loc 索引切片
     - 分列聚合 numeric 与 first/last separately
-    """
+    """
     period_type = period_type_dic.get(period_day.lower(), period_day)
 
     # 1️⃣ 如果 index 已经是 DatetimeIndex 且已排序，可跳过
+
     if not isinstance(stock_data.index, pd.DatetimeIndex):
         stock_data.index = pd.to_datetime(stock_data.index)
         stock_data = stock_data.sort_index()
@@ -7070,12 +7304,19 @@ if __name__ == '__main__':
     # tdx_profile_test_tdx()
         
     resample = 'd'
-    code = '300503'
+    code = '300640'
 
-    import ipdb;ipdb.set_trace()
+    # dm_index = sina_data.Sina().get_stock_list_data(tdx_index_code_list,index=True)
+    # for inx in tdx_index_code_list:
+    #     get_tdx_append_now_df_api_tofile(inx,dm=dm_index)
+    # write_market_index_to_df()
+
 
     dd = get_tdx_Exp_day_to_df(code, dl=1) 
     duration = cct.get_today_duration(dd.date,tdx=True) if dd is not None and len(dd) > 5 else -1
+    df = get_tdx_Exp_day_to_df_lday(code, dl=1) 
+    dm = get_tdx_Exp_day_to_df_lday(code, dl=480,resample='m')
+    print(f'df_txt:{dd} df_day:{df}')
     import ipdb;ipdb.set_trace()
 
     # code_l=['920274','300342','300696', '603091', '605167']
