@@ -6,11 +6,19 @@ from collections import deque, defaultdict
 from typing import Callable, Any, Dict, List, Union, Optional
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips  as cct
+from cache_utils import DataFrameCacheSlot,df_fingerprint
 import psutil
 import os
 import sqlite3
-
+import re
 logger = LoggerFactory.getLogger()
+
+# CFG = cct.GlobalConfig()
+# win10_ramdisk_triton = CFG.get_path("win10_ramdisk_triton")
+# if re.fullmatch(r"[A-Z]:", win10_ramdisk_triton, re.I):
+#     win10_ramdisk_triton = win10_ramdisk_triton + "\\"
+# CACHE_FILE = os.path.join(win10_ramdisk_triton, "realtime_data_snapshot.pkl")
+# FP_FILE    = os.path.join(win10_ramdisk_triton, "realtime_data_snapshot_fp.json")
 
 # Lightweight K-line item using __slots__ to save memory
 class KLineItem:
@@ -242,12 +250,20 @@ class DataPublisher:
     数据分发器 (核心入口)
     """
     def __init__(self, high_performance: bool = True, scraper_interval: int = 600):
+        # global FP_FILE,CACHE_FILE
         self.paused = False
         self.high_performance = high_performance # HP: ~4.0h, Legacy: ~2.0h (Dynamic nodes)
         self.auto_switch_enabled = True
         self.mem_threshold_mb = 800.0 # 阈值调低至 800MB
         self.node_threshold = 1000000 # 默认 100万个节点触发降级
-        
+        # self._CACHE_FILE = CACHE_FILE
+        # self._FP_FILE = FP_FILE
+        # self._last_snapshot_fp = None
+        # self.cache = DataFrameCacheSlot(
+        #         cache_file=CACHE_FILE,
+        #         fp_file=None,
+        #         logger=logger,
+        #     )
         # Interval Settings
         self.expected_interval = 60 # 默认 1分钟
         self.last_batch_clock = 0.0
@@ -295,6 +311,23 @@ class DataPublisher:
         # Start external data scraper thread
         self.scraper_thread = threading.Thread(target=self._scraper_task, daemon=True)
         self.scraper_thread.start()
+
+        # =========================
+        # Crash Recovery: Load Last Snapshot
+        # =========================
+        # try:
+        #     cached_df = self.cache.load_df()
+        #     if not cached_df.empty:
+        #         logger.warning(
+        #             f"♻️ Cache recovered on startup: {len(cached_df)} rows. "
+        #             f"Used as last known snapshot (no K-line backfill)."
+        #         )
+        #         self._last_cached_df = cached_df
+        #     else:
+        #         self._last_cached_df = None
+        # except Exception as e:
+        #     logger.error(f"Cache recovery failed: {e}")
+        #     self._last_cached_df = None
 
     def reset_state(self):
         """
@@ -567,6 +600,28 @@ class DataPublisher:
                 self.batch_rates_dq.append(rows_count / duration)
             self.last_batch_time = t1
             
+            # =========================
+            # Snapshot Cache (Crash Safe)
+            # =========================
+            # self._latest_df = df
+            # self.kline_cache.cache.shape            
+            # fp = df_fingerprint(
+            #     df,
+            #     cols=['open', 'high', 'low', 'close'] if 'ratio' in df.columns else ['code', 'price', 'percent']
+            # )
+            # # 仅在成功处理完整 batch 后写 cache
+            # # 不做频率限制由上游控制
+            # if fp != self._last_snapshot_fp:
+            #     saved = self.cache.save_df(df)
+            #     if saved:
+            #         self._last_snapshot_fp = fp
+            # else:
+            #     logger.debug("Snapshot unchanged, cache skipped.")
+
+            # saved = self.cache.save_df(df)
+            # if not saved:
+            #     logger.warning("⚠️ Snapshot cache write failed (memory valid, disk skipped).")
+
         except Exception as e:
             logger.error(f"DataPublisher update_batch error: {e}")
 

@@ -1611,12 +1611,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.dfcf_var = tk.BooleanVar(value=False)
         self.tip_var = tk.BooleanVar(value=False)
         self.voice_var = tk.BooleanVar(value=False)
+        self.realtime_var = tk.BooleanVar(value=True)
         checkbuttons_info = [
             ("Win", self.win_var),
             ("TDX", self.tdx_var),
             ("THS", self.ths_var),
             ("DC", self.dfcf_var),
-            ("Tip", self.tip_var)
+            ("Tip", self.tip_var),
+            ("Real", self.realtime_var)
         ]
         
         # 💥 修正：使用 ttk.Checkbutton 替代 tk.Checkbutton
@@ -1689,6 +1691,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._setup_tree_columns(self.tree,self.current_cols, sort_callback=self.sort_by_column, other={})
             self.reload_cfg_value()
             self.live_strategy.set_alert_cooldown(alert_cooldown)
+
+        if self.realtime_var.get():
+            if not self.live_strategy.scan_hot_concepts_status:
+                self.live_strategy.set_scan_hot_concepts(status=True)
+                logger.info(f'self.live_strategy.scan_hot_concepts_status is False will be open')
+        else:
+            if self.live_strategy.scan_hot_concepts_status:
+                self.live_strategy.set_scan_hot_concepts(status=False)
+                logger.info(f'self.live_strategy.scan_hot_concepts_status  will be close')
+
             # self.update_treeview_cols(self.current_cols)
 
         logger.info(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
