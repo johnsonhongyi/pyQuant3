@@ -226,6 +226,7 @@ class StockLiveStrategy:
         self.alert_callback = None
         self.df = None
         self.realtime_service = None
+        self.scan_hot_concepts_status = True
         
         # --- 外部数据缓存 (55188.cn) ---
         self.ext_data_55188: pd.DataFrame = pd.DataFrame()
@@ -316,7 +317,10 @@ class StockLiveStrategy:
         """注入实时数据服务"""
         self.realtime_service = service
 
-    
+    def set_scan_hot_concepts(self, status=True):
+        """注入实时数据服务"""
+        self.scan_hot_concepts_status = status
+
     def _calculate_position(self, stock: dict, current_price: float, current_nclose: float, last_close: float, last_percent: Optional[float], last_nclose: float) -> tuple[str, float]:
         """根据今日/昨日数据计算动态仓位与操作"""
         position_ratio = round(1.0/self.stock_count,1)
@@ -631,13 +635,15 @@ class StockLiveStrategy:
         self.executor.submit(self._check_strategies, self.df)
         
         # --- Top 5 Hot Concepts Strategy ---
-        if concept_top5:
+        if concept_top5 and cct.get_now_time_int() > 922:
             self.executor.submit(self._scan_hot_concepts, df_all, concept_top5)
 
     def _scan_hot_concepts(self, df: pd.DataFrame, concept_top5: list):
         """
         扫描五大热点板块，识别龙头
-        """
+        """
+        if not self.scan_hot_concepts_status:
+            return
         try:
             if df.empty or not concept_top5:
                 # logger.debug("No data or concept_top5 is empty.")
@@ -664,8 +670,13 @@ class StockLiveStrategy:
             # Only check stocks with > 4% gain
             if 'percent' not in df.columns:
                 return
-                
-            strong_df = df[df['percent'] > 5.0]
+            
+            required_cols = ['close', 'high4', 'ma5d']
+            if not set(required_cols).issubset(df.columns):
+            # strong_df = df[df['percent'] > 5.0]
+                strong_df = df[(df['close'] > df['high4']) & (df['close'] > df['ma5d'])]
+            else:
+                strong_df = df[(df['percent'] > 3 )]
             
             if strong_df.empty:
                 return

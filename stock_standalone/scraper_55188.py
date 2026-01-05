@@ -528,7 +528,8 @@ class Scraper55188:
     def get_combined_data(self, force_full=False,count=30) -> pd.DataFrame:
         """
         聚合多维数据：主力、人气、题材逻辑
-        """
+        """
+
         # 1. 抓取 L1（必须）
         df_zhuli = self.fetch_eastmoney_zhuli()
         if df_zhuli.empty:
