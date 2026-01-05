@@ -1250,6 +1250,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if len(self.search_history2) > 0:
             self.search_var2.set(self.search_history2[0])
 
+        self.after(1000,lambda :self.load_window_position(self, "main_window", default_width=1200, default_height=480))
         self.open_column_manager_init()
 
     def replace_st_key_sort_col(self, old_col, new_col):
@@ -9400,6 +9401,7 @@ COMMON_COMMANDS = [
     "tdd.h5a.check_tdx_all_df_Sina('sina_data')",
     "tdd.h5a.check_tdx_all_df_Sina('get_sina_all_ratio')",
     "write_to_hdf()",
+    "write_market_index_to_df()",
     "test_opt(top_all,resample='d',code='002151')"
 ]
 
