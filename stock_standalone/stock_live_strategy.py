@@ -7,7 +7,7 @@ import threading
 import time
 import os
 import winsound
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
@@ -895,27 +895,31 @@ class StockLiveStrategy:
                 # --- 3. 实时情绪感知 & K线形态 (Realtime Analysis) ---
                 if self.realtime_service:
                     try:
-                        # Emotion Score
+                        # --- 3.1 读取实时情绪 ---
                         rt_emotion = self.realtime_service.get_emotion_score(code)
-                        snap['rt_emotion'] = rt_emotion
+                        snap['rt_emotion'] = snap.get('rt_emotion', 0) + rt_emotion
 
-                        # K-Line Pattern (V-Shape Reversal)
+                        # --- 3.2 V-Shape K线形态 ---
                         klines = self.realtime_service.get_minute_klines(code, n=30)
                         if len(klines) >= 15:
                             lows = [k['low'] for k in klines]
                             closes = [k['close'] for k in klines]
                             p_curr = closes[-1]
                             p_low = min(lows)
-                            
-                            # Logic: Deep drop from start of window (>2%) + Significant Rebound (>1.5%)
                             p_start = closes[0]
+
                             if p_start > 0 and p_low > 0:
                                 drop = (p_low - p_start) / p_start
                                 rebound = (p_curr - p_low) / p_low
-                                
-                                if drop < -0.02 and rebound > 0.015:
+
+                                # --- 防重复触发 ---
+                                if 'v_shape_triggered' not in snap:
+                                    snap['v_shape_triggered'] = False
+
+                                if drop < -0.02 and rebound > 0.015 and not snap['v_shape_triggered']:
                                     snap['v_shape_signal'] = True
-                                    snap['rt_emotion'] += 15 # Bonus for reversal
+                                    snap['rt_emotion'] += 15  # 加分
+                                    snap['v_shape_triggered'] = True
                                     logger.info(f"V-Shape Detected {code}: Drop {drop:.1%} Rebound {rebound:.1%}")
 
                     except Exception as e:
@@ -923,43 +927,127 @@ class StockLiveStrategy:
 
                 # ---------- 决策引擎 ----------
                 decision = self.decision_engine.evaluate(row, snap)
-                logger.debug(f"Strategy: {code} ({data['name']}) Engine Result: {decision['action']} Score: {decision['debug'].get('实时买入分', 0)} Reason: {decision['reason']}")
-                
-                # --- 状态记忆持久化 (New) ---
-                if decision["action"] == "买入":
-                    snap["last_buy_score"] = decision["debug"].get("实时买入分", 0)
-                    snap["buy_triggered_today"] = True
-                elif decision["action"] == "卖出":
-                    snap["sell_triggered_today"] = True
-                
-                # 记录最高分作为今日目标追踪
+
+                # --- 3.3 冷却机制：避免短时重复触发 ---
+                cooldown_minutes = 5
+                now_ts = datetime.now()
+                if 'last_trigger_time' not in snap:
+                    snap['last_trigger_time'] = now_ts - timedelta(minutes=cooldown_minutes)
+                    # logger.info(f'timedelta(minutes=cooldown_minutes): {timedelta(minutes=cooldown_minutes)}')
+                time_since_last = (now_ts - snap['last_trigger_time']).total_seconds() / 60
+                if time_since_last >= cooldown_minutes:
+                    if decision["action"] == "买入":
+                        snap["last_buy_score"] = decision["debug"].get("实时买入分", 0)
+                        snap["buy_triggered_today"] = True
+                        snap['last_trigger_time'] = now_ts
+                    elif decision["action"] == "卖出":
+                        snap["sell_triggered_today"] = True
+                        snap['last_trigger_time'] = now_ts
+
+                # --- 3.4 记录最大分数 ---
                 snap["max_score_today"] = max(snap.get("max_score_today", 0), decision["debug"].get("实时买入分", 0))
 
-                # 记录信号历史 (增强版：传递完整行情数据以便后续分析)
+                # --- 3.5 构建 row_data（顺序优化 + 日线周期增强） ---
                 row_data = {
+                    # --- 日线周期指标 ---
                     'ma5d': float(row.get('ma5d', 0)),
                     'ma10d': float(row.get('ma10d', 0)),
                     'ma20d': float(row.get('ma20d', 0)),
                     'ma60d': float(row.get('ma60d', 0)),
+                    'low10': snap.get('low10', 0),
+                    'highest_today': snap.get('highest_today', row.get('high', 0)),
+                    'lower': snap.get('lower', 0),
+                    'pump_height': snap.get('pump_height', 0),
+                    'pullback_depth': snap.get('pullback_depth', 0),
+
+                    # --- 分时指标 ---
                     'ratio': float(row.get('ratio', 0)),
                     'volume': float(row.get('volume', 0)),
-                    'nclose': current_nclose,
-                    'high': current_high,
-                    'low': float(row.get('low', 0)),
-                    'open': float(row.get('open', 0)),
-                    'percent': current_change,
                     'turnover': float(row.get('turnover', 0)),
+                    'nclose': row.get('nclose', 0),
+                    'open': float(row.get('open', 0)),
+                    'high': float(row.get('high', 0)),
+                    'low': float(row.get('low', 0)),
+                    'percent': row.get('percent', 0),
+
+                    # --- 额外状态 ---
                     'win': snap.get('win', 0),
                     'red': snap.get('red', 0),
                     'gren': snap.get('gren', 0),
                     'sum_perc': snap.get('sum_perc', 0),
-                    'low10': snap.get('low10', 0),
-                    'lower': snap.get('lower', 0),
-                    'highest_today': snap.get('highest_today', current_high),
-                    'pump_height': snap.get('pump_height', 0),
-                    'pullback_depth': snap.get('pullback_depth', 0),
                 }
+
+                # --- 3.6 记录信号日志 ---
                 self.trading_logger.log_signal(code, data['name'], current_price, decision, row_data=row_data)
+
+                # # --- 3. 实时情绪感知 & K线形态 (Realtime Analysis) ---
+                # if self.realtime_service:
+                #     try:
+                #         # Emotion Score
+                #         rt_emotion = self.realtime_service.get_emotion_score(code)
+                #         snap['rt_emotion'] = rt_emotion
+
+                #         # K-Line Pattern (V-Shape Reversal)
+                #         klines = self.realtime_service.get_minute_klines(code, n=30)
+                #         if len(klines) >= 15:
+                #             lows = [k['low'] for k in klines]
+                #             closes = [k['close'] for k in klines]
+                #             p_curr = closes[-1]
+                #             p_low = min(lows)
+                            
+                #             # Logic: Deep drop from start of window (>2%) + Significant Rebound (>1.5%)
+                #             p_start = closes[0]
+                #             if p_start > 0 and p_low > 0:
+                #                 drop = (p_low - p_start) / p_start
+                #                 rebound = (p_curr - p_low) / p_low
+                                
+                #                 if drop < -0.02 and rebound > 0.015:
+                #                     snap['v_shape_signal'] = True
+                #                     snap['rt_emotion'] += 15 # Bonus for reversal
+                #                     logger.info(f"V-Shape Detected {code}: Drop {drop:.1%} Rebound {rebound:.1%}")
+
+                #     except Exception as e:
+                #         logger.debug(f"Realtime service fetch error: {e}")
+
+                # # ---------- 决策引擎 ----------
+                # decision = self.decision_engine.evaluate(row, snap)
+                # logger.debug(f"Strategy: {code} ({data['name']}) Engine Result: {decision['action']} Score: {decision['debug'].get('实时买入分', 0)} Reason: {decision['reason']}")
+                
+                # # --- 状态记忆持久化 (New) ---
+                # if decision["action"] == "买入":
+                #     snap["last_buy_score"] = decision["debug"].get("实时买入分", 0)
+                #     snap["buy_triggered_today"] = True
+                # elif decision["action"] == "卖出":
+                #     snap["sell_triggered_today"] = True
+                
+                # # 记录最高分作为今日目标追踪
+                # snap["max_score_today"] = max(snap.get("max_score_today", 0), decision["debug"].get("实时买入分", 0))
+
+                # # 记录信号历史 (增强版：传递完整行情数据以便后续分析)
+                # row_data = {
+                #     'ma5d': float(row.get('ma5d', 0)),
+                #     'ma10d': float(row.get('ma10d', 0)),
+                #     'ma20d': float(row.get('ma20d', 0)),
+                #     'ma60d': float(row.get('ma60d', 0)),
+                #     'ratio': float(row.get('ratio', 0)),
+                #     'volume': float(row.get('volume', 0)),
+                #     'nclose': current_nclose,
+                #     'high': current_high,
+                #     'low': float(row.get('low', 0)),
+                #     'open': float(row.get('open', 0)),
+                #     'percent': current_change,
+                #     'turnover': float(row.get('turnover', 0)),
+                #     'win': snap.get('win', 0),
+                #     'red': snap.get('red', 0),
+                #     'gren': snap.get('gren', 0),
+                #     'sum_perc': snap.get('sum_perc', 0),
+                #     'low10': snap.get('low10', 0),
+                #     'lower': snap.get('lower', 0),
+                #     'highest_today': snap.get('highest_today', current_high),
+                #     'pump_height': snap.get('pump_height', 0),
+                #     'pullback_depth': snap.get('pullback_depth', 0),
+                # }
+                # self.trading_logger.log_signal(code, data['name'], current_price, decision, row_data=row_data)
 
                 if decision["action"] != "持仓":
                     messages.append(("POSITION", f'{data["name"]} {decision["action"]} 仓位{int(decision["position"]*100)}% {decision["reason"]}'))
@@ -1252,14 +1340,13 @@ class StockLiveStrategy:
         """触发报警"""
         logger.warning(f"🔔 ALERT: {message}")
         
-        # 1. 声音
-        self._play_sound_async()
-        
         # # 2. 语音播报
         # speak_text = f"注意{action}，{code} ，{message}"
         # self._voice.say(speak_text, code=code)
         # 2. 语音播报（★ 受控）
         if self.voice_enabled:
+            # 1. 声音
+            self._play_sound_async()
             speak_text = f"注意{action}，{code} ，{message}"
             self._voice.say(speak_text, code=code)
         else:

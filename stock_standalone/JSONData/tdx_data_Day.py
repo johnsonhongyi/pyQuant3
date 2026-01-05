@@ -1868,8 +1868,10 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
 
     # if df.index.name != 'date':
     #     df=df[-id_cout:].set_index('date')
-    if not isinstance(df.index, pd.DatetimeIndex) and 'date' in df.columns:
-        df.index = pd.to_datetime(df.pop('date'), errors='coerce')
+    # if not isinstance(df.index, pd.DatetimeIndex) and 'date' in df.columns:
+    #     df.index = pd.to_datetime(df.pop('date'), errors='coerce')
+    if 'date' in df.columns:
+        df.index = df.pop('date')
         df=df[-id_cout:]
     else:
         df=df[-id_cout:]
@@ -1908,6 +1910,32 @@ def get_tdx_Exp_day_to_df(
     if dl is None:
         dl = 70  # 防止上层漏传
 
+    if dl == 1:
+        data = cct.read_last_lines(file_path, int(dl) + 3)
+        data_l = data.split('\n')
+        data_l.reverse()
+        for line in data_l:
+            a = line.split(',')
+            if len(a) == 7:
+                tdate = a[0]
+                if len(tdate) != 10:
+                    continue
+                topen = round(float(a[1]), 2)
+                thigh = round(float(a[2]), 2)
+                tlow = round(float(a[3]), 2)
+                tclose = round(float(a[4]), 2)
+                tvol = round(float(a[5]), 2)
+                amount = round(float(a[6].replace('\r\n','')), 1)
+                if int(topen) == 0 or int(amount) == 0:
+                    continue
+                # 返回 pd.Series
+                df = pd.Series({
+                    'code': code, 'date': tdate, 'open': topen, 'high': thigh,
+                    'low': tlow, 'close': tclose, 'amount': amount, 'vol': tvol
+                })
+                return df
+        # 如果循环结束没有有效行，返回空 Series
+        return pd.Series([], dtype='float64')
     # =========================
     # 2. 极速尾部读取（日线原始）
     # =========================
@@ -1947,8 +1975,7 @@ def get_tdx_Exp_day_to_df(
     if lastday:
         df = df.iloc[:-lastday]
     df = df.iloc[-dl:]
-    if dl == 1:
-        return df.squeeze() 
+
 
     if df.empty:
         return pd.DataFrame()
@@ -2045,8 +2072,10 @@ def get_tdx_Exp_day_to_df(
     #     df['code'] = code
     #     df.set_index(['code', df.index], inplace=True)
 
-    if not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.pop('date'), errors='coerce')
+    # if not isinstance(df.index, pd.DatetimeIndex):
+    #     df.index = pd.to_datetime(df.pop('date'), errors='coerce')
+    if 'date' in df.columns:
+        df.index = df.pop('date')
 
     return df
 
@@ -5323,8 +5352,10 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
             lastdays = len(df) - 1
         # if 'date' in df.columns:
         #     df = df.set_index('date')
-        if not isinstance(df.index, pd.DatetimeIndex) and 'date' in df.columns:
-            df.index = pd.to_datetime(df.pop('date'), errors='coerce')
+        # if not isinstance(df.index, pd.DatetimeIndex) and 'date' in df.columns:
+        #     df.index = pd.to_datetime(df.pop('date'), errors='coerce')
+        if 'date' in df.columns:
+            df.index = df.pop('date')
         # df = df.sort_index(ascending=True)
         if cct.get_work_day_status() and 915 < cct.get_now_time_int() < 1500:
             df = df[df.index < cct.get_today()]
@@ -5368,8 +5399,9 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
         # # print(result['match_stats'])
         # print(result['mismatch_details'])
 
-        if not isinstance(df.index, pd.DatetimeIndex) and 'date' in df.columns:
-            df.index = pd.to_datetime(df.pop('date'), errors='coerce')
+        if 'date' in df.columns:
+            df.index = df.pop('date')
+            # df.index = pd.to_datetime(df.pop('date'), errors='coerce')
 
     return df
 
@@ -7036,9 +7068,16 @@ if __name__ == '__main__':
     # log_level = LoggerFactory.DEBUG
     log.setLevel(log_level)
     # tdx_profile_test_tdx()
-    
+        
     resample = 'd'
     code = '300503'
+
+    import ipdb;ipdb.set_trace()
+
+    dd = get_tdx_Exp_day_to_df(code, dl=1) 
+    duration = cct.get_today_duration(dd.date,tdx=True) if dd is not None and len(dd) > 5 else -1
+    import ipdb;ipdb.set_trace()
+
     # code_l=['920274','300342','300696', '603091', '605167']
     # # code_l=['920274']
     # df=get_tdx_exp_all_LastDF_DL(code_l, dt=ct.Resample_LABELS_Days['d'],filter='y', resample='d')
