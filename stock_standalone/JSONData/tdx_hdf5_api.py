@@ -1265,6 +1265,20 @@ def rebuild_table(store, table_name, new_df,MultiIndex=False,complib='blosc'):
             store.put(table_name, new_df, format='table', index=False, complib=complib, data_columns=True, append=False)
         store.flush()
 
+def safe_remove_h5_table(h5, table, max_retry=5, retry_interval=0.2):
+    """安全删除 HDF5 表，节点被占用时等待重试"""
+    for attempt in range(max_retry):
+        try:
+            if '/' + table in list(h5.keys()):
+                h5.remove(table)
+            return True
+        except Exception as e:
+            # 节点被占用，等待
+            time.sleep(retry_interval)
+    # 尝试多次仍失败
+    logger.warning(f"Failed to remove HDF5 table {table} after {max_retry} attempts")
+    return False
+
 def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False,showtable=False):
 
     if 'code' in df.columns:
@@ -1395,17 +1409,26 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
             if h5 is not None:
                 if '/' + table in list(h5.keys()):
                     if not MultiIndex:
-
-                        h5.remove(table)
+                        safe_remove_h5_table(h5, table)
                         h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
-                        # h5.put(table, df, format='table',index=False, data_columns=True, append=False)
                     else:
                         if rewrite:
-                            h5.remove(table)
+                            safe_remove_h5_table(h5, table)
                         elif len(h5[table]) < 1:
-                            h5.remove(table)
+                            safe_remove_h5_table(h5, table)
                         h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
-                        # h5.append(table, df, format='table', append=True,data_columns=True, dropna=None)
+
+                    # if not MultiIndex:
+                    #     h5.remove(table)
+                    #     h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
+                    #     # h5.put(table, df, format='table',index=False, data_columns=True, append=False)
+                    # else:
+                    #     if rewrite:
+                    #         h5.remove(table)
+                    #     elif len(h5[table]) < 1:
+                    #         h5.remove(table)
+                    #     h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
+                    #     # h5.append(table, df, format='table', append=True,data_columns=True, dropna=None)
                 else:
                     if not MultiIndex:
                         # h5[table]=df

@@ -1545,7 +1545,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.select_code = stock_code
 
             stock_code = str(stock_code).zfill(6)
-            logger.info(f'stock_code:{stock_code}')
+            logger.debug(f'stock_code:{stock_code}')
             # logger.info(f"选中股票代码: {stock_code}")
             if send_tdx_Key and stock_code:
                 self.sender.send(stock_code)
@@ -3715,16 +3715,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     #     # 5. 立即調用重排佈局 (不需要 after() 延遲)
     #     self._update_alert_positions()
 
-    def _close_alert(self, win, is_manual=False):
-        """关闭弹窗并刷新布局，并停止关联的语音报警"""
 
-        # ===== [修改点 1] =====
-        # 关闭时，立即从 active_alerts 移除（避免后续布局和引用错误）
+
+    def _close_alert(self, win, is_manual=False):
+        """关闭弹窗并刷新布局，并停止关联的语音报警（冻结免疫版）"""
+
+        # =========================
+        # 1️⃣ UI 状态立即清理（只做内存操作）
+        # =========================
         if hasattr(self, 'active_alerts') and win in self.active_alerts:
             self.active_alerts.remove(win)
 
-        # ===== [修改点 2] =====
-        # 统一在这里清理 code -> window 映射，并获取 target_code
         target_code = None
         if hasattr(self, 'code_to_alert_win'):
             for c, w in list(self.code_to_alert_win.items()):
@@ -3733,32 +3734,93 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     del self.code_to_alert_win[c]
                     break
 
-        # ===== [修改点 3] =====
-        # 语音 / 策略处理逻辑统一放在一个块中，避免分支遗漏
-        if target_code and getattr(self, 'live_strategy', None):
+        # =========================
+        # 2️⃣ 立即销毁窗口（不等待任何策略 / 语音）
+        # =========================
+        try:
+            win.destroy()
+        except Exception:
+            pass
 
-            # ===== [修改点 3.1] =====
-            # 手动关闭：只负责“延迟再报”，不负责停当前语音
+        # =========================
+        # 3️⃣ 延迟 UI 重排（同函数内完成）
+        # =========================
+        self.after(0, self._update_alert_positions)
+
+        # =========================
+        # 4️⃣ 延迟处理策略 / 语音（关键）
+        #    ⚠️ 仍然在本函数内，不拆逻辑
+        # =========================
+        if not target_code or not getattr(self, 'live_strategy', None):
+            return
+
+        def _post_logic():
+            # ---- 手动关闭：只做延迟再报 ----
             if is_manual:
-                self.live_strategy.snooze_alert(
-                    target_code,
-                    cycles=pending_alert_cycles
-                )
+                try:
+                    self.live_strategy.snooze_alert(
+                        target_code,
+                        cycles=pending_alert_cycles
+                    )
+                except Exception:
+                    pass
 
-            # ===== [修改点 3.2 - 关键修复点] =====
-            # 无论手动 / 自动关闭，都必须立即 cancel 当前语音
-            # （这是 new 版本出问题的根因）
+            # ---- 无论手动 / 自动，都必须 cancel 当前语音 ----
             v = getattr(self.live_strategy, '_voice', None)
             if v and hasattr(v, 'cancel_for_code'):
-                v.cancel_for_code(target_code)
+                try:
+                    v.cancel_for_code(target_code)
+                except Exception:
+                    pass
 
-        # ===== [修改点 4] =====
-        # 在所有状态清理完成后，再销毁窗口
-        win.destroy()
+        # ⚠️ 核心：逻辑仍在 _close_alert，但不阻塞 Tk
+        self.after(1, _post_logic)
 
-        # ===== [修改点 5] =====
-        # 立即重排弹窗位置（不使用 after，避免顺序错乱）
-        self._update_alert_positions()
+
+    # def _close_alert_old(self, win, is_manual=False):
+    #     """关闭弹窗并刷新布局，并停止关联的语音报警"""
+    #        #偶发关闭时ui全部卡死
+    #     # ===== [修改点 1] =====
+    #     # 关闭时，立即从 active_alerts 移除（避免后续布局和引用错误）
+    #     if hasattr(self, 'active_alerts') and win in self.active_alerts:
+    #         self.active_alerts.remove(win)
+
+    #     # ===== [修改点 2] =====
+    #     # 统一在这里清理 code -> window 映射，并获取 target_code
+    #     target_code = None
+    #     if hasattr(self, 'code_to_alert_win'):
+    #         for c, w in list(self.code_to_alert_win.items()):
+    #             if w is win:
+    #                 target_code = c
+    #                 del self.code_to_alert_win[c]
+    #                 break
+
+    #     # ===== [修改点 3] =====
+    #     # 语音 / 策略处理逻辑统一放在一个块中，避免分支遗漏
+    #     if target_code and getattr(self, 'live_strategy', None):
+
+    #         # ===== [修改点 3.1] =====
+    #         # 手动关闭：只负责“延迟再报”，不负责停当前语音
+    #         if is_manual:
+    #             self.live_strategy.snooze_alert(
+    #                 target_code,
+    #                 cycles=pending_alert_cycles
+    #             )
+
+    #         # ===== [修改点 3.2 - 关键修复点] =====
+    #         # 无论手动 / 自动关闭，都必须立即 cancel 当前语音
+    #         # （这是 new 版本出问题的根因）
+    #         v = getattr(self.live_strategy, '_voice', None)
+    #         if v and hasattr(v, 'cancel_for_code'):
+    #             v.cancel_for_code(target_code)
+
+    #     # ===== [修改点 4] =====
+    #     # 在所有状态清理完成后，再销毁窗口
+    #     win.destroy()
+
+    #     # ===== [修改点 5] =====
+    #     # 立即重排弹窗位置（不使用 after，避免顺序错乱）
+    #     self._update_alert_positions()
 
 
 
@@ -4285,6 +4347,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             tk.Label(top_frame, text="🔔 实时语音监控列表", font=("Arial", 12, "bold")).pack(side="left")
             
+            total_label = tk.Label(
+                top_frame,
+                text="总条目: 0",
+                anchor="w",
+                padx=10,
+                font=("微软雅黑", 9)
+            )
+            total_label.pack(side="left")
+            
             tk.Button(top_frame, text="开启自动交易", command=lambda: self.live_strategy.start_auto_trading_loop(force=True, concept_top5=getattr(self, 'concept_top5', None)), bg="#fff9c4").pack(side="right", padx=5)
             tk.Button(top_frame, text="测试报警音", command=lambda: self.live_strategy.test_alert(), bg="#e0f7fa").pack(side="right", padx=5)
             win.lift()
@@ -4299,6 +4370,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             columns = ("code", "name", "rule_type", "value", "add_time", "tags", "id")
             tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
             
+            # 4. 底部状态栏用于显示计数
+            # --- 底部统计总计 ---
+            # status_frame = tk.Frame(win, relief="sunken", bd=1)
+            # status_frame.pack(side="bottom", fill="x")
+
+            # total_label = tk.Label(status_frame, text="总条目: 0", anchor="w", padx=10, font=("微软雅黑", 9))
+            # total_label.pack(side="left")
+
+
+            # 刷新统计函数
+            def refresh_stats():
+                total = len(tree.get_children())
+                # selected = len(tree.selection())
+                total_label.config(text=f"总条目: {total}")
+                # selected_label.config(text=f"已选中: {selected}")
+
+            
+
             def treeview_sort_column(tv, col, reverse):
                 l = [(tv.set(k, col), k) for k in tv.get_children('')]
                 try:
@@ -4460,37 +4549,87 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 selected = tree.selection()
                 if not selected:
                     return
-                
-                # if not messagebox.askyesno("确认", "确定删除选中的规则吗?", parent=win):
-                #     return
 
-                # 这里直接删，为了顺手，可以不弹二次确认，或者仅在 list 选中时弹
-                if not messagebox.askyesno("删除确认", "确定删除选中项?", parent=win):
+                # 取第一个选中项（支持连续快速删除）
+                item = selected[0]
+                values = tree.item(item, "values")
+                code = values[0]
+                uid = values[6]
+
+                # 调整删除逻辑
+                if self.live_strategy:
+                    if uid.endswith('_none'):
+                        self.live_strategy.remove_monitor(code)
+                    else:
+                        try:
+                            idx = int(uid.split('_')[1])
+                            self.live_strategy.remove_rule(code, idx)
+                        except Exception:
+                            pass
+
+                # --- 记录删除行的索引 ---
+                children = list(tree.get_children())
+                try:
+                    del_idx = children.index(item)
+                except ValueError:
+                    del_idx = 0
+
+                # 删除行
+                tree.delete(item)
+
+                # --- 自动选中下一行 ---
+                children = tree.get_children()
+                if not children:
                     return
 
-                for item in selected:
-                     values = tree.item(item, "values")
-                     code = values[0]
-                     uid = values[6]
-                     # 由于 uid 是 'code_idx'，但如果删除了前面的，后面的 idx 会变
-                     # 最稳妥的是：倒序删除，或者重新加载。
-                     # 我们的界面是单选还是多选？Treeview 默认多选。
-                     # 简单处理：只处理第一个
-                     # 简单处理：只处理第一个
-                     # 处理特殊标记 'code_none'
-                     if self.live_strategy:
-                         if uid.endswith('_none'):
-                             # 如果没有规则，删除操作即移除该监控项
-                             self.live_strategy.remove_monitor(code)
-                         else:
-                             try:
-                                 idx = int(uid.split('_')[1])
-                                 self.live_strategy.remove_rule(code, idx)
-                             except:
-                                 pass
-                     break # 仅删一个，防止索引错乱
+                # 如果删除的是最后一行，选中上一行
+                if del_idx >= len(children):
+                    del_idx = len(children) - 1
+
+                next_item = children[del_idx]
+                tree.selection_set(next_item)
+                tree.focus(next_item)
+                tree.see(next_item)
+
+                # 可选刷新数据
+                # load_data()
+
+
+            # def delete_selected(event=None):
+            #     selected = tree.selection()
+            #     if not selected:
+            #         return
                 
-                load_data()
+            #     # if not messagebox.askyesno("确认", "确定删除选中的规则吗?", parent=win):
+            #     #     return
+
+            #     # 这里直接删，为了顺手，可以不弹二次确认，或者仅在 list 选中时弹
+            #     # if not messagebox.askyesno("删除确认", "确定删除选中项?", parent=win):
+            #     #     return
+
+            #     for item in selected:
+            #          values = tree.item(item, "values")
+            #          code = values[0]
+            #          uid = values[6]
+            #          # 由于 uid 是 'code_idx'，但如果删除了前面的，后面的 idx 会变
+            #          # 最稳妥的是：倒序删除，或者重新加载。
+            #          # 我们的界面是单选还是多选？Treeview 默认多选。
+            #          # 简单处理：只处理第一个
+            #          # 简单处理：只处理第一个
+            #          # 处理特殊标记 'code_none'
+            #          if self.live_strategy:
+            #              if uid.endswith('_none'):
+            #                  # 如果没有规则，删除操作即移除该监控项
+            #                  self.live_strategy.remove_monitor(code)
+            #              else:
+            #                  try:
+            #                      idx = int(uid.split('_')[1])
+            #                      self.live_strategy.remove_rule(code, idx)
+            #                  except:
+            #                      pass
+            #          break # 仅删一个，防止索引错乱
+                
+            #     load_data()
 
             def on_voice_tree_select(event):
                 selected = tree.selection()
@@ -4707,6 +4846,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tk.Button(btn_frame, text="✏️ 修改阈值", command=edit_selected).pack(side="left", padx=10)
             tk.Button(btn_frame, text="🗑️ 删除规则 (Del)", command=delete_selected, fg="red").pack(side="left", padx=10)
             tk.Button(btn_frame, text="刷新列表", command=load_data).pack(side="left", padx=10)
+
+            # 绑定选中事件
+            tree.bind("<<TreeviewSelect>>", lambda e: refresh_stats())
+            # 初始刷新
+            refresh_stats()
+
             tree.bind("<Button-1>", on_voice_on_click)
             tree.bind("<Button-3>", on_voice_right_click)
             # 双击编辑
@@ -8307,7 +8452,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 else:
                     self.status_var2.set('')
                     self.status_var.set(f"结果 {len(df_filtered)}行 | 搜索: {final_query}")
-                logger.info(f'final_query: {final_query}')
+                logger.debug(f'final_query: {final_query}')
         except Exception as e:
             traceback.print_exc()
             logger.error(f"final_query: {final_query} query_check: {([c for c in self.df_all.columns if not c.isidentifier()])}")
@@ -8842,7 +8987,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if hasattr(self, 'realtime_service') and self.realtime_service:
                     self.realtime_service.set_auto_switch(auto_var.get())
 
-            auto_chk = tk.Checkbutton(perf_frame, text="Auto Guard(Clip at 500MB)", variable=auto_var, command=on_auto_switch, font=("Microsoft YaHei", 9))
+            auto_chk = tk.Checkbutton(perf_frame, text=f"Auto Guard(Clip at {self.realtime_service.mem_threshold_mb}MB)", variable=auto_var, command=on_auto_switch, font=("Microsoft YaHei", 9))
             auto_chk.pack(side="left", padx=5)
 
             # Simple text area for status and logs
@@ -8885,9 +9030,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 msg += f"Uptime         : {uptime_str}\n"
                 msg += f"Memory Usage   : {status.get('memory_usage', 'N/A')}\n"
                 msg += f"CPU Usage      : {status.get('cpu_usage', 0):.1f}%\n"
+                msg += f"update_count   : {status.get('update_count', 0)}\n"
+                msg += f"total_rows_processed: {status.get('total_rows_processed', 0)}\n"
+
                 msg += "-" * 35 + "\n"
-                msg += f"Stocks Cached  : {status.get('klines_cached', 0)}\n"
-                
+                msg += f"Stocks Cached        : {status.get('klines_cached', 0)}\n"
+                msg += f"high_performance_mode: {status.get('high_performance_mode', 0)}\n"
+                msg += f"total_nodes          : {status.get('total_nodes', 0)}\n"
+                msg += f"avg_nodes_per_stock  : {status.get('avg_nodes_per_stock', 0)}\n"
+                msg += f"subscribers          : {status.get('subscribers', 0)}\n"
+                msg += f"target_hours         : {status.get('target_hours', 0)}\n"
+                msg += f"mem_threshold        : {status.get('mem_threshold', 0)}\n"
+                msg += f"cache_history_limit  : {status.get('cache_history_limit', 0)}\n"
+                msg += f"last_update          : {status.get('last_update', 0)}\n"
+                msg += f"server_time          : {cct.get_unixtime_to_time(status.get('server_time', 0))}\n"
+                # "avg_interval_sec": int(avg_interval),
+                # "expected_interval": self.expected_interval,
+                # "history_coverage_minutes": int(history_sec / 60),
+                # "emotions_tracked": len(self.emotion_tracker.scores),
+                # "auto_switch": self.auto_switch_enabled,
+                # "node_threshold": self.node_threshold,
+                # "node_capacity_pct": (total_nodes / self.node_threshold * 100) if self.node_threshold else 0,
+                # "max_batch_time_ms": int(self.max_batch_time * 1000),
+                # "last_batch_time_ms": int(self.last_batch_time * 1000),
+                # "processing_speed_row_per_sec": int(avg_speed),
                 if "error" in status:
                     msg += f"\n[!] ERROR: {status['error']}\n"
                 

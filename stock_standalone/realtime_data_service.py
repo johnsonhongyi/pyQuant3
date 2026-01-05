@@ -241,11 +241,11 @@ class DataPublisher:
     """
     数据分发器 (核心入口)
     """
-    def __init__(self, high_performance: bool = False, scraper_interval: int = 600):
+    def __init__(self, high_performance: bool = True, scraper_interval: int = 600):
         self.paused = False
         self.high_performance = high_performance # HP: ~4.0h, Legacy: ~2.0h (Dynamic nodes)
         self.auto_switch_enabled = True
-        self.mem_threshold_mb = 500.0 # 阈值调低至 500MB
+        self.mem_threshold_mb = 800.0 # 阈值调低至 800MB
         self.node_threshold = 1000000 # 默认 100万个节点触发降级
         
         # Interval Settings
@@ -360,7 +360,7 @@ class DataPublisher:
         self.kline_cache.set_mode(max_len=cache_len)
         logger.info(f"🚀 Mode: {'HP' if enabled else 'Legacy'} | Target: {target_h}h | Interval: {interval}s | Limit: {cache_len}K")
 
-    def set_auto_switch(self, enabled: bool, threshold_mb: float = 500.0, node_limit: int = 1000000):
+    def set_auto_switch(self, enabled: bool, threshold_mb: float = 800.0, node_limit: int = 1000000):
         """设置自动切换规则"""
         self.auto_switch_enabled = enabled
         self.mem_threshold_mb = threshold_mb
