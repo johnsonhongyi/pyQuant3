@@ -3434,7 +3434,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def _init_live_strategy(self):
         """延迟初始化策略模块"""
         try:
-            self.live_strategy = StockLiveStrategy(alert_cooldown=alert_cooldown,
+            self.live_strategy = StockLiveStrategy(self,alert_cooldown=alert_cooldown,
                                                    voice_enabled=self.voice_var.get(),
                                                    realtime_service=self.realtime_service)
             
