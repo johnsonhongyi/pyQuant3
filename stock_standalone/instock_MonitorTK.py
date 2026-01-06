@@ -83,6 +83,7 @@ from stock_selector import StockSelector
 from column_manager import ColumnSetManager
 from collections import Counter, OrderedDict, deque
 import hashlib
+import keyboard  # pip install keyboard
 
 # 全局单例
 logger = init_logging(log_file='instock_tk.log',redirect_print=False) 
@@ -457,10 +458,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.bind("<Alt-d>", lambda event: self.open_handbook_overview())
         self.bind("<Alt-e>", lambda event: self.open_voice_monitor_manager())
         self.bind("<Alt-g>", lambda event: self.open_trade_report_window())
+        self.bind("<Alt-b>", lambda event: self.close_all_alerts())
         # 启动周期检测 RDP DPI 变化
         self.after(3000, self._check_dpi_change)
         self.auto_adjust_column = self.dfcf_var.get()
         # self.bind("<Configure>", self.on_resize)
+    # 在初始化 UI 或后台线程里
+    def setup_global_hotkey(self):
+        """
+        注册系统全局快捷键 Alt+B，调用 close_all_alerts
+        """
+        def _on_hotkey():
+            # 必须通过 Tkinter 的 after 调用，保证在主线程执行
+            self.after(0, self.close_all_alerts)
+
+        # 注册系统全局快捷键
+        keyboard.add_hotkey('alt+b', _on_hotkey)
 
     def on_resize(self, event):
         if event.widget != self:
@@ -1186,6 +1199,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(bottom_search_frame, text="清空", command=lambda: self.clean_search(1)).pack(side="left", padx=2)
         tk.Button(bottom_search_frame, text="删除", command=lambda: self.delete_search_history(1)).pack(side="left", padx=2)
         tk.Button(bottom_search_frame, text="管理", command=lambda: self.open_column_manager()).pack(side="left", padx=2)
+        tk.Button(bottom_search_frame, text="关闭", command=lambda: self.close_all_alerts()).pack(side="left", padx=2)
 
 
         # 功能选择下拉框（固定宽度）
@@ -1250,6 +1264,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if len(self.search_history2) > 0:
             self.search_var2.set(self.search_history2[0])
 
+        self.setup_global_hotkey()
         self.after(1000,lambda :self.load_window_position(self, "main_window", default_width=1200, default_height=480))
         self.open_column_manager_init()
 
@@ -3728,9 +3743,67 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     #     # 5. 立即調用重排佈局 (不需要 after() 延遲)
     #     self._update_alert_positions()
 
+    def close_all_alerts(self, is_manual=False):
+        """
+        一键批量关闭所有 active alert 窗口。
+        安全调用 _close_alert，不阻塞 Tk 主线程。
+        """
+        # 拷贝列表，防止遍历过程中被修改
+        active_windows = list(getattr(self, 'active_alerts', []))
 
+        for win in active_windows:
+            try:
+                # 调用 _close_alert（它内部会处理重复关闭和安全销毁）
+                self._close_alert(win, is_manual=is_manual)
+            except Exception as e:
+                log.error(f"Failed to close alert window {win}: {e}")
+        toast_message(self, "已关闭所有报警窗口")
 
     def _close_alert(self, win, is_manual=False):
+        if hasattr(self, 'active_alerts') and win in self.active_alerts:
+            self.active_alerts.remove(win)
+
+        # 防止重复关闭
+        if getattr(win, 'is_closing', False):
+            return
+        win.is_closing = True
+
+        target_code = None
+        if hasattr(self, 'code_to_alert_win'):
+            for c, w in list(self.code_to_alert_win.items()):
+                if w is win:
+                    target_code = c
+                    del self.code_to_alert_win[c]
+                    break
+
+        try:
+            win.destroy()
+        except Exception:
+            pass
+
+        self.after(100, self._update_alert_positions)
+
+        if not target_code or not getattr(self, 'live_strategy', None):
+            return
+
+        def _post_logic():
+            try:
+                if is_manual:
+                    self.live_strategy.snooze_alert(target_code, cycles=pending_alert_cycles)
+                v = getattr(self.live_strategy, '_voice', None)
+                if v and hasattr(v, 'cancel_for_code'):
+                    v.cancel_for_code(target_code)
+            except Exception:
+                pass
+
+        threading.Thread(target=_post_logic, daemon=True).start()
+
+        # 取消 safety timer（如果已经触发）
+        if hasattr(win, 'safety_close_timer'):
+            self.after_cancel(win.safety_close_timer)
+
+
+    def _close_alert_old(self, win, is_manual=False):
         """关闭弹窗并刷新布局，并停止关联的语音报警（冻结免疫版）"""
 
         # =========================
@@ -3758,7 +3831,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # =========================
         # 3️⃣ 延迟 UI 重排（同函数内完成）
         # =========================
-        self.after(0, self._update_alert_positions)
+        self.after(50, self._update_alert_positions)
 
         # =========================
         # 4️⃣ 延迟处理策略 / 语音（关键）
@@ -3787,7 +3860,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     pass
 
         # ⚠️ 核心：逻辑仍在 _close_alert，但不阻塞 Tk
-        self.after(1, _post_logic)
+        self.after(10, _post_logic)
 
 
     # def _close_alert_old(self, win, is_manual=False):
@@ -4421,12 +4494,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.heading("tags", text="简介", command=lambda: treeview_sort_column(tree, "tags", False))
             tree.heading("id", text="ID (Code_Idx)")
             
-            tree.column("code", width=80, anchor="center")
-            tree.column("name", width=100, anchor="center")
-            tree.column("rule_type", width=150, anchor="center")
-            tree.column("value", width=100, anchor="center")
-            tree.column("add_time", width=140, anchor="center")
-            tree.column("tags", width=50, anchor="center")
+            tree.column("code", width=50, anchor="center")
+            tree.column("name", width=80, anchor="center")
+            tree.column("rule_type", width=80, anchor="center")
+            tree.column("value", width=60, anchor="center")
+            tree.column("add_time", width=100, anchor="center")
+            tree.column("tags", width=120, anchor="center")
             tree.column("id", width=0, stretch=False) # 隐藏 ID 列
 
             def show_tags_detail(values):

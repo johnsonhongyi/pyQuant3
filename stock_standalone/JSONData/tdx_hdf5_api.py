@@ -1211,43 +1211,167 @@ def write_hdf_db_newbug(fname, df, table='all', index=False, complib='blosc', ba
 #     else:
 #         return pd.DataFrame()
 
-def safe_load_table(store, table_name, chunk_size=1000,MultiIndex=False,complib='blosc'):
-    """
-    尝试读取 HDF5 table，如果读取失败，则逐块读取。
-    返回 DataFrame。
-    """
+# def safe_load_table(store, table_name, chunk_size=1000,MultiIndex=False,complib='blosc',readonly=False):
+#     """
+#     尝试读取 HDF5 table，如果读取失败，则逐块读取。
+#     返回 DataFrame。
+#     """
+#     try:
+#         # 直接读取整个 table
+#         df = store[table_name]
+#         df = df[~df.index.duplicated(keep='first')]
+#         return df
+#     except tables.exceptions.HDF5ExtError as e:
+#         log.error(f"{table_name} read error: {e}, attempting chunked read...")
+#         # 逐块读取
+#         import ipdb;ipdb.set_trace()
+
+#         dfs = []
+#         start = 0
+#         while True:
+#             try:
+#                 storer = store.get_storer(table_name)
+#                 if not storer.is_table:
+#                     raise RuntimeError(f"{table_name} is not a table format")
+#                 df_chunk = store.select(table_name, start=start, stop=start+chunk_size)
+#                 if df_chunk.empty:
+#                     break
+#                 dfs.append(df_chunk)
+#                 start += chunk_size
+#             except tables.exceptions.HDF5ExtError:
+#                 # 跳过损坏块
+#                 print(f"Skipping corrupted chunk {start}-{start+chunk_size}")
+#                 start += chunk_size
+#         if not readonly and dfs:
+#             df = pd.concat(dfs)
+#             df = df[~df.index.duplicated(keep='first')]
+#             rebuild_table(store, table_name, df, MultiIndex=MultiIndex, complib=complib)
+#             return df
+#         else:
+#             print(f"All chunks of {table_name} are corrupted")
+#             return pd.DataFrame()
+
+def quarantine_hdf_file(fname, reason, rebuild_func=None):
+    log.critical(f"[HDF QUARANTINE] {fname}, reason={reason}")
+
+    # 1. 关闭残留句柄（尽量）
     try:
-        # 直接读取整个 table
+        tables.file._open_files.close_all()
+    except Exception:
+        pass
+
+    # 2. 删除文件
+    try:
+        if os.path.exists(fname):
+            os.remove(fname)
+            log.critical(f"[HDF REMOVED] {fname}")
+    except Exception as e:
+        log.error(f"Failed to remove {fname}: {e}")
+        return
+
+    # 3. 重建（可选）
+    if rebuild_func:
+        try:
+            log.critical(f"[HDF REBUILD] {fname}")
+            rebuild_func(fname)
+        except Exception as e:
+            log.error(f"Rebuild failed for {fname}: {e}")
+
+
+def safe_load_table(store, table_name, chunk_size=1000,
+                    MultiIndex=False, complib='blosc',
+                    readonly=False):
+    """
+    安全读取 HDF5 table：
+    - metadata / UnImplemented → 直接失败
+    - HDF5ExtError → 尝试 chunk 读取
+    """
+
+    # ---------- 1. 尝试整表读取 ----------
+    try:
         df = store[table_name]
-        df = df[~df.index.duplicated(keep='first')]
-        return df
+        return df[~df.index.duplicated(keep='first')]
+
+    # ---------- 2. 结构级损坏（不可恢复） ----------
+    except (AttributeError, KeyError, TypeError) as e:
+        log.critical(
+            f"HDF STRUCTURE BROKEN: {table_name}, "
+            f"type={type(e).__name__}, err={e}"
+        )
+        raise e
+
+    # ---------- HDF5 底层错误 ----------
     except tables.exceptions.HDF5ExtError as e:
-        log.error(f"{table_name} read error: {e}, attempting chunked read...")
-        # 逐块读取
-        dfs = []
-        start = 0
-        while True:
-            try:
-                storer = store.get_storer(table_name)
-                if not storer.is_table:
-                    raise RuntimeError(f"{table_name} is not a table format")
-                df_chunk = store.select(table_name, start=start, stop=start+chunk_size)
-                if df_chunk.empty:
-                    break
-                dfs.append(df_chunk)
-                start += chunk_size
-            except tables.exceptions.HDF5ExtError:
-                # 跳过损坏块
-                print(f"Skipping corrupted chunk {start}-{start+chunk_size}")
-                start += chunk_size
-        if dfs:
-            df = pd.concat(dfs)
-            df = df[~df.index.duplicated(keep='first')]
-            rebuild_table(store, table_name, df, MultiIndex=MultiIndex, complib=complib)
-            return df
-        else:
-            print(f"All chunks of {table_name} are corrupted")
+        log.error(
+            f"{table_name} HDF5ExtError: {e}, "
+            f"attempting chunked read..."
+        )
+        # ↓ 继续走 chunk fallback
+
+    # ---------- 4. 文件级物理损坏 ----------
+    except (OSError, IOError, UnicodeDecodeError) as e:
+        log.critical(
+            f"HDF FILE BROKEN: {table_name}, "
+            f"type={type(e).__name__}, err={e}"
+        )
+        return pd.DataFrame()
+
+    # ---------- 5. chunk fallback ----------
+    dfs = []
+    start = 0
+
+    try:
+        storer = store.get_storer(table_name)
+        if not storer.is_table:
+            log.error(f"{table_name} is not table format")
             return pd.DataFrame()
+    except Exception as e:
+        log.error(f"get_storer failed for {table_name}: {e}")
+        return pd.DataFrame()
+
+    while True:
+        try:
+            df_chunk = store.select(
+                table_name,
+                start=start,
+                stop=start + chunk_size
+            )
+            if df_chunk.empty:
+                break
+            dfs.append(df_chunk)
+            start += chunk_size
+
+        except tables.exceptions.HDF5ExtError:
+            log.warning(
+                f"Skipping corrupted chunk "
+                f"{start}-{start + chunk_size}"
+            )
+            start += chunk_size
+
+        except Exception as e:
+            log.error(
+                f"Fatal error reading chunk {start}: {e}"
+            )
+            break
+
+    if not dfs:
+        log.error(f"All chunks of {table_name} are unreadable")
+        return pd.DataFrame()
+
+    df = pd.concat(dfs)
+    df = df[~df.index.duplicated(keep='first')]
+
+    # ---------- 6. 是否重建 ----------
+    if not readonly:
+        log.warning(f"Rebuilding table {table_name} from chunks")
+        rebuild_table(
+            store, table_name, df,
+            MultiIndex=MultiIndex,
+            complib=complib
+        )
+
+    return df
+
 
 def rebuild_table(store, table_name, new_df,MultiIndex=False,complib='blosc'):
     """
@@ -1753,29 +1877,75 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
     # -------------------------
     else:
         if table is not None:
-            with SafeHDFStore(fname, mode='r') as store:
-                if store is not None:
+            # with SafeHDFStore(fname, mode='r') as store:
+            #     if store is not None:
+            #         log.debug("fname: %s keys:%s", fname, store.keys())
+            #         if showtable:
+            #             log.debug("keys:%s", store.keys())
+            #         try:
+            #             table_key = '/' + table
+            #             if table_key in store.keys():
+            #                 # 读取整表（尽量避免额外 copy）
+            #                 dd = safe_load_table(store, table, chunk_size=5000,MultiIndex=MultiIndex,readonly=True)
+            #             else:
+            #                 dd = pd.DataFrame()
+            #         except AttributeError as e:
+            #             # 与原逻辑保持一致：在异常时关闭 store 并记录错误
+            #             try:
+            #                 store.close()
+            #             except Exception:
+            #                 pass
+            #             log.error("AttributeError:%s %s", fname, e)
+            #             dd = pd.DataFrame()
+            #         except Exception as e:
+            #             log.error("Exception:%s %s", fname, e)
+            #             dd = pd.DataFrame()
+            dd = pd.DataFrame()
+            try:
+                with SafeHDFStore(fname, mode='r') as store:
+                    if store is None:
+                        raise AttributeError("SafeHDFStore open failed")
+
                     log.debug("fname: %s keys:%s", fname, store.keys())
                     if showtable:
                         log.debug("keys:%s", store.keys())
-                    try:
-                        table_key = '/' + table
-                        if table_key in store.keys():
-                            # 读取整表（尽量避免额外 copy）
-                            dd = store[table]
-                        else:
-                            dd = pd.DataFrame()
-                    except AttributeError as e:
-                        # 与原逻辑保持一致：在异常时关闭 store 并记录错误
-                        try:
-                            store.close()
-                        except Exception:
-                            pass
-                        log.error("AttributeError:%s %s", fname, e)
+
+                    table_key = '/' + table
+                    if table_key in store.keys():
+                        dd = safe_load_table(
+                            store,
+                            table,
+                            chunk_size=5000,
+                            MultiIndex=MultiIndex,
+                            readonly=True
+                        )
+                    else:
                         dd = pd.DataFrame()
-                    except Exception as e:
-                        log.error("Exception:%s %s", fname, e)
-                        dd = pd.DataFrame()
+
+            # ---------- 这里是关键 ----------
+            except AttributeError as e:
+                log.critical("HDF STRUCTURE BROKEN: %s %s", fname, e)
+                # 1. 确保 PyTables 句柄释放
+                try:
+                    import tables
+                    tables.file._open_files.close_all()
+                except Exception:
+                    pass
+                # 2. 删除损坏文件
+                try:
+                    _ram_fname = cct.get_ramdisk_path(f'{fname}.h5')
+                    if os.path.exists(_ram_fname):
+                        os.remove(_ram_fname)
+                        log.critical("HDF REMOVED: %s", _ram_fname)
+                    else:
+                        log.critical("HDF %s not exists", _ram_fname)
+                except Exception as e2:
+                    log.error("Failed to remove %s: %s", fname, e2)
+                dd = pd.DataFrame()
+            except Exception as e:
+                # ⚠️ 普通异常不删文件
+                log.error("Exception:%s %s", fname, e)
+                dd = pd.DataFrame()
 
             if dd is not None and len(dd) > 0:
                 if not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300) and timelimit:
@@ -2597,7 +2767,8 @@ if __name__ == "__main__":
         df_diagnose(h5)
 
         mdf = cct.get_limit_multiIndex_freq(h5, freq=freq.upper(),  col='all', start=startime, end=endtime, code=None)
-        print(mdf.loc['300245'])
+        print(mdf.loc['002151'])
+        
         print(mdf.loc['300516'])
         print(mdf.loc['300245'].close.mean())
         print(mdf.loc['300516'].close.mean())
@@ -2698,7 +2869,6 @@ if __name__ == "__main__":
     for na in fname:
         # with SafeHDFStore(na) as h5:
         with HDFStore(na) as h5:
-            import ipdb;ipdb.set_trace()
             print(h5)
             if '/' + 'all' in list(h5.keys()):
                 print((h5['all'].loc['600007']))

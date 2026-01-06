@@ -5843,10 +5843,9 @@ def select_multiIndex_index_fast(df, index='ticktime', start=None, end=None, dat
         t = str(t)
         if len(t) <= 10:  # 只有时间部分
             # 用第一行日期补齐
-            base_date = str(lvl[0])[:10]
+            base_date = str(lvl[-1])[:10]
             t = f"{base_date} {t}"
         return pd.Timestamp(t)
-
     start_ts = fix_datetime(start)
     end_ts   = fix_datetime(end)
     # print(f'start_ts : {start_ts} end_ts : {end_ts}')

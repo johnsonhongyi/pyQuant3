@@ -635,13 +635,14 @@ class StockLiveStrategy:
         self.executor.submit(self._check_strategies, self.df)
         
         # --- Top 5 Hot Concepts Strategy ---
-        if concept_top5 and cct.get_now_time_int() > 922:
+        if concept_top5 and cct.get_now_time_int() > 916:
             self.executor.submit(self._scan_hot_concepts, df_all, concept_top5)
 
     def _scan_hot_concepts(self, df: pd.DataFrame, concept_top5: list):
         """
         扫描五大热点板块，识别龙头
-        """
+        """
+
         if not self.scan_hot_concepts_status:
             return
         try:
@@ -670,13 +671,25 @@ class StockLiveStrategy:
             # Only check stocks with > 4% gain
             if 'percent' not in df.columns:
                 return
-            
+
             required_cols = ['close', 'high4', 'ma5d']
-            if not set(required_cols).issubset(df.columns):
+            if 'hmax' in df.columns:
             # strong_df = df[df['percent'] > 5.0]
-                strong_df = df[(df['close'] > df['high4']) & (df['close'] > df['ma5d'])]
+                # strong_df = df[(df['close'] > df['high4']) & (df['close'] > df['ma5d'])  & (df['close'] > df['hmax']) & (df['ma5d'] > df['ma60d'] ) & ((df['red'] > 5) | (df['top10'] > 0)) & (df['volume'] > 1.5)]
+                cond_trend = (
+                    (df['close'] > df['high4']) &
+                    (df['close'] > df['ma5d']) &
+                    (df['close'] > df['hmax']) &
+                    (df['ma5d'] > df['ma60d'])
+                )
+                cond_strength = (
+                    (df['red'] > 5) | (df['top10'] > 0)
+                )
+                cond_volume = df['volume'] > 1.5
+                strong_df = df[cond_trend & cond_strength & cond_volume]
+
             else:
-                strong_df = df[(df['percent'] > 3 )]
+                strong_df = df[(df['percent'] > 8 ) & (df['volume'] > 2)]
             
             if strong_df.empty:
                 return

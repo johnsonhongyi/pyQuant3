@@ -426,7 +426,7 @@ class Sina:
                             return self._sanitize_indicators(self.combine_lastbuy(h5))
 
             # 若不可早退，继续后续流程
-            log.info("HDF5 exists but not recent enough (%d rows)" % len(h5))
+            log.info(f"HDF5 exists but not recent enough ({len(h5)} rows) code: {len(self.stock_codes)}")
         else:
             log.info("HDF5 data missing or empty")
 
