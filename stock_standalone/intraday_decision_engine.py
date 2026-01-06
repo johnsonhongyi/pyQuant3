@@ -325,7 +325,21 @@ class IntradayDecisionEngine:
                 elif trend_strength < -0.3:
                     base_pos -= 0.1
                 
+                # 【新增】单阳惩罚 (One-Day Wonder Penalty)
+                # 统计发现 win=1 时买入胜率为 0%，需连续确认
+                win_days = int(snapshot.get('win', 0))
+                if win_days == 1:
+                    base_pos -= 0.15
+                    debug["单阳惩罚"] = -0.15
+                
                 # 3. 量能与均价约束 (关键点)
+                # 【新增】量能模糊区间惩罚
+                # 统计发现 volume 在 0.8-1.2 之间胜率仅 18%
+                current_vol = float(row.get('volume', 0))
+                if 0.8 <= current_vol <= 1.2:
+                    base_pos -= 0.10
+                    debug["量能模糊"] = -0.10
+                    
                 base_pos += self._volume_bonus(row, debug)
                 
                 # --- 进化: 应用防御惩罚 ---
@@ -394,11 +408,21 @@ class IntradayDecisionEngine:
                 if vwap_score < -0.2 and support_score < 0.15:
                     return self._hold(f"趋势重心下移({debug.get('VWAP趋势', '')})", debug)
 
-                final_pos = max(min(base_pos, self.max_position * 1.2), 0)
-                if final_pos <= 0:
-                    return self._hold("仓位被限制为0", debug)
+                # ==============================================================================
+                # 💥 最终门槛大幅提高 (根据回测，得分 < 0.3 胜率极低)
+                # MIN_BUY_SCORE 从隐性 ~0.3 提升至显性 0.40
+                # ==============================================================================
+                debug["实时买入分"] = round(base_pos, 2)
+                
+                if base_pos < 0.40:  # Hard Threshold
+                    return self._hold(f"评分不足({base_pos:.2f}<0.4)", debug)
 
-                reason = f"{structure} | {ma_reason}"
+                final_pos = max(min(base_pos, self.max_position * 1.2), 0)
+                # Double check to ensure non-zero if we passed the threshold (though logically 0.4 > 0)
+                if final_pos <= 0:
+                     return self._hold("仓位被限制为0", debug)
+
+                reason = f"{structure} | {ma_reason} | 得分{base_pos:.2f}"
                 logger.debug(f"DecisionEngine BUY pos={final_pos:.2f} reason={reason}")
 
                 return {
