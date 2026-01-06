@@ -50,6 +50,103 @@ def calc_compute_volume(top_all: pd.DataFrame, logger: Any, resample: str = 'd',
         # 原始量还原 = 虚拟量比 * last6vol * ratio_t
         return (top_all['volume'] * top_all.get('last6vol', 1) * ratio_t).round(1)
 
+def build_hma_and_trendscore(
+    df,
+    close_col='close',
+    ma_map=None,
+    invalid_val=-101.0,
+    strong_cols=None,
+    win_col='win',
+):
+    """
+    极限向量化生成：
+    - Hma5/10/20/60
+    - TrendS (0~100)
+    - Rank 排队，避免一堆满分100
+
+    df 已包含 close 和 maXd
+    最终输出列统一保留 .1f 字符串格式
+    """
+
+    if ma_map is None:
+        ma_map = {5:'ma5d',10:'ma10d',20:'ma20d',60:'ma60d'}
+    if strong_cols is None:
+        strong_cols = ['sum_perc','slope','vol_ratio','power_idx']
+
+    weights = {5:0.35,10:0.30,20:0.20,60:0.15}
+    n = len(df)
+    close = df[close_col].values.astype('float32')
+    score = np.zeros(n, dtype='float32')
+    weight_sum = 0.0
+
+    # -------------------------
+    # 1️⃣ 计算 Hma 并累加 TrendS
+    # -------------------------
+    for period, ma_col in ma_map.items():
+        hma_col = f'Hma{period}d'
+        if ma_col not in df.columns:
+            df[hma_col] = invalid_val
+            continue
+
+        ma = df[ma_col].values.astype('float32')
+        valid = ma > 0
+        hma = np.full(n, invalid_val, dtype='float32')
+        hma[valid] = (close[valid] - ma[valid]) / (ma[valid] + 0.01) * 100
+
+        # 不转字符串，保持浮点
+        df[hma_col] = np.round(hma, 1)
+
+        # TrendScore 累加
+        w = weights.get(period)
+        if w is not None:
+            score[valid] += np.clip(hma[valid], -10, 10) * w
+            weight_sum += w
+
+    # -------------------------
+    # 2️⃣ TrendS归一化
+    # -------------------------
+    if weight_sum > 0:
+        trend = (score / weight_sum + 10) * 5
+        df['TrendS'] = np.clip(trend, 0, 100)
+    else:
+        df['TrendS'] = 0.0
+
+    # -------------------------
+    # 3️⃣ 强势因子辅助打散满分
+    # -------------------------
+    strong_score = np.zeros(n, dtype='float32')
+    valid_cols = [c for c in strong_cols if c in df.columns]
+    for col in valid_cols:
+        arr = df[col].fillna(0).values.astype('float32')
+        arr = (arr - arr.min()) / (arr.ptp() + 1e-6)
+        strong_score += arr
+    if valid_cols:
+        strong_score /= len(valid_cols)
+
+    # -------------------------
+    # 4️⃣ 连阳加权
+    # -------------------------
+    if win_col in df.columns:
+        win_vals = df[win_col].fillna(0).astype('float32')
+    else:
+        win_vals = np.zeros(n, dtype='float32')
+
+    # -------------------------
+    # 5️⃣ 排序 Rank（整数/浮点，保持性能）
+    # -------------------------
+    sort_score = df['TrendS'].values * 1000 + strong_score*10 + win_vals*1.0
+    df['Rank'] = (-sort_score).argsort().argsort() + 1
+
+    # -------------------------
+    # 6️⃣ 最终输出格式化 .1f（展示用）
+    # -------------------------
+    for col in ['Hma5d','Hma10d','Hma20d','Hma60d','TrendS']:
+        if col in df.columns:
+            df[col] = df[col].apply(lambda x: f"{x:.1f}")
+
+    return df
+
+
 def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.DataFrame:
     """指标计算"""
     # 确保 vol 列镜像原始成交量。
@@ -1600,6 +1697,8 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
                 clean_sum = merge_strong_momentum_results(result_opt,min_days=winlimit)
                 top_all = align_sum_percent(top_all,clean_sum)
             logger.info(f'clean_sum: {time.time() - time_sum:.2f}')
+            with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
+                top_all = build_hma_and_trendscore(top_all)
 
             top_temp = top_all.copy()
             with timed_ctx("getBollFilter", warn_ms=800):

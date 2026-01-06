@@ -541,6 +541,7 @@ class StockLiveStrategy:
                 'rules': [],
                 'last_alert': 0,
                 'created_time': datetime.now().strftime("%Y-%m-%d %H"),
+                'added_date': datetime.now().strftime('%Y-%m-%d'), # [新增] 用于已添加数量统计
                 'tags': tags or ""
             }
         
@@ -549,9 +550,14 @@ class StockLiveStrategy:
         if tags:
             stock['tags'] = tags
         
-        # 确保 created_time 存在 (对于旧数据)
+        # 记录触发加入的规则类型
+        stock['rule_type_tag'] = rule_type
+        
+        # 确保 created_time 和 added_date 存在 (对于旧数据)
         if 'created_time' not in stock:
             stock['created_time'] = datetime.now().strftime("%Y-%m-%d %H")
+        if 'added_date' not in stock:
+            stock['added_date'] = datetime.now().strftime('%Y-%m-%d')
 
         # 确保派生字段存在
         stock.setdefault('rule_keys', set())
@@ -641,13 +647,12 @@ class StockLiveStrategy:
 
     def _scan_hot_concepts(self, df: pd.DataFrame, concept_top5: list):
         """
-        扫描五大热点板块，识别龙头
+        扫描五大热点板块，识别龙头（增强版）
         """
-
         if not self.scan_hot_concepts_status:
             return
+        
         try:
-
             if df is None or df.empty or not concept_top5:
                 logger.info("No data or concept_top5 is empty.")
                 if  hasattr(self, 'master') and self.master:
@@ -657,7 +662,6 @@ class StockLiveStrategy:
                         return
                 else:
                     return
-
 
             # Extract concept names
             top_concepts = set()
@@ -670,43 +674,50 @@ class StockLiveStrategy:
             if not top_concepts:
                 return
 
-            # logger.info(f"Scanning hot concepts: {top_concepts}")
-
-            # Filter stocks belonging to hot concepts and showing strength
-            # Using iteration for flexibility with 'category' field format (assuming 'ConceptA;ConceptB')
-            current_time = datetime.now()
+            # ------------------------------------------------------------------
+            # 策略优化：基于统计的热点龙头筛选
+            # 每日限量 5 只，避免监控列表爆炸
+            # ------------------------------------------------------------------
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            MAX_DAILY_ADDITIONS = 6
             
-            # Optimization: Pre-filter by pct to reduce loop count
-            # Only check stocks with > 4% gain
+            # 检查今日已添加的热点股数量
+            added_today_count = sum(1 for c, d in self._monitored_stocks.items() 
+                                    if d.get('added_date', '') == today_str and d.get('rule_type_tag') == 'hot_concept')
+            
+            if added_today_count >= MAX_DAILY_ADDITIONS:
+                # logger.info("Daily hot concept limit reached.")
+                return
+
             if 'percent' not in df.columns:
                 return
 
-            required_cols = ['close', 'high4', 'ma5d']
-            if 'hmax' in df.columns:
-            # strong_df = df[df['percent'] > 5.0]
-                # strong_df = df[(df['close'] > df['high4']) & (df['close'] > df['ma5d'])  & (df['close'] > df['hmax']) & (df['ma5d'] > df['ma60d'] ) & ((df['red'] > 5) | (df['top10'] > 0)) & (df['volume'] > 1.5)]
-                cond_trend = (
-                    (df['close'] > df['high4']) &
-                    (df['close'] > df['ma5d']) &
-                    (df['close'] > df['hmax']) &
-                    (df['ma5d'] > df['ma60d']) 
-                )
-                cond_strength = (
-                    (df['red'] > 5) | (df['top10'] > 0)
-                )
-                cond_volume = df['volume'] > 1.5
-                cond_percent =  ((df['close'] > df['lastp1d']) |  (df['close'] > df['lastp2d']) )
-                cond_win = df['win'] > 0
-                strong_df = df[cond_trend & cond_strength & cond_volume & cond_percent & cond_win]
-                logger.info(f'strong_df: {strong_df.shape}')
-            else:
-                strong_df = df[(df['percent'] > 8 ) & (df['volume'] > 2)]
+            # 先进行基础过滤，找出"像样"的股票
+            cond_trend = (
+                (df['close'] > df['high4']) &
+                (df['close'] > df['ma5d']) & 
+                (df['close'] > df['hmax']) 
+            )
+                # (df['ma5d'] > df['ma60d']) 
+            # 稍微放宽上涨要求，允许回调只要趋势在 (但这里先保留强趋势筛选)
+            cond_strength = (
+                (df['red'] > 5) | (df['top10'] > 0)
+            )
+            cond_volume = df['volume'] > 1.2 # 放宽一点点，下面打分再细分
+            cond_percent =  ((df['close'] > df['lastp1d']) | (df['close'] > df['lastp2d']))
+            cond_win = df['win'] > 0
+            
+            # strong_df = df[cond_trend & cond_strength & cond_volume & cond_percent & cond_win].copy()
+            strong_df = df[cond_trend  & cond_volume & cond_percent & cond_win].copy()
             
             if strong_df.empty:
                 return
-
+            logger.info(f'strong_df: {strong_df.shape}')
+            # 计算候选股综合评分
+            candidates = []
+            
             for code, row in strong_df.iterrows():
-                # Avoid re-adding if already monitored recently (check not needed if add_monitor handles idempotency or updates)
+                # Avoid re-adding
                 if code in self._monitored_stocks:
                     continue
 
@@ -715,27 +726,90 @@ class StockLiveStrategy:
                     continue
                 
                 stock_cats = set(raw_cats.split(';'))
-                
-                # Intersection
+                stock_name = row.get('name')
+                stock_ma5d = row.get('ma5d')
+                stock_close = row.get('close')
+                hma5d =  row.get('hma5d')
+                hma10d =  row.get('hma10d')
+                hma20d =  row.get('hma20d')
+                hma60d =  row.get('hma60d')
+                trendS =  row.get('trendS')
+                # logger.debug(f"code: {code} name: {stock_name} percent: {row.get('percent')} 背离ma5d: {high_ma5d} per2d: {row.get('per2d')} per3d: {row.get('per3d')}")
                 matched_concepts = stock_cats.intersection(top_concepts)
+                # logger.debug(f'stock_cats: {stock_cats} top_concepts:{top_concepts}')
                 if matched_concepts:
                     concept_name = list(matched_concepts)[0]
-                    pct = row.get('percent', 0.0)
-                    name = row.get('name', code)
                     
-                    # Logic: Add to monitor if it's a strong performer in a hot sector
-                    # Type: 'hot_concept', Value: pct
-                    logger.info(f"🔥 Found Hot Leader: {name}({code}) in {concept_name} +{pct}%")
+                    # --- 定量评分系统 ---
+                    score = 0.0
                     
+                    # 1. 涨幅贡献 (0 - 0.3)
+                    pct = row.get('percent', 0)
+                    if pct > 3:
+                         score += min(pct / 10, 0.3)
+                    else:
+                         score += min(pct / 10, 0.3) * 0.5 # 弱涨幅打折
+                    
+                    # 2. 量能贡献 (0 - 0.2)
+                    # 统计显示 1.2-2.5 最佳
+                    vol = row.get('volume', 0)
+                    if 1.2 <= vol <= 2.5:
+                        score += 0.2
+                    elif vol > 2.5:
+                        score += 0.1 # 天量减分
+                    elif vol < 0.8:
+                        score -= 0.1 # 地量减分
+                    
+                    # 3. 趋势贡献 (0 - 0.3)
+                    # 3连阳且红兵多最佳
+                    win = row.get('win', 0)
+                    if win >= 3:
+                        score += 0.3
+                    elif win == 2:
+                        score += 0.15
+                    
+                    # 4. 技术位贡献 (0 - 0.2)
+                    hmax = row.get('hmax', float('inf'))
+                    if row.get('close', 0) > hmax:
+                        score += 0.2 # 突破新高
+                    # select_code ={
+                    #     'code': code,
+                    #     'name': row.get('name', code),
+                    #     'score': score,
+                    #     'concept': concept_name,
+                    #     'pct': pct
+                    # }
+                    # logger.debug(f"candidates append:{select_code}")
+                    logger.info(f"code: {code} name: {stock_name} percent: {row.get('percent')} 背离ma5d: {hma5d} 背离ma10d: {hma10d} 评估: {score} 综合趋势分: {trendS}per2d: {row.get('per2d')} per3d: {row.get('per3d')}")
+                    # 添加到候选列表
+                    candidates.append({
+                        'code': code,
+                        'name': row.get('name', code),
+                        'score': round(score,1),
+                        'concept': concept_name,
+                        'pct': pct
+                    })
+            
+            # 按分数从高到低排序
+            candidates.sort(key=lambda x: x['score'], reverse=True)
+            
+            # 选取前 N 名进行添加
+            slots_remaining = MAX_DAILY_ADDITIONS - added_today_count
+            
+            for cand in candidates[:slots_remaining]:
+                # 只有评分 > 0.4 才配得上进入监控
+                if cand['score'] >= 0.4:
                     self.add_monitor(
-                        code=str(code),
-                        name=name,
+                        code=str(cand['code']),
+                        name=cand['name'],
                         rule_type='hot_concept',
-                        value=pct,
-                        tags=f"Hot:{concept_name}"
+                        value=cand['score'],
+                        tags=f"Hot:{cand['concept']}|Sc:{cand['score']:.2f}"
                     )
+                    logger.info(f"🔥 Found Hot Leader (Score={cand['score']:.2f}): {cand['name']}({cand['code']}) in {cand['concept']}")
+
         except Exception as e:
-            logger.error(f"Error in _scan_hot_concepts: {e}")
+            logger.error(f"Error in scan_hot_concepts: {e}", exc_info=True)
             pass
 
     def _check_strategies(self, df):

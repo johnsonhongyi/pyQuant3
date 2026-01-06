@@ -119,7 +119,7 @@ def dump_timing_stats(top=10,logger=log):
 # @timed_block("fetch_and_process", warn_ms=1000)
 # def fetch_and_process(...):
 
-def print_timing_summary(top_n=5, unit="ms"):
+def print_timing_summary(top_n=10, unit="ms"):
     """
     汇总 _TIMING_STATS 并打印 top_n 慢函数
     :param top_n: 显示前 top_n 个慢函数
