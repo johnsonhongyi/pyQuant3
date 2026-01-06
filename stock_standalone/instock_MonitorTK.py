@@ -175,6 +175,8 @@ DEFAULT_DISPLAY_COLS = [
     'topR', 'volume', 'red', 'lastdu4', 'category'
 ]
 
+tip_var_status_flag = mp.Value('b', False)  # boolean
+
 from alerts_manager import AlertManager, open_alert_center, set_global_manager, check_alert
 def ___toast_message(master, text, duration=1500):
     """短暂提示信息（浮层，不阻塞）"""
@@ -1377,6 +1379,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.refresh_flag.value = True
         self.status_var.set(f"手动刷新: resample={resample}")
 
+
     def _start_process(self):
         self.refresh_flag = mp.Value('b', True)
         self.log_level = mp.Value('i', log_level)  # 'i' 表示整数
@@ -1386,7 +1389,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         #                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
         #                       marketInit: str = "all", marketblk: str = "boll",
         #                       duration_sleep_time: int = 5, ramdisk_dir: str = cct.get_ramdisk_dir()) -> None:
-        self.proc = mp.Process(target=fetch_and_process, args=(self.global_dict,self.queue, self.blkname , self.refresh_flag,self.log_level, self.detect_calc_support,marketInit,marketblk,duration_sleep_time))
+        
+        # self.proc = mp.Process(target=fetch_and_process, args=(self.global_dict,self.queue, self.blkname , self.refresh_flag,self.log_level, self.detect_calc_support,marketInit,marketblk,duration_sleep_time))
+        self.proc = mp.Process(
+            target=fetch_and_process,
+            args=(self.global_dict, self.queue, self.blkname, 
+                  self.refresh_flag, self.log_level, self.detect_calc_support, 
+                  marketInit, marketblk, duration_sleep_time),
+            kwargs={
+                "status_callback": tip_var_status_flag  # 注意不用括号，传函数
+            }
+        )
         # self.proc.daemon = True
         self.proc.daemon = False 
         self.proc.start()
@@ -1696,6 +1709,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 pass
 
     def update_linkage_status(self):
+        global tip_var_status_flag
         # 此处处理 checkbuttons 状态
         if not self.tdx_var.get() or not self.ths_var.get():
             self.sender.reload()
@@ -1707,7 +1721,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._setup_tree_columns(self.tree,self.current_cols, sort_callback=self.sort_by_column, other={})
             self.reload_cfg_value()
             self.live_strategy.set_alert_cooldown(alert_cooldown)
-
         if self.realtime_var.get():
             if not self.live_strategy.scan_hot_concepts_status:
                 self.live_strategy.set_scan_hot_concepts(status=True)
@@ -1717,9 +1730,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.live_strategy.set_scan_hot_concepts(status=False)
                 logger.info(f'self.live_strategy.scan_hot_concepts_status  will be close')
 
-            # self.update_treeview_cols(self.current_cols)
+        # self.update_treeview_cols(self.current_cols)
+        tip_var_status_flag.value = self.tip_var.get()
 
-        logger.info(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()}")
+        logger.info(f"TDX:{self.tdx_var.get()}, THS:{self.ths_var.get()}, DC:{self.dfcf_var.get()} tip_var_status_flag:{tip_var_status_flag.value}")
 
 
     # 选择历史查询
