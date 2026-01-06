@@ -1523,7 +1523,7 @@ if __name__ == "__main__":
     print(f'ticktime: {df.ticktime[:5]}')    
     # print(df.loc['920274'][['close','nclose','nlow','nhigh']])
     # print(df.loc['920274'][['close','nclose','nlow','nhigh']])
-    # print(df.loc['300245'].close.mean())
+    print(df.loc['002151'].nclose)
     import ipdb;ipdb.set_trace()
     
     print(len(df))

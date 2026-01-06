@@ -1546,7 +1546,6 @@ def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "b
             blkname = g_values.getkey("blkname", marketblk)  # 对应的 blk 文件
             st_key_sort = g_values.getkey("st_key_sort", st_key_sort)  # 对应的 blk 文件
             logger.info(f"resample Main  market : {market} resample: {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
-
             if market == 'indb':
                 with timed_ctx(f"fetch_market:{market} {resample}", warn_ms=800):
                     indf = get_indb_df()

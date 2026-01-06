@@ -182,7 +182,8 @@ class StockLiveStrategy:
     - min_position_ratio: 最小仓位比例
     - risk_duration_threshold: 风险持续时间阈值
     """
-    def __init__(self, 
+    def __init__(self,
+                 master=None, 
                  alert_cooldown: float = 60,
                  stop_loss_pct: float = 0.05,
                  take_profit_pct: float = 0.10,
@@ -193,6 +194,7 @@ class StockLiveStrategy:
                  voice_enabled: bool = True,
                  realtime_service: Any = None):
         # --- 实例属性注解 (PEP 526) ---
+        self.master = master
         self._voice: VoiceAnnouncer
         self.voice_enabled: bool
         self._monitored_stocks: dict[str, Any]
@@ -224,7 +226,6 @@ class StockLiveStrategy:
         self.config_file = "voice_alert_config.json"
         self.alert_callback = None
         self.alert_callback = None
-        self.df = None
         self.realtime_service = None
         self.scan_hot_concepts_status = True
         
@@ -646,9 +647,17 @@ class StockLiveStrategy:
         if not self.scan_hot_concepts_status:
             return
         try:
-            if df.empty or not concept_top5:
-                # logger.debug("No data or concept_top5 is empty.")
-                return
+
+            if df is None or df.empty or not concept_top5:
+                logger.info("No data or concept_top5 is empty.")
+                if  hasattr(self, 'master') and self.master:
+                    if self.master.df_all is not None and not self.master.df_all.empty:
+                        df = self.master.df_all.copy()
+                    else:
+                        return
+                else:
+                    return
+
 
             # Extract concept names
             top_concepts = set()
@@ -680,14 +689,16 @@ class StockLiveStrategy:
                     (df['close'] > df['high4']) &
                     (df['close'] > df['ma5d']) &
                     (df['close'] > df['hmax']) &
-                    (df['ma5d'] > df['ma60d'])
+                    (df['ma5d'] > df['ma60d']) 
                 )
                 cond_strength = (
                     (df['red'] > 5) | (df['top10'] > 0)
                 )
                 cond_volume = df['volume'] > 1.5
-                strong_df = df[cond_trend & cond_strength & cond_volume]
-
+                cond_percent =  ((df['close'] > df['lastp1d']) |  (df['close'] > df['lastp2d']) )
+                cond_win = df['win'] > 0
+                strong_df = df[cond_trend & cond_strength & cond_volume & cond_percent & cond_win]
+                logger.info(f'strong_df: {strong_df.shape}')
             else:
                 strong_df = df[(df['percent'] > 8 ) & (df['volume'] > 2)]
             
@@ -1412,8 +1423,9 @@ class StockLiveStrategy:
             self._voice.say("手动热点选股强制启动")
             logger.info("Manual Hotspot Selection Triggered (Independent Batch)")
             if hasattr(self, 'df'):
-                 self._import_hotspot_candidates(concept_top5=concept_top5, is_manual=True)
-            
+                self._import_hotspot_candidates(concept_top5=concept_top5, is_manual=True)
+                self._voice.say("手动执行热点筛选")
+                self._scan_hot_concepts(self.df,concept_top5=concept_top5)
             # 如果是盘后强制启动，标记今日已结算，防止后续 tick 再次触发 Settlement
             if is_after_close:
                 self._last_settlement_date = today_str
