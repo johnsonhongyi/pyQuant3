@@ -398,6 +398,22 @@ def _ensure_listener_started(log_f, show_detail=True):
 
         fh.rotator = win_safe_rotator
 
+        # ---------- Custom namer: instock_tk_1.log ----------
+        def underscore_namer(name):
+            """
+            logging 默认给的是:
+              instock_tk.log.1
+            这里改成:
+              instock_tk_1.log
+            """
+            if name.endswith(".log"):
+                return name
+
+            base, idx = name.rsplit(".log.", 1)
+            return f"{base}_{idx}.log"
+
+        fh.namer = underscore_namer
+        
         fh_formatter = logging.Formatter(
             "[%(asctime)s] %(levelname)s:%(filename)s(%(funcName)s:%(lineno)s): %(message)s"
             if show_detail else

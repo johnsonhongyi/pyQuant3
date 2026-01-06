@@ -1952,6 +1952,7 @@ def read_tdx_day_fast(fname: str, dl: int) -> pd.DataFrame:
 
     return df
 
+# def get_tdx_Exp_day_to_df(
 def get_tdx_Exp_day_to_df_lday(
     code, start=None, end=None, dl=None, newdays=None,
     type='f', wds=True, lastdays=3, resample='d',
@@ -2108,6 +2109,7 @@ def get_tdx_Exp_day_to_df_lday(
 
 
 
+# def get_tdx_Exp_day_to_df_txt(
 def get_tdx_Exp_day_to_df(
     code, start=None, end=None, dl=None, newdays=None,
     type='f', wds=True, lastdays=3, resample='d',
@@ -2235,12 +2237,14 @@ def get_tdx_Exp_day_to_df(
     # =========================
     # 7. 结构指标（向量化）
     # =========================
-    c1 = df.close.shift(1)
-    df['max5'] = c1.rolling(5).max()
-    df['max10'] = c1.rolling(10).max()
-    df['hmax'] = c1.rolling(30).max()
-    df['low10'] = df.low.shift(1).rolling(10).min()
-    df['low4'] = df.low.shift(1).rolling(4).min()
+    # tdx_max_int = ct.tdx_max_int  #10
+    # tdx_max_int_end = ct.tdx_max_int_end   #30
+    # tdx_high_da = ct.tdx_high_da   #3
+    df['max5'] = df.close.iloc[-6:-1].max()
+    df['max10'] = df.close.iloc[-13:-tdx_high_da].max()
+    df['hmax'] = df.close.iloc[-tdx_max_int_end:-tdx_high_da].max()
+    df['low10'] = df.low.iloc[-13:-tdx_high_da].min()
+    df['low4'] = df.low.iloc[-13:-tdx_high_da].min()
     # =========================
     # 7+. 补齐旧版依赖的结构指标（极速等价）
     # =========================
@@ -2253,9 +2257,10 @@ def get_tdx_Exp_day_to_df(
             df['hv'] = df.vol.iloc[-tdx_max_int:-tdx_high_da].max()
             df['lv'] = df.vol.iloc[-tdx_max_int:-tdx_high_da].min()
             df['llowvol'] = df['lv']
-            df['high4'] = df.close.shift(1).rolling(4).max()
-            df['hmax60'] = df.close.shift(1).rolling(60).max()
-            df['low60'] = df.close.iloc[-tdx_max_int_end*2:-tdx_max_int_end].min()
+            df['high4'] = df.high.iloc[-5:-1].max()
+            df['hmax60'] = df.close.iloc[-60:-tdx_high_da].max()
+            df['low60'] = df.close.iloc[-60:-tdx_max_int_end].min()
+            # df['low60'] = df.low.iloc[-tdx_max_int_end*2:-tdx_max_int_end].min()
 
             df['lastdu4'] = (
                 (df.high.rolling(4).max() - df.low.rolling(4).min()) /
@@ -2849,7 +2854,8 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
         df = df.sort_index(ascending=False)
     if end is None and writedm and len(df) > 0:
         if cct.get_now_time_int() < 900 or cct.get_now_time_int() > 1505:
-            #            if index_status:
+            import ipdb;ipdb.set_trace()
+
             sta = write_tdx_sina_data_to_file(code, df=df)
 
     return df
@@ -3004,6 +3010,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
         writedm = False
     else:
         writedm = True
+
     if df is not None and len(df) > 0:
         if df.index.values[-1] == today:
             if dm is not None and not isinstance(dm, Series) and code in dm.index:
@@ -3086,7 +3093,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
 
     if writedm and len(df) > 0:
         if cct.get_now_time_int() < 900 or cct.get_now_time_int() > 1505:
-            df['amount'] = df['amount'].apply(lambda x: round(x , 1))
+            df['amount'] = df['amount'].apply(lambda x: round(x, 2))
             sta = write_tdx_sina_data_to_file(code, df=df)
     return df
 
@@ -3323,13 +3330,20 @@ def write_tdx_sina_data_to_file(code, dm=None, df=None, dl=2, type='f'):
             tdate = date
             if len(tdate) != 10:
                 continue
-            topen = str(round(td.open, 2))
-            thigh = str(round(td.high, 2))
-            tlow = str(round(td.low, 2))
-            tclose = str(round(td.close, 2))
+
+            # topen = str(round(td.open, 2))
+            # thigh = str(round(td.high, 2))
+            # tlow = str(round(td.low, 2))
+            # tclose = str(round(td.close, 2))
+            
+            topen = f"{td.open:.2f}"
+            thigh = f"{td.high:.2f}"
+            tlow = f"{td.low:.2f}"
+            tclose = f"{td.close:.2f}"
             # tvol = round(float(a[5]) / 10, 2)
-            tvol = str(round(td.vol, 2))
-            amount = str(round(td.amount, 2))
+            tvol = str(round(td.vol))
+            # amount = str(round(td.amount, 2))
+            amount = f"{td.amount:.2f}"
             tdata = tdate + ',' + topen + ',' + thigh + ',' + tlow + \
                 ',' + tclose + ',' + tvol + ',' + amount + '\r\n'
                 # ',' + tclose + ',' + tvol + ',' + amount + '\n'
@@ -3668,7 +3682,7 @@ def write_market_index_to_df():
         log.info(f'write index append to df:{inx}')
         get_tdx_append_now_df_api_tofile(inx,dm=dm_index)
 
-def Write_market_all_day_mp(market='all', rewrite=False,recheck=False,detect_calc_support=False):
+def Write_market_all_day_mp(market='all', rewrite=False,recheck=True,detect_calc_support=False):
     """
     rewrite True: history date ?
     rewrite False: Now Sina date
@@ -3724,15 +3738,14 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=False,detect_cal
 
                 df = df[((df.b1 > 0) | (df.a1 > 0))]
 
-
             code_list = duration_code
             dm = get_sina_data_df(code_list)
             dm = dm[((dm.open > 0) | (dm.a1 > 0))]
             print(("market:%s A:%s open_dm:%s" % (mk, len(df),len(dm))), end=' ')
             log.info(("market:%s A:%s open_dm:%s" % (mk, len(df),len(dm))))
             count_list = len(code_list)
+            # count_list = len(['000002'])
             log.info('code_list:%s df:%s' % (code_list if count_list < 10 else count_list, len(df)))
-
 
             if len(dm) > 0:
                 results = cct.to_mp_run_async(
@@ -3742,7 +3755,6 @@ def Write_market_all_day_mp(market='all', rewrite=False,recheck=False,detect_cal
                 #    print(code,)
                 #    results.append(get_tdx_append_now_df_api_tofile(code, dm=dm, newdays=0,detect_calc_support=detect_calc_support))
                 # results = get_tdx_exp_low_or_high_price(codeList[0], dt,ptype,dl)))
-
 
             else:
                 print(("dm is not open sell:%s"%(code_list if len(code_list) <10 else len(code_list))))
@@ -6349,6 +6361,21 @@ def get_index_percd(codeList=tdx_index_code_list, dt=60, end=None, ptype='low', 
     tdxdata = get_tdx_exp_all_LastDF_DL(codeList, dt=dt, end=end, ptype=ptype, filter=filter, power=power, lastp=lastp, newdays=newdays, resample=resample)
     return tdxdata
 
+def select_codes_from_tdx(tdxdata: pd.DataFrame, tdx_index_code_list: list) -> pd.DataFrame:
+    """
+    从 tdxdata 中选择 tdx_index_code_list 存在的行。
+    不存在的代码会被自动忽略。
+    """
+    # ---------- 1. 找到存在的代码 ----------
+    existing_codes = [code for code in tdx_index_code_list if code in tdxdata.index]
+
+    if not existing_codes:
+        # 没有匹配的代码，返回空 DataFrame
+        return pd.DataFrame(columns=tdxdata.columns)
+
+    # ---------- 2. 用 loc 取出 ----------
+    return tdxdata.loc[existing_codes]
+
 
 def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS_Days['d'], end=None, ptype='low', filter='y', power=True, lastp=False, newdays=None, checknew=True, resample='d',showtable=False,detect_calc_support=False):
     time_s = time.time()
@@ -6376,7 +6403,7 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
             tdxdata = h5
             if cct.GlobalValues().getkey('tdx_Index_Tdxdata') is None:
                 if tdx_index_code_list[0] in tdxdata.index:
-                    cct.GlobalValues().setkey('tdx_Index_Tdxdata', tdxdata.loc[tdx_index_code_list])
+                    cct.GlobalValues().setkey('tdx_Index_Tdxdata', select_codes_from_tdx(tdxdata, tdx_index_code_list))
         else:
             log.info("no hdf data:%s %s" % (h5_fname, h5_table))
             print(f"TDD: {len(codelist)} resample:{resample}",end='')
@@ -6394,7 +6421,7 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
             tdxdata = cct.combine_dataFrame(tdxdata, wcdf.loc[:, ['category','hangye']])
             if cct.GlobalValues().getkey('tdx_Index_Tdxdata') is None:
                 if tdx_index_code_list[0] in tdxdata.index:
-                    cct.GlobalValues().setkey('tdx_Index_Tdxdata', tdxdata.loc[tdx_index_code_list])
+                    cct.GlobalValues().setkey('tdx_Index_Tdxdata', select_codes_from_tdx(tdxdata, tdx_index_code_list))
             tdxdata = tdxdata.drop_duplicates(keep='first')  # 保留第一次出现的行
             h5 = h5a.write_hdf_db(
                 h5_fname, tdxdata, table=h5_table, append=True)
@@ -6968,7 +6995,8 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
     - 避免重复 datetime 解析和排序
     - 使用 loc 索引切片
     - 分列聚合 numeric 与 first/last separately
-    """
+    """
+
     period_type = period_type_dic.get(period_day.lower(), period_day)
 
     # 1️⃣ 如果 index 已经是 DatetimeIndex 且已排序，可跳过
@@ -7304,15 +7332,22 @@ if __name__ == '__main__':
     # tdx_profile_test_tdx()
         
     resample = 'd'
-    code = '300640'
+    code = '002151'
+    # dm = sina_data.Sina().market('all').loc['000002']
+    # get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0,detect_calc_support=False)
 
     # dm_index = sina_data.Sina().get_stock_list_data(tdx_index_code_list,index=True)
     # for inx in tdx_index_code_list:
     #     get_tdx_append_now_df_api_tofile(inx,dm=dm_index)
     # write_market_index_to_df()
+    # Write_market_all_day_mp()
 
 
     dd = get_tdx_Exp_day_to_df(code, dl=1) 
+    dd2 = get_tdx_Exp_day_to_df(code, dl=480,resample='m')
+    dd3 = get_tdx_Exp_day_to_df(code, dl=60,resample='d')
+    import ipdb;ipdb.set_trace()
+
     duration = cct.get_today_duration(dd.date,tdx=True) if dd is not None and len(dd) > 5 else -1
     df = get_tdx_Exp_day_to_df_lday(code, dl=1) 
     dm = get_tdx_Exp_day_to_df_lday(code, dl=480,resample='m')

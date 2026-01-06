@@ -258,7 +258,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
     tdx_Index_Tdxdata = cct.GlobalValues().getkey('tdx_Index_Tdxdata')
     market_va_filter = cct.GlobalValues().getkey('market_va_filter')
     log.debug(f'indexfibl:{indexfibl} sort_value: {sort_value} market_key: {market_key} market_value: {market_value} market_va_filter: {market_va_filter}\n')
-    log.debug(f'tdx_Index_Tdxdata: {tdx_Index_Tdxdata.shape}')
+    log.debug(f'tdx_Index_Tdxdata: {tdx_Index_Tdxdata}')
     if market_value != '1.1' and int(float(market_value)) > ct.compute_lastdays:
         market_value = ct.compute_lastdays
 
@@ -269,7 +269,7 @@ def getBollFilter(df=None, boll=ct.bollFilter, duration=ct.PowerCountdl, filter=
         if tdx_Index_Tdxdata is not None:
             tdx_Index_Tdxdata = compute_perd_value(tdx_Index_Tdxdata,market_value,'perc')
             tdx_Index_Tdxdata = compute_perd_value(tdx_Index_Tdxdata,market_value,'per')
-        if market_key == '3':
+        if market_key == '3' and tdx_Index_Tdxdata is not None:
             idx_k = tdx_Index_Tdxdata['perc%sd'%(int(float(market_value)))].max()
         else:
 
