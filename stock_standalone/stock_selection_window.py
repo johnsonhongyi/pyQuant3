@@ -191,7 +191,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
         # --- Main List ---
         # Columns
-        columns = ("code", "name", "status", "score", "price", "percent", "昨日涨幅", "ratio", "amount", "连阳涨幅", "win", "volume", "category", "auto_reason", "user_status", "user_reason")
+        columns = ("code", "name", "status", "score", "rank", "price", "percent", "昨日涨幅", "ratio", "amount", "连阳涨幅", "win", "volume", "category", "auto_reason", "user_status", "user_reason")
         
         tree_frame = tk.Frame(self)
         tree_frame.pack(fill="both", expand=True, padx=5, pady=5)
@@ -213,7 +213,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         
         # Headings
         headers = {
-            "code": "代码", "name": "名称", "status": "类型", "score": "分值", 
+            "code": "代码", "name": "名称", "status": "类型", "score": "分值", "rank": "Rank",
             "price": "现价", "percent": "涨幅%", "昨日涨幅": "昨日%", "ratio": "量比", "amount": "成交额",
             "连阳涨幅": "连阳", "win": "胜率", "volume": "成交量",
             "category": "板块/概念",
@@ -229,6 +229,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
         self.tree.column("name", width=80, minwidth=70, stretch=False)
         self.tree.column("status", width=60, minwidth=50, stretch=False)
         self.tree.column("score", width=50, minwidth=40, stretch=False)
+        self.tree.column("rank", width=40, minwidth=30, stretch=False)
         self.tree.column("price", width=70, minwidth=60, stretch=False)
         self.tree.column("percent", width=70, minwidth=60, stretch=False)
         self.tree.column("昨日涨幅", width=70, minwidth=60, stretch=False)
@@ -323,11 +324,13 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                 self.df_full_candidates['昨日涨幅'] = self.df_full_candidates['code'].map(self.selector.df_all_realtime['per1d']).fillna(0)
                 self.df_full_candidates['连阳涨幅'] = self.df_full_candidates['code'].map(self.selector.df_all_realtime['sum_perc']).fillna(0)
                 self.df_full_candidates['win'] = self.df_full_candidates['code'].map(self.selector.df_all_realtime['win']).fillna(0)
+                self.df_full_candidates['Rank'] = self.df_full_candidates['code'].map(self.selector.df_all_realtime['Rank']).fillna(0)
             else:
                 # live_strategy 不存在或列缺失，全部填 0
                 self.df_full_candidates['昨日涨幅'] = 0
                 self.df_full_candidates['连阳涨幅'] = 0
                 self.df_full_candidates['win'] = 0
+                self.df_full_candidates['Rank'] = 0
             # 从全量缓存中复制，用于当前视窗的筛选/显示
             self.df_candidates = self.df_full_candidates.copy()
 
@@ -420,7 +423,7 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                         display_name = f"{icon} {display_name}"
 
                 self.tree.insert("", "end", iid=row['code'], values=(
-                    row['code'], display_name, row.get('status', ''), row['score'], row['price'], 
+                    row['code'], display_name, row.get('status', ''), row['score'], row.get('Rank', 0), row['price'], 
                     f"{row['percent']:.2f}", f"{row.get('昨日涨幅', 0):.2f}", f"{row.get('ratio', 0):.2f}", amount_str,
                     row.get('连阳涨幅', 0), row.get('win', 0), row['volume'], row.get('category', ''), row['reason'], 
                     user_status, user_reason

@@ -4467,7 +4467,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             list_frame.pack(fill="both", expand=True, padx=5, pady=5)
             
             # 显示 ID 是为了方便管理 (code + rule_index)
-            columns = ("code", "name", "rule_type", "value", "add_time", "tags", "id")
+            columns = ("code", "name", "rule_type", "value", "rank", "add_time", "tags", "id")
             tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
             
             # 4. 底部状态栏用于显示计数
@@ -4504,6 +4504,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.heading("name", text="名称", command=lambda: treeview_sort_column(tree, "name", False))
             tree.heading("rule_type", text="规则类型", command=lambda: treeview_sort_column(tree, "rule_type", False))
             tree.heading("value", text="阈值", command=lambda: treeview_sort_column(tree, "value", False))
+            tree.heading("rank", text="Rank", command=lambda: treeview_sort_column(tree, "rank", False))
             tree.heading("add_time", text="时间", command=lambda: treeview_sort_column(tree, "add_time", False))
             tree.heading("tags", text="简介", command=lambda: treeview_sort_column(tree, "tags", False))
             tree.heading("id", text="ID (Code_Idx)")
@@ -4512,13 +4513,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.column("name", width=80, anchor="center")
             tree.column("rule_type", width=80, anchor="center")
             tree.column("value", width=60, anchor="center")
+            tree.column("rank", width=40, anchor="center")
             tree.column("add_time", width=100, anchor="center")
             tree.column("tags", width=120, anchor="center")
             tree.column("id", width=0, stretch=False) # 隐藏 ID 列
 
             def show_tags_detail(values):
                 code, name = values[0], values[1]
-                tags_info = values[5]
+                tags_info = values[6]
 
                 top = tk.Toplevel(win)
                 top.title(f"{name}:{code} 详情")
@@ -4556,7 +4558,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 values = tree.item(item, "values")
 
-                TAGS_COL_INDEX = 5  # tags 在 values 中的索引
+                TAGS_COL_INDEX = 6  # tags 在 values 中的索引
 
                 if col_idx == TAGS_COL_INDEX:
                     tags_info = values[TAGS_COL_INDEX]
@@ -4594,10 +4596,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     add_time = data.get('created_time', '')
                     tags = data.get('tags', '')
                     
+                    rank = 0
+                    if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
+                         rank = self.df_all.loc[code].get('Rank', 0)
+
                     if not rules:
                         # 对于没有规则的股票，显示一行占位，方便管理
                         uid = f"{code}_none"
-                        tree.insert("", "end", values=(code, name, "⚠️(未设规则)", "-", add_time, tags, uid))
+                        tree.insert("", "end", values=(code, name, "⚠️(未设规则)", "-", rank, add_time, tags, uid))
                     else:
                         for idx, rule in enumerate(rules):
                             rtype_map = {
@@ -4608,7 +4614,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             display_type = rtype_map.get(rule['type'], rule['type'])
                             # unique id
                             uid = f"{code}_{idx}"
-                            tree.insert("", "end", values=(code, name, display_type, rule['value'], add_time, tags, uid))
+                            tree.insert("", "end", values=(code, name, display_type, rule['value'], rank, add_time, tags, uid))
 
             load_data()
             win.refresh_list = load_data
@@ -4654,7 +4660,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 item = selected[0]
                 values = tree.item(item, "values")
                 code = values[0]
-                uid = values[6]
+                uid = values[7]
 
                 # 调整删除逻辑
                 if self.live_strategy:
@@ -4778,7 +4784,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                  code = values[0]
                  name = values[1]
                  old_val = values[3]
-                 uid = values[6]
+                 uid = values[7]
                  if uid.endswith('_none'):
                      idx = -1
                  else:
@@ -6204,7 +6210,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     tk.Label(scroll_frame, text=c, fg="blue", font=self.default_font_bold).pack(anchor="w", padx=5)
                     stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)[:limit]  # 只取前 limit
                     for code, name, percent, volume in stocks:
-                        lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}",
+                        rank = 0
+                        if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
+                            val = self.df_all.loc[code].get('Rank', 0)
+                            rank = int(val) if pd.notna(val) else 0
+                        lbl = tk.Label(scroll_frame, text=f"  {code} {name} R:{rank:<4} {percent:>6.2f}% {volume}",
                                        fg="black", cursor="hand2", anchor="w", takefocus=True)    # ⭐ 必须
                         lbl.pack(anchor="w", padx=6)
                         lbl._code = code
@@ -6226,7 +6236,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 tk.Label(scroll_frame, text=c, fg="black", font=self.default_font_bold).pack(anchor="w", padx=5)
                 stocks = sorted(cat_dict.get(c, []), key=lambda x: x[2], reverse=True)[:limit]  # 只取前 limit
                 for code, name, percent, volume in stocks:
-                    lbl = tk.Label(scroll_frame, text=f"  {code} {name} {percent:.2f}% {volume}",
+                    rank = 0
+                    if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
+                         val = self.df_all.loc[code].get('Rank', 0)
+                         rank = int(val) if pd.notna(val) else 0
+                    lbl = tk.Label(scroll_frame, text=f"  {code} {name} R:{rank:<4} {percent:>6.2f}% {volume}",
                                    fg="gray", cursor="hand2", anchor="w",takefocus=True)    # ⭐ 必须
                     lbl.pack(anchor="w", padx=6)
                     lbl._code = code
@@ -6588,17 +6602,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         frame = tk.Frame(win)
         frame.pack(fill="both", expand=True)
 
-        columns = ("code", "name", "percent", "volume","red","win")
+        columns = ("code", "name", "rank", "percent", "volume","red","win")
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
-        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量","red":"连阳","win":"主升"}
+        col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","volume":"成交量","red":"连阳","win":"主升"}
         for col in columns:
             tree.heading(col, text=col_texts[col], anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
-            tree.column(col, anchor="center", width=60 if col != "name" else 80)
+            width = 80 if col == "name" else (40 if col == "rank" else 60)
+            tree.column(col, anchor="center", width=width)
 
         # 保存引用，独立窗口不复用 _concept_top10_win
         win._tree_top10 = tree
@@ -6940,7 +6955,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         frame = tk.Frame(win)
         frame.pack(fill="both", expand=True)
 
-        columns = ("code", "name", "percent", "volume","red","win")
+        columns = ("code", "name", "rank", "percent", "volume","red","win")
         tree = ttk.Treeview(frame, columns=columns, show="headings", selectmode="browse")
         vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
         tree.configure(yscrollcommand=vsb.set)
@@ -6948,11 +6963,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         vsb.pack(side="right", fill="y")
 
         # col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量"}
-        col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量","red":"连阳","win":"主升"}
+        col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","volume":"成交量","red":"连阳","win":"主升"}
         for col in columns:
             tree.heading(col, text=col_texts[col], anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
-            tree.column(col, anchor="center", width=60 if col != "name" else 80)
+            width = 80 if col == "name" else (40 if col == "rank" else 60)
+            tree.column(col, anchor="center", width=width)
 
         # 保存引用
         win._content_frame_top10 = frame
@@ -7210,6 +7226,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if pd.isna(percent) or percent == 0:
                 percent = latest_row.get("per1d", row.get("per1d", 0))
 
+            rank_val = latest_row.get("Rank", row.get("Rank", 0))
+            rank_str = str(int(rank_val)) if pd.notna(rank_val) else "0"
+
             tree.insert(
                 "",
                 "end",
@@ -7217,6 +7236,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 values=(
                     code_row,
                     latest_row.get("name", row.get("name", "")),
+                    rank_str,
                     f"{percent:.2f}",
                     f"{latest_row.get('volume', row.get('volume', 0)):.1f}",
                     latest_row.get("red", row.get("red", 0)),
@@ -7392,8 +7412,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             percent = row.get("percent")
             if pd.isna(percent) or percent == 0:
                 percent = row.get("per1d")
+
+            rank_val = row.get("Rank", 0)
+            rank_str = str(int(rank_val)) if pd.notna(rank_val) else "0"
+
             tree.insert("", "end", iid=iid,
-                        values=(code_row, row["name"], f"{percent:.2f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}", f"{row.get('win',0)}"),tags=tuple(tags_for_row))
+                        values=(code_row, row["name"], rank_str, f"{percent:.2f}", f"{row.get('volume',0):.1f}", f"{row.get('red',0)}", f"{row.get('win',0)}"),tags=tuple(tags_for_row))
 
         # 保留选中状态
         if hasattr(tree, "_selected_index") and tree.get_children():

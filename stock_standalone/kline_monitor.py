@@ -91,7 +91,7 @@ class KLineMonitor(tk.Toplevel):
 
         self.tree = ttk.Treeview(
             table_frame,
-            columns=("code", "name", "now", "percent", "volume", "signal","score","red", "emotion"),
+            columns=("code", "name", "now", "percent", "volume", "signal", "Rank", "score", "red", "emotion"),
             show="headings",
             height=20
         )
@@ -113,6 +113,7 @@ class KLineMonitor(tk.Toplevel):
             ("percent", "涨幅",30),
             ("volume", "量比", 30),
             ("signal", "信号", 60),
+            ("Rank", "Rank", 30),
             ("score", "评分", 30),
             ("red", "连阳", 30),
             ("emotion", "情绪", 60)
@@ -482,6 +483,7 @@ class KLineMonitor(tk.Toplevel):
                 "percent": r.get("percent",0) or r.get("per1d",0),
                 "volume": r.get("volume",0),
                 "display_signal": display_signal,
+                "Rank": r.get("Rank", 0),
                 "score": r.get("score",0),
                 "red": r.get("red",0),
                 "emotion": r.get("emotion",""),
@@ -510,6 +512,7 @@ class KLineMonitor(tk.Toplevel):
                     f"{row['percent']:.2f}",
                     f"{row['volume']:.1f}",
                     row["display_signal"],
+                    f"{row['Rank']}",
                     f"{row['score']}",
                     f"{row['red']}",
                     row["emotion"]
@@ -608,7 +611,7 @@ class KLineMonitor(tk.Toplevel):
                     final_query = ensure_parentheses_balanced(final_query)
                     query_engine = 'python' if any('index.' in c.lower() for c in valid_conditions) else 'numexpr'
 
-                    for col in ["score", "percent", "volume", "now"]:
+                    for col in ["score", "percent", "volume", "now", "Rank"]:
                         if col in df.columns:
                             df[col] = pd.to_numeric(df[col], errors="coerce")
 
