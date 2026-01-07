@@ -4066,7 +4066,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             btn_del = tk.Button(btn_frame, text="Del", command=delete_monitor, bg="#ffcdd2", cursor="hand2", font=("Arial", 8), width=3)
             btn_del.pack(side="left", padx=2)
             
-            tk.Button(btn_frame, text="关闭", command=lambda: self._close_alert(win, is_manual=True), bg="#eee").pack(side="right", padx=5)
+            tk.Button(btn_frame, text="关闭", command=lambda: self._close_alert(win, is_manual=True), bg="#eee", width=8, pady=2).pack(side="right", padx=5)
 
             # --- 上部内容 ---
             tk.Label(frame, text=f"⚠️{code} {msg}", font=("Microsoft YaHei", 12, "bold"), fg="#d32f2f", bg="#fff", wraplength=380).pack(pady=5)
@@ -7417,6 +7417,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if reverse is None:
             reverse = not tree._sort_state.get(col, False)
         tree._sort_state[col] = not reverse
+
+        # map 'rank' to 'Rank' or ensure 'rank' exists for sorting
+        if col == "rank":
+            if "rank" not in tree._full_df.columns and "Rank" in tree._full_df.columns:
+                 tree._full_df["rank"] = tree._full_df["Rank"]
+            
+            if "rank" in tree._full_df.columns:
+                # 确保 rank 列为数值型，便于正确排序
+                tree._full_df["rank"] = pd.to_numeric(tree._full_df["rank"], errors='coerce').fillna(9999)
+        
+        # 再次检查列是否存在（防止其他列名不对的情况）
+        if col not in tree._full_df.columns:
+            logger.warning(f"Sort column '{col}' not found in DataFrame columns: {tree._full_df.columns.tolist()}")
+            return
 
         # 排序完整数据
         df_sorted = tree._full_df.sort_values(col, ascending=not reverse)

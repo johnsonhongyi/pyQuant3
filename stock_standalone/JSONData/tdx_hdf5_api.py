@@ -188,13 +188,14 @@ class SafeHDFStore(pd.HDFStore):
             with timed_ctx("reopen_hdf"):
                 super().__init__(self.fname, **kwargs)
 
-        # 锁处理
         if self.mode != 'r':
             with timed_ctx("acquire_lock"):
                 self._acquire_lock()
         else:
             with timed_ctx("wait_for_lock"):
-                self._wait_for_lock()
+                # 原来只 wait 不 acquire，导致写者可能插入
+                # 现在改为：读也加锁（虽然牺牲并发，但保证安全）
+                self._acquire_lock()
 
         # 检查损坏 key
         # with timed_ctx("check_corrupt_keys"):
@@ -1739,44 +1740,50 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
     # When filtering by code list
     # -------------------------
     if code_l is not None:
+        delete_corrupt_file = False
         if table is not None:
             with SafeHDFStore(fname, mode='r') as store:
                 if store is not None:
                     keys = store.keys()
-                    log.debug("HDF5 file: %s, keys: %s", fname, keys)
                     
-                    if showtable:
-                        log.debug("HDF5 file %s contents keys: %s", fname, keys)
                     try:
                         table_key = '/' + table
-                        log.debug("Trying to access table key: %s", table_key)
-
                         if table_key in keys:
-                            # 直接读取对象（避免无谓 copy）
                             obj = store.get(table)
                             if isinstance(obj, pd.DataFrame):
                                 dd = obj
-                                log.debug("Loaded DataFrame shape: %s", dd.shape)
-                                # 可选：显示前几行预览
-                                log.debug("DataFrame preview:\n%s", dd.head(2))
                             else:
-                                log.error(
-                                    "Unexpected object type from HDF5: %s, key: %s, fname: %s",
-                                    type(obj), table_key, fname
-                                )
                                 dd = pd.DataFrame()
                         else:
-                            log.warning(
-                                "Table key not found in HDF5: %s, available keys: %s", table_key, keys
-                            )
                             dd = pd.DataFrame()
 
                     except Exception as e:
-                        log.exception("load_hdf_db exception for file %s, table %s", fname, table)
+                        log.error(f"load_hdf_db error {fname}/{table}: {e}")
                         dd = pd.DataFrame()
+                        # 判定是否为严重损坏
+                        if isinstance(e, AttributeError) or "UnImplemented" in str(e) or "HDF5ExtError" in str(type(e).__name__):
+                             delete_corrupt_file = True
                 else:
-                    log.error("SafeHDFStore returned None for file: %s", fname)
                     dd = pd.DataFrame()
+        
+        # 退出 with 块后执行清理
+        if delete_corrupt_file:
+            log.critical(f"Aggressive cleanup for corrupted file: {fname}")
+            try:
+                import tables
+                tables.file._open_files.close_all()
+            except: pass
+            
+            try:
+                if os.path.exists(fname):
+                    os.remove(fname)
+                    log.warning(f"Deleted corrupted file: {fname}")
+                lock_f = fname + ".lock"
+                if os.path.exists(lock_f):
+                    os.remove(lock_f)
+            except Exception as del_e:
+                log.error(f"Cleanup failed: {del_e}")
+
 
             if dd is not None and len(dd) > 0:
                 if not MultiIndex:
