@@ -130,7 +130,7 @@ def build_hma_and_trendscore(
         win_vals = np.zeros(n, dtype='float32')
 
 
-    if status_callback.value:
+    if get_status(status_callback):
         # ---------- 4️⃣ 最近 N 天成交量因子 ----------
         vol_cols = [f'{lastv_prefix}{i}d' for i in range(1, max_days+1)]
         vol_cols = [c for c in vol_cols if c in df.columns]
@@ -1220,6 +1220,30 @@ def wait_or_break(seconds, stop_conditions):
                 log.warning(f"stop_condition error: {e}")
         time.sleep(1)
 
+def get_status(status_callback):
+    """
+    统一读取 status：
+    - None        → 0
+    - mp.Value    → value
+    - callable    → callable()
+    - 其他        → bool 转 int
+    """
+    if status_callback is None:
+        return 0
+
+    # multiprocessing.Value / Manager.Value
+    if hasattr(status_callback, "value"):
+        return int(status_callback.value)
+
+    # callable（不推荐，但兼容）
+    if callable(status_callback):
+        try:
+            return int(status_callback())
+        except Exception:
+            return 0
+
+    return int(bool(status_callback))
+
 
 # ---------- while True 循环 ----------
 # # ---------- 停止刷新 ----------
@@ -1277,7 +1301,8 @@ def fetch_and_process(
     logger.info("ℹ️ fetch_and_process running in data-only mode (IPC via Queue)")
 
     logger.info(f"init resample: {resample} flag: {flag.value if flag else 'None'} detect_calc_support: {detect_calc_support_val}")
-    last_status = status_callback.value 
+    last_status = get_status(status_callback)
+
     while True:
         try:
             time_s = time.time()
@@ -1383,8 +1408,8 @@ def fetch_and_process(
                     time.sleep(1)
                 continue
 
-            elif status_callback.value != last_status:
-                last_status = status_callback.value
+            elif get_status(status_callback) != last_status:
+                last_status = get_status(status_callback)
 
             elif START_INIT > 0 and (not cct.get_work_time()):
                     # logger.info(f'not worktime and work_duration')
@@ -1394,7 +1419,7 @@ def fetch_and_process(
                     #     time.sleep(1)
                     wait_or_break(5, [
                         lambda: not flag.value,          # 外部手动停止
-                        lambda: status_callback.value != last_status,
+                        lambda: get_status(status_callback) != last_status,
                     ])
                     continue
             else:
@@ -1438,7 +1463,7 @@ def fetch_and_process(
          
             with timed_ctx("calc_indicators", warn_ms=1000):
                 top_all = calc_indicators(top_all, logger, resample)
-            logger.info(f"resample Main  top_all:{len(top_all)} market : {market}  resample: {resample}  status_callback: {status_callback.value} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
+            logger.info(f"resample Main  top_all:{len(top_all)} market : {market}  resample: {resample}  status_callback: {get_status(status_callback)} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
             # top_all = calc_indicators(top_all, resample)
 
             if top_all is not None and not top_all.empty:
@@ -1550,7 +1575,7 @@ def fetch_and_process(
 
             stop_conditions = [
                 lambda: not flag.value,
-                lambda: status_callback.value != last_status,
+                lambda: get_status(status_callback) != last_status,
                 lambda: g_values.getkey("resample") and g_values.getkey("resample") != resample,
                 lambda: g_values.getkey("market") and g_values.getkey("market") != market,
                 lambda: g_values.getkey("st_key_sort") and g_values.getkey("st_key_sort") != st_key_sort
