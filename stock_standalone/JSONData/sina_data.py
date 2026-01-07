@@ -152,7 +152,6 @@ class StockCode:
         self.exceptCount = cct.GlobalValues().getkey('exceptCount')
         log.info(f'stock_code_path: {os.path.getsize(self.stock_code_path)}')
         # file_days = file_modified_days_ago(self.stock_code_path)
-
         if  self.exceptCount is None and (not os.path.exists(self.stock_code_path) or os.path.getsize(self.stock_code_path) < 500):
             stock_codes = self.get_stock_codes(True)
             log.info(("create:%s counts:%s" % (self.stock_code_path, len(stock_codes))))
@@ -188,7 +187,6 @@ class StockCode:
         stock_codes = list(set([elem for elem in stock_codes if elem.startswith(('60', '30', '00','688','43','83','87','92'))]))
         '''
 
-        
         df = rl.get_sina_Market_json('all')
         stock_codes = df.index.tolist()
         # stock_info_bj_name_code_df = stock_info_bj_name_code()
@@ -212,8 +210,8 @@ class StockCode:
             [type] -- [description]
         """
         # print "days:",cct.creation_date_duration(self.stock_code_path)
-
-        if realtime:
+        is_trading_time = cct.get_trade_date_status() and (930 <= cct.get_now_time_int() <= 1500)
+        if realtime and is_trading_time:
             # all_stock_codes_url = 'http://www.shdjt.com/js/lib/astock.js'
             # grep_stock_codes = re.compile('~(\d+)`')
             # response = requests.get(all_stock_codes_url)

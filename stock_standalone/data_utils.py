@@ -1207,18 +1207,18 @@ def fetch_and_process_timed_ctx(shared_dict: Dict[str, Any], queue: Any, blkname
             logger.error("background error", exc_info=True)
             time.sleep(duration_sleep_time)
 
-# def wait_or_break(seconds, stop_conditions):
-#     """
-#     每秒检查 stop_conditions 列表中任意条件是否为 True，如果为 True 则提前退出循环
-#     """
-#     for _ in range(seconds):
-#         for cond in stop_conditions:
-#             try:
-#                 if cond():
-#                     return  # 条件触发，提前退出等待
-#             except Exception as e:
-#                 log.warning(f"stop_condition error: {e}")
-#         time.sleep(1)
+def wait_or_break(seconds, stop_conditions):
+    """
+    每秒检查 stop_conditions 列表中任意条件是否为 True，如果为 True 则提前退出循环
+    """
+    for _ in range(seconds):
+        for cond in stop_conditions:
+            try:
+                if cond():
+                    return  # 条件触发，提前退出等待
+            except Exception as e:
+                log.warning(f"stop_condition error: {e}")
+        time.sleep(1)
 
 
 # ---------- while True 循环 ----------
@@ -1283,9 +1283,12 @@ def fetch_and_process(
             time_s = time.time()
             # status = status_callback.value  # 获取最新状态
             if not flag.value:   # 停止刷新
-                   for _ in range(5):
-                        if not flag.value: break
-                        time.sleep(1)
+                   # for _ in range(5):
+                   #      if not flag.value: break
+                   #      time.sleep(1)
+                   wait_or_break(5, [
+                       lambda: not flag.value,          # 外部手动停止
+                   ])
                    continue
             elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
                 top_now = pd.DataFrame()
@@ -1385,14 +1388,14 @@ def fetch_and_process(
 
             elif START_INIT > 0 and (not cct.get_work_time()):
                     # logger.info(f'not worktime and work_duration')
-                    for _ in range(5):
-                        if not flag.value or status_callback.value != last_status:
-                            break
-                        time.sleep(1)
-                    # wait_or_break(5, [
-                    #     lambda: not flag.value,          # 外部手动停止
-                    #     lambda: status_callback.value != last_status,
-                    # ])
+                    # for _ in range(5):
+                    #     if not flag.value or status_callback.value != last_status:
+                    #         break
+                    #     time.sleep(1)
+                    wait_or_break(5, [
+                        lambda: not flag.value,          # 外部手动停止
+                        lambda: status_callback.value != last_status,
+                    ])
                     continue
             else:
                 logger.info(f'start work : {cct.get_now_time()} get_work_time: {cct.get_work_time()} , START_INIT :{START_INIT} ')
@@ -1435,7 +1438,7 @@ def fetch_and_process(
          
             with timed_ctx("calc_indicators", warn_ms=1000):
                 top_all = calc_indicators(top_all, logger, resample)
-            logger.info(f"resample Main  top_all:{len(top_all)} market : {market}  resample: {resample} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
+            logger.info(f"resample Main  top_all:{len(top_all)} market : {market}  resample: {resample}  status_callback: {status_callback.value} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
             # top_all = calc_indicators(top_all, resample)
 
             if top_all is not None and not top_all.empty:
@@ -1545,15 +1548,29 @@ def fetch_and_process(
             else:
                 sleep_step = 1
 
+            stop_conditions = [
+                lambda: not flag.value,
+                lambda: status_callback.value != last_status,
+                lambda: g_values.getkey("resample") and g_values.getkey("resample") != resample,
+                lambda: g_values.getkey("market") and g_values.getkey("market") != market,
+                lambda: g_values.getkey("st_key_sort") and g_values.getkey("st_key_sort") != st_key_sort
+            ]
+
             for _ in range(int(loop_sleep_time / sleep_step)):
-                if not flag.value:
+                # if not flag.value:
+                #     break
+                # elif status_callback.value != last_status:
+                #     break
+                # elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
+                #     break
+                # elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
+                #     break
+                # elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
+                #     break
+                
+                if any(cond() for cond in stop_conditions):
                     break
-                elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
-                    break
-                elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
-                    break
-                elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
-                    break
+                # wait_or_break(5, stop_conditions)
                 time.sleep(sleep_step)
             START_INIT = 1
 
