@@ -2088,9 +2088,13 @@ def get_ramdisk_path(filename: str, lock: bool = False) -> Optional[str]:
     if lock:
         filename = name + '.lock'
     else:
-        if ext.lower() in ('.pkl', '.json'):
-            pass  # 保持不变
-        elif ext.lower() == '.h5':
+        # if ext.lower() in ('.pkl', '.json'):
+        #     pass  # 保持不变
+        # elif ext.lower() == '.h5':
+        if ext.lower() == '.h5':
+            pass
+        elif ext:
+            # log.info(f'')
             pass
         else:
             filename = name + '.h5'
