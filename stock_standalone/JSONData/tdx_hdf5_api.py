@@ -1414,6 +1414,47 @@ def safe_remove_h5_table(h5, table, max_retry=5, retry_interval=0.2):
     logger.warning(f"Failed to remove HDF5 table {table} after {max_retry} attempts")
     return False
 
+def put_table_safe(h5, table, df, *,
+                   MultiIndex=False,
+                   rewrite=False,
+                   complib='blosc'):
+
+    #单文件模式
+    key = '/' + table
+
+    if key in h5.keys():
+        if not MultiIndex:
+            safe_remove_h5_table(h5, table)
+            h5.put(
+                table, df,
+                format='table',
+                append=False,
+                complib=complib,
+                data_columns=True
+            )
+        else:
+            if rewrite or len(h5[table]) < 1:
+                safe_remove_h5_table(h5, table)
+
+            h5.put(
+                table, df,
+                format='table',
+                index=False,
+                append=True,
+                complib=complib,
+                data_columns=True
+            )
+    else:
+        h5.put(
+            table, df,
+            format='table',
+            index=MultiIndex is False,
+            append=MultiIndex,
+            complib=complib,
+            data_columns=True
+        )
+
+
 def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount=500, append=True, MultiIndex=False,rewrite=False,showtable=False):
 
     if 'code' in df.columns:
@@ -1541,35 +1582,70 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
         # Atomic Write Optimization: Write to temp file and then rename
         temp_fname = fname + ".tmp." + str(os.getpid())
         temp_fname = cct.get_ramdisk_path(temp_fname)
+        fname_path = cct.get_ramdisk_path(fname)
 
         try:
-            # Ensure parent directory exists
-            os.makedirs(os.path.dirname(os.path.abspath(temp_fname)), exist_ok=True)
+            # # Ensure parent directory exists
+            # os.makedirs(os.path.dirname(os.path.abspath(temp_fname)), exist_ok=True)
             
-            # 1. First write to a temporary HDF5 file
-            with pd.HDFStore(temp_fname, mode='w', complib=complib) as tmp_store:
-                if not MultiIndex:
-                    tmp_store.put(table, df, format='table', append=False, complib=complib, data_columns=True)
-                else:
-                    tmp_store.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
-                tmp_store.flush()
+            # # 1. First write to a temporary HDF5 file
+            # with pd.HDFStore(temp_fname, mode='w', complib=complib) as tmp_store:
+            #     if not MultiIndex:
+            #         tmp_store.put(table, df, format='table', append=False, complib=complib, data_columns=True)
+            #     else:
+            #         tmp_store.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
+            #     tmp_store.flush()
             
-                # if not MultiIndex:
-                #     h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
-                # else:
-                #     h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
-                # h5.flush()
-                
+
+            os.makedirs(os.path.dirname(os.path.abspath(fname_path)), exist_ok=True)
+
+            # 1. 复制原 h5 到 temp
+            if os.path.exists(final_fname):
+                shutil.copy2(final_fname, temp_fname)
+
+            # 2. 在 temp h5 中操作
+            with pd.HDFStore(temp_fname, mode='a', complib=complib) as tmp_h5:
+                put_table_safe(
+                    tmp_h5,
+                    table,
+                    df,
+                    MultiIndex=MultiIndex,
+                    rewrite=rewrite,
+                    complib=complib
+                )
+                tmp_h5.flush()
+
+            # # 3. 原子替换
+            # os.replace(temp_fname, final_fname)
+
+            # if h5 is not None:
+            #     if '/' + table in list(h5.keys()):
+            #         if not MultiIndex:
+            #             safe_remove_h5_table(h5, table)
+            #             h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
+            #         else:
+            #             if rewrite:
+            #                 safe_remove_h5_table(h5, table)
+            #             elif len(h5[table]) < 1:
+            #                 safe_remove_h5_table(h5, table)
+            #             h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
+            #     else:
+            #         if not MultiIndex:
+            #             h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
+            #         else:
+            #             h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
+            #     h5.flush()
+
             # 2. Atomic Replace (Requires Exclusive Lock)
             with SafeHDFStore(fname, mode='a') as h5:
                 # We have the lock, but SafeHDFStore has opened the original file.
                 # In Windows, we must close it before we can replace it.
                 h5.close() 
-                fname_path = cct.get_ramdisk_path(fname)
                 # Simple and reliable replacement
                 if os.path.exists(fname_path):
                     os.remove(fname_path)
-                os.rename(temp_fname, fname_path)
+                os.replace(temp_fname, fname_path)
+                # os.rename(temp_fname, fname_path)
                 log.debug(f"✅ Atomic replace successful: {fname} ({table}) fname_path:{fname_path}")
                 
         except Exception as e:
