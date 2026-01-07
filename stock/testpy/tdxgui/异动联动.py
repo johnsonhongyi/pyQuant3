@@ -493,6 +493,7 @@ CONFIG_FILE =  os.path.join(BASE_DIR, "window_config.json")
 ALERTS_FILE =  os.path.join(BASE_DIR, "alerts.json")
 ARCHIVE_DIR = os.path.join(BASE_DIR, "archives")
 DARACSV_DIR = os.path.join(BASE_DIR, "datacsv")
+filterCONFIG_FILE = os.path.join(BASE_DIR,"filter_stock_codes.json")  # 可以放开机自动加载的 code_list
 os.makedirs(ARCHIVE_DIR, exist_ok=True)
 os.makedirs(DARACSV_DIR, exist_ok=True)
 def check_hdf5():
@@ -598,6 +599,42 @@ def save_code_file(store, filename):
     """写回 JSON 文件"""
     with open(filename, "w", encoding="utf-8") as f:
         json.dump(store, f, ensure_ascii=False, indent=4)
+
+
+def load_keywords_from_config():
+    """开机自动加载关键字列表，按优先顺序"""
+    if os.path.exists(filterCONFIG_FILE):
+        try:
+            with open(filterCONFIG_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception as e:
+            print(f"[WARN] load_keywords_from_config error: {e}")
+    return []
+
+def load_top_keyword_from_config():
+    """读取最上面的关键字（优先级最高）"""
+    keywords = load_keywords_from_config()
+    if keywords:
+        return keywords[0]
+    return None
+
+def save_keyword_to_config(new_keyword: str):
+    """
+    保存关键字到配置：
+    - 如果已存在，删除原位置，放到最前面
+    - 如果不存在，直接放到最前面
+    """
+    keywords = load_keywords_from_config()
+    if new_keyword in keywords:
+        keywords.remove(new_keyword)
+    keywords.insert(0, new_keyword)  # 放到最前面
+    try:
+        with open(filterCONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(keywords, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"[WARN] save_keyword_to_config error: {e}")
 
 
 def add_code_to_file(code):
@@ -1887,6 +1924,7 @@ def clear_code_entry():
     
     # 清空搜索框内容并执行搜索
     code_entry.delete(0, tk.END)
+    # safe_set_stock_code(code_entry)
     search_by_code()  # 调用搜索函数
 
 # def scroll_to_code_in_treeview(monitor_tree,stock_code):
@@ -1908,9 +1946,53 @@ def scroll_to_code_in_treeview(monitor_tree, stock_code):
             monitor_tree.see(item)   # 确保该行滚动到可见
             break
 
+def filter_df_by_contains(
+    df: pd.DataFrame,
+    column: str,
+    keyword: str,
+    case: bool = False,
+    regex: bool = False,
+):
+    """
+    按字符串包含过滤 DataFrame（支持中文，安全）
+
+    :param df: 原始 DataFrame
+    :param column: 列名
+    :param keyword: 关键词（如 '航天'）
+    :param case: 是否区分大小写
+    :param regex: 是否启用正则（默认 False，更安全）
+    """
+    if df is None or df.empty:
+        return df
+
+    if column not in df.columns:
+        raise KeyError(f"column not found: {column}")
+
+    return df[
+        df[column]
+        .astype(str)
+        .str.contains(keyword, case=case, regex=regex, na=False)
+    ]
+
+def loc_df_by_code_list(
+    df: pd.DataFrame,
+    code_list,
+    code_col: str = '代码'
+) -> pd.DataFrame:
+    """
+    根据 df[code_col] ∈ code_list 过滤 DataFrame
+    """
+    if not code_list:
+        return df
+        # return df.iloc[0:0]
+
+    return df.loc[df[code_col].isin(code_list)]
+
+
+
 def search_by_code(event=None,onclick=False):
     """按代码搜索"""
-    global last_searched_code
+    global last_searched_code,today_tdx_df
     code = code_entry.get().strip()
     selected_type = type_var.get()
 
@@ -1928,8 +2010,36 @@ def search_by_code(event=None,onclick=False):
     else:
         # 非数字，模糊匹配名称
         if check_string_type(code):
+            # df = _get_stock_changes()
+            # if today_tdx_df is not None and not today_tdx_df.empty and 'category' in today_tdx_df.columns:
+            #     code_list = today_tdx_df.query(f'category.str.contains("{code}")').index.tolist()
+            #     # data = df.loc[df[code_col].isin(code_list)]
+            #     if len(code_list) > 0:
+            #         data = loc_df_by_code_list(df,code_list)
+            #     else:
+            #         data = df[df["名称"].str.contains(code, case=False, na=False)]
+            # else:
+            #     data = df[df["名称"].str.contains(code, case=False, na=False)]
             df = _get_stock_changes()
-            data = df[df["名称"].str.contains(code, case=False, na=False)]
+            data = pd.DataFrame()  # 默认空
+            if (
+                today_tdx_df is not None
+                and not today_tdx_df.empty
+                and 'category' in today_tdx_df.columns
+            ):
+                # ① 从 category 中筛代码（向量化，安全）
+                # code_list = today_tdx_df.query(f'category.str.contains("{code}")').index.tolist()
+                mask = today_tdx_df['category'].str.contains(code, na=False)
+                code_list = today_tdx_df.loc[mask].index.tolist()
+                if code_list:
+                    # ② 用代码精确过滤（最快、最准）
+                    data = df.loc[df['代码'].isin(code_list)]
+                    save_keyword_to_config(code)
+
+            # ③ 兜底：category 不可用 / 未命中 → 用名称模糊匹配
+            if data.empty:
+                data = df.loc[df['名称'].str.contains(code, case=False, na=False)]
+
 
     logger.info(f"将记录的代码: {code} onclick:{onclick}")
 
@@ -1989,7 +2099,8 @@ def search_by_type():
     """按异动类型搜索"""
     global last_searched_code
     selected_type = type_var.get()
-    code_entry.delete(0, tk.END)
+    # code_entry.delete(0, tk.END)
+    safe_set_stock_code(code_entry)
 
     status_var.set(f"加载{selected_type if selected_type else '所有'}异动数据")
     data = _get_stock_changes(selected_type=selected_type)
@@ -2045,8 +2156,9 @@ def on_tree_select(event):
         # 1. 推送代码到输入框
         if last_searched_code is None or  last_searched_code != stock_code:
             send_to_tdx(stock_code)
-            code_entry.delete(0, tk.END)
-            code_entry.insert(0, stock_code)
+            # code_entry.delete(0, tk.END)
+            # code_entry.insert(0, stock_code)
+            safe_set_stock_code(code_entry, stock_code)
             # 2. 更新其他数据（示例）
             logger.info(f"选中股票代码: {stock_code}")
         time.sleep(0.1)
@@ -5259,8 +5371,9 @@ def add_selected_stock():
             send_to_tdx(stock_code)
 
             # 1. 推送代码到输入框
-            code_entry.delete(0, tk.END)
-            code_entry.insert(0, stock_code)
+            # code_entry.delete(0, tk.END)
+            # code_entry.insert(0, stock_code)
+            safe_set_stock_code(code_entry, stock_code)
 
             logger.info(f"选中监控股票代码: {stock_code}")
         else:
@@ -5319,8 +5432,9 @@ def add_selected_stock_popup_window():
             send_to_tdx(stock_code)
 
             # 1. 推送代码到输入框
-            code_entry.delete(0, tk.END)
-            code_entry.insert(0, stock_code)
+            # code_entry.delete(0, tk.END)
+            # code_entry.insert(0, stock_code)
+            safe_set_stock_code(code_entry, stock_code)
 
             logger.info(f"选中监控股票代码: {stock_code}")
         else:
@@ -7126,7 +7240,37 @@ def flash_title(win, code, name):
 #     # 没有任何窗口
 #     return None
 
-# import tkinter as tk
+import tkinter as tk
+
+def safe_set_stock_code(entry: tk.Entry, stock_code: str=None):
+    """
+    安全写入股票代码：
+    - 如果 entry 当前内容包含中文 → 不操作
+    - 否则清空并写入 stock_code
+    """
+
+    if entry is None:
+        return
+    if stock_code is None:
+        stock_code = entry.get().strip()
+    try:
+        current = entry.get().strip()
+
+    except tk.TclError:
+        return
+
+    # 1️⃣ 如果包含中文，直接跳过
+    if re.search(r'[\u4e00-\u9fff]', current):
+        return
+
+    # 2️⃣ 可选：只在当前不是同一个 code 时才更新
+    if current == stock_code:
+        return
+
+    # 3️⃣ 清空并写入
+    entry.delete(0, tk.END)
+    entry.insert(0, stock_code)
+
 # import threading
 
 def toast_message2(parent=None, text="", duration=2000, bg="#333", fg="#fff"):
@@ -7858,8 +8002,9 @@ def open_alert_center():
             send_to_tdx(stock_code)
 
             # 1. 推送代码到输入框
-            code_entry.delete(0, tk.END)
-            code_entry.insert(0, stock_code)
+            # code_entry.delete(0, tk.END)
+            # code_entry.insert(0, stock_code)
+            safe_set_stock_code(code_entry, stock_code)
             
             # 2. 更新其他数据（示例）
             logger.info(f"选中股票代码: {stock_code}")
@@ -7875,8 +8020,9 @@ def open_alert_center():
         name = vals[2]
         # logger.info(f'on_single_click sel : {row_id} vals : {vals}')
         send_to_tdx(code)
-        code_entry.delete(0, tk.END)
-        code_entry.insert(0, code)
+        # code_entry.delete(0, tk.END)
+        # code_entry.insert(0, code)
+        safe_set_stock_code(code_entry, code)
         reset_timer()
 
     # 双击报警 → 聚焦监控窗口
@@ -7889,8 +8035,9 @@ def open_alert_center():
         name = vals[2]
         # logger.info(f'on_double_click sel : {sel} vals : {vals}')
         send_to_tdx(code)
-        code_entry.delete(0, tk.END)
-        code_entry.insert(0, code)
+        # code_entry.delete(0, tk.END)
+        # code_entry.insert(0, code)
+        safe_set_stock_code(code_entry, code)
 
 
         if code in monitor_windows.keys():
@@ -9961,8 +10108,9 @@ if __name__ == "__main__":
                 open_editors.pop(code, None)
 
         # --- ③ 打开新编辑窗口 ---
-        code_entry.delete(0, tk.END)
-        code_entry.insert(0, code)
+        # code_entry.delete(0, tk.END)
+        # code_entry.insert(0, code)
+        safe_set_stock_code(code_entry)
         search_by_code()
 
         win = open_alert_editor(code, new=True, stock_info=stock_tuple, parent_win=root)
@@ -10065,6 +10213,22 @@ if __name__ == "__main__":
     # 假设点击按钮触发后台保存
     #quene 模式
     # start_async_save_dataframe()
+    #-----------------------------
+    # 保存关键字（新关键字放最前面）
+    # save_keyword_to_config("航天")
+    # save_keyword_to_config("汽车")
+
+    # 读取所有关键字
+    all_keywords = load_keywords_from_config()
+    print(all_keywords)  # ['汽车', '航天', ...]
+
+    # 读取最优先关键字
+    top_kw = load_top_keyword_from_config()
+    # print(top_kw)  # '汽车'
+    if top_kw:
+        code_entry.delete(0, tk.END)
+        code_entry.insert(0, top_kw)
+        root.after(10000, search_by_code)  # 调用搜索函数
 
     root.after(10000, flush_alerts)
 

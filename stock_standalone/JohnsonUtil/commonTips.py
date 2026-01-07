@@ -2052,8 +2052,57 @@ def get_ramdisk_dir() -> Optional[str]:
 
 RamBaseDir = get_ramdisk_dir()
 
+# def normalize_windows_drive_path(path: str) -> str:
+#     # G:xxx → G:\xxx
+#     if len(path) >= 2 and path[1] == ':' and not path.startswith(('\\\\',)):
+#         if len(path) == 2 or path[2] != '\\':
+#             return path[:2] + '\\' + path[2:]
+#     return path
+
+
+VALID_EXTS = ('.pkl', '.json', '.h5', '.lock')
 
 def get_ramdisk_path(filename: str, lock: bool = False) -> Optional[str]:
+    if not filename:
+        return None
+
+    basedir = RamBaseDir
+    if not basedir or not os.path.isdir(basedir):
+        log.error(f"ramdisk Root Err: {basedir}")
+        return None
+
+    # 1. 如果是 Windows 且是单独盘符，自动加分隔符
+    if os.name == 'nt' and len(basedir) == 2 and basedir[1] == ':':
+        basedir += os.sep  # 自动补 '\'
+            
+    # 1️⃣ 如果已经是“真正的绝对路径”（如 G:\xxx）
+    if os.path.isabs(filename):
+        return filename
+
+    # 2️⃣ 只保留文件名，防止 G:xxx / a/b/xxx 这种污染
+    filename = os.path.basename(filename)
+
+    # 3️⃣ 扩展名处理
+    name, ext = os.path.splitext(filename)
+
+    if lock:
+        filename = name + '.lock'
+    else:
+        if ext.lower() in ('.pkl', '.json'):
+            pass  # 保持不变
+        elif ext.lower() == '.h5':
+            pass
+        else:
+            filename = name + '.h5'
+
+    # 4️⃣ 用 os.path.join，禁止字符串拼接
+    file_path = os.path.join(basedir, filename)
+
+    return file_path
+
+
+
+def get_ramdisk_path_old(filename: str, lock: bool = False) -> Optional[str]:
     if filename:
         basedir: Optional[str] = RamBaseDir
         if basedir is None or not os.path.isdir(basedir):
@@ -2078,11 +2127,6 @@ def get_ramdisk_path(filename: str, lock: bool = False) -> Optional[str]:
             return filename
 
         file_path = basedir + path_sep + filename
-        # for root in win7rootList:
-        #     basedir = root.replace('/', path_sep).replace('\\',path_sep)  # 如果你的安装路径不同,请改这里
-        #     if os.path.exists(basedir):
-        #         log.info("%s : path:%s" % (os_platform,basedir))
-        #         break
     return file_path
 # get_ramdisk_path('/Volumes/RamDisk/top_now.h5')
 
@@ -8141,6 +8185,9 @@ if __name__ == '__main__':
     '''
     # rzrq['all']='nan'
     # print(get_last_trade_date('2025-06-01'))
+    print(get_ramdisk_path("minute_kline_cache.pkl"))
+    import ipdb;ipdb.set_trace()
+
     print(f'get_work_time() : {get_work_time()}')
     st_key_sort='3 0 f'
     print(ct.get_market_sort_value_key(st_key_sort))

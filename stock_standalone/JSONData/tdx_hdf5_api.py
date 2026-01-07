@@ -193,13 +193,18 @@ class SafeHDFStore(pd.HDFStore):
                 self._acquire_lock()
         else:
             with timed_ctx("wait_for_lock"):
-                # 原来只 wait 不 acquire，导致写者可能插入
-                # 现在改为：读也加锁（虽然牺牲并发，但保证安全）
+                # 读模式仍然需要检查是否有写者，但我们可以允许并发读
+                # 这里目前维持原有的互斥逻辑，但确保它能被正确释放
                 self._acquire_lock()
 
-        # 检查损坏 key
-        # with timed_ctx("check_corrupt_keys"):
-        #     self._check_and_clean_corrupt_keys()
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            self.close()
+        finally:
+            self._release_lock()
 
     def ensure_hdf_file(self):
         """确保 HDF5 文件存在"""
@@ -425,8 +430,13 @@ class SafeHDFStore(pd.HDFStore):
 
 
     def close(self):
-        super().close()
-        # self._release_lock()
+        """关闭 HDFStore 并释放锁"""
+        try:
+            super().close()
+        except Exception as e:
+            self.log.error(f"[{self.my_pid}] super().close() failed: {e}")
+        finally:
+            self._release_lock()
 
     def write_safe(self, key, df, **kwargs):
         # from contextlib import contextmanager
@@ -1543,45 +1553,39 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                 df.index=df.index.astype(str)
                 df=df.fillna(0)
 
-        with SafeHDFStore(fname,mode='a') as h5:
-            df=df.fillna(0)
-            # df=cct.reduce_memory_usage(df,verbose=False)
-            log.info(f'df.shape:{df.shape}')
-            if h5 is not None:
-                if '/' + table in list(h5.keys()):
-                    if not MultiIndex:
-                        safe_remove_h5_table(h5, table)
-                        h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
-                    else:
-                        if rewrite:
-                            safe_remove_h5_table(h5, table)
-                        elif len(h5[table]) < 1:
-                            safe_remove_h5_table(h5, table)
-                        h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
-
-                    # if not MultiIndex:
-                    #     h5.remove(table)
-                    #     h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
-                    #     # h5.put(table, df, format='table',index=False, data_columns=True, append=False)
-                    # else:
-                    #     if rewrite:
-                    #         h5.remove(table)
-                    #     elif len(h5[table]) < 1:
-                    #         h5.remove(table)
-                    #     h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
-                    #     # h5.append(table, df, format='table', append=True,data_columns=True, dropna=None)
+        # Atomic Write Optimization: Write to temp file and then rename
+        temp_fname = fname + ".tmp." + str(os.getpid())
+        try:
+            # Ensure parent directory exists
+            os.makedirs(os.path.dirname(os.path.abspath(temp_fname)), exist_ok=True)
+            
+            # 1. First write to a temporary HDF5 file
+            with pd.HDFStore(temp_fname, mode='w', complib=complib) as tmp_store:
+                if not MultiIndex:
+                    tmp_store.put(table, df, format='table', append=False, data_columns=True)
                 else:
-                    if not MultiIndex:
-                        # h5[table]=df
-                        h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
-                        # h5.put(table, df, format='table',index=False, data_columns=True, append=False)
-                    else:
-                        h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
-                        # h5.append(table, df, format='table', append=True, data_columns=True, dropna=None)
-                        # h5[table]=df
-                h5.flush()
-            else:
-                log.error("HDFile is None,Pls check:%s" % (fname))
+                    tmp_store.put(table, df, format='table', index=False, data_columns=True, append=False)
+                tmp_store.flush()
+            
+            # 2. Atomic Replace (Requires Exclusive Lock)
+            with SafeHDFStore(fname, mode='a') as h5:
+                # We have the lock, but SafeHDFStore has opened the original file.
+                # In Windows, we must close it before we can replace it.
+                h5.close() 
+                
+                # Simple and reliable replacement
+                if os.path.exists(fname):
+                    os.remove(fname)
+                os.rename(temp_fname, fname)
+                log.info(f"✅ Atomic replace successful: {fname} ({table})")
+                
+        except Exception as e:
+            log.error(f"❌ Atomic write failure for {fname}: {e}")
+            if os.path.exists(temp_fname):
+                try: os.remove(temp_fname)
+                except: pass
+            return False
+            
     log.info("write hdf time:%0.2f" % (time.time() - time_t))
     return True
 

@@ -103,6 +103,7 @@ if sys.platform.startswith('win'):
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 from trading_analyzerQt6 import TradingGUI
+from minute_kline_viewer_qt import KlineBackupViewer
 
 # ✅ 性能优化模块导入
 try:
@@ -222,7 +223,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.last_dpi_scale = self.scale_factor
         # 3. 接下来是 Qt 初始化，它不应该影响 self.scale_factor
         if not QtWidgets.QApplication.instance():
-            self.app = pg.mkQApp()
+            self.app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
 
         self.title("Stock Monitor")
         self.initial_w, self.initial_h, self.initial_x, self.initial_y  = self.load_window_position(self, "main_window", default_width=1200, default_height=480)
@@ -681,6 +682,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             if hasattr(self, "manager"):
                 try:
+                    # 10.5 退出前强制保存 K 线记录，确保数据清洗成果持久化
+                    if hasattr(self, "realtime_service") and self.realtime_service:
+                        logger.info("正在执行 MinuteKlineCache 退出保存...")
+                        self.realtime_service.save_cache(force=True)
+
                     # 断开代理引用，防止 shutdown 时的 BrokenPipe
                     self.realtime_service = None
                     self.global_dict = None
@@ -1210,7 +1216,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","复盘数据", "盈亏统计", "交易分析Qt6", "覆写TDX", "手札总览", "语音预警"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","复盘数据", "盈亏统计", "交易分析Qt6", "GUI 工具", "覆写TDX", "手札总览", "语音预警"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -1245,6 +1251,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.open_trade_report_window()
             elif action == "交易分析Qt6":
                 self.open_trading_analyzer_qt6()
+            elif action == "GUI 工具":
+                self.open_kline_viewer_qt()
             elif action == "复盘数据":
                 self.open_strategy_backtest_view()
 
@@ -4417,7 +4425,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not hasattr(self, "_trading_gui_qt6") or self._trading_gui_qt6 is None:
                 # 确保 Qt 环境已初始化
                 if not QtWidgets.QApplication.instance():
-                    _ = pg.mkQApp()
+                    self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
                 
                 self._trading_gui_qt6 = TradingGUI(sender=self.sender,on_tree_scroll_to_code=self.tree_scroll_to_code)
                 
@@ -4428,6 +4436,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"Failed to open TradingGUI Qt6: {e}")
             messagebox.showerror("错误", f"启动 Qt6 分析工具失败: {e}")
+
+    def open_kline_viewer_qt(self):
+        """打开 Qt 版本的 K 线缓存查看器"""
+        try:
+            if not hasattr(self, "_kline_viewer_qt") or self._kline_viewer_qt is None:
+                # 确保 Qt 环境已初始化
+                if not QtWidgets.QApplication.instance():
+                    self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
+                
+                # 连接双击代码到 TDX 联动，并传入实时服务代理
+                self._kline_viewer_qt = KlineBackupViewer(
+                    on_code_callback=self.on_code_click,
+                    service_proxy=self.realtime_service
+                )
+                
+            self._kline_viewer_qt.show()
+            self._kline_viewer_qt.raise_()
+            self._kline_viewer_qt.activateWindow()
+            toast_message(self, "K线查看器 (Qt) 已启动")
+        except Exception as e:
+            logger.error(f"Failed to open KlineBackupViewer: {e}")
+            messagebox.showerror("错误", f"启动 GUI 查看器失败: {e}")
 
     def open_strategy_backtest_view(self):
         """预留：打开策略复盘与AI优化建议视图"""
