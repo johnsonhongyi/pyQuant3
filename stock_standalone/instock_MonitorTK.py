@@ -4035,6 +4035,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             frame.pack(fill="both", expand=True)
 
             # --- 底部按钮区 (优先 Pack 保证可见) ---
+            def delete_monitor():
+                if hasattr(self, 'live_strategy'):
+                     try:
+                        self.live_strategy.remove_monitor(code)
+                        logger.info(f"Deleted alarm rule for {code} from alert popup")
+                        btn_del.config(text="🗑️已删除", state="disabled")
+                        # 延时关闭窗口
+                        win.after(50, lambda: self._close_alert(win, is_manual=True))
+                     except Exception as e:
+                        logger.error(f"Remove monitor error: {e}")
+
             def send_to_tdx():
                 if hasattr(self, 'sender'):
                      try:
@@ -4048,8 +4059,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             btn_frame = tk.Frame(frame, bg="#fff")
             btn_frame.pack(side="bottom", fill="x", pady=5)
             
-            btn_send = tk.Button(btn_frame, text="🚀 发送到通达信", command=send_to_tdx, bg="#e0f7fa", font=("Arial", 10, "bold"), cursor="hand2")
+            btn_send = tk.Button(btn_frame, text="🚀发送", command=send_to_tdx, bg="#e0f7fa", font=("Arial", 10, "bold"), cursor="hand2")
             btn_send.pack(side="left", fill="x", expand=True, padx=5)
+
+            btn_del = tk.Button(btn_frame, text="🗑️删除", command=delete_monitor, bg="#ffcdd2", cursor="hand2")
+            btn_del.pack(side="left", padx=5)
             
             tk.Button(btn_frame, text="关闭", command=lambda: self._close_alert(win, is_manual=True), bg="#eee").pack(side="right", padx=5)
 
@@ -4680,25 +4694,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except ValueError:
                     del_idx = 0
 
-                # 删除行
-                tree.delete(item)
-
-                # --- 自动选中下一行 ---
-                children = tree.get_children()
-                if not children:
-                    return
-
-                # 如果删除的是最后一行，选中上一行
-                if del_idx >= len(children):
-                    del_idx = len(children) - 1
-
-                next_item = children[del_idx]
-                tree.selection_set(next_item)
-                tree.focus(next_item)
-                tree.see(next_item)
+                # 可选刷新数据
+                # load_data()
 
                 # 可选刷新数据
                 # load_data()
+
+                # --- 设置删除标志位，防止触发 on_voice_tree_select ---
+                self._is_deleting = True
+                try:
+                     tree.delete(item)
+                     
+                     # 选中下一行
+                     children = tree.get_children()
+                     if children:
+                         if del_idx >= len(children):
+                             del_idx = len(children) - 1
+                         next_item = children[del_idx]
+                         tree.selection_set(next_item)
+                         tree.focus(next_item)
+                         tree.see(next_item)
+                finally:
+                     # 必须确保 UI 事件循环处理完毕后再重置标志位
+                     # 使用 after_idle 确保本次事件栈清空
+                     tree.after_idle(lambda: setattr(self, '_is_deleting', False))
 
 
             # def delete_selected(event=None):
@@ -4738,6 +4757,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             #     load_data()
 
             def on_voice_tree_select(event):
+                # 检查删除标志位
+                if getattr(self, '_is_deleting', False):
+                    return
+
                 selected = tree.selection()
                 if not selected: return
                 item = selected[0]
