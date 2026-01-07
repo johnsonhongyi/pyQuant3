@@ -628,13 +628,28 @@ def save_keyword_to_config(new_keyword: str):
     """
     keywords = load_keywords_from_config()
     if new_keyword in keywords:
-        keywords.remove(new_keyword)
+        if keywords != keywords[0]:
+            keywords.remove(new_keyword)
+        else:
+            return 
     keywords.insert(0, new_keyword)  # 放到最前面
     try:
         with open(filterCONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(keywords, f, ensure_ascii=False, indent=2)
     except Exception as e:
         print(f"[WARN] save_keyword_to_config error: {e}")
+
+
+def delete_keyword_from_config(keyword: str):
+    """从配置中删除关键字"""
+    keywords = load_keywords_from_config()
+    if keyword in keywords:
+        keywords.remove(keyword)
+        try:
+            with open(filterCONFIG_FILE, "w", encoding="utf-8") as f:
+                json.dump(keywords, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"[WARN] delete_keyword_from_config error: {e}")
 
 
 def add_code_to_file(code):
@@ -1988,13 +2003,18 @@ def loc_df_by_code_list(
 
     return df.loc[df[code_col].isin(code_list)]
 
-
+# 保存防抖的 after_id
+search_after_id = None
 
 def search_by_code(event=None,onclick=False):
     """按代码搜索"""
-    global last_searched_code,today_tdx_df
+    global last_searched_code,today_tdx_df,search_after_id
     code = code_entry.get().strip()
     selected_type = type_var.get()
+    if search_after_id == code:
+        return
+    else:
+        search_after_id = code
 
     if code.isdigit():  # 输入是数字
         if len(code) == 6:
@@ -2006,7 +2026,6 @@ def search_by_code(event=None,onclick=False):
 
     # elif last_searched_code:  # If no code is entered, use the last searched code
     #     search_by_type() 
-
     else:
         # 非数字，模糊匹配名称
         if check_string_type(code):
@@ -2020,8 +2039,16 @@ def search_by_code(event=None,onclick=False):
             #         data = df[df["名称"].str.contains(code, case=False, na=False)]
             # else:
             #     data = df[df["名称"].str.contains(code, case=False, na=False)]
+
+            # 保存历史记录并更新下拉列表
+            save_keyword_to_config(code)
+            all_keywords = load_keywords_from_config()
+            if code_entry:
+                code_entry['values'] = all_keywords
+
             df = _get_stock_changes()
             data = pd.DataFrame()  # 默认空
+            today_tdx_df = _get_tdx_data_df()
             if (
                 today_tdx_df is not None
                 and not today_tdx_df.empty
@@ -2163,11 +2190,35 @@ def on_tree_select(event):
             logger.info(f"选中股票代码: {stock_code}")
         time.sleep(0.1)
 
+def delete_current_keyword_ui():
+    """删除当前选中的关键字并更新下拉列表"""
+    code = code_entry.get().strip()
+    if code:
+        delete_keyword_from_config(code)
+        all_keywords = load_keywords_from_config()
+        if code_entry:
+            code_entry['values'] = all_keywords
+            if all_keywords:
+                code_entry.set(all_keywords[0])
+            else:
+                code_entry.set("")
+            search_by_code() # 刷新搜索结果
+
+
 def on_code_entry_change(event=None):
     """处理代码输入框变化事件"""
     code = code_entry.get().strip()
-    if len(code) == 6:  # 仅当输入长度等于6时触发联动
-         # _get_stock_changes(stock_code=code)
+    if not code:
+        return
+
+    # 自动保存历史记录并更新下拉列表
+    if len(code) >= 2:  # 只有当长度大于等于2时才记录，避免单字符干扰
+        save_keyword_to_config(code)
+        all_keywords = load_keywords_from_config()
+        if code_entry:
+            code_entry['values'] = all_keywords
+
+    if len(code) == 6 and code.isdigit():  # 仅当输入长度等于6时触发联动
         send_to_tdx(code)
 
 # 1. 定义一个全局变量来存储最近的事件对象
@@ -9279,24 +9330,43 @@ def refresh_all_stock_data():
         sina_realtime_status = True
         _tdx_df = _get_tdx_data_df()
         # ② 只取 high4 列
-        if 'high4' not in _tdx_df.columns:
-            logger.error(f'high4 not in _tdx_df count:{len(_tdx_df)}')
+        if _tdx_df is not None and not _tdx_df.empty:
+            if 'high4' not in _tdx_df.columns:
+                logger.error(f'high4 not in _tdx_df count:{len(_tdx_df)}')
 
+            else:
+                high4_df = _tdx_df[['high4']]
+                # ③ 合并到 sina_data_df
+                if data is not None and not data.empty:
+                    data = data.join(high4_df, how='left')
+            check_monitor_break_high4(monitor_windows=monitor_windows,df=data, logger=logger)
+            for stock_code, row in data.iterrows():
+                if stock_code  in alerts_rules.keys():
+                    price = row.close
+                    name = row['name']
+                    percent = round((row.close - row.llastp) / row.llastp *100,1)
+                    amount = round(row.turnover/100/10000/100,1)
+                    logger.debug(f'sina_data-check_alert:{stock_code} {name}')
+                    check_alert(stock_code, price, percent, amount , name)
         else:
-            high4_df = _tdx_df[['high4']]
-            # ③ 合并到 sina_data_df
+            data = _get_stock_changes()
             if data is not None and not data.empty:
-                data = data.join(high4_df, how='left')
-        check_monitor_break_high4(monitor_windows=monitor_windows,df=data, logger=logger)
-        for stock_code, row in data.iterrows():
-            if stock_code  in alerts_rules.keys():
-                price = row.close
-                name = row['name']
-                percent = round((row.close - row.llastp) / row.llastp *100,1)
-                amount = round(row.turnover/100/10000/100,1)
-                logger.debug(f'sina_data-check_alert:{stock_code} {name}')
-                check_alert(stock_code, price, percent, amount , name)
-
+                if '涨幅' not in data.columns:
+                    data = process_full_dataframe(data)
+                data = get_latest_valid_data(data)
+                for _, row in data.iterrows():
+                    stock_code = row["代码"]
+                    if stock_code  in alerts_rules.keys():
+                        # if stock_code == '603083':
+                        #     import ipdb;ipdb.set_trace()
+                        name = row["名称"]
+                        price = row["价格"]
+                        change = row["涨幅"]
+                        volume = row["量"]
+                        # 调用你的报警检查
+                        if not sina_realtime_status:
+                            check_alert(stock_code, price, change, volume,name)
+                            
     elif loaded_df is not None and not loaded_df.empty:
         data = loaded_df.copy()  # 每只股票：code, price, change, volume
     elif realdatadf is not None and not realdatadf.empty:
@@ -9940,49 +10010,62 @@ if __name__ == "__main__":
         radio_container.grid_columnconfigure(c, weight=1)
             
     # # 创建搜索框和按钮
-    search_frame = tk.Frame(root, bg="#f0f0f0", padx=10, pady=10)
+    # # 创建搜索框和按钮
+    search_frame = tk.Frame(root, bg="#f0f0f0", padx=5, pady=5)
     search_frame.pack(fill=tk.X, padx=10)
 
-    tk.Label(search_frame, text="股票代码搜索:", font=('Microsoft YaHei', 9), 
-            bg="#f0f0f0").pack(side=tk.LEFT, padx=(0, 5))
+    tk.Label(search_frame, text="代码:", font=('Microsoft YaHei', 9), 
+            bg="#f0f0f0").pack(side=tk.LEFT, padx=(0, 2))
 
-    code_entry = tk.Entry(search_frame, width=10, font=('Microsoft YaHei', 9))
+    # 加载历史记录
+    all_keywords = load_keywords_from_config()
+    code_entry = ttk.Combobox(search_frame, width=12, font=('Microsoft YaHei', 9), values=all_keywords)
     code_entry.pack(side=tk.LEFT, padx=5)
+    
+    # 默认选择第一个
+    if all_keywords:
+        code_entry.set(all_keywords[0])
+
     code_entry.bind("<KeyRelease>", on_code_entry_change)
+    code_entry.bind("<<ComboboxSelected>>", lambda e: search_by_code())
     code_entry.bind("<Return>", search_by_code)
     code_entry.bind("<Button-3>", right_click_paste)
 
     search_btn = tk.Button(search_frame, text="搜索", command=lambda: search_by_code(onclick=True), 
                           font=('Microsoft YaHei', 9), bg="#5b9bd5", fg="white",
-                          padx=12, pady=2, relief="flat")
+                          padx=5, pady=2, relief="flat")
     search_btn.pack(side=tk.LEFT, padx=2)
+
+    delete_btn = tk.Button(search_frame, text="删除", command=delete_current_keyword_ui,
+                          font=('Microsoft YaHei', 9), bg="#f44336", fg="white",
+                          padx=5, pady=2, relief="flat")
+    delete_btn.pack(side=tk.LEFT, padx=2)
 
     clear_btn = tk.Button(search_frame, text="清空", 
                          command=clear_code_entry,
                          font=('Microsoft YaHei', 9), 
-                         padx=2, pady=2)
-
+                         padx=5, pady=2)
     clear_btn.pack(side=tk.LEFT, padx=2)
-    clear_all_btn = tk.Button(search_frame, text="清除", 
-                         command=lambda: [type_var.set(""), search_by_type()],
-                         font=('Microsoft YaHei', 9), 
-                         padx=2, pady=2)
-    clear_all_btn.pack(side=tk.RIGHT, padx=2)
 
+    archive_loader_btn = tk.Button(search_frame, text="存档", command=open_archive_loader,
+                                  font=('Microsoft YaHei', 9), padx=5, pady=2)
+    archive_loader_btn.pack(side=tk.RIGHT, padx=2)
+
+    btn_rearrange = tk.Button(search_frame, text="重排", command=rearrange_monitors_per_screen,
+                             font=('Microsoft YaHei', 9), padx=5, pady=2)
+    btn_rearrange.pack(side=tk.RIGHT, padx=2)
 
     analysi = tk.Button(search_frame, text="分析", 
                          command=lambda r=root: open_detailed_analysis(r),
                          font=('Microsoft YaHei', 9), 
-                         padx=2, pady=2)
+                         padx=5, pady=2)
     analysi.pack(side=tk.RIGHT, padx=2)
 
-    btn_rearrange = tk.Button(search_frame, text="重排", command=rearrange_monitors_per_screen,font=('Microsoft YaHei', 9), 
-                         padx=2, pady=2)
-    btn_rearrange.pack(side=tk.RIGHT,pady=2)
-
-    archive_loader_btn=tk.Button(search_frame, text="存档", command=open_archive_loader,font=('Microsoft YaHei', 9), 
-                         padx=2, pady=2)
-    archive_loader_btn.pack(side=tk.RIGHT,pady=2)
+    clear_all_btn = tk.Button(search_frame, text="清除", 
+                         command=lambda: [type_var.set(""), search_by_type()],
+                         font=('Microsoft YaHei', 9), 
+                         padx=5, pady=2)
+    clear_all_btn.pack(side=tk.RIGHT, padx=2)
 
     
 

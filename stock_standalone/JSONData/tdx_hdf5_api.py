@@ -1429,22 +1429,10 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 
     if not MultiIndex:
         df['timel']=time.time()
-        
+
     if not rewrite:
         if df is not None and not df.empty and table is not None:
-            tmpdf=[]
-            # try:
-            #     with SafeHDFStore(fname,mode='a') as store:
-            #         if store is not None:
-            #             log.debug(f"fname: {(fname)} keys:{store.keys()}")
-            #             if showtable:
-            #                 print(f"fname: {(fname)} keys:{store.keys()}")
-            #             if '/' + table in list(store.keys()):
-            #                 tmpdf=store[table]
-            #                 tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
-            # except tables.exceptions.HDF5ExtError as e:
-            #     print(f"{table_name} read error: {e}")
-            # 使用示例
+            tmpdf = pd.DataFrame()
             try:
                 with SafeHDFStore(fname, mode='a') as store:
                     if store is not None:
@@ -1460,24 +1448,24 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                 log.error(f"Failed to open store {fname}: {e}")
                 try:
                     # 强力恢复模式：如果打开失败，直接尝试清理相关文件
-                    if os.path.exists(fname):
+                    fname_path = cct.get_ramdisk_path(fname)
+                    if os.path.exists(fname_path):
                         # 尝试解锁
                         try:
                             if hasattr(SafeHDFStore, '_release_lock'):
                                 # 静态调用很难，这里简化为清理 lock 文件
-                                lock_file = fname + ".lock"
+                                lock_file = fname_path + ".lock"
                                 if os.path.exists(lock_file):
                                     os.remove(lock_file)
                         except: pass
                         
-                        os.remove(fname)
-                        log.warning(f"Deleted corrupted HDF5 file after open failure: {fname}")
+                        os.remove(fname_path)
+                        log.warning(f"Deleted corrupted HDF5 file after open failure: {fname} fname_path: {fname_path}")
                 except Exception as del_e:
-                    log.error(f"Failed to delete corrupted file {fname}: {del_e}")
+                    log.error(f"Failed to delete corrupted file {fname} fname_path: {fname_path}: {del_e}")
 
             if not MultiIndex:
                 if index:
-                    # log.error("debug index:%s %s %s"%(df,index,len(df)))
                     df.index=list(map((lambda x: str(1000000 - int(x))
                                     if x.startswith('0') else x), df.index))
                 if tmpdf is not None and len(tmpdf) > 0:
@@ -1508,11 +1496,8 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                                 df['timel']=time.time()
                                 log.error("%s %s o_time:%.1f timel:%s" % (fname, table, o_time, o_timel))
 
-        #            df=cct.combine_dataFrame(tmpdf, df, col=None,append=False)
                     log.info("read hdf time:%0.2f" % (time.time() - time_t))
                 else:
-                    # if index:
-                        # df.index = map((lambda x:str(1000000-int(x)) if x.startswith('0') else x),df.index)
                     log.info("h5 None hdf reindex time:%0.2f" %
                              (time.time() - time_t))
             else:
@@ -1547,7 +1532,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
         if 'object' in dd.values:
             dd=dd[dd == 'object'].dropna()
             col=dd.index.tolist()
-            log.info("col:%s" % (col))
+            log.debug("col:%s" % (col))
             if not MultiIndex:
                 df[col]=df[col].astype(str)
                 df.index=df.index.astype(str)
@@ -1555,6 +1540,8 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
 
         # Atomic Write Optimization: Write to temp file and then rename
         temp_fname = fname + ".tmp." + str(os.getpid())
+        temp_fname = cct.get_ramdisk_path(temp_fname)
+
         try:
             # Ensure parent directory exists
             os.makedirs(os.path.dirname(os.path.abspath(temp_fname)), exist_ok=True)
@@ -1562,22 +1549,28 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
             # 1. First write to a temporary HDF5 file
             with pd.HDFStore(temp_fname, mode='w', complib=complib) as tmp_store:
                 if not MultiIndex:
-                    tmp_store.put(table, df, format='table', append=False, data_columns=True)
+                    tmp_store.put(table, df, format='table', append=False, complib=complib, data_columns=True)
                 else:
-                    tmp_store.put(table, df, format='table', index=False, data_columns=True, append=False)
+                    tmp_store.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
                 tmp_store.flush()
             
+                # if not MultiIndex:
+                #     h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
+                # else:
+                #     h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
+                # h5.flush()
+                
             # 2. Atomic Replace (Requires Exclusive Lock)
             with SafeHDFStore(fname, mode='a') as h5:
                 # We have the lock, but SafeHDFStore has opened the original file.
                 # In Windows, we must close it before we can replace it.
                 h5.close() 
-                
+                fname_path = cct.get_ramdisk_path(fname)
                 # Simple and reliable replacement
-                if os.path.exists(fname):
-                    os.remove(fname)
-                os.rename(temp_fname, fname)
-                log.info(f"✅ Atomic replace successful: {fname} ({table})")
+                if os.path.exists(fname_path):
+                    os.remove(fname_path)
+                os.rename(temp_fname, fname_path)
+                log.debug(f"✅ Atomic replace successful: {fname} ({table}) fname_path:{fname_path}")
                 
         except Exception as e:
             log.error(f"❌ Atomic write failure for {fname}: {e}")
@@ -1586,7 +1579,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                 except: pass
             return False
             
-    log.info("write hdf time:%0.2f" % (time.time() - time_t))
+    log.debug("write hdf time:%0.2f" % (time.time() - time_t))
     return True
 
 
