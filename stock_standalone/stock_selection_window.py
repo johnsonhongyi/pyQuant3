@@ -422,10 +422,20 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                     if icon:
                         display_name = f"{icon} {display_name}"
 
+                # 格式化 Rank 为整数显示
+                score_val = row.get('score', 0)
+                score_str = str(int(score_val)) if pd.notna(rank_val) else "0"
+
+                win_val = row.get('win', 0)
+                win_str = str(int(win_val)) if pd.notna(rank_val) else "0"
+                
+                rank_val = row.get('Rank', 0)
+                rank_str = str(int(rank_val)) if pd.notna(rank_val) else "0"
+
                 self.tree.insert("", "end", iid=row['code'], values=(
-                    row['code'], display_name, row.get('status', ''), row['score'], row.get('Rank', 0), row['price'], 
+                    row['code'], display_name, row.get('status', ''), score_str, rank_str, row['price'], 
                     f"{row['percent']:.2f}", f"{row.get('昨日涨幅', 0):.2f}", f"{row.get('ratio', 0):.2f}", amount_str,
-                    row.get('连阳涨幅', 0), row.get('win', 0), row['volume'], row.get('category', ''), row['reason'], 
+                    row.get('连阳涨幅', 0), win_str, row['volume'], row.get('category', ''), row['reason'], 
                     user_status, user_reason
                 ), tags=tuple(all_tags))
             
@@ -767,8 +777,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
     def sort_tree(self, col, reverse):
         l = [(self.tree.set(k, col), k) for k in self.tree.get_children('')]
+        # 尝试转为数字排序
         try:
-            l.sort(key=lambda t: float(t[0]), reverse=reverse)
+            # 针对 rank 列或其他整数列，优先尝试 int，再 float
+            l.sort(key=lambda t: float(t[0]) if t[0] and t[0].strip() else -1, reverse=reverse)
         except ValueError:
             l.sort(reverse=reverse)
 
