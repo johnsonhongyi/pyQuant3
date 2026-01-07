@@ -20,7 +20,7 @@ from JohnsonUtil import commonTips as cct
 from JohnsonUtil import LoggerFactory
 
 logger = LoggerFactory.getLogger(name="stock_live_strategy")
-
+MAX_DAILY_ADDITIONS = cct.MAX_DAILY_ADDITIONS
 # Optional imports
 try:
     import pyttsx3
@@ -650,7 +650,8 @@ class StockLiveStrategy:
     def _scan_hot_concepts(self, df: pd.DataFrame, concept_top5: list):
         """
         扫描五大热点板块，识别龙头（增强版）
-        """
+        """
+        global MAX_DAILY_ADDITIONS
         if not self.scan_hot_concepts_status:
             return
         
@@ -681,7 +682,6 @@ class StockLiveStrategy:
             # 每日限量 5 只，避免监控列表爆炸
             # ------------------------------------------------------------------
             today_str = datetime.now().strftime('%Y-%m-%d')
-            MAX_DAILY_ADDITIONS = 6
             
             # 检查今日已添加的热点股数量
             added_today_count = sum(1 for c, d in self._monitored_stocks.items() 
@@ -1500,7 +1500,7 @@ class StockLiveStrategy:
             logger.info("Manual Hotspot Selection Triggered (Independent Batch)")
             if hasattr(self, 'df'):
                 self._import_hotspot_candidates(concept_top5=concept_top5, is_manual=True)
-                self._voice.say("手动执行热点筛选")
+                self._voice.say(f"手动执行热点筛选{MAX_DAILY_ADDITIONS}只")
                 self._scan_hot_concepts(self.df,concept_top5=concept_top5)
             # 如果是盘后强制启动，标记今日已结算，防止后续 tick 再次触发 Settlement
             if is_after_close:
@@ -1724,7 +1724,7 @@ class StockLiveStrategy:
                     "name": name,
                     "rules": [{'type': 'price_up', 'value': float(row.get('price', 0))}], 
                     "last_alert": 0,
-                    "created_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "created_time": datetime.now().strftime("%Y-%m-%d %H"),
                     "tags": tag,
                     "snapshot": {
                         "score": row.get('score', 0),
