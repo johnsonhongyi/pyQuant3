@@ -1785,113 +1785,113 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                 log.error(f"Cleanup failed: {del_e}")
 
 
-            if dd is not None and len(dd) > 0:
-                if not MultiIndex:
-                    # 若 index 模式下需要映射 code（保持原行为）
-                    if index:
-                        code_l = list(map((lambda x: str(1000000 - int(x))
-                                           if x.startswith('0') else x), code_l))
+        if dd is not None and len(dd) > 0:
+            if not MultiIndex:
+                # 若 index 模式下需要映射 code（保持原行为）
+                if index:
+                    code_l = list(map((lambda x: str(1000000 - int(x))
+                                       if x.startswith('0') else x), code_l))
 
-                    # 使用 pandas Index.intersection 替代 set 交集（更快）
-                    try:
-                        dif_index = dd.index.intersection(code_l)
-                    except Exception:
-                        # 兼容性回退（极少见）
-                        dif_index = pd.Index(list(set(dd.index) & set(code_l)))
+                # 使用 pandas Index.intersection 替代 set 交集（更快）
+                try:
+                    dif_index = dd.index.intersection(code_l)
+                except Exception:
+                    # 兼容性回退（极少见）
+                    dif_index = pd.Index(list(set(dd.index) & set(code_l)))
 
-                    # 保持原变量名 dif_co（列表形式）以兼容后续逻辑
-                    dif_co = list(dif_index)
+                # 保持原变量名 dif_co（列表形式）以兼容后续逻辑
+                dif_co = list(dif_index)
 
-                    # try:
-                    #     # 强制统一类型为字符串
-                    #     dd_list = dd.index.tolist()
-                    #     dd_set   = set(map(str, dd_list))
-                    #     code_set = set(map(str, code_l))
-                    #     dif_index = code_set - dd_set
-                    # except Exception:
-                    #     # 兼容性回退（极少见）
-                    #     dif_index = pd.Index(list(set(dd_index_str) & set(code_l_str)))
+                # try:
+                #     # 强制统一类型为字符串
+                #     dd_list = dd.index.tolist()
+                #     dd_set   = set(map(str, dd_list))
+                #     code_set = set(map(str, code_l))
+                #     dif_index = code_set - dd_set
+                # except Exception:
+                #     # 兼容性回退（极少见）
+                #     dif_index = pd.Index(list(set(dd_index_str) & set(code_l_str)))
 
-                    # # 保持原变量名 dif_co（列表形式）以兼容后续逻辑
+                # # 保持原变量名 dif_co（列表形式）以兼容后续逻辑
 
-                    # dif_co = list(dif_index)
+                # dif_co = list(dif_index)
 
-                    if len(code_l) > 0:
-                        dratio = (float(len(code_l)) - float(len(dif_co))) / float(len(code_l))
-                    else:
-                        dratio = 0.0
-
-                    log.debug("find all:%s :%s %0.2f", len(code_l), len(code_l) - len(dif_co), dratio)
-
-                    # 与原逻辑相同的 timelimit 分支
-                    if not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300) and timelimit and len(dd) > 0:
-                        # 先按 dif_co 筛选（避免对整表重复计算）
-                        if len(dif_co) > 0:
-                            # 这会返回新 DataFrame（必要时会复制）
-                            dd = dd.loc[dif_co]
-                        else:
-                            dd = dd.iloc[0:0]
-
-                        # 计算 o_time（保留最近唯一 timel 的偏移列表）
-                        o_time = []
-                        if 'timel' in dd.columns:
-                            timel_vals = dd.loc[dd['timel'] != 0, 'timel'].values
-                            if timel_vals.size > 0:
-                                unique_timel = np.unique(timel_vals)
-                                # 计算距离现在的秒数（与原逻辑一致）
-                                now_t = time.time()
-                                o_time = [now_t - float(t) for t in unique_timel]
-                                o_time.sort()  # 原代码使用 sorted(..., reverse=False)
-
-                        if len(dd) > 0:
-                            l_time = np.mean(o_time) if len(o_time) > 0 else 0.0
-                            # dd = normalize_ticktime(dd)
-                            # log.info(f'dd normalize_ticktime:{dd.ticktime[0]}')
-                            # 原先在极高命中率时用 ticktime 重新计算 dratio
-                            # print(f"ticktime: {dd['ticktime'][:5]} , l_time: {l_time} limit_time: {limit_time}")
-                            if len(code_l) / len(dd) > 0.95 and 'ticktime' in dd.columns and 'kind' not in dd.columns:
-                                try:
-                                    late_count = int((dd['ticktime'] >= "15:00:00").sum())
-                                except Exception:
-                                    # 回退到 query（兼容性）
-                                    try:
-                                        late_count = len(dd.query('ticktime >= "15:00:00"'))
-                                    except Exception:
-                                        late_count = 0
-                                dratio = (float(len(dd)) - float(late_count)) / float(len(dd)) if len(dd) > 0 else 0.0
-                                return_hdf_status = (not cct.get_work_time() and dratio < dratio_limit) or (cct.get_work_time() and l_time < limit_time)
-                            else:
-                                return_hdf_status = not cct.get_work_time() or (cct.get_work_time() and l_time < limit_time)
-
-                            if return_hdf_status:
-                                # 注意：dd 已经被筛选为 dif_co，直接使用 dd 即可
-                                df = dd
-                                log.debug("return hdf: %s timel:%s l_t:%s hdf ok:%s", fname, len(o_time), l_time, len(df))
-                        else:
-                            log.error("%s %s o_time:%s %s", fname, table, len(o_time), o_time[:3] if len(o_time) >= 3 else o_time)
-
-                        # 记录一下（调试级别）
-                        if 'o_time' in locals() and o_time:
-                            log.debug('fname:%s sample_o_time:%s', fname, o_time[:5])
-                    else:
-                        # 非 timelimit 分支，直接按 dif_co 返回（与原逻辑一致）
-                        df = dd.loc[dif_co] if len(dif_co) > 0 else dd.iloc[0:0]
-
-                    # dratio 超限处理（保持原行为）
-                    if dratio > dratio_limit:
-                        if len(code_l) > ct.h5_time_l_count * 10 and INIT_LOG_Error < 5:
-                            log.error("dratio_limit fn:%s cl:%s h5:%s don't find:%s dra:%0.2f log_err:%s",
-                                      fname, len(code_l), len(dd), len(code_l) - len(dif_co), dratio, INIT_LOG_Error)
-                            return None
-
+                if len(code_l) > 0:
+                    dratio = (float(len(code_l)) - float(len(dif_co))) / float(len(code_l))
                 else:
-                    # MultiIndex 情况按原逻辑：按 level='code' 过滤
-                    try:
-                        df = dd.loc[dd.index.isin(code_l, level='code')]
-                    except Exception:
-                        # 回退：使用 boolean mask
-                        mask = dd.index.get_level_values('code').isin(code_l)
-                        df = dd.loc[mask]
+                    dratio = 0.0
+
+                log.debug("find all:%s :%s %0.2f", len(code_l), len(code_l) - len(dif_co), dratio)
+
+                # 与原逻辑相同的 timelimit 分支
+                if not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300) and timelimit and len(dd) > 0:
+                    # 先按 dif_co 筛选（避免对整表重复计算）
+                    if len(dif_co) > 0:
+                        # 这会返回新 DataFrame（必要时会复制）
+                        dd = dd.loc[dif_co]
+                    else:
+                        dd = dd.iloc[0:0]
+
+                    # 计算 o_time（保留最近唯一 timel 的偏移列表）
+                    o_time = []
+                    if 'timel' in dd.columns:
+                        timel_vals = dd.loc[dd['timel'] != 0, 'timel'].values
+                        if timel_vals.size > 0:
+                            unique_timel = np.unique(timel_vals)
+                            # 计算距离现在的秒数（与原逻辑一致）
+                            now_t = time.time()
+                            o_time = [now_t - float(t) for t in unique_timel]
+                            o_time.sort()  # 原代码使用 sorted(..., reverse=False)
+
+                    if len(dd) > 0:
+                        l_time = np.mean(o_time) if len(o_time) > 0 else 0.0
+                        # dd = normalize_ticktime(dd)
+                        # log.info(f'dd normalize_ticktime:{dd.ticktime[0]}')
+                        # 原先在极高命中率时用 ticktime 重新计算 dratio
+                        # print(f"ticktime: {dd['ticktime'][:5]} , l_time: {l_time} limit_time: {limit_time}")
+                        if len(code_l) / len(dd) > 0.95 and 'ticktime' in dd.columns and 'kind' not in dd.columns:
+                            try:
+                                late_count = int((dd['ticktime'] >= "15:00:00").sum())
+                            except Exception:
+                                # 回退到 query（兼容性）
+                                try:
+                                    late_count = len(dd.query('ticktime >= "15:00:00"'))
+                                except Exception:
+                                    late_count = 0
+                            dratio = (float(len(dd)) - float(late_count)) / float(len(dd)) if len(dd) > 0 else 0.0
+                            return_hdf_status = (not cct.get_work_time() and dratio < dratio_limit) or (cct.get_work_time() and l_time < limit_time)
+                        else:
+                            return_hdf_status = not cct.get_work_time() or (cct.get_work_time() and l_time < limit_time)
+
+                        if return_hdf_status:
+                            # 注意：dd 已经被筛选为 dif_co，直接使用 dd 即可
+                            df = dd
+                            log.debug("return hdf: %s timel:%s l_t:%s hdf ok:%s", fname, len(o_time), l_time, len(df))
+                    else:
+                        log.error("%s %s o_time:%s %s", fname, table, len(o_time), o_time[:3] if len(o_time) >= 3 else o_time)
+
+                    # 记录一下（调试级别）
+                    if 'o_time' in locals() and o_time:
+                        log.debug('fname:%s sample_o_time:%s', fname, o_time[:5])
+                else:
+                    # 非 timelimit 分支，直接按 dif_co 返回（与原逻辑一致）
+                    df = dd.loc[dif_co] if len(dif_co) > 0 else dd.iloc[0:0]
+
+                # dratio 超限处理（保持原行为）
+                if dratio > dratio_limit:
+                    if len(code_l) > ct.h5_time_l_count * 10 and INIT_LOG_Error < 5:
+                        log.error("dratio_limit fn:%s cl:%s h5:%s don't find:%s dra:%0.2f log_err:%s",
+                                  fname, len(code_l), len(dd), len(code_l) - len(dif_co), dratio, INIT_LOG_Error)
+                        return None
+
+            else:
+                # MultiIndex 情况按原逻辑：按 level='code' 过滤
+                try:
+                    df = dd.loc[dd.index.isin(code_l, level='code')]
+                except Exception:
+                    # 回退：使用 boolean mask
+                    mask = dd.index.get_level_values('code').isin(code_l)
+                    df = dd.loc[mask]
         else:
             log.error("%s is not find %s", fname, table)
 
