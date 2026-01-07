@@ -1191,8 +1191,27 @@ class Sina:
             limit_time_int = int(self.sina_limit_time) if self.sina_limit_time else 60
             h5_mi_table = 'all_' + str(limit_time_int)
             
-            h5a.write_hdf_db(h5_mi_fname, df_mi_write, table=h5_mi_table, index=True, baseCount=500, append=False, MultiIndex=True)
-            log.info("Saved minimal mi_data: %s rows, cols: %s" % (len(df_mi_write), df_mi_write.columns.tolist()))
+            try:
+                h5a.write_hdf_db(h5_mi_fname, df_mi_write, table=h5_mi_table, index=True, baseCount=500, append=False, MultiIndex=True)
+                log.info("Saved minimal mi_data: %s rows, cols: %s" % (len(df_mi_write), df_mi_write.columns.tolist()))
+            except Exception as e:
+                log.error(f"HDF5 Write Error for {h5_mi_table}: {e}")
+                try:
+                    # 尝试清理已损坏的文件，防止死循环
+                    path = cct.get_ramdisk_path(h5_mi_fname)
+                    if not path.endswith('.h5') and not os.path.exists(path):
+                        path += '.h5'
+                    
+                    if os.path.exists(path):
+                        os.remove(path)
+                        log.warning(f"Deleted corrupt file: {path}")
+                    
+                    # 同时也清理 lock 文件
+                    lock_path = path + '.lock'
+                    if os.path.exists(lock_path):
+                         os.remove(lock_path)
+                except Exception as ex:
+                    log.error(f"Failed to auto-delete corrupt file: {ex}")
             log.info("hdf5 class all (trajectory) time:%0.2f" % (time.time() - time_s))
             
         return df
