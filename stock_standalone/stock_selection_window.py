@@ -424,10 +424,10 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
 
                 # 格式化 Rank 为整数显示
                 score_val = row.get('score', 0)
-                score_str = str(int(score_val)) if pd.notna(rank_val) else "0"
+                score_str = str(int(score_val)) if pd.notna(score_val) else "0"
 
                 win_val = row.get('win', 0)
-                win_str = str(int(win_val)) if pd.notna(rank_val) else "0"
+                win_str = str(int(win_val)) if pd.notna(win_val) else "0"
                 
                 rank_val = row.get('Rank', 0)
                 rank_str = str(int(rank_val)) if pd.notna(rank_val) else "0"

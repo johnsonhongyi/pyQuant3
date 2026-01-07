@@ -189,6 +189,9 @@ class StockCode:
 
         df = rl.get_sina_Market_json('all')
         stock_codes = df.index.tolist()
+        if len(stock_codes) < 5300:
+            log.error(f"update_stock_codes codes:{len(stock_codes)} < 5300 get_sina_Market_json获取数据不全,停止更新")
+            return (self.get_stock_codes())
         # stock_info_bj_name_code_df = stock_info_bj_name_code()
         # bj_list = stock_info_bj_name_code_df['证券代码'].tolist()
         # stock_codes.extend(bj_list)
