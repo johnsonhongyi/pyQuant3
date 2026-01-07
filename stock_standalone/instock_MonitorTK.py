@@ -6572,7 +6572,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win._btn_copy_expr.destroy()
         def _copy_expr():
             concept = getattr(win, "_concept_name","未知概念")
-            q = f'category.str.contains("{concept}", na=False)'
+            # q = f'category.str.contains("{concept}", na=False)'
+            q = concept
             pyperclip.copy(q)
             self.after(100, lambda: toast_message(self,f"已复制筛选条件：{q}"))
         btn = tk.Button(btn_frame, text="复制", command=_copy_expr)
@@ -6827,7 +6828,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 win._btn_copy_expr.destroy()
             def _copy_expr():
                 concept = getattr(win, "_concept_name","未知概念")
-                q = f'category.str.contains("{concept}", na=False)'
+                # q = f'category.str.contains("{concept}", na=False)'
+                q = concept
                 pyperclip.copy(q)
                 self.after(100, lambda: toast_message(self,f"已复制筛选条件：{q}"))
             btn = tk.Button(btn_frame, text="复制", command=_copy_expr)
@@ -7712,7 +7714,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     elif event.button() == QtCore.Qt.MouseButton.RightButton:
                         concept_text = concepts[idx]
                         clipboard = QtWidgets.QApplication.clipboard()
-                        copy_concept_text = f'category.str.contains("{concept_text}")'
+                        # copy_concept_text = f'category.str.contains("{concept_text}")'
+                        copy_concept_text = concept_text
                         clipboard.setText(copy_concept_text)
 
                         from PyQt6.QtCore import QPoint
@@ -8438,7 +8441,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 return
 
             # text = "\n".join(concepts)
-            text = f'category.str.contains("{concepts.strip()}")'
+            # text = f'category.str.contains("{concepts.strip()}")'
+            text = concepts.strip()
             pyperclip.copy(text)
             logger.info(f"已复制: {text}")
             # messagebox.showinfo("概念详情", f"{code} 所属概念：\n{text}")
