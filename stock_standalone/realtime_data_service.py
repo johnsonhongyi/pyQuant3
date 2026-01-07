@@ -1,16 +1,15 @@
-# -*- coding:utf-8 -*-
 import time
 import threading
 import pandas as pd
+import sqlite3
 from collections import deque, defaultdict
-from typing import Callable, Any, Dict, List, Union, Optional
+from typing import Any, Optional, cast
+from collections.abc import Callable
 from JohnsonUtil import LoggerFactory
-from JohnsonUtil import commonTips  as cct
-from cache_utils import DataFrameCacheSlot,df_fingerprint
+from JohnsonUtil import commonTips as cct
+from cache_utils import DataFrameCacheSlot, df_fingerprint
 import psutil
 import os
-import sqlite3
-import re
 logger = LoggerFactory.getLogger()
 
 # CFG = cct.GlobalConfig()
@@ -23,111 +22,230 @@ logger = LoggerFactory.getLogger()
 # Lightweight K-line item using __slots__ to save memory
 class KLineItem:
     __slots__ = ('time', 'open', 'high', 'low', 'close', 'volume', 'cum_vol_start')
-    def __init__(self, time: int, open: float, high: float, low: float, close: float, volume: float, cum_vol_start: float):
-        self.time = time
-        self.open = open
-        self.high = high
-        self.low = low
-        self.close = close
-        self.volume = volume
-        self.cum_vol_start = cum_vol_start
     
-    def as_dict(self) -> dict:
-        return {k: getattr(self, k) for k in self.__slots__}
+    def __init__(self, time: int, open: float, high: float, low: float, close: float, volume: float, cum_vol_start: float):
+        self.time: int = time
+        self.open: float = open
+        self.high: float = high
+        self.low: float = low
+        self.close: float = close
+        self.volume: float = volume
+        self.cum_vol_start: float = cum_vol_start
+    
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "time": self.time,
+            "open": self.open,
+            "high": self.high,
+            "low": self.low,
+            "close": self.close,
+            "volume": self.volume,
+            "cum_vol_start": self.cum_vol_start
+        }
 
 class MinuteKlineCache:
     """
     分时K线缓存
     每股保留最近 N 根 1分钟K线
     """
+    _max_len: int
+    _shared_cache: dict[str, deque[KLineItem]]
+    _last_update_ts: dict[str, int]
+    _is_dirty: bool
+
     def __init__(self, max_len: int = 240):
-        self.max_len = max_len
+        self._max_len = max_len
         # {code: deque([KLineItem, ...])}
-        self.cache: dict[str, deque] = {}
-        self.last_update_ts: dict[str, float] = {}
+        self._shared_cache: dict[str, deque[KLineItem]] = {}
+        self._last_update_ts: dict[str, int] = {}
+        self._is_dirty = False # 脏标记：是否有新数据产生
+        self._is_restored = False # 记录是否执行过恢复加载
+
+    def to_dataframe(self) -> pd.DataFrame:
+        """
+        转换为 DataFrame (用于外部分析或持久化)
+        增加了最终去重检查以确保数据完整性
+        """
+        data: list[dict[str, Any]] = []
+        for code, dq in self._shared_cache.items():
+            # 强制标准化 code
+            code_clean = str(code).strip().zfill(6)
+            for item in dq:
+                # 直接通过 __slots__ 提取数据，避免 as_dict() 方法调用开销
+                item_data = {s: getattr(item, s) for s in item.__slots__}
+                item_data['code'] = code_clean
+                data.append(item_data)
+        
+        if not data:
+            return pd.DataFrame()
+        
+        df = pd.DataFrame(data)
+        if df.empty:
+            return df
+            
+        # 最后的防线：确保返回的 DF 绝对没有重复的 (code, time)
+        # 强制转换类型并补齐 6 位代码，保证 drop_duplicates 和后续查看的一致性
+        df['time'] = df['time'].astype(int)
+        df['code'] = df['code'].astype(str).str.strip().str.zfill(6)
+        df = df.sort_values(['code', 'time']).drop_duplicates(subset=['code', 'time'], keep='last')
+        return df
+
+    def from_dataframe(self, df: Optional[pd.DataFrame]):
+        """
+        从 DataFrame 恢复缓存数据
+        """
+        if df is None or df.empty:
+            return
+            
+        try:
+            # 确保 code 是标准化字符串格式
+            df = df.copy()
+            if 'code' in df.columns:
+                df['code'] = df['code'].astype(str).str.strip().str.zfill(6)
+            
+            # 确保时间有序并清理可能的重复数据
+            if 'time' in df.columns:
+                df['time'] = df['time'].astype(int) 
+                df['code'] = df['code'].astype(str).str.strip().str.zfill(6)
+                df = df.sort_values(['code', 'time']).drop_duplicates(subset=['code', 'time'], keep='last')
+            
+            # 清空当前
+            self.clear()
+            
+            # 按 code 分组重建 deque
+            for code, group in df.groupby('code'):
+                code_str = str(code)
+                new_dq: deque[KLineItem] = deque(maxlen=self._max_len)
+                # itertuples 性能较好
+                for row in group.itertuples(index=False):
+                    try:
+                        # 确保所有数值都是标准类型
+                        item = KLineItem(
+                            time=int(getattr(row, 'time', 0)),
+                            open=float(getattr(row, 'open', 0.0)),
+                            high=float(getattr(row, 'high', 0.0)),
+                            low=float(getattr(row, 'low', 0.0)),
+                            close=float(getattr(row, 'close', 0.0)),
+                            volume=float(getattr(row, 'volume', 0.0)),
+                            cum_vol_start=float(getattr(row, 'cum_vol_start', 0.0))
+                        )
+                        new_dq.append(item)
+                    except (AttributeError, ValueError, TypeError):
+                        continue
+                self._shared_cache[code_str] = new_dq
+            
+            self._is_dirty = True 
+            self._is_restored = True
+            logger.info(f"♻️ MinuteKlineCache restored: {len(self._shared_cache)} stocks. [Rows: {len(df_raw)} -> Cleaned: {len(df)}]")
+        except Exception as e:
+            logger.error(f"MinuteKlineCache restore error: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+
+    @property
+    def max_len(self) -> int:
+        return self._max_len
+
+    @property
+    def cache(self) -> dict[str, deque[KLineItem]]:
+        return self._shared_cache
+
+    @property
+    def last_update_ts(self) -> dict[str, int]:
+        return self._last_update_ts
 
     def set_mode(self, max_len: int):
         """动态切换回溯时长：不清除数据，仅裁剪旧节点以回收内存"""
-        if self.max_len != max_len:
-            logger.info(f"✂️ MinuteKlineCache Trimming: {self.max_len} -> {max_len} nodes")
-            self.max_len = max_len
+        if self._max_len != max_len:
+            logger.info(f"✂️ MinuteKlineCache Trimming: {self._max_len} -> {max_len} nodes")
+            self._max_len = max_len
             # 对所有现有数据进行重建以同步 maxlen 属性
-            for code in list(self.cache.keys()):
-                dq = self.cache[code]
+            for code in list(self._shared_cache.keys()):
+                dq = self._shared_cache[code]
                 # 无论当前长度如何，都必须重建 deque 以修改只读的 maxlen 属性
-                self.cache[code] = deque(list(dq)[-max_len:], maxlen=max_len)
+                self._shared_cache[code] = deque(list(dq)[-max_len:], maxlen=max_len)
 
     def clear(self):
         """完全清空缓存"""
-        self.cache.clear()
-        self.last_update_ts.clear()
+        self._shared_cache.clear()
+        self._last_update_ts.clear()
+        self._is_dirty = False
 
-    def get_klines(self, code: str, n: int = 60) -> list:
-        if code not in self.cache:
+    def get_klines(self, code: str, n: int = 60) -> list[dict[str, Any]]:
+        if code not in self._shared_cache:
             return []
-        nodes = list(self.cache[code])[-n:]
+        nodes = list(self._shared_cache[code])[-n:]
         # Support dict-based access for existing strategy code
         return [node.as_dict() for node in nodes]
 
+    def update_batch(self, df: Optional[pd.DataFrame], subscribers: dict[str, list[Callable[..., Any]]]):
+        """
+        批量更新 K 线缓存并触发订阅
+        """
+        if df is None or df.empty:
+            return
+            
+        updated_codes: set[str] = set()
+        # 预计算时间戳 (通常一个 batch 时间一致)
+        # 如果 df 中有 time 或 timestamp 列，则使用它，否则使用当前时间
+        ts = time.time()
+        if 'time' in df.columns:
+            ts = float(df['time'].iloc[0]) # type: ignore
+        elif 'timestamp' in df.columns:
+            ts = float(df['timestamp'].iloc[0]) # type: ignore
+            
+        minute_ts = int(ts - (ts % 60))
+        
+        for row in df.itertuples(index=False):
+            code_raw = getattr(row, 'code', '')
+            if not code_raw: continue
+            code = str(code_raw).strip().zfill(6)
+            
+            price = float(cast(float, getattr(row, 'trade', getattr(row, 'now', getattr(row, 'close', 0.0)))))
+            if price <= 0: continue
+            
+            vol = float(cast(float, getattr(row, 'volume', getattr(row, 'vol', 0.0))))
+            
+            self._update_internal(code, price, vol, minute_ts)
+            updated_codes.add(code)
+            self._last_update_ts[code] = minute_ts
+            
+        # 触发订阅回调
+        if subscribers:
+            for code in updated_codes.intersection(subscribers):
+                klines = self.get_klines(code, n=1)
+                if klines:
+                    for callback in subscribers[code]:
+                        try:
+                            callback(code, klines[0])
+                        except Exception as e:
+                            logger.error(f"Callback error for {code}: {e}")
+
     def update(self, code: str, tick: dict):
         """
-        使用实时 Tick 更新 K 线 (保留单条更新接口用于兼容性)
+        单条更新接口 (主要用于兼容外部单条推送)
         """
         try:
-            price = float(tick.get('trade', 0) or tick.get('now', 0))
+            code_clean = str(code).strip().zfill(6)
+            price = float(tick.get('trade', tick.get('now', 0.0)))
             if price <= 0: return
 
-            ts = int(tick.get('timestamp') or time.time())
-            minute_ts = ts - (ts % 60)
+            ts = float(tick.get('timestamp') or tick.get('time') or time.time())
+            minute_ts = int(ts - (ts % 60))
+            vol = float(tick.get('volume', tick.get('vol', 0.0)))
             
-            # 使用更轻量、无函数调用开销的内部逻辑
-            self._update_internal(code, price, float(tick.get('volume', 0)), minute_ts)
+            self._update_internal(code_clean, price, vol, minute_ts)
+            self._last_update_ts[code_clean] = minute_ts
         except Exception as e:
-            logger.error(f"MinuteKlineCache update error: {e}")
-
-    def batch_update(self, df: pd.DataFrame, subscribers: set):
-        """
-        批量更新 K 线 (矢量化/高性能模式)
-        """
-        try:
-            if df.empty: return
-            
-            # 1. 矢量化过滤：仅处理感兴趣的股票
-            # 这样做可以避免对全市场 5000+ 股票进行循环
-            mask = df['code'].isin(self.cache.keys() | subscribers)
-            if not mask.any(): return
-            
-            active_df = df[mask]
-            
-            # 2. 预计算公共信息
-            # 假设一个 Batch 内的时间戳基本一致
-            ts = int(active_df['timestamp'].iloc[0] if 'timestamp' in active_df.columns else time.time())
-            minute_ts = ts - (ts % 60)
-            
-            # 3. 高速迭代
-            # itertuples 打包成 NamedTuple，访问速度远快于 to_dict('records')
-            # 必须指定字段顺序或直接按位置访问
-            for row in active_df.itertuples(index=False):
-                # row 对应 columns: code, trade, volume, high, low, open, amount, (timestamp)
-                # 注意：create_dummy_data 或 fetch_and_process 返回的列顺序可能不同
-                # 建议通过 getattr 访问以保证稳健性，虽然稍慢一点点但比 dict 快
-                code = row.code
-                price = getattr(row, 'trade', 0)
-                if price <= 0: continue
-                volume = getattr(row, 'volume', getattr(row, 'vol', 0))
-                
-                self._update_internal(code, price, float(volume), minute_ts)
-                
-        except Exception as e:
-            logger.error(f"MinuteKlineCache batch_update error: {e}")
+            logger.error(f"MinuteKlineCache.update error for {code}: {e}")
 
     def _update_internal(self, code: str, price: float, current_cum_vol: float, minute_ts: int):
         """
         内部核心更新逻辑（最小化开销）
         """
-        if code not in self.cache:
-            self.cache[code] = deque(maxlen=self.max_len)
-        klines = self.cache[code]
+        if code not in self._shared_cache:
+            self._shared_cache[code] = deque(maxlen=self._max_len)
+        klines = self._shared_cache[code]
         
         if not klines:
             klines.append(KLineItem(
@@ -137,15 +255,23 @@ class MinuteKlineCache:
         else:
             last_k = klines[-1]
             if last_k.time == minute_ts:
+                # 同一分钟：更新当前 K 线
                 last_k.high = max(last_k.high, price)
                 last_k.low = min(last_k.low, price)
                 last_k.close = price
+                # 累积量减去分钟起始量 = 该分钟内量
                 last_k.volume = current_cum_vol - last_k.cum_vol_start
-            else:
+                self._is_dirty = True
+            elif minute_ts > last_k.time:
+                # 新的一分钟：结算并开始新 K 线
                 klines.append(KLineItem(
                     time=minute_ts, open=price, high=price, low=price, close=price,
                     volume=0.0, cum_vol_start=current_cum_vol
                 ))
+                self._is_dirty = True
+            else:
+                # 忽略过时数据或乱序推送
+                pass
 
     def detect_v_shape(self, code: str, window: int = 30) -> bool:
         """
@@ -178,7 +304,7 @@ class MinuteKlineCache:
             # 2. 从最低点反弹力度
             # (当前 - 最低) / 最低
             if min_low == 0: return False
-            rebound = (curr_price - min_low) / min_low
+            rebound: float = (curr_price - min_low) / min_low
             
             # 3. 反弹确认
             if rebound > 0.015:
@@ -209,6 +335,7 @@ class IntradayEmotionTracker:
     盘中情绪追踪器
     计算个股及市场情绪分
     """
+    scores: dict[str, float]
     def __init__(self):
         self.scores = {} # {code: score}
 
@@ -249,21 +376,54 @@ class DataPublisher:
     """
     数据分发器 (核心入口)
     """
+    paused: bool
+    high_performance: bool
+    auto_switch_enabled: bool
+    mem_threshold_mb: float
+    node_threshold: int
+    _CACHE_FILE: str
+    _last_save_ts: float
+    _save_interval: int
+    _last_save_fp: str
+    expected_interval: int
+    last_batch_clock: float
+    scraper_interval: int
+    current_scraper_wait: int
+    max_scraper_wait: int
+    db_path: str
+    sector_cache: dict[str, float]
+    last_db_check: float
+    kline_cache: MinuteKlineCache
+    emotion_tracker: IntradayEmotionTracker
+    subscribers: dict[str, list[Callable[..., Any]]]
+    update_count: int
+    total_rows_processed: int
+    last_batch_time: float
+    max_batch_time: float
+    _last_batch_fp: str
     def __init__(self, high_performance: bool = True, scraper_interval: int = 600):
         # global FP_FILE,CACHE_FILE
         self.paused = False
         self.high_performance = high_performance # HP: ~4.0h, Legacy: ~2.0h (Dynamic nodes)
         self.auto_switch_enabled = True
         self.mem_threshold_mb = 800.0 # 阈值调低至 800MB
-        self.node_threshold = 1000000 # 默认 100万个节点触发降级
-        # self._CACHE_FILE = CACHE_FILE
-        # self._FP_FILE = FP_FILE
-        # self._last_snapshot_fp = None
-        # self.cache = DataFrameCacheSlot(
-        #         cache_file=CACHE_FILE,
-        #         fp_file=None,
-        #         logger=logger,
-        #     )
+        self.node_threshold: int = 1000000 # 默认 100万个节点触发降级
+        # =========================
+        # Persistent Cache Settings
+        # =========================
+        cache_path = cct.get_ramdisk_path("minute_kline_cache.pkl")
+        self._CACHE_FILE: str = str(cache_path) if cache_path else "" 
+        self._last_save_ts: float = 0.0  # 修改：初始化为 0 以触发启动后的第一次保存
+        self._save_interval: int = 300 # 每 5 分钟备份一次到磁盘
+        
+        self.cache_slot: DataFrameCacheSlot = DataFrameCacheSlot(
+                cache_file=self._CACHE_FILE,
+                fp_file=None,
+                logger=logger,
+            )
+        self._last_save_fp = "" # 上次保存数据的指纹
+        self._last_batch_fp = "" # 上次批次数据的指纹
+        self._last_save_status = "N/A" # 上次保存状态
         # Interval Settings
         self.expected_interval = 60 # 默认 1分钟
         self.last_batch_clock = 0.0
@@ -289,7 +449,7 @@ class DataPublisher:
         self.kline_cache = MinuteKlineCache(max_len=cache_len)
         
         self.emotion_tracker = IntradayEmotionTracker()
-        self.subscribers: Dict[str, List[Callable]] = defaultdict(list)
+        self.subscribers: dict[str, list[Callable[..., Any]]] = defaultdict(lambda: cast(list[Callable[..., Any]], []))
         
         # Performance Tracking
         self.start_time = time.time()
@@ -315,19 +475,15 @@ class DataPublisher:
         # =========================
         # Crash Recovery: Load Last Snapshot
         # =========================
-        # try:
-        #     cached_df = self.cache.load_df()
-        #     if not cached_df.empty:
-        #         logger.warning(
-        #             f"♻️ Cache recovered on startup: {len(cached_df)} rows. "
-        #             f"Used as last known snapshot (no K-line backfill)."
-        #         )
-        #         self._last_cached_df = cached_df
-        #     else:
-        #         self._last_cached_df = None
-        # except Exception as e:
-        #     logger.error(f"Cache recovery failed: {e}")
-        #     self._last_cached_df = None
+        try:
+            cached_df = self.cache_slot.load_df()
+            if not cached_df.empty:
+                self.kline_cache.from_dataframe(cached_df)
+                logger.info(f"♻️ MinuteKlineCache recovered from disk: {len(cached_df)} nodes.")
+            else:
+                logger.info("ℹ️ No MinuteKlineCache found on disk or empty.")
+        except Exception as e:
+            logger.error(f"MinuteKlineCache recovery failed: {e}")
 
     def reset_state(self):
         """
@@ -546,6 +702,26 @@ class DataPublisher:
             if 'code' not in df.columns:
                 df = df.copy()
                 df['code'] = df.index
+            
+            # --- 🚀 批次指纹校验：防止重复推送同一秒的数据 ---
+            check_sample = df.head(10).copy()
+            # 兼容不同来源的列名
+            fp_cols = ['code']
+            for c in ['trade', 'now', 'price']:
+                if c in check_sample.columns:
+                    fp_cols.append(c)
+                    break
+            if 'volume' in check_sample.columns:
+                fp_cols.append('volume')
+                
+            batch_fp = df_fingerprint(check_sample, cols=fp_cols)
+            if self._last_batch_fp and batch_fp == self._last_batch_fp:
+                return
+                
+            if self.update_count == 0:
+                logger.info(f"🚦 First batch received in DataPublisher. Columns: {list(df.columns)}")
+                
+            self._last_batch_fp = batch_fp
 
             t0 = time.time()
             if self.last_batch_clock > 0:
@@ -570,10 +746,10 @@ class DataPublisher:
                 final_score = base_score + momentum
                 
                 # 特殊状态修正
-                # 恐慌盘：跌幅 > 7% 且放量 -> 极低分
-                # 抢筹：涨幅 > 7% 且放量 -> 极高分
-                mask_panic = (df['percent'] < -7) & (vol_ratio > 1.5)
-                mask_mania = (df['percent'] > 7) & (vol_ratio > 1.5)
+                # 恐慌盘：跌幅 > 5% 且放量 -> 极低分
+                # 抢筹：涨幅 > 5% 且放量 -> 极高分
+                mask_panic = (df['percent'] < -5) & (vol_ratio > 1.5)
+                mask_mania = (df['percent'] > 5) & (vol_ratio > 1.5)
                 
                 final_score.loc[mask_panic] -= 15
                 final_score.loc[mask_mania] += 15
@@ -589,9 +765,8 @@ class DataPublisher:
 
             # Update global last update timestamp
             # 2. 更新 KLine (仅更新订阅或活跃股) - Vectorized & Batch Optimized
-            if 'trade' in df.columns:
-                active_stocks = set(self.subscribers.keys()) | set(self.kline_cache.cache.keys())
-                self.kline_cache.batch_update(df, active_stocks)
+            if 'trade' in df.columns or 'now' in df.columns:
+                self.kline_cache.update_batch(df, self.subscribers)
             
             # Record Speed
             t1 = time.time()
@@ -603,32 +778,18 @@ class DataPublisher:
             # =========================
             # Snapshot Cache (Crash Safe)
             # =========================
-            # self._latest_df = df
-            # self.kline_cache.cache.shape            
-            # fp = df_fingerprint(
-            #     df,
-            #     cols=['open', 'high', 'low', 'close'] if 'ratio' in df.columns else ['code', 'price', 'percent']
-            # )
-            # # 仅在成功处理完整 batch 后写 cache
-            # # 不做频率限制由上游控制
-            # if fp != self._last_snapshot_fp:
-            #     saved = self.cache.save_df(df)
-            #     if saved:
-            #         self._last_snapshot_fp = fp
-            # else:
-            #     logger.debug("Snapshot unchanged, cache skipped.")
-
-            # saved = self.cache.save_df(df)
-            # if not saved:
-            #     logger.warning("⚠️ Snapshot cache write failed (memory valid, disk skipped).")
+            now = time.time()
+            if now - self._last_save_ts > self._save_interval:
+                self.save_cache(force=False)
 
         except Exception as e:
             logger.error(f"DataPublisher update_batch error: {e}")
 
-    def subscribe(self, code: str, callback: Callable):
+
+    def subscribe(self, code: str, callback: Callable[..., object]):
         self.subscribers[code].append(callback)
 
-    def get_minute_klines(self, code: str, n: int = 60):
+    def get_minute_klines(self, code: str, n: int = 60) -> list[dict[str, Any]]:
         return self.kline_cache.get_klines(code, n)
 
     def get_emotion_score(self, code: str):
@@ -638,7 +799,7 @@ class DataPublisher:
         """获取个股是否有 V 型反转信号"""
         return self.kline_cache.detect_v_shape(code, window)
 
-    def get_55188_data(self, code: Optional[str] = None) -> Union[dict, dict[str, Any]]:
+    def get_55188_data(self, code: Optional[str] = None) -> dict[str, Any]:
         """获取指定的 55188 外部数据 (人气、主力排名、题材、板块得分等)"""
         if self.ext_data_55188.empty:
             return {}
@@ -659,9 +820,9 @@ class DataPublisher:
         if code_str in self.ext_data_55188.index:
             data = self.ext_data_55188.loc[code_str].to_dict()
             # 注入板块持续性得分
-            theme_name = data.get('theme_name', '')
+            theme_name = str(data.get('theme_name', ''))
             data['sector_score'] = self.get_sector_score(theme_name)
-            return data
+            return cast(dict[str, Any], data)
         return {}
 
     def stress_test(self, num_stocks=4000, n_klines=240):
@@ -673,8 +834,21 @@ class DataPublisher:
         }
         for i in range(num_stocks):
             code = f"600{i:03d}"
+            if code not in self.kline_cache.cache:
+                self.kline_cache.cache[code] = deque(maxlen=self.kline_cache.max_len)
+            
             for _ in range(n_klines):
-                self.kline_cache.cache[code].append(dummy_data)
+                # 必须存储 KLineItem 对象
+                item = KLineItem(
+                    time=int(dummy_data['time']),
+                    open=float(dummy_data['open']),
+                    high=float(dummy_data['high']),
+                    low=float(dummy_data['low']),
+                    close=float(dummy_data['close']),
+                    volume=float(dummy_data['volume']),
+                    cum_vol_start=0.0
+                )
+                self.kline_cache.cache[code].append(item)
         
         # 估算内存
         # 这是一个粗略估算
@@ -686,38 +860,40 @@ class DataPublisher:
         获取服务运行状态监控指标
         """
         try:
-            # Memory Usage
+            # Memory & CPU Usage
             mem_info = "N/A"
+            cpu_usage = 0.0
             if psutil:
-                process = psutil.Process(os.getpid())
-                mem_bytes = process.memory_info().rss
-                mem_info = f"{mem_bytes / 1024 / 1024:.2f} MB"
+                try:
+                    process = psutil.Process(os.getpid())
+                    mem_bytes = process.memory_info().rss
+                    mem_info = f"{mem_bytes / 1024 / 1024:.2f} MB"
+                    cpu_usage = process.cpu_percent(interval=None)
+                except Exception:
+                    pass
             
             # Speed
-            avg_speed = 0
+            avg_speed = 0.0
             if self.batch_rates_dq:
                 avg_speed = sum(self.batch_rates_dq) / len(self.batch_rates_dq)
-            
-            try:
-                cpu_usage = process.cpu_percent(interval=None)
-            except:
-                cpu_usage = 0.0
                 
             uptime = time.time() - self.start_time
             
             total_nodes = sum(len(d) for d in self.kline_cache.cache.values())
-            avg_nodes = total_nodes / len(self.kline_cache.cache) if self.kline_cache.cache else 0
+            avg_nodes = float(total_nodes / len(self.kline_cache.cache)) if self.kline_cache.cache else 0.0
             
             # Estimate History Coverage
             # 优先级：直接使用预期的抓取频率，如果没有抓取过数据，则使用 expected_interval
             # 只有在预期频率和观测频率都缺失时才默认 60s
-            avg_interval = self.expected_interval
+            avg_interval = float(self.expected_interval)
             if self.batch_intervals:
-                avg_interval = sum(self.batch_intervals) / len(self.batch_intervals)
+                avg_interval = float(sum(self.batch_intervals) / len(self.batch_intervals))
             
-            if avg_interval <= 0: avg_interval = 60
+            if avg_interval <= 0: avg_interval = 60.0
             
-            history_sec = avg_nodes * avg_interval
+            history_sec = float(avg_nodes * avg_interval)
+            
+            num_subscribers = sum(len(v) for v in self.subscribers.values())
             
             return {
                 "klines_cached": len(self.kline_cache.cache),
@@ -726,7 +902,7 @@ class DataPublisher:
                 "avg_interval_sec": int(avg_interval),
                 "expected_interval": self.expected_interval,
                 "history_coverage_minutes": int(history_sec / 60),
-                "subscribers": sum(len(v) for v in self.subscribers.values()),
+                "subscribers": num_subscribers,
                 "emotions_tracked": len(self.emotion_tracker.scores),
                 "paused": self.paused,
                 "high_performance_mode": self.high_performance,
@@ -743,10 +919,14 @@ class DataPublisher:
                 "server_time": time.time(),
                 "uptime_seconds": int(uptime),
                 "memory_usage": mem_info,
-                "memory_usage_mb": float(mem_info.split()[0]) if mem_info != "N/A" else 0,
+                "memory_usage_mb": float(mem_info.split()[0]) if mem_info != "N/A" else 0.0,
                 "total_rows_processed": self.total_rows_processed,
                 "update_count": self.update_count,
                 "processing_speed_row_per_sec": int(avg_speed),
+                "last_save_time": cct.get_unixtime_to_time(self._last_save_ts) if self._last_save_ts > 0 else "NEVER",
+                "last_save_status": self._last_save_status,
+                "cache_is_dirty": self.kline_cache._is_dirty,
+                "cache_restored": self.kline_cache._is_restored,
                 "pid": os.getpid()
             }
         except Exception as e:
@@ -755,7 +935,6 @@ class DataPublisher:
 
 if __name__ == "__main__":
     # 🧪 Standalone Test Functionality
-    import sys
     print("🚀 Starting Standalone RealtimeDataService Test...")
     
     # --- Configuration ---
