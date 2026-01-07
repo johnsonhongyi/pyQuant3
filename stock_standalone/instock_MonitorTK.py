@@ -470,12 +470,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """
         注册系统全局快捷键 Alt+B，调用 close_all_alerts
         """
-        def _on_hotkey():
+        def _on_hotkey_close_all_alerts():
             # 必须通过 Tkinter 的 after 调用，保证在主线程执行
             self.after(0, self.close_all_alerts)
 
+        def _on_hotkey_voice_monitor_manager():
+            # 必须通过 Tkinter 的 after 调用，保证在主线程执行
+            self.after(0, self.open_voice_monitor_manager)
+
         # 注册系统全局快捷键
-        keyboard.add_hotkey('alt+b', _on_hotkey)
+        keyboard.add_hotkey('alt+b', _on_hotkey_close_all_alerts)
+        keyboard.add_hotkey('alt+e', _on_hotkey_voice_monitor_manager)
 
     def on_resize(self, event):
         if event.widget != self:
