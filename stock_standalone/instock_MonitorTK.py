@@ -3795,7 +3795,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception:
             pass
 
-        self.after(100, self._update_alert_positions)
+        # 使用 after_idle 确保 destroy 完成且事件循环已更新
+        self.after_idle(self._update_alert_positions)
 
         if not target_code or not getattr(self, 'live_strategy', None):
             return
@@ -4062,8 +4063,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             btn_send = tk.Button(btn_frame, text="🚀发送", command=send_to_tdx, bg="#e0f7fa", font=("Arial", 10, "bold"), cursor="hand2")
             btn_send.pack(side="left", fill="x", expand=True, padx=5)
 
-            btn_del = tk.Button(btn_frame, text="🗑️删除", command=delete_monitor, bg="#ffcdd2", cursor="hand2")
-            btn_del.pack(side="left", padx=5)
+            btn_del = tk.Button(btn_frame, text="Del", command=delete_monitor, bg="#ffcdd2", cursor="hand2", font=("Arial", 8), width=3)
+            btn_del.pack(side="left", padx=2)
             
             tk.Button(btn_frame, text="关闭", command=lambda: self._close_alert(win, is_manual=True), bg="#eee").pack(side="right", padx=5)
 

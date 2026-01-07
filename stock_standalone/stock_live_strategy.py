@@ -498,7 +498,9 @@ class StockLiveStrategy:
                     'rules': stock.get('rules', []),
                     'last_alert': stock.get('last_alert', 0),
                     'created_time': stock.get('created_time', datetime.now().strftime("%Y-%m-%d %H")),
-                    'tags': stock.get('tags', "")
+                    'tags': stock.get('tags', ""),
+                    'added_date': stock.get('added_date', ""),
+                    'rule_type_tag': stock.get('rule_type_tag', "")
                 }
 
                 # --- 可选：添加行情快照 ---

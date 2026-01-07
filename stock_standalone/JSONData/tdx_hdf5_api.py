@@ -1447,6 +1447,22 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                                 # tmpdf = tmpdf[~tmpdf.index.duplicated(keep='first')]
             except Exception as e:
                 log.error(f"Failed to open store {fname}: {e}")
+                try:
+                    # 强力恢复模式：如果打开失败，直接尝试清理相关文件
+                    if os.path.exists(fname):
+                        # 尝试解锁
+                        try:
+                            if hasattr(SafeHDFStore, '_release_lock'):
+                                # 静态调用很难，这里简化为清理 lock 文件
+                                lock_file = fname + ".lock"
+                                if os.path.exists(lock_file):
+                                    os.remove(lock_file)
+                        except: pass
+                        
+                        os.remove(fname)
+                        log.warning(f"Deleted corrupted HDF5 file after open failure: {fname}")
+                except Exception as del_e:
+                    log.error(f"Failed to delete corrupted file {fname}: {del_e}")
 
             if not MultiIndex:
                 if index:
