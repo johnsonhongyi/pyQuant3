@@ -39,6 +39,34 @@ try:
 except ImportError:
     pythoncom = None
 
+import re
+
+def normalize_speech_text(text: str) -> str:
+    """
+    将数值符号转换为适合中文语音播报的表达
+    """
+    # 百分号
+    text = text.replace('%', '百分之')
+
+    # 负数（-10, -3.5）
+    text = re.sub(
+        r'(?<!\d)-(\d+(\.\d+)?)',
+        r'负\1',
+        text
+    )
+
+    # 正号（可选）
+    text = re.sub(
+        r'(?<!\d)\+(\d+(\.\d+)?)',
+        r'正\1',
+        text
+    )
+
+    # 小数点
+    text = re.sub(r'(\d+)\.(\d+)', r'\1点\2', text)
+
+    return text
+
 class VoiceAnnouncer:
     """独立的语音播报引擎"""
     queue: Queue
@@ -78,8 +106,11 @@ class VoiceAnnouncer:
             rate = engine.getProperty('rate')
             engine.setProperty('rate', rate + 20)
             
-            logger.info(f"📢 语音播报: {text}")
-            engine.say(text)
+            # ⭐ 关键：语音前做规范化
+            speech_text = normalize_speech_text(text)
+                    
+            logger.info(f"📢 语音播报: {speech_text}")
+            engine.say(speech_text)
             engine.runAndWait()
             
         except Exception as e:
@@ -650,7 +681,8 @@ class StockLiveStrategy:
     def _scan_hot_concepts(self, df: pd.DataFrame, concept_top5: list):
         """
         扫描五大热点板块，识别龙头（增强版）
-        """
+        """
+
         global MAX_DAILY_ADDITIONS
         if not self.scan_hot_concepts_status:
             return
@@ -686,7 +718,7 @@ class StockLiveStrategy:
             # 检查今日已添加的热点股数量
             added_today_count = sum(1 for c, d in self._monitored_stocks.items() 
                                     if d.get('added_date', '') == today_str and d.get('rule_type_tag') == 'hot_concept')
-            
+            # logger.debug(f'added_today_count: {type(added_today_count)} MAX_DAILY_ADDITIONS: {type(MAX_DAILY_ADDITIONS)}')
             if added_today_count >= MAX_DAILY_ADDITIONS:
                 # logger.info("Daily hot concept limit reached.")
                 return
@@ -731,11 +763,11 @@ class StockLiveStrategy:
                 stock_name = row.get('name')
                 stock_ma5d = row.get('ma5d')
                 stock_close = row.get('close')
-                hma5d =  row.get('hma5d')
-                hma10d =  row.get('hma10d')
-                hma20d =  row.get('hma20d')
-                hma60d =  row.get('hma60d')
-                trendS =  row.get('trendS')
+                hma5d =  row.get('Hma5d')
+                hma10d =  row.get('Hma10d')
+                hma20d =  row.get('Hma20d')
+                hma60d =  row.get('Hma60d')
+                trendS =  row.get('TrendS')
                 # logger.debug(f"code: {code} name: {stock_name} percent: {row.get('percent')} 背离ma5d: {high_ma5d} per2d: {row.get('per2d')} per3d: {row.get('per3d')}")
                 matched_concepts = stock_cats.intersection(top_concepts)
                 # logger.debug(f'stock_cats: {stock_cats} top_concepts:{top_concepts}')
@@ -782,7 +814,7 @@ class StockLiveStrategy:
                     #     'pct': pct
                     # }
                     # logger.debug(f"candidates append:{select_code}")
-                    logger.info(f"code: {code} name: {stock_name} percent: {row.get('percent')} 背离ma5d: {hma5d} 背离ma10d: {hma10d} 评估: {score} 综合趋势分: {trendS}per2d: {row.get('per2d')} per3d: {row.get('per3d')}")
+                    logger.info(f"code: {code} name: {stock_name} percent: {row.get('percent')} 背离ma5d: {hma5d} 背离ma10d: {hma10d} 评估: {score} 综合趋势分: {trendS} per2d: {row.get('per2d')} per3d: {row.get('per3d')}")
                     # 添加到候选列表
                     candidates.append({
                         'code': code,
