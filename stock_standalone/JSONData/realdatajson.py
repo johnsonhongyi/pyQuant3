@@ -116,33 +116,6 @@ def _parsing_Market_price_json_src(url):
     return df
 
 
-def _get_sina_Market_url_src(market='sh_a', count=None, num='1000'):
-    num = str(num)
-    if count == None:
-        url = ct.JSON_Market_Center_CountURL % (market)
-        # print url
-        data = cct.get_url_data(url,timeout=10)
-        # print data
-        log.debug(f'url:{url}')
-        count = re.findall('(\d+)', data, re.S)
-        urllist = []
-
-        if len(count) > 0:
-            count = count[0]
-            if int(count) >= int(num):
-                page_count = int(math.ceil(int(count) / int(num)))
-                for page in range(1, page_count + 1):
-                    # print page
-                    url = ct.JSON_Market_Center_RealURL % (page, num, market)
-                    # print "url",url
-                    urllist.append(url)
-
-            else:
-                url = ct.JSON_Market_Center_RealURL % ('1', count, market)
-                urllist.append(url)
-    # print "%s count: %s"%(market,count),
-    return urllist
-
 config_ini = cct.get_ramdisk_dir() + os.path.sep+ 'h5config.txt'
 jsonfname = 'jsonlimit'
 json_time = cct.get_config_value_wencai(config_ini,jsonfname,currvalue=time.time(),xtype='time',update=False)
@@ -206,7 +179,7 @@ def get_sina_Market_json_src(market='all', showtime=True, num='100', retry_count
 
     if h5 is None or market=='all':
         url_list=[]
-        for m in ['sh_a','sz_a']:
+        for m in ['sh_a','sz_a','hs_bjs']:
             mlist=_get_sina_Market_url(m, num=num)
             for l in mlist:url_list.append(l)
     else:
@@ -529,16 +502,12 @@ def _parsing_sina_dd_price_json(url):
     # request = Request(url)
     # text = urlopen(request, timeout=10).read()
     # sinaheader = {'Referer':'http://vip.stock.finance.sina.com.cn'}
-
     text = cct.get_url_data(url,headers=sinaheader)
     log.debug(f'url:{url}')
     # print(len(text))
     # return text
-    
     if len(text) < 10 or text.find('finproduct@staff.sina.com.cn') > 0:
         return ''
-
-
     #2020 new json
     text = text.replace('symbol', 'code')
     # text = text.replace('turnoverratio', 'ratio')
@@ -548,11 +517,6 @@ def _parsing_sina_dd_price_json(url):
     # df = pd.DataFrame(pd.read_json(js, dtype={'code':object}),columns=ct.MARKET_COLUMNS)
     log.debug("parsing_sina_dd:%s"%js[0])
     df = pd.DataFrame(js,columns=ct.DAY_REAL_DD_COLUMNS)
-
-
-
-
-
     #20200422 problem json
     '''
     reg = re.compile(r'\,(.*?)\:')
@@ -569,11 +533,8 @@ def _parsing_sina_dd_price_json(url):
     df = pd.DataFrame(pd.read_json(js, dtype={'code': object}),
                       columns=ct.DAY_REAL_DD_COLUMNS)
     '''
-
-
     df = df.drop('symbol', axis=1)
     df = df.loc[df.volume > '0']
-    # print ""
     # print df['name'][len(df.index)-1:],len(df.index)
     return df
 
@@ -601,7 +562,130 @@ def _parsing_sina_dd_price_json(url):
         #     #['code' 'name' 'ticktime' 'price' 'volume' 'prev_price' 'kind']
         #     log.debug("get_sina_all_json_dd:%s" % df[:1])
 
-def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.001):
+
+async def _fetch_with_dd_delay(url, pause_range):
+    now = time.time()
+    if now < g_sina_blocked['blocked_until']:
+        wait = g_sina_blocked['blocked_until'] - now
+        log.warning(f"[SINA-WAIT] {wait:.1f}s")
+        await asyncio.sleep(wait)
+
+    try:
+        loop = asyncio.get_running_loop()
+        df = await loop.run_in_executor(None, _parsing_sina_dd_price_json, url)
+        if df is None or len(df) == 0:
+            df = None
+        # else:
+        #     log.error(f"_parsing_sina_dd_price_json is Null : {url}")
+        #     return None
+    except Exception as e:
+        log.error(f"Fetch url error: {url}, {e}")
+        # 触发冷却模式
+        set_blocked_cooling(reason=str(e), factor=1.23, cooling_sec=300)
+        df = None
+        set_blocked(60, str(e), url)
+        return None
+
+    sleep_t = random.uniform(*pause_range)
+    await asyncio.sleep(sleep_t)
+    return df
+
+async def _fetch_parsed(url):
+    """
+    异步抓取并解析单个 url  gpt 没用
+    """
+    dd_l = await _parsing_sina_dd_price_json(url)  # 假设原来的解析函数可改成 async
+    if dd_l is not None and len(dd_l) > 2:
+        return dd_l
+    else:
+        log.error(f"_parsing_sina_dd_price_json is Null : {url}")
+        return None
+
+def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.001,batch_size=5, pause_range=(0.2, 0.8)):
+    start_t = time.time()
+    # url="http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=50&sort=changepercent&asc=0&node=sh_a&symbol="
+    # SINA_REAL_PRICE_DD = '%s%s/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=%s&sort=changepercent&asc=0&node=%s&symbol=%s'
+    #http://vip.stock.finance.sina.com.cn/quotes_service/view/cn_bill_sum.php
+    #http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/CN_Bill.GetBillList?num=10000&page=1&sort=ticktime&asc=0&volume=100000&type=0
+    #http://vip.stock.finance.sina.com.cn/quotes_service/view/cn_bill_all.php?num=100&page=1&sort=ticktime&asc=0&volume=100000&type=0
+    """
+        一次性获取最近一个日交易日所有股票的交易数据
+    return
+    -------
+      DataFrame
+           属性：代码，名称，涨跌幅，现价，开盘价，最高价，最低价，最日收盘价，成交量，换手率
+    """
+    # return ''
+    h5_fname = 'get_sina_all_dd'
+    h5_table = 'all'+'_'+ct.DD_VOL_List[str(vol)]+'_'+str(num)
+    # limit_time = cct.sina_dd_limit_time
+    base_limit = cct.sina_dd_limit_time
+
+    batch_size, pause_range, force_cache, limit_time = _get_dynamic_fetch_params(
+        batch_size, pause_range, base_limit
+    )
+
+    h5 = h5a.load_hdf_db(h5_fname, table=h5_table,limit_time=limit_time)
+    if h5 is not None and not h5.empty and len(h5) > 100 and 'timel' in h5.columns:
+       o_time = h5[h5.timel != 0].timel
+       if len(o_time) > 0:
+           o_time = o_time[0]
+           l_time = time.time() - o_time
+           log.info(f'limit_time : {limit_time} l_time : {l_time}')
+           return_hdf_status = not cct.get_work_time() or (cct.get_work_time() and l_time < limit_time)
+           if return_hdf_status:
+               log.info("load hdf data:%s %s %s"%(h5_fname,h5_table,len(h5)))
+               return h5
+    log.info(f'limit_time:{limit_time}')
+    url_list = _get_sina_json_dd_url(vol, type, num)
+    df = pd.DataFrame()
+    if not url_list:
+        print(f"Url None json-df:{time.time() - start_t:.2f}")
+        return ''
+
+    df_list = []
+    loop = asyncio.get_event_loop()
+
+    for i in range(0, len(url_list), batch_size):
+        log.debug(f"Processing batch {i//batch_size + 1} / {len(url_list)//batch_size + 1}")
+        tasks = [_fetch_with_dd_delay(u,pause_range) for u in url_list[i:i+batch_size]]
+        try:
+            rs = loop.run_until_complete(asyncio.gather(*tasks))
+            log.debug(f"Batch {i//batch_size + 1} completed")
+        except Exception as e:
+            set_blocked(120, f"batch error:{e}")
+            break
+
+        for r in rs:
+            if r is not None and not r.empty:
+                df_list.append(r)
+
+    if not df_list:
+        log.error("no data fetched")
+        return []
+
+    df = pd.concat(df_list, ignore_index=True)
+    
+    if len(df) > 50:
+        time_drop = time.time()
+        df['couts'] = df.groupby('code')['code'].transform('count')
+        df = df.sort_values(by='couts', ascending=False)
+        df = df.drop_duplicates('code')
+        print(f"djdf:{time.time()-time_drop:.1f}", end=' ')
+        log.info(f"sina-DD:{df[:1]}")
+        df = df.loc[:, ['code','name','couts','kind','prev_price','ticktime']]
+        df['code'] = df['code'].apply(lambda x: str(x).replace('sh','') if str(x).startswith('sh') else str(x).replace('sz',''))
+        if len(df) > 0:
+            df = df.set_index('code')
+            h5 = h5a.write_hdf_db(h5_fname, df, table=h5_table, append=False)
+            log.info(f"get_sina_all_json_dd:{len(df)}")
+        print(f" dd-df:{time.time()-start_t:.2f}", end=' ')
+        return df
+    else:
+        print(f"url:{url_list[0]} no data  json-df:{time.time()-start_t:.2f}", end=' ')
+        return ''
+
+def get_sina_all_json_dd_old_2026(vol='0', type='0', num='10000', retry_count=3, pause=0.001):
     start_t = time.time()
     # url="http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=50&sort=changepercent&asc=0&node=sh_a&symbol="
     # SINA_REAL_PRICE_DD = '%s%s/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=%s&sort=changepercent&asc=0&node=%s&symbol=%s'
@@ -631,12 +715,8 @@ def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.
                log.info("load hdf data:%s %s %s"%(h5_fname,h5_table,len(h5)))
                return h5
     log.info(f'limit_time:{limit_time}')
-    # ct._write_head()
     url_list = _get_sina_json_dd_url(vol, type, num)
     df = pd.DataFrame()
-    # import ipdb;ipdb.set_trace()
-    # data['code'] = symbol
-    # df = df.append(data, ignore_index=True)
     if len(url_list)>0:
         log.info("json_dd_url:%s"%url_list[0])
         for url in url_list:
@@ -646,20 +726,12 @@ def get_sina_all_json_dd(vol='0', type='0', num='10000', retry_count=3, pause=0.
             else:
                 log.error("_parsing_sina_dd_price_json is Null :%s"%(dd_l))
         if df is not None and not df.empty and len(df) > 50:
-            # for i in range(2, ct.PAGE_NUM[0]):
-            #     newdf = _parsing_dayprice_json(i)
-            #     df = df.append(newdf, ignore_index=True)
-            # print "dd",
             time_drop=time.time()
             df['couts']=df.groupby(['code'])['code'].transform('count')
-            # df=df[(df['kind'] == 'U')]
             df=df.sort_values(by='couts',ascending=0)
             df=df.drop_duplicates('code')
             print("djdf:%0.1f"%(time.time()-time_drop), end=' ')
-            # df=df[df.price >df.prev_price]
             log.info("sina-DD:%s" % df[:1])
-#            df = df.loc[:, ['code','name', 'couts', 'kind', 'prev_price']]
-#            print df.columns
             df = df.loc[:, ['code','name', 'couts', 'kind', 'prev_price','ticktime']]
             df.code=df.code.apply(lambda x:str(x).replace('sh','') if str(x).startswith('sh') else str(x).replace('sz',''))
             if len(df) > 0:
@@ -823,57 +895,25 @@ def get_market_price_sina_dd_realTime(dp='',vol='0',type='0'):
     '''
     input df count and merge price to df
     '''
-
     if len(dp)==0:
-            dp=get_sina_Market_json()
+        dp=get_sina_Market_json()
     if len(dp)>0:
-        # df=df.dropna('index')
-        # df=df.drop_duplicates('code')
-        # dm=pd.merge(df,dp,on='name',how='left')
-        # print(type(dp))
-#        dp=dp.drop_duplicates('code')
         log.info("Market_realTime:%s"%len(dp))
-        # dp=dp.set_index('code')
         dp=dp.fillna(0)
         dp=dp.dropna()
-        # if dp[:1].volume.values >0:
-        # log.debug("dp.volume>0:%s"%dp[:1].volume.values)
-        # dp['volume']=dp['volume'].apply(lambda x:round(float(x)/100,1))
-        # dp=dp.loc[:,'trade':].astype(float)
         log.info("DP:%s" % dp[:1].open)
-
-        # if len(dp[:10][dp[:10]['buy'] > 0]) > 2 and len(dp[:10][dp[:10]['percent'] == 0]) > 2:
-        #     if 'close' in dp.columns:
-        #         if len(dp[:5][dp[:5]['close'] > 0]) > 2:
-        #             dp['percent'] = (map(lambda x, y: round((x - y) / y * 100, 1), dp['buy'].values, dp['close'].values))
-        #             log.info("DP-1-percent==0:%s" % dp[:1].percent)
-
-        # dp.loc[dp.percent>9.9,'percent']=10
-
         dp['dff']=0
-        
         df=get_sina_all_json_dd(vol,type)
 
         if len(df)>0:
-
-            # print df[df.couts>0][:2]
             dm = cct.combine_dataFrame(dp,df)
             log.info("top_now:main:%s subobject:%s dm:%s "%(len(dp),len(df),len(dm)))
-#            dm=pd.merge(dp,df,on='name',how='left')
             log.debug("dmMerge:%s"%dm.columns[:5])
-            # print dm[dm.couts>0][:2]
             dm.couts=dm.couts.fillna(0)
             dm.prev_price=dm.prev_price.fillna(0.0)
             dm.couts=dm.couts.astype(int)
-#            dm=dm.drop_duplicates('code')
-#            dm=dm.set_index('code')
             dm.rename(columns={'prev_price': 'prev_p'}, inplace=True)
-            # print dm.sort_values(by=['couts','percent','dff','ratio'],ascending=[0,0,0,1])[:2]
-            # dm=dm.fillna(int(0))
-            # dm.ratio=dm.ratio
-            # dm=dm.loc[:,ct.SINA_Market_Clean_UP_Columns]
         else:
-            # if len(dp) > 0 and 'code' in dp.columns:
             if len(dp) > 0:
                 if 'code' in dp.columns:dp=dp.set_index('code')
                 dp['couts'] = 0
@@ -1334,8 +1374,9 @@ def get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, 
 
     # --------- URL 构建 ---------
     url_list = []
+    # SINA_Market_KEY = {'sh': 'sh_a', 'sz': 'sz_a', 'cyb': 'cyb','kcb':'kcb','bj':'hs_bjs'}
     if market == 'all':
-        for m in ('sh_a', 'sz_a'):
+        for m in ('sh_a', 'sz_a' , 'hs_bjs'):
             url_list.extend(_get_sina_Market_url(m, num))
     else:
         url_list = _get_sina_Market_url(ct.SINA_Market_KEY.get(market, market), num)
@@ -1440,7 +1481,7 @@ if __name__ == '__main__':
     # df = get_sina_all_json_dd(ct.json_countType, ct.json_countVol)
     # df = get_sina_all_json_dd('0', '1')
     # print df.couts.sum()
-    # df = get_market_price_sina_dd_realTime(dp='', vol='1', type='0')
+
     # print df
     # urltemp ='http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=100&sort=changepercent&asc=0&node=sh_a&symbol='
 
@@ -1453,6 +1494,9 @@ if __name__ == '__main__':
 
     print("getconfigBigCount:",getconfigBigCount(count=None, write=False))
     log.setLevel(LoggerFactory.INFO)
+    df = get_market_price_sina_dd_realTime(dp='', vol='1', type='0')
+    import ipdb;ipdb.set_trace()
+
     # df = get_sina_Market_json(market='all', showtime=True, num='100', retry_count=3, pause=0.001)
     df = get_sina_Market_json()
     print(df)

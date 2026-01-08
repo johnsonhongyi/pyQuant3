@@ -563,7 +563,7 @@ class StockLiveStrategy:
             logger.error(f"Failed to save voice monitors: {e}")
 
     def _rule_key(self, rule_type, value):
-        return f"{rule_type}:{value:.4f}"
+        return f"{rule_type}:{value:.2f}"
 
     def add_monitor(self, code, name, rule_type, value, tags=None):
         value = float(value)
@@ -1201,7 +1201,7 @@ class StockLiveStrategy:
                     messages.append(("POSITION", f'{data["name"]} {action} 当前价 {current_price} 建议仓位 {ratio*100:.0f}%'))
 
                 # ---------- 调试输出 ----------
-                logger.debug(f"{code} 调试: price={current_price} nclose={current_nclose} last_close={last_close} below_nclose_count={data['below_nclose_count']} below_last_close_count={data['below_last_close_count']} max_normal_pullback={max_normal_pullback:.4f}")
+                logger.debug(f"{code} 调试: price={current_price} nclose={current_nclose} last_close={last_close} below_nclose_count={data['below_nclose_count']} below_last_close_count={data['below_last_close_count']} max_normal_pullback={max_normal_pullback:.2f}")
 
                 if messages:
                     # ---------- 去重 & 合并 ----------
@@ -1355,7 +1355,7 @@ class StockLiveStrategy:
                     f"{code} 调试: price={current_price} nclose={current_nclose} "
                     f"last_close={last_close} below_nclose_count={data['below_nclose_count']} "
                     f"below_last_close_count={data['below_last_close_count']} "
-                    f"max_normal_pullback={max_normal_pullback:.4f}"
+                    f"max_normal_pullback={max_normal_pullback:.2f}"
                 )
 
                 if messages:
