@@ -61,6 +61,9 @@ class MinuteKlineCache:
         self._is_dirty = False # 脏标记：是否有新数据产生
         self._is_restored = False # 记录是否执行过恢复加载
 
+    def __len__(self) -> int:
+        return len(self._shared_cache)
+
     def to_dataframe(self) -> pd.DataFrame:
         """
         转换为 DataFrame (用于外部分析或持久化)
@@ -99,6 +102,7 @@ class MinuteKlineCache:
             
         try:
             # 确保 code 是标准化字符串格式
+            df_raw = df.copy()
             df = df.copy()
             if 'code' in df.columns:
                 df['code'] = df['code'].astype(str).str.strip().str.zfill(6)
@@ -201,7 +205,7 @@ class MinuteKlineCache:
             if not code_raw: continue
             code = str(code_raw).strip().zfill(6)
             
-            price = float(cast(float, getattr(row, 'trade', getattr(row, 'now', getattr(row, 'close', 0.0)))))
+            price = float(cast(float, getattr(row, 'trade', getattr(row, 'now', getattr(row, 'price', getattr(row, 'close', 0.0))))))
             if price <= 0: continue
             
             vol = float(cast(float, getattr(row, 'volume', getattr(row, 'vol', 0.0))))
@@ -350,13 +354,39 @@ class IntradayEmotionTracker:
         try:
             if df.empty: return
             
-            # 简单算法示例：涨幅 + 量比贡献
-            # 实际逻辑可迁移原 Emotion 算法
-            # 这里仅做简单映射作为占位
-            if 'percent' in df.columns:
-                # 归一化 emotion score 0-100
-                # 假设 percent > 9 为 100, < -9 为 0
-                self.scores = df.set_index('code')['percent'].to_dict()
+            # 1. Check for existing emotion score in DF (from upstream)
+            if 'scan_score_emotion' in df.columns:
+                self.scores = df.set_index('code')['scan_score_emotion'].to_dict()
+                return
+
+            if 'percent' not in df.columns:
+                return
+
+            # 2. Vectorized 深度情绪计算
+            # 基础分：50 + 涨幅 * 3 (10% -> 80分, -10% -> 20分)
+            base_score = 50 + (df['percent'] * 3)
+            
+            # 量能加权 (假设 ratio 为量比, 如果没有则默认为 1)
+            vol_ratio = df['ratio'] if 'ratio' in df.columns else pd.Series(1.0, index=df.index)
+            
+            # 动量修正：量比 > 1.5 且同向，加大情绪波动
+            momentum = (vol_ratio - 1.0).clip(lower=0) * df['percent'] * 0.5
+            
+            final_score = base_score + momentum
+            
+            # 特殊状态修正
+            # 恐慌盘：跌幅 > 5% 且放量 -> 极低分
+            # 抢筹：涨幅 > 5% 且放量 -> 极高分
+            mask_panic = (df['percent'] < -5) & (vol_ratio > 1.5)
+            mask_mania = (df['percent'] > 5) & (vol_ratio > 1.5)
+            
+            final_score.loc[mask_panic] -= 15
+            final_score.loc[mask_mania] += 15
+            
+            # 限制在 0-100
+            final_score = final_score.clip(0, 100)
+            
+            self.scores = dict(zip(df['code'], final_score))
                 
         except Exception as e:
             logger.error(f"IntradayEmotionTracker update error: {e}")
@@ -381,7 +411,7 @@ class DataPublisher:
     auto_switch_enabled: bool
     mem_threshold_mb: float
     node_threshold: int
-    _CACHE_FILE: str
+    _cache_path: str
     _last_save_ts: float
     _save_interval: int
     _last_save_fp: str
@@ -395,7 +425,7 @@ class DataPublisher:
     last_db_check: float
     kline_cache: MinuteKlineCache
     emotion_tracker: IntradayEmotionTracker
-    subscribers: dict[str, list[Callable[..., Any]]]
+    subscribers: dict[str, list[Callable[..., object]]]
     update_count: int
     total_rows_processed: int
     last_batch_time: float
@@ -407,17 +437,17 @@ class DataPublisher:
         self.high_performance = high_performance # HP: ~4.0h, Legacy: ~2.0h (Dynamic nodes)
         self.auto_switch_enabled = True
         self.mem_threshold_mb = 800.0 # 阈值调低至 800MB
-        self.node_threshold: int = 1000000 # 默认 100万个节点触发降级
+        self.node_threshold = 1000000 # 默认 100万个节点触发降级
         # =========================
         # Persistent Cache Settings
         # =========================
         cache_path = cct.get_ramdisk_path("minute_kline_cache.pkl")
-        self._CACHE_FILE: str = str(cache_path) if cache_path else "" 
-        self._last_save_ts: float = 0.0  # 修改：初始化为 0 以触发启动后的第一次保存
-        self._save_interval: int = 300 # 每 5 分钟备份一次到磁盘
+        self._cache_path = str(cache_path) if cache_path else "" 
+        self._last_save_ts = 0.0  # 修改：初始化为 0 以触发启动后的第一次保存
+        self._save_interval = 300 # 每 5 分钟备份一次到磁盘
         
         self.cache_slot: DataFrameCacheSlot = DataFrameCacheSlot(
-                cache_file=self._CACHE_FILE,
+                cache_file=self._cache_path,
                 fp_file=None,
                 logger=logger,
             )
@@ -449,7 +479,7 @@ class DataPublisher:
         self.kline_cache = MinuteKlineCache(max_len=cache_len)
         
         self.emotion_tracker = IntradayEmotionTracker()
-        self.subscribers: dict[str, list[Callable[..., Any]]] = defaultdict(lambda: cast(list[Callable[..., Any]], []))
+        self.subscribers = defaultdict(lambda: cast(list[Callable[..., object]], []))
         
         # Performance Tracking
         self.start_time = time.time()
@@ -741,39 +771,11 @@ class DataPublisher:
             self.total_rows_processed += rows_count
             
             # 1. 深度情绪计算 (Vectorized)
-            if 'percent' in df.columns:
-                # 基础分：50 + 涨幅 * 3 (10% -> 80分, -10% -> 20分)
-                base_score = 50 + (df['percent'] * 3)
-                
-                # 量能加权 (假设 ratio 为量比, 如果没有则默认为 1)
-                vol_ratio = df['ratio'] if 'ratio' in df.columns else pd.Series(1.0, index=df.index)
-                
-                # 动量修正：量比 > 1.5 且同向，加大情绪波动
-                momentum = (vol_ratio - 1.0).clip(lower=0) * df['percent'] * 0.5
-                
-                final_score = base_score + momentum
-                
-                # 特殊状态修正
-                # 恐慌盘：跌幅 > 5% 且放量 -> 极低分
-                # 抢筹：涨幅 > 5% 且放量 -> 极高分
-                mask_panic = (df['percent'] < -5) & (vol_ratio > 1.5)
-                mask_mania = (df['percent'] > 5) & (vol_ratio > 1.5)
-                
-                final_score.loc[mask_panic] -= 15
-                final_score.loc[mask_mania] += 15
-                
-                # 限制在 0-100
-                final_score = final_score.clip(0, 100)
-                
-                # Check for existing emotion score in DF (from upstream)
-                if 'scan_score_emotion' in df.columns:
-                    self.emotion_tracker.scores = df.set_index('code')['scan_score_emotion'].to_dict()
-                else:
-                    self.emotion_tracker.scores = dict(zip(df['code'], final_score))
+            self.emotion_tracker.update_batch(df)
 
             # Update global last update timestamp
             # 2. 更新 KLine (仅更新订阅或活跃股) - Vectorized & Batch Optimized
-            if 'trade' in df.columns or 'now' in df.columns:
+            if 'trade' in df.columns or 'now' in df.columns or 'price' in df.columns:
                 self.kline_cache.update_batch(df, self.subscribers)
             
             # Record Speed

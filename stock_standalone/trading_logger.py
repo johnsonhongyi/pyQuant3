@@ -232,7 +232,15 @@ class TradingLogger:
             cur = conn.cursor()
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
+            # 检查是否已有持仓
+            cur.execute("SELECT id, buy_price, buy_amount, fee FROM trade_records WHERE code=? AND status='OPEN' ORDER BY buy_date DESC LIMIT 1", (code,))
+            existing_trade = cur.fetchone()
+
             if action == "买入":
+                if existing_trade:
+                    logger.warning(f"TradeLogger: {code} ({name}) already has an OPEN position. Skipping duplicate '买入'.")
+                    conn.close()
+                    return
                 # 开启新仓
                 fee = price * amount * fee_rate
                 cur.execute("""
@@ -240,13 +248,34 @@ class TradingLogger:
                     VALUES (?, ?, ?, ?, ?, ?, 'OPEN')
                 """, (code, name, now_str, price, amount, fee))
             
+            elif action == "ADD":
+                if not existing_trade:
+                    logger.warning(f"TradeLogger: {code} ({name}) No OPEN position to ADD to. Converting to '买入'.")
+                    # 如果没有持仓，退化为买入（或者直接跳过，取决于策略严谨性）
+                    fee = price * amount * fee_rate
+                    cur.execute("""
+                        INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, fee, status)
+                        VALUES (?, ?, ?, ?, ?, ?, 'OPEN')
+                    """, (code, name, now_str, price, amount, fee))
+                else:
+                    # 加仓：更新均价和股数
+                    t_id, old_price, old_amount, old_fee = existing_trade
+                    new_amount = old_amount + amount
+                    new_fee = old_fee + (price * amount * fee_rate)
+                    # 计算加权均价
+                    new_avg_price = (old_price * old_amount + price * amount) / new_amount
+                    
+                    cur.execute("""
+                        UPDATE trade_records 
+                        SET buy_price=?, buy_amount=?, fee=?
+                        WHERE id=?
+                    """, (new_avg_price, new_amount, new_fee, t_id))
+                    logger.info(f"TradeLogger: {code} ({name}) 加仓成功. 新均价: {new_avg_price:.2f}, 总股数: {new_amount}")
+
             elif action == "卖出" or "止" in action:
-                # 寻找最近的未平仓记录
-                cur.execute("SELECT id, buy_price, buy_amount, fee FROM trade_records WHERE code=? AND status='OPEN' ORDER BY buy_date DESC LIMIT 1", (code,))
-                row = cur.fetchone()
-                if row:
-                    t_id, b_price, b_amount, old_fee = row
-                    sell_fee = price * b_amount * fee_rate # 假设卖出股数等于买入
+                if existing_trade:
+                    t_id, b_price, b_amount, old_fee = existing_trade
+                    sell_fee = price * b_amount * fee_rate # 假设卖出股数等于当前全部持仓
                     total_fee = old_fee + sell_fee
                     gross_profit = (price - b_price) * b_amount
                     net_profit = gross_profit - total_fee
@@ -257,6 +286,9 @@ class TradingLogger:
                         SET sell_date=?, sell_price=?, fee=?, profit=?, pnl_pct=?, status='CLOSED'
                         WHERE id=?
                     """, (now_str, price, total_fee, net_profit, pnl_pct, t_id))
+                    logger.info(f"TradeLogger: {code} ({name}) 平仓成功. 盈亏: {net_profit:.2f} ({pnl_pct:.2%})")
+                else:
+                    logger.warning(f"TradeLogger: {code} ({name}) No OPEN position to CLOSE.")
             
             conn.commit()
             conn.close()

@@ -3,11 +3,24 @@ import os
 import sys
 import json
 import configparser
+import threading
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
 
 # 获取或创建日志记录器
 logger = LoggerFactory.getLogger("instock_TK.Sys")
+
+def assert_main_thread(tag=""):
+    """
+    检查当前是否在主线程执行。如果不在，抛出 RuntimeError。
+    用于定位可能导致 GUI 崩溃的后台线程 UI 操作。
+    """
+    if threading.current_thread() is not threading.main_thread():
+        msg = f"[FATAL] {tag} called outside main thread: {threading.current_thread().name}"
+        logger.error(msg)
+        # 在开发模式下建议抛出异常以立即定位问题
+        # 如果是生产环境，可以只打日志不抛异常
+        raise RuntimeError(msg)
 
 def get_base_path():
     """获取程序基准路径，支持脚本和打包模式 (Nuitka/PyInstaller)"""
