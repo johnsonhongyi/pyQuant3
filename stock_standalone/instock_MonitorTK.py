@@ -21,6 +21,7 @@ import pyperclip
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Union, Callable
 import pandas as pd
+pd.set_option('display.float_format', '{:.2f}'.format)
 import numpy as np
 import win32api
 import win32file
@@ -1452,7 +1453,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self.realtime_service.update_batch(df)
                         except Exception as e:
                             logger.error(f"Main process realtime update error: {e}")
-                    
+                    else:
+                        logger.info(f'realtime_service 还未初始化')
 
                     # logger.info(f'df:{df[:1]}')
                     if self.sortby_col is not None:
@@ -2200,7 +2202,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             menu.add_separator()
             
             menu.add_command(label="🧪 测试买卖策略", 
-                            command=lambda: self.test_strategy_for_stock(stock_code, stock_name))
+                            command=lambda  e=event: self.on_tree_click_for_tooltip(e,stock_code,stock_name,True))
+                            # command=lambda: self.test_strategy_for_stock(stock_code, stock_name))
             
             menu.add_command(label="🏷️ 添加标注备注", 
                             command=lambda: self.add_stock_remark(stock_code, stock_name))
@@ -2268,8 +2271,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             f"📉 连阴: {stock_data.get('gren', 'N/A')} 🔻\n"
             f"📈 突破布林: {boll}\n"
             f"  signal: {signal_icon} (low<10 & C>5)\n"
-            f"  Upper:  {upper}\n"
-            f"  Lower:  {lower}\n"
+            f"  Upper:  {upper:.2f}\n"
+            f"  Lower:  {lower:.2f}\n"
             f"🚀 突破: {breakthrough} (high > upper)\n"
             f"💪 强势: {strength} (L1>L2 & H1>H2)"
         )
@@ -2425,7 +2428,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 report_lines.append("【决策调试信息】")
                 for key, val in debug.items():
                     if isinstance(val, float):
-                        report_lines.append(f"  {key}: {val:.4f}")
+                        report_lines.append(f"  {key}: {val:.2f}")
                     elif isinstance(val, list):
                         report_lines.append(f"  {key}: {', '.join(map(str, val))}")
                     else:
@@ -4138,7 +4141,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             trades = t_logger.get_trades(start_date=start_date, end_date=end_date)
             for t in trades:
                 status = t.get('status', 'CLOSED')
-                sell_p = f"{t['sell_price']:.3f}" if t['sell_price'] is not None else "--"
+                sell_p = f"{t['sell_price']:.2f}" if t['sell_price'] is not None else "--"
                 profit = f"{t['profit']:.2f}" if t['profit'] is not None else "--"
                 pnl = f"{t['pnl_pct']*100:.2f}%" if t['pnl_pct'] is not None else "--"
                 sell_d = t['sell_date'] if t['sell_date'] else ("Holding" if status == 'OPEN' else "--")
@@ -5354,10 +5357,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         return False  # 未找到
 
 
-    def on_tree_click_for_tooltip(self, event,stock_code=None,stock_name=None):
+    def on_tree_click_for_tooltip(self, event,stock_code=None,stock_name=None,is_manual=False):
         """处理树视图点击事件，延迟显示提示框"""
         logger.debug(f"[Tooltip] 点击事件触发: x={event.x}, y={event.y}")
-        if not self.tip_var.get():
+        if not is_manual and not self.tip_var.get():
             return
         # 取消之前的定时器
         if getattr(self, '_tooltip_timer', None):
@@ -5568,8 +5571,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             f"📉 连阴: {stock_data.get('gren', 'N/A')} 🔻",
             f"📈 突破布林: {boll}",
             f"  signal: {signal_icon} (low<10 & C>5)",
-            f"  Upper:  {stock_data.get('upper', 'N/A')}",
-            f"  Lower:  {stock_data.get('lower', 'N/A')}",
+            f"  Upper:  {stock_data.get('upper', 'N/A'):.2f}",
+            f"  Lower:  {stock_data.get('lower', 'N/A'):.2f}",
             f"🚀 突破: {breakthrough} (high > upper)",
             f"💪 强势: {strength} (L1>L2 & H1>H2)",
         ]
