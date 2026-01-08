@@ -340,8 +340,13 @@ class IntradayEmotionTracker:
     计算个股及市场情绪分
     """
     scores: dict[str, float]
+    history: deque
+    
     def __init__(self):
         self.scores = {} # {code: score}
+        # 保存最近 4小时的历史 (每分钟一次大概 240个点，这里存的是 update_batch 的快照)
+        # item: (timestamp, scores_dict)
+        self.history = deque(maxlen=300) 
 
     def clear(self):
         self.scores.clear()
@@ -387,12 +392,57 @@ class IntradayEmotionTracker:
             final_score = final_score.clip(0, 100)
             
             self.scores = dict(zip(df['code'], final_score))
+            
+            # Record history snapshot
+            now = time.time()
+            # 简单降频：如果上次存的时间 < 30秒前，就不存了，避免 history 太大
+            # 但为了简单，先每次 batch 都存，因为 batch 本身有间隔
+            self.history.append((now, self.scores.copy()))
                 
         except Exception as e:
             logger.error(f"IntradayEmotionTracker update error: {e}")
 
     def get_score(self, code: str) -> float:
         return self.scores.get(code, 50.0) # 默认 50 中性
+
+    def get_score_diffs(self, minutes: int = 10) -> dict[str, float]:
+        """
+        获取 N 分钟前的情绪分变化
+        Returns: {code: diff}
+        """
+        if not self.history or minutes <= 0:
+            return {}
+            
+        now = time.time()
+        target_ts = now - (minutes * 60)
+        
+        # Find closest snapshot
+        # history is ordered by time asc
+        closest_scores = None
+        
+        # 简单遍历寻找最近的时间点
+        for ts, snapshot in self.history:
+            if ts >= target_ts:
+                # 找到了第一个大于等于 target_ts 的点，即最接近 target_ts 的点 (从过去到现在)
+                # 其实更精确的是找 abs(ts - target_ts) 最小
+                # 但由于是单调递增，第一个 >= target_ts 的通常就是我们要找的 "N分钟前" 的那个时刻的未来一点点
+                # 或者它前面的一个是 "N分钟前" 的过去一点点
+                closest_scores = snapshot
+                break
+        
+        # 如果所有历史都比 target_ts 新 (比如刚启动)，取最老的一个
+        if closest_scores is None and self.history:
+             closest_scores = self.history[0][1]
+             
+        if not closest_scores:
+            return {}
+            
+        diffs = {}
+        for code, current_score in self.scores.items():
+            old_score = closest_scores.get(code, 50.0) # 假设之前是中性 50
+            diffs[code] = current_score - old_score
+            
+        return diffs
 
 try:
     import psutil

@@ -61,6 +61,7 @@ from gui_utils import (
     bind_mouse_scroll, get_monitor_by_point, rearrange_monitors_per_screen,get_monitor_index_for_window
 )
 from tk_gui_modules.dpi_mixin import DPIMixin
+from strategy_manager import StrategyManager
 from tk_gui_modules.window_mixin import WindowMixin
 from tk_gui_modules.treeview_mixin import TreeviewMixin
 from tk_gui_modules.gui_config import (
@@ -463,6 +464,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.bind("<Alt-e>", lambda event: self.open_voice_monitor_manager())
         self.bind("<Alt-g>", lambda event: self.open_trade_report_window())
         self.bind("<Alt-b>", lambda event: self.close_all_alerts())
+        self.bind("<Alt-s>", lambda event: self.open_strategy_manager())
         # 启动周期检测 RDP DPI 变化
         self.after(3000, self._check_dpi_change)
         self.auto_adjust_column = self.dfcf_var.get()
@@ -479,10 +481,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         def _on_hotkey_voice_monitor_manager():
             # 必须通过 Tkinter 的 after 调用，保证在主线程执行
             self.after(0, self.open_voice_monitor_manager)
+        def _on_hotkey_trategy_manager():
+            # 必须通过 Tkinter 的 after 调用，保证在主线程执行
+            self.after(0, self.open_strategy_manager)
 
         # 注册系统全局快捷键
         keyboard.add_hotkey('alt+b', _on_hotkey_close_all_alerts)
         keyboard.add_hotkey('alt+e', _on_hotkey_voice_monitor_manager)
+        keyboard.add_hotkey('alt+s', _on_hotkey_trategy_manager)
 
     def on_resize(self, event):
         if event.widget != self:
@@ -1279,6 +1285,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tk.Button(ctrl_frame, text="选股", command=lambda: self.open_stock_selection_window()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="存档", command=lambda: self.open_archive_loader(), font=('Microsoft YaHei', 9), padx=2, pady=2).pack(side="left", padx=2)
+        tk.Button(ctrl_frame, text="策略", command=lambda: self.open_strategy_manager(), font=('Microsoft YaHei', 9, 'bold'), fg="blue", padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="实时", command=lambda: self.open_realtime_monitor(), font=('Microsoft YaHei', 9), padx=2, pady=2).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="55188数据", command=lambda: self.open_ext_data_viewer(), font=('Microsoft YaHei', 9, 'bold'), fg="darkgreen", padx=2, pady=2).pack(side="left", padx=2)
 
@@ -2227,7 +2234,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             menu.add_command(label=f"🚀 发送到关联软件", 
                             command=lambda: self.original_push_logic(stock_code))
-                            
+            menu.add_command(label="🔍 策略白盒评估...", command=lambda: self.open_strategy_manager(verify_code=stock_code), foreground="blue")
+            
             # 弹出菜单
             menu.post(event.x_root, event.y_root)
 
@@ -2477,9 +2485,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 f"  KDJ_J:  {row_dict.get('kdj_j', 'N/A')}",
                 "",
                 "【量能数据】",
-                f"  成交量: {row_dict.get('volume', 'N/A')}",
-                f"  换手率: {row_dict.get('ratio', 'N/A')}%",
-                f"  昨日量: {snapshot.get('lastv1d', 'N/A')}",
+                f"  成交量  : {row_dict.get('volume', 'N/A')}",
+                f"  换手率  : {row_dict.get('ratio', 'N/A')}%",
+                f"  昨日量  : {snapshot.get('lastv1d', 'N/A')}",
                 f"  最近高量: {snapshot.get('hvolume', 'N/A')}",
                 f"  最近地量: {snapshot.get('lvolume', 'N/A')}",
             ])
@@ -4474,6 +4482,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def open_strategy_backtest_view(self):
         """预留：打开策略复盘与AI优化建议视图"""
         messagebox.showinfo("敬请期待", "复盘功能正在开发中，将结合您的反馈进行模型微调。")
+
+    def open_strategy_manager(self, verify_code=None):
+        """打开策略白盒管理器"""
+        if not hasattr(self, 'live_strategy') or self.live_strategy is None:
+            messagebox.showwarning("提示", "实时监控模块尚未启动，请稍后再试")
+            return
+
+        # 窗口复用
+        if hasattr(self, '_strategy_manager_win') and self._strategy_manager_win and self._strategy_manager_win.winfo_exists():
+            self._strategy_manager_win.deiconify()
+            self._strategy_manager_win.lift()
+            self._strategy_manager_win.focus_force()
+            if verify_code:
+                self._strategy_manager_win.notebook.select(self._strategy_manager_win.tab_verify)
+                self._strategy_manager_win.set_verify_code(verify_code)
+            return
+
+        try:
+            # 传入 realtime_service (如果有)
+            rt_service = getattr(self, 'realtime_service', None)
+            win = StrategyManager(self, self.live_strategy, realtime_service=rt_service)
+            self._strategy_manager_win = win
+            
+            if verify_code:
+                win.notebook.select(win.tab_verify)
+                win.set_verify_code(verify_code)
+                
+        except Exception as e:
+            logger.error(f"Failed to open StrategyManager: {e}")
+            messagebox.showerror("错误", f"启动策略管理器失败: {e}")
 
     def open_voice_monitor_manager(self):
         """语音预警管理窗口 (支持窗口复用)"""
@@ -9299,7 +9337,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 msg += f"Stocks Cached        : {status.get('klines_cached', 0)}\n"
                 msg += f"high_performance_mode: {status.get('high_performance_mode', 0)}\n"
                 msg += f"total_nodes          : {status.get('total_nodes', 0)}\n"
-                msg += f"avg_nodes_per_stock  : {status.get('avg_nodes_per_stock', 0)}\n"
+                msg += f"avg_nodes_per_stock  : {status.get('avg_nodes_per_stock', 0):.2f}\n"
                 msg += f"subscribers          : {status.get('subscribers', 0)}\n"
                 msg += f"target_hours         : {status.get('target_hours', 0)}\n"
                 msg += f"mem_threshold        : {status.get('mem_threshold', 0)}\n"

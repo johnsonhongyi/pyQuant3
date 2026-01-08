@@ -10,8 +10,9 @@ import winsound
 from datetime import datetime, timedelta
 import pandas as pd
 from queue import Queue, Empty
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Any, Union, Optional, Callable, Deque
+from typing import Any, Union, Optional, Callable
 
 from intraday_decision_engine import IntradayDecisionEngine
 from risk_engine import RiskEngine
@@ -252,6 +253,7 @@ class StockLiveStrategy:
         self.voice_enabled = voice_enabled
         self._monitored_stocks = {} 
         self._last_process_time = 0.0
+        self.signal_history: deque[dict[str, Any]] = deque(maxlen=200) # Added signal_history definition
         self._alert_cooldown = alert_cooldown
         self.enabled = True
         self._is_stopping = False
@@ -672,6 +674,17 @@ class StockLiveStrategy:
         stock['rule_keys'].add(rule_key)
 
         self._save_monitors()
+        
+        # 记录到历史以便前端查询
+        self.signal_history.appendleft({
+            'time': datetime.now().strftime("%H:%M:%S"),
+            'code': code,
+            'name': name,
+            'type': rule_type,
+            'value': value,
+            'msg': f"Added monitor: {rule_type} > {value}"
+        })
+        
         logger.info(
             f"Monitor added: {name}({code}) {rule_type} > {value}"
         )
