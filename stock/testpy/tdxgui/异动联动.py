@@ -2207,6 +2207,9 @@ def delete_current_keyword_ui():
 
 def on_code_entry_change(event=None):
     """处理代码输入框变化事件"""
+    # 放行上下键 / 回车 / Esc
+    if event.keysym in ("Up", "Down", "Return", "Escape"):
+        return
     code = code_entry.get().strip()
     if not code:
         return
@@ -7221,6 +7224,36 @@ def highlight_window_nobg(win, times=10, delay=300, interval=60_000):
 #     _flash(0)
 
 def highlight_window(win, times=10, delay=300, interval=60_000, alter_tdx=False):
+    """
+    安全窗口高亮，不破坏 Combobox / 下拉控件
+    """
+
+    if alter_tdx and not hasattr(win, "_alter_tdx"):
+        win._alter_tdx = True
+
+        # 只在第一次设置 topmost
+        win.attributes("-topmost", True)
+        win.after(200, lambda: win.attributes("-topmost", False))
+        win.lift()
+
+    def _flash(count):
+        if not win.winfo_exists():
+            return
+
+        color = "red" if alter_tdx else (
+            "red" if count % 2 == 0 else "SystemButtonFace"
+        )
+        win.configure(bg=color)
+
+        if count < times:
+            win.after(delay, _flash, count + 1)
+        else:
+            if not alter_tdx:
+                win.configure(bg="SystemButtonFace")
+
+    _flash(0)
+
+def highlight_window_bug(win, times=10, delay=300, interval=60_000, alter_tdx=False):
     """
     让窗口闪烁提示，并提前到最前端
     """
