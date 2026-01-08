@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 from queue import Queue, Empty
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Any, Union, Optional, Callable
+from typing import Dict, List, Any, Union, Optional, Callable, Deque
 
 from intraday_decision_engine import IntradayDecisionEngine
 from risk_engine import RiskEngine
@@ -235,7 +235,6 @@ class StockLiveStrategy:
         self.executor: ThreadPoolExecutor
         self.config_file: str
         self.alert_callback: Optional[Callable]
-        self.df: Optional[pd.DataFrame]
         self.decision_engine: IntradayDecisionEngine
         self.trading_logger: TradingLogger
         self.risk_engine: RiskEngine
@@ -247,6 +246,7 @@ class StockLiveStrategy:
         self._last_settlement_date: Optional[str]
         self._market_win_rate_cache: float
         self._market_win_rate_ts: float
+        self.scan_hot_concepts_status: bool
 
         self._voice = VoiceAnnouncer()
         self.voice_enabled = voice_enabled
@@ -254,10 +254,11 @@ class StockLiveStrategy:
         self._last_process_time = 0.0
         self._alert_cooldown = alert_cooldown
         self.enabled = True
+        self._is_stopping = False
+
         self.config_file = "voice_alert_config.json"
         self.alert_callback = None
-        self.alert_callback = None
-        self.realtime_service = None
+        self.realtime_service = realtime_service
         self.scan_hot_concepts_status = True
         
         # --- 外部数据缓存 (55188.cn) ---
@@ -280,10 +281,12 @@ class StockLiveStrategy:
         # 使用 max_workers=1 避免并发资源竞争，本身计算量很小
         self.executor = ThreadPoolExecutor(max_workers=1)
         
-        self.config_file = "voice_alert_config.json"
+        # --- 初始化记录器 (必须在 _load_monitors 之前) ---
+        self.trading_logger = TradingLogger()
+
         self._load_monitors()
-        self.alert_callback = None
         self.df = None
+
         # 初始化决策引擎（带止损止盈配置）
         self.decision_engine = IntradayDecisionEngine(
             stop_loss_pct=stop_loss_pct,
@@ -292,11 +295,8 @@ class StockLiveStrategy:
             max_position=max_single_stock_ratio
         )
         
-        # 初始化记录器
-        self.trading_logger = TradingLogger()
-        
         # 初始化风控引擎
-        self._risk_engine = RiskEngine(
+        self.risk_engine = RiskEngine(
             max_single_stock_ratio=max_single_stock_ratio,
             min_ratio=min_position_ratio,
             alert_cooldown=alert_cooldown,
@@ -306,11 +306,34 @@ class StockLiveStrategy:
         self._last_settlement_date: Optional[str] = None # 用于防止重复结算
 
         # --- Automatic Trading Loop State ---
-        self.auto_loop_enabled = False
-        self.batch_state = "IDLE"  # IDLE, WAITING_ENTRY, IN_PROGRESS
-        self.current_batch: List[str] = []
+        # self.auto_loop_enabled = False (已经在上方初始化)
+        # self.batch_state = "IDLE"
         self.batch_start_time = 0
         self.batch_last_check = 0
+
+    def stop(self):
+        """停止策略引擎并关闭后台线程"""
+        if self._is_stopping:
+             return
+        self._is_stopping = True
+        logger.info("Stopping StockLiveStrategy...")
+        
+        # 1. 停止语音播报
+        if hasattr(self, "_voice") and self._voice:
+            try:
+                self._voice.stop()
+            except Exception as e:
+                logger.error(f"Error stopping VoiceAnnouncer: {e}")
+                
+        # 2. 停止线程池 (不再接收新任务，等待现有任务完成)
+        if hasattr(self, "executor") and self.executor:
+            try:
+                self.executor.shutdown(wait=True)
+            except Exception as e:
+                logger.error(f"Error shutting down executor: {e}")
+
+        logger.info("StockLiveStrategy stopped.")
+
 
 
     # ------------------------------------------------------------------
@@ -397,41 +420,67 @@ class StockLiveStrategy:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     self._monitored_stocks = json.load(f)
 
-                # ✅ 结构迁移 / 补齐
-                for code, stock in self._monitored_stocks.items():
-                    stock.setdefault('rules', [])
-                    stock.setdefault('last_alert', 0)
-                    stock.setdefault('created_time', datetime.now().strftime("%Y-%m-%d %H"))
-                    stock.setdefault('tags', "")
-                    stock.setdefault('snapshot', {})  # 快照信息
+            # --- [新增] 从数据库恢复持仓股监控，防止重启后丢失卖点 ---
+            if hasattr(self, 'trading_logger'):
+                try:
+                    trades = self.trading_logger.get_trades()
+                    open_trades = [t for t in trades if t['status'] == 'OPEN']
+                    recovered_count = 0
+                    for t in open_trades:
+                        code = str(t['code']).zfill(6)
+                        if code not in self._monitored_stocks:
+                            self._monitored_stocks[code] = {
+                                'name': t['name'],
+                                'rules': [{'type': 'price_up', 'value': float(t['buy_price'])}],
+                                'last_alert': 0,
+                                'created_time': t['buy_date'][:13] if t.get('buy_date') else datetime.now().strftime("%Y-%m-%d %H"),
+                                'tags': "recovered_holding",
+                                'snapshot': {
+                                    'cost_price': float(t['buy_price']),
+                                    'buy_date': t.get('buy_date', '')
+                                }
+                            }
+                            recovered_count += 1
+                    if recovered_count > 0:
+                        logger.info(f"♻️ 监控恢复: 从数据库自动载入 {recovered_count} 只活跃持仓股")
+                except Exception as db_e:
+                    logger.error(f"恢复持仓监控失败: {db_e}")
 
-                    # ✅ 重建 rule_keys（不从文件读取）
-                    rule_keys = set()
-                    for r in stock['rules']:
-                        try:
-                            key = self._rule_key(r['type'], r['value'])
-                            rule_keys.add(key)
-                        except Exception:
-                            logger.warning(f"Invalid rule skipped for {code}: {r}")
+            # ✅ 结构迁移 / 补齐
+            for code, stock in self._monitored_stocks.items():
+                stock.setdefault('rules', [])
+                stock.setdefault('last_alert', 0)
+                stock.setdefault('created_time', datetime.now().strftime("%Y-%m-%d %H"))
+                stock.setdefault('tags', "")
+                stock.setdefault('snapshot', {})  # 快照信息
 
-                    stock['rule_keys'] = rule_keys
+                # ✅ 重建 rule_keys（不从文件读取）
+                rule_keys = set()
+                for r in stock['rules']:
+                    try:
+                        key = self._rule_key(r['type'], r['value'])
+                        rule_keys.add(key)
+                    except Exception:
+                        logger.warning(f"Invalid rule skipped for {code}: {r}")
 
-                    # ✅ 可选：加载 snapshot 到运行时对象
-                    snap = stock.get('snapshot', {})
-                    stock['trade'] = snap.get('trade', 0)
-                    stock['percent'] = snap.get('percent', 0)
-                    stock['volume'] = snap.get('volume', 0)
-                    stock['ratio'] = snap.get('ratio', 0)
-                    stock['nclose'] = snap.get('nclose', 0)
-                    stock['last_close'] = snap.get('last_close', 0)
-                    stock['ma5d'] = snap.get('ma5d', 0)
-                    stock['ma10d'] = snap.get('ma10d', 0)
+                stock['rule_keys'] = rule_keys
 
-                self.stock_count: int = len(self._monitored_stocks) 
-                logger.info(
-                    f"Loaded voice monitors from {self.config_file}, "
-                    f"总计持仓stocks={len(self._monitored_stocks)}"
-                )
+                # ✅ 可选：加载 snapshot 到运行时对象
+                snap = stock.get('snapshot', {})
+                stock['trade'] = snap.get('trade', 0)
+                stock['percent'] = snap.get('percent', 0)
+                stock['volume'] = snap.get('volume', 0)
+                stock['ratio'] = snap.get('ratio', 0)
+                stock['nclose'] = snap.get('nclose', 0)
+                stock['last_close'] = snap.get('last_close', 0)
+                stock['ma5d'] = snap.get('ma5d', 0)
+                stock['ma10d'] = snap.get('ma10d', 0)
+
+            self.stock_count: int = len(self._monitored_stocks) 
+            logger.info(
+                f"Loaded voice monitors from {self.config_file}, "
+                f"总计持仓stocks={len(self._monitored_stocks)}"
+            )
 
         except Exception as e:
             logger.error(f"Failed to load voice monitors: {e}")
@@ -1079,10 +1128,14 @@ class StockLiveStrategy:
                     # logger.info(f'timedelta(minutes=cooldown_minutes): {timedelta(minutes=cooldown_minutes)}')
                 time_since_last = (now_ts - snap['last_trigger_time']).total_seconds() / 60
                 if time_since_last >= cooldown_minutes:
-                    if decision["action"] == "买入":
+                    if decision["action"] in ("买入", "ADD", "加仓"):
+                        # 记录加仓分数和触发历史
                         snap["last_buy_score"] = decision["debug"].get("实时买入分", 0)
                         snap["buy_triggered_today"] = True
                         snap['last_trigger_time'] = now_ts
+                        # 特殊冷却：加仓后增加冷却时间，防止短时连续加仓
+                        if decision["action"] in ("ADD", "加仓"):
+                             snap['last_trigger_time'] = now_ts + timedelta(minutes=10) 
                     elif decision["action"] == "卖出":
                         snap["sell_triggered_today"] = True
                         snap['last_trigger_time'] = now_ts
@@ -1428,6 +1481,32 @@ class StockLiveStrategy:
             self._save_monitors()
             logger.info(f"Removed monitor for {code}")
 
+    def close_position_if_any(self, code: str, price: float, name: Optional[str] = None) -> bool:
+        """
+        检查并平掉指定代码的持仓
+        :param code: 股票代码
+        :param price: 平仓价格
+        :param name: 股票名称 (可选)
+        :return: 是否执行了平仓操作
+        """
+        if not hasattr(self, 'trading_logger'):
+            return False
+            
+        try:
+            trades = self.trading_logger.get_trades()
+            open_trades = [t for t in trades if str(t['code']).zfill(6) == str(code).zfill(6) and t['status'] == 'OPEN']
+            
+            if open_trades:
+                stock_name = name or open_trades[0].get('name', 'Unknown')
+                # 执行卖出记录
+                self.trading_logger.record_trade(code, stock_name, "卖出", price, 0)
+                logger.info(f"Auto-closed position for {code} ({stock_name}) at {price}")
+                return True
+        except Exception as e:
+            logger.error(f"Error in close_position_if_any for {code}: {e}")
+            
+        return False
+
     def update_rule(self, code, rule_index, new_type, new_value):
         """更新指定规则"""
         if code in self._monitored_stocks:
@@ -1503,7 +1582,7 @@ class StockLiveStrategy:
                 logger.error(f"Alert callback error: {e}")
 
         # 4. 记录交易执行 (用于回测优化和收益计算)
-        if action in ("买入", "卖出") or "止" in action:
+        if action in ("买入", "卖出", "ADD", "加仓") or "止" in action:
             # 记录交易并计算单笔收益
             self.trading_logger.record_trade(code, name, action, price, 100) 
 

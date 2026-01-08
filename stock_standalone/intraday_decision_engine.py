@@ -107,8 +107,6 @@ class IntradayDecisionEngine:
             debug["structure"] = structure
             debug["trend_strength"] = trend_strength
             debug["analysis_skip"] = "均线数据无效"
-            debug["trend_strength"] = trend_strength
-            debug["analysis_skip"] = "均线数据无效"
         
         # ---------- 策略进化：痛感与防御机制 (Pain & Defense) ----------
         # 1. 记仇机制 (PTSD)：如果这只票最近连续让你亏钱，就别碰它！
@@ -308,11 +306,16 @@ class IntradayDecisionEngine:
             if action == "买入":
                 # 💥 核心修正：结构性熔断机制 💥
                 # 如果盘中结构判定为"派发"(冲高大幅回落)，坚决禁止开仓，无论其他指标多好
-                # 这直接解决了"冲高回落收盘还是大于前日收盘加是加仓信号"的非理性行为
                 if structure == "派发":
                     debug["refuse_buy"] = "结构为派发(冲高回落)"
                     return self._hold(f"结构{structure}禁买", debug)
                 
+                # --- 模式识别：加速股模式 (Acceleration Pattern) ---
+                acc_result = self._check_acceleration_pattern(row, snapshot, debug)
+                if acc_result["is_acc"]:
+                    base_pos += acc_result["bonus"]
+                    ma_reason += f" | {acc_result['reason']}"
+
                 # 1. 应用基础过滤器
                 base_pos += self._yesterday_anchor(price, snapshot, debug)
                 base_pos += self._structure_filter(row, debug)
@@ -364,21 +367,14 @@ class IntradayDecisionEngine:
                 base_pos += capital_bonus
                 base_pos += sector_bonus
                 
-                # 如果价格在今日今日成交均价（nclose）下方，极大程度严控买入
+                # 如果价格在今日今日成交均价（nclose）下方，【硬性拒绝】买入
+                # User Rule: 不允许任何低于分时均线（VWAP）的买入
                 if nclose > 0 and price < nclose:
-                    penalty = 0.3
-                    if structure == "走弱":
-                        penalty = 0.4
-                    # 注意：派发已被熔断，这里不需要重复 check
-                    
-                    # 例外：如果是强支撑位抄底(score>0.2)且偏离均价不远，由于是左侧交易，允许在均价线下
-                    if support_score > 0.2 and (nclose - price)/nclose < 0.01:
-                         penalty = 0.1 # 减轻惩罚
-                         debug["均价约束"] = "支撑位豁免"
-                    
-                    base_pos -= penalty
-                    if "均价约束" not in debug:
-                        debug["均价/结构约束"] = f"线下{structure}，扣减{penalty}"
+                    # 例外：极强的支撑位抄底(score>0.25)且偏离均价极近(<0.5%)，由于是左侧交易，允许在均价线下波动
+                    if support_score > 0.25 and (nclose - price)/nclose < 0.005:
+                          debug["均价约束"] = "支撑位极近豁免"
+                    else:
+                        return self._hold(f"低于分时均线(VWAP:{nclose:.2f})禁买", debug)
                     
                 # 【新增】昨日均价线约束
                 last_nclose = float(snapshot.get("nclose", 0))
@@ -408,6 +404,15 @@ class IntradayDecisionEngine:
                 if vwap_score < -0.2 and support_score < 0.15:
                     return self._hold(f"趋势重心下移({debug.get('VWAP趋势', '')})", debug)
 
+                # --- [新增] 智能加仓逻辑 (Smart Positioning) ---
+                # 如果当前已经是持仓状态，则判定是否符合加仓条件
+                is_holding = float(snapshot.get("cost_price", 0)) > 0
+                if is_holding:
+                    add_pos_decision = self._check_add_position(row, snapshot, debug)
+                    if not add_pos_decision["allow"]:
+                        return self._hold(f"不符合加仓条件: {add_pos_decision['reason']}", debug)
+                    debug["加仓信号"] = "符合条件"
+
                 ***REMOVED***
                 # 💥 最终门槛大幅提高 (根据回测，得分 < 0.3 胜率极低)
                 # MIN_BUY_SCORE 从隐性 ~0.3 提升至显性 0.40
@@ -420,10 +425,11 @@ class IntradayDecisionEngine:
                 final_pos = max(min(base_pos, self.max_position * 1.2), 0)
                 # Double check to ensure non-zero if we passed the threshold (though logically 0.4 > 0)
                 if final_pos <= 0:
-                     return self._hold("仓位被限制为0", debug)
+                     return self._hold("仓位由风控限制为0", debug)
 
                 reason = f"{structure} | {ma_reason} | 得分{base_pos:.2f}"
-                logger.debug(f"DecisionEngine BUY pos={final_pos:.2f} reason={reason}")
+                if is_holding: reason = "[加仓] " + reason
+                logger.info(f"DecisionEngine {'ADD' if is_holding else 'BUY'} pos={final_pos:.2f} reason={reason}")
 
                 return {
                     "action": "买入",
@@ -793,6 +799,46 @@ class IntradayDecisionEngine:
             penalty -= 0.1
         debug["指标约束"] = penalty
         return penalty
+
+    def _check_acceleration_pattern(self, row: dict, snapshot: dict, debug: dict) -> dict:
+        """
+        检查“加速股”模式：
+        1. 回踩 5/10/20 日线后重新放量向上加速
+        2. 收盘于布林上轨 (upper) 2-4% 处且昨日也是高分的次日模式
+        """
+        price = float(row.get("trade", 0))
+        ma5 = float(row.get("ma5d", 0))
+        ma10 = float(row.get("ma10d", 0))
+        ma20 = float(row.get("ma20d", 0))
+        volume = float(row.get("volume", 0))
+        ratio = float(row.get("ratio", 0))
+        nclose = float(debug.get("nclose", snapshot.get("nclose", 0)))
+        
+        result = {"is_acc": False, "bonus": 0.0, "reason": ""}
+        
+        if price <= 0 or ma5 <= 0:
+            return result
+            
+        # 模式1: 回踩均线后加速 (典型强庄股二次启动)
+        # 条件：过去2日有过回探，今日价格 > ma5 且价格 > nclose 且量能比 > 1.2
+        last_l1 = float(snapshot.get("lastl1d", 0))
+        if last_l1 > 0 and last_l1 < ma5 * 1.01 and price > ma5 * 1.01 and price > nclose and volume > 1.25:
+             result["is_acc"] = True
+             result["bonus"] += 0.15
+             result["reason"] = "回踩5日线加速"
+        
+        # 模式2: 布林上轨偏离加速 (加速段特征)
+        uppers = [snapshot.get(f'upper{i}', 0) for i in range(1, 6)]
+        up4 = uppers[3] # upper4
+        if up4 > 0:
+            up_bias = (price - up4) / up4
+            # 强势加速区：处于上轨上方 2%-5% 且带量站稳
+            if 0.02 <= up_bias <= 0.05 and price > nclose and ratio > 4:
+                result["is_acc"] = True
+                result["bonus"] += 0.2
+                result["reason"] += " | 上轨偏离加速" if result["reason"] else "上轨偏离加速"
+        
+        return result
 
     def _vwap_trend_check(self, row: dict, snapshot: dict, debug: dict) -> float:
         """
@@ -1655,6 +1701,50 @@ class IntradayDecisionEngine:
         debug["multiday_trend_score"] = score
         debug["multiday_trend_reasons"] = reasons
         return score
+
+    def _check_add_position(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any]:
+        """
+        智能加仓策略判定
+        
+        逻辑细节:
+        - 必须盈利 > 1%
+        - 趋势强度 > 0.5 (强上升趋势)
+        - 禁止高位放量下杀加仓 (价格低于均价且量能 > 1.5)
+        - 禁止低开下杀加仓 (低开且价格持续低于开盘)
+        - 统计学 win 计数不减 (代表持仓日线未破)
+        """
+        price = float(row.get("trade", 0))
+        cost_price = float(snapshot.get("cost_price", 0))
+        trend_strength = debug.get("trend_strength", 0.0)
+        
+        # 1. 盈利要求：必须盈利 > 1.0% (防止加仓摊平变深陷)
+        pnl = (price - cost_price) / cost_price
+        if pnl < 0.01:
+            return {"allow": False, "reason": f"盈利不足加仓要求({pnl:.1%}<1%)"}
+        
+        # 2. 趋势要求：强上升趋势
+        if trend_strength < 0.5:
+             return {"allow": False, "reason": f"趋势强度不足({trend_strength:.2f}<0.5)"}
+             
+        # 3. 量能异常检测：禁止高位放量下杀加仓
+        nclose = debug.get("nclose", snapshot.get("nclose", 0))
+        volume = float(row.get("volume", 0))
+        if price < nclose and volume > 1.5:
+             return {"allow": False, "reason": "均价线下放量下杀"}
+             
+        # 4. 开盘表现：低开下杀禁止加仓
+        open_p = float(row.get("open", 0))
+        last_close = float(snapshot.get("last_close", 0))
+        if last_close > 0 and open_p < last_close * 0.99 and price < open_p:
+             return {"allow": False, "reason": "低开且价格弱于开盘"}
+
+        # 5. 板块环境辅助 (可选)
+        sector_bonus = debug.get("sector_bonus", 0)
+        if sector_bonus < 0:
+             return {"allow": False, "reason": "板块效应转弱"}
+
+        return {"allow": True, "reason": "符合智能加仓环境"}
+
 
     def _hold(self, reason: str, debug: dict[str, Any], position: float = 0.0) -> dict[str, Any]:
         """返回持仓决策"""

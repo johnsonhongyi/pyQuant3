@@ -16,9 +16,9 @@ def test_service_basic():
     dp.update_batch(df)
     
     score = dp.get_emotion_score('600000')
-    print(f"Emotion Score 600000 (Expected 1.5/Mapped): {score}")
+    print(f"Emotion Score 600000 (Normalized, 50 + 1.5*3): {score}")
     
-    assert score == 1.5, f"Score mismatch: {score}"
+    assert score == 54.5, f"Score mismatch: {score}"
     print("Basic Test Passed.")
 
 def test_frequency_logic_simulation():

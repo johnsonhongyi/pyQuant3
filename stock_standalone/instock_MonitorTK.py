@@ -618,6 +618,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         logger.info(f"[on_close] now:{now_time} 不到收盘时间 未进行_save_monitors SAVE OK")
                 except Exception as e:
                     logger.warning(f"[on_close] self.live_strategy._save_monitors 失败: {e}")
+                
+                # 6.5 停止策略引擎后台任务 (包含语音线程和线程池)
+                try:
+                    self.live_strategy.stop()
+                except Exception as e:
+                    logger.warning(f"[on_close] self.live_strategy.stop 失败: {e}")
+
 
             # 7. 关闭所有 concept top10 窗口 (Tkinter 版)
             if hasattr(self, "_pg_top10_window_simple"):
@@ -1440,6 +1447,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         return target_time.strftime("%H:%M")
     # ----------------- 数据刷新 ----------------- #
     def update_tree(self):
+        from sys_utils import assert_main_thread
+        assert_main_thread("update_tree")
         if not hasattr(self, "tree") or not self.tree.winfo_exists():
             return  # 已销毁，直接返回
         try:
@@ -4510,6 +4519,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             total_label.pack(side="left")
             
             tk.Button(top_frame, text="开启自动交易", command=lambda: self.live_strategy.start_auto_trading_loop(force=True, concept_top5=getattr(self, 'concept_top5', None)), bg="#fff9c4").pack(side="right", padx=5)
+            tk.Button(top_frame, text="清理恢复持仓", command=lambda: batch_clear_recovered(), bg="#ffcdd2").pack(side="right", padx=5)
             tk.Button(top_frame, text="测试报警音", command=lambda: self.live_strategy.test_alert(), bg="#e0f7fa").pack(side="right", padx=5)
             win.lift()
             win.focus_force()
@@ -4704,6 +4714,36 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 messagebox.showinfo("提示", "请在主界面股票列表右键点击股票添加监控", parent=add_win)
                 add_win.destroy()
 
+            def batch_clear_recovered():
+                """一键清理所有 recovered_holding 标记的监控并平仓记录"""
+                monitors = self.live_strategy.get_monitors()
+                to_remove = [code for code, data in monitors.items() if data.get('tags') == "recovered_holding"]
+                
+                if not to_remove:
+                    messagebox.showinfo("提示", "未发现带有 'recovered_holding' 标签的监控项", parent=win)
+                    return
+                
+                if not messagebox.askyesno("确认操作", f"确定要清理这 {len(to_remove)} 只恢复持仓股吗？\n这将自动在交易日志中记录已卖出并移除监控。", parent=win):
+                    return
+                
+                count = 0
+                for code in to_remove:
+                    data = monitors.get(code)
+                    name = data.get('name', '')
+                    # 尝试获取当前价
+                    price = 0.0
+                    if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
+                        price = float(self.df_all.loc[code].get('trade', 0))
+                    
+                    # 执行平仓记录
+                    self.live_strategy.close_position_if_any(code, price, name)
+                    # 移除监控
+                    self.live_strategy.remove_monitor(code)
+                    count += 1
+                
+                messagebox.showinfo("成功", f"已成功清理并记录 {count} 只持仓股", parent=win)
+                load_data()
+
             def delete_selected(event=None):
                 selected = tree.selection()
                 if not selected:
@@ -4717,6 +4757,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 # 调整删除逻辑
                 if self.live_strategy:
+                    # ✅ [新增] 删除前检查持仓并提示
+                    is_holding = False
+                    if hasattr(self, 'live_strategy') and hasattr(self.live_strategy, 'trading_logger'):
+                        try:
+                            trades = self.live_strategy.trading_logger.get_trades()
+                            is_holding = any(t['code'].zfill(6) == code.zfill(6) and t['status'] == 'OPEN' for t in trades)
+                        except: pass
+                    
+                    if is_holding:
+                        ans = messagebox.askyesnocancel("持仓确认", f"检测到 {values[1]}({code}) 尚有持仓，是否记录为[卖出平仓]后再删除监控？\n\n'是' - 记录卖出平仓并删除\n'否' - 直接删除监控\n'取消' - 放弃操作", parent=win)
+                        if ans is None: return # 取消
+                        if ans is True: # 是
+                            price = 0.0
+                            if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
+                                price = float(self.df_all.loc[code].get('trade', 0))
+                            self.live_strategy.close_position_if_any(code, price, values[1])
+
                     if uid.endswith('_none'):
                         self.live_strategy.remove_monitor(code)
                     else:
@@ -4821,6 +4878,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # pyperclip.copy(stock_code)
                 # toast_message(self, f"stock_code: {stock_code} 已复制")
                 self.tree_scroll_to_code(stock_code)
+                self.original_push_logic(stock_code)
                 
             def on_voice_on_click(event):
                 item_id = tree.identify_row(event.y)

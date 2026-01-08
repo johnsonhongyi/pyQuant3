@@ -37,10 +37,12 @@ class RiskEngine:
         "RISK": 2,
         "卖出": 3,
         "RULE": 4,
-        "减仓": 5,
-        "POSITION": 6,
-        "买入": 7,
-        "持仓": 8
+        "加仓": 5,
+        "ADD": 5,
+        "减仓": 6,
+        "POSITION": 7,
+        "买入": 8,
+        "持仓": 9
     }
     
     def __init__(self, 
@@ -280,8 +282,10 @@ class RiskEngine:
         if sorted_msgs:
             highest_type = sorted_msgs[0][1]
             # 映射类型到动作
-            if highest_type in ('止损', '止盈', '卖出', '买入', '持仓', '减仓'):
+            if highest_type in ('止损', '止盈', '卖出', '买入', '持仓', '减仓', '加仓'):
                 action = highest_type
+            elif highest_type == 'ADD':
+                action = '加仓'
             elif highest_type == 'RISK':
                 action = '卖出'
             elif highest_type == 'RULE':

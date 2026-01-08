@@ -20,7 +20,7 @@ from history_manager import toast_message
 logger = LoggerFactory.getLogger("instock_TK.KLineMonitor")
 
 class KLineMonitor(tk.Toplevel):
-    def __init__(self, parent: tk.Widget, get_df_func: Callable[[], Optional[pd.DataFrame]], refresh_interval: int = 30, history3: Optional[Callable[[], List[str]]] = None,logger=logger) -> None :
+    def __init__(self, parent: tk.Widget, get_df_func: Callable[[], Optional[pd.DataFrame]], refresh_interval: int = 30, history3: Optional[Callable[[], List[str]]] = None ,logger=logger) -> None :
         super().__init__(parent)
         self.master = parent
         self.get_df_func = get_df_func
@@ -152,7 +152,8 @@ class KLineMonitor(tk.Toplevel):
 
         # --- 搜索框区域 ---
         self.search_var = tk.StringVar()
-        self.search_combo3 = ttk.Combobox(self.status_frame, textvariable=self.search_var, values=self.history3(), width=20)
+        h3_values = self.history3() if callable(self.history3) else (self.history3 or [])
+        self.search_combo3 = ttk.Combobox(self.status_frame, textvariable=self.search_var, values=h3_values, width=20)
         self.search_combo3.pack(side="left", padx=5, fill="x", expand=True)
         self.search_combo3.bind("<Return>", lambda e: self.search_code_status(onclick=True))
         self.search_combo3.bind("<Button-3>", self.on_kline_monitor_right_click)
@@ -167,10 +168,11 @@ class KLineMonitor(tk.Toplevel):
             self.status_frame, text="编辑", cursor="hand2", command=self.edit_code_status)
         self.search_btn2.pack(side="left", padx=3)
 
-        if len(self.history3()) > 0:
-            self.search_var.set(self.history3()[0])
+        if h3_values:
+            self.search_var.set(h3_values[0])
 
-        threading.Thread(target=self.refresh_loop, daemon=True).start()
+        self.refresh_thread = threading.Thread(target=self.refresh_loop, daemon=True)
+        self.refresh_thread.start()
         self.protocol("WM_DELETE_WINDOW", self.on_kline_monitor_close)
        
         try:
@@ -192,12 +194,14 @@ class KLineMonitor(tk.Toplevel):
                 logger.info(f"[refresh_search_combo3] 刷新失败: {e}")
 
     def edit_code_status(self) -> None:
-        query = self.history3()[0] if self.history3() else ""
+        h3 = self.history3() if callable(self.history3) else self.history3
+        query = h3[0] if h3 else ""
         new_note = askstring_at_parent_single(self, "修改备注", "请输入新的备注：", initialvalue=query)
         if new_note is not None:
             self.search_var.set(new_note)
-            self.history3()[0] = new_note
-            self.search_combo3["values"] = self.history3()
+            if h3:
+                h3[0] = new_note
+            self.search_combo3["values"] = h3
             self.search_combo3.set(new_note)
             self.search_code_status()
 
@@ -397,14 +401,15 @@ class KLineMonitor(tk.Toplevel):
                         self.after(0, self.apply_filters)
                 else:
                     time.sleep(10)
+                if not self.stop_event.is_set():
+                    time.sleep(self.refresh_interval)
             except Exception as e:
-                logger.info(f"[Monitor] 更新错误:{e}")
-            finally:
+                logger.error(f"[Monitor] 更新错误: {e}")
                 time.sleep(self.refresh_interval)
 
     def get_row_tags_kline(self, r: pd.Series, idx: Optional[Any] = None) -> List[str]:
         tags = []
-        sig = str(r.get("signal","") or "")
+        sig = str(r.get("signal", "") or "")
         if sig.startswith("BUY"):
             tags.append("buy")
         elif sig.startswith("SELL"):
@@ -627,7 +632,7 @@ class KLineMonitor(tk.Toplevel):
         return df
 
     def on_kline_monitor_close(self):
-        self.stop_event.set()
+        self.stop()
         try:
             self.master.save_window_position(self, "KLineMonitor")
         except Exception:
@@ -645,5 +650,14 @@ class KLineMonitor(tk.Toplevel):
             logger.info("[KLineMonitor] 有数据，隐藏窗口。")
             try:
                 self.withdraw()
+            except Exception:
+                pass
+    def stop(self):
+        """信号停止线程并等待结束"""
+        self.stop_event.set()
+        if hasattr(self, "refresh_thread") and self.refresh_thread.is_alive():
+            try:
+                # 尽量等待其退出，避免 GIL 冲突
+                self.refresh_thread.join(timeout=0.5)
             except Exception:
                 pass
