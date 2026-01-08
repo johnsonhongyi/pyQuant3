@@ -28,6 +28,8 @@ import queue
 import importlib.util
 import win32pipe, win32file
 import a_trade_calendar
+import tkinter as tk
+
 # from filelock import FileLock, Timeout
 # 全局变量
 monitor_windows = {}  # 存储监控窗口实例
@@ -2244,6 +2246,7 @@ def right_click_paste(event):
         code_entry.event_generate("<Return>")
     else:
         # 如果没有匹配，就按正常粘贴
+        code_entry.delete(0, tk.END)       # 清空输入框
         code_entry.event_generate("<<Paste>>")
 
 def delete_selected_records():
@@ -7324,7 +7327,6 @@ def flash_title(win, code, name):
 #     # 没有任何窗口
 #     return None
 
-import tkinter as tk
 
 def safe_set_stock_code(entry: tk.Entry, stock_code: str=None):
     """

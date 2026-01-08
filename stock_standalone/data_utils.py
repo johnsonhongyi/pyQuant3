@@ -262,6 +262,19 @@ def build_hma_and_trendscore_noVol(
 
     return df
 
+def format_floats(df):
+    # 找出 float 列
+    float_cols = df.select_dtypes(include='float').columns
+    # 仅对 float 列 apply 格式化，其他列保持不变
+    df_copy = df.copy()
+    # df_copy[float_cols] = df_copy[float_cols].applymap(lambda x: f"{x:.2f}")
+    df_copy[float_cols] = df_copy[float_cols].round(2)
+    return df_copy
+
+# for col, dtype in top_all.dtypes.items():print(col, dtype)
+# formatted_rows = format_floats(top_all).astype(str)
+# for row in formatted_rows.head(5).itertuples(index=False):
+#     print(", ".join(row))
 
 def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.DataFrame:
     """指标计算"""
@@ -274,8 +287,8 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
     top_all['amount'] = top_all['vol'] * top_all['close']
     # 这里的 volume 将被更新为虚拟量比信号强度
     top_all['volume'] = calc_compute_volume(top_all, logger, resample=resample, virtual=True)
-    # 同步到 ratio 列，确保兼容性
-    top_all['ratio'] = top_all['volume']
+    # 同步到 ratio 列，确保兼容性 是换手率,不能同步Volume
+    # top_all['ratio'] = top_all['volume']
 
     now_time = cct.get_now_time_int()
     if cct.get_trade_date_status():
@@ -1471,11 +1484,9 @@ def fetch_and_process(
             else:
                 with timed_ctx("get_append combine_dataFrame", warn_ms=1000):
                     top_all = cct.combine_dataFrame(top_all, top_now, col="couts", compare="dff")
-
             with timed_ctx("sina_with_history", warn_ms=1000):
                 top_all = process_merged_sina_with_history(top_all)
             time_sum = time.time()
-         
             with timed_ctx("calc_indicators", warn_ms=1000):
                 top_all = calc_indicators(top_all, logger, resample)
             logger.info(f"resample Main  top_all:{len(top_all)} market : {market}  resample: {resample}  status_callback: {get_status(status_callback)} flag.value : {flag.value} blkname :{blkname} st_key_sort:{st_key_sort}")
@@ -1527,7 +1538,8 @@ def fetch_and_process(
 
             # 🔌 RealtimeDataService updates are now handled by the Main process
             # inside update_tree() to eliminate cross-process proxy overhead.
-
+            with timed_ctx("format_floats", warn_ms=800):
+                df_all = format_floats(df_all)
             queue.put(df_all)
             gc.collect()
             cct.print_timing_summary()

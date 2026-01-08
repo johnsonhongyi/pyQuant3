@@ -81,7 +81,7 @@ class DataFrameModel(QAbstractTableModel):
             if role == _DisplayRole:
                 val = self._data.iloc[index.row(), index.column()]
                 if isinstance(val, float):
-                    return f"{val:.3f}"
+                    return f"{val:.2f}"
                 return str(val)
         return None
 
