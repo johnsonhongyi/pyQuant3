@@ -436,8 +436,9 @@ def get_sina_Market_json(market='all', showtime=True, num='100', batch_size=50, 
 
     # --------- URL 构建 ---------
     url_list = []
+    # SINA_Market_KEY = {'sh': 'sh_a', 'sz': 'sz_a', 'cyb': 'cyb','kcb':'kcb','bj':'hs_bjs'}
     if market == 'all':
-        for m in ('sh_a', 'sz_a'):
+        for m in ('sh_a', 'sz_a' ,'hs_bjs'):
             url_list.extend(_get_sina_Market_url(m, num))
     else:
         url_list = _get_sina_Market_url(ct.SINA_Market_KEY.get(market, market), num)

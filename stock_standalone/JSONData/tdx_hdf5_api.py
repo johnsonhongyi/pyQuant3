@@ -2857,18 +2857,19 @@ if __name__ == "__main__":
     if os.path.exists(sina_MultiD_path) and os.path.getsize(sina_MultiD_path) > 5000:
         h5 = readHdf5(sina_MultiD_path)
         h5.shape
-        print(h5.loc['300245'])
-        print(h5.loc['000002'])
+        codelist = ['300245' ,'000002']
+
+        for co in codelist:
+            if co in h5.index:
+                print(h5.loc[co])
         df_diagnose(h5)
 
         mdf = cct.get_limit_multiIndex_freq(h5, freq=freq.upper(),  col='all', start=startime, end=endtime, code=None)
-        print(mdf.loc['002151'])
+        codelist2 = ['002151' ,'300516', '300245','300516']
+        for co in codelist:
+            if co in mdf.index:
+                print(f'code:{co} :{mdf.loc[co]}')
         
-        print(mdf.loc['300516'])
-        print(mdf.loc['300245'].close.mean())
-        print(mdf.loc['300516'].close.mean())
-        import ipdb;ipdb.set_trace()
-
 
     def check_tdx_all_df1(fname='300'):
         import h5py

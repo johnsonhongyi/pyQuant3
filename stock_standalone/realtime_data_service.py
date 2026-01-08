@@ -699,10 +699,18 @@ class DataPublisher:
             if df.empty: return
 
             # Fix: Ensure 'code' exists as a column (often in index)
+            # if 'code' not in df.columns:
+            #     df = df.copy()
+            #     df['code'] = df.index
+
             if 'code' not in df.columns:
-                df = df.copy()
-                df['code'] = df.index
-            
+                if df.index.name == 'code':
+                    df = df.reset_index()  # 把 index 转成列，同时 index 变成 RangeIndex
+                else:
+                    df = df.copy()
+                    df['code'] = df.index
+
+            # logger.info(f'df:{df[:3]} col:{df.columns} "code" in df.columns: {"code" in df.columns}')
             # --- 🚀 批次指纹校验：防止重复推送同一秒的数据 ---
             check_sample = df.head(10).copy()
             # 兼容不同来源的列名
@@ -719,7 +727,7 @@ class DataPublisher:
                 return
                 
             if self.update_count == 0:
-                logger.info(f"🚦 First batch received in DataPublisher. Columns: {list(df.columns)}")
+                logger.info(f"🚦 First batch received in DataPublisher. Columns: {list(df.columns)[:10]}")
                 
             self._last_batch_fp = batch_fp
 
@@ -780,8 +788,12 @@ class DataPublisher:
             # =========================
             now = time.time()
             if now - self._last_save_ts > self._save_interval:
-                self.save_cache(force=False)
-
+                # self.save_cache(force=False)
+                save_cache_df = self.kline_cache.to_dataframe()
+                # logger.debug(f'save_cache_df: {save_cache_df.shape}')
+                self.cache_slot.save_df(save_cache_df,persist=True)
+                self._last_save_ts = time.time()
+                
         except Exception as e:
             logger.error(f"DataPublisher update_batch error: {e}")
 

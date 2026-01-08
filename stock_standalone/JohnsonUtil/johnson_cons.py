@@ -692,6 +692,8 @@ JSON_DD_Data_URL_Page = "http://vip.stock.finance.sina.com.cn/quotes_service/api
 
 JSON_Market_Center_RealURL = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=%s&num=%s&sort=changepercent&asc=0&node=%s&symbol="
 JSON_Market_Center_CountURL = "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount?node=%s"
+#抓取https://vip.stock.finance.sina.com.cn/mkt/#bjs_root 查询 过滤Market_Center.getHQNodeStockCount 
+#北交所: https://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeStockCount?node=hs_bjs
 # SINA_DAY_PRICE_URL =                                      '%s%s/quotes_service/api/%s/Market_Center.getHQNodeData?num=80&sort=changepercent&asc=0&node=hs_a&symbol=&_s_r_a=page&page=%s'
 # http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?num=80&sort=changepercent&asc=0&node=hs_a&symbol=&_s_r_a=page&page=1
 SINA_Market_KEY = {'sh': 'sh_a', 'sz': 'sz_a', 'cyb': 'cyb','kcb':'kcb','bj':'hs_bjs'}

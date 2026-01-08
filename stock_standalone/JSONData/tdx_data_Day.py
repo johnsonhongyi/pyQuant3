@@ -2854,8 +2854,6 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
         df = df.sort_index(ascending=False)
     if end is None and writedm and len(df) > 0:
         if cct.get_now_time_int() < 900 or cct.get_now_time_int() > 1505:
-            import ipdb;ipdb.set_trace()
-
             sta = write_tdx_sina_data_to_file(code, df=df)
 
     return df
@@ -4184,7 +4182,7 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         top_now['dff'] = 0
         top_now['prev_p'] = 0
         top_now['kind'] = 0
-
+        
     print(":%s b1>:%s it:%s" % (initTdxdata, len(top_now), round(time.time() - time_s, 1)), end=' ')
     if top_now is None or len(top_now) == 0:
         log.error("top_all is None :%s" % (top_now))

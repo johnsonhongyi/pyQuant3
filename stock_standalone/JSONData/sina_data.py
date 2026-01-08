@@ -938,6 +938,7 @@ class Sina:
             l_limit_time = int(cct.sina_limit_time)
             h5_mi_fname = 'sina_MultiIndex_data'
             h5_mi_table = 'all_' + str(l_limit_time)
+            # h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False, MultiIndex=True)
             h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
             df_final = self._rebuild_agg_cache(h5_hist, df)
             # 此时内存缓存已由 _rebuild_agg_cache 设置好
@@ -946,6 +947,7 @@ class Sina:
             h5_mi_fname = 'sina_MultiIndex_data'
             l_limit_time = int(cct.sina_limit_time)
             h5_mi_table = 'all_' + str(l_limit_time)
+            # h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False, MultiIndex=True)
             h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
             self._update_agg_cache(df,h5_hist)
             agg_data = self.agg_cache.getkey('agg_metrics')
@@ -1099,8 +1101,18 @@ class Sina:
         # df = pd.DataFrame.from_dict(stock_dict,columns=ct.SINA_Total_Columns)
         if len(list_s) == 0:
             log.error("Sina Url error:%s" % (self.sina_stock_api + ','.join(self.stock_codes[:2])))
-
         df = pd.DataFrame(list_s, columns=ct.SINA_Total_Columns)
+
+        #nclose 数据异常
+        # 1. 确保 dt 是日期字符串（如果是 datetime 可以用 .dt.date / .strftime）
+        df['dt'] = df['dt'].astype(str)
+        # 2. 确保 ticktime 是时间字符串，只取 HH:MM:SS 部分
+        df['ticktime'] = df['ticktime'].astype(str).str[-8:]
+        # 3. 拼接成完整时间
+        df['ticktime'] = df['dt'] + ' ' + df['ticktime']
+        # df['ticktime'] = pd.to_datetime(df['ticktime'])
+        df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S')
+
         dt_v = df.dt.value_counts().index[0]
         df = df[(df.dt >= dt_v)]
 
@@ -1195,7 +1207,7 @@ class Sina:
             h5_mi_table = 'all_' + str(limit_time_int)
             
             try:
-                h5a.write_hdf_db(h5_mi_fname, df_mi_write, table=h5_mi_table, index=True, baseCount=500, append=False, MultiIndex=True)
+                h5a.write_hdf_db(h5_mi_fname, df_mi_write, table=h5_mi_table, index=False, baseCount=500, append=False, MultiIndex=True)
                 log.info("Saved minimal mi_data: %s rows, cols: %s" % (len(df_mi_write), df_mi_write.columns.tolist()))
             except Exception as e:
                 log.error(f"HDF5 Write Error for {h5_mi_table}: {e}")
@@ -1543,7 +1555,8 @@ if __name__ == "__main__":
     print(f'ticktime: {df.ticktime[:5]}')    
     # print(df.loc['920274'][['close','nclose','nlow','nhigh']])
     # print(df.loc['920274'][['close','nclose','nlow','nhigh']])
-    print(df.loc['002151'].nclose)
+    print(df.loc['601698'].nclose)
+    print(df.loc['601698'].close)
     import ipdb;ipdb.set_trace()
     
     print(len(df))
@@ -1556,7 +1569,8 @@ if __name__ == "__main__":
         df = Sina().market(ma)
         # print df.loc['600581']
         # print len(sina.all)
-        print(("market:%s %s" % (ma, len(df))))
+        print(("market:%s" % (ma)))
+        print(f'count:{len(df)}')
 
         
     # print df.lastbuy[-5:].to_frame().T

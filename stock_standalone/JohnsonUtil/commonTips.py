@@ -3926,12 +3926,12 @@ def get_url_data(url, retry_count=2, pause=0.05, timeout=30, headers=None):
             else:
                 break
         else:
-            log.info('Access successful.')
-        # print data.text
-        # fp = urlopen(req, timeout=5)
-        # data = fp.read()
-        # fp.close()
-        # print data.encoding
+            # log.info('Access successful.')
+            # print data.text
+            # fp = urlopen(req, timeout=5)
+            # data = fp.read()
+            # fp.close()
+            # print data.encoding
             return data.text
     #     else:
     #         return df

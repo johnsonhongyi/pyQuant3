@@ -132,8 +132,8 @@ def clean_expired_tdx_file(logger: Any, g_values: Any, get_trade_date_status_fun
         MultiIndex_fname = get_ramdisk_path_func("sina_MultiIndex_data")
         if os.path.exists(MultiIndex_fname):
             os.remove(MultiIndex_fname)
-            logger.info(f"[CLEAN_OK] {today} 已清理过期文件: {MultiIndex_fname}")
-        logger.info(f"[CLEAN_OK] {today} 已清理过期文件: {fname}")
+            logger.info(f"[CLEAN_OK] {today} 同步已清理过期文件: {MultiIndex_fname}")
+        logger.info(f"[CLEAN_OK] {today} 已清理过期文件: {fname} : {MultiIndex_fname}")
     except Exception as e:
         logger.error(f"[CLEAN_ERR] 删除失败: {fname}, err={e}")
         return False
