@@ -1595,13 +1595,12 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
             #     else:
             #         tmp_store.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
             #     tmp_store.flush()
-            
 
             os.makedirs(os.path.dirname(os.path.abspath(fname_path)), exist_ok=True)
 
             # 1. 复制原 h5 到 temp
-            if os.path.exists(final_fname):
-                shutil.copy2(final_fname, temp_fname)
+            if os.path.exists(fname_path):
+                shutil.copy2(fname_path, temp_fname)
 
             # 2. 在 temp h5 中操作
             with pd.HDFStore(temp_fname, mode='a', complib=complib) as tmp_h5:
@@ -1616,7 +1615,7 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                 tmp_h5.flush()
 
             # # 3. 原子替换
-            # os.replace(temp_fname, final_fname)
+            # os.replace(temp_fname, fname_path)
 
             # if h5 is not None:
             #     if '/' + table in list(h5.keys()):
@@ -2853,7 +2852,7 @@ if __name__ == "__main__":
     endtime = '15:01:00'
 
     print('sina_MultiD_path:{sina_MultiD_path}')
-    os.path.getsize(sina_MultiD_path) > 500
+    # if os.path.exists(sina_MultiD_path) and os.path.getsize(sina_MultiD_path) > 500:
 
     if os.path.exists(sina_MultiD_path) and os.path.getsize(sina_MultiD_path) > 5000:
         h5 = readHdf5(sina_MultiD_path)

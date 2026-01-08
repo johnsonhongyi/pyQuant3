@@ -855,6 +855,21 @@ def align_sum_percent(df, merged_df):
     # df_copy['win'] = merged_df['win'].reindex(df_copy.index).replace([np.inf, -np.inf], 0).fillna(0).astype(int)
     # 需要对齐的列
     cols_to_align = ['sum_perc', 'slope', 'vol_ratio', 'power_idx', 'win']
+
+    if not merged_df.index.is_unique:
+        # dup = merged_df.index[merged_df.index.duplicated()]
+        # merged_df = (
+        #         merged_df
+        #         .sort_values(['win', 'sum_perc'], ascending=[True, False])
+        #         .drop_duplicates(subset='code', keep='first')
+        #     )
+        merged_df = merged_df.sort_values(['win', 'sum_perc'], ascending=[False, False])
+        merged_df = merged_df[~merged_df.index.duplicated(keep='first')]
+        log.warning(
+            f"align_sum_percent: merged_df duplicate code detected: "
+            f"{merged_df[:3]} ..."
+        )
+
     for col in cols_to_align:
         if col in merged_df.columns:
             df_copy[col] = merged_df[col].reindex(df_copy.index) \
@@ -1369,27 +1384,27 @@ def fetch_and_process(
                 )
 
                 if now_time <= 900:
-                    resamples = ['d','3d', 'w', 'm']
+                    resamples = ['3d', 'w', 'm','d']
                 else:
-                    resamples = ['3d']
+                    resamples = ['3d','d']
 
                 init_res_m = resample
                 for res_m in resamples:
                     time_init_m = time.time()
-                    if res_m != g_values.getkey("resample"):
-                        now_time = cct.get_now_time_int()
-                        if now_time <= 905:
-                            init_res_m = resample
-                            logger.info(f"start init_tdx resample: {res_m}")
-                            tdd.get_append_lastp_to_df(
-                                top_now,
-                                dl=ct.Resample_LABELS_Days[res_m],
-                                resample=res_m)
-                        else:
-                            init_res_m = resample
-                            logger.info(f'resample:{res_m} now_time:{now_time} > 905 终止初始化 init_tdx 用时:{time.time()-time_init_m:.2f}')
-                            break
-                        logger.info(f'resample:{res_m} init_tdx 用时:{time.time()-time_init_m:.2f}')
+                    # if res_m != g_values.getkey("resample"):
+                    now_time = cct.get_now_time_int()
+                    if now_time <= 905:
+                        init_res_m = resample
+                        logger.info(f"start init_tdx resample: {res_m}")
+                        tdd.get_append_lastp_to_df(
+                            top_now,
+                            dl=ct.Resample_LABELS_Days[res_m],
+                            resample=res_m)
+                    else:
+                        init_res_m = resample
+                        logger.info(f'resample:{res_m} now_time:{now_time} > 905 终止初始化 init_tdx 用时:{time.time()-time_init_m:.2f}')
+                        break
+                    logger.info(f'resample:{res_m} init_tdx 用时:{time.time()-time_init_m:.2f}')
                 #还原最后的初始化的init_res_m
                 resample = init_res_m
                 # 4️⃣ 关键：标记 init 已完成（跨循环）
