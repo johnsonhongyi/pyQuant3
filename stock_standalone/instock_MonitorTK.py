@@ -4465,10 +4465,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if not QtWidgets.QApplication.instance():
                     self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
                 
+                # 获取 last6vol 用于归一化
+                last6vol_map = {}
+                if hasattr(self, 'df_all') and not self.df_all.empty and 'last6vol' in self.df_all.columns:
+                    last6vol_map = self.df_all['last6vol'].to_dict()
+
                 # 连接双击代码到 TDX 联动，并传入实时服务代理
                 self._kline_viewer_qt = KlineBackupViewer(
                     on_code_callback=self.on_code_click,
-                    service_proxy=self.realtime_service
+                    service_proxy=self.realtime_service,
+                    last6vol_map=last6vol_map
                 )
                 
             self._kline_viewer_qt.show()

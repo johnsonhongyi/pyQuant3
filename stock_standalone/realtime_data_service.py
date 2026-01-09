@@ -208,8 +208,10 @@ class MinuteKlineCache:
             price = float(cast(float, getattr(row, 'trade', getattr(row, 'now', getattr(row, 'price', getattr(row, 'close', 0.0))))))
             if price <= 0: continue
             
+            # 优先提取 'vol' (成交量), 其次才是 'volume' (在某些接口可能是量比)
+            # 用户确认: volume是量比, vol是实时交易量
+            # vol = float(cast(float, getattr(row, 'vol', getattr(row, 'volume', 0.0))))
             vol = float(cast(float, getattr(row, 'volume', getattr(row, 'vol', 0.0))))
-            
             self._update_internal(code, price, vol, minute_ts)
             updated_codes.add(code)
             self._last_update_ts[code] = minute_ts
@@ -236,8 +238,9 @@ class MinuteKlineCache:
 
             ts = float(tick.get('timestamp') or tick.get('time') or time.time())
             minute_ts = int(ts - (ts % 60))
+            # 优先提取 'vol'
+            # vol = float(tick.get('vol', tick.get('volume', 0.0)))
             vol = float(tick.get('volume', tick.get('vol', 0.0)))
-            
             self._update_internal(code_clean, price, vol, minute_ts)
             self._last_update_ts[code_clean] = minute_ts
         except Exception as e:
@@ -486,7 +489,7 @@ class DataPublisher:
         self.paused = False
         self.high_performance = high_performance # HP: ~4.0h, Legacy: ~2.0h (Dynamic nodes)
         self.auto_switch_enabled = True
-        self.mem_threshold_mb = 800.0 # 阈值调低至 800MB
+        self.mem_threshold_mb = 1200.0 # 阈值调低至 1200MB
         self.node_threshold = 1000000 # 默认 100万个节点触发降级
         # =========================
         # Persistent Cache Settings
@@ -792,7 +795,7 @@ class DataPublisher:
 
             # logger.info(f'df:{df[:3]} col:{df.columns} "code" in df.columns: {"code" in df.columns}')
             # --- 🚀 批次指纹校验：防止重复推送同一秒的数据 ---
-            check_sample = df.head(10).copy()
+            check_sample = df.head(5).copy()
             # 兼容不同来源的列名
             fp_cols = ['code']
             for c in ['trade', 'now', 'price']:
@@ -801,9 +804,21 @@ class DataPublisher:
                     break
             if 'volume' in check_sample.columns:
                 fp_cols.append('volume')
-                
+            
             batch_fp = df_fingerprint(check_sample, cols=fp_cols)
-            if self._last_batch_fp and batch_fp == self._last_batch_fp:
+
+            # # 判断 + 更新
+            # if self._last_batch_fp == "":
+            #     # 首次批次：建立指纹，不拦截
+            #     self._last_batch_fp = batch_fp
+            # elif batch_fp == self._last_batch_fp:
+            #     # 重复批次：拦截
+            #     return
+            # else:
+            #     # 新批次：更新指纹
+            #     self._last_batch_fp = batch_fp
+            
+            if not cct.get_realtime_status() or self._last_batch_fp and batch_fp == self._last_batch_fp:
                 return
                 
             if self.update_count == 0:
@@ -839,12 +854,15 @@ class DataPublisher:
             # Snapshot Cache (Crash Safe)
             # =========================
             now = time.time()
+            close_time = int(self._save_interval / 60) + 1500
             if now - self._last_save_ts > self._save_interval:
                 # self.save_cache(force=False)
-                save_cache_df = self.kline_cache.to_dataframe()
-                # logger.debug(f'save_cache_df: {save_cache_df.shape}')
-                self.cache_slot.save_df(save_cache_df,persist=True)
-                self._last_save_ts = time.time()
+                # if cct.get_realtime_status() or cct.get_:
+                if self._last_save_ts == 0 or cct.get_trade_date_status() and 930 < get_now_time_int() <= close_time:
+                    save_cache_df = self.kline_cache.to_dataframe()
+                    # logger.debug(f'save_cache_df: {save_cache_df.shape}')
+                    self.cache_slot.save_df(save_cache_df,persist=True)
+                    self._last_save_ts = time.time()
                 
         except Exception as e:
             logger.error(f"DataPublisher update_batch error: {e}")

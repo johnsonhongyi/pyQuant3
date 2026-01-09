@@ -1,9 +1,11 @@
 import sys
 import os
 import pandas as pd
+import numpy as np
 from datetime import datetime
 
-from typing import Optional, Any, Callable
+from typing import Optional, Any, Callable, Dict
+
 # Handle multiple Qt bindings (PyQt6, PySide6, PyQt5)
 try:
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -79,10 +81,25 @@ class DataFrameModel(QAbstractTableModel):
     def data(self, index, role=_DisplayRole):
         if index.isValid():
             if role == _DisplayRole:
-                val = self._data.iloc[index.row(), index.column()]
-                if isinstance(val, float):
-                    return f"{val:.2f}"
-                return str(val)
+                try:
+                    col_name = self._data.columns[index.column()]
+                    val = self._data.iloc[index.row(), index.column()]
+                    
+                    # Time Formatting
+                    if col_name.lower() in ('time', 'timestamp'):
+                        try:
+                            ts = float(val)
+                            if ts > 1000000000:
+                                return datetime.fromtimestamp(ts).strftime('%Y-%m-%d %H:%M:%S')
+                        except (ValueError, TypeError):
+                            pass
+
+                    if isinstance(val, (float, np.float64)):
+                        return f"{val:.2f}"
+
+                    return str(val)
+                except Exception:
+                    return str(self._data.iloc[index.row(), index.column()])
         return None
 
     def headerData(self, col, orientation, role):
@@ -90,11 +107,26 @@ class DataFrameModel(QAbstractTableModel):
             return self._data.columns[col]
         return None
 
+    def sort(self, column, order):
+        """Sort table by given column number."""
+        try:
+            col_name = self._data.columns[column]
+            self.layoutAboutToBeChanged.emit()
+            self._data = self._data.sort_values(
+                by=col_name, 
+                ascending=(order == Qt.SortOrder.AscendingOrder)
+            )
+            self.layoutChanged.emit()
+        except Exception as e:
+            print(f"Sort Error: {e}")
+
 class KlineBackupViewer(QMainWindow):
-    def __init__(self, on_code_callback: Optional[Callable[[str], Any]] = None, service_proxy: Any = None):
+    def __init__(self, on_code_callback: Optional[Callable[[str], Any]] = None, service_proxy: Any = None, last6vol_map: Optional[Dict[str, float]] = None):
         super().__init__()
         self.on_code_callback = on_code_callback
         self.service_proxy = service_proxy # RealtimeDataService proxy
+        self.last6vol_map = last6vol_map if last6vol_map is not None else {}
+
         self.current_file: Optional[str] = None
         self.is_memory_mode: bool = False
         self.setWindowTitle("Minute Kline Cache Viewer (Realtime Service)")
@@ -152,6 +184,7 @@ class KlineBackupViewer(QMainWindow):
         self.summary_table = QTableView()
         self.summary_table.setAlternatingRowColors(True)
         self.summary_table.setSelectionBehavior(_SelectRows)
+        self.summary_table.setSortingEnabled(True)
         self.summary_table.clicked.connect(self.on_summary_clicked)
         self.summary_table.doubleClicked.connect(self.on_double_click)
         
@@ -159,6 +192,7 @@ class KlineBackupViewer(QMainWindow):
         self.detail_table = QTableView()
         self.detail_table.setAlternatingRowColors(True)
         self.detail_table.setSelectionBehavior(_SelectRows)
+        self.detail_table.setSortingEnabled(True)
         self.detail_table.doubleClicked.connect(self.on_double_click)
         
         splitter.addWidget(self.summary_table)
@@ -309,7 +343,15 @@ class KlineBackupViewer(QMainWindow):
             detail_df = self.df_all[self.df_all['code'] == code].copy()
             if 'time' in detail_df.columns:
                 detail_df = detail_df.sort_values('time', ascending=False)
-                
+            
+            # Calculate vol_ratio
+            if hasattr(self, 'last6vol_map') and code in self.last6vol_map:
+                l6v = self.last6vol_map[code]
+                if l6v > 0:
+                    minute_avg_vol = l6v / 240
+                    if 'volume' in detail_df.columns:
+                         detail_df['vol_ratio'] = detail_df['volume'] / minute_avg_vol
+
             new_model = DataFrameModel(detail_df)
             self.detail_table.setModel(new_model)
             self.detail_table.resizeColumnsToContents()
