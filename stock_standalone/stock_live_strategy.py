@@ -238,7 +238,7 @@ class StockLiveStrategy:
         self.alert_callback: Optional[Callable]
         self.decision_engine: IntradayDecisionEngine
         self.trading_logger: TradingLogger
-        self.risk_engine: RiskEngine
+        self._risk_engine: RiskEngine
         self.realtime_service: Any # RealtimeDataService
         self.auto_loop_enabled: bool
         self.batch_state: str
@@ -298,7 +298,7 @@ class StockLiveStrategy:
         )
         
         # 初始化风控引擎
-        self.risk_engine = RiskEngine(
+        self._risk_engine = RiskEngine(
             max_single_stock_ratio=max_single_stock_ratio,
             min_ratio=min_position_ratio,
             alert_cooldown=alert_cooldown,
