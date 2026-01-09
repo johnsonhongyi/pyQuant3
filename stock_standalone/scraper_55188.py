@@ -140,6 +140,19 @@ def df_fingerprint(df: pd.DataFrame, cols=None) -> str:
     return hashlib.md5(raw.encode('utf-8')).hexdigest()
 
 
+def clean_text(text: str) -> str:
+    """
+    保留中文字符、常用标点和文字，去掉数字、特殊符号、URL、HTML
+    """
+    if not text:
+        return ""
+    # 去掉 HTML 标签
+    text = re.sub(r'<[^>]+>', '', text)
+    # 去掉 URL
+    text = re.sub(r'https?://\S+', '', text)
+    # 只保留中文、中文标点和空格
+    text = "".join(re.findall(r'[\u4e00-\u9fff。，！？；：、“”‘’（）—…《》【】]+', text))
+    return text
 
 class Scraper55188:
     """
@@ -737,13 +750,21 @@ class Scraper55188:
             # 构造 theme_logic 块
             blocks = []
             if drives:
-                blocks.append("【个股驱动（事件）】: " + "\n".join(drives))
+                # blocks.append("【个股驱动（事件）】: " + "\n".join(drives))
+                drives_clean = [clean_text(d) for d in drives]
+                blocks.append("".join(drives_clean))
             if industries:
-                blocks.append("【业务与行业定位】: " + " / ".join(industries))
+                industries_clean = [clean_text(i) for i in industries]
+                blocks.append("【业务与行业定位】: " + " / ".join(industries_clean))
+                # blocks.append("【业务与行业定位】: " + " / ".join(industries))
             if themes:
-                blocks.append("【题材 / 宏观背景】: " + "\n".join(themes))
+                themes_clean = [clean_text(t) for t in themes]
+                # blocks.append("【题材 / 宏观背景】: " + "\n".join(themes))
+                blocks.append("【题材 / 宏观背景】: " + "\n".join(themes_clean))
             if concepts_all:
-                blocks.append("【市场概念理解】: " + "、".join(concepts_all))
+                # blocks.append("【市场概念理解】: " + "、".join(concepts_all))
+                concepts_clean = [clean_text(c) for c in concepts_all]
+                blocks.append("【市场概念理解】: " + "、".join(concepts_clean))
 
             # 构造 theme_name: hot_tag在最前面
             theme_name_parts = []
