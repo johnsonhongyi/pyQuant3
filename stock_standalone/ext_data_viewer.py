@@ -23,7 +23,7 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
         self.window_id = "ExtDataViewer"
         self.detail_window_id = "个股分析"
         self._detail_win = None
-        
+        self._sender_code = None
         # 同步缩放比例
         self.scale_factor = getattr(parent, 'scale_factor', 1.0)
         
@@ -174,8 +174,12 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
         
         if button_type == "left":
             # 左键点击其实会触发 <<TreeviewSelect>>，这里手动再触发一次确保万无一失
-            if self.sender and hasattr(self.sender, 'send'):
-                self.sender.send(stock_code)
+            if self._sender_code is not None  and self._sender_code == stock_code:
+                return
+            else:
+                if self.sender and hasattr(self.sender, 'send'):
+                    self.sender.send(stock_code)
+                    self._sender_code = stock_code
         elif button_type == "right":
             if self.on_tree_scroll_to_code:
                 self.on_tree_scroll_to_code(stock_code)
