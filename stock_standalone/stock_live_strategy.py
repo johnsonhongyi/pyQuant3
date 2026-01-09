@@ -1141,6 +1141,19 @@ class StockLiveStrategy:
                     # logger.info(f'timedelta(minutes=cooldown_minutes): {timedelta(minutes=cooldown_minutes)}')
                 time_since_last = (now_ts - snap['last_trigger_time']).total_seconds() / 60
                 if time_since_last >= cooldown_minutes:
+                    # [防重复开仓] 核心防御逻辑
+                    if decision["action"] == "买入" and code in open_trades:
+                        logger.info(f"🛡️ 拒绝重复开仓 {code} {data['name']}: 当前已持仓")
+                        # 可以选择不触发，或者转为持仓
+                        # decision["action"] = "持仓" 
+                        # 但为了保持逻辑纯洁，我们直接在这里不进入下面的分支，或者在这里做标记
+                        
+                        # 为了不破坏后续可能的逻辑（比如记录高分），我们简单地把它打回"持仓"或跳过 action 处理
+                        # 最安全的做法是：直接 continue，但后面还有日志记录...
+                        # 让我们修改 decision action 为持仓，这样就不会触发下面的交易逻辑
+                        decision["action"] = "持仓"
+                        decision["reason"] += " [已持仓防重复]"
+
                     if decision["action"] in ("买入", "ADD", "加仓"):
                         # 记录加仓分数和触发历史
                         snap["last_buy_score"] = decision["debug"].get("实时买入分", 0)
@@ -1184,6 +1197,10 @@ class StockLiveStrategy:
                     'red': snap.get('red', 0),
                     'gren': snap.get('gren', 0),
                     'sum_perc': snap.get('sum_perc', 0),
+                    # --- 关键新增: 情绪基准与实时分 ---
+                    'emotion_baseline': float(row.get('emotion_baseline', 50.0)),
+                    'rt_emotion': float(row.get('rt_emotion', 50.0)),
+                    'emotion_status': str(row.get('emotion_status', '')),
                 }
 
                 # --- 3.6 记录信号日志 ---

@@ -175,7 +175,7 @@ START_INIT = 0
 DEFAULT_DISPLAY_COLS = [
     'name', 'trade', 'boll', 'dff', 'df2', 'couts',
     'percent', 'per1d', 'perc1d', 'ra', 'ral',
-    'topR', 'volume', 'red', 'lastdu4', 'category'
+    'topR', 'volume', 'red', 'lastdu4', 'category', 'emotion_status'
 ]
 
 tip_var_status_flag = mp.Value('b', False)  # boolean

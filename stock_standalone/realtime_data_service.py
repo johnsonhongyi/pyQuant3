@@ -337,6 +337,105 @@ class TickAggregator:
         # 暂时只做占位，后续扩展 Level2 分析
         pass
 
+class DailyEmotionBaseline:
+    """
+    开盘基准值：基于历史指标构建当日情绪锚点
+    """
+    def __init__(self):
+        self._baselines: dict[str, float] = {}  # {code: baseline_score}
+        self._baseline_details: dict[str, str] = {} # {code: status_description}
+        self._last_calc_date: str = ""
+    
+    def calculate_baseline(self, df: pd.DataFrame) -> None:
+        """开盘时调用，基于日线数据计算基准"""
+        from datetime import datetime
+        today = datetime.now().strftime("%Y-%m-%d")
+        if self._last_calc_date == today:
+            return  # 今日已计算
+        
+        try:
+            count = 0
+            # 临时增加 robust 检查
+            if df.empty: return
+
+            # 转换为 dict 迭代更快，而且为了逻辑清晰
+            # 这里的 df 应该是 full candidate list 或者包含 historical data columns 的 df
+            for idx, row in df.iterrows():
+                # 兼容：如果 code 在列中则取列，否则取 index
+                if 'code' in row:
+                    code_val = row['code']
+                else:
+                    code_val = idx
+                
+                code_str = str(code_val).strip().zfill(6)
+                score = 50.0  # 中性起点
+                
+                # 1. 连阳加分 (win >= 3 满分)
+                win = float(row.get('win', 0))
+                score += min(win * 5, 15)  # 最多+15
+                
+                # 2. 5日线上天数 (red >= 5 满分)
+                red = float(row.get('red', 0))
+                score += min(red * 3, 15)  # 最多+15
+                
+                # 3. 累计涨幅 (sum_perc)
+                sum_perc = float(row.get('sum_perc', 0))
+                if sum_perc > 10:
+                    score += 10
+                elif sum_perc > 5:
+                    score += 5
+                elif sum_perc < -5:
+                    score -= 10
+                
+                # 4. 量比稳定性
+                # 4. 量比稳定性
+                # 注意：盘前/早盘可能没有 vol_ratio，或者取的是昨日的量比
+                vol_ratio = float(row.get('vol_ratio', 1.0))
+                if 0.8 <= vol_ratio <= 2.0:
+                    score += 5  # 健康量比
+                elif vol_ratio > 3.0:
+                    score -= 5  # 异常放量
+                    
+                # 5. [New] 缩量回踩 MA5 (Growth Potential)
+                # 逻辑: 股价在5日线附近, 缩量, 且处于上升趋势
+                ma5 = float(row.get('ma5', 0))
+                price = float(row.get('trade', 0)) 
+                # 注意: 这里的 row 来自每日静态数据/选股结果，通常有 'trade' 或 'close'
+                if price == 0 and 'close' in row:
+                    price = float(row.get('close', 0))
+                    
+                status_detail = ""
+                if ma5 > 0 and price > 0:
+                    # 距离 MA5 差距在 -2% ~ +3% 之间 (回踩或轻微支撑)
+                    dist_ma5 = (price - ma5) / ma5
+                    if -0.02 <= dist_ma5 <= 0.03:
+                        # 缩量: 量比 < 1.0 (或昨日量比小于1)
+                        if vol_ratio < 1.0:
+                            # 趋势验证: 连阳(win>0) 或 处于多头(red>0)
+                            if win > 0 or red > 0:
+                                score += 20
+                                status_detail = "缩量回踩MA5"
+                
+                self._baselines[code_str] = max(20.0, min(100.0, score)) # 上限放宽到 100
+                self._baseline_details[code_str] = status_detail
+                
+                self._baselines[code_str] = max(20.0, min(80.0, score))  # 限制在 20-80
+                count += 1
+            
+            self._last_calc_date = today
+            logger.info(f"✅ Daily Emotion Baseline Calculated for {count} stocks.")
+        except Exception as e:
+            logger.error(f"Calculate Baseline Error: {e}")
+
+    def get_baseline(self, code: str) -> float:
+        return self._baselines.get(str(code), 50.0)
+        
+    def get_all_baselines(self) -> dict[str, float]:
+        return self._baselines
+
+    def get_all_baseline_details(self) -> dict[str, str]:
+        return self._baseline_details
+
 class IntradayEmotionTracker:
     """
     盘中情绪追踪器
@@ -354,9 +453,9 @@ class IntradayEmotionTracker:
     def clear(self):
         self.scores.clear()
 
-    def update_batch(self, df: pd.DataFrame):
+    def update_batch(self, df: pd.DataFrame, baseline_tracker: Optional[DailyEmotionBaseline] = None):
         """
-        批量更新情绪分
+        批量更新情绪分（稳定化版本）
         df: 包含 'percent', 'amount', 'volume' 等列
         """
         try:
@@ -370,36 +469,76 @@ class IntradayEmotionTracker:
             if 'percent' not in df.columns:
                 return
 
-            # 2. Vectorized 深度情绪计算
-            # 基础分：50 + 涨幅 * 3 (10% -> 80分, -10% -> 20分)
-            base_score = 50 + (df['percent'] * 3)
+            # 2. Vectorized 深度情绪计算 with Smoothing
+            EMA_ALPHA = 0.3  # 平滑系数
+            MAX_DELTA = 15   # 单次最大变动幅度
             
-            # 量能加权 (假设 ratio 为量比, 如果没有则默认为 1)
+            # 获取基准值
+            if baseline_tracker:
+                # Map baselines to the current dataframe
+                baselines = df['code'].map(baseline_tracker.get_all_baselines()).fillna(50.0)
+            else:
+                baselines = pd.Series(50.0, index=df.index)
+            
+            percent = df['percent']
             vol_ratio = df['ratio'] if 'ratio' in df.columns else pd.Series(1.0, index=df.index)
             
-            # 动量修正：量比 > 1.5 且同向，加大情绪波动
-            momentum = (vol_ratio - 1.0).clip(lower=0) * df['percent'] * 0.5
+            # 增量公式
+            delta = percent * 2.0
             
-            final_score = base_score + momentum
+            # 动量修正
+            momentum = pd.Series(0.0, index=df.index)
+            mask_up = (vol_ratio > 1.5) & (percent > 0)
+            mask_down = (vol_ratio > 1.5) & (percent < 0)
+            momentum[mask_up] = 5.0
+            momentum[mask_down] = -5.0
             
-            # 特殊状态修正
-            # 恐慌盘：跌幅 > 5% 且放量 -> 极低分
-            # 抢筹：涨幅 > 5% 且放量 -> 极高分
-            mask_panic = (df['percent'] < -5) & (vol_ratio > 1.5)
-            mask_mania = (df['percent'] > 5) & (vol_ratio > 1.5)
+            delta = delta + momentum
+            delta = delta.clip(-MAX_DELTA, MAX_DELTA)
             
-            final_score.loc[mask_panic] -= 15
-            final_score.loc[mask_mania] += 15
+            target_scores = baselines + delta
+            
+            # EMA 平滑
+            # get previous scores aligned with current df
+            # fillna with baselines (if no previous score, start from baseline)
+            prev_scores = df['code'].map(self.scores).fillna(baselines)
+            
+            final_scores = prev_scores * (1 - EMA_ALPHA) + target_scores * EMA_ALPHA
+            
+            # 特殊状态修正 (Override)
+            # 恐慌盘：跌幅 > 5% 且放量 -> 额外扣分
+            mask_panic = (percent < -5) & (vol_ratio > 1.5)
+            # 抢筹：涨幅 > 5% 且放量 -> 额外加分
+            mask_mania = (percent > 5) & (vol_ratio > 1.5)
+            
+            final_scores[mask_panic] -= 5
+            final_scores[mask_mania] += 5
             
             # 限制在 0-100
-            final_score = final_score.clip(0, 100)
+            final_scores = final_scores.clip(0, 100)
             
-            self.scores = dict(zip(df['code'], final_score))
+            self.scores = dict(zip(df['code'], final_scores))
+
+            # 3. 将结果写回 DataFrame (用于下游策略 & 日志)
+            # 注意: df 是引用传递，修改会影响外部
+            df['rt_emotion'] = final_scores
+            df['emotion_baseline'] = baselines
+            
+            # --- [New] Expose Baseline Status/Reason ---
+            details = {}
+            if baseline_tracker:
+                details = baseline_tracker.get_all_baseline_details()
+            
+            # Use 'code' column for mapping
+            if 'code' in df.columns:
+                 # Ensure code is string for mapping
+                df['emotion_status'] = df['code'].astype(str).map(details).fillna('')
+            else:
+                # Fallback if code is index
+                df['emotion_status'] = df.index.astype(str).map(details).fillna('')
             
             # Record history snapshot
             now = time.time()
-            # 简单降频：如果上次存的时间 < 30秒前，就不存了，避免 history 太大
-            # 但为了简单，先每次 batch 都存，因为 batch 本身有间隔
             self.history.append((now, self.scores.copy()))
                 
         except Exception as e:
@@ -531,6 +670,9 @@ class DataPublisher:
         cache_len = int((self.TARGET_HOURS_HP * 3600) / default_interval) if high_performance else int((self.TARGET_HOURS_LEGACY * 3600) / default_interval)
         self.kline_cache = MinuteKlineCache(max_len=cache_len)
         
+        self.kline_cache = MinuteKlineCache(max_len=cache_len)
+        
+        self.emotion_baseline = DailyEmotionBaseline() # Initialize baseline tracker
         self.emotion_tracker = IntradayEmotionTracker()
         self.subscribers = defaultdict(lambda: cast(list[Callable[..., object]], []))
         
@@ -796,6 +938,14 @@ class DataPublisher:
             # logger.info(f'df:{df[:3]} col:{df.columns} "code" in df.columns: {"code" in df.columns}')
             # --- 🚀 批次指纹校验：防止重复推送同一秒的数据 ---
             check_sample = df.head(5).copy()
+            
+            # 计算开盘基准情绪 (每天确保计算一次)
+            # 移除 < 940 的限制，交由 emotion_baseline 内部控制频率
+            self.emotion_baseline.calculate_baseline(df)
+
+            # 更新情绪 (传入 baseline)
+            self.emotion_tracker.update_batch(df, self.emotion_baseline)
+
             # 兼容不同来源的列名
             fp_cols = ['code']
             for c in ['trade', 'now', 'price']:
