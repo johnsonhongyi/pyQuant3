@@ -5050,6 +5050,12 @@ def get_trade_date_status() -> bool:
     return to_bool(trade_status)
 # wencai_count = cct.get_config_value_wencai(config_ini,fname,1,update=True)
 
+def get_realtime_status():
+    is_trade_day = get_trade_date_status()
+    in_market_hours = 915 < get_now_time_int() < 1500
+    real_time_mode = is_trade_day and in_market_hours
+    return real_time_mode
+
 def get_index_fibl(default=1):
     # import sys
     # sys.path.append("..")
@@ -8191,6 +8197,7 @@ if __name__ == '__main__':
     # print(get_last_trade_date('2025-06-01'))
     print(get_ramdisk_path("minute_kline_cache.pkl"))
     import ipdb;ipdb.set_trace()
+    print(f'get_realtime_status: {get_realtime_status()}')
 
     print(f'get_work_time() : {get_work_time()}')
     st_key_sort='3 0 f'
