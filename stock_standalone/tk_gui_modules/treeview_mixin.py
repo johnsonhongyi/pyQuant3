@@ -70,6 +70,12 @@ class TreeviewMixin:
             elif col in co_narrow:
                 width = int(45 * col_scaled)
                 minwidth = int(30 * col_scaled)
+            elif col == "emotion_status":
+                width = int(100 * col_scaled)
+                minwidth = int(80 * col_scaled)
+            elif col == "emotion_baseline":
+                width = int(60 * col_scaled)
+                minwidth = int(45 * col_scaled)
             elif col in co_mid:
                 width = int(55 * col_scaled)
                 minwidth = int(40 * col_scaled)

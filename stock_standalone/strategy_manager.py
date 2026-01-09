@@ -313,6 +313,40 @@ class StrategyManager(tk.Toplevel, WindowMixin):
                     code, data['name'], "冷却中", f"{remaining:.0f}s"
                 ))
 
+        # [New] 从 RiskEngine 获取更多状态
+        # 1. 实时风控状态 (连续低于均价/昨日收盘)
+        if self.live_strategy:
+             # 遍历监控中的股票
+             monitors = self.live_strategy.get_monitors()
+             for code, data in monitors.items():
+                 name = data['name']
+                 
+                 # 1.1 检查 RiskEngine 状态
+                 if self.risk_engine:
+                     r_state = self.risk_engine.get_risk_state(code)
+                     # below_nclose_count
+                     bn_count = r_state.get('below_nclose_count', 0)
+                     if bn_count > 0:
+                         self.tree_risk.insert("", "end", values=(
+                             code, name, f"低于均价 {bn_count}次", "--"
+                         ))
+                     
+                     # below_last_close_count
+                     bl_count = r_state.get('below_last_close_count', 0)
+                     if bl_count > 0:
+                          self.tree_risk.insert("", "end", values=(
+                             code, name, f"低于昨收 {bl_count}次", "--"
+                         ))
+
+                 # 1.2 检查历史连亏 (Pain System)
+                 if self.trading_logger:
+                     loss_count = self.trading_logger.get_consecutive_losses(code)
+                     if loss_count > 0:
+                         tag = "连亏警告" if loss_count == 1 else "黑名单(连亏)"
+                         self.tree_risk.insert("", "end", values=(
+                             code, name, f"{tag} {loss_count}次", "--"
+                         ))
+
     # ------------------- Tab 3: 实时数据 -------------------
     def _init_data_tab(self):
         # 顶部统计 & 控制区
@@ -380,12 +414,14 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         list_frame = tk.LabelFrame(self.tab_data, text="实时情绪分数监控", padx=5, pady=5)
         list_frame.pack(fill="both", expand=True, padx=10, pady=5)
         
-        cols = ("code", "name", "score", "diff", "time", "vol_ratio")
+        cols = ("code", "name", "score", "diff", "baseline", "status", "time", "vol_ratio")
         self.tree_data = ttk.Treeview(list_frame, columns=cols, show="headings")
         self.tree_data.heading("code", text="代码", command=lambda: self._sort_tree_data("code", False))
         self.tree_data.heading("name", text="名称", command=lambda: self._sort_tree_data("name", False))
         self.tree_data.heading("score", text="情绪分", command=lambda: self._sort_tree_data("score", True))
         self.tree_data.heading("diff", text="变化", command=lambda: self._sort_tree_data("diff", True))
+        self.tree_data.heading("baseline", text="基准", command=lambda: self._sort_tree_data("baseline", True))
+        self.tree_data.heading("status", text="形态", command=lambda: self._sort_tree_data("status", False))
         self.tree_data.heading("time", text="时间", command=lambda: self._sort_tree_data("time", True))
         self.tree_data.heading("vol_ratio", text="成交量", command=lambda: self._sort_tree_data("vol_ratio", True))
         
@@ -393,6 +429,8 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         self.tree_data.column("name", width=70, anchor="center")
         self.tree_data.column("score", width=60, anchor="center")
         self.tree_data.column("diff", width=50, anchor="center")
+        self.tree_data.column("baseline", width=50, anchor="center")
+        self.tree_data.column("status", width=100, anchor="center")
         self.tree_data.column("time", width=80, anchor="center")
         self.tree_data.column("vol_ratio", width=80, anchor="center")
 
@@ -627,13 +665,27 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             self._save_config()
         # --------------------------------------
             
+        # 2.5 增加差值统计
+        try:
+            period = int(self.var_stat_period.get())
+        except:
+            period = 10
+            
         diffs = self.realtime_service.emotion_tracker.get_score_diffs(period)
-        # map diffs to df_temp
-        # diffs is {code: diff}
-        # Vectorized map is faster using Series
         s_diffs = pd.Series(diffs)
-        df_temp['diff'] = s_diffs # auto aligns on index (code)
+        df_temp['diff'] = s_diffs
         df_temp['diff'] = df_temp['diff'].fillna(0.0)
+
+        # 2.6 [New] 增加 Baseline 和 Status
+        if hasattr(self.realtime_service, 'emotion_baseline'):
+             baselines = self.realtime_service.emotion_baseline.get_all_baselines()
+             details = self.realtime_service.emotion_baseline.get_all_baseline_details()
+             
+             df_temp['baseline'] = pd.Series(baselines)
+             df_temp['status'] = pd.Series(details)
+             
+             df_temp['baseline'] = df_temp['baseline'].fillna(50.0)
+             df_temp['status'] = df_temp['status'].fillna('')
 
         # 2.6 应用高级过滤
         filter_expr = self.combo_filter.get().strip()
@@ -744,11 +796,17 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             if ts > 0:
                 time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
 
+            # Baseline & Status
+            baseline = float(row.get('baseline', 50.0))
+            status = str(row.get('status', ''))
+
             display_list.append({
                 'code': code,
                 'name': name,
                 'score': score,
                 'diff': diff_val,
+                'baseline': baseline,
+                'status': status,
                 'time': time_str,
                 'vol_ratio': volume_str
             })
@@ -770,6 +828,8 @@ class StrategyManager(tk.Toplevel, WindowMixin):
                 item_data['name'], 
                 f"{item_data['score']:.1f}",
                 f"{item_data['diff']:+.1f}",
+                f"{item_data['baseline']:.1f}",
+                item_data['status'],
                 item_data['time'], 
                 item_data['vol_ratio']
             )
@@ -829,25 +889,108 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         
         self.tree_log.pack(fill="both", expand=True, padx=10, pady=5)
 
+        # 绑定事件 (Linkage)
+        self.tree_log.bind("<ButtonRelease-1>", self.on_log_tree_click)
+        self.tree_log.bind("<KeyRelease-Up>", self.on_log_tree_key_nav)
+        self.tree_log.bind("<KeyRelease-Down>", self.on_log_tree_key_nav)
+
+    def on_log_tree_key_nav(self, event):
+        """键盘上下键联动"""
+        sel = self.tree_log.selection()
+        if sel:
+            self._try_link_stock_log(sel[0])
+
+    def on_log_tree_click(self, event):
+        """左键联动通达信"""
+        item = self.tree_log.identify_row(event.y)
+        if not item: return
+        self._try_link_stock_log(item)
+
+    def _try_link_stock_log(self, item):
+        """发送联动信号 (Log专用)"""
+        values = self.tree_log.item(item, 'values')
+        if values:
+            # Treeview columns: ("time", "code", "name", "action", "pos", "reason")
+            # Index 1 is code
+            code = values[1]
+            if hasattr(self.master, 'sender') and self.master.sender:
+                self.master.sender.send(str(code))
+
+    def _refresh_signal_logs(self):
+        """自动刷新信号日志"""
+        # 1. 如果 Tab 不可见，跳过
+        try:
+             current_tab = self.notebook.select()
+             if str(current_tab) != str(self.tab_log):
+                 return
+        except:
+             pass
+
+        # 2. 从 TradingLogger (DB) 读取今日信号
+        if not self.trading_logger:
+            return
+            
+        try:
+            today = datetime.now().strftime('%Y-%m-%d')
+            # 增量读取优化？目前简单点，读取今日所有，然后覆盖显示
+            # 或者仅读取最近 N 条
+            signals = self.trading_logger.get_signals(start_date=today)
+            if not signals:
+                return
+
+            # 3. 准备数据
+            # 仅取前 100 条显示
+            display_signals = signals[:100]
+
+            # 4. 保存选中状态
+            selected_items = self.tree_log.selection()
+            selected_keys = set()
+            
+            if selected_items:
+                for iid in selected_items:
+                    v = self.tree_log.item(iid, 'values')
+                    if v:
+                        # key = time_str + code
+                        selected_keys.add(str(v[0]) + str(v[1]))
+
+            # 5. 更新 Treeview
+            for item in self.tree_log.get_children():
+                self.tree_log.delete(item)
+                
+            for s in display_signals:
+                try:
+                    ts = s.get('created_at', s.get('date', ''))
+                    code = s['code']
+                    reason = s['reason']
+                    
+                    values=(
+                        ts, 
+                        s['code'], 
+                        s['name'], 
+                        s['action'], 
+                        f"{s.get('position', 0)}", 
+                        reason
+                    )
+                    
+                    new_item = self.tree_log.insert("", "end", values=values)
+                    
+                    # 检查是否需要恢复选中
+                    key = str(ts) + str(code)
+                    if key in selected_keys:
+                        self.tree_log.selection_add(new_item)
+                        # 确保可见
+                        self.tree_log.see(new_item)
+                        
+                except Exception as e:
+                    logger.error(f"Log row error: {e}")
+
+        except Exception as e:
+            logger.error(f"刷新信号日志失败: {e}")
+
     def log_signal(self, log_entry: dict):
         """外部调用接口：记录新的信号"""
-        # log_entry comes from strategy
-        if not self.winfo_exists(): return
-        
-        values = (
-            datetime.now().strftime("%H:%M:%S"),
-            log_entry.get('code'),
-            log_entry.get('name'),
-            log_entry.get('action'),
-            f"{log_entry.get('position', 0):.2f}",
-            log_entry.get('reason')
-        )
-        self.tree_log.insert("", 0, values=values) # 插入顶部
-        
-        # 限制显示条数
-        if len(self.tree_log.get_children()) > 200:
-            last = self.tree_log.get_children()[-1]
-            self.tree_log.delete(last)
+        # 兼容旧接口，但也触发刷新
+        self._refresh_signal_logs()
 
     def _delete_current_filter(self):
         """删除当前选中的过滤记录"""
@@ -1057,9 +1200,152 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         self._refresh_data_tab()
         
         # 10秒刷新一次 (降低频率以减轻卡顿)
-        self._update_job = self.after(10000, self._schedule_refresh)
+        # 刷新 Signal Logs
+        self._refresh_signal_logs()
+
+        # 5秒刷新一次 (提高日志实时性)
+        self._update_job = self.after(5000, self._schedule_refresh)
 
     def on_close(self):
         self.save_window_position(self, "StrategyManager")
         self.destroy()
+
+if __name__ == "__main__":
+    import sys
+    import os
+    # Ensure project root is in path
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    sys.path.append(project_root)
+
+    try:
+        from data_utils import tdd
+        from JohnsonUtil import commonTips as cct
+        from JohnsonUtil import johnson_cons as ct
+    except ImportError as e:
+        print(f"Module import failed: {e}. Please run in project environment.")
+        sys.exit(1)
+
+    # --- Benchmark / Timer ---
+    t_start = time.time()
+
+    # --- Mock / Minimal Implementation of dependencies ---
+    class MockRiskEngine:
+        def get_risk_state(self, code):
+            # Return dummy risk state
+            return {'below_nclose_count': 0, 'below_last_close_count': 0}
+
+    class MockTradingLogger:
+        def get_consecutive_losses(self, code):
+            return 0
+        def get_signals(self, start_date=None):
+            # Return some dummy signals
+            return [
+                {'code': '000001', 'name': '平安银行', 'action': 'BUY', 'position': 100, 'reason': 'Test Signal', 'created_at': '10:00:00', 'date': '2025-01-01'},
+                {'code': '600519', 'name': '贵州茅台', 'action': 'SELL', 'position': 0, 'reason': 'Stop Loss', 'created_at': '11:30:00', 'date': '2025-01-01'}
+            ]
+
+    class MockEmotionBaseline:
+        def get_all_baselines(self):
+            return {}
+        def get_all_baseline_details(self):
+            return {}
+
+    class MockRealtimeService:
+        def __init__(self):
+            self.emotion_baseline = MockEmotionBaseline()
+
+    class MockSender:
+        def send(self, msg):
+            print(f"MockSender: {msg}")
+
+    class MockLiveStrategy:
+        def __init__(self):
+            self.monitors = {}
+            self.risk_engine = MockRiskEngine()
+            self.trading_logger = MockTradingLogger()
+            self.decision_engine = None
+            self.realtime_service = None
+            self.sender = MockSender()
+
+        def get_monitors(self):
+            return self.monitors
+            
+        def get_alert_cooldown(self):
+            # Return configured cooldown period (seconds)
+            return 60
+
+    def main():
+        root = tk.Tk()
+        # root.geometry("800x600")
+        
+        # 1. Setup Data & Strategy
+        live_strategy = MockLiveStrategy()
+        realtime_service = MockRealtimeService()
+        
+        # 2. Fetch Sample Data
+        print("Fetching sample data from Sina via data_utils (tdx_data_Day)...")
+        try:
+            # Try fetching a small set of market codes for test
+            # market_arg = ['sh600519', 'sz000001', 'sz002594'] 
+            # Note: tdd.getSinaAlldf expects just the code numbers if using list, 
+            # but usually it auto-prefixes. Let's provide numbers.
+            test_codes = ['600519', '000001', '002594', '300750', '601127', '002475']
+            df = tdd.getSinaAlldf(market=test_codes, vol=ct.json_countVol, vtype=ct.json_countType)
+            
+            if not df.empty:
+                print(f"Fetched {len(df)} records. Columns: {df.columns.tolist()}")
+                if 'code' not in df.columns:
+                     df = df.reset_index()
+                
+                # If reset_index creates 'index' column, rename it to code if needed, 
+                # but usually tdx_data_Day returns code as index named 'code' or no name
+                if 'code' not in df.columns and 'index' in df.columns:
+                    df.rename(columns={'index': 'code'}, inplace=True)
+
+                for idx, row in df.iterrows():
+                    # Handle code if it's still not in columns (shouldn't happen after reset_index if index was code)
+                    code = row.get('code')
+                    if not code and not isinstance(idx, int):
+                         code = idx
+                    if not code:
+                         print(f"Skipping row with no code: {idx}")
+                         continue
+                         
+                    # Construct monitor data expected by StrategyManager
+                    # Needs: name, score, diff, time, vol_ratio (optional), baseline, status
+                    live_strategy.monitors[code] = {
+                        'name': row['name'],
+                        'score': 60.0 + (float(row.get('percent', 0)) * 2), # Mock score
+                        'diff': float(row.get('percent', 0)),
+                        'time': row.get('time', '00:00:00'),
+                        'vol_ratio': float(row.get('ratio', 0)) if 'ratio' in row else 1.0,
+                        'baseline': 50.0,
+                        'status': 'Running'
+                    }
+            else:
+                print("Warning: No data fetched from Source.")
+                # Add some dummy data if fetch fails (e.g. no network)
+                live_strategy.monitors['000001'] = {'name': 'Mock平安', 'score': 66, 'diff': 1.2, 'time': '10:00:00', 'status': 'Test'}
+                
+        except Exception as e:
+            print(f"Data fetch error: {e}")
+            import traceback
+            traceback.print_exc()
+
+        # 3. Launch UI
+        # We pass 'root' as master. Since StrategyManager is Toplevel, it opens a declared window.
+        # We assume root is the main app window (hidden or simple).
+        root.title("Main App Root")
+        # Hide root if you prefer only seeing the StrategyManager
+        # root.withdraw() 
+        
+        # Inject sender to root so StrategyManager can use it if it looks for master.sender
+        root.sender = MockSender()
+
+        app = StrategyManager(root, live_strategy, realtime_service)
+        
+        # Keep mainloop running
+        root.mainloop()
+
+    main()
 
