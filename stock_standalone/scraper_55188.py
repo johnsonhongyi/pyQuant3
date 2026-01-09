@@ -221,44 +221,58 @@ class Scraper55188:
         #     logger.error(f"Error fetching Eastmoney data: {e}")
         #     return pd.DataFrame()
 
-    def fetch_ths_hotlist(self) -> pd.DataFrame:
+    def fetch_ths_hotlist_full(self) -> pd.DataFrame:
         """
-        获取同花顺人气热榜及其深度分析
+        获取同花顺人气热榜及其深度分析，并保留原始原始 item 数据
         """
         try:
             resp = self.session.get(self.THS_URL, timeout=10)
             data = resp.json()
             stock_list = data.get("data", {}).get("stock_list", [])
-            if not stock_list: return pd.DataFrame()
-            
+            if not stock_list:
+                return pd.DataFrame()
+
             items = []
             for item in stock_list:
                 raw_code = item.get("code", "")
                 code = raw_code[-6:] if len(raw_code) >= 6 else raw_code
-                
+
+                # === hot_tag 解析 ===
                 tags = []
                 tag_obj = item.get("tag", {})
                 if isinstance(tag_obj, dict):
-                    c_tags = tag_obj.get("concept_tag", [])
-                    if isinstance(c_tags, list): tags.extend(c_tags)
-                    p_tag = tag_obj.get("popularity_tag")
-                    if p_tag: tags.append(p_tag)
-                
-                # 组合详细理由
+                    concept_tags = tag_obj.get("concept_tag", [])
+                    if isinstance(concept_tags, list):
+                        tags.extend([str(t).strip() for t in concept_tags if t])
+                    popularity_tag = tag_obj.get("popularity_tag")
+                    if popularity_tag:
+                        tags.append(str(popularity_tag).strip())
+                hot_tag_str = ",".join(tags)  # 始终用逗号分隔
+
+                # === 组合详细理由 ===
                 title = item.get("analyse_title", "").strip()
                 reason = item.get("analyse", "").replace("<br>", "\n").strip()
                 reason = re.sub(r'<[^>]+>', '', reason)
                 full_reason = f"【{title}】\n{reason}" if title else reason
-                
+
                 items.append({
                     "code": code,
                     "name": item.get("name", ""),
-                    "hot_rank": item.get("order"), 
-                    "hot_tag": ",".join(tags),
-                    "hot_reason": full_reason
+                    "hot_rank": item.get("order"),
+                    "hot_tag": hot_tag_str,
+                    "hot_reason": full_reason,
+                    "raw_item": item  # 保留原始 item 数据，便于 debug 或后续扩展
                 })
-            
-            return pd.DataFrame(items)
+
+            df_hot = pd.DataFrame(items)
+
+            # 保证 hot_tag 和 hot_reason 列存在，即使为空
+            for col in ["hot_tag", "hot_reason"]:
+                if col not in df_hot.columns:
+                    df_hot[col] = ""
+
+            return df_hot
+
         except Exception as e:
             status = getattr(resp, "status_code", "N/A")
             text = ""
@@ -267,27 +281,230 @@ class Scraper55188:
             except Exception:
                 pass
             logger.warning(
-                "fetch_theme_stocks failed | status=%s | resp=%s | err=%s",
+                "fetch_ths_hotlist failed | status=%s | resp=%s | err=%s",
                 status,
                 text,
                 repr(e)
             )
             return pd.DataFrame()
-        # except Exception as e:
-        #     logger.error(f"Error fetching THS data: {e}")
-        #     return pd.DataFrame()
 
-    # def fetch_concept_mining_themes(self, count: int = 15) -> list:
+    def fetch_ths_hotlist(self) -> pd.DataFrame:
+        """
+        获取同花顺人气热榜及其深度分析
+        hot_reason 包含 analyse_title、analyse、topic、tag 中文信息
+        HTML/URL/无用内容全部过滤
+        """
+        try:
+            resp = self.session.get(self.THS_URL, timeout=10)
+            data = resp.json()
+            stock_list = data.get("data", {}).get("stock_list", [])
+            if not stock_list:
+                return pd.DataFrame()
+
+            items = []
+            for item in stock_list:
+                # === 代码 ===
+                raw_code = item.get("code", "")
+                code = raw_code[-6:] if len(raw_code) >= 6 else raw_code
+
+                # === 热榜标签 hot_tag ===
+                tags = []
+                tag_obj = item.get("tag", {})
+                if isinstance(tag_obj, dict):
+                    concept_tags = tag_obj.get("concept_tag", [])
+                    if isinstance(concept_tags, list):
+                        tags.extend([str(t).strip() for t in concept_tags if t])
+                    popularity_tag = tag_obj.get("popularity_tag")
+                    if popularity_tag:
+                        tags.append(str(popularity_tag).strip())
+                hot_tag_str = ",".join(tags)
+
+                # === 分析信息 analyse ===
+                title = item.get("analyse_title", "").strip()
+                reason = item.get("analyse", "").replace("<br>", "\n").strip()
+                # 去掉 HTML 标签、URL，只保留中文和数字标点
+                reason = re.sub(r'<[^>]+>', '', reason)
+                reason = re.sub(r'http\S+', '', reason)
+                reason = re.sub(r'[^\u4e00-\u9fff0-9a-zA-Z：：,.、\n]', '', reason)
+                full_reason = f"【{title}】\n{reason}" if title else reason
+
+                # === topic 信息 ===
+                topic = item.get("topic")
+                topic_info = ""
+                if isinstance(topic, dict):
+                    t_title = topic.get("title", "").strip()
+                    if t_title:
+                        topic_info = f"【主题】{t_title}"
+
+                # === tag 信息（其他标签） ===
+                other_tags = []
+                if isinstance(tag_obj, dict):
+                    for k in ['industry_tag', 'other_tag']:
+                        vals = tag_obj.get(k, [])
+                        if isinstance(vals, list):
+                            other_tags.extend([str(v).strip() for v in vals if v])
+                other_tags_str = "、".join(other_tags)
+
+                # === 整合 hot_reason ===
+                combined_reason_parts = [full_reason]
+                if topic_info:
+                    combined_reason_parts.append(topic_info)
+                if other_tags_str:
+                    combined_reason_parts.append(f"【其他标签】{other_tags_str}")
+                hot_reason_final = "\n\n".join([p for p in combined_reason_parts if p])
+
+                items.append({
+                    "code": code,
+                    "name": item.get("name", ""),
+                    "hot_rank": item.get("order"),
+                    "hot_tag": hot_tag_str,
+                    "hot_reason": hot_reason_final
+                })
+
+            df_hot = pd.DataFrame(items)
+
+            # 保证列存在，即使为空
+            for col in ["hot_tag", "hot_reason"]:
+                if col not in df_hot.columns:
+                    df_hot[col] = ""
+
+            return df_hot
+
+        except Exception as e:
+            status = getattr(resp, "status_code", "N/A")
+            text = ""
+            try:
+                text = resp.text[:200]
+            except Exception:
+                pass
+            logger.warning(
+                "fetch_ths_hotlist_clean failed | status=%s | resp=%s | err=%s",
+                status,
+                text,
+                repr(e)
+            )
+            return pd.DataFrame()
+
+
+    # def fetch_ths_hotlist(self) -> pd.DataFrame:
     #     """
-    #     获取优品热门题材列表
+    #     获取同花顺人气热榜及其深度分析
     #     """
-    #     payload = {"stReq": {"uiStart": 0, "uiCount": count}}
     #     try:
-    #         resp = self.session.post(self.UPCHINA_THEME_URL, json=payload, timeout=10)
+    #         resp = self.session.get(self.THS_URL, timeout=10)
     #         data = resp.json()
-    #         return data.get("stRsp", {}).get("vThemeData", [])
+    #         stock_list = data.get("data", {}).get("stock_list", [])
+    #         if not stock_list:
+    #             return pd.DataFrame()
+
+    #         items = []
+    #         for item in stock_list:
+    #             raw_code = item.get("code", "")
+    #             code = raw_code[-6:] if len(raw_code) >= 6 else raw_code
+
+    #             # === hot_tag 解析 ===
+    #             tags = []
+    #             tag_obj = item.get("tag", {})
+    #             if isinstance(tag_obj, dict):
+    #                 concept_tags = tag_obj.get("concept_tag", [])
+    #                 if isinstance(concept_tags, list):
+    #                     tags.extend([str(t).strip() for t in concept_tags if t])
+    #                 popularity_tag = tag_obj.get("popularity_tag")
+    #                 if popularity_tag:
+    #                     tags.append(str(popularity_tag).strip())
+    #             hot_tag_str = ",".join(tags)  # 始终用逗号分隔
+
+    #             # === 组合详细理由 ===
+    #             title = item.get("analyse_title", "").strip()
+    #             reason = item.get("analyse", "").replace("<br>", "\n").strip()
+    #             reason = re.sub(r'<[^>]+>', '', reason)
+    #             full_reason = f"【{title}】\n{reason}" if title else reason
+
+    #             items.append({
+    #                 "code": code,
+    #                 "name": item.get("name", ""),
+    #                 "hot_rank": item.get("order"),
+    #                 "hot_tag": hot_tag_str,
+    #                 "hot_reason": full_reason
+    #             })
+
+    #         df_hot = pd.DataFrame(items)
+
+    #         # 保证 hot_tag 列存在，即使为空
+    #         if "hot_tag" not in df_hot.columns:
+    #             df_hot["hot_tag"] = ""
+
+    #         return df_hot
+
     #     except Exception as e:
-    #         return []
+    #         status = getattr(resp, "status_code", "N/A")
+    #         text = ""
+    #         try:
+    #             text = resp.text[:200]
+    #         except Exception:
+    #             pass
+    #         logger.warning(
+    #             "fetch_ths_hotlist failed | status=%s | resp=%s | err=%s",
+    #             status,
+    #             text,
+    #             repr(e)
+    #         )
+    #         return pd.DataFrame()
+
+
+    # def fetch_ths_hotlist_old(self) -> pd.DataFrame:
+    #     """
+    #     获取同花顺人气热榜及其深度分析
+    #     """
+    #     try:
+    #         resp = self.session.get(self.THS_URL, timeout=10)
+    #         data = resp.json()
+    #         stock_list = data.get("data", {}).get("stock_list", [])
+    #         if not stock_list: return pd.DataFrame()
+    #         items = []
+    #         for item in stock_list:
+    #             raw_code = item.get("code", "")
+    #             code = raw_code[-6:] if len(raw_code) >= 6 else raw_code
+                
+    #             tags = []
+    #             tag_obj = item.get("tag", {})
+    #             if isinstance(tag_obj, dict):
+    #                 c_tags = tag_obj.get("concept_tag", [])
+    #                 if isinstance(c_tags, list): tags.extend(c_tags)
+    #                 p_tag = tag_obj.get("popularity_tag")
+    #                 if p_tag: tags.append(p_tag)
+                
+    #             # 组合详细理由
+    #             title = item.get("analyse_title", "").strip()
+    #             reason = item.get("analyse", "").replace("<br>", "\n").strip()
+    #             reason = re.sub(r'<[^>]+>', '', reason)
+    #             full_reason = f"【{title}】\n{reason}" if title else reason
+                
+    #             items.append({
+    #                 "code": code,
+    #                 "name": item.get("name", ""),
+    #                 "hot_rank": item.get("order"), 
+    #                 "hot_tag": ",".join(tags),
+    #                 "hot_reason": full_reason
+    #             })
+            
+    #         return pd.DataFrame(items)
+    #     except Exception as e:
+    #         status = getattr(resp, "status_code", "N/A")
+    #         text = ""
+    #         try:
+    #             text = resp.text[:200]
+    #         except Exception:
+    #             pass
+    #         logger.warning(
+    #             "fetch_theme_stocks failed | status=%s | resp=%s | err=%s",
+    #             status,
+    #             text,
+    #             repr(e)
+    #         )
+    #         return pd.DataFrame()
+
+
 
     def fetch_concept_mining_themes(self, count: int = 15) -> list:
         """
@@ -322,6 +539,43 @@ class Scraper55188:
             )
             return []
 
+    def parse_belong_gn(self,gn_str: str):
+        """
+        1##884164##多元金融@@1##884118##教育培训
+        """
+        res = []
+        if not isinstance(gn_str, str):
+            return res
+
+        for part in gn_str.split("@@"):
+            seg = part.split("##")
+            if len(seg) >= 3:
+                res.append({
+                    "level": seg[0],
+                    "gn_code": seg[1],
+                    "gn_name": seg[2]
+                })
+        return res
+
+    def extract_drive_logic(self,item: dict):
+        for k in ("latestDrive", "driveContent", "position", "driveName"):
+            val = item.get(k)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return ""
+
+    def extract_ext_features(self,ext: dict):
+        if not isinstance(ext, dict):
+            return {}
+
+        return {
+            "bFirstZT": ext.get("bFirstZT"),
+            "bCross250MA": ext.get("bCross250MA"),
+            "zljm5Day": ext.get("zljm5Day"),
+            "ztCnt5Days": ext.get("ztCnt5Days"),
+            "niusan": ext.get("niusan"),
+            "sAIFactor": ext.get("sAIFactor"),
+        }
 
 
     def fetch_theme_stocks(self, plate_code: str) -> pd.DataFrame:
@@ -346,36 +600,40 @@ class Scraper55188:
             stock_list = rsp.get("vDataSimple", []) or rsp.get("vData", [])
             
             items = []
+            
             for item in stock_list:
-                code = str(item.get("code", ""))
-                code = code[-6:] if len(code) > 6 else code
-                if not code.isnumeric(): continue
-                
-                logic = ""
-                m2 = item.get("vLatestData", {})
-                logic2 = item.get("position", "")
-                updateDate = ""
+                code = str(item.get("code", ""))[-6:]
+                if not code.isnumeric():
+                    continue
+                logic = self.extract_drive_logic(item)
+                gn_list = self.parse_belong_gn(item.get("belongGN", ""))
+                ext_feat = self.extract_ext_features(item.get("extData", {}))
 
-                if isinstance(m2, list) and m2 and isinstance(m2[0], dict):
-                    val = m2[0].get("driveContent")
-                    updateDate = m2[0].get("updateDate", "")
-        
-                    if isinstance(val, str):
-                        logic = val.strip()
-                        
-                    if not logic and len(m2) > 1 and isinstance(m2[1], dict):
-                        val2 = m2[1].get("driveContent")
-                        if isinstance(val2, str):
-                            logic = val2.strip()
-                            
-                    if isinstance(logic2, str) and logic2 and '地址' not in logic2:
-                        logic = f"{logic} {logic2}"
-                    # else:
-                        # print(f'position: {logic2}')
-                    # if isinstance(val, list) and len(val) > 1: logic = val[1]
-                    # else: logic = str(val)
-                
-                items.append({"code": code, "theme_logic": logic ,"updateDate": updateDate})
+                items.append({
+                    "code": code,
+                    "name": item.get("name"),
+                    "price": item.get("price"),
+                    "chg": item.get("chg"),
+                    "turnover": item.get("turnover"),
+
+                    # 资金
+                    "fMainBuy": item.get("fMainBuy"),
+                    "fMainRatio": item.get("fMainRatio"),
+                    "d5DayNetInflow": item.get("d5DayNetInflow"),
+
+                    # 趋势
+                    "d3DayChg": item.get("d3DayChg"),
+                    "d5DayChg": item.get("d5DayChg"),
+                    "d10DayChg": item.get("d10DayChg"),
+
+                    # 逻辑
+                    "drive_logic": logic,
+                    "industry": item.get("sHyBlockName"),
+                    "concepts": [g["gn_name"] for g in gn_list],
+
+                    # ext
+                    **ext_feat
+                })
             return pd.DataFrame(items)
         except Exception as e:
             status = getattr(resp, "status_code", "N/A")
@@ -391,300 +649,511 @@ class Scraper55188:
                 repr(e)
             )
             return []
-        # except Exception as e:
-        #     logger.error("Exception", e)
-        #     return pd.DataFrame()
+    
+    # def merge_theme_logic(self, df: pd.DataFrame) -> pd.DataFrame:
+    #     """
+    #     整合题材逻辑：个股驱动 / 行业定位 / 题材背景 / 市场概念
+    #     """
+    #     def merge_one(sub: pd.DataFrame) -> pd.Series:
+    #         sub = sub.sort_values('theme_date', ascending=False)
 
-    def get_combined_data_old(self) -> pd.DataFrame:
+    #         # === 1. 个股驱动（事件） ===
+    #         drives = sub.get('drive_logic', pd.Series(dtype='object')).dropna().astype(str)
+    #         drives = [d.strip() for d in drives if d.strip()]
+    #         drives = list(dict.fromkeys(drives))
+
+    #         # === 2. 行业 / 业务定位 ===
+    #         industries = sub.get('industry', pd.Series(dtype='object')).dropna().astype(str)
+    #         industries = list(dict.fromkeys([i.strip() for i in industries if i.strip()]))
+
+    #         # === 3. 题材 / 宏观背景 ===
+    #         themes = sub.get('theme_logic', pd.Series(dtype='object')).dropna().astype(str)
+    #         themes = [t.strip() for t in themes if t.strip()]
+    #         themes = list(dict.fromkeys(themes))
+
+    #         # === 4. 市场概念 ===
+    #         concepts_all = []
+    #         if 'concepts' in sub.columns:
+    #             for c in sub['concepts']:
+    #                 if isinstance(c, list):
+    #                     concepts_all.extend(c)
+    #         concepts_all = list(dict.fromkeys([str(c).strip() for c in concepts_all if str(c).strip()]))
+
+    #         blocks = []
+    #         if drives:
+    #             blocks.append("【个股驱动（事件）】: " + "\n".join(drives))
+    #         if industries:
+    #             blocks.append("【业务与行业定位】: " + " / ".join(industries))
+    #         if themes:
+    #             blocks.append("【题材 / 宏观背景】: " + "\n".join(themes))
+    #         if concepts_all:
+    #             blocks.append("【市场概念理解】: " + "、".join(concepts_all))
+
+    #         return pd.Series({
+    #             "theme_name": " / ".join(sub['theme_name'].dropna().astype(str).unique()),
+    #             "theme_logic": "\n\n".join(blocks),
+    #             "theme_date": sub['theme_date'].max()
+    #         })
+
+    #     return df.groupby('code', group_keys=False).apply(merge_one).reset_index()
+
+    def merge_theme_logic(self, df: pd.DataFrame , debug = False) -> pd.DataFrame:
+        debug_logs = []
+
+        def merge_one(sub: pd.DataFrame,debug=debug) -> pd.Series:
+            sub = sub.sort_values('theme_date', ascending=False)
+
+            # === 1. 个股驱动（事件） ===
+            drives = sub.get('drive_logic', pd.Series(dtype=str)).dropna().astype(str)
+            drives = [d.strip() for d in drives if d.strip()]
+            drives = list(dict.fromkeys(drives))
+
+            # === 2. 行业 / 业务定位 ===
+            industries = sub.get('industry', pd.Series(dtype=str)).dropna().astype(str)
+            industries = [i.strip() for i in industries if i.strip()]
+            industries = list(dict.fromkeys(industries))
+
+            # === 3. 题材 / 宏观背景 ===
+            themes = sub.get('theme_logic', pd.Series(dtype=str)).dropna().astype(str)
+            themes = [t.strip() for t in themes if t.strip()]
+            themes = list(dict.fromkeys(themes))
+
+            # === 4. 市场概念 ===
+            concepts_all = []
+            if 'concepts' in sub.columns:
+                for c in sub['concepts']:
+                    if isinstance(c, list):
+                        concepts_all.extend(c)
+            concepts_all = list(dict.fromkeys([str(c).strip() for c in concepts_all if str(c).strip()]))
+
+            # === 5. hot_tag ===
+            hot_tags = []
+            if 'hot_tag' in sub.columns:
+                for t in sub['hot_tag']:
+                    if isinstance(t, str) and t.strip():
+                        hot_tags.append(t.strip())
+            hot_tags = list(dict.fromkeys(hot_tags))  # 去重保序
+
+            # 构造 theme_logic 块
+            blocks = []
+            if drives:
+                blocks.append("【个股驱动（事件）】: " + "\n".join(drives))
+            if industries:
+                blocks.append("【业务与行业定位】: " + " / ".join(industries))
+            if themes:
+                blocks.append("【题材 / 宏观背景】: " + "\n".join(themes))
+            if concepts_all:
+                blocks.append("【市场概念理解】: " + "、".join(concepts_all))
+
+            # 构造 theme_name: hot_tag在最前面
+            theme_name_parts = []
+            if hot_tags:
+                theme_name_parts.append(", ".join(hot_tags))  # 保留逗号
+            theme_name_parts.extend(sub['theme_name'].dropna().astype(str).unique())
+            if industries:
+                theme_name_parts.extend(industries)
+            theme_name_final = " / ".join(theme_name_parts)
+
+            if debug:
+                # 记录 debug 信息到列表    
+                debug_logs.append({
+                    'code': sub['code'].iloc[0],
+                    'hot_tags': hot_tags,
+                    'theme_name_parts': theme_name_parts,
+                    'theme_logic_blocks': blocks
+                })
+
+            return pd.Series({
+                "theme_name": theme_name_final,
+                "theme_logic": "\n\n".join(blocks),
+                "theme_date": sub['theme_date'].max()
+            })
+
+        df_merged = df.groupby('code', group_keys=False).apply(merge_one)
+
+        if debug:
+            # 输出所有 debug 信息
+            for log_entry in debug_logs:
+                print(f"\n=== CODE: {log_entry['code']} ===")
+                print(f"hot_tags: {log_entry['hot_tags']}")
+                print(f"theme_name_parts: {log_entry['theme_name_parts']}")
+                print("theme_logic_blocks:")
+                for b in log_entry['theme_logic_blocks']:
+                    print(b)
+
+        return df_merged
+
+
+
+    def get_combined_data(self, force_full=False, count=30) -> pd.DataFrame:
         """
         聚合多维数据：主力、人气、题材逻辑
         """
-        df_zhuli = self.fetch_eastmoney_zhuli()
-        df_hot = self.fetch_ths_hotlist()
-        
-        # 题材与逻辑整合 (增加抓取数量以覆盖更久之前的题材)
-        themes = self.fetch_concept_mining_themes(count=30) 
-        theme_dfs = []
-        # logger.info(f'themes: {themes}')
-        last_date = None
-        for theme in themes:
-            p_code = theme.get("sPlateCode")
-            if p_code:
-                df_t = self.fetch_theme_stocks(p_code)
-                if not df_t.empty:
-                    df_t["theme_name"] = str(theme.get("sPlateName") or "")
-                    
-                    # 提取日期：尝试更多可能字段并处理时间戳
-                    # 优先级：effectiveTime > sDate > uiDate > uiUpdateDate > sUpdateDate > sDriveTime > ...
-                    # raw_date = (theme.get("effectiveTime") or theme.get("sEffectiveTime"))
-                    raw_date = (theme.get("effectiveTime") or theme.get("sEffectiveTime")  or
-                                theme.get("sDate") or theme.get("uiDate") or 
-                                theme.get("uiUpdateDate") or theme.get("sUpdateDate") or
-                                theme.get("sDriveTime") or theme.get("sDriveDate") or 
-                                theme.get("sTime") or theme.get("dt") or theme.get("uiTime") or ""
-                                )
-                    
-                    theme_date = ""
-                    try:
-                        if raw_date:
-                            s_date = str(raw_date).strip()
-                            # 1. 处理 Unix 时间戳 (10位秒 或 13位毫秒)
-                            if s_date.isdigit() and len(s_date) >= 10:
-                                ts = int(s_date)
-                                if len(s_date) == 13: ts //= 1000
-                                theme_date = time.strftime("%Y/%m/%d", time.localtime(ts))
-                            # 2. 处理 20251229 这种 8+ 位数字格式
-                            elif len(s_date) >= 8 and s_date[:8].isdigit():
-                                theme_date = f"{s_date[:4]}/{s_date[4:6]}/{s_date[6:8]}"
-                            # 3. 处理已带有 / 或 - 的格式
-                            elif "/" in s_date or "-" in s_date:
-                                # 简单正则提取前 10 位
-                                m = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', s_date)
-                                if m: theme_date = f"{m.group(1)}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
-                        else:
-                            logger.info(f'p_code: {p_code} raw_date: {raw_date} theme_date: {theme_date}')
-                        if not theme_date:
-                            # 最后的兜底：如果完全没抓到，记录一下可能存在的 key
-                            pass
-                        else:
-                            pass
-                    except Exception as e:
-                        theme_date = ""
-                        logger.error(f'raw_date: {e}')
-                    df_t["theme_date"] = theme_date
-
-                    # 题材逻辑兜底：如果个股 logic 为空，使用该题材的 driveLogic
-                    drive = theme.get("driveLogic", "").strip()
-                    if drive:
-                        df_t['theme_logic'] = df_t['theme_logic'].replace('', f"【背景】{drive}")
-                    theme_dfs.append(df_t)
-        
-        # 题材全集（暂不消重，归并后按日期保留最新的）
-        df_theme = pd.concat(theme_dfs) if theme_dfs else pd.DataFrame()
-        if not df_theme.empty:
-            # 统一将空日期转为 NA 以便排序，或者赋一个极小值
-            df_theme['theme_date'] = df_theme['theme_date'].replace('', '1970/01/01')
-
-        # 确立代码全集
-        all_codes = set()
-        if not df_zhuli.empty: all_codes.update(df_zhuli['code'])
-        if not df_hot.empty: all_codes.update(df_hot['code'])
-        if not df_theme.empty: all_codes.update(df_theme['code'])
-        
-        if not all_codes: return pd.DataFrame()
-        
-        # 构建主表
-        result = pd.DataFrame({'code': list(all_codes)}).set_index('code')
-        
-        # 1. 注入主力基础面数据 (EM)
-        if not df_zhuli.empty:
-            result = result.join(df_zhuli.set_index('code'), how='left')
-        
-        # 2. 注入人气维度 (THS)
-        if not df_hot.empty:
-            df_hot_idx = df_hot.set_index('code')
-            # 补全名称
-            if 'name' not in result.columns:
-                result['name'] = df_hot_idx['name']
-            else:
-                result['name'] = result['name'].fillna('').replace('', pd.NA).combine_first(df_hot_idx['name']).fillna('')
-            
-            result = result.join(df_hot_idx[['hot_rank', 'hot_tag', 'hot_reason']], how='left', rsuffix='_hot')
-            
-        # 3. 注入题材维度 (Upchina)
-        if not df_theme.empty:
-            # 确保按日期倒序排列，这样 groupby.first() 拿到的是最新的题材日期
-            # 将 1970/01/01 再换回空，结果更干净
-            df_theme_unique = df_theme.sort_values('theme_date', ascending=False).groupby('code').first()
-            if 'theme_date' in df_theme_unique.columns:
-                df_theme_unique['theme_date'] = df_theme_unique['theme_date'].replace('1970/01/01', '')
-            result = result.join(df_theme_unique, how='left')
-            
-        # 4. 最终清洗与默认值
-        result['zhuli_rank'] = result.get('zhuli_rank', pd.Series(999, index=result.index)).fillna(999)
-        result['hot_rank'] = result.get('hot_rank_hot', result.get('hot_rank', pd.Series(999, index=result.index))).fillna(999)
-        result['net_ratio'] = result.get('net_ratio', pd.Series(0.0, index=result.index)).fillna(0.0)
-        result['change_pct'] = result.get('change_pct', pd.Series(0.0, index=result.index)).fillna(0.0)
-        result['price'] = result.get('price', pd.Series(0.0, index=result.index)).fillna(0.0)
-
-        if 'hot_rank_hot' in result.columns: result.drop(columns=['hot_rank_hot'], inplace=True)
-
-        for col in ['name', 'theme_name', 'theme_logic', 'theme_date', 'hot_tag', 'hot_reason', 'sector']:
-            if col in result.columns:
-                result[col] = result[col].fillna('')
-            else: result[col] = ''
-            
-        # 补位策略
-        # # 1. 如果题材名为空但有人气标签，尝试回填
-        # mask_theme_name = (result['theme_name'] == '') & (result['hot_tag'] != '')
-        # result.loc[mask_theme_name, 'theme_name'] = result.loc[mask_theme_name, 'hot_tag'].apply(lambda x: x.split(',')[0])
-        
-        # # 2. 如果题材逻辑为空但有人气推导逻辑，回填推导逻辑作为分析参考
-        # mask_theme_logic = (result['theme_logic'] == '') & (result['hot_reason'] != '')
-        # result.loc[mask_theme_logic, 'theme_logic'] = result.loc[mask_theme_logic, 'hot_reason']
-        logger.info(f'fetching: {len(result)}')
-        return result.reset_index()
-
-    def get_combined_data(self, force_full=False,count=30) -> pd.DataFrame:
-        """
-        聚合多维数据：主力、人气、题材逻辑
-        """
-
-        # 1. 抓取 L1（必须）
+        # 1. 抓取主力基础面数据
         df_zhuli = self.fetch_eastmoney_zhuli()
         if df_zhuli.empty:
             return load_cache()
 
+        # 2. 缓存指纹
         new_fp = df_fingerprint(df_zhuli)
         fp_info = load_fp()
         old_fp = fp_info.get("fp")
-        # 2. 如果指纹相同，直接返回缓存
-        if (not force_full) and new_fp == old_fp:
-            logger.info("Market snapshot unchanged, use cached data.")
+        if not force_full and new_fp == old_fp:
             return load_cache()
 
-
-        # df_zhuli = self.fetch_eastmoney_zhuli()
+        # 3. 抓取人气
         df_hot = self.fetch_ths_hotlist()
-        
-        # 题材与逻辑整合 (增加抓取数量以覆盖更久之前的题材)
-        themes = self.fetch_concept_mining_themes(count=count) 
+
+        # 4. 抓取题材与逻辑
+        themes = self.fetch_concept_mining_themes(count=count)
         theme_dfs = []
-        # logger.info(f'themes: {themes}')
-        last_date = None
         for theme in themes:
             p_code = theme.get("sPlateCode")
-            if p_code:
-                df_t = self.fetch_theme_stocks(p_code)
-                if not df_t.empty:
-                    df_t["theme_name"] = str(theme.get("sPlateName") or "")
-                    
-                    # 提取日期：尝试更多可能字段并处理时间戳
-                    # 优先级：effectiveTime > sDate > uiDate > uiUpdateDate > sUpdateDate > sDriveTime > ...
-                    # raw_date = (theme.get("effectiveTime") or theme.get("sEffectiveTime"))
-                    raw_date = (theme.get("effectiveTime") or theme.get("sEffectiveTime")  or
-                                theme.get("sDate") or theme.get("uiDate") or 
-                                theme.get("uiUpdateDate") or theme.get("sUpdateDate") or
-                                theme.get("sDriveTime") or theme.get("sDriveDate") or 
-                                theme.get("sTime") or theme.get("dt") or theme.get("uiTime") or ""
-                                )
-                    
-                    theme_date = ""
-                    try:
-                        if raw_date:
-                            s_date = str(raw_date).strip()
-                            # 1. 处理 Unix 时间戳 (10位秒 或 13位毫秒)
-                            if s_date.isdigit() and len(s_date) >= 10:
-                                ts = int(s_date)
-                                if len(s_date) == 13: ts //= 1000
-                                theme_date = time.strftime("%Y/%m/%d", time.localtime(ts))
-                            # 2. 处理 20251229 这种 8+ 位数字格式
-                            elif len(s_date) >= 8 and s_date[:8].isdigit():
-                                theme_date = f"{s_date[:4]}/{s_date[4:6]}/{s_date[6:8]}"
-                            # 3. 处理已带有 / 或 - 的格式
-                            elif "/" in s_date or "-" in s_date:
-                                # 简单正则提取前 10 位
-                                m = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', s_date)
-                                if m: theme_date = f"{m.group(1)}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
-                        else:
-                            logger.info(f'p_code: {p_code} raw_date: {raw_date} theme_date: {theme_date}')
-                        if not theme_date:
-                            # 最后的兜底：如果完全没抓到，记录一下可能存在的 key
-                            pass
-                        else:
-                            pass
-                    except Exception as e:
-                        theme_date = ""
-                        logger.error(f'raw_date: {e}')
-                    df_t["theme_date"] = theme_date
+            if not p_code:
+                continue
 
-                    # 题材逻辑兜底：如果个股 logic 为空，使用该题材的 driveLogic
-                    drive = theme.get("driveLogic", "").strip()
-                    if drive:
-                        df_t['theme_logic'] = df_t['theme_logic'].replace('', f"【背景】{drive}")
-                    theme_dfs.append(df_t)
-        
-        # 题材全集（暂不消重，归并后按日期保留最新的）
+            df_t = self.fetch_theme_stocks(p_code)
+            if df_t.empty:
+                continue
+
+            # 初始化列
+            for col in ['theme_name', 'theme_logic', 'theme_date']:
+                if col not in df_t.columns:
+                    df_t[col] = ''
+
+            df_t['theme_name'] = str(theme.get("sPlateName") or "")
+
+            # 处理日期
+            raw_date = (theme.get("effectiveTime") or theme.get("sEffectiveTime") or
+                        theme.get("sDate") or theme.get("uiDate") or
+                        theme.get("uiUpdateDate") or theme.get("sUpdateDate") or
+                        theme.get("sDriveTime") or theme.get("sDriveDate") or
+                        theme.get("sTime") or theme.get("dt") or theme.get("uiTime") or "")
+            theme_date = ''
+            try:
+                s_date = str(raw_date).strip()
+                if s_date.isdigit() and len(s_date) >= 10:
+                    ts = int(s_date)
+                    if len(s_date) == 13:
+                        ts //= 1000
+                    theme_date = time.strftime("%Y/%m/%d", time.localtime(ts))
+                elif len(s_date) >= 8 and s_date[:8].isdigit():
+                    theme_date = f"{s_date[:4]}/{s_date[4:6]}/{s_date[6:8]}"
+                elif "/" in s_date or "-" in s_date:
+                    m = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', s_date)
+                    if m:
+                        theme_date = f"{m.group(1)}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
+            except Exception:
+                theme_date = ''
+            df_t['theme_date'] = theme_date or ''
+
+            # 整合逻辑
+            df_t['theme_logic'] = df_t.get('theme_logic', '').fillna('')
+            for idx, row in df_t.iterrows():
+                logic = row.get('theme_logic', '').strip()
+                drive = theme.get("driveLogic", "").strip()
+                if not logic and drive:
+                    logic = f"【背景】{drive}"
+                pos_logic = row.get('position', '').strip() if 'position' in row else ''
+                if pos_logic:
+                    logic = f"{logic} {pos_logic}".strip()
+                df_t.at[idx, 'theme_logic'] = logic
+
+            theme_dfs.append(df_t)
+
         df_theme = pd.concat(theme_dfs) if theme_dfs else pd.DataFrame()
         if not df_theme.empty:
-            # 统一将空日期转为 NA 以便排序，或者赋一个极小值
             df_theme['theme_date'] = df_theme['theme_date'].replace('', '1970/01/01')
 
-        # 确立代码全集
+        # 5. 把 hot_tag join 进 df_theme
+        if not df_hot.empty:
+            df_hot_idx = df_hot.set_index('code')[['hot_tag', 'hot_reason']]
+            df_theme = df_theme.join(df_hot_idx, on='code')
+
+        # 6. 合并主题逻辑
+        df_theme_unique = self.merge_theme_logic(df_theme)
+        if 'theme_date' in df_theme_unique.columns:
+            df_theme_unique['theme_date'] = df_theme_unique['theme_date'].replace('1970/01/01', '')
+
+        # 7. 构建代码全集
         all_codes = set()
-        if not df_zhuli.empty: all_codes.update(df_zhuli['code'])
-        if not df_hot.empty: all_codes.update(df_hot['code'])
-        if not df_theme.empty: all_codes.update(df_theme['code'])
-        
-        if not all_codes: return pd.DataFrame()
-        
-        # 构建主表
+        for df in [df_zhuli, df_hot, df_theme_unique]:
+            if not df.empty:
+                if 'code' in df.columns:
+                    all_codes.update(df['code'])
+                else:
+                    all_codes.update(df.index)
+        if not all_codes:
+            return pd.DataFrame()
+
         result = pd.DataFrame({'code': list(all_codes)}).set_index('code')
-        
-        # 1. 注入主力基础面数据 (EM)
+
+        # 注入主力
         if not df_zhuli.empty:
             result = result.join(df_zhuli.set_index('code'), how='left')
-        
-        # 2. 注入人气维度 (THS)
+
+        # 注入人气
         if not df_hot.empty:
             df_hot_idx = df_hot.set_index('code')
-            # 补全名称
             if 'name' not in result.columns:
                 result['name'] = df_hot_idx['name']
             else:
-                result['name'] = result['name'].fillna('').replace('', pd.NA).combine_first(df_hot_idx['name']).fillna('')
-            
+                result['name'] = result['name'].fillna('').combine_first(df_hot_idx['name'])
             result = result.join(df_hot_idx[['hot_rank', 'hot_tag', 'hot_reason']], how='left', rsuffix='_hot')
-            
-        # 3. 注入题材维度 (Upchina)
-        if not df_theme.empty:
-            # 确保按日期倒序排列，这样 groupby.first() 拿到的是最新的题材日期
-            # 将 1970/01/01 再换回空，结果更干净
-            df_theme_unique = df_theme.sort_values('theme_date', ascending=False).groupby('code').first()
-            if 'theme_date' in df_theme_unique.columns:
-                df_theme_unique['theme_date'] = df_theme_unique['theme_date'].replace('1970/01/01', '')
-            result = result.join(df_theme_unique, how='left')
-            
-        # 4. 最终清洗与默认值
+
+        # 注入题材
+        if not df_theme_unique.empty:
+            result = result.join(df_theme_unique[['theme_name', 'theme_logic', 'theme_date']], how='left')
+
+        # 8. 清洗默认值
         result['zhuli_rank'] = result.get('zhuli_rank', pd.Series(999, index=result.index)).fillna(999)
         result['hot_rank'] = result.get('hot_rank_hot', result.get('hot_rank', pd.Series(999, index=result.index))).fillna(999)
-        result['net_ratio'] = result.get('net_ratio', pd.Series(0.0, index=result.index)).fillna(0.0)
-        result['change_pct'] = result.get('change_pct', pd.Series(0.0, index=result.index)).fillna(0.0)
         result['price'] = result.get('price', pd.Series(0.0, index=result.index)).fillna(0.0)
-
-        if 'hot_rank_hot' in result.columns: result.drop(columns=['hot_rank_hot'], inplace=True)
+        result['change_pct'] = result.get('change_pct', pd.Series(0.0, index=result.index)).fillna(0.0)
 
         for col in ['name', 'theme_name', 'theme_logic', 'theme_date', 'hot_tag', 'hot_reason', 'sector']:
-            if col in result.columns:
+            if col not in result.columns:
+                result[col] = ''
+            else:
                 result[col] = result[col].fillna('')
-            else: result[col] = ''
-            
+
         # 补位策略
-        # 1. 如果题材名为空但有人气标签，尝试回填
         mask_theme_name = (result['theme_name'] == '') & (result['hot_tag'] != '')
-        result.loc[mask_theme_name, 'theme_name'] = result.loc[mask_theme_name, 'hot_tag'].apply(lambda x: x.split(',')[0])
-        
-        # 2. 如果题材逻辑为空但有人气推导逻辑，回填推导逻辑作为分析参考
+        result.loc[mask_theme_name, 'theme_name'] = result.loc[mask_theme_name, 'hot_tag']
         mask_theme_logic = (result['theme_logic'] == '') & (result['hot_reason'] != '')
         result.loc[mask_theme_logic, 'theme_logic'] = result.loc[mask_theme_logic, 'hot_reason']
-        
+
         result = result.reset_index()
 
-        # self.df_zhuli = result[result['zhuli_rank'] <= 200].sort_values('zhuli_rank')
-        # self.df_hot = result[result['hot_rank'] <= 100].sort_values('hot_rank')
-        # self.df_theme = result[(result['theme_name'] != "") & (df['theme_date'] != "")].sort_values('theme_date')
-
-        # 7. 缓存
+        # 9. 缓存
         ok = save_cache(result, persist=True)
         if ok:
             save_fp({"fp": new_fp, "ts": time.time()}, persist=True)
-        else:
-            logger.warning("cache write failed, fingerprint skipped")
-
-        logger.info(f"Updated fetching snapshot size: {len(result)}")
-        # logger.info(f'fetching: {len(result)}')
 
         return result
+
+
+
+    # def merge_theme_logic(self, df: pd.DataFrame) -> pd.DataFrame:
+    #     def merge_one(sub: pd.DataFrame) -> pd.Series:
+    #         sub = sub.sort_values('theme_date', ascending=False)
+
+    #         # === 1. 个股驱动（事件） ===
+    #         drives = sub.get('drive_logic', pd.Series(dtype=str)).dropna().astype(str)
+    #         drives = [d.strip() for d in drives if d.strip()]
+    #         drives = list(dict.fromkeys(drives))
+
+    #         # === 2. 行业 / 业务定位 ===
+    #         industries = sub.get('industry', pd.Series(dtype=str)).dropna().astype(str)
+    #         industries = list(dict.fromkeys([i.strip() for i in industries if i.strip()]))
+
+    #         # === 3. 原题材 / 宏观背景 ===
+    #         themes = sub.get('theme_logic', pd.Series(dtype=str)).dropna().astype(str)
+    #         themes = [t.strip() for t in themes if t.strip()]
+    #         themes = list(dict.fromkeys(themes))
+
+    #         # === 4. 市场概念 ===
+    #         concepts_all = []
+    #         if 'concepts' in sub.columns:
+    #             for c in sub['concepts']:
+    #                 if isinstance(c, list):
+    #                     concepts_all.extend(c)
+    #         concepts_all = list(dict.fromkeys([str(c).strip() for c in concepts_all if str(c).strip()]))
+
+    #         # === 5. hot_tag ===
+    #         hot_tags = []
+    #         if 'hot_tag' in sub.columns:
+    #             for ht in sub['hot_tag']:
+    #                 if isinstance(ht, str) and ht.strip():
+    #                     hot_tags.append(ht.strip())
+    #             # 去重但保留逗号内原顺序
+    #             hot_tags = list(dict.fromkeys(hot_tags))
+
+    #         # === 构建 theme_logic 内容块 ===
+    #         blocks = []
+    #         if drives:
+    #             blocks.append("【个股驱动（事件）】: " + "\n".join(drives))
+    #         if industries:
+    #             blocks.append("【业务与行业定位】: " + " / ".join(industries))
+    #         if themes:
+    #             blocks.append("【题材 / 宏观背景】: " + "\n".join(themes))
+    #         if concepts_all:
+    #             blocks.append("【市场概念理解】: " + "、".join(concepts_all))
+
+    #         # === 构建 theme_name ===
+    #         name_parts = []
+
+    #         # hot_tag 放最前面，逗号保留
+    #         if hot_tags:
+    #             name_parts += hot_tags
+
+    #         # 原 theme_name
+    #         name_parts += list(sub['theme_name'].dropna().astype(str).unique())
+
+    #         # industry 内容追加
+    #         if industries:
+    #             name_parts += industries
+
+    #         # 去重保序
+    #         seen = set()
+    #         name_parts = [x for x in name_parts if not (x in seen or seen.add(x))]
+
+    #         theme_name_final = " / ".join(name_parts)
+
+    #         return pd.Series({
+    #             "theme_name": theme_name_final,
+    #             "theme_logic": "\n\n".join(blocks),
+    #             "theme_date": sub['theme_date'].max()
+    #         })
+
+    #     return df.groupby('code', group_keys=False).apply(merge_one)
+
+
+    # def get_combined_data(self, force_full=False, count=30) -> pd.DataFrame:
+    #     """
+    #     聚合多维数据：主力、人气、题材逻辑
+    #     """
+
+    #     # 1. 抓取主力基础面数据
+    #     df_zhuli = self.fetch_eastmoney_zhuli()
+    #     if df_zhuli.empty:
+    #         return load_cache()
+
+    #     # 2. 缓存指纹
+    #     new_fp = df_fingerprint(df_zhuli)
+    #     fp_info = load_fp()
+    #     old_fp = fp_info.get("fp")
+    #     if not force_full and new_fp == old_fp:
+    #         logger.info("Market snapshot unchanged, use cached data.")
+    #         return load_cache()
+
+    #     # 3. 抓取人气数据
+    #     df_hot = self.fetch_ths_hotlist()
+
+    #     # 4. 抓取题材与逻辑
+    #     themes = self.fetch_concept_mining_themes(count=count)
+    #     theme_dfs = []
+    #     for theme in themes:
+    #         p_code = theme.get("sPlateCode")
+    #         if not p_code:
+    #             continue
+
+    #         df_t = self.fetch_theme_stocks(p_code)
+    #         if df_t.empty:
+    #             continue
+
+    #         # 初始化必要列
+    #         for col in ['theme_name', 'theme_logic', 'theme_date']:
+    #             if col not in df_t.columns:
+    #                 df_t[col] = ''
+
+    #         # 设置题材名
+    #         df_t['theme_name'] = str(theme.get("sPlateName") or "")
+
+    #         # 处理题材日期
+    #         raw_date = (theme.get("effectiveTime") or theme.get("sEffectiveTime") or
+    #                     theme.get("sDate") or theme.get("uiDate") or
+    #                     theme.get("uiUpdateDate") or theme.get("sUpdateDate") or
+    #                     theme.get("sDriveTime") or theme.get("sDriveDate") or
+    #                     theme.get("sTime") or theme.get("dt") or theme.get("uiTime") or "")
+    #         theme_date = ''
+    #         try:
+    #             s_date = str(raw_date).strip()
+    #             if s_date.isdigit() and len(s_date) >= 10:
+    #                 ts = int(s_date)
+    #                 if len(s_date) == 13: ts //= 1000
+    #                 theme_date = time.strftime("%Y/%m/%d", time.localtime(ts))
+    #             elif len(s_date) >= 8 and s_date[:8].isdigit():
+    #                 theme_date = f"{s_date[:4]}/{s_date[4:6]}/{s_date[6:8]}"
+    #             elif "/" in s_date or "-" in s_date:
+    #                 m = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', s_date)
+    #                 if m:
+    #                     theme_date = f"{m.group(1)}/{int(m.group(2)):02d}/{int(m.group(3)):02d}"
+    #         except Exception:
+    #             theme_date = ''
+    #         df_t['theme_date'] = theme_date or ''
+    #         # 整合逻辑：vLatestData > position > driveLogic
+    #         df_t['theme_logic'] = df_t.get('theme_logic', '').fillna('')
+    #         for idx, row in df_t.iterrows():
+    #             logic = row.get('theme_logic', '').strip()
+    #             # driveLogic 补充逻辑
+    #             drive = theme.get("driveLogic", "").strip()
+    #             if not logic and drive:
+    #                 logic = f"【背景】{drive}"
+    #             # position 补充逻辑
+    #             pos_logic = row.get('position', '').strip() if 'position' in row else ''
+    #             if pos_logic:
+    #                 logic = f"{logic} {pos_logic}".strip()
+    #             df_t.at[idx, 'theme_logic'] = logic
+
+    #         theme_dfs.append(df_t)
+
+    #     df_theme = pd.concat(theme_dfs) if theme_dfs else pd.DataFrame()
+    #     if not df_theme.empty:
+    #         df_theme['theme_date'] = df_theme['theme_date'].replace('', '1970/01/01')
+
+    #     # 5. 确立所有股票代码全集
+    #     all_codes = set()
+    #     for df in [df_zhuli, df_hot, df_theme]:
+    #         if not df.empty:
+    #             all_codes.update(df['code'])
+    #     if not all_codes:
+    #         return pd.DataFrame()
+
+    #     # 6. 构建主表
+    #     result = pd.DataFrame({'code': list(all_codes)}).set_index('code')
+
+    #     # 注入主力基础面
+    #     if not df_zhuli.empty:
+    #         result = result.join(df_zhuli.set_index('code'), how='left')
+
+    #     # 注入人气
+    #     if not df_hot.empty:
+    #         df_hot_idx = df_hot.set_index('code')
+    #         if 'name' not in result.columns:
+    #             result['name'] = df_hot_idx['name']
+    #         else:
+    #             result['name'] = result['name'].fillna('').combine_first(df_hot_idx['name'])
+    #         result = result.join(df_hot_idx[['hot_rank', 'hot_tag', 'hot_reason']], how='left', rsuffix='_hot')
+
+    #     # 注入题材
+    #     if not df_theme.empty:
+    #         # 按日期倒序，取最新主题
+    #         df_theme_unique = self.merge_theme_logic(df_theme)
+    #         if 'theme_date' in df_theme_unique.columns:
+    #             df_theme_unique['theme_date'] = df_theme_unique['theme_date'].replace('1970/01/01', '')
+    #         # result = result.join(df_theme_unique[['theme_name', 'theme_logic', 'theme_date']], how='left')
+    #         result = result.join(df_theme_unique, how='left')
+
+    #     # 7. 清洗默认值
+    #     result['zhuli_rank'] = result.get('zhuli_rank', pd.Series(999, index=result.index)).fillna(999)
+    #     result['hot_rank'] = result.get('hot_rank_hot', result.get('hot_rank', pd.Series(999, index=result.index))).fillna(999)
+    #     result['price'] = result.get('price', pd.Series(0.0, index=result.index)).fillna(0.0)
+    #     result['change_pct'] = result.get('change_pct', pd.Series(0.0, index=result.index)).fillna(0.0)
+
+    #     for col in ['name', 'theme_name', 'theme_logic', 'theme_date', 'hot_tag', 'hot_reason', 'sector']:
+    #         if col not in result.columns:
+    #             result[col] = ''
+    #         else:
+    #             result[col] = result[col].fillna('')
+
+    #     # 补位策略
+    #     mask_theme_name = (result['theme_name'] == '') & (result['hot_tag'] != '')
+    #     result.loc[mask_theme_name, 'theme_name'] = result.loc[mask_theme_name, 'hot_tag'].apply(lambda x: x.split(',')[0])
+    #     mask_theme_logic = (result['theme_logic'] == '') & (result['hot_reason'] != '')
+    #     result.loc[mask_theme_logic, 'theme_logic'] = result.loc[mask_theme_logic, 'hot_reason']
+
+    #     result = result.reset_index()
+
+    #     # 8. 缓存
+    #     ok = save_cache(result, persist=True)
+    #     if ok:
+    #         save_fp({"fp": new_fp, "ts": time.time()}, persist=True)
+    #     else:
+    #         logger.warning("cache write failed, fingerprint skipped")
+
+    #     logger.info(f"Updated fetching snapshot size: {len(result)}")
+    #     return result
 
 if __name__ == "__main__":
     scraper = Scraper55188()
@@ -695,5 +1164,6 @@ if __name__ == "__main__":
         if '300058' in df['code'].values:
             print("\n[VERIFY] 300058:")
             print(df[df['code'] == '300058'].iloc[0])
+            print(df[df['code'] == '688548'].iloc[0])
     else:
         print("Empty.")
