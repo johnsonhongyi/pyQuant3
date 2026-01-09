@@ -3548,7 +3548,7 @@ def get_work_time(now_t: Optional[int] = None) -> bool:
         now_t = get_now_time_int()
     if not get_work_day_status():
         return False
-    if (now_t > 1132 and now_t < 1300) or now_t < 915 or now_t > 1502:
+    if (now_t > 1130 and now_t < 1300) or now_t < 915 or now_t > 1501:
         return False
     else:
         return True
@@ -3558,7 +3558,7 @@ def get_work_time_duration():
     if not get_trade_date_status():
         return False
     now_t = get_now_time_int()
-    if  now_t < 915 or now_t > 1502:
+    if  now_t < 915 or now_t > 1501:
         return False
     else:
         return True
@@ -3570,7 +3570,7 @@ def get_work_hdf_status():
     if not get_work_day_status():
         return False
     # if (now_t > 1130 and now_t < 1300) or now_t < 915 or now_t > 1502:
-    if 915 < now_t < 1502:
+    if 915 < now_t < 1501:
         # return False
         return True
     return False

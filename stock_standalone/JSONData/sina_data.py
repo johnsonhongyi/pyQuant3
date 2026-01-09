@@ -1103,15 +1103,20 @@ class Sina:
             log.error("Sina Url error:%s" % (self.sina_stock_api + ','.join(self.stock_codes[:2])))
         df = pd.DataFrame(list_s, columns=ct.SINA_Total_Columns)
 
-        #nclose 数据异常
-        # 1. 确保 dt 是日期字符串（如果是 datetime 可以用 .dt.date / .strftime）
-        df['dt'] = df['dt'].astype(str)
-        # 2. 确保 ticktime 是时间字符串，只取 HH:MM:SS 部分
+
+        # # 2. 确保 ticktime 是时间字符串，只取 HH:MM:SS 部分
         df['ticktime'] = df['ticktime'].astype(str).str[-8:]
-        # 3. 拼接成完整时间
-        df['ticktime'] = df['dt'] + ' ' + df['ticktime']
-        # df['ticktime'] = pd.to_datetime(df['ticktime'])
-        df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S')
+
+
+        # #nclose 数据异常
+        # # 1. 确保 dt 是日期字符串（如果是 datetime 可以用 .dt.date / .strftime）
+        # df['dt'] = df['dt'].astype(str)
+        # # 2. 确保 ticktime 是时间字符串，只取 HH:MM:SS 部分
+        # df['ticktime'] = df['ticktime'].astype(str).str[-8:]
+        # # 3. 拼接成完整时间
+        # df['ticktime'] = df['dt'] + ' ' + df['ticktime']
+        # # df['ticktime'] = pd.to_datetime(df['ticktime'])
+        # df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S')
 
         dt_v = df.dt.value_counts().index[0]
         df = df[(df.dt >= dt_v)]
@@ -1167,8 +1172,30 @@ class Sina:
             time_s = time.time()
             df.index = df.index.astype(str)
             df.ticktime = df.ticktime.astype(str)
+
             df.ticktime = list(map(lambda x, y: str(x) + ' ' + str(y), df.dt, df.ticktime))
             df.ticktime = pd.to_datetime(df.ticktime, format='%Y-%m-%d %H:%M:%S')
+
+            # # 1. 统一为字符串
+            # df['dt'] = df['dt'].astype(str).str[:10]
+            # tt = df['ticktime'].astype(str)
+
+            # # 2. 判断是否已经是完整 datetime
+            # is_full_dt = tt.str.match(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$')
+
+            # # 3. 只对“不是完整 datetime”的行进行补齐
+            # tt.loc[~is_full_dt] = (
+            #     df.loc[~is_full_dt, 'dt'] + ' ' +
+            #     tt.loc[~is_full_dt].str[-8:]
+            # )
+
+            # # 4. 转换为 datetime（兜底不炸）
+            # df['ticktime'] = pd.to_datetime(
+            #     tt,
+            #     format='%Y-%m-%d %H:%M:%S',
+            #     errors='coerce'
+            # )
+
 
             if logtime == 0:
                 cct.get_config_value_ramfile('sina_logtime',currvalue=time.time(),xtype='time',update=True)
