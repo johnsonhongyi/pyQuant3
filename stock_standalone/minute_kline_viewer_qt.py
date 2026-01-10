@@ -11,28 +11,28 @@ from typing import Optional, Any, Callable, Dict
 try:
     from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                  QHBoxLayout, QPushButton, QLineEdit, QTableView, 
-                                 QLabel, QFileDialog, QSplitter)
+                                 QLabel, QFileDialog, QSplitter, QComboBox)
     from PyQt6.QtCore import Qt, QAbstractTableModel, QModelIndex
     from PyQt6.QtGui import QIcon, QFont
 except ImportError:
     try:
         from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                      QHBoxLayout, QPushButton, QLineEdit, QTableView, 
-                                     QLabel, QFileDialog, QSplitter)
+                                     QLabel, QFileDialog, QSplitter, QComboBox)
         from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex
         from PySide6.QtGui import QIcon, QFont
     except ImportError:
         try:
             from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                          QHBoxLayout, QPushButton, QLineEdit, QTableView, 
-                                         QLabel, QFileDialog, QSplitter)
+                                         QLabel, QFileDialog, QSplitter, QComboBox)
             from PyQt5.QtCore import Qt, QAbstractTableModel, QModelIndex
             from PyQt5.QtGui import QIcon, QFont
         except ImportError:
             try:
                 from PySide2.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                              QHBoxLayout, QPushButton, QLineEdit, QTableView, 
-                                             QLabel, QFileDialog, QSplitter)
+                                             QLabel, QFileDialog, QSplitter, QComboBox)
                 from PySide2.QtCore import Qt, QAbstractTableModel, QModelIndex
                 from PySide2.QtGui import QIcon, QFont
             except ImportError:
@@ -154,11 +154,14 @@ class DataFrameModel(QAbstractTableModel):
             print(f"Sort Error: {e}")
 
 class KlineBackupViewer(QMainWindow):
-    def __init__(self, on_code_callback: Optional[Callable[[str], Any]] = None, service_proxy: Any = None, last6vol_map: Optional[Dict[str, float]] = None):
+    def __init__(self, on_code_callback: Optional[Callable[[str], Any]] = None, service_proxy: Any = None, 
+                 last6vol_map: Optional[Dict[str, float]] = None, main_app: Any = None):
         super().__init__()
         self.on_code_callback = on_code_callback
         self.service_proxy = service_proxy # RealtimeDataService proxy
         self.last6vol_map = last6vol_map if last6vol_map is not None else {}
+        self.main_app = main_app # Reference to Tkinter app
+        self.internal_dfs: Dict[str, pd.DataFrame] = {}
 
         self.current_file: Optional[str] = None
         self.is_memory_mode: bool = False
@@ -247,6 +250,20 @@ class KlineBackupViewer(QMainWindow):
         toolbar_layout.addWidget(QLabel("Search Code:"))
         toolbar_layout.addWidget(self.search_input)
         
+        # Source Selection
+        toolbar_layout.addStretch(1)
+        toolbar_layout.addWidget(QLabel("Source:"))
+        self.source_combo = QComboBox()
+        self.source_combo.addItem("File")
+        if self.service_proxy:
+            self.source_combo.addItem("Memory Service")
+        self.source_combo.currentIndexChanged.connect(self.on_source_changed)
+        toolbar_layout.addWidget(self.source_combo)
+
+        self.btn_scan = QPushButton("Scan")
+        self.btn_scan.clicked.connect(self.discover_internal_dfs)
+        toolbar_layout.addWidget(self.btn_scan)
+        
         main_layout.addLayout(toolbar_layout)
 
         # Stats Label
@@ -306,6 +323,66 @@ class KlineBackupViewer(QMainWindow):
         )
         if file_name:
             self.load_data(file_name)
+            if self.source_combo.currentText() != "File":
+                self.source_combo.setCurrentText("File")
+
+    def discover_internal_dfs(self):
+        """扫描 main_app 中的所有 pandas DataFrame"""
+        if not self.main_app:
+            self.statusBar().showMessage("Main app not connected.")
+            return
+
+        self.internal_dfs = {}
+        seen_shapes = set() # 用来根据 shape 去重
+
+        # 扫描主对象
+        for attr_name in dir(self.main_app):
+            if attr_name.startswith('_'): continue
+            try:
+                attr = getattr(self.main_app, attr_name)
+                if isinstance(attr, pd.DataFrame) and not attr.empty:
+                    shape = attr.shape
+                    if shape not in seen_shapes:
+                        self.internal_dfs[f"app.{attr_name}"] = attr
+                        seen_shapes.add(shape)
+            except: continue
+
+        # 扫描一些已知的子对象
+        for sub_obj_name in ['live_strategy', 'realtime_service']:
+            sub_obj = getattr(self.main_app, sub_obj_name, None)
+            if sub_obj:
+                for attr_name in dir(sub_obj):
+                    if attr_name.startswith('_'): continue
+                    try:
+                        attr = getattr(sub_obj, attr_name)
+                        if isinstance(attr, pd.DataFrame) and not attr.empty:
+                            shape = attr.shape
+                            if shape not in seen_shapes:
+                                self.internal_dfs[f"{sub_obj_name}.{attr_name}"] = attr
+                                seen_shapes.add(shape)
+                    except: continue
+
+        # 更新下拉框
+        current_sources = [self.source_combo.itemText(i) for i in range(self.source_combo.count())]
+        for name in self.internal_dfs:
+            if name not in current_sources:
+                self.source_combo.addItem(name)
+        
+        self.statusBar().showMessage(f"Discovered {len(self.internal_dfs)} unique internal DataFrames.")
+
+    def on_source_changed(self, index):
+        source_name = self.source_combo.currentText()
+        if source_name == "File":
+            self.is_memory_mode = False
+            self.update_summary()
+        elif source_name == "Memory Service":
+            self.on_memory_sync()
+        elif source_name in self.internal_dfs:
+            self.is_memory_mode = False # Treat as file-like for direct local modification
+            self.df_file = self.internal_dfs[source_name].copy()
+            self.update_summary()
+            self.on_filter()
+            self.statusBar().showMessage(f"Loaded internal source: {source_name}")
 
     def on_refresh(self):
         if self.is_memory_mode:
@@ -398,7 +475,17 @@ class KlineBackupViewer(QMainWindow):
                     self.stats_label.setText(f"Count: 0 | {'MEMORY' if self.is_memory_mode else 'FILE'}")
                 return
                 
-            summary = df.groupby('code').size().reset_index(name='count')
+            # 解决 'code' 既是索引又是列名的歧义问题
+            if 'code' in df.columns:
+                codes = df['code']
+            elif 'code' in df.index.names:
+                codes = df.index.get_level_values('code')
+            else:
+                # 兜底：如果找不到 code 列/索引，打印错误
+                raise KeyError("'code' column or index not found in DataFrame.")
+
+            summary = codes.value_counts().reset_index()
+            summary.columns = ['code', 'count']
             summary = summary.sort_values('count', ascending=False)
             
             model = DataFrameModel(summary)

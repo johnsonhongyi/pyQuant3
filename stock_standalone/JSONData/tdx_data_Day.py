@@ -4121,6 +4121,8 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
     dm['trade'] = np.where(dm['now'] > 0, dm['now'], dm['b1'])
 
     dm['buy'] = dm['trade']
+    
+    # stop_code = dm[~((dm.b1 > 0) | (dm.a1 > 0) | (dm.buy >0) | (dm.sell >0))].loc[:,['name']].T
 
     if market != 'index':
         now_time_int = cct.get_now_time_int()
@@ -4130,12 +4132,14 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
             # print dm[dm.code=='000001'].a1_v
             # print dm[dm.code=='000001'].b1_v
             dm['volume'] = dm['b1_v'].values + dm['b2_v'].values
-            dm = dm[(dm.b1 > 0) | (dm.a1 > 0)]
+            # dm = dm[(dm.b1 > 0) | (dm.a1 > 0)]
+            dm[((dm.b1 > 0) | (dm.a1 > 0) | (dm.buy >0) | (dm.sell >0))]
             dm['b1_v'] = ((dm['b1_v'] + dm['b2_v']) / 1000000.0).round(1) + 0.01
 
         elif 926 < now_time_int < 1502 :
             # dm = dm[dm.open > 0]
-            dm = dm[(dm.b1 > 0) | (dm.a1 > 0)]
+            # dm = dm[(dm.b1 > 0) | (dm.a1 > 0)]
+            dm[((dm.b1 > 0) | (dm.a1 > 0) | (dm.buy >0) | (dm.sell >0))]
             dm['b1_v'] = (dm['b1_v'] / dm['volume'] * 100).round(1)
 
             # dm['b1_v'] = map(lambda x, y: round(x / y * 100, 1), dm['b1_v'], dm['volume'])
@@ -4170,8 +4174,6 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         log.info("dm combine_df ratio:%s %s" % (len(dm), len(df))),
         dm = dm.fillna(0)
         
-    if 925 < cct.get_now_time_int() < 1502:
-        dm = dm.query('b1_v > 0 or a1_v > 0')  
     if market != 'index' and (cct.get_now_time_int() > 935 or not cct.get_work_time()):
         top_now = rl.get_market_price_sina_dd_realTime(dm, vol, vtype)
     else:
@@ -4184,6 +4186,7 @@ def getSinaAlldf(market='kcb', vol=ct.json_countVol, vtype=ct.json_countType, fi
         top_now['kind'] = 0
         
     print(":%s b1>:%s it:%s" % (initTdxdata, len(top_now), round(time.time() - time_s, 1)), end=' ')
+    # log.info(f'停牌个股: {stop_code}')
     if top_now is None or len(top_now) == 0:
         log.error("top_all is None :%s" % (top_now))
     if isinstance(top_now,pd.DataFrame) and not 'ratio' in top_now.columns:

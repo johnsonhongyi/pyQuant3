@@ -1499,6 +1499,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self.apply_search()
                         else:
                             self.refresh_tree(self.df_all)
+                        
+                        # ✅ 强制同步刷新所有已打开的 Top10 窗口
+                        self.update_all_top10_windows()
                             
                 # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
                 # if not self.tip_var.get() and has_update and hasattr(self, 'live_strategy'):
@@ -4474,7 +4477,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._kline_viewer_qt = KlineBackupViewer(
                     on_code_callback=self.on_code_click,
                     service_proxy=self.realtime_service,
-                    last6vol_map=last6vol_map
+                    last6vol_map=last6vol_map,
+                    main_app=self
                 )
                 
             self._kline_viewer_qt.show()
@@ -4620,7 +4624,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.column("name", width=80, anchor="center")
             tree.column("rule_type", width=80, anchor="center")
             tree.column("value", width=60, anchor="center")
-            tree.column("rank", width=40, anchor="center")
+            tree.column("rank", width=60, anchor="center")
             tree.column("add_time", width=100, anchor="center")
             tree.column("tags", width=120, anchor="center")
             tree.column("id", width=0, stretch=False) # 隐藏 ID 列
@@ -6545,6 +6549,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 如果发送失败，更新状态标签
             self.status_var2.set(f"发送失败: {stock_code}")
 
+        self.tree_scroll_to_code(code)
+
     def _on_label_double_click_top10(self, code, idx):
         """
         双击股票标签时，显示该股票所属概念详情。
@@ -6774,10 +6780,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         tree.pack(side="left", fill="both", expand=True)
         vsb.pack(side="right", fill="y")
         col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","volume":"成交量","red":"连阳","win":"主升"}
+        limit_col = ['volume','red','win']
         for col in columns:
             tree.heading(col, text=col_texts[col], anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
-            width = 80 if col == "name" else (40 if col == "rank" else 60)
+            width = 80 if col == ["name","code"] else (30 if col in limit_col else 50)
             tree.column(col, anchor="center", width=width)
 
         # 保存引用，独立窗口不复用 _concept_top10_win
@@ -7130,10 +7137,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # col_texts = {"code":"代码","name":"名称","percent":"涨幅(%)","volume":"成交量"}
         col_texts = {"code":"代码","name":"名称","rank":"Rank","percent":"涨幅(%)","volume":"成交量","red":"连阳","win":"主升"}
+        limit_col = ['volume','red','win']
         for col in columns:
             tree.heading(col, text=col_texts[col], anchor="center",
                          command=lambda c=col: self._sort_treeview_column_newTop10(tree, c, False))
-            width = 80 if col == "name" else (40 if col == "rank" else 60)
+            # width = 80 if col == "name" else (40 if col == "rank" else 60)
+            width = 80 if col == ["name","code"] else (30 if col in limit_col else 40)
             tree.column(col, anchor="center", width=width)
 
         # 保存引用
@@ -7337,6 +7346,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 窗口已创建 / 已复用
         self._focus_top10_tree(win)
 
+    def update_all_top10_windows(self):
+        """强制刷新所有当前打开的 Concept Top10 窗口数据"""
+        # 1. 刷新独立窗口字典
+        if hasattr(self, "_pg_top10_window_simple"):
+            for k, v in list(self._pg_top10_window_simple.items()):
+                win = v.get("win")
+                if win and win.winfo_exists():
+                    concept_name = getattr(win, "_concept_name", None)
+                    if concept_name:
+                        self._fill_concept_top10_content(win, concept_name)
+
+        # 2. 刷新复用窗口
+        if hasattr(self, "_concept_top10_win") and self._concept_top10_win and self._concept_top10_win.winfo_exists():
+            concept_name = getattr(self._concept_top10_win, "_concept_name", None)
+            if concept_name:
+                self._fill_concept_top10_content(self._concept_top10_win, concept_name)
+
     def _fill_concept_top10_content(self, win, concept_name, df_concept=None, code=None, limit=50):
         """
         填充概念Top10内容到Treeview（支持实时刷新）。
@@ -7413,6 +7439,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
             code_to_iid[code_row] = iid
+
+        # --- 更新状态栏数量 ---
+        if hasattr(win, "_status_label_top10") and win._status_label_top10.winfo_exists():
+            visible_count = len(df_display[df_display["percent"] > 2])
+            total_count = len(df_concept)
+            win._status_label_top10.config(text=f"显示 {visible_count}/{total_count} 只")
 
         # --- 默认选中逻辑 ---
         children = list(tree.get_children())
@@ -8565,7 +8597,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         else:
             # 如果发送失败，更新状态标签
             self.status_var2.set(f"发送失败: {stock_code}")
-
+        self.tree_scroll_to_code(code)
+        
     def _on_key(self, event):
         """键盘上下/分页滚动"""
         if not self._label_widgets:
