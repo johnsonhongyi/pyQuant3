@@ -35,10 +35,10 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
             ("name", "名称", 100),
             ("zhuli_rank", "排名", 50),
             ("price", "现价", 70),
-            ("change_pct", "涨幅%", 80),
-            ("percent", "盯盘%", 80),
-            ("win", "胜率", 60),
-            ("sum_perc", "盈亏%", 80),
+            ("change_pct", "涨幅%", 60),
+            ("percent", "今日%", 60),
+            ("win", "胜率", 50),
+            ("sum_perc", "盈亏%", 60),
             ("net_ratio", "主力净占比%", 110),
             ("sector", "所属板块", 120)
         ])
@@ -51,11 +51,11 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
             ("name", "名称", 100),
             ("hot_rank", "排名", 50),
             ("price", "现价", 70),
-            ("change_pct", "涨幅%", 80),
-            ("percent", "盯盘%", 80),
-            ("win", "胜率", 60),
-            ("sum_perc", "盈亏%", 80),
-            ("hot_tag", "标签", 180),
+            ("change_pct", "涨幅%", 60),
+            ("percent", "今日%", 60),
+            ("win", "胜率", 50),
+            ("sum_perc", "盈亏%", 60),
+            ("hot_tag", "标签", 200),
             ("hot_reason", "深度推导逻辑", 550)
         ])
         
@@ -67,11 +67,11 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
             ("name", "名称", 100),
             ("theme_date", "日期", 100),
             ("price", "现价", 70),
-            ("change_pct", "涨幅%", 80),
-            ("percent", "盯盘%", 80),
-            ("win", "胜率", 60),
-            ("sum_perc", "盈亏%", 80),
-            ("theme_name", "所属题材", 150),
+            ("change_pct", "涨幅%", 60),
+            ("percent", "今日%", 60),
+            ("win", "胜率", 50),
+            ("sum_perc", "盈亏%", 60),
+            ("theme_name", "所属题材", 200),
             ("theme_logic", "题材逻辑推演", 550)
         ])
         
@@ -239,6 +239,8 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
         
         # 加载位置
         self.load_window_position(win, self.detail_window_id, default_width=600, default_height=400)
+        self._detail_win.lift()
+        self._detail_win.focus_force()
         
         txt = tk.Text(win, wrap="word", font=("微软雅黑", 11), padx=10, pady=10)
         txt.insert("1.0", content)

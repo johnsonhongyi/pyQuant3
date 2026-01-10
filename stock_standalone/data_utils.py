@@ -76,7 +76,7 @@ def build_hma_and_trendscore(
     #     try:
     #         status = status_callback()
     #     except Exception as e:
-    #         log.warning(f"status_callback error: {e}")
+    #         logger.warning(f"status_callback error: {e}")
 
     n = len(df)
 
@@ -878,7 +878,7 @@ def align_sum_percent(df, merged_df):
         #     )
         merged_df = merged_df.sort_values(['win', 'sum_perc'], ascending=[False, False])
         merged_df = merged_df[~merged_df.index.duplicated(keep='first')]
-        log.warning(
+        logger.warning(
             f"align_sum_percent: merged_df duplicate code detected: "
             f"{merged_df[:3]} ..."
         )
@@ -1245,7 +1245,7 @@ def wait_or_break(seconds, stop_conditions):
                 if cond():
                     return  # 条件触发，提前退出等待
             except Exception as e:
-                log.warning(f"stop_condition error: {e}")
+                logger.warning(f"stop_condition error: {e}")
         time.sleep(1)
 
 def get_status(status_callback):
