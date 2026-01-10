@@ -1584,12 +1584,15 @@ if __name__ == "__main__":
     # print(df.loc['920274'][['close','nclose','nlow','nhigh']])
     print(df.loc['601698'].nclose)
     print(df.loc['601698'].close)
-    import ipdb;ipdb.set_trace()
     
-    print(len(df))
     print(df[['close','nclose','nlow','nhigh']])
     print(f"df.loc['002786']: {df.loc['002786']}")
     print((df[-5:][['open','close']].T))
+    print(f'总计: {len(df)}')
+    dm = df
+    stop_code = dm[~((dm.b1 > 0) | (dm.a1 > 0) | (dm.buy >0) | (dm.sell >0))].loc[:,['name']].T
+    print(f'总计: {len(df)} 停牌个股:\n {stop_code}')
+    import ipdb;ipdb.set_trace()
 
     for ma in ['bj','sh', 'sz', 'cyb', 'kcb','all']:
         # for ma in ['sh']:
