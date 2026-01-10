@@ -142,16 +142,27 @@ def df_fingerprint(df: pd.DataFrame, cols=None) -> str:
 
 def clean_text(text: str) -> str:
     """
-    保留中文字符、常用标点和文字，去掉数字、特殊符号、URL、HTML
+    清洗文本：
+    - 去掉 HTML 标签
+    - 去掉 URL
+    - 保留中文、英文、数字、中文标点和空格
     """
     if not text:
         return ""
+    
     # 去掉 HTML 标签
     text = re.sub(r'<[^>]+>', '', text)
+    
     # 去掉 URL
     text = re.sub(r'https?://\S+', '', text)
-    # 只保留中文、中文标点和空格
-    text = "".join(re.findall(r'[\u4e00-\u9fff。，！？；：、“”‘’（）—…《》【】]+', text))
+    
+    # 只保留中文、英文、数字、中文标点和空格
+    pattern = r'[\u4e00-\u9fffA-Za-z0-9\s。，！？；：、“”‘’（）—…《》【】]+'
+    text = "".join(re.findall(pattern, text))
+    
+    # 去掉多余空格
+    text = re.sub(r'\s+', ' ', text).strip()
+    
     return text
 
 class Scraper55188:
