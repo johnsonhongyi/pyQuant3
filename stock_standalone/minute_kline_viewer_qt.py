@@ -1,5 +1,6 @@
 import sys
 import os
+import re
 import pandas as pd
 import numpy as np
 from datetime import datetime
@@ -80,13 +81,13 @@ class DataFrameModel(QAbstractTableModel):
 
     def data(self, index, role=_DisplayRole):
         if index.isValid():
-            if role == _DisplayRole:
-                try:
-                    col_name = self._data.columns[index.column()]
-                    val = self._data.iloc[index.row(), index.column()]
-                    
-                    # Time Formatting
-                    if col_name.lower() in ('time', 'timestamp'):
+            try:
+                col_name = self._data.columns[index.column()]
+                val = self._data.iloc[index.row(), index.column()]
+                
+                if role == _DisplayRole or role == Qt.ItemDataRole.EditRole:
+                    # Time Formatting for display only
+                    if role == _DisplayRole and col_name.lower() in ('time', 'timestamp'):
                         try:
                             ts = float(val)
                             if ts > 1000000000:
@@ -95,12 +96,44 @@ class DataFrameModel(QAbstractTableModel):
                             pass
 
                     if isinstance(val, (float, np.float64)):
+                        if role == Qt.ItemDataRole.EditRole:
+                            return val # Keep original float for editing
                         return f"{val:.2f}"
 
                     return str(val)
-                except Exception:
+                
+                # Add background color for editable columns if needed
+                # elif role == Qt.ItemDataRole.BackgroundRole:
+                #     return QBrush(Qt.GlobalColor.white)
+                    
+            except Exception:
+                if role == _DisplayRole:
                     return str(self._data.iloc[index.row(), index.column()])
         return None
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemFlag.NoItemFlags
+        return super().flags(index) | Qt.ItemFlag.ItemIsEditable
+
+    def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
+        if index.isValid() and role == Qt.ItemDataRole.EditRole:
+            try:
+                col_name = self._data.columns[index.column()]
+                # Attempt to cast to correct type
+                orig_val = self._data.iloc[index.row(), index.column()]
+                if isinstance(orig_val, (int, np.integer)):
+                    value = int(value)
+                elif isinstance(orig_val, (float, np.float64)):
+                    value = float(value)
+                
+                self._data.iloc[index.row(), index.column()] = value
+                self.dataChanged.emit(index, index, [role])
+                return True
+            except (ValueError, TypeError) as e:
+                print(f"SetData Error (Type Mismatch): {e}")
+                return False
+        return False
 
     def headerData(self, col, orientation, role):
         if orientation == _Horizontal and role == _DisplayRole:
@@ -130,13 +163,27 @@ class KlineBackupViewer(QMainWindow):
         self.current_file: Optional[str] = None
         self.is_memory_mode: bool = False
         self.setWindowTitle("Minute Kline Cache Viewer (Realtime Service)")
-        self.resize(1000, 700)
+        self.resize(1100, 750)
         
-        self.df_all = pd.DataFrame()
-        self.df_display = pd.DataFrame()
+        self.df_file = pd.DataFrame()     # Source Data Table (from file)
+        self.df_mem = pd.DataFrame()      # Memory View (synced realtime data)
+        self.df_display = pd.DataFrame() 
         
         self.setup_ui()
         self.auto_load()
+
+    @property
+    def active_df(self) -> pd.DataFrame:
+        """根据当前模式返回活跃的数据集"""
+        return self.df_mem if self.is_memory_mode else self.df_file
+
+    @active_df.setter
+    def active_df(self, value: pd.DataFrame):
+        """根据当前模式更新活跃的数据集"""
+        if self.is_memory_mode:
+            self.df_mem = value
+        else:
+            self.df_file = value
 
     def setup_ui(self):
         central_widget = QWidget()
@@ -160,6 +207,28 @@ class KlineBackupViewer(QMainWindow):
         else:
             self.btn_mem.setEnabled(False)
 
+        # Edit Operations
+        self.btn_add_row = QPushButton("Add Row")
+        self.btn_add_row.setStyleSheet("background-color: #2ecc71; color: white;")
+        self.btn_add_row.clicked.connect(self.on_add_row)
+
+        self.btn_del_row = QPushButton("Delete Row")
+        self.btn_del_row.setStyleSheet("background-color: #e74c3c; color: white;")
+        self.btn_del_row.clicked.connect(self.on_delete_row)
+
+        self.btn_save = QPushButton("💾 Save Changes")
+        self.btn_save.setStyleSheet("background-color: #f39c12; color: white; font-weight: bold;")
+        self.btn_save.clicked.connect(self.on_save_changes)
+
+        # Delete by Time Controls
+        self.time_input = QLineEdit()
+        self.time_input.setPlaceholderText("UnixTS or Start, End")
+        self.time_input.setFixedWidth(180)
+        
+        self.btn_del_time = QPushButton("Del by Time")
+        self.btn_del_time.setStyleSheet("background-color: #9b59b6; color: white;")
+        self.btn_del_time.clicked.connect(self.on_delete_by_time)
+
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Filter Stock Code...")
         self.search_input.textChanged.connect(self.on_filter)
@@ -167,6 +236,14 @@ class KlineBackupViewer(QMainWindow):
         toolbar_layout.addWidget(self.btn_open)
         toolbar_layout.addWidget(self.btn_refresh)
         toolbar_layout.addWidget(self.btn_mem)
+        toolbar_layout.addWidget(self.btn_add_row)
+        toolbar_layout.addWidget(self.btn_del_row)
+        toolbar_layout.addWidget(self.btn_save)
+        toolbar_layout.addStretch(1) # Stretch before del-time
+        toolbar_layout.addWidget(QLabel("Time:"))
+        toolbar_layout.addWidget(self.time_input)
+        toolbar_layout.addWidget(self.btn_del_time)
+        toolbar_layout.addStretch(1) # Stretch before search
         toolbar_layout.addWidget(QLabel("Search Code:"))
         toolbar_layout.addWidget(self.search_input)
         
@@ -220,7 +297,13 @@ class KlineBackupViewer(QMainWindow):
             self.load_data(path)
 
     def on_open_file(self):
-        file_name, _ = QFileDialog.getOpenFileName(self, "Open Cache File", "", "Pickle Files (*.pkl);;All Files (*)")
+        start_dir = ""
+        if self.current_file and os.path.exists(self.current_file):
+            start_dir = os.path.dirname(os.path.abspath(self.current_file))
+            
+        file_name, _ = QFileDialog.getOpenFileName(
+            self, "Open Cache File", start_dir, "Pickle Files (*.pkl);;All Files (*)"
+        )
         if file_name:
             self.load_data(file_name)
 
@@ -231,7 +314,7 @@ class KlineBackupViewer(QMainWindow):
             self.load_data(self.current_file)
 
     def on_memory_sync(self):
-        """直接从内存中的 realtime_service 读取最新快照"""
+        """直接从内存中的实时服务同步快照"""
         if not self.service_proxy:
             self.statusBar().showMessage("Realtime Service not connected.")
             return
@@ -241,10 +324,8 @@ class KlineBackupViewer(QMainWindow):
             self.is_memory_mode = True
             
             # 这里调用 DataPublisher 或 MinuteKlineCache 的 to_dataframe
-            # 假设 service_proxy 内部是通过 kline_cache 公开的
             df = self.service_proxy.get_55188_data().get('df_klines', pd.DataFrame())
             if df.empty:
-                # 备选方案：如果上面的 API 没公开，尝试直接访问 kline_cache (如果是 Manager 代理)
                 try:
                     df = self.service_proxy.kline_cache.to_dataframe()
                 except:
@@ -254,7 +335,7 @@ class KlineBackupViewer(QMainWindow):
                 self.statusBar().showMessage("Memory Cache is currently empty.")
                 return
 
-            self.df_all = df
+            self.df_mem = df
             self.update_summary()
             self.on_filter()
             
@@ -265,13 +346,14 @@ class KlineBackupViewer(QMainWindow):
                 f"🧠 MODE: REALTIME MEMORY | Stocks: {stock_count} | Total Nodes: {total_nodes}\n"
                 f"Data synchronized at: {datetime.now().strftime('%H:%M:%S')}"
             )
-            self.statusBar().showMessage("Memory data synchronized.")
+            self.statusBar().showMessage("Memory data synchronized. Edits will apply to Memory Snapshot.")
         except Exception as e:
             self.statusBar().showMessage(f"Memory Sync Failed: {e}")
 
     def load_data(self, file_path):
         try:
             self.current_file = file_path
+            self.is_memory_mode = False
             self.statusBar().showMessage(f"Loading {file_path}...")
             
             df = pd.read_pickle(file_path)
@@ -279,7 +361,7 @@ class KlineBackupViewer(QMainWindow):
                 self.stats_label.setText(f"File {file_path} is empty.")
                 return
 
-            self.df_all = df
+            self.df_file = df
             self.update_summary()
             self.on_filter()
             
@@ -308,39 +390,52 @@ class KlineBackupViewer(QMainWindow):
             self.statusBar().showMessage("Error loading data.")
 
     def update_summary(self):
-        if self.df_all.empty:
-            return
-            
-        summary = self.df_all.groupby('code').size().reset_index(name='count')
-        # Add basic info
-        summary = summary.sort_values('count', ascending=False)
-        
-        model = DataFrameModel(summary)
-        self.summary_table.setModel(model)
-
-    def on_filter(self):
-        search_text = self.search_input.text().strip()
-        if self.df_all.empty:
-            return
-            
-        if not search_text:
-            self.update_summary()
-        else:
-            summary = self.df_all.groupby('code').size().reset_index(name='count')
-            summary = summary[summary['code'].str.contains(search_text)]
+        try:
+            df = self.active_df
+            if df.empty:
+                self.summary_table.setModel(DataFrameModel(pd.DataFrame(columns=['code', 'count'])))
+                if hasattr(self, 'stats_label'):
+                    self.stats_label.setText(f"Count: 0 | {'MEMORY' if self.is_memory_mode else 'FILE'}")
+                return
+                
+            summary = df.groupby('code').size().reset_index(name='count')
             summary = summary.sort_values('count', ascending=False)
+            
             model = DataFrameModel(summary)
             self.summary_table.setModel(model)
+        except Exception as e:
+            print(f"DEBUG: update_summary Error: {e}")
+
+    def on_filter(self):
+        try:
+            search_text = self.search_input.text().strip().upper()
+            df = self.active_df
+            if df.empty:
+                self.summary_table.setModel(DataFrameModel(pd.DataFrame(columns=['code', 'count'])))
+                return
+                
+            if not search_text:
+                self.update_summary()
+            else:
+                summary = df.groupby('code').size().reset_index(name='count')
+                # Use regex=False to avoid crashes on special characters
+                summary = summary[summary['code'].str.contains(search_text, regex=False)]
+                summary = summary.sort_values('count', ascending=False)
+                model = DataFrameModel(summary)
+                self.summary_table.setModel(model)
+        except Exception as e:
+            print(f"DEBUG: on_filter Error: {e}")
 
     def on_summary_clicked(self, index: QModelIndex):
-        if self.df_all.empty:
+        df = self.active_df
+        if df.empty:
             return
             
         model = index.model()
         if isinstance(model, DataFrameModel):
             # 假设代码在第一列
             code = str(model._data.iloc[index.row(), 0])
-            detail_df = self.df_all[self.df_all['code'] == code].copy()
+            detail_df = df[df['code'] == code].copy()
             if 'time' in detail_df.columns:
                 detail_df = detail_df.sort_values('time', ascending=False)
             
@@ -357,7 +452,7 @@ class KlineBackupViewer(QMainWindow):
             self.detail_table.resizeColumnsToContents()
 
     def on_double_click(self, index: QModelIndex):
-        if self.df_all.empty:
+        if self.active_df.empty:
             return
             
         model = index.model()
@@ -368,7 +463,181 @@ class KlineBackupViewer(QMainWindow):
             if self.on_code_callback:
                 self.on_code_callback(code)
             else:
-                print(f"Double-clicked code: {code}")
+                # print(f"Double-clicked code: {code}")
+                # Use it as triggering a refresh of detail if clicked in summary
+                if model is self.summary_table.model():
+                    self.on_summary_clicked(index)
+
+    def on_add_row(self):
+        """在当前选中的代码下新增一行"""
+        selection = self.summary_table.selectionModel().currentIndex()
+        if not selection.isValid():
+            self.statusBar().showMessage("Please select a stock in summary first.")
+            return
+            
+        code = str(selection.model()._data.iloc[selection.row(), 0])
+        df = self.active_df
+        
+        # 创建一个新行模版
+        new_row = {col: 0.0 for col in df.columns}
+        new_row['code'] = code
+        new_row['time'] = datetime.now().timestamp()
+        
+        # 追加到活跃数据集
+        self.active_df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        
+        # 刷新当前显示
+        self.on_summary_clicked(selection)
+        self.statusBar().showMessage(f"Added new row for {code} in {'Memory' if self.is_memory_mode else 'File'} buffer.")
+
+    def on_delete_row(self):
+        """删除详情表中选中的行"""
+        indexes = self.detail_table.selectionModel().selectedRows()
+        if not indexes:
+            self.statusBar().showMessage("Please select rows in detail table to delete.")
+            return
+            
+        model = self.detail_table.model()
+        if not isinstance(model, DataFrameModel):
+            return
+            
+        df = self.active_df
+        deleted_count = 0
+        for idx in sorted(indexes, key=lambda x: x.row(), reverse=True):
+            row_to_del = model._data.iloc[idx.row()]
+            mask = (df['code'] == row_to_del['code']) & (df['time'] == row_to_del['time'])
+            df = df.drop(df[mask].index)
+            deleted_count += 1
+            
+        self.active_df = df
+        # 刷新视图
+        selection = self.summary_table.selectionModel().currentIndex()
+        if selection.isValid():
+            self.on_summary_clicked(selection)
+            
+        self.statusBar().showMessage(f"Deleted {deleted_count} rows from active buffer.")
+
+    def on_save_changes(self):
+        """保存更改到原始文件或内存"""
+        df = self.active_df
+        if df.empty:
+            self.statusBar().showMessage("Nothing to save.")
+            return
+
+        try:
+            if self.is_memory_mode:
+                if not self.service_proxy:
+                    self.statusBar().showMessage("Memory Mode: No service proxy found.")
+                    return
+                try:
+                    self.statusBar().showMessage("Saving to remote memory cache...")
+                    self.service_proxy.kline_cache.from_dataframe(df)
+                    self.statusBar().showMessage("Successfully saved to Memory!")
+                except Exception as e:
+                    self.statusBar().showMessage(f"Save to Memory Failed: {e}")
+            else:
+                if not self.current_file:
+                    self.statusBar().showMessage("File Mode: No file path.")
+                    return
+                
+                self.statusBar().showMessage(f"Saving to {self.current_file}...")
+                df.to_pickle(self.current_file)
+                self.statusBar().showMessage(f"Successfully saved to {os.path.basename(self.current_file)}!")
+                
+        except Exception as e:
+            self.statusBar().showMessage(f"Save Failed: {e}")
+            print(f"DEBUG: Save General Error: {e}")
+
+    def on_delete_by_time(self):
+        """按时间或时间范围删除所有股票的该行数据
+        支持:
+        1. 单个 Unix 时间戳 (如 1767945960)
+        2. 时间戳范围 (如 1767944700, 1767945960 或 1767945960 到 1767944700)
+        3. 日期字符串 (如 2026-01-10 10:00:00)
+        """
+        raw_str = self.time_input.text().strip()
+        if not raw_str:
+            self.statusBar().showMessage("Please enter Unix timestamp or Range (Start, End)")
+            return
+            
+        df = self.active_df
+        if df.empty:
+            self.statusBar().showMessage("Dataset is empty.")
+            return
+
+        if 'time' not in df.columns:
+            self.statusBar().showMessage("Error: 'time' column not found.")
+            return
+
+        try:
+            # 1. 尝试解析范围 (逗号, 短横线, 空格, 或 "到")
+            # 过滤掉空的 parts
+            parts = [p.strip() for p in re.split(r'[, \-到|]+', raw_str) if p.strip()]
+            
+            mask = None
+            desc = ""
+            
+            if len(parts) >= 2:
+                # 范围模式
+                t1 = parts[0]
+                t2 = parts[1]
+                
+                try:
+                    ts1 = float(t1)
+                    ts2 = float(t2)
+                    start_ts, end_ts = min(ts1, ts2), max(ts1, ts2)
+                    mask = (df['time'] >= start_ts) & (df['time'] <= end_ts)
+                    desc = f"range {start_ts} to {end_ts}"
+                except ValueError:
+                    self.statusBar().showMessage("Range mode only supports Unix timestamps.")
+                    return
+            else:
+                # 2. 单个值模式
+                val = raw_str
+                try:
+                    # 2a. 尝试作为 UnixTS
+                    target_ts = float(val)
+                    mask = df['time'] == target_ts
+                    if not (isinstance(mask, pd.Series) and mask.any()):
+                        mask = df['time'].astype(int) == int(target_ts)
+                    desc = f"timestamp {target_ts}"
+                except ValueError:
+                    # 2b. 尝试作为日期字符串
+                    try:
+                        dt = datetime.strptime(val, '%Y-%m-%d %H:%M:%S')
+                        target_ts = dt.timestamp()
+                        mask = df['time'] == target_ts
+                        if not (isinstance(mask, pd.Series) and mask.any()):
+                            mask = df['time'].astype(int) == int(target_ts)
+                        desc = f"time {val}"
+                    except ValueError:
+                        self.statusBar().showMessage("Invalid format. Use UnixTS or YYYY-MM-DD HH:MM:SS")
+                        return
+
+            if mask is None:
+                return
+
+            # 执行删除
+            before_count = len(df)
+            # 显式转换为 bool 序列，避免潜在的类型问题
+            final_mask = mask.fillna(False).astype(bool)
+            updated_df = df[~final_mask].copy() 
+            self.active_df = updated_df
+            after_count = len(updated_df)
+            
+            del_count = before_count - after_count
+            if del_count > 0:
+                self.statusBar().showMessage(f"Deleted {del_count} rows for {desc}")
+                # 刷新视图
+                self.update_summary()
+                self.on_filter()
+                self.detail_table.setModel(DataFrameModel(pd.DataFrame(columns=df.columns)))
+            else:
+                self.statusBar().showMessage(f"No records found for {desc}")
+                
+        except Exception as e:
+            self.statusBar().showMessage(f"Delete Failed: {e}")
+            print(f"DEBUG: Delete by Time Error: {e}")
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
