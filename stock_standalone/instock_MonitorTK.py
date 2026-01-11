@@ -40,7 +40,7 @@ from JohnsonUtil import commonTips as cct
 from JohnsonUtil import johnson_cons as ct
 from JSONData import tdx_data_Day as tdd
 from JSONData import stockFilter as stf
-from logger_utils import LoggerFactory, init_logging
+from logger_utils import LoggerFactory, init_logging, with_log_level
 from stock_live_strategy import StockLiveStrategy
 from realtime_data_service import DataPublisher
 # DataPublisher is now handled locally in the Main process for resource efficiency
@@ -575,6 +575,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._task_running = False
 
     # --- DPI and Window management moved to Mixins ---
+    @with_log_level(LoggerFactory.INFO)
     def on_close(self):
         try:
             logger.info("程序正在退出，执行保存与清理...")

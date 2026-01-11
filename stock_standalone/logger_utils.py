@@ -1,6 +1,6 @@
 # -*- coding:utf-8 -*-
 import sys
-import logging
+import functools
 from JohnsonUtil import LoggerFactory
 
 class SafeLoggerWriter:
@@ -92,31 +92,45 @@ def init_logging_noprint(log_file="appTk.log", level=LoggerFactory.ERROR, redire
     logger.info("日志初始化完成")
     return logger
 
-def init_logging_nopdb(log_file="appTk.log", level=LoggerFactory.ERROR):
-    """初始化全局日志，专门用于避免重复打印和异常捕获"""
-    logger = LoggerFactory.getLogger("instock_MonitorTK")
-    logger.setLevel(level)
+# def init_logging_nopdb(log_file="appTk.log", level=LoggerFactory.ERROR):
+#     """初始化全局日志，专门用于避免重复打印和异常捕获"""
+#     logger = LoggerFactory.getLogger("instock_MonitorTK")
+#     logger.setLevel(level)
 
-    if not logger.handlers:
-        formatter = LoggerFactory.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
-        fh = LoggerFactory.FileHandler(log_file, encoding="utf-8")
-        fh.setFormatter(formatter)
-        logger.addHandler(fh)
+#     if not logger.handlers:
+#         formatter = LoggerFactory.Formatter('[%(asctime)s] %(levelname)s:%(name)s: %(message)s')
+#         fh = LoggerFactory.FileHandler(log_file, encoding="utf-8")
+#         fh.setFormatter(formatter)
+#         logger.addHandler(fh)
 
-        ch = logging.StreamHandler()
-        ch.setFormatter(formatter)
-        logger.addHandler(ch)
+#         ch = logging.StreamHandler()
+#         ch.setFormatter(formatter)
+#         logger.addHandler(ch)
 
-    logger.propagate = True
-    sys.stdout = LoggerWriter(logger.info)
-    sys.stderr = LoggerWriter(logger.error)
+#     logger.propagate = True
+#     sys.stdout = LoggerWriter(logger.info)
+#     sys.stderr = LoggerWriter(logger.error)
 
-    def handle_exception(exc_type, exc_value, exc_traceback):
-        if issubclass(exc_type, KeyboardInterrupt):
-            sys.__excepthook__(exc_type, exc_value, exc_traceback)
-            return
-        logger.error("未捕获异常:", exc_info=(exc_type, exc_value, exc_traceback))
+#     def handle_exception(exc_type, exc_value, exc_traceback):
+#         if issubclass(exc_type, KeyboardInterrupt):
+#             sys.__excepthook__(exc_type, exc_value, exc_traceback)
+#             return
+#         logger.error("未捕获异常:", exc_info=(exc_type, exc_value, exc_traceback))
 
-    sys.excepthook = handle_exception
-    logger.info("日志初始化完成")
-    return logger
+#     sys.excepthook = handle_exception
+#     logger.info("日志初始化完成")
+#     return logger
+
+def with_log_level(level=LoggerFactory.INFO, logger_name=None):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            logger = LoggerFactory.getLogger(logger_name)
+            old_level = logger.level
+            try:
+                logger.setLevel(level)
+                return func(*args, **kwargs)
+            finally:
+                logger.setLevel(old_level)
+        return wrapper
+    return decorator

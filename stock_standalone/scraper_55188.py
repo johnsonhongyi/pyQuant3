@@ -200,6 +200,7 @@ class Scraper55188:
             # 标准全 A 股过滤字符串 (包含创业板 t:80 和科创板 t:23)
             "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23" 
         }
+        resp = None
         try:
             resp = self.session.get(self.EASTMONEY_URL, params=params, timeout=10)
             data = resp.json()
@@ -248,7 +249,8 @@ class Scraper55188:
     def fetch_ths_hotlist_full(self) -> pd.DataFrame:
         """
         获取同花顺人气热榜及其深度分析，并保留原始原始 item 数据
-        """
+        """
+        resp = None
         try:
             resp = self.session.get(self.THS_URL, timeout=10)
             data = resp.json()
@@ -317,7 +319,8 @@ class Scraper55188:
         获取同花顺人气热榜及其深度分析
         hot_reason 包含 analyse_title、analyse、topic、tag 中文信息
         HTML/URL/无用内容全部过滤
-        """
+        """
+        resp = None
         try:
             resp = self.session.get(self.THS_URL, timeout=10)
             data = resp.json()
@@ -410,131 +413,12 @@ class Scraper55188:
             return pd.DataFrame()
 
 
-    # def fetch_ths_hotlist(self) -> pd.DataFrame:
-    #     """
-    #     获取同花顺人气热榜及其深度分析
-    #     """
-    #     try:
-    #         resp = self.session.get(self.THS_URL, timeout=10)
-    #         data = resp.json()
-    #         stock_list = data.get("data", {}).get("stock_list", [])
-    #         if not stock_list:
-    #             return pd.DataFrame()
-
-    #         items = []
-    #         for item in stock_list:
-    #             raw_code = item.get("code", "")
-    #             code = raw_code[-6:] if len(raw_code) >= 6 else raw_code
-
-    #             # === hot_tag 解析 ===
-    #             tags = []
-    #             tag_obj = item.get("tag", {})
-    #             if isinstance(tag_obj, dict):
-    #                 concept_tags = tag_obj.get("concept_tag", [])
-    #                 if isinstance(concept_tags, list):
-    #                     tags.extend([str(t).strip() for t in concept_tags if t])
-    #                 popularity_tag = tag_obj.get("popularity_tag")
-    #                 if popularity_tag:
-    #                     tags.append(str(popularity_tag).strip())
-    #             hot_tag_str = ",".join(tags)  # 始终用逗号分隔
-
-    #             # === 组合详细理由 ===
-    #             title = item.get("analyse_title", "").strip()
-    #             reason = item.get("analyse", "").replace("<br>", "\n").strip()
-    #             reason = re.sub(r'<[^>]+>', '', reason)
-    #             full_reason = f"【{title}】\n{reason}" if title else reason
-
-    #             items.append({
-    #                 "code": code,
-    #                 "name": item.get("name", ""),
-    #                 "hot_rank": item.get("order"),
-    #                 "hot_tag": hot_tag_str,
-    #                 "hot_reason": full_reason
-    #             })
-
-    #         df_hot = pd.DataFrame(items)
-
-    #         # 保证 hot_tag 列存在，即使为空
-    #         if "hot_tag" not in df_hot.columns:
-    #             df_hot["hot_tag"] = ""
-
-    #         return df_hot
-
-    #     except Exception as e:
-    #         status = getattr(resp, "status_code", "N/A")
-    #         text = ""
-    #         try:
-    #             text = resp.text[:200]
-    #         except Exception:
-    #             pass
-    #         logger.warning(
-    #             "fetch_ths_hotlist failed | status=%s | resp=%s | err=%s",
-    #             status,
-    #             text,
-    #             repr(e)
-    #         )
-    #         return pd.DataFrame()
-
-
-    # def fetch_ths_hotlist_old(self) -> pd.DataFrame:
-    #     """
-    #     获取同花顺人气热榜及其深度分析
-    #     """
-    #     try:
-    #         resp = self.session.get(self.THS_URL, timeout=10)
-    #         data = resp.json()
-    #         stock_list = data.get("data", {}).get("stock_list", [])
-    #         if not stock_list: return pd.DataFrame()
-    #         items = []
-    #         for item in stock_list:
-    #             raw_code = item.get("code", "")
-    #             code = raw_code[-6:] if len(raw_code) >= 6 else raw_code
-                
-    #             tags = []
-    #             tag_obj = item.get("tag", {})
-    #             if isinstance(tag_obj, dict):
-    #                 c_tags = tag_obj.get("concept_tag", [])
-    #                 if isinstance(c_tags, list): tags.extend(c_tags)
-    #                 p_tag = tag_obj.get("popularity_tag")
-    #                 if p_tag: tags.append(p_tag)
-                
-    #             # 组合详细理由
-    #             title = item.get("analyse_title", "").strip()
-    #             reason = item.get("analyse", "").replace("<br>", "\n").strip()
-    #             reason = re.sub(r'<[^>]+>', '', reason)
-    #             full_reason = f"【{title}】\n{reason}" if title else reason
-                
-    #             items.append({
-    #                 "code": code,
-    #                 "name": item.get("name", ""),
-    #                 "hot_rank": item.get("order"), 
-    #                 "hot_tag": ",".join(tags),
-    #                 "hot_reason": full_reason
-    #             })
-            
-    #         return pd.DataFrame(items)
-    #     except Exception as e:
-    #         status = getattr(resp, "status_code", "N/A")
-    #         text = ""
-    #         try:
-    #             text = resp.text[:200]
-    #         except Exception:
-    #             pass
-    #         logger.warning(
-    #             "fetch_theme_stocks failed | status=%s | resp=%s | err=%s",
-    #             status,
-    #             text,
-    #             repr(e)
-    #         )
-    #         return pd.DataFrame()
-
-
-
     def fetch_concept_mining_themes(self, count: int = 15) -> list:
         """
         获取优品热门题材列表
         """
         payload = {"stReq": {"uiStart": 0, "uiCount": count}}
+        resp = None
         try:
             resp = self.session.post(
                 self.UPCHINA_THEME_URL,
@@ -616,6 +500,7 @@ class Scraper55188:
                 "bFromCache": True
             }
         }
+        resp = None
         try:
             time.sleep(0.3)
             resp = self.session.post(self.UPCHINA_STOCK_URL, json=payload, timeout=10)
@@ -674,53 +559,6 @@ class Scraper55188:
             )
             return []
     
-    # def merge_theme_logic(self, df: pd.DataFrame) -> pd.DataFrame:
-    #     """
-    #     整合题材逻辑：个股驱动 / 行业定位 / 题材背景 / 市场概念
-    #     """
-    #     def merge_one(sub: pd.DataFrame) -> pd.Series:
-    #         sub = sub.sort_values('theme_date', ascending=False)
-
-    #         # === 1. 个股驱动（事件） ===
-    #         drives = sub.get('drive_logic', pd.Series(dtype='object')).dropna().astype(str)
-    #         drives = [d.strip() for d in drives if d.strip()]
-    #         drives = list(dict.fromkeys(drives))
-
-    #         # === 2. 行业 / 业务定位 ===
-    #         industries = sub.get('industry', pd.Series(dtype='object')).dropna().astype(str)
-    #         industries = list(dict.fromkeys([i.strip() for i in industries if i.strip()]))
-
-    #         # === 3. 题材 / 宏观背景 ===
-    #         themes = sub.get('theme_logic', pd.Series(dtype='object')).dropna().astype(str)
-    #         themes = [t.strip() for t in themes if t.strip()]
-    #         themes = list(dict.fromkeys(themes))
-
-    #         # === 4. 市场概念 ===
-    #         concepts_all = []
-    #         if 'concepts' in sub.columns:
-    #             for c in sub['concepts']:
-    #                 if isinstance(c, list):
-    #                     concepts_all.extend(c)
-    #         concepts_all = list(dict.fromkeys([str(c).strip() for c in concepts_all if str(c).strip()]))
-
-    #         blocks = []
-    #         if drives:
-    #             blocks.append("【个股驱动（事件）】: " + "\n".join(drives))
-    #         if industries:
-    #             blocks.append("【业务与行业定位】: " + " / ".join(industries))
-    #         if themes:
-    #             blocks.append("【题材 / 宏观背景】: " + "\n".join(themes))
-    #         if concepts_all:
-    #             blocks.append("【市场概念理解】: " + "、".join(concepts_all))
-
-    #         return pd.Series({
-    #             "theme_name": " / ".join(sub['theme_name'].dropna().astype(str).unique()),
-    #             "theme_logic": "\n\n".join(blocks),
-    #             "theme_date": sub['theme_date'].max()
-    #         })
-
-    #     return df.groupby('code', group_keys=False).apply(merge_one).reset_index()
-
     def merge_theme_logic(self, df: pd.DataFrame , debug = False) -> pd.DataFrame:
         debug_logs = []
 
