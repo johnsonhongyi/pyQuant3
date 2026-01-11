@@ -1164,6 +1164,39 @@ def _run_main_pipeline(
 
     return top_all, lastpTDX_DF
 
+def get_all_fetch_df(market = 'all', resample= 'd',detect_val = False,status_callback: Callable[[], Any] = None):
+    with timed_ctx(f"fetch_market:{market} {resample}", warn_ms=800):
+        top_now = tdd.getSinaAlldf(market=market,vol=ct.json_countVol, vtype=ct.json_countType)
+
+        top_all, lastpTDX_DF = tdd.get_append_lastp_to_df(top_now, dl=ct.Resample_LABELS_Days[resample], 
+                                                   resample=resample, detect_calc_support=detect_val)
+
+    with timed_ctx("sina_with_history", warn_ms=1000):
+        top_all = process_merged_sina_with_history(top_all)
+    time_sum = time.time()
+    with timed_ctx("calc_indicators", warn_ms=1000):
+        top_all = calc_indicators(top_all, logger, resample)
+    with timed_ctx("plus_history_sum_opt", warn_ms=1000):
+        if resample == 'd':
+            # result_opt = strong_momentum_today_plus_history_sum_opt(top_all,max_days=cct.compute_lastdays)
+            result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays)
+        else:
+            result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays)
+    with timed_ctx("merge_strong_momentum_results_opt", warn_ms=1000):
+        clean_sum = merge_strong_momentum_results(result_opt,min_days=winlimit)
+        top_all = align_sum_percent(top_all,clean_sum)
+    logger.info(f'clean_sum: {time.time() - time_sum:.2f}')
+    with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
+        top_all = build_hma_and_trendscore(top_all,status_callback=status_callback)
+    top_temp = top_all.copy()
+    df_all = clean_bad_columns(top_temp)
+    df_all = sanitize(df_all)
+
+    # inside update_tree() to eliminate cross-process proxy overhead.
+    with timed_ctx("format_floats", warn_ms=800):
+        df_all = format_floats(df_all)
+    return df_all
+    
 def fetch_and_process_timed_ctx(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
 # def fetch_and_process(shared_dict: Dict[str, Any], queue: Any, blkname: str = "boll", 
                       flag: Any = None, log_level: Any = None, detect_calc_support_var: Any = None,
