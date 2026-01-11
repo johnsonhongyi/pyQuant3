@@ -13,6 +13,8 @@ import re
 
 from tk_gui_modules.window_mixin import WindowMixin
 from stock_logic_utils import toast_message
+from history_manager import QueryHistoryManager
+from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
 
@@ -55,7 +57,21 @@ class StrategyManager(tk.Toplevel, WindowMixin):
 
         self._start_time = time.time()
         self._update_job = None
+        self._pause_refresh = False
         
+        # 初始化 QueryHistoryManager (history2 集成)
+        self.var_history2 = tk.StringVar()
+        self.var_use_history2 = tk.BooleanVar(value=True)
+        self.query_manager = QueryHistoryManager(
+            self,
+            search_var2=self.var_history2, # 绑定到 history2
+            history_file=SEARCH_HISTORY_FILE,
+            sync_history_callback=self._on_history_sync
+        )
+        # 加载历史到 combo (在 _init_data_tab 中会用到)
+        _, h2, _ = self.query_manager.load_search_history()
+        self.history2_list = [r["query"] for r in h2]
+
         # 初始化 UI
         self._setup_ui()
         
@@ -376,15 +392,34 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         self.combo_filter = ttk.Combobox(ctrl_frame, width=25)
         self.combo_filter.pack(side="left", padx=2, fill="x", expand=True)
         
+        # --- Row 2: History2 联动过滤 ---
+        h2_frame = tk.Frame(self.tab_data)
+        h2_frame.pack(fill="x", padx=10, pady=2)
+        
+        tk.Checkbutton(h2_frame, text="H2联合过滤 (history2):", variable=self.var_use_history2, 
+                       command=self._refresh_data_tab, font=("Arial", 9, "bold")).pack(side="left", padx=2)
+        
+        self.combo_history2 = ttk.Combobox(h2_frame, textvariable=self.var_history2)
+        self.combo_history2.pack(side="left", padx=2, fill="x", expand=True)
+        self.combo_history2['values'] = self.history2_list
+        # 默认选中最新的历史记录 (列表第一个)
+        if self.history2_list:
+            self.var_history2.set(self.history2_list[0])
+        
+        # 绑定 History2 选择事件
+        self.combo_history2.bind("<<ComboboxSelected>>", lambda e: self._refresh_data_tab())
+        self.combo_history2.bind("<Return>", lambda e: self._refresh_data_tab())
+
+        # 管理按钮 (打开 QueryHistoryManager 编辑器)
+        tk.Button(h2_frame, text="⚙️ 管理搜索历史", command=lambda: self.query_manager.open_editor()).pack(side="left", padx=5)
+
         default_filters = [
-            "",
             "score > 80", 
-            "score < 20",
+            "score < 50",
             "diff > 5", 
-            "diff < -5",
-            "volume > 500000",
-            "score > 60 and diff > 3",
-            "20 < score < 80 and volume > 10000"
+            "volume > 2 and amount > 5e8",
+            "60 < score < 80 and volume > 2 and close > ma5d and low < ma10d and amount > 5e8",
+            "20 < score < 80 and volume > 2 and amount > 2e8"
         ]
         # 加载历史
         saved_history = self.config_data.get('filter_history', [])
@@ -408,31 +443,33 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             self.combo_filter.set(last_filter) # even if not in history, set it
             
         # 回车应用过滤
-        self.combo_filter.bind('<Return>', lambda e: self._refresh_data_tab())
-        
+        # self.combo_filter.bind('<Return>', lambda e: self._refresh_data_tab())
+        self.combo_filter.bind('<Return>', lambda e: (self._pause_refresh_end(), self._refresh_data_tab()))
+        self.combo_filter.bind("<FocusIn>", lambda e: self._pause_refresh_start())
+        self.combo_filter.bind("<FocusOut>", lambda e: self._pause_refresh_end())
         # 情绪分数表
         list_frame = tk.LabelFrame(self.tab_data, text="实时情绪分数监控", padx=5, pady=5)
         list_frame.pack(fill="both", expand=True, padx=10, pady=5)
         
-        cols = ("code", "name", "score", "diff", "baseline", "status", "time", "vol_ratio")
+        cols = ("code", "name", "Rank", "score", "diff", "win", "slope", "baseline", "status", "time", "vol_ratio")
         self.tree_data = ttk.Treeview(list_frame, columns=cols, show="headings")
         self.tree_data.heading("code", text="代码", command=lambda: self._sort_tree_data("code", False))
         self.tree_data.heading("name", text="名称", command=lambda: self._sort_tree_data("name", False))
+        self.tree_data.heading("Rank", text="Rank", command=lambda: self._sort_tree_data("Rank", False))
         self.tree_data.heading("score", text="情绪分", command=lambda: self._sort_tree_data("score", True))
         self.tree_data.heading("diff", text="变化", command=lambda: self._sort_tree_data("diff", True))
+        self.tree_data.heading("win", text="连阳", command=lambda: self._sort_tree_data("win", True))
+        self.tree_data.heading("slope", text="斜率", command=lambda: self._sort_tree_data("slope", True))
         self.tree_data.heading("baseline", text="基准", command=lambda: self._sort_tree_data("baseline", True))
         self.tree_data.heading("status", text="形态", command=lambda: self._sort_tree_data("status", False))
         self.tree_data.heading("time", text="时间", command=lambda: self._sort_tree_data("time", True))
         self.tree_data.heading("vol_ratio", text="成交量", command=lambda: self._sort_tree_data("vol_ratio", True))
         
-        self.tree_data.column("code", width=60, anchor="center")
-        self.tree_data.column("name", width=70, anchor="center")
-        self.tree_data.column("score", width=60, anchor="center")
-        self.tree_data.column("diff", width=50, anchor="center")
-        self.tree_data.column("baseline", width=50, anchor="center")
-        self.tree_data.column("status", width=100, anchor="center")
-        self.tree_data.column("time", width=80, anchor="center")
-        self.tree_data.column("vol_ratio", width=80, anchor="center")
+        for col in cols:
+            self.tree_data.column(col, width=60, anchor="center")
+        # 初始微调一些明显长度不同的
+        self.tree_data.column("name", width=70)
+        self.tree_data.column("status", width=120)
 
         self.tree_data.pack(fill="both", expand=True)
 
@@ -687,25 +724,38 @@ class StrategyManager(tk.Toplevel, WindowMixin):
              df_temp['baseline'] = df_temp['baseline'].fillna(50.0)
              df_temp['status'] = df_temp['status'].fillna('')
 
-        # 2.6 应用高级过滤
+        # 2.6 应用高级过滤 (主过滤器 + History2 联动)
         filter_expr = self.combo_filter.get().strip()
+        h2_expr = self.var_history2.get().strip()
+        use_h2 = self.var_use_history2.get()
+        
+        # 组合过滤条件
+        combined_filters = []
         if filter_expr:
+            combined_filters.append(f"({filter_expr})")
+        if use_h2 and h2_expr:
+            combined_filters.append(f"({h2_expr})")
+            
+        final_query = " and ".join(combined_filters)
+
+        if final_query:
             try:
                 if df_all is not None:
                      # 策略优化：仅 join 过滤表达式中用到的列 Isolate only used columns
                      # 简单的正则提取标识符
                      import re
                      # 提取所有单词作为潜在列名
-                     tokens = set(re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', filter_expr))
+                     tokens = set(re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', final_query))
+                     # 强制加入我们需要显示的列
+                     tokens.update(['Rank', 'win', 'slope'])
                      
                      cols_in_temp = set(df_temp.columns)
-                     # 找出 df_all 中存在且 filter_expr 中用到，但 df_temp 尚未包含的列
                      cols_to_add = [c for c in df_all.columns if c in tokens and c not in cols_in_temp]
                      
                      if cols_to_add:
                          df_temp = df_temp.join(df_all[cols_to_add])
                 
-                df_temp = df_temp.query(filter_expr)
+                df_temp = df_temp.query(final_query)
                 
             except Exception as e:
                 # 过滤失败显示在状态栏
@@ -716,7 +766,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
                     self.lbl_rt_stats.config(text=f"过滤错误: {err_msg}", fg="red")
                 
                 # Console debug
-                print(f"[Filter Error]Query: {filter_expr}")
+                print(f"[Filter Error]Query: {final_query}")
                 print(f"[Filter Error]Available columns: {list(df_temp.columns)}")
                 return # 停止后续处理
 
@@ -731,7 +781,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         if df_sort_col in df_temp.columns:
             try:
                 # 确保排序列是数值型以便正确排序
-                if df_sort_col in ['score', 'volume', 'diff']:
+                if df_sort_col in ['score', 'volume', 'diff', 'Rank', 'win', 'slope']:
                     df_temp[df_sort_col] = pd.to_numeric(df_temp[df_sort_col], errors='coerce').fillna(0)
                     
                 df_temp.sort_values(by=df_sort_col, ascending=ascending, inplace=True)
@@ -800,11 +850,19 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             baseline = float(row.get('baseline', 50.0))
             status = str(row.get('status', ''))
 
+            # Rank & Win & Slope
+            rank_val = row.get('Rank', 0)
+            win_val = row.get('win', 0)
+            slope_val = row.get('slope', 0.0)
+
             display_list.append({
                 'code': code,
                 'name': name,
+                'Rank': rank_val,
                 'score': score,
                 'diff': diff_val,
+                'win': win_val,
+                'slope': slope_val,
                 'baseline': baseline,
                 'status': status,
                 'time': time_str,
@@ -826,8 +884,11 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             values = (
                 code, 
                 item_data['name'], 
+                f"{item_data['Rank']}",
                 f"{item_data['score']:.1f}",
                 f"{item_data['diff']:+.1f}",
+                f"{item_data['win']}",
+                f"{item_data['slope']:.1f}",
                 f"{item_data['baseline']:.1f}",
                 item_data['status'],
                 item_data['time'], 
@@ -863,6 +924,40 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         valid_selection = [s for s in selected_items if self.tree_data.exists(s)]
         if valid_selection:
             self.tree_data.selection_set(valid_selection)
+            
+        # 7. 自动调整列宽
+        self._adjust_data_tree_columns()
+        
+    def _adjust_data_tree_columns(self):
+        """
+        自动根据内容调整列宽
+        """
+        import tkinter.font as tkfont
+        f = tkfont.Font(font='TkDefaultFont')
+        
+        # 遍历所有可见列
+        for col in self.tree_data["columns"]:
+            # 1. 测量表头宽度
+            header_text = self.tree_data.heading(col, "text")
+            w_header = f.measure(header_text) + 20 # 留点 margin 给排序箭头
+            
+            # 2. 测量内容宽度 (采样前 20 条)
+            w_content = 0
+            for iid in self.tree_data.get_children()[:20]:
+                val = self.tree_data.set(iid, col)
+                w_curr = f.measure(str(val))
+                if w_curr > w_content:
+                    w_content = w_curr
+            
+            # 3. 设置最优宽度 (min 60, max 200)
+            final_w = max(60, w_header, w_content + 15)
+            if final_w > 200: final_w = 200
+            
+            # 特殊修正
+            if col == "name": final_w = max(final_w, 75)
+            if col == "status": final_w = max(final_w, 120)
+            
+            self.tree_data.column(col, width=final_w)
 
     # ------------------- Tab 4: 信号日志 -------------------
     def _init_log_tab(self):
@@ -1029,6 +1124,19 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         self._refresh_data_tab() # 刷新
 
     # ------------------- Tab 5: 验证/手操 -------------------
+    def _on_history_sync(self, **kwargs: Any) -> None:
+        """当 QueryHistoryManager 同步历史时触发"""
+        if 'search_history2' in kwargs:
+            h2 = kwargs['search_history2']
+            self.history2_list = [r["query"] for r in h2]
+            if hasattr(self, 'combo_history2'):
+                self.combo_history2['values'] = self.history2_list
+                # 同步时，如果当前未选择或列表更新，确保显示最新的一条
+                if self.history2_list:
+                    # 只有在没有手动输入过或者当前值不在列表里时才同步到最新的？
+                    # 用户通常希望即时同步生效
+                    self.var_history2.set(self.history2_list[0])
+        
     def _init_verify_tab(self):
         paned = tk.PanedWindow(self.tab_verify, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=5, pady=5)
@@ -1186,28 +1294,36 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         except Exception as e:
             messagebox.showerror("异常", f"记录失败: {e}")
 
+    def _pause_refresh_start(self):
+        self._pause_refresh = True
+
+    def _pause_refresh_end(self):
+        self._pause_refresh = False
     # ------------------- 通用 -------------------
     def _schedule_refresh(self):
         if not self.winfo_exists(): return
         
-        # 刷新 Decision Tab
-        self._refresh_decision_status()
-        
-        # 刷新 Risk List
-        self._refresh_risk_list()
-        
-        # 刷新 Realtime Tab
-        self._refresh_data_tab()
-        
-        # 10秒刷新一次 (降低频率以减轻卡顿)
-        # 刷新 Signal Logs
-        self._refresh_signal_logs()
+        if not getattr(self, "_pause_refresh", False):
+            # 刷新 Decision Tab
+            self._refresh_decision_status()
+            
+            # 刷新 Risk List
+            self._refresh_risk_list()
+            
+            # 刷新 Realtime Tab
+            self._refresh_data_tab()
+            
+            # 10秒刷新一次 (降低频率以减轻卡顿)
+            # 刷新 Signal Logs
+            self._refresh_signal_logs()
 
-        # 5秒刷新一次 (提高日志实时性)
-        self._update_job = self.after(5000, self._schedule_refresh)
+        # 10秒刷新一次 (提高日志实时性)
+        self._update_job = self.after(10*1000, self._schedule_refresh)
 
     def on_close(self):
         self.save_window_position(self, "StrategyManager")
+        if hasattr(self, 'query_manager'):
+            self.query_manager.save_search_history()
         self.destroy()
 
 if __name__ == "__main__":
