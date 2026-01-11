@@ -382,7 +382,7 @@ class KlineBackupViewer(QMainWindow):
             self.df_file = self.internal_dfs[source_name].copy()
             self.update_summary()
             self.on_filter()
-            self.statusBar().showMessage(f"Loaded internal source: {source_name}")
+            self.statusBar().showMessage(f"Loaded internal source: {source_name} dataCount: {len(self.df_file)}")
 
     def on_refresh(self):
         if self.is_memory_mode:
@@ -460,7 +460,7 @@ class KlineBackupViewer(QMainWindow):
                 f"Stocks: {stock_count} | Total Nodes: {total_nodes}\n"
                 f"🔑 Fingerprint (MD5): {fp}"
             )
-            self.statusBar().showMessage("Data loaded successfully.")
+            self.statusBar().showMessage(f"Data loaded successfully. dateCount: {len(self.df_file)}")
             
         except Exception as e:
             self.stats_label.setText(f"Error loading data: {e}")

@@ -54,7 +54,7 @@ from tdx_utils import (
     cleanup_old_clean_flags, clean_expired_tdx_file, is_tdx_clean_done, sanitize,
     start_clipboard_listener
 )
-from data_utils import (
+from data_utils_multi_periods import (
     calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe,test_opt
 )
 from gui_utils import (
@@ -292,17 +292,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.txt_widget = None
         self.select_code = None
 
-        # 🛡️ 动态列订阅管理
         self.mandatory_cols: set[str] = {
             'code', 'name', 'trade', 'high', 'low', 'open', 'ratio', 'volume', 'amount',
             'percent', 'per1d', 'perc1d', 'nclose', 'ma5d', 'ma10d', 'ma20d', 'ma60d',
             'ma51d', 'lastp1d', 'lastp2d', 'lastp3d', 'lastl1d', 'lasto1d', 'lastv1d', 'lasth1d',
-            'macddif', 'macddea', 
-            'macd', 'macdlast1', 'macdlast2', 'macdlast3', 'rsi', 'kdj_j', 'kdj_k', 
-            'kdj_d', 'upper', 'lower', 'max5', 'high4', 'curr_eval', 'trade_signal',
-            'now', 'signal', 'signal_strength', 'emotion', 'win', 'sum_perc', 'slope',
-            'vol_ratio', 'power_idx', 'category', 'lastdu4'
+            'macddif', 'macddea', 'Rank', 'macd', 'macdlast1', 'macdlast2', 'macdlast3', 
+            'rsi', 'kdj_j', 'kdj_k', 'kdj_d', 'upper', 'lower', 'max5', 'high4', 
+            'curr_eval', 'trade_signal', 'now', 'signal', 'signal_strength', 'emotion', 
+            'win', 'sum_perc', 'slope', 'vol_ratio', 'power_idx', 'category', 'lastdu4'
         }
+        
+        self.multi_periods = {}
+        self.rank_data = pd.Series(dtype=float)
+        self.filter_multi_leaders = tk.BooleanVar(value=False)
+        
         self.update_required_columns()
 
         # ----------------- 控件框 ----------------- #
@@ -1161,6 +1164,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.st_key_sort_entry.bind("<Return>", self.on_st_key_sort_enter)
         self.st_key_sort_value.set(self.st_key_sort) 
         
+        
         # --- resample 下拉框 ---
         resampleValues = ["d",'3d', "w", "m"]
         tk.Label(ctrl_frame, text="resample:").pack(side="left")
@@ -1168,6 +1172,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.resample_combo.current(resampleValues.index(self.global_values.getkey("resample")))
         self.resample_combo.pack(side="left", padx=5)
         self.resample_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_data())
+
+        tk.Checkbutton(ctrl_frame, text="周期联动", variable=self.filter_multi_leaders).pack(side="left", padx=5)
 
         # 在初始化时（StockMonitorApp.__init__）创建并注册：
         self.alert_manager = AlertManager(storage_dir=DARACSV_DIR, logger=logger)
@@ -1463,7 +1469,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if self.refresh_enabled:  # ✅ 只在启用时刷新
                 has_update = False
                 while not self.queue.empty():
-                    df = self.queue.get_nowait()
+                    packet = self.queue.get_nowait()
+                    
+                    if isinstance(packet, dict):
+                        df = packet.get('data', pd.DataFrame())
+                        self.multi_periods = packet.get('multi_periods', {})
+                        self.rank_data = packet.get('rank', pd.Series(dtype=float))
+                        
+                        logger.info(f"[数据包] 接收到字典格式数据包")
+                        logger.info(f"[数据包] df shape: {df.shape if hasattr(df, 'shape') else 'N/A'}")
+                        logger.info(f"[数据包] multi_periods keys: {list(self.multi_periods.keys())}")
+                        logger.info(f"[数据包] rank_data shape: {self.rank_data.shape if hasattr(self.rank_data, 'shape') else 'N/A'}")
+                        
+                        # 把 Rank 合并到主 DataFrame
+                        if not df.empty and not self.rank_data.empty:
+                            df['Rank'] = df.index.map(self.rank_data).fillna(0)
+                            logger.info(f"[数据包] Rank 列已合并，范围: {df['Rank'].min():.1f} - {df['Rank'].max():.1f}")
+                        else:
+                            logger.warning(f"[数据包] 无法合并 Rank: df.empty={df.empty}, rank_data.empty={self.rank_data.empty}")
+                    else:
+                        df = packet
+                        logger.info(f"[数据包] 接收到 DataFrame 格式数据包，shape: {df.shape if hasattr(df, 'shape') else 'N/A'}")
+
                     # 🔌 在主进程同步更新 DataPublisher
                     if hasattr(self, 'realtime_service') and self.realtime_service:
                         try:
@@ -8660,6 +8687,32 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.sync_history(val2, self.search_history2, self.search_combo2, "history2", "history2")
         except Exception as ex:
             logger.exception("更新搜索历史时出错: %s", ex)
+
+
+        # --- 周期联动逻辑 ---
+        logger.info(f"[周期联动] 检查条件: filter_multi_leaders={self.filter_multi_leaders.get()}, "
+                   f"has_multi_periods={hasattr(self, 'multi_periods')}, "
+                   f"multi_periods_keys={list(self.multi_periods.keys()) if hasattr(self, 'multi_periods') else 'N/A'}")
+        
+        if self.filter_multi_leaders.get() and hasattr(self, 'multi_periods') and self.multi_periods:
+            query_rule = f"({val1}) and ({val2})" if val1 and val2 else val1 or val2
+            logger.info(f"[周期联动] 启用! 查询条件: {query_rule}")
+            logger.info(f"[周期联动] multi_periods 数据: {[(k, v.shape if hasattr(v, 'shape') else 'N/A') for k, v in self.multi_periods.items()]}")
+            
+            from data_utils import find_multi_period_leaders
+            leader_codes = find_multi_period_leaders(self.multi_periods, query_rule)
+            logger.info(f"[周期联动] 筛选结果: {len(leader_codes)} 只股票")
+            
+            if leader_codes:
+                self.status_var.set(f"周期联动过滤: 命中 {len(leader_codes)} 只")
+                df_filtered = self.df_all.loc[self.df_all.index.intersection(leader_codes)]
+                logger.info(f"[周期联动] 最终显示: {len(df_filtered)} 只股票")
+                self.refresh_tree(df_filtered)
+                return
+            else:
+                self.status_var.set("周期联动未发现满足所有周期的标的")
+                self.refresh_tree(pd.DataFrame())
+                return
 
         # ================= 数据为空检查 =================
         if self.df_all.empty:
