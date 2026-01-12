@@ -12,7 +12,7 @@ import pandas as pd
 from queue import Queue, Empty
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Union, Optional, Callable
+from typing import Any, Optional, Callable, cast, List, Dict, Tuple
 
 from intraday_decision_engine import IntradayDecisionEngine
 from risk_engine import RiskEngine
@@ -20,7 +20,8 @@ from trading_logger import TradingLogger
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import LoggerFactory
 
-logger = LoggerFactory.getLogger(name="stock_live_strategy")
+import logging
+logger: logging.Logger = LoggerFactory.getLogger(name="stock_live_strategy")
 MAX_DAILY_ADDITIONS = cct.MAX_DAILY_ADDITIONS
 # Optional imports
 try:
@@ -910,16 +911,32 @@ class StockLiveStrategy:
 
     def _check_strategies(self, df):
         try:
+            # --- [新增] 全局交易日判断：非交易日不执行策略逻辑 ---
+            if not cct.get_trade_date_status():
+                return
+
             now = time.time()
             # 从数据库同步实时持仓信息
             open_trades = {t['code']: t for t in self.trading_logger.get_trades() if t['status'] == 'OPEN'}
             
+            # --- [优化] 同步 55188 全量数据：移出循环，每批次仅执行一次 ---
+            if self.realtime_service:
+                try:
+                    ext_status = self.realtime_service.get_55188_data() # 不传 code 获取全量字典
+                    if isinstance(ext_status, dict):
+                        df_ext = ext_status.get('df')
+                        if df_ext is not None and not df_ext.empty:
+                            self.ext_data_55188 = df_ext
+                            self.last_ext_update_ts = ext_status.get('last_update', time.time())
+                except Exception as e:
+                    logger.debug(f"Sync full 55188 data failed: {e}")
+
             valid_codes = [c for c in self._monitored_stocks.keys() if c in df.index]
 
             for code in valid_codes:
                 data = self._monitored_stocks[code]
                 last_alert = data.get('last_alert', 0)
-                logger.debug(f"{code} data:{data}")
+                # logger.debug(f"{code} data:{data}")
 
                 # ---------- 冷却判断 ----------
                 if now - last_alert < self._alert_cooldown:
@@ -948,6 +965,7 @@ class StockLiveStrategy:
                     trade = open_trades[code]
                     snap['cost_price'] = trade.get('buy_price', 0)
                     snap['buy_date'] = trade.get('buy_date', '')
+                    snap['buy_reason'] = trade.get('buy_reason', '')
                     # 追踪买入后最高价 (用于移动止盈)
                     if current_price > snap.get('highest_since_buy', 0):
                         snap['highest_since_buy'] = current_price
@@ -960,17 +978,8 @@ class StockLiveStrategy:
 
                 # --- 实时情绪与形态注入 (Realtime Signal Injection) ---
                 if self.realtime_service:
-                    # ✅ 1. 同步 55188 全量数据 (用于 UI 查看器和全局感知)
-                    try:
-                        ext_status = self.realtime_service.get_55188_data() # 不传 code 获取全量字典
-                        if isinstance(ext_status, dict):
-                            df_ext = ext_status.get('df')
-                            if df_ext is not None and not df_ext.empty:
-                                self.ext_data_55188 = df_ext
-                                self.last_ext_update_ts = ext_status.get('last_update', time.time())
-                    except Exception as e:
-                        logger.debug(f"Sync full 55188 data failed: {e}")
-
+                    # 55188 全量数据已在循环外同步 (self.ext_data_55188)
+                    
                     try:
                         # 1. 注入实时情绪 (0-100)
                         rt_emotion = self.realtime_service.get_emotion_score(code)
@@ -1164,6 +1173,7 @@ class StockLiveStrategy:
                              snap['last_trigger_time'] = now_ts + timedelta(minutes=10) 
                     elif decision["action"] == "卖出":
                         snap["sell_triggered_today"] = True
+                        snap["sell_reason"] = decision["reason"]
                         snap['last_trigger_time'] = now_ts
 
                 # --- 3.4 记录最大分数 ---
@@ -1284,7 +1294,7 @@ class StockLiveStrategy:
                     messages.append(("POSITION", f'{data["name"]} {action} 当前价 {current_price} 建议仓位 {ratio*100:.0f}%'))
 
                 # ---------- 调试输出 ----------
-                logger.debug(f"{code} 调试: price={current_price} nclose={current_nclose} last_close={last_close} below_nclose_count={data['below_nclose_count']} below_last_close_count={data['below_last_close_count']} max_normal_pullback={max_normal_pullback:.2f}")
+                # logger.debug(f"{code} DEBUG: price={current_price} nclose={current_nclose} last_close={last_close} below_nclose_count={data['below_nclose_count']} below_last_close_count={data['below_last_close_count']} max_normal_pullback={max_normal_pullback:.2f}")
 
                 if messages:
                     # ---------- 去重 & 合并 ----------
@@ -1434,12 +1444,12 @@ class StockLiveStrategy:
                     messages.append(("POSITION", msg))
 
                 # ---------- 调试信息 ----------
-                logger.debug(
-                    f"{code} 调试: price={current_price} nclose={current_nclose} "
-                    f"last_close={last_close} below_nclose_count={data['below_nclose_count']} "
-                    f"below_last_close_count={data['below_last_close_count']} "
-                    f"max_normal_pullback={max_normal_pullback:.2f}"
-                )
+                # logger.debug(
+                #     f"{code} DEBUG: price={current_price} nclose={current_nclose} "
+                #     f"last_close={last_close} below_nclose_count={data['below_nclose_count']} "
+                #     f"below_last_close_count={data['below_last_close_count']} "
+                #     f"max_normal_pullback={max_normal_pullback:.2f}"
+                # )
 
                 if messages:
                     # ---------- 优先级定义 ----------
@@ -1475,10 +1485,10 @@ class StockLiveStrategy:
                     # else:
                     #     final_action = "HOLD"
 
-                    # ---------- 调试输出 ----------
-                    logger.debug(f"{code} 合并前 messages={messages}")
-                    logger.debug(f"{code} 去重后 unique_msgs={unique_msgs}")
-                    # logger.info(f"{code} combined_msg:\n{combined_msg}")
+                    # # ---------- 调试输出 ----------
+                    # logger.debug(f"{code} 合并前 messages={messages}")
+                    # logger.debug(f"{code} 去重后 unique_msgs={unique_msgs}")
+                    # # logger.info(f"{code} combined_msg:\n{combined_msg}")
 
                     # ---------- 单次触发 ----------
                     self._trigger_alert(
@@ -1529,7 +1539,7 @@ class StockLiveStrategy:
             if open_trades:
                 stock_name = name or open_trades[0].get('name', 'Unknown')
                 # 执行卖出记录
-                self.trading_logger.record_trade(code, stock_name, "卖出", price, 0)
+                self.trading_logger.record_trade(code, stock_name, "卖出", price, 0, reason="Manual/Auto Close")
                 logger.info(f"Auto-closed position for {code} ({stock_name}) at {price}")
                 return True
         except Exception as e:
@@ -1601,8 +1611,8 @@ class StockLiveStrategy:
             self._play_sound_async()
             speak_text = f"注意{action}，{code} ，{message}"
             self._voice.say(speak_text, code=code)
-        else:
-            logger.debug(f"Voice muted for {code}")
+        # else:
+        #     logger.debug(f"Voice muted for {code}")
         
         # 3. 回调
         if self.alert_callback:
@@ -1614,7 +1624,7 @@ class StockLiveStrategy:
         # 4. 记录交易执行 (用于回测优化和收益计算)
         if action in ("买入", "卖出", "ADD", "加仓") or "止" in action:
             # 记录交易并计算单笔收益
-            self.trading_logger.record_trade(code, name, action, price, 100) 
+            self.trading_logger.record_trade(code, name, action, price, 100, reason=message) 
 
     def _play_sound_async(self):
         try:

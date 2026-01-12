@@ -14,6 +14,7 @@ from tdx_utils import clean_bad_columns, sanitize, clean_expired_tdx_file
 from db_utils import get_indb_df
 
 winlimit = cct.winlimit
+loop_counter_limit = cct.loop_counter_limit
 START_INIT = 0
 PIPE_NAME = r"\\.\pipe\my_named_pipe"
 logger = LoggerFactory.getLogger()
@@ -1363,7 +1364,7 @@ def fetch_and_process(
 
     logger.info(f"init resample: {resample} flag: {flag.value if flag else 'None'} detect_calc_support: {detect_calc_support_val}")
     last_status = get_status(status_callback)
-
+    loop_counter = 0  # 循环计数
     while True:
         try:
             time_s = time.time()
@@ -1372,7 +1373,11 @@ def fetch_and_process(
                    # for _ in range(5):
                    #      if not flag.value: break
                    #      time.sleep(1)
-                   wait_or_break(5, [
+                   loop_counter += 1
+                   # 只每 10 次循环输出一次
+                   if loop_counter % loop_counter_limit == 0:
+                       logger.debug(f'调试 not flag.value:{not flag.value}')
+                   wait_or_break(duration_sleep_time, [
                        lambda: not flag.value,          # 外部手动停止
                    ])
                    continue
@@ -1390,12 +1395,17 @@ def fetch_and_process(
             elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
                 # logger.info(f'st_key_sort : new : {g_values.getkey("st_key_sort")} last : {st_key_sort} ')
                 st_key_sort = g_values.getkey("st_key_sort")
+                logger.debug(f'调试 st_key_sort:{st_key_sort}')
             elif cct.get_trade_date_status() and START_INIT > 0 and 830 <= cct.get_now_time_int() <= 915:
                 today = cct.get_today()
                 # 0️⃣ init 今天已经完成 → 直接跳过
 
                 # 1️⃣ 清理（未完成 → 不允许 init）
                 # if not clean_expired_tdx_file(logger, g_values):
+                loop_counter += 1
+                # 只每 10 次循环输出一次
+                if loop_counter % loop_counter_limit == 0:
+                    logger.debug(f'调试 clean_expired_tdx_file')
                 if not clean_expired_tdx_file(logger, g_values, cct.get_trade_date_status, cct.get_today, cct.get_now_time_int, cct.get_ramdisk_path, ramdisk_dir):
                     logger.info(f"{today} 清理尚未完成，跳过 init_tdx")
                     # 5️⃣ 节流
@@ -1404,7 +1414,8 @@ def fetch_and_process(
                             break
                         time.sleep(1)
                     continue
-
+                else:
+                    logger.info(f"{today} 清理已完成，进入init_tdx")
                 if (
                     g_values.getkey("tdx.init.done") is True
                     and g_values.getkey("tdx.init.date") == today
@@ -1471,6 +1482,7 @@ def fetch_and_process(
 
             elif get_status(status_callback) != last_status:
                 last_status = get_status(status_callback)
+                logger.debug(f'调试 last_status:{last_status}')
 
             elif START_INIT > 0 and (not cct.get_work_time()):
                     # logger.info(f'not worktime and work_duration')
@@ -1478,7 +1490,11 @@ def fetch_and_process(
                     #     if not flag.value or status_callback.value != last_status:
                     #         break
                     #     time.sleep(1)
-                    wait_or_break(5, [
+                    loop_counter += 1
+                    # 只每 10 次循环输出一次
+                    if loop_counter % loop_counter_limit == 0:
+                        logger.debug(f'调试 START_INIT: {START_INIT} not cct.get_work_time(): {not cct.get_work_time()}')
+                    wait_or_break(duration_sleep_time, [
                         lambda: not flag.value,          # 外部手动停止
                         lambda: get_status(status_callback) != last_status,
                     ])
@@ -1652,11 +1668,17 @@ def fetch_and_process(
                 #     break
                 # elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
                 #     break
-                
+                loop_counter += 1
+                # 只每 10 次循环输出一次
+                if loop_counter % loop_counter_limit == 0:
+                    logger.debug(f'调试 START_INIT: {START_INIT} not cct.get_work_time(): {not cct.get_work_time()} loop_sleep_time:{loop_sleep_time}')
                 if any(cond() for cond in stop_conditions):
                     break
                 # wait_or_break(5, stop_conditions)
                 time.sleep(sleep_step)
+                # 防止 loop_counter 无限大（可选）
+                if loop_counter >= 10000:
+                    loop_counter = 0
             START_INIT = 1
 
         except Exception as e:
