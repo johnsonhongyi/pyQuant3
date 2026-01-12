@@ -1,11 +1,9 @@
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
-    QTableWidgetItem, QLabel, QComboBox, QMenu
+    QTableWidgetItem, QLabel, QComboBox, QMenu, QTextEdit, QHeaderView
 )
-from PyQt6.QtCore import pyqtSignal, QObject
+from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QPoint
 from PyQt6.QtGui import QAction
-from PyQt6.QtCore import Qt
-from PyQt6.QtCore import QTimer
 import sys
 import pandas as pd
 
@@ -44,16 +42,16 @@ class TradingGUI(QWidget):
         self.logger = TradingLogger(logger_path)
         self.analyzer = TradingAnalyzer(self.logger)
 
-        self.layout = QVBoxLayout()
-        self.setLayout(self.layout)
+        self.main_layout = QVBoxLayout()
+        self.setLayout(self.main_layout)
 
         # 顶部：汇总信息
         self.label_summary = QLabel("总收益: 0, 平均收益率: 0%, 总笔数: 0")
-        self.layout.addWidget(self.label_summary)
+        self.main_layout.addWidget(self.label_summary)
 
         # 顶部选择
         self.top_layout = QHBoxLayout()
-        self.layout.addLayout(self.top_layout)
+        self.main_layout.addLayout(self.top_layout)
 
         self.view_combo = QComboBox()
         self.view_combo.addItems([
@@ -79,14 +77,13 @@ class TradingGUI(QWidget):
 
         # 表格显示
         self.table = QTableWidget()
-        self.layout.addWidget(self.table)
+        self.main_layout.addWidget(self.table)
 
         # 底部日志/报告显示区域 (隐藏，仅在查看报告时显示)
-        from PyQt6.QtWidgets import QTextEdit
         self.report_area = QTextEdit()
         self.report_area.setReadOnly(True)
         self.report_area.setVisible(False)
-        self.layout.addWidget(self.report_area)
+        self.main_layout.addWidget(self.report_area)
 
         self.on_tree_scroll_to_code = on_tree_scroll_to_code 
 
@@ -176,6 +173,7 @@ class TradingGUI(QWidget):
                 df = df[df['code'] == code]
             # 只保留指标相关列
             indicator_cols = ['date', 'code', 'name', 'price', 'action', 'reason',
+                            'buy_reason', 'sell_reason', 'time_msg',
                             'ma5d', 'ma10d', 'ratio', 'volume', 'percent',
                             'high', 'low', 'open', 'nclose',
                             'highest_today', 'pump_height', 'pullback_depth',
@@ -250,29 +248,63 @@ class TradingGUI(QWidget):
 
         # 填充数据期间关闭排序，避免干扰和性能下降
         self.table.setSortingEnabled(False)
-        self.table.setColumnCount(len(df.columns))
         self.table.setRowCount(len(df))
-        self.table.setHorizontalHeaderLabels(df.columns)
+        self.table.setColumnCount(len(df.columns))
+        
+        # 列名转换字典
+        col_mapping = {
+            'date': '日期', 'code': '代码', 'name': '名称', 'price': '价格', 'action': '动作', 
+            'reason': '理由', 'buy_reason': '买入原因', 'sell_reason': '卖出原因', 'time_msg': '时间窗口',
+            'buy_date': '买入日期', 'sell_date': '卖出日期', 'buy_price': '买入价', 'sell_price': '卖出价',
+            'buy_amount': '买入量', 'profit': '盈亏', 'pnl_pct': '收益率', 'status': '状态',
+            'total_profit': '总盈亏', 'avg_pnl_pct': '均收益率', 'total_bought': '总买入量',
+            'open_positions': '持仓数', 'last_buy_reason': '最后买入原因', 'last_sell_reason': '最后卖出原因',
+            'ma5d': 'MA5', 'ma10d': 'MA10', 'ratio': '换手', 'volume': '量比', 'percent': '涨幅%',
+            'high': '最高', 'low': '最低', 'open': '开盘', 'nclose': '当日均价',
+            'highest_today': '今日峰值', 'pump_height': '冲高高度', 'pullback_depth': '回落深度',
+            'win': '胜率', 'red': '阳线', 'gren': '阴线', 'structure': '结构'
+        }
+        display_cols = [col_mapping.get(c, c) for c in df.columns]
+        self.table.setHorizontalHeaderLabels(display_cols)
 
         for i, row in enumerate(df.itertuples(index=False)):
             for j, value in enumerate(row):
-                item = NumericTableWidgetItem(value)
+                # 处理空值
+                display_value = "" if pd.isna(value) else value
+                item = NumericTableWidgetItem(display_value)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
                 # 特色染色逻辑：盈亏染色
-                col_name = df.columns[j].lower()
-                if "profit" in col_name or "pnl" in col_name or "return" in col_name or "percent" in col_name:
+                # 获取列字段名
+                raw_col_name = str(df.columns[j]).lower()
+                if any(k in raw_col_name for k in ["profit", "pnl", "return", "percent"]):
                     try:
                         f_val = float(value)
-                        if f_val > 0: item.setForeground(Qt.GlobalColor.red)
-                        elif f_val < 0: item.setForeground(Qt.GlobalColor.darkGreen)
-                    except: pass
+                        if f_val > 0: 
+                            item.setForeground(Qt.GlobalColor.red)
+                        elif f_val < 0: 
+                            item.setForeground(Qt.GlobalColor.darkGreen)
+                    except: 
+                        pass
                 
                 self.table.setItem(i, j, item)
         
         # 填充完成后开启排序
         self.table.setSortingEnabled(True)
         self.table.resizeColumnsToContents()
+        
+        # 限制高度文本列的宽度，防止撑开过大
+        header = self.table.horizontalHeader()
+        for j, col_name in enumerate(df.columns):
+            raw_target = col_name.lower()
+            if any(k in raw_target for k in ["reason", "msg", "feedback", "indicators"]):
+                self.table.setColumnWidth(j, 250)
+                header.setSectionResizeMode(j, QHeaderView.ResizeMode.Interactive)
+            elif any(k in raw_target for k in ["code", "name", "date", "action"]):
+                # 对于这些列，如果内容很短，resizeColumnsToContents 已经处理好了
+                # 如果还是觉得太窄，可以给个最小值
+                if self.table.columnWidth(j) < 60:
+                    self.table.setColumnWidth(j, 80)
 
     def get_current_df(self):
         return getattr(self, "current_df", None)
@@ -301,36 +333,38 @@ class TradingGUI(QWidget):
         统一的触发发送逻辑
         :param force_send: 如果为 True，则忽略列过滤
         """
-        df = self.get_current_df()
-        if df is None or df.empty:
-            return
-
         # 检查触发列
         if not force_send:
+            header_item = self.table.horizontalHeaderItem(column)
+            if not header_item:
+                return
+            header_text = header_item.text()
+            # 汉化映射后的列名
+            trigger_headers = {"代码", "名称", "code", "name"}
+            if header_text not in trigger_headers:
+                return
+
+        # 获取当前行的股票代码
+        stock_code = self._get_stock_code_from_row(row)
+        if stock_code and self.sender:
             try:
-                clicked_col = df.columns[column].lower()
-            except Exception:
-                return
-            trigger_cols = {"code", "stock_code", "ts_code", "name"}
-            if clicked_col not in trigger_cols:
-                return
-
-        # 找到 code 列（发送始终以 code 为准）
-        code_col = None
-        for c in df.columns:
-            if c.lower() in ("code", "stock_code", "ts_code"):
-                code_col = c
-                break
-
-        if not code_col:
-            return
-
-        try:
-            stock_code = str(df.iloc[row][code_col]).strip()
-            if stock_code:
                 self.sender.send(stock_code)
-        except Exception as e:
-            print(f"Error sending stock code: {e}")
+            except Exception as e:
+                print(f"Error sending stock code: {e}")
+
+    def _get_stock_code_from_row(self, row: int) -> str:
+        """从表格行中精确检索股票代码"""
+        if row < 0:
+            return ""
+        
+        # 遍历列头找到代码列
+        for j in range(self.table.columnCount()):
+            h_item = self.table.horizontalHeaderItem(j)
+            if h_item and h_item.text() in ("代码", "code", "ts_code"):
+                code_item = self.table.item(row, j)
+                if code_item:
+                    return code_item.text().strip()
+        return ""
 
     def show_context_menu(self, pos):
         """显示右键菜单"""
@@ -339,22 +373,7 @@ class TradingGUI(QWidget):
             return
 
         row = item.row()
-        df = self.get_current_df()
-        if df is None or df.empty:
-            return
-
-        code_col = None
-        for c in df.columns:
-            if c.lower() in ("code", "stock_code", "ts_code"):
-                code_col = c
-                break
-        if not code_col:
-            return
-
-        try:
-            stock_code = str(df.iloc[row][code_col]).strip()
-        except Exception:
-            return
+        stock_code = self._get_stock_code_from_row(row)
         if not stock_code:
             return
 
@@ -379,11 +398,14 @@ class TradingGUI(QWidget):
 
     def _safe_scroll_to_code(self, stock_code):
         """Qt 主线程执行"""
-        # if callable(self.on_tree_scroll_to_code):
-        #     self.on_tree_scroll_to_code(stock_code)
-        # else:
-        #     self.stock_input.setCurrentText(stock_code)
-        pass
+        if self.on_tree_scroll_to_code and callable(self.on_tree_scroll_to_code):
+            try:
+                self.on_tree_scroll_to_code(stock_code)
+            except Exception as e:
+                print(f"on_tree_scroll_to_code error: {e}")
+        else:
+            # 降级方案：如果是独立的，尝试更新输入框
+            self.stock_input.setCurrentText(stock_code)
             
     def _safe_update_send_status(self, msg):
         """Qt 主线程安全更新状态"""

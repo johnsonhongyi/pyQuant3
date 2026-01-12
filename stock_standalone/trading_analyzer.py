@@ -1,8 +1,7 @@
 from __future__ import annotations
 import pandas as pd
 import json
-from datetime import datetime
-from typing import Optional, List, Dict, Any, Union, TYPE_CHECKING
+from typing import Optional, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from trading_logger import TradingLogger
@@ -16,7 +15,7 @@ class TradingAnalyzer:
 
     def get_all_trades_df(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
         """获取所有交易记录的 DataFrame"""
-        trades: List[Dict[str, Any]] = self.logger.get_trades(start_date, end_date)
+        trades: list[dict[str, Any]] = self.logger.get_trades(start_date, end_date)
         df: pd.DataFrame = pd.DataFrame(trades)
         if df.empty:
             return df
@@ -29,7 +28,7 @@ class TradingAnalyzer:
 
     def get_signal_history_df(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
         """获取信号历史数据的 DataFrame，并展开 indicators 列"""
-        signals: List[Dict[str, Any]] = self.logger.get_signals(start_date, end_date)
+        signals: list[dict[str, Any]] = self.logger.get_signals(start_date, end_date)
         df: pd.DataFrame = pd.DataFrame(signals)
         if df.empty:
             return df
@@ -63,6 +62,9 @@ class TradingAnalyzer:
                     'pullback_depth': round(d.get('pullback_depth', 0) * 100, 2),  # 转为百分比
                     'hvolume': round(d.get('hvolume', 0), 2),
                     'lvolume': round(d.get('lvolume', 0), 2),
+                    'time_msg': d.get('时间窗口说明', ''),
+                    'buy_reason': d.get('buy_reason', ''),
+                    'sell_reason': d.get('sell_reason', ''),
                 })
             except:
                 return pd.Series({
@@ -71,7 +73,8 @@ class TradingAnalyzer:
                     'ma5d': 0, 'ma10d': 0, 'ratio': 0, 'volume': 0, 'percent': 0,
                     'high': 0, 'low': 0, 'open': 0,
                     'highest_today': 0, 'pump_height': 0, 'pullback_depth': 0,
-                    'hvolume': 0, 'lvolume': 0
+                    'hvolume': 0, 'lvolume': 0, 'time_msg': '',
+                    'buy_reason': '', 'sell_reason': ''
                 })
 
         expanded = df['indicators'].apply(expand_indicators)
@@ -87,7 +90,7 @@ class TradingAnalyzer:
         if df.empty:
             return df
             
-        summary_list: List[Dict[str, Any]] = []
+        summary_list: list[dict[str, Any]] = []
         for code, group in df.groupby('code'):
             total_amount: float = group['buy_amount'].sum()
             closed_group: pd.DataFrame = group[group['status'] == 'CLOSED']
@@ -102,7 +105,9 @@ class TradingAnalyzer:
                 'total_bought': total_amount,
                 'open_positions': open_count,
                 'total_profit': round(closed_group['profit'].sum(), 2) if not closed_group.empty else 0,
-                'avg_pnl_pct': round(closed_group['pnl_pct'].mean(), 4) if not closed_group.empty else 0
+                'avg_pnl_pct': round(closed_group['pnl_pct'].mean(), 4) if not closed_group.empty else 0,
+                'last_buy_reason': group['buy_reason'].iloc[-1] if 'buy_reason' in group.columns else '',
+                'last_sell_reason': group['sell_reason'].iloc[-1] if 'sell_reason' in group.columns else ''
             })
             
         return pd.DataFrame(summary_list).sort_values('total_profit', ascending=False)
@@ -116,16 +121,16 @@ class TradingAnalyzer:
 
     def daily_summary(self, days: int = 30) -> pd.DataFrame:
         """每日盈亏统计"""
-        trades: List[Dict[str, Any]] = self.logger.get_trades()
+        trades: list[dict[str, Any]] = self.logger.get_trades()
         if not trades:
             return pd.DataFrame()
             
         df: pd.DataFrame = pd.DataFrame(trades)
         # 获取所有日期
-        dates: List[str] = sorted(list(set([t['sell_date'][:10] for t in trades if t['sell_date']] + 
+        dates: list[str] = sorted(list(set([t['sell_date'][:10] for t in trades if t['sell_date']] + 
                                   [t['buy_date'][:10] for t in trades if t['buy_date']])), reverse=True)
         
-        daily_list: List[Dict[str, Any]] = []
+        daily_list: list[dict[str, Any]] = []
         for d in dates[:days]:
             daily_trades: pd.DataFrame = df[(df['buy_date'].str.startswith(d)) | (df['sell_date'].str.startswith(d))]
             daily_amount: float = daily_trades['buy_amount'].sum()
@@ -158,7 +163,7 @@ class TradingAnalyzer:
         if closed.empty:
             return pd.DataFrame()
             
-        perf: List[Dict[str, Any]] = []
+        perf: list[dict[str, Any]] = []
         for code, group in closed.groupby('code'):
             win_count: int = len(group[group['profit'] > 0])
             total_count: int = len(group)

@@ -109,6 +109,21 @@ class IntradayDecisionEngine:
             debug["analysis_skip"] = "均线数据无效"
         
         # ---------- 策略进化：痛感与防御机制 (Pain & Defense) ----------
+        # 0. 基础过滤：时间窗口与涨跌停 (Basic Filters)
+        base_pos = 0.0
+        # --- 时间窗口过滤 (Time window filter) ---
+        time_penalty, time_msg = self._time_structure_filter(debug)
+        if time_penalty < -0.5: # 严重不建议的时间点
+            return self._hold(time_msg, debug)
+        base_pos += time_penalty
+        if time_msg:
+            debug["时间窗口说明"] = time_msg
+
+        # --- 涨停/跌停过滤 (Limit price filter) ---
+        limit_refuse, limit_msg = self._limit_price_filter(row, debug)
+        if limit_refuse:
+            return self._hold(limit_msg, debug)
+
         # 1. 记仇机制 (PTSD)：如果这只票最近连续让你亏钱，就别碰它！
         loss_streak = int(snapshot.get("loss_streak", 0))
         if loss_streak >= 2:
@@ -713,6 +728,43 @@ class IntradayDecisionEngine:
 
     # ==================== 原有方法（保持兼容） ====================
     
+    def _time_structure_filter(self, debug: dict) -> tuple[float, str]:
+        """
+        根据交易时间段应用结构性加成或惩罚
+        用户反馈：9:20-9:45 相对低位, 10:00-11:00 短期高点, 下午需稳在均线上
+        """
+        now = dt.datetime.now().time()
+        curr_min = now.hour * 60 + now.minute
+        
+        # 9:30-9:45 (570-585)
+        if 570 <= curr_min <= 585:
+            return 0.05, "开盘低位择机区"
+        
+        # 10:00-11:00 (600-660)
+        if 600 <= curr_min <= 660:
+            return -0.15, "早盘高位风险区(慎追)"
+        
+        # 14:30-15:00 (870-900)
+        if 870 <= curr_min <= 900:
+            return -0.20, "尾盘防追高区"
+            
+        return 0, ""
+
+    def _limit_price_filter(self, row: dict, debug: dict) -> tuple[bool, str]:
+        """
+        价格限制过滤器：防止在涨停板或跌停板错误交易
+        """
+        percent = float(row.get('percent', 0))
+        # 涨停板判定 (通常 > 9.8% 且买一量大)
+        if percent > 9.85:
+            return True, "涨停板禁止追高"
+        
+        # 跌停板判定
+        if percent < -9.85:
+            return True, "跌停板禁止抄底"
+            
+        return False, ""
+
     def _intraday_structure(self, price: float, high: float, open_p: float, ratio: float) -> str:
         """判断盘中结构"""
         # 优化“派发”判定：即使换手率没到 8，如果回落严重且带量，也算派发

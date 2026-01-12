@@ -1,19 +1,27 @@
 import sqlite3
 import json
-# import logging
+import logging
 from datetime import datetime
 from typing import Any, Optional, Union
-from JohnsonUtil import LoggerFactory
 
-# logger = logging.getLogger(__name__)
-logger = LoggerFactory.getLogger()
+# 处理 override 装饰器 (Python 3.12+ 才有)
+try:
+    from typing import override # type: ignore
+except ImportError:
+    def override(func):
+        return func
 
 import numpy as np
+from JohnsonUtil import LoggerFactory
+
+# LoggerFactory.getLogger() 返回的类型通过注解明确
+logger: logging.Logger = LoggerFactory.getLogger()
 
 class NumpyEncoder(json.JSONEncoder):
     """
     专门用于处理 Numpy 数据类型的 JSON Encoder
     """
+    @override
     def default(self, o):
         if isinstance(o, np.integer):
             return int(o)
@@ -62,8 +70,10 @@ class TradingLogger:
                     buy_date TEXT,
                     buy_price REAL,
                     buy_amount REAL, -- 股数
+                    buy_reason TEXT, -- 买入理由
                     sell_date TEXT,
                     sell_price REAL,
+                    sell_reason TEXT, -- 卖出理由
                     fee REAL,        -- 手续费累计
                     profit REAL,     -- 净利润
                     pnl_pct REAL,    -- 盈亏比例
@@ -92,6 +102,20 @@ class TradingLogger:
                     PRIMARY KEY (date, code)
                 )
             """)
+
+            # 4. 语音预警配置表
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS voice_alerts (
+                    code TEXT PRIMARY KEY,
+                    name TEXT,
+                    rules TEXT, -- JSON
+                    last_alert REAL,
+                    created_time TEXT,
+                    tags TEXT,
+                    added_date TEXT,
+                    rule_type_tag TEXT
+                )
+            """)
             
             # --- Schema Evolution/Migration (New) ---
             # 检查字段是否缺失 (针对已存在数据库升级)
@@ -112,10 +136,13 @@ class TradingLogger:
             for col_name, col_type in check_cols.items():
                 if col_name not in existing_cols:
                     logger.error(f"DB Migration: Adding missing column '{col_name}' to selection_history")
-                    try:
-                        cur.execute(f"ALTER TABLE selection_history ADD COLUMN {col_name} {col_type}")
-                    except Exception as e:
-                        logger.error(f"Failed to add column {col_name}: {e}")
+            # Migration for trade_records
+            cur.execute("PRAGMA table_info(trade_records)")
+            existing_trade_cols = [col[1] for col in cur.fetchall()]
+            if "buy_reason" not in existing_trade_cols:
+                cur.execute("ALTER TABLE trade_records ADD COLUMN buy_reason TEXT")
+            if "sell_reason" not in existing_trade_cols:
+                cur.execute("ALTER TABLE trade_records ADD COLUMN sell_reason TEXT")
 
             conn.commit()
             conn.close()
@@ -222,7 +249,7 @@ class TradingLogger:
         except Exception as e:
             logger.error(f"Error logging signal: {e}")
 
-    def record_trade(self, code: str, name: str, action: str, price: float, amount: float, fee_rate: float = 0.0003) -> None:
+    def record_trade(self, code: str, name: str, action: str, price: float, amount: float, fee_rate: float = 0.0003, reason: str = "") -> None:
         """
         记录买卖操作并计算单笔盈利
         fee_rate: 手续费率（默认万3）
@@ -230,6 +257,16 @@ class TradingLogger:
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
+            
+            # --- [新增] 非交易日拦截 ---
+            try:
+                from JohnsonUtil import commonTips as cct
+                if not cct.get_trade_date_status():
+                    logger.warning(f"TradeLogger: 非交易日，拒绝记录交易 ({code} {action})")
+                    return
+            except Exception as check_e:
+                logger.debug(f"TradeLogger: 交易日检查失败 (fallback to allow): {check_e}")
+
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
             # 检查是否已有持仓
@@ -244,22 +281,28 @@ class TradingLogger:
                 # 开启新仓
                 fee = price * amount * fee_rate
                 cur.execute("""
-                    INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, fee, status)
-                    VALUES (?, ?, ?, ?, ?, ?, 'OPEN')
-                """, (code, name, now_str, price, amount, fee))
+                    INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, buy_reason, fee, status)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN')
+                """, (code, name, now_str, price, amount, reason, fee))
             
             elif action == "ADD":
                 if not existing_trade:
                     logger.warning(f"TradeLogger: {code} ({name}) No OPEN position to ADD to. Converting to '买入'.")
-                    # 如果没有持仓，退化为买入（或者直接跳过，取决于策略严谨性）
+                    # 如果没有持仓，退化为买入
                     fee = price * amount * fee_rate
                     cur.execute("""
-                        INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, fee, status)
-                        VALUES (?, ?, ?, ?, ?, ?, 'OPEN')
-                    """, (code, name, now_str, price, amount, fee))
+                        INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, buy_reason, fee, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN')
+                    """, (code, name, now_str, price, amount, reason, fee))
                 else:
-                    # 加仓：更新均价和股数
+                    # 加仓：更新均价和股数，并追加理由
                     t_id, old_price, old_amount, old_fee = existing_trade
+                    # 尝试读取旧理由
+                    cur.execute("SELECT buy_reason FROM trade_records WHERE id=?", (t_id,))
+                    res = cur.fetchone()
+                    old_reason = res[0] if res and res[0] else ""
+                    new_reason = f"{old_reason} | [ADD] {reason}" if old_reason else f"[ADD] {reason}"
+                    
                     new_amount = old_amount + amount
                     new_fee = old_fee + (price * amount * fee_rate)
                     # 计算加权均价
@@ -267,10 +310,10 @@ class TradingLogger:
                     
                     cur.execute("""
                         UPDATE trade_records 
-                        SET buy_price=?, buy_amount=?, fee=?
+                        SET buy_price=?, buy_amount=?, buy_reason=?, fee=?
                         WHERE id=?
-                    """, (new_avg_price, new_amount, new_fee, t_id))
-                    logger.info(f"TradeLogger: {code} ({name}) 加仓成功. 新均价: {new_avg_price:.2f}, 总股数: {new_amount}")
+                    """, (new_avg_price, new_amount, new_reason, new_fee, t_id))
+                    logger.info(f"TradeLogger: {code} ({name}) 加仓成功. 新均价: {new_avg_price:.2f}, 原因: {reason}")
 
             elif action == "卖出" or "止" in action:
                 if existing_trade:
@@ -283,9 +326,9 @@ class TradingLogger:
                     
                     cur.execute("""
                         UPDATE trade_records 
-                        SET sell_date=?, sell_price=?, fee=?, profit=?, pnl_pct=?, status='CLOSED'
+                        SET sell_date=?, sell_price=?, sell_reason=?, fee=?, profit=?, pnl_pct=?, status='CLOSED'
                         WHERE id=?
-                    """, (now_str, price, total_fee, net_profit, pnl_pct, t_id))
+                    """, (now_str, price, reason, total_fee, net_profit, pnl_pct, t_id))
                     logger.info(f"TradeLogger: {code} ({name}) 平仓成功. 盈亏: {net_profit:.2f} ({pnl_pct:.2%})")
                 else:
                     logger.warning(f"TradeLogger: {code} ({name}) No OPEN position to CLOSE.")

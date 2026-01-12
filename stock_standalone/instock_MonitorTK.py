@@ -9450,7 +9450,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if ext_status and 'df' in ext_status:
                     df_ext = ext_status['df']
                     remote_ts = ext_status.get('last_update', 0)
-                    
+                    try:
+                        remote_ts = int(remote_ts)  # 确保是整数
+                    except (ValueError, TypeError):
+                        remote_ts = 0  # 异常情况当作未更新处理
                     # 同步给策略模块
                     if hasattr(self, 'live_strategy') and self.live_strategy:
                         self.live_strategy.ext_data_55188 = df_ext

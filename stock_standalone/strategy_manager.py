@@ -9,6 +9,7 @@ from datetime import datetime
 from threading import Thread
 from typing import Any, Optional, Dict
 import pandas as pd
+import numpy as np
 import re
 
 from tk_gui_modules.window_mixin import WindowMixin
@@ -414,6 +415,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         tk.Button(h2_frame, text="⚙️ 管理搜索历史", command=lambda: self.query_manager.open_editor()).pack(side="left", padx=5)
 
         default_filters = [
+            " ",
             "score > 80", 
             "score < 50",
             "diff > 5", 
@@ -451,11 +453,12 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         list_frame = tk.LabelFrame(self.tab_data, text="实时情绪分数监控", padx=5, pady=5)
         list_frame.pack(fill="both", expand=True, padx=10, pady=5)
         
-        cols = ("code", "name", "Rank", "score", "diff", "win", "slope", "baseline", "status", "time", "vol_ratio")
+        cols = ("code", "name", "Rank","percent", "score", "diff", "win", "slope", "baseline", "status", "time", "vol_ratio")
         self.tree_data = ttk.Treeview(list_frame, columns=cols, show="headings")
         self.tree_data.heading("code", text="代码", command=lambda: self._sort_tree_data("code", False))
         self.tree_data.heading("name", text="名称", command=lambda: self._sort_tree_data("name", False))
         self.tree_data.heading("Rank", text="Rank", command=lambda: self._sort_tree_data("Rank", False))
+        self.tree_data.heading("percent", text="percent", command=lambda: self._sort_tree_data("percent", False))
         self.tree_data.heading("score", text="情绪分", command=lambda: self._sort_tree_data("score", True))
         self.tree_data.heading("diff", text="变化", command=lambda: self._sort_tree_data("diff", True))
         self.tree_data.heading("win", text="连阳", command=lambda: self._sort_tree_data("win", True))
@@ -636,31 +639,46 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             logger.error(f"构建 DataFrame 失败: {e}")
             return
 
-        # 2. 批量关联 Name 和 Volume
+        # 2. 批量关联 Name 和 Volume 以及实时 55188 数据
         df_all = getattr(self.master, 'df_all', None)
-        if df_all is not None:
-            # 仅选取需要的列，并确保类型匹配
-            # 假设 df_all.index 是 code
+        ext_data_map = {}
+        if self.realtime_service:
             try:
-                # 使用 reindex/join 远快于逐行 loc
-                # 注意：这里假设此处的 code 和 df_all.index 格式一致（都是 str 6位代码）
-                cols_needed = [c for c in ['name', 'volume'] if c in df_all.columns]
+                ext_status = self.realtime_service.get_55188_data()
+                if isinstance(ext_status, dict) and 'df' in ext_status:
+                    df_ext = ext_status['df']
+                    if not df_ext.empty:
+                        if 'code' in df_ext.columns:
+                            ext_data_map = df_ext.set_index('code').to_dict('index')
+                        else:
+                            ext_data_map = df_ext.to_dict('index')
+            except Exception as e:
+                logger.error(f"获取55188同步数据失败: {e}")
+
+        if df_all is not None:
+            try:
+                cols_needed = [c for c in ['name', 'volume', 'Rank','percent', 'win', 'slope', 'ratio'] if c in df_all.columns]
                 if cols_needed:
-                    # 使用 join 或 merge
-                    # 如果 df_all 很大，reindex 可能内存占用高，join intersection 更好
-                    # df_subset = df_all.loc[df_all.index.intersection(df_temp.index), cols_needed]
-                    # df_temp = df_temp.join(df_subset)
-                    # 简单方式（pandas 内部会优化索引对齐）:
                     df_temp = df_temp.join(df_all[cols_needed])
             except Exception as e:
                 logger.error(f"关联主数据失败: {e}")
         
-        # 填充缺失值
+        # 填充基本缺失值
         if 'name' not in df_temp.columns: df_temp['name'] = '--'
         if 'volume' not in df_temp.columns: df_temp['volume'] = 0
+        if 'Rank' not in df_temp.columns: df_temp['Rank'] = 0
+        if 'percent' not in df_temp.columns: df_temp['percent'] = 0
+        if 'win' not in df_temp.columns: df_temp['win'] = 0
+        if 'slope' not in df_temp.columns: df_temp['slope'] = 0.0
+        if 'ratio' not in df_temp.columns: df_temp['ratio'] = 1.0
         
         df_temp['name'] = df_temp['name'].fillna('--')
         df_temp['volume'] = df_temp['volume'].fillna(0)
+        df_temp['Rank'] = df_temp['Rank'].fillna(0)
+        df_temp['percent'] = df_temp['percent'].fillna(0)
+        df_temp['win'] = df_temp['win'].fillna(0)
+        df_temp['slope'] = df_temp['slope'].fillna(0.0)
+        df_temp['ratio'] = df_temp['ratio'].fillna(1.0) # Default ratio to 1.0
         
         # 2.5 增加差值统计
         try:
@@ -702,12 +720,6 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             self._save_config()
         # --------------------------------------
             
-        # 2.5 增加差值统计
-        try:
-            period = int(self.var_stat_period.get())
-        except:
-            period = 10
-            
         diffs = self.realtime_service.emotion_tracker.get_score_diffs(period)
         s_diffs = pd.Series(diffs)
         df_temp['diff'] = s_diffs
@@ -747,7 +759,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
                      # 提取所有单词作为潜在列名
                      tokens = set(re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', final_query))
                      # 强制加入我们需要显示的列
-                     tokens.update(['Rank', 'win', 'slope'])
+                     tokens.update(['Rank','percent', 'win', 'slope', 'ratio']) # Added ratio
                      
                      cols_in_temp = set(df_temp.columns)
                      cols_to_add = [c for c in df_all.columns if c in tokens and c not in cols_in_temp]
@@ -773,7 +785,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         # 3. 排序 (Pandas Native Sort)
         sort_col = self._data_sort_col
         # 映射 Treeview 列名到 DataFrame 列名
-        col_map = {'vol_ratio': 'volume'} # vol_ratio 列显示的是 volume
+        col_map = {'vol_ratio': 'ratio'} # vol_ratio 列显示的是 ratio
         df_sort_col = col_map.get(sort_col, sort_col)
         
         ascending = not self._data_sort_reverse
@@ -781,7 +793,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         if df_sort_col in df_temp.columns:
             try:
                 # 确保排序列是数值型以便正确排序
-                if df_sort_col in ['score', 'volume', 'diff', 'Rank', 'win', 'slope']:
+                if df_sort_col in ['score', 'volume', 'diff', 'Rank','percent', 'win', 'slope', 'ratio']: # Added ratio
                     df_temp[df_sort_col] = pd.to_numeric(df_temp[df_sort_col], errors='coerce').fillna(0)
                     
                 df_temp.sort_values(by=df_sort_col, ascending=ascending, inplace=True)
@@ -819,55 +831,74 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         for code, row in df_display.iterrows():
             code = str(code) # ensure str
             
-            # Name
-            name = str(row['name'])
-            
-            # Score
-            score = float(row['score'])
-            
-            # Diff
-            diff_val = row.get('diff', 0.0)
-            
-            # Volume Formatting
-            vol_val = row['volume']
-            volume_str = '--'
-            try:
-                v = float(vol_val)
-                if v > 10000:
-                    volume_str = f"{v/10000:.1f}万"
-                else:
-                    volume_str = str(int(v))
-            except:
-                volume_str = str(vol_val)
-
             # Time Formatting
             time_str = '--'
             ts = kl_cache_ts.get(code, 0)
             if ts > 0:
                 time_str = datetime.fromtimestamp(ts).strftime("%H:%M:%S")
 
-            # Baseline & Status
-            baseline = float(row.get('baseline', 50.0))
-            status = str(row.get('status', ''))
-
-            # Rank & Win & Slope
+            # Rank & Win & Slope 动态同步
             rank_val = row.get('Rank', 0)
-            win_val = row.get('win', 0)
-            slope_val = row.get('slope', 0.0)
+            # 如果主数据没有 Rank，尝试从 55188 实时同步源获取
+            if (rank_val == 0 or rank_val == 999) and code in ext_data_map:
+                rank_val = ext_data_map[code].get('hot_rank', 0)
 
-            display_list.append({
+            percent_val = row.get('percent', 0)
+            # 如果主数据没有 Rank，尝试从 55188 实时同步源获取
+            if (percent_val == 0 or percent_val == 999) and code in ext_data_map:
+                percent_val = ext_data_map[code].get('percent', 0)
+
+            win_val = row.get('win', 0)
+            slope_val = float(row.get('slope', 0.0))
+            
+            # 如果斜率为 0，且有实时服务，尝试基于最近 K 线计算动态斜率
+            if slope_val == 0.0 and self.realtime_service:
+                try:
+                    klines = self.realtime_service.get_minute_klines(code, n=10)
+                    if len(klines) >= 5:
+                        prices = [float(k['close']) for k in klines]
+                        # 简单线性拟合斜率
+                        x = np.arange(len(prices))
+                        y = np.array(prices)
+                        slope_fit, _ = np.polyfit(x, y, 1) # type: ignore
+                        # 归一化为百分比斜率
+                        if prices[0] > 0:
+                            slope_val = (slope_fit / prices[0]) * 1000 # 放大以利于观察
+                except Exception:
+                    pass
+
+            # 量比显示优化
+            ratio_val = float(row.get('ratio', 0.0))
+            if ratio_val == 0.0 and 'volume' in row:
+                # 如果没有量比列，简单显示成交量
+                try:
+                    vol = float(row.get('volume', 0.0))
+                    if vol > 1000000:
+                        vol_str = f"{vol/1000000:.1f}M"
+                    elif vol > 1000:
+                        vol_str = f"{vol/1000:.0f}K"
+                    else:
+                        vol_str = str(int(vol))
+                except:
+                    vol_str = "--"
+            else:
+                vol_str = f"{ratio_val:.1f}"
+
+            item_data = {
                 'code': code,
-                'name': name,
+                'name': row.get('name', '--'),
                 'Rank': rank_val,
-                'score': score,
-                'diff': diff_val,
+                'percent': percent_val,
+                'score': f"{row['score']:.1f}",
+                'diff': f"{row.get('diff', 0):+.1f}",
                 'win': win_val,
-                'slope': slope_val,
-                'baseline': baseline,
-                'status': status,
+                'slope': f"{slope_val:.1f}", # Format slope
+                'baseline': f"{row.get('baseline', 50):.1f}",
+                'status': row.get('status', '--'),
                 'time': time_str,
-                'vol_ratio': volume_str
-            })
+                'vol_ratio': vol_str
+            }
+            display_list.append(item_data) # Append the constructed item_data
         display_codes = [x['code'] for x in display_list]
         
         # 3. 保存状态 (选中项 & 滚动位置)
@@ -882,14 +913,15 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         for index, item_data in enumerate(display_list):
             code = item_data['code']
             values = (
-                code, 
+                item_data['code'], 
                 item_data['name'], 
-                f"{item_data['Rank']}",
-                f"{item_data['score']:.1f}",
-                f"{item_data['diff']:+.1f}",
-                f"{item_data['win']}",
-                f"{item_data['slope']:.1f}",
-                f"{item_data['baseline']:.1f}",
+                str(item_data['Rank']),
+                item_data['percent'],
+                item_data['score'], 
+                item_data['diff'], 
+                str(item_data['win']),
+                item_data['slope'], 
+                item_data['baseline'], 
                 item_data['status'],
                 item_data['time'], 
                 item_data['vol_ratio']
