@@ -1376,7 +1376,7 @@ def fetch_and_process(
                    loop_counter += 1
                    # 只每 10 次循环输出一次
                    if loop_counter % loop_counter_limit == 0:
-                       logger.debug(f'调试 not flag.value:{not flag.value}')
+                       logger.debug(f'调试 not flag.value:{not flag.value} loop_counter:{loop_counter} duration_sleep_time:{duration_sleep_time}')
                    wait_or_break(duration_sleep_time, [
                        lambda: not flag.value,          # 外部手动停止
                    ])
@@ -1409,7 +1409,7 @@ def fetch_and_process(
                 if not clean_expired_tdx_file(logger, g_values, cct.get_trade_date_status, cct.get_today, cct.get_now_time_int, cct.get_ramdisk_path, ramdisk_dir):
                     logger.info(f"{today} 清理尚未完成，跳过 init_tdx")
                     # 5️⃣ 节流
-                    for _ in range(30):
+                    for _ in range(duration_sleep_time):
                         if not flag.value:
                             break
                         time.sleep(1)
@@ -1644,20 +1644,21 @@ def fetch_and_process(
                logger.info(f"[FreqAdapt] Trading:{is_trading_time} SinaLimit:{sina_limit}s CfgSleep:{cfg_sleep}s -> ActualSleep:{loop_sleep_time}s")
 
             # 4. 执行分段 Sleep (保持灵敏度)
-            if cct.get_now_time_int() < 945:
+            if 915 < cct.get_now_time_int() < 945:
                 sleep_step = 0.5
             else:
                 sleep_step = 1
 
             stop_conditions = [
                 lambda: not flag.value,
+                lambda: not cct.get_work_time(),
                 lambda: get_status(status_callback) != last_status,
                 lambda: g_values.getkey("resample") and g_values.getkey("resample") != resample,
                 lambda: g_values.getkey("market") and g_values.getkey("market") != market,
                 lambda: g_values.getkey("st_key_sort") and g_values.getkey("st_key_sort") != st_key_sort
             ]
 
-            for _ in range(int(loop_sleep_time / sleep_step)):
+            for _ in range(int(loop_sleep_time * sleep_step)):
                 # if not flag.value:
                 #     break
                 # elif status_callback.value != last_status:
@@ -1668,13 +1669,12 @@ def fetch_and_process(
                 #     break
                 # elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
                 #     break
-                loop_counter += 1
                 # 只每 10 次循环输出一次
+                loop_counter += 1
                 if loop_counter % loop_counter_limit == 0:
-                    logger.debug(f'调试 START_INIT: {START_INIT} not cct.get_work_time(): {not cct.get_work_time()} loop_sleep_time:{loop_sleep_time}')
+                    logger.debug(f'调试 START_INIT: {START_INIT} not cct.get_work_time(): {not cct.get_work_time()} loop_sleep_time:{loop_sleep_time} loop_counter: {loop_counter}')
                 if any(cond() for cond in stop_conditions):
                     break
-                # wait_or_break(5, stop_conditions)
                 time.sleep(sleep_step)
                 # 防止 loop_counter 无限大（可选）
                 if loop_counter >= 10000:
