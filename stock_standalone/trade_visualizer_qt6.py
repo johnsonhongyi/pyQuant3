@@ -9,6 +9,8 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QBrush, QPen
+from PyQt6.QtWidgets import QComboBox, QCheckBox, QHBoxLayout, QLabel, QToolBar
+from PyQt6.QtGui import QAction, QActionGroup
 import socket
 import pickle
 import struct
@@ -16,6 +18,7 @@ from JohnsonUtil import LoggerFactory
 from JohnsonUtil.stock_sender import StockSender
 # from JohnsonUtil import commonTips as cct
 from JohnsonUtil.commonTips import timed_ctx,print_timing_summary
+from JohnsonUtil import johnson_cons as ct
 # Configuration
 IPC_PORT = 26668
 IPC_HOST = '127.0.0.1'
@@ -40,26 +43,80 @@ pg.setConfigOption('background', 'w')
 pg.setConfigOption('foreground', 'k')
 
 class CandlestickItem(pg.GraphicsObject):
-    """Custom Candlestick Item for pyqtgraph"""
-    def __init__(self, data):
-        pg.GraphicsObject.__init__(self)
-        self.data = data  # list of (time, open, close, min, max)
+    def __init__(self, data, theme='light'):
+        super().__init__()
+        self.data = data
+        self.theme = theme
+        self._gen_colors()
         self.generatePicture()
 
+    def _gen_colors(self):
+        if self.theme == 'dark':
+            self.up_pen = pg.mkPen(QColor(220, 80, 80))
+            self.up_brush = pg.mkBrush(QColor(220, 80, 80))
+            self.down_pen = pg.mkPen(QColor(80, 200, 120))
+            self.down_brush = pg.mkBrush(QColor(80, 200, 120))
+            self.wick_pen = pg.mkPen(QColor(200, 200, 200))
+        else:
+            self.up_pen = pg.mkPen(QColor(200, 0, 0))
+            self.up_brush = pg.mkBrush(QColor(200, 0, 0))
+            self.down_pen = pg.mkPen(QColor(0, 150, 0))
+            self.down_brush = pg.mkBrush(QColor(0, 150, 0))
+            self.wick_pen = pg.mkPen(QColor(80, 80, 80))
     def generatePicture(self):
         self.picture = pg.QtGui.QPicture()
         p = pg.QtGui.QPainter(self.picture)
         w = 0.4
-        for (t, open, close, min, max) in self.data:
-            if open > close:
-                p.setPen(pg.mkPen('g'))
-                p.setBrush(pg.mkBrush('g'))
+
+        for (t, open_, close, low, high) in self.data:
+            if close >= open_:
+                pen = self.up_pen
+                brush = self.up_brush
             else:
-                p.setPen(pg.mkPen('r'))
-                p.setBrush(pg.mkBrush('r'))
-            p.drawLine(pg.QtCore.QPointF(t, min), pg.QtCore.QPointF(t, max))
-            p.drawRect(pg.QtCore.QRectF(t - w, open, w * 2, close - open))
+                pen = self.down_pen
+                brush = self.down_brush
+
+            # wick
+            p.setPen(self.wick_pen)
+            p.drawLine(
+                pg.QtCore.QPointF(t, low),
+                pg.QtCore.QPointF(t, high)
+            )
+
+            # body
+            p.setPen(pen)
+            p.setBrush(brush)
+            p.drawRect(
+                pg.QtCore.QRectF(
+                    t - w,
+                    open_,
+                    w * 2,
+                    close - open_
+                )
+            )
+
         p.end()
+    def setTheme(self, theme):
+        if theme != self.theme:
+            self.theme = theme
+            self._gen_colors()
+            self.generatePicture()
+            self.update()
+
+    # def generatePicture(self):
+    #     self.picture = pg.QtGui.QPicture()
+    #     p = pg.QtGui.QPainter(self.picture)
+    #     w = 0.4
+    #     for (t, open, close, min, max) in self.data:
+    #         if open > close:
+    #             p.setPen(pg.mkPen('g'))
+    #             p.setBrush(pg.mkBrush('g'))
+    #         else:
+    #             p.setPen(pg.mkPen('r'))
+    #             p.setBrush(pg.mkBrush('r'))
+    #         p.drawLine(pg.QtCore.QPointF(t, min), pg.QtCore.QPointF(t, max))
+    #         p.drawRect(pg.QtCore.QRectF(t - w, open, w * 2, close - open))
+    #     p.end()
 
     def paint(self, p, *args):
         p.drawPicture(0, 0, self.picture)
@@ -162,27 +219,60 @@ class CommandListenerThread(QThread):
     #         except Exception as e:
     #             print(f"Listener Error: {e}")
 
+from PyQt6.QtCore import QMutex, QThread, pyqtSignal, QMutexLocker
+
 class DataLoaderThread(QThread):
     data_loaded = pyqtSignal(object, object, object) # code, day_df, tick_df
 
-    def __init__(self, code):
+    def __init__(self, code ,mutex_lock, resample='d'):
         super().__init__()
         self.code = code
+        self.resample = resample
+        self.mutex_lock = mutex_lock # 存储锁对象
+        self._search_code = None
+        self._resample = None
 
     def run(self):
-        try:
-            # 1. Fetch Daily Data (Historical)
-            with timed_ctx("get_tdx_Exp_day_to_df", warn_ms=800):
-                day_df = tdd.get_tdx_Exp_day_to_df(self.code, dl=120,fastohlc=True) # Last 60 days
-            # 2. Fetch Realtime/Tick Data (Intraday)
-            # Use get_real_time_tick for specific code
-            with timed_ctx("get_real_time_tick", warn_ms=800):
-                tick_df = sina_data.Sina().get_real_time_tick(self.code)
-            with timed_ctx("emit", warn_ms=800):
-                self.data_loaded.emit(self.code, day_df, tick_df)
-        except Exception as e:
-            print(f"Error loading data for {self.code}: {e}")
-            self.data_loaded.emit(self.code, pd.DataFrame(), pd.DataFrame())
+            try:
+                # 使用 QMutexLocker 自动管理锁定和解锁
+                if self._search_code == self.code and self._resample == self.resample:
+                    return  # 数据已经加载过，不重复
+                with QMutexLocker(self.mutex_lock):
+                    # 1. Fetch Daily Data (Historical)
+                    # tdd.get_tdx_Exp_day_to_df 内部调用 HDF5 API，必须在锁内执行
+                    with timed_ctx("get_tdx_Exp_day_to_df", warn_ms=800):
+                       day_df = tdd.get_tdx_Exp_day_to_df(self.code, dl=ct.Resample_LABELS_Days[self.resample],resample=self.resample,fastohlc=True)
+
+                    # 2. Fetch Realtime/Tick Data (Intraday)
+                    # 假设此操作不涉及 HDF5，可以在锁外执行
+                    with timed_ctx("get_real_time_tick", warn_ms=800):
+                       tick_df = sina_data.Sina().get_real_time_tick(self.code)
+
+                self._search_code = self.code
+                self._resample = self.resample
+                with timed_ctx("emit", warn_ms=800):
+                       self.data_loaded.emit(self.code, day_df, tick_df)
+            except Exception as e:
+                print(f"Error loading data for {self.code}: {e}")
+                # 确保即使发生错误，信号也能发出
+                import traceback
+                traceback.print_exc()
+                self.data_loaded.emit(self.code, pd.DataFrame(), pd.DataFrame())
+
+    # def run(self):
+    #     try:
+    #         # 1. Fetch Daily Data (Historical)
+    #         with timed_ctx("get_tdx_Exp_day_to_df", warn_ms=800):
+    #             day_df = tdd.get_tdx_Exp_day_to_df(self.code, dl=ct.Resample_LABELS_Days[self.resample],resample=self.resample,fastohlc=True) # Last 60 days
+    #         # 2. Fetch Realtime/Tick Data (Intraday)
+    #         # Use get_real_time_tick for specific code
+    #         with timed_ctx("get_real_time_tick", warn_ms=800):
+    #             tick_df = sina_data.Sina().get_real_time_tick(self.code)
+    #         with timed_ctx("emit", warn_ms=800):
+    #             self.data_loaded.emit(self.code, day_df, tick_df)
+    #     except Exception as e:
+    #         print(f"Error loading data for {self.code}: {e}")
+    #         self.data_loaded.emit(self.code, pd.DataFrame(), pd.DataFrame())
 
 class MainWindow(QMainWindow, WindowMixin):
     def __init__(self):
@@ -191,7 +281,17 @@ class MainWindow(QMainWindow, WindowMixin):
         self.sender = StockSender(callback=None)
         # WindowMixin requirement: scale_factor
         self.scale_factor = get_windows_dpi_scale_factor()
+        self.hdf5_mutex = QMutex() 
+
+        self.resample = 'd'
+        self.qt_theme = 'light'
+        self.show_bollinger = True
         
+        # --- 1. 创建工具栏 ---
+        self._init_toolbar()
+        self._init_resample_toolbar()
+        self._init_theme_selector()
+
         # Load Window Position (Qt specific method from Mixin)
         # Using a distinct window_id "TradeVisualizer"
         self.load_window_position_qt(self, "TradeVisualizer", default_width=600, default_height=850)
@@ -215,6 +315,15 @@ class MainWindow(QMainWindow, WindowMixin):
         self.stock_table.setHorizontalHeaderLabels(['Code', 'Name', 'Rank', 'Percent'])
         self.stock_table.horizontalHeader().setStretchLastSection(True)
         self.stock_table.setSortingEnabled(True)
+
+        # 设置表格列自适应
+        self.stock_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # Code 列自适应内容
+        # self.stock_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)          # Name 列占满剩余空间
+        self.stock_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)          # Name 列占满剩余空间
+        self.stock_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Rank 列自适应
+        self.stock_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Percent 列自适应
+
+
         # 在 MainWindow.__init__ 中修改
         self.stock_table.cellClicked.connect(self.on_table_cell_clicked) # 保留点击
         self.stock_table.currentItemChanged.connect(self.on_current_item_changed) # 新增键盘支持
@@ -245,6 +354,137 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Load Stock List
         self.load_stock_list()
+
+    def _init_toolbar(self):
+        self.toolbar = QToolBar("Settings", self)
+        self.toolbar.setObjectName("ResampleToolbar")
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.toolbar)
+
+        self.toolbar.setStyleSheet("""
+        QToolBar#ResampleToolbar QToolButton {
+            padding: 4px 8px;
+            margin: 2px;
+        }
+
+        QToolBar#ResampleToolbar QToolButton:checked {
+            background-color: #ffd700;
+            color: black;
+            font-weight: bold;
+            border-radius: 3px;
+        }
+        """)
+
+
+    def _init_resample_toolbar(self):
+        self.toolbar.addSeparator()
+        self.toolbar.addWidget(QLabel("Resample:"))
+
+        self.resample_group = QActionGroup(self)
+        self.resample_group.setExclusive(True)
+
+        self.resample_actions = {}
+
+        for key, label in [('d', '1D'), ('3d', '3D'), ('w', '1W'), ('m', '1M')]:
+            act = QAction(label, self)
+            act.setCheckable(True)
+            act.setData(key)
+
+            if key == self.resample:
+                act.setChecked(True)
+
+            # 正确绑定：传递 key
+            act.triggered.connect(lambda checked, k=key: self.on_resample_changed(k))
+            # act.triggered.connect(self.on_resample_changed)
+
+            self.resample_group.addAction(act)
+            self.toolbar.addAction(act)
+
+            self.resample_actions[key] = act
+
+    def _init_theme_selector(self):
+        self.toolbar.addSeparator()
+        self.toolbar.addWidget(QLabel("Theme:"))
+
+        self.theme_cb = QComboBox()
+        self.theme_cb.addItems(['light', 'dark'])
+        self.theme_cb.setCurrentText(self.qt_theme)
+        self.theme_cb.currentTextChanged.connect(self.on_theme_changed)
+
+        self.toolbar.addWidget(self.theme_cb)
+
+    def on_resample_changed(self, text):
+        self.resample = text
+        logger.info(f'self.current_code: {self.current_code} self.resample: {self.resample}')
+        if self.current_code:
+            self.load_stock_by_code(self.current_code)
+
+    def on_theme_changed(self, text):
+        self.qt_theme = text
+        self.apply_qt_theme()
+
+    def _apply_pg_theme_to_plot(self, plot):
+        # 获取 PlotItem 的 ViewBox
+        vb = plot.getViewBox()
+
+        # 背景颜色
+        if self.qt_theme == 'dark':
+            vb.setBackgroundColor('#1e1e1e')
+            axis_color = '#cccccc'
+        else:
+            vb.setBackgroundColor('w')
+            axis_color = '#000000'
+
+        # 设置坐标轴颜色
+        for ax_name in ('left', 'bottom'):
+            ax = plot.getAxis(ax_name)
+            ax.setPen(pg.mkPen(axis_color))
+            ax.setTextPen(pg.mkPen(axis_color))
+
+        # 网格
+        plot.showGrid(x=True, y=True, alpha=0.3)
+
+
+
+    def apply_qt_theme(self):
+        """Apply Qt theme / color scheme"""
+        # if self.qt_theme == 'dark':
+        #     self.setStyleSheet("""
+        #         QWidget { background-color: #2b2b2b; color: #f0f0f0; }
+        #         QTableWidget { gridline-color: #555555; }
+        #     """)
+        #     pg.setConfigOption('background', 'k')
+        #     pg.setConfigOption('foreground', 'w')
+        if self.qt_theme == 'dark':
+            self.setStyleSheet("""
+                QWidget {
+                    background-color: #2b2b2b;
+                    color: #e6e6e6;
+                }
+                QTableWidget {
+                    background-color: #2b2b2b;
+                    gridline-color: #444444;
+                }
+                QHeaderView::section {
+                    background-color: #3a3a3a;
+                    color: #f0f0f0;
+                    padding: 4px;
+                    border: 1px solid #555555;
+                }
+                QTableWidget::item:selected {
+                    background-color: #505050;
+                }
+            """)
+            pg.setConfigOption('background', 'k')
+            pg.setConfigOption('foreground', 'w')
+
+        else:
+            # 默认 light
+            self.setStyleSheet("")
+            pg.setConfigOption('background', 'w')
+            pg.setConfigOption('foreground', 'k')
+        # 调用统一函数设置 pg 主题
+        self._apply_pg_theme_to_plot(self.kline_plot)
+        self._apply_pg_theme_to_plot(self.tick_plot)
 
     def closeEvent(self, event):
         """Save window position on close"""
@@ -332,11 +572,13 @@ class MainWindow(QMainWindow, WindowMixin):
         if code_item:
             code = code_item.data(Qt.ItemDataRole.UserRole)
             if code:
-                self.load_stock_by_code(code)
-                try:
-                    self.sender.send(code)
-                except Exception as e:
-                    print(f"Error sending stock code: {e}")
+                if code != self.current_code:  # 只有 code 不同才加载
+                    self.load_stock_by_code(code)
+                    try:
+                        self.sender.send(code)
+                    except Exception as e:
+                        print(f"Error sending stock code: {e}")
+
     def on_current_item_changed(self, current, previous):
         """处理键盘上下键引起的行切换"""
         if current:
@@ -361,10 +603,10 @@ class MainWindow(QMainWindow, WindowMixin):
     def load_stock_by_code(self, code):
         self.current_code = code
         self.kline_plot.setTitle(f"Loading {code}...")
-        
         # Start Thread
         with timed_ctx("DataLoaderThread", warn_ms=800):
-            self.loader = DataLoaderThread(code)
+            logger.info(f'code: {code} self.resample: {self.resample}')
+            self.loader = DataLoaderThread(code,self.hdf5_mutex,resample=self.resample)
         with timed_ctx("data_loaded", warn_ms=800):
             self.loader.data_loaded.connect(self.render_charts)
         with timed_ctx("start", warn_ms=800):
@@ -416,8 +658,13 @@ class MainWindow(QMainWindow, WindowMixin):
         for i, (idx, row) in enumerate(day_df.iterrows()):
             ohlc_data.append((i, row['open'], row['close'], row['low'], row['high']))
         
-        # Draw Candles
-        candle_item = CandlestickItem(ohlc_data)
+        # # Draw Candles
+        # candle_item = CandlestickItem(ohlc_data)
+        # self.kline_plot.addItem(candle_item)
+        candle_item = CandlestickItem(
+            ohlc_data,
+            theme=self.qt_theme
+        )
         self.kline_plot.addItem(candle_item)
         
         # Draw Signals (Arrows)
@@ -454,12 +701,6 @@ class MainWindow(QMainWindow, WindowMixin):
                                                  pen=pg.mkPen('k'), brush=brushes, symbol='t1')
                     self.kline_plot.addItem(scatter)
 
-        # Draw MA Lines
-        # if 'amount' in day_df.columns: # Simple MA calculation
-        #     ma5 = day_df['close'].rolling(5).mean()
-        #     ma10 = day_df['close'].rolling(10).mean()
-        #     self.kline_plot.plot(x_axis, ma5.values, pen=pg.mkPen('b', width=1), name="MA5")
-        #     self.kline_plot.plot(x_axis, ma10.values, pen=pg.mkPen('orange', width=1), name="MA10")
         if 'close' in day_df.columns:
             # --- MA5 / MA10 ---
             ma5 = day_df['close'].rolling(5).mean()
@@ -601,6 +842,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     text.setPos(new_x, high_p)
                     self.kline_plot.addItem(text)
 
+
                 # 3. Render Tick Plot (Curve)
                 pct_change = ((current_price - pre_close) / pre_close * 100) if pre_close != 0 else 0
                 self.tick_plot.setTitle(f"Intraday: {current_price:.2f} ({pct_change:.2f}%)")
@@ -611,9 +853,17 @@ class MainWindow(QMainWindow, WindowMixin):
                 # Draw Pre-close (Dash Blue)
                 self.tick_plot.addLine(y=pre_close, pen=pg.mkPen('b', style=Qt.PenStyle.DashLine, width=1))
                 
-                # Draw Price Curve
-                curve_pen = pg.mkPen('k', width=2)
+                # # Draw Price Curve
+                if self.qt_theme == 'dark':
+                    curve_color = 'w'  # 白色线条
+                    pre_close_color = 'b'
+                else:
+                    curve_color = 'k'
+                    pre_close_color = 'b'
+                curve_pen = pg.mkPen(curve_color, width=2)
                 self.tick_plot.plot(x_ticks, prices, pen=curve_pen)
+                self.tick_plot.addLine(y=pre_close, pen=pg.mkPen(pre_close_color, style=Qt.PenStyle.DashLine))
+
                 
                 # Add Grid
                 self.tick_plot.showGrid(x=False, y=True, alpha=0.5)
