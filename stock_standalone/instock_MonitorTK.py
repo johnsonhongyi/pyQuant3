@@ -7965,8 +7965,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         layout = QtWidgets.QVBoxLayout(win)
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(0)
-
         self.dpi_scale =  1
+
+
+        #  # 设置黑色背景，文字白色
+        # win.setStyleSheet("""
+        #     QWidget {
+        #         background-color: #2b2b2b;   /* 窗口背景深色 */
+        #         color: #f0f0f0;              /* 默认文字白色 */
+        #     }
+        #     QTableWidget, QListWidget, QTextEdit {
+        #         background-color: #2b2b2b;
+        #         color: #f0f0f0;
+        #         gridline-color: #555555;
+        #     }
+        # """)
+
+        # layout = QtWidgets.QVBoxLayout(win)
+        # layout.setContentsMargins(2, 2, 2, 2)
+        # layout.setSpacing(0)
 
         # 控制栏
         ctrl_layout = QtWidgets.QHBoxLayout()
