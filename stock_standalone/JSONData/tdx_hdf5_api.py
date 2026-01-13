@@ -27,7 +27,8 @@ Debug_is_not_find = 0
 BaseDir = cct.get_ramdisk_dir()
 import tables
 import psutil
-import shutil, os
+import shutil
+import errno
 from pathlib import Path
 
 from contextlib import contextmanager
@@ -57,7 +58,47 @@ def normalize_ticktime(df, default_date=None):
 # 使用方法
 # df = normalize_ticktime(df)
 
+def _on_rm_error(func, path, exc_info):
+    """
+    rmtree 删除失败回调：只记录，不抛出
+    """
+    err = exc_info[1]
+    if isinstance(err, PermissionError) or getattr(err, 'errno', None) in (errno.EACCES, errno.EBUSY, 32):
+        log.warning(f"[TempCleanup] skip locked: {path}")
+        return
+    log.warning(f"[TempCleanup] skip: {path}, reason: {err}")
+
+
 def cleanup_temp_dir(base_dir: str, temp_name: str = "Temp") -> None:
+    """
+    清理 base_dir 下的 Temp 目录内容（不确认、不抛异常、尽力而为）
+    """
+    try:
+        base_dir = os.path.abspath(base_dir)
+        temp_dir = os.path.join(base_dir, temp_name)
+
+        if not os.path.isdir(temp_dir):
+            return
+
+        for name in os.listdir(temp_dir):
+            path = os.path.join(temp_dir, name)
+
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path, onerror=_on_rm_error)
+                    log.info(f"[TempCleanup] removed dir: {path}")
+                else:
+                    os.remove(path)
+                    log.info(f"[TempCleanup] removed file: {path}")
+
+            except Exception as e:
+                # 双保险：目录级兜底
+                log.warning(f"[TempCleanup] skip: {path}, reason: {e}")
+
+    except Exception as e:
+        log.error(f"[TempCleanup] fatal error on base_dir={base_dir}: {e}")
+
+def cleanup_temp_dir_old_dir(base_dir: str, temp_name: str = "Temp") -> None:
     """
     清理 base_dir 下的 Temp 目录内容（不确认、不抛异常、尽力而为）
 
