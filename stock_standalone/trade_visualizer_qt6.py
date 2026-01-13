@@ -7,7 +7,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
     QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QSplitter, QFrame, QMessageBox
 )
-from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt6.QtCore import QObject,Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QBrush, QPen
 from PyQt6.QtWidgets import QComboBox, QCheckBox, QHBoxLayout, QLabel, QToolBar
 from PyQt6.QtGui import QAction, QActionGroup
@@ -19,6 +19,8 @@ from JohnsonUtil.stock_sender import StockSender
 # from JohnsonUtil import commonTips as cct
 from JohnsonUtil.commonTips import timed_ctx,print_timing_summary
 from JohnsonUtil import johnson_cons as ct
+import datetime  # ⚠️ 必须导入
+import time
 # Configuration
 IPC_PORT = 26668
 IPC_HOST = '127.0.0.1'
@@ -26,6 +28,7 @@ logger = LoggerFactory.getLogger()
 # Ensure project root is in path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
+from multiprocessing import Process, Queue
 
 try:
     from trading_logger import TradingLogger
@@ -231,7 +234,7 @@ class DataLoaderThread(QThread):
         self.mutex_lock = mutex_lock # 存储锁对象
         self._search_code = None
         self._resample = None
-
+        # self._sinadata = sinadata
     def run(self):
             try:
                 # 使用 QMutexLocker 自动管理锁定和解锁
@@ -259,20 +262,140 @@ class DataLoaderThread(QThread):
                 traceback.print_exc()
                 self.data_loaded.emit(self.code, pd.DataFrame(), pd.DataFrame())
 
-    # def run(self):
-    #     try:
-    #         # 1. Fetch Daily Data (Historical)
-    #         with timed_ctx("get_tdx_Exp_day_to_df", warn_ms=800):
-    #             day_df = tdd.get_tdx_Exp_day_to_df(self.code, dl=ct.Resample_LABELS_Days[self.resample],resample=self.resample,fastohlc=True) # Last 60 days
-    #         # 2. Fetch Realtime/Tick Data (Intraday)
-    #         # Use get_real_time_tick for specific code
-    #         with timed_ctx("get_real_time_tick", warn_ms=800):
-    #             tick_df = sina_data.Sina().get_real_time_tick(self.code)
-    #         with timed_ctx("emit", warn_ms=800):
-    #             self.data_loaded.emit(self.code, day_df, tick_df)
-    #     except Exception as e:
-    #         print(f"Error loading data for {self.code}: {e}")
-    #         self.data_loaded.emit(self.code, pd.DataFrame(), pd.DataFrame())
+# def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
+#     """
+#     从 tick_df 生成 1 行日线 OHLCV
+#     """
+#     if tick_df is None or tick_df.empty:
+#         return pd.DataFrame()
+
+#     df = tick_df.copy()
+
+#     # 如果是 MultiIndex（code, ticktime）
+#     if isinstance(df.index, pd.MultiIndex):
+#         if 'ticktime' in df.index.names:
+#             df = df.reset_index(level=0, drop=True)
+
+#     # 必须按时间排序
+#     df = df.sort_index()
+
+#     close = df['close'].iloc[-1]
+#     open_ = df['close'].iloc[0]
+#     high = df['close'].max()
+#     low = df['close'].min()
+
+#     # 成交量（优先 volume，其次 amount）
+#     if 'volume' in df.columns:
+#         volume = df['volume'].sum()
+#     elif 'vol' in df.columns:
+#         volume = df['vol'].sum()
+#     else:
+#         volume = 0
+
+#     today = pd.Timestamp.now().normalize()
+
+#     daily = pd.DataFrame([{
+#         'open': open_,
+#         'high': high,
+#         'low': low,
+#         'close': close,
+#         'volume': volume
+#     }], index=[today])
+
+#     return daily
+
+def tick_to_daily_bar(tick_df):
+    """
+    将 tick 转成今天的日 K
+    """
+    if tick_df.empty:
+        return pd.DataFrame()
+    # 只生成今天的 K
+    # 假设 tick_df 是你当前的 DataFrame
+    if isinstance(tick_df.index, pd.MultiIndex):
+        if 'ticktime' in tick_df.index.names:
+            # ticktime 在 MultiIndex 里
+            tick_times = tick_df.index.get_level_values('ticktime')
+            tick_df['date'] = tick_times.to_series().dt.date
+        else:
+            # 没有 ticktime，直接用今天
+            from datetime import date
+            tick_df['date'] = date.today()
+    else:
+        # 普通 DataFrame，ticktime 在列里
+        if 'ticktime' in tick_df.columns:
+            tick_df['date'] = pd.to_datetime(tick_df['ticktime']).dt.date
+        else:
+            from datetime import date
+            tick_df['date'] = date.today()
+
+    today = pd.Timestamp.today().date()
+    today_ticks = tick_df[tick_df['date'] == today]
+    if today_ticks.empty:
+        return pd.DataFrame()
+    bar = pd.DataFrame({
+        'open': [today_ticks['price'].iloc[0]],
+        'high': [today_ticks['price'].max()],
+        'low': [today_ticks['price'].min()],
+        'close': [today_ticks['price'].iloc[-1]],
+        'volume': [today_ticks['volume'].sum()]
+    }, index=[today])
+    return bar
+
+
+def realtime_worker_process(code, queue, interval=3):
+    """多进程拉取实时数据"""
+    s = sina_data.Sina()
+    while True:
+        try:
+            with timed_ctx("realtime_worker_process", warn_ms=800):
+                tick_df = s.get_real_time_tick(code)
+            # 这里可以生成今天的 day_bar
+            with timed_ctx("realtime_worker_tick_to_daily_bar", warn_ms=800):
+                today_bar = tick_to_daily_bar(tick_df)
+                queue.put((code, tick_df, today_bar))
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+        time.sleep(interval)
+
+class RealtimeWorker(QObject):
+    data_updated = pyqtSignal(object, object, object)  # code, tick_df, today_bar
+
+    def __init__(self, mutex, interval_ms=3000):
+        super().__init__()
+        self._mutex = mutex
+        self._timer = QTimer(self)
+        self._timer.setInterval(interval_ms)
+        self._timer.timeout.connect(self._poll)
+        self._code = None
+        self._running = False
+        self._sina = sina_data.Sina()
+
+    def start(self, code):
+        self._code = code
+        self._running = True
+        self._timer.start()
+
+    def stop(self):
+        self._timer.stop()
+        self._running = False
+        self._code = None
+
+    def _poll(self):
+        if not self._running or not self._code:
+            return
+        try:
+            with timed_ctx("_sina.get_real_time_tick", warn_ms=800):
+                tick_df = self._sina.get_real_time_tick(self._code)
+            with timed_ctx("_sina.get_real_time_tick_to_daily_bar", warn_ms=800):
+                today_bar = tick_to_daily_bar(tick_df)
+            if today_bar.empty:
+                return
+            self.data_updated.emit(self._code, tick_df, today_bar)
+        except Exception as e:
+            print(f"[RealtimeWorker] {e}")
+
 
 class MainWindow(QMainWindow, WindowMixin):
     def __init__(self):
@@ -287,12 +410,26 @@ class MainWindow(QMainWindow, WindowMixin):
         self.qt_theme = 'dark'  # 默认使用黑色主题
         self.show_bollinger = True
         self.tdx_enabled = False  # 默认开启
+        self.realtime = True  # 默认开启
         
+        # self.realtime_worker = None
+
+        self.realtime_queue = Queue()
+        self.realtime_process = None
+
+        # 定时检查队列
+        self.realtime_timer = QTimer()
+        self.realtime_timer.timeout.connect(self._poll_realtime_queue)
+        self.realtime_timer.start(5000)  # 每5秒检查一次队列
+
+        self.day_df = pd.DataFrame()
+        self.df_all = pd.DataFrame()
         # --- 1. 创建工具栏 ---
         self._init_toolbar()
         self._init_resample_toolbar()
         self._init_theme_selector()
         self._init_tdx()
+        self._init_real_time()
         # Load Window Position (Qt specific method from Mixin)
         # Using a distinct window_id "TradeVisualizer"
         self.load_window_position_qt(self, "TradeVisualizer", default_width=600, default_height=850)
@@ -311,7 +448,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 1. Left Sidebar: Stock Table
         self.stock_table = QTableWidget()
-        self.stock_table.setMaximumWidth(350)
+        self.stock_table.setMaximumWidth(300)
         self.stock_table.setColumnCount(4)
         self.stock_table.setHorizontalHeaderLabels(['Code', 'Name', 'Rank', 'Percent'])
         self.stock_table.horizontalHeader().setStretchLastSection(True)
@@ -417,6 +554,88 @@ class MainWindow(QMainWindow, WindowMixin):
         """Enable or disable code sending via sender"""
         self.tdx_enabled = bool(state)
         logger.info(f'tdx_enabled: {self.tdx_enabled}')
+
+    def _init_real_time(self):
+        """Initialize TDX / code link toggle"""
+        self.real_time_cb = QCheckBox("实时")
+        self.real_time_cb.setChecked(self.realtime)  # 默认联动
+        self.real_time_cb.stateChanged.connect(self.on_real_time_toggled)
+        self.toolbar.addSeparator()
+        self.toolbar.addWidget(self.real_time_cb)
+
+    def on_real_time_toggled(self, state):
+        self.realtime = bool(state)
+        # if self.realtime and self.current_code:
+        #     self._start_realtime_worker(self.current_code)
+        # elif not self.realtime and self.realtime_worker:
+        #     self.realtime_worker.stop()
+
+        # if self.realtime and cct.get_trade_date_status() and self.current_code:
+        if self.realtime and self.current_code:
+            self._start_realtime_process(self.current_code)
+        elif not self.realtime:
+            self._stop_realtime_process()
+
+    def _start_realtime_process(self, code):
+        # 停止旧进程
+        if self.realtime_process and self.realtime_process.is_alive():
+            self.realtime_process.terminate()
+            self.realtime_process.join()
+
+        # 启动新进程
+        self.realtime_process = Process(
+            target=realtime_worker_process,
+            args=(code, self.realtime_queue),
+            daemon=False
+        )
+        self.realtime_process.start()
+
+    def _stop_realtime_process(self):
+        if self.realtime_process and self.realtime_process.is_alive():
+            self.realtime_process.terminate()
+            self.realtime_process.join()
+            self.realtime_process = None
+
+    def _poll_realtime_queue(self):
+        """从队列读取数据并更新 UI"""
+        while not self.realtime_queue.empty():
+            code, tick_df, today_bar = self.realtime_queue.get()
+            if code != self.current_code:
+                continue
+            self.on_realtime_update(code, tick_df, today_bar)
+
+    def _on_initial_loaded(self, code, day_df, tick_df):
+        if code != self.current_code:
+            return
+
+        # ⚡ 过滤掉今天的数据，只保留过去的日 K
+        today_str = pd.Timestamp.today().strftime('%Y-%m-%d')
+        day_df = day_df[day_df.index < today_str]
+
+        self.day_df = day_df.copy()
+        # render_charts 时只传历史日 K，tick_df 用于 intraday 图，不绘制今天 K
+        self.render_charts(code, self.day_df, tick_df)
+
+        # 启动 realtime
+        if self.realtime:
+            # self._start_realtime_worker(code)
+            self._start_realtime_process(code)
+
+
+    def on_realtime_update(self, code, tick_df, today_bar):
+        if not self.realtime or code != self.current_code or today_bar.empty:
+            return
+
+        last_day = self.day_df.index[-1]
+        today_idx = today_bar.index[0]
+
+        if last_day < today_idx:
+            self.day_df = pd.concat([self.day_df, today_bar])
+        elif last_day == today_idx:
+            self.day_df.iloc[-1] = today_bar.iloc[0]
+
+        self.render_charts(code, self.day_df, tick_df)
+
 
     def _init_theme_selector(self):
         self.toolbar.addSeparator()
@@ -551,7 +770,32 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def closeEvent(self, event):
         """Save window position on close"""
+        """关闭窗口时统一清理"""
+        # 1. 停止 Realtime Process
+        self._stop_realtime_process()
+        # 停掉 Realtime 多进程
+        if getattr(self, 'realtime_process', None):
+           if self.realtime_process.is_alive():
+               self.realtime_process.terminate()  # 发送终止信号
+               self.realtime_process.join(timeout=2)  # 等待结束
+
+        # 停掉 QT GUI 子进程
+        if getattr(self, 'qt_process', None):
+           if self.qt_process.is_alive():
+               self.qt_process.terminate()
+               self.qt_process.join(timeout=2)
+
+        # 停掉任何后台线程
+        # if getattr(self, 'realtime_thread', None):
+        #    if self.realtime_thread.isRunning():
+        #        self.realtime_worker.stop()
+        #        self.realtime_thread.quit()
+        #        self.realtime_thread.wait()
+
+        # 3. 保存窗口位置
         self.save_window_position_qt(self, "TradeVisualizer")
+
+        # 调用父类 closeEvent
         super().closeEvent(event)
 
     def load_stock_list(self):
@@ -652,7 +896,7 @@ class MainWindow(QMainWindow, WindowMixin):
             if code_item:
                 code = code_item.data(Qt.ItemDataRole.UserRole)
                 # 只有当代码发生变化时才加载，防止重复触发
-                if code and code != self.current_code:
+                if  code != self.current_code:  # 只有 code 不同才加载
                     self.load_stock_by_code(code)
                     if self.tdx_enabled:
                         try:
@@ -668,14 +912,36 @@ class MainWindow(QMainWindow, WindowMixin):
     def load_stock_by_code(self, code):
         self.current_code = code
         self.kline_plot.setTitle(f"Loading {code}...")
-        # Start Thread
+
+        # ① 切 code 一定先停 realtime
+        # ---- 1. 停止旧的 realtime worker（如果存在）----
+        if self.realtime_process:
+            # self.realtime_worker.stop()
+            # self.realtime_thread.quit()
+            # self.realtime_thread.wait()
+            # self.realtime_worker = None
+            # self.realtime_thread = None
+
+            # 停止旧的实时进程（如果存在）
+            self._stop_realtime_process()
+
+        # ② 加载历史
         with timed_ctx("DataLoaderThread", warn_ms=800):
-            logger.info(f'code: {code} self.resample: {self.resample}')
-            self.loader = DataLoaderThread(code,self.hdf5_mutex,resample=self.resample)
+            self.loader = DataLoaderThread(
+                code,
+                self.hdf5_mutex,
+                resample=self.resample
+            )
         with timed_ctx("data_loaded", warn_ms=800):
-            self.loader.data_loaded.connect(self.render_charts)
+            self.loader.data_loaded.connect(self._on_initial_loaded)
         with timed_ctx("start", warn_ms=800):
             self.loader.start()
+
+        # ---- 3. 如果开启 realtime，再启动 realtime worker ----
+        with timed_ctx("start_realtime_worker", warn_ms=800):
+            if self.realtime:
+                # self._start_realtime_worker(code)
+                self._start_realtime_process(code)
         if logger.level == LoggerFactory.DEBUG:
             print_timing_summary(top_n=6)
 
@@ -916,14 +1182,25 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 # Compare today vs last history. If today > last_hist, draw ghost
                 # Note: simple string comparison works for YYYY-MM-DD
-                if today_str > last_hist_date_str:
+                # if today_str > last_hist_date_str:
+                #     new_x = len(day_df)
+                #     ghost_data = [(new_x, open_p, current_price, low_p, high_p)]
+                #     ghost_candle = CandlestickItem(ghost_data)
+                #     self.kline_plot.addItem(ghost_candle)
+                    
+                #     # Add current price label
+                #     text = pg.TextItem(f"{current_price}", anchor=(0, 1), color='r' if current_price>pre_close else 'g')
+                #     text.setPos(new_x, high_p)
+                #     self.kline_plot.addItem(text)
+
+                if self.realtime and today_str > last_hist_date_str:
                     new_x = len(day_df)
                     ghost_data = [(new_x, open_p, current_price, low_p, high_p)]
                     ghost_candle = CandlestickItem(ghost_data)
                     self.kline_plot.addItem(ghost_candle)
                     
-                    # Add current price label
-                    text = pg.TextItem(f"{current_price}", anchor=(0, 1), color='r' if current_price>pre_close else 'g')
+                    text = pg.TextItem(f"{current_price}", anchor=(0, 1),
+                                       color='r' if current_price>pre_close else 'g')
                     text.setPos(new_x, high_p)
                     self.kline_plot.addItem(text)
 
@@ -999,8 +1276,10 @@ def run_visualizer(initial_code=None, df_all=None):
     window.show()
     sys.exit(app.exec())
 
-def main(initial_code='000002'):
+def main(initial_code='000002',logger=logger):
     # --- 1. 尝试成为 Primary Instance ---
+    # logger = LoggerFactory.getLogger()
+    # logger = logger
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
         server_socket.bind((IPC_HOST, IPC_PORT))
@@ -1019,7 +1298,7 @@ def main(initial_code='000002'):
                 client_socket.connect((IPC_HOST, IPC_PORT))
                 client_socket.send(code_to_send.encode('utf-8'))
                 client_socket.close()
-                print(f"Sent command: {code_to_send}")
+                # print(f"Sent command: {code_to_send}")
             except Exception as e:
                 print(f"Failed to send command: {e}")
         sys.exit(0)
@@ -1032,8 +1311,8 @@ def main(initial_code='000002'):
     listener = CommandListenerThread(server_socket)
     listener.command_received.connect(window.load_stock_by_code)
     listener.dataframe_received.connect(window.update_df_all)
-    listener.command_received.connect(lambda: window.raise_())
-    listener.command_received.connect(lambda: window.activateWindow())
+    # listener.command_received.connect(lambda: window.raise_())
+    # listener.command_received.connect(lambda: window.activateWindow())
     listener.start()
 
     window.show()
@@ -1045,9 +1324,13 @@ def main(initial_code='000002'):
             window.load_stock_by_code(start_code)
     elif start_code is not None:
         window.load_stock_by_code(start_code)
+    ret = app.exec()  # 阻塞 Qt 主循环
 
+    # 确保所有后台进程被杀
+    window.close()  # 触发 closeEvent
+    sys.exit(ret)
+    # sys.exit(app.exec())
 
-    sys.exit(app.exec())
 # def open_visualizer(code=None):
 #     if not code:
 #         return
@@ -1098,10 +1381,12 @@ def main(initial_code='000002'):
 
 
 if __name__ == "__main__":
+    # logger.setLevel(LoggerFactory.INFO)
+    logger.setLevel(LoggerFactory.DEBUG)
 
     main()
     # # 1. Try to become the Primary Instance
-    # # logger.setLevel(LoggerFactory.DEBUG)
+    # logger.setLevel(LoggerFactory.DEBUG)
     # server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     # try:
     #     server_socket.bind((IPC_HOST, IPC_PORT))

@@ -720,10 +720,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # 10. 停止后台进程与管理器 (关键顺序：先停进程，再停管理器)
             self.stop_refresh()
-            
+            if self.qt_process  and self.qt_process.is_alive():
+                logger.info("正在停止后台qt_process进程...")
+                self.qt_process.terminate()
+                self.qt_process.join()
+                self.qt_process = None
+
             if hasattr(self, "proc") and self.proc.is_alive():
                 logger.info("正在停止后台数据扫描进程...")
-                self.proc.join(timeout=1.5)
+                self.proc.join(timeout=1)
                 if self.proc.is_alive():
                     self.proc.terminate()
                     logger.info("后台进程已强制终止")
@@ -1648,7 +1653,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # logger.info(f"选中股票代码: {stock_code}")
             if send_tdx_Key and stock_code:
                 self.sender.send(stock_code)
-            
             # Auto-launch Visualizer if enabled
             if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
                 self.open_visualizer(stock_code)
@@ -1765,39 +1769,38 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         sent = False
 
         # 1. 尝试通过 Socket 发送给已有实例
-        if self.qt_process is not None and  self.qt_process.is_alive():
-            try:
-                client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                client_socket.settimeout(1.0)
-                client_socket.connect((ipc_host, ipc_port))
-                client_socket.send(f"CODE|{code}".encode('utf-8'))
-                client_socket.close()
-                logger.info(f"Socket: Sent code {code} to visualizer")
-                sent = True
+        try:
+            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client_socket.settimeout(2)
+            client_socket.connect((ipc_host, ipc_port))
+            client_socket.send(f"CODE|{code}".encode('utf-8'))
+            client_socket.close()
+            logger.info(f"Socket: Sent code {code} to visualizer")
+            sent = True
 
-                # 发送 df_all
-                if hasattr(self, 'df_all') and not self.df_all.empty:
-                    try:
-                        data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        data_socket.settimeout(2.0)
-                        data_socket.connect((ipc_host, ipc_port))
+            # 发送 df_all
+            if hasattr(self, 'df_all') and not self.df_all.empty:
+                try:
+                    data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    data_socket.settimeout(0.8)
+                    data_socket.connect((ipc_host, ipc_port))
 
-                        ui_cols = ['code', 'name', 'Rank', 'percent']
-                        df_ui = self.df_all[ui_cols].copy()
-                        import struct, pickle
-                        pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
-                        header = struct.pack("!I", len(pickled_data))
-                        data_socket.sendall(b"DATA" + header + pickled_data)
-                        data_socket.close()
-                        logger.info(f"Socket: Sent df_all ({len(df_ui)} rows) to visualizer")
-                    except Exception as e:
-                        logger.warning(f"Failed to send df_all via socket: {e}")
+                    ui_cols = ['code', 'name', 'Rank', 'percent']
+                    df_ui = self.df_all[ui_cols].copy()
+                    import struct, pickle
+                    pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
+                    header = struct.pack("!I", len(pickled_data))
+                    data_socket.sendall(b"DATA" + header + pickled_data)
+                    data_socket.close()
+                    logger.info(f"Socket: Sent df_all ({len(df_ui)} rows) to visualizer")
+                except Exception as e:
+                    logger.warning(f"Failed to send df_all via socket: {e}")
 
-                return
-            except (ConnectionRefusedError, OSError):
-                sent = False
-            except Exception as e:
-                logger.warning(f"Socket connection check failed: {e}")
+            return
+        except (ConnectionRefusedError, OSError):
+            sent = False
+        except Exception as e:
+            logger.warning(f"Socket connection check failed: {e}")
 
         # 2. 如果没发出去 -> 直接 import QT 模块并在后台线程启动
         if not sent:
@@ -1812,7 +1815,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 #     threading.Thread(target=qt_runner, daemon=True).start()
                 #     print(f"Launching QT GUI for {code}")
                 if self.qt_process is None or not self.qt_process.is_alive():
-                   self.qt_process = Process(target=qtviz.main, args=(code,), daemon=True)
+                   self.qt_process = Process(target=qtviz.main, args=(code,logger), daemon=False)
                    self.qt_process.start()
                    print(f"Launched QT GUI process for {code}")
 
@@ -1824,115 +1827,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 # 延迟发送 df_all
                 if hasattr(self, 'df_all') and not self.df_all.empty:
-                    for _ in range(1):  # 尝试多次，等待 QT GUI 初始化 socket
-                        try:
-                            time.sleep(1)
-                            data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                            data_socket.settimeout(2)
-                            data_socket.connect((ipc_host, ipc_port))
-                            ui_cols = ['code', 'name', 'Rank', 'percent']
-                            df_ui = self.df_all[ui_cols].copy()
-                            pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
-                            header = struct.pack("!I", len(pickled_data))
-                            data_socket.sendall(b"DATA" + header + pickled_data)
-                            data_socket.close()
-                            logger.info("Sent df_all after launching Qt visualizer")
-                            break
-                        except Exception:
-                            continue
+                    time.sleep(3)
+                    # for _ in range(1):  # 尝试多次，等待 QT GUI 初始化 socket
+                    try:
+                        time.sleep(2)
+                        data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        data_socket.settimeout(0.8)
+                        data_socket.connect((ipc_host, ipc_port))
+                        ui_cols = ['code', 'name', 'Rank', 'percent']
+                        df_ui = self.df_all[ui_cols].copy()
+                        pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
+                        header = struct.pack("!I", len(pickled_data))
+                        data_socket.sendall(b"DATA" + header + pickled_data)
+                        data_socket.close()
+                        logger.info("Sent df_all after launching Qt visualizer")
+                    except Exception:
+                        pass
 
             except Exception as e:
                 logger.error(f"Failed to start Qt visualizer: {e}")
                 traceback.print_exc()   # 打印完整异常栈
-
-    def open_visualizer_src(self, code):
-        if not code: 
-            return
-        
-        # 1. Try to reuse existing instance via Socket IPC
-        ipc_port = 26668
-        ipc_host = '127.0.0.1'
-        try:
-            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.settimeout(1.0) # Quick check
-            client_socket.connect((ipc_host, ipc_port))
-            
-            # Send command: format is "CODE|<code>" or "DATA|<pickled_df>"
-            # First send the code
-            client_socket.send(f"CODE|{code}".encode('utf-8'))
-            client_socket.close()
-            logger.info(f"Socket: Sent code {code} to visualizer")
-            
-            # Send df_all in a separate connection if available
-            if hasattr(self, 'df_all') and not self.df_all.empty:
-                try:
-                    data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    data_socket.settimeout(2.0)
-                    data_socket.connect((ipc_host, ipc_port))
-                        
-                    #准备数据:
-                    ui_cols = ['code', 'name', 'Rank', 'percent']
-                    df_ui = self.df_all[ui_cols].copy()
-                    pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
-                    header = struct.pack("!I", len(pickled_data))  # 4 字节，无符号整型（网络字节序）
-
-                    # Pickle and send df_all
-                    # pickled_data = pickle.dumps(self.df_all)
-                    # data_socket.send(b"DATA|" + pickled_data)
-                    data_socket.sendall(b"DATA" + header + pickled_data)
-
-                    data_socket.close()
-                    logger.info(f"Socket: Sent df_all ({len(self.df_all)} rows) to visualizer")
-                except Exception as e:
-                    logger.warning(f"Failed to send df_all: {e}")
-            
-            return
-        except (ConnectionRefusedError, OSError):
-            # No existing instance listening
-            pass
-        except Exception as e:
-            logger.warning(f"Socket connection check failed: {e}")
-
-        # 2. Launch new instance
-        try:
-            # script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'trade_visualizer_qt6.py')
-            # if not os.path.exists(script_path):
-            #      logger.error(f"Visualizer script not found: {script_path}")
-            #      return
-
-            # exe_path = os.path.join(os.path.dirname(sys.executable), 'trade_visualizer_qt6.exe')
-            # if not os.path.exists(exe_path):
-            #     logger.error(f"Visualizer exe not found: {exe_path}")
-            #     return
-            script_path = get_visualizer_path(file_base='trade_visualizer_qt6')
-            if script_path is None:
-                return
-
-            # Non-blocking subprocess
-            subprocess.Popen([sys.executable, script_path, str(code)])
-            logger.info(f"Launched visualizer for {code}")
-
-            # --- 延迟发送 df_all ---
-            if hasattr(self, 'df_all') and not self.df_all.empty:
-                time.sleep(1.5)  # 等 0.5 秒让可视化器初始化 Socket
-                try:
-                    data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    data_socket.settimeout(2.0)
-                    data_socket.connect((ipc_host, ipc_port))
-                    
-                    ui_cols = ['code', 'name', 'Rank', 'percent']
-                    df_ui = self.df_all[ui_cols].copy()
-                    pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
-                    header = struct.pack("!I", len(pickled_data))
-                    
-                    data_socket.sendall(b"DATA" + header + pickled_data)
-                    data_socket.close()
-                    logger.info(f"Sent df_all to newly launched visualizer")
-                except Exception as e:
-                    logger.warning(f"Failed to send df_all to new visualizer: {e}")
-
-        except Exception as e:
-            logger.error(f"Failed to launch visualizer: {e}")
 
     def on_voice_toggle(self):
         self.live_strategy.set_voice_enabled(self.voice_var.get())
@@ -2294,7 +2208,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         if send_tdx_Key and stock_code:
             self.sender.send(stock_code)
-
+        # Auto-launch Visualizer if enabled
+        if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+            self.open_visualizer(stock_code)
 
     def is_window_covered_by_main(self, win):
         """
@@ -3339,6 +3255,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 stock_code = str(target_code).zfill(6)
                 # logger.info(f'on_handbook_on_click stock_code:{stock_code} name:{target_name}')
                 self.sender.send(stock_code)
+                # Auto-launch Visualizer if enabled
+                if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+                    self.open_visualizer(stock_code)
 
             def on_handbook_tree_select(event):
                 item = tree.selection()
@@ -3352,7 +3271,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 stock_code = str(target_code).zfill(6)
                 # logger.info(f'on_handbook_on_click stock_code:{stock_code} name:{target_name}')
                 self.sender.send(stock_code)
-
+                # Auto-launch Visualizer if enabled
+                if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+                    self.open_visualizer(stock_code)
             # --- 双击事件 (复用之前的 detail window) ---
             def on_handbook_double_click(event):
                 item = tree.selection()
@@ -4319,6 +4240,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                      try:
                         self.sender.send(code)
                         btn_send.config(text="✅ 已发送", bg="#ccff90")
+                        # Auto-launch Visualizer if enabled
+                        if hasattr(self, 'vis_var') and self.vis_var.get() and code:
+                            self.open_visualizer(code)
                      except Exception as e:
                         logger.error(f"Send stock error: {e}")
                 else:
@@ -4506,7 +4430,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 stock_code = str(target_code).zfill(6)
                 # logger.info(f'on_handbook_on_click stock_code:{stock_code} name:{target_name}')
                 self.sender.send(stock_code)
-
+                # Auto-launch Visualizer if enabled
+                if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+                    self.open_visualizer(stock_code)
         def on_trade_report_on_click(event):
                 item_id = tree.identify_row(event.y)
                 if not item_id:
@@ -4520,7 +4446,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if stock_code:
                     # logger.info(f'on_voice_on_click stock_code:{stock_code} name:{name}')
                     self.sender.send(stock_code)
-
+                    # Auto-launch Visualizer if enabled
+                    if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+                        self.open_visualizer(stock_code)
         # --- 编辑交易 ---
         def edit_selected_trade():
             selected = tree.selection()
@@ -5145,6 +5073,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 stock_code = str(target_code).zfill(6)
                 # logger.info(f'on_handbook_on_click stock_code:{stock_code} name:{target_name}')
                 self.sender.send(stock_code)
+                # Auto-launch Visualizer if enabled
+                if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+                    self.open_visualizer(stock_code)
 
             def on_voice_right_click(event):
                 item_id = tree.identify_row(event.y)
@@ -5172,6 +5103,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if stock_code:
                     # logger.info(f'on_voice_on_click stock_code:{stock_code} name:{name}')
                     self.sender.send(stock_code)
+                    # Auto-launch Visualizer if enabled
+                    if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+                        self.open_visualizer(stock_code)
 
             def edit_selected(item=None, values=None):
                  if values is None:
@@ -6464,7 +6398,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # if hasattr(self, "show_stock_detail"):
             #     self.show_stock_detail(code)
             self.sender.send(code)
-
+            # Auto-launch Visualizer if enabled
+            if hasattr(self, 'vis_var') and self.vis_var.get() and code:
+                self.open_visualizer(code)
     # --- 类内部方法 ---
     def show_concept_detail_window(self):
         """弹出详细概念异动窗口（复用+自动刷新+键盘/滚轮+高亮）"""
@@ -6732,6 +6668,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # ✅ 可改为打开详情逻辑，比如：
         self.sender.send(code)
+        # Auto-launch Visualizer if enabled
+        if hasattr(self, 'vis_var') and self.vis_var.get() and code:
+            self.open_visualizer(code)
         if hasattr(self._concept_top10_win, "_canvas_top10"):
             canvas = self._concept_top10_win._canvas_top10
             yview = canvas.yview()  # 保存当前滚动条位置
@@ -6772,6 +6711,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         stock_code = code
         self.select_code = code
         self.sender.send(code)
+        # Auto-launch Visualizer if enabled
+        if hasattr(self, 'vis_var') and self.vis_var.get() and code:
+            self.open_visualizer(code)
+
         pyperclip.copy(code)
         if self.push_stock_info(stock_code,self.df_all.loc[stock_code]):
             # 如果发送成功，更新状态标签
@@ -6904,6 +6847,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # 发送消息
             self.sender.send(code)
+            # Auto-launch Visualizer if enabled
+            if hasattr(self, 'vis_var') and self.vis_var.get() and code:
+                self.open_visualizer(code)
 
     def _bind_copy_expr(self, win):
         """绑定或重新绑定复制表达式按钮"""
@@ -7081,7 +7027,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if code != win.select_code:
                 win.select_code = code
                 self.sender.send(code)
-
+                # Auto-launch Visualizer if enabled
+                if hasattr(self, 'vis_var') and self.vis_var.get() and code:
+                    self.open_visualizer(code)
             # 高亮
             self._highlight_tree_selection(tree, item)
 
@@ -7427,7 +7375,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if code != win.select_code:
                 win.select_code = code
                 self.sender.send(code)
-
+                # Auto-launch Visualizer if enabled
+                if hasattr(self, 'vis_var') and self.vis_var.get() and code:
+                    self.open_visualizer(code)
             # 高亮
             self._highlight_tree_selection(tree, item)
 
@@ -9310,8 +9260,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if not vals:
                 return
             code = str(vals[0]).zfill(6)
-            self.sender.send(str(vals[0]).zfill(6))
-
+            self.sender.send(code)
+            # Auto-launch Visualizer if enabled
+            if hasattr(self, 'vis_var') and self.vis_var.get() and code:
+                self.open_visualizer(code)
 
         def on_single_click(event):
             row_id = tree.identify_row(event.y)
@@ -9320,7 +9272,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             vals = tree.item(row_id, "values")
             if not vals:
                 return
-            self.sender.send(str(vals[0]).zfill(6))
+            code = str(vals[0]).zfill(6)
+            self.sender.send(code)
+            if hasattr(self, 'vis_var') and self.vis_var.get() and code:
+                self.open_visualizer(code)
 
         def on_double_click(event):
             item = tree.focus()
@@ -10137,7 +10092,7 @@ if __name__ == "__main__":
     # 仅在 Windows 上设置启动方法，因为 Unix/Linux 默认是 'fork'，更稳定
     if sys.platform.startswith('win'):
         mp.freeze_support() # Windows 必需
-        mp.set_start_method('spawn', force=True) 
+        mp.set_start_method('spawn', force=True)
         # 'spawn' 是默认的，但显式设置有助于确保一致性。
         # 另一种方法是尝试使用 'forkserver' (如果可用)
         # mp.freeze_support()  # <-- 必须
