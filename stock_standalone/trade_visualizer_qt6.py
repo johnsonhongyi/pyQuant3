@@ -284,14 +284,15 @@ class MainWindow(QMainWindow, WindowMixin):
         self.hdf5_mutex = QMutex() 
 
         self.resample = 'd'
-        self.qt_theme = 'light'
+        self.qt_theme = 'dark'  # 默认使用黑色主题
         self.show_bollinger = True
+        self.tdx_enabled = False  # 默认开启
         
         # --- 1. 创建工具栏 ---
         self._init_toolbar()
         self._init_resample_toolbar()
         self._init_theme_selector()
-
+        self._init_tdx()
         # Load Window Position (Qt specific method from Mixin)
         # Using a distinct window_id "TradeVisualizer"
         self.load_window_position_qt(self, "TradeVisualizer", default_width=600, default_height=850)
@@ -351,6 +352,9 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # Set splitter sizes (70% top, 30% bottom)
         right_splitter.setSizes([500, 200])
+        
+        # Apply initial theme
+        self.apply_qt_theme()
 
         # Load Stock List
         self.load_stock_list()
@@ -401,6 +405,19 @@ class MainWindow(QMainWindow, WindowMixin):
 
             self.resample_actions[key] = act
 
+    def _init_tdx(self):
+        """Initialize TDX / code link toggle"""
+        self.tdx_cb = QCheckBox("Enable TDX Link")
+        self.tdx_cb.setChecked(self.tdx_enabled)  # 默认联动
+        self.tdx_cb.stateChanged.connect(self.on_tdx_toggled)
+        self.toolbar.addSeparator()
+        self.toolbar.addWidget(self.tdx_cb)
+
+    def on_tdx_toggled(self, state):
+        """Enable or disable code sending via sender"""
+        self.tdx_enabled = bool(state)
+        logger.info(f'tdx_enabled: {self.tdx_enabled}')
+
     def _init_theme_selector(self):
         self.toolbar.addSeparator()
         self.toolbar.addWidget(QLabel("Theme:"))
@@ -423,25 +440,58 @@ class MainWindow(QMainWindow, WindowMixin):
         self.apply_qt_theme()
 
     def _apply_pg_theme_to_plot(self, plot):
+        """Apply theme to a single plot"""
         # 获取 PlotItem 的 ViewBox
         vb = plot.getViewBox()
 
-        # 背景颜色
+        # 背景颜色和边框颜色
         if self.qt_theme == 'dark':
             vb.setBackgroundColor('#1e1e1e')
             axis_color = '#cccccc'
+            border_color = '#555555'  # 深灰色边框
+            title_color = '#e6e6e6'   # 浅灰色标题
         else:
             vb.setBackgroundColor('w')
             axis_color = '#000000'
+            border_color = '#cccccc'  # 浅灰色边框
+            title_color = '#000000'   # 黑色标题
 
-        # 设置坐标轴颜色
-        for ax_name in ('left', 'bottom'):
+        # 设置边框颜色
+        vb.setBorder(pg.mkPen(border_color, width=1))
+        
+        # 设置坐标轴颜色（包括所有四个边）
+        for ax_name in ('left', 'bottom', 'right', 'top'):
             ax = plot.getAxis(ax_name)
-            ax.setPen(pg.mkPen(axis_color))
-            ax.setTextPen(pg.mkPen(axis_color))
+            if ax is not None:
+                ax.setPen(pg.mkPen(axis_color, width=1))
+                ax.setTextPen(pg.mkPen(axis_color))
+        
+        # 设置标题颜色 - 使用正确的方法
+        if hasattr(plot, 'titleLabel'):
+            plot.titleLabel.item.setDefaultTextColor(QColor(title_color))
 
         # 网格
         plot.showGrid(x=True, y=True, alpha=0.3)
+    
+    def _apply_widget_theme(self, widget):
+        """Apply theme to GraphicsLayoutWidget"""
+        if self.qt_theme == 'dark':
+            widget.setBackground('#1e1e1e')
+            # 设置widget边框
+            widget.setStyleSheet("""
+                QGraphicsView {
+                    border: 1px solid #555555;
+                    background-color: #1e1e1e;
+                }
+            """)
+        else:
+            widget.setBackground('w')
+            widget.setStyleSheet("""
+                QGraphicsView {
+                    border: 1px solid #cccccc;
+                    background-color: white;
+                }
+            """)
 
 
 
@@ -482,9 +532,22 @@ class MainWindow(QMainWindow, WindowMixin):
             self.setStyleSheet("")
             pg.setConfigOption('background', 'w')
             pg.setConfigOption('foreground', 'k')
+        
+        # 应用到 GraphicsLayoutWidget
+        self._apply_widget_theme(self.kline_widget)
+        self._apply_widget_theme(self.tick_widget)
+        
         # 调用统一函数设置 pg 主题
         self._apply_pg_theme_to_plot(self.kline_plot)
         self._apply_pg_theme_to_plot(self.tick_plot)
+        
+        # 如果有 volume_plot，也应用主题
+        if hasattr(self, 'volume_plot'):
+            self._apply_pg_theme_to_plot(self.volume_plot)
+        
+        # 重新渲染当前股票（如果有）以更新蜡烛图颜色
+        if self.current_code:
+            self.load_stock_by_code(self.current_code)
 
     def closeEvent(self, event):
         """Save window position on close"""
@@ -574,10 +637,11 @@ class MainWindow(QMainWindow, WindowMixin):
             if code:
                 if code != self.current_code:  # 只有 code 不同才加载
                     self.load_stock_by_code(code)
-                    try:
-                        self.sender.send(code)
-                    except Exception as e:
-                        print(f"Error sending stock code: {e}")
+                    if self.tdx_enabled:
+                        try:
+                            self.sender.send(code)
+                        except Exception as e:
+                            print(f"Error sending stock code: {e}")
 
     def on_current_item_changed(self, current, previous):
         """处理键盘上下键引起的行切换"""
@@ -590,10 +654,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 # 只有当代码发生变化时才加载，防止重复触发
                 if code and code != self.current_code:
                     self.load_stock_by_code(code)
-                    try:
-                        self.sender.send(code)
-                    except Exception as e:
-                        print(f"Error sending stock code: {e}")
+                    if self.tdx_enabled:
+                        try:
+                            self.sender.send(code)
+                        except Exception as e:
+                            print(f"Error sending stock code: {e}")
 
     def update_df_all(self, df):
         """Update df_all and refresh table"""
@@ -611,7 +676,8 @@ class MainWindow(QMainWindow, WindowMixin):
             self.loader.data_loaded.connect(self.render_charts)
         with timed_ctx("start", warn_ms=800):
             self.loader.start()
-        print_timing_summary(top_n=6)
+        if logger.level == LoggerFactory.DEBUG:
+            print_timing_summary(top_n=6)
 
     def render_charts(self, code, day_df, tick_df):
         if day_df.empty:
@@ -718,9 +784,14 @@ class MainWindow(QMainWindow, WindowMixin):
             # self.kline_plot.plot(x_axis, upper_band.values, pen=pg.mkPen('grey', width=1, style=Qt.PenStyle.DashLine))
             # self.kline_plot.plot(x_axis, lower_band.values, pen=pg.mkPen('grey', width=1, style=Qt.PenStyle.DashLine))
 
-            # 中轨 明黄色加粗
+            # 中轨颜色根据主题调整
+            if self.qt_theme == 'dark':
+                ma20_color = QColor(255, 255, 0)  # 黄色
+            else:
+                ma20_color = QColor(255, 140, 0)  # 深橙色 (DarkOrange)
+            
             self.kline_plot.plot(x_axis, ma20.values,
-                                 pen=pg.mkPen(QColor(255, 255, 0), width=2))  # Yellow
+                                 pen=pg.mkPen(ma20_color, width=2))
 
             # 上轨 深红色加粗
             self.kline_plot.plot(x_axis, upper_band.values,
@@ -745,6 +816,9 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.volume_plot.setLabel('left', 'Volume')
                 self.volume_plot.setXLink(self.kline_plot)  # x 轴同步主图
                 self.volume_plot.setMenuEnabled(False)
+            else:
+                # 清空之前的数据，防止重叠
+                self.volume_plot.clear()
             
             x_axis = np.arange(len(day_df))
             amounts = day_df['amount'].values
@@ -770,6 +844,17 @@ class MainWindow(QMainWindow, WindowMixin):
                     brush='g'
                 )
                 self.volume_plot.addItem(bg_down)
+            
+            # 添加5日均量线
+            ma5_volume = pd.Series(amounts).rolling(5).mean()
+            if self.qt_theme == 'dark':
+                vol_ma_color = QColor(255, 255, 0)  # 黄色
+            else:
+                vol_ma_color = QColor(255, 140, 0)  # 深橙色
+            
+            self.volume_plot.plot(x_axis, ma5_volume.values,
+                                 pen=pg.mkPen(vol_ma_color, width=1.5),
+                                 name='MA5')
 
         # --- B. Render Intraday Trick ---
         if not tick_df.empty:
@@ -857,13 +942,33 @@ class MainWindow(QMainWindow, WindowMixin):
                 if self.qt_theme == 'dark':
                     curve_color = 'w'  # 白色线条
                     pre_close_color = 'b'
+                    avg_color = QColor(255, 255, 0)  # 黄色均价线
                 else:
                     curve_color = 'k'
                     pre_close_color = 'b'
+                    avg_color = QColor(255, 140, 0)  # 深橙色均价线 (DarkOrange)
+                
                 curve_pen = pg.mkPen(curve_color, width=2)
-                self.tick_plot.plot(x_ticks, prices, pen=curve_pen)
+                self.tick_plot.plot(x_ticks, prices, pen=curve_pen, name='Price')
                 self.tick_plot.addLine(y=pre_close, pen=pg.mkPen(pre_close_color, style=Qt.PenStyle.DashLine))
 
+                # 计算并绘制分时均价线
+                # 分时均价 = 累计成交金额 / 累计成交量
+                if 'amount' in df_ticks.columns and 'volume' in df_ticks.columns:
+                    # 使用 amount 和 volume 计算均价
+                    cum_amount = df_ticks['amount'].cumsum()
+                    cum_volume = df_ticks['volume'].cumsum()
+                    # 避免除以零
+                    avg_prices = np.where(cum_volume > 0, cum_amount / cum_volume, prices)
+                elif 'close' in df_ticks.columns:
+                    # 如果没有成交量数据，使用价格的累计平均
+                    avg_prices = pd.Series(prices).expanding().mean().values
+                else:
+                    avg_prices = None
+                
+                if avg_prices is not None:
+                    avg_pen = pg.mkPen(avg_color, width=1.5, style=Qt.PenStyle.SolidLine)
+                    self.tick_plot.plot(x_ticks, avg_prices, pen=avg_pen, name='Avg Price')
                 
                 # Add Grid
                 self.tick_plot.showGrid(x=False, y=True, alpha=0.5)
