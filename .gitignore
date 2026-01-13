@@ -150,3 +150,5 @@ stock_standalone/.cmd_history
 stock_standalone/instock_tk.*
 stock_standalone/JSONData/stock_codes.conf
 *.log.*
+stock_standalone/JSONData/stock_codes.conf
+stock_standalone/JohnsonUtil/global.ini
