@@ -1,5 +1,9 @@
 import os
 import sys
+import subprocess
+import socket
+import pickle
+import struct
 import warnings
 warnings.filterwarnings(
     "ignore",
@@ -76,7 +80,7 @@ from stock_handbook import StockHandbook
 from history_manager import QueryHistoryManager
 
 from stock_logic_utils import get_row_tags,detect_signals,toast_message
-from stock_logic_utils import test_code_against_queries,is_generic_concept
+from stock_logic_utils import test_code_against_queries,is_generic_concept,check_code
 
 from db_utils import *
 from kline_monitor import KLineMonitor
@@ -86,6 +90,8 @@ from column_manager import ColumnSetManager
 from collections import Counter, OrderedDict, deque
 import hashlib
 import keyboard  # pip install keyboard
+from multiprocessing import Process
+import trade_visualizer_qt6 as qtviz  # 你的 Qt GUI 模块
 
 # 全局单例
 logger = init_logging(log_file='instock_tk.log',redirect_print=False) 
@@ -201,6 +207,33 @@ def ___toast_message(master, text, duration=1500):
     toast.geometry(f"{toast_w}x{toast_h}+{master_x + (master_w-toast_w)//2}+{master_y + 50}")
     toast.after(duration, toast.destroy)
 
+
+def get_visualizer_path(file_base='trade_visualizer_qt6'):
+    """
+    返回 trade_visualizer_qt6 的路径：
+    - 开发环境 -> .py 文件路径
+    - 打包 exe  -> exe 文件路径
+    """
+    if getattr(sys, 'frozen', False):
+        # 打包后的 exe 所在目录
+        base_path = os.path.dirname(sys.executable)
+        path = os.path.join(base_path, f"{file_base}.exe")
+        if os.path.exists(path):
+            return path
+        else:
+            logger.error(f"Visualizer exe not found: {path}")
+            return None
+    else:
+        # 开发环境
+        base_path = os.path.dirname(os.path.abspath(__file__))
+        path = os.path.join(base_path, f"{file_base}.py")
+        if os.path.exists(path):
+            return path
+        else:
+            logger.error(f"Visualizer script not found: {path}")
+            return None
+
+
 class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def __init__(self):
         # 初始化 tk.Tk()
@@ -253,6 +286,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.live_strategy = None
         self.after(3000, self._init_live_strategy)
         
+        self.visualizer_process = None # Track visualizer process
+
         # 4. 初始化 Realtime Data Service
         try:
             # 启动 Manager 仅用于同步设置 (global_dict)
@@ -1613,6 +1648,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # logger.info(f"选中股票代码: {stock_code}")
             if send_tdx_Key and stock_code:
                 self.sender.send(stock_code)
+            
+            # Auto-launch Visualizer if enabled
+            if hasattr(self, 'vis_var') and self.vis_var.get() and stock_code:
+                self.open_visualizer(stock_code)
 
             # if self.voice_var.get():
             if self.tip_var.get():
@@ -1676,13 +1715,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.tip_var = tk.BooleanVar(value=False)
         self.voice_var = tk.BooleanVar(value=False)
         self.realtime_var = tk.BooleanVar(value=True)
+        self.vis_var = tk.BooleanVar(value=False)
         checkbuttons_info = [
             ("Win", self.win_var),
             ("TDX", self.tdx_var),
             ("THS", self.ths_var),
             ("DC", self.dfcf_var),
             ("Tip", self.tip_var),
-            ("Real", self.realtime_var)
+            ("Real", self.realtime_var),
+            ("Vis", self.vis_var)
         ]
         
         # 💥 修正：使用 ttk.Checkbutton 替代 tk.Checkbutton
@@ -1705,6 +1746,193 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             variable=self.voice_var,
             command=self.on_voice_toggle
         ).pack(side=tk.LEFT, padx=1)
+
+        ttk.Button(
+            frame_right,
+            text="📊", 
+            width=3,
+            command=lambda: self.open_visualizer(getattr(self, 'select_code', None))
+        ).pack(side=tk.LEFT, padx=1)
+
+    def open_visualizer(self, code):
+        if not code:
+            return
+
+        if not hasattr(self, 'qt_process'):
+            self.qt_process = None
+
+        ipc_host, ipc_port = '127.0.0.1', 26668
+        sent = False
+
+        # 1. 尝试通过 Socket 发送给已有实例
+        if self.qt_process is not None and  self.qt_process.is_alive():
+            try:
+                client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client_socket.settimeout(1.0)
+                client_socket.connect((ipc_host, ipc_port))
+                client_socket.send(f"CODE|{code}".encode('utf-8'))
+                client_socket.close()
+                logger.info(f"Socket: Sent code {code} to visualizer")
+                sent = True
+
+                # 发送 df_all
+                if hasattr(self, 'df_all') and not self.df_all.empty:
+                    try:
+                        data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        data_socket.settimeout(2.0)
+                        data_socket.connect((ipc_host, ipc_port))
+
+                        ui_cols = ['code', 'name', 'Rank', 'percent']
+                        df_ui = self.df_all[ui_cols].copy()
+                        import struct, pickle
+                        pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
+                        header = struct.pack("!I", len(pickled_data))
+                        data_socket.sendall(b"DATA" + header + pickled_data)
+                        data_socket.close()
+                        logger.info(f"Socket: Sent df_all ({len(df_ui)} rows) to visualizer")
+                    except Exception as e:
+                        logger.warning(f"Failed to send df_all via socket: {e}")
+
+                return
+            except (ConnectionRefusedError, OSError):
+                sent = False
+            except Exception as e:
+                logger.warning(f"Socket connection check failed: {e}")
+
+        # 2. 如果没发出去 -> 直接 import QT 模块并在后台线程启动
+        if not sent:
+            try:
+                # # 方式 A: 直接调用模块函数
+                # if not self.qt_started:
+                #     self.qt_started = True
+                #     def qt_runner():
+                #         # 这里保证在新线程里启动 QT GUI
+                #         qtviz.main(initial_code=code)
+
+                #     threading.Thread(target=qt_runner, daemon=True).start()
+                #     print(f"Launching QT GUI for {code}")
+                if self.qt_process is None or not self.qt_process.is_alive():
+                   self.qt_process = Process(target=qtviz.main, args=(code,), daemon=True)
+                   self.qt_process.start()
+                   print(f"Launched QT GUI process for {code}")
+
+                   # 给 QT GUI 启动时间初始化 IPC
+                   time.sleep(1)
+
+
+                logger.info(f"Started Qt visualizer in background thread for {code}")
+
+                # 延迟发送 df_all
+                if hasattr(self, 'df_all') and not self.df_all.empty:
+                    for _ in range(1):  # 尝试多次，等待 QT GUI 初始化 socket
+                        try:
+                            time.sleep(1)
+                            data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                            data_socket.settimeout(2)
+                            data_socket.connect((ipc_host, ipc_port))
+                            ui_cols = ['code', 'name', 'Rank', 'percent']
+                            df_ui = self.df_all[ui_cols].copy()
+                            pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
+                            header = struct.pack("!I", len(pickled_data))
+                            data_socket.sendall(b"DATA" + header + pickled_data)
+                            data_socket.close()
+                            logger.info("Sent df_all after launching Qt visualizer")
+                            break
+                        except Exception:
+                            continue
+
+            except Exception as e:
+                logger.error(f"Failed to start Qt visualizer: {e}")
+                traceback.print_exc()   # 打印完整异常栈
+
+    def open_visualizer_src(self, code):
+        if not code: 
+            return
+        
+        # 1. Try to reuse existing instance via Socket IPC
+        ipc_port = 26668
+        ipc_host = '127.0.0.1'
+        try:
+            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client_socket.settimeout(1.0) # Quick check
+            client_socket.connect((ipc_host, ipc_port))
+            
+            # Send command: format is "CODE|<code>" or "DATA|<pickled_df>"
+            # First send the code
+            client_socket.send(f"CODE|{code}".encode('utf-8'))
+            client_socket.close()
+            logger.info(f"Socket: Sent code {code} to visualizer")
+            
+            # Send df_all in a separate connection if available
+            if hasattr(self, 'df_all') and not self.df_all.empty:
+                try:
+                    data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    data_socket.settimeout(2.0)
+                    data_socket.connect((ipc_host, ipc_port))
+                        
+                    #准备数据:
+                    ui_cols = ['code', 'name', 'Rank', 'percent']
+                    df_ui = self.df_all[ui_cols].copy()
+                    pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
+                    header = struct.pack("!I", len(pickled_data))  # 4 字节，无符号整型（网络字节序）
+
+                    # Pickle and send df_all
+                    # pickled_data = pickle.dumps(self.df_all)
+                    # data_socket.send(b"DATA|" + pickled_data)
+                    data_socket.sendall(b"DATA" + header + pickled_data)
+
+                    data_socket.close()
+                    logger.info(f"Socket: Sent df_all ({len(self.df_all)} rows) to visualizer")
+                except Exception as e:
+                    logger.warning(f"Failed to send df_all: {e}")
+            
+            return
+        except (ConnectionRefusedError, OSError):
+            # No existing instance listening
+            pass
+        except Exception as e:
+            logger.warning(f"Socket connection check failed: {e}")
+
+        # 2. Launch new instance
+        try:
+            # script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'trade_visualizer_qt6.py')
+            # if not os.path.exists(script_path):
+            #      logger.error(f"Visualizer script not found: {script_path}")
+            #      return
+
+            # exe_path = os.path.join(os.path.dirname(sys.executable), 'trade_visualizer_qt6.exe')
+            # if not os.path.exists(exe_path):
+            #     logger.error(f"Visualizer exe not found: {exe_path}")
+            #     return
+            script_path = get_visualizer_path(file_base='trade_visualizer_qt6')
+            if script_path is None:
+                return
+
+            # Non-blocking subprocess
+            subprocess.Popen([sys.executable, script_path, str(code)])
+            logger.info(f"Launched visualizer for {code}")
+
+            # --- 延迟发送 df_all ---
+            if hasattr(self, 'df_all') and not self.df_all.empty:
+                time.sleep(1.5)  # 等 0.5 秒让可视化器初始化 Socket
+                try:
+                    data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    data_socket.settimeout(2.0)
+                    data_socket.connect((ipc_host, ipc_port))
+                    
+                    ui_cols = ['code', 'name', 'Rank', 'percent']
+                    df_ui = self.df_all[ui_cols].copy()
+                    pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
+                    header = struct.pack("!I", len(pickled_data))
+                    
+                    data_socket.sendall(b"DATA" + header + pickled_data)
+                    data_socket.close()
+                    logger.info(f"Sent df_all to newly launched visualizer")
+                except Exception as e:
+                    logger.warning(f"Failed to send df_all to new visualizer: {e}")
+
+        except Exception as e:
+            logger.error(f"Failed to launch visualizer: {e}")
 
     def on_voice_toggle(self):
         self.live_strategy.set_voice_enabled(self.voice_var.get())
@@ -2224,7 +2452,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             menu.add_command(label="🧪 测试买卖策略", 
                             command=lambda  e=event: self.on_tree_click_for_tooltip(e,stock_code,stock_name,True))
                             # command=lambda: self.test_strategy_for_stock(stock_code, stock_name))
-            
+            menu.add_command(label="🧪 测试Code策略", 
+                            command=lambda  e=event: check_code(self.df_all,stock_code,self.search_var1.get()))
+
             menu.add_command(label="🏷️ 添加标注备注", 
                             command=lambda: self.add_stock_remark(stock_code, stock_name))
             
@@ -9702,7 +9932,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 # KLineMonitor class moved to kline_monitor.py
 
-def test_single_thread():
+def test_single_thread(single=False):
     import queue
     # 用普通 dict 代替 manager.dict()
     global marketInit,resampleInit
@@ -9721,8 +9951,8 @@ def test_single_thread():
     log_level = mp.Value('i', LoggerFactory.DEBUG)  # 'i' 表示整数
     detect_calc_support = mp.Value('b', False)  # 'i' 表示整数
     # 直接单线程调用
-    fetch_and_process(shared_dict, q, blkname="boll", flag=flag ,log_level=log_level,detect_calc_support_var=detect_calc_support)
-
+    df = fetch_and_process(shared_dict, q, blkname="boll", flag=flag ,log_level=log_level,detect_calc_support_var=detect_calc_support,single=single)
+    return df
 # 常用命令示例列表
 COMMON_COMMANDS = [
     "tdd.get_tdx_Exp_day_to_df('000002', dl=60, newdays=0, resample='d')",
@@ -9986,7 +10216,14 @@ if __name__ == "__main__":
                 return repr(obj)
 
         print("调试模式启动 (输入 ':help' 获取帮助)")
-
+        top_all = test_single_thread(single=True)
+        queries = [
+            {
+                "name": "main_rule",
+                "expr": "(vol > 1e8 or volume > 2) and (open <= nlow or (open > lasth1d and low >= lastp1d)) "
+                        "and close > lastp1d and a1_v > 10 and percent > 3 and close > nclose and win > 2"
+            }
+        ]
         while True:
             try:
                 cmd = session.prompt(">>> ").strip()

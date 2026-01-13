@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 from typing import Any, Optional, Union, Callable
+from typing import Tuple,List,Dict
 from JohnsonUtil import LoggerFactory
 import logging
 import tkinter as tk
@@ -93,6 +94,126 @@ def remove_invalid_conditions(query: str, invalid_cols: list[str]) -> str:
     elif close_count > open_count:
         query = "(" * (close_count - open_count) + query
     return query
+
+
+# def extract_columns(expr: str) -> set[str]:
+#     """
+#     从条件表达式中提取列名
+#     """
+#     tokens = re.findall(r"[A-Za-z_]\w*", expr)
+#     keywords = {
+#         "and", "or", "not", "True", "False"
+#     }
+#     return {t for t in tokens if not t.isupper() and t not in keywords}
+
+def format_check_result(results: list[dict]) -> str:
+    lines = []
+    for i, r in enumerate(results, 1):
+        lines.append(f"[条件 {i}]")
+        lines.append(f"  表达式: {r['expr']}")
+        lines.append(f"  是否通过: {'✅ 是' if r['ok'] else '❌ 否'}")
+
+        if not r["ok"]:
+            if r["reason"] == "missing_columns":
+                lines.append("  缺失字段:")
+                for c in r["missing"]:
+                    lines.append(f"    - {c}")
+            else:
+                lines.append(f"  失败原因: {r['reason']}")
+        lines.append("")  # 空行
+    return "\n".join(lines)
+
+
+def extract_columns(expr: str) -> set:
+    tokens = re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", expr)
+    keywords = {"and", "or", "not", "True", "False"}
+    return {t for t in tokens if t not in keywords and not re.fullmatch(r"e\d+", t)}
+
+def eval_condition(row: dict, expr: str) -> Tuple[bool, Optional[str]]:
+    try:
+        return bool(eval(expr, {}, row)), None
+    except Exception as e:
+        return False, str(e)
+
+def test_code_query(df_code: Any, queries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    results = []
+
+    if df_code.empty:
+        return [{"error": "df_code is empty"}]
+
+    row = df_code.iloc[-1].to_dict()
+
+    for q in queries:
+        expr = q["expr"]
+        cols = extract_columns(expr)
+        missing_cols = [c for c in cols if c not in row]
+
+        if missing_cols:
+            results.append({
+                "expr": expr,
+                "ok": False,
+                "reason": "missing_columns",
+                "missing": missing_cols
+            })
+            continue
+
+        # 逐子条件拆分
+        sub_conditions = [x.strip() for x in expr.split("and")]
+        sub_results = []
+        all_ok = True
+        for cond in sub_conditions:
+            ok, err = eval_condition(row, cond)
+            sub_results.append({
+                "condition": cond,
+                "ok": ok,
+                "values": {c: row[c] for c in extract_columns(cond)}
+            })
+            if not ok:
+                all_ok = False
+
+        results.append({
+            "expr": expr,
+            "ok": all_ok,
+            "reason": "pass" if all_ok else "condition_failed",
+            "sub_conditions": sub_results
+        })
+
+    return results
+
+def format_check_result(results: List[Dict[str, Any]]) -> str:
+    lines = []
+    for i, r in enumerate(results, 1):
+        lines.append(f"[条件 {i}]")
+        lines.append(f"  表达式: {r['expr']}")
+        lines.append(f"  是否通过: {'✅ 是' if r['ok'] else '❌ 否'}")
+
+        if not r["ok"]:
+            if "missing" in r:
+                lines.append("  缺失字段:")
+                for c in r["missing"]:
+                    lines.append(f"    - {c}")
+            elif "sub_conditions" in r:
+                lines.append("  失败子条件:")
+                for sub in r["sub_conditions"]:
+                    if not sub["ok"]:
+                        lines.append(f"    - {sub['condition']} → 当前值: {sub['values']}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+
+def check_code(df: pd.DataFrame, code: str, queries: List[Dict[str, Any]]) -> None:
+    """
+    高层封装函数：传入 DataFrame 和 code，自动显示检查报告
+    """
+    if code not in df.index:
+        print(f"⚠️ 股票代码 {code} 不在 DataFrame 中")
+        return
+
+    df_code = df.loc[[code]]
+    report = test_code_query(df_code, queries)
+    # print(format_check_result(report))
+    return report
 
 def test_code_against_queries(df_code: pd.DataFrame, queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """测试单只股票是否符合多个查询条件"""
@@ -499,3 +620,19 @@ def detect_signals(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[df.get("volume", 0) > 1.2, "emotion"] = "乐观"
     df.loc[df.get("volume", 0) < 0.8, "emotion"] = "悲观"
     return df
+
+if __name__ == '__main__':
+    from JSONData import tdx_data_Day as tdd
+    code = '920088'
+    df = tdd.get_tdx_append_now_df_api(code)
+
+    queries = [
+        {
+            "name": "main_rule",
+            "expr": "(vol > 1e8 or volume > 2) and (open <= nlow or (open > lasth1d and low >= lastp1d)) "
+                    "and close > lastp1d and a1_v > 10 and percent > 3 and close > nclose and win > 2"
+        }
+    ]
+
+    result = test_code_query(df, queries)
+    print(f'test_code_query: {(format_check_result(result))}')

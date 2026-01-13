@@ -2115,6 +2115,7 @@ def get_tdx_Exp_day_to_df(
     type='f', wds=True, lastdays=3, resample='d',
     MultiIndex=False, lastday=None,
     detect_calc_support=True, normalized=False,
+    fastohlc=False,
 ):
     """
     全极速稳定版（无回退 / 自动支持 resample & MultiIndex）
@@ -2209,7 +2210,10 @@ def get_tdx_Exp_day_to_df(
         df = get_tdx_stock_period_to_type(df, period_day=resample)
         if 'date' in df.columns:
             df = df.set_index('date')
-
+    if fastohlc:
+        if 'date' in df.columns:
+            df.index = df.pop('date')
+        return df
     # =========================
     # 5. 核心指标（极速）
     # =========================

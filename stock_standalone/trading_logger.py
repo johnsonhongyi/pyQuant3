@@ -368,6 +368,35 @@ class TradingLogger:
         conn.close()
         return results
 
+    def get_signal_history_df(self, start_date: Optional[str] = None, end_date: Optional[str] = None):
+        """获取信号历史并作为 DataFrame 返回"""
+        try:
+            import pandas as pd
+        except ImportError:
+            return None
+            
+        conn = sqlite3.connect(self.db_path)
+        query = "SELECT * FROM signal_history WHERE 1=1"
+        params = []
+        if start_date:
+            query += " AND date >= ?"
+            params.append(start_date)
+        if end_date:
+            query += " AND date <= ?"
+            params.append(end_date)
+            
+        query += " ORDER BY date DESC"
+        
+        try:
+            df = pd.read_sql_query(query, conn, params=params)
+        except Exception as e:
+            logger.error(f"get_signal_history_df error: {e}")
+            df = pd.DataFrame()
+        finally:
+            conn.close()
+        
+        return df
+
     def get_trades(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> list[dict[str, Any]]:
         """获取交易记录（包含持仓中和已平仓）"""
         conn = sqlite3.connect(self.db_path)

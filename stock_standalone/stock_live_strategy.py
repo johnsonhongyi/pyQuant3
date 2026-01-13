@@ -3,6 +3,7 @@
 Stock Live Strategy & Alert System
 高性能实时股票跟踪与语音报警模块
 """
+from __future__ import annotations
 import threading
 import time
 import os
@@ -12,7 +13,7 @@ import pandas as pd
 from queue import Queue, Empty
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional, Callable, cast, List, Dict, Tuple
+from typing import Any, Optional, Callable
 
 from intraday_decision_engine import IntradayDecisionEngine
 from risk_engine import RiskEngine
@@ -35,6 +36,10 @@ try:
 except ImportError:
     StockSelector = None
     logger.warning("StockSelector not found.")
+
+from sector_risk_monitor import SectorRiskMonitor
+
+from sector_risk_monitor import SectorRiskMonitor
 
 try:
     import pythoncom
@@ -254,6 +259,11 @@ class StockLiveStrategy:
         self.voice_enabled = voice_enabled
         self._monitored_stocks = {} 
         self._last_process_time = 0.0
+        
+        # 初始化板块监控
+        self.sector_monitor = SectorRiskMonitor()
+        self._last_sector_status = {}
+
         self.signal_history: deque[dict[str, Any]] = deque(maxlen=200) # Added signal_history definition
         self._alert_cooldown = alert_cooldown
         self.enabled = True
@@ -517,7 +527,7 @@ class StockLiveStrategy:
             if df_candidates.empty:
                 return f"筛选器未返回逻辑日期 {logical_date} 的任何标的"
             
-            candidates = df_candidates['code'].tolist()
+
             added_count = 0
             existing_codes = set(self._monitored_stocks.keys())
             
@@ -731,9 +741,34 @@ class StockLiveStrategy:
         self.df = df_all.copy()
         logger.info(f"Strategy: Processing cycle for {len(self._monitored_stocks)} monitored stocks")
 
-        # --- Auto Loop Check ---
         if self.auto_loop_enabled:
              self.executor.submit(self._process_auto_loop, df_all, concept_top5)
+
+        # --- 板块风险监控 (Sector Risk Monitoring) ---
+        if concept_top5 and cct.get_now_time_int() > 916:
+            # Sync execute to ensure status is ready for strategies
+            try:
+                sector_status = self.sector_monitor.update(df_all, concept_top5)
+                if sector_status.get('risk_level', 0) > 0.6:
+                    # logger.warning(f"⚠️ 系统性风险预警: {sector_status}")
+                    pass
+                self._last_sector_status = sector_status
+            except Exception as e:
+                logger.error(f"Sector Monitor Check Failed: {e}")
+
+        # --- Auto Loop Check ---
+
+        # --- 板块风险监控 (Sector Risk Monitoring) ---
+        if concept_top5 and cct.get_now_time_int() > 916:
+            # Sync execute to ensure status is ready for strategies
+            try:
+                sector_status = self.sector_monitor.update(df_all, concept_top5)
+                if sector_status.get('risk_level', 0) > 0.6:
+                    # logger.warning(f"⚠️ 系统性风险预警: {sector_status}")
+                    pass
+                self._last_sector_status = sector_status
+            except Exception as e:
+                logger.error(f"Sector Monitor Check Failed: {e}")
 
         self.executor.submit(self._check_strategies, self.df)
         
@@ -903,7 +938,37 @@ class StockLiveStrategy:
                         value=cand['score'],
                         tags=f"Hot:{cand['concept']}|Sc:{cand['score']:.2f}"
                     )
+
                     logger.info(f"🔥 Found Hot Leader (Score={cand['score']:.2f}): {cand['name']}({cand['code']}) in {cand['concept']}")
+
+            # --- 板块整体拉升跟单 (Sector Rally Following) ---
+            sector_status = getattr(self, '_last_sector_status', {})
+            rally_signals = sector_status.get('rally_signals', [])
+            
+            for sector, avg_pct, leader_code in rally_signals:
+                if leader_code not in self._monitored_stocks:
+                    # 板块整体拉升,自动跟踪龙头
+                    leader_row = df.loc[leader_code] if leader_code in df.index else None
+                    if leader_row is not None:
+                         # 检查是否已有高分候选人是同一只股票
+                        is_duplicate = False
+                        for cand in candidates:
+                             if str(cand['code']) == str(leader_code):
+                                 is_duplicate = True
+                                 break
+                        
+                        if not is_duplicate:
+                            self.add_monitor(
+                                code=str(leader_code),
+                                name=leader_row.get('name', leader_code),
+                                rule_type='sector_rally',
+                                value=avg_pct,
+                                tags=f"Rally:{sector}|Avg:{avg_pct:.1%}"
+                            )
+                            logger.info(f"🚀 板块拉升跟单: {sector} 龙头 {leader_code} (AvgPct: {avg_pct:.1%})")
+
+
+
 
         except Exception as e:
             logger.error(f"Error in scan_hot_concepts: {e}", exc_info=True)
@@ -988,6 +1053,8 @@ class StockLiveStrategy:
                         # 2. 注入 V 型反转信号 (True/False)
                         v_shape = self.realtime_service.get_v_shape_signal(code)
                         snap['v_shape_signal'] = v_shape
+                        if v_shape:
+                             logger.info(f"⚡ {code} 触发 V 型反转信号")
                         
                         # 3. 注入 55188 外部数据 (人气、主力、题材)
                         ext_55188 = self.realtime_service.get_55188_data(code)
@@ -1005,13 +1072,77 @@ class StockLiveStrategy:
                             snap['zhuli_rank'] = 999
                             snap['net_ratio_ext'] = 0
                             snap['sector_score'] = 0.0
-
-                        if v_shape:
-                             logger.info(f"⚡ {code} 触发 V 型反转信号")
-                             
+                            
                     except Exception as e:
-                        logger.warning(f"无法获取 {code} 实时数据: {e}")
-                else:
+                        logger.error(f"Realtime Service Injection Injection Error: {e}")
+
+                # --- 注入板块与系统风险状态 ---
+                # 从 _last_sector_status 中获取
+                sector_status = getattr(self, '_last_sector_status', {})
+                pullback_alerts = sector_status.get('pullback_alerts', [])
+                snap['systemic_risk'] = sector_status.get('risk_level', 0)
+                
+                # 获取该股票所属板块的风险
+                stock_sector = snap.get('theme_name', '')
+                if not stock_sector and 'category' in row:
+                     cats = str(row['category']).split(';')
+                     if cats: stock_sector = cats[0]
+
+                for p_sector, p_code, p_drop in pullback_alerts:
+                    # check if self is leader
+                    if str(p_code) == str(code):
+                        snap['sector_leader_pullback'] = p_drop
+                    # check if sector leader is pulling back (follow-on risk)
+                    if stock_sector and p_sector == stock_sector:
+                        snap['sector_leader_pullback'] = p_drop
+                
+                # --- 注入日线中轴趋势数据 (Daily Midline Trend) ---
+                # Midline = (High + Low) / 2
+                # 计算过去 2 天的中轴线趋势
+                try:
+                    # 获取昨日和前日数据 (需要有 last_high, last_low 等数据列，或者从 row 中获取如果存在)
+                    # 假设 df 中有 last_high, last_low, last2_high, last2_low
+                    # 如果没有，尝试用 nclose 近似或跳过
+                    
+                    # 昨中轴
+                    last_h = float(row.get('last_high', 0))
+                    last_l = float(row.get('last_low', 0))
+                    if last_h > 0 and last_l > 0:
+                        snap['yesterday_midline'] = (last_h + last_l) / 2
+                    else:
+                        snap['yesterday_midline'] = float(row.get('last_close', 0)) # fallback
+
+                    # 前中轴
+                    last2_h = float(row.get('last2_high', 0))
+                    last2_l = float(row.get('last2_low', 0))
+                    if last2_h > 0 and last2_l > 0:
+                        snap['day_before_midline'] = (last2_h + last2_l) / 2
+                    else:
+                         snap['day_before_midline'] = snap['yesterday_midline'] # fallback
+
+                    # 今日实施中轴 (动态)
+                    if current_high > 0:
+                         # 注意: low 只有在收盘确定，盘中 low 可能不准，这里用 当前价作为临时低点参考? 
+                         # 不，盘中 low 也是实时更新的
+                         current_low = float(row.get('low', 0))
+                         if current_low > 0:
+                             snap['today_midline'] = (current_high + current_low) / 2
+                    
+                    # 简单的趋势判断标记
+                    if snap['yesterday_midline'] < snap['day_before_midline']:
+                        snap['midline_falling'] = True
+                    else:
+                        snap['midline_falling'] = False
+                        
+                    if snap['yesterday_midline'] > snap['day_before_midline']:
+                        snap['midline_rising'] = True
+                    else:
+                         snap['midline_rising'] = False
+
+                except Exception as e:
+                    logger.debug(f"Midline calc error for {code}: {e}")
+
+
                     # 默认值
                     snap['rt_emotion'] = 50
                     snap['v_shape_signal'] = False
@@ -1053,7 +1184,6 @@ class StockLiveStrategy:
 
                 last_close = snap.get('last_close', 0)
                 last_percent = snap.get('percent', None)
-                last_nclose = snap.get('nclose', 0)
 
                 # ---------- 初始化计数器 ----------
                 data.setdefault('below_nclose_count', 0)
@@ -1190,7 +1320,13 @@ class StockLiveStrategy:
                     'highest_today': snap.get('highest_today', row.get('high', 0)),
                     'lower': snap.get('lower', 0),
                     'pump_height': snap.get('pump_height', 0),
+                    'pump_height': snap.get('pump_height', 0),
                     'pullback_depth': snap.get('pullback_depth', 0),
+
+                    # --- 日K中轴线趋势数据 ---
+                    'lasthigh': float(row.get('lasthigh', 0)),
+                    'lastlow': float(row.get('lastlow', 0)),
+                    'midline_2d': float(row.get('midline_2d', 0)), # 对应 day_before_midline
 
                     # --- 分时指标 ---
                     'ratio': float(row.get('ratio', 0)),
@@ -1210,8 +1346,23 @@ class StockLiveStrategy:
                     # --- 关键新增: 情绪基准与实时分 ---
                     'emotion_baseline': float(row.get('emotion_baseline', 50.0)),
                     'rt_emotion': float(row.get('rt_emotion', 50.0)),
+                    'rt_emotion': float(row.get('rt_emotion', 50.0)),
                     'emotion_status': str(row.get('emotion_status', '')),
                 }
+
+                # --- 补充中轴线数据到 snapshot 供下次使用 (或本次 checking) ---
+                # 注意：_check_strategies 里的 snap 是引用 self._monitored_stocks[code]['snapshot']
+                # 所以这里修改 snap 会保留。
+                lasthigh = float(row.get('lasthigh', 0))
+                lastlow = float(row.get('lastlow', 0))
+                if lasthigh > 0 and lastlow > 0:
+                    snap['yesterday_midline'] = (lasthigh + lastlow) / 2
+                snap['day_before_midline'] = float(row.get('midline_2d', 0))
+                
+                # 计算趋势方向
+                current_mid = (float(row.get('high', 0)) + float(row.get('low', 0))) / 2
+                snap['midline_rising'] = current_mid > snap.get('yesterday_midline', 0) > snap.get('day_before_midline', -1) if snap.get('yesterday_midline', 0) > 0 else False
+                snap['midline_falling'] = current_mid < snap.get('yesterday_midline', 9999) < snap.get('day_before_midline', 9999) if snap.get('yesterday_midline', 0) > 0 else False
 
                 # --- 3.6 记录信号日志 ---
                 self.trading_logger.log_signal(code, data['name'], current_price, decision, row_data=row_data)
