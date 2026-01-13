@@ -57,7 +57,7 @@ def get_base_path():
         try:
             # 此时 __file__ 是可靠的
             path = os.path.dirname(os.path.abspath(__file__))
-            print(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
+            # print(f"[DEBUG] Path Mode: Python Script (__file__). Path: {path}")
             return path
         except NameError:
              pass # 忽略交互模式
@@ -73,12 +73,12 @@ def get_base_path():
             if real_path != os.path.dirname(os.path.abspath(sys.executable)):
                  # 这是一个强烈信号：sys.executable 被欺骗了 (例如 Nuitka Onefile 启动器)，
                  # 或者程序被从其他地方调用，我们信任 Win32 API。
-                 print(f"[DEBUG] Path Mode: WinAPI (Override). Path: {real_path}")
+                 # print(f"[DEBUG] Path Mode: WinAPI (Override). Path: {real_path}")
                  return real_path
             
             # 如果 Win32 API 结果与 sys.executable 目录一致，且我们处于打包状态
             if not is_interpreter:
-                 print(f"[DEBUG] Path Mode: WinAPI (Standalone). Path: {real_path}")
+                 # print(f"[DEBUG] Path Mode: WinAPI (Standalone). Path: {real_path}")
                  return real_path
 
         except Exception:
@@ -162,7 +162,7 @@ def get_conf_path(fname):
     # --- 1. 直接存在 ---
     if os.path.exists(default_path):
         if os.path.getsize(default_path) > 0:
-            print(f"使用本地配置: {default_path}")
+            # print(f"使用本地配置: {default_path}")
             return default_path
         else:
             print("配置文件存在但为空，将尝试重新释放")
@@ -451,7 +451,7 @@ def getLogger(name=None, logpath='instock_tk.log', show_detail=True):
     log_f = logpath if logpath else get_log_file(log_n=_GLOBAL_LOG_NAME)
     # log_f = get_log_file(logpath) if logpath else get_log_file(log_n=_GLOBAL_LOG_NAME)
 
-    print(f'log_f: {log_f}')
+    # print(f'log_f: {log_f}')
     # 只在 log_f 变化时打印
     # if _GLOBAL_LAST_LOG_F != log_f:
     #     print(f'log_f: {log_f}')

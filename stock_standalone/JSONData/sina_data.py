@@ -14,6 +14,8 @@ from JSONData import tdx_hdf5_api as h5a
 from JSONData import realdatajson as rl
 from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import commonTips as cct
+from JohnsonUtil import commonTips as cct
+from JohnsonUtil.commonTips import timed_ctx,print_timing_summary
 from JohnsonUtil import LoggerFactory
 log = LoggerFactory.getLogger("sina_data")
 # import trollius as asyncio
@@ -996,7 +998,7 @@ class Sina:
             limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
             h5_mi_table = 'all_' + str(limit_time_int)
             # 仅在交易时间内记录
-            if cct.get_work_time():
+            if cct.get_work_time() and cct.get_now_time_int() > 920:
                 # 构造 MultiIndex 精简格式轨迹: [code, ticktime, close, high, low, llastp, volume, lastbuy]
                 # 这必须与 format_response_data 中的 mi_cols 保持绝对一致以避免 ValueError
                 mi_cols = ['code', 'ticktime', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
@@ -1545,6 +1547,24 @@ class Sina:
         h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
         return h5_hist
 
+    # def get_code_df_fast(h5_hist: pd.DataFrame, code: str, debug=False) -> pd.DataFrame:
+    #     """
+    #     从 h5_hist 中筛选指定 code 的行。
+    #     支持单索引和多索引，保证返回数据。
+    #     """
+    #     if code is None:
+    #         return h5_hist
+
+    #     try:
+    #         df_code = h5_hist.loc[[code]]  # 对 MultiIndex 第一层或单索引都适用
+    #         if debug:
+    #             print(f"[DEBUG] Found code {code}, rows: {len(df_code)}")
+    #         return df_code
+    #     except KeyError:
+    #         # 没有匹配到返回空 DataFrame
+    #         return pd.DataFrame(columns=h5_hist.columns)
+
+
 
     def get_real_time_tick(self, code: str, l_limit_time: int = int(cct.sina_limit_time), debug: bool = False) -> pd.DataFrame:
         """
@@ -1573,15 +1593,17 @@ class Sina:
                     print(f"[DEBUG] Cache expired or missing. Loading HDF5 from disk: {h5_mi_table}")
                 
                 # Load HDF5 Data
-                h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False, MultiIndex=True)
-                
+                log.debug(f'load_h5_hist_hdf')
+                with timed_ctx("sina_data_h5_hist_load_hdf", warn_ms=800):
+                    h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False, MultiIndex=True)
                 # Update Cache if load successful
                 if h5_hist is not None and not h5_hist.empty:
                     self.agg_cache.setkey(cache_key_df, h5_hist)
                     self.agg_cache.setkey(cache_key_time, now_time)
             else:
-                if debug:
-                    print(f"[DEBUG] Using cached HDF5 data (Age: {now_time - float(last_time):.1f}s)")
+                # if debug:
+                    # log.debug(f"[DEBUG] Using cached HDF5 data (Age: {now_time - float(last_time):.1f}s)")
+                log.debug(f"[DEBUG] Using cached HDF5 data (Age: {now_time - float(last_time):.1f}s)")
 
             if debug and h5_hist is not None:
                 print(f"[DEBUG] Table: {h5_mi_table}, rows: {len(h5_hist)}")
@@ -1591,16 +1613,18 @@ class Sina:
 
             # 3. Filter for specific code
             if code is not None:
-                if isinstance(h5_hist.index, pd.MultiIndex):
-                    if code in h5_hist.index.get_level_values(0):
-                        df_code = h5_hist.loc[[code]]
-                        if debug:
-                            print(f"[DEBUG] Found code {code}, rows: {len(df_code)}")
-                        return df_code
-                elif code in h5_hist.index:
-                     df_code = h5_hist.loc[[code]]
-                     return df_code
-
+                with timed_ctx("sina_data_h5_loc_code", warn_ms=800):
+                    # df_code = get_code_df_fast(h5_hist,code)
+                    if isinstance(h5_hist.index, pd.MultiIndex):
+                        if code in h5_hist.index.get_level_values(0):
+                            df_code = h5_hist.loc[[code]]
+                            if debug:
+                                print(f"[DEBUG] Found code {code}, rows: {len(df_code)}")
+                            return df_code
+                    elif code in h5_hist.index:
+                         df_code = h5_hist.loc[[code]]
+                         return df_code
+                    return df_code
                 if debug:
                     print(f"[DEBUG] Code {code} not found in {h5_mi_table}")
             
@@ -1655,10 +1679,10 @@ if __name__ == "__main__":
     # print(sina.get_code_cname('301397'))
 
     # print(sina.get_code_cname('300107'))
-    # print((sina.get_stock_code_data('000017').T))
+    df = sina.get_stock_code_data('000017')
 
     # print((sina.get_stock_code_data('300107').T))
-    dd = sina.get_real_time_tick('920088')
+    dd = sina.get_real_time_tick('688136')
     import ipdb;ipdb.set_trace()
 
     df =sina.all
