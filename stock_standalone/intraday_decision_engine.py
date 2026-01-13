@@ -3,6 +3,7 @@
 盘中决策引擎 - 增强版
 支持买入/卖出信号生成、动态仓位计算、趋势强度评估、止损止盈检测
 """
+from __future__ import annotations
 import logging
 import datetime as dt
 from typing import Any
@@ -567,6 +568,30 @@ class IntradayDecisionEngine:
                 target_pos = 0.0 if structure == "派发" else 0.4
                 return {"triggered": True, "action": "预警止损", "position": target_pos, "reason": f"结构{structure}且亏损{abs(pnl_pct):.1%}"}
 
+        # --- [New] 每日中轴趋势止损 (Daily Midline Stop-Loss) ---
+        # 依赖于 StockLiveStrategy 注入的 snapshot 数据
+        mid_rising = snapshot.get('midline_rising', False)
+        mid_falling = snapshot.get('midline_falling', False)
+        
+        # 1. 趋势止损：中轴连跌且今日价格在均价之下 (Weakening Trend)
+        if mid_falling and price < nclose and pnl_pct < -0.015:
+            return {"triggered": True, "action": "趋势止损", "position": 0.3, "reason": "日线中轴重心下移且弱于均价"}
+
+        # 2. 也是趋势止损：如果中轴没有上升，且今日高开低走(或冲高回落)跌破均价
+        if not mid_rising:
+             # 检查是否大幅回撤
+             if high > 0 and (high - price) / high > 0.02 and price < nclose:
+                 return {"triggered": True, "action": "回撤止损", "position": 0.3, "reason": "中轴未升+日内冲高回落破均价"}
+
+        # 3. 均值回归止损 (Mean Reversion Stop)
+        # 低开低走，且被均线压制，且中轴下移 -> 极弱，不做反弹幻想
+        if mid_falling:
+            open_p = float(row.get("open", 0))
+            ma5 = float(row.get("ma5d", 0))
+            if open_p > 0 and price < open_p and ma5 > 0 and price < ma5:
+                 return {"triggered": True, "action": "极弱止损", "position": 0.0, "reason": "极弱形态(中轴降+被均线压制)"}
+
+
         # 2. 基础百分比止盈 (分三步)
         if pnl_pct >= self.take_profit_pct:
             return {"triggered": True, "action": "目标止盈", "position": 0.0, "reason": f"达到目标止盈: {pnl_pct:.1%}"}
@@ -575,7 +600,7 @@ class IntradayDecisionEngine:
             # 盈利 5% 减 30% 保护利润
             debug["分步止盈"] = "第一目标已达"
             # 保持盈利 5% 的减仓建议可以通过实时判断后续给出
-
+            
         # 3. 分级移动止盈 (回撤保护，根据盈利幅度动态调整回撤容忍度)
         if highest_since_buy > 0 and highest_since_buy > cost_price:
             drawdown = (highest_since_buy - price) / highest_since_buy
@@ -651,7 +676,7 @@ class IntradayDecisionEngine:
 
     # ==================== 趋势强度 ====================
     
-    def _trend_strength(self, row: dict, debug: dict) -> float:
+    def _trend_strength(self, row: dict[str, Any], debug: dict[str, Any]) -> float:
         """
         计算趋势强度评分
         
@@ -704,7 +729,7 @@ class IntradayDecisionEngine:
 
     # ==================== 量能分析 ====================
     
-    def _volume_bonus(self, row: dict, debug: dict) -> float:
+    def _volume_bonus(self, row: dict[str, Any], debug: dict[str, Any]) -> float:
         """
         量能加成/惩罚
         
@@ -728,7 +753,7 @@ class IntradayDecisionEngine:
 
     # ==================== 原有方法（保持兼容） ====================
     
-    def _time_structure_filter(self, debug: dict) -> tuple[float, str]:
+    def _time_structure_filter(self, debug: dict[str, Any]) -> tuple[float, str]:
         """
         根据交易时间段应用结构性加成或惩罚
         用户反馈：9:20-9:45 相对低位, 10:00-11:00 短期高点, 下午需稳在均线上
@@ -750,7 +775,7 @@ class IntradayDecisionEngine:
             
         return 0, ""
 
-    def _limit_price_filter(self, row: dict, debug: dict) -> tuple[bool, str]:
+    def _limit_price_filter(self, row: dict[str, Any], debug: dict[str, Any]) -> tuple[bool, str]:
         """
         价格限制过滤器：防止在涨停板或跌停板错误交易
         """
@@ -804,7 +829,7 @@ class IntradayDecisionEngine:
             return "持仓", 0, "远离MA5，追高风险"
         return "持仓", 0, "均线结构中性"
 
-    def _yesterday_anchor(self, price: float, snapshot: dict, debug: dict) -> float:
+    def _yesterday_anchor(self, price: float, snapshot: dict[str, Any], debug: dict[str, Any]) -> float:
         """昨日锚点惩罚"""
         penalty = 0.0
         last_close = float(snapshot.get("last_close", 0))
@@ -816,7 +841,7 @@ class IntradayDecisionEngine:
         debug["昨日约束"] = penalty
         return penalty
 
-    def _structure_filter(self, row: dict, debug: dict) -> float:
+    def _structure_filter(self, row: dict[str, Any], debug: dict[str, Any]) -> float:
         """结构过滤"""
         penalty = 0.0
         price = float(row.get("trade", 0))
@@ -832,7 +857,7 @@ class IntradayDecisionEngine:
         debug["结构约束"] = penalty
         return penalty
 
-    def _extreme_filter(self, row: dict, debug: dict) -> float:
+    def _extreme_filter(self, row: dict[str, Any], debug: dict[str, Any]) -> float:
         """极端指标过滤"""
         penalty = 0.0
         kdj_j = float(row.get("kdj_j", 0))
@@ -852,7 +877,7 @@ class IntradayDecisionEngine:
         debug["指标约束"] = penalty
         return penalty
 
-    def _check_acceleration_pattern(self, row: dict, snapshot: dict, debug: dict) -> dict:
+    def _check_acceleration_pattern(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any]:
         """
         检查“加速股”模式：
         1. 回踩 5/10/20 日线后重新放量向上加速
@@ -892,7 +917,7 @@ class IntradayDecisionEngine:
         
         return result
 
-    def _vwap_trend_check(self, row: dict, snapshot: dict, debug: dict) -> float:
+    def _vwap_trend_check(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> float:
         """
         VWAP (均价) 趋势过滤器
         User Requirement: 通过实时数据的均价线和昨天的均价来判定小趋势走高还是小转大
@@ -1101,6 +1126,19 @@ class IntradayDecisionEngine:
             sum_perc = float(snapshot.get("sum_perc", 0))
             red = int(snapshot.get("red", 0))
             
+            # [New] 中轴线趋势加成
+            mid_rising = snapshot.get('midline_rising', False)
+            mid_falling = snapshot.get('midline_falling', False)
+            
+            if mid_rising:
+                buy_score += 0.1
+                buy_reasons.append("中轴重心上移")
+            elif mid_falling:
+                # 除非是超跌反弹，否则中轴下移要扣分
+                if not is_oversold:
+                    buy_score -= 0.15
+                    buy_reasons.append("中轴重心下移")
+
             # 情况 A: 强势惜售后的加速 (win >= 3，小幅连阳后爆发)
             if win >= 3 and (sum_perc / win < 3.5):
                 # 盘中表现：突破分时均价且已经产生一定涨幅
@@ -1265,7 +1303,7 @@ class IntradayDecisionEngine:
         return result
 
     def _volume_emotion_score(self, volume: float, ratio: float, 
-                               v1: float, v2: float, v3: float, debug: dict) -> float:
+                               v1: float, v2: float, v3: float, debug: dict[str, Any]) -> float:
         """
         量能情绪评分
         

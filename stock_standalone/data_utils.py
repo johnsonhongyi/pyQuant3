@@ -12,7 +12,6 @@ from JSONData import tdx_data_Day as tdd
 from JSONData import stockFilter as stf
 from tdx_utils import clean_bad_columns, sanitize, clean_expired_tdx_file
 from db_utils import get_indb_df
-
 winlimit = cct.winlimit
 loop_counter_limit = cct.loop_counter_limit
 START_INIT = 0
@@ -1311,6 +1310,7 @@ def fetch_and_process(
     duration_sleep_time: int = 120,
     ramdisk_dir: str = cct.get_ramdisk_dir(),
     status_callback: Callable[[], Any] = None,  # 新增回调参数
+    single = False
 ) -> None:
     """
     fetch_and_process 任务函数
@@ -1340,6 +1340,7 @@ def fetch_and_process(
     logger.info(f"init resample: {resample} flag: {flag.value if flag else 'None'} detect_calc_support: {detect_calc_support_val}")
     last_status = get_status(status_callback)
     loop_counter = 0  # 循环计数
+    df_all = None
     while True:
         try:
             time_s = time.time()
@@ -1609,30 +1610,16 @@ def fetch_and_process(
                 lambda: g_values.getkey("market") and g_values.getkey("market") != market,
                 lambda: g_values.getkey("st_key_sort") and g_values.getkey("st_key_sort") != st_key_sort
             ]
-
+            
+            if single:
+                break   
             for _ in range(int(loop_sleep_time * sleep_step)):
-                # if not flag.value:
-                #     break
-                # elif status_callback.value != last_status:
-                #     break
-                # elif g_values.getkey("resample") and  g_values.getkey("resample") !=  resample:
-                #     break
-                # elif g_values.getkey("market") and  g_values.getkey("market") !=  market:
-                #     break
-                # elif g_values.getkey("st_key_sort") and  g_values.getkey("st_key_sort") !=  st_key_sort:
-                #     break
-                # 只每 10 次循环输出一次
-                # loop_counter += 1
-                # if loop_counter % loop_counter_limit == 0:
-                #     logger.debug(f'调试 START_INIT: {START_INIT} not cct.get_work_time(): {not cct.get_work_time()} loop_sleep_time:{loop_sleep_time} loop_counter: {loop_counter}')
                 if any(cond() for cond in stop_conditions):
                     break
                 time.sleep(sleep_step)
-                # 防止 loop_counter 无限大（可选）
-            # if loop_counter >= 10000:
-            #     loop_counter = 0
             START_INIT = 1
-
         except Exception as e:
             logger.error(f"resample: {resample} Error in background process: {e}", exc_info=True)
             time.sleep(duration_sleep_time)
+
+    return df_all

@@ -671,6 +671,7 @@ class GlobalConfig:
         self.sina_dd_limit_day = self.get_with_writeback("general", "sina_dd_limit_day", fallback='0', value_type="str")
         self.MAX_DAILY_ADDITIONS = self.get_with_writeback("general", "MAX_DAILY_ADDITIONS", fallback='10', value_type="int")
         self.loop_counter_limit = self.get_with_writeback("general", "loop_counter_limit", fallback='10', value_type="int")
+        self.real_time_tick_limit = self.get_with_writeback("general", "real_time_tick_limit", fallback='300', value_type="int")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         try:
@@ -874,6 +875,7 @@ loglevel: str = CFG.loglevel
 cleanRAMdiskTemp: str = CFG.cleanRAMdiskTemp
 MAX_DAILY_ADDITIONS: int = CFG.MAX_DAILY_ADDITIONS
 loop_counter_limit: int = CFG.loop_counter_limit
+real_time_tick_limit: int = CFG.real_time_tick_limit
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:
     return os.path.sep

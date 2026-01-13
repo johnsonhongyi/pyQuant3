@@ -1537,6 +1537,87 @@ class Sina:
             log.info('agg_df_Row:%.2f s, h5:%s, endtime:%s' % ((time.time() - time_n), len(h5_slice) if h5_slice is not None else 0, endtime))
 
         return dd
+    def get_sina_MultiIndex_data(self):
+        h5_mi_fname = 'sina_MultiIndex_data'
+        l_limit_time = int(cct.sina_limit_time)
+        h5_mi_table = 'all_' + str(l_limit_time)
+        # h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False, MultiIndex=True)
+        h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False)
+        return h5_hist
+
+
+    def get_real_time_tick(self, code: str, l_limit_time: int = int(cct.sina_limit_time), debug: bool = False) -> pd.DataFrame:
+        """
+        获取指定股票 code 的实时 tick 数据
+
+        :param code: 股票代码
+        :param l_limit_time: 限制时间窗口（分钟），用于选择 HDF5 表名
+        :param debug: 是否打印调试信息
+        :return: DataFrame，若没有数据返回空 DataFrame
+        """
+        h5_mi_fname = 'sina_MultiIndex_data'
+        h5_mi_table = 'all_' + str(l_limit_time)
+        
+        # Cache keys including limit_time to distinguish different windows
+        cache_key_df = f'sina_MultiIndex_hist_{l_limit_time}'
+        cache_key_time = f'sina_MultiIndex_hist_time_{l_limit_time}'
+        try:
+            # 1. Try to load from cache
+            h5_hist = self.agg_cache.getkey(cache_key_df)
+            last_time = self.agg_cache.getkey(cache_key_time)
+            now_time = time.time()
+            _real_time_tick_limit = cct.real_time_tick_limit
+            # 2. Check if cache needs update (missing or older than 5 minutes)
+            if (h5_hist is None or last_time is None) or ((now_time - float(last_time) > _real_time_tick_limit) and cct.get_work_time_duration()):
+                if debug:
+                    print(f"[DEBUG] Cache expired or missing. Loading HDF5 from disk: {h5_mi_table}")
+                
+                # Load HDF5 Data
+                h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False, MultiIndex=True)
+                
+                # Update Cache if load successful
+                if h5_hist is not None and not h5_hist.empty:
+                    self.agg_cache.setkey(cache_key_df, h5_hist)
+                    self.agg_cache.setkey(cache_key_time, now_time)
+            else:
+                if debug:
+                    print(f"[DEBUG] Using cached HDF5 data (Age: {now_time - float(last_time):.1f}s)")
+
+            if debug and h5_hist is not None:
+                print(f"[DEBUG] Table: {h5_mi_table}, rows: {len(h5_hist)}")
+            
+            if h5_hist is None or h5_hist.empty:
+                 return pd.DataFrame()
+
+            # 3. Filter for specific code
+            if code is not None:
+                if isinstance(h5_hist.index, pd.MultiIndex):
+                    if code in h5_hist.index.get_level_values(0):
+                        df_code = h5_hist.loc[[code]]
+                        if debug:
+                            print(f"[DEBUG] Found code {code}, rows: {len(df_code)}")
+                        return df_code
+                elif code in h5_hist.index:
+                     df_code = h5_hist.loc[[code]]
+                     return df_code
+
+                if debug:
+                    print(f"[DEBUG] Code {code} not found in {h5_mi_table}")
+            
+            return pd.DataFrame()  # Code not found or hist empty
+
+        except FileNotFoundError:
+            if debug:
+                print(f"[DEBUG] HDF5 file {h5_mi_fname} not found")
+            return pd.DataFrame()
+        except KeyError:
+            if debug:
+                print(f"[DEBUG] Table {h5_mi_table} not found in HDF5 file")
+            return pd.DataFrame()
+        except Exception as e:
+            if debug:
+                print(f"[DEBUG] Unexpected error: {e}")
+            return pd.DataFrame()
 
 
 def nanrankdata_len(x):
@@ -1577,6 +1658,8 @@ if __name__ == "__main__":
     # print((sina.get_stock_code_data('000017').T))
 
     # print((sina.get_stock_code_data('300107').T))
+    dd = sina.get_real_time_tick('920088')
+    import ipdb;ipdb.set_trace()
 
     df =sina.all
     print(f'ticktime: {df.ticktime[:5]}')    
