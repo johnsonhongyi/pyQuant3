@@ -39,8 +39,8 @@ except ImportError as e:
 
 # Configuration for pyqtgraph
 pg.setConfigOptions(antialias=True)
-pg.setConfigOption('background', 'w')
-pg.setConfigOption('foreground', 'k')
+# pg.setConfigOption('background', 'w')
+# pg.setConfigOption('foreground', 'k')
 
 class CandlestickItem(pg.GraphicsObject):
     def __init__(self, data, theme='light'):
@@ -999,7 +999,7 @@ def run_visualizer(initial_code=None, df_all=None):
     window.show()
     sys.exit(app.exec())
 
-def main(initial_code=None):
+def main(initial_code='000002'):
     # --- 1. 尝试成为 Primary Instance ---
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
