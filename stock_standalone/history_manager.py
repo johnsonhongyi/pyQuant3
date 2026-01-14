@@ -489,7 +489,7 @@ class QueryHistoryManager:
         min_width = int(400 * scale_factor)
         max_width = 2000 if 1000 * scale_factor < screen_width_limit else screen_width_limit
         win_width = max(min_width, min(len(initialvalue) * char_width + 100, max_width))
-        win_height = 120
+        win_height = 180
         x, y = self.get_centered_window_position_query(parent, win_width, win_height)
         dlg.geometry(f"{int(win_width)}x{int(win_height)}+{int(x)}{int(y):+d}")
         result = {"value": None}
