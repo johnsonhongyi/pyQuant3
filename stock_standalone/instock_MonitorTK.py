@@ -1235,6 +1235,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.search_history1 = []
         self.search_history2 = []
         self.search_history3 = []
+        self.search_history4 = []
         self._search_job = None
 
         self.search_var1 = tk.StringVar()
@@ -1252,28 +1253,39 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.search_combo2.bind("<<ComboboxSelected>>", lambda e: self.apply_search())
         self.search_var2.trace_add("write", self._on_search_var_change)
 
+        # self.search_var4 = tk.StringVar()
+        # self.search_combo4 = ttk.Combobox(ctrl_frame, textvariable=self.search_var4, values=self.search_history4, width=30)
+        # self.search_combo4.pack(side="left", padx=5, fill="x", expand=True)
+        # self.search_combo4.bind("<Return>", lambda e: self.apply_search())
+        # self.search_combo4.bind("<<ComboboxSelected>>", lambda e: self.apply_search())
+        # self.search_var4.trace_add("write", self._on_search_var_change)
+
         self.search_combo2.bind("<Button-3>", self.on_right_click_search_var2)
+        # self.search_combo4.bind("<Button-3>", self.on_right_click_search_var4)
 
         self.query_manager = QueryHistoryManager(
             self,
             search_var1=self.search_var1,
             search_var2=self.search_var2,
+            # search_var4=self.search_var4,
             search_combo1=self.search_combo1,
             search_combo2=self.search_combo2,
+            # search_combo4=self.search_combo4,
             history_file=SEARCH_HISTORY_FILE,
             sync_history_callback = self.sync_history_from_QM,
             test_callback=self.on_test_code
         )
 
-        self.search_history1, self.search_history2,self.search_history3 = self.query_manager.load_search_history()
+        self.search_history1, self.search_history2, self.search_history3, self.search_history4 = self.query_manager.load_search_history()
 
         # 从 query_manager 获取历史
-        h1, h2, h3 = self.query_manager.history1, self.query_manager.history2, self.query_manager.history3
+        h1, h2, h3, h4 = self.query_manager.history1, self.query_manager.history2, self.query_manager.history3, self.query_manager.history4
 
         # 提取 query 字段用于下拉框
         self.search_history1 = [r["query"] for r in h1]
         self.search_history2 = [r["query"] for r in h2]   
         self.search_history3 = [r["query"] for r in h3]
+        self.search_history4 = [r["query"] for r in h4]
 
         tk.Button(bottom_search_frame, text="搜索", command=lambda: self.apply_search()).pack(side="left", padx=3)
         tk.Button(bottom_search_frame, text="清空", command=lambda: self.clean_search(1)).pack(side="left", padx=2)
@@ -1334,6 +1346,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         tk.Button(ctrl_frame, text="清空", command=lambda: self.clean_search(2)).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="删除", command=lambda: self.delete_search_history(2)).pack(side="left", padx=2)
+        
+        # 为 search_var4/history4 添加 专门的清空/删除按钮 (在 search_combo4 之后)
+        # tk.Button(ctrl_frame, text="清空4", command=lambda: self.clean_search(3)).pack(side="left", padx=2)
+        # tk.Button(ctrl_frame, text="删除4", command=lambda: self.delete_search_history(3)).pack(side="left", padx=2)
+        
         tk.Button(ctrl_frame, text="监控", command=lambda: self.KLineMonitor_init()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="选股", command=lambda: self.open_stock_selection_window()).pack(side="left", padx=2)
         tk.Button(ctrl_frame, text="写入", command=lambda: self.write_to_blk()).pack(side="left", padx=2)
@@ -1346,6 +1363,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.search_var1.set(self.search_history1[0])
         if len(self.search_history2) > 0:
             self.search_var2.set(self.search_history2[0])
+        # if len(self.search_history4) > 0:
+        #     self.search_var4.set(self.search_history4[0])
 
         self.setup_global_hotkey()
         self.after(1000,lambda :self.load_window_position(self, "main_window", default_width=1200, default_height=480))
@@ -4692,7 +4711,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             # 传入 realtime_service (如果有)
             rt_service = getattr(self, 'realtime_service', None)
-            win = StrategyManager(self, self.live_strategy, realtime_service=rt_service)
+            win = StrategyManager(self, self.live_strategy, realtime_service=rt_service, query_manager=self.query_manager)
             self._strategy_manager_win = win
             
             if verify_code:
@@ -6224,40 +6243,65 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.after_cancel(self._search_job)
         self._search_job = self.after(3000, self.apply_search)  # 3000ms后执行
 
-    def sync_history_from_QM(self, search_history1=None, search_history2=None, search_history3=None):
+    def sync_history_from_QM(self, **kwargs):
         self.query_manager.clear_hits()
+        source = kwargs.get("source", "")
+        selected_query = kwargs.get("selected_query")
 
-        if search_history1 is not None:
-            if search_history1 is self.query_manager.history2:
+        if "search_history1" in kwargs:
+            h1 = kwargs["search_history1"]
+            if h1 is self.query_manager.history2:
                 logger.info("[警告] sync_history_from_QM 收到错误引用（history2）→ 覆盖 history1 被阻止")
-                return
-            self.search_history1 = [r["query"] for r in list(search_history1)]
-
-        if search_history2 is not None:
-            if search_history2 is self.query_manager.history1:
-                logger.info("[警告] sync_history_from_QM 收到错误引用（history1）→ 覆盖 history2 被阻止")
-                return
-            self.search_history2 = [r["query"] for r in list(search_history2)]
-        if search_history3 is not None:
-            if search_history3 is self.query_manager.history1 or search_history3 is self.query_manager.history2:
-                logger.info("[警告] sync_history_from_QM 收到错误引用（history1/2）→ 覆盖 history3 被阻止")
-                return
-
-            # ✅ 如果 self.search_history3 已存在，就直接更新原对象
-            if hasattr(self, "search_history3") and isinstance(self.search_history3, list):
-                self.search_history3.clear()
-                self.search_history3.extend([r["query"] for r in list(search_history3)])
             else:
-                # 第一次初始化才创建
-                self.search_history3 = [r["query"] for r in list(search_history3)]
-            # ✅ 同步 combobox
-            # if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
-            # ✅ 如果 kline_monitor 存在，就刷新 ComboBox
-            if hasattr(self, "kline_monitor") and getattr(self.kline_monitor, "winfo_exists", lambda: False)():
-                try:
-                    self.kline_monitor.refresh_search_combo3()
-                except Exception as e:
-                    logger.info(f"[警告] 刷新 KLineMonitor ComboBox 失败: {e}")
+                self.search_history1 = [r["query"] for r in list(h1)]
+                if hasattr(self, 'search_combo1'):
+                    self.search_combo1['values'] = self.search_history1
+
+        if "search_history2" in kwargs:
+            h2 = kwargs["search_history2"]
+            if h2 is self.query_manager.history1:
+                logger.info("[警告] sync_history_from_QM 收到错误引用（history1）→ 覆盖 history2 被阻止")
+            else:
+                self.search_history2 = [r["query"] for r in list(h2)]
+                if hasattr(self, 'search_combo2'):
+                    self.search_combo2['values'] = self.search_history2
+        if "search_history3" in kwargs:
+            h3 = kwargs["search_history3"]
+            if h3 is self.query_manager.history1 or h3 is self.query_manager.history2:
+                logger.info("[警告] sync_history_from_QM 收到错误引用（history1/2）→ 覆盖 history3 被阻止")
+
+            else:
+                if hasattr(self, "search_history3") and isinstance(self.search_history3, list):
+                    self.search_history3.clear()
+                    self.search_history3.extend([r["query"] for r in list(h3)])
+                else:
+                    self.search_history3 = [r["query"] for r in list(h3)]
+                
+                if hasattr(self, "kline_monitor") and getattr(self.kline_monitor, "winfo_exists", lambda: False)():
+                    try:
+                        self.kline_monitor.refresh_search_combo3()
+                        # 如果是双击联动，强制执行一次查询以应用过滤器
+                        if source == "use" and selected_query:
+                            self.kline_monitor.search_var.set(selected_query)
+                            self.kline_monitor.search_code_status(onclick=True)
+                    except Exception as e:
+                        logger.info(f"[警告] 刷新 KLineMonitor ComboBox 失败: {e}")
+
+        if "search_history4" in kwargs:
+            h4 = kwargs["search_history4"]
+            self.search_history4 = [r["query"] for r in list(h4)]
+            if hasattr(self, 'search_combo4'):
+                self.search_combo4['values'] = self.search_history4
+                if source == "use" and selected_query:
+                    self.search_var4.set(selected_query)
+                    self.apply_search()
+        
+        # ✅ 子窗口同步：转发给策略白盒管理窗口
+        if hasattr(self, "_strategy_manager_win") and self._strategy_manager_win and getattr(self._strategy_manager_win, "winfo_exists", lambda: False)():
+            try:
+                self._strategy_manager_win._on_history_sync(**kwargs)
+            except Exception as e:
+                logger.info(f"[警告] 转发同步到 StrategyManager 失败: {e}")
 
     def sync_history(self, val, search_history, combo, history_attr, current_key):
 
@@ -6680,6 +6724,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         event.widget.delete(0, tk.END)
         event.widget.insert(0, clipboard_text)
+
+    def on_right_click_search_var4(self, event):
+        """search_var4 的右键快捷键，逻辑同 var2"""
+        self.on_right_click_search_var2(event)
 
 
     def _on_label_on_code_click(self, code,idx):
@@ -8861,21 +8909,31 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def apply_search(self):
         val1 = self.search_var1.get().strip()
         val2 = self.search_var2.get().strip()
+        # val4 = self.search_var4.get().strip()
 
         if not val1 and not val2:
             self.status_var.set("搜索框为空")
             return
 
         self.query_manager.clear_hits()
-        query = (f"({val1}) and ({val2})" if val1 and val2 else val1 or val2)
+        
+        # 组合查询条件
+        parts = []
+        if val1: parts.append(f"({val1})")
+        if val2: parts.append(f"({val2})")
+        # if val4: parts.append(f"({val4})")
+        
+        query = " and ".join(parts)
         self._last_value = query
 
         try:
-            # 🔹 同步两个搜索框的历史，不依赖 current_key
+            # 🔹 同步所有搜索框的历史
             if val1:
                 self.sync_history(val1, self.search_history1, self.search_combo1, "history1", "history1")
             if val2:
                 self.sync_history(val2, self.search_history2, self.search_combo2, "history2", "history2")
+            # if val4:
+            #     self.sync_history(val4, self.search_history4, self.search_combo4, "history4", "history4")
         except Exception as ex:
             logger.exception("更新搜索历史时出错: %s", ex)
 
@@ -9081,12 +9139,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
     def clean_search(self, which):
-        """清空指定搜索框内容"""
+        """清空指定搜索框内容 (1=bottom, 2=middle/ctrl, 3=history4/ctrl_new)"""
         if which == 1:
             self.search_var1.set("")
-        else:
-            # if len(self.search_var2.get()) == 6:
+        elif which == 2:
             self.search_var2.set("")
+        # elif which == 3:
+        #     self.search_var4.set("")
 
         self.select_code = None
         self.sortby_col = None
@@ -9115,6 +9174,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             combo = self.search_combo2
             var = self.search_var2
             key = "history2"
+        # elif which == 3:
+        #     history = self.search_history4
+        #     combo = self.search_combo4
+        #     var = self.search_var4
+        #     key = "history4"
 
         target = entry or var.get().strip()
         if not target:
