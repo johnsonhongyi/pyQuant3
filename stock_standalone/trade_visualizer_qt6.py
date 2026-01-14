@@ -11,7 +11,6 @@ from PyQt6.QtCore import QObject,Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QBrush, QPen
 from PyQt6.QtWidgets import QComboBox, QCheckBox, QHBoxLayout, QLabel, QToolBar
 from PyQt6.QtGui import QAction, QActionGroup
-from PyQt6.QtCore import QProcess
 import socket
 import pickle
 import struct
@@ -30,7 +29,11 @@ logger = LoggerFactory.getLogger()
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(current_dir)
 from multiprocessing import Process, Queue
-
+import queue  # 这个一定要加，用于捕获 Empty 异常
+from multiprocessing import Event
+import multiprocessing as mp
+# 全局或窗口属性
+stop_event = Event()
 try:
     from trading_logger import TradingLogger
     from JSONData import tdx_data_Day as tdd
@@ -344,10 +347,15 @@ def tick_to_daily_bar(tick_df):
     return bar
 
 
-def realtime_worker_process(code, queue, interval=3):
+def realtime_worker_process(code, queue, stop_flag,log_level=None,interval=10):
     """多进程拉取实时数据"""
+    # logger = LoggerFactory.getLogger(f"realtime_worker_process")
+    # if log_level is not None:
+    #     logger.setLevel(log_level.value)
+        # logger.setLevel(LoggerFactory.DEBUG)
     s = sina_data.Sina()
-    while True:
+    # while True:
+    while  stop_flag.value:   # 👈 关键
         try:
             if cct.get_trade_date_status() and cct.get_now_time_int() > 920 or not cct.get_trade_date_status():
                 with timed_ctx("realtime_worker_process", warn_ms=800):
@@ -359,7 +367,14 @@ def realtime_worker_process(code, queue, interval=3):
         except Exception as e:
             import traceback
             traceback.print_exc()
-        time.sleep(interval)
+        # time.sleep(interval)
+        if stop_flag.value:
+            for _ in range(interval):
+                if not stop_flag.value:
+                    break
+                time.sleep(1)
+        # logger.debug(f'auto_process interval: {interval}')
+    print(f'stop_flag: {stop_flag.value}')
 
 class RealtimeWorker(QObject):
     data_updated = pyqtSignal(object, object, object)  # code, tick_df, today_bar
@@ -400,14 +415,15 @@ class RealtimeWorker(QObject):
 
 
 class MainWindow(QMainWindow, WindowMixin):
-    def __init__(self):
+    def __init__(self,stop_flag=None,log_level=None):
         super().__init__()
         self.setWindowTitle("Trade Signal Visualizer (Qt6 + PyQtGraph)")
         self.sender = StockSender(callback=None)
         # WindowMixin requirement: scale_factor
         self.scale_factor = get_windows_dpi_scale_factor()
         self.hdf5_mutex = QMutex() 
-
+        self.stop_flag = stop_flag
+        self.log_level = log_level
         self.resample = 'd'
         self.qt_theme = 'dark'  # 默认使用黑色主题
         self.show_bollinger = True
@@ -451,27 +467,20 @@ class MainWindow(QMainWindow, WindowMixin):
         # 1. Left Sidebar: Stock Table
         self.stock_table = QTableWidget()
         self.stock_table.setMaximumWidth(300)
-        self.stock_table.setColumnCount(4)
         # self.stock_table.setHorizontalHeaderLabels(['Code', 'Name', 'Rank', 'Percent'])
-        # self.headers = ['code', 'name', 'Rank', 'win', 'slope', 'volume', 'power_idx', 'percent']
-        self.headers = ['Code', 'Name', 'Rank', 'Percent']
+        self.headers = ['code', 'name', 'percent','dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
+        # self.headers = ['Code', 'Name', 'Rank', 'Percent']
+        self.stock_table.setColumnCount(len(self.headers))
+        
         self.stock_table.setHorizontalHeaderLabels(self.headers)
         # self.stock_table.horizontalHeader().setStretchLastSection(True)
         self.stock_table.setSortingEnabled(True)
-
         headers = self.stock_table.horizontalHeader()
         headers.setStretchLastSection(True)
         # 设置表格列自适应
         # 所有列自动根据内容调整宽度
         for col in range(len(headers)):
             headers.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-
-        # self.stock_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # Code 列自适应内容
-        # # self.stock_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)          # Name 列占满剩余空间
-        # self.stock_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)          # Name 列占满剩余空间
-        # self.stock_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Rank 列自适应
-        # self.stock_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Percent 列自适应
-
 
         # 在 MainWindow.__init__ 中修改
         self.stock_table.cellClicked.connect(self.on_table_cell_clicked) # 保留点击
@@ -576,12 +585,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def on_real_time_toggled(self, state):
         self.realtime = bool(state)
-        # if self.realtime and self.current_code:
-        #     self._start_realtime_worker(self.current_code)
-        # elif not self.realtime and self.realtime_worker:
-        #     self.realtime_worker.stop()
-
-        # if self.realtime and cct.get_trade_date_status() and self.current_code:
         if self.realtime and self.current_code:
             self._start_realtime_process(self.current_code)
         elif not self.realtime:
@@ -596,7 +599,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 启动新进程
         self.realtime_process = Process(
             target=realtime_worker_process,
-            args=(code, self.realtime_queue),
+            args=(code, self.realtime_queue,self.stop_flag,self.log_level),
             daemon=False
         )
         self.realtime_process.start()
@@ -607,12 +610,43 @@ class MainWindow(QMainWindow, WindowMixin):
             self.realtime_process.join()
             self.realtime_process = None
 
+    # def _poll_realtime_queue(self):
+    #     """从队列读取数据并更新 UI"""
+    #     while not self.realtime_queue.empty():
+    #         code, tick_df, today_bar = self.realtime_queue.get()
+    #         if code != self.current_code:
+    #             continue
+    #         self.on_realtime_update(code, tick_df, today_bar)
+    # def _poll_realtime_queue(self):
+    #     """从队列安全读取数据并更新 UI"""
+    #     while True:
+    #         try:
+    #             code, tick_df, today_bar = self.realtime_queue.get_nowait()
+    #         except queue.Empty:
+    #             break  # 队列空了，退出循环
+    #         except (EOFError, OSError):
+    #             break  # 队列已经关闭或进程退出，安全退出
+    #         except Exception as e:
+    #             logger.exception(f"Error reading realtime queue: {e}")
+    #             break
+
+    #         # 忽略非当前股票的数据
+    #         if code != self.current_code:
+    #             continue
+
+    #         self.on_realtime_update(code, tick_df, today_bar)
+
     def _poll_realtime_queue(self):
-        """从队列读取数据并更新 UI"""
-        while not self.realtime_queue.empty():
-            code, tick_df, today_bar = self.realtime_queue.get()
-            if code != self.current_code:
-                continue
+        while True:
+            try:
+                code, tick_df, today_bar = self.realtime_queue.get_nowait()
+            except queue.Empty:
+                break
+            except (EOFError, OSError):
+                break
+            except Exception as e:
+                logger.exception(e)
+                break
             self.on_realtime_update(code, tick_df, today_bar)
 
     def _on_initial_loaded(self, code, day_df, tick_df):
@@ -629,7 +663,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 启动 realtime
         if self.realtime:
-            # self._start_realtime_worker(code)
             self._start_realtime_process(code)
 
 
@@ -727,13 +760,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def apply_qt_theme(self):
         """Apply Qt theme / color scheme"""
-        # if self.qt_theme == 'dark':
-        #     self.setStyleSheet("""
-        #         QWidget { background-color: #2b2b2b; color: #f0f0f0; }
-        #         QTableWidget { gridline-color: #555555; }
-        #     """)
-        #     pg.setConfigOption('background', 'k')
-        #     pg.setConfigOption('foreground', 'w')
         if self.qt_theme == 'dark':
             self.setStyleSheet("""
                 QWidget {
@@ -780,34 +806,33 @@ class MainWindow(QMainWindow, WindowMixin):
             self.load_stock_by_code(self.current_code)
 
     def closeEvent(self, event):
-        """Save window position on close"""
-        """关闭窗口时统一清理"""
-        # 1. 停止 Realtime Process
-        self._stop_realtime_process()
-        # 停掉 Realtime 多进程
+        """窗口关闭统一退出清理"""
+        
+        # 1️⃣ 停止实时数据进程
+        # 1️⃣ 通知子进程退出
+        if hasattr(self, 'stop_flag'):
+            self.stop_flag.value = False
+        if hasattr(self, 'refresh_flag'):
+            self.refresh_flag.value = False
+
+        # 2️⃣ 停止 realtime_process
         if getattr(self, 'realtime_process', None):
-           if self.realtime_process.is_alive():
-               self.realtime_process.terminate()  # 发送终止信号
-               self.realtime_process.join(timeout=2)  # 等待结束
+            if self.realtime_process.is_alive():
+                self.realtime_process.join(timeout=2)
+                if self.realtime_process.is_alive():
+                    logger.info("realtime_process 强制终止")
+                    self.realtime_process.terminate()
+                    self.realtime_process.join()
+            self.realtime_process = None
+        # 当 GUI 关闭时，触发 stop_event
+        stop_event.set()
 
-        # 停掉 QT GUI 子进程
-        if getattr(self, 'qt_process', None):
-           if self.qt_process.state() == QProcess.ProcessState.Running:
-               self.qt_process.terminate()
-               self.qt_process.join(timeout=2)
-
-        # 停掉任何后台线程
-        # if getattr(self, 'realtime_thread', None):
-        #    if self.realtime_thread.isRunning():
-        #        self.realtime_worker.stop()
-        #        self.realtime_thread.quit()
-        #        self.realtime_thread.wait()
-
-        # 3. 保存窗口位置
+        # 5️⃣ 保存窗口位置
         self.save_window_position_qt(self, "TradeVisualizer")
 
-        # 调用父类 closeEvent
+        # 6️⃣ 调用父类 closeEvent
         super().closeEvent(event)
+
 
     def load_stock_list(self):
         """Load stocks from df_all if available, otherwise from signal history"""
@@ -822,8 +847,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 unique_stocks = df[['code', 'name']].drop_duplicates()
                 # Create a minimal df_all structure
                 fallback_df = unique_stocks.copy()
-                fallback_df['Rank'] = 0
-                fallback_df['percent'] = 0.0
+                for col in self.headers:
+                    if col not in ['code' , 'name']:
+                        fallback_df[col] = 0
+                # fallback_df['Rank'] = 0
+                # fallback_df['percent'] = 0.0
                 self.update_stock_table(fallback_df)
     
     def update_stock_table(self, df):
@@ -836,8 +864,9 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # Filter required columns
         required_cols = ['code', 'name']
-        optional_cols = ['Rank', 'percent']
-        
+        # optional_cols = ['Rank', 'percent']
+        optional_cols = [col for col in self.headers if col not in required_cols]
+        logger.info(f'optional_cols: {optional_cols}')
         for col in required_cols:
             if col not in df.columns:
                 return
@@ -859,28 +888,54 @@ class MainWindow(QMainWindow, WindowMixin):
             name_item = QTableWidgetItem(stock_name)
             self.stock_table.setItem(row_position, 1, name_item)
             
+            # code_name_map / code_info_map 之前的逻辑保持
             self.code_name_map[stock_code] = stock_name
             self.code_info_map[stock_code] = {
-                    "name": stock_name,
-                    "rank": row.get('Rank'),
-                    "percent": row.get('percent')
-                }
-            # Rank
-            rank_val = row.get('Rank', 0)
-            rank_item = QTableWidgetItem()
-            rank_item.setData(Qt.ItemDataRole.DisplayRole, int(rank_val) if pd.notnull(rank_val) else 0)
-            self.stock_table.setItem(row_position, 2, rank_item)
-            
-            # Percent
-            pct_val = row.get('percent', 0.0)
-            pct_item = QTableWidgetItem()
-            pct_item.setData(Qt.ItemDataRole.DisplayRole, float(pct_val) if pd.notnull(pct_val) else 0.0)
-            # Color code percent
-            if pd.notnull(pct_val) and float(pct_val) > 0:
-                pct_item.setForeground(QColor('red'))
-            elif pd.notnull(pct_val) and float(pct_val) < 0:
-                pct_item.setForeground(QColor('green'))
-            self.stock_table.setItem(row_position, 3, pct_item)
+                "name": stock_name,
+            }
+            for col in optional_cols:
+                self.code_info_map[stock_code][col] = row.get(col)
+            # 填表格
+            # 假设 row_position 已经确定
+            # required_cols 已经处理过 code / name，如果可选列从列索引 len(required_cols) 开始
+            # 遍历可选列填表
+            for idx, col in enumerate(optional_cols, start=len(required_cols)):
+                val = row.get(col)
+                item = QTableWidgetItem()
+
+                # 空值 / 类型处理
+                if pd.notnull(val):
+                    if isinstance(val, (int, float)):
+                        item.setData(Qt.ItemDataRole.DisplayRole, val)
+                    else:
+                        item.setData(Qt.ItemDataRole.DisplayRole, str(val))
+                else:
+                    # 默认值
+                    if col in ['Rank']:
+                        item.setData(Qt.ItemDataRole.DisplayRole, 0)
+                    # elif col in ['percent', 'slope', 'power_idx', 'volume']:
+                        # item.setData(Qt.ItemDataRole.DisplayRole, 0.0)
+                    else:
+                        item.setData(Qt.ItemDataRole.DisplayRole, 0.0)
+                        
+                        # item.setData(Qt.ItemDataRole.DisplayRole, '')
+
+                # -------------------------
+                # 可扩展列特殊显示规则
+                # -------------------------
+                if col == 'percent' and pd.notnull(val):
+                    val_float = float(val)
+                    if val_float > 0:
+                        item.setForeground(QColor('red'))
+                    elif val_float < 0:
+                        item.setForeground(QColor('green'))
+
+                # 如果后续还有别的列需要颜色逻辑，可以继续加 elif col == 'xxx'
+
+                # 填入表格
+                self.stock_table.setItem(row_position, idx, item)
+
+
         
         self.stock_table.setSortingEnabled(True)
         self.stock_table.resizeColumnsToContents()
@@ -890,6 +945,7 @@ class MainWindow(QMainWindow, WindowMixin):
         if code_item:
             code = code_item.data(Qt.ItemDataRole.UserRole)
             if code:
+                self._clicked_change = True
                 if code != self.current_code:  # 只有 code 不同才加载
                     self.load_stock_by_code(code)
                     if self.tdx_enabled:
@@ -909,11 +965,14 @@ class MainWindow(QMainWindow, WindowMixin):
                 # 只有当代码发生变化时才加载，防止重复触发
                 if  code != self.current_code:  # 只有 code 不同才加载
                     self.load_stock_by_code(code)
-                    if self.tdx_enabled:
-                        try:
-                            self.sender.send(code)
-                        except Exception as e:
-                            print(f"Error sending stock code: {e}")
+                    # 判断是不是鼠标点击：currentItemChanged 会在 cellClicked 之后触发
+                    if getattr(self, "_clicked_change", False):
+                        self._clicked_change = False
+                        if self.tdx_enabled:
+                            try:
+                                self.sender.send(code)
+                            except Exception as e:
+                                print(f"Error sending stock code: {e}")
 
     def update_df_all(self, df):
         """Update df_all and refresh table"""
@@ -927,12 +986,6 @@ class MainWindow(QMainWindow, WindowMixin):
         # ① 切 code 一定先停 realtime
         # ---- 1. 停止旧的 realtime worker（如果存在）----
         if self.realtime_process:
-            # self.realtime_worker.stop()
-            # self.realtime_thread.quit()
-            # self.realtime_thread.wait()
-            # self.realtime_worker = None
-            # self.realtime_thread = None
-
             # 停止旧的实时进程（如果存在）
             self._stop_realtime_process()
 
@@ -951,7 +1004,6 @@ class MainWindow(QMainWindow, WindowMixin):
         # ---- 3. 如果开启 realtime，再启动 realtime worker ----
         with timed_ctx("start_realtime_worker", warn_ms=800):
             if self.realtime:
-                # self._start_realtime_worker(code)
                 self._start_realtime_process(code)
         if logger.level == LoggerFactory.DEBUG:
             print_timing_summary(top_n=6)
@@ -963,16 +1015,15 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.kline_plot.clear()
         self.tick_plot.clear()
-        # # self.kline_plot.setTitle(f"{code} Daily K-Line")
-        # name = self.code_name_map.get(str(code), "")
-        # title = f"{code} {name} Daily K-Line" if name else f"{code} Daily K-Line"
-        # self.kline_plot.setTitle(title)
 
         info = self.code_info_map.get(code, {})
 
         name = info.get("name", "")
-        rank = info.get("rank", None)
+        rank = info.get("Rank", None)
         percent = info.get("percent", None)
+        win = info.get("win", None)
+        slope = info.get("slope", None)
+        volume = info.get("volume", None)
 
         title_parts = [code]
         if name:
@@ -984,6 +1035,14 @@ class MainWindow(QMainWindow, WindowMixin):
         if percent is not None:
             pct_str = f"{percent:+.2f}%"
             title_parts.append(pct_str)
+
+        if win is not None:
+            title_parts.append(f"win: {int(win)}")
+        if slope is not None:
+            slope_str = f"{slope:.1f}%"
+            title_parts.append(f"slope: {slope:.1f}%")
+        if volume is not None:
+            title_parts.append(f"vol: {volume:.1f}")
 
         title_text = " | ".join(title_parts)
 
@@ -1287,11 +1346,14 @@ def run_visualizer(initial_code=None, df_all=None):
     window.show()
     sys.exit(app.exec())
 
-def main(initial_code='000002',logger=logger):
+def main(initial_code='000002',stop_flag=None,log_level=None):
     # --- 1. 尝试成为 Primary Instance ---
     # logger = LoggerFactory.getLogger()
-    # logger = logger
+    # if log_level is not None:
+    #     logger.setLevel(log_level.value)
+
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    stop_flag = stop_flag if stop_flag else mp.Value('b', True)   # 出厂运行
     try:
         server_socket.bind((IPC_HOST, IPC_PORT))
         server_socket.listen(1)
@@ -1299,11 +1361,12 @@ def main(initial_code='000002',logger=logger):
         print(f"Listening on {IPC_HOST}:{IPC_PORT}")
     except OSError:
         is_primary_instance = False
+        print(f"Listening 被占用 {IPC_HOST}:{IPC_PORT}")
 
     # --- 2. Secondary Instance: 发送 code 给 Primary Instance 后退出 ---
     if not is_primary_instance:
-        if len(sys.argv) > 1:
-            code_to_send = sys.argv[1]
+        if len(sys.argv) > 1 or initial_code is not None:
+            code_to_send = initial_code if initial_code is not None else sys.argv[1]
             try:
                 client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 client_socket.connect((IPC_HOST, IPC_PORT))
@@ -1316,7 +1379,7 @@ def main(initial_code='000002',logger=logger):
 
     # --- 3. Primary Instance: 启动 GUI ---
     app = QApplication(sys.argv)
-    window = MainWindow()
+    window = MainWindow(stop_flag,log_level)
     start_code = initial_code
     # 启动监听线程，处理 socket 消息
     listener = CommandListenerThread(server_socket)
@@ -1336,8 +1399,8 @@ def main(initial_code='000002',logger=logger):
     elif start_code is not None:
         window.load_stock_by_code(start_code)
     ret = app.exec()  # 阻塞 Qt 主循环
-
     # 确保所有后台进程被杀
+    stop_flag.value = False
     window.close()  # 触发 closeEvent
     sys.exit(ret)
     # sys.exit(app.exec())
@@ -1394,8 +1457,9 @@ def main(initial_code='000002',logger=logger):
 if __name__ == "__main__":
     # logger.setLevel(LoggerFactory.INFO)
     logger.setLevel(LoggerFactory.DEBUG)
-
-    main()
+    stop_flag =  mp.Value('b', True)   # 出厂运行
+    log_level = mp.Value('i', LoggerFactory.DEBUG)  # 'i' 表示整数
+    main(initial_code='000002',stop_flag=stop_flag,log_level=log_level)
     # # 1. Try to become the Primary Instance
     # logger.setLevel(LoggerFactory.DEBUG)
     # server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

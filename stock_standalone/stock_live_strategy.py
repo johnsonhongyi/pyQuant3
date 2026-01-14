@@ -1751,7 +1751,7 @@ class StockLiveStrategy:
 
     def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0) -> None:
         """触发报警"""
-        logger.warning(f"🔔 ALERT: {message}")
+        logger.debug(f"🔔 ALERT: {message}")
         
         # # 2. 语音播报
         # speak_text = f"注意{action}，{code} ，{message}"
