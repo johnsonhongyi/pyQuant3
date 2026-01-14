@@ -65,7 +65,7 @@ global last_trade_date,is_trade_date_today
 import ctypes
 import shutil
 from collections import defaultdict
-
+import ast
 _TIMING_STATS = defaultdict(list)
 
 class timed_ctx:
@@ -672,6 +672,7 @@ class GlobalConfig:
         self.MAX_DAILY_ADDITIONS = self.get_with_writeback("general", "MAX_DAILY_ADDITIONS", fallback='10', value_type="int")
         self.loop_counter_limit = self.get_with_writeback("general", "loop_counter_limit", fallback='10', value_type="int")
         self.real_time_tick_limit = self.get_with_writeback("general", "real_time_tick_limit", fallback='300', value_type="int")
+        self.real_time_cols = self.get_with_writeback("general", "real_time_cols", fallback="'code', 'name', 'Rank','win','slope','volume','power_idx', 'percent'", value_type="tuple_str")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         try:
@@ -876,6 +877,9 @@ cleanRAMdiskTemp: str = CFG.cleanRAMdiskTemp
 MAX_DAILY_ADDITIONS: int = CFG.MAX_DAILY_ADDITIONS
 loop_counter_limit: int = CFG.loop_counter_limit
 real_time_tick_limit: int = CFG.real_time_tick_limit
+real_time_cols: str = CFG.real_time_cols
+real_time_cols = ast.literal_eval(f"[{real_time_cols}]")
+
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:
     return os.path.sep

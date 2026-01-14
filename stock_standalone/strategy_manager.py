@@ -417,10 +417,8 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         default_filters = [
             " ",
             "score > 80", 
-            "score < 50",
-            "diff > 5", 
             "volume > 2 and amount > 5e8",
-            "60 < score < 80 and volume > 2 and close > ma5d and low < ma10d and amount > 5e8",
+            "60 < score and volume > 2 and close > ma5d and low < ma10d and amount > 5e8",
             "20 < score < 80 and volume > 2 and amount > 2e8"
         ]
         # 加载历史
@@ -1133,14 +1131,11 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             
         # 更新 UI values (需保留 default)
         default_filters = [
-            "",
+            " ",
             "score > 80", 
-            "score < 20",
-            "diff > 5", 
-            "diff < -5",
-            "volume > 500000",
-            "score > 60 and diff > 3",
-            "20 < score < 80 and volume > 10000"
+            "volume > 2 and amount > 5e8",
+            "60 < score and volume > 2 and close > ma5d and low < ma10d and amount > 5e8",
+            "20 < score < 80 and volume > 2 and amount > 2e8"
         ] # 需要与 _init 保持一致，最好提取为类常量
         
         # 重新构建 combined
