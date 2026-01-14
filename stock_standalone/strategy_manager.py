@@ -1,13 +1,11 @@
 # -*- coding: utf-8 -*-
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
-import logging
+from tkinter import ttk, messagebox
 import json
 import os
 import time
 from datetime import datetime
-from threading import Thread
-from typing import Any, Optional, Dict
+from typing import Any, Dict
 import pandas as pd
 import numpy as np
 import re
@@ -17,7 +15,6 @@ from stock_logic_utils import toast_message
 from history_manager import QueryHistoryManager
 from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
 from JohnsonUtil import LoggerFactory
-from JohnsonUtil import commonTips as cct
 
 logger = LoggerFactory.getLogger(name="StrategyManager")
 
@@ -33,45 +30,67 @@ class StrategyManager(tk.Toplevel, WindowMixin):
     5. 单股验证与手动交易
     """
     
-    CONFIG_FILE = "strategy_config.json"
+    CONFIG_FILE: str = "strategy_config.json"
     
-    def __init__(self, master, live_strategy, realtime_service=None):
+    def __init__(self, master: Any, live_strategy: Any, realtime_service: Any = None, query_manager: Any = None):
         super().__init__(master)
-        self.master = master
-        self.live_strategy = live_strategy
-        self.realtime_service = realtime_service
+        self.master: Any = master
+        self.live_strategy: Any = live_strategy
+        self.realtime_service: Any = realtime_service
         
         # 注入 realtime_service 到 live_strategy (为了后台集成)
         if self.live_strategy and self.realtime_service:
             self.live_strategy.realtime_service = self.realtime_service
             
-        self.decision_engine = getattr(live_strategy, 'decision_engine', None)
-        self.risk_engine = getattr(live_strategy, 'risk_engine', None)
-        self.trading_logger = getattr(live_strategy, 'trading_logger', None)
+        self.decision_engine: Any = getattr(live_strategy, 'decision_engine', None)
+        self.risk_engine: Any = getattr(live_strategy, 'risk_engine', None)
+        self.trading_logger: Any = getattr(live_strategy, 'trading_logger', None)
         
         self.title("策略白盒管理器 & 验证工具")
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         
         # 加载持久化配置
-        self.config_data = self._load_config()
+        self.config_data: Dict = self._load_config()
         self._apply_config_to_engines()
 
-        self._start_time = time.time()
-        self._update_job = None
-        self._pause_refresh = False
+        self._start_time: float = time.time()
+        self._update_job: Any = None
+        self._pause_refresh: bool = False
+        self._data_sort_col: str = "score"  # 默认排序字段
+        self._data_sort_reverse: bool = True # 默认降序排序
         
-        # 初始化 QueryHistoryManager (history2 集成)
-        self.var_history2 = tk.StringVar()
-        self.var_use_history2 = tk.BooleanVar(value=True)
-        self.query_manager = QueryHistoryManager(
-            self,
-            search_var2=self.var_history2, # 绑定到 history2
-            history_file=SEARCH_HISTORY_FILE,
-            sync_history_callback=self._on_history_sync
-        )
+        self.var_history2: tk.StringVar = tk.StringVar()
+        self.var_use_history2: tk.BooleanVar = tk.BooleanVar(value=True)
+        self.var_history4: tk.StringVar = tk.StringVar()
+        
+        if query_manager:
+            self.query_manager = query_manager
+            # 链接共享 QM 的变量
+            if self.query_manager.search_var2:
+                self.var_history2 = self.query_manager.search_var2
+            else:
+                self.query_manager.search_var2 = self.var_history2
+            
+            if self.query_manager.search_var4:
+                self.var_history4 = self.query_manager.search_var4
+            else:
+                self.query_manager.search_var4 = self.var_history4
+        else:
+            self.query_manager = QueryHistoryManager(
+                self,
+                search_var2=self.var_history2, 
+                search_var4=self.var_history4, 
+                history_file=SEARCH_HISTORY_FILE,
+                sync_history_callback=self._on_history_sync
+            )
+        
+        # 迁移旧数据到 history4
+        # self._migrate_old_history()
+        
         # 加载历史到 combo (在 _init_data_tab 中会用到)
-        _, h2, _ = self.query_manager.load_search_history()
-        self.history2_list = [r["query"] for r in h2]
+        _, h2, _, h4 = self.query_manager.load_search_history()
+        self.history2_list: list[str] = [r["query"] for r in h2]
+        self.history4_list: list[str] = [r["query"] for r in h4]
 
         # 初始化 UI
         self._setup_ui()
@@ -82,41 +101,42 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         # 启动自动刷新
         self._schedule_refresh()
 
-    def _setup_ui(self):
+    def _setup_ui(self) -> None:
         # 状态栏 (放在底部)
-        self.statusbar = tk.Label(self, text="Ready", bd=1, relief=tk.SUNKEN, anchor="w")
+        self.statusbar: tk.Label = tk.Label(self, text="Ready", bd=1, relief=tk.SUNKEN, anchor="w")
         self.statusbar.pack(side="bottom", fill="x")
         
-        self.notebook = ttk.Notebook(self)
+        self.notebook: ttk.Notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=5, pady=5)
         
         # Tab 1: 决策引擎 (Decision Engine)
-        self.tab_decision = ttk.Frame(self.notebook)
+        self.tab_decision: ttk.Frame = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_decision, text="🧠 决策引擎")
         self._init_decision_tab()
         
         # Tab 2: 风险控制 (Risk Control)
-        self.tab_risk = ttk.Frame(self.notebook)
+        self.tab_risk: ttk.Frame = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_risk, text="🛡️ 风险控制")
         self._init_risk_tab()
         
         # Tab 3: 实时数据 (Realtime Data)
-        self.tab_data = ttk.Frame(self.notebook)
+        self.tab_data: ttk.Frame = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_data, text="📊 实时数据")
         self._init_data_tab()
+        self._init_tree_tab()
         
         # Tab 4: 信号日志 (Signal Log)
-        self.tab_log = ttk.Frame(self.notebook)
+        self.tab_log: ttk.Frame = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_log, text="📜 信号日志")
         self._init_log_tab()
         
         # Tab 5: 验证/手操 (Verify & Trade)
-        self.tab_verify = ttk.Frame(self.notebook)
+        self.tab_verify: ttk.Frame = ttk.Frame(self.notebook)
         self.notebook.add(self.tab_verify, text="🔧 验证与手操")
         self._init_verify_tab()
 
     # ------------------- 配置持久化 -------------------
-    def _load_config(self) -> Dict:
+    def _load_config(self) -> dict[str, Any]:
         if os.path.exists(self.CONFIG_FILE):
             try:
                 with open(self.CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -125,7 +145,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
                 logger.error(f"加载策略配置失败: {e}")
         return {}
         
-    def _save_config(self):
+    def _save_config(self) -> None:
         try:
             with open(self.CONFIG_FILE, 'w', encoding='utf-8') as f:
                 json.dump(self.config_data, f, indent=4, ensure_ascii=False)
@@ -133,14 +153,48 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         except Exception as e:
             logger.error(f"保存策略配置失败: {e}")
 
-    def _apply_config_to_engines(self):
+    # def _migrate_old_history(self) -> None:
+    #     """从 strategy_config.json 迁移 history 到 history_manager 的 history4"""
+    #     old_filters = self.config_data.get('filter_history', [])
+    #     if not old_filters:
+    #         return
+            
+    #     logger.info(f"💾 正在迁移 {len(old_filters)} 条旧过滤记录到 history4...")
+    #     migrated_count = 0
+    #     for q in old_filters:
+    #         q = q.strip()
+    #         if not q: continue
+    #         record = {"query": q, "starred": 0, "note": "Migrated"}
+    #         # 直接操作 query_manager 数据
+    #         self.query_manager.sync_history_current(record, action="add", history_key="history4")
+    #         migrated_count += 1
+            
+    #     # 同时迁移已有的 history2 记录 (因为 StrategyManager 之前主要使用 H2)
+    #     _, h2, _, _ = self.query_manager.load_search_history()
+    #     h2_count = 0
+    #     for r in h2:
+    #         q = r.get("query", "").strip()
+    #         if q:
+    #             self.query_manager.sync_history_current(r.copy(), action="add", history_key="history4")
+    #             h2_count += 1
+            
+    #     # 移除旧配置并保存
+    #     if 'filter_history' in self.config_data:
+    #         del self.config_data['filter_history']
+    #         self._save_config()
+            
+    #     # 强制保存一次 history_manager 的文件
+    #     self.query_manager.save_search_history()
+    #     logger.info(f"✅ 成功迁移 {migrated_count} 条配置记录和 {h2_count} 条 H2 记录到 history4，并清理了旧配置。")
+
+    def _apply_config_to_engines(self) -> None:
         """应用保存的配置到引擎实例"""
         if not self.config_data:
             return
             
         # 决策引擎参数
         if self.decision_engine:
-            de_cfg = self.config_data.get('decision_engine', {})
+            de_cfg: dict = self.config_data.get('decision_engine', {})
             for attr, val in de_cfg.items():
                 if hasattr(self.decision_engine, attr):
                     setattr(self.decision_engine, attr, float(val))
@@ -148,7 +202,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         
         # 风险引擎参数
         if self.risk_engine:
-            re_cfg = self.config_data.get('risk_engine', {})
+            re_cfg: dict = self.config_data.get('risk_engine', {})
             for attr, val in re_cfg.items():
                 if hasattr(self.risk_engine, attr):
                     setattr(self.risk_engine, attr, float(val))
@@ -384,35 +438,38 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         self.ent_period = tk.Entry(ctrl_frame, textvariable=self.var_stat_period, width=3)
         self.ent_period.pack(side="left", padx=2)
         
-        # 2. 高级过滤
-        tk.Label(ctrl_frame, text="过滤:").pack(side="left", padx=5)
+        # 2. H2 联动过滤 (移至顶部)
+        tk.Label(ctrl_frame, text="H2联合:").pack(side="left", padx=5)
+        tk.Checkbutton(ctrl_frame, text="", variable=self.var_use_history2, 
+                       command=self._refresh_data_tab).pack(side="left")
         
-        # 删除按钮 (先 pack 到右侧，避免阻挡 combo 扩展)
-        tk.Button(ctrl_frame, text="✖", width=2, command=self._delete_current_filter).pack(side="right", padx=2)
-        
-        self.combo_filter = ttk.Combobox(ctrl_frame, width=25)
-        self.combo_filter.pack(side="left", padx=2, fill="x", expand=True)
-        
-        # --- Row 2: History2 联动过滤 ---
-        h2_frame = tk.Frame(self.tab_data)
-        h2_frame.pack(fill="x", padx=10, pady=2)
-        
-        tk.Checkbutton(h2_frame, text="H2联合过滤 (history2):", variable=self.var_use_history2, 
-                       command=self._refresh_data_tab, font=("Arial", 9, "bold")).pack(side="left", padx=2)
-        
-        self.combo_history2 = ttk.Combobox(h2_frame, textvariable=self.var_history2)
+        self.combo_history2 = ttk.Combobox(ctrl_frame, width=20, textvariable=self.var_history2)
         self.combo_history2.pack(side="left", padx=2, fill="x", expand=True)
         self.combo_history2['values'] = self.history2_list
-        # 默认选中最新的历史记录 (列表第一个)
-        if self.history2_list:
+        if self.history2_list and not self.var_history2.get():
             self.var_history2.set(self.history2_list[0])
-        
-        # 绑定 History2 选择事件
+            
         self.combo_history2.bind("<<ComboboxSelected>>", lambda e: self._refresh_data_tab())
         self.combo_history2.bind("<Return>", lambda e: self._refresh_data_tab())
 
-        # 管理按钮 (打开 QueryHistoryManager 编辑器)
-        tk.Button(h2_frame, text="⚙️ 管理搜索历史", command=lambda: self.query_manager.open_editor()).pack(side="left", padx=5)
+        # --- Row 2: 高级过滤 (History4, 下方放置) ---
+        h4_frame = tk.Frame(self.tab_data)
+        h4_frame.pack(fill="x", padx=10, pady=2)
+        
+        tk.Label(h4_frame, text="策略过滤 (H4):", font=("Arial", 9, "bold")).pack(side="left", padx=2)
+        
+        # 删除按钮
+        tk.Button(h4_frame, text="✖", width=2, command=self._delete_current_filter).pack(side="right", padx=2)
+        # 管理按钮 (⚙️)
+        # tk.Button(h4_frame, text="⚙️", width=2, command=lambda: self.query_manager.open_editor()).pack(side="right", padx=2)
+        
+        self.combo_filter = ttk.Combobox(h4_frame, width=35, textvariable=self.var_history4)
+        self.combo_filter.pack(side="left", padx=2, fill="x", expand=True)
+        self.combo_filter['values'] = self.history4_list
+        
+        # 链接 combo 到 query_manager 以便双击"使用"时同步
+        self.query_manager.search_combo4 = self.combo_filter
+        self.query_manager.search_combo2 = self.combo_history2
 
         default_filters = [
             " ",
@@ -421,32 +478,31 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             "60 < score and volume > 2 and close > ma5d and low < ma10d and amount > 5e8",
             "20 < score < 80 and volume > 2 and amount > 2e8"
         ]
-        # 加载历史
-        saved_history = self.config_data.get('filter_history', [])
-        # 合并并去重，保持顺序 (saved first or default first? usually saved history implies user preference)
-        # Let's align with user request: 'automatic load'
-        # Combine: saved_history + default_filters, removing duplicates
-        combined = []
-        seen = set()
-        for f in saved_history + default_filters:
-            if f not in seen:
-                combined.append(f)
+        
+        # 补充默认值到 history4
+        seen = set(self.history4_list)
+        for f in default_filters:
+            f = f.strip()
+            if f and f not in seen:
+                self.query_manager.sync_history_current({"query": f, "starred": 0}, action="add", history_key="history4")
                 seen.add(f)
         
-        self.combo_filter['values'] = combined
+        # 重新获取最新的 history4_list
+        _, _, _, h4 = self.query_manager.load_search_history()
+        self.history4_list = [r["query"] for r in h4]
+        self.combo_filter['values'] = self.history4_list
         
-        # 恢复上次选中的过滤
-        last_filter = self.config_data.get('last_filter', "")
-        if last_filter in combined:
-            self.combo_filter.set(last_filter)
-        elif last_filter:
-            self.combo_filter.set(last_filter) # even if not in history, set it
+        # 恢复上次选中的过滤 (优先使用 history4 中的最新项，即最近一次 pinning 或使用的)
+        if self.history4_list:
+            self.var_history4.set(self.history4_list[0])
             
-        # 回车应用过滤
-        # self.combo_filter.bind('<Return>', lambda e: self._refresh_data_tab())
-        self.combo_filter.bind('<Return>', lambda e: (self._pause_refresh_end(), self._refresh_data_tab()))
+        # 绑定事件 (支持暂停/恢复刷新)
+        self.combo_filter.bind("<<ComboboxSelected>>", lambda e: self._apply_filter())
+        self.combo_filter.bind('<Return>', lambda e: self._apply_filter())
         self.combo_filter.bind("<FocusIn>", lambda e: self._pause_refresh_start())
         self.combo_filter.bind("<FocusOut>", lambda e: self._pause_refresh_end())
+
+    def _init_tree_tab(self):
         # 情绪分数表
         list_frame = tk.LabelFrame(self.tab_data, text="实时情绪分数监控", padx=5, pady=5)
         list_frame.pack(fill="both", expand=True, padx=10, pady=5)
@@ -474,17 +530,25 @@ class StrategyManager(tk.Toplevel, WindowMixin):
 
         self.tree_data.pack(fill="both", expand=True)
 
-        # 排序状态
-        self._data_sort_col = "score"
-        self._data_sort_reverse = True
-
-        # 绑定事件
         # 绑定事件
         self.tree_data.bind("<ButtonRelease-1>", self.on_data_tree_click)
         self.tree_data.bind("<Double-1>", self.on_data_tree_dblclick)
         self.tree_data.bind("<Button-3>", self.on_data_tree_rclick)
         self.tree_data.bind("<KeyRelease-Up>", self.on_data_tree_key_nav)
         self.tree_data.bind("<KeyRelease-Down>", self.on_data_tree_key_nav)
+
+    def _apply_filter(self, event=None) -> None:
+        """用户手动触发过滤应用，此时才保存到历史记录"""
+        current_filter = self.var_history4.get().strip()
+        if current_filter:
+            # 实现置顶：先同步到 history_manager (它内部已改为先删再插)
+            self.query_manager.sync_history_current({"query": current_filter, "starred": 0}, action="add", history_key="history4")
+            self.query_manager.save_search_history()
+            
+        # 停止刷新暂停状态
+        self._pause_refresh_end()
+        # 立即执行刷新
+        self._refresh_data_tab()
         
         # 初始触发一次刷新 (延迟以便UI就绪)
         self.after(500, self._refresh_data_tab)
@@ -694,26 +758,12 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             changed = True
             
         current_filter = self.combo_filter.get().strip()
-        saved_filter = self.config_data.get('last_filter', "")
+        # saved_filter = self.config_data.get('last_filter', "")
         
-        if current_filter != saved_filter:
-            self.config_data['last_filter'] = current_filter
-            changed = True
+        # if current_filter != saved_filter:
+        #     self.config_data['last_filter'] = current_filter
+        #     changed = True
             
-        # 更新 Filter History (如果有效且不在历史中)
-        if current_filter:
-            history = self.config_data.get('filter_history', [])
-            if current_filter not in history:
-                history.insert(0, current_filter) # add to top
-                if len(history) > 20: history = history[:20]
-                self.config_data['filter_history'] = history
-                # Update combo values immediately
-                current_values = list(self.combo_filter['values'])
-                if current_filter not in current_values:
-                    current_values.insert(0, current_filter)
-                    self.combo_filter['values'] = current_values
-                changed = True
-        
         if changed:
             self._save_config()
         # --------------------------------------
@@ -734,15 +784,14 @@ class StrategyManager(tk.Toplevel, WindowMixin):
              df_temp['baseline'] = df_temp['baseline'].fillna(50.0)
              df_temp['status'] = df_temp['status'].fillna('')
 
-        # 2.6 应用高级过滤 (主过滤器 + History2 联动)
-        filter_expr = self.combo_filter.get().strip()
+        # 2.6 应用高级过滤 (统一使用 history4 + 可选 history2)
+        h4_expr = self.var_history4.get().strip()
         h2_expr = self.var_history2.get().strip()
         use_h2 = self.var_use_history2.get()
         
-        # 组合过滤条件
         combined_filters = []
-        if filter_expr:
-            combined_filters.append(f"({filter_expr})")
+        if h4_expr:
+            combined_filters.append(f"({h4_expr})")
         if use_h2 and h2_expr:
             combined_filters.append(f"({h2_expr})")
             
@@ -753,7 +802,6 @@ class StrategyManager(tk.Toplevel, WindowMixin):
                 if df_all is not None:
                      # 策略优化：仅 join 过滤表达式中用到的列 Isolate only used columns
                      # 简单的正则提取标识符
-                     import re
                      # 提取所有单词作为潜在列名
                      tokens = set(re.findall(r'[a-zA-Z_][a-zA-Z0-9_]*', final_query))
                      # 强制加入我们需要显示的列
@@ -1117,53 +1165,49 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         # 兼容旧接口，但也触发刷新
         self._refresh_signal_logs()
 
-    def _delete_current_filter(self):
+    def _delete_current_filter(self) -> None:
         """删除当前选中的过滤记录"""
-        current = self.combo_filter.get().strip()
+        current = self.var_history4.get().strip()
         if not current: return
         
-        # 更新历史列表
-        history = self.config_data.get('filter_history', [])
-        if current in history:
-            history.remove(current)
-            self.config_data['filter_history'] = history
-            self._save_config()
-            
-        # 更新 UI values (需保留 default)
-        default_filters = [
-            " ",
-            "score > 80", 
-            "volume > 2 and amount > 5e8",
-            "60 < score and volume > 2 and close > ma5d and low < ma10d and amount > 5e8",
-            "20 < score < 80 and volume > 2 and amount > 2e8"
-        ] # 需要与 _init 保持一致，最好提取为类常量
-        
-        # 重新构建 combined
-        combined = []
-        seen = set()
-        for f in history + default_filters:
-            if f not in seen:
-                combined.append(f)
-                seen.add(f)
-        
-        self.combo_filter['values'] = combined
-        self.combo_filter.set("") # 清空当前
+        # 统一使用 QueryHistoryManager
+        self.query_manager.sync_history_current({"query": current}, action="delete", history_key="history4")
+        self.query_manager.save_search_history()
         self._refresh_data_tab() # 刷新
 
     # ------------------- Tab 5: 验证/手操 -------------------
     def _on_history_sync(self, **kwargs: Any) -> None:
         """当 QueryHistoryManager 同步历史时触发"""
-        if 'search_history2' in kwargs:
-            h2 = kwargs['search_history2']
+        source = kwargs.get("source", "")
+        selected = kwargs.get("selected_query")
+        
+        if "search_history2" in kwargs:
+            h2 = kwargs["search_history2"]
             self.history2_list = [r["query"] for r in h2]
             if hasattr(self, 'combo_history2'):
                 self.combo_history2['values'] = self.history2_list
-                # 同步时，如果当前未选择或列表更新，确保显示最新的一条
-                if self.history2_list:
-                    # 只有在没有手动输入过或者当前值不在列表里时才同步到最新的？
-                    # 用户通常希望即时同步生效
+                # 联动：双击使用时同步
+                if source == "use" and selected:
+                    self.var_history2.set(selected)
+                elif self.history2_list and not self.var_history2.get():
                     self.var_history2.set(self.history2_list[0])
-        
+                    
+        if "search_history4" in kwargs:
+            h4 = kwargs["search_history4"]
+            self.history4_list = [r["query"] for r in h4]
+            if hasattr(self, 'combo_filter'):
+                self.combo_filter['values'] = self.history4_list
+                # 联动：双击使用时同步
+                if source == "use" and selected:
+                    self.var_history4.set(selected)
+                elif self.history4_list and not self.var_history4.get():
+                    self.var_history4.set(self.history4_list[0])
+                    
+        # 如果是双击使用的联动，强制刷新一次 UI
+        if source == "use":
+            self._refresh_data_tab()
+
+
     def _init_verify_tab(self):
         paned = tk.PanedWindow(self.tab_verify, orient="horizontal")
         paned.pack(fill="both", expand=True, padx=5, pady=5)
