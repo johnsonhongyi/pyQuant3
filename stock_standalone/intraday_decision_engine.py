@@ -314,9 +314,31 @@ class IntradayDecisionEngine:
                     base_pos += 0.1
                     ma_reason += f" & {support_reason}"
             
+            # --- 模式识别：加速股模式 & MA60 突破 (提前判断以支持升级) ---
+            # [新增] MA60 突破 + Red > 5 加速模式
+            ma60_result = self._check_ma60_red5_acceleration(row, snapshot, debug)
+            if ma60_result["triggered"]:
+                if action == "持仓": 
+                    action = "买入"
+                base_pos += ma60_result["bonus"]
+                ma_reason += f" | {ma60_result['reason']}"
+
+            acc_result = self._check_acceleration_pattern(row, snapshot, debug)
+            if acc_result["is_acc"]:
+                if action == "持仓": 
+                    action = "买入"
+                base_pos += acc_result["bonus"]
+                ma_reason += f" | {acc_result['reason']}"
+
             debug["ma_decision"] = ma_reason
 
             if action == "持仓":
+                # [迭代优化] 虽然均线判定持仓，但如果是加速股，应该给予更强的正面理由
+                is_holding = float(snapshot.get("cost_price", 0)) > 0
+                if is_holding:
+                    red_val = int(snapshot.get('red', 0))
+                    if red_val >= 5 and price > ma5:
+                        ma_reason = f"加速延续(Red{red_val}) | {ma_reason}"
                 return self._hold(ma_reason, debug)
             
             if action == "买入":
@@ -326,11 +348,7 @@ class IntradayDecisionEngine:
                     debug["refuse_buy"] = "结构为派发(冲高回落)"
                     return self._hold(f"结构{structure}禁买", debug)
                 
-                # --- 模式识别：加速股模式 (Acceleration Pattern) ---
-                acc_result = self._check_acceleration_pattern(row, snapshot, debug)
-                if acc_result["is_acc"]:
-                    base_pos += acc_result["bonus"]
-                    ma_reason += f" | {acc_result['reason']}"
+                # (模式识别已移至上方)
 
                 # 1. 应用基础过滤器
                 base_pos += self._yesterday_anchor(price, snapshot, debug)
@@ -424,10 +442,21 @@ class IntradayDecisionEngine:
                 # 如果当前已经是持仓状态，则判定是否符合加仓条件
                 is_holding = float(snapshot.get("cost_price", 0)) > 0
                 if is_holding:
+                    # [迭代优化] 用户需求：如果保持加速状态且红柱高位，继续持仓甚至加仓
+                    red_val = int(snapshot.get('red', 0))
+                    win_val = int(snapshot.get('win', 0))
+                    if red_val >= 5 and price > ma5 and win_val >= 2:
+                        debug["迭代持仓"] = f"Red{red_val}加速延续"
+                        # 如果评分本身很高，允许维持高分，这样就不会触发卖出/减仓
+                        base_pos = max(base_pos, 0.45) 
+                    
                     add_pos_decision = self._check_add_position(row, snapshot, debug)
                     if not add_pos_decision["allow"]:
-                        return self._hold(f"不符合加仓条件: {add_pos_decision['reason']}", debug)
-                    debug["加仓信号"] = "符合条件"
+                        # 如果不是为了持仓，而是为了新买入/加仓，则受限于 add_pos_decision
+                        # 但如果是为了维持"持仓"，我们这里已经在 evaluate 流程中了
+                        pass 
+                    else:
+                        debug["加仓信号"] = "符合条件"
 
                 # ==============================================================================
                 # 💥 最终门槛大幅提高 (根据回测，得分 < 0.3 胜率极低)
@@ -876,6 +905,41 @@ class IntradayDecisionEngine:
             penalty -= 0.1
         debug["指标约束"] = penalty
         return penalty
+
+    def _check_ma60_red5_acceleration(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any]:
+        """
+        检查 MA60 突破 + Red > 5 加速模式
+        逻辑：
+        1. 价格站在 MA60 之上 (或刚突破)
+        2. 站稳 5 日线已经 5 天以上 (red > 5)
+        3. 沿着 5 日线加速 (price > ma5, win >= 2, vwap 趋势向上)
+        """
+        price = float(row.get("trade", 0))
+        ma60 = float(row.get("ma60d", 0))
+        ma5 = float(row.get("ma5d", 0))
+        red = int(snapshot.get("red", 0))
+        win = int(snapshot.get("win", 0))
+        nclose = float(debug.get("nclose", snapshot.get("nclose", 0)))
+        
+        result = {"triggered": False, "bonus": 0.0, "reason": ""}
+        
+        if price <= 0 or ma60 <= 0 or ma5 <= 0:
+            return result
+            
+        # 基础条件：站住 MA60 且 Red > 5
+        if price > ma60 and red >= 5:
+            # 加速条件：价格在 MA5 之上，且今日均价线向上，且连阳
+            if price > ma5 and price >= nclose and win >= 2:
+                result["triggered"] = True
+                result["bonus"] = 0.35 # 给予较大的权重
+                result["reason"] = f"MA60突破加速(Red{red},Win{win})"
+                
+                # 如果刚突破 MA60 (比如价格离 MA60 很近)，额外加分
+                if (price - ma60) / ma60 < 0.03:
+                    result["bonus"] += 0.1
+                    result["reason"] += "+刚逾MA60"
+                    
+        return result
 
     def _check_acceleration_pattern(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> dict[str, Any]:
         """

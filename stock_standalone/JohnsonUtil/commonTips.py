@@ -673,7 +673,7 @@ class GlobalConfig:
         self.MAX_DAILY_ADDITIONS = self.get_with_writeback("general", "MAX_DAILY_ADDITIONS", fallback='10', value_type="int")
         self.loop_counter_limit = self.get_with_writeback("general", "loop_counter_limit", fallback='10', value_type="int")
         self.real_time_tick_limit = self.get_with_writeback("general", "real_time_tick_limit", fallback='300', value_type="int")
-        self.real_time_cols = self.get_with_writeback("general", "real_time_cols", fallback="'code', 'name', 'Rank','win','slope','volume','power_idx', 'percent'", value_type="tuple_str")
+        self.real_time_cols = self.get_with_writeback("general", "real_time_cols", fallback=['code', 'name', 'percent','dff', 'Rank', 'win', 'slope', 'volume', 'power_idx'], value_type="list")
 
         saved_wh_str = self.get_with_writeback("general", "saved_width_height", fallback="230x160")
         try:
@@ -711,6 +711,7 @@ class GlobalConfig:
             - "float"
             - "bool"
             - "tuple_str"   # ('6','30') 或 6,30
+            - "list"        # JSON list: ["a","b"]
         """
 
         # ===== 1. 确保 section 存在（绝对安全）=====
@@ -722,6 +723,12 @@ class GlobalConfig:
             try:
                 if value_type == "bool":
                     val_str = "True" if bool(fallback) else "False"
+                elif value_type == "list":
+                    try:
+                        import json
+                        val_str = json.dumps(list(fallback), ensure_ascii=False)
+                    except Exception:
+                        val_str = "[]"
                 else:
                     val_str = str(fallback)
 
@@ -749,6 +756,35 @@ class GlobalConfig:
 
             elif value_type == "bool":
                 return str(raw).strip().lower() in ("1", "true", "yes", "on")
+
+            elif value_type == "list":
+                raw = raw.strip()
+                # 1️⃣ JSON list（推荐）
+                try:
+                    value = json.loads(raw)
+                    if isinstance(value, list):
+                        return value
+                except Exception:
+                    pass
+
+                # 2️⃣ 兼容老格式：('a','b') / ['a','b']
+                try:
+                    value = ast.literal_eval(raw)
+                    if isinstance(value, (list, tuple)):
+                        return list(value)
+                except Exception:
+                    pass
+
+                # 3️⃣ 兼容老旧逗号分隔格式：a,b,c
+                parts = [
+                    s.strip()
+                    for s in raw.replace("'", "").replace('"', "").split(",")
+                    if s.strip()
+                ]
+                if parts:
+                    return parts
+
+                raise ValueError("invalid list")
 
             # ===== tuple_str（重点增强）=====
             elif value_type == "tuple_str":
@@ -793,6 +829,10 @@ class GlobalConfig:
                         if s.strip()
                     )
                 return ()
+            elif value_type == "list":
+                    if isinstance(fallback, (list, tuple)):
+                        return list(fallback)
+                    return []
 
             return fallback
     # =====================================================================
@@ -878,8 +918,7 @@ cleanRAMdiskTemp: str = CFG.cleanRAMdiskTemp
 MAX_DAILY_ADDITIONS: int = CFG.MAX_DAILY_ADDITIONS
 loop_counter_limit: int = CFG.loop_counter_limit
 real_time_tick_limit: int = CFG.real_time_tick_limit
-real_time_cols: str = CFG.real_time_cols
-real_time_cols = ast.literal_eval(f"[{real_time_cols}]")
+real_time_cols: List[str] = CFG.real_time_cols
 
 # log.info(f'code_startswith: {code_startswith}')
 def get_os_path_sep() -> str:
