@@ -90,7 +90,6 @@ from column_manager import ColumnSetManager
 from collections import Counter, OrderedDict, deque
 import hashlib
 import keyboard  # pip install keyboard
-from multiprocessing import Process
 import trade_visualizer_qt6 as qtviz  # 你的 Qt GUI 模块
 
 # 全局单例
@@ -720,14 +719,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # 10. 停止后台进程与管理器 (关键顺序：先停进程，再停管理器)
             self.stop_refresh()
-            from PyQt6.QtCore import QProcess
-            if getattr(self, 'qt_process', None):
-                if self.qt_process  and self.qt_process.state() == QProcess.ProcessState.Running:
-                    logger.info("正在停止后台qt_process进程...")
-                    self.qt_process.terminate()
-                    self.qt_process.join()
+            # if getattr(self, 'qt_process', None):
+            #     self.qt_process.join(timeout=2)
+            #     if self.qt_process  and self.qt_process.is_alive():
+            #         logger.info("正在停止后台qt_process进程...")
+            #         self.qt_process.terminate()
+            #         self.qt_process.join()
+            #         self.qt_process = None
+            # 先停止 Qt 子进程
+            if hasattr(self, 'qt_process') and self.qt_process is not None:
+                if self.qt_process.is_alive():
+                    # 设置 stop_flag 让 Qt 子进程循环退出
+                    if hasattr(self, 'stop_flag'):
+                        self.stop_flag.value = False
+                    self.qt_process.join(timeout=2)
+                    if self.qt_process.is_alive():
+                        self.qt_process.terminate()
+                        self.qt_process.join()
                     self.qt_process = None
-
+                    
             if hasattr(self, "proc") and self.proc.is_alive():
                 logger.info("正在停止后台数据扫描进程...")
                 self.proc.join(timeout=1)
@@ -1787,7 +1797,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     data_socket.settimeout(0.8)
                     data_socket.connect((ipc_host, ipc_port))
 
-                    ui_cols = ['code', 'name', 'Rank','win','slope','volume','power_idx', 'percent']
+                    ui_cols = ['code', 'name', 'Rank','dff','win','slope','volume','power_idx', 'percent']
                     df_ui = self.df_all[ui_cols].copy()
                     import struct, pickle
                     pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1817,7 +1827,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 #     threading.Thread(target=qt_runner, daemon=True).start()
                 #     print(f"Launching QT GUI for {code}")
                 if self.qt_process is None or not self.qt_process.is_alive():
-                   self.qt_process = Process(target=qtviz.main, args=(code,logger), daemon=False)
+                   self.qt_process = mp.Process(target=qtviz.main, args=(code,self.refresh_flag), daemon=False)
+                   # self.proc = mp.Process(
+                   #     target=fetch_and_process,
+                   #     args=(self.global_dict, self.queue, self.blkname, 
+                   #           self.refresh_flag, self.log_level, self.detect_calc_support, 
+                   #           marketInit, marketblk, duration_sleep_time),
+                   #     kwargs={
+                   #         "close_event_callback": tip_var_status_flag  # 注意不用括号，传函数
+                   #     }
+                   # )
                    self.qt_process.start()
                    print(f"Launched QT GUI process for {code}")
 

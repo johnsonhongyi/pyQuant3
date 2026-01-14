@@ -128,7 +128,8 @@ def print_timing_summary(top_n=10, unit="ms"):
     summary = []
 
     # 遍历所有统计项
-    for name, times in _TIMING_STATS.items():
+    # for name, times in _TIMING_STATS.items():
+    for name, times in list(_TIMING_STATS.items()):
         if not times:
             continue
         arr = np.array(times)

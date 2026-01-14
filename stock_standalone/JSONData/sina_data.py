@@ -935,7 +935,7 @@ class Sina:
         
         # 4. 如果缓存缺失，优先从 MultiIndex 历史恢复，然后再应用当前 Tick
         now_int = cct.get_now_time_int()
-        if cache_needs_rebuild or 915 < now_int <= 1030 :
+        if cache_needs_rebuild or 925 < now_int <= 1030 :
             log.info("AggregatorCache poor or missing, rebuilding from MultiIndex HDF5...")
             l_limit_time = int(cct.sina_limit_time)
             h5_mi_fname = 'sina_MultiIndex_data'
@@ -998,7 +998,7 @@ class Sina:
             limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
             h5_mi_table = 'all_' + str(limit_time_int)
             # 仅在交易时间内记录
-            if cct.get_work_time() and cct.get_now_time_int() > 920:
+            if cct.get_work_time() and cct.get_now_time_int() > 925:
                 # 构造 MultiIndex 精简格式轨迹: [code, ticktime, close, high, low, llastp, volume, lastbuy]
                 # 这必须与 format_response_data 中的 mi_cols 保持绝对一致以避免 ValueError
                 mi_cols = ['code', 'ticktime', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
