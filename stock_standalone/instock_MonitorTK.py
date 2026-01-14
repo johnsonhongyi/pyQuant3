@@ -633,6 +633,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception as e:
                     logger.warning(f"手札存档失败: {e}")
 
+
             # 4. 如果 concept 窗口存在，也保存位置并隐藏
             if hasattr(self, "_concept_win") and self._concept_win:
                 if self._concept_win.winfo_exists():
@@ -726,6 +727,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             #         self.qt_process.terminate()
             #         self.qt_process.join()
             #         self.qt_process = None
+            # ===== 3. 停掉后台线程 =====
+            if hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
+                logger.info("正在停止 df_all 同步线程...")
+                # 线程是 daemon=True, 会随主线程退出，也可设置标志 self._df_sync_flag = False 来优雅退出
+                # self._df_sync_flag = False
+                self._df_sync_running = False
+                self._df_sync_thread.join(timeout=2)
+                self._df_sync_thread = None
+
             # 先停止 Qt 子进程
             if hasattr(self, 'qt_process') and self.qt_process is not None:
                 if self.qt_process.is_alive():
@@ -737,7 +747,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self.qt_process.terminate()
                         self.qt_process.join()
                     self.qt_process = None
-                    
+              
             if hasattr(self, "proc") and self.proc.is_alive():
                 logger.info("正在停止后台数据扫描进程...")
                 self.proc.join(timeout=1)
@@ -1789,6 +1799,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             command=lambda: self.open_visualizer(getattr(self, 'select_code', None))
         ).pack(side=tk.LEFT, padx=1)
 
+
     def open_visualizer(self, code):
         if not code:
             return
@@ -1796,97 +1807,176 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not hasattr(self, 'qt_process'):
             self.qt_process = None
 
+        # ===== 初始化和定时线程 =====
+        self._df_sync_running = True
+
         ipc_host, ipc_port = '127.0.0.1', 26668
         sent = False
 
-        # 1. 尝试通过 Socket 发送给已有实例
+        real_time_cols = cct.real_time_cols
+        ui_cols = real_time_cols if len(real_time_cols) > 4 and 'percent' in real_time_cols else \
+                  ['code', 'name', 'Rank','dff','win','slope','volume','power_idx', 'percent']
+
+        # --- 1️⃣ 尝试通过 Socket 发送给已有实例 ---
         try:
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             client_socket.settimeout(2)
             client_socket.connect((ipc_host, ipc_port))
             client_socket.send(f"CODE|{code}".encode('utf-8'))
             client_socket.close()
-            logger.info(f"Socket: Sent code {code} to visualizer")
+            logger.debug(f"Socket: Sent code {code} to visualizer")
             sent = True
-
-            # 发送 df_all
-            if hasattr(self, 'df_all') and not self.df_all.empty:
-                try:
-                    data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    data_socket.settimeout(0.8)
-                    data_socket.connect((ipc_host, ipc_port))
-
-                    ui_cols = ['code', 'name', 'Rank','dff','win','slope','volume','power_idx', 'percent']
-                    df_ui = self.df_all[ui_cols].copy()
-                    import struct, pickle
-                    pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
-                    header = struct.pack("!I", len(pickled_data))
-                    data_socket.sendall(b"DATA" + header + pickled_data)
-                    data_socket.close()
-                    logger.info(f"Socket: Sent df_all ({len(df_ui)} rows) to visualizer")
-                except Exception as e:
-                    logger.warning(f"Failed to send df_all via socket: {e}")
-
-            return
         except (ConnectionRefusedError, OSError):
             sent = False
         except Exception as e:
             logger.warning(f"Socket connection check failed: {e}")
 
-        # 2. 如果没发出去 -> 直接 import QT 模块并在后台线程启动
+        # --- 2️⃣ 启动 Qt 可视化进程（如果没发出去） ---
         if not sent:
             try:
-                # # 方式 A: 直接调用模块函数
-                # if not self.qt_started:
-                #     self.qt_started = True
-                #     def qt_runner():
-                #         # 这里保证在新线程里启动 QT GUI
-                #         qtviz.main(initial_code=code)
-
-                #     threading.Thread(target=qt_runner, daemon=True).start()
-                #     print(f"Launching QT GUI for {code}")
                 if self.qt_process is None or not self.qt_process.is_alive():
-                   self.qt_process = mp.Process(target=qtviz.main, args=(code,self.refresh_flag), daemon=False)
-                   # self.proc = mp.Process(
-                   #     target=fetch_and_process,
-                   #     args=(self.global_dict, self.queue, self.blkname, 
-                   #           self.refresh_flag, self.log_level, self.detect_calc_support, 
-                   #           marketInit, marketblk, duration_sleep_time),
-                   #     kwargs={
-                   #         "close_event_callback": tip_var_status_flag  # 注意不用括号，传函数
-                   #     }
-                   # )
-                   self.qt_process.start()
-                   print(f"Launched QT GUI process for {code}")
-
-                   # 给 QT GUI 启动时间初始化 IPC
-                   time.sleep(1)
-
-
-                logger.info(f"Started Qt visualizer in background thread for {code}")
-
-                # 延迟发送 df_all
-                if hasattr(self, 'df_all') and not self.df_all.empty:
-                    time.sleep(3)
-                    # for _ in range(1):  # 尝试多次，等待 QT GUI 初始化 socket
-                    try:
-                        time.sleep(2)
-                        data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        data_socket.settimeout(0.8)
-                        data_socket.connect((ipc_host, ipc_port))
-                        ui_cols = ['code', 'name', 'Rank', 'percent']
-                        df_ui = self.df_all[ui_cols].copy()
-                        pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
-                        header = struct.pack("!I", len(pickled_data))
-                        data_socket.sendall(b"DATA" + header + pickled_data)
-                        data_socket.close()
-                        logger.info("Sent df_all after launching Qt visualizer")
-                    except Exception:
-                        pass
-
+                    self.qt_process = mp.Process(target=qtviz.main, args=(code,self.refresh_flag), daemon=False)
+                    self.qt_process.start()
+                    print(f"Launched QT GUI process for {code}")
+                    time.sleep(1)  # 给 Qt 初始化 socket 时间
+                    if  hasattr(self, '_df_first_send_done'):
+                        self._df_first_send_done = False
             except Exception as e:
                 logger.error(f"Failed to start Qt visualizer: {e}")
-                traceback.print_exc()   # 打印完整异常栈
+                traceback.print_exc()
+                return
+
+        if not hasattr(self, '_df_first_send_done'):
+            self._df_first_send_done = False
+        import struct, pickle
+        # --- 启动后台线程（只启动一次） ---
+        def send_df(initial=True):
+            while self._df_sync_running:
+                # QT GUI 已关闭
+                if not sent and (self.qt_process is None or not self.qt_process.is_alive()):
+                    self._df_first_send_done = False  # ✅ 重新初始化
+                    logger.info(f'not qt_process.is_alive reset _df_first_send_done')
+                    time.sleep(2)
+                    continue
+
+                if not hasattr(self, 'df_all') or self.df_all.empty:
+                    time.sleep(10)
+                    continue
+
+                try:
+                    df_ui = self.df_all[ui_cols].copy()
+                    pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
+                    header = struct.pack("!I", len(pickled_data))
+
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.settimeout(1.0)
+                        s.connect((ipc_host, ipc_port))
+                        s.sendall(b"DATA" + header + pickled_data)
+
+                    if initial and not self._df_first_send_done:
+                        logger.info(f"[IPC] 初始 df_all 已发送 ({len(df_ui)} 行)")
+                        self._df_first_send_done = True
+                    else:
+                        logger.debug(f"[IPC] df_all 定时发送 ({len(df_ui)} 行)")
+
+                except Exception:
+                    pass
+
+                time.sleep(600 if self._df_first_send_done else 5)
+
+        # 启动线程（只启动一次）
+        if not hasattr(self, '_df_sync_thread') or not self._df_sync_thread.is_alive():
+            self._df_sync_thread = threading.Thread(target=send_df, daemon=True)
+            self._df_sync_thread.start()
+
+
+    # def open_visualizer(self, code):
+    #     if not code:
+    #         return
+
+    #     if not hasattr(self, 'qt_process'):
+    #         self.qt_process = None
+
+    #     ipc_host, ipc_port = '127.0.0.1', 26668
+    #     sent = False
+
+    #     real_time_cols = cct.real_time_cols
+    #     if len(real_time_cols) > 4 and 'percent' in real_time_cols:
+    #         ui_cols = real_time_cols
+    #     else:
+    #         logger.info(f'real_time_cols: {real_time_cols} not good')
+    #         # self.headers = ['code', 'name', 'percent','dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
+    #         ui_cols = ['code', 'name', 'Rank','dff','win','slope','volume','power_idx', 'percent']
+
+    #     # 1. 尝试通过 Socket 发送给已有实例
+    #     try:
+    #         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    #         client_socket.settimeout(2)
+    #         client_socket.connect((ipc_host, ipc_port))
+    #         client_socket.send(f"CODE|{code}".encode('utf-8'))
+    #         client_socket.close()
+    #         logger.info(f"Socket: Sent code {code} to visualizer")
+    #         sent = True
+
+    #         # 发送 df_all
+    #         if hasattr(self, 'df_all') and not self.df_all.empty:
+    #             try:
+    #                 data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    #                 data_socket.settimeout(0.8)
+    #                 data_socket.connect((ipc_host, ipc_port))
+
+    #                 df_ui = self.df_all[ui_cols].copy()
+    #                 import struct, pickle
+    #                 pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
+    #                 header = struct.pack("!I", len(pickled_data))
+    #                 data_socket.sendall(b"DATA" + header + pickled_data)
+    #                 data_socket.close()
+    #                 logger.info(f"Socket: Sent df_all ({len(df_ui)} rows) to visualizer")
+    #             except Exception as e:
+    #                 logger.warning(f"Failed to send df_all via socket: {e}")
+
+    #         return
+    #     except (ConnectionRefusedError, OSError):
+    #         sent = False
+    #     except Exception as e:
+    #         logger.warning(f"Socket connection check failed: {e}")
+
+    #     # 2. 如果没发出去 -> 直接 import QT 模块并在后台线程启动
+    #     if not sent:
+    #         try:
+    #             # # 方式 A: 直接调用模块函数
+    #             if self.qt_process is None or not self.qt_process.is_alive():
+    #                self.qt_process = mp.Process(target=qtviz.main, args=(code,self.refresh_flag), daemon=False)
+    #                self.qt_process.start()
+    #                print(f"Launched QT GUI process for {code}")
+
+    #                # 给 QT GUI 启动时间初始化 IPC
+    #                time.sleep(1)
+
+
+    #             logger.info(f"Started Qt visualizer in background thread for {code}")
+
+    #             # 延迟发送 df_all
+    #             if hasattr(self, 'df_all') and not self.df_all.empty:
+    #                 time.sleep(3)
+    #                 # for _ in range(1):  # 尝试多次，等待 QT GUI 初始化 socket
+    #                 try:
+    #                     time.sleep(2)
+    #                     data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    #                     data_socket.settimeout(0.8)
+    #                     data_socket.connect((ipc_host, ipc_port))
+    #                     df_ui = self.df_all[ui_cols].copy()
+    #                     pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
+    #                     header = struct.pack("!I", len(pickled_data))
+    #                     data_socket.sendall(b"DATA" + header + pickled_data)
+    #                     data_socket.close()
+    #                     logger.info("Sent df_all after launching Qt visualizer")
+    #                 except Exception:
+    #                     pass
+
+    #         except Exception as e:
+    #             logger.error(f"Failed to start Qt visualizer: {e}")
+    #             traceback.print_exc()   # 打印完整异常栈
 
     def on_voice_toggle(self):
         self.live_strategy.set_voice_enabled(self.voice_var.get())

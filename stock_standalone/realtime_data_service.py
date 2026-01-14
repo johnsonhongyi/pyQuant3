@@ -344,7 +344,7 @@ class DailyEmotionBaseline:
     def __init__(self):
         self._baselines: dict[str, float] = {}  # {code: baseline_score}
         self._baseline_details: dict[str, str] = {} # {code: status_description}
-        self._last_calc_date: str = ""
+        self._last_calc_date: Optional[str] = None
     
     def calculate_baseline(self, df: pd.DataFrame) -> None:
         """开盘时调用，基于日线数据计算基准"""
@@ -376,50 +376,54 @@ class DailyEmotionBaseline:
                 
                 # 2. 5日线上天数 (red >= 5 满分)
                 red = float(row.get('red', 0))
-                score += min(red * 3, 15)  # 最多+15
+                score += min(red * 3, 10)  # 最多+10
                 
-                # 3. 累计涨幅 (sum_perc)
+                # 3. 趋势强度 (TrendS)
+                trend_s = float(row.get('TrendS', 50))
+                if trend_s > 80: score += 10
+                elif trend_s > 60: score += 5
+                
+                # 4. 斜率稳定 (slope)
+                slope = float(row.get('slope', 0))
+                if slope > 5: score += 10
+                elif slope > 2: score += 5
+                
+                # 5. 累计涨幅 (sum_perc)
                 sum_perc = float(row.get('sum_perc', 0))
-                if sum_perc > 10:
-                    score += 10
-                elif sum_perc > 5:
-                    score += 5
-                elif sum_perc < -5:
-                    score -= 10
+                if sum_perc > 15: score += 10
+                elif sum_perc > 8: score += 5
+                elif sum_perc < -5: score -= 10
                 
-                # 4. 量比稳定性
-                # 4. 量比稳定性
-                # 注意：盘前/早盘可能没有 vol_ratio，或者取的是昨日的量比
-                vol_ratio = float(row.get('vol_ratio', 1.0))
-                if 0.8 <= vol_ratio <= 2.0:
-                    score += 5  # 健康量比
-                elif vol_ratio > 3.0:
-                    score -= 5  # 异常放量
-                    
-                # 5. [New] 缩量回踩 MA5 (Growth Potential)
-                # 逻辑: 股价在5日线附近, 缩量, 且处于上升趋势
-                ma5 = float(row.get('ma5', 0))
-                price = float(row.get('trade', 0)) 
-                # 注意: 这里的 row 来自每日静态数据/选股结果，通常有 'trade' 或 'close'
-                if price == 0 and 'close' in row:
-                    price = float(row.get('close', 0))
-                    
+                # 6. 量能动力 (power_idx)
+                power = float(row.get('power_idx', 0))
+                if power > 15: score += 10
+                elif power > 8: score += 5
+                
                 status_detail = ""
-                if ma5 > 0 and price > 0:
-                    # 距离 MA5 差距在 -2% ~ +3% 之间 (回踩或轻微支撑)
+                # 7. [New] 突破上轨或强势洗盘回踩
+                upper = float(row.get('upper', 0))
+                boll = int(row.get('boll', 0))
+                red = int(row.get('red', 0))
+                gren = int(row.get('gren', 0))
+                win = int(row.get('win', 0))
+                price = float(row.get('trade', row.get('close', 0)))
+                ma5 = float(row.get('ma5', 0))
+
+                if upper > 0 and price >= upper:
+                    score += 15
+                    status_detail = f"上轨:{boll}红:{red}绿{gren}"
+                elif ma5 > 0 and price > 0:
+                    # 强势洗盘: 连阳后缩量回踩 MA5
                     dist_ma5 = (price - ma5) / ma5
-                    if -0.02 <= dist_ma5 <= 0.03:
-                        # 缩量: 量比 < 1.0 (或昨日量比小于1)
-                        if vol_ratio < 1.0:
-                            # 趋势验证: 连阳(win>0) 或 处于多头(red>0)
-                            if win > 0 or red > 0:
-                                score += 20
-                                status_detail = "缩量回踩MA5"
-                
-                self._baselines[code_str] = max(20.0, min(100.0, score)) # 上限放宽到 100
+                    vol_ratio = float(row.get('vol_ratio', row.get('ratio', 1.0)))
+                    if -0.015 <= dist_ma5 <= 0.02 and vol_ratio < 1.0 and win >= 2:
+                        score += 20
+                        status_detail = f"缩量:{win}红:{red}绿{gren}"
+                else:
+                    status_detail = f"震荡:{win}红:{red}绿{gren}"
+                # 最终限制
+                self._baselines[code_str] = max(10.0, min(100.0, score))
                 self._baseline_details[code_str] = status_detail
-                
-                self._baselines[code_str] = max(20.0, min(80.0, score))  # 限制在 20-80
                 count += 1
             
             self._last_calc_date = today
@@ -939,12 +943,12 @@ class DataPublisher:
             # --- 🚀 批次指纹校验：防止重复推送同一秒的数据 ---
             check_sample = df.head(5).copy()
             
-            # 计算开盘基准情绪 (每天确保计算一次)
-            # 移除 < 940 的限制，交由 emotion_baseline 内部控制频率
-            self.emotion_baseline.calculate_baseline(df)
+            # # 计算开盘基准情绪 (每天确保计算一次)
+            # # 移除 < 940 的限制，交由 emotion_baseline 内部控制频率
+            # self.emotion_baseline.calculate_baseline(df)
 
-            # 更新情绪 (传入 baseline)
-            self.emotion_tracker.update_batch(df, self.emotion_baseline)
+            # # 更新情绪 (传入 baseline)
+            # self.emotion_tracker.update_batch(df, self.emotion_baseline)
 
             # 兼容不同来源的列名
             fp_cols = ['code']
@@ -967,8 +971,15 @@ class DataPublisher:
             # else:
             #     # 新批次：更新指纹
             #     self._last_batch_fp = batch_fp
-            
+
             if not cct.get_realtime_status() or self._last_batch_fp and batch_fp == self._last_batch_fp:
+                if self.emotion_baseline._last_calc_date is None:
+                    # 计算开盘基准情绪 (每天确保计算一次)
+                    # 移除 < 940 的限制，交由 emotion_baseline 内部控制频率
+                    self.emotion_baseline.calculate_baseline(df)
+                    # 更新情绪 (传入 baseline)
+                    self.emotion_tracker.update_batch(df, self.emotion_baseline)
+                    logger.info(f'emotion_baseline._last_calc_date: {self.emotion_baseline._last_calc_date}')
                 return
                 
             if self.update_count == 0:
@@ -980,13 +991,18 @@ class DataPublisher:
             if self.last_batch_clock > 0:
                 self.batch_intervals.append(t0 - self.last_batch_clock)
             self.last_batch_clock = t0
+
+            # 1. 计算当日基准分 & 实时情绪 (Vectorized)
+            # 只有在新批次到来时才更新，避免指纹拦截后的重复计算
+            self.emotion_baseline.calculate_baseline(df)
+            self.emotion_tracker.update_batch(df, self.emotion_baseline)
             
             rows_count = len(df)
             self.update_count += 1
             self.total_rows_processed += rows_count
             
-            # 1. 深度情绪计算 (Vectorized)
-            self.emotion_tracker.update_batch(df)
+            # 1. 深度情绪计算 (Vectorized) - Already updated above with baseline
+            # self.emotion_tracker.update_batch(df) # 删除重复调用，避免基准分重置
 
             # Update global last update timestamp
             # 2. 更新 KLine (仅更新订阅或活跃股) - Vectorized & Batch Optimized

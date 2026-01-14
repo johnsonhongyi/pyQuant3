@@ -22,6 +22,13 @@ class StrongPullbackMA5Strategy:
         _df.loc[_df.ma5d > _df.ma10d, "trend_score"] += 10
         _df.loc[_df.ma10d > _df.ma20d, "trend_score"] += 10
         _df.loc[_df.ma20d > _df.ma60d, "trend_score"] += 10
+        
+        # [新增] MA60 突破加分
+        _df.loc[_df.close > _df.ma60d, "trend_score"] += 10
+        # [新增] 红柱延续加分 (Red > 5)
+        if 'red' in _df.columns:
+            _df.loc[_df.red >= 5, "trend_score"] += 15
+            
         _df.loc[
             (_df.lastp1d > _df.lastp2d) & (_df.lastp2d > _df.lastp3d),
             "trend_score"

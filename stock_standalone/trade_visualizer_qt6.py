@@ -110,21 +110,6 @@ class CandlestickItem(pg.GraphicsObject):
             self.generatePicture()
             self.update()
 
-    # def generatePicture(self):
-    #     self.picture = pg.QtGui.QPicture()
-    #     p = pg.QtGui.QPainter(self.picture)
-    #     w = 0.4
-    #     for (t, open, close, min, max) in self.data:
-    #         if open > close:
-    #             p.setPen(pg.mkPen('g'))
-    #             p.setBrush(pg.mkBrush('g'))
-    #         else:
-    #             p.setPen(pg.mkPen('r'))
-    #             p.setBrush(pg.mkBrush('r'))
-    #         p.drawLine(pg.QtCore.QPointF(t, min), pg.QtCore.QPointF(t, max))
-    #         p.drawRect(pg.QtCore.QRectF(t - w, open, w * 2, close - open))
-    #     p.end()
-
     def paint(self, p, *args):
         p.drawPicture(0, 0, self.picture)
 
@@ -154,10 +139,8 @@ class CommandListenerThread(QThread):
             try:
                 client_socket, _ = self.server_socket.accept()
                 client_socket.settimeout(3.0)
-
                 # 先读前 4 个字节判断协议
                 prefix = recv_exact(client_socket, 4)
-
                 # -------- DATA 协议 --------
                 if prefix == b"DATA":
                     try:
@@ -167,7 +150,6 @@ class CommandListenerThread(QThread):
 
                         # 读取完整 payload
                         payload = recv_exact(client_socket, size)
-
                         df = pickle.loads(payload)
                         self.dataframe_received.emit(df)
 
@@ -192,39 +174,6 @@ class CommandListenerThread(QThread):
 
             except Exception as e:
                 print(f"[IPC] Listener Error: {e}")
-
-    # def run(self):
-    #     while self.running:
-    #         try:
-    #             client_socket, _ = self.server_socket.accept()
-    #             # Receive raw bytes first
-    #             raw_data = client_socket.recv(1024 * 1024)  # 1MB buffer
-                
-    #             try:
-    #                 # Try to decode as text first
-    #                 text_data = raw_data.decode('utf-8', errors='strict')
-                    
-    #                 if text_data.startswith("CODE|"):
-    #                     code = text_data[5:].strip()
-    #                     if code:
-    #                         self.command_received.emit(code)
-    #                 else:
-    #                     # Legacy: plain code
-    #                     if text_data.strip():
-    #                         self.command_received.emit(text_data.strip())
-    #             except UnicodeDecodeError:
-    #                 # Binary data - likely pickled DataFrame
-    #                 if raw_data.startswith(b"DATA|"):
-    #                     try:
-    #                         pickled_data = raw_data[5:]  # Remove "DATA|" prefix
-    #                         df = pickle.loads(pickled_data)
-    #                         self.dataframe_received.emit(df)
-    #                     except Exception as e:
-    #                         print(f"Error unpickling data: {e}")
-                
-    #             client_socket.close()
-    #         except Exception as e:
-    #             print(f"Listener Error: {e}")
 
 from PyQt6.QtCore import QMutex, QThread, pyqtSignal, QMutexLocker
 
@@ -265,48 +214,6 @@ class DataLoaderThread(QThread):
                 import traceback
                 traceback.print_exc()
                 self.data_loaded.emit(self.code, pd.DataFrame(), pd.DataFrame())
-
-# def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
-#     """
-#     从 tick_df 生成 1 行日线 OHLCV
-#     """
-#     if tick_df is None or tick_df.empty:
-#         return pd.DataFrame()
-
-#     df = tick_df.copy()
-
-#     # 如果是 MultiIndex（code, ticktime）
-#     if isinstance(df.index, pd.MultiIndex):
-#         if 'ticktime' in df.index.names:
-#             df = df.reset_index(level=0, drop=True)
-
-#     # 必须按时间排序
-#     df = df.sort_index()
-
-#     close = df['close'].iloc[-1]
-#     open_ = df['close'].iloc[0]
-#     high = df['close'].max()
-#     low = df['close'].min()
-
-#     # 成交量（优先 volume，其次 amount）
-#     if 'volume' in df.columns:
-#         volume = df['volume'].sum()
-#     elif 'vol' in df.columns:
-#         volume = df['vol'].sum()
-#     else:
-#         volume = 0
-
-#     today = pd.Timestamp.now().normalize()
-
-#     daily = pd.DataFrame([{
-#         'open': open_,
-#         'high': high,
-#         'low': low,
-#         'close': close,
-#         'volume': volume
-#     }], index=[today])
-
-#     return daily
 
 def tick_to_daily_bar(tick_df):
     """
@@ -363,7 +270,11 @@ def realtime_worker_process(code, queue, stop_flag,log_level=None,interval=10):
                 # 这里可以生成今天的 day_bar
                 with timed_ctx("realtime_worker_tick_to_daily_bar", warn_ms=800):
                     today_bar = tick_to_daily_bar(tick_df)
-                    queue.put((code, tick_df, today_bar))
+                    try:
+                        # queue.put((code, tick_df, today_bar))
+                        queue.put_nowait((code, tick_df, today_bar))
+                    except queue.Full:
+                        pass  # 队列满了就跳过，避免卡住
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -429,7 +340,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.show_bollinger = True
         self.tdx_enabled = False  # 默认开启
         self.realtime = True  # 默认开启
-        
+        # 缓存 df_all
+        self.df_cache = pd.DataFrame()
         # self.realtime_worker = None
 
         self.realtime_queue = Queue()
@@ -468,7 +380,13 @@ class MainWindow(QMainWindow, WindowMixin):
         self.stock_table = QTableWidget()
         self.stock_table.setMaximumWidth(300)
         # self.stock_table.setHorizontalHeaderLabels(['Code', 'Name', 'Rank', 'Percent'])
-        self.headers = ['code', 'name', 'percent','dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
+        # self.headers = ['code', 'name', 'percent','dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
+        real_time_cols = cct.real_time_cols
+        if len(real_time_cols) > 4 and 'percent' in real_time_cols:
+            self.headers = real_time_cols
+        else:
+            logger.info(f'real_time_cols: {real_time_cols} not good')
+            self.headers = ['code', 'name', 'percent','dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
         # self.headers = ['Code', 'Name', 'Rank', 'Percent']
         self.stock_table.setColumnCount(len(self.headers))
         
@@ -609,32 +527,6 @@ class MainWindow(QMainWindow, WindowMixin):
             self.realtime_process.terminate()
             self.realtime_process.join()
             self.realtime_process = None
-
-    # def _poll_realtime_queue(self):
-    #     """从队列读取数据并更新 UI"""
-    #     while not self.realtime_queue.empty():
-    #         code, tick_df, today_bar = self.realtime_queue.get()
-    #         if code != self.current_code:
-    #             continue
-    #         self.on_realtime_update(code, tick_df, today_bar)
-    # def _poll_realtime_queue(self):
-    #     """从队列安全读取数据并更新 UI"""
-    #     while True:
-    #         try:
-    #             code, tick_df, today_bar = self.realtime_queue.get_nowait()
-    #         except queue.Empty:
-    #             break  # 队列空了，退出循环
-    #         except (EOFError, OSError):
-    #             break  # 队列已经关闭或进程退出，安全退出
-    #         except Exception as e:
-    #             logger.exception(f"Error reading realtime queue: {e}")
-    #             break
-
-    #         # 忽略非当前股票的数据
-    #         if code != self.current_code:
-    #             continue
-
-    #         self.on_realtime_update(code, tick_df, today_bar)
 
     def _poll_realtime_queue(self):
         while True:
@@ -838,6 +730,8 @@ class MainWindow(QMainWindow, WindowMixin):
         """Load stocks from df_all if available, otherwise from signal history"""
         if not self.df_all.empty:
             self.update_stock_table(self.df_all)
+        elif not self.df_cache.empty:
+            self.update_stock_table(self.df_cache)
         else:
             # Fallback to signal history
             df = self.logger.get_signal_history_df()
@@ -850,8 +744,6 @@ class MainWindow(QMainWindow, WindowMixin):
                 for col in self.headers:
                     if col not in ['code' , 'name']:
                         fallback_df[col] = 0
-                # fallback_df['Rank'] = 0
-                # fallback_df['percent'] = 0.0
                 self.update_stock_table(fallback_df)
     
     def update_stock_table(self, df):
@@ -913,12 +805,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     # 默认值
                     if col in ['Rank']:
                         item.setData(Qt.ItemDataRole.DisplayRole, 0)
-                    # elif col in ['percent', 'slope', 'power_idx', 'volume']:
-                        # item.setData(Qt.ItemDataRole.DisplayRole, 0.0)
                     else:
                         item.setData(Qt.ItemDataRole.DisplayRole, 0.0)
-                        
-                        # item.setData(Qt.ItemDataRole.DisplayRole, '')
 
                 # -------------------------
                 # 可扩展列特殊显示规则
@@ -978,6 +866,19 @@ class MainWindow(QMainWindow, WindowMixin):
         """Update df_all and refresh table"""
         self.df_all = df.copy() if not df.empty else pd.DataFrame()
         self.update_stock_table(self.df_all)
+
+    def update_df_all(self, df=None):
+        """
+        更新 df_all 并刷新表格
+        - df: 如果传入 DataFrame，则刷新缓存
+        - code: 如果传入 code，则只刷新表格对应 code，数据用缓存
+        """
+        if df is not None:
+            # 更新缓存
+            self.df_cache = df.copy() if not df.empty else pd.DataFrame()
+            self.df_all = self.df_cache
+        self.update_stock_table(self.df_all)
+
 
     def load_stock_by_code(self, code):
         self.current_code = code
@@ -1250,19 +1151,6 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
                 
-                # Compare today vs last history. If today > last_hist, draw ghost
-                # Note: simple string comparison works for YYYY-MM-DD
-                # if today_str > last_hist_date_str:
-                #     new_x = len(day_df)
-                #     ghost_data = [(new_x, open_p, current_price, low_p, high_p)]
-                #     ghost_candle = CandlestickItem(ghost_data)
-                #     self.kline_plot.addItem(ghost_candle)
-                    
-                #     # Add current price label
-                #     text = pg.TextItem(f"{current_price}", anchor=(0, 1), color='r' if current_price>pre_close else 'g')
-                #     text.setPos(new_x, high_p)
-                #     self.kline_plot.addItem(text)
-
                 if self.realtime and today_str > last_hist_date_str:
                     new_x = len(day_df)
                     ghost_data = [(new_x, open_p, current_price, low_p, high_p)]
@@ -1403,54 +1291,6 @@ def main(initial_code='000002',stop_flag=None,log_level=None):
     stop_flag.value = False
     window.close()  # 触发 closeEvent
     sys.exit(ret)
-    # sys.exit(app.exec())
-
-# def open_visualizer(code=None):
-#     if not code:
-#         return
-
-#     ipc_host, ipc_port = '127.0.0.1', 26668
-#     sent = False
-
-#     # 尝试发送给已存在 visualizer
-#     try:
-#         client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-#         client.settimeout(1)
-#         client.connect((ipc_host, ipc_port))
-#         client.send(f"CODE|{code}".encode('utf-8'))
-#         sent = True
-#         client.close()
-#     except (ConnectionRefusedError, OSError):
-#         sent = False
-
-#     # 如果没发出去 -> 启动新实例
-#     if not sent:
-#         visualizer_path = get_visualizer_path()
-#         if not visualizer_path:
-#             return
-#         subprocess.Popen([sys.executable, visualizer_path, str(code)])
-#         logger.info(f"Launched visualizer for {code}")
-
-#         # 延迟尝试发送 df_all
-#         if hasattr(self, 'df_all') and not self.df_all.empty:
-#             import time
-#             import pickle, struct
-#             for _ in range(10):
-#                 try:
-#                     time.sleep(0.5)  # 等待 visualizer 启动
-#                     data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-#                     data_socket.settimeout(2)
-#                     data_socket.connect((ipc_host, ipc_port))
-#                     ui_cols = ['code', 'name', 'Rank', 'percent']
-#                     df_ui = self.df_all[ui_cols].copy()
-#                     pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
-#                     header = struct.pack("!I", len(pickled_data))
-#                     data_socket.sendall(b"DATA" + header + pickled_data)
-#                     data_socket.close()
-#                     logger.info("Sent df_all after launching visualizer")
-#                     break
-#                 except Exception:
-#                     continue
 
 
 
