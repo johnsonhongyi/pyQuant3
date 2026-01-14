@@ -232,6 +232,29 @@ def get_visualizer_path(file_base='trade_visualizer_qt6'):
             logger.error(f"Visualizer script not found: {path}")
             return None
 
+import functools
+def send_with_visualizer(func):
+    """装饰器：发送股票，同时根据 vis_var 自动打开可视化"""
+    @functools.wraps(func)
+    def wrapper(self, code, *args, **kwargs):
+        if not code:
+            return
+
+        # 1️⃣ 调用原 send 方法
+        result = func(self, code, *args, **kwargs)
+
+        # 2️⃣ 更新状态（可选）
+        if hasattr(self, 'update_send_status'):
+            self.update_send_status(code)
+
+        # 3️⃣ 自动启动可视化
+        if getattr(self, 'vis_var', None) and self.vis_var.get():
+            self.open_visualizer(code)
+
+        return result
+
+    return wrapper
+
 
 class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def __init__(self):
@@ -1852,13 +1875,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # --- 启动后台线程（只启动一次） ---
         def send_df(initial=True):
             while self._df_sync_running:
-                # QT GUI 已关闭
-                if not sent and (self.qt_process is None or not self.qt_process.is_alive()):
-                    self._df_first_send_done = False  # ✅ 重新初始化
-                    logger.info(f'not qt_process.is_alive reset _df_first_send_done')
-                    time.sleep(2)
-                    continue
-
                 if not hasattr(self, 'df_all') or self.df_all.empty:
                     time.sleep(10)
                     continue
@@ -1870,19 +1886,22 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                         s.settimeout(1.0)
-                        s.connect((ipc_host, ipc_port))
+                        s.connect((ipc_host, ipc_port))  # 尝试连接，不管 self.qt_process
                         s.sendall(b"DATA" + header + pickled_data)
 
-                    if initial and not self._df_first_send_done:
+                    # 连接成功，说明 GUI 可用
+                    if not getattr(self, "_df_first_send_done", False):
                         logger.info(f"[IPC] 初始 df_all 已发送 ({len(df_ui)} 行)")
                         self._df_first_send_done = True
                     else:
                         logger.debug(f"[IPC] df_all 定时发送 ({len(df_ui)} 行)")
 
                 except Exception:
-                    pass
+                    # 连接失败，GUI 可能没启动 → 重置 first_send_done
+                    self._df_first_send_done = False
 
-                time.sleep(600 if self._df_first_send_done else 5)
+                # 初次发送后 10 分钟一次，否则快速重试
+                time.sleep(300 if getattr(self, "_df_first_send_done", False) else 5)
 
         # 启动线程（只启动一次）
         if not hasattr(self, '_df_sync_thread') or not self._df_sync_thread.is_alive():
@@ -2036,7 +2055,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if self.live_strategy.scan_hot_concepts_status:
                 self.live_strategy.set_scan_hot_concepts(status=False)
                 logger.info(f'self.live_strategy.scan_hot_concepts_status  will be close')
-
+        if not self.vis_var.get() and hasattr(self, '_df_first_send_done'):
+            self._df_first_send_done = False
         # self.update_treeview_cols(self.current_cols)
         tip_var_status_flag.value = self.tip_var.get()
 

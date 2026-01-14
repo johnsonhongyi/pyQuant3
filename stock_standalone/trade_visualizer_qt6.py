@@ -503,9 +503,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def on_real_time_toggled(self, state):
         self.realtime = bool(state)
-        if self.realtime and self.current_code:
+        if self.realtime and self.current_code and cct.get_work_time_duration():
             self._start_realtime_process(self.current_code)
-        elif not self.realtime:
+        elif not self.realtime or not cct.get_work_time_duration():
             self._stop_realtime_process()
 
     def _start_realtime_process(self, code):
@@ -554,12 +554,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.render_charts(code, self.day_df, tick_df)
 
         # 启动 realtime
-        if self.realtime:
+        if self.realtime and cct.get_work_time_duration():
             self._start_realtime_process(code)
 
 
     def on_realtime_update(self, code, tick_df, today_bar):
-        if not self.realtime or code != self.current_code or today_bar.empty:
+        if not self.realtime or code != self.current_code or today_bar.empty or not cct.get_work_time_duration():
             return
 
         last_day = self.day_df.index[-1]
@@ -904,7 +904,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # ---- 3. 如果开启 realtime，再启动 realtime worker ----
         with timed_ctx("start_realtime_worker", warn_ms=800):
-            if self.realtime:
+            if self.realtime and cct.get_work_time_duration():
                 self._start_realtime_process(code)
         if logger.level == LoggerFactory.DEBUG:
             print_timing_summary(top_n=6)
@@ -957,9 +957,18 @@ class MainWindow(QMainWindow, WindowMixin):
         x_axis = np.arange(len(day_df))
         
         # Create OHLC Data for CandlestickItem
-        ohlc_data = []
-        for i, (idx, row) in enumerate(day_df.iterrows()):
-            ohlc_data.append((i, row['open'], row['close'], row['low'], row['high']))
+        # ohlc_data = []
+        # for i, (idx, row) in enumerate(day_df.iterrows()):
+        #     ohlc_data.append((i, row['open'], row['close'], row['low'], row['high']))
+        
+        x_axis = np.arange(len(day_df))
+        ohlc_data = np.column_stack((
+            x_axis,
+            day_df['open'].values,
+            day_df['close'].values,
+            day_df['low'].values,
+            day_df['high'].values
+        ))
         
         # # Draw Candles
         # candle_item = CandlestickItem(ohlc_data)
@@ -1151,7 +1160,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
                 
-                if self.realtime and today_str > last_hist_date_str:
+                if self.realtime and cct.get_work_time_duration() and today_str > last_hist_date_str:
                     new_x = len(day_df)
                     ghost_data = [(new_x, open_p, current_price, low_p, high_p)]
                     ghost_candle = CandlestickItem(ghost_data)
