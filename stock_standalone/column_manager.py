@@ -547,7 +547,7 @@ class ColumnSetManager(tk.Toplevel):
         dlg.resizable(True, True)  # ✅ 可自由拉伸
 
         # --- 智能计算初始大小 ---
-        base_width, base_height = 300, 120
+        base_width, base_height = 300, 150
         char_width = 10
         text_len = max(len(prompt), len(initialvalue))
         extra_width = min(text_len * char_width, 600)
