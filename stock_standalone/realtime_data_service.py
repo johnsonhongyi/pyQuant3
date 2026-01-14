@@ -1008,7 +1008,7 @@ class DataPublisher:
             if now - self._last_save_ts > self._save_interval:
                 # self.save_cache(force=False)
                 # if cct.get_realtime_status() or cct.get_:
-                if self._last_save_ts == 0 or cct.get_trade_date_status() and 930 < get_now_time_int() <= close_time:
+                if self._last_save_ts == 0 or cct.get_trade_date_status() and 930 < cct.get_now_time_int() <= close_time:
                     save_cache_df = self.kline_cache.to_dataframe()
                     # logger.debug(f'save_cache_df: {save_cache_df.shape}')
                     self.cache_slot.save_df(save_cache_df,persist=True)

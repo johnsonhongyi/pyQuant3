@@ -7,6 +7,8 @@ from typing import Tuple,List,Dict
 from JohnsonUtil import LoggerFactory
 import logging
 import tkinter as tk
+from tkinter import messagebox
+
 # 获取或创建日志记录器
 logger: logging.Logger = LoggerFactory.getLogger("instock_TK.StockLogic")
 
@@ -137,14 +139,15 @@ def eval_condition(row: dict, expr: str) -> Tuple[bool, Optional[str]]:
 
 def test_code_query(df_code: Any, queries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     results = []
-
     if df_code.empty:
         return [{"error": "df_code is empty"}]
 
     row = df_code.iloc[-1].to_dict()
-
-    for q in queries:
-        expr = q["expr"]
+    if isinstance(queries, str):
+        queries = [{"expr": queries}]
+    for que in queries:
+        logger.debug(f'que: {que}')
+        expr = que["expr"]
         cols = extract_columns(expr)
         missing_cols = [c for c in cols if c not in row]
 
@@ -202,18 +205,49 @@ def format_check_result(results: List[Dict[str, Any]]) -> str:
 
 
 
-def check_code(df: pd.DataFrame, code: str, queries: List[Dict[str, Any]]) -> None:
+# def check_code(df: pd.DataFrame, code: str, queries: List[Dict[str, Any]]) -> None:
+#     """
+#     高层封装函数：传入 DataFrame 和 code，自动显示检查报告
+#     """
+#     if code not in df.index:
+#         print(f"⚠️ 股票代码 {code} 不在 DataFrame 中")
+#         return
+
+#     df_code = df.loc[[code]]
+#     report = test_code_query(df_code, queries)
+#     # print(format_check_result(report))
+#     return report
+
+
+def check_code(
+    df: pd.DataFrame,
+    code: str,
+    queries: List[Dict[str, Any]],
+    parent=None
+) -> Any:
     """
-    高层封装函数：传入 DataFrame 和 code，自动显示检查报告
-    """
+    使用 Tk 弹窗显示股票检查报告
+    """
     if code not in df.index:
-        print(f"⚠️ 股票代码 {code} 不在 DataFrame 中")
-        return
+        messagebox.showwarning(
+            "股票检查",
+            f"股票代码 {code} 不在当前 DataFrame 中",
+            parent=parent
+        )
+        return None
 
     df_code = df.loc[[code]]
     report = test_code_query(df_code, queries)
-    # print(format_check_result(report))
+    text = format_check_result(report)
+
+    messagebox.showinfo(
+        f"股票检查报告 - {code}",
+        text,
+        parent=parent
+    )
+
     return report
+
 
 def test_code_against_queries(df_code: pd.DataFrame, queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """测试单只股票是否符合多个查询条件"""

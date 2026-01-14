@@ -720,11 +720,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # 10. 停止后台进程与管理器 (关键顺序：先停进程，再停管理器)
             self.stop_refresh()
-            if self.qt_process  and self.qt_process.is_alive():
-                logger.info("正在停止后台qt_process进程...")
-                self.qt_process.terminate()
-                self.qt_process.join()
-                self.qt_process = None
+            from PyQt6.QtCore import QProcess
+            if getattr(self, 'qt_process', None):
+                if self.qt_process  and self.qt_process.state() == QProcess.ProcessState.Running:
+                    logger.info("正在停止后台qt_process进程...")
+                    self.qt_process.terminate()
+                    self.qt_process.join()
+                    self.qt_process = None
 
             if hasattr(self, "proc") and self.proc.is_alive():
                 logger.info("正在停止后台数据扫描进程...")
@@ -1785,7 +1787,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     data_socket.settimeout(0.8)
                     data_socket.connect((ipc_host, ipc_port))
 
-                    ui_cols = ['code', 'name', 'Rank', 'percent']
+                    ui_cols = ['code', 'name', 'Rank','win','slope','volume','power_idx', 'percent']
                     df_ui = self.df_all[ui_cols].copy()
                     import struct, pickle
                     pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
@@ -9032,9 +9034,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 更新缓存，并筛选对应行
                 self._select_on_test_code = code
                 df_code = self.df_all.loc[self.df_all.index == code]
+                results = check_code(self.df_all,code,self.search_var1.get())
             else:
                 if onclick:
                     df_code = self.df_all.loc[self.df_all.index == code]
+                    results = check_code(self.df_all,code,self.search_var1.get())
+                    logger.info(f'check_code: {results}')
                     self.tree_scroll_to_code(code)
                     if hasattr(self, "kline_monitor") and self.kline_monitor and self.kline_monitor.winfo_exists():
                         self.kline_monitor.tree_scroll_to_code_kline(code)

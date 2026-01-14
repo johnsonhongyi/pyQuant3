@@ -11,12 +11,13 @@ from PyQt6.QtCore import QObject,Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QBrush, QPen
 from PyQt6.QtWidgets import QComboBox, QCheckBox, QHBoxLayout, QLabel, QToolBar
 from PyQt6.QtGui import QAction, QActionGroup
+from PyQt6.QtCore import QProcess
 import socket
 import pickle
 import struct
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil.stock_sender import StockSender
-# from JohnsonUtil import commonTips as cct
+from JohnsonUtil import commonTips as cct
 from JohnsonUtil.commonTips import timed_ctx,print_timing_summary
 from JohnsonUtil import johnson_cons as ct
 import datetime  # ⚠️ 必须导入
@@ -348,12 +349,13 @@ def realtime_worker_process(code, queue, interval=3):
     s = sina_data.Sina()
     while True:
         try:
-            with timed_ctx("realtime_worker_process", warn_ms=800):
-                tick_df = s.get_real_time_tick(code)
-            # 这里可以生成今天的 day_bar
-            with timed_ctx("realtime_worker_tick_to_daily_bar", warn_ms=800):
-                today_bar = tick_to_daily_bar(tick_df)
-                queue.put((code, tick_df, today_bar))
+            if cct.get_trade_date_status() and cct.get_now_time_int() > 920 or not cct.get_trade_date_status():
+                with timed_ctx("realtime_worker_process", warn_ms=800):
+                    tick_df = s.get_real_time_tick(code)
+                # 这里可以生成今天的 day_bar
+                with timed_ctx("realtime_worker_tick_to_daily_bar", warn_ms=800):
+                    today_bar = tick_to_daily_bar(tick_df)
+                    queue.put((code, tick_df, today_bar))
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -450,16 +452,25 @@ class MainWindow(QMainWindow, WindowMixin):
         self.stock_table = QTableWidget()
         self.stock_table.setMaximumWidth(300)
         self.stock_table.setColumnCount(4)
-        self.stock_table.setHorizontalHeaderLabels(['Code', 'Name', 'Rank', 'Percent'])
-        self.stock_table.horizontalHeader().setStretchLastSection(True)
+        # self.stock_table.setHorizontalHeaderLabels(['Code', 'Name', 'Rank', 'Percent'])
+        # self.headers = ['code', 'name', 'Rank', 'win', 'slope', 'volume', 'power_idx', 'percent']
+        self.headers = ['Code', 'Name', 'Rank', 'Percent']
+        self.stock_table.setHorizontalHeaderLabels(self.headers)
+        # self.stock_table.horizontalHeader().setStretchLastSection(True)
         self.stock_table.setSortingEnabled(True)
 
+        headers = self.stock_table.horizontalHeader()
+        headers.setStretchLastSection(True)
         # 设置表格列自适应
-        self.stock_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # Code 列自适应内容
-        # self.stock_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)          # Name 列占满剩余空间
-        self.stock_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)          # Name 列占满剩余空间
-        self.stock_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Rank 列自适应
-        self.stock_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Percent 列自适应
+        # 所有列自动根据内容调整宽度
+        for col in range(len(headers)):
+            headers.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+
+        # self.stock_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # Code 列自适应内容
+        # # self.stock_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)          # Name 列占满剩余空间
+        # self.stock_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)          # Name 列占满剩余空间
+        # self.stock_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Rank 列自适应
+        # self.stock_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  # Percent 列自适应
 
 
         # 在 MainWindow.__init__ 中修改
@@ -781,7 +792,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 停掉 QT GUI 子进程
         if getattr(self, 'qt_process', None):
-           if self.qt_process.is_alive():
+           if self.qt_process.state() == QProcess.ProcessState.Running:
                self.qt_process.terminate()
                self.qt_process.join(timeout=2)
 
