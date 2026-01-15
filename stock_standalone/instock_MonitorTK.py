@@ -637,7 +637,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def on_close(self):
         try:
             logger.info("程序正在退出，执行保存与清理...")
-            
+            self.vis_var = tk.BooleanVar(value=False)
             # 1. 保存预警规则
             if hasattr(self, 'alert_manager'):
                 self.alert_manager.save_all()
