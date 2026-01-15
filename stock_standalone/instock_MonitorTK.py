@@ -436,6 +436,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 队列接收子进程数据
         self.queue = mp.Queue()
+        self.viz_command_queue = None  # ⭐ 给可视化器的内部指令队列
 
         # UI 构建
         self._build_ui(ctrl_frame)
@@ -1837,8 +1838,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         sent = False
 
         real_time_cols = cct.real_time_cols
-        ui_cols = real_time_cols if len(real_time_cols) > 4 and 'percent' in real_time_cols else \
-                  ['code', 'name', 'Rank','dff','win','slope','volume','power_idx', 'percent']
+        strategy_cols = ['last_action', 'last_reason', 'shadow_info', 'market_win_rate', 'loss_streak', 'vwap_bias']
+        ui_cols = (real_time_cols + strategy_cols) if len(real_time_cols) > 4 and 'percent' in real_time_cols else \
+                  ['code', 'name', 'Rank','dff','win','slope','volume','power_idx', 'percent'] + strategy_cols
 
         # --- 1️⃣ 尝试通过 Socket 发送给已有实例 ---
         try:
@@ -1858,12 +1860,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not sent:
             try:
                 if self.qt_process is None or not self.qt_process.is_alive():
-                    self.qt_process = mp.Process(target=qtviz.main, args=(code,self.refresh_flag), daemon=False)
+                    # 初始化指令队列
+                    if self.viz_command_queue is None:
+                        self.viz_command_queue = mp.Queue()
+                    
+                    # 启动进程：传入 code, stop_flag, log_level, debug, queue
+                    self.qt_process = mp.Process(
+                        target=qtviz.main, 
+                        # args=(code, self.refresh_flag, self.log_level, False, self.viz_command_queue), 
+                        args=(code, self.refresh_flag, self.log_level, False, self.viz_command_queue), 
+                        daemon=False
+                    )
                     self.qt_process.start()
-                    print(f"Launched QT GUI process for {code}")
-                    time.sleep(1)  # 给 Qt 初始化 socket 时间
-                    if  hasattr(self, '_df_first_send_done'):
+                    print(f"Launched QT GUI process via Queue for {code}")
+                    time.sleep(1)  # 给 Qt 初始化时间
+                    if hasattr(self, '_df_first_send_done'):
                         self._df_first_send_done = False
+                else:
+                    # 进程已在运行，通过队列切换代码
+                    if self.viz_command_queue:
+                        self.viz_command_queue.put(('SWITCH_CODE', code))
+                        logger.info(f"Queue: Sent SWITCH_CODE {code}")
+                        sent = True # 标记为已处理
             except Exception as e:
                 logger.error(f"Failed to start Qt visualizer: {e}")
                 traceback.print_exc()
@@ -1880,7 +1898,41 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     continue
 
                 try:
-                    df_ui = self.df_all[ui_cols].copy()
+                    # ⭐ 容错：不区分大小写地抓取必要的列，解决 'percent' vs 'Percent' 等不平衡问题
+                    all_cols_lower = {c.lower(): c for c in self.df_all.columns}
+                    final_mapped_cols = []
+                    for req_col in ui_cols:
+                        if req_col.lower() in all_cols_lower:
+                            final_mapped_cols.append(all_cols_lower[req_col.lower()])
+                    
+                    df_ui = self.df_all[final_mapped_cols].copy()
+                    
+                    # 如果 code 是索引且不在 actual_cols 中，强制重置索引以包含 code
+                    if 'code' not in df_ui.columns and self.df_all.index.name == 'code':
+                        df_ui = df_ui.reset_index()
+                    elif 'code' not in df_ui.columns and not df_ui.empty:
+                        # 尝试将索引作为 code (如果索引看起来像代码)
+                        df_ui['code'] = df_ui.index
+                    
+                    # --- ⭐ 优先通过队列同步 (内存级别同步) ---
+                    if self.viz_command_queue:
+                        try:
+                            # 限制堆积，只保留最新的一份数据
+                            while not self.viz_command_queue.empty():
+                                try:
+                                    # 尝试清理旧的 DATA 指令，但不清理 SWITCH_CODE
+                                    # 注意：mp.Queue 没有简单的查看方法，这里我们简单 put 覆盖或由消费端处理最新即可
+                                    # 这里简单 put 最新，消费端 while 循环 get 直到最后一份
+                                    pass
+                                except: break
+                            
+                            self.viz_command_queue.put(('UPDATE_DF_ALL', df_ui))
+                            logger.debug(f"[Queue] df_all 同步已推送 ({len(df_ui)} 行)")
+                            self._df_first_send_done = True # 标记发送成功
+                        except Exception as q_e:
+                            logger.warning(f"Push to viz_command_queue failed: {q_e}")
+
+                    # --- 2. Socket 备份发送 (用于跨实例或外部工具联动) ---
                     pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
                     header = struct.pack("!I", len(pickled_data))
 

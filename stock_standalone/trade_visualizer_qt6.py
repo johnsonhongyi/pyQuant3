@@ -349,10 +349,10 @@ def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
 
 def realtime_worker_process(code, queue, stop_flag,log_level=None,debug_realtime=False,interval=cct.sina_limit_time):
     """多进程拉取实时数据"""
-    if log_level:
-        logger = LoggerFactory.getLogger()
-        if log_level is not None:
-            logger.setLevel(log_level.value)
+    # if log_level:
+    #     logger = LoggerFactory.getLogger()
+    #     if log_level is not None:
+    #         logger.setLevel(log_level.value)
     s = sina_data.Sina()
     # while True:
     count_debug = 0
@@ -363,44 +363,44 @@ def realtime_worker_process(code, queue, stop_flag,log_level=None,debug_realtime
                 with timed_ctx("realtime_worker_process", warn_ms=800):
                     tick_df = s.get_real_time_tick(code)
                     # 这里可以生成今天的 day_bar
-                    if log_level and tick_df is None or tick_df.empty:
-                        logger.warning(
-                            f"[RT] tick_df EMPTY | code={code} | "
-                            f"trade={cct.get_trade_date_status()} "
-                            f"time={cct.get_now_time_int()}"
-                        )
-                        time.sleep(interval)
-                        continue
+                    # if log_level and tick_df is None or tick_df.empty:
+                    #     logger.warning(
+                    #         f"[RT] tick_df EMPTY | code={code} | "
+                    #         f"trade={cct.get_trade_date_status()} "
+                    #         f"time={cct.get_now_time_int()}"
+                    #     )
+                    #     time.sleep(interval)
+                    #     continue
                 with timed_ctx("realtime_worker_tick_to_daily_bar", warn_ms=800):
                     today_bar = tick_to_daily_bar(tick_df)
-                    if log_level and today_bar is None or today_bar.empty:
-                        logger.warning(
-                            f"[RT] today_bar EMPTY | code={code} | "
-                            f"today_bar_rows={len(today_bar)} | "
-                            f"today_bar_cols={list(today_bar.columns)}"
-                        )
-                        time.sleep(interval)
-                        continue
+                    # if log_level and today_bar is None or today_bar.empty:
+                    #     logger.warning(
+                    #         f"[RT] today_bar EMPTY | code={code} | "
+                    #         f"today_bar_rows={len(today_bar)} | "
+                    #         f"today_bar_cols={list(today_bar.columns)}"
+                    #     )
+                    #     time.sleep(interval)
+                    #     continue
                     try:
-                        # queue.put((code, tick_df, today_bar))
-                        if log_level and count_debug == 0 and debug_realtime:
-                            logger.debug(
-                                    f"[RT] tick_df | code={code} | "
-                                    f"tick_rows={len(tick_df)} | "
-                                    f"tick_cols={list(tick_df.columns)}"
-                                    f"tick={(tick_df[-3:])}"
-                                )
-                            # dump_path = cct.get_ramdisk_path(f"{code}_tick_{int(time.time())}.pkl")
-                            # tick_df.to_pickle(dump_path)
-                            logger.debug(
-                                    f"[RT] today_bar | code={code} | "
-                                    f"today_barrows={len(today_bar)} | "
-                                    f"today_bar_cols={list(today_bar.columns)}"
-                                    f"today_bar=\n{(today_bar)}"
-                                )
-                            # dump_path = cct.get_ramdisk_path(f"{code}_today_{int(time.time())}.pkl")
-                            # today_bar.to_pickle(dump_path)
-                            # count_debug += 1
+                        # # queue.put((code, tick_df, today_bar))
+                        # if log_level and count_debug == 0 and debug_realtime:
+                        #     logger.debug(
+                        #             f"[RT] tick_df | code={code} | "
+                        #             f"tick_rows={len(tick_df)} | "
+                        #             f"tick_cols={list(tick_df.columns)}"
+                        #             f"tick={(tick_df[-3:])}"
+                        #         )
+                        #     # dump_path = cct.get_ramdisk_path(f"{code}_tick_{int(time.time())}.pkl")
+                        #     # tick_df.to_pickle(dump_path)
+                        #     logger.debug(
+                        #             f"[RT] today_bar | code={code} | "
+                        #             f"today_barrows={len(today_bar)} | "
+                        #             f"today_bar_cols={list(today_bar.columns)}"
+                        #             f"today_bar=\n{(today_bar)}"
+                        #         )
+                        #     # dump_path = cct.get_ramdisk_path(f"{code}_today_{int(time.time())}.pkl")
+                        #     # today_bar.to_pickle(dump_path)
+                        #     # count_debug += 1
                         queue.put_nowait((code, tick_df, today_bar))
                     except queue.Full:
                         pass  # 队列满了就跳过，避免卡住
@@ -408,14 +408,12 @@ def realtime_worker_process(code, queue, stop_flag,log_level=None,debug_realtime
             import traceback
             traceback.print_exc()
             time.sleep(interval)  # 避免无限抛异常占用 CPU
-        # time.sleep(interval)
         if stop_flag.value:
             for _ in range(interval):
                 if not stop_flag.value:
                     break
                 time.sleep(1)
-        # logger.debug(f'auto_process interval: {interval}')
-    print(f'stop_flag: {stop_flag.value}')
+    # print(f'stop_flag: {stop_flag.value}')
 
 # def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 #         """
@@ -557,6 +555,43 @@ def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
 
 from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtCore import Qt
+from PyQt6 import sip
+class ScrollableMsgBox(QtWidgets.QDialog):
+    """可滚动的详细信息弹窗，用于显示高密度决策日志"""
+    def __init__(self, title, content, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumSize(500, 400)
+        self.resize(600, 500)
+        
+        layout = QtWidgets.QVBoxLayout(self)
+        
+        # 滚动区域
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        
+        content_widget = QtWidgets.QWidget()
+        content_layout = QtWidgets.QVBoxLayout(content_widget)
+        
+        self.label = QtWidgets.QLabel(content)
+        self.label.setWordWrap(True)
+        self.label.setTextFormat(Qt.TextFormat.RichText)
+        self.label.setOpenExternalLinks(True)
+        self.label.setAlignment(Qt.AlignmentFlag.AlignTop)
+        
+        content_layout.addWidget(self.label)
+        scroll.setWidget(content_widget)
+        
+        layout.addWidget(scroll)
+        
+        # 按钮
+        btn_box = QtWidgets.QHBoxLayout()
+        close_btn = QtWidgets.QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        btn_box.addStretch()
+        btn_box.addWidget(close_btn)
+        layout.addLayout(btn_box)
 
 class GlobalInputFilter(QtCore.QObject):
     """
@@ -568,6 +603,9 @@ class GlobalInputFilter(QtCore.QObject):
 
     def eventFilter(self, obj, event):
         # 只在主窗口活动时处理
+        if not hasattr(self, 'main_window') or sip.isdeleted(self.main_window):
+            return False
+
         if not self.main_window.isActiveWindow():
             return super().eventFilter(obj, event)
 
@@ -637,10 +675,11 @@ class RealtimeWorker(QObject):
 
 
 class MainWindow(QMainWindow, WindowMixin):
-    def __init__(self,stop_flag=None,log_level=None,debug_realtime=False):
+    def __init__(self, stop_flag=None, log_level=None, debug_realtime=False, command_queue=None):
         super().__init__()
         self.setWindowTitle("Trade Signal Visualizer (Qt6 + PyQtGraph)")
         self.sender = StockSender(callback=None)
+        self.command_queue = command_queue  # ⭐ 新增：内部指令队列
         # WindowMixin requirement: scale_factor
         self._debug_realtime = debug_realtime   # 临时调试用
         self.scale_factor = get_windows_dpi_scale_factor()
@@ -664,6 +703,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.realtime_timer = QTimer()
         self.realtime_timer.timeout.connect(self._poll_realtime_queue)
         self.realtime_timer.start(5000)  # 每5秒检查一次队列
+
+        # ⭐ 新增：指令队列轮询 (处理来自 MonitorTK 的直连指令)
+        if self.command_queue:
+            self.command_timer = QTimer()
+            self.command_timer.timeout.connect(self._poll_command_queue)
+            self.command_timer.start(200)  # 200ms 轮询一次，保证响应速度
 
         self.day_df = pd.DataFrame()
         self.df_all = pd.DataFrame()
@@ -748,18 +793,26 @@ class MainWindow(QMainWindow, WindowMixin):
         """)
         self.stock_table.verticalScrollBar().setFixedWidth(6)
         # self.stock_table.setHorizontalHeaderLabels(['Code', 'Name', 'Rank', 'Percent'])
-        # self.headers = ['code', 'name', 'percent','dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
-        real_time_cols = cct.real_time_cols
+        # 列名中英文映射
+        self.column_map = {
+            'code': '代码', 'name': '名称', 'percent': '涨幅%', 'Rank': '排名',
+            'last_action': '策略动作', 'last_reason': '决策理由', 'shadow_info': '影子比对',
+            'market_win_rate': '全场胜率', 'loss_streak': '连亏次数', 'vwap_bias': '均价偏离'
+        }
+
+        real_time_cols = list(cct.real_time_cols)
+        strategy_cols = ['last_action', 'last_reason', 'shadow_info', 'market_win_rate', 'loss_streak', 'vwap_bias']
+        
         if len(real_time_cols) > 4 and 'percent' in real_time_cols:
-            self.headers = real_time_cols
+            self.headers = real_time_cols + strategy_cols
         else:
-            logger.info(f'real_time_cols: {real_time_cols} not good')
-            self.headers = ['code', 'name', 'percent','dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
-        # self.headers = ['Code', 'Name', 'Rank', 'Percent']
+            self.headers = ['code', 'name', 'percent','dff', 'Rank', 'win', 'slope', 'volume', 'power_idx'] + strategy_cols
+        
         self.stock_table.setColumnCount(len(self.headers))
         
-        self.stock_table.setHorizontalHeaderLabels(self.headers)
-        # self.stock_table.horizontalHeader().setStretchLastSection(True)
+        # 使用映射显示中文表头
+        display_headers = [self.column_map.get(h, h) for h in self.headers]
+        self.stock_table.setHorizontalHeaderLabels(display_headers)
         self.stock_table.setSortingEnabled(True)
         headers = self.stock_table.horizontalHeader()
         headers.setStretchLastSection(True)
@@ -997,6 +1050,90 @@ class MainWindow(QMainWindow, WindowMixin):
             except Exception:
                 logger.exception("Error in on_realtime_update")
 
+    def _poll_command_queue(self):
+        """轮询内部指令队列 (优化：消费所有积压，只取最新全量数据)"""
+        if not self.command_queue:
+            return
+        
+        try:
+            latest_df = None
+            while not self.command_queue.empty():
+                cmd_data = self.command_queue.get_nowait()
+                if isinstance(cmd_data, tuple) and len(cmd_data) == 2:
+                    cmd, val = cmd_data
+                    if cmd == 'SWITCH_CODE':
+                        logger.info(f"Queue CMD: Switching to {val}")
+                        self.load_stock_by_code(val)
+                    elif cmd == 'UPDATE_DF_ALL':
+                        # 记录最新的全量数据，跳过中间过时的
+                        if isinstance(val, pd.DataFrame):
+                            latest_df = val
+            
+            # 处理最鲜活的一份数据
+            if latest_df is not None:
+                logger.debug(f"Queue CMD: Instant sync df_all ({len(latest_df)} rows)")
+                self.update_df_all(latest_df)
+
+        except Exception as e:
+            logger.debug(f"Poll command queue failed: {e}")
+
+    def on_signal_clicked(self, plot, points):
+        """点击 K 线信号图标时触发，显示详细决策理由与指标"""
+        if not points:
+            return
+        
+        point = points[0]
+        data = point.data()
+        if not data:
+            return
+
+        # 构造信息
+        date = data.get("date", "Unknown")
+        action = data.get("action", "Unknown")
+        reason = data.get("reason", "No reason")
+        price = data.get("price", 0.0)
+        indicators_raw = data.get("indicators", "{}")
+
+        # 处理指标 JSON
+        import json
+        try:
+            if isinstance(indicators_raw, str):
+                indicators = json.loads(indicators_raw)
+            else:
+                indicators = indicators_raw
+            
+            # 提取关键指标美化显示
+            ind_text = ""
+            for k, v in indicators.items():
+                if isinstance(v, float):
+                    ind_text += f"• {k}: {v:.2f}\n"
+                else:
+                    ind_text += f"• {k}: {v}\n"
+        except:
+            ind_text = str(indicators_raw)
+
+        # msg = (
+        #     f"<b>日期:</b> {date}<br>"
+        #     f"<b>动作:</b> <span style='color:red;'>{action}</span><br>"
+        #     f"<b>价格:</b> {price:.2f}<br>"
+        #     f"<b>理由:</b> {reason}<br><br>"
+        #     f"<b>📊 决策指标快照:</b><br>{ind_text.replace('\n', '<br>')}"
+        # )
+        ind_html = ind_text.replace('\n', '<br>')
+        msg = (
+            f"<div style='font-family: Microsoft YaHei; font-size: 10pt;'>"
+            f"<p><b>📅 日期:</b> {date}</p>"
+            f"<p><b>🎬 动作:</b> <span style='color:red; font-size: 12pt;'>{action}</span></p>"
+            f"<p><b>💰 价格:</b> <span style='color:#00FF00;'>{price:.2f}</span></p>"
+            f"<p><b>📝 理由:</b> {reason}</p>"
+            f"<hr>"
+            f"<p><b>📊 决策指标快照 (可滚动查看):</b><br>{ind_html}</p>"
+            f"</div>"
+        )
+
+        dlg = ScrollableMsgBox(f"🔍 信号透视: {self.current_code} ({date})", msg, self)
+        dlg.exec()
+
     def _on_initial_loaded(self, code, day_df, tick_df):
         if code != self.current_code:
             return
@@ -1208,9 +1345,11 @@ class MainWindow(QMainWindow, WindowMixin):
         # 1️⃣ 通知子进程退出
         if hasattr(self, 'stop_flag'):
             self.stop_flag.value = False
+        logger.info(f'stop_flag.value: {stop_flag.value}')
+        self._stop_realtime_process()
         if hasattr(self, 'refresh_flag'):
             self.refresh_flag.value = False
-
+            
         # 2️⃣ 停止 realtime_process
         if getattr(self, 'realtime_process', None):
             if self.realtime_process.is_alive():
@@ -1251,84 +1390,71 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.update_stock_table(fallback_df)
     
     def update_stock_table(self, df):
-        """Update table with df_all data"""
+        """Update table with df_all data (Robust column matching and index support)"""
         self.stock_table.setSortingEnabled(False)
         self.stock_table.setRowCount(0)
         
         if df.empty:
             return
         
-        # Filter required columns
-        required_cols = ['code', 'name']
-        # optional_cols = ['Rank', 'percent']
-        optional_cols = [col for col in self.headers if col not in required_cols]
-        logger.info(f'optional_cols: {optional_cols}')
-        for col in required_cols:
-            if col not in df.columns:
-                return
+        # 预先统一列名映射，支持大小写不同或索引形式
+        cols_in_df = {c.lower(): c for c in df.columns}
         
         # Add rows
         for idx, row in df.iterrows():
             row_position = self.stock_table.rowCount()
             self.stock_table.insertRow(row_position)
             
-            stock_code = str(row.get('code', ''))
-            stock_name = str(row.get('name', ''))
+            # ⭐ 优先从列中找 code，找不到则看 index (idx)
+            raw_code = row.get('code', idx) if 'code' in cols_in_df else idx
+            stock_code = str(raw_code)
+            # 名称处理
+            raw_name = row.get('name', '') if 'name' in cols_in_df else ''
+            stock_name = str(raw_name)
 
             # Code
             code_item = QTableWidgetItem(stock_code)
-            code_item.setData(Qt.ItemDataRole.UserRole, row.get('code', ''))
+            code_item.setData(Qt.ItemDataRole.UserRole, stock_code)
             self.stock_table.setItem(row_position, 0, code_item)
             
             # Name
             name_item = QTableWidgetItem(stock_name)
             self.stock_table.setItem(row_position, 1, name_item)
             
-            # code_name_map / code_info_map 之前的逻辑保持
             self.code_name_map[stock_code] = stock_name
-            self.code_info_map[stock_code] = {
-                "name": stock_name,
-            }
-            for col in optional_cols:
-                self.code_info_map[stock_code][col] = row.get(col)
-            # 填表格
-            # 假设 row_position 已经确定
-            # required_cols 已经处理过 code / name，如果可选列从列索引 len(required_cols) 开始
-            # 遍历可选列填表
-            for idx, col in enumerate(optional_cols, start=len(required_cols)):
-                val = row.get(col)
+            self.code_info_map[stock_code] = {"name": stock_name}
+            
+            # 填入可选列
+            optional_cols = [col for col in self.headers if col not in ['code', 'name']]
+            for col_idx, col_name in enumerate(optional_cols, start=2):
+                # 尝试大小写不敏感匹配
+                real_col = cols_in_df.get(col_name.lower())
+                val = row.get(real_col) if real_col else 0
+                
+                # ⭐ 关键修复：将数据存入 code_info_map 以供 K 线标题使用
+                self.code_info_map[stock_code][col_name] = val
+                
                 item = QTableWidgetItem()
-
-                # 空值 / 类型处理
                 if pd.notnull(val):
                     if isinstance(val, (int, float)):
                         item.setData(Qt.ItemDataRole.DisplayRole, val)
                     else:
                         item.setData(Qt.ItemDataRole.DisplayRole, str(val))
                 else:
-                    # 默认值
-                    if col in ['Rank']:
-                        item.setData(Qt.ItemDataRole.DisplayRole, 0)
-                    else:
-                        item.setData(Qt.ItemDataRole.DisplayRole, 0.0)
+                    item.setData(Qt.ItemDataRole.DisplayRole, 0 if col_name in ['Rank'] else 0.0)
 
-                # -------------------------
-                # 可扩展列特殊显示规则
-                # -------------------------
-                if col == 'percent' and pd.notnull(val):
+                # --- 颜色渲染 ---
+                if col_name == 'percent' and pd.notnull(val):
                     val_float = float(val)
-                    if val_float > 0:
-                        item.setForeground(QColor('red'))
-                    elif val_float < 0:
-                        item.setForeground(QColor('green'))
+                    if val_float > 0: item.setForeground(QColor('red'))
+                    elif val_float < 0: item.setForeground(QColor('green'))
+                elif col_name == 'last_action' and pd.notnull(val):
+                    action_text = str(val)
+                    if 'VETO' in action_text: item.setForeground(QColor(255, 140, 0))
+                    elif '买' in action_text or 'Buy' in action_text: item.setForeground(QColor('red'))
+                
+                self.stock_table.setItem(row_position, col_idx, item)
 
-                # 如果后续还有别的列需要颜色逻辑，可以继续加 elif col == 'xxx'
-
-                # 填入表格
-                self.stock_table.setItem(row_position, idx, item)
-
-
-        
         self.stock_table.setSortingEnabled(True)
         self.stock_table.resizeColumnsToContents()
 
@@ -1366,22 +1492,20 @@ class MainWindow(QMainWindow, WindowMixin):
                             except Exception as e:
                                 print(f"Error sending stock code: {e}")
 
-    def update_df_all(self, df):
-        """Update df_all and refresh table"""
-        self.df_all = df.copy() if not df.empty else pd.DataFrame()
-        self.update_stock_table(self.df_all)
-
     def update_df_all(self, df=None):
         """
         更新 df_all 并刷新表格
         - df: 如果传入 DataFrame，则刷新缓存
-        - code: 如果传入 code，则只刷新表格对应 code，数据用缓存
         """
         if df is not None:
             # 更新缓存
             self.df_cache = df.copy() if not df.empty else pd.DataFrame()
             self.df_all = self.df_cache
         self.update_stock_table(self.df_all)
+        
+        # ⭐ 关键修复：刷新当前股票标题（仅更新监理看板部分）
+        if getattr(self, 'current_code', None) and hasattr(self, 'kline_plot'):
+            self._refresh_sensing_bar(self.current_code)
 
 
     def _capture_view_state(self):
@@ -1395,11 +1519,35 @@ class MainWindow(QMainWindow, WindowMixin):
             
             # 计算可见窗口距离末尾的根数
             # 如果看的是最后 100 根，那么 last_n 就是 100
-            self._prev_last_n = total - view_rect.left()
+            self._prev_last_n = total - view_rect.right() # 改为 relative to right edge? No, right edge is 'latest'.
+            # Correct logic:
+            # X axis is 0..Total.
+            # Rightmost data is at X=Total.
+            # If I look at [Total-100, Total]. ViewRect Right is Total. viewRect Left is Total-100.
+            # I want to preserve "how many bars are visible". i.e. Width.
+            # AND "how close to the newest bar I am".
             
+            # If I stick to the 'latest', I want to preserve (Total - Right) and (Total - Left).
+            # Usually users care about "Last N bars". So preserving (Total - Left) is good.
+            # self._prev_last_n = total - view_rect.left() (This means Left edge is N bars from end).
+            
+            # Let's try preserving the span (zoom level) and the offset from right.
+            self._prev_span = view_rect.width()
+            self._prev_offset_right = total - view_rect.right() # Distance from right edge to latest data
+            
+            # 兼容旧逻辑变量名，方便调试
+            self._prev_last_n = total - view_rect.left()
+
             # 计算可见区域内的价格波动比例
-            # 取旧数据在当前视野内的最高/最低
-            v_start, v_end = int(max(0, view_rect.left())), int(min(total, view_rect.right()))
+            v_start = int(max(0, view_rect.left()))
+            v_end = int(min(total, view_rect.right()))
+            
+            # Safety check
+            if v_start >= v_end:
+                 # fallback to span only
+                 self._prev_y_zoom = None
+                 return
+
             visible_old = self.day_df.iloc[v_start:v_end]
             if not visible_old.empty:
                 old_h = visible_old['high'].max()
@@ -1413,7 +1561,7 @@ class MainWindow(QMainWindow, WindowMixin):
             else:
                 self._prev_y_zoom = None
         except Exception as e:
-            logger.debug(f"Capture state failed: {e}")
+            logger.error(f"Capture state failed: {e}")
 
     def load_stock_by_code(self, code):
         # ① 在清空/加载前捕获状态
@@ -1475,20 +1623,9 @@ class MainWindow(QMainWindow, WindowMixin):
                     delattr(self, attr)
             return
 
-        # --- 状态判断 ---
-        is_new_stock = not hasattr(self, '_last_rendered_code') or self._last_rendered_code != code
-        self._last_rendered_code = code
-
-        # --- 标题 ---
-        info = self.code_info_map.get(code, {})
-        title_parts = [code]
-        for k, fmt in [('name', '{}'), ('Rank', 'Rank: {}'), ('percent', '{:+.2f}%'),
-                       ('win', 'win: {}'), ('slope', 'slope: {:.1f}%'), ('volume', 'vol: {:.1f}')]:
-            v = info.get(k)
-            if v is not None:
-                title_parts.append(fmt.format(v))
-        self.kline_plot.setTitle(" | ".join(title_parts))
-
+        # --- 标题 (含监理看板) ---
+        self._update_plot_title(code, day_df, tick_df)
+        
         # --- 主题颜色 ---
         if self.qt_theme == 'dark':
             ma_colors = {'ma5':'b','ma10':'orange','ma20':QColor(255,255,0)}
@@ -1615,6 +1752,8 @@ class MainWindow(QMainWindow, WindowMixin):
         if not hasattr(self, 'signal_scatter'):
             self.signal_scatter = pg.ScatterPlotItem(size=15, pen=pg.mkPen('k'), symbol='t1', z=10)
             self.kline_plot.addItem(self.signal_scatter)
+            # ⭐ 绑定点击事件
+            self.signal_scatter.sigClicked.connect(self.on_signal_clicked)
             self.signal_text_items = []
         else:
             self.signal_scatter.clear()
@@ -1623,8 +1762,10 @@ class MainWindow(QMainWindow, WindowMixin):
             self.signal_text_items.clear()
 
         if not signals.empty:
-            stock_signals = signals[signals['code'] == code]
-            xs, ys, brushes = [], [], []
+            # ⭐ 类型安全转换：确保按字符串匹配
+            signals['code'] = signals['code'].astype(str)
+            stock_signals = signals[signals['code'] == str(code)]
+            xs, ys, brushes, symbols, meta = [], [], [], [], []
             date_map = {d if isinstance(d, str) else d.strftime('%Y-%m-%d'): i for i, d in enumerate(dates)}
             
             for _, row in stock_signals.iterrows():
@@ -1634,15 +1775,53 @@ class MainWindow(QMainWindow, WindowMixin):
                     xs.append(idx)
                     y_price = row['price'] if pd.notnull(row['price']) else day_df.iloc[idx]['close']
                     ys.append(y_price)
-                    buy_signal = 'Buy' in row['action'] or '买' in row['action']
-                    brushes.append(pg.mkBrush('r') if buy_signal else pg.mkBrush('g'))
+                    
+                    action = str(row['action'])
+                    reason = str(row['reason'])
+                    indicators = row.get('indicators', '{}')
+                    
+                    # --- 识别信号类型 ---
+                    is_veto = "VETO" in action
+                    is_shadow = "SHADOW" in action
+                    is_buy = 'Buy' in action or '买' in action or 'ADD' in action or '加' in action
+                    
+                    # ⭐ 动态设置颜色与图标
+                    if is_veto:
+                        brush = pg.mkBrush(200, 200, 200) # 银色/灰色
+                        color = (200, 200, 200)
+                        symbol = 's' # Square for VETO
+                        label = f"🛡️ {y_price:.2f}"
+                        anchor = (0.5, 1.5)
+                    elif is_shadow:
+                        brush = pg.mkBrush(0, 255, 255) # 青色
+                        color = 'c'
+                        symbol = 'd' # Diamond for SHADOW
+                        label = f"🧪 {y_price:.2f}"
+                        anchor = (0.5, 1.5)
+                    else:
+                        brush = pg.mkBrush('r') if is_buy else pg.mkBrush('g')
+                        color = 'r' if is_buy else 'g'
+                        symbol = 't1' # Triangle for normal
+                        label = f"{y_price:.2f}"
+                        anchor = (0.5, 1.5) if is_buy else (0.5, -0.5)
+                    
+                    brushes.append(brush)
+                    symbols.append(symbol)
+                    # 存储元数据用于点击显示
+                    meta.append({
+                        "date": sig_date, 
+                        "action": action, 
+                        "reason": reason, 
+                        "price": y_price,
+                        "indicators": indicators
+                    })
                     
                     text_item = pg.TextItem(
-                        text=f"{y_price:.2f}",
-                        anchor=(0.5, 1.5) if buy_signal else (0.5, -0.5),
-                        color='r' if buy_signal else 'g',
+                        text=label,
+                        anchor=anchor,
+                        color=color,
                         border='k',
-                        fill=(50,50,50,150)
+                        fill=(50,50,50,180)
                     )
                     text_item.setZValue(11)
                     text_item.setPos(idx, y_price)
@@ -1650,7 +1829,12 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.signal_text_items.append(text_item)
 
             if xs:
-                self.signal_scatter.setData(x=xs, y=ys, brush=brushes, size=15)
+                # 信号点使用不同形状增强区分
+                self.signal_scatter.setData(x=xs, y=ys, brush=brushes, symbol=symbols, size=22, data=meta)
+
+        # -------------------------
+        # 移除此处的 sensing_bar 设置，改到 intraday 内容设置之后
+        # -------------------------
 
         # --- Ghost Candle (实时占位) ---
         is_realtime_active = self.realtime and not tick_df.empty and (cct.get_work_time_duration() or self._debug_realtime)
@@ -1715,44 +1899,68 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.pre_close_line.setPen(pg.mkPen(pre_close_color, style=Qt.PenStyle.DashLine))
 
             pct_change = (prices[-1]-pre_close)/pre_close*100 if pre_close!=0 else 0
-            self.tick_plot.setTitle(f"Intraday: {prices[-1]:.2f} ({pct_change:.2f}%)")
+            
+            # ⭐ 构建分时图标题（包含监理看板）
+            tick_title = f"Intraday: {prices[-1]:.2f} ({pct_change:.2f}%)"
+            
+            # 追加监理看板信息
+            if not self.df_all.empty:
+                # 调试：打印 df_all 的列名
+                print(f"[DEBUG] df_all columns: {self.df_all.columns.tolist()}")
+                print(f"[DEBUG] Looking for code: {code}, df_all index: {self.df_all.index.tolist()[:5]}")
+                
+                crow = None
+                if code in self.df_all.index:
+                    crow = self.df_all.loc[code]
+                    print(f"[DEBUG] Found in index")
+                elif 'code' in self.df_all.columns:
+                    mask = self.df_all['code'] == code
+                    if mask.any():
+                        crow = self.df_all[mask].iloc[0]
+                        print(f"[DEBUG] Found in columns")
+                
+                if crow is not None:
+                    print(f"[DEBUG] crow data: {crow.to_dict() if hasattr(crow, 'to_dict') else crow}")
+                    mwr = crow.get('market_win_rate', 0)
+                    ls = crow.get('loss_streak', 0)
+                    vwap_bias = crow.get('vwap_bias', 0)
+                    print(f"[DEBUG] Supervision data: mwr={mwr}, ls={ls}, vwap_bias={vwap_bias}")
+                    # 显示所有监理数据
+                    tick_title += f"  |  <span style='color: #FFD700; font-weight: bold;'>🛡️监理: 偏离{vwap_bias:+.1%} 胜率{mwr:.1%} 连亏{ls}</span>"
+                else:
+                    print(f"[DEBUG] Stock {code} not found in df_all")
+            
+            self.tick_plot.setTitle(tick_title)
             self.tick_plot.showGrid(x=False, y=True, alpha=0.5)
+
+
+        # --- 状态判断 ---
+        is_new_stock = not hasattr(self, '_last_rendered_code') or self._last_rendered_code != code
+        self._last_rendered_code = code
 
         # --- 范围处理（缩放自适应） ---
         if is_new_stock:
             vb = self.kline_plot.getViewBox()
-            # 检查是否有保存的旧状态
-            if hasattr(self, '_prev_last_n') and hasattr(self, '_prev_y_zoom') and self._prev_y_zoom is not None:
-                # 1. 应用 X 轴：根据保存的距离末尾的根数
-                new_total = len(day_df)
-                target_left = max(0, new_total - self._prev_last_n)
-                target_right = new_total + (2 if is_realtime_active else 0)
+            n = len(day_df)
+            
+            # 检查是否有保存的旧状态（仅使用显示宽度，不使用偏移量）
+            if hasattr(self, '_prev_span') and self._prev_span is not None and self._prev_span > 0:
+                # 保持相同的显示宽度（K线根数），但始终对齐到最右侧
+                display_width = min(self._prev_span, n)  # 不超过总K线数
+                target_left = max(0, n - display_width)
+                target_right = n + 5  # 右侧留足够空间，确保最新K线可见
                 
-                # 2. 应用 Y 轴：计算新股票在目标 X 范围内的价格区间
-                visible_new = day_df.iloc[int(target_left):]
-                if not visible_new.empty:
-                    new_h = visible_new['high'].max()
-                    new_l = visible_new['low'].min()
-                    new_rng = new_h - new_l if new_h > new_l else 1.0
-                    
-                    # 按比例恢复高度和中心位置
-                    target_h = new_rng * self._prev_y_zoom
-                    target_y_center = new_l + (new_rng * self._prev_y_center_rel)
-                    
-                    # 设置视图，padding=0 保证精确匹配
-                    vb.setRange(xRange=(target_left, target_right), 
-                                yRange=(target_y_center - target_h/2, target_y_center + target_h/2),
-                                padding=0)
-                else:
-                    self.kline_plot.autoRange()
+                vb.setRange(xRange=(target_left, target_right), padding=0)
+                vb.enableAutoRange(axis=pg.ViewBox.YAxis)
             else:
                 # 若无状态或首次打开，显示最后 100 根
-                n = len(day_df)
-                vb.setRange(xRange=(max(0, n-100), n+1))
+                vb.setRange(xRange=(max(0, n-100), n+5), padding=0)
+                vb.enableAutoRange(axis=pg.ViewBox.YAxis)
                 vb.enableAutoRange(axis=pg.ViewBox.YAxis)
             
             # 切换完股票后清理状态，防止实时更新干扰
-            for attr in ['_prev_last_n', '_prev_y_zoom', '_prev_y_center_rel']:
+            # 切换完股票后清理状态，防止实时更新干扰
+            for attr in ['_prev_last_n', '_prev_y_zoom', '_prev_y_center_rel', '_prev_span', '_prev_offset_right']:
                 if hasattr(self, attr):
                     delattr(self, attr)
         else:
@@ -2086,6 +2294,88 @@ class MainWindow(QMainWindow, WindowMixin):
     #             import traceback
     #             traceback.print_exc()
 
+    def _update_plot_title(self, code, day_df, tick_df):
+        """Helper to update the K-line plot title with Latest Info & Sensing Dashboard"""
+        if not hasattr(self, 'kline_plot'):
+            return
+        
+        
+        info = self.code_info_map.get(code, {})
+        title_parts = [code]
+        for k, fmt in [('name', '{}'), ('Rank', 'Rank: {}'), ('percent', '{:+.2f}%'),
+                       ('win', 'win: {}'), ('slope', 'slope: {:.1f}%'), ('volume', 'vol: {:.1f}')]:
+            v = info.get(k)
+            # 容错：如果是 0 但不为 None，也要显示
+            if v is not None:
+                title_parts.append(fmt.format(v))
+        
+        # ⭐ 追加监理看板信息
+        sensing_parts = []
+        if not self.df_all.empty:
+            # 兼容 code 为 index 或列的情况
+            crow = None
+            if code in self.df_all.index:
+                crow = self.df_all.loc[code]
+            elif 'code' in self.df_all.columns:
+                mask = self.df_all['code'] == code
+                if mask.any():
+                    crow = self.df_all[mask].iloc[0]
+            
+            if crow is not None:
+                mwr = crow.get('market_win_rate', 0)
+                ls = crow.get('loss_streak', 0)
+                vwap_bias = crow.get('vwap_bias', 0)
+                # 只要有非零数据就显示，或者全部显示以明确状态
+                if mwr > 0 or ls > 0 or abs(vwap_bias) > 0.001:
+                    sensing_parts.append(f"🛡️监理: 偏离{vwap_bias:+.1%} 胜率{mwr:.1%} 连亏{ls}")
+        
+        main_title = " | ".join(title_parts)
+        if sensing_parts:
+            # 使用 HTML 颜色增强看板可见性
+            sensing_html = " ".join(sensing_parts)
+            main_title += f"  |  <span style='color: #FFD700; font-weight: bold;'>{sensing_html}</span>"
+            
+        self.kline_plot.setTitle(main_title)
+    
+    def _refresh_sensing_bar(self, code):
+        """仅刷新监理看板部分（用于 update_df_all 时的快速更新）"""
+        if not hasattr(self, 'kline_plot'):
+            return
+        
+        # 获取当前标题的基础部分（不含监理看板）
+        info = self.code_info_map.get(code, {})
+        title_parts = [code]
+        for k, fmt in [('name', '{}'), ('Rank', 'Rank: {}'), ('percent', '{:+.2f}%'),
+                       ('win', 'win: {}'), ('slope', 'slope: {:.1f}%'), ('volume', 'vol: {:.1f}')]:
+            v = info.get(k)
+            if v is not None:
+                title_parts.append(fmt.format(v))
+        
+        # ⭐ 追加监理看板信息
+        sensing_parts = []
+        if not self.df_all.empty:
+            crow = None
+            if code in self.df_all.index:
+                crow = self.df_all.loc[code]
+            elif 'code' in self.df_all.columns:
+                mask = self.df_all['code'] == code
+                if mask.any():
+                    crow = self.df_all[mask].iloc[0]
+            
+            if crow is not None:
+                mwr = crow.get('market_win_rate', 0)
+                ls = crow.get('loss_streak', 0)
+                vwap_bias = crow.get('vwap_bias', 0)
+                # 显示所有监理数据（即使为0也显示，便于调试）
+                sensing_parts.append(f"🛡️监理: 偏离{vwap_bias:+.1%} 胜率{mwr:.1%} 连亏{ls}")
+        
+        main_title = " | ".join(title_parts)
+        if sensing_parts:
+            sensing_html = " ".join(sensing_parts)
+            main_title += f"  |  <span style='color: #FFD700; font-weight: bold;'>{sensing_html}</span>"
+            
+        self.kline_plot.setTitle(main_title)
+
 def run_visualizer(initial_code=None, df_all=None):
     """
     启动 Visualizer GUI。
@@ -2107,7 +2397,7 @@ def run_visualizer(initial_code=None, df_all=None):
     window.show()
     sys.exit(app.exec())
 
-def main(initial_code='000002',stop_flag=None,log_level=None,debug_realtime=False):
+def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=False, command_queue=None):
     # --- 1. 尝试成为 Primary Instance ---
         # logger = LoggerFactory.getLogger()
     if log_level is not None:
@@ -2140,7 +2430,7 @@ def main(initial_code='000002',stop_flag=None,log_level=None,debug_realtime=Fals
 
     # --- 3. Primary Instance: 启动 GUI ---
     app = QApplication(sys.argv)
-    window = MainWindow(stop_flag,log_level,debug_realtime)
+    window = MainWindow(stop_flag, log_level, debug_realtime, command_queue=command_queue)
     start_code = initial_code
     # 启动监听线程，处理 socket 消息
     listener = CommandListenerThread(server_socket)

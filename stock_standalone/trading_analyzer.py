@@ -65,6 +65,9 @@ class TradingAnalyzer:
                     'time_msg': d.get('时间窗口说明', ''),
                     'buy_reason': d.get('buy_reason', ''),
                     'sell_reason': d.get('sell_reason', ''),
+                    # 影子策略比对字段
+                    'shadow_action': d.get('shadow_action', ''),
+                    'shadow_reason': d.get('shadow_reason', ''),
                 })
             except:
                 return pd.Series({
