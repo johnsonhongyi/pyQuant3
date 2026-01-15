@@ -5,7 +5,7 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QSplitter, QFrame, QMessageBox
+    QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QSplitter, QFrame, QMessageBox, QAbstractItemView
 )
 from PyQt6.QtCore import QObject,Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QBrush, QPen
@@ -815,6 +815,9 @@ class MainWindow(QMainWindow, WindowMixin):
         }
         """)
         self.stock_table.verticalScrollBar().setFixedWidth(6)
+        # 禁止编辑：防止误触发覆盖 Code/Name 等关键信息，只允许选择和复制
+        self.stock_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.stock_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         # self.stock_table.setHorizontalHeaderLabels(['Code', 'Name', 'Rank', 'Percent'])
         # 列名中英文映射
         self.column_map = {
@@ -1591,10 +1594,12 @@ class MainWindow(QMainWindow, WindowMixin):
             # Code
             code_item = QTableWidgetItem(stock_code)
             code_item.setData(Qt.ItemDataRole.UserRole, stock_code)
+            code_item.setFlags(code_item.flags() & ~Qt.ItemFlag.ItemIsEditable) # 明确移除可编辑属性
             self.stock_table.setItem(row_position, 0, code_item)
             
             # Name
             name_item = QTableWidgetItem(stock_name)
+            name_item.setFlags(name_item.flags() & ~Qt.ItemFlag.ItemIsEditable) # 明确移除可编辑属性
             self.stock_table.setItem(row_position, 1, name_item)
             
             self.code_name_map[stock_code] = stock_name
@@ -1629,6 +1634,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     if 'VETO' in action_text: item.setForeground(QColor(255, 140, 0))
                     elif '买' in action_text or 'Buy' in action_text: item.setForeground(QColor('red'))
                 
+                item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable) # 明确移除可编辑属性
                 self.stock_table.setItem(row_position, col_idx, item)
 
         self.stock_table.setSortingEnabled(True)
@@ -2222,8 +2228,9 @@ class MainWindow(QMainWindow, WindowMixin):
                         vwap_bias = auto_data.get('vwap_bias', 0)
                         
                         # ⭐ 重点：补齐自主模式下的详情数据分配
-                        shadow_act = shadow_decision.get('action', 'N/A') if 'shadow_decision' in locals() else 'N/A'
-                        shadow_res = shadow_decision.get('reason', 'N/A') if 'shadow_decision' in locals() else 'N/A'
+                        has_sh = 'shadow_decision' in locals() and shadow_decision is not None
+                        shadow_act = shadow_decision.get('action', 'N/A') if has_sh else 'N/A'
+                        shadow_res = shadow_decision.get('reason', 'N/A') if has_sh else 'N/A'
                         
                         self.current_supervision_data = {
                             'market_win_rate': mwr,
@@ -2242,8 +2249,9 @@ class MainWindow(QMainWindow, WindowMixin):
                     ls = auto_data.get('loss_streak', 0)
                     vwap_bias = auto_data.get('vwap_bias', 0)
                     
-                    shadow_act = shadow_decision.get('action', 'N/A') if 'shadow_decision' in locals() else 'N/A'
-                    shadow_res = shadow_decision.get('reason', 'N/A') if 'shadow_decision' in locals() else 'N/A'
+                    has_sh = 'shadow_decision' in locals() and shadow_decision is not None
+                    shadow_act = shadow_decision.get('action', 'N/A') if has_sh else 'N/A'
+                    shadow_res = shadow_decision.get('reason', 'N/A') if has_sh else 'N/A'
                     
                     self.current_supervision_data = {
                         'market_win_rate': mwr,
