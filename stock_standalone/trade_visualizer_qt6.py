@@ -154,7 +154,7 @@ class DateAxis(pg.AxisItem):
                     idx = 0  # 负索引归零
                 elif idx >= n:
                     idx = n - 1  # 超出范围用最后一天
-                strs.append(str(self.dates[idx])[5:])  # MM-DD
+                strs.append(str(self.dates[idx])[5:10])  # MM-DD
             except Exception as e:
                 # 捕捉意外异常
                 logger.warning(f"[tickStrings] val={val} error: {e}")
@@ -417,66 +417,186 @@ def realtime_worker_process(code, queue, stop_flag,log_level=None,debug_realtime
         # logger.debug(f'auto_process interval: {interval}')
     print(f'stop_flag: {stop_flag.value}')
 
+# def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+#         """
+#         统一 DataFrame 结构：
+#         - MultiIndex(code, ticktime) → 普通列 code, ticktime
+#         - ticktime 自适应类型：
+#             - datetime → 保留
+#             - str → 转 datetime
+#             - float/int timestamp → 转 datetime
+#         - 重置 index，保证 Viewer 内部只使用列
+#         """
+#         df = df.copy()
+
+#         if isinstance(df.index, pd.MultiIndex):
+#             idx_names = df.index.names
+
+#             # code
+#             if 'code' in idx_names:
+#                 df['code'] = df.index.get_level_values('code')
+#             else:
+#                 df['code'] = df.index.get_level_values(0)
+
+#             # ticktime / time / datetime
+#             time_level = None
+#             for name in idx_names:
+#                 if name and name.lower() in ('ticktime', 'time', 'datetime', 'date'):
+#                     time_level = name
+#                     break
+
+#             if time_level:
+#                 ts = df.index.get_level_values(time_level)
+#             else:
+#                 ts = df.index.get_level_values(1)
+
+#             # 自适应处理 ticktime
+#             if np.issubdtype(ts.dtype, np.datetime64):
+#                 df['ticktime'] = ts
+#             elif np.issubdtype(ts.dtype, np.number):
+#                 # float/int timestamp → datetime
+#                 df['ticktime'] = pd.to_datetime(ts, unit='s', errors='coerce')
+#             else:
+#                 # str → datetime
+#                 df['ticktime'] = pd.to_datetime(ts, errors='coerce')
+
+#             df.reset_index(drop=True, inplace=True)
+#         else:
+#             # 单层 index 或普通 DataFrame
+#             if 'ticktime' in df.columns:
+#                 if np.issubdtype(df['ticktime'].dtype, np.datetime64):
+#                     pass  # 保留
+#                 elif np.issubdtype(df['ticktime'].dtype, np.number):
+#                     df['ticktime'] = pd.to_datetime(df['ticktime'], unit='s', errors='coerce')
+#                 else:
+#                     df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
+
+#             # 如果 index 是 code，也转成列
+#             if 'code' not in df.columns:
+#                 df = df.reset_index()
+#                 df.rename(columns={df.columns[0]: 'code'}, inplace=True)
+
+#         return df
+
 def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        统一 DataFrame 结构：
-        - MultiIndex(code, ticktime) → 普通列 code, ticktime
-        - ticktime 自适应类型：
-            - datetime → 保留
-            - str → 转 datetime
-            - float/int timestamp → 转 datetime
-        - 重置 index，保证 Viewer 内部只使用列
-        """
-        df = df.copy()
+    """
+    统一 DataFrame 结构（最终稳定版）：
 
-        if isinstance(df.index, pd.MultiIndex):
-            idx_names = df.index.names
+    输出保证：
+    - 存在列：code, date
+    - date 类型：datetime64[ns]，粒度为 YYYY-MM-DD（normalize）
+    - 不混用 str / Timestamp
+    - 可直接 set_index('date') + sort_index()
 
-            # code
-            if 'code' in idx_names:
-                df['code'] = df.index.get_level_values('code')
-            else:
-                df['code'] = df.index.get_level_values(0)
+    处理逻辑：
+    - MultiIndex(code, ticktime/date/...) → 列
+    - 单层 index → 兜底转列
+    - 所有时间统一 → datetime → normalize
+    """
+    df = df.copy()
 
-            # ticktime / time / datetime
-            time_level = None
-            for name in idx_names:
-                if name and name.lower() in ('ticktime', 'time', 'datetime', 'date'):
-                    time_level = name
-                    break
+    # ---------- 1. 统一抽取 code / time ----------
+    ts = None
 
-            if time_level:
-                ts = df.index.get_level_values(time_level)
-            else:
-                ts = df.index.get_level_values(1)
+    if isinstance(df.index, pd.MultiIndex):
+        idx_names = df.index.names
 
-            # 自适应处理 ticktime
-            if np.issubdtype(ts.dtype, np.datetime64):
-                df['ticktime'] = ts
-            elif np.issubdtype(ts.dtype, np.number):
-                # float/int timestamp → datetime
-                df['ticktime'] = pd.to_datetime(ts, unit='s', errors='coerce')
-            else:
-                # str → datetime
-                df['ticktime'] = pd.to_datetime(ts, errors='coerce')
-
-            df.reset_index(drop=True, inplace=True)
+        # code
+        if 'code' in idx_names:
+            df['code'] = df.index.get_level_values('code')
         else:
-            # 单层 index 或普通 DataFrame
-            if 'ticktime' in df.columns:
-                if np.issubdtype(df['ticktime'].dtype, np.datetime64):
-                    pass  # 保留
-                elif np.issubdtype(df['ticktime'].dtype, np.number):
-                    df['ticktime'] = pd.to_datetime(df['ticktime'], unit='s', errors='coerce')
-                else:
-                    df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
+            df['code'] = df.index.get_level_values(0)
 
-            # 如果 index 是 code，也转成列
-            if 'code' not in df.columns:
-                df = df.reset_index()
-                df.rename(columns={df.columns[0]: 'code'}, inplace=True)
+        # time / date
+        time_level = None
+        for name in idx_names:
+            if name and name.lower() in ('ticktime', 'time', 'datetime', 'date'):
+                time_level = name
+                break
 
-        return df
+        ts = (
+            df.index.get_level_values(time_level)
+            if time_level
+            else df.index.get_level_values(1)
+        )
+
+        df.reset_index(drop=True, inplace=True)
+
+    else:
+        # 单层 index
+        if 'ticktime' in df.columns:
+            ts = df['ticktime']
+        elif 'date' in df.columns:
+            ts = df['date']
+        else:
+            # index 当时间兜底
+            ts = df.index
+
+        # code 兜底
+        if 'code' not in df.columns:
+            df = df.reset_index(drop=False)
+            df.rename(columns={df.columns[0]: 'code'}, inplace=True)
+
+    # ---------- 2. 时间统一转 datetime ----------
+    ts = pd.to_datetime(ts, errors='coerce')
+
+    # ---------- 3. 统一成“日粒度 YYYY-MM-DD” ----------
+    if 'date' in df.columns:
+        df['date'] = ts.dt.normalize()
+
+        # ---------- 4. 清洗非法数据 ----------
+        df = df.dropna(subset=['date'])
+
+    # ---------- 5. 删除旧时间字段，避免污染 ----------
+    for col in ('ticktime',):
+        if col in df.columns:
+            df.drop(columns=col, inplace=True)
+
+    return df
+
+
+from PyQt6 import QtCore, QtWidgets
+from PyQt6.QtCore import Qt
+
+class GlobalInputFilter(QtCore.QObject):
+    """
+    捕捉全窗口鼠标侧键和键盘按键
+    """
+    def __init__(self, main_window):
+        super().__init__(main_window)
+        self.main_window = main_window
+
+    def eventFilter(self, obj, event):
+        # 只在主窗口活动时处理
+        if not self.main_window.isActiveWindow():
+            return super().eventFilter(obj, event)
+
+        # 鼠标按键
+        if event.type() == QtCore.QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.XButton1:  # 前进键
+                self.main_window.switch_resample_prev()
+                return True
+            elif event.button() == Qt.MouseButton.XButton2:  # 后退键
+                self.main_window.switch_resample_next()
+                return True
+
+        # 键盘按键
+        elif event.type() == QtCore.QEvent.Type.KeyPress:
+            key = event.key()
+            if key == Qt.Key.Key_1:
+                self.main_window.on_resample_changed('d')
+                return True
+            elif key == Qt.Key.Key_2:
+                self.main_window.on_resample_changed('3d')
+                return True
+            elif key == Qt.Key.Key_3:
+                self.main_window.on_resample_changed('w')
+                return True
+            elif key == Qt.Key.Key_4:
+                self.main_window.on_resample_changed('m')
+                return True
+
+        return super().eventFilter(obj, event)
 
 class RealtimeWorker(QObject):
     data_updated = pyqtSignal(object, object, object)  # code, tick_df, today_bar
@@ -547,6 +667,16 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.day_df = pd.DataFrame()
         self.df_all = pd.DataFrame()
+
+        # ---- resample state ----
+        self.resample_keys = ['d', '3d', 'w', 'm']
+
+        if self.resample in self.resample_keys:
+            self.current_resample_idx = self.resample_keys.index(self.resample)
+        else:
+            self.current_resample_idx = 0
+            self.resample = self.resample_keys[0]
+
         # --- 1. 创建工具栏 ---
         self._init_toolbar()
         self._init_resample_toolbar()
@@ -669,7 +799,9 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # Set splitter sizes (70% top, 30% bottom)
         right_splitter.setSizes([500, 200])
-        
+        # 安装全局事件过滤器
+        self.input_filter = GlobalInputFilter(self)
+        self.installEventFilter(self.input_filter)
         # Apply initial theme
         self.apply_qt_theme()
 
@@ -703,7 +835,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # 如果你用的是 ViewBox，可以加上：
             vb = self.kline_plot.getViewBox()
             vb.autoRange()
-            print("[INFO] K-line view reset")
+            # print("[INFO] K-line view reset")
 
     def _init_resample_toolbar(self):
         self.toolbar.addSeparator()
@@ -714,22 +846,56 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.resample_actions = {}
 
-        for key, label in [('d', '1D'), ('3d', '3D'), ('w', '1W'), ('m', '1M')]:
-            act = QAction(label, self)
+        label_map = {
+            'd': '1D',
+            '3d': '3D',
+            'w': '1W',
+            'm': '1M',
+        }
+
+        for key in self.resample_keys:
+            act = QAction(label_map.get(key, key), self)
             act.setCheckable(True)
             act.setData(key)
 
             if key == self.resample:
                 act.setChecked(True)
 
-            # 正确绑定：传递 key
             act.triggered.connect(lambda checked, k=key: self.on_resample_changed(k))
-            # act.triggered.connect(self.on_resample_changed)
 
             self.resample_group.addAction(act)
             self.toolbar.addAction(act)
-
             self.resample_actions[key] = act
+
+    def switch_resample_prev(self):
+        self.current_resample_idx = (self.current_resample_idx - 1) % len(self.resample_keys)
+        key = self.resample_keys[self.current_resample_idx]
+        self.on_resample_changed(key)
+
+    def switch_resample_next(self):
+        self.current_resample_idx = (self.current_resample_idx + 1) % len(self.resample_keys)
+        key = self.resample_keys[self.current_resample_idx]
+        self.on_resample_changed(key)
+
+    def on_resample_changed(self, key):
+        if key not in self.resample_keys:
+            return
+
+        if key == self.resample:
+            return
+
+        # ① 更新内部状态
+        self.resample = key
+        self.current_resample_idx = self.resample_keys.index(key)
+
+        # ② 同步 toolbar UI（关键）
+        act = self.resample_actions.get(key)
+        if act is not None and not act.isChecked():
+            act.setChecked(True)
+
+        # ③ 执行真实业务逻辑
+        if self.current_code:
+            self.load_stock_by_code(self.current_code)
 
     def _init_tdx(self):
         """Initialize TDX / code link toggle"""
@@ -842,10 +1008,11 @@ class MainWindow(QMainWindow, WindowMixin):
             and cct.get_work_time_duration() 
         )
 
-        # if self.realtime:
         if is_intraday or self._debug_realtime:
             day_df = day_df[day_df.index < today_str]
 
+        datetime_index = pd.to_datetime(day_df.index)
+        day_df.index = datetime_index.strftime('%Y-%m-%d')
         self.day_df = day_df.copy()
         # render_charts 时只传历史日 K，tick_df 用于 intraday 图，不绘制今天 K
         with timed_ctx("render_charts", warn_ms=50):
@@ -856,48 +1023,14 @@ class MainWindow(QMainWindow, WindowMixin):
             self._start_realtime_process(code)
 
 
-    # def on_realtime_update(self, code, tick_df, today_bar):
-    #     if not self.realtime or code != self.current_code or today_bar.empty or not cct.get_work_time_duration():
-    #         return
-
-    #     last_day = self.day_df.index[-1]
-    #     today_idx = today_bar.index[0]
-
-    #     if last_day < today_idx:
-    #         self.day_df = pd.concat([self.day_df, today_bar])
-    #     elif last_day == today_idx:
-    #         self.day_df.iloc[-1] = today_bar.iloc[0]
-
-    #     self.render_charts(code, self.day_df, tick_df)
-
-    # def on_realtime_update(self, code, tick_df, today_bar):
-    #     #每日自动初始化
-    #     if not self.realtime or code != self.current_code or today_bar.empty or not cct.get_work_time_duration():
-    #         return
-
-    #     # 只在交易日变化时初始化一次
-    #     today_trade_day = today_bar.index[0].date()  # 取今天 bar 的日期
-
-    #     if self.last_initialized_trade_day != today_trade_day:
-    #         # 初始化 today_bar
-    #         if self.day_df.empty:
-    #             self.day_df = today_bar.copy()
-    #         else:
-    #             self.day_df = pd.concat([self.day_df, today_bar])
-    #         self.last_initialized_trade_day = today_trade_day
-    #         print(f"[INFO] Initialized new trading day: {today_trade_day}")
-    #     else:
-    #         # 当天实时更新最后一行
-    #         self.day_df.iloc[-1] = today_bar.iloc[0]
-
-    #     # 渲染图表
-    #     self.render_charts(code, self.day_df, tick_df)
-
     def on_realtime_update(self, code, tick_df, today_bar):
         if not self._debug_realtime and (not self.realtime or code != self.current_code or today_bar.empty or not cct.get_work_time_duration()):
             # logger.info(f'on_realtime_update today_bar.iloc[0] : {today_bar.iloc[0]}')
             return
 
+        datetime_index = pd.to_datetime(today_bar.index)
+        today_bar.index = datetime_index.strftime('%Y-%m-%d')
+        self.day_df
         today_idx = today_bar.index[0]
         # 获取 day_df 最后一天日期
         last_day = self.day_df.index[-1] if not self.day_df.empty else None
@@ -960,11 +1093,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.toolbar.addWidget(self.theme_cb)
 
-    def on_resample_changed(self, text):
-        self.resample = text
-        logger.info(f'self.current_code: {self.current_code} self.resample: {self.resample}')
-        if self.current_code:
-            self.load_stock_by_code(self.current_code)
 
     def on_theme_changed(self, text):
         self.qt_theme = text
@@ -1378,7 +1506,12 @@ class MainWindow(QMainWindow, WindowMixin):
             pre_close_color = 'b'
             
         day_df = _normalize_dataframe(day_df)
+
+        if 'date' in day_df.columns:
+            day_df = day_df.set_index('date')
+        logger.debug(f'day_df.index:\n {day_df.index[-3:]}')
         day_df = day_df.sort_index()
+        # day_df.index = day_df.index.normalize()   # 去掉时间
         dates = day_df.index
         x_axis = np.arange(len(day_df))
 
@@ -1625,8 +1758,18 @@ class MainWindow(QMainWindow, WindowMixin):
         else:
             # 实时更新阶段不强制重置坐标轴，除非此时还没有 view
             pass
+        # ------------------------
+        # ① 保存上一次 resample
+        # ------------------------
+        last_resample = getattr(self, "_last_resample", None)
+        # 仅在 resample 切换时才执行
+        if last_resample != self.resample:
+            if last_resample is not None:
+                # 上一次存在且与当前不同，刷新 K 线视图
+                self._reset_kline_view()
 
-
+            # 更新 _last_resample
+            self._last_resample = self.resample
 
 
 
