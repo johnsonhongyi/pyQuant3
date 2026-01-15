@@ -3502,12 +3502,12 @@ def get_trade_day_distance(datastr, endday=None):
 
     if start >= end:
         return 0
-
     cnt = a_trade_calendar.get_trade_count(
         start.strftime('%Y-%m-%d'),
         end.strftime('%Y-%m-%d')
     )
 
+    log.debug(f'start: {start} end: {end}')
     # 关键：点位数 → 间隔数
     return max(cnt - 1, 0)
 
@@ -3599,7 +3599,6 @@ def get_work_time(now_t: Optional[int] = None) -> bool:
     if (now_t > 1130 and now_t < 1300) or now_t < 915 or now_t > 1501:
         return False
     else:
-        return True
         return True
 
 def get_work_time_duration():
@@ -8244,6 +8243,10 @@ if __name__ == '__main__':
     # rzrq['all']='nan'
     # print(get_last_trade_date('2025-06-01'))
     print(get_ramdisk_path("minute_kline_cache.pkl"))
+    lastday = get_last_trade_date()
+    last2day = get_last_trade_date(lastday)
+    trade_gap = get_trade_day_distance(lastday,get_today())
+    print(f'lastday: {lastday} get_today: {get_today()} trade_gap: {trade_gap} last2day:{last2day} gap: {get_trade_day_distance(last2day,get_today())}')
     import ipdb;ipdb.set_trace()
     print(f'get_realtime_status: {get_realtime_status()}')
 

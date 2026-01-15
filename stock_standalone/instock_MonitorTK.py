@@ -1363,7 +1363,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.open_trade_report_window()
             elif action == "交易分析Qt6":
                 self.open_trading_analyzer_qt6()
-            elif action == "GUI 工具":
+            elif action == "GUI工具":
                 self.open_kline_viewer_qt()
             elif action == "复盘数据":
                 self.open_strategy_backtest_view()
@@ -1843,7 +1843,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # --- 1️⃣ 尝试通过 Socket 发送给已有实例 ---
         try:
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.settimeout(2)
+            client_socket.settimeout(1)
             client_socket.connect((ipc_host, ipc_port))
             client_socket.send(f"CODE|{code}".encode('utf-8'))
             client_socket.close()
@@ -1901,7 +1901,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._df_first_send_done = False
 
                 # 初次发送后 10 分钟一次，否则快速重试
-                time.sleep(300 if getattr(self, "_df_first_send_done", False) else 5)
+                # time.sleep()
+                loop_time = 300 if getattr(self, "_df_first_send_done", False) else 5
+                for _ in range(loop_time):
+                    if not self._df_first_send_done:
+                        break
+                    time.sleep(1)
 
         # 启动线程（只启动一次）
         if not hasattr(self, '_df_sync_thread') or not self._df_sync_thread.is_alive():
@@ -2055,7 +2060,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if self.live_strategy.scan_hot_concepts_status:
                 self.live_strategy.set_scan_hot_concepts(status=False)
                 logger.info(f'self.live_strategy.scan_hot_concepts_status  will be close')
-        if not self.vis_var.get() and hasattr(self, '_df_first_send_done'):
+        if not self.vis_var.get() and getattr(self, "_df_first_send_done"):
             self._df_first_send_done = False
         # self.update_treeview_cols(self.current_cols)
         tip_var_status_flag.value = self.tip_var.get()

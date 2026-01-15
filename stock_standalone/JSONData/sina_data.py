@@ -1591,7 +1591,6 @@ class Sina:
             if (h5_hist is None or last_time is None) or ((now_time - float(last_time) > _real_time_tick_limit) and cct.get_work_time_duration()):
                 if debug:
                     print(f"[DEBUG] Cache expired or missing. Loading HDF5 from disk: {h5_mi_table}")
-                
                 # Load HDF5 Data
                 log.debug(f'load_h5_hist_hdf')
                 with timed_ctx("sina_data_h5_hist_load_hdf", warn_ms=800):
@@ -1679,10 +1678,10 @@ if __name__ == "__main__":
     # print(sina.get_code_cname('301397'))
 
     # print(sina.get_code_cname('300107'))
-    df = sina.get_stock_code_data('000017')
+    # df = sina.get_stock_code_data('000017')
 
     # print((sina.get_stock_code_data('300107').T))
-    dd = sina.get_real_time_tick('688136')
+    dd = sina.get_real_time_tick('300376')
     import ipdb;ipdb.set_trace()
 
     df =sina.all

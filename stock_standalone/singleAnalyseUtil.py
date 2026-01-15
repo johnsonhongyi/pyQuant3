@@ -823,7 +823,7 @@ if __name__ == '__main__':
                 if  cct.get_now_time_int() > 1500 and cct.get_trade_date_status() and cct.creation_date_duration(ramdisk_h5) > 0:
                     os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-ramdisk_back.bat')
                     time.sleep(1)
-                    os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-Restore.bat')
+                    # os.system('cmd /c start C:\\Users\\Johnson\\Documents\\1-Restore.bat')
                     print("1-ramdisk_back is OK")
             st = cct.cct_raw_input("status:[go(g),clear(c),quit(q,e),wri(w)]:")
             if len(st) == 0:

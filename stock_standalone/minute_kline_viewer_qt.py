@@ -313,18 +313,148 @@ class KlineBackupViewer(QMainWindow):
         if path:
             self.load_data(path)
 
+    def _normalize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        统一 DataFrame 结构：
+        - MultiIndex(code, ticktime) → 普通列 code, ticktime
+        - ticktime 自适应类型：
+            - datetime → 保留
+            - str → 转 datetime
+            - float/int timestamp → 转 datetime
+        - 重置 index，保证 Viewer 内部只使用列
+        """
+        df = df.copy()
+
+        if isinstance(df.index, pd.MultiIndex):
+            idx_names = df.index.names
+
+            # code
+            if 'code' in idx_names:
+                df['code'] = df.index.get_level_values('code')
+            else:
+                df['code'] = df.index.get_level_values(0)
+
+            # ticktime / time / datetime
+            time_level = None
+            for name in idx_names:
+                if name and name.lower() in ('ticktime', 'time', 'datetime', 'date'):
+                    time_level = name
+                    break
+
+            if time_level:
+                ts = df.index.get_level_values(time_level)
+            else:
+                ts = df.index.get_level_values(1)
+
+            # 自适应处理 ticktime
+            if np.issubdtype(ts.dtype, np.datetime64):
+                df['ticktime'] = ts
+            elif np.issubdtype(ts.dtype, np.number):
+                # float/int timestamp → datetime
+                df['ticktime'] = pd.to_datetime(ts, unit='s', errors='coerce')
+            else:
+                # str → datetime
+                df['ticktime'] = pd.to_datetime(ts, errors='coerce')
+
+            df.reset_index(drop=True, inplace=True)
+        else:
+            # 单层 index 或普通 DataFrame
+            if 'ticktime' in df.columns:
+                if np.issubdtype(df['ticktime'].dtype, np.datetime64):
+                    pass  # 保留
+                elif np.issubdtype(df['ticktime'].dtype, np.number):
+                    df['ticktime'] = pd.to_datetime(df['ticktime'], unit='s', errors='coerce')
+                else:
+                    df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
+
+            # 如果 index 是 code，也转成列
+            if 'code' not in df.columns:
+                df = df.reset_index()
+                df.rename(columns={df.columns[0]: 'code'}, inplace=True)
+
+        return df
+
+
+    # def _normalize_dataframe(self, df: pd.DataFrame) -> pd.DataFrame:
+    #     """
+    #     统一 DataFrame 结构：
+    #     - MultiIndex(code, ticktime) → 普通列 code, time
+    #     - 保证 Viewer 内部只使用列，不使用索引
+    #     """
+    #     if isinstance(df.index, pd.MultiIndex):
+    #         df = df.copy()
+
+    #         # 提取 index → columns
+    #         idx_names = df.index.names
+
+    #         if 'code' in idx_names:
+    #             df['code'] = df.index.get_level_values('code')
+    #         else:
+    #             df['code'] = df.index.get_level_values(0)
+
+    #         # ticktime / time / datetime
+    #         time_level = None
+    #         for name in idx_names:
+    #             if name and name.lower() in ('ticktime', 'time', 'datetime', 'date'):
+    #                 time_level = name
+    #                 break
+
+    #         if time_level:
+    #             ts = df.index.get_level_values(time_level)
+    #         else:
+    #             ts = df.index.get_level_values(1)
+
+    #         # 统一成 float timestamp（你后面逻辑都用这个）
+    #         if np.issubdtype(ts.dtype, np.datetime64):
+    #             df['time'] = ts.astype('int64') / 1e9
+    #         else:
+    #             df['time'] = ts.astype(float)
+
+    #         df.reset_index(drop=True, inplace=True)
+
+    #     return df
+
+    # def on_open_file(self):
+    #     start_dir = ""
+    #     if self.current_file and os.path.exists(self.current_file):
+    #         start_dir = os.path.dirname(os.path.abspath(self.current_file))
+            
+    #     file_name, _ = QFileDialog.getOpenFileName(
+    #         self, "Open Cache File", start_dir, "Pickle Files (*.pkl);;All Files (*)"
+    #     )
+    #     if file_name:
+    #         self.load_data(file_name)
+    #         if self.source_combo.currentText() != "File":
+    #             self.source_combo.setCurrentText("File")
+
     def on_open_file(self):
         start_dir = ""
         if self.current_file and os.path.exists(self.current_file):
             start_dir = os.path.dirname(os.path.abspath(self.current_file))
-            
+
+        # 修改这里，添加 HDF5 支持
         file_name, _ = QFileDialog.getOpenFileName(
-            self, "Open Cache File", start_dir, "Pickle Files (*.pkl);;All Files (*)"
+            self,
+            "Open Cache File",
+            start_dir,
+            "HDF5 Files (*.h5);;All Files (*);;Pickle Files (*.pkl)"
         )
+
         if file_name:
-            self.load_data(file_name)
+            # 根据文件类型调用不同加载方式
+            ext = os.path.splitext(file_name)[1].lower()
+            if ext == ".pkl":
+                self.load_data(file_name)
+            elif ext == ".h5":
+                self.load_data(file_name)
+            else:
+                # 默认尝试 pickle
+                self.load_data(file_name)
+
+            # 更新数据源显示
             if self.source_combo.currentText() != "File":
                 self.source_combo.setCurrentText("File")
+
 
     def discover_internal_dfs(self):
         """扫描 main_app 中的所有 pandas DataFrame"""
@@ -402,6 +532,7 @@ class KlineBackupViewer(QMainWindow):
             
             # 这里调用 DataPublisher 或 MinuteKlineCache 的 to_dataframe
             df = self.service_proxy.get_55188_data().get('df_klines', pd.DataFrame())
+            # df = self._normalize_dataframe(df)
             if df.empty:
                 try:
                     df = self.service_proxy.kline_cache.to_dataframe()
@@ -427,13 +558,55 @@ class KlineBackupViewer(QMainWindow):
         except Exception as e:
             self.statusBar().showMessage(f"Memory Sync Failed: {e}")
 
+
     def load_data(self, file_path):
+        from PyQt6.QtWidgets import QInputDialog
         try:
             self.current_file = file_path
             self.is_memory_mode = False
             self.statusBar().showMessage(f"Loading {file_path}...")
-            
-            df = pd.read_pickle(file_path)
+
+            ext = os.path.splitext(file_path)[1].lower()
+
+            if ext == ".pkl":
+                df = pd.read_pickle(file_path)
+
+            elif ext == ".h5":
+                # 获取所有 key
+                with pd.HDFStore(file_path, "r") as store:
+                    keys = store.keys()  # 返回 ['/data1', '/data2', ...]
+                    keys = [k.strip("/") for k in keys]  # 去掉前导斜杠
+
+                if not keys:
+                    self.stats_label.setText(f"No datasets found in {file_path}")
+                    return
+
+                # 只有一个 key 时直接使用
+                if len(keys) == 1:
+                    key = keys[0]
+                else:
+                    # 弹出选择框，让用户选择 key
+                    key, ok = QInputDialog.getItem(
+                        self,
+                        "Select HDF5 Key",
+                        "Choose dataset to load:",
+                        keys,
+                        0,
+                        False
+                    )
+                    if not ok:
+                        self.statusBar().showMessage("HDF5 load cancelled.")
+                        return
+
+                df = pd.read_hdf(file_path, key=key)
+
+            else:
+                self.stats_label.setText(f"Unsupported file type: {ext}")
+                self.statusBar().showMessage("Error loading data.")
+                return
+
+            # 统一规范化
+            df = self._normalize_dataframe(df)
             if df is None or df.empty:
                 self.stats_label.setText(f"File {file_path} is empty.")
                 return
@@ -441,13 +614,14 @@ class KlineBackupViewer(QMainWindow):
             self.df_file = df
             self.update_summary()
             self.on_filter()
-            
+
+            # 文件信息
             mtime = os.path.getmtime(file_path)
             time_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
-            
+
             stock_count = len(df['code'].unique())
             total_nodes = len(df)
-            
+
             # calculate fingerprint for display
             try:
                 from cache_utils import df_fingerprint
@@ -461,10 +635,52 @@ class KlineBackupViewer(QMainWindow):
                 f"🔑 Fingerprint (MD5): {fp}"
             )
             self.statusBar().showMessage(f"Data loaded successfully. dateCount: {len(self.df_file)}")
-            
+
         except Exception as e:
             self.stats_label.setText(f"Error loading data: {e}")
             self.statusBar().showMessage("Error loading data.")
+
+
+
+    # def load_data(self, file_path):
+    #     try:
+    #         self.current_file = file_path
+    #         self.is_memory_mode = False
+    #         self.statusBar().showMessage(f"Loading {file_path}...")
+            
+    #         df = pd.read_pickle(file_path)
+    #         df = self._normalize_dataframe(df)
+    #         if df is None or df.empty:
+    #             self.stats_label.setText(f"File {file_path} is empty.")
+    #             return
+
+    #         self.df_file = df
+    #         self.update_summary()
+    #         self.on_filter()
+            
+    #         mtime = os.path.getmtime(file_path)
+    #         time_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d %H:%M:%S')
+            
+    #         stock_count = len(df['code'].unique())
+    #         total_nodes = len(df)
+            
+    #         # calculate fingerprint for display
+    #         try:
+    #             from cache_utils import df_fingerprint
+    #             fp = df_fingerprint(df, cols=['code', 'time', 'close', 'volume'])
+    #         except ImportError:
+    #             fp = "N/A (cache_utils not found)"
+
+    #         self.stats_label.setText(
+    #             f"📊 File: {os.path.basename(file_path)} | Last Modified: {time_str} | "
+    #             f"Stocks: {stock_count} | Total Nodes: {total_nodes}\n"
+    #             f"🔑 Fingerprint (MD5): {fp}"
+    #         )
+    #         self.statusBar().showMessage(f"Data loaded successfully. dateCount: {len(self.df_file)}")
+            
+    #     except Exception as e:
+    #         self.stats_label.setText(f"Error loading data: {e}")
+    #         self.statusBar().showMessage("Error loading data.")
 
     def update_summary(self):
         try:
@@ -522,7 +738,11 @@ class KlineBackupViewer(QMainWindow):
         if isinstance(model, DataFrameModel):
             # 假设代码在第一列
             code = str(model._data.iloc[index.row(), 0])
-            detail_df = df[df['code'] == code].copy()
+            if 'code' not in df.columns:
+                detail_df = df.loc[[code]].copy()
+            else:
+                detail_df = df[df['code'] == code].copy()
+
             if 'time' in detail_df.columns:
                 detail_df = detail_df.sort_values('time', ascending=False)
             

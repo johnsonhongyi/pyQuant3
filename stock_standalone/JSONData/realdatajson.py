@@ -34,7 +34,7 @@ except ImportError:
     from urllib.request import urlopen, Request
 
 # log=LoggerFactory.getLogger('Realdata')
-log = LoggerFactory.log
+log = LoggerFactory.getLogger()
 # log.setLevel(LoggerFactory.INFO)
 # log=LoggerFactory.JohnsonLoger('Realdata')
 
