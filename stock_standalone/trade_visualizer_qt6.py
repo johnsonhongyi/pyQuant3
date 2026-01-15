@@ -25,6 +25,8 @@ from JohnsonUtil.commonTips import timed_ctx,print_timing_summary
 from JohnsonUtil import johnson_cons as ct
 import datetime  # ⚠️ 必须导入
 import time
+import json
+from StrongPullbackMA5Strategy import StrongPullbackMA5Strategy
 # Configuration
 IPC_PORT = 26668
 IPC_HOST = '127.0.0.1'
@@ -633,6 +635,21 @@ class GlobalInputFilter(QtCore.QObject):
             elif key == Qt.Key.Key_4:
                 self.main_window.on_resample_changed('m')
                 return True
+            elif key == Qt.Key.Key_Space:
+                self.main_window.show_comprehensive_briefing()
+                return True
+            elif key == Qt.Key.Key_R:
+                self.main_window._reset_kline_view()
+                return True
+            elif key == Qt.Key.Key_S:
+                self.main_window.show_supervision_details()
+                return True
+            elif key == Qt.Key.Key_T:
+                # 切换模拟显示
+                btn = next((a for a in self.main_window.toolbar.actions() if a.text() == "模拟信号"), None)
+                if btn:
+                    btn.trigger()
+                return True
 
         return super().eventFilter(obj, event)
 
@@ -722,18 +739,24 @@ class MainWindow(QMainWindow, WindowMixin):
             self.current_resample_idx = 0
             self.resample = self.resample_keys[0]
 
+        # ⭐ 先初始化策略相关属性，再创建工具栏，防止 AttributeError
+        # Initialize Logger with absolute path to ensure data consistency
+        db_path = os.path.join(current_dir, "trading_signals.db")
+        self.logger = TradingLogger(db_path=db_path)
+        from intraday_decision_engine import IntradayDecisionEngine
+        self.decision_engine = IntradayDecisionEngine() # ⭐ 内部决策引擎
+        self.pullback_strat = StrongPullbackMA5Strategy(min_score=60) # ⭐ 强力回撤策略
+        
+        # 策略模拟开关
+        self.show_strategy_simulation = True 
+
         # --- 1. 创建工具栏 ---
         self._init_toolbar()
         self._init_resample_toolbar()
         self._init_theme_selector()
         self._init_tdx()
         self._init_real_time()
-        # Load Window Position (Qt specific method from Mixin)
-        # Using a distinct window_id "TradeVisualizer"
-        self.load_window_position_qt(self, "TradeVisualizer", default_width=600, default_height=850)
         
-        # Initialize Logger to read signals
-        self.logger = TradingLogger()
         self.current_code = None
         self.df_all = pd.DataFrame()  # Store real-time data from MonitorTK
         self.code_name_map = {}
@@ -864,6 +887,12 @@ class MainWindow(QMainWindow, WindowMixin):
     def _init_toolbar(self):
         self.toolbar = QToolBar("Settings", self)
         self.toolbar.setObjectName("ResampleToolbar")
+        action = QAction("模拟信号", self)
+        action.setCheckable(True)
+        action.setChecked(self.show_strategy_simulation)
+        action.triggered.connect(self.on_toggle_simulation)
+        self.toolbar.addAction(action)
+        
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, self.toolbar)
 
         self.toolbar.setStyleSheet("""
@@ -879,6 +908,11 @@ class MainWindow(QMainWindow, WindowMixin):
             border-radius: 3px;
         }
         """)
+
+    def on_toggle_simulation(self, checked):
+        self.show_strategy_simulation = checked
+        if self.current_code:
+            self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
 
 
     def _reset_kline_view(self, df=None):
@@ -1041,7 +1075,7 @@ class MainWindow(QMainWindow, WindowMixin):
         <table border="0" cellpadding="4">
             <tr>
                 <td><b>市场胜率 (Win Rate):</b></td>
-                <td><span style="color: {'red' if data['market_win_rate'] > 50 else 'green'};">{data.get('market_win_rate', 0):.1f}%</span></td>
+                <td><span style="color: {'red' if data.get('market_win_rate',0) > 50 else 'green'};">{data.get('market_win_rate', 0):.1f}%</span></td>
             </tr>
             <tr>
                 <td><b>当前连亏 (Loss Streak):</b></td>
@@ -1056,7 +1090,7 @@ class MainWindow(QMainWindow, WindowMixin):
         <h4>🔎 最近信号详情</h4>
         <p><b>动作:</b> {data.get('last_action', 'N/A')}</p>
         <p><b>原因:</b> {data.get('last_reason', 'N/A')}</p>
-        <p><b>影子索引:</b> {data.get('shadow_info', 'N/A')}</p>
+        <p><b>诊断:</b> {data.get('shadow_info', 'N/A')}</p>
         """
         
         msg = QMessageBox(self)
@@ -1065,6 +1099,71 @@ class MainWindow(QMainWindow, WindowMixin):
         msg.setText(content)
         msg.setStandardButtons(QMessageBox.StandardButton.Ok)
         msg.exec()
+
+    def show_comprehensive_briefing(self):
+        """[⭐极限弹窗] 一键显示综合研报信息"""
+        if not self.current_code: return
+        
+        # 1. 基础个股信息
+        info = self.code_info_map.get(self.current_code)
+        if info is None and len(self.current_code) > 6:
+            info = self.code_info_map.get(self.current_code[-6:])
+        info = info or {}
+        
+        # 2. 策略监理信息
+        sup = getattr(self, 'current_supervision_data', {})
+        
+        # 3. 影子决策 (即时计算)
+        shadow = None
+        if hasattr(self, 'day_df') and hasattr(self, 'tick_df'):
+            shadow = self._run_realtime_strategy(self.current_code, self.day_df, self.tick_df)
+            
+        mwr = sup.get('market_win_rate', 0)
+        m_color = "#FF4500" if mwr > 50 else "#32CD32"
+        
+        briefing = f"""
+        <div style='font-family: Microsoft YaHei;'>
+            <h2 style='color: #FFD700;'>📊 {self.current_code} 综合实战简报</h2>
+            <hr>
+            <table width='100%' border='0'>
+                <tr>
+                    <td><b>个股名称:</b> {info.get('name','N/A')}</td>
+                    <td><b>全场排名:</b> <span style='color: yellow;'>{info.get('Rank','N/A')}</span></td>
+                </tr>
+                <tr>
+                    <td><b>当日涨幅:</b> <span style='color: {'red' if info.get('percent',0)>0 else 'green'};'>{info.get('percent','0.00')}%</span></td>
+                    <td><b>昨日胜率:</b> {info.get('win','N/A')}</td>
+                </tr>
+            </table>
+            
+            <h3 style='border-bottom: 1px solid #555;'>🛡️ 监理与风控</h3>
+            <p><b>市场热度:</b> <span style='color: {m_color}; font-weight: bold;'>{mwr:.1f}% Win Rate</span></p>
+            <p><b>账户连亏:</b> <span style='color: orange;'>{sup.get('loss_streak', 0)} 次</span></p>
+            <p><b>价量偏离:</b> {sup.get('vwap_bias', 0):+.2f}% (VWAP Bias)</p>
+            
+            <h3 style='border-bottom: 1px solid #555;'>🤖 实时策略影子评分</h3>
+        """
+        
+        if shadow:
+            briefing += f"""
+            <p><b>影子动作:</b> <span style='color: cyan; font-size: 14pt;'>{shadow.get('action', '持仓待定')}</span></p>
+            <p><b>逻辑考量:</b> {shadow.get('reason', '无明确触发')}</p>
+            <div style='background: #333; padding: 5px; border-radius: 3px;'>
+                <b>核心指标快照:</b><br>
+                {" ".join([f"• {k}: {v if not isinstance(v,float) else f'{v:.2f}'}" for k,v in shadow.get('debug',{}).items() if k!='indicators'])}
+            </div>
+            """
+        else:
+            briefing += "<p>暂无影子决策数据 (等待行情更新或检查数据源)</p>"
+            
+        briefing += """
+            <hr>
+            <p style='font-size: 9pt; color: #888;'>[快捷键提示] Space: 综述 | S: 监理 | R: 重置视图 | T: 模拟开关</p>
+        </div>
+        """
+        
+        dlg = ScrollableMsgBox(f"📈 综合简报 - {self.current_code}", briefing, self)
+        dlg.exec()
 
     def _start_realtime_process(self, code):
         # 停止旧进程
@@ -1858,17 +1957,42 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # --- Signals Arrows with Price Text ---
         signals = self.logger.get_signal_history_df()
+        
+        # --- [Simulation Hits] ---
+        sim_xs, sim_ys, sim_brushes, sim_symbols, sim_meta = [], [], [], [], []
+        if self.show_strategy_simulation:
+            sim_hits = self._run_strategy_simulation(code, day_df)
+            for hit in sim_hits:
+                idx = hit['index']
+                y_p = hit['price']
+                sim_xs.append(idx)
+                sim_ys.append(y_p)
+                sim_brushes.append(pg.mkBrush(hit['color']))
+                sim_symbols.append(hit['symbol'])
+                sim_meta.append(hit['meta'])
+
         if not hasattr(self, 'signal_scatter'):
             self.signal_scatter = pg.ScatterPlotItem(size=15, pen=pg.mkPen('k'), symbol='t1', z=10)
             self.kline_plot.addItem(self.signal_scatter)
+            
+            # ⭐ 模拟信号专门用一个层
+            self.sim_scatter = pg.ScatterPlotItem(size=18, pen=pg.mkPen('w', width=0.5), z=9)
+            self.kline_plot.addItem(self.sim_scatter)
+            
             # ⭐ 绑定点击事件
             self.signal_scatter.sigClicked.connect(self.on_signal_clicked)
+            self.sim_scatter.sigClicked.connect(self.on_signal_clicked)
             self.signal_text_items = []
         else:
             self.signal_scatter.clear()
+            self.sim_scatter.clear()
             for t in getattr(self, 'signal_text_items', []):
                 self.kline_plot.removeItem(t)
             self.signal_text_items.clear()
+        
+        # 渲染模拟信号
+        if sim_xs:
+            self.sim_scatter.setData(x=sim_xs, y=sim_ys, brush=sim_brushes, symbol=sim_symbols, data=sim_meta)
 
         if not signals.empty:
             # ⭐ 类型安全转换：确保按字符串匹配
@@ -1936,6 +2060,46 @@ class MainWindow(QMainWindow, WindowMixin):
                     text_item.setPos(idx, y_price)
                     self.kline_plot.addItem(text_item)
                     self.signal_text_items.append(text_item)
+            
+            # --- [NEW] Shadow Strategy Integration ---
+            # 自动集成策略系统跑数：在图表末尾计算并显示实时“影子信号”
+            is_realtime_active = self.realtime and not tick_df.empty and (cct.get_work_time_duration() or self._debug_realtime)
+            if is_realtime_active:
+                shadow_decision = self._run_realtime_strategy(code, day_df, tick_df)
+                if shadow_decision and shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
+                    y_price = float(tick_df['price'].iloc[-1])
+                    idx = len(dates) # Ghost candle index
+                    
+                    action = shadow_decision['action']
+                    reason = shadow_decision['reason']
+                    is_buy = '买' in action or 'BUY' in action or 'ADD' in action
+                    
+                    xs.append(idx)
+                    ys.append(y_price)
+                    brushes.append(pg.mkBrush(255, 215, 0)) # 黄金色表示影子信号
+                    symbols.append('star')
+                    
+                    self.last_shadow_decision = shadow_decision # ⭐ 存储供简报使用
+                    meta.append({
+                        "date": "REALTIME", 
+                        "action": f"[SHADOW] {action}", 
+                        "reason": reason, 
+                        "price": y_price,
+                        "indicators": shadow_decision.get('debug', {}) # 直接存对象，不需要 dumps，on_signal_clicked 会处理
+                    })
+                    
+                    # 添加实时的文本提示
+                    shadow_text = pg.TextItem(
+                        text=f"⭐{action}\n{y_price:.2f}",
+                        anchor=(0.5, 1.2) if is_buy else (0.5, -0.2),
+                        color=(255, 215, 0),
+                        border='w',
+                        fill=(0, 0, 0, 200)
+                    )
+                    shadow_text.setPos(idx, y_price)
+                    shadow_text.setZValue(12)
+                    self.kline_plot.addItem(shadow_text)
+                    self.signal_text_items.append(shadow_text)
 
             if xs:
                 # 信号点使用不同形状增强区分
@@ -2015,21 +2179,26 @@ class MainWindow(QMainWindow, WindowMixin):
             # 追加监理看板信息
             if not self.df_all.empty:
                 # 调试：打印 df_all 的列名
-                print(f"[DEBUG] df_all columns: {self.df_all.columns.tolist()}")
-                print(f"[DEBUG] Looking for code: {code}, df_all index: {self.df_all.index.tolist()[:5]}")
+                # print(f"[DEBUG] df_all columns: {self.df_all.columns.tolist()}")
+                # print(f"[DEBUG] Looking for code: {code}, df_all index: {self.df_all.index.tolist()[:5]}")
                 
                 crow = None
-                if code in self.df_all.index:
-                    crow = self.df_all.loc[code]
-                    print(f"[DEBUG] Found in index")
-                elif 'code' in self.df_all.columns:
-                    mask = self.df_all['code'] == code
-                    if mask.any():
-                        crow = self.df_all[mask].iloc[0]
-                        print(f"[DEBUG] Found in columns")
+                # 尝试多种匹配方式：原样匹配、去掉市场前缀匹配
+                search_codes = [code]
+                if len(code) > 6:
+                    search_codes.append(code[-6:])
+                
+                for sc in search_codes:
+                    if sc in self.df_all.index:
+                        crow = self.df_all.loc[sc]
+                        break
+                    elif 'code' in self.df_all.columns:
+                        mask = self.df_all['code'] == sc
+                        if mask.any():
+                            crow = self.df_all[mask].iloc[0]
+                            break
                 
                 if crow is not None:
-                    # print(f"[DEBUG] crow data: {crow.to_dict() if hasattr(crow, 'to_dict') else crow}")
                     mwr = crow.get('market_win_rate', 0)
                     ls = crow.get('loss_streak', 0)
                     vwap_bias = crow.get('vwap_bias', 0)
@@ -2043,15 +2212,81 @@ class MainWindow(QMainWindow, WindowMixin):
                         'last_reason': crow.get('last_reason', ''),
                         'shadow_info': crow.get('shadow_info', '')
                     }
-                    
-                    # print(f"[DEBUG] Supervision data: mwr={mwr}, ls={ls}, vwap_bias={vwap_bias}")
-                    # 显示所有监理数据
                     tick_title += f"  |  <span style='color: #FFD700; font-weight: bold;'>🛡️监理: 偏离{vwap_bias:+.1%} 胜率{mwr:.1%} 连亏{ls}</span>"
                 else:
-                    print(f"[DEBUG] Stock {code} not found in df_all")
+                    # 尝试自主计算
+                    auto_data = self._get_autonomous_supervision_data(code)
+                    if auto_data:
+                        mwr = auto_data.get('market_win_rate', 0.5)
+                        ls = auto_data.get('loss_streak', 0)
+                        vwap_bias = auto_data.get('vwap_bias', 0)
+                        
+                        # ⭐ 重点：补齐自主模式下的详情数据分配
+                        shadow_act = shadow_decision.get('action', 'N/A') if 'shadow_decision' in locals() else 'N/A'
+                        shadow_res = shadow_decision.get('reason', 'N/A') if 'shadow_decision' in locals() else 'N/A'
+                        
+                        self.current_supervision_data = {
+                            'market_win_rate': mwr,
+                            'loss_streak': ls,
+                            'vwap_bias': vwap_bias,
+                            'last_action': f"自主检测({shadow_act})",
+                            'last_reason': shadow_res,
+                            'shadow_info': 'AUTONOMOUS'
+                        }
+                        tick_title += f"  |  <span style='color: #FFD700; font-weight: bold;'>🛡️监理(自): 偏离{vwap_bias:+.1%} 胜率{mwr:.1%} 连亏{ls}</span>"
+            else:
+                # df_all 为空，直接自主计算
+                auto_data = self._get_autonomous_supervision_data(code)
+                if auto_data:
+                    mwr = auto_data.get('market_win_rate', 0.5)
+                    ls = auto_data.get('loss_streak', 0)
+                    vwap_bias = auto_data.get('vwap_bias', 0)
+                    
+                    shadow_act = shadow_decision.get('action', 'N/A') if 'shadow_decision' in locals() else 'N/A'
+                    shadow_res = shadow_decision.get('reason', 'N/A') if 'shadow_decision' in locals() else 'N/A'
+                    
+                    self.current_supervision_data = {
+                        'market_win_rate': mwr,
+                        'loss_streak': ls,
+                        'vwap_bias': vwap_bias,
+                        'last_action': f"直接启动模式({shadow_act})",
+                        'last_reason': shadow_res,
+                        'shadow_info': 'DIRECT_LAUNCH'
+                    }
+                    tick_title += f"  |  <span style='color: #FFD700; font-weight: bold;'>🛡️监理(自): 偏离{vwap_bias:+.1%} 胜率{mwr:.1%} 连亏{ls}</span>"
             
             self.tick_plot.setTitle(tick_title)
             self.tick_plot.showGrid(x=False, y=True, alpha=0.5)
+
+            # --- [NEW] Intraday Tick Signals (Shadow/Realtime) ---
+            # 直接在分时图上标记影子信号
+            if not hasattr(self, 'tick_signal_scatter'):
+                self.tick_signal_scatter = pg.ScatterPlotItem(size=18, pen=pg.mkPen('w', width=0.5), z=15)
+                self.tick_plot.addItem(self.tick_signal_scatter)
+                self.tick_signal_scatter.sigClicked.connect(self.on_signal_clicked)
+            else:
+                self.tick_signal_scatter.clear()
+
+            is_realtime_active = self.realtime and not tick_df.empty and (cct.get_work_time_duration() or self._debug_realtime)
+            if is_realtime_active and self.show_strategy_simulation:
+                shadow_decision = self._run_realtime_strategy(code, day_df, tick_df)
+                if shadow_decision and shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
+                    y_p = float(tick_df['price'].iloc[-1])
+                    idx = len(tick_df) - 1
+                    action = shadow_decision['action']
+                    
+                    self.tick_signal_scatter.setData(
+                        x=[idx], y=[y_p],
+                        brush=[pg.mkBrush(255, 215, 0)],
+                        symbol=['star'],
+                        data=[{
+                            "date": "INTRADAY_LIVE",
+                            "action": f"[TICK] {action}",
+                            "reason": shadow_decision['reason'],
+                            "price": y_p,
+                            "indicators": shadow_decision.get('debug', {})
+                        }]
+                    )
 
         # ----------------- 5. 数据同步与视角处理 -----------------
         # 同步归一化后的数据到 self.day_df
@@ -2420,88 +2655,242 @@ class MainWindow(QMainWindow, WindowMixin):
     #             traceback.print_exc()
 
     def _update_plot_title(self, code, day_df, tick_df):
-        """Helper to update the K-line plot title with Latest Info & Sensing Dashboard"""
+        """仅更新 K 线图基础信息（代码、名称、排名等），不再包含监理看板以防干扰视图"""
         if not hasattr(self, 'kline_plot'):
             return
         
-        
-        info = self.code_info_map.get(code, {})
+        # 尝试从 code_info_map 获取基础信息 (增加模糊匹配)
+        info = self.code_info_map.get(code)
+        if info is None and len(code) > 6:
+            info = self.code_info_map.get(code[-6:])
+        if info is None:
+            info = {}
+            
         title_parts = [code]
         for k, fmt in [('name', '{}'), ('Rank', 'Rank: {}'), ('percent', '{:+.2f}%'),
                        ('win', 'win: {}'), ('slope', 'slope: {:.1f}%'), ('volume', 'vol: {:.1f}')]:
             v = info.get(k)
-            # 容错：如果是 0 但不为 None，也要显示
             if v is not None:
                 title_parts.append(fmt.format(v))
         
-        # ⭐ 追加监理看板信息
-        sensing_parts = []
-        if not self.df_all.empty:
-            # 兼容 code 为 index 或列的情况
-            crow = None
-            if code in self.df_all.index:
-                crow = self.df_all.loc[code]
-            elif 'code' in self.df_all.columns:
-                mask = self.df_all['code'] == code
-                if mask.any():
-                    crow = self.df_all[mask].iloc[0]
-            
-            if crow is not None:
-                mwr = crow.get('market_win_rate', 0)
-                ls = crow.get('loss_streak', 0)
-                vwap_bias = crow.get('vwap_bias', 0)
-                # 只要有非零数据就显示，或者全部显示以明确状态
-                if mwr > 0 or ls > 0 or abs(vwap_bias) > 0.001:
-                    sensing_parts.append(f"🛡️监理: 偏离{vwap_bias:+.1%} 胜率{mwr:.1%} 连亏{ls}")
-        
         main_title = " | ".join(title_parts)
-        if sensing_parts:
-            sensing_html = " ".join(sensing_parts)
-            main_title += f"  |  <span style='color: #FFD700; font-weight: bold;'>{sensing_html}</span>"
-            
-        # 性能优化：只有标题内容变化时才调用 setTitle，避免 layout 抖动导致视角意外重置
+        # 只有标题内容变化时才调用 setTitle
         if getattr(self, "_last_main_title", "") != main_title:
             self.kline_plot.setTitle(main_title)
             self._last_main_title = main_title
     
     def _refresh_sensing_bar(self, code):
-        """仅刷新监理看板部分（用于 update_df_all 时的快速更新）"""
-        if not hasattr(self, 'kline_plot'):
+        """刷新分时图标题中的监理看板（避免刷新 K 线标题导致布局抖动）"""
+        if not hasattr(self, 'tick_plot'):
             return
         
-        # 获取当前标题的基础部分（不含监理看板）
-        info = self.code_info_map.get(code, {})
-        title_parts = [code]
-        for k, fmt in [('name', '{}'), ('Rank', 'Rank: {}'), ('percent', '{:+.2f}%'),
-                       ('win', 'win: {}'), ('slope', 'slope: {:.1f}%'), ('volume', 'vol: {:.1f}')]:
-            v = info.get(k)
-            if v is not None:
-                title_parts.append(fmt.format(v))
-        
-        # ⭐ 追加监理看板信息
+        # 1. 获取基础分时信息
+        # 尝试从之前的标题中恢复基础部分，或者简单重构
+        base_title = self.tick_plot.titleLabel.text
+        if "🛡️监理" in base_title:
+            # 剥离旧的监理部分
+            base_title = base_title.split("  |  <span")[0]
+            
+        # 2. 追加最新的监理看板信息
         sensing_parts = []
         if not self.df_all.empty:
             crow = None
-            if code in self.df_all.index:
-                crow = self.df_all.loc[code]
-            elif 'code' in self.df_all.columns:
-                mask = self.df_all['code'] == code
-                if mask.any():
-                    crow = self.df_all[mask].iloc[0]
+            search_codes = [code]
+            if len(code) > 6:
+                search_codes.append(code[-6:])
+            
+            for sc in search_codes:
+                if sc in self.df_all.index:
+                    crow = self.df_all.loc[sc]
+                    break
+                elif 'code' in self.df_all.columns:
+                    mask = self.df_all['code'] == sc
+                    if mask.any():
+                        crow = self.df_all[mask].iloc[0]
+                        break
             
             if crow is not None:
                 mwr = crow.get('market_win_rate', 0)
                 ls = crow.get('loss_streak', 0)
                 vwap_bias = crow.get('vwap_bias', 0)
-                # 显示所有监理数据（即使为0也显示，便于调试）
                 sensing_parts.append(f"🛡️监理: 偏离{vwap_bias:+.1%} 胜率{mwr:.1%} 连亏{ls}")
+            else:
+                # ⭐ 备选方案：尝试自主计算（脱离主程序推送）
+                auto_data = self._get_autonomous_supervision_data(code)
+                if auto_data:
+                    mwr = auto_data.get('market_win_rate', 0.5)
+                    ls = auto_data.get('loss_streak', 0)
+                    vwap_bias = auto_data.get('vwap_bias', 0)
+                    sensing_parts.append(f"🛡️监理(自): 偏离{vwap_bias:+.1%} 胜率{mwr:.1%} 连亏{ls}")
         
-        main_title = " | ".join(title_parts)
         if sensing_parts:
             sensing_html = " ".join(sensing_parts)
-            main_title += f"  |  <span style='color: #FFD700; font-weight: bold;'>{sensing_html}</span>"
+            new_title = f"{base_title}  |  <span style='color: #FFD700; font-weight: bold;'>{sensing_html}</span>"
+            self.tick_plot.setTitle(new_title)
+
+    def _get_autonomous_supervision_data(self, code):
+        """自主计算并获取监理数据（胜率、连亏、偏离度）"""
+        try:
+            # 1. 从数据库读取胜率和连亏
+            mwr = self.logger.get_market_sentiment(days=10)
+            ls = self.logger.get_consecutive_losses(code, days=15)
             
-        self.kline_plot.setTitle(main_title)
+            # 2. 计算偏离度 (VWAP Bias)
+            vwap_bias = 0
+            if hasattr(self, 'tick_df') and not self.tick_df.empty:
+                tick = self.tick_df
+                if 'amount' in tick.columns and 'volume' in tick.columns:
+                    cum_amount = tick['amount'].cumsum().iloc[-1]
+                    cum_vol = tick['volume'].cumsum().iloc[-1]
+                    if cum_vol > 0:
+                        vwap = cum_amount / cum_vol
+                        current_price = tick['price'].iloc[-1]
+                        vwap_bias = (current_price - vwap) / vwap
+            
+            return {
+                'market_win_rate': mwr,
+                'loss_streak': ls,
+                'vwap_bias': vwap_bias
+            }
+        except Exception as e:
+            logger.debug(f"Autonomous supervision failed for {code}: {e}")
+            return None
+
+    def _run_realtime_strategy(self, code, day_df, tick_df):
+        """
+        [DEEP INTEGRATION] 自动集成策略系统跑数
+        直接在可视化中运行决策引擎，生成实时的‘影子信号’
+        """
+        try:
+            if day_df.get('close') is None or tick_df.empty:
+                return None
+            
+            # 1. 准备行情行 (row)
+            # 模拟 MonitorTK 的 row_data 结构
+            last_tick = tick_df.iloc[-1]
+            row = {
+                'code': code,
+                'trade': last_tick.get('price', 0),
+                'high': tick_df['price'].max(),
+                'low': tick_df['price'].min(),
+                'open': tick_df['price'].iloc[0],
+                'ratio': last_tick.get('ratio', 0),
+                'volume': last_tick.get('volume', 0),
+                'amount': last_tick.get('amount', 0),
+                'ma5d': day_df['close'].rolling(5).mean().iloc[-1],
+                'ma10d': day_df['close'].rolling(10).mean().iloc[-1],
+                'ma20d': day_df['close'].rolling(20).mean().iloc[-1],
+                'nclose': (tick_df['amount'].sum() / tick_df['volume'].sum()) if tick_df['volume'].sum() > 0 else 0
+            }
+            
+            # 2. 准备快照 (snapshot)
+            snapshot = {
+                'last_close': day_df['close'].iloc[-2] if len(day_df) > 1 else day_df['close'].iloc[-1],
+                'market_win_rate': self.logger.get_market_sentiment(days=5),
+                'loss_streak': self.logger.get_consecutive_losses(code, days=10)
+            }
+            
+            # 3. 运行引擎评估
+            decision = self.decision_engine.evaluate(row, snapshot)
+            return decision
+            
+        except Exception as e:
+            logger.debug(f"Realtime strategy evaluation failed: {e}")
+            return None
+
+    def _run_strategy_simulation(self, code, day_df):
+        """
+        [DEEP INTEGRATION] 历史策略模拟：计算哪些 K 线命中了哪些策略
+        """
+        hits = []
+        try:
+            if len(day_df) < 10: return hits
+            
+            # --- 1. StrongPullbackMA5 策略 (批量) ---
+            # 确保列齐
+            df_pb = day_df.copy()
+            # 简单模拟必要列
+            if 'lasth1d' not in df_pb.columns:
+                df_pb['lasth1d'] = df_pb['high'].shift(1)
+                df_pb['lastp1d'] = df_pb['close'].shift(1)
+                df_pb['lastp2d'] = df_pb['close'].shift(2)
+                df_pb['lastv1d'] = df_pb['volume'].shift(1)
+                df_pb['lastv2d'] = df_pb['volume'].shift(2)
+                df_pb['ma5d'] = df_pb['close'].rolling(5).mean()
+                df_pb['ma10d'] = df_pb['close'].rolling(10).mean()
+                df_pb['ma20d'] = df_pb['close'].rolling(20).mean()
+                df_pb['ma60d'] = df_pb['close'].rolling(60).mean()
+            
+            pb_results = self.pullback_strat.run(df_pb)
+            for i, row in pb_results.iterrows():
+                # 获取在原始 df 中的索引位置
+                try:
+                    idx = day_df.index.get_loc(i)
+                    hits.append({
+                        'index': idx,
+                        'price': row['close'],
+                        'symbol': 'o',
+                        'color': (0, 255, 255, 180), # 蓝绿色
+                        'meta': {
+                            'date': str(i).split()[0],
+                            'action': '[SIM] 强力回撤',
+                            'reason': f"评分: {row['strong_score']:.1f} ({row['risk_level']})",
+                            'price': row['close'],
+                            'indicators': {
+                                'Trend': row['trend_score'],
+                                'Pullback': row['pullback_score'],
+                                'Volume': row['volume_score']
+                            }
+                        }
+                    })
+                except: continue
+
+            # --- 2. IntradayDecision (逐行，最近 60 天) ---
+            eval_df = day_df.tail(60)
+            for timestamp, d_row in eval_df.iterrows():
+                # 模拟盘中行
+                idx = day_df.index.get_loc(timestamp)
+                pseudo_row = {
+                    'code': code,
+                    'trade': d_row['close'],
+                    'high': d_row['high'],
+                    'low': d_row['low'],
+                    'open': d_row['open'],
+                    'volume': d_row['volume'],
+                    'ma5d': d_row['ma5'],
+                    'ma10d': d_row['ma10'],
+                    'ma20d': d_row['ma20'],
+                    'ratio': 0.1,
+                }
+                # 找前一天做 snapshot
+                past_idx = idx - 1
+                if past_idx >= 0:
+                    prev_row = day_df.iloc[past_idx]
+                    snap = {
+                        'last_close': prev_row['close'],
+                        'market_win_rate': 0.5,
+                        'loss_streak': 0
+                    }
+                    decision = self.decision_engine.evaluate(pseudo_row, snap)
+                    if decision.get('action') in ("买入", "卖出", "ADD"):
+                        hits.append({
+                            'index': idx,
+                            'price': d_row['close'],
+                            'symbol': 'star',
+                            'color': (255, 200, 0, 150),
+                            'meta': {
+                                'date': str(timestamp).split()[0],
+                                'action': f"[SIM] 影子决策:{decision['action']}",
+                                'reason': decision['reason'],
+                                'price': d_row['close'],
+                                'indicators': decision.get('debug', {})
+                            }
+                        })
+                        
+        except Exception as e:
+            logger.debug(f"Strategy simulation failed: {e}")
+            
+        return hits
 
 def run_visualizer(initial_code=None, df_all=None):
     """
