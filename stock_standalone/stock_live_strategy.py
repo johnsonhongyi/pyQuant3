@@ -207,6 +207,74 @@ class VoiceAnnouncer:
             self._thread.join(timeout=2)
 
 
+class StrategySupervisor:
+    """
+    策略监理机制 (Strategy Supervision Mechanism)
+    负责从盈利角度对信号进行最终审核，拦截无效或高风险交易（如追涨）。
+    具备从日志和历史数据自升级的能力。
+    """
+    def __init__(self, logger_instance=None):
+        self.logger = logger_instance
+        self.constraints = {
+            'anti_chase_threshold': 0.05,  # 距分时均价偏离度上限
+            'min_market_win_rate': 0.35,  # 最低市场胜率门槛
+            'max_loss_streak': 2,         # 最大允许连亏次数 (15天内)
+            'ignore_concepts': ['ST', '退市']  # 规避概念
+        }
+        self._load_dynamic_constraints()
+
+    def _load_dynamic_constraints(self):
+        """从外部 JSON 加载由 TradingAnalyzer 生成的优化参数"""
+        try:
+            config_path = os.path.join(cct.get_base_path(), "config", "supervisor_constraints.json")
+            if os.path.exists(config_path):
+                import json
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    dynamic_data = json.load(f)
+                    self.constraints.update(dynamic_data)
+                    logger.info(f"🛡️ 策略监理已载入动态/自升级约束: {dynamic_data}")
+        except Exception as e:
+            logger.debug(f"No dynamic constraints found or load failed: {e}")
+
+    def veto(self, code: str, decision: dict, row: pd.Series, snap: dict) -> tuple[bool, str]:
+        """
+        审核决策。返回: (是否否决, 否决理由)
+        """
+        # 仅对买入/加仓信号进行监理
+        action = decision.get("action", "")
+        if action not in ("买入", "加仓", "BUY", "ADD"):
+            return False, ""
+
+        # 1. 规避板块/名称
+        name = snap.get('name', '')
+        for bad in self.constraints['ignore_concepts']:
+            if bad in name:
+                return True, f"命中规避概念: {bad}"
+
+        # 2. 防追涨拦截 (Anti-Chase) - 距日内均价(VWAP)偏离度
+        current_price = float(row.get('trade', 0))
+        # 优先使用实时服务提供的分时均价，否则从 row 转换
+        amount = float(row.get('amount', 0))
+        volume = float(row.get('volume', 0))
+        vwap = (amount / volume) if volume > 0 else 0
+        
+        if vwap > 0:
+            bias = (current_price - vwap) / vwap
+            if bias > self.constraints['anti_chase_threshold']:
+                return True, f"偏离均价过高({bias:.1%})，防止追涨"
+
+        # 3. 情绪冰点拦截 (Sentiment Veto)
+        market_win_rate = snap.get('market_win_rate', 1.0)
+        if market_win_rate < self.constraints['min_market_win_rate']:
+            return True, f"全场胜率过低({market_win_rate:.1%})，提高防御"
+
+        # 4. 霉运/个股冷宫机制 (Failure Filter)
+        loss_streak = snap.get('loss_streak', 0)
+        if loss_streak >= self.constraints['max_loss_streak']:
+            return True, f"个股近期连亏{loss_streak}次，强行降温"
+
+        return False, ""
+
 class StockLiveStrategy:
     """
     高性能实时行情监控策略类
@@ -296,6 +364,7 @@ class StockLiveStrategy:
         
         # --- 初始化记录器 (必须在 _load_monitors 之前) ---
         self.trading_logger = TradingLogger()
+        self.supervisor = StrategySupervisor(self.trading_logger) # ⭐ 注入盈利监理器
 
         self._load_monitors()
         self.df = None
@@ -304,6 +373,14 @@ class StockLiveStrategy:
         self.decision_engine = IntradayDecisionEngine(
             stop_loss_pct=stop_loss_pct,
             take_profit_pct=take_profit_pct,
+            trailing_stop_pct=trailing_stop_pct,
+            max_position=max_single_stock_ratio
+        )
+
+        # --- ⭐ 影子策略引擎 (用于参数比对与自优化) ---
+        self.shadow_engine = IntradayDecisionEngine(
+            stop_loss_pct=stop_loss_pct * 0.8, # 更严苛的止损
+            take_profit_pct=take_profit_pct * 1.2, # 更高的止盈期待
             trailing_stop_pct=trailing_stop_pct,
             max_position=max_single_stock_ratio
         )
@@ -771,6 +848,29 @@ class StockLiveStrategy:
                 logger.error(f"Sector Monitor Check Failed: {e}")
 
         self.executor.submit(self._check_strategies, self.df)
+
+        # --- ⭐ 数据反馈与回显 (Enrich df_all for UI) ---
+        # 将各股的最新决策与监理感知指标写回 df_all，以便前端实时显示
+        for code, stock in self._monitored_stocks.items():
+            if code in df_all.index:
+                snap = stock.get('snapshot', {})
+                df_all.at[code, 'last_action'] = snap.get('last_action', '')
+                df_all.at[code, 'last_reason'] = snap.get('last_reason', '')
+                df_all.at[code, 'shadow_info'] = snap.get('shadow_info', '')
+                df_all.at[code, 'market_win_rate'] = snap.get('market_win_rate', 0.5)
+                df_all.at[code, 'loss_streak'] = snap.get('loss_streak', 0)
+                df_all.at[code, 'vwap_bias'] = snap.get('vwap_bias', 0.0)
+            elif 'code' in df_all.columns:
+                # 兼容 code 也在列里的情况
+                mask = df_all['code'] == code
+                if mask.any():
+                    snap = stock.get('snapshot', {})
+                    df_all.loc[mask, 'last_action'] = snap.get('last_action', '')
+                    df_all.loc[mask, 'last_reason'] = snap.get('last_reason', '')
+                    df_all.loc[mask, 'shadow_info'] = snap.get('shadow_info', '')
+                    df_all.loc[mask, 'market_win_rate'] = snap.get('market_win_rate', 0.5)
+                    df_all.loc[mask, 'loss_streak'] = snap.get('loss_streak', 0)
+                    df_all.loc[mask, 'vwap_bias'] = snap.get('vwap_bias', 0.0)
         
         # --- Top 5 Hot Concepts Strategy ---
         if concept_top5 and cct.get_now_time_int() > 916:
@@ -1272,6 +1372,27 @@ class StockLiveStrategy:
                 # ---------- 决策引擎 ----------
                 decision = self.decision_engine.evaluate(row, snap)
 
+                # --- ⭐ 影子策略并行运行 (Dual Strategy Optimization) ---
+                shadow_decision = self.shadow_engine.evaluate(row, snap)
+                
+                # --- ⭐ 盈利监理重磅拦截 (Supervision Veto) ---
+                is_vetoed, veto_reason = self.supervisor.veto(code, decision, row, snap)
+
+                # 记录影子差异 (Inject into debug info for later analysis)
+                if shadow_decision["action"] in ("买入", "加仓", "BUY", "ADD"):
+                    # 如果影子有买入意向而主策略没有（或者主策略被拦截了）
+                    decision["debug"]["shadow_action"] = shadow_decision["action"]
+                    decision["debug"]["shadow_reason"] = shadow_decision["reason"]
+                    if decision["action"] == "HOLD" or is_vetoed:
+                        logger.info(f"🧪 [影子策略] {code} {snap.get('name')} 发现比对机会: {shadow_decision['reason']}")
+
+                if is_vetoed:
+                    # 如果被监理拦截，修改 action 为 VETO 并记录原因
+                    decision["original_action"] = decision["action"] # 保留原意图用于分析
+                    decision["action"] = "VETO" 
+                    decision["reason"] = f"🛡️ [监理拦截] {veto_reason} | 原理由: {decision['reason']}"
+                    logger.warning(f"🛡️ {code} {snap.get('name')} 信号被监理拦截: {veto_reason}")
+
                 # --- 3.3 冷却机制：避免短时重复触发 ---
                 cooldown_minutes = 5
                 now_ts = datetime.now()
@@ -1366,6 +1487,22 @@ class StockLiveStrategy:
 
                 # --- 3.6 记录信号日志 ---
                 self.trading_logger.log_signal(code, data['name'], current_price, decision, row_data=row_data)
+
+                # --- ⭐ 将决策与监理感知回写至 snap (供 UI 同步使用) ---
+                snap['last_action'] = decision.get('action', 'HOLD')
+                snap['last_reason'] = decision.get('reason', '')
+                snap['market_win_rate'] = market_win_rate # 监理感知的胜率
+                snap['loss_streak'] = loss_streak # 监理感知的连亏
+                if vwap > 0:
+                    snap['vwap_bias'] = (current_price - vwap) / vwap
+                else:
+                    snap['vwap_bias'] = 0.0
+                
+                # 影子策略信息
+                if shadow_decision["action"] in ("买入", "加仓", "BUY", "ADD"):
+                    snap['shadow_info'] = f"🧪 {shadow_decision['action']}: {shadow_decision['reason']}"
+                else:
+                    snap['shadow_info'] = ""
 
                 # # --- 3. 实时情绪感知 & K线形态 (Realtime Analysis) ---
                 # if self.realtime_service:
