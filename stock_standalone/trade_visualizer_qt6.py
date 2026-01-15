@@ -177,6 +177,18 @@ class CommandListenerThread(QThread):
 
 from PyQt6.QtCore import QMutex, QThread, pyqtSignal, QMutexLocker
 
+duration_date_day = 70
+duration_date_up = 250      #
+# duration_date_up = 190
+# duration_date_up = 120
+duration_date_week = 500    #3-ma60d
+# duration_date_month = 300
+duration_date_month = 1000    #3-ma20d
+#m : 510 ma26
+
+Resample_LABELS_Days = {'d':duration_date_day,'3d':duration_date_up,
+                      'w':duration_date_week,'m':duration_date_month}
+
 class DataLoaderThread(QThread):
     data_loaded = pyqtSignal(object, object, object) # code, day_df, tick_df
 
@@ -197,7 +209,8 @@ class DataLoaderThread(QThread):
                     # 1. Fetch Daily Data (Historical)
                     # tdd.get_tdx_Exp_day_to_df 内部调用 HDF5 API，必须在锁内执行
                     with timed_ctx("get_tdx_Exp_day_to_df", warn_ms=800):
-                       day_df = tdd.get_tdx_Exp_day_to_df(self.code, dl=ct.Resample_LABELS_Days[self.resample],resample=self.resample,fastohlc=True)
+                       day_df = tdd.get_tdx_Exp_day_to_df(self.code, dl=Resample_LABELS_Days[self.resample],resample=self.resample,fastohlc=True)
+                       # day_df = tdd.get_tdx_Exp_day_to_df(self.code, dl=ct.Resample_LABELS_Days[self.resample],resample=self.resample,fastohlc=True)
 
                     # 2. Fetch Realtime/Tick Data (Intraday)
                     # 假设此操作不涉及 HDF5，可以在锁外执行
@@ -215,69 +228,126 @@ class DataLoaderThread(QThread):
                 traceback.print_exc()
                 self.data_loaded.emit(self.code, pd.DataFrame(), pd.DataFrame())
 
-def tick_to_daily_bar(tick_df):
-    """
-    将 tick 转成今天的日 K
-    """
-    if tick_df.empty:
-        return pd.DataFrame()
-    # 只生成今天的 K
-    # 假设 tick_df 是你当前的 DataFrame
-    if isinstance(tick_df.index, pd.MultiIndex):
-        if 'ticktime' in tick_df.index.names:
-            # ticktime 在 MultiIndex 里
-            tick_times = tick_df.index.get_level_values('ticktime')
-            tick_df['date'] = tick_times.to_series().dt.date
-        else:
-            # 没有 ticktime，直接用今天
-            from datetime import date
-            tick_df['date'] = date.today()
-    else:
-        # 普通 DataFrame，ticktime 在列里
-        if 'ticktime' in tick_df.columns:
-            tick_df['date'] = pd.to_datetime(tick_df['ticktime']).dt.date
-        else:
-            from datetime import date
-            tick_df['date'] = date.today()
 
-    today = pd.Timestamp.today().date()
-    today_ticks = tick_df[tick_df['date'] == today]
-    if today_ticks.empty:
+
+def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    将 tick_df（MultiIndex: code, ticktime）聚合成“今天的一根日 K”
+    返回：
+        index: DatetimeIndex([today])
+        columns: open, high, low, close, volume
+    """
+    if tick_df is None or tick_df.empty:
         return pd.DataFrame()
-    bar = pd.DataFrame({
-        'open': [today_ticks['price'].iloc[0]],
-        'high': [today_ticks['price'].max()],
-        'low': [today_ticks['price'].min()],
-        'close': [today_ticks['price'].iloc[-1]],
-        'volume': [today_ticks['volume'].sum()]
-    }, index=[today])
+
+    df = tick_df.copy()
+    # === 1. 取 ticktime ===
+    if isinstance(df.index, pd.MultiIndex) and 'ticktime' in df.index.names:
+        tick_time = pd.to_datetime(df.index.get_level_values('ticktime'))
+    elif 'ticktime' in df.columns:
+        tick_time = pd.to_datetime(df['ticktime'])
+    else:
+        return pd.DataFrame()
+
+    df['_dt'] = tick_time
+    df['_date'] = df['_dt'].dt.normalize()
+
+    # today = pd.Timestamp.today().normalize()
+    # df = df[df['_date'] == today]
+    # 获取今天的日期（不带时间）
+    today = pd.Timestamp.today().normalize()
+
+    # 筛选今天的数据
+    df = df[df['_date'] == today]
+
+    # # 将 dt 和 ticktime 拼接成完整时间字符串，再转 datetime
+    # df['ticktime'] = pd.to_datetime(
+    #     df['dt'].astype(str) + ' ' + df['ticktime'].astype(str),
+    #     format='%Y-%m-%d'
+    # )
+    today = pd.Timestamp.today().normalize().strftime('%Y-%m-%d')
+
+    if df.empty:
+        return pd.DataFrame()
+
+    # === 2. 价格列统一 ===
+    # 你的真实价格列是 close
+    price_col = 'close'
+
+    bar = pd.DataFrame(
+        {
+            'open':   [df[price_col].iloc[0]],
+            'high':   [df[price_col].max()],
+            'low':    [df[price_col].min()],
+            'close':  [df[price_col].iloc[-1]],
+            'volume': [df['volume'].iloc[-1]],  # 注意：你的 volume 是累计量
+        },
+        index=[today],
+    )
+    logger.debug(f'bar: {bar} df:{df.high.max()}')
     return bar
 
-
-def realtime_worker_process(code, queue, stop_flag,log_level=None,interval=10):
+def realtime_worker_process(code, queue, stop_flag,log_level=None,debug_realtime=False,interval=cct.sina_limit_time):
     """多进程拉取实时数据"""
-    # logger = LoggerFactory.getLogger(f"realtime_worker_process")
-    # if log_level is not None:
-    #     logger.setLevel(log_level.value)
-        # logger.setLevel(LoggerFactory.DEBUG)
+    if log_level:
+        logger = LoggerFactory.getLogger()
+        if log_level is not None:
+            logger.setLevel(log_level.value)
     s = sina_data.Sina()
     # while True:
+    count_debug = 0
     while  stop_flag.value:   # 👈 关键
         try:
-            if cct.get_trade_date_status() and cct.get_now_time_int() > 920 or not cct.get_trade_date_status():
+            # if cct.get_trade_date_status() and cct.get_now_time_int() > 920 or not cct.get_trade_date_status():
+            if (cct.get_work_time() and cct.get_now_time_int() > 923) or debug_realtime:
                 with timed_ctx("realtime_worker_process", warn_ms=800):
                     tick_df = s.get_real_time_tick(code)
-                # 这里可以生成今天的 day_bar
+                    # 这里可以生成今天的 day_bar
+                    if log_level and tick_df is None or tick_df.empty:
+                        logger.warning(
+                            f"[RT] tick_df EMPTY | code={code} | "
+                            f"trade={cct.get_trade_date_status()} "
+                            f"time={cct.get_now_time_int()}"
+                        )
+                        time.sleep(interval)
+                        continue
                 with timed_ctx("realtime_worker_tick_to_daily_bar", warn_ms=800):
                     today_bar = tick_to_daily_bar(tick_df)
+                    if log_level and today_bar is None or today_bar.empty:
+                        logger.warning(
+                            f"[RT] today_bar EMPTY | code={code} | "
+                            f"today_bar_rows={len(today_bar)} | "
+                            f"today_bar_cols={list(today_bar.columns)}"
+                        )
+                        time.sleep(interval)
+                        continue
                     try:
                         # queue.put((code, tick_df, today_bar))
+                        if log_level and count_debug == 0 and debug_realtime:
+                            logger.debug(
+                                    f"[RT] tick_df | code={code} | "
+                                    f"tick_rows={len(tick_df)} | "
+                                    f"tick_cols={list(tick_df.columns)}"
+                                    f"tick={(tick_df[-3:])}"
+                                )
+                            # dump_path = cct.get_ramdisk_path(f"{code}_tick_{int(time.time())}.pkl")
+                            # tick_df.to_pickle(dump_path)
+                            logger.debug(
+                                    f"[RT] today_bar | code={code} | "
+                                    f"today_barrows={len(today_bar)} | "
+                                    f"today_bar_cols={list(today_bar.columns)}"
+                                    f"today_bar=\n{(today_bar)}"
+                                )
+                            # dump_path = cct.get_ramdisk_path(f"{code}_today_{int(time.time())}.pkl")
+                            # today_bar.to_pickle(dump_path)
+                            # count_debug += 1
                         queue.put_nowait((code, tick_df, today_bar))
                     except queue.Full:
                         pass  # 队列满了就跳过，避免卡住
         except Exception as e:
             import traceback
             traceback.print_exc()
+            time.sleep(interval)  # 避免无限抛异常占用 CPU
         # time.sleep(interval)
         if stop_flag.value:
             for _ in range(interval):
@@ -326,11 +396,12 @@ class RealtimeWorker(QObject):
 
 
 class MainWindow(QMainWindow, WindowMixin):
-    def __init__(self,stop_flag=None,log_level=None):
+    def __init__(self,stop_flag=None,log_level=None,debug_realtime=False):
         super().__init__()
         self.setWindowTitle("Trade Signal Visualizer (Qt6 + PyQtGraph)")
         self.sender = StockSender(callback=None)
         # WindowMixin requirement: scale_factor
+        self._debug_realtime = debug_realtime   # 临时调试用
         self.scale_factor = get_windows_dpi_scale_factor()
         self.hdf5_mutex = QMutex() 
         self.stop_flag = stop_flag
@@ -343,7 +414,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # 缓存 df_all
         self.df_cache = pd.DataFrame()
         # self.realtime_worker = None
-
+        self.last_initialized_trade_day = None  # 记录最后一次初始化的交易日
+        self._closing = False
         self.realtime_queue = Queue()
         self.realtime_process = None
 
@@ -379,6 +451,51 @@ class MainWindow(QMainWindow, WindowMixin):
         # 1. Left Sidebar: Stock Table
         self.stock_table = QTableWidget()
         self.stock_table.setMaximumWidth(300)
+
+        self.stock_table.setStyleSheet("""
+
+        QTableWidget {
+            background-color: transparent;
+        }
+
+        /* 只作用在 table 内部 */
+        QTableWidget QScrollBar:vertical {
+            width: 6px;
+            background: transparent;
+            margin: 0px;
+        }
+
+        QTableWidget QScrollBar::handle:vertical {
+            background: rgba(180, 180, 180, 120);
+            min-height: 30px;
+            border-radius: 3px;
+        }
+
+        QTableWidget QScrollBar::handle:vertical:hover {
+            background: rgba(220, 220, 220, 180);
+        }
+
+        QTableWidget QScrollBar::add-line:vertical,
+        QTableWidget QScrollBar::sub-line:vertical {
+            height: 0px;
+        }
+
+        QTableWidget QScrollBar::add-page:vertical,
+        QTableWidget QScrollBar::sub-page:vertical {
+            background: transparent;
+        }
+        """)
+
+        self.stock_table.setStyleSheet(self.stock_table.styleSheet() + """
+        QTableWidget::item:hover {
+            background: rgba(255, 255, 255, 30);
+        }
+        QTableWidget::item:selected {
+            background: rgba(255, 215, 0, 80);
+            color: black;
+        }
+        """)
+        self.stock_table.verticalScrollBar().setFixedWidth(6)
         # self.stock_table.setHorizontalHeaderLabels(['Code', 'Name', 'Rank', 'Percent'])
         # self.headers = ['code', 'name', 'percent','dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
         real_time_cols = cct.real_time_cols
@@ -503,10 +620,18 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def on_real_time_toggled(self, state):
         self.realtime = bool(state)
-        if self.realtime and self.current_code and cct.get_work_time_duration():
+        # 当前时间是否在交易时段
+        is_work_time = cct.get_work_time_duration()
+
+        if self.realtime and self.current_code and is_work_time or self._debug_realtime:
             self._start_realtime_process(self.current_code)
-        elif not self.realtime or not cct.get_work_time_duration():
+        else:
             self._stop_realtime_process()
+            # 清理今天的数据（保留历史日 K）
+            if not self.day_df.empty and cct.get_work_time_duration():
+                today_str = pd.Timestamp.today().strftime('%Y-%m-%d')
+                self.day_df = self.day_df[self.day_df.index < today_str]
+                logger.info(f"[INFO] Real-time stopped, cleared today's:{today_str} data for {self.current_code}")
 
     def _start_realtime_process(self, code):
         # 停止旧进程
@@ -517,7 +642,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 启动新进程
         self.realtime_process = Process(
             target=realtime_worker_process,
-            args=(code, self.realtime_queue,self.stop_flag,self.log_level),
+            args=(code, self.realtime_queue,self.stop_flag,self.log_level,self._debug_realtime),
             daemon=False
         )
         self.realtime_process.start()
@@ -528,18 +653,45 @@ class MainWindow(QMainWindow, WindowMixin):
             self.realtime_process.join()
             self.realtime_process = None
 
+    # def _poll_realtime_queue(self):
+    #     while True:
+    #         try:
+    #             code, tick_df, today_bar = self.realtime_queue.get_nowait()
+    #         except queue.Empty:
+    #             break
+    #         except (EOFError, OSError):
+    #             break
+    #         except Exception as e:
+    #             logger.exception(e)
+    #             break
+    #         self.on_realtime_update(code, tick_df, today_bar)
+
     def _poll_realtime_queue(self):
+        if not hasattr(self, "_closing") or getattr(self, "_closing", False):
+            logger.debug(f'self._closing :{getattr(self, "_closing", False)}')
+            return  # 窗口正在关闭，不再处理队列
+        # latest_updates = {}  # key: code, value: (tick_df, today_bar)
         while True:
             try:
                 code, tick_df, today_bar = self.realtime_queue.get_nowait()
             except queue.Empty:
                 break
             except (EOFError, OSError):
+                logger.warning("Realtime queue closed unexpectedly")
                 break
             except Exception as e:
-                logger.exception(e)
+                logger.exception("Unexpected error in realtime queue")
                 break
-            self.on_realtime_update(code, tick_df, today_bar)
+
+            try:
+                # GUI 更新加保护
+                if self.isVisible():  # 确保窗口未关闭
+                    self.on_realtime_update(code, tick_df, today_bar)
+                    logger.debug(f'on_realtime_update today_bar:\n {today_bar}')
+            except RuntimeError as e:
+                logger.warning(f"GUI update skipped: {e}")
+            except Exception:
+                logger.exception("Error in on_realtime_update")
 
     def _on_initial_loaded(self, code, day_df, tick_df):
         if code != self.current_code:
@@ -547,30 +699,116 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # ⚡ 过滤掉今天的数据，只保留过去的日 K
         today_str = pd.Timestamp.today().strftime('%Y-%m-%d')
-        day_df = day_df[day_df.index < today_str]
+        is_intraday = (
+            self.realtime
+            and cct.get_work_time_duration()
+        )
+
+        # if is_intraday:
+        if self.realtime:
+            day_df = day_df[day_df.index < today_str]
 
         self.day_df = day_df.copy()
         # render_charts 时只传历史日 K，tick_df 用于 intraday 图，不绘制今天 K
-        self.render_charts(code, self.day_df, tick_df)
+        with timed_ctx("render_charts", warn_ms=50):
+            self.render_charts(code, self.day_df, tick_df)
 
         # 启动 realtime
-        if self.realtime and cct.get_work_time_duration():
+        if self.realtime and cct.get_work_time_duration() or self._debug_realtime:
             self._start_realtime_process(code)
 
 
+    # def on_realtime_update(self, code, tick_df, today_bar):
+    #     if not self.realtime or code != self.current_code or today_bar.empty or not cct.get_work_time_duration():
+    #         return
+
+    #     last_day = self.day_df.index[-1]
+    #     today_idx = today_bar.index[0]
+
+    #     if last_day < today_idx:
+    #         self.day_df = pd.concat([self.day_df, today_bar])
+    #     elif last_day == today_idx:
+    #         self.day_df.iloc[-1] = today_bar.iloc[0]
+
+    #     self.render_charts(code, self.day_df, tick_df)
+
+    # def on_realtime_update(self, code, tick_df, today_bar):
+    #     #每日自动初始化
+    #     if not self.realtime or code != self.current_code or today_bar.empty or not cct.get_work_time_duration():
+    #         return
+
+    #     # 只在交易日变化时初始化一次
+    #     today_trade_day = today_bar.index[0].date()  # 取今天 bar 的日期
+
+    #     if self.last_initialized_trade_day != today_trade_day:
+    #         # 初始化 today_bar
+    #         if self.day_df.empty:
+    #             self.day_df = today_bar.copy()
+    #         else:
+    #             self.day_df = pd.concat([self.day_df, today_bar])
+    #         self.last_initialized_trade_day = today_trade_day
+    #         print(f"[INFO] Initialized new trading day: {today_trade_day}")
+    #     else:
+    #         # 当天实时更新最后一行
+    #         self.day_df.iloc[-1] = today_bar.iloc[0]
+
+    #     # 渲染图表
+    #     self.render_charts(code, self.day_df, tick_df)
+
     def on_realtime_update(self, code, tick_df, today_bar):
-        if not self.realtime or code != self.current_code or today_bar.empty or not cct.get_work_time_duration():
+        if not self._debug_realtime and (not self.realtime or code != self.current_code or today_bar.empty or not cct.get_work_time_duration()):
+            # logger.info(f'on_realtime_update today_bar.iloc[0] : {today_bar.iloc[0]}')
             return
 
-        last_day = self.day_df.index[-1]
         today_idx = today_bar.index[0]
+        # 获取 day_df 最后一天日期
+        last_day = self.day_df.index[-1] if not self.day_df.empty else None
 
-        if last_day < today_idx:
+        # 计算交易日间隔
+        trade_gap = cct.get_trade_day_distance(last_day, today_idx) if last_day else None
+        logger.debug(f'trade_gap: {trade_gap}')
+        # 第二天开盘（交易日不同），自动初始化 today_bar
+        # if last_day is None or (trade_gap is not None and trade_gap > 1):
+        #     self._on_initial_loaded()
+        #     print(f"[INFO] New trading day detected: {today_idx}, today_bar appended trade_gap:{trade_gap}")
+        #     return
+        # elif last_day == today_idx:
+        if last_day == today_idx:
+            # 当天更新最后一行
+            # 先按 day_df 列对齐 today_bar
+            # 直接重命名列
+            # today_bar = today_bar.rename(columns={'volume': 'vol'})
+            # today_bar_renamed
+            today_bar['vol'] = today_bar['volume']
+            cols_match = ['open', 'high', 'low', 'close', 'vol', 'volume','amount', 'code']
+            # 先从 today_bar 里取需要的列（不存在的填 NaN）
+            today_row = today_bar.iloc[0].reindex(cols_match)
+            today_row['code'] = code
+
+            # 如果 amount 列存在但为空，用 (high+low)/2 * volume 填充
+            if 'amount' in today_row:
+                if pd.isna(today_row['amount']):
+                    if 'vol' in today_row and not pd.isna(today_row['vol']):
+                        today_row['amount'] = round((today_row['high'] + today_row['low']) / 2 * today_row['vol'], 1)
+
+            # code 列保持原样（如果 day_df 有默认值或 NaN 就不动）
+            # 数值列精度处理
+            num_cols = ['open', 'high', 'low', 'close']
+            for col in num_cols:
+                if col in today_row:
+                    today_row[col] = round(pd.to_numeric(today_row[col], errors='coerce'), 2)
+            # 更新最后一行
+            today_row_new = today_row[self.day_df.columns]  # 强制顺序和 day_df 对齐
+            logger.debug(f' today_row\n: {today_row} today_row_new:{today_row_new}')
+            self.day_df.iloc[-1] = today_row_new
+            # self.day_df.iloc[-1] = today_bar.iloc[0]
+        else:
             self.day_df = pd.concat([self.day_df, today_bar])
-        elif last_day == today_idx:
-            self.day_df.iloc[-1] = today_bar.iloc[0]
 
+        # 渲染图表
         self.render_charts(code, self.day_df, tick_df)
+
+
 
 
     def _init_theme_selector(self):
@@ -699,7 +937,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def closeEvent(self, event):
         """窗口关闭统一退出清理"""
-        
+        self._closing = True
         # 1️⃣ 停止实时数据进程
         # 1️⃣ 通知子进程退出
         if hasattr(self, 'stop_flag'):
@@ -897,19 +1135,306 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.hdf5_mutex,
                 resample=self.resample
             )
-        with timed_ctx("data_loaded", warn_ms=800):
+        with timed_ctx("data_loaded", warn_ms=50):
             self.loader.data_loaded.connect(self._on_initial_loaded)
         with timed_ctx("start", warn_ms=800):
             self.loader.start()
 
         # ---- 3. 如果开启 realtime，再启动 realtime worker ----
         with timed_ctx("start_realtime_worker", warn_ms=800):
-            if self.realtime and cct.get_work_time_duration():
+            if self.realtime and cct.get_work_time_duration() or self._debug_realtime:
                 self._start_realtime_process(code)
         if logger.level == LoggerFactory.DEBUG:
             print_timing_summary(top_n=6)
 
+    
+    # def render_charts_opt(self, code, day_df, tick_df):
     def render_charts(self, code, day_df, tick_df):
+        """
+        Render full charts:
+          - Daily K-line + MA5/10/20 + Bollinger + Signals
+          - Volume + Volume MA5
+          - Realtime ghost candle
+          - Intraday Tick plot + avg line + pre_close
+          - Theme aware
+          - Signals arrows on top
+        """
+        if day_df.empty:
+            self.kline_plot.setTitle(f"{code} - No Data")
+            self.tick_plot.setTitle("No Tick Data")
+            return
+
+        # --- 清理可复用图表 ---
+        self.kline_plot.setTitle("")
+        self.tick_plot.setTitle("")
+        
+        # --- 标题 ---
+        info = self.code_info_map.get(code, {})
+        title_parts = [code]
+        for k, fmt in [('name', '{}'), ('Rank', 'Rank: {}'), ('percent', '{:+.2f}%'),
+                       ('win', 'win: {}'), ('slope', 'slope: {:.1f}%'), ('volume', 'vol: {:.1f}')]:
+            v = info.get(k)
+            if v is not None:
+                title_parts.append(fmt.format(v))
+        self.kline_plot.setTitle(" | ".join(title_parts))
+
+        # --- 主题颜色 ---
+        if self.qt_theme == 'dark':
+            ma_colors = {'ma5':'b','ma10':'orange','ma20':QColor(255,255,0)}
+            bollinger_colors = {'upper':QColor(139,0,0),'lower':QColor(0,128,0)}
+            vol_ma_color = QColor(255,255,0)
+            tick_curve_color = 'w'
+            tick_avg_color = QColor(255,255,0)
+            pre_close_color = 'b'
+        else:
+            ma_colors = {'ma5':'b','ma10':'orange','ma20':QColor(255,140,0)}
+            bollinger_colors = {'upper':QColor(139,0,0),'lower':QColor(0,128,0)}
+            vol_ma_color = QColor(255,140,0)
+            tick_curve_color = 'k'
+            tick_avg_color = QColor(255,140,0)
+            pre_close_color = 'b'
+
+        day_df = day_df.sort_index()
+        dates = day_df.index
+        x_axis = np.arange(len(day_df))
+
+        # ----------------- 自定义日期轴 -----------------
+        class DateAxis(pg.AxisItem):
+            def __init__(self, dates, orientation='bottom'):
+                super().__init__(orientation=orientation)
+                self.dates = list(dates)
+
+            def tickStrings(self, values, scale, spacing):
+                """把整数索引映射成日期字符串，最后一天显示在末尾"""
+                strs = []
+                n = len(self.dates)
+                for val in values:
+                    idx = int(val)
+                    if idx < n:
+                        strs.append(str(self.dates[idx])[5:])  # MM-DD
+                    else:
+                        strs.append(str(self.dates[-1])[5:])  # ghost candle 对应最后一天
+                return strs
+
+        if self.realtime and not tick_df.empty and cct.get_work_time_duration() or self._debug_realtime:
+            # ghost candle 占用最后一个索引
+            x_axis_full = np.append(x_axis, len(day_df))
+        else:
+            x_axis_full = x_axis
+
+        # ----------------- 设置底部轴 -----------------
+        date_axis = DateAxis(day_df.index, orientation='bottom')
+        self.kline_plot.setAxisItems({'bottom': date_axis})
+
+        # --- Candlestick ---
+        ohlc_data = np.column_stack((
+            x_axis,
+            day_df['open'].values,
+            day_df['close'].values,
+            day_df['low'].values,
+            day_df['high'].values
+        ))
+
+        if not hasattr(self, 'candle_item'):
+            self.candle_item = CandlestickItem(ohlc_data, theme=self.qt_theme)
+            self.kline_plot.addItem(self.candle_item)
+        else:
+            try:
+                self.candle_item.setData(ohlc_data)
+            except TypeError:
+                self.kline_plot.removeItem(self.candle_item)
+                self.candle_item = CandlestickItem(ohlc_data, theme=self.qt_theme)
+                self.kline_plot.addItem(self.candle_item)
+
+        # --- MA5/10/20 ---
+        ma5 = day_df['close'].rolling(5).mean().values
+        ma10 = day_df['close'].rolling(10).mean().values
+        ma20 = day_df['close'].rolling(20).mean().values
+
+        for attr, series, color in zip(['ma5_curve','ma10_curve','ma20_curve'],
+                                       [ma5,ma10,ma20],
+                                       [ma_colors['ma5'], ma_colors['ma10'], ma_colors['ma20']]):
+            if not hasattr(self, attr):
+                setattr(self, attr, self.kline_plot.plot(x_axis, series, pen=pg.mkPen(color, width=1)))
+            else:
+                getattr(self, attr).setData(x_axis, series)
+
+        # --- Bollinger ---
+        std20 = day_df['close'].rolling(20).std().values
+        upper_band = ma20 + 2*std20
+        lower_band = ma20 - 2*std20
+
+        for attr, series, color in [('upper_curve', upper_band, bollinger_colors['upper']),
+                                    ('lower_curve', lower_band, bollinger_colors['lower'])]:
+            if not hasattr(self, attr):
+                setattr(self, attr, self.kline_plot.plot(x_axis, series, pen=pg.mkPen(color, width=2)))
+            else:
+                getattr(self, attr).setData(x_axis, series)
+
+        # ----------------- 绘制 Volume -----------------
+        if 'amount' in day_df.columns:
+            if not hasattr(self, 'volume_plot'):
+                self.volume_plot = self.kline_widget.addPlot(row=1, col=0)
+                self.volume_plot.setXLink(self.kline_plot)
+                self.volume_plot.setMaximumHeight(120)
+                self.volume_plot.setLabel('left', 'Volume')
+                self.volume_plot.showGrid(x=True, y=True)
+                self.volume_plot.setMenuEnabled(False)
+            else:
+                self.volume_plot.clear()
+
+            amounts = day_df['amount'].values
+            up_idx = day_df['close'] >= day_df['open']
+            down_idx = day_df['close'] < day_df['open']
+
+            # 保证 volume 与 x_axis_full 对齐
+            x_vol = x_axis_full[:-1] if len(x_axis_full) > len(amounts) else x_axis_full
+
+            if up_idx.any():
+                self.volume_plot.addItem(pg.BarGraphItem(x=x_vol[up_idx], height=amounts[up_idx],
+                                                         width=0.6, brush='r'))
+            if down_idx.any():
+                self.volume_plot.addItem(pg.BarGraphItem(x=x_vol[down_idx], height=amounts[down_idx],
+                                                         width=0.6, brush='g'))
+
+            # 5日均量线
+            ma5_vol = pd.Series(amounts).rolling(5).mean().values
+            if self.realtime and not tick_df.empty and cct.get_work_time_duration() or self._debug_realtime:
+                ma5_vol = np.append(ma5_vol, ma5_vol[-1])  # ghost candle
+            if not hasattr(self, 'vol_ma5_curve'):
+                self.vol_ma5_curve = self.volume_plot.plot(x_axis_full, ma5_vol,
+                                                           pen=pg.mkPen('yellow', width=1.5))
+            else:
+                self.vol_ma5_curve.setData(x_axis_full, ma5_vol)
+
+        # --- Signals Arrows with Price Text (增强版) ---
+        signals = self.logger.get_signal_history_df()
+        if not hasattr(self, 'signal_scatter'):
+            # ScatterPlotItem 用于箭头
+            self.signal_scatter = pg.ScatterPlotItem(size=15, pen=pg.mkPen('k'), symbol='t1', z=10)
+            self.kline_plot.addItem(self.signal_scatter)
+            self.signal_text_items = []  # 用于显示价格文字
+        else:
+            self.signal_scatter.clear()
+            # 移除旧的文字
+            for t in getattr(self, 'signal_text_items', []):
+                self.kline_plot.removeItem(t)
+            self.signal_text_items.clear()
+
+        if not signals.empty:
+            stock_signals = signals[signals['code'] == code]
+            xs, ys, brushes = [], [], []
+            date_map = {d if isinstance(d, str) else d.strftime('%Y-%m-%d'): i for i, d in enumerate(dates)}
+            
+            for _, row in stock_signals.iterrows():
+                sig_date = str(row['date']).split()[0]
+                if sig_date in date_map:
+                    idx = date_map[sig_date]
+                    xs.append(idx)
+                    y_price = row['price'] if pd.notnull(row['price']) else day_df.iloc[idx]['close']
+                    ys.append(y_price)
+                    buy_signal = 'Buy' in row['action'] or '买' in row['action']
+                    brushes.append(pg.mkBrush('r') if buy_signal else pg.mkBrush('g'))
+                    
+                    # 添加价格文本
+                    text_item = pg.TextItem(
+                        text=f"{y_price:.2f}",
+                        anchor=(0.5, 1.5) if buy_signal else (0.5, -0.5),  # 买在上方，卖在下方
+                        color='r' if buy_signal else 'g',
+                        border='k',
+                        fill=(50,50,50,150)
+                    )
+                    text_item.setZValue(11)  # 文字在箭头上层
+                    text_item.setPos(idx, y_price)
+                    self.kline_plot.addItem(text_item)
+                    self.signal_text_items.append(text_item)
+
+            # 绘制箭头
+            if xs:
+                self.signal_scatter.setData(x=xs, y=ys, brush=brushes, size=15)
+
+        # # --- Ghost Candle (实时) ---
+        # if self.realtime and not tick_df.empty and cct.get_work_time_duration():
+        #     new_x = len(day_df)
+        #     current_price = tick_df['close'].values[-1]
+        #     open_p = tick_df['open'][tick_df['open']>0].iloc[-1] if 'open' in tick_df.columns else current_price
+        #     low_p = tick_df['low'][tick_df['low']>0].min() if 'low' in tick_df.columns else current_price
+        #     high_p = tick_df['high'][tick_df['high']>0].max() if 'high' in tick_df.columns else current_price
+        #     ghost_data = [(new_x, open_p, current_price, low_p, high_p)]
+        #     if not hasattr(self, 'ghost_candle'):
+        #         self.ghost_candle = CandlestickItem(ghost_data, theme=self.qt_theme)
+        #         self.kline_plot.addItem(self.ghost_candle)
+        #     else:
+        #         self.ghost_candle.setData(ghost_data)
+        if self.realtime and not tick_df.empty and cct.get_work_time_duration() or self._debug_realtime:
+            current_price = float(tick_df['close'].iloc[-1])
+
+            last_hist_date = str(day_df.index[-1]).split()[0]
+            today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
+
+            if today_str > last_hist_date:
+                new_x = len(day_df)
+
+                open_p = tick_df['open'][tick_df['open'] > 0].iloc[-1] if 'open' in tick_df.columns else current_price
+                low_p  = tick_df['low'][tick_df['low'] > 0].min() if 'low' in tick_df.columns else current_price
+                high_p = tick_df['high'][tick_df['high'] > 0].max() if 'high' in tick_df.columns else current_price
+
+                ghost_ohlc = np.array([
+                    [new_x, open_p, current_price, low_p, high_p]
+                ], dtype=float)
+
+                # 关键：永远先删再建
+                if hasattr(self, 'ghost_candle'):
+                    self.kline_plot.removeItem(self.ghost_candle)
+                    del self.ghost_candle
+
+                self.ghost_candle = CandlestickItem(
+                    ghost_ohlc,
+                    theme=self.qt_theme
+                )
+                self.kline_plot.addItem(self.ghost_candle)
+
+        # --- Tick Plot ---
+        if not tick_df.empty:
+            prices = tick_df['close'].values
+            x_ticks = np.arange(len(prices))
+            pre_close = tick_df['llastp'].iloc[-1] if 'llastp' in tick_df.columns else tick_df['pre_close'].iloc[-1] if 'pre_close' in tick_df.columns else prices[0]
+
+            if not hasattr(self, 'tick_curve'):
+                self.tick_curve = self.tick_plot.plot(x_ticks, prices, pen=pg.mkPen(tick_curve_color, width=2))
+            else:
+                self.tick_curve.setData(x_ticks, prices)
+
+            # 均价线
+            if 'amount' in tick_df.columns and 'volume' in tick_df.columns:
+                cum_amount = tick_df['amount'].cumsum()
+                cum_volume = tick_df['volume'].cumsum()
+                avg_prices = np.where(cum_volume>0, cum_amount/cum_volume, prices)
+            else:
+                avg_prices = pd.Series(prices).expanding().mean().values
+
+            if not hasattr(self, 'avg_curve'):
+                self.avg_curve = self.tick_plot.plot(x_ticks, avg_prices, pen=pg.mkPen(tick_avg_color, width=1.5))
+            else:
+                self.avg_curve.setData(x_ticks, avg_prices)
+
+            # pre_close 虚线
+            if not hasattr(self, 'pre_close_line'):
+                self.pre_close_line = self.tick_plot.addLine(y=pre_close, pen=pg.mkPen(pre_close_color, style=Qt.PenStyle.DashLine))
+            else:
+                self.pre_close_line.setValue(pre_close)
+
+            pct_change = (prices[-1]-pre_close)/pre_close*100 if pre_close!=0 else 0
+            self.tick_plot.setTitle(f"Intraday: {prices[-1]:.2f} ({pct_change:.2f}%)")
+            self.tick_plot.showGrid(x=False, y=True, alpha=0.5)
+
+        # --- 自动范围 ---
+        self.kline_plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
+        self.kline_plot.autoRange()
+
+
+
+    def render_charts_old(self, code, day_df, tick_df):
         if day_df.empty:
             self.kline_plot.setTitle(f"{code} - No Data")
             return
@@ -1160,7 +1685,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
                 
-                if self.realtime and cct.get_work_time_duration() and today_str > last_hist_date_str:
+                if self.realtime and cct.get_work_time_duration() and today_str > last_hist_date_str or self._debug_realtime:
                     new_x = len(day_df)
                     ghost_data = [(new_x, open_p, current_price, low_p, high_p)]
                     ghost_candle = CandlestickItem(ghost_data)
@@ -1243,11 +1768,11 @@ def run_visualizer(initial_code=None, df_all=None):
     window.show()
     sys.exit(app.exec())
 
-def main(initial_code='000002',stop_flag=None,log_level=None):
+def main(initial_code='000002',stop_flag=None,log_level=None,debug_realtime=False):
     # --- 1. 尝试成为 Primary Instance ---
-    # logger = LoggerFactory.getLogger()
-    # if log_level is not None:
-    #     logger.setLevel(log_level.value)
+        # logger = LoggerFactory.getLogger()
+    if log_level is not None:
+        logger.setLevel(log_level.value)
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     stop_flag = stop_flag if stop_flag else mp.Value('b', True)   # 出厂运行
@@ -1276,7 +1801,7 @@ def main(initial_code='000002',stop_flag=None,log_level=None):
 
     # --- 3. Primary Instance: 启动 GUI ---
     app = QApplication(sys.argv)
-    window = MainWindow(stop_flag,log_level)
+    window = MainWindow(stop_flag,log_level,debug_realtime)
     start_code = initial_code
     # 启动监听线程，处理 socket 消息
     listener = CommandListenerThread(server_socket)
@@ -1287,14 +1812,13 @@ def main(initial_code='000002',stop_flag=None,log_level=None):
     listener.start()
 
     window.show()
-
     # 如果 exe 启动时带了参数
-    if len(sys.argv) > 1:
+    if start_code is not None:
+        window.load_stock_by_code(start_code)
+    elif len(sys.argv) > 1:
         start_code = sys.argv[1]
         if len(start_code) in (6, 8):
             window.load_stock_by_code(start_code)
-    elif start_code is not None:
-        window.load_stock_by_code(start_code)
     ret = app.exec()  # 阻塞 Qt 主循环
     # 确保所有后台进程被杀
     stop_flag.value = False
@@ -1302,13 +1826,74 @@ def main(initial_code='000002',stop_flag=None,log_level=None):
     sys.exit(ret)
 
 
-
 if __name__ == "__main__":
     # logger.setLevel(LoggerFactory.INFO)
-    logger.setLevel(LoggerFactory.DEBUG)
-    stop_flag =  mp.Value('b', True)   # 出厂运行
-    log_level = mp.Value('i', LoggerFactory.DEBUG)  # 'i' 表示整数
-    main(initial_code='000002',stop_flag=stop_flag,log_level=log_level)
+    import argparse
+    LOG_LEVEL_MAP = {
+        "debug": LoggerFactory.DEBUG,
+        "info": LoggerFactory.INFO,
+        "warning": LoggerFactory.WARNING,
+        "error": LoggerFactory.ERROR,
+    }
+
+    def parse_args():
+        parser = argparse.ArgumentParser(description="Realtime Stock Visualizer")
+
+        parser.add_argument(
+            "-log",
+            "--log-level",
+            default="info",
+            choices=LOG_LEVEL_MAP.keys(),
+            help="Log level: debug / info / warning / error"
+        )
+
+        parser.add_argument(
+            "-realtime",
+            action="store_true",
+            help="Force realtime mode even outside trading hours"
+        )
+
+        parser.add_argument(
+            "-code",
+            default="000002",
+            help="Initial stock code"
+        )
+
+        return parser.parse_args()
+
+
+    args = parse_args()
+
+    # logger 本身
+    logger.setLevel(LOG_LEVEL_MAP[args.log_level])
+
+    # multiprocessing 共享变量
+    stop_flag = mp.Value('b', True)
+    log_level = mp.Value('i', LOG_LEVEL_MAP[args.log_level])
+
+    realtime = args.realtime
+    initial_code = args.code
+
+    logger.info(
+        f"Starting app | code={initial_code} "
+        f"log={args.log_level} debug_realtime={realtime}"
+    )
+
+    main(
+        initial_code=initial_code,
+        stop_flag=stop_flag,
+        log_level=log_level,
+        debug_realtime=realtime
+    )
+
+    # logger.setLevel(LoggerFactory.DEBUG)
+    # stop_flag =  mp.Value('b', True)   # 出厂运行
+    # log_level = mp.Value('i', LoggerFactory.DEBUG)  # 'i' 表示整数
+    # debug_realtime = False
+    # main(initial_code='000002',stop_flag=stop_flag,log_level=log_level,debug_realtime=debug_realtime)
+
+
+
     # # 1. Try to become the Primary Instance
     # logger.setLevel(LoggerFactory.DEBUG)
     # server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

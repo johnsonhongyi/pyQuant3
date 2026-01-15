@@ -1759,7 +1759,8 @@ def load_hdf_db_timed_ctx(fname, table='all', code_l=None, timelimit=True, index
     # timelimit 检查逻辑
     # -------------------------
     with timed_ctx("timelimit_check"):
-        if timelimit and not dd.empty and not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300):
+        # if timelimit and not dd.empty and not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300):
+        if timelimit and not dd.empty and cct.get_work_time():
             o_time = []
             if 'timel' in dd.columns:
                 timel_vals = dd.loc[dd['timel'] != 0, 'timel'].values
@@ -1937,7 +1938,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                 log.debug("find all:%s :%s %0.2f", len(code_l), len(code_l) - len(dif_co), dratio)
 
                 # 与原逻辑相同的 timelimit 分支
-                if not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300) and timelimit and len(dd) > 0:
+                # if not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300) and timelimit and len(dd) > 0:
+                if cct.get_work_time() and timelimit:
                     # 先按 dif_co 筛选（避免对整表重复计算）
                     if len(dif_co) > 0:
                         # 这会返回新 DataFrame（必要时会复制）
@@ -2013,29 +2015,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
     # -------------------------
     else:
         if table is not None:
-            # with SafeHDFStore(fname, mode='r') as store:
-            #     if store is not None:
-            #         log.debug("fname: %s keys:%s", fname, store.keys())
-            #         if showtable:
-            #             log.debug("keys:%s", store.keys())
-            #         try:
-            #             table_key = '/' + table
-            #             if table_key in store.keys():
-            #                 # 读取整表（尽量避免额外 copy）
-            #                 dd = safe_load_table(store, table, chunk_size=5000,MultiIndex=MultiIndex,readonly=True)
-            #             else:
-            #                 dd = pd.DataFrame()
-            #         except AttributeError as e:
-            #             # 与原逻辑保持一致：在异常时关闭 store 并记录错误
-            #             try:
-            #                 store.close()
-            #             except Exception:
-            #                 pass
-            #             log.error("AttributeError:%s %s", fname, e)
-            #             dd = pd.DataFrame()
-            #         except Exception as e:
-            #             log.error("Exception:%s %s", fname, e)
-            #             dd = pd.DataFrame()
             dd = pd.DataFrame()
             try:
                 with SafeHDFStore(fname, mode='r') as store:
@@ -2084,7 +2063,8 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
                 dd = pd.DataFrame()
 
             if dd is not None and len(dd) > 0:
-                if not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300) and timelimit:
+                # if not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300) and timelimit:
+                if cct.get_work_time() and timelimit:
                     # 计算 unique timel 并求平均延迟
                     o_time = []
                     if 'timel' in dd.columns:
@@ -2182,214 +2162,6 @@ def load_hdf_db(fname, table='all', code_l=None, timelimit=True, index=False,
     #     return cct.reduce_memory_usage(df)
     # except Exception:
         # return df
-
-
-def load_hdf_db_src_OK(fname, table='all', code_l=None, timelimit=True, index=False, limit_time=ct.h5_limit_time, dratio_limit=ct.dratio_limit,MultiIndex=False,showtable=False):
-    """[summary]
-
-    [load hdf ]
-
-    Parameters
-    ----------
-    fname : {[type]}
-        [description]
-    table : {str}, optional
-        [description] (the default is 'all', which [default_description])
-    code_l : {[type]}, optional
-        [description] (the default is None, which [default_description])
-    timelimit : {bool}, optional
-        [description] (the default is True, which [default_description])
-    index : {bool}, optional
-        [description] (the default is False, which [default_description])
-    limit_time : {[type]}, optional
-        [description] (the default is ct.h5_limit_time, which [default_description])
-    dratio_limit : {[type]}, optional
-        [description] (the default is ct.dratio_limit, which [default_description])
-    MultiIndex : {bool}, optional
-        [description] (the default is False, which [default_description])
-
-    Returns
-    -------
-    [dataframe]
-        [description]
-    """
-    time_t=time.time()
-    global RAMDISK_KEY, INIT_LOG_Error
-    if not RAMDISK_KEY < 1:
-        return None
-    df=None
-    dd=None
-    if code_l is not None:
-        if table is not None:
-            with SafeHDFStore(fname,mode='r') as store:
-                if store is not None:
-                    log.debug(f"fname: {fname} keys:{store.keys()}")
-                    if showtable:
-                        print(f"fname: {fname} keys:{store.keys()}")
-
-                    try:
-                        if '/' + table in store.keys():
-                            obj = store.get(table)
-                            if isinstance(obj, pd.DataFrame):
-                                dd = obj.copy()
-                            else:
-                                log.error("Unexpected object type from HDF5: %s", type(obj))
-                                dd = pd.DataFrame()
-                        else:
-                            dd = pd.DataFrame()
-                    except Exception as e:
-                        log.error("load_hdf_db Error: %s %s", fname, e)
-                        dd = pd.DataFrame()
-
-            if dd is not None and len(dd) > 0:
-                if not MultiIndex:
-                    if index:
-                        code_l=list(map((lambda x: str(1000000 - int(x))
-                                      if x.startswith('0') else x), code_l))
-                    dif_co=list(set(dd.index) & set(code_l))
-                    #len(set(dd.index) & set(code_l))
-                    if len(code_l) > 0:
-                        dratio=(float(len(code_l)) - float(len(dif_co))) / \
-                            float(len(code_l))
-                    else:
-                        dratio = 0
-                    # if dratio < 0.1 or len(dd) > 3100:
-
-                    log.info("find all:%s :%s %0.2f" %
-                            (len(code_l), len(code_l) - len(dif_co), dratio))
-                    if not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300) and timelimit and len(dd) > 0:
-                       dd=dd.loc[dif_co]
-                       o_time=dd[dd.timel != 0].timel.tolist()
-                    #                        if fname == 'powerCompute':
-                    #                            o_time = sorted(set(o_time),reverse=True)
-                       o_time=sorted(set(o_time), reverse=False)
-                       o_time=[time.time() - t_x for t_x in o_time]
-
-                       if len(dd) > 0:
-                           # if len(dd) > 0 and (not cct.get_work_time() or len(o_time) <= ct.h5_time_l_count):
-                           l_time=np.mean(o_time)
-                           
-                           if len(code_l)/len(dd) > 0.95 and 'ticktime' in dd.columns and 'kind' not in dd.columns:
-                               # len(dd) ,len(dd.query('ticktime >= "15:00:00"'))
-                               dratio=(float(len(dd)) - float(len(dd.query('ticktime >= "15:00:00"')))) / float(len(dd))
-                               return_hdf_status=(not cct.get_work_time() and  dratio < dratio_limit)  or (cct.get_work_time() and l_time < limit_time)
-                           else:  
-                               return_hdf_status=not cct.get_work_time() or (
-                                   cct.get_work_time() and l_time < limit_time)
-
-
-                           if return_hdf_status:
-                               # df=dd
-                               df = dd.loc[dif_co]
-                               log.info("return hdf: %s timel:%s l_t:%s hdf ok:%s" % (
-                                   fname, len(o_time), l_time, len(df)))
-                       else:
-                           log.error("%s %s o_time:%s %s" % (fname, table, len(
-                               o_time), [time.time() - t_x for t_x in o_time[:3]]))
-                       log.info('fname:%s l_time:%s' %
-                                (fname, [time.time() - t_x for t_x in o_time]))
-
-                    else:
-                       df=dd.loc[dif_co]
-
-                    if dratio > dratio_limit:
-                       if len(code_l) > ct.h5_time_l_count * 10 and INIT_LOG_Error < 5:
-                           # INIT_LOG_Error += 1
-                           log.error("dratio_limit fn:%s cl:%s h5:%s don't find:%s dra:%0.2f log_err:%s" % (
-                               fname, len(code_l), len(dd), len(code_l) - len(dif_co), dratio, INIT_LOG_Error))
-                           return None
-    
-                else:
-                    df = dd.loc[dd.index.isin(code_l, level='code')]
-        else:
-            log.error("%s is not find %s" % (fname, table))
-    else:
-        if table is not None:
-            with SafeHDFStore(fname,mode='r') as store:
-                if store is not None:
-                    log.debug(f"fname: {(fname)} keys:{store.keys()}")
-                    if showtable:
-                        print(f"keys:{store.keys()}")
-                    try:
-                        if '/' + table in list(store.keys()):
-                            dd=store[table].copy()
-                    except AttributeError as e:
-                        store.close()
-                        # os.remove(store.filename)
-                        log.error("AttributeError:%s %s"%(fname,e))
-                        # log.error("Remove File:%s"%(fname))
-                    except Exception as e:
-                        log.error("Exception:%s %s"%(fname,e))
-                        print(("Exception:%s name:%s"%(fname,e)))
-                    else:
-                        pass
-                    finally:
-                        pass
-
-            if dd is not None and len(dd) > 0:
-                if not (cct.is_trade_date() and 1130 < cct.get_now_time_int() < 1300) and timelimit:
-                    if dd is not None and len(dd) > 0:
-                        o_time=dd[dd.timel != 0].timel.tolist()
-                        o_time=sorted(set(o_time))
-                        o_time=[time.time() - t_x for t_x in o_time]
-                        if len(o_time) > 0:
-                            l_time=np.mean(o_time)
-
-                            if 'ticktime' in dd.columns and 'kind' not in dd.columns:
-                                # len(dd) ,len(dd.query('ticktime >= "15:00:00"'))
-                                dratio=(float(len(dd)) - float(len(dd.query('ticktime >= "15:00:00"')))) / float(len(dd))
-                                return_hdf_status=(not cct.get_work_time() and dratio < dratio_limit) or (cct.get_work_time() and l_time < limit_time)
-                            else:  
-                                return_hdf_status=not cct.get_work_time() or (
-                                    cct.get_work_time() and l_time < limit_time)
-
-
-                            log.info("return_hdf_status:%s time:%0.2f" %
-                                     (return_hdf_status, l_time))
-                            if return_hdf_status:
-                                log.info("return hdf5 data:%s o_time:%s" %
-                                         (len(dd), len(o_time)))
-                                df=dd
-                            else:
-                                log.info("no return time hdf5:%s" % (len(dd)))
-                        log.info('fname:%s l_time:%s' %
-                                 (fname, [time.time() - t_x for t_x in o_time]))
-                else:
-                    df=dd
-            else:
-                log.error("%s is not find %s" % (fname, table))
-        else:
-            log.error("%s / table is Init None:%s"%(fname, table))
-
-    if df is not None and len(df) > 0:
-        df=df.fillna(0)
-        if 'timel' in df.columns:
-            time_list=df.timel.tolist()
-            time_list=sorted(set(time_list))
-            if time_list is not None and len(time_list) > 0:
-                df['timel']=time_list[0]
-                log.info("load hdf times:%s" %
-                         ([time.time() - t_x for t_x in time_list]))
-
-    log.info("load_hdf_time:%0.2f" % (time.time() - time_t))
-
-    if df is not None:
-        df=df[~df.index.duplicated(keep='last')]
-        if fname.find('MultiIndex') > 0 and 'volume' in df.columns:
-            count_drop = len(df)
-            df = df.drop_duplicates()
-            # df = df.drop_duplicates('volume',keep='last')
-            dratio=round((float(len(df))) / float(count_drop),2)
-            log.debug("all:%s  drop:%s  dratio:%.2f"%(int(count_drop/100),int(len(df)/100),dratio))
-            if dratio < 0.8:
-                log.error("MultiIndex drop_duplicates:%s %s dr:%s"%(count_drop,len(df),dratio))
-                if isinstance(df.index, pd.MultiIndex):
-                    write_hdf_db(fname, df, table=table, index=index, MultiIndex=True,rewrite=True)
-
-    return  df
-    # return  cct.reduce_memory_usage(df)
-
-
 
 # def compact_hdf5_file(old_path, new_path=None, key="all_30/table"):
 #     if new_path is None:
