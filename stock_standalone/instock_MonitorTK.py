@@ -1867,8 +1867,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     # 启动进程：传入 code, stop_flag, log_level, debug, queue
                     self.qt_process = mp.Process(
                         target=qtviz.main, 
+                        args=(code, self.refresh_flag, None , False, self.viz_command_queue), 
                         # args=(code, self.refresh_flag, self.log_level, False, self.viz_command_queue), 
-                        args=(code, self.refresh_flag, self.log_level, False, self.viz_command_queue), 
                         daemon=False
                     )
                     self.qt_process.start()
@@ -1878,10 +1878,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self._df_first_send_done = False
                 else:
                     # 进程已在运行，通过队列切换代码
-                    if self.viz_command_queue:
                         self.viz_command_queue.put(('SWITCH_CODE', code))
                         logger.info(f"Queue: Sent SWITCH_CODE {code}")
                         sent = True # 标记为已处理
+                        # 交互提示
+                        if hasattr(self, 'status_bar'):
+                            self.status_bar.config(text=f"正在切换可视化: {code} ...")
+                            self.update_idletasks()
             except Exception as e:
                 logger.error(f"Failed to start Qt visualizer: {e}")
                 traceback.print_exc()
@@ -1898,13 +1901,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     continue
 
                 try:
+                    # ⭐ 确保监理列存在 (若 strategy 没运行或没初始化，手动补齐)
+                    for scol in strategy_cols:
+                        if scol not in self.df_all.columns:
+                            # 根据列类型给予默认值
+                            if scol in ['last_action', 'last_reason', 'shadow_info']:
+                                self.df_all[scol] = ""
+                            else:
+                                self.df_all[scol] = 0.0
+
                     # ⭐ 容错：不区分大小写地抓取必要的列，解决 'percent' vs 'Percent' 等不平衡问题
                     all_cols_lower = {c.lower(): c for c in self.df_all.columns}
                     final_mapped_cols = []
+                    
+                    # 总是包含必要的 UI 列
                     for req_col in ui_cols:
                         if req_col.lower() in all_cols_lower:
                             final_mapped_cols.append(all_cols_lower[req_col.lower()])
-                    
+                        else:
+                            # 即使源 df 没有，也得造一个，防止下游报错
+                            # 这里其实已经在上面补齐了 strategy_cols，但为了防止其他列缺失
+                            pass 
+
                     df_ui = self.df_all[final_mapped_cols].copy()
                     
                     # 如果 code 是索引且不在 actual_cols 中，强制重置索引以包含 code

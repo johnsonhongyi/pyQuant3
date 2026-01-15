@@ -1083,6 +1083,15 @@ class StockLiveStrategy:
             now = time.time()
             # 从数据库同步实时持仓信息
             open_trades = {t['code']: t for t in self.trading_logger.get_trades() if t['status'] == 'OPEN'}
+
+            # --- [新增] 确保 DataFrame 包含监理与策略状态列 (供前端 Visualizer 使用) ---
+            for col in ['market_win_rate', 'loss_streak', 'vwap_bias', 'last_action', 'last_reason', 'shadow_info']:
+                if col not in df.columns:
+                    # 数值型默认为 0，字符串型默认为空
+                    if col in ['last_action', 'last_reason', 'shadow_info']:
+                        df[col] = ""
+                    else:
+                        df[col] = 0.0
             
             # --- [优化] 同步 55188 全量数据：移出循环，每批次仅执行一次 ---
             if self.realtime_service:
@@ -1503,6 +1512,18 @@ class StockLiveStrategy:
                     snap['shadow_info'] = f"🧪 {shadow_decision['action']}: {shadow_decision['reason']}"
                 else:
                     snap['shadow_info'] = ""
+
+                # --- [新增] 将 SNAP 中的关键策略状态同步回 DataFrame ---
+                # 这是因为 Monitor 和 Visualizer 通常从 self.df_all (即这里的 df) 读取数据
+                try:
+                    df.at[code, 'market_win_rate'] = snap.get('market_win_rate', 0.0)
+                    df.at[code, 'loss_streak'] = snap.get('loss_streak', 0)
+                    df.at[code, 'vwap_bias'] = snap.get('vwap_bias', 0.0)
+                    df.at[code, 'last_action'] = snap.get('last_action', '')
+                    df.at[code, 'last_reason'] = snap.get('last_reason', '')
+                    df.at[code, 'shadow_info'] = snap.get('shadow_info', '')
+                except Exception as e:
+                    pass
 
                 # # --- 3. 实时情绪感知 & K线形态 (Realtime Analysis) ---
                 # if self.realtime_service:

@@ -881,14 +881,36 @@ class MainWindow(QMainWindow, WindowMixin):
         """)
 
 
-    def _reset_kline_view(self):
-        """重置 K 线图缩放和范围"""
-        if hasattr(self, 'kline_plot'):
-            self.kline_plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
-            # 如果你用的是 ViewBox，可以加上：
-            vb = self.kline_plot.getViewBox()
-            vb.autoRange()
-            # print("[INFO] K-line view reset")
+    def _reset_kline_view(self, df=None):
+        """重置 K 线图视图：实现真正的“出厂设置”全览模式，两头留白不遮挡"""
+        # 注意：如果被信号直接调用，df 可能是 bool (checked)，需排除
+        if not isinstance(df, pd.DataFrame):
+            df = getattr(self, 'day_df', pd.DataFrame())
+            
+        if not hasattr(self, 'kline_plot') or df.empty:
+            return
+            
+        vb = self.kline_plot.getViewBox()
+        n = len(df)
+        
+        # 1. 暂时启用全局自动缩放，让 pyqtgraph 找到数据边界
+        vb.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
+        vb.autoRange()
+        
+        # 2. 手动微调 X 轴：开启“固定模式”，设置完美的全览范围
+        # 左侧留 1 根，右侧留 3 根（给信号箭头和最新 ghost 留位置）
+        vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
+        x_min, x_max = -1.5, n + 2.5
+        vb.setRange(xRange=(x_min, x_max), padding=0)
+        
+        # 3. Y 轴维持自适应（基于当前的 X 范围）
+        vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+        vb.setAutoVisible(y=True)
+        
+        # 4. 强制刷新 Y 轴到当前可见最佳高度 (由于 X 已在锁定期，autoRange 只会计算 Y)
+        vb.autoRange()
+        
+        logger.info(f"[VIEW] Reset to FullView: 0-{n} (Range: {x_min}-{x_max})")
 
     def _init_resample_toolbar(self):
         self.toolbar.addSeparator()
@@ -919,6 +941,12 @@ class MainWindow(QMainWindow, WindowMixin):
             self.resample_group.addAction(act)
             self.toolbar.addAction(act)
             self.resample_actions[key] = act
+
+        # 分隔符并添加监理详情按钮
+        self.toolbar.addSeparator()
+        self.supervision_action = QAction("🛡️监理详情", self)
+        self.supervision_action.triggered.connect(self.show_supervision_details)
+        self.toolbar.addAction(self.supervision_action)
 
     def switch_resample_prev(self):
         self.current_resample_idx = (self.current_resample_idx - 1) % len(self.resample_keys)
@@ -995,12 +1023,48 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.day_df = self.day_df[self.day_df.index < today_str]
                 logger.info(f"[INFO] Real-time stopped, cleared today's:{today_str} data for {self.current_code}")
     
-    def reset_kline_view():
-        vb = self.kline_plot.getViewBox()
-        vb.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
-        from PyQt6.QtCore import QTimer
-        QTimer.singleShot(50, lambda: vb.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=False))
+    
+    def show_supervision_details(self):
+        """显示监理详细信息"""
+        if not hasattr(self, 'current_supervision_data') or not self.current_supervision_data:
+            QMessageBox.information(self, "监理详情", "暂无监理数据。请稍候或检查策略服务是否运行。")
+            return
 
+        data = self.current_supervision_data
+        
+        # 构建 HTML 内容
+        content = f"""
+        <h3>🛡️ 实时策略监理报告</h3>
+        <hr>
+        <p><b>股票代码:</b> {self.current_code}</p>
+        <br>
+        <table border="0" cellpadding="4">
+            <tr>
+                <td><b>市场胜率 (Win Rate):</b></td>
+                <td><span style="color: {'red' if data['market_win_rate'] > 50 else 'green'};">{data.get('market_win_rate', 0):.1f}%</span></td>
+            </tr>
+            <tr>
+                <td><b>当前连亏 (Loss Streak):</b></td>
+                <td>{data.get('loss_streak', 0)}</td>
+            </tr>
+            <tr>
+                <td><b>VWAP 偏离:</b></td>
+                <td>{data.get('vwap_bias', 0):+.2f}%</td>
+            </tr>
+        </table>
+        <hr>
+        <h4>🔎 最近信号详情</h4>
+        <p><b>动作:</b> {data.get('last_action', 'N/A')}</p>
+        <p><b>原因:</b> {data.get('last_reason', 'N/A')}</p>
+        <p><b>影子索引:</b> {data.get('shadow_info', 'N/A')}</p>
+        """
+        
+        msg = QMessageBox(self)
+        msg.setWindowTitle(f"监理详情 - {self.current_code}")
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText(content)
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.exec()
 
     def _start_realtime_process(self, code):
         # 停止旧进程
@@ -1161,8 +1225,10 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
     def on_realtime_update(self, code, tick_df, today_bar):
-        if not self._debug_realtime and (not self.realtime or code != self.current_code or today_bar.empty or not cct.get_work_time_duration()):
-            # logger.info(f'on_realtime_update today_bar.iloc[0] : {today_bar.iloc[0]}')
+        if today_bar is None or today_bar.empty:
+            return
+            
+        if not self._debug_realtime and (not self.realtime or code != self.current_code or not cct.get_work_time_duration()):
             return
 
         datetime_index = pd.to_datetime(today_bar.index)
@@ -1345,7 +1411,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 1️⃣ 通知子进程退出
         if hasattr(self, 'stop_flag'):
             self.stop_flag.value = False
-        logger.info(f'stop_flag.value: {stop_flag.value}')
+        logger.info(f'stop_flag.value: {self.stop_flag.value}')
         self._stop_realtime_process()
         if hasattr(self, 'refresh_flag'):
             self.refresh_flag.value = False
@@ -1353,12 +1419,23 @@ class MainWindow(QMainWindow, WindowMixin):
         # 2️⃣ 停止 realtime_process
         if getattr(self, 'realtime_process', None):
             if self.realtime_process.is_alive():
-                self.realtime_process.join(timeout=2)
+                self.realtime_process.join(timeout=1)
                 if self.realtime_process.is_alive():
                     logger.info("realtime_process 强制终止")
                     self.realtime_process.terminate()
                     self.realtime_process.join()
             self.realtime_process = None
+
+        # 3️⃣ 停止 DataLoaderThread (避免 QThread Destroyed 崩溃)
+        if hasattr(self, 'loader') and self.loader:
+            if self.loader.isRunning():
+                logger.info("Stopping DataLoaderThread...")
+                self.loader.quit()
+                if not self.loader.wait(1000): # 等待 1 秒
+                    logger.warning("DataLoaderThread did not stop, terminating...")
+                    self.loader.terminate()
+                    self.loader.wait()
+            self.loader = None
         # 当 GUI 关闭时，触发 stop_event
         stop_event.set()
 
@@ -1508,8 +1585,63 @@ class MainWindow(QMainWindow, WindowMixin):
             self._refresh_sensing_bar(self.current_code)
 
 
+    # def _capture_view_state(self):
+    #     """在切换数据前，捕获当前的缩放视角（相对于末尾）"""
+    #     if not hasattr(self, 'day_df') or self.day_df.empty:
+    #         return
+    #     try:
+    #         vb = self.kline_plot.getViewBox()
+    #         view_rect = vb.viewRect()
+    #         total = len(self.day_df)
+            
+    #         # 计算可见窗口距离末尾的根数
+    #         # 如果看的是最后 100 根，那么 last_n 就是 100
+    #         self._prev_last_n = total - view_rect.right() # 改为 relative to right edge? No, right edge is 'latest'.
+    #         # Correct logic:
+    #         # X axis is 0..Total.
+    #         # Rightmost data is at X=Total.
+    #         # If I look at [Total-100, Total]. ViewRect Right is Total. viewRect Left is Total-100.
+    #         # I want to preserve "how many bars are visible". i.e. Width.
+    #         # AND "how close to the newest bar I am".
+            
+    #         # If I stick to the 'latest', I want to preserve (Total - Right) and (Total - Left).
+    #         # Usually users care about "Last N bars". So preserving (Total - Left) is good.
+    #         # self._prev_last_n = total - view_rect.left() (This means Left edge is N bars from end).
+            
+    #         # Let's try preserving the span (zoom level) and the offset from right.
+    #         self._prev_span = view_rect.width()
+    #         self._prev_offset_right = total - view_rect.right() # Distance from right edge to latest data
+            
+    #         # 兼容旧逻辑变量名，方便调试
+    #         self._prev_last_n = total - view_rect.left()
+
+    #         # 计算可见区域内的价格波动比例
+    #         v_start = int(max(0, view_rect.left()))
+    #         v_end = int(min(total, view_rect.right()))
+            
+    #         # Safety check
+    #         if v_start >= v_end:
+    #              # fallback to span only
+    #              self._prev_y_zoom = None
+    #              return
+
+    #         visible_old = self.day_df.iloc[v_start:v_end]
+    #         if not visible_old.empty:
+    #             old_h = visible_old['high'].max()
+    #             old_l = visible_old['low'].min()
+    #             old_rng = old_h - old_l if old_h > old_l else 1.0
+                
+    #             # 缩放因子：视图高度 / 价格区间
+    #             self._prev_y_zoom = view_rect.height() / old_rng
+    #             # 相对中心点：(视图中心 - 价格最低) / 价格区间
+    #             self._prev_y_center_rel = (view_rect.center().y() - old_l) / old_rng
+    #         else:
+    #             self._prev_y_zoom = None
+    #     except Exception as e:
+    #         logger.error(f"Capture state failed: {e}")
+
     def _capture_view_state(self):
-        """在切换数据前，捕获当前的缩放视角（相对于末尾）"""
+        """在切换数据前，精准捕获当前的可见窗口"""
         if not hasattr(self, 'day_df') or self.day_df.empty:
             return
         try:
@@ -1517,51 +1649,28 @@ class MainWindow(QMainWindow, WindowMixin):
             view_rect = vb.viewRect()
             total = len(self.day_df)
             
-            # 计算可见窗口距离末尾的根数
-            # 如果看的是最后 100 根，那么 last_n 就是 100
-            self._prev_last_n = total - view_rect.right() # 改为 relative to right edge? No, right edge is 'latest'.
-            # Correct logic:
-            # X axis is 0..Total.
-            # Rightmost data is at X=Total.
-            # If I look at [Total-100, Total]. ViewRect Right is Total. viewRect Left is Total-100.
-            # I want to preserve "how many bars are visible". i.e. Width.
-            # AND "how close to the newest bar I am".
+            # 1. 检测是否处于“全览”状态（即当前已经看完了绝大部分数据）
+            # 如果左边缘接近 0 且右边缘接近末尾，则标记为 FullView
+            self._prev_is_full_view = (view_rect.left() <= 10 and view_rect.right() >= total - 5)
             
-            # If I stick to the 'latest', I want to preserve (Total - Right) and (Total - Left).
-            # Usually users care about "Last N bars". So preserving (Total - Left) is good.
-            # self._prev_last_n = total - view_rect.left() (This means Left edge is N bars from end).
+            # 2. 捕获两端相对于末尾的偏移根数
+            self._prev_dist_left = total - view_rect.left()
+            self._prev_dist_right = total - view_rect.right()
             
-            # Let's try preserving the span (zoom level) and the offset from right.
-            self._prev_span = view_rect.width()
-            self._prev_offset_right = total - view_rect.right() # Distance from right edge to latest data
-            
-            # 兼容旧逻辑变量名，方便调试
-            self._prev_last_n = total - view_rect.left()
-
-            # 计算可见区域内的价格波动比例
-            v_start = int(max(0, view_rect.left()))
-            v_end = int(min(total, view_rect.right()))
-            
-            # Safety check
-            if v_start >= v_end:
-                 # fallback to span only
-                 self._prev_y_zoom = None
-                 return
-
+            # 3. 捕获价格比例关系
+            v_start, v_end = int(max(0, view_rect.left())), int(min(total, view_rect.right()))
             visible_old = self.day_df.iloc[v_start:v_end]
             if not visible_old.empty:
-                old_h = visible_old['high'].max()
-                old_l = visible_old['low'].min()
+                old_h, old_l = visible_old['high'].max(), visible_old['low'].min()
                 old_rng = old_h - old_l if old_h > old_l else 1.0
-                
-                # 缩放因子：视图高度 / 价格区间
                 self._prev_y_zoom = view_rect.height() / old_rng
-                # 相对中心点：(视图中心 - 价格最低) / 价格区间
                 self._prev_y_center_rel = (view_rect.center().y() - old_l) / old_rng
             else:
                 self._prev_y_zoom = None
+            
+            logger.info(f"[VIEW] Capture: is_full={self._prev_is_full_view}, left_d={self._prev_dist_left:.1f}")
         except Exception as e:
-            logger.error(f"Capture state failed: {e}")
+            logger.debug(f"Capture state failed: {e}")
 
     def load_stock_by_code(self, code):
         # ① 在清空/加载前捕获状态
@@ -1920,11 +2029,22 @@ class MainWindow(QMainWindow, WindowMixin):
                         print(f"[DEBUG] Found in columns")
                 
                 if crow is not None:
-                    print(f"[DEBUG] crow data: {crow.to_dict() if hasattr(crow, 'to_dict') else crow}")
+                    # print(f"[DEBUG] crow data: {crow.to_dict() if hasattr(crow, 'to_dict') else crow}")
                     mwr = crow.get('market_win_rate', 0)
                     ls = crow.get('loss_streak', 0)
                     vwap_bias = crow.get('vwap_bias', 0)
-                    print(f"[DEBUG] Supervision data: mwr={mwr}, ls={ls}, vwap_bias={vwap_bias}")
+                    
+                    # 保存数据供详情弹窗使用
+                    self.current_supervision_data = {
+                        'market_win_rate': mwr,
+                        'loss_streak': ls,
+                        'vwap_bias': vwap_bias,
+                        'last_action': crow.get('last_action', ''),
+                        'last_reason': crow.get('last_reason', ''),
+                        'shadow_info': crow.get('shadow_info', '')
+                    }
+                    
+                    # print(f"[DEBUG] Supervision data: mwr={mwr}, ls={ls}, vwap_bias={vwap_bias}")
                     # 显示所有监理数据
                     tick_title += f"  |  <span style='color: #FFD700; font-weight: bold;'>🛡️监理: 偏离{vwap_bias:+.1%} 胜率{mwr:.1%} 连亏{ls}</span>"
                 else:
@@ -1933,51 +2053,56 @@ class MainWindow(QMainWindow, WindowMixin):
             self.tick_plot.setTitle(tick_title)
             self.tick_plot.showGrid(x=False, y=True, alpha=0.5)
 
+        # ----------------- 5. 数据同步与视角处理 -----------------
+        # 同步归一化后的数据到 self.day_df
+        self.day_df = day_df
 
-        # --- 状态判断 ---
         is_new_stock = not hasattr(self, '_last_rendered_code') or self._last_rendered_code != code
         self._last_rendered_code = code
 
-        # --- 范围处理（缩放自适应） ---
-        if is_new_stock:
-            vb = self.kline_plot.getViewBox()
-            n = len(day_df)
-            
-            # 检查是否有保存的旧状态（仅使用显示宽度，不使用偏移量）
-            if hasattr(self, '_prev_span') and self._prev_span is not None and self._prev_span > 0:
-                # 保持相同的显示宽度（K线根数），但始终对齐到最右侧
-                display_width = min(self._prev_span, n)  # 不超过总K线数
-                target_left = max(0, n - display_width)
-                target_right = n + 5  # 右侧留足够空间，确保最新K线可见
-                
-                vb.setRange(xRange=(target_left, target_right), padding=0)
-                vb.enableAutoRange(axis=pg.ViewBox.YAxis)
-            else:
-                # 若无状态或首次打开，显示最后 100 根
-                vb.setRange(xRange=(max(0, n-100), n+5), padding=0)
-                vb.enableAutoRange(axis=pg.ViewBox.YAxis)
-                vb.enableAutoRange(axis=pg.ViewBox.YAxis)
-            
-            # 切换完股票后清理状态，防止实时更新干扰
-            # 切换完股票后清理状态，防止实时更新干扰
-            for attr in ['_prev_last_n', '_prev_y_zoom', '_prev_y_center_rel', '_prev_span', '_prev_offset_right']:
-                if hasattr(self, attr):
-                    delattr(self, attr)
-        else:
-            # 实时更新阶段不强制重置坐标轴，除非此时还没有 view
-            pass
-        # ------------------------
-        # ① 保存上一次 resample
-        # ------------------------
         last_resample = getattr(self, "_last_resample", None)
-        # 仅在 resample 切换时才执行
-        if last_resample != self.resample:
-            if last_resample is not None:
-                # 上一次存在且与当前不同，刷新 K 线视图
-                self._reset_kline_view()
+        is_resample_change = (last_resample is not None and last_resample != self.resample)
+        self._last_resample = self.resample
+        
+        # 复合视角恢复标志
+        has_captured_state = hasattr(self, '_prev_dist_left') and getattr(self, '_prev_y_zoom', None) is not None
+        was_full_view = getattr(self, '_prev_is_full_view', False)
 
-            # 更新 _last_resample
-            self._last_resample = self.resample
+        if is_new_stock or is_resample_change or has_captured_state:
+            vb = self.kline_plot.getViewBox()
+            
+            # 如果之前是“全览”状态，或者根本没有捕获状态，则执行 Reset (全览)
+            if was_full_view or not has_captured_state:
+                self._reset_kline_view(df=day_df)
+            else:
+                # 处于“记忆”状态：用户之前可能缩放到了某个特定区域
+                new_total = len(day_df)
+                target_left = max(-1, new_total - self._prev_dist_left)
+                target_right = new_total - self._prev_dist_right
+                
+                # 设置 X 轴，留出缓冲
+                vb.setRange(xRange=(target_left, target_right), padding=0)
+                
+                # 适配 Y 轴
+                visible_new = day_df.iloc[int(max(0, target_left)):int(min(new_total, target_right+1))]
+                if not visible_new.empty:
+                    new_h, new_l = visible_new['high'].max(), visible_new['low'].min()
+                    new_rng = new_h - new_l if new_h > new_l else 1.0
+                    p_zoom, p_center_rel = float(self._prev_y_zoom), float(self._prev_y_center_rel)
+                    target_h = new_rng * p_zoom
+                    target_y_center = new_l + (new_rng * p_center_rel)
+                    vb.setRange(yRange=(target_y_center - target_h/2, target_y_center + target_h/2), padding=0)
+
+                # 保持自适应开启
+                vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+                vb.setAutoVisible(y=True)
+
+            # 清理刚才使用的临时状态
+            for attr in ['_prev_dist_left', '_prev_dist_right', '_prev_y_zoom', '_prev_y_center_rel', '_prev_is_full_view']:
+                if hasattr(self, attr): delattr(self, attr)
+        else:
+            # 实时刷新：不对视角做任何干扰
+            pass
 
 
 
@@ -2331,11 +2456,13 @@ class MainWindow(QMainWindow, WindowMixin):
         
         main_title = " | ".join(title_parts)
         if sensing_parts:
-            # 使用 HTML 颜色增强看板可见性
             sensing_html = " ".join(sensing_parts)
             main_title += f"  |  <span style='color: #FFD700; font-weight: bold;'>{sensing_html}</span>"
             
-        self.kline_plot.setTitle(main_title)
+        # 性能优化：只有标题内容变化时才调用 setTitle，避免 layout 抖动导致视角意外重置
+        if getattr(self, "_last_main_title", "") != main_title:
+            self.kline_plot.setTitle(main_title)
+            self._last_main_title = main_title
     
     def _refresh_sensing_bar(self, code):
         """仅刷新监理看板部分（用于 update_df_all 时的快速更新）"""
