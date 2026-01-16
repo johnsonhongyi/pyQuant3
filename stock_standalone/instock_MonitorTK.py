@@ -358,7 +358,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             'macd', 'macdlast1', 'macdlast2', 'macdlast3', 'rsi', 'kdj_j', 'kdj_k', 
             'kdj_d', 'upper', 'lower', 'max5', 'high4', 'curr_eval', 'trade_signal',
             'now', 'signal', 'signal_strength', 'emotion', 'win', 'sum_perc', 'slope',
-            'vol_ratio', 'power_idx', 'category', 'lastdu4'
+            'vol_ratio', 'power_idx', 'category', 'lastdu4',
+            'dff', 'dff2', 'Rank', 'buy', 'llastp' # 🛡️ 增加可视化所需的缺失列
         }
         self.update_required_columns()
 
@@ -877,7 +878,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def update_required_columns(self, refresh_ui=False) -> None:
         """同步当前 UI 和策略所需的列到后台进程"""
         try:
-            if not refresh_ui or not hasattr(self, 'global_dict') or self.global_dict is None:
+            if not hasattr(self, 'global_dict') or self.global_dict is None:
                 return
             
             # 这里的 self.current_cols 存储了当前 UI 真正显示的列
@@ -1837,10 +1838,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         ipc_host, ipc_port = '127.0.0.1', 26668
         sent = False
 
-        real_time_cols = cct.real_time_cols
+        real_time_cols = list(cct.real_time_cols) if hasattr(cct, 'real_time_cols') else []
         strategy_cols = ['last_action', 'last_reason', 'shadow_info', 'market_win_rate', 'loss_streak', 'vwap_bias']
-        ui_cols = (real_time_cols + strategy_cols) if len(real_time_cols) > 4 and 'percent' in real_time_cols else \
-                  ['code', 'name', 'Rank','dff','win','slope','volume','power_idx', 'percent'] + strategy_cols
+        # 🛡️ 确保核心字段始终包含，即使用户配置中缺失
+        required_visualizer_cols = ['code', 'name', 'percent', 'dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
+        
+        # 使用去重的方式合并列
+        ui_cols = []
+        has_percent = any(c.lower() == 'percent' for c in real_time_cols)
+        source_cols = real_time_cols if len(real_time_cols) > 4 and has_percent else required_visualizer_cols
+        for c in (source_cols + required_visualizer_cols + strategy_cols):
+            if c not in ui_cols:
+                ui_cols.append(c)
 
         # --- 1️⃣ 尝试通过 Socket 发送给已有实例 ---
         try:
@@ -1916,12 +1925,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     
                     # 总是包含必要的 UI 列
                     for req_col in ui_cols:
-                        if req_col.lower() in all_cols_lower:
-                            final_mapped_cols.append(all_cols_lower[req_col.lower()])
+                        req_lower = req_col.lower()
+                        if req_lower in all_cols_lower:
+                            final_mapped_cols.append(all_cols_lower[req_lower])
                         else:
-                            # 即使源 df 没有，也得造一个，防止下游报错
-                            # 这里其实已经在上面补齐了 strategy_cols，但为了防止其他列缺失
-                            pass 
+                            # 补齐缺失字段：字符型默认空串，数值型默认 0.0
+                            if any(k in req_lower for k in ['name', 'action', 'reason', 'info']):
+                                self.df_all[req_col] = ""
+                            else:
+                                self.df_all[req_col] = 0.0
+                            final_mapped_cols.append(req_col) 
 
                     df_ui = self.df_all[final_mapped_cols].copy()
                     
