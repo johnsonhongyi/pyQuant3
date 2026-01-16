@@ -1966,6 +1966,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             # 如果没有变化行，就跳过本轮
                             if df_diff.empty:
                                 logger.debug("[send_df] df_diff empty, skip sending this cycle")
+                                sent = True
                             else:
                                 msg_type = 'UPDATE_DF_DIFF'
                                 payload_to_send = df_diff
@@ -2001,14 +2002,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if 'code' not in df_ui.columns:
                         df_ui = df_ui.reset_index()
 
-                    logger.debug(
+                    logger.info(
                         f'df_ui: {msg_type} rows={len(df_ui)} mem={mem/1024:.1f} KB'
                     )
 
                     # ======================================================
                     # ⭐ 4️⃣ 主通道：Queue
                     # ======================================================
-                    if self.viz_command_queue:
+                    if self.viz_command_queue and not sent:
                         try:
                             with timed_ctx(f"viz_queue_put[{len(df_ui)}]", warn_ms=300):
                                 self.viz_command_queue.put_nowait(
@@ -2076,7 +2077,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # ======================================================
                 # ⭐ 7️⃣ 调度逻辑
                 # ======================================================
-                sleep_seconds = 300 if sent else 3
+                sleep_seconds = 300 if sent else 5
                 for _ in range(sleep_seconds):
                     if not self._df_sync_running or not self._df_first_send_done:
                         break
@@ -2154,7 +2155,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not self.vis_var.get() and getattr(self, "_df_first_send_done"):
             # logger.debug(f'change _df_first_send_done:{self._df_first_send_done}')
             logger.debug(f"[send_df] force full send: deleting df_ui_prev, _df_first_send_done={self._df_first_send_done}")
-            if hasattr(self, "df_ui_prev"):
+            if hasattr(self, 'df_ui_prev'):
                 del self.df_ui_prev  # 删除缓存，模拟初始化
             self._df_first_send_done = False
         # self.update_treeview_cols(self.current_cols)

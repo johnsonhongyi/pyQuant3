@@ -241,7 +241,6 @@ class TreeviewIncrementalUpdater:
         
         return rows_data
         
-        return rows_data
     
     def _prepare_rows(self, df: pd.DataFrame) -> list:
         """
