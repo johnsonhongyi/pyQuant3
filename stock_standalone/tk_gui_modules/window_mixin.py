@@ -171,31 +171,45 @@ class WindowMixin:
         except Exception as e:
             logger.error(f"[save_window_position] 失败: {e}")
 
-    def _get_available_geometry_qt(self,window=None):
-        app = QtWidgets.QApplication.instance()
+    def _get_available_geometry_qt(self, window=None):
+        """
+        安全获取 Qt 可用屏幕几何，适用于多屏和 Tk 多进程环境。
+        返回 QRect 或 None
+        """
+        app = None
         screen = None
 
-        # 1️⃣ 优先使用窗口所属 screen（最可靠）
+        # 1️⃣ 尝试获取 QApplication 实例（先检查）
+        try:
+            from PyQt6 import QtWidgets
+            app = QtWidgets.QApplication.instance()
+        except Exception:
+            app = None
+
+        # 2️⃣ 优先使用窗口所属 screen（最可靠）
         if window is not None:
             try:
                 wh = window.windowHandle()
-                if wh is not None:
+                if wh is not None and wh.screen() is not None:
                     screen = wh.screen()
             except Exception:
                 screen = None
 
-        # 2️⃣ 回退 primaryScreen（允许为 None）
+        # 3️⃣ 回退 primaryScreen（允许为 None）
         if screen is None and app is not None:
             try:
-                screen = app.primaryScreen()
+                primary = app.primaryScreen()
+                if primary is not None:
+                    screen = primary
             except Exception:
                 screen = None
 
-        # 3️⃣ 最终兜底
+        # 4️⃣ 最终兜底
         if screen is not None:
             return screen.availableGeometry()
 
         return None
+
 
     def load_window_position_qt(self, win: Any, window_name: str, file_path: Optional[str] = None, 
                                 default_width: int = 500, default_height: int = 500, offset_step: int = 100) -> tuple[int, int, Optional[int], Optional[int]]:
