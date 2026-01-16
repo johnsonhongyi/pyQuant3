@@ -1950,10 +1950,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         # df_diff = df_ui.compare(self.df_ui_prev, keep_shape=True, keep_equal=False)
                         # df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
                         try:
-                            if hasattr(self, 'df_ui_prev'):
-                                df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
+                            df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
+                            # 如果没有变化行，就跳过本轮
+                            if df_diff.empty:
+                                logger.debug("[send_df] df_diff empty, skip sending this cycle")
+                                time.sleep(1)  # 可选短延时，避免 CPU 占满
+                                continue
                             else:
-                                df_diff = df_ui.copy()
+                                msg_type = 'UPDATE_DF_DIFF'
+                                payload_to_send = df_diff
+                                # --- 3️⃣ 内存日志 ---
+                                mem = df_diff.memory_usage(deep=True).sum()
+
                         except ValueError as e:
                             # debug 输出索引和列的不一致
                             prev_cols = set(self.df_ui_prev.columns) if hasattr(self, 'df_ui_prev') else set()
@@ -1966,12 +1974,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             logger.debug(f"[send_df] index prev={prev_idx}, curr={curr_idx}")
 
                             # 为了不中断，可以直接把全量当作 diff
-                            df_diff = df_ui.copy()
+                            payload_to_send = df_ui
+                            # --- 3️⃣ 内存日志 ---
+                            mem = df_ui.memory_usage(deep=True).sum()
+                            msg_type = 'UPDATE_DF_ALL'
 
-                        payload_to_send = df_diff
-                        # --- 3️⃣ 内存日志 ---
-                        mem = df_diff.memory_usage(deep=True).sum()
-                        msg_type = 'UPDATE_DF_DIFF'
                     else:
                         payload_to_send = df_ui
                         # --- 3️⃣ 内存日志 ---
@@ -2032,11 +2039,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     s.sendall(b"DATA" + header + payload)
 
                             # logger.info(f"[IPC] df_all sent ({len(df_ui)} rows)")
-                            logger.info(f"[IPC] {msg_type} sent ({len(payload_to_send)} rows)")
+                            logger.debug(f"[IPC] {msg_type} sent ({len(payload_to_send)} rows)")
                             sent = True
 
                         except Exception as e:
                             logger.warning(f"[IPC] send failed: {e}")
+                            if not self.vis_var.get():
+                                # self._df_first_send_done = True
+                                sent = True
 
                 except Exception:
                     logger.exception("[send_df] unexpected error")
