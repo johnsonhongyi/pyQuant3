@@ -66,6 +66,9 @@ class QueryHistoryManager:
         self.current_key = "history1"
         self.MAX_HISTORY = 500
         self._build_ui()
+        
+        if auto_run:
+            self.open_editor()
 
     def _build_ui(self):
         if not self.root:
@@ -714,3 +717,38 @@ class QueryHistoryManager:
     def test_code(self, code_data):
         queries = getattr(self, "current_history", [])
         return test_code_against_queries(code_data, queries)
+
+if __name__ == "__main__":
+    def main():
+        # Import config at runtime to avoid circular dependencies
+        from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
+        
+        root = tk.Tk()
+        root.title("Query History Manager")
+        
+        # Calculate window size and position
+        w, h = 800, 600
+        ws = root.winfo_screenwidth()
+        hs = root.winfo_screenheight()
+        x = (ws/2) - (w/2)
+        y = (hs/2) - (h/2)
+        root.geometry('%dx%d+%d+%d' % (w, h, x, y))
+        
+        # Use configured history file path
+        history_path = SEARCH_HISTORY_FILE
+        
+        # Create manager with auto_run=True to show editor immediately
+        manager = QueryHistoryManager(
+            root=root, 
+            auto_run=True,
+            history_file=history_path
+        )
+        
+        # Debug: Print loaded history count
+        print(f"Loaded history counts: H1={len(manager.history1)}, H2={len(manager.history2)}, H3={len(manager.history3)}, H4={len(manager.history4)}")
+        print(f"History file path: {history_path}")
+        print(f"File exists: {os.path.exists(history_path)}")
+        
+        root.mainloop()
+
+    main()
