@@ -169,68 +169,93 @@ class DateAxis(pg.AxisItem):
                 strs.append("")  # 出错显示空
         return strs
 
-def recv_exact(sock, size: int) -> bytes:
+
+def recv_exact(sock, size, running_cb=None):
     buf = b""
     while len(buf) < size:
+        if running_cb and not running_cb():
+            raise RuntimeError("Listener stopped")
         chunk = sock.recv(size - len(buf))
         if not chunk:
-            raise ConnectionError("Socket closed before receiving full data")
+            raise ConnectionError("Socket closed")
         buf += chunk
     return buf
 
+
 class CommandListenerThread(QThread):
     command_received = pyqtSignal(str)
-    dataframe_received = pyqtSignal(object, str)  # 传 df 和 msg_type
+    dataframe_received = pyqtSignal(object, str)
 
     def __init__(self, server_socket):
         super().__init__()
         self.server_socket = server_socket
         self.running = True
 
+    def stop(self):
+        self.running = False
+        try:
+            self.server_socket.close()
+        except Exception:
+            pass
+        self.wait(1000)
+
     def run(self):
         while self.running:
             try:
+                # accept 阻塞，直到有客户端连接
                 client_socket, _ = self.server_socket.accept()
                 client_socket.settimeout(3.0)
 
-                # 读取前 4 个字节判断协议
-                prefix = recv_exact(client_socket, 4)
+                try:
+                    # 前4字节协议判断
+                    prefix = client_socket.recv(4)
+                    if not prefix:
+                        client_socket.close()
+                        continue
 
-                # -------- DATA 协议 --------
-                if prefix == b"DATA":
-                    try:
-                        # 读取 4 字节长度
-                        header = recv_exact(client_socket, 4)
-                        size = struct.unpack("!I", header)[0]
+                    if prefix == b"DATA":
+                        try:
+                            header = client_socket.recv(4)
+                            if not header:
+                                client_socket.close()
+                                continue
+                            size = struct.unpack("!I", header)[0]
+                            payload = b""
+                            while len(payload) < size:
+                                chunk = client_socket.recv(size - len(payload))
+                                if not chunk:
+                                    break
+                                payload += chunk
+                            if payload:
+                                msg_type, df = pickle.loads(payload)
+                                self.dataframe_received.emit(df, msg_type)
+                        except Exception as e:
+                            print(f"[IPC] Drop DATA packet: {e}")
 
-                        # 读取完整 payload
-                        payload_bytes = recv_exact(client_socket, size)
-                        msg_type, df = pickle.loads(payload_bytes)  # 解包 msg_type
-
-                        # 发射信号：df + msg_type
-                        self.dataframe_received.emit(df, msg_type)
-
-                    except Exception as e:
-                        print(f"[IPC] Error receiving DATA: {e}")
-
-                # -------- CODE / 文本协议 --------
-                else:
-                    # prefix 已经是文本的一部分
-                    rest = client_socket.recv(4096)
-                    text = (prefix + rest).decode("utf-8", errors="ignore").strip()
-
-                    if text.startswith("CODE|"):
-                        code = text[5:].strip()
-                        if code:
-                            self.command_received.emit(code)
                     else:
-                        if text:
-                            self.command_received.emit(text)
-
-                client_socket.close()
+                        try:
+                            rest = client_socket.recv(4096)
+                            text = (prefix + rest).decode("utf-8", errors="ignore").strip()
+                            if text.startswith("CODE|"):
+                                code = text[5:].strip()
+                                if code:
+                                    self.command_received.emit(code)
+                            elif text:
+                                self.command_received.emit(text)
+                        except Exception as e:
+                            print(f"[IPC] Drop CODE packet: {e}")
+                finally:
+                    try:
+                        client_socket.close()
+                    except Exception:
+                        pass
 
             except Exception as e:
-                print(f"[IPC] Listener Error: {e}")
+                if self.running:
+                    print(f"[IPC] Listener Loop Error: {e}")
+                else:
+                    break
+        print("[IPC] CommandListenerThread exited cleanly")
 
 
 
@@ -673,6 +698,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self.current_resample_idx = 0
             self.resample = self.resample_keys[0]
 
+        self.select_resample = None
         # ⭐ 先初始化策略相关属性，再创建工具栏，防止 AttributeError
         # Initialize Logger with default path to ensure consistency with main program
         self.logger = TradingLogger()
@@ -1857,19 +1883,33 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.debug(f"Capture state failed: {e}")
 
+
     def load_stock_by_code(self, code):
-        # ① 在清空/加载前捕获状态
         self._capture_view_state()
 
+        if self.current_code == code and self.select_resample == self.resample:
+            return
         self.current_code = code
-        # --- 联动滚动左侧列表 ---
-        if self.stock_table.rowCount() > 0:
-            for row in range(self.stock_table.rowCount()):
-                item = self.stock_table.item(row, 0)
-                if item and item.data(Qt.ItemDataRole.UserRole) == str(code):
-                    self.stock_table.selectRow(row)
-                    self.stock_table.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
-                    break
+        self.select_resample == self.resample
+
+        if self.stock_table.rowCount() == 0:
+            return
+
+        current_row = self.stock_table.currentRow()
+
+        for row in range(self.stock_table.rowCount()):
+            item = self.stock_table.item(row, 0)
+            if item and item.data(Qt.ItemDataRole.UserRole) == str(code):
+
+                if row != current_row:
+                    self.stock_table.blockSignals(True)
+                    self.stock_table.setCurrentCell(row, 0)
+                    self.stock_table.blockSignals(False)
+
+                    self.stock_table.scrollToItem(
+                        item, QAbstractItemView.ScrollHint.EnsureVisible
+                    )
+                break
 
         self.kline_plot.setTitle(f"Loading {code}...")
 
@@ -2983,6 +3023,82 @@ class MainWindow(QMainWindow, WindowMixin):
             
         return hits
 
+
+    def _run_strategy_simulation_other(self, code, day_df):
+        """
+        [DEEP INTEGRATION] 历史策略模拟：直接使用 day_df 原始列，不做任何修改
+        """
+        hits = []
+        try:
+            if len(day_df) < 10:
+                return hits
+
+            # --- 1. StrongPullbackMA5 策略 (批量) ---
+            pb_results = self.pullback_strat.run(day_df)
+            for i, row in pb_results.iterrows():
+                try:
+                    idx = day_df.index.get_loc(i)
+                    hits.append({
+                        'index': idx,
+                        'price': row['close'],
+                        'symbol': 'o',
+                        'color': (0, 255, 255, 180),
+                        'meta': {
+                            'date': str(i).split()[0],
+                            'action': '[SIM] 强力回撤',
+                            'reason': f"评分: {row.get('strong_score', 0)} ({row.get('risk_level','N/A')})",
+                            'price': row['close'],
+                            'indicators': {
+                                'Trend': row.get('trend_score', 0),
+                                'Pullback': row.get('pullback_score', 0),
+                                'Volume': row.get('volume_score', 0)
+                            }
+                        }
+                    })
+                except Exception:
+                    continue
+
+            # --- 2. IntradayDecision (逐行，最近 60 天) ---
+            eval_df = day_df.tail(60)
+            for timestamp, d_row in eval_df.iterrows():
+                idx = day_df.index.get_loc(timestamp)
+                pseudo_row = d_row.to_dict()  # 直接取原始行
+
+                # 加上必要的额外字段
+                pseudo_row.update({
+                    'code': code,
+                    'trade': d_row['close'],
+                    'ratio': 0.1,
+                })
+
+                past_idx = idx - 1
+                if past_idx >= 0:
+                    snap = {
+                        'last_close': day_df.iloc[past_idx]['close'],
+                        'market_win_rate': 0.5,
+                        'loss_streak': 0
+                    }
+                    decision = self.decision_engine.evaluate(pseudo_row, snap)
+                    if decision.get('action') in ("买入", "卖出", "ADD"):
+                        hits.append({
+                            'index': idx,
+                            'price': d_row['close'],
+                            'symbol': 'star',
+                            'color': (255, 200, 0, 150),
+                            'meta': {
+                                'date': str(timestamp).split()[0],
+                                'action': f"[SIM] 影子决策:{decision['action']}",
+                                'reason': decision.get('reason', ''),
+                                'price': d_row['close'],
+                                'indicators': decision.get('debug', {})
+                            }
+                        })
+
+        except Exception as e:
+            logger.debug(f"Strategy simulation failed: {e}")
+
+        return hits
+
     def _init_filter_toolbar(self):
         # 查找或创建 Filter Action
         actions = self.toolbar.actions()
@@ -3304,6 +3420,78 @@ def run_visualizer(initial_code=None, df_all=None):
     sys.exit(app.exec())
 
 def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=False, command_queue=None):
+    # ------------------ 1. Logger ------------------
+    if log_level is not None:
+        logger.setLevel(log_level.value)
+
+    # ------------------ 2. Primary/Secondary ------------------
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    stop_flag = stop_flag if stop_flag else mp.Value('b', True)
+
+    try:
+        server_socket.bind((IPC_HOST, IPC_PORT))
+        server_socket.listen(5)  # backlog > 1
+        is_primary_instance = True
+        print(f"Listening on {IPC_HOST}:{IPC_PORT}")
+    except OSError:
+        is_primary_instance = False
+        print(f"Listening 被占用 {IPC_HOST}:{IPC_PORT}")
+
+    # ------------------ 3. Secondary ------------------
+    if not is_primary_instance:
+        code_to_send = initial_code if initial_code else (sys.argv[1] if len(sys.argv) > 1 else None)
+        if code_to_send:
+            # 尝试多次连接，保证 Primary 还没完全 accept 也能发
+            for _ in range(5):
+                try:
+                    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    client_socket.connect((IPC_HOST, IPC_PORT))
+                    client_socket.send(code_to_send.encode("utf-8"))
+                    client_socket.close()
+                    break
+                except Exception:
+                    time.sleep(0.05)
+            else:
+                print(f"Failed to send command: {code_to_send}")
+        sys.exit(0)
+
+    # ------------------ 4. Primary: 启动 GUI ------------------
+    app = QApplication(sys.argv)
+    window = MainWindow(stop_flag, log_level, debug_realtime, command_queue=command_queue)
+    start_code = initial_code
+
+    # 启动 ListenerThread
+    listener = CommandListenerThread(server_socket)
+    listener.command_received.connect(window.load_stock_by_code)
+    listener.dataframe_received.connect(window.on_dataframe_received)
+    listener.start()
+
+    # 确保 listener 已经准备好接收连接
+    time.sleep(0.05)
+
+    # ------------------ 5. 显示 GUI ------------------
+    window.show()
+    if start_code is not None:
+        window.load_stock_by_code(start_code)
+    elif len(sys.argv) > 1:
+        start_code = sys.argv[1]
+        if len(start_code) in (6, 8):
+            window.load_stock_by_code(start_code)
+
+    ret = app.exec()  # 阻塞 Qt 主循环
+
+    # ------------------ 6. 清理 ------------------
+    stop_flag.value = False
+    try:
+        listener.stop()
+    except Exception:
+        pass
+    window.close()
+    sys.exit(ret)
+
+
+def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=False, command_queue=None):
     # --- 1. 尝试成为 Primary Instance ---
         # logger = LoggerFactory.getLogger()
     if log_level is not None:
