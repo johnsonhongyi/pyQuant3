@@ -1,6 +1,5 @@
 import os
 import sys
-import logging
 import json
 from typing import Any, Optional, Union, Protocol, runtime_checkable, TYPE_CHECKING
 import tkinter as tk
@@ -17,8 +16,9 @@ from monitor_utils import save_monitor_list, load_monitor_list
 from gui_utils import clamp_window_to_screens
 from dpi_utils import get_windows_dpi_scale_factor
 from .gui_config import WINDOW_CONFIG_FILE, MONITOR_LIST_FILE
-
-logger = logging.getLogger("instock_TK.Window")
+from JohnsonUtil import LoggerFactory
+# logger = logging.getLogger("instock_TK.Window")
+logger = LoggerFactory.getLogger("instock_TK.Window")
 
 @runtime_checkable
 class WindowAppProtocol(Protocol):
@@ -227,7 +227,7 @@ class WindowMixin:
             height = default_height
 
             config_file_path = self._get_config_file_path(file_path, scale)
-
+   
             if os.path.exists(config_file_path):
                 with open(config_file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
@@ -265,7 +265,7 @@ class WindowMixin:
                         if aw.x() == x and aw.y() == y:
                             x += offset_step
                             y += offset_step
-
+            logger.debug(f"[load_window_position_qt] config_file_path: {config_file_path}")
             win.setGeometry(x, y, width, height)
             return width, height, x, y
         except Exception as e:
@@ -309,30 +309,24 @@ class WindowMixin:
         except Exception as e:
             logger.error(f"[save_window_position_qt] 失败: {e}")
 
-    def save_window_position_qt_visual(
-        self,
-        win: Any,
-        window_name: str,
-        file_path: Optional[str] = None
-    ) -> None:
-        """保存 PyQt 窗口 position（Qt5 / Qt6 安全）"""
+    def save_window_position_qt_visual(self, win: Any, window_name: str, file_path: Optional[str] = None) -> None:
+        """保存 PyQt 窗口 position"""
         if file_path is None:
             file_path = WINDOW_CONFIG_FILE
-
         try:
             window_name = str(window_name)
             scale = self._get_dpi_scale_factor()
-            # ⭐ 使用 normalGeometry，避免最小化 / 最大化状态污染
-            if win.isMinimized() or win.isMaximized():
-                geom = win.normalGeometry()
-            else:
-                geom = win.geometry()
 
+            geom = win.geometry()
+            # width = max(130, min(int(geom.width() / scale), 500))
+            # height = max(150, min(int(geom.height() / scale), 450))
+            width = int(geom.width() / scale)
+            height = int(geom.height() / scale)
             pos = {
                 "x": int(geom.x() / scale),
                 "y": int(geom.y() / scale),
-                "width": int(geom.width() / scale),
-                "height": int(geom.height() / scale),
+                "width": width,
+                "height": height
             }
 
             config_file_path = self._get_config_file_path(file_path, scale)
@@ -346,12 +340,10 @@ class WindowMixin:
                     logger.error(f"[save_window_position_qt] 读取失败: {e}")
 
             data[window_name] = pos
-
             with open(config_file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
-            logger.debug(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
-
+            logger.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
         except Exception as e:
             logger.error(f"[save_window_position_qt] 失败: {e}")
 

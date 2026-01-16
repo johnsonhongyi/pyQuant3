@@ -30,6 +30,8 @@ from JohnsonUtil import johnson_cons as ct
 import datetime  # ⚠️ 必须导入
 import time
 from StrongPullbackMA5Strategy import StrongPullbackMA5Strategy
+from data_utils import (
+    calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe)
 # Configuration
 IPC_PORT = 26668
 IPC_HOST = '127.0.0.1'
@@ -57,6 +59,7 @@ except ImportError as e:
 pg.setConfigOptions(antialias=True)
 # pg.setConfigOption('background', 'w')
 # pg.setConfigOption('foreground', 'k')
+
 
 class CandlestickItem(pg.GraphicsObject):
     def __init__(self, data, theme='light'):
@@ -165,22 +168,6 @@ class DateAxis(pg.AxisItem):
                 logger.warning(f"[tickStrings] val={val} error: {e}")
                 strs.append("")  # 出错显示空
         return strs
-
-
-    # def tickStrings(self, values, scale, spacing):
-    #     """把整数索引映射成日期字符串，最后一天显示在末尾"""
-    #     strs = []
-    #     n = len(self.dates)
-    #     if n == 0:
-    #         return [str(v) for v in values]
-    #     for val in values:
-    #         idx = int(val)
-    #         if idx < n:
-    #             strs.append(str(self.dates[idx])[5:])  # MM-DD
-    #         else:
-    #             strs.append(str(self.dates[-1])[5:])  # ghost candle 对应最后一天
-    #     return strs
-
 
 def recv_exact(sock, size: int) -> bytes:
     buf = b""
@@ -815,6 +802,10 @@ class MainWindow(QMainWindow, WindowMixin):
         # 排序后自动滚动到顶部
         self.stock_table.horizontalHeader().sectionClicked.connect(self.on_header_section_clicked)
 
+        # 1️⃣ 启用自定义上下文菜单
+        self.stock_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.stock_table.customContextMenuRequested.connect(self.on_table_right_click)
+
         self.stock_table.verticalHeader().setVisible(False)
         self.main_splitter.addWidget(self.stock_table)
 
@@ -1221,26 +1212,45 @@ class MainWindow(QMainWindow, WindowMixin):
         dlg = ScrollableMsgBox(f"📈 综合简报 - {self.current_code}", briefing, self)
         dlg.exec()
 
+    # def _start_realtime_process(self, code):
+    #     # 停止旧进程
+    #     if self.realtime_process and self.realtime_process.is_alive():
+    #         self.realtime_process.terminate()
+    #         self.realtime_process.join()
+
+    #     # 启动新进程
+    #     self.realtime_process = Process(
+    #         target=realtime_worker_process,
+    #         args=(code, self.realtime_queue,self.stop_flag,self.log_level,self._debug_realtime),
+    #         daemon=False
+    #     )
+    #     self.realtime_process.start()
+
     def _start_realtime_process(self, code):
-        # 停止旧进程
-        if self.realtime_process and self.realtime_process.is_alive():
-            self.realtime_process.terminate()
-            self.realtime_process.join()
+        # ✅ 优雅停止旧进程
+        self._stop_realtime_process()
+
+        # 重置 stop_flag
+        self.stop_flag.value = True
 
         # 启动新进程
         self.realtime_process = Process(
             target=realtime_worker_process,
-            args=(code, self.realtime_queue,self.stop_flag,self.log_level,self._debug_realtime),
+            args=(code, self.realtime_queue, self.stop_flag, self.log_level, self._debug_realtime),
             daemon=False
         )
         self.realtime_process.start()
 
-    def _stop_realtime_process(self):
-        if self.realtime_process and self.realtime_process.is_alive():
-            self.realtime_process.terminate()
-            self.realtime_process.join()
-            self.realtime_process = None
 
+    def _stop_realtime_process(self):
+        if self.realtime_process:
+            # 先停止循环
+            self.stop_flag.value = False
+            # 等待进程结束，最多 5 秒
+            self.realtime_process.join(timeout=5)
+            if self.realtime_process.is_alive():
+                self.realtime_process.terminate()
+            self.realtime_process = None
 
     def _poll_realtime_queue(self):
         if not hasattr(self, "_closing") or getattr(self, "_closing", False):
@@ -1342,6 +1352,46 @@ class MainWindow(QMainWindow, WindowMixin):
 
     #     except Exception as e:
     #         logger.debug(f"Poll command queue failed: {e}")
+
+    def push_stock_info(self,stock_code, row):
+        """
+        从 self.df_all 的一行数据提取 stock_info 并推送
+        """
+        try:
+            stock_info = {
+                "code": str(stock_code),
+                "name": str(row["name"]),
+                "high": str(row["high"]),
+                "lastp1d": str(row["lastp1d"]),
+                "percent": float(row.get("percent", 0)),
+                "price": float(row.get("close", 0)),
+                "volume": int(row.get("volume", 0))
+            }
+            # code, _ , percent,price, vol
+            # 转为 JSON 字符串
+            payload = json.dumps(stock_info, ensure_ascii=False)
+
+            # ---- 根据传输方式选择 ----
+            # 如果用 WM_COPYDATA，需要 encode 成 bytes 再传
+            # if hasattr(self, "send_wm_copydata"):
+            #     self.send_wm_copydata(payload.encode("utf-8"))
+
+            # 如果用 Pipe / Queue，可以直接传 str
+            # elif hasattr(self, "pipe"):
+            #     self.pipe.send(payload)
+
+
+            # 推送给异动联动（用管道/消息）
+            send_code_via_pipe(payload, logger=logger)   # 假设你用 multiprocessing.Pipe
+            # 或者 self.queue.put(stock_info)  # 如果是队列
+            # 或者 send_code_to_other_window(stock_info) # 如果是 WM_COPYDATA
+            logger.info(f"推送: {stock_info}")
+            return True
+        except Exception as e:
+            logger.error(f"推送 stock_info 出错: {e} {row}")
+            return False
+
+
 
     def on_signal_clicked(self, plot, points):
         """点击 K 线信号图标时触发，显示详细决策理由与指标"""
@@ -1605,57 +1655,6 @@ class MainWindow(QMainWindow, WindowMixin):
         if self.current_code:
             self.load_stock_by_code(self.current_code)
 
-
-    def closeEvent(self, event):
-        """窗口关闭统一退出清理"""
-        self._closing = True
-        # 1️⃣ 停止实时数据进程
-        # 1️⃣ 通知子进程退出
-        if hasattr(self, 'stop_flag'):
-            self.stop_flag.value = False
-        logger.info(f'stop_flag.value: {self.stop_flag.value}')
-        self._stop_realtime_process()
-        if hasattr(self, 'refresh_flag'):
-            self.refresh_flag.value = False
-            
-        # 2️⃣ 停止 realtime_process
-        if getattr(self, 'realtime_process', None):
-            if self.realtime_process.is_alive():
-                self.realtime_process.join(timeout=1)
-                if self.realtime_process.is_alive():
-                    logger.info("realtime_process 强制终止")
-                    self.realtime_process.terminate()
-                    self.realtime_process.join()
-            self.realtime_process = None
-
-        # 3️⃣ 停止 DataLoaderThread (避免 QThread Destroyed 崩溃)
-        if hasattr(self, 'loader') and self.loader:
-            if self.loader.isRunning():
-                logger.info("Stopping DataLoaderThread...")
-                self.loader.quit()
-                if not self.loader.wait(1000): # 等待 1 秒
-                    logger.warning("DataLoaderThread did not stop, terminating...")
-                    self.loader.terminate()
-                    self.loader.wait()
-            self.loader = None
-        # 当 GUI 关闭时，触发 stop_event
-        stop_event.set()
-
-        """Override close event to save window position"""
-        try:
-            self.save_window_position_qt(self, "trade_visualizer")
-            # self.save_window_position_qt_visual(self, "trade_visualizer")
-        except Exception as e:
-            logger.error(f"Failed to save window position: {e}")
-
-        print(f'closeEvent: OK')
-        # Accept the event to close
-        event.accept()
-        # 6️⃣ 调用父类 closeEvent
-        super().closeEvent(event)
-        
-
-
     def load_stock_list(self):
         """Load stocks from df_all if available, otherwise from signal history"""
         if not self.df_all.empty:
@@ -1748,6 +1747,23 @@ class MainWindow(QMainWindow, WindowMixin):
         self.stock_table.setSortingEnabled(True)
         self.stock_table.resizeColumnsToContents()
 
+    # 2️⃣ 处理右键事件
+    def on_table_right_click(self, pos):
+        item = self.stock_table.itemAt(pos)
+        if not item:
+            return
+        
+        stock_code = item.data(Qt.ItemDataRole.UserRole)
+        if not stock_code or self.df_all.empty:
+            return
+
+        # 发送逻辑
+        success = self.push_stock_info(stock_code, self.df_all.loc[stock_code])
+        if success:
+            self.statusBar().showMessage(f"发送成功: {stock_code}")
+        else:
+            self.statusBar().showMessage(f"发送失败: {stock_code}")
+
     def on_header_section_clicked(self, _logicalIndex):
         """排序后自动滚动到顶部，延时确保排序完成"""
         QTimer.singleShot(50, self.stock_table.scrollToTop)
@@ -1809,62 +1825,6 @@ class MainWindow(QMainWindow, WindowMixin):
         if getattr(self, 'current_code', None) and hasattr(self, 'kline_plot'):
             self._refresh_sensing_bar(self.current_code)
 
-
-    # def _capture_view_state(self):
-    #     """在切换数据前，捕获当前的缩放视角（相对于末尾）"""
-    #     if not hasattr(self, 'day_df') or self.day_df.empty:
-    #         return
-    #     try:
-    #         vb = self.kline_plot.getViewBox()
-    #         view_rect = vb.viewRect()
-    #         total = len(self.day_df)
-            
-    #         # 计算可见窗口距离末尾的根数
-    #         # 如果看的是最后 100 根，那么 last_n 就是 100
-    #         self._prev_last_n = total - view_rect.right() # 改为 relative to right edge? No, right edge is 'latest'.
-    #         # Correct logic:
-    #         # X axis is 0..Total.
-    #         # Rightmost data is at X=Total.
-    #         # If I look at [Total-100, Total]. ViewRect Right is Total. viewRect Left is Total-100.
-    #         # I want to preserve "how many bars are visible". i.e. Width.
-    #         # AND "how close to the newest bar I am".
-            
-    #         # If I stick to the 'latest', I want to preserve (Total - Right) and (Total - Left).
-    #         # Usually users care about "Last N bars". So preserving (Total - Left) is good.
-    #         # self._prev_last_n = total - view_rect.left() (This means Left edge is N bars from end).
-            
-    #         # Let's try preserving the span (zoom level) and the offset from right.
-    #         self._prev_span = view_rect.width()
-    #         self._prev_offset_right = total - view_rect.right() # Distance from right edge to latest data
-            
-    #         # 兼容旧逻辑变量名，方便调试
-    #         self._prev_last_n = total - view_rect.left()
-
-    #         # 计算可见区域内的价格波动比例
-    #         v_start = int(max(0, view_rect.left()))
-    #         v_end = int(min(total, view_rect.right()))
-            
-    #         # Safety check
-    #         if v_start >= v_end:
-    #              # fallback to span only
-    #              self._prev_y_zoom = None
-    #              return
-
-    #         visible_old = self.day_df.iloc[v_start:v_end]
-    #         if not visible_old.empty:
-    #             old_h = visible_old['high'].max()
-    #             old_l = visible_old['low'].min()
-    #             old_rng = old_h - old_l if old_h > old_l else 1.0
-                
-    #             # 缩放因子：视图高度 / 价格区间
-    #             self._prev_y_zoom = view_rect.height() / old_rng
-    #             # 相对中心点：(视图中心 - 价格最低) / 价格区间
-    #             self._prev_y_center_rel = (view_rect.center().y() - old_l) / old_rng
-    #         else:
-    #             self._prev_y_zoom = None
-    #     except Exception as e:
-    #         logger.error(f"Capture state failed: {e}")
-
     def _capture_view_state(self):
         """在切换数据前，精准捕获当前的可见窗口"""
         if not hasattr(self, 'day_df') or self.day_df.empty:
@@ -1912,12 +1872,6 @@ class MainWindow(QMainWindow, WindowMixin):
                     break
 
         self.kline_plot.setTitle(f"Loading {code}...")
-
-        # ① 切 code 一定先停 realtime
-        # ---- 1. 停止旧的 realtime worker（如果存在）----
-        if self.realtime_process:
-            # 停止旧的实时进程（如果存在）
-            self._stop_realtime_process()
 
         # ② 加载历史
         with timed_ctx("DataLoaderThread", warn_ms=800):
@@ -3150,7 +3104,6 @@ class MainWindow(QMainWindow, WindowMixin):
         if code:
             # 1. 触发图表加载
             self.load_stock_by_code(code)
-            
             # 2. 联动左侧列表选中
             self._select_stock_in_main_table(code)
 
@@ -3268,7 +3221,7 @@ class MainWindow(QMainWindow, WindowMixin):
             with open(config_file, 'w', encoding='utf-8') as f:
                 json.dump(config, f, indent=2)
 
-            logger.info(
+            logger.debug(
                 f'save_splitter sizes: raw={sizes}, fixed={fixed_sizes}, file={config_file}'
             )
 
@@ -3278,11 +3231,56 @@ class MainWindow(QMainWindow, WindowMixin):
 
     
     def closeEvent(self, event):
-        """窗口关闭事件"""
-        # 保存分割器状态
-        self.save_splitter_state()
-        # 调用父类的 closeEvent
-        super().closeEvent(event)
+       """窗口关闭统一退出清理"""
+       self._closing = True
+       """窗口关闭事件"""
+       # 保存分割器状态
+       self.save_splitter_state()
+       """Override close event to save window position"""
+       try:
+           self.save_window_position_qt_visual(self, "trade_visualizer")
+           # self.save_window_position_qt(self, "trade_visualizer")
+       except Exception as e:
+           logger.error(f"Failed to save window position: {e}")
+
+       # 1️⃣ 停止实时数据进程
+       # 1️⃣ 通知子进程退出
+       if hasattr(self, 'stop_flag'):
+           self.stop_flag.value = False
+       logger.info(f'stop_flag.value: {self.stop_flag.value}')
+       self._stop_realtime_process()
+       if hasattr(self, 'refresh_flag'):
+           self.refresh_flag.value = False
+           
+       # 2️⃣ 停止 realtime_process
+       if getattr(self, 'realtime_process', None):
+           if self.realtime_process.is_alive():
+               self.realtime_process.join(timeout=1)
+               if self.realtime_process.is_alive():
+                   logger.info("realtime_process 强制终止")
+                   self.realtime_process.terminate()
+                   self.realtime_process.join()
+           self.realtime_process = None
+
+       # 3️⃣ 停止 DataLoaderThread (避免 QThread Destroyed 崩溃)
+       if hasattr(self, 'loader') and self.loader:
+           if self.loader.isRunning():
+               logger.info("Stopping DataLoaderThread...")
+               self.loader.quit()
+               if not self.loader.wait(1000): # 等待 1 秒
+                   logger.warning("DataLoaderThread did not stop, terminating...")
+                   self.loader.terminate()
+                   self.loader.wait()
+           self.loader = None
+       # 当 GUI 关闭时，触发 stop_event
+       stop_event.set()
+
+       print(f'closeEvent: OK')
+       # Accept the event to close
+       event.accept()
+       # 6️⃣ 调用父类 closeEvent
+       super().closeEvent(event)
+        
 
 def run_visualizer(initial_code=None, df_all=None):
     """
