@@ -906,21 +906,21 @@ class MainWindow(QMainWindow, WindowMixin):
         self.load_stock_list()
 
         # ⭐ Load saved window position (Restores size and location)
-        self.load_window_position_qt(self, "trade_visualizer", default_width=1400, default_height=900)
+        self._window_pos_loaded = False   # ⭐ 必须加
+        # self.load_window_position_qt(self, "trade_visualizer", default_width=1400, default_height=900)
 
-    def closeEvent(self, event):
-        """Override close event to save window position"""
-        try:
-            self.save_window_position_qt(self, "trade_visualizer")
-        except Exception as e:
-            logger.error(f"Failed to save window position: {e}")
-        
-        # Stop realtime process if running
-        self._closing = True
-        self._stop_realtime_process()
-        
-        # Accept the event to close
-        event.accept()
+    def showEvent(self, event):
+        super().showEvent(event)
+
+        if not self._window_pos_loaded:
+            self._window_pos_loaded = True
+            self.load_window_position_qt(
+                self,
+                "trade_visualizer",
+                default_width=1400,
+                default_height=900
+            )
+
 
     def _init_toolbar(self):
         self.toolbar = QToolBar("Settings", self)
@@ -1541,6 +1541,7 @@ class MainWindow(QMainWindow, WindowMixin):
         if self.current_code:
             self.load_stock_by_code(self.current_code)
 
+
     def closeEvent(self, event):
         """窗口关闭统一退出清理"""
         self._closing = True
@@ -1576,11 +1577,18 @@ class MainWindow(QMainWindow, WindowMixin):
         # 当 GUI 关闭时，触发 stop_event
         stop_event.set()
 
-        # 5️⃣ 保存窗口位置
-        self.save_window_position_qt(self, "TradeVisualizer")
+        """Override close event to save window position"""
+        try:
+            self.save_window_position_qt(self, "trade_visualizer")
+            # self.save_window_position_qt_visual(self, "trade_visualizer")
+        except Exception as e:
+            logger.error(f"Failed to save window position: {e}")
 
+        # Accept the event to close
+        event.accept()
         # 6️⃣ 调用父类 closeEvent
         super().closeEvent(event)
+        
 
 
     def load_stock_list(self):

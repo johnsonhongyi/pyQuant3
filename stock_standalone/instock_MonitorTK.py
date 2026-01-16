@@ -877,22 +877,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def update_required_columns(self, refresh_ui=False) -> None:
         """同步当前 UI 和策略所需的列到后台进程"""
-        try:
-            if not hasattr(self, 'global_dict') or self.global_dict is None:
-                return
+        # mandatory_cols动态加载列不要改df_all基础数据col,导致其他出现col确实, update_required_columns 只是用来同步可视化数据,不要改基础数据
+        pass
+        # try:
+        #     if not hasattr(self, 'global_dict') or self.global_dict is None:
+        #         return
             
-            # 这里的 self.current_cols 存储了当前 UI 真正显示的列
-            current_ui_cols = set(getattr(self, 'current_cols', []))
+        #     # 这里的 self.current_cols 存储了当前 UI 真正显示的列
+        #     current_ui_cols = set(getattr(self, 'current_cols', []))
             
-            # 使用更严谨的获取方式
-            mandatory = getattr(self, 'mandatory_cols', set())
-            required = set(mandatory).union(current_ui_cols)
+        #     # 使用更严谨的获取方式
+        #     mandatory = getattr(self, 'mandatory_cols', set())
+        #     required = set(mandatory).union(current_ui_cols)
             
-            # 更新到 global_dict 供后台进程读取
-            self.global_dict['required_cols'] = list(required)
-            logger.debug(f"Dynamic Trimming: Subscribed to {len(required)} columns.")
-        except Exception as e:
-            logger.error(f"Failed to update required columns: {e}")
+        #     # 更新到 global_dict 供后台进程读取
+        #     self.global_dict['required_cols'] = list(required)
+        #     logger.debug(f"Dynamic Trimming: Subscribed to {len(required)} columns.")
+        # except Exception as e:
+        #     logger.error(f"Failed to update required columns: {e}")
 
     def tree_scroll_to_code(self, code):
         """外部调用：定位特定代码"""
@@ -1578,7 +1580,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             logger.error(f"Main process realtime update error: {e}")
                     else:
                         logger.info(f'realtime_service 还未初始化')
-
                     # logger.info(f'df:{df[:1]}')
                     if self.sortby_col is not None:
                         logger.info(f'update_tree sortby_col : {self.sortby_col} sortby_col_ascend : {self.sortby_col_ascend}')
