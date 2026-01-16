@@ -864,6 +864,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # 在 MainWindow.__init__ 中修改
         self.stock_table.cellClicked.connect(self.on_table_cell_clicked) # 保留点击
         self.stock_table.currentItemChanged.connect(self.on_current_item_changed) # 新增键盘支持
+        # 排序后自动滚动到顶部
+        self.stock_table.horizontalHeader().sectionClicked.connect(self.on_header_section_clicked)
 
         self.stock_table.verticalHeader().setVisible(False)
         self.main_splitter.addWidget(self.stock_table)
@@ -1683,6 +1685,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self.stock_table.setSortingEnabled(True)
         self.stock_table.resizeColumnsToContents()
 
+    def on_header_section_clicked(self, _logicalIndex):
+        """排序后自动滚动到顶部，延时确保排序完成"""
+        QTimer.singleShot(50, self.stock_table.scrollToTop)
+
     def on_table_cell_clicked(self, row, column):
         code_item = self.stock_table.item(row, 0)
         if code_item:
@@ -1825,6 +1831,15 @@ class MainWindow(QMainWindow, WindowMixin):
         self._capture_view_state()
 
         self.current_code = code
+        # --- 联动滚动左侧列表 ---
+        if self.stock_table.rowCount() > 0:
+            for row in range(self.stock_table.rowCount()):
+                item = self.stock_table.item(row, 0)
+                if item and item.data(Qt.ItemDataRole.UserRole) == str(code):
+                    self.stock_table.selectRow(row)
+                    self.stock_table.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+                    break
+
         self.kline_plot.setTitle(f"Loading {code}...")
 
         # ① 切 code 一定先停 realtime
