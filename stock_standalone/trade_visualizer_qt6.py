@@ -738,50 +738,128 @@ class MainWindow(QMainWindow, WindowMixin):
         # Removed fixed maximum width to allow splitter resizing
         # self.stock_table.setMaximumWidth(300) 
 
+        # self.stock_table.setStyleSheet("""
+
+        # QTableWidget {
+        #     background-color: transparent;
+        # }
+
+        # /* 只作用在 table 内部 */
+        # QTableWidget QScrollBar:vertical {
+        #     width: 6px;
+        #     background: transparent;
+        #     margin: 0px;
+        # }
+
+        # QTableWidget QScrollBar::handle:vertical {
+        #     background: rgba(180, 180, 180, 120);
+        #     min-height: 30px;
+        #     border-radius: 3px;
+        # }
+
+        # QTableWidget QScrollBar::handle:vertical:hover {
+        #     background: rgba(220, 220, 220, 180);
+        # }
+
+        # QTableWidget QScrollBar::add-line:vertical,
+        # QTableWidget QScrollBar::sub-line:vertical {
+        #     height: 0px;
+        # }
+
+        # QTableWidget QScrollBar::add-page:vertical,
+        # QTableWidget QScrollBar::sub-page:vertical {
+        #     background: transparent;
+        # }
+        # """)
+
+        # self.stock_table.setStyleSheet(self.stock_table.styleSheet() + """
+        # QTableWidget::item:hover {
+        #     background: rgba(255, 255, 255, 30);
+        # }
+        # QTableWidget::item:selected {
+        #     background: rgba(255, 215, 0, 80);
+        #     color: black;
+        # }
+        # """)
+
+        # self.stock_table.verticalScrollBar().setFixedWidth(6)
+
+
         self.stock_table.setStyleSheet("""
+            QTableWidget {
+                background-color: transparent;
+            }
 
-        QTableWidget {
-            background-color: transparent;
-        }
+            /* 垂直滚动条 */
+            QTableWidget QScrollBar:vertical {
+                width: 6px;
+                background: transparent;
+                margin: 0px;
+            }
 
-        /* 只作用在 table 内部 */
-        QTableWidget QScrollBar:vertical {
-            width: 6px;
-            background: transparent;
-            margin: 0px;
-        }
+            QTableWidget QScrollBar::handle:vertical {
+                background: rgba(180, 180, 180, 120);
+                min-height: 30px;
+                border-radius: 3px;
+            }
 
-        QTableWidget QScrollBar::handle:vertical {
-            background: rgba(180, 180, 180, 120);
-            min-height: 30px;
-            border-radius: 3px;
-        }
+            QTableWidget QScrollBar::handle:vertical:hover {
+                background: rgba(220, 220, 220, 180);
+            }
 
-        QTableWidget QScrollBar::handle:vertical:hover {
-            background: rgba(220, 220, 220, 180);
-        }
+            QTableWidget QScrollBar::add-line:vertical,
+            QTableWidget QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
 
-        QTableWidget QScrollBar::add-line:vertical,
-        QTableWidget QScrollBar::sub-line:vertical {
-            height: 0px;
-        }
+            QTableWidget QScrollBar::add-page:vertical,
+            QTableWidget QScrollBar::sub-page:vertical {
+                background: transparent;
+            }
 
-        QTableWidget QScrollBar::add-page:vertical,
-        QTableWidget QScrollBar::sub-page:vertical {
-            background: transparent;
-        }
+            /* 水平滚动条 */
+            QTableWidget QScrollBar:horizontal {
+                height: 6px;
+                background: transparent;
+                margin: 0px;
+            }
+
+            QTableWidget QScrollBar::handle:horizontal {
+                background: rgba(180, 180, 180, 120);
+                min-width: 30px;
+                border-radius: 3px;
+            }
+
+            QTableWidget QScrollBar::handle:horizontal:hover {
+                background: rgba(220, 220, 220, 180);
+            }
+
+            QTableWidget QScrollBar::add-line:horizontal,
+            QTableWidget QScrollBar::sub-line:horizontal {
+                width: 0px;
+            }
+
+            QTableWidget QScrollBar::add-page:horizontal,
+            QTableWidget QScrollBar::sub-page:horizontal {
+                background: transparent;
+            }
+
+            /* 鼠标悬停 & 选中效果 */
+            QTableWidget::item:hover {
+                background: rgba(255, 255, 255, 30);
+            }
+
+            QTableWidget::item:selected {
+                background: rgba(255, 215, 0, 80);
+                color: black;
+            }
         """)
 
-        self.stock_table.setStyleSheet(self.stock_table.styleSheet() + """
-        QTableWidget::item:hover {
-            background: rgba(255, 255, 255, 30);
-        }
-        QTableWidget::item:selected {
-            background: rgba(255, 215, 0, 80);
-            color: black;
-        }
-        """)
+        # 设置滚动条固定大小
         self.stock_table.verticalScrollBar().setFixedWidth(6)
+        self.stock_table.horizontalScrollBar().setFixedHeight(6)
+
+
         # 禁止编辑：防止误触发覆盖 Code/Name 等关键信息，只允许选择和复制
         self.stock_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.stock_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -891,6 +969,10 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Filter Tree - 过滤结果
         self.filter_tree = QTreeWidget()
+        # from stock_feature_marker import StockFeatureMarker
+        # self._filter_columns = ['code', 'name', 'rank', 'percent']  # 显示列
+        # self.feature_marker = StockFeatureMarker(self.filter_tree, enable_colors=True)
+
         self.filter_tree.setHeaderLabels(["Filtered Results"])
         self.filter_tree.setColumnCount(1) 
         self.filter_tree.itemClicked.connect(self.on_filter_tree_item_clicked)
@@ -3164,6 +3246,131 @@ class MainWindow(QMainWindow, WindowMixin):
         if self.filter_combo.count() > 0:
              self.on_filter_combo_changed(0)
 
+    def populate_tree_from_df(self, df: pd.DataFrame):
+        """
+        将 DataFrame 高速填充到 QTreeWidget
+        - 支持列、颜色标记、图标
+        - 左对齐、紧凑列宽、水平滚动
+        """
+        import time
+        prep_start = time.time()
+        self.filter_tree.clear()
+
+        if df.empty:
+            return
+
+        # --- 配置列 ---
+        columns = self._filter_columns  # 需要显示的列
+        self.filter_tree.setColumnCount(len(columns))
+        self.filter_tree.setHeaderLabels(columns)
+        self.filter_tree.setSortingEnabled(True)
+        self.filter_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.filter_tree.setHorizontalScrollMode(QTreeWidget.ScrollMode.ScrollPerPixel)
+        self.filter_tree.setSizeAdjustPolicy(QTreeWidget.SizeAdjustPolicy.AdjustToContents)
+
+        n_rows = len(df)
+
+        # --- 预提取列数据，避免循环内索引 ---
+        col_arrays = []
+        for col in columns:
+            if col in df.columns:
+                arr = df[col].fillna('').tolist()
+            else:
+                arr = [''] * n_rows
+            col_arrays.append(arr)
+
+        # --- 特征标记预提取 ---
+        feature_data = None
+        fm = getattr(self, 'feature_marker', None)
+        if fm and fm.enable_colors:
+            feature_cols = ['percent', 'volume', 'category', 'price', 'trade', 'high4',
+                            'max5', 'max10', 'hmax', 'hmax60', 'low4', 'low10', 'low60',
+                            'lmin', 'min5', 'cmean', 'hv', 'lv', 'llowvol', 'lastdu4']
+            fd = {}
+            for k in feature_cols:
+                if k in df.columns:
+                    if k == 'category':
+                        fd[k] = df[k].fillna('').tolist()
+                    else:
+                        fd[k] = df[k].fillna(0).tolist()
+                else:
+                    fd[k] = None
+            feature_data = fd
+
+        name_idx = columns.index('name') if 'name' in columns else -1
+
+        # --- 构建行 ---
+        for i in range(n_rows):
+            values = [col_arrays[j][i] for j in range(len(columns))]
+
+            row_data = None
+            if feature_data:
+                try:
+                    fd = feature_data
+                    price_val = fd['price'][i] if fd['price'] else 0
+                    if price_val == 0 and fd['trade']:
+                        price_val = fd['trade'][i]
+
+                    row_data = {
+                        'percent': fd['percent'][i] if fd['percent'] else 0,
+                        'volume': fd['volume'][i] if fd['volume'] else 0,
+                        'category': fd['category'][i] if fd['category'] else '',
+                        'price': price_val,
+                        'high4': fd['high4'][i] if fd['high4'] else 0,
+                        'max5': fd['max5'][i] if fd['max5'] else 0,
+                        'max10': fd['max10'][i] if fd['max10'] else 0,
+                        'hmax': fd['hmax'][i] if fd['hmax'] else 0,
+                        'hmax60': fd['hmax60'][i] if fd['hmax60'] else 0,
+                        'low4': fd['low4'][i] if fd['low4'] else 0,
+                        'low10': fd['low10'][i] if fd['low10'] else 0,
+                        'low60': fd['low60'][i] if fd['low60'] else 0,
+                        'lmin': fd['lmin'][i] if fd['lmin'] else 0,
+                        'min5': fd['min5'][i] if fd['min5'] else 0,
+                        'cmean': fd['cmean'][i] if fd['cmean'] else 0,
+                        'hv': fd['hv'][i] if fd['hv'] else 0,
+                        'lv': fd['lv'][i] if fd['lv'] else 0,
+                        'llowvol': fd['llowvol'][i] if fd['llowvol'] else 0,
+                        'lastdu4': fd['lastdu4'][i] if fd['lastdu4'] else 0
+                    }
+
+                    # 添加图标
+                    if name_idx >= 0:
+                        icon = fm.get_icon_for_row(row_data)
+                        if icon:
+                            values[name_idx] = f"{icon} {values[name_idx]}"
+                except Exception:
+                    row_data = None
+
+            # --- 插入 QTreeWidgetItem ---
+            item = QTreeWidgetItem(self.filter_tree)
+            for col, val in enumerate(values):
+                item.setText(col, str(val))
+                item.setTextAlignment(col, Qt.AlignmentFlag.AlignLeft)
+
+            # 设置 UserRole 保存 code
+            code_col = df.columns.get_loc('code') if 'code' in df.columns else 0
+            item.setData(0, Qt.ItemDataRole.UserRole, str(values[code_col]))
+
+            # 上色 percent 列
+            pct_idx = columns.index('percent') if 'percent' in columns else -1
+            if feature_data and pct_idx >= 0:
+                pct_val = row_data['percent'] if row_data else 0
+                if pct_val > 0:
+                    item.setForeground(pct_idx, QBrush(QColor("red")))
+                elif pct_val < 0:
+                    item.setForeground(pct_idx, QBrush(QColor("green")))
+
+        # --- 调整列宽 ---
+        header = self.filter_tree.header()
+        for col in range(self.filter_tree.columnCount()):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        header.setStretchLastSection(False)
+
+        prep_time = time.time() - prep_start
+        if prep_time > 0.1:
+            logger.debug(f"[TreeviewUpdater] 填充 {n_rows} 行耗时 {prep_time:.3f}s")
+
+
     def on_filter_combo_changed(self, index):
         query_str = self.filter_combo.currentData()
         self.filter_tree.clear()
@@ -3172,48 +3379,114 @@ class MainWindow(QMainWindow, WindowMixin):
             return
 
         try:
-            # 准备数据
+            # --- 1. 准备数据 ---
             df_to_search = self.df_all.copy()
             if 'code' not in df_to_search.columns:
-                 df_to_search['code'] = df_to_search.index.astype(str)
+                df_to_search['code'] = df_to_search.index.astype(str)
             if 'volume' in df_to_search.columns and 'vol' not in df_to_search.columns:
                 df_to_search['vol'] = df_to_search['volume']
 
-            # 执行查询
+            # --- 2. 执行查询 ---
             final_query = ensure_parentheses_balanced(query_str)
             matches = df_to_search.query(final_query)
+            if matches.empty:
+                self.statusBar().showMessage("Results: 0")
+                return
+
+            # # 调用高速填充
+            # self.populate_tree_from_df(matches)
             
-            # top_item = QTreeWidgetItem(self.filter_tree)
-            # top_item.setText(0, f"Results [{len(matches)}]")
-            # top_item.setExpanded(True)
+            # --- 3. 设置列头 ---
+            self.filter_tree.setColumnCount(4)
+            self.filter_tree.setHeaderLabels(['Code', 'Name', 'Rank', 'Percent'])
+            self.filter_tree.setSortingEnabled(True)
+            self.filter_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            self.filter_tree.setHorizontalScrollMode(QTreeWidget.ScrollMode.ScrollPerPixel)
+            self.filter_tree.setSizeAdjustPolicy(QTreeWidget.SizeAdjustPolicy.AdjustToContents)
 
-            # for idx, row in matches.iterrows():
-            #     code = str(row['code'])
-            #     name = str(row.get('name', ''))
-            #     child = QTreeWidgetItem(top_item)
-            #     child.setText(0, f"{code} {name}")
-            #     child.setData(0, Qt.ItemDataRole.UserRole, code)
-            #     pct = row.get('percent', 0)
-            #     if pct > 0: child.setForeground(0, QBrush(QColor("red")))
-            #     elif pct < 0: child.setForeground(0, QBrush(QColor("green")))
-
+            # --- 4. 填充数据 ---
             for idx, row in matches.iterrows():
                 code = str(row['code'])
                 name = str(row.get('name', ''))
-                child = QTreeWidgetItem(self.filter_tree)  # 直接顶格
-                child.setText(0, f"{code} {name}")
-                child.setData(0, Qt.ItemDataRole.UserRole, code)
-                
+                rank = row.get('Rank', 0)
                 pct = row.get('percent', 0)
+
+                child = QTreeWidgetItem(self.filter_tree)
+                child.setText(0, code)
+                child.setText(1, name)
+                child.setText(2, str(rank))
+                child.setText(3, f"{pct:.2f}%")
+                child.setData(0, Qt.ItemDataRole.UserRole, code)
+
+                # 左对齐
+                for col in range(4):
+                    child.setTextAlignment(col, Qt.AlignmentFlag.AlignLeft)
+
+                # 百分比上色
                 if pct > 0:
-                    child.setForeground(0, QBrush(QColor("red")))
+                    child.setForeground(3, QBrush(QColor("red")))
                 elif pct < 0:
-                    child.setForeground(0, QBrush(QColor("green")))
+                    child.setForeground(3, QBrush(QColor("green")))
+
+            # --- 5. 调整列宽，尽量紧凑 ---
+            header = self.filter_tree.header()
+            for col in range(self.filter_tree.columnCount()):
+                header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+            header.setStretchLastSection(False)  # 不拉伸最后一列
+
             self.statusBar().showMessage(f"Results: {len(matches)}")
 
         except Exception as e:
             err_item = QTreeWidgetItem(self.filter_tree)
             err_item.setText(0, f"Error: {e}")
+
+
+
+
+    # # 设置表格列自适应
+    # # 所有列自动根据内容调整宽度
+    # for col in range(len(headers)):
+    #     headers.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+
+    # def on_filter_combo_changed(self, index):
+    #     query_str = self.filter_combo.currentData()
+    #     self.filter_tree.clear()
+
+    #     if not query_str or self.df_all.empty:
+    #         return
+
+    #     try:
+    #         # 准备数据
+    #         df_to_search = self.df_all.copy()
+    #         if 'code' not in df_to_search.columns:
+    #              df_to_search['code'] = df_to_search.index.astype(str)
+    #         if 'volume' in df_to_search.columns and 'vol' not in df_to_search.columns:
+    #             df_to_search['vol'] = df_to_search['volume']
+
+    #         # 执行查询
+    #         final_query = ensure_parentheses_balanced(query_str)
+    #         matches = df_to_search.query(final_query)
+            
+
+
+    #         for idx, row in matches.iterrows():
+    #             code = str(row['code'])
+    #             name = str(row.get('name', ''))
+    #             rank = str(row.get('rank', 0))
+    #             child = QTreeWidgetItem(self.filter_tree)  # 直接顶格
+    #             child.setText(0, f"{code} {name}{rank}{pct}")
+    #             child.setData(0, Qt.ItemDataRole.UserRole, code)
+                
+    #             pct = row.get('percent', 0)
+    #             if pct > 0:
+    #                 child.setForeground(0, QBrush(QColor("red")))
+    #             elif pct < 0:
+    #                 child.setForeground(0, QBrush(QColor("green")))
+    #         self.statusBar().showMessage(f"Results: {len(matches)}")
+
+    #     except Exception as e:
+    #         err_item = QTreeWidgetItem(self.filter_tree)
+    #         err_item.setText(0, f"Error: {e}")
 
     def on_filter_tree_item_clicked(self, item, column):
         code = item.data(0, Qt.ItemDataRole.UserRole)
