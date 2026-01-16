@@ -331,7 +331,7 @@ class TradingLogger:
                     """, (now_str, price, reason, total_fee, net_profit, pnl_pct, t_id))
                     logger.info(f"TradeLogger: {code} ({name}) 平仓成功. 盈亏: {net_profit:.2f} ({pnl_pct:.2%})")
                 else:
-                    logger.warning(f"TradeLogger: {code} ({name}) No OPEN position to CLOSE.")
+                    logger.info(f"TradeLogger: {code} ({name}) Signal 'CLOSE' ignored (No OPEN position).")
             
             conn.commit()
             conn.close()

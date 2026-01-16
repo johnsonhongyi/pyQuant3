@@ -1500,8 +1500,9 @@ class StockLiveStrategy:
                 # --- ⭐ 将决策与监理感知回写至 snap (供 UI 同步使用) ---
                 snap['last_action'] = decision.get('action', 'HOLD')
                 snap['last_reason'] = decision.get('reason', '')
-                snap['market_win_rate'] = market_win_rate # 监理感知的胜率
-                snap['loss_streak'] = loss_streak # 监理感知的连亏
+                
+                # 修正：market_win_rate 和 loss_streak 已在上文注入 snap，此处无需重复赋值且避免 NameError
+                vwap = current_nclose
                 if vwap > 0:
                     snap['vwap_bias'] = (current_price - vwap) / vwap
                 else:

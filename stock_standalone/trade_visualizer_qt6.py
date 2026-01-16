@@ -740,9 +740,8 @@ class MainWindow(QMainWindow, WindowMixin):
             self.resample = self.resample_keys[0]
 
         # ⭐ 先初始化策略相关属性，再创建工具栏，防止 AttributeError
-        # Initialize Logger with absolute path to ensure data consistency
-        db_path = os.path.join(current_dir, "trading_signals.db")
-        self.logger = TradingLogger(db_path=db_path)
+        # Initialize Logger with default path to ensure consistency with main program
+        self.logger = TradingLogger()
         from intraday_decision_engine import IntradayDecisionEngine
         self.decision_engine = IntradayDecisionEngine() # ⭐ 内部决策引擎
         self.pullback_strat = StrongPullbackMA5Strategy(min_score=60) # ⭐ 强力回撤策略
@@ -766,10 +765,17 @@ class MainWindow(QMainWindow, WindowMixin):
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QHBoxLayout(main_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+
+        # Create a horizontal splitter for the main layout
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_layout.addWidget(self.main_splitter)
 
         # 1. Left Sidebar: Stock Table
         self.stock_table = QTableWidget()
-        self.stock_table.setMaximumWidth(300)
+        # Removed fixed maximum width to allow splitter resizing
+        # self.stock_table.setMaximumWidth(300) 
 
         self.stock_table.setStyleSheet("""
 
@@ -822,6 +828,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 列名中英文映射
         self.column_map = {
             'code': '代码', 'name': '名称', 'percent': '涨幅%', 'Rank': '排名',
+            'dff': '竞价幅%', 'win': '连阳', 'slope': '斜率', 'volume': '虚拟量', 'power_idx': '爆发力',
             'last_action': '策略动作', 'last_reason': '决策理由', 'shadow_info': '影子比对',
             'market_win_rate': '全场胜率', 'loss_streak': '连亏次数', 'vwap_bias': '均价偏离'
         }
@@ -829,10 +836,17 @@ class MainWindow(QMainWindow, WindowMixin):
         real_time_cols = list(cct.real_time_cols)
         strategy_cols = ['last_action', 'last_reason', 'shadow_info', 'market_win_rate', 'loss_streak', 'vwap_bias']
         
-        if len(real_time_cols) > 4 and 'percent' in real_time_cols:
-            self.headers = real_time_cols + strategy_cols
-        else:
-            self.headers = ['code', 'name', 'percent','dff', 'Rank', 'win', 'slope', 'volume', 'power_idx'] + strategy_cols
+        # 🛡️ 整合可视化所需的核心列，确保 'dff', 'Rank' 等字段始终出现在表头
+        visualizer_core_cols = ['code', 'name', 'percent', 'dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
+        
+        # 使用去重的方式合并列
+        combined_header_cols = []
+        source_cols = real_time_cols if len(real_time_cols) > 4 and 'percent' in real_time_cols else visualizer_core_cols
+        for c in (source_cols + visualizer_core_cols + strategy_cols):
+            if c not in combined_header_cols:
+                combined_header_cols.append(c)
+        
+        self.headers = combined_header_cols
         
         self.stock_table.setColumnCount(len(self.headers))
         
@@ -852,11 +866,15 @@ class MainWindow(QMainWindow, WindowMixin):
         self.stock_table.currentItemChanged.connect(self.on_current_item_changed) # 新增键盘支持
 
         self.stock_table.verticalHeader().setVisible(False)
-        main_layout.addWidget(self.stock_table)
+        self.main_splitter.addWidget(self.stock_table)
 
         # 2. Right Area: Splitter (Day K-Line + Intraday)
         right_splitter = QSplitter(Qt.Orientation.Vertical)
-        main_layout.addWidget(right_splitter, 1) # Stretch factor 1
+        self.main_splitter.addWidget(right_splitter)
+        
+        # Set initial sizes for the main splitter (left table: 280, right charts: remaining)
+        self.main_splitter.setSizes([280, 900])
+        self.main_splitter.setCollapsible(0, False) # Prevent table from being completely hidden
 
 
         # -- Top Chart: Day K-Line
@@ -886,6 +904,23 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # Load Stock List
         self.load_stock_list()
+
+        # ⭐ Load saved window position (Restores size and location)
+        self.load_window_position_qt(self, "trade_visualizer", default_width=1400, default_height=900)
+
+    def closeEvent(self, event):
+        """Override close event to save window position"""
+        try:
+            self.save_window_position_qt(self, "trade_visualizer")
+        except Exception as e:
+            logger.error(f"Failed to save window position: {e}")
+        
+        # Stop realtime process if running
+        self._closing = True
+        self._stop_realtime_process()
+        
+        # Accept the event to close
+        event.accept()
 
     def _init_toolbar(self):
         self.toolbar = QToolBar("Settings", self)
@@ -947,7 +982,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 4. 强制刷新 Y 轴到当前可见最佳高度 (由于 X 已在锁定期，autoRange 只会计算 Y)
         vb.autoRange()
         
-        logger.info(f"[VIEW] Reset to FullView: 0-{n} (Range: {x_min}-{x_max})")
+        # logger.debug(f"[VIEW] Reset to FullView: 0-{n} (Range: {x_min}-{x_max})")
 
     def _init_resample_toolbar(self):
         self.toolbar.addSeparator()
@@ -1606,7 +1641,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self.code_info_map[stock_code] = {"name": stock_name}
             
             # 填入可选列
-            optional_cols = [col for col in self.headers if col not in ['code', 'name']]
+            optional_cols = [col for col in self.headers if col.lower() not in ['code', 'name']]
             for col_idx, col_name in enumerate(optional_cols, start=2):
                 # 尝试大小写不敏感匹配
                 real_col = cols_in_df.get(col_name.lower())
@@ -1625,7 +1660,7 @@ class MainWindow(QMainWindow, WindowMixin):
                     item.setData(Qt.ItemDataRole.DisplayRole, 0 if col_name in ['Rank'] else 0.0)
 
                 # --- 颜色渲染 ---
-                if col_name == 'percent' and pd.notnull(val):
+                if col_name in ('percent', 'dff') and pd.notnull(val):
                     val_float = float(val)
                     if val_float > 0: item.setForeground(QColor('red'))
                     elif val_float < 0: item.setForeground(QColor('green'))
@@ -1773,7 +1808,7 @@ class MainWindow(QMainWindow, WindowMixin):
             else:
                 self._prev_y_zoom = None
             
-            logger.info(f"[VIEW] Capture: is_full={self._prev_is_full_view}, left_d={self._prev_dist_left:.1f}")
+            # logger.debug(f"[VIEW] Capture: is_full={self._prev_is_full_view}, left_d={self._prev_dist_left:.1f}")
         except Exception as e:
             logger.debug(f"Capture state failed: {e}")
 
