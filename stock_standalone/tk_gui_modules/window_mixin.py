@@ -171,6 +171,32 @@ class WindowMixin:
         except Exception as e:
             logger.error(f"[save_window_position] 失败: {e}")
 
+    def _get_available_geometry_qt(self,window=None):
+        app = QtWidgets.QApplication.instance()
+        screen = None
+
+        # 1️⃣ 优先使用窗口所属 screen（最可靠）
+        if window is not None:
+            try:
+                wh = window.windowHandle()
+                if wh is not None:
+                    screen = wh.screen()
+            except Exception:
+                screen = None
+
+        # 2️⃣ 回退 primaryScreen（允许为 None）
+        if screen is None and app is not None:
+            try:
+                screen = app.primaryScreen()
+            except Exception:
+                screen = None
+
+        # 3️⃣ 最终兜底
+        if screen is not None:
+            return screen.availableGeometry()
+
+        return None
+
     def load_window_position_qt(self, win: Any, window_name: str, file_path: Optional[str] = None, 
                                 default_width: int = 500, default_height: int = 500, offset_step: int = 100) -> tuple[int, int, Optional[int], Optional[int]]:
         """从统一配置文件加载 PyQt 窗口位置"""
@@ -202,12 +228,21 @@ class WindowMixin:
                     logger.debug(f"[load_window_position_qt] 加载 {window_name}: {width}x{height} {x}+{y}")
 
             if x is None or y is None:
-                if PYQT5_AVAILABLE:
-                    screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
-                    x = (screen.width() - width) // 2
-                    y = (screen.height() - height) // 2
+                geo = self._get_available_geometry_qt(win)
+                if geo is not None:
+                    x = (geo.width() - width) // 2
+                    y = (geo.height() - height) // 2
                 else:
+                    # ⭐ 永远不会崩的兜底
                     x, y = 100, 100
+                # if PYQT5_AVAILABLE:
+                #     screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+                #     x = (screen.width() - width) // 2
+                #     y = (screen.height() - height) // 2
+                # else:
+                #     x, y = 100, 100
+
+            
 
             if x is not None and y is not None:
                 if hasattr(self, "_pg_windows"):
@@ -256,9 +291,56 @@ class WindowMixin:
             with open(config_file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
 
-            logger.debug(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
+            logger.info(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
         except Exception as e:
             logger.error(f"[save_window_position_qt] 失败: {e}")
+
+    def save_window_position_qt_visual(
+        self,
+        win: Any,
+        window_name: str,
+        file_path: Optional[str] = None
+    ) -> None:
+        """保存 PyQt 窗口 position（Qt5 / Qt6 安全）"""
+        if file_path is None:
+            file_path = WINDOW_CONFIG_FILE
+
+        try:
+            window_name = str(window_name)
+            scale = self._get_dpi_scale_factor()
+            # ⭐ 使用 normalGeometry，避免最小化 / 最大化状态污染
+            if win.isMinimized() or win.isMaximized():
+                geom = win.normalGeometry()
+            else:
+                geom = win.geometry()
+
+            pos = {
+                "x": int(geom.x() / scale),
+                "y": int(geom.y() / scale),
+                "width": int(geom.width() / scale),
+                "height": int(geom.height() / scale),
+            }
+
+            config_file_path = self._get_config_file_path(file_path, scale)
+
+            data = {}
+            if os.path.exists(config_file_path):
+                try:
+                    with open(config_file_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                except Exception as e:
+                    logger.error(f"[save_window_position_qt] 读取失败: {e}")
+
+            data[window_name] = pos
+
+            with open(config_file_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+            logger.debug(f"[save_window_position_qt] 已保存 {window_name}: {pos}")
+
+        except Exception as e:
+            logger.error(f"[save_window_position_qt] 失败: {e}")
+
 
     def center_window(self, win: Union[tk.Tk, tk.Toplevel], width: int, height: int) -> None:
         """将指定窗口居中显示"""
