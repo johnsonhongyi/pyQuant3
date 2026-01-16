@@ -10,6 +10,7 @@ warnings.filterwarnings(
     message="pkg_resources is deprecated as an API.*"
 )
 import json
+import random
 import time
 import re
 import gc
@@ -41,6 +42,7 @@ from types import SimpleNamespace
 
 from JohnsonUtil.stock_sender import StockSender
 from JohnsonUtil import commonTips as cct
+from JohnsonUtil.commonTips import timed_ctx
 from JohnsonUtil import johnson_cons as ct
 from JSONData import tdx_data_Day as tdd
 from JSONData import stockFilter as stf
@@ -638,7 +640,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def on_close(self):
         try:
             logger.info("程序正在退出，执行保存与清理...")
-            self.vis_var = tk.BooleanVar(value=False)
+            self.vis_var.set(False)
             # 1. 保存预警规则
             if hasattr(self, 'alert_manager'):
                 self.alert_manager.save_all()
@@ -1888,13 +1890,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self._df_first_send_done = False
                 else:
                     # 进程已在运行，通过队列切换代码
-                        self.viz_command_queue.put(('SWITCH_CODE', code))
-                        logger.info(f"Queue: Sent SWITCH_CODE {code}")
-                        sent = True # 标记为已处理
-                        # 交互提示
-                        if hasattr(self, 'status_bar'):
-                            self.status_bar.config(text=f"正在切换可视化: {code} ...")
-                            self.update_idletasks()
+                    self.viz_command_queue.put(('SWITCH_CODE', code))
+                    logger.info(f"Queue: Sent SWITCH_CODE {code}")
+                    sent = True # 标记为已处理
+                    # 交互提示
+                    if hasattr(self, 'status_bar'):
+                        self.status_bar.config(text=f"正在切换可视化: {code} ...")
+                        self.update_idletasks()
             except Exception as e:
                 logger.error(f"Failed to start Qt visualizer: {e}")
                 traceback.print_exc()
@@ -1903,97 +1905,171 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not hasattr(self, '_df_first_send_done'):
             self._df_first_send_done = False
         import struct, pickle
-        # --- 启动后台线程（只启动一次） ---
+        from queue import Full
         def send_df(initial=True):
+            last_send_time = 0
+            min_interval = 0.2  # 最小发送间隔 200ms
+            max_jitter = 0.1    # 随机抖动 0~100ms
             while self._df_sync_running:
                 if not hasattr(self, 'df_all') or self.df_all.empty:
-                    time.sleep(10)
+                    time.sleep(2)
                     continue
-
+                sent = False  # ⭐ 本轮是否成功发送
                 try:
-                    # ⭐ 确保监理列存在 (若 strategy 没运行或没初始化，手动补齐)
+                    now = time.time()
+                    # ⭐ 限流 + 抖动
+                    if now - last_send_time < min_interval:
+                        time.sleep(min_interval - (now - last_send_time) + random.uniform(0, max_jitter))
+                    last_send_time = time.time()
+
+                    # --- 1️⃣ 确保必要列存在 ---
                     for scol in strategy_cols:
                         if scol not in self.df_all.columns:
-                            # 根据列类型给予默认值
-                            if scol in ['last_action', 'last_reason', 'shadow_info']:
-                                self.df_all[scol] = ""
-                            else:
-                                self.df_all[scol] = 0.0
+                            self.df_all[scol] = "" if scol in [
+                                'last_action', 'last_reason', 'shadow_info'
+                            ] else 0.0
 
-                    # ⭐ 容错：不区分大小写地抓取必要的列，解决 'percent' vs 'Percent' 等不平衡问题
+                    # --- 2️⃣ 列名容错映射 ---
                     all_cols_lower = {c.lower(): c for c in self.df_all.columns}
-                    final_mapped_cols = []
-                    
-                    # 总是包含必要的 UI 列
-                    for req_col in ui_cols:
-                        req_lower = req_col.lower()
-                        if req_lower in all_cols_lower:
-                            final_mapped_cols.append(all_cols_lower[req_lower])
-                        else:
-                            # 补齐缺失字段：字符型默认空串，数值型默认 0.0
-                            if any(k in req_lower for k in ['name', 'action', 'reason', 'info']):
-                                self.df_all[req_col] = ""
-                            else:
-                                self.df_all[req_col] = 0.0
-                            final_mapped_cols.append(req_col) 
+                    final_cols = []
 
-                    df_ui = self.df_all[final_mapped_cols].copy()
-                    
-                    # 如果 code 是索引且不在 actual_cols 中，强制重置索引以包含 code
-                    if 'code' not in df_ui.columns and self.df_all.index.name == 'code':
+                    for req in ui_cols:
+                        key = req.lower()
+                        if key in all_cols_lower:
+                            final_cols.append(all_cols_lower[key])
+                        else:
+                            self.df_all[req] = "" if any(
+                                k in key for k in ['name', 'action', 'reason', 'info']
+                            ) else 0.0
+                            final_cols.append(req)
+
+                    # df_ui = self.df_all[final_cols].copy()
+                    df_ui = self.df_all.copy()
+                    # --- 计算增量 ---
+                    if hasattr(self, 'df_ui_prev'):
+                        # df_diff = df_ui.compare(self.df_ui_prev, keep_shape=True, keep_equal=False)
+                        # df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
+                        try:
+                            if hasattr(self, 'df_ui_prev'):
+                                df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
+                            else:
+                                df_diff = df_ui.copy()
+                        except ValueError as e:
+                            # debug 输出索引和列的不一致
+                            prev_cols = set(self.df_ui_prev.columns) if hasattr(self, 'df_ui_prev') else set()
+                            curr_cols = set(df_ui.columns)
+                            prev_idx = set(self.df_ui_prev.index) if hasattr(self, 'df_ui_prev') else set()
+                            curr_idx = set(df_ui.index)
+
+                            logger.debug(f"[send_df] compare() ValueError: {e}")
+                            logger.debug(f"[send_df] columns prev={prev_cols}, curr={curr_cols}")
+                            logger.debug(f"[send_df] index prev={prev_idx}, curr={curr_idx}")
+
+                            # 为了不中断，可以直接把全量当作 diff
+                            df_diff = df_ui.copy()
+
+                        payload_to_send = df_diff
+                        # --- 3️⃣ 内存日志 ---
+                        mem = df_diff.memory_usage(deep=True).sum()
+                        msg_type = 'UPDATE_DF_DIFF'
+                    else:
+                        payload_to_send = df_ui
+                        # --- 3️⃣ 内存日志 ---
+                        mem = df_ui.memory_usage(deep=True).sum()
+                        msg_type = 'UPDATE_DF_ALL'
+
+                    # 更新缓存
+                    self.df_ui_prev = df_ui.copy()
+
+                    if 'code' not in df_ui.columns:
                         df_ui = df_ui.reset_index()
-                    elif 'code' not in df_ui.columns and not df_ui.empty:
-                        # 尝试将索引作为 code (如果索引看起来像代码)
-                        df_ui['code'] = df_ui.index
-                    
-                    # --- ⭐ 优先通过队列同步 (内存级别同步) ---
+
+                    logger.debug(
+                        f'df_ui: {msg_type} rows={len(df_ui)} mem={mem/1024:.1f} KB'
+                    )
+
+                    # ======================================================
+                    # ⭐ 4️⃣ 主通道：Queue
+                    # ======================================================
                     if self.viz_command_queue:
                         try:
-                            # 限制堆积，只保留最新的一份数据
-                            while not self.viz_command_queue.empty():
-                                try:
-                                    # 尝试清理旧的 DATA 指令，但不清理 SWITCH_CODE
-                                    # 注意：mp.Queue 没有简单的查看方法，这里我们简单 put 覆盖或由消费端处理最新即可
-                                    # 这里简单 put 最新，消费端 while 循环 get 直到最后一份
-                                    pass
-                                except: break
-                            
-                            self.viz_command_queue.put(('UPDATE_DF_ALL', df_ui))
-                            logger.debug(f"[Queue] df_all 同步已推送 ({len(df_ui)} 行)")
-                            self._df_first_send_done = True # 标记发送成功
-                        except Exception as q_e:
-                            logger.warning(f"Push to viz_command_queue failed: {q_e}")
+                            with timed_ctx(f"viz_queue_put[{len(df_ui)}]", warn_ms=300):
+                                self.viz_command_queue.put_nowait(
+                                    (msg_type, payload_to_send)
+                                )
+                                    # ('UPDATE_DF_ALL', df_ui)
+                            # logger.debug(
+                            #     f"[Queue] df_all sent ({len(df_ui)} rows)"
+                            # )
+                            logger.debug(f"[Queue] {msg_type} sent ({len(payload_to_send)} rows)")
+                            sent = True
 
-                    # --- 2. Socket 备份发送 (用于跨实例或外部工具联动) ---
-                    pickled_data = pickle.dumps(df_ui, protocol=pickle.HIGHEST_PROTOCOL)
-                    header = struct.pack("!I", len(pickled_data))
+                        except Full:
+                            logger.warning("[Queue] full, fallback to IPC")
 
-                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                        s.settimeout(1.0)
-                        s.connect((ipc_host, ipc_port))  # 尝试连接，不管 self.qt_process
-                        s.sendall(b"DATA" + header + pickled_data)
+                        except Exception as e:
+                            logger.exception(f"[Queue] send failed:: {e}")
 
-                    # 连接成功，说明 GUI 可用
-                    if not getattr(self, "_df_first_send_done", False):
-                        logger.info(f"[IPC] 初始 df_all 已发送 ({len(df_ui)} 行)")
-                        self._df_first_send_done = True
-                    else:
-                        logger.debug(f"[IPC] df_all 定时发送 ({len(df_ui)} 行)")
+                    # ======================================================
+                    # ⭐ 5️⃣ 兜底通道：Socket（仅当 Queue 失败）
+                    # ======================================================
+                    if not sent:
+                        try:
+                            # 1️⃣ pickle 单独计时
+                            with timed_ctx("viz_IPC_pickle", warn_ms=300):
+                                payload = pickle.dumps((msg_type, payload_to_send),
+                                         protocol=pickle.HIGHEST_PROTOCOL)
+                                # payload = pickle.dumps(
+                                #     df_ui, protocol=pickle.HIGHEST_PROTOCOL)
+
+                            header = struct.pack("!I", len(payload))
+
+                            # 2️⃣ socket 单独计时
+                            with timed_ctx("viz_IPC_send", warn_ms=300):
+                                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                                    s.settimeout(1.0)
+                                    s.connect((ipc_host, ipc_port))
+                                    s.sendall(b"DATA" + header + payload)
+
+                            # logger.info(f"[IPC] df_all sent ({len(df_ui)} rows)")
+                            logger.info(f"[IPC] {msg_type} sent ({len(payload_to_send)} rows)")
+                            sent = True
+
+                        except Exception as e:
+                            logger.warning(f"[IPC] send failed: {e}")
 
                 except Exception:
-                    # 连接失败，GUI 可能没启动 → 重置 first_send_done
-                    self._df_first_send_done = False
+                    logger.exception("[send_df] unexpected error")
+                finally:
+                    if sent:
+                        cct.print_timing_summary_filter(include_prefix="viz_", top_n=10)
+                # ======================================================
+                # ⭐ 6️⃣ 状态更新（只在这里）
+                # ======================================================
+                prev = getattr(self, "_df_first_send_done", False)
+                self._df_first_send_done = sent
 
-                # 初次发送后 10 分钟一次，否则快速重试
-                # time.sleep()
-                loop_time = 300 if getattr(self, "_df_first_send_done", False) else 5
-                for _ in range(loop_time):
-                    if not self._df_first_send_done:
+                # 状态刚从 False → True：立即进入慢速周期
+                if sent and not prev:
+                    logger.info("[send_df] first successful send")
+
+                # ======================================================
+                # ⭐ 7️⃣ 调度逻辑
+                # ======================================================
+                sleep_seconds = 300 if sent else 3
+                for _ in range(sleep_seconds):
+                    if not self._df_sync_running or not self._df_first_send_done:
                         break
                     time.sleep(1)
 
+
         # 启动线程（只启动一次）
         if not hasattr(self, '_df_sync_thread') or not self._df_sync_thread.is_alive():
+            # import traceback, logging
+            # logger.warning(
+            #     "Starting df_sync thread\n%s",
+            #     "".join(traceback.format_stack(limit=5))
+            # )
             self._df_sync_thread = threading.Thread(target=send_df, daemon=True)
             self._df_sync_thread.start()
 
@@ -2056,6 +2132,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.live_strategy.set_scan_hot_concepts(status=False)
                 logger.info(f'self.live_strategy.scan_hot_concepts_status  will be close')
         if not self.vis_var.get() and getattr(self, "_df_first_send_done"):
+            # logger.debug(f'change _df_first_send_done:{self._df_first_send_done}')
+            logger.debug(f"[send_df] force full send: deleting df_ui_prev, _df_first_send_done={self._df_first_send_done}")
+            if hasattr(self, "df_ui_prev"):
+                del self.df_ui_prev  # 删除缓存，模拟初始化
             self._df_first_send_done = False
         # self.update_treeview_cols(self.current_cols)
         tip_var_status_flag.value = self.tip_var.get()
@@ -3966,7 +4046,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                          pass
                 return
             
-            import random
             # 计算随机偏移量
             dx = random.randint(-distance, distance)
             dy = random.randint(-distance, distance)

@@ -5,8 +5,12 @@ import numpy as np
 import pyqtgraph as pg
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QSplitter, QFrame, QMessageBox, QAbstractItemView
+    QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QSplitter, QFrame, QMessageBox, QAbstractItemView,
+    QTreeWidget, QTreeWidgetItem
 )
+import json
+import stock_logic_utils
+from stock_logic_utils import ensure_parentheses_balanced, remove_invalid_conditions
 from PyQt6.QtCore import QObject,Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QBrush, QPen
 from PyQt6.QtWidgets import QComboBox, QCheckBox, QHBoxLayout, QLabel, QToolBar
@@ -25,7 +29,6 @@ from JohnsonUtil.commonTips import timed_ctx,print_timing_summary
 from JohnsonUtil import johnson_cons as ct
 import datetime  # ⚠️ 必须导入
 import time
-import json
 from StrongPullbackMA5Strategy import StrongPullbackMA5Strategy
 # Configuration
 IPC_PORT = 26668
@@ -190,7 +193,7 @@ def recv_exact(sock, size: int) -> bytes:
 
 class CommandListenerThread(QThread):
     command_received = pyqtSignal(str)
-    dataframe_received = pyqtSignal(object)  # For df_all updates
+    dataframe_received = pyqtSignal(object, str)  # 传 df 和 msg_type
 
     def __init__(self, server_socket):
         super().__init__()
@@ -202,8 +205,10 @@ class CommandListenerThread(QThread):
             try:
                 client_socket, _ = self.server_socket.accept()
                 client_socket.settimeout(3.0)
-                # 先读前 4 个字节判断协议
+
+                # 读取前 4 个字节判断协议
                 prefix = recv_exact(client_socket, 4)
+
                 # -------- DATA 协议 --------
                 if prefix == b"DATA":
                     try:
@@ -212,9 +217,11 @@ class CommandListenerThread(QThread):
                         size = struct.unpack("!I", header)[0]
 
                         # 读取完整 payload
-                        payload = recv_exact(client_socket, size)
-                        df = pickle.loads(payload)
-                        self.dataframe_received.emit(df)
+                        payload_bytes = recv_exact(client_socket, size)
+                        msg_type, df = pickle.loads(payload_bytes)  # 解包 msg_type
+
+                        # 发射信号：df + msg_type
+                        self.dataframe_received.emit(df, msg_type)
 
                     except Exception as e:
                         print(f"[IPC] Error receiving DATA: {e}")
@@ -237,6 +244,7 @@ class CommandListenerThread(QThread):
 
             except Exception as e:
                 print(f"[IPC] Listener Error: {e}")
+
 
 
 duration_date_day = 70
@@ -416,67 +424,6 @@ def realtime_worker_process(code, queue, stop_flag,log_level=None,debug_realtime
                     break
                 time.sleep(1)
     # print(f'stop_flag: {stop_flag.value}')
-
-# def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-#         """
-#         统一 DataFrame 结构：
-#         - MultiIndex(code, ticktime) → 普通列 code, ticktime
-#         - ticktime 自适应类型：
-#             - datetime → 保留
-#             - str → 转 datetime
-#             - float/int timestamp → 转 datetime
-#         - 重置 index，保证 Viewer 内部只使用列
-#         """
-#         df = df.copy()
-
-#         if isinstance(df.index, pd.MultiIndex):
-#             idx_names = df.index.names
-
-#             # code
-#             if 'code' in idx_names:
-#                 df['code'] = df.index.get_level_values('code')
-#             else:
-#                 df['code'] = df.index.get_level_values(0)
-
-#             # ticktime / time / datetime
-#             time_level = None
-#             for name in idx_names:
-#                 if name and name.lower() in ('ticktime', 'time', 'datetime', 'date'):
-#                     time_level = name
-#                     break
-
-#             if time_level:
-#                 ts = df.index.get_level_values(time_level)
-#             else:
-#                 ts = df.index.get_level_values(1)
-
-#             # 自适应处理 ticktime
-#             if np.issubdtype(ts.dtype, np.datetime64):
-#                 df['ticktime'] = ts
-#             elif np.issubdtype(ts.dtype, np.number):
-#                 # float/int timestamp → datetime
-#                 df['ticktime'] = pd.to_datetime(ts, unit='s', errors='coerce')
-#             else:
-#                 # str → datetime
-#                 df['ticktime'] = pd.to_datetime(ts, errors='coerce')
-
-#             df.reset_index(drop=True, inplace=True)
-#         else:
-#             # 单层 index 或普通 DataFrame
-#             if 'ticktime' in df.columns:
-#                 if np.issubdtype(df['ticktime'].dtype, np.datetime64):
-#                     pass  # 保留
-#                 elif np.issubdtype(df['ticktime'].dtype, np.number):
-#                     df['ticktime'] = pd.to_datetime(df['ticktime'], unit='s', errors='coerce')
-#                 else:
-#                     df['ticktime'] = pd.to_datetime(df['ticktime'], errors='coerce')
-
-#             # 如果 index 是 code，也转成列
-#             if 'code' not in df.columns:
-#                 df = df.reset_index()
-#                 df.rename(columns={df.columns[0]: 'code'}, inplace=True)
-
-#         return df
 
 def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -755,6 +702,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self._init_theme_selector()
         self._init_tdx()
         self._init_real_time()
+        self._init_filter_toolbar()
         
         self.current_code = None
         self.df_all = pd.DataFrame()  # Store real-time data from MonitorTK
@@ -828,7 +776,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 列名中英文映射
         self.column_map = {
             'code': '代码', 'name': '名称', 'percent': '涨幅%', 'Rank': '排名',
-            'dff': '竞价幅%', 'win': '连阳', 'slope': '斜率', 'volume': '虚拟量', 'power_idx': '爆发力',
+            'dff': 'DFF', 'win': '连阳', 'slope': '斜率', 'volume': '虚拟量', 'power_idx': '爆发力',
             'last_action': '策略动作', 'last_reason': '决策理由', 'shadow_info': '影子比对',
             'market_win_rate': '全场胜率', 'loss_streak': '连亏次数', 'vwap_bias': '均价偏离'
         }
@@ -874,8 +822,8 @@ class MainWindow(QMainWindow, WindowMixin):
         right_splitter = QSplitter(Qt.Orientation.Vertical)
         self.main_splitter.addWidget(right_splitter)
         
-        # Set initial sizes for the main splitter (left table: 280, right charts: remaining)
-        self.main_splitter.setSizes([280, 900])
+        # Set initial sizes for the main splitter (left table: 200, right charts: remaining)
+        self.main_splitter.setSizes([200, 900])
         self.main_splitter.setCollapsible(0, False) # Prevent table from being completely hidden
 
 
@@ -898,6 +846,73 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # Set splitter sizes (70% top, 30% bottom)
         right_splitter.setSizes([500, 200])
+
+        # 3. Filter Panel (Initially Hidden)
+        self.filter_panel = QWidget()
+        filter_layout = QVBoxLayout(self.filter_panel)
+        filter_layout.setContentsMargins(0, 0, 0, 0)
+        
+        # Top Controls - 按钮行
+        button_row = QHBoxLayout()
+        btn_manage = QPushButton("Manage")
+        btn_manage.setMaximumWidth(60)
+        btn_manage.clicked.connect(self.open_history_manager)
+        button_row.addWidget(btn_manage)
+
+        btn_refresh = QPushButton("R") # Refresh
+        btn_refresh.setMaximumWidth(30)
+        btn_refresh.clicked.connect(self.load_history_filters)
+        button_row.addWidget(btn_refresh)
+        button_row.addStretch()
+        
+        filter_layout.addLayout(button_row)
+        
+        # ComboBox - 过滤条件选择
+        self.filter_combo = QComboBox()
+        self.filter_combo.currentIndexChanged.connect(self.on_filter_combo_changed)
+        filter_layout.addWidget(self.filter_combo)
+
+        # Filter Tree - 过滤结果
+        self.filter_tree = QTreeWidget()
+        self.filter_tree.setHeaderLabels(["Filtered Results"])
+        self.filter_tree.setColumnCount(1) 
+        self.filter_tree.itemClicked.connect(self.on_filter_tree_item_clicked)
+        # 添加键盘导航支持
+        self.filter_tree.currentItemChanged.connect(self.on_filter_tree_current_changed)
+        
+        # 应用窄边滚动条样式，与左侧列表一致
+        scrollbar_style = """
+            QScrollBar:vertical {
+                border: none;
+                background: #2b2b2b;
+                width: 8px;
+                margin: 0px;
+            }
+            QScrollBar::handle:vertical {
+                background: #555555;
+                min-height: 20px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #666666;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+        """
+        self.filter_tree.setStyleSheet(scrollbar_style)
+        filter_layout.addWidget(self.filter_tree)
+        
+        self.filter_panel.setVisible(False)
+        self.main_splitter.addWidget(self.filter_panel)
+        
+        # 设置默认分割比例（不加载保存的设置）
+        # 股票列表:过滤面板:图表区域 = 400:200:800
+        self.main_splitter.setSizes([400, 200, 800])
+
         # 安装全局事件过滤器
         self.input_filter = GlobalInputFilter(self)
         self.installEventFilter(self.input_filter)
@@ -910,6 +925,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⭐ Load saved window position (Restores size and location)
         self._window_pos_loaded = False   # ⭐ 必须加
         # self.load_window_position_qt(self, "trade_visualizer", default_width=1400, default_height=900)
+        self.load_splitter_state()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1253,13 +1269,22 @@ class MainWindow(QMainWindow, WindowMixin):
             except Exception:
                 logger.exception("Error in on_realtime_update")
 
+    def apply_df_diff(self, df_diff):
+        for col in df_diff.columns:
+            mask = df_diff[col].notna()
+            self.df_all.loc[mask, col] = df_diff.loc[mask, col]
+        # self.render_table_or_charts()
+        # 用 update_df_all 来刷新界面
+        self.update_df_all(self.df_all)
+
     def _poll_command_queue(self):
-        """轮询内部指令队列 (优化：消费所有积压，只取最新全量数据)"""
+        """轮询内部指令队列 (消费所有积压，只取最新数据)"""
         if not self.command_queue:
             return
-        
         try:
-            latest_df = None
+            latest_full_df = None
+            df_diffs = []
+
             while not self.command_queue.empty():
                 cmd_data = self.command_queue.get_nowait()
                 if isinstance(cmd_data, tuple) and len(cmd_data) == 2:
@@ -1267,18 +1292,56 @@ class MainWindow(QMainWindow, WindowMixin):
                     if cmd == 'SWITCH_CODE':
                         logger.info(f"Queue CMD: Switching to {val}")
                         self.load_stock_by_code(val)
+
                     elif cmd == 'UPDATE_DF_ALL':
-                        # 记录最新的全量数据，跳过中间过时的
                         if isinstance(val, pd.DataFrame):
-                            latest_df = val
-            
-            # 处理最鲜活的一份数据
-            if latest_df is not None:
-                logger.debug(f"Queue CMD: Instant sync df_all ({len(latest_df)} rows)")
-                self.update_df_all(latest_df)
+                            # 全量覆盖 → 丢弃之前的增量
+                            latest_full_df = val
+                            df_diffs.clear()
+
+                    elif cmd == 'UPDATE_DF_DIFF':
+                        if isinstance(val, pd.DataFrame):
+                            df_diffs.append(val)
+
+            # --- 处理最新全量数据 ---
+            if latest_full_df is not None:
+                logger.debug(f"[Queue] Instant sync full df_all ({len(latest_full_df)} rows)")
+                self.update_df_all(latest_full_df)
+
+            # --- 处理增量数据 ---
+            for diff_df in df_diffs:
+                logger.debug(f"[Queue] Instant apply df diff ({len(diff_df)} rows)")
+                self.apply_df_diff(diff_df)
 
         except Exception as e:
-            logger.debug(f"Poll command queue failed: {e}")
+            logger.warning(f"Poll command queue failed: {e}")
+
+    # def _poll_command_queue_ALL(self):
+    #     """轮询内部指令队列 (优化：消费所有积压，只取最新全量数据)"""
+    #     if not self.command_queue:
+    #         return
+        
+    #     try:
+    #         latest_df = None
+    #         while not self.command_queue.empty():
+    #             cmd_data = self.command_queue.get_nowait()
+    #             if isinstance(cmd_data, tuple) and len(cmd_data) == 2:
+    #                 cmd, val = cmd_data
+    #                 if cmd == 'SWITCH_CODE':
+    #                     logger.info(f"Queue CMD: Switching to {val}")
+    #                     self.load_stock_by_code(val)
+    #                 elif cmd == 'UPDATE_DF_ALL':
+    #                     # 记录最新的全量数据，跳过中间过时的
+    #                     if isinstance(val, pd.DataFrame):
+    #                         latest_df = val
+            
+    #         # 处理最鲜活的一份数据
+    #         if latest_df is not None:
+    #             logger.debug(f"Queue CMD: Instant sync df_all ({len(latest_df)} rows)")
+    #             self.update_df_all(latest_df)
+
+    #     except Exception as e:
+    #         logger.debug(f"Poll command queue failed: {e}")
 
     def on_signal_clicked(self, plot, points):
         """点击 K 线信号图标时触发，显示详细决策理由与指标"""
@@ -1298,7 +1361,6 @@ class MainWindow(QMainWindow, WindowMixin):
         indicators_raw = data.get("indicators", "{}")
 
         # 处理指标 JSON
-        import json
         try:
             if isinstance(indicators_raw, str):
                 indicators = json.loads(indicators_raw)
@@ -1586,6 +1648,7 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.error(f"Failed to save window position: {e}")
 
+        print(f'closeEvent: OK')
         # Accept the event to close
         event.accept()
         # 6️⃣ 调用父类 closeEvent
@@ -1722,6 +1785,14 @@ class MainWindow(QMainWindow, WindowMixin):
                                 self.sender.send(code)
                             except Exception as e:
                                 print(f"Error sending stock code: {e}")
+
+    def on_dataframe_received(self, df, msg_type):
+        if msg_type == "UPDATE_DF_ALL":
+            self.update_df_all(df)
+        elif msg_type == "UPDATE_DF_DIFF":
+            self.apply_df_diff(df)
+        else:
+            logger.warning(f"Unknown msg_type: {msg_type}")
 
     def update_df_all(self, df=None):
         """
@@ -2958,6 +3029,261 @@ class MainWindow(QMainWindow, WindowMixin):
             
         return hits
 
+    def _init_filter_toolbar(self):
+        # 查找或创建 Filter Action
+        actions = self.toolbar.actions()
+        has_filter = any(a.text() == "Filter" for a in actions)
+        if not has_filter:
+            filter_action = self.toolbar.addAction("Filter")
+            filter_action.setCheckable(True)
+            filter_action.triggered.connect(self.toggle_filter_panel)
+            self.filter_action = filter_action
+
+    def toggle_filter_panel(self, checked):
+        self.filter_panel.setVisible(checked)
+        if checked:
+            self.load_history_filters()
+
+    def open_history_manager(self):
+        import subprocess
+        try:
+            # 假设 history_manager.py 在同一目录下
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            script_path = os.path.join(base_dir, "history_manager.py")
+            if os.path.exists(script_path):
+                subprocess.Popen(["python", script_path], cwd=base_dir)
+            else:
+                QMessageBox.warning(self, "Error", f"history_manager.py not found at {script_path}")
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to launch manager: {e}")
+
+    def load_history_filters(self):
+        from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
+        import os
+        
+        self.filter_combo.blockSignals(True)
+        self.filter_combo.clear()
+        
+        history_path = SEARCH_HISTORY_FILE
+        
+        if not os.path.exists(history_path):
+             self.filter_combo.addItem("History file not found")
+             self.filter_combo.blockSignals(False)
+             return
+
+        try:
+            with open(history_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            # 使用 history4
+            self.history_items = data.get("history4", [])
+            for item in self.history_items:
+                q = item.get("query", "")
+                note = item.get("note", "")
+                label = f"{note} ({q})" if note else q
+                self.filter_combo.addItem(label, userData=q) # Store query in UserData
+            
+            if not self.history_items:
+                 self.filter_combo.addItem("(No history)")
+
+        except Exception as e:
+            self.filter_combo.addItem(f"Error: {e}")
+        
+        self.filter_combo.blockSignals(False)
+        # Load first item if available
+        if self.filter_combo.count() > 0:
+             self.on_filter_combo_changed(0)
+
+    def on_filter_combo_changed(self, index):
+        query_str = self.filter_combo.currentData()
+        self.filter_tree.clear()
+
+        if not query_str or self.df_all.empty:
+            return
+
+        try:
+            # 准备数据
+            df_to_search = self.df_all.copy()
+            if 'code' not in df_to_search.columns:
+                 df_to_search['code'] = df_to_search.index.astype(str)
+            if 'volume' in df_to_search.columns and 'vol' not in df_to_search.columns:
+                df_to_search['vol'] = df_to_search['volume']
+
+            # 执行查询
+            final_query = ensure_parentheses_balanced(query_str)
+            matches = df_to_search.query(final_query)
+            
+            # top_item = QTreeWidgetItem(self.filter_tree)
+            # top_item.setText(0, f"Results [{len(matches)}]")
+            # top_item.setExpanded(True)
+
+            # for idx, row in matches.iterrows():
+            #     code = str(row['code'])
+            #     name = str(row.get('name', ''))
+            #     child = QTreeWidgetItem(top_item)
+            #     child.setText(0, f"{code} {name}")
+            #     child.setData(0, Qt.ItemDataRole.UserRole, code)
+            #     pct = row.get('percent', 0)
+            #     if pct > 0: child.setForeground(0, QBrush(QColor("red")))
+            #     elif pct < 0: child.setForeground(0, QBrush(QColor("green")))
+
+            for idx, row in matches.iterrows():
+                code = str(row['code'])
+                name = str(row.get('name', ''))
+                child = QTreeWidgetItem(self.filter_tree)  # 直接顶格
+                child.setText(0, f"{code} {name}")
+                child.setData(0, Qt.ItemDataRole.UserRole, code)
+                
+                pct = row.get('percent', 0)
+                if pct > 0:
+                    child.setForeground(0, QBrush(QColor("red")))
+                elif pct < 0:
+                    child.setForeground(0, QBrush(QColor("green")))
+            self.statusBar().showMessage(f"Results: {len(matches)}")
+
+        except Exception as e:
+            err_item = QTreeWidgetItem(self.filter_tree)
+            err_item.setText(0, f"Error: {e}")
+
+    def on_filter_tree_item_clicked(self, item, column):
+        code = item.data(0, Qt.ItemDataRole.UserRole)
+        if code:
+            # 1. 触发图表加载
+            self.load_stock_by_code(code)
+            
+            # 2. 联动左侧列表选中
+            self._select_stock_in_main_table(code)
+
+    def on_filter_tree_current_changed(self, current, previous):
+        """处理键盘导航（上下键）"""
+        if current:
+            code = current.data(0, Qt.ItemDataRole.UserRole)
+            if code:
+                # 触发图表加载
+                self.load_stock_by_code(code)
+                # 联动左侧列表选中
+                self._select_stock_in_main_table(code)
+
+    def _select_stock_in_main_table(self, target_code):
+        """在左侧 stock_table 中查找并滚动到指定 code"""
+        # 遍历查找 (假设数据量不大，几千行以内尚可)
+        # 如果 self.stock_table 行数过多，建议维护 code -> row 映射
+        row_count = self.stock_table.rowCount()
+        for row in range(row_count):
+            item = self.stock_table.item(row, 0) # 第0列通常是 Code? 需确认
+            # get data from UserRole or text
+            if item:
+                code_data = item.data(Qt.ItemDataRole.UserRole)
+                if not code_data:
+                    code_data = item.text()
+                
+                if str(code_data) == str(target_code):
+                    self.stock_table.selectRow(row)
+                    self.stock_table.scrollToItem(item)
+                    break
+
+    def load_splitter_state(self):
+        """加载保存的分割器状态"""
+        try:
+            config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
+            if os.path.exists(config_file):
+                with open(config_file, 'r', encoding='utf-8') as f:
+                    config = json.load(f)
+                    sizes = config.get('splitter_sizes', [])
+                    if sizes and len(sizes) == 3:
+                        self.main_splitter.setSizes(sizes)
+                        return
+        except Exception as e:
+            print(f"Failed to load splitter state: {e}")
+        
+        # 默认分割比例：股票列表:过滤面板:图表区域 = 1:1:4
+        self.main_splitter.setSizes([200, 200, 800])
+    
+    # def save_splitter_state(self):
+    #     """保存分割器状态（过滤隐藏面板的 0 值）"""
+    #     try:
+    #         config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
+
+    #         sizes = self.main_splitter.sizes()
+    #         fixed_sizes = list(sizes)
+
+    #         # 假设 filter 是第 3 个（index=2）
+    #         FILTER_INDEX = 2
+    #         FILTER_DEFAULT = 100
+    #         FILTER_MIN = 60
+
+    #         # 如果 filter 当前是隐藏状态或 size=0，写入合理值
+    #         if fixed_sizes[FILTER_INDEX] <= 0:
+    #             fixed_sizes[FILTER_INDEX] = max(
+    #                 FILTER_DEFAULT,
+    #                 FILTER_MIN
+    #             )
+
+    #         config = {'splitter_sizes': fixed_sizes}
+
+    #         with open(config_file, 'w', encoding='utf-8') as f:
+    #             json.dump(config, f, indent=2)
+
+    #         logger.info(
+    #             f'save_splitter sizes: raw={sizes}, fixed={fixed_sizes}, file={config_file}'
+    #         )
+
+    #     except Exception as e:
+    #         logger.exception("Failed to save splitter state")
+
+    def save_splitter_state(self):
+        """保存分割器状态（过滤隐藏面板的 0 值）"""
+        try:
+            config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
+
+            sizes = self.main_splitter.sizes()
+            fixed_sizes = list(sizes)
+
+            # 假设 filter 是第 3 个（index=2）
+            FILTER_INDEX = 2
+            FILTER_DEFAULT = 100
+            FILTER_MIN = 60
+
+            # 尝试读取历史保存值
+            old_size = None
+            if os.path.exists(config_file):
+                try:
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        old_config = json.load(f)
+                        old_sizes = old_config.get('splitter_sizes', [])
+                        if len(old_sizes) > FILTER_INDEX:
+                            old_size = old_sizes[FILTER_INDEX]
+                except Exception:
+                    old_size = None
+
+            # 如果当前 size 为 0，则使用历史值或默认值
+            if fixed_sizes[FILTER_INDEX] <= 0:
+                if old_size and old_size > 0:
+                    fixed_sizes[FILTER_INDEX] = old_size
+                else:
+                    fixed_sizes[FILTER_INDEX] = max(FILTER_DEFAULT, FILTER_MIN)
+
+            config = {'splitter_sizes': fixed_sizes}
+
+            with open(config_file, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=2)
+
+            logger.info(
+                f'save_splitter sizes: raw={sizes}, fixed={fixed_sizes}, file={config_file}'
+            )
+
+        except Exception as e:
+            logger.exception("Failed to save splitter state")
+
+
+    
+    def closeEvent(self, event):
+        """窗口关闭事件"""
+        # 保存分割器状态
+        self.save_splitter_state()
+        # 调用父类的 closeEvent
+        super().closeEvent(event)
+
 def run_visualizer(initial_code=None, df_all=None):
     """
     启动 Visualizer GUI。
@@ -3017,7 +3343,8 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
     # 启动监听线程，处理 socket 消息
     listener = CommandListenerThread(server_socket)
     listener.command_received.connect(window.load_stock_by_code)
-    listener.dataframe_received.connect(window.update_df_all)
+    # listener.dataframe_received.connect(window.update_df_all)
+    listener.dataframe_received.connect(window.on_dataframe_received)
     # listener.command_received.connect(lambda: window.raise_())
     # listener.command_received.connect(lambda: window.activateWindow())
     listener.start()

@@ -119,6 +119,68 @@ def dump_timing_stats(top=10,logger=log):
 # @timed_block("fetch_and_process", warn_ms=1000)
 # def fetch_and_process(...):
 
+def print_timing_summary_filter(
+    top_n=10,
+    unit="ms",
+    include_names=None,
+    include_prefix=None,
+):
+    """
+    汇总 _TIMING_STATS 并打印 top_n 慢函数
+
+    :param top_n: 显示前 top_n 个慢函数
+    :param unit: 时间单位 'ms' 或 's'
+    :param include_names: 仅显示指定 name（list / set）
+    :param include_prefix: 仅显示指定前缀（如 'viz_'）
+    """
+    summary = []
+
+    if include_names:
+        include_names = set(include_names)
+
+    for name, times in list(_TIMING_STATS.items()):
+        if not times:
+            continue
+
+        # ===== 名称过滤逻辑 =====
+        if include_names is not None and name not in include_names:
+            continue
+        if include_prefix is not None and not name.startswith(include_prefix):
+            continue
+
+        arr = np.asarray(times)
+        if unit == "s":
+            arr = arr / 1000.0
+
+        summary.append({
+            "name": name,
+            "count": len(arr),
+            "mean": float(np.mean(arr)),
+            "max": float(np.max(arr)),
+            "p95": float(np.percentile(arr, 95)),
+        })
+
+    if not summary:
+        print("\n[Timing] No matching timing records.")
+        return
+
+    # 按平均耗时排序
+    summary_sorted = sorted(
+        summary, key=lambda x: x["mean"], reverse=True
+    )
+
+    print(f"\n{'Function':40} {'count':>6} {'mean':>10} {'max':>10} {'p95':>10}")
+    print("-" * 80)
+
+    for item in summary_sorted[:top_n]:
+        print(
+            f"{item['name'][:40]:40} "
+            f"{item['count']:6d} "
+            f"{item['mean']:10.2f} "
+            f"{item['max']:10.2f} "
+            f"{item['p95']:10.2f}"
+        )
+
 def print_timing_summary(top_n=10, unit="ms"):
     """
     汇总 _TIMING_STATS 并打印 top_n 慢函数
