@@ -211,15 +211,28 @@ class SafeHDFStore(pd.HDFStore):
         need_repair = False
 
         # ========= 核心：只在这里判断是否损坏 =========
-        try:
-            with timed_ctx("hdfstore_open"):
-                # super().__init__(self.fname, mode=mode, **kwargs)
-                super().__init__(self.fname, **kwargs)
-            opened = True
-
-        except (tables.exceptions.HDF5ExtError, OSError, ValueError) as e:
-            self.log.error(f"[HDF] open failed: {e}")
-            need_repair = True
+        retry_count = 5
+        for attempt in range(retry_count):
+            try:
+                with timed_ctx(f"hdfstore_open_{attempt}"):
+                    # super().__init__(self.fname, mode=mode, **kwargs)
+                    super().__init__(self.fname, **kwargs)
+                opened = True
+                break
+            except (tables.exceptions.HDF5ExtError, OSError, ValueError, PermissionError) as e:
+                self.log.error(f"[HDF] open failed (attempt {attempt+1}/{retry_count}): {e}")
+                if attempt < retry_count - 1:
+                    self.log.warning(f"[HDF] Retrying in 3s... Releasing lock first.")
+                    try:
+                        self.close()
+                    except Exception:
+                        pass
+                    # 尝试释放可能残留的锁
+                    self._release_lock()
+                    time.sleep(3)
+                else:
+                    self.log.error(f"[HDF] Final open failed after {retry_count} attempts")
+                    need_repair = True
 
         # ========= 异常路径：才做清理 =========
         if not opened and need_repair:
@@ -334,7 +347,14 @@ class SafeHDFStore(pd.HDFStore):
                     log.error(f"文件 {self.fname} 不存在，无法删除")
         except Exception as e:
             log.error(f"删除文件失败: {e}")
-            # 在这里添加一些逻辑，比如稍后再重试等
+            # 尝试延迟重试
+            try:
+                time.sleep(2)
+                if os.path.isfile(self.fname):
+                    os.remove(self.fname)
+                    log.info(f"重试删除文件成功: {self.fname}")
+            except Exception as e2:
+                log.error(f"重试删除文件失败: {e2}")
 
     def _acquire_lock(self):
         my_pid = os.getpid()
@@ -503,8 +523,19 @@ class SafeHDFStore(pd.HDFStore):
             col_bytes = sum(8 if pd.api.types.is_numeric_dtype(dt) else 1 if pd.api.types.is_bool_dtype(dt) else 50 for dt in df.dtypes)
             target_chunk_size = 5 * 1024 * 1024
             kwargs['chunksize'] = max(1000, int(target_chunk_size / col_bytes))
-        with timed_ctx(f"write_key_{key}"):
-            self.put(key, df, format='table', **kwargs)
+        retry_count = 5
+        for attempt in range(retry_count):
+            try:
+                with timed_ctx(f"write_key_{key}"):
+                    self.put(key, df, format='table', **kwargs)
+                break
+            except Exception as e:
+                self.log.error(f"[HDF] write failed (attempt {attempt+1}/{retry_count}): {e}")
+                if attempt < retry_count - 1:
+                    self.log.warning(f"[HDF] Write failed, retrying in 3s...")
+                    time.sleep(3)
+                else:
+                    raise e
 
 
     def __exit__(self, exc_type, exc_val, exc_tb):
