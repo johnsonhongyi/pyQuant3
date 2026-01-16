@@ -302,6 +302,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.ColManagerconfig = None
         self._open_column_manager_job = None
 
+        self._last_visualizer_code = None
+        self._last_visualizer_time = 0
+        self._visualizer_debounce_sec = 0.5  # 防抖 0.5 秒
+
         self._concept_dict_global = {}
 
         # 刷新开关标志
@@ -1829,8 +1833,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
     def open_visualizer(self, code):
+
         if not code:
             return
+        now = time.time()
+        # 防抖：同一 code 在 0.5 秒内不重复发送
+        if self._last_visualizer_code == code and (now - self._last_visualizer_time) < self._visualizer_debounce_sec:
+            return
+
+        self._last_visualizer_code = code
+        self._last_visualizer_time = now
 
         if not hasattr(self, 'qt_process'):
             self.qt_process = None
@@ -1954,8 +1966,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             # 如果没有变化行，就跳过本轮
                             if df_diff.empty:
                                 logger.debug("[send_df] df_diff empty, skip sending this cycle")
-                                time.sleep(1)  # 可选短延时，避免 CPU 占满
-                                continue
                             else:
                                 msg_type = 'UPDATE_DF_DIFF'
                                 payload_to_send = df_diff
@@ -2060,7 +2070,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._df_first_send_done = sent
 
                 # 状态刚从 False → True：立即进入慢速周期
-                if sent and not prev:
+                if sent and not prev and self.vis_var.get():
                     logger.info("[send_df] first successful send")
 
                 # ======================================================
@@ -6976,6 +6986,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _on_label_right_click_top10(self,code ,idx):
         # self._update_selection_top10(idx)
+        if self.select_code == code:
+            return
         stock_code = code
         self.select_code = code
         self.sender.send(code)
