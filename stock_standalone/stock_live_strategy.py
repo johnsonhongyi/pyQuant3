@@ -39,8 +39,6 @@ except ImportError:
 
 from sector_risk_monitor import SectorRiskMonitor
 
-from sector_risk_monitor import SectorRiskMonitor
-
 try:
     import pythoncom
 except ImportError:
@@ -76,12 +74,12 @@ def normalize_speech_text(text: str) -> str:
 
 class VoiceAnnouncer:
     """独立的语音播报引擎"""
-    queue: Queue
+    queue: Queue[dict[str, Optional[str]]]
     on_speak_start: Optional[Callable[[str], None]]
     on_speak_end: Optional[Callable[[str], None]]
     _stop_event: threading.Event
     current_code: Optional[str]
-    current_engine: Any # pyttsx3.Engine
+    current_engine: Optional[Any] # pyttsx3.Engine
     _thread: Optional[threading.Thread]
 
     def __init__(self) -> None:
@@ -106,12 +104,16 @@ class VoiceAnnouncer:
             if pythoncom:
                 pythoncom.CoInitialize()
             
-            engine = pyttsx3.init()
-            self.current_engine = engine
-            
-            # 设置语速
-            rate = engine.getProperty('rate')
-            engine.setProperty('rate', rate + 20)
+            if pyttsx3:
+                engine = pyttsx3.init()
+                self.current_engine = engine
+                
+                # 设置语速
+                rate = engine.getProperty('rate')
+                if isinstance(rate, (int, float)):
+                    engine.setProperty('rate', rate + 20)
+                else:
+                    engine.setProperty('rate', 200) # 容错处理
             
             # ⭐ 关键：语音前做规范化
             speech_text = normalize_speech_text(text)
@@ -191,7 +193,7 @@ class VoiceAnnouncer:
         try:
             while True:
                 item = self.queue.get_nowait()
-                if item.get('code') != target_code:
+                if item.get('code') != target_code: # type: ignore
                     temp_list.append(item)
                 else:
                     logger.info(f"🗑️ Removed pending voice for {target_code}")
@@ -213,7 +215,10 @@ class StrategySupervisor:
     负责从盈利角度对信号进行最终审核，拦截无效或高风险交易（如追涨）。
     具备从日志和历史数据自升级的能力。
     """
-    def __init__(self, logger_instance=None):
+    # 定义约束字典的精确类型以消除 Pylance 歧义
+    constraints: dict[str, float | int | list[str]]
+
+    def __init__(self, logger_instance: Optional[logging.Logger] = None) -> None:
         self.logger = logger_instance
         self.constraints = {
             'anti_chase_threshold': 0.05,  # 距分时均价偏离度上限
@@ -230,13 +235,13 @@ class StrategySupervisor:
             if os.path.exists(config_path):
                 import json
                 with open(config_path, 'r', encoding='utf-8') as f:
-                    dynamic_data = json.load(f)
+                    dynamic_data: dict[str, Any] = json.load(f)
                     self.constraints.update(dynamic_data)
                     logger.info(f"🛡️ 策略监理已载入动态/自升级约束: {dynamic_data}")
         except Exception as e:
             logger.debug(f"No dynamic constraints found or load failed: {e}")
 
-    def veto(self, code: str, decision: dict, row: pd.Series, snap: dict) -> tuple[bool, str]:
+    def veto(self, code: str, decision: dict[str, Any], row: pd.Series[Any], snap: dict[str, Any]) -> tuple[bool, str]:
         """
         审核决策。返回: (是否否决, 否决理由)
         """
@@ -246,31 +251,36 @@ class StrategySupervisor:
             return False, ""
 
         # 1. 规避板块/名称
-        name = snap.get('name', '')
-        for bad in self.constraints['ignore_concepts']:
-            if bad in name:
-                return True, f"命中规避概念: {bad}"
+        name = str(snap.get('name', ''))
+        ignore_concepts = self.constraints.get('ignore_concepts', [])
+        if isinstance(ignore_concepts, list):
+            for bad in ignore_concepts:
+                if isinstance(bad, str) and bad in name:
+                    return True, f"命中规避概念: {bad}"
 
         # 2. 防追涨拦截 (Anti-Chase) - 距日内均价(VWAP)偏离度
-        current_price = float(row.get('trade', 0))
+        current_price = float(row.get('trade', 0.0)) # type: ignore
         # 优先使用实时服务提供的分时均价，否则从 row 转换
-        amount = float(row.get('amount', 0))
-        volume = float(row.get('volume', 0))
-        vwap = (amount / volume) if volume > 0 else 0
+        amount = float(row.get('amount', 0.0)) # type: ignore
+        volume = float(row.get('volume', 0.0)) # type: ignore
+        vwap = (amount / volume) if volume > 0 else 0.0
         
         if vwap > 0:
             bias = (current_price - vwap) / vwap
-            if bias > self.constraints['anti_chase_threshold']:
+            threshold = self.constraints.get('anti_chase_threshold', 0.05)
+            if isinstance(threshold, (int, float)) and bias > float(threshold):
                 return True, f"偏离均价过高({bias:.1%})，防止追涨"
 
         # 3. 情绪冰点拦截 (Sentiment Veto)
-        market_win_rate = snap.get('market_win_rate', 1.0)
-        if market_win_rate < self.constraints['min_market_win_rate']:
+        market_win_rate = float(snap.get('market_win_rate', 1.0))
+        min_win_rate = self.constraints.get('min_market_win_rate', 0.35)
+        if isinstance(min_win_rate, (int, float)) and market_win_rate < float(min_win_rate):
             return True, f"全场胜率过低({market_win_rate:.1%})，提高防御"
 
         # 4. 霉运/个股冷宫机制 (Failure Filter)
-        loss_streak = snap.get('loss_streak', 0)
-        if loss_streak >= self.constraints['max_loss_streak']:
+        loss_streak = int(snap.get('loss_streak', 0))
+        max_loss = self.constraints.get('max_loss_streak', 2)
+        if isinstance(max_loss, (int, float)) and loss_streak >= int(max_loss):
             return True, f"个股近期连亏{loss_streak}次，强行降温"
 
         return False, ""
@@ -289,7 +299,7 @@ class StockLiveStrategy:
     - risk_duration_threshold: 风险持续时间阈值
     """
     def __init__(self,
-                 master=None, 
+                 master: Any = None, 
                  alert_cooldown: float = 60,
                  stop_loss_pct: float = 0.05,
                  take_profit_pct: float = 0.10,
@@ -300,7 +310,7 @@ class StockLiveStrategy:
                  voice_enabled: bool = True,
                  realtime_service: Any = None):
         # --- 实例属性注解 (PEP 526) ---
-        self.master = master
+        self.master: Any = master
         self._voice: VoiceAnnouncer
         self.voice_enabled: bool
         self._monitored_stocks: dict[str, Any]
@@ -309,7 +319,7 @@ class StockLiveStrategy:
         self.enabled: bool
         self.executor: ThreadPoolExecutor
         self.config_file: str
-        self.alert_callback: Optional[Callable]
+        self.alert_callback: Optional[Callable[[str, str, str], None]]
         self.decision_engine: IntradayDecisionEngine
         self.trading_logger: TradingLogger
         self._risk_engine: RiskEngine
@@ -322,6 +332,7 @@ class StockLiveStrategy:
         self._market_win_rate_cache: float
         self._market_win_rate_ts: float
         self.scan_hot_concepts_status: bool
+        self.shadow_engine: IntradayDecisionEngine
 
         self._voice = VoiceAnnouncer()
         self.voice_enabled = voice_enabled
@@ -330,12 +341,12 @@ class StockLiveStrategy:
         
         # 初始化板块监控
         self.sector_monitor = SectorRiskMonitor()
-        self._last_sector_status = {}
+        self._last_sector_status: dict[str, Any] = {}
 
-        self.signal_history: deque[dict[str, Any]] = deque(maxlen=200) # Added signal_history definition
+        self.signal_history: deque[dict[str, Any]] = deque(maxlen=200)
         self._alert_cooldown = alert_cooldown
         self.enabled = True
-        self._is_stopping = False
+        self._is_stopping: bool = False
 
         self.config_file = "voice_alert_config.json"
         self.alert_callback = None
@@ -350,7 +361,7 @@ class StockLiveStrategy:
         self.auto_loop_enabled = False
         self.batch_state = "IDLE"
         self.current_batch = []
-        self.batch_last_check = 0.0
+        self.batch_last_check: float = 0.0
         self._settlement_prep_done = False
         self._last_settlement_date = None
         self._market_win_rate_cache = 0.5
@@ -364,10 +375,10 @@ class StockLiveStrategy:
         
         # --- 初始化记录器 (必须在 _load_monitors 之前) ---
         self.trading_logger = TradingLogger()
-        self.supervisor = StrategySupervisor(self.trading_logger) # ⭐ 注入盈利监理器
+        self.supervisor = StrategySupervisor(self.trading_logger) # type: ignore # ⭐ 注入盈利监理器
 
         self._load_monitors()
-        self.df = None
+        self.df: Optional[pd.DataFrame] = None
 
         # 初始化决策引擎（带止损止盈配置）
         self.decision_engine = IntradayDecisionEngine(
@@ -393,13 +404,12 @@ class StockLiveStrategy:
             risk_duration_threshold=risk_duration_threshold
         )
         self._last_import_logical_date: Optional[str] = None
-        self._last_settlement_date: Optional[str] = None # 用于防止重复结算
 
         # --- Automatic Trading Loop State ---
         # self.auto_loop_enabled = False (已经在上方初始化)
         # self.batch_state = "IDLE"
-        self.batch_start_time = 0
-        self.batch_last_check = 0
+        self.batch_start_time: float = 0.0
+        self.batch_last_check: float = 0.0
 
     def stop(self):
         """停止策略引擎并关闭后台线程"""
@@ -429,15 +439,15 @@ class StockLiveStrategy:
     # ------------------------------------------------------------------
     # Alert Cooldown 控制
     # ------------------------------------------------------------------
-    def set_alert_cooldown(self, cooldown: float):
+    def set_alert_cooldown(self, cooldown: float | None):
         """
         动态设置告警冷却时间（秒）
         可在运行中安全调用
         """
         if cooldown is None:
-            raise ValueError("alert_cooldown cannot be None")
+            return
 
-        cooldown = float(cooldown)
+        self._alert_cooldown = float(cooldown)
         if cooldown < 0:
             raise ValueError("alert_cooldown must be >= 0")
 
@@ -876,7 +886,7 @@ class StockLiveStrategy:
         if concept_top5 and cct.get_now_time_int() > 916:
             self.executor.submit(self._scan_hot_concepts, df_all, concept_top5)
 
-    def _scan_hot_concepts(self, df: pd.DataFrame, concept_top5: list):
+    def _scan_hot_concepts(self, df: pd.DataFrame | None, concept_top5: list[Any]):
         """
         扫描五大热点板块，识别龙头（增强版）
         """
@@ -886,15 +896,15 @@ class StockLiveStrategy:
             return
         
         try:
+            if df is None:
+                if hasattr(self, 'master') and self.master:
+                    df = getattr(self.master, 'df_all', None)
+            
             if df is None or df.empty or not concept_top5:
-                logger.info("No data or concept_top5 is empty.")
-                if  hasattr(self, 'master') and self.master:
-                    if self.master.df_all is not None and not self.master.df_all.empty:
-                        df = self.master.df_all.copy()
-                    else:
-                        return
-                else:
-                    return
+                return
+
+            # 此时 df 已确定为 pd.DataFrame
+            target_df: pd.DataFrame = df
 
             # Extract concept names
             top_concepts = set()
@@ -921,26 +931,22 @@ class StockLiveStrategy:
                 # logger.info("Daily hot concept limit reached.")
                 return
 
-            if 'percent' not in df.columns:
+            if 'percent' not in target_df.columns:
                 return
 
             # 先进行基础过滤，找出"像样"的股票
             cond_trend = (
-                (df['close'] > df['high4']) &
-                (df['close'] > df['ma5d']) & 
-                (df['close'] > df['hmax']) 
+                (target_df['close'] > target_df['high4']) &
+                (target_df['close'] > target_df['ma5d']) & 
+                (target_df['close'] > target_df['hmax']) 
             )
-                # (df['ma5d'] > df['ma60d']) 
-            # 稍微放宽上涨要求，允许回调只要趋势在 (但这里先保留强趋势筛选)
-            cond_strength = (
-                (df['red'] > 5) | (df['top10'] > 0)
-            )
-            cond_volume = df['volume'] > 1.2 # 放宽一点点，下面打分再细分
-            cond_percent =  ((df['close'] > df['lastp1d']) | (df['close'] > df['lastp2d']))
-            cond_win = df['win'] > 0
+            # cond_strength 变量未直接用于过滤，若需要则应加入 strong_df 过滤条件中
+            _ = (target_df['red'] > 5) | (target_df['top10'] > 0)
+            cond_volume = target_df['volume'] > 1.2
+            cond_percent =  ((target_df['close'] > target_df['lastp1d']) | (target_df['close'] > target_df['lastp2d']))
+            cond_win = target_df['win'] > 0
             
-            # strong_df = df[cond_trend & cond_strength & cond_volume & cond_percent & cond_win].copy()
-            strong_df = df[cond_trend  & cond_volume & cond_percent & cond_win].copy()
+            strong_df = target_df[cond_trend & cond_volume & cond_percent & cond_win].copy()
             
             if strong_df.empty:
                 return
@@ -958,33 +964,27 @@ class StockLiveStrategy:
                     continue
                 
                 stock_cats = set(raw_cats.split(';'))
-                stock_name = row.get('name')
-                stock_ma5d = row.get('ma5d')
-                stock_close = row.get('close')
-                hma5d =  row.get('Hma5d')
-                hma10d =  row.get('Hma10d')
-                hma20d =  row.get('Hma20d')
-                hma60d =  row.get('Hma60d')
-                trendS =  row.get('TrendS')
-                # logger.debug(f"code: {code} name: {stock_name} percent: {row.get('percent')} 背离ma5d: {high_ma5d} per2d: {row.get('per2d')} per3d: {row.get('per3d')}")
+                # stock_ma5d, stock_close 等变量被识别为未使用，若仅用于调试打印可移除或改用 _
+                _ = row.get('ma5d')
+                _ = row.get('close')
+                _ = row.get('Hma20d')
+                _ = row.get('Hma60d')
+
+                # logger.debug(f"code: {code} name: {row.get('name')} percent: {row.get('percent')}")
                 matched_concepts = stock_cats.intersection(top_concepts)
-                # logger.debug(f'stock_cats: {stock_cats} top_concepts:{top_concepts}')
                 if matched_concepts:
-                    concept_name = list(matched_concepts)[0]
+                    concept_name: str = list(matched_concepts)[0]
+                    stock_name: str = str(row.get('name', code))
                     
                     # --- 定量评分系统 ---
                     score = 0.0
                     
                     # 1. 涨幅贡献 (0 - 0.3)
-                    pct = row.get('percent', 0)
-                    if pct > 3:
-                         score += min(pct / 10, 0.3)
-                    else:
-                         score += min(pct / 10, 0.3) * 0.5 # 弱涨幅打折
+                    pct = float(row.get('percent', 0.0)) # type: ignore
+                    score += min(pct / 10, 0.3) if pct > 3 else min(pct / 10, 0.3) * 0.5
                     
                     # 2. 量能贡献 (0 - 0.2)
-                    # 统计显示 1.2-2.5 最佳
-                    vol = row.get('volume', 0)
+                    vol = float(row.get('volume', 0.0)) # type: ignore
                     if 1.2 <= vol <= 2.5:
                         score += 0.2
                     elif vol > 2.5:
@@ -992,17 +992,24 @@ class StockLiveStrategy:
                     elif vol < 0.8:
                         score -= 0.1 # 地量减分
                     
-                    # 3. 趋势贡献 (0 - 0.3)
-                    # 3连阳且红兵多最佳
-                    win = row.get('win', 0)
-                    if win >= 3:
-                        score += 0.3
-                    elif win == 2:
-                        score += 0.15
+                    # 3. 趋势强度 (0 - 0.3)
+                    win_count = int(row.get('win', 0)) # type: ignore
+                    if win_count >= 3:
+                        score += 0.2
+                    
+                    # 4. 价格稳定性 (0 - 0.2)
+                    hmax = float(row.get('hmax', 0.0)) # type: ignore
+                    curr = float(row.get('close', 0.0)) # type: ignore
+                    
+                    hma5d = float(row.get('ma5d', 0.0)) # type: ignore
+                    hma10d = float(row.get('ma10d', 0.0)) # type: ignore
+                    trendS = float(row.get('win', 0.0)) # type: ignore
+                    if hmax > 0 and curr > hmax:
+                        score += 0.2
                     
                     # 4. 技术位贡献 (0 - 0.2)
-                    hmax = row.get('hmax', float('inf'))
-                    if row.get('close', 0) > hmax:
+                    hmax = float(row.get('hmax', float('inf'))) # type: ignore
+                    if float(row.get('close', 0)) > hmax: # type: ignore
                         score += 0.2 # 突破新高
                     # select_code ={
                     #     'code': code,
@@ -1121,14 +1128,15 @@ class StockLiveStrategy:
 
                 # ---------- 安全获取行情数据 ----------
                 try:
-                    current_price = float(row.get('trade', 0))
-                    current_nclose = float(row.get('nclose', 0))
-                    current_change = float(row.get('percent', 0))
-                    volume_change = float(row.get('volume', 0))
-                    ratio_change = float(row.get('ratio', 0))
-                    ma5d_change = float(row.get('ma5d', 0))
-                    ma10d_change = float(row.get('ma10d', 0))
-                    current_high = float(row.get('high', 0))
+                    current_price = float(row.get('trade', 0.0)) # type: ignore
+                    _ = float(row.get('nclose', 0.0)) # type: ignore
+                    _ = float(row.get('percent', 0.0)) # type: ignore
+                    _ = float(row.get('volume', 0.0)) # type: ignore
+                    _ = float(row.get('ratio', 0.0)) # type: ignore
+                    # ma5d_change, ma10d_change 仅获取确保存在，但不直接使用
+                    _ = float(row.get('ma5d', 0.0)) # type: ignore
+                    _ = float(row.get('ma10d', 0.0)) # type: ignore
+                    current_high = float(row.get('high', 0.0)) # type: ignore
                 except (ValueError, TypeError) as e:
                     logger.warning(f"{code} 行情数据异常: {e}")
                     continue
@@ -1141,7 +1149,7 @@ class StockLiveStrategy:
                     snap['buy_date'] = trade.get('buy_date', '')
                     snap['buy_reason'] = trade.get('buy_reason', '')
                     # 追踪买入后最高价 (用于移动止盈)
-                    if current_price > snap.get('highest_since_buy', 0):
+                    if current_price > float(snap.get('highest_since_buy', 0.0)): # type: ignore
                         snap['highest_since_buy'] = current_price
                 
                 # 注入加速连阳与五日线强度数据
@@ -1942,12 +1950,8 @@ class StockLiveStrategy:
         except:
             pass
 
-    def stop(self):
-        self.enabled = False
-        self._voice.stop()
-        self.executor.shutdown(wait=False)
 
-    def start_auto_trading_loop(self, force=False, concept_top5=None):
+    def start_auto_trading_loop(self, force: bool = False, concept_top5: Optional[list[Any]] = None):
         """开启自动循环优选交易 (支持断点恢复/自动补作业/强制启动)"""
         self.auto_loop_enabled = True
         now_time = datetime.now()
@@ -1962,7 +1966,9 @@ class StockLiveStrategy:
             if hasattr(self, 'df'):
                 self._import_hotspot_candidates(concept_top5=concept_top5, is_manual=True)
                 self._voice.say(f"手动执行热点筛选{MAX_DAILY_ADDITIONS}只")
-                self._scan_hot_concepts(self.df,concept_top5=concept_top5)
+                # 确保 concept_top5 不为 None
+                if concept_top5 is not None:
+                    self._scan_hot_concepts(self.df, concept_top5=concept_top5)
             # 如果是盘后强制启动，标记今日已结算，防止后续 tick 再次触发 Settlement
             if is_after_close:
                 self._last_settlement_date = today_str
@@ -2097,7 +2103,7 @@ class StockLiveStrategy:
         holding = [t for t in trades if t['status'] == 'OPEN' and str(t.get('code')).zfill(6) in self.current_batch]
         return len(holding)
 
-    def _import_hotspot_candidates(self, concept_top5=None, is_manual: bool = False) -> str:
+    def _import_hotspot_candidates(self, concept_top5: Optional[list[Any]] = None, is_manual: bool = False) -> str:
         """
         专用的自动选股方法：
         优选“今日热点”中评分最高的5只标的
