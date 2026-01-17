@@ -623,20 +623,23 @@ class PerformanceMonitor:
         self.name = name
         self._records: List[float] = []
         self._max_records = 100  # 最多保留100条记录
+        self._total_count = 0    # ⚡ 总调用次数（不会重置）
     
     def record(self, duration: float):
         """记录一次执行时间"""
         self._records.append(duration)
+        self._total_count += 1  # ⚡ 累计总次数
         if len(self._records) > self._max_records:
             self._records.pop(0)
     
     def get_stats(self) -> Dict[str, float]:
         """获取统计信息"""
         if not self._records:
-            return {"count": 0}
+            return {"count": 0, "total_count": 0}
         
         return {
             "count": len(self._records),
+            "total_count": self._total_count,  # ⚡ 返回总次数
             "avg": sum(self._records) / len(self._records),
             "min": min(self._records),
             "max": max(self._records),
@@ -650,7 +653,7 @@ class PerformanceMonitor:
             return f"[{self.name}] 无数据"
         
         return (f"[{self.name}] "
-                f"次数:{stats['count']} "
+                f"次数:{stats['total_count']} "  # ⚡ 显示总次数
                 f"平均:{stats['avg']:.3f}s "
                 f"最小:{stats['min']:.3f}s "
                 f"最大:{stats['max']:.3f}s "

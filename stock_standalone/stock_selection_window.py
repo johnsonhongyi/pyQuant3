@@ -749,6 +749,31 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
                     if hasattr(self.live_strategy, '_save_monitors'):
                         self.live_strategy._save_monitors()
                     
+                    # ⭐ 推送到信号队列 (独立DB)
+                    try:
+                        from signal_message_queue import SignalMessageQueue, SignalMessage
+                        queue = SignalMessageQueue()
+                        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        
+                        for item in to_import:
+                            # 构建信号消息
+                            q_msg = SignalMessage(
+                                priority=40, # 用户选择优先级较高
+                                timestamp=timestamp,
+                                code=str(item["code"]).zfill(6),
+                                name=item["name"],
+                                signal_type="USER_SELECT",
+                                source="SELECTOR",
+                                reason=f"{item.get('user_reason','')} | {item.get('auto_reason','')}",
+                                score=item.get("score", 0)
+                            )
+                            queue.push(q_msg)
+                            
+                    except ImportError:
+                        pass
+                    except Exception as e:
+                        logger.error(f"Failed to push signal to queue: {e}")
+                    
                     # 尝试通知语音监控窗口刷新 (如果已打开)
                     vm_win = getattr(self.master, '_voice_monitor_window', None)
                     if vm_win and vm_win.winfo_exists() and hasattr(vm_win, 'refresh_list'):

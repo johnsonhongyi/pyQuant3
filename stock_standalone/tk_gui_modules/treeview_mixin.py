@@ -5,7 +5,6 @@ import tkinter as tk
 from tkinter import ttk
 import pandas as pd
 from typing import Any, Optional, Protocol, Union, runtime_checkable, TYPE_CHECKING
-from JohnsonUtil import commonTips as cct
 
 logger = logging.getLogger("instock_TK.Treeview")
 
@@ -20,7 +19,7 @@ class TreeviewAppProtocol(Protocol):
     _name_col_width: int
     _pending_cols: list[str]
     def get_scaled_value(self) -> float: ...
-    def refresh_tree(self, df_sorted: Optional[pd.DataFrame] = None) -> None: ...
+    def refresh_tree(self, df_sorted: Optional[pd.DataFrame] = None, force: bool = False) -> None: ...
     def bind_treeview_column_resize(self) -> None: ...
 
 class TreeviewMixin:
@@ -35,7 +34,7 @@ class TreeviewMixin:
         _name_col_width: int
         _pending_cols: list[str]
         def get_scaled_value(self) -> float: ...
-        def refresh_tree(self, df_sorted: Optional[pd.DataFrame] = None) -> None: ...
+        def refresh_tree(self, df_sorted: Optional[pd.DataFrame] = None, force: bool = False) -> None: ...
         def bind_treeview_column_resize(self) -> None: ...
 
     def _setup_tree_columns(self, tree: ttk.Treeview, cols: Union[list[str], tuple[str, ...]], sort_callback: Optional[Any] = None, other: dict[str, Any] = {}) -> None:
@@ -118,8 +117,8 @@ class TreeviewMixin:
                 sort_callback=getattr(self, 'sort_by_column', None)
             )
  
-            self.tree.after(100, getattr(self, 'refresh_tree', lambda: None))
-            self.tree.after(500, getattr(self, 'bind_treeview_column_resize', lambda: None))
+            self.tree.after(100, lambda: self.refresh_tree(force=True) if hasattr(self, 'refresh_tree') else None)
+            self.tree.after(500, lambda: getattr(self, 'bind_treeview_column_resize', lambda: None)())
             # 🔌 动态列订阅：通知后台进程 UI 需要的新列
             if hasattr(self, 'update_required_columns'):
                 self.update_required_columns()
