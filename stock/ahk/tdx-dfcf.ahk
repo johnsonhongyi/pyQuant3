@@ -11,6 +11,33 @@ global AutoSendToDFCF := False     ; <<< 自动推送开关（默认关闭）
 global DEBUG_MODE := false         ; <<< 调试日志开关
 global LOG_FILE := A_ScriptDir "\hotkey_debug.log"
 global SentCodes := {}  ; <<< 已发送代码记录
+
+; ================================
+; 屏蔽 通达信 Alt+Q（终极方案）
+; ================================
+#Persistent
+#NoEnv
+#SingleInstance Force
+
+OnMessage(0x0104, "BlockSysKey")  ; WM_SYSKEYDOWN
+OnMessage(0x0105, "BlockSysKey")  ; WM_SYSKEYUP
+
+BlockSysKey(wParam, lParam, msg, hwnd) {
+    WinGetClass, cls, ahk_id %hwnd%
+    if (cls != "TdxW_MainFrame_Class")
+        return
+
+    ; Q 键
+    if (wParam = 0x51) { ; 'Q'
+        ; Alt 是否按下
+        if (GetKeyState("Alt", "P")) {
+            ; 吞掉消息
+            return 0
+        }
+    }
+}
+
+
 ; ================================
 ; 通知与日志函数
 ; ================================

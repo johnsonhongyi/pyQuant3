@@ -2307,7 +2307,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 df_display[col] = ""
 
         self.current_df = df_display
-        self.refresh_tree()
+        self.refresh_tree(force=True)
 
 
     def filter_and_refresh_tree(self, query_dict):
@@ -5797,7 +5797,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self.apply_search()
             else:
                 # 重新加载数据
-                self.tree.after(100, self.refresh_tree(self.df_all))
+                self.tree.after(100, lambda: self.refresh_tree(self.df_all, force=True))
 
     def restore_tree_selection(tree, code: str, col_index: int = 0):
         """
@@ -6152,7 +6152,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         except Exception as e:
             logger.error(f"❌ 切换特征颜色失败: {e}")
 
-    def refresh_tree(self, df=None):
+    def refresh_tree(self, df=None, force=False):
         """刷新 TreeView，保证列和数据严格对齐。"""
         start_time = time.time()
         
@@ -6173,6 +6173,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             self.update_status()
             return
+
+        # ⚡ 非交易时间优化：仅在数据或列配置真正变化时刷新
+        # 交易时间：9:15-11:30, 13:00-15:00
+        now_time = cct.get_now_time_int()
+        is_trading_time = cct.get_trade_date_status() and ((915 <= now_time <= 1130) or (1300 <= now_time <= 1500))
+        
+        # 定义状态指纹：包含代码哈希、列配置哈希
+        code_hash = hash(tuple(df['code'].astype(str).values)) if 'code' in df.columns else hash(len(df))
+        cols_hash = hash(tuple(self.current_cols))
+        current_fingerprint = (code_hash, cols_hash)
+        
+        if not is_trading_time and not force:
+            if hasattr(self, '_last_refresh_fingerprint') and self._last_refresh_fingerprint == current_fingerprint:
+                # 非交易时间且状态无变化，跳过以节省 CPU
+                return
+        
+        self._last_refresh_fingerprint = current_fingerprint
 
         df = df.copy()
 
@@ -6217,7 +6234,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 
                 # 每10次更新打印一次性能报告
                 stats = self.perf_monitor.get_stats()
-                if stats.get("count", 0) % 10 == 0:
+                if stats.get("total_count", 0) % 10 == 0:  # ⚡ 使用total_count
                     logger.info(self.perf_monitor.report())
                 
             except Exception as e:
@@ -9281,7 +9298,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # result = counterCategory(df_filtered, 'category', limit=50, table=True)
                 # self._Categoryresult = result
                 # self.query_manager.entry_query.set(self._Categoryresult)
-                self.after(500,self.refresh_tree(df_filtered))
+                self.after(500, lambda: self.refresh_tree(df_filtered, force=True))
                 # 打印剔除条件列表
                 if removed_conditions:
                     # logger.info(f"[剔除的条件列表] {removed_conditions}")

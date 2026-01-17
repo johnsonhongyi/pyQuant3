@@ -4,6 +4,8 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Set
 
 from StrongPullbackMA5Strategy import StrongPullbackMA5Strategy
+from strong_consolidation_strategy import StrongConsolidationStrategy
+from sudden_launch_strategy import SuddenLaunchStrategy
 from intraday_decision_engine import IntradayDecisionEngine
 from trading_logger import TradingLogger
 from signal_types import SignalPoint, SignalType, SignalSource, SIGNAL_VISUAL_CONFIG
@@ -29,6 +31,8 @@ class StrategyController:
     STRATEGY_PULLBACK_MA5 = "pullback_ma5"
     STRATEGY_DECISION_ENGINE = "decision_engine"
     STRATEGY_SUPERVISOR = "supervisor"
+    STRATEGY_STRONG_CONSOLIDATION = "StrongConsolidationStrategy"
+    STRATEGY_SUDDEN_LAUNCH = "SuddenLaunchStrategy"
     
     def __init__(self, master: Any = None):
         self.master = master
@@ -44,7 +48,10 @@ class StrategyController:
         self.registry = StrategyRegistry()
         self._enabled_strategies: Set[str] = {
             self.STRATEGY_PULLBACK_MA5,
+            self.STRATEGY_PULLBACK_MA5,
             self.STRATEGY_DECISION_ENGINE,
+            self.STRATEGY_STRONG_CONSOLIDATION,
+            self.STRATEGY_SUDDEN_LAUNCH,
         }
         
         # 注册内置策略适配器
@@ -52,9 +59,28 @@ class StrategyController:
     
     def _register_builtin_strategies(self) -> None:
         """注册内置策略"""
-        # 这里我们用简单的标识来控制内置策略的启用
-        # 实际的IStrategy适配器可以后续添加
-        pass
+        # 注册强势整理策略
+        try:
+            sc_strat = StrongConsolidationStrategy()
+            self.registry.register(sc_strat)
+            # 根据初始配置启用/禁用
+            if sc_strat.name in self._enabled_strategies:
+                self.registry.enable(sc_strat.name)
+            else:
+                self.registry.disable(sc_strat.name)
+        except Exception as e:
+            logger.error(f"Failed to register StrongConsolidationStrategy: {e}")
+            
+        # 注册突发启动策略
+        try:
+            sl_strat = SuddenLaunchStrategy()
+            self.registry.register(sl_strat)
+            if sl_strat.name in self._enabled_strategies:
+                self.registry.enable(sl_strat.name)
+            else:
+                self.registry.disable(sl_strat.name)
+        except Exception as e:
+            logger.error(f"Failed to register SuddenLaunchStrategy: {e}")
     
     def enable_strategy(self, name: str) -> None:
         """启用策略"""
