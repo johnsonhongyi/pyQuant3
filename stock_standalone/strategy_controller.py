@@ -1,26 +1,34 @@
 import pandas as pd
 import numpy as np
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 
 from StrongPullbackMA5Strategy import StrongPullbackMA5Strategy
 from intraday_decision_engine import IntradayDecisionEngine
 from trading_logger import TradingLogger
 from signal_types import SignalPoint, SignalType, SignalSource, SIGNAL_VISUAL_CONFIG
+from strategy_interface import IStrategy, StrategyRegistry, SignalConflictResolver, StrategyConfig, StrategyMode
 from JohnsonUtil import LoggerFactory
 
 logger = LoggerFactory.getLogger()
 
+
 class StrategyController:
     """
     策略控制器：统一管理策略规则、信号生成、交易执行
-    直接集成 stock_live_strategy.py 中的逻辑
+    支持策略动态注册、启用/禁用、信号聚合
     """
     master: Any
     trading_logger: TradingLogger
     decision_engine: IntradayDecisionEngine
     pullback_strat: StrongPullbackMA5Strategy
     shadow_engine: IntradayDecisionEngine
+    registry: StrategyRegistry
+    
+    # 内置策略标识
+    STRATEGY_PULLBACK_MA5 = "pullback_ma5"
+    STRATEGY_DECISION_ENGINE = "decision_engine"
+    STRATEGY_SUPERVISOR = "supervisor"
     
     def __init__(self, master: Any = None):
         self.master = master
@@ -31,6 +39,76 @@ class StrategyController:
         
         # 影子引擎用于比对
         self.shadow_engine = IntradayDecisionEngine(max_position=0.3)
+        
+        # 策略注册表
+        self.registry = StrategyRegistry()
+        self._enabled_strategies: Set[str] = {
+            self.STRATEGY_PULLBACK_MA5,
+            self.STRATEGY_DECISION_ENGINE,
+        }
+        
+        # 注册内置策略适配器
+        self._register_builtin_strategies()
+    
+    def _register_builtin_strategies(self) -> None:
+        """注册内置策略"""
+        # 这里我们用简单的标识来控制内置策略的启用
+        # 实际的IStrategy适配器可以后续添加
+        pass
+    
+    def enable_strategy(self, name: str) -> None:
+        """启用策略"""
+        self._enabled_strategies.add(name)
+        self.registry.enable(name)
+    
+    def disable_strategy(self, name: str) -> None:
+        """禁用策略"""
+        self._enabled_strategies.discard(name)
+        self.registry.disable(name)
+    
+    def is_strategy_enabled(self, name: str) -> bool:
+        """检查策略是否启用"""
+        return name in self._enabled_strategies
+    
+    def get_enabled_strategies(self) -> List[str]:
+        """获取所有启用的策略名称"""
+        return list(self._enabled_strategies)
+    
+    def get_available_strategies(self) -> List[Dict[str, Any]]:
+        """获取所有可用策略及其状态"""
+        strategies = [
+            {
+                "name": self.STRATEGY_PULLBACK_MA5,
+                "display_name": "回调MA5策略",
+                "description": "强势回调到MA5均线附近买入",
+                "enabled": self.is_strategy_enabled(self.STRATEGY_PULLBACK_MA5),
+            },
+            {
+                "name": self.STRATEGY_DECISION_ENGINE,
+                "display_name": "日内决策引擎",
+                "description": "综合多指标的日内交易决策",
+                "enabled": self.is_strategy_enabled(self.STRATEGY_DECISION_ENGINE),
+            },
+            {
+                "name": self.STRATEGY_SUPERVISOR,
+                "display_name": "策略监理",
+                "description": "拦截不合规信号,风控保护",
+                "enabled": self.is_strategy_enabled(self.STRATEGY_SUPERVISOR),
+            },
+        ]
+        
+        # 添加动态注册的策略
+        for strat in self.registry.get_all():
+            if strat.name not in [s["name"] for s in strategies]:
+                strategies.append({
+                    "name": strat.name,
+                    "display_name": strat.display_name,
+                    "description": strat.description,
+                    "enabled": strat.enabled,
+                })
+        
+        return strategies
+
         
     def evaluate_historical_signals(self, code: str, day_df: pd.DataFrame) -> List[SignalPoint]:
         """
