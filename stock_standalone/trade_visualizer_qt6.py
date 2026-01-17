@@ -342,7 +342,7 @@ class CommandListenerThread(QThread):
 
 
 
-duration_date_day = 70
+duration_date_day = 120
 duration_date_up = 250      #
 # duration_date_up = 190
 # duration_date_up = 120
@@ -602,10 +602,45 @@ def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+
 from PyQt6 import QtCore, QtWidgets
 from PyQt6.QtCore import Qt
 from PyQt6 import sip
+
+
+class NumericTreeWidgetItem(QtWidgets.QTreeWidgetItem):
+    """支持数值排序的 QTreeWidgetItem
+    
+    使用 UserRole 存储的数值进行排序,而非文本
+    对于没有 UserRole 数据的列,回退到字符串比较
+    """
+    def __lt__(self, other):
+        if not isinstance(other, QtWidgets.QTreeWidgetItem):
+            return super().__lt__(other)
+            
+        tree = self.treeWidget()
+        if tree is None:
+            return super().__lt__(other)
+            
+        col = tree.sortColumn()
+        
+        # 尝试获取 UserRole 存储的数值
+        my_data = self.data(col, Qt.ItemDataRole.UserRole)
+        other_data = other.data(col, Qt.ItemDataRole.UserRole)
+        
+        # 如果两者都是数值,则数值比较
+        if my_data is not None and other_data is not None:
+            try:
+                return float(my_data) < float(other_data)
+            except (ValueError, TypeError):
+                pass
+        
+        # 回退到字符串比较
+        return self.text(col) < other.text(col)
+
+
 class ScrollableMsgBox(QtWidgets.QDialog):
+
     """可滚动的详细信息弹窗，用于显示高密度决策日志"""
     def __init__(self, title, content, parent=None):
         super().__init__(parent)
@@ -835,9 +870,37 @@ class MainWindow(QMainWindow, WindowMixin):
                 font-family: 'Microsoft YaHei UI', 'Segoe UI';
                 font-size: 10pt;
             }
+            QComboBox {
+                background-color: #2a2a2a;
+                color: #00FF00;
+                border: 1px solid #444;
+                border-radius: 3px;
+                padding: 2px 5px;
+                min-width: 100px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #2a2a2a;
+                color: #00FF00;
+                selection-background-color: #444;
+            }
         """)
         self.decision_layout = QHBoxLayout(self.decision_panel)
         self.decision_layout.setContentsMargins(15, 0, 15, 0)
+        
+        # --- 策略选择器 (Phase 25) ---
+        from PyQt6.QtWidgets import QComboBox
+        self.strategy_combo = QComboBox()
+        self.strategy_combo.addItems([
+            "📊 回调MA5",
+            "🎯 决策引擎", 
+            "🛡️ 全策略(含监理)",
+        ])
+        self.strategy_combo.setCurrentIndex(2)  # 默认全策略
+        self.strategy_combo.currentIndexChanged.connect(self._on_strategy_changed)
+        self.decision_layout.addWidget(self.strategy_combo)
         
         self.decision_label = QLabel("实时决策中心: 等待策略信号...")
         self.decision_label.setStyleSheet("color: #00FF00; font-weight: bold;")
@@ -854,6 +917,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.decision_layout.addWidget(self.hb_label)
         
         main_layout.addWidget(self.decision_panel)
+
 
         # 1. Left Sidebar: Stock Table
         self.stock_table = QTableWidget()
@@ -1064,6 +1128,33 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⭐ [UPGRADE] 初始化信号覆盖层管理器
         self.signal_overlay = SignalOverlay(self.kline_plot, self.tick_plot)
         self.signal_overlay.set_on_click_handler(self.on_signal_clicked)
+        
+        # ⭐ [NEW] 初始化十字光标组件
+        self.crosshair_enabled = True  # 默认开启十字光标
+        
+        # 创建十字线 (虚线样式)
+        crosshair_pen = pg.mkPen(color=(128, 128, 128), width=1, style=Qt.PenStyle.DashLine)
+        self.vline = pg.InfiniteLine(angle=90, movable=False, pen=crosshair_pen)
+        self.hline = pg.InfiniteLine(angle=0, movable=False, pen=crosshair_pen)
+        self.vline.setZValue(50)  # 确保在 K 线之上,但在信号点之下
+        self.hline.setZValue(50)
+        
+        # 创建数据浮窗
+        self.crosshair_label = pg.TextItem(anchor=(0, 1), color=(255, 255, 255), fill=(0, 0, 0, 180))
+        self.crosshair_label.setZValue(100)  # 最上层
+        
+        # 初始隐藏
+        self.vline.setVisible(False)
+        self.hline.setVisible(False)
+        self.crosshair_label.setVisible(False)
+        
+        # 将十字线和浮窗添加到 K 线图
+        self.kline_plot.addItem(self.vline, ignoreBounds=True)
+        self.kline_plot.addItem(self.hline, ignoreBounds=True)
+        self.kline_plot.addItem(self.crosshair_label)
+        
+        # 连接鼠标移动事件
+        self.kline_plot.scene().sigMouseMoved.connect(self._on_kline_mouse_moved)
         
         # Set splitter sizes (70% top, 30% bottom)
         right_splitter.setSizes([500, 200])
@@ -1349,7 +1440,69 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.day_df = self.day_df[self.day_df.index < today_str]
                 logger.info(f"[INFO] Real-time stopped, cleared today's:{today_str} data for {self.current_code}")
     
+    def _on_strategy_changed(self, index: int) -> None:
+        """
+        处理策略选择器变更
+        
+        策略组合:
+        - 0: 回调MA5策略
+        - 1: 决策引擎
+        - 2: 全策略(含监理)
+        """
+        strategy_map = {
+            0: [StrategyController.STRATEGY_PULLBACK_MA5],
+            1: [StrategyController.STRATEGY_DECISION_ENGINE],
+            2: [StrategyController.STRATEGY_PULLBACK_MA5, 
+                StrategyController.STRATEGY_DECISION_ENGINE,
+                StrategyController.STRATEGY_SUPERVISOR],
+        }
+        
+        selected_strategies = strategy_map.get(index, [])
+        
+        # 更新策略控制器的启用状态
+        all_strategies = [
+            StrategyController.STRATEGY_PULLBACK_MA5,
+            StrategyController.STRATEGY_DECISION_ENGINE,
+            StrategyController.STRATEGY_SUPERVISOR,
+        ]
+        
+        for strat in all_strategies:
+            if strat in selected_strategies:
+                self.strategy_controller.enable_strategy(strat)
+            else:
+                self.strategy_controller.disable_strategy(strat)
+        
+        # 更新决策面板状态显示
+        enabled_list = self.strategy_controller.get_enabled_strategies()
+        status_text = f"策略: {', '.join(enabled_list)}"
+        self.decision_label.setText(f"🎯 {status_text}")
+        
+        # 如果当前有加载的股票,自动刷新信号
+        if self.current_code and not self.day_df.empty:
+            self._refresh_strategy_signals()
+        
+        logger.info(f"[策略选择器] 切换到组合 {index}, 启用策略: {enabled_list}")
     
+    def _refresh_strategy_signals(self) -> None:
+        """刷新当前股票的策略信号显示"""
+        if not self.current_code or self.day_df.empty:
+            return
+        
+        try:
+            # 重新生成信号
+            signals = self.strategy_controller.evaluate_historical_signals(
+                self.current_code, self.day_df
+            )
+            
+            # 更新信号覆盖层
+            if hasattr(self, 'signal_overlay') and self.signal_overlay:
+                self.signal_overlay.update_signals(signals, target='kline')
+                
+            logger.info(f"[刷新信号] {self.current_code} 生成 {len(signals)} 个信号")
+        except Exception as e:
+            logger.error(f"[刷新信号] 失败: {e}")
+    
+
     def show_supervision_details(self):
         """显示监理详细信息"""
         if not hasattr(self, 'current_supervision_data') or not self.current_supervision_data:
@@ -1640,7 +1793,12 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def on_signal_clicked(self, plot, points):
         """点击 K 线信号图标时触发，显示详细决策理由与指标"""
-        if not points:
+        # 终极健壮性保障：使用 try-except 规避所有 numpy 数组或 PySide 对象的布尔判定异常
+        try:
+            if points is None or len(points) == 0:
+                return
+        except Exception:
+            # 如果发生 truth value 歧义或其他评估错误，跳过信号处理
             return
         
         point = points[0]
@@ -1694,7 +1852,143 @@ class MainWindow(QMainWindow, WindowMixin):
         dlg = ScrollableMsgBox(f"🔍 信号透视: {self.current_code} ({date})", msg, self)
         dlg.exec()
 
+    def _on_kline_mouse_moved(self, pos):
+        """
+        K 线图鼠标移动事件处理器
+        显示十字光标和 OHLC 数据浮窗
+        只在鼠标悬停在有效K线柱上时显示
+        """
+        if not self.crosshair_enabled or self.day_df.empty:
+            self.vline.setVisible(False)
+            self.hline.setVisible(False)
+            self.crosshair_label.setVisible(False)
+            return
+        
+        # 检查鼠标是否在图表范围内
+        if self.kline_plot.sceneBoundingRect().contains(pos):
+            # 将场景坐标转换为数据坐标
+            mouse_point = self.kline_plot.vb.mapSceneToView(pos)
+            x, y = mouse_point.x(), mouse_point.y()
+            
+            # 将 X 坐标转换为 DataFrame 索引
+            idx = int(round(x))
+            
+            # ⭐ 严格的边界检查: 只有当 idx 在有效范围内才显示十字光标
+            # 这样可以避免在空白区域显示十字线
+            if 0 <= idx < len(self.day_df):
+                # 获取当前 K 线数据
+                row = self.day_df.iloc[idx]
+                
+                # ⭐ 额外检查: 鼠标Y坐标必须在K线的价格范围内
+                # 这样确保只有真正指向K线柱时才显示
+                high_price = row.get('high', 0)
+                low_price = row.get('low', 0)
+                
+                # 如果鼠标Y坐标不在K线的高低价范围内,不显示十字光标
+                if not (low_price <= y <= high_price):
+                    self.vline.setVisible(False)
+                    self.hline.setVisible(False)
+                    self.crosshair_label.setVisible(False)
+                    return
+                
+                # 更新十字线位置
+                self.vline.setPos(idx)
+                self.hline.setPos(y)
+                self.vline.setVisible(True)
+                self.hline.setVisible(True)
+                date_str = row.name.strftime('%Y-%m-%d') if hasattr(row.name, 'strftime') else str(row.name)
+                
+                # 提取 OHLC 和成交量
+                open_price = row.get('open', 0)
+                high_price = row.get('high', 0)
+                low_price = row.get('low', 0)
+                close_price = row.get('close', 0)
+                volume = row.get('amount', 0)
+                
+                # 成交量转换为亿单位
+                volume_yi = volume / 100000000  # 转换为亿
+                
+                # 获取涨幅 (如果有 percent 字段)
+                ratio = row.get('p_change', 0.0)  # 尝试从 p_change 获取
+                if ratio == 0.0:
+                    ratio = row.get('percent', 0.0)  # 备用字段
+                
+                # 定义各价格独立颜色
+                RED = "#FF3333"
+                WHITE = "#FFFFFF"
+                
+                # 基础颜色:阳线收盘红色,阴线收盘白色
+                is_bullish = close_price > open_price
+                
+                # Open 颜色
+                open_color = RED if is_bullish else WHITE
+                
+                # Close 颜色: close==high 时红色
+                close_is_high = abs(close_price - high_price) < 0.01
+                close_color = RED if close_is_high or is_bullish else WHITE
+                
+                # Low 颜色: open==low 时红色
+                open_is_low = abs(open_price - low_price) < 0.01
+                low_color = RED if open_is_low else WHITE
+                
+                # High 颜色
+                high_color = RED if is_bullish else WHITE
+                
+                # 格式化显示文本 (4行格式,使用HTML表格实现对齐)
+                # 每个价格独立设置颜色
+                text = f"""
+                <table style='font-family:monospace; border-collapse:collapse;'>
+                <tr><td style='color:{WHITE}'>O:</td><td style='text-align:right;color:{open_color}'>{open_price:.2f}</td><td style='padding-left:8px;color:{WHITE}'>C:</td><td style='text-align:right;color:{close_color}'>{close_price:.2f}</td></tr>
+                <tr><td style='color:{WHITE}'>L:</td><td style='text-align:right;color:{low_color}'>{low_price:.2f}</td><td style='padding-left:8px;color:{WHITE}'>H:</td><td style='text-align:right;color:{high_color}'>{high_price:.2f}</td></tr>
+                </table>
+                <div style='color:#FFFFFF; font-family:monospace;'>V:{volume_yi:6.2f}亿 R:{ratio:6.2f}%</div>
+                <div style='color:#FFFFFF; font-family:monospace;'>{date_str}</div>
+                """
+                
+
+                self.crosshair_label.setHtml(text)
+                
+                # 计算浮窗位置 - 显示在鼠标指针下方
+                view_range = self.kline_plot.viewRange()
+                x_range = view_range[0]
+                y_range = view_range[1]
+                
+                # 浮窗位置: 在当前鼠标Y坐标下方
+                label_x = x
+                label_y = y - (y_range[1] - y_range[0]) * 0.08  # 在鼠标下方 8% 的位置
+                
+                # 如果光标在右侧,浮窗向左偏移,避免超出边界
+                if idx > (x_range[0] + x_range[1]) * 0.7:
+                    label_x = x - (x_range[1] - x_range[0]) * 0.12
+                # 如果光标在左侧,浮窗向右偏移
+                elif idx < (x_range[0] + x_range[1]) * 0.3:
+                    label_x = x + (x_range[1] - x_range[0]) * 0.02
+                
+                # 如果光标在底部,浮窗显示在上方
+                if y < (y_range[0] + y_range[1]) * 0.3:
+                    label_y = y + (y_range[1] - y_range[0]) * 0.08
+                
+                self.crosshair_label.setPos(label_x, label_y)
+                self.crosshair_label.setVisible(True)
+            else:
+                # 超出K线数据范围,隐藏十字光标
+                self.vline.setVisible(False)
+                self.hline.setVisible(False)
+                self.crosshair_label.setVisible(False)
+        else:
+            # 鼠标移出图表,隐藏
+            self.vline.setVisible(False)
+            self.hline.setVisible(False)
+            self.crosshair_label.setVisible(False)
+
     def _on_initial_loaded(self, code, day_df, tick_df):
+        # ⚡ 立即更新标题,清除 "Loading..." 状态
+        # 即使这是旧的加载结果,也要清除 Loading 状态,避免标题卡住
+        if not day_df.empty:
+            # 调用完整的标题更新逻辑,显示所有信息 (Rank、percent、win、slope、volume)
+            self._update_plot_title(code, day_df, tick_df)
+        
+        # 检查是否是当前请求的代码,如果不是则忽略(防止旧数据覆盖新数据)
         if code != self.current_code:
             return
 
@@ -3396,22 +3690,36 @@ class MainWindow(QMainWindow, WindowMixin):
                 name = str(row.get('name', ''))
                 rank = row.get('Rank', 0)
                 pct = row.get('percent', 0)
+                
+                # 安全转换数值
+                try:
+                    rank_val = float(rank) if rank not in ('', None, 'nan') else float('inf')
+                except (ValueError, TypeError):
+                    rank_val = float('inf')
+                try:
+                    pct_val = float(pct) if pct not in ('', None, 'nan') else 0.0
+                except (ValueError, TypeError):
+                    pct_val = 0.0
 
-                child = QTreeWidgetItem(self.filter_tree)
+                child = NumericTreeWidgetItem(self.filter_tree)
                 child.setText(0, code)
                 child.setText(1, name)
-                child.setText(2, str(rank))
-                child.setText(3, f"{pct:.2f}%")
+                child.setText(2, str(rank) if rank not in ('', None) else '')
+                child.setText(3, f"{pct_val:.2f}%")
                 child.setData(0, Qt.ItemDataRole.UserRole, code)
+                
+                # ⭐ 关键修复：使用UserRole+1存储数值用于排序
+                child.setData(2, Qt.ItemDataRole.UserRole, rank_val)  # Rank列数值
+                child.setData(3, Qt.ItemDataRole.UserRole, pct_val)    # Percent列数值
 
                 # 左对齐
                 for col in range(4):
                     child.setTextAlignment(col, Qt.AlignmentFlag.AlignLeft)
 
                 # 百分比上色
-                if pct > 0:
+                if pct_val > 0:
                     child.setForeground(3, QBrush(QColor("red")))
-                elif pct < 0:
+                elif pct_val < 0:
                     child.setForeground(3, QBrush(QColor("green")))
 
             # --- 5. 调整列宽，尽量紧凑 ---
@@ -3419,6 +3727,10 @@ class MainWindow(QMainWindow, WindowMixin):
             for col in range(self.filter_tree.columnCount()):
                 header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
             header.setStretchLastSection(False)  # 不拉伸最后一列
+            
+            # ⭐ 默认按Rank升序排序
+            self.filter_tree.sortItems(2, Qt.SortOrder.AscendingOrder)
+
 
             self.statusBar().showMessage(f"Results: {len(matches)}")
 
@@ -3426,53 +3738,6 @@ class MainWindow(QMainWindow, WindowMixin):
             err_item = QTreeWidgetItem(self.filter_tree)
             err_item.setText(0, f"Error: {e}")
 
-
-
-
-    # # 设置表格列自适应
-    # # 所有列自动根据内容调整宽度
-    # for col in range(len(headers)):
-    #     headers.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-
-    # def on_filter_combo_changed(self, index):
-    #     query_str = self.filter_combo.currentData()
-    #     self.filter_tree.clear()
-
-    #     if not query_str or self.df_all.empty:
-    #         return
-
-    #     try:
-    #         # 准备数据
-    #         df_to_search = self.df_all.copy()
-    #         if 'code' not in df_to_search.columns:
-    #              df_to_search['code'] = df_to_search.index.astype(str)
-    #         if 'volume' in df_to_search.columns and 'vol' not in df_to_search.columns:
-    #             df_to_search['vol'] = df_to_search['volume']
-
-    #         # 执行查询
-    #         final_query = ensure_parentheses_balanced(query_str)
-    #         matches = df_to_search.query(final_query)
-            
-
-
-    #         for idx, row in matches.iterrows():
-    #             code = str(row['code'])
-    #             name = str(row.get('name', ''))
-    #             rank = str(row.get('rank', 0))
-    #             child = QTreeWidgetItem(self.filter_tree)  # 直接顶格
-    #             child.setText(0, f"{code} {name}{rank}{pct}")
-    #             child.setData(0, Qt.ItemDataRole.UserRole, code)
-                
-    #             pct = row.get('percent', 0)
-    #             if pct > 0:
-    #                 child.setForeground(0, QBrush(QColor("red")))
-    #             elif pct < 0:
-    #                 child.setForeground(0, QBrush(QColor("green")))
-    #         self.statusBar().showMessage(f"Results: {len(matches)}")
-
-    #     except Exception as e:
-    #         err_item = QTreeWidgetItem(self.filter_tree)
-    #         err_item.setText(0, f"Error: {e}")
 
     def on_filter_tree_item_clicked(self, item, column):
         code = item.data(0, Qt.ItemDataRole.UserRole)
@@ -3527,37 +3792,6 @@ class MainWindow(QMainWindow, WindowMixin):
         # 默认分割比例：股票列表:过滤面板:图表区域 = 1:1:4
         self.main_splitter.setSizes([200, 200, 800])
     
-    # def save_splitter_state(self):
-    #     """保存分割器状态（过滤隐藏面板的 0 值）"""
-    #     try:
-    #         config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
-
-    #         sizes = self.main_splitter.sizes()
-    #         fixed_sizes = list(sizes)
-
-    #         # 假设 filter 是第 3 个（index=2）
-    #         FILTER_INDEX = 2
-    #         FILTER_DEFAULT = 100
-    #         FILTER_MIN = 60
-
-    #         # 如果 filter 当前是隐藏状态或 size=0，写入合理值
-    #         if fixed_sizes[FILTER_INDEX] <= 0:
-    #             fixed_sizes[FILTER_INDEX] = max(
-    #                 FILTER_DEFAULT,
-    #                 FILTER_MIN
-    #             )
-
-    #         config = {'splitter_sizes': fixed_sizes}
-
-    #         with open(config_file, 'w', encoding='utf-8') as f:
-    #             json.dump(config, f, indent=2)
-
-    #         logger.info(
-    #             f'save_splitter sizes: raw={sizes}, fixed={fixed_sizes}, file={config_file}'
-    #         )
-
-    #     except Exception as e:
-    #         logger.exception("Failed to save splitter state")
 
     def save_splitter_state(self):
         """保存分割器状态（过滤隐藏面板的 0 值）"""

@@ -5010,15 +5010,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             def treeview_sort_column(tv, col, reverse):
                 l = [(tv.set(k, col), k) for k in tv.get_children('')]
-                try:
-                    l.sort(key=lambda t: float(t[0]), reverse=reverse)
-                except ValueError:
-                    l.sort(reverse=reverse)
+                
+                # 智能数值排序:尝试转换为数值,失败则按字符串排序
+                def sort_key(item):
+                    val = item[0]
+                    if val in ('', '-', '--', 'N/A', None):
+                        return (1, 0)  # 空值排在最后
+                    try:
+                        # 尝试转换为数值
+                        return (0, float(val))
+                    except (ValueError, TypeError):
+                        # 无法转换,按字符串排序
+                        return (0, str(val).lower())
+                
+                l.sort(key=sort_key, reverse=reverse)
 
                 for index, (val, k) in enumerate(l):
                     tv.move(k, '', index)
 
                 tv.heading(col, command=lambda: treeview_sort_column(tv, col, not reverse))
+
 
             tree.heading("code", text="代码", command=lambda: treeview_sort_column(tree, "code", False))
             tree.heading("name", text="名称", command=lambda: treeview_sort_column(tree, "name", False))
