@@ -1542,8 +1542,8 @@ def fetch_and_process(
             # inside update_tree() to eliminate cross-process proxy overhead.
             with timed_ctx("format_floats", warn_ms=800):
                 df_all = format_floats(df_all)
-            with timed_ctx("reduce_memory_usage", warn_ms=800):
-                df_all = cct.reduce_memory_usage(df_all)
+            # with timed_ctx("reduce_memory_usage", warn_ms=800):
+            #     df_all = cct.reduce_memory_usage(df_all)
             queue.put(df_all)
             gc.collect()
             cct.print_timing_summary()
