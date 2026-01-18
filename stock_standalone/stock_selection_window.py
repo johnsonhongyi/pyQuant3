@@ -615,6 +615,11 @@ class StockSelectionWindow(tk.Toplevel, WindowMixin):
             # 发送联动
             if stock_code and hasattr(self, 'sender') and self.sender:
                 self.sender.send(stock_code)
+            # ⭐ 可视化器联动
+            if stock_code and hasattr(self.master, 'vis_var') and self.master.vis_var.get():
+                if hasattr(self.master, 'open_visualizer'):
+                    self.master.open_visualizer(str(stock_code))
+
     # === 行选择逻辑 ===
     # def on_tree_select(self,event):
     #     sel = self.tree.selection()
