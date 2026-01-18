@@ -87,6 +87,8 @@ class VoiceAnnouncer:
         self.on_speak_start = None # 回调函数: func(code)
         self.on_speak_end = None   # 回调函数: func(code)
         self._stop_event = threading.Event()
+        self._pause_event = threading.Event()  # 🛡️ 暂停信号
+        self._pause_event.set()  # 默认不暂停 (set = 可运行)
         self.current_code = None
         self.current_engine = None
         
@@ -96,6 +98,35 @@ class VoiceAnnouncer:
             self._thread.start()
         else:
             self._thread = None
+    
+    def pause(self) -> None:
+        """暂停语音播报 (用于避免与 Qt 窗口创建冲突)"""
+        self._pause_event.clear()
+        logger.debug("VoiceAnnouncer: 已暂停")
+    
+    def resume(self) -> None:
+        """恢复语音播报"""
+        self._pause_event.set()
+        logger.debug("VoiceAnnouncer: 已恢复")
+    
+    @property
+    def is_speaking(self) -> bool:
+        """检查是否正在播放语音"""
+        return self.current_engine is not None
+    
+    def wait_for_safe(self, timeout: float = 3.0) -> bool:
+        """
+        等待当前语音播放完成 (用于 Qt 操作前的安全等待)
+        返回: True 如果成功等待完成，False 如果超时
+        """
+        import time
+        start = time.time()
+        while self.is_speaking:
+            if time.time() - start > timeout:
+                logger.warning(f"VoiceAnnouncer: 等待语音完成超时 ({timeout}s)")
+                return False
+            time.sleep(0.1)
+        return True
 
     def _speak_one(self, text: str):
         """单次播报，每次重新初始化以避免 COM 状态问题"""
@@ -143,6 +174,10 @@ class VoiceAnnouncer:
             
         while not self._stop_event.is_set():
             try:
+                # 🛡️ 等待暂停状态解除 (用于避免与 Qt 操作冲突)
+                if not self._pause_event.wait(timeout=0.5):
+                    continue  # 如果暂停中，继续等待
+                
                 data = self.queue.get(timeout=1)
                 text = data.get('text')
                 code = data.get('code')

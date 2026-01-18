@@ -258,8 +258,58 @@ def send_with_visualizer(func):
     return wrapper
 
 
+# ============================================================================
+# 🛡️ Qt 安全操作上下文管理器 - 防止 pyttsx3 COM 与 Qt GIL 冲突
+# ============================================================================
+from contextlib import contextmanager
+
+@contextmanager
+def qt_safe_operation(app_instance):
+    """
+    Qt 安全操作上下文管理器
+    在任何 Qt 窗口创建/显示操作前暂停语音引擎并等待完成，然后恢复
+    
+    用法:
+        with qt_safe_operation(self):
+            # Qt 窗口操作
+            window.show()
+    """
+    voice = None
+    voice_paused = False
+    
+    try:
+        # 获取语音引擎
+        if hasattr(app_instance, 'live_strategy') and app_instance.live_strategy:
+            if hasattr(app_instance.live_strategy, '_voice'):
+                voice = app_instance.live_strategy._voice
+                
+                if voice:
+                    # 1. 暂停语音队列（阻止新语音）
+                    if hasattr(voice, 'pause'):
+                        voice.pause()
+                        voice_paused = True
+                    
+                    # 2. 等待当前语音播放完成
+                    if hasattr(voice, 'wait_for_safe'):
+                        voice.wait_for_safe(timeout=5.0)
+                    else:
+                        import time
+                        time.sleep(0.3)  # 回退方案
+        
+        yield  # 执行 Qt 操作
+        
+    finally:
+        # 恢复语音引擎
+        if voice_paused and voice:
+            if hasattr(voice, 'resume'):
+                voice.resume()
+
+
 class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def __init__(self):
+        # ⭐ 启动计时
+        self._init_start_time = time.time()
+        
         # 初始化 tk.Tk()
         super().__init__()
         
@@ -318,7 +368,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.after(5000, self._start_feedback_listener)
 
-        # 4. 初始化 Realtime Data Service
+        # 4. 初始化 Realtime Data Service (异步加载以加快启动)
         try:
             # 启动 Manager 仅用于同步设置 (global_dict)
             logger.info("正在启动 StockManager (SyncManager) 用于状态共享...")
@@ -328,14 +378,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.global_dict = self.manager.dict()
             self.global_dict["resample"] = resampleInit
             
-            # 🔥 直接在主进程实例化 DataPublisher 以减少跨进程开销和内存占用
-            # 这样避免了在 SyncManager 进程中维护一个庞大的数据对象副本
-            self.realtime_service = DataPublisher(high_performance=False)
-            logger.info(f"✅ RealtimeDataService (Local) 已就绪 (Main PID: {os.getpid()})")
+            # 🚀 异步加载 DataPublisher - 加快启动速度
+            # 注: 策略白盒等组件将在加载完成后通过回调获取数据
+            self.realtime_service = None
+            self._realtime_service_ready = False
+            self._realtime_ready_callbacks: list[Callable[[], None]] = []  # 回调队列
+            self.after(100, self._init_realtime_service_async)
+            logger.info(f"⏳ RealtimeDataService 将异步加载 (Main PID: {os.getpid()})")
 
         except Exception as e:
-            logger.error(f"❌ RealtimeDataService 初始化失败: {e}\n{traceback.format_exc()}")
+            logger.error(f"❌ SyncManager 初始化失败: {e}\n{traceback.format_exc()}")
             self.realtime_service = None
+            self._realtime_service_ready = False
+            self._realtime_ready_callbacks = []
             self.manager = mp.Manager()
             self.global_dict = self.manager.dict()
             self.global_dict["resample"] = resampleInit
@@ -536,6 +591,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.after(3000, self._check_dpi_change)
         self.auto_adjust_column = self.dfcf_var.get()
         # self.bind("<Configure>", self.on_resize)
+        
+        # ⭐ 启动完成计时
+        init_elapsed = time.time() - self._init_start_time
+        logger.info(f"🚀 程序初始化完成 (总耗时: {init_elapsed:.2f}s)")
+        if logger.level == LoggerFactory.DEBUG:
+            print_timing_summary(top_n=6)
     # 在初始化 UI 或后台线程里
     def setup_global_hotkey(self):
         """
@@ -1388,7 +1449,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
         # 功能选择下拉框（固定宽度）
-        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","复盘数据", "盈亏统计", "交易分析Qt6", "GUI 工具", "覆写TDX", "手札总览", "语音预警"]
+        options = ["窗口重排","Query编辑","停止刷新", "启动刷新" , "保存数据", "读取存档", "报警中心","复盘数据", "盈亏统计", "交易分析Qt6", "GUI工具", "覆写TDX", "手札总览", "语音预警"]
         self.action_var = tk.StringVar()
         self.action_combo = ttk.Combobox(
             bottom_search_frame, textvariable=self.action_var,
@@ -3971,14 +4032,92 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Add monitor dialog error: {e}")
             messagebox.showerror("Error", f"开启监控对话框失败: {e}")
 
+    def _init_realtime_service_async(self):
+        """
+        🚀 异步初始化 RealtimeDataService (DataPublisher)
+        在后台线程中加载 MinuteKlineCache，避免阻塞 UI 显示
+        """
+        def _load_in_thread():
+            try:
+                start_time = time.time()
+                service = DataPublisher(high_performance=False)
+                elapsed = time.time() - start_time
+                # 使用 after 安全地更新主线程状态
+                self.after(0, lambda: self._on_realtime_service_ready(service, elapsed))
+            except Exception as e:
+                logger.error(f"❌ RealtimeDataService 异步初始化失败: {e}\n{traceback.format_exc()}")
+                self.after(0, lambda: self._on_realtime_service_ready(None, 0))
+
+        # 在后台线程中加载
+        import threading
+        loader_thread = threading.Thread(target=_load_in_thread, daemon=True, name="RealtimeServiceLoader")
+        loader_thread.start()
+        logger.info("🔄 开始后台加载 RealtimeDataService...")
+
+    def _on_realtime_service_ready(self, service, elapsed):
+        """处理 RealtimeDataService 加载完成"""
+        self.realtime_service = service
+        self._realtime_service_ready = service is not None
+        
+        if service:
+            logger.info(f"✅ RealtimeDataService (Local) 已就绪 (耗时: {elapsed:.2f}s)")
+            # 如果 live_strategy 已经初始化，注入 realtime_service
+            if hasattr(self, 'live_strategy') and self.live_strategy:
+                self.live_strategy.realtime_service = service
+                logger.info("RealtimeDataService 已注入到已初始化的 StockLiveStrategy")
+            
+            # 如果策略白盒窗口已打开，注入 realtime_service
+            if hasattr(self, '_strategy_manager_win') and self._strategy_manager_win:
+                try:
+                    if self._strategy_manager_win.winfo_exists():
+                        self._strategy_manager_win.realtime_service = service
+                        logger.info("RealtimeDataService 已注入到已打开的 StrategyManager")
+                except:
+                    pass
+            
+            # 🔔 执行所有等待中的回调
+            if hasattr(self, '_realtime_ready_callbacks'):
+                for callback in self._realtime_ready_callbacks:
+                    try:
+                        callback()
+                    except Exception as cb_e:
+                        logger.warning(f"Realtime ready callback failed: {cb_e}")
+                self._realtime_ready_callbacks.clear()
+                logger.debug(f"已执行 {len(self._realtime_ready_callbacks)} 个等待回调")
+        else:
+            logger.warning("⚠️ RealtimeDataService 加载失败，部分功能可能不可用")
+
+    def on_realtime_service_ready(self, callback: Callable[[], None]) -> None:
+        """
+        注册回调函数，在 RealtimeDataService 就绪时调用
+        如果已就绪则立即执行回调
+        """
+        if self._realtime_service_ready and self.realtime_service:
+            # 已就绪，立即执行
+            try:
+                callback()
+            except Exception as e:
+                logger.warning(f"Realtime ready callback failed: {e}")
+        else:
+            # 尚未就绪，加入队列
+            if hasattr(self, '_realtime_ready_callbacks'):
+                self._realtime_ready_callbacks.append(callback)
+            else:
+                self._realtime_ready_callbacks = [callback]
+
     def _init_live_strategy(self):
         """延迟初始化策略模块"""
         try:
+            # 注意：realtime_service 可能还在异步加载中，传入当前值（可能为 None）
+            # 稍后在 _on_realtime_service_ready 中会注入
             self.live_strategy = StockLiveStrategy(self,alert_cooldown=alert_cooldown,
                                                    voice_enabled=self.voice_var.get(),
                                                    realtime_service=self.realtime_service)
             
-            logger.info("RealtimeDataService injected into StockLiveStrategy.")
+            if self.realtime_service:
+                logger.info("RealtimeDataService injected into StockLiveStrategy.")
+            else:
+                logger.info("StockLiveStrategy 已初始化 (RealtimeDataService 稍后注入)")
             
             # 注册报警回调
             self.live_strategy.set_alert_callback(self.on_voice_alert)
@@ -4941,16 +5080,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def open_trading_analyzer_qt6(self):
         """打开 Qt6 版本的交易分析工具"""
         try:
-            if not hasattr(self, "_trading_gui_qt6") or self._trading_gui_qt6 is None:
-                # 确保 Qt 环境已初始化
-                if not QtWidgets.QApplication.instance():
-                    self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
-                
-                self._trading_gui_qt6 = TradingGUI(sender=self.sender,on_tree_scroll_to_code=self.tree_scroll_to_code)
-                
-            self._trading_gui_qt6.show()
-            self._trading_gui_qt6.raise_()
-            self._trading_gui_qt6.activateWindow()
+            # 🛡️ 使用 Qt 安全操作上下文管理器，避免 pyttsx3 COM 与 Qt GIL 冲突
+            with qt_safe_operation(self):
+                if not hasattr(self, "_trading_gui_qt6") or self._trading_gui_qt6 is None:
+                    # 确保 Qt 环境已初始化
+                    if not QtWidgets.QApplication.instance():
+                        self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
+                    
+                    self._trading_gui_qt6 = TradingGUI(sender=self.sender,on_tree_scroll_to_code=self.tree_scroll_to_code)
+                    
+                self._trading_gui_qt6.show()
+                self._trading_gui_qt6.raise_()
+                self._trading_gui_qt6.activateWindow()
+            
             toast_message(self, "交易分析工具(Qt6) 已启动")
         except Exception as e:
             logger.error(f"Failed to open TradingGUI Qt6: {e}")
@@ -4959,27 +5101,33 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def open_kline_viewer_qt(self):
         """打开 Qt 版本的 K 线缓存查看器"""
         try:
-            if not hasattr(self, "_kline_viewer_qt") or self._kline_viewer_qt is None:
-                # 确保 Qt 环境已初始化
-                if not QtWidgets.QApplication.instance():
-                    self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
-                
-                # 获取 last6vol 用于归一化
-                last6vol_map = {}
-                if hasattr(self, 'df_all') and not self.df_all.empty and 'last6vol' in self.df_all.columns:
-                    last6vol_map = self.df_all['last6vol'].to_dict()
+            # 🛡️ 使用 Qt 安全操作上下文管理器，避免 pyttsx3 COM 与 Qt GIL 冲突
+            with qt_safe_operation(self):
+                if not hasattr(self, "_kline_viewer_qt") or self._kline_viewer_qt is None:
+                    # 确保 Qt 环境已初始化
+                    if not QtWidgets.QApplication.instance():
+                        self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
+                    
+                    # 获取 last6vol 用于归一化
+                    last6vol_map = {}
+                    if hasattr(self, 'df_all') and not self.df_all.empty and 'last6vol' in self.df_all.columns:
+                        last6vol_map = self.df_all['last6vol'].to_dict()
 
-                # 连接双击代码到 TDX 联动，并传入实时服务代理
-                self._kline_viewer_qt = KlineBackupViewer(
-                    on_code_callback=self.on_code_click,
-                    service_proxy=self.realtime_service,
-                    last6vol_map=last6vol_map,
-                    main_app=self
-                )
+                    # 连接双击代码到 TDX 联动，并传入实时服务代理
+                    self._kline_viewer_qt = KlineBackupViewer(
+                        on_code_callback=self.on_code_click,
+                        service_proxy=self.realtime_service,
+                        last6vol_map=last6vol_map,
+                        main_app=self
+                    )
                 
-            self._kline_viewer_qt.show()
-            self._kline_viewer_qt.raise_()
-            self._kline_viewer_qt.activateWindow()
+                # 处理 Qt 事件以确保窗口正确显示
+                QtWidgets.QApplication.processEvents()
+                    
+                self._kline_viewer_qt.show()
+                self._kline_viewer_qt.raise_()
+                self._kline_viewer_qt.activateWindow()
+            
             toast_message(self, "K线查看器 (Qt) 已启动")
         except Exception as e:
             logger.error(f"Failed to open KlineBackupViewer: {e}")

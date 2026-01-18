@@ -11,7 +11,7 @@ from queue import Queue, Empty
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional, Union, Callable
-
+import signal
 import pandas as pd
 import numpy as np
 import pyqtgraph as pg
@@ -1244,7 +1244,15 @@ class GlobalInputFilter(QtCore.QObject):
     def __init__(self, main_window):
         super().__init__(main_window)
         self.main_window = main_window
+        # 注册终端信号处理（Ctrl+C 或 kill）
+        signal.signal(signal.SIGINT, self._handle_exit)
+        signal.signal(signal.SIGTERM, self._handle_exit)
 
+    def _handle_exit(self, signum, frame):
+        logger.info(f"⚡ Received signal {signum}, exiting...")
+        QtWidgets.QApplication.quit()
+        sys.exit(0)
+            
     def eventFilter(self, obj, event):
         # 检查主窗口是否还存在
         if not hasattr(self, 'main_window') or sip.isdeleted(self.main_window):

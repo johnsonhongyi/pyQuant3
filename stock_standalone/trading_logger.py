@@ -57,7 +57,8 @@ class TradingLogger:
                     position REAL,
                     reason TEXT,
                     indicators TEXT, -- JSON 格式存储当时的 MA, MACD, Structure 等指标
-                    PRIMARY KEY (date, code)
+                    resample TEXT DEFAULT 'd', -- 周期标识: 'd', '3d', 'w', 'm'
+                    PRIMARY KEY (date, code, resample)
                 )
             """)
             
@@ -78,7 +79,8 @@ class TradingLogger:
                     profit REAL,     -- 净利润
                     pnl_pct REAL,    -- 盈亏比例
                     status TEXT,     -- 'OPEN' or 'CLOSED'
-                    feedback TEXT    -- 策略反馈 (用户点评)
+                    feedback TEXT,   -- 策略反馈 (用户点评)
+                    resample TEXT DEFAULT 'd' -- 周期标识
                 )
             """)
             conn.commit()
@@ -99,7 +101,8 @@ class TradingLogger:
                     ma5 REAL,
                     ma10 REAL,
                     category TEXT,
-                    PRIMARY KEY (date, code)
+                    resample TEXT DEFAULT 'd', -- 周期标识
+                    PRIMARY KEY (date, code, resample)
                 )
             """)
 
@@ -143,6 +146,21 @@ class TradingLogger:
                 cur.execute("ALTER TABLE trade_records ADD COLUMN buy_reason TEXT")
             if "sell_reason" not in existing_trade_cols:
                 cur.execute("ALTER TABLE trade_records ADD COLUMN sell_reason TEXT")
+            if "resample" not in existing_trade_cols:
+                cur.execute("ALTER TABLE trade_records ADD COLUMN resample TEXT DEFAULT 'd'")
+                logger.info("DB Migration: Added 'resample' column to trade_records")
+            
+            # Migration for signal_history
+            cur.execute("PRAGMA table_info(signal_history)")
+            existing_signal_cols = [col[1] for col in cur.fetchall()]
+            if "resample" not in existing_signal_cols:
+                cur.execute("ALTER TABLE signal_history ADD COLUMN resample TEXT DEFAULT 'd'")
+                logger.info("DB Migration: Added 'resample' column to signal_history")
+            
+            # Migration for selection_history
+            if "resample" not in existing_cols:
+                cur.execute("ALTER TABLE selection_history ADD COLUMN resample TEXT DEFAULT 'd'")
+                logger.info("DB Migration: Added 'resample' column to selection_history")
 
             conn.commit()
             conn.close()
@@ -209,11 +227,12 @@ class TradingLogger:
             logger.error(f"Error getting selections: {e}")
             return pd.DataFrame() if pd else []
 
-    def log_signal(self, code: str, name: str, price: float, decision_dict: dict[str, Any], row_data: Optional[dict[str, Any]] = None) -> None:
+    def log_signal(self, code: str, name: str, price: float, decision_dict: dict[str, Any], row_data: Optional[dict[str, Any]] = None, resample: str = 'd') -> None:
         """
         记录每日决策信号
         decision_dict 格式参考 IntradayDecisionEngine.evaluate 的输出
         row_data: 可选的行情数据字典，包含 ma5d, ma10d, ratio, volume 等指标
+        resample: 周期标识 ('d', '3d', 'w', 'm')
         """
         try:
             conn = sqlite3.connect(self.db_path)
@@ -232,8 +251,8 @@ class TradingLogger:
             indicators_json = json.dumps(indicators, ensure_ascii=False, cls=NumpyEncoder)
             
             cur.execute("""
-                INSERT OR REPLACE INTO signal_history (date, code, name, price, action, position, reason, indicators)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT OR REPLACE INTO signal_history (date, code, name, price, action, position, reason, indicators, resample)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 date_str, 
                 code, 
@@ -242,7 +261,8 @@ class TradingLogger:
                 decision_dict.get('action'), 
                 decision_dict.get('position'), 
                 decision_dict.get('reason'),
-                indicators_json
+                indicators_json,
+                resample
             ))
             conn.commit()
             conn.close()

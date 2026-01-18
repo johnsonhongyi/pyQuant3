@@ -426,7 +426,7 @@ class WindowMixin:
             logger.info("无监控窗口记录。")
             return
 
-        logger.info(f"正在恢复 {len(monitor_data)} 个监控窗口...")
+        logger.debug(f"正在恢复 {len(monitor_data)} 个监控窗口...")
         for m in monitor_data:
             try:
                 code = m[0]
@@ -444,6 +444,6 @@ class WindowMixin:
                             "code": unique_code,
                             "stock_info": m
                         }
-                        logger.info(f"恢复窗口 {unique_code}: {concept_name} ({code})")
+                        logger.debug(f"恢复窗口 {unique_code}: {concept_name} ({code})")
             except Exception as e:
                 logger.info(f"恢复窗口失败: {m}, 错误: {e}")
