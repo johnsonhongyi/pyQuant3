@@ -2993,7 +2993,7 @@ def set_console(width=80, height=15, color=3, title=None, closeTerminal=True):
     if title is None:
         # title= (os.path.basename(sys.argv[0]))
         filename = (os.path.basename(sys.argv[0]))
-        log.debug(f'filename:{filename}')
+        # log.debug(f'filename:{filename}')
     elif isinstance(title, list):
         filename = (os.path.basename(sys.argv[0]))
         for cname in title:

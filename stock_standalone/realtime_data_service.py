@@ -7,6 +7,7 @@ from typing import Any, Optional, cast
 from collections.abc import Callable
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil import commonTips as cct
+from JohnsonUtil.commonTips import timed_ctx
 from cache_utils import DataFrameCacheSlot, df_fingerprint
 import psutil
 import os
@@ -94,6 +95,97 @@ class MinuteKlineCache:
         return df
 
     def from_dataframe(self, df: Optional[pd.DataFrame]):
+        """
+        从 DataFrame 恢复缓存数据（性能优化版，可直接替换）
+        """
+        if df is None or df.empty:
+            return
+
+        try:
+            # 仅记录原始行数用于日志，避免双 copy
+            raw_len = len(df)
+
+            # 只 copy 一次
+            df = df.copy()
+
+            cols = df.columns
+
+            # code 规范化（只做一次）
+            if 'code' in cols:
+                df['code'] = (
+                    df['code']
+                    .astype(str)
+                    .str.strip()
+                    .str.zfill(6)
+                )
+
+            # time 规范化
+            if 'time' in cols:
+                # int32 足够，速度和内存都更优
+                df['time'] = df['time'].astype('int32')
+
+                # 排序 + 去重
+                df = (
+                    df
+                    .sort_values(['code', 'time'], kind='mergesort')
+                    .drop_duplicates(subset=['code', 'time'], keep='last')
+                )
+
+            # 清空现有缓存
+            self.clear()
+
+            # 局部变量加速
+            shared_cache = self._shared_cache
+            max_len = self._max_len
+
+            # 提前绑定属性访问，减少 getattr 开销
+            from operator import attrgetter
+            get_time   = attrgetter('time')
+            get_open   = attrgetter('open')
+            get_high   = attrgetter('high')
+            get_low    = attrgetter('low')
+            get_close  = attrgetter('close')
+            get_volume = attrgetter('volume')
+            get_cum    = attrgetter('cum_vol_start')
+
+            # 按 code 分组重建 deque（不再二次排序）
+            for code, group in df.groupby('code', sort=False):
+                dq = deque(maxlen=max_len)
+
+                # itertuples 是目前 pandas → Python 最快路径
+                for r in group.itertuples(index=False):
+                    try:
+                        dq.append(
+                            KLineItem(
+                                time=get_time(r),
+                                open=get_open(r),
+                                high=get_high(r),
+                                low=get_low(r),
+                                close=get_close(r),
+                                volume=get_volume(r),
+                                cum_vol_start=get_cum(r),
+                            )
+                        )
+                    except Exception:
+                        # 与原逻辑一致，跳过坏行
+                        continue
+
+                shared_cache[str(code)] = dq
+
+            self._is_dirty = True
+            self._is_restored = True
+
+            logger.info(
+                f"♻️ MinuteKlineCache restored: {len(shared_cache)} stocks. "
+                f"[Rows: {raw_len} -> Cleaned: {len(df)}]"
+            )
+
+        except Exception as e:
+            logger.error(f"MinuteKlineCache restore error: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+
+    def from_dataframe_slow(self, df: Optional[pd.DataFrame]):
         """
         从 DataFrame 恢复缓存数据
         """
@@ -707,7 +799,8 @@ class DataPublisher:
         try:
             cached_df = self.cache_slot.load_df()
             if not cached_df.empty:
-                self.kline_cache.from_dataframe(cached_df)
+                with timed_ctx("from_dataframe", warn_ms=800):
+                    self.kline_cache.from_dataframe(cached_df)
                 logger.info(f"♻️ MinuteKlineCache recovered from disk: {len(cached_df)} nodes.")
             else:
                 logger.info("ℹ️ No MinuteKlineCache found on disk or empty.")
