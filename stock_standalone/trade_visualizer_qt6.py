@@ -1252,7 +1252,7 @@ class GlobalInputFilter(QtCore.QObject):
         logger.info(f"⚡ Received signal {signum}, exiting...")
         QtWidgets.QApplication.quit()
         sys.exit(0)
-            
+
     def eventFilter(self, obj, event):
         # 检查主窗口是否还存在
         if not hasattr(self, 'main_window') or sip.isdeleted(self.main_window):
@@ -5245,7 +5245,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 过滤隐藏面板的 0 值
             FILTER_INDEX = 2
-            FILTER_DEFAULT = 100
+            FILTER_DEFAULT = 120
             FILTER_MIN = 60
 
             old_sizes = old_config.get('splitter_sizes', [])

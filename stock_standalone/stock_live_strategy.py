@@ -563,11 +563,16 @@ class StockLiveStrategy:
                     recovered_count = 0
                     for t in open_trades:
                         code = str(t['code']).zfill(6)
+                        resample = t.get('resample', 'd')
+                        # 兼容逻辑：为了支持多周期，理想情况下 key 应该是 (code, resample)
+                        # 但为了最少破坏现有结构，如果已经存在同 code 但不同周期的，我们可能需要特殊处理
+                        # 暂且遵循 "目前代码库习惯"，如果不存在则添加
                         if code not in self._monitored_stocks:
                             self._monitored_stocks[code] = {
                                 'name': t['name'],
                                 'rules': [{'type': 'price_up', 'value': float(t['buy_price'])}],
                                 'last_alert': 0,
+                                'resample': resample,
                                 'created_time': t['buy_date'][:13] if t.get('buy_date') else datetime.now().strftime("%Y-%m-%d %H"),
                                 'tags': "recovered_holding",
                                 'snapshot': {
@@ -582,19 +587,25 @@ class StockLiveStrategy:
                     logger.error(f"恢复持仓监控失败: {db_e}")
 
             # ✅ 结构迁移 / 补齐
-            for code, stock in self._monitored_stocks.items():
+            for key, stock in self._monitored_stocks.items():
                 stock.setdefault('rules', [])
                 stock.setdefault('last_alert', 0)
+                stock.setdefault('resample', 'd') # 默认日线
                 stock.setdefault('created_time', datetime.now().strftime("%Y-%m-%d %H"))
                 stock.setdefault('tags', "")
                 stock.setdefault('snapshot', {})  # 快照信息
 
+                # 确保 code 字段存在 (从 key 补齐)
+                if 'code' not in stock:
+                    stock['code'] = key.split('_')[0]
+
                 # ✅ 重建 rule_keys（不从文件读取）
                 rule_keys = set()
+                code = stock['code']
                 for r in stock['rules']:
                     try:
-                        key = self._rule_key(r['type'], r['value'])
-                        rule_keys.add(key)
+                        r_key = self._rule_key(r['type'], r['value'])
+                        rule_keys.add(r_key)
                     except Exception:
                         logger.warning(f"Invalid rule skipped for {code}: {r}")
 
@@ -706,12 +717,13 @@ class StockLiveStrategy:
             import json
             data = {}
 
-            for code, stock in self._monitored_stocks.items():
+            for key, stock in self._monitored_stocks.items():
                 # --- 构建基础数据 ---
                 record = {
                     'name': stock.get('name'),
                     'rules': stock.get('rules', []),
                     'last_alert': stock.get('last_alert', 0),
+                    'resample': stock.get('resample', 'd'), # 保存周期信息
                     'created_time': stock.get('created_time', datetime.now().strftime("%Y-%m-%d %H")),
                     'tags': stock.get('tags', ""),
                     'added_date': stock.get('added_date', ""),
@@ -720,6 +732,8 @@ class StockLiveStrategy:
 
                 # --- 可选：添加行情快照 ---
                 if hasattr(self, 'df') and self.df is not None and not self.df.empty:
+                    # 从 key 中提取原始 code
+                    code = stock.get('code', key.split('_')[0])
                     if code in self.df.index:
                         row = self.df.loc[code]
                         try:
@@ -737,7 +751,7 @@ class StockLiveStrategy:
                             # 如果数据异常，不存 snapshot
                             pass
 
-                data[code] = record
+                data[key] = record
 
             # --- 保存到 JSON ---
             with open(self.config_file, 'w', encoding='utf-8') as f:
@@ -749,20 +763,24 @@ class StockLiveStrategy:
     def _rule_key(self, rule_type, value):
         return f"{rule_type}:{value:.2f}"
 
-    def add_monitor(self, code, name, rule_type, value, tags=None):
+    def add_monitor(self, code, name, rule_type, value, tags=None, resample='d'):
         value = float(value)
+        # 支持多周期隔离，使用复合 Key
+        key = f"{code}_{resample}"
 
-        if code not in self._monitored_stocks:
-            self._monitored_stocks[code] = {
+        if key not in self._monitored_stocks:
+            self._monitored_stocks[key] = {
+                'code': code, # 保存原始代码以供查询
                 'name': name,
                 'rules': [],
                 'last_alert': 0,
+                'resample': resample,
                 'created_time': datetime.now().strftime("%Y-%m-%d %H"),
                 'added_date': datetime.now().strftime('%Y-%m-%d'), # [新增] 用于已添加数量统计
                 'tags': tags or ""
             }
         
-        stock = self._monitored_stocks[code]
+        stock = self._monitored_stocks[key]
         # 如果提供了 tags 且不为空，则更新（覆盖旧的或空的）
         if tags:
             stock['tags'] = tags
@@ -823,13 +841,25 @@ class StockLiveStrategy:
         )
         return "added"
 
-    def process_data(self, df_all: pd.DataFrame, concept_top5: list = None) -> None:
+    def process_data(self, df_all: pd.DataFrame, concept_top5: list = None, resample: str = 'd') -> None:
         """
         处理每一帧的行情数据
         """
         if not self.enabled or df_all is None or df_all.empty:
             return
 
+        # 标记当前处理的周期
+        self.current_resample = resample 
+        
+        # --- 1. 热点题材领涨股发现 (Algorithm Expansion) ---
+        if 925 <= cct.get_now_time_int() <= 1505:
+             self.executor.submit(self._scan_hot_concepts, df_all, concept_top5, resample=resample)
+        
+        # 2. 规则引擎监控 (Existing rules)
+        # self._check_risk_control(df_all)
+        
+        # 3. 策略判定
+        self._check_strategies(df_all, resample=resample)
         # 1. 交易期间判断: 0915 至 1502
         is_trading = cct.get_work_time_duration()
         today_str = datetime.now().strftime('%Y-%m-%d')
@@ -866,37 +896,21 @@ class StockLiveStrategy:
         if self.auto_loop_enabled:
              self.executor.submit(self._process_auto_loop, df_all, concept_top5)
 
-        # --- 板块风险监控 (Sector Risk Monitoring) ---
+        # --- [新增] 板块风险监控 (Sector Risk Monitoring) ---
         if concept_top5 and cct.get_now_time_int() > 916:
-            # Sync execute to ensure status is ready for strategies
             try:
                 sector_status = self.sector_monitor.update(df_all, concept_top5)
-                if sector_status.get('risk_level', 0) > 0.6:
-                    # logger.warning(f"⚠️ 系统性风险预警: {sector_status}")
-                    pass
                 self._last_sector_status = sector_status
             except Exception as e:
                 logger.error(f"Sector Monitor Check Failed: {e}")
 
-        # --- Auto Loop Check ---
-
-        # --- 板块风险监控 (Sector Risk Monitoring) ---
-        if concept_top5 and cct.get_now_time_int() > 916:
-            # Sync execute to ensure status is ready for strategies
-            try:
-                sector_status = self.sector_monitor.update(df_all, concept_top5)
-                if sector_status.get('risk_level', 0) > 0.6:
-                    # logger.warning(f"⚠️ 系统性风险预警: {sector_status}")
-                    pass
-                self._last_sector_status = sector_status
-            except Exception as e:
-                logger.error(f"Sector Monitor Check Failed: {e}")
-
-        self.executor.submit(self._check_strategies, self.df)
+        # --- [关键] 异步触发策略判定 ---
+        self.executor.submit(self._check_strategies, self.df, resample=resample)
 
         # --- ⭐ 数据反馈与回显 (Enrich df_all for UI) ---
         # 将各股的最新决策与监理感知指标写回 df_all，以便前端实时显示
-        for code, stock in self._monitored_stocks.items():
+        for key, stock in self._monitored_stocks.items():
+            code = stock.get('code', key.split('_')[0])
             if code in df_all.index:
                 snap = stock.get('snapshot', {})
                 df_all.at[code, 'last_action'] = snap.get('last_action', '')
@@ -916,12 +930,9 @@ class StockLiveStrategy:
                     df_all.loc[mask, 'market_win_rate'] = snap.get('market_win_rate', 0.5)
                     df_all.loc[mask, 'loss_streak'] = snap.get('loss_streak', 0)
                     df_all.loc[mask, 'vwap_bias'] = snap.get('vwap_bias', 0.0)
-        
-        # --- Top 5 Hot Concepts Strategy ---
-        if concept_top5 and cct.get_now_time_int() > 916:
-            self.executor.submit(self._scan_hot_concepts, df_all, concept_top5)
 
-    def _scan_hot_concepts(self, df: pd.DataFrame | None, concept_top5: list[Any]):
+
+    def _scan_hot_concepts(self, df: pd.DataFrame | None, concept_top5: list[Any], resample: str = 'd'):
         """
         扫描五大热点板块，识别龙头（增强版）
         """
@@ -958,9 +969,9 @@ class StockLiveStrategy:
             # ------------------------------------------------------------------
             today_str = datetime.now().strftime('%Y-%m-%d')
             
-            # 检查今日已添加的热点股数量
-            added_today_count = sum(1 for c, d in self._monitored_stocks.items() 
-                                    if d.get('added_date', '') == today_str and d.get('rule_type_tag') == 'hot_concept')
+            # 检查今日已添加的热点股数量 (限制在当前周期下)
+            added_today_count = sum(1 for k, d in self._monitored_stocks.items() 
+                                    if d.get('added_date', '') == today_str and d.get('rule_type_tag') == 'hot_concept' and d.get('resample', 'd') == resample)
             # logger.debug(f'added_today_count: {type(added_today_count)} MAX_DAILY_ADDITIONS: {type(MAX_DAILY_ADDITIONS)}')
             if added_today_count >= MAX_DAILY_ADDITIONS:
                 # logger.info("Daily hot concept limit reached.")
@@ -1078,7 +1089,8 @@ class StockLiveStrategy:
                         name=cand['name'],
                         rule_type='hot_concept',
                         value=cand['score'],
-                        tags=f"Hot:{cand['concept']}|Sc:{cand['score']:.2f}"
+                        tags=f"Hot:{cand['concept']}|Sc:{cand['score']:.2f}",
+                        resample=resample
                     )
 
                     logger.info(f"🔥 Found Hot Leader (Score={cand['score']:.2f}): {cand['name']}({cand['code']}) in {cand['concept']}")
@@ -1116,7 +1128,7 @@ class StockLiveStrategy:
             logger.error(f"Error in scan_hot_concepts: {e}", exc_info=True)
             pass
 
-    def _check_strategies(self, df):
+    def _check_strategies(self, df, resample='d'):
         try:
             # --- [新增] 全局交易日判断：非交易日不执行策略逻辑 ---
             if not cct.get_trade_date_status():
@@ -1147,10 +1159,15 @@ class StockLiveStrategy:
                 except Exception as e:
                     logger.debug(f"Sync full 55188 data failed: {e}")
 
-            valid_codes = [c for c in self._monitored_stocks.keys() if c in df.index]
+            # 过滤对应周期的监控项
+            monitored_keys = self._monitored_stocks.keys()
+            filtered_keys = [k for k in monitored_keys if self._monitored_stocks[k].get('resample', 'd') == resample]
+            
+            valid_keys = [k for k in filtered_keys if k.split('_')[0] in df.index]
 
-            for code in valid_codes:
-                data = self._monitored_stocks[code]
+            for key in valid_keys:
+                data = self._monitored_stocks[key]
+                code = data.get('code', key.split('_')[0])
                 last_alert = data.get('last_alert', 0)
                 # logger.debug(f"{code} data:{data}")
 
@@ -1164,10 +1181,10 @@ class StockLiveStrategy:
                 # ---------- 安全获取行情数据 ----------
                 try:
                     current_price = float(row.get('trade', 0.0)) # type: ignore
-                    _ = float(row.get('nclose', 0.0)) # type: ignore
-                    _ = float(row.get('percent', 0.0)) # type: ignore
-                    _ = float(row.get('volume', 0.0)) # type: ignore
-                    _ = float(row.get('ratio', 0.0)) # type: ignore
+                    current_nclose = float(row.get('nclose', 0.0)) # type: ignore
+                    current_change = float(row.get('percent', 0.0)) # type: ignore
+                    volume_change = float(row.get('volume', 0.0)) # type: ignore
+                    ratio_change = float(row.get('ratio', 0.0)) # type: ignore
                     # ma5d_change, ma10d_change 仅获取确保存在，但不直接使用
                     _ = float(row.get('ma5d', 0.0)) # type: ignore
                     _ = float(row.get('ma10d', 0.0)) # type: ignore
@@ -1311,13 +1328,19 @@ class StockLiveStrategy:
                      pass
                 
                 # 实时查询 (耗时较小，Sqlite PK查询极快)
-                snap['loss_streak'] = self.trading_logger.get_consecutive_losses(code, days=15)
+                snap['loss_streak'] = self.trading_logger.get_consecutive_losses(code, days=15, resample=resample)
                 
-                # 2. 环境感知：查询最近市场胜率 (可用类变量缓存，每分钟更新一次)
-                if not hasattr(self, '_market_win_rate_cache') or now - getattr(self, '_market_win_rate_ts', 0) > 300:
-                    self._market_win_rate_cache = self.trading_logger.get_market_sentiment(days=3)
-                    self._market_win_rate_ts = now
-                snap['market_win_rate'] = self._market_win_rate_cache
+                # 2. 环境感知：查询最近市场胜率 (分周期缓存)
+                if not hasattr(self, '_sentiments'):
+                    self._sentiments = {}
+                
+                sent_data = self._sentiments.get(resample, {'value': 0.5, 'ts': 0})
+                if now - sent_data['ts'] > 300:
+                    val = self.trading_logger.get_market_sentiment(days=3, resample=resample)
+                    self._sentiments[resample] = {'value': val, 'ts': now}
+                    sent_data = self._sentiments[resample]
+                    
+                snap['market_win_rate'] = sent_data['value']
 
 
                 # 【新增】日内实时追踪字段（用于冲高回落检测和盈利最大化）
@@ -1665,7 +1688,7 @@ class StockLiveStrategy:
 
                     log_msg = combined_msgs.replace('\n', ' | ')
                     logger.info(f"Strategy ALERT: {code} ({data['name']}) Triggered. Action: {action} Msg: {log_msg}")
-                    self._trigger_alert(code, data['name'], combined_msgs, action=action, price=current_price)
+                    self._trigger_alert(code, data['name'], combined_msgs, action=action, price=current_price, resample=resample)
                     data['last_alert'] = now
 
                     data['below_nclose_count'] = 0
@@ -1848,7 +1871,9 @@ class StockLiveStrategy:
                         code,
                         data['name'],
                         combined_msg,
-                        action=action
+                        action=action,
+                        price=current_price,
+                        resample=data.get('resample', 'd')
                     )
                         # action=final_action
 
@@ -1869,10 +1894,20 @@ class StockLiveStrategy:
 
     def remove_monitor(self, code):
         """移除指定股票的所有监控"""
-        if code in self._monitored_stocks:
-            del self._monitored_stocks[code]
+        # 移除所有周期下的监控
+        keys_to_remove = [k for k in self._monitored_stocks if k.startswith(f"{code}_")]
+        if not keys_to_remove:
+            # 如果没有复合键，尝试移除原始键
+            if code in self._monitored_stocks:
+                keys_to_remove.append(code)
+
+        for key in keys_to_remove:
+            del self._monitored_stocks[key]
+            logger.info(f"Removed monitor for {key}")
+        
+        if keys_to_remove:
             self._save_monitors()
-            logger.info(f"Removed monitor for {code}")
+
 
     def close_position_if_any(self, code: str, price: float, name: Optional[str] = None) -> bool:
         """
@@ -1902,17 +1937,21 @@ class StockLiveStrategy:
 
     def update_rule(self, code, rule_index, new_type, new_value):
         """更新指定规则"""
-        if code in self._monitored_stocks:
-            rules = self._monitored_stocks[code]['rules']
+        # 假设更新总是针对默认周期 'd'
+        key = f"{code}_d"
+        if key in self._monitored_stocks:
+            rules = self._monitored_stocks[key]['rules']
             if 0 <= rule_index < len(rules):
                 rules[rule_index]['type'] = new_type
                 rules[rule_index]['value'] = float(new_value)
                 self._save_monitors()
-                logger.info(f"Updated rule for {code} index {rule_index}: {new_type} {new_value}")
+                logger.info(f"Updated rule for {key} index {rule_index}: {new_type} {new_value}")
 
     def remove_rule(self, code, rule_index):
-        if code in self._monitored_stocks:
-            stock = self._monitored_stocks[code]
+        # 假设移除总是针对默认周期 'd'
+        key = f"{code}_d"
+        if key in self._monitored_stocks:
+            stock = self._monitored_stocks[key]
             rules = stock['rules']
 
             if 0 <= rule_index < len(rules):
@@ -1924,16 +1963,32 @@ class StockLiveStrategy:
                     )
 
                 if not rules:
-                    del self._monitored_stocks[code]
+                    del self._monitored_stocks[key]
 
                 self._save_monitors()
     def test_alert(self, text="这是一个测试报警"):
-        """测试报警功能"""
-        self._trigger_alert("TEST", "测试股票", text)
+        """测试报警功能 (强制绕过全局开关以验证引擎)"""
+        logger.info(f"🔔 Forced Test Alert: {text}")
+        self._play_sound_async()
+        speak_text = f"测试报警，{text}"
+        self._voice.say(speak_text, code="TEST")
+        if self.alert_callback:
+            try:
+                self.alert_callback("TEST", "测试股票", text)
+            except Exception as e:
+                logger.error(f"Test alert callback error: {e}")
 
     def test_alert_specific(self, code, name, msg):
-        """测试特定报警"""
-        self._trigger_alert(code, name, msg)
+        """测试特定报警 (强制绕过全局开关以验证引擎)"""
+        logger.info(f"🔔 Forced Specific Test Alert: {code} {name} {msg}")
+        self._play_sound_async()
+        speak_text = f"注意，{code} ，{msg}"
+        self._voice.say(speak_text, code=code)
+        if self.alert_callback:
+            try:
+                self.alert_callback(code, name, msg)
+            except Exception as e:
+                logger.error(f"Test alert specific callback error: {e}")
 
     def snooze_alert(self, code, cycles=10):
         """
@@ -1941,19 +1996,21 @@ class StockLiveStrategy:
         :param code: 股票代码
         :param cycles: 暂停的周期数 (总时长 = cycles * alert_cooldown)
         """
-        if code in self._monitored_stocks:
+        # 假设暂停总是针对默认周期 'd'
+        key = f"{code}_d"
+        if key in self._monitored_stocks:
             # 逻辑: last_alert 设为未来时间，使得 now - last_alert < cooldown 持续成立
             # 想要暂停 N 个周期，即 N * cooldown 时间
             # 在 t = now + N * cooldown 时，恢复报警 => (now + N*cooldown) - last_alert >= cooldown
             # => last_alert <= now + (N-1)*cooldown
             future_offset = (cycles - 1) * self._alert_cooldown
-            self._monitored_stocks[code]['last_alert'] = time.time() + future_offset
-            dt_str = datetime.fromtimestamp(self._monitored_stocks[code]['last_alert']).strftime("%Y-%m-%d %H:%M:%S")
-            logger.info(f"😴 Snoozed alert for {code}  in {cycles} cycles ({cycles * self._alert_cooldown}s alert_cooldown: {self._alert_cooldown}s next_alert_time:{dt_str})")
+            self._monitored_stocks[key]['last_alert'] = time.time() + future_offset
+            dt_str = datetime.fromtimestamp(self._monitored_stocks[key]['last_alert']).strftime("%Y-%m-%d %H:%M:%S")
+            logger.info(f"😴 Snoozed alert for {key}  in {cycles} cycles ({cycles * self._alert_cooldown}s alert_cooldown: {self._alert_cooldown}s next_alert_time:{dt_str})")
 
-    def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0) -> None:
+    def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0, resample: str = 'd') -> None:
         """触发报警"""
-        logger.debug(f"🔔 ALERT: {message}")
+        logger.debug(f"🔔 ALERT [{resample}]: {message}")
         
         # # 2. 语音播报
         # speak_text = f"注意{action}，{code} ，{message}"
@@ -1977,7 +2034,7 @@ class StockLiveStrategy:
         # 4. 记录交易执行 (用于回测优化和收益计算)
         if action in ("买入", "卖出", "ADD", "加仓") or "止" in action:
             # 记录交易并计算单笔收益
-            self.trading_logger.record_trade(code, name, action, price, 100, reason=message) 
+            self.trading_logger.record_trade(code, name, action, price, 100, reason=message, resample=resample) 
 
     def _play_sound_async(self):
         try:
@@ -2301,8 +2358,8 @@ class StockLiveStrategy:
                     to_remove.append(code)
             
             if to_remove:
-                for code in to_remove:
-                    del self._monitored_stocks[code]
+                for key in to_remove:
+                    del self._monitored_stocks[key]
                 
                 self._save_monitors()
                 logger.info(f"Auto Loop Cleanup: Removed {len(to_remove)} unheld stocks: {to_remove}")

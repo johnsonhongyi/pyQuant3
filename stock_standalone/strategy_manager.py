@@ -389,12 +389,14 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         if self.live_strategy:
              # 遍历监控中的股票
              monitors = self.live_strategy.get_monitors()
-             for code, data in monitors.items():
+             for key, data in monitors.items():
+                 code = data.get('code', key.split('_')[0])
+                 res = data.get('resample', 'd')
                  name = data['name']
                  
                  # 1.1 检查 RiskEngine 状态
                  if self.risk_engine:
-                     r_state = self.risk_engine.get_risk_state(code)
+                     r_state = self.risk_engine.get_risk_state(key)
                      # below_nclose_count
                      bn_count = r_state.get('below_nclose_count', 0)
                      if bn_count > 0:
@@ -411,7 +413,7 @@ class StrategyManager(tk.Toplevel, WindowMixin):
 
                  # 1.2 检查历史连亏 (Pain System)
                  if self.trading_logger:
-                     loss_count = self.trading_logger.get_consecutive_losses(code)
+                     loss_count = self.trading_logger.get_consecutive_losses(code, resample=res)
                      if loss_count > 0:
                          tag = "连亏警告" if loss_count == 1 else "黑名单(连亏)"
                          self.tree_risk.insert("", "end", values=(

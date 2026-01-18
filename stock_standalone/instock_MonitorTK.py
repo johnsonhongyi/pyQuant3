@@ -261,48 +261,44 @@ def send_with_visualizer(func):
 # ============================================================================
 # 🛡️ Qt 安全操作上下文管理器 - 防止 pyttsx3 COM 与 Qt GIL 冲突
 # ============================================================================
-from contextlib import contextmanager
+# from contextlib import contextmanager
 
-@contextmanager
-def qt_safe_operation(app_instance):
-    """
-    Qt 安全操作上下文管理器
-    在任何 Qt 窗口创建/显示操作前暂停语音引擎并等待完成，然后恢复
+# @contextmanager
+# def qt_safe_operation(app_instance):
+#     voice = None
+#     voice_paused = False
     
-    用法:
-        with qt_safe_operation(self):
-            # Qt 窗口操作
-            window.show()
-    """
-    voice = None
-    voice_paused = False
-    
-    try:
-        # 获取语音引擎
-        if hasattr(app_instance, 'live_strategy') and app_instance.live_strategy:
-            if hasattr(app_instance.live_strategy, '_voice'):
-                voice = app_instance.live_strategy._voice
+#     try:
+#         # 获取语音引擎
+#         if hasattr(app_instance, 'live_strategy') and app_instance.live_strategy:
+#             voice = getattr(app_instance.live_strategy, '_voice', None)
+#             if voice:
+#                 # 暂停语音队列
+#                 getattr(voice, 'pause', lambda: None)()
+#                 voice_paused = True
                 
-                if voice:
-                    # 1. 暂停语音队列（阻止新语音）
-                    if hasattr(voice, 'pause'):
-                        voice.pause()
-                        voice_paused = True
-                    
-                    # 2. 等待当前语音播放完成
-                    if hasattr(voice, 'wait_for_safe'):
-                        voice.wait_for_safe(timeout=5.0)
-                    else:
-                        import time
-                        time.sleep(0.3)  # 回退方案
+#                 # 等待当前语音安全完成
+#                 if hasattr(voice, 'wait_for_safe'):
+#                     import time
+#                     start = time.time()
+#                     while not voice.wait_for_safe(timeout=0.1):
+#                         QtWidgets.QApplication.processEvents()
+#                         if time.time() - start > 5.0:
+#                             break
+#                 else:
+#                     QtWidgets.QApplication.processEvents()
+#                     import time
+#                     time.sleep(0.05)
         
-        yield  # 执行 Qt 操作
-        
-    finally:
-        # 恢复语音引擎
-        if voice_paused and voice:
-            if hasattr(voice, 'resume'):
-                voice.resume()
+#         yield
+
+#     finally:
+#         if voice_paused and voice:
+#             try:
+#                 getattr(voice, 'resume', lambda: None)()
+#             except Exception as e:
+#                 logger.warning(f"Voice resume failed: {e}")
+
 
 
 class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
@@ -1755,10 +1751,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if self._live_strategy_first_run:
                             # 第一次：延迟执行
                             self._live_strategy_first_run = False
-                            self.after(15 * 1000,lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None)))
+                            res = self.global_values.getkey("resample")
+                            self.after(15 * 1000,lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=res))
                         else:
                             # 后续：立即执行
-                            self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None))
+                            res = self.global_values.getkey("resample")
+                            self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=res)
                 if has_update:
                     if self._last_resample != self.global_values.getkey("resample"):
                         if  hasattr(self, '_df_sync_thread') or self._df_sync_thread.is_alive():
@@ -2031,15 +2029,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if self.viz_command_queue is None:
                         self.viz_command_queue = mp.Queue()
                     
-                    # 启动进程：传入 code, stop_flag, log_level, debug, queue
+                    # 启动进程：传入 code|resample, stop_flag, log_level, debug, queue
+                    # load_stock_by_code handles the | split automatically
+                    initial_payload = f"{code}|resample={resample}"
                     self.qt_process = mp.Process(
                         target=qtviz.main, 
-                        args=(code, self.refresh_flag, None , False, self.viz_command_queue), 
-                        # args=(code, self.refresh_flag, self.log_level, False, self.viz_command_queue), 
+                        args=(initial_payload, self.refresh_flag, None , False, self.viz_command_queue), 
                         daemon=False
                     )
                     self.qt_process.start()
-                    print(f"Launched QT GUI process via Queue for {code}")
+                    print(f"Launched QT GUI process via Queue for {initial_payload}")
                     time.sleep(1)  # 给 Qt 初始化时间
                     if hasattr(self, '_df_first_send_done'):
                         self._df_first_send_done = False
@@ -5081,17 +5080,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """打开 Qt6 版本的交易分析工具"""
         try:
             # 🛡️ 使用 Qt 安全操作上下文管理器，避免 pyttsx3 COM 与 Qt GIL 冲突
-            with qt_safe_operation(self):
-                if not hasattr(self, "_trading_gui_qt6") or self._trading_gui_qt6 is None:
-                    # 确保 Qt 环境已初始化
-                    if not QtWidgets.QApplication.instance():
-                        self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
-                    
-                    self._trading_gui_qt6 = TradingGUI(sender=self.sender,on_tree_scroll_to_code=self.tree_scroll_to_code)
-                    
-                self._trading_gui_qt6.show()
-                self._trading_gui_qt6.raise_()
-                self._trading_gui_qt6.activateWindow()
+            if not hasattr(self, "_trading_gui_qt6") or self._trading_gui_qt6 is None:
+                # 确保 Qt 环境已初始化
+                if not QtWidgets.QApplication.instance():
+                    self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
+                
+                self._trading_gui_qt6 = TradingGUI(sender=self.sender,on_tree_scroll_to_code=self.tree_scroll_to_code)
+                
+            self._trading_gui_qt6.show()
+            self._trading_gui_qt6.raise_()
+            self._trading_gui_qt6.activateWindow()
             
             toast_message(self, "交易分析工具(Qt6) 已启动")
         except Exception as e:
@@ -5102,31 +5100,30 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """打开 Qt 版本的 K 线缓存查看器"""
         try:
             # 🛡️ 使用 Qt 安全操作上下文管理器，避免 pyttsx3 COM 与 Qt GIL 冲突
-            with qt_safe_operation(self):
-                if not hasattr(self, "_kline_viewer_qt") or self._kline_viewer_qt is None:
-                    # 确保 Qt 环境已初始化
-                    if not QtWidgets.QApplication.instance():
-                        self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
-                    
-                    # 获取 last6vol 用于归一化
-                    last6vol_map = {}
-                    if hasattr(self, 'df_all') and not self.df_all.empty and 'last6vol' in self.df_all.columns:
-                        last6vol_map = self.df_all['last6vol'].to_dict()
-
-                    # 连接双击代码到 TDX 联动，并传入实时服务代理
-                    self._kline_viewer_qt = KlineBackupViewer(
-                        on_code_callback=self.on_code_click,
-                        service_proxy=self.realtime_service,
-                        last6vol_map=last6vol_map,
-                        main_app=self
-                    )
+            if not hasattr(self, "_kline_viewer_qt") or self._kline_viewer_qt is None:
+                # 确保 Qt 环境已初始化
+                if not QtWidgets.QApplication.instance():
+                    self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
                 
-                # 处理 Qt 事件以确保窗口正确显示
-                QtWidgets.QApplication.processEvents()
-                    
-                self._kline_viewer_qt.show()
-                self._kline_viewer_qt.raise_()
-                self._kline_viewer_qt.activateWindow()
+                # 获取 last6vol 用于归一化
+                last6vol_map = {}
+                if hasattr(self, 'df_all') and not self.df_all.empty and 'last6vol' in self.df_all.columns:
+                    last6vol_map = self.df_all['last6vol'].to_dict()
+
+                # 连接双击代码到 TDX 联动，并传入实时服务代理
+                self._kline_viewer_qt = KlineBackupViewer(
+                    on_code_callback=self.on_code_click,
+                    service_proxy=self.realtime_service,
+                    last6vol_map=last6vol_map,
+                    main_app=self
+                )
+            
+            # 处理 Qt 事件以确保窗口正确显示
+            QtWidgets.QApplication.processEvents()
+                
+            self._kline_viewer_qt.show()
+            self._kline_viewer_qt.raise_()
+            self._kline_viewer_qt.activateWindow()
             
             toast_message(self, "K线查看器 (Qt) 已启动")
         except Exception as e:
