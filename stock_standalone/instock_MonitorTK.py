@@ -315,6 +315,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.after(3000, self._init_live_strategy)
         
         self.visualizer_process = None # Track visualizer process
+        self.sync_version = 0          # ⭐ 数据同步序列号
+        self.after(5000, self._start_feedback_listener)
 
         # 4. 初始化 Realtime Data Service
         try:
@@ -567,6 +569,54 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             300,
             self._on_resize_finished
         )
+
+    def _start_feedback_listener(self):
+        """监听来自可视化器的反馈指令 (例如请求全量同步)"""
+        import win32pipe, win32file, pywintypes
+        from data_utils import PIPE_NAME
+
+        def listener():
+            logger.info(f"[Pipe] Starting feedback listener on {PIPE_NAME}")
+            while True:
+                try:
+                    # 创建命名管道服务端
+                    pipe = win32pipe.CreateNamedPipe(
+                        PIPE_NAME,
+                        win32pipe.PIPE_ACCESS_DUPLEX,
+                        win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
+                        1, 65536, 65536,
+                        0,
+                        None
+                    )
+                    win32pipe.ConnectNamedPipe(pipe, None)
+                    res, data = win32file.ReadFile(pipe, 65536)
+                    if res == 0:
+                        msg = data.decode('utf-8')
+                        try:
+                            cmd_obj = json.loads(msg)
+                            if cmd_obj.get("cmd") == "REQ_FULL_SYNC":
+                                logger.info("[Pipe] Received REQ_FULL_SYNC, forcing full update")
+                                if hasattr(self, 'df_ui_prev'):
+                                    del self.df_ui_prev
+                                self._df_first_send_done = False
+                                self.sync_version = 0
+                        except Exception as e:
+                            if "REQ_FULL_SYNC" in msg:
+                                logger.info("[Pipe] Received REQ_FULL_SYNC (raw), forcing full update")
+                                if hasattr(self, 'df_ui_prev'):
+                                    del self.df_ui_prev
+                                self._df_first_send_done = False
+                                self.sync_version = 0
+                    
+                    win32pipe.DisconnectNamedPipe(pipe)
+                    win32file.CloseHandle(pipe)
+                except Exception as e:
+                    # 记录错误但不崩溃
+                    logger.debug(f"[Pipe] Listener cycle error: {e}")
+                    time.sleep(2)
+
+        threading.Thread(target=listener, daemon=True).start()
+
     def _on_resize_finished(self):
         self._is_resizing = False
         logger.info("[resize] finished, apply")
@@ -1263,7 +1313,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.resample_combo.current(resampleValues.index(self.global_values.getkey("resample")))
         self.resample_combo.pack(side="left", padx=5)
         self.resample_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh_data())
-
+        self._last_resample = self.resample_combo.get().strip()
         # 在初始化时（StockMonitorApp.__init__）创建并注册：
         self.alert_manager = AlertManager(storage_dir=DARACSV_DIR, logger=logger)
         set_global_manager(self.alert_manager)  
@@ -1505,6 +1555,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """
         手动刷新：更新 resample 全局配置，触发后台进程下一轮 fetch_and_process
         """
+
+        
+        if self._last_resample == self.resample_combo.get().strip():
+            return
+        else:
+            if hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
+                self.vis_var.set(False)
         resample = self.resample_combo.get().strip()
         logger.info(f'set resample : {resample}')
         # cct.GlobalValues().setkey("resample", resample)
@@ -1576,6 +1633,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         try:
             if self.refresh_enabled:  # ✅ 只在启用时刷新
                 has_update = False
+                _last_df = pd.DataFrame()
                 while not self.queue.empty():
                     df = self.queue.get_nowait()
                     # 🔌 在主进程同步更新 DataPublisher
@@ -1590,13 +1648,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if self.sortby_col is not None:
                         logger.info(f'update_tree sortby_col : {self.sortby_col} sortby_col_ascend : {self.sortby_col_ascend}')
                         df = df.sort_values(by=self.sortby_col, ascending=self.sortby_col_ascend)
-                    if df is not None and not df.empty and len(df) > 30:
+                    if not _last_df.empty:
+                        try:
+                            _df_diff = df.compare(_last_df, keep_shape=False, keep_equal=False)
+                            # 如果没有变化行，就跳过本轮
+                        except ValueError as e:
+                            # debug 输出索引和列的不一致
+                            logger.debug(f"[df] compare() ValueError: {e}")
+                    else:
+                        _last_df = df.copy()
+                        _df_diff = _last_df
+                    if not _df_diff.empty and df is not None and not df.empty:
                         time_s = time.time()
                         df = detect_signals(df)
                         self.df_all = df.copy()
+                        _last_df = df.copy()
                         has_update = True
                         logger.info(f'detect_signals duration time:{time.time()-time_s:.2f}')
-                    # logger.info(f"self.queue [Debug] df_all_hash={df_hash(self.df_all)} len={len(self.df_all)} time={datetime.now():%H:%M:%S}")
+                        # logger.info(f"self.queue [Debug] df_all_hash={df_hash(self.df_all)} len={len(self.df_all)} time={datetime.now():%H:%M:%S}")
                         
                         # ✅ 仅在第一次获取 df_all 后恢复监控窗口
                         if not hasattr(self, "_restore_done"):
@@ -1629,7 +1698,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         else:
                             # 后续：立即执行
                             self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None))
-
+                if has_update:
+                    if self._last_resample != self.global_values.getkey("resample"):
+                        if  hasattr(self, '_df_sync_thread') or self._df_sync_thread.is_alive():
+                            logger.debug(f'[send_df] resample:{self._last_resample} to {self.global_values.getkey("resample")} change force full send init df_first_send_done to False now:{self._df_first_send_done}')
+                            if hasattr(self, 'df_ui_prev'):
+                                del self.df_ui_prev  # 删除缓存，模拟初始化
+                            self._last_resample = self.global_values.getkey("resample")
+                            self._df_first_send_done = False
+                            self.vis_var.set(True)
                 # -------------------------
 
                 self.status_var2.set(f'queue update: {self.format_next_time()}')
@@ -1834,7 +1911,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_visualizer(self, code):
 
-        if not code:
+        if not code and self._last_resample != self.global_values.getkey("resample"):
             return
         now = time.time()
         # 防抖：同一 code 在 0.5 秒内不重复发送
@@ -1866,14 +1943,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if c not in ui_cols:
                 ui_cols.append(c)
 
-        # --- 1️⃣ 尝试通过 Socket 发送给已有实例 ---
+        # --- 0️⃣ 获取当前周期参数 ---
+        resample = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
+
+        # --- 1️⃣ 尝试通过 Socket 发送给已有实例 (Extensible Format) ---
         try:
             client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             client_socket.settimeout(1)
             client_socket.connect((ipc_host, ipc_port))
-            client_socket.send(f"CODE|{code}".encode('utf-8'))
+            # 发送格式: CODE|代码|key1=val1|key2=val2
+            ipc_msg = f"CODE|{code}|resample={resample}"
+            client_socket.send(ipc_msg.encode('utf-8'))
             client_socket.close()
-            logger.debug(f"Socket: Sent code {code} to visualizer")
+            logger.debug(f"Socket: Sent {ipc_msg} to visualizer")
             sent = True
         except (ConnectionRefusedError, OSError):
             sent = False
@@ -1901,9 +1983,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if hasattr(self, '_df_first_send_done'):
                         self._df_first_send_done = False
                 else:
-                    # 进程已在运行，通过队列切换代码
-                    self.viz_command_queue.put(('SWITCH_CODE', code))
-                    logger.info(f"Queue: Sent SWITCH_CODE {code}")
+                    # 进程已在运行，通过队列切换代码 (Extensible Format)
+                    self.viz_command_queue.put(('SWITCH_CODE', {'code': code, 'resample': resample}))
+                    logger.info(f"Queue: Sent SWITCH_CODE {code} with resample={resample}")
                     sent = True # 标记为已处理
                     # 交互提示
                     if hasattr(self, 'status_bar'):
@@ -1981,8 +2063,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             curr_idx = set(df_ui.index)
 
                             logger.debug(f"[send_df] compare() ValueError: {e}")
-                            logger.debug(f"[send_df] columns prev={prev_cols}, curr={curr_cols}")
-                            logger.debug(f"[send_df] index prev={prev_idx}, curr={curr_idx}")
+                            logger.debug(f"[send_df] columns prev={list(prev_cols)[:5]}, curr={list(curr_cols)[:5]}")
+                            logger.debug(f"[send_df] index prev={list(prev_idx)[:5]}, curr={list(curr_idx)[:5]}")
 
                             # 为了不中断，可以直接把全量当作 diff
                             payload_to_send = df_ui
@@ -2003,8 +2085,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         df_ui = df_ui.reset_index()
 
                     logger.info(
-                        f'df_ui: {msg_type} rows={len(df_ui)} mem={mem/1024:.1f} KB'
+                        f'df_ui: {msg_type} rows={len(df_ui)} ver={self.sync_version} mem={mem/1024:.1f} KB'
                     )
+
+                    # --- 🎁 封装版本化协议包 ---
+                    if msg_type == 'UPDATE_DF_ALL':
+                        self.sync_version = 0
+                    else:
+                        self.sync_version += 1
+                        
+                    sync_package = {
+                        'type': msg_type,
+                        'data': payload_to_send,
+                        'ver': self.sync_version
+                    }
 
                     # ======================================================
                     # ⭐ 4️⃣ 主通道：Queue
@@ -2013,13 +2107,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         try:
                             with timed_ctx(f"viz_queue_put[{len(df_ui)}]", warn_ms=300):
                                 self.viz_command_queue.put_nowait(
-                                    (msg_type, payload_to_send)
+                                    ('UPDATE_DF_DATA', sync_package)
                                 )
-                                    # ('UPDATE_DF_ALL', df_ui)
-                            # logger.debug(
-                            #     f"[Queue] df_all sent ({len(df_ui)} rows)"
-                            # )
-                            logger.debug(f"[Queue] {msg_type} sent ({len(payload_to_send)} rows)")
+                            logger.debug(f"[Queue] {msg_type} sent (ver={self.sync_version})")
                             sent = True
 
                         except Full:
@@ -2035,10 +2125,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         try:
                             # 1️⃣ pickle 单独计时
                             with timed_ctx("viz_IPC_pickle", warn_ms=300):
-                                payload = pickle.dumps((msg_type, payload_to_send),
+                                payload = pickle.dumps(('UPDATE_DF_DATA', sync_package),
                                          protocol=pickle.HIGHEST_PROTOCOL)
-                                # payload = pickle.dumps(
-                                #     df_ui, protocol=pickle.HIGHEST_PROTOCOL)
 
                             header = struct.pack("!I", len(payload))
 
@@ -2049,8 +2137,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                     s.connect((ipc_host, ipc_port))
                                     s.sendall(b"DATA" + header + payload)
 
-                            # logger.info(f"[IPC] df_all sent ({len(df_ui)} rows)")
-                            logger.debug(f"[IPC] {msg_type} sent ({len(payload_to_send)} rows)")
+                            logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version})")
                             sent = True
 
                         except Exception as e:

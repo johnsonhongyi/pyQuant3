@@ -1,46 +1,44 @@
-# -*- encoding: utf-8 -*-
-from __future__ import annotations
 import sys
 import os
+import time
+import pickle
+import struct
+import json
+import socket
+import logging
+import platform
+from queue import Queue, Empty
+from datetime import datetime
+from dataclasses import dataclass, field
+from typing import List, Dict, Any, Optional, Union, Callable
+
 import pandas as pd
 import numpy as np
-from queue import Queue, Empty
-import platform
 import pyqtgraph as pg
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QSplitter, QFrame, QMessageBox, QAbstractItemView,
-    QSplitter, QTableWidget, QTableWidgetItem, QHeaderView,
-    QPushButton, QLabel, QComboBox, QToolBar, QMenu,
-    QFrame, QSizePolicy, QStyle, QLineEdit, QCheckBox, QMessageBox, QAbstractItemView,
+    QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QSplitter, 
+    QFrame, QMessageBox, QAbstractItemView, QPushButton, QComboBox, 
+    QToolBar, QMenu, QSizePolicy, QStyle, QLineEdit, QCheckBox,
     QTreeWidget, QTreeWidgetItem
 )
-import json
-import stock_logic_utils
-from stock_logic_utils import ensure_parentheses_balanced, remove_invalid_conditions
 from PyQt6.QtCore import (
     QObject, Qt, pyqtSignal, QThread, QTimer, QPoint, QMutex, QMutexLocker, 
     QRect, QPointF, QRectF
 )
+from PyQt6.QtGui import (
+    QAction, QColor, QPainter, QPicture, QFont, QPen, QBrush, 
+    QActionGroup, QShortcut, QKeySequence
+)
 from PyQt6 import sip
-from PyQt6.QtGui import QAction, QColor, QPainter, QPicture, QFont, QPen, QBrush, QActionGroup, QShortcut, QKeySequence
 
-import os
-import sys
-import time
-import pickle
-import struct
-import numpy as np
-import pandas as pd
-from typing import List, Dict, Any, Optional, Union, Callable
-from datetime import datetime
-from dataclasses import dataclass, field
-
-import socket
+import stock_logic_utils
+from stock_logic_utils import ensure_parentheses_balanced, remove_invalid_conditions
 from JohnsonUtil import LoggerFactory
 from JohnsonUtil.stock_sender import StockSender
 from JohnsonUtil import commonTips as cct
-from JohnsonUtil.commonTips import timed_ctx,print_timing_summary
+from JohnsonUtil.commonTips import timed_ctx, print_timing_summary
 from JohnsonUtil import johnson_cons as ct
 from strategy_controller import StrategyController
 from signal_types import SignalPoint, SignalType, SignalSource
@@ -452,10 +450,16 @@ class CommandListenerThread(QThread):
                                     break
                                 payload += chunk
                             if payload:
-                                msg_type: str
-                                df: pd.DataFrame
-                                msg_type, df = pickle.loads(payload)
-                                self.dataframe_received.emit(df, msg_type)
+                                # ⭐ 兼容旧格式 (tuple) 和新格式 (dict package)
+                                raw_data = pickle.loads(payload)
+                                if isinstance(raw_data, tuple) and len(raw_data) == 2:
+                                    msg_type, df = raw_data
+                                    if msg_type == 'UPDATE_DF_DATA' and isinstance(df, dict):
+                                        # 新版字典协议：{'type': '...', 'data': df, 'ver': 123}
+                                        self.dataframe_received.emit(df, 'UPDATE_DF_DATA')
+                                    else:
+                                        # 旧版元组协议：('UPDATE_DF_ALL', df)
+                                        self.dataframe_received.emit(df, msg_type)
                         except Exception as e:
                             print(f"[IPC] Drop DATA packet: {e}")
 
@@ -981,6 +985,8 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
         table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         table.doubleClicked.connect(self._on_table_double_clicked)
+        # ⭐ 启用列排序功能
+        table.setSortingEnabled(True)
         return table
 
     def refresh(self):
@@ -990,6 +996,10 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
 
         signals = self._queue_mgr.get_top()
         self.status_label.setText(f"总信号: {len(signals)} 条")
+
+        # ⭐ 暂时禁用排序，加快数据填充
+        for t in self.tables.values():
+            t.setSortingEnabled(False)
 
         # 清空所有表格
         for t in self.tables.values():
@@ -1013,6 +1023,10 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
                 self._add_row(self.tables['sudden'], msg)
 
             # USER_SELECT 默认只在全部显示，或可视情况加到 main
+
+        # ⭐ 数据填充完成，重新启用排序
+        for t in self.tables.values():
+            t.setSortingEnabled(True)
 
     def _add_row(self, table: QtWidgets.QTableWidget, msg):
         """向指定表格添加一行"""
@@ -1251,7 +1265,45 @@ class GlobalInputFilter(QtCore.QObject):
         # 键盘按键
         elif event.type() == QtCore.QEvent.Type.KeyPress:
             key = event.key()
-            if key == Qt.Key.Key_1:
+            # --- 通达信模式: 上下左右导航 ---
+            if key == Qt.Key.Key_Up:
+                # 1.1: 如果左侧列表有焦点，交给列表处理翻页
+                if self.main_window.stock_table.hasFocus():
+                    return False
+                # 1.2: 如果鼠标在 K 线图，缩放 K 线；如果在分时图，切换至上一只股票 (专业模式)
+                if self.main_window.is_mouse_in_kline_plot():
+                    self.main_window.zoom_kline(in_=True)
+                    return True
+                elif self.main_window.is_mouse_in_tick_plot():
+                    self.main_window.switch_stock_prev()
+                    return True
+                return False # 其他情况交给系统
+            elif key == Qt.Key.Key_Down:
+                if self.main_window.stock_table.hasFocus():
+                    return False
+                if self.main_window.is_mouse_in_kline_plot():
+                    self.main_window.zoom_kline(in_=False)
+                    return True
+                elif self.main_window.is_mouse_in_tick_plot():
+                    self.main_window.switch_stock_next()
+                    return True
+                return False
+            elif key == Qt.Key.Key_Left:
+                # 1.2: 根据当前鼠标所在位置，决定是移动 K 线光标还是分时图光标
+                if self.main_window.is_mouse_in_tick_plot():
+                    self.main_window.move_tick_crosshair(-1)
+                else:
+                    self.main_window.move_crosshair(-1)
+                return True
+            elif key == Qt.Key.Key_Right:
+                if self.main_window.is_mouse_in_tick_plot():
+                    self.main_window.move_tick_crosshair(1)
+                else:
+                    self.main_window.move_crosshair(1)
+                return True
+            
+            # --- 原有快捷键 ---
+            elif key == Qt.Key.Key_1:
                 self.main_window.on_resample_changed('d')
                 return True
             elif key == Qt.Key.Key_2:
@@ -1394,12 +1446,24 @@ class MainWindow(QMainWindow, WindowMixin):
         self._init_theme_selector()
         self._init_tdx()
         self._init_real_time()
-        self._init_filter_toolbar()
+
+        # ⭐ 数据同步序列号 (用于防重发、防漏发、防乱序)
+        self.expected_sync_version = -1
+
+        # ⭐ 新增：图表交互状态
+        self.tick_prices = np.array([])
+        self.tick_avg_prices = np.array([])
+        self.tick_times = []
+        self.current_kline_signals = []
+        self.current_tick_crosshair_idx = -1
+        self.mouse_last_pos = QPointF(0, 0)
+        self.mouse_last_scene = None # ⭐ 记录鼠标最后所在的场景 ('kline' or 'tick') (1.1/1.2)
 
         self.current_code = None
         self.df_all = pd.DataFrame()  # Store real-time data from MonitorTK
         self.code_name_map = {}
         self.code_info_map = {}   # ⭐ 新增
+        self.current_crosshair_idx = -1  # ⭐ 新增：通达信模式焦点索引
 
         # Main Layout
         main_widget = QWidget()
@@ -1600,6 +1664,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self.stock_table.verticalScrollBar().setFixedWidth(6)
         self.stock_table.horizontalScrollBar().setFixedHeight(6)
 
+        # ⭐ 安装全局事件过滤器，实现应用程序级别的快捷键捕捉
+        self.input_filter = GlobalInputFilter(self)
+        QApplication.instance().installEventFilter(self.input_filter)
+
 
         # 禁止编辑：防止误触发覆盖 Code/Name 等关键信息，只允许选择和复制
         self.stock_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -1669,6 +1737,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.kline_plot.showGrid(x=True, y=True)
         self.kline_plot.setLabel('bottom', 'Date Index')
         self.kline_plot.setLabel('left', 'Price')
+        # ⭐ 禁用自动范围，防止鼠标悬停时视图跳动
+        self.kline_plot.disableAutoRange()
         right_splitter.addWidget(self.kline_widget)
 
         # --- 添加重置按钮 (只添加一次) ---
@@ -1678,6 +1748,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tick_widget = pg.GraphicsLayoutWidget()
         self.tick_plot = self.tick_widget.addPlot(title="Real-time / Intraday")
         self.tick_plot.showGrid(x=True, y=True)
+        # ⭐ 禁用自动范围，防止鼠标悬停时视图跳动
+        self.tick_plot.disableAutoRange()
         right_splitter.addWidget(self.tick_widget)
 
         # ⭐ [UPGRADE] 初始化信号覆盖层管理器
@@ -1703,13 +1775,31 @@ class MainWindow(QMainWindow, WindowMixin):
         self.hline.setVisible(False)
         self.crosshair_label.setVisible(False)
 
-        # 将十字线和浮窗添加到 K 线图
+        # 将十字线和浮窗添加到 K 线图 (全部忽略边界，防止触发autoRange)
         self.kline_plot.addItem(self.vline, ignoreBounds=True)
         self.kline_plot.addItem(self.hline, ignoreBounds=True)
-        self.kline_plot.addItem(self.crosshair_label)
+        self.kline_plot.addItem(self.crosshair_label, ignoreBounds=True)
 
         # 连接鼠标移动事件
         self.kline_plot.scene().sigMouseMoved.connect(self._on_kline_mouse_moved)
+
+        # ⭐ [NEW] 初始化分时图十字光标
+        self.tick_vline = pg.InfiniteLine(angle=90, movable=False, pen=crosshair_pen)
+        self.tick_hline = pg.InfiniteLine(angle=0, movable=False, pen=crosshair_pen)
+        self.tick_vline.setZValue(50)
+        self.tick_hline.setZValue(50)
+        self.tick_crosshair_label = pg.TextItem(anchor=(0, 1), color=(255, 255, 255), fill=(0, 0, 0, 180))
+        self.tick_crosshair_label.setZValue(100)
+        
+        self.tick_plot.addItem(self.tick_vline, ignoreBounds=True)
+        self.tick_plot.addItem(self.tick_hline, ignoreBounds=True)
+        self.tick_plot.addItem(self.tick_crosshair_label, ignoreBounds=True)
+        self.tick_plot.scene().sigMouseMoved.connect(self._on_tick_mouse_moved)
+
+        # 初始隐藏分时十字线
+        self.tick_vline.setVisible(False)
+        self.tick_hline.setVisible(False)
+        self.tick_crosshair_label.setVisible(False)
 
         # Set splitter sizes (70% top, 30% bottom)
         right_splitter.setSizes([500, 200])
@@ -1747,6 +1837,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 信号消息盒子初始化
         self._init_signal_message_box()
+        # 过滤初始化
+        self._init_filter_toolbar()
 
         # ComboBox - 过滤条件选择
         self.filter_combo = QComboBox()
@@ -2455,8 +2547,12 @@ class MainWindow(QMainWindow, WindowMixin):
                 if isinstance(cmd_data, tuple) and len(cmd_data) == 2:
                     cmd, val = cmd_data
                     if cmd == 'SWITCH_CODE':
-                        logger.info(f"Queue CMD: Switching to {val}")
-                        self.load_stock_by_code(val)
+                        if isinstance(val, dict):
+                            logger.info(f"Queue CMD: Switching to {val.get('code')} with params {val}")
+                            self.load_stock_by_code(val.get('code'), **val)
+                        else:
+                            logger.info(f"Queue CMD: Switching to {val}")
+                            self.load_stock_by_code(val)
 
                     elif cmd == 'UPDATE_DF_ALL':
                         if isinstance(val, pd.DataFrame):
@@ -2467,6 +2563,26 @@ class MainWindow(QMainWindow, WindowMixin):
                     elif cmd == 'UPDATE_DF_DIFF':
                         if isinstance(val, pd.DataFrame):
                             df_diffs.append(val)
+                    
+                    elif cmd == 'UPDATE_DF_DATA' and isinstance(val, dict):
+                        m_type = val.get('type')
+                        payload = val.get('data')
+                        ver = val.get('ver', 0)
+
+                        if m_type == 'UPDATE_DF_ALL':
+                            self.expected_sync_version = ver
+                            latest_full_df = payload
+                            df_diffs.clear()
+                        elif m_type == 'UPDATE_DF_DIFF':
+                            if ver == self.expected_sync_version + 1:
+                                self.expected_sync_version = ver
+                                df_diffs.append(payload)
+                            else:
+                                logger.warning(f"[Queue] Version mismatch! Got {ver}, expected {self.expected_sync_version+1}. Requesting full sync.")
+                                self._request_full_sync()
+                                # 终止本轮增量应用，等待全量同步
+                                df_diffs.clear()
+                                break
 
             # --- 处理最新全量数据 ---
             if latest_full_df is not None:
@@ -2616,11 +2732,12 @@ class MainWindow(QMainWindow, WindowMixin):
         只在鼠标悬停在有效K线柱上时显示
         """
         if not self.crosshair_enabled or self.day_df.empty:
-            self.vline.setVisible(False)
-            self.hline.setVisible(False)
-            self.crosshair_label.setVisible(False)
+            self._hide_crosshair()
             return
-
+        
+        self.mouse_last_pos = pos # ⭐ 记录鼠标位置 (1.1/1.2)
+        self.mouse_last_scene = 'kline'
+ 
         # 检查鼠标是否在图表范围内
         if self.kline_plot.sceneBoundingRect().contains(pos):
             # 将场景坐标转换为数据坐标
@@ -2629,114 +2746,222 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 将 X 坐标转换为 DataFrame 索引
             idx = int(round(x))
-
-            # ⭐ 严格的边界检查: 只有当 idx 在有效范围内才显示十字光标
-            # 这样可以避免在空白区域显示十字线
+            
+            # 记录当前索引，方便键盘操作接管
             if 0 <= idx < len(self.day_df):
-                # 获取当前 K 线数据
-                row = self.day_df.iloc[idx]
-
-                # ⭐ 额外检查: 鼠标Y坐标必须在K线的价格范围内
-                # 这样确保只有真正指向K线柱时才显示
-                high_price = row.get('high', 0)
-                low_price = row.get('low', 0)
-
-                # 如果鼠标Y坐标不在K线的高低价范围内,不显示十字光标
-                if not (low_price <= y <= high_price):
-                    self.vline.setVisible(False)
-                    self.hline.setVisible(False)
-                    self.crosshair_label.setVisible(False)
-                    return
-
-                # 更新十字线位置
-                self.vline.setPos(idx)
-                self.hline.setPos(y)
-                self.vline.setVisible(True)
-                self.hline.setVisible(True)
-                date_str = row.name.strftime('%Y-%m-%d') if hasattr(row.name, 'strftime') else str(row.name)
-
-                # 提取 OHLC 和成交量
-                open_price = row.get('open', 0)
-                high_price = row.get('high', 0)
-                low_price = row.get('low', 0)
-                close_price = row.get('close', 0)
-                volume = row.get('amount', 0)
-
-                # 成交量转换为亿单位
-                volume_yi = volume / 100000000  # 转换为亿
-
-                # 获取涨幅 (如果有 percent 字段)
-                ratio = row.get('p_change', 0.0)  # 尝试从 p_change 获取
-                if ratio == 0.0:
-                    ratio = row.get('percent', 0.0)  # 备用字段
-
-                # 定义各价格独立颜色
-                RED = "#FF3333"
-                WHITE = "#FFFFFF"
-
-                # 基础颜色:阳线收盘红色,阴线收盘白色
-                is_bullish = close_price > open_price
-
-                # Open 颜色
-                open_color = RED if is_bullish else WHITE
-
-                # Close 颜色: close==high 时红色
-                close_is_high = abs(close_price - high_price) < 0.01
-                close_color = RED if close_is_high or is_bullish else WHITE
-
-                # Low 颜色: open==low 时红色
-                open_is_low = abs(open_price - low_price) < 0.01
-                low_color = RED if open_is_low else WHITE
-
-                # High 颜色
-                high_color = RED if is_bullish else WHITE
-
-                # 格式化显示文本 (4行格式,使用HTML表格实现对齐)
-                # 每个价格独立设置颜色
-                text = f"""
-                <table style='font-family:monospace; border-collapse:collapse;'>
-                <tr><td style='color:{WHITE}'>O:</td><td style='text-align:right;color:{open_color}'>{open_price:.2f}</td><td style='padding-left:8px;color:{WHITE}'>C:</td><td style='text-align:right;color:{close_color}'>{close_price:.2f}</td></tr>
-                <tr><td style='color:{WHITE}'>L:</td><td style='text-align:right;color:{low_color}'>{low_price:.2f}</td><td style='padding-left:8px;color:{WHITE}'>H:</td><td style='text-align:right;color:{high_color}'>{high_price:.2f}</td></tr>
-                </table>
-                <div style='color:#FFFFFF; font-family:monospace;'>V:{volume_yi:6.2f}亿 R:{ratio:6.2f}%</div>
-                <div style='color:#FFFFFF; font-family:monospace;'>{date_str}</div>
-                """
-
-
-                self.crosshair_label.setHtml(text)
-
-                # 计算浮窗位置 - 显示在鼠标指针下方
-                view_range = self.kline_plot.viewRange()
-                x_range = view_range[0]
-                y_range = view_range[1]
-
-                # 浮窗位置: 在当前鼠标Y坐标下方
-                label_x = x
-                label_y = y - (y_range[1] - y_range[0]) * 0.08  # 在鼠标下方 8% 的位置
-
-                # 如果光标在右侧,浮窗向左偏移,避免超出边界
-                if idx > (x_range[0] + x_range[1]) * 0.7:
-                    label_x = x - (x_range[1] - x_range[0]) * 0.12
-                # 如果光标在左侧,浮窗向右偏移
-                elif idx < (x_range[0] + x_range[1]) * 0.3:
-                    label_x = x + (x_range[1] - x_range[0]) * 0.02
-
-                # 如果光标在底部,浮窗显示在上方
-                if y < (y_range[0] + y_range[1]) * 0.3:
-                    label_y = y + (y_range[1] - y_range[0]) * 0.08
-
-                self.crosshair_label.setPos(label_x, label_y)
-                self.crosshair_label.setVisible(True)
+                self.current_crosshair_idx = idx
+                self._update_crosshair_ui(idx, y)
             else:
-                # 超出K线数据范围,隐藏十字光标
-                self.vline.setVisible(False)
-                self.hline.setVisible(False)
-                self.crosshair_label.setVisible(False)
+                self._hide_crosshair()
         else:
-            # 鼠标移出图表,隐藏
-            self.vline.setVisible(False)
-            self.hline.setVisible(False)
-            self.crosshair_label.setVisible(False)
+            self._hide_crosshair()
+
+    def _on_tick_mouse_moved(self, pos):
+        """分时图鼠标移动回调 (1.2)"""
+        if not self.crosshair_enabled: return
+        self.mouse_last_pos = pos
+        self.mouse_last_scene = 'tick'
+        
+        if self.tick_plot.sceneBoundingRect().contains(pos):
+            mouse_point = self.tick_plot.vb.mapSceneToView(pos)
+            x, y = mouse_point.x(), mouse_point.y()
+            idx = int(round(x))
+            
+            if 0 <= idx < len(self.tick_prices):
+                self.current_tick_crosshair_idx = idx
+                self._update_tick_crosshair_ui(idx, y)
+            else:
+                self._hide_tick_crosshair()
+        else:
+            self._hide_tick_crosshair()
+
+    def is_mouse_in_tick_plot(self):
+        """判断鼠标是否在分时图范围内"""
+        if self.mouse_last_scene != 'tick': return False
+        return self.tick_plot.sceneBoundingRect().contains(self.mouse_last_pos)
+
+    def is_mouse_in_kline_plot(self):
+        """判断鼠标是否在 K 线图或成交量图范围内"""
+        if self.mouse_last_scene != 'kline': return False
+        in_kline = self.kline_plot.sceneBoundingRect().contains(self.mouse_last_pos)
+        in_vol = False
+        if hasattr(self, 'volume_plot'):
+            in_vol = self.volume_plot.sceneBoundingRect().contains(self.mouse_last_pos)
+        return in_kline or in_vol
+
+    def move_tick_crosshair(self, step):
+        """左右键移动分时图十字光标"""
+        if len(self.tick_prices) == 0: return
+        if self.current_tick_crosshair_idx < 0:
+            self.current_tick_crosshair_idx = len(self.tick_prices) - 1
+        
+        new_idx = self.current_tick_crosshair_idx + step
+        if 0 <= new_idx < len(self.tick_prices):
+            self.current_tick_crosshair_idx = new_idx
+            self._update_tick_crosshair_ui(new_idx)
+            self.tick_vline.setVisible(True)
+            self.tick_hline.setVisible(True)
+            self.tick_crosshair_label.setVisible(True)
+
+    def _update_tick_crosshair_ui(self, idx, y_price=None):
+        """更新分时图十字光标 UI (1.2)"""
+        if len(self.tick_prices) == 0 or idx < 0 or idx >= len(self.tick_prices):
+            self._hide_tick_crosshair()
+            return
+        
+        price = self.tick_prices[idx]
+        avg_price = self.tick_avg_prices[idx] if idx < len(self.tick_avg_prices) else 0
+        if y_price is None: y_price = price
+        
+        self.tick_vline.setPos(idx)
+        self.tick_hline.setPos(y_price)
+        self.tick_vline.setVisible(True)
+        self.tick_hline.setVisible(True)
+        
+        time_str = self.tick_times[idx] if idx < len(self.tick_times) else ""
+        
+        text = f"""
+        <div style='color:#FFFFFF; font-family:monospace;'>
+        P: <span style='color:#FF3333;'>{price:.2f}</span><br>
+        A: <span style='color:#FFFF00;'>{avg_price:.2f}</span><br>
+        T: {time_str}
+        </div>
+        """
+        self.tick_crosshair_label.setHtml(text)
+        self.tick_crosshair_label.setVisible(True)
+        
+        # 自动调整位置
+        vb = self.tick_plot.vb
+        view_range = vb.viewRange()
+        y_range = view_range[1]
+        label_y = y_price - (y_range[1] - y_range[0]) * 0.15
+        if label_y < y_range[0]: label_y = y_price + (y_range[1] - y_range[0]) * 0.15
+        self.tick_crosshair_label.setPos(idx, label_y)
+
+    def _hide_tick_crosshair(self):
+        self.tick_vline.setVisible(False)
+        self.tick_hline.setVisible(False)
+        self.tick_crosshair_label.setVisible(False)
+
+    def _hide_crosshair(self):
+        """隐藏十字光标及其标签"""
+        self.vline.setVisible(False)
+        self.hline.setVisible(False)
+        self.crosshair_label.setVisible(False)
+
+    def _update_crosshair_ui(self, idx, y_price=None):
+        """
+        核心 UI 更新逻辑：根据索引和可选的价格显示十字线和信息浮窗。
+        """
+        if self.day_df.empty or idx < 0 or idx >= len(self.day_df):
+            self._hide_crosshair()
+            return
+
+        row = self.day_df.iloc[idx]
+        
+        # 如果没有传入价格（键盘操作），则默认使用收盘价
+        if y_price is None:
+            y_price = row.get('close', 0)
+
+        # 更新十字线位置
+        self.vline.setPos(idx)
+        self.hline.setPos(y_price)
+        self.vline.setVisible(True)
+        self.hline.setVisible(True)
+
+        # 准备显示文本
+        date_str = row.name.strftime('%Y-%m-%d') if hasattr(row.name, 'strftime') else str(row.name)
+        open_p = row.get('open', 0)
+        high_p = row.get('high', 0)
+        low_p = row.get('low', 0)
+        close_p = row.get('close', 0)
+        volume = row.get('amount', 0)
+        volume_yi = volume / 100000000
+        ratio = row.get('p_change', row.get('percent', 0.0))
+
+        RED, WHITE = "#FF3333", "#FFFFFF"
+        is_bullish = close_p > open_p
+        open_color = RED if is_bullish else WHITE
+        close_color = RED if (abs(close_p - high_p) < 0.01 or is_bullish) else WHITE
+        low_color = RED if abs(open_p - low_p) < 0.01 else WHITE
+        high_color = RED if is_bullish else WHITE
+
+        text = f"""
+        <table style='font-family:monospace; border-collapse:collapse;'>
+        <tr><td style='color:{WHITE}'>O:</td><td style='text-align:right;color:{open_color}'>{open_p:.2f}</td><td style='padding-left:8px;color:{WHITE}'>C:</td><td style='text-align:right;color:{close_color}'>{close_p:.2f}</td></tr>
+        <tr><td style='color:{WHITE}'>L:</td><td style='text-align:right;color:{low_color}'>{low_p:.2f}</td><td style='padding-left:8px;color:{WHITE}'>H:</td><td style='text-align:right;color:{high_color}'>{high_p:.2f}</td></tr>
+        </table>
+        <div style='color:#FFFFFF; font-family:monospace;'>V:{volume_yi:6.2f}亿 R:{ratio:6.2f}%</div>
+        <div style='color:#FFFFFF; font-family:monospace;'>{date_str}</div>
+        """
+        
+        # 1.3: 检查是否有信号透视信息
+        signal = next((s for s in self.current_kline_signals if s.bar_index == idx), None)
+        if signal:
+            text += f"""
+            <hr>
+            <div style='color:#FFD700; font-family:monospace;'><b>动作:</b> {signal.signal_type.value}</div>
+            <div style='color:#FFD700; font-family:monospace;'><b>理由:</b> {signal.reason}</div>
+            """
+            
+        self.crosshair_label.setHtml(text)
+
+        # 计算浮窗位置
+        view_range = self.kline_plot.viewRange()
+        x_range, y_range = view_range[0], view_range[1]
+
+        label_x = idx
+        label_y = y_price - (y_range[1] - y_range[0]) * 0.08
+
+        if idx > (x_range[0] + x_range[1]) * 0.7:
+            label_x = idx - (x_range[1] - x_range[0]) * 0.12
+        elif idx < (x_range[0] + x_range[1]) * 0.3:
+            label_x = idx + (x_range[1] - x_range[0]) * 0.02
+
+        if y_price < (y_range[0] + y_range[1]) * 0.3:
+            label_y = y_price + (y_range[1] - y_range[0]) * 0.08
+
+        self.crosshair_label.setPos(label_x, label_y)
+        self.crosshair_label.setVisible(True)
+
+    def zoom_kline(self, in_=True):
+        """通达信模式：上下键缩放"""
+        vb = self.kline_plot.vb
+        view_range = vb.viewRange()
+        center_x = (view_range[0][1] + view_range[0][0]) / 2
+        scale = 0.85 if in_ else 1.15  # 这里的比例可以根据手感微调
+        vb.scaleBy(x=scale, center=(center_x, 0))
+
+    def move_crosshair(self, step):
+        """通达信模式：左右键移动十字光标并显示信息"""
+        if self.day_df.empty:
+            return
+        
+        if self.current_crosshair_idx < 0:
+            self.current_crosshair_idx = len(self.day_df) - 1
+            
+        new_idx = self.current_crosshair_idx + step
+        if 0 <= new_idx < len(self.day_df):
+            self.current_crosshair_idx = new_idx
+            self._update_crosshair_ui(new_idx)
+            # 确保十字线在移动后可见（如果原先被隐藏了）
+            self.vline.setVisible(True)
+            self.hline.setVisible(True)
+            self.crosshair_label.setVisible(True)
+            
+            # 自动调整视图范围，确保当前焦点可见
+            self._ensure_idx_visible(new_idx)
+
+    def _ensure_idx_visible(self, idx):
+        """确保索引 idx 在 K 线图中可见"""
+        vb = self.kline_plot.vb
+        x_range = vb.viewRange()[0]
+        margin = 5 # 边缘留白
+        
+        if idx < x_range[0] + margin:
+            vb.setXRange(idx - margin, idx - margin + (x_range[1] - x_range[0]), padding=0)
+        elif idx > x_range[1] - margin:
+            vb.setXRange(idx + margin - (x_range[1] - x_range[0]), idx + margin, padding=0)
 
     def _on_initial_loaded(self, code, day_df, tick_df):
         # ⚡ 立即更新标题,清除 "Loading..." 状态
@@ -3234,36 +3459,70 @@ class MainWindow(QMainWindow, WindowMixin):
             code = code_item.data(Qt.ItemDataRole.UserRole)
             if code:
                 self._clicked_change = True
-                if code != self.current_code:  # 只有 code 不同才加载
-                    self.load_stock_by_code(code)
+                if code == self.current_code: 
+                    # 如果 code 没变，说明 currentItemChanged 不会触发，手动同步一次 TDX (强制同步)
                     if self.tdx_enabled:
                         try:
                             self.sender.send(code)
-                        except Exception as e:
-                            print(f"Error sending stock code: {e}")
+                        except Exception:
+                            pass
+                # 如果 code 变了，currentItemChanged 会处理加载和同步
+
+    def switch_stock_prev(self):
+        """切换至上一只股票 (1.1/1.2 Context navigation)"""
+        curr_row = self.stock_table.currentRow()
+        if curr_row > 0:
+            self.stock_table.setCurrentCell(curr_row - 1, 0)
+
+    def switch_stock_next(self):
+        """切换至下一只股票 (1.1/1.2 Context navigation)"""
+        curr_row = self.stock_table.currentRow()
+        if curr_row < self.stock_table.rowCount() - 1:
+            self.stock_table.setCurrentCell(curr_row + 1, 0)
 
     def on_current_item_changed(self, current, previous):
         """处理键盘上下键引起的行切换"""
         if current:
             row = current.row()
-            # 始终获取第 0 列（Code列）的 item
             code_item = self.stock_table.item(row, 0)
             if code_item:
                 code = code_item.data(Qt.ItemDataRole.UserRole)
-                # 只有当代码发生变化时才加载，防止重复触发
-                if  code != self.current_code:  # 只有 code 不同才加载
+                if code != self.current_code:
                     self.load_stock_by_code(code)
-                    # 判断是不是鼠标点击：currentItemChanged 会在 cellClicked 之后触发
+                    
+                    # 1.1: 无论是键盘还是点击，只要切换了代码，且开启了同步，就发送给外部工具
+                    if self.tdx_enabled:
+                        try:
+                            self.sender.send(code)
+                        except Exception as e:
+                            print(f"Error sending stock code: {e}")
+                    
+                    # 消费掉点击标记
                     if getattr(self, "_clicked_change", False):
                         self._clicked_change = False
-                        if self.tdx_enabled:
-                            try:
-                                self.sender.send(code)
-                            except Exception as e:
-                                print(f"Error sending stock code: {e}")
 
     def on_dataframe_received(self, df, msg_type):
         """接收 DataFrame 更新 (优化: 避免阻塞主线程)"""
+        if msg_type == 'UPDATE_DF_DATA' and isinstance(df, dict):
+            # 新版字典协议
+            m_type = df.get('type')
+            payload = df.get('data')
+            ver = df.get('ver', 0)
+            
+            # 版本校验逻辑
+            if m_type == 'UPDATE_DF_ALL':
+                self.expected_sync_version = ver
+                logger.debug(f"[IPC] Sync version reset to {ver}")
+                QtCore.QTimer.singleShot(0, lambda: self._process_df_all_update(payload))
+            elif m_type == 'UPDATE_DF_DIFF':
+                if ver == self.expected_sync_version + 1:
+                    self.expected_sync_version = ver
+                    QtCore.QTimer.singleShot(0, lambda: self.apply_df_diff(payload))
+                else:
+                    logger.warning(f"[IPC] Version mismatch! Got {ver}, expected {self.expected_sync_version + 1}. Requesting full sync.")
+                    self._request_full_sync()
+            return
+
         if msg_type == "UPDATE_DF_ALL":
             # 使用 QTimer 延迟处理，避免阻塞主线程
             QtCore.QTimer.singleShot(0, lambda: self._process_df_all_update(df))
@@ -3298,6 +3557,19 @@ class MainWindow(QMainWindow, WindowMixin):
                 
         except Exception as e:
             logger.error(f"Error processing df_all update: {e}")
+
+    def _request_full_sync(self):
+        """向 Monitor 发送全量同步请求"""
+        try:
+            success = send_code_via_pipe({"cmd": "REQ_FULL_SYNC"}, logger=logger)
+            if success:
+                logger.info("[Sync] Requested full sync via Pipe")
+                # 暂时将版本设为无效，防止在收到全量包前继续处理碎片增量
+                self.expected_sync_version = -1
+            else:
+                logger.warning("[Sync] Failed to send sync request via Pipe")
+        except Exception as e:
+            logger.error(f"[Sync] Request full sync error: {e}")
 
     def _process_hot_signals(self, df):
         """从df中提取热榜Top5推送到信号队列"""
@@ -3392,13 +3664,49 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.debug(f"Capture state failed: {e}")
 
 
-    def load_stock_by_code(self, code, name=None):
+    def load_stock_by_code(self, code, name=None, **kwargs):
+        """
+        加载股票数据并渲染。支持可扩展参数模式：
+        1. 字符串模式: "CODE|代码|key1=val1|key2=val2" (来自 IPC)
+        2. 字典模式: 通过 **kwargs 传入 (来自 Queue)
+        """
         self._capture_view_state()
+
+        # --- 解析可扩展参数 ---
+        params = kwargs.copy()
+        if code and "|" in str(code):
+            parts = str(code).split("|")
+            code = parts[0]
+            for p in parts[1:]:
+                if "=" in p:
+                    try:
+                        k, v = p.split("=", 1)
+                        params[k] = v
+                    except ValueError:
+                        pass
+
+        # --- 处理周期同步 (resample) ---
+        target_resample = params.get('resample')
+        if target_resample and target_resample in self.resample_keys:
+            if target_resample != self.resample:
+                logger.info(f"Syncing resample to {target_resample}")
+                # 调用 on_resample_changed 会触发递归调用 load_stock_by_code，
+                # 但内部有相同 code/resample 的拦截逻辑
+                self.on_resample_changed(target_resample)
 
         if self.current_code == code and self.select_resample == self.resample:
             return
+        
+        # ⭐ 清理交互状态，防止数据残留 (1.2/1.3)
         self.current_code = code
         self.select_resample = self.resample
+        self.tick_prices = np.array([])
+        self.tick_avg_prices = np.array([])
+        self.tick_times = []
+        self.current_kline_signals = []
+        self.current_tick_crosshair_idx = -1
+        self._hide_crosshair()
+        self._hide_tick_crosshair()
 
         if self.stock_table.rowCount() == 0:
             return
@@ -3448,6 +3756,17 @@ class MainWindow(QMainWindow, WindowMixin):
             self.stock_table.scrollToItem(code_item, QAbstractItemView.ScrollHint.EnsureVisible)
 
         self.kline_plot.setTitle(f"Loading {code}...")
+
+        # ⭐ 清理旧的 DataLoaderThread，防止 QThread: Destroyed while thread is still running
+        if hasattr(self, 'loader') and self.loader is not None:
+            if self.loader.isRunning():
+                logger.debug("[DataLoaderThread] Waiting for previous loader to finish...")
+                self.loader.data_loaded.disconnect()  # 断开信号，防止旧数据干扰
+                self.loader.wait(500)  # 等待最多 500ms
+                if self.loader.isRunning():
+                    logger.warning("[DataLoaderThread] Previous loader still running, forcing termination")
+                    self.loader.terminate()
+                    self.loader.wait(100)
 
         # ② 加载历史
         with timed_ctx("DataLoaderThread", warn_ms=800):
@@ -3673,6 +3992,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.last_shadow_decision = shadow_decision # 存储供简报使用
 
         # 执行 K 线绘图
+        self.current_kline_signals = kline_signals # ⭐ 保存信号供十字光标显示 (1.3)
         self.signal_overlay.update_signals(kline_signals, target='kline')
 
         # -------------------------
@@ -3734,6 +4054,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.avg_curve.setData(x_ticks, avg_prices)
                 self.avg_curve.setPen(pg.mkPen(tick_avg_color, width=1.5))
 
+            # ⭐ 保存分时数据供十字光标使用 (1.2)
+            self.tick_prices = prices
+            self.tick_avg_prices = avg_prices
+            self.tick_times = tick_df['time'].tolist() if 'time' in tick_df.columns else []
+
             # pre_close 虚线
             if not hasattr(self, 'pre_close_line') or self.pre_close_line not in self.tick_plot.items:
                 self.pre_close_line = self.tick_plot.addLine(y=pre_close, pen=pg.mkPen(pre_close_color, style=Qt.PenStyle.DashLine))
@@ -3742,6 +4067,9 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.pre_close_line.setPen(pg.mkPen(pre_close_color, style=Qt.PenStyle.DashLine))
 
             pct_change = (prices[-1]-pre_close)/pre_close*100 if pre_close!=0 else 0
+
+            # ⭐ 绘制完成后一次性调整视图范围，确保数据可见 (由于 disableAutoRange)
+            self.tick_plot.autoRange()
 
             # ⭐ 构建分时图标题（包含监理看板）
             tick_title = f"Intraday: {prices[-1]:.2f} ({pct_change:.2f}%)"
@@ -4743,6 +5071,8 @@ class MainWindow(QMainWindow, WindowMixin):
     def on_filter_tree_item_clicked(self, item, column):
         code = item.data(0, Qt.ItemDataRole.UserRole)
         if code:
+            # ⭐ 确保 filter_tree 获得键盘焦点，使上下键在此视图生效
+            self.filter_tree.setFocus()
             # 1. 触发图表加载
             self.load_stock_by_code(code)
             # 2. 联动左侧列表选中
