@@ -2,7 +2,7 @@ import sqlite3
 import json
 import logging
 from datetime import datetime
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 # 处理 override 装饰器 (Python 3.12+ 才有)
 try:
@@ -109,14 +109,16 @@ class TradingLogger:
             # 4. 语音预警配置表
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS voice_alerts (
-                    code TEXT PRIMARY KEY,
+                    code TEXT,
+                    resample TEXT DEFAULT 'd', -- 周期标识
                     name TEXT,
                     rules TEXT, -- JSON
                     last_alert REAL,
                     created_time TEXT,
                     tags TEXT,
                     added_date TEXT,
-                    rule_type_tag TEXT
+                    rule_type_tag TEXT,
+                    PRIMARY KEY (code, resample)
                 )
             """)
             
@@ -162,6 +164,37 @@ class TradingLogger:
                 cur.execute("ALTER TABLE selection_history ADD COLUMN resample TEXT DEFAULT 'd'")
                 logger.info("DB Migration: Added 'resample' column to selection_history")
 
+            # Migration for voice_alerts (Upgrade PK to include resample)
+            cur.execute("PRAGMA table_info(voice_alerts)")
+            voice_cols = [col[1] for col in cur.fetchall()]
+            if "resample" not in voice_cols:
+                logger.info("DB Migration: Upgrading voice_alerts PK for multi-period support")
+                # SQLite doesn't support ALTER TABLE DROP/ADD PRIMARY KEY
+                # We must use a temporary table
+                cur.execute("CREATE TABLE voice_alerts_backup AS SELECT * FROM voice_alerts")
+                cur.execute("DROP TABLE voice_alerts")
+                cur.execute("""
+                    CREATE TABLE voice_alerts (
+                        code TEXT,
+                        resample TEXT DEFAULT 'd',
+                        name TEXT,
+                        rules TEXT,
+                        last_alert REAL,
+                        created_time TEXT,
+                        tags TEXT,
+                        added_date TEXT,
+                        rule_type_tag TEXT,
+                        PRIMARY KEY (code, resample)
+                    )
+                """)
+                # Insert data from backup, defaulting resample to 'd'
+                cur.execute("""
+                    INSERT INTO voice_alerts (code, name, rules, last_alert, created_time, tags, added_date, rule_type_tag, resample)
+                    SELECT code, name, rules, last_alert, created_time, tags, added_date, rule_type_tag, 'd' FROM voice_alerts_backup
+                """)
+                cur.execute("DROP TABLE voice_alerts_backup")
+                logger.info("DB Migration: voice_alerts upgrade completed")
+
             conn.commit()
             conn.close()
         except Exception as e:
@@ -191,7 +224,11 @@ class TradingLogger:
             logger.error(f"Error logging selections: {e}")
 
     def get_selections_df(self, date: Optional[str] = None, resample: Optional[str] = None) -> Any:
-        # ... (lines 194-205)
+        """获取选股历史记录"""
+        conn = sqlite3.connect(self.db_path)
+        query = "SELECT * FROM selection_history WHERE 1=1"
+        params: list = []
+        
         if date:
             query += " AND date = ?"
             params.append(date)
@@ -546,6 +583,50 @@ class TradingLogger:
         conn.close()
         return rows
 
+    def log_voice_alert_config(self, code: str, resample: str, name: str, rules: str, last_alert: float, tags: str = "", rule_type_tag: str = ""):
+        """记录或更新语音预警配置"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            added_date = datetime.now().strftime('%Y-%m-%d')
+            created_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            cur.execute("""
+                INSERT OR REPLACE INTO voice_alerts 
+                (code, resample, name, rules, last_alert, created_time, tags, added_date, rule_type_tag)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (code, resample, name, rules, last_alert, created_time, tags, added_date, rule_type_tag))
+            
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Failed to log voice alert config: {e}")
+
+    def get_voice_alerts(self, resample: Optional[str] = None):
+        """获取所有或特定周期的语音预警配置"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            
+            query = "SELECT * FROM voice_alerts"
+            params = []
+            if resample:
+                query += " WHERE resample = ?"
+                params.append(resample)
+            
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            
+            # 转换为字典列表
+            cols = [d[0] for d in cur.description] # type: ignore
+            results = [dict(zip(cols, row)) for row in rows]
+            
+            conn.close()
+            return results
+        except Exception as e:
+            logger.error(f"Failed to get voice alerts: {e}")
+            return []
+
     def get_consecutive_losses(self, code: str, days: int = 10, resample: str = 'd') -> int:
         """
         获取某只股票最近连续亏损的次数 (用于“记仇”机制)
@@ -605,7 +686,7 @@ class TradingLogger:
 if __name__ == '__main__':
     from trading_analyzer import TradingAnalyzer
     
-    logger = TradingLogger("./trading_signals.db")
+    logger_instance = TradingLogger("./trading_signals.db")
     
     # 简单的查看器
     def view_records(limit=20):
@@ -616,7 +697,7 @@ if __name__ == '__main__':
             return
 
         print(f"\n=== 最近 {limit} 笔交易记录 ===")
-        trades = logger.get_trades()
+        trades = logger_instance.get_trades()
         if not trades:
             print("无记录")
             return
@@ -630,7 +711,7 @@ if __name__ == '__main__':
 
     view_records()
     
-    analyzer = TradingAnalyzer(logger)
+    analyzer = TradingAnalyzer(logger_instance)
 
     print("--- 股票汇总 ---")
     print(analyzer.summarize_by_stock().head())

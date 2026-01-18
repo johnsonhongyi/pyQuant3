@@ -1718,6 +1718,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if not _df_diff.empty and df is not None and not df.empty:
                         time_s = time.time()
                         df = detect_signals(df)
+                        # Phase 4: Inject resample info for UI display
+                        cur_res = self.global_values.getkey("resample") or 'd'
+                        if 'resample' not in df.columns:
+                            df['resample'] = cur_res
+                            
                         self.df_all = df.copy()
                         _last_df = df.copy()
                         has_update = True
@@ -1759,7 +1764,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=res)
                 if has_update:
                     if self._last_resample != self.global_values.getkey("resample"):
-                        if  hasattr(self, '_df_sync_thread') or self._df_sync_thread.is_alive():
+                        if  hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
                             logger.debug(f'[send_df] resample:{self._last_resample} to {self.global_values.getkey("resample")} change force full send init df_first_send_done to False now:{self._df_first_send_done}')
                             if hasattr(self, 'df_ui_prev'):
                                 del self.df_ui_prev  # 删除缓存，模拟初始化
@@ -1967,6 +1972,32 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             command=lambda: self.open_visualizer(getattr(self, 'select_code', None))
         ).pack(side=tk.LEFT, padx=1)
 
+        ttk.Button(
+            frame_right,
+            text="策略", 
+            width=5,
+            command=self.open_strategy_scan
+        ).pack(side=tk.LEFT, padx=1)
+
+
+
+    def open_strategy_scan(self):
+        """一键打开策略扫描"""
+        # 1. 确保 Visualizer 启动 (传入当前选中代码或 None)
+        code = getattr(self, 'select_code', None)
+        # 如果未启动则启动，如果已启动则无副作用 (除了 debounce)
+        self.open_visualizer(code)
+
+        # 2. 发送扫描指令
+        # open_visualizer 会初始化 viz_command_queue
+        if hasattr(self, 'viz_command_queue') and self.viz_command_queue:
+             self.viz_command_queue.put(('CMD_SCAN_CONSOLIDATION', {}))
+             logger.info("Sent CMD_SCAN_CONSOLIDATION to Visualizer")
+             if hasattr(self, 'status_var'):
+                self.status_var.set("已发送策略扫描指令...")
+             
+             # 提示用户
+             # toast_message(self, "已触发策略扫描，请查看可视化窗口", duration=2000)
 
     def open_visualizer(self, code):
 
@@ -3947,6 +3978,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             for text, val in types:
                 tk.Radiobutton(left_frame, text=text, variable=type_var, value=val, command=on_type_change).pack(anchor="w", padx=10, pady=2)
                 
+            tk.Label(left_frame, text="选择监控周期:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(5, 5))
+            
+            # 获取当前周期
+            current_resample = self.global_values.getkey("resample") or 'd'
+            resample_var = tk.StringVar(value=current_resample)
+            
+            resample_combo = ttk.Combobox(left_frame, textvariable=resample_var, width=10)
+            resample_combo['values'] = ['d', 'w', 'm', '30', '60']
+            resample_combo.pack(anchor="w", padx=10, pady=2)
+
             tk.Label(left_frame, text="触发阈值:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(15, 5))
             
             # 阈值输入区域 (包含 +/- 按钮)
@@ -4006,7 +4047,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     
                     if hasattr(self, 'live_strategy') and self.live_strategy:
                         tags = self.get_stock_info_text(code)
-                        self.live_strategy.add_monitor(code, name, rtype, val, tags=tags)
+                        resample = resample_var.get()
+                        self.live_strategy.add_monitor(code, name, rtype, val, tags=tags, resample=resample)
                         # 自动关闭，不再弹窗确认，提升效率 (或者用 toast)
                         # messagebox.showinfo("成功", f"已添加监控: {name} {rtype} {val}", parent=win)
                         logger.info(f"Monitor added: {name} {rtype} {val}")
@@ -5219,7 +5261,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             list_frame.pack(fill="both", expand=True, padx=5, pady=5)
             
             # 显示 ID 是为了方便管理 (code + rule_index)
-            columns = ("code", "name", "rule_type", "value", "rank", "add_time", "tags", "id")
+            columns = ("code", "name", "resample", "rule_type", "value", "rank", "add_time", "tags", "id")
             tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
             
             # 4. 底部状态栏用于显示计数
@@ -5265,6 +5307,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             tree.heading("code", text="代码", command=lambda: treeview_sort_column(tree, "code", False))
             tree.heading("name", text="名称", command=lambda: treeview_sort_column(tree, "name", False))
+            tree.heading("resample", text="周期", command=lambda: treeview_sort_column(tree, "resample", False))
             tree.heading("rule_type", text="规则类型", command=lambda: treeview_sort_column(tree, "rule_type", False))
             tree.heading("value", text="阈值", command=lambda: treeview_sort_column(tree, "value", False))
             tree.heading("rank", text="Rank", command=lambda: treeview_sort_column(tree, "rank", False))
@@ -5274,6 +5317,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             tree.column("code", width=50, anchor="center")
             tree.column("name", width=80, anchor="center")
+            tree.column("resample", width=50, anchor="center")
             tree.column("rule_type", width=80, anchor="center")
             tree.column("value", width=60, anchor="center")
             tree.column("rank", width=60, anchor="center")
@@ -5353,20 +5397,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     tree.delete(item)
                     
                 monitors = self.live_strategy.get_monitors()
-                for code, data in monitors.items():
+                for key, data in monitors.items():
+                    # Extract pure code from composite key (e.g., "002131_d" -> "002131")
+                    pure_code = data.get('code') or key.split('_')[0]
                     name = data['name']
                     rules = data['rules']
+                    resample = data.get('resample', 'd')
                     add_time = data.get('created_time', '')
                     tags = data.get('tags', '')
                     
                     rank = 0
-                    if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
-                         rank = self.df_all.loc[code].get('Rank', 0)
+                    if hasattr(self, 'df_all') and not self.df_all.empty and pure_code in self.df_all.index:
+                         rank = self.df_all.loc[pure_code].get('Rank', 0)
 
                     if not rules:
                         # 对于没有规则的股票，显示一行占位，方便管理
-                        uid = f"{code}_none"
-                        tree.insert("", "end", values=(code, name, "⚠️(未设规则)", "-", rank, add_time, tags, uid))
+                        uid = f"{key}_none"
+                        tree.insert("", "end", values=(pure_code, name, resample, "⚠️(未设规则)", "-", rank, add_time, tags, uid))
                     else:
                         for idx, rule in enumerate(rules):
                             rtype_map = {
@@ -5375,9 +5422,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 "change_up": "涨幅超过 >="
                             }
                             display_type = rtype_map.get(rule['type'], rule['type'])
-                            # unique id
-                            uid = f"{code}_{idx}"
-                            tree.insert("", "end", values=(code, name, display_type, rule['value'], rank, add_time, tags, uid))
+                            # unique id uses composite key for proper reference
+                            uid = f"{key}_{idx}"
+                            tree.insert("", "end", values=(pure_code, name, resample, display_type, rule['value'], rank, add_time, tags, uid))
 
             load_data()
             win.refresh_list = load_data
@@ -5452,8 +5499,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # 取第一个选中项（支持连续快速删除）
                 item = selected[0]
                 values = tree.item(item, "values")
-                code = values[0]
-                uid = values[7]
+                # Column order: code(0), name(1), resample(2), rule_type(3), value(4), rank(5), add_time(6), tags(7), id(8)
+                code = values[0]  # Pure code (e.g., "002131")
+                resample = values[2]  # Period (e.g., "d", "w")
+                uid = values[8]  # id column
+                
+                # Construct composite key from code + resample
+                composite_key = f"{code}_{resample}"
+                
+                # Extract rule index from uid (format: "{composite_key}_{idx}" or "{composite_key}_none")
+                suffix = uid.rsplit('_', 1)[-1] if '_' in uid else "none"
 
                 # 调整删除逻辑
                 if self.live_strategy:
@@ -5474,12 +5529,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 price = float(self.df_all.loc[code].get('trade', 0))
                             self.live_strategy.close_position_if_any(code, price, values[1])
 
-                    if uid.endswith('_none'):
-                        self.live_strategy.remove_monitor(code)
+                    if suffix == "none":
+                        self.live_strategy.remove_monitor(composite_key)
                     else:
                         try:
-                            idx = int(uid.split('_')[1])
-                            self.live_strategy.remove_rule(code, idx)
+                            idx = int(suffix)
+                            self.live_strategy.remove_rule(composite_key, idx)
                         except Exception:
                             pass
 
@@ -5607,24 +5662,33 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         return
                     item = selected[0]
                     values = tree.item(item, "values")
-                 code = values[0]
+                 # Column order: code(0), name(1), resample(2), rule_type(3), value(4), rank(5), add_time(6), tags(7), id(8)
+                 code = values[0]  # Pure code
                  name = values[1]
-                 old_val = values[3]
-                 uid = values[7]
-                 if uid.endswith('_none'):
+                 resample = values[2]  # Period
+                 old_val = values[4]  # value is at index 4
+                 uid = values[8]  # id is at index 8
+                 
+                 # Construct composite key from code + resample
+                 composite_key = f"{code}_{resample}"
+                 
+                 # Extract rule index from uid suffix
+                 suffix = uid.rsplit('_', 1)[-1] if '_' in uid else "none"
+                 
+                 if suffix == "none":
                      idx = -1
                  else:
                      try:
-                         idx = int(uid.split('_')[1])
+                         idx = int(suffix)
                      except:
                          idx = -1
                  # logger.info(f'on_voice_edit_selected stock_code:{code} name:{name}')
                  
                  current_type = "price_up"
                  monitors = self.live_strategy.get_monitors()
-                 if code in monitors:
-                     rules = monitors[code]['rules']
-                     if idx < len(rules):
+                 if composite_key in monitors:
+                     rules = monitors[composite_key]['rules']
+                     if idx >= 0 and idx < len(rules):
                          current_type = rules[idx]['type']
 
                  # 弹出编辑框 (UI 与 Add 保持一致)
