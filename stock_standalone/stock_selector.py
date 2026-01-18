@@ -32,10 +32,11 @@ class StockSelector:
     """
 
     # def __init__(self, log_path="selection_log.csv", df: Optional[pd.DataFrame] = None):
-    def __init__(self, df: Optional[pd.DataFrame] = None):
+    def __init__(self, df: Optional[pd.DataFrame] = None, resample: str = 'd'):
         self.data_path = r'g:\top_all.h5'
         # self.log_path = log_path # Deprecated: moved to SQLite
         self.df_all_realtime = df  # 实时数据引用
+        self.resample = resample  # 周期标识: 'd', '3d', 'w', 'm'
         self._setup_logger()
         
         self.db_logger: Optional['TradingLogger'] = None
@@ -86,8 +87,8 @@ class StockSelector:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
         # 调用 data_utils 中的标准计算链 (包含量能扩缩逻辑)
-        # resample 默认为 'd'
-        df = data_utils.calc_indicators(df, self.logger, resample='d')
+        # resample 使用实例化时传入的参数
+        df = data_utils.calc_indicators(df, self.logger, resample=self.resample)
         
         return df
 
@@ -111,6 +112,7 @@ class StockSelector:
 
     def filter_strong_stocks(self, df: pd.DataFrame, today: Optional[str] = None) -> pd.DataFrame:
         """执行优化后的筛选逻辑"""
+        resample = self.resample # 使用当前实例的周期标识
         if df.empty:
             return df
 
@@ -310,7 +312,8 @@ class StockSelector:
                     'ma5': ma5,
                     'ma10': ma10,
                     'open': float(data.get('open', 0)),
-                    'category': "|".join(stock_cats[:3])
+                    'category': "|".join(stock_cats[:3]),
+                    'resample': resample
                 }
                 selected_records.append(record)
 
@@ -343,25 +346,30 @@ class StockSelector:
             return []
         return df['code'].tolist()
 
-    def get_candidates_df(self, force: bool = False, logical_date: Optional[str] = None) -> pd.DataFrame:
+    def get_candidates_df(self, force: bool = False, logical_date: Optional[str] = None, resample: Optional[str] = None) -> pd.DataFrame:
         """
         获取筛选结果。
         :param force: 是否强制重新运行策略。如果为 False，则优先从数据库加载今日已存数据。
         :param logical_date: 逻辑日期，格式 'YYYY-MM-DD'。如果提供，则使用此日期进行数据查询；否则使用系统当前日期。
+        :param resample: 如果提供，则覆盖实例的周期标识。
         """
+        if resample:
+            self.resample = resample
+        
         today = logical_date if logical_date else datetime.datetime.now().strftime("%Y-%m-%d")
         
         # 非强制模式下，先检查今日是否有存量数据 (From SQLite)
         if not force and self.db_logger:
             try:
-                df_today = self.db_logger.get_selections_df(date=today)
+                # 注意：这里可能需要更新 get_selections_df 以支持 resample
+                df_today = self.db_logger.get_selections_df(date=today, resample=self.resample)
                 
                 # 如果返回的是 list (pandas import fail)，转 df
                 if isinstance(df_today, list):
                     df_today = pd.DataFrame(df_today)
 
                 if not df_today.empty:
-                    self.logger.info(f"检测到今日已运行过策略 (DB)，加载存量数据: {len(df_today)} 条")
+                    self.logger.info(f"检测到今日已运行过策略 (DB [{self.resample}]), 加载存量数据: {len(df_today)} 条")
                     if 'code' in df_today.columns:
                         df_today['code'] = df_today['code'].apply(lambda x: str(x).zfill(6))
                     return df_today

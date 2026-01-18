@@ -181,8 +181,8 @@ class TradingLogger:
             
             # 使用事务批量插入
             cur.executemany("""
-                INSERT OR REPLACE INTO selection_history (date, code, name, score, price, percent, ratio, volume, amount, reason, status, ma5, ma10, category)
-                VALUES (:date, :code, :name, :score, :price, :percent, :ratio, :volume, :amount, :reason, :status, :ma5, :ma10, :category)
+                INSERT OR REPLACE INTO selection_history (date, code, name, score, price, percent, ratio, volume, amount, reason, status, ma5, ma10, category, resample)
+                VALUES (:date, :code, :name, :score, :price, :percent, :ratio, :volume, :amount, :reason, :status, :ma5, :ma10, :category, :resample)
             """, records)
             
             conn.commit()
@@ -190,22 +190,14 @@ class TradingLogger:
         except Exception as e:
             logger.error(f"Error logging selections: {e}")
 
-    def get_selections_df(self, date: Optional[str] = None) -> Any:
-        """
-        获取选股历史，返回 DataFrame (为了解耦不强制在此文件 import pandas，返回 list[dict] 或由调用方转 df)
-        但考虑到便利性，这里如果环境有 pandas 则返回 df，否则返回 list
-        """
-        try:
-            import pandas as pd
-        except ImportError:
-            pd = None
-
-        conn = sqlite3.connect(self.db_path)
-        query = "SELECT * FROM selection_history WHERE 1=1"
-        params = []
+    def get_selections_df(self, date: Optional[str] = None, resample: Optional[str] = None) -> Any:
+        # ... (lines 194-205)
         if date:
             query += " AND date = ?"
             params.append(date)
+        if resample:
+            query += " AND resample = ?"
+            params.append(resample)
         
         # 按分数倒序
         query += " ORDER BY date DESC, score DESC"
@@ -269,10 +261,11 @@ class TradingLogger:
         except Exception as e:
             logger.error(f"Error logging signal: {e}")
 
-    def record_trade(self, code: str, name: str, action: str, price: float, amount: float, fee_rate: float = 0.0003, reason: str = "") -> None:
+    def record_trade(self, code: str, name: str, action: str, price: float, amount: float, fee_rate: float = 0.0003, reason: str = "", resample: str = 'd') -> None:
         """
         记录买卖操作并计算单笔盈利
         fee_rate: 手续费率（默认万3）
+        resample: 周期标识 ('d', '3d', 'w', 'm')
         """
         try:
             conn = sqlite3.connect(self.db_path)
@@ -290,7 +283,7 @@ class TradingLogger:
             now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
             # 检查是否已有持仓
-            cur.execute("SELECT id, buy_price, buy_amount, fee FROM trade_records WHERE code=? AND status='OPEN' ORDER BY buy_date DESC LIMIT 1", (code,))
+            cur.execute("SELECT id, buy_price, buy_amount, fee FROM trade_records WHERE code=? AND resample=? AND status='OPEN' ORDER BY buy_date DESC LIMIT 1", (code, resample))
             existing_trade = cur.fetchone()
 
             if action == "买入":
@@ -301,9 +294,9 @@ class TradingLogger:
                 # 开启新仓
                 fee = price * amount * fee_rate
                 cur.execute("""
-                    INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, buy_reason, fee, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN')
-                """, (code, name, now_str, price, amount, reason, fee))
+                    INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, buy_reason, fee, status, resample)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+                """, (code, name, now_str, price, amount, reason, fee, resample))
             
             elif action == "ADD":
                 if not existing_trade:
@@ -311,9 +304,9 @@ class TradingLogger:
                     # 如果没有持仓，退化为买入
                     fee = price * amount * fee_rate
                     cur.execute("""
-                        INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, buy_reason, fee, status)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN')
-                    """, (code, name, now_str, price, amount, reason, fee))
+                        INSERT INTO trade_records (code, name, buy_date, buy_price, buy_amount, buy_reason, fee, status, resample)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)
+                    """, (code, name, now_str, price, amount, reason, fee, resample))
                 else:
                     # 加仓：更新均价和股数，并追加理由
                     t_id, old_price, old_amount, old_fee = existing_trade
@@ -358,16 +351,22 @@ class TradingLogger:
         except Exception as e:
             logger.error(f"Error recording trade: {e}")
 
-    def get_summary(self) -> Optional[tuple[float, float, int]]:
+    def get_summary(self, resample: Optional[str] = None) -> Optional[tuple[float, float, int]]:
         """获取盈亏概览"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
-        cur.execute("SELECT SUM(profit), AVG(pnl_pct), COUNT(*) FROM trade_records WHERE status='CLOSED'")
+        query = "SELECT SUM(profit), AVG(pnl_pct), COUNT(*) FROM trade_records WHERE status='CLOSED'"
+        params = []
+        if resample:
+            query += " AND resample = ?"
+            params.append(resample)
+            
+        cur.execute(query, params)
         res = cur.fetchone()
         conn.close()
         return res # (总利润, 平均收益率, 总笔数)
 
-    def get_signals(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> list[dict[str, Any]]:
+    def get_signals(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None) -> list[dict[str, Any]]:
         """获取记录的信号"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -379,6 +378,9 @@ class TradingLogger:
         if end_date:
             query += " AND date <= ?"
             params.append(end_date)
+        if resample:
+            query += " AND resample = ?"
+            params.append(resample)
         
         query += " ORDER BY date DESC"
         cur.execute(query, params)
@@ -388,7 +390,7 @@ class TradingLogger:
         conn.close()
         return results
 
-    def get_signal_history_df(self, start_date: Optional[str] = None, end_date: Optional[str] = None):
+    def get_signal_history_df(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None):
         """获取信号历史并作为 DataFrame 返回"""
         try:
             import pandas as pd
@@ -404,6 +406,9 @@ class TradingLogger:
         if end_date:
             query += " AND date <= ?"
             params.append(end_date)
+        if resample:
+            query += " AND resample = ?"
+            params.append(resample)
             
         query += " ORDER BY date DESC"
         
@@ -417,7 +422,7 @@ class TradingLogger:
         
         return df
 
-    def get_trades(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> list[dict[str, Any]]:
+    def get_trades(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None) -> list[dict[str, Any]]:
         """获取交易记录（包含持仓中和已平仓）"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -431,6 +436,9 @@ class TradingLogger:
         if end_date:
             query += " AND ( (status='CLOSED' AND date(sell_date) <= ?) OR (status='OPEN' AND date(buy_date) <= ?) )"
             params.extend([end_date, end_date])
+        if resample:
+            query += " AND resample = ?"
+            params.append(resample)
             
         query += " ORDER BY CASE WHEN status='CLOSED' THEN sell_date ELSE buy_date END DESC"
         cur.execute(query, params)
@@ -511,24 +519,34 @@ class TradingLogger:
             logger.error(f"update_trade_feedback error: {e}")
             return False
 
-    def get_db_summary(self, days: int = 30) -> list[tuple[Any, ...]]:
+    def get_db_summary(self, days: int = 30, resample: Optional[str] = None) -> list[tuple[Any, ...]]:
         """按天统计多日收益"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
         # 截取日期部分进行 group by
-        cur.execute("""
+        query = """
             SELECT substr(sell_date, 1, 10) as day, SUM(profit) as daily_profit, COUNT(*) as count 
             FROM trade_records 
             WHERE status='CLOSED' 
+        """
+        params = []
+        if resample:
+            query += " AND resample = ?"
+            params.append(resample)
+        
+        query += """
             GROUP BY day 
             ORDER BY day DESC 
             LIMIT ?
-        """, (days,))
+        """
+        params.append(days)
+        
+        cur.execute(query, params)
         rows = cur.fetchall()
         conn.close()
         return rows
 
-    def get_consecutive_losses(self, code: str, days: int = 10) -> int:
+    def get_consecutive_losses(self, code: str, days: int = 10, resample: str = 'd') -> int:
         """
         获取某只股票最近连续亏损的次数 (用于“记仇”机制)
         """
@@ -538,9 +556,9 @@ class TradingLogger:
             # 获取最近N天的已平仓记录，按时间倒序
             cur.execute("""
                 SELECT profit, buy_date FROM trade_records 
-                WHERE code=? AND status='CLOSED' AND date(buy_date) >= date('now', ?)
+                WHERE code=? AND resample=? AND status='CLOSED' AND date(buy_date) >= date('now', ?)
                 ORDER BY sell_date DESC
-            """, (code, f'-{days} days'))
+            """, (code, resample, f'-{days} days'))
             rows = cur.fetchall()
             conn.close()
             
@@ -556,7 +574,7 @@ class TradingLogger:
             logger.error(f"get_consecutive_losses error: {e}")
             return 0
 
-    def get_market_sentiment(self, days: int = 5) -> float:
+    def get_market_sentiment(self, days: int = 5, resample: Optional[str] = None) -> float:
         """
         获取最近 N 天的全市场交易胜率 (用于感知市场环境)
         Returns: 0.0 - 1.0
@@ -564,10 +582,13 @@ class TradingLogger:
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
-            cur.execute("""
-                SELECT profit FROM trade_records 
-                WHERE status='CLOSED' AND date(sell_date) >= date('now', ?)
-            """, (f'-{days} days',))
+            query = "SELECT profit FROM trade_records WHERE status='CLOSED' AND date(sell_date) >= date('now', ?)"
+            params = [f'-{days} days']
+            if resample:
+                query += " AND resample = ?"
+                params.append(resample)
+                
+            cur.execute(query, params)
             rows = cur.fetchall()
             conn.close()
             
