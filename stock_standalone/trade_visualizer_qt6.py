@@ -32,7 +32,7 @@ from PyQt6.QtGui import (
     QActionGroup, QShortcut, QKeySequence
 )
 from PyQt6 import sip
-
+from PyQt6 import QtGui
 import stock_logic_utils
 from stock_logic_utils import ensure_parentheses_balanced, remove_invalid_conditions
 from JohnsonUtil import LoggerFactory
@@ -43,6 +43,7 @@ from JohnsonUtil import johnson_cons as ct
 from strategy_controller import StrategyController
 from signal_types import SignalPoint, SignalType, SignalSource
 from StrongPullbackMA5Strategy import StrongPullbackMA5Strategy
+from strong_consolidation_strategy import StrongConsolidationStrategy
 from data_utils import (
     calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe)
 
@@ -944,9 +945,15 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
         top_layout.addWidget(btn_clean)
 
         btn_refresh = QtWidgets.QPushButton("🔄 刷新")
-        btn_refresh = QtWidgets.QPushButton("🔄 刷新")
         btn_refresh.clicked.connect(self.refresh)
         top_layout.addWidget(btn_refresh)
+
+        # 强势整理扫描按钮
+        btn_scan = QtWidgets.QPushButton("🛡️ 强势整理扫描")
+        btn_scan.setToolTip("全市场实时扫描强势阶段整理突破潜伏股 (需 df_all 完整)")
+        btn_scan.clicked.connect(self.on_scan_consolidation)
+        top_layout.addWidget(btn_scan)
+
         layout.addLayout(top_layout)
 
         # 2. 分类标签页
@@ -955,11 +962,13 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
         # 创建各分类表格
         self.tables['all'] = self._create_table()
         self.tables['main'] = self._create_table()
+        self.tables['conso'] = self._create_table() # 强势整理
         self.tables['startup'] = self._create_table()
         self.tables['sudden'] = self._create_table()
 
         self.tabs.addTab(self.tables['all'], "全部 (All)")
         self.tabs.addTab(self.tables['main'], "🔥 主升浪 (Hot)")
+        self.tabs.addTab(self.tables['conso'], "🛡️ 强势整理 (Conso)")
         self.tabs.addTab(self.tables['startup'], "🚀 启动蓄势 (Startup)")
         self.tabs.addTab(self.tables['sudden'], "⚡ 突发 (Sudden)")
 
@@ -1001,6 +1010,9 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
         for t in self.tables.values():
             t.setSortingEnabled(False)
 
+        # 此时可以检查是否需要执行扫描
+        # (通常 refresh 只是显示 queue, 扫描是主动触发的)
+
         # 清空所有表格
         for t in self.tables.values():
             t.setRowCount(0)
@@ -1014,11 +1026,15 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
             if msg.signal_type == 'HOT_WATCH':
                 self._add_row(self.tables['main'], msg)
 
-            # 3. 启动蓄势 (Conso)
+            # 3. 强势整理 (Conso)
             elif msg.signal_type == 'CONSOLIDATION':
+                self._add_row(self.tables['conso'], msg)
+
+            # 4. 启动蓄势
+            elif msg.signal_type == 'STARTUP':
                 self._add_row(self.tables['startup'], msg)
 
-            # 4. 突发 (Sudden / Alert)
+            # 5. 突发 (Sudden / Alert)
             elif msg.signal_type in ['SUDDEN_LAUNCH', 'ALERT']:
                 self._add_row(self.tables['sudden'], msg)
 
@@ -1056,6 +1072,8 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
             type_item.setForeground(Qt.GlobalColor.blue)
         elif msg.signal_type == "SUDDEN_LAUNCH":
             type_item.setForeground(Qt.GlobalColor.darkMagenta)
+        elif msg.signal_type == "CONSOLIDATION":
+            type_item.setForeground(QColor("#00CCFF")) # 天蓝色
         table.setItem(row_idx, 3, type_item)
 
         # 4. 理由
@@ -1173,18 +1191,94 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
                 self.refresh()
                 return
 
+            # 获取当前 close 价格作为默认值
+            default_price = 0.0
+            if hasattr(self, 'parent_window') and hasattr(self.parent_window, 'df_all'):
+                df_all = self.parent_window.df_all
+                code = msg.code[-6:] if len(msg.code) > 6 else msg.code
+                if not df_all.empty and code in df_all.index:
+                    default_price = float(df_all.loc[code].get('trade', 0) or df_all.loc[code].get('close', 0))
+            
             price, ok = QtWidgets.QInputDialog.getDouble(self, "跟单确认",
                                                        f"确认跟踪 {msg.name}({msg.code})?\n输入当前价格:",
-                                                       value=0.0, decimals=2)
+                                                       value=default_price, decimals=2)
             if ok:
+                # 默认止损 -3%
+                default_stop_loss = price * 0.97
                 stop_loss, ok2 = QtWidgets.QInputDialog.getDouble(self, "设置止损",
-                                                                "输入止损价格:",
-                                                                value=price*0.95, decimals=2)
+                                                                "输入止损价格 (默认-3%):",
+                                                                value=default_stop_loss, decimals=2)
                 if ok2:
                     self._queue_mgr.add_follow(msg, price, stop_loss)
                     self.refresh()
             else:
                 self.refresh()
+
+    def on_scan_consolidation(self):
+        """执行强势整理全市场扫描"""
+        if not hasattr(self.parent_window, 'df_all') or self.parent_window.df_all.empty:
+            _ = QtWidgets.QMessageBox.warning(self, "扫描提示", "当前市场数据(df_all)为空，无法进行扫描。\n请确保已开启'实时数据'接收全场快照。")
+            return
+
+        if not hasattr(self.parent_window, 'consolidation_strat'):
+            _ = QtWidgets.QMessageBox.warning(self, "扫描提示", "策略引擎未就绪。")
+            return
+
+        # 禁用按钮防止重复点击
+        btn = self.sender()
+        if btn and isinstance(btn, QtWidgets.QPushButton): 
+            btn.setEnabled(False)
+            
+        self.status_label.setText("正在执行全市场扫描 (强势整理)...")
+        QtWidgets.QApplication.processEvents()
+
+        try:
+            # 执行扫描 (默认 parallel=True)
+            resample = getattr(self.parent_window, 'resample', 'd')
+            
+            # 从 MainWindow 获取 df_all
+            df_all = self.parent_window.df_all
+            
+            results = self.parent_window.consolidation_strat.execute_scan(
+                df_all, 
+                resample=resample,
+                parallel=True
+            )
+
+            # 将结果推送到信号 queue
+            if results:
+                from signal_message_queue import SignalMessage
+                for item in results:
+                    msg = SignalMessage(
+                        priority=30, # 扫描出的信号优先级稍低于实时监控
+                        timestamp=item['timestamp'],
+                        code=item['code'],
+                        name=item['name'],
+                        signal_type='CONSOLIDATION',
+                        source='SCANNER', # 新的来源标识
+                        reason=item['reason'],
+                        score=item['score']
+                    )
+                    if self._queue_mgr:
+                        self._queue_mgr.push(msg)
+
+                _ = QtWidgets.QMessageBox.information(self, "扫描完成", 
+                    f"扫描完毕，共发现 {len(results)} 个潜在信号。\n已同步至'强势整理'标签页。")
+            else:
+                _ = QtWidgets.QMessageBox.information(self, "扫描完成", "全市场扫描完毕，未发现符合特征的股票。")
+            
+            self.refresh()
+            # 切换到 conso 标签页 (索引 2)
+            self.tabs.setCurrentIndex(2)
+            
+        except Exception as e:
+            logger.error(f"Scan execution error: {e}")
+            _ = QtWidgets.QMessageBox.critical(self, "扫描失败", f"扫描过程中发生错误: {e}")
+        finally:
+            if btn and isinstance(btn, QtWidgets.QPushButton): 
+                btn.setEnabled(True)
+            if self._queue_mgr:
+                self.status_label.setText(f"总信号: {len(self._queue_mgr.get_top())} 条")
 
     def on_heat_period_changed(self, val):
         self.refresh()
@@ -1316,18 +1410,18 @@ class GlobalInputFilter(QtCore.QObject):
                 return True
             
             # --- 原有快捷键 ---
-            elif key == Qt.Key.Key_1:
-                self.main_window.on_resample_changed('d')
-                return True
-            elif key == Qt.Key.Key_2:
-                self.main_window.on_resample_changed('3d')
-                return True
-            elif key == Qt.Key.Key_3:
-                self.main_window.on_resample_changed('w')
-                return True
-            elif key == Qt.Key.Key_4:
-                self.main_window.on_resample_changed('m')
-                return True
+            # elif key == Qt.Key.Key_1:
+            #     self.main_window.on_resample_changed('d')
+            #     return True
+            # elif key == Qt.Key.Key_2:
+            #     self.main_window.on_resample_changed('3d')
+            #     return True
+            # elif key == Qt.Key.Key_3:
+            #     self.main_window.on_resample_changed('w')
+            #     return True
+            # elif key == Qt.Key.Key_4:
+            #     self.main_window.on_resample_changed('m')
+            #     return True
             elif key == Qt.Key.Key_Space:
                 self.main_window.show_comprehensive_briefing()
                 return True
@@ -1409,6 +1503,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.qt_theme = 'dark'  # 默认使用黑色主题
         self.show_bollinger = True
         self.tdx_enabled = False  # 默认开启
+        self.show_td_sequential = True  # 神奇九转默认开启
         self.realtime = True  # 默认开启
         # 缓存 df_all
         self.df_cache = pd.DataFrame()
@@ -1448,6 +1543,7 @@ class MainWindow(QMainWindow, WindowMixin):
         from intraday_decision_engine import IntradayDecisionEngine
         self.decision_engine = IntradayDecisionEngine() # ⭐ 内部决策引擎
         self.pullback_strat = StrongPullbackMA5Strategy(min_score=60) # ⭐ 强力回撤策略
+        self.consolidation_strat = StrongConsolidationStrategy()     # ⭐ 强势整理策略
         self.strategy_controller = StrategyController(self) # ⭐ 新增：统一策略控制器
 
         # 策略模拟开关
@@ -1922,6 +2018,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self._window_pos_loaded = False   # ⭐ 必须加
         # self.load_window_position_qt(self, "trade_visualizer", default_width=1400, default_height=900)
         self.load_splitter_state()
+        self._init_td_text_pool()
+        self._init_tick_signal_pool()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1984,6 +2082,78 @@ class MainWindow(QMainWindow, WindowMixin):
         self.help_dialog.raise_()
         self.help_dialog.activateWindow()
 
+    def _init_td_text_pool(self, max_items=50):
+        self.td_text_pool = []
+
+        self.td_font_9 = QtGui.QFont('Arial', 14, QtGui.QFont.Weight.Bold)
+        self.td_font_7p = QtGui.QFont('Arial', 12, QtGui.QFont.Weight.Bold)
+        self.td_font_norm = QtGui.QFont('Arial', 11, QtGui.QFont.Weight.Normal)
+
+        for _ in range(max_items):
+            t = pg.TextItem('', anchor=(0.5, 1))
+            t.hide()
+            self.kline_plot.addItem(t)
+            self.td_text_pool.append(t)
+
+    def _init_tick_signal_pool(self, max_items=50):
+        """
+        初始化分时图影子信号对象池，用于复用 TextItem 避免频繁 add/remove。
+        """
+        self.tick_signal_pool = []
+
+        # 字体缓存
+        self.tick_font_bold = QtGui.QFont('Arial', 12, QtGui.QFont.Weight.Bold)
+        self.tick_font_normal = QtGui.QFont('Arial', 11, QtGui.QFont.Weight.Normal)
+
+        for _ in range(max_items):
+            t = pg.TextItem('', anchor=(0.5, 1))
+            t.hide()
+            self.kline_plot.addItem(t)
+            self.tick_signal_pool.append(t)
+
+    def _update_tick_shadow_signal(self, code, tick_df, shadow_decision, x_axis=None):
+        """
+        高速绘制分时影子信号，复用对象池，显示最近 N 个信号
+        """
+        if not shadow_decision or 'action' not in shadow_decision:
+            return
+
+        action = shadow_decision['action']
+        if action not in ("买入", "卖出", "止损", "止盈", "ADD"):
+            return
+
+        # 最新价格和索引
+        y_p = float(tick_df['price'].iloc[-1])
+        idx = len(tick_df) - 1
+        x = x_axis[idx] if x_axis is not None else idx
+
+        # 获取对象池元素
+        if not hasattr(self, 'tick_signal_pool') or len(self.tick_signal_pool) == 0:
+            return  # 对象池耗尽，可扩容或丢弃
+        t = self.tick_signal_pool.pop(0)
+
+        # 设置文本和样式
+        text = '买入' if action in ('买入', 'ADD') else action
+        t.setText(text)
+
+        if action in ('止损', '止盈'):
+            t.setColor('#FF4500')   # 红橙色
+            t.setFont(self.tick_font_bold)
+        elif action in ('买入', 'ADD'):
+            t.setColor('#00FF00')   # 绿色
+            t.setFont(self.tick_font_bold)
+        else:
+            t.setColor('#FFD700')   # 金黄色
+            t.setFont(self.tick_font_normal)
+
+        # 设置位置并显示
+        t.setPos(x, y_p)
+        t.show()
+
+        # 回收对象池（末尾追加，实现循环复用）
+        self.tick_signal_pool.append(t)
+
+
     def _init_toolbar(self):
         self.toolbar = QToolBar("Settings", self)
         self.toolbar.setObjectName("ResampleToolbar")
@@ -2000,6 +2170,14 @@ class MainWindow(QMainWindow, WindowMixin):
         self.sim_action.setChecked(self.show_strategy_simulation)
         self.sim_action.triggered.connect(self.on_toggle_simulation)
         self.toolbar.addAction(self.sim_action)
+
+        # 神奇九转 Action
+        self.td_action = QAction("九转", self)
+        self.td_action.setCheckable(True)
+        self.td_action.setChecked(self.show_td_sequential)
+        self.td_action.setToolTip("显示/隐藏神奇九转指标")
+        self.td_action.triggered.connect(self.on_toggle_td_sequential)
+        self.toolbar.addAction(self.td_action)
         self.toolbar.addSeparator()
 
         # 系统级全局快捷键开关
@@ -2039,6 +2217,41 @@ class MainWindow(QMainWindow, WindowMixin):
         self.show_strategy_simulation = checked
         if self.current_code:
             self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
+
+    # def on_toggle_td_sequential(self, checked):
+    #     """切换神奇九转显示"""
+    #     self.show_td_sequential = checked
+    #     # 清除现有的 TD 标记
+    #     if not checked and hasattr(self, 'td_text_items'):
+    #         for item in self.td_text_items:
+    #             if hasattr(self, 'kline_plot') and item in self.kline_plot.items:
+    #                 self.kline_plot.removeItem(item)
+    #         self.td_text_items = []
+    #     # 如果开启，重新渲染图表
+    #     elif checked and self.current_code:
+    #         self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
+
+    def on_toggle_td_sequential(self, checked):
+        """切换神奇九转显示（对象池安全版）"""
+        self.show_td_sequential = checked
+
+        # TD 图层还没初始化，直接返回
+        if not hasattr(self, 'td_text_pool'):
+            return
+
+        if not checked:
+            # ❗ 只隐藏，不 remove
+            for t in self.td_text_pool:
+                t.hide()
+        else:
+            # 开启时，重新渲染（会复用对象池）
+            if self.current_code:
+                self.render_charts(
+                    self.current_code,
+                    self.day_df,
+                    getattr(self, 'tick_df', pd.DataFrame())
+                )
+
 
     def on_toggle_global_keys(self, checked):
         """切换系统级全局快捷键"""
@@ -2427,9 +2640,36 @@ class MainWindow(QMainWindow, WindowMixin):
         msg.exec()
 
     def show_comprehensive_briefing(self):
-        """[⭐极限弹窗] 一键显示综合研报信息"""
+        """[⭐极限弹窗] 一键显示综合研报信息 (复用模式)"""
         if not self.current_code: return
 
+        # 窗口复用逻辑
+        if hasattr(self, '_briefing_dlg') and self._briefing_dlg is not None:
+            try:
+                if self._briefing_dlg.isVisible():
+                    self._briefing_dlg.raise_()
+                    self._briefing_dlg.activateWindow()
+                    # 更新内容
+                    self._update_briefing_content(self._briefing_dlg)
+                    return
+            except RuntimeError:
+                pass  # 窗口已被删除
+
+        # 创建新窗口
+        briefing = self._generate_briefing_html()
+        dlg = ScrollableMsgBox(f"📈 综合简报 - {self.current_code}", briefing, self)
+        self._briefing_dlg = dlg
+        dlg.show()  # 使用 show() 而不是 exec() 以允许复用
+
+    def _update_briefing_content(self, dlg):
+        """更新简报窗口内容"""
+        briefing = self._generate_briefing_html()
+        dlg.setWindowTitle(f"📈 综合简报 - {self.current_code}")
+        if hasattr(dlg, 'content_label'):
+            dlg.content_label.setText(briefing)
+
+    def _generate_briefing_html(self):
+        """生成简报HTML内容"""
         # 1. 基础个股信息
         info = self.code_info_map.get(self.current_code)
         if info is None and len(self.current_code) > 6:
@@ -2487,9 +2727,7 @@ class MainWindow(QMainWindow, WindowMixin):
             <p style='font-size: 9pt; color: #888;'>[快捷键提示] Space: 综述 | S: 监理 | R: 重置视图 | T: 模拟开关</p>
         </div>
         """
-
-        dlg = ScrollableMsgBox(f"📈 综合简报 - {self.current_code}", briefing, self)
-        dlg.exec()
+        return briefing
 
     # def _start_realtime_process(self, code):
     #     # 停止旧进程
@@ -2615,6 +2853,14 @@ class MainWindow(QMainWindow, WindowMixin):
                                 # 终止本轮增量应用，等待全量同步
                                 df_diffs.clear()
                                 break
+                    
+                    elif cmd == 'CMD_SCAN_CONSOLIDATION':
+                        # 触发策略扫描
+                        logger.info("Queue CMD: Triggering Consolidation Scan...")
+                        # 确保 SignalBoxDialog 已显示
+                        self._show_signal_box()
+                        # 延迟以确保窗口初始化完成
+                        QTimer.singleShot(500, self.signal_box_dialog.on_scan_consolidation)
 
             # --- 处理最新全量数据 ---
             if latest_full_df is not None:
@@ -3930,6 +4176,122 @@ class MainWindow(QMainWindow, WindowMixin):
                 getattr(self, attr).setData(x_axis, series)
                 getattr(self, attr).setPen(pg.mkPen(color, width=2))
 
+        # --- TD Sequential (神奇九转) ---
+        # 清除旧的 TD 标记
+        if not hasattr(self, 'td_text_items'):
+            self.td_text_items = []
+        for item in self.td_text_items:
+            if item in self.kline_plot.items:
+                self.kline_plot.removeItem(item)
+        self.td_text_items = []
+        
+        # 仅在开关开启时绘制
+        if getattr(self, 'show_td_sequential', True):
+            # --- TD Sequential (神奇九转) ---
+            try:
+                from JSONData.tdx_data_Day import td_sequential_fast
+
+                # 1️⃣ 计算 TD Sequential（完整历史）
+                with timed_ctx("td_sequential_fast", warn_ms=100):
+                    df_td = td_sequential_fast(day_df)
+
+                # 2️⃣ 初始化对象池（第一次调用）
+                if not hasattr(self, 'td_text_pool'):
+                    self.td_text_pool = []
+
+                    # 字体缓存
+                    self.td_font_9 = QtGui.QFont('Arial', 14, QtGui.QFont.Weight.Bold)
+                    self.td_font_7p = QtGui.QFont('Arial', 12, QtGui.QFont.Weight.Bold)
+                    self.td_font_norm = QtGui.QFont('Arial', 11, QtGui.QFont.Weight.Normal)
+
+                    # 预创建 TextItem，最大 50 个
+                    for _ in range(50):
+                        t = pg.TextItem('', anchor=(0.5, 1))
+                        t.hide()
+                        self.kline_plot.addItem(t)
+                        self.td_text_pool.append(t)
+
+                # 3️⃣ 仅在开关开启时绘制
+                if not getattr(self, 'show_td_sequential', True):
+                    # TD 关闭时，全部隐藏
+                    for t in self.td_text_pool:
+                        t.hide()
+                    return
+
+                # 4️⃣ 只显示最近 30 根 K
+                N = 30
+                total = len(df_td)
+                start = max(0, total - N)
+
+                # 5️⃣ 预取 numpy 避免 iloc
+                buy = df_td['td_buy_count'].values
+                sell = df_td['td_sell_count'].values
+                highs = day_df['high'].values
+
+                # 6️⃣ 对象池绘制
+                pool = self.td_text_pool
+                pool_idx = 0
+
+                # 先隐藏全部
+                for t in pool:
+                    t.hide()
+
+                with timed_ctx("draw_td_sequential", warn_ms=40):
+                    for i in range(start, total):
+                        td_cnt = buy[i] if buy[i] > 0 else sell[i]
+                        if td_cnt == 0:
+                            continue
+                        if pool_idx >= len(pool):
+                            break
+
+                        t = pool[pool_idx]
+                        pool_idx += 1
+
+                        # 视觉节奏：颜色 + 字体
+                        if td_cnt == 9:
+                            t.setColor('#FFFF00')      # 明黄色
+                            t.setFont(self.td_font_9)
+                        elif td_cnt >= 7:
+                            t.setColor('#FFD700')      # 金黄色
+                            t.setFont(self.td_font_7p)
+                        else:
+                            t.setColor('#E6C200')      # 深黄色
+                            t.setFont(self.td_font_norm)
+
+                        t.setText(str(td_cnt))
+                        t.setPos(x_axis[i], highs[i] * 1.008)
+                        t.show()
+
+            except Exception as e:
+                logger.debug(f"TD Sequential display error: {e}")
+
+            # try:
+            #     from JSONData.tdx_data_Day import td_sequential_fast
+            #     with timed_ctx("td_sequential_fast", warn_ms=100):
+            #         df_td = td_sequential_fast(day_df.copy())
+                
+            #     # 绘制 TD 计数标记 - 统一使用明黄色，在K线上方显示
+            #     for i in range(len(df_td)):
+            #         buy_cnt = df_td['td_buy_count'].iloc[i]
+            #         sell_cnt = df_td['td_sell_count'].iloc[i]
+                    
+            #         td_cnt = buy_cnt if buy_cnt > 0 else sell_cnt
+            #         if td_cnt > 0:
+            #             # 所有序列：在 K 线上方显示数字，使用明黄色
+            #             y_pos = day_df['high'].iloc[i] * 1.008
+            #             # 第 9 根用更亮的黄色和更大字体
+            #             color = '#FFFF00' if td_cnt == 9 else '#FFD700'  # 明黄色 / 金黄色
+            #             font_size = 14 if td_cnt == 9 else 11
+            #             font_weight = QtGui.QFont.Weight.Bold if td_cnt >= 7 else QtGui.QFont.Weight.Normal
+                        
+            #             text = pg.TextItem(str(td_cnt), color=color, anchor=(0.5, 1))
+            #             text.setFont(QtGui.QFont('Arial', font_size, font_weight))
+            #             text.setPos(x_axis[i], y_pos)
+            #             self.kline_plot.addItem(text)
+            #             self.td_text_items.append(text)
+            # except Exception as e:
+            #     logger.debug(f"TD Sequential display error: {e}")
+
         # ----------------- 绘制 Volume -----------------
         if 'amount' in day_df.columns:
             if not hasattr(self, 'volume_plot'):
@@ -3981,10 +4343,12 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 1. 历史模拟信号
         if self.show_strategy_simulation:
-            kline_signals.extend(self._run_strategy_simulation(code, day_df))
+            with timed_ctx("_run_strategy_simulation_signal", warn_ms=800):
+                kline_signals.extend(self._run_strategy_simulation(code, day_df))
 
         # 2. 实盘日志历史信号 (CSV)
-        hist_df = self.logger.get_signal_history_df()
+        with timed_ctx("get_signal_history_df", warn_ms=800):
+            hist_df = self.logger.get_signal_history_df()
         if not hist_df.empty:
             hist_df['code'] = hist_df['code'].astype(str)
             stock_signals = hist_df[hist_df['code'] == str(code)]
@@ -4196,20 +4560,29 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # --- [UPGRADE] Intraday Tick Signals (Shadow/Realtime) ---
             # 直接在分时图上标记影子信号
-            if is_realtime_active and self.show_strategy_simulation:
-                # 复用刚才计算好的实时影子决策
-                if 'shadow_decision' in locals() and shadow_decision and shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
-                    y_p = float(tick_df['price'].iloc[-1])
-                    idx = len(tick_df) - 1
 
-                    tick_point = SignalPoint(
-                        code=code, timestamp="TICK_LIVE", bar_index=idx, price=y_p,
-                        signal_type=SignalType.BUY if '买' in shadow_decision['action'] or 'ADD' in shadow_decision['action'] else SignalType.SELL,
-                        source=SignalSource.SHADOW_ENGINE,
-                        reason=shadow_decision['reason'],
-                        debug_info=shadow_decision.get('debug', {})
-                    )
-                    self.signal_overlay.update_signals([tick_point], target='tick')
+            # if is_realtime_active and self.show_strategy_simulation:
+            #     # 复用刚才计算好的实时影子决策
+            #     if 'shadow_decision' in locals() and shadow_decision and shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
+            #         y_p = float(tick_df['price'].iloc[-1])
+            #         idx = len(tick_df) - 1
+            #         tick_point = SignalPoint(
+            #             code=code, timestamp="TICK_LIVE", bar_index=idx, price=y_p,
+            #             signal_type=SignalType.BUY if '买' in shadow_decision['action'] or 'ADD' in shadow_decision['action'] else SignalType.SELL,
+            #             source=SignalSource.SHADOW_ENGINE,
+            #             reason=shadow_decision['reason'],
+            #             debug_info=shadow_decision.get('debug', {})
+            #         )
+            #         self.signal_overlay.update_signals([tick_point], target='tick')
+
+
+            if is_realtime_active and self.show_strategy_simulation:
+                if 'shadow_decision' in locals() and shadow_decision:
+                    with timed_ctx("_run_strategy_simulation_signal_show", warn_ms=100):
+                        # 只调用一次绘制函数
+                        self._update_tick_shadow_signal(code, tick_df, shadow_decision, x_axis=x_axis)
+
+
 
         # ----------------- 5. 数据同步与视角处理 -----------------
         # 同步归一化后的数据到 self.day_df
@@ -4603,7 +4976,7 @@ class MainWindow(QMainWindow, WindowMixin):
     #             traceback.print_exc()
 
     def _update_plot_title(self, code, day_df, tick_df):
-        """仅更新 K 线图基础信息（代码、名称、排名等），不再包含监理看板以防干扰视图"""
+        """仅更新 K 线图基础信息（代码、名称、排名、板块等）"""
         if not hasattr(self, 'kline_plot'):
             return
 
@@ -4622,10 +4995,44 @@ class MainWindow(QMainWindow, WindowMixin):
                 title_parts.append(fmt.format(v))
 
         main_title = " | ".join(title_parts)
+        
+        # --- 添加板块信息 (从 df_all 获取 category) ---
+        category_text = ""
+        if not self.df_all.empty:
+            crow = None
+            search_codes = [code]
+            if len(code) > 6:
+                search_codes.append(code[-6:])
+            
+            for sc in search_codes:
+                if sc in self.df_all.index:
+                    crow = self.df_all.loc[sc]
+                    break
+                elif 'code' in self.df_all.columns:
+                    mask = self.df_all['code'] == sc
+                    if mask.any():
+                        crow = self.df_all[mask].iloc[0]
+                        break
+            
+            if crow is not None:
+                raw_cat = crow.get('category', '')
+                if pd.notna(raw_cat) and str(raw_cat).lower() != 'nan':
+                    cats = [c.strip() for c in str(raw_cat).split(';') if c.strip() and c.strip() != '0']
+                    if cats:
+                        # 取前5个板块
+                        top5_cats = cats[:5]
+                        category_text = " | ".join(top5_cats)
+        
+        # 组合最终标题
+        if category_text:
+            full_title = f"{main_title}\n<span style='color: #FFCC00; font-size: 10pt;'>{category_text}</span>"
+        else:
+            full_title = main_title
+        
         # 只有标题内容变化时才调用 setTitle
-        if getattr(self, "_last_main_title", "") != main_title:
-            self.kline_plot.setTitle(main_title)
-            self._last_main_title = main_title
+        if getattr(self, "_last_main_title", "") != full_title:
+            self.kline_plot.setTitle(full_title)
+            self._last_main_title = full_title
 
     def _refresh_sensing_bar(self, code):
         """刷新分时图标题中的监理看板（避免刷新 K 线标题导致布局抖动）"""
@@ -4745,6 +5152,52 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.error(f"Realtime strategy evaluation failed: {e}")
             return None
 
+    def _run_strategy_simulation_new50(self, code, day_df, n_rows=0) -> list[SignalPoint]:
+        """
+        [极限性能版] 历史策略模拟（保持顺序，高速，最近 N 行）
+        """
+        try:
+            if day_df is None or len(day_df) < 10:
+                return []
+
+            # --- 只保留最近 n_rows 行 ---
+            if n_rows == 0:
+                _df = day_df.copy()
+            else:
+                _df = day_df.iloc[-n_rows:].copy()
+            cols = _df.columns.tolist()
+
+            target_cols = ['ma5d', 'ma10d', 'ma20d', 'ma60d', 
+                           'lastp1d', 'lastv1d', 'macddif', 'macddea', 'macd', 
+                           'rsi', 'upper']
+            target_cols = [c for c in target_cols if c in cols]
+
+            # --- 快速从 df_all 回填最新指标（只最后一行） ---
+            if not self.df_all.empty:
+                # 如果 df_all 已经以 code 为索引，直接 loc 获取
+                if code in self.df_all.index:
+                    stock_row = self.df_all.loc[code]
+                else:
+                    # 否则用 numpy 避免全 DataFrame 扫描
+                    mask = self.df_all['code'].to_numpy() == code
+                    idx = np.flatnonzero(mask)
+                    stock_row = self.df_all.iloc[idx[-1]] if len(idx) > 0 else None
+
+                if stock_row is not None:
+                    _df_values = _df.values
+                    col_idx_map = {c:i for i,c in enumerate(cols)}
+                    for col in target_cols:
+                        if col in stock_row and pd.notnull(stock_row[col]):
+                            _df_values[-1, col_idx_map[col]] = stock_row[col]
+                    _df.iloc[:,:] = _df_values
+
+            # --- 调用策略控制器 ---
+            signals = self.strategy_controller.evaluate_historical_signals(code, _df)
+            return signals
+
+        except Exception as e:
+            logger.error(f"Strategy simulation failed for {code}: {e}", exc_info=True)
+            return []
 
 
 
@@ -4941,7 +5394,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def load_history_filters(self):
         from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
-        import os, json
 
         self.filter_combo.blockSignals(True)
         self.filter_combo.clear()
@@ -5201,6 +5653,24 @@ class MainWindow(QMainWindow, WindowMixin):
                     # ❗ 调用正确的 slot
                     self.on_toggle_simulation(enabled)
 
+            # 3.4 TDX 联动开关
+            if 'tdx_enabled' in window_config:
+                enabled = bool(window_config.get('tdx_enabled', False))
+                self.tdx_enabled = enabled
+                if hasattr(self, 'tdx_cb'):
+                    self.tdx_cb.blockSignals(True)
+                    self.tdx_cb.setChecked(enabled)
+                    self.tdx_cb.blockSignals(False)
+
+            # 3.5 神奇九转开关
+            if 'show_td_sequential' in window_config:
+                enabled = bool(window_config.get('show_td_sequential', True))
+                self.show_td_sequential = enabled
+                if hasattr(self, 'td_action'):
+                    self.td_action.blockSignals(True)
+                    self.td_action.setChecked(enabled)
+                    self.td_action.blockSignals(False)
+
 
             logger.debug(f"[Config] Loaded: splitter={sizes}, filter={filter_config}, shortcuts={self.global_shortcuts_enabled}")
             
@@ -5279,6 +5749,15 @@ class MainWindow(QMainWindow, WindowMixin):
             # 3.3 模拟信号开关
             if hasattr(self, 'show_strategy_simulation'):
                 window_config['show_strategy_simulation'] = self.show_strategy_simulation
+            
+            # 3.4 TDX 联动开关
+            if hasattr(self, 'tdx_enabled'):
+                window_config['tdx_enabled'] = self.tdx_enabled
+            
+            # 3.5 神奇九转开关
+            if hasattr(self, 'show_td_sequential'):
+                window_config['show_td_sequential'] = self.show_td_sequential
+                
             # --- 构建最终配置 ---
             config = {
                 'splitter_sizes': fixed_sizes,

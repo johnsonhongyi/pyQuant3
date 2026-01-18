@@ -598,6 +598,57 @@ class StockLiveStrategy:
                 # 确保 code 字段存在 (从 key 补齐)
                 if 'code' not in stock:
                     stock['code'] = key.split('_')[0]
+                
+                # 确保 resample 字段存在
+                if 'resample' not in stock:
+                    stock['resample'] = 'd'
+                
+                # 修复 key 格式（如果旧数据是以 code 为 key 的）
+                new_key = f"{stock['code']}_{stock['resample']}"
+                if key != new_key:
+                    logger.info(f"🔧 Migrating monitor key: {key} -> {new_key}")
+                    # 我们延后处理，避免在迭代时修改字典
+                    
+            # 建立新的字典以完成迁移
+            migrated_monitors = {}
+            for key, stock in self._monitored_stocks.items():
+                code = stock.get('code', key.split('_')[0])
+                resample = stock.get('resample', 'd')
+                new_key = f"{code}_{resample}"
+                migrated_monitors[new_key] = stock
+            self._monitored_stocks = migrated_monitors
+
+            # --- [新增] 从数据库恢复持仓股监控，防止重启后丢失卖点 ---
+            if hasattr(self, 'trading_logger'):
+                try:
+                    trades = self.trading_logger.get_trades()
+                    open_trades = [t for t in trades if t['status'] == 'OPEN']
+                    recovered_count = 0
+                    for t in open_trades:
+                        code = str(t['code']).zfill(6)
+                        resample = t.get('resample', 'd')
+                        key = f"{code}_{resample}"
+                        
+                        if key not in self._monitored_stocks:
+                            self._monitored_stocks[key] = {
+                                'code': code,
+                                'name': t['name'],
+                                'rules': [{'type': 'price_up', 'value': float(t['buy_price'])}],
+                                'last_alert': 0,
+                                'resample': resample,
+                                'created_time': t['buy_date'][:19] if t.get('buy_date') else datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                'tags': "recovered_holding",
+                                'snapshot': {
+                                    'cost_price': float(t['buy_price']),
+                                    'buy_date': t.get('buy_date', '')
+                                }
+                            }
+                            recovered_count += 1
+                    if recovered_count > 0:
+                        logger.info(f"♻️ 监控恢复: 从数据库自动载入 {recovered_count} 只活跃持仓股")
+                        self._save_monitors() # 保存恢复后的状态
+                except Exception as db_e:
+                    logger.error(f"恢复持仓监控失败: {db_e}")
 
                 # ✅ 重建 rule_keys（不从文件读取）
                 rule_keys = set()
@@ -756,6 +807,21 @@ class StockLiveStrategy:
             # --- 保存到 JSON ---
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+
+            # --- [新增] 同步到数据库，支持跨终端状态一致性 ---
+            if hasattr(self, 'trading_logger'):
+                for key, stock in self._monitored_stocks.items():
+                    code_from_key = key.split('_')[0]
+                    resample_from_key = stock.get('resample', 'd')
+                    self.trading_logger.log_voice_alert_config(
+                        code=code_from_key,
+                        resample=resample_from_key,
+                        name=stock.get('name', ''),
+                        rules=json.dumps(stock.get('rules', [])),
+                        last_alert=stock.get('last_alert', 0),
+                        tags=stock.get('tags', ''),
+                        rule_type_tag=stock.get('rule_type_tag', '')
+                    )
 
         except Exception as e:
             logger.error(f"Failed to save voice monitors: {e}")
@@ -1134,9 +1200,9 @@ class StockLiveStrategy:
             if not cct.get_trade_date_status():
                 return
 
-            now = time.time()
-            # 从数据库同步实时持仓信息
-            open_trades = {t['code']: t for t in self.trading_logger.get_trades() if t['status'] == 'OPEN'}
+            # 从数据库同步实时持仓信息 (按 代码+周期 映射以支持多周期持仓隔离)
+            trades_info = self.trading_logger.get_trades()
+            open_trades = {(t['code'], t.get('resample', 'd')): t for t in trades_info if t['status'] == 'OPEN'}
 
             # --- [新增] 确保 DataFrame 包含监理与策略状态列 (供前端 Visualizer 使用) ---
             for col in ['market_win_rate', 'loss_streak', 'vwap_bias', 'last_action', 'last_reason', 'shadow_info']:
@@ -1195,8 +1261,9 @@ class StockLiveStrategy:
 
                 # ---------- 历史 snapshot 与 持仓同步 ----------
                 snap = data.get('snapshot', {})
-                if code in open_trades:
-                    trade = open_trades[code]
+                trade_key = (code, resample)
+                if trade_key in open_trades:
+                    trade = open_trades[trade_key]
                     snap['cost_price'] = trade.get('buy_price', 0)
                     snap['buy_date'] = trade.get('buy_date', '')
                     snap['buy_reason'] = trade.get('buy_reason', '')
@@ -1892,21 +1959,21 @@ class StockLiveStrategy:
         """获取所有监控数据"""
         return self._monitored_stocks
 
-    def remove_monitor(self, code):
-        """移除指定股票的所有监控"""
-        # 移除所有周期下的监控
-        keys_to_remove = [k for k in self._monitored_stocks if k.startswith(f"{code}_")]
-        if not keys_to_remove:
-            # 如果没有复合键，尝试移除原始键
-            if code in self._monitored_stocks:
-                keys_to_remove.append(code)
-
-        for key in keys_to_remove:
-            del self._monitored_stocks[key]
-            logger.info(f"Removed monitor for {key}")
+    def remove_monitor(self, code, resample=None):
+        """移除指定代码和周期的监控"""
+        if resample:
+            key = f"{code}_{resample}"
+            if key in self._monitored_stocks:
+                del self._monitored_stocks[key]
+                logger.info(f"Removed monitor {key}")
+        else:
+            # 移除所有周期下的监控
+            keys_to_remove = [k for k in self._monitored_stocks if k.startswith(f"{code}_") or k == code]
+            for key in keys_to_remove:
+                del self._monitored_stocks[key]
+                logger.info(f"Removed monitor for {key}")
         
-        if keys_to_remove:
-            self._save_monitors()
+        self._save_monitors()
 
 
     def close_position_if_any(self, code: str, price: float, name: Optional[str] = None) -> bool:

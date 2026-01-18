@@ -1752,6 +1752,98 @@ def evaluate_trading_signal(df, mode='A'):
     return df
 
 
+def td_sequential_fast(df: pd.DataFrame, lookback: int = 4) -> pd.DataFrame:
+    if df.empty or 'close' not in df.columns or len(df) < lookback + 1:
+        out = df.copy()
+        out[['td_buy_count','td_sell_count']] = 0
+        out[['td_buy_signal','td_sell_signal']] = False
+        return out
+
+    out = df.copy()
+    close = out['close']
+
+    # 1️⃣ 条件
+    cond_buy  = close < close.shift(lookback)
+    cond_sell = close > close.shift(lookback)
+
+    # 2️⃣ 连续段编号
+    grp_buy  = (cond_buy  != cond_buy.shift()).cumsum()
+    grp_sell = (cond_sell != cond_sell.shift()).cumsum()
+
+    # 3️⃣ 连续计数（True 段）
+    buy_count = cond_buy.groupby(grp_buy).cumcount() + 1
+    sell_count = cond_sell.groupby(grp_sell).cumcount() + 1
+
+    buy_count = buy_count.where(cond_buy, 0).clip(upper=9)
+    sell_count = sell_count.where(cond_sell, 0).clip(upper=9)
+
+    out['td_buy_count'] = buy_count.astype('int8')
+    out['td_sell_count'] = sell_count.astype('int8')
+
+    out['td_buy_signal'] = buy_count.eq(9)
+    out['td_sell_signal'] = sell_count.eq(9)
+
+    return out
+    
+def td_sequential(df: pd.DataFrame, lookback: int = 4) -> pd.DataFrame:
+    """
+    神奇九转 (TD Sequential / Tom DeMark Sequential)
+    
+    规则：
+    - 买入信号：连续 9 根 K 线的收盘价 < lookback 根前的收盘价
+    - 卖出信号：连续 9 根 K 线的收盘价 > lookback 根前的收盘价
+    
+    返回新增列：
+    - td_buy_count: 买入序列计数 (1-9)，0 表示序列中断
+    - td_sell_count: 卖出序列计数 (1-9)，0 表示序列中断
+    - td_buy_signal: 买入信号 (当 td_buy_count == 9 时为 True)
+    - td_sell_signal: 卖出信号 (当 td_sell_count == 9 时为 True)
+    
+    Args:
+        df: 包含 'close' 列的 DataFrame
+        lookback: 比较的回溯周期数，默认 4
+    
+    Returns:
+        添加了 TD Sequential 列的 DataFrame
+    """
+    if df.empty or 'close' not in df.columns or len(df) < lookback + 1:
+        df['td_buy_count'] = 0
+        df['td_sell_count'] = 0
+        df['td_buy_signal'] = False
+        df['td_sell_signal'] = False
+        return df
+    
+    close = df['close'].values
+    n = len(close)
+    
+    # 初始化计数数组
+    buy_count = np.zeros(n, dtype=np.int8)
+    sell_count = np.zeros(n, dtype=np.int8)
+    
+    # 从 lookback 开始计算
+    for i in range(lookback, n):
+        # 买入条件：当前收盘价 < lookback 根前的收盘价
+        if close[i] < close[i - lookback]:
+            buy_count[i] = min(buy_count[i - 1] + 1, 9) if buy_count[i - 1] < 9 else 1
+            sell_count[i] = 0  # 买入序列开启，卖出序列中断
+        # 卖出条件：当前收盘价 > lookback 根前的收盘价
+        elif close[i] > close[i - lookback]:
+            sell_count[i] = min(sell_count[i - 1] + 1, 9) if sell_count[i - 1] < 9 else 1
+            buy_count[i] = 0  # 卖出序列开启，买入序列中断
+        else:
+            # 平盘：两个序列都中断
+            buy_count[i] = 0
+            sell_count[i] = 0
+    
+    df = df.copy()
+    df['td_buy_count'] = buy_count
+    df['td_sell_count'] = sell_count
+    df['td_buy_signal'] = buy_count == 9
+    df['td_sell_signal'] = sell_count == 9
+    
+    return df
+
+
 
 def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_period: int = 9 ,detect_calc_support=False) -> pd.DataFrame:
     """
@@ -7000,12 +7092,10 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
     - 避免重复 datetime 解析和排序
     - 使用 loc 索引切片
     - 分列聚合 numeric 与 first/last separately
+    - 3d (3日线) 使用交易日分组而非日历日分组
     """
 
-    period_type = period_type_dic.get(period_day.lower(), period_day)
-
     # 1️⃣ 如果 index 已经是 DatetimeIndex 且已排序，可跳过
-
     if not isinstance(stock_data.index, pd.DatetimeIndex):
         stock_data.index = pd.to_datetime(stock_data.index)
         stock_data = stock_data.sort_index()
@@ -7017,7 +7107,63 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
     if 915 < now_time < 1500 and is_trade_day and is_work_day:
         stock_data = stock_data.loc[stock_data.index < pd.Timestamp(cct.get_today())]
 
-    # 3️⃣ 数值列单独 sum
+    # 3️⃣ 特殊处理 3d (3日线) - 按交易日分组
+    period_day_lower = period_day.lower()
+    if period_day_lower == '3d':
+        # 3日线：按交易日序号每3天分组（从最新交易日倒推）
+        # 这样可以与通达信/同花顺保持一致
+        n_rows = len(stock_data)
+        # 创建分组标签：每3个交易日为一组，从最后一天开始倒推
+        # 例如: [0,0,0,1,1,1,2,2,2,...] 从末尾开始
+        group_labels = np.arange(n_rows)[::-1] // 3  # 倒序分组
+        group_labels = group_labels[::-1]  # 恢复正序
+        stock_data = stock_data.copy()
+        stock_data['_group'] = group_labels
+        
+        # 分组聚合
+        numeric_cols = ['vol', 'amount']
+        if ncol:
+            numeric_cols += ncol
+        numeric_cols = [col for col in numeric_cols if col in stock_data.columns]
+        
+        ohlc_cols = ['open', 'high', 'low', 'close']
+        ohlc_cols = [col for col in ohlc_cols if col in stock_data.columns]
+        
+        # OHLC 聚合
+        ohlc_agg = stock_data.groupby('_group').agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last'
+        })
+        
+        # 数值列聚合
+        if numeric_cols:
+            numeric_agg = stock_data.groupby('_group')[numeric_cols].sum()
+            period_stock_data = pd.concat([ohlc_agg, numeric_agg], axis=1)
+        else:
+            period_stock_data = ohlc_agg
+        
+        # code 列
+        if 'code' in stock_data.columns:
+            code_agg = stock_data.groupby('_group')['code'].last()
+            period_stock_data['code'] = code_agg
+        
+        # 使用每组最后一天的日期作为索引
+        date_agg = stock_data.groupby('_group').apply(lambda x: x.index[-1])
+        period_stock_data.index = date_agg.values
+        
+        # 清理无效数据
+        if 'code' in period_stock_data.columns:
+            period_stock_data = period_stock_data.loc[period_stock_data['code'].notnull()]
+        period_stock_data = period_stock_data.dropna(how='all')
+        
+        return period_stock_data
+
+    # 4️⃣ 其他周期使用 pandas resample
+    period_type = period_type_dic.get(period_day_lower, period_day)
+
+    # 数值列单独 sum
     numeric_cols = ['vol', 'amount']
     if ncol:
         numeric_cols += ncol
@@ -7025,7 +7171,7 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
 
     numeric_agg = stock_data[numeric_cols].resample(period_type, label='right', closed='right').sum()
 
-    # 4️⃣ first/last/max/min 列 separately
+    # first/last/max/min 列 separately
     ohlc_cols = ['open', 'high', 'low', 'close']
     ohlc_cols = [col for col in ohlc_cols if col in stock_data.columns]
     ohlc_agg = stock_data[ohlc_cols].resample(period_type, label='right', closed='right').agg({
@@ -7035,18 +7181,18 @@ def get_tdx_stock_period_to_type(stock_data, period_day='w', periods=5, ncol=Non
         'close': 'last'
     })
 
-    # 5️⃣ code 列 last
+    # code 列 last
     code_agg = None
     if 'code' in stock_data.columns:
         code_agg = stock_data['code'].resample(period_type, label='right', closed='right').last()
 
-    # 6️⃣ 合并所有结果
+    # 合并所有结果
     dfs = [ohlc_agg, numeric_agg]
     if code_agg is not None:
         dfs.append(code_agg)
     period_stock_data = pd.concat(dfs, axis=1)
 
-    # 7️⃣ 清理无效数据
+    # 清理无效数据
     if 'code' in period_stock_data.columns:
         period_stock_data = period_stock_data.loc[period_stock_data['code'].notnull()]
     period_stock_data = period_stock_data.dropna(how='all')  # 仅删除全空行
