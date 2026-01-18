@@ -175,6 +175,41 @@ class KlineBackupViewer(QMainWindow):
         self.setup_ui()
         self.auto_load()
 
+    def _wait_voice_safe(self) -> bool:
+        """
+        🛡️ 等待语音播放完成，避免 Qt 操作与 pyttsx3 COM 冲突导致 GIL 崩溃
+        返回: True 如果成功等待，False 如果超时或无法检查
+        """
+        if not self.main_app:
+            return True
+        
+        try:
+            # 检查是否有 live_strategy 和语音引擎
+            if not hasattr(self.main_app, 'live_strategy') or not self.main_app.live_strategy:
+                return True
+            
+            voice = getattr(self.main_app.live_strategy, '_voice', None)
+            if not voice:
+                return True
+            
+            # 等待语音完成
+            if hasattr(voice, 'wait_for_safe'):
+                return voice.wait_for_safe(timeout=3.0)
+            elif hasattr(voice, 'is_speaking'):
+                import time
+                start = time.time()
+                while voice.is_speaking:
+                    if time.time() - start > 3.0:
+                        print("[WARN] _wait_voice_safe: timeout waiting for voice")
+                        return False
+                    time.sleep(0.1)
+                return True
+            
+            return True
+        except Exception as e:
+            print(f"[WARN] _wait_voice_safe error: {e}")
+            return True
+
     @property
     def active_df(self) -> pd.DataFrame:
         """根据当前模式返回活跃的数据集"""
@@ -730,18 +765,33 @@ class KlineBackupViewer(QMainWindow):
             print(f"DEBUG: on_filter Error: {e}")
 
     def on_summary_clicked(self, index: QModelIndex):
-        df = self.active_df
-        if df.empty:
-            return
+        """处理摘要表点击事件，显示股票详情"""
+        try:
+            # 🛡️ 等待语音完成，避免 GIL 冲突
+            self._wait_voice_safe()
             
-        model = index.model()
-        if isinstance(model, DataFrameModel):
+            # print(f"[DEBUG] on_summary_clicked: index.row()={index.row()}, index.column()={index.column()}")
+            
+            df = self.active_df
+            if df.empty:
+                # print("[DEBUG] on_summary_clicked: active_df is empty, returning")
+                return
+                
+            model = index.model()
+            if not isinstance(model, DataFrameModel):
+                # print(f"[DEBUG] on_summary_clicked: model is not DataFrameModel: {type(model)}")
+                return
+            
             # 假设代码在第一列
             code = str(model._data.iloc[index.row(), 0])
+            # print(f"[DEBUG] on_summary_clicked: code={code}")
+            
             if 'code' not in df.columns:
                 detail_df = df.loc[[code]].copy()
             else:
                 detail_df = df[df['code'] == code].copy()
+            
+            # print(f"[DEBUG] on_summary_clicked: detail_df.shape={detail_df.shape}")
 
             if 'time' in detail_df.columns:
                 detail_df = detail_df.sort_values('time', ascending=False)
@@ -758,29 +808,64 @@ class KlineBackupViewer(QMainWindow):
             self.detail_table.setModel(new_model)
             self.detail_table.resizeColumnsToContents()
             
-            # ⭐ 可视化器联动
-            if self.main_app is not None and code:
-                if hasattr(self.main_app, 'vis_var') and self.main_app.vis_var.get():
-                    if hasattr(self.main_app, 'open_visualizer'):
-                        self.main_app.open_visualizer(str(code))
+            # 🛡️ 强制处理 Qt 事件，避免与 Tkinter 事件循环冲突
+            QApplication.processEvents()
+            
+            # print(f"[DEBUG] on_summary_clicked: detail_table updated successfully")
+            
+            # ⚠️ 可视化器联动已禁用
+            # Qt 和 Tkinter 在同一进程中混合运行时，任何跨框架调用都可能导致 GIL 崩溃
+            # 这是 Python GIL 和两个 GUI 框架事件循环冲突导致的系统级问题
+            # 要启用此功能，需要将 Qt 窗口运行在独立子进程中，类似 trade_visualizer_qt6
+            #
+            # if self.main_app is not None and code:
+            #     try:
+            #         if hasattr(self.main_app, 'vis_var') and self.main_app.vis_var.get():
+            #             if hasattr(self.main_app, 'open_visualizer'):
+            #                 print(f"[DEBUG] on_summary_clicked: scheduling open_visualizer({code}) via Tkinter after()")
+            #                 self.main_app.after(0, lambda c=code: self.main_app.open_visualizer(str(c)))
+            #     except Exception as viz_e:
+            #         print(f"[ERROR] on_summary_clicked: open_visualizer failed: {viz_e}")
+            #         import traceback
+            #         traceback.print_exc()
+        
+        except Exception as e:
+            print(f"[ERROR] on_summary_clicked: {e}")
+            import traceback
+            traceback.print_exc()
 
 
     def on_double_click(self, index: QModelIndex):
-        if self.active_df.empty:
-            return
+        """处理双击事件"""
+        try:
+            print(f"[DEBUG] on_double_click: index.row()={index.row()}")
             
-        model = index.model()
-        if isinstance(model, DataFrameModel):
-            row_data = model._data.iloc[index.row()]
-            code = str(row_data.get('code', row_data.iloc[0]))
-            
-            if self.on_code_callback:
-                self.on_code_callback(code)
-            else:
-                # print(f"Double-clicked code: {code}")
-                # Use it as triggering a refresh of detail if clicked in summary
-                if model is self.summary_table.model():
-                    self.on_summary_clicked(index)
+            if self.active_df.empty:
+                print("[DEBUG] on_double_click: active_df is empty")
+                return
+                
+            model = index.model()
+            if isinstance(model, DataFrameModel):
+                row_data = model._data.iloc[index.row()]
+                code = str(row_data.get('code', row_data.iloc[0]))
+                print(f"[DEBUG] on_double_click: code={code}")
+                
+                if self.on_code_callback:
+                    print(f"[DEBUG] on_double_click: scheduling on_code_callback({code}) via Tkinter after()")
+                    # 🛡️ 使用 after() 将调用调度到 Tkinter 主线程
+                    if self.main_app and hasattr(self.main_app, 'after'):
+                        self.main_app.after(0, lambda c=code: self.on_code_callback(c))
+                    else:
+                        # 回退：直接调用（可能在独立模式下运行）
+                        self.on_code_callback(code)
+                else:
+                    # Use it as triggering a refresh of detail if clicked in summary
+                    if model is self.summary_table.model():
+                        self.on_summary_clicked(index)
+        except Exception as e:
+            print(f"[ERROR] on_double_click: {e}")
+            import traceback
+            traceback.print_exc()
 
     def on_add_row(self):
         """在当前选中的代码下新增一行"""

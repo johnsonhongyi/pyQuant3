@@ -673,8 +673,18 @@ class StrategyManager(tk.Toplevel, WindowMixin):
         except:
              pass
 
+        # 动态获取 realtime_service (异步加载后可能已更新)
+        if not self.realtime_service and hasattr(self.master, 'realtime_service'):
+            if self.master.realtime_service:
+                self.realtime_service = self.master.realtime_service
+                logger.info("StrategyManager: 从主窗口获取到 RealtimeDataService")
+        
         if not self.realtime_service:
-            self.lbl_rt_stats.config(text="连接中/服务离线")
+            # 检查主窗口是否正在异步加载
+            if hasattr(self.master, '_realtime_service_ready') and not self.master._realtime_service_ready:
+                self.lbl_rt_stats.config(text="⏳ RealtimeDataService 正在后台加载中...")
+            else:
+                self.lbl_rt_stats.config(text="❌ RealtimeDataService 未初始化 (请检查启动日志)")
             return
             
         # 刷新统计

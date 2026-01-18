@@ -29,6 +29,7 @@ class SignalPoint:
     price: float                 # 触发价格
     signal_type: SignalType
     source: SignalSource = SignalSource.STRATEGY_ENGINE
+    resample: str = 'd'  # 周期标识: 'd', '3d', 'w', 'm'
     reason: str = ""
     debug_info: dict[str, Any] = field(default_factory=dict)
     
@@ -56,12 +57,14 @@ class SignalPoint:
             "price": self.price,
             "action": self.signal_type.value,
             "reason": self.reason,
+            "resample": self.resample,
             "meta": {
                 "code": self.code,
                 "date": ts_str,
                 "price": self.price,
                 "action": self.signal_type.value,
                 "source": self.source.value,
+                "resample": self.resample,
                 "reason": self.reason,
                 "indicators": self.debug_info
             }
