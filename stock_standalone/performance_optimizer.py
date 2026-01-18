@@ -226,7 +226,7 @@ class TreeviewIncrementalUpdater:
                     }
                     
                     # 添加图标
-                    if name_idx >= 0:
+                    if name_idx >= 0 and feature_marker:
                         icon = feature_marker.get_icon_for_row(row_data)
                         if icon:
                             values[name_idx] = f"{icon} {values[name_idx]}"
