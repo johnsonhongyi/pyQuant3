@@ -1264,6 +1264,11 @@ class GlobalInputFilter(QtCore.QObject):
 
         # 键盘按键
         elif event.type() == QtCore.QEvent.Type.KeyPress:
+            # ⭐ 避开组合键(Alt/Ctrl)，交给 QShortcut 或系统处理，防止重复响应
+            modifiers = event.modifiers()
+            if modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier):
+                return False
+                
             key = event.key()
             # --- 通达信模式: 上下左右导航 ---
             if key == Qt.Key.Key_Up:
@@ -1856,6 +1861,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self.filter_tree.itemClicked.connect(self.on_filter_tree_item_clicked)
         # 添加键盘导航支持
         self.filter_tree.currentItemChanged.connect(self.on_filter_tree_current_changed)
+        
+        # ⭐ 确保点击 filter_tree 任意位置都能获得键盘焦点
+        self.filter_tree.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.filter_tree.viewport().installEventFilter(self)
 
         # 应用窄边滚动条样式，与左侧列表一致
         scrollbar_style = """
@@ -1961,7 +1970,7 @@ class MainWindow(QMainWindow, WindowMixin):
         content += "</table>"
         
         if not hasattr(self, 'help_dialog') or not self.help_dialog:
-            self.help_dialog = SimpleDialog("快捷键帮助", content, self)
+            self.help_dialog = ScrollableMsgBox("快捷键帮助", content, self)
         
         self.help_dialog.show()
         self.help_dialog.raise_()
@@ -1970,28 +1979,32 @@ class MainWindow(QMainWindow, WindowMixin):
     def _init_toolbar(self):
         self.toolbar = QToolBar("Settings", self)
         self.toolbar.setObjectName("ResampleToolbar")
-        action = QAction("模拟信号", self)
-        action.setCheckable(True)
-        action.setChecked(self.show_strategy_simulation)
-        action.triggered.connect(self.on_toggle_simulation)
-        action.setCheckable(True)
-        action.setChecked(self.show_strategy_simulation)
-        action.triggered.connect(self.on_toggle_simulation)
-        self.toolbar.addAction(action)
+        # action = QAction("模拟信号", self)
+        # action.setCheckable(True)
+        # action.setChecked(self.show_strategy_simulation)
+        # action.triggered.connect(self.on_toggle_simulation)
+        # self.toolbar.addAction(action)
+        # self.toolbar.addSeparator()
 
+        # 模拟信号 Action
+        self.sim_action = QAction("模拟信号", self)
+        self.sim_action.setCheckable(True)
+        self.sim_action.setChecked(self.show_strategy_simulation)
+        self.sim_action.triggered.connect(self.on_toggle_simulation)
+        self.toolbar.addAction(self.sim_action)
         self.toolbar.addSeparator()
-        
+
         # 系统级全局快捷键开关
         self.global_shortcuts_enabled = False  # 默认关闭（仅 App-wide）
         self.system_hotkeys_registered = False
         
         if KEYBOARD_AVAILABLE:
-            gs_action = QAction("GlobalKeys", self)
-            gs_action.setCheckable(True)
-            gs_action.setToolTip("开启后快捷键为系统级（即使应用失去焦点也有效）")
-            gs_action.setChecked(self.global_shortcuts_enabled)
-            gs_action.triggered.connect(self.on_toggle_global_keys)
-            self.toolbar.addAction(gs_action)
+            self.gs_action = QAction("GlobalKeys", self)
+            self.gs_action.setCheckable(True)
+            self.gs_action.setToolTip("开启后快捷键为系统级（即使应用失去焦点也有效）")
+            self.gs_action.setChecked(self.global_shortcuts_enabled)
+            self.gs_action.triggered.connect(self.on_toggle_global_keys)
+            self.toolbar.addAction(self.gs_action)
         else:
             # keyboard 库不可用，添加提示
             label = QLabel(" [系统快捷键不可用] ")
@@ -2026,7 +2039,16 @@ class MainWindow(QMainWindow, WindowMixin):
             self._register_system_hotkeys()
         else:
             self._unregister_system_hotkeys()
-        state = "全局模式 (App Wide)" if checked else "窗口模式 (Window Only)"
+            
+        # ⭐ 动态启用/禁用冲突的 QShortcut
+        # 当开启系统全局键时，禁用 App 内的 QShortcut，防止重复响应，且确保系统键优先
+        conflict_keys = ["Alt+T", "Ctrl+/"]
+        if hasattr(self, 'shortcuts'):
+            for key in conflict_keys:
+                if key in self.shortcuts:
+                    self.shortcuts[key].setEnabled(not checked)
+
+        state = "全局模式 (System Wide)" if checked else "窗口模式 (App Wide)"
         logger.info(f"Shortcut mode changed to: {state}")
         
     def _register_system_hotkeys(self):
@@ -2037,9 +2059,11 @@ class MainWindow(QMainWindow, WindowMixin):
         try:
             # 定义回调函数 (必须在主线程执行)
             def _on_hotkey_show_signal_box():
+                # ⭐ 已在 on_toggle_global_keys 中禁用了 QShortcut，这里直接触发即可
                 QTimer.singleShot(0, self._show_signal_box)
             
             def _on_hotkey_show_help():
+                # ⭐ 已在 on_toggle_global_keys 中禁用了 QShortcut，这里直接触发即可
                 QTimer.singleShot(0, self.show_shortcut_help)
             
             # 注册系统全局快捷键
@@ -2972,6 +2996,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 检查是否是当前请求的代码,如果不是则忽略(防止旧数据覆盖新数据)
         if code != self.current_code:
+            logger.debug(f"[Rapid Browse] Discarding outdated result for {code}, current is {self.current_code}")
             return
 
         # ⚡ 过滤掉今天的数据，只保留过去的日 K
@@ -3757,16 +3782,19 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.kline_plot.setTitle(f"Loading {code}...")
 
+        # ⭐ 快速浏览优化：直接丢弃旧的 DataLoaderThread，不等待完成
+
         # ⭐ 清理旧的 DataLoaderThread，防止 QThread: Destroyed while thread is still running
+        # 快速浏览时不等待，直接丢弃旧线程
         if hasattr(self, 'loader') and self.loader is not None:
             if self.loader.isRunning():
-                logger.debug("[DataLoaderThread] Waiting for previous loader to finish...")
-                self.loader.data_loaded.disconnect()  # 断开信号，防止旧数据干扰
-                self.loader.wait(500)  # 等待最多 500ms
-                if self.loader.isRunning():
-                    logger.warning("[DataLoaderThread] Previous loader still running, forcing termination")
-                    self.loader.terminate()
-                    self.loader.wait(100)
+                logger.debug("[DataLoaderThread] Discarding previous loader (rapid browsing)")
+                try:
+                    self.loader.data_loaded.disconnect()  # 断开信号，防止旧数据干扰
+                except TypeError:
+                    pass  # 信号可能已断开
+                # 不等待旧线程，让它在后台完成或被 GC
+                self.loader = None
 
         # ② 加载历史
         with timed_ctx("DataLoaderThread", warn_ms=800):
@@ -4778,43 +4806,6 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to launch manager: {e}")
 
-    # def load_history_filters(self):
-    #     from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
-    #     import os
-    #
-    #     self.filter_combo.blockSignals(True)
-    #     self.filter_combo.clear()
-    #
-    #     history_path = SEARCH_HISTORY_FILE
-    #
-    #     if not os.path.exists(history_path):
-    #          self.filter_combo.addItem("History file not found")
-    #          self.filter_combo.blockSignals(False)
-    #          return
-    #
-    #     try:
-    #         with open(history_path, "r", encoding="utf-8") as f:
-    #             data = json.load(f)
-    #
-    #         # 使用 history4
-    #         self.history_items = data.get("history4", [])
-    #         for item in self.history_items:
-    #             q = item.get("query", "")
-    #             note = item.get("note", "")
-    #             label = f"{note} ({q})" if note else q
-    #             self.filter_combo.addItem(label, userData=q) # Store query in UserData
-    #
-    #         if not self.history_items:
-    #              self.filter_combo.addItem("(No history)")
-    #
-    #     except Exception as e:
-    #         self.filter_combo.addItem(f"Error: {e}")
-    #
-    #     self.filter_combo.blockSignals(False)
-    #     # Load first item if available
-    #     if self.filter_combo.count() > 0:
-    #          self.on_filter_combo_changed(0)
-
     def populate_tree_from_df(self, df: pd.DataFrame):
         """
         将 DataFrame 高速填充到 QTreeWidget
@@ -4976,8 +4967,10 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.filter_combo.blockSignals(False)
 
-        # Load first item if available
-        if self.filter_combo.count() > 0:
+        # ⭐ 应用配置中保存的查询规则索引，或默认加载第一项
+        if hasattr(self, '_pending_filter_query_index'):
+            self._apply_pending_filter_index()
+        elif self.filter_combo.count() > 0:
             self.on_filter_combo_changed(0)
 
     def on_filter_combo_changed(self, index):
@@ -5069,10 +5062,11 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
     def on_filter_tree_item_clicked(self, item, column):
+        # ⭐ 无论如何先确保 filter_tree 获得键盘焦点
+        self.filter_tree.setFocus()
+        
         code = item.data(0, Qt.ItemDataRole.UserRole)
         if code:
-            # ⭐ 确保 filter_tree 获得键盘焦点，使上下键在此视图生效
-            self.filter_tree.setFocus()
             # 1. 触发图表加载
             self.load_stock_by_code(code)
             # 2. 联动左侧列表选中
@@ -5087,6 +5081,15 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.load_stock_by_code(code)
                 # 联动左侧列表选中
                 self._select_stock_in_main_table(code)
+
+    def eventFilter(self, watched, event):
+        """处理 filter_tree viewport 点击事件，确保获取焦点"""
+        from PyQt6.QtCore import QEvent
+        if watched == self.filter_tree.viewport():
+            if event.type() == QEvent.Type.MouseButtonPress:
+                # ⭐ 点击 filter_tree 区域时强制获取焦点
+                self.filter_tree.setFocus()
+        return super().eventFilter(watched, event)
 
     def _select_stock_in_main_table(self, target_code):
         """在左侧 stock_table 中查找并滚动到指定 code"""
@@ -5107,66 +5110,183 @@ class MainWindow(QMainWindow, WindowMixin):
                     break
 
     def load_splitter_state(self):
-        """加载保存的分割器状态"""
+        """加载保存的分割器状态 (兼容旧版调用)"""
+        self._load_visualizer_config()
+
+    def _load_visualizer_config(self):
+        """
+        统一加载可视化器配置 (支持未来扩展)
+        配置文件: visualizer_layout.json
+        """
         try:
             config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
+            config = {}
+            
             if os.path.exists(config_file):
                 with open(config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
-                    sizes = config.get('splitter_sizes', [])
-                    if sizes and len(sizes) == 3:
-                        self.main_splitter.setSizes(sizes)
-                        return
-        except Exception as e:
-            print(f"Failed to load splitter state: {e}")
+            
+            # --- 1. 分割器尺寸 ---
+            sizes = config.get('splitter_sizes', [])
+            if sizes and len(sizes) == 3:
+                self.main_splitter.setSizes(sizes)
+            else:
+                # 默认分割比例：股票列表:过滤面板:图表区域 = 1:1:4
+                self.main_splitter.setSizes([200, 200, 800])
+            
+            # --- 2. Filter 配置 ---
+            filter_config = config.get('filter', {})
+            
+            # 2.1 历史文件选择 (history1-4)
+            history_index = filter_config.get('history_index', 3)  # 默认 history4
+            if hasattr(self, 'history_selector'):
+                if 0 <= history_index < self.history_selector.count():
+                    self.history_selector.blockSignals(True)
+                    self.history_selector.setCurrentIndex(history_index)
+                    self.history_selector.blockSignals(False)
+            
+            # 2.2 上次使用的查询规则索引 (延迟应用，等 filter_combo 加载完成后)
+            self._pending_filter_query_index = filter_config.get('last_query_index', 0)
+            
+            # --- 3. 窗口配置 ---
+            window_config = config.get('window', {})
+            
+            # 3.1 主题 (如果有)
+            saved_theme = window_config.get('theme')
+            if saved_theme and hasattr(self, 'qt_theme'):
+                # 仅记录，不强制覆盖（让用户可以手动切换）
+                pass
+            
+            # # 3.2 全局快捷键开关
+            # if 'global_shortcuts_enabled' in window_config:
+            #     enabled = window_config.get('global_shortcuts_enabled', False)
+            #     self.global_shortcuts_enabled = enabled
+            #     if hasattr(self, 'gs_action'):
+            #         self.gs_action.setChecked(enabled)
+            #         if enabled:
+            #             self.on_toggle_global_keys(enabled)
 
-        # 默认分割比例：股票列表:过滤面板:图表区域 = 1:1:4
-        self.main_splitter.setSizes([200, 200, 800])
+            # 3.2 全局快捷键开关
+            if 'global_shortcuts_enabled' in window_config:
+                enabled = bool(window_config.get('global_shortcuts_enabled', False))
+                self.global_shortcuts_enabled = enabled
+
+                if hasattr(self, 'gs_action'):
+                    self.gs_action.blockSignals(True)
+                    self.gs_action.setChecked(enabled)
+                    self.gs_action.blockSignals(False)
+
+                    # 主动执行一次逻辑（仅初始化）
+                    self.on_toggle_global_keys(enabled)
+
+
+            # 3.3 模拟信号开关（修复重点）
+            if 'show_strategy_simulation' in window_config:
+                enabled = bool(window_config.get('show_strategy_simulation', False))
+                self.show_strategy_simulation = enabled
+
+                if hasattr(self, 'sim_action'):
+                    self.sim_action.blockSignals(True)
+                    self.sim_action.setChecked(enabled)
+                    self.sim_action.blockSignals(False)
+
+                    # ❗ 调用正确的 slot
+                    self.on_toggle_simulation(enabled)
+
+
+            logger.debug(f"[Config] Loaded: splitter={sizes}, filter={filter_config}, shortcuts={self.global_shortcuts_enabled}")
+            
+        except Exception as e:
+            logger.warning(f"Failed to load visualizer config: {e}")
+            # 使用默认值
+            self.main_splitter.setSizes([200, 200, 800])
+
+    def _apply_pending_filter_index(self):
+        """应用待定的过滤规则索引 (在 filter_combo 加载完成后调用)"""
+        if hasattr(self, '_pending_filter_query_index'):
+            idx = self._pending_filter_query_index
+            if hasattr(self, 'filter_combo') and 0 <= idx < self.filter_combo.count():
+                self.filter_combo.setCurrentIndex(idx)
+            delattr(self, '_pending_filter_query_index')
 
 
     def save_splitter_state(self):
-        """保存分割器状态（过滤隐藏面板的 0 值）"""
+        """保存分割器状态 (兼容旧版调用)"""
+        self._save_visualizer_config()
+
+    def _save_visualizer_config(self):
+        """
+        统一保存可视化器配置 (支持未来扩展)
+        配置文件: visualizer_layout.json
+        """
         try:
             config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
 
-            sizes = self.main_splitter.sizes()
-            fixed_sizes = list(sizes)
-
-            # 假设 filter 是第 3 个（index=2）
-            FILTER_INDEX = 2
-            FILTER_DEFAULT = 100
-            FILTER_MIN = 60
-
-            # 尝试读取历史保存值
-            old_size = None
+            # --- 读取现有配置 (保留未知字段以支持向前兼容) ---
+            old_config = {}
             if os.path.exists(config_file):
                 try:
                     with open(config_file, 'r', encoding='utf-8') as f:
                         old_config = json.load(f)
-                        old_sizes = old_config.get('splitter_sizes', [])
-                        if len(old_sizes) > FILTER_INDEX:
-                            old_size = old_sizes[FILTER_INDEX]
                 except Exception:
-                    old_size = None
+                    old_config = {}
 
-            # 如果当前 size 为 0，则使用历史值或默认值
+            # --- 1. 分割器尺寸 ---
+            sizes = self.main_splitter.sizes()
+            fixed_sizes = list(sizes)
+
+            # 过滤隐藏面板的 0 值
+            FILTER_INDEX = 2
+            FILTER_DEFAULT = 100
+            FILTER_MIN = 60
+
+            old_sizes = old_config.get('splitter_sizes', [])
             if fixed_sizes[FILTER_INDEX] <= 0:
-                if old_size and old_size > 0:
-                    fixed_sizes[FILTER_INDEX] = old_size
+                if len(old_sizes) > FILTER_INDEX and old_sizes[FILTER_INDEX] > 0:
+                    fixed_sizes[FILTER_INDEX] = old_sizes[FILTER_INDEX]
                 else:
                     fixed_sizes[FILTER_INDEX] = max(FILTER_DEFAULT, FILTER_MIN)
 
-            config = {'splitter_sizes': fixed_sizes}
+            # --- 2. Filter 配置 ---
+            filter_config = old_config.get('filter', {})
+            
+            # 2.1 历史文件选择
+            if hasattr(self, 'history_selector'):
+                filter_config['history_index'] = self.history_selector.currentIndex()
+            
+            # 2.2 上次使用的查询规则索引
+            if hasattr(self, 'filter_combo'):
+                filter_config['last_query_index'] = self.filter_combo.currentIndex()
 
+            # --- 3. 窗口配置 ---
+            window_config = old_config.get('window', {})
+            
+            # 3.1 主题
+            if hasattr(self, 'qt_theme'):
+                window_config['theme'] = self.qt_theme
+
+            # 3.2 全局快捷键开关
+            if hasattr(self, 'global_shortcuts_enabled'):
+                window_config['global_shortcuts_enabled'] = self.global_shortcuts_enabled
+            # 3.3 模拟信号开关
+            if hasattr(self, 'show_strategy_simulation'):
+                window_config['show_strategy_simulation'] = self.show_strategy_simulation
+            # --- 构建最终配置 ---
+            config = {
+                'splitter_sizes': fixed_sizes,
+                'filter': filter_config,
+                'window': window_config,
+                # 未来扩展：直接添加新的顶级键即可
+            }
+
+            # --- 保存 ---
             with open(config_file, 'w', encoding='utf-8') as f:
-                json.dump(config, f, indent=2)
+                json.dump(config, f, indent=2, ensure_ascii=False)
 
-            logger.debug(
-                f'save_splitter sizes: raw={sizes}, fixed={fixed_sizes}, file={config_file}'
-            )
+            logger.debug(f'[Config] Saved: {config}')
 
         except Exception as e:
-            logger.exception("Failed to save splitter state")
+            logger.exception("Failed to save visualizer config")
 
 
     def closeEvent(self, event):

@@ -757,6 +757,13 @@ class KlineBackupViewer(QMainWindow):
             new_model = DataFrameModel(detail_df)
             self.detail_table.setModel(new_model)
             self.detail_table.resizeColumnsToContents()
+            
+            # ⭐ 可视化器联动
+            if self.main_app is not None and code:
+                if hasattr(self.main_app, 'vis_var') and self.main_app.vis_var.get():
+                    if hasattr(self.main_app, 'open_visualizer'):
+                        self.main_app.open_visualizer(str(code))
+
 
     def on_double_click(self, index: QModelIndex):
         if self.active_df.empty:

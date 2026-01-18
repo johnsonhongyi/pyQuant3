@@ -294,6 +294,11 @@ class KLineMonitor(tk.Toplevel):
                 stock_code = str(stock_code).zfill(6)
                 if send_tdx_Key and stock_code:
                     self.master.sender.send(stock_code)
+                    
+                # ⭐ 可视化器联动
+                if hasattr(self.master, 'vis_var') and self.master.vis_var.get():
+                    if hasattr(self.master, 'open_visualizer'):
+                         self.master.open_visualizer(str(stock_code))
         except Exception as e:
             logger.info(f"[Monitor] 点击处理错误: {e}")
 

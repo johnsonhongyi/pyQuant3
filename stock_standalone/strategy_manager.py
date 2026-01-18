@@ -566,6 +566,11 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             code = values[0]
             if hasattr(self.master, 'sender') and self.master.sender:
                 self.master.sender.send(str(code))
+            # ⭐ 可视化器联动
+            if hasattr(self.master, 'vis_var') and self.master.vis_var.get() and code:
+                if hasattr(self.master, 'open_visualizer'):
+                    self.master.open_visualizer(str(code))
+
 
     def on_data_tree_click(self, event):
         """左键联动通达信"""
@@ -1088,6 +1093,11 @@ class StrategyManager(tk.Toplevel, WindowMixin):
             code = values[1]
             if hasattr(self.master, 'sender') and self.master.sender:
                 self.master.sender.send(str(code))
+            # ⭐ 可视化器联动
+            if hasattr(self.master, 'vis_var') and self.master.vis_var.get() and code:
+                if hasattr(self.master, 'open_visualizer'):
+                    self.master.open_visualizer(str(code))
+
 
     def _refresh_signal_logs(self):
         """自动刷新信号日志"""
