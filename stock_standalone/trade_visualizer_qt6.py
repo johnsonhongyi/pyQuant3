@@ -1548,6 +1548,13 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 策略模拟开关
         self.show_strategy_simulation = True
+        
+        # ⭐ 性能优化缓存
+        self._hist_df_cache = pd.DataFrame()
+        self._hist_df_last_load = 0  # 上次加载时间
+        self._cache_code_info = {}   # 标题信息缓存
+        self._last_rendered_code = ""
+        self._last_rendered_resample = ""
 
         # --- 1. 创建工具栏 ---
         self._init_toolbar()
@@ -4341,38 +4348,54 @@ class MainWindow(QMainWindow, WindowMixin):
         self.signal_overlay.clear()
         kline_signals = []
 
-        # 1. 历史模拟信号
+        # 1. 历史模拟信号 (优化版：只处理最近 50 行)
         if self.show_strategy_simulation:
-            with timed_ctx("_run_strategy_simulation_signal", warn_ms=800):
-                kline_signals.extend(self._run_strategy_simulation(code, day_df))
+            with timed_ctx("_run_strategy_simulation_signal", warn_ms=50):
+                kline_signals.extend(self._run_strategy_simulation_new50(code, day_df, n_rows=50))
 
-        # 2. 实盘日志历史信号 (CSV)
-        with timed_ctx("get_signal_history_df", warn_ms=800):
-            hist_df = self.logger.get_signal_history_df()
+        # 2. 实盘日志历史信号 (CSV) - 引入缓存优化
+        import time
+        now_ts = time.time()
+        # 每 30 秒重新加载一次历史信号 CSV
+        if now_ts - getattr(self, '_hist_df_last_load', 0) > 30:
+            with timed_ctx("get_signal_history_df", warn_ms=50):
+                self._hist_df_cache = self.logger.get_signal_history_df()
+                if not self._hist_df_cache.empty:
+                    self._hist_df_cache['code'] = self._hist_df_cache['code'].astype(str)
+                self._hist_df_last_load = now_ts
+        
+        hist_df = self._hist_df_cache
         if not hist_df.empty:
-            hist_df['code'] = hist_df['code'].astype(str)
             stock_signals = hist_df[hist_df['code'] == str(code)]
-            date_map = {d if isinstance(d, str) else d.strftime('%Y-%m-%d'): i for i, d in enumerate(dates)}
-            for _, row in stock_signals.iterrows():
-                sig_date = str(row['date']).split()[0]
+            
+            # 性能优化：缓存 date_map
+            cache_dates_key = (code, len(dates), dates[-1] if len(dates)>0 else "")
+            if getattr(self, "_last_dates_cache_key", None) != cache_dates_key:
+                self._cached_date_map = {d if isinstance(d, str) else d.strftime('%Y-%m-%d'): i for i, d in enumerate(dates)}
+                self._last_dates_cache_key = cache_dates_key
+            
+            date_map = self._cached_date_map
+            
+            # 使用 itertuples 替代 iterrows，速度提升约 10 倍
+            for row in stock_signals.itertuples(index=False):
+                # row 属性对应 DataFrame 列名，如果没有列名则按位置
+                # 假设列顺序已知或通过 getattr 安全获取
+                sig_date = str(row.date).split()[0]
                 if sig_date in date_map:
                     idx = date_map[sig_date]
-                    y_p = row['price'] if pd.notnull(row['price']) else day_df.iloc[idx]['close']
-                    action = str(row['action'])
-                    reason = str(row['reason'])
-
-                    # 识别信号类型 (BUY/SELL/VETO)
+                    y_p = row.price if pd.notnull(row.price) else day_df.iloc[idx]['close']
+                    action = str(row.action)
+                    reason = str(row.reason)
+                    
                     is_buy = 'Buy' in action or '买' in action or 'ADD' in action
                     stype = SignalType.BUY if is_buy else SignalType.SELL
                     if "VETO" in action: stype = SignalType.VETO
-
-                    # 识别信号来源 (STRATEGY/SHADOW)
                     source = SignalSource.SHADOW_ENGINE if "SHADOW" in action else SignalSource.STRATEGY_ENGINE
 
                     kline_signals.append(SignalPoint(
                         code=code, timestamp=sig_date, bar_index=idx, price=y_p,
                         signal_type=stype, source=source, reason=reason,
-                        debug_info=row.get('indicators', {})
+                        debug_info=getattr(row, 'indicators', {})
                     ))
 
         # 3. 实时影子信号 (K线占位图标)
@@ -4976,63 +4999,67 @@ class MainWindow(QMainWindow, WindowMixin):
     #             traceback.print_exc()
 
     def _update_plot_title(self, code, day_df, tick_df):
-        """仅更新 K 线图基础信息（代码、名称、排名、板块等）"""
+        """仅更新 K 线图基础信息（代码、名称、排名、板块等） - 极限性能版"""
         if not hasattr(self, 'kline_plot'):
             return
 
-        # 尝试从 code_info_map 获取基础信息 (增加模糊匹配)
+        # 1. 快速检查代码基本信息 (从缓存获取)
         info = self.code_info_map.get(code)
         if info is None and len(code) > 6:
             info = self.code_info_map.get(code[-6:])
         if info is None:
             info = {}
 
-        title_parts = [code]
-        for k, fmt in [('name', '{}'), ('Rank', 'Rank: {}'), ('percent', '{:+.2f}%'),
-                       ('win', 'win: {}'), ('slope', 'slope: {:.1f}%'), ('volume', 'vol: {:.1f}')]:
-            v = info.get(k)
-            if v is not None:
-                title_parts.append(fmt.format(v))
+        # 2. 构建主标题 (只有在 info/code 改变或强制更新时才重新构建)
+        # 使用 tuple 作为缓存键提高效率
+        cache_key = (code, info.get('name'), info.get('Rank'), info.get('percent'))
+        main_title = getattr(self, "_cached_main_title_str", "")
+        
+        if getattr(self, "_last_title_cache_key", None) != cache_key:
+            title_parts = [code]
+            for k, fmt in [('name', '{}'), ('Rank', 'Rank: {}'), ('percent', '{:+.2f}%'),
+                           ('win', 'win: {}'), ('slope', 'slope: {:.1f}%'), ('volume', 'vol: {:.1f}')]:
+                v = info.get(k)
+                if v is not None:
+                    title_parts.append(fmt.format(v))
 
-        main_title = " | ".join(title_parts)
-        
-        # --- 添加板块信息 (从 df_all 获取 category) ---
-        category_text = ""
-        if not self.df_all.empty:
-            crow = None
-            search_codes = [code]
-            if len(code) > 6:
-                search_codes.append(code[-6:])
+            main_title = " | ".join(title_parts)
+            self._cached_main_title_str = main_title
+            self._last_title_cache_key = cache_key
+
+        # 3. 获取板块信息 (category)
+        category_text = getattr(self, "_cached_category_text", "")
+        if self._last_rendered_code != code:
+            category_text = ""
+            if not self.df_all.empty:
+                # 提前进行 numpy 掩码查找比 iterrows 快
+                if code in self.df_all.index:
+                    crow = self.df_all.loc[code]
+                else:
+                    sc = code[-6:] if len(code) > 6 else code
+                    if sc in self.df_all.index:
+                        crow = self.df_all.loc[sc]
+                    else:
+                        mask = self.df_all['code'].to_numpy() == sc
+                        idx = np.flatnonzero(mask)
+                        crow = self.df_all.iloc[idx[-1]] if len(idx) > 0 else None
+                
+                if crow is not None:
+                    raw_cat = crow.get('category', '')
+                    if pd.notna(raw_cat) and str(raw_cat).lower() != 'nan':
+                        cats = [c.strip() for c in str(raw_cat).split(';') if c.strip() and c.strip() != '0']
+                        if cats:
+                            category_text = " | ".join(cats[:5])
             
-            for sc in search_codes:
-                if sc in self.df_all.index:
-                    crow = self.df_all.loc[sc]
-                    break
-                elif 'code' in self.df_all.columns:
-                    mask = self.df_all['code'] == sc
-                    if mask.any():
-                        crow = self.df_all[mask].iloc[0]
-                        break
-            
-            if crow is not None:
-                raw_cat = crow.get('category', '')
-                if pd.notna(raw_cat) and str(raw_cat).lower() != 'nan':
-                    cats = [c.strip() for c in str(raw_cat).split(';') if c.strip() and c.strip() != '0']
-                    if cats:
-                        # 取前5个板块
-                        top5_cats = cats[:5]
-                        category_text = " | ".join(top5_cats)
+            self._cached_category_text = category_text
+            self._last_rendered_code = code
+
+        # 4. 组合最终标题并设置
+        full_title = f"{main_title}\n<span style='color: #FFCC00; font-size: 10pt;'>{category_text}</span>" if category_text else main_title
         
-        # 组合最终标题
-        if category_text:
-            full_title = f"{main_title}\n<span style='color: #FFCC00; font-size: 10pt;'>{category_text}</span>"
-        else:
-            full_title = main_title
-        
-        # 只有标题内容变化时才调用 setTitle
-        if getattr(self, "_last_main_title", "") != full_title:
+        if getattr(self, "_last_full_title", "") != full_title:
             self.kline_plot.setTitle(full_title)
-            self._last_main_title = full_title
+            self._last_full_title = full_title
 
     def _refresh_sensing_bar(self, code):
         """刷新分时图标题中的监理看板（避免刷新 K 线标题导致布局抖动）"""
@@ -5152,7 +5179,7 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.error(f"Realtime strategy evaluation failed: {e}")
             return None
 
-    def _run_strategy_simulation_new50(self, code, day_df, n_rows=0) -> list[SignalPoint]:
+    def _run_strategy_simulation_new50(self, code, day_df, n_rows=50) -> list[SignalPoint]:
         """
         [极限性能版] 历史策略模拟（保持顺序，高速，最近 N 行）
         """
@@ -5193,6 +5220,13 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # --- 调用策略控制器 ---
             signals = self.strategy_controller.evaluate_historical_signals(code, _df)
+            
+            # --- 修正 bar_index 偏移：信号索引需对应原始 day_df ---
+            if n_rows > 0 and len(day_df) > n_rows:
+                offset = len(day_df) - n_rows
+                for sig in signals:
+                    sig.bar_index += offset
+            
             return signals
 
         except Exception as e:

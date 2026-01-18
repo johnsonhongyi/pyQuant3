@@ -173,7 +173,7 @@ class StrategyController:
 
             # 2. 模拟盘中决策逻辑 (逐行扫描最近 N 天)
             # 用户要求：标记是最近周期的数据才有意义。缩小扫描窗以减少历史冗余信号。
-            eval_window = 20 # 缩减至最近20个交易日
+            eval_window = 10 # 极限优化：缩减至最近10个交易日
             eval_df = day_df.tail(eval_window)
             
             # 初始化一个模拟 snapshot
