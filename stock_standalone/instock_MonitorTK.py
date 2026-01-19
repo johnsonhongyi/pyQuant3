@@ -374,19 +374,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.global_dict = self.manager.dict()
             self.global_dict["resample"] = resampleInit
             
-            # 🚀 异步加载 DataPublisher - 加快启动速度
-            # 注: 策略白盒等组件将在加载完成后通过回调获取数据
-            self.realtime_service = None
-            self._realtime_service_ready = False
-            self._realtime_ready_callbacks: list[Callable[[], None]] = []  # 回调队列
-            self.after(100, self._init_realtime_service_async)
-            logger.info(f"⏳ RealtimeDataService 将异步加载 (Main PID: {os.getpid()})")
+            # 🔥 同步初始化 DataPublisher (启动时直接加载)
+            self.realtime_service = DataPublisher(high_performance=False)
+            self._realtime_service_ready = True
+            logger.info(f"✅ RealtimeDataService (Local) 已就绪 (Main PID: {os.getpid()})")
 
         except Exception as e:
             logger.error(f"❌ SyncManager 初始化失败: {e}\n{traceback.format_exc()}")
             self.realtime_service = None
             self._realtime_service_ready = False
-            self._realtime_ready_callbacks = []
             self.manager = mp.Manager()
             self.global_dict = self.manager.dict()
             self.global_dict["resample"] = resampleInit
@@ -629,12 +625,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def _start_feedback_listener(self):
         """监听来自可视化器的反馈指令 (例如请求全量同步)"""
-        import win32pipe, win32file, pywintypes
+        import win32pipe, win32file, pywintypes, winerror
+        import json
         from data_utils import PIPE_NAME
 
         def listener():
             logger.info(f"[Pipe] Starting feedback listener on {PIPE_NAME}")
             while True:
+                pipe = None
                 try:
                     # 创建命名管道服务端
                     pipe = win32pipe.CreateNamedPipe(
@@ -652,24 +650,35 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         try:
                             cmd_obj = json.loads(msg)
                             if cmd_obj.get("cmd") == "REQ_FULL_SYNC":
-                                logger.info("[Pipe] Received REQ_FULL_SYNC, forcing full update")
+                                logger.info("[Pipe] Received REQ_FULL_SYNC, triggering immediate full update")
                                 if hasattr(self, 'df_ui_prev'):
                                     del self.df_ui_prev
                                 self._df_first_send_done = False
                                 self.sync_version = 0
+                                # ⭐ [FIX] 直接触发同步，不再等待 300s 循环
+                                threading.Thread(target=self.send_df, kwargs={'initial': True}, daemon=True).start()
                         except Exception as e:
                             if "REQ_FULL_SYNC" in msg:
-                                logger.info("[Pipe] Received REQ_FULL_SYNC (raw), forcing full update")
+                                logger.info("[Pipe] Received REQ_FULL_SYNC (raw), triggering immediate full update")
                                 if hasattr(self, 'df_ui_prev'):
                                     del self.df_ui_prev
                                 self._df_first_send_done = False
                                 self.sync_version = 0
+                                threading.Thread(target=self.send_df, kwargs={'initial': True}, daemon=True).start()
                     
                     win32pipe.DisconnectNamedPipe(pipe)
                     win32file.CloseHandle(pipe)
+                except pywintypes.error as e:
+                    # 针对常见的“管道另一端有一进程”错误进行处理，不视为严重错误
+                    if e.winerror == winerror.ERROR_PIPE_CONNECTED:
+                         pass
+                    else:
+                         logger.debug(f"[Pipe] Win32 Error: {e}")
+                    if pipe: win32file.CloseHandle(pipe)
+                    time.sleep(1)
                 except Exception as e:
-                    # 记录错误但不崩溃
                     logger.debug(f"[Pipe] Listener cycle error: {e}")
+                    if pipe: win32file.CloseHandle(pipe)
                     time.sleep(2)
 
         threading.Thread(target=listener, daemon=True).start()
@@ -1699,8 +1708,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             self.realtime_service.update_batch(df)
                         except Exception as e:
                             logger.error(f"Main process realtime update error: {e}")
-                    else:
-                        logger.info(f'realtime_service 还未初始化')
                     # logger.info(f'df:{df[:1]}')
                     if self.sortby_col is not None:
                         logger.info(f'update_tree sortby_col : {self.sortby_col} sortby_col_ascend : {self.sortby_col_ascend}')
@@ -2042,6 +2049,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             client_socket.settimeout(1)
             client_socket.connect((ipc_host, ipc_port))
             # 发送格式: CODE|代码|key1=val1|key2=val2
+            # 必须加上 CODE| 前缀，否则 Visualizer 无法识别 (elif prefix == b"CODE")
             ipc_msg = f"CODE|{code}|resample={resample}"
             client_socket.send(ipc_msg.encode('utf-8'))
             client_socket.close()
@@ -2087,190 +2095,139 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 traceback.print_exc()
                 return
 
-        if not hasattr(self, '_df_first_send_done'):
-            self._df_first_send_done = False
+            if not hasattr(self, '_df_first_send_done'):
+                self._df_first_send_done = False
+            
+        # 启动同步线程（只启动一次）
+        if not hasattr(self, '_df_sync_thread') or not self._df_sync_thread.is_alive():
+            self._df_sync_thread = threading.Thread(target=self.send_df, daemon=True)
+            self._df_sync_thread.start()
+
+    def send_df(self, initial=True):
+        """同步数据推送核心逻辑 (作为类方法，支持跨线程唤醒)"""
         import struct, pickle
         from queue import Full
-        def send_df(initial=True):
-            last_send_time = 0
-            min_interval = 0.2  # 最小发送间隔 200ms
-            max_jitter = 0.1    # 随机抖动 0~100ms
-            while self._df_sync_running:
-                if not hasattr(self, 'df_all') or self.df_all.empty:
-                    time.sleep(2)
-                    continue
-                sent = False  # ⭐ 本轮是否成功发送
-                try:
-                    now = time.time()
-                    # ⭐ 限流 + 抖动
-                    if now - last_send_time < min_interval:
-                        time.sleep(min_interval - (now - last_send_time) + random.uniform(0, max_jitter))
-                    last_send_time = time.time()
+        
+        last_send_time = 0
+        min_interval = 0.2  # 最小发送间隔 200ms
+        max_jitter = 0.1    # 随机抖动 0~100ms
+        ipc_host, ipc_port = '127.0.0.1', 26668
+        
+        # 定义同步列 (复用原有逻辑)
+        strategy_cols = ['last_action', 'last_reason', 'shadow_info', 'market_win_rate', 'loss_streak', 'vwap_bias']
+        required_visualizer_cols = ['code', 'name', 'percent', 'dff', 'Rank', 'win', 'slope', 'volume', 'power_idx']
+        
+        while getattr(self, '_df_sync_running', False):
+            if not hasattr(self, 'df_all') or self.df_all.empty:
+                time.sleep(2)
+                continue
+            
+            sent = False  # ⭐ 本轮是否成功发送
+            try:
+                now = time.time()
+                # ⭐ 限流 + 抖动
+                if now - last_send_time < min_interval:
+                    time.sleep(min_interval - (now - last_send_time) + random.uniform(0, max_jitter))
+                last_send_time = time.time()
 
-                    # --- 1️⃣ 确保必要列存在 ---
-                    for scol in strategy_cols:
-                        if scol not in self.df_all.columns:
-                            self.df_all[scol] = "" if scol in [
-                                'last_action', 'last_reason', 'shadow_info'
-                            ] else 0.0
+                # --- 1️⃣ 确保必要列存在 ---
+                for scol in strategy_cols:
+                    if scol not in self.df_all.columns:
+                        self.df_all[scol] = "" if scol in ['last_action', 'last_reason', 'shadow_info'] else 0.0
 
-                    # --- 2️⃣ 列名容错映射 ---
-                    all_cols_lower = {c.lower(): c for c in self.df_all.columns}
-                    final_cols = []
+                # --- 2️⃣ 数据快照与增量判断 ---
+                df_ui = self.df_all.copy()
+                msg_type = 'UPDATE_DF_ALL'
+                payload_to_send = df_ui
+                
+                # --- 2.1 列名容错映射 ---
+                all_cols_lower = {c.lower(): c for c in df_ui.columns}
+                final_cols = []
+                # Use self.ui_cols which is set in open_visualizer
+                ui_cols_to_use = getattr(self, 'ui_cols', required_visualizer_cols) 
 
-                    for req in ui_cols:
-                        key = req.lower()
-                        if key in all_cols_lower:
-                            final_cols.append(all_cols_lower[key])
-                        else:
-                            self.df_all[req] = "" if any(
-                                k in key for k in ['name', 'action', 'reason', 'info']
-                            ) else 0.0
-                            final_cols.append(req)
-
-                    # df_ui = self.df_all[final_cols].copy()
-                    df_ui = self.df_all.copy()
-                    # --- 计算增量 ---
-                    if hasattr(self, 'df_ui_prev'):
-                        # df_diff = df_ui.compare(self.df_ui_prev, keep_shape=True, keep_equal=False)
-                        # df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
-                        try:
-                            df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
-                            # 如果没有变化行，就跳过本轮
-                            if df_diff.empty:
-                                logger.debug("[send_df] df_diff empty, skip sending this cycle")
-                                sent = True
-                            else:
-                                msg_type = 'UPDATE_DF_DIFF'
-                                payload_to_send = df_diff
-                                # --- 3️⃣ 内存日志 ---
-                                mem = df_diff.memory_usage(deep=True).sum()
-
-                        except ValueError as e:
-                            # debug 输出索引和列的不一致
-                            prev_cols = set(self.df_ui_prev.columns) if hasattr(self, 'df_ui_prev') else set()
-                            curr_cols = set(df_ui.columns)
-                            prev_idx = set(self.df_ui_prev.index) if hasattr(self, 'df_ui_prev') else set()
-                            curr_idx = set(df_ui.index)
-
-                            logger.debug(f"[send_df] compare() ValueError: {e}")
-                            logger.debug(f"[send_df] columns prev={list(prev_cols)[:5]}, curr={list(curr_cols)[:5]}")
-                            logger.debug(f"[send_df] index prev={list(prev_idx)[:5]}, curr={list(curr_idx)[:5]}")
-
-                            # 为了不中断，可以直接把全量当作 diff
-                            payload_to_send = df_ui
-                            # --- 3️⃣ 内存日志 ---
-                            mem = df_ui.memory_usage(deep=True).sum()
-                            msg_type = 'UPDATE_DF_ALL'
-
+                for req in ui_cols_to_use:
+                    key = req.lower()
+                    if key in all_cols_lower:
+                        final_cols.append(all_cols_lower[key])
                     else:
-                        payload_to_send = df_ui
-                        # --- 3️⃣ 内存日志 ---
-                        mem = df_ui.memory_usage(deep=True).sum()
+                        df_ui[req] = "" if any(
+                            k in key for k in ['name', 'action', 'reason', 'info']
+                        ) else 0.0
+                        final_cols.append(req)
+                df_ui = df_ui[final_cols].copy()
+
+
+                if hasattr(self, 'df_ui_prev'):
+                    try:
+                        df_diff = df_ui.compare(self.df_ui_prev, keep_shape=False, keep_equal=False)
+                        if df_diff.empty:
+                            logger.debug("[send_df] df_diff empty, skip sending this cycle")
+                            sent = True
+                        else:
+                            msg_type = 'UPDATE_DF_DIFF'
+                            payload_to_send = df_diff
+                    except ValueError:
+                        # 结构变化，强制全量
                         msg_type = 'UPDATE_DF_ALL'
 
+                if not sent:
                     # 更新缓存
                     self.df_ui_prev = df_ui.copy()
-
+                    mem = payload_to_send.memory_usage(deep=True).sum()
+                    
                     if 'code' not in df_ui.columns:
                         df_ui = df_ui.reset_index()
 
-                    logger.info(
-                        f'df_ui: {msg_type} rows={len(df_ui)} ver={self.sync_version} mem={mem/1024:.1f} KB'
-                    )
-
-                    # --- 🎁 封装版本化协议包 ---
-                    if msg_type == 'UPDATE_DF_ALL':
-                        self.sync_version = 0
-                    else:
-                        self.sync_version += 1
+                    # 封装协议
+                    if msg_type == 'UPDATE_DF_ALL': self.sync_version = 0
+                    else: self.sync_version += 1
                         
-                    sync_package = {
-                        'type': msg_type,
-                        'data': payload_to_send,
-                        'ver': self.sync_version
-                    }
-
-                    # ======================================================
-                    # ⭐ 4️⃣ 主通道：Queue
-                    # ======================================================
-                    if self.viz_command_queue and not sent:
+                    sync_package = {'type': msg_type, 'data': payload_to_send, 'ver': self.sync_version}
+                    
+                    # 优先 Queue
+                    if getattr(self, 'viz_command_queue', None) and not sent:
                         try:
                             with timed_ctx(f"viz_queue_put[{len(df_ui)}]", warn_ms=300):
-                                self.viz_command_queue.put_nowait(
-                                    ('UPDATE_DF_DATA', sync_package)
-                                )
+                                self.viz_command_queue.put_nowait(('UPDATE_DF_DATA', sync_package))
                             logger.debug(f"[Queue] {msg_type} sent (ver={self.sync_version})")
                             sent = True
-
                         except Full:
                             logger.warning("[Queue] full, fallback to IPC")
-
                         except Exception as e:
                             logger.exception(f"[Queue] send failed:: {e}")
-
-                    # ======================================================
-                    # ⭐ 5️⃣ 兜底通道：Socket（仅当 Queue 失败）
-                    # ======================================================
+                    
+                    # 兜底 Socket
                     if not sent:
                         try:
-                            # 1️⃣ pickle 单独计时
-                            with timed_ctx("viz_IPC_pickle", warn_ms=300):
-                                payload = pickle.dumps(('UPDATE_DF_DATA', sync_package),
-                                         protocol=pickle.HIGHEST_PROTOCOL)
-
+                            payload = pickle.dumps(('UPDATE_DF_DATA', sync_package), protocol=pickle.HIGHEST_PROTOCOL)
                             header = struct.pack("!I", len(payload))
-
-                            # 2️⃣ socket 单独计时
-                            with timed_ctx("viz_IPC_send", warn_ms=300):
+                            with timed_ctx("viz_IPC_send", warn_ms=800):
                                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                                    s.settimeout(1.0)
+                                    s.settimeout(10.0) 
                                     s.connect((ipc_host, ipc_port))
-                                    s.sendall(b"DATA" + header + payload)
-
+                                    s.sendall(b"DATA"); s.sendall(header); s.sendall(payload)
                             logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version})")
                             sent = True
-
                         except Exception as e:
                             logger.warning(f"[IPC] send failed: {e}")
-                            if not self.vis_var.get():
-                                # self._df_first_send_done = True
-                                sent = True
+                            if not self.vis_var.get(): sent = True
 
-                except Exception:
-                    logger.exception("[send_df] unexpected error")
-                finally:
-                    if sent:
-                        cct.print_timing_summary_filter(include_prefix="viz_", top_n=10)
-                # ======================================================
-                # ⭐ 6️⃣ 状态更新（只在这里）
-                # ======================================================
-                prev = getattr(self, "_df_first_send_done", False)
-                self._df_first_send_done = sent
+            except Exception:
+                logger.exception("[send_df] unexpected error")
+            
+            # 更新状态
+            self._df_first_send_done = sent
+            if sent: cct.print_timing_summary_filter(include_prefix="viz_", top_n=10)
 
-                # 状态刚从 False → True：立即进入慢速周期
-                if sent and not prev and self.vis_var.get():
-                    logger.info("[send_df] first successful send")
-
-                # ======================================================
-                # ⭐ 7️⃣ 调度逻辑
-                # ======================================================
-                sleep_seconds = 300 if sent else 5
-                for _ in range(sleep_seconds):
-                    if not self._df_sync_running or not self._df_first_send_done:
-                        break
-                    time.sleep(1)
-
-
-        # 启动线程（只启动一次）
-        if not hasattr(self, '_df_sync_thread') or not self._df_sync_thread.is_alive():
-            # import traceback, logging
-            # logger.warning(
-            #     "Starting df_sync thread\n%s",
-            #     "".join(traceback.format_stack(limit=5))
-            # )
-            self._df_sync_thread = threading.Thread(target=send_df, daemon=True)
-            self._df_sync_thread.start()
+            # --- 调度休眠 (可被指令唤醒) ---
+            sleep_seconds = 300 if sent else 5
+            for _ in range(sleep_seconds):
+                # 如果同步运行标志改变，或者被删除了 prev 缓存（强制唤醒），则立即中止休眠
+                # 检查 _df_sync_running 和 df_ui_prev 的存在性
+                if not getattr(self, '_df_sync_running', False) or not hasattr(self, 'df_ui_prev'):
+                    break
+                time.sleep(1)
 
     def on_voice_toggle(self):
         self.live_strategy.set_voice_enabled(self.voice_var.get())
@@ -2330,7 +2287,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             if self.live_strategy.scan_hot_concepts_status:
                 self.live_strategy.set_scan_hot_concepts(status=False)
                 logger.info(f'self.live_strategy.scan_hot_concepts_status  will be close')
-        if not self.vis_var.get() and getattr(self, "_df_first_send_done"):
+        if (not self.vis_var.get()) and getattr(self, "_df_first_send_done", False):
             # logger.debug(f'change _df_first_send_done:{self._df_first_send_done}')
             logger.debug(f"[send_df] force full send: deleting df_ui_prev, _df_first_send_done={self._df_first_send_done}")
             if hasattr(self, 'df_ui_prev'):

@@ -428,56 +428,65 @@ class CommandListenerThread(QThread):
                 # accept 阻塞，直到有客户端连接
                 client_socket: socket.socket
                 client_socket, _ = self.server_socket.accept()
-                client_socket.settimeout(3.0)
-
                 try:
-                    # 前4字节协议判断
-                    prefix = client_socket.recv(4)
+                    client_socket.settimeout(10.0)
+                    
+                    # 尝试增加接收缓冲区
+                    try:
+                        client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2 * 1024 * 1024) # 2MB
+                    except Exception:
+                        pass
+
+                    # 1. 精确读取 4 字节协议头
+                    prefix = recv_exact(client_socket, 4, lambda: self.running)
                     if not prefix:
                         client_socket.close()
                         continue
 
                     if prefix == b"DATA":
+                        # --- DATA 模式：二进制大数据包 ---
                         try:
-                            # 使用 recv_exact 确保精确读取 4 字节长度头
+                            # 2. 读取长度头 (4 字节)
                             header = recv_exact(client_socket, 4, lambda: self.running)
                             size = struct.unpack("!I", header)[0]
                             
-                            # 使用 recv_exact 确保精确读取整个 payload
-                            payload = recv_exact(client_socket, size, lambda: self.running)
+                            # 限制异常大小，防止内存攻击（200MB 限制）
+                            if size > 200 * 1024 * 1024:
+                                logger.error(f"[IPC] Packet too large ({size} bytes). Discarding.")
+                                client_socket.close()
+                                continue
+
+                            logger.debug(f"[IPC] Start receiving payload: {size/(1024*1024):.2f} MB")
                             
+                            # 3. 读取完整负载
+                            payload = recv_exact(client_socket, size, lambda: self.running)
                             if payload:
-                                # ⭐ 兼容旧格式 (tuple) 和新格式 (dict package)
                                 raw_data = pickle.loads(payload)
                                 if isinstance(raw_data, tuple) and len(raw_data) == 2:
-                                    msg_type, df = raw_data
-                                    if msg_type == 'UPDATE_DF_DATA' and isinstance(df, dict):
-                                        # 新版字典协议：{'type': '...', 'data': df, 'ver': 123}
-                                        self.dataframe_received.emit(df, 'UPDATE_DF_DATA')
-                                    else:
-                                        # 旧版元组协议：('UPDATE_DF_ALL', df)
-                                        self.dataframe_received.emit(df, msg_type)
+                                    msg_type, df_obj = raw_data
+                                    self.dataframe_received.emit(df_obj, msg_type)
+                                    logger.info(f"[IPC] Dataframe processed: {msg_type}")
                         except Exception as e:
-                            print(f"[IPC] DATA packet error: {e}")
+                            logger.error(f"[IPC] DATA Packet process error: {e}")
 
-                    else:
+                    elif prefix == b"CODE":
+                        # --- CODE 模式：短文本指令 (CODE|...) ---
                         try:
-                            # 尝试读取剩余数据（针对短指令）
-                            client_socket.setblocking(False)
-                            try:
-                                rest = client_socket.recv(4096)
-                            except (BlockingIOError, socket.error):
-                                rest = b""
+                            # 尝试非阻塞读取剩余内容 (最多 1024 字节)
+                            client_socket.settimeout(1.0) # 防止这里死锁
+                            remaining = client_socket.recv(1024)
+                            full_cmd_bytes = prefix + remaining
+                            cmd = full_cmd_bytes.decode("utf-8", errors='ignore')
                             
-                            text = (prefix + rest).decode("utf-8", errors="ignore").strip()
-                            if text.startswith("CODE|"):
-                                code = text[5:].strip()
-                                if code:
-                                    self.command_received.emit(code)
-                            elif text:
-                                self.command_received.emit(text)
+                            if "|" in cmd:
+                                logger.info(f"[IPC] Command received: {cmd}")
+                                self.command_received.emit(cmd)
                         except Exception as e:
-                            print(f"[IPC] CODE packet error: {e}")
+                            logger.error(f"[IPC] Command process error: {e}")
+                    else:
+                        # 未知协议头，可能是脏数据，直接丢弃
+                        logger.warning(f"[IPC] Unknown protocol prefix: {prefix}. Discarding connection.")
+                        client_socket.close()
                 finally:
                     try:
                         client_socket.close()
@@ -1349,12 +1358,21 @@ class GlobalInputFilter(QtCore.QObject):
         # 注意: Qt 不支持真正的系统级快捷键，这是应用程序级别的最大范围
 
         # 鼠标按键
-        if event.type() == QtCore.QEvent.Type.MouseButtonPress:
-            if event.button() == Qt.MouseButton.XButton1:  # 前进键
-                self.main_window.switch_resample_prev()
-                return True
-            elif event.button() == Qt.MouseButton.XButton2:  # 后退键
-                self.main_window.switch_resample_next()
+        if event.type() in (QtCore.QEvent.Type.MouseButtonPress, 
+                            QtCore.QEvent.Type.MouseButtonRelease,
+                            QtCore.QEvent.Type.MouseButtonDblClick):
+            if event.button() in (Qt.MouseButton.XButton1, Qt.MouseButton.XButton2):
+                # 仅在按下时触发切换
+                if event.type() == QtCore.QEvent.Type.MouseButtonPress:
+                    if event.button() == Qt.MouseButton.XButton1:  # 侧键后退 -> 上一个周期
+                        self.main_window.switch_resample_prev()
+                    elif event.button() == Qt.MouseButton.XButton2:  # 侧键前进 -> 下一个周期
+                        self.main_window.switch_resample_next()
+                return True # 彻底拦截，防止 pyqtgraph 看到这些侧键导致 KeyError
+
+        # ⭐ [FIX] 拦截带有侧键标志的鼠标移动，彻底避免 pyqtgraph 内部状态不一致导致的崩溃
+        if event.type() == QtCore.QEvent.Type.MouseMove:
+            if event.buttons() & (Qt.MouseButton.XButton1 | Qt.MouseButton.XButton2):
                 return True
 
         # 键盘按键
@@ -2055,11 +2073,10 @@ class MainWindow(QMainWindow, WindowMixin):
         if not self._window_pos_loaded:
             self._window_pos_loaded = True
             self.load_window_position_qt(
-                self,
-                "trade_visualizer",
-                default_width=1400,
-                default_height=900
-            )
+                self, "trade_visualizer", default_width=1400, default_height=900)
+            
+            # ⭐ [SYNC] 重启后主动向主 TK 请求全量同步，确保数据第一时间到位
+            QtCore.QTimer.singleShot(2000, self._request_full_sync)
 
 
     def _init_global_shortcuts(self):
@@ -3880,9 +3897,17 @@ class MainWindow(QMainWindow, WindowMixin):
             ver = df.get('ver', 0)
             
             # 版本校验逻辑
-            if m_type == 'UPDATE_DF_ALL':
+            # ⭐ [SYNC FIX] 如果 ver == 0，视为全量强制覆盖，无视之前的所有版本记录
+            actual_type = df.get('type')
+            if m_type == 'UPDATE_DF_DATA' and actual_type == 'UPDATE_DF_ALL':
+                logger.info(f"[IPC] Received Full DF_ALL via Package (rows={len(payload)})")
                 self.expected_sync_version = ver
-                logger.info(f"[IPC] Received Full DF_ALL (ver={ver}, rows={len(payload)})")
+                QtCore.QTimer.singleShot(0, lambda: self._process_df_all_update(payload))
+                return
+
+            if m_type == 'UPDATE_DF_ALL' or (ver == 0):
+                self.expected_sync_version = ver
+                logger.info(f"[IPC] Received Ver=0 (Full Sync) Packets (rows={len(payload)})")
                 QtCore.QTimer.singleShot(0, lambda: self._process_df_all_update(payload))
             elif m_type == 'UPDATE_DF_DIFF':
                 if self.expected_sync_version != -1 and ver == self.expected_sync_version + 1:
@@ -3915,8 +3940,8 @@ class MainWindow(QMainWindow, WindowMixin):
             with timed_ctx("update_stock_table_only", warn_ms=500):
                 self.update_stock_table(self.df_all)
             
-            # ⚡ 处理事件，让 UI 响应
-            QApplication.processEvents()
+            # ⭐ [STABILITY FIX] 移除了强制 processEvents，防止在大规模同步期间产生危险的逻辑重入
+            # QApplication.processEvents()
             
             # ⚡ 刷新监理看板
             if getattr(self, 'current_code', None) and hasattr(self, 'kline_plot'):
@@ -4059,16 +4084,26 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # --- 解析可扩展参数 ---
         params = kwargs.copy()
-        if code and "|" in str(code):
-            parts = str(code).split("|")
-            code = parts[0]
-            for p in parts[1:]:
-                if "=" in p:
-                    try:
-                        k, v = p.split("=", 1)
-                        params[k] = v
-                    except ValueError:
-                        pass
+        if isinstance(code, str):
+            # 1. 清理可能的空白和前缀
+            code = code.strip()
+            if code.startswith("CODE|"):
+                code = code[5:] # 移除 "CODE|"
+            
+            # 2. 解析可能的参数管道符 (code|key=val)
+            if "|" in code:
+                parts = code.split('|')
+                real_code = parts[0]
+                
+                # 解析后续参数
+                for p in parts[1:]:
+                    if "=" in p:
+                        try:
+                            k, v = p.split("=", 1)
+                            kwargs[k.strip()] = v.strip()
+                        except ValueError:
+                            pass
+                code = real_code
 
         # --- 处理周期同步 (resample) ---
         target_resample = params.get('resample')
@@ -6064,9 +6099,10 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
 
     # ------------------ 2. Primary/Secondary ------------------
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    # server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1) # Windows 下不要开启 SO_REUSEADDR 否则可以重复绑定
     stop_flag = stop_flag if stop_flag else mp.Value('b', True)
-
+    # import ipdb;ipdb.set_trace()
+    
     try:
         server_socket.bind((IPC_HOST, IPC_PORT))
         server_socket.listen(5)  # backlog > 1
