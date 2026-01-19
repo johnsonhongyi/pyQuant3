@@ -360,7 +360,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.visualizer_process = None # Track visualizer process
         self.viz_command_queue = None  # ⭐ [FIX] 提前初始化队列，供 send_df 使用
         self.sync_version = 0          # ⭐ 数据同步序列号
-
+        self.last_vis_var_status = None 
         # 4. 初始化 Realtime Data Service (异步加载以加快启动)
         try:
             # 启动 Manager 仅用于同步设置 (global_dict)
@@ -1704,7 +1704,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if self._last_resample == self.resample_combo.get().strip():
             return
         else:
-            if hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
+            if self.vis_var.get() and hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
                 self.vis_var.set(False)
         resample = self.resample_combo.get().strip()
         logger.info(f'set resample : {resample}')
@@ -1859,7 +1859,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             if self.viz_command_queue:
                                 self.viz_command_queue = None
                             self._df_first_send_done = False
-                            self.vis_var.set(True)
+                            # self.vis_var.set(True)
                 # -------------------------
 
                 self.status_var2.set(f'queue update: {self.format_next_time()}')
@@ -2200,7 +2200,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 logger.debug("[send_df] df_all is empty or missing, waiting...")
                 if count < 3:
                     count +=1
-                    time.sleep(10)
+                    time.sleep(2)
                     continue
             sent = False  # ⭐ 本轮是否成功发送
             try:

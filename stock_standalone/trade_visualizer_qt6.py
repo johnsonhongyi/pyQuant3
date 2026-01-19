@@ -4508,14 +4508,11 @@ class MainWindow(QMainWindow, WindowMixin):
         """
         self._capture_view_state()
 
-        # --- 解析可扩展参数 ---
-        params = kwargs.copy()
         if isinstance(code, str):
             # 1. 清理可能的空白和前缀
             code = code.strip()
             if code.startswith("CODE|"):
                 code = code[5:] # 移除 "CODE|"
-            
             # 2. 解析可能的参数管道符 (code|key=val)
             if "|" in code:
                 parts = code.split('|')
@@ -4530,7 +4527,9 @@ class MainWindow(QMainWindow, WindowMixin):
                         except ValueError:
                             pass
                 code = real_code
-
+        logger.debug(f'code: {code} :kwargs :{kwargs}')
+        # --- 解析可扩展参数 ---
+        params = kwargs.copy()
         # --- 处理周期同步 (resample) ---
         target_resample = params.get('resample')
         if target_resample and target_resample in self.resample_keys:
