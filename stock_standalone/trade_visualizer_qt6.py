@@ -2121,6 +2121,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 帮助信息配置 (Key, Desc, Handler)
         self.shortcut_map = [
             ("Alt+T", "显示/隐藏信号盒子 / 切换模拟信号(T)", self._show_signal_box),
+            ("Alt+F", "显示快捷键帮助 (此弹窗)", self._show_filter_panel),
             ("Ctrl+/", "显示快捷键帮助 (此弹窗)", self.show_shortcut_help),
             ("Space", "显示综合研报 / 弹窗详情 (K线图内生效)", None),
             ("R", "重置 K 线视图 (全览模式)", None),
@@ -2344,7 +2345,7 @@ class MainWindow(QMainWindow, WindowMixin):
             
         # ⭐ 动态启用/禁用冲突的 QShortcut
         # 当开启系统全局键时，禁用 App 内的 QShortcut，防止重复响应，且确保系统键优先
-        conflict_keys = ["Alt+T", "Ctrl+/"]
+        conflict_keys = ["Alt+T", "Alt+F", "Ctrl+/"]
         if hasattr(self, 'shortcuts'):
             for key in conflict_keys:
                 if key in self.shortcuts:
@@ -2364,12 +2365,17 @@ class MainWindow(QMainWindow, WindowMixin):
                 # ⭐ 已在 on_toggle_global_keys 中禁用了 QShortcut，这里直接触发即可
                 QTimer.singleShot(0, self._show_signal_box)
             
+            def _on_hotkey_show_filter_panel():
+                # ⭐ 已在 on_toggle_global_keys 中禁用了 QShortcut，这里直接触发即可
+                QTimer.singleShot(0, self._show_filter_panel)
+                
             def _on_hotkey_show_help():
                 # ⭐ 已在 on_toggle_global_keys 中禁用了 QShortcut，这里直接触发即可
                 QTimer.singleShot(0, self.show_shortcut_help)
             
             # 注册系统全局快捷键
             keyboard.add_hotkey('alt+t', _on_hotkey_show_signal_box)
+            keyboard.add_hotkey('alt+f', _on_hotkey_show_filter_panel)
             keyboard.add_hotkey('ctrl+/', _on_hotkey_show_help)
             
             self.system_hotkeys_registered = True
@@ -2385,6 +2391,7 @@ class MainWindow(QMainWindow, WindowMixin):
         
         try:
             keyboard.remove_hotkey('alt+t')
+            keyboard.remove_hotkey('alt+f')
             keyboard.remove_hotkey('ctrl+/')
             self.system_hotkeys_registered = False
             logger.info("✅ 系统级全局快捷键已注销")
@@ -2572,6 +2579,27 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.signal_box_dialog.show()
                 self.signal_box_dialog.raise_()
                 self.signal_box_dialog.activateWindow()
+
+    def _show_filter_panel(self):
+        """
+        切换 Filter 面板显示状态：
+        - 如果当前可见，则关闭
+        - 如果当前隐藏，则打开
+        - 内部通过 toggle_filter_panel 控制实际显示/隐藏
+        """
+        if not hasattr(self, 'filter_panel'):
+            return
+
+        # 当前是否可见
+        is_presently_visible = self.filter_panel.isVisible()
+
+        # 切换状态
+        if is_presently_visible:
+            # 隐藏 Filter
+            self.toggle_filter_panel(False)
+        else:
+            # 打开 Filter
+            self.toggle_filter_panel(True)
 
     def _update_signal_badge(self):
         if hasattr(self, 'signal_box_dialog') and self.signal_box_dialog._queue_mgr:
