@@ -985,7 +985,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.ColumnSetManager = None
             self._open_column_manager_job = None
             if hasattr(self, 'global_dict') and self.global_dict is not None:
-                 self.global_dict['keep_all_columns'] = False  # 关闭发现模式
+                 self.global_dict['keep_all_columns'] = True  # 关闭发现模式
             self.update_required_columns() # 恢复按需裁剪
 
     def update_required_columns(self, refresh_ui=False) -> None:
@@ -10528,7 +10528,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 # KLineMonitor class moved to kline_monitor.py
 
-def test_single_thread(single=False):
+def test_single_thread(single=True, test_strategy=False):
+    """
+    单线程测试函数。
+    :param single: 是否单次执行（默认 True，执行一次后返回）
+    :param test_strategy: 是否同时测试 StockLiveStrategy
+    """
     import queue
     # 用普通 dict 代替 manager.dict()
     global marketInit,resampleInit
@@ -10548,7 +10553,120 @@ def test_single_thread(single=False):
     detect_calc_support = mp.Value('b', False)  # 'i' 表示整数
     # 直接单线程调用
     df = fetch_and_process(shared_dict, q, blkname="boll", flag=flag ,log_level=log_level,detect_calc_support_var=detect_calc_support,single=single)
+    
+    if test_strategy and df is not None and not df.empty:
+        print(f"===== 测试 StockLiveStrategy =====")
+        print(f"DataFrame shape: {df.shape}")
+        
+        # 创建模拟 master 对象
+        class MockMaster:
+            def __init__(self):
+                self.df_all = df
+                self.voice_var = type('obj', (object,), {'get': lambda self: False})()
+                self.realtime_service = None
+            
+            def after(self, ms, func, *args):
+                """模拟 TK after 方法 - 直接执行"""
+                func(*args)
+        
+        mock_master = MockMaster()
+        
+        try:
+            # 使用与 _init_live_strategy 相同的参数
+            strategy = StockLiveStrategy(
+                mock_master,
+                alert_cooldown=alert_cooldown,
+                voice_enabled=False,
+                realtime_service=None
+            )
+            print(f"✅ StockLiveStrategy 初始化成功")
+            
+            # 测试 _check_strategies
+            print(f"测试 _check_strategies...")
+            strategy._check_strategies(df, resample='d')
+            print(f"✅ _check_strategies 执行成功")
+            
+        except Exception as e:
+            print(f"❌ StockLiveStrategy 测试失败: {e}")
+            import traceback
+            traceback.print_exc()
+    
     return df
+
+def test_main_process_params():
+    """
+    使用与主进程完全相同的参数进行单线程测试。
+    模拟 _start_process 中的调用方式。
+    """
+    import queue
+    global marketInit, marketblk, duration_sleep_time, resampleInit
+    
+    # 获取全局变量或使用默认值
+    try:
+        _log_level = log_level
+    except NameError:
+        _log_level = LoggerFactory.DEBUG
+    
+    try:
+        _detect_calc_support = detect_calc_support
+    except NameError:
+        _detect_calc_support = False
+    
+    print("===== 测试主进程参数 =====")
+    print(f"marketInit: {marketInit}")
+    print(f"marketblk: {marketblk}")
+    print(f"duration_sleep_time: {duration_sleep_time}")
+    print(f"log_level: {_log_level}")
+    print(f"detect_calc_support: {_detect_calc_support}")
+    
+    # 模拟 self.global_dict（与主进程一致）
+    shared_dict = {}
+    shared_dict["resample"] = resampleInit
+    shared_dict["market"] = marketInit
+    
+    # 模拟 self.queue
+    q = queue.Queue()
+    
+    # 模拟 self.blkname
+    blkname = "boll"
+    
+    # 模拟 self.refresh_flag, self.log_level, self.detect_calc_support
+    # 使用 mp.Value 与主进程一致
+    refresh_flag = mp.Value('b', True)
+    log_level_var = mp.Value('i', _log_level)
+    detect_calc_support_var = mp.Value('b', _detect_calc_support)
+    
+    print(f"\n调用 fetch_and_process (与主进程参数一致)...")
+    
+    try:
+        # 与主进程调用方式完全一致
+        df = fetch_and_process(
+            shared_dict, 
+            q, 
+            blkname, 
+            refresh_flag, 
+            log_level_var, 
+            detect_calc_support_var, 
+            marketInit, 
+            marketblk, 
+            duration_sleep_time,
+            status_callback=tip_var_status_flag,  # 与主进程 kwargs 一致
+            single=True  # 单次执行，不循环
+        )
+        
+        if df is not None and not df.empty:
+            print(f"✅ fetch_and_process 成功, DataFrame shape: {df.shape}")
+            return df
+        else:
+            print(f"⚠️ fetch_and_process 返回空 DataFrame")
+            return None
+            
+    except Exception as e:
+        print(f"❌ fetch_and_process 失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 # 常用命令示例列表
 COMMON_COMMANDS = [
     "tdd.get_tdx_Exp_day_to_df('000002', dl=60, newdays=0, resample='d')",
