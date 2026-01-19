@@ -103,116 +103,152 @@ def normalize_speech_text(text: str) -> str:
     return text
 
 
-class VoiceThread(QThread):
-    """语音播报线程 (完全后台运行，不阻塞主线程)"""
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.queue = Queue()
-        self.running = True
-        self.engine = None
-
-    def run(self):
-        """语音线程主循环"""
-        logger.info("✅ 语音播报线程已启动")
-        
-        while self.running:
-            try:
-                # 批量获取队列中的所有消息
-                messages = []
-                try:
-                    # 获取第一条消息（阻塞等待 1s）
-                    text = self.queue.get(timeout=1)
-                    messages.append(text)
-                    
-                    # 获取队列中剩余的所有消息（非阻塞）
-                    while not self.queue.empty():
-                        try:
-                            text = self.queue.get_nowait()
-                            messages.append(text)
-                        except Empty:
-                            break
-                except Empty:
-                    continue
-                
-                # 依次播报所有消息
-                logger.info(f"🔊 开始播报 {len(messages)} 条消息")
-                for i, msg in enumerate(messages, 1):
-                    if not self.running:
-                        break
-                    
-                    # 对每一条消息采用独立的初始化和清理流程，确保 SAPI5 稳定
-                    self._speak_one(msg, i, len(messages))
-                
-                logger.info(f"✅ 播报处理完成")
-                    
-            except Exception as e:
-                logger.warning(f"Voice thread loop error: {e}")
-
-    def _speak_one(self, text: str, index: int, total: int):
-        """
-        单次播报逻辑，包含完整的初始化和清理。
-        Windows SAPI5 在多线程环境下，长时间持有 Engine 或频繁调用 runAndWait 容易出现状态同步问题。
-        采用“一报一初始化”模式虽然稍慢，但最稳定。
-        """
-        import pyttsx3
-        import time
-        engine = None
+def _voice_worker(queue: 'mp.Queue', stop_flag: 'mp.Value'):
+    """
+    语音播报工作进程的主函数 (完全独立进程，不干扰主进程)
+    
+    Args:
+        queue: 多进程队列，用于接收播报文本
+        stop_flag: 多进程共享值，用于控制进程退出
+    """
+    import pyttsx3
+    import time
+    try:
+        import pythoncom
+    except ImportError:
+        pythoncom = None
+    
+    print("[VoiceProcess] Worker started")
+    
+    while stop_flag.value:
         try:
-            if pythoncom:
-                pythoncom.CoInitialize()
+            # 批量获取队列中的所有消息
+            messages = []
+            try:
+                # 获取第一条消息（阻塞等待 1s）
+                text = queue.get(timeout=1)
+                messages.append(text)
+                
+                # 获取队列中剩余的所有消息（非阻塞）
+                while not queue.empty():
+                    try:
+                        text = queue.get_nowait()
+                        messages.append(text)
+                    except:
+                        break
+            except:
+                continue
             
-            engine = pyttsx3.init()
-            self.engine = engine # 暴露给 stop() 使用
+            if not messages:
+                continue
+                
+            # 依次播报所有消息
+            print(f"[VoiceProcess] 🔊 开始播报 {len(messages)} 条消息")
+            for i, msg in enumerate(messages, 1):
+                if not stop_flag.value:
+                    break
+                
+                # 单次播报逻辑
+                engine = None
+                try:
+                    if pythoncom:
+                        pythoncom.CoInitialize()
+                    
+                    engine = pyttsx3.init()
+                    
+                    # 语速调整
+                    rate = engine.getProperty('rate')
+                    if isinstance(rate, (int, float)):
+                        engine.setProperty('rate', rate + 40)
+                    
+                    # 规范化文本
+                    speech_text = normalize_speech_text(msg)
+                    print(f"[VoiceProcess]   播报 [{i}/{len(messages)}]: {speech_text}")
+                    
+                    engine.say(speech_text)
+                    engine.runAndWait()
+                    
+                    print(f"[VoiceProcess]   ✅ 完成 [{i}/{len(messages)}]")
+                    time.sleep(0.1)
+                    
+                except Exception as e:
+                    print(f"[VoiceProcess]   ⚠️ 错误 [{i}/{len(messages)}]: {e}")
+                finally:
+                    if engine:
+                        try:
+                            engine.stop()
+                            del engine
+                        except:
+                            pass
+                    if pythoncom:
+                        try:
+                            pythoncom.CoUninitialize()
+                        except:
+                            pass
             
-            # 语速调整
-            rate = engine.getProperty('rate')
-            if isinstance(rate, (int, float)):
-                engine.setProperty('rate', rate + 40)  # 加速
-            
-            # 规范化文本
-            speech_text = normalize_speech_text(text)
-            logger.debug(f"  正在播报 [{index}/{total}]: {speech_text}")
-            
-            engine.say(speech_text)
-            # runAndWait 在当前线程阻塞，直到该段语音播报完毕
-            engine.runAndWait()
-            
-            logger.debug(f"  ✅ 播报完成 [{index}/{total}]")
-            
-            # 增加短暂停顿，给系统语音组件喘息机会
-            time.sleep(0.1)
-            
+            print(f"[VoiceProcess] ✅ 播报处理完成")
+                
         except Exception as e:
-            logger.warning(f"  ⚠️ 播报错误 [{index}/{total}]: {e}")
-        finally:
-            if engine:
-                try:
-                    engine.stop()
-                    del engine
-                except:
-                    pass
-            self.engine = None
-            if pythoncom:
-                try:
-                    pythoncom.CoUninitialize()
-                except:
-                    pass
+            print(f"[VoiceProcess] Worker loop error: {e}")
+    
+    print("[VoiceProcess] Worker stopped")
+
+
+class VoiceProcess:
+    """
+    语音播报进程管理器 (多进程完全隔离，不干扰主进程)
+    
+    使用 multiprocessing 而非 QThread，完全隔离 COM 调用，
+    避免与 Qt 事件循环产生冲突导致卡死。
+    """
+    def __init__(self, parent=None):  # 接受 parent 参数保持兼容性
+        import multiprocessing as mp
+        self.queue = mp.Queue()
+        self.stop_flag = mp.Value('b', True)  # boolean, True = running
+        self.process = None
+        self.pause_for_sync = False  # 保留接口兼容性（但多进程下无需使用）
+
+    def start(self):
+        """启动语音播报进程"""
+        import multiprocessing as mp
+        if self.process is None or not self.process.is_alive():
+            self.stop_flag.value = True
+            self.process = mp.Process(
+                target=_voice_worker, 
+                args=(self.queue, self.stop_flag),
+                daemon=True
+            )
+            self.process.start()
+            logger.info("✅ 语音播报进程已启动 (PID: %s)", self.process.pid)
 
     def speak(self, text):
         """添加文本到播报队列"""
-        if self.running:
+        if self.stop_flag.value:
             self.queue.put(text)
 
     def stop(self):
-        """停止语音线程"""
-        self.running = False
+        """停止语音播报进程"""
+        self.stop_flag.value = False
         # 清空队列
         while not self.queue.empty():
             try:
                 self.queue.get_nowait()
-            except Empty:
+            except:
                 break
-        self.wait(2000)  # 等待最备2秒
+        if self.process and self.process.is_alive():
+            self.process.join(timeout=2)
+            if self.process.is_alive():
+                self.process.terminate()
+        logger.info("✅ 语音播报进程已停止")
+
+    def wait(self, timeout_ms=2000):
+        """等待进程完成（兼容旧接口）"""
+        if self.process and self.process.is_alive():
+            self.process.join(timeout=timeout_ms / 1000)
+
+
+# 保留旧名称作为别名，确保兼容性
+VoiceThread = VoiceProcess
 
 
 class CandlestickItem(pg.GraphicsObject):
@@ -2547,34 +2583,43 @@ class MainWindow(QMainWindow, WindowMixin):
             # 检查是否有新信号并播报 (语音播报逻辑)
             if not signals: return
 
-            latest = signals[0] # PriorityQueue top 可能是最新的或优先级最高的
-            # Queue get_top() 是排序后的列表 (Prio ASC, Timestamp DESC)
-            # 所以 0 号元素是优先级最高且最新的
+            # ⚡ [OPTIMIZATION] 语音去重缓存，避免重复播报
+            if not hasattr(self, '_spoken_cache'): 
+                self._spoken_cache = set()
+                self._last_spoken_clean_time = 0
+            
+            import time
+            now = time.time()
+            if now - self._last_spoken_clean_time > 300: # 每5分钟清理一次缓存
+                self._spoken_cache.clear()
+                self._last_spoken_clean_time = now
 
-            # 简单去重: 仅当 timestamp 不同于上次时播报
-            if latest.timestamp > self.last_voice_ts:
-                self.last_voice_ts = latest.timestamp
-
-                # 播放 Top 5 信息
-                # 逻辑: 播报前5条高优先级信号
-                
-                count_spoken = 0
-                for msg in signals[:5]: # 前5条
-                    # 仅播报 High Priority (<100)
-                    if msg.priority < 100: # 放宽限制
-                        strategy_name = msg.signal_type
-                        if strategy_name == "HOT_WATCH": strategy_name = "热点"
-                        elif strategy_name == "CONSOLIDATION": strategy_name = "蓄势"
-                        elif strategy_name == "SUDDEN_LAUNCH": strategy_name = "突发"
+            count_spoken = 0
+            for msg in signals[:5]: # 前5条
+                # 仅播报 High Priority (<100)
+                if msg.priority < 100: # 放宽限制
+                    # 去重键: 代码 + 类型 + 分钟级时间戳 (同一分钟内不重复报)
+                    dedup_key = (msg.code, msg.signal_type, msg.timestamp[:16]) 
+                    if dedup_key in self._spoken_cache:
+                        continue
                         
-                        # 简短播报
-                        text = f"{msg.name}, {strategy_name}"
+                    strategy_name = msg.signal_type
+                    if strategy_name == "HOT_WATCH": strategy_name = "热点"
+                    elif strategy_name == "CONSOLIDATION": strategy_name = "蓄势"
+                    elif strategy_name == "SUDDEN_LAUNCH": strategy_name = "突发"
+                    
+                    # 简短播报
+                    text = f"{msg.name}, {strategy_name}"
+                    
+                    # ⚡ 再次检查 VoiceProcess 是否可用
+                    if hasattr(self, 'voice_thread') and self.voice_thread:
                         self.voice_thread.speak(text)
-                        
-                        count_spoken += 1
-                
-                if count_spoken > 0:
-                    logger.info(f"Voice broadcast {count_spoken} signals")
+                    
+                    self._spoken_cache.add(dedup_key)
+                    count_spoken += 1
+            
+            if count_spoken > 0:
+                logger.debug(f"Voice broadcast {count_spoken} signals (deduplicated)")
 
     def _on_strategy_changed(self, index: int) -> None:
         """
@@ -3582,14 +3627,28 @@ class MainWindow(QMainWindow, WindowMixin):
                         fallback_df[col] = 0
                 self.update_stock_table(fallback_df)
 
-    def update_stock_table(self, df):
-        """Update table with df_all data (增量更新优化版 - 参考TK性能优化)"""
+    def update_stock_table(self, df, force_full=False):
+        """Update table with df_all data (增量更新优化版 - 参考TK性能优化)
+        
+        Args:
+            df: DataFrame 数据
+            force_full: 是否强制全量刷新 (默认 False)
+        """
         import time
         start_time = time.time()
         
-        if df.empty:
+        if df is None or df.empty:
             self.stock_table.setRowCount(0)
             self._table_item_map = {}  # 重置映射
+            return
+        
+        n_rows = len(df)
+        
+        # ⚡ [CRITICAL] 大数据量（>500行）使用异步分块更新，避免UI卡死
+        # [FINAL DECISION] 异步分块已被证实为卡死元凶，永久禁用，使用稳健的同步更新
+        if n_rows > 999999: 
+            logger.info(f"[TableUpdate] Large dataset ({n_rows} rows), using async chunked update")
+            self._update_table_in_chunks_full_async(df, chunk_size=100, force_full=force_full)
             return
         
         # ⚡ 初始化映射表（首次或重置后）
@@ -3597,12 +3656,13 @@ class MainWindow(QMainWindow, WindowMixin):
             self._table_item_map = {}  # code -> row_idx 映射
         if not hasattr(self, '_table_update_count'):
             self._table_update_count = 0
-        
+            
         self._table_update_count += 1
         
         # ⚡ 每50次增量更新后强制全量刷新，防止累积误差
-        force_full = self._table_update_count >= 50
-        if force_full:
+        # 或者外部明确要求强制全量
+        if force_full or self._table_update_count >= 50 or not self._table_item_map:
+            force_full = True
             self._table_update_count = 0
             self._table_item_map = {}
         
@@ -3653,16 +3713,30 @@ class MainWindow(QMainWindow, WindowMixin):
             
             if force_full or not self._table_item_map:
                 # === 全量刷新 ===
+                logger.debug("[TableUpdate] Clearing table...")
+                self.stock_table.setRowCount(0) # 显式清空
+                # ⚡ [SAFEGUARD] 强制处理事件循环，确保旧对象被安全销毁
+                QtWidgets.QApplication.processEvents()
+                
+                logger.debug("[TableUpdate] Allocating rows...")
                 self.stock_table.setRowCount(n_rows)
+                logger.debug(f"[TableUpdate] Filling {n_rows} rows...")
+                
                 self._table_item_map = {}
                 
                 for row_idx in range(n_rows):
-                    stock_code = str(codes[row_idx])
-                    stock_name = str(names[row_idx]) if pd.notnull(names[row_idx]) else ''
-                    
-                    self._set_table_row(row_idx, stock_code, stock_name, 
-                                       optional_cols_real, optional_data, no_edit_flag)
-                    self._table_item_map[stock_code] = row_idx
+                    if row_idx % 1000 == 0:
+                        logger.debug(f"[TableUpdate] Filling row {row_idx}...")
+                    try:
+                        stock_code = str(codes[row_idx])
+                        stock_name = str(names[row_idx]) if pd.notnull(names[row_idx]) else ''
+                        
+                        self._set_table_row(row_idx, stock_code, stock_name, 
+                                           optional_cols_real, optional_data, no_edit_flag)
+                        self._table_item_map[stock_code] = row_idx
+                    except Exception as e:
+                        logger.warning(f"[TableUpdate] Row error at {row_idx}: {e}")
+                        continue
             else:
                 # === 增量更新 ===
                 # 1. 删除不存在的行 (从后往前删除避免索引错乱)
@@ -3678,25 +3752,30 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 # 2. 更新已存在的行
                 for row_idx in range(n_rows):
-                    stock_code = str(codes[row_idx])
-                    
-                    if stock_code in self._table_item_map:
-                        # 更新现有行
-                        old_row_idx = self._table_item_map[stock_code]
-                        stock_name = str(names[row_idx]) if pd.notnull(names[row_idx]) else ''
-                        self._update_table_row(old_row_idx, stock_code, stock_name,
-                                              optional_cols_real, optional_data, row_idx)
-                    else:
-                        # 新增行
-                        new_row_idx = self.stock_table.rowCount()
-                        self.stock_table.insertRow(new_row_idx)
-                        stock_name = str(names[row_idx]) if pd.notnull(names[row_idx]) else ''
-                        self._set_table_row(new_row_idx, stock_code, stock_name,
-                                           optional_cols_real, optional_data, no_edit_flag, row_idx)
-                        self._table_item_map[stock_code] = new_row_idx
+                    try:
+                        stock_code = str(codes[row_idx])
+                        
+                        if stock_code in self._table_item_map:
+                            # 更新现有行
+                            old_row_idx = self._table_item_map[stock_code]
+                            stock_name = str(names[row_idx]) if pd.notnull(names[row_idx]) else ''
+                            self._update_table_row(old_row_idx, stock_code, stock_name,
+                                                  optional_cols_real, optional_data, row_idx)
+                        else:
+                            # 新增行
+                            new_row_idx = self.stock_table.rowCount()
+                            self.stock_table.insertRow(new_row_idx)
+                            stock_name = str(names[row_idx]) if pd.notnull(names[row_idx]) else ''
+                            self._set_table_row(new_row_idx, stock_code, stock_name,
+                                               optional_cols_real, optional_data, no_edit_flag, row_idx)
+                            self._table_item_map[stock_code] = new_row_idx
+                    except Exception as e:
+                        logger.warning(f"[TableUpdate] Incr row error at {row_idx}: {e}")
+                        continue
         
         finally:
             # ⚡ 恢复信号和更新
+            logger.debug("[TableUpdate] Restoring updatesEnabled=True and signals...")
             self.stock_table.setUpdatesEnabled(True)
             self.stock_table.blockSignals(False)
             self.stock_table.setSortingEnabled(True)
@@ -3729,6 +3808,207 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.stock_table.blockSignals(True)
                 self.stock_table.setCurrentCell(row, 0)
                 self.stock_table.blockSignals(False)
+    
+    def _limit_table_column_widths(self):
+        """限制表格列宽，防止过宽列挤压其他内容"""
+        try:
+            for i, h in enumerate(self.headers):
+                if h in ('last_reason', 'shadow_info'):
+                    if self.stock_table.columnWidth(i) > 200:
+                        self.stock_table.setColumnWidth(i, 200)
+        except Exception:
+            pass
+
+    def _do_sync_update_logic(self, df, n_rows, codes, names, optional_cols_real, optional_data, no_edit_flag):
+        """同步更新的核心逻辑块 (用于小数据量或全量刷新)"""
+        new_codes = set(str(c) for c in codes)
+        old_codes = set(self._table_item_map.keys())
+        codes_to_delete = old_codes - new_codes
+        
+        # 1. 删除不存在的行 (从后往前删除避免索引错乱)
+        if codes_to_delete:
+            rows_to_delete = sorted([self._table_item_map[c] for c in codes_to_delete if c in self._table_item_map], reverse=True)
+            for ridx in rows_to_delete: self.stock_table.removeRow(ridx)
+            # 更新映射
+            for c in codes_to_delete: self._table_item_map.pop(c, None)
+            self._rebuild_item_map_from_table()
+        
+        # 2. 更新或新增
+        for row_idx in range(n_rows):
+            stock_code = str(codes[row_idx])
+            stock_name = str(names[row_idx]) if pd.notnull(names[row_idx]) else ''
+            if stock_code in self._table_item_map:
+                # 更新现有行
+                self._update_table_row(self._table_item_map[stock_code], stock_code, stock_name,
+                                      optional_cols_real, optional_data, row_idx)
+            else:
+                # 新增行
+                new_idx = self.stock_table.rowCount()
+                self.stock_table.insertRow(new_idx)
+                self._set_table_row(new_idx, stock_code, stock_name,
+                                   optional_cols_real, optional_data, no_edit_flag, row_idx)
+                self._table_item_map[stock_code] = new_idx
+
+    def _update_table_in_chunks_full_async(self, df, chunk_size, force_full):
+        """完全异步地更新表格：数据准备 + 分块渲染均在计时器中分步触发
+        
+        [OPTIMIZATION] 修复全量数据卡死问题：
+        - 将数据准备阶段也异步化，在 QTimer 中分步执行
+        - 避免大数据量时阻塞主线程
+        """
+        import time
+        n_rows = len(df)
+        
+        # ⚡ [CRITICAL FIX] 立即返回控制权给主线程，
+        # 将所有重活（包括数据准备）都推入 QTimer 链
+        logger.info(f"[TableUpdate] Scheduling async update for {n_rows} rows...")
+        
+        def _do_async_update():
+            """真正的异步更新逻辑，在下一个事件循环中执行"""
+            prep_start = time.time()
+            
+            try:
+                # 1. 数据准备 (现在在异步上下文中执行)
+                cols_in_df = {c.lower(): c for c in df.columns}
+                optional_cols = [col for col in self.headers if col.lower() not in ['code', 'name']]
+                optional_cols_real = [(col, cols_in_df.get(col.lower())) for col in optional_cols]
+                codes = df[cols_in_df['code']].values if 'code' in cols_in_df else df.index.values
+                names = df[cols_in_df['name']].values if 'name' in cols_in_df else [''] * n_rows
+                optional_data = {}
+                for col_name, real_col in optional_cols_real:
+                    optional_data[col_name] = df[real_col].values if real_col else [0] * n_rows
+                
+                no_edit_flag = Qt.ItemFlag.ItemIsEditable
+                nonlocal force_full
+                
+                # 2. 结构调整 (全量包直接 setRowCount，杜绝 removeRow 死循环)
+                self.stock_table.blockSignals(True)
+                self.stock_table.setSortingEnabled(False)
+                
+                if force_full or not self._table_item_map:
+                    self.stock_table.setRowCount(n_rows)
+                    self._table_item_map = {}
+                    force_full = True
+                else:
+                    # 增量包下的删除检测
+                    new_codes = set(str(c) for c in codes)
+                    old_codes = set(self._table_item_map.keys())
+                    codes_to_delete = old_codes - new_codes
+                    if len(codes_to_delete) > 100:
+                        self.stock_table.setRowCount(n_rows)
+                        self._table_item_map = {}
+                        force_full = True # 降级为全量，更快
+                    elif codes_to_delete:
+                        rows_to_delete = sorted([self._table_item_map[c] for c in codes_to_delete if c in self._table_item_map], reverse=True)
+                        for ridx in rows_to_delete: self.stock_table.removeRow(ridx)
+                        for c in codes_to_delete: self._table_item_map.pop(c, None)
+                        self._rebuild_item_map_from_table()
+
+                prep_duration = time.time() - prep_start
+                logger.info(f"[TableUpdate] Prep done (is_full={force_full}) in {prep_duration:.3f}s, starting async chunking...")
+
+                # 3. 分块渲染器
+                # ⚡ [OPTIMIZATION] 全程禁用 UI 更新，最后统一恢复，避免中间重绘卡死
+                self.stock_table.setUpdatesEnabled(False)
+                self.stock_table.setSortingEnabled(False)
+                
+                def process_next_chunk(start_idx):
+                    # 辅助：恢复语音
+                    def _ensure_voice_resumed(tag):
+                        if hasattr(self, 'voice_thread') and self.voice_thread:
+                            if self.voice_thread.pause_for_sync:
+                                self.voice_thread.pause_for_sync = False
+                                logger.debug(f"[TableUpdate] Voice thread resumed ({tag})")
+                    
+                    try:
+                        logger.debug(f"[TableUpdate] Chunk START: idx={start_idx}/{n_rows}")
+                        
+                        if not self.isVisible(): 
+                            # 窗口不可见时，恢复表格状态并退出
+                            logger.debug("[TableUpdate] Window not visible, aborting chunk update")
+                            self.stock_table.setUpdatesEnabled(True)
+                            self.stock_table.setSortingEnabled(True)
+                            if block_signals_state is False: # 只有之前没阻塞才恢复
+                                self.stock_table.blockSignals(False)
+                            _ensure_voice_resumed("WindowHidden")
+                            return
+
+                        if start_idx >= n_rows:
+                            # 最终收尾
+                            self.stock_table.setUpdatesEnabled(True) # ⚡ [CRITICAL] 恢复 UI 更新
+                            self.stock_table.setSortingEnabled(True)
+                            if block_signals_state is False:
+                                self.stock_table.blockSignals(False)
+                                
+                            self._limit_table_column_widths()
+                            logger.info(f"[TableUpdate] DEFERRED update finished: {n_rows} rows")
+                            _ensure_voice_resumed("Finished")
+                            return
+
+                        end_idx = min(start_idx + chunk_size, n_rows)
+                        logger.debug(f"[TableUpdate] Processing rows {start_idx}-{end_idx}")
+                        
+                        # 批量写入，不再中间开关 updatesEnabled
+                        for i in range(start_idx, end_idx):
+                            try:
+                                s_code = str(codes[i])
+                                s_name = str(names[i]) if pd.notnull(names[i]) else ''
+                                
+                                if force_full or s_code not in self._table_item_map:
+                                    if force_full:
+                                        self._set_table_row(i, s_code, s_name, optional_cols_real, optional_data, no_edit_flag)
+                                        self._table_item_map[s_code] = i
+                                    else:
+                                        new_r = self.stock_table.rowCount()
+                                        self.stock_table.insertRow(new_r)
+                                        self._set_table_row(new_r, s_code, s_name, optional_cols_real, optional_data, no_edit_flag, i)
+                                        self._table_item_map[s_code] = new_r
+                                else:
+                                    r_idx = self._table_item_map[s_code]
+                                    self._update_table_row(r_idx, s_code, s_name, optional_cols_real, optional_data, i)
+
+                            except Exception as row_e:
+                                logger.warning(f"[TableUpdate] Row error at {i} ({s_code}): {row_e}")
+                                continue
+
+                        logger.debug(f"[TableUpdate] Chunk DONE: idx={start_idx}-{end_idx}, scheduling next...")
+                        
+                        # ⚡ 核心呼吸：保持较大的时间片，与 UI 循环交互
+                        QtCore.QTimer.singleShot(10, lambda: process_next_chunk(end_idx))
+                        
+                    except Exception as e:
+                        import traceback
+                        logger.error(f"[TableUpdate] Chunk processing error at row {start_idx}: {e}")
+                        logger.error(f"[TableUpdate] Traceback: {traceback.format_exc()}")
+                        # 恢复表格状态
+                        try:
+                            self.stock_table.setUpdatesEnabled(True)
+                            self.stock_table.setSortingEnabled(True)
+                            self.stock_table.blockSignals(False)
+                        except:
+                            pass
+                        _ensure_voice_resumed("Error")
+
+                # 启动第一块处理
+                block_signals_state = self.stock_table.signalsBlocked() # 记录原始状态
+                if not block_signals_state:
+                    self.stock_table.blockSignals(True)
+                    
+                logger.debug("[TableUpdate] Starting first chunk...")
+                process_next_chunk(0)
+                
+            except Exception as e:
+                logger.error(f"[TableUpdate] Async update error: {e}")
+                # 确保恢复表格状态
+                try:
+                    self.stock_table.setSortingEnabled(True)
+                    self.stock_table.blockSignals(False)
+                except:
+                    pass
+        
+        # ⚡ [KEY] 使用 singleShot(0) 将整个数据准备推入下一个事件循环
+        # 10ms 延迟给 UI 一个喘息机会
+        QtCore.QTimer.singleShot(10, _do_async_update)
     
     def _set_table_row(self, row_idx, stock_code, stock_name, optional_cols_real, 
                        optional_data, no_edit_flag, data_idx=None):
@@ -3889,7 +4169,18 @@ class MainWindow(QMainWindow, WindowMixin):
                         self._clicked_change = False
 
     def on_dataframe_received(self, df, msg_type):
-        """接收 DataFrame 更新 (优化: 避免阻塞主线程)"""
+        """接收 DataFrame 更新 (优化: 避免阻塞主线程)
+        
+        [CRITICAL FIX] 防重复处理：
+        - 当正在处理全量同步时，忽略后续的重复 ver=0 请求
+        - 避免多个全量同步并发执行导致卡死
+        """
+        # ⚡ [CRITICAL] 初始化/检查防重复标志
+        if not hasattr(self, '_is_processing_full_sync'):
+            self._is_processing_full_sync = False
+        if not hasattr(self, '_last_full_sync_time'):
+            self._last_full_sync_time = 0
+            
         if msg_type == 'UPDATE_DF_DATA' and isinstance(df, dict):
             # 新版字典协议
             m_type = df.get('type')
@@ -3899,17 +4190,53 @@ class MainWindow(QMainWindow, WindowMixin):
             # 版本校验逻辑
             # ⭐ [SYNC FIX] 如果 ver == 0，视为全量强制覆盖，无视之前的所有版本记录
             actual_type = df.get('type')
-            if m_type == 'UPDATE_DF_DATA' and actual_type == 'UPDATE_DF_ALL':
-                logger.info(f"[IPC] Received Full DF_ALL via Package (rows={len(payload)})")
+            
+            # ⚡ [CRITICAL] 检测是否为全量同步请求
+            is_full_sync = (m_type == 'UPDATE_DF_ALL' or ver == 0 or 
+                           (m_type == 'UPDATE_DF_DATA' and actual_type == 'UPDATE_DF_ALL'))
+            
+            if is_full_sync:
+                import time
+                now = time.time()
+                # ⚡ [CRITICAL] 防重复：如果正在处理或距离上次同步不到2秒，忽略
+                if self._is_processing_full_sync:
+                    logger.warning(f"[IPC] Ignoring duplicate full sync (already processing)")
+                    return
+                if now - self._last_full_sync_time < 2.0:
+                    logger.warning(f"[IPC] Ignoring full sync request (too frequent, last: {now - self._last_full_sync_time:.2f}s ago)")
+                    return
+                    
+                self._is_processing_full_sync = True
+                self._last_full_sync_time = now
                 self.expected_sync_version = ver
-                QtCore.QTimer.singleShot(0, lambda: self._process_df_all_update(payload))
+                logger.info(f"[IPC] Received Full Sync (ver={ver}, rows={len(payload)})")
+                
+                # ⚡ [CRITICAL] 暂停语音播报，防止 COM 冲突导致卡死
+                if hasattr(self, 'voice_thread') and self.voice_thread:
+                    self.voice_thread.pause_for_sync = True
+                    logger.debug("[IPC] Voice thread paused for sync")
+                
+                def _safe_process():
+                    logger.debug("[_safe_process] START")
+                    try:
+                        self._process_df_all_update(payload)
+                        logger.debug("[_safe_process] _process_df_all_update completed")
+                    except Exception as e:
+                        import traceback
+                        logger.error(f"[_safe_process] Error: {e}")
+                        logger.error(f"[_safe_process] Traceback: {traceback.format_exc()}")
+                    finally:
+                        self._is_processing_full_sync = False
+                        # ⚡ [CRITICAL] 恢复语音播报（已弃用分块，直接恢复）
+                        if hasattr(self, 'voice_thread') and self.voice_thread:
+                            self.voice_thread.pause_for_sync = False
+                            logger.debug("[IPC] Voice thread resumed")
+                        logger.debug("[_safe_process] END, _is_processing_full_sync reset to False")
+                        
+                QtCore.QTimer.singleShot(10, _safe_process)
                 return
-
-            if m_type == 'UPDATE_DF_ALL' or (ver == 0):
-                self.expected_sync_version = ver
-                logger.info(f"[IPC] Received Ver=0 (Full Sync) Packets (rows={len(payload)})")
-                QtCore.QTimer.singleShot(0, lambda: self._process_df_all_update(payload))
-            elif m_type == 'UPDATE_DF_DIFF':
+                
+            if m_type == 'UPDATE_DF_DIFF':
                 if self.expected_sync_version != -1 and ver == self.expected_sync_version + 1:
                     self.expected_sync_version = ver
                     logger.info(f"[IPC] Received DF_DIFF (ver={ver}, rows={len(payload)})")
@@ -3920,8 +4247,30 @@ class MainWindow(QMainWindow, WindowMixin):
             return
 
         if msg_type == "UPDATE_DF_ALL":
-            # 使用 QTimer 延迟处理，避免阻塞主线程
-            QtCore.QTimer.singleShot(0, lambda: self._process_df_all_update(df))
+            # 同样应用防重复逻辑
+            import time
+            now = time.time()
+            if self._is_processing_full_sync or (now - self._last_full_sync_time < 2.0):
+                logger.warning(f"[IPC] Ignoring duplicate UPDATE_DF_ALL")
+                return
+            self._is_processing_full_sync = True
+            self._last_full_sync_time = now
+            
+            # ⚡ [CRITICAL] 暂停语音播报
+            if hasattr(self, 'voice_thread') and self.voice_thread:
+                self.voice_thread.pause_for_sync = True
+                logger.debug("[IPC] Voice thread paused for sync (UPDATE_DF_ALL)")
+            
+            def _safe_process():
+                try:
+                    self._process_df_all_update(df)
+                finally:
+                    self._is_processing_full_sync = False
+                    # ⚡ [CRITICAL] 恢复语音播报（已弃用分块，直接恢复）
+                    if hasattr(self, 'voice_thread') and self.voice_thread:
+                        self.voice_thread.pause_for_sync = False
+                        logger.debug("[IPC] Voice thread resumed (UPDATE_DF_ALL)")
+            QtCore.QTimer.singleShot(10, _safe_process)
         elif msg_type == "UPDATE_DF_DIFF":
             # diff 更新通常较小，可以直接处理
             QtCore.QTimer.singleShot(0, lambda: self.apply_df_diff(df))
@@ -3929,44 +4278,81 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.warning(f"Unknown msg_type: {msg_type}")
     
     def _process_df_all_update(self, df):
-        """处理完整 DataFrame 更新 (优化: 分块处理避免 UI 冻结)"""
+        """处理完整 DataFrame 更新 (优化: 分块处理避免 UI 冻结)
+        
+        [OPTIMIZATION] 修复全量数据卡死问题：
+        - 移除同步的 df.copy() 操作
+        - 直接引用 DataFrame，避免大数据量时的内存复制阻塞
+        """
+        logger.debug(f"[_process_df_all_update] START: df type={type(df)}, rows={len(df) if df is not None else 'None'}")
         try:
-            # ⚡ 快速更新缓存 (不触发 UI)
-            if df is not None:
-                self.df_cache = df.copy() if not df.empty else pd.DataFrame()
+            # ⚡ [CRITICAL FIX] 直接引用 DataFrame，不做 copy() 避免阻塞
+            # copy() 在大数据量（5000+行）时可能需要数秒
+            if df is not None and not df.empty:
+                self.df_cache = df  # 直接引用，不复制
+                self.df_all = df
+                logger.debug(f"[_process_df_all_update] df_all updated, rows={len(self.df_all)}")
+            elif df is not None:
+                self.df_cache = pd.DataFrame()
                 self.df_all = self.df_cache
+                logger.debug("[_process_df_all_update] df is empty, reset df_all")
             
-            # ⚡ 更新表格 (已优化)
-            with timed_ctx("update_stock_table_only", warn_ms=500):
-                self.update_stock_table(self.df_all)
+            # ⚡ 更新表格 (完全异步)
+            # ⭐ [SYNC FIX] 全量包 ver=0 必须强制刷新表格
+            is_full = True # 默认全量
+            logger.debug(f"[_process_df_all_update] Calling update_stock_table, force_full={is_full}")
+            self.update_stock_table(self.df_all, force_full=is_full)
+            logger.debug("[_process_df_all_update] update_stock_table dispatched")
             
             # ⭐ [STABILITY FIX] 移除了强制 processEvents，防止在大规模同步期间产生危险的逻辑重入
-            # QApplication.processEvents()
             
-            # ⚡ 刷新监理看板
-            if getattr(self, 'current_code', None) and hasattr(self, 'kline_plot'):
-                self._refresh_sensing_bar(self.current_code)
+            # ⚡ 刷新监理看板 (延迟执行，避免阻塞)
+            def _delayed_refresh():
+                try:
+                    logger.debug("[_delayed_refresh] Executing...")
+                    if getattr(self, 'current_code', None) and hasattr(self, 'kline_plot'):
+                        self._refresh_sensing_bar(self.current_code)
+                    logger.debug("[_delayed_refresh] Done")
+                except Exception as e:
+                    logger.error(f"[_delayed_refresh] Error: {e}")
+            QtCore.QTimer.singleShot(100, _delayed_refresh)
             
             # ⭐ [SYNC FIX] 确保 IPC 数据导致的布局剧烈变化后，K 线图能自适应感知新的几何尺寸
             if hasattr(self, 'kline_plot'):
                 def _force_sync_geometry():
-                    if not hasattr(self.kline_plot, 'vb'): return
-                    vb = self.kline_plot.vb
-                    # 1. 强力刷新坐标映射
-                    vb.sigResized.emit(vb)
-                    vb.update()
-                    # 2. 如果当前处于全览模式，则自动重置一次以校准范围
-                    self.kline_plot.update()
+                    try:
+                        logger.debug("[_force_sync_geometry] Executing...")
+                        if not hasattr(self.kline_plot, 'vb'): return
+                        vb = self.kline_plot.vb
+                        # 1. 强力刷新坐标映射
+                        vb.sigResized.emit(vb)
+                        vb.update()
+                        # 2. 如果当前处于全览模式，则自动重置一次以校准范围
+                        self.kline_plot.update()
+                        logger.debug("[_force_sync_geometry] Done")
+                    except Exception as e:
+                        logger.error(f"[_force_sync_geometry] Error: {e}")
                     
                 # 稍微多等一会儿，确保表格渲染完毕且 QSplitter 动作结束
-                QtCore.QTimer.singleShot(250, _force_sync_geometry)
+                QtCore.QTimer.singleShot(350, _force_sync_geometry)
             
-            # ⚡ 处理热榜信号 (轻量操作)
+            # ⚡ 处理热榜信号 (延迟执行，轻量操作)
             if SIGNAL_QUEUE_AVAILABLE:
-                self._process_hot_signals(df if df is not None else self.df_all)
+                def _delayed_hot_signals():
+                    try:
+                        logger.debug("[_delayed_hot_signals] Executing...")
+                        self._process_hot_signals(df if df is not None else self.df_all)
+                        logger.debug("[_delayed_hot_signals] Done")
+                    except Exception as e:
+                        logger.error(f"[_delayed_hot_signals] Error: {e}")
+                QtCore.QTimer.singleShot(200, _delayed_hot_signals)
+            
+            logger.debug("[_process_df_all_update] END: All tasks dispatched successfully")
                 
         except Exception as e:
+            import traceback
             logger.error(f"Error processing df_all update: {e}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
 
     def _request_full_sync(self):
         """向 Monitor 发送全量同步请求"""
