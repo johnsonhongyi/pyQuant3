@@ -18,6 +18,7 @@ winlimit = cct.winlimit
 loop_counter_limit = cct.loop_counter_limit
 START_INIT = 0
 PIPE_NAME = r"\\.\pipe\my_named_pipe"
+PIPE_NAME_TK = r"\\.\pipe\instock_tk_pipe"
 logger = LoggerFactory.getLogger()
 
 def calc_compute_volume(top_all: pd.DataFrame, logger: Any, resample: str = 'd', virtual: bool = True) -> pd.Series:

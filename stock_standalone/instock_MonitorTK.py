@@ -358,6 +358,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.refresh_enabled = True
         
         self.visualizer_process = None # Track visualizer process
+        self.viz_command_queue = mp.Queue()  # ⭐ [FIX] 提前初始化队列，供 send_df 使用
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.after(5000, self._start_feedback_listener)
 
@@ -620,65 +621,143 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._on_resize_finished
         )
 
+    # def _start_feedback_listener(self):
+    #     """监听来自可视化器的反馈指令 (例如请求全量同步)"""
+    #     import win32pipe, win32file, pywintypes, winerror
+    #     import json
+    #     from data_utils import PIPE_NAME_TK
+
+    #     def listener():
+    #         logger.info(f"[Pipe] Starting feedback listener on {PIPE_NAME_TK}")
+    #         while True:
+    #             pipe = None
+    #             try:
+    #                 # 创建命名管道服务端
+    #                 pipe = win32pipe.CreateNamedPipe(
+    #                     PIPE_NAME_TK,
+    #                     win32pipe.PIPE_ACCESS_DUPLEX,
+    #                     win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
+    #                     1, 65536, 65536,
+    #                     0,
+    #                     None
+    #                 )
+    #                 win32pipe.ConnectNamedPipe(pipe, None)
+    #                 res, data = win32file.ReadFile(pipe, 65536)
+    #                 if res == 0:
+    #                     msg = data.decode('utf-8')
+    #                     logger.info(f"[Pipe] getdata feedback msg: {msg}")
+    #                     try:
+    #                         cmd_obj = json.loads(msg)
+    #                         if cmd_obj.get("cmd") == "REQ_FULL_SYNC":
+    #                             # 启动同步线程（只启动一次）
+    #                             logger.info("[Pipe] Received REQ_FULL_SYNC, triggering immediate full update")
+    #                             # ⭐ [FIX] 设置标志位，由主推送线程处理，避免线程爆炸
+    #                             self._force_full_sync_pending = True
+    #                             self._df_first_send_done = False
+    #                     except Exception as e:
+    #                         if "REQ_FULL_SYNC" in msg:
+    #                             logger.info("[Pipe] Received REQ_FULL_SYNC (raw), triggering immediate full update")
+    #                             self._force_full_sync_pending = True
+    #                             self._df_first_send_done = False
+
+                    
+    #                 win32pipe.DisconnectNamedPipe(pipe)
+    #                 win32file.CloseHandle(pipe)
+    #             except pywintypes.error as e:
+    #                 # 针对常见的“管道另一端有一进程”错误进行处理，不视为严重错误
+    #                 if e.winerror == winerror.ERROR_PIPE_CONNECTED:
+    #                      pass
+    #                 else:
+    #                      logger.debug(f"[Pipe] Win32 Error: {e}")
+    #                 if pipe: win32file.CloseHandle(pipe)
+    #                 time.sleep(1)
+    #             except Exception as e:
+    #                 logger.debug(f"[Pipe] Listener cycle error: {e}")
+    #                 if pipe: win32file.CloseHandle(pipe)
+    #                 time.sleep(2)
+
+    #     # ⭐ [FIX] 强制确保同步线程已启动
+    #     if not hasattr(self, '_df_sync_thread') or not self._df_sync_thread.is_alive():
+    #         self._df_sync_running = True
+    #         self._df_sync_thread = threading.Thread(target=self.send_df, daemon=True)
+    #         self._df_sync_thread.start()
+
+    #     threading.Thread(target=listener, daemon=True).start()
+
     def _start_feedback_listener(self):
-        """监听来自可视化器的反馈指令 (例如请求全量同步)"""
+        """
+        监听来自可视化器的控制指令（如 REQ_FULL_SYNC）
+        使用独立控制管道，短连接，强健容错
+        """
         import win32pipe, win32file, pywintypes, winerror
-        import json
-        from data_utils import PIPE_NAME
+        import json, threading, time
+        from data_utils import PIPE_NAME_TK
 
         def listener():
-            logger.info(f"[Pipe] Starting feedback listener on {PIPE_NAME}")
+            logger.info(f"[Pipe] Feedback listener ready on {PIPE_NAME_TK}")
+
             while True:
                 pipe = None
                 try:
-                    # 创建命名管道服务端
                     pipe = win32pipe.CreateNamedPipe(
-                        PIPE_NAME,
+                        PIPE_NAME_TK,
                         win32pipe.PIPE_ACCESS_DUPLEX,
-                        win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
-                        1, 65536, 65536,
+                        win32pipe.PIPE_TYPE_MESSAGE |
+                        win32pipe.PIPE_READMODE_MESSAGE |
+                        win32pipe.PIPE_WAIT,
+                        win32pipe.PIPE_UNLIMITED_INSTANCES,
+                        65536, 65536,
                         0,
                         None
                     )
-                    win32pipe.ConnectNamedPipe(pipe, None)
-                    res, data = win32file.ReadFile(pipe, 65536)
-                    if res == 0:
-                        msg = data.decode('utf-8')
-                        try:
-                            cmd_obj = json.loads(msg)
-                            if cmd_obj.get("cmd") == "REQ_FULL_SYNC":
-                                logger.info("[Pipe] Received REQ_FULL_SYNC, triggering immediate full update")
-                                if hasattr(self, 'df_ui_prev'):
-                                    del self.df_ui_prev
-                                self._df_first_send_done = False
-                                self.sync_version = 0
-                                # ⭐ [FIX] 直接触发同步，不再等待 300s 循环
-                                threading.Thread(target=self.send_df, kwargs={'initial': True}, daemon=True).start()
-                        except Exception as e:
-                            if "REQ_FULL_SYNC" in msg:
-                                logger.info("[Pipe] Received REQ_FULL_SYNC (raw), triggering immediate full update")
-                                if hasattr(self, 'df_ui_prev'):
-                                    del self.df_ui_prev
-                                self._df_first_send_done = False
-                                self.sync_version = 0
-                                threading.Thread(target=self.send_df, kwargs={'initial': True}, daemon=True).start()
-                    
-                    win32pipe.DisconnectNamedPipe(pipe)
-                    win32file.CloseHandle(pipe)
-                except pywintypes.error as e:
-                    # 针对常见的“管道另一端有一进程”错误进行处理，不视为严重错误
-                    if e.winerror == winerror.ERROR_PIPE_CONNECTED:
-                         pass
-                    else:
-                         logger.debug(f"[Pipe] Win32 Error: {e}")
-                    if pipe: win32file.CloseHandle(pipe)
-                    time.sleep(1)
-                except Exception as e:
-                    logger.debug(f"[Pipe] Listener cycle error: {e}")
-                    if pipe: win32file.CloseHandle(pipe)
-                    time.sleep(2)
 
-        threading.Thread(target=listener, daemon=True).start()
+                    win32pipe.ConnectNamedPipe(pipe, None)
+
+                    while True:
+                        res, data = win32file.ReadFile(pipe, 65536)
+                        if res != 0 or not data:
+                            break
+
+                        msg = data.decode("utf-8")
+                        logger.info(f"[Pipe] recv: {msg}")
+
+                        try:
+                            obj = json.loads(msg)
+                        except Exception:
+                            obj = None
+
+                        if obj and obj.get("cmd") == "REQ_FULL_SYNC":
+                            logger.info(f'[Pipe] Feedback listener cmd REQ_FULL_SYNC')
+                            self._force_full_sync_pending = True
+                            self._df_first_send_done = False
+
+                except Exception as e:
+                    logger.debug(f"[Pipe] listener error: {e}")
+                    time.sleep(1)
+
+                finally:
+                    if pipe:
+                        win32pipe.DisconnectNamedPipe(pipe)
+                        win32file.CloseHandle(pipe)
+
+
+        # ====== 确保主同步线程只启动一次 ======
+        if not hasattr(self, "_df_sync_thread") or not self._df_sync_thread.is_alive():
+            self._df_sync_running = True
+            self._df_sync_thread = threading.Thread(
+                target=self.send_df,
+                name="DFSyncThread",
+                daemon=True
+            )
+            self._df_sync_thread.start()
+
+        # ====== 启动控制监听线程 ======
+        threading.Thread(
+            target=listener,
+            name="PipeCtrlListener",
+            daemon=True
+        ).start()
+
 
     def _on_resize_finished(self):
         self._is_resizing = False
@@ -1988,7 +2067,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def open_strategy_scan(self):
         """一键打开策略扫描"""
         # 1. 确保 Visualizer 启动 (传入当前选中代码或 None)
-        code = getattr(self, 'select_code', None)
+        code = getattr(self, 'select_code', '000001')
         # 如果未启动则启动，如果已启动则无副作用 (除了 debounce)
         self.open_visualizer(code)
 
@@ -2108,8 +2187,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         last_send_time = 0
         min_interval = 0.2  # 最小发送间隔 200ms
         max_jitter = 0.1    # 随机抖动 0~100ms
+        logger.info(f"[send_df] Thread START, running={getattr(self,'_df_sync_running',False)}")
         while self._df_sync_running:
             if not hasattr(self, 'df_all') or self.df_all.empty:
+                logger.warning("[send_df] df_all is empty or missing, waiting...")
                 time.sleep(2)
                 continue
             sent = False  # ⭐ 本轮是否成功发送
@@ -2119,6 +2200,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if now - last_send_time < min_interval:
                     time.sleep(min_interval - (now - last_send_time) + random.uniform(0, max_jitter))
                 last_send_time = time.time()
+
+                # ⚡ [FIX] 处理来自 Pipe 的强制全量同步请求（线程安全方式）
+                if getattr(self, '_force_full_sync_pending', False):
+                    logger.info("[send_df] Executing pending FULL SYNC request")
+                    if hasattr(self, 'df_ui_prev'):
+                        del self.df_ui_prev
+                    self.sync_version = 0
+                    self._force_full_sync_pending = False
 
                 df_ui = self.df_all.copy()
                 # --- 计算增量 ---
