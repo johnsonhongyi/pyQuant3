@@ -360,7 +360,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.visualizer_process = None # Track visualizer process
         self.viz_command_queue = None  # ⭐ [FIX] 提前初始化队列，供 send_df 使用
         self.sync_version = 0          # ⭐ 数据同步序列号
-        self.after(5000, self._start_feedback_listener)
 
         # 4. 初始化 Realtime Data Service (异步加载以加快启动)
         try:
@@ -1837,6 +1836,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # --- 注入: 实时策略检查 (移出循环，只在有更新时执行一次) ---
                 # if not self.tip_var.get() and has_update and hasattr(self, 'live_strategy'):
                 if has_update and hasattr(self, 'live_strategy'):
+                    self.after(2000, self._start_feedback_listener)
                     if not (915 < cct.get_now_time_int() < 920):
                         # self.after(90 * 1000, lambda: self.live_strategy.process_data(self.df_all))
                         if self._live_strategy_first_run:
@@ -1848,6 +1848,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             # 后续：立即执行
                             res = self.global_values.getkey("resample")
                             self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=res)
+                    
                 if has_update:
                     if self._last_resample != self.global_values.getkey("resample"):
                         if  hasattr(self, '_df_sync_thread') and self._df_sync_thread.is_alive():
@@ -2193,11 +2194,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         min_interval = 0.2  # 最小发送间隔 200ms
         max_jitter = 0.1    # 随机抖动 0~100ms
         logger.info(f"[send_df] Thread START, running={getattr(self,'_df_sync_running',False)}")
+        count = 0
         while self._df_sync_running:
             if not hasattr(self, 'df_all') or self.df_all.empty:
-                logger.warning("[send_df] df_all is empty or missing, waiting...")
-                time.sleep(2)
-                continue
+                logger.debug("[send_df] df_all is empty or missing, waiting...")
+                if count < 3:
+                    count +=1
+                    time.sleep(10)
+                    continue
             sent = False  # ⭐ 本轮是否成功发送
             try:
                 now = time.time()

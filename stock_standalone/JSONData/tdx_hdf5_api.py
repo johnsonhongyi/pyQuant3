@@ -1686,27 +1686,6 @@ def write_hdf_db(fname, df, table='all', index=False, complib='blosc', baseCount
                 )
                 tmp_h5.flush()
 
-            # # 3. 原子替换
-            # os.replace(temp_fname, fname_path)
-
-            # if h5 is not None:
-            #     if '/' + table in list(h5.keys()):
-            #         if not MultiIndex:
-            #             safe_remove_h5_table(h5, table)
-            #             h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
-            #         else:
-            #             if rewrite:
-            #                 safe_remove_h5_table(h5, table)
-            #             elif len(h5[table]) < 1:
-            #                 safe_remove_h5_table(h5, table)
-            #             h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
-            #     else:
-            #         if not MultiIndex:
-            #             h5.put(table, df, format='table', append=False, complib=complib, data_columns=True)
-            #         else:
-            #             h5.put(table, df, format='table', index=False, complib=complib, data_columns=True, append=True)
-            #     h5.flush()
-
             # 2. Atomic Replace (Requires Exclusive Lock)
             with SafeHDFStore(fname, mode='a') as h5:
                 # We have the lock, but SafeHDFStore has opened the original file.

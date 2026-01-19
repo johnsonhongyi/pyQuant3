@@ -4306,30 +4306,37 @@ def to_mp_run_async(cmd, urllist, *args, **kwargs):
         for c in tqdm(urllist, desc="mp_run_async-Running", ncols=getattr(ct, 'ncols', 80)):
             try:
                 r = cmd(c, **kwargs)
+                # r 是子进程返回
                 if r is None:
                     continue
-                # 1️⃣ 子进程返回的 dict 错误
+
                 elif isinstance(r, dict) and r.get("__error__"):
-                    errors.append((r["code"], r["exc_type"], r["exc_msg"]))
-                # 2️⃣ DataFrame 错误通过 attrs
+                    # 把 traceback 也保存下来
+                    errors.append({
+                        "code": r["code"],
+                        "exc_type": r["exc_type"],
+                        "exc_msg": r["exc_msg"],
+                        "traceback": r.get("traceback", "")
+                    })
+                    # continue  # ⚠️ 跳过本次循环，不处理 DataFrame
+                # 2️⃣ 判断 r 是否是 pd.DataFrame 的错误标记
                 elif hasattr(r, 'attrs') and '__error__' in r.attrs:
                     err_info = r.attrs['__error__']
                     errors.append((err_info['code'], err_info['exc_type'], err_info['exc_msg']))
-                # 3️⃣ 有效 DataFrame
+                    # continue  # ⚠️ 跳过
+                # 3️⃣ 否则 r 是正常 DataFrame
                 elif not hasattr(r, 'empty') or not r.empty:
+                # elif isinstance(r, pd.DataFrame) and not r.empty:
                     result.append(r)
 
             except Exception as e:
                 # 这里捕获 cmd 函数本身异常
                 errors.append((c, type(e).__name__, str(e)))
     else:
-        # cpu_used = cpu_count() // 2 + 1 #7
-        # pool_count7 = min(max(1, data_count // 100), cpu_used)   #7
-        # pool_count7 = min(cpu_count() // 2 + 1, max(4, data_count // 60)) #7
-        # log.info(f'count:{data_count} pool_count:{pool_count} pool_count5: {pool_count5} pool_count4:{pool_count4}')
         log.info(f'count:{data_count} pool_count:{pool_count}')
         func = functools.partial(cmd, **kwargs)
-        worker = functools.partial(process_file_exc, func)
+        # worker = functools.partial(process_file_exc, func)
+        worker = functools.partial(process_file_exc_traceback, func)
         try:
             # --- 关键：在多进程运行期间，只允许 WARNING 以上级别的日志进入管道 ---
             # 这样可以极大减少管道通信负担，避免结束时管道破裂
@@ -4344,33 +4351,30 @@ def to_mp_run_async(cmd, urllist, *args, **kwargs):
                     desc="Running_MP",
                     ncols=getattr(ct, 'ncols', 80),
                 ):
-                    # if r is None:
-                    #     continue
-
-                    # if isinstance(r, dict) and r.get("__error__"):
-                    #     errors.append(
-                    #         (r["code"], r["exc_type"], r["exc_msg"])
-                    #     )
-                    #     continue
-
-                    # if not hasattr(r, 'empty') or not r.empty:
-                    #     result.append(r)
-
                     # r 是子进程返回
                     if r is None:
                         continue
 
                     # 1️⃣ 判断 r 是否是 dict 错误
+                    # elif isinstance(r, dict) and r.get("__error__"):
+                    #     errors.append((r["code"], r["exc_type"], r["exc_msg"]))
                     elif isinstance(r, dict) and r.get("__error__"):
-                        errors.append((r["code"], r["exc_type"], r["exc_msg"]))
-
+                        # 把 traceback 也保存下来
+                        errors.append({
+                            "code": r["code"],
+                            "exc_type": r["exc_type"],
+                            "exc_msg": r["exc_msg"],
+                            "traceback": r.get("traceback", "")
+                        })
+                        # continue  # ⚠️ 跳过本次循环，不处理 DataFrame
                     # 2️⃣ 判断 r 是否是 pd.DataFrame 的错误标记
                     elif hasattr(r, 'attrs') and '__error__' in r.attrs:
                         err_info = r.attrs['__error__']
                         errors.append((err_info['code'], err_info['exc_type'], err_info['exc_msg']))
-
+                        # continue  # ⚠️ 跳过
                     # 3️⃣ 否则 r 是正常 DataFrame
                     elif not hasattr(r, 'empty') or not r.empty:
+                    # elif isinstance(r, pd.DataFrame) and not r.empty:
                         result.append(r)
 
             # 执行完后立即恢复原始日志等级
@@ -4390,8 +4394,18 @@ def to_mp_run_async(cmd, urllist, *args, **kwargs):
             log.error(f"MP Error: {e}")
 
     # 主进程统一记录错误（安全）
-    for code, etype, emsg in errors:
-        log.error("Worker failed | code=%s | %s: %s", code, etype, emsg)
+    # for code, etype, emsg, traceback in errors:
+    #     log.error("Worker failed | code=%s | %s: %s traceback:%s", code, etype, emsg,traceback)
+    
+    # 主进程统一记录错误（安全）
+    for err in errors:
+        log.error(
+            "Worker failed | code=%s | %s: %s\n%s",
+            err["code"],
+            err["exc_type"],
+            err["exc_msg"],
+            err.get("traceback", "")
+        )
 
     log.info(
         "Cpu_count: {%d} Time: %.2fs | Total OK: %d | Errors: %d",
@@ -4401,6 +4415,33 @@ def to_mp_run_async(cmd, urllist, *args, **kwargs):
         len(errors),
     )
     return result
+
+# def process_file_exc_traceback(func=None, code=None):
+#     try:
+#         return func(code)
+#     except Exception as ex:
+#         tb_str = traceback.format_exc()  # ✅ 完整堆栈
+#         # 子进程返回异常字典
+#         return {
+#             "__error__": True,
+#             "code": code,
+#             "exc_type": type(ex).__name__,
+#             "exc_msg": str(ex),
+#             "traceback": tb_str,  # 添加完整 traceback
+#         }
+
+def process_file_exc_traceback(func=None, code=None, **kwargs):
+    try:
+        return func(code, **kwargs)
+    except Exception as ex:
+        tb_str = traceback.format_exc()  # 捕获完整堆栈
+        return {
+            "__error__": True,
+            "code": code,
+            "exc_type": type(ex).__name__,
+            "exc_msg": str(ex),
+            "traceback": tb_str
+        }
 
 def process_file_exc(func=None, code=None):
     try:
