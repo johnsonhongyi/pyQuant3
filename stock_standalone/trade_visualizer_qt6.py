@@ -1835,9 +1835,11 @@ class MainWindow(QMainWindow, WindowMixin):
         headers = self.stock_table.horizontalHeader()
         headers.setStretchLastSection(True)
         # 设置表格列自适应
-        # 所有列自动根据内容调整宽度
-        for col in range(len(headers)):
+        # ⭐ [BUGFIX REVERTED] 恢复自动宽度，以保证默认显示不空旷
+        for col in range(len(self.headers)):
             headers.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
+        
+        headers.setStretchLastSection(True)
 
         # 在 MainWindow.__init__ 中修改
         self.stock_table.cellClicked.connect(self.on_table_cell_clicked) # 保留点击
@@ -2020,9 +2022,14 @@ class MainWindow(QMainWindow, WindowMixin):
         self.filter_panel.setVisible(False)
         self.main_splitter.addWidget(self.filter_panel)
 
-        # 设置默认分割比例（不加载保存的设置）
-        # 股票列表:过滤面板:图表区域 = 400:200:800
-        self.main_splitter.setSizes([400, 200, 800])
+        # 设置默认分割比例
+        # 股票列表:图表区域:过滤面板 = 1 : 4 : 1 (示例分配)
+        self.main_splitter.setSizes([350, 800, 250])
+        
+        # ⭐ [LAYOUT STABILITY] 设置拉伸因子，确保 Chart (Index 1) 随窗口自动缩放，而 Table (Index 0) 保持稳定
+        self.main_splitter.setStretchFactor(0, 0) # 左侧列表：不自动拉伸
+        self.main_splitter.setStretchFactor(1, 1) # 中间图表：自动占满空间
+        self.main_splitter.setStretchFactor(2, 0) # 右侧过滤：不自动拉伸
 
         # 安装全局事件过滤器
         # 安装全局事件过滤器 (安装到 QApplication 以便支持 App 级全局)
@@ -3677,6 +3684,18 @@ class MainWindow(QMainWindow, WindowMixin):
             self.stock_table.blockSignals(False)
             self.stock_table.setSortingEnabled(True)
             
+            # ⭐ [BUGFIX] 限制过宽列，防止挤压 K 线图
+            # 在自动宽度计算后，对特定长文本列进行二次限制
+            if not df.empty:
+                try:
+                    # 针对“决策理由”等可能很长的列设置上限
+                    for i, h in enumerate(self.headers):
+                        if h in ('last_reason', 'shadow_info'):
+                            if self.stock_table.columnWidth(i) > 200:
+                                self.stock_table.setColumnWidth(i, 200)
+                except Exception:
+                    pass
+
             # ⚡ 性能日志
             duration = time.time() - start_time
             n_rows = len(df) if not df.empty else 0
@@ -3684,6 +3703,15 @@ class MainWindow(QMainWindow, WindowMixin):
                 logger.warning(f"[TableUpdate] {update_type}: {n_rows}行, 耗时{duration:.3f}s ⚠️")
             else:
                 logger.info(f"[TableUpdate] {update_type}: {n_rows}行, 耗时{duration:.3f}s")
+        
+        # ⭐ [NEW] 如果当前已有加载的股票但表格中没选中，则尝试在表格中同步选中它
+        if self.current_code and self.stock_table.currentRow() == -1:
+            code_str = str(self.current_code)
+            if code_str in self._table_item_map:
+                row = self._table_item_map[code_str]
+                self.stock_table.blockSignals(True)
+                self.stock_table.setCurrentCell(row, 0)
+                self.stock_table.blockSignals(False)
     
     def _set_table_row(self, row_idx, stock_code, stock_name, optional_cols_real, 
                        optional_data, no_edit_flag, data_idx=None):
@@ -3894,6 +3922,20 @@ class MainWindow(QMainWindow, WindowMixin):
             if getattr(self, 'current_code', None) and hasattr(self, 'kline_plot'):
                 self._refresh_sensing_bar(self.current_code)
             
+            # ⭐ [SYNC FIX] 确保 IPC 数据导致的布局剧烈变化后，K 线图能自适应感知新的几何尺寸
+            if hasattr(self, 'kline_plot'):
+                def _force_sync_geometry():
+                    if not hasattr(self.kline_plot, 'vb'): return
+                    vb = self.kline_plot.vb
+                    # 1. 强力刷新坐标映射
+                    vb.sigResized.emit(vb)
+                    vb.update()
+                    # 2. 如果当前处于全览模式，则自动重置一次以校准范围
+                    self.kline_plot.update()
+                    
+                # 稍微多等一会儿，确保表格渲染完毕且 QSplitter 动作结束
+                QtCore.QTimer.singleShot(250, _force_sync_geometry)
+            
             # ⚡ 处理热榜信号 (轻量操作)
             if SIGNAL_QUEUE_AVAILABLE:
                 self._process_hot_signals(df if df is not None else self.df_all)
@@ -4037,7 +4079,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 # 但内部有相同 code/resample 的拦截逻辑
                 self.on_resample_changed(target_resample)
 
-        if self.current_code == code and self.select_resample == self.resample:
+        if self.current_code == code and self.select_resample == self.resample and not self.day_df.empty:
             return
         
         # ⭐ 清理交互状态，防止数据残留 (1.2/1.3)
@@ -4051,8 +4093,6 @@ class MainWindow(QMainWindow, WindowMixin):
         self._hide_crosshair()
         self._hide_tick_crosshair()
 
-        if self.stock_table.rowCount() == 0:
-            return
 
         current_row = self.stock_table.currentRow()
         found_in_list = False
@@ -5367,9 +5407,53 @@ class MainWindow(QMainWindow, WindowMixin):
             self.filter_action = filter_action
 
     def toggle_filter_panel(self, checked):
-        self.filter_panel.setVisible(checked)
-        if checked:
+        """⭐ [UI OPTIMIZATION] 内部平移方案：开启 Filter 时压缩左侧列表，确保 K 线图不被挤压，且窗口不漂移"""
+        # 1. 记录当前所有面板的宽度 [Table, Charts, Filter]
+        sizes = self.main_splitter.sizes()
+        if len(sizes) < 3: 
+            self.filter_panel.setVisible(checked)
+            return
+        
+        # 2. 记录当前可见性状态
+        is_presently_visible = self.filter_panel.isVisible()
+        
+        # 3. 确定 Filter 目标宽度 (若当前尺寸太小则设个保底值)
+        # 如果即将开启
+        if checked and not is_presently_visible:
+            target_f_width = 250
+            # 尝试从历史配置获取用户习惯的宽度
+            try:
+                config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
+                if os.path.exists(config_file):
+                    with open(config_file, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                        s_sizes = config.get('splitter_sizes', [])
+                        if len(s_sizes) == 3 and s_sizes[2] > 50:
+                            target_f_width = s_sizes[2]
+            except Exception:
+                pass
+
+            # 逻辑：从左侧列表(sizes[0])中借用宽度给右侧 Filter(sizes[2])
+            # 确保 K 线区域(sizes[1]) 宽度几乎不变
+            if sizes[0] > target_f_width + 100:
+                new_sizes = [sizes[0] - target_f_width, sizes[1], target_f_width]
+            else:
+                # 若列表太窄，则列表保留 100，剩余从图表扣
+                available_from_table = max(0, sizes[0] - 100)
+                from_charts = target_f_width - available_from_table
+                new_sizes = [100, max(100, sizes[1] - from_charts), target_f_width]
+            
+            self.filter_panel.setVisible(True)
+            self.main_splitter.setSizes(new_sizes)
             self.load_history_filters()
+
+        elif not checked and is_presently_visible:
+            # --- 动作：关闭 Filter ---
+            # 逻辑：把 Filter 回收的宽度全部还给左侧列表，不影响 K 线图宽度
+            f_w = sizes[2]
+            self.filter_panel.setVisible(False)
+            new_sizes = [sizes[0] + f_w, sizes[1], 0]
+            self.main_splitter.setSizes(new_sizes)
 
     def open_history_manager(self):
         import subprocess
