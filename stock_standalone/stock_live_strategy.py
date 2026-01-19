@@ -9,11 +9,12 @@ import time
 import os
 import winsound
 from datetime import datetime, timedelta
+import multiprocessing as mp
 import pandas as pd
-from queue import Queue, Empty
+from queue import Empty
+from typing import Any, Optional, Callable, Dict, List, Union
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional, Callable
 
 from intraday_decision_engine import IntradayDecisionEngine
 from risk_engine import RiskEngine
@@ -72,166 +73,167 @@ def normalize_speech_text(text: str) -> str:
 
     return text
 
-class VoiceAnnouncer:
-    """独立的语音播报引擎"""
-    queue: Queue[dict[str, Optional[str]]]
-    on_speak_start: Optional[Callable[[str], None]]
-    on_speak_end: Optional[Callable[[str], None]]
-    _stop_event: threading.Event
-    current_code: Optional[str]
-    current_engine: Optional[Any] # pyttsx3.Engine
-    _thread: Optional[threading.Thread]
-
-    def __init__(self) -> None:
-        self.queue = Queue()
-        self.on_speak_start = None # 回调函数: func(code)
-        self.on_speak_end = None   # 回调函数: func(code)
-        self._stop_event = threading.Event()
-        self._pause_event = threading.Event()  # 🛡️ 暂停信号
-        self._pause_event.set()  # 默认不暂停 (set = 可运行)
-        self.current_code = None
-        self.current_engine = None
+def _voice_process_target(queue: mp.Queue, stop_event: mp.Event):
+    """
+    语音播报外部进程目标函数
+    """
+    engine = None
+    try:
+        if pythoncom:
+            pythoncom.CoInitialize()
         
-        # 仅当 pyttsx3 可用时启动线程
         if pyttsx3:
-            self._thread = threading.Thread(target=self._run_loop, daemon=True)
-            self._thread.start()
-        else:
-            self._thread = None
-    
-    def pause(self) -> None:
-        """暂停语音播报 (用于避免与 Qt 窗口创建冲突)"""
-        self._pause_event.clear()
-        logger.debug("VoiceAnnouncer: 已暂停")
-    
-    def resume(self) -> None:
-        """恢复语音播报"""
-        self._pause_event.set()
-        logger.debug("VoiceAnnouncer: 已恢复")
-    
-    @property
-    def is_speaking(self) -> bool:
-        """检查是否正在播放语音"""
-        return self.current_engine is not None
-    
-    def wait_for_safe(self, timeout: float = 3.0) -> bool:
-        """
-        等待当前语音播放完成 (用于 Qt 操作前的安全等待)
-        返回: True 如果成功等待完成，False 如果超时
-        """
-        import time
-        start = time.time()
-        while self.is_speaking:
-            if time.time() - start > timeout:
-                logger.warning(f"VoiceAnnouncer: 等待语音完成超时 ({timeout}s)")
-                return False
-            time.sleep(0.1)
-        return True
-
-    def _speak_one(self, text: str):
-        """单次播报，每次重新初始化以避免 COM 状态问题"""
-        engine = None
-        try:
-            if pythoncom:
-                pythoncom.CoInitialize()
-            
-            if pyttsx3:
+            try:
                 engine = pyttsx3.init()
-                self.current_engine = engine
-                
                 # 设置语速
                 rate = engine.getProperty('rate')
                 if isinstance(rate, (int, float)):
                     engine.setProperty('rate', rate + 20)
                 else:
-                    engine.setProperty('rate', 200) # 容错处理
-            
-            # ⭐ 关键：语音前做规范化
-            speech_text = normalize_speech_text(text)
-                    
-            logger.info(f"📢 语音播报: {speech_text}")
-            engine.say(speech_text)
-            engine.runAndWait()
-            
-        except Exception as e:
-            logger.error(f"TTS Play Error: {e}")
-        finally:
-            self.current_engine = None
-            # 尝试清理
-            if engine:
-                try:
-                    engine.stop()
-                    del engine
-                except:
-                    pass
-            if pythoncom:
-                pythoncom.CoUninitialize()
+                    engine.setProperty('rate', 200)
+            except Exception as e:
+                logger.error(f"Voice Process TTS Init Error: {e}")
+                pyttsx3_available = False
+            else:
+                pyttsx3_available = True
+        else:
+            pyttsx3_available = False
 
-    def _run_loop(self):
-        """后台语音线程"""
-        if not pyttsx3:
-            return
-            
-        while not self._stop_event.is_set():
+        while not stop_event.is_set():
             try:
-                # 🛡️ 等待暂停状态解除 (用于避免与 Qt 操作冲突)
-                if not self._pause_event.wait(timeout=0.5):
-                    continue  # 如果暂停中，继续等待
-                
-                data = self.queue.get(timeout=1)
+                # 获取任务
+                data = queue.get(timeout=0.5)
                 text = data.get('text')
-                code = data.get('code')
-                
-                self.current_code = code
                 
                 if text:
-                    if self.on_speak_start:
-                        try:
-                            self.on_speak_start(code)
-                        except: pass
+                    speech_text = normalize_speech_text(text)
+                    logger.info(f"📢 [VoiceProcess] 播报: {speech_text}")
                     
-                    self._speak_one(text)
-                    
-                    if self.on_speak_end:
-                        try:
-                            self.on_speak_end(code)
-                        except: pass
-                
-                self.current_code = None
+                    # 每次循环初始化，确保最大限度的兼容性和 COM 状态正确
+                    engine = None
+                    try:
+                        if pythoncom:
+                            pythoncom.CoInitialize()
+                        
+                        if pyttsx3:
+                            engine = pyttsx3.init()
+                            # 设置语速
+                            rate = engine.getProperty('rate')
+                            if isinstance(rate, (int, float)):
+                                engine.setProperty('rate', rate + 20)
+                            else:
+                                engine.setProperty('rate', 200)
+                            
+                            engine.say(speech_text)
+                            engine.runAndWait()
+                            
+                    except Exception as e:
+                        logger.error(f"TTS Speak Error in VoiceProcess: {e}")
+                    finally:
+                        if engine:
+                            try:
+                                engine.stop()
+                                del engine
+                            except: pass
+                        if pythoncom:
+                            pythoncom.CoUninitialize()
                 
             except Empty:
                 continue
             except Exception as e:
-                logger.error(f"Voice Loop Error: {e}")
-                self.current_code = None
-                time.sleep(1) # 防止死循环刷屏
+                logger.error(f"VoiceProcess Loop Error: {e}")
+                time.sleep(1)
+
+    finally:
+        logger.info("VoiceProcess loop terminated.")
+
+
+class VoiceAnnouncer:
+    """独立的语音播报引擎 (多进程版)"""
+    queue: mp.Queue
+    on_speak_start: Optional[Callable[[Optional[str]], None]]
+    on_speak_end: Optional[Callable[[Optional[str]], None]]
+    _stop_event: Any # mp.synchronize.Event
+    current_code: Optional[str]
+    _process: Optional[mp.Process]
+
+    def __init__(self) -> None:
+        self.queue = mp.Queue()
+        self.on_speak_start = None # 回调函数: func(code)
+        self.on_speak_end = None   # 回调函数: func(code)
+        self._stop_event = mp.Event()
+        self._pause_event = threading.Event()  # 本地控制暂停 (仍保留用于逻辑兼容)
+        self._pause_event.set()
+        self.current_code = None
+        
+        if pyttsx3:
+            # 开启独立进程
+            self._process = mp.Process(target=_voice_process_target, args=(self.queue, self._stop_event), daemon=True)
+            self._process.start()
+            logger.info("VoiceAnnouncer: 多进程播报引擎已启动")
+        else:
+            self._process = None
+
+    def pause(self) -> None:
+        """暂停语音播报"""
+        self._pause_event.clear()
+        logger.debug("VoiceAnnouncer: 已暂停 (本地队列仍会接收但不发送)")
+    
+    def resume(self) -> None:
+        """恢复语音播报意识"""
+        self._pause_event.set()
+        logger.debug("VoiceAnnouncer: 已恢复")
+    
+    @property
+    def is_speaking(self) -> bool:
+        """多进程下准确状态检测较难，暂且通过队列判定"""
+        return not self.queue.empty()
+    
+    def wait_for_safe(self, timeout: float = 3.0) -> bool:
+        """等待队列清空"""
+        start = time.time()
+        while self.is_speaking:
+            if time.time() - start > timeout:
+                return False
+            time.sleep(0.1)
+        return True
 
     def say(self, text: str, code: Optional[str] = None) -> None:
-        if self._thread and self._thread.is_alive():
-            if self.queue.qsize() < 10: # 稍微放宽堆积限制
-                self.queue.put({'text': text, 'code': code})
+        if self._process and self._process.is_alive():
+            if not self._pause_event.is_set():
+                 logger.debug(f"Voice (Paused): {text}")
+                 return
+            
+            # 移除 qsize() 调用以避免在某些 Windows 环境下报 NotImplementedError
+            # 触发主进程回调
+            if self.on_speak_start:
+                try: self.on_speak_start(code)
+                except: pass
+            
+            try:
+                self.queue.put({'text': text, 'code': code}, block=False)
+            except Exception as e:
+                logger.error(f"Failed to put to voice queue: {e}")
+                return
+            
+            # 由于是异步进程，我们无法精准得知结束时间
+            # 简单延时触发结束回调或由 UI 自动处理
+            if self.on_speak_end:
+                # 估算一个播报时长
+                duration = len(text) * 0.3 + 1.0 
+                threading.Timer(duration, lambda: self.on_speak_end(code) if self.on_speak_end else None).start()
         else:
-            logger.info(f"Voice (Disabled): {text}")
+            logger.info(f"Voice (Disabled/Dead): {text}")
 
     def cancel_for_code(self, target_code: str):
-        """停止指定代码的语音播报并清除队列中相关项"""
-        # 1. 如果当前正在播报该代码，尝试停止
-        if self.current_code == target_code and self.current_engine:
-            try:
-                logger.info(f"🛑 Stopping voice for {target_code}")
-                self.current_engine.stop()
-            except Exception as e:
-                logger.error(f"Failed to stop engine: {e}")
-        
-        # 2. 清除队列中的等待项
+        """停止指定代码 (多进程下只能清空待播报项)"""
+        # 由于跨进程控制 engine.stop() 较难，主要清理队列
         temp_list = []
         try:
             while True:
                 item = self.queue.get_nowait()
-                if item.get('code') != target_code: # type: ignore
+                if item.get('code') != target_code:
                     temp_list.append(item)
-                else:
-                    logger.info(f"🗑️ Removed pending voice for {target_code}")
         except Empty:
             pass
         
@@ -240,8 +242,10 @@ class VoiceAnnouncer:
 
     def stop(self):
         self._stop_event.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2)
+        if self._process and self._process.is_alive():
+            self._process.join(timeout=1)
+            if self._process.is_alive():
+                 self._process.terminate()
 
 
 class StrategySupervisor:
@@ -2094,9 +2098,16 @@ class StockLiveStrategy:
 
     def _play_sound_async(self):
         try:
-             winsound.Beep(1000, 200) 
-        except:
-            pass
+            # 使用 MessageBeep 替代 PlaySound，更可靠且原生异步
+            # MB_ICONEXCLAMATION (0x00000030L) 是一个清晰的提示音
+            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except Exception as e:
+            logger.debug(f"MessageBeep failed: {e}")
+            try:
+                 # 兜底：如果 API 失败，尝试在线程中 Beep
+                 threading.Thread(target=lambda: winsound.Beep(1000, 200), daemon=True).start()
+            except:
+                 pass
 
 
     def start_auto_trading_loop(self, force: bool = False, concept_top5: Optional[list[Any]] = None):
