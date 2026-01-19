@@ -117,7 +117,7 @@ def _voice_worker(queue: 'mp.Queue', stop_flag: 'mp.Value'):
     except ImportError:
         pythoncom = None
     
-    print("[VoiceProcess] Worker started")
+    logger.debug("[VoiceProcess] Worker started")
     
     while stop_flag.value:
         try:
@@ -142,7 +142,7 @@ def _voice_worker(queue: 'mp.Queue', stop_flag: 'mp.Value'):
                 continue
                 
             # 依次播报所有消息
-            print(f"[VoiceProcess] 🔊 开始播报 {len(messages)} 条消息")
+            logger.debug(f"[VoiceProcess] 🔊 开始播报 {len(messages)} 条消息")
             for i, msg in enumerate(messages, 1):
                 if not stop_flag.value:
                     break
@@ -162,16 +162,16 @@ def _voice_worker(queue: 'mp.Queue', stop_flag: 'mp.Value'):
                     
                     # 规范化文本
                     speech_text = normalize_speech_text(msg)
-                    print(f"[VoiceProcess]   播报 [{i}/{len(messages)}]: {speech_text}")
+                    logger.debug(f"[VoiceProcess]   播报 [{i}/{len(messages)}]: {speech_text}")
                     
                     engine.say(speech_text)
                     engine.runAndWait()
                     
-                    print(f"[VoiceProcess]   ✅ 完成 [{i}/{len(messages)}]")
+                    logger.debug(f"[VoiceProcess]   ✅ 完成 [{i}/{len(messages)}]")
                     time.sleep(0.1)
                     
                 except Exception as e:
-                    print(f"[VoiceProcess]   ⚠️ 错误 [{i}/{len(messages)}]: {e}")
+                    logger.debug(f"[VoiceProcess]   ⚠️ 错误 [{i}/{len(messages)}]: {e}")
                 finally:
                     if engine:
                         try:
@@ -185,12 +185,12 @@ def _voice_worker(queue: 'mp.Queue', stop_flag: 'mp.Value'):
                         except:
                             pass
             
-            print(f"[VoiceProcess] ✅ 播报处理完成")
+            logger.debug(f"[VoiceProcess] ✅ 播报处理完成")
                 
         except Exception as e:
-            print(f"[VoiceProcess] Worker loop error: {e}")
+            logger.debug(f"[VoiceProcess] Worker loop error: {e}")
     
-    print("[VoiceProcess] Worker stopped")
+    logger.debug("[VoiceProcess] Worker stopped")
 
 
 class VoiceProcess:
@@ -6089,7 +6089,6 @@ class MainWindow(QMainWindow, WindowMixin):
         if prep_time > 0.1:
             logger.debug(f"[TreeviewUpdater] 填充 {n_rows} 行耗时 {prep_time:.3f}s")
 
-
     def load_history_filters(self):
         from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
 
@@ -6107,7 +6106,7 @@ class MainWindow(QMainWindow, WindowMixin):
             with open(history_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            # ⭐ 根据选择的 history 载入
+            # 根据选择的 history 载入
             history_key = self.history_selector.currentText()  # "history1" / "history2" / ...
             self.history_items = data.get(history_key, [])
 
@@ -6125,11 +6124,51 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.filter_combo.blockSignals(False)
 
-        # ⭐ 应用配置中保存的查询规则索引，或默认加载第一项
-        if hasattr(self, '_pending_filter_query_index'):
-            self._apply_pending_filter_index()
-        elif self.filter_combo.count() > 0:
-            self.on_filter_combo_changed(0)
+        # ⭐ 延迟刷新 ComboBox 触发的 tree 填充
+        if self.filter_combo.count() > 0:
+            QTimer.singleShot(100, lambda: self.on_filter_combo_changed(self.filter_combo.currentIndex()))
+
+
+    # def load_history_filters(self):
+    #     from tk_gui_modules.gui_config import SEARCH_HISTORY_FILE
+
+    #     self.filter_combo.blockSignals(True)
+    #     self.filter_combo.clear()
+
+    #     history_path = SEARCH_HISTORY_FILE
+
+    #     if not os.path.exists(history_path):
+    #         self.filter_combo.addItem("History file not found")
+    #         self.filter_combo.blockSignals(False)
+    #         return
+
+    #     try:
+    #         with open(history_path, "r", encoding="utf-8") as f:
+    #             data = json.load(f)
+
+    #         # ⭐ 根据选择的 history 载入
+    #         history_key = self.history_selector.currentText()  # "history1" / "history2" / ...
+    #         self.history_items = data.get(history_key, [])
+
+    #         for item in self.history_items:
+    #             q = item.get("query", "")
+    #             note = item.get("note", "")
+    #             label = f"{note} ({q})" if note else q
+    #             self.filter_combo.addItem(label, userData=q)  # Store query in UserData
+
+    #         if not self.history_items:
+    #             self.filter_combo.addItem("(No history)")
+
+    #     except Exception as e:
+    #         self.filter_combo.addItem(f"Error: {e}")
+
+    #     self.filter_combo.blockSignals(False)
+
+    #     # ⭐ 应用配置中保存的查询规则索引，或默认加载第一项
+    #     if hasattr(self, '_pending_filter_query_index'):
+    #         self._apply_pending_filter_index()
+    #     elif self.filter_combo.count() > 0:
+    #         self.on_filter_combo_changed(0)
 
     def on_filter_combo_changed(self, index):
         query_str = self.filter_combo.currentData()
