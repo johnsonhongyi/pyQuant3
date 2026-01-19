@@ -603,20 +603,8 @@ class StockLiveStrategy:
                 if 'resample' not in stock:
                     stock['resample'] = 'd'
                 
-                # 修复 key 格式（如果旧数据是以 code 为 key 的）
-                new_key = f"{stock['code']}_{stock['resample']}"
-                if key != new_key:
-                    logger.info(f"🔧 Migrating monitor key: {key} -> {new_key}")
-                    # 我们延后处理，避免在迭代时修改字典
-                    
-            # 建立新的字典以完成迁移
-            migrated_monitors = {}
-            for key, stock in self._monitored_stocks.items():
-                code = stock.get('code', key.split('_')[0])
-                resample = stock.get('resample', 'd')
-                new_key = f"{code}_{resample}"
-                migrated_monitors[new_key] = stock
-            self._monitored_stocks = migrated_monitors
+                # 保持使用 code 作为 key（不再迁移到 code_resample 格式）
+                # 旧逻辑已移除：不再将 000561 改为 000561_d
 
             # --- [新增] 从数据库恢复持仓股监控，防止重启后丢失卖点 ---
             if hasattr(self, 'trading_logger'):
@@ -627,7 +615,7 @@ class StockLiveStrategy:
                     for t in open_trades:
                         code = str(t['code']).zfill(6)
                         resample = t.get('resample', 'd')
-                        key = f"{code}_{resample}"
+                        key = code  # 使用纯 code 作为 key，不再加 _resample 后缀
                         
                         if key not in self._monitored_stocks:
                             self._monitored_stocks[key] = {
@@ -831,8 +819,8 @@ class StockLiveStrategy:
 
     def add_monitor(self, code, name, rule_type, value, tags=None, resample='d'):
         value = float(value)
-        # 支持多周期隔离，使用复合 Key
-        key = f"{code}_{resample}"
+        # 使用纯 code 作为 key（不再使用复合 key）
+        key = code
 
         if key not in self._monitored_stocks:
             self._monitored_stocks[key] = {
@@ -1197,8 +1185,8 @@ class StockLiveStrategy:
     def _check_strategies(self, df, resample='d'):
         try:
             # --- [新增] 全局交易日判断：非交易日不执行策略逻辑 ---
-            if not cct.get_trade_date_status():
-                return
+            # if not cct.get_trade_date_status():
+            #     return
 
             # 从数据库同步实时持仓信息 (按 代码+周期 映射以支持多周期持仓隔离)
             trades_info = self.trading_logger.get_trades()
@@ -1761,7 +1749,7 @@ class StockLiveStrategy:
                     combined_msgs = t1_prefix + "\n".join(list(unique_msgs.keys()) + list(last_duplicate.keys()))
 
                     log_msg = combined_msgs.replace('\n', ' | ')
-                    logger.info(f"Strategy ALERT: {code} ({data['name']}) Triggered. Action: {action} Msg: {log_msg}")
+                    logger.debug(f"Strategy ALERT: {code} ({data['name']}) Triggered. Action: {action} Msg: {log_msg}")
                     self._trigger_alert(code, data['name'], combined_msgs, action=action, price=current_price, resample=resample)
                     data['last_alert'] = now
 
@@ -1967,18 +1955,12 @@ class StockLiveStrategy:
         return self._monitored_stocks
 
     def remove_monitor(self, code, resample=None):
-        """移除指定代码和周期的监控"""
-        if resample:
-            key = f"{code}_{resample}"
-            if key in self._monitored_stocks:
-                del self._monitored_stocks[key]
-                logger.info(f"Removed monitor {key}")
-        else:
-            # 移除所有周期下的监控
-            keys_to_remove = [k for k in self._monitored_stocks if k.startswith(f"{code}_") or k == code]
-            for key in keys_to_remove:
-                del self._monitored_stocks[key]
-                logger.info(f"Removed monitor for {key}")
+        """移除指定代码的监控"""
+        # 使用纯 code 作为 key
+        key = code
+        if key in self._monitored_stocks:
+            del self._monitored_stocks[key]
+            logger.info(f"Removed monitor {key}")
         
         self._save_monitors()
 

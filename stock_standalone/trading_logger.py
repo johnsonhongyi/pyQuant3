@@ -3,7 +3,7 @@ import json
 import logging
 from datetime import datetime
 from typing import Any, Optional
-
+import pandas as pd
 # 处理 override 装饰器 (Python 3.12+ 才有)
 try:
     from typing import override # type: ignore
@@ -379,9 +379,9 @@ class TradingLogger:
                         SET sell_date=?, sell_price=?, sell_reason=?, fee=?, profit=?, pnl_pct=?, status='CLOSED'
                         WHERE id=?
                     """, (now_str, price, reason, total_fee, net_profit, pnl_pct, t_id))
-                    logger.info(f"TradeLogger: {code} ({name}) 平仓成功. 盈亏: {net_profit:.2f} ({pnl_pct:.2%})")
+                    logger.debug(f"TradeLogger: {code} ({name}) 平仓成功. 盈亏: {net_profit:.2f} ({pnl_pct:.2%})")
                 else:
-                    logger.info(f"TradeLogger: {code} ({name}) Signal 'CLOSE' ignored (No OPEN position).")
+                    logger.debug(f"TradeLogger: {code} ({name}) Signal 'CLOSE' ignored (No OPEN position).")
             
             conn.commit()
             conn.close()
