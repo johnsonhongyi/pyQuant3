@@ -358,7 +358,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.refresh_enabled = True
         
         self.visualizer_process = None # Track visualizer process
-        self.viz_command_queue = mp.Queue()  # ⭐ [FIX] 提前初始化队列，供 send_df 使用
+        self.viz_command_queue = None  # ⭐ [FIX] 提前初始化队列，供 send_df 使用
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.after(5000, self._start_feedback_listener)
 
@@ -483,7 +483,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.tree.bind("<Double-1>", self.on_tree_double_click)
         self.tree.bind("<Button-2>", self.copy_code)
         
-
 
         self.df_all = pd.DataFrame()      # 保存 fetch_and_process 返回的完整原始数据
         self.current_df = pd.DataFrame()
@@ -729,6 +728,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if obj and obj.get("cmd") == "REQ_FULL_SYNC":
                             logger.info(f'[Pipe] Feedback listener cmd REQ_FULL_SYNC')
                             self._force_full_sync_pending = True
+                            if self.viz_command_queue:
+                                self.viz_command_queue = None
                             self._df_first_send_done = False
 
                 except Exception as e:
@@ -957,6 +958,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 # self._df_sync_flag = False
                 self._df_sync_running = False
                 self._df_sync_thread.join(timeout=2)
+                if self.viz_command_queue:
+                    self.viz_command_queue = None
                 self._df_sync_thread = None
 
             # 先停止 Qt 子进程
@@ -1852,6 +1855,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             if hasattr(self, 'df_ui_prev'):
                                 del self.df_ui_prev  # 删除缓存，模拟初始化
                             self._last_resample = self.global_values.getkey("resample")
+                            if self.viz_command_queue:
+                                self.viz_command_queue = None
                             self._df_first_send_done = False
                             self.vis_var.set(True)
                 # -------------------------
@@ -2405,6 +2410,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.debug(f"[send_df] force full send: deleting df_ui_prev, _df_first_send_done={self._df_first_send_done}")
             if hasattr(self, 'df_ui_prev'):
                 del self.df_ui_prev  # 删除缓存，模拟初始化
+            if self.viz_command_queue:
+                self.viz_command_queue = None
             self._df_first_send_done = False
         # self.update_treeview_cols(self.current_cols)
         tip_var_status_flag.value = self.tip_var.get()
