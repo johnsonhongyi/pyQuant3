@@ -15,7 +15,6 @@ import signal
 import pandas as pd
 import numpy as np
 import pyqtgraph as pg
-
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QHeaderView, QLabel, QSplitter, 
@@ -45,7 +44,7 @@ from signal_types import SignalPoint, SignalType, SignalSource
 from StrongPullbackMA5Strategy import StrongPullbackMA5Strategy
 from strong_consolidation_strategy import StrongConsolidationStrategy
 from data_utils import (
-    calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe)
+    calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe,PIPE_NAME_TK)
 
 import re
 try:
@@ -1547,7 +1546,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.setWindowTitle("PyQuant Stock Visualizer (Qt6 + PyQtGraph)")
         self.sender = StockSender(callback=None)
         self.command_queue = command_queue  # ⭐ 新增：内部指令队列
-        # WindowMixin requirement: scale_factor
+        # WindowMixin 要求: scale_factor
         self._debug_realtime = debug_realtime   # 临时调试用
         self.scale_factor = get_windows_dpi_scale_factor()
         self.hdf5_mutex = QMutex()
@@ -1649,7 +1648,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.code_info_map = {}   # ⭐ 新增
         self.current_crosshair_idx = -1  # ⭐ 新增：通达信模式焦点索引
 
-        # Main Layout
+        # 主布局
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QVBoxLayout(main_widget)
@@ -1660,7 +1659,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
         main_layout.addWidget(self.main_splitter)
 
-        # --- Decision Panel (Phase 7) ---
+        # --- 决策面板 (第 7 阶段) ---
         self.decision_panel = QFrame()
         self.decision_panel.setFixedHeight(40)
         self.decision_panel.setObjectName("DecisionPanel")
@@ -1715,7 +1714,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.decision_layout.addStretch()
 
-        # 💓 Heartbeat Label (Strategy Alive Indicator)
+        # 💓 心跳标签 (策略运行指示器)
         self.hb_label = QLabel("💓")
         self.decision_layout.addWidget(self.hb_label)
 
@@ -1908,7 +1907,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.stock_table.verticalHeader().setVisible(False)
         self.main_splitter.addWidget(self.stock_table)
 
-        # 2. Right Area: Splitter (Day K-Line + Intraday)
+        # 2. 右侧区域: 分离器 (日 K 线 + 分时图)
         right_splitter = QSplitter(Qt.Orientation.Vertical)
         self.main_splitter.addWidget(right_splitter)
 
@@ -1917,12 +1916,12 @@ class MainWindow(QMainWindow, WindowMixin):
         self.main_splitter.setCollapsible(0, False) # Prevent table from being completely hidden
 
 
-        # -- Top Chart: Day K-Line
+        # -- 顶部图表: 日 K 线
         self.kline_widget = pg.GraphicsLayoutWidget()
-        self.kline_plot = self.kline_widget.addPlot(title="Daily K-Line")
+        self.kline_plot = self.kline_widget.addPlot(title="日线 K 线")
         self.kline_plot.showGrid(x=True, y=True)
-        self.kline_plot.setLabel('bottom', 'Date Index')
-        self.kline_plot.setLabel('left', 'Price')
+        self.kline_plot.setLabel('bottom', '日期索引')
+        self.kline_plot.setLabel('left', '价格')
         # ⭐ 禁用自动范围，防止鼠标悬停时视图跳动
         self.kline_plot.disableAutoRange()
         right_splitter.addWidget(self.kline_widget)
@@ -1930,9 +1929,9 @@ class MainWindow(QMainWindow, WindowMixin):
         # --- 添加重置按钮 (只添加一次) ---
         # self._add_reset_button()
 
-        # -- Bottom Chart: Intraday
+        # -- 底部图表: 分时图
         self.tick_widget = pg.GraphicsLayoutWidget()
-        self.tick_plot = self.tick_widget.addPlot(title="Real-time / Intraday")
+        self.tick_plot = self.tick_widget.addPlot(title="实时 / 分时图")
         self.tick_plot.showGrid(x=True, y=True)
         # ⭐ 禁用自动范围，防止鼠标悬停时视图跳动
         self.tick_plot.disableAutoRange()
@@ -1987,7 +1986,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tick_hline.setVisible(False)
         self.tick_crosshair_label.setVisible(False)
 
-        # Set splitter sizes (70% top, 30% bottom)
+        # 设置分割器大小 (70% 顶部, 30% 底部)
         right_splitter.setSizes([500, 200])
 
         # 3. Filter Panel (Initially Hidden)
@@ -3713,6 +3712,10 @@ class MainWindow(QMainWindow, WindowMixin):
             
             if force_full or not self._table_item_map:
                 # === 全量刷新 ===
+                # ⚡ [UI FIX] 保存当前选中/关注的股票
+                target_code = getattr(self, 'current_code', None)
+                target_row_idx = -1
+
                 logger.debug("[TableUpdate] Clearing table...")
                 self.stock_table.setRowCount(0) # 显式清空
                 # ⚡ [SAFEGUARD] 强制处理事件循环，确保旧对象被安全销毁
@@ -3720,15 +3723,17 @@ class MainWindow(QMainWindow, WindowMixin):
                 
                 logger.debug("[TableUpdate] Allocating rows...")
                 self.stock_table.setRowCount(n_rows)
-                logger.debug(f"[TableUpdate] Filling {n_rows} rows...")
+                # logger.debug(f"[TableUpdate] Filling {n_rows} rows...")
                 
                 self._table_item_map = {}
                 
                 for row_idx in range(n_rows):
-                    if row_idx % 1000 == 0:
-                        logger.debug(f"[TableUpdate] Filling row {row_idx}...")
+                    # if row_idx % 1000 == 0:
+                    #     logger.debug(f"[TableUpdate] Filling row {row_idx}...")
                     try:
                         stock_code = str(codes[row_idx])
+                        if stock_code == target_code:
+                            target_row_idx = row_idx
                         stock_name = str(names[row_idx]) if pd.notnull(names[row_idx]) else ''
                         
                         self._set_table_row(row_idx, stock_code, stock_name, 
@@ -4355,17 +4360,24 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.error(f"Traceback: {traceback.format_exc()}")
 
     def _request_full_sync(self):
-        """向 Monitor 发送全量同步请求"""
-        try:
-            success = send_code_via_pipe({"cmd": "REQ_FULL_SYNC"}, logger=logger)
-            if success:
-                logger.info("[Sync] Requested full sync via Pipe")
-                # 暂时将版本设为无效，防止在收到全量包前继续处理碎片增量
-                self.expected_sync_version = -1
-            else:
-                logger.warning("[Sync] Failed to send sync request via Pipe")
-        except Exception as e:
-            logger.error(f"[Sync] Request full sync error: {e}")
+        """向 Monitor 发送全量同步请求 (带重试)"""
+        max_retries = 3
+        for i in range(max_retries):
+            try:
+                success = send_code_via_pipe({"cmd": "REQ_FULL_SYNC"}, logger=logger,pipe_name=PIPE_NAME_TK)
+                if success:
+                    logger.info(f"[Sync] Requested full sync via Pipe (Attempt {i+1})")
+                    # 暂时将版本设为无效，防止在收到全量包前继续处理碎片增量
+                    self.expected_sync_version = -1
+                    return
+                else:
+                    logger.warning(f"[Sync] Failed to send sync request via Pipe (Attempt {i+1})")
+                    time.sleep(0.5) # Wait before retry
+            except Exception as e:
+                logger.error(f"[Sync] Request full sync error (Attempt {i+1}): {e}")
+                time.sleep(0.5)
+        
+        logger.error("[Sync] Gave up requesting full sync after retries")
 
     def _process_hot_signals(self, df):
         """从df中提取热榜Top5推送到信号队列"""
@@ -4599,13 +4611,13 @@ class MainWindow(QMainWindow, WindowMixin):
     # def render_charts_opt(self, code, day_df, tick_df):
     def render_charts(self, code, day_df, tick_df):
         """
-        Render full charts:
-          - Daily K-line + MA5/10/20 + Bollinger + Signals
-          - Volume + Volume MA5
-          - Realtime ghost candle
-          - Intraday Tick plot + avg line + pre_close
-          - Theme aware
-          - Signals arrows on top
+        渲染完整图表：
+          - 日 K 线 + MA5/10/20 + 布林带 + 信号
+          - 成交量 + 成交量 MA5
+          - 实时幽灵 K 线 (Ghost Candle)
+          - 实时分时图 + 均价线 + 昨日收盘参考线
+          - 主题感知
+          - 顶层信号箭头
         """
         if day_df.empty:
             self.kline_plot.setTitle(f"{code} - No Data")
@@ -4633,14 +4645,14 @@ class MainWindow(QMainWindow, WindowMixin):
             vol_ma_color = QColor(255,255,0)
             tick_curve_color = 'w'
             tick_avg_color = QColor(255,255,0)
-            pre_close_color = 'b'
+            pre_close_color = '#FF0000' # Bright Red for Yesterday's Close
         else:
             ma_colors = {'ma5':'b','ma10':'orange','ma20':QColor(255,140,0)}
             bollinger_colors = {'upper':QColor(139,0,0),'lower':QColor(0,128,0)}
             vol_ma_color = QColor(255,140,0)
             tick_curve_color = 'k'
             tick_avg_color = QColor(255,140,0)
-            pre_close_color = 'b'
+            pre_close_color = '#FF0000' # Bright Red for Yesterday's Close
 
         day_df = _normalize_dataframe(day_df)
 
@@ -4648,6 +4660,17 @@ class MainWindow(QMainWindow, WindowMixin):
             day_df = day_df.set_index('date')
         logger.debug(f'day_df.index:\n {day_df.index[-3:]}')
         day_df = day_df.sort_index()
+        
+        # ⚡ [DEBUG] Check OHLC data integrity
+        try:
+            if not day_df.empty:
+                cols_to_check = [c for c in ['open', 'close', 'high', 'low'] if c in day_df.columns]
+                tail_data = day_df[cols_to_check].tail(3)
+                logger.debug(f"[RT] day_df OHLC tail:\n{tail_data}")
+                if day_df[cols_to_check].isnull().values.any():
+                    logger.warning(f"[RT] day_df contains NaNs:\n{day_df[cols_to_check].isnull().sum()}")
+        except Exception as e:
+            logger.error(f"[RT] Error inspecting day_df: {e}")
         # day_df.index = day_df.index.normalize()   # 去掉时间
         dates = day_df.index
         x_axis = np.arange(len(day_df))
@@ -4791,33 +4814,6 @@ class MainWindow(QMainWindow, WindowMixin):
             except Exception as e:
                 logger.debug(f"TD Sequential display error: {e}")
 
-            # try:
-            #     from JSONData.tdx_data_Day import td_sequential_fast
-            #     with timed_ctx("td_sequential_fast", warn_ms=100):
-            #         df_td = td_sequential_fast(day_df.copy())
-                
-            #     # 绘制 TD 计数标记 - 统一使用明黄色，在K线上方显示
-            #     for i in range(len(df_td)):
-            #         buy_cnt = df_td['td_buy_count'].iloc[i]
-            #         sell_cnt = df_td['td_sell_count'].iloc[i]
-                    
-            #         td_cnt = buy_cnt if buy_cnt > 0 else sell_cnt
-            #         if td_cnt > 0:
-            #             # 所有序列：在 K 线上方显示数字，使用明黄色
-            #             y_pos = day_df['high'].iloc[i] * 1.008
-            #             # 第 9 根用更亮的黄色和更大字体
-            #             color = '#FFFF00' if td_cnt == 9 else '#FFD700'  # 明黄色 / 金黄色
-            #             font_size = 14 if td_cnt == 9 else 11
-            #             font_weight = QtGui.QFont.Weight.Bold if td_cnt >= 7 else QtGui.QFont.Weight.Normal
-                        
-            #             text = pg.TextItem(str(td_cnt), color=color, anchor=(0.5, 1))
-            #             text.setFont(QtGui.QFont('Arial', font_size, font_weight))
-            #             text.setPos(x_axis[i], y_pos)
-            #             self.kline_plot.addItem(text)
-            #             self.td_text_items.append(text)
-            # except Exception as e:
-            #     logger.debug(f"TD Sequential display error: {e}")
-
         # ----------------- 绘制 Volume -----------------
         if 'amount' in day_df.columns:
             if not hasattr(self, 'volume_plot'):
@@ -4863,7 +4859,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.vol_ma5_curve.setData(x_axis, ma5_vol)
                 self.vol_ma5_curve.setPen(pg.mkPen(vol_ma_color, width=1.5))
 
-        # --- [UPGRADE] 信号标记渲染 ---
+        # --- [升级] 信号标记渲染 ---
         self.signal_overlay.clear()
         kline_signals = []
 
@@ -5003,12 +4999,62 @@ class MainWindow(QMainWindow, WindowMixin):
             self.tick_avg_prices = avg_prices
             self.tick_times = tick_df['time'].tolist() if 'time' in tick_df.columns else []
 
-            # pre_close 虚线
-            if not hasattr(self, 'pre_close_line') or self.pre_close_line not in self.tick_plot.items:
-                self.pre_close_line = self.tick_plot.addLine(y=pre_close, pen=pg.mkPen(pre_close_color, style=Qt.PenStyle.DashLine))
-            else:
-                self.pre_close_line.setValue(pre_close)
-                self.pre_close_line.setPen(pg.mkPen(pre_close_color, style=Qt.PenStyle.DashLine))
+            # --- 分时图参考线“归一化”防压扁逻辑 ---
+            # 目标：当昨日/前日价格差距巨大时，将参考线“吸引”到可见边缘，确保今日分时图足够大，同时展示相对高低关系
+            p_min, p_max = prices.min(), prices.max()
+            p_mid = (p_min + p_max) / 2
+            p_span = max(p_max - p_min, p_mid * 0.005) # 最小 0.5% 视口高度
+            
+            # 定义舒适显示边界：参考线偏离今日中点超过 1.2 倍今日振幅时进行特殊处理
+            v_limit = 1.0 * p_span 
+            
+            ref_items = []
+            # 1. 昨日收盘
+            ref_items.append({'id': 'pre', 'val': pre_close, 'color': pre_close_color})
+            
+            # 2. 前日均价
+            if len(day_df) >= 2:
+                ppre_row = day_df.iloc[-2]
+                ppre_vol = ppre_row.get('volume', ppre_row.get('vol', 0))
+                if ppre_vol > 0:
+                    ppre_avg = ppre_row.get('amount', 0) / ppre_vol
+                    ref_items.append({'id': 'ppre', 'val': ppre_avg, 'color': '#00FF00'})
+
+            # 排序以保持相对高低顺序 (归一化的核心：只要谁比谁高就好)
+            ref_items.sort(key=lambda x: x['val'])
+            
+            for i, item in enumerate(ref_items):
+                true_val = item['val']
+                diff = true_val - p_mid
+                
+                if abs(diff) > v_limit:
+                    # 偏离太大，归一化映射：固定在今日视口边缘附近，并根据序号排队，防止重合
+                    direction = 1 if diff > 0 else -1
+                    # 让多条线在边缘留出微小间隙 (5% 振幅步长)
+                    rank_offset = (i - (len(ref_items)-1)/2.0) * (0.05 * p_span)
+                    item['draw_y'] = p_mid + (direction * v_limit) + rank_offset
+                else:
+                    item['draw_y'] = true_val
+
+            # 更新/绘制 UI 线条
+            for item in ref_items:
+                if item['id'] == 'pre':
+                    if not hasattr(self, 'pre_close_line') or self.pre_close_line not in self.tick_plot.items:
+                        self.pre_close_line = self.tick_plot.addLine(y=item['draw_y'], pen=pg.mkPen(item['color'], width=2, style=Qt.PenStyle.DashLine))
+                    else:
+                        self.pre_close_line.setValue(item['draw_y'])
+                        self.pre_close_line.setPen(pg.mkPen(item['color'], width=2, style=Qt.PenStyle.DashLine))
+                elif item['id'] == 'ppre':
+                    if not hasattr(self, 'ppre_avg_line') or self.ppre_avg_line not in self.tick_plot.items:
+                        self.ppre_avg_line = self.tick_plot.addLine(y=item['draw_y'], pen=pg.mkPen(item['color'], width=2, style=Qt.PenStyle.DashLine))
+                    else:
+                        self.ppre_avg_line.setValue(item['draw_y'])
+                        self.ppre_avg_line.setPen(pg.mkPen(item['color'], width=2, style=Qt.PenStyle.DashLine))
+                    self.ppre_avg_line.setVisible(True)
+
+            # 兜底：如果没拿到 ppre 数据，隐藏线条
+            if len(ref_items) < 2 and hasattr(self, 'ppre_avg_line'):
+                self.ppre_avg_line.hide()
 
             pct_change = (prices[-1]-pre_close)/pre_close*100 if pre_close!=0 else 0
 
