@@ -1858,7 +1858,6 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
     increasing = None
     id_cout = len(df)
     limit = min_len
-
     if id_cout < limit:
         # if  df.index.is_monotonic_increasing:
         #     increasing = True
@@ -1972,8 +1971,12 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
     #     df=df[-id_cout:].set_index('date')
     # if not isinstance(df.index, pd.DatetimeIndex) and 'date' in df.columns:
     #     df.index = pd.to_datetime(df.pop('date'), errors='coerce')
+
     if 'date' in df.columns:
         df.index = df.pop('date')
+        df=df[-id_cout:]
+    elif 'index' in df.columns:
+        df.index = df.pop('index')
         df=df[-id_cout:]
     else:
         df=df[-id_cout:]
@@ -1983,6 +1986,7 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
     if detect_calc_support:
         df = detect_local_extremes_filtered(df)
         df = calc_support_resistance_vec(df)
+
     return df
 
 tdx_max_int = ct.tdx_max_int
@@ -2398,7 +2402,8 @@ def get_tdx_Exp_day_to_df(
     #     df.index = pd.to_datetime(df.pop('date'), errors='coerce')
     if 'date' in df.columns:
         df.index = df.pop('date')
-
+    if 'index' in df.columns:
+        df.index = df.pop('index')
     return df
 
 
@@ -4896,7 +4901,7 @@ def compute_perd_df(dd, lastdays=3, resample='d',normalized=False):
     dfupper = df[-ct.bollupperT:]
     upperT = dfupper['high'][(dfupper['high'] > 0) & (dfupper['high'] > dfupper['upper'])]
     upperL = dfupper['low'][(dfupper['low'] > dfupper['ma5d']) & (dfupper['ma5d'] > 0)]
-    upperLIS, posLIS = LIS_TDX(upperT) if len(upperT) > 0 else ([], [])
+    upperLIS, posLIS = LIS_TDX(upperT) if len(upperT) > 5 else ([], [])
     dd['upperT'] = len(posLIS)
     dd['upperL'] = len(upperL)
 
@@ -5685,6 +5690,7 @@ def generate_lastN_features(df, lastdays=6):
 #     return df_temp
 
 def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,normalized=False):
+
     if df is not None and len(df) > lastdays:
         if len(df) > lastdays + 1:
             # 判断lastdays > 9 
@@ -6534,7 +6540,9 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
         diff_code = list(set(codelist) - set(tdx_list))
         diff_code = [
             co for co in diff_code if co.startswith(cct.code_startswith)]
-        if len(diff_code) > 5:
+        # 假设 diff_code 是你的列表
+        not_92_list = [code for code in diff_code if not code.startswith('92')]
+        if len(not_92_list) > 5:
             log.error("tdx Out:%s code:%s" % (len(diff_code), diff_code))
             print(f"diff_code: {len(diff_code)} resample:{resample} ",end='')
             tdx_diff = get_tdx_exp_all_LastDF_DL(
@@ -6554,11 +6562,11 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
                 if newdays is None or newdays > 0:
                     h5 = h5a.write_hdf_db(h5_fname, tdx_diff, table=h5_table, append=True)
                 tdxdata = pd.concat([tdxdata, tdx_diff], axis=0)
-                
-    top_all = cct.combine_dataFrame(
-        top_all, tdxdata, col=None, compare=None, append=False)
-    top_all['llow'] = top_all.get('llow', 0)  # 列不存在时用默认0
-    top_all = top_all[top_all['llow'] > 0]
+    if len(top_all) > 5:
+        top_all = cct.combine_dataFrame(
+            top_all, tdxdata, col=None, compare=None, append=False)
+        top_all['llow'] = top_all.get('llow', 0)  # 列不存在时用默认0
+        top_all = top_all[top_all['llow'] > 0]
     #20231110 add today topR
     #20250607 mod today topR
     if cct.get_day_istrade_date() and len(top_all) > 2:
@@ -6616,11 +6624,30 @@ def get_append_lastp_to_df(top_all=None, lastpTDX_DF=None, dl=ct.Resample_LABELS
             return np.nan
         return round((x - y) / y * 100, 1)
 
+
+    # # 只在满足条件时计算
+    # if (top_all.get('dff', pd.Series([0]*len(top_all)))[0] == 0) \
+    #         or (top_all.get('close', pd.Series([0]*len(top_all)))[0] == top_all.get('lastp1d', pd.Series([0]*len(top_all)))[0]):
+    #     top_all['dff'] = list(map(safe_dff, top_all['buy'].values, top_all['df2'].values))
+    
+    # 安全获取 Series 的第一个元素
+    def safe_first(s, default=0):
+        """返回 Series 或 list 的第一个元素，如果为空返回 default"""
+        if s is None or len(s) == 0:
+            return default
+        return s.iloc[0] if isinstance(s, pd.Series) else s[0]
+
+    # 取各列第一个值
+    dff_first     = safe_first(top_all.get('dff'))
+    close_first   = safe_first(top_all.get('close'))
+    lastp1d_first = safe_first(top_all.get('lastp1d'))
+
     # 只在满足条件时计算
-    if (top_all.get('dff', pd.Series([0]*len(top_all)))[0] == 0) \
-            or (top_all.get('close', pd.Series([0]*len(top_all)))[0] == top_all.get('lastp1d', pd.Series([0]*len(top_all)))[0]):
-        top_all['dff'] = list(map(safe_dff, top_all['buy'].values, top_all['df2'].values))
-        
+    if (dff_first == 0) or (close_first == lastp1d_first):
+        top_all['dff'] = list(map(safe_dff, 
+                                  top_all.get('buy', pd.Series([])).values, 
+                                  top_all.get('df2', pd.Series([])).values))
+
 
     for col in co2int:
         if col in tdxdata.columns:
@@ -6787,11 +6814,6 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
 
     """
     time_t = time.time()
-    # df = rl.get_sina_Market_json(market)
-    # code_list = np.array(df.code)
-    # if type==0:
-    #     results = cct.to_mp_run(get_tdx_day_to_df_last, codeList)
-    # else:
     end = cct.day8_to_day10(end)
     if dt is not None and filter == 'n':
         if len(str(dt)) < 8:
@@ -6828,12 +6850,6 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
     elif dt is not None:
         if len(str(dt)) < 8:
             dl = int(dt)
-#            dt = int(dt)
-            # dt = None
-            # df = get_tdx_Exp_day_to_df('999999',end=end).sort_index(ascending=False)
-            # dt = get_duration_price_date('999999', dt=dt,ptype=ptype,df=df)
-            # dt = df[df.index <= dt].index.values[0]
-#            dt=get_duration_Index_date('999999',dl=dt)
             log.info("Codelist:%s LastDF:%s,%s" % (len(codeList),dt, dl))
             dt = None
         else:
@@ -6853,11 +6869,17 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             log.info("LastDF:%s,%s" % (dt, dl))
         if dl is not None and end is not None:
             dl = dl + cct.get_today_duration(end, cct.get_today())
-#            print cct.get_today_duration(end,cct.get_today())
 
         if len(codeList) > 200:
             log.debug("Codelist:%s LastDF:%s,%s" % (len(codeList),dt, dl))
             
+
+            # results=[]
+            # for code in codeList:
+            #     print(code,)
+            #     df = get_tdx_exp_low_or_high_power(code, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample)
+            #     results.append(df)
+
             results = cct.to_mp_run_async(
                 get_tdx_exp_low_or_high_power, codeList, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample,detect_calc_support=detect_calc_support)
                 
@@ -6870,10 +6892,7 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
             # #     print(code,)
             # #     results.append(get_tdx_exp_low_or_high_power(code, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample))
                 
-            # results=[]
-            # for code in codeList:
-            #    print(code,)
-            #    results.append(get_tdx_exp_low_or_high_power(code, dt=dt, ptype=ptype, dl=dl, end=end, power=power, lastp=lastp, newdays=newdays, resample=resample))
+
 
         else:
             results = []
@@ -6897,7 +6916,8 @@ def get_tdx_exp_all_LastDF_DL(codeList, dt=None, end=None, ptype='low', filter='
            # print(code)
            results.append(get_tdx_Exp_day_to_df, codeList, type='f', start=None, end=None, dl=None, newdays=1,detect_calc_support=detect_calc_support)
     # print results
-#    df = pd.DataFrame(results, columns=ct.TDX_Day_columns)
+    # df = pd.DataFrame(results, columns=ct.TDX_Day_columns)
+
     df = pd.DataFrame(results)
     df = df.dropna(how='all')
     if len(df) > 0 and 'code' in df.columns:
@@ -7492,8 +7512,20 @@ if __name__ == '__main__':
     #     get_tdx_append_now_df_api_tofile(inx,dm=dm_index)
     # write_market_index_to_df()
     # Write_market_all_day_mp()
-
-
+    # code = '920091'
+    code = '920099'
+    df2 = get_tdx_Exp_day_to_df(code,dl=1,newdays=0)
+    # df2 = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )
+    resample = '3d'
+    try:
+        df=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
+    except Exception as e:
+        print("执行异常:\n", traceback.format_exc())
+    else:
+        pass
+    finally:
+        pass
+    print(f'df2 :{df2}')
     dd = get_tdx_Exp_day_to_df(code, dl=1) 
     dd2 = get_tdx_Exp_day_to_df(code, dl=480,resample='m')
     dd3 = get_tdx_Exp_day_to_df(code, dl=60,resample='d')
