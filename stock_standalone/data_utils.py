@@ -1324,7 +1324,7 @@ def fetch_and_process(
     if log_level is not None:
         logger.setLevel(log_level.value)
     logger.info(f"子进程开始，日志等级: {log_level.value if hasattr(log_level, 'value') else log_level} duration_sleep_time:{duration_sleep_time}")
-    
+    print(f'single:{single}')
     START_INIT = 0
     g_values = cct.GlobalValues(shared_dict)
     resample = g_values.getkey("resample") or "d"

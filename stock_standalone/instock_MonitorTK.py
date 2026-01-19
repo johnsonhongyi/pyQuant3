@@ -592,7 +592,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         init_elapsed = time.time() - self._init_start_time
         logger.info(f"🚀 程序初始化完成 (总耗时: {init_elapsed:.2f}s)")
         if logger.level == LoggerFactory.DEBUG:
-            print_timing_summary(top_n=6)
+            cct.print_timing_summary(top_n=6)
     # 在初始化 UI 或后台线程里
     def setup_global_hotkey(self):
         """
