@@ -2129,8 +2129,9 @@ class MainWindow(QMainWindow, WindowMixin):
         if action not in ("买入", "卖出", "止损", "止盈", "ADD"):
             return
 
-        # 最新价格和索引
-        y_p = float(tick_df['price'].iloc[-1])
+        # 最新价格和索引 - 优先使用 close, 其次 trade
+        price_col = 'close' if 'close' in tick_df.columns else ('trade' if 'trade' in tick_df.columns else 'price')
+        y_p = float(tick_df[price_col].iloc[-1]) if price_col in tick_df.columns else 0
         idx = len(tick_df) - 1
         x = x_axis[idx] if x_axis is not None else idx
 
@@ -3274,7 +3275,7 @@ class MainWindow(QMainWindow, WindowMixin):
         day_df.index = datetime_index.strftime('%Y-%m-%d')
         self.day_df = day_df.copy()
         # render_charts 时只传历史日 K，tick_df 用于 intraday 图，不绘制今天 K
-        with timed_ctx("render_charts", warn_ms=50):
+        with timed_ctx("render_charts", warn_ms=100):
             self.render_charts(code, self.day_df, tick_df)
 
         # 启动 realtime
@@ -4058,7 +4059,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.loader = None
 
         # ② 加载历史
-        with timed_ctx("DataLoaderThread", warn_ms=800):
+        with timed_ctx("DataLoaderThread", warn_ms=80):
             self.loader = DataLoaderThread(
                 code,
                 self.hdf5_mutex,
@@ -4066,11 +4067,11 @@ class MainWindow(QMainWindow, WindowMixin):
             )
         with timed_ctx("data_loaded", warn_ms=50):
             self.loader.data_loaded.connect(self._on_initial_loaded)
-        with timed_ctx("start", warn_ms=800):
+        with timed_ctx("start", warn_ms=80):
             self.loader.start()
 
         # ---- 3. 如果开启 realtime，再启动 realtime worker ----
-        with timed_ctx("start_realtime_worker", warn_ms=800):
+        with timed_ctx("start_realtime_worker", warn_ms=80):
             if self.realtime and cct.get_work_time_duration() or self._debug_realtime:
                 self._start_realtime_process(code)
         if logger.level == LoggerFactory.DEBUG:
@@ -4403,7 +4404,9 @@ class MainWindow(QMainWindow, WindowMixin):
         if is_realtime_active:
             shadow_decision = self._run_realtime_strategy(code, day_df, tick_df)
             if shadow_decision and shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
-                y_p = float(tick_df['price'].iloc[-1])
+                # 优先使用 close, 其次 trade, 最后 price
+                price_col = 'close' if 'close' in tick_df.columns else ('trade' if 'trade' in tick_df.columns else 'price')
+                y_p = float(tick_df[price_col].iloc[-1]) if price_col in tick_df.columns else 0
                 # 当前 K 线索引是 dates 长度（即下一根未收盘的 K 线）
                 kline_signals.append(SignalPoint(
                     code=code, timestamp="REALTIME", bar_index=len(dates), price=y_p,
@@ -5126,8 +5129,11 @@ class MainWindow(QMainWindow, WindowMixin):
                     cum_vol = tick['volume'].cumsum().iloc[-1]
                     if cum_vol > 0:
                         vwap = cum_amount / cum_vol
-                        current_price = tick['price'].iloc[-1]
-                        vwap_bias = (current_price - vwap) / vwap
+                        # 优先使用 close, 其次 trade, 最后 price
+                        price_col = 'close' if 'close' in tick.columns else ('trade' if 'trade' in tick.columns else 'price')
+                        current_price = tick[price_col].iloc[-1] if price_col in tick.columns else 0
+                        if current_price > 0:
+                            vwap_bias = (current_price - vwap) / vwap
             return {
                 'market_win_rate': mwr,
                 'loss_streak': ls,
@@ -5148,19 +5154,39 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 1. 准备行情行 (row)
             last_tick = tick_df.iloc[-1]
+            # 优先使用 close, 其次 trade, 最后 price
+            price_col = 'close' if 'close' in tick_df.columns else ('trade' if 'trade' in tick_df.columns else 'price')
+            current_price = float(last_tick.get(price_col, last_tick.get('close', last_tick.get('trade', 0))))
+            
+            # 成交量：优先 vol, 其次 volume（注意：某些数据源 volume 是量比，vol 是成交量）
+            vol_col = 'vol' if 'vol' in tick_df.columns else 'volume'
+            # 成交额：优先 amount, 其次用 vol * close 估算
+            amount_val = float(last_tick.get('amount', 0))
+            if amount_val == 0 and vol_col in tick_df.columns and price_col in tick_df.columns:
+                amount_val = float(tick_df[vol_col].sum() * current_price)
+            
+            vol_val = float(last_tick.get(vol_col, last_tick.get('vol', last_tick.get('volume', 0))))
+            
+            # 计算 nclose（均价）
+            if vol_col in tick_df.columns and 'amount' in tick_df.columns:
+                vol_sum = tick_df[vol_col].sum()
+                nclose_val = float(tick_df['amount'].sum() / vol_sum) if vol_sum > 0 else current_price
+            else:
+                nclose_val = current_price
+            
             row = {
                 'code': code,
-                'trade': float(last_tick.get('price', 0)),
-                'high': float(tick_df['price'].max()),
-                'low': float(tick_df['price'].min()),
-                'open': float(tick_df['price'].iloc[0]),
-                'ratio': float(last_tick.get('ratio', 0)),
-                'volume': float(last_tick.get('volume', 0)),
-                'amount': float(last_tick.get('amount', 0)),
+                'trade': current_price,
+                'high': float(tick_df[price_col].max()) if price_col in tick_df.columns else current_price,
+                'low': float(tick_df[price_col].min()) if price_col in tick_df.columns else current_price,
+                'open': float(tick_df[price_col].iloc[0]) if price_col in tick_df.columns else current_price,
+                'ratio': float(last_tick.get('ratio', last_tick.get('volume', 0))),  # volume 可能是量比
+                'volume': vol_val,
+                'amount': amount_val,
                 'ma5d': float(day_df['close'].rolling(5).mean().iloc[-1]),
                 'ma10d': float(day_df['close'].rolling(10).mean().iloc[-1]),
                 'ma20d': float(day_df['close'].rolling(20).mean().iloc[-1]),
-                'nclose': float((tick_df['amount'].sum() / tick_df['volume'].sum()) if tick_df['volume'].sum() > 0 else 0)
+                'nclose': nclose_val
             }
 
             # 2. 准备快照 (snapshot)
@@ -5168,7 +5194,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 'last_close': float(day_df['close'].iloc[-2] if len(day_df) > 1 else day_df['close'].iloc[-1]),
                 'market_win_rate': float(self.logger.get_market_sentiment(days=5)),
                 'loss_streak': int(self.logger.get_consecutive_losses(code, days=10)),
-                'highest_today': float(tick_df['price'].max())
+                'highest_today': float(tick_df[price_col].max()) if price_col in tick_df.columns else current_price
             }
 
             # 3. 运行控制器评估
@@ -5338,7 +5364,8 @@ class MainWindow(QMainWindow, WindowMixin):
         feature_data = None
         fm = getattr(self, 'feature_marker', None)
         if fm and fm.enable_colors:
-            feature_cols = ['percent', 'volume', 'category', 'price', 'trade', 'high4',
+            # 使用 close/trade 替代 price（数据中不存在 price 列）
+            feature_cols = ['percent', 'volume', 'category', 'close', 'trade', 'high4',
                             'max5', 'max10', 'hmax', 'hmax60', 'low4', 'low10', 'low60',
                             'lmin', 'min5', 'cmean', 'hv', 'lv', 'llowvol', 'lastdu4']
             fd = {}
@@ -5362,8 +5389,9 @@ class MainWindow(QMainWindow, WindowMixin):
             if feature_data:
                 try:
                     fd = feature_data
-                    price_val = fd['price'][i] if fd['price'] else 0
-                    if price_val == 0 and fd['trade']:
+                    # 优先使用 close, 其次 trade
+                    price_val = fd['close'][i] if fd.get('close') else 0
+                    if price_val == 0 and fd.get('trade'):
                         price_val = fd['trade'][i]
 
                     row_data = {

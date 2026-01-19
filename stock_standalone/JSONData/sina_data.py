@@ -1162,7 +1162,7 @@ class Sina:
         if index:
             df.index = list(map((lambda x: str(1000000 - int(x))
                             if x.startswith('0') else x), df.index))
-        log.info("hdf:all%s %s" % (len(df), len(self.stock_codes)))
+        log.info("hdf:all %s %s" % (len(df), len(self.stock_codes)))
         
         # --- 分别处理轨迹数据(mi)和实时数据(dd) ---
         # 1. 轨迹历史数据 (仅精简 8 列) -> sina_MultiIndex_data.h5

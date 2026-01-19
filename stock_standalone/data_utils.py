@@ -1,6 +1,7 @@
 # -*- coding:utf-8 -*-
 import time
 import gc
+import traceback
 import pandas as pd
 import numpy as np
 from typing import Any, Optional, Union, Dict, List, Callable
@@ -1265,7 +1266,8 @@ def fetch_and_process_timed_ctx(shared_dict: Dict[str, Any], queue: Any, blkname
             time.sleep(1)
 
         except Exception as e:
-            logger.error("background error", exc_info=True)
+            logger.error(f"[fetch_and_process:init_loop] 初始化阶段异常: {type(e).__name__}: {e}")
+            logger.error(f"完整堆栈:\n{traceback.format_exc()}")
             time.sleep(duration_sleep_time)
 
 def get_status(status_callback):
@@ -1524,9 +1526,21 @@ def fetch_and_process(
             df_all = sanitize(df_all)
             
             # 🛡️ 动态列裁剪 (Dynamic Column Trimming)
-            keep_all = shared_dict.get('keep_all_columns', False)
+            # 使用 try-except 包装，防止 Manager 失效时崩溃
+            try:
+                # keep_all = shared_dict.get('keep_all_columns')
+                keep_all = shared_dict.get('keep_all_columns', True)
+            except (BrokenPipeError, EOFError, OSError, AttributeError) as e:
+                logger.error(f"shared_dict.get('keep_all_columns') 失败: {type(e).__name__}: {e}")
+                keep_all = True  # Manager 失效时使用默认值
+                
             if not keep_all:
-                required_cols = shared_dict.get('required_cols', [])
+                try:
+                    required_cols = shared_dict.get('required_cols', [])
+                except (BrokenPipeError, EOFError, OSError, AttributeError) as e:
+                    logger.error(f"[data_utils:1537] shared_dict.get('required_cols') 失败: {type(e).__name__}: {e}")
+                    required_cols = []  # Manager 失效时使用默认空列表
+                    
                 if required_cols:
                     # 获取 df_all 中存在的列
                     actual_keep = [c for c in required_cols if c in df_all.columns]
@@ -1550,20 +1564,7 @@ def fetch_and_process(
             cct.df_memory_usage(df_all)
             extra_cols = ['win','sum_perc', 'slope', 'vol_ratio', 'power_idx']
             df_show = top_temp.loc[:, ["name"] + sort_cols[:7] + extra_cols].head(10)
-            if logger.level <= LoggerFactory.INFO:
-                logger.debug(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
-                logger.info(f'resample: {resample} top_temp :  {df_show.to_string()} shape : {top_temp.shape} detect_calc_support:{detect_val}')
-                logger.info(f'process now: {cct.get_now_time_int()} resample Main:{len(df_all)} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
-            else:
-                print(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
-                # print(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape} detect_calc_support:{detect_val}')
-                print(
-                    f"resample: {resample}\n"
-                    f"top_temp:\n{df_show.to_string()}\n"
-                    f"shape: {top_temp.shape}\n"
-                    f"detect_calc_support: {detect_val}"
-                )
-                print(f'process now: {cct.get_now_time_int()} resample Main:{len(df_all)} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+         
             # --- 智能频率自适应 (Intelligent Frequency Adaptation) ---
             # 1. 动态获取配置
             sina_limit_val = g_values.getkey("sina_limit_time")
@@ -1580,20 +1581,23 @@ def fetch_and_process(
             now_int = cct.get_now_time_int()
             is_trading_time = cct.get_trade_date_status() and (915 <= now_int <= 1500)
 
+
+            loop_sleep_time = cfg_sleep
+
             # 3. 动态决定 Loop Sleep Time
-            if is_trading_time:
-                # 交易时段：优先满足数据源频率 (sina_limit)，确保高颗粒度
-                # 取 min(sina_limit, cfg_sleep)，防止配置过大导致漏数据
-                loop_sleep_time = min(sina_limit, cfg_sleep)
-                if loop_sleep_time < 5: 
-                    loop_sleep_time = 5 # 最小保护
+            # if is_trading_time:
+            #     # 交易时段：优先满足数据源频率 (sina_limit)，确保高颗粒度
+            #     # 取 min(sina_limit, cfg_sleep)，防止配置过大导致漏数据
+            #     loop_sleep_time = min(sina_limit, cfg_sleep)
+            #     if loop_sleep_time < 5: 
+            #         loop_sleep_time = 5 # 最小保护
                 
-                # 开盘前夕 (9:15-9:25) 加速刷新 (可选优化)
-                if 915 <= now_int < 925:
-                   loop_sleep_time = min(loop_sleep_time, 15)
-            else:
-                # 非交易时段：使用低频刷新，降低资源消耗
-                loop_sleep_time = cfg_sleep
+            #     # 开盘前夕 (9:15-9:25) 加速刷新 (可选优化)
+            #     if 915 <= now_int < 925:
+            #        loop_sleep_time = min(loop_sleep_time, 15)
+            # else:
+            #     # 非交易时段：使用低频刷新，降低资源消耗
+            #     loop_sleep_time = cfg_sleep
 
             if logger.level <= LoggerFactory.INFO:
                logger.info(f"[FreqAdapt] Trading:{is_trading_time} SinaLimit:{sina_limit}s CfgSleep:{cfg_sleep}s -> ActualSleep:{loop_sleep_time}s")
@@ -1615,13 +1619,36 @@ def fetch_and_process(
             
             if single:
                 break   
-            for _ in range(int(loop_sleep_time * sleep_step)):
+            # 周期性心跳日志 - 每 10 秒输出一次状态
+            heartbeat_interval = 10  # 秒
+            sleep_elapsed = 0
+            if logger.level <= LoggerFactory.INFO:
+                logger.debug(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
+                logger.info(f'resample: {resample} top_temp :  {df_show.to_string()} shape : {top_temp.shape} detect_calc_support:{detect_val}')
+                logger.info(f'process now: {cct.get_now_time_int()} resample Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all}  sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+            else:
+                print(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
+                # print(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape} detect_calc_support:{detect_val}')
+                print(
+                    f"resample: {resample}\n"
+                    f"top_temp:\n{df_show.to_string()}\n"
+                    f"shape: {top_temp.shape}\n"
+                    f"detect_calc_support: {detect_val}"
+                )
+                print(f'process now: {cct.get_now_time_int()} resample Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all} sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
+
+            for _ in range(int(loop_sleep_time / sleep_step)):
                 if any(cond() for cond in stop_conditions):
                     break
                 time.sleep(sleep_step)
+                sleep_elapsed += sleep_step
+                # 每 heartbeat_interval 秒输出一次心跳
+                if sleep_elapsed % heartbeat_interval == 0:
+                    logger.debug(f"[心跳] resample={resample} 等待中... {sleep_elapsed}/{int(loop_sleep_time)}s flag={flag.value}")
             START_INIT = 1
         except Exception as e:
-            logger.error(f"resample: {resample} Error in background process: {e}", exc_info=True)
+            logger.error(f"[fetch_and_process:main_loop] resample={resample} 主循环异常: {type(e).__name__}: {e}")
+            logger.error(f"完整堆栈:\n{traceback.format_exc()}")
             time.sleep(duration_sleep_time)
 
     return df_all

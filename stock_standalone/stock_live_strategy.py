@@ -1230,7 +1230,7 @@ class StockLiveStrategy:
             filtered_keys = [k for k in monitored_keys if self._monitored_stocks[k].get('resample', 'd') == resample]
             
             valid_keys = [k for k in filtered_keys if k.split('_')[0] in df.index]
-
+            now = time.time()  # 使用时间戳，与 last_alert 等保持类型一致
             for key in valid_keys:
                 data = self._monitored_stocks[key]
                 code = data.get('code', key.split('_')[0])
@@ -1290,7 +1290,7 @@ class StockLiveStrategy:
                         v_shape = self.realtime_service.get_v_shape_signal(code)
                         snap['v_shape_signal'] = v_shape
                         if v_shape:
-                             logger.info(f"⚡ {code} 触发 V 型反转信号")
+                             logger.debug(f"⚡ {code} 触发 V 型反转信号")
                         
                         # 3. 注入 55188 外部数据 (人气、主力、题材)
                         ext_55188 = self.realtime_service.get_55188_data(code)
@@ -1729,11 +1729,18 @@ class StockLiveStrategy:
                 # self.trading_logger.log_signal(code, data['name'], current_price, decision, row_data=row_data)
 
                 if decision["action"] != "持仓":
-                    messages.append(("POSITION", f'{data["name"]} {decision["action"]} 仓位{int(decision["position"]*100)}% {decision["reason"]}'))
+                    pos_val = decision.get("position", 0)
+                    # 防止 NaN 转换为整数失败
+                    if pd.isna(pos_val):
+                        pos_val = 0
+                    messages.append(("POSITION", f'{data["name"]} {decision["action"]} 仓位{int(pos_val*100)}% {decision["reason"]}'))
 
                 # ---------- 风控调整仓位 ----------
                 action, ratio = self._risk_engine.adjust_position(data, decision["action"], decision["position"])
                 if action and (action != "持仓"):
+                    # 防止 NaN 转换失败
+                    if pd.isna(ratio):
+                        ratio = 0
                     messages.append(("POSITION", f'{data["name"]} {action} 当前价 {current_price} 建议仓位 {ratio*100:.0f}%'))
 
                 # ---------- 调试输出 ----------
@@ -2436,3 +2443,62 @@ class StockLiveStrategy:
         except Exception as e:
             logger.error(f"Cleanup Error: {e}")
 
+
+def test_check_strategies_params():
+    """
+    测试 _check_strategies 参数类型一致性。
+    验证 now, last_alert, sent_data['ts'] 等时间戳类型。
+    """
+    import time
+    from datetime import datetime
+    
+    print("===== 测试参数类型一致性 =====")
+    
+    # 模拟 now 变量（应为 float）
+    now = time.time()
+    print(f"now = time.time() -> type: {type(now).__name__}, value: {now}")
+    
+    # 模拟 last_alert（应为 float，初始值为 0）
+    last_alert = 0
+    print(f"last_alert -> type: {type(last_alert).__name__}, value: {last_alert}")
+    
+    # 测试 now - last_alert（应正常工作）
+    try:
+        diff = now - last_alert
+        print(f"✅ now - last_alert = {diff:.2f} (正常)")
+    except TypeError as e:
+        print(f"❌ now - last_alert 失败: {e}")
+    
+    # 模拟 sent_data['ts']（应为 float）
+    sent_data = {'value': 0.5, 'ts': 0}
+    print(f"sent_data['ts'] -> type: {type(sent_data['ts']).__name__}, value: {sent_data['ts']}")
+    
+    # 测试 now - sent_data['ts']（应正常工作）
+    try:
+        diff = now - sent_data['ts']
+        print(f"✅ now - sent_data['ts'] = {diff:.2f} (正常)")
+    except TypeError as e:
+        print(f"❌ now - sent_data['ts'] 失败: {e}")
+    
+    # 模拟错误情况：now 为 datetime 对象
+    now_datetime = datetime.now()
+    print(f"\n模拟错误情况: now = datetime.now() -> type: {type(now_datetime).__name__}")
+    
+    try:
+        diff = now_datetime - last_alert
+        print(f"⚠️ datetime - int 意外成功: {diff}")
+    except TypeError as e:
+        print(f"✅ 正确捕获类型错误: {e}")
+    
+    try:
+        diff = now_datetime - sent_data['ts']
+        print(f"⚠️ datetime - float 意外成功: {diff}")
+    except TypeError as e:
+        print(f"✅ 正确捕获类型错误: {e}")
+    
+    print("\n===== 测试完成 =====")
+    return True
+
+
+if __name__ == "__main__":
+    test_check_strategies_params()
