@@ -439,17 +439,13 @@ class CommandListenerThread(QThread):
 
                     if prefix == b"DATA":
                         try:
-                            header = client_socket.recv(4)
-                            if not header:
-                                client_socket.close()
-                                continue
+                            # 使用 recv_exact 确保精确读取 4 字节长度头
+                            header = recv_exact(client_socket, 4, lambda: self.running)
                             size = struct.unpack("!I", header)[0]
-                            payload: bytes = b""
-                            while len(payload) < size:
-                                chunk: bytes = client_socket.recv(size - len(payload))
-                                if not chunk:
-                                    break
-                                payload += chunk
+                            
+                            # 使用 recv_exact 确保精确读取整个 payload
+                            payload = recv_exact(client_socket, size, lambda: self.running)
+                            
                             if payload:
                                 # ⭐ 兼容旧格式 (tuple) 和新格式 (dict package)
                                 raw_data = pickle.loads(payload)
@@ -462,11 +458,17 @@ class CommandListenerThread(QThread):
                                         # 旧版元组协议：('UPDATE_DF_ALL', df)
                                         self.dataframe_received.emit(df, msg_type)
                         except Exception as e:
-                            print(f"[IPC] Drop DATA packet: {e}")
+                            print(f"[IPC] DATA packet error: {e}")
 
                     else:
                         try:
-                            rest = client_socket.recv(4096)
+                            # 尝试读取剩余数据（针对短指令）
+                            client_socket.setblocking(False)
+                            try:
+                                rest = client_socket.recv(4096)
+                            except (BlockingIOError, socket.error):
+                                rest = b""
+                            
                             text = (prefix + rest).decode("utf-8", errors="ignore").strip()
                             if text.startswith("CODE|"):
                                 code = text[5:].strip()
@@ -475,7 +477,7 @@ class CommandListenerThread(QThread):
                             elif text:
                                 self.command_received.emit(text)
                         except Exception as e:
-                            print(f"[IPC] Drop CODE packet: {e}")
+                            print(f"[IPC] CODE packet error: {e}")
                 finally:
                     try:
                         client_socket.close()
@@ -606,71 +608,62 @@ def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
     logger.debug(f'bar: {bar} df:{df.high.max()}')
     return bar
 
-def realtime_worker_process(code, queue, stop_flag,log_level=None,debug_realtime=False,interval=cct.sina_limit_time):
-    """多进程拉取实时数据"""
-    # if log_level:
-    #     logger = LoggerFactory.getLogger()
-    #     if log_level is not None:
-    #         logger.setLevel(log_level.value)
+def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_realtime=False, interval=None):
+    """多进程常驻拉取实时数据"""
+    if interval is None:
+        interval = getattr(cct.CFG, 'duration_sleep_time', 5)
+    
     s = sina_data.Sina()
-    # while True:
-    count_debug = 0
-    while  stop_flag.value:   # 👈 关键
+    current_code = None
+    force_fetch = False
+    
+    while stop_flag.value:
+        # 1. 检查是否有新任务（切换股票）
         try:
-            # if cct.get_trade_date_status() and cct.get_now_time_int() > 920 or not cct.get_trade_date_status():
-            if (cct.get_work_time() and cct.get_now_time_int() > 923) or debug_realtime:
+            new_code = task_queue.get_nowait()
+            if new_code:
+                current_code = new_code
+                force_fetch = True # 切换股票后强制拉取一次
+        except Empty:
+            pass
+
+        if not current_code:
+            time.sleep(1)
+            continue
+
+        try:
+            code = current_code
+            # ⭐ 核心逻辑：如果是切股后的第一笔，或者处于交易时间，则执行抓取
+            is_work_time = (cct.get_work_time() and cct.get_now_time_int() > 923)
+            if is_work_time or debug_realtime or force_fetch:
                 with timed_ctx("realtime_worker_process", warn_ms=800):
                     tick_df = s.get_real_time_tick(code)
-                    # 这里可以生成今天的 day_bar
-                    # if log_level and tick_df is None or tick_df.empty:
-                    #     logger.warning(
-                    #         f"[RT] tick_df EMPTY | code={code} | "
-                    #         f"trade={cct.get_trade_date_status()} "
-                    #         f"time={cct.get_now_time_int()}"
-                    #     )
-                    #     time.sleep(interval)
-                    #     continue
-                with timed_ctx("realtime_worker_tick_to_daily_bar", warn_ms=800):
-                    today_bar = tick_to_daily_bar(tick_df)
-                    # if log_level and today_bar is None or today_bar.empty:
-                    #     logger.warning(
-                    #         f"[RT] today_bar EMPTY | code={code} | "
-                    #         f"today_bar_rows={len(today_bar)} | "
-                    #         f"today_bar_cols={list(today_bar.columns)}"
-                    #     )
-                    #     time.sleep(interval)
-                    #     continue
-                    try:
-                        # # queue.put((code, tick_df, today_bar))
-                        # if log_level and count_debug == 0 and debug_realtime:
-                        #     logger.debug(
-                        #             f"[RT] tick_df | code={code} | "
-                        #             f"tick_rows={len(tick_df)} | "
-                        #             f"tick_cols={list(tick_df.columns)}"
-                        #             f"tick={(tick_df[-3:])}"
-                        #         )
-                        #     # dump_path = cct.get_ramdisk_path(f"{code}_tick_{int(time.time())}.pkl")
-                        #     # tick_df.to_pickle(dump_path)
-                        #     logger.debug(
-                        #             f"[RT] today_bar | code={code} | "
-                        #             f"today_barrows={len(today_bar)} | "
-                        #             f"today_bar_cols={list(today_bar.columns)}"
-                        #             f"today_bar=\n{(today_bar)}"
-                        #         )
-                        #     # dump_path = cct.get_ramdisk_path(f"{code}_today_{int(time.time())}.pkl")
-                        #     # today_bar.to_pickle(dump_path)
-                        #     # count_debug += 1
-                        queue.put_nowait((code, tick_df, today_bar))
-                    except queue.Full:
-                        pass  # 队列满了就跳过，避免卡住
+                
+                if tick_df is not None and not tick_df.empty:
+                    with timed_ctx("realtime_worker_tick_to_daily_bar", warn_ms=800):
+                        today_bar = tick_to_daily_bar(tick_df)
+                        try:
+                            queue.put_nowait((code, tick_df, today_bar))
+                            force_fetch = False # 成功抓取一次后清除强制标记
+                        except queue.Full:
+                            pass
         except Exception as e:
             import traceback
             traceback.print_exc()
             time.sleep(interval)  # 避免无限抛异常占用 CPU
         if stop_flag.value:
-            for _ in range(interval):
+            # 使用配置的 interval 作为冷却时间
+            for _ in range(int(interval)):
                 if not stop_flag.value:
                     break
+                # 冷却期间也要检查是否有切股任务
+                try:
+                    nc = task_queue.get_nowait()
+                    if nc:
+                        current_code = nc
+                        break # 立即切股，不等待冷却
+                except Empty:
+                    pass
                 time.sleep(1)
     # print(f'stop_flag: {stop_flag.value}')
 
@@ -1366,6 +1359,11 @@ class GlobalInputFilter(QtCore.QObject):
 
         # 键盘按键
         elif event.type() == QtCore.QEvent.Type.KeyPress:
+            # ⭐ 安全防护：仅当主窗口是当前激活窗口时，才拦截处理其定义的全局快捷键
+            # 否则会干扰其他独立窗口（如 TradingGUI、SignalBox）的正常输入
+            if not self.main_window.isActiveWindow():
+                return False
+
             # ⭐ 避开组合键(Alt/Ctrl)，交给 QShortcut 或系统处理，防止重复响应
             modifiers = event.modifiers()
             if modifiers & (Qt.KeyboardModifier.AltModifier | Qt.KeyboardModifier.ControlModifier):
@@ -1374,8 +1372,9 @@ class GlobalInputFilter(QtCore.QObject):
             key = event.key()
             # --- 通达信模式: 上下左右导航 ---
             if key == Qt.Key.Key_Up:
-                # 1.1: 如果左侧列表有焦点，交给列表处理翻页
-                if self.main_window.stock_table.hasFocus():
+                # 1.1: 如果左侧列表或过滤器树有焦点，交给控件处理翻页
+                if self.main_window.stock_table.hasFocus() or \
+                   (hasattr(self.main_window, 'filter_tree') and self.main_window.filter_tree.hasFocus()):
                     return False
                 # 1.2: 如果鼠标在 K 线图，缩放 K 线；如果在分时图，切换至上一只股票 (专业模式)
                 if self.main_window.is_mouse_in_kline_plot():
@@ -1386,7 +1385,8 @@ class GlobalInputFilter(QtCore.QObject):
                     return True
                 return False # 其他情况交给系统
             elif key == Qt.Key.Key_Down:
-                if self.main_window.stock_table.hasFocus():
+                if self.main_window.stock_table.hasFocus() or \
+                   (hasattr(self.main_window, 'filter_tree') and self.main_window.filter_tree.hasFocus()):
                     return False
                 if self.main_window.is_mouse_in_kline_plot():
                     self.main_window.zoom_kline(in_=False)
@@ -1510,19 +1510,33 @@ class MainWindow(QMainWindow, WindowMixin):
         # self.realtime_worker = None
         self.last_initialized_trade_day = None  # 记录最后一次初始化的交易日
         self._closing = False
+        self.current_day_df_code = None  # ⭐ 追踪当前 day_df 实际对应哪个股票 (1.5)
+        self.expected_sync_version = -1  # ⭐ 初始化同步版本 (1.4)
+        self._table_item_map = {}        # ⭐ 初始化表映射 (1.4)
         self.realtime_queue = Queue()
+        self.realtime_task_queue = Queue() # ⭐ 新增：任务队列 (1.3)
         self.realtime_process = None
+        self._tick_cache = {}  # ⭐ 新增：实时数据缓存 (code -> {tick_df, today_bar, ts}) (1.3)
 
-        # 定时检查队列
+        # 定时检查队列 - 使用配置的数据更新频率
+        refresh_interval_ms = int(cct.CFG.duration_sleep_time * 1000)  # 秒转毫秒
+        refresh_interval_ms = max(refresh_interval_ms, 2000)  # 最小 2 秒，避免过于频繁
+        # ⚡ 修正：GUI 轮询队列的频率应保持高频 (如 1s)，
+        # 而抓取频率 (duration_sleep_time) 由后台进程控制。
         self.realtime_timer = QTimer()
         self.realtime_timer.timeout.connect(self._poll_realtime_queue)
-        self.realtime_timer.start(5000)  # 每5秒检查一次队列
+        self.realtime_timer.start(1000)  # 1秒轮询一次，保证响应速度
+        logger.info(f"[Visualizer] Realtime UI poll timer started at 1000ms")
+        logger.info(f"[Visualizer] Realtime timer interval: {refresh_interval_ms}ms (from CFG.duration_sleep_time={cct.CFG.duration_sleep_time}s)")
 
         # ⭐ 新增：指令队列轮询 (处理来自 MonitorTK 的直连指令)
         if self.command_queue:
+            logger.info(f"[Visualizer] Command queue detected: {self.command_queue}")
             self.command_timer = QTimer()
             self.command_timer.timeout.connect(self._poll_command_queue)
             self.command_timer.start(200)  # 200ms 轮询一次，保证响应速度
+        else:
+            logger.warning("[Visualizer] No command queue detected! Sync from MonitorTK may fail.")
 
         self.day_df = pd.DataFrame()
         self.df_all = pd.DataFrame()
@@ -2752,29 +2766,56 @@ class MainWindow(QMainWindow, WindowMixin):
     #     self.realtime_process.start()
 
     def _start_realtime_process(self, code):
-        # ✅ 优雅停止旧进程
-        self._stop_realtime_process()
+        """常驻进程模式启动/更新实时任务"""
+        # 1. 检查缓存 (超过 duration_sleep_time 就获取一次新的)
+        now = time.time()
+        limit = getattr(cct.CFG, 'duration_sleep_time', 10)
+        cached = self._tick_cache.get(code)
+        
+        if cached and (now - cached['ts']) < limit:
+            logger.debug(f"[RT] Cache HIT for {code} (age: {now - cached['ts']:.1f}s)")
+            # 直接触发一次 GUI 更新，实现“瞬开”效果
+            self.on_realtime_update(code, cached['tick_df'], cached['today_bar'])
+            # 虽然有缓存，但如果常驻进程没跑，还是得启动它以便后续更新
+            if self.realtime_process and self.realtime_process.is_alive():
+                 # 发送到任务队列，让进程在后台慢慢更新
+                 self.realtime_task_queue.put(code)
+                 return
 
-        # 重置 stop_flag
-        self.stop_flag.value = True
+        # 2. 确保常驻进程在运行
+        if not self.realtime_process or not self.realtime_process.is_alive():
+            logger.info("[RealtimeProcess] Starting persistent worker...")
+            # 重置 stop_flag
+            self.stop_flag.value = True
+            # 清空旧任务
+            while not self.realtime_task_queue.empty():
+                try: self.realtime_task_queue.get_nowait()
+                except: break
+                
+            self.realtime_process = Process(
+                target=realtime_worker_process,
+                args=(self.realtime_task_queue, self.realtime_queue, self.stop_flag, self.log_level, self._debug_realtime),
+                daemon=False
+            )
+            self.realtime_process.start()
 
-        # 启动新进程
-        self.realtime_process = Process(
-            target=realtime_worker_process,
-            args=(code, self.realtime_queue, self.stop_flag, self.log_level, self._debug_realtime),
-            daemon=False
-        )
-        self.realtime_process.start()
+        # 3. 发送新任务
+        logger.debug(f"[RealtimeProcess] Switching task to {code}")
+        self.realtime_task_queue.put(code)
+        
+        # ⭐ 4. 立即触发一次 UI 轮询，尝试捕捉随后产生的第一笔数据
+        QTimer.singleShot(1000, self._poll_realtime_queue)
+        QTimer.singleShot(3000, self._poll_realtime_queue)  # 双重保险，由于 network 可能有延迟
 
 
     def _stop_realtime_process(self):
         if self.realtime_process:
-            # 先停止循环
+            # 停止常驻进程
             self.stop_flag.value = False
-            # 等待进程结束，最多 5 秒
-            self.realtime_process.join(timeout=5)
+            self.realtime_process.join(timeout=0.5)
             if self.realtime_process.is_alive():
                 self.realtime_process.terminate()
+                logger.debug("[RealtimeProcess] Force terminated (timeout)")
             self.realtime_process = None
 
     def _poll_realtime_queue(self):
@@ -2798,6 +2839,12 @@ class MainWindow(QMainWindow, WindowMixin):
                 # GUI 更新加保护
                 if self.isVisible():  # 确保窗口未关闭
                     self.on_realtime_update(code, tick_df, today_bar)
+                    # 更新缓存
+                    self._tick_cache[code] = {
+                        'tick_df': tick_df,
+                        'today_bar': today_bar,
+                        'ts': time.time()
+                    }
                     logger.debug(f'on_realtime_update today_bar:\n {today_bar}')
             except RuntimeError as e:
                 logger.warning(f"GUI update skipped: {e}")
@@ -2819,9 +2866,16 @@ class MainWindow(QMainWindow, WindowMixin):
         try:
             latest_full_df = None
             df_diffs = []
-
-            while not self.command_queue.empty():
-                cmd_data = self.command_queue.get_nowait()
+            
+            # 🔄 移除 unreliable 的 empty() 检查，直接进入消费循环
+            while True:
+                try:
+                    cmd_data = self.command_queue.get_nowait()
+                except Empty: # queue.Empty
+                    break
+                except EOFError:
+                    break
+                    
                 if isinstance(cmd_data, tuple) and len(cmd_data) == 2:
                     cmd, val = cmd_data
                     if cmd == 'SWITCH_CODE':
@@ -2851,12 +2905,17 @@ class MainWindow(QMainWindow, WindowMixin):
                             self.expected_sync_version = ver
                             latest_full_df = payload
                             df_diffs.clear()
+                            logger.info(f"[Queue] Received Full DF_ALL (ver={ver}, rows={len(payload)})")
                         elif m_type == 'UPDATE_DF_DIFF':
-                            if ver == self.expected_sync_version + 1:
+                            if self.expected_sync_version == -1:
+                                # 还没有全量包，丢弃增量并请求同步
+                                logger.warning("[Queue] Received DIFF before ALL. Requesting full sync.")
+                                self._request_full_sync()
+                            elif ver == self.expected_sync_version + 1:
                                 self.expected_sync_version = ver
                                 df_diffs.append(payload)
                             else:
-                                logger.warning(f"[Queue] Version mismatch! Got {ver}, expected {self.expected_sync_version+1}. Requesting full sync.")
+                                logger.warning(f"[Queue] Version mismatch! Got {ver}, expected {self.expected_sync_version + 1}. Requesting full sync.")
                                 self._request_full_sync()
                                 # 终止本轮增量应用，等待全量同步
                                 df_diffs.clear()
@@ -2872,12 +2931,12 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # --- 处理最新全量数据 ---
             if latest_full_df is not None:
-                logger.debug(f"[Queue] Instant sync full df_all ({len(latest_full_df)} rows)")
-                self.update_df_all(latest_full_df)
+                logger.info(f"[Queue] Applying full sync ({len(latest_full_df)} rows)...")
+                self._process_df_all_update(latest_full_df)
 
             # --- 处理增量数据 ---
             for diff_df in df_diffs:
-                logger.debug(f"[Queue] Instant apply df diff ({len(diff_df)} rows)")
+                logger.info(f"[Queue] Applying df diff ({len(diff_df)} rows)...")
                 self.apply_df_diff(diff_df)
 
         except Exception as e:
@@ -3251,114 +3310,110 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _on_initial_loaded(self, code, day_df, tick_df):
         # ⚡ 立即更新标题,清除 "Loading..." 状态
-        # 即使这是旧的加载结果,也要清除 Loading 状态,避免标题卡住
         if not day_df.empty:
-            # 调用完整的标题更新逻辑,显示所有信息 (Rank、percent、win、slope、volume)
             self._update_plot_title(code, day_df, tick_df)
 
-        # 检查是否是当前请求的代码,如果不是则忽略(防止旧数据覆盖新数据)
+        # 检查是否是当前请求的代码
         if code != self.current_code:
             logger.debug(f"[Rapid Browse] Discarding outdated result for {code}, current is {self.current_code}")
             return
 
         # ⚡ 过滤掉今天的数据，只保留过去的日 K
         today_str = pd.Timestamp.today().strftime('%Y-%m-%d')
-        is_intraday = (
-            self.realtime
-            and cct.get_work_time_duration()
-        )
+        is_intraday = self.realtime and cct.get_work_time_duration()
 
         if is_intraday or self._debug_realtime:
             day_df = day_df[day_df.index < today_str]
 
-        datetime_index = pd.to_datetime(day_df.index)
-        day_df.index = datetime_index.strftime('%Y-%m-%d')
         self.day_df = day_df.copy()
-        # render_charts 时只传历史日 K，tick_df 用于 intraday 图，不绘制今天 K
+        datetime_index = pd.to_datetime(self.day_df.index)
+        self.day_df.index = datetime_index.strftime('%Y-%m-%d')
+        
+        # ⭐ 记录当前加载成功的股票代码
+        self.current_day_df_code = code
+
+        # ⭐ 核心修复：既然 DataLoaderThread 已经带回了最新的 tick_df，直接利用它来生成首个幽灵 K 线
+        # 这样无论是否在交易时间，只要打开图表，就能看到最新的今天行情。
+        if tick_df is not None and not tick_df.empty:
+            logger.debug(f"[InitialLoad] Using fresh tick_df from DataLoader for {code}, triggering update...")
+            today_bar = tick_to_daily_bar(tick_df)
+            # 立即触发同步 (不使用 QTimer 以防闪烁)
+            self.on_realtime_update(code, tick_df, today_bar)
+        else:
+            # 如果 DataLoader 没拿到 tick_df，再尝试从缓存补全
+            cached = self._tick_cache.get(code)
+            if cached:
+                logger.info(f"[InitialLoad] Using cached realtime data for {code}...")
+                self.on_realtime_update(code, cached['tick_df'], cached['today_bar'])
+
+        # 执行首次渲染 (历史数据已经在 on_realtime_update 渲染过，这里再兜底一次)
         with timed_ctx("render_charts", warn_ms=100):
             self.render_charts(code, self.day_df, tick_df)
 
-        # 启动 realtime
-        if self.realtime and cct.get_work_time_duration() or self._debug_realtime:
-            self._start_realtime_process(code)
-
-
     def on_realtime_update(self, code, tick_df, today_bar):
+        """处理实时分时与幽灵 K 线更新"""
+        # 0. 永远缓存最新数据
+        self._tick_cache[code] = {
+            'tick_df': tick_df,
+            'today_bar': today_bar,
+            'ts': time.time()
+        }
+
         if today_bar is None or today_bar.empty:
             return
 
-        if not self._debug_realtime and (not self.realtime or code != self.current_code or not cct.get_work_time_duration()):
+        # 1. 严格检查：如果当前加载的历史 K 线不是这只股票，则不合并，防止“串号”
+        if code != self.current_day_df_code:
+             return
+
+        # ⭐ 允许休盘期间的“首笔”或强制更新。抓取是否继续由后台 worker 控制。
+        if not self._debug_realtime and (not self.realtime or code != self.current_code):
             return
 
+        # --- 2. 统一索引与格式化 ---
+        today_bar = today_bar.copy()
         datetime_index = pd.to_datetime(today_bar.index)
-        today_bar.index = datetime_index.strftime('%Y-%m-%d')
-        self.day_df
-        today_idx = today_bar.index[0]
-        # 获取 day_df 最后一天日期
+        today_idx = datetime_index.strftime('%Y-%m-%d')[0]
+        today_bar.index = [today_idx]
+        today_bar['vol'] = today_bar['volume']  # 统一列名
+
+        # 数值列精度处理
+        num_cols = ['open', 'high', 'low', 'close']
+        for col in num_cols:
+            if col in today_bar.columns:
+                today_bar[col] = round(pd.to_numeric(today_bar[col], errors='coerce'), 2)
+
+        # --- 3. 补全实时指标 (Rank, win 等) ---
+        if not self.df_all.empty:
+            stock_row = pd.DataFrame()
+            if code in self.df_all.index:
+                stock_row = self.df_all.loc[[code]]
+            elif 'code' in self.df_all.columns:
+                stock_row = self.df_all[self.df_all['code'] == code]
+
+            if not stock_row.empty:
+                for col in ['ma5d', 'ma10d', 'ma20d', 'ma60d', 'Rank', 'win', 'slope', 'macddif', 'macddea', 'macd']:
+                    if col in stock_row.columns:
+                        today_bar[col] = stock_row[col].iloc[0]
+
+        # --- 4. 合并到主数据集 ---
         last_day = self.day_df.index[-1] if not self.day_df.empty else None
 
-        # 计算交易日间隔
-        trade_gap = cct.get_trade_day_distance(last_day, today_idx) if last_day else None
-        logger.debug(f'trade_gap: {trade_gap}')
-        # 第二天开盘（交易日不同），自动初始化 today_bar
-        # if last_day is None or (trade_gap is not None and trade_gap > 1):
-        #     self._on_initial_loaded()
-        #     print(f"[INFO] New trading day detected: {today_idx}, today_bar appended trade_gap:{trade_gap}")
-        #     return
-        # elif last_day == today_idx:
         if last_day == today_idx:
-            # 当天更新最后一行
-            # 先按 day_df 列对齐 today_bar
-            # 直接重命名列
-            # today_bar = today_bar.rename(columns={'volume': 'vol'})
-            # today_bar_renamed
-            today_bar['vol'] = today_bar['volume']
-            cols_match = ['open', 'high', 'low', 'close', 'vol', 'volume','amount', 'code']
-            # 先从 today_bar 里取需要的列（不存在的填 NaN）
-            today_row = today_bar.iloc[0].reindex(cols_match)
-            today_row['code'] = code
-
-            # 如果 amount 列存在但为空，用 (high+low)/2 * volume 填充
-            if 'amount' in today_row:
-                if pd.isna(today_row['amount']):
-                    if 'vol' in today_row and not pd.isna(today_row['vol']):
-                        today_row['amount'] = round((today_row['high'] + today_row['low']) / 2 * today_row['vol'], 1)
-
-            # code 列保持原样（如果 day_df 有默认值或 NaN 就不动）
-            # 数值列精度处理
-            num_cols = ['open', 'high', 'low', 'close']
-            for col in num_cols:
-                if col in today_row:
-                    today_row[col] = round(pd.to_numeric(today_row[col], errors='coerce'), 2)
-            # 更新最后一行
-            today_row_new = today_row[self.day_df.columns]  # 强制顺序和 day_df 对齐
-
-            # ⭐ 双轨制补全：从 df_all 中提取由 Tkinter 实时计算好的指标 (Rank, win, ma5d 等)
-            if not self.df_all.empty:
-                stock_row = pd.DataFrame()
-                if code in self.df_all.index:
-                    stock_row = self.df_all.loc[[code]]
-                elif 'code' in self.df_all.columns:
-                    stock_row = self.df_all[self.df_all['code'] == code]
-
-                if not stock_row.empty:
-                    # 补充指标到这一行，如果 day_df 没这些列也没关系(iloc 会跳过)
-                    # 确保 today_row_new 包含这些潜在列
-                    for col in ['ma5d', 'ma10d', 'ma20d', 'ma60d', 'Rank', 'win', 'slope', 'macddif', 'macddea', 'macd']:
-                        if col not in self.day_df.columns:
-                            self.day_df[col] = np.nan
-                        if col in stock_row.columns:
-                            val = stock_row[col].iloc[0]
-                            if pd.notnull(val):
-                                self.day_df.loc[self.day_df.index[-1], col] = val
-
-            logger.debug(f' today_row\n: {today_row} today_row_new:{today_row_new}')
-            self.day_df.iloc[-1] = today_row_new
-            # self.day_df.iloc[-1] = today_bar.iloc[0]
+            # 覆盖当天最后一行
+            today_row = today_bar.iloc[0]
+            for col in self.day_df.columns:
+                if col in today_row.index and pd.notna(today_row[col]):
+                    self.day_df.loc[today_idx, col] = today_row[col]
+            logger.debug(f"[RT] Updated today's bar for {code}")
         else:
-            self.day_df = pd.concat([self.day_df, today_bar])
+            # 新增一行 (第二天或者刚从历史加载完成)
+            # 确保列顺序和类型对齐
+            today_bar_aligned = today_bar.reindex(columns=self.day_df.columns)
+            self.day_df = pd.concat([self.day_df, today_bar_aligned])
+            logger.debug(f"[RT] Appended today's bar for {code}")
 
-        # 渲染图表
+        # --- 5. 渲染图表 ---
         self.render_charts(code, self.day_df, tick_df)
 
 
@@ -3799,11 +3854,12 @@ class MainWindow(QMainWindow, WindowMixin):
             # 版本校验逻辑
             if m_type == 'UPDATE_DF_ALL':
                 self.expected_sync_version = ver
-                logger.debug(f"[IPC] Sync version reset to {ver}")
+                logger.info(f"[IPC] Received Full DF_ALL (ver={ver}, rows={len(payload)})")
                 QtCore.QTimer.singleShot(0, lambda: self._process_df_all_update(payload))
             elif m_type == 'UPDATE_DF_DIFF':
-                if ver == self.expected_sync_version + 1:
+                if self.expected_sync_version != -1 and ver == self.expected_sync_version + 1:
                     self.expected_sync_version = ver
+                    logger.info(f"[IPC] Received DF_DIFF (ver={ver}, rows={len(payload)})")
                     QtCore.QTimer.singleShot(0, lambda: self.apply_df_diff(payload))
                 else:
                     logger.warning(f"[IPC] Version mismatch! Got {ver}, expected {self.expected_sync_version + 1}. Requesting full sync.")
@@ -4070,9 +4126,10 @@ class MainWindow(QMainWindow, WindowMixin):
         with timed_ctx("start", warn_ms=80):
             self.loader.start()
 
-        # ---- 3. 如果开启 realtime，再启动 realtime worker ----
+        # ---- 3. 如果开启 realtime，则确保推送任务 ----
         with timed_ctx("start_realtime_worker", warn_ms=80):
-            if self.realtime and cct.get_work_time_duration() or self._debug_realtime:
+            if self.realtime:
+                # 不再检查时间，让 worker 进程自己决定是休眠还是强制抓取一次
                 self._start_realtime_process(code)
         if logger.level == LoggerFactory.DEBUG:
             print_timing_summary(top_n=6)
@@ -5584,15 +5641,15 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
     def on_filter_tree_item_clicked(self, item, column):
-        # ⭐ 无论如何先确保 filter_tree 获得键盘焦点
-        self.filter_tree.setFocus()
-        
         code = item.data(0, Qt.ItemDataRole.UserRole)
         if code:
             # 1. 触发图表加载
             self.load_stock_by_code(code)
             # 2. 联动左侧列表选中
             self._select_stock_in_main_table(code)
+        
+        # ⭐ 无论如何确保焦点留在 filter_tree，防止联动逻辑掠夺焦点
+        self.filter_tree.setFocus()
 
     def on_filter_tree_current_changed(self, current, previous):
         """处理键盘导航（上下键）"""
@@ -5603,6 +5660,9 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.load_stock_by_code(code)
                 # 联动左侧列表选中
                 self._select_stock_in_main_table(code)
+        
+        # ⭐ 确保焦点留在 filter_tree，防止键盘连续上下切换失效
+        self.filter_tree.setFocus()
 
     def eventFilter(self, watched, event):
         """处理 filter_tree viewport 点击事件，确保获取焦点"""
@@ -6101,7 +6161,8 @@ if __name__ == "__main__":
         initial_code=initial_code,
         stop_flag=stop_flag,
         log_level=log_level,
-        debug_realtime=realtime
+        debug_realtime=realtime,
+        command_queue=None  # CLI 启动模式下暂无外部队列
     )
 
     # logger.setLevel(LoggerFactory.DEBUG)
