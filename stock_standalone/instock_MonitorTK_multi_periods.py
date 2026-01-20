@@ -4003,7 +4003,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win = tk.Toplevel(self)
             win.title(f"🔔 触发报警 - {name} ({code})")
             win.attributes("-topmost", True) # 强制置顶
-            win.attributes("-toolwindow", True) # 工具窗口样式
+            # 移除 -toolwindow: 工具窗口样式会导致窗口在某些情况下无法响应鼠标事件
+            # win.attributes("-toolwindow", True)
+            win.overrideredirect(False)  # 确保窗口有标准标题栏和边框
+            win.focus_force()  # 强制获取焦点，确保窗口可交互
             
             # 记录并定位
             self.active_alerts.append(win)
@@ -4068,7 +4071,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if getattr(win, 'is_flashing', False): return # 防止重复触发
                 win.is_flashing = True
                 flash()
-                self._shake_window(win, distance=8,interval_ms=60) # 稍微加大震动幅度
+                self._shake_window(win, distance=5, interval_ms=150) # 降低震动频率以确保窗口可响应事件
             
             def stop_effects():
                 win.is_flashing = False

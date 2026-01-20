@@ -44,6 +44,16 @@ class TradingGUI(QWidget):
     scroll_to_code_signal = pyqtSignal(str)
     send_status_signal = pyqtSignal(object)  # 可以接收 dict
 
+    # === Qt 版 BooleanVar 包装器，用于兼容 StockSender ===
+    class QtBoolVar:
+        """模拟 tk.BooleanVar 接口，用于 Qt 环境"""
+        def __init__(self, value=False):
+            self._value = value
+        def get(self):
+            return self._value
+        def set(self, value):
+            self._value = bool(value)
+
     def __init__(self, logger_path="./trading_signals.db", sender=None, on_tree_scroll_to_code=None):
         super().__init__()
         self.setWindowTitle("策略交易分析工具")
@@ -80,6 +90,25 @@ class TradingGUI(QWidget):
         self.refresh_btn.clicked.connect(self.refresh_table)
         self.top_layout.addWidget(self.refresh_btn)
 
+        # === TDX / THS 独立联动开关 ===
+        self.tdx_var = self.QtBoolVar(True)  # 默认开启
+        self.ths_var = self.QtBoolVar(True)  # 默认开启
+        self.dfcf_var = self.QtBoolVar(False)  # 东方财富默认关闭
+
+        self.tdx_btn = QPushButton("📡 TDX")
+        self.tdx_btn.setCheckable(True)
+        self.tdx_btn.setChecked(True)
+        self.tdx_btn.setStyleSheet("QPushButton:checked { background-color: #4CAF50; color: white; }")
+        self.tdx_btn.clicked.connect(self._on_tdx_toggle)
+        self.top_layout.addWidget(self.tdx_btn)
+
+        self.ths_btn = QPushButton("📡 THS")
+        self.ths_btn.setCheckable(True)
+        self.ths_btn.setChecked(True)
+        self.ths_btn.setStyleSheet("QPushButton:checked { background-color: #2196F3; color: white; }")
+        self.ths_btn.clicked.connect(self._on_ths_toggle)
+        self.top_layout.addWidget(self.ths_btn)
+
         self.stock_input = QComboBox()
         self.stock_input.setEditable(True)
         self.top_layout.addWidget(QLabel("代码过滤:"))
@@ -106,7 +135,7 @@ class TradingGUI(QWidget):
         self.scroll_to_code_signal.connect(self._safe_scroll_to_code)
         self.send_status_signal.connect(self._safe_update_send_status)
 
-        # === 股票发送器 ===
+        # === 股票发送器 (使用独立的 tdx_var / ths_var) ===
         if sender is not None:
             self.sender = sender
             if hasattr(self.sender, "callback"):
@@ -117,10 +146,33 @@ class TradingGUI(QWidget):
                         original_cb(status_dict)
                 self.sender.callback = safe_callback
         else:
-            self.sender = StockSender(callback=self.update_send_status)
+            self.sender = StockSender(
+                self.tdx_var, 
+                self.ths_var, 
+                self.dfcf_var, 
+                callback=self.update_send_status
+            )
 
         # 初始化表格数据
         self.refresh_table()
+
+    def _on_tdx_toggle(self):
+        """TDX 联动开关切换"""
+        self.tdx_var.set(self.tdx_btn.isChecked())
+        status = "已开启" if self.tdx_var.get() else "已关闭"
+        self.label_summary.setText(f"TDX 联动: {status}")
+        # 刷新 sender 句柄
+        if hasattr(self.sender, 'reload'):
+            self.sender.reload()
+
+    def _on_ths_toggle(self):
+        """THS 联动开关切换"""
+        self.ths_var.set(self.ths_btn.isChecked())
+        status = "已开启" if self.ths_var.get() else "已关闭"
+        self.label_summary.setText(f"THS 联动: {status}")
+        # 刷新 sender 句柄
+        if hasattr(self.sender, 'reload'):
+            self.sender.reload()
 
     def center(self):
         screen = QApplication.primaryScreen()

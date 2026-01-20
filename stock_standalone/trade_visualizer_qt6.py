@@ -1544,7 +1544,24 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 1. 窗口基本设置
         self.setWindowTitle("PyQuant Stock Visualizer (Qt6 + PyQtGraph)")
-        self.sender = StockSender(callback=None)
+        
+        # === Qt 版 BooleanVar 包装器，用于兼容 StockSender ===
+        class QtBoolVar:
+            """模拟 tk.BooleanVar 接口，用于 Qt 环境"""
+            def __init__(self, value=False):
+                self._value = value
+            def get(self):
+                return self._value
+            def set(self, value):
+                self._value = bool(value)
+        
+        # === TDX / THS 独立联动开关 ===
+        self.tdx_var = QtBoolVar(True)  # 默认开启
+        self.ths_var = QtBoolVar(True)  # 默认开启
+        self.dfcf_var = QtBoolVar(False)  # 东方财富默认关闭
+        
+        # 使用独立开关初始化 StockSender
+        self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=None)
         self.command_queue = command_queue  # ⭐ 新增：内部指令队列
         # WindowMixin 要求: scale_factor
         self._debug_realtime = debug_realtime   # 临时调试用
@@ -1555,7 +1572,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.resample = 'd'
         self.qt_theme = 'dark'  # 默认使用黑色主题
         self.show_bollinger = True
-        self.tdx_enabled = False  # 默认开启
+        self.tdx_enabled = True  # 保留兼容，同步到 tdx_var
+        self.ths_enabled = True  # THS 开关状态
         self.show_td_sequential = True  # 神奇九转默认开启
         self.realtime = True  # 默认开启
         # 缓存 df_all
@@ -2496,17 +2514,53 @@ class MainWindow(QMainWindow, WindowMixin):
             self.load_stock_by_code(self.current_code)
 
     def _init_tdx(self):
-        """Initialize TDX / code link toggle"""
-        self.tdx_cb = QCheckBox("Enable TDX Link")
-        self.tdx_cb.setChecked(self.tdx_enabled)  # 默认联动
-        self.tdx_cb.stateChanged.connect(self.on_tdx_toggled)
+        """Initialize TDX / THS independent link toggles"""
         self.toolbar.addSeparator()
-        self.toolbar.addWidget(self.tdx_cb)
+        
+        # 简洁样式：只增大指示器
+        checkbox_style = """
+            QCheckBox { font-weight: bold; spacing: 5px; }
+            QCheckBox::indicator { width: 16px; height: 16px; }
+        """
+        
+        # TDX 开关
+        self.tdx_btn = QCheckBox("📡 TDX")
+        self.tdx_btn.setChecked(self.tdx_enabled)
+        self.tdx_btn.stateChanged.connect(self._on_tdx_toggled)
+        self.tdx_btn.setStyleSheet(checkbox_style)
+        self.toolbar.addWidget(self.tdx_btn)
+        
+        # THS 开关
+        self.ths_btn = QCheckBox("📡 THS")
+        self.ths_btn.setChecked(self.ths_enabled)
+        self.ths_btn.stateChanged.connect(self._on_ths_toggled)
+        self.ths_btn.setStyleSheet(checkbox_style)
+        self.toolbar.addWidget(self.ths_btn)
 
-    def on_tdx_toggled(self, state):
-        """Enable or disable code sending via sender"""
+    def _on_tdx_toggled(self, state):
+        """TDX 联动开关切换"""
         self.tdx_enabled = bool(state)
-        logger.info(f'tdx_enabled: {self.tdx_enabled}')
+        if hasattr(self, 'tdx_var'):
+            self.tdx_var.set(self.tdx_enabled)
+        logger.info(f'TDX 联动: {"已开启" if self.tdx_enabled else "已关闭"}')
+        # 刷新 sender 句柄
+        if hasattr(self, 'sender') and hasattr(self.sender, 'reload'):
+            self.sender.reload()
+
+    def _on_ths_toggled(self, state):
+        """THS 联动开关切换"""
+        self.ths_enabled = bool(state)
+        if hasattr(self, 'ths_var'):
+            self.ths_var.set(self.ths_enabled)
+        logger.info(f'THS 联动: {"已开启" if self.ths_enabled else "已关闭"}')
+        # 刷新 sender 句柄
+        if hasattr(self, 'sender') and hasattr(self.sender, 'reload'):
+            self.sender.reload()
+
+    # 保留旧方法作为兼容
+    def on_tdx_toggled(self, state):
+        """Enable or disable code sending via sender (legacy compatibility)"""
+        self._on_tdx_toggled(state)
 
     def _init_real_time(self):
         """Initialize TDX / code link toggle"""
@@ -2948,12 +3002,35 @@ class MainWindow(QMainWindow, WindowMixin):
                 logger.exception("Error in on_realtime_update")
 
     def apply_df_diff(self, df_diff):
-        for col in df_diff.columns:
-            mask = df_diff[col].notna()
-            self.df_all.loc[mask, col] = df_diff.loc[mask, col]
-        # self.render_table_or_charts()
-        # 用 update_df_all 来刷新界面
-        self.update_df_all(self.df_all)
+        """安全地应用增量更新到 df_all"""
+        try:
+            if df_diff is None or df_diff.empty or self.df_all is None or self.df_all.empty:
+                return
+            
+            # 获取两个 DataFrame 共有的索引
+            common_idx = self.df_all.index.intersection(df_diff.index)
+            if len(common_idx) == 0:
+                logger.debug("[apply_df_diff] No common indices between df_diff and df_all")
+                return
+            
+            for col in df_diff.columns:
+                if col not in self.df_all.columns:
+                    continue  # 跳过 df_all 中不存在的列
+                try:
+                    # 只处理共有索引上的有效值
+                    col_data = df_diff.loc[common_idx, col]
+                    valid_mask = col_data.notna()
+                    valid_indices = valid_mask[valid_mask].index
+                    
+                    if len(valid_indices) > 0:
+                        self.df_all.loc[valid_indices, col] = df_diff.loc[valid_indices, col]
+                except Exception as e:
+                    logger.debug(f"[apply_df_diff] Column {col} update failed: {e}")
+                    
+            # 用 update_df_all 来刷新界面
+            self.update_df_all(self.df_all)
+        except Exception as e:
+            logger.error(f"[apply_df_diff] Error: {e}")
 
     def _poll_command_queue(self):
         """轮询内部指令队列 (消费所有积压，只取最新数据)"""
@@ -4160,8 +4237,9 @@ class MainWindow(QMainWindow, WindowMixin):
             if code:
                 self._clicked_change = True
                 if code == self.current_code: 
-                    # 如果 code 没变，说明 currentItemChanged 不会触发，手动同步一次 TDX (强制同步)
-                    if self.tdx_enabled:
+                    # 如果 code 没变，说明 currentItemChanged 不会触发，手动同步一次 (强制同步)
+                    # TDX 或 THS 任一开启时都发送
+                    if self.tdx_enabled or self.ths_enabled:
                         try:
                             self.sender.send(code)
                         except Exception:
@@ -4191,7 +4269,8 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.load_stock_by_code(code)
                     
                     # 1.1: 无论是键盘还是点击，只要切换了代码，且开启了同步，就发送给外部工具
-                    if self.tdx_enabled:
+                    # TDX 或 THS 任一开启时都发送
+                    if self.tdx_enabled or self.ths_enabled:
                         try:
                             self.sender.send(code)
                         except Exception as e:
@@ -4814,8 +4893,10 @@ class MainWindow(QMainWindow, WindowMixin):
 
                 with timed_ctx("draw_td_sequential", warn_ms=40):
                     for i in range(start, total):
-                        td_cnt = buy[i] if buy[i] > 0 else sell[i]
-                        if td_cnt == 0:
+                        buy_cnt = buy[i]
+                        sell_cnt = sell[i]
+
+                        if buy_cnt == 0 and sell_cnt == 0:
                             continue
                         if pool_idx >= len(pool):
                             break
@@ -4823,20 +4904,62 @@ class MainWindow(QMainWindow, WindowMixin):
                         t = pool[pool_idx]
                         pool_idx += 1
 
-                        # 视觉节奏：颜色 + 字体
-                        if td_cnt == 9:
-                            t.setColor('#FFFF00')      # 明黄色
-                            t.setFont(self.td_font_9)
-                        elif td_cnt >= 7:
-                            t.setColor('#FFD700')      # 金黄色
-                            t.setFont(self.td_font_7p)
+                        # 判断是 buy 还是 sell
+                        if buy_cnt > 0:
+                            td_cnt = buy_cnt
+                            # buy 用黄色系
+                            if td_cnt == 9:
+                                t.setColor('#FFFF00')      # 明黄色，买入信号
+                                t.setFont(self.td_font_9)
+                            elif td_cnt >= 7:
+                                t.setColor('#FFD700')      # 金黄色，买入强势
+                                t.setFont(self.td_font_7p)
+                            else:
+                                t.setColor('#E6C200')      # 深黄色，买入弱势
+                                t.setFont(self.td_font_norm)
+
                         else:
-                            t.setColor('#E6C200')      # 深黄色
-                            t.setFont(self.td_font_norm)
+                            td_cnt = sell_cnt
+                            # sell 用绿色系
+                            if td_cnt == 9:
+                                t.setColor('#00FF00')      # 明绿色，卖出信号
+                                t.setFont(self.td_font_9)
+                            elif td_cnt >= 7:
+                                t.setColor('#32CD32')      # 亮绿色，卖出强势
+                                t.setFont(self.td_font_7p)
+                            else:
+                                t.setColor('#228B22')      # 深绿色，卖出弱势
+                                t.setFont(self.td_font_norm)
 
                         t.setText(str(td_cnt))
                         t.setPos(x_axis[i], highs[i] * 1.008)
                         t.show()
+
+                # with timed_ctx("draw_td_sequential", warn_ms=40):
+                #     for i in range(start, total):
+                #         td_cnt = buy[i] if buy[i] > 0 else sell[i]
+                #         if td_cnt == 0:
+                #             continue
+                #         if pool_idx >= len(pool):
+                #             break
+
+                #         t = pool[pool_idx]
+                #         pool_idx += 1
+
+                #         # 视觉节奏：颜色 + 字体
+                #         if td_cnt == 9:
+                #             t.setColor('#FFFF00')      # 明黄色
+                #             t.setFont(self.td_font_9)
+                #         elif td_cnt >= 7:
+                #             t.setColor('#FFD700')      # 金黄色
+                #             t.setFont(self.td_font_7p)
+                #         else:
+                #             t.setColor('#E6C200')      # 深黄色
+                #             t.setFont(self.td_font_norm)
+
+                #         t.setText(str(td_cnt))
+                #         t.setPos(x_axis[i], highs[i] * 1.008)
+                #         t.show()
 
             except Exception as e:
                 logger.debug(f"TD Sequential display error: {e}")
@@ -6404,12 +6527,25 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 3.4 TDX 联动开关
             if 'tdx_enabled' in window_config:
-                enabled = bool(window_config.get('tdx_enabled', False))
+                enabled = bool(window_config.get('tdx_enabled', True))
                 self.tdx_enabled = enabled
-                if hasattr(self, 'tdx_cb'):
-                    self.tdx_cb.blockSignals(True)
-                    self.tdx_cb.setChecked(enabled)
-                    self.tdx_cb.blockSignals(False)
+                if hasattr(self, 'tdx_var'):
+                    self.tdx_var.set(enabled)
+                if hasattr(self, 'tdx_btn'):
+                    self.tdx_btn.blockSignals(True)
+                    self.tdx_btn.setChecked(enabled)
+                    self.tdx_btn.blockSignals(False)
+
+            # 3.4.1 THS 联动开关
+            if 'ths_enabled' in window_config:
+                enabled = bool(window_config.get('ths_enabled', True))
+                self.ths_enabled = enabled
+                if hasattr(self, 'ths_var'):
+                    self.ths_var.set(enabled)
+                if hasattr(self, 'ths_btn'):
+                    self.ths_btn.blockSignals(True)
+                    self.ths_btn.setChecked(enabled)
+                    self.ths_btn.blockSignals(False)
 
             # 3.5 神奇九转开关
             if 'show_td_sequential' in window_config:
@@ -6502,6 +6638,10 @@ class MainWindow(QMainWindow, WindowMixin):
             # 3.4 TDX 联动开关
             if hasattr(self, 'tdx_enabled'):
                 window_config['tdx_enabled'] = self.tdx_enabled
+            
+            # 3.4.1 THS 联动开关
+            if hasattr(self, 'ths_enabled'):
+                window_config['ths_enabled'] = self.ths_enabled
             
             # 3.5 神奇九转开关
             if hasattr(self, 'show_td_sequential'):
