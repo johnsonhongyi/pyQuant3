@@ -344,6 +344,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.sortby_col = None
         self.sortby_col_ascend = None
         self.select_code = None
+        self.vis_select_code = None
         self.ColumnSetManager = None
         self.ColManagerconfig = None
         self._open_column_manager_job = None
@@ -399,7 +400,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self._realtime_monitor_win: Optional[tk.Toplevel] = None
         self._stock_selection_win: Optional[tk.Toplevel] = None
         self.txt_widget = None
-        self.select_code = None
 
         # 🛡️ 动态列订阅管理
         self.mandatory_cols: set[str] = {
@@ -488,7 +488,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 队列接收子进程数据
         self.queue = mp.Queue()
-        self.viz_command_queue = None  # ⭐ 给可视化器的内部指令队列
 
         # UI 构建
         self._build_ui(ctrl_frame)
@@ -2092,6 +2091,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         if not code and self._last_resample != self.global_values.getkey("resample"):
             return
+
+        if self.vis_select_code == code:
+            return
+        else:
+            self.vis_select_code = code
         now = time.time()
         # 防抖：同一 code 在 0.5 秒内不重复发送
         if self._last_visualizer_code == code and (now - self._last_visualizer_time) < self._visualizer_debounce_sec:
@@ -2145,7 +2149,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # --- 2️⃣ 启动 Qt 可视化进程（如果没发出去） ---
         if not sent:
             try:
-                if self.qt_process is None or not self.qt_process.is_alive():
+                if self.qt_process is None or not self.qt_process.is_alive() or getattr(self, '_df_first_send_done',False):
                     # 初始化指令队列
                     if self.viz_command_queue is None:
                         self.viz_command_queue = mp.Queue()
@@ -4725,7 +4729,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win = tk.Toplevel(self)
             win.title(f"🔔 触发报警 - {name} ({code})")
             win.attributes("-topmost", True) # 强制置顶
-            win.attributes("-toolwindow", True) # 工具窗口样式
+            # 移除 -toolwindow: 工具窗口样式会导致窗口在某些情况下无法响应鼠标事件
+            win.attributes("-toolwindow", True)
+            # win.overrideredirect(False)  # 确保窗口有标准标题栏和边框
+            # win.focus_force()  # 强制获取焦点，确保窗口可交互
             
             # 记录并定位
             self.active_alerts.append(win)
@@ -4790,7 +4797,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if getattr(win, 'is_flashing', False): return # 防止重复触发
                 win.is_flashing = True
                 flash()
-                self._shake_window(win, distance=8,interval_ms=60) # 稍微加大震动幅度
+                self._shake_window(win, distance=5, interval_ms=150) # 降低震动频率以确保窗口可响应事件
             
             def stop_effects():
                 win.is_flashing = False

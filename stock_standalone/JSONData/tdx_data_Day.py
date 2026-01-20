@@ -1751,6 +1751,58 @@ def evaluate_trading_signal(df, mode='A'):
 
     return df
 
+def td_sequential_13d(df: pd.DataFrame, lookback: int = 4):
+    """
+    极限性能版 TD Sequential 段位计算
+    - 只计算最近 lookback + 9 天
+    - 输出 td_buy_count / td_sell_count
+    - df 必须有 'close' 列
+    """
+    out = pd.DataFrame(index=df.index, data={
+        'td_buy': 0,
+        'td_sell': 0
+    })
+    
+    if df.empty or 'close' not in df.columns:
+        return out
+
+    # 最近需要的天数
+    need_days = lookback + 9
+    if len(df) < need_days:
+        close = df['close'].values
+    else:
+        close = df['close'].values[-need_days:]
+
+    N = len(close)
+    buy_count = np.zeros(N, dtype=np.int8)
+    sell_count = np.zeros(N, dtype=np.int8)
+
+    # 逐日计算段位
+    for i in range(lookback, N):
+        # TD Buy
+        if close[i] < close[i - lookback]:
+            cnt = 1
+            j = i - 1
+            while j >= lookback and close[j] < close[j - lookback]:
+                cnt += 1
+                j -= 1
+            buy_count[i] = min(cnt, 255)  # 可扩展到大于9
+        # TD Sell
+        if close[i] > close[i - lookback]:
+            cnt = 1
+            j = i - 1
+            while j >= lookback and close[j] > close[j - lookback]:
+                cnt += 1
+                j -= 1
+            sell_count[i] = min(cnt, 255)
+
+    # 对齐到原 df
+    out_idx_start = len(df) - N
+    out.iloc[out_idx_start:, out.columns.get_loc('td_buy')] = buy_count
+    out.iloc[out_idx_start:, out.columns.get_loc('td_sell')] = sell_count
+
+    return out
+
 
 def td_sequential_fast(df: pd.DataFrame, lookback: int = 4) -> pd.DataFrame:
     if df.empty or 'close' not in df.columns or len(df) < lookback + 1:
@@ -1785,7 +1837,7 @@ def td_sequential_fast(df: pd.DataFrame, lookback: int = 4) -> pd.DataFrame:
 
     return out
     
-def td_sequential(df: pd.DataFrame, lookback: int = 4) -> pd.DataFrame:
+def td_sequential_slow(df: pd.DataFrame, lookback: int = 4) -> pd.DataFrame:
     """
     神奇九转 (TD Sequential / Tom DeMark Sequential)
     
@@ -1986,7 +2038,11 @@ def get_tdx_macd(df: pd.DataFrame, min_len: int = 39, rsi_period: int = 14, kdj_
     if detect_calc_support:
         df = detect_local_extremes_filtered(df)
         df = calc_support_resistance_vec(df)
-
+    # with timed_ctx("td_sequential_13d", warn_ms=50):
+    td_sig = td_sequential_13d(df)
+    # with timed_ctx("td_sequential_fast", warn_ms=50):
+    #     td_sig2 = td_sequential_fast(df)
+    df[['td_buy', 'td_sell']] = td_sig
     return df
 
 tdx_max_int = ct.tdx_max_int
@@ -7529,8 +7585,8 @@ if __name__ == '__main__':
     dd = get_tdx_Exp_day_to_df(code, dl=1) 
     dd2 = get_tdx_Exp_day_to_df(code, dl=480,resample='m')
     dd3 = get_tdx_Exp_day_to_df(code, dl=60,resample='d')
+    cct.print_timing_summary()
     import ipdb;ipdb.set_trace()
-
     duration = cct.get_today_duration(dd.date,tdx=True) if dd is not None and len(dd) > 5 else -1
     df = get_tdx_Exp_day_to_df_lday(code, dl=1) 
     dm = get_tdx_Exp_day_to_df_lday(code, dl=480,resample='m')
