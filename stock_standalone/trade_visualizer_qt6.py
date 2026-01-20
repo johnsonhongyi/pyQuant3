@@ -374,35 +374,61 @@ class SignalOverlay:
         self.tick_plot.addItem(self.tick_scatter)
 
         self.text_items = []
+        self._text_pool = []  # 对象池：存放 TextItem
+
+    def _get_text_item(self) -> pg.TextItem:
+        """从池中获取或新建 TextItem"""
+        if self._text_pool:
+            t = self._text_pool.pop()
+            t.show()
+            return t
+        
+        # 池空了，新建并添加到场景 (默认先加到 kline_plot，后续可通过 addItem 调整或直接 setPos)
+        t = pg.TextItem('', anchor=(0.5, 1))
+        self.kline_plot.addItem(t)
+        return t
 
     def clear(self):
-        """清理所有信号标记"""
+        """清理所有信号标记 (回收对象到池)"""
         self.kline_scatter.clear()
         self.tick_scatter.clear()
         for item in self.text_items:
-            # 尝试从两个图中移除，忽略错误
-            if item.scene():
-                item.scene().removeItem(item)
+            item.hide()
+            self._text_pool.append(item)
         self.text_items.clear()
 
-    def update_signals(self, signals: list[SignalPoint], target='kline'):
+    def update_signals(self, signals: list[SignalPoint], target='kline', y_visuals=None):
         """
         更新信号显示
         :param signals: SignalPoint 列表
         :param target: 'kline' 或 'tick'
+        :param y_visuals: 可选的视觉 Y 坐标列表 (用于对齐 K 线上下方)
         """
         plot = self.kline_plot if target == 'kline' else self.tick_plot
         scatter = self.kline_scatter if target == 'kline' else self.tick_scatter
 
         if not signals:
             scatter.clear()
+            # 立即清理旧文本并回收入池
+            for item in self.text_items:
+                item.hide()
+                self._text_pool.append(item)
+            self.text_items.clear()
             return
 
         xs, ys, brushes, symbols, sizes, data = [], [], [], [], [], []
 
-        for sig in signals:
+        # 先将当前显示的文本回收入池
+        for item in self.text_items:
+            item.hide()
+            self._text_pool.append(item)
+        self.text_items.clear()
+
+        for i, sig in enumerate(signals):
+            y_pos = y_visuals[i] if y_visuals is not None else sig.price
+            
             xs.append(sig.bar_index)
-            ys.append(sig.price)
+            ys.append(y_pos)
             brushes.append(pg.mkBrush(sig.color))
             symbols.append(sig.symbol)
             sizes.append(sig.size)
@@ -410,14 +436,18 @@ class SignalOverlay:
             data.append(sig.to_visual_hit()['meta'])
 
             # 添加价格文字标签
-            is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD)
-            anchor = (0.5, 1.2) if is_buy else (0.5, -0.2)
+            is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY)
+            # anchor (x, y): (0.5, 1) means center-bottom of text is at pos
+            # If is_buy, text should be BELOW the marker
+            anchor = (0.5, -0.5) if is_buy else (0.5, 1.5)
             # 颜色适配主题
             text_color = (255, 120, 120) if is_buy else (120, 255, 120)
 
-            txt = pg.TextItem(text=f"{sig.price:.2f}", anchor=anchor, color=text_color)
-            txt.setPos(sig.bar_index, sig.price)
-            plot.addItem(txt)
+            txt = self._get_text_item()
+            txt.setText(f"{sig.price:.2f}")
+            txt.setAnchor(anchor)
+            txt.setColor(text_color)
+            txt.setPos(sig.bar_index, y_pos)
             self.text_items.append(txt)
 
         scatter.setData(x=xs, y=ys, brush=brushes, symbol=symbols, size=sizes, data=data)
@@ -1578,6 +1608,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.realtime = True  # 默认开启
         # 缓存 df_all
         self.df_cache = pd.DataFrame()
+        self.garbage_threads = []         # ⭐ 线程回收站：防止 QThread 被提前 GC 导致崩溃 (1.6)
         # self.realtime_worker = None
         self.last_initialized_trade_day = None  # 记录最后一次初始化的交易日
         self._closing = False
@@ -2969,6 +3000,9 @@ class MainWindow(QMainWindow, WindowMixin):
             self.realtime_process = None
 
     def _poll_realtime_queue(self):
+        # 顺便清理不再运行的旧线程
+        self._cleanup_garbage_threads()
+        
         if not hasattr(self, "_closing") or getattr(self, "_closing", False):
             logger.debug(f'self._closing :{getattr(self, "_closing", False)}')
             return  # 窗口正在关闭，不再处理队列
@@ -3000,6 +3034,20 @@ class MainWindow(QMainWindow, WindowMixin):
                 logger.warning(f"GUI update skipped: {e}")
             except Exception:
                 logger.exception("Error in on_realtime_update")
+
+    def _cleanup_garbage_threads(self):
+        """清理线程回收站中已经结束运行的线程"""
+        if not self.garbage_threads:
+            return
+            
+        remaining = []
+        for t in self.garbage_threads:
+            if t.isFinished():
+                # 线程已结束，可以安全释放 (由 Python GC 处理)
+                logger.debug(f"[DataLoaderThread] Scavenged finished thread: {id(t)}")
+                continue
+            remaining.append(t)
+        self.garbage_threads = remaining
 
     def apply_df_diff(self, df_diff):
         """安全地应用增量更新到 df_all"""
@@ -3587,7 +3635,8 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.debug(f"[RT] Appended today's bar for {code}")
 
         # --- 5. 渲染图表 ---
-        self.render_charts(code, self.day_df, tick_df)
+        with timed_ctx("render_charts_realtime", warn_ms=100):
+            self.render_charts(code, self.day_df, tick_df)
 
 
 
@@ -4679,19 +4728,17 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.kline_plot.setTitle(f"Loading {code}...")
 
-        # ⭐ 快速浏览优化：直接丢弃旧的 DataLoaderThread，不等待完成
-
-        # ⭐ 清理旧的 DataLoaderThread，防止 QThread: Destroyed while thread is still running
-        # 快速浏览时不等待，直接丢弃旧线程
+        # ⭐ 清理旧的 DataLoaderThread，使用回收站机制防止闪推
         if hasattr(self, 'loader') and self.loader is not None:
             if self.loader.isRunning():
-                logger.debug("[DataLoaderThread] Discarding previous loader (rapid browsing)")
+                logger.debug(f"[DataLoaderThread] Moving active thread to scavenger: {id(self.loader)}")
                 try:
-                    self.loader.data_loaded.disconnect()  # 断开信号，防止旧数据干扰
-                except TypeError:
-                    pass  # 信号可能已断开
-                # 不等待旧线程，让它在后台完成或被 GC
-                self.loader = None
+                    self.loader.data_loaded.disconnect()  # 重要：断开信号，防止旧数据乱跳
+                except Exception:
+                    pass
+                # 将运行中的线程移入回收站
+                self.garbage_threads.append(self.loader)
+            self.loader = None
 
         # ② 加载历史
         with timed_ctx("DataLoaderThread", warn_ms=80):
@@ -5081,9 +5128,37 @@ class MainWindow(QMainWindow, WindowMixin):
                 ))
                 self.last_shadow_decision = shadow_decision # 存储供简报使用
 
-        # 执行 K 线绘图
+        # 执行 K 线绘图 (计算视觉偏移)
         self.current_kline_signals = kline_signals # ⭐ 保存信号供十字光标显示 (1.3)
-        self.signal_overlay.update_signals(kline_signals, target='kline')
+        
+        y_visuals = []
+        for sig in kline_signals:
+            is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY)
+            
+            # 1. 历史 K 线信号
+            if sig.bar_index < len(day_df):
+                row = day_df.iloc[int(sig.bar_index)]
+                y_low = row['low']
+                y_high = row['high']
+                if is_buy:
+                    # 价格标签在低价下方 1.5%，防止悬空
+                    y_v = y_low * 0.985
+                else:
+                    # 价格标签在高价上方 1.5%
+                    y_v = y_high * 1.015
+            else:
+                # 2. 实时幽灵 K 线信号 (Ghost Candle)
+                current_p = float(tick_df['close'].iloc[-1]) if not tick_df.empty else sig.price
+                high_p = tick_df['high'].max() if not tick_df.empty else current_p
+                low_p = tick_df['low'].min() if not tick_df.empty else current_p
+                
+                if is_buy:
+                    y_v = low_p * 0.985
+                else:
+                    y_v = high_p * 1.015
+            y_visuals.append(y_v)
+
+        self.signal_overlay.update_signals(kline_signals, target='kline', y_visuals=y_visuals)
 
         # -------------------------
         # 移除此处的 sensing_bar 设置，改到 intraday 内容设置之后
@@ -5318,9 +5393,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
             if is_realtime_active and self.show_strategy_simulation:
                 if 'shadow_decision' in locals() and shadow_decision:
-                    with timed_ctx("_run_strategy_simulation_signal_show", warn_ms=100):
-                        # 只调用一次绘制函数
-                        self._update_tick_shadow_signal(code, tick_df, shadow_decision, x_axis=x_axis)
+                    # [OPTIMIZATION] Consolidated into signal_overlay. kline_signals already contains this.
+                    pass
 
 
 

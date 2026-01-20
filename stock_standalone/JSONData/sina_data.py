@@ -1051,6 +1051,47 @@ class Sina:
 
         raise IOError(ct.NETWORK_URL_ERROR_MSG)
 
+    def clean_ohlcv_zero(self,df: pd.DataFrame, ohlcv_cols=None, check_existing=True) -> pd.DataFrame:
+        """
+        清理 OHLCV 全为 0 的行，用于 HDF5 写入前优化。
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            多索引或普通 DataFrame
+        ohlcv_cols : list, optional
+            OHLCV 列名列表，默认 ['open','high','low','close','volume']
+        check_existing : bool, default True
+            如果 True，会先快速判断是否有全 0 行，没有就直接返回 df，减少计算开销
+
+        Returns
+        -------
+        pd.DataFrame
+            清理后的 DataFrame
+        """
+        if df.empty:
+            return df
+
+        # 1️⃣ 自动选择 OHLCV 列
+        if ohlcv_cols is None:
+            ohlcv_cols = [c for c in ['open','high','low','close','volume'] if c in df.columns]
+
+        if not ohlcv_cols:
+            return df  # 没有需要清理的列
+
+        # 2️⃣ 高性能检查是否需要清理
+        if check_existing:
+            # 快速检查所有 OHLCV 列是否全非0
+            all_zero_rows = np.all(df[ohlcv_cols].values == 0.0, axis=1)
+            if not np.any(all_zero_rows):
+                return df  # 没有全 0 行，直接返回原 df
+
+        # 3️⃣ 矢量化清理
+        mask_valid = (df[ohlcv_cols].values != 0.0).any(axis=1)
+        df_cleaned = df.loc[mask_valid]
+
+        return df_cleaned
+
     def format_response_data(self, index: bool = False) -> Optional[pd.DataFrame]:
         stocks_detail = ''.join(self.stock_data)
         # print stocks_detail
@@ -1224,6 +1265,14 @@ class Sina:
                 df_mi['lastbuy'] = df_mi['close'] if 'close' in df_mi.columns else 0
             
             df_mi_write = df_mi.loc[:, [c for c in mi_cols if c in df_mi.columns]]
+
+            # if isinstance(df_mi_write.index, pd.RangeIndex):
+            #     if 'code' in df_mi_write.columns and 'ticktime' in df_mi_write.columns:
+            #         df_mi_write = df_mi_write.set_index(['code','ticktime'])
+
+            # 调用清理函数
+            df_mi_write = self.clean_ohlcv_zero(df_mi_write)
+
             # 直接 reindex 取需要的列
             # df_mi_write = df_mi.reindex(columns=[c for c in mi_cols if c in df_mi.columns])
 
