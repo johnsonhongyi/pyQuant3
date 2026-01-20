@@ -595,33 +595,44 @@ class DataLoaderThread(QThread):
         self._search_code = None
         self._resample = None
 
+    def __del__(self):
+        """当 Python 准备销毁这个对象时触发"""
+        if hasattr(self, 'isRunning') and self.isRunning():
+            import traceback
+            logger.error("\n" + "="*50)
+            logger.error(f"[CRITICAL DEBUG] QThread object (DataLoaderThread) is being GC'd while STILL RUNNING! ID: {id(self)}")
+            # 打印当前谁在执行删除操作 (即触发 GC 的堆栈)
+            err_stack = "".join(traceback.format_stack())
+            logger.error(f"Traceback of who triggered this deletion:\n{err_stack}")
+            logger.error("="*50 + "\n")
+
     def run(self) -> None:
-            try:
-                # 使用 QMutexLocker 自动管理锁定和解锁
-                if self._search_code == self.code and self._resample == self.resample:
-                    return  # 数据已经加载过，不重复
-                with QMutexLocker(self.mutex_lock):
-                    # 1. Fetch Daily Data (Historical)
-                    # tdd.get_tdx_Exp_day_to_df 内部调用 HDF5 API，必须在锁内执行
-                    with timed_ctx("get_tdx_Exp_day_to_df", warn_ms=800):
-                       day_df = tdd.get_tdx_Exp_day_to_df(self.code, dl=Resample_LABELS_Days[self.resample],resample=self.resample,fastohlc=True)
-                       # day_df = tdd.get_tdx_Exp_day_to_df(self.code, dl=ct.Resample_LABELS_Days[self.resample],resample=self.resample,fastohlc=True)
+        try:
+            # 使用 QMutexLocker 自动管理锁定和解锁
+            if self._search_code == self.code and self._resample == self.resample:
+                return  # 数据已经加载过，不重复
+                
+            with QMutexLocker(self.mutex_lock):
+                # 1. Fetch Daily Data (Historical)
+                # tdd.get_tdx_Exp_day_to_df 内部调用 HDF5 API，必须在锁内执行
+                with timed_ctx("get_tdx_Exp_day_to_df", warn_ms=800):
+                    day_df = tdd.get_tdx_Exp_day_to_df(self.code, dl=Resample_LABELS_Days[self.resample], resample=self.resample, fastohlc=True)
 
-                    # 2. Fetch Realtime/Tick Data (Intraday)
-                    # 假设此操作不涉及 HDF5，可以在锁外执行
-                    with timed_ctx("get_real_time_tick", warn_ms=800):
-                       tick_df = sina_data.Sina().get_real_time_tick(self.code)
+                # 2. Fetch Realtime/Tick Data (Intraday)
+                # 假设此操作不涉及 HDF5，可以在锁外执行
+                with timed_ctx("get_real_time_tick", warn_ms=800):
+                    tick_df = sina_data.Sina().get_real_time_tick(self.code)
 
-                self._search_code = self.code
-                self._resample = self.resample
-                with timed_ctx("emit", warn_ms=800):
-                       self.data_loaded.emit(self.code, day_df, tick_df)
-            except Exception as e:
-                print(f"Error loading data for {self.code}: {e}")
-                # 确保即使发生错误，信号也能发出
-                import traceback
-                traceback.print_exc()
-                self.data_loaded.emit(self.code, pd.DataFrame(), pd.DataFrame())
+            self._search_code = self.code
+            self._resample = self.resample
+            with timed_ctx("emit", warn_ms=800):
+                self.data_loaded.emit(self.code, day_df, tick_df)
+        except Exception:
+            # ⭐ 核心改进：使用 logger.exception 自动记录完整堆栈，并确保信号发出
+            logger.exception(f"DataLoaderThread Error for {self.code}")
+            self.data_loaded.emit(self.code, pd.DataFrame(), pd.DataFrame())
+        finally:
+            logger.debug(f"[DataLoaderThread] Thread for {self.code} is exiting run().")
 
 
 
@@ -1678,6 +1689,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self._init_theme_selector()
         self._init_tdx()
         self._init_real_time()
+        self._init_layout_menu()  # ⭐ 新增：布局预设菜单
 
         # ⭐ 数据同步序列号 (用于防重发、防漏发、防乱序)
         self.expected_sync_version = -1
@@ -1714,8 +1726,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.decision_panel.setObjectName("DecisionPanel")
         self.decision_panel.setStyleSheet("""
             #DecisionPanel {
-                background-color: #1a1a1a;
-                border-top: 1px solid #333;
+                background-color: transparent;
+                border-top: 1px solid #b3d7ff;
             }
             QLabel {
                 font-family: 'Microsoft YaHei UI', 'Segoe UI';
@@ -2448,8 +2460,7 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.warning(f"⚠️ 系统快捷键注销失败: {e}")
 
     def _reset_kline_view(self, df=None):
-        """重置 K 线图视图：实现真正的“出厂设置”全览模式，两头留白不遮挡"""
-        # 注意：如果被信号直接调用，df 可能是 bool (checked)，需排除
+        """重置 K 线图视图：始终优先显示右侧最新的 120-150 根（不压缩全览）"""
         if not isinstance(df, pd.DataFrame):
             df = getattr(self, 'day_df', pd.DataFrame())
 
@@ -2458,23 +2469,27 @@ class MainWindow(QMainWindow, WindowMixin):
 
         vb = self.kline_plot.getViewBox()
         n = len(df)
-
-        # 1. 暂时启用全局自动缩放，让 pyqtgraph 找到数据边界
-        vb.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
-        vb.autoRange()
-
-        # 2. 手动微调 X 轴：开启“固定模式”，设置完美的全览范围
-        # 左侧留 1 根，右侧留 3 根（给信号箭头和最新 ghost 留位置）
-        vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
-        x_min, x_max = -1.5, n + 2.5
-        vb.setRange(xRange=(x_min, x_max), padding=0)
-
-        # 3. Y 轴维持自适应（基于当前的 X 范围）
+        
+        # 设定默认显示根数 ( trader 视角: 120-150 根最舒适)
+        display_n = 150 
+        
+        # 1. 暂时启用全局自动缩放，让 pyqtgraph 找到 Y 数据边界
         vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
         vb.setAutoVisible(y=True)
 
-        # 4. 强制刷新 Y 轴到当前可见最佳高度 (由于 X 已在锁定期，autoRange 只会计算 Y)
+        # 2. X 轴：右对齐，显示最新的 display_n 根
+        vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
+        # 右侧留 3.5 根缓冲空间（给信号箭头和最新 ghost 留位置），确保不被右侧边界遮挡
+        x_max = n + 3.5 
+        x_min = max(-1.5, x_max - display_n)
+        
+        # 核心：使用 setRange 并确保 padding 为 0，精准控制
+        vb.setRange(xRange=(x_min, x_max), padding=0)
+
+        # 3. 强制刷新 Y 轴到当前可见 X 范围的最佳高度
         vb.autoRange()
+        
+        # logger.debug(f"[VIEW] Reset to TraderView: {x_min:.1f} to {x_max:.1f} (total {n})")
 
         # logger.debug(f"[VIEW] Reset to FullView: 0-{n} (Range: {x_min}-{x_max})")
 
@@ -3703,11 +3718,11 @@ class MainWindow(QMainWindow, WindowMixin):
                 }
             """)
         else:
-            widget.setBackground('w')
+            widget.setBackground('#f2faff')
             widget.setStyleSheet("""
                 QGraphicsView {
-                    border: 1px solid #cccccc;
-                    background-color: white;
+                    border: 1px solid #d0e5f5;
+                    background-color: #f2faff;
                 }
             """)
 
@@ -3715,11 +3730,18 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def apply_qt_theme(self):
         """Apply Qt theme / color scheme"""
+        # ⭐ 记录当前分割器尺寸，防止样式重置导致布局错乱
+        current_sizes = self.main_splitter.sizes()
+        
         if self.qt_theme == 'dark':
             self.setStyleSheet("""
                 QWidget {
                     background-color: #2b2b2b;
                     color: #e6e6e6;
+                }
+                #DecisionPanel {
+                    background-color: #1a1a1a;
+                    border-top: 1px solid #333333;
                 }
                 QTableWidget {
                     background-color: #2b2b2b;
@@ -3732,15 +3754,69 @@ class MainWindow(QMainWindow, WindowMixin):
                     border: 1px solid #555555;
                 }
                 QTableWidget::item:selected {
-                    background-color: #505050;
+                    background-color: #094771;
+                    color: #FFFFFF;
+                }
+                QMenuBar {
+                    background-color: #2b2b2b;
+                    color: #e6e6e6;
+                    border-bottom: 1px solid #444444;
+                }
+                QMenuBar::item:selected {
+                    background-color: #3d3d3d;
+                }
+                QMenu {
+                    background-color: #2b2b2b;
+                    color: #e6e6e6;
+                    border: 1px solid #444444;
+                }
+                QMenu::item:selected {
+                    background-color: #094771;
+                    color: #FFFFFF;
                 }
             """)
             pg.setConfigOption('background', 'k')
             pg.setConfigOption('foreground', 'w')
 
         else:
-            # 默认 light
-            self.setStyleSheet("")
+            # 默认 light (优化为淡蓝色系 Trader 风格)
+            self.setStyleSheet("""
+                QWidget {
+                    background-color: #f2faff; /* 极淡蓝色主背景 */
+                    color: #000000;
+                }
+                #DecisionPanel {
+                    background-color: #e1f3ff;
+                    border-top: 1px solid #b3d7ff;
+                }
+                QMenuBar {
+                    background-color: #e1f3ff;
+                    color: #000000;
+                }
+                QMenuBar::item:selected {
+                    background-color: #cce8ff;
+                }
+                QMenu {
+                    background-color: #ffffff;
+                    color: #000000;
+                    border: 1px solid #b3d7ff;
+                }
+                QMenu::item:selected {
+                    background-color: #0078d4;
+                    color: #ffffff;
+                }
+                QTableWidget, QTreeWidget, QHeaderView::section {
+                    background-color: #f8fcff;
+                    color: #000000;
+                    gridline-color: #e1f0fa;
+                }
+                QHeaderView::section {
+                    background-color: #eef7ff;
+                    border: 1px solid #d0e5f5;
+                }
+            """)
+            # 强化 light 模式下的分割器手柄可见性
+            self.main_splitter.setStyleSheet("QSplitter::handle { background-color: #b3d7ff; width: 4px; }")
             pg.setConfigOption('background', 'w')
             pg.setConfigOption('foreground', 'k')
 
@@ -3758,7 +3834,69 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 重新渲染当前股票（如果有）以更新蜡烛图颜色
         if self.current_code:
-            self.load_stock_by_code(self.current_code)
+            # self.load_stock_by_code(self.current_code) # 🔴 移除此处调用，避免 layout 回路
+            # 仅刷新图表颜色，不重载数据
+            self.render_charts(self.current_code, self.day_df)
+
+        # ⭐ 恢复分割器尺寸
+        if any(current_sizes):
+            self.main_splitter.setSizes(current_sizes)
+
+    def _init_layout_menu(self):
+        """初始化布局预设菜单 (优化版：分层明确，防误触)"""
+        if not hasattr(self, '_layout_menu'):
+            menubar = self.menuBar()
+            self._layout_menu = menubar.addMenu("布局(Layout)")
+        
+        self._layout_menu.clear() # 每次刷新前先清空旧项
+        
+        # 1. 加载预设 (放在最外层，方便快速切换)
+        for i in range(1, 4):
+            # 尝试获取描述信息
+            desc = ""
+            if hasattr(self, 'layout_presets'):
+                sizes = self.layout_presets.get(str(i))
+                if sizes:
+                    desc = f" ({sizes[0]}:{sizes[1]}:{sizes[2]})"
+            
+            action = QAction(f"加载 布局预设 {i}{desc}", self)
+            action.triggered.connect(lambda checked, idx=i: self.load_layout_preset(idx))
+            self._layout_menu.addAction(action)
+            
+        self._layout_menu.addSeparator()
+            
+        # 2. 保存预设 (放入子菜单，并明确提示“保存此布局”)
+        save_menu = self._layout_menu.addMenu("⚙️ 保存当前布局为...")
+        for i in range(1, 4):
+            action = QAction(f"保存为 预设 {i}", self)
+            action.triggered.connect(lambda checked, idx=i: self.save_layout_preset(idx))
+            save_menu.addAction(action)
+
+    def save_layout_preset(self, index):
+        """保存当前布局到指定预设 (1-3) - 增加二次确认"""
+        try:
+            from PyQt6.QtWidgets import QMessageBox
+            if not hasattr(self, 'layout_presets'):
+                self.layout_presets = {}
+            
+            # 二次确认
+            reply = QMessageBox.question(
+                self, '确认保存', 
+                f"确定要将当前布局覆盖到 预设 {index} 吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.Yes:
+                sizes = self.main_splitter.sizes()
+                self.layout_presets[str(index)] = sizes
+                self._save_visualizer_config()
+                # 刷新菜单显示新的尺寸描述
+                self._init_layout_menu()
+                logger.info(f"Layout preset {index} saved: {sizes}")
+                QMessageBox.information(self, "布局保存", f"布局预设 {index} 已保存成功。")
+        except Exception as e:
+            logger.error(f"Failed to save layout preset {index}: {e}")
 
     def load_stock_list(self):
         """Load stocks from df_all if available, otherwise from signal history"""
@@ -6540,6 +6678,9 @@ class MainWindow(QMainWindow, WindowMixin):
                 # 默认分割比例：股票列表:过滤面板:图表区域 = 1:1:4
                 self.main_splitter.setSizes([200, 200, 800])
             
+            # --- 1.1 加载布局预设 ---
+            self.layout_presets = config.get('layout_presets', {})
+            
             # --- 2. Filter 配置 ---
             filter_config = config.get('filter', {})
             
@@ -6724,6 +6865,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # --- 构建最终配置 ---
             config = {
                 'splitter_sizes': fixed_sizes,
+                'layout_presets': getattr(self, 'layout_presets', {}),
                 'filter': filter_config,
                 'window': window_config,
                 # 未来扩展：直接添加新的顶级键即可
@@ -6738,59 +6880,95 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.exception("Failed to save visualizer config")
 
+    def save_layout_preset(self, index):
+        """保存当前布局到指定预设 (1-3)"""
+        try:
+            if not hasattr(self, 'layout_presets'):
+                self.layout_presets = {}
+            sizes = self.main_splitter.sizes()
+            self.layout_presets[str(index)] = sizes
+            self._save_visualizer_config()
+            logger.info(f"Layout preset {index} saved: {sizes}")
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.information(self, "布局保存", f"布局预设 {index} 已保存成功。")
+        except Exception as e:
+            logger.error(f"Failed to save layout preset {index}: {e}")
+
+    def load_layout_preset(self, index):
+        """从预设加载布局 (1-3) 并重新校准视角"""
+        try:
+            if hasattr(self, 'layout_presets'):
+                sizes = self.layout_presets.get(str(index))
+                if sizes:
+                    self.main_splitter.setSizes(sizes)
+                    # ⭐ 核心修复：布局切换后强制执行一次“智能重置”，校准 X 轴优先级至右侧
+                    if not self.day_df.empty:
+                        self._reset_kline_view()
+                    logger.info(f"Layout preset {index} loaded and view recalibrated.")
+                else:
+                    from PyQt6.QtWidgets import QMessageBox
+                    QMessageBox.warning(self, "加载失败", f"尚未保存布局预设 {index}。")
+        except Exception as e:
+            logger.error(f"Failed to load layout preset {index}: {e}")
+
 
     def closeEvent(self, event):
-       """窗口关闭统一退出清理"""
-       self._closing = True
-       """窗口关闭事件"""
-       # 保存分割器状态
-       self.save_splitter_state()
-       """Override close event to save window position"""
-       try:
-           self.save_window_position_qt_visual(self, "trade_visualizer")
-           # self.save_window_position_qt(self, "trade_visualizer")
-       except Exception as e:
-           logger.error(f"Failed to save window position: {e}")
+        """窗口关闭统一退出清理"""
+        self._closing = True
+        """窗口关闭事件"""
+        # 保存分割器状态
+        self.save_splitter_state()
+        """Override close event to save window position"""
+        try:
+            self.save_window_position_qt_visual(self, "trade_visualizer")
+        except Exception as e:
+            logger.error(f"Failed to save window position: {e}")
 
-       # 1️⃣ 停止实时数据进程
-       # 1️⃣ 通知子进程退出
-       if hasattr(self, 'stop_flag'):
-           self.stop_flag.value = False
-       logger.info(f'stop_flag.value: {self.stop_flag.value}')
-       self._stop_realtime_process()
-       if hasattr(self, 'refresh_flag'):
-           self.refresh_flag.value = False
+        # 1️⃣ 停止实时数据进程
+        if hasattr(self, 'stop_flag'):
+            self.stop_flag.value = False
+        logger.info(f'stop_flag.value: {self.stop_flag.value}')
+        self._stop_realtime_process()
+        if hasattr(self, 'refresh_flag'):
+            self.refresh_flag.value = False
 
-       # 2️⃣ 停止 realtime_process
-       if getattr(self, 'realtime_process', None):
-           if self.realtime_process.is_alive():
-               self.realtime_process.join(timeout=1)
-               if self.realtime_process.is_alive():
-                   logger.info("realtime_process 强制终止")
-                   self.realtime_process.terminate()
-                   self.realtime_process.join()
-           self.realtime_process = None
+        # 2️⃣ 停止 realtime_process
+        if getattr(self, 'realtime_process', None):
+            if self.realtime_process.is_alive():
+                self.realtime_process.join(timeout=1)
+                if self.realtime_process.is_alive():
+                    logger.info("realtime_process 强制终止")
+                    self.realtime_process.terminate()
+                    self.realtime_process.join()
+            self.realtime_process = None
 
-       # 3️⃣ 停止 DataLoaderThread (避免 QThread Destroyed 崩溃)
-       if hasattr(self, 'loader') and self.loader:
-           if self.loader.isRunning():
-               logger.info("Stopping DataLoaderThread...")
-               self.loader.quit()
-               if not self.loader.wait(1000): # 等待 1 秒
-                   logger.warning("DataLoaderThread did not stop, terminating...")
-                   self.loader.terminate()
-                   self.loader.wait()
-           self.loader = None
-       # 当 GUI 关闭时，触发 stop_event
-       stop_event.set()
+        # 3️⃣ 停止 DataLoaderThread (避免 QThread Destroyed 崩溃)
+        if hasattr(self, 'loader') and self.loader:
+            if self.loader.isRunning():
+                logger.debug("Stopping main DataLoaderThread...")
+                self.loader.quit()
+                if not self.loader.wait(500):
+                    self.loader.terminate()
+            self.loader = None
+            
+        # 3.5️⃣ 清理回收站中的线程
+        if hasattr(self, 'garbage_threads'):
+            while self.garbage_threads:
+                t = self.garbage_threads.pop()
+                if t.isRunning():
+                    logger.debug(f"Stopping scavenger thread: {id(t)}")
+                    t.quit()
+                    t.wait(500)
+        # 当 GUI 关闭时，触发 stop_event
+        stop_event.set()
 
-       print(f'closeEvent: OK')
-       # Accept the event to close
-       if hasattr(self, 'voice_thread'):
-           self.voice_thread.stop()
-       event.accept()
-       # 6️⃣ 调用父类 closeEvent
-       super().closeEvent(event)
+        print(f'closeEvent: OK')
+        # Accept the event to close
+        if hasattr(self, 'voice_thread'):
+            self.voice_thread.stop()
+        event.accept()
+        # 6️⃣ 调用父类 closeEvent
+        super().closeEvent(event)
 
 
 def run_visualizer(initial_code=None, df_all=None):
@@ -6815,6 +6993,13 @@ def run_visualizer(initial_code=None, df_all=None):
     sys.exit(app.exec())
 
 def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=False, command_queue=None):
+    # ⭐ 启用底层故障捕捉，以便锁定 QThread Destroyed 等 C++ 报错
+    try:
+        import faulthandler
+        faulthandler.enable()
+    except Exception:
+        pass
+
     # ------------------ 1. Logger ------------------
     if log_level is not None:
         logger.setLevel(log_level.value)
@@ -6888,6 +7073,13 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
 
 
 def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=False, command_queue=None):
+    # ⭐ 启用底层故障捕捉
+    try:
+        import faulthandler
+        faulthandler.enable()
+    except Exception:
+        pass
+
     # --- 1. 尝试成为 Primary Instance ---
         # logger = LoggerFactory.getLogger()
     if log_level is not None:
