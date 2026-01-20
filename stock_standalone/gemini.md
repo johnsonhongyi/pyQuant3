@@ -50,8 +50,12 @@
 
 ## 🛰️ 可视化迭代与信号流监控 (01-21 01:26)
 
-**改进点**:
-- **全局拦截**: 使用 `keyboard` 库取代 `QShortcut` 处理核心控制键，解决 `Alt+H` 被系统拦截或焦点丢失问题。
+- **全局拦截**: 使用 `keyboard` 库处理系统级热键，并与 `QShortcut` 实现自动互斥（开启系统模式时禁用窗口模式快捷键），彻底解决 `Alt+H/L` 等按键的“双重触发”及冲突问题。
+- **架构优化**: 将所有全局热键统一集成到 `_register_system_hotkeys` 注册中心，废弃分散在 `QAction` 中的临时快捷键设置。
+- **持久化**: 实现了 `SignalLogPanel` 的窗口位置与尺寸持久化加载方案。
+- **交互联动**: 赋予 `SignalLogPanel` 超链接跳转能力，点击日志代码可同步联动 K 线、主列表、热点自选面板。
+- **数据治理**: 信号日志面板引入“基于股票的代码去重”与“基础格式校验”，防止高频重复信号刷屏，确保数据流稳定性。
+- **备选方案**: 为 Alt+H/L 提供 Ctrl+Alt+H/L 备选，最大程度避免第三方软件冲突。
 - **实时日志流**: 新增 `SignalLogPanel` 为后续 P0.5 仓位引擎提供可视化调试窗口。
 - **并行开发线**: 强化 `gemini.md` 作为任务汇合点，所有沟通文档、计划、Task 实时同步。
 
@@ -128,14 +132,20 @@ if hasattr(self, 'pattern_detector'):
 
 ### P0.5: 最后一公里执行 🔥 核心
 
-- [ ] `position_phase_engine.py` - 阶段性仓位状态机
-  ```
-  SCOUT(0%) → ACCUMULATE(20%) → LAUNCH(50%) → SURGE(70%) → TOP_WATCH(50%) → EXIT(0%)
-  ```
-- [ ] 顶部识别评分
-- [ ] 震荡过滤规则
-- [ ] 集成到 `stock_live_strategy.py`
-- [ ] `hotlist_panel.py` 阶段显示
+**阶段性仓位状态机 (PositionPhaseEngine)**:
+- **SCOUT (试探 10%)**: 出现选股信号，但无量能或形态确认。
+- **ACCUMULATE (蓄势 30%)**: 形态确认（如突破平台），量能堆积。
+- **LAUNCH (启动 50%)**: 分时放量突破，形态加速。
+- **SURGE (主升 70-90%)**: 脱离成本区，进入主升浪。
+- **TOP_WATCH (顶部预警 50%)**: 出现高位放量滞涨或冲高回落信号。
+- **EXIT (离场 0%)**: 跌破支撑或顶部确立。
+
+**待办事项**:
+- [ ] `position_phase_engine.py` - 实现状态转移逻辑与评分机制
+- [ ] 顶部识别评分 - 结合 `IntradayPatternDetector` 的 `high_drop` 信号
+- [ ] 震荡过滤规则 - 增加波动率与均线粘合度判断
+- [ ] 集成到 `stock_live_strategy.py` - 替换简单的 `is_buy` 逻辑
+- [ ] `hotlist_panel.py` - 在列表中直观显示当前股票所处的“阶段” (进度条或标签)
 
 ### P1: 策略整合
 
