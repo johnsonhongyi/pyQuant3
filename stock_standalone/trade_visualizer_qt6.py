@@ -46,6 +46,7 @@ from strong_consolidation_strategy import StrongConsolidationStrategy
 from data_utils import (
     calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe,PIPE_NAME_TK)
 from hotlist_panel import HotlistPanel
+from signal_log_panel import SignalLogPanel
 from hotspot_popup import HotSpotPopup
 
 import re
@@ -59,6 +60,7 @@ try:
     import keyboard
     KEYBOARD_AVAILABLE = True
 except ImportError:
+    keyboard = None  # type: ignore
     KEYBOARD_AVAILABLE = False
     print("Warning: 'keyboard' library not available. System-wide hotkeys disabled.")
 
@@ -1981,6 +1983,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.hotlist_panel = HotlistPanel(self)
         self.hotlist_panel.stock_selected.connect(self._on_hotlist_stock_selected)
         self.hotlist_panel.item_double_clicked.connect(self._on_hotlist_double_click)
+        self.hotlist_panel.voice_alert.connect(self._on_hotlist_voice_alert)  # 语音通知
         # 初始隐藏，通过 Alt+H 切换显示
         self.hotlist_panel.hide()
 
@@ -2194,6 +2197,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self._init_tick_signal_pool()
         # self._show_filter_panel()
         
+        # ⭐ 热点面板和信号日志面板初始化
+        self._init_hotlist_and_signal_log()
+        
     def showEvent(self, event):
         super().showEvent(event)
 
@@ -2214,7 +2220,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.shortcut_map = [
             ("Alt+T", "显示/隐藏信号盒子 / 切换模拟信号(T)", self._show_signal_box),
             ("Alt+F", "显示快捷键帮助 (此弹窗)", self._show_filter_panel),
-            ("Alt+H", "显示/隐藏热点自选面板", self._toggle_hotlist_panel),
+            ("Alt+H", "显示/隐藏热点自选面板 (Global)", self._toggle_hotlist_panel),
+            ("Alt+L", "显示/隐藏信号日志面板 (Global)", self._toggle_signal_log),
             ("Ctrl+/", "显示快捷键帮助 (此弹窗)", self.show_shortcut_help),
             ("H", "添加当前股票到热点自选", self._add_to_hotlist),
             ("Space", "显示综合研报 / 弹窗详情 (K线图内生效)", None),
@@ -2227,6 +2234,11 @@ class MainWindow(QMainWindow, WindowMixin):
         # 注册非事件捕获型快捷键
         for key_seq, desc, handler in self.shortcut_map:
             if handler and key_seq != "Space": # Space in keyPressEvent
+                # 如果系统热键可用，且是核心面板切换键，则优先使用系统热键，跳过 QShortcut 以免冲突
+                # 注意：即便 key_seq 是 "Alt+H / Ctrl+Alt+H" 这种复合描述，只要包含核心键就跳过
+                if KEYBOARD_AVAILABLE and any(k in key_seq for k in ("Alt+H", "Alt+L")):
+                    continue
+                    
                 sc = QShortcut(QKeySequence(key_seq), self)
                 # 所有组合键默认为 App-wide（应用程序级别）
                 # 即使子窗口（信号盒子、帮助窗口）激活时也能响应
@@ -2234,6 +2246,10 @@ class MainWindow(QMainWindow, WindowMixin):
                     sc.setContext(Qt.ShortcutContext.ApplicationShortcut)
                 sc.activated.connect(handler)
                 self.shortcuts[key_seq] = sc
+        
+        # 提示：系统级全局热键已统一在 _register_system_hotkeys 中管理，
+        # 即使窗口不在前台也能响应。如果 keyboard 库可用，用户可通过 UI 菜单切换模式。
+        pass
 
     def show_shortcut_help(self):
         """显示/隐藏快捷键帮助弹窗 (Toggle)"""
@@ -2256,6 +2272,86 @@ class MainWindow(QMainWindow, WindowMixin):
         self.help_dialog.show()
         self.help_dialog.raise_()
         self.help_dialog.activateWindow()
+
+    # ================== 热点面板 & 信号日志 ==================
+    def _init_hotlist_and_signal_log(self):
+        """初始化热点自选面板和信号日志面板"""
+        # 1. 热点自选面板
+        self.hotlist_panel = HotlistPanel(self)
+        self.hotlist_panel.stock_selected.connect(self._on_hotlist_stock_selected)
+        self.hotlist_panel.voice_alert.connect(self._on_hotlist_voice_alert)
+        self.hotlist_panel.signal_log.connect(self._on_signal_log)
+        
+        # 2. 信号日志面板
+        self.signal_log_panel = SignalLogPanel(self)
+        
+        # 3. 定时检测热点股票形态 (每30秒)
+        self.hotlist_check_timer = QTimer(self)
+        self.hotlist_check_timer.timeout.connect(self._check_hotlist_patterns)
+        self.hotlist_check_timer.start(30000)
+        
+        logger.info("✅ 热点面板和信号日志面板已初始化")
+    
+    def _toggle_hotlist_panel(self):
+        """切换热点自选面板显示"""
+        if not hasattr(self, 'hotlist_panel'):
+            return
+        if self.hotlist_panel.isVisible():
+            self.hotlist_panel.hide()
+        else:
+            self.hotlist_panel.show()
+            self.hotlist_panel.raise_()
+    
+    def _toggle_signal_log(self):
+        """切换信号日志面板显示"""
+        if not hasattr(self, 'signal_log_panel'):
+            return
+        if self.signal_log_panel.isVisible():
+            self.signal_log_panel.hide()
+        else:
+            self.signal_log_panel.show()
+            self.signal_log_panel.raise_()
+    
+    def _add_to_hotlist(self):
+        """添加当前股票到热点自选"""
+        if not hasattr(self, 'hotlist_panel') or not self.current_code:
+            return
+        
+        name = self.code_name_map.get(self.current_code, self.current_code)
+        price = 0.0
+        
+        # 尝试从 df_all 获取当前价格
+        if not self.df_all.empty and self.current_code in self.df_all.index:
+            row = self.df_all.loc[self.current_code]
+            price = float(row.get('close', row.get('price', 0)))
+        
+        if self.hotlist_panel.add_stock(self.current_code, name, price, "手动添加"):
+            self.voice_thread.speak(f"已添加 {name}")
+            logger.info(f"✅ 已添加到热点: {self.current_code} {name}")
+    
+    def _on_hotlist_stock_selected(self, code: str, name: str):
+        """热点面板选中股票回调"""
+        self.show_stock(code)
+    
+    def _on_hotlist_voice_alert(self, code: str, message: str):
+        """热点面板语音提醒回调"""
+        if hasattr(self, 'voice_thread'):
+            self.voice_thread.speak(message)
+    
+    def _on_signal_log(self, code: str, pattern: str, message: str):
+        """信号日志回调 - 追加到日志面板"""
+        if hasattr(self, 'signal_log_panel'):
+            self.signal_log_panel.append_log(code, pattern, message)
+    
+    def _check_hotlist_patterns(self):
+        """定时检测热点股票形态"""
+        if not hasattr(self, 'hotlist_panel') or self.df_all.empty:
+            return
+        try:
+            self.hotlist_panel.check_patterns(self.df_all)
+        except Exception as e:
+            logger.debug(f"Hotlist pattern check error: {e}")
+
 
     def _init_td_text_pool(self, max_items=50):
         self.td_text_pool = []
@@ -2448,9 +2544,7 @@ class MainWindow(QMainWindow, WindowMixin):
         state = "全局模式 (System Wide)" if checked else "窗口模式 (App Wide)"
         logger.info(f"Shortcut mode changed to: {state}")
         
-    def _register_system_hotkeys(self):
-        """注册系统级全局快捷键 (使用 keyboard 库)"""
-        if not KEYBOARD_AVAILABLE or self.system_hotkeys_registered:
+        if not KEYBOARD_AVAILABLE or not keyboard or self.system_hotkeys_registered:
             return
         
         try:
@@ -2472,21 +2566,29 @@ class MainWindow(QMainWindow, WindowMixin):
             keyboard.add_hotkey('alt+f', _on_hotkey_show_filter_panel)
             keyboard.add_hotkey('ctrl+/', _on_hotkey_show_help)
             
+            # ⭐ 新增：热点自选与信号日志全局热键
+            keyboard.add_hotkey('alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
+            keyboard.add_hotkey('ctrl+alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
+            keyboard.add_hotkey('alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
+            keyboard.add_hotkey('ctrl+alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
+            
             self.system_hotkeys_registered = True
-            logger.info("✅ 系统级全局快捷键已注册 (Alt+T, Ctrl+/)")
+            logger.info("✅ 系统级全局快捷键已注册 (Alt+T, Alt+H, Alt+L, Ctrl+/)")
         except Exception as e:
             logger.error(f"❌ 系统快捷键注册失败: {e}")
             self.global_shortcuts_enabled = False
     
     def _unregister_system_hotkeys(self):
         """注销系统级全局快捷键"""
-        if not KEYBOARD_AVAILABLE or not self.system_hotkeys_registered:
+        if not KEYBOARD_AVAILABLE or not keyboard or not self.system_hotkeys_registered:
             return
         
         try:
             keyboard.remove_hotkey('alt+t')
             keyboard.remove_hotkey('alt+f')
             keyboard.remove_hotkey('ctrl+/')
+            keyboard.remove_hotkey('alt+h')
+            keyboard.remove_hotkey('alt+l')
             self.system_hotkeys_registered = False
             logger.info("✅ 系统级全局快捷键已注销")
         except Exception as e:
@@ -7572,6 +7674,16 @@ class MainWindow(QMainWindow, WindowMixin):
         """热点列表单击: 切换到该股票"""
         if code and code != self.current_code:
             self.load_stock_by_code(code, name)
+    
+    def _on_hotlist_voice_alert(self, code: str, msg: str):
+        """热点面板语音通知"""
+        try:
+            if hasattr(self, 'voice_thread') and self.voice_thread:
+                self.voice_thread.speak(f"热点提醒，{msg}")
+            else:
+                logger.debug(f"Voice thread not available, skipping: {msg}")
+        except Exception as e:
+            logger.error(f"Hotlist voice alert error: {e}")
 
     def _on_hotlist_double_click(self, code: str, name: str, add_price: float):
         """热点列表双击: 打开详情弹窗"""

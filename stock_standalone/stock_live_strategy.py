@@ -40,6 +40,14 @@ except ImportError:
 
 from sector_risk_monitor import SectorRiskMonitor
 
+# 日内形态检测器
+try:
+    from intraday_pattern_detector import IntradayPatternDetector, PatternEvent
+    HAS_PATTERN_DETECTOR = True
+except ImportError:
+    HAS_PATTERN_DETECTOR = False
+    logger.warning("IntradayPatternDetector not found.")
+
 try:
     import pythoncom
 except ImportError:
@@ -443,6 +451,15 @@ class StockLiveStrategy:
             risk_duration_threshold=risk_duration_threshold
         )
         self._last_import_logical_date: Optional[str] = None
+
+        # --- ⭐ 日内形态检测器 ---
+        if HAS_PATTERN_DETECTOR:
+            self.pattern_detector = IntradayPatternDetector(
+                cooldown=120,           # 同一形态同一股票 2 分钟冷却
+                publish_to_bus=True     # 自动发布到信号总线
+            )
+            self.pattern_detector.on_pattern = self._on_pattern_detected
+            logger.info("IntradayPatternDetector initialized.")
 
         # --- Automatic Trading Loop State ---
         # self.auto_loop_enabled = False (已经在上方初始化)
@@ -1302,7 +1319,21 @@ class StockLiveStrategy:
                             snap['sector_score'] = 0.0
                             
                     except Exception as e:
-                        logger.error(f"Realtime Service Injection Injection Error: {e}")
+                        logger.error(f"Realtime Service Injection Error: {e}")
+
+                # --- ⭐ 日内形态检测 ---
+                if hasattr(self, 'pattern_detector'):
+                    try:
+                        prev_close = float(row.get('lastp1d', 0))
+                        self.pattern_detector.update(
+                            code=code,
+                            name=data.get('name', ''),
+                            tick_df=None,   # 暂无分时数据，使用 day_row 即可
+                            day_row=row,
+                            prev_close=prev_close
+                        )
+                    except Exception as e:
+                        logger.debug(f"Pattern detect error for {code}: {e}")
 
                 # --- 注入板块与系统风险状态 ---
                 # 从 _last_sector_status 中获取
@@ -2067,6 +2098,20 @@ class StockLiveStrategy:
             self._monitored_stocks[key]['last_alert'] = time.time() + future_offset
             dt_str = datetime.fromtimestamp(self._monitored_stocks[key]['last_alert']).strftime("%Y-%m-%d %H:%M:%S")
             logger.info(f"😴 Snoozed alert for {key}  in {cycles} cycles ({cycles * self._alert_cooldown}s alert_cooldown: {self._alert_cooldown}s next_alert_time:{dt_str})")
+
+    def _on_pattern_detected(self, event: 'PatternEvent') -> None:
+        """形态检测回调 - 触发语音播报"""
+        try:
+            pattern_cn = IntradayPatternDetector.PATTERN_NAMES.get(event.pattern, event.pattern)
+            msg = f"{event.name} {pattern_cn}"
+            
+            # 区分买点信号 vs 卖点信号
+            action = "风险" if event.pattern in ('high_drop', 'top_signal') else "形态"
+            
+            logger.info(f"🔔 形态信号: {event.code} {event.name} - {pattern_cn} @ {event.price:.2f}")
+            self._trigger_alert(event.code, event.name, msg, action=action, price=event.price)
+        except Exception as e:
+            logger.error(f"Pattern callback error: {e}")
 
     def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0, resample: str = 'd') -> None:
         """触发报警"""

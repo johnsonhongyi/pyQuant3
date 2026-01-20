@@ -10,6 +10,16 @@ import logging
 from datetime import datetime
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, asdict
+import pandas as pd
+
+# 日内形态检测器
+try:
+    from intraday_pattern_detector import IntradayPatternDetector, PatternEvent
+    HAS_PATTERN_DETECTOR = True
+except ImportError:
+    HAS_PATTERN_DETECTOR = False
+    IntradayPatternDetector = None
+    PatternEvent = None
 
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
@@ -59,11 +69,14 @@ class HotlistPanel(QWidget):
     
     stock_selected = pyqtSignal(str, str)  # code, name
     item_double_clicked = pyqtSignal(str, str, float)  # code, name, add_price
+    voice_alert = pyqtSignal(str, str)  # code, message - 语音通知信号
+    signal_log = pyqtSignal(str, str, str)  # code, pattern, message - 信号日志
     
     def __init__(self, parent=None):
         super().__init__(parent)
         self.items: List[HotlistItem] = []
         self._drag_pos = None
+        self.voice_enabled = True  # 是否启用语音通知
         
         # 设置为浮动工具窗口（可调整大小）
         self.setWindowFlags(
@@ -376,6 +389,10 @@ class HotlistPanel(QWidget):
             self._refresh_table()
             
             logger.info(f"添加热点: {code} {name} @ {price:.2f}")
+            
+            # 语音通知：重要信号类型
+            if any(kw in signal_type for kw in ("龙头", "突破", "启动", "强势")):
+                self._notify_voice(code, f"新增热点 {name}")
             return True
             
         except Exception as e:
@@ -483,6 +500,7 @@ class HotlistPanel(QWidget):
         """设置分组"""
         for item in self.items:
             if item.code == code:
+                old_group = item.group
                 item.group = group
                 try:
                     conn = sqlite3.connect(DB_FILE, timeout=10)
@@ -492,12 +510,78 @@ class HotlistPanel(QWidget):
                     conn.close()
                 except Exception as e:
                     logger.error(f"Set group error: {e}")
+                
+                # 语音通知：分组变更为已启动或持仓
+                if group in ("已启动", "持仓") and old_group != group:
+                    self._notify_voice(code, f"{item.name} 状态变更为 {group}")
                 break
         self._refresh_table()
+    
+    def _notify_voice(self, code: str, msg: str):
+        """发送语音通知信号"""
+        if self.voice_enabled:
+            self.voice_alert.emit(code, msg)
+            logger.debug(f"Voice alert: {code} - {msg}")
     
     def contains(self, code: str) -> bool:
         """检查是否已包含该股票"""
         return any(item.code == code for item in self.items)
+
+    # ================== 形态检测 ==================
+    def check_patterns(self, df: pd.DataFrame) -> None:
+        """
+        检测热点股票的形态信号
+        
+        Args:
+            df: 包含实时数据的 DataFrame (df_all)
+        """
+        if not HAS_PATTERN_DETECTOR or df is None or df.empty:
+            return
+        
+        # 懒加载检测器
+        if not hasattr(self, '_pattern_detector'):
+            self._pattern_detector = IntradayPatternDetector(
+                cooldown=120,           # 2分钟冷却
+                publish_to_bus=False    # 不发布到全局总线，局部处理
+            )
+            self._pattern_detector.on_pattern = self._on_signal_detected
+            logger.info("🔥 HotlistPanel PatternDetector initialized")
+        
+        # 遍历热点股票
+        for item in self.items:
+            if item.code not in df.index:
+                continue
+            try:
+                row = df.loc[item.code]
+                prev_close = float(row.get('lastp1d', 0))
+                if prev_close <= 0:
+                    continue
+                self._pattern_detector.update(
+                    code=item.code,
+                    name=item.name,
+                    tick_df=None,
+                    day_row=row,
+                    prev_close=prev_close
+                )
+            except Exception as e:
+                logger.debug(f"Pattern check error for {item.code}: {e}")
+
+    def _on_signal_detected(self, event: 'PatternEvent') -> None:
+        """形态检测回调"""
+        try:
+            pattern_cn = IntradayPatternDetector.PATTERN_NAMES.get(event.pattern, event.pattern)
+            time_str = datetime.now().strftime('%H:%M:%S')
+            msg = f"[{time_str}] {event.name} {pattern_cn} @ {event.price:.2f}"
+            
+            # 发射信号日志
+            self.signal_log.emit(event.code, event.pattern, msg)
+            
+            # 语音通知
+            self._notify_voice(event.code, f"{event.name} {pattern_cn}")
+            
+            logger.info(f"🔥 热点信号: {msg}")
+        except Exception as e:
+            logger.error(f"Signal callback error: {e}")
 
     # ================== 拖动支持 ==================
     def mousePressEvent(self, event):
