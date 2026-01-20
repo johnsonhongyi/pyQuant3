@@ -70,7 +70,7 @@ class HotlistPanel(QWidget):
     stock_selected = pyqtSignal(str, str)  # code, name
     item_double_clicked = pyqtSignal(str, str, float)  # code, name, add_price
     voice_alert = pyqtSignal(str, str)  # code, message - 语音通知信号
-    signal_log = pyqtSignal(str, str, str)  # code, pattern, message - 信号日志
+    signal_log = pyqtSignal(str, str, str, str)  # code, name, pattern, message - 信号日志
     
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -96,6 +96,9 @@ class HotlistPanel(QWidget):
         self._init_db()
         self._init_ui()
         self._load_from_db()
+        
+        # 数据流校验缓存：{code: (price, volume, amount)}
+        self._last_data_sigs: dict[str, tuple[float, float, float]] = {}
         
         # 定时刷新盈亏（每30秒）
         self.refresh_timer = QTimer(self)
@@ -470,6 +473,17 @@ class HotlistPanel(QWidget):
         if 0 <= row < len(self.items):
             item = self.items[row]
             self.item_double_clicked.emit(item.code, item.name, item.add_price)
+
+    def select_stock(self, code: str):
+        """外部联动：根据代码选中行"""
+        if not code: return
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)  # 第一列是代码
+            if item and item.text() == code:
+                self.table.selectRow(row)
+                self.table.scrollToItem(item)
+                return True
+        return False
     
     def _on_context_menu(self, pos):
         """右键菜单"""
@@ -553,9 +567,27 @@ class HotlistPanel(QWidget):
                 continue
             try:
                 row = df.loc[item.code]
+                
+                # 1. 基础数据校验 (Data Validation)
+                price = float(row.get('price', row.get('close', 0)))
+                volume = float(row.get('volume', 0))
+                amount = float(row.get('amount', 0))
                 prev_close = float(row.get('lastp1d', 0))
-                if prev_close <= 0:
+                
+                # 剔除无效数据流
+                if price <= 0 or prev_close <= 0 or volume < 0:
                     continue
+                
+                # 2. 数据更新检测 (Skip redundant data)
+                # 只有当 价、量、额 至少有一个发生变化时，才认为数据流有更新
+                current_sig = (price, volume, amount)
+                if self._last_data_sigs.get(item.code) == current_sig:
+                    continue
+                
+                # 更新指纹
+                self._last_data_sigs[item.code] = current_sig
+                
+                # 3. 执行形态扫描
                 self._pattern_detector.update(
                     code=item.code,
                     name=item.name,
@@ -569,12 +601,16 @@ class HotlistPanel(QWidget):
     def _on_signal_detected(self, event: 'PatternEvent') -> None:
         """形态检测回调"""
         try:
+            # 数据完整性二次校验
+            if not event or not event.code or event.price <= 0:
+                return
+                
             pattern_cn = IntradayPatternDetector.PATTERN_NAMES.get(event.pattern, event.pattern)
             time_str = datetime.now().strftime('%H:%M:%S')
-            msg = f"[{time_str}] {event.name} {pattern_cn} @ {event.price:.2f}"
+            msg = f"[{time_str}] {event.code} {event.name} {pattern_cn} @ {event.price:.2f}"
             
-            # 发射信号日志
-            self.signal_log.emit(event.code, event.pattern, msg)
+            # 发射信号日志 (仅在数据有效且由于 update 触发后产生)
+            self.signal_log.emit(event.code, event.name, event.pattern, msg)
             
             # 语音通知
             self._notify_voice(event.code, f"{event.name} {pattern_cn}")

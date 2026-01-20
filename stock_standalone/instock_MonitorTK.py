@@ -387,6 +387,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.global_dict['init_error'] = str(e)
         # Restore global_values initialization
         self.global_values = cct.GlobalValues(self.global_dict)
+        
+        # [NEW] 额外监控列表，用于热点实时刷新
+        if 'extra_monitor_codes' not in self.global_dict:
+            self.global_dict['extra_monitor_codes'] = []
         resample = self.global_values.getkey("resample")
         logger.info(f'app init getkey resample:{self.global_values.getkey("resample")}')
         self.global_values.setkey("resample", resample)
@@ -729,6 +733,21 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             if self.viz_command_queue:
                                 self.viz_command_queue = None
                             self._df_first_send_done = False
+                        
+                        elif obj and obj.get("cmd") == "ADD_MONITOR":
+                            code = obj.get("code")
+                            if code:
+                                logger.info(f'[Pipe] Feedback listener cmd ADD_MONITOR: {code}')
+                                try:
+                                    current_list = list(self.global_dict.get('extra_monitor_codes', []))
+                                    if code not in current_list:
+                                        current_list.append(code)
+                                        self.global_dict['extra_monitor_codes'] = current_list
+                                        logger.info(f"✅ Added {code} to extra_monitor_codes")
+                                        # 同时也触发一次强制全量同步，确保新代码能飞速出现在可视化器中
+                                        self._force_full_sync_pending = True
+                                except Exception as e:
+                                    logger.error(f"Failed to update extra_monitor_codes: {e}")
 
                 except Exception as e:
                     logger.debug(f"[Pipe] listener error: {e}")

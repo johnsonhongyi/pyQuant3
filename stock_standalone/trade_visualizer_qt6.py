@@ -1979,13 +1979,9 @@ class MainWindow(QMainWindow, WindowMixin):
         right_splitter = QSplitter(Qt.Orientation.Vertical)
         self.main_splitter.addWidget(right_splitter)
 
-        # 3. 热点自选面板 (HotlistPanel) - 浮动窗口
-        self.hotlist_panel = HotlistPanel(self)
-        self.hotlist_panel.stock_selected.connect(self._on_hotlist_stock_selected)
-        self.hotlist_panel.item_double_clicked.connect(self._on_hotlist_double_click)
-        self.hotlist_panel.voice_alert.connect(self._on_hotlist_voice_alert)  # 语音通知
-        # 初始隐藏，通过 Alt+H 切换显示
-        self.hotlist_panel.hide()
+        # 3. 初始状态：面板会在后面通过 _init_hotlist_and_signal_log 统一初始化
+        # 我们在这里保留布局结构，但不反复实例化面板对象
+
 
         # Set initial sizes for the main splitter (left table: 200, right charts: remaining)
         self.main_splitter.setSizes([200, 900])
@@ -2197,8 +2193,16 @@ class MainWindow(QMainWindow, WindowMixin):
         self._init_tick_signal_pool()
         # self._show_filter_panel()
         
-        # ⭐ 热点面板和信号日志面板初始化
         self._init_hotlist_and_signal_log()
+
+        # --- [NEW] 列宽自动记忆 & 防抖保存 ---
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.timeout.connect(self._save_visualizer_config)
+        
+        self.stock_table.horizontalHeader().sectionResized.connect(self._on_column_resized_debounced)
+        if hasattr(self, 'filter_tree'):
+            self.filter_tree.header().sectionResized.connect(self._on_column_resized_debounced)
         
     def showEvent(self, event):
         super().showEvent(event)
@@ -2222,6 +2226,7 @@ class MainWindow(QMainWindow, WindowMixin):
             ("Alt+F", "显示快捷键帮助 (此弹窗)", self._show_filter_panel),
             ("Alt+H", "显示/隐藏热点自选面板 (Global)", self._toggle_hotlist_panel),
             ("Alt+L", "显示/隐藏信号日志面板 (Global)", self._toggle_signal_log),
+            ("Alt+W", "紧凑自适应列宽 (当前焦点表格)", self._on_shortcut_autofit),
             ("Ctrl+/", "显示快捷键帮助 (此弹窗)", self.show_shortcut_help),
             ("H", "添加当前股票到热点自选", self._add_to_hotlist),
             ("Space", "显示综合研报 / 弹窗详情 (K线图内生效)", None),
@@ -2234,11 +2239,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # 注册非事件捕获型快捷键
         for key_seq, desc, handler in self.shortcut_map:
             if handler and key_seq != "Space": # Space in keyPressEvent
-                # 如果系统热键可用，且是核心面板切换键，则优先使用系统热键，跳过 QShortcut 以免冲突
-                # 注意：即便 key_seq 是 "Alt+H / Ctrl+Alt+H" 这种复合描述，只要包含核心键就跳过
-                if KEYBOARD_AVAILABLE and any(k in key_seq for k in ("Alt+H", "Alt+L")):
-                    continue
-                    
+                # 所有键统一注册为 QShortcut，并在 on_toggle_global_keys 中集中管理冲突
                 sc = QShortcut(QKeySequence(key_seq), self)
                 # 所有组合键默认为 App-wide（应用程序级别）
                 # 即使子窗口（信号盒子、帮助窗口）激活时也能响应
@@ -2276,14 +2277,18 @@ class MainWindow(QMainWindow, WindowMixin):
     # ================== 热点面板 & 信号日志 ==================
     def _init_hotlist_and_signal_log(self):
         """初始化热点自选面板和信号日志面板"""
-        # 1. 热点自选面板
-        self.hotlist_panel = HotlistPanel(self)
-        self.hotlist_panel.stock_selected.connect(self._on_hotlist_stock_selected)
-        self.hotlist_panel.voice_alert.connect(self._on_hotlist_voice_alert)
-        self.hotlist_panel.signal_log.connect(self._on_signal_log)
+        # 1. 热点自选面板 (集中初始化，防止重复)
+        if not hasattr(self, 'hotlist_panel'):
+            self.hotlist_panel = HotlistPanel(self)
+            self.hotlist_panel.stock_selected.connect(self._on_hotlist_stock_selected)
+            self.hotlist_panel.item_double_clicked.connect(self._on_hotlist_double_click)
+            self.hotlist_panel.voice_alert.connect(self._on_hotlist_voice_alert)
+            self.hotlist_panel.signal_log.connect(self._on_signal_log)
+            self.hotlist_panel.hide()
         
         # 2. 信号日志面板
         self.signal_log_panel = SignalLogPanel(self)
+        self.signal_log_panel.log_clicked.connect(self._on_signal_log_clicked)
         
         # 3. 定时检测热点股票形态 (每30秒)
         self.hotlist_check_timer = QTimer(self)
@@ -2291,6 +2296,26 @@ class MainWindow(QMainWindow, WindowMixin):
         self.hotlist_check_timer.start(30000)
         
         logger.info("✅ 热点面板和信号日志面板已初始化")
+
+    def _on_signal_log_clicked(self, code: str):
+        """处理信号日志中的代码点击：一键直达"""
+        if not code: return
+        
+        # 1. 联动 K 线视图与基础数据
+        self.load_stock_by_code(code)
+        
+        # 2. 联动左侧主表格 (Treeview)
+        self._select_stock_in_main_table(code)
+        
+        # 3. 联动热点自选面板 (如果存在且可见)
+        if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
+            self.hotlist_panel.select_stock(code)
+            
+        # 4. 激活主窗口，确保在顶层
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        logger.debug(f"[LINK] Signal Log clicked: {code}, linked to all views.")
     
     def _toggle_hotlist_panel(self):
         """切换热点自选面板显示"""
@@ -2326,8 +2351,25 @@ class MainWindow(QMainWindow, WindowMixin):
             price = float(row.get('close', row.get('price', 0)))
         
         if self.hotlist_panel.add_stock(self.current_code, name, price, "手动添加"):
-            self.voice_thread.speak(f"已添加 {name}")
+            if hasattr(self, 'voice_thread') and self.voice_thread:
+                self.voice_thread.speak(f"已添加 {name}")
             logger.info(f"✅ 已添加到热点: {self.current_code} {name}")
+            
+            # 立即在图表上绘制标记
+            self._draw_hotspot_markers(self.current_code, getattr(self, 'x_axis', None), self.day_df)
+            
+            # [NEW] 同时也通知 MonitorTK 重点监控该股 (实时队列)
+            self._notify_monitor_add(self.current_code)
+    
+    def _notify_monitor_add(self, code: str):
+        """通知 MonitorTK (通过命名管道) 增加重点监控股票"""
+        try:
+            from data_utils import send_code_via_pipe, PIPE_NAME_TK
+            payload = {"cmd": "ADD_MONITOR", "code": code}
+            send_code_via_pipe(payload, logger=logger, pipe_name=PIPE_NAME_TK)
+            logger.info(f"[Pipe] Sent ADD_MONITOR for {code}")
+        except Exception as e:
+            logger.error(f"[Pipe] Failed to send ADD_MONITOR: {e}")
     
     def _on_hotlist_stock_selected(self, code: str, name: str):
         """热点面板选中股票回调"""
@@ -2338,10 +2380,10 @@ class MainWindow(QMainWindow, WindowMixin):
         if hasattr(self, 'voice_thread'):
             self.voice_thread.speak(message)
     
-    def _on_signal_log(self, code: str, pattern: str, message: str):
+    def _on_signal_log(self, code: str, name: str, pattern: str, message: str):
         """信号日志回调 - 追加到日志面板"""
         if hasattr(self, 'signal_log_panel'):
-            self.signal_log_panel.append_log(code, pattern, message)
+            self.signal_log_panel.append_log(code, name, pattern, message)
     
     def _check_hotlist_patterns(self):
         """定时检测热点股票形态"""
@@ -2528,48 +2570,39 @@ class MainWindow(QMainWindow, WindowMixin):
     def on_toggle_global_keys(self, checked):
         """切换系统级全局快捷键"""
         self.global_shortcuts_enabled = checked
+        
+        # 1. 注销/注册系统热键 (keyboard)
         if checked:
             self._register_system_hotkeys()
         else:
             self._unregister_system_hotkeys()
             
-        # ⭐ 动态启用/禁用冲突的 QShortcut
-        # 当开启系统全局键时，禁用 App 内的 QShortcut，防止重复响应，且确保系统键优先
-        conflict_keys = ["Alt+T", "Alt+F", "Ctrl+/"]
+        # 2. 动态启用/禁用冲突的 App-wide 快捷键 (防止双重触发)
+        # 包含所有的核心全局热键，确保系统模式开启时，App 内部的 Shortcut 被屏蔽
+        conflict_keys = ["Alt+T", "Alt+F", "Ctrl+/", "Alt+H", "Alt+L"]
         if hasattr(self, 'shortcuts'):
             for key in conflict_keys:
                 if key in self.shortcuts:
                     self.shortcuts[key].setEnabled(not checked)
-
+        
         state = "全局模式 (System Wide)" if checked else "窗口模式 (App Wide)"
         logger.info(f"Shortcut mode changed to: {state}")
-        
+
+    def _register_system_hotkeys(self):
+        """注册系统级全局快捷键"""
         if not KEYBOARD_AVAILABLE or not keyboard or self.system_hotkeys_registered:
             return
-        
+            
         try:
-            # 定义回调函数 (必须在主线程执行)
-            def _on_hotkey_show_signal_box():
-                # ⭐ 已在 on_toggle_global_keys 中禁用了 QShortcut，这里直接触发即可
-                QTimer.singleShot(0, self._show_signal_box)
-            
-            def _on_hotkey_show_filter_panel():
-                # ⭐ 已在 on_toggle_global_keys 中禁用了 QShortcut，这里直接触发即可
-                QTimer.singleShot(0, self._show_filter_panel)
-                
-            def _on_hotkey_show_help():
-                # ⭐ 已在 on_toggle_global_keys 中禁用了 QShortcut，这里直接触发即可
-                QTimer.singleShot(0, self.show_shortcut_help)
-            
-            # 注册系统全局快捷键
-            keyboard.add_hotkey('alt+t', _on_hotkey_show_signal_box)
-            keyboard.add_hotkey('alt+f', _on_hotkey_show_filter_panel)
-            keyboard.add_hotkey('ctrl+/', _on_hotkey_show_help)
-            
-            # ⭐ 新增：热点自选与信号日志全局热键
+            # 注册系统全局快捷键 (使用 QTimer 确保主线程执行)
+            keyboard.add_hotkey('alt+t', lambda: QTimer.singleShot(0, self._show_signal_box))
+            keyboard.add_hotkey('alt+f', lambda: QTimer.singleShot(0, self._show_filter_panel))
+            keyboard.add_hotkey('ctrl+/', lambda: QTimer.singleShot(0, self.show_shortcut_help))
             keyboard.add_hotkey('alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
-            keyboard.add_hotkey('ctrl+alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
             keyboard.add_hotkey('alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
+            
+            # 兼容性补充 (Ctrl+Alt+H 等)
+            keyboard.add_hotkey('ctrl+alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
             keyboard.add_hotkey('ctrl+alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
             
             self.system_hotkeys_registered = True
@@ -4031,16 +4064,22 @@ class MainWindow(QMainWindow, WindowMixin):
         self._init_hotspot_menu()
 
     def _init_hotspot_menu(self):
-        """初始化热点跟踪菜单"""
+        """初始化热点跟踪与信号日志菜单"""
         if hasattr(self, '_hotspot_action'):
             return
 
         menubar = self.menuBar()
-        # 直接添加顶级 Action
+        # 1. 热点跟踪
         self._hotspot_action = QAction("🔥 热点跟踪(Alt+H)", self)
-        self._hotspot_action.setShortcut("Alt+H")
-        self._hotspot_action.triggered.connect(lambda: self.hotlist_panel.show())
+        self._hotspot_action.setShortcut("") 
+        self._hotspot_action.triggered.connect(self._toggle_hotlist_panel)
         menubar.addAction(self._hotspot_action)
+
+        # 2. 信号日志 - 新增
+        self._signal_log_action = QAction("📋 信号日志(Alt+L)", self)
+        self._signal_log_action.setShortcut("")
+        self._signal_log_action.triggered.connect(self._toggle_signal_log)
+        menubar.addAction(self._signal_log_action)
 
     def _init_layout_menu(self):
         """初始化布局预设菜单 (优化版：分层明确，防误触)"""
@@ -4742,8 +4781,44 @@ class MainWindow(QMainWindow, WindowMixin):
                         self.hotlist_panel.show()
 
     def on_header_section_clicked(self, _logicalIndex):
-        """排序后自动滚动到顶部，延时确保排序完成"""
-        QTimer.singleShot(50, self.stock_table.scrollToTop)
+        """
+        排序后逻辑：
+        仅保留滚动位置恢复，防止视图跳动。
+        不再自动调整列宽，完全保留用户的微调记忆。
+        """
+        scroll_state = self._save_h_scroll_state(self.stock_table)
+        
+        # 恢复水平位置，防止排序导致的选择项偏移
+        self._restore_h_scroll_state(self.stock_table, scroll_state)
+        
+        # 延时滚动到顶部
+        QTimer.singleShot(100, self.stock_table.scrollToTop)
+
+    def on_filter_tree_header_clicked(self, _logicalIndex):
+        """Filter Tree: 排序时保留手动列宽"""
+        scroll_state = self._save_h_scroll_state(self.filter_tree)
+        self._restore_h_scroll_state(self.filter_tree, scroll_state)
+
+    def _on_shortcut_autofit(self):
+        """Alt+W 触发：紧凑型自适应"""
+        widget = self.focusWidget()
+        target = None
+        if isinstance(widget, (QTableWidget, QTreeWidget)):
+            target = widget
+        elif hasattr(self, 'stock_table') and self.stock_table.hasFocus():
+            target = self.stock_table
+        elif hasattr(self, 'filter_tree') and self.filter_tree.hasFocus():
+            target = self.filter_tree
+            
+        if target:
+            self._resize_columns_tightly(target)
+            self.statusBar().showMessage(f"Layout Optimized: {target.objectName() or 'Table'}", 2000)
+
+    def _on_column_resized_debounced(self, index, old_size, new_size):
+        """列宽变动防抖保存"""
+        if abs(new_size - old_size) <= 2: return # 忽略微小变动
+        if hasattr(self, '_resize_timer'):
+            self._resize_timer.start(2000) # 2秒后执行 _save_visualizer_config
 
     def on_table_cell_clicked(self, row, column):
         code_item = self.stock_table.item(row, 0)
@@ -4819,26 +4894,34 @@ class MainWindow(QMainWindow, WindowMixin):
         for item in self.hotlist_panel.items:
             if item.code in df.index:
                 row = df.loc[item.code]
+                
+                # [NEW] 顺便更新热点面板中的现价和盈亏
+                curr_price = float(row.get('close', row.get('price', 0)))
+                if curr_price > 0:
+                    item.current_price = curr_price
+                    if item.add_price > 0:
+                        item.pnl_percent = (curr_price - item.add_price) / item.add_price * 100
+                
                 # 检查 last_action 列 (策略信号)
                 action = row.get('last_action', '')
                 if action and ('买' in str(action) or '卖' in str(action)):
                     # 检查是否是新信号
                     last_val = self._alerted_signals.get(item.code, '')
                     if str(action) != last_val:
+                        self._alerted_signals.get(item.code, '')
                         self._alerted_signals[item.code] = str(action)
                         alerts.append(f"{item.name} {action}")
         
+        # 刷新热点面板表格
+        if hasattr(self, 'hotlist_panel'):
+            self.hotlist_panel._refresh_table()
+
         if alerts and (now - self._last_alert_time > 5):
             alert_msg = "热点提醒: " + " ".join(alerts)
             logger.info(alert_msg)
-            # 语音播报
-            try:
-                import pyttsx3
-                engine = pyttsx3.init()
-                engine.say(alert_msg)
-                engine.runAndWait()
-            except Exception:
-                pass
+            # 语音播报 - 使用 voice_thread 异步执行，避免卡顿
+            if hasattr(self, 'voice_thread') and self.voice_thread:
+                self.voice_thread.speak(alert_msg)
             
             # 状态栏提示 (如果界面存在)
             if self.isVisible():
@@ -5327,14 +5410,25 @@ class MainWindow(QMainWindow, WindowMixin):
             # day_df.index 通常是字符串 'YYYY-MM-DD'
             
             # 查找对应的 K 线索引
+            idx = -1
             if add_date in day_df.index:
                 # 获取整数索引
-                idx = day_df.index.get_loc(add_date)
+                idx_res = day_df.index.get_loc(add_date)
                 # 处理重复索引的情况
-                if isinstance(idx, slice):
-                    idx = idx.start
-                elif hasattr(idx, '__iter__'): # array or list
-                    idx = idx[0]
+                if isinstance(idx_res, slice):
+                    idx = idx_res.start
+                elif hasattr(idx_res, '__iter__'): # array or list
+                    idx = idx_res[0]
+                else:
+                    idx = idx_res
+            
+            # Fallback: 如果是今天但 index 里还没刷出来，强制用最后一根
+            if idx == -1:
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                if add_date == today_str:
+                    idx = len(day_df) - 1
+            
+            if idx != -1:
                 
                 # 获取坐标
                 try: 
@@ -6057,6 +6151,9 @@ class MainWindow(QMainWindow, WindowMixin):
             #     if 'shadow_decision' in locals() and shadow_decision:
             #         # [OPTIMIZATION] Consolidated into signal_overlay. kline_signals already contains this.
             #         pass
+        
+        # --- 绘制热点标记 (热点自选加入点) ---
+        self._draw_hotspot_markers(code, x_axis, day_df)
 
 
 
@@ -7105,14 +7202,20 @@ class MainWindow(QMainWindow, WindowMixin):
             # self.populate_tree_from_df(matches)
 
             # --- 3. 设置列头 ---
-            filter_col = ['Code', 'Name', 'Rank','win', 'Percent']
-            count_col = len(filter_col)
+            base_cols = ['Code', 'Name', 'Rank', 'win', 'Percent']
+            extra_cols = []
+            if 'dff' in matches.columns:
+                extra_cols.append('dff')
+            if 'dff2' in matches.columns:
+                extra_cols.append('dff2')
+
+            display_cols = base_cols + extra_cols
+            count_col = len(display_cols)
             self.filter_tree.setColumnCount(count_col)
-            self.filter_tree.setHeaderLabels(filter_col)
+            self.filter_tree.setHeaderLabels(display_cols)
             self.filter_tree.setSortingEnabled(True)
             self.filter_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.filter_tree.setHorizontalScrollMode(QTreeWidget.ScrollMode.ScrollPerPixel)
-            # self.filter_tree.setSizeAdjustPolicy(QTreeWidget.SizeAdjustPolicy.AdjustToContents) <-- REMOVED
 
             # --- 4. 填充数据 ---
             for idx, row in matches.iterrows():
@@ -7143,32 +7246,45 @@ class MainWindow(QMainWindow, WindowMixin):
                 child.setText(2, str(rank) if rank not in ('', None) else '')
                 child.setText(3, f"{win_val}")
                 child.setText(4, f"{pct_val:.2f}%")
+                
+                # 填入额外列
+                curr_col_idx = len(base_cols)
+                for col_name in extra_cols:
+                    val = row.get(col_name, '-')
+                    child.setText(curr_col_idx, str(val))
+                    try:
+                        # 尝试为额外列也设置数值用于排序
+                        num_val = float(val) if val not in ('', None, '-', 'nan') else 0.0
+                        child.setData(curr_col_idx, Qt.ItemDataRole.UserRole, num_val)
+                    except:
+                        pass
+                    curr_col_idx += 1
+
                 child.setData(0, Qt.ItemDataRole.UserRole, code)
 
-                # ⭐ 关键修复：使用UserRole+1存储数值用于排序
+                # ⭐ 关键修复：使用UserRole存储数值用于排序
                 child.setData(2, Qt.ItemDataRole.UserRole, rank_val)  # Rank列数值
-                child.setData(3, Qt.ItemDataRole.UserRole, win_val)    # Percent列数值
-                child.setData(4, Qt.ItemDataRole.UserRole, pct_val)    # Percent列数值
+                child.setData(3, Qt.ItemDataRole.UserRole, win_val)   # Win列数值
+                child.setData(4, Qt.ItemDataRole.UserRole, pct_val)   # Percent列数值
 
-                # 左对齐
+                # 对齐
                 for col in range(count_col):
                     child.setTextAlignment(col, Qt.AlignmentFlag.AlignLeft)
 
                 # 百分比上色
                 if pct_val > 0:
-                    child.setForeground(3, QBrush(QColor("red")))
+                    child.setForeground(4, QBrush(QColor("red")))
                 elif pct_val < 0:
-                    child.setForeground(3, QBrush(QColor("green")))
+                    child.setForeground(4, QBrush(QColor("green")))
 
-            # --- 5. 调整列宽，尽量紧凑 ---
+            # --- 5. 调整列宽 ---
             header = self.filter_tree.header()
             for col in range(self.filter_tree.columnCount()):
                 header.setSectionResizeMode(col, QHeaderView.ResizeMode.ResizeToContents)
-            header.setStretchLastSection(False)  # 不拉伸最后一列
+            header.setStretchLastSection(False)
 
             # ⭐ 默认按Rank升序排序
             self.filter_tree.sortItems(2, Qt.SortOrder.AscendingOrder)
-
 
             self.statusBar().showMessage(f"Results: {len(matches)}")
 
@@ -7325,6 +7441,14 @@ class MainWindow(QMainWindow, WindowMixin):
             # 初始应用一次主题样式
             self.apply_qt_theme()
             
+            # --- 4. 列宽配置 ---
+            self.saved_col_widths = config.get('column_widths', {})
+            if 'stock_table' in self.saved_col_widths:
+                # 延迟应用，确保表头和数据已初次加载完成 (主要针对独立运行模式)
+                QTimer.singleShot(800, lambda: self._apply_saved_column_widths(
+                    self.stock_table, self.saved_col_widths.get('stock_table', {})
+                ))
+            
             # # 3.2 全局快捷键开关
             # if 'global_shortcuts_enabled' in window_config:
             #     enabled = window_config.get('global_shortcuts_enabled', False)
@@ -7441,33 +7565,13 @@ class MainWindow(QMainWindow, WindowMixin):
             sizes = self.main_splitter.sizes()
             fixed_sizes = list(sizes)
 
-            # 过滤隐藏面板的 0 值
+            # 🛡️ 安全上限：防止过滤器面板过宽导致渲染异常 (修复 1110)
             FILTER_INDEX = 2
-            FILTER_DEFAULT = 160
-            FILTER_MIN = 60
-            FILTER_MAX = 300  # 🛡️ 安全上限
+            FILTER_MAX = 300 
 
-            old_sizes = old_config.get('splitter_sizes', [])
-            
-            # 1. 如果当前 Filter 是隐藏的 (width <= 0)
-            # 1. 如果当前 Filter 是隐藏的 (width <= 0)
-            if fixed_sizes[FILTER_INDEX] <= 0:
-                # [FIX]: 如果用户当前就是折叠状态，应该保存为 0，而不是强行恢复历史值
-                # 只有在某些异常情况下才需要恢复 (但这里我们信任当前的 UI 状态)
-                fixed_sizes[FILTER_INDEX] = 0
-            
-            # 2. 如果当前 Filter 异常宽 (修复 1110) - 仅在非折叠时检查
-            elif fixed_sizes[FILTER_INDEX] > FILTER_MAX:
+            if fixed_sizes[FILTER_INDEX] > FILTER_MAX:
                 logger.warning(f"[SaveConfig] Detected huge filter width {fixed_sizes[FILTER_INDEX]}, capping to {FILTER_MAX}")
                 fixed_sizes[FILTER_INDEX] = FILTER_MAX
-                
-                fixed_sizes[FILTER_INDEX] = restored_val
-            
-            # 2. 如果当前 Filter 是显示的
-            else:
-                # 如果当前宽度异常大，保存时强制截断
-                if fixed_sizes[FILTER_INDEX] > FILTER_MAX:
-                    fixed_sizes[FILTER_INDEX] = FILTER_MAX
 
             # --- 2. Filter 配置 ---
             filter_config = old_config.get('filter', {})
@@ -7506,16 +7610,38 @@ class MainWindow(QMainWindow, WindowMixin):
             if hasattr(self, 'ths_enabled'):
                 window_config['ths_enabled'] = self.ths_enabled
             
-            # 3.5 神奇九转开关
             if hasattr(self, 'show_td_sequential'):
                 window_config['show_td_sequential'] = self.show_td_sequential
                 
+            # --- 4. 列宽配置 ---
+            col_widths = old_config.get('column_widths', {})
+            
+            # 4.1 主表宽度 (以表头显示文本为 Key 以保持语义一致性)
+            stock_widths = {}
+            for col in range(self.stock_table.columnCount()):
+                h_item = self.stock_table.horizontalHeaderItem(col)
+                if h_item:
+                    stock_widths[h_item.text()] = self.stock_table.columnWidth(col)
+            col_widths['stock_table'] = stock_widths
+
+            # 4.2 筛选树宽度
+            if hasattr(self, 'filter_tree'):
+                tree_widths = {}
+                h_item = self.filter_tree.headerItem()
+                for col in range(self.filter_tree.columnCount()):
+                    tree_widths[h_item.text(col)] = self.filter_tree.columnWidth(col)
+                col_widths['filter_tree'] = tree_widths
+
+            # ⭐ [FIX] 保存时同步更新运行时的内存缓存
+            self.saved_col_widths = col_widths
+
             # --- 构建最终配置 ---
             config = {
                 'splitter_sizes': fixed_sizes,
                 'layout_presets': getattr(self, 'layout_presets', {}),
                 'filter': filter_config,
                 'window': window_config,
+                'column_widths': col_widths,
                 # 未来扩展：直接添加新的顶级键即可
             }
 
@@ -7527,6 +7653,104 @@ class MainWindow(QMainWindow, WindowMixin):
 
         except Exception as e:
             logger.exception("Failed to save visualizer config")
+
+    def _save_h_scroll_state(self, widget):
+        """保存水平滚动状态：记录最左侧可见列及其像素偏移"""
+        if not widget: return None
+        try:
+            h_bar = widget.horizontalScrollBar()
+            if not h_bar: return None
+            
+            left_pos = h_bar.value()
+            first_col = widget.columnAt(0)
+            if first_col < 0: return None
+            
+            # 检查是否有 header 对象
+            header = getattr(widget, 'header', None)
+            if callable(header): header = header()
+            if not header: return None
+            
+            col_pos = header.sectionPosition(first_col)
+            offset = left_pos - col_pos
+            return (first_col, offset)
+        except:
+            return None
+
+    def _restore_h_scroll_state(self, widget, state):
+        """恢复水平滚动状态：滚动到指定列并应用偏移 (防止视图跳动)"""
+        if not widget or not state: return
+        try:
+            first_col, offset = state
+            if first_col < 0 or first_col >= widget.columnCount(): return
+            
+            # 使用针对性方法
+            if hasattr(widget, 'scrollToColumn'):
+                widget.scrollToColumn(first_col)
+            
+            # header 对象获取
+            header = getattr(widget, 'header', None)
+            if callable(header): header = header()
+            if not header: return
+
+            # 延时一点等待渲染完成
+            QTimer.singleShot(10, lambda: widget.horizontalScrollBar().setValue(
+                header.sectionPosition(first_col) + offset
+            ))
+        except:
+            pass
+
+    def _resize_columns_tightly(self, widget):
+        """
+        紧凑型自适应：
+        1. 执行标准自适应
+        2. 手动收缩 15px 去除 Qt 默认宽边距
+        3. 强制限制最大宽度 380px，防止长文本霸屏
+        """
+        if not widget: return
+        h_state = self._save_h_scroll_state(widget)
+        
+        # 关键：暂时关闭列宽变动的信号捕获，防止触发配置保存覆盖用户手动微调
+        header = getattr(widget, 'header', None)
+        if callable(header): header = header()
+        if header: header.blockSignals(True)
+        
+        try:
+            for col in range(widget.columnCount()):
+                widget.resizeColumnToContents(col)
+                w = widget.columnWidth(col)
+                # 策略: 原始宽度 - 15px (更紧凑), 但最小保留 35px, 最大限制 380px
+                new_w = min(max(w - 15, 35), 380)
+                widget.setColumnWidth(col, new_w)
+        finally:
+            if header: header.blockSignals(False)
+            
+        self._restore_h_scroll_state(widget, h_state)
+
+    def _apply_saved_column_widths(self, widget, widths_dict):
+        """应用保存过的列宽配置"""
+        if not widget or not widths_dict: return
+        header = getattr(widget, 'header', None)
+        if callable(header): header = header()
+        if not header: return
+        
+        # 阻塞信号，防止恢复过程触发冗余保存
+        header.blockSignals(True)
+        try:
+            is_table = isinstance(widget, QTableWidget)
+            for col in range(widget.columnCount()):
+                col_name = ""
+                if is_table:
+                    h_item = widget.horizontalHeaderItem(col)
+                    if h_item: col_name = h_item.text()
+                else: # QTreeWidget
+                    col_name = widget.headerItem().text(col)
+                    
+                if col_name in widths_dict:
+                    widget.setColumnWidth(col, widths_dict[col_name])
+                    # 显式设为 Interactive 模式，防止后续被 ResizeToContents 覆盖
+                    header.setSectionResizeMode(col, QHeaderView.ResizeMode.Interactive)
+        finally:
+            header.blockSignals(False)
 
     def load_layout_preset(self, index):
         """从预设加载布局 (1-3) 并重新校准视角"""
