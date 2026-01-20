@@ -1612,6 +1612,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.log_level = log_level
         self.resample = 'd'
         self.qt_theme = 'dark'  # 默认使用黑色主题
+        self.custom_bg_app = None    # 用户自定义界面背景色
+        self.custom_bg_chart = None  # 用户自定义图表背景色
         self.show_bollinger = True
         self.tdx_enabled = True  # 保留兼容，同步到 tdx_var
         self.ths_enabled = True  # THS 开关状态
@@ -1690,6 +1692,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self._init_tdx()
         self._init_real_time()
         self._init_layout_menu()  # ⭐ 新增：布局预设菜单
+        self._init_theme_menu()   # ⭐ 新增：主题背景菜单
 
         # ⭐ 数据同步序列号 (用于防重发、防漏发、防乱序)
         self.expected_sync_version = -1
@@ -3673,172 +3676,196 @@ class MainWindow(QMainWindow, WindowMixin):
         self.apply_qt_theme()
 
     def _apply_pg_theme_to_plot(self, plot):
-        """Apply theme to a single plot"""
-        # 获取 PlotItem 的 ViewBox
+        """为单个 PlotItem 应用主题（坐标轴、标题、背景等）"""
         vb = plot.getViewBox()
 
-        # 背景颜色和边框颜色
-        if self.qt_theme == 'dark':
-            vb.setBackgroundColor('#1e1e1e')
-            axis_color = '#cccccc'
-            border_color = '#555555'  # 深灰色边框
-            title_color = '#e6e6e6'   # 浅灰色标题
+        # 1. 确定图表亮度与背景色
+        if getattr(self, 'custom_bg_chart', None):
+            bg_color = self.custom_bg_chart
+            chart_text_color = self._get_contrast_color(bg_color)
+            is_dark = (chart_text_color == "#F0F0F0")
         else:
-            vb.setBackgroundColor('w')
-            axis_color = '#000000'
-            border_color = '#cccccc'  # 浅灰色边框
-            title_color = '#000000'   # 黑色标题
+            is_dark = (self.qt_theme == 'dark')
+            bg_color = '#111111' if is_dark else '#FFFFFF'
 
-        # 设置边框颜色
+        # 2. 根据亮度配置辅助色
+        if is_dark:
+            axis_color = '#CCCCCC'
+            border_color = '#555555'
+            title_color = '#EEEEEE'
+        else:
+            axis_color = '#000000'
+            border_color = '#BBBBBB'
+            title_color = '#000000'
+
+        # 应用背景与边框
+        vb.setBackgroundColor(bg_color)
         vb.setBorder(pg.mkPen(border_color, width=1))
 
-        # 设置坐标轴颜色（包括所有四个边）
+        # 3. 设置坐标轴与文字颜色
         for ax_name in ('left', 'bottom', 'right', 'top'):
             ax = plot.getAxis(ax_name)
             if ax is not None:
                 ax.setPen(pg.mkPen(axis_color, width=1))
                 ax.setTextPen(pg.mkPen(axis_color))
 
-        # 设置标题颜色 - 使用正确的方法
         if hasattr(plot, 'titleLabel'):
             plot.titleLabel.item.setDefaultTextColor(QColor(title_color))
 
         # 网格
         plot.showGrid(x=True, y=True, alpha=0.3)
 
+    def _get_contrast_color(self, bg_hex):
+        """根据背景色亮度返回黑色或白色的前景文字色"""
+        if not bg_hex or bg_hex == 'transparent':
+            return "#e6e6e6" if self.qt_theme == 'dark' else "#000000"
+        try:
+            bg_hex = bg_hex.lstrip('#')
+            if len(bg_hex) == 3:
+                bg_hex = ''.join([c*2 for c in bg_hex])
+            r, g, b = int(bg_hex[0:2], 16), int(bg_hex[2:4], 16), int(bg_hex[4:6], 16)
+            luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255
+            return "#000000" if luminance > 0.5 else "#F0F0F0"
+        except:
+            return "#000000"
+
     def _apply_widget_theme(self, widget):
-        """Apply theme to GraphicsLayoutWidget"""
-        if self.qt_theme == 'dark':
-            widget.setBackground('#1e1e1e')
-            # 设置widget边框
-            widget.setStyleSheet("""
-                QGraphicsView {
-                    border: 1px solid #555555;
-                    background-color: #1e1e1e;
-                }
-            """)
+        """Apply theme to GraphicsLayoutWidget (Enhanced)"""
+        if self.custom_bg_chart:
+            bg = self.custom_bg_chart
         else:
-            widget.setBackground('#f2faff')
-            widget.setStyleSheet("""
-                QGraphicsView {
-                    border: 1px solid #d0e5f5;
-                    background-color: #f2faff;
-                }
-            """)
+            bg = '#111111' if self.qt_theme == 'dark' else '#FFFFFF'
+            
+        widget.setBackground(bg)
+        border = "#555555" if self.qt_theme == 'dark' else "#d0e5f5"
+        widget.setStyleSheet(f"""
+            QGraphicsView {{
+                border: 1px solid {border};
+                background-color: {bg};
+            }}
+        """)
 
 
 
     def apply_qt_theme(self):
-        """Apply Qt theme / color scheme"""
-        # ⭐ 记录当前分割器尺寸，防止样式重置导致布局错乱
+        """Apply Qt theme / color scheme (Enhanced for dynamic backgrounds)"""
         current_sizes = self.main_splitter.sizes()
         
-        if self.qt_theme == 'dark':
-            self.setStyleSheet("""
-                QWidget {
-                    background-color: #2b2b2b;
-                    color: #e6e6e6;
-                }
-                #DecisionPanel {
-                    background-color: #1a1a1a;
-                    border-top: 1px solid #333333;
-                }
-                QTableWidget {
-                    background-color: #2b2b2b;
-                    gridline-color: #444444;
-                }
-                QHeaderView::section {
-                    background-color: #3a3a3a;
-                    color: #f0f0f0;
-                    padding: 4px;
-                    border: 1px solid #555555;
-                }
-                QTableWidget::item:selected {
-                    background-color: #094771;
-                    color: #FFFFFF;
-                }
-                QMenuBar {
-                    background-color: #2b2b2b;
-                    color: #e6e6e6;
-                    border-bottom: 1px solid #444444;
-                }
-                QMenuBar::item:selected {
-                    background-color: #3d3d3d;
-                }
-                QMenu {
-                    background-color: #2b2b2b;
-                    color: #e6e6e6;
-                    border: 1px solid #444444;
-                }
-                QMenu::item:selected {
-                    background-color: #094771;
-                    color: #FFFFFF;
-                }
-            """)
-            pg.setConfigOption('background', 'k')
-            pg.setConfigOption('foreground', 'w')
-
+        # 1. 确定背景色与前景文字色
+        if self.custom_bg_app:
+            bg_main = self.custom_bg_app
+            color_text = self._get_contrast_color(bg_main)
+            is_dark = (color_text == "#F0F0F0")
         else:
-            # 默认 light (优化为淡蓝色系 Trader 风格)
-            self.setStyleSheet("""
-                QWidget {
-                    background-color: #f2faff; /* 极淡蓝色主背景 */
-                    color: #000000;
-                }
-                #DecisionPanel {
-                    background-color: #e1f3ff;
-                    border-top: 1px solid #b3d7ff;
-                }
-                QMenuBar {
-                    background-color: #e1f3ff;
-                    color: #000000;
-                }
-                QMenuBar::item:selected {
-                    background-color: #cce8ff;
-                }
-                QMenu {
-                    background-color: #ffffff;
-                    color: #000000;
-                    border: 1px solid #b3d7ff;
-                }
-                QMenu::item:selected {
-                    background-color: #0078d4;
-                    color: #ffffff;
-                }
-                QTableWidget, QTreeWidget, QHeaderView::section {
-                    background-color: #f8fcff;
-                    color: #000000;
-                    gridline-color: #e1f0fa;
-                }
-                QHeaderView::section {
-                    background-color: #eef7ff;
-                    border: 1px solid #d0e5f5;
-                }
-            """)
-            # 强化 light 模式下的分割器手柄可见性
-            self.main_splitter.setStyleSheet("QSplitter::handle { background-color: #b3d7ff; width: 4px; }")
-            pg.setConfigOption('background', 'w')
-            pg.setConfigOption('foreground', 'k')
+            is_dark = (self.qt_theme == 'dark')
+            bg_main = "#2b2b2b" if is_dark else "#f2faff"
+            color_text = "#e6e6e6" if is_dark else "#000000"
 
-        # 应用到 GraphicsLayoutWidget
+        # 2. 生成全局样式表
+        if is_dark:
+            # 深色基调
+            border_color = "#444444"
+            item_selected = "#094771"
+            header_bg = "#3a3a3a"
+            decision_bg = "#1a1a1a"
+        else:
+            # 浅色基调 (Trader Blue 风格)
+            border_color = "#b3d7ff"
+            item_selected = "#cce8ff"
+            header_bg = "#eef7ff"
+            decision_bg = "#e1f3ff"
+
+        self.setStyleSheet(f"""
+            QWidget {{
+                background-color: {bg_main};
+                color: {color_text};
+            }}
+            #DecisionPanel {{
+                background-color: {decision_bg if not self.custom_bg_app else 'transparent'};
+                border-top: 1px solid {border_color};
+            }}
+            QMenuBar {{
+                background-color: {bg_main};
+                color: {color_text};
+                border-bottom: 1px solid {border_color};
+            }}
+            QMenuBar::item:selected {{
+                background-color: {item_selected};
+            }}
+            QMenu {{
+                background-color: {bg_main if is_dark else '#ffffff'};
+                color: {color_text};
+                border: 1px solid {border_color};
+            }}
+            QMenu::item:selected {{
+                background-color: #0078d4;
+                color: #ffffff;
+            }}
+            QTableWidget, QTreeWidget, QHeaderView::section {{
+                background-color: {bg_main if not is_dark else '#2b2b2b'};
+                color: {color_text};
+                gridline-color: {border_color};
+            }}
+            QHeaderView::section {{
+                background-color: {header_bg};
+                border: 1px solid {border_color};
+                padding: 4px;
+            }}
+            QTableWidget::item:selected {{
+                background-color: #094771;
+                color: #FFFFFF;
+            }}
+            QComboBox, QPushButton {{
+                background-color: {decision_bg if not self.custom_bg_app else 'rgba(255,255,255,50)'};
+                border: 1px solid {border_color};
+                border-radius: 4px;
+                padding: 4px;
+                color: {color_text};
+            }}
+            QComboBox::drop-down, QPushButton:hover {{
+                background-color: {item_selected};
+            }}
+            QSplitter::handle {{
+                background-color: {border_color};
+            }}
+        """)
+
+        # 2.1 更新标签颜色（处理“看不清”的问题）
+        if hasattr(self, 'decision_label'):
+            label_color = "#00FF00" if is_dark else "#006400" # 深绿或翠绿
+            self.decision_label.setStyleSheet(f"color: {label_color}; font-weight: bold; background: transparent;")
+        if hasattr(self, 'supervision_label'):
+            super_color = "#FFD700" if is_dark else "#B8860B" # 金色或暗金
+            self.supervision_label.setStyleSheet(f"color: {super_color}; background: transparent;")
+
+        # 3. 确定图表亮度（独立于界面亮度，确保坐标轴可见）
+        if self.custom_bg_chart:
+            # 根据图表背色计算图表文字色
+            chart_text_color = self._get_contrast_color(self.custom_bg_chart)
+            is_chart_dark = (chart_text_color == "#F0F0F0")
+        else:
+            is_chart_dark = is_dark
+
+        # 4. 应用图表全局配置
+        pg.setConfigOption('background', self.custom_bg_chart if self.custom_bg_chart else ('k' if is_dark else 'w'))
+        pg.setConfigOption('foreground', 'w' if is_chart_dark else 'k')
+
         self._apply_widget_theme(self.kline_widget)
         self._apply_widget_theme(self.tick_widget)
 
-        # 调用统一函数设置 pg 主题
         self._apply_pg_theme_to_plot(self.kline_plot)
         self._apply_pg_theme_to_plot(self.tick_plot)
-
-        # 如果有 volume_plot，也应用主题
         if hasattr(self, 'volume_plot'):
             self._apply_pg_theme_to_plot(self.volume_plot)
 
-        # 重新渲染当前股票（如果有）以更新蜡烛图颜色
+        # 4. 刷新渲染
         if self.current_code:
-            # self.load_stock_by_code(self.current_code) # 🔴 移除此处调用，避免 layout 回路
-            # 仅刷新图表颜色，不重载数据
-            self.render_charts(self.current_code, self.day_df)
+            self.render_charts(self.current_code, self.day_df, getattr(self, 'tick_df', pd.DataFrame()))
 
-        # ⭐ 恢复分割器尺寸
+        # 5. 恢复分割器手柄样式与尺寸
+        handle_color = border_color
+        self.main_splitter.setStyleSheet(f"QSplitter::handle {{ background-color: {handle_color}; width: 4px; }}")
+        
         if any(current_sizes):
             self.main_splitter.setSizes(current_sizes)
 
@@ -3855,9 +3882,15 @@ class MainWindow(QMainWindow, WindowMixin):
             # 尝试获取描述信息
             desc = ""
             if hasattr(self, 'layout_presets'):
-                sizes = self.layout_presets.get(str(i))
-                if sizes:
-                    desc = f" ({sizes[0]}:{sizes[1]}:{sizes[2]})"
+                preset = self.layout_presets.get(str(i))
+                if preset:
+                    # 兼容新旧格式: 新格式是 dict，旧格式是 list
+                    if isinstance(preset, dict):
+                        sizes = preset.get('sizes', [])
+                    else:
+                        sizes = preset  # 旧格式直接是 list
+                    if sizes and len(sizes) >= 3:
+                        desc = f" ({sizes[0]}:{sizes[1]}:{sizes[2]})"
             
             action = QAction(f"加载 布局预设 {i}{desc}", self)
             action.triggered.connect(lambda checked, idx=i: self.load_layout_preset(idx))
@@ -3872,8 +3905,50 @@ class MainWindow(QMainWindow, WindowMixin):
             action.triggered.connect(lambda checked, idx=i: self.save_layout_preset(idx))
             save_menu.addAction(action)
 
+    def _init_theme_menu(self):
+        """初始化自定义背景颜色菜单"""
+        menubar = self.menuBar()
+        theme_menu = menubar.addMenu("主题(Theme)")
+        
+        # 常见颜色选项
+        colors = [
+            ("默认方案", None),
+            ("纯白 (Classic)", "#FFFFFF"),
+            ("淡蓝 (Trader Blue)", "#F2FAFF"),
+            ("浅灰 (Soft Gray)", "#F0F0F0"),
+            ("中灰 (Medium)", "#DCDCDC"),
+            ("深灰 (Deep Gray)", "#333333"),
+            ("纯黑 (Dark)", "#000000"),
+        ]
+        
+        # 1. 界面背景
+        app_bg_menu = theme_menu.addMenu("🖼️ 界面背景颜色")
+        for name, code in colors:
+            action = QAction(name, self)
+            action.triggered.connect(lambda checked, c=code: self._update_app_bg(c))
+            app_bg_menu.addAction(action)
+            
+        # 2. 图表背景
+        chart_bg_menu = theme_menu.addMenu("📈 K线/分时背景颜色")
+        for name, code in colors:
+            action = QAction(name, self)
+            action.triggered.connect(lambda checked, c=code: self._update_chart_bg(c))
+            chart_bg_menu.addAction(action)
+
+    def _update_app_bg(self, color):
+        self.custom_bg_app = color
+        self.apply_qt_theme()
+        self._save_visualizer_config()
+        logger.info(f"App background updated to: {color}")
+        
+    def _update_chart_bg(self, color):
+        self.custom_bg_chart = color
+        self.apply_qt_theme()
+        self._save_visualizer_config()
+        logger.info(f"Chart background updated to: {color}")
+
     def save_layout_preset(self, index):
-        """保存当前布局到指定预设 (1-3) - 增加二次确认"""
+        """保存当前布局到指定预设 (1-3) - 包含背景色设置"""
         try:
             from PyQt6.QtWidgets import QMessageBox
             if not hasattr(self, 'layout_presets'):
@@ -3882,19 +3957,25 @@ class MainWindow(QMainWindow, WindowMixin):
             # 二次确认
             reply = QMessageBox.question(
                 self, '确认保存', 
-                f"确定要将当前布局覆盖到 预设 {index} 吗？",
+                f"确定要将当前布局（包含界面颜色、K线颜色）覆盖到 预设 {index} 吗？",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, 
                 QMessageBox.StandardButton.No
             )
             
             if reply == QMessageBox.StandardButton.Yes:
                 sizes = self.main_splitter.sizes()
-                self.layout_presets[str(index)] = sizes
+                # 保存尺寸与主题色
+                self.layout_presets[str(index)] = {
+                    'sizes': sizes,
+                    'bg_app': getattr(self, 'custom_bg_app', None),
+                    'bg_chart': getattr(self, 'custom_bg_chart', None),
+                    'theme': getattr(self, 'qt_theme', 'dark')
+                }
                 self._save_visualizer_config()
                 # 刷新菜单显示新的尺寸描述
                 self._init_layout_menu()
-                logger.info(f"Layout preset {index} saved: {sizes}")
-                QMessageBox.information(self, "布局保存", f"布局预设 {index} 已保存成功。")
+                logger.info(f"Layout preset {index} saved (with theme): {self.layout_presets[str(index)]}")
+                QMessageBox.information(self, "布局保存", f"布局预设 {index}（含环境色）已保存成功。")
         except Exception as e:
             logger.error(f"Failed to save layout preset {index}: {e}")
 
@@ -6701,8 +6782,16 @@ class MainWindow(QMainWindow, WindowMixin):
             # 3.1 主题 (如果有)
             saved_theme = window_config.get('theme')
             if saved_theme and hasattr(self, 'qt_theme'):
-                # 仅记录，不强制覆盖（让用户可以手动切换）
-                pass
+                 self.qt_theme = saved_theme
+            
+            # 3.1.2 自定义背景色
+            if 'custom_bg_app' in window_config:
+                self.custom_bg_app = window_config.get('custom_bg_app')
+            if 'custom_bg_chart' in window_config:
+                self.custom_bg_chart = window_config.get('custom_bg_chart')
+            
+            # 初始应用一次主题样式
+            self.apply_qt_theme()
             
             # # 3.2 全局快捷键开关
             # if 'global_shortcuts_enabled' in window_config:
@@ -6842,6 +6931,10 @@ class MainWindow(QMainWindow, WindowMixin):
             # 3.1 主题
             if hasattr(self, 'qt_theme'):
                 window_config['theme'] = self.qt_theme
+            if hasattr(self, 'custom_bg_app'):
+                window_config['custom_bg_app'] = self.custom_bg_app
+            if hasattr(self, 'custom_bg_chart'):
+                window_config['custom_bg_chart'] = self.custom_bg_chart
 
             # 3.2 全局快捷键开关
             if hasattr(self, 'global_shortcuts_enabled'):
@@ -6880,31 +6973,39 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.exception("Failed to save visualizer config")
 
-    def save_layout_preset(self, index):
-        """保存当前布局到指定预设 (1-3)"""
-        try:
-            if not hasattr(self, 'layout_presets'):
-                self.layout_presets = {}
-            sizes = self.main_splitter.sizes()
-            self.layout_presets[str(index)] = sizes
-            self._save_visualizer_config()
-            logger.info(f"Layout preset {index} saved: {sizes}")
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.information(self, "布局保存", f"布局预设 {index} 已保存成功。")
-        except Exception as e:
-            logger.error(f"Failed to save layout preset {index}: {e}")
-
     def load_layout_preset(self, index):
         """从预设加载布局 (1-3) 并重新校准视角"""
         try:
             if hasattr(self, 'layout_presets'):
-                sizes = self.layout_presets.get(str(index))
-                if sizes:
-                    self.main_splitter.setSizes(sizes)
+                preset = self.layout_presets.get(str(index))
+                if preset:
+                    # 兼容旧版本 (以前是 list，现在是 dict)
+                    theme_changed = False
+                    if isinstance(preset, list):
+                        sizes = preset
+                    else:
+                        sizes = preset.get('sizes')
+                        # 恢复主题设置
+                        if 'bg_app' in preset:
+                            self.custom_bg_app = preset['bg_app']
+                            theme_changed = True
+                        if 'bg_chart' in preset:
+                            self.custom_bg_chart = preset['bg_chart']
+                            theme_changed = True
+                        if 'theme' in preset:
+                            self.qt_theme = preset['theme']
+                            theme_changed = True
+                    
+                    if sizes:
+                        self.main_splitter.setSizes(sizes)
+                    
+                    if theme_changed:
+                        self.apply_qt_theme()
+                        
                     # ⭐ 核心修复：布局切换后强制执行一次“智能重置”，校准 X 轴优先级至右侧
                     if not self.day_df.empty:
                         self._reset_kline_view()
-                    logger.info(f"Layout preset {index} loaded and view recalibrated.")
+                    logger.info(f"Layout preset {index} loaded. Theme changed: {theme_changed}")
                 else:
                     from PyQt6.QtWidgets import QMessageBox
                     QMessageBox.warning(self, "加载失败", f"尚未保存布局预设 {index}。")
