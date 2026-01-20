@@ -45,6 +45,8 @@ from StrongPullbackMA5Strategy import StrongPullbackMA5Strategy
 from strong_consolidation_strategy import StrongConsolidationStrategy
 from data_utils import (
     calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe,PIPE_NAME_TK)
+from hotlist_panel import HotlistPanel
+from hotspot_popup import HotSpotPopup
 
 import re
 try:
@@ -1975,9 +1977,16 @@ class MainWindow(QMainWindow, WindowMixin):
         right_splitter = QSplitter(Qt.Orientation.Vertical)
         self.main_splitter.addWidget(right_splitter)
 
+        # 3. 热点自选面板 (HotlistPanel) - 浮动窗口
+        self.hotlist_panel = HotlistPanel(self)
+        self.hotlist_panel.stock_selected.connect(self._on_hotlist_stock_selected)
+        self.hotlist_panel.item_double_clicked.connect(self._on_hotlist_double_click)
+        # 初始隐藏，通过 Alt+H 切换显示
+        self.hotlist_panel.hide()
+
         # Set initial sizes for the main splitter (left table: 200, right charts: remaining)
         self.main_splitter.setSizes([200, 900])
-        self.main_splitter.setCollapsible(0, False) # Prevent table from being completely hidden
+        self.main_splitter.setCollapsible(0, False)  # Prevent table from being completely hidden
 
 
         # -- 顶部图表: 日 K 线
@@ -2136,13 +2145,13 @@ class MainWindow(QMainWindow, WindowMixin):
         self.filter_tree.setStyleSheet(scrollbar_style)
         filter_layout.addWidget(self.filter_tree)
 
-        self.filter_panel.setVisible(False)
+        # self.filter_panel.setVisible(False)
         self.main_splitter.addWidget(self.filter_panel)
 
         # 设置默认分割比例
         # 股票列表:图表区域:过滤面板 = 1 : 4 : 1 (示例分配)
-        self.main_splitter.setSizes([350, 800, 250])
-        
+        self.main_splitter.setSizes([350, 800, 160])
+        self.filter_panel.setMinimumWidth(0)
         # ⭐ [LAYOUT STABILITY] 设置拉伸因子，确保 Chart (Index 1) 随窗口自动缩放，而 Table (Index 0) 保持稳定
         self.main_splitter.setStretchFactor(0, 0) # 左侧列表：不自动拉伸
         self.main_splitter.setStretchFactor(1, 1) # 中间图表：自动占满空间
@@ -2186,7 +2195,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.shortcut_map = [
             ("Alt+T", "显示/隐藏信号盒子 / 切换模拟信号(T)", self._show_signal_box),
             ("Alt+F", "显示快捷键帮助 (此弹窗)", self._show_filter_panel),
+            ("Alt+H", "显示/隐藏热点自选面板", self._toggle_hotlist_panel),
             ("Ctrl+/", "显示快捷键帮助 (此弹窗)", self.show_shortcut_help),
+            ("H", "添加当前股票到热点自选", self._add_to_hotlist),
             ("Space", "显示综合研报 / 弹窗详情 (K线图内生效)", None),
             ("R", "重置 K 线视图 (全览模式)", None),
             ("S", "显示策略监理 & 风控详情", None),
@@ -2683,6 +2694,28 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.signal_box_dialog.raise_()
                 self.signal_box_dialog.activateWindow()
 
+     # 安全折叠 filter
+    def collapse_filter(self):
+        sizes = self.main_splitter.sizes()
+        logger.info(f'collapse_filter sizes: {len(sizes)}')
+        # if len(sizes) > 2:
+        sizes[2] = 0
+        self.main_splitter.setSizes(sizes)
+
+    # 安全展开 filter
+    # def expand_filter(self, width=250):
+    #     sizes = self.main_splitter.sizes()
+    #     logger.info(f'expand_filter sizes: {len(sizes)}')
+    #     sizes[2] = width
+    #     self.main_splitter.setSizes(sizes)
+
+    # def toggle_filter(self):
+    #     sizes = self.main_splitter.sizes()
+    #     if sizes[2] == 0:
+    #         self.expand_filter(250)
+    #     else:
+    #         self.collapse_filter()
+
     def _show_filter_panel(self):
         """
         切换 Filter 面板显示状态：
@@ -2693,8 +2726,9 @@ class MainWindow(QMainWindow, WindowMixin):
         if not hasattr(self, 'filter_panel'):
             return
 
+        sizes = self.main_splitter.sizes()
         # 当前是否可见
-        is_presently_visible = self.filter_panel.isVisible()
+        is_presently_visible = True if sizes[2] > 0 else False
 
         # 切换状态
         if is_presently_visible:
@@ -3867,6 +3901,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.main_splitter.setStyleSheet(f"QSplitter::handle {{ background-color: {handle_color}; width: 4px; }}")
         
         if any(current_sizes):
+            logger.debug(f'load_layout_preset current_sizes: {current_sizes}')
             self.main_splitter.setSizes(current_sizes)
 
     def _init_layout_menu(self):
@@ -3876,7 +3911,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self._layout_menu = menubar.addMenu("布局(Layout)")
         
         self._layout_menu.clear() # 每次刷新前先清空旧项
-        
+
         # 1. 加载预设 (放在最外层，方便快速切换)
         for i in range(1, 4):
             # 尝试获取描述信息
@@ -4487,12 +4522,50 @@ class MainWindow(QMainWindow, WindowMixin):
         if not stock_code or self.df_all.empty:
             return
 
-        # 发送逻辑
-        success = self.push_stock_info(stock_code, self.df_all.loc[stock_code])
-        if success:
-            self.statusBar().showMessage(f"发送成功: {stock_code}")
-        else:
-            self.statusBar().showMessage(f"发送失败: {stock_code}")
+        # 获取股票信息
+        row = self.df_all.loc[stock_code] if stock_code in self.df_all.index else None
+        stock_name = row.get('name', '') if row is not None else ''
+        
+        # 创建右键菜单
+        menu = QMenu(self)
+        
+        # 发送到通达信
+        send_action = menu.addAction("📤 发送到通达信")
+        send_action.triggered.connect(lambda: self._on_send_to_tdx(stock_code, row))
+        
+        menu.addSeparator()
+        
+        # 添加到热点
+        hotlist_action = menu.addAction("🔥 添加到热点自选")
+        hotlist_action.triggered.connect(lambda: self._on_add_to_hotlist_from_menu(stock_code, stock_name, row))
+        
+        menu.exec(self.stock_table.mapToGlobal(pos))
+
+    def _on_send_to_tdx(self, stock_code, row):
+        """发送到通达信"""
+        if row is not None:
+            success = self.push_stock_info(stock_code, row)
+            if success:
+                self.statusBar().showMessage(f"发送成功: {stock_code}")
+            else:
+                self.statusBar().showMessage(f"发送失败: {stock_code}")
+
+    def _on_add_to_hotlist_from_menu(self, code: str, name: str, row):
+        """从右键菜单添加到热点"""
+        price = 0.0
+        if row is not None:
+            price = float(row.get('close', row.get('price', 0)))
+        
+        if hasattr(self, 'hotlist_panel'):
+            if self.hotlist_panel.contains(code):
+                self.statusBar().showMessage(f"热点已存在: {code} {name}")
+            else:
+                success = self.hotlist_panel.add_stock(code, name, price, "右键添加")
+                if success:
+                    self.statusBar().showMessage(f"🔥 添加热点: {code} {name}")
+                    # 自动显示面板
+                    if not self.hotlist_panel.isVisible():
+                        self.hotlist_panel.show()
 
     def on_header_section_clicked(self, _logicalIndex):
         """排序后自动滚动到顶部，延时确保排序完成"""
@@ -5001,7 +5074,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.volume_plot.clear()
             # 清除缓存的 Items
             for attr in ['candle_item', 'date_axis', 'vol_up_item', 'vol_down_item',
-                        'ma5_curve', 'ma10_curve', 'ma20_curve', 'upper_curve', 'lower_curve',
+                        'ma5_curve', 'ma10_curve', 'ma20_curve','ma60_curve', 'upper_curve', 'lower_curve',
                         'vol_ma5_curve', 'signal_scatter', 'tick_curve', 'avg_curve', 'pre_close_line', 'ghost_candle']:
                 if hasattr(self, attr):
                     delattr(self, attr)
@@ -5012,14 +5085,14 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # --- 主题颜色 ---
         if self.qt_theme == 'dark':
-            ma_colors = {'ma5':'b','ma10':'orange','ma20':QColor(255,255,0)}
+            ma_colors = {'ma5':'b','ma10':'orange','ma20':QColor(255,255,0),'ma60':QColor(0, 180, 255)}
             bollinger_colors = {'upper':QColor(139,0,0),'lower':QColor(0,128,0)}
             vol_ma_color = QColor(255,255,0)
             tick_curve_color = 'w'
             tick_avg_color = QColor(255,255,0)
             pre_close_color = '#FF0000' # Bright Red for Yesterday's Close
         else:
-            ma_colors = {'ma5':'b','ma10':'orange','ma20':QColor(255,140,0)}
+            ma_colors = {'ma5':'b','ma10':'orange','ma20':QColor(255,140,0),'ma60':QColor(0, 180, 255)}
             bollinger_colors = {'upper':QColor(139,0,0),'lower':QColor(0,128,0)}
             vol_ma_color = QColor(255,140,0)
             tick_curve_color = 'k'
@@ -5070,19 +5143,48 @@ class MainWindow(QMainWindow, WindowMixin):
             self.candle_item.setTheme(self.qt_theme)
             self.candle_item.setData(ohlc_data)
 
-        # --- MA5/10/20 ---
-        ma5 = day_df['close'].rolling(5).mean().values
+        # # --- MA5/10/20 ---
+        # ma5 = day_df['close'].rolling(5).mean().values
+        # ma10 = day_df['close'].rolling(10).mean().values
+        # ma20 = day_df['close'].rolling(20).mean().values
+        # ma60 = day_df['close'].rolling(60).mean().values
+        
+        # for attr, series, color in zip(['ma5_curve','ma10_curve','ma20_curve'],
+        #                                [ma5,ma10,ma20],
+        #                                [ma_colors['ma5'], ma_colors['ma10'], ma_colors['ma20']]):
+        #     if not hasattr(self, attr) or getattr(self, attr) not in self.kline_plot.items:
+        #         setattr(self, attr, self.kline_plot.plot(x_axis, series, pen=pg.mkPen(color, width=1)))
+        #     else:
+        #         getattr(self, attr).setData(x_axis, series)
+        #         getattr(self, attr).setPen(pg.mkPen(color, width=1))
+
+        # --- MA5 / MA10 / MA20 / MA60 ---
+        ma5  = day_df['close'].rolling(5).mean().values
         ma10 = day_df['close'].rolling(10).mean().values
         ma20 = day_df['close'].rolling(20).mean().values
+        ma60 = day_df['close'].rolling(60).mean().values
 
-        for attr, series, color in zip(['ma5_curve','ma10_curve','ma20_curve'],
-                                       [ma5,ma10,ma20],
-                                       [ma_colors['ma5'], ma_colors['ma10'], ma_colors['ma20']]):
+        # MA60 颜色：亮蓝色（深浅主题都清晰）
+        # ma60_color = QColor(0, 180, 255)
+
+        ma_defs = [
+            ('ma5_curve',  ma5,  ma_colors['ma5'],  QtCore.Qt.PenStyle.SolidLine),
+            ('ma10_curve', ma10, ma_colors['ma10'], QtCore.Qt.PenStyle.SolidLine),
+            ('ma20_curve', ma20, ma_colors['ma20'], QtCore.Qt.PenStyle.SolidLine),
+            ('ma60_curve', ma60, ma_colors['ma60'], QtCore.Qt.PenStyle.DashLine),
+        ]
+
+        for attr, series, color, style in ma_defs:
+            pen = pg.mkPen(color, width=1, style=style)
+
             if not hasattr(self, attr) or getattr(self, attr) not in self.kline_plot.items:
-                setattr(self, attr, self.kline_plot.plot(x_axis, series, pen=pg.mkPen(color, width=1)))
+                setattr(self, attr, self.kline_plot.plot(x_axis, series, pen=pen))
             else:
-                getattr(self, attr).setData(x_axis, series)
-                getattr(self, attr).setPen(pg.mkPen(color, width=1))
+                curve = getattr(self, attr)
+                curve.setData(x_axis, series)
+                curve.setPen(pen)
+
+
 
         # --- Bollinger ---
         std20 = day_df['close'].rolling(20).std().values
@@ -5503,7 +5605,11 @@ class MainWindow(QMainWindow, WindowMixin):
             pct_change = (prices[-1]-pre_close)/pre_close*100 if pre_close!=0 else 0
 
             # ⭐ 绘制完成后一次性调整视图范围，确保数据可见 (由于 disableAutoRange)
-            self.tick_plot.autoRange()
+            try:
+                self.tick_plot.autoRange()
+            except (ValueError, RuntimeError) as e:
+                # 防止 NaN 值导致 pyqtgraph 崩溃
+                logger.debug(f"tick_plot.autoRange() failed: {e}")
 
             # ⭐ 构建分时图标题（包含监理看板）
             tick_title = f"Intraday: {prices[-1]:.2f} ({pct_change:.2f}%)"
@@ -6320,17 +6426,18 @@ class MainWindow(QMainWindow, WindowMixin):
         """⭐ [UI OPTIMIZATION] 内部平移方案：开启 Filter 时压缩左侧列表，确保 K 线图不被挤压，且窗口不漂移"""
         # 1. 记录当前所有面板的宽度 [Table, Charts, Filter]
         sizes = self.main_splitter.sizes()
-        if len(sizes) < 3: 
-            self.filter_panel.setVisible(checked)
-            return
-        
+        # if len(sizes) < 3: 
+        #     # self.filter_panel.setVisible(checked)
+        #     return
+
         # 2. 记录当前可见性状态
-        is_presently_visible = self.filter_panel.isVisible()
+        # is_presently_visible = self.filter_panel.isVisible()
+        is_presently_visible = True if sizes[2] > 0 else False
         
         # 3. 确定 Filter 目标宽度 (若当前尺寸太小则设个保底值)
         # 如果即将开启
         if checked and not is_presently_visible:
-            target_f_width = 250
+            target_f_width = 160
             # 尝试从历史配置获取用户习惯的宽度
             try:
                 config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
@@ -6353,17 +6460,17 @@ class MainWindow(QMainWindow, WindowMixin):
                 from_charts = target_f_width - available_from_table
                 new_sizes = [100, max(100, sizes[1] - from_charts), target_f_width]
             
-            self.filter_panel.setVisible(True)
             self.main_splitter.setSizes(new_sizes)
+
             self.load_history_filters()
 
         elif not checked and is_presently_visible:
             # --- 动作：关闭 Filter ---
             # 逻辑：把 Filter 回收的宽度全部还给左侧列表，不影响 K 线图宽度
             f_w = sizes[2]
-            self.filter_panel.setVisible(False)
             new_sizes = [sizes[0] + f_w, sizes[1], 0]
             self.main_splitter.setSizes(new_sizes)
+            # self.collapse_filter()
 
     def open_history_manager(self):
         import subprocess
@@ -6398,7 +6505,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.filter_tree.setSortingEnabled(True)
         self.filter_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.filter_tree.setHorizontalScrollMode(QTreeWidget.ScrollMode.ScrollPerPixel)
-        self.filter_tree.setSizeAdjustPolicy(QTreeWidget.SizeAdjustPolicy.AdjustToContents)
+        # self.filter_tree.setSizeAdjustPolicy(QTreeWidget.SizeAdjustPolicy.AdjustToContents)  <-- REMOVED: Caused panel to force expansion
 
         n_rows = len(df)
 
@@ -6618,7 +6725,7 @@ class MainWindow(QMainWindow, WindowMixin):
             self.filter_tree.setSortingEnabled(True)
             self.filter_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.filter_tree.setHorizontalScrollMode(QTreeWidget.ScrollMode.ScrollPerPixel)
-            self.filter_tree.setSizeAdjustPolicy(QTreeWidget.SizeAdjustPolicy.AdjustToContents)
+            # self.filter_tree.setSizeAdjustPolicy(QTreeWidget.SizeAdjustPolicy.AdjustToContents) <-- REMOVED
 
             # --- 4. 填充数据 ---
             for idx, row in matches.iterrows():
@@ -6752,12 +6859,34 @@ class MainWindow(QMainWindow, WindowMixin):
                     config = json.load(f)
             
             # --- 1. 分割器尺寸 ---
+            # --- 1. 分割器尺寸 ---
+            # --- 1. 分割器尺寸 ---
             sizes = config.get('splitter_sizes', [])
             if sizes and len(sizes) == 3:
-                self.main_splitter.setSizes(sizes)
+                # 🛡️ [Self-Healing] 检查并修复异常尺寸 (修复 1110px 问题)
+                table_w, chart_w, filter_w = sizes
+                
+                # 如果 Filter 异常大 (> 600) 或 Chart 异常小 (< 300)
+                if filter_w > 600 or chart_w < 300:
+                    logger.warning(f"Detected corrupted layout {sizes}, resetting to safe defaults.")
+                    # 重置为更合理的比例，保留用户可能的 Table 宽度习惯
+                    safe_table = max(150, min(table_w, 400))
+                    safe_filter = 250
+                    # Chart 自动填充剩余
+                    self.main_splitter.setSizes([safe_table, 800, safe_filter])
+                else:
+                    self.main_splitter.setSizes(sizes)
+                
+                # 确保 Filter 宽度为 0 也能被正确识别为折叠
+                if sizes[2] == 0:
+                    # self.collapse_filter()
+                    f_w = sizes[2]
+                    new_sizes = [sizes[0] + f_w, sizes[1], 0]
+                    self.main_splitter.setSizes(new_sizes)
+                    
             else:
                 # 默认分割比例：股票列表:过滤面板:图表区域 = 1:1:4
-                self.main_splitter.setSizes([200, 200, 800])
+                self.main_splitter.setSizes([200, 800, 200])
             
             # --- 1.1 加载布局预设 ---
             self.layout_presets = config.get('layout_presets', {})
@@ -6866,7 +6995,7 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.warning(f"Failed to load visualizer config: {e}")
             # 使用默认值
-            self.main_splitter.setSizes([200, 200, 800])
+            self.main_splitter.setSizes([200, 800, 200])
 
     def _apply_pending_filter_index(self):
         """应用待定的过滤规则索引 (在 filter_combo 加载完成后调用)"""
@@ -6904,15 +7033,32 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 过滤隐藏面板的 0 值
             FILTER_INDEX = 2
-            FILTER_DEFAULT = 120
+            FILTER_DEFAULT = 160
             FILTER_MIN = 60
+            FILTER_MAX = 300  # 🛡️ 安全上限
 
             old_sizes = old_config.get('splitter_sizes', [])
+            
+            # 1. 如果当前 Filter 是隐藏的 (width <= 0)
             if fixed_sizes[FILTER_INDEX] <= 0:
+                # 尝试从历史配置恢复，但必须检查合法性
+                restored_val = FILTER_DEFAULT
                 if len(old_sizes) > FILTER_INDEX and old_sizes[FILTER_INDEX] > 0:
-                    fixed_sizes[FILTER_INDEX] = old_sizes[FILTER_INDEX]
-                else:
-                    fixed_sizes[FILTER_INDEX] = max(FILTER_DEFAULT, FILTER_MIN)
+                    val = old_sizes[FILTER_INDEX]
+                    # 如果历史值在合理范围内，则采纳；否则使用默认
+                    if FILTER_MIN <= val <= FILTER_MAX:
+                        restored_val = val
+                    else:
+                        # 历史值异常 (如 1110)，强制重置为默认
+                        restored_val = FILTER_DEFAULT
+                
+                fixed_sizes[FILTER_INDEX] = restored_val
+            
+            # 2. 如果当前 Filter 是显示的
+            else:
+                # 如果当前宽度异常大，保存时强制截断
+                if fixed_sizes[FILTER_INDEX] > FILTER_MAX:
+                    fixed_sizes[FILTER_INDEX] = FILTER_MAX
 
             # --- 2. Filter 配置 ---
             filter_config = old_config.get('filter', {})
@@ -6978,6 +7124,7 @@ class MainWindow(QMainWindow, WindowMixin):
         try:
             if hasattr(self, 'layout_presets'):
                 preset = self.layout_presets.get(str(index))
+
                 if preset:
                     # 兼容旧版本 (以前是 list，现在是 dict)
                     theme_changed = False
@@ -6997,7 +7144,10 @@ class MainWindow(QMainWindow, WindowMixin):
                             theme_changed = True
                     
                     if sizes:
+                        # self.filter_panel.setVisible(True)
+                        logger.debug(f'load_layout_preset sizes: {sizes}')
                         self.main_splitter.setSizes(sizes)
+                        # self.filter_panel.setVisible(False)
                     
                     if theme_changed:
                         self.apply_qt_theme()
@@ -7070,6 +7220,92 @@ class MainWindow(QMainWindow, WindowMixin):
         event.accept()
         # 6️⃣ 调用父类 closeEvent
         super().closeEvent(event)
+
+    # ================== 热点自选面板回调 ==================
+    def _toggle_hotlist_panel(self):
+        """Alt+H: 切换热点面板显示/隐藏"""
+        if hasattr(self, 'hotlist_panel'):
+            if self.hotlist_panel.isVisible():
+                self.hotlist_panel.hide()
+                logger.info("隐藏热点面板")
+            else:
+                self.hotlist_panel.show()
+                self.hotlist_panel.raise_()  # 确保在最前面
+                logger.info("显示热点面板")
+
+    def _add_to_hotlist(self):
+        """快捷键H: 添加当前股票到热点列表"""
+        if not self.current_code:
+            logger.info("无当前股票，无法添加热点")
+            return
+        
+        code = self.current_code
+        name = self.code_name_map.get(code, "")
+        
+        # 获取当前价格
+        price = 0.0
+        if not self.df_all.empty and code in self.df_all.index:
+            row = self.df_all.loc[code]
+            price = row.get('close', row.get('price', 0))
+        elif not self.day_df.empty:
+            price = self.day_df['close'].iloc[-1] if 'close' in self.day_df.columns else 0
+        
+        if hasattr(self, 'hotlist_panel'):
+            if self.hotlist_panel.contains(code):
+                logger.info(f"热点已存在: {code} {name}")
+            else:
+                success = self.hotlist_panel.add_stock(code, name, float(price), "手动添加")
+                if success:
+                    logger.info(f"🔥 添加热点: {code} {name} @ {float(price):.2f}")
+                    # 如果面板隐藏，自动显示
+                    if not self.hotlist_panel.isVisible():
+                        self.hotlist_panel.show()
+
+    def _on_hotlist_stock_selected(self, code: str, name: str):
+        """热点列表单击: 切换到该股票"""
+        if code and code != self.current_code:
+            self.load_stock_by_code(code, name)
+
+    def _on_hotlist_double_click(self, code: str, name: str, add_price: float):
+        """热点列表双击: 打开详情弹窗"""
+        logger.info(f"打开热点详情: {code} {name} (加入价: {add_price:.2f})")
+        
+        # 先加载该股票数据（确保K线预览可用）
+        if code and code != self.current_code:
+            self.load_stock_by_code(code, name)
+        
+        # 创建并显示详情弹窗
+        popup = HotSpotPopup(code, name, add_price, self)
+        
+        # 连接弹窗信号
+        popup.group_changed.connect(lambda c, g: self._on_popup_group_changed(c, g))
+        popup.stop_loss_set.connect(lambda c, sl: self._on_popup_stop_loss(c, sl))
+        popup.item_removed.connect(lambda c: self._on_popup_remove(c))
+        
+        # 更新弹窗中的当前价格
+        if not self.df_all.empty and code in self.df_all.index:
+            row = self.df_all.loc[code]
+            current_price = float(row.get('close', row.get('price', add_price)))
+            popup.update_price(current_price)
+        
+        popup.exec()
+
+    def _on_popup_group_changed(self, code: str, new_group: str):
+        """弹窗分组变更回调"""
+        if hasattr(self, 'hotlist_panel'):
+            self.hotlist_panel._set_group(code, new_group)
+            logger.info(f"更新分组: {code} -> {new_group}")
+
+    def _on_popup_stop_loss(self, code: str, stop_loss: float):
+        """弹窗止损设置回调"""
+        # TODO: 将止损写入数据库并在实时监控中使用
+        logger.info(f"设置止损: {code} @ {stop_loss:.2f}")
+
+    def _on_popup_remove(self, code: str):
+        """弹窗移除回调"""
+        if hasattr(self, 'hotlist_panel'):
+            self.hotlist_panel.remove_stock(code)
+            logger.info(f"从热点移除: {code}")
 
 
 def run_visualizer(initial_code=None, df_all=None):

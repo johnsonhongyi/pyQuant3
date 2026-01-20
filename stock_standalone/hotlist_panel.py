@@ -1,0 +1,581 @@
+# -*- coding: utf-8 -*-
+"""
+HotlistPanel - 热点自选面板
+支持快捷添加、盈亏跟踪、弹出详情窗口
+
+数据持久化：signal_strategy.db (follow_record 表)
+"""
+import sqlite3
+import logging
+from datetime import datetime
+from typing import Optional, List, Dict, Any
+from dataclasses import dataclass, asdict
+
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
+    QPushButton, QLabel, QHeaderView, QAbstractItemView, QMenu,
+    QMessageBox, QDialog, QFrame
+)
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from PyQt6.QtGui import QColor, QAction
+
+logger = logging.getLogger(__name__)
+
+DB_FILE = "signal_strategy.db"
+
+
+@dataclass
+class HotlistItem:
+    """热点项数据结构"""
+    id: int = 0
+    code: str = ""
+    name: str = ""
+    add_price: float = 0.0
+    add_time: str = ""
+    signal_type: str = "手动添加"
+    group: str = "观察"  # 观察/蓄势/已启动/持仓
+    current_price: float = 0.0
+    pnl_percent: float = 0.0
+    stop_loss: float = 0.0
+    notes: str = ""
+    status: str = "ACTIVE"
+
+
+class HotlistPanel(QWidget):
+    """
+    热点自选面板（浮动窗口）
+    
+    功能：
+    - 快速添加当前浏览股票到热点列表
+    - 显示加入价、当前价、盈亏百分比
+    - 双击跳转至该股票K线
+    - 右键菜单管理（移除、设置止损等）
+    - Alt+H 快捷键切换显示/隐藏
+    
+    信号：
+    - stock_selected: 用户选择了某只股票，通知主窗口切换
+    - item_double_clicked: 双击打开详情弹窗
+    """
+    
+    stock_selected = pyqtSignal(str, str)  # code, name
+    item_double_clicked = pyqtSignal(str, str, float)  # code, name, add_price
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.items: List[HotlistItem] = []
+        self._drag_pos = None
+        
+        # 设置为浮动工具窗口（可调整大小）
+        self.setWindowFlags(
+            Qt.WindowType.Tool |
+            Qt.WindowType.WindowStaysOnTopHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        self.setWindowTitle("🔥 热点自选")
+        
+        # 可调整大小范围
+        self.setMinimumWidth(200)
+        self.setMaximumWidth(400)
+        self.setMinimumHeight(250)
+        self.setMaximumHeight(800)
+        self.resize(280, 400)
+        
+        self._init_db()
+        self._init_ui()
+        self._load_from_db()
+        
+        # 定时刷新盈亏（每30秒）
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.timeout.connect(self._refresh_pnl)
+        self.refresh_timer.start(30000)
+    
+    def _init_db(self):
+        """确保数据库表存在，并扩展字段"""
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=10)
+            c = conn.cursor()
+            
+            # 检查 follow_record 表是否存在，如不存在则创建
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS follow_record (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signal_id INTEGER,
+                    code TEXT NOT NULL,
+                    name TEXT,
+                    follow_date TEXT,
+                    follow_price REAL,
+                    stop_loss REAL,
+                    status TEXT DEFAULT 'ACTIVE',
+                    exit_date TEXT,
+                    exit_price REAL,
+                    pnl_pct REAL,
+                    feedback TEXT
+                )
+            """)
+            
+            # Migration: 添加 group 字段
+            try:
+                c.execute("ALTER TABLE follow_record ADD COLUMN group_tag TEXT DEFAULT '观察'")
+            except sqlite3.OperationalError:
+                pass  # 字段已存在
+            
+            # Migration: 添加 signal_type 字段
+            try:
+                c.execute("ALTER TABLE follow_record ADD COLUMN signal_type TEXT DEFAULT '手动添加'")
+            except sqlite3.OperationalError:
+                pass
+            
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"HotlistPanel DB init error: {e}")
+    
+    def _init_ui(self):
+        """初始化UI"""
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(1, 1, 1, 1)
+        layout.setSpacing(0)
+        
+        # 外框样式
+        self.setStyleSheet("""
+            HotlistPanel {
+                background-color: #1e1e1e;
+                border: 1px solid #555;
+                border-radius: 4px;
+            }
+        """)
+        
+        # 标题栏（可拖动区域）
+        self.header = QFrame()
+        self.header.setFixedHeight(28)
+        self.header.setCursor(Qt.CursorShape.OpenHandCursor)
+        self.header.setStyleSheet("""
+            QFrame {
+                background-color: #2d2d2d;
+                border-bottom: 1px solid #444;
+                border-top-left-radius: 3px;
+                border-top-right-radius: 3px;
+            }
+            QLabel {
+                color: #FFD700;
+                font-weight: bold;
+                font-size: 10pt;
+            }
+            QPushButton {
+                background-color: transparent;
+                color: #888;
+                border: none;
+                font-size: 9pt;
+                padding: 2px 6px;
+            }
+            QPushButton:hover {
+                color: #FFD700;
+            }
+        """)
+        header_layout = QHBoxLayout(self.header)
+        header_layout.setContentsMargins(8, 0, 4, 0)
+        
+        title_label = QLabel("🔥 热点自选")
+        header_layout.addWidget(title_label)
+        header_layout.addStretch()
+        
+        # 刷新按钮
+        refresh_btn = QPushButton("🔄")
+        refresh_btn.setToolTip("刷新盈亏")
+        refresh_btn.clicked.connect(self._refresh_pnl)
+        header_layout.addWidget(refresh_btn)
+        
+        # 清空按钮
+        clear_btn = QPushButton("🗑️")
+        clear_btn.setToolTip("清空已退出")
+        clear_btn.clicked.connect(self._clear_exited)
+        header_layout.addWidget(clear_btn)
+        
+        # 关闭按钮
+        close_btn = QPushButton("✕")
+        close_btn.setToolTip("关闭 (Alt+H)")
+        close_btn.setStyleSheet("QPushButton:hover { color: #ff6b6b; }")
+        close_btn.clicked.connect(self.hide)
+        header_layout.addWidget(close_btn)
+        
+        layout.addWidget(self.header)
+        
+        # 表格
+        self.table = QTableWidget()
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(["代码", "名称", "加入价", "现价", "盈亏%", "分组"])
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_context_menu)
+        self.table.cellDoubleClicked.connect(self._on_double_click)
+        self.table.cellClicked.connect(self._on_click)
+        
+        # 表头设置
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        
+        self.table.verticalHeader().setVisible(False)
+        self.table.setStyleSheet("""
+            QTableWidget {
+                background-color: #1e1e1e;
+                color: #ddd;
+                border: none;
+                font-size: 10pt;
+            }
+            QTableWidget::item {
+                padding: 3px;
+            }
+            QTableWidget::item:selected {
+                background-color: #444;
+            }
+            QHeaderView::section {
+                background-color: #2a2a2a;
+                color: #aaa;
+                border: none;
+                padding: 4px;
+                font-size: 9pt;
+            }
+        """)
+        
+        layout.addWidget(self.table)
+        
+        # 状态栏
+        self.status_label = QLabel("共 0 只热点股")
+        self.status_label.setStyleSheet("color: #666; font-size: 9pt; padding: 2px 8px;")
+        layout.addWidget(self.status_label)
+    
+    def _load_from_db(self):
+        """从数据库加载热点列表"""
+        self.items.clear()
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=10)
+            conn.row_factory = sqlite3.Row
+            c = conn.cursor()
+            c.execute("""
+                SELECT * FROM follow_record 
+                WHERE status = 'ACTIVE' 
+                ORDER BY id DESC
+            """)
+            rows = c.fetchall()
+            conn.close()
+            
+            for r in rows:
+                item = HotlistItem(
+                    id=r['id'],
+                    code=r['code'],
+                    name=r['name'] or "",
+                    add_price=r['follow_price'] or 0.0,
+                    add_time=r['follow_date'] or "",
+                    stop_loss=r['stop_loss'] or 0.0,
+                    status=r['status'],
+                    group=r['group_tag'] if 'group_tag' in r.keys() else "观察",
+                    signal_type=r['signal_type'] if 'signal_type' in r.keys() else "手动添加"
+                )
+                self.items.append(item)
+            
+            self._refresh_table()
+        except Exception as e:
+            logger.error(f"Load hotlist error: {e}")
+    
+    def _refresh_table(self):
+        """刷新表格显示"""
+        self.table.setRowCount(len(self.items))
+        
+        for row, item in enumerate(self.items):
+            # 代码
+            code_item = QTableWidgetItem(item.code)
+            self.table.setItem(row, 0, code_item)
+            
+            # 名称
+            name_item = QTableWidgetItem(item.name)
+            self.table.setItem(row, 1, name_item)
+            
+            # 加入价
+            add_price_item = QTableWidgetItem(f"{item.add_price:.2f}")
+            add_price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.table.setItem(row, 2, add_price_item)
+            
+            # 现价
+            cur_price_item = QTableWidgetItem(f"{item.current_price:.2f}" if item.current_price > 0 else "-")
+            cur_price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.table.setItem(row, 3, cur_price_item)
+            
+            # 盈亏%
+            pnl_item = QTableWidgetItem(f"{item.pnl_percent:+.2f}%" if item.current_price > 0 else "-")
+            pnl_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            if item.pnl_percent > 0:
+                pnl_item.setForeground(QColor(220, 80, 80))  # 红色
+            elif item.pnl_percent < 0:
+                pnl_item.setForeground(QColor(80, 200, 120))  # 绿色
+            self.table.setItem(row, 4, pnl_item)
+            
+            # 分组
+            group_item = QTableWidgetItem(item.group)
+            group_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 5, group_item)
+        
+        self.status_label.setText(f"共 {len(self.items)} 只热点股")
+    
+    def add_stock(self, code: str, name: str, price: float, signal_type: str = "手动添加"):
+        """
+        添加股票到热点列表
+        
+        Args:
+            code: 股票代码
+            name: 股票名称
+            price: 加入时价格
+            signal_type: 信号类型
+        """
+        # 检查是否已存在
+        for item in self.items:
+            if item.code == code:
+                logger.info(f"热点已存在: {code} {name}")
+                return False
+        
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=10)
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO follow_record 
+                (code, name, follow_date, follow_price, status, signal_type, group_tag)
+                VALUES (?, ?, ?, ?, 'ACTIVE', ?, '观察')
+            """, (code, name, now, price, signal_type))
+            new_id = c.lastrowid
+            conn.commit()
+            conn.close()
+            
+            new_item = HotlistItem(
+                id=new_id,
+                code=code,
+                name=name,
+                add_price=price,
+                add_time=now,
+                current_price=price,
+                pnl_percent=0.0,
+                signal_type=signal_type,
+                group="观察"
+            )
+            self.items.insert(0, new_item)
+            self._refresh_table()
+            
+            logger.info(f"添加热点: {code} {name} @ {price:.2f}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Add hotlist error: {e}")
+            return False
+    
+    def remove_stock(self, code: str):
+        """移除股票"""
+        for item in self.items:
+            if item.code == code:
+                try:
+                    conn = sqlite3.connect(DB_FILE, timeout=10)
+                    c = conn.cursor()
+                    c.execute("UPDATE follow_record SET status = 'REMOVED' WHERE id = ?", (item.id,))
+                    conn.commit()
+                    conn.close()
+                    
+                    self.items.remove(item)
+                    self._refresh_table()
+                    logger.info(f"移除热点: {code}")
+                    return True
+                except Exception as e:
+                    logger.error(f"Remove hotlist error: {e}")
+        return False
+    
+    def update_prices(self, price_map: Dict[str, float]):
+        """
+        批量更新现价和盈亏
+        
+        Args:
+            price_map: {code: current_price}
+        """
+        for item in self.items:
+            if item.code in price_map:
+                item.current_price = price_map[item.code]
+                if item.add_price > 0:
+                    item.pnl_percent = (item.current_price - item.add_price) / item.add_price * 100
+        
+        self._refresh_table()
+    
+    def _refresh_pnl(self):
+        """刷新盈亏数据（从主窗口的df_all获取）"""
+        parent = self.parent()
+        if parent and hasattr(parent, 'df_all') and not parent.df_all.empty:
+            df = parent.df_all
+            price_map = {}
+            for item in self.items:
+                if item.code in df.index:
+                    row = df.loc[item.code]
+                    price_map[item.code] = row.get('close', row.get('price', 0))
+            
+            if price_map:
+                self.update_prices(price_map)
+    
+    def _clear_exited(self):
+        """清空已退出的记录"""
+        try:
+            conn = sqlite3.connect(DB_FILE, timeout=10)
+            c = conn.cursor()
+            c.execute("DELETE FROM follow_record WHERE status != 'ACTIVE'")
+            conn.commit()
+            conn.close()
+            logger.info("已清空退出记录")
+        except Exception as e:
+            logger.error(f"Clear exited error: {e}")
+    
+    def _on_click(self, row: int, col: int):
+        """单击切换股票"""
+        if 0 <= row < len(self.items):
+            item = self.items[row]
+            self.stock_selected.emit(item.code, item.name)
+    
+    def _on_double_click(self, row: int, col: int):
+        """双击打开详情"""
+        if 0 <= row < len(self.items):
+            item = self.items[row]
+            self.item_double_clicked.emit(item.code, item.name, item.add_price)
+    
+    def _on_context_menu(self, pos):
+        """右键菜单"""
+        row = self.table.currentRow()
+        if row < 0 or row >= len(self.items):
+            return
+        
+        item = self.items[row]
+        menu = QMenu(self)
+        
+        # 移除
+        remove_action = QAction("❌ 移除", self)
+        remove_action.triggered.connect(lambda: self.remove_stock(item.code))
+        menu.addAction(remove_action)
+        
+        menu.addSeparator()
+        
+        # 分组切换
+        group_menu = menu.addMenu("📁 分组")
+        for g in ["观察", "蓄势", "已启动", "持仓"]:
+            action = QAction(g, self)
+            action.triggered.connect(lambda checked, grp=g: self._set_group(item.code, grp))
+            group_menu.addAction(action)
+        
+        menu.exec(self.table.mapToGlobal(pos))
+    
+    def _set_group(self, code: str, group: str):
+        """设置分组"""
+        for item in self.items:
+            if item.code == code:
+                item.group = group
+                try:
+                    conn = sqlite3.connect(DB_FILE, timeout=10)
+                    c = conn.cursor()
+                    c.execute("UPDATE follow_record SET group_tag = ? WHERE id = ?", (group, item.id))
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    logger.error(f"Set group error: {e}")
+                break
+        self._refresh_table()
+    
+    def contains(self, code: str) -> bool:
+        """检查是否已包含该股票"""
+        return any(item.code == code for item in self.items)
+
+    # ================== 拖动支持 ==================
+    def mousePressEvent(self, event):
+        """记录拖动起始位置"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            # 检查是否在标题栏区域
+            if hasattr(self, 'header') and self.header.geometry().contains(event.pos()):
+                self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                self.header.setCursor(Qt.CursorShape.ClosedHandCursor)
+                event.accept()
+            else:
+                self._drag_pos = None
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        """处理拖动"""
+        if self._drag_pos is not None and event.buttons() == Qt.MouseButton.LeftButton:
+            self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """结束拖动"""
+        if self._drag_pos is not None:
+            self._drag_pos = None
+            if hasattr(self, 'header'):
+                self.header.setCursor(Qt.CursorShape.OpenHandCursor)
+            self._save_position()  # 自动保存位置
+        super().mouseReleaseEvent(event)
+
+    # ================== 位置保存/加载 ==================
+    def _get_config_path(self) -> str:
+        """获取配置文件路径"""
+        import os
+        return os.path.join(os.path.dirname(__file__), "hotlist_position.json")
+
+    def _save_position(self):
+        """保存窗口位置和尺寸"""
+        import json
+        try:
+            config = {
+                "x": self.x(),
+                "y": self.y(),
+                "width": self.width(),
+                "height": self.height(),
+                "visible": self.isVisible()
+            }
+            with open(self._get_config_path(), "w", encoding="utf-8") as f:
+                json.dump(config, f)
+        except Exception as e:
+            logger.debug(f"Save hotlist position error: {e}")
+
+    def _load_position(self):
+        """加载窗口位置和尺寸"""
+        import json
+        import os
+        try:
+            path = self._get_config_path()
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                    self.move(config.get("x", 100), config.get("y", 100))
+                    # 恢复尺寸
+                    w = config.get("width", 280)
+                    h = config.get("height", 400)
+                    self.resize(w, h)
+                    if config.get("visible", True):
+                        self.show()
+                    return True
+        except Exception as e:
+            logger.debug(f"Load hotlist position error: {e}")
+        return False
+
+    def showEvent(self, event):
+        """首次显示时加载位置"""
+        if not hasattr(self, '_pos_loaded'):
+            self._pos_loaded = True
+            if not self._load_position():
+                # 默认位置：主窗口右侧
+                parent = self.parent()
+                if parent:
+                    parent_geo = parent.geometry()
+                    self.move(parent_geo.right() - 290, parent_geo.top() + 50)
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        """隐藏时保存位置"""
+        self._save_position()
+        super().hideEvent(event)
+
