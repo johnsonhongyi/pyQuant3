@@ -6195,8 +6195,10 @@ class MainWindow(QMainWindow, WindowMixin):
             # self.populate_tree_from_df(matches)
 
             # --- 3. 设置列头 ---
-            self.filter_tree.setColumnCount(4)
-            self.filter_tree.setHeaderLabels(['Code', 'Name', 'Rank', 'Percent'])
+            filter_col = ['Code', 'Name', 'Rank','win', 'Percent']
+            count_col = len(filter_col)
+            self.filter_tree.setColumnCount(count_col)
+            self.filter_tree.setHeaderLabels(filter_col)
             self.filter_tree.setSortingEnabled(True)
             self.filter_tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
             self.filter_tree.setHorizontalScrollMode(QTreeWidget.ScrollMode.ScrollPerPixel)
@@ -6207,31 +6209,39 @@ class MainWindow(QMainWindow, WindowMixin):
                 code = str(row['code'])
                 name = str(row.get('name', ''))
                 rank = row.get('Rank', 0)
+                win = row.get('win', 0)
                 pct = row.get('percent', 0)
 
                 # 安全转换数值
                 try:
-                    rank_val = float(rank) if rank not in ('', None, 'nan') else float('inf')
+                    rank_val = int(rank) if rank not in ('', None, 'nan') else float('inf')
                 except (ValueError, TypeError):
-                    rank_val = float('inf')
+                    rank_val = 0
                 try:
                     pct_val = float(pct) if pct not in ('', None, 'nan') else 0.0
                 except (ValueError, TypeError):
                     pct_val = 0.0
 
+                try:
+                    win_val = int(win) if win not in ('', None, 'nan') else 0
+                except (ValueError, TypeError):
+                    win_val = 0
+
                 child = NumericTreeWidgetItem(self.filter_tree)
                 child.setText(0, code)
                 child.setText(1, name)
                 child.setText(2, str(rank) if rank not in ('', None) else '')
-                child.setText(3, f"{pct_val:.2f}%")
+                child.setText(3, f"{win_val}")
+                child.setText(4, f"{pct_val:.2f}%")
                 child.setData(0, Qt.ItemDataRole.UserRole, code)
 
                 # ⭐ 关键修复：使用UserRole+1存储数值用于排序
                 child.setData(2, Qt.ItemDataRole.UserRole, rank_val)  # Rank列数值
-                child.setData(3, Qt.ItemDataRole.UserRole, pct_val)    # Percent列数值
+                child.setData(3, Qt.ItemDataRole.UserRole, win_val)    # Percent列数值
+                child.setData(4, Qt.ItemDataRole.UserRole, pct_val)    # Percent列数值
 
                 # 左对齐
-                for col in range(4):
+                for col in range(count_col):
                     child.setTextAlignment(col, Qt.AlignmentFlag.AlignLeft)
 
                 # 百分比上色
