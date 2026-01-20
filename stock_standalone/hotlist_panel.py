@@ -75,10 +75,10 @@ class HotlistPanel(QWidget):
         
         # 可调整大小范围
         self.setMinimumWidth(200)
-        self.setMaximumWidth(400)
+        self.setMaximumWidth(800)  # [OPTIMIZE] Allow wider window
         self.setMinimumHeight(250)
         self.setMaximumHeight(800)
-        self.resize(280, 400)
+        self.resize(580, 400)      # [OPTIMIZE] Wider default size
         
         self._init_db()
         self._init_ui()
@@ -202,8 +202,8 @@ class HotlistPanel(QWidget):
         
         # 表格
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["代码", "名称", "加入价", "现价", "盈亏%", "分组"])
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["代码", "名称", "加入价", "现价", "盈亏%", "分组", "时间"])
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -213,12 +213,15 @@ class HotlistPanel(QWidget):
         
         # 表头设置
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents) # Code
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)           # Name (Stretch to fill)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # Add Price
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # Cur Price
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # PnL
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)            # Group
+        self.table.setColumnWidth(5, 50)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)            # Time
+        self.table.setColumnWidth(6, 45)                                        # Compact time width
         
         self.table.verticalHeader().setVisible(False)
         self.table.setStyleSheet("""
@@ -319,6 +322,12 @@ class HotlistPanel(QWidget):
             group_item = QTableWidgetItem(item.group)
             group_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row, 5, group_item)
+
+            # 时间 (显示短时间格式)
+            time_str = item.add_time[5:-3] if len(item.add_time) > 10 else item.add_time
+            time_item = QTableWidgetItem(time_str)
+            time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 6, time_item)
         
         self.status_label.setText(f"共 {len(self.items)} 只热点股")
     

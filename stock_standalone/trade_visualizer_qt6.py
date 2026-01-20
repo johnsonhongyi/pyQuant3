@@ -2088,6 +2088,16 @@ class MainWindow(QMainWindow, WindowMixin):
         btn_refresh.clicked.connect(self.load_history_filters)
         button_row.addWidget(btn_refresh)
 
+        # ⭐ 新增: 面板折叠切换按钮
+        self.toggle_filter_btn = QPushButton("▶")
+        self.toggle_filter_btn.setToolTip("收起筛选面板")
+        self.toggle_filter_btn.setMaximumWidth(30)
+        self.toggle_filter_btn.setCheckable(True) # 让它可以保持按下状态? 不需要，只是触发
+        # 这里 checked 参数传递给 toggle_filter_panel，需要反转逻辑：点击时如果是折叠的->展开(checked=True)，反之亦然
+        # 但 toggle_filter_panel(checked) 的 checked 是目标状态 (True=显示, False=隐藏)
+        # 我们可以简单的连接到一个中间 slot 或者使用 lambda
+        self.toggle_filter_btn.clicked.connect(self._on_toggle_filter_clicked)
+        button_row.addWidget(self.toggle_filter_btn)
 
         button_row.addStretch()
         filter_layout.addLayout(button_row)
@@ -2143,6 +2153,11 @@ class MainWindow(QMainWindow, WindowMixin):
             }
         """
         self.filter_tree.setStyleSheet(scrollbar_style)
+        
+        # [NEW] Enable Context Menu for Filter Tree
+        self.filter_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.filter_tree.customContextMenuRequested.connect(self.on_filter_tree_right_click)
+        
         filter_layout.addWidget(self.filter_tree)
 
         # self.filter_panel.setVisible(False)
@@ -2156,6 +2171,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.main_splitter.setStretchFactor(0, 0) # 左侧列表：不自动拉伸
         self.main_splitter.setStretchFactor(1, 1) # 中间图表：自动占满空间
         self.main_splitter.setStretchFactor(2, 0) # 右侧过滤：不自动拉伸
+
+        # ⭐ [SYNC] 监听 Splitter 移动，实时更新按钮状态
+        self.main_splitter.splitterMoved.connect(self.on_main_splitter_moved)
 
         # 安装全局事件过滤器
         # 安装全局事件过滤器 (安装到 QApplication 以便支持 App 级全局)
@@ -2174,7 +2192,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.load_splitter_state()
         self._init_td_text_pool()
         self._init_tick_signal_pool()
-
+        # self._show_filter_panel()
+        
     def showEvent(self, event):
         super().showEvent(event)
 
@@ -2695,12 +2714,12 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.signal_box_dialog.activateWindow()
 
      # 安全折叠 filter
-    def collapse_filter(self):
-        sizes = self.main_splitter.sizes()
-        logger.info(f'collapse_filter sizes: {len(sizes)}')
-        # if len(sizes) > 2:
-        sizes[2] = 0
-        self.main_splitter.setSizes(sizes)
+    # def collapse_filter(self):
+    #     sizes = self.main_splitter.sizes()
+    #     logger.info(f'collapse_filter sizes: {len(sizes)}')
+    #     # if len(sizes) > 2:
+    #     sizes[2] = 0
+    #     self.main_splitter.setSizes(sizes)
 
     # 安全展开 filter
     # def expand_filter(self, width=250):
@@ -2734,9 +2753,11 @@ class MainWindow(QMainWindow, WindowMixin):
         if is_presently_visible:
             # 隐藏 Filter
             self.toggle_filter_panel(False)
+            self.filter_action.setChecked(False)
         else:
             # 打开 Filter
             self.toggle_filter_panel(True)
+            self.filter_action.setChecked(True)
 
     def _update_signal_badge(self):
         if hasattr(self, 'signal_box_dialog') and self.signal_box_dialog._queue_mgr:
@@ -3904,6 +3925,21 @@ class MainWindow(QMainWindow, WindowMixin):
             logger.debug(f'load_layout_preset current_sizes: {current_sizes}')
             self.main_splitter.setSizes(current_sizes)
 
+        # [NEW] Init Hotspot Menu
+        self._init_hotspot_menu()
+
+    def _init_hotspot_menu(self):
+        """初始化热点跟踪菜单"""
+        if hasattr(self, '_hotspot_action'):
+            return
+
+        menubar = self.menuBar()
+        # 直接添加顶级 Action
+        self._hotspot_action = QAction("🔥 热点跟踪(Alt+H)", self)
+        self._hotspot_action.setShortcut("Alt+H")
+        self._hotspot_action.triggered.connect(lambda: self.hotlist_panel.show())
+        menubar.addAction(self._hotspot_action)
+
     def _init_layout_menu(self):
         """初始化布局预设菜单 (优化版：分层明确，防误触)"""
         if not hasattr(self, '_layout_menu'):
@@ -4514,16 +4550,24 @@ class MainWindow(QMainWindow, WindowMixin):
 
     # 2️⃣ 处理右键事件
     def on_table_right_click(self, pos):
+        logger.info(f"on_table_right_click at {pos}")
         item = self.stock_table.itemAt(pos)
         if not item:
+            logger.info("No item at pos")
             return
 
         stock_code = item.data(Qt.ItemDataRole.UserRole)
-        if not stock_code or self.df_all.empty:
+        logger.info(f"Right click stock_code: {stock_code}")
+        
+        if not stock_code:
             return
 
-        # 获取股票信息
-        row = self.df_all.loc[stock_code] if stock_code in self.df_all.index else None
+        # 获取股票信息 (允许 df_all 为空时尝试从 item 获取基础信息)
+        if hasattr(self, 'df_all') and not self.df_all.empty and stock_code in self.df_all.index:
+            row = self.df_all.loc[stock_code]
+        else:
+            row = None
+        
         stock_name = row.get('name', '') if row is not None else ''
         
         # 创建右键菜单
@@ -4540,6 +4584,34 @@ class MainWindow(QMainWindow, WindowMixin):
         hotlist_action.triggered.connect(lambda: self._on_add_to_hotlist_from_menu(stock_code, stock_name, row))
         
         menu.exec(self.stock_table.mapToGlobal(pos))
+
+    def on_filter_tree_right_click(self, pos):
+        """Filter Tree 右键菜单"""
+        logger.info(f"on_filter_tree_right_click at {pos}")
+        item = self.filter_tree.itemAt(pos)
+        if not item: 
+            logger.info("No filter item at pos")
+            return
+        
+        # 假设第一列是 Code
+        stock_code = item.text(0)
+        stock_name = item.text(1) if item.columnCount() > 1 else ""
+        logger.info(f"Filter tree code: {stock_code}")
+        
+        if not stock_code: return
+        
+        menu = QMenu(self)
+        
+        # 添加到热点
+        hotlist_action = menu.addAction("🔥 添加到热点自选")
+        row = self.df_all.loc[stock_code] if (hasattr(self, 'df_all') and not self.df_all.empty and stock_code in self.df_all.index) else None
+        hotlist_action.triggered.connect(lambda: self._on_add_to_hotlist_from_menu(stock_code, stock_name, row))
+        
+        # 发送到通达信
+        send_action = menu.addAction("📤 发送到通达信")
+        send_action.triggered.connect(lambda: self._on_send_to_tdx(stock_code, row))
+
+        menu.exec(self.filter_tree.mapToGlobal(pos))
 
     def _on_send_to_tdx(self, stock_code, row):
         """发送到通达信"""
@@ -4621,13 +4693,69 @@ class MainWindow(QMainWindow, WindowMixin):
                     if getattr(self, "_clicked_change", False):
                         self._clicked_change = False
 
+    def _check_hotspot_alerts(self, df):
+        """检查热点股票的实时信号并语音播报"""
+        if not hasattr(self, 'hotlist_panel') or not self.hotlist_panel.items:
+            return
+            
+        # 如果传入的是 dict (新协议)，尝试提取 data 部分
+        if isinstance(df, dict):
+            df = df.get('data', getattr(self, 'df_all', None))
+            
+        if not isinstance(df, pd.DataFrame):
+            return
+
+        # 简单的频率控制 (每5秒最多一次播报)
+        import time
+        now = time.time()
+        if not hasattr(self, '_last_alert_time'):
+            self._last_alert_time = 0
+            self._alerted_signals = {}  # {code: last_action_str}
+        
+        # 遍历热点股
+        alerts = []
+        for item in self.hotlist_panel.items:
+            if item.code in df.index:
+                row = df.loc[item.code]
+                # 检查 last_action 列 (策略信号)
+                action = row.get('last_action', '')
+                if action and ('买' in str(action) or '卖' in str(action)):
+                    # 检查是否是新信号
+                    last_val = self._alerted_signals.get(item.code, '')
+                    if str(action) != last_val:
+                        self._alerted_signals[item.code] = str(action)
+                        alerts.append(f"{item.name} {action}")
+        
+        if alerts and (now - self._last_alert_time > 5):
+            alert_msg = "热点提醒: " + " ".join(alerts)
+            logger.info(alert_msg)
+            # 语音播报
+            try:
+                import pyttsx3
+                engine = pyttsx3.init()
+                engine.say(alert_msg)
+                engine.runAndWait()
+            except Exception:
+                pass
+            
+            # 状态栏提示 (如果界面存在)
+            if self.isVisible():
+                self.statusBar().showMessage(f"🔔 {alert_msg}", 10000)
+            
+            self._last_alert_time = now
+
     def on_dataframe_received(self, df, msg_type):
         """接收 DataFrame 更新 (优化: 避免阻塞主线程)
         
         [CRITICAL FIX] 防重复处理：
         - 当正在处理全量同步时，忽略后续的重复 ver=0 请求
         - 避免多个全量同步并发执行导致卡死
+        
+        [NEW] 实时热点监控
         """
+        # [NEW] 实时热点监控
+        self._check_hotspot_alerts(df)
+
         # ⚡ [CRITICAL] 初始化/检查防重复标志
         if not hasattr(self, '_is_processing_full_sync'):
             self._is_processing_full_sync = False
@@ -5053,6 +5181,109 @@ class MainWindow(QMainWindow, WindowMixin):
             print_timing_summary(top_n=6)
 
 
+
+    def _draw_hotspot_markers(self, code, x_axis, day_df):
+        """在 K 线图上绘制热点加入标记"""
+        # 先清理旧标记
+        self._clear_hotspot_markers()
+        
+        if not hasattr(self, 'hotlist_panel'):
+            return
+            
+        # 尝试匹配：直接匹配 or 6位代码匹配
+        target_item = None
+        
+        # 1. 直接匹配
+        if self.hotlist_panel.contains(code):
+            for it in self.hotlist_panel.items:
+                if it.code == code:
+                    target_item = it
+                    break
+        
+        # 2. 如果没找到，尝试模糊匹配 (6位代码)
+        if not target_item:
+            short_code = code[:6]
+            for it in self.hotlist_panel.items:
+                if it.code[:6] == short_code:
+                    target_item = it
+                    break
+                    
+        if not target_item: 
+            return
+        
+        item = target_item
+        
+        try:
+            # 解析日期
+            add_time_str = item.add_time
+            if len(add_time_str) >= 10:
+                add_date = add_time_str[:10]
+            else:
+                add_date = add_time_str
+            
+            # 确保日期格式一致 (YYYY-MM-DD)
+            # day_df.index 通常是字符串 'YYYY-MM-DD'
+            
+            # 查找对应的 K 线索引
+            if add_date in day_df.index:
+                # 获取整数索引
+                idx = day_df.index.get_loc(add_date)
+                # 处理重复索引的情况
+                if isinstance(idx, slice):
+                    idx = idx.start
+                elif hasattr(idx, '__iter__'): # array or list
+                    idx = idx[0]
+                
+                # 获取坐标
+                try: 
+                    x_pos = x_axis[idx] 
+                except:
+                    # 如果索引越界或 x_axis 不对齐，尝试重新推算 (简单的 idx 对应)
+                    x_pos = idx
+                
+                low_val = day_df['low'].iloc[idx]
+                price = item.add_price
+                
+                # 绘制一条横向虚线指示加入价 (更短一些)
+                # 长度：从加入点开始，向右延伸 12 个 bar
+                line_len = 12
+                x_end = x_pos + line_len
+                line = pg.PlotCurveItem(
+                    x=[x_pos, x_end], 
+                    y=[price, price], 
+                    pen=pg.mkPen('#FF4500', width=1, style=Qt.PenStyle.DashLine)
+                )
+                self.kline_plot.addItem(line)
+
+                # 绘制价格标签 (在虚线上方)
+                # anchor=(0, 1) => 锚点在文本左下角 -> 文本显示在坐标点上方
+                msg = f'<div style="color: #FF4500; font-weight: bold; font-size: 9pt;">¥{price:.2f}</div>'
+                label = pg.TextItem(html=msg, anchor=(0, 1))
+                label.setPos(x_pos, price)
+                self.kline_plot.addItem(label)
+
+                # 绘制火焰图标 (在虚线下方)
+                # anchor=(0, 0) => 锚点在文本左上角 -> 文本显示在坐标点下方
+                marker = pg.TextItem(html='<div style="font-size: 14pt;">🔥</div>', anchor=(0, 0)) 
+                marker.setPos(x_pos, price)
+                self.kline_plot.addItem(marker)
+                
+                # 保存引用以便清理
+                self.hotspot_items.extend([marker, label, line])
+                
+        except Exception as e:
+            logger.debug(f"Draw hotspot marker error: {e}")
+
+    def _clear_hotspot_markers(self):
+        """清理旧的热点标记"""
+        if hasattr(self, 'hotspot_items'):
+            for item in self.hotspot_items:
+                if item in self.kline_plot.items:
+                    self.kline_plot.removeItem(item)
+            self.hotspot_items.clear()
+        else:
+            self.hotspot_items = []
+
     # def render_charts_opt(self, code, day_df, tick_df):
     def render_charts(self, code, day_df, tick_df):
         """
@@ -5332,6 +5563,9 @@ class MainWindow(QMainWindow, WindowMixin):
             except Exception as e:
                 logger.debug(f"TD Sequential display error: {e}")
 
+        # [NEW] 绘制热点加入标记
+        self._draw_hotspot_markers(code, x_axis, day_df)
+
         # ----------------- 绘制 Volume -----------------
         if 'amount' in day_df.columns:
             if not hasattr(self, 'volume_plot'):
@@ -5432,22 +5666,23 @@ class MainWindow(QMainWindow, WindowMixin):
                     ))
 
         # 3. 实时影子信号 (K线占位图标)
-        is_realtime_active = self.realtime and not tick_df.empty and (cct.get_work_time_duration() or self._debug_realtime)
+        is_realtime_active = (self.realtime and not tick_df.empty) or (cct.get_work_time_duration() or self._debug_realtime)
         if is_realtime_active:
-            shadow_decision = self._run_realtime_strategy(code, day_df, tick_df)
-            if shadow_decision and shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
-                # 优先使用 close, 其次 trade, 最后 price
-                price_col = 'close' if 'close' in tick_df.columns else ('trade' if 'trade' in tick_df.columns else 'price')
-                y_p = float(tick_df[price_col].iloc[-1]) if price_col in tick_df.columns else 0
-                # 当前 K 线索引是 dates 长度（即下一根未收盘的 K 线）
-                kline_signals.append(SignalPoint(
-                    code=code, timestamp="REALTIME", bar_index=len(dates), price=y_p,
-                    signal_type=SignalType.BUY if '买' in shadow_decision['action'] or 'ADD' in shadow_decision['action'] else SignalType.SELL,
-                    source=SignalSource.SHADOW_ENGINE,
-                    reason=shadow_decision['reason'],
-                    debug_info=shadow_decision.get('debug', {})
-                ))
-                self.last_shadow_decision = shadow_decision # 存储供简报使用
+            with timed_ctx("_run_realtime_strategy", warn_ms=100):
+                shadow_decision = self._run_realtime_strategy(code, day_df, tick_df)
+                if shadow_decision and shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
+                    # 优先使用 close, 其次 trade, 最后 price
+                    price_col = 'close' if 'close' in tick_df.columns else ('trade' if 'trade' in tick_df.columns else 'price')
+                    y_p = float(tick_df[price_col].iloc[-1]) if price_col in tick_df.columns else 0
+                    # 当前 K 线索引是 dates 长度（即下一根未收盘的 K 线）
+                    kline_signals.append(SignalPoint(
+                        code=code, timestamp="REALTIME", bar_index=len(dates), price=y_p,
+                        signal_type=SignalType.BUY if '买' in shadow_decision['action'] or 'ADD' in shadow_decision['action'] else SignalType.SELL,
+                        source=SignalSource.SHADOW_ENGINE,
+                        reason=shadow_decision['reason'],
+                        debug_info=shadow_decision.get('debug', {})
+                    ))
+                    self.last_shadow_decision = shadow_decision # 存储供简报使用
 
         # 执行 K 线绘图 (计算视觉偏移)
         self.current_kline_signals = kline_signals # ⭐ 保存信号供十字光标显示 (1.3)
@@ -5486,7 +5721,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # -------------------------
 
         # --- Ghost Candle (实时占位) ---
-        is_realtime_active = self.realtime and not tick_df.empty and (cct.get_work_time_duration() or self._debug_realtime)
+        logger.debug(f'is_realtime_active: {is_realtime_active}')
         if is_realtime_active:
             current_price = float(tick_df['close'].iloc[-1])
             last_hist_date = str(day_df.index[-1]).split()[0]
@@ -5701,25 +5936,25 @@ class MainWindow(QMainWindow, WindowMixin):
             # --- [UPGRADE] Intraday Tick Signals (Shadow/Realtime) ---
             # 直接在分时图上标记影子信号
 
-            # if is_realtime_active and self.show_strategy_simulation:
-            #     # 复用刚才计算好的实时影子决策
-            #     if 'shadow_decision' in locals() and shadow_decision and shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
-            #         y_p = float(tick_df['price'].iloc[-1])
-            #         idx = len(tick_df) - 1
-            #         tick_point = SignalPoint(
-            #             code=code, timestamp="TICK_LIVE", bar_index=idx, price=y_p,
-            #             signal_type=SignalType.BUY if '买' in shadow_decision['action'] or 'ADD' in shadow_decision['action'] else SignalType.SELL,
-            #             source=SignalSource.SHADOW_ENGINE,
-            #             reason=shadow_decision['reason'],
-            #             debug_info=shadow_decision.get('debug', {})
-            #         )
-            #         self.signal_overlay.update_signals([tick_point], target='tick')
-
-
             if is_realtime_active and self.show_strategy_simulation:
-                if 'shadow_decision' in locals() and shadow_decision:
-                    # [OPTIMIZATION] Consolidated into signal_overlay. kline_signals already contains this.
-                    pass
+                # 复用刚才计算好的实时影子决策
+                if 'shadow_decision' in locals() and shadow_decision and shadow_decision.get('action') in ("买入", "卖出", "止损", "止盈", "ADD"):
+                    y_p = float(tick_df['close'].iloc[-1])
+                    idx = len(tick_df) - 1
+                    tick_point = SignalPoint(
+                        code=code, timestamp="TICK_LIVE", bar_index=idx, price=y_p,
+                        signal_type=SignalType.BUY if '买' in shadow_decision['action'] or 'ADD' in shadow_decision['action'] else SignalType.SELL,
+                        source=SignalSource.SHADOW_ENGINE,
+                        reason=shadow_decision['reason'],
+                        debug_info=shadow_decision.get('debug', {})
+                    )
+                    self.signal_overlay.update_signals([tick_point], target='tick')
+
+
+            # if is_realtime_active and self.show_strategy_simulation:
+            #     if 'shadow_decision' in locals() and shadow_decision:
+            #         # [OPTIMIZATION] Consolidated into signal_overlay. kline_signals already contains this.
+            #         pass
 
 
 
@@ -6221,9 +6456,19 @@ class MainWindow(QMainWindow, WindowMixin):
                     vwap_bias = auto_data.get('vwap_bias', 0)
                     sensing_parts.append(f"🛡️监理(自): 偏离{vwap_bias:+.1%} 胜率{mwr:.1%} 连亏{ls}")
 
+        # [NEW] 实时决策信息显示
+        decision_html = ""
+        if hasattr(self, 'last_shadow_decision') and self.last_shadow_decision:
+            d = self.last_shadow_decision
+            action = d.get('action', '')
+            reason = d.get('reason', '')
+            if action:
+                color = "#FF4500" if "买" in action or "ADD" in action else "#00CED1"
+                decision_html = f"  |  🚀策略: <span style='color: {color}; font-weight: bold; font-size: 14pt;'>{action}</span> <span style='color: #AAA; font-size: 10pt;'>({reason})</span>"
+
         if sensing_parts:
             sensing_html = " ".join(sensing_parts)
-            new_title = f"{base_title}  |  <span style='color: #FFD700; font-weight: bold;'>{sensing_html}</span>"
+            new_title = f"{base_title}  |  <span style='color: #FFD700; font-weight: bold;'>{sensing_html}</span>{decision_html}"
             self.tick_plot.setTitle(new_title)
 
     def _get_autonomous_supervision_data(self, code):
@@ -6421,6 +6666,46 @@ class MainWindow(QMainWindow, WindowMixin):
             filter_action.setCheckable(True)
             filter_action.triggered.connect(self.toggle_filter_panel)
             self.filter_action = filter_action
+
+    def on_main_splitter_moved(self, pos, index):
+        """当 Splitter 被拖动时，实时同步 Filter 按钮状态"""
+        # 只有当拖动的是右侧分割条 (index=2 ? check logic)
+        # Splitter valid indices for moved signal are 1..count-1. 
+        # For 3 widgets (0,1,2), moving the right handle is usually index 2 (between 1 and 2).
+        
+        sizes = self.main_splitter.sizes()
+        if len(sizes) >= 3:
+            filter_width = sizes[2]
+            
+            # 判断是否处于折叠状态
+            is_collapsed = (filter_width <= 0)
+            self.is_filter_collapsed = is_collapsed
+            
+            # 1. 更新 Toolbar Action
+            if hasattr(self, 'filter_action'):
+                self.filter_action.blockSignals(True)
+                self.filter_action.setChecked(not is_collapsed)
+                self.filter_action.blockSignals(False)
+                
+            # 2. 更新 Toggle 按钮图标
+            if hasattr(self, 'toggle_filter_btn'):
+                btn_text = "◀" if is_collapsed else "▶"
+                self.toggle_filter_btn.setText(btn_text)
+                tooltip = "展开筛选面板" if is_collapsed else "收起筛选面板"
+                self.toggle_filter_btn.setToolTip(tooltip)
+    
+    def _on_toggle_filter_clicked(self):
+        """处理面板上的 Toggle 按钮点击"""
+        # 获取当前状态
+        sizes = self.main_splitter.sizes()
+        if len(sizes) < 3: return
+        
+        is_collapsed = (sizes[2] <= 0)
+        # 如果当前是折叠的，点击意味着展开 -> checked=True
+        # 如果当前是展开的，点击意味着折叠 -> checked=False
+        target_state = is_collapsed 
+        
+        self.toggle_filter_panel(target_state)
 
     def toggle_filter_panel(self, checked):
         """⭐ [UI OPTIMIZATION] 内部平移方案：开启 Filter 时压缩左侧列表，确保 K 线图不被挤压，且窗口不漂移"""
@@ -6878,11 +7163,27 @@ class MainWindow(QMainWindow, WindowMixin):
                     self.main_splitter.setSizes(sizes)
                 
                 # 确保 Filter 宽度为 0 也能被正确识别为折叠
+                # 确保 Filter 宽度为 0 也能被正确识别为折叠
                 if sizes[2] == 0:
-                    # self.collapse_filter()
-                    f_w = sizes[2]
-                    new_sizes = [sizes[0] + f_w, sizes[1], 0]
+                    # 临时允许缩小至 0，防止 setMinimumWidth 阻挡
+                    if hasattr(self, 'filter_panel_container'):
+                        self.filter_panel_container.setMinimumWidth(0)
+                        
+                    f_w = 0 
+                    new_sizes = [sizes[0], sizes[1], f_w]
+                    # 强制应用
                     self.main_splitter.setSizes(new_sizes)
+                    
+                    # 更新 toggle 按钮状态
+                    if hasattr(self, 'toggle_filter_btn'):
+                        self.toggle_filter_btn.setText("◀")
+                        self.toggle_filter_btn.setToolTip("展开筛选面板")
+                    
+                    self.is_filter_collapsed = True
+                else:
+                    self.is_filter_collapsed = False
+                    if hasattr(self, 'toggle_filter_btn'):
+                        self.toggle_filter_btn.setText("▶")
                     
             else:
                 # 默认分割比例：股票列表:过滤面板:图表区域 = 1:1:4
@@ -6985,9 +7286,16 @@ class MainWindow(QMainWindow, WindowMixin):
                 enabled = bool(window_config.get('show_td_sequential', True))
                 self.show_td_sequential = enabled
                 if hasattr(self, 'td_action'):
-                    self.td_action.blockSignals(True)
                     self.td_action.setChecked(enabled)
                     self.td_action.blockSignals(False)
+
+            # 3.6 顶部 Filter 按钮状态同步
+            if hasattr(self, 'filter_action'):
+                # 如果 collapsed=True, 则 visible=False -> checked=False
+                is_filter_visible = not getattr(self, 'is_filter_collapsed', False)
+                self.filter_action.blockSignals(True)
+                self.filter_action.setChecked(is_filter_visible)
+                self.filter_action.blockSignals(False)
 
 
             logger.debug(f"[Config] Loaded: splitter={sizes}, filter={filter_config}, shortcuts={self.global_shortcuts_enabled}")
@@ -7040,17 +7348,16 @@ class MainWindow(QMainWindow, WindowMixin):
             old_sizes = old_config.get('splitter_sizes', [])
             
             # 1. 如果当前 Filter 是隐藏的 (width <= 0)
+            # 1. 如果当前 Filter 是隐藏的 (width <= 0)
             if fixed_sizes[FILTER_INDEX] <= 0:
-                # 尝试从历史配置恢复，但必须检查合法性
-                restored_val = FILTER_DEFAULT
-                if len(old_sizes) > FILTER_INDEX and old_sizes[FILTER_INDEX] > 0:
-                    val = old_sizes[FILTER_INDEX]
-                    # 如果历史值在合理范围内，则采纳；否则使用默认
-                    if FILTER_MIN <= val <= FILTER_MAX:
-                        restored_val = val
-                    else:
-                        # 历史值异常 (如 1110)，强制重置为默认
-                        restored_val = FILTER_DEFAULT
+                # [FIX]: 如果用户当前就是折叠状态，应该保存为 0，而不是强行恢复历史值
+                # 只有在某些异常情况下才需要恢复 (但这里我们信任当前的 UI 状态)
+                fixed_sizes[FILTER_INDEX] = 0
+            
+            # 2. 如果当前 Filter 异常宽 (修复 1110) - 仅在非折叠时检查
+            elif fixed_sizes[FILTER_INDEX] > FILTER_MAX:
+                logger.warning(f"[SaveConfig] Detected huge filter width {fixed_sizes[FILTER_INDEX]}, capping to {FILTER_MAX}")
+                fixed_sizes[FILTER_INDEX] = FILTER_MAX
                 
                 fixed_sizes[FILTER_INDEX] = restored_val
             
