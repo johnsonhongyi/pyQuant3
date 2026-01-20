@@ -6564,10 +6564,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         is_trading_time = cct.get_trade_date_status() and ((915 <= now_time <= 1130) or (1300 <= now_time <= 1500))
         
         # 定义状态指纹：包含代码哈希、列配置哈希
+        # code_hash = hash(tuple(tuple(sorted(df['code'].astype(str).values)))) if 'code' in df.columns else hash(len(df))
+
         code_hash = hash(tuple(df['code'].astype(str).values)) if 'code' in df.columns else hash(len(df))
         cols_hash = hash(tuple(self.current_cols))
         current_fingerprint = (code_hash, cols_hash)
-        
+
         if not is_trading_time and not force:
             if hasattr(self, '_last_refresh_fingerprint') and self._last_refresh_fingerprint == current_fingerprint:
                 # 非交易时间且状态无变化，跳过以节省 CPU
@@ -6583,7 +6585,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 要显示的列顺序
         cols_to_show = [c for c in self.current_cols if c in df.columns]
-
+        
         # ✅ 使用增量更新机制
         if self._use_incremental_update and hasattr(self, 'tree_updater'):
             try:
@@ -6845,16 +6847,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         val1 = self.search_var1.get().strip()
         val2 = self.search_var2.get().strip()
 
-        if not val1 and not val2:
-            return
+        # [FIX] 当 val1 为空时，不应该仅用 val2 触发搜索
+        # 因为清空 val1 通常意味着用户想要查看全部数据
+        if not val1:
+            # 如果有挂起的搜索任务，取消它
+            if self._search_job:
+                self.after_cancel(self._search_job)
+                self._search_job = None
+            # 清除上次值，避免后续误判
+            if hasattr(self, "_last_value"):
+                self._last_value = ""
+            return  # 不触发搜索
 
         # 构建原始查询语句
         if val1 and val2:
             query = f"({val1}) and ({val2})"
-        elif val1:
-            query = val1
         else:
-            query = val2
+            query = val1
 
         # 如果新值和上次一样，就不触发
         if hasattr(self, "_last_value") and self._last_value == query:
