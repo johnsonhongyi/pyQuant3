@@ -1700,7 +1700,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self._init_tdx()
         self._init_real_time()
         self._init_layout_menu()  # ⭐ 新增：布局预设菜单
+        self._init_layout_menu()  # ⭐ 新增：布局预设菜单
         self._init_theme_menu()   # ⭐ 新增：主题背景菜单
+        self._init_voice_toolbar() # ⭐ 新增：语音控制栏
 
         # ⭐ 数据同步序列号 (用于防重发、防漏发、防乱序)
         self.expected_sync_version = -1
@@ -2230,6 +2232,7 @@ class MainWindow(QMainWindow, WindowMixin):
             ("Alt+F", "显示快捷键帮助 (此弹窗)", self._show_filter_panel),
             ("Alt+H", "显示/隐藏热点自选面板 (Global)", self._toggle_hotlist_panel),
             ("Alt+L", "显示/隐藏信号日志面板 (Global)", self._toggle_signal_log),
+            ("Alt+V", "开启/关闭热点语音播报 (Voice)", self._toggle_hotlist_voice),
             ("Alt+W", "紧凑自适应列宽 (当前焦点表格)", self._on_shortcut_autofit),
             ("Ctrl+/", "显示快捷键帮助 (此弹窗)", self.show_shortcut_help),
             ("H", "添加当前股票到热点自选", self._add_to_hotlist),
@@ -2290,11 +2293,20 @@ class MainWindow(QMainWindow, WindowMixin):
             self.hotlist_panel.voice_alert.connect(self._on_hotlist_voice_alert)
             self.hotlist_panel.signal_log.connect(self._on_signal_log)
             self.hotlist_panel.hide()
+            
+            # 恢复保存的语音状态 (应对 Config 加载早于 Init 的情况)
+            if hasattr(self, '_pending_hotlist_voice_paused'):
+                self.hotlist_panel._voice_paused = self._pending_hotlist_voice_paused
         
         # 2. 信号日志面板
         # ⭐ [Independent Window] 设置为 None，允许面板掉到主窗口后面
         self.signal_log_panel = SignalLogPanel(None)
         self.signal_log_panel.log_clicked.connect(self._on_signal_log_clicked)
+
+        # [FIX] Force Apply Pending Voice State (Override any earlier reset)
+        if hasattr(self, 'hotlist_panel') and hasattr(self, '_pending_hotlist_voice_paused'):
+            self.hotlist_panel._voice_paused = self._pending_hotlist_voice_paused
+            logger.info(f"StartUp: Final Voice State Enforced: {self._pending_hotlist_voice_paused}")
         
         # 3. 热点检测：不再使用独立定时器，由主数据刷新周期驱动
         #    在 IPC 数据包接收后或手动调用 _check_hotlist_patterns()
@@ -2907,6 +2919,10 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 检查是否有新信号并播报 (语音播报逻辑)
             if not signals: return
+
+            # ⭐ CHECK MUTE STATE (Global / Hotlist Control)
+            if hasattr(self, 'hotlist_panel') and self.hotlist_panel._voice_paused:
+                return
 
             # ⚡ [OPTIMIZATION] 语音去重缓存，避免重复播报
             if not hasattr(self, '_spoken_cache'): 
@@ -4152,6 +4168,54 @@ class MainWindow(QMainWindow, WindowMixin):
             action.triggered.connect(lambda checked, c=code: self._update_chart_bg(c))
             chart_bg_menu.addAction(action)
 
+    def _init_voice_toolbar(self):
+        """初始化语音控制工具栏"""
+        self.voice_toolbar = self.addToolBar("Voice Control")
+        # self.voice_toolbar.setMovable(False)
+        
+        # 补救措施：确保 Pending 状态被应用
+        if hasattr(self, '_pending_hotlist_voice_paused') and hasattr(self, 'hotlist_panel'):
+             self.hotlist_panel._voice_paused = self._pending_hotlist_voice_paused
+             logger.info(f"StartUp: Forced Apply Pending Voice State: {self._pending_hotlist_voice_paused}")
+        
+        # 默认根据当前状态开启
+        is_paused = False
+        if hasattr(self, 'hotlist_panel'):
+             is_paused = self.hotlist_panel._voice_paused
+        
+        text = "🔇 热点播报: 关(Alt+V)" if is_paused else "🔊 热点播报: 开(Alt+V)"
+        self.voice_action = QAction(text, self)
+        self.voice_action.setStatusTip("点击开启/关闭热点信号语音播报")
+        self.voice_action.triggered.connect(self._toggle_hotlist_voice)
+        self.voice_toolbar.addAction(self.voice_action)
+
+    def _toggle_hotlist_voice(self):
+        """切换热点面板语音"""
+        if hasattr(self, 'hotlist_panel'):
+            self.hotlist_panel.toggle_voice()
+            # 同步图标和文字
+            is_paused = self.hotlist_panel._voice_paused
+            if is_paused:
+                self.voice_action.setText("🔇 热点播报: 关")
+                
+                # 🛑 立即清空语音队列，防止后台继续播放堆积的消息
+                if hasattr(self, 'voice_thread') and self.voice_thread:
+                    try:
+                        # 尝试清空队列 (使用循环 get_nowait 直到异常)
+                        q = self.voice_thread.queue
+                        count = 0
+                        while True:
+                            try:
+                                q.get_nowait()
+                                count += 1
+                            except: # Queue.Empty
+                                break
+                        logger.info(f"🛑 Cleared {count} items from voice queue due to mute.")
+                    except Exception as e:
+                        logger.debug(f"Failed to clear voice queue: {e}")
+            else:
+                self.voice_action.setText("🔊 热点播报: 开")
+
     def _update_app_bg(self, color):
         self.custom_bg_app = color
         self.apply_qt_theme()
@@ -4922,11 +4986,15 @@ class MainWindow(QMainWindow, WindowMixin):
             self.hotlist_panel._refresh_table()
 
         if alerts and (now - self._last_alert_time > 5):
-            alert_msg = "热点提醒: " + " ".join(alerts)
+            # alert_msg = "热点提醒: " + " ".join(alerts)
+            alert_msg = " ".join(alerts)
             logger.info(alert_msg)
             # 语音播报 - 使用 voice_thread 异步执行，避免卡顿
             if hasattr(self, 'voice_thread') and self.voice_thread:
-                self.voice_thread.speak(alert_msg)
+                # ⭐ CHECK MUTE
+                is_muted = hasattr(self, 'hotlist_panel') and self.hotlist_panel._voice_paused
+                if not is_muted:
+                    self.voice_thread.speak(alert_msg)
             
             # 状态栏提示 (如果界面存在)
             if self.isVisible():
@@ -7541,6 +7609,24 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.filter_action.setChecked(is_filter_visible)
                 self.filter_action.blockSignals(False)
 
+            # 3.7 热点语音播报状态 (恢复)
+            if 'hotlist_voice_paused' in window_config:
+                is_paused = bool(window_config.get('hotlist_voice_paused', False))
+                # 暂存状态
+                self._pending_hotlist_voice_paused = is_paused
+                
+                if hasattr(self, 'hotlist_panel'):
+                    self.hotlist_panel._voice_paused = is_paused
+                
+                # Update UI
+                if hasattr(self, 'voice_action'):
+                    if is_paused:
+                        self.voice_action.setText("🔇 热点播报: 关(Alt+V)")
+                    else:
+                        self.voice_action.setText("🔊 热点播报: 开(Alt+V)")
+                
+                logger.info(f"StartUp: Loaded Voice Config. Paused={is_paused}")
+
 
             logger.debug(f"[Config] Loaded: splitter={sizes}, filter={filter_config}, shortcuts={self.global_shortcuts_enabled}")
             
@@ -7632,6 +7718,10 @@ class MainWindow(QMainWindow, WindowMixin):
             
             if hasattr(self, 'show_td_sequential'):
                 window_config['show_td_sequential'] = self.show_td_sequential
+            
+            # 3.8 热点语音播报状态
+            if hasattr(self, 'hotlist_panel'):
+                window_config['hotlist_voice_paused'] = self.hotlist_panel._voice_paused
                 
             # --- 4. 列宽配置 ---
             col_widths = old_config.get('column_widths', {})
@@ -7923,7 +8013,11 @@ class MainWindow(QMainWindow, WindowMixin):
         """热点面板语音通知"""
         try:
             if hasattr(self, 'voice_thread') and self.voice_thread:
-                self.voice_thread.speak(f"热点提醒，{msg}")
+                # ⭐ CHECK MUTE
+                is_muted = hasattr(self, 'hotlist_panel') and self.hotlist_panel._voice_paused
+                if not is_muted:
+                    # self.voice_thread.speak(f"热点提醒，{msg}")
+                    self.voice_thread.speak(f"{msg}")
             else:
                 logger.debug(f"Voice thread not available, skipping: {msg}")
         except Exception as e:
@@ -8138,6 +8232,9 @@ def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realti
     sys.exit(ret)
 
 
+
+
+                
 if __name__ == "__main__":
     # logger.setLevel(LoggerFactory.INFO)
     import argparse
