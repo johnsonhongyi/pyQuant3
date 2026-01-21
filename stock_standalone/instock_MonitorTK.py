@@ -853,6 +853,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     @with_log_level(LoggerFactory.INFO)
     def on_close(self):
         try:
+            # 设置退出标志，阻止后台线程调用 Tkinter 方法
+            self._is_closing = True
+            
+            # 0.1 立即关闭所有报警弹窗（停止震动/闪烁循环）
+            if hasattr(self, 'active_alerts'):
+                for win in list(self.active_alerts):
+                    try:
+                        win.is_shaking = False
+                        win.is_flashing = False
+                        if win.winfo_exists():
+                            win.destroy()
+                    except Exception:
+                        pass
+                self.active_alerts.clear()
+            if hasattr(self, 'code_to_alert_win'):
+                self.code_to_alert_win.clear()
+            
             logger.info("程序正在退出，执行保存与清理...")
             self.vis_var.set(False)
             # 1. 保存预警规则
@@ -4331,15 +4348,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.after(0, lambda: self._show_alert_popup(code, name, msg))
 
     def on_voice_speak_start(self, code):
-        """语音开始播报时的回调 (在后台线程调用)"""
+        """语音播报开始的回调"""
         if not code: return
+        # 检查程序是否正在退出
+        if getattr(self, '_is_closing', False): return
         # 调度到主线程执行闪烁和震动
-        self.after(0, lambda: self._trigger_alert_visual_effects(code, start=True))
+        try:
+            self.after(0, lambda: self._trigger_alert_visual_effects(code, start=True))
+        except RuntimeError:
+            pass  # 主循环已停止，忽略
 
     def on_voice_speak_end(self, code):
         """语音播报结束的回调"""
         if not code: return
-        self.after(0, lambda: self._trigger_alert_visual_effects(code, start=False))
+        # 检查程序是否正在退出
+        if getattr(self, '_is_closing', False): return
+        try:
+            self.after(0, lambda: self._trigger_alert_visual_effects(code, start=False))
+        except RuntimeError:
+            pass  # 主循环已停止，忽略
 
 
     def _trigger_alert_visual_effects(self, code, start=True):
@@ -4423,9 +4450,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # 标记正在震动
         win.is_shaking = True
-
-        # 💥 关键点：在获取几何信息前强制更新 UI 布局
-        win.update_idletasks()
+        
+        # 获取当前几何信息（不使用 update_idletasks 避免阻塞）
 
         def do_shake(orig_wh, orig_x, orig_y):
             # 检查窗口是否存在且是否应继续晃动
@@ -4735,163 +4761,222 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
     def _show_alert_popup(self, code, name, msg):
-        """显示报警弹窗"""
-        try:
-            if not hasattr(self, 'active_alerts'):
-                self.active_alerts = []
-                
-            # 获取 category content
-            category_content = "暂无详细信息"
-            if code in self.df_all.index:
-                category_content = self.df_all.loc[code].get('category', '')
+        """显示报警弹窗 (队列化逐个创建 + 同股去重)"""
+        # ===== 初始化弹窗队列 =====
+        if not hasattr(self, '_alert_queue'):
+            self._alert_queue = []
+            self._alert_queue_processing = False
+        
+        if not hasattr(self, 'active_alerts'):
+            self.active_alerts = []
+        if not hasattr(self, 'code_to_alert_win'):
+            self.code_to_alert_win = {}
+        
+        # ===== 同股去重：如果已有弹窗，更新消息而非新建 =====
+        existing_win = self.code_to_alert_win.get(code)
+        if existing_win:
+            try:
+                if existing_win.winfo_exists():
+                    existing_win.title(f"🔔 触发报警 - {name} ({code})")
+                    if hasattr(existing_win, 'msg_label'):
+                        existing_win.msg_label.config(text=f"⚠️{code} {msg}")
+                    existing_win.lift()
+                    existing_win.attributes("-topmost", True)
+                    if hasattr(existing_win, 'start_visual_effects'):
+                        existing_win.start_visual_effects()
+                    logger.debug(f"复用已有弹窗: {code}")
+                    return
+            except tk.TclError:
+                logger.debug(f"检测到已销毁弹窗，清理映射: {code}")
+            except Exception as e:
+                logger.debug(f"更新已有弹窗失败: {e}")
             
+            if code in self.code_to_alert_win:
+                del self.code_to_alert_win[code]
+        
+        # ===== 加入队列，避免同时创建大量窗口 =====
+        # 检查队列中是否已有同股请求
+        for item in self._alert_queue:
+            if item[0] == code:
+                # 更新队列中的消息
+                item[1] = name
+                item[2] = msg
+                logger.debug(f"队列中已有同股请求，更新消息: {code}")
+                return
+        
+        self._alert_queue.append([code, name, msg])
+        logger.debug(f"弹窗请求加入队列: {code}, 队列长度: {len(self._alert_queue)}")
+        
+        # 启动队列处理（如果未运行）
+        if not self._alert_queue_processing:
+            self._process_alert_queue()
+    
+    def _process_alert_queue(self):
+        """处理弹窗队列，逐个创建窗口"""
+        if not hasattr(self, '_alert_queue') or not self._alert_queue:
+            self._alert_queue_processing = False
+            return
+        
+        self._alert_queue_processing = True
+        
+        # 取出一个请求
+        item = self._alert_queue.pop(0)
+        code, name, msg = item
+        
+        # 创建这个弹窗
+        self._create_single_alert_popup(code, name, msg)
+        
+        # 如果还有队列，300ms 后继续处理下一个（间隔更大，层级效果更明显）
+        if self._alert_queue:
+            self.after(300, self._process_alert_queue)
+        else:
+            self._alert_queue_processing = False
+    
+    def _create_single_alert_popup(self, code, name, msg):
+        """实际创建单个弹窗（从队列调用）"""
+        try:
+            # 再次检查是否已有弹窗（可能在队列等待期间已创建）
+            existing_win = self.code_to_alert_win.get(code)
+            if existing_win:
+                try:
+                    if existing_win.winfo_exists():
+                        existing_win.title(f"🔔 触发报警 - {name} ({code})")
+                        if hasattr(existing_win, 'msg_label'):
+                            existing_win.msg_label.config(text=f"⚠️{code} {msg}")
+                        existing_win.lift()
+                        return
+                except:
+                    pass
+                if code in self.code_to_alert_win:
+                    del self.code_to_alert_win[code]
+            
+            # ===== 直接创建完整弹窗（队列控制速度，无需分段） =====
             win = tk.Toplevel(self)
             win.title(f"🔔 触发报警 - {name} ({code})")
-            win.attributes("-topmost", True) # 强制置顶
-            # 移除 -toolwindow: 工具窗口样式会导致窗口在某些情况下无法响应鼠标事件
+            win.attributes("-topmost", True)
             win.attributes("-toolwindow", True)
-            # win.overrideredirect(False)  # 确保窗口有标准标题栏和边框
-            # win.focus_force()  # 强制获取焦点，确保窗口可交互
+            win.geometry("400x180")
+            win.configure(bg="#fff")
+            win.grab_release()  # 确保不会锁定焦点
             
             # 记录并定位
             self.active_alerts.append(win)
             self._update_alert_positions()
             
-            # 关闭回调 (手动关闭，设为 True)
+            # 关闭回调
             win.protocol("WM_DELETE_WINDOW", lambda: self._close_alert(win, is_manual=True))
             
-            # 自动关闭逻辑：
-            # 如果语音功能有效，则等待播报结束后才开始计时关闭；
-            # 否则立即开始计时，以防窗口无限堆积。
+            # 映射记录
+            if not hasattr(self, 'code_to_alert_win'):
+                self.code_to_alert_win = {}
+            self.code_to_alert_win[code] = win
+            
+            # 获取 category content
+            category_content = "暂无详细信息"
+            if code in self.df_all.index:
+                category_content = self.df_all.loc[code].get('category', '')
+            
+            # 自动关闭逻辑
             has_voice = False
-            # try:
-            #     if hasattr(self, 'live_strategy') and self.live_strategy:
-            #         v = getattr(self.live_strategy, '_voice', None)
-            #         if v and v._thread and v._thread.is_alive():
-            #             # 检查队列容量，如果由于队列满而未加入，则视为无语音同步
-            #             if v.queue.qsize() < 10: 
-            #                 has_voice = True
-            # except: pass
             try:
                 if hasattr(self, 'live_strategy') and self.live_strategy:
-                    # ✅ 关键：语音开关
                     if not getattr(self.live_strategy, 'voice_enabled', True):
                         has_voice = False
                     else:
                         v = getattr(self.live_strategy, '_voice', None)
-                        if (
-                            v
-                            and v._thread
-                            and v._thread.is_alive()
-                            and v.queue.qsize() < 10
-                        ):
+                        if v and v._thread and v._thread.is_alive() and v.queue.qsize() < 10:
                             has_voice = True
             except Exception as e:
                 logger.debug(f"voice detect failed: {e}")
-
-            # 【新增】自动关闭时间兜底
+            
             def _get_alert_close_delay_ms():
                 seconds = max(60, int(alert_cooldown / 2))
                 return seconds * 1000
-
+            
             delay_ms = _get_alert_close_delay_ms()
-
             if not has_voice:
                 self.after(delay_ms, lambda: self._close_alert(win))
             else:
-                # 安全兜底：如果因为某种原因没触发回调（如语音引擎卡死），3分钟后强制关闭
                 win.safety_close_timer = self.after(180000, lambda: self._close_alert(win))
             
-            # 闪烁与震动效果 (持续性同步)
+            # 闪烁效果
             def flash(count=0):
                 if not win.winfo_exists() or not getattr(win, 'is_flashing', False):
                     if win.winfo_exists(): win.configure(bg="#fff")
                     return
                 bg = "#ffcdd2" if count % 2 == 0 else "#ffebee"
                 win.configure(bg=bg)
-                win.after(500, lambda: flash(count+1)) # 这里的 500 是闪烁频率（毫秒），数值越大闪得越慢
+                win.after(500, lambda: flash(count+1))
             
-            # 定义供外部触发的方法
             def start_effects():
-                if getattr(win, 'is_flashing', False): return # 防止重复触发
+                if getattr(win, 'is_flashing', False): return
                 win.is_flashing = True
                 flash()
-                self._shake_window(win, distance=5, interval_ms=150) # 降低震动频率以确保窗口可响应事件
+                # 暂时禁用震动效果（测试是否导致无法操作）
+                # self._shake_window(win, distance=5, interval_ms=150)
             
             def stop_effects():
                 win.is_flashing = False
                 win.is_shaking = False
-                # 播报结束，启动正常的倒计时关闭 (30-60秒)
-                # 如果有安全倒计时，先取消它
                 if hasattr(win, 'safety_close_timer'):
                     try: self.after_cancel(win.safety_close_timer)
                     except: pass
-                
                 self.after(int(alert_cooldown/2)*1000, lambda: self._close_alert(win))
             
             win.start_visual_effects = start_effects
             win.stop_visual_effects = stop_effects
             win.is_flashing = False
             win.is_shaking = False
-
-            # 记录映射用于同步播放
-            if not hasattr(self, 'code_to_alert_win'):
-                self.code_to_alert_win = {}
-            self.code_to_alert_win[code] = win
-
-            # 如果当前没有在排队，或者想立刻由于新窗口弹出而提醒，可以先闪一下（可选）
-            # 这里我们遵从用户要求：播放到哪个提示，闪屏哪个窗口
-            # 所以我们不在这里主动调用 flash()，而是等 on_voice_speak_start 回调触发
             
             # 内容框架
             frame = tk.Frame(win, bg="#fff", padx=10, pady=10)
             frame.pack(fill="both", expand=True)
-
-            # --- 底部按钮区 (优先 Pack 保证可见) ---
+            
+            # 按钮区
             def delete_monitor():
                 if hasattr(self, 'live_strategy'):
-                     try:
+                    try:
                         self.live_strategy.remove_monitor(code)
-                        logger.info(f"Deleted alarm rule for {code} from alert popup")
+                        logger.info(f"Deleted alarm rule for {code}")
                         btn_del.config(text="🗑️已删除", state="disabled")
-                        # 延时关闭窗口
                         win.after(50, lambda: self._close_alert(win, is_manual=True))
-                     except Exception as e:
+                    except Exception as e:
                         logger.error(f"Remove monitor error: {e}")
-
+            
             def send_to_tdx():
                 if hasattr(self, 'sender'):
-                     try:
+                    try:
                         self.sender.send(code)
                         btn_send.config(text="✅ 已发送", bg="#ccff90")
-                        # Auto-launch Visualizer if enabled
                         if hasattr(self, 'vis_var') and self.vis_var.get() and code:
                             self.open_visualizer(code)
-                     except Exception as e:
+                    except Exception as e:
                         logger.error(f"Send stock error: {e}")
-                else:
-                     logger.warning("Sender module not available")
-
+            
             btn_frame = tk.Frame(frame, bg="#fff")
             btn_frame.pack(side="bottom", fill="x", pady=5)
             
             btn_send = tk.Button(btn_frame, text="🚀发送", command=send_to_tdx, bg="#e0f7fa", font=("Arial", 10, "bold"), cursor="hand2")
             btn_send.pack(side="left", fill="x", expand=True, padx=5)
-
+            
             btn_del = tk.Button(btn_frame, text="Del", command=delete_monitor, bg="#ffcdd2", cursor="hand2", font=("Arial", 8), width=3)
             btn_del.pack(side="left", padx=2)
             
             tk.Button(btn_frame, text="关闭", command=lambda: self._close_alert(win, is_manual=True), bg="#eee", width=8, pady=2).pack(side="right", padx=5)
-
-            # --- 上部内容 ---
-            tk.Label(frame, text=f"⚠️{code} {msg}", font=("Microsoft YaHei", 12, "bold"), fg="#d32f2f", bg="#fff", wraplength=380).pack(pady=5)
-            # tk.Label(frame, text=f"[{code}] {name}", font=("Arial", 14, "bold"), bg="#fff").pack(pady=5)
             
-            # 详情文本 (自适应剩余空间)
+            # 消息标签
+            msg_label = tk.Label(frame, text=f"⚠️{code} {msg}", font=("Microsoft YaHei", 12, "bold"), fg="#d32f2f", bg="#fff", wraplength=380)
+            msg_label.pack(pady=5)
+            win.msg_label = msg_label
+            
+            # 详情文本
             text_box = tk.Text(frame, height=4, font=("Arial", 10), bg="#f5f5f5", relief="flat")
             text_box.pack(fill="both", expand=True, pady=5)
             text_box.insert("1.0", category_content)
             text_box.config(state="disabled")
+            
+            # 异步启动视觉效果（不阻塞事件循环）
+            self.after(10, win.start_visual_effects)
             
         except Exception as e:
             logger.error(f"Show alert popup error: {e}")
