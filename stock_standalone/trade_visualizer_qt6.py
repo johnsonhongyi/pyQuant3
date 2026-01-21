@@ -5118,6 +5118,14 @@ class MainWindow(QMainWindow, WindowMixin):
                         logger.error(f"[_delayed_hot_signals] Error: {e}")
                 QtCore.QTimer.singleShot(200, _delayed_hot_signals)
             
+            # ⚡ [FIX] 热点形态检测 - 驱动信号日志面板
+            def _delayed_hotlist_check():
+                try:
+                    self._check_hotlist_patterns()
+                except Exception as e:
+                    logger.debug(f"[_delayed_hotlist_check] Error: {e}")
+            QtCore.QTimer.singleShot(300, _delayed_hotlist_check)
+            
             logger.debug("[_process_df_all_update] END: All tasks dispatched successfully")
                 
         except Exception as e:
@@ -5204,6 +5212,9 @@ class MainWindow(QMainWindow, WindowMixin):
             self.df_all = self.df_cache
         # ⚡ 直接更新表格，不再重复处理
         self.update_stock_table(self.df_all)
+        
+        # ⚡ [FIX] 增量更新时也触发热点形态检测
+        QtCore.QTimer.singleShot(100, self._check_hotlist_patterns)
 
     def _capture_view_state(self):
         """在切换数据前，精准捕获当前的可见窗口"""
