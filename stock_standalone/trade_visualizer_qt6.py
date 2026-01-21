@@ -2644,6 +2644,8 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.warning(f"⚠️ 系统快捷键注销失败: {e}")
 
+
+
     def _reset_kline_view(self, df=None):
         """重置 K 线图视图：始终优先显示右侧最新的 120-150 根（不压缩全览）"""
         if not isinstance(df, pd.DataFrame):
@@ -2674,9 +2676,10 @@ class MainWindow(QMainWindow, WindowMixin):
         # 3. 强制刷新 Y 轴到当前可见 X 范围的最佳高度
         vb.autoRange()
         
-        # logger.debug(f"[VIEW] Reset to TraderView: {x_min:.1f} to {x_max:.1f} (total {n})")
 
-        # logger.debug(f"[VIEW] Reset to FullView: 0-{n} (Range: {x_min}-{x_max})")
+    #     # logger.debug(f"[VIEW] Reset to TraderView: {x_min:.1f} to {x_max:.1f} (total {n})")
+
+    #     # logger.debug(f"[VIEW] Reset to FullView: 0-{n} (Range: {x_min}-{x_max})")
 
     def _init_resample_toolbar(self):
         self.toolbar.addSeparator()
@@ -3796,9 +3799,13 @@ class MainWindow(QMainWindow, WindowMixin):
                 logger.info(f"[InitialLoad] Using cached realtime data for {code}...")
                 self.on_realtime_update(code, cached['tick_df'], cached['today_bar'])
 
+        self._capture_view_state()
         # 执行首次渲染 (历史数据已经在 on_realtime_update 渲染过，这里再兜底一次)
         with timed_ctx("render_charts", warn_ms=100):
             self.render_charts(code, self.day_df, tick_df)
+        
+        # [FIX] 首次加载完成后，必须重置视野到最新的 K 线，否则可能仍停留在初始范围导致黑屏
+        # self._reset_kline_view(self.day_df)
 
     def on_realtime_update(self, code, tick_df, today_bar):
         """处理实时分时与幽灵 K 线更新"""
@@ -4101,6 +4108,23 @@ class MainWindow(QMainWindow, WindowMixin):
         self._signal_log_action.setShortcut("")
         self._signal_log_action.triggered.connect(self._toggle_signal_log)
         menubar.addAction(self._signal_log_action)
+        
+        # 3. 语音播报 (移至 MenuBar)
+        # 补救措施：确保 Pending 状态被应用
+        if hasattr(self, '_pending_hotlist_voice_paused') and hasattr(self, 'hotlist_panel'):
+             self.hotlist_panel._voice_paused = self._pending_hotlist_voice_paused
+        
+        # 默认根据当前状态开启
+        is_paused = False
+        if hasattr(self, 'hotlist_panel'):
+             is_paused = self.hotlist_panel._voice_paused
+             
+        text = "🔇 热点播报: 关(Alt+V)" if is_paused else "🔊 热点播报: 开(Alt+V)"
+        self.voice_action = QAction(text, self)
+        self.voice_action.setShortcut("") 
+        self.voice_action.setStatusTip("点击开启/关闭热点信号语音播报")
+        self.voice_action.triggered.connect(self._toggle_hotlist_voice)
+        menubar.addAction(self.voice_action)
 
     def _init_layout_menu(self):
         """初始化布局预设菜单 (优化版：分层明确，防误触)"""
@@ -4169,25 +4193,8 @@ class MainWindow(QMainWindow, WindowMixin):
             chart_bg_menu.addAction(action)
 
     def _init_voice_toolbar(self):
-        """初始化语音控制工具栏"""
-        self.voice_toolbar = self.addToolBar("Voice Control")
-        # self.voice_toolbar.setMovable(False)
-        
-        # 补救措施：确保 Pending 状态被应用
-        if hasattr(self, '_pending_hotlist_voice_paused') and hasattr(self, 'hotlist_panel'):
-             self.hotlist_panel._voice_paused = self._pending_hotlist_voice_paused
-             logger.info(f"StartUp: Forced Apply Pending Voice State: {self._pending_hotlist_voice_paused}")
-        
-        # 默认根据当前状态开启
-        is_paused = False
-        if hasattr(self, 'hotlist_panel'):
-             is_paused = self.hotlist_panel._voice_paused
-        
-        text = "🔇 热点播报: 关(Alt+V)" if is_paused else "🔊 热点播报: 开(Alt+V)"
-        self.voice_action = QAction(text, self)
-        self.voice_action.setStatusTip("点击开启/关闭热点信号语音播报")
-        self.voice_action.triggered.connect(self._toggle_hotlist_voice)
-        self.voice_toolbar.addAction(self.voice_action)
+        """语音控制已集成到 MenuBar (_init_hotspot_menu)，此处保留空方法以兼容旧调用"""
+        pass
 
     def _toggle_hotlist_voice(self):
         """切换热点面板语音"""
@@ -5284,6 +5291,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⚡ [FIX] 增量更新时也触发热点形态检测
         QtCore.QTimer.singleShot(100, self._check_hotlist_patterns)
 
+
     def _capture_view_state(self):
         """在切换数据前，精准捕获当前的可见窗口"""
         if not hasattr(self, 'day_df') or self.day_df.empty:
@@ -5296,7 +5304,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # 1. 检测是否处于“全览”状态（即当前已经看完了绝大部分数据）
             # 如果左边缘接近 0 且右边缘接近末尾，则标记为 FullView
             self._prev_is_full_view = (view_rect.left() <= 10 and view_rect.right() >= total - 5)
-
+            logger.debug(f'_prev_is_full_view: { self._prev_is_full_view }')
             # 2. 捕获两端相对于末尾的偏移根数
             self._prev_dist_left = total - view_rect.left()
             self._prev_dist_right = total - view_rect.right()
@@ -5575,6 +5583,8 @@ class MainWindow(QMainWindow, WindowMixin):
           - 主题感知
           - 顶层信号箭头
         """
+
+
         if day_df.empty:
             self.kline_plot.setTitle(f"{code} - No Data")
             self.tick_plot.setTitle("No Tick Data")
@@ -6258,8 +6268,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
         if is_new_stock or is_resample_change or has_captured_state:
             vb = self.kline_plot.getViewBox()
-
             # 如果之前是“全览”状态，或者根本没有捕获状态，则执行 Reset (全览)
+            logger.debug(f'was_full_view: {was_full_view} has_captured_state: {has_captured_state}')
             if was_full_view or not has_captured_state:
                 self._reset_kline_view(df=day_df)
             else:
