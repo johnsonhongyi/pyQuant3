@@ -49,6 +49,10 @@ from hotlist_panel import HotlistPanel
 from signal_log_panel import SignalLogPanel
 from hotspot_popup import HotSpotPopup
 
+from sys_utils import get_base_path
+BASE_DIR = get_base_path()
+visualizer_config = cct.get_resource_file("visualizer_layout.json",BASE_DIR=BASE_DIR)
+
 import re
 try:
     import pythoncom
@@ -6924,7 +6928,8 @@ class MainWindow(QMainWindow, WindowMixin):
             target_f_width = 160
             # 尝试从历史配置获取用户习惯的宽度
             try:
-                config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
+                # config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
+                config_file = visualizer_config
                 if os.path.exists(config_file):
                     with open(config_file, 'r', encoding='utf-8') as f:
                         config = json.load(f)
@@ -7354,7 +7359,8 @@ class MainWindow(QMainWindow, WindowMixin):
         配置文件: visualizer_layout.json
         """
         try:
-            config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
+            # config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
+            config_file = visualizer_config
             config = {}
             
             if os.path.exists(config_file):
@@ -7550,7 +7556,9 @@ class MainWindow(QMainWindow, WindowMixin):
         配置文件: visualizer_layout.json
         """
         try:
-            config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
+            # config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
+            # config_file = cct.get_resource_file("visualizer_layout.json")
+            config_file = visualizer_config
 
             # --- 读取现有配置 (保留未知字段以支持向前兼容) ---
             old_config = {}
@@ -7567,7 +7575,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
             # 🛡️ 安全上限：防止过滤器面板过宽导致渲染异常 (修复 1110)
             FILTER_INDEX = 2
-            FILTER_MAX = 300 
+            FILTER_MAX = 400 
 
             if fixed_sizes[FILTER_INDEX] > FILTER_MAX:
                 logger.warning(f"[SaveConfig] Detected huge filter width {fixed_sizes[FILTER_INDEX]}, capping to {FILTER_MAX}")
@@ -7641,9 +7649,9 @@ class MainWindow(QMainWindow, WindowMixin):
                 'layout_presets': getattr(self, 'layout_presets', {}),
                 'filter': filter_config,
                 'window': window_config,
-                'column_widths': col_widths,
                 # 未来扩展：直接添加新的顶级键即可
             }
+                # 'column_widths': col_widths,
 
             # --- 保存 ---
             with open(config_file, 'w', encoding='utf-8') as f:
