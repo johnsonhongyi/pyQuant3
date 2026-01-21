@@ -2398,9 +2398,45 @@ class MainWindow(QMainWindow, WindowMixin):
             self.voice_thread.speak(message)
     
     def _on_signal_log(self, code: str, name: str, pattern: str, message: str):
-        """信号日志回调 - 追加到日志面板"""
+        """信号日志回调 - 追加到日志面板并写入数据库"""
+        # 1. 显示到信号日志面板
         if hasattr(self, 'signal_log_panel'):
             self.signal_log_panel.append_log(code, name, pattern, message)
+        
+        # 2. [NEW] 写入数据库 signal_message 表（用于热点详情窗口的历史查询）
+        try:
+            import sqlite3
+            from datetime import datetime
+            
+            conn = sqlite3.connect("signal_strategy.db", timeout=10)
+            c = conn.cursor()
+            
+            # 确保表存在
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS signal_message (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT NOT NULL,
+                    name TEXT,
+                    timestamp TEXT,
+                    signal_type TEXT,
+                    score REAL,
+                    reason TEXT,
+                    message TEXT
+                )
+            """)
+            
+            # 插入信号记录
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            c.execute("""
+                INSERT INTO signal_message (code, name, timestamp, signal_type, score, reason, message)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (code, name, now, pattern, 0.0, pattern, message))
+            
+            conn.commit()
+            conn.close()
+            logger.debug(f"✅ Signal saved to DB: {code} - {pattern}")
+        except Exception as e:
+            logger.error(f"Failed to save signal to DB: {e}")
     
     def _check_hotlist_patterns(self):
         """定时检测热点股票形态"""
@@ -2644,7 +2680,21 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.warning(f"⚠️ 系统快捷键注销失败: {e}")
 
+    def _safe_len(self, df, fallback=150):
+        """
+        安全获取数据长度：
+        1. 优先 df
+        2. 其次 self.df_all
+        3. 最后 fallback
+        """
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            return len(df)
 
+        day_df = getattr(self, 'day_df', None)
+        if isinstance(day_df, pd.DataFrame) and not day_df.empty:
+            return len(day_df)
+
+        return fallback
 
     def _reset_kline_view(self, df=None):
         """重置 K 线图视图：始终优先显示右侧最新的 120-150 根（不压缩全览）"""
@@ -2655,10 +2705,10 @@ class MainWindow(QMainWindow, WindowMixin):
             return
 
         vb = self.kline_plot.getViewBox()
-        n = len(df)
+        n = len(df) 
         
         # 设定默认显示根数 ( trader 视角: 120-150 根最舒适)
-        display_n = 150 
+        display_n = self._safe_len(df, fallback=150)
         
         # 1. 暂时启用全局自动缩放，让 pyqtgraph 找到 Y 数据边界
         vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
@@ -3187,8 +3237,10 @@ class MainWindow(QMainWindow, WindowMixin):
         
         if cached and (now - cached['ts']) < limit:
             logger.debug(f"[RT] Cache HIT for {code} (age: {now - cached['ts']:.1f}s)")
-            # 直接触发一次 GUI 更新，实现“瞬开”效果
-            self.on_realtime_update(code, cached['tick_df'], cached['today_bar'])
+            # [FIX] 不再立即触发 GUI 更新，等待 DataLoader 完成后统一渲染
+            # 这样可以确保只渲染一次，使用完整的新周期数据
+            # self.on_realtime_update(code, cached['tick_df'], cached['today_bar'])
+            
             # 虽然有缓存，但如果常驻进程没跑，还是得启动它以便后续更新
             if self.realtime_process and self.realtime_process.is_alive():
                  # 发送到任务队列，让进程在后台慢慢更新
@@ -3787,22 +3839,31 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # ⭐ 核心修复：既然 DataLoaderThread 已经带回了最新的 tick_df，直接利用它来生成首个幽灵 K 线
         # 这样无论是否在交易时间，只要打开图表，就能看到最新的今天行情。
-        if tick_df is not None and not tick_df.empty:
+        # [FIX] 只有在 realtime 开启时才使用实时数据
+        if self.realtime and tick_df is not None and not tick_df.empty:
             logger.debug(f"[InitialLoad] Using fresh tick_df from DataLoader for {code}, triggering update...")
             today_bar = tick_to_daily_bar(tick_df)
             # 立即触发同步 (不使用 QTimer 以防闪烁)
             self.on_realtime_update(code, tick_df, today_bar)
-        else:
-            # 如果 DataLoader 没拿到 tick_df，再尝试从缓存补全
+            # [FIX] on_realtime_update 已经调用了 render_charts，无需重复渲染
+        elif self.realtime:
+            # 如果 realtime 开启但 DataLoader 没拿到 tick_df，再尝试从缓存补全
             cached = self._tick_cache.get(code)
             if cached:
                 logger.info(f"[InitialLoad] Using cached realtime data for {code}...")
                 self.on_realtime_update(code, cached['tick_df'], cached['today_bar'])
-
-        self._capture_view_state()
-        # 执行首次渲染 (历史数据已经在 on_realtime_update 渲染过，这里再兜底一次)
-        with timed_ctx("render_charts", warn_ms=100):
-            self.render_charts(code, self.day_df, tick_df)
+                # [FIX] on_realtime_update 已经调用了 render_charts，无需重复渲染
+            else:
+                # realtime 开启但没有任何实时数据，兜底渲染
+                self._capture_view_state()
+                with timed_ctx("render_charts", warn_ms=100):
+                    self.render_charts(code, self.day_df, None)
+        else:
+            # [FIX] realtime 关闭时，直接渲染历史数据（不使用缓存）
+            logger.debug(f"[InitialLoad] Realtime disabled, rendering historical data only for {code}")
+            self._capture_view_state()
+            with timed_ctx("render_charts", warn_ms=100):
+                self.render_charts(code, self.day_df, None)
         
         # [FIX] 首次加载完成后，必须重置视野到最新的 K 线，否则可能仍停留在初始范围导致黑屏
         # self._reset_kline_view(self.day_df)
@@ -5304,7 +5365,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # 1. 检测是否处于“全览”状态（即当前已经看完了绝大部分数据）
             # 如果左边缘接近 0 且右边缘接近末尾，则标记为 FullView
             self._prev_is_full_view = (view_rect.left() <= 10 and view_rect.right() >= total - 5)
-            logger.debug(f'_prev_is_full_view: { self._prev_is_full_view }')
+            logger.debug(f'total: {total} _prev_is_full_view: { self._prev_is_full_view }')
             # 2. 捕获两端相对于末尾的偏移根数
             self._prev_dist_left = total - view_rect.left()
             self._prev_dist_right = total - view_rect.right()
@@ -5331,7 +5392,9 @@ class MainWindow(QMainWindow, WindowMixin):
         1. 字符串模式: "CODE|代码|key1=val1|key2=val2" (来自 IPC)
         2. 字典模式: 通过 **kwargs 传入 (来自 Queue)
         """
-        self._capture_view_state()
+
+        if getattr(self,'select_resample',None) != 'd':
+            self._capture_view_state()
 
         if isinstance(code, str):
             # 1. 清理可能的空白和前缀
@@ -6040,9 +6103,22 @@ class MainWindow(QMainWindow, WindowMixin):
                 delattr(self, 'ghost_candle')
 
         # --- Tick Plot (Intraday) ---
-        if not tick_df.empty:
-            prices = tick_df['close'].values
-            x_ticks = np.arange(len(prices))
+        if tick_df is not None and not tick_df.empty:
+
+            # 取收盘价和索引
+            _prices = tick_df['close'].values
+            _x_ticks = np.arange(len(_prices))
+
+            # 找到非 NaN 的位置
+            valid_mask = ~np.isnan(_prices)
+            prices = _prices[valid_mask]
+            x_ticks = _x_ticks[valid_mask]
+
+            # prices = tick_df['close'].values
+            # x_ticks = np.arange(len(prices))
+
+
+
             pre_close = tick_df['llastp'].iloc[-1] if 'llastp' in tick_df.columns else tick_df['pre_close'].iloc[-1] if 'pre_close' in tick_df.columns else prices[0]
 
             if not hasattr(self, 'tick_curve') or self.tick_curve not in self.tick_plot.items:
@@ -6129,12 +6205,64 @@ class MainWindow(QMainWindow, WindowMixin):
 
             pct_change = (prices[-1]-pre_close)/pre_close*100 if pre_close!=0 else 0
 
+            # def safe_autoRange(vb, df, cols=['high','low']):
+            #     if df is None or df.empty:
+            #         return
+            #     visible = df[cols].dropna()
+            #     if visible.empty:
+            #         return
+            #     y_max, y_min = visible.max().max(), visible.min().min()
+            #     if y_max == y_min:
+            #         y_max += 1
+            #     vb.setRange(yRange=(y_min, y_max), padding=0)
+
+            # # ⭐ 绘制完成后一次性调整视图范围，确保数据可见 (由于 disableAutoRange)
+            # try:
+            #     self.tick_plot.autoRange()
+            # except (ValueError, RuntimeError) as e:
+                    # 防止 NaN 值导致 pyqtgraph 崩溃
+                    # logger.debug(f"tick_plot.autoRange() failed: {e}")
+
             # ⭐ 绘制完成后一次性调整视图范围，确保数据可见 (由于 disableAutoRange)
             try:
-                self.tick_plot.autoRange()
-            except (ValueError, RuntimeError) as e:
-                # 防止 NaN 值导致 pyqtgraph 崩溃
-                logger.debug(f"tick_plot.autoRange() failed: {e}")
+                # 仅当有有效数据时才设置范围
+                if tick_df is not None and not tick_df.empty:
+                    # 提取有效的 high/low 数据（过滤 NaN）
+                    valid_high = tick_df['high'].dropna()
+                    valid_low = tick_df['low'].dropna()
+                    
+                    if not valid_high.empty and not valid_low.empty:
+                        # 手动计算 Y 轴范围（避免 NaN 导致的 autoRange 错误）
+                        y_max = float(valid_high.max())
+                        y_min = float(valid_low.min())
+                        
+                        # 添加一些 padding
+                        y_range = y_max - y_min
+                        padding = y_range * 0.05 if y_range > 0 else 0.1
+                        
+                        # 获取 ViewBox
+                        vb = self.tick_plot.getViewBox()
+                        
+                        # 手动设置 Y 轴范围
+                        vb.setYRange(y_min - padding, y_max + padding, padding=0)
+                        
+                        # 手动设置 X 轴范围（避免调用 updateAutoRange）
+                        # 使用有效数据的索引范围
+                        if len(x_ticks) > 0:
+                            x_min = float(x_ticks[0])
+                            x_max = float(x_ticks[-1])
+                            x_padding = (x_max - x_min) * 0.02 if x_max > x_min else 1
+                            vb.setXRange(x_min - x_padding, x_max + x_padding, padding=0)
+                        
+                        logger.debug(f"tick_plot range set: X=[{x_ticks[0]:.0f}, {x_ticks[-1]:.0f}], Y=[{y_min:.2f}, {y_max:.2f}]")
+                    else:
+                        logger.debug("tick_plot range skipped: all NaN in high/low")
+                else:
+                    logger.debug("tick_plot range skipped: tick_df empty")
+            except (ValueError, RuntimeError, TypeError) as e:
+                # 防止 NaN 值或其他异常导致崩溃
+                logger.debug(f"tick_plot range setting failed: {e}")
+
 
             # ⭐ 构建分时图标题（包含监理看板）
             tick_title = f"Intraday: {prices[-1]:.2f} ({pct_change:.2f}%)"
@@ -6258,19 +6386,26 @@ class MainWindow(QMainWindow, WindowMixin):
         is_new_stock = not hasattr(self, '_last_rendered_code') or self._last_rendered_code != code
         self._last_rendered_code = code
 
-        last_resample = getattr(self, "_last_resample", None)
-        is_resample_change = (last_resample is not None and last_resample != self.resample)
-        self._last_resample = self.resample
 
+        # 判断周期是否变化
+        last_resample = getattr(self, "_last_resample", None)
+        is_resample_change = last_resample != self.resample  # None != '3d' 第一次会是 True
+        logger.debug(f"resample check: last={last_resample}, current={self.resample}, is_change={is_resample_change}")
+        
         # 复合视角恢复标志
         has_captured_state = hasattr(self, '_prev_dist_left') and getattr(self, '_prev_y_zoom', None) is not None
         was_full_view = getattr(self, '_prev_is_full_view', False)
 
         if is_new_stock or is_resample_change or has_captured_state:
+            # [FIX] 只在真正发生变化时更新 _last_resample
+            if is_resample_change:
+                self._last_resample = self.resample
+                logger.debug(f"✅ Resample changed: {last_resample} → {self.resample}")
+            
             vb = self.kline_plot.getViewBox()
-            # 如果之前是“全览”状态，或者根本没有捕获状态，则执行 Reset (全览)
+            # 如果之前是"全览"状态，或者根本没有捕获状态，则执行 Reset (全览)
             logger.debug(f'was_full_view: {was_full_view} has_captured_state: {has_captured_state}')
-            if was_full_view or not has_captured_state:
+            if was_full_view or not has_captured_state or is_resample_change:
                 self._reset_kline_view(df=day_df)
             else:
                 # 处于“记忆”状态：用户之前可能缩放到了某个特定区域
@@ -6326,7 +6461,8 @@ class MainWindow(QMainWindow, WindowMixin):
             self.decision_label.setText("实时决策中心: <span style='color:#666;'>未开启实时监控或等待信号...</span>")
             self.supervision_label.setText("🛡️ 流程监理: <span style='color:#666;'>就绪</span>")
             self.hb_label.setText("💤")
-
+        
+        
 
 
     # def render_charts_old(self, code, day_df, tick_df):
