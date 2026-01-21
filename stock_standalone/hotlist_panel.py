@@ -99,6 +99,21 @@ class HotlistPanel(QWidget):
         # 数据流校验缓存：{code: (price, volume, amount)}
         self._last_data_sigs: dict[str, tuple[float, float, float]] = {}
         
+        # 语音前缀播放控制
+        self._last_voice_prefix_time: float = 0.0  # 全局冷却计时
+        self._batch_spoken_flag: bool = False      # 单批次互斥锁
+        
+        # 信号计数统计：{(code, pattern): count} —— 当天重复信号计数
+        self._signal_counts: dict[tuple[str, str], int] = {}
+        self._voice_paused: bool = False
+        
+        # 日期控制
+        self._last_reset_date = datetime.now().date()
+        
+        # 检测器与指纹状态
+        self._last_check_fingerprint: str = ""
+        self._pattern_detector = None  # 语音暂停标记
+        
         # 定时刷新盈亏（每30秒）
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._refresh_pnl)
@@ -263,11 +278,53 @@ class HotlistPanel(QWidget):
         
         layout.addWidget(self.table)
         
-        # 状态栏
+        # 状态栏 + 暂停语音按钮
+        status_bar = QHBoxLayout()
         self.status_label = QLabel("共 0 只热点股")
         self.status_label.setStyleSheet("color: #666; font-size: 9pt; padding: 2px 8px;")
-        layout.addWidget(self.status_label)
+        status_bar.addWidget(self.status_label)
+        
+        status_bar.addStretch()
+        
+        # 暂停语音按钮
+        self.pause_voice_btn = QPushButton("🔊")
+        self.pause_voice_btn.setFixedSize(28, 22)
+        self.pause_voice_btn.setCheckable(True)
+        self.pause_voice_btn.setToolTip("点击暂停/恢复语音播报")
+        self.pause_voice_btn.setStyleSheet("""
+            QPushButton {
+                background: transparent;
+                border: 1px solid #444;
+                border-radius: 3px;
+                font-size: 12pt;
+            }
+            QPushButton:checked {
+                background: #600;
+                border-color: #900;
+            }
+            QPushButton:hover {
+                background: #333;
+            }
+        """)
+        self.pause_voice_btn.clicked.connect(self.toggle_voice)
+        status_bar.addWidget(self.pause_voice_btn)
+        
+        layout.addLayout(status_bar)
     
+    def toggle_voice(self):
+        """切换语音播报开启/暂停状态"""
+        self._voice_paused = not self._voice_paused
+        
+        # 更新按钮文本和样式
+        if self._voice_paused:
+            self.pause_voice_btn.setText("恢复语音")
+            self.pause_voice_btn.setStyleSheet("background-color: #600; border: 1px solid #f00;")
+            logger.info(f"🔇 Hotlist Voice PAUSED (Instance {id(self)})")
+        else:
+            self.pause_voice_btn.setText("暂停语音")
+            self.pause_voice_btn.setStyleSheet("")
+            logger.info(f"🔊 Hotlist Voice RESUMED (Instance {id(self)})")
+
     def _load_from_db(self):
         """从数据库加载热点列表"""
         self.items.clear()
@@ -532,9 +589,24 @@ class HotlistPanel(QWidget):
     
     def _notify_voice(self, code: str, msg: str):
         """发送语音通知信号"""
+        # 检查语音暂停状态
+        if self._voice_paused:
+            return
         if self.voice_enabled:
             self.voice_alert.emit(code, msg)
             logger.debug(f"Voice alert: {code} - {msg}")
+    
+    def _toggle_voice_pause(self):
+        """切换语音暂停状态"""
+        self._voice_paused = self.pause_voice_btn.isChecked()
+        if self._voice_paused:
+            self.pause_voice_btn.setText("🔇")
+            self.pause_voice_btn.setToolTip("语音已暂停，点击恢复")
+            logger.info("🔇 热点语音播报已暂停")
+        else:
+            self.pause_voice_btn.setText("🔊")
+            self.pause_voice_btn.setToolTip("点击暂停/恢复语音播报")
+            logger.info("🔊 热点语音播报已恢复")
     
     def contains(self, code: str) -> bool:
         """检查是否已包含该股票"""
@@ -548,17 +620,46 @@ class HotlistPanel(QWidget):
         Args:
             df: 包含实时数据的 DataFrame (df_all)
         """
-        if not HAS_PATTERN_DETECTOR or df is None or df.empty:
+        if not HAS_PATTERN_DETECTOR:
+            logger.warning("⚠️ Pattern Detector not available (Import failed)")
             return
         
+        if df is None or df.empty:
+            return
+            
+        # 每日重置信号计数
+        current_date = datetime.now().date()
+        if current_date != self._last_reset_date:
+            self._signal_counts.clear()
+            self._last_reset_date = current_date
+            logger.info("📅 New Day: Cleared signal counts")
+        
+        # ⭐ 使用及健壮的数据指纹 (Length + SumClose + SumVol)
+        try:
+            c_sum = int(df['close'].sum() * 100)
+            v_sum = int(df['volume'].sum())
+            current_fp = f"{len(df)}_{c_sum}_{v_sum}"
+        except Exception as e:
+            current_fp = f"{len(df)}_{hash(str(df.index.tolist()[:5]))}"
+            
+        # 如果数据未变化，跳过检测
+        if hasattr(self, '_last_check_fingerprint') and self._last_check_fingerprint == current_fp:
+            return
+        self._last_check_fingerprint = current_fp
+        
+        # ⭐ 新的一轮检测开始：重置本轮说话标记
+        self._batch_spoken_flag = False
+        
         # 懒加载检测器
-        if not hasattr(self, '_pattern_detector'):
+        if self._pattern_detector is None:
             self._pattern_detector = IntradayPatternDetector(
                 cooldown=120,           # 2分钟冷却
                 publish_to_bus=False    # 不发布到全局总线，局部处理
             )
             self._pattern_detector.on_pattern = self._on_signal_detected
             logger.info("🔥 HotlistPanel PatternDetector initialized")
+            
+        # logger.info(f"🔍 Scan Started: {len(self.items)} items, FP={current_fp}")
         
         # 遍历热点股票
         for item in self.items:
@@ -595,7 +696,8 @@ class HotlistPanel(QWidget):
                     prev_close=prev_close
                 )
             except Exception as e:
-                logger.debug(f"Pattern check error for {item.code}: {e}")
+                # logger.debug(f"Pattern check error for {item.code}: {e}")
+                pass
 
     def _on_signal_detected(self, event: 'PatternEvent') -> None:
         """形态检测回调"""
@@ -606,15 +708,43 @@ class HotlistPanel(QWidget):
                 
             pattern_cn = IntradayPatternDetector.PATTERN_NAMES.get(event.pattern, event.pattern)
             time_str = datetime.now().strftime('%H:%M:%S')
-            msg = f"[{time_str}] {event.code} {event.name} {pattern_cn} @ {event.price:.2f}"
+            
+            # ⭐ 信号计数统计
+            signal_key = (event.code, event.pattern)
+            count = self._signal_counts.get(signal_key, 0) + 1
+            self._signal_counts[signal_key] = count
+            
+            msg = f"[{time_str}] {event.code} {event.name} {pattern_cn} @ {event.price:.2f} (第{count}次)"
             
             # 发射信号日志 (仅在数据有效且由于 update 触发后产生)
-            self.signal_log.emit(event.code, event.name, event.pattern, msg)
+            try:
+                self.signal_log.emit(event.code, event.name, event.pattern, msg)
+            except Exception as e_emit:
+                logger.error(f"❌ Signal emit failed: {e_emit}")
             
-            # 语音通知
-            self._notify_voice(event.code, f"{event.name} {pattern_cn}")
+            # ⭐ 语音通知优化
+            import time as _time
+            now = _time.time()
             
-            logger.info(f"🔥 热点信号: {msg}")
+            should_play_prefix = False
+            
+            if count == 1:
+                # 首次触发：只做时间冷却检查 (60秒)
+                # 忽略BatchFlag，防止因数据刷新过快导致的重复播报
+                time_diff = now - self._last_voice_prefix_time
+                if time_diff > 60:
+                    should_play_prefix = True
+                    self._last_voice_prefix_time = now # 更新全局冷却
+                
+                prefix = "热点信息 " if should_play_prefix else ""
+                voice_msg = f"{prefix}{event.name} {pattern_cn}"
+            else:
+                # 重复触发：简短播报
+                voice_msg = f"{event.name} {pattern_cn} 第{count}次"
+            
+            self._notify_voice(event.code, voice_msg)
+            
+            logger.warning(f"🔥 热点信号: {msg}")
         except Exception as e:
             logger.error(f"Signal callback error: {e}")
 
