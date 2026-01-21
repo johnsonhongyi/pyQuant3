@@ -4390,7 +4390,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self.active_alerts = []
             
         # 定义固定的窗口尺寸和边距
-        alert_width, alert_height = 400, 260 
+        alert_width, alert_height = 400, 180 
         margin = 10
         taskbar_height = 100 # 避开任务栏高度
         
@@ -4433,9 +4433,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as e:
                 logger.error(f"调整索引 {i} 的警报窗口位置时出错: {e}")
 
-        # *** 关键优化 ***
-        # 强制 Tkinter 立即处理所有待定的 geometry() 更新。
-        # 这使得所有窗口的位置变化在视觉上是同步的，消除了逐个移动的闪烁感。
+        # *** 层叠效果优化 ***
+        # 强制 Tkinter 立即处理所有待定的 geometry() 更新
+        # 这使得所有窗口的位置变化在视觉上是同步的，保持层叠效果
         self.update_idletasks()
 
     def _shake_window(self, win, distance=8, interval_ms=60):
@@ -4812,7 +4812,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._process_alert_queue()
     
     def _process_alert_queue(self):
-        """处理弹窗队列，逐个创建窗口"""
+        """处理弹窗队列，逐个创建窗口（层叠效果 + 可操作）"""
         if not hasattr(self, '_alert_queue') or not self._alert_queue:
             self._alert_queue_processing = False
             return
@@ -4826,7 +4826,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 创建这个弹窗
         self._create_single_alert_popup(code, name, msg)
         
-        # 如果还有队列，300ms 后继续处理下一个（间隔更大，层级效果更明显）
+        # ⭐ 关键：处理完一个弹窗后，立即处理待定的用户事件（如点击）
+        # 这确保用户可以在弹窗逐个出现的过程中操作已显示的窗口
+        try:
+            self.update()
+        except tk.TclError:
+            pass  # 窗口可能已关闭
+        
+        # 如果还有队列，300ms 后继续处理下一个（层级效果）
         if self._alert_queue:
             self.after(300, self._process_alert_queue)
         else:
@@ -4852,14 +4859,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             # ===== 直接创建完整弹窗（队列控制速度，无需分段） =====
             win = tk.Toplevel(self)
-            win.title(f"🔔 触发报警 - {name} ({code})")
+            win.overrideredirect(True)  # 移除系统标题栏，使用自定义标题栏
             win.attributes("-topmost", True)
-            win.attributes("-toolwindow", True)
             win.geometry("400x180")
             win.configure(bg="#fff")
-            win.grab_release()  # 确保不会锁定焦点
             
-            # 记录并定位
+            # 记录并定位（直接调用，保持层叠效果）
             self.active_alerts.append(win)
             self._update_alert_positions()
             
@@ -4928,8 +4933,105 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win.is_flashing = False
             win.is_shaking = False
             
-            # 内容框架
-            frame = tk.Frame(win, bg="#fff", padx=10, pady=10)
+            # ===== 双击放大/缩小功能 =====
+            # 原始尺寸
+            win._orig_width = 400
+            win._orig_height = 180
+            win._is_enlarged = False
+            
+            def toggle_size(event=None):
+                """双击切换窗口大小：放大2倍 / 缩小回原大小"""
+                if not win.winfo_exists():
+                    return
+                
+                if win._is_enlarged:
+                    # 缩小回原大小
+                    new_w = win._orig_width
+                    new_h = win._orig_height
+                    win._is_enlarged = False
+                else:
+                    # 放大2倍
+                    new_w = win._orig_width * 2
+                    new_h = win._orig_height * 2
+                    win._is_enlarged = True
+                
+                # 获取当前位置，保持窗口中心不变
+                try:
+                    curr_x = win.winfo_x()
+                    curr_y = win.winfo_y()
+                    curr_w = win.winfo_width()
+                    curr_h = win.winfo_height()
+                    
+                    # 计算新位置，使窗口中心保持不变
+                    new_x = curr_x + (curr_w - new_w) // 2
+                    new_y = curr_y + (curr_h - new_h) // 2
+                    
+                    # 确保不超出屏幕边界
+                    screen_w = win.winfo_screenwidth()
+                    screen_h = win.winfo_screenheight()
+                    new_x = max(0, min(new_x, screen_w - new_w))
+                    new_y = max(0, min(new_y, screen_h - new_h - 50))  # 50 为任务栏
+                    
+                    win.geometry(f"{new_w}x{new_h}+{new_x}+{new_y}")
+                except Exception as e:
+                    logger.debug(f"Toggle size error: {e}")
+                    win.geometry(f"{new_w}x{new_h}")
+            
+            win.toggle_size = toggle_size
+            
+            # 绑定标题栏双击事件（使用顶部模拟标题栏）
+            title_bar = tk.Frame(win, bg="#e57373", height=32, cursor="hand2")
+            title_bar.pack(fill="x", side="top")
+            title_bar.pack_propagate(False)
+            
+            title_label = tk.Label(
+                title_bar, 
+                text=f"🔔 {name} ({code})", 
+                bg="#e57373", 
+                fg="white",
+                font=("Microsoft YaHei", 10, "bold"),
+                anchor="w",
+                padx=8
+            )
+            title_label.pack(side="left", fill="x", expand=True)
+            
+            # 关闭按钮（在标题栏右侧）
+            close_btn = tk.Label(
+                title_bar,
+                text="✖",
+                bg="#e57373",
+                fg="white",
+                font=("Arial", 12, "bold"),
+                cursor="hand2",
+                padx=8
+            )
+            close_btn.pack(side="right")
+            close_btn.bind("<Button-1>", lambda e: self._close_alert(win, is_manual=True))
+            close_btn.bind("<Enter>", lambda e: close_btn.configure(bg="#c62828"))
+            close_btn.bind("<Leave>", lambda e: close_btn.configure(bg="#e57373"))
+            
+            # 双击标题栏切换大小
+            title_bar.bind("<Double-Button-1>", toggle_size)
+            title_label.bind("<Double-Button-1>", toggle_size)
+            
+            # 支持拖动窗口
+            def start_drag(event):
+                win._drag_start_x = event.x
+                win._drag_start_y = event.y
+            
+            def do_drag(event):
+                if hasattr(win, '_drag_start_x'):
+                    x = win.winfo_x() + (event.x - win._drag_start_x)
+                    y = win.winfo_y() + (event.y - win._drag_start_y)
+                    win.geometry(f"+{x}+{y}")
+            
+            title_bar.bind("<Button-1>", start_drag)
+            title_bar.bind("<B1-Motion>", do_drag)
+            title_label.bind("<Button-1>", start_drag)
+            title_label.bind("<B1-Motion>", do_drag)
+            
+            # 内容框架（减小padding，信息更紧凑）
+            frame = tk.Frame(win, bg="#fff", padx=8, pady=5)
             frame.pack(fill="both", expand=True)
             
             # 按钮区
@@ -4964,9 +5066,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             tk.Button(btn_frame, text="关闭", command=lambda: self._close_alert(win, is_manual=True), bg="#eee", width=8, pady=2).pack(side="right", padx=5)
             
-            # 消息标签
-            msg_label = tk.Label(frame, text=f"⚠️{code} {msg}", font=("Microsoft YaHei", 12, "bold"), fg="#d32f2f", bg="#fff", wraplength=380)
-            msg_label.pack(pady=5)
+            # 消息标签（移除重复的股票代码，标题栏已有）
+            msg_label = tk.Label(frame, text=f"⚠️ {msg}", font=("Microsoft YaHei", 11, "bold"), fg="#d32f2f", bg="#fff", wraplength=380, anchor="w", justify="left")
+            msg_label.pack(fill="x", pady=2)
             win.msg_label = msg_label
             
             # 详情文本
