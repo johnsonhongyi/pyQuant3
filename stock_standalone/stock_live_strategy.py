@@ -281,11 +281,31 @@ class VoiceAnnouncer:
                     pass
             self._pending_timers.clear()
         
+        # 清空队列，防止阻塞
+        try:
+            while True:
+                self.queue.get_nowait()
+        except Empty:
+            pass
+        
         self._stop_event.set()
+        
         if self._process and self._process.is_alive():
-            self._process.join(timeout=1)
+            # 给进程短暂时间自行退出
+            self._process.join(timeout=0.5)
+            # 如果还没退出，强制终止
             if self._process.is_alive():
-                 self._process.terminate()
+                try:
+                    self._process.terminate()
+                    self._process.join(timeout=0.3)
+                except Exception:
+                    pass
+            # 最后手段：杀死进程
+            if self._process.is_alive():
+                try:
+                    self._process.kill()
+                except Exception:
+                    pass
 
 
 class StrategySupervisor:
@@ -513,10 +533,13 @@ class StockLiveStrategy:
             except Exception as e:
                 logger.error(f"Error stopping VoiceAnnouncer: {e}")
                 
-        # 2. 停止线程池 (不再接收新任务，等待现有任务完成)
+        # 2. 停止线程池 (不再接收新任务，不等待)
         if hasattr(self, "executor") and self.executor:
             try:
-                self.executor.shutdown(wait=True)
+                self.executor.shutdown(wait=False, cancel_futures=True)
+            except TypeError:
+                # Python 3.8 不支持 cancel_futures
+                self.executor.shutdown(wait=False)
             except Exception as e:
                 logger.error(f"Error shutting down executor: {e}")
 
