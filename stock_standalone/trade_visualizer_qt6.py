@@ -3386,7 +3386,11 @@ class MainWindow(QMainWindow, WindowMixin):
                     if cmd == 'SWITCH_CODE':
                         if isinstance(val, dict):
                             logger.info(f"Queue CMD: Switching to {val.get('code')} with params {val}")
-                            self.load_stock_by_code(val.get('code'), **val)
+                            # [FIX] 避免 multiple values for argument 'code'
+                            params = val.copy()
+                            code = params.pop('code', None)
+                            if code:
+                                self.load_stock_by_code(code, **params)
                         else:
                             logger.info(f"Queue CMD: Switching to {val}")
                             self.load_stock_by_code(val)
@@ -6433,6 +6437,23 @@ class MainWindow(QMainWindow, WindowMixin):
             # 清理刚才使用的临时状态
             for attr in ['_prev_dist_left', '_prev_dist_right', '_prev_y_zoom', '_prev_y_center_rel', '_prev_is_full_view']:
                 if hasattr(self, attr): delattr(self, attr)
+        # ----------------- 5.1 数据自适应安全检查 (FIX) -----------------
+        # 如果不是新股切换，检查当前价格是否在视野内。如果偏离过大（例如缓存数据与实时数据价差巨大），强制回正
+        if not (is_new_stock or is_resample_change or has_captured_state):
+             # 检查最后一条 K 线是否可见
+             if not day_df.empty:
+                 last_c = day_df['close'].iloc[-1]
+                 vb = self.kline_plot.getViewBox()
+                 y_min, y_max = vb.viewRange()[1]
+                 
+                 # 容差 20% (稍微宽松一点，避免频繁跳动)
+                 height = y_max - y_min
+                 # 如果高度极小（初始状态），或者价格完全跑偏
+                 if height <= 0 or last_c < (y_min - height*0.2) or last_c > (y_max + height*0.2):
+                     logger.info(f"[AutoRange] Price {last_c:.2f} out of view [{y_min:.2f}, {y_max:.2f}], forcing Y-AutoRange")
+                     vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+                     vb.setAutoVisible(y=True)
+
         # ----------------- 6. 更新实时决策面板 (Phase 7) -----------------
         if is_realtime_active and 'shadow_decision' in locals() and shadow_decision:
             action = shadow_decision.get('action', '无')

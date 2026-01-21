@@ -359,6 +359,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.refresh_enabled = True
         
         self.visualizer_process = None # Track visualizer process
+        self.qt_process = None         # [FIX] 初始化 qt_process 避免 send_df AttributeError
         self.viz_command_queue = None  # ⭐ [FIX] 提前初始化队列，供 send_df 使用
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.last_vis_var_status = None 
@@ -730,8 +731,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if obj and obj.get("cmd") == "REQ_FULL_SYNC":
                             logger.info(f'[Pipe] Feedback listener cmd REQ_FULL_SYNC')
                             self._force_full_sync_pending = True
-                            if self.viz_command_queue:
-                                self.viz_command_queue = None
+
                             self._df_first_send_done = False
                         
                         elif obj and obj.get("cmd") == "ADD_MONITOR":
@@ -2165,27 +2165,44 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # --- 0️⃣ 获取当前周期参数 ---
         resample = self.resample_combo.get() if hasattr(self, 'resample_combo') else 'd'
 
-        # --- 1️⃣ 尝试通过 Socket 发送给已有实例 (Extensible Format) ---
-        try:
-            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.settimeout(1)
-            client_socket.connect((ipc_host, ipc_port))
-            # 发送格式: CODE|代码|key1=val1|key2=val2
-            # 必须加上 CODE| 前缀，否则 Visualizer 无法识别 (elif prefix == b"CODE")
-            ipc_msg = f"CODE|{code}|resample={resample}"
-            client_socket.send(ipc_msg.encode('utf-8'))
-            client_socket.close()
-            logger.debug(f"Socket: Sent {ipc_msg} to visualizer")
-            sent = True
-        except (ConnectionRefusedError, OSError):
-            sent = False
-        except Exception as e:
-            logger.warning(f"Socket connection check failed: {e}")
+        sent = False
+        
+        # --- 1️⃣ 优先检查内部进程是否存活，使用 Queue 通信 (最快) ---
+        if self.qt_process is not None and self.qt_process.is_alive():
+             try:
+                 if self.viz_command_queue is not None:
+                     self.viz_command_queue.put(('SWITCH_CODE', {'code': code, 'resample': resample}))
+                     logger.info(f"Queue: Sent SWITCH_CODE {code} with resample={resample}")
+                     sent = True
+                     # 交互提示
+                     if hasattr(self, 'status_bar'):
+                         self.status_bar.config(text=f"正在切换可视化: {code} ...")
+                         self.update_idletasks()
+             except Exception as e:
+                 logger.error(f"Queue send failed: {e}")
 
-        # --- 2️⃣ 启动 Qt 可视化进程（如果没发出去） ---
+        # --- 2️⃣ 如果内部队列没发送(可能是外部进程或队列错)，尝试 Socket ---
         if not sent:
             try:
-                if self.qt_process is None or not self.qt_process.is_alive() or getattr(self, '_df_first_send_done',False):
+                client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client_socket.settimeout(0.5) # 缩短超时，避免界面卡顿
+                client_socket.connect((ipc_host, ipc_port))
+                # 发送格式: CODE|代码|key1=val1|key2=val2
+                ipc_msg = f"CODE|{code}|resample={resample}"
+                client_socket.send(ipc_msg.encode('utf-8'))
+                client_socket.close()
+                logger.debug(f"Socket: Sent {ipc_msg} to visualizer")
+                sent = True
+            except (ConnectionRefusedError, OSError):
+                pass
+            except Exception as e:
+                logger.warning(f"Socket connection check failed: {e}")
+
+        # --- 3️⃣ 启动 Qt 可视化进程（如果既没活着也没人听） ---
+        if not sent:
+            try:
+                # 只有当进程确实不存在或已死时才启动
+                if self.qt_process is None or not self.qt_process.is_alive():
                     # 初始化指令队列
                     if self.viz_command_queue is None:
                         self.viz_command_queue = mp.Queue()
@@ -2195,7 +2212,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     initial_payload = f"{code}|resample={resample}"
                     self.qt_process = mp.Process(
                         target=qtviz.main, 
-                        args=(initial_payload, self.refresh_flag, None , False, self.viz_command_queue), 
+                        args=(initial_payload, self.refresh_flag, self.log_level , False, self.viz_command_queue), 
                         daemon=False
                     )
                     self.qt_process.start()
@@ -2204,18 +2221,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if hasattr(self, '_df_first_send_done'):
                         self._df_first_send_done = False
                 else:
-                    # 进程已在运行，通过队列切换代码 (Extensible Format)
-                    self.viz_command_queue.put(('SWITCH_CODE', {'code': code, 'resample': resample}))
-                    logger.info(f"Queue: Sent SWITCH_CODE {code} with resample={resample}")
-                    sent = True # 标记为已处理
-                    # 交互提示
-                    if hasattr(self, 'status_bar'):
-                        self.status_bar.config(text=f"正在切换可视化: {code} ...")
-                        self.update_idletasks()
+                     # 理论上不应该走到这里，因为前面检查过 alive 并尝试了 queue
+                     # 但以防万一 queue 失败了但进程还活着... 还是尝试 queue 吧
+                     if self.viz_command_queue is not None:
+                         self.viz_command_queue.put(('SWITCH_CODE', {'code': code, 'resample': resample}))
             except Exception as e:
                 logger.error(f"Failed to start Qt visualizer: {e}")
                 traceback.print_exc()
                 return
+
+            if not hasattr(self, '_df_first_send_done'):
+                self._df_first_send_done = False
 
             if not hasattr(self, '_df_first_send_done'):
                 self._df_first_send_done = False
@@ -2321,9 +2337,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 }
 
                 # ======================================================
-                # ⭐ 4️⃣ 主通道：Queue
+                # ⭐ 4️⃣ 主通道：Queue (优先)
                 # ======================================================
-                if self.viz_command_queue and not sent:
+                used_queue = False
+                # 关键修正：必须检查 qt_process.is_alive()。
+                # 如果内联进程关闭，Queue 对象虽在但无人读取，会导致数据堆积且外部 IPC 无法生效。
+                # 只有进程活着，Queue 通信才有意义。
+                if self.viz_command_queue is not None and self.qt_process is not None and self.qt_process.is_alive() and not sent:
                     try:
                         with timed_ctx(f"viz_queue_put[{len(df_ui)}]", warn_ms=300):
                             self.viz_command_queue.put_nowait(
@@ -2331,12 +2351,17 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             )
                         logger.debug(f"[Queue] {msg_type} sent (ver={self.sync_version})")
                         sent = True
+                        used_queue = True
 
                     except Full:
                         logger.warning("[Queue] full, fallback to IPC")
 
                     except Exception as e:
-                        logger.exception(f"[Queue] send failed:: {e}")
+                        logger.exception(f"[Queue] send failed: {e}")
+
+                # 诊断：如果有内部进程但没走 Queue
+                if not sent and self.qt_process is not None and self.qt_process.is_alive():
+                     logger.warning(f"[send_df] Internal process alive but Queue skipped/failed! queue_obj={self.viz_command_queue is not None}")
 
                 # ======================================================
                 # ⭐ 5️⃣ 兜底通道：Socket（仅当 Queue 失败）
@@ -2359,9 +2384,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                         logger.debug(f"[IPC] {msg_type} sent (ver={self.sync_version})")
                         sent = True
+                        
+                        # 再次提醒：虽然 IPC 发送成功，但如果是内部启动，本应该走 Queue
+                        if self.qt_process is not None and self.qt_process.is_alive():
+                            logger.info("[send_df] Used IPC fallback for distinct internal process (Queue might be full or broken).")
 
                     except Exception as e:
-                        logger.warning(f"[IPC] send failed: {e}")
+                        # 只有当真正失败时才 Warning，避免没有 Visualizer 时的噪音
+                        # logger.warning(f"[IPC] send failed: {e}")
+                        pass
                         if not self.vis_var.get():
                             # self._df_first_send_done = True
                             sent = True
@@ -2454,8 +2485,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.debug(f"[send_df] force full send: deleting df_ui_prev, _df_first_send_done={self._df_first_send_done}")
             if hasattr(self, 'df_ui_prev'):
                 del self.df_ui_prev  # 删除缓存，模拟初始化
-            if self.viz_command_queue:
-                self.viz_command_queue = None
+
             self._df_first_send_done = False
         # self.update_treeview_cols(self.current_cols)
         tip_var_status_flag.value = self.tip_var.get()
