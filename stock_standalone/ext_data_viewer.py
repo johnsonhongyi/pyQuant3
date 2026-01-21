@@ -160,8 +160,15 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
         vals = tree.item(item, "values")
         if vals:
             stock_code = str(vals[0])
+            # 发送到 TDX
             if self.sender and hasattr(self.sender, 'send'):
                 self.sender.send(stock_code)
+            
+            # [NEW] 根据 vis_var 开关联动到可视化窗口
+            parent = self.master
+            if hasattr(parent, 'vis_var') and parent.vis_var.get() and stock_code:
+                if hasattr(parent, 'open_visualizer'):
+                    parent.open_visualizer(stock_code)
 
     def _on_tree_click(self, event, tree, button_type):
         """处理树视图点击联动"""
@@ -177,9 +184,16 @@ class ExtDataViewer(tk.Toplevel, WindowMixin, TreeviewMixin):
             if self._sender_code is not None  and self._sender_code == stock_code:
                 return
             else:
+                # 发送到 TDX
                 if self.sender and hasattr(self.sender, 'send'):
                     self.sender.send(stock_code)
                     self._sender_code = stock_code
+                
+                # [NEW] 根据 vis_var 开关联动到可视化窗口
+                parent = self.master
+                if hasattr(parent, 'vis_var') and parent.vis_var.get() and stock_code:
+                    if hasattr(parent, 'open_visualizer'):
+                        parent.open_visualizer(stock_code)
         elif button_type == "right":
             if self.on_tree_scroll_to_code:
                 self.on_tree_scroll_to_code(stock_code)

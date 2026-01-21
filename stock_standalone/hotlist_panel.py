@@ -118,6 +118,9 @@ class HotlistPanel(QWidget):
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._refresh_pnl)
         self.refresh_timer.start(30000)
+        
+        # [NEW] 加载信号计数（从数据库）
+        self._load_signal_counts()
     
     def _init_db(self):
         """确保数据库表存在，并扩展字段"""
@@ -154,6 +157,18 @@ class HotlistPanel(QWidget):
                 c.execute("ALTER TABLE follow_record ADD COLUMN signal_type TEXT DEFAULT '手动添加'")
             except sqlite3.OperationalError:
                 pass
+            
+            # [NEW] 创建信号计数表（按天统计）
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS signal_counts (
+                    code TEXT NOT NULL,
+                    pattern TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    count INTEGER DEFAULT 0,
+                    last_trigger TEXT,
+                    PRIMARY KEY (code, pattern, date)
+                )
+            """)
             
             conn.commit()
             conn.close()
@@ -215,12 +230,6 @@ class HotlistPanel(QWidget):
         refresh_btn.clicked.connect(self._refresh_pnl)
         header_layout.addWidget(refresh_btn)
         
-        # 清空按钮
-        clear_btn = QPushButton("🗑️")
-        clear_btn.setToolTip("清空已退出")
-        clear_btn.clicked.connect(self._clear_exited)
-        header_layout.addWidget(clear_btn)
-        
         # 关闭按钮
         close_btn = QPushButton("✕")
         close_btn.setToolTip("关闭 (Alt+H)")
@@ -241,6 +250,12 @@ class HotlistPanel(QWidget):
         self.table.cellDoubleClicked.connect(self._on_double_click)
         self.table.cellClicked.connect(self._on_click)
         
+        # [NEW] 启用列排序功能
+        self.table.setSortingEnabled(True)
+        
+        # [NEW] 添加键盘导航联动（上下键切换时也触发股票选择）
+        self.table.currentCellChanged.connect(self._on_current_cell_changed)
+        
         # 表头设置
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents) # Code
@@ -251,7 +266,7 @@ class HotlistPanel(QWidget):
         header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)            # Group
         self.table.setColumnWidth(5, 50)
         header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)            # Time
-        self.table.setColumnWidth(6, 45)                                        # Compact time width
+        self.table.setColumnWidth(6, 80)                                        # [MODIFIED] 增大时间列宽度以便完整显示
         
         self.table.verticalHeader().setVisible(False)
         self.table.setStyleSheet("""
@@ -494,9 +509,20 @@ class HotlistPanel(QWidget):
     
     def _refresh_pnl(self):
         """刷新盈亏数据（从主窗口的df_all获取）"""
-        parent = self.parent()
-        if parent and hasattr(parent, 'df_all') and not parent.df_all.empty:
-            df = parent.df_all
+        # [FIX] 使用 window() 而不是 parent() 来获取主窗口（因为 parent=None）
+        main_window = None
+        try:
+            # 尝试通过 window() 获取顶层窗口
+            from PyQt6.QtWidgets import QApplication
+            for widget in QApplication.topLevelWidgets():
+                if hasattr(widget, 'df_all') and widget.__class__.__name__ == 'MainWindow':
+                    main_window = widget
+                    break
+        except Exception as e:
+            logger.debug(f"Failed to find main window: {e}")
+        
+        if main_window and hasattr(main_window, 'df_all') and not main_window.df_all.empty:
+            df = main_window.df_all
             price_map = {}
             for item in self.items:
                 if item.code in df.index:
@@ -505,23 +531,80 @@ class HotlistPanel(QWidget):
             
             if price_map:
                 self.update_prices(price_map)
+                logger.info(f"✅ 已刷新 {len(price_map)} 只股票的盈亏数据")
+            else:
+                logger.warning("⚠️ 未找到匹配的股票数据")
+        else:
+            logger.warning("⚠️ 无法获取主窗口数据，请确保主窗口已加载数据")
     
     def _clear_exited(self):
         """清空已退出的记录"""
         try:
             conn = sqlite3.connect(DB_FILE, timeout=10)
             c = conn.cursor()
+            # [FIX] 先查询要删除的数量
+            c.execute("SELECT COUNT(*) FROM follow_record WHERE status != 'ACTIVE'")
+            count = c.fetchone()[0]
+            
+            if count == 0:
+                logger.info("ℹ️ 没有需要清理的退出记录")
+                conn.close()
+                return
+            
             c.execute("DELETE FROM follow_record WHERE status != 'ACTIVE'")
             conn.commit()
             conn.close()
-            logger.info("已清空退出记录")
+            
+            # [FIX] 重新加载列表以显示更新
+            self._load_from_db()
+            logger.info(f"✅ 已清空 {count} 条退出记录")
         except Exception as e:
             logger.error(f"Clear exited error: {e}")
+    
+    def _load_signal_counts(self):
+        """从数据库加载今日信号计数"""
+        try:
+            today = datetime.now().strftime('%Y-%m-%d')
+            conn = sqlite3.connect(DB_FILE, timeout=10)
+            c = conn.cursor()
+            c.execute("SELECT code, pattern, count FROM signal_counts WHERE date = ?", (today,))
+            rows = c.fetchall()
+            conn.close()
+            
+            for code, pattern, count in rows:
+                self._signal_counts[(code, pattern)] = count
+            
+            if rows:
+                logger.info(f"📊 已加载今日 {len(rows)} 条信号统计")
+        except Exception as e:
+            logger.debug(f"Load signal counts error: {e}")
+    
+    def _save_signal_count(self, code: str, pattern: str, count: int):
+        """保存单个信号计数到数据库（按天）"""
+        try:
+            today = datetime.now().strftime('%Y-%m-%d')
+            conn = sqlite3.connect(DB_FILE, timeout=10)
+            c = conn.cursor()
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            c.execute("""
+                INSERT OR REPLACE INTO signal_counts (code, pattern, date, count, last_trigger)
+                VALUES (?, ?, ?, ?, ?)
+            """, (code, pattern, today, count, now))
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Save signal count error: {e}")
     
     def _on_click(self, row: int, col: int):
         """单击切换股票"""
         if 0 <= row < len(self.items):
             item = self.items[row]
+            self.stock_selected.emit(item.code, item.name)
+    
+    def _on_current_cell_changed(self, currentRow: int, _currentColumn: int, _previousRow: int, _previousColumn: int):
+        """键盘导航联动（上下键切换时也触发股票选择）"""
+        if 0 <= currentRow < len(self.items):
+            item = self.items[currentRow]
             self.stock_selected.emit(item.code, item.name)
     
     def _on_double_click(self, row: int, col: int):
@@ -627,12 +710,12 @@ class HotlistPanel(QWidget):
         if df is None or df.empty:
             return
             
-        # 每日重置信号计数
+        # [MODIFIED] 每日重置信号计数（按天统计）
         current_date = datetime.now().date()
         if current_date != self._last_reset_date:
             self._signal_counts.clear()
             self._last_reset_date = current_date
-            logger.info("📅 New Day: Cleared signal counts")
+            logger.info(f"📅 新的一天：已重置今日信号计数 ({current_date})")
         
         # ⭐ 使用及健壮的数据指纹 (Length + SumClose + SumVol)
         try:
@@ -709,10 +792,13 @@ class HotlistPanel(QWidget):
             pattern_cn = IntradayPatternDetector.PATTERN_NAMES.get(event.pattern, event.pattern)
             time_str = datetime.now().strftime('%H:%M:%S')
             
-            # ⭐ 信号计数统计
+            # ⭐ 信号计数统计（累积）
             signal_key = (event.code, event.pattern)
             count = self._signal_counts.get(signal_key, 0) + 1
             self._signal_counts[signal_key] = count
+            
+            # [NEW] 持久化到数据库
+            self._save_signal_count(event.code, event.pattern, count)
             
             msg = f"[{time_str}] {event.code} {event.name} {pattern_cn} @ {event.price:.2f} (第{count}次)"
             
