@@ -24,6 +24,7 @@ a = Analysis(
         ("window_config.json", "."),
         ("scale2_window_config.json", "."),
         ("monitor_category_list.json", "."),
+        ("visualizer_layout.json", "."),
         ("display_cols.json", "."),
         ("datacsv/search_history.json", "."),
         ("JSONData/stock_codes.conf", "JSONData"),
