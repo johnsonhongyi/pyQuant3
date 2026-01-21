@@ -212,6 +212,8 @@ if hasattr(self, 'pattern_detector'):
 
 | 日期 | 内容 | 影响 |
 |------|------|------|
+| 01-21 11:27 | 合并监控循环：删除独立30s定时器 | `trade_visualizer_qt6.py` |
+| 01-21 11:10 | 同股去重：弹窗复用 + 消息更新 | `instock_MonitorTK.py` |
 | 01-21 01:26 | 升级全局热键模式，集成信号日志面板 | `trade_visualizer_qt6.py` |
 | 01-21 01:20 | 重构热点监控，支持形态日志流 | `signal_log_panel.py` |
 | 01-21 01:05 | 重构跟踪机制，增加当前任务详情区块 | `gemini.md` |

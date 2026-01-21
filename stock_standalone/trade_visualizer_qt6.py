@@ -2283,7 +2283,8 @@ class MainWindow(QMainWindow, WindowMixin):
         """初始化热点自选面板和信号日志面板"""
         # 1. 热点自选面板 (集中初始化，防止重复)
         if not hasattr(self, 'hotlist_panel'):
-            self.hotlist_panel = HotlistPanel(self)
+            # ⭐ [Independent Window] 设置为 None，允许面板掉到主窗口后面
+            self.hotlist_panel = HotlistPanel(None)
             self.hotlist_panel.stock_selected.connect(self._on_hotlist_stock_selected)
             self.hotlist_panel.item_double_clicked.connect(self._on_hotlist_double_click)
             self.hotlist_panel.voice_alert.connect(self._on_hotlist_voice_alert)
@@ -2291,7 +2292,8 @@ class MainWindow(QMainWindow, WindowMixin):
             self.hotlist_panel.hide()
         
         # 2. 信号日志面板
-        self.signal_log_panel = SignalLogPanel(self)
+        # ⭐ [Independent Window] 设置为 None，允许面板掉到主窗口后面
+        self.signal_log_panel = SignalLogPanel(None)
         self.signal_log_panel.log_clicked.connect(self._on_signal_log_clicked)
         
         # 3. 热点检测：不再使用独立定时器，由主数据刷新周期驱动

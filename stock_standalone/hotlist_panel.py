@@ -80,8 +80,7 @@ class HotlistPanel(QWidget):
         
         # 设置为浮动工具窗口（可调整大小）
         self.setWindowFlags(
-            Qt.WindowType.Tool |
-            Qt.WindowType.WindowStaysOnTopHint
+            Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
         self.setWindowTitle("🔥 热点自选")
