@@ -173,6 +173,9 @@ class VoiceAnnouncer:
         self._pause_event = threading.Event()  # 本地控制暂停 (仍保留用于逻辑兼容)
         self._pause_event.set()
         self.current_code = None
+        self._is_stopped = False  # 停止标志
+        self._pending_timers: list[threading.Timer] = []  # 跟踪待处理的 Timer
+        self._timer_lock = threading.Lock()  # 保护 Timer 列表
         
         if pyttsx3:
             # 开启独立进程
@@ -207,12 +210,13 @@ class VoiceAnnouncer:
         return True
 
     def say(self, text: str, code: Optional[str] = None) -> None:
+        if self._is_stopped:
+            return
         if self._process and self._process.is_alive():
             if not self._pause_event.is_set():
                  logger.debug(f"Voice (Paused): {text}")
                  return
             
-            # 移除 qsize() 调用以避免在某些 Windows 环境下报 NotImplementedError
             # 触发主进程回调
             if self.on_speak_start:
                 try: self.on_speak_start(code)
@@ -225,11 +229,27 @@ class VoiceAnnouncer:
                 return
             
             # 由于是异步进程，我们无法精准得知结束时间
-            # 简单延时触发结束回调或由 UI 自动处理
+            # 使用跟踪的 Timer，便于退出时取消
             if self.on_speak_end:
-                # 估算一个播报时长
-                duration = len(text) * 0.3 + 1.0 
-                threading.Timer(duration, lambda: self.on_speak_end(code) if self.on_speak_end else None).start()
+                duration = len(text) * 0.3 + 1.0
+                
+                def _on_timer_done(target_code: Optional[str]):
+                    # 检查是否已停止
+                    if self._is_stopped:
+                        return
+                    if self.on_speak_end:
+                        try:
+                            self.on_speak_end(target_code)
+                        except Exception:
+                            pass
+                
+                timer = threading.Timer(duration, lambda: _on_timer_done(code))
+                timer.daemon = True  # 设为守护线程
+                with self._timer_lock:
+                    # 清理已完成的 Timer
+                    self._pending_timers = [t for t in self._pending_timers if t.is_alive()]
+                    self._pending_timers.append(timer)
+                timer.start()
         else:
             logger.info(f"Voice (Disabled/Dead): {text}")
 
@@ -249,6 +269,18 @@ class VoiceAnnouncer:
             self.queue.put(item)
 
     def stop(self):
+        """停止语音播报引擎"""
+        self._is_stopped = True
+        
+        # 取消所有待处理的 Timer
+        with self._timer_lock:
+            for timer in self._pending_timers:
+                try:
+                    timer.cancel()
+                except Exception:
+                    pass
+            self._pending_timers.clear()
+        
         self._stop_event.set()
         if self._process and self._process.is_alive():
             self._process.join(timeout=1)

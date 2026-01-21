@@ -2294,10 +2294,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.signal_log_panel = SignalLogPanel(self)
         self.signal_log_panel.log_clicked.connect(self._on_signal_log_clicked)
         
-        # 3. 定时检测热点股票形态 (每30秒)
-        self.hotlist_check_timer = QTimer(self)
-        self.hotlist_check_timer.timeout.connect(self._check_hotlist_patterns)
-        self.hotlist_check_timer.start(30000)
+        # 3. 热点检测：不再使用独立定时器，由主数据刷新周期驱动
+        #    在 IPC 数据包接收后或手动调用 _check_hotlist_patterns()
+        #    避免与 StockLiveStrategy 的形态检测重复
         
         logger.info("✅ 热点面板和信号日志面板已初始化")
 
