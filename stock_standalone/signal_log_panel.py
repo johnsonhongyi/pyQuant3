@@ -60,8 +60,7 @@ class SignalLogPanel(QWidget, WindowMixin):
         
         # 设置为浮动工具窗口
         self.setWindowFlags(
-            Qt.WindowType.Tool |
-            Qt.WindowType.WindowStaysOnTopHint
+            Qt.WindowType.Tool
         )
         self.setWindowTitle("📊 信号日志")
         self.setMinimumWidth(300)
