@@ -4426,7 +4426,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 x = screen_width - (col + 1) * (alert_width + margin)
                 y = screen_height - taskbar_height - (row + 1) * (alert_height + margin)
                 
-                win.geometry(f"{alert_width}x{alert_height}+{x}+{y}")
+                # ⭐ 关键修复:保持已放大窗口的尺寸状态
+                # 检查窗口是否已被用户双击放大
+                if hasattr(win, '_is_enlarged') and win._is_enlarged:
+                    # 使用放大后的尺寸
+                    current_width = win._orig_width * 2
+                    current_height = win._orig_height * 2
+                else:
+                    # 使用默认尺寸
+                    current_width = alert_width
+                    current_height = alert_height
+                
+                win.geometry(f"{current_width}x{current_height}+{x}+{y}")
                 # 确保窗口是可见的（如果之前被隐藏了）
                 if not win.winfo_ismapped():
                     win.deiconify() 
@@ -4835,7 +4846,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # 如果还有队列，300ms 后继续处理下一个（层级效果）
         if self._alert_queue:
-            self.after(300, self._process_alert_queue)
+            self.after(200, self._process_alert_queue)
         else:
             self._alert_queue_processing = False
     
