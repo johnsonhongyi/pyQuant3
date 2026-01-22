@@ -4518,6 +4518,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """
         重新排列所有报警弹窗。
         优化点：使用 update_idletasks 确保所有窗口位置同时刷新，减少初始化时的视觉闪烁。
+        修改点：已放大的窗口（_is_enlarged）脱离自动网格布局，保留用户拖拽后的位置。
         """
         if not hasattr(self, 'active_alerts'):
             self.active_alerts = []
@@ -4541,7 +4542,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 限制最大行数以避免超出屏幕范围
         max_rows = (screen_height - taskbar_height - margin) // (alert_height + margin)
         
-        for i, win in enumerate(self.active_alerts):
+        # --- 分离受控窗口和脱离窗口 ---
+        managed_alerts = []
+        detached_alerts = []
+        for win in self.active_alerts:
+            # 如果窗口处于“放大”状态，视为脱离网格管控
+            if getattr(win, '_is_enlarged', False):
+                detached_alerts.append(win)
+            else:
+                managed_alerts.append(win)
+        
+        # 1. 布局受控的普通窗口
+        for i, win in enumerate(managed_alerts):
             if i >= max_cols * max_rows:
                 # 超出显示区域，隐藏窗口
                 try:
@@ -4556,19 +4568,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 col = i % max_cols
                 row = i // max_cols
                 
+                # 从右向左排列
                 x = screen_width - (col + 1) * (alert_width + margin)
                 y = screen_height - taskbar_height - (row + 1) * (alert_height + margin)
                 
-                # ⭐ 关键修复:保持已放大窗口的尺寸状态
-                # 检查窗口是否已被用户双击放大
-                if hasattr(win, '_is_enlarged') and win._is_enlarged:
-                    # 使用放大后的尺寸
-                    current_width = win._orig_width * 2
-                    current_height = win._orig_height * 2
-                else:
-                    # 使用默认尺寸
-                    current_width = alert_width
-                    current_height = alert_height
+                # 使用默认尺寸
+                current_width = alert_width
+                current_height = alert_height
                 
                 win.geometry(f"{current_width}x{current_height}+{x}+{y}")
                 # 确保窗口是可见的（如果之前被隐藏了）
@@ -4577,9 +4583,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             except Exception as e:
                 logger.error(f"调整索引 {i} 的警报窗口位置时出错: {e}")
 
+        # 2. 处理脱离的窗口 (仅确保可见和保持尺寸状态，不重置位置)
+        for win in detached_alerts:
+            try:
+                # 确保可见
+                if not win.winfo_ismapped():
+                    win.deiconify()
+                # 位置和尺寸由用户控制，或者由 toggle_size 逻辑控制，此处不干涉
+            except Exception as e:
+                 logger.error(f"Check detached window error: {e}")
+
         # *** 层叠效果优化 ***
         # 强制 Tkinter 立即处理所有待定的 geometry() 更新
-        # 这使得所有窗口的位置变化在视觉上是同步的，保持层叠效果
         self.update_idletasks()
 
     def _shake_window(self, win, distance=8, interval_ms=60):
@@ -4601,7 +4616,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 检查窗口是否存在且是否应继续晃动
             if not win.winfo_exists() or not getattr(win, 'is_shaking', False):
                 # 停止晃动时，尝试将窗口恢复到原始位置（如果可能）
-                if win.winfo_exists():
+                # 关键修复：如果窗口已被双击放大，则绝不恢复到旧的 orig_wh
+                if win.winfo_exists() and not getattr(win, '_is_enlarged', False):
                      try:
                          win.geometry(f"{orig_wh}+{orig_x}+{orig_y}")
                      except: 
@@ -4753,6 +4769,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         toast_message(self, "已关闭所有报警窗口")
 
     def _close_alert(self, win, is_manual=False):
+        # 如果是自动关闭且窗口处于放大状态，则忽略关闭请求
+        if not is_manual and getattr(win, '_is_enlarged', False):
+            return
+
         if hasattr(self, 'active_alerts') and win in self.active_alerts:
             self.active_alerts.remove(win)
 
@@ -5074,7 +5094,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if hasattr(win, 'safety_close_timer'):
                     try: self.after_cancel(win.safety_close_timer)
                     except: pass
-                self.after(int(alert_cooldown/2)*1000, lambda: self._close_alert(win))
+                
+                # 只有在未放大状态下，才安排自动关闭
+                if not getattr(win, '_is_enlarged', False):
+                    self.after(int(alert_cooldown/2)*1000, lambda: self._close_alert(win))
             
             win.start_visual_effects = start_effects
             win.stop_visual_effects = stop_effects
@@ -5092,16 +5115,37 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if not win.winfo_exists():
                     return
                 
+                # 防抖动处理：防止短时间内重复触发（例如事件冒泡或者用户手抖）
+                import time
+                current_time = time.time()
+                last_time = getattr(win, 'last_toggle_time', 0)
+                if current_time - last_time < 0.8:  # 800ms 冷却时间
+                    return "break"
+                win.last_toggle_time = current_time
+
+                
                 if win._is_enlarged:
                     # 缩小回原大小
                     new_w = win._orig_width
                     new_h = win._orig_height
                     win._is_enlarged = False
+                    
+                    # 缩小后恢复自动关闭计时 (重新开始倒计时)
+                    if not has_voice:
+                        win.safety_close_timer = self.after(delay_ms, lambda: self._close_alert(win))
+                    else:
+                        win.safety_close_timer = self.after(180000, lambda: self._close_alert(win))
                 else:
                     # 放大2倍
                     new_w = win._orig_width * 2
                     new_h = win._orig_height * 2
                     win._is_enlarged = True
+                    
+                    # 放大时：停止震动，暂停自动关闭
+                    win.is_shaking = False
+                    if hasattr(win, 'safety_close_timer'):
+                        try: self.after_cancel(win.safety_close_timer)
+                        except: pass
                 
                 # 获取当前位置，保持窗口中心不变
                 try:
@@ -5124,6 +5168,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except Exception as e:
                     logger.debug(f"Toggle size error: {e}")
                     win.geometry(f"{new_w}x{new_h}")
+                
+                # 阻止事件冒泡，防止 Label 和 Frame 重复触发
+                return "break"
             
             win.toggle_size = toggle_size
             
@@ -5131,6 +5178,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             title_bar = tk.Frame(win, bg="#e57373", height=32, cursor="hand2")
             title_bar.pack(fill="x", side="top")
             title_bar.pack_propagate(False)
+            
+            def stop_shake(event=None):
+                """鼠标悬停停止震动，方便瞄准进行双击"""
+                # 强制停止震动
+                win.is_shaking = False
             
             title_label = tk.Label(
                 title_bar, 
@@ -5142,6 +5194,37 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 padx=8
             )
             title_label.pack(side="left", fill="x", expand=True)
+            
+            title_bar.bind("<Double-Button-1>", toggle_size)
+            title_label.bind("<Double-Button-1>", toggle_size)
+            
+            # 使用鼠标悬停停止震动 (解决单击歧义)
+            title_bar.bind("<Enter>", stop_shake)
+            title_label.bind("<Enter>", stop_shake)
+            
+            # 整合单击和拖拽开始逻辑
+            def on_click_start(event):
+                # 1. 停止震动 (已改为 Hover 触发)
+                # stop_shake() 
+                # 2. 记录拖拽起始坐标
+                win.x = event.x
+                win.y = event.y
+                return "break"
+            
+            def do_move(event):
+                if not hasattr(win, 'x'): return
+                deltax = event.x - win.x
+                deltay = event.y - win.y
+                x = win.winfo_x() + deltax
+                y = win.winfo_y() + deltay
+                win.geometry(f"+{x}+{y}")
+                return "break"
+            
+            # 使用 Button-1 统一响应点击和拖拽开始
+            title_bar.bind("<Button-1>", on_click_start)
+            title_label.bind("<Button-1>", on_click_start)
+            title_bar.bind("<B1-Motion>", do_move)
+            title_label.bind("<B1-Motion>", do_move)
             
             # 关闭按钮（在标题栏右侧）
             close_btn = tk.Label(

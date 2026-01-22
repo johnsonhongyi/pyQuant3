@@ -406,7 +406,7 @@ class SignalOverlay:
             self._text_pool.append(item)
         self.text_items.clear()
 
-    # def update_signals(self, signals: list[SignalPoint], target='kline', y_visuals=None):
+    # def update_signals_old(self, signals: list[SignalPoint], target='kline', y_visuals=None):
     #     """
     #     更新信号显示
     #     :param signals: SignalPoint 列表
@@ -2110,22 +2110,22 @@ class MainWindow(QMainWindow, WindowMixin):
         # 设置分割器大小 (70% 顶部, 30% 底部)
         right_splitter.setSizes([500, 200])
 
-        # splitter 行为
-        right_splitter.setChildrenCollapsible(True)
-        right_splitter.setStretchFactor(0, 3)
-        right_splitter.setStretchFactor(1, 1)
+        # # splitter 行为
+        # right_splitter.setChildrenCollapsible(True)
+        # right_splitter.setStretchFactor(0, 3)
+        # right_splitter.setStretchFactor(1, 1)
 
-        # 允许图被压缩
-        self.kline_widget.setMinimumHeight(80)
-        self.tick_widget.setMinimumHeight(60)
+        # # 允许图被压缩
+        # self.kline_widget.setMinimumHeight(80)
+        # self.tick_widget.setMinimumHeight(60)
 
-        # 防止 TextItem 抬高 bounding
-        self.crosshair_label.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
-        )
-        self.tick_crosshair_label.setFlag(
-            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
-        )
+        # # 防止 TextItem 抬高 bounding
+        # self.crosshair_label.setFlag(
+        #     QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
+        # )
+        # self.tick_crosshair_label.setFlag(
+        #     QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
+        # )
 
         # 3. Filter Panel (Initially Hidden)
         self.filter_panel = QWidget()
@@ -6747,322 +6747,6 @@ class MainWindow(QMainWindow, WindowMixin):
             self.supervision_label.setText("🛡️ 流程监理: <span style='color:#666;'>就绪</span>")
             self.hb_label.setText("💤")
         
-        
-
-
-    # def render_charts_old(self, code, day_df, tick_df):
-    #     if day_df.empty:
-    #         self.kline_plot.setTitle(f"{code} - No Data")
-    #         return
-
-    #     self.kline_plot.clear()
-    #     self.tick_plot.clear()
-
-    #     info = self.code_info_map.get(code, {})
-
-    #     name = info.get("name", "")
-    #     rank = info.get("Rank", None)
-    #     percent = info.get("percent", None)
-    #     win = info.get("win", None)
-    #     slope = info.get("slope", None)
-    #     volume = info.get("volume", None)
-
-    #     title_parts = [code]
-    #     if name:
-    #         title_parts.append(name)
-
-    #     if rank is not None:
-    #         title_parts.append(f"Rank: {int(rank)}")
-
-    #     if percent is not None:
-    #         pct_str = f"{percent:+.2f}%"
-    #         title_parts.append(pct_str)
-
-    #     if win is not None:
-    #         title_parts.append(f"win: {int(win)}")
-    #     if slope is not None:
-    #         slope_str = f"{slope:.1f}%"
-    #         title_parts.append(f"slope: {slope:.1f}%")
-    #     if volume is not None:
-    #         title_parts.append(f"vol: {volume:.1f}")
-
-    #     title_text = " | ".join(title_parts)
-
-    #     self.kline_plot.setTitle(title_text)
-
-
-    #     # --- A. Render Daily K-Line ---
-    #     day_df = day_df.sort_index()
-    #     dates = day_df.index
-    #     # Convert date index to integers 0..N
-    #     x_axis = np.arange(len(day_df))
-
-    #     # Create OHLC Data for CandlestickItem
-    #     # ohlc_data = []
-    #     # for i, (idx, row) in enumerate(day_df.iterrows()):
-    #     #     ohlc_data.append((i, row['open'], row['close'], row['low'], row['high']))
-
-    #     x_axis = np.arange(len(day_df))
-    #     ohlc_data = np.column_stack((
-    #         x_axis,
-    #         day_df['open'].values,
-    #         day_df['close'].values,
-    #         day_df['low'].values,
-    #         day_df['high'].values
-    #     ))
-
-    #     # # Draw Candles
-    #     # candle_item = CandlestickItem(ohlc_data)
-    #     # self.kline_plot.addItem(candle_item)
-    #     candle_item = CandlestickItem(
-    #         ohlc_data,
-    #         theme=self.qt_theme
-    #     )
-    #     self.kline_plot.addItem(candle_item)
-
-    #     # Draw Signals (Arrows)
-    #     signals = self.logger.get_signal_history_df()
-    #     if not signals.empty:
-    #         stock_signals = signals[signals['code'] == code]
-    #         if not stock_signals.empty:
-    #             arrow_x = []
-    #             arrow_y = []
-    #             brushes = []
-
-    #             # Align signals to x-axis indices
-    #             date_map = {
-    #                 d if isinstance(d, str) else d.strftime('%Y-%m-%d'): i
-    #                 for i, d in enumerate(dates)
-    #             }
-    #             for _, row in stock_signals.iterrows():
-    #                 sig_date_str = str(row['date']).split()[0]
-    #                 if sig_date_str in date_map:
-    #                     idx = date_map[sig_date_str]
-    #                     arrow_x.append(idx)
-
-    #                     action = row['action']
-    #                     price = row['price'] if pd.notnull(row['price']) else day_df.iloc[idx]['close']
-    #                     arrow_y.append(price)
-
-    #                     if 'Buy' in action or '买' in action:
-    #                         brushes.append(pg.mkBrush('r')) # Red for Buy
-    #                     else:
-    #                         brushes.append(pg.mkBrush('g')) # Green for Sell
-
-    #             if arrow_x:
-    #                 scatter = pg.ScatterPlotItem(x=arrow_x, y=arrow_y, size=15,
-    #                                              pen=pg.mkPen('k'), brush=brushes, symbol='t1')
-    #                 self.kline_plot.addItem(scatter)
-
-    #     if 'close' in day_df.columns:
-    #         # --- MA5 / MA10 ---
-    #         ma5 = day_df['close'].rolling(5).mean()
-    #         ma10 = day_df['close'].rolling(10).mean()
-    #         self.kline_plot.plot(x_axis, ma5.values, pen=pg.mkPen('b', width=1), name="MA5")
-    #         self.kline_plot.plot(x_axis, ma10.values, pen=pg.mkPen('orange', width=1), name="MA10")
-
-    #         # --- Bollinger Bands ---
-    #         ma20 = day_df['close'].rolling(20).mean()
-    #         std20 = day_df['close'].rolling(20).std()
-    #         upper_band = ma20 + 2 * std20
-    #         lower_band = ma20 - 2 * std20
-
-    #         # self.kline_plot.plot(x_axis, ma20.values, pen=pg.mkPen('purple', width=1, style=Qt.PenStyle.DotLine))
-    #         # self.kline_plot.plot(x_axis, upper_band.values, pen=pg.mkPen('grey', width=1, style=Qt.PenStyle.DashLine))
-    #         # self.kline_plot.plot(x_axis, lower_band.values, pen=pg.mkPen('grey', width=1, style=Qt.PenStyle.DashLine))
-
-    #         # 中轨颜色根据主题调整
-    #         if self.qt_theme == 'dark':
-    #             ma20_color = QColor(255, 255, 0)  # 黄色
-    #         else:
-    #             ma20_color = QColor(255, 140, 0)  # 深橙色 (DarkOrange)
-
-    #         self.kline_plot.plot(x_axis, ma20.values,
-    #                              pen=pg.mkPen(ma20_color, width=2))
-
-    #         # 上轨 深红色加粗
-    #         self.kline_plot.plot(x_axis, upper_band.values,
-    #                              pen=pg.mkPen(QColor(139, 0, 0), width=2))  # DarkRed
-
-    #         # 下轨 深绿色加粗
-    #         self.kline_plot.plot(x_axis, lower_band.values,
-    #                              pen=pg.mkPen(QColor(0, 128, 0), width=2))  # DarkGreen
-
-    #         # --- 自动居中显示 ---
-    #         self.kline_plot.enableAutoRange(axis=pg.ViewBox.XYAxes, enable=True)
-    #         self.kline_plot.autoRange()
-
-
-    #     # --- volume plot ---
-    #     if 'amount' in day_df.columns:
-    #         # 创建 volume 子图
-    #         if not hasattr(self, 'volume_plot'):
-    #             self.volume_plot = self.kline_widget.addPlot(row=1, col=0)
-    #             self.volume_plot.showGrid(x=True, y=True)
-    #             self.volume_plot.setMaximumHeight(120)
-    #             self.volume_plot.setLabel('left', 'Volume')
-    #             self.volume_plot.setXLink(self.kline_plot)  # x 轴同步主图
-    #             self.volume_plot.setMenuEnabled(False)
-    #         else:
-    #             # 清空之前的数据，防止重叠
-    #             self.volume_plot.clear()
-    #
-    #         x_axis = np.arange(len(day_df))
-    #         amounts = day_df['amount'].values
-    #
-    #         # 涨的柱子
-    #         up_idx = day_df['close'] >= day_df['open']
-    #         if up_idx.any():
-    #             bg_up = pg.BarGraphItem(
-    #                 x=x_axis[up_idx],
-    #                 height=amounts[up_idx],
-    #                 width=0.6,
-    #                 brush='r'
-    #             )
-    #             self.volume_plot.addItem(bg_up)
-    #
-    #         # 跌的柱子
-    #         down_idx = day_df['close'] < day_df['open']
-    #         if down_idx.any():
-    #             bg_down = pg.BarGraphItem(
-    #                 x=x_axis[down_idx],
-    #                 height=amounts[down_idx],
-    #                 width=0.6,
-    #                 brush='g'
-    #             )
-    #             self.volume_plot.addItem(bg_down)
-    #
-    #         # 添加5日均量线
-    #         ma5_volume = pd.Series(amounts).rolling(5).mean()
-    #         if self.qt_theme == 'dark':
-    #             vol_ma_color = QColor(255, 255, 0)  # 黄色
-    #         else:
-    #             vol_ma_color = QColor(255, 140, 0)  # 深橙色
-    #
-    #         self.volume_plot.plot(x_axis, ma5_volume.values,
-    #                              pen=pg.mkPen(vol_ma_color, width=1.5),
-    #                              name='MA5')
-    #
-    #     # --- B. Render Intraday Trick ---
-    #     if not tick_df.empty:
-    #         try:
-    #             # 1. Prepare Data
-    #             df_ticks = tick_df.copy()
-    #
-    #             # Handle MultiIndex: code, ticktime
-    #             if isinstance(df_ticks.index, pd.MultiIndex):
-    #                 # Sort by ticktime just in case
-    #                 df_ticks = df_ticks.sort_index(level='ticktime')
-    #                 prices = df_ticks['close'].values
-    #             else:
-    #                 prices = df_ticks['close'].values
-    #
-    #             # Get Params
-    #             current_price = prices[-1]
-    #
-    #             # Attempt to get pre_close (llastp)
-    #             if 'llastp' in df_ticks.columns:
-    #                 pre_close = float(df_ticks['llastp'].iloc[-1])
-    #             elif 'pre_close' in df_ticks.columns:
-    #                 pre_close = float(df_ticks['pre_close'].iloc[-1])
-    #             else:
-    #                 pre_close = prices[0]
-    #
-    #             open_p = 0
-    #             if 'open' in df_ticks.columns:
-    #                 # Avoid 0 values if possible
-    #                 opens = df_ticks['open'][df_ticks['open'] > 0]
-    #                 if not opens.empty:
-    #                     open_p = opens.iloc[-1]
-    #                 else:
-    #                     open_p = prices[0]
-    #             else:
-    #                 open_p = prices[0]
-    #
-    #             low_p = prices.min()
-    #             if 'low' in df_ticks.columns:
-    #                 mins = df_ticks['low'][df_ticks['low'] > 0]
-    #                 if not mins.empty:
-    #                     l_val = mins.min()
-    #                     if l_val < low_p: low_p = l_val
-    #
-    #             high_p = prices.max()
-    #             if 'high' in df_ticks.columns:
-    #                 maxs = df_ticks['high'][df_ticks['high'] > 0]
-    #                 if not maxs.empty:
-    #                     h_val = maxs.max()
-    #                     if h_val > high_p: high_p = h_val
-    #
-    #             # 2. Update Ghost Candle on Day Chart
-    #             day_dates = day_df.index
-    #             last_hist_date_str = ""
-    #             if not day_dates.empty:
-    #                 last_hist_date_str = str(day_dates[-1]).split()[0]
-    #
-    #             today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
-    #
-    #             if self.realtime and cct.get_work_time_duration() and today_str > last_hist_date_str or self._debug_realtime:
-    #                 new_x = len(day_df)
-    #                 ghost_data = [(new_x, open_p, current_price, low_p, high_p)]
-    #                 ghost_candle = CandlestickItem(ghost_data)
-    #                 self.kline_plot.addItem(ghost_candle)
-    #
-    #                 text = pg.TextItem(f"{current_price}", anchor=(0, 1),
-    #                                    color='r' if current_price>pre_close else 'g')
-    #                 text.setPos(new_x, high_p)
-    #                 self.kline_plot.addItem(text)
-    #
-    #
-    #             # 3. Render Tick Plot (Curve)
-    #             pct_change = ((current_price - pre_close) / pre_close * 100) if pre_close != 0 else 0
-    #             self.tick_plot.setTitle(f"Intraday: {current_price:.2f} ({pct_change:.2f}%)")
-    #
-    #             # X-axis: 0 to N
-    #             x_ticks = np.arange(len(prices))
-    #
-    #             # Draw Pre-close (Dash Blue)
-    #             self.tick_plot.addLine(y=pre_close, pen=pg.mkPen('b', style=Qt.PenStyle.DashLine, width=1))
-    #
-    #             # # Draw Price Curve
-    #             if self.qt_theme == 'dark':
-    #                 curve_color = 'w'  # 白色线条
-    #                 pre_close_color = 'b'
-    #                 avg_color = QColor(255, 255, 0)  # 黄色均价线
-    #             else:
-    #                 curve_color = 'k'
-    #                 pre_close_color = 'b'
-    #                 avg_color = QColor(255, 140, 0)  # 深橙色均价线 (DarkOrange)
-    #
-    #             curve_pen = pg.mkPen(curve_color, width=2)
-    #             self.tick_plot.plot(x_ticks, prices, pen=curve_pen, name='Price')
-    #             self.tick_plot.addLine(y=pre_close, pen=pg.mkPen(pre_close_color, style=Qt.PenStyle.DashLine))
-    #
-    #             # 计算并绘制分时均价线
-    #             # 分时均价 = 累计成交金额 / 累计成交量
-    #             if 'amount' in df_ticks.columns and 'volume' in df_ticks.columns:
-    #                 # 使用 amount 和 volume 计算均价
-    #                 cum_amount = df_ticks['amount'].cumsum()
-    #                 cum_volume = df_ticks['volume'].cumsum()
-    #                 # 避免除以零
-    #                 avg_prices = np.where(cum_volume > 0, cum_amount / cum_volume, prices)
-    #             elif 'close' in df_ticks.columns:
-    #                 # 如果没有成交量数据，使用价格的累计平均
-    #                 avg_prices = pd.Series(prices).expanding().mean().values
-    #             else:
-    #                 avg_prices = None
-    #
-    #             if avg_prices is not None:
-    #                 avg_pen = pg.mkPen(avg_color, width=1.5, style=Qt.PenStyle.SolidLine)
-    #                 self.tick_plot.plot(x_ticks, avg_prices, pen=avg_pen, name='Avg Price')
-    #
-    #             # Add Grid
-    #             self.tick_plot.showGrid(x=False, y=True, alpha=0.5)
-    #
-    #         except Exception as e:
-    #             print(f"Error rendering tick data: {e}")
-    #             import traceback
-    #             traceback.print_exc()
-
     def _update_plot_title(self, code, day_df, tick_df):
         """仅更新 K 线图基础信息（代码、名称、排名、板块等） - 极限性能版"""
         if not hasattr(self, 'kline_plot'):
