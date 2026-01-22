@@ -212,3 +212,34 @@ class TradingAnalyzer:
             suffixes=('', '_sig')
         )
         return df
+
+class StrategySignalAnalyzer:
+    """
+    专门分析 signal_strategy.db 的实时信号
+    """
+    def __init__(self, logger_instance: 'SignalStrategyLogger'):
+        self.logger = logger_instance
+
+    def get_signal_message_df(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+        """获取信号消息作为 DataFrame"""
+        msgs = self.logger.get_signal_messages(start_date, end_date, limit=5000)
+        df = pd.DataFrame(msgs)
+        if df.empty:
+            return pd.DataFrame()
+        
+        # 简单清洗
+        if 'timestamp' in df.columns:
+            # 有时 timestamp 是 "09:30:00" 这种格式(不含日期)，有时是完整 datetime
+            pass 
+        return df
+
+    def summarize_signals_by_type(self) -> pd.DataFrame:
+        """按信号类型汇总"""
+        data = self.logger.get_signal_counts_by_type()
+        return pd.DataFrame(data, columns=['signal_type', 'count'])
+
+    def summarize_signals_by_code(self) -> pd.DataFrame:
+        """按股票汇总信号数量"""
+        data = self.logger.get_top_signal_stocks(limit=100)
+        return pd.DataFrame(data, columns=['code', 'name', 'count'])
+

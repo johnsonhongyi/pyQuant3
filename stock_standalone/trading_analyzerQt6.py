@@ -53,6 +53,13 @@ class TradingGUI(QWidget):
         self.top_layout = QHBoxLayout()
         self.main_layout.addLayout(self.top_layout)
 
+        # 数据源选择
+        self.source_combo = QComboBox()
+        self.source_combo.addItems(["交易/选股数据库", "实时策略信号库"])
+        self.source_combo.currentTextChanged.connect(self._on_source_changed)
+        self.top_layout.addWidget(QLabel("数据源:"))
+        self.top_layout.addWidget(self.source_combo)
+
         self.view_combo = QComboBox()
         self.view_combo.addItems([
             "实时指标详情","股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史"
@@ -60,6 +67,14 @@ class TradingGUI(QWidget):
         self.view_combo.currentTextChanged.connect(self.refresh_table)
         self.top_layout.addWidget(QLabel("视图选择:"))
         self.top_layout.addWidget(self.view_combo)
+        
+        # 工具栏菜单 (按钮形式)
+        self.tools_btn = QPushButton("工具")
+        self.tools_menu = QMenu(self)
+        self.tools_menu.addAction("数据库诊断", self.show_db_diagnostics)
+        self.tools_btn.setMenu(self.tools_menu)
+        self.top_layout.addWidget(self.tools_btn)
+
 
         self.analysis_btn = QPushButton("生成分析报告")
         self.analysis_btn.clicked.connect(self.show_analysis_report)
@@ -79,7 +94,7 @@ class TradingGUI(QWidget):
         self.table = QTableWidget()
         self.main_layout.addWidget(self.table)
 
-        # 底部日志/报告显示区域 (隐藏，仅在查看报告时显示)
+        # 底部日志/报告显示区域
         self.report_area = QTextEdit()
         self.report_area.setReadOnly(True)
         self.report_area.setVisible(False)
@@ -112,8 +127,66 @@ class TradingGUI(QWidget):
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         _ = self.table.customContextMenuRequested.connect(self.show_context_menu)
 
-        # 初始化表格数据
+        # 初始化数据源相关
+        from trading_logger import SignalStrategyLogger
+        from trading_analyzer import StrategySignalAnalyzer
+        
+        self.signal_logger = SignalStrategyLogger()
+        self.signal_analyzer = StrategySignalAnalyzer(self.signal_logger)
+        
+        # 初始刷新
         self.refresh_table()
+
+    def _on_source_changed(self, text):
+        """数据源切换处理"""
+        self.view_combo.blockSignals(True)
+        self.view_combo.clear()
+        
+        if text == "交易/选股数据库":
+            self.view_combo.addItems([
+                "实时指标详情", "股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史"
+            ])
+        else:
+            self.view_combo.addItems([
+                "所有信号流", "信号类型统计", "高频信号股"
+            ])
+            
+        self.view_combo.blockSignals(False)
+        self.refresh_table()
+
+    def show_db_diagnostics(self):
+        """显示数据库诊断信息"""
+        source = self.source_combo.currentText()
+        if source == "交易/选股数据库":
+            inspector = self.logger # TradingLogger 继承了 DBInspector (如果在 logger 中 mixin 了的话)
+            # 暂时 TradingLogger 没有 mixin，需确认。
+            # 这里的 logger 是 TradingLogger 实例
+            # 我们动态给它加一个 mixin 或者简单点，直接再实例化一个 Inspector
+            from trading_logger import DBInspector
+            inspector = DBInspector(self.logger.db_path)
+            db_name = "Trading Signals DB"
+        else:
+            inspector = self.signal_logger
+            db_name = "Signal Strategy DB"
+            
+        stats = inspector.get_db_stats()
+        issues = inspector.run_health_check()
+        
+        msg = f"=== {db_name} 诊断报告 ===\n\n"
+        msg += f"[统计信息]\n"
+        for table, count in stats.get('tables', {}).items():
+            msg += f"  - 表 {table:<20}: {count} 行\n"
+            
+        msg += f"\n[健康检查]\n"
+        if not issues:
+            msg += "  ✅未发现明显异常。\n"
+        else:
+            for issue in issues:
+                msg += f"  ❌ {issue}\n"
+                
+        self.report_area.setPlainText(msg)
+        self.report_area.setVisible(True)
+        self.table.setVisible(False)
 
     def center(self):
         screen = QApplication.primaryScreen()
@@ -126,8 +199,6 @@ class TradingGUI(QWidget):
     def show_analysis_report(self):
         """生成并显示文本分析报告"""
         from generate_analysis_report import generate_report
-        # 为了不阻塞 UI，简单处理：直接运行并读取输出文件 (或者重构 generate_report 返回字符串)
-        # 这里我们假定执行后会生成提示
         generate_report()
         try:
             with open("analysis_report_output.txt", "r", encoding="utf-8") as f:
@@ -144,51 +215,67 @@ class TradingGUI(QWidget):
         self.report_area.setVisible(False)
         self.table.setVisible(True)
         
-        self.update_stock_list()
-        # 当前视图
+        # 获取当前源和视图
+        source = self.source_combo.currentText()
         view = self.view_combo.currentText()
         code = self.stock_input.currentText().strip()
+        
+        df = pd.DataFrame()
 
-        # 根据视图获取 DataFrame
-        if view == "股票汇总":
-            df = self.analyzer.summarize_by_stock()
-        elif view == "单只股票明细":
-            df = self.analyzer.get_stock_detail(code) if code else pd.DataFrame()
-        elif view == "每日策略统计":
-            df = self.analyzer.daily_summary()
-        elif view == "Top 盈利交易":
-            df = self.analyzer.top_trades(n=10, largest=True)
-        elif view == "Top 亏损交易":
-            df = self.analyzer.top_trades(n=10, largest=False)
-        elif view == "股票表现概览":
-            df = self.analyzer.stock_performance()
-        elif view == "信号探测历史":
-            df = self.analyzer.get_signal_history_df()
-            if code:
-                df = df[df['code'] == code]
-        elif view == "实时指标详情":
-            # 专门展示增强后的指标数据（ma5d, ma10d, pump_height 等）
-            df = self.analyzer.get_signal_history_df()
-            if code:
-                df = df[df['code'] == code]
-            # 只保留指标相关列
-            indicator_cols = ['date', 'code', 'name', 'price', 'action', 'reason',
-                            'buy_reason', 'sell_reason', 'time_msg',
-                            'ma5d', 'ma10d', 'ratio', 'volume', 'percent',
-                            'high', 'low', 'open', 'nclose',
-                            'highest_today', 'pump_height', 'pullback_depth',
-                            'win', 'red', 'gren', 'structure']
-            existing_cols = [c for c in indicator_cols if c in df.columns]
-            df = df[existing_cols] if existing_cols else df
+        if source == "交易/选股数据库":
+            self.update_stock_list_traditional()
+            
+            if view == "股票汇总":
+                df = self.analyzer.summarize_by_stock()
+            elif view == "单只股票明细":
+                df = self.analyzer.get_stock_detail(code) if code else pd.DataFrame()
+            elif view == "每日策略统计":
+                df = self.analyzer.daily_summary()
+            elif view == "Top 盈利交易":
+                df = self.analyzer.top_trades(n=10, largest=True)
+            elif view == "Top 亏损交易":
+                df = self.analyzer.top_trades(n=10, largest=False)
+            elif view == "股票表现概览":
+                df = self.analyzer.stock_performance()
+            elif view == "信号探测历史":
+                df = self.analyzer.get_signal_history_df()
+                if code and not df.empty:
+                    df = df[df['code'] == code]
+            elif view == "实时指标详情":
+                df = self.analyzer.get_signal_history_df()
+                if code and not df.empty:
+                    df = df[df['code'] == code]
+                # 指标列筛选
+                indicator_cols = ['date', 'code', 'name', 'price', 'action', 'reason',
+                                'buy_reason', 'sell_reason', 'time_msg',
+                                'ma5d', 'ma10d', 'ratio', 'volume', 'percent',
+                                'high', 'low', 'open', 'nclose',
+                                'highest_today', 'pump_height', 'pullback_depth',
+                                'win', 'red', 'gren', 'structure']
+                if not df.empty:
+                    existing_cols = [c for c in indicator_cols if c in df.columns]
+                    df = df[existing_cols]
         else:
-            df = pd.DataFrame()
+            # 实时策略信号库
+            if view == "所有信号流":
+                df = self.signal_analyzer.get_signal_message_df()
+                if code and not df.empty:
+                    df = df[df['code'] == code]
+            elif view == "信号类型统计":
+                df = self.signal_analyzer.summarize_signals_by_type()
+            elif view == "高频信号股":
+                df = self.signal_analyzer.summarize_signals_by_code()
 
         # 显示表格
         self.current_df = df
         self.display_df(df)
 
-        # 更新总收益摘要
-        self.refresh_summary_label()
+        # 更新总收益摘要 (仅在交易模式下有意义，但在信号模式下可显示行数)
+        if source == "交易/选股数据库":
+            self.refresh_summary_label()
+        else:
+            count = len(df) if not df.empty else 0
+            self.label_summary.setText(f"当前视图记录数: {count}")
 
     def refresh_summary_label(self):
         df_all = self.analyzer.get_all_trades_df()
@@ -204,6 +291,10 @@ class TradingGUI(QWidget):
             self.label_summary.setText("总收益: 0, 平均收益率: 0%, 总笔数: 0")
 
     def update_stock_list(self):
+        """兼容旧接口"""
+        self.update_stock_list_traditional()
+        
+    def update_stock_list_traditional(self):
         # 仅在需要代码过滤的视图下更新下拉列表
         view = self.view_combo.currentText()
         if view not in ["单只股票明细", "信号探测历史", "实时指标详情"]:
@@ -246,12 +337,12 @@ class TradingGUI(QWidget):
             self.table.setColumnCount(0)
             return
 
-        # 填充数据期间关闭排序，避免干扰和性能下降
+        # 填充数据期间关闭排序
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(df))
         self.table.setColumnCount(len(df.columns))
         
-        # 列名转换字典
+        # 列名转换字典 (扩充了信号相关列)
         col_mapping = {
             'date': '日期', 'code': '代码', 'name': '名称', 'price': '价格', 'action': '动作', 
             'reason': '理由', 'buy_reason': '买入原因', 'sell_reason': '卖出原因', 'time_msg': '时间窗口',
@@ -262,7 +353,10 @@ class TradingGUI(QWidget):
             'ma5d': 'MA5', 'ma10d': 'MA10', 'ratio': '换手', 'volume': '量比', 'percent': '涨幅%',
             'high': '最高', 'low': '最低', 'open': '开盘', 'nclose': '当日均价',
             'highest_today': '今日峰值', 'pump_height': '冲高高度', 'pullback_depth': '回落深度',
-            'win': '胜率', 'red': '阳线', 'gren': '阴线', 'structure': '结构'
+            'win': '胜率', 'red': '阳线', 'gren': '阴线', 'structure': '结构',
+            # 新增信号库列名
+            'signal_type': '信号类型', 'timestamp': '时间戳', 'source': '来源', 'priority': '优先级',
+            'score': '评分', 'created_date': '创建日期', 'evaluated': '已评估', 'count': '计数'
         }
         display_cols = [col_mapping.get(c, c) for c in df.columns]
         self.table.setHorizontalHeaderLabels(display_cols)
@@ -275,7 +369,6 @@ class TradingGUI(QWidget):
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                 
                 # 特色染色逻辑：盈亏染色
-                # 获取列字段名
                 raw_col_name = str(df.columns[j]).lower()
                 if any(k in raw_col_name for k in ["profit", "pnl", "return", "percent"]):
                     try:
@@ -287,24 +380,30 @@ class TradingGUI(QWidget):
                     except: 
                         pass
                 
+                # 信号类型染色
+                if raw_col_name == "signal_type":
+                    if "buy" in str(value).lower() or "enter" in str(value).lower():
+                         item.setForeground(Qt.GlobalColor.red)
+                    elif "sell" in str(value).lower() or "exit" in str(value).lower():
+                         item.setForeground(Qt.GlobalColor.darkGreen)
+
                 self.table.setItem(i, j, item)
         
         # 填充完成后开启排序
         self.table.setSortingEnabled(True)
         self.table.resizeColumnsToContents()
         
-        # 限制高度文本列的宽度，防止撑开过大
+        # 限制高度文本列的宽度
         header = self.table.horizontalHeader()
         for j, col_name in enumerate(df.columns):
             raw_target = col_name.lower()
             if any(k in raw_target for k in ["reason", "msg", "feedback", "indicators"]):
                 self.table.setColumnWidth(j, 250)
                 header.setSectionResizeMode(j, QHeaderView.ResizeMode.Interactive)
-            elif any(k in raw_target for k in ["code", "name", "date", "action"]):
-                # 对于这些列，如果内容很短，resizeColumnsToContents 已经处理好了
-                # 如果还是觉得太窄，可以给个最小值
+            elif any(k in raw_target for k in ["code", "name", "date", "action", "signal_type"]):
                 if self.table.columnWidth(j) < 60:
                     self.table.setColumnWidth(j, 80)
+
 
     def get_current_df(self):
         return getattr(self, "current_df", None)

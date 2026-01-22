@@ -155,7 +155,38 @@ if hasattr(self, 'pattern_detector'):
 - [ ] 竞价阶段特殊处理
 - [ ] 连续大阳检测
 
+### P0.8: 信号优化与分析 🔴 当前任务 (01-22)
+
+**目标**: 降低信号频率噪音，提升有效信号权重，并实现信号历史的可视化分析
+
+**问题现状**:
+- 同一股票同一形态在短时间内多次触发，导致语音播报过于频繁("刷屏")
+- 低开走高等关键信号未能区分量能和位置（如是否在20日均线以下）
+- 信号触发后缺乏后续跟踪（维持次数、收盘结果）无法闭环分析
+
+**待办事项**:
+- [x] **信号计数机制**: 在 `_should_notify` 中记录触发次数，同股同形态连续触发时只更新计数，不重复播报
+- [x] **延迟批量播报**: 对于连续高频信号，采用"聚合播报"模式 (如 "紫光国微 低开走高 x3")
+- [x] **优先级权重提升**: 低于MA20的低开走高 + 带量(换手>3%) → 设为高优先级信号
+- [ ] **闪屏通知**: 新增 `flash_alert_popup()` 方法，高优先级信号触发时短暂闪烁报警弹窗（非主窗口）
+- [ ] **信号分组**: 多个信号同时触发时按类型分组，显示 "低开走高(3只): 紫光, 科森, 汇成"
+- [ ] **信号历史同步**: `trading_analyzerQt6.py` 的"实时策略信号库"视图增加对今日信号的汇总和计数展示
+- [ ] **次日决策参考**: 记录信号启动时间、维持次数、收盘涨幅，用于生成次日竞价策略建议
+
+
+**变更文件**:
+| 文件 | 变更 |
+|------|------|
+| `intraday_pattern_detector.py` | 增加 `_signal_counts` 字典跟踪信号计数 |
+| `stock_live_strategy.py` | `_on_pattern_detected` 增加计数判断、高优先级信号闪屏调用 |
+| `trading_analyzerQt6.py` | 增加"今日信号汇总"视图，显示计数和收盘结果 |
+| `signal_strategy.db` | `signal_counts` 表已有，需在写入时更新 `count` 字段 |
+| `trade_visualizer_qt6.py` 或 `instock_MonitorTK.py` | 新增 `flash_screen()` UI 闪烁效果 |
+
+---
+
 ### P2: 数据流优化
+
 
 - [ ] 热点列表批量tick请求
 - [ ] 形态触发UI闪烁
@@ -213,7 +244,11 @@ if hasattr(self, 'pattern_detector'):
 
 | 日期 | 内容 | 影响 |
 |------|------|------|
+| 01-22 19:46 | P0.8 Phase 1 完成：信号计数机制、聚合播报、高优先级检测(multi-MA+换手) | `intraday_pattern_detector.py`, `stock_live_strategy.py` |
+| 01-22 19:15 | 新增 P0.8 信号优化任务规划：信号计数、批量播报、高优先级闪屏、分析可视化 | `gemini.md` |
+| 01-22 19:05 | 新增策略信号数据库查看功能：trading_analyzerQt6 支持切换数据源、数据库诊断 | `trading_analyzerQt6.py`, `trading_logger.py`, `trading_analyzer.py` |
 | 01-22 15:00 | 优化加载布局：强制禁用表格列自动宽 (ResizeToContents)，彻底解决面板内容撑大导致图表被挤压的问题 | `trade_visualizer_qt6.py` |
+
 | 01-22 14:35 | 修复加载布局预设时 K 线视图计算错误：强制使用预设宽度而不是不可靠的瞬时物理宽度 | `trade_visualizer_qt6.py` |
 | 01-22 13:46 | 修复 Filter 面板切换时 K 线图被遮挡问题：新增 `_reset_kline_view` 方法，使用 splitter 实际宽度计算可见K线数 | `trade_visualizer_qt6.py` |
 | 01-21 11:27 | 合并监控循环：删除独立30s定时器 | `trade_visualizer_qt6.py` |

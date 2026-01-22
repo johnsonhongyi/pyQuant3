@@ -2155,16 +2155,85 @@ class StockLiveStrategy:
             logger.info(f"😴 Snoozed alert for {key}  in {cycles} cycles ({cycles * self._alert_cooldown}s alert_cooldown: {self._alert_cooldown}s next_alert_time:{dt_str})")
 
     def _on_pattern_detected(self, event: 'PatternEvent') -> None:
-        """形态检测回调 - 触发语音播报"""
+        """形态检测回调 - 触发语音播报 (带计数和高优先级检测)"""
         try:
             pattern_cn = IntradayPatternDetector.PATTERN_NAMES.get(event.pattern, event.pattern)
-            msg = f"{event.name} {pattern_cn}"
             
             # 区分买点信号 vs 卖点信号
             action = "风险" if event.pattern in ('high_drop', 'top_signal') else "形态"
             
-            logger.info(f"🔔 形态信号: {event.code} {event.name} - {pattern_cn} @ {event.price:.2f}")
-            self._trigger_alert(event.code, event.name, msg, action=action, price=event.price)
+            # === 高优先级信号检测 ===
+            is_high_priority = False
+            high_priority_reason = ""
+            
+            if event.pattern in ('low_open_high_walk', 'pullback_upper'):
+                # 尝试从实时数据中获取当前行情 (如果可用)
+                try:
+                    if hasattr(self, 'df') and not self.df.empty and event.code in self.df.index:
+                        row = self.df.loc[event.code]
+                        current_price = event.price
+                        ratio = float(row.get('ratio', 0))  # 换手率
+                        
+                        # 多周期均线检查
+                        ma10 = float(row.get('ma10d', row.get('ma10', 0)))
+                        ma20 = float(row.get('ma20d', row.get('ma20', 0)))
+                        ma60 = float(row.get('ma60d', row.get('ma60', 0)))
+                        
+                        # 日线周期：价格低于 MA10/MA20/MA60 之一 且 换手>3%
+                        below_ma = None
+                        if ma10 > 0 and current_price < ma10:
+                            below_ma = "MA10"
+                        elif ma20 > 0 and current_price < ma20:
+                            below_ma = "MA20"
+                        elif ma60 > 0 and current_price < ma60:
+                            below_ma = "MA60"
+                        
+                        if below_ma and ratio > 3.0:
+                            is_high_priority = True
+                            high_priority_reason = f"[HIGH] 回撤至{below_ma}，换手{ratio:.1f}%"
+                            event.is_high_priority = True
+                            logger.info(f"🔥 高优先级信号: {event.code} {event.name} - {high_priority_reason}")
+                except Exception as e:
+                    logger.debug(f"High priority check failed: {e}")
+            
+            # === 构建消息 ===
+            count_suffix = f" (第{event.count}次)" if event.count > 1 else ""
+            msg = f"{event.name} {pattern_cn}{count_suffix}"
+            if high_priority_reason:
+                msg = f"{msg} {high_priority_reason}"
+            
+            # === 日志记录 ===
+            priority_tag = "🔥" if is_high_priority else "🔔"
+            logger.info(f"{priority_tag} 形态信号: {event.code} {event.name} - {pattern_cn} @ {event.price:.2f}{count_suffix}")
+            
+            # === 语音播报控制 ===
+            # 1. 第一次触发：完整播报
+            # 2. 第2-4次触发：静默（不播报）
+            # 3. 每5次触发：聚合播报 "xxx 低开走高 已触发5次"
+            # 4. 高优先级信号：始终播报
+            should_voice = False
+            if is_high_priority:
+                should_voice = True
+                msg = f"注意高优先级，{msg}"
+            elif event.count == 1:
+                should_voice = True
+            elif event.count % 5 == 0:
+                should_voice = True
+                msg = f"{event.name} {pattern_cn} 已触发{event.count}次"
+            
+            if should_voice:
+                self._trigger_alert(event.code, event.name, msg, action=action, price=event.price)
+            else:
+                # 静默模式：只记录日志，不播报
+                logger.debug(f"Signal muted (count={event.count}): {event.code} {pattern_cn}")
+            
+            # === 高优先级信号触发闪屏 ===
+            if is_high_priority and hasattr(self, 'on_high_priority_signal'):
+                try:
+                    self.on_high_priority_signal(event)
+                except Exception as e:
+                    logger.debug(f"High priority callback failed: {e}")
+                    
         except Exception as e:
             logger.error(f"Pattern callback error: {e}")
 
