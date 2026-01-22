@@ -58,6 +58,11 @@ class SignalLogPanel(QWidget, WindowMixin):
         self._max_lines: int = 500
         self._drag_pos: Optional[QPoint] = None
         
+        # 闪屏状态
+        self._flash_step: int = 0
+        self._flash_timer: Optional[QTimer] = None
+        self._original_border_style: str = ""
+        
         # 设置为浮动工具窗口
         self.setWindowFlags(
             Qt.WindowType.Tool
@@ -191,7 +196,7 @@ class SignalLogPanel(QWidget, WindowMixin):
             return False
         return True
 
-    def append_log(self, code: str, name: str, pattern: str, message: str):
+    def append_log(self, code: str, name: str, pattern: str, message: str, is_high_priority: bool = False):
         """添加日志条目，包含校验与去重"""
         if self._paused:
             return
@@ -237,6 +242,10 @@ class SignalLogPanel(QWidget, WindowMixin):
         
         self.count_label.setText(str(len(self._log_buffer)))
         self.status_label.setText(f"最新: {code}")
+        
+        # 高优先级信号触发闪屏
+        if is_high_priority:
+            self.flash_for_high_priority()
 
     def clear_logs(self):
         """清空日志"""
@@ -245,6 +254,66 @@ class SignalLogPanel(QWidget, WindowMixin):
         self._last_messages.clear()
         self.count_label.setText("0")
         self.status_label.setText("已清空")
+    
+    def flash_for_high_priority(self, times: int = 3, interval_ms: int = 150):
+        """
+        高优先级信号闪屏效果 (非阻塞)
+        使用 QTimer 实现边框颜色交替闪烁
+        
+        Args:
+            times: 闪烁次数
+            interval_ms: 每次闪烁间隔（毫秒）
+        """
+        # 如果正在闪烁中，不重复触发
+        if self._flash_timer and self._flash_timer.isActive():
+            return
+        
+        self._flash_step = 0
+        total_steps = times * 2  # 每次闪烁包含亮和暗两步
+        
+        # 保存原始样式
+        self._original_border_style = self.styleSheet()
+        
+        # 闪烁样式
+        flash_style = """
+            SignalLogPanel {
+                background-color: #1a1a1a;
+                border: 3px solid #FF0000;
+                border-radius: 4px;
+            }
+        """
+        
+        normal_style = """
+            SignalLogPanel {
+                background-color: #1a1a1a;
+                border: 1px solid #444;
+                border-radius: 4px;
+            }
+        """
+        
+        def do_flash():
+            if self._flash_step >= total_steps:
+                # 闪烁结束，恢复原始样式
+                self.setStyleSheet(self._original_border_style)
+                if self._flash_timer:
+                    self._flash_timer.stop()
+                return
+            
+            # 奇偶步切换样式
+            if self._flash_step % 2 == 0:
+                self.setStyleSheet(flash_style)
+            else:
+                self.setStyleSheet(normal_style)
+            
+            self._flash_step += 1
+        
+        # 创建定时器
+        self._flash_timer = QTimer(self)
+        self._flash_timer.timeout.connect(do_flash)
+        self._flash_timer.start(interval_ms)
+        
+        # 首次立即执行
+        do_flash()
     
     def _toggle_pause(self):
         """切换暂停状态"""

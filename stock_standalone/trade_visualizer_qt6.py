@@ -30,6 +30,7 @@ from PyQt6.QtGui import (
     QAction, QColor, QPainter, QPicture, QFont, QPen, QBrush, 
     QActionGroup, QShortcut, QKeySequence
 )
+from PyQt6.QtWidgets import QGraphicsItem
 from PyQt6 import sip
 from PyQt6 import QtGui
 import stock_logic_utils
@@ -405,6 +406,61 @@ class SignalOverlay:
             self._text_pool.append(item)
         self.text_items.clear()
 
+    # def update_signals(self, signals: list[SignalPoint], target='kline', y_visuals=None):
+    #     """
+    #     更新信号显示
+    #     :param signals: SignalPoint 列表
+    #     :param target: 'kline' 或 'tick'
+    #     :param y_visuals: 可选的视觉 Y 坐标列表 (用于对齐 K 线上下方)
+    #     """
+    #     plot = self.kline_plot if target == 'kline' else self.tick_plot
+    #     scatter = self.kline_scatter if target == 'kline' else self.tick_scatter
+
+    #     if not signals:
+    #         scatter.clear()
+    #         # 立即清理旧文本并回收入池
+    #         for item in self.text_items:
+    #             item.hide()
+    #             self._text_pool.append(item)
+    #         self.text_items.clear()
+    #         return
+
+    #     xs, ys, brushes, symbols, sizes, data = [], [], [], [], [], []
+
+    #     # 先将当前显示的文本回收入池
+    #     for item in self.text_items:
+    #         item.hide()
+    #         self._text_pool.append(item)
+    #     self.text_items.clear()
+
+    #     for i, sig in enumerate(signals):
+    #         y_pos = y_visuals[i] if y_visuals is not None else sig.price
+            
+    #         xs.append(sig.bar_index)
+    #         ys.append(y_pos)
+    #         brushes.append(pg.mkBrush(sig.color))
+    #         symbols.append(sig.symbol)
+    #         sizes.append(sig.size)
+    #         # data 存储 meta 信息供点击回调使用
+    #         data.append(sig.to_visual_hit()['meta'])
+
+    #         # 添加价格文字标签
+    #         is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY)
+    #         # anchor (x, y): (0.5, 1) means center-bottom of text is at pos
+    #         # If is_buy, text should be BELOW the marker
+    #         anchor = (0.5, -0.5) if is_buy else (0.5, 1.5)
+    #         # 颜色适配主题
+    #         text_color = (255, 120, 120) if is_buy else (120, 255, 120)
+
+    #         txt = self._get_text_item()
+    #         txt.setText(f"{sig.price:.2f}")
+    #         txt.setAnchor(anchor)
+    #         txt.setColor(text_color)
+    #         txt.setPos(sig.bar_index, y_pos)
+    #         self.text_items.append(txt)
+
+    #     scatter.setData(x=xs, y=ys, brush=brushes, symbol=symbols, size=sizes, data=data)
+
     def update_signals(self, signals: list[SignalPoint], target='kline', y_visuals=None):
         """
         更新信号显示
@@ -412,12 +468,13 @@ class SignalOverlay:
         :param target: 'kline' 或 'tick'
         :param y_visuals: 可选的视觉 Y 坐标列表 (用于对齐 K 线上下方)
         """
+        import math
+
         plot = self.kline_plot if target == 'kline' else self.tick_plot
         scatter = self.kline_scatter if target == 'kline' else self.tick_scatter
 
         if not signals:
             scatter.clear()
-            # 立即清理旧文本并回收入池
             for item in self.text_items:
                 item.hide()
                 self._text_pool.append(item)
@@ -426,7 +483,7 @@ class SignalOverlay:
 
         xs, ys, brushes, symbols, sizes, data = [], [], [], [], [], []
 
-        # 先将当前显示的文本回收入池
+        # 回收旧文本
         for item in self.text_items:
             item.hide()
             self._text_pool.append(item)
@@ -434,31 +491,34 @@ class SignalOverlay:
 
         for i, sig in enumerate(signals):
             y_pos = y_visuals[i] if y_visuals is not None else sig.price
-            
-            xs.append(sig.bar_index)
+            x_pos = sig.bar_index
+
+            # === NaN / None 保护 ===
+            if x_pos is None or y_pos is None or math.isnan(x_pos) or math.isnan(y_pos):
+                continue  # 跳过异常信号
+
+            xs.append(x_pos)
             ys.append(y_pos)
             brushes.append(pg.mkBrush(sig.color))
             symbols.append(sig.symbol)
             sizes.append(sig.size)
-            # data 存储 meta 信息供点击回调使用
             data.append(sig.to_visual_hit()['meta'])
 
             # 添加价格文字标签
             is_buy = sig.signal_type in (SignalType.BUY, SignalType.ADD, SignalType.SHADOW_BUY)
-            # anchor (x, y): (0.5, 1) means center-bottom of text is at pos
-            # If is_buy, text should be BELOW the marker
             anchor = (0.5, -0.5) if is_buy else (0.5, 1.5)
-            # 颜色适配主题
             text_color = (255, 120, 120) if is_buy else (120, 255, 120)
 
             txt = self._get_text_item()
             txt.setText(f"{sig.price:.2f}")
             txt.setAnchor(anchor)
             txt.setColor(text_color)
-            txt.setPos(sig.bar_index, y_pos)
+            txt.setPos(x_pos, y_pos)
             self.text_items.append(txt)
 
+        # 最后统一更新 scatter
         scatter.setData(x=xs, y=ys, brush=brushes, symbol=symbols, size=sizes, data=data)
+
 
     def set_on_click_handler(self, handler):
         """设置信号点击回调"""
@@ -1982,6 +2042,8 @@ class MainWindow(QMainWindow, WindowMixin):
         self.kline_plot.disableAutoRange()
         right_splitter.addWidget(self.kline_widget)
 
+        # ⭐ 安装 ViewBox 守护钩子 (锁定 X 轴, Y 轴自动)
+        # self._install_viewbox_guard(self.kline_plot)
         # --- 添加重置按钮 (只添加一次) ---
         # self._add_reset_button()
 
@@ -1992,6 +2054,9 @@ class MainWindow(QMainWindow, WindowMixin):
         # ⭐ 禁用自动范围，防止鼠标悬停时视图跳动
         self.tick_plot.disableAutoRange()
         right_splitter.addWidget(self.tick_widget)
+
+        # ⭐ 安装分时图的 ViewBox 守护钩子
+        # self._install_viewbox_guard(self.tick_plot)
 
         # ⭐ [UPGRADE] 初始化信号覆盖层管理器
         self.signal_overlay = SignalOverlay(self.kline_plot, self.tick_plot)
@@ -2044,6 +2109,23 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 设置分割器大小 (70% 顶部, 30% 底部)
         right_splitter.setSizes([500, 200])
+
+        # splitter 行为
+        right_splitter.setChildrenCollapsible(True)
+        right_splitter.setStretchFactor(0, 3)
+        right_splitter.setStretchFactor(1, 1)
+
+        # 允许图被压缩
+        self.kline_widget.setMinimumHeight(80)
+        self.tick_widget.setMinimumHeight(60)
+
+        # 防止 TextItem 抬高 bounding
+        self.crosshair_label.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
+        )
+        self.tick_crosshair_label.setFlag(
+            QGraphicsItem.GraphicsItemFlag.ItemIgnoresTransformations, True
+        )
 
         # 3. Filter Panel (Initially Hidden)
         self.filter_panel = QWidget()
@@ -2367,13 +2449,13 @@ class MainWindow(QMainWindow, WindowMixin):
         if hasattr(self, 'voice_thread'):
             self.voice_thread.speak(message)
     
-    def _on_signal_log(self, code: str, name: str, pattern: str, message: str):
+    def _on_signal_log(self, code: str, name: str, pattern: str, message: str, is_high_priority: bool = False):
         """信号日志回调 - 追加到日志面板并写入数据库"""
-        # 1. 显示到信号日志面板
+        # 1. 显示到信号日志面板（传递高优先级标志以触发闪屏）
         if hasattr(self, 'signal_log_panel'):
-            self.signal_log_panel.append_log(code, name, pattern, message)
+            self.signal_log_panel.append_log(code, name, pattern, message, is_high_priority=is_high_priority)
         
-        # 2. [NEW] 写入数据库 signal_message 表（用于热点详情窗口的历史查询）
+        # 2. 写入数据库 signal_message 表（同日同股同信号只更新计数）
         try:
             import sqlite3
             from datetime import datetime
@@ -2381,17 +2463,37 @@ class MainWindow(QMainWindow, WindowMixin):
             conn = sqlite3.connect("signal_strategy.db", timeout=10)
             c = conn.cursor()
             
-            # 插入信号记录 (匹配现有表结构: id, timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days)
             now_time = datetime.now().strftime('%H:%M:%S')
             now_date = datetime.now().strftime('%Y-%m-%d')
+            priority_value = 100 if is_high_priority else 50
+            
+            # 检查是否已存在同日同股同信号类型
             c.execute("""
-                INSERT INTO signal_message (timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (now_time, code, name, pattern, 'hotlist_panel', 50, 0.0, message, 0, now_date, 1, 1))
+                SELECT id, count FROM signal_message 
+                WHERE code = ? AND signal_type = ? AND source = 'hotlist_panel' AND created_date = ?
+                LIMIT 1
+            """, (code, pattern, now_date))
+            existing = c.fetchone()
+            
+            if existing:
+                # 已存在：更新计数和时间戳
+                new_count = existing[1] + 1
+                c.execute("""
+                    UPDATE signal_message 
+                    SET timestamp = ?, count = ?, priority = ?, reason = ?
+                    WHERE id = ?
+                """, (now_time, new_count, priority_value, message, existing[0]))
+                logger.debug(f"✅ Signal updated in DB: {code} - {pattern} (count={new_count})")
+            else:
+                # 不存在：插入新记录
+                c.execute("""
+                    INSERT INTO signal_message (timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (now_time, code, name, pattern, 'hotlist_panel', priority_value, 0.0, message, 0, now_date, 1, 1))
+                logger.debug(f"✅ Signal saved to DB: {code} - {pattern}")
             
             conn.commit()
             conn.close()
-            logger.debug(f"✅ Signal saved to DB: {code} - {pattern}")
         except Exception as e:
             logger.error(f"Failed to save signal to DB: {e}")
     
@@ -5746,6 +5848,18 @@ class MainWindow(QMainWindow, WindowMixin):
             self.hotspot_items.clear()
         else:
             self.hotspot_items = []
+
+    def _install_viewbox_guard(self, plot: pg.PlotItem):
+        vb = plot.getViewBox()
+        
+        def on_range_changed(vb_self, range):
+            # 强制锁定 X 轴
+            vb_self.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
+            # Y 轴保持自动
+            vb_self.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+        
+        # 连接一次，后续 addItem 不会破坏这个 hook
+        vb.sigRangeChanged.connect(on_range_changed)
 
     # def render_charts_opt(self, code, day_df, tick_df):
     def render_charts(self, code, day_df, tick_df):
