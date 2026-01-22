@@ -370,38 +370,6 @@ tdx_ths_position5376nodfcf={'Edge': '1013,-793,914,800','交易信号监控': '1
         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51','开盘啦竞价板块观察1.0': '914,-1052,898,265',\
         }
 
-# tdx_ths_position5376={'Edge': '1013,-793,914,800','交易信号监控': '971,87,566,389','东兴证券': '51,205,1083,717',\
-#         '行业跟随1': '-1059,-622,677,404','人气综合排行榜2.2': '-1922,-622,478,753','通达信金融终端(开心果交易版) 副屏一': '-37,-891,1153,652',\
-#         '通达信金融终端(开心果交易版) 副屏二': '-43,-27,1170,760','通达信金融终端(开心果交易版) 副屏三': '-1894,-407,1130,639','通达信金融终端(开心果交易版)V2025': '-1711,-560,1216,794',\
-#         '东方财富': '64,98,1353,768','同花顺': '29,-785,1440,785','sina_Market-DurationDn.exe': '-6,432,1356,423',\
-#         'sina_Market-DurationCXDN.exe': '10,313,1329,438','sina_Market-DurationDnUP.exe': '-6,374,1353,438','sina_Market-DurationUP.exe': '119,329,1394,439',\
-#         'sina_Monitor-Market-LH.exe': '264,306,1307,407','sina_Monitor.exe': '48,-1080,1353,521','singleAnalyseUtil.exe': '992,-1080,897,359',\
-#         'LinePower.exe': '750,33,761,407','instock_Monitor.exe': '16,82,1346,439','chantdxpower.exe': '-1926,-159,649,407',\
-#         'ths-tdx-web.exe': '70,200,59,51','pywin32_mouse.py': '-20480,-20482,59,51','开盘啦竞价板块观察1.0': '-7,-1043,898,265',\
-#         '股票异动数据监控': '1161,-1005,766,589','开盘啦竞价板块观察1.0': '-7,-1043,898,265','股票异动数据监控': '1161,-1005,766,589',\
-# }
-
-# tdx_ths_position5376={'Edge': '1013,-793,914,800','交易信号监控': '1335,180,566,389','东兴证券': '51,205,1083,717',\
-#         '行业跟随1': '30,221,677,404','人气综合排行榜2.2': '169,0,477,753','通达信金融终端(开心果交易版) 副屏一': '-37,-891,1153,652',\
-#         '通达信金融终端(开心果交易版) 副屏二': '-43,-27,1170,760','通达信金融终端(开心果交易版) 副屏三': '-1894,-407,1130,639','通达信金融终端(开心果交易版)V2025': '243,114,1385,828',\
-#         '东方财富': '-1483,589,1267,804','同花顺': '54,38,1370,830','sina_Market-DurationDn.py': '-6,432,1356,423',\
-#         'sina_Market-DurationCXDN.py': '10,313,1329,438','sina_Market-DurationDnUP.py': '-6,374,1353,438','sina_Market-DurationUP.py': '119,329,1394,439',\
-#         'sina_Monitor-Market-LH.py': '264,306,1307,407','sina_Monitor.py': '48,-1080,1353,521','singleAnalyseUtil.py': '992,-1080,897,359',\
-#         'LinePower.py': '750,33,761,407','instock_Monitor.py': '16,82,1346,439','chantdxpower.exe': '65,87,646,415',\
-#         'ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '53,135,150,36','开盘啦竞价板块观察1.0': '-7,-1043,898,265',\
-#         '股票异动数据监控': '1411,50,516,972','instock_MonitorTK.py': '200,29,1603,951',}
-
-# tdx_ths_position5376={'Edge': '909,0,680,776','交易信号监控': '1335,180,566,389','东兴证券': '51,205,1083,717',\
-#         '行业跟随1': '30,221,677,404','人气综合排行榜2.2': '169,0,477,753','通达信金融终端(开心果交易版) 副屏一': '-37,-891,1153,652',\
-#         '通达信金融终端(开心果交易版) 副屏二': '-43,-27,1170,760','通达信金融终端(开心果交易版) 副屏三': '-1894,-407,1130,639','通达信金融终端(开心果交易版)V2025': '219,119,1416,870',\
-#         '东方财富': '-1499,601,1250,773','同花顺': '-1390,588,1355,807','sina_Market-DurationDn.py': '-6,432,1356,423',\
-#         'sina_Market-DurationCXDN.py': '10,313,1329,438','sina_Market-DurationDnUP.py': '-6,374,1353,438','sina_Market-DurationUP.py': '119,329,1394,439',\
-#         'sina_Monitor-Market-LH.py': '264,306,1307,407','sina_Monitor.py': '48,-1080,1353,521','singleAnalyseUtil.py': '992,-1080,897,359',\
-#         'LinePower.py': '750,33,761,407','instock_Monitor.py': '16,82,1346,439','chantdxpower.py': '65,87,646,415',\
-#         'ths-tdx-web.py': '70,200,59,51','pywin32_mouse.py': '53,135,150,36','开盘啦竞价板块观察1.0': '-7,-1043,898,265',\
-#         '股票异动数据监控': '1408,50,516,972','instock_MonitorTK.py': '332,75,1435,911',}
-
-
 #Triton LG
 # tdx_ths_position5376={'Edge': '909,0,680,776','交易信号监控': '1335,180,566,389','东兴证券': '51,205,1083,717',\
 #         '行业跟随1': '30,221,677,404','人气综合排行榜2.2': '169,0,477,753','通达信金融终端(开心果交易版) 副屏一': '-37,-891,1153,652',\
@@ -413,6 +381,16 @@ tdx_ths_position5376nodfcf={'Edge': '1013,-793,914,800','交易信号监控': '1
 #         'ths-tdx-web.py': '70,200,159,27','pywin32_mouse.py': '70,200,159,27','开盘啦竞价板块观察1.0': '-7,-1043,898,265',\
 #         '股票异动数据监控': '1408,50,516,972','instock_MonitorTK.py': '332,75,1435,911',}
 
+# tdx_ths_position5376={'Edge': '909,0,680,776','交易信号监控': '1335,180,566,389','东兴证券': '51,205,1083,717',\
+#         '行业跟随1': '30,221,677,404','人气综合排行榜2.2': '169,0,477,753','通达信金融终端(开心果交易版) 副屏一': '-37,-891,1153,652',\
+#         '通达信金融终端(开心果交易版) 副屏二': '-43,-27,1170,760','通达信金融终端(开心果交易版) 副屏三': '-1894,-407,1130,639','通达信金融终端(开心果交易版)V2025': '219,119,1416,870',\
+#         '东方财富': '-1536,604,1250,773','同花顺': '-1355,615,1355,807','sina_Market-DurationDn.py': '-6,432,1356,423',\
+#         'sina_Market-DurationCXDN.py': '10,313,1329,438','sina_Market-DurationDnUP.py': '-6,374,1353,438','sina_Market-DurationUP.py': '119,329,1394,439',\
+#         'sina_Monitor-Market-LH.py': '264,306,1307,407','sina_Monitor.py': '109,20,1356,520','singleAnalyseUtil.py': '1046,20,897,359',\
+#         'LinePower.py': '750,33,761,407','instock_Monitor.py': '16,82,1346,439','chantdxpower.py': '65,87,646,415',\
+#         'ths-tdx-web.py': '70,200,159,27','pywin32_mouse.py': '70,200,159,27','开盘啦竞价板块观察1.0': '-7,-1043,898,265',\
+#         'instock_MonitorTK.py': '332,75,1435,911',}
+
 tdx_ths_position5376={'Edge': '909,0,680,776','交易信号监控': '1335,180,566,389','东兴证券': '51,205,1083,717',\
         '行业跟随1': '30,221,677,404','人气综合排行榜2.2': '169,0,477,753','通达信金融终端(开心果交易版) 副屏一': '-37,-891,1153,652',\
         '通达信金融终端(开心果交易版) 副屏二': '-43,-27,1170,760','通达信金融终端(开心果交易版) 副屏三': '-1894,-407,1130,639','通达信金融终端(开心果交易版)V2025': '219,119,1416,870',\
@@ -421,7 +399,8 @@ tdx_ths_position5376={'Edge': '909,0,680,776','交易信号监控': '1335,180,56
         'sina_Monitor-Market-LH.py': '264,306,1307,407','sina_Monitor.py': '109,20,1356,520','singleAnalyseUtil.py': '1046,20,897,359',\
         'LinePower.py': '750,33,761,407','instock_Monitor.py': '16,82,1346,439','chantdxpower.py': '65,87,646,415',\
         'ths-tdx-web.py': '70,200,159,27','pywin32_mouse.py': '70,200,159,27','开盘啦竞价板块观察1.0': '-7,-1043,898,265',\
-        'instock_MonitorTK.py': '332,75,1435,911',}
+        'instock_MonitorTK.py': '332,75,1435,911','PyQuant Stock Visualizer (Qt6 + PyQtGraph)': '-1481,571,1338,829','股票异动数据监控': '0,0,494,825',\
+}
 
 # tdx_ths_position5760={'Edge': '1013,-793,914,800','交易信号监控': '1361,-935,566,389','东兴证券': '51,205,1083,717',\
 #         '行业跟随1': '-1059,-622,677,404','人气综合排行榜2.2': '-1922,-622,478,753','通达信金融终端(开心果交易版) 副屏一': '-37,-891,1153,652',\
@@ -1043,9 +1022,12 @@ if __name__ == '__main__':
     # print(get_tdx_ths_position_eval())
     # result3=find_proc_windows('行业跟随1.0',visible=True)
     # print(result3)
-    print(FindWindowRectFromName('股票异动数据监控'))
-    print(f"ths-tdx-web.py: {find_window_by_title_safe('ths-tdx-web.py')}")
+    pyQuantStock = 'PyQuant Stock Visualizer (Qt6 + PyQtGraph)'
 
+    print(FindWindowRectFromName('股票异动数据监控'))
+    print(FindWindowRectFromName(pyQuantStock))
+    print(f"ths-tdx-web.py: {find_window_by_title_safe('ths-tdx-web.py')}")
+    print(f"PyQuant Stock Visual: {find_window_by_title_safe(pyQuantStock)}")
 
     print(FindWindowRectFromName('ths-tdx-web.py'))
     
@@ -1060,6 +1042,8 @@ if __name__ == '__main__':
     # print(find_proc_windows('通达信金融终端(开心果交易版)V2025',fuzzysearch=True))
     # print(get_screen_resolution())
     print(find_window_by_title_background('开盘啦板块竞价'))
+    # print(find_window_by_title_background('PyQuant Stock Visual'))
+
     print(find_window_by_title_background('异动联动'))
     print(find_window_by_title_background('通达信金融终端'))
     result = find_window_by_title_background('涨停采集工具共享版')
@@ -1097,7 +1081,7 @@ if __name__ == '__main__':
     #     run_system_fpath('%s\\tdxw.exe'%(cct.get_tdx_dir()))
     #     time.sleep(8)
 
-    tasklist = ['通达信金融终端(开心果交易版) 副屏一','通达信金融终端(开心果交易版) 副屏二','通达信金融终端(开心果交易版) 副屏三','Edge','行业跟随1.0','link.exe']
+    tasklist = [pyQuantStock,'通达信金融终端(开心果交易版) 副屏一','通达信金融终端(开心果交易版) 副屏二','通达信金融终端(开心果交易版) 副屏三','Edge','行业跟随1.0','link.exe']
     for task in tasklist:
         result1 = (find_window_by_title_safe(task))
         # result1 = find_proc_window_tasklist('通达信')
@@ -1254,7 +1238,7 @@ if __name__ == '__main__':
 
     #新加的时候
 
-    appendProc = ['开盘啦竞价板块观察1.0','股票异动数据监控','instock_MonitorTK.py']
+    appendProc = [ pyQuantStock,'开盘啦竞价板块观察1.0','股票异动数据监控','instock_MonitorTK.py']
 
     for proc in appendProc:
         if proc not in positon.keys():

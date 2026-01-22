@@ -361,6 +361,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.visualizer_process = None # Track visualizer process
         self.qt_process = None         # [FIX] 初始化 qt_process 避免 send_df AttributeError
         self.viz_command_queue = None  # ⭐ [FIX] 提前初始化队列，供 send_df 使用
+        self.viz_lifecycle_flag = mp.Value('b', True) # [FIX] 重命名为 viz_lifecycle_flag 确保唯一性
         self.sync_version = 0          # ⭐ 数据同步序列号
         self.last_vis_var_status = None 
         # 4. 初始化 Realtime Data Service (异步加载以加快启动)
@@ -731,8 +732,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if obj and obj.get("cmd") == "REQ_FULL_SYNC":
                             logger.info(f'[Pipe] Feedback listener cmd REQ_FULL_SYNC')
                             self._force_full_sync_pending = True
-
                             self._df_first_send_done = False
+                        
+                        elif obj and obj.get("cmd") == "VIZ_EXIT":
+                            logger.info(f'[Pipe] Visualizer exited. Cleaning up qt_process state.')
+                            self.qt_process = None
+                            self.viz_command_queue = None
+                            if hasattr(self, 'viz_stop_flag'):
+                                self.viz_stop_flag.value = True # Reset for next launch
                         
                         elif obj and obj.get("cmd") == "ADD_MONITOR":
                             code = obj.get("code")
@@ -997,16 +1004,28 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 self._df_sync_thread = None
 
             # 先停止 Qt 子进程
-            if hasattr(self, 'qt_process') and self.qt_process is not None:
-                if self.qt_process.is_alive():
-                    # 设置 stop_flag 让 Qt 子进程循环退出
-                    if hasattr(self, 'stop_flag'):
-                        self.stop_flag.value = False
-                    self.qt_process.join(timeout=2)
-                    if self.qt_process.is_alive():
-                        self.qt_process.terminate()
-                        self.qt_process.join()
-                    self.qt_process = None
+            # 先停止 Qt 子进程 [FIX: Race Condition safe]
+            qtz_proc = getattr(self, 'qt_process', None)
+            if qtz_proc is not None:
+                try:
+                    if qtz_proc.is_alive():
+                        # 设置 stop_flag 让 Qt 子进程循环退出
+                        if hasattr(self, 'viz_lifecycle_flag'):
+                            self.viz_lifecycle_flag.value = False
+                            logger.info("Setting viz_lifecycle_flag to False (App Exit)")
+                        
+                        # 兼容旧代码 (如果有)
+                        if hasattr(self, 'stop_flag'):
+                            self.stop_flag.value = False
+
+                        qtz_proc.join(timeout=2)
+                        if qtz_proc.is_alive():
+                            qtz_proc.terminate()
+                            qtz_proc.join()
+                except Exception as e:
+                    logger.error(f"Error stopping qt_process: {e}")
+                
+                self.qt_process = None
               
             if hasattr(self, "proc") and self.proc.is_alive():
                 logger.info("正在停止后台数据扫描进程...")
@@ -1787,6 +1806,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if hasattr(self, 'refresh_flag'):
             self.refresh_flag.value = False
             logger.info(f'refresh_flag.value : {self.refresh_flag.value}')
+            # logger.info(f"DEBUG: stop_refresh called. refresh_flag ID: {id(self.refresh_flag)}")
         self.status_var.set("刷新已停止")
 
     def start_refresh(self):
@@ -2207,12 +2227,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if self.viz_command_queue is None:
                         self.viz_command_queue = mp.Queue()
                     
+                    # [FIX] 每次启动前强制重置生命周期标志为 True (防止上次退出残留 False)
+                    if hasattr(self, 'viz_lifecycle_flag'):
+                        self.viz_lifecycle_flag.value = True
+                        logger.info(f"[Visualizer] Resetting viz_lifecycle_flag to True. Addr: {id(self.viz_lifecycle_flag)}")
+                    
                     # 启动进程：传入 code|resample, stop_flag, log_level, debug, queue
                     # load_stock_by_code handles the | split automatically
                     initial_payload = f"{code}|resample={resample}"
                     self.qt_process = mp.Process(
                         target=qtviz.main, 
-                        args=(initial_payload, self.refresh_flag, self.log_level , False, self.viz_command_queue), 
+                        # [FIX] 使用 viz_lifecycle_flag
+                        # args=(initial_payload, self.viz_lifecycle_flag, self.log_level , False, self.viz_command_queue), 
+                        # debug info
+                        args=(initial_payload, self.viz_lifecycle_flag, self.log_level , False, self.viz_command_queue), 
                         daemon=False
                     )
                     self.qt_process.start()

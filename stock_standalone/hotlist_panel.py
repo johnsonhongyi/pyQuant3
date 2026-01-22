@@ -595,22 +595,50 @@ class HotlistPanel(QWidget):
         except Exception as e:
             logger.error(f"Save signal count error: {e}")
     
+    def _get_item_from_row(self, row: int) -> Optional[HotlistItem]:
+        """
+        从表格 UI 行索引获取对应的 HotlistItem（支持排序后正确映射）
+        
+        Args:
+            row: 表格 UI 当前行索引（排序后可能变化）
+        
+        Returns:
+            对应的 HotlistItem 对象，如果未找到则返回 None
+        """
+        if row < 0 or row >= self.table.rowCount():
+            return None
+        
+        # 从表格单元格读取 code（第 0 列）
+        code_item = self.table.item(row, 0)
+        if not code_item:
+            return None
+        
+        code = code_item.text().strip()
+        if not code:
+            return None
+        
+        # 在 self.items 中查找匹配的 HotlistItem
+        for item in self.items:
+            if item.code == code:
+                return item
+        return None
+    
     def _on_click(self, row: int, col: int):
         """单击切换股票"""
-        if 0 <= row < len(self.items):
-            item = self.items[row]
+        item = self._get_item_from_row(row)
+        if item:
             self.stock_selected.emit(item.code, item.name)
     
     def _on_current_cell_changed(self, currentRow: int, _currentColumn: int, _previousRow: int, _previousColumn: int):
         """键盘导航联动（上下键切换时也触发股票选择）"""
-        if 0 <= currentRow < len(self.items):
-            item = self.items[currentRow]
+        item = self._get_item_from_row(currentRow)
+        if item:
             self.stock_selected.emit(item.code, item.name)
     
     def _on_double_click(self, row: int, col: int):
         """双击打开详情"""
-        if 0 <= row < len(self.items):
-            item = self.items[row]
+        item = self._get_item_from_row(row)
+        if item:
             self.item_double_clicked.emit(item.code, item.name, item.add_price)
 
     def select_stock(self, code: str):
@@ -627,15 +655,17 @@ class HotlistPanel(QWidget):
     def _on_context_menu(self, pos):
         """右键菜单"""
         row = self.table.currentRow()
-        if row < 0 or row >= len(self.items):
+        item = self._get_item_from_row(row)
+        if not item:
             return
         
-        item = self.items[row]
+        # 使用局部变量绑定 code，避免 lambda 闭包问题
+        current_code = item.code
         menu = QMenu(self)
         
         # 移除
         remove_action = QAction("❌ 移除", self)
-        remove_action.triggered.connect(lambda: self.remove_stock(item.code))
+        remove_action.triggered.connect(lambda: self.remove_stock(current_code))
         menu.addAction(remove_action)
         
         menu.addSeparator()
@@ -644,7 +674,7 @@ class HotlistPanel(QWidget):
         group_menu = menu.addMenu("📁 分组")
         for g in ["观察", "蓄势", "已启动", "持仓"]:
             action = QAction(g, self)
-            action.triggered.connect(lambda checked, grp=g: self._set_group(item.code, grp))
+            action.triggered.connect(lambda checked, grp=g, code=current_code: self._set_group(code, grp))
             group_menu.addAction(action)
         
         menu.exec(self.table.mapToGlobal(pos))
