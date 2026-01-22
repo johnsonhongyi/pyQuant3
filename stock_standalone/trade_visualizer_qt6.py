@@ -487,15 +487,25 @@ class CommandListenerThread(QThread):
         self.server_socket = server_socket
         self.running = True
 
+    # def stop(self):
+    #     self.running = False
+    #     try:
+    #         self.server_socket.close()
+    #     except Exception:
+    #         pass
+    #     self.wait(1000)
     def stop(self):
         self.running = False
         try:
             self.server_socket.close()
         except Exception:
             pass
-        self.wait(1000)
+        self.quit()
+        self.wait(500)
 
     def run(self):
+        # ⭐ 关键：避免 accept 无限阻塞
+        self.server_socket.settimeout(1.0)
         while self.running:
             try:
                 # accept 阻塞，直到有客户端连接
@@ -503,7 +513,6 @@ class CommandListenerThread(QThread):
                 client_socket, _ = self.server_socket.accept()
                 try:
                     client_socket.settimeout(10.0)
-                    
                     # 尝试增加接收缓冲区
                     try:
                         client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 2 * 1024 * 1024) # 2MB
@@ -565,14 +574,24 @@ class CommandListenerThread(QThread):
                         client_socket.close()
                     except Exception:
                         pass
+            except socket.timeout:
+                continue
+            except OSError as e:
+                # server_socket 被关闭时，这是“正常退出路径”
+                if not self.running:
+                    break
+                logger.warning(f"[IPC] accept OSError: {e}")
 
             except Exception as e:
-                if self.running:
-                    print(f"[IPC] Listener Loop Error: {e}")
-                else:
-                    break
+                logger.exception("[IPC] Unexpected listener error")
+
         print("[IPC] CommandListenerThread exited cleanly")
 
+            # except Exception as e:
+            #     if self.running:
+            #         print(f"[IPC] Listener Loop Error: {e}")
+            #     else:
+            #         break
 
 
 duration_date_day = 120
@@ -2362,26 +2381,13 @@ class MainWindow(QMainWindow, WindowMixin):
             conn = sqlite3.connect("signal_strategy.db", timeout=10)
             c = conn.cursor()
             
-            # 确保表存在
+            # 插入信号记录 (匹配现有表结构: id, timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days)
+            now_time = datetime.now().strftime('%H:%M:%S')
+            now_date = datetime.now().strftime('%Y-%m-%d')
             c.execute("""
-                CREATE TABLE IF NOT EXISTS signal_message (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    code TEXT NOT NULL,
-                    name TEXT,
-                    timestamp TEXT,
-                    signal_type TEXT,
-                    score REAL,
-                    reason TEXT,
-                    message TEXT
-                )
-            """)
-            
-            # 插入信号记录
-            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            c.execute("""
-                INSERT INTO signal_message (code, name, timestamp, signal_type, score, reason, message)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-            """, (code, name, now, pattern, 0.0, pattern, message))
+                INSERT INTO signal_message (timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (now_time, code, name, pattern, 'hotlist_panel', 50, 0.0, message, 0, now_date, 1, 1))
             
             conn.commit()
             conn.close()
@@ -5775,19 +5781,41 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # --- 主题颜色 ---
         if self.qt_theme == 'dark':
-            ma_colors = {'ma5':'b','ma10':'orange','ma20':QColor(255,255,0),'ma60':QColor(0, 180, 255)}
-            bollinger_colors = {'upper':QColor(139,0,0),'lower':QColor(0,128,0)}
+            # ma_colors = {'ma5':'b','ma10':'orange','ma20':QColor(255,255,0),'ma60':QColor(0, 180, 255)}
+            ma_colors = {
+                   'ma5': QColor(0, 255, 0),          # ✅ 亮绿色（改这里）
+                   'ma10': QColor(255, 165, 0),        # orange
+                   'ma20': QColor(255, 255, 0),        # yellow
+                   'ma60': QColor(0, 180, 255)         # cyan-blue
+               }
+            # bollinger_colors = {'upper':QColor(139,0,0),'lower':QColor(0,128,0)}
+            bollinger_colors = {
+                    'upper': QColor(220, 20, 60),       # Crimson Red（比 139,0,0 更清晰）
+                    'lower': QColor(0, 200, 120)        # 明亮绿
+               }
+
             vol_ma_color = QColor(255,255,0)
             tick_curve_color = 'w'
             tick_avg_color = QColor(255,255,0)
-            pre_close_color = '#FF0000' # Bright Red for Yesterday's Close
+            # pre_close_color = '#FF0000' # Bright Red for Yesterday's Close
+            pre_close_color = '#FF4040'             # 柔亮红（不刺眼）
         else:
-            ma_colors = {'ma5':'b','ma10':'orange','ma20':QColor(255,140,0),'ma60':QColor(0, 180, 255)}
-            bollinger_colors = {'upper':QColor(139,0,0),'lower':QColor(0,128,0)}
-            vol_ma_color = QColor(255,140,0)
+            ma_colors = {
+                'ma5': QColor(0, 200, 0),            # ✅ 亮绿但不刺眼
+                'ma10': QColor(255, 140, 0),          # Dark Orange
+                'ma20': QColor(255, 165, 0),          # Orange
+                'ma60': QColor(0, 120, 255)           # 深蓝
+            }
+
+            bollinger_colors = {
+                'upper': QColor(200, 0, 0),
+                'lower': QColor(0, 150, 0)
+            }
+
+            vol_ma_color = QColor(255, 140, 0)
             tick_curve_color = 'k'
-            tick_avg_color = QColor(255,140,0)
-            pre_close_color = '#FF0000' # Bright Red for Yesterday's Close
+            tick_avg_color = QColor(255, 140, 0)
+            pre_close_color = '#FF0000'
 
         day_df = _normalize_dataframe(day_df)
 

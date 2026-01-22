@@ -645,68 +645,74 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._on_resize_finished
         )
 
-    # def _start_feedback_listener(self):
-    #     """监听来自可视化器的反馈指令 (例如请求全量同步)"""
-    #     import win32pipe, win32file, pywintypes, winerror
-    #     import json
-    #     from data_utils import PIPE_NAME_TK
+    # def listener():
+    #     logger.info(f"[Pipe] Feedback listener ready on {PIPE_NAME_TK}")
 
-    #     def listener():
-    #         logger.info(f"[Pipe] Starting feedback listener on {PIPE_NAME_TK}")
-    #         while True:
-    #             pipe = None
-    #             try:
-    #                 # 创建命名管道服务端
-    #                 pipe = win32pipe.CreateNamedPipe(
-    #                     PIPE_NAME_TK,
-    #                     win32pipe.PIPE_ACCESS_DUPLEX,
-    #                     win32pipe.PIPE_TYPE_MESSAGE | win32pipe.PIPE_READMODE_MESSAGE | win32pipe.PIPE_WAIT,
-    #                     1, 65536, 65536,
-    #                     0,
-    #                     None
-    #                 )
-    #                 win32pipe.ConnectNamedPipe(pipe, None)
+    #     while True:
+    #         pipe = None
+    #         try:
+    #             pipe = win32pipe.CreateNamedPipe(
+    #                 PIPE_NAME_TK,
+    #                 win32pipe.PIPE_ACCESS_DUPLEX,
+    #                 win32pipe.PIPE_TYPE_MESSAGE |
+    #                 win32pipe.PIPE_READMODE_MESSAGE |
+    #                 win32pipe.PIPE_WAIT,
+    #                 win32pipe.PIPE_UNLIMITED_INSTANCES,
+    #                 65536, 65536,
+    #                 0,
+    #                 None
+    #             )
+
+    #             win32pipe.ConnectNamedPipe(pipe, None)
+
+    #             while True:
     #                 res, data = win32file.ReadFile(pipe, 65536)
-    #                 if res == 0:
-    #                     msg = data.decode('utf-8')
-    #                     logger.info(f"[Pipe] getdata feedback msg: {msg}")
-    #                     try:
-    #                         cmd_obj = json.loads(msg)
-    #                         if cmd_obj.get("cmd") == "REQ_FULL_SYNC":
-    #                             # 启动同步线程（只启动一次）
-    #                             logger.info("[Pipe] Received REQ_FULL_SYNC, triggering immediate full update")
-    #                             # ⭐ [FIX] 设置标志位，由主推送线程处理，避免线程爆炸
-    #                             self._force_full_sync_pending = True
-    #                             self._df_first_send_done = False
-    #                     except Exception as e:
-    #                         if "REQ_FULL_SYNC" in msg:
-    #                             logger.info("[Pipe] Received REQ_FULL_SYNC (raw), triggering immediate full update")
-    #                             self._force_full_sync_pending = True
-    #                             self._df_first_send_done = False
+    #                 if res != 0 or not data:
+    #                     break
 
+    #                 msg = data.decode("utf-8")
+    #                 logger.info(f"[Pipe] recv: {msg}")
+
+    #                 try:
+    #                     obj = json.loads(msg)
+    #                 except Exception:
+    #                     obj = None
+
+    #                 if obj and obj.get("cmd") == "REQ_FULL_SYNC":
+    #                     logger.info(f'[Pipe] Feedback listener cmd REQ_FULL_SYNC')
+    #                     self._force_full_sync_pending = True
+    #                     self._df_first_send_done = False
                     
+    #                 elif obj and obj.get("cmd") == "VIZ_EXIT":
+    #                     logger.info(f'[Pipe] Visualizer exited. Cleaning up qt_process state.')
+    #                     self.qt_process = None
+    #                     self.viz_command_queue = None
+    #                     if hasattr(self, 'viz_stop_flag'):
+    #                         self.viz_stop_flag.value = True # Reset for next launch
+                    
+    #                 elif obj and obj.get("cmd") == "ADD_MONITOR":
+    #                     code = obj.get("code")
+    #                     if code:
+    #                         logger.info(f'[Pipe] Feedback listener cmd ADD_MONITOR: {code}')
+    #                         try:
+    #                             current_list = list(self.global_dict.get('extra_monitor_codes', []))
+    #                             if code not in current_list:
+    #                                 current_list.append(code)
+    #                                 self.global_dict['extra_monitor_codes'] = current_list
+    #                                 logger.info(f"✅ Added {code} to extra_monitor_codes")
+    #                                 # 同时也触发一次强制全量同步，确保新代码能飞速出现在可视化器中
+    #                                 self._force_full_sync_pending = True
+    #                         except Exception as e:
+    #                             logger.error(f"Failed to update extra_monitor_codes: {e}")
+
+    #         except Exception as e:
+    #             logger.debug(f"[Pipe] listener error: {e}")
+    #             time.sleep(1)
+
+    #         finally:
+    #             if pipe:
     #                 win32pipe.DisconnectNamedPipe(pipe)
     #                 win32file.CloseHandle(pipe)
-    #             except pywintypes.error as e:
-    #                 # 针对常见的“管道另一端有一进程”错误进行处理，不视为严重错误
-    #                 if e.winerror == winerror.ERROR_PIPE_CONNECTED:
-    #                      pass
-    #                 else:
-    #                      logger.debug(f"[Pipe] Win32 Error: {e}")
-    #                 if pipe: win32file.CloseHandle(pipe)
-    #                 time.sleep(1)
-    #             except Exception as e:
-    #                 logger.debug(f"[Pipe] Listener cycle error: {e}")
-    #                 if pipe: win32file.CloseHandle(pipe)
-    #                 time.sleep(2)
-
-    #     # ⭐ [FIX] 强制确保同步线程已启动
-    #     if not hasattr(self, '_df_sync_thread') or not self._df_sync_thread.is_alive():
-    #         self._df_sync_running = True
-    #         self._df_sync_thread = threading.Thread(target=self.send_df, daemon=True)
-    #         self._df_sync_thread.start()
-
-    #     threading.Thread(target=listener, daemon=True).start()
 
     def _start_feedback_listener(self):
         """
@@ -720,7 +726,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         def listener():
             logger.info(f"[Pipe] Feedback listener ready on {PIPE_NAME_TK}")
 
+            # ⚠️ 退出闸门（如果外部没定义，就兜底一个）
+            app_exiting = getattr(self, "_app_exiting", None)
+
             while True:
+                # ====== 全局退出判断 ======
+                if app_exiting and app_exiting.is_set():
+                    break
+
                 pipe = None
                 try:
                     pipe = win32pipe.CreateNamedPipe(
@@ -735,14 +748,33 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         None
                     )
 
-                    win32pipe.ConnectNamedPipe(pipe, None)
+                    try:
+                        win32pipe.ConnectNamedPipe(pipe, None)
+                    except pywintypes.error as e:
+                        # ⛔ 正常退出场景（应用关闭 / 对端消失）
+                        if app_exiting and app_exiting.is_set():
+                            break
+                        raise
 
+                    # ====== 已建立连接，开始读取 ======
                     while True:
-                        res, data = win32file.ReadFile(pipe, 65536)
+                        if app_exiting and app_exiting.is_set():
+                            break
+
+                        try:
+                            res, data = win32file.ReadFile(pipe, 65536)
+                        except pywintypes.error as e:
+                            # Windows 管道正常断开（不要当异常刷日志）
+                            if e.winerror in (winerror.ERROR_BROKEN_PIPE,
+                                              winerror.ERROR_NO_DATA,
+                                              winerror.ERROR_INVALID_HANDLE):
+                                break
+                            raise
+
                         if res != 0 or not data:
                             break
 
-                        msg = data.decode("utf-8")
+                        msg = data.decode("utf-8", errors="ignore")
                         logger.info(f"[Pipe] recv: {msg}")
 
                         try:
@@ -750,18 +782,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         except Exception:
                             obj = None
 
+                        # ================== 原有逻辑：完全保留 ==================
+
                         if obj and obj.get("cmd") == "REQ_FULL_SYNC":
-                            logger.info(f'[Pipe] Feedback listener cmd REQ_FULL_SYNC')
+                            logger.info('[Pipe] Feedback listener cmd REQ_FULL_SYNC')
                             self._force_full_sync_pending = True
                             self._df_first_send_done = False
-                        
+
                         elif obj and obj.get("cmd") == "VIZ_EXIT":
-                            logger.info(f'[Pipe] Visualizer exited. Cleaning up qt_process state.')
+                            logger.info('[Pipe] Visualizer exited. Cleaning up qt_process state.')
                             self.qt_process = None
                             self.viz_command_queue = None
                             if hasattr(self, 'viz_stop_flag'):
-                                self.viz_stop_flag.value = True # Reset for next launch
-                        
+                                self.viz_stop_flag.value = True  # Reset for next launch
+
                         elif obj and obj.get("cmd") == "ADD_MONITOR":
                             code = obj.get("code")
                             if code:
@@ -772,20 +806,40 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                         current_list.append(code)
                                         self.global_dict['extra_monitor_codes'] = current_list
                                         logger.info(f"✅ Added {code} to extra_monitor_codes")
-                                        # 同时也触发一次强制全量同步，确保新代码能飞速出现在可视化器中
+                                        # 同时也触发一次强制全量同步
                                         self._force_full_sync_pending = True
                                 except Exception as e:
                                     logger.error(f"Failed to update extra_monitor_codes: {e}")
 
+                except pywintypes.error as e:
+                    # 正常退出错误码 → 静默退出
+                    if app_exiting and app_exiting.is_set():
+                        break
+                    if e.winerror in (winerror.ERROR_BROKEN_PIPE,
+                                      winerror.ERROR_NO_DATA,
+                                      winerror.ERROR_INVALID_HANDLE):
+                        break
+                    logger.debug(f"[Pipe] listener error: {e}")
+                    time.sleep(1)
+
                 except Exception as e:
+                    if app_exiting and app_exiting.is_set():
+                        break
                     logger.debug(f"[Pipe] listener error: {e}")
                     time.sleep(1)
 
                 finally:
                     if pipe:
-                        win32pipe.DisconnectNamedPipe(pipe)
-                        win32file.CloseHandle(pipe)
+                        try:
+                            win32pipe.DisconnectNamedPipe(pipe)
+                        except Exception:
+                            pass
+                        try:
+                            win32file.CloseHandle(pipe)
+                        except Exception:
+                            pass
 
+            logger.info("[Pipe] Feedback listener exited cleanly")
 
         # ====== 确保主同步线程只启动一次 ======
         if not hasattr(self, "_df_sync_thread") or not self._df_sync_thread.is_alive():
