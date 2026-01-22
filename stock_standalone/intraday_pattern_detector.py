@@ -262,12 +262,13 @@ class IntradayPatternDetector:
     def _check_low_open_patterns(self, code: str, name: str, 
                                   tick_df: Optional[pd.DataFrame],
                                   day_row: pd.Series, prev_close: float) -> List[PatternEvent]:
-        """低开走高 / 开盘最低"""
+        """低开走高 / 开盘最低 (带分级信息)"""
         events = []
         
         open_price = float(day_row.get('open', 0))
         current_price = float(day_row.get('close', day_row.get('trade', 0)))
         day_low = float(day_row.get('low', 0))
+        day_high = float(day_row.get('high', 0))
         
         if open_price <= 0 or prev_close <= 0 or current_price <= 0:
             return events
@@ -276,11 +277,56 @@ class IntradayPatternDetector:
         
         # 低开走高: 开盘低于昨收 1%+, 当前价高于开盘 2%+
         if open_gap <= -1.0 and current_price > open_price * 1.02:
+            # === 起点分级：从哪个 MA 附近启动 ===
+            ma5 = float(day_row.get('ma5d', day_row.get('ma5', 0)))
+            ma10 = float(day_row.get('ma10d', day_row.get('ma10', 0)))
+            ma20 = float(day_row.get('ma20d', day_row.get('ma20', 0)))
+            
+            start_level = ""
+            if ma5 > 0 and abs(open_price - ma5) / ma5 < 0.015:  # 在 MA5 ±1.5% 附近
+                start_level = "MA5"
+            elif ma10 > 0 and abs(open_price - ma10) / ma10 < 0.015:
+                start_level = "MA10"
+            elif ma20 > 0 and abs(open_price - ma20) / ma20 < 0.02:
+                start_level = "MA20"
+            elif open_price < day_low * 1.01:  # 接近日内最低
+                start_level = "日低"
+            
+            # === 高度分级：走到了哪里 ===
+            high4 = float(day_row.get('high4', 0))  # 4日最高
+            max5 = float(day_row.get('max5', day_row.get('high5', 0)))  # 5日最高
+            
+            height_level = ""
+            height_levels = []
+            if current_price > prev_close:
+                height_levels.append("昨收")
+            if high4 > 0 and current_price > high4:
+                height_levels.append("4日高")
+            if max5 > 0 and current_price > max5:
+                height_levels.append("5日高")
+            if ma20 > 0 and current_price > ma20:
+                height_levels.append(">MA20")
+            
+            if height_levels:
+                height_level = ",".join(height_levels[-2:])  # 取最高的2个
+            else:
+                # 计算涨幅作为备选
+                rise_pct = (current_price - open_price) / open_price * 100
+                height_level = f"+{rise_pct:.1f}%"
+            
+            # === 构建详细描述 ===
+            detail_parts = [f"低开{open_gap:.1f}%"]
+            if start_level:
+                detail_parts.append(f"@{start_level}")
+            detail_parts.append(f"走高至{height_level}")
+            
+            detail = "".join(detail_parts)
+            
             events.append(PatternEvent(
                 code=code, name=name, pattern='low_open_high_walk',
                 timestamp=datetime.now().strftime('%H:%M:%S'),
                 price=current_price,
-                detail=f"低开{open_gap:.1f}%走高"
+                detail=detail
             ))
         
         # 开盘最低: 当前价等于今日最低且等于开盘价

@@ -2169,42 +2169,44 @@ class StockLiveStrategy:
             if event.pattern in ('low_open_high_walk', 'pullback_upper'):
                 # 尝试从实时数据中获取当前行情 (如果可用)
                 try:
-                    if hasattr(self, 'df') and not self.df.empty and event.code in self.df.index:
+                    ratio = 0.0
+                    if hasattr(self, 'df') and self.df is not None and not self.df.empty and event.code in self.df.index:
                         row = self.df.loc[event.code]
-                        current_price = event.price
                         ratio = float(row.get('ratio', 0))  # 换手率
-                        
-                        # 多周期均线检查
-                        ma10 = float(row.get('ma10d', row.get('ma10', 0)))
-                        ma20 = float(row.get('ma20d', row.get('ma20', 0)))
-                        ma60 = float(row.get('ma60d', row.get('ma60', 0)))
-                        
-                        # 日线周期：价格低于 MA10/MA20/MA60 之一 且 换手>3%
-                        below_ma = None
-                        if ma10 > 0 and current_price < ma10:
-                            below_ma = "MA10"
-                        elif ma20 > 0 and current_price < ma20:
-                            below_ma = "MA20"
-                        elif ma60 > 0 and current_price < ma60:
-                            below_ma = "MA60"
-                        
-                        if below_ma and ratio > 3.0:
-                            is_high_priority = True
-                            high_priority_reason = f"[HIGH] 回撤至{below_ma}，换手{ratio:.1f}%"
-                            event.is_high_priority = True
-                            logger.info(f"🔥 高优先级信号: {event.code} {event.name} - {high_priority_reason}")
+                    
+                    # 使用 detector 生成的 detail 判断起点位置
+                    # detail 格式如: "低开-2.1%@MA10走高至4日高" 或 "低开-3.0%@日低走高至..."
+                    detail = event.detail or ""
+                    start_at_ma = "@MA" in detail or "@日低" in detail
+                    has_volume = ratio > 3.0
+                    
+                    # 高优先级条件：从重要位置启动 或 换手>3%
+                    if start_at_ma and has_volume:
+                        is_high_priority = True
+                        ma_level = "MA级别" if "@MA" in detail else "日低"
+                        high_priority_reason = f"[HIGH] 起点{ma_level}，换手{ratio:.1f}%"
+                        event.is_high_priority = True
+                        logger.info(f"🔥 高优先级信号: {event.code} {event.name} - {high_priority_reason}")
+                    elif start_at_ma:
+                        # 从 MA 附近启动但换手不足，仍标记为较高优先级
+                        is_high_priority = True
+                        high_priority_reason = f"[HIGH] 起点{detail.split('走高')[0].split('@')[1] if '@' in detail else 'MA'}"
+                        event.is_high_priority = True
+                        logger.info(f"🔥 高优先级信号: {event.code} {event.name} - {high_priority_reason}")
                 except Exception as e:
                     logger.debug(f"High priority check failed: {e}")
             
-            # === 构建消息 ===
+            # === 构建消息 (使用 detector 生成的 detail) ===
             count_suffix = f" (第{event.count}次)" if event.count > 1 else ""
-            msg = f"{event.name} {pattern_cn}{count_suffix}"
+            # 优先使用 event.detail，它包含分级信息 (如 "低开-2.1%@MA10走高至4日高")
+            detail_msg = event.detail if event.detail else pattern_cn
+            msg = f"{event.name} {detail_msg}{count_suffix}"
             if high_priority_reason:
                 msg = f"{msg} {high_priority_reason}"
             
             # === 日志记录 ===
             priority_tag = "🔥" if is_high_priority else "🔔"
-            logger.info(f"{priority_tag} 形态信号: {event.code} {event.name} - {pattern_cn} @ {event.price:.2f}{count_suffix}")
+            logger.info(f"{priority_tag} 形态信号: {event.code} {event.name} - {detail_msg} @ {event.price:.2f}{count_suffix}")
             
             # === 语音播报控制 ===
             # 1. 第一次触发：完整播报
@@ -2233,6 +2235,48 @@ class StockLiveStrategy:
                     self.on_high_priority_signal(event)
                 except Exception as e:
                     logger.debug(f"High priority callback failed: {e}")
+            
+            # === 直接写入数据库 (Live 信号独立记录, 同日同股同信号只更新计数) ===
+            try:
+                import sqlite3
+                from datetime import datetime
+                
+                conn = sqlite3.connect("signal_strategy.db", timeout=10)
+                c = conn.cursor()
+                
+                now_time = datetime.now().strftime('%H:%M:%S')
+                now_date = datetime.now().strftime('%Y-%m-%d')
+                priority_value = 100 if is_high_priority else 50
+                
+                # 检查是否已存在同日同股同信号类型
+                c.execute("""
+                    SELECT id, count FROM signal_message 
+                    WHERE code = ? AND signal_type = ? AND source = 'live_strategy' AND created_date = ?
+                    LIMIT 1
+                """, (event.code, event.pattern, now_date))
+                existing = c.fetchone()
+                
+                if existing:
+                    # 已存在：更新计数和时间戳
+                    new_count = existing[1] + 1
+                    c.execute("""
+                        UPDATE signal_message 
+                        SET timestamp = ?, count = ?, priority = ?, reason = ?
+                        WHERE id = ?
+                    """, (now_time, new_count, priority_value, msg, existing[0]))
+                    logger.debug(f"✅ Live signal updated in DB: {event.code} - {event.pattern} (count={new_count})")
+                else:
+                    # 不存在：插入新记录
+                    c.execute("""
+                        INSERT INTO signal_message (timestamp, code, name, signal_type, source, priority, score, reason, evaluated, created_date, count, consecutive_days)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (now_time, event.code, event.name, event.pattern, 'live_strategy', priority_value, event.score, msg, 0, now_date, 1, 1))
+                    logger.debug(f"✅ Live signal saved to DB: {event.code} - {event.pattern}")
+                
+                conn.commit()
+                conn.close()
+            except Exception as db_err:
+                logger.error(f"Failed to save live signal to DB: {db_err}")
                     
         except Exception as e:
             logger.error(f"Pattern callback error: {e}")

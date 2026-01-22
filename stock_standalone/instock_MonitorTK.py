@@ -5008,6 +5008,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win.geometry("400x180")
             win.configure(bg="#fff")
             
+            # 检测是否为高优先级信号（消息中包含 [HIGH]）
+            win.is_high_priority = "[HIGH]" in msg or "高优先级" in msg
+            
             # 记录并定位（直接调用，保持层叠效果）
             self.active_alerts.append(win)
             self._update_alert_positions()
@@ -5033,7 +5036,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         has_voice = False
                     else:
                         v = getattr(self.live_strategy, '_voice', None)
-                        if v and v._thread and v._thread.is_alive() and v.queue.qsize() < 10:
+                        if v and hasattr(v, '_thread') and v._thread and v._thread.is_alive() and v.queue.qsize() < 10:
                             has_voice = True
             except Exception as e:
                 logger.debug(f"voice detect failed: {e}")
@@ -5061,8 +5064,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if getattr(win, 'is_flashing', False): return
                 win.is_flashing = True
                 flash()
-                # 暂时禁用震动效果（测试是否导致无法操作）
-                # self._shake_window(win, distance=5, interval_ms=150)
+                # 高优先级信号触发震动效果
+                if getattr(win, 'is_high_priority', False):
+                    self._shake_window(win, distance=5, interval_ms=150)
             
             def stop_effects():
                 win.is_flashing = False
