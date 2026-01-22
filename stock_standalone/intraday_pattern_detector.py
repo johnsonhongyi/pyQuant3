@@ -46,9 +46,12 @@ class PatternEvent:
     price: float
     detail: str        # 附加说明
     score: float = 0.0 # 可选评分
+    count: int = 1     # 触发次数（第几次触发）
+    is_high_priority: bool = False  # 是否高优先级
     
     def __repr__(self):
-        return f"PatternEvent({self.code} {self.name}: {self.pattern} @ {self.price:.2f})"
+        count_suffix = f" (x{self.count})" if self.count > 1 else ""
+        return f"PatternEvent({self.code} {self.name}: {self.pattern}{count_suffix} @ {self.price:.2f})"
 
 
 class IntradayPatternDetector:
@@ -91,12 +94,15 @@ class IntradayPatternDetector:
             publish_to_bus: 是否发布到信号总线
         """
         self.on_pattern: Optional[Callable[[PatternEvent], None]] = None
-        self._cache: Dict[str, dict] = {}  # code_pattern -> {ts, ...}
+        self._cache: Dict[str, dict] = {}  # code_pattern -> {ts, count, ...}
         self._cooldown = cooldown
         self._publish_to_bus = publish_to_bus and HAS_SIGNAL_BUS
         
         # 可配置的检测开关
         self.enabled_patterns = set(self.PATTERNS)
+        
+        # 信号计数跟踪 (key: "code_pattern" -> count for today)
+        self._signal_counts: Dict[str, int] = {}
     
     def enable_pattern(self, pattern: str) -> None:
         """启用特定形态检测"""
@@ -153,8 +159,17 @@ class IntradayPatternDetector:
             events.extend(self._check_top_signal(code, name, tick_df, day_row, prev_close))
         
         # 触发回调和发布
+        notified_events: List[PatternEvent] = []
         for ev in events:
-            if self._should_notify(code, ev.pattern):
+            should_notify, count = self._should_notify(code, ev.pattern)
+            
+            # 更新事件的计数
+            ev.count = count
+            if count > 1:
+                ev.detail = f"{ev.detail} (第{count}次)"
+            
+            if should_notify:
+                notified_events.append(ev)
                 # 回调
                 if self.on_pattern:
                     try:
@@ -173,17 +188,41 @@ class IntradayPatternDetector:
                         detail=ev.detail
                     )
         
-        return events
+        return notified_events
     
-    def _should_notify(self, code: str, pattern: str) -> bool:
-        """冷却判断"""
+    def _should_notify(self, code: str, pattern: str) -> tuple[bool, int]:
+        """
+        冷却判断并更新计数
+        
+        Returns:
+            (should_notify, count): 是否应该通知, 当前累计次数
+        """
         now = datetime.now().timestamp()
         key = f"{code}_{pattern}"
-        last = self._cache.get(key, {}).get('ts', 0)
-        if now - last < self._cooldown:
-            return False
-        self._cache[key] = {'ts': now}
-        return True
+        cached = self._cache.get(key, {})
+        last_ts = cached.get('ts', 0)
+        
+        # 更新今日计数
+        count = self._signal_counts.get(key, 0) + 1
+        self._signal_counts[key] = count
+        
+        if now - last_ts < self._cooldown:
+            # 在冷却期内，只更新计数，不通知
+            return False, count
+        
+        # 冷却期已过，重置缓存并通知
+        self._cache[key] = {'ts': now, 'count': count}
+        return True, count
+    
+    def get_signal_count(self, code: str, pattern: str) -> int:
+        """获取某信号的当日触发次数"""
+        key = f"{code}_{pattern}"
+        return self._signal_counts.get(key, 0)
+    
+    def reset_daily_counts(self):
+        """重置每日计数（应在开盘前调用）"""
+        self._signal_counts.clear()
+        logger.info("IntradayPatternDetector: Daily signal counts reset.")
     
     # ========== 具体形态检测方法 ==========
     

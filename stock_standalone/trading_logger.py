@@ -683,6 +683,193 @@ class TradingLogger:
             return 0.5
 
 
+class DBInspector:
+    """
+    通用数据库诊断工具 mixin
+    """
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+
+    def get_table_info(self) -> dict[str, list[dict[str, str]]]:
+        """获取所有表结构信息"""
+        info = {}
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [r[0] for r in cur.fetchall()]
+            
+            for table in tables:
+                cur.execute(f"PRAGMA table_info({table})")
+                columns = []
+                for col in cur.fetchall():
+                    # cid, name, type, notnull, dflt_value, pk
+                    columns.append({
+                        "cid": col[0],
+                        "name": col[1],
+                        "type": col[2],
+                        "notnull": bool(col[3]),
+                        "pk": bool(col[5])
+                    })
+                info[table] = columns
+            conn.close()
+        except Exception as e:
+            logger.error(f"DBInspector get_table_info error: {e}")
+        return info
+
+    def get_db_stats(self) -> dict[str, Any]:
+        """获取数据库基本统计"""
+        stats = {}
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [r[0] for r in cur.fetchall()]
+            
+            table_stats = {}
+            for table in tables:
+                try:
+                    cur.execute(f"SELECT COUNT(*) FROM {table}")
+                    count = cur.fetchone()[0]
+                    table_stats[table] = count
+                except:
+                    table_stats[table] = -1
+            
+            stats['tables'] = table_stats
+            conn.close()
+        except Exception as e:
+            logger.error(f"DBInspector get_db_stats error: {e}")
+        return stats
+
+    def run_health_check(self) -> list[str]:
+        """运行数据库健康检查"""
+        issues = []
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            
+            # Check 1: 检查 schema 是否可读
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            tables = [r[0] for r in cur.fetchall()]
+            if not tables:
+                issues.append("Warning: Database has no tables or is empty.")
+            
+            # Check 2: 关键表是否为空 (示例)
+            # 这里做一些通用的检查，具体业务检查在子类实现
+            
+            conn.close()
+        except Exception as e:
+            issues.append(f"Critical: Database connection failed: {e}")
+        return issues
+
+
+class SignalStrategyLogger(DBInspector):
+    """
+    负责读取 signal_strategy.db 的日志类
+    该数据库存储实时产生的形态信号、报警等
+    """
+    def __init__(self, db_path: str = "./signal_strategy.db"):
+        super().__init__(db_path)
+        self.db_path = db_path
+        # 确保 DB 存在（通常由产生信号的进程创建，这里主要是读取）
+
+    def get_signal_messages(self, start_date: Optional[str] = None, end_date: Optional[str] = None, 
+                            limit: int = 2000) -> list[dict[str, Any]]:
+        """获取信号消息流"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            # row_factory 设为 Row 但我们习惯转 dict
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            
+            query = "SELECT * FROM signal_message WHERE 1=1"
+            params = []
+            
+            if start_date:
+                # signal_message 表有 created_date (YYYY-MM-DD)
+                query += " AND created_date >= ?"
+                params.append(start_date)
+            if end_date:
+                query += " AND created_date <= ?"
+                params.append(end_date)
+                
+            query += " ORDER BY id DESC LIMIT ?"
+            params.append(limit)
+            
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            results = [dict(row) for row in rows]
+            conn.close()
+            return results
+        except Exception as e:
+            logger.error(f"get_signal_messages error: {e}")
+            return []
+
+    def get_signal_counts_by_type(self, date: Optional[str] = None) -> list[tuple[str, int]]:
+        """按类型统计信号数量"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            query = "SELECT signal_type, COUNT(*) as c FROM signal_message WHERE 1=1"
+            params = []
+            if date:
+                query += " AND created_date = ?"
+                params.append(date)
+            query += " GROUP BY signal_type ORDER BY c DESC"
+            
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            conn.close()
+            return rows
+        except Exception as e:
+            logger.error(f"get_signal_counts_by_type error: {e}")
+            return []
+            
+    def get_top_signal_stocks(self, date: Optional[str] = None, limit: int = 20) -> list[tuple[str, str, int]]:
+        """获取产生信号最多的股票"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            query = "SELECT code, name, COUNT(*) as c FROM signal_message WHERE 1=1"
+            params = []
+            if date:
+                query += " AND created_date = ?"
+                params.append(date)
+            query += " GROUP BY code, name ORDER BY c DESC LIMIT ?"
+            params.append(limit)
+            
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            conn.close()
+            return rows
+        except Exception as e:
+            logger.error(f"get_top_signal_stocks error: {e}")
+            return []
+
+    @override
+    def run_health_check(self) -> list[str]:
+        """覆盖基类的检查，增加业务相关"""
+        issues = super().run_health_check()
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            
+            # Check: 是否有无效的时间戳
+            try:
+                cur.execute("SELECT COUNT(*) FROM signal_message WHERE timestamp IS NULL OR timestamp = ''")
+                invalid_ts = cur.fetchone()[0]
+                if invalid_ts > 0:
+                    issues.append(f"Data Quality: Found {invalid_ts} rows with invalid timestamp in signal_message.")
+            except:
+                pass # 表可能不存在
+
+            conn.close()
+        except Exception as e:
+            issues.append(f"DB Error during check: {e}")
+        return issues
+
+
+
 if __name__ == '__main__':
     from trading_analyzer import TradingAnalyzer
     
