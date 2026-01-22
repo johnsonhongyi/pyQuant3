@@ -1804,54 +1804,6 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 1. Left Sidebar: Stock Table
         self.stock_table = QTableWidget()
-        # Removed fixed maximum width to allow splitter resizing
-        # self.stock_table.setMaximumWidth(300)
-
-        # self.stock_table.setStyleSheet("""
-
-        # QTableWidget {
-        #     background-color: transparent;
-        # }
-
-        # /* 只作用在 table 内部 */
-        # QTableWidget QScrollBar:vertical {
-        #     width: 6px;
-        #     background: transparent;
-        #     margin: 0px;
-        # }
-
-        # QTableWidget QScrollBar::handle:vertical {
-        #     background: rgba(180, 180, 180, 120);
-        #     min-height: 30px;
-        #     border-radius: 3px;
-        # }
-
-        # QTableWidget QScrollBar::handle:vertical:hover {
-        #     background: rgba(220, 220, 220, 180);
-        # }
-
-        # QTableWidget QScrollBar::add-line:vertical,
-        # QTableWidget QScrollBar::sub-line:vertical {
-        #     height: 0px;
-        # }
-
-        # QTableWidget QScrollBar::add-page:vertical,
-        # QTableWidget QScrollBar::sub-page:vertical {
-        #     background: transparent;
-        # }
-        # """)
-
-        # self.stock_table.setStyleSheet(self.stock_table.styleSheet() + """
-        # QTableWidget::item:hover {
-        #     background: rgba(255, 255, 255, 30);
-        # }
-        # QTableWidget::item:selected {
-        #     background: rgba(255, 215, 0, 80);
-        #     color: black;
-        # }
-        # """)
-
-        # self.stock_table.verticalScrollBar().setFixedWidth(6)
 
 
         self.stock_table.setStyleSheet("""
@@ -2142,29 +2094,29 @@ class MainWindow(QMainWindow, WindowMixin):
         self.filter_tree.viewport().installEventFilter(self)
 
         # 应用窄边滚动条样式，与左侧列表一致
-        scrollbar_style = """
+        filter_tree_scrollbar_style = """
             QScrollBar:vertical {
                 border: none;
-                background: #2b2b2b;
+                background: transparent;
                 width: 8px;
                 margin: 0px;
             }
             QScrollBar::handle:vertical {
-                background: #555555;
+                background: rgba(180, 180, 180, 120);
                 min-height: 20px;
                 border-radius: 4px;
             }
             QScrollBar::handle:vertical:hover {
-                background: #666666;
+                background: rgba(220, 220, 220, 180);
             }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 height: 0px;
             }
             QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: none;
+                background: transparent;
             }
         """
-        self.filter_tree.setStyleSheet(scrollbar_style)
+        self.filter_tree.setStyleSheet(filter_tree_scrollbar_style)
         
         # [NEW] Enable Context Menu for Filter Tree
         self.filter_tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2178,7 +2130,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # 设置默认分割比例
         # 股票列表:图表区域:过滤面板 = 1 : 4 : 1 (示例分配)
         self.main_splitter.setSizes([350, 800, 160])
-        self.filter_panel.setMinimumWidth(0)
+        self.filter_panel.setMinimumWidth(150)
+        self.filter_panel.setMaximumWidth(400)  # 根据你期望的最大宽度
         # ⭐ [LAYOUT STABILITY] 设置拉伸因子，确保 Chart (Index 1) 随窗口自动缩放，而 Table (Index 0) 保持稳定
         self.main_splitter.setStretchFactor(0, 0) # 左侧列表：不自动拉伸
         self.main_splitter.setStretchFactor(1, 1) # 中间图表：自动占满空间
@@ -2208,10 +2161,10 @@ class MainWindow(QMainWindow, WindowMixin):
         
         self._init_hotlist_and_signal_log()
 
-        # --- [NEW] 列宽自动记忆 & 防抖保存 ---
-        self._resize_timer = QTimer(self)
-        self._resize_timer.setSingleShot(True)
-        self._resize_timer.timeout.connect(self._save_visualizer_config)
+        # # --- [NEW] 列宽自动记忆 & 防抖保存 ---
+        # self._resize_timer = QTimer(self)
+        # self._resize_timer.setSingleShot(True)
+        # self._resize_timer.timeout.connect(self._save_visualizer_config)
         
         self.stock_table.horizontalHeader().sectionResized.connect(self._on_column_resized_debounced)
         if hasattr(self, 'filter_tree'):
@@ -2341,15 +2294,6 @@ class MainWindow(QMainWindow, WindowMixin):
         self.activateWindow()
         logger.debug(f"[LINK] Signal Log clicked: {code}, linked to all views.")
     
-    def _toggle_hotlist_panel(self):
-        """切换热点自选面板显示"""
-        if not hasattr(self, 'hotlist_panel'):
-            return
-        if self.hotlist_panel.isVisible():
-            self.hotlist_panel.hide()
-        else:
-            self.hotlist_panel.show()
-            self.hotlist_panel.raise_()
     
     def _toggle_signal_log(self):
         """切换信号日志面板显示"""
@@ -2703,39 +2647,65 @@ class MainWindow(QMainWindow, WindowMixin):
 
         return fallback
 
-    def _reset_kline_view(self, df=None):
-        """重置 K 线图视图：始终优先显示右侧最新的 120-150 根（不压缩全览）"""
-        if not isinstance(df, pd.DataFrame):
-            df = getattr(self, 'day_df', pd.DataFrame())
-
-        if not hasattr(self, 'kline_plot') or df.empty:
-            return
-
-        vb = self.kline_plot.getViewBox()
-        n = len(df) 
+    # def _reset_kline_view(self, df=None):
+    #     """重置 K 线图视图：始终优先显示右侧最新的 120-150 根（不压缩全览）
         
-        # 设定默认显示根数 ( trader 视角: 120-150 根最舒适)
-        display_n = self._safe_len(df, fallback=150)
-        
-        # 1. 暂时启用全局自动缩放，让 pyqtgraph 找到 Y 数据边界
-        vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
-        vb.setAutoVisible(y=True)
+    #     [FIX] 自适应 filter 面板宽度：当 filter 面板打开时，动态计算额外的右侧边距，
+    #           防止 K 线最新数据被 filter 面板遮挡。
+    #     """
+    #     if not isinstance(df, pd.DataFrame):
+    #         df = getattr(self, 'day_df', pd.DataFrame())
 
-        # 2. X 轴：右对齐，显示最新的 display_n 根
-        vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
-        # 右侧留 3.5 根缓冲空间（给信号箭头和最新 ghost 留位置），确保不被右侧边界遮挡
-        x_max = n + 3.5 
-        x_min = max(-1.5, x_max - display_n)
-        
-        # 核心：使用 setRange 并确保 padding 为 0，精准控制
-        vb.setRange(xRange=(x_min, x_max), padding=0)
+    #     if not hasattr(self, 'kline_plot') or df.empty:
+    #         return
 
-        # 3. 强制刷新 Y 轴到当前可见 X 范围的最佳高度
-        vb.autoRange()
+    #     vb = self.kline_plot.getViewBox()
+    #     n = len(df) 
         
+    #     # 设定默认显示根数 ( trader 视角: 120-150 根最舒适)
+    #     display_n = self._safe_len(df, fallback=150)
+    #     logger.debug(f'display_n:{display_n}')
+    #     # 1. 暂时启用全局自动缩放，让 pyqtgraph 找到 Y 数据边界
+    #     vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+    #     vb.setAutoVisible(y=True)
 
+    #     # 2. X 轴：右对齐，显示最新的 display_n 根
+    #     vb.enableAutoRange(axis=pg.ViewBox.XAxis, enable=False)
+        
+    #     # ⭐ [FIX] 计算 filter 面板占用的像素宽度，转换为需要额外留出的 K 线根数
+    #     extra_right_margin = 0.0
+    #     try:
+    #         if hasattr(self, 'main_splitter'):
+    #             sizes = self.main_splitter.sizes()
+    #             if len(sizes) >= 3 and sizes[2] > 0:
+    #                 filter_width_px = sizes[2]  # filter 面板像素宽度
+    #                 chart_width_px = sizes[1]   # K 线图区域像素宽度（直接从 splitter 获取，更准确）
+                    
+    #                 if chart_width_px > 0 and display_n > 0:
+    #                     # 计算每根 K 线占用的像素宽度
+    #                     bar_width_px = chart_width_px / display_n
+                        
+    #                     # filter 面板虽然不会直接遮挡 K 线图（它们是并列的），
+    #                     # 但当 filter 面板打开时，K 线图区域变窄，每根 K 线占用的像素更少，
+    #                     # 导致原来的 3.5 根缓冲空间可能不够。
+    #                     # 额外边距 = filter 宽度占 K 线区域宽度的比例 * 显示根数的一定比例
+    #                     ratio = filter_width_px / chart_width_px
+    #                     extra_right_margin = ratio * display_n * 0.02  # 取 2% 作为安全边距
+    #                     extra_right_margin = min(max(extra_right_margin, 1.0), 8.0)  # 限制在 1-8 根之间
+    #     except Exception as e:
+    #         logger.debug(f"_reset_kline_view filter margin calc error: {e}")
+        
+    #     # 右侧留 3.5 根缓冲空间（给信号箭头和最新 ghost 留位置），确保不被右侧边界遮挡
+    #     base_right_margin = 3.5
+    #     x_max = n + base_right_margin + extra_right_margin
+    #     x_min = max(-1.5, x_max - display_n)
+        
+    #     # 核心：使用 setRange 并确保 padding 为 0，精准控制
+    #     vb.setRange(xRange=(x_min, x_max), padding=0)
+
+    #     # 3. 强制刷新 Y 轴到当前可见 X 范围的最佳高度
+    #     vb.autoRange()
     #     # logger.debug(f"[VIEW] Reset to TraderView: {x_min:.1f} to {x_max:.1f} (total {n})")
-
     #     # logger.debug(f"[VIEW] Reset to FullView: 0-{n} (Range: {x_min}-{x_max})")
 
     def _init_resample_toolbar(self):
@@ -4307,13 +4277,13 @@ class MainWindow(QMainWindow, WindowMixin):
     def _update_app_bg(self, color):
         self.custom_bg_app = color
         self.apply_qt_theme()
-        self._save_visualizer_config()
+        # self._save_visualizer_config()
         logger.info(f"App background updated to: {color}")
         
     def _update_chart_bg(self, color):
         self.custom_bg_chart = color
         self.apply_qt_theme()
-        self._save_visualizer_config()
+        # self._save_visualizer_config()
         logger.info(f"Chart background updated to: {color}")
 
     def save_layout_preset(self, index):
@@ -4322,7 +4292,13 @@ class MainWindow(QMainWindow, WindowMixin):
             from PyQt6.QtWidgets import QMessageBox
             if not hasattr(self, 'layout_presets'):
                 self.layout_presets = {}
-            
+
+            # sizes = self.main_splitter.sizes()
+            # is_visible = sizes[2] > 0
+            # if is_visible:
+            #     self.toggle_filter_panel(False)
+
+
             # 二次确认
             reply = QMessageBox.question(
                 self, '确认保存', 
@@ -4334,15 +4310,19 @@ class MainWindow(QMainWindow, WindowMixin):
             if reply == QMessageBox.StandardButton.Yes:
                 sizes = self.main_splitter.sizes()
                 # 保存尺寸与主题色
+                # 'sizes': [sizes[0], sizes[1]], # 只记录 Table + Chart
                 self.layout_presets[str(index)] = {
                     'sizes': sizes,
                     'bg_app': getattr(self, 'custom_bg_app', None),
                     'bg_chart': getattr(self, 'custom_bg_chart', None),
                     'theme': getattr(self, 'qt_theme', 'dark')
                 }
-                self._save_visualizer_config()
                 # 刷新菜单显示新的尺寸描述
                 self._init_layout_menu()
+                # if is_visible:
+                #     self.toggle_filter_panel(True)
+                
+                self._save_visualizer_config()
                 logger.info(f"Layout preset {index} saved (with theme): {self.layout_presets[str(index)]}")
                 QMessageBox.information(self, "布局保存", f"布局预设 {index}（含环境色）已保存成功。")
         except Exception as e:
@@ -5405,6 +5385,109 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception as e:
             logger.debug(f"Capture state failed: {e}")
 
+    def _reset_kline_view(self, df=None, force=False, target_width=None):
+        """
+        ⭐ [核心修复] 重置 K 线视图范围
+        
+        使用 main_splitter.sizes()[1] 获取图表区域的实际像素宽度（可靠值），
+        而不是 ViewBox.width()（有时不准）。
+        
+        Args:
+            df: DataFrame，用于计算 Y 轴范围，默认使用 self.day_df
+            force: 是否强制重置，忽略手动调整状态
+            target_width: 强制使用的图表宽度（像素），用于布局加载时的预计算
+        """
+        try:
+            # 1. 净化 df 参数
+            # Qt 信号槽可能会把 checked (bool) 传给第一个参数，所以必须处理 bool
+            if df is None or isinstance(df, bool):
+                df = getattr(self, 'day_df', None)
+            
+            # 2. 最后的防线：确保 df 是 DataFrame
+            if df is None or not isinstance(df, pd.DataFrame):
+                # logger.warning(f"[_reset_kline_view] Valid DataFrame not found (got {type(df)}), aborting.")
+                return
+
+            # 3. 检查是否为空
+            if df.empty:
+                return
+            
+            total_bars = len(df)
+            vb = self.kline_plot.getViewBox()
+            
+            # ========== 1. 计算图表区域的实际像素宽度 ==========
+            # ========== 1. 计算图表区域的实际像素宽度 ==========
+            # 优先使用 target_width，其次 main_splitter.sizes()[1]
+            chart_pixel_width = 800  # 默认值
+            sizes = []
+            if hasattr(self, 'main_splitter'):
+                try:
+                    sizes = self.main_splitter.sizes()
+                except Exception:
+                    pass
+
+            if target_width is not None and isinstance(target_width, (int, float)) and target_width > 0:
+                chart_pixel_width = int(target_width)
+                logger.debug(f"[_reset_kline_view] Using forced target width: {chart_pixel_width}px (actual sizes: {sizes})")
+            elif len(sizes) >= 2:
+                chart_pixel_width = max(sizes[1], 200)  # 最小保护
+                logger.debug(f"[_reset_kline_view] Using splitter width: {chart_pixel_width}px sizes:{sizes}")
+            else:
+                # 回退方案：使用 ViewBox 宽度
+                try:
+                    vb_width = vb.width()
+                    if vb_width and vb_width > 100:
+                        chart_pixel_width = vb_width
+                except Exception:
+                    pass
+            
+            # ========== 2. 计算可见 K 线数 ==========
+            # 每根 K 线约占 8-12 像素（包含间隔），这里用 10 作为平均值
+            BAR_PIXEL_WIDTH = 10
+            visible_bars = max(30, int(chart_pixel_width / BAR_PIXEL_WIDTH))
+            
+            # 限制最小显示根数，防止显示过少
+            visible_bars = max(visible_bars, 60)
+            
+            # ========== 3. 计算 X 轴范围 ==========
+            # 始终让最新数据在右侧可见，留出 2 根 K 线的右边距
+            RIGHT_MARGIN = 2
+            x_max = total_bars + RIGHT_MARGIN
+            x_min = max(-1, total_bars - visible_bars)
+            
+            # ========== 4. 设置 X 轴范围 ==========
+            vb.setRange(xRange=(x_min, x_max), padding=0)
+            
+            # ========== 5. 自适应 Y 轴 ==========
+            # 根据可见区域的价格范围自动调整 Y 轴
+            visible_start = int(max(0, x_min))
+            visible_end = int(min(total_bars, x_max))
+            
+            if visible_start < visible_end and visible_start < len(df):
+                visible_df = df.iloc[visible_start:visible_end]
+                logger.debug(f'visible_df: {visible_df[-1:]}')
+                if visible_df is not None and not visible_df.empty and 'high' in visible_df.columns and 'low' in visible_df.columns:
+                    y_high = visible_df['high'].max()
+                    y_low = visible_df['low'].min()
+                    y_margin = (y_high - y_low) * 0.05  # 5% 边距
+                    vb.setRange(yRange=(y_low - y_margin, y_high + y_margin), padding=0)
+            
+            # ========== 6. 启用 Y 轴自动范围 ==========
+            vb.enableAutoRange(axis=pg.ViewBox.YAxis, enable=True)
+            vb.setAutoVisible(y=True)
+            
+            logger.debug(f"[_reset_kline_view] sizes:{sizes} Reset: bars={total_bars}, visible={visible_bars}, xRange=({x_min:.0f}, {x_max:.0f}), width={chart_pixel_width}px")
+            
+        except Exception as e:
+            logger.warning(f"[_reset_kline_view] Failed: {e}")
+            import traceback
+            traceback.print_exc()
+            # 降级方案：简单的自动范围
+            try:
+                vb = self.kline_plot.getViewBox()
+                vb.enableAutoRange(enable=True)
+            except Exception:
+                pass
 
     def load_stock_by_code(self, code, name=None, **kwargs):
         """
@@ -7156,6 +7239,22 @@ class MainWindow(QMainWindow, WindowMixin):
             filter_action.triggered.connect(self.toggle_filter_panel)
             self.filter_action = filter_action
 
+    def _init_filter_state(self):
+        # 默认逻辑状态
+        is_visible = not getattr(self, 'is_filter_collapsed', False)
+        sizes = self.main_splitter.sizes()
+        if is_visible:
+            # 当前是“展开态”，需要构造一个“关闭态快照”
+            self._filter_closed_sizes = [
+                sizes[0] + sizes[2],
+                sizes[1],
+                0
+            ]
+        else:
+            # 当前已经是关闭态
+            self._filter_closed_sizes = sizes.copy()
+        logger.debug(f'_filter_closed_sizes: {self._filter_closed_sizes} is_visible:{is_visible}')
+
     def on_main_splitter_moved(self, pos, index):
         """当 Splitter 被拖动时，实时同步 Filter 按钮状态"""
         # 只有当拖动的是右侧分割条 (index=2 ? check logic)
@@ -7196,14 +7295,15 @@ class MainWindow(QMainWindow, WindowMixin):
         
         self.toggle_filter_panel(target_state)
 
-    def toggle_filter_panel(self, checked):
+    def toggle_filter_panel(self, checked=False):
         """⭐ [UI OPTIMIZATION] 内部平移方案：开启 Filter 时压缩左侧列表，确保 K 线图不被挤压，且窗口不漂移"""
         # 1. 记录当前所有面板的宽度 [Table, Charts, Filter]
         sizes = self.main_splitter.sizes()
-        # if len(sizes) < 3: 
-        #     # self.filter_panel.setVisible(checked)
-        #     return
+        is_visible = sizes[2] > 0
 
+        if checked and not is_visible:
+            # ⭐ 核心修复：记录关闭状态的原始 sizes
+            self._filter_closed_sizes = sizes.copy()
         # 2. 记录当前可见性状态
         # is_presently_visible = self.filter_panel.isVisible()
         is_presently_visible = True if sizes[2] > 0 else False
@@ -7211,8 +7311,32 @@ class MainWindow(QMainWindow, WindowMixin):
         # 3. 确定 Filter 目标宽度 (若当前尺寸太小则设个保底值)
         # 如果即将开启
         if checked and not is_presently_visible:
+            # target_f_width = 160
+            # #尝试从历史配置获取用户习惯的宽度
+            # try:
+            #     # config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
+            #     config_file = visualizer_config
+            #     if os.path.exists(config_file):
+            #         with open(config_file, 'r', encoding='utf-8') as f:
+            #             config = json.load(f)
+            #             s_sizes = config.get('splitter_sizes', [])
+            #             if len(s_sizes) == 3 and s_sizes[2] > 50:
+            #                 target_f_width = s_sizes[2]
+            # except Exception:
+            #     pass
+
+            # # 逻辑：从左侧列表(sizes[0])中借用宽度给右侧 Filter(sizes[2])
+            # # 确保 K 线区域(sizes[1]) 宽度几乎不变
+            # if sizes[0] > target_f_width + 100:
+            #     new_sizes = [sizes[0] - target_f_width, sizes[1], target_f_width]
+            # else:
+            #     # 若列表太窄，则列表保留 100，剩余从图表扣
+            #     available_from_table = max(0, sizes[0] - 100)
+            #     from_charts = target_f_width - available_from_table
+            #     new_sizes = [100, max(100, sizes[1] - from_charts), target_f_width]
+            # self.main_splitter.setSizes(new_sizes)
+
             target_f_width = 160
-            # 尝试从历史配置获取用户习惯的宽度
             try:
                 # config_file = os.path.join(os.path.dirname(__file__), "visualizer_layout.json")
                 config_file = visualizer_config
@@ -7224,28 +7348,53 @@ class MainWindow(QMainWindow, WindowMixin):
                             target_f_width = s_sizes[2]
             except Exception:
                 pass
+            base = self._filter_closed_sizes
+            # 从 table 借，不动 chart
+            borrow = min(target_f_width, max(0, base[0] - 100))
+            new_sizes = [
+                base[0] - borrow,
+                base[1],
+                borrow
+            ]
+            self._close_auto_size()
 
-            # 逻辑：从左侧列表(sizes[0])中借用宽度给右侧 Filter(sizes[2])
-            # 确保 K 线区域(sizes[1]) 宽度几乎不变
-            if sizes[0] > target_f_width + 100:
-                new_sizes = [sizes[0] - target_f_width, sizes[1], target_f_width]
-            else:
-                # 若列表太窄，则列表保留 100，剩余从图表扣
-                available_from_table = max(0, sizes[0] - 100)
-                from_charts = target_f_width - available_from_table
-                new_sizes = [100, max(100, sizes[1] - from_charts), target_f_width]
-            
+            # self.filter_tree.setMinimumWidth(150)
+            # self.filter_tree.setMaximumWidth(400)  # 根据你期望的最大宽度
+
             self.main_splitter.setSizes(new_sizes)
-
             self.load_history_filters()
+            self._open_auto_size()
+            logger.debug(f'new_sizes set : {new_sizes} base:{base} now:{self.main_splitter.sizes()}')
+        elif not checked:
+            if is_visible:
+                if hasattr(self, '_filter_closed_sizes'):
+                    self.main_splitter.setSizes(self._filter_closed_sizes)
+                else:
+                    sizes = self.main_splitter.sizes()
+                    table_width = sizes[0] + sizes[2]  # 把 Filter 宽度加回 Table
+                    chart_width = sizes[1]
+                    filter_width = 0
+                    self.main_splitter.setSizes([table_width, chart_width, filter_width])
 
-        elif not checked and is_presently_visible:
-            # --- 动作：关闭 Filter ---
-            # 逻辑：把 Filter 回收的宽度全部还给左侧列表，不影响 K 线图宽度
-            f_w = sizes[2]
-            new_sizes = [sizes[0] + f_w, sizes[1], 0]
-            self.main_splitter.setSizes(new_sizes)
+        # elif not checked and is_presently_visible:
+        #     # --- 动作：关闭 Filter ---
+        #     # 逻辑：把 Filter 回收的宽度全部还给左侧列表，不影响 K 线图宽度
+        #     f_w = sizes[2]
+        #     new_sizes = [sizes[0] + f_w, sizes[1], 0]
+        #     self.main_splitter.setSizes(new_sizes)
             # self.collapse_filter()
+        
+        # ⭐ [FIX] 面板切换后，延迟重置 K 线视图边距，确保最新数据不被遮挡
+        # 使用双重延迟：50ms 等待 splitter 初步重排，150ms 等待渲染完成
+        if hasattr(self, 'day_df') and not self.day_df.empty:
+            from PyQt6.QtCore import QTimer
+            def _delayed_reset():
+                self._reset_kline_view(df=self.day_df, force=True)
+            # 第一次延迟：等待 splitter 布局
+            QTimer.singleShot(50, _delayed_reset)
+            # 第二次延迟：确保渲染完全稳定
+            # QTimer.singleShot(200, _delayed_reset)
+
 
     def open_history_manager(self):
         import subprocess
@@ -7880,11 +8029,12 @@ class MainWindow(QMainWindow, WindowMixin):
             # 🛡️ 安全上限：防止过滤器面板过宽导致渲染异常 (修复 1110)
             FILTER_INDEX = 2
             FILTER_MAX = 400 
-
+            if hasattr(self, '_filter_closed_sizes'):
+                _filter_size = self._filter_closed_sizes[2]
             if fixed_sizes[FILTER_INDEX] > FILTER_MAX:
-                logger.warning(f"[SaveConfig] Detected huge filter width {fixed_sizes[FILTER_INDEX]}, capping to {FILTER_MAX}")
-                fixed_sizes[FILTER_INDEX] = FILTER_MAX
-
+                fixed_sizes[FILTER_INDEX] = min(_filter_size,FILTER_MAX)
+                logger.warning(f"[SaveConfig] Detected huge filter width {fixed_sizes[FILTER_INDEX]}, capping to {FILTER_MAX} _filter_size:{_filter_size}")
+            logger.debug('fixed_sizes: {fixed_sizes}')
             # --- 2. Filter 配置 ---
             filter_config = old_config.get('filter', {})
             
@@ -8068,6 +8218,41 @@ class MainWindow(QMainWindow, WindowMixin):
         finally:
             header.blockSignals(False)
 
+    def _open_auto_size(self, delay=True):
+        if delay:
+            # 延迟到下一轮事件循环，避免影响 splitter / layout
+            QTimer.singleShot(1, lambda: self._open_auto_size(delay=False))
+            return
+
+        if hasattr(self, 'stock_table'):
+            header = self.stock_table.horizontalHeader()
+            for c in range(header.count()):
+                header.setSectionResizeMode(
+                    c, QHeaderView.ResizeMode.ResizeToContents
+                )
+            self.stock_table.resizeColumnsToContents()
+
+        if hasattr(self, 'filter_tree'):
+            header = self.filter_tree.header()
+            for c in range(header.count()):
+                header.setSectionResizeMode(
+                    c, QHeaderView.ResizeMode.ResizeToContents
+                )
+            self.filter_tree.resizeColumnToContents(0)
+            # self.stock_table.resizeColumnsToContents()
+
+    def _close_auto_size(self):
+        if hasattr(self, 'stock_table'):
+            header = self.stock_table.horizontalHeader()
+            for c in range(header.count()):
+                header.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+
+        if hasattr(self, 'filter_tree'):
+            header = self.filter_tree.header()
+            for c in range(header.count()):
+                header.setSectionResizeMode(c, QHeaderView.ResizeMode.Interactive)
+
+
     def load_layout_preset(self, index):
         """从预设加载布局 (1-3) 并重新校准视角"""
         try:
@@ -8093,21 +8278,35 @@ class MainWindow(QMainWindow, WindowMixin):
                             theme_changed = True
                     
                     if sizes:
+                        # ⭐ [FIX] 强制切换列宽模式为 Interactive，防止 ResizeToContents 撑大布局
+                        # 左侧 Stock Table
+                        self._close_auto_size()
                         # self.filter_panel.setVisible(True)
-                        logger.debug(f'load_layout_preset sizes: {sizes}')
+                        logger.debug(f'load_layout_preset sizes: {sizes} (Auto-resize disabled)')
                         self.main_splitter.setSizes(sizes)
-                        # self.filter_panel.setVisible(False)
+                        self._open_auto_size()
+
+                        # is_visible = not getattr(self, 'is_filter_collapsed', False)
+                        # if is_visible:
+                        #     self.toggle_filter_panel(True)
+                        #     logger.debug(f'load_layout_preset toggle_filter_panel open')
                     
                     if theme_changed:
                         self.apply_qt_theme()
                         
                     # ⭐ 核心修复：布局切换后强制执行一次“智能重置”，校准 X 轴优先级至右侧
+                    # 传入 target_width=sizes[1]，确保即使 Splitter 尚未物理调整，也按预设宽度计算可见 K 线
+                    target_chart_width = sizes[1] if (sizes and len(sizes) >= 2) else None
                     if not self.day_df.empty:
-                        self._reset_kline_view()
+                        self._reset_kline_view(target_width=target_chart_width)
                     logger.info(f"Layout preset {index} loaded. Theme changed: {theme_changed}")
+
+                    # self._init_filter_state()
+
                 else:
                     from PyQt6.QtWidgets import QMessageBox
                     QMessageBox.warning(self, "加载失败", f"尚未保存布局预设 {index}。")
+
         except Exception as e:
             logger.error(f"Failed to load layout preset {index}: {e}")
 

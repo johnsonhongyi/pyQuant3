@@ -4904,7 +4904,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         # 如果还有队列，300ms 后继续处理下一个（层级效果）
         if self._alert_queue:
-            self.after(200, self._process_alert_queue)
+            self.after(100, self._process_alert_queue)
         else:
             self._alert_queue_processing = False
     
