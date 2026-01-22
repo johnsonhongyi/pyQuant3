@@ -39,7 +39,7 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.completion import WordCompleter
 from types import SimpleNamespace
-
+import signal
 from JohnsonUtil.stock_sender import StockSender
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil.commonTips import timed_ctx
@@ -138,6 +138,16 @@ except ImportError as e:
     logger.warning(f"⚠️ 股票特征标记模块未找到: {e}")
 
 
+# def ask_exit():
+#     """弹出确认框，询问是否退出"""
+#     if messagebox.askyesno("确认退出", "你确定要退出吗？"):
+#         root.destroy()
+#         sys.exit(0)
+
+# def signal_handler(sig, frame):
+#     """捕获 Ctrl+C 信号"""
+#     # 弹出确认框
+#     ask_exit()
 
 
 conf_ini= cct.get_conf_path('global.ini')
@@ -316,7 +326,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.default_font_size = self.default_font.cget("size")
         self.default_font_bold = tkfont.nametofont("TkDefaultFont").copy()
         self.default_font_bold.configure(family="Microsoft YaHei", size=10, weight="bold")
-
+        # 在类中注册信号处理
+        signal.signal(signal.SIGINT, self.signal_handler)
         global duration_sleep_time
         # 💥 关键修正 2：立即执行 DPI 缩放并重新赋值
         if sys.platform.startswith('win'):
@@ -590,6 +601,16 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         logger.info(f"🚀 程序初始化完成 (总耗时: {init_elapsed:.2f}s)")
         if logger.level == LoggerFactory.DEBUG:
             cct.print_timing_summary(top_n=6)
+
+    def signal_handler(self, sig, frame):
+        """捕获 Ctrl+C 信号"""
+        self.ask_exit()
+
+    def ask_exit(self):
+        """弹出确认框，询问是否退出"""
+        if messagebox.askyesno("确认退出", "你确定要退出 StockApp 吗？"):
+            self.on_close()
+            sys.exit(0)
     # 在初始化 UI 或后台线程里
     def setup_global_hotkey(self):
         """
@@ -11384,4 +11405,8 @@ if __name__ == "__main__":
         cct.set_console(width, height)
 
     app.mainloop()
-    
+    try:
+        app.mainloop()
+    except KeyboardInterrupt:
+        # 额外防护：Ctrl+C 在某些情况下仍可能抛异常
+        app.ask_exit()

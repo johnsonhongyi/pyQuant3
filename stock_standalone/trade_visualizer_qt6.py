@@ -6126,7 +6126,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 3. 实时影子信号 (K线占位图标)
         # [FIX] 无论什么条件，必须有实时数据才能激活实时模式，否则无法获取最新价格导致 Crash
-        is_realtime_active = (self.realtime or cct.get_work_time_duration() or self._debug_realtime) and not tick_df.empty
+        is_realtime_active = (self.realtime or cct.get_work_time_duration() or self._debug_realtime) and tick_df is not None and not tick_df.empty
         
         if is_realtime_active:
             with timed_ctx("_run_realtime_strategy", warn_ms=100):
@@ -6193,7 +6193,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # -------------------------
 
         # --- Ghost Candle (实时占位) ---
-        logger.debug(f'is_realtime_active: {is_realtime_active} tick_df keys:{tick_df.keys() if not tick_df.empty else "None"}')
+        logger.debug(f'is_realtime_active: {is_realtime_active} tick_df keys:{tick_df.keys() if tick_df is not None and not tick_df.empty else "None"}')
         if is_realtime_active:
              # [FIX] Safe column choice
             price_col = 'close' if 'close' in tick_df.columns else ('trade' if 'trade' in tick_df.columns else 'price')
