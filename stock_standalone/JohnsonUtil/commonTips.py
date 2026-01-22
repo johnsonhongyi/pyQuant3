@@ -180,7 +180,9 @@ def print_timing_summary_filter(
             f"{item['max']:10.2f} "
             f"{item['p95']:10.2f}"
         )
-
+    print("")
+    sys.stdout.flush()
+    
 def print_timing_summary(top_n=10, unit="ms"):
     """
     汇总 _TIMING_STATS 并打印 top_n 慢函数
@@ -216,6 +218,8 @@ def print_timing_summary(top_n=10, unit="ms"):
     for item in summary_sorted[:top_n]:
         print(f"{item['name'][:40]:40} {item['count']:6d} "
               f"{item['mean']:10.2f} {item['max']:10.2f} {item['p95']:10.2f}")
+    print("")
+    sys.stdout.flush()
 
 # 使用示例
 # 在程序任意位置调用
