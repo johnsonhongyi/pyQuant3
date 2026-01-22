@@ -666,40 +666,44 @@ def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
     df['_dt'] = tick_time
     df['_date'] = df['_dt'].dt.normalize()
 
-    # today = pd.Timestamp.today().normalize()
-    # df = df[df['_date'] == today]
-    # 获取今天的日期（不带时间）
-    today = pd.Timestamp.today().normalize()
-
-    # 筛选今天的数据
-    df = df[df['_date'] == today]
-
-    # # 将 dt 和 ticktime 拼接成完整时间字符串，再转 datetime
-    # df['ticktime'] = pd.to_datetime(
-    #     df['dt'].astype(str) + ' ' + df['ticktime'].astype(str),
-    #     format='%Y-%m-%d'
-    # )
-    today = pd.Timestamp.today().normalize().strftime('%Y-%m-%d')
-
+    # [FIX] 不要强制使用系统日期的“今天”，因为在凌晨或非交易日，数据实际上是上一个交易日的。
+    # 应该使用数据中的最新日期。
+    if df.empty:
+        return pd.DataFrame()
+        
+    latest_date = df['_date'].max()
+    df = df[df['_date'] == latest_date]
+    today_str = latest_date.strftime('%Y-%m-%d')
+    
     if df.empty:
         return pd.DataFrame()
 
     # === 2. 价格列统一 ===
     # 你的真实价格列是 close
     price_col = 'close'
+    if price_col not in df.columns and 'price' in df.columns:
+        price_col = 'price'
 
-    bar = pd.DataFrame(
-        {
-            'open':   [df[price_col].iloc[0]],
-            'high':   [df[price_col].max()],
-            'low':    [df[price_col].min()],
-            'close':  [df[price_col].iloc[-1]],
-            'volume': [df['volume'].iloc[-1]],  # 注意：你的 volume 是累计量
-        },
-        index=[today],
-    )
-    logger.debug(f'bar: {bar} df:{df.high.max()}')
-    return bar
+    if price_col not in df.columns:
+        logger.error(f"tick_to_daily_bar: Missing price column. Cols: {df.columns}")
+        return pd.DataFrame()
+
+    try:
+        bar = pd.DataFrame(
+            {
+                'open':   [df[price_col].iloc[0]],
+                'high':   [df[price_col].max()],
+                'low':    [df[price_col].min()],
+                'close':  [df[price_col].iloc[-1]],
+                'volume': [df['volume'].iloc[-1] if 'volume' in df.columns else 0],  # 注意：你的 volume 是累计量
+            },
+            index=[today_str],
+        )
+        logger.debug(f'Generated bar for {today_str}, close={bar["close"].values[0]}')
+        return bar
+    except Exception as e:
+        logger.error(f"tick_to_daily_bar error: {e}")
+        return pd.DataFrame()
 
 def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_realtime=False, interval=None):
     """多进程常驻拉取实时数据"""
@@ -1587,6 +1591,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.voice_thread = VoiceThread(self)
         self.voice_thread.start()
         self.last_voice_ts = "" # 记录最后一次播报的信号时间
+        
+        # [FIX] 内部实时进程专用的停止标志，避免污染全局 stop_flag
+        self.rt_worker_stop_flag = mp.Value('b', True)
         
         # 统一快捷键注册
         self._init_global_shortcuts()
@@ -3250,8 +3257,8 @@ class MainWindow(QMainWindow, WindowMixin):
         # 2. 确保常驻进程在运行
         if not self.realtime_process or not self.realtime_process.is_alive():
             logger.info("[RealtimeProcess] Starting persistent worker...")
-            # 重置 stop_flag
-            self.stop_flag.value = True
+            # 重置 stop_flag (专用)
+            self.rt_worker_stop_flag.value = True
             # 清空旧任务
             while not self.realtime_task_queue.empty():
                 try: self.realtime_task_queue.get_nowait()
@@ -3259,7 +3266,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 
             self.realtime_process = Process(
                 target=realtime_worker_process,
-                args=(self.realtime_task_queue, self.realtime_queue, self.stop_flag, self.log_level, self._debug_realtime),
+                args=(self.realtime_task_queue, self.realtime_queue, self.rt_worker_stop_flag, self.log_level, self._debug_realtime),
                 daemon=False
             )
             self.realtime_process.start()
@@ -3275,8 +3282,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _stop_realtime_process(self):
         if self.realtime_process:
-            # 停止常驻进程
-            self.stop_flag.value = False
+            # 停止常驻进程 (使用专用 flag)
+            self.rt_worker_stop_flag.value = False
             self.realtime_process.join(timeout=0.5)
             if self.realtime_process.is_alive():
                 self.realtime_process.terminate()
@@ -3366,6 +3373,15 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def _poll_command_queue(self):
         """轮询内部指令队列 (消费所有积压，只取最新数据)"""
+        # ⭐ [FIX] 僵尸进程自杀机制：检查退出标志
+        # MonitorTK 在 on_close 时会将 stop_flag 设为 False
+        if hasattr(self, 'stop_flag') and self.stop_flag and not self.stop_flag.value:
+            logger.info("[Visualizer] Stop flag detected (False), initiating self-destruct...")
+            self.close()
+            # 确保 Qt 循环结束
+            QApplication.quit()
+            return
+
         if not self.command_queue:
             return
         try:
@@ -5396,7 +5412,10 @@ class MainWindow(QMainWindow, WindowMixin):
         1. 字符串模式: "CODE|代码|key1=val1|key2=val2" (来自 IPC)
         2. 字典模式: 通过 **kwargs 传入 (来自 Queue)
         """
-
+        # [FIX] 强制类型安全，防止 Queue 传递非标字符串导致的底层库查询失败
+        if code is not None:
+            code = str(code).strip()
+            
         if getattr(self,'select_resample',None) != 'd':
             self._capture_view_state()
 
@@ -6023,7 +6042,9 @@ class MainWindow(QMainWindow, WindowMixin):
                     ))
 
         # 3. 实时影子信号 (K线占位图标)
-        is_realtime_active = (self.realtime and not tick_df.empty) or (cct.get_work_time_duration() or self._debug_realtime)
+        # [FIX] 无论什么条件，必须有实时数据才能激活实时模式，否则无法获取最新价格导致 Crash
+        is_realtime_active = (self.realtime or cct.get_work_time_duration() or self._debug_realtime) and not tick_df.empty
+        
         if is_realtime_active:
             with timed_ctx("_run_realtime_strategy", warn_ms=100):
                 shadow_decision = self._run_realtime_strategy(code, day_df, tick_df)
@@ -6061,9 +6082,20 @@ class MainWindow(QMainWindow, WindowMixin):
                     y_v = y_high * 1.015
             else:
                 # 2. 实时幽灵 K 线信号 (Ghost Candle)
-                current_p = float(tick_df['close'].iloc[-1]) if not tick_df.empty else sig.price
-                high_p = tick_df['high'].max() if not tick_df.empty else current_p
-                low_p = tick_df['low'].min() if not tick_df.empty else current_p
+                if not tick_df.empty:
+                    # [FIX] Use safe column access
+                    p_col = 'close' if 'close' in tick_df.columns else ('trade' if 'trade' in tick_df.columns else 'price')
+                    current_p = float(tick_df[p_col].iloc[-1]) if p_col in tick_df.columns else sig.price
+                    
+                    h_col = 'high' if 'high' in tick_df.columns else p_col
+                    l_col = 'low' if 'low' in tick_df.columns else p_col
+                    
+                    high_p = tick_df[h_col].max() if h_col in tick_df.columns else current_p
+                    low_p = tick_df[l_col].min() if l_col in tick_df.columns else current_p
+                else:
+                    current_p = sig.price
+                    high_p = sig.price
+                    low_p = sig.price
                 
                 if is_buy:
                     y_v = low_p * 0.985
@@ -6078,9 +6110,16 @@ class MainWindow(QMainWindow, WindowMixin):
         # -------------------------
 
         # --- Ghost Candle (实时占位) ---
-        logger.debug(f'is_realtime_active: {is_realtime_active}')
+        logger.debug(f'is_realtime_active: {is_realtime_active} tick_df keys:{tick_df.keys() if not tick_df.empty else "None"}')
         if is_realtime_active:
-            current_price = float(tick_df['close'].iloc[-1])
+             # [FIX] Safe column choice
+            price_col = 'close' if 'close' in tick_df.columns else ('trade' if 'trade' in tick_df.columns else 'price')
+            
+            if price_col not in tick_df.columns:
+                logger.error(f"Tick DF missing price column. Columns: {tick_df.columns}")
+                return # Abort drawing ghost candle if no data
+                
+            current_price = float(tick_df[price_col].iloc[-1])
             last_hist_date = str(day_df.index[-1]).split()[0]
             today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
 
@@ -8089,6 +8128,15 @@ class MainWindow(QMainWindow, WindowMixin):
         if hasattr(self, 'stop_flag'):
             self.stop_flag.value = False
         logger.info(f'stop_flag.value: {self.stop_flag.value}')
+
+        # [FIX] 通知 Monitor 进程已退出，以便重置句柄
+        try:
+            from data_utils import send_code_via_pipe, PIPE_NAME_TK
+            # 使用 send_code_via_pipe 发送字典指令
+            send_code_via_pipe({"cmd": "VIZ_EXIT"}, logger=logger, pipe_name=PIPE_NAME_TK)
+            logger.info("Sent VIZ_EXIT to Monitor.")
+        except Exception as e:
+            logger.warning(f"Failed to send VIZ_EXIT to Monitor: {e}")
         self._stop_realtime_process()
         if hasattr(self, 'refresh_flag'):
             self.refresh_flag.value = False
