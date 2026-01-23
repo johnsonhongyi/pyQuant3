@@ -1002,6 +1002,7 @@ class Sina:
                 # 构造 MultiIndex 精简格式轨迹: [code, ticktime, close, high, low, llastp, volume, lastbuy]
                 # 这必须与 format_response_data 中的 mi_cols 保持绝对一致以避免 ValueError
                 mi_cols = ['code', 'ticktime', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
+                # mi_cols = ['code', 'ticktime', 'open', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
                 mi_df = df_final.loc[:, [c for c in mi_cols if c in df_final.columns]].copy()
 
                 # mi_df = self.clean_ohlcv_zero(mi_df)
@@ -1293,6 +1294,8 @@ class Sina:
                 df_mi = df_mi.reset_index()
             
             mi_cols = ['code', 'ticktime', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
+            # mi_cols = ['code', 'ticktime', 'open', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
+
             if 'lastbuy' not in df_mi.columns:
                 df_mi['lastbuy'] = df_mi['close'] if 'close' in df_mi.columns else 0
             
