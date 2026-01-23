@@ -23,6 +23,7 @@ from JohnsonUtil import commonTips as cct
 from JohnsonUtil import commonTips as cct
 from JohnsonUtil import LoggerFactory
 from trading_hub import get_trading_hub, TrackedSignal  # [NEW] Import TradingHub
+from alert_manager import get_alert_manager # [NEW] Import AlertManager
 
 import logging
 logger: logging.Logger = LoggerFactory.getLogger(name="stock_live_strategy")
@@ -91,127 +92,31 @@ def normalize_speech_text(text: str) -> str:
 
     return text
 
-def _voice_process_target(queue: mp.Queue, stop_event: mp.Event):
-    """
-    语音播报外部进程目标函数
-    """
-    engine = None
-    try:
-        if pythoncom:
-            pythoncom.CoInitialize()
-        
-        if pyttsx3:
-            try:
-                engine = pyttsx3.init()
-                # 设置语速
-                rate = engine.getProperty('rate')
-                if isinstance(rate, (int, float)):
-                    engine.setProperty('rate', rate + 20)
-                else:
-                    engine.setProperty('rate', 200)
-            except Exception as e:
-                logger.error(f"Voice Process TTS Init Error: {e}")
-                pyttsx3_available = False
-            else:
-                pyttsx3_available = True
-        else:
-            pyttsx3_available = False
-
-        while not stop_event.is_set():
-            try:
-                # 获取任务
-                data = queue.get(timeout=0.5)
-                text = data.get('text')
-                
-                if text:
-                    speech_text = normalize_speech_text(text)
-                    logger.info(f"📢 [VoiceProcess] 播报: {speech_text}")
-                    
-                    # 每次循环初始化，确保最大限度的兼容性和 COM 状态正确
-                    engine = None
-                    try:
-                        if pythoncom:
-                            pythoncom.CoInitialize()
-                        
-                        if pyttsx3:
-                            engine = pyttsx3.init()
-                            # 设置语速
-                            rate = engine.getProperty('rate')
-                            if isinstance(rate, (int, float)):
-                                engine.setProperty('rate', rate + 20)
-                            else:
-                                engine.setProperty('rate', 200)
-                            
-                            engine.say(speech_text)
-                            engine.runAndWait()
-                            
-                    except Exception as e:
-                        logger.error(f"TTS Speak Error in VoiceProcess: {e}")
-                    finally:
-                        if engine:
-                            try:
-                                engine.stop()
-                                del engine
-                            except: pass
-                        if pythoncom:
-                            pythoncom.CoUninitialize()
-                
-            except Empty:
-                continue
-            except Exception as e:
-                logger.error(f"VoiceProcess Loop Error: {e}")
-                time.sleep(1)
-
-    finally:
-        logger.info("VoiceProcess loop terminated.")
-
+# _voice_process_target removed (moved to alert_manager.py)
 
 class VoiceAnnouncer:
-    """独立的语音播报引擎 (多进程版)"""
-    queue: mp.Queue
-    on_speak_start: Optional[Callable[[Optional[str]], None]]
-    on_speak_end: Optional[Callable[[Optional[str]], None]]
-    _stop_event: Any # mp.synchronize.Event
-    current_code: Optional[str]
-    _process: Optional[mp.Process]
-
+    """独立的语音播报引擎 (代理 AlertManager)"""
     def __init__(self) -> None:
-        self.queue = mp.Queue()
-        self.on_speak_start = None # 回调函数: func(code)
-        self.on_speak_end = None   # 回调函数: func(code)
-        self._stop_event = mp.Event()
-        self._pause_event = threading.Event()  # 本地控制暂停 (仍保留用于逻辑兼容)
-        self._pause_event.set()
-        self.current_code = None
-        self._is_stopped = False  # 停止标志
-        self._pending_timers: list[threading.Timer] = []  # 跟踪待处理的 Timer
-        self._timer_lock = threading.Lock()  # 保护 Timer 列表
-        
-        if pyttsx3:
-            # 开启独立进程
-            self._process = mp.Process(target=_voice_process_target, args=(self.queue, self._stop_event), daemon=True)
-            self._process.start()
-            logger.info("VoiceAnnouncer: 多进程播报引擎已启动")
-        else:
-            self._process = None
+        self.manager = get_alert_manager()
+        self.manager.start()
+        self.on_speak_start = None 
+        self.on_speak_end = None
 
     def pause(self) -> None:
         """暂停语音播报"""
-        self._pause_event.clear()
-        logger.debug("VoiceAnnouncer: 已暂停 (本地队列仍会接收但不发送)")
+        self.manager.voice_enabled = False
+        logger.debug("VoiceAnnouncer: 已暂停 (AlertManager Voice Disabled)")
     
     def resume(self) -> None:
-        """恢复语音播报意识"""
-        self._pause_event.set()
+        """恢复语音播报"""
+        self.manager.voice_enabled = True
         logger.debug("VoiceAnnouncer: 已恢复")
     
     @property
     def is_speaking(self) -> bool:
-        """多进程下准确状态检测较难，暂且通过队列判定"""
-        return not self.queue.empty()
+        return not self.manager.voice_queue.empty()
     
     def wait_for_safe(self, timeout: float = 3.0) -> bool:
-        """等待队列清空"""
         start = time.time()
         while self.is_speaking:
             if time.time() - start > timeout:
@@ -220,102 +125,35 @@ class VoiceAnnouncer:
         return True
 
     def say(self, text: str, code: Optional[str] = None) -> None:
-        if self._is_stopped:
-            return
-        if self._process and self._process.is_alive():
-            if not self._pause_event.is_set():
-                 logger.debug(f"Voice (Paused): {text}")
-                 return
+        """兼容旧接口"""
+        self.announce(text, code)
+
+    def announce(self, text: str, code: Optional[str] = None) -> None:
+        """发送报警"""
+        # 触发回调 (Legacy support)
+        if self.on_speak_start:
+            try: self.on_speak_start(code)
+            except: pass
             
-            # 触发主进程回调
-            if self.on_speak_start:
-                try: self.on_speak_start(code)
-                except: pass
-            
-            try:
-                self.queue.put({'text': text, 'code': code}, block=False)
-            except Exception as e:
-                logger.error(f"Failed to put to voice queue: {e}")
-                return
-            
-            # 由于是异步进程，我们无法精准得知结束时间
-            # 使用跟踪的 Timer，便于退出时取消
-            if self.on_speak_end:
-                duration = len(text) * 0.3 + 1.0
-                
-                def _on_timer_done(target_code: Optional[str]):
-                    # 检查是否已停止
-                    if self._is_stopped:
-                        return
-                    if self.on_speak_end:
-                        try:
-                            self.on_speak_end(target_code)
-                        except Exception:
-                            pass
-                
-                timer = threading.Timer(duration, lambda: _on_timer_done(code))
-                timer.daemon = True  # 设为守护线程
-                with self._timer_lock:
-                    # 清理已完成的 Timer
-                    self._pending_timers = [t for t in self._pending_timers if t.is_alive()]
-                    self._pending_timers.append(timer)
-                timer.start()
-        else:
-            logger.info(f"Voice (Disabled/Dead): {text}")
+        self.manager.send_alert(text, priority=2, key=code)
+        
+        # Fake timer for on_speak_end
+        if self.on_speak_end:
+            threading.Timer(1.0, lambda: self._safe_callback(self.on_speak_end, code)).start()
+
+    def _safe_callback(self, cb, arg):
+        try: cb(arg)
+        except: pass
 
     def cancel_for_code(self, target_code: str):
-        """停止指定代码 (多进程下只能清空待播报项)"""
-        # 由于跨进程控制 engine.stop() 较难，主要清理队列
-        temp_list = []
-        try:
-            while True:
-                item = self.queue.get_nowait()
-                if item.get('code') != target_code:
-                    temp_list.append(item)
-        except Empty:
-            pass
-        
-        for item in temp_list:
-            self.queue.put(item)
+        pass # AlertManager doesn't support canceling specific yet
+
+    def shutdown(self):
+        self.manager.stop()
 
     def stop(self):
         """停止语音播报引擎"""
-        self._is_stopped = True
-        
-        # 取消所有待处理的 Timer
-        with self._timer_lock:
-            for timer in self._pending_timers:
-                try:
-                    timer.cancel()
-                except Exception:
-                    pass
-            self._pending_timers.clear()
-        
-        # 清空队列，防止阻塞
-        try:
-            while True:
-                self.queue.get_nowait()
-        except Empty:
-            pass
-        
-        self._stop_event.set()
-        
-        if self._process and self._process.is_alive():
-            # 给进程短暂时间自行退出
-            self._process.join(timeout=0.5)
-            # 如果还没退出，强制终止
-            if self._process.is_alive():
-                try:
-                    self._process.terminate()
-                    self._process.join(timeout=0.3)
-                except Exception:
-                    pass
-            # 最后手段：杀死进程
-            if self._process.is_alive():
-                try:
-                    self._process.kill()
-                except Exception:
-                    pass
+        self.shutdown()
 
 
 class StrategySupervisor:
@@ -460,6 +298,13 @@ class StockLiveStrategy:
         self.config_file = "voice_alert_config.json"
         self.alert_callback = None
         self.realtime_service = realtime_service
+        
+        # [P3 Fix] Store config as instance attributes
+        self._stop_loss_pct = stop_loss_pct
+        self._take_profit_pct = take_profit_pct
+        self._trailing_stop_pct = trailing_stop_pct
+        self._max_single_stock_ratio = max_single_stock_ratio
+        
         self.scan_hot_concepts_status = True
         
         # --- 外部数据缓存 (55188.cn) ---
@@ -1528,25 +1373,78 @@ class StockLiveStrategy:
                     action_text = "突破确认"
 
                 if triggered:
-                    # 1. 语音提醒
-                    msg = f"跟单{action_text}: {signal.name} {trigger_msg}"
-                    self.voice_announcer.announce(msg)
-                    logger.info(f"🚀 [Follow Alert] {code} {signal.name} {trigger_msg}")
-                    
-                    # 2. 更新状态 -> READY / ENTERED?
-                    hub = get_trading_hub()
-                    new_status = "READY"
-                    hub.update_follow_status(code, new_status, notes=f"Triggered: {trigger_msg}")
-                    
-                    # 3. 立即从缓存移除 (防止重复报警)
-                    # 如果需要持续追踪直到成交，可以改为更新缓存状态而不是移除
-                    # 这里选择移除，避免刷屏
-                    self.follow_queue_cache.remove(signal)
+                    # [P3 Fix] 执行跟单交易逻辑
+                    self._execute_follow_trade(signal, current_price, trigger_msg, resample)
             
             except Exception as e:
                 logger.error(f"Process follow queue error {code}: {e}")
 
-    # _monitor_follow_queue removed - functionality merged into _process_follow_queue
+    def _execute_follow_trade(self, signal: 'TrackedSignal', price: float, reason: str, resample: str = 'd'):
+        """
+        [P3] 执行跟单交易: 记录+上监控+报警
+        """
+        code = signal.code
+        name = signal.name
+        
+        try:
+            # 1. 记录交易 (模拟成交流程)
+            # 默认仓位 10% (可后续优化为动态计算)
+            # 如果是 "竞价买入"，通常是开盘价，但此时 price 可能是昨收或虚拟开盘价
+            # 真实交易中应等待 9:30 确认，但为了不错过，我们记录意向
+            
+            # 使用 PhaseEngine 计算初始仓位 (如有)
+            initial_pos_ratio = 0.1 
+            
+            self.trading_logger.record_trade(
+                code, name, "买入", price, 0, # amount=0 (indicates simulator/tracker)
+                reason=f"[{signal.entry_strategy}] {reason}",
+                resample=resample
+            )
+            
+            # 2. 更新 Hub 状态
+            hub = get_trading_hub()
+            hub.update_follow_status(code, "ENTERED", notes=f"Executed at {price}: {reason}")
+            
+            # 3. 加入实时监控 (Hotspot Injection Logic)
+            # 构造监控数据结构
+            monitor_data = {
+                "name": name,
+                "code": code,
+                "resample": resample,
+                "last_alert": 0,
+                "created_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "tags": f"auto_followed_{signal.entry_strategy}",
+                "snapshot": {
+                    "score": 99, # High score for followed signal
+                    "reason": reason,
+                    "buy_date": datetime.now().strftime("%Y-%m-%d"),
+                    "cost_price": price,
+                    "highest_since_buy": price,
+                    # Initialize Phase
+                    "trade_phase": "ACCUMULATE" if "回踩" in signal.entry_strategy else "LAUNCH"
+                },
+                "rules": [
+                    # 默认止损规则
+                    {"type": "price_down", "value": price * (1 - self._stop_loss_pct)}
+                ]
+            }
+            
+            key = f"{code}_{resample}" if resample != 'd' else code
+            self._monitored_stocks[key] = monitor_data
+            self._save_monitors()
+            
+            # 4. 移除待跟单队列缓存
+            if signal in self.follow_queue_cache:
+                self.follow_queue_cache.remove(signal)
+                
+            # 5. 报警联动
+            action_text = "自动买入"
+            msg = f"{action_text}: {name} ({code}) 价格:{price} 理由:{reason}"
+            self.voice_announcer.announce(msg)
+            logger.info(f"✅ [Trade Executed] {msg}")
+            
+        except Exception as e:
+            logger.error(f"Execute trade failed {code}: {e}")
 
 
     def _check_strategies(self, df, resample='d'):

@@ -233,6 +233,70 @@ class TradingAnalyzer:
             print(f"Error fetching Hub strategy stats: {e}")
             return pd.DataFrame()
 
+    def compute_and_sync_strategy_stats(self):
+        """
+        [P2] 计算并同步策略绩效到 TradingHub
+        解析交易记录中的策略名称，计算胜率与盈亏，写入 signal_strategy.db
+        """
+        df = self.get_all_trades_df()
+        if df.empty:
+            return
+            
+        closed = df[df['status'] == 'CLOSED'].copy()
+        if closed.empty:
+            return
+
+        # 尝试提取策略名称
+        # 优先使用 'strategy' 列，如果没有则从 'buy_reason' 解析
+        if 'strategy' not in closed.columns:
+            closed['strategy'] = 'Unknown'
+            
+        def extract_strategy(row):
+            s = str(row.get('strategy', ''))
+            if s and s != 'nan' and s != 'Unknown':
+                return s
+            # Fallback to reason: "[Strategy] ..."
+            reason = str(row.get('buy_reason', ''))
+            import re
+            match = re.search(r'\[(.*?)\]', reason)
+            if match:
+                return match.group(1)
+            # Fallback for old data
+            if "竞价" in reason: return "竞价买入"
+            if "回踩" in reason: return "回踩MA5"
+            return "Manual/Other"
+
+        closed['calc_strategy'] = closed.apply(extract_strategy, axis=1)
+        
+        # 按策略汇总
+        hub = get_trading_hub()
+        today = pd.Timestamp.now().strftime('%Y-%m-%d')
+        
+        for strategy, group in closed.groupby('calc_strategy'):
+            total_trades = len(group)
+            wins = len(group[group['profit'] > 0])
+            losses = len(group[group['profit'] <= 0])
+            total_pnl = group['profit'].sum()
+            
+            # 更新到 Hub (使用今日日期作为统计更新日，累计数据)
+            # 注意：Hub 的 update_strategy_stats 设计可能是每日快照? 
+            # Check hub.update_strategy_stats: it inserts (strategy, date).
+            # We should probably overwrite "Today's" stat with "All Time" or "Last 30 Days"?
+            # Hub definition: "strategy_stats" unique(strategy, date).
+            # So we are recording "Performance AS OF date".
+            
+            # 更新到 Hub
+            hub.update_strategy_stats(
+                strategy_name=str(strategy),
+                date=str(today),
+                signals=int(total_trades),
+                entered=int(total_trades),
+                wins=int(wins),
+                losses=int(losses),
+                pnl=float(total_pnl)
+            )
+        print("Strategy stats synced to Hub.")
+
 class StrategySignalAnalyzer:
     """
     专门分析 signal_strategy.db 的实时信号
