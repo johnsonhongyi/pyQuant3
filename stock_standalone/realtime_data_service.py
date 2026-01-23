@@ -300,10 +300,9 @@ class MinuteKlineCache:
             price = float(cast(float, getattr(row, 'trade', getattr(row, 'now', getattr(row, 'price', getattr(row, 'close', 0.0))))))
             if price <= 0: continue
             
-            # 优先提取 'vol' (成交量), 其次才是 'volume' (在某些接口可能是量比)
-            # 用户确认: volume是量比, vol是实时交易量
+            # 优先提取 'nvol' (用户确认: nvol=nowvol=实时交易量, volume=量比)
             # vol = float(cast(float, getattr(row, 'vol', getattr(row, 'volume', 0.0))))
-            vol = float(cast(float, getattr(row, 'volume', getattr(row, 'vol', 0.0))))
+            vol = float(cast(float, getattr(row, 'nvol', getattr(row, 'vol', getattr(row, 'volume', 0.0)))))
             self._update_internal(code, price, vol, minute_ts)
             updated_codes.add(code)
             self._last_update_ts[code] = minute_ts
@@ -330,9 +329,9 @@ class MinuteKlineCache:
 
             ts = float(tick.get('timestamp') or tick.get('time') or time.time())
             minute_ts = int(ts - (ts % 60))
-            # 优先提取 'vol'
+            # 优先提取 'nvol'
             # vol = float(tick.get('vol', tick.get('volume', 0.0)))
-            vol = float(tick.get('volume', tick.get('vol', 0.0)))
+            vol = float(tick.get('nvol', tick.get('vol', tick.get('volume', 0.0))))
             self._update_internal(code_clean, price, vol, minute_ts)
             self._last_update_ts[code_clean] = minute_ts
         except Exception as e:
@@ -351,6 +350,8 @@ class MinuteKlineCache:
                 time=minute_ts, open=price, high=price, low=price, close=price,
                 volume=0.0, cum_vol_start=current_cum_vol
             ))
+
+
         else:
             last_k = klines[-1]
             if last_k.time == minute_ts:
@@ -358,15 +359,62 @@ class MinuteKlineCache:
                 last_k.high = max(last_k.high, price)
                 last_k.low = min(last_k.low, price)
                 last_k.close = price
-                # 累积量减去分钟起始量 = 该分钟内量
-                last_k.volume = current_cum_vol - last_k.cum_vol_start
+                
+                # Check for volume reset or negative delta
+                if current_cum_vol < last_k.cum_vol_start:
+                     print(f"[WARNING] Volume Reset Detected - Code: {code}, Time: {minute_ts}, Current: {current_cum_vol}, Start: {last_k.cum_vol_start}")
+                     last_k.cum_vol_start = current_cum_vol
+                     # If reset happens, we can't calculate meaningful volume for this tick relative to previous start
+                     # Reset volume to 0 for this instant or keep previous? 
+                     # Safest is to reset start and assume minimal volume change for this specific update, 
+                     # effectively restarting the counter for this minute.
+                     last_k.volume = 0.0 
+                else:
+                    last_k.volume = current_cum_vol - last_k.cum_vol_start
+
+                # if code == '000001':
+                #      print(f"[DEBUG] Update KLine - Code: {code}, Time: {minute_ts}, Price: {price}, CumVol: {current_cum_vol}, StartVol: {last_k.cum_vol_start}, Vol: {last_k.volume}")
+                
                 self._is_dirty = True
             elif minute_ts > last_k.time:
                 # 新的一分钟：结算并开始新 K 线
-                klines.append(KLineItem(
-                    time=minute_ts, open=price, high=price, low=price, close=price,
-                    volume=0.0, cum_vol_start=current_cum_vol
-                ))
+                
+                # Hybrid Logic:
+                # 1. Normal Trading: Gap volume belongs to the PREVIOUS bar (e.g., 14:56:00 tick reflects 14:55 activity).
+                # 2. Closing Auction (15:00): The volume event happens AT 15:00, so it belongs to the NEW bar (15:00).
+                
+                prev_end_cum_vol = last_k.cum_vol_start + last_k.volume
+                
+                # Check for reset first
+                if current_cum_vol < prev_end_cum_vol:
+                     print(f"[WARNING] Volume Reset Detected on New Bar - Code: {code}, Time: {minute_ts}, Current: {current_cum_vol}, PrevEnd: {prev_end_cum_vol}")
+                     # Reset: Start fresh
+                     klines.append(KLineItem(
+                        time=minute_ts, open=price, high=price, low=price, close=price,
+                        volume=0.0, cum_vol_start=current_cum_vol
+                    ))
+                else:
+                    # Determine attribution based on time
+                    is_closing_call = (minute_ts % 10000 == 1500)
+                    
+                    if is_closing_call:
+                        # 15:00 Closing Auction: Attribute gap volume to THIS bar (15:00)
+                        # New bar starts from where previous left off
+                        klines.append(KLineItem(
+                            time=minute_ts, open=price, high=price, low=price, close=price,
+                            volume=current_cum_vol - prev_end_cum_vol, 
+                            cum_vol_start=prev_end_cum_vol
+                        ))
+                    else:
+                        # Normal Trading: Attribute gap volume to PREVIOUS bar
+                        last_k.volume = current_cum_vol - last_k.cum_vol_start
+                        
+                        # New bar starts fresh from current level
+                        klines.append(KLineItem(
+                            time=minute_ts, open=price, high=price, low=price, close=price,
+                            volume=0.0, cum_vol_start=current_cum_vol
+                        ))
+                
                 self._is_dirty = True
             else:
                 # 忽略过时数据或乱序推送
@@ -1051,7 +1099,7 @@ class DataPublisher:
                     break
             if 'volume' in check_sample.columns:
                 fp_cols.append('volume')
-            
+                
             batch_fp = df_fingerprint(check_sample, cols=fp_cols)
 
             # # 判断 + 更新
