@@ -661,7 +661,18 @@ class HotlistPanel(QWidget):
         
         # 使用局部变量绑定 code，避免 lambda 闭包问题
         current_code = item.code
+        current_name = item.name
+        current_price = item.current_price if item.current_price > 0 else item.add_price
+        signal_type = item.signal_type
+        
         menu = QMenu(self)
+        
+        # 🔥 加入跟单队列
+        follow_action = QAction("📋 加入跟单队列", self)
+        follow_action.triggered.connect(lambda: self._add_to_follow_queue(current_code, current_name, current_price, signal_type))
+        menu.addAction(follow_action)
+        
+        menu.addSeparator()
         
         # 移除
         remove_action = QAction("❌ 移除", self)
@@ -678,6 +689,39 @@ class HotlistPanel(QWidget):
             group_menu.addAction(action)
         
         menu.exec(self.table.mapToGlobal(pos))
+    
+    def _add_to_follow_queue(self, code: str, name: str, price: float, signal_type: str):
+        """添加到跟单队列"""
+        try:
+            from trading_hub import get_trading_hub, TrackedSignal
+            hub = get_trading_hub()
+            
+            # 计算目标入场价（默认当前价±3%）
+            target_low = price * 0.97
+            target_high = price * 1.03
+            stop_loss = price * 0.95  # 默认止损5%
+            
+            signal = TrackedSignal(
+                code=code,
+                name=name,
+                signal_type=signal_type,
+                detected_date=datetime.now().strftime("%Y-%m-%d"),
+                detected_price=price,
+                entry_strategy="竞价买入",
+                target_price_low=target_low,
+                target_price_high=target_high,
+                stop_loss=stop_loss,
+                priority=7,
+                source="热点面板"
+            )
+            
+            if hub.add_to_follow_queue(signal):
+                logger.info(f"✅ 已加入跟单队列: {code} {name}")
+                self._notify_voice(code, f"{name} 已加入跟单队列")
+            else:
+                logger.warning(f"⚠️ 加入跟单队列失败: {code}")
+        except Exception as e:
+            logger.error(f"Add to follow queue error: {e}")
     
     def _set_group(self, code: str, group: str):
         """设置分组"""

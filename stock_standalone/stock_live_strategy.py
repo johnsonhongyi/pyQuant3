@@ -985,9 +985,24 @@ class StockLiveStrategy:
         if 925 <= cct.get_now_time_int() <= 1505:
              self.executor.submit(self._scan_hot_concepts, df_all, concept_top5, resample=resample)
         
+        # --- 1.5 Rank 强势股自动入队跟单 (每日 9:35-10:30 扫描一次) ---
+        if 935 <= cct.get_now_time_int() <= 1030:
+            if not getattr(self, '_rank_scan_done_today', False):
+                self.executor.submit(self._scan_rank_for_follow, df_all, concept_top5, top_n=100)
+                self._rank_scan_done_today = True
+        
+        # 每日重置扫描标记
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        if getattr(self, '_last_rank_scan_date', '') != today_str:
+            self._rank_scan_done_today = False
+            self._last_rank_scan_date = today_str
+        
         # 2. 规则引擎监控 (Existing rules)
         # self._check_risk_control(df_all)
         
+        # [Phase 2] 入场监控：检查跟单队列
+        self._monitor_follow_queue(df_all)
+
         # 3. 策略判定
         self._check_strategies(df_all, resample=resample)
         # 1. 交易期间判断: 0915 至 1502
@@ -1257,6 +1272,251 @@ class StockLiveStrategy:
         except Exception as e:
             logger.error(f"Error in scan_hot_concepts: {e}", exc_info=True)
             pass
+
+    def _scan_rank_for_follow(self, df: pd.DataFrame, concept_top5: list = None, top_n: int = 100) -> None:
+        """
+        扫描板块联动强势突破股，筛选可跟单标的加入队列
+        
+        核心筛选逻辑:
+        1. 板块联动: 属于当日热点板块 (concept_top5) 的龙头股
+        2. 连阳加速: win > 2 表示连续阳线，形态处于加速启动阶段
+        3. 回踩启动: 价格回踩 MA5/MA10 后反弹启动
+        4. 强势突破: 突破 hmax (历史高点) 或 high4 (4日高点)
+        """
+        if df is None or df.empty:
+            return
+        
+        try:
+            from trading_hub import get_trading_hub, TrackedSignal
+            hub = get_trading_hub()
+            
+            today_str = datetime.now().strftime('%Y-%m-%d')
+            
+            # 获取今日已入队的股票代码
+            existing_queue = hub.get_follow_queue_df()
+            queued_today = set()
+            if not existing_queue.empty:
+                queued_today = set(existing_queue[existing_queue['detected_date'] == today_str]['code'])
+            
+            # 获取热点板块集合
+            top_concepts = set()
+            if concept_top5:
+                for item in concept_top5:
+                    if isinstance(item, (list, tuple)):
+                        top_concepts.add(str(item[0]))
+                    else:
+                        top_concepts.add(str(item))
+            
+            candidates = []
+            
+            for code, row in df.iterrows():
+                code_str = str(code).zfill(6)
+                
+                # 跳过今日已入队 / 已在监控的
+                if code_str in queued_today or code_str in self._monitored_stocks:
+                    continue
+                
+                # 获取关键指标
+                price = float(row.get('close', row.get('trade', 0)))
+                ma5 = float(row.get('ma5d', 0))
+                ma10 = float(row.get('ma10d', 0))
+                percent = float(row.get('percent', 0))
+                win = int(row.get('win', 0))  # 连阳天数
+                volume = float(row.get('volume', 0))
+                name = str(row.get('name', code_str))
+                category = str(row.get('category', ''))
+                hmax = float(row.get('hmax', 0))
+                high4 = float(row.get('high4', 0))
+                lastp1d = float(row.get('lastp1d', 0))  # 昨收
+                
+                if price <= 0 or ma5 <= 0:
+                    continue
+                
+                # ========== 核心筛选条件 ==========
+                signal_type = ""
+                priority = 5
+                sector_match = ""
+                
+                # 1. 板块联动判断
+                stock_cats = set(category.split(';')) if category else set()
+                matched_concepts = stock_cats.intersection(top_concepts)
+                is_sector_linked = len(matched_concepts) > 0
+                if matched_concepts:
+                    sector_match = list(matched_concepts)[0]
+                
+                # 2. 连阳加速 (win >= 2 且当日上涨) - 越早识别越好
+                is_consecutive_yang = win >= 2 and percent > 0
+                
+                # 3. 回踩MA5启动 (价格在 MA5 附近 ±3%，且当日上涨)
+                ma5_bias = (price - ma5) / ma5 if ma5 > 0 else 999
+                is_ma5_bounce = -0.03 <= ma5_bias <= 0.05 and percent > 0
+                
+                # 4. 回踩MA10启动 (价格在 MA10 附近 ±3%，且当日上涨)
+                ma10_bias = (price - ma10) / ma10 if ma10 > 0 else 999
+                is_ma10_bounce = -0.03 <= ma10_bias <= 0.05 and percent > 0
+                
+                # 5. 强势突破 (突破4日高点或历史高点)
+                is_breakout = (price > high4 > 0) or (price > hmax > 0)
+                
+                # 6. 放量配合 (量比 > 1.2)
+                has_volume = volume >= 1.2
+                
+                # ========== 组合判断信号类型 ==========
+                
+                # 最优: 板块联动 + 连阳加速 + 放量
+                if is_sector_linked and is_consecutive_yang and has_volume:
+                    signal_type = f"板块联动连阳"
+                    priority = 10
+                
+                # 优质: 连阳加速 + 回踩MA5启动
+                elif is_consecutive_yang and is_ma5_bounce:
+                    signal_type = "连阳回踩MA5"
+                    priority = 9
+                
+                # 良好: 板块联动 + 突破
+                elif is_sector_linked and is_breakout and has_volume:
+                    signal_type = "板块突破"
+                    priority = 8
+                
+                # 标准: 回踩MA5启动 + 放量
+                elif is_ma5_bounce and has_volume:
+                    signal_type = "回踩MA5启动"
+                    priority = 7
+                
+                # 备选: 回踩MA10启动
+                elif is_ma10_bounce and has_volume:
+                    signal_type = "回踩MA10启动"
+                    priority = 6
+                
+                if not signal_type:
+                    continue
+                
+                # 计算入场价和止损
+                entry_strategy = "竞价买入" if is_breakout else "回踩MA5"
+                stop_loss = ma5 * 0.97 if ma5 > lastp1d * 0.97 else lastp1d * 0.97
+                
+                candidates.append({
+                    'code': code_str,
+                    'name': name,
+                    'signal_type': signal_type,
+                    'priority': priority,
+                    'price': price,
+                    'percent': percent,
+                    'win': win,
+                    'volume': volume,
+                    'sector': sector_match,
+                    'entry_strategy': entry_strategy,
+                    'stop_loss': stop_loss
+                })
+            
+            # 按优先级排序
+            candidates.sort(key=lambda x: x['priority'], reverse=True)
+            
+            added_count = 0
+            for cand in candidates[:8]:  # 每批最多加 8 只
+                tracked_signal = TrackedSignal(
+                    code=cand['code'],
+                    name=cand['name'],
+                    signal_type=cand['signal_type'],
+                    detected_date=today_str,
+                    detected_price=cand['price'],
+                    entry_strategy=cand['entry_strategy'],
+                    target_price_low=cand['price'] * 0.97,
+                    target_price_high=cand['price'] * 1.05,
+                    stop_loss=cand['stop_loss'],
+                    priority=cand['priority'],
+                    source=f"LiveStrategy|{cand['sector'] or 'Rank'}",
+                    notes=f"涨幅:{cand['percent']:.1f}% 连阳:{cand['win']} 量比:{cand['volume']:.1f}"
+                )
+                
+                if hub.add_to_follow_queue(tracked_signal):
+                    added_count += 1
+                    logger.info(f"📋 跟单入队: {cand['code']} {cand['name']} [{cand['signal_type']}] P{cand['priority']} | {cand.get('sector','')}")
+            
+            if added_count > 0:
+                logger.info(f"✅ 今日自动入队 {added_count} 只板块联动/连阳加速股")
+        
+        except ImportError:
+            logger.debug("TradingHub not available, skip sector follow scan")
+        except Exception as e:
+            logger.error(f"Error in _scan_rank_for_follow: {e}")
+
+
+    def _monitor_follow_queue(self, df: pd.DataFrame) -> None:
+        """
+        [Phase 2] 入场监控：遍历跟单队列，检查是否满足入场条件
+        """
+        if df is None or df.empty:
+            return
+
+        try:
+            from trading_hub import get_trading_hub
+            hub = get_trading_hub()
+            
+            # 获取所有处于 TRACKING / READY 状态的跟单
+            queue_df = hub.get_follow_queue_df()
+            if queue_df.empty:
+                return
+                
+            active_queue = queue_df[queue_df['status'].isin(['TRACKING', 'READY'])]
+            
+            if active_queue.empty:
+                return
+                
+            now_time = datetime.now()
+            current_time_str = now_time.strftime("%H:%M:%S")
+            is_auction_time = "09:24:00" <= current_time_str <= "09:30:00"
+            is_trading_time = ("09:30:00" <= current_time_str <= "11:30:00") or \
+                              ("13:00:00" <= current_time_str <= "14:57:00")
+            
+            for index, item in active_queue.iterrows():
+                code = str(item['code']).zfill(6)
+                
+                # 如果当前 DataFrame 中没有该股票数据，尝试获取单股数据
+                if code not in df.index:
+                    continue
+                    
+                row = df.loc[code]
+                price = float(row.get('close', row.get('trade', 0)))
+                pre_close = float(row.get('lastp1d', 0))
+                ma5 = float(row.get('ma5d', 0))
+                
+                if price <= 0:
+                    continue
+                
+                pct = (price - pre_close) / pre_close * 100 if pre_close > 0 else 0
+                entry_strategy = str(item.get('entry_strategy', ''))
+                
+                triggered = False
+                trigger_msg = ""
+                
+                # --- 策略 1: 竞价买入 (09:25-09:30) ---
+                if entry_strategy == "竞价买入" and is_auction_time:
+                    # 高开且未大幅高开 (>0% and <5%)
+                    if 0 < pct < 5.0:
+                        triggered = True
+                        trigger_msg = f"竞价达标 高开{pct:.2f}%"
+                
+                # --- 策略 2: 回踩 MA5 启动 (盘中) ---
+                elif entry_strategy == "回踩MA5" and is_trading_time:
+                    if ma5 > 0:
+                        ma5_bias = (price - ma5) / ma5
+                        # 价格在 MA5 附近 (-1% ~ 2%)
+                        if -0.01 <= ma5_bias <= 0.02:
+                            triggered = True
+                            trigger_msg = f"回踩MA5到位 偏离{ma5_bias:.2%}"
+
+                if triggered:
+                    # 语音播报
+                    action_text = "准备买入" if entry_strategy == "竞价买入" else "关注入场"
+                    msg = f"跟单提醒: {item['name']} {trigger_msg} {action_text}"
+                    
+                    self.voice_announcer.announce(msg)
+                    logger.info(f"🚀 [Entry Alert] {code} {item['name']}: {trigger_msg}")
+                    
+        except Exception as e:
+            logger.error(f"Error in _monitor_follow_queue: {e}")
+
 
     def _check_strategies(self, df, resample='d'):
         try:
