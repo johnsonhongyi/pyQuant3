@@ -1579,6 +1579,7 @@ class StockLiveStrategy:
                     continue
 
                 row = df.loc[code]
+                messages = []  # [Fix] 提前初始化 messages，供日/日内形态检测使用
 
                 # ---------- 安全获取行情数据 ----------
                 try:
@@ -1666,13 +1667,26 @@ class StockLiveStrategy:
                 if hasattr(self, 'daily_pattern_detector'):
                     try:
                         self._update_daily_history_cache(code,resample) # 尝试刷新全量缓存
-                        prev_rows = self.daily_history_cache.get(code)
-                        self.daily_pattern_detector.update(
+                        prev_rows = self.daily_history_cache.get(f'{code}_{resample}')
+                        det_events = self.daily_pattern_detector.update(
                             code=code,
                             name=data.get('name', ''),
                             current_row=row,
                             prev_rows=prev_rows
                         )
+                        
+                        if det_events:
+                            for ev in det_events:
+                                # 构造 "PATTERN" 类型的消息，放入 messages 以便最后统一去重播报
+                                # 格式: (type, content)
+                                msg_content = f"[日线]: {ev.detail}"
+                                messages.append(("PATTERN", msg_content))
+                                
+                                # 同时确保 trading_hub 更新 (虽然 callback 里也有，但双重保险无害，或者考虑移除 callback 中的 update)
+                                try:
+                                    hub = get_trading_hub()
+                                    hub.update_follow_status(ev.code, notes=f"[{ev.pattern}] {ev.detail}")
+                                except: pass
 
                     except Exception as e:
                         logger.debug(f"Daily pattern detect error for {code}: {e}")
@@ -1807,7 +1821,7 @@ class StockLiveStrategy:
                     if snap['buy_date'].startswith(today_str):
                         is_t1_restricted = True
 
-                messages = []
+                # messages = [] # Moved to top of loop
 
                 # ---------- 今日均价风控 ----------
                 max_normal_pullback = (last_percent / 5 / 100 if last_percent else 0.01)
@@ -1899,6 +1913,9 @@ class StockLiveStrategy:
                     except Exception as e:
                         logger.debug(f"Realtime service fetch error: {e}")
 
+                # 定义默认 shadow_decision，防止后续引用报错
+                shadow_decision = {"action": "HOLD", "reason": "", "debug": {}}
+                
                 # ---------- 决策引擎 ----------
                 decision = self.decision_engine.evaluate(row, snap)
 
@@ -2204,7 +2221,7 @@ class StockLiveStrategy:
 
                 if messages:
                     # ---------- 去重 & 合并 ----------
-                    priority_order = ["RISK", "RULE", "POSITION"]
+                    priority_order = ["RISK", "RULE", "POSITION", "PATTERN"]
                     priority_rank = {k:i for i,k in enumerate(priority_order)}
                     unique_msgs = {}
                     last_duplicate = {}
@@ -2693,7 +2710,7 @@ class StockLiveStrategy:
             # 过滤掉带采样的 key (e.g., '000001_5')
             codes = [c for c in codes if '_' not in c]
 
-        if code not in list(self.daily_history_cache.keys()):
+        if f'{code}_{resample}' not in list(self.daily_history_cache.keys()):
             codes.append(code)
         else:
             # logger.debug(f'code in hist_cache')
@@ -2716,7 +2733,8 @@ class StockLiveStrategy:
                 df_hist.rename(columns={"vol": "volume"}, inplace=True)
                 if df_hist is not None and not df_hist.empty:
                     # 存入该股的历史数据 DataFrame
-                    self.daily_history_cache[code] = df_hist
+                    # self.daily_history_cache[code] = df_hist
+                    self.daily_history_cache[f'{code}_{resample}'] = df_hist
             self.last_daily_history_refresh = now
             logger.debug(f"Daily history cache refreshed for {len(codes)} stocks. caches: {len(self.daily_history_cache.keys())}")
         except Exception as e:
@@ -2734,7 +2752,7 @@ class StockLiveStrategy:
             
             # 触发报警
             logger.info(f"📅 日线形态: {event.code} {event.name} - {event.detail} Score={event.score}")
-            self._trigger_alert(event.code, event.name, msg, action=action, price=event.price)
+            # self._trigger_alert(event.code, event.name, msg, action=action, price=event.price)
             
             # 也可以选择性的根据形态更新 trading_hub
             if event.pattern in ('big_bull', 'platform_break'):
