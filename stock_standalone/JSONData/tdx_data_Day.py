@@ -2396,8 +2396,8 @@ def get_tdx_Exp_day_to_df(
     # tdx_max_int = ct.tdx_max_int  #10
     # tdx_max_int_end = ct.tdx_max_int_end   #30
     # tdx_high_da = ct.tdx_high_da   #3
-    df['max5'] = df.close.iloc[-6:-1].max()
-    df['max10'] = df.high.iloc[-13:-tdx_high_da].max()
+    df['max5'] = df.high.iloc[-6:-1].max()
+    df['max10'] = df.close.iloc[-13:-tdx_high_da].max()
     df['hmax'] = df.high.iloc[-tdx_max_int_end:-tdx_high_da].max()
     df['low10'] = df.low.iloc[-13:-tdx_high_da].min()
     df['low4'] = df.low.iloc[-13:-tdx_high_da].min()
@@ -2413,8 +2413,8 @@ def get_tdx_Exp_day_to_df(
             df['hv'] = df.vol.iloc[-tdx_max_int:-tdx_high_da].max()
             df['lv'] = df.vol.iloc[-tdx_max_int:-tdx_high_da].min()
             df['llowvol'] = df['lv']
-            df['high4'] = df.high.iloc[-5:-1].max()
-            df['hmax60'] = df.high.iloc[-60:-tdx_high_da].max()
+            df['high4'] = df.close.iloc[-5:-1].max()
+            df['hmax60'] = df.close.iloc[-60:-tdx_high_da].max()
             df['low60'] = df.low.iloc[-60:-tdx_max_int_end].min()
             # df['low60'] = df.low.iloc[-tdx_max_int_end*2:-tdx_max_int_end].min()
 
@@ -2747,7 +2747,7 @@ def get_tdx_Exp_day_to_df_slow(code, start=None, end=None, dl=None, newdays=None
         df = df.fillna(0)
 
         # 滚动指标
-        df['max5'] = df.close.shift(1).rolling(5).max()
+        df['max5'] = df.high.shift(1).rolling(5).max()
         df['max10'] = df.close.shift(1).rolling(10).max()
         df['hmax'] = df.close.shift(1).rolling(30).max()
         df['hmax60'] = df.close.shift(1).rolling(60).max()
@@ -4965,7 +4965,7 @@ def compute_perd_df(dd, lastdays=3, resample='d',normalized=False):
     df['vol_shift1'] = df['vol'].shift(1)
 
     # rolling max/min
-    df['max5'] = df['close_shift1'].rolling(5).max()
+    df['max5'] = df['high_shift1'].rolling(5).max()
     df['max10'] = df['close_shift1'].rolling(10).max()
     df['hmax'] = df['close_shift1'].rolling(30).max()
     df['high4'] = df['close_shift1'].rolling(4).max()
