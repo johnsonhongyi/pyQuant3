@@ -169,9 +169,9 @@ class DailyPatternDetector:
 
     def _check_vol_drying(self, code: str, name: str, row: Any, prev_df: Any) -> List[DailyPatternEvent]:
         """极端缩量企稳"""
+        
         volume = float(row.get('volume', 0))
         pct = float(row.get('percent', 0))
-        
         vol_ma5 = prev_df['volume'].tail(5).mean() if not prev_df.empty else 0
         
         # 条件：成交量 < 5日均量 60%, 且涨跌幅绝对值 < 1.5%
