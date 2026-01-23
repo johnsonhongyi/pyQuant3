@@ -241,10 +241,10 @@ class TradingHub:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
             if notes:
-                c.execute("UPDATE follow_queue SET status = ?, notes = ?, updated_at = ? WHERE code = ? AND status = 'TRACKING'",
+                c.execute("UPDATE follow_queue SET status = ?, notes = ?, updated_at = ? WHERE code = ?",
                          (new_status, notes, now, code))
             else:
-                c.execute("UPDATE follow_queue SET status = ?, updated_at = ? WHERE code = ? AND status = 'TRACKING'",
+                c.execute("UPDATE follow_queue SET status = ?, updated_at = ? WHERE code = ?",
                          (new_status, now, code))
             
             conn.commit()

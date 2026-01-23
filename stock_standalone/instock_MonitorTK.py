@@ -606,6 +606,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def signal_handler(self, sig, frame):
         """捕获 Ctrl+C 信号"""
         self.ask_exit()
+        
+    def send_command_to_visualizer(self, cmd_str):
+        """
+        发送指令到 Visualizer (Port: 26668)
+        Format: CODE|{cmd}
+        """
+        IPC_HOST = '127.0.0.1'
+        IPC_PORT = 26668
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            s.settimeout(1.0)
+            s.connect((IPC_HOST, IPC_PORT))
+            payload = f"CODE|{cmd_str}"
+            s.send(payload.encode('utf-8'))
+            s.close()
+            logger.info(f"Command sent to Visualizer: {cmd_str}")
+        except Exception as e:
+            logger.error(f"Failed to send command to visualizer: {e}")
+            messagebox.showwarning("Connection Error", "无法连接到可视化窗口，请确认它已启动。")
 
     def ask_exit(self):
         """弹出确认框，询问是否退出"""
@@ -631,7 +650,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 注册系统全局快捷键
         keyboard.add_hotkey('alt+b', _on_hotkey_close_all_alerts)
         keyboard.add_hotkey('alt+e', _on_hotkey_voice_monitor_manager)
+
         keyboard.add_hotkey('alt+s', _on_hotkey_trategy_manager)
+        # [NEW] Alt+H to toggle Hotlist
+        keyboard.add_hotkey('alt+h', lambda: self.after(0, lambda: self.send_command_to_visualizer("TOGGLE_HOTLIST")))
 
     def on_resize(self, event):
         if event.widget != self:
