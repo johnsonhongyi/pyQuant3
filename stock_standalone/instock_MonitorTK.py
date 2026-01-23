@@ -5,6 +5,7 @@ import socket
 import pickle
 import struct
 import warnings
+import queue  # ✅ 全局引入 queue 以便捕获 queue.Empty
 warnings.filterwarnings(
     "ignore",
     message="pkg_resources is deprecated as an API.*"
@@ -571,6 +572,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 定时检查队列
         self.after(1000, self.update_tree)
 
+        # ✅ UI 线程任务调度队列 (解决 Qt -> Tkinter 跨线程/GIL 问题)
+        import queue
+        self.tk_dispatch_queue = queue.Queue()
+        self._process_dispatch_queue()
+
+
         self.sender = StockSender(self.tdx_var, self.ths_var, self.dfcf_var, callback=self.update_send_status)
         # 📋 启动后台剪贴板监听服务 (包含自动查重逻辑，避免重复发送当前已选中代码)
         self.clipboard_monitor = start_clipboard_listener(
@@ -602,6 +609,29 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         logger.info(f"🚀 程序初始化完成 (总耗时: {init_elapsed:.2f}s)")
         if logger.level == LoggerFactory.DEBUG:
             cct.print_timing_summary(top_n=6)
+
+    def _process_dispatch_queue(self):
+        """
+        [FIX] 专门处理从 Qt 回调或其他非主线程发来的 Tkinter 任务。
+        避免直接在 Qt 线程调用 Tkinter (self.after 也不行)。
+        """
+        try:
+            while True:
+                # 非阻塞获取任务
+                task = self.tk_dispatch_queue.get_nowait()
+                if callable(task):
+                    try:
+                        task()
+                    except Exception as e:
+                        logger.error(f"Error executing dispatched task: {e}\n{traceback.format_exc()}")
+        except queue.Empty:
+            pass
+        except Exception as e:
+            logger.error(f"Error in dispatch queue processing: {e}")
+        finally:
+            # 100ms 后再次检查
+            self.after(100, self._process_dispatch_queue)
+
 
     def signal_handler(self, sig, frame):
         """捕获 Ctrl+C 信号"""
@@ -8689,6 +8719,44 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # 窗口已创建 / 已复用
         self._focus_top10_tree(win)
 
+    def _call_concept_top10_win_no_focus(self, code, concept_name):
+        """
+        [FIX] 打开或复用 Top10 窗口，但不强制夺取焦点。
+        供 Qt 线程通过队列调用，避免抢占 Qt 窗口焦点。
+        """
+        if code is None:
+            return
+        
+        # 内部会调用 deiconify / lift, 但我们尽量不再额外 force_focus
+        self.show_concept_top10_window(concept_name, code=code, bring_monitor_status=False)
+        
+        if hasattr(self, "_concept_top10_win") and self._concept_top10_win:
+            win = self._concept_top10_win
+            
+            # --- 更新标题 ---
+            try:
+                win.title(f"{concept_name} 概念前10放量上涨股")
+            except:
+                pass
+
+            # --- 仅做最小化恢复，不强制置顶/聚焦 ---
+            try:
+                if win.state() == "iconic":
+                    win.deiconify()
+                # [REMOVED] win.lift(), win.focus_force(), win.attributes("-topmost")
+            except Exception as e:
+                logger.info(f"窗口状态检查失败(no_focus)： {e}")
+
+            # --- 恢复 Canvas 滚动位置 (不调用 focus_set) ---
+            if hasattr(win, "_canvas_top10"):
+                try:
+                    canvas = win._canvas_top10
+                    yview = canvas.yview()
+                    # [REMOVED] canvas.focus_set()
+                    canvas.yview_moveto(yview[0])
+                except:
+                    pass
+
     def update_all_top10_windows(self):
         """强制刷新所有当前打开的 Concept Top10 窗口数据"""
         # 1. 刷新独立窗口字典
@@ -9168,107 +9236,142 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # --- 鼠标点击事件 ---
         def mouse_click(event):
-            if plot.sceneBoundingRect().contains(event.scenePos()):
-                vb = plot.vb
-                mouse_point = vb.mapSceneToView(event.scenePos())
-                idx = int(round(mouse_point.y()))
+            try:
+                if plot.sceneBoundingRect().contains(event.scenePos()):
+                    vb = plot.vb
+                    mouse_point = vb.mapSceneToView(event.scenePos())
+                    idx = int(round(mouse_point.y()))
 
-                # ✅ 动态读取最新数据
-                data = plot._data_ref
-                concepts = data.get("concepts", [])
-                # 获取 plot 对应的顶层窗口
-                # 调用你的聚焦函数，并传入 win
-                unique_code = data.get("code", '')
-                self.on_monitor_window_focus_pg(unique_code)
+                    # ✅ 动态读取最新数据
+                    data = plot._data_ref
+                    concepts = data.get("concepts", [])
+                    # 获取 plot 对应的顶层窗口
+                    # 调用你的聚焦函数，并传入 win
+                    unique_code = data.get("code", '')
+                    self.tk_dispatch_queue.put(lambda: self.on_monitor_window_focus_pg(unique_code))
 
-                if 0 <= idx < len(concepts):
-                    current_idx["value"] = idx
-                    highlight_bar(idx)
+                    if 0 <= idx < len(concepts):
+                        current_idx["value"] = idx
+                        highlight_bar(idx)
 
-                    if event.button() == QtCore.Qt.MouseButton.LeftButton:
-                        self._call_concept_top10_win(code, concepts[idx])
-                        win.raise_()
-                        win.activateWindow()
+                        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+                            def _action():
+                                # [FIX] 使用不抢焦点的版本
+                                self._call_concept_top10_win_no_focus(code, concepts[idx])
+                                # 确保在 Tkinter 更新后，强制唤起 Qt 窗口并赋予焦点
+                                win.raise_()
+                                win.activateWindow()
+                                win.setFocus()
+                            self.tk_dispatch_queue.put(_action)
 
-                    elif event.button() == QtCore.Qt.MouseButton.RightButton:
-                        concept_text = concepts[idx]
-                        clipboard = QtWidgets.QApplication.clipboard()
-                        # copy_concept_text = f'category.str.contains("{concept_text}")'
-                        copy_concept_text = concept_text
-                        clipboard.setText(copy_concept_text)
+                        elif event.button() == QtCore.Qt.MouseButton.RightButton:
+                            concept_text = concepts[idx]
+                            clipboard = QtWidgets.QApplication.clipboard()
+                            # copy_concept_text = f'category.str.contains("{concept_text}")'
+                            copy_concept_text = concept_text
+                            clipboard.setText(copy_concept_text)
 
-                        from PyQt6.QtCore import QPoint
-                        pos = event.screenPos()
-                        pos_int = QPoint(int(pos.x()), int(pos.y()))
-                        QtWidgets.QToolTip.showText(pos_int, f"已复制: {copy_concept_text}", win)
-                    # ⭐ 未处理的按键继续向下传播
-                    event.ignore()
+                            from PyQt6.QtCore import QPoint
+                            pos = event.screenPos()
+                            pos_int = QPoint(int(pos.x()), int(pos.y()))
+                            QtWidgets.QToolTip.showText(pos_int, f"已复制: {copy_concept_text}", win)
+                        # ⭐ 未处理的按键继续向下传播
+                        event.ignore()
+            except Exception as e:
+                logger.exception(f"Fatal Error in mouse_click: {e}")
+                import traceback
+                traceback.print_exc()
 
         plot.scene().sigMouseClicked.connect(mouse_click)
 
         # --- 鼠标悬停 tooltip ---
         def show_tooltip(event):
-            pos = event
-            vb = plot.vb
-            if plot.sceneBoundingRect().contains(pos):
-                mouse_point = vb.mapSceneToView(pos)
-                idx = int(round(mouse_point.y()))
+            try:
+                pos = event
+                vb = plot.vb
+                if plot.sceneBoundingRect().contains(pos):
+                    mouse_point = vb.mapSceneToView(pos)
+                    idx = int(round(mouse_point.y()))
 
-                # ✅ 动态读取最新数据
-                data = plot._data_ref
-                concepts = data.get("concepts", [])
-                scores = data.get("scores", [])
-                avg_percents = data.get("avg_percents", [])
-                follow_ratios = data.get("follow_ratios", [])
+                    # ✅ 动态读取最新数据
+                    data = plot._data_ref
+                    concepts = data.get("concepts", [])
+                    scores = data.get("scores", [])
+                    avg_percents = data.get("avg_percents", [])
+                    follow_ratios = data.get("follow_ratios", [])
 
-                if 0 <= idx < len(concepts):
-                    msg = (f"概念: {concepts[idx]}\n"
-                           f"平均涨幅: {avg_percents[idx]:.2f}%\n"
-                           f"跟随指数: {follow_ratios[idx]:.2f}\n"
-                           f"综合得分: {scores[idx]:.2f}")
-                    QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), msg, win)
+                    if 0 <= idx < len(concepts):
+                        msg = (f"概念: {concepts[idx]}\n"
+                               f"平均涨幅: {avg_percents[idx]:.2f}%\n"
+                               f"跟随指数: {follow_ratios[idx]:.2f}\n"
+                               f"综合得分: {scores[idx]:.2f}")
+                        QtWidgets.QToolTip.showText(QtGui.QCursor.pos(), msg, win)
+            except Exception as e:
+                pass
+
 
         plot.scene().sigMouseMoved.connect(show_tooltip)
 
         # --- 键盘事件 ---
+        # 必须显式设置 FocusPolicy 才能接收键盘事件
+        win.setFocusPolicy(QtCore.Qt.FocusPolicy.StrongFocus)
+        
         def key_event(event):
-            key = event.key()
-            data = plot._data_ref  # ✅ 动态读取最新数据
-            concepts = data.get("concepts", [])
-            
-            if key == QtCore.Qt.Key.Key_R:
-                self.plot_following_concepts_pg(code, top_n)
-                event.accept()
+            try:
+                key = event.key()
+                data = plot._data_ref  # ✅ 动态读取最新数据
+                concepts = data.get("concepts", [])
+                
+                if key == QtCore.Qt.Key.Key_R:
+                    self.tk_dispatch_queue.put(lambda: self.plot_following_concepts_pg(code, top_n))
+                    event.accept()
 
-            elif key in (QtCore.Qt.Key.Key_Q, QtCore.Qt.Key.Key_Escape):
-                QtCore.QTimer.singleShot(0, win.close)
-                event.accept()
+                elif key in (QtCore.Qt.Key.Key_Q, QtCore.Qt.Key.Key_Escape):
+                    QtCore.QTimer.singleShot(0, win.close)
+                    event.accept()
 
-            elif key == QtCore.Qt.Key.Key_Up:
-                current_idx["value"] = max(0, current_idx["value"] - 1)
-                highlight_bar(current_idx["value"])
-                self._call_concept_top10_win(code, concepts[current_idx["value"]])
-                win.raise_()
-                win.activateWindow()
-                event.accept()
+                elif key == QtCore.Qt.Key.Key_Up:
+                    current_idx["value"] = max(0, current_idx["value"] - 1)
+                    highlight_bar(current_idx["value"])
+                    def _key_action_up():
+                        # [FIX] 使用不抢焦点的版本
+                        self._call_concept_top10_win_no_focus(code, concepts[current_idx["value"]])
+                        win.raise_()
+                        win.activateWindow()
+                        win.setFocus()
+                    self.tk_dispatch_queue.put(_key_action_up)
+                    event.accept()
 
-            elif key == QtCore.Qt.Key.Key_Down:
-                current_idx["value"] = min(len(concepts) - 1, current_idx["value"] + 1)
-                highlight_bar(current_idx["value"])
-                self._call_concept_top10_win(code, concepts[current_idx["value"]])
-                win.raise_()
-                win.activateWindow()
-                event.accept()
+                elif key == QtCore.Qt.Key.Key_Down:
+                    current_idx["value"] = min(len(concepts) - 1, current_idx["value"] + 1)
+                    highlight_bar(current_idx["value"])
+                    def _key_action_down():
+                        # [FIX] 使用不抢焦点的版本
+                        self._call_concept_top10_win_no_focus(code, concepts[current_idx["value"]])
+                        win.raise_()
+                        win.activateWindow()
+                        win.setFocus()
+                    self.tk_dispatch_queue.put(_key_action_down)
+                    event.accept()
 
-            elif key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
-                idx = current_idx["value"]
-                if 0 <= idx < len(concepts):
-                    self._call_concept_top10_win(code, concepts[idx])
-                    win.raise_()
-                    # win.activateWindow()
-                event.accept()
-            # ⭐ 未处理的按键继续向下传播
-            event.ignore()
+                elif key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                    idx = current_idx["value"]
+                    if 0 <= idx < len(concepts):
+                        # [FIX] 使用队列处理 Enter 键，保持 focus 在 Qt 窗口
+                        def _key_action_enter():
+                             self._call_concept_top10_win_no_focus(code, concepts[idx])
+                             win.raise_()
+                             win.activateWindow()
+                             win.setFocus()
+                        self.tk_dispatch_queue.put(_key_action_enter)
+                    event.accept()
+                # ⭐ 未处理的按键继续向下传播
+                event.ignore()
+            except Exception as e:
+                logger.exception(f"Fatal Error in key_event: {e}")
+                import traceback
+                traceback.print_exc()
+
         win.keyPressEvent = key_event
 
         # --- 屏幕/DPI 切换重定位文本 ---
@@ -9437,250 +9540,262 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         5. 支持增量条闪烁。
         6. 自动恢复当天已有数据（NoSQL 存储）。
         """
+        try:
 
-        # === 🧩 调试信息 ===
-        def quick_hash(arr):
-            try:
-                if isinstance(arr, (list, tuple, np.ndarray)):
-                    s = ",".join(map(str, arr[:10]))
-                    return hashlib.md5(s.encode()).hexdigest()[:8]
-                return str(type(arr))
-            except Exception as e:
-                return f"err:{e}"
+            # === 🧩 调试信息 ===
+            def quick_hash(arr):
+                try:
+                    if isinstance(arr, (list, tuple, np.ndarray)):
+                        s = ",".join(map(str, arr[:10]))
+                        return hashlib.md5(s.encode()).hexdigest()[:8]
+                    return str(type(arr))
+                except Exception as e:
+                    return f"err:{e}"
 
-        logger.info(
-            f"[DEBUG {datetime.now():%H:%M:%S}] update_pg_plot 调用 "
-            f"概念数={len(concepts)} thread={threading.current_thread().name} "
-            f"hash_concepts={quick_hash(concepts)} hash_scores={quick_hash(scores)}"
-        )
+            logger.info(
+                f"[DEBUG {datetime.now():%H:%M:%S}] update_pg_plot 调用 "
+                f"概念数={len(concepts)} thread={threading.current_thread().name} "
+                f"hash_concepts={quick_hash(concepts)} hash_scores={quick_hash(scores)}"
+            )
 
-        win = w_dict["win"]
-        plot = w_dict["plot"]
-        texts = w_dict["texts"]
+            win = w_dict["win"]
+            plot = w_dict["plot"]
+            texts = w_dict["texts"]
 
-        now = datetime.now()
-        now_t = int(now.strftime("%H%M"))
-        today = now.date()
+            now = datetime.now()
+            now_t = int(now.strftime("%H%M"))
+            today = now.date()
 
-        force_reset = False
+            force_reset = False
 
-        # 检查是否跨天，跨天就重置阶段标记
-        if getattr(self, "_concept_data_date", None) != today:
-            win._concept_data_date = today
-            win._concept_first_phase_done = False
-            win._concept_second_phase_done = False
+            # 检查是否跨天，跨天就重置阶段标记
+            if getattr(self, "_concept_data_date", None) != today:
+                win._concept_data_date = today
+                win._concept_first_phase_done = False
+                win._concept_second_phase_done = False
 
-        # 第一阶段：9:15~9:24触发一次
-        if cct.get_trade_date_status() and (915 <= now_t <= 924) and not getattr(self, "_concept_first_phase_done", False):
-            win._concept_first_phase_done = True
-            force_reset = True
-            logger.info(f"{today} 触发 9:15~9:24 第一阶段刷新")
+            # 第一阶段：9:15~9:24触发一次
+            if cct.get_trade_date_status() and (915 <= now_t <= 924) and not getattr(self, "_concept_first_phase_done", False):
+                win._concept_first_phase_done = True
+                force_reset = True
+                logger.info(f"{today} 触发 9:15~9:24 第一阶段刷新")
 
-        # 第二阶段：9:25 后触发一次
-        elif cct.get_trade_date_status() and (now_t >= 925) and not getattr(self, "_concept_second_phase_done", False):
-            win._concept_second_phase_done = True
-            force_reset = True
-            logger.info(f"{today} 触发 9:25 第二阶段全局重置")
+            # 第二阶段：9:25 后触发一次
+            elif cct.get_trade_date_status() and (now_t >= 925) and not getattr(self, "_concept_second_phase_done", False):
+                win._concept_second_phase_done = True
+                force_reset = True
+                logger.info(f"{today} 触发 9:25 第二阶段全局重置")
 
-        # --- 初始化多 concept 数据容器 ---
-        if not hasattr(win, "_init_prev_concepts_data") or force_reset:
-            win._init_prev_concepts_data = {}
-        if not hasattr(win, "_prev_concepts_data") or force_reset:
-            win._prev_concepts_data = {}
+            # --- 初始化多 concept 数据容器 ---
+            if not hasattr(win, "_init_prev_concepts_data") or force_reset:
+                win._init_prev_concepts_data = {}
+            if not hasattr(win, "_prev_concepts_data") or force_reset:
+                win._prev_concepts_data = {}
 
-        # --- 全局一次加载当天数据 ---
-        if not hasattr(self, "_concept_data_loaded"):
-            self._concept_data_loaded = True
-            all_data = load_all_concepts_pg_data()  # dict: concept_name -> (init_data, prev_data)
-            self._global_concept_init_data = {}
-            self._global_concept_prev_data = {}
-            for c_name, (init_data, prev_data) in all_data.items():
-                if init_data:
-                    self._global_concept_init_data[c_name] = {k: np.array(v) for k, v in init_data.items()}
-                if prev_data:
-                    self._global_concept_prev_data[c_name] = {k: np.array(v) for k, v in prev_data.items()}
+            # --- 全局一次加载当天数据 ---
+            if not hasattr(self, "_concept_data_loaded"):
+                self._concept_data_loaded = True
+                all_data = load_all_concepts_pg_data()  # dict: concept_name -> (init_data, prev_data)
+                self._global_concept_init_data = {}
+                self._global_concept_prev_data = {}
+                for c_name, (init_data, prev_data) in all_data.items():
+                    if init_data:
+                        self._global_concept_init_data[c_name] = {k: np.array(v) for k, v in init_data.items()}
+                    if prev_data:
+                        self._global_concept_prev_data[c_name] = {k: np.array(v) for k, v in prev_data.items()}
 
-        # --- 窗口初始化各自 concept 数据 ---
-        for i, c_name in enumerate(concepts):
-            if c_name not in win._init_prev_concepts_data:
-                base_data = self._global_concept_init_data.get(c_name)
-                if base_data is None:
-                    base_data = {
-                        "concepts": [c_name],
-                        "avg_percents": np.array([avg_percents[i]]),
-                        "scores": np.array([scores[i]]),
-                        "follow_ratios": np.array([follow_ratios[i]])
-                    }
-                    self._global_concept_init_data[c_name] = base_data
-                win._init_prev_concepts_data[c_name] = base_data
+            # --- 窗口初始化各自 concept 数据 ---
+            for i, c_name in enumerate(concepts):
+                if c_name not in win._init_prev_concepts_data:
+                    base_data = self._global_concept_init_data.get(c_name)
+                    if base_data is None:
+                        base_data = {
+                            "concepts": [c_name],
+                            "avg_percents": np.array([avg_percents[i]]),
+                            "scores": np.array([scores[i]]),
+                            "follow_ratios": np.array([follow_ratios[i]])
+                        }
+                        self._global_concept_init_data[c_name] = base_data
+                    win._init_prev_concepts_data[c_name] = base_data
 
-            if c_name not in win._prev_concepts_data:
-                prev_data = self._global_concept_prev_data.get(c_name)
+                if c_name not in win._prev_concepts_data:
+                    prev_data = self._global_concept_prev_data.get(c_name)
+                    if prev_data is None:
+                        prev_data = {
+                            "concepts": [c_name],
+                            "avg_percents": np.array([avg_percents[i]]),
+                            "scores": np.array([scores[i]]),
+                            "follow_ratios": np.array([follow_ratios[i]])
+                        }
+                        self._global_concept_prev_data[c_name] = prev_data
+                    win._prev_concepts_data[c_name] = prev_data
+
+            # --- 检查是否需要刷新（数据完全一致时跳过） ---
+            data_changed = False
+            for i, c_name in enumerate(concepts):
+                prev_data = win._prev_concepts_data.get(c_name)
                 if prev_data is None:
-                    prev_data = {
-                        "concepts": [c_name],
-                        "avg_percents": np.array([avg_percents[i]]),
-                        "scores": np.array([scores[i]]),
-                        "follow_ratios": np.array([follow_ratios[i]])
-                    }
-                    self._global_concept_prev_data[c_name] = prev_data
-                win._prev_concepts_data[c_name] = prev_data
+                    data_changed = True
+                    break
+                if (abs(prev_data["avg_percents"][0] - avg_percents[i]) > 1e-6 or
+                    abs(prev_data["scores"][0] - scores[i]) > 1e-6 or
+                    abs(prev_data["follow_ratios"][0] - follow_ratios[i]) > 1e-6):
+                    data_changed = True
+                    break
 
-        # --- 检查是否需要刷新（数据完全一致时跳过） ---
-        data_changed = False
-        for i, c_name in enumerate(concepts):
-            prev_data = win._prev_concepts_data.get(c_name)
-            if prev_data is None:
-                data_changed = True
-                break
-            if (abs(prev_data["avg_percents"][0] - avg_percents[i]) > 1e-6 or
-                abs(prev_data["scores"][0] - scores[i]) > 1e-6 or
-                abs(prev_data["follow_ratios"][0] - follow_ratios[i]) > 1e-6):
-                data_changed = True
-                break
+            if not data_changed:
+                logger.info("[DEBUG] 数据未变化，跳过刷新 ✅")
+                return
 
-        if not data_changed:
-            logger.info("[DEBUG] 数据未变化，跳过刷新 ✅")
-            return
+            y = np.arange(len(concepts))
+            max_score = max(scores) if len(scores) > 0 else 1
 
-        y = np.arange(len(concepts))
-        max_score = max(scores) if len(scores) > 0 else 1
+            # --- 清除旧 BarGraphItem ---
+            for item in plot.items[:]:
+                if isinstance(item, pg.BarGraphItem):
+                    plot.removeItem(item)
 
-        # --- 清除旧 BarGraphItem ---
-        for item in plot.items[:]:
-            if isinstance(item, pg.BarGraphItem):
-                plot.removeItem(item)
+            # --- 按新顺序生成 y 轴 ---
+            y = np.arange(len(concepts))
+            max_score = max(scores) if len(scores) > 0 else 1
 
-        # --- 按新顺序生成 y 轴 ---
-        y = np.arange(len(concepts))
-        max_score = max(scores) if len(scores) > 0 else 1
+            # --- 主 BarGraphItem（使用排序后的 scores 和 y） ---
+            color_map = pg.colormap.get('CET-R1')
+            brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
+            main_bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
+            plot.addItem(main_bars)
+            w_dict["bars"] = main_bars
 
-        # --- 主 BarGraphItem（使用排序后的 scores 和 y） ---
-        color_map = pg.colormap.get('CET-R1')
-        brushes = [pg.mkBrush(color_map.map(s)) for s in scores]
-        main_bars = pg.BarGraphItem(x0=np.zeros(len(y)), y=y, height=0.6, width=scores, brushes=brushes)
-        plot.addItem(main_bars)
-        w_dict["bars"] = main_bars
+            # --- 绘制增量条 ---
+            delta_bars_list = []
+            for i, c_name in enumerate(concepts):
+                score = scores[i]
+                base_score = win._init_prev_concepts_data[c_name]["scores"][0]
+                delta = score - base_score
 
-        # --- 绘制增量条 ---
-        delta_bars_list = []
-        for i, c_name in enumerate(concepts):
-            score = scores[i]
-            base_score = win._init_prev_concepts_data[c_name]["scores"][0]
-            delta = score - base_score
+                if abs(delta) < 1e-6:
+                    delta_bars_list.append(None)
+                    continue
 
-            if abs(delta) < 1e-6:
-                delta_bars_list.append(None)
-                continue
+                color = (0, 255, 0, 150) if delta > 0 else (255, 0, 0, 150)
+                x0 = base_score if delta > 0 else score
+                bar = pg.BarGraphItem(x0=x0, y=[y[i]], height=0.6, width=[abs(delta)], brushes=[pg.mkBrush(color)])
+                plot.addItem(bar)
+                delta_bars_list.append(bar)
+            w_dict["delta_bars"] = delta_bars_list
+            # logger.info(f'texts: {texts}')
+            # --- 更新文字显示（顺序保持和 y 对齐） ---
+            app_font = QtWidgets.QApplication.font()
+            font_family = app_font.family()
+            for i, text in enumerate(texts):
+                score = scores[i]
+                delta = score - win._init_prev_concepts_data[concepts[i]]["scores"][0]
 
-            color = (0, 255, 0, 150) if delta > 0 else (255, 0, 0, 150)
-            x0 = base_score if delta > 0 else score
-            bar = pg.BarGraphItem(x0=x0, y=[y[i]], height=0.6, width=[abs(delta)], brushes=[pg.mkBrush(color)])
-            plot.addItem(bar)
-            delta_bars_list.append(bar)
-        w_dict["delta_bars"] = delta_bars_list
-        # logger.info(f'texts: {texts}')
-        # --- 更新文字显示（顺序保持和 y 对齐） ---
-        app_font = QtWidgets.QApplication.font()
-        font_family = app_font.family()
-        for i, text in enumerate(texts):
-            score = scores[i]
-            delta = score - win._init_prev_concepts_data[concepts[i]]["scores"][0]
+                if delta > 0:
+                    arrow = "↑"
+                    color = "green"
+                elif delta < 0:
+                    arrow = "↓"
+                    color = "red"
+                else:
+                    arrow = "→"
+                    color = "gray"
 
-            if delta > 0:
-                arrow = "↑"
-                color = "green"
-            elif delta < 0:
-                arrow = "↓"
-                color = "red"
-            else:
-                arrow = "→"
-                color = "gray"
+                text.setText(f"{arrow}{delta:.1f} score:{score:.2f}\navg:{avg_percents[i]:.2f}%")
+                text.setColor(QtGui.QColor(color))
+                text.setPos(score + 0.03 * max_score, y[i])
+                text.setAnchor((0, 0.5))
 
-            text.setText(f"{arrow}{delta:.1f} score:{score:.2f}\navg:{avg_percents[i]:.2f}%")
-            text.setColor(QtGui.QColor(color))
-            text.setPos(score + 0.03 * max_score, y[i])
-            text.setAnchor((0, 0.5))
-
-        plot.getAxis('left').setTicks([list(zip(y, concepts))])
+            plot.getAxis('left').setTicks([list(zip(y, concepts))])
 
 
 
-        plot._data_ref["concepts"] = concepts
-        plot._data_ref["scores"] = scores
-        plot._data_ref["avg_percents"] = avg_percents
-        plot._data_ref["follow_ratios"] = follow_ratios
-        plot._data_ref["bars"] = main_bars
-        plot._data_ref["brushes"] = brushes
+            plot._data_ref["concepts"] = concepts
+            plot._data_ref["scores"] = scores
+            plot._data_ref["avg_percents"] = avg_percents
+            plot._data_ref["follow_ratios"] = follow_ratios
+            plot._data_ref["bars"] = main_bars
+            plot._data_ref["brushes"] = brushes
 
 
-        # --- 保存当前刷新数据 ---
-        for i, c_name in enumerate(concepts):
-            win._prev_concepts_data[c_name] = {
-                "concepts": [c_name],
-                "avg_percents": np.array([avg_percents[i]]),
-                "scores": np.array([scores[i]]),
-                "follow_ratios": np.array([follow_ratios[i]])
-            }
+            # --- 保存当前刷新数据 ---
+            for i, c_name in enumerate(concepts):
+                win._prev_concepts_data[c_name] = {
+                    "concepts": [c_name],
+                    "avg_percents": np.array([avg_percents[i]]),
+                    "scores": np.array([scores[i]]),
+                    "follow_ratios": np.array([follow_ratios[i]])
+                }
 
-        # --- 增量条闪烁 ---
-        if not hasattr(win, "_flash_timer"):
-            win._flash_state = True
-            win._flash_timer = QtCore.QTimer(win)
+            # --- 增量条闪烁 ---
+            if not hasattr(win, "_flash_timer"):
+                win._flash_state = True
+                win._flash_timer = QtCore.QTimer(win)
 
-            def flash_delta():
-                for bar in w_dict["delta_bars"]:
-                    if bar is not None:
-                        bar.setVisible(win._flash_state)
-                win._flash_state = not win._flash_state
+                def flash_delta():
+                    for bar in w_dict["delta_bars"]:
+                        if bar is not None:
+                            bar.setVisible(win._flash_state)
+                    win._flash_state = not win._flash_state
 
-            win._flash_timer.timeout.connect(flash_delta)
-            win._flash_timer.start(30000)  # 30 秒闪烁一次
+                win._flash_timer.timeout.connect(flash_delta)
+                win._flash_timer.start(30000)  # 30 秒闪烁一次
+
+        except Exception as e:
+            logger.exception(f"Fatal Error in update_pg_plot: {e}")
+            import traceback
+            traceback.print_exc()
 
 
     # --- 定时刷新 ---
     def _refresh_pg_window(self, code, top_n):
-        unique_code = f"{code or ''}_{top_n or ''}"
-        if unique_code not in self._pg_windows:
-            return
-        if not cct.get_work_time():  # 仅工作时间刷新
-            return
-
-        logger.info(f'unique_code : {unique_code}')
-        w_dict = self._pg_windows[unique_code]
-        win = w_dict["win"]
-
-        # --- 获取最新概念数据 ---
-        if code == "总览":
-            tcode, _ = self.get_stock_code_none()
-            top_concepts = self.get_following_concepts_by_correlation(tcode, top_n=top_n)
+        try:
             unique_code = f"{code or ''}_{top_n or ''}"
-            # logger.info(f'_refresh_pg_window concepts : {top_concepts} unique_code: {unique_code} ')
-        else:
-            top_concepts = self.get_following_concepts_by_correlation(code, top_n=top_n)
+            if unique_code not in self._pg_windows:
+                return
+            if not cct.get_work_time():  # 仅工作时间刷新
+                return
 
-        if not top_concepts:
-            logger.info(f"[Auto] 无法刷新 {code} 数据为空")
-            return
+            logger.info(f'unique_code : {unique_code}')
+            w_dict = self._pg_windows[unique_code]
+            win = w_dict["win"]
 
-        # --- 对概念按 score 降序排序 ---
-        top_concepts_sorted = sorted(top_concepts, key=lambda x: x[1], reverse=True)
+            # --- 获取最新概念数据 ---
+            if code == "总览":
+                tcode, _ = self.get_stock_code_none()
+                top_concepts = self.get_following_concepts_by_correlation(tcode, top_n=top_n)
+                unique_code = f"{code or ''}_{top_n or ''}"
+                # logger.info(f'_refresh_pg_window concepts : {top_concepts} unique_code: {unique_code} ')
+            else:
+                top_concepts = self.get_following_concepts_by_correlation(code, top_n=top_n)
 
-        concepts = [c[0] for c in top_concepts_sorted]
-        scores = np.array([c[1] for c in top_concepts_sorted])
-        avg_percents = np.array([c[2] for c in top_concepts_sorted])
-        follow_ratios = np.array([c[3] for c in top_concepts_sorted])
+            if not top_concepts:
+                logger.info(f"[Auto] 无法刷新 {code} 数据为空")
+                return
 
-        # --- 判断概念顺序是否变化 ---
-        old_concepts = w_dict.get("_concepts", [])
-        concept_changed = old_concepts != concepts
-        # --- 调试输出 ---
-        # logger.info(f'_refresh_pg_window top_concepts_sorted : {top_concepts_sorted} unique_code: {unique_code} ')
-        logger.info(f'更新图形: {unique_code} : {concepts}')
-        # --- 更新图形 ---
-        self.update_pg_plot(w_dict, concepts, scores, avg_percents, follow_ratios)
+            # --- 对概念按 score 降序排序 ---
+            top_concepts_sorted = sorted(top_concepts, key=lambda x: x[1], reverse=True)
 
-        logger.info(f"[Auto] 已自动刷新 {code}")
+            concepts = [c[0] for c in top_concepts_sorted]
+            scores = np.array([c[1] for c in top_concepts_sorted])
+            avg_percents = np.array([c[2] for c in top_concepts_sorted])
+            follow_ratios = np.array([c[3] for c in top_concepts_sorted])
+
+            # --- 判断概念顺序是否变化 ---
+            old_concepts = w_dict.get("_concepts", [])
+            concept_changed = old_concepts != concepts
+            # --- 调试输出 ---
+            # logger.info(f'_refresh_pg_window top_concepts_sorted : {top_concepts_sorted} unique_code: {unique_code} ')
+            logger.info(f'更新图形: {unique_code} : {concepts}')
+            # --- 更新图形 ---
+            self.update_pg_plot(w_dict, concepts, scores, avg_percents, follow_ratios)
+
+            logger.info(f"[Auto] 已自动刷新 {code}")
+
+        except Exception as e:
+            logger.exception(f"Fatal Error in _refresh_pg_window: {e}")
+            import traceback
+            traceback.print_exc()
 
 
     def _call_concept_top10_win(self,code,concept_name):
