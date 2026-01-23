@@ -24,7 +24,7 @@ except ImportError:
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
     QPushButton, QLabel, QHeaderView, QAbstractItemView, QMenu,
-    QMessageBox, QDialog, QFrame
+    QMessageBox, QDialog, QFrame, QTabWidget
 )
 from PyQt6.QtCore import Qt, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QAction
@@ -114,13 +114,18 @@ class HotlistPanel(QWidget):
         self._last_check_fingerprint: str = ""
         self._pattern_detector = None  # 语音暂停标记
         
-        # 定时刷新盈亏（每30秒）
+        # 定时刷新盈亏（每 5 秒）
         self.refresh_timer = QTimer(self)
         self.refresh_timer.timeout.connect(self._refresh_pnl)
-        self.refresh_timer.start(30000)
+        self.refresh_timer.start(5000)
         
         # [NEW] 加载信号计数（从数据库）
         self._load_signal_counts()
+    
+    def showEvent(self, event):
+        """窗口显示时立即刷新"""
+        super().showEvent(event)
+        self._refresh_pnl()
     
     def _init_db(self):
         """确保数据库表存在，并扩展字段"""
@@ -239,59 +244,44 @@ class HotlistPanel(QWidget):
         
         layout.addWidget(self.header)
         
-        # 表格
-        self.table = QTableWidget()
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(["代码", "名称", "加入价", "现价", "盈亏%", "分组", "时间"])
-        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self._on_context_menu)
-        self.table.cellDoubleClicked.connect(self._on_double_click)
-        self.table.cellClicked.connect(self._on_click)
         
-        # [NEW] 启用列排序功能
-        self.table.setSortingEnabled(True)
-        
-        # [NEW] 添加键盘导航联动（上下键切换时也触发股票选择）
-        self.table.currentCellChanged.connect(self._on_current_cell_changed)
-        
-        # 表头设置
-        header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents) # Code
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)           # Name (Stretch to fill)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # Add Price
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # Cur Price
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # PnL
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)            # Group
-        self.table.setColumnWidth(5, 50)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)            # Time
-        self.table.setColumnWidth(6, 80)                                        # [MODIFIED] 增大时间列宽度以便完整显示
-        
-        self.table.verticalHeader().setVisible(False)
-        self.table.setStyleSheet("""
-            QTableWidget {
-                background-color: #1e1e1e;
-                color: #ddd;
-                border: none;
-                font-size: 10pt;
+        # --- 使用 TabWidget ---
+        self.tabs = QTabWidget()
+        self.tabs.setStyleSheet("""
+            QTabWidget::pane {
+                border: 1px solid #444;
+                background: #1e1e1e;
             }
-            QTableWidget::item {
-                padding: 3px;
+            QTabBar::tab {
+                background: #2d2d2d;
+                color: #888;
+                padding: 5px 10px;
+                border: 1px solid #444;
+                border-bottom: none;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
             }
-            QTableWidget::item:selected {
-                background-color: #444;
+            QTabBar::tab:selected {
+                background: #1e1e1e;
+                color: #FFD700;
+                border-bottom: 1px solid #1e1e1e;
             }
-            QHeaderView::section {
-                background-color: #2a2a2a;
-                color: #aaa;
-                border: none;
-                padding: 4px;
-                font-size: 9pt;
+            QTabBar::tab:hover {
+                background: #333;
             }
         """)
         
-        layout.addWidget(self.table)
+        # Tab 1: Hotlist
+        self.hotlist_widget = QWidget()
+        self._init_hotlist_ui()
+        self.tabs.addTab(self.hotlist_widget, "🔥 Hotlist")
+        
+        # Tab 2: Follow Queue
+        self.follow_widget = QWidget()
+        self._init_follow_queue_ui()
+        self.tabs.addTab(self.follow_widget, "📋 Follow Queue")
+        
+        layout.addWidget(self.tabs)
         
         # 状态栏 + 暂停语音按钮
         status_bar = QHBoxLayout()
@@ -339,6 +329,98 @@ class HotlistPanel(QWidget):
             self.pause_voice_btn.setText("暂停语音")
             self.pause_voice_btn.setStyleSheet("")
             logger.info(f"🔊 Hotlist Voice RESUMED (Instance {id(self)})")
+
+    def _init_hotlist_ui(self):
+        """初始化热点列表 UI (Tab 1 content)"""
+        layout = QVBoxLayout(self.hotlist_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # 表格
+        self.table = QTableWidget()
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(["代码", "名称", "加入价", "现价", "盈亏%", "分组", "时间"])
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._on_context_menu)
+        self.table.cellDoubleClicked.connect(self._on_double_click)
+        self.table.cellClicked.connect(self._on_click)
+        
+        # [NEW] 启用列排序功能
+        self.table.setSortingEnabled(True)
+        
+        # [NEW] 添加键盘导航联动（上下键切换时也触发股票选择）
+        self.table.currentCellChanged.connect(self._on_current_cell_changed)
+        
+        # 表头设置
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents) # Code
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)           # Name (Stretch to fill)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # Add Price
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # Cur Price
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # PnL
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)            # Group
+        self.table.setColumnWidth(5, 50)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)            # Time
+        self.table.setColumnWidth(6, 80)                                        
+        
+        self.table.verticalHeader().setVisible(False)
+        self.table.setStyleSheet("""
+            QTableWidget {
+                background-color: #1e1e1e;
+                color: #ddd;
+                border: none;
+                font-size: 10pt;
+            }
+            QTableWidget::item {
+                padding: 3px;
+            }
+            QTableWidget::item:selected {
+                background-color: #444;
+            }
+            QHeaderView::section {
+                background-color: #2a2a2a;
+                color: #aaa;
+                border: none;
+                padding: 4px;
+                font-size: 9pt;
+            }
+        """)
+        
+        layout.addWidget(self.table)
+
+    def _init_follow_queue_ui(self):
+        """初始化跟单队列 UI (Tab 2 content)"""
+        layout = QVBoxLayout(self.follow_widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        self.follow_table = QTableWidget()
+        cols = ["状态", "代码", "名称", "信号类型", "P", "策略", "入场", "时间"]
+        self.follow_table.setColumnCount(len(cols))
+        self.follow_table.setHorizontalHeaderLabels(cols)
+        self.follow_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.follow_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.follow_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.follow_table.customContextMenuRequested.connect(self._on_follow_context_menu)
+        self.follow_table.cellDoubleClicked.connect(self._on_follow_double_click)
+        
+        header = self.follow_table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents) # Status
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents) # Code
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)          # Name
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # Signal Type
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)            # Priority
+        self.follow_table.setColumnWidth(4, 30)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents) # Strategy
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents) # Entry
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents) # Time
+
+        self.follow_table.verticalHeader().setVisible(False)
+        self.follow_table.setStyleSheet(self.table.styleSheet()) # Reuse style
+        
+        layout.addWidget(self.follow_table)
 
     def _load_from_db(self):
         """从数据库加载热点列表"""
@@ -531,11 +613,135 @@ class HotlistPanel(QWidget):
             
             if price_map:
                 self.update_prices(price_map)
-                logger.info(f"✅ 已刷新 {len(price_map)} 只股票的盈亏数据")
-            else:
-                logger.warning("⚠️ 未找到匹配的股票数据")
+                logger.debug(f"✅ Hotlist PnL refreshed ({len(price_map)} items)")
+            
+            # [NEW] 刷新跟单队列
+            self._update_follow_queue()
+            
         else:
-            logger.warning("⚠️ 无法获取主窗口数据，请确保主窗口已加载数据")
+            # 如果没有主窗口数据，也尝试刷新跟单队列（至少显示列表）
+            self._update_follow_queue()
+            logger.warning("⚠️ 无法获取主窗口数据，仅刷新跟单列表")
+
+    def _update_follow_queue(self):
+        """[Phase 2] 刷新跟单队列可视化"""
+        try:
+            from trading_hub import get_trading_hub
+            hub = get_trading_hub()
+            df = hub.get_follow_queue_df()
+            
+            if df.empty:
+                self.follow_table.setRowCount(0)
+                return
+
+            # 过滤非活跃 (可选)
+            # df = df[df['status'].isin(['TRACKING', 'READY', 'ENTERED'])]
+            # 按时间倒序
+            df = df.sort_values(by='updated_at', ascending=False)
+
+            self.follow_table.setRowCount(len(df))
+            
+            for row_idx, row in enumerate(df.itertuples()):
+                # cols = ["状态", "代码", "名称", "信号类型", "P", "策略", "入场", "时间"]
+                
+                status_item = QTableWidgetItem(str(row.status))
+                # 状态着色
+                if row.status == 'TRACKING':
+                    status_item.setForeground(QColor('#FFD700')) # Gold
+                elif row.status == 'ENTERED':
+                    status_item.setForeground(QColor('#00FF00')) # Green
+                
+                self.follow_table.setItem(row_idx, 0, status_item)
+                self.follow_table.setItem(row_idx, 1, QTableWidgetItem(str(row.code)))
+                self.follow_table.setItem(row_idx, 2, QTableWidgetItem(str(row.name)))
+                self.follow_table.setItem(row_idx, 3, QTableWidgetItem(str(row.signal_type)))
+                
+                p_item = QTableWidgetItem(str(row.priority))
+                p_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.follow_table.setItem(row_idx, 4, p_item)
+                
+                self.follow_table.setItem(row_idx, 5, QTableWidgetItem(str(row.entry_strategy)))
+                
+                # 入场 (策略入场点 / 实际入场价)
+                entry_txt = f"{row.entry_price:.2f}" if getattr(row, 'entry_price', 0) > 0 else f"MA5" # 简单显示
+                self.follow_table.setItem(row_idx, 6, QTableWidgetItem(entry_txt))
+                
+                time_str = str(row.updated_at).split(' ')[-1] if row.updated_at else ""
+                self.follow_table.setItem(row_idx, 7, QTableWidgetItem(time_str))
+
+        except Exception as e:
+            logger.error(f"Error updating follow queue UI: {e}")
+
+    def _on_follow_double_click(self, row, col):
+        """跟单队列双击：跳转K线"""
+        try:
+            code_item = self.follow_table.item(row, 1)
+            name_item = self.follow_table.item(row, 2)
+            if code_item and name_item:
+                code = code_item.text()
+                name = name_item.text()
+                self.stock_selected.emit(code, name)
+                # 同时也触发 item_double_clicked 以显示弹窗 (可选)
+                # self.item_double_clicked.emit(code, name, 0.0) 
+        except Exception as e:
+            logger.error(f"Follow double click error: {e}")
+
+    def _on_follow_context_menu(self, pos):
+        """跟单队列右键菜单"""
+        row = self.follow_table.currentRow()
+        if row < 0: return
+        
+        code_item = self.follow_table.item(row, 1)
+        name_item = self.follow_table.item(row, 2)
+        if not code_item: return
+        
+        code = code_item.text()
+        name = name_item.text() if name_item else ""
+        
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #2d2d2d;
+                color: #ddd;
+                border: 1px solid #555;
+            }
+            QMenu::item {
+                padding: 5px 20px;
+            }
+            QMenu::item:selected {
+                background-color: #444;
+            }
+        """)
+        
+        # 动作：取消跟踪 (标记为 CANCELLED)
+        action_cancel = QAction("🚫 不再跟踪 (Cancel)", self)
+        action_cancel.triggered.connect(lambda: self._update_follow_status(code, "CANCELLED"))
+        menu.addAction(action_cancel)
+        
+        # 动作：手动入场 (标记为 ENTERED)
+        action_entered = QAction("✅ 标记为已入场 (Entered)", self)
+        action_entered.triggered.connect(lambda: self._update_follow_status(code, "ENTERED"))
+        menu.addAction(action_entered)
+
+        menu.addSeparator()
+
+        # 动作：强制移除 (Physical Delete - Optional, currently use CANCELLED as soft delete)
+        # action_delete = QAction("🗑️ 彻底删除", self)
+        
+        menu.exec(self.follow_table.mapToGlobal(pos))
+
+    def _update_follow_status(self, code, new_status):
+        """更新跟单状态并刷新"""
+        try:
+            from trading_hub import get_trading_hub
+            hub = get_trading_hub()
+            if hub.update_follow_status(code, new_status, notes="Manual update"):
+                logger.info(f"Updated follow status for {code} -> {new_status}")
+                self._update_follow_queue() # 立即刷新界面
+            else:
+                logger.error(f"Failed to update status for {code}")
+        except Exception as e:
+            logger.error(f"Update follow status error: {e}")
     
     def _clear_exited(self):
         """清空已退出的记录"""

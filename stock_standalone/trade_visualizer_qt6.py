@@ -5763,6 +5763,18 @@ class MainWindow(QMainWindow, WindowMixin):
                         except ValueError:
                             pass
                 code = real_code
+        
+        # [NEW] Handle specific commands from Monitor (e.g. key bindings)
+        if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
+            if code == 'TOGGLE_HOTLIST':
+                if self.hotlist_panel.isVisible():
+                    self.hotlist_panel.hide()
+                else:
+                    self.hotlist_panel.show()
+                    self.hotlist_panel.raise_()
+                    self.hotlist_panel.activateWindow()
+                return
+
         logger.debug(f'code: {code} :kwargs :{kwargs}')
         # --- 解析可扩展参数 ---
         params = kwargs.copy()
