@@ -20,7 +20,9 @@ from intraday_decision_engine import IntradayDecisionEngine
 from risk_engine import RiskEngine
 from trading_logger import TradingLogger
 from JohnsonUtil import commonTips as cct
+from JohnsonUtil import commonTips as cct
 from JohnsonUtil import LoggerFactory
+from trading_hub import get_trading_hub, TrackedSignal  # [NEW] Import TradingHub
 
 import logging
 logger: logging.Logger = LoggerFactory.getLogger(name="stock_live_strategy")
@@ -47,6 +49,14 @@ try:
 except ImportError:
     HAS_PATTERN_DETECTOR = False
     logger.warning("IntradayPatternDetector not found.")
+
+# [NEW] 仓位状态机
+try:
+    from position_phase_engine import PositionPhaseEngine, TradePhase
+    HAS_PHASE_ENGINE = True
+except ImportError:
+    HAS_PHASE_ENGINE = False
+    logger.warning("PositionPhaseEngine not found.")
 
 try:
     import pythoncom
@@ -456,6 +466,10 @@ class StockLiveStrategy:
         self.ext_data_55188: pd.DataFrame = pd.DataFrame()
         self.last_ext_update_ts: float = 0
         
+        # --- [NEW] 跟单队列缓存 (Follow Queue Cache) ---
+        self.follow_queue_cache: List[TrackedSignal] = []
+        self.last_follow_sync_ts: float = 0
+        
         # --- 自动交易相关状态初始化 ---
         self.auto_loop_enabled = False
         self.batch_state = "IDLE"
@@ -512,6 +526,13 @@ class StockLiveStrategy:
             )
             self.pattern_detector.on_pattern = self._on_pattern_detected
             logger.info("IntradayPatternDetector initialized.")
+
+        # --- [NEW] 仓位状态机引擎 ---
+        if HAS_PHASE_ENGINE:
+            self.phase_engine = PositionPhaseEngine()
+            logger.info("PositionPhaseEngine initialized.")
+        else:
+            self.phase_engine = None
 
         # --- Automatic Trading Loop State ---
         # self.auto_loop_enabled = False (已经在上方初始化)
@@ -1000,8 +1021,8 @@ class StockLiveStrategy:
         # 2. 规则引擎监控 (Existing rules)
         # self._check_risk_control(df_all)
         
-        # [Phase 2] 入场监控：检查跟单队列
-        self._monitor_follow_queue(df_all)
+        # [Phase 2] 入场监控：已整合至 _check_strategies -> _process_follow_queue
+        # self._monitor_follow_queue(df_all)
 
         # 3. 策略判定
         self._check_strategies(df_all, resample=resample)
@@ -1442,80 +1463,90 @@ class StockLiveStrategy:
             logger.error(f"Error in _scan_rank_for_follow: {e}")
 
 
-    def _monitor_follow_queue(self, df: pd.DataFrame) -> None:
+        except Exception as e:
+            logger.error(f"Error in _scan_rank_for_follow: {e}")
+
+    def _process_follow_queue(self, df: pd.DataFrame, resample='d'):
         """
-        [Phase 2] 入场监控：遍历跟单队列，检查是否满足入场条件
+        [Phase 2] 处理跟单队列：支持竞价、回踩、突破等多种策略
         """
-        if df is None or df.empty:
+        if not self.follow_queue_cache:
             return
 
-        try:
-            from trading_hub import get_trading_hub
-            hub = get_trading_hub()
+        # 仅在日线周期检查
+        if resample != 'd':
+            return
             
-            # 获取所有处于 TRACKING / READY 状态的跟单
-            queue_df = hub.get_follow_queue_df()
-            if queue_df.empty:
-                return
-                
-            active_queue = queue_df[queue_df['status'].isin(['TRACKING', 'READY'])]
+        now_time = datetime.now()
+        current_time_str = now_time.strftime("%H:%M:%S")
+        is_auction_time = "09:24:00" <= current_time_str <= "09:30:00"
+        is_trading_time = ("09:30:00" <= current_time_str <= "11:30:00") or \
+                          ("13:00:00" <= current_time_str <= "14:57:00")
             
-            if active_queue.empty:
-                return
-                
-            now_time = datetime.now()
-            current_time_str = now_time.strftime("%H:%M:%S")
-            is_auction_time = "09:24:00" <= current_time_str <= "09:30:00"
-            is_trading_time = ("09:30:00" <= current_time_str <= "11:30:00") or \
-                              ("13:00:00" <= current_time_str <= "14:57:00")
+        for signal in list(self.follow_queue_cache): # Iterate copy to allow removal
+            code = signal.code
+            if code not in df.index:
+                continue
             
-            for index, item in active_queue.iterrows():
-                code = str(item['code']).zfill(6)
-                
-                # 如果当前 DataFrame 中没有该股票数据，尝试获取单股数据
-                if code not in df.index:
-                    continue
-                    
+            try:
                 row = df.loc[code]
-                price = float(row.get('close', row.get('trade', 0)))
+                current_price = float(row.get('trade', 0.0))
+                if current_price <= 0: continue
+                
+                volume = float(row.get('volume', 0.0))
                 pre_close = float(row.get('lastp1d', 0))
                 ma5 = float(row.get('ma5d', 0))
                 
-                if price <= 0:
-                    continue
-                
-                pct = (price - pre_close) / pre_close * 100 if pre_close > 0 else 0
-                entry_strategy = str(item.get('entry_strategy', ''))
-                
+                pct = (current_price - pre_close) / pre_close * 100 if pre_close > 0 else 0
+                entry_strategy = str(signal.entry_strategy)
+
                 triggered = False
                 trigger_msg = ""
+                action_text = "关注"
                 
-                # --- 策略 1: 竞价买入 (09:25-09:30) ---
-                if entry_strategy == "竞价买入" and is_auction_time:
-                    # 高开且未大幅高开 (>0% and <5%)
+                # --- A. 竞价策略 ---
+                if "竞价" in entry_strategy and is_auction_time:
+                    # 高开 0~5%
                     if 0 < pct < 5.0:
                         triggered = True
-                        trigger_msg = f"竞价达标 高开{pct:.2f}%"
+                        trigger_msg = f"竞价高开{pct:.2f}%"
+                        action_text = "准备买入"
                 
-                # --- 策略 2: 回踩 MA5 启动 (盘中) ---
-                elif entry_strategy == "回踩MA5" and is_trading_time:
+                # --- B. 回踩策略 ---
+                elif "回踩" in entry_strategy and is_trading_time:
                     if ma5 > 0:
-                        ma5_bias = (price - ma5) / ma5
-                        # 价格在 MA5 附近 (-1% ~ 2%)
-                        if -0.01 <= ma5_bias <= 0.02:
+                        bias = (current_price - ma5) / ma5
+                        if -0.015 <= bias <= 0.015: # 误差 1.5%
                             triggered = True
-                            trigger_msg = f"回踩MA5到位 偏离{ma5_bias:.2%}"
+                            trigger_msg = f"回踩MA5,偏离{bias:.2%}"
+                            action_text = "低吸机会"
+
+                # --- C. 突破目标价 (通用) ---
+                if not triggered and signal.target_price_high > 0 and current_price >= signal.target_price_high:
+                    triggered = True
+                    trigger_msg = f"突破目标价 {signal.target_price_high}"
+                    action_text = "突破确认"
 
                 if triggered:
-                    # 语音播报
-                    action_text = "准备买入" if entry_strategy == "竞价买入" else "关注入场"
-                    msg = f"跟单提醒: {item['name']} {trigger_msg} {action_text}"
-                    
+                    # 1. 语音提醒
+                    msg = f"跟单{action_text}: {signal.name} {trigger_msg}"
                     self.voice_announcer.announce(msg)
-                    logger.info(f"🚀 [Entry Alert] {code} {item['name']}: {trigger_msg}")
+                    logger.info(f"🚀 [Follow Alert] {code} {signal.name} {trigger_msg}")
                     
-        except Exception as e:
-            logger.error(f"Error in _monitor_follow_queue: {e}")
+                    # 2. 更新状态 -> READY / ENTERED?
+                    hub = get_trading_hub()
+                    new_status = "READY"
+                    hub.update_follow_status(code, new_status, notes=f"Triggered: {trigger_msg}")
+                    
+                    # 3. 立即从缓存移除 (防止重复报警)
+                    # 如果需要持续追踪直到成交，可以改为更新缓存状态而不是移除
+                    # 这里选择移除，避免刷屏
+                    self.follow_queue_cache.remove(signal)
+            
+            except Exception as e:
+                logger.error(f"Process follow queue error {code}: {e}")
+
+    # _monitor_follow_queue removed - functionality merged into _process_follow_queue
 
 
     def _check_strategies(self, df, resample='d'):
@@ -1523,6 +1554,8 @@ class StockLiveStrategy:
             # --- [新增] 全局交易日判断：非交易日不执行策略逻辑 ---
             # if not cct.get_trade_date_status():
             #     return
+
+            now = time.time()  # [FIX] Initialize now variable early
 
             # 从数据库同步实时持仓信息 (按 代码+周期 映射以支持多周期持仓隔离)
             trades_info = self.trading_logger.get_trades()
@@ -1548,6 +1581,18 @@ class StockLiveStrategy:
                             self.last_ext_update_ts = ext_status.get('last_update', time.time())
                 except Exception as e:
                     logger.debug(f"Sync full 55188 data failed: {e}")
+
+            # --- [NEW] 同步跟单队列 (每5秒同步一次) ---
+            if now - self.last_follow_sync_ts > 5:
+                try:
+                    hub = get_trading_hub()
+                    self.follow_queue_cache = hub.get_follow_queue(status="TRACKING")
+                    self.last_follow_sync_ts = now
+                except Exception as e:
+                    logger.error(f"Sync follow queue failed: {e}")
+
+            # --- [NEW] 检查跟单队列触发 ---
+            self._process_follow_queue(df, resample)
 
             # 过滤对应周期的监控项
             monitored_keys = self._monitored_stocks.keys()
@@ -1845,12 +1890,104 @@ class StockLiveStrategy:
                                     snap['rt_emotion'] += 15  # 加分
                                     snap['v_shape_triggered'] = True
                                     logger.info(f"V-Shape Detected {code}: Drop {drop:.1%} Rebound {rebound:.1%}")
+                                    
+                                    # [NEW] Add to Follow Queue
+                                    try:
+                                        from trading_hub import get_trading_hub, TrackedSignal
+                                        hub = get_trading_hub()
+                                        today_str = datetime.now().strftime("%Y-%m-%d")
+                                        ts = TrackedSignal(
+                                            code=code, 
+                                            name=data.get('name', ''),
+                                            signal_type='V_SHAPE',
+                                            detected_date=today_str,
+                                            detected_price=p_curr,
+                                            entry_strategy='回踩MA5', # V-Shape often follows up with pullback or momentum
+                                            status='TRACKING',
+                                            priority=9,
+                                            source='RealTime',
+                                            notes=f"V-Shape Drop:{drop:.1%} Rebound:{rebound:.1%}"
+                                        )
+                                        hub.add_to_follow_queue(ts)
+                                        logger.info(f"📋 Auto-added V-Shape to Follow Queue: {code}")
+                                    except Exception as e:
+                                        logger.error(f"Failed to add V-Shape to queue: {e}")
 
                     except Exception as e:
                         logger.debug(f"Realtime service fetch error: {e}")
 
                 # ---------- 决策引擎 ----------
                 decision = self.decision_engine.evaluate(row, snap)
+
+                # --- [NEW] P0.6 仓位状态机逻辑 ---
+                if self.phase_engine:
+                    try:
+                        # 1. 获取当前状态 (从 snap 恢复)
+                        curr_phase_str = snap.get('trade_phase', 'IDLE')
+                        try:
+                            curr_phase = TradePhase(curr_phase_str)
+                        except ValueError:
+                            curr_phase = TradePhase.IDLE
+                            
+                        # 2. 评估新状态
+                        new_phase, phase_reason = self.phase_engine.evaluate_phase(code, row, snap, curr_phase)
+                        
+                        # 3. 状态变更处理
+                        if new_phase != curr_phase:
+                            logger.info(f"🔄 [Phase Change] {code} {curr_phase.value} -> {new_phase.value} ({phase_reason})")
+                            snap['trade_phase'] = new_phase.value
+                            snap['phase_reason'] = phase_reason
+                            
+                            # Log change
+                            messages.append(("RULE", f"状态变更: {curr_phase.value}->{new_phase.value} {phase_reason}"))
+                            
+                            # [Visualization] Persist Phase to DB (via Notes) for HotlistPanel
+                            try:
+                                from trading_hub import get_trading_hub
+                                hub = get_trading_hub()
+                                # Prepend Phase to notes
+                                new_note = f"[{new_phase.value}] {phase_reason}"
+                                hub.update_follow_status(code, notes=new_note)
+                                snap['phase_synced_ts'] = time.time()
+                            except Exception as db_e:
+                                logger.error(f"Failed to update phase to DB: {db_e}")
+                            
+                            # 如果是 EXIT，强制叠加卖出信号
+                            if new_phase == TradePhase.EXIT:
+                                decision['action'] = "卖出"
+                                decision['reason'] = f"状态机离场: {phase_reason}"
+                                decision['position'] = 0.0
+                        else:
+                            # Periodic Sync (Heartbeat for Phase Visualization)
+                            last_sync = snap.get('phase_synced_ts', 0)
+                            if time.time() - last_sync > 60: # Every 60s
+                                try:
+                                    from trading_hub import get_trading_hub
+                                    hub = get_trading_hub()
+                                    # Sync current phase if not synced recently
+                                    new_note = f"[{new_phase.value}] {phase_reason}"
+                                    # Use update_follow_status but only if different? 
+                                    # To avoid DB spam, we blindly update notes timestamp
+                                    hub.update_follow_status(code, notes=new_note)
+                                    snap['phase_synced_ts'] = time.time()
+                                except Exception: pass
+
+                        # 4. 根据状态获取目标仓位
+                        target_pos_ratio = self.phase_engine.get_target_position(new_phase)
+                        # 将状态机的建议注入到 decision (作为参考或覆盖)
+                        # 如果 decision 原本是 HOLD，但状态机说 SCOUT(10%)，是否要买入?
+                        # 策略融合：以状态机为指导上限
+                        
+                        # Case A: 状态机处于持有阶段 (SCOUT/ACC/LAUNCH/SURGE)
+                        if new_phase not in (TradePhase.IDLE, TradePhase.EXIT, TradePhase.TOP_WATCH):
+                             # 如果 decision 还是 IDLE/HOLD，检查是否有必要补仓
+                             # 暂且只用来做风控上限约束
+                             pass
+                        
+                        snap['phase_target_pos'] = target_pos_ratio
+
+                    except Exception as e:
+                        logger.error(f"Phase engine error {code}: {e}")
 
                 # --- ⭐ 影子策略并行运行 (Dual Strategy Optimization) ---
                 shadow_decision = self.shadow_engine.evaluate(row, snap)

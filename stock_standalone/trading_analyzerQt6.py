@@ -62,7 +62,7 @@ class TradingGUI(QWidget):
 
         self.view_combo = QComboBox()
         self.view_combo.addItems([
-            "实时指标详情","股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史"
+            "实时指标详情","股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史", "策略胜率排行"
         ])
         self.view_combo.currentTextChanged.connect(self.refresh_table)
         self.top_layout.addWidget(QLabel("视图选择:"))
@@ -144,7 +144,7 @@ class TradingGUI(QWidget):
         
         if text == "交易/选股数据库":
             self.view_combo.addItems([
-                "实时指标详情", "股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史"
+                "实时指标详情", "股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史", "策略胜率排行"
             ])
         else:
             self.view_combo.addItems([
@@ -254,7 +254,15 @@ class TradingGUI(QWidget):
                                 'win', 'red', 'gren', 'structure']
                 if not df.empty:
                     existing_cols = [c for c in indicator_cols if c in df.columns]
+                if not df.empty:
+                    existing_cols = [c for c in indicator_cols if c in df.columns]
                     df = df[existing_cols]
+            elif view == "策略胜率排行":
+                # Prefer Hub data
+                df = self.analyzer.get_hub_strategy_stats()
+                if df.empty:
+                     # Fallback to stock performance if no specific strategy data
+                     df = self.analyzer.stock_performance()
         else:
             # 实时策略信号库
             if view == "所有信号流":
@@ -356,7 +364,11 @@ class TradingGUI(QWidget):
             'win': '胜率', 'red': '阳线', 'gren': '阴线', 'structure': '结构',
             # 新增信号库列名
             'signal_type': '信号类型', 'timestamp': '时间戳', 'source': '来源', 'priority': '优先级',
-            'score': '评分', 'created_date': '创建日期', 'evaluated': '已评估', 'count': '计数'
+            'score': '评分', 'created_date': '创建日期', 'evaluated': '已评估', 'count': '计数',
+            # 新增策略统计列名
+            'strategy_name': '策略名称', 'total_trades': '交易数', 'win_rate': '胜率', 
+            'avg_profit': '平均盈利', 'max_drawdown': '最大回撤', 'sharpe': '夏普比率', 
+            'profit_factor': '盈亏比'
         }
         display_cols = [col_mapping.get(c, c) for c in df.columns]
         self.table.setHorizontalHeaderLabels(display_cols)
