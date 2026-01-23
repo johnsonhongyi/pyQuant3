@@ -19,8 +19,10 @@ from concurrent.futures import ThreadPoolExecutor
 from intraday_decision_engine import IntradayDecisionEngine
 from risk_engine import RiskEngine
 from trading_logger import TradingLogger
+from JSONData import sina_data
+from JSONData import tdx_data_Day as tdd
 from JohnsonUtil import commonTips as cct
-from JohnsonUtil import commonTips as cct
+from JohnsonUtil import johnson_cons as ct
 from JohnsonUtil import LoggerFactory
 from trading_hub import get_trading_hub, TrackedSignal  # [NEW] Import TradingHub
 from alert_manager import get_alert_manager # [NEW] Import AlertManager
@@ -281,7 +283,7 @@ class StockLiveStrategy:
         self._market_win_rate_ts: float
         self.scan_hot_concepts_status: bool
         self.shadow_engine: IntradayDecisionEngine
-
+        self._sina_data = sina_data.Sina()
         self._voice = VoiceAnnouncer()
         self.voice_enabled = voice_enabled
         self._monitored_stocks = {} 
@@ -1167,9 +1169,7 @@ class StockLiveStrategy:
             return
         
         try:
-            from trading_hub import get_trading_hub, TrackedSignal
             hub = get_trading_hub()
-            
             today_str = datetime.now().strftime('%Y-%m-%d')
             
             # 获取今日已入队的股票代码
@@ -1557,10 +1557,10 @@ class StockLiveStrategy:
                     self.last_follow_sync_ts = now
                 except Exception as e:
                     logger.error(f"Sync follow queue failed: {e}")
-
+                    import traceback
+                    traceback.print_exc()
             # --- [NEW] 检查跟单队列触发 ---
             self._process_follow_queue(df, resample)
-
             # 过滤对应周期的监控项
             monitored_keys = self._monitored_stocks.keys()
             filtered_keys = [k for k in monitored_keys if self._monitored_stocks[k].get('resample', 'd') == resample]
@@ -1665,7 +1665,7 @@ class StockLiveStrategy:
                 # --- 📅 日线形态检测 ---
                 if hasattr(self, 'daily_pattern_detector'):
                     try:
-                        self._update_daily_history_cache() # 尝试刷新全量缓存
+                        self._update_daily_history_cache(code,resample) # 尝试刷新全量缓存
                         prev_rows = self.daily_history_cache.get(code)
                         self.daily_pattern_detector.update(
                             code=code,
@@ -1673,9 +1673,11 @@ class StockLiveStrategy:
                             current_row=row,
                             prev_rows=prev_rows
                         )
+
                     except Exception as e:
                         logger.debug(f"Daily pattern detect error for {code}: {e}")
-
+                        import traceback
+                        traceback.print_exc()
 
                 # --- 注入板块与系统风险状态 ---
                 # 从 _last_sector_status 中获取
@@ -1875,7 +1877,6 @@ class StockLiveStrategy:
                                     
                                     # [NEW] Add to Follow Queue
                                     try:
-                                        from trading_hub import get_trading_hub, TrackedSignal
                                         hub = get_trading_hub()
                                         today_str = datetime.now().strftime("%Y-%m-%d")
                                         ts = TrackedSignal(
@@ -1925,7 +1926,6 @@ class StockLiveStrategy:
                             
                             # [Visualization] Persist Phase to DB (via Notes) for HotlistPanel
                             try:
-                                from trading_hub import get_trading_hub
                                 hub = get_trading_hub()
                                 # Prepend Phase to notes
                                 new_note = f"[{new_phase.value}] {phase_reason}"
@@ -1944,7 +1944,6 @@ class StockLiveStrategy:
                             last_sync = snap.get('phase_synced_ts', 0)
                             if time.time() - last_sync > 60: # Every 60s
                                 try:
-                                    from trading_hub import get_trading_hub
                                     hub = get_trading_hub()
                                     # Sync current phase if not synced recently
                                     new_note = f"[{new_phase.value}] {phase_reason}"
@@ -2676,39 +2675,50 @@ class StockLiveStrategy:
         except Exception as e:
             logger.error(f"Pattern callback error: {e}")
 
-    def _update_daily_history_cache(self):
+    def _update_daily_history_cache(self,code=None,resample='d'):
         """
         批量更新监控股票的日线历史缓存
         """
         if not hasattr(self, 'daily_pattern_detector'):
             return
-            
-        now = time.time()
-        # 每 10 分钟更新一次
-        if now - self.last_daily_history_refresh < 600:
-            return
-            
-        codes = list(self._monitored_stocks.keys())
-        # 过滤掉带采样的 key (e.g., '000001_5')
-        codes = [c for c in codes if '_' not in c]
         
+        codes = []
+        now = time.time()
+        if not hasattr(self, '_daily_hist_cache_status'):
+            self._daily_hist_cache_status = True
+            # # 每 10 分钟更新一次
+            # if now - self.last_daily_history_refresh < 600:
+            #     return
+            codes = list(self._monitored_stocks.keys())
+            # 过滤掉带采样的 key (e.g., '000001_5')
+            codes = [c for c in codes if '_' not in c]
+
+        if code not in list(self.daily_history_cache.keys()):
+            codes.append(code)
+        else:
+            # logger.debug(f'code in hist_cache')
+            return
+
         if not codes:
             return
             
         try:
-            from JSONData.tdx_hdf5_api import load_hdf_db
-            h5_file = "all_30.h5"
-            df_hist = load_hdf_db(h5_file, table='all', code_l=codes)
-            
-            if df_hist is not None and not df_hist.empty:
-                # load_hdf_db 返回的是过滤后的 DF
-                for code in codes:
-                    if code in df_hist.index:
-                        # 存入该股的历史数据 DataFrame
-                        self.daily_history_cache[code] = df_hist.loc[[code]]
-                
-                self.last_daily_history_refresh = now
-                logger.info(f"Daily history cache refreshed for {len(codes)} stocks.")
+            # load_hdf_db 返回的是过滤后的 DF
+            # results = cct.to_mp_run_async(get_tdx_Exp_day_to_df, codeList, start=None, end=None, dl=1, newdays=0,detect_calc_support=detect_calc_support)
+            # if len(codes) > 1:
+            #     results = cct.to_mp_run_async(tdd.get_tdx_Exp_day_to_df, codes, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=True)
+            # 返回多维的数据
+            #     # newdays=0,detect_calc_support=detect_calc_support)
+            #     for code in codes:
+            #         self.daily_history_cache[code] = results.loc[code]
+            for code in codes:
+                df_hist = tdd.get_tdx_Exp_day_to_df(code, dl=ct.Resample_LABELS_Days[resample], resample=resample, fastohlc=True)
+                df_hist.rename(columns={"vol": "volume"}, inplace=True)
+                if df_hist is not None and not df_hist.empty:
+                    # 存入该股的历史数据 DataFrame
+                    self.daily_history_cache[code] = df_hist
+            self.last_daily_history_refresh = now
+            logger.debug(f"Daily history cache refreshed for {len(codes)} stocks. caches: {len(self.daily_history_cache.keys())}")
         except Exception as e:
             logger.error(f"Failed to refresh daily history cache: {e}")
 
@@ -2729,7 +2739,6 @@ class StockLiveStrategy:
             # 也可以选择性的根据形态更新 trading_hub
             if event.pattern in ('big_bull', 'platform_break'):
                  try:
-                     from trading_hub import get_trading_hub
                      hub = get_trading_hub()
                      hub.update_follow_status(event.code, notes=f"[{pattern_cn}] {event.detail}")
                  except Exception: pass
