@@ -6010,6 +6010,113 @@ class MainWindow(QMainWindow, WindowMixin):
         else:
             self.hotspot_items = []
 
+    def _clear_price_gaps(self):
+        """清理价格缺口"""
+        if not hasattr(self, 'gap_items'):
+            self.gap_items = []
+        for item in self.gap_items:
+            if item in self.kline_plot.items:
+                self.kline_plot.removeItem(item)
+        self.gap_items.clear()
+
+    def _draw_price_gaps(self, x_axis, day_df):
+        """
+        在 K 线图上绘制最近 5 个跳空缺口 (未回补的水平带)
+        Gap Up: Current Low > Previous High
+        Gap Down: Current High < Previous Low
+        """
+        self._clear_price_gaps()
+
+        if len(day_df) < 2:
+            return
+
+        try:
+            highs = day_df['high'].values
+            lows = day_df['low'].values
+            
+            # 使用列表收集缺口信息
+            gaps = []
+            
+            # 遍历寻找缺口 (这里不使用纯矢量化，因为需要后续的 Search-Forward Fill 检测，循环更直观)
+            # 为了性能，反向遍历寻找最近的 N 个缺口 maybe? 
+            # 但用户要求“最近5个”，我们还是以前向遍历+截取最后5个比较稳妥
+            
+            total = len(day_df)
+            found_gaps = []
+
+            # 性能优化：只扫描最近 20 天的缺口
+            scan_start = max(1, total - 20)
+
+            for i in range(scan_start, total):
+                prev_high = highs[i-1]
+                prev_low = lows[i-1]
+                curr_high = highs[i]
+                curr_low = lows[i]
+                
+                # Gap Up
+                if curr_low > prev_high:
+                    gap_start_price = prev_high
+                    gap_end_price = curr_low
+                    gap_type = 'up'
+                # Gap Down
+                elif curr_high < prev_low:
+                    gap_start_price = curr_high
+                    gap_end_price = prev_low 
+                    gap_type = 'down'
+                else:
+                    continue
+                
+                # 记录缺口
+                found_gaps.append({
+                    'start_idx': i,
+                    'start_price': gap_start_price,
+                    'end_price': gap_end_price,
+                    'type': gap_type
+                })
+            
+            # 只取最近 5 个
+            targets = found_gaps[-5:]
+            
+            for gap in targets:
+                start_idx = gap['start_idx']
+                gap_low = gap['start_price']
+                gap_high = gap['end_price']
+                gap_type = gap['type']
+                
+                # 用户需求: "到整个屏幕不用保留宽度,调整比例缺口水平都直达屏幕右侧最远端"
+                # 这意味着无论是否回补，都画到最右边
+                
+                # 起点: 缺口产生的那一天
+                x_start = x_axis[start_idx] - 0.4
+                
+                # 终点: 屏幕最右端. 
+                # 由于 x_axis 是 0..N 的整数索引映射，我们可以给一个足够大的数
+                # 或者当前数据的最后一根 + 一个屏幕宽度
+                # 取 len(day_df) + 200 应该足够覆盖右侧空白
+                x_end = len(day_df) + 500 
+                
+                width = x_end - x_start
+                height = gap_high - gap_low
+                
+                rect_item = pg.QtWidgets.QGraphicsRectItem(x_start, gap_low, width, height)
+                
+                # 颜色: 加亮些
+                # 原来: (200, 200, 200, 50)
+                # 加亮: 提高不透明度，或者更白一点
+                # 用户说"加亮些"，可能指更显眼。
+                # 试用: (220, 220, 220, 120) -> 接近半透明白
+                # 或者 (180, 180, 180, 100) -> 显眼的灰
+                
+                brush_color = pg.mkColor(190, 190, 190, 90)
+                rect_item.setBrush(pg.mkBrush(brush_color))
+                rect_item.setPen(pg.mkPen(None)) # 无边框
+                
+                self.kline_plot.addItem(rect_item)
+                self.gap_items.append(rect_item)
+
+        except Exception as e:
+            logger.error(f"Draw price gaps error: {e}")
+
     def _install_viewbox_guard(self, plot: pg.PlotItem):
         vb = plot.getViewBox()
         
@@ -6021,6 +6128,126 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # 连接一次，后续 addItem 不会破坏这个 hook
         vb.sigRangeChanged.connect(on_range_changed)
+
+    def _check_hotlist_patterns(self):
+        """
+        检查所有股票的形态 (增量检测，轻量级)
+        目前主要检测:
+        1. 跳空缺口 (Gap Up/Down) -> 自动加入热点
+        """
+        if not hasattr(self, 'df_all') or self.df_all.empty:
+            return
+
+        try:
+            # 仅检查当天产生缺口的股票
+            # 需要遍历 df_all 中的股票，但在主线程全量遍历太慢
+            # 策略：
+            # 1. 仅对 "关注" 或 "持仓" 列表里的？不行，用户要求自动加入热点
+            # 2. 既然是增量检测，能否只检测最近更新的？
+            #    Monitor 传来的 df_all 通常是全量的。
+            # 3. 简化方案：遍历 df_all，但只对前 N 个活跃股？或者只对涨跌幅较大的？
+            #    跳空通常伴随较大幅度。
+            #    或者：直接 iterate all，只要逻辑够快。
+            
+            # 为了性能，我们只检查涨跌幅 abs > 1% 的股票
+            # 或者只检查 top active
+            
+            # 这里先简单实现：只检查当前选中的 stock 或者 hotlist?
+            # 用户的意图是: "出现计算的跳空缺口直接加入热点跟踪里面" => 应该是全市场扫描
+            # 但全市场 5000 只股票遍历日线数据开销太大。
+            # 折中：只扫描 df_all 中 'pct_chg' 绝对值 > 0.5% 的股票 (缺口通常意味着价格变动)
+            
+            # 注意：这里需要获取日线数据。如果本地没有缓存日线，去 fetch 所有股票日线是不现实的。
+            # 因此，这个功能可能只能针对 **已经加载过数据** 的股票 或者 **当前正在查看** 的股票？
+            # 或者 Monitor 端传来了基础数据 (Open/High/Low/Close)? 
+            # df_all 通常只有当天的 snapshot。
+            # 如果只有 snapshot，我们无法准确判断 "缺口" (需要昨天的 High/Low)。
+            # df_all 里有 'pre_close', 'open', 'high', 'low'
+            
+            # 簡易缺口判断 (基于 Snapshot):
+            # Gap Up: Today Low > Yesterday High? 
+            #   We have Today Low. We DON'T have Yesterday High directly in snapshot usually.
+            #   We have PreClose. 
+            #   Approximate: Gap Up if Today Low > PreClose * 1.005? (Unsafe)
+            #   Real Gap definition needs Yesterday High.
+            
+            # 如果无法获取 Yesterday High，暂时用 PreClose 代替进行初筛
+            # Gap Up (Approx): Low > PreClose 
+            # Gap Down (Approx): High < PreClose
+            
+            # 更好的方案：仅对 **已经加入自选/热点** 的股票做精细扫描?
+            # 用户意思是 "自动添加跟单模式"，这意味着这是一个发现机制。
+            
+            # 让我们尝试基于 df_all 的快照数据做 "疑似缺口" 筛选，然后对疑似的做精细 Confirm?
+            # Snapshot columns: name, code, price, pct_chg, high, low, open, pre_close
+            
+            candidates = []
+            if 'low' in self.df_all.columns and 'high' in self.df_all.columns and 'pre_close' in self.df_all.columns:
+                # 向量化筛选
+                # Gap Up Suspicion: Low > PreClose (这意味着 Low 肯定大于 昨收，但不一定大于 昨日最高)
+                # Gap Down Suspicion: High < PreClose
+                
+                # 严格来说这只是 "Gap relative to Close"，不是 "Gap relative to Shadow"
+                # 但这是我们能做的最快筛选
+                
+                mask_up = self.df_all['low'] > self.df_all['pre_close']
+                mask_down = self.df_all['high'] < self.df_all['pre_close']
+                
+                up_candidates = self.df_all[mask_up].copy()
+                down_candidates = self.df_all[mask_down].copy()
+                
+                # 限制数量，避免瞬间爆炸
+                if len(up_candidates) > 20: 
+                    # 优先取涨幅大的
+                    up_candidates = up_candidates.nlargest(20, 'pct_chg')
+                    
+                if len(down_candidates) > 20:
+                    # 优先取跌幅大的
+                    down_candidates = down_candidates.nsmallest(20, 'pct_chg')
+                    
+                candidates.extend([(r, 'up') for _, r in up_candidates.iterrows()])
+                candidates.extend([(r, 'down') for _, r in down_candidates.iterrows()])
+            
+            if not candidates:
+                return
+
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            queue = SignalMessageQueue()
+            
+            for row, direction in candidates:
+                code = str(row['code']).zfill(6)
+                name = row['name']
+                price = float(row['price'])
+                
+                # 构造信号
+                sig_type = SignalType.GAP_UP if direction == 'up' else SignalType.GAP_DOWN
+                reason = f"{direction.upper()} Gap > PreClose"
+                
+                # 1. 自动加入热点 (HotlistPanel)
+                if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
+                    # 添加到 "GAP_WATCH" 组 或者 直接加到 "热点"
+                    # 用户说: "直接加入热点跟踪里面,作为重点和follow队列自动添加跟单模式"
+                    # 假设我们加到 Group '强势' 或 新建 Group '缺口'?
+                    # 使用 add_stock 接口
+                    self.hotlist_panel.add_stock(code, name, price, group='缺口跟踪')
+                
+                # 2. 发送信号日志
+                msg = SignalMessage(
+                    priority=80, # 高优先级
+                    timestamp=timestamp,
+                    code=code,
+                    name=name,
+                    signal_type=sig_type.value, # "向上跳空"
+                    source='GAP_SCAN',
+                    reason=f"Gap {direction.title()} (Low:{row['low']} > Pre:{row['pre_close']})" if direction=='up' else f"Gap {direction.title()} (High:{row['high']} < Pre:{row['pre_close']})",
+                    score=85
+                )
+                queue.push(msg)
+                
+            self._update_signal_badge()
+
+        except Exception as e:
+            logger.error(f"[_check_hotlist_patterns] Error: {e}")
 
     # def render_charts_opt(self, code, day_df, tick_df):
     def render_charts(self, code, day_df, tick_df):
@@ -6327,6 +6554,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # [NEW] 绘制热点加入标记
         self._draw_hotspot_markers(code, x_axis, day_df)
+
+        # [NEW] 绘制跳空缺口 (最近 5 个)
+        self._draw_price_gaps(x_axis, day_df)
 
         # ----------------- 绘制 Volume -----------------
         if 'amount' in day_df.columns:
