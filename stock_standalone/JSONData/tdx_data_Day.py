@@ -3016,7 +3016,57 @@ def get_tdx_append_now_df_api(code, start=None, end=None, type='f', df=None, dm=
     return df
 
 
-def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=None, type='f', df=None, dl=10, power=True,detect_calc_support=False):
+def is_suspended_tick(dm) -> bool:
+    """
+    判断是否为停牌 / 无成交 tick 快照
+    dm: Series / dict / DataFrame 行
+    返回 True 表示停牌
+    """
+    try:
+        # 1️⃣ 成交量为 0（核心条件）
+        if float(dm.get("volume", 0)) != 0:
+            return False
+
+        # 2️⃣ 成交笔数为 0（若存在）
+        if float(dm.get("trade", 0)) != 0:
+            return False
+
+        # 3️⃣ 买卖盘口全部为 0
+        for k in ("b1", "b2", "b3", "b4", "b5", "a1", "a2", "a3", "a4", "a5"):
+            if float(dm.get(k, 0)) != 0:
+                return False
+
+        # 4️⃣ OHLC 恒等（增强确认）
+        prices = []
+        for k in ("open", "high", "low", "close", "now"):
+            p = dm.get(k)
+
+            if p is None:
+                continue
+
+            # Series → 标量
+            if isinstance(p, pd.Series):
+                if p.empty:
+                    continue
+                p = p.iloc[0]
+
+            # NaN 防护
+            if pd.isna(p):
+                continue
+
+            prices.append(float(p))
+
+        if prices and len(set(prices)) != 1:
+            return False
+
+        return True
+
+    except Exception:
+        # 任何异常，保守认为不是停牌
+        return False
+
+
+def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=None, type='f', df=None, dl=10, power=True,detect_calc_support=False,rechecktushare=False):
     #补数据power = false
     start = cct.day8_to_day10(start)
     end = cct.day8_to_day10(end)
@@ -3076,7 +3126,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
         else:
             today = end
 
-    if duration > 1 and (tdx_last_day != cct.get_lastdays_trade_date(1)):
+    if rechecktushare and duration > 1 and (tdx_last_day != cct.get_lastdays_trade_date(1)):
         try:
             ds = get_kdate_data(code_ts, start=tdx_last_day,
                                 end=today, index=index_status)
@@ -3152,7 +3202,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
         df = df.fillna(0)
         df = df.sort_index(ascending=False)
         return df
-#    print df.index.values,code
+
     if dm is None and end is None:
         # if dm is None and today != df.index[-1]:
         # log.warn('today != end:%s'%(df.index[-1]))
@@ -3164,7 +3214,11 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
     if len(df) != 0 and duration == 0:
         writedm = False
     else:
-        writedm = True
+        _is_stop_code = is_suspended_tick(dm)
+        if not is_suspended_tick:
+            writedm = True
+        else:
+            writedm = False
 
     if df is not None and len(df) > 0:
         if df.index.values[-1] == today:
@@ -7557,7 +7611,14 @@ if __name__ == '__main__':
     # log_level = LoggerFactory.DEBUG
     log.setLevel(log_level)
     # tdx_profile_test_tdx()
-        
+    
+    code='603056'
+
+    df=get_tdx_append_now_df_api_tofile(code)
+    # import ipdb;ipdb.set_trace()
+    print('df: {df}')
+    import ipdb;ipdb.set_trace()
+
     resample = 'd'
     code = '002151'
     # dm = sina_data.Sina().market('all').loc['000002']
@@ -7686,10 +7747,7 @@ if __name__ == '__main__':
     # Write_tdx_all_to_hdf('all', h5_fname='tdx_all_df', h5_table='all', dl=300, rewrite=True)
     # import ipdb;ipdb.set_trace()
     
-    # code='603603'
-    # df=get_tdx_append_now_df_api_tofile(code)
-    # import ipdb;ipdb.set_trace()
-    
+
     code='001896' #豫能控股
     code='002594' #byd
     code='601628' #中国人寿

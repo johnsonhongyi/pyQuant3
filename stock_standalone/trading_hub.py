@@ -421,6 +421,7 @@ class TradingHub:
         conn.close()
         return df
     
+    
     def get_unified_dashboard(self) -> Dict[str, Any]:
         """获取统一仪表盘数据"""
         return {
@@ -430,6 +431,59 @@ class TradingHub:
             "positions_count": len(self.get_positions()),
             "today_signals": len(self.get_signal_history(days=1)),
         }
+        
+    def sync_from_logger(self) -> int:
+        """
+        [Sync] 从 legacy trading_logger 同步持仓状态
+        返回同步的持仓数量
+        """
+        try:
+            # 1. Read from Legacy DB
+            conn_legacy = sqlite3.connect(self.trading_db)
+            legacy_df = pd.read_sql_query("SELECT * FROM trade_records WHERE status='OPEN'", conn_legacy)
+            conn_legacy.close()
+            
+            if legacy_df.empty:
+                return 0
+                
+            # 2. Upsert into Hub DB
+            conn_hub = sqlite3.connect(self.signal_db)
+            c = conn_hub.cursor()
+            
+            synced_count = 0
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            for _, row in legacy_df.iterrows():
+                code = row['code']
+                # Check if exists
+                c.execute("SELECT id FROM positions WHERE code=? AND status='HOLDING'", (code,))
+                exists = c.fetchone()
+                
+                if not exists:
+                    # Insert
+                    c.execute("""
+                        INSERT INTO positions 
+                        (code, name, entry_date, entry_price, quantity, current_price, pnl_percent, status, strategy, notes, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        code, row['name'], row['buy_date'], row['buy_price'], 
+                        row['buy_amount'], row['buy_price'], 0.0, 
+                        'HOLDING', row.get('buy_reason', ''), 'Synced from Logger',
+                        now, now
+                    ))
+                    synced_count += 1
+                else:
+                    # Optional: Update fields if needed
+                    pass
+            
+            conn_hub.commit()
+            conn_hub.close()
+            logger.info(f"[TradingHub] Synced {synced_count} positions from Logger.")
+            return synced_count
+            
+        except Exception as e:
+            logger.error(f"[TradingHub] Sync error: {e}")
+            return 0
 
 
 # 单例模式

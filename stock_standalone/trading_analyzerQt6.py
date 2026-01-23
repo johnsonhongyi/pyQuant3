@@ -148,7 +148,7 @@ class TradingGUI(QWidget):
             ])
         else:
             self.view_combo.addItems([
-                "所有信号流", "信号类型统计", "高频信号股"
+                "今日信号汇总", "所有信号流", "信号类型统计", "高频信号股"
             ])
             
         self.view_combo.blockSignals(False)
@@ -271,7 +271,31 @@ class TradingGUI(QWidget):
                      df = self.analyzer.stock_performance()
         else:
             # 实时策略信号库
-            if view == "所有信号流":
+            if view == "今日信号汇总":
+                df = self.signal_analyzer.get_todays_signal_counts()
+                if code and not df.empty:
+                    df = df[df['code'] == code]
+                
+                # [NEW] Re-order and rename columns for display
+                if not df.empty:
+                    # Ensure pattern_cn exists (it should from analyzer)
+                    if 'pattern_cn' not in df.columns:
+                         df['pattern_cn'] = df['pattern']
+                    
+                    # Select useful columns
+                    cols_to_show = ['code', 'pattern', 'pattern_cn', 'count', 'last_trigger']
+                    # Filter existing columns
+                    cols_to_show = [c for c in cols_to_show if c in df.columns]
+                    df = df[cols_to_show]
+                    
+                    # Rename for UI
+                    df.rename(columns={
+                        'pattern': 'Signal ID',
+                        'pattern_cn': '策略名称',
+                        'count': '触发次数',
+                        'last_trigger': '最后触发时间'
+                    }, inplace=True)
+            elif view == "所有信号流":
                 df = self.signal_analyzer.get_signal_message_df()
                 if code and not df.empty:
                     df = df[df['code'] == code]

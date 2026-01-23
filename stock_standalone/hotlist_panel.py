@@ -397,7 +397,7 @@ class HotlistPanel(QWidget):
         layout.setSpacing(0)
 
         self.follow_table = QTableWidget()
-        cols = ["状态", "代码", "名称", "信号类型", "阶段", "P", "策略", "入场", "时间"]
+        cols = ["状态", "代码", "名称", "信号类型", "阶段", "P", "策略", "入场", "理由", "时间"]
         self.follow_table.setColumnCount(len(cols))
         self.follow_table.setHorizontalHeaderLabels(cols)
         self.follow_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -416,7 +416,8 @@ class HotlistPanel(QWidget):
         self.follow_table.setColumnWidth(5, 30)
         header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents) # Strategy
         header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents) # Entry
-        header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents) # Time
+        header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents) # Reason
+        header.setSectionResizeMode(9, QHeaderView.ResizeMode.ResizeToContents) # Time
 
         self.follow_table.verticalHeader().setVisible(False)
         self.follow_table.setStyleSheet(self.table.styleSheet()) # Reuse style
@@ -607,13 +608,28 @@ class HotlistPanel(QWidget):
         if main_window and hasattr(main_window, 'df_all') and not main_window.df_all.empty:
             df = main_window.df_all
             price_map = {}
+            phase_map = {}
+            
             for item in self.items:
                 if item.code in df.index:
                     row = df.loc[item.code]
                     price_map[item.code] = row.get('close', row.get('price', 0))
+                    # [NEW] Extract Phase from shadow_info or last_reason if possible, or TradePhase column if it exists
+                    # Currently Phase is stored in 'last_action' or just notes in Hub.
+                    # Best way: Check 'last_action' or 'shadow_info' if Phase Engine writes to it.
+                    # As per P0.6, Phase Engine writes to snap['trade_phase'].
+                    # We might need to expose snap data in df_all or just use what we have.
+                    # For now, let's try to get it from 'trade_phase' column if we added it to df_all in P0.6
+                    
+                    phase = str(row.get('last_action', '')) # Placeholder
+                    # Try to parse Phase from 'notes' in Hub if needed, but here we just use what's in DF
+                    if 'trade_phase' in row:
+                        phase = str(row['trade_phase'])
+                    
+                    phase_map[item.code] = phase
             
             if price_map:
-                self.update_prices(price_map)
+                self.update_prices(price_map, phase_map)
                 logger.debug(f"✅ Hotlist PnL refreshed ({len(price_map)} items)")
             
             # [NEW] 刷新跟单队列
@@ -623,6 +639,37 @@ class HotlistPanel(QWidget):
             # 如果没有主窗口数据，也尝试刷新跟单队列（至少显示列表）
             self._update_follow_queue()
             logger.warning("⚠️ 无法获取主窗口数据，仅刷新跟单列表")
+
+    def update_prices(self, price_map: Dict[str, float], phase_map: Dict[str, str] = None):
+        """
+        批量更新现价和盈亏
+        """
+        for item in self.items:
+            if item.code in price_map:
+                item.current_price = price_map[item.code]
+                if item.add_price > 0:
+                    item.pnl_percent = (item.current_price - item.add_price) / item.add_price * 100
+            
+            if phase_map and item.code in phase_map:
+                # Update visual only (since item struct doesn't have phase field yet, maybe reuse group or notes?)
+                # Actually let's just update the table directly in _refresh_table or store it in item.group for now
+                item.group = phase_map[item.code] or item.group
+        
+        self._refresh_table()
+
+    def flash_screen(self, color="#FF0000", duration=500):
+        """
+        [Visual] 边框闪烁效果
+        """
+        original_style = self.styleSheet()
+        flash_style = original_style + f"""
+            HotlistPanel {{
+                border: 3px solid {color};
+            }}
+        """
+        self.setStyleSheet(flash_style)
+        QTimer.singleShot(duration, lambda: self.setStyleSheet(original_style))
+
 
     def _update_follow_queue(self):
         """[Phase 2] 刷新跟单队列可视化"""
@@ -680,8 +727,13 @@ class HotlistPanel(QWidget):
                 entry_txt = f"{row.entry_price:.2f}" if getattr(row, 'entry_price', 0) > 0 else f"MA5" # 简单显示
                 self.follow_table.setItem(row_idx, 7, QTableWidgetItem(entry_txt))
                 
+                # Reason
+                reason_item = QTableWidgetItem(str(row.notes) if row.notes else "")
+                reason_item.setToolTip(str(row.notes) if row.notes else "")
+                self.follow_table.setItem(row_idx, 8, reason_item)
+
                 time_str = str(row.updated_at).split(' ')[-1] if row.updated_at else ""
-                self.follow_table.setItem(row_idx, 8, QTableWidgetItem(time_str))
+                self.follow_table.setItem(row_idx, 9, QTableWidgetItem(time_str))
 
         except Exception as e:
             logger.error(f"Error updating follow queue UI: {e}")
