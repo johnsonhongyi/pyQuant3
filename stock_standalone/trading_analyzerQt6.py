@@ -62,7 +62,7 @@ class TradingGUI(QWidget):
 
         self.view_combo = QComboBox()
         self.view_combo.addItems([
-            "实时指标详情","股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史", "策略胜率排行"
+            "实时指标详情","股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史", "策略胜率排行", "绩效分析看板"
         ])
         self.view_combo.currentTextChanged.connect(self.refresh_table)
         self.top_layout.addWidget(QLabel("视图选择:"))
@@ -231,6 +231,9 @@ class TradingGUI(QWidget):
                 df = self.analyzer.get_stock_detail(code) if code else pd.DataFrame()
             elif view == "每日策略统计":
                 df = self.analyzer.daily_summary()
+            elif view == "绩效分析看板":
+                self.refresh_performance_dashboard()
+                return
             elif view == "Top 盈利交易":
                 df = self.analyzer.top_trades(n=10, largest=True)
             elif view == "Top 亏损交易":
@@ -314,6 +317,46 @@ class TradingGUI(QWidget):
         else:
             count = len(df) if not df.empty else 0
             self.label_summary.setText(f"当前视图记录数: {count}")
+
+    def refresh_performance_dashboard(self):
+        """[P7] 绩效看板聚合逻辑"""
+        self.table.setVisible(False)
+        self.report_area.setVisible(True)
+        
+        # 强制同步一次
+        self.analyzer.compute_and_sync_strategy_stats()
+        
+        # 获取汇总指标
+        trades_df = self.analyzer.get_all_trades_df()
+        if trades_df.empty:
+            self.report_area.setPlainText("暂无完成交易数据")
+            return
+            
+        closed = trades_df[trades_df['status'] == 'CLOSED']
+        total_pnl = closed['profit'].sum()
+        total_trades = len(closed)
+        avg_pnl = total_pnl / total_trades if total_trades > 0 else 0
+        
+        try:
+            from trading_hub import get_trading_hub
+            summary_df = get_trading_hub().get_strategy_performance(days=30)
+        except:
+            summary_df = pd.DataFrame()
+        
+        display_text = f"=== 账户绩效总览 (最近30日) ===\n"
+        display_text += f"总盈亏: {total_pnl:.2f} | 总笔数: {total_trades} | 平均笔盈亏: {avg_pnl:.2f}\n\n"
+        display_text += "策略表现 (胜率/盈亏):\n"
+        display_text += "-" * 50 + "\n"
+        
+        if not summary_df.empty:
+            summary_df = summary_df.sort_values('pnl', ascending=False)
+            for _, row in summary_df.iterrows():
+                win_rate = (row['wins'] / row['entered'] * 100) if row['entered'] > 0 else 0
+                display_text += f" {row['strategy_name']:<18}: 胜率 {win_rate:>5.1f}% | 笔数 {row['entered']:>3} | 盈亏 {row['pnl']:>9.2f}\n"
+        else:
+            display_text += " (暂无策略统计信息)\n"
+        
+        self.report_area.setPlainText(display_text)
 
     def refresh_summary_label(self):
         df_all = self.analyzer.get_all_trades_df()

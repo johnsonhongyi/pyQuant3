@@ -235,7 +235,7 @@ class TradingAnalyzer:
 
     def compute_and_sync_strategy_stats(self):
         """
-        [P2] 计算并同步策略绩效到 TradingHub
+        [P2/P7] 计算并同步策略绩效到 TradingHub
         解析交易记录中的策略名称，计算胜率与盈亏，写入 signal_strategy.db
         """
         df = self.get_all_trades_df()
@@ -246,11 +246,6 @@ class TradingAnalyzer:
         if closed.empty:
             return
 
-        # 尝试提取策略名称
-        # 优先使用 'strategy' 列，如果没有则从 'buy_reason' 解析
-        if 'strategy' not in closed.columns:
-            closed['strategy'] = 'Unknown'
-            
         def extract_strategy(row):
             s = str(row.get('strategy', ''))
             if s and s != 'nan' and s != 'Unknown':
@@ -260,7 +255,8 @@ class TradingAnalyzer:
             import re
             match = re.search(r'\[(.*?)\]', reason)
             if match:
-                return match.group(1)
+                # 进一步清洗：提取方括号内的第一个词，避免类似 "[回踩MA5:达标]" 这种带描述的
+                return match.group(1).split(':')[0].strip()
             # Fallback for old data
             if "竞价" in reason: return "竞价买入"
             if "回踩" in reason: return "回踩MA5"
@@ -278,12 +274,12 @@ class TradingAnalyzer:
             losses = len(group[group['profit'] <= 0])
             total_pnl = group['profit'].sum()
             
-            # 更新到 Hub (使用今日日期作为统计更新日，累计数据)
-            # 注意：Hub 的 update_strategy_stats 设计可能是每日快照? 
-            # Check hub.update_strategy_stats: it inserts (strategy, date).
-            # We should probably overwrite "Today's" stat with "All Time" or "Last 30 Days"?
-            # Hub definition: "strategy_stats" unique(strategy, date).
-            # So we are recording "Performance AS OF date".
+            # [P7] 计算额外指标
+            win_rate = (wins / total_trades * 100) if total_trades > 0 else 0
+            gross_profit = group[group['profit'] > 0]['profit'].sum()
+            gross_loss = abs(group[group['profit'] < 0]['profit'].sum())
+            profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else (99.0 if gross_profit > 0 else 1.0)
+            avg_pnl = round(total_pnl / total_trades, 2) if total_trades > 0 else 0
             
             # 更新到 Hub
             hub.update_strategy_stats(
@@ -294,6 +290,12 @@ class TradingAnalyzer:
                 wins=int(wins),
                 losses=int(losses),
                 pnl=float(total_pnl)
+            )
+            
+            # 记录详细日志供分析
+            from JohnsonUtil import LoggerFactory
+            LoggerFactory.getLogger("Analyzer").info(
+                f"Sync Strategy: {strategy} | Trades: {total_trades} | Win%: {win_rate:.1f}% | PF: {profit_factor} | AvgPnl: {avg_pnl}"
             )
         print("Strategy stats synced to Hub.")
 

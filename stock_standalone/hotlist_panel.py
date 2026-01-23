@@ -715,6 +715,14 @@ class HotlistPanel(QWidget):
                     phase_txt = notes[:10] # Show part of notes if no bracket
                 
                 phase_item = QTableWidgetItem(phase_txt)
+                # [P7] 阶段着色: 风险预警
+                if phase_txt in ('TOP_WATCH', '顶部观察'):
+                    phase_item.setForeground(QColor('#FF8C00')) # DarkOrange
+                elif phase_txt in ('EXIT', '分批离场'):
+                    phase_item.setForeground(QColor('#FF4500')) # OrangeRed
+                elif phase_txt in ('LAUNCH', '启动'):
+                    phase_item.setForeground(QColor('#00BFFF')) # DeepSkyBlue
+                
                 self.follow_table.setItem(row_idx, 4, phase_item)
                 
                 p_item = QTableWidgetItem(str(row.priority))

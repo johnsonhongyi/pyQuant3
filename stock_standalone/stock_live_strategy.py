@@ -1426,17 +1426,24 @@ class StockLiveStrategy:
         标准化突破检查逻辑
         """
         current_price = float(row.get('trade', 0.0))
+        name = str(row.get('name', ''))
         
         # 1. 突破信号设定的具体目标价
         if hasattr(signal, 'target_price_high') and signal.target_price_high > 0:
             if current_price >= signal.target_price_high:
-                return True, f"突破目标上限 {signal.target_price_high}"
+                msg = f"突破目标上限 {signal.target_price_high}"
+                # [P7] 突破确认高优先级播报
+                self.voice_announcer.announce(f"{name} 突破确认", code=code)
+                return True, msg
             
         # 2. 突破今日高点 (如果当前就是高点且涨幅够)
         high = float(row.get('high', 0.0))
         pct = float(row.get('percent', 0.0))
         if current_price >= high and pct > 3.0:
-            return True, f"日内新高突破 ({pct:.1f}%)"
+            msg = f"日内新高突破 ({pct:.1f}%)"
+            # [P7] 突破确认高优先级播报
+            self.voice_announcer.announce(f"{name} 强势突破", code=code)
+            return True, msg
             
         return False, ""
 
@@ -2597,7 +2604,23 @@ class StockLiveStrategy:
             
             if should_voice:
                 self._trigger_alert(event.code, event.name, msg, action=action, price=event.price)
-            else:
+            
+            # === [P7] 仓位状态机联动 ===
+            if self.phase_engine and hasattr(self, 'df') and self.df is not None:
+                try:
+                    # 获取行情快照
+                    row = self.df.loc[event.code] if event.code in self.df.index else pd.Series()
+                    if not row.empty:
+                        # 触发状态机评估
+                        new_phase = self.phase_engine.evaluate_phase(event.code, row, {"pattern": event.pattern})
+                        
+                        # 如果标记为 TOP_WATCH / EXIT，强化语音警报
+                        if new_phase in (TradePhase.TOP_WATCH, TradePhase.EXIT):
+                            msg = f"注意顶部风险: {event.name} ({event.code}) 阶段:{new_phase.value}"
+                            self.voice_announcer.announce(f"{event.name} 顶部信号，分批离场", code=event.code)
+                            logger.warning(f"🚨 [Phase Alert] {event.code} {event.name} -> {new_phase.value}")
+                except Exception as e:
+                    logger.debug(f"Phase engine link failed: {e}")
                 # 静默模式：只记录日志，不播报
                 logger.debug(f"Signal muted (count={event.count}): {event.code} {pattern_cn}")
             
