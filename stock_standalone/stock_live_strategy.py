@@ -373,6 +373,19 @@ class StockLiveStrategy:
             self.pattern_detector.on_pattern = self._on_pattern_detected
             logger.info("IntradayPatternDetector initialized.")
 
+        # --- ⭐ 日线形态检测器 ---
+        try:
+            from daily_pattern_detector import DailyPatternDetector
+            self.daily_pattern_detector = DailyPatternDetector()
+            self.daily_pattern_detector.on_pattern = self._on_daily_pattern_detected
+            # 历史数据缓存 {code: df_history}
+            self.daily_history_cache = {}
+            self.last_daily_history_refresh = 0
+            logger.info("DailyPatternDetector initialized with history cache.")
+        except Exception as e:
+            logger.error(f"Failed to initialize DailyPatternDetector: {e}")
+            self.daily_pattern_detector = None
+
         # --- [NEW] 仓位状态机引擎 ---
         if HAS_PHASE_ENGINE:
             self.phase_engine = PositionPhaseEngine()
@@ -1326,7 +1339,7 @@ class StockLiveStrategy:
         now_time = datetime.now()
         current_time_str = now_time.strftime("%H:%M:%S")
         is_auction_time = "09:24:00" <= current_time_str <= "09:30:00"
-        is_trading_time = ("09:30:00" <= current_time_str <= "11:30:00") or \
+        is_trading_time = ("09:30:05" <= current_time_str <= "11:30:00") or \
                           ("13:00:00" <= current_time_str <= "14:57:00")
             
         for signal in list(self.follow_queue_cache): # Iterate copy to allow removal
@@ -1339,62 +1352,94 @@ class StockLiveStrategy:
                 current_price = float(row.get('trade', 0.0))
                 if current_price <= 0: continue
                 
-                volume = float(row.get('volume', 0.0))
-                pre_close = float(row.get('lastp1d', 0))
-                ma5 = float(row.get('ma5d', 0))
-                
-                pct = (current_price - pre_close) / pre_close * 100 if pre_close > 0 else 0
                 entry_strategy = str(signal.entry_strategy)
-
                 triggered = False
                 trigger_msg = ""
-                action_text = "关注"
                 
                 # --- A. 竞价策略 ---
                 if "竞价" in entry_strategy and is_auction_time:
-                    # [P5 Tuning] 放宽到 0~7%，但要求有一定的量能配合 (避免无量高开)
-                    # volume 是当前成交量 (手)
-                    if 0 < pct < 7.0 and volume > 100: 
-                        triggered = True
-                        trigger_msg = f"竞价高开{pct:.2f}% Vol:{int(volume)}"
-                        action_text = "准备买入"
-                    elif 0 <= pct <= 10.0: # [Shadow Engine] Record near misses
-                        try:
-                            shadow_reason = f"Gap={pct:.2f}% Vol={int(volume)}"
-                            SignalMessageQueue().push(SignalMessage(
-                                priority=99,
-                                timestamp=now_time.strftime("%Y-%m-%d %H:%M:%S"),
-                                code=code,
-                                name=signal.name,
-                                signal_type="SHADOW_AUCTION",
-                                source="LiveStrategy",
-                                reason=shadow_reason,
-                                score=pct
-                            ))
-                        except Exception as e:
-                            logger.error(f"Shadow log error: {e}")
+                    triggered, trigger_msg = self._check_auction_conditions(code, row)
                 
-                # --- B. 回踩策略 ---
-                elif "回踩" in entry_strategy and is_trading_time:
-                    if ma5 > 0:
-                        bias = (current_price - ma5) / ma5
-                        if -0.015 <= bias <= 0.015: # 误差 1.5%
-                            triggered = True
-                            trigger_msg = f"回踩MA5,偏离{bias:.2%}"
-                            action_text = "低吸机会"
-
-                # --- C. 突破目标价 (通用) ---
+                # --- B. 盘中策略 (回踩/突破/形态) ---
+                elif is_trading_time:
+                    if "回踩" in entry_strategy:
+                        triggered, trigger_msg = self._check_pullback_conditions(code, row)
+                    elif "突破" in entry_strategy or "平台" in entry_strategy:
+                        triggered, trigger_msg = self._check_breakout_conditions(code, row, signal)
+                    elif "V型" in entry_strategy:
+                        triggered, trigger_msg = True, "V型反转确认"
+                
+                # --- C. 通用目标价突破 ---
                 if not triggered and signal.target_price_high > 0 and current_price >= signal.target_price_high:
                     triggered = True
                     trigger_msg = f"突破目标价 {signal.target_price_high}"
-                    action_text = "突破确认"
 
                 if triggered:
-                    # [P3 Fix] 执行跟单交易逻辑
+                    # 执行跟单交易逻辑
                     self._execute_follow_trade(signal, current_price, trigger_msg, resample)
             
             except Exception as e:
                 logger.error(f"Process follow queue error {code}: {e}")
+
+    def _check_auction_conditions(self, code: str, row: Any) -> tuple[bool, str]:
+        """
+        标准化竞价检查逻辑
+        """
+        current_price = float(row.get('trade', 0.0))
+        pre_close = float(row.get('lastp1d', 0.0))
+        volume = float(row.get('volume', 0.0))
+        
+        pct = (current_price - pre_close) / pre_close * 100 if pre_close > 0 else 0
+        
+        # [Strategy Tuning] 竞价高开 0.5% ~ 6.5%，且要求一定的成交额
+        if 0.5 <= pct <= 6.5 and volume >= 200:
+            return True, f"竞价达标: 高开{pct:.2f}% 量{int(volume)}"
+            
+        # Shadow Engine record for near misses
+        if 0 <= pct <= 10.0:
+            try:
+                now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                SignalMessageQueue().push(SignalMessage(
+                    priority=99, timestamp=now_str, code=code, name=str(row.get('name', '')),
+                    signal_type="SHADOW_AUCTION", source="Live",
+                    reason=f"Gap:{pct:.1f}% Vol:{int(volume)}", score=pct
+                ))
+            except: pass
+            
+        return False, ""
+
+    def _check_pullback_conditions(self, code: str, row: Any) -> tuple[bool, str]:
+        """
+        标准化回踩检查逻辑 (MA5/MA10)
+        """
+        current_price = float(row.get('trade', 0.0))
+        ma5 = float(row.get('ma5d', 0.0))
+        if ma5 <= 0: return False, ""
+        
+        bias = (current_price - ma5) / ma5
+        if -0.012 <= bias <= 0.012: # 偏离度在 1.2% 以内
+            return True, f"成功回踩MA5 (P={current_price:.2f}, MA5={ma5:.2f})"
+        return False, ""
+
+    def _check_breakout_conditions(self, code: str, row: Any, signal: Any) -> tuple[bool, str]:
+        """
+        标准化突破检查逻辑
+        """
+        current_price = float(row.get('trade', 0.0))
+        
+        # 1. 突破信号设定的具体目标价
+        if hasattr(signal, 'target_price_high') and signal.target_price_high > 0:
+            if current_price >= signal.target_price_high:
+                return True, f"突破目标上限 {signal.target_price_high}"
+            
+        # 2. 突破今日高点 (如果当前就是高点且涨幅够)
+        high = float(row.get('high', 0.0))
+        pct = float(row.get('percent', 0.0))
+        if current_price >= high and pct > 3.0:
+            return True, f"日内新高突破 ({pct:.1f}%)"
+            
+        return False, ""
+
 
     def _execute_follow_trade(self, signal: 'TrackedSignal', price: float, reason: str, resample: str = 'd'):
         """
@@ -1609,6 +1654,21 @@ class StockLiveStrategy:
                         )
                     except Exception as e:
                         logger.debug(f"Pattern detect error for {code}: {e}")
+
+                # --- 📅 日线形态检测 ---
+                if hasattr(self, 'daily_pattern_detector'):
+                    try:
+                        self._update_daily_history_cache() # 尝试刷新全量缓存
+                        prev_rows = self.daily_history_cache.get(code)
+                        self.daily_pattern_detector.update(
+                            code=code,
+                            name=data.get('name', ''),
+                            current_row=row,
+                            prev_rows=prev_rows
+                        )
+                    except Exception as e:
+                        logger.debug(f"Daily pattern detect error for {code}: {e}")
+
 
                 # --- 注入板块与系统风险状态 ---
                 # 从 _last_sector_status 中获取
@@ -2592,6 +2652,67 @@ class StockLiveStrategy:
                     
         except Exception as e:
             logger.error(f"Pattern callback error: {e}")
+
+    def _update_daily_history_cache(self):
+        """
+        批量更新监控股票的日线历史缓存
+        """
+        if not hasattr(self, 'daily_pattern_detector'):
+            return
+            
+        now = time.time()
+        # 每 10 分钟更新一次
+        if now - self.last_daily_history_refresh < 600:
+            return
+            
+        codes = list(self._monitored_stocks.keys())
+        # 过滤掉带采样的 key (e.g., '000001_5')
+        codes = [c for c in codes if '_' not in c]
+        
+        if not codes:
+            return
+            
+        try:
+            from JSONData.tdx_hdf5_api import load_hdf_db
+            h5_file = "all_30.h5"
+            df_hist = load_hdf_db(h5_file, table='all', code_l=codes)
+            
+            if df_hist is not None and not df_hist.empty:
+                # load_hdf_db 返回的是过滤后的 DF
+                for code in codes:
+                    if code in df_hist.index:
+                        # 存入该股的历史数据 DataFrame
+                        self.daily_history_cache[code] = df_hist.loc[[code]]
+                
+                self.last_daily_history_refresh = now
+                logger.info(f"Daily history cache refreshed for {len(codes)} stocks.")
+        except Exception as e:
+            logger.error(f"Failed to refresh daily history cache: {e}")
+
+
+    def _on_daily_pattern_detected(self, event: 'DailyPatternEvent') -> None:
+        """日线形态检测回调 - 标准化报警处理"""
+        try:
+            pattern_cn = self.daily_pattern_detector.PATTERN_NAMES.get(event.pattern, event.pattern)
+            action = "日线形态"
+            
+            # 使用 detail 增强消息
+            msg = f"[日线] {event.name} ({event.code}) {event.detail}"
+            
+            # 触发报警
+            logger.info(f"📅 日线形态: {event.code} {event.name} - {event.detail} Score={event.score}")
+            self._trigger_alert(event.code, event.name, msg, action=action, price=event.price)
+            
+            # 也可以选择性的根据形态更新 trading_hub
+            if event.pattern in ('big_bull', 'platform_break'):
+                 try:
+                     from trading_hub import get_trading_hub
+                     hub = get_trading_hub()
+                     hub.update_follow_status(event.code, notes=f"[{pattern_cn}] {event.detail}")
+                 except Exception: pass
+
+        except Exception as e:
+            logger.error(f"Daily pattern callback failed: {e}")
 
     def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0, resample: str = 'd') -> None:
         """触发报警"""

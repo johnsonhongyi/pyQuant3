@@ -53,6 +53,15 @@ def load_daily_strategies(force_run: bool = False, min_score: int = 45):
         logger.warning("今日无选股结果")
         return
 
+    # [NEW] 初始化形态检测器
+    from daily_pattern_detector import DailyPatternDetector
+    from JSONData.tdx_hdf5_api import load_hdf_db
+    pattern_detector = DailyPatternDetector()
+
+    # 1.5 预加载候选股的历史数据
+    all_codes = [str(r['code']).zfill(6) for _, r in df.iterrows()]
+    df_hist = load_hdf_db("all_30.h5", table='all', code_l=all_codes)
+
     hub = get_trading_hub()
     today_str = datetime.now().strftime("%Y-%m-%d")
     count = 0
@@ -69,8 +78,25 @@ def load_daily_strategies(force_run: bool = False, min_score: int = 45):
             reason = str(row.get('reason', ''))
             price = float(row.get('price', 0))
             
+            # [NEW] 结合历史K线进行形态校验
+            prev_rows = df_hist.loc[[code]] if df_hist is not None and code in df_hist.index else None
+            
+            # 利用形态检测器建议策略
+            v_shape = pattern_detector.check_volunteer(code, row, prev_rows)
+            platform = pattern_detector.check_platform_break(code, row, prev_rows)
+            
             # 策略映射
             strategy = map_reason_to_strategy(reason, float(row.get('percent', 0)))
+
+            # 强化策略逻辑
+            if v_shape:
+                strategy = "V型反转" # 优先级高
+                reason += " | [检测] V型反转"
+            elif platform:
+                strategy = "平台突破"
+                reason += " | [检测] 平台突破"
+            elif "新晋热股" in reason:
+                strategy = "竞价买入"
             
             # 构建信号对象
             # 止损位默认设置：当前价 - 5% (可优化为技术位)
