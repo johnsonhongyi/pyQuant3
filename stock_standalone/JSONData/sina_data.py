@@ -1146,7 +1146,7 @@ class Sina:
                  'low': float(stock[6]),
                  'buy': float(stock[7]),
                  'sell': float(stock[8]),
-                 'volume': int(stock[9]),
+                 'volume': int(stock[9]),       # 成交量
                  'turnover': float(stock[10]),  # 交易额/亿
                  # 'turnover': round(float(stock[10])/1000/1000/100,1),  # 交易额/亿
                  # 'amount': float(stock[10]),
