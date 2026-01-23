@@ -231,12 +231,18 @@ if hasattr(self, 'pattern_detector'):
 
 ---
 
-### P2: 数据流优化
+### P2: 交易闭环与报警优化 ✅ 已完成
+- [x] **Alert System Hardening**: Created `alert_manager.py` ✅ 01-23
+- [x] **Trading Analytics**: `compute_and_sync_strategy_stats` in `TradingAnalyzer` ✅ 01-23
 
+### P3: 修复交易缺失 (Fix Missing Trades) ✅ 已完成
+- [x] **Trade Execution Implementation**: `_execute_follow_trade` added to `StockLiveStrategy`.
+- [x] **Alert & Monitor Linkage**: Process now triggers Trade + Monitor + Voice Alert.
 
-- [ ] 热点列表批量tick请求
-- [ ] 形态触发UI闪烁
-- [ ] 形态历史查看
+### P4: 数据一致性与 UI 优化 (Next Steps) 🔴 当前任务
+- [ ] **Data Consistency**: Ensure `TradingHub` and `TradingLogger` stay in sync.
+- [ ] **UI Refresh**: Polish `HotlistPanel` to show "Phase" (SCOUT/LAUNCH/etc.)
+- [ ] **Flash & Visuals**: Implement visual feedback for high-priority alerts.
 
 ---
 

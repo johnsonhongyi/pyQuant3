@@ -258,6 +258,12 @@ class TradingGUI(QWidget):
                     existing_cols = [c for c in indicator_cols if c in df.columns]
                     df = df[existing_cols]
             elif view == "策略胜率排行":
+                # [P2] Sync stats from Trade Logs to Hub
+                try:
+                    self.analyzer.compute_and_sync_strategy_stats()
+                except Exception as e:
+                    print(f"Stats sync failed: {e}")
+                    
                 # Prefer Hub data
                 df = self.analyzer.get_hub_strategy_stats()
                 if df.empty:
