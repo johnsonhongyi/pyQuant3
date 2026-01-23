@@ -177,57 +177,24 @@ if hasattr(self, 'pattern_detector'):
 - [ ] 每日盈亏统计
 - [ ] 策略胜率计算
 
-### P0.6: 仓位状态机执行 (PositionPhaseEngine) [Pending]
+### P0.6: 仓位状态机执行 (PositionPhaseEngine) ✅ 已完成
+- [x] **Core Engine**: `position_phase_engine.py` implemented (SCOUT/ACCUMULATE/LAUNCH/SURGE/EXIT).
+- [x] **Integration**: Integrated into `StockLiveStrategy`.
+- [x] **Visualization**: `HotlistPanel` receives Phase updates.
 
-**阶段性仓位状态机 (PositionPhaseEngine)**:
-- **SCOUT (试探 10%)**: 出现选股信号，但无量能或形态确认。
-- **ACCUMULATE (蓄势 30%)**: 形态确认（如突破平台），量能堆积。
-- **LAUNCH (启动 50%)**: 分时放量突破，形态加速。
-- **SURGE (主升 70-90%)**: 脱离成本区，进入主升浪。
-- **TOP_WATCH (顶部预警 50%)**: 出现高位放量滞涨或冲高回落信号。
-- **EXIT (离场 0%)**: 跌破支撑或顶部确立。
-
-**待办事项**:
-- [ ] `position_phase_engine.py` - 实现状态转移逻辑与评分机制
-- [ ] 顶部识别评分 - 结合 `IntradayPatternDetector` 的 `high_drop` 信号
-- [ ] 震荡过滤规则 - 增加波动率与均线粘合度判断
-- [ ] 集成到 `stock_live_strategy.py` - 替换简单的 `is_buy` 逻辑
-- [ ] `hotlist_panel.py` - 在列表中直观显示当前股票所处的“阶段” (进度条或标签)
-
-### P1: 策略整合
-
+### P1: 策略整合 (Strategy Integration)
 - [ ] `daily_pattern_detector.py` - 日K形态统一入口
 - [ ] 重构 `_check_strategies` 形态逻辑
 - [ ] 竞价阶段特殊处理
 - [ ] 连续大阳检测
 
-### P0.8: 信号优化与分析 🔴 当前任务 (01-22)
+### P0.8: 信号优化与分析 (Signal Analysis) ✅ 已完成 (P5)
+**目标**: 提升信号透明度，回答"为什么没买"的问题。
 
-**目标**: 降低信号频率噪音，提升有效信号权重，并实现信号历史的可视化分析
-
-**问题现状**:
-- 同一股票同一形态在短时间内多次触发，导致语音播报过于频繁("刷屏")
-- 低开走高等关键信号未能区分量能和位置（如是否在20日均线以下）
-- 信号触发后缺乏后续跟踪（维持次数、收盘结果）无法闭环分析
-
-**待办事项**:
-- [x] **信号计数机制**: 在 `_should_notify` 中记录触发次数，同股同形态连续触发时只更新计数，不重复播报
-- [x] **延迟批量播报**: 对于连续高频信号，采用"聚合播报"模式 (如 "紫光国微 低开走高 x3")
-- [x] **优先级权重提升**: 低于MA20的低开走高 + 带量(换手>3%) → 设为高优先级信号
-- [x] **闪屏通知**: 新增 `flash_for_high_priority()` 方法，高优先级信号触发时短暂闪烁信号日志面板边框
-- [ ] **信号分组**: 多个信号同时触发时按类型分组，显示 "低开走高(3只): 紫光, 科森, 汇成"
-- [ ] **信号历史同步**: `trading_analyzerQt6.py` 的"实时策略信号库"视图增加对今日信号的汇总和计数展示
-- [ ] **次日决策参考**: 记录信号启动时间、维持次数、收盘涨幅，用于生成次日竞价策略建议
-
-
-**变更文件**:
-| 文件 | 变更 |
-|------|------|
-| `intraday_pattern_detector.py` | 增加 `_signal_counts` 字典跟踪信号计数 |
-| `stock_live_strategy.py` | `_on_pattern_detected` 增加计数判断、高优先级信号闪屏调用 |
-| `trading_analyzerQt6.py` | 增加"今日信号汇总"视图，显示计数和收盘结果 |
-| `signal_strategy.db` | `signal_counts` 表已有，需在写入时更新 `count` 字段 |
-| `trade_visualizer_qt6.py` 或 `instock_MonitorTK.py` | 新增 `flash_screen()` UI 闪烁效果 |
+**完成事项**:
+- [x] **信号历史同步**: `trading_analyzerQt6.py` 增加 "今日信号汇总" 视图。
+- [x] **影子策略分析**: 对比主策略与影子策略(更严苛参数)的触发差异。
+- [x] **策略调优**: 竞价策略参数放宽至 7% + 量比校验。
 
 ---
 
@@ -239,10 +206,20 @@ if hasattr(self, 'pattern_detector'):
 - [x] **Trade Execution Implementation**: `_execute_follow_trade` added to `StockLiveStrategy`.
 - [x] **Alert & Monitor Linkage**: Process now triggers Trade + Monitor + Voice Alert.
 
-### P4: 数据一致性与 UI 优化 (Next Steps) 🔴 当前任务
-- [ ] **Data Consistency**: Ensure `TradingHub` and `TradingLogger` stay in sync.
-- [ ] **UI Refresh**: Polish `HotlistPanel` to show "Phase" (SCOUT/LAUNCH/etc.)
-- [ ] **Flash & Visuals**: Implement visual feedback for high-priority alerts.
+### P4: 数据一致性与 UI 优化 (Data & UI) ✅ 已完成
+- [x] **Data Consistency**: Verified `TradingHub` vs `TradingLogger` sync.
+- [x] **UI Refresh**: `HotlistPanel` Reason/Phase columns added.
+- [x] **Visuals**: Implemented `flash_screen` and high-priority alerts.
+
+---
+
+### P6: 策略整合 (Strategy Integration) 🔴 当前任务
+**目标**: 统一日线形态检测逻辑，标准化策略入口。
+
+**待办事项**:
+- [ ] `daily_pattern_detector.py` - 日K形态统一检测器 (New)
+- [ ] 重构 `StockLiveStrategy._check_strategies` - 使用标准检测器
+- [ ] 盘前竞价策略标准化 (Call Auction Strategy)
 
 ---
 

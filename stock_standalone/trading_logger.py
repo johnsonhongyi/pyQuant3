@@ -846,6 +846,39 @@ class SignalStrategyLogger(DBInspector):
             logger.error(f"get_top_signal_stocks error: {e}")
             return []
 
+    def get_daily_signal_counts(self, date: Optional[str] = None) -> list[dict[str, Any]]:
+        """
+        获取每日信号计数 (从 signal_counts 表)
+        返回: [{code, pattern, count, last_trigger, date}, ...]
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            
+            # 优先查询 signal_counts 表
+            # 检查表是否存在
+            cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='signal_counts'")
+            if not cur.fetchone():
+                conn.close()
+                return []
+                
+            query = "SELECT * FROM signal_counts WHERE 1=1"
+            params = []
+            if date:
+                query += " AND date = ?"
+                params.append(date)
+            
+            query += " ORDER BY count DESC"
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            results = [dict(row) for row in rows]
+            conn.close()
+            return results
+        except Exception as e:
+            logger.error(f"get_daily_signal_counts error: {e}")
+            return []
+
     @override
     def run_health_check(self) -> list[str]:
         """覆盖基类的检查，增加业务相关"""

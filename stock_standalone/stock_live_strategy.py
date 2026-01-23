@@ -24,6 +24,7 @@ from JohnsonUtil import commonTips as cct
 from JohnsonUtil import LoggerFactory
 from trading_hub import get_trading_hub, TrackedSignal  # [NEW] Import TradingHub
 from alert_manager import get_alert_manager # [NEW] Import AlertManager
+from signal_message_queue import SignalMessageQueue, SignalMessage # [NEW] Shadow Engine Support
 
 import logging
 logger: logging.Logger = LoggerFactory.getLogger(name="stock_live_strategy")
@@ -1351,11 +1352,27 @@ class StockLiveStrategy:
                 
                 # --- A. 竞价策略 ---
                 if "竞价" in entry_strategy and is_auction_time:
-                    # 高开 0~5%
-                    if 0 < pct < 5.0:
+                    # [P5 Tuning] 放宽到 0~7%，但要求有一定的量能配合 (避免无量高开)
+                    # volume 是当前成交量 (手)
+                    if 0 < pct < 7.0 and volume > 100: 
                         triggered = True
-                        trigger_msg = f"竞价高开{pct:.2f}%"
+                        trigger_msg = f"竞价高开{pct:.2f}% Vol:{int(volume)}"
                         action_text = "准备买入"
+                    elif 0 <= pct <= 10.0: # [Shadow Engine] Record near misses
+                        try:
+                            shadow_reason = f"Gap={pct:.2f}% Vol={int(volume)}"
+                            SignalMessageQueue().push(SignalMessage(
+                                priority=99,
+                                timestamp=now_time.strftime("%Y-%m-%d %H:%M:%S"),
+                                code=code,
+                                name=signal.name,
+                                signal_type="SHADOW_AUCTION",
+                                source="LiveStrategy",
+                                reason=shadow_reason,
+                                score=pct
+                            ))
+                        except Exception as e:
+                            logger.error(f"Shadow log error: {e}")
                 
                 # --- B. 回踩策略 ---
                 elif "回踩" in entry_strategy and is_trading_time:

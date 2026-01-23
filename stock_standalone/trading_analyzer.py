@@ -327,3 +327,25 @@ class StrategySignalAnalyzer:
         data = self.logger.get_top_signal_stocks(limit=100)
         return pd.DataFrame(data, columns=['code', 'name', 'count'])
 
+    def get_todays_signal_counts(self) -> pd.DataFrame:
+        """
+        获取今日信号计数详情
+        返回 DataFrame columns: [code, pattern, count, last_trigger, date]
+        """
+        import datetime
+        try:
+            from intraday_pattern_detector import IntradayPatternDetector
+            pattern_map = IntradayPatternDetector.PATTERN_NAMES
+        except ImportError:
+            pattern_map = {}
+
+        today = datetime.date.today().strftime('%Y-%m-%d')
+        data = self.logger.get_daily_signal_counts(date=today)
+        df = pd.DataFrame(data)
+        
+        if not df.empty and 'pattern' in df.columns:
+            # Add Chinese name column
+            df['pattern_cn'] = df['pattern'].map(lambda x: pattern_map.get(x, x))
+            
+        return df
+
