@@ -813,21 +813,31 @@ class KlineBackupViewer(QMainWindow):
             
             # print(f"[DEBUG] on_summary_clicked: detail_table updated successfully")
             
-            # ⚠️ 可视化器联动已禁用
-            # Qt 和 Tkinter 在同一进程中混合运行时，任何跨框架调用都可能导致 GIL 崩溃
-            # 这是 Python GIL 和两个 GUI 框架事件循环冲突导致的系统级问题
-            # 要启用此功能，需要将 Qt 窗口运行在独立子进程中，类似 trade_visualizer_qt6
-            #
-            # if self.main_app is not None and code:
-            #     try:
-            #         if hasattr(self.main_app, 'vis_var') and self.main_app.vis_var.get():
-            #             if hasattr(self.main_app, 'open_visualizer'):
-            #                 print(f"[DEBUG] on_summary_clicked: scheduling open_visualizer({code}) via Tkinter after()")
-            #                 self.main_app.after(0, lambda c=code: self.main_app.open_visualizer(str(c)))
-            #     except Exception as viz_e:
-            #         print(f"[ERROR] on_summary_clicked: open_visualizer failed: {viz_e}")
-            #         import traceback
-            #         traceback.print_exc()
+            # [FIX] 恢复可视化器联动 (使用 tk_dispatch_queue 解决 GIL/线程安全问题)
+            if self.main_app is not None and code:
+                try:
+                    # 检查是否有 dispatch queue (新版)
+                    if hasattr(self.main_app, 'tk_dispatch_queue'):
+                        def _safe_linkage_task():
+                            # ✅ 在 Tkinter 主线程中检查 vis_var 和打开窗口
+                            try:
+                                if hasattr(self.main_app, 'vis_var') and self.main_app.vis_var.get():
+                                    if hasattr(self.main_app, 'open_visualizer'):
+                                        # print(f"[DEBUG] safe linkage: open_visualizer({code})")
+                                        self.main_app.open_visualizer(str(code))
+                            except Exception as e:
+                                print(f"[ERROR] safe linkage task failed: {e}")
+
+                        self.main_app.tk_dispatch_queue.put(_safe_linkage_task)
+                    
+                    # 旧版兼容 (仍然风险较高, 仅作备用)
+                    elif hasattr(self.main_app, 'after'):
+                        # print("[WARN] Legacy linkage: using .after() which involves cross-thread var access")
+                        self.main_app.after(0, lambda: self.main_app.open_visualizer(str(code)) 
+                                            if (hasattr(self.main_app, 'vis_var') and self.main_app.vis_var.get()) else None)
+
+                except Exception as viz_e:
+                    print(f"[ERROR] on_summary_clicked: linkage check failed: {viz_e}")
         
         except Exception as e:
             print(f"[ERROR] on_summary_clicked: {e}")
@@ -851,9 +861,13 @@ class KlineBackupViewer(QMainWindow):
                 print(f"[DEBUG] on_double_click: code={code}")
                 
                 if self.on_code_callback:
-                    print(f"[DEBUG] on_double_click: scheduling on_code_callback({code}) via Tkinter after()")
-                    # 🛡️ 使用 after() 将调用调度到 Tkinter 主线程
-                    if self.main_app and hasattr(self.main_app, 'after'):
+                    print(f"[DEBUG] on_double_click: scheduling on_code_callback({code}) via Tkinter Dispatch Queue")
+                    # 🛡️ 使用 tk_dispatch_queue 将调用调度到 Tkinter 主线程 (避免 GIL 崩溃)
+                    if self.main_app and hasattr(self.main_app, 'tk_dispatch_queue'):
+                        self.main_app.tk_dispatch_queue.put(lambda: self.on_code_callback(code))
+                    elif self.main_app and hasattr(self.main_app, 'after'):
+                        # Fallback (Unsafe, legacy)
+                        print("[WARN] No dispatch queue found, falling back to unsafe .after()")
                         self.main_app.after(0, lambda c=code: self.on_code_callback(c))
                     else:
                         # 回退：直接调用（可能在独立模式下运行）
