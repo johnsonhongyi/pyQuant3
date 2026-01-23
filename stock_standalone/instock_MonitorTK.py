@@ -9079,24 +9079,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         layout.setSpacing(0)
         self.dpi_scale =  1
 
-
-        #  # 设置黑色背景，文字白色
-        # win.setStyleSheet("""
-        #     QWidget {
-        #         background-color: #2b2b2b;   /* 窗口背景深色 */
-        #         color: #f0f0f0;              /* 默认文字白色 */
-        #     }
-        #     QTableWidget, QListWidget, QTextEdit {
-        #         background-color: #2b2b2b;
-        #         color: #f0f0f0;
-        #         gridline-color: #555555;
-        #     }
-        # """)
-
-        # layout = QtWidgets.QVBoxLayout(win)
-        # layout.setContentsMargins(2, 2, 2, 2)
-        # layout.setSpacing(0)
-
         # 控制栏
         ctrl_layout = QtWidgets.QHBoxLayout()
         chk_auto = QtWidgets.QCheckBox("自动更新")
@@ -9334,11 +9316,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         prev_screen = None
         prev_dpi = None
         base_fontsize = None
-        # app = QtWidgets.QApplication.instance() or pg.mkQApp()
-        # screen = app.primaryScreen()
-        # dpi = screen.logicalDotsPerInch()
-        # font_size = max(7, int(10 * dpi / 96))  # 根据 DPI 调整字体
-        # logger.info(f"[DEBUG] 当前屏幕: {screen.name()}, DPI={dpi}, 字体大小={font_size}")
+
 
         def check_screen():
             nonlocal prev_screen, prev_dpi ,base_fontsize
@@ -9348,8 +9326,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             else:
                 screen = self.app.primaryScreen()
             self._dpi_now = screen.logicalDotsPerInch()
-            # self.dpi_scale = self._dpi_now / prev_dpi if prev_dpi else 1
-            # logger.info(f'self.dpi_scale : {self.dpi_scale}')
+
             if prev_screen or  prev_dpi:
                 if screen != prev_screen or self._dpi_now  != prev_dpi:
                     logger.info(f'dpi_now :{self._dpi_now } prev_dpi :{prev_dpi}')
@@ -9480,20 +9457,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         win = w_dict["win"]
         plot = w_dict["plot"]
         texts = w_dict["texts"]
-
-        # # --- 按 scores 降序排序，保证绘图、文字对齐 ---
-        # sort_idx = np.argsort(-np.array(scores))
-        # concepts = [concepts[i] for i in sort_idx]
-        # scores = np.array(scores)[sort_idx]
-        # avg_percents = np.array(avg_percents)[sort_idx]
-        # follow_ratios = np.array(follow_ratios)[sort_idx]
-        # texts = [texts[i] for i in sort_idx]
-
-        # --- 判断是否需要 9:25 后重置 ---
-        # force_reset = False
-        # now = datetime.now()
-        # if now.time() >= time(9, 25) and getattr(self, "_concept_data_date", None) != now.date():
-        #     force_reset = True
 
         now = datetime.now()
         now_t = int(now.strftime("%H%M"))
