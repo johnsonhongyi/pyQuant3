@@ -397,7 +397,7 @@ class HotlistPanel(QWidget):
         layout.setSpacing(0)
 
         self.follow_table = QTableWidget()
-        cols = ["状态", "代码", "名称", "信号类型", "P", "策略", "入场", "时间"]
+        cols = ["状态", "代码", "名称", "信号类型", "阶段", "P", "策略", "入场", "时间"]
         self.follow_table.setColumnCount(len(cols))
         self.follow_table.setHorizontalHeaderLabels(cols)
         self.follow_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -411,11 +411,12 @@ class HotlistPanel(QWidget):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents) # Code
         header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)          # Name
         header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # Signal Type
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)            # Priority
-        self.follow_table.setColumnWidth(4, 30)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents) # Strategy
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents) # Entry
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents) # Time
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # Phase
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)            # Priority
+        self.follow_table.setColumnWidth(5, 30)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents) # Strategy
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents) # Entry
+        header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents) # Time
 
         self.follow_table.verticalHeader().setVisible(False)
         self.follow_table.setStyleSheet(self.table.styleSheet()) # Reuse style
@@ -642,7 +643,7 @@ class HotlistPanel(QWidget):
             self.follow_table.setRowCount(len(df))
             
             for row_idx, row in enumerate(df.itertuples()):
-                # cols = ["状态", "代码", "名称", "信号类型", "P", "策略", "入场", "时间"]
+                # cols = ["状态", "代码", "名称", "信号类型", "阶段", "P", "策略", "入场", "时间"]
                 
                 status_item = QTableWidgetItem(str(row.status))
                 # 状态着色
@@ -656,18 +657,31 @@ class HotlistPanel(QWidget):
                 self.follow_table.setItem(row_idx, 2, QTableWidgetItem(str(row.name)))
                 self.follow_table.setItem(row_idx, 3, QTableWidgetItem(str(row.signal_type)))
                 
+                # 提取阶段 (Phase)
+                phase_txt = "-"
+                notes = str(row.notes) if row.notes else ""
+                import re
+                match = re.search(r'\[(.*?)\]', notes)
+                if match:
+                    phase_txt = match.group(1) # SCOUT, LAUNCH etc
+                elif notes:
+                    phase_txt = notes[:10] # Show part of notes if no bracket
+                
+                phase_item = QTableWidgetItem(phase_txt)
+                self.follow_table.setItem(row_idx, 4, phase_item)
+                
                 p_item = QTableWidgetItem(str(row.priority))
                 p_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.follow_table.setItem(row_idx, 4, p_item)
+                self.follow_table.setItem(row_idx, 5, p_item)
                 
-                self.follow_table.setItem(row_idx, 5, QTableWidgetItem(str(row.entry_strategy)))
+                self.follow_table.setItem(row_idx, 6, QTableWidgetItem(str(row.entry_strategy)))
                 
                 # 入场 (策略入场点 / 实际入场价)
                 entry_txt = f"{row.entry_price:.2f}" if getattr(row, 'entry_price', 0) > 0 else f"MA5" # 简单显示
-                self.follow_table.setItem(row_idx, 6, QTableWidgetItem(entry_txt))
+                self.follow_table.setItem(row_idx, 7, QTableWidgetItem(entry_txt))
                 
                 time_str = str(row.updated_at).split(' ')[-1] if row.updated_at else ""
-                self.follow_table.setItem(row_idx, 7, QTableWidgetItem(time_str))
+                self.follow_table.setItem(row_idx, 8, QTableWidgetItem(time_str))
 
         except Exception as e:
             logger.error(f"Error updating follow queue UI: {e}")

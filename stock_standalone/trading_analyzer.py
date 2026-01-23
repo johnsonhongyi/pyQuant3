@@ -6,6 +6,8 @@ from typing import Optional, Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from trading_logger import TradingLogger
 
+from trading_hub import get_trading_hub
+
 class TradingAnalyzer:
     """
     提供多种维度的交易分析逻辑，返回 pandas DataFrame
@@ -212,6 +214,24 @@ class TradingAnalyzer:
             suffixes=('', '_sig')
         )
         return df
+
+    def get_hub_daily_pnl(self, days: int = 30) -> pd.DataFrame:
+        """从 TradingHub 获取每日盈亏"""
+        try:
+            hub = get_trading_hub()
+            return hub.get_daily_pnl(days=days)
+        except Exception as e:
+            print(f"Error fetching Hub daily PnL: {e}")
+            return pd.DataFrame()
+
+    def get_hub_strategy_stats(self, days: int = 30) -> pd.DataFrame:
+        """从 TradingHub 获取策略绩效"""
+        try:
+            hub = get_trading_hub()
+            return hub.get_strategy_performance(days=days)
+        except Exception as e:
+            print(f"Error fetching Hub strategy stats: {e}")
+            return pd.DataFrame()
 
 class StrategySignalAnalyzer:
     """
