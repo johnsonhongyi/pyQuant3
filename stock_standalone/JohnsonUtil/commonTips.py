@@ -8351,6 +8351,7 @@ if __name__ == '__main__':
     '''
     # rzrq['all']='nan'
     # print(get_last_trade_date('2025-06-01'))
+    print(f'get_trade_date_status : {get_trade_date_status()}')
     print(get_ramdisk_path("minute_kline_cache.pkl"))
     lastday = get_last_trade_date()
     last2day = get_last_trade_date(lastday)

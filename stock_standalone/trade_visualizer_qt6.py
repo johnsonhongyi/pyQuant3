@@ -762,6 +762,10 @@ def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
     price_col = 'close'
     if price_col not in df.columns and 'price' in df.columns:
         price_col = 'price'
+    low_col = 'low'
+    # if low_col not in df.columns and 'close' in df.columns:
+    #     low_col = 'close'
+    high_col = 'high'
 
     if price_col not in df.columns:
         logger.error(f"tick_to_daily_bar: Missing price column. Cols: {df.columns}")
@@ -771,8 +775,8 @@ def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
         bar = pd.DataFrame(
             {
                 'open':   [df[price_col].iloc[0]],
-                'high':   [df[price_col].max()],
-                'low':    [df[price_col].min()],
+                'high':   [df[high_col].max()],
+                'low':    [df[low_col].min()],
                 'close':  [df[price_col].iloc[-1]],
                 'volume': [df['volume'].iloc[-1] if 'volume' in df.columns else 0],  # 注意：你的 volume 是累计量
             },
@@ -783,6 +787,16 @@ def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"tick_to_daily_bar error: {e}")
         return pd.DataFrame()
+
+
+def test_tick_df():
+    s = sina_data.Sina()
+    tick_df = s.get_real_time_tick('000603')
+    today_bar = tick_to_daily_bar(tick_df)
+    print(f'today_bar: {today_bar}')
+    import ipdb;ipdb.set_trace()
+
+    # test_tick_df()
 
 def drop_tick_all_zero(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -2126,8 +2140,9 @@ class MainWindow(QMainWindow, WindowMixin):
         self.tick_hline.setVisible(False)
         self.tick_crosshair_label.setVisible(False)
 
-        # 设置分割器大小 (70% 顶部, 30% 底部)
-        right_splitter.setSizes([500, 200])
+        # 设置分割器大小 (80% 顶部, 20% 底部) - 给 K 线更多空间
+        # right_splitter.setSizes([800, 150])
+        right_splitter.setSizes([300, 100])  # 3:1 比例
 
         # # splitter 行为
         # right_splitter.setChildrenCollapsible(True)
@@ -6318,7 +6333,7 @@ class MainWindow(QMainWindow, WindowMixin):
             if not hasattr(self, 'volume_plot'):
                 self.volume_plot = self.kline_widget.addPlot(row=1, col=0)
                 self.volume_plot.setXLink(self.kline_plot)
-                self.volume_plot.setMaximumHeight(120)
+                self.volume_plot.setMaximumHeight(85)
                 self.volume_plot.setLabel('left', 'Volume')
                 self.volume_plot.showGrid(x=True, y=True)
                 self.volume_plot.setMenuEnabled(False)
@@ -6494,11 +6509,56 @@ class MainWindow(QMainWindow, WindowMixin):
             last_hist_date = str(day_df.index[-1]).split()[0]
             today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
 
-            if today_str > last_hist_date:
+            # [FIX] strict check for trading day
+            # If not a trading day, do not draw ghost candle
+            is_trade_day = cct.get_trade_date_status()
+            if not is_trade_day:
+                if hasattr(self, 'ghost_candle'):
+                    self.kline_plot.removeItem(self.ghost_candle)
+                    delattr(self, 'ghost_candle')
+            elif today_str > last_hist_date:
                 new_x = len(day_df)
-                open_p = tick_df['open'][tick_df['open'] > 0].iloc[-1] if 'open' in tick_df.columns else current_price
-                low_p  = tick_df['low'][tick_df['low'] > 0].min() if 'low' in tick_df.columns else current_price
-                high_p = tick_df['high'][tick_df['high'] > 0].max() if 'high' in tick_df.columns else current_price
+                
+                # [FIX] 增强实时 OHLC 字段获取，防止 T 字形 K 线 (Open=Close)
+                # 优先找 'open'/'nopen'，如果没找到则用 current_price
+                
+                # 1. Open
+                if 'open' in tick_df.columns:
+                    # 过滤掉 0 值
+                    opens = tick_df['open'][tick_df['open'] > 0]
+                    open_p = opens.iloc[-1] if not opens.empty else tick_df[price_col].iloc[0]
+                elif 'nopen' in tick_df.columns:
+                    opens = tick_df['nopen'][tick_df['nopen'] > 0]
+                    open_p = opens.iloc[-1] if not opens.empty else tick_df[price_col].iloc[0]
+                else:
+                    # Fallback: Use the first available price as Open
+                    open_p = tick_df[price_col].iloc[0]
+                    
+                # 2. High
+                if 'high' in tick_df.columns:
+                    highs = tick_df['high'][tick_df['high'] > 0]
+                    high_p = highs.max() if not highs.empty else tick_df[price_col].max()
+                elif 'nhigh' in tick_df.columns:
+                    highs = tick_df['nhigh'][tick_df['nhigh'] > 0]
+                    high_p = highs.max() if not highs.empty else tick_df[price_col].max()
+                else:
+                    # Fallback: Calculate Max from price column
+                    high_p = tick_df[price_col].max()
+
+                # 3. Low
+                if 'low' in tick_df.columns:
+                    lows = tick_df['low'][tick_df['low'] > 0]
+                    low_p = lows.min() if not lows.empty else tick_df[price_col].min()
+                elif 'nlow' in tick_df.columns:
+                    lows = tick_df['nlow'][tick_df['nlow'] > 0]
+                    low_p = lows.min() if not lows.empty else tick_df[price_col].min()
+                else:
+                    # Fallback: Calculate Min from price column
+                    low_p = tick_df[price_col].min()
+
+                # 修正 High/Low 必须包含 Current/Open
+                high_p = max(high_p, current_price, open_p)
+                low_p = min(low_p, current_price, open_p)
 
                 ghost_ohlc = np.array([[new_x, open_p, current_price, low_p, high_p]], dtype=float)
 
