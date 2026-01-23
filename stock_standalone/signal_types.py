@@ -11,6 +11,8 @@ class SignalType(Enum):
     SUB = "减仓"           # 增量信号：减仓
     STOP_LOSS = "止损"     # 风险信号：止损
     TAKE_PROFIT = "止盈"   # 风险信号：止盈
+    GAP_UP = "向上跳空"     # 形态信号：向上跳空
+    GAP_DOWN = "向下跳空"   # 形态信号：向下跳空
     SHADOW_BUY = "影子买入" # 影子引擎：模拟买入
     SHADOW_SELL = "影子卖出" # 影子引擎：模拟卖出
     VETO = "否决"           # 策略否决：过滤不符合条件的信号
@@ -80,5 +82,7 @@ SIGNAL_VISUAL_CONFIG = {
     SignalType.TAKE_PROFIT: {"symbol": 'star', "size": 15, "color": (255, 215, 0)},
     SignalType.SHADOW_BUY: {"symbol": 't1', "size": 10, "color": (200, 200, 200, 150)},
     SignalType.SHADOW_SELL: {"symbol": 't', "size": 10, "color": (150, 150, 150, 150)},
+    SignalType.GAP_UP: {"symbol": 'arrow_up', "size": 12, "color": (255, 69, 0)},  # Orange Red
+    SignalType.GAP_DOWN: {"symbol": 'arrow_down', "size": 12, "color": (0, 191, 255)}, # Deep Sky Blue
     SignalType.VETO: {"symbol": 'o', "size": 8, "color": (100, 100, 100, 100)},
 }
