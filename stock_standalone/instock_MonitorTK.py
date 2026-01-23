@@ -64,7 +64,8 @@ from data_utils import (
     calc_compute_volume, calc_indicators, fetch_and_process, send_code_via_pipe,test_opt
 )
 from gui_utils import (
-    bind_mouse_scroll, get_monitor_by_point, rearrange_monitors_per_screen,get_monitor_index_for_window
+    bind_mouse_scroll, get_monitor_by_point, rearrange_monitors_per_screen,get_monitor_index_for_window,
+    is_window_covered_pg
 )
 from tk_gui_modules.dpi_mixin import DPIMixin
 from strategy_manager import StrategyManager

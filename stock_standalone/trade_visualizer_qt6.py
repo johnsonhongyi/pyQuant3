@@ -784,6 +784,24 @@ def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
         logger.error(f"tick_to_daily_bar error: {e}")
         return pd.DataFrame()
 
+def drop_tick_all_zero(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    删除 tick 中 OHLC + volume 全为 0 的脏行
+    - 不 reset index
+    - 保留 MultiIndex
+    - 适用于 tick / 分时
+    """
+    if df.empty:
+        return df
+
+    cols = [c for c in ('close', 'high', 'low', 'volume') if c in df.columns]
+    if not cols:
+        return df
+
+    mask_valid = df[cols].ne(0).any(axis=1)
+    return df.loc[mask_valid]
+
+
 def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_realtime=False, interval=None):
     """多进程常驻拉取实时数据"""
     if interval is None:
@@ -814,7 +832,8 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
             if is_work_time or debug_realtime or force_fetch:
                 with timed_ctx("realtime_worker_process", warn_ms=800):
                     tick_df = s.get_real_time_tick(code)
-                
+                    # logger.debug(f'tick_df: {tick_df[:3]}')
+                    # tick_df = drop_tick_all_zero(tick_df)
                 if tick_df is not None and not tick_df.empty:
                     with timed_ctx("realtime_worker_tick_to_daily_bar", warn_ms=800):
                         today_bar = tick_to_daily_bar(tick_df)
@@ -2939,6 +2958,38 @@ class MainWindow(QMainWindow, WindowMixin):
         self.toolbar.addSeparator()
         self.toolbar.addWidget(self.real_time_cb)
 
+        # --- 添加股票代码搜索框 ---
+        self.toolbar.addSeparator()
+        search_label = QLabel("🔍")
+        self.toolbar.addWidget(search_label)
+        
+        self.code_search_input = QLineEdit()
+        self.code_search_input.setPlaceholderText("输入代码...")
+        self.code_search_input.setFixedWidth(80)
+        self.code_search_input.setMaxLength(6)
+        self.code_search_input.returnPressed.connect(self._on_search_code_jump)
+        # 输入后延迟2秒自动执行
+        self._search_debounce_timer = QTimer()
+        self._search_debounce_timer.setSingleShot(True)
+        self._search_debounce_timer.timeout.connect(self._on_search_code_jump)
+        self.code_search_input.textChanged.connect(self._on_search_text_changed)
+        # 右键菜单：自动粘贴并提取6位数字
+        self.code_search_input.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.code_search_input.customContextMenuRequested.connect(self._on_search_input_right_click)
+        self.code_search_input.setStyleSheet("""
+            QLineEdit {
+                background-color: rgba(40, 40, 40, 200);
+                color: #00FF00;
+                border: 1px solid #555;
+                border-radius: 3px;
+                padding: 2px 5px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #00BFFF;
+            }
+        """)
+        self.toolbar.addWidget(self.code_search_input)
+
         # --- 添加右侧 Reset 按钮 ---
         spacer = QWidget()        # 占位伸缩
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
@@ -2964,6 +3015,78 @@ class MainWindow(QMainWindow, WindowMixin):
                 self.day_df = self.day_df[self.day_df.index < today_str]
                 logger.info(f"[INFO] Real-time stopped, cleared today's:{today_str} data for {self.current_code}")
 
+    def _on_search_code_jump(self):
+        """处理搜索框回车：跳转到左侧表格对应的股票行"""
+        code_input = self.code_search_input.text().strip()
+        if not code_input:
+            return
+        
+        # 补齐 6 位代码
+        code = code_input.zfill(6)
+        
+        # 在 stock_table 中查找匹配的行
+        found_row = -1
+        for row in range(self.stock_table.rowCount()):
+            item = self.stock_table.item(row, 0)  # 第一列是 code
+            if item:
+                item_code = item.data(Qt.ItemDataRole.UserRole) or item.text()
+                if str(item_code).zfill(6) == code:
+                    found_row = row
+                    break
+        
+        if found_row >= 0:
+            # 找到匹配行 - 选中并滚动到可见
+            self.stock_table.setCurrentCell(found_row, 0)
+            self.stock_table.scrollToItem(self.stock_table.item(found_row, 0))
+            # 加载该股票的 K 线图
+            self.load_stock_by_code(code)
+            self.statusBar().showMessage(f"✅ 跳转到: {code}", 3000)
+            # 清空输入框
+            self.code_search_input.clear()
+        else:
+            # 未找到 - 尝试直接加载
+            self.load_stock_by_code(code)
+            self.statusBar().showMessage(f"⚠️ 表中未找到 {code}，尝试直接加载", 3000)
+            self.code_search_input.clear()
+
+    def _on_search_input_right_click(self, pos):
+        """搜索框右键菜单：自动粘贴并提取6位数字"""
+        import re
+        
+        # 获取剪贴板内容
+        clipboard = QApplication.clipboard()
+        text = clipboard.text().strip()
+        
+        if not text:
+            self.statusBar().showMessage("📋 剪贴板为空", 2000)
+            return
+        
+        # 提取6位连续数字（优先匹配第一个6位数字串）
+        matches = re.findall(r'\d{6}', text)
+        if matches:
+            code = matches[0]
+        else:
+            # 如果没有6位连续数字，尝试提取所有数字并取前6位
+            digits = re.sub(r'\D', '', text)[:6]
+            if len(digits) >= 1:
+                code = digits.zfill(6)
+            else:
+                self.statusBar().showMessage("📋 未找到有效数字", 2000)
+                return
+        
+        # 设置到输入框（textChanged 会触发2秒延迟定时器）
+        self.code_search_input.setText(code)
+        self.code_search_input.setFocus()  # 获取焦点，方便用户按Enter立即跳转
+
+    def _on_search_text_changed(self, text):
+        """输入框文本变化时重启延迟定时器（2秒后自动执行）"""
+        # 如果输入为空，停止定时器
+        if not text.strip():
+            self._search_debounce_timer.stop()
+            return
+        # 重启2秒定时器（每次输入都重置）
+        self._search_debounce_timer.stop()
+        self._search_debounce_timer.start(2000)  # 2秒延迟
 
     def _init_signal_message_box(self):
         """初始化信号消息盒子"""
@@ -5139,9 +5262,20 @@ class MainWindow(QMainWindow, WindowMixin):
         for item in self.hotlist_panel.items:
             if item.code in df.index:
                 row = df.loc[item.code]
+                # [FIX] 数据保护：当 index 重复时，df.loc 返回 DataFrame，需取第一行
+                if isinstance(row, pd.DataFrame):
+                    row = row.iloc[0]
                 
                 # [NEW] 顺便更新热点面板中的现价和盈亏
-                curr_price = float(row.get('close', row.get('price', 0)))
+                # [FIX] 安全获取价格，防止 Series 类型错误
+                try:
+                    price_val = row.get('close', row.get('price', 0))
+                    # 处理可能的 Series 或 NaN
+                    if isinstance(price_val, pd.Series):
+                        price_val = price_val.iloc[0] if len(price_val) > 0 else 0
+                    curr_price = float(price_val) if pd.notnull(price_val) else 0.0
+                except (TypeError, ValueError, IndexError):
+                    curr_price = 0.0
                 if curr_price > 0:
                     item.current_price = curr_price
                     if item.add_price > 0:

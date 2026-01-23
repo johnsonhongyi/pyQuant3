@@ -1003,7 +1003,9 @@ class Sina:
                 # 这必须与 format_response_data 中的 mi_cols 保持绝对一致以避免 ValueError
                 mi_cols = ['code', 'ticktime', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
                 mi_df = df_final.loc[:, [c for c in mi_cols if c in df_final.columns]].copy()
-                
+
+                # mi_df = self.clean_ohlcv_zero(mi_df)
+
                 if isinstance(mi_df, pd.DataFrame):
                     # 1. 无条件 Reset Index，确保所有数据 flattened，防止 ticktime 藏在 Index 中漏过类型检查
                     if not isinstance(mi_df.index, pd.RangeIndex):
@@ -1071,6 +1073,23 @@ class Sina:
             f"index.names={df.index.names}, "
             f"columns={list(df.columns)}"
         )
+
+    def drop_tick_all_zero(self,df: pd.DataFrame) -> pd.DataFrame:
+        """
+        删除 tick 中 OHLC + volume 全为 0 的脏行
+        - 不 reset index
+        - 保留 MultiIndex
+        - 适用于 tick / 分时
+        """
+        if df.empty:
+            return df
+
+        cols = [c for c in ('close', 'high', 'low', 'volume') if c in df.columns]
+        if not cols:
+            return df
+
+        mask_valid = df[cols].ne(0).any(axis=1)
+        return df.loc[mask_valid]
 
     def clean_ohlcv_zero(self, df: pd.DataFrame, ohlcv_cols=None, check_existing=True) -> pd.DataFrame:
         """
@@ -1285,11 +1304,12 @@ class Sina:
 
             # 调用清理函数
             # log.debug(f'index: {isinstance(df_mi_write.index, pd.RangeIndex)}')
-            df_mi_write = self.clean_ohlcv_zero(df_mi_write)
+            # df_mi_write = self.clean_ohlcv_zero(df_mi_write)
 
             # # 直接 reindex 取需要的列
             # # df_mi_write = df_mi.reindex(columns=[c for c in mi_cols if c in df_mi.columns])
             # df_mi_write = self.ensure_code_ticktime_index(df_mi_write)
+            # df_mi_write = self.clean_ohlcv_zero(df_mi_write)
 
             if isinstance(df_mi_write.index, pd.RangeIndex):
                 if 'code' in df_mi_write.columns and 'ticktime' in df_mi_write.columns:
@@ -1628,83 +1648,173 @@ class Sina:
     #         # 没有匹配到返回空 DataFrame
     #         return pd.DataFrame(columns=h5_hist.columns)
 
-
-
-    def get_real_time_tick(self, code: str, l_limit_time: int = int(cct.sina_limit_time), debug: bool = False) -> pd.DataFrame:
+    def get_real_time_tick(
+        self,
+        code: str,
+        l_limit_time: int = int(cct.sina_limit_time),
+        debug: bool = False
+    ) -> pd.DataFrame:
         """
         获取指定股票 code 的实时 tick 数据
-
-        :param code: 股票代码
-        :param l_limit_time: 限制时间窗口（分钟），用于选择 HDF5 表名
-        :param debug: 是否打印调试信息
-        :return: DataFrame，若没有数据返回空 DataFrame
         """
         h5_mi_fname = 'sina_MultiIndex_data'
         h5_mi_table = 'all_' + str(l_limit_time)
-        
-        # Cache keys including limit_time to distinguish different windows
+
         cache_key_df = f'sina_MultiIndex_hist_{l_limit_time}'
         cache_key_time = f'sina_MultiIndex_hist_time_{l_limit_time}'
+
+        df_code = pd.DataFrame()  # ⭐ 统一出口变量
+
         try:
-            # 1. Try to load from cache
+            # 1️⃣ 从缓存读取
             h5_hist = self.agg_cache.getkey(cache_key_df)
             last_time = self.agg_cache.getkey(cache_key_time)
             now_time = time.time()
+
             _real_time_tick_limit = cct.real_time_tick_limit
-            # 2. Check if cache needs update (missing or older than 5 minutes)
-            if (h5_hist is None or last_time is None) or ((now_time - float(last_time) > _real_time_tick_limit) and cct.get_work_time_duration()):
+
+            # 2️⃣ 判断是否需要重新加载
+            need_reload = (
+                h5_hist is None
+                or last_time is None
+                or (
+                    (now_time - float(last_time) > _real_time_tick_limit)
+                    and cct.get_work_time_duration()
+                )
+            )
+
+            if need_reload:
                 if debug:
-                    print(f"[DEBUG] Cache expired or missing. Loading HDF5 from disk: {h5_mi_table}")
-                # Load HDF5 Data
-                log.debug(f'load_h5_hist_hdf')
+                    print(f"[DEBUG] Cache expired or missing. Loading HDF5: {h5_mi_table}")
+
                 with timed_ctx("sina_data_h5_hist_load_hdf", warn_ms=800):
-                    h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False, MultiIndex=True)
-                # Update Cache if load successful
+                    h5_hist = h5a.load_hdf_db(
+                        h5_mi_fname,
+                        h5_mi_table,
+                        timelimit=False,
+                        MultiIndex=True,
+                    )
+
                 if h5_hist is not None and not h5_hist.empty:
                     self.agg_cache.setkey(cache_key_df, h5_hist)
                     self.agg_cache.setkey(cache_key_time, now_time)
             else:
-                # if debug:
-                    # log.debug(f"[DEBUG] Using cached HDF5 data (Age: {now_time - float(last_time):.1f}s)")
-                log.debug(f"[DEBUG] Using cached HDF5 data (Age: {now_time - float(last_time):.1f}s)")
+                log.debug(
+                    f"[DEBUG] Using cached HDF5 data "
+                    f"(Age: {now_time - float(last_time):.1f}s)"
+                )
 
-            if debug and h5_hist is not None:
-                print(f"[DEBUG] Table: {h5_mi_table}, rows: {len(h5_hist)}")
-            
+            # 3️⃣ 空表保护
             if h5_hist is None or h5_hist.empty:
-                 return pd.DataFrame()
+                return df_code
 
-            # 3. Filter for specific code
+            # 4️⃣ code 过滤（不提前 return）
             if code is not None:
                 with timed_ctx("sina_data_h5_loc_code", warn_ms=800):
-                    # df_code = get_code_df_fast(h5_hist,code)
                     if isinstance(h5_hist.index, pd.MultiIndex):
                         if code in h5_hist.index.get_level_values(0):
                             df_code = h5_hist.loc[[code]]
-                            if debug:
-                                print(f"[DEBUG] Found code {code}, rows: {len(df_code)}")
-                            return df_code
-                    elif code in h5_hist.index:
-                         df_code = h5_hist.loc[[code]]
-                         return df_code
-                    return df_code
-                if debug:
-                    print(f"[DEBUG] Code {code} not found in {h5_mi_table}")
-            
-            return pd.DataFrame()  # Code not found or hist empty
+                    else:
+                        if code in h5_hist.index:
+                            df_code = h5_hist.loc[[code]]
+
+            if debug:
+                print(
+                    f"[DEBUG] Table: {h5_mi_table}, "
+                    f"code: {code}, rows: {len(df_code)}"
+                )
 
         except FileNotFoundError:
             if debug:
                 print(f"[DEBUG] HDF5 file {h5_mi_fname} not found")
-            return pd.DataFrame()
+
         except KeyError:
             if debug:
                 print(f"[DEBUG] Table {h5_mi_table} not found in HDF5 file")
-            return pd.DataFrame()
+
         except Exception as e:
             if debug:
                 print(f"[DEBUG] Unexpected error: {e}")
-            return pd.DataFrame()
+        df_code = self.drop_tick_all_zero(df_code)
+        # ⭐ 统一出口
+        return df_code
+
+
+    # def get_real_time_tick_old(self, code: str, l_limit_time: int = int(cct.sina_limit_time), debug: bool = False) -> pd.DataFrame:
+    #     """
+    #     获取指定股票 code 的实时 tick 数据
+
+    #     :param code: 股票代码
+    #     :param l_limit_time: 限制时间窗口（分钟），用于选择 HDF5 表名
+    #     :param debug: 是否打印调试信息
+    #     :return: DataFrame，若没有数据返回空 DataFrame
+    #     """
+    #     h5_mi_fname = 'sina_MultiIndex_data'
+    #     h5_mi_table = 'all_' + str(l_limit_time)
+        
+    #     # Cache keys including limit_time to distinguish different windows
+    #     cache_key_df = f'sina_MultiIndex_hist_{l_limit_time}'
+    #     cache_key_time = f'sina_MultiIndex_hist_time_{l_limit_time}'
+    #     try:
+    #         # 1. Try to load from cache
+    #         h5_hist = self.agg_cache.getkey(cache_key_df)
+    #         last_time = self.agg_cache.getkey(cache_key_time)
+    #         now_time = time.time()
+    #         _real_time_tick_limit = cct.real_time_tick_limit
+    #         # 2. Check if cache needs update (missing or older than 5 minutes)
+    #         if (h5_hist is None or last_time is None) or ((now_time - float(last_time) > _real_time_tick_limit) and cct.get_work_time_duration()):
+    #             if debug:
+    #                 print(f"[DEBUG] Cache expired or missing. Loading HDF5 from disk: {h5_mi_table}")
+    #             # Load HDF5 Data
+    #             log.debug(f'load_h5_hist_hdf')
+    #             with timed_ctx("sina_data_h5_hist_load_hdf", warn_ms=800):
+    #                 h5_hist = h5a.load_hdf_db(h5_mi_fname, h5_mi_table, timelimit=False, MultiIndex=True)
+    #             # Update Cache if load successful
+    #             if h5_hist is not None and not h5_hist.empty:
+    #                 self.agg_cache.setkey(cache_key_df, h5_hist)
+    #                 self.agg_cache.setkey(cache_key_time, now_time)
+    #         else:
+    #             # if debug:
+    #                 # log.debug(f"[DEBUG] Using cached HDF5 data (Age: {now_time - float(last_time):.1f}s)")
+    #             log.debug(f"[DEBUG] Using cached HDF5 data (Age: {now_time - float(last_time):.1f}s)")
+
+    #         if debug and h5_hist is not None:
+    #             print(f"[DEBUG] Table: {h5_mi_table}, rows: {len(h5_hist)}")
+            
+    #         if h5_hist is None or h5_hist.empty:
+    #              return pd.DataFrame()
+
+    #         # 3. Filter for specific code
+    #         if code is not None:
+    #             with timed_ctx("sina_data_h5_loc_code", warn_ms=800):
+    #                 # df_code = get_code_df_fast(h5_hist,code)
+    #                 if isinstance(h5_hist.index, pd.MultiIndex):
+    #                     if code in h5_hist.index.get_level_values(0):
+    #                         df_code = h5_hist.loc[[code]]
+    #                         if debug:
+    #                             print(f"[DEBUG] Found code {code}, rows: {len(df_code)}")
+    #                         return df_code
+    #                 elif code in h5_hist.index:
+    #                      df_code = h5_hist.loc[[code]]
+    #                      return df_code
+    #                 return df_code
+    #             if debug:
+    #                 print(f"[DEBUG] Code {code} not found in {h5_mi_table}")
+            
+    #         return pd.DataFrame()  # Code not found or hist empty
+
+    #     except FileNotFoundError:
+    #         if debug:
+    #             print(f"[DEBUG] HDF5 file {h5_mi_fname} not found")
+    #         return pd.DataFrame()
+    #     except KeyError:
+    #         if debug:
+    #             print(f"[DEBUG] Table {h5_mi_table} not found in HDF5 file")
+    #         return pd.DataFrame()
+    #     except Exception as e:
+    #         if debug:
+    #             print(f"[DEBUG] Unexpected error: {e}")
+    #         return pd.DataFrame()
 
 
 def nanrankdata_len(x):
