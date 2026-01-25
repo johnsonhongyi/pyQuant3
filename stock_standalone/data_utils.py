@@ -1300,6 +1300,13 @@ def merge_strong_momentum_results(results, min_days=winlimit, columns=['sum_perc
     else:
         return pd.DataFrame(columns=columns + ['win'])
 
+def get_top_20(top_all):
+    # 精选 Top 20
+    top_20 = top_all.query('power_idx > 1.5 and win_upper >= 1').copy()
+    top_20['final_score'] = top_20['TrendS'].astype(float) * 0.4 + top_20['power_idx'] * 30 + top_20['gem_score'] * 0.3
+    top_20 = top_20.sort_values('final_score', ascending=False).head(20)
+    return top_20
+    
 def save_top_all_to_hdf(top_all, file_path=r'g:\top_all.h5'):
     # 如果 top_all 是字典，先合并成一个大的 DataFrame，或者逐个处理
     if isinstance(top_all, dict):
