@@ -615,6 +615,476 @@ def check_real_time(df, codes):
         )
         logger.debug(f"{row['code']} - 实盘模式: {not ohlc_same_as_last1d}, ohlc_same_as_last1d={ohlc_same_as_last1d}")
 
+
+def scoring_momentum_pullback_system(df: pd.DataFrame, max_days: int = 9):
+    N = len(df)
+    if N == 0: return df
+
+    def get_mat(prefix, suffix='d'):
+        if prefix in ['upper', 'high4']:
+            cols = [f"{prefix}{i}" for i in range(1, max_days + 1)]
+        else:
+            cols = [f"{prefix}{i}{suffix}" for i in range(1, max_days + 1)]
+        valid = [c for c in cols if c in df.columns]
+        mat = np.zeros((N, max_days))
+        if valid:
+            mat[:, :len(valid)] = df[valid].values
+        return mat
+
+    # --- 1. 构建基础矩阵 ---
+    C = get_mat('lastp')   # Close (0=今日, 1=昨日...)
+    O = get_mat('lasto')   # Open
+    L = get_mat('lastl')   # Low
+    H = get_mat('lasth')   # High
+    U = get_mat('upper')   # Upper Band
+    M5 = get_mat('ma5')
+    M10 = get_mat('ma10')
+    H4 = get_mat('high4')
+    P = get_mat('per')     # 涨跌幅
+
+    scores = np.zeros(N)
+
+    # --- 2. 维度一：前期强势基因 (权重: 30) ---
+    early_strong = np.any(C[:, 6:9] > U[:, 6:9], axis=1)
+    scores += np.where(early_strong, 30, 0)
+
+    # --- 3. 维度二：回踩企稳判定 (权重: 20) ---
+    near_ma = (np.abs(C[:, 0:2] - M10[:, 0:2]) / M10[:, 0:2] < 0.015) | \
+              (np.abs(C[:, 0:2] - M5[:, 0:2]) / M5[:, 0:2] < 0.015)
+    scores += np.where(np.any(near_ma, axis=1), 20, 0)
+
+    # --- 4. 维度三：K线形态与突破细化 ---
+    # (1) Open == Low 信号 (权重: 25)
+    open_eq_low = (O[:, 0] == L[:, 0]) & (C[:, 0] > O[:, 0])
+    scores += np.where(open_eq_low, 25, 0)
+
+    # (2) High4 突破精度优化 (基础15 + 溢出奖励)
+    # 计算今日收盘超过 High4 的百分比
+    break_ratio = (C[:, 0] - H4[:, 0]) / H4[:, 0]
+    breaking_out = (C[:, 0] >= H4[:, 0])
+    # 溢出分：每超过 1% 加 0.5 分，最高封顶 3 分 (即超过 6% 就不再额外加分)
+    break_bonus = np.clip(break_ratio * 100 * 0.5, 0, 3)
+    scores += np.where(breaking_out, 15 + break_bonus, 0)
+
+    # (3) 最近两日走势节奏 (Micro-Rhythm)
+    # 节奏 A: 今日重心抬高 (收盘价 > 昨日收盘) -> 加 1.2 分
+    # 节奏 B: 今日承接力强 (最低价 > 昨日最低) -> 加 0.8 分
+    rhythm_score = np.where(C[:, 0] > C[:, 1], 1.2, 0) + \
+                   np.where(L[:, 0] > L[:, 1], 0.8, 0)
+    scores += rhythm_score
+
+    # (4) 十字星企稳 (权重: 10)
+    body_pct = np.abs(C[:, 0] - O[:, 0]) / O[:, 0]
+    doji = (body_pct < 0.005) & (H[:, 0] > L[:, 0])
+    scores += np.where(doji, 10, 0)
+
+    # --- 5. 维度四：异常风险扣分 ---
+    three_day_ret = np.sum(P[:, 0:3], axis=1)
+    scores += np.where(three_day_ret < -15, -50, 0)
+
+    # --- 6. 结果输出 ---
+    res = df.copy()
+    res['gem_score'] = np.round(scores, 2) # 保留两位小数拉开区分度
+    return res.sort_values(by='gem_score', ascending=False)
+
+
+
+def scoring_momentum_pullback_system_first(df: pd.DataFrame, max_days: int = 9):
+    N = len(df)
+    if N == 0: return df
+
+    def get_mat(prefix, suffix='d'):
+        # 兼容不同列名格式
+        if prefix in ['upper', 'high4']:
+            cols = [f"{prefix}{i}" for i in range(1, max_days + 1)]
+        else:
+            cols = [f"{prefix}{i}{suffix}" for i in range(1, max_days + 1)]
+        valid = [c for c in cols if c in df.columns]
+        mat = np.zeros((N, max_days))
+        if valid:
+            mat[:, :len(valid)] = df[valid].values
+        return mat
+
+    # --- 1. 构建基础矩阵 (0=1d, 1=2d, ..., 8=9d) ---
+    C = get_mat('lastp')   # Close
+    O = get_mat('lasto')   # Open
+    L = get_mat('lastl')   # Low
+    H = get_mat('lasth')   # High
+    U = get_mat('upper')   # Upper Band
+    M5 = get_mat('ma5')
+    M10 = get_mat('ma10')
+    H4 = get_mat('high4')
+    P = get_mat('per')     # 涨跌幅
+
+    scores = np.zeros(N)
+
+    # --- 2. 维度一：前期强势基因 (7-9日前上过轨) ---
+    # 检查 7d, 8d, 9d 是否有 P > U
+    early_strong = np.any(C[:, 6:9] > U[:, 6:9], axis=1)
+    scores += np.where(early_strong, 30, 0)
+
+    # --- 3. 维度二：回踩企稳判定 (最近1-3天) ---
+    # 最近 1-2 天收盘价在 MA5 或 MA10 附近 (波动率 < 1.5%)
+    near_ma = (np.abs(C[:, 0:2] - M10[:, 0:2]) / M10[:, 0:2] < 0.015) | \
+              (np.abs(C[:, 0:2] - M5[:, 0:2]) / M5[:, 0:2] < 0.015)
+    scores += np.where(np.any(near_ma, axis=1), 20, 0)
+
+    # --- 4. 维度三：K线形态打分 (1d/今天) ---
+    # (1) Open == Low 信号
+    open_eq_low = (O[:, 0] == L[:, 0]) & (C[:, 0] > O[:, 0])
+    scores += np.where(open_eq_low, 25, 0)
+
+    # (2) Close > High4 蓄势信号
+    breaking_out = (C[:, 0] >= H4[:, 0])
+    scores += np.where(breaking_out, 15, 0)
+
+    # (3) 十字星企稳 (实体长度 < 0.5% 且 有上下影线)
+    body_pct = np.abs(C[:, 0] - O[:, 0]) / O[:, 0]
+    doji = (body_pct < 0.005) & (H[:, 0] > L[:, 0])
+    scores += np.where(doji, 10, 0)
+
+    # --- 5. 维度四：涨跌幅扣分/加分 (防止阴跌) ---
+    # 如果最近3天跌幅过大 (<-15%)，判定为走坏，大幅扣分
+    three_day_ret = np.sum(P[:, 0:3], axis=1)
+    scores += np.where(three_day_ret < -15, -50, 0)
+
+    # --- 6. 结果输出 ---
+    res = df.copy()
+    res['gem_score'] = scores
+    # 过滤出有基本得分的个股并排序
+    return res.sort_values(by='gem_score', ascending=False)
+
+# 调用示例
+# top_potential = scoring_momentum_pullback_system(top_all)
+
+def get_vect_col(upper='upper',max_days=cct.compute_lastdays):
+    cols = []
+    # 构建 lastp, lasth, lastl, lastv 等列
+    for prefix in ['lastp', 'lasth', 'lasto','lastl', 'lastv', upper, 'high4', 'ma5']:
+        for i in range(1, max_days + 1):
+            cols.append(f"{prefix}{i}d" if prefix not in ['upper', 'high4'] else f"{prefix}{i}")
+
+    # 最终再加上计算列 win_upper
+    cols.append('win_upper')
+    return cols
+
+
+def strong_momentum_large_cycle_vect_consecutive_above(
+    df: pd.DataFrame,
+    price_col: str = 'lastp',
+    upper_col: str = 'upper',
+    ma_col: str = 'ma5',
+    high4_col: str = 'high4',
+    max_days: int = 9
+):
+    N = len(df)
+    if N == 0:
+        return df.assign(**{f'win_{upper_col}': np.zeros(N, dtype=int)})
+
+    # ---------- 构建矩阵 (0轴代表行, 1轴代表天数 1d, 2d... ) ----------
+    def get_mat(prefix):
+        # 统一处理列名，upper/high4 后面没有 'd'，lastp/lastl 有 'd'
+        if prefix in ['upper', 'high4']:
+            cols = [f"{prefix}{i}" for i in range(1, max_days + 1)]
+        else:
+            cols = [f"{prefix}{i}d" for i in range(1, max_days + 1)]
+        
+        valid = [c for c in cols if c in df.columns]
+        # 初始化为 NaN 或 0，这里用 0 并在后面取交集有效长度
+        mat = np.zeros((N, len(valid))) 
+        if valid:
+            mat = df[valid].values
+        return mat, len(valid)
+
+    P, plen = get_mat(price_col)
+    U, ulen = get_mat(upper_col)
+    L, _    = get_mat('lastl')
+    Ma, _   = get_mat(ma_col)
+    H4, _   = get_mat(high4_col)
+
+    usable = min(plen, ulen)
+    win_upper = np.zeros(N, dtype=int)
+
+    # ---------- 核心计算 ----------
+    # start_cond[i, j] 表示第 i 行第 j+1 天是否满足启动条件
+    start_cond = (L[:, :usable] <= Ma[:, :usable]) & (P[:, :usable] > H4[:, :usable])
+    # above_upper[i, j] 表示第 i 行第 j+1 天是否站稳压力位
+    above_upper = (P[:, :usable] > U[:, :usable])
+
+    for i in range(N):
+        # 找到最近的启动点索引 (1d=0, 2d=1...)
+        # 使用 np.where 找到所有启动点，取第一个 [0] 即为最近的启动点
+        hits = np.where(start_cond[i])[0]
+        if len(hits) == 0:
+            continue
+        
+        start_idx = hits[0] 
+        
+        # 启动当天必须满足 P > U 才能开始计天数
+        if not above_upper[i, start_idx]:
+            win_upper[i] = 0
+            continue
+        
+        # 从启动点开始向“现在”(索引减小的方向) 检查连续性
+        # 例如 start_idx = 2 (3d), 检查顺序为 2 -> 1 -> 0
+        count = 0
+        for j in range(start_idx, -1, -1):
+            if above_upper[i, j]:
+                count += 1
+            else:
+                break # 一旦断掉就停止
+        
+        win_upper[i] = count
+
+    res = df.copy()
+    res[f'win_{upper_col}'] = win_upper
+    return res
+
+
+
+def strong_momentum_large_cycle_vect_consecutive_above_m5(
+    df: pd.DataFrame,
+    price_col: str = 'lastp',
+    upper_col: str = 'upper',
+    ma_col: str = 'ma5',
+    max_days: int = 20,
+):
+    """
+    修正版逻辑：
+    1. 找到离现在最近的一个满足 L <= Ma 的交易日作为“启动点”。
+    2. 启动点当天计 1 天。
+    3. 从启动点向“现在”的方向（即 1d 方向）检查，如果连续满足 P > U 且 C > O，则累加天数。
+    """
+    N = len(df)
+    if N == 0:
+        return df.assign(**{f'wm5_{upper_col}': np.zeros(N, dtype=int)})
+
+    # ---------- 构建矩阵 (1d 在 index 0, 2d 在 index 1...) ----------
+    def get_mat(prefix, use_col=None):
+        cols = [f"{prefix}{i}" for i in range(1, max_days+1)] if prefix == upper_col else [f"{prefix}{i}d" for i in range(1, max_days+1)]
+        valid = [c for c in cols if c in df.columns]
+        if valid:
+            return df[valid].values
+        else:
+            # 兼容性处理：若无滚动列则重复当前列
+            use_col = use_col or prefix
+            return np.tile(df[[use_col]].values, (1, max_days))
+
+    P  = get_mat(price_col)
+    U  = get_mat(upper_col)
+    L  = get_mat('lastl')
+    Ma = get_mat(ma_col)
+    O  = get_mat('lasto')
+    C  = P  # 阳线判断通常使用收盘价/现价
+
+    win_upper = np.zeros(N, dtype=int)
+
+    # ---------- 条件矩阵 ----------
+    # 注意：矩阵的列索引 0=1d, 1=2d, 2=3d...
+    cond_touch = (L <= Ma)
+    cond_strong = (P > U) & (C > O)
+
+    # ---------- 遍历每行计算 ----------
+    for i in range(N):
+        # 1. 找到最近的一次启动点 (即最小的列索引)
+        idxs = np.where(cond_touch[i])[0]
+        if len(idxs) == 0:
+            continue
+        
+        start_idx = idxs[0]  # 最近的一个满足 L <= Ma 的位置 (例如 3d 对应索引 2)
+        
+        # 2. 启动点当天计入
+        length = 1
+        
+        # 3. 从启动点向“现在”方向遍历 (索引减小的方向)
+        # 例如 start_idx=2 (3d)，则检查索引 1 (2d) 和 0 (1d)
+        for j in range(start_idx - 1, -1, -1):
+            if cond_strong[i, j]:
+                length += 1
+            else:
+                # 一旦不满足 P>U & C>O，连续中断
+                break
+        
+        win_upper[i] = length
+
+    res = df.copy()
+    res[f'wm5_{upper_col}'] = win_upper
+    return res
+
+def strong_momentum_large_cycle_vect_consecutive_above_single(
+    df: pd.DataFrame,
+    price_col: str = 'lastp',     # 'lastp' or 'lasth'
+    upper_col: str = 'upper',     # 'upper', 'ma5', 'ma10', ...
+    max_days: int = 20,
+):
+    """
+    统计从 1d 开始向过去方向，price_col > upper_col 连续成立的天数。
+    如果 1d 就不满足，则返回 0。
+    """
+    N = len(df)
+    if N == 0:
+        return df
+
+    # ---------- 构建矩阵 (1d=idx 0, 2d=idx 1...) ----------
+    def get_val_matrix(prefix):
+        if prefix == 'upper':
+            cols = [f"{prefix}{i}" for i in range(1, max_days + 1)]
+        else:
+            cols = [f"{prefix}{i}d" for i in range(1, max_days + 1)]
+        
+        valid_cols = [c for c in cols if c in df.columns]
+        if not valid_cols:
+            return None, 0
+        return df[valid_cols].values, len(valid_cols)
+
+    P, p_len = get_val_matrix(price_col)
+    U, u_len = get_val_matrix(upper_col)
+
+    usable_days = min(p_len, u_len)
+    if usable_days == 0:
+        df[f'w_{upper_col}'] = 0
+        return df
+
+    # ---------- 核心向量化逻辑 ----------
+    # cond 矩阵: True 代表 P > U
+    cond = P[:, :usable_days] > U[:, :usable_days]
+
+    # 寻找每一行第一个出现 False 的位置 (即不满足 P > U 的日子)
+    # ~cond 会把 True 变 False，np.argmax 找到第一个 True (即原矩阵第一个 False)
+    first_false = np.argmax(~cond, axis=1)
+
+    # 特殊情况处理：如果整行都是 True，np.argmax 会返回 0
+    # 我们需要区分：是真的第一天就是 False，还是全行都是 True
+    all_true = np.all(cond, axis=1)
+    
+    win_upper = np.where(all_true, usable_days, first_false)
+
+    # 如果第一天就是 False (cond[:,0] == False)，first_false 本身就是 0，正确
+    
+    # ---------- 输出 ----------
+    res_df = df.copy()
+    res_df[f'w_{upper_col}'] = win_upper
+
+    return res_df
+
+# def strong_momentum_large_cycle_vect_other_noapp(
+#     df,
+#     max_days=10,
+#     winlimit=1,
+#     upper_prefix='upper',          # e.g. 'upper', 'ma10', 'ma20'
+#     upper_mode='P',             # 'P' | 'PH' | 'custom'
+#     debug=False
+# ):
+#     N = len(df)
+#     if N == 0:
+#         return {}
+
+#     # ========= 1. 构建矩阵 =========
+#     def get_val_matrix_other(prefix):
+#         if prefix == 'upper':
+#             cols = [f"{prefix}{i}" for i in range(1, max_days + 2)]
+#         else:
+#             cols = [f"{prefix}{i}d" for i in range(1, max_days + 2)]
+#         valid_cols = [c for c in cols if c in df.columns]
+#         mat = np.zeros((N, max_days + 2))
+#         if valid_cols:
+#             mat[:, 1:len(valid_cols) + 1] = df[valid_cols].values
+#         return mat
+
+#     P = get_val_matrix_other('lastp')
+#     H = get_val_matrix_other('lasth')
+#     L = get_val_matrix_other('lastl')
+#     V = get_val_matrix_other('lastv')
+
+#     U = None
+#     if upper_prefix is not None:
+#         U = get_val_matrix_other(upper_prefix)
+
+#     # ========= 2. 趋势判定 =========
+#     yesterday_up = P[:, 1] > P[:, 2]
+#     max_win = np.zeros(N, dtype=int)
+
+#     for w in range(2, max_days):
+#         c_a, p_a = np.arange(1, w), np.arange(2, w + 1)
+#         c_b, p_b = np.arange(2, w + 1), np.arange(3, w + 2)
+
+#         # ---------- 原始结构 ----------
+#         m_a = (
+#             np.all(P[:, c_a] >= P[:, p_a], axis=1) &
+#             np.all(H[:, c_a] >= P[:, c_a], axis=1) &
+#             np.all((L[:, c_a] >= L[:, p_a]) | (V[:, c_a] >= V[:, p_a]), axis=1)
+#         )
+
+#         m_b = (
+#             np.all(P[:, c_b] >= P[:, p_b], axis=1) &
+#             np.all(H[:, c_b] >= H[:, p_b], axis=1) &
+#             np.all((L[:, c_b] >= L[:, p_b]) | (V[:, c_b] >= V[:, p_b]), axis=1)
+#         )
+
+#         # ---------- upper / MA 结构约束 ----------
+#         if U is not None:
+#             if upper_mode == 'P':
+#                 m_a &= np.all(P[:, c_a] > U[:, c_a], axis=1)
+#                 m_b &= np.all(P[:, c_b] > U[:, c_b], axis=1)
+
+#             elif upper_mode == 'PH':
+#                 m_a &= (
+#                     np.all(P[:, c_a] > U[:, c_a], axis=1) &
+#                     np.all(H[:, c_a] > U[:, c_a], axis=1)
+#                 )
+#                 m_b &= (
+#                     np.all(P[:, c_b] > U[:, c_b], axis=1) &
+#                     np.all(H[:, c_b] > U[:, c_b], axis=1)
+#                 )
+
+#             elif upper_mode == 'custom':
+#                 # 预留：你可以在这里插入更复杂的逻辑
+#                 pass
+
+#         combined = (yesterday_up & m_a) | (~yesterday_up & m_b)
+#         if not np.any(combined):
+#             break
+
+#         max_win[combined] = w
+
+#     # ========= 3. 筛选 =========
+#     keep_idx = np.where(max_win >= winlimit)[0]
+#     if len(keep_idx) == 0:
+#         return {}
+
+#     # ========= 4. 斜率 =========
+#     start_d = np.where(yesterday_up[keep_idx], 1, 2)
+#     end_d = start_d + max_win[keep_idx] - 1
+
+#     p_start = P[keep_idx, start_d]
+#     p_end = P[keep_idx, end_d]
+
+#     slopes = (p_start - p_end) / p_end / (max_win[keep_idx] - 1) * 100
+
+#     # ========= 5. 爆发力 =========
+#     v_sub = V[keep_idx].copy()
+#     col_range = np.arange(V.shape[1])
+#     mask = (col_range >= start_d[:, None]) & (col_range <= end_d[:, None])
+#     v_sub[~mask] = 0
+
+#     avg_vols = np.sum(v_sub, axis=1) / max_win[keep_idx]
+#     vol_ratio = V[keep_idx, 1] / (avg_vols + 1e-9)
+
+#     power_idx = slopes * vol_ratio
+
+#     # ========= 6. 输出 =========
+#     res_df = df.iloc[keep_idx].copy()
+#     res_df['max_win'] = max_win[keep_idx]
+#     res_df['slope'] = np.round(slopes, 2)
+#     res_df['vol_ratio'] = np.round(vol_ratio, 2)
+#     res_df['power_idx'] = np.round(power_idx, 2)
+#     res_df['sum_perc'] = np.round((p_start - p_end) / p_end * 100, 2)
+
+#     return {
+#         int(w): g.sort_values('power_idx', ascending=False)
+#         for w, g in res_df.groupby('max_win')
+#     }
+
 # 使用示例：
 # df = pd.DataFrame(vect_daily_t)
 # check_real_time(df, ['688239', '601360'])
@@ -701,104 +1171,104 @@ def strong_momentum_large_cycle_vect(df, max_days=10, winlimit=2,debug=False):
             for w, group in res_df.groupby('max_win')}
 
 
-def strong_momentum_today_plus_history_sum_opt(df, max_days=cct.compute_lastdays, winlimit=winlimit,debug=False):
-    """
-    完全向量化版本，用 NumPy 计算严格连续上涨和 sum_percent 25ms
-    """
-    result_dict = {}
+# def strong_momentum_today_plus_history_sum_opt(df, max_days=cct.compute_lastdays, winlimit=winlimit,debug=False):
+#     """
+#     完全向量化版本，用 NumPy 计算严格连续上涨和 sum_percent 25ms
+#     """
+#     result_dict = {}
 
-    # ===== 0️⃣ 判断今天状态，只做一次 =====
-    is_trade_day = cct.get_trade_date_status()
-    in_market_hours = 915 < cct.get_now_time_int() < 1500
-    real_time_mode = is_trade_day and in_market_hours
+#     # ===== 0️⃣ 判断今天状态，只做一次 =====
+#     is_trade_day = cct.get_trade_date_status()
+#     in_market_hours = 915 < cct.get_now_time_int() < 1500
+#     real_time_mode = is_trade_day and in_market_hours
 
-    ohlc_same_as_last1d = (
-        (df['open'] == df.get('lasto1d', df['open'])) &
-        (df['low'] == df.get('lastl1d', df['low'])) &
-        (df['high'] == df.get('lasth1d', df['high'])) &
-        (df['close'] == df.get('lastp1d', df['close']))
-    )
-    use_real_ohlc = real_time_mode & (~ohlc_same_as_last1d)
+#     ohlc_same_as_last1d = (
+#         (df['open'] == df.get('lasto1d', df['open'])) &
+#         (df['low'] == df.get('lastl1d', df['low'])) &
+#         (df['high'] == df.get('lasth1d', df['high'])) &
+#         (df['close'] == df.get('lastp1d', df['close']))
+#     )
+#     use_real_ohlc = real_time_mode & (~ohlc_same_as_last1d)
 
-    # ===== 1️⃣ 今天数据列 =====
-    today_open  = df['open'].where(use_real_ohlc, df['lasto1d']).to_numpy()
-    today_high  = df['high'].where(use_real_ohlc, df['lasth1d']).to_numpy()
-    today_low   = df['low'].where(use_real_ohlc, df['lastl1d']).to_numpy()
-    today_close = df['close'].where(use_real_ohlc, df['lastp1d']).to_numpy()
-    # today_vol = df['volume'].where(use_real_ohlc, df['lastv1d']).to_numpy()
+#     # ===== 1️⃣ 今天数据列 =====
+#     today_open  = df['open'].where(use_real_ohlc, df['lasto1d']).to_numpy()
+#     today_high  = df['high'].where(use_real_ohlc, df['lasth1d']).to_numpy()
+#     today_low   = df['low'].where(use_real_ohlc, df['lastl1d']).to_numpy()
+#     today_close = df['close'].where(use_real_ohlc, df['lastp1d']).to_numpy()
+#     # today_vol = df['volume'].where(use_real_ohlc, df['lastv1d']).to_numpy()
 
-    codes = df.index.to_numpy()
+#     codes = df.index.to_numpy()
 
-    # ===== 2️⃣ 历史收盘/高/低 =====
-    # 构建 N x max_days 的 NumPy array
-    lastp = np.zeros((len(df), max_days))
-    lasth = np.zeros((len(df), max_days))
-    lastl = np.zeros((len(df), max_days))
-    lastv = np.zeros((len(df), max_days))
+#     # ===== 2️⃣ 历史收盘/高/低 =====
+#     # 构建 N x max_days 的 NumPy array
+#     lastp = np.zeros((len(df), max_days))
+#     lasth = np.zeros((len(df), max_days))
+#     lastl = np.zeros((len(df), max_days))
+#     lastv = np.zeros((len(df), max_days))
 
-    for i in range(1, max_days+1):
-        lastp[:, i-1] = df.get(f'lastp{i}d', 0).to_numpy()
-        lasth[:, i-1] = df.get(f'lasth{i}d', 0).to_numpy()
-        lastl[:, i-1] = df.get(f'lastl{i}d', 0).to_numpy()
-        lastv[:, i-1] = df.get(f'lastv{i}d', 0).to_numpy()
+#     for i in range(1, max_days+1):
+#         lastp[:, i-1] = df.get(f'lastp{i}d', 0).to_numpy()
+#         lasth[:, i-1] = df.get(f'lasth{i}d', 0).to_numpy()
+#         lastl[:, i-1] = df.get(f'lastl{i}d', 0).to_numpy()
+#         lastv[:, i-1] = df.get(f'lastv{i}d', 0).to_numpy()
 
-    # ===== 3️⃣ 遍历窗口 =====
-    start_window = winlimit
+#     # ===== 3️⃣ 遍历窗口 =====
+#     start_window = winlimit
 
-    # 盘后：today == last1d，window=1 没有策略意义
-    if not use_real_ohlc.any():
-        start_window = max(2, winlimit)
+#     # 盘后：today == last1d，window=1 没有策略意义
+#     if not use_real_ohlc.any():
+#         start_window = max(2, winlimit)
 
-    # ===== 3️⃣ 遍历窗口 =====
-    for window in range(start_window, max_days+1):
-        if window == 1:
-            # window=1 特殊处理
-            # mask = (today_high > lastp[:, 0]) & (today_close > lastp[:, 0])
-            # window=1 特殊处理：实时 vs 收盘后
-            mask = np.where(
-                use_real_ohlc.to_numpy(),
-                (today_high > lastp[:, 0]) & (today_close > lastp[:, 0]),  # 实时 vs 昨天
-                (lastp[:, 0] > df.get('lastp2d', lastp[:, 0]).to_numpy()) &
-                (lasth[:, 0] > df.get('lasth2d', lasth[:, 0]).to_numpy())  # 收盘后 vs 前天
-            )
-            if debug:
-                # logger.debug(f"use_real_ohlc: {use_real_ohlc.all()} window={window}, mask_close={mask}")
-                print(f"use_real_ohlc: {use_real_ohlc.all()} window={window}, mask_close={mask}")
+#     # ===== 3️⃣ 遍历窗口 =====
+#     for window in range(start_window, max_days+1):
+#         if window == 1:
+#             # window=1 特殊处理
+#             # mask = (today_high > lastp[:, 0]) & (today_close > lastp[:, 0])
+#             # window=1 特殊处理：实时 vs 收盘后
+#             mask = np.where(
+#                 use_real_ohlc.to_numpy(),
+#                 (today_high > lastp[:, 0]) & (today_close > lastp[:, 0]),  # 实时 vs 昨天
+#                 (lastp[:, 0] > df.get('lastp2d', lastp[:, 0]).to_numpy()) &
+#                 (lasth[:, 0] > df.get('lasth2d', lasth[:, 0]).to_numpy())  # 收盘后 vs 前天
+#             )
+#             if debug:
+#                 # logger.debug(f"use_real_ohlc: {use_real_ohlc.all()} window={window}, mask_close={mask}")
+#                 print(f"use_real_ohlc: {use_real_ohlc.all()} window={window}, mask_close={mask}")
 
-        else:
-            # 严格连续上涨
-            # lastp[:, 0:window-1] > lastp[:, 1:window] for close
-            mask_close = np.all(lastp[:, :window-1] > lastp[:, 1:window], axis=1)
-            mask_high  = np.all(lasth[:, :window-1] > lasth[:, 1:window], axis=1)
-            # mask_low   = np.all(lastl[:, :window-1] > lastl[:, 1:window], axis=1)
-            cond_low = lastl[:, :window-1] > lastl[:, 1:window]
-            cond_vol = lastv[:, :window-1] > lastv[:, 1:window]
-            mask_low_or_vol = np.all(cond_low | cond_vol, axis=1)
-            mask = mask_close & mask_high & mask_low_or_vol
-            if debug:
-                # logger.debug(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close},mask_high={mask_high}, mask_low={mask_low_or_vol} cond_low:{np.all(cond_low)} cond_vol:{np.all(cond_vol)}")
-                # print(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close},mask_high={mask_high}, mask_low={mask_low_or_vol} cond_low:{cond_low[0, i]} cond_vol:{cond_vol[0, i]}")
-                print(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close},mask_high={mask_high}, mask_low={mask_low_or_vol}")
+#         else:
+#             # 严格连续上涨
+#             # lastp[:, 0:window-1] > lastp[:, 1:window] for close
+#             mask_close = np.all(lastp[:, :window-1] > lastp[:, 1:window], axis=1)
+#             mask_high  = np.all(lasth[:, :window-1] > lasth[:, 1:window], axis=1)
+#             # mask_low   = np.all(lastl[:, :window-1] > lastl[:, 1:window], axis=1)
+#             cond_low = lastl[:, :window-1] > lastl[:, 1:window]
+#             cond_vol = lastv[:, :window-1] > lastv[:, 1:window]
+#             mask_low_or_vol = np.all(cond_low | cond_vol, axis=1)
+#             mask = mask_close & mask_high & mask_low_or_vol
+#             if debug:
+#                 # logger.debug(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close},mask_high={mask_high}, mask_low={mask_low_or_vol} cond_low:{np.all(cond_low)} cond_vol:{np.all(cond_vol)}")
+#                 # print(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close},mask_high={mask_high}, mask_low={mask_low_or_vol} cond_low:{cond_low[0, i]} cond_vol:{cond_vol[0, i]}")
+#                 print(f"use_real_ohlc: {use_real_ohlc.all()} 对比{window-1} vs {window} window={window}, mask_close={mask_close},mask_high={mask_high}, mask_low={mask_low_or_vol}")
 
-        if not mask.any():
-            continue
+#         if not mask.any():
+#             continue
 
-        # ===== 4️⃣ sum_percent =====
-        compare_low = lastl[:, window-1].copy()
-        compare_low[compare_low==0] = today_low[compare_low==0]  # 避免0
-        sum_percent = ((today_high - compare_low) / compare_low * 100).round(2)
-        sum_percent = sum_percent[mask]
+#         # ===== 4️⃣ sum_percent =====
+#         compare_low = lastl[:, window-1].copy()
+#         compare_low[compare_low==0] = today_low[compare_low==0]  # 避免0
+#         sum_percent = ((today_high - compare_low) / compare_low * 100).round(2)
+#         sum_percent = sum_percent[mask]
 
-        # ===== 5️⃣ 构建 df 矩阵 =====
-        df_window = df.iloc[mask].copy()
-        df_window['sum_perc'] = sum_percent
-        df_window = df_window.sort_values('sum_perc', ascending=False)
-        # result_dict[window] = df_window
-        # ===== 修正 window 输出 =====
-        effective_window = window - (0 if use_real_ohlc.any() else 1)
-        result_dict[effective_window] = df_window
+#         # ===== 5️⃣ 构建 df 矩阵 =====
+#         df_window = df.iloc[mask].copy()
+#         df_window['sum_perc'] = sum_percent
+#         df_window = df_window.sort_values('sum_perc', ascending=False)
+#         # result_dict[window] = df_window
+#         # ===== 修正 window 输出 =====
+#         effective_window = window - (0 if use_real_ohlc.any() else 1)
+#         result_dict[effective_window] = df_window
 
-    return result_dict
+#     return result_dict
 
 # def merge_strong_momentum_results(results, min_days=2, columns=['name','lastp1d','lasth1d','lastl1d','sum_percent']):
 def merge_strong_momentum_results(results, min_days=winlimit, columns=['sum_perc','slope','vol_ratio','power_idx']):
@@ -1508,13 +1978,26 @@ def fetch_and_process(
             with timed_ctx("plus_history_sum_opt", warn_ms=1000):
                 if resample == 'd':
                     # result_opt = strong_momentum_today_plus_history_sum_opt(top_all,max_days=cct.compute_lastdays)
-                    result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays)
+                    result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays,winlimit=1)
                 else:
-                    result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays)
-            
+                    result_opt = strong_momentum_large_cycle_vect(top_all,max_days=cct.compute_lastdays,winlimit=1)
             with timed_ctx("merge_strong_momentum_results_opt", warn_ms=1000):
                 clean_sum = merge_strong_momentum_results(result_opt,min_days=winlimit)
                 top_all = align_sum_percent(top_all,clean_sum)
+
+            with timed_ctx("consecutive_above_win_upper", warn_ms=1000):
+                top_all = strong_momentum_large_cycle_vect_consecutive_above(top_all, price_col='lastp', upper_col='upper',max_days=cct.compute_lastdays)
+            
+            with timed_ctx("consecutive_above_single_w_upper", warn_ms=1000):
+                top_all = strong_momentum_large_cycle_vect_consecutive_above_single(top_all, price_col='lastp', upper_col='upper',max_days=cct.compute_lastdays)
+            with timed_ctx("consecutive_above_wm5_upper", warn_ms=1000):
+                top_all = strong_momentum_large_cycle_vect_consecutive_above_m5(top_all, price_col='lastp', upper_col='upper',max_days=cct.compute_lastdays)
+            with timed_ctx("scoring_momentum_pullback_system", warn_ms=1000):
+                top_all = scoring_momentum_pullback_system(top_all,max_days=cct.compute_lastdays)
+            # print(top_all.loc['920427', get_vect_col(upper='upper',max_days=cct.compute_lastdays)].T.to_string())
+            # cct.print_timing_summary()
+            logger.debug(f"{top_all.query('win_upper > 0').loc['920427',['win_upper','w_upper','wm5_upper','gem_score']]}")
+            logger.debug(f"{top_all.sort_values(by='gem_score', ascending=False).gem_score[:10]}")
             logger.info(f'clean_sum: {time.time() - time_sum:.2f}')
             with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
                 top_all = build_hma_and_trendscore(top_all,status_callback=status_callback)

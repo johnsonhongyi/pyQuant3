@@ -502,7 +502,7 @@ class HotlistPanel(QWidget):
         
         self.status_label.setText(f"共 {len(self.items)} 只热点股")
     
-    def add_stock(self, code: str, name: str, price: float, signal_type: str = "手动添加"):
+    def add_stock(self, code: str, name: str, price: float, signal_type: str = "手动添加", group: str = "观察"):
         """
         添加股票到热点列表
         
@@ -511,6 +511,7 @@ class HotlistPanel(QWidget):
             name: 股票名称
             price: 加入时价格
             signal_type: 信号类型
+            group: 分组名称 (观察/强势/缺口等)
         """
         # 检查是否已存在
         for item in self.items:
@@ -526,8 +527,8 @@ class HotlistPanel(QWidget):
             c.execute("""
                 INSERT INTO follow_record 
                 (code, name, follow_date, follow_price, status, signal_type, group_tag)
-                VALUES (?, ?, ?, ?, 'ACTIVE', ?, '观察')
-            """, (code, name, now, price, signal_type))
+                VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?)
+            """, (code, name, now, price, signal_type, group))
             new_id = c.lastrowid
             conn.commit()
             conn.close()
@@ -541,7 +542,7 @@ class HotlistPanel(QWidget):
                 current_price=price,
                 pnl_percent=0.0,
                 signal_type=signal_type,
-                group="观察"
+                group=group
             )
             self.items.insert(0, new_item)
             self._refresh_table()

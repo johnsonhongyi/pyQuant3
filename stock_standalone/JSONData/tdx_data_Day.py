@@ -2366,6 +2366,7 @@ def get_tdx_Exp_day_to_df(
         if 'date' in df.columns:
             df.index = df.pop('date')
         return df
+
     # =========================
     # 5. 核心指标（极速）
     # =========================
@@ -2405,7 +2406,7 @@ def get_tdx_Exp_day_to_df(
     # 7+. 补齐旧版依赖的结构指标（极速等价）
     # =========================
 
-    if len(df) > 10:
+    if len(df) > 8:
         try:
             df['lmin'] = df.low.iloc[-tdx_max_int_end:-tdx_high_da].min()
             df['min5'] = df.low.iloc[-6:-1].min()
@@ -2413,7 +2414,8 @@ def get_tdx_Exp_day_to_df(
             df['hv'] = df.vol.iloc[-tdx_max_int:-tdx_high_da].max()
             df['lv'] = df.vol.iloc[-tdx_max_int:-tdx_high_da].min()
             df['llowvol'] = df['lv']
-            df['high4'] = df.close.iloc[-5:-1].max()
+            # df['high4'] = df.close.iloc[-5:-1].max()
+            # df['high4'] = df.close.shift(2).rolling(4).max()
             df['hmax60'] = df.close.iloc[-60:-tdx_high_da].max()
             df['low60'] = df.low.iloc[-60:-tdx_max_int_end].min()
             # df['low60'] = df.low.iloc[-tdx_max_int_end*2:-tdx_max_int_end].min()
@@ -2463,358 +2465,358 @@ def get_tdx_Exp_day_to_df(
     return df
 
 
-# def get_tdx_Exp_day_to_df_impl(code, start=None, end=None, dl=None, newdays=None,
-def get_tdx_Exp_day_to_df_slow(code, start=None, end=None, dl=None, newdays=None,
-                          type='f', wds=True, lastdays=3, resample='d', MultiIndex=False,lastday=None,detect_calc_support=True,normalized=False):
-    """
-    获取指定股票的日线数据，并计算各类指标
-    保留原有逻辑和所有变量
+# # def get_tdx_Exp_day_to_df_impl(code, start=None, end=None, dl=None, newdays=None,
+# def get_tdx_Exp_day_to_df_slow(code, start=None, end=None, dl=None, newdays=None,
+#                           type='f', wds=True, lastdays=3, resample='d', MultiIndex=False,lastday=None,detect_calc_support=True,normalized=False):
+#     """
+#     获取指定股票的日线数据，并计算各类指标
+#     保留原有逻辑和所有变量
 
-    Arguments:
-        code (str): 股票代码
-        start (str, optional): 开始日期 YYYYMMDD
-        end (str, optional): 结束日期 YYYYMMDD
-        dl (int, optional): 最近天数
-        newdays (int, optional): 新数据天数
-        type (str, optional): 'f' forward / 'b' back
-        wds (bool, optional): 是否写入数据
-        lastdays (int, optional): 最近几日计算涨幅
-        resample (str, optional): 'd','w','m'等
-        MultiIndex (bool, optional): 是否返回多索引格式
+#     Arguments:
+#         code (str): 股票代码
+#         start (str, optional): 开始日期 YYYYMMDD
+#         end (str, optional): 结束日期 YYYYMMDD
+#         dl (int, optional): 最近天数
+#         newdays (int, optional): 新数据天数
+#         type (str, optional): 'f' forward / 'b' back
+#         wds (bool, optional): 是否写入数据
+#         lastdays (int, optional): 最近几日计算涨幅
+#         resample (str, optional): 'd','w','m'等
+#         MultiIndex (bool, optional): 是否返回多索引格式
 
-    Returns:
-        pd.DataFrame: 包含原始数据与计算指标的 DataFrame
-    """
+#     Returns:
+#         pd.DataFrame: 包含原始数据与计算指标的 DataFrame
+#     """
 
-    # ------------------------------
-    # 初始化参数
-    # ------------------------------
+#     # ------------------------------
+#     # 初始化参数
+#     # ------------------------------
 
-    code_u = cct.code_to_symbol(code)
-    if type == 'f':
-        file_path = os.path.join(exp_path, 'forwardp', f"{code_u.upper()}.txt")
-    elif type == 'b':
-        file_path = os.path.join(exp_path, 'backp', f"{code_u.upper()}.txt")
-    else:
-        return pd.DataFrame()
+#     code_u = cct.code_to_symbol(code)
+#     if type == 'f':
+#         file_path = os.path.join(exp_path, 'forwardp', f"{code_u.upper()}.txt")
+#     elif type == 'b':
+#         file_path = os.path.join(exp_path, 'backp', f"{code_u.upper()}.txt")
+#     else:
+#         return pd.DataFrame()
 
-    global initTdxdata
-    write_k_data_status = False #wds and not code_u.startswith('bj')
+#     global initTdxdata
+#     write_k_data_status = False #wds and not code_u.startswith('bj')
 
-    # if dl is not None:
-    #     start = cct.get_trade_day_before_dl(dl)
-        # start = cct.last_tddate(dl)
-    start = cct.day8_to_day10(start)
-    end = cct.day8_to_day10(end)
+#     # if dl is not None:
+#     #     start = cct.get_trade_day_before_dl(dl)
+#         # start = cct.last_tddate(dl)
+#     start = cct.day8_to_day10(start)
+#     end = cct.day8_to_day10(end)
 
-    tdx_max_int = ct.tdx_max_int
-    tdx_max_int_end = ct.tdx_max_int_end
-    tdx_high_da = ct.tdx_high_da
-    newstockdayl = newdays if newdays is not None else newdaysinit
+#     tdx_max_int = ct.tdx_max_int
+#     tdx_max_int_end = ct.tdx_max_int_end
+#     tdx_high_da = ct.tdx_high_da
+#     newstockdayl = newdays if newdays is not None else newdaysinit
 
-    df = None
+#     df = None
 
-    # if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
-    #     # 只有当日志等级是 DEBUG 或更低才进入 ipdb
-    #     import ipdb; ipdb.set_trace()
-    log.debug(f'file_path:{file_path} code: {code}')
+#     # if log.getEffectiveLevel() <= LoggerFactory.DEBUG:
+#     #     # 只有当日志等级是 DEBUG 或更低才进入 ipdb
+#     #     import ipdb; ipdb.set_trace()
+#     log.debug(f'file_path:{file_path} code: {code}')
 
-    # ------------------------------
-    # 文件不存在或为空
-    # ------------------------------
-    if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
-        log.error(f'get_kdate_data {code_u} file not exists: {file_path}')
-        tmp_df = get_kdate_data(code, start='', end='', ktype='D')
-        if len(tmp_df) > 0:
-            write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
-            log.error(f'{code_u} file not exists: {file_path}')
-        else:
-            if initTdxdata < 10:
-                log.error(f"file_path not exists code: {code}")
-            else:
-                print('.',end=' ')
-            initTdxdata += 1
-        return pd.DataFrame()
+#     # ------------------------------
+#     # 文件不存在或为空
+#     # ------------------------------
+#     if not os.path.exists(file_path) or os.path.getsize(file_path) == 0:
+#         log.error(f'get_kdate_data {code_u} file not exists: {file_path}')
+#         tmp_df = get_kdate_data(code, start='', end='', ktype='D')
+#         if len(tmp_df) > 0:
+#             write_tdx_tushare_to_file(code, df=tmp_df, start=None, type='f')
+#             log.error(f'{code_u} file not exists: {file_path}')
+#         else:
+#             if initTdxdata < 10:
+#                 log.error(f"file_path not exists code: {code}")
+#             else:
+#                 print('.',end=' ')
+#             initTdxdata += 1
+#         return pd.DataFrame()
 
-    # ------------------------------
-    # dl == 1 的特殊处理
-    # ------------------------------
-    if dl is not None and int(dl) == 1:
-        data = cct.read_last_lines(file_path, int(dl) + 3)
-        data_l = data.split('\n')
-        data_l.reverse()
-        for line in data_l:
-            a = line.split(',')
-            if len(a) == 7:
-                tdate = a[0]
-                if len(tdate) != 10:
-                    continue
-                topen = round(float(a[1]), 2)
-                thigh = round(float(a[2]), 2)
-                tlow = round(float(a[3]), 2)
-                tclose = round(float(a[4]), 2)
-                tvol = round(float(a[5]), 2)
-                amount = round(float(a[6].replace('\r\n','')), 1)
-                if int(topen) == 0 or int(amount) == 0:
-                    continue
-                # 返回 pd.Series
-                df = pd.Series({
-                    'code': code, 'date': tdate, 'open': topen, 'high': thigh,
-                    'low': tlow, 'close': tclose, 'amount': amount, 'vol': tvol
-                })
-                return df
-        # 如果循环结束没有有效行，返回空 Series
-        return pd.Series([], dtype='float64')
+#     # ------------------------------
+#     # dl == 1 的特殊处理
+#     # ------------------------------
+#     if dl is not None and int(dl) == 1:
+#         data = cct.read_last_lines(file_path, int(dl) + 3)
+#         data_l = data.split('\n')
+#         data_l.reverse()
+#         for line in data_l:
+#             a = line.split(',')
+#             if len(a) == 7:
+#                 tdate = a[0]
+#                 if len(tdate) != 10:
+#                     continue
+#                 topen = round(float(a[1]), 2)
+#                 thigh = round(float(a[2]), 2)
+#                 tlow = round(float(a[3]), 2)
+#                 tclose = round(float(a[4]), 2)
+#                 tvol = round(float(a[5]), 2)
+#                 amount = round(float(a[6].replace('\r\n','')), 1)
+#                 if int(topen) == 0 or int(amount) == 0:
+#                     continue
+#                 # 返回 pd.Series
+#                 df = pd.Series({
+#                     'code': code, 'date': tdate, 'open': topen, 'high': thigh,
+#                     'low': tlow, 'close': tclose, 'amount': amount, 'vol': tvol
+#                 })
+#                 return df
+#         # 如果循环结束没有有效行，返回空 Series
+#         return pd.Series([], dtype='float64')
 
-    # ------------------------------
-    # 读取文件数据 (Refactored to use read_csv)
-    # ------------------------------
-    try:
-        # Use C engine for speed, handle bad lines by skipping
-        # Assuming ct.TDX_Day_columns is ['code', 'date', 'open', 'high', 'low', 'close', 'vol', 'amount']
-        # The file content is: date, open, high, low, close, vol, amount (7 columns)
-        # So we must NOT use the first column name 'code' for reading.
+#     # ------------------------------
+#     # 读取文件数据 (Refactored to use read_csv)
+#     # ------------------------------
+#     try:
+#         # Use C engine for speed, handle bad lines by skipping
+#         # Assuming ct.TDX_Day_columns is ['code', 'date', 'open', 'high', 'low', 'close', 'vol', 'amount']
+#         # The file content is: date, open, high, low, close, vol, amount (7 columns)
+#         # So we must NOT use the first column name 'code' for reading.
         
-        file_cols = ct.TDX_Day_columns[1:] # Exclude 'code'
-        try:
-            df = pd.read_csv(
-                    file_path, 
-                    names=file_cols, 
-                    header=None, 
-                    index_col=False, 
-                    # usecols=range(len(file_cols)), # Only read the first len(file_cols) columns (0 to 6)
-                    engine='c',
-                    encoding='gb18030', # Use broadly compatible encoding
-                    encoding_errors='replace', # Ignore encoding errors
-                    on_bad_lines='skip', 
-                    )
-        except pd.errors.ParserError as e:
-            log.warning(f"{code} ParserError reading file {file_path}: {e}")
-            df_err = pd.DataFrame()
-            df_err.attrs['__error__'] = {
-                "code": code,
-                "exc_type": "EmptyFile",
-                "exc_msg": "通达信 TXT 文件为空或格式错误",
-            }
-            return df_err
+#         file_cols = ct.TDX_Day_columns[1:] # Exclude 'code'
+#         try:
+#             df = pd.read_csv(
+#                     file_path, 
+#                     names=file_cols, 
+#                     header=None, 
+#                     index_col=False, 
+#                     # usecols=range(len(file_cols)), # Only read the first len(file_cols) columns (0 to 6)
+#                     engine='c',
+#                     encoding='gb18030', # Use broadly compatible encoding
+#                     encoding_errors='replace', # Ignore encoding errors
+#                     on_bad_lines='skip', 
+#                     )
+#         except pd.errors.ParserError as e:
+#             log.warning(f"{code} ParserError reading file {file_path}: {e}")
+#             df_err = pd.DataFrame()
+#             df_err.attrs['__error__'] = {
+#                 "code": code,
+#                 "exc_type": "EmptyFile",
+#                 "exc_msg": "通达信 TXT 文件为空或格式错误",
+#             }
+#             return df_err
         
 
-        # # 倒序取最后 dl+3 行
-        # df = df.iloc[-(dl+3):].iloc[::-1].reset_index(drop=True)
+#         # # 倒序取最后 dl+3 行
+#         # df = df.iloc[-(dl+3):].iloc[::-1].reset_index(drop=True)
 
-        # # 用 deque 高效读取文件尾 dl+1 行
-        # with open(file_path, 'r', encoding='gb18030', errors='replace') as f:
-        #     last_lines = deque(f, maxlen=dl+1)
+#         # # 用 deque 高效读取文件尾 dl+1 行
+#         # with open(file_path, 'r', encoding='gb18030', errors='replace') as f:
+#         #     last_lines = deque(f, maxlen=dl+1)
 
-        # df = pd.read_csv(
-        #     pd.io.common.StringIO(''.join(last_lines)),
-        #     names=file_cols,
-        #     header=None,
-        #     index_col=False,
-        #     engine='c',
-        #     on_bad_lines='skip'
-        # )
-        # # 倒序
-        # df = df.iloc[::-1].reset_index(drop=True)
-        # t1 = time.time()
+#         # df = pd.read_csv(
+#         #     pd.io.common.StringIO(''.join(last_lines)),
+#         #     names=file_cols,
+#         #     header=None,
+#         #     index_col=False,
+#         #     engine='c',
+#         #     on_bad_lines='skip'
+#         # )
+#         # # 倒序
+#         # df = df.iloc[::-1].reset_index(drop=True)
+#         # t1 = time.time()
         
-        # Ensure numeric columns are numeric (coerce errors to NaN)
-        cols_to_numeric = ['open', 'high', 'low', 'close', 'vol', 'amount']
-        df[cols_to_numeric] = df[cols_to_numeric].apply(pd.to_numeric, errors='coerce')
+#         # Ensure numeric columns are numeric (coerce errors to NaN)
+#         cols_to_numeric = ['open', 'high', 'low', 'close', 'vol', 'amount']
+#         df[cols_to_numeric] = df[cols_to_numeric].apply(pd.to_numeric, errors='coerce')
         
-        # t2 = time.time()
+#         # t2 = time.time()
 
-        # Drop NaNs created by coercion
-        df.dropna(subset=cols_to_numeric, inplace=True)
+#         # Drop NaNs created by coercion
+#         df.dropna(subset=cols_to_numeric, inplace=True)
         
-        # Filter logic: if topen == 0 or amount == 0: continue
-        df = df[(df['open'] != 0) & (df['amount'] != 0)]
+#         # Filter logic: if topen == 0 or amount == 0: continue
+#         df = df[(df['open'] != 0) & (df['amount'] != 0)]
         
-        # Add 'code' column
-        df['code'] = code
-        # t_io_end = time.time()
-        # Format 'date' to string
+#         # Add 'code' column
+#         df['code'] = code
+#         # t_io_end = time.time()
+#         # Format 'date' to string
 
-        # df['date'] = df['date'].astype(str)
-        # df = df[df['date'].str.len() == 10]
+#         # df['date'] = df['date'].astype(str)
+#         # df = df[df['date'].str.len() == 10]
 
-        # Reorder columns to match ct.TDX_Day_columns exactly
-        # This puts 'code' back at the first position
-        final_cols = [c for c in ct.TDX_Day_columns if c in df.columns]
-        df = df[final_cols]
+#         # Reorder columns to match ct.TDX_Day_columns exactly
+#         # This puts 'code' back at the first position
+#         final_cols = [c for c in ct.TDX_Day_columns if c in df.columns]
+#         df = df[final_cols]
 
-    except Exception as e:
-        # log.error(f"Error {code} reading file {file_path} with read_csv: {e}")
-        # # print(f"DEBUG Error: {e}") # Print to stdout for visibility in test logs
-        # return pd.DataFrame()
-        # return {
-        #         "__error__": True,
-        #         "code": code,
-        #         "exc_type": type(e).__name__,
-        #         "exc_msg": str(e),
-        #     }
-        df_err = pd.DataFrame()
-        df_err.attrs['__error__'] = {
-            "code": code,
-            "exc_type": type(e).__name__,
-            "exc_msg": str(e),
-        }
-        return df_err
+#     except Exception as e:
+#         # log.error(f"Error {code} reading file {file_path} with read_csv: {e}")
+#         # # print(f"DEBUG Error: {e}") # Print to stdout for visibility in test logs
+#         # return pd.DataFrame()
+#         # return {
+#         #         "__error__": True,
+#         #         "code": code,
+#         #         "exc_type": type(e).__name__,
+#         #         "exc_msg": str(e),
+#         #     }
+#         df_err = pd.DataFrame()
+#         df_err.attrs['__error__'] = {
+#             "code": code,
+#             "exc_type": type(e).__name__,
+#             "exc_msg": str(e),
+#         }
+#         return df_err
 
-    df = df[~df.date.duplicated()]
-    # print(f'code: {code} df:{len(df)}', end=' ')
-    # ------------------------------
-    # 筛选日期
-    # ------------------------------
-    # if start is not None:
-    #     df = df[df.date >= start]
-    # if end is not None:
-    #     df = df[df.date <= end]
+#     df = df[~df.date.duplicated()]
+#     # print(f'code: {code} df:{len(df)}', end=' ')
+#     # ------------------------------
+#     # 筛选日期
+#     # ------------------------------
+#     # if start is not None:
+#     #     df = df[df.date >= start]
+#     # if end is not None:
+#     #     df = df[df.date <= end]
 
-    if start is not None or end is not None:
-        mask = pd.Series(True, index=df.index)
-        if start is not None:
-            mask &= df['date'] >= start
-        if end is not None:
-            mask &= df['date'] <= end
-        df = df.loc[mask]
-    elif dl is not None:
-        df = df[-dl:]
+#     if start is not None or end is not None:
+#         mask = pd.Series(True, index=df.index)
+#         if start is not None:
+#             mask &= df['date'] >= start
+#         if end is not None:
+#             mask &= df['date'] <= end
+#         df = df.loc[mask]
+#     elif dl is not None:
+#         df = df[-dl:]
 
-    if len(df) == 0:
-        return pd.DataFrame()
+#     if len(df) == 0:
+#         return pd.DataFrame()
 
-    # df['date'] = df['date'].astype(str)
-    df = df.set_index('date').sort_index(ascending=True)
+#     # df['date'] = df['date'].astype(str)
+#     df = df.set_index('date').sort_index(ascending=True)
 
-    # if lastday is not None:
-    #     df = df[:-lastday]
-    if lastday is not None:
-        df = df.iloc[:-lastday] if lastday > 0 else df
-    # ------------------------------
-    # 非日线重采样
-    # ------------------------------
-    if not MultiIndex and resample != 'd':
-        df = get_tdx_stock_period_to_type(df, period_day=resample)
-        if 'date' in df.columns:
-            # df['date'] = df['date'].astype(str)
-            df = df.set_index('date')
+#     # if lastday is not None:
+#     #     df = df[:-lastday]
+#     if lastday is not None:
+#         df = df.iloc[:-lastday] if lastday > 0 else df
+#     # ------------------------------
+#     # 非日线重采样
+#     # ------------------------------
+#     if not MultiIndex and resample != 'd':
+#         df = get_tdx_stock_period_to_type(df, period_day=resample)
+#         if 'date' in df.columns:
+#             # df['date'] = df['date'].astype(str)
+#             df = df.set_index('date')
 
-    # ------------------------------
-    # 数据完整性检查
-    # ------------------------------
+#     # ------------------------------
+#     # 数据完整性检查
+#     # ------------------------------
 
-    # ------------------------------
-    # MACD 和涨幅
-    # ------------------------------
-    t_macd_start = time.time()
-    if 'macd' not in df.columns:
-        df = get_tdx_macd(df,detect_calc_support=detect_calc_support)
-    t_macd_end = time.time()
+#     # ------------------------------
+#     # MACD 和涨幅
+#     # ------------------------------
+#     t_macd_start = time.time()
+#     if 'macd' not in df.columns:
+#         df = get_tdx_macd(df,detect_calc_support=detect_calc_support)
+#     t_macd_end = time.time()
 
-    # ------------------------------
-    # maxp / fib / maxpcout
-    # ------------------------------
-    per_couts = df.filter(regex=r'per[1-9]d')[-1:]
-    if len(per_couts.T) > 2:
-        if resample == 'd':
-            df['maxp'] = per_couts.T[1:].values.max()
-            fib_c = (per_couts.T.values > 2).sum()
-        else:
-            df['maxp'] = per_couts.T[:3].values.max()
-            fib_c = (per_couts.T[:3].values > 10).sum()
-        df['fib'] = fib_c
-        df['maxpcout'] = fib_c
-    else:
-        df['maxp'] = df['fib'] = df['maxpcout'] = 0
+#     # ------------------------------
+#     # maxp / fib / maxpcout
+#     # ------------------------------
+#     per_couts = df.filter(regex=r'per[1-9]d')[-1:]
+#     if len(per_couts.T) > 2:
+#         if resample == 'd':
+#             df['maxp'] = per_couts.T[1:].values.max()
+#             fib_c = (per_couts.T.values > 2).sum()
+#         else:
+#             df['maxp'] = per_couts.T[:3].values.max()
+#             fib_c = (per_couts.T[:3].values > 10).sum()
+#         df['fib'] = fib_c
+#         df['maxpcout'] = fib_c
+#     else:
+#         df['maxp'] = df['fib'] = df['maxpcout'] = 0
 
         
-    t_perc_start = time.time()
-    if f'perc{lastdays}d' not in df.columns:
-        df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample,normalized=normalized)
-    t_perc_end = time.time()
+#     t_perc_start = time.time()
+#     if f'perc{lastdays}d' not in df.columns:
+#         df = compute_lastdays_percent(df, lastdays=lastdays, resample=resample,normalized=normalized)
+#     t_perc_end = time.time()
 
 
-    # ------------------------------
-    # 高低价 / 成交量 / 均价指标
-    # ------------------------------
-    if len(df) > 10:
-        df['lmin'] = df.low[-tdx_max_int_end:-tdx_high_da].min()
-        df['min5'] = df.low[-6:-1].min()
-        df['cmean'] = round(df.close[-10:-tdx_high_da].mean(), 2)
-        df['hv'] = df.vol[-tdx_max_int:-tdx_high_da].max()
-        df['lv'] = df.vol[-tdx_max_int:-tdx_high_da].min()
-        df = df.fillna(0)
+#     # ------------------------------
+#     # 高低价 / 成交量 / 均价指标
+#     # ------------------------------
+#     if len(df) > 10:
+#         df['lmin'] = df.low[-tdx_max_int_end:-tdx_high_da].min()
+#         df['min5'] = df.low[-6:-1].min()
+#         df['cmean'] = round(df.close[-10:-tdx_high_da].mean(), 2)
+#         df['hv'] = df.vol[-tdx_max_int:-tdx_high_da].max()
+#         df['lv'] = df.vol[-tdx_max_int:-tdx_high_da].min()
+#         df = df.fillna(0)
 
-        # 滚动指标
-        df['max5'] = df.high.shift(1).rolling(5).max()
-        df['max10'] = df.close.shift(1).rolling(10).max()
-        df['hmax'] = df.close.shift(1).rolling(30).max()
-        df['hmax60'] = df.close.shift(1).rolling(60).max()
-        df['high4'] = df.close.shift(1).rolling(4).max()
-        df['llowvol'] = df.vol[-tdx_max_int_end:-tdx_high_da].min()
-        df['low10'] = df.low.shift(1).rolling(10).min()
-        df['low60'] = df.close[-tdx_max_int_end*2:-tdx_max_int_end].min()
-        df['low4'] = df.low.shift(1).rolling(4).min()
-        df['lastdu4'] = ((df.high.rolling(4).max() - df.low.rolling(4).min()) /
-                          df.close.rolling(4).mean() * 100).round(1)
+#         # 滚动指标
+#         df['max5'] = df.high.shift(1).rolling(5).max()
+#         df['max10'] = df.close.shift(1).rolling(10).max()
+#         df['hmax'] = df.close.shift(1).rolling(30).max()
+#         df['hmax60'] = df.close.shift(1).rolling(60).max()
+#         df['high4'] = df.close.shift(1).rolling(4).max()
+#         df['llowvol'] = df.vol[-tdx_max_int_end:-tdx_high_da].min()
+#         df['low10'] = df.low.shift(1).rolling(10).min()
+#         df['low60'] = df.close[-tdx_max_int_end*2:-tdx_max_int_end].min()
+#         df['low4'] = df.low.shift(1).rolling(4).min()
+#         df['lastdu4'] = ((df.high.rolling(4).max() - df.low.rolling(4).min()) /
+#                           df.close.rolling(4).mean() * 100).round(1)
 
-    if len(df) > 10:
-        # 2. 调用自动检查函数
-        df_checked = check_conditions_auto(df[-1:])
-        # 3. 直接赋值给原始 df 的 'MainU' 列对应最后一行
-        # df.loc[df.index[-1], 'MainU'] = df_checked.loc[df_checked.index[-1], '符合条件']
-        df.loc[df.index[-1], 'MainU'] = df_checked.loc[df_checked.index[-1], 'MainU']
+#     if len(df) > 10:
+#         # 2. 调用自动检查函数
+#         df_checked = check_conditions_auto(df[-1:])
+#         # 3. 直接赋值给原始 df 的 'MainU' 列对应最后一行
+#         # df.loc[df.index[-1], 'MainU'] = df_checked.loc[df_checked.index[-1], '符合条件']
+#         df.loc[df.index[-1], 'MainU'] = df_checked.loc[df_checked.index[-1], 'MainU']
 
-        # 索引设置与排序
-    # ------------------------------
-    if len(df) > 0:
-        if 'date' in df.columns:
-            df = df.set_index('date')
-        df = df.sort_index(ascending=True)
-    # ------------------------------
-    # tdx_err_code 检查逻辑
-    # ------------------------------
-    if resample == 'd':
-        try:
-            cond = cct.get_today_duration(df.index[-1]) > 20 or df.close[-3:].max() / df.open[-3:].min() > 5
-        except Exception as e:
-            log.error(f"tdx_err_code cond check failed: {e}")
-            cond = False
+#         # 索引设置与排序
+#     # ------------------------------
+#     if len(df) > 0:
+#         if 'date' in df.columns:
+#             df = df.set_index('date')
+#         df = df.sort_index(ascending=True)
+#     # ------------------------------
+#     # tdx_err_code 检查逻辑
+#     # ------------------------------
+#     if resample == 'd':
+#         try:
+#             cond = cct.get_today_duration(df.index[-1]) > 20 or df.close[-3:].max() / df.open[-3:].min() > 5
+#         except Exception as e:
+#             log.error(f"tdx_err_code cond check failed: {e}")
+#             cond = False
 
-        if cond:
-            tdx_err_code = cct.GlobalValues().getkey('tdx_err_code')
-            if tdx_err_code is None:
-                tdx_err_code = [code]
-                cct.GlobalValues().setkey('tdx_err_code', tdx_err_code)
-                log.error(f"{code} dl None outdata!")
-                initTdxdata += 1
-                if write_k_data_status:
-                    write_all_kdata_to_file(code, f_path=file_path)
-                    df = get_tdx_Exp_day_to_df(
-                        code, start=start, end=end, dl=dl, newdays=newdays, type='f', wds=False, MultiIndex=MultiIndex
-                    )
-            else:
-                if code not in tdx_err_code:
-                    tdx_err_code.append(code)
-                    cct.GlobalValues().setkey('tdx_err_code', tdx_err_code)
-                    log.error(f"{code} dl None outdata!")
-                    initTdxdata += 1
-                    if write_k_data_status:
-                        write_all_kdata_to_file(code, f_path=file_path)
-                        df = get_tdx_Exp_day_to_df(
-                            code, start=start, end=end, dl=dl, newdays=newdays, type='f', wds=False, MultiIndex=MultiIndex
-                        )
+#         if cond:
+#             tdx_err_code = cct.GlobalValues().getkey('tdx_err_code')
+#             if tdx_err_code is None:
+#                 tdx_err_code = [code]
+#                 cct.GlobalValues().setkey('tdx_err_code', tdx_err_code)
+#                 log.error(f"{code} dl None outdata!")
+#                 initTdxdata += 1
+#                 if write_k_data_status:
+#                     write_all_kdata_to_file(code, f_path=file_path)
+#                     df = get_tdx_Exp_day_to_df(
+#                         code, start=start, end=end, dl=dl, newdays=newdays, type='f', wds=False, MultiIndex=MultiIndex
+#                     )
+#             else:
+#                 if code not in tdx_err_code:
+#                     tdx_err_code.append(code)
+#                     cct.GlobalValues().setkey('tdx_err_code', tdx_err_code)
+#                     log.error(f"{code} dl None outdata!")
+#                     initTdxdata += 1
+#                     if write_k_data_status:
+#                         write_all_kdata_to_file(code, f_path=file_path)
+#                         df = get_tdx_Exp_day_to_df(
+#                             code, start=start, end=end, dl=dl, newdays=newdays, type='f', wds=False, MultiIndex=MultiIndex
+#                         )
 
-    return df
-    # t_end = time.time()
-    # t_total = t_end - t_start
-    # if t_start > 0 and t_total > 0.1: # Threshold 50ms
-    #     io_time = t_io_end - t_start if t_io_end > 0 else 0
-    #     macd_time = t_macd_end - t_macd_start if t_macd_end > 0 else 0
-    #     perc_time = t_perc_end - t_perc_start if t_perc_end > 0 else 0
-    #     other_time = t_total - io_time - macd_time - perc_time
-    #     log.info(f"SLOW_LOG: {code} Total:{t_total:.3f}s | IO:{io_time:.3f}s | MACD:{macd_time:.3f}s | PERC:{perc_time:.3f}s | Other:{other_time:.3f}s")
+#     return df
+#     # t_end = time.time()
+#     # t_total = t_end - t_start
+#     # if t_start > 0 and t_total > 0.1: # Threshold 50ms
+#     #     io_time = t_io_end - t_start if t_io_end > 0 else 0
+#     #     macd_time = t_macd_end - t_macd_start if t_macd_end > 0 else 0
+#     #     perc_time = t_perc_end - t_perc_start if t_perc_end > 0 else 0
+#     #     other_time = t_total - io_time - macd_time - perc_time
+#     #     log.info(f"SLOW_LOG: {code} Total:{t_total:.3f}s | IO:{io_time:.3f}s | MACD:{macd_time:.3f}s | PERC:{perc_time:.3f}s | Other:{other_time:.3f}s")
 
 
 INDEX_LIST = {'sh': 'sh000001', 'sz': 'sz399001', 'hs300': 'sz399300',
@@ -4968,7 +4970,8 @@ def compute_perd_df(dd, lastdays=3, resample='d',normalized=False):
     df['max5'] = df['high_shift1'].rolling(5).max()
     df['max10'] = df['close_shift1'].rolling(10).max()
     df['hmax'] = df['close_shift1'].rolling(30).max()
-    df['high4'] = df['close_shift1'].rolling(4).max()
+    # df['high4'] = df['close_shift1'].rolling(4).max()
+    df['high4'] = df.close.shift(2).rolling(4).max()
     df['low4'] = df['low_shift1'].rolling(4).min()
     df['lastdu4'] = (df['high4'].iloc[0] - (df['low4'].iloc[0]+0.1)) / (df['low4'].iloc[0]+0.1) * 100
 
@@ -5061,7 +5064,7 @@ def compute_perd_df(dd, lastdays=3, resample='d',normalized=False):
     # # 查看匹配统计
     # # print(result['match_stats'])
     # print(result['mismatch_details'])
-
+    dd['high4'] = df['high4']
     return dd
 
 def resample_dataframe_recut(temp,resample='d',increasing=True,check=False):
@@ -5703,6 +5706,7 @@ def generate_lastN_features_dict(df, lastdays=5):
         'high': 'lasth',
         'low': 'lastl',
         'close': 'lastp',
+        'high4': 'high4',
         'vol': 'lastv',
         'perd': 'per',
         'upper': 'upper',
@@ -5726,7 +5730,7 @@ def generate_lastN_features_dict(df, lastdays=5):
             else:
                 val = 0
             # upper 不加 d 后缀
-            if prefix == 'upper':
+            if prefix == 'upper' or prefix =='high4':
                 key = f'{prefix}{da}' if da > 0 else prefix
             else:
                 key = f'{prefix}{da}d'
@@ -5734,38 +5738,39 @@ def generate_lastN_features_dict(df, lastdays=5):
 
     return data
 
-COL_MAPPING = {
-    'open': 'lasto',
-    'high': 'lasth',
-    'low': 'lastl',
-    'close': 'lastp',
-    'vol': 'lastv',
-    'perd': 'per',
-    'upper': 'upper',
-    'ma5d': 'ma5',
-    'ma20d': 'ma20',
-    'ma60d': 'ma60',
-    'perlastp': 'perc',
-    # 'high4': 'high4',
-    # 'hmax': 'hmax',
-    'EVAL_STATE': 'eval',
-    'trade_signal': 'signal'
-}
+# COL_MAPPING = {
+#     'open': 'lasto',
+#     'high': 'lasth',
+#     'low': 'lastl',
+#     'close': 'lastp',
+#     'vol': 'lastv',
+#     'perd': 'per',
+#     'upper': 'upper',
+#     'ma5d': 'ma5',
+#     'ma20d': 'ma20',
+#     'ma60d': 'ma60',
+#     'perlastp': 'perc',
+#     # 'high4': 'high4',
+#     # 'hmax': 'hmax',
+#     'EVAL_STATE': 'eval',
+#     'trade_signal': 'signal'
+# }
 
-def generate_lastN_features(df, lastdays=6):
-    df_temp = pd.DataFrame()
-    for col, prefix in COL_MAPPING.items():
-        if col in df.columns:
-            col_values = df[col].iloc[-lastdays:]
-            if len(col_values) < lastdays:
-                col_values = pd.concat([pd.Series([0]*(lastdays-len(col_values))), col_values])
-        else:
-            col_values = pd.Series([0]*lastdays)
+# def generate_lastN_features(df, lastdays=6):
+#     df_temp = pd.DataFrame()
+#     for col, prefix in COL_MAPPING.items():
+#         if col in df.columns:
+#             col_values = df[col].iloc[-lastdays:]
+#             if len(col_values) < lastdays:
+#                 col_values = pd.concat([pd.Series([0]*(lastdays-len(col_values))), col_values])
+#         else:
+#             col_values = pd.Series([0]*lastdays)
         
-        for i in range(1, lastdays+1):
-            df_temp[f'{prefix}{i}d'] = [col_values.iloc[-i]]
+#         for i in range(1, lastdays+1):
+#             df_temp[f'{prefix}{i}d'] = [col_values.iloc[-i]]
     
-    return df_temp
+#     return df_temp
+
 # def generate_lastN_features(df, lastdays=6, feature_cols=None):
 #     """
 #     生成 df 的过去 lastdays 天的多列特征，向量化处理。
@@ -5818,9 +5823,9 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
         if cct.get_work_day_status() and 915 < cct.get_now_time_int() < 1500:
             df = df[df.index < cct.get_today()]
 
-        df['ma5d'] = talib.EMA(df['close'], timeperiod=5)
-        df['ma10d'] = talib.EMA(df['close'], timeperiod=10)
-        df['ma20d'] = talib.EMA(df['close'], timeperiod=26)
+        df['ma5d'] = talib.SMA(df['close'], timeperiod=5)
+        df['ma10d'] = talib.SMA(df['close'], timeperiod=10)
+        df['ma20d'] = talib.SMA(df['close'], timeperiod=26)
         df['ma60d'] = talib.SMA(df['close'], timeperiod=60)
 
         # safe_SMA(df, 'close', 5,  'ma5d')
@@ -5834,7 +5839,6 @@ def compute_lastdays_percent(df=None, lastdays=3, resample='d',vc_radio=100,norm
         df = compute_cross_indicators(df, [('ma5d', 'ma10d', 'op')], [('upper', 'ma5d', 'topU', 'eneU')])
 
         df = compute_perd_df(df,lastdays=lastdays,resample=resample,normalized=normalized)
-
 
         df['vchange'] = ((df['vol'] - df['vol'].shift(1)) / df['vol'].shift(1) * 100).round(1)
         df = df.fillna(0)
@@ -7614,10 +7618,10 @@ if __name__ == '__main__':
     
     code='603056'
 
-    df=get_tdx_append_now_df_api_tofile(code)
+    # df=get_tdx_append_now_df_api_tofile(code)
+    # # import ipdb;ipdb.set_trace()
+    # print('df: {df}')
     # import ipdb;ipdb.set_trace()
-    print('df: {df}')
-    import ipdb;ipdb.set_trace()
 
     resample = 'd'
     code = '002151'
@@ -7630,9 +7634,12 @@ if __name__ == '__main__':
     # write_market_index_to_df()
     # Write_market_all_day_mp()
     # code = '920091'
-    code = '920099'
-    df2 = get_tdx_Exp_day_to_df(code,dl=1,newdays=0)
-    # df2 = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )
+    code = '920427'
+    # df1 = get_tdx_Exp_day_to_df(code,dl=1,newdays=0)
+    df1d = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'],resample='d' )
+    df2 = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )
+    import ipdb;ipdb.set_trace()
+
     resample = '3d'
     try:
         df=get_tdx_exp_low_or_high_power(code,dl=ct.Resample_LABELS_Days[resample],resample=resample)
