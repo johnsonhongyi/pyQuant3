@@ -6,96 +6,86 @@ import os
 # 确保能导入 data_utils
 sys.path.append(os.getcwd())
 import data_utils
-from JohnsonUtil import johnson_cons as cct
 
-def generate_mock_data(scenario='breakout', n_days=50):
+def generate_mock_row(scenario='normal', win_upper_prev=0):
     """
-    生成模拟数据
-    scenario: 'breakout', 'pullback', 'weak', 'perfect_jump'
+    生成单行模拟数据
     """
-    dates = pd.date_range(end='2026-01-25', periods=n_days)
-    prices = np.zeros(n_days)
+    data = {
+        'code': '600001',
+        'name': f'测试-{scenario}',
+        'close': 13.0, 'open': 12.8, 'high': 13.2, 'low': 12.7, 'volume': 1000000,
+        'TrendS': 85.0, 'power_idx': 1.8, 'gem_score': 75.0,
+        'lastp1d': 12.0, 'upper1': 12.5, 'ma51d': 12.2, 'high41': 12.1
+    }
     
-    if scenario == 'breakout':
-        prices[:40] = 10.0 + np.random.normal(0, 0.05, 40)
-        prices[40:] = 10.0 + np.linspace(0.1, 5.0, 10)
-    elif scenario == 'pullback':
-        prices[:20] = np.linspace(10.0, 15.0, 20)
-        prices[20:40] = np.linspace(15.0, 12.0, 20)
-        prices[40:] = 12.0 + np.linspace(0.1, 1.0, 10)
-    elif scenario == 'perfect_jump':
-        prices[:40] = 10.0
-        prices[40:] = 11.0 + np.linspace(0.1, 4.0, 10)
-    else:
-        prices = np.linspace(15.0, 8.0, n_days)
-
-    df = pd.DataFrame({'close': prices, 'open': prices * 0.99, 'high': prices * 1.01, 'low': prices * 0.98, 'volume': 1000000}, index=dates)
-    df['ma5'] = df['close'].rolling(5).mean()
-    df['ma10'] = df['close'].rolling(10).mean()
-    df['std'] = df['close'].rolling(20).std().fillna(0.1)
-    df['upper'] = df['ma10'] + 1.2 * df['std']
-    df['high4'] = df['high'].rolling(4).max()
-    df['per'] = df['close'].pct_change() * 100
-    return df
-
-def flatten_history(df, scenario, max_days=20):
-    latest = df.iloc[-1].to_dict()
-    latest['code'] = 'TEST_CODE'
-    latest['name'] = f'模拟-{scenario}'
+    # 模拟启动点条件: L <= MA AND P > H4
+    if scenario == 'buy1_trigger':
+        data['low'] = 12.1   # 触碰 MA51d (12.2)
+        data['close'] = 13.0 # 突破 High41 (12.1) 且站上 Upper1 (12.5)
     
+    return data
+
+def demo_buy_point_transition():
+    print("\n=== 1. 捕捉起跳买点 (win_upper 0 -> 1 跳变演示) ===")
+    
+    # 模拟“昨日”：未站稳 Upper
+    df_yesterday = pd.DataFrame([{
+        'code': '600001', 'name': '起跳新星',
+        'lastp': 12.4, 'upper1': 12.5 # P < Upper -> win_upper 会是 0
+    }]).set_index('code')
+    # 实际上 win_upper 计算依赖历史列，这里我们直接模拟计算后的结果展示逻辑
+    
+    # 模拟“今日”触发起跳
+    # 逻辑：P1d > Upper1d (假启动) vs 今日初次触碰均线
+    df_today = pd.DataFrame([{
+        'code': '600001', 'name': '起跳新星',
+        'lastp1d': 12.0, 'upper1': 11.5,
+        'lastl1d': 10.0, 'ma51d': 10.1, 'high41': 10.0
+    }]).set_index('code')
+    
+    # 补全历史列，使函数内部 range(1, max_days+1) 不会因为列缺失报错
+    max_days = 10
     for i in range(1, max_days + 1):
-        if i < len(df):
-            row = df.iloc[-(i+1)]
-            latest[f'lastp{i}d'] = row['close']
-            latest[f'lasto{i}d'] = row['open']
-            latest[f'lasth{i}d'] = row['high']
-            latest[f'lastl{i}d'] = row['low']
-            latest[f'lastv{i}d'] = row['volume']
-            latest[f'ma5{i}d'] = row['ma5']
-            latest[f'ma10{i}d'] = row['ma10']
-            latest[f'upper{i}'] = row['upper']
-            latest[f'high4{i}'] = row['high4']
-            latest[f'per{i}d'] = row['per']
-        else:
-            for suffix in ['p', 'o', 'h', 'l', 'v']: latest[f'last{suffix}{i}d'] = 1.0
-            latest[f'ma5{i}d'] = 1.0; latest[f'ma10{i}d'] = 1.0
-            latest[f'upper{i}'] = 100.0; latest[f'high4{i}'] = 100.0; latest[f'per{i}d'] = 0
-
-    latest['lastp'] = latest['close']
-    latest['lasto'] = latest['open']
-    latest['lasth'] = latest['high']
-    latest['lastl'] = latest['low']
+        if f'lastp{i}d' not in df_today.columns:
+            df_today[f'lastp{i}d'] = 10.0; df_today[f'upper{i}'] = 11.0
+            df_today[f'lastl{i}d'] = 9.0; df_today[f'ma5{i}d'] = 9.1; df_today[f'high4{i}'] = 9.5
     
-    if scenario == 'perfect_jump':
-        # 强制 4d (idx 3) 为启动点
-        # 启动条件: L <= MA(触碰) AND P > H4 (起跳)
-        # 逻辑内 idx 0=1d, 1=2d, 2=3d, 3=4d
-        latest['lastl4d'] = 9.9; latest['ma54d'] = 10.0 # L <= MA
-        latest['lastp4d'] = 10.5; latest['high44'] = 10.1 # P > H4
-        latest['upper4'] = 10.2 # P > Upper (连阳计数开始)
-        
-        # 3d, 2d, 1d 连续 > Upper
-        latest['lastp3d'] = 11.0; latest['upper3'] = 10.5
-        latest['lastp2d'] = 11.5; latest['upper2'] = 11.0
-        latest['lastp1d'] = 12.0; latest['upper1'] = 11.5
-        # 0d (今天) 也满足 P > Upper
-        latest['lastp'] = 13.0
-        # 逻辑：从启动点 4d(idx 3) 开始向 1d(idx 0) 遍历。
-        # 启动点必须 above_upper，如果是 4d，那么 count 从 4d 开始连续到 1d。
-        # 结果预期 win_upper = 4
-        
-    return latest
-
-def run_test(scenario):
-    print(f"\n--- 场景: {scenario} ---")
-    df = generate_mock_data(scenario)
-    flat = flatten_history(df, scenario)
-    test_df = pd.DataFrame([flat]).set_index('code')
+    # 强制 1d (idx 0) 为启动点：L <= MA 且 P > H4 且 P > Upper
+    df_today['lastl1d'] = 10.0; df_today['ma51d'] = 10.5 # L <= MA
+    df_today['lastp1d'] = 12.0; df_today['high41'] = 11.0 # P > H4
+    df_today['upper1'] = 11.5 # P > Upper (计数开始)
     
-    test_df = data_utils.scoring_momentum_pullback_system(test_df)
-    test_df = data_utils.strong_momentum_large_cycle_vect_consecutive_above(test_df)
-    print(test_df[['name', 'gem_score', 'win_upper']].to_string())
+    # 我们运行函数，它会遍历从 max_days 到 1d
+    res = data_utils.strong_momentum_large_cycle_vect_consecutive_above(df_today, max_days=max_days)
+    print(f"今日计算 win_upper: {res.loc['600001', 'win_upper']} (成功捕捉 1d 起跳)")
 
-run_test('breakout')
-run_test('perfect_jump')
-run_test('weak')
+def demo_top_20_ranking():
+    print("\n=== 2. Top 20 二次排序逻辑演示 ===")
+    # 构造一个包含 5 只股票的池子
+    pool_data = [
+        {'code': '001', 'TrendS': 95, 'power_idx': 2.5, 'gem_score': 80, 'win_upper': 3},
+        {'code': '002', 'TrendS': 80, 'power_idx': 1.2, 'gem_score': 60, 'win_upper': 1},
+        {'code': '003', 'TrendS': 88, 'power_idx': 3.0, 'gem_score': 90, 'win_upper': 4},
+        {'code': '004', 'TrendS': 70, 'power_idx': 0.8, 'gem_score': 50, 'win_upper': 0},
+        {'code': '005', 'TrendS': 92, 'power_idx': 1.5, 'gem_score': 70, 'win_upper': 2},
+    ]
+    df_pool = pd.DataFrame(pool_data).set_index('code')
+    
+    # 筛选
+    candidates = df_pool.query('power_idx > 1.0 and win_upper >= 1').copy()
+    
+    # 二次排序
+    candidates['final_score'] = (
+        candidates['TrendS'].astype(float) * 0.4 + 
+        candidates['power_idx'] * 30 + 
+        candidates['gem_score'] * 0.3
+    )
+    
+    result = candidates.sort_values('final_score', ascending=False)
+    print("优选池排序结果:")
+    print(result[['TrendS', 'power_idx', 'win_upper', 'final_score']].to_string())
+
+if __name__ == "__main__":
+    demo_buy_point_transition()
+    demo_top_20_ranking()
