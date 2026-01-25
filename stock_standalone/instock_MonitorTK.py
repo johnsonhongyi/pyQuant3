@@ -11506,6 +11506,7 @@ if __name__ == "__main__":
     if args.cmd:
         if len(args.cmd) > 5:
             try:
+                from data_utils import *
                 result = eval(args.cmd)
                 print("执行结果:", result)
             except Exception as e:
