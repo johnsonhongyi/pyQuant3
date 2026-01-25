@@ -1529,7 +1529,7 @@ class StockLiveStrategy:
             open_trades = {(t['code'], t.get('resample', 'd')): t for t in trades_info if t['status'] == 'OPEN'}
 
             # --- [新增] 确保 DataFrame 包含监理与策略状态列 (供前端 Visualizer 使用) ---
-            for col in ['market_win_rate', 'loss_streak', 'vwap_bias', 'last_action', 'last_reason', 'shadow_info']:
+            for col in ['market_win_rate', 'loss_streak', 'vwap_bias', 'last_action', 'last_reason', 'shadow_info', 'win_upper1', 'win_upper2']:
                 if col not in df.columns:
                     # 数值型默认为 0，字符串型默认为空
                     if col in ['last_action', 'last_reason', 'shadow_info']:
@@ -1613,6 +1613,10 @@ class StockLiveStrategy:
                 snap['sum_perc'] = row.get('sum_perc', snap.get('sum_perc', 0)) #加速连阳涨幅
                 snap['red'] = row.get('red', snap.get('red', 0)) #五日线上数据
                 snap['gren'] = row.get('gren', snap.get('gren', 0)) #弱势绿柱数据
+                
+                # --- [NEW] 注入 win_upper 状态用于起跳探测 ---
+                snap['win_upper1'] = row.get('win_upper1', snap.get('win_upper1', 0))
+                snap['win_upper2'] = row.get('win_upper2', snap.get('win_upper2', 0))
 
                 # --- 实时情绪与形态注入 (Realtime Signal Injection) ---
                 if self.realtime_service:
@@ -1858,6 +1862,23 @@ class StockLiveStrategy:
                     if (rtype == 'price_up' and current_price >= rval) or (rtype == 'price_down' and current_price <= rval) or (rtype == 'change_up' and current_change >= rval):
                         msg = f"{data['name']} {('价格突破' if rtype=='price_up' else '价格跌破' if rtype=='price_down' else '涨幅达到')} {current_price} 涨幅 {current_change} 量能 {volume_change} 换手 {ratio_change}"
                         messages.append(("RULE", msg))
+
+                # ---------- [NEW] 起跳新星探测逻辑 (win_upper 0 -> 1) ----------
+                # 逻辑：上一个状态为 0 (未站稳)，当前状态 >= 1 (开始站稳)
+                # 配合量能过滤，提高准度
+                curr_win_u1 = int(row.get('win_upper1', 0))
+                prev_win_u1 = int(data.get('prev_win_upper1', curr_win_u1)) # 从 data 级(持久)或初始化获取
+                
+                if prev_win_u1 == 0 and curr_win_u1 >= 1:
+                    # 获取 gem_score (形态打分) 进行辅助过滤，如果不存在则默认为高分以触发
+                    gem_score = float(row.get('gem_score', 20.0))
+                    if volume_change > 1.2 and gem_score > 15:
+                        msg = f"🌟 [起跳新星]: {data['name']} 形态修复完成, 站稳压力位! 量能 {volume_change:.1f} 基因 {gem_score:.0f}"
+                        messages.append(("PATTERN", msg))
+                        logger.info(f"🚀 Detected BREAKOUT_STAR for {code} {data['name']}: win_upper1 jump 0->{curr_win_u1}")
+                
+                # 更新持久化状态供下一次循环比对
+                data['prev_win_upper1'] = curr_win_u1
 
                 # --- 3. 实时情绪感知 & K线形态 (Realtime Analysis) ---
                 if self.realtime_service:

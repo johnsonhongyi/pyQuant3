@@ -290,6 +290,31 @@ def calc_indicators(top_all: pd.DataFrame, logger: Any, resample: str) -> pd.Dat
     top_all['amount'] = top_all['vol'] * top_all['close']
     # 这里的 volume 将被更新为虚拟量比信号强度
     top_all['volume'] = calc_compute_volume(top_all, logger, resample=resample, virtual=True)
+    
+    # --- [NEW] 注入 win_upper 实时指标 (针对压力位1和2) ---
+    max_days = cct.compute_lastdays
+    N_count = len(top_all)
+    
+    # 初始化默认值，避免后续引用报 KeyError
+    if 'win_upper1' not in top_all.columns:
+        top_all['win_upper1'] = 0
+    if 'win_upper2' not in top_all.columns:
+        top_all['win_upper2'] = 0
+
+    if N_count > 0:
+        try:
+            # 这里的 ma51d, high41 已经在 process_merged_sina_with_history 后存在
+            if 'upper1' in top_all.columns:
+                top_all = strong_momentum_large_cycle_vect_consecutive_above(
+                    top_all, 'close', 'upper1', 'ma51d', 'high41', max_days
+                )
+            if 'upper2' in top_all.columns:
+                top_all = strong_momentum_large_cycle_vect_consecutive_above(
+                    top_all, 'close', 'upper2', 'ma51d', 'high41', max_days
+                )
+        except Exception as e:
+            logger.warning(f"calc_indicators win_upper failed: {e}")
+
     # 同步到 ratio 列，确保兼容性 是换手率,不能同步Volume
     # top_all['ratio'] = top_all['volume']
 
@@ -781,20 +806,42 @@ def strong_momentum_large_cycle_vect_consecutive_above(
     if N == 0:
         return df.assign(**{f'win_{upper_col}': np.zeros(N, dtype=int)})
 
-    # ---------- 构建矩阵 (0轴代表行, 1轴代表天数 1d, 2d... ) ----------
+    # ---------- 构建矩阵 (0轴代表行, 1轴代表天数 0d, 1d, 2d... ) ----------
     def get_mat(prefix):
-        # 统一处理列名，upper/high4 后面没有 'd'，lastp/lastl 有 'd'
-        if prefix in ['upper', 'high4']:
-            cols = [f"{prefix}{i}" for i in range(1, max_days + 1)]
-        else:
-            cols = [f"{prefix}{i}d" for i in range(1, max_days + 1)]
+        # 统一输出形状为 (N, max_days + 1)
+        mat = np.zeros((N, max_days + 1))
         
-        valid = [c for c in cols if c in df.columns]
-        # 初始化为 NaN 或 0，这里用 0 并在后面取交集有效长度
-        mat = np.zeros((N, len(valid))) 
+        if prefix in ['upper', 'high4']:
+            potential_cols = [f"{prefix}{i}" for i in range(0, max_days + 1)]
+        else:
+            potential_cols = [f"{prefix}{i}d" for i in range(0, max_days + 1)]
+        
+        valid = [c for c in potential_cols if c in df.columns]
+        
         if valid:
-            mat = df[valid].values
-        return mat, len(valid)
+            import re
+            def extra_num(s):
+                m = re.search(r'\d+', s)
+                return int(m.group()) if m else 99
+            
+            # 按天数排序并填充到矩阵对应位置
+            for c in valid:
+                day_idx = extra_num(c)
+                if day_idx <= max_days:
+                    mat[:, day_idx] = df[c].values
+            return mat, max_days + 1
+        else:
+            # 兼容性回退
+            if prefix == 'lasto': use_col = 'open'
+            elif prefix == 'lastp': use_col = 'close'
+            elif prefix == 'lasth': use_col = 'high'
+            elif prefix == 'lastl': use_col = 'low'
+            elif prefix == 'lastv': use_col = 'volume'
+            else: use_col = prefix
+            
+            if use_col in df.columns:
+                mat = np.tile(df[[use_col]].values, (1, max_days + 1))
+            return mat, max_days + 1
 
     P, plen = get_mat(price_col)
     U, ulen = get_mat(upper_col)
@@ -859,16 +906,40 @@ def strong_momentum_large_cycle_vect_consecutive_above_m5(
     if N == 0:
         return df.assign(**{f'wm5_{upper_col}': np.zeros(N, dtype=int)})
 
-    # ---------- 构建矩阵 (1d 在 index 0, 2d 在 index 1...) ----------
+    # ---------- 构建矩阵 (0d 在 index 0, 1d 在 index 1...) ----------
     def get_mat(prefix, use_col=None):
-        cols = [f"{prefix}{i}" for i in range(1, max_days+1)] if prefix == upper_col else [f"{prefix}{i}d" for i in range(1, max_days+1)]
-        valid = [c for c in cols if c in df.columns]
+        mat = np.zeros((N, max_days + 1))
+        if prefix == upper_col:
+            potential_cols = [f"{prefix}{i}" for i in range(0, max_days+1)]
+        else:
+            potential_cols = [f"{prefix}{i}d" for i in range(0, max_days+1)]
+        
+        valid = [c for c in potential_cols if c in df.columns]
         if valid:
-            return df[valid].values
+            import re
+            def extra_num(s):
+                m = re.search(r'\d+', s)
+                return int(m.group()) if m else 99
+            
+            for c in valid:
+                day_idx = extra_num(c)
+                if day_idx <= max_days:
+                    mat[:, day_idx] = df[c].values
+            return mat
         else:
             # 兼容性处理：若无滚动列则重复当前列
-            use_col = use_col or prefix
-            return np.tile(df[[use_col]].values, (1, max_days))
+            if use_col is None:
+                if prefix == 'lasto': use_col = 'open'
+                elif prefix == 'lastp': use_col = 'close'
+                elif prefix == 'lasth': use_col = 'high'
+                elif prefix == 'lastl': use_col = 'low'
+                elif prefix == 'lastv': use_col = 'volume'
+                else: use_col = prefix
+            
+            if use_col in df.columns:
+                return np.tile(df[[use_col]].values, (1, max_days + 1))
+            else:
+                return mat
 
     P  = get_mat(price_col)
     U  = get_mat(upper_col)
@@ -878,9 +949,11 @@ def strong_momentum_large_cycle_vect_consecutive_above_m5(
     C  = P  # 阳线判断通常使用收盘价/现价
 
     win_upper = np.zeros(N, dtype=int)
+    has_0d = f'{price_col}0d' in df.columns or f'{upper_col}0' in df.columns
+    stop_idx = 0 if has_0d else 1
 
     # ---------- 条件矩阵 ----------
-    # 注意：矩阵的列索引 0=1d, 1=2d, 2=3d...
+    # 注意：矩阵的列索引 0=0d, 1=1d, 2=2d...
     cond_touch = (L <= Ma)
     cond_strong = (P > U) & (C > O)
 
@@ -888,21 +961,20 @@ def strong_momentum_large_cycle_vect_consecutive_above_m5(
     for i in range(N):
         # 1. 找到最近的一次启动点 (即最小的列索引)
         idxs = np.where(cond_touch[i])[0]
+        # 过滤 0d 屏蔽位
+        idxs = [idx for idx in idxs if idx >= stop_idx]
+        
         if len(idxs) == 0:
             continue
         
-        start_idx = idxs[0]  # 最近的一个满足 L <= Ma 的位置 (例如 3d 对应索引 2)
-        
-        # 2. 启动点当天计入
+        start_idx = idxs[0]
         length = 1
         
         # 3. 从启动点向“现在”方向遍历 (索引减小的方向)
-        # 例如 start_idx=2 (3d)，则检查索引 1 (2d) 和 0 (1d)
-        for j in range(start_idx - 1, -1, -1):
+        for j in range(start_idx - 1, stop_idx - 1, -1):
             if cond_strong[i, j]:
                 length += 1
             else:
-                # 一旦不满足 P>U & C>O，连续中断
                 break
         
         win_upper[i] = length
@@ -925,16 +997,23 @@ def strong_momentum_large_cycle_vect_consecutive_above_single(
     if N == 0:
         return df
 
-    # ---------- 构建矩阵 (1d=idx 0, 2d=idx 1...) ----------
+    # ---------- 构建矩阵 (0d=idx 0, 1d=idx 1...) ----------
     def get_val_matrix(prefix):
         if prefix == 'upper':
-            cols = [f"{prefix}{i}" for i in range(1, max_days + 1)]
+            potential_cols = [f"{prefix}{i}" for i in range(0, max_days + 1)]
         else:
-            cols = [f"{prefix}{i}d" for i in range(1, max_days + 1)]
+            potential_cols = [f"{prefix}{i}d" for i in range(0, max_days + 1)]
         
-        valid_cols = [c for c in cols if c in df.columns]
+        valid_cols = [c for c in potential_cols if c in df.columns]
         if not valid_cols:
             return None, 0
+            
+        import re
+        def extra_num(s):
+            m = re.search(r'\d+', s)
+            return int(m.group()) if m else 99
+        valid_cols = sorted(valid_cols, key=extra_num)
+        
         return df[valid_cols].values, len(valid_cols)
 
     P, p_len = get_val_matrix(price_col)
@@ -945,22 +1024,22 @@ def strong_momentum_large_cycle_vect_consecutive_above_single(
         df[f'w_{upper_col}'] = 0
         return df
 
+    # 判定是否存在 0d 实时数据
+    has_0d = f'{price_col}0d' in df.columns or f'{upper_col}0' in df.columns
+    start_offset = 0 if has_0d else 1
+
     # ---------- 核心向量化逻辑 ----------
     # cond 矩阵: True 代表 P > U
-    cond = P[:, :usable_days] > U[:, :usable_days]
-
-    # 寻找每一行第一个出现 False 的位置 (即不满足 P > U 的日子)
-    # ~cond 会把 True 变 False，np.argmax 找到第一个 True (即原矩阵第一个 False)
-    first_false = np.argmax(~cond, axis=1)
-
-    # 特殊情况处理：如果整行都是 True，np.argmax 会返回 0
-    # 我们需要区分：是真的第一天就是 False，还是全行都是 True
-    all_true = np.all(cond, axis=1)
+    # 截取有效范围，跳过可能的 0d 占位符
+    effective_cond = P[:, start_offset:usable_days] > U[:, start_offset:usable_days]
     
-    win_upper = np.where(all_true, usable_days, first_false)
+    # 寻找每一行第一个出现 False 的位置
+    first_false = np.argmax(~effective_cond, axis=1)
 
-    # 如果第一天就是 False (cond[:,0] == False)，first_false 本身就是 0，正确
-    
+    # 特殊情况处理
+    all_true = np.all(effective_cond, axis=1)
+    win_upper = np.where(all_true, usable_days - start_offset, first_false)
+
     # ---------- 输出 ----------
     res_df = df.copy()
     res_df[f'w_{upper_col}'] = win_upper
@@ -1976,6 +2055,19 @@ def fetch_and_process(
             # top_all = calc_indicators(top_all, resample)
 
             if top_all is not None and not top_all.empty:
+                # --- [新增] 注入 0d 数据列，使 consecutive_above 生效 ---
+                # 只有在盘中且有实时行情时注入
+                if 'now' in top_all.columns:
+                    top_all['lastp0d'] = top_all['now']
+                    top_all['lasth0d'] = top_all['high']
+                    top_all['lastl0d'] = top_all['low']
+                    top_all['lasto0d'] = top_all['open']
+                    top_all['lastv0d'] = top_all['vol'] if 'vol' in top_all.columns else top_all['volume']
+                    # 为压力位注入 0d (复用昨日压力位作为今日参考线)
+                    if 'upper1' in top_all.columns: top_all['upper0'] = top_all['upper1']
+                    if 'ma51d' in top_all.columns: top_all['ma50d'] = top_all['ma51d']
+                    if 'high41' in top_all.columns: top_all['high40'] = top_all['high41']
+
                 sort_cols, sort_keys = ct.get_market_sort_value_key(st_key_sort,top_all)
             else:
                 sort_cols, sort_keys = ct.get_market_sort_value_key(st_key_sort)
@@ -2003,8 +2095,8 @@ def fetch_and_process(
                 top_all = scoring_momentum_pullback_system(top_all,max_days=cct.compute_lastdays)
             # print(top_all.loc['920427', get_vect_col(upper='upper',max_days=cct.compute_lastdays)].T.to_string())
             # cct.print_timing_summary()
-            logger.debug(f"{top_all.query('win_upper > 0').loc['920427',['win_upper','w_upper','wm5_upper','gem_score']]}")
-            logger.debug(f"{top_all.sort_values(by='gem_score', ascending=False).gem_score[:10]}")
+            logger.debug(f"{top_all.loc['920427',['win_upper','win_upper1','win_upper2','w_upper','wm5_upper','gem_score']]}")
+            logger.debug(f"{top_all.sort_values(by='gem_score', ascending=False).gem_score[:10].T}")
             logger.info(f'clean_sum: {time.time() - time_sum:.2f}')
             with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
                 top_all = build_hma_and_trendscore(top_all,status_callback=status_callback)
