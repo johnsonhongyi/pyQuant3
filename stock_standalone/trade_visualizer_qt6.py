@@ -2474,6 +2474,14 @@ class MainWindow(QMainWindow, WindowMixin):
     def _on_hotlist_stock_selected(self, code: str, name: str):
         """热点面板选中股票回调"""
         self.show_stock(code)
+
+    def _on_hotlist_double_click(self, code: str, name: str, price: float):
+        """热点面板双击回调 - 切换到K线并聚焦"""
+        logger.info(f"[Hotlist] Double clicked: {code} {name}")
+        self.show_stock(code)
+        # 激活窗口
+        self.raise_()
+        self.activateWindow()
     
     def _on_hotlist_voice_alert(self, code: str, message: str):
         """热点面板语音提醒回调"""

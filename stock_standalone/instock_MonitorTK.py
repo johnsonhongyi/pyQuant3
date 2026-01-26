@@ -2203,7 +2203,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.ths_var = tk.BooleanVar(value=True)
         self.dfcf_var = tk.BooleanVar(value=False)
         self.tip_var = tk.BooleanVar(value=False)
-        self.voice_var = tk.BooleanVar(value=False)
+        self.voice_var = tk.BooleanVar(value=True) # 💥 默认开启语音
         self.realtime_var = tk.BooleanVar(value=True)
         self.vis_var = tk.BooleanVar(value=False)
         checkbuttons_info = [
@@ -2579,7 +2579,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
 
     def on_voice_toggle(self):
-        self.live_strategy.set_voice_enabled(self.voice_var.get())
+        val = self.voice_var.get()
+        self.live_strategy.set_voice_enabled(val)
+        if not val:
+            # 如果关闭语音，立即停止当前播放
+            try:
+                from alert_manager import AlertManager
+                AlertManager().stop_current_speech()
+            except:
+                pass
 
     def reload_cfg_value(self):
         global marketInit,marketblk,scale_offset,resampleInit
@@ -4808,8 +4816,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def close_all_alerts(self, is_manual=False):
         """
         一键批量关闭所有 active alert 窗口。
-        安全调用 _close_alert，不阻塞 Tk 主线程。
+        新增强制停止当前所有语音播报的联动。
         """
+        # 💥 联动核心 1：强制停止当前正在播放的 *任何* 语音
+        try:
+            from alert_manager import get_alert_manager
+            mgr = get_alert_manager()
+            mgr.stop_current_speech(key=None) # key=None 表示全局硬停止
+            # 💥 联动核心 2：立即清空活跃列表，确保后续排队全部跳过
+            mgr.sync_active_codes([]) 
+        except:
+            pass
+        
         # 拷贝列表，防止遍历过程中被修改
         active_windows = list(getattr(self, 'active_alerts', []))
 
@@ -4834,11 +4852,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             return
         win.is_closing = True
 
-        target_code = None
+        target_code = getattr(win, 'stock_code', None)
+        
+        # 尝试从映射表查找（用于清理）
         if hasattr(self, 'code_to_alert_win'):
             for c, w in list(self.code_to_alert_win.items()):
                 if w is win:
-                    target_code = c
+                    if not target_code: target_code = c
                     del self.code_to_alert_win[c]
                     break
 
@@ -4853,10 +4873,46 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not target_code or not getattr(self, 'live_strategy', None):
             return
 
+        # 💥 联动核心 1：只要窗口关闭，就试强制停止播报。
+        # 如果是手动点击(is_manual)，则执行全局停止 (key=None)，彻底斩断声音；
+        # 如果是自动超时关闭，由于用户未干预，仅尝试停止匹配该代码的播报。
+
+        # 取消 safety timer（如果已经触发）
+        if hasattr(win, 'safety_close_timer'):
+            self.after_cancel(win.safety_close_timer)
+            
+        try:
+            from alert_manager import get_alert_manager
+            mgr = get_alert_manager()
+            mgr.stop_current_speech(key=None if is_manual else target_code)
+            
+            # 💥 联动核心 2：同步最新的活跃代码列表，确保后续排队的该代码内容被跳过
+            self.after(10, self._update_voice_active_codes)
+        except:
+            pass
+
+    def _update_voice_active_codes(self):
+        """同步当前屏幕上所有报警窗口的股票代码到语音管理器"""
+        try:
+            active_windows = list(getattr(self, 'active_alerts', []))
+            valid_codes = []
+            for w in active_windows:
+                # # 取消 safety timer（如果已经触发）
+                # if hasattr(w, 'safety_close_timer'):
+                #     self.after_cancel(w.safety_close_timer)
+                if hasattr(w, 'stock_code') and w.winfo_exists():
+                    valid_codes.append(str(w.stock_code))
+            
+            from alert_manager import get_alert_manager
+            get_alert_manager().sync_active_codes(valid_codes)
+        except:
+            pass
+
         def _post_logic():
             try:
                 if is_manual:
                     self.live_strategy.snooze_alert(target_code, cycles=pending_alert_cycles)
+                
                 v = getattr(self.live_strategy, '_voice', None)
                 if v and hasattr(v, 'cancel_for_code'):
                     v.cancel_for_code(target_code)
@@ -4865,69 +4921,66 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         threading.Thread(target=_post_logic, daemon=True).start()
 
-        # 取消 safety timer（如果已经触发）
-        if hasattr(win, 'safety_close_timer'):
-            self.after_cancel(win.safety_close_timer)
 
 
-    def _close_alert_old(self, win, is_manual=False):
-        """关闭弹窗并刷新布局，并停止关联的语音报警（冻结免疫版）"""
+    # def _close_alert_old(self, win, is_manual=False):
+    #     """关闭弹窗并刷新布局，并停止关联的语音报警（冻结免疫版）"""
 
-        # =========================
-        # 1️⃣ UI 状态立即清理（只做内存操作）
-        # =========================
-        if hasattr(self, 'active_alerts') and win in self.active_alerts:
-            self.active_alerts.remove(win)
+    #     # =========================
+    #     # 1️⃣ UI 状态立即清理（只做内存操作）
+    #     # =========================
+    #     if hasattr(self, 'active_alerts') and win in self.active_alerts:
+    #         self.active_alerts.remove(win)
 
-        target_code = None
-        if hasattr(self, 'code_to_alert_win'):
-            for c, w in list(self.code_to_alert_win.items()):
-                if w is win:
-                    target_code = c
-                    del self.code_to_alert_win[c]
-                    break
+    #     target_code = None
+    #     if hasattr(self, 'code_to_alert_win'):
+    #         for c, w in list(self.code_to_alert_win.items()):
+    #             if w is win:
+    #                 target_code = c
+    #                 del self.code_to_alert_win[c]
+    #                 break
 
-        # =========================
-        # 2️⃣ 立即销毁窗口（不等待任何策略 / 语音）
-        # =========================
-        try:
-            win.destroy()
-        except Exception:
-            pass
+    #     # =========================
+    #     # 2️⃣ 立即销毁窗口（不等待任何策略 / 语音）
+    #     # =========================
+    #     try:
+    #         win.destroy()
+    #     except Exception:
+    #         pass
 
-        # =========================
-        # 3️⃣ 延迟 UI 重排（同函数内完成）
-        # =========================
-        self.after(50, self._update_alert_positions)
+    #     # =========================
+    #     # 3️⃣ 延迟 UI 重排（同函数内完成）
+    #     # =========================
+    #     self.after(50, self._update_alert_positions)
 
-        # =========================
-        # 4️⃣ 延迟处理策略 / 语音（关键）
-        #    ⚠️ 仍然在本函数内，不拆逻辑
-        # =========================
-        if not target_code or not getattr(self, 'live_strategy', None):
-            return
+    #     # =========================
+    #     # 4️⃣ 延迟处理策略 / 语音（关键）
+    #     #    ⚠️ 仍然在本函数内，不拆逻辑
+    #     # =========================
+    #     if not target_code or not getattr(self, 'live_strategy', None):
+    #         return
 
-        def _post_logic():
-            # ---- 手动关闭：只做延迟再报 ----
-            if is_manual:
-                try:
-                    self.live_strategy.snooze_alert(
-                        target_code,
-                        cycles=pending_alert_cycles
-                    )
-                except Exception:
-                    pass
+    #     def _post_logic():
+    #         # ---- 手动关闭：只做延迟再报 ----
+    #         if is_manual:
+    #             try:
+    #                 self.live_strategy.snooze_alert(
+    #                     target_code,
+    #                     cycles=pending_alert_cycles
+    #                 )
+    #             except Exception:
+    #                 pass
 
-            # ---- 无论手动 / 自动，都必须 cancel 当前语音 ----
-            v = getattr(self.live_strategy, '_voice', None)
-            if v and hasattr(v, 'cancel_for_code'):
-                try:
-                    v.cancel_for_code(target_code)
-                except Exception:
-                    pass
+    #         # ---- 无论手动 / 自动，都必须 cancel 当前语音 ----
+    #         v = getattr(self.live_strategy, '_voice', None)
+    #         if v and hasattr(v, 'cancel_for_code'):
+    #             try:
+    #                 v.cancel_for_code(target_code)
+    #             except Exception:
+    #                 pass
 
-        # ⚠️ 核心：逻辑仍在 _close_alert，但不阻塞 Tk
-        self.after(10, _post_logic)
+    #     # ⚠️ 核心：逻辑仍在 _close_alert，但不阻塞 Tk
+    #     self.after(10, _post_logic)
 
 
     # def _close_alert_old(self, win, is_manual=False):
@@ -5036,25 +5089,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         
         self._alert_queue_processing = True
         
-        # 取出一个请求
-        item = self._alert_queue.pop(0)
-        code, name, msg = item
-        
-        # 创建这个弹窗
-        self._create_single_alert_popup(code, name, msg)
-        
-        # ⭐ 关键：处理完一个弹窗后，立即处理待定的用户事件（如点击）
-        # 这确保用户可以在弹窗逐个出现的过程中操作已显示的窗口
         try:
-            self.update()
-        except tk.TclError:
-            pass  # 窗口可能已关闭
-        
-        # 如果还有队列，300ms 后继续处理下一个（层级效果）
-        if self._alert_queue:
-            self.after(100, self._process_alert_queue)
-        else:
-            self._alert_queue_processing = False
+            # 取出一个请求
+            item = self._alert_queue.pop(0)
+            code, name, msg = item
+            
+            # 创建这个弹窗
+            self._create_single_alert_popup(code, name, msg)
+            
+            # logger.debug(f"已处理一个弹窗，剩余队列: {len(self._alert_queue)}")
+            
+        except Exception as e:
+            logger.error(f"处理弹窗队列异常: {e}")
+        finally:
+            # 如果还有队列，100ms 后继续处理下一个（层级效果）
+            if self._alert_queue:
+                self.after(100, self._process_alert_queue)
+            else:
+                self._alert_queue_processing = False
     
     def _create_single_alert_popup(self, code, name, msg):
         """实际创建单个弹窗（从队列调用）"""
@@ -5080,6 +5132,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             win.attributes("-topmost", True)
             win.geometry("400x180")
             win.configure(bg="#fff")
+            win.stock_code = code # ⭐ 关键：将代码绑定到窗口，确保销毁时能精准找到
             
             # 检测是否为高优先级信号（消息中包含 [HIGH]）
             win.is_high_priority = "[HIGH]" in msg or "高优先级" in msg
@@ -5087,6 +5140,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # 记录并定位（直接调用，保持层叠效果）
             self.active_alerts.append(win)
             self._update_alert_positions()
+            
+            # ⭐ 联动增强：更新活跃列表
+            self.after(10, self._update_voice_active_codes)
             
             # 关闭回调
             win.protocol("WM_DELETE_WINDOW", lambda: self._close_alert(win, is_manual=True))
@@ -5108,9 +5164,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if not getattr(self.live_strategy, 'voice_enabled', True):
                         has_voice = False
                     else:
-                        v = getattr(self.live_strategy, '_voice', None)
-                        if v and hasattr(v, '_thread') and v._thread and v._thread.is_alive() and v.queue.qsize() < 10:
-                            has_voice = True
+                        try:
+                            from alert_manager import AlertManager
+                            mgr = AlertManager()
+                            if mgr.voice_enabled and mgr.process and mgr.process.is_alive():
+                                # 如果语音队列积压太严重(>30)，就不标记为 has_voice，以便窗口快速关闭
+                                if mgr.voice_queue.qsize() < 30:
+                                    has_voice = True
+                        except:
+                            has_voice = False
             except Exception as e:
                 logger.debug(f"voice detect failed: {e}")
             
@@ -5324,6 +5386,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     try:
                         self.live_strategy.remove_monitor(code)
                         logger.info(f"Deleted alarm rule for {code}")
+                        
+                        # 💥 同步停止当前语音播报
+                        try:
+                            from alert_manager import AlertManager
+                            AlertManager().stop_current_speech()
+                        except:
+                            pass
+
                         btn_del.config(text="🗑️已删除", state="disabled")
                         win.after(50, lambda: self._close_alert(win, is_manual=True))
                     except Exception as e:

@@ -7,10 +7,10 @@ from __future__ import annotations
 import threading
 import time
 import os
-import winsound
 from datetime import datetime, timedelta
 import multiprocessing as mp
 import pandas as pd
+import re
 from queue import Empty
 from typing import Any, Optional, Callable, Dict, List, Union
 from collections import deque
@@ -67,7 +67,6 @@ try:
 except ImportError:
     pythoncom = None
 
-import re
 
 def normalize_speech_text(text: str) -> str:
     """
@@ -138,25 +137,32 @@ class VoiceAnnouncer:
             try: self.on_speak_start(code)
             except: pass
             
-        self.manager.send_alert(text, priority=2, key=code)
+        # 提升优先级
+        p = 2
+        if any(kw in text for kw in ["注意", "卖出", "风险", "警告"]):
+            p = 1
+            
+        self.manager.send_alert(text, priority=p, key=code)
         
-        # Fake timer for on_speak_end
+        # Fake timer for on_speak_end (Legacy)
         if self.on_speak_end:
             threading.Timer(1.0, lambda: self._safe_callback(self.on_speak_end, code)).start()
+
+    def stop(self) -> None:
+        """停止所有当前正在播放的语音"""
+        self.manager.stop_current_speech()
+
+    def cancel_for_code(self, code: str) -> None:
+        """针对特定品种取消语音播报（精准中断）"""
+        self.manager.stop_current_speech(key=code)
+
+    def shutdown(self):
+        """完全关闭语音引擎"""
+        self.manager.stop()
 
     def _safe_callback(self, cb, arg):
         try: cb(arg)
         except: pass
-
-    def cancel_for_code(self, target_code: str):
-        pass # AlertManager doesn't support canceling specific yet
-
-    def shutdown(self):
-        self.manager.stop()
-
-    def stop(self):
-        """停止语音播报引擎"""
-        self.shutdown()
 
 
 class StrategySupervisor:
@@ -1263,7 +1269,7 @@ class StockLiveStrategy:
                     signal_type = "回踩MA5启动"
                     priority = 7
                 
-                # 备选: 回踩MA10启动
+                #备选: 回踩MA10启动
                 elif is_ma10_bounce and has_volume:
                     signal_type = "回踩MA10启动"
                     priority = 6
@@ -1391,7 +1397,7 @@ class StockLiveStrategy:
         
         pct = (current_price - pre_close) / pre_close * 100 if pre_close > 0 else 0
         
-        # [Strategy Tuning] 竞价高开 0.5% ~ 6.5%，且要求一定的成交额
+        # [Strategy Tuning]竞价高开 0.5% ~ 6.5%，且要求一定的成交额
         if 0.5 <= pct <= 6.5 and volume >= 200:
             return True, f"竞价达标: 高开{pct:.2f}% 量{int(volume)}"
             
@@ -2788,25 +2794,64 @@ class StockLiveStrategy:
     def _trigger_alert(self, code: str, name: str, message: str, action: str = '持仓', price: float = 0.0, resample: str = 'd') -> None:
         """触发报警"""
         logger.debug(f"🔔 ALERT [{resample}]: {message}")
-        
-        # # 2. 语音播报
-        # speak_text = f"注意{action}，{code} ，{message}"
-        # self._voice.say(speak_text, code=code)
-        # 2. 语音播报（★ 受控）
-        if self.voice_enabled:
-            # 1. 声音
-            self._play_sound_async()
-            speak_text = f"注意{action}，{code} ，{message}"
-            self._voice.say(speak_text, code=code)
-        # else:
-        #     logger.debug(f"Voice muted for {code}")
-        
-        # 3. 回调
+
+        # --- [NEW] 1. 推送到信号队列 (供可视化信号日志使用) ---
+        try:
+            from signal_message_queue import SignalMessageQueue, SignalMessage
+            now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            # 提取信号类型 (如果是 [起跳新星] 等模式)
+            sig_type = "ALERT"
+            if "起跳新星" in message:
+                sig_type = "BREAKOUT_STAR"
+            elif "形态" in message or "PATTERN" in message:
+                sig_type = "PATTERN"
+            
+            SignalMessageQueue().push(SignalMessage(
+                priority=30 if sig_type == "BREAKOUT_STAR" else 50,
+                timestamp=now_str,
+                code=code,
+                name=name,
+                signal_type=sig_type,
+                source="live_strategy",
+                reason=message,
+                score=0.0
+            ))
+        except Exception as e:
+            logger.debug(f"Push to SignalMessageQueue failed: {e}")
+            
+        # 1. 回调 (UI 优先，确保窗口先弹出来)
         if self.alert_callback:
             try:
                 self.alert_callback(code, name, message)
             except Exception as e:
                 logger.error(f"Alert callback error: {e}")
+
+        # 2. 语音播报（后置，避免阻塞 UI 窗口产生感官延迟）
+        if self.voice_enabled:
+            # --- [优化] 语音内容精简与去重 ---
+            # message 可能包含：[T+1限制] 名称 (代码) 内容1 \n 内容2...
+            unique_parts = []
+            seen = set()
+            
+            # 1. 基础清理：移除重复的名称和代码
+            clean_msg = message.replace(name, "").replace(code, "").replace("\n", " ").strip()
+            
+            # 2. 中文分词去重 (简单实现：按常见标点分割)
+            # 使用 re.split 支持多分隔符
+            raw_parts = re.split(r'[，。！| \s]+', clean_msg)
+            for part in raw_parts:
+                part = part.strip()
+                # 过滤掉过短的无意义字符，且只保留第一次出现的非重复内容
+                if part and part not in seen and len(part) > 1:
+                    unique_parts.append(part)
+                    seen.add(part)
+            
+            # 3. 限制播报长度：最多 3 个关键要素
+            concise_msg = "，".join(unique_parts[:3])
+            # 4. 组装最终文本：注意[买入]，[名称]，[核心内容]
+            speak_text = f"注意{action}，{name}，{concise_msg}"
+            
+            self._voice.say(speak_text, code=code)
 
         # 4. 记录交易执行 (用于回测优化和收益计算)
         if action in ("买入", "卖出", "ADD", "加仓") or "止" in action:
@@ -2814,17 +2859,8 @@ class StockLiveStrategy:
             self.trading_logger.record_trade(code, name, action, price, 100, reason=message, resample=resample) 
 
     def _play_sound_async(self):
-        try:
-            # 使用 MessageBeep 替代 PlaySound，更可靠且原生异步
-            # MB_ICONEXCLAMATION (0x00000030L) 是一个清晰的提示音
-            winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
-        except Exception as e:
-            logger.debug(f"MessageBeep failed: {e}")
-            try:
-                 # 兜底：如果 API 失败，尝试在线程中 Beep
-                 threading.Thread(target=lambda: winsound.Beep(1000, 200), daemon=True).start()
-            except:
-                 pass
+        # 💥 已移除 winsound 报警，统一使用 VoiceAnnouncer
+        pass
 
 
     def start_auto_trading_loop(self, force: bool = False, concept_top5: Optional[list[Any]] = None):

@@ -3078,7 +3078,6 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
             code, start=start, end=end, dl=dl, newdays=newdays).sort_index(ascending=True)
     else:
         df = df.sort_index(ascending=True)
-
     index_status = False
     if code == '999999':
         code_ts = str(1000000 - int(code)).zfill(6)
@@ -3217,7 +3216,7 @@ def get_tdx_append_now_df_api_tofile(code, dm=None, newdays=0, start=None, end=N
         writedm = False
     else:
         _is_stop_code = is_suspended_tick(dm)
-        if not is_suspended_tick:
+        if not _is_stop_code:
             writedm = True
         else:
             writedm = False
@@ -7616,9 +7615,11 @@ if __name__ == '__main__':
     log.setLevel(log_level)
     # tdx_profile_test_tdx()
     
-    code='603056'
+    code='601212'
 
-    # df=get_tdx_append_now_df_api_tofile(code)
+    df=get_tdx_append_now_df_api_tofile(code)
+    import ipdb;ipdb.set_trace()
+
     # # import ipdb;ipdb.set_trace()
     # print('df: {df}')
     # import ipdb;ipdb.set_trace()
