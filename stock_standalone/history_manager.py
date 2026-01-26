@@ -187,8 +187,19 @@ class QueryHistoryManager:
                 self.editor_frame.pack_forget()
             else:
                 self.editor_frame.pack(fill="both", expand=True)
+
     def save_search_history(self, confirm_threshold=10):
         try:
+            def dedup(history):
+                seen = set()
+                result = []
+                for r in history:
+                    q = r.get("query") if isinstance(r, dict) else str(r)
+                    if q not in seen:
+                        seen.add(q)
+                        result.append(r)
+                return result
+
             def normalize_history(history):
                 normalized = []
                 for r in history:
@@ -204,160 +215,65 @@ class QueryHistoryManager:
                     normalized.append({"query": q, "starred": starred, "note": note})
                 return normalized
 
-            # 保留最新的去重函数（后出现覆盖前）
-            def dedup_latest(history):
-                seen = {}
-                for r in history:
-                    q = r.get("query") if isinstance(r, dict) else str(r)
-                    seen[q] = r  # 后出现的覆盖前面的
-                return list(seen.values())
-
             def merge_history(current, old):
-                # 合并时，current 优先覆盖 old
-                combined = old + current  # 旧的在前，新的在后
-                return dedup_latest(combined)[:self.MAX_HISTORY]
+                seen = set()
+                result = []
+                for r in current:
+                    q = r.get("query") if isinstance(r, dict) else str(r)
+                    if q not in seen:
+                        seen.add(q)
+                        result.append(r)
+                for r in old:
+                    q = r.get("query") if isinstance(r, dict) else str(r)
+                    if q not in seen:
+                        seen.add(q)
+                        result.append(r)
+                return result[:self.MAX_HISTORY]
 
             old_data = {"history1": [], "history2": [], "history3": [], "history4": []}
             if os.path.exists(self.history_file):
                 with open(self.history_file, "r", encoding="utf-8") as f:
                     try:
                         loaded_data = json.load(f)
-                        for key in old_data:
-                            old_data[key] = normalize_history(loaded_data.get(key, []))
+                        old_data["history1"] = dedup(loaded_data.get("history1", []))
+                        old_data["history2"] = dedup(loaded_data.get("history2", []))
+                        old_data["history3"] = dedup(loaded_data.get("history3", []))
+                        old_data["history4"] = dedup(loaded_data.get("history4", []))
                     except json.JSONDecodeError:
                         pass
 
-            # 先 normalize
             self.history1 = normalize_history(self.history1)
             self.history2 = normalize_history(self.history2)
             self.history3 = normalize_history(self.history3)
             self.history4 = normalize_history(self.history4)
 
-            # merge 并去重（保留最新）
             merged_data = {
-                "history1": merge_history(self.history1, old_data["history1"]),
-                "history2": merge_history(self.history2, old_data["history2"]),
-                "history3": merge_history(self.history3, old_data["history3"]),
-                "history4": merge_history(self.history4, old_data["history4"]),
+                "history1": normalize_history(merge_history(self.history1, old_data.get("history1", []))),
+                "history2": normalize_history(merge_history(self.history2, old_data.get("history2", []))),
+                "history3": normalize_history(merge_history(self.history3, old_data.get("history3", []))),
+                "history4": normalize_history(merge_history(self.history4, old_data.get("history4", []))),
             }
 
-            # 变化检测
             def changes_count(old_list, new_list):
                 old_set = {r['query'] for r in old_list}
                 new_set = {r['query'] for r in new_list}
                 return len(new_set - old_set) + len(old_set - new_set)
 
-            delta1 = changes_count(old_data["history1"], merged_data["history1"])
-            delta2 = changes_count(old_data["history2"], merged_data["history2"])
+            delta1 = changes_count(old_data.get("history1", []), merged_data["history1"])
+            delta2 = changes_count(old_data.get("history2", []), merged_data["history2"])
 
             if delta1 + delta2 >= confirm_threshold:
-                if not messagebox.askyesno(
-                    "确认保存",
-                    f"搜索历史发生较大变动（{delta1 + delta2} 条），是否继续保存？"
-                ):
+                if not messagebox.askyesno("确认保存", f"搜索历史发生较大变动（{delta1 + delta2} 条），是否继续保存？"):
                     logger.info("❌ 用户取消保存搜索历史")
                     return
 
             with open(self.history_file, "w", encoding="utf-8") as f:
                 json.dump(merged_data, f, ensure_ascii=False, indent=2)
 
-            logger.info(
-                f"✅ 搜索历史已保存 "
-                f"(h1: {len(merged_data['history1'])} / "
-                f"h2: {len(merged_data['history2'])} / "
-                f"h3: {len(merged_data['history3'])} / "
-                f"h4: {len(merged_data['history4'])})"
-            )
+            logger.info(f"✅ 搜索历史已保存 (h1: {len(merged_data['history1'])} / h2: {len(merged_data['history2'])} / h3: {len(merged_data['history3'])} / h4: {len(merged_data['history4'])})")
 
         except Exception as e:
             messagebox.showerror("错误", f"保存搜索历史失败: {e}")
-
-    # def save_search_history_no_dup(self, confirm_threshold=10):
-    #     try:
-    #         def dedup(history):
-    #             seen = set()
-    #             result = []
-    #             for r in history:
-    #                 q = r.get("query") if isinstance(r, dict) else str(r)
-    #                 if q not in seen:
-    #                     seen.add(q)
-    #                     result.append(r)
-    #             return result
-
-    #         def normalize_history(history):
-    #             normalized = []
-    #             for r in history:
-    #                 if not isinstance(r, dict):
-    #                     continue
-    #                 q = r.get("query", "")
-    #                 starred = r.get("starred", 0)
-    #                 note = r.get("note", "")
-    #                 if isinstance(starred, bool):
-    #                     starred = 1 if starred else 0
-    #                 elif not isinstance(starred, int):
-    #                     starred = 0
-    #                 normalized.append({"query": q, "starred": starred, "note": note})
-    #             return normalized
-
-    #         def merge_history(current, old):
-    #             seen = set()
-    #             result = []
-    #             for r in current:
-    #                 q = r.get("query") if isinstance(r, dict) else str(r)
-    #                 if q not in seen:
-    #                     seen.add(q)
-    #                     result.append(r)
-    #             for r in old:
-    #                 q = r.get("query") if isinstance(r, dict) else str(r)
-    #                 if q not in seen:
-    #                     seen.add(q)
-    #                     result.append(r)
-    #             return result[:self.MAX_HISTORY]
-
-    #         old_data = {"history1": [], "history2": [], "history3": [], "history4": []}
-    #         if os.path.exists(self.history_file):
-    #             with open(self.history_file, "r", encoding="utf-8") as f:
-    #                 try:
-    #                     loaded_data = json.load(f)
-    #                     old_data["history1"] = dedup(loaded_data.get("history1", []))
-    #                     old_data["history2"] = dedup(loaded_data.get("history2", []))
-    #                     old_data["history3"] = dedup(loaded_data.get("history3", []))
-    #                     old_data["history4"] = dedup(loaded_data.get("history4", []))
-    #                 except json.JSONDecodeError:
-    #                     pass
-
-    #         self.history1 = normalize_history(self.history1)
-    #         self.history2 = normalize_history(self.history2)
-    #         self.history3 = normalize_history(self.history3)
-    #         self.history4 = normalize_history(self.history4)
-
-    #         merged_data = {
-    #             "history1": normalize_history(merge_history(self.history1, old_data.get("history1", []))),
-    #             "history2": normalize_history(merge_history(self.history2, old_data.get("history2", []))),
-    #             "history3": normalize_history(merge_history(self.history3, old_data.get("history3", []))),
-    #             "history4": normalize_history(merge_history(self.history4, old_data.get("history4", []))),
-    #         }
-
-    #         def changes_count(old_list, new_list):
-    #             old_set = {r['query'] for r in old_list}
-    #             new_set = {r['query'] for r in new_list}
-    #             return len(new_set - old_set) + len(old_set - new_set)
-
-    #         delta1 = changes_count(old_data.get("history1", []), merged_data["history1"])
-    #         delta2 = changes_count(old_data.get("history2", []), merged_data["history2"])
-
-    #         if delta1 + delta2 >= confirm_threshold:
-    #             if not messagebox.askyesno("确认保存", f"搜索历史发生较大变动（{delta1 + delta2} 条），是否继续保存？"):
-    #                 logger.info("❌ 用户取消保存搜索历史")
-    #                 return
-
-    #         with open(self.history_file, "w", encoding="utf-8") as f:
-    #             json.dump(merged_data, f, ensure_ascii=False, indent=2)
-
-    #         logger.info(f"✅ 搜索历史已保存 (h1: {len(merged_data['history1'])} / h2: {len(merged_data['history2'])} / h3: {len(merged_data['history3'])} / h4: {len(merged_data['history4'])})")
-
-    #     except Exception as e:
-    #         messagebox.showerror("错误", f"保存搜索历史失败: {e}")
 
     def load_search_history(self):
         h1, h2, h3, h4 = [], [], [], []
