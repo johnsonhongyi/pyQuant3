@@ -212,6 +212,20 @@ class SignalLogPanel(QWidget, WindowMixin):
         # 更新缓存
         self._last_messages[code] = message
         
+        if self._paused:
+            return
+            
+        # 1. 基础校验
+        if not self._validate_data(code, pattern, message):
+            return
+
+        # 2. 智能去重：检查该代码的最后一条消息是否相同
+        if self._last_messages.get(code) == message:
+            return
+        
+        # 更新缓存
+        self._last_messages[code] = message
+        
         # 3. 颜色与格式化
         color = self.SIGNAL_COLORS.get(pattern, self.SIGNAL_COLORS['default'])
         

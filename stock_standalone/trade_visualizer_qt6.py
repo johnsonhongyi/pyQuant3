@@ -1054,6 +1054,22 @@ from typing import List
 from datetime import datetime
 SIGNAL_QUEUE_AVAILABLE = True
 
+class NumericTableWidgetItem(QtWidgets.QTableWidgetItem):
+    """支持数值排序的 TableWidgetItem"""
+    def __lt__(self, other):
+        try:
+            # 处理 '-' 等非数字字符为 0 或最小
+            val1 = self.text().replace(',', '').strip()
+            val2 = other.text().replace(',', '').strip()
+            
+            f1 = float(val1) if val1 and val1 != '-' else -999999.0
+            f2 = float(val2) if val2 and val2 != '-' else -999999.0
+            
+            return f1 < f2
+        except ValueError:
+            return super().__lt__(other)
+
+
 class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
     """信号消息盒子弹窗 (分级显示)"""
     def __init__(self, parent):
@@ -1240,20 +1256,83 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
     def _create_table(self):
         """创建统一格式的信号表格"""
         table = QtWidgets.QTableWidget()
-        cols = ["时间", "代码", "名称", "类型", "理由", "评分", "热度", "天数", "操作"]
+        cols = ["时间", "代码", "名称", "类型", "理由", "评分", "热度", "天数", "Rank", "操作"]
         table.setColumnCount(len(cols))
         table.setHorizontalHeaderLabels(cols)
-        table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        table.horizontalHeader().setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        # 热度和天数列宽度固定
+        
+        # [FIX] 更好的列宽适配策略
+        header = table.horizontalHeader()
+        # 1. 大部分列自动适配内容
+        header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        # 2. 理由/类型 占据剩余空间
+        header.setSectionResizeMode(4, QtWidgets.QHeaderView.ResizeMode.Stretch) # 理由列拉伸
+        # header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Interactive) # 类型列
+
+        # 定宽列
         table.setColumnWidth(6, 40)  # 热度
         table.setColumnWidth(7, 40)  # 天数
+        table.setColumnWidth(8, 45)  # Rank
+        
+        # [MODIFIED] 单选模式 & 信号连接
         table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        table.doubleClicked.connect(self._on_table_double_clicked)
+        
+        # 允许键盘获得焦点
+        table.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        
+        # 单击联动
+        table.cellClicked.connect(self._on_table_clicked)
+        # 键盘导航联动
+        table.currentCellChanged.connect(self._on_current_cell_changed)
+        
         # ⭐ 启用列排序功能
         table.setSortingEnabled(True)
         return table
+
+    def _on_table_clicked(self, row, col):
+        """单击行联动"""
+        self._link_signal(row, self.sender())
+
+    def _on_current_cell_changed(self, current_row, current_col, previous_row, previous_col):
+        """键盘导航联动"""
+        if current_row >= 0:
+            self._link_signal(current_row, self.sender())
+
+    def _link_signal(self, row, table):
+        """执行联动逻辑"""
+        if not table or row < 0: return
+
+        code_item = table.item(row, 1)
+        if code_item:
+            code = code_item.text()
+            name_item = table.item(row, 2)
+            name = name_item.text() if name_item else ""
+
+            # 1. 联动主窗口
+            self.parent_window.load_stock_by_code(code, name=name)
+            # [FIX] Do NOT activate main window, keep focus on this dialog for keyboard nav
+            # self.parent_window.showNormal()
+            # self.parent_window.activateWindow()
+            
+            # 2. 标记已读 (Evaluated)
+            if self._queue_mgr:
+                self._queue_mgr.mark_evaluated(code)
+                # [OPTIMIZATION] 不调用 refresh()，而是直接置灰当前行，避免破坏焦点
+                self._mark_row_evaluated_ui(table, row)
+
+    def _mark_row_evaluated_ui(self, table, row):
+        """原地更新行的样式为已读 (灰色)"""
+        try:
+            for c in range(table.columnCount()):
+                item = table.item(row, c)
+                if item:
+                    item.setBackground(QColor("#333333")) # 深灰色背景
+                    item.setForeground(QColor("#555555")) # 更暗的灰色
+                    # font = item.font()
+                    # item.setFont(font)
+        except Exception:
+            pass
 
     def refresh(self):
         if not self._queue_mgr:
@@ -1337,20 +1416,38 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
         table.setItem(row_idx, 4, QtWidgets.QTableWidgetItem(msg.reason))
 
         # 5. 评分
-        score_item = QtWidgets.QTableWidgetItem(f"{msg.score:.2f}")
+        score_item = NumericTableWidgetItem(f"{msg.score:.2f}")
         table.setItem(row_idx, 5, score_item)
 
         # 6. 热度 (count)
         count = getattr(msg, 'count', 1)
-        count_item = QtWidgets.QTableWidgetItem(str(count))
+        count_item = NumericTableWidgetItem(str(count))
         count_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         table.setItem(row_idx, 6, count_item)
         
         # 7. 连续天数 (consecutive_days)
         consecutive_days = getattr(msg, 'consecutive_days', 1)
-        days_item = QtWidgets.QTableWidgetItem(str(consecutive_days))
+        days_item = NumericTableWidgetItem(str(consecutive_days))
         days_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         table.setItem(row_idx, 7, days_item)
+
+        # 8. Rank (当日排名)
+        rank_val = getattr(msg, 'rank', 0)
+        # 如果 rank 为 0/None，尝试从 df_all 获取实时排名
+        if not rank_val and hasattr(self, 'parent_window') and hasattr(self.parent_window, 'df_all'):
+             df = self.parent_window.df_all
+             code = msg.code[-6:] if len(msg.code) > 6 else msg.code
+             if not df.empty and code in df.index:
+                 # 从 df_all 获取 rank (通常为 int)
+                 rank_val =  int(df.loc[code].get('Rank', 0))
+                 # [NEW] 补全并回写数据库
+                 if rank_val > 0 and self._queue_mgr:
+                     msg.rank = rank_val
+                     self._queue_mgr.update_signal_rank(msg.code, msg.signal_type, rank_val)
+        
+        rank_item = NumericTableWidgetItem(str(rank_val) if rank_val else "-")
+        rank_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        table.setItem(row_idx, 8, rank_item)
 
         # 热度染色逻辑 (基于 self.heat_spin.value())
         # 如果 now - msg.timestamp > heat_period, 则视为冷却 (变灰)
@@ -1363,7 +1460,7 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
             
             if is_cool:
                 # 冷却样式: 全行灰色/斜体
-                for c in range(8): # Adjusted for new column
+                for c in range(9): # Adjusted for new column
                     item = table.item(row_idx, c)
                     if item:
                         item.setForeground(QColor("#777777"))
@@ -1381,7 +1478,7 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
         except Exception as e:
             pass
 
-        # 8. 操作 (跟单 checkbox)
+        # 9. 操作 (跟单 checkbox)
         follow_widget = QtWidgets.QWidget()
         follow_layout = QtWidgets.QHBoxLayout(follow_widget)
         follow_layout.setContentsMargins(0, 0, 0, 0)
@@ -1392,12 +1489,12 @@ class SignalBoxDialog(QtWidgets.QDialog, WindowMixin):
         follow_cb.setChecked(followed)
         follow_cb.stateChanged.connect(lambda checked, m=msg: self._on_follow_toggled(m, checked))
         follow_layout.addWidget(follow_cb)
-        table.setCellWidget(row_idx, 8, follow_widget)
+        table.setCellWidget(row_idx, 9, follow_widget)
         
-        # 9. 已评估标记 (灰化)
+        # 10. 已评估标记 (灰化)
         evaluated = getattr(msg, 'evaluated', False)
         if evaluated:
-            for c in range(9):  # Updated to 9 columns
+            for c in range(10):  # Updated to 9 columns
                 item = table.item(row_idx, c)
                 if item: 
                     item.setBackground(QColor("#333333")) # 深灰色背景
@@ -1960,7 +2057,14 @@ class MainWindow(QMainWindow, WindowMixin):
         self.supervision_label.setStyleSheet("color: #FFD700; margin-left: 20px;")
         self.decision_layout.addWidget(self.supervision_label)
 
-        self.decision_layout.addStretch()
+        self.decision_layout.addStretch(1)
+
+        # [NEW] 中间状态消息 (替代原 StatusBar)
+        self.center_msg_label = QLabel("")
+        self.center_msg_label.setStyleSheet("color: #00FF00; font-weight: bold;") 
+        self.decision_layout.addWidget(self.center_msg_label)
+
+        self.decision_layout.addStretch(1)
 
         # [NEW] 统计信息标签 (左侧列表/热点/跟单)
         self.stats_label = QLabel("📊 市场: 0 | 🔥 热股: 0 | 📋 跟单: 0")
@@ -3125,13 +3229,13 @@ class MainWindow(QMainWindow, WindowMixin):
             self.stock_table.scrollToItem(self.stock_table.item(found_row, 0))
             # 加载该股票的 K 线图
             self.load_stock_by_code(code)
-            self.statusBar().showMessage(f"✅ 跳转到: {code}", 3000)
+            self.show_status_message(f"✅ 跳转到: {code}", 3000)
             # 清空输入框
             self.code_search_input.clear()
         else:
             # 未找到 - 尝试直接加载
             self.load_stock_by_code(code)
-            self.statusBar().showMessage(f"⚠️ 表中未找到 {code}，尝试直接加载", 3000)
+            self.show_status_message(f"⚠️ 表中未找到 {code}，尝试直接加载", 3000)
             self.code_search_input.clear()
 
     def _on_search_input_right_click(self, pos):
@@ -3635,7 +3739,21 @@ class MainWindow(QMainWindow, WindowMixin):
                 filter_count = self.filter_tree.topLevelItemCount()
             
             # 4. 构造并更新文本
-            stats_txt = f"📊 市场: {market_count} | 🔥 热股: {hot_count} | 📋 跟单: {follow_count} | 🔍 筛选: {filter_count} "
+            # 仅显示非零项，或紧凑显示
+            display_parts = []
+            display_parts.append(f"📊 市场: {market_count}")
+            # 热股大于0才显示醒目
+            if hot_count > 0: display_parts.append(f"🔥 热股: {hot_count}")
+            else: display_parts.append(f"热股: 0")
+            
+            if follow_count > 0: display_parts.append(f"📋 跟单: {follow_count}")
+            
+            # 筛选数 > 0 才显示
+            if filter_count > 0: 
+                display_parts.append(f"🔍 筛选: {filter_count}")
+
+            stats_txt = " | ".join(display_parts)
+            
             if hasattr(self, 'stats_label'):
                 # 只有在内容变化时才刷新 UI，减少绘图开销
                 if self.stats_label.text() != stats_txt:
@@ -3643,6 +3761,28 @@ class MainWindow(QMainWindow, WindowMixin):
         except Exception:
             # 这里的异常通常发生窗口关闭时，静默处理
             pass
+
+    def show_status_message(self, message, timeout=0):
+        """
+        ⭐ [NEW] 在底部中间显示状态消息 (替代原 StatusBar)
+        Args:
+            message (str): 要显示的消息内容。如果为空，则清空显示。
+            timeout (int): 消息显示的持续时间（毫秒）。0 表示一直显示。
+        """
+        if not hasattr(self, 'center_msg_label'):
+            return
+            
+        if not message:
+            self.center_msg_label.setText("")
+            self.center_msg_label.setVisible(False) # Hiding it completely if empty
+            return
+
+        self.center_msg_label.setText(message)
+        self.center_msg_label.setVisible(True)
+        
+        # 如果设置了超时，使用 QTimer 清除
+        if timeout > 0:
+            QTimer.singleShot(timeout, lambda: self.show_status_message(""))
 
     def _cleanup_garbage_threads(self):
         """清理线程回收站中已经结束运行的线程"""
@@ -5425,7 +5565,7 @@ class MainWindow(QMainWindow, WindowMixin):
             
             # 状态栏提示 (如果界面存在)
             if self.isVisible():
-                self.statusBar().showMessage(f"🔔 {alert_msg}", 10000)
+                self.show_status_message(f"🔔 {alert_msg}", 10000)
             
             self._last_alert_time = now
 
@@ -8023,7 +8163,11 @@ class MainWindow(QMainWindow, WindowMixin):
             final_query = ensure_parentheses_balanced(query_str)
             matches = df_to_search.query(final_query)
             if matches.empty:
-                # self.statusBar().showMessage("Results: 0")
+                # # self.statusBar().showMessage("Results: 0")
+                # self.show_status_message("Results: 0", 2000)
+                # # 设置为红色更醒目
+                # if hasattr(self, 'center_msg_label'):
+                #     self.center_msg_label.setStyleSheet("color: red; font-weight: bold;")
                 return
 
             # # 调用高速填充
@@ -8114,7 +8258,10 @@ class MainWindow(QMainWindow, WindowMixin):
             # ⭐ 默认按Rank升序排序
             self.filter_tree.sortItems(2, Qt.SortOrder.AscendingOrder)
 
-            # self.statusBar().showMessage(f"Results: {len(matches)}")
+            # # self.statusBar().showMessage(f"Results: {len(matches)}")
+            # if hasattr(self, 'center_msg_label'):
+            #     self.center_msg_label.setStyleSheet("color: #00FF00; font-weight: bold;")
+            # self.show_status_message(f"Results: {len(matches)}", 3000)
 
         except Exception as e:
             err_item = QTreeWidgetItem(self.filter_tree)

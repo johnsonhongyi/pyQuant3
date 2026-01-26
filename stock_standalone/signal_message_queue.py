@@ -30,6 +30,7 @@ class SignalMessage:
     followed: bool = field(default=False, compare=False)
     count: int = field(default=1, compare=False)  # 当日触发计数（热度）
     consecutive_days: int = field(default=1, compare=False)  # 连续天数
+    rank: int = field(default=0, compare=False) # [NEW] 当时排名
     # 扩展字段，不参与比较
     extra: Dict[str, Any] = field(default_factory=dict, compare=False)
 
@@ -90,7 +91,10 @@ class SignalMessageQueue:
                         score REAL,
                         reason TEXT,
                         evaluated INTEGER DEFAULT 0,
-                        created_date TEXT
+                        created_date TEXT,
+                        count INTEGER DEFAULT 1,
+                        consecutive_days INTEGER DEFAULT 1,
+                        rank INTEGER DEFAULT 0
                     )
                 """)
                 
@@ -128,6 +132,12 @@ class SignalMessageQueue:
                     c.execute("ALTER TABLE signal_message ADD COLUMN consecutive_days INTEGER DEFAULT 1")
                 except sqlite3.OperationalError:
                     pass # Column likely already exists
+
+                # [NEW] Migration: Ensure rank column exists
+                try:
+                    c.execute("ALTER TABLE signal_message ADD COLUMN rank INTEGER DEFAULT 0")
+                except sqlite3.OperationalError:
+                    pass # Column likely already exists
                 
                 conn.commit()
                 conn.close()
@@ -158,7 +168,8 @@ class SignalMessageQueue:
                         score=row['score'],
                         evaluated=bool(row['evaluated']),
                         count=row['count'] if 'count' in row.keys() else 1,
-                        consecutive_days=row['consecutive_days'] if 'consecutive_days' in row.keys() else 1
+                        consecutive_days=row['consecutive_days'] if 'consecutive_days' in row.keys() else 1,
+                        rank=row['rank'] if 'rank' in row.keys() else 0
                     )
                     # 放入队列
                     self._queue.put(msg) 
@@ -199,6 +210,7 @@ class SignalMessageQueue:
                     existing.score = msg.score         # 更新分数
                     existing.reason = msg.reason       # 更新理由
                     existing.priority = min(existing.priority, msg.priority)
+                    existing.rank = msg.rank           # [NEW] 更新排名
                 else:
                     # 次日触发: 增加连续天数，重置当日计数
                     existing.consecutive_days += 1
@@ -207,6 +219,7 @@ class SignalMessageQueue:
                     existing.score = msg.score
                     existing.reason = msg.reason
                     existing.priority = min(existing.priority, msg.priority)
+                    existing.rank = msg.rank           # [NEW] 更新排名
                 
                 # DB Update
                 self._update_db_signal(existing)
@@ -270,11 +283,11 @@ class SignalMessageQueue:
                 c.execute("""
                     INSERT INTO signal_message (
                         timestamp, code, name, signal_type, source, 
-                        priority, score, reason, evaluated, count, consecutive_days, created_date
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        priority, score, reason, evaluated, count, consecutive_days, rank, created_date
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     msg.timestamp, msg.code, msg.name, msg.signal_type, msg.source,
-                    msg.priority, msg.score, msg.reason, int(msg.evaluated), msg.count, msg.consecutive_days, created_date
+                    msg.priority, msg.score, msg.reason, int(msg.evaluated), msg.count, msg.consecutive_days, msg.rank, created_date
                 ))
                 conn.commit()
                 conn.close()
@@ -291,16 +304,47 @@ class SignalMessageQueue:
                 # 更新匹配记录（不限日期，按 code + signal_type）
                 c.execute("""
                     UPDATE signal_message
-                    SET timestamp = ?, score = ?, reason = ?, priority = ?, count = ?, consecutive_days = ?, created_date = ?
+                    SET timestamp = ?, score = ?, reason = ?, priority = ?, count = ?, consecutive_days = ?, rank = ?, created_date = ?
                     WHERE code = ? AND signal_type = ?
                 """, (
-                    msg.timestamp, msg.score, msg.reason, msg.priority, msg.count, msg.consecutive_days, created_date,
+                    msg.timestamp, msg.score, msg.reason, msg.priority, msg.count, msg.consecutive_days, msg.rank, created_date,
                     msg.code, msg.signal_type
                 ))
                 conn.commit()
                 conn.close()
         except Exception as e:
             logger.error(f"Failed to update db signal: {e}")
+
+    def update_signal_rank(self, code: str, signal_type: str, rank: int):
+        """更新信号的 Rank (用于补全)"""
+        updated = False
+        with self._lock:
+            # 1. 更新内存缓存 (Queue 里的很难改，只能改 cache，或者全部重载? 
+            # PriorityQueue 里的 item 是 mutable dataclass，只要引用还在就可以改。
+            # 但从 Queue 里取出来的难度较大。
+            # 我们主要更新 _cached_top，这是 get_top() 的来源，用于 UI 显示)
+            for item in self._cached_top:
+                if item.code == code and item.signal_type == signal_type:
+                    item.rank = rank
+                    updated = True
+                    # 注意：如果 Queue 里存的是同一个对象引用，那么 Queue 里的也变了。
+                    # 通常是的。
+        
+        if updated:
+            # 2. 更新数据库
+            try:
+                with self._db_lock:
+                    conn = sqlite3.connect(DB_FILE)
+                    c = conn.cursor()
+                    c.execute("""
+                        UPDATE signal_message 
+                        SET rank = ? 
+                        WHERE code = ? AND signal_type = ?
+                    """, (rank, code, signal_type))
+                    conn.commit()
+                    conn.close()
+            except Exception as e:
+                logger.error(f"Failed to update signal rank: {e}")
 
     def get_top(self) -> List[SignalMessage]:
         """获取展示用的 Top 列表"""
