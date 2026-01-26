@@ -8209,6 +8209,71 @@ def func_compute_percdS(close, lastp, op, lastopen,lasth, lastl, nowh, nowl,nowv
     return initc
 
 
+def tick_to_daily_bar(tick_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    将 tick_df（MultiIndex: code, ticktime）聚合成“今天的一根日 K”
+    返回：
+        index: DatetimeIndex([today])
+        columns: open, high, low, close, volume
+    """
+    if tick_df is None or tick_df.empty:
+        return pd.DataFrame()
+
+    df = tick_df.copy()
+    # === 1. 取 ticktime ===
+    if isinstance(df.index, pd.MultiIndex) and 'ticktime' in df.index.names:
+        tick_time = pd.to_datetime(df.index.get_level_values('ticktime'))
+    elif 'ticktime' in df.columns:
+        tick_time = pd.to_datetime(df['ticktime'])
+    else:
+        return pd.DataFrame()
+
+    df['_dt'] = tick_time
+    df['_date'] = df['_dt'].dt.normalize()
+
+    # [FIX] 不要强制使用系统日期的“今天”，因为在凌晨或非交易日，数据实际上是上一个交易日的。
+    # 应该使用数据中的最新日期。
+    if df.empty:
+        return pd.DataFrame()
+        
+    latest_date = df['_date'].max()
+    df = df[df['_date'] == latest_date]
+    today_str = latest_date.strftime('%Y-%m-%d')
+    
+    if df.empty:
+        return pd.DataFrame()
+
+    # === 2. 价格列统一 ===
+    # 你的真实价格列是 close
+    price_col = 'close'
+    if price_col not in df.columns and 'price' in df.columns:
+        price_col = 'price'
+    low_col = 'low'
+    # if low_col not in df.columns and 'close' in df.columns:
+    #     low_col = 'close'
+    high_col = 'high'
+
+    if price_col not in df.columns:
+        log.error(f"tick_to_daily_bar: Missing price column. Cols: {df.columns}")
+        return pd.DataFrame()
+
+    try:
+        bar = pd.DataFrame(
+            {
+                'open':   [df[price_col].iloc[0]],
+                'high':   [df[high_col].max()],
+                'low':    [df[low_col].min()],
+                'close':  [df[price_col].iloc[-1]],
+                'volume': [df['volume'].iloc[-1] if 'volume' in df.columns else 0],  # 注意：你的 volume 是累计量
+            },
+            index=[today_str],
+        )
+        log.debug(f'Generated bar for {today_str}, close={bar["close"].values[0]}')
+        return bar
+    except Exception as e:
+        log.error(f"tick_to_daily_bar error: {e}")
+        return pd.DataFrame()
+
 def select_dataFrame_isNull(df):
     is_null = df.isnull().stack()[lambda x: x].index.tolist() 
     return(is_null)

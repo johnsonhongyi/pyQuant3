@@ -117,6 +117,7 @@ class HotlistPanel(QWidget):
         self._voice_paused = False  # 语音播报状态
         self._is_refreshing = False # 刷新状态标识，防止信号干扰
         self._last_follow_fingerprint = ""
+        self.follow_count = 0  # [NEW] Track follow queue count
         
         # 设置为浮动工具窗口（可调整大小）
         self.setWindowFlags(
@@ -592,7 +593,13 @@ class HotlistPanel(QWidget):
         self.table.setUpdatesEnabled(True)
         self._is_refreshing = False
         
-        self.status_label.setText(f"共 {len(self.items)} 只热点股")
+        self._update_status_bar()
+
+    def _update_status_bar(self):
+        """[NEW] 统一更新状态栏信息"""
+        hot_count = len(self.items)
+        follow_txt = f" | 跟单: {self.follow_count}" if self.follow_count > 0 else ""
+        self.status_label.setText(f"🔥 热点: {hot_count}{follow_txt}")
     
     def add_stock(self, code: str, name: str, price: float, signal_type: str = "手动添加", group: str = "观察"):
         """
@@ -703,8 +710,10 @@ class HotlistPanel(QWidget):
                 if hasattr(self, '_last_follow_fingerprint') and self._last_follow_fingerprint == current_fingerprint:
                     pass
                 else:
+                    self.follow_count = len(df_follow) # [NEW] Update count
                     self._update_follow_queue(df_follow)
                     self._last_follow_fingerprint = current_fingerprint
+                    self._update_status_bar() # [NEW] Refresh UI
             except Exception:
                 # 出错降级：总是更新
                 self._update_follow_queue(df_follow)
