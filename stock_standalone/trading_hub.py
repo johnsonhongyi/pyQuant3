@@ -188,19 +188,40 @@ class TradingHub:
             c = conn.cursor()
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            c.execute("""
-                INSERT OR REPLACE INTO follow_queue 
-                (code, name, signal_type, detected_date, detected_price,
-                 entry_strategy, target_price_low, target_price_high, stop_loss,
-                 status, priority, source, notes, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                signal.code, signal.name, signal.signal_type,
-                signal.detected_date, signal.detected_price,
-                signal.entry_strategy, signal.target_price_low, signal.target_price_high,
-                signal.stop_loss, signal.status, signal.priority,
-                signal.source, signal.notes, now, now
-            ))
+            # [FIX] Truncate time to minute or check existence to prevent second-level duplicates
+            # Policy: One signal per code per day? Or per minute?
+            # Let's align with unique constraint: We should reuse the same row for the same day unless it's a diff signal.
+            # But the UNIQUE index is (code, detected_date). If detected_date has seconds, it's useless for dedup.
+            
+            # Use Day string for dedup check
+            day_str = datetime.now().strftime("%Y-%m-%d")
+            
+            # Check if exists for today
+            c.execute("SELECT id FROM follow_queue WHERE code=? AND detected_date LIKE ?", (signal.code, f"{day_str}%"))
+            row = c.fetchone()
+            
+            if row:
+                # Update existing
+                c.execute("""
+                    UPDATE follow_queue 
+                    SET signal_type=?, detected_price=?, status=?, updated_at=?, notes=?
+                    WHERE id=?
+                """, (signal.signal_type, signal.detected_price, signal.status, now, signal.notes, row[0]))
+            else:
+                # Insert new
+                c.execute("""
+                    INSERT INTO follow_queue 
+                    (code, name, signal_type, detected_date, detected_price,
+                     entry_strategy, target_price_low, target_price_high, stop_loss,
+                     status, priority, source, notes, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    signal.code, signal.name, signal.signal_type,
+                    now, signal.detected_price,
+                    signal.entry_strategy, signal.target_price_low, signal.target_price_high,
+                    signal.stop_loss, signal.status, signal.priority,
+                    signal.source, signal.notes, now, now
+                ))
             
             conn.commit()
             conn.close()
@@ -233,19 +254,26 @@ class TradingHub:
             ))
         return signals
     
-    def update_follow_status(self, code: str, new_status: str, notes: str = None) -> bool:
+    def update_follow_status(self, code: str, new_status: str = None, notes: str = None) -> bool:
         """更新跟单状态"""
         try:
             conn = sqlite3.connect(self.signal_db)
             c = conn.cursor()
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             
-            if notes:
+            if new_status and notes:
                 c.execute("UPDATE follow_queue SET status = ?, notes = ?, updated_at = ? WHERE code = ?",
                          (new_status, notes, now, code))
-            else:
+            elif new_status:
                 c.execute("UPDATE follow_queue SET status = ?, updated_at = ? WHERE code = ?",
                          (new_status, now, code))
+            elif notes:
+                c.execute("UPDATE follow_queue SET notes = ?, updated_at = ? WHERE code = ?",
+                         (notes, now, code))
+            else:
+                # Nothing to update
+                conn.close()
+                return True
             
             conn.commit()
             conn.close()

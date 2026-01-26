@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass, asdict
 import pandas as pd
-
+from JohnsonUtil import LoggerFactory
 # 日内形态检测器
 try:
     from intraday_pattern_detector import IntradayPatternDetector, PatternEvent
@@ -26,10 +26,10 @@ from PyQt6.QtWidgets import (
     QPushButton, QLabel, QHeaderView, QAbstractItemView, QMenu,
     QMessageBox, QDialog, QFrame, QTabWidget
 )
-from PyQt6.QtCore import Qt, pyqtSignal, QTimer
+from PyQt6.QtCore import Qt, pyqtSignal, QTimer, QThread
 from PyQt6.QtGui import QColor, QAction
 
-logger = logging.getLogger(__name__)
+logger = LoggerFactory.getLogger(__name__)
 
 DB_FILE = "signal_strategy.db"
 
@@ -49,6 +49,43 @@ class HotlistItem:
     stop_loss: float = 0.0
     notes: str = ""
     status: str = "ACTIVE"
+
+
+# [NEW] 独立的工作线程，负责后台拉取数据
+class HotlistWorker(QThread):
+    # 信号：(follow_queue_df, error_msg)
+    data_ready = pyqtSignal(object, str)
+    
+    def __init__(self, interval=2.0, parent=None):
+        super().__init__(parent)
+        self.interval = interval
+        self._running = True
+        
+    def run(self):
+        import time
+        from trading_hub import get_trading_hub
+        
+        while self._running:
+            try:
+                # 1. 拉取跟单队列数据
+                hub = get_trading_hub()
+                df_follow = hub.get_follow_queue_df()
+                
+                # 2. 发送数据 (不要在线程里操作 UI)
+                self.data_ready.emit(df_follow, "")
+                
+            except Exception as e:
+                logger.error(f"HotlistWorker error: {e}")
+                self.data_ready.emit(None, str(e))
+                
+            # 简单的休眠
+            for _ in range(int(self.interval * 10)):
+                if not self._running: break
+                time.sleep(0.1)
+
+    def stop(self):
+        self._running = False
+        self.wait()
 
 
 class HotlistPanel(QWidget):
@@ -77,6 +114,9 @@ class HotlistPanel(QWidget):
         self.items: List[HotlistItem] = []
         self._drag_pos = None
         self.voice_enabled = True  # 是否启用语音通知
+        self._voice_paused = False  # 语音播报状态
+        self._is_refreshing = False # 刷新状态标识，防止信号干扰
+        self._last_follow_fingerprint = ""
         
         # 设置为浮动工具窗口（可调整大小）
         self.setWindowFlags(
@@ -114,18 +154,24 @@ class HotlistPanel(QWidget):
         self._last_check_fingerprint: str = ""
         self._pattern_detector = None  # 语音暂停标记
         
-        # 定时刷新盈亏（每 5 秒）
-        self.refresh_timer = QTimer(self)
-        self.refresh_timer.timeout.connect(self._refresh_pnl)
-        self.refresh_timer.start(5000)
+        # [MODIFIED] 移除 QTimer，改用 Worker
+        self.data_worker = HotlistWorker(interval=1.0, parent=self)
+        self.data_worker.data_ready.connect(self._on_worker_data)
+        self.data_worker.start()  # [FIX] Start immediately
         
         # [NEW] 加载信号计数（从数据库）
         self._load_signal_counts()
     
     def showEvent(self, event):
-        """窗口显示时立即刷新"""
+        """窗口显示时"""
         super().showEvent(event)
-        self._refresh_pnl()
+        if not self.data_worker.isRunning():
+            self.data_worker.start()
+    
+    def closeEvent(self, event):
+        if self.data_worker.isRunning():
+            self.data_worker.stop()
+        super().closeEvent(event)
     
     def _init_db(self):
         """确保数据库表存在，并扩展字段"""
@@ -338,8 +384,8 @@ class HotlistPanel(QWidget):
 
         # 表格
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
-        self.table.setHorizontalHeaderLabels(["代码", "名称", "加入价", "现价", "盈亏%", "分组", "时间"])
+        self.table.setColumnCount(9) # Changed from 8 to 9 for "序号"
+        self.table.setHorizontalHeaderLabels(["序号", "代码", "名称", "加入价", "现价", "盈亏%", "分组", "时间", "信号类型"]) # Added "序号" and "信号类型"
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -353,17 +399,17 @@ class HotlistPanel(QWidget):
         # [NEW] 添加键盘导航联动（上下键切换时也触发股票选择）
         self.table.currentCellChanged.connect(self._on_current_cell_changed)
         
-        # 表头设置
+        # 表头设置 - 极致紧凑，紧贴内容
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents) # Code
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)           # Name (Stretch to fill)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents) # Add Price
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # Cur Price
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # PnL
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)            # Group
-        self.table.setColumnWidth(5, 50)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)            # Time
-        self.table.setColumnWidth(6, 80)                                        
+        for i in range(self.table.columnCount()):
+            if i == 2: # 名称
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
+            else:
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        
+        # 允许手动调整
+        header.setStretchLastSection(False)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff) # 尽量不出现横向滚动条
         
         self.table.verticalHeader().setVisible(False)
         self.table.setStyleSheet("""
@@ -374,7 +420,7 @@ class HotlistPanel(QWidget):
                 font-size: 10pt;
             }
             QTableWidget::item {
-                padding: 3px;
+                padding: 1px 3px;
             }
             QTableWidget::item:selected {
                 background-color: #444;
@@ -383,7 +429,7 @@ class HotlistPanel(QWidget):
                 background-color: #2a2a2a;
                 color: #aaa;
                 border: none;
-                padding: 4px;
+                padding: 2px 4px;
                 font-size: 9pt;
             }
         """)
@@ -397,7 +443,7 @@ class HotlistPanel(QWidget):
         layout.setSpacing(0)
 
         self.follow_table = QTableWidget()
-        cols = ["状态", "代码", "名称", "信号类型", "阶段", "P", "策略", "入场", "理由", "时间"]
+        cols = ["序号", "状态", "代码", "名称", "信号类型", "阶段", "P", "策略", "入场", "理由", "时间"] # Added "序号"
         self.follow_table.setColumnCount(len(cols))
         self.follow_table.setHorizontalHeaderLabels(cols)
         self.follow_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -405,19 +451,18 @@ class HotlistPanel(QWidget):
         self.follow_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.follow_table.customContextMenuRequested.connect(self._on_follow_context_menu)
         self.follow_table.cellDoubleClicked.connect(self._on_follow_double_click)
+        self.follow_table.cellClicked.connect(self._on_follow_click)
+        # [FIX] Add keyboard navigation support
+        self.follow_table.currentCellChanged.connect(self._on_follow_cell_changed)
         
         header = self.follow_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents) # Status
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents) # Code
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)          # Name
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents) # Signal Type
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents) # Phase
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)            # Priority
-        self.follow_table.setColumnWidth(5, 30)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents) # Strategy
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents) # Entry
-        header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents) # Reason
-        header.setSectionResizeMode(9, QHeaderView.ResizeMode.ResizeToContents) # Time
+        for i in range(self.follow_table.columnCount()):
+            if i == 3: # 名称
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.Stretch)
+            else:
+                header.setSectionResizeMode(i, QHeaderView.ResizeMode.ResizeToContents)
+        
+        self.follow_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
         self.follow_table.verticalHeader().setVisible(False)
         self.follow_table.setStyleSheet(self.table.styleSheet()) # Reuse style
@@ -459,46 +504,93 @@ class HotlistPanel(QWidget):
     
     def _refresh_table(self):
         """刷新表格显示"""
+        from trading_analyzerQt6 import NumericTableWidgetItem # Import here to avoid circular dependency if not already imported
+        
+        self._is_refreshing = True
+        self.table.setUpdatesEnabled(False)
+        self.table.blockSignals(True)
+        was_sorting = self.table.isSortingEnabled()
+        self.table.setSortingEnabled(False)
+        
+        # [FIX] 保存选中项和滚动条
+        current_code = None
+        curr_row = self.table.currentRow()
+        if curr_row >= 0:
+            it = self.table.item(curr_row, 1) # Code col (index shifted to 1)
+            if it: current_code = it.text()
+            
+        v_scroll = self.table.verticalScrollBar().value()
+        
+        self.table.setRowCount(0)
         self.table.setRowCount(len(self.items))
         
         for row, item in enumerate(self.items):
+            # 序号 (No.) - 传整数以支持正确排序
+            no_item = NumericTableWidgetItem(row + 1)
+            no_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 0, no_item)
+            
             # 代码
             code_item = QTableWidgetItem(item.code)
-            self.table.setItem(row, 0, code_item)
+            self.table.setItem(row, 1, code_item)
             
             # 名称
             name_item = QTableWidgetItem(item.name)
-            self.table.setItem(row, 1, name_item)
+            self.table.setItem(row, 2, name_item)
             
-            # 加入价
-            add_price_item = QTableWidgetItem(f"{item.add_price:.2f}")
+            # 加入价 - 传浮点数
+            add_price_item = NumericTableWidgetItem(item.add_price)
             add_price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row, 2, add_price_item)
+            self.table.setItem(row, 3, add_price_item)
             
-            # 现价
-            cur_price_item = QTableWidgetItem(f"{item.current_price:.2f}" if item.current_price > 0 else "-")
+            # 现价 - 如果有值传浮点数，否则传字符串 "-"
+            cur_price_val = item.current_price if item.current_price > 0 else "-"
+            cur_price_item = NumericTableWidgetItem(cur_price_val)
             cur_price_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.table.setItem(row, 3, cur_price_item)
+            self.table.setItem(row, 4, cur_price_item)
             
-            # 盈亏%
-            pnl_item = QTableWidgetItem(f"{item.pnl_percent:+.2f}%" if item.current_price > 0 else "-")
+            # 盈亏% - 传浮点数
+            pnl_val = item.pnl_percent if item.current_price > 0 else "-"
+            pnl_item = NumericTableWidgetItem(pnl_val)
             pnl_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             if item.pnl_percent > 0:
                 pnl_item.setForeground(QColor(220, 80, 80))  # 红色
             elif item.pnl_percent < 0:
                 pnl_item.setForeground(QColor(80, 200, 120))  # 绿色
-            self.table.setItem(row, 4, pnl_item)
+            self.table.setItem(row, 5, pnl_item)
             
             # 分组
             group_item = QTableWidgetItem(item.group)
             group_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row, 5, group_item)
-
+            self.table.setItem(row, 6, group_item)
+            
             # 时间 (显示短时间格式)
             time_str = item.add_time[5:-3] if len(item.add_time) > 10 else item.add_time
             time_item = QTableWidgetItem(time_str)
             time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(row, 6, time_item)
+            self.table.setItem(row, 7, time_item)
+
+            # 信号类型
+            signal_type_item = QTableWidgetItem(item.signal_type)
+            signal_type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.table.setItem(row, 8, signal_type_item)
+        
+        # 自动调整列宽以适应内容
+        self.table.resizeColumnsToContents()
+        # [FIX] 恢复选中项
+        if current_code:
+            for r in range(self.table.rowCount()):
+                it = self.table.item(r, 1) # Code col
+                if it and it.text() == current_code:
+                    self.table.setCurrentCell(r, 1)
+                    break
+        
+        self.table.verticalScrollBar().setValue(v_scroll)
+        
+        self.table.setSortingEnabled(was_sorting)
+        self.table.blockSignals(False)
+        self.table.setUpdatesEnabled(True)
+        self._is_refreshing = False
         
         self.status_label.setText(f"共 {len(self.items)} 只热点股")
     
@@ -592,8 +684,42 @@ class HotlistPanel(QWidget):
         
         self._refresh_table()
     
+    def _on_worker_data(self, df_follow, error_msg):
+        """Worker 数据回调 (主线程执行)"""
+        if error_msg:
+            return
+            
+        if df_follow is not None:
+            # [OPTIMIZE] 差分更新检查
+            try:
+                # 使用 updated_at 的最大值作为指纹 (假设最新的一条变了，数据就变了)
+                # 或者如果有行数变化
+                current_fingerprint = ""
+                if not df_follow.empty:
+                    max_time = df_follow['updated_at'].max() if 'updated_at' in df_follow.columns else ""
+                    current_fingerprint = f"{len(df_follow)}_{max_time}"
+                
+                # 如果指纹一致，跳过重绘
+                if hasattr(self, '_last_follow_fingerprint') and self._last_follow_fingerprint == current_fingerprint:
+                    pass
+                else:
+                    self._update_follow_queue(df_follow)
+                    self._last_follow_fingerprint = current_fingerprint
+            except Exception:
+                # 出错降级：总是更新
+                self._update_follow_queue(df_follow)
+
+            # 刷新 PnL (仅当 Tab 1 可见时？或者总是？)
+            # 用户抱怨日志太多，先静默调用
+            self._refresh_pnl_ui_only()
+
     def _refresh_pnl(self):
-        """刷新盈亏数据（从主窗口的df_all获取）"""
+        """手动刷新按钮回调"""
+        self._refresh_pnl_ui_only()
+        # logger.info("界面刷新已触发")
+
+    def _refresh_pnl_ui_only(self):
+        """仅做 UI 层面的 PnL 刷新（不拉取数据）"""
         # [FIX] 使用 window() 而不是 parent() 来获取主窗口（因为 parent=None）
         main_window = None
         try:
@@ -603,8 +729,8 @@ class HotlistPanel(QWidget):
                 if hasattr(widget, 'df_all') and widget.__class__.__name__ == 'MainWindow':
                     main_window = widget
                     break
-        except Exception as e:
-            logger.debug(f"Failed to find main window: {e}")
+        except Exception:
+            pass
         
         if main_window and hasattr(main_window, 'df_all') and not main_window.df_all.empty:
             df = main_window.df_all
@@ -631,7 +757,8 @@ class HotlistPanel(QWidget):
             
             if price_map:
                 self.update_prices(price_map, phase_map)
-                logger.debug(f"✅ Hotlist PnL refreshed ({len(price_map)} items)")
+                # [SILENCE] 用户抱怨日志刷屏
+                # logger.debug(f"✅ Hotlist PnL refreshed ({len(price_map)} items)")
             
             # [NEW] 刷新跟单队列
             self._update_follow_queue()
@@ -672,40 +799,134 @@ class HotlistPanel(QWidget):
         QTimer.singleShot(duration, lambda: self.setStyleSheet(original_style))
 
 
-    def _update_follow_queue(self):
-        """[Phase 2] 刷新跟单队列可视化"""
+    def _update_follow_queue(self, df=None):
+        """[Phase 2] 刷新跟单队列可视化 (数据由 Worker 提供)"""
         try:
-            from trading_hub import get_trading_hub
-            hub = get_trading_hub()
-            df = hub.get_follow_queue_df()
-            
+            if df is None:
+                return # 等待 Worker 数据
+                
             if df.empty:
                 self.follow_table.setRowCount(0)
                 return
 
-            # 过滤非活跃 (可选)
-            # df = df[df['status'].isin(['TRACKING', 'READY', 'ENTERED'])]
-            # 按时间倒序
-            df = df.sort_values(by='updated_at', ascending=False)
+            # [FIX] Deduplicate: Ensure one row per stock (latest)
+            if 'code' in df.columns:
+                df['code'] = df['code'].astype(str).str.strip() # Ensure consistency
+            
+            df = df.sort_values(by=['priority', 'updated_at'], ascending=[False, False])
+            df = df.drop_duplicates(subset=['code'], keep='first')
 
+            # [SMART UPDATE] Check if we can do an in-place update (Speed & Stability)
+            # CRITICAL: If table is sorted by user, modifying items causes them to jump rows immediately,
+            # invalidating any index maps. We MUST disable sorting to update, or just Rebuild.
+            
+            is_sorted = self.follow_table.isSortingEnabled() 
+            current_rows = self.follow_table.rowCount()
+            needs_full_rebuild = False
+            
+            if is_sorted:
+                needs_full_rebuild = True # Safe fallback for sorted tables
+            elif current_rows != len(df):
+                needs_full_rebuild = True
+            else:
+                # Check if codes match exactly in order (Model Order)
+                new_codes = df['code'].tolist()
+                for r in range(current_rows):
+                    item = self.follow_table.item(r, 2) # Code col (index shifted to 2)
+                    if not item or item.text() != new_codes[r]:
+                        needs_full_rebuild = True
+                        break
+            
+            if not needs_full_rebuild:
+                # --- IN-PLACE UPDATE (Only for Unsorted/Stable Tables) ---
+                for row_idx, row in enumerate(df.itertuples()):
+                    # Exact row match guaranteed by checks above
+                    
+                    # Status Col 1
+                    if (it := self.follow_table.item(row_idx, 1)):
+                        if it.text() != str(row.status):
+                            it.setText(str(row.status))
+                            if row.status == 'TRACKING': it.setForeground(QColor('#FFD700'))
+                            elif row.status == 'ENTERED': it.setForeground(QColor('#00FF00'))
+                            else: it.setForeground(QColor('#ddd'))
+                    
+                    # Phase Col 5
+                    phase_txt = "-"
+                    notes = str(row.notes) if row.notes else ""
+                    import re
+                    match = re.search(r'\[(.*?)\]', notes)
+                    if match: phase_txt = match.group(1)
+                    elif notes: phase_txt = notes[:10]
+                    
+                    if (it := self.follow_table.item(row_idx, 5)):
+                        if it.text() != phase_txt:
+                            it.setText(phase_txt)
+                            if phase_txt in ('TOP_WATCH', '顶部观察'): it.setForeground(QColor('#FF8C00'))
+                            elif phase_txt in ('EXIT', '分批离场'): it.setForeground(QColor('#FF4500'))
+                            elif phase_txt in ('LAUNCH', '启动'): it.setForeground(QColor('#00BFFF'))
+                            else: it.setForeground(QColor('#ddd'))
+
+                    # Priority Col 6
+                    if (it := self.follow_table.item(row_idx, 6)):
+                        if it.text() != str(row.priority):
+                             it.setText(str(row.priority))
+                        
+                    # Time Col 10
+                    time_str = str(row.updated_at).split(' ')[-1] if row.updated_at else ""
+                    if (it := self.follow_table.item(row_idx, 10)):
+                        if it.text() != time_str:
+                             it.setText(time_str)
+
+                return
+
+            # --- FULL REBUILD (Structure Changed or Sorted) ---
+            from trading_analyzerQt6 import NumericTableWidgetItem
+            
+            # [FIX] Block Signals to prevent side effects during mass changes
+            self._is_refreshing = True
+            self.follow_table.blockSignals(True)
+            self.follow_table.setSortingEnabled(False)
+            self.follow_table.setUpdatesEnabled(False)
+            
+            # [FIX] Preserve Scroll and Selection State
+            current_code = None
+            current_row = self.follow_table.currentRow()
+            if current_row >= 0:
+                item = self.follow_table.item(current_row, 2) # Code col (index shifted to 2)
+                if item:
+                    current_code = item.text()
+            
+            v_scroll = self.follow_table.verticalScrollBar().value()
+            h_scroll = self.follow_table.horizontalScrollBar().value()
+
+            # [FIX] Nuclear Option: Reset RowCount to 0 to guarantee no ghosts
+            self.follow_table.setRowCount(0)
             self.follow_table.setRowCount(len(df))
             
             for row_idx, row in enumerate(df.itertuples()):
-                # cols = ["状态", "代码", "名称", "信号类型", "阶段", "P", "策略", "入场", "时间"]
+                # cols = ["序号", "状态", "代码", "名称", "信号类型", "阶段", "P", "策略", "入场", "理由", "时间"]
                 
+                # 0. No. - 传整数
+                no_item = NumericTableWidgetItem(row_idx + 1)
+                no_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.follow_table.setItem(row_idx, 0, no_item)
+                
+                # 1. Status
                 status_item = QTableWidgetItem(str(row.status))
-                # 状态着色
                 if row.status == 'TRACKING':
                     status_item.setForeground(QColor('#FFD700')) # Gold
                 elif row.status == 'ENTERED':
                     status_item.setForeground(QColor('#00FF00')) # Green
+                self.follow_table.setItem(row_idx, 1, status_item)
                 
-                self.follow_table.setItem(row_idx, 0, status_item)
-                self.follow_table.setItem(row_idx, 1, QTableWidgetItem(str(row.code)))
-                self.follow_table.setItem(row_idx, 2, QTableWidgetItem(str(row.name)))
-                self.follow_table.setItem(row_idx, 3, QTableWidgetItem(str(row.signal_type)))
+                # 2. Code, 3. Name
+                self.follow_table.setItem(row_idx, 2, QTableWidgetItem(str(row.code)))
+                self.follow_table.setItem(row_idx, 3, QTableWidgetItem(str(row.name)))
                 
-                # 提取阶段 (Phase)
+                # 4. Signal Type
+                self.follow_table.setItem(row_idx, 4, QTableWidgetItem(str(row.signal_type)))
+                
+                # 5. Phase
                 phase_txt = "-"
                 notes = str(row.notes) if row.notes else ""
                 import re
@@ -724,50 +945,97 @@ class HotlistPanel(QWidget):
                 elif phase_txt in ('LAUNCH', '启动'):
                     phase_item.setForeground(QColor('#00BFFF')) # DeepSkyBlue
                 
-                self.follow_table.setItem(row_idx, 4, phase_item)
+                self.follow_table.setItem(row_idx, 5, phase_item)
                 
-                p_item = QTableWidgetItem(str(row.priority))
+                # 6. Priority - 尝试转为数值
+                try:
+                    p_val = float(row.priority)
+                except:
+                    p_val = row.priority
+                p_item = NumericTableWidgetItem(p_val)
                 p_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                self.follow_table.setItem(row_idx, 5, p_item)
+                self.follow_table.setItem(row_idx, 6, p_item)
                 
-                self.follow_table.setItem(row_idx, 6, QTableWidgetItem(str(row.entry_strategy)))
+                # 7. Strategy
+                self.follow_table.setItem(row_idx, 7, QTableWidgetItem(str(row.entry_strategy)))
                 
-                # 入场 (策略入场点 / 实际入场价)
+                # 8. Entry
                 entry_txt = f"{row.entry_price:.2f}" if getattr(row, 'entry_price', 0) > 0 else f"MA5" # 简单显示
-                self.follow_table.setItem(row_idx, 7, QTableWidgetItem(entry_txt))
+                self.follow_table.setItem(row_idx, 8, QTableWidgetItem(entry_txt))
                 
-                # Reason
+                # 9. Reason
                 reason_item = QTableWidgetItem(str(row.notes) if row.notes else "")
                 reason_item.setToolTip(str(row.notes) if row.notes else "")
-                self.follow_table.setItem(row_idx, 8, reason_item)
+                self.follow_table.setItem(row_idx, 9, reason_item)
 
+                # 10. Time
                 time_str = str(row.updated_at).split(' ')[-1] if row.updated_at else ""
-                self.follow_table.setItem(row_idx, 9, QTableWidgetItem(time_str))
+                self.follow_table.setItem(row_idx, 10, QTableWidgetItem(time_str))
+
+            # [FIX] Restore Scroll and Selection BEFORE re-enabling signals
+            if current_code:
+                # Find the row with this code
+                for r in range(self.follow_table.rowCount()):
+                    it = self.follow_table.item(r, 2)
+                    if it and it.text() == current_code:
+                        self.follow_table.setCurrentCell(r, 2)
+                        break
+            
+            self.follow_table.verticalScrollBar().setValue(v_scroll)
+            self.follow_table.horizontalScrollBar().setValue(h_scroll)
+
+            self.follow_table.setUpdatesEnabled(True)
+            self.follow_table.setSortingEnabled(True) # Re-enable sorting
+            self.follow_table.blockSignals(False) # [FIX] Unblock signals
+            self.follow_table.resizeColumnsToContents()
+            self._is_refreshing = False
 
         except Exception as e:
             logger.error(f"Error updating follow queue UI: {e}")
 
-    def _on_follow_double_click(self, row, col):
-        """跟单队列双击：跳转K线"""
+    def _on_follow_cell_changed(self, currentRow, _currentColumn, _previousRow, _previousColumn):
+        """跟单队列键盘导航：联动K线"""
+        # 复用单击逻辑，确保行为一致
+        if self._is_refreshing: return
+        if currentRow >= 0:
+            self._on_follow_click(currentRow, 0)
+        
+    def _on_follow_click(self, row, col):
+        """跟单队列单击：联动K线"""
+        if self._is_refreshing: return
         try:
-            code_item = self.follow_table.item(row, 1)
-            name_item = self.follow_table.item(row, 2)
+            code_item = self.follow_table.item(row, 2) # Shift index No(0), Status(1), Code(2)
+            name_item = self.follow_table.item(row, 3)
             if code_item and name_item:
-                code = code_item.text()
-                name = name_item.text()
-                self.stock_selected.emit(code, name)
-                # 同时也触发 item_double_clicked 以显示弹窗 (可选)
-                # self.item_double_clicked.emit(code, name, 0.0) 
+                code = str(code_item.text()).strip()
+                name = str(name_item.text()).strip()
+                if code:
+                    # [FIX] Link Only: disable active realtime fetching
+                    self.stock_selected.emit(f"{code}|realtime=false", name)
         except Exception as e:
-            logger.error(f"Follow double click error: {e}")
+            logger.error(f"Follow click error: {e}")
+
+    def _on_follow_double_click(self, row, col):
+        """跟单队列双击：打开详情"""
+        if self._is_refreshing: return
+        try:
+            code_item = self.follow_table.item(row, 2) # Shift index
+            name_item = self.follow_table.item(row, 3)
+            if code_item and name_item:
+                code = str(code_item.text()).strip()
+                name = str(name_item.text()).strip()
+                # 触发详情信号 (Main Window handles it)
+                self.item_double_clicked.emit(code, name, 0.0)
+        except Exception as e:
+            logger.error(f"Follow double-click error: {e}")
 
     def _on_follow_context_menu(self, pos):
         """跟单队列右键菜单"""
         row = self.follow_table.currentRow()
         if row < 0: return
         
-        code_item = self.follow_table.item(row, 1)
-        name_item = self.follow_table.item(row, 2)
+        code_item = self.follow_table.item(row, 2) # Shifted index
+        name_item = self.follow_table.item(row, 3) # Shifted index
         if not code_item: return
         
         code = code_item.text()
@@ -889,8 +1157,8 @@ class HotlistPanel(QWidget):
         if row < 0 or row >= self.table.rowCount():
             return None
         
-        # 从表格单元格读取 code（第 0 列）
-        code_item = self.table.item(row, 0)
+        # 从表格单元格读取 code（第 1 列，因为第 0 列是序号）
+        code_item = self.table.item(row, 1)
         if not code_item:
             return None
         
@@ -908,28 +1176,35 @@ class HotlistPanel(QWidget):
         """单击切换股票"""
         item = self._get_item_from_row(row)
         if item:
-            self.stock_selected.emit(item.code, item.name)
+            # [FIX] Link Only: disable active realtime fetching
+            self.stock_selected.emit(f"{item.code}|realtime=false", item.name)
     
     def _on_current_cell_changed(self, currentRow: int, _currentColumn: int, _previousRow: int, _previousColumn: int):
         """键盘导航联动（上下键切换时也触发股票选择）"""
         item = self._get_item_from_row(currentRow)
         if item:
-            self.stock_selected.emit(item.code, item.name)
+            self.stock_selected.emit(f"{item.code}|realtime=false", item.name)
     
     def _on_double_click(self, row: int, col: int):
         """双击打开详情"""
         item = self._get_item_from_row(row)
         if item:
+            # [FIX] Link Only: disable active realtime fetching
+            self.stock_selected.emit(f"{item.code}|realtime=false", item.name)
             self.item_double_clicked.emit(item.code, item.name, item.add_price)
 
     def select_stock(self, code: str):
         """外部联动：根据代码选中行"""
-        if not code: return
+        if not code: return False
+        
+        # 遍历所有行，找到匹配的股票代码
         for row in range(self.table.rowCount()):
-            item = self.table.item(row, 0)  # 第一列是代码
+            item = self.table.item(row, 1)  # 第二列是代码 (Index 1)
             if item and item.text() == code:
                 self.table.selectRow(row)
                 self.table.scrollToItem(item)
+                # 触发一次_on_current_cell_changed，确保联动K线
+                self._on_current_cell_changed(row, 1, -1, -1) 
                 return True
         return False
     
@@ -1021,6 +1296,7 @@ class HotlistPanel(QWidget):
                 
                 # 语音通知：分组变更为已启动或持仓
                 if group in ("已启动", "持仓") and old_group != group:
+                    # [P5] 状态变更语音
                     self._notify_voice(code, f"{item.name} 状态变更为 {group}")
                 break
         self._refresh_table()
