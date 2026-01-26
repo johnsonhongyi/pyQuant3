@@ -1859,6 +1859,7 @@ if __name__ == "__main__":
 
     # print((sina.get_stock_code_data('300107').T))
     dd = sina.get_real_time_tick('300376')
+    tickdf = cct.tick_to_daily_bar(dd)
     import ipdb;ipdb.set_trace()
 
     df =sina.all

@@ -98,7 +98,9 @@ except ImportError as e:
 pg.setConfigOptions(antialias=True)
 # pg.setConfigOption('background', 'w')
 # pg.setConfigOption('foreground', 'k')
-
+class IntradayAxis(pg.DateAxisItem):
+    def tickStrings(self, values, scale, spacing):
+        return [time.strftime('%H:%M', time.localtime(v)) for v in values]
 
 def normalize_speech_text(text: str) -> str:
     """将数值符号转换为适合中文语音播报的表达"""
@@ -367,6 +369,62 @@ class DateAxis(pg.AxisItem):
                 # 捕捉意外异常
                 logger.warning(f"[tickStrings] val={val} error: {e}")
                 strs.append("")  # 出错显示空
+        return strs
+
+
+class TimeAxis(pg.AxisItem):
+    def __init__(self, times, orientation='bottom'):
+        super().__init__(orientation=orientation)
+        self.times = list(times)
+
+    def updateTimes(self, times):
+        self.times = list(times)
+        self.update()
+
+    # def tickStrings(self, values, scale, spacing):
+    #     strs = []
+    #     n = len(self.times)
+
+    #     if n == 0:
+    #         return [""] * len(values)
+
+    #     for v in values:
+    #         try:
+    #             idx = int(round(v))
+    #             if idx < 0 or idx >= n:
+    #                 strs.append("")
+    #                 continue
+
+    #             ts = int(self.times[idx])  # Unix 秒
+    #             strs.append(time.strftime('%H:%M', time.localtime(ts)))
+    #         except Exception:
+    #             strs.append("")
+    #     return strs
+
+    def tickStrings(self, values, scale, spacing):
+        """把整数索引映射成时间字符串"""
+        strs = []
+        n = len(self.times)
+        if n == 0:
+            return [str(v) for v in values]
+
+        for val in values:
+            try:
+                idx = int(val)
+                if idx < 0:
+                    idx = 0
+                elif idx >= n:
+                    idx = n - 1
+                
+                # 假设 times 里存的是 "HH:MM:SS" 或 "HH:MM"
+                t_str = str(self.times[idx])
+                # 只显示 HH:MM
+                if len(t_str) >= 5:
+                    strs.append(t_str[:5])
+                else:
+                    strs.append(t_str)
+            except Exception:
+                strs.append("")
         return strs
 
 
@@ -1904,6 +1962,11 @@ class MainWindow(QMainWindow, WindowMixin):
 
         self.decision_layout.addStretch()
 
+        # [NEW] 统计信息标签 (左侧列表/热点/跟单)
+        self.stats_label = QLabel("📊 市场: 0 | 🔥 热股: 0 | 📋 跟单: 0")
+        self.stats_label.setStyleSheet("color: #aaa; margin-right: 15px; font-weight: normal;")
+        self.decision_layout.addWidget(self.stats_label)
+
         # 💓 心跳标签 (策略运行指示器)
         self.hb_label = QLabel("💓")
         self.decision_layout.addWidget(self.hb_label)
@@ -2079,7 +2142,9 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # -- 底部图表: 分时图
         self.tick_widget = pg.GraphicsLayoutWidget()
-        self.tick_plot = self.tick_widget.addPlot(title="实时 / 分时图")
+        # [FIX] 使用自定义时间轴
+        self.tick_axis = TimeAxis([], orientation='bottom')
+        self.tick_plot = self.tick_widget.addPlot(title="实时 / 分时图", axisItems={'bottom': self.tick_axis})
         self.tick_plot.showGrid(x=True, y=True)
         # ⭐ 禁用自动范围，防止鼠标悬停时视图跳动
         self.tick_plot.disableAutoRange()
@@ -3546,6 +3611,38 @@ class MainWindow(QMainWindow, WindowMixin):
                 logger.warning(f"GUI update skipped: {e}")
             except Exception:
                 logger.exception("Error in on_realtime_update")
+        
+        # [NEW] 定时更新底部统计信息
+        if self.isVisible():
+            self.update_bottom_stats()
+
+    def update_bottom_stats(self):
+        """[NEW] 汇总更新底部状态栏统计信息 (支持热点与跟单同步)"""
+        try:
+            # 1. 主列表计数 (左侧 df_all)
+            market_count = len(self.df_all) if hasattr(self, 'df_all') else 0
+            
+            # 2. 热点与跟单计数 (从 HotlistPanel 获取)
+            hot_count = 0
+            follow_count = 0
+            if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
+                hot_count = len(self.hotlist_panel.items)
+                follow_count = getattr(self.hotlist_panel, 'follow_count', 0)
+            
+            # 3. 筛选计数 (Filter Panel)
+            filter_count = 0
+            if hasattr(self, 'filter_tree') and self.filter_tree:
+                filter_count = self.filter_tree.topLevelItemCount()
+            
+            # 4. 构造并更新文本
+            stats_txt = f"📊 市场: {market_count} | 🔥 热股: {hot_count} | 📋 跟单: {follow_count} | 🔍 筛选: {filter_count} "
+            if hasattr(self, 'stats_label'):
+                # 只有在内容变化时才刷新 UI，减少绘图开销
+                if self.stats_label.text() != stats_txt:
+                    self.stats_label.setText(stats_txt)
+        except Exception:
+            # 这里的异常通常发生窗口关闭时，静默处理
+            pass
 
     def _cleanup_garbage_threads(self):
         """清理线程回收站中已经结束运行的线程"""
@@ -5523,6 +5620,22 @@ class MainWindow(QMainWindow, WindowMixin):
                 except Exception as e:
                     logger.debug(f"[_delayed_hotlist_check] Error: {e}")
             QtCore.QTimer.singleShot(300, _delayed_hotlist_check)
+
+            # ⚡ [NEW] 如果 Filter Panel 可见，则自动刷新 Filter 结果
+            def _delayed_filter_refresh():
+                try:
+                    if not hasattr(self, 'main_splitter'): return
+                    sizes = self.main_splitter.sizes()
+                    # Check visibility safely
+                    is_presently_visible = True if (len(sizes) > 2 and sizes[2] > 0) else False
+                    
+                    if hasattr(self, 'filter_panel') and is_presently_visible:
+                         logger.debug("[_process_df_all_update] Triggering delayed filter refresh")
+                         self.load_history_filters()
+                except Exception as e:
+                    logger.error(f"[_delayed_filter_refresh] Error: {e}")
+
+            QtCore.QTimer.singleShot(400, _delayed_filter_refresh)
             
             logger.debug("[_process_df_all_update] END: All tasks dispatched successfully")
                 
@@ -5613,6 +5726,13 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # ⚡ [FIX] 增量更新时也触发热点形态检测
         QtCore.QTimer.singleShot(100, self._check_hotlist_patterns)
+
+        # ⚡ [NEW] 如果 Filter Panel 可见，则自动刷新 Filter 结果
+        sizes = self.main_splitter.sizes()
+        # 当前是否可见
+        is_presently_visible = True if sizes[2] > 0 else False
+        if hasattr(self, 'filter_panel') and is_presently_visible:
+             QtCore.QTimer.singleShot(200, self.load_history_filters)
 
 
     def _capture_view_state(self):
@@ -6546,12 +6666,18 @@ class MainWindow(QMainWindow, WindowMixin):
         # ----------------- 绘制 Volume -----------------
         if 'amount' in day_df.columns:
             if not hasattr(self, 'volume_plot'):
-                self.volume_plot = self.kline_widget.addPlot(row=1, col=0)
+                # [FIX] Volume 使用 DateAxis
+                self.vol_date_axis = DateAxis(day_df.index, orientation='bottom')
+                self.volume_plot = self.kline_widget.addPlot(row=1, col=0, axisItems={'bottom': self.vol_date_axis})
                 self.volume_plot.setXLink(self.kline_plot)
                 self.volume_plot.setMaximumHeight(85)
                 self.volume_plot.setLabel('left', 'Volume')
                 self.volume_plot.showGrid(x=True, y=True)
                 self.volume_plot.setMenuEnabled(False)
+            else:
+                # 更新 Volume 的日期轴
+                if hasattr(self, 'vol_date_axis'):
+                    self.vol_date_axis.updateDates(day_df.index)
 
             # 重要：不使用 clear()，而是复用 BarGraphItem
             amounts = day_df['amount'].values
@@ -7036,6 +7162,21 @@ class MainWindow(QMainWindow, WindowMixin):
                         'shadow_info': 'DIRECT_LAUNCH'
                     }
                     tick_title += f"  |  <span style='color: #FFD700; font-weight: bold;'>🛡️监理(自): 偏离{vwap_bias:+.1%} 胜率{mwr:.1%} 连亏{ls}</span>"
+
+            # [FIX] 更新分时图时间轴
+            if hasattr(self, 'tick_axis'):
+                # 优先使用 explicit 'time' column
+                t_list = []
+                # if 'time' in tick_df.columns:
+                #     t_list = tick_df['time'].astype(str).tolist()
+                # elif isinstance(tick_df.index, pd.DatetimeIndex):
+                #     t_list = tick_df.index.strftime('%H:%M').tolist()
+                _times = tick_df.index.get_level_values('ticktime')
+                # 过滤 NaN
+                t_list = pd.to_datetime(_times).strftime('%H:%M:%S').tolist()
+                # t_list = pd.to_datetime(_times).strftime('%Y-%m-%d %H:%M:%S').tolist()
+
+                self.tick_axis.updateTimes(t_list)
 
             self.tick_plot.setTitle(tick_title)
             self.tick_plot.showGrid(x=False, y=True, alpha=0.5)
@@ -7882,7 +8023,7 @@ class MainWindow(QMainWindow, WindowMixin):
             final_query = ensure_parentheses_balanced(query_str)
             matches = df_to_search.query(final_query)
             if matches.empty:
-                self.statusBar().showMessage("Results: 0")
+                # self.statusBar().showMessage("Results: 0")
                 return
 
             # # 调用高速填充
@@ -7973,7 +8114,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # ⭐ 默认按Rank升序排序
             self.filter_tree.sortItems(2, Qt.SortOrder.AscendingOrder)
 
-            self.statusBar().showMessage(f"Results: {len(matches)}")
+            # self.statusBar().showMessage(f"Results: {len(matches)}")
 
         except Exception as e:
             err_item = QTreeWidgetItem(self.filter_tree)
