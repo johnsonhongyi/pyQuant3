@@ -189,11 +189,18 @@ class TradingLogger:
                 """)
                 # Insert data from backup, defaulting resample to 'd'
                 cur.execute("""
-                    INSERT INTO voice_alerts (code, name, rules, last_alert, created_time, tags, added_date, rule_type_tag, resample)
-                    SELECT code, name, rules, last_alert, created_time, tags, added_date, rule_type_tag, 'd' FROM voice_alerts_backup
+                    INSERT INTO voice_alerts (code, name, rules, last_alert, created_time, tags, added_date, rule_type_tag, resample, create_price)
+                    SELECT code, name, rules, last_alert, created_time, tags, added_date, rule_type_tag, 'd', 0.0 FROM voice_alerts_backup
                 """)
                 cur.execute("DROP TABLE voice_alerts_backup")
                 logger.info("DB Migration: voice_alerts upgrade completed")
+            
+            # 另起一个 Migration: 专门检查最近新增的 create_price 字段 (如果已有 resample 之后又升级的情况)
+            cur.execute("PRAGMA table_info(voice_alerts)")
+            voice_cols = [col[1] for col in cur.fetchall()]
+            if "create_price" not in voice_cols:
+                logger.info("DB Migration: Adding create_price to voice_alerts")
+                cur.execute("ALTER TABLE voice_alerts ADD COLUMN create_price REAL DEFAULT 0.0")
 
             conn.commit()
             conn.close()
@@ -328,6 +335,10 @@ class TradingLogger:
                     logger.warning(f"TradeLogger: {code} ({name}) already has an OPEN position. Skipping duplicate '买入'.")
                     conn.close()
                     return
+                if amount <= 0:
+                    logger.warning(f"TradeLogger: {code} ({name}) '买入' amount is {amount}. Skipping.")
+                    conn.close()
+                    return
                 # 开启新仓
                 fee = price * amount * fee_rate
                 cur.execute("""
@@ -355,8 +366,11 @@ class TradingLogger:
                     
                     new_amount = old_amount + amount
                     new_fee = old_fee + (price * amount * fee_rate)
-                    # 计算加权均价
-                    new_avg_price = (old_price * old_amount + price * amount) / new_amount
+                    if new_amount <= 0:
+                        new_avg_price = old_price
+                    else:
+                        # 计算加权均价
+                        new_avg_price = (old_price * old_amount + price * amount) / new_amount
                     
                     cur.execute("""
                         UPDATE trade_records 
@@ -372,7 +386,7 @@ class TradingLogger:
                     total_fee = old_fee + sell_fee
                     gross_profit = (price - b_price) * b_amount
                     net_profit = gross_profit - total_fee
-                    pnl_pct = net_profit / (b_price * b_amount) if b_price > 0 else 0
+                    pnl_pct = net_profit / (b_price * b_amount) if (b_price > 0 and b_amount > 0) else 0
                     
                     cur.execute("""
                         UPDATE trade_records 
@@ -530,7 +544,7 @@ class TradingLogger:
                 
                 total_fee = (buy_p * buy_a * fee_rate) + (effective_sell_p * buy_a * fee_rate)
                 net_profit = (effective_sell_p - buy_p) * buy_a - total_fee
-                pnl_pct = net_profit / (buy_p * buy_a) if buy_p > 0 else 0
+                pnl_pct = net_profit / (buy_p * buy_a) if (buy_p > 0 and buy_a > 0) else 0
                 cur.execute("""
                     UPDATE trade_records SET buy_price=?, buy_amount=?, sell_price=?, fee=?, profit=?, pnl_pct=?
                     WHERE id=?
@@ -583,19 +597,42 @@ class TradingLogger:
         conn.close()
         return rows
 
-    def log_voice_alert_config(self, code: str, resample: str, name: str, rules: str, last_alert: float, tags: str = "", rule_type_tag: str = ""):
+    def remove_voice_alert_config(self, code: str, resample: str = 'd'):
+        """从数据库物理删除语音预警配置"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("DELETE FROM voice_alerts WHERE code = ? AND resample = ?", (code, resample))
+            conn.commit()
+            conn.close()
+            logger.info(f"DB: Removed voice alert config for {code}_{resample}")
+        except Exception as e:
+            logger.error(f"Failed to remove voice alert config: {e}")
+
+    def log_voice_alert_config(self, code: str, resample: str, name: str, rules: str, last_alert: float, tags: str = "", rule_type_tag: str = "", create_price: float = 0.0, created_time: str = ""):
         """记录或更新语音预警配置"""
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
             added_date = datetime.now().strftime('%Y-%m-%d')
-            created_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # --- [关键保护] 保护已有的“加入价”和“创建时间”不被 0.0 或当前时间误覆盖 ---
+            cur.execute("SELECT create_price, created_time FROM voice_alerts WHERE code=? AND resample=?", (code, resample))
+            existing = cur.fetchone()
+            if existing:
+                if create_price <= 0 and existing[0] and existing[0] > 0:
+                    create_price = float(existing[0])
+                if not created_time and existing[1]:
+                    created_time = str(existing[1])
+            
+            if not created_time:
+                created_time = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
             
             cur.execute("""
                 INSERT OR REPLACE INTO voice_alerts 
-                (code, resample, name, rules, last_alert, created_time, tags, added_date, rule_type_tag)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (code, resample, name, rules, last_alert, created_time, tags, added_date, rule_type_tag))
+                (code, resample, name, rules, last_alert, created_time, tags, added_date, rule_type_tag, create_price)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (code, resample, name, rules, last_alert, created_time, tags, added_date, rule_type_tag, create_price))
             
             conn.commit()
             conn.close()

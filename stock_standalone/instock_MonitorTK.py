@@ -74,7 +74,7 @@ from tk_gui_modules.window_mixin import WindowMixin
 from tk_gui_modules.treeview_mixin import TreeviewMixin
 from tk_gui_modules.gui_config import (
     WINDOW_CONFIG_FILE, MONITOR_LIST_FILE, WINDOW_CONFIG_FILE2,
-    CONFIG_FILE, SEARCH_HISTORY_FILE, ICON_PATH as icon_path
+    CONFIG_FILE, SEARCH_HISTORY_FILE,VOICE_ALERT_CONFIG_FILE, ICON_PATH as icon_path
 )
 from trading_logger import TradingLogger
 from dpi_utils import set_process_dpi_awareness, get_windows_dpi_scale_factor
@@ -1025,7 +1025,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     archive_file_tools(self.handbook.data_file, "stock_handbook", ARCHIVE_DIR, logger)
                 except Exception as e:
                     logger.warning(f"手札存档失败: {e}")
-
+                    
+            try:
+                archive_file_tools(VOICE_ALERT_CONFIG_FILE, "voice_alert_config", ARCHIVE_DIR, logger)
+            except Exception as e:
+                logger.warning(f"手札存档失败: {e}")
 
             # 4. 如果 concept 窗口存在，也保存位置并隐藏
             if hasattr(self, "_concept_win") and self._concept_win:
@@ -4268,13 +4272,13 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except:
                     pass
             
-            tk.Label(left_frame, text=f"当前价格: {curr_price}", font=("Arial", 12, "bold"), fg="#1a237e").pack(pady=10, anchor="w")
+            tk.Label(left_frame, text=f"当前价格: {curr_price:.2f}", font=("Arial", 12, "bold"), fg="#1a237e").pack(pady=10, anchor="w")
             tk.Label(left_frame, text=f"当前涨幅: {curr_change:.2f}%", font=("Arial", 10), fg="#b71c1c" if curr_change>=0 else "#00695c").pack(pady=5, anchor="w")
             
             tk.Label(left_frame, text="选择监控类型:").pack(anchor="w", pady=(15, 5))
             
             type_var = tk.StringVar(value="price_up")
-            e_val_var = tk.StringVar(value=str(curr_price)) # 绑定Entry变量
+            e_val_var = tk.StringVar(value=f"{curr_price:.2f}") # 绑定Entry变量
             
             def on_type_change():
                 """切换类型时更新默认值"""
@@ -4284,7 +4288,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                      e_val_var.set(f"{curr_change:.2f}")
                 else:
                      # 切换回价格
-                     e_val_var.set(str(curr_price))
+                     e_val_var.set(f"{curr_price:.2f}")
 
             types = [("价格突破 (Price >=)", "price_up"), 
                      ("价格跌破 (Price <=)", "price_down"),
@@ -4363,7 +4367,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if hasattr(self, 'live_strategy') and self.live_strategy:
                         tags = self.get_stock_info_text(code)
                         resample = resample_var.get()
-                        self.live_strategy.add_monitor(code, name, rtype, val, tags=tags, resample=resample)
+                        self.live_strategy.add_monitor(code, name, rtype, val, tags=tags, resample=resample, create_price=curr_price)
                         # 自动关闭，不再弹窗确认，提升效率 (或者用 toast)
                         # messagebox.showinfo("成功", f"已添加监控: {name} {rtype} {val}", parent=win)
                         logger.info(f"Monitor added: {name} {rtype} {val}")
@@ -5899,6 +5903,19 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             
             tk.Button(top_frame, text="开启自动交易", command=lambda: self.live_strategy.start_auto_trading_loop(force=True, concept_top5=getattr(self, 'concept_top5', None)), bg="#fff9c4").pack(side="right", padx=5)
             tk.Button(top_frame, text="清理恢复持仓", command=lambda: batch_clear_recovered(), bg="#ffcdd2").pack(side="right", padx=5)
+            def on_repair_sync():
+                if messagebox.askyesno("数据修复", "将进行以下操作：\n1. 根据创建时间从历史行情回补缺失的‘加入价’\n2. 确保所有预警规则已同步到数据库\n\n是否立即开始?"):
+                    res = self.live_strategy.sync_and_repair_monitors()
+                    if "error" in res:
+                        messagebox.showerror("错误", f"修复过程中出现错误: {res['error']}")
+                    else:
+                        msg = f"✅ 数据对齐完成!\n\n- 价格回补: {res['repair_count']} 只\n- 数据库同步: {res['sync_count']} 条\n- 总条目: {res['total']}"
+                        if res['errors']:
+                            msg += f"\n\n注意: 有 {len(res['errors'])} 项同步异常，请检查日志。"
+                        messagebox.showinfo("成功", msg)
+                        load_data()
+
+            tk.Button(top_frame, text="数据同步修复", command=on_repair_sync, bg="#c8e6c9").pack(side="right", padx=5)
             tk.Button(top_frame, text="测试报警音", command=lambda: self.live_strategy.test_alert(), bg="#e0f7fa").pack(side="right", padx=5)
             win.lift()
             win.focus_force()
@@ -5909,7 +5926,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             list_frame.pack(fill="both", expand=True, padx=5, pady=5)
             
             # 显示 ID 是为了方便管理 (code + rule_index)
-            columns = ("code", "name", "resample", "rule_type", "value", "rank", "add_time", "tags", "id")
+            columns = ("code", "name", "resample", "rule_type", "value", "create_price", "curr_price", "pnl", "rank", "add_time", "tags", "id")
             tree = ttk.Treeview(list_frame, columns=columns, show="headings", height=15)
             
             # 4. 底部状态栏用于显示计数
@@ -5939,8 +5956,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if val in ('', '-', '--', 'N/A', None):
                         return (1, 0)  # 空值排在最后
                     try:
-                        # 尝试转换为数值
-                        return (0, float(val))
+                        # 尝试转换为数值 (处理百分比和符号)
+                        clean_val = str(val).replace('%', '').replace('+', '')
+                        return (0, float(clean_val))
                     except (ValueError, TypeError):
                         # 无法转换,按字符串排序
                         return (0, str(val).lower())
@@ -5958,6 +5976,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.heading("resample", text="周期", command=lambda: treeview_sort_column(tree, "resample", False))
             tree.heading("rule_type", text="规则类型", command=lambda: treeview_sort_column(tree, "rule_type", False))
             tree.heading("value", text="阈值", command=lambda: treeview_sort_column(tree, "value", False))
+            tree.heading("create_price", text="加入价", command=lambda: treeview_sort_column(tree, "create_price", False))
+            tree.heading("curr_price", text="现价", command=lambda: treeview_sort_column(tree, "curr_price", False))
+            tree.heading("pnl", text="盈亏%", command=lambda: treeview_sort_column(tree, "pnl", False))
             tree.heading("rank", text="Rank", command=lambda: treeview_sort_column(tree, "rank", False))
             tree.heading("add_time", text="时间", command=lambda: treeview_sort_column(tree, "add_time", False))
             tree.heading("tags", text="简介", command=lambda: treeview_sort_column(tree, "tags", False))
@@ -5968,7 +5989,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             tree.column("resample", width=50, anchor="center")
             tree.column("rule_type", width=80, anchor="center")
             tree.column("value", width=60, anchor="center")
-            tree.column("rank", width=60, anchor="center")
+            tree.column("create_price", width=60, anchor="center")
+            tree.column("curr_price", width=60, anchor="center")
+            tree.column("pnl", width=60, anchor="center")
+            tree.column("rank", width=50, anchor="center")
             tree.column("add_time", width=100, anchor="center")
             tree.column("tags", width=120, anchor="center")
             tree.column("id", width=0, stretch=False) # 隐藏 ID 列
@@ -6013,7 +6037,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
                 values = tree.item(item, "values")
 
-                TAGS_COL_INDEX = 6  # tags 在 values 中的索引
+                TAGS_COL_INDEX = 10  # tags 在 values 中的索引
 
                 if col_idx == TAGS_COL_INDEX:
                     tags_info = values[TAGS_COL_INDEX]
@@ -6053,15 +6077,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     resample = data.get('resample', 'd')
                     add_time = data.get('created_time', '')
                     tags = data.get('tags', '')
+                    create_price = data.get('create_price', 0.0)
                     
+                    curr_price = 0.0
                     rank = 0
+                    pnl_str = "--"
                     if hasattr(self, 'df_all') and not self.df_all.empty and pure_code in self.df_all.index:
-                         rank = self.df_all.loc[pure_code].get('Rank', 0)
+                         row_data = self.df_all.loc[pure_code]
+                         rank = row_data.get('Rank', 0)
+                         curr_price = float(row_data.get('trade', 0))
+                         if create_price > 0 and curr_price > 0:
+                             pnl = (curr_price - create_price) / create_price * 100
+                             pnl_str = f"{pnl:+.2f}%"
 
                     if not rules:
                         # 对于没有规则的股票，显示一行占位，方便管理
                         uid = f"{key}_none"
-                        tree.insert("", "end", values=(pure_code, name, resample, "⚠️(未设规则)", "-", rank, add_time, tags, uid))
+                        tree.insert("", "end", values=(pure_code, name, resample, "⚠️(未设规则)", "-", f"{create_price:.2f}", f"{curr_price:.2f}", pnl_str, rank, add_time, tags, uid))
                     else:
                         for idx, rule in enumerate(rules):
                             rtype_map = {
@@ -6072,7 +6104,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             display_type = rtype_map.get(rule['type'], rule['type'])
                             # unique id uses composite key for proper reference
                             uid = f"{key}_{idx}"
-                            tree.insert("", "end", values=(pure_code, name, resample, display_type, rule['value'], rank, add_time, tags, uid))
+                            # ✅ 格式化数值展示，价格/阈值保留2位小数
+                            try:
+                                val_formatted = f"{float(rule['value']):.2f}"
+                            except:
+                                val_formatted = rule['value']
+                            tree.insert("", "end", values=(pure_code, name, resample, display_type, val_formatted, f"{create_price:.2f}", f"{curr_price:.2f}", pnl_str, rank, add_time, tags, uid))
+                
+                # 💥 关键：数据加载后更新统计标签
+                refresh_stats()
 
             load_data()
             win.refresh_list = load_data
@@ -6165,7 +6205,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if hasattr(self, 'live_strategy') and hasattr(self.live_strategy, 'trading_logger'):
                         try:
                             trades = self.live_strategy.trading_logger.get_trades()
-                            is_holding = any(t['code'].zfill(6) == code.zfill(6) and t['status'] == 'OPEN' for t in trades)
+                            is_holding = any(t['code'].zfill(6) == code.zfill(6) and t['status'] == 'OPEN' and t.get('buy_amount', 0) > 0 for t in trades)
                         except: pass
                     
                     if is_holding:
@@ -6186,6 +6226,25 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         except Exception:
                             pass
 
+                    # 💥 联动核心：彻底清理该品种的所有浮动报警窗口与余波语音
+                    try:
+                        # 1. 查找并关闭 UI 报警窗
+                        if hasattr(self, 'code_to_alert_win') and code in self.code_to_alert_win:
+                            awin = self.code_to_alert_win[code]
+                            if awin.winfo_exists():
+                                self._close_alert(awin, is_manual=True)
+                        elif hasattr(self, 'active_alerts'):
+                            # 托底查找
+                            for awin in list(self.active_alerts):
+                                if getattr(awin, 'stock_code', None) == code:
+                                    self._close_alert(awin, is_manual=True)
+                        
+                        # 2. 强制同步一次活跃代码列表 (确保 cancel 队列和Existence检查立即生效)
+                        if hasattr(self, '_update_voice_active_codes'):
+                            self._update_voice_active_codes()
+                    except Exception as linkage_e:
+                        logger.debug(f"Linkage cleanup failed for {code}: {linkage_e}")
+
                 # --- 记录删除行的索引 ---
                 children = list(tree.get_children())
                 try:
@@ -6193,18 +6252,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 except ValueError:
                     del_idx = 0
 
-                # 可选刷新数据
-                # load_data()
-
-                # 可选刷新数据
-                # load_data()
-
+                # 为了防止索引错乱，删除后必须全量刷新
+                load_data()
+                
                 # --- 设置删除标志位，防止触发 on_voice_tree_select ---
                 self._is_deleting = True
                 try:
-                     tree.delete(item)
+                     # tree.delete(item) # 已经由 load_data() 刷新
                      
-                     # 选中下一行
+                     # 选中下一行 (尝试在刷新后的 tree 中找原位置)
                      children = tree.get_children()
                      if children:
                          if del_idx >= len(children):
@@ -6310,12 +6366,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         return
                     item = selected[0]
                     values = tree.item(item, "values")
-                 # Column order: code(0), name(1), resample(2), rule_type(3), value(4), rank(5), add_time(6), tags(7), id(8)
+                 # Column order: code(0), name(1), resample(2), rule_type(3), value(4), create_price(5), curr_price(6), pnl(7), rank(8), add_time(9), tags(10), id(11)
                  code = values[0]  # Pure code
                  name = values[1]
                  resample = values[2]  # Period
                  old_val = values[4]  # value is at index 4
-                 uid = values[8]  # id is at index 8
+                 uid = values[11]  # id is at index 11
                  
                  # Construct composite key from code + resample
                  composite_key = f"{code}_{resample}"
@@ -6392,13 +6448,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         curr_change = float(row_data.get('changepercent', 0))
                     except: pass
                  
-                 tk.Label(left_frame, text=f"当前价格: {curr_price}", font=("Arial", 12, "bold"), fg="#1a237e").pack(pady=10, anchor="w")
+                 tk.Label(left_frame, text=f"当前价格: {curr_price:.2f}", font=("Arial", 12, "bold"), fg="#1a237e").pack(pady=10, anchor="w")
                  # tk.Label(left_frame, text=f"当前涨幅: {curr_change:.2f}%", font=("Arial", 10)).pack(pady=5, anchor="w")
 
                  tk.Label(left_frame, text="规则类型:", font=("Arial", 10, "bold")).pack(anchor="w", pady=(5, 5))
                  
                  new_type_var = tk.StringVar(value=current_type)
-                 val_var = tk.StringVar(value=str(old_val))
+                 # ✅ 格式化显示旧阈值
+                 try:
+                     old_val_fmt = f"{float(old_val):.2f}"
+                 except:
+                     old_val_fmt = str(old_val)
+                 val_var = tk.StringVar(value=old_val_fmt)
 
                  def on_type_change():
                     # 切换默认值
@@ -6406,7 +6467,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if t == "change_up":
                          val_var.set(f"{curr_change:.2f}")
                     else:
-                         val_var.set(str(curr_price))
+                         val_var.set(f"{curr_price:.2f}")
 
                  types = [("价格突破 (Price >=)", "price_up"), 
                           ("价格跌破 (Price <=)", "price_down"),
@@ -6471,7 +6532,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                  self.live_strategy.update_rule(code, idx, new_type, val)
                              else:
                                  # 新增规则 (原来的占位行)
-                                 self.live_strategy.add_monitor(code, name, new_type, val)
+                                 self.live_strategy.add_monitor(code, name, new_type, val, create_price=curr_price)
                          
                          load_data()
                          edit_win.on_close()
@@ -6489,7 +6550,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             tk.Button(btn_frame, text="✏️ 修改阈值", command=edit_selected).pack(side="left", padx=10)
             tk.Button(btn_frame, text="🗑️ 删除规则 (Del)", command=delete_selected, fg="red").pack(side="left", padx=10)
-            tk.Button(btn_frame, text="刷新列表", command=load_data).pack(side="left", padx=10)
+            def manual_refresh():
+                if self.live_strategy:
+                    # 💥 强制从 JSON/DB 重新加载，捕捉后台平仓等外部变更
+                    self.live_strategy.load_monitors()
+                load_data()
+                toast_message(self, "监控列表已刷新")
+
+            tk.Button(btn_frame, text="刷新列表", command=manual_refresh).pack(side="left", padx=10)
 
             # 绑定选中事件
             tree.bind("<<TreeviewSelect>>", lambda e: refresh_stats())

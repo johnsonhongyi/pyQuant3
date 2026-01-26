@@ -7,6 +7,7 @@ from __future__ import annotations
 import threading
 import time
 import os
+import json
 from datetime import datetime, timedelta
 import multiprocessing as mp
 import pandas as pd
@@ -344,7 +345,7 @@ class StockLiveStrategy:
         self.trading_logger = TradingLogger()
         self.supervisor = StrategySupervisor(self.trading_logger) # type: ignore # ⭐ 注入盈利监理器
 
-        self._load_monitors()
+        self.load_monitors()
         self.df: Optional[pd.DataFrame] = None
 
         # 初始化决策引擎（带止损止盈配置）
@@ -509,8 +510,8 @@ class StockLiveStrategy:
         position_ratio = max(0.0, min(1.0, position_ratio))
         return action, position_ratio
 
-    def _load_monitors(self):
-        """加载配置并进行结构修复，同时恢复行情快照"""
+    def load_monitors(self):
+        """加载配置并进行结构修复，同时从数据库同步持仓状态"""
         self._monitored_stocks = {}
 
         try:
@@ -519,70 +520,57 @@ class StockLiveStrategy:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     self._monitored_stocks = json.load(f)
 
-            # --- [新增] 从数据库恢复持仓股监控，防止重启后丢失卖点 ---
+            # --- [新增] 从 voice_alerts 数据表加载备补数据 ---
             if hasattr(self, 'trading_logger'):
                 try:
-                    trades = self.trading_logger.get_trades()
-                    open_trades = [t for t in trades if t['status'] == 'OPEN']
-                    recovered_count = 0
-                    for t in open_trades:
-                        code = str(t['code']).zfill(6)
-                        resample = t.get('resample', 'd')
-                        # 兼容逻辑：为了支持多周期，理想情况下 key 应该是 (code, resample)
-                        # 但为了最少破坏现有结构，如果已经存在同 code 但不同周期的，我们可能需要特殊处理
-                        # 暂且遵循 "目前代码库习惯"，如果不存在则添加
-                        if code not in self._monitored_stocks:
-                            self._monitored_stocks[code] = {
-                                'name': t['name'],
-                                'rules': [{'type': 'price_up', 'value': float(t['buy_price'])}],
-                                'last_alert': 0,
-                                'resample': resample,
-                                'created_time': t['buy_date'][:13] if t.get('buy_date') else datetime.now().strftime("%Y-%m-%d %H"),
-                                'tags': "recovered_holding",
-                                'snapshot': {
-                                    'cost_price': float(t['buy_price']),
-                                    'buy_date': t.get('buy_date', '')
-                                }
-                            }
-                            recovered_count += 1
-                    if recovered_count > 0:
-                        logger.info(f"♻️ 监控恢复: 从数据库自动载入 {recovered_count} 只活跃持仓股")
-                except Exception as db_e:
-                    logger.error(f"恢复持仓监控失败: {db_e}")
-
-            # ✅ 结构迁移 / 补齐
-            for key, stock in self._monitored_stocks.items():
-                stock.setdefault('rules', [])
-                stock.setdefault('last_alert', 0)
-                stock.setdefault('resample', 'd') # 默认日线
-                stock.setdefault('created_time', datetime.now().strftime("%Y-%m-%d %H"))
-                stock.setdefault('tags', "")
-                stock.setdefault('snapshot', {})  # 快照信息
-
-                # 确保 code 字段存在 (从 key 补齐)
-                if 'code' not in stock:
-                    stock['code'] = key.split('_')[0]
-                
-                # 确保 resample 字段存在
-                if 'resample' not in stock:
-                    stock['resample'] = 'd'
-                
-                # 保持使用 code 作为 key（不再迁移到 code_resample 格式）
-                # 旧逻辑已移除：不再将 000561 改为 000561_d
-
-            # --- [新增] 从数据库恢复持仓股监控，防止重启后丢失卖点 ---
-            if hasattr(self, 'trading_logger'):
-                try:
-                    trades = self.trading_logger.get_trades()
-                    open_trades = [t for t in trades if t['status'] == 'OPEN']
-                    recovered_count = 0
-                    for t in open_trades:
-                        code = str(t['code']).zfill(6)
-                        resample = t.get('resample', 'd')
-                        key = code  # 使用纯 code 作为 key，不再加 _resample 后缀
+                    db_alerts = self.trading_logger.get_voice_alerts()
+                    for alert in db_alerts:
+                        code = alert['code']
+                        resample = alert.get('resample', 'd')
+                        # 确定 key (兼容逻辑: 优先匹配 JSON 已有的 key)
+                        key = code if code in self._monitored_stocks else (f"{code}_{resample}" if f"{code}_{resample}" in self._monitored_stocks else code)
                         
                         if key not in self._monitored_stocks:
-                            self._monitored_stocks[key] = {
+                             # 如果 JSON 里没有，则从 DB 恢复
+                             self._monitored_stocks[key] = {
+                                 'code': code,
+                                 'name': alert['name'],
+                                 'rules': json.loads(alert['rules']) if isinstance(alert['rules'], str) else alert['rules'],
+                                 'last_alert': alert.get('last_alert', 0),
+                                 'resample': resample,
+                                 'created_time': alert.get('created_time', ''),
+                                 'create_price': alert.get('create_price', 0.0),
+                                 'tags': alert.get('tags', ''),
+                                 'added_date': alert.get('added_date', ''),
+                                 'rule_type_tag': alert.get('rule_type_tag', '')
+                             }
+                        else:
+                             # 如果 JSON 里已有，但 create_price 为 0，而 DB 有值，则覆盖
+                             stock = self._monitored_stocks[key]
+                             if stock.get('create_price', 0) == 0 and alert.get('create_price', 0) > 0:
+                                 stock['create_price'] = alert['create_price']
+                             # 同样补齐可能缺失的字段
+                             if not stock.get('created_time') and alert.get('created_time'):
+                                 stock['created_time'] = alert['created_time']
+                except Exception as e:
+                    logger.error(f"Failed to sync from voice_alerts DB: {e}")
+
+            # --- [核心同步] 从数据库同步持仓股监控 ---
+            open_codes = set()
+            if hasattr(self, 'trading_logger'):
+                try:
+                    trades = self.trading_logger.get_trades()
+                    open_trades = [t for t in trades if t['status'] == 'OPEN']
+                    
+                    recovered_count = 0
+                    for t in open_trades:
+                        code = str(t['code']).zfill(6)
+                        resample = t.get('resample', 'd')
+                        open_codes.add(code)
+                        
+                        # 如果数据库有持仓但监控列表没有，则恢复
+                        if code not in self._monitored_stocks:
+                            self._monitored_stocks[code] = {
                                 'code': code,
                                 'name': t['name'],
                                 'rules': [{'type': 'price_up', 'value': float(t['buy_price'])}],
@@ -596,40 +584,67 @@ class StockLiveStrategy:
                                 }
                             }
                             recovered_count += 1
+                    
                     if recovered_count > 0:
-                        logger.info(f"♻️ 监控恢复: 从数据库自动载入 {recovered_count} 只活跃持仓股")
-                        self._save_monitors() # 保存恢复后的状态
-                except Exception as db_e:
-                    logger.error(f"恢复持仓监控失败: {db_e}")
+                        logger.info(f"♻️ 监控恢复: 从数据库载入 {recovered_count} 只活跃持仓股")
+                        self._save_monitors()
+                        
+                    # --- [关键清理] 如果监控项标记为 recovered_holding 但外部(数据库)已平仓，则自动移除 ---
+                    to_remove = []
+                    for key, stock in self._monitored_stocks.items():
+                        if stock.get('tags') == "recovered_holding":
+                            # 提取 code (兼容 key 为 code_resample 的老格式)
+                            s_code = stock.get('code') or key.split('_')[0]
+                            if s_code not in open_codes:
+                                to_remove.append(key)
+                    
+                    if to_remove:
+                        for k in to_remove:
+                            del self._monitored_stocks[k]
+                        logger.info(f"🧹 自动清理: 已移出 {len(to_remove)} 只已平仓的持仓股监控")
+                        self._save_monitors()
 
-                # ✅ 重建 rule_keys（不从文件读取）
+                except Exception as db_e:
+                    logger.error(f"同步数据库持仓状态失败: {db_e}")
+
+            # ✅ 结构迁移 / 补齐 / 运行时属性填充 (作用于所有 stock)
+            for key, stock in self._monitored_stocks.items():
+                stock.setdefault('rules', [])
+                stock.setdefault('last_alert', 0)
+                stock.setdefault('resample', 'd')
+                stock.setdefault('create_price', 0.0)
+                if 'code' not in stock:
+                    stock['code'] = key.split('_')[0]
+
+                # ✅ 修补缺失的价格 (从快照或当前行情尝试恢复)
+                if stock.get('create_price', 0) == 0:
+                    snap_price = stock.get('snapshot', {}).get('trade', 0)
+                    if snap_price > 0:
+                        stock['create_price'] = snap_price
+                    elif hasattr(self, 'df') and self.df is not None:
+                         # 尝试从最近一次行情中获取
+                         s_code = stock['code']
+                         if s_code in self.df.index:
+                             stock['create_price'] = float(self.df.loc[s_code].get('trade', 0))
+
+                # ✅ 重建 rule_keys
                 rule_keys = set()
-                code = stock['code']
                 for r in stock['rules']:
                     try:
                         r_key = self._rule_key(r['type'], r['value'])
                         rule_keys.add(r_key)
                     except Exception:
-                        logger.warning(f"Invalid rule skipped for {code}: {r}")
-
+                        pass
                 stock['rule_keys'] = rule_keys
 
-                # ✅ 可选：加载 snapshot 到运行时对象
+                # ✅ 加载 snapshot 里的关键行情数据到顶层，方便 UI 显示
                 snap = stock.get('snapshot', {})
-                stock['trade'] = snap.get('trade', 0)
-                stock['percent'] = snap.get('percent', 0)
-                stock['volume'] = snap.get('volume', 0)
-                stock['ratio'] = snap.get('ratio', 0)
-                stock['nclose'] = snap.get('nclose', 0)
-                stock['last_close'] = snap.get('last_close', 0)
-                stock['ma5d'] = snap.get('ma5d', 0)
-                stock['ma10d'] = snap.get('ma10d', 0)
+                for attr in ['trade', 'percent', 'volume', 'ratio', 'nclose', 'last_close', 'ma5d', 'ma10d']:
+                    stock[attr] = snap.get(attr, 0)
 
-            self.stock_count: int = len(self._monitored_stocks) 
-            logger.info(
-                f"Loaded voice monitors from {self.config_file}, "
-                f"总计持仓stocks={len(self._monitored_stocks)}"
-            )
+            self.stock_count: int = len(self._monitored_stocks)
+            self._save_monitors() # ✅ 持久化修补后的价格到 JSON 和数据库
+            logger.info(f"Loaded {self.stock_count} voice monitors (File: {self.config_file})")
 
         except Exception as e:
             logger.error(f"Failed to load voice monitors: {e}")
@@ -677,6 +692,7 @@ class StockLiveStrategy:
                         "last_alert": 0,
                         "created_time": datetime.now().strftime("%Y-%m-%d %H:%M"),
                         "tags": f"auto_{logical_date}",
+                        "create_price": float(row.get('price', 0.0)),
                         "snapshot": {
                             "trade": float(row.get('price', 0.0)),
                             "percent": float(row.get('percent', 0.0)),
@@ -728,6 +744,7 @@ class StockLiveStrategy:
                     'last_alert': stock.get('last_alert', 0),
                     'resample': stock.get('resample', 'd'), # 保存周期信息
                     'created_time': stock.get('created_time', datetime.now().strftime("%Y-%m-%d %H")),
+                    'create_price': stock.get('create_price', 0.0),
                     'tags': stock.get('tags', ""),
                     'added_date': stock.get('added_date', ""),
                     'rule_type_tag': stock.get('rule_type_tag', "")
@@ -772,7 +789,9 @@ class StockLiveStrategy:
                         rules=json.dumps(stock.get('rules', [])),
                         last_alert=stock.get('last_alert', 0),
                         tags=stock.get('tags', ''),
-                        rule_type_tag=stock.get('rule_type_tag', '')
+                        rule_type_tag=stock.get('rule_type_tag', ''),
+                        create_price=stock.get('create_price', 0.0),
+                        created_time=stock.get('created_time', '')
                     )
 
         except Exception as e:
@@ -781,7 +800,7 @@ class StockLiveStrategy:
     def _rule_key(self, rule_type, value):
         return f"{rule_type}:{value:.2f}"
 
-    def add_monitor(self, code, name, rule_type, value, tags=None, resample='d'):
+    def add_monitor(self, code, name, rule_type, value, tags=None, resample='d', create_price=0.0):
         value = float(value)
         # 使用纯 code 作为 key（不再使用复合 key）
         key = code
@@ -795,6 +814,7 @@ class StockLiveStrategy:
                 'resample': resample,
                 'created_time': datetime.now().strftime("%Y-%m-%d %H"),
                 'added_date': datetime.now().strftime('%Y-%m-%d'), # [新增] 用于已添加数量统计
+                'create_price': create_price,
                 'tags': tags or ""
             }
         
@@ -851,7 +871,8 @@ class StockLiveStrategy:
             'name': name,
             'type': rule_type,
             'value': value,
-            'msg': f"Added monitor: {rule_type} > {value}"
+            'create_price': create_price,
+            'msg': f"Added monitor: {rule_type} > {value} (Price: {create_price:.2f})"
         })
         
         logger.info(
@@ -1123,7 +1144,8 @@ class StockLiveStrategy:
                         rule_type='hot_concept',
                         value=cand['score'],
                         tags=f"Hot:{cand['concept']}|Sc:{cand['score']:.2f}",
-                        resample=resample
+                        resample=resample,
+                        create_price=cand['pct'] # 这里 cand['pct'] 实际上存的是之前的行情涨幅，如果是价格则是 cand['price']
                     )
 
                     logger.info(f"🔥 Found Hot Leader (Score={cand['score']:.2f}): {cand['name']}({cand['code']}) in {cand['concept']}")
@@ -2466,15 +2488,148 @@ class StockLiveStrategy:
         """获取所有监控数据"""
         return self._monitored_stocks
 
+    def sync_and_repair_monitors(self) -> dict:
+        """
+        同步监控列表到数据库,并修复缺失的价格信息。
+        返回修复统计信息。
+        """
+        repair_count = 0
+        sync_count = 0
+        errors = []
+        
+        try:
+            # 内部使用局部导入以减少加载开销
+            from JSONData import tdx_data_Day as tdd
+            from JohnsonUtil import johnson_cons as ct
+            import json
+
+            for key, data in self._monitored_stocks.items():
+                code = data.get('code') or key.split('_')[0]
+                resample = data.get('resample', 'd')
+                name = data.get('name', '')
+                create_price = data.get('create_price', 0)
+                created_time_str = data.get('created_time', '')
+
+                # 1. 尝试修复价格
+                if (not create_price or create_price <= 0) and created_time_str:
+                    try:
+                        dt_obj = None
+                        date_formats = ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d %H', '%Y-%m-%d']
+                        for fmt in date_formats:
+                            try:
+                                dt_obj = datetime.strptime(created_time_str, fmt)
+                                break
+                            except ValueError:
+                                continue
+                        
+                        if dt_obj:
+                            target_date = dt_obj.strftime('%Y-%m-%d')
+                            dl = ct.Resample_LABELS_Days.get(resample, 200)
+                            df_hist = tdd.get_tdx_Exp_day_to_df(code, dl=dl, resample=resample, fastohlc=True)
+                            
+                            if df_hist is not None and not df_hist.empty:
+                                found_price = 0.0
+                                if target_date in df_hist.index:
+                                    row = df_hist.loc[target_date]
+                                    if isinstance(row, pd.DataFrame): row = row.iloc[0]
+                                    found_price = float(row.get('close', 0))
+                                else:
+                                    past_df = df_hist[df_hist.index <= target_date]
+                                    if not past_df.empty:
+                                        found_price = float(past_df.iloc[-1].get('close', 0))
+                                    else:
+                                        found_price = float(df_hist.iloc[0].get('open', 0))
+                                
+                                if found_price > 0:
+                                    data['create_price'] = found_price
+                                    create_price = found_price
+                                    repair_count += 1
+                                    logger.info(f"Fixed price for {code}: {found_price}")
+                    except Exception as e:
+                        errors.append(f"{code} repair error: {e}")
+
+                # 2. 同步到数据库
+                if hasattr(self, 'trading_logger'):
+                    try:
+                        self.trading_logger.log_voice_alert_config(
+                            code=code,
+                            resample=resample,
+                            name=name,
+                            rules=json.dumps(data.get('rules', [])),
+                            last_alert=data.get('last_alert', 0),
+                            tags=data.get('tags', ''),
+                            rule_type_tag=data.get('rule_type_tag', ''),
+                            create_price=create_price,
+                            created_time=created_time_str
+                        )
+                        sync_count += 1
+                    except Exception as e:
+                        errors.append(f"{code} sync error: {e}")
+
+            # 保存修复后的结果到配置文件
+            self._save_monitors()
+            
+            return {
+                "repair_count": repair_count,
+                "sync_count": sync_count,
+                "total": len(self._monitored_stocks),
+                "errors": errors
+            }
+        except Exception as e:
+            logger.error(f"Failed to sync and repair monitors: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"error": str(e)}
+
+    def _resolve_stock_key(self, code: str) -> Optional[str]:
+        """
+        内部辅助：解析传入的代码/Key，返回存在于 _monitored_stocks 中的真实 Key。
+        支持：纯代码 ("000001")、带周期的 Key ("000001_d")。
+        """
+        if code in self._monitored_stocks:
+            return code
+        
+        # 尝试拆分
+        parts = code.split('_')
+        pure_code = parts[0]
+        if pure_code in self._monitored_stocks:
+            return pure_code
+            
+        # 尝试常用后缀 (兼容旧数据)
+        for suffix in ['d', 'w', 'm', '3d', '5', '15', '30', '60']:
+            alias = f"{pure_code}_{suffix}"
+            if alias in self._monitored_stocks:
+                return alias
+        
+        return None
+
     def remove_monitor(self, code, resample=None):
         """移除指定代码的监控"""
-        # 使用纯 code 作为 key
-        key = code
-        if key in self._monitored_stocks:
+        key = self._resolve_stock_key(code)
+        if key:
+            pure_code = key.split('_')[0]
+            stock_resample = self._monitored_stocks[key].get('resample', 'd')
+            
+            # 1. 从内存移除
             del self._monitored_stocks[key]
-            logger.info(f"Removed monitor {key}")
-        
-        self._save_monitors()
+            logger.info(f"Removed monitor {key} from memory")
+            
+            # 2. 从数据库物理删除
+            if hasattr(self, 'trading_logger'):
+                self.trading_logger.remove_voice_alert_config(pure_code, stock_resample)
+            
+            # 3. 中断当前及排队中的语音
+            if hasattr(self, '_voice'):
+                self._voice.cancel_for_code(pure_code)
+                
+            # 4. 从信号历史中移除相关品种 (可选优化：保持界面整洁)
+            # self.signal_history = deque([s for s in self.signal_history if s.get('code') != pure_code], maxlen=200)
+
+            self._save_monitors()
+            return True
+        else:
+            logger.warning(f"Failed to remove monitor: {code} not found")
+            return False
 
 
     def close_position_if_any(self, code: str, price: float, name: Optional[str] = None) -> bool:
@@ -2490,7 +2645,7 @@ class StockLiveStrategy:
             
         try:
             trades = self.trading_logger.get_trades()
-            open_trades = [t for t in trades if str(t['code']).zfill(6) == str(code).zfill(6) and t['status'] == 'OPEN']
+            open_trades = [t for t in trades if str(t['code']).zfill(6) == str(code).zfill(6) and t['status'] == 'OPEN' and t.get('buy_amount', 0) > 0]
             
             if open_trades:
                 stock_name = name or open_trades[0].get('name', 'Unknown')
@@ -2505,25 +2660,30 @@ class StockLiveStrategy:
 
     def update_rule(self, code, rule_index, new_type, new_value):
         """更新指定规则"""
-        # 假设更新总是针对默认周期 'd'
-        key = f"{code}_d"
-        if key in self._monitored_stocks:
+        key = self._resolve_stock_key(code)
+        if key:
             rules = self._monitored_stocks[key]['rules']
             if 0 <= rule_index < len(rules):
                 rules[rule_index]['type'] = new_type
                 rules[rule_index]['value'] = float(new_value)
                 self._save_monitors()
                 logger.info(f"Updated rule for {key} index {rule_index}: {new_type} {new_value}")
+                return True
+        else:
+            logger.warning(f"Failed to update rule: {code} not found")
+        return False
 
     def remove_rule(self, code, rule_index):
-        # 假设移除总是针对默认周期 'd'
-        key = f"{code}_d"
-        if key in self._monitored_stocks:
+        """移除指定规则"""
+        key = self._resolve_stock_key(code)
+        if key:
             stock = self._monitored_stocks[key]
             rules = stock['rules']
 
             if 0 <= rule_index < len(rules):
                 rule = rules.pop(rule_index)
+                pure_code = key.split('_')[0]
+                stock_resample = stock.get('resample', 'd')
 
                 if 'rule_keys' in stock:
                     stock['rule_keys'].discard(
@@ -2531,9 +2691,21 @@ class StockLiveStrategy:
                     )
 
                 if not rules:
+                    # 如果没规则了，整个监控项物理删除
                     del self._monitored_stocks[key]
+                    if hasattr(self, 'trading_logger'):
+                        self.trading_logger.remove_voice_alert_config(pure_code, stock_resample)
+                    if hasattr(self, '_voice'):
+                        self._voice.cancel_for_code(pure_code)
+                    logger.info(f"Monitor {key} fully removed because no rules left")
+                else:
+                    logger.info(f"Removed rule {rule_index} for {key}")
 
                 self._save_monitors()
+                return True
+        else:
+            logger.warning(f"Failed to remove rule: {code} not found")
+        return False
     def test_alert(self, text="这是一个测试报警"):
         """测试报警功能 (强制绕过全局开关以验证引擎)"""
         logger.info(f"🔔 Forced Test Alert: {text}")
@@ -3041,8 +3213,10 @@ class StockLiveStrategy:
             date_str = cct.get_today()
             # 获取全部候选
             df = selector.get_candidates_df(logical_date=date_str)
+            logger.info(f"StockSelector: Found {len(df)} candidates for {date_str}")
             
             if df.empty:
+                logger.warning(f"StockSelector returned empty candidates for {date_str}")
                 return "无标的"
             
             # 识别热点股 (确保 reason 列存在)
@@ -3094,32 +3268,73 @@ class StockLiveStrategy:
                 self.current_batch = final_top5_df['code'].apply(lambda x: str(x).zfill(6)).tolist()
             
             # 导入监控列表
-            added_count = 0
+            added_names = []
+            skipped_names = []
+            repaired_names = []
+            
             for _, row in final_top5_df.iterrows():
                 code = str(row['code']).zfill(6)
                 name = row['name']
-                # Add to monitor
-                self._monitored_stocks[code] = {
-                    "name": name,
-                    "rules": [{'type': 'price_up', 'value': float(row.get('price', 0))}], 
-                    "last_alert": 0,
-                    "created_time": datetime.now().strftime("%Y-%m-%d %H"),
-                    "tags": tag,
-                    "snapshot": {
-                        "score": row.get('score', 0),
-                        "reason": row.get('reason', ''),
-                        "category": row.get('category', '')
+                current_price = float(row.get('price', 0))
+                
+                if code in self._monitored_stocks:
+                    stock_data = self._monitored_stocks[code]
+                    # 如果已有条目 价格缺失，则补齐（不算新增，算修补）
+                    if stock_data.get('create_price', 0) <= 0:
+                        stock_data['create_price'] = current_price
+                        repaired_names.append(name)
+                    else:
+                        skipped_names.append(name)
+                        continue # 严格跳过，不修改任何其他内容
+                else:
+                    added_names.append(name)
+                    self._monitored_stocks[code] = {
+                        "name": name,
+                        "rules": [{'type': 'price_up', 'value': current_price}], 
+                        "last_alert": 0,
+                        "created_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "create_price": current_price,
+                        "tags": tag,
+                        "snapshot": {
+                            "score": row.get('score', 0),
+                            "reason": row.get('reason', ''),
+                            "category": row.get('category', '')
+                        }
                     }
-                }
-                added_count += 1
+                
+                # 同步到数据库
+                if hasattr(self, 'trading_logger'):
+                    data = self._monitored_stocks[code]
+                    self.trading_logger.log_voice_alert_config(
+                        code=code,
+                        resample=data.get('resample', 'd'),
+                        name=name,
+                        rules=json.dumps(data.get('rules', [])),
+                        last_alert=data.get('last_alert', 0),
+                        tags=data.get('tags', ''),
+                        rule_type_tag=data.get('rule_type_tag', ''),
+                        create_price=data.get('create_price', 0.0),
+                        created_time=data.get('created_time', '')
+                    )
            
-            if added_count > 0:
+            added_count = len(added_names)
+            repaired_count = len(repaired_names)
+            skipped_count = len(skipped_names)
+
+            if added_count > 0 or repaired_count > 0:
                 self._save_monitors()
-                names = ",".join(final_top5_df['name'].tolist())
                 mode_str = "Manual" if is_manual else "Auto"
-                logger.info(f"{mode_str} Hotspots: Selected {added_count} Stocks: {names}")
-                return f"成功导入 {added_count} 只 ({mode_str})"
-            return "无新标的导入"
+                
+                # 构建详细日志
+                log_detail = f"{mode_str} Hotspots Report:"
+                if added_names: log_detail += f" [Added: {','.join(added_names)}]"
+                if repaired_names: log_detail += f" [Repaired: {','.join(repaired_names)}]"
+                if skipped_names: log_detail += f" [Skipped: {','.join(skipped_names)}]"
+                logger.info(log_detail)
+
+                return f"成功添加 {added_count} 只, 修补 {repaired_count} 只 ({mode_str})"
+            
+            return f"已存在重复标的，跳过 {skipped_count} 只 ({','.join(skipped_names)})"
 
         except Exception as e:
             logger.error(f"Auto Import Error: {e}")

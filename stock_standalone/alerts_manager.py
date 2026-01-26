@@ -429,8 +429,24 @@ class AlertCenter(tk.Toplevel):
         hist = self.manager.get_history(limit=1000)
         self.tree_hist.delete(*self.tree_hist.get_children())
         for a in hist:
-            rule_repr = f"{a.get('field')} {a.get('op')}{a.get('rule_value')}"
-            vals = (a.get("time"), a.get("stock_code"), a.get("name"), a.get("field"), rule_repr, a.get("value"), a.get("delta"))
+            # ✅ 格式化数值展示
+            try:
+                rv_f = f"{float(a.get('rule_value', 0)):.2f}"
+            except:
+                rv_f = a.get('rule_value')
+            
+            try:
+                v_f = f"{float(a.get('value', 0)):.2f}"
+            except:
+                v_f = a.get('value')
+                
+            try:
+                d_f = f"{float(a.get('delta', 0)):.2f}"
+            except:
+                d_f = a.get('delta')
+
+            rule_repr = f"{a.get('field')} {a.get('op')}{rv_f}"
+            vals = (a.get("time"), a.get("stock_code"), a.get("name"), a.get("field"), rule_repr, v_f, d_f)
             self.tree_hist.insert("", "end", values=vals)
 
     def clear_history(self):
@@ -481,7 +497,17 @@ class AlertCenter(tk.Toplevel):
         rules = self.manager.get_rules(cur)
         for i, r in enumerate(rules):
             enabled = "是" if r.get("enabled", True) else "否"
-            self.tree_rules.insert("", "end", values=(i + 1, r.get("field"), r.get("op"), r.get("value"), enabled, r.get("delta", "")))
+            # ✅ 格式化数值
+            try:
+                rv_f = f"{float(r.get('value', 0)):.2f}"
+            except:
+                rv_f = r.get('value')
+            try:
+                d_f = f"{float(r.get('delta', 0)):.2f}"
+            except:
+                d_f = r.get('delta', "")
+                
+            self.tree_rules.insert("", "end", values=(i + 1, r.get("field"), r.get("op"), rv_f, enabled, d_f))
 
     def open_editor_for_selected(self):
         code = self.stock_var.get().strip()
@@ -549,7 +575,17 @@ class EditRuleDialog(tk.Toplevel):
     def refresh_list(self):
         self.tree.delete(*self.tree.get_children())
         for r in self.rules:
-            self.tree.insert("", "end", values=(r.get("field"), r.get("op"), r.get("value"), "是" if r.get("enabled", True) else "否", r.get("delta", "")))
+            # ✅ 格式化数值展示
+            try:
+                rv_f = f"{float(r.get('value', 0)):.2f}"
+            except:
+                rv_f = r.get('value')
+            try:
+                d_f = f"{float(r.get('delta', 0)):.2f}"
+            except:
+                d_f = r.get('delta', "")
+                
+            self.tree.insert("", "end", values=(r.get("field"), r.get("op"), rv_f, "是" if r.get("enabled", True) else "否", d_f))
 
     def add_new_rule(self):
         default = {"field": "价格", "op": ">=", "value": 1.0, "enabled": True, "delta": 1}
