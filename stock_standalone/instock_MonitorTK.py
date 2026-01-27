@@ -6205,13 +6205,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     if hasattr(self, 'live_strategy') and hasattr(self.live_strategy, 'trading_logger'):
                         try:
                             trades = self.live_strategy.trading_logger.get_trades()
-                            is_holding = any(t['code'].zfill(6) == code.zfill(6) and t['status'] == 'OPEN' and t.get('buy_amount', 0) > 0 for t in trades)
+                            is_holding = any(t['code'].zfill(6) == code.zfill(6) and t['status'] == 'OPEN' for t in trades)
                         except: pass
                     
                     if is_holding:
-                        ans = messagebox.askyesnocancel("持仓确认", f"检测到 {values[1]}({code}) 尚有持仓，是否记录为[卖出平仓]后再删除监控？\n\n'是' - 记录卖出平仓并删除\n'否' - 直接删除监控\n'取消' - 放弃操作", parent=win)
+                        # 💥 [优化] 提示语更明确：移除监控 = 停止跟踪 = 需要处理持仓
+                        ans = messagebox.askyesnocancel(
+                            "持仓确认", 
+                            f"检测到 {values[1]}({code}) 尚有在册持仓！\n\n移除监控将导致该持仓不再被实时跟踪，且为了防止自动恢复，系统将必须强制关闭该持仓记录。\n\n是否同时并在交易日志中标记为[卖出平仓]？\n\n'是' - 标记平仓并移除监控\n'否' - 仅标记移除(不再跟踪)但保留日志闭环\n'取消' - 放弃操作", 
+                            parent=win
+                        )
                         if ans is None: return # 取消
-                        if ans is True: # 是
+                        if ans is True: # 是 - 正常平仓逻辑(用当前价)
                             price = 0.0
                             if hasattr(self, 'df_all') and not self.df_all.empty and code in self.df_all.index:
                                 price = float(self.df_all.loc[code].get('trade', 0))

@@ -125,6 +125,19 @@ class IntradayDecisionEngine:
         if limit_refuse:
             return self._hold(limit_msg, debug)
 
+        # 💥 [New] 严格追高限制 (Anti-Chasing)
+        # 如果日内涨幅超过 7%，且当前不是为了卖出，则坚决不追
+        pct_now = float(row.get('percent', 0))
+        if pct_now > 7.0 and mode != "sell_only":
+            # 唯一的例外：如果有极强的题材或外部加分 (可配置)
+            # 但为了安全起见，默认禁止
+            debug["refuse_reason"] = f"涨幅{pct_now:.2f}%过高"
+            return self._hold(f"禁止追高(>{pct_now:.1f}%)", debug)
+        elif pct_now > 5.0 and mode != "sell_only":
+            # 5-7% 之间，扣分惩罚
+            base_pos -= 0.15
+            debug["追高惩罚"] = -0.15
+
         # 1. 记仇机制 (PTSD)：如果这只票最近连续让你亏钱，就别碰它！
         loss_streak = int(snapshot.get("loss_streak", 0))
         if loss_streak >= 2:
@@ -798,9 +811,13 @@ class IntradayDecisionEngine:
         if 600 <= curr_min <= 660:
             return -0.15, "早盘高位风险区(慎追)"
         
-        # 14:30-15:00 (870-900)
-        if 870 <= curr_min <= 900:
-            return -0.20, "尾盘防追高区"
+        # 14:50-15:00 (890-900) -> 尾盘禁买一刀切
+        if 890 <= curr_min <= 900:
+            return -1.0, "尾盘禁买(14:50后)"
+
+        # 14:30-14:50 (870-890) -> 风险区
+        if 870 <= curr_min < 890:
+            return -0.20, "尾盘风险区(慎开)"
             
         return 0, ""
 

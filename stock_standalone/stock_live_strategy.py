@@ -8,6 +8,7 @@ import threading
 import time
 import os
 import json
+# from sys_utils import get_base_path
 from datetime import datetime, timedelta
 import multiprocessing as mp
 import pandas as pd
@@ -568,22 +569,47 @@ class StockLiveStrategy:
                         resample = t.get('resample', 'd')
                         open_codes.add(code)
                         
-                        # 如果数据库有持仓但监控列表没有，则恢复
+                        # 1. 强制校准逻辑：即使已存在，如果是 recovered_holding，也要校准时间与价格
+                        b_date = str(t.get('buy_date', '') or '')
+                        real_created_time = b_date[:19] if len(b_date) >= 10 else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        b_price = float(t['buy_price'])
+
+                        # 如果已在监控中
+                        if code in self._monitored_stocks:
+                            exist_stock = self._monitored_stocks[code]
+                            if exist_stock.get('tags') == "recovered_holding":
+                                # 强制覆盖为 DB 的真实数据
+                                exist_stock['created_time'] = real_created_time
+                                exist_stock['create_price'] = b_price
+                                if 'snapshot' not in exist_stock:
+                                    exist_stock['snapshot'] = {}
+                                exist_stock['snapshot']['cost_price'] = b_price
+                                exist_stock['snapshot']['buy_date'] = b_date
+                        
+                        # 2. 如果完全不存在，则全新恢复
                         if code not in self._monitored_stocks:
+                            # b_date 等变量已在上面定义
+                            # 如果数据库里没有有效的 buy_date，才被迫使用当前时间
+                            real_created_time = b_date[:19] if len(b_date) >= 10 else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            
+                            b_price = float(t['buy_price'])
+                            
                             self._monitored_stocks[code] = {
                                 'code': code,
                                 'name': t['name'],
-                                'rules': [{'type': 'price_up', 'value': float(t['buy_price'])}],
+                                'rules': [{'type': 'price_up', 'value': b_price}],
                                 'last_alert': 0,
                                 'resample': resample,
-                                'created_time': t['buy_date'][:19] if t.get('buy_date') else datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                'created_time': real_created_time,
+                                'create_price': b_price, # ✅ 恢复时同步设置加入价 = 成本价
                                 'tags': "recovered_holding",
                                 'snapshot': {
-                                    'cost_price': float(t['buy_price']),
-                                    'buy_date': t.get('buy_date', '')
+                                    'cost_price': b_price,
+                                    'buy_date': b_date
                                 }
                             }
                             recovered_count += 1
+                            logger.info(f"Recovered {code} with date {real_created_time} and cost {b_price}")
                     
                     if recovered_count > 0:
                         logger.info(f"♻️ 监控恢复: 从数据库载入 {recovered_count} 只活跃持仓股")
@@ -2617,6 +2643,25 @@ class StockLiveStrategy:
             # 2. 从数据库物理删除
             if hasattr(self, 'trading_logger'):
                 self.trading_logger.remove_voice_alert_config(pure_code, stock_resample)
+                # 💥 [New] 如果是持仓股，还需要将交易状态标记为 CLOSED (或手动移除状态)，防止 load_monitors 自动恢复
+                # 检查是否有 OPEN 状态的交易
+                try:
+                    trades = self.trading_logger.get_trades()
+                    open_trades = [t for t in trades if t['code'] == pure_code and t['status'] == 'OPEN']
+                    if open_trades:
+                        for trade in open_trades:
+                            # 这里我们不真正卖出，而是标记为 CLOSED (或者引入新的状态 MANUAL_REMOVED)
+                            # 为了打断循环，我们调用 update_trade_status (需要 logger 支持，或者直接 close)
+                            # 既然是移除监控，意味着不再关注，视为结束跟踪
+                            self.trading_logger.close_trade(
+                                code=pure_code, 
+                                sell_price=0, 
+                                sell_reason="手动移除监控(不再跟踪)",
+                                sell_amount=0 # 0 表示仅修改状态
+                            )
+                        logger.info(f"Closed trade record for {pure_code} to prevent auto-recovery")
+                except Exception as e:
+                    logger.error(f"Failed to close trade for {pure_code}: {e}")
             
             # 3. 中断当前及排队中的语音
             if hasattr(self, '_voice'):

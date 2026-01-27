@@ -2280,7 +2280,7 @@ def get_tdx_Exp_day_to_df(
     base = 'forwardp' if type == 'f' else 'backp'
     file_path = os.path.join(exp_path, base, f"{code_u.upper()}.txt")
 
-    if not os.path.exists(file_path):
+    if not os.path.exists(file_path) or os.path.getsize(file_path) < 500:
         return pd.DataFrame()
 
     if dl is None:
@@ -2324,6 +2324,7 @@ def get_tdx_Exp_day_to_df(
         return pd.DataFrame()
 
     cols = ['date', 'open', 'high', 'low', 'close', 'vol', 'amount']
+
     df = pd.read_csv(
         StringIO(''.join(lines)),
         names=cols,
@@ -7615,10 +7616,9 @@ if __name__ == '__main__':
     log.setLevel(log_level)
     # tdx_profile_test_tdx()
     
-    code='601212'
-
-    df=get_tdx_append_now_df_api_tofile(code)
-    import ipdb;ipdb.set_trace()
+    # code='601212'
+    # df=get_tdx_append_now_df_api_tofile(code)
+    # import ipdb;ipdb.set_trace()
 
     # # import ipdb;ipdb.set_trace()
     # print('df: {df}')
@@ -7634,8 +7634,8 @@ if __name__ == '__main__':
     #     get_tdx_append_now_df_api_tofile(inx,dm=dm_index)
     # write_market_index_to_df()
     # Write_market_all_day_mp()
-    # code = '920091'
-    code = '920427'
+    code = '920091'
+    # code = '920076'
     # df1 = get_tdx_Exp_day_to_df(code,dl=1,newdays=0)
     df1d = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'],resample='d' )
     df2 = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )

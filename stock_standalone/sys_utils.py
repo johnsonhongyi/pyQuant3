@@ -46,7 +46,13 @@ def get_base_path():
         return os.path.dirname(os.path.abspath(sys.executable))
 
     return os.path.dirname(os.path.abspath(sys.argv[0]))
-
+    # base_path = os.path.dirname(os.path.abspath(sys.argv[0]))
+    # # 💥 [New] 优先检查 dist 目录作为数据根目录
+    # dist_path = os.path.join(base_path, 'dist')
+    # if os.path.exists(dist_path) and os.path.exists(os.path.join(dist_path, 'trading_signals.db')):
+    #     return dist_path
+    # return base_path
+    
 def get_conf_path(fname, base_dir=None):
     """获取并验证配置文件路径，如果不存在则释放资源"""
     if base_dir is None:
