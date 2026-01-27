@@ -7634,11 +7634,15 @@ if __name__ == '__main__':
     #     get_tdx_append_now_df_api_tofile(inx,dm=dm_index)
     # write_market_index_to_df()
     # Write_market_all_day_mp()
-    code = '920091'
+    # code = '920091'
     # code = '920076'
     # df1 = get_tdx_Exp_day_to_df(code,dl=1,newdays=0)
-    df1d = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['d'],resample='d' )
-    df2 = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )
+    df1d = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['3d'],resample='3d' )
+    df1w = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['w'],resample='w' )
+    df1m = get_tdx_Exp_day_to_df(code,dl=ct.Resample_LABELS_Days['m'],resample='m' )
+    print(f'df1d: {df1d.ma60d[-5:]}')
+    print(f'df1w: {df1w.ma60d[-5:]}')
+    print(f'df1m: {df1m.ma60d[-5:]}')
     import ipdb;ipdb.set_trace()
 
     resample = '3d'
