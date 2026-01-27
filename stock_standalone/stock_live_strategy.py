@@ -1146,13 +1146,15 @@ class StockLiveStrategy:
                     # }
                     # logger.debug(f"candidates append:{select_code}")
                     logger.info(f"code: {code} name: {stock_name} percent: {row.get('percent')} 背离ma5d: {hma5d} 背离ma10d: {hma10d} 评估: {score} 综合趋势分: {trendS} per2d: {row.get('per2d')} per3d: {row.get('per3d')}")
+                    start_price = float(row.get('trade', row.get('close', 0.0)))
                     # 添加到候选列表
                     candidates.append({
                         'code': code,
                         'name': row.get('name', code),
                         'score': round(score,1),
                         'concept': concept_name,
-                        'pct': pct
+                        'pct': pct,
+                        'price': start_price
                     })
             
             # 按分数从高到低排序
@@ -1171,7 +1173,7 @@ class StockLiveStrategy:
                         value=cand['score'],
                         tags=f"Hot:{cand['concept']}|Sc:{cand['score']:.2f}",
                         resample=resample,
-                        create_price=cand['pct'] # 这里 cand['pct'] 实际上存的是之前的行情涨幅，如果是价格则是 cand['price']
+                        create_price=cand['price'] # ✅ 修复：正确传入加入时的价格
                     )
 
                     logger.info(f"🔥 Found Hot Leader (Score={cand['score']:.2f}): {cand['name']}({cand['code']}) in {cand['concept']}")
