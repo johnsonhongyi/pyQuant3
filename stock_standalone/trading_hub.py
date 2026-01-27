@@ -231,6 +231,24 @@ class TradingHub:
             logger.error(f"[TradingHub] Add to follow queue error: {e}")
             return False
     
+    def delete_from_follow_queue(self, code: str) -> bool:
+        """从跟单队列中物理删除"""
+        try:
+            conn = sqlite3.connect(self.signal_db)
+            c = conn.cursor()
+            c.execute("DELETE FROM follow_queue WHERE code = ?", (code,))
+            rows_affected = c.rowcount
+            conn.commit()
+            conn.close()
+            
+            if rows_affected > 0:
+                logger.info(f"[TradingHub] Deleted from follow queue: {code}")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"[TradingHub] Delete from follow queue error: {e}")
+            return False
+
     def get_follow_queue(self, status: str = None) -> List[TrackedSignal]:
         """获取待跟单队列"""
         conn = sqlite3.connect(self.signal_db)
