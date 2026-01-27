@@ -7925,17 +7925,23 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
     def open_history_manager(self):
-        import subprocess
+
         try:
-            # 假设 history_manager.py 在同一目录下
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            script_path = os.path.join(base_dir, "history_manager.py")
-            if os.path.exists(script_path):
-                subprocess.Popen(["python", script_path], cwd=base_dir)
-            else:
-                QMessageBox.warning(self, "Error", f"history_manager.py not found at {script_path}")
+            import history_manager
+            # 使用 multiprocessing 启动独立进程，避免 frozen exe 中找不到 python 解释器的问题
+            p = Process(target=history_manager.run_manager_process)
+            p.daemon = False # 允许子进程在主进程退出后继续运行？或者设为 True 跟随退出？
+            # 这里的逻辑是单独窗口，通常用户希望它能独立存在，但作为工具窗口，随主程序退出也是合理的。
+            # 不过 multiprocessing 默认 daemon=False，主进程退出会等待子进程。
+            # 这里我们还是让它独立一点吧，但要注意如果不 join，引用会被 GC 吗？Process 对象会被 GC，但进程不一定死。
+            p.start()
+            logger.info(f"History Manager launched (PID: {p.pid})")
+            
+        except ImportError:
+             QMessageBox.warning(self, "Error", f"Failed to import history_manager module.")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to launch manager: {e}")
+
 
     def populate_tree_from_df(self, df: pd.DataFrame):
         """
@@ -9185,6 +9191,8 @@ def main_src(initial_code='000002', stop_flag=None, log_level=None, debug_realti
 
                 
 if __name__ == "__main__":
+    import multiprocessing as mp
+    mp.freeze_support()
     # logger.setLevel(LoggerFactory.INFO)
     import argparse
     LOG_LEVEL_MAP = {
