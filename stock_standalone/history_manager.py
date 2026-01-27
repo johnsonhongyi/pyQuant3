@@ -733,17 +733,67 @@ def run_manager_process(history_path=None):
         if history_path is None:
             history_path = "query_history.json"
     
+    # [FIX] High DPI Awareness for Windows EXEs
+    try:
+        import ctypes
+        import platform
+        if platform.system() == "Windows":
+            # 尝试 SetProcessDpiAwareness(1) -> PROCESS_SYSTEM_DPI_AWARE
+            # 避免使用 2 (Per-Monitor), Tkinter 对 Per-Monitor 支持一般
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try:
+            # Fallback for older Windows
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
     root = tk.Tk()
     root.title("Query History Manager")
     
+    # [FIX] Manually adjust scaling based on DPI
+    scale_factor = 1.0
+    try:
+        # Standard DPI is 96. Get actual DPI based on screen scaling.
+        dpi = root.winfo_fpixels('1i')
+        scale_factor = dpi / 96.0
+        
+        # If scale factor is < 1, dont shrink it. If > 1, scale up.
+        if scale_factor < 1.0: scale_factor = 1.0
+        
+        # Correctly inform Tkinter about the screen resolution (Points to Pixels)
+        # 1 Point = 1/72 inch. Tkinter needs pixels per point.
+        # This fixes font sizes and widget padding automatically without manual font.configure
+        root.tk.call('tk', 'scaling', dpi / 72.0)
+        
+    except Exception:
+        scale_factor = 1.0
+
+    print(f"DPI: {dpi if 'dpi' in locals() else 'Unknown'} | Geometry Scale Factor: {scale_factor}")
+
     # Calculate window size and position
-    w, h = 800, 600
+    # Window geometry needs physical pixels when DPI Aware is ON
+    w, h = int(900 * scale_factor), int(650 * scale_factor) 
     ws = root.winfo_screenwidth()
     hs = root.winfo_screenheight()
     x = (ws/2) - (w/2)
     y = (hs/2) - (h/2)
     root.geometry('%dx%d+%d+%d' % (w, h, x, y))
     
+    # Remove manual font configuration as 'tk scaling' handles it now
+    # This prevents double-scaling issues (huge fonts)
+
+    # [FIX] Manually adjust Treeview row height
+    # Tkinter's automatic scaling sometimes misses the row height, causing overlap.
+    try:
+        import tkinter.ttk as ttk
+        style = ttk.Style()
+        # Base row height 25, scaled by DPI factor
+        style.configure("Treeview", rowheight=int(30 * scale_factor))
+        style.configure("Treeview.Heading", font=('Segoe UI', 10)) # Optional: ensure heading is readable
+    except Exception as e:
+        print(f"Style config error: {e}")
+
     # Create manager with auto_run=True to show editor immediately
     manager = QueryHistoryManager(
         root=root, 

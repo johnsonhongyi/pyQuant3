@@ -1264,6 +1264,7 @@ class StockLiveStrategy:
                 hmax = float(row.get('hmax', 0))
                 high4 = float(row.get('high4', 0))
                 lastp1d = float(row.get('lastp1d', 0))  # 昨收
+                open_p = float(row.get('open', 0))      # 今开
                 
                 if price <= 0 or ma5 <= 0:
                     continue
@@ -1297,10 +1298,31 @@ class StockLiveStrategy:
                 # 6. 放量配合 (量比 > 1.2)
                 has_volume = volume >= 1.2
                 
+                ma20 = float(row.get('ma20d', 0))
+                low = float(row.get('low', 0))
+                
+                # 7. [NEW] 蓄势潜力 (板块联动 + 放量 + (低点回踩MA10/20) + 启动拉升)
+                is_early_stage = win < 3
+                is_strong_volume = volume >= 1.5 # 当日量能放大
+                
+                # User Request Refinement: Low < MA10 or Low < MA20 implies a dip/test of support
+                # "启动open和low都在开盘" implies the dip was at the open or quickly recovered, forming a solid candle.
+                is_support_test = (low <= ma10 and ma10 > 0) or (low <= ma20 and ma20 > 0)
+                
+                # 强力反转: 现价高于开盘 (阳线) 且 涨幅明显 (>1.5%) 且 现价高于昨收
+                is_strong_reversal = (price > open_p) and (price > lastp1d) and (percent > 1.5)
+                
+                is_accumulation_start = is_sector_linked and is_early_stage and is_strong_volume and is_support_test and is_strong_reversal
+
                 # ========== 组合判断信号类型 ==========
                 
+                # [Optimization] 板块蓄势启动 (User Request: Early Trend Detection)
+                if is_accumulation_start:
+                    signal_type = f"板块蓄势启动"
+                    priority = 11 # Highest Priority
+                
                 # 最优: 板块联动 + 连阳加速 + 放量
-                if is_sector_linked and is_consecutive_yang and has_volume:
+                elif is_sector_linked and is_consecutive_yang and has_volume:
                     signal_type = f"板块联动连阳"
                     priority = 10
                 
@@ -1328,8 +1350,13 @@ class StockLiveStrategy:
                     continue
                 
                 # 计算入场价和止损
-                entry_strategy = "竞价买入" if is_breakout else "回踩MA5"
-                stop_loss = ma5 * 0.97 if ma5 > lastp1d * 0.97 else lastp1d * 0.97
+                if "蓄势" in signal_type:
+                    entry_strategy = "蓄势启动跟随"
+                    # 蓄势启动通常以开盘价或昨日收盘价为止损参考
+                    stop_loss = open_p * 0.98 if open_p > 0 else lastp1d * 0.97
+                else:
+                    entry_strategy = "竞价买入" if is_breakout else "回踩MA5"
+                    stop_loss = ma5 * 0.97 if ma5 > lastp1d * 0.97 else lastp1d * 0.97
                 
                 candidates.append({
                     'code': code_str,
@@ -1424,6 +1451,11 @@ class StockLiveStrategy:
                         triggered, trigger_msg = self._check_breakout_conditions(code, row, signal)
                     elif "V型" in entry_strategy:
                         triggered, trigger_msg = True, "V型反转确认"
+                    elif "蓄势" in entry_strategy:
+                        # 简单的趋势维持检查: 现价 > 开盘价 (且不大幅回落)
+                        open_p = float(row.get('open', 0))
+                        if current_price > open_p:
+                            triggered, trigger_msg = True, f"蓄势启动确认 (现价 > 开盘)"
                 
                 # --- C. 通用目标价突破 ---
                 if not triggered and signal.target_price_high > 0 and current_price >= signal.target_price_high:
