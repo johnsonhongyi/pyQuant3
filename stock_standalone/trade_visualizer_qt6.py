@@ -8284,7 +8284,7 @@ class MainWindow(QMainWindow, WindowMixin):
                 child.setText(1, name)
                 child.setText(2, str(rank) if rank not in ('', None) else '')
                 child.setText(3, f"{win_val}")
-                child.setText(4, f"{pct_val:.2f}%")
+                child.setText(4, f"{pct_val:.2f}")
                 
                 # 填入额外列
                 curr_col_idx = len(base_cols)
