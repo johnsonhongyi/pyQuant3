@@ -402,6 +402,54 @@ class TradingLogger:
         except Exception as e:
             logger.error(f"Error recording trade: {e}")
 
+    def close_trade(self, code: str, sell_price: float, sell_reason: str, sell_amount: float = 0, resample: str = 'd') -> bool:
+        """
+        强制平仓指定代码的持仓记录 (用于手动干预或状态同步)
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            
+            # 找到最新的 OPEN 持仓
+            cur.execute("""
+                SELECT id, buy_price, buy_amount, fee FROM trade_records 
+                WHERE code=? AND status='OPEN' AND resample=? 
+                ORDER BY buy_date DESC LIMIT 1
+            """, (code, resample))
+            existing_trade = cur.fetchone()
+            
+            if not existing_trade:
+                logger.warning(f"DB: Trade {code} not found or already closed.")
+                conn.close()
+                return False
+                
+            t_id, b_price, b_amount, old_fee = existing_trade
+            
+            if sell_amount <= 0:
+                sell_amount = b_amount # 默认全部平仓
+                
+            # 简单计算
+            fee_rate = 0.001
+            total_fee = old_fee + (sell_price * sell_amount * fee_rate)
+            gross_profit = (sell_price - b_price) * sell_amount
+            net_profit = gross_profit - total_fee
+            pnl_pct = net_profit / (b_price * b_amount) if (b_price > 0 and b_amount > 0) else 0.0
+            now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+            cur.execute("""
+                UPDATE trade_records 
+                SET sell_date=?, sell_price=?, sell_reason=?, fee=?, profit=?, pnl_pct=?, status='CLOSED'
+                WHERE id=?
+            """, (now_str, sell_price, sell_reason, total_fee, net_profit, pnl_pct, t_id))
+            
+            conn.commit()
+            conn.close()
+            logger.info(f"DB: Closed trade {code}. Reason: {sell_reason}")
+            return True
+        except Exception as e:
+            logger.error(f"Error closing trade {code}: {e}")
+            return False
+
     def get_summary(self, resample: Optional[str] = None) -> Optional[tuple[float, float, int]]:
         """获取盈亏概览"""
         conn = sqlite3.connect(self.db_path)

@@ -1938,7 +1938,8 @@ def fetch_and_process(
                         time.sleep(1)
                     continue
                 else:
-                    logger.info(f"{today} 清理已完成，进入init_tdx")
+                    logger.debug(f"{today} 清理已完成，进入init_tdx")
+                    
                 if (
                     g_values.getkey("tdx.init.done") is True
                     and g_values.getkey("tdx.init.date") == today
