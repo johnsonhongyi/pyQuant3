@@ -14,6 +14,7 @@ from JSONData import tdx_data_Day as tdd
 from JSONData import stockFilter as stf
 from tdx_utils import clean_bad_columns, sanitize, clean_expired_tdx_file
 from db_utils import get_indb_df
+import re
 winlimit = cct.winlimit
 loop_counter_limit = cct.loop_counter_limit
 START_INIT = 0
@@ -641,7 +642,256 @@ def check_real_time(df, codes):
         logger.debug(f"{row['code']} - 实盘模式: {not ohlc_same_as_last1d}, ohlc_same_as_last1d={ohlc_same_as_last1d}")
 
 
-def scoring_momentum_pullback_system(df: pd.DataFrame, max_days: int = 9):
+
+
+def scoring_momentum_pullback_system_top(df: pd.DataFrame, max_days: int = 9):
+    N = len(df)
+    if N == 0: return df
+
+    def get_mat(prefix):
+        if prefix in ['upper', 'high4', 'ma5', 'ma10']:
+            cols = [f"{prefix}{i}" for i in range(0, max_days + 1)]
+        else:
+            cols = [f"{prefix}{i}d" for i in range(0, max_days + 1)]
+        mat = np.zeros((N, max_days + 1))
+        for idx, col in enumerate(cols):
+            if col in df.columns:
+                mat[:, idx] = df[col].values
+        return mat
+
+    C, O, L, H, U = get_mat('lastp'), get_mat('lasto'), get_mat('lastl'), get_mat('lasth'), get_mat('upper')
+    P, M5, M10, H4 = get_mat('per'), get_mat('ma5'), get_mat('ma10'), get_mat('high4')
+
+    scores = np.zeros(N)
+
+    # --- 1. 大阳动力衰减 (拉开天数梯度) ---
+    is_big_up = P[:, 1:9] >= 5.0
+    # 衰减权重：1d=1.0, 2d=0.88, 3d=0.76... 逐级减少
+    decay_weights = np.linspace(1.0, 0.2, 8) 
+    
+    big_up_bonus = np.zeros(N)
+    for i in range(1, 9):
+        has_big_up = is_big_up[:, i-1]
+        support_price = C[:, i]
+        is_stable = np.min(C[:, 0:i], axis=1) >= support_price
+        
+        # 基础分随天数递减
+        base_val = 40 * decay_weights[i-1]
+        
+        # 2. 增加【强度梯度】：站上 Upper 多少？
+        # 站上 1% 给 2分，最高 10分
+        upper_dist = (C[:, 0] - U[:, 0]) / U[:, 0] * 100
+        upper_linear_bonus = np.clip(upper_dist * 2, 0, 10)
+        
+        day_score = np.where(has_big_up & is_stable, base_val + upper_linear_bonus, 0)
+        big_up_bonus = np.maximum(big_up_bonus, day_score)
+
+    scores += big_up_bonus
+
+    # --- 3. 维度三：形态连续化 (不再是 0/1) ---
+    # (1) Open==Low 的精准度：差值越小分越高
+    ol_dist = np.abs(O[:, 0] - L[:, 0]) / O[:, 0] * 100
+    ol_bonus = np.where((ol_dist < 0.2) & (C[:, 0] > O[:, 0]), 15 * (1 - ol_dist*5), 0)
+    scores += ol_bonus
+
+    # (2) 均线回踩精准度 (越贴合 MA 分越高)
+    dist_ma5 = np.abs(C[:, 0] - M5[:, 0]) / M5[:, 0] * 100
+    ma_bonus = np.where(dist_ma5 < 1.5, 10 * (1 - dist_ma5/1.5), 0)
+    scores += ma_bonus
+
+    # (3) 实时涨幅线性分 (每涨 1% 给 1.5分)
+    scores += np.clip(P[:, 0] * 1.5, -5, 12)
+
+    # (4) 突破 High4 的厚度
+    h4_dist = (C[:, 0] - H4[:, 0]) / H4[:, 0] * 100
+    scores += np.where(h4_dist > 0, 8 + np.clip(h4_dist, 0, 5), 0)
+
+    # --- 4. 动力枯竭与负反馈 ---
+    # 冲高回落惩罚：高位回落每 1% 扣 5分
+    retreat = (H[:, 0] - C[:, 0]) / H[:, 0] * 100
+    scores -= np.clip(retreat * 5, 0, 30)
+
+    # --- 5. 结果输出 ---
+    res = df.copy()
+    res['gem_tops'] = np.round(scores, 2)
+    return res.sort_values(by='gem_tops', ascending=False)
+
+
+
+# def scoring_momentum_pullback_system_last(df: pd.DataFrame, max_days: int = 9):
+#     N = len(df)
+#     if N == 0: return df
+
+#     def get_mat(prefix, suffix='d'):
+#         if prefix in ['upper', 'high4']:
+#             cols = [f"{prefix}{i}" for i in range(1, max_days + 1)]
+#         else:
+#             cols = [f"{prefix}{i}{suffix}" for i in range(1, max_days + 1)]
+#         valid = [c for c in cols if c in df.columns]
+#         mat = np.zeros((N, max_days))
+#         if valid:
+#             mat[:, :len(valid)] = df[valid].values
+#         return mat
+
+#     # --- 1. 构建基础矩阵 ---
+#     C = get_mat('lastp')   # Close (0=今日, 1=昨日...)
+#     O = get_mat('lasto')   # Open
+#     L = get_mat('lastl')   # Low
+#     H = get_mat('lasth')   # High
+#     U = get_mat('upper')   # Upper Band
+#     M5 = get_mat('ma5')
+#     M10 = get_mat('ma10')
+#     H4 = get_mat('high4')
+#     P = get_mat('per')     # 涨跌幅
+
+#     # 初始化总分
+#     scores = np.zeros(N)
+
+#     # --- 2. 【核心维度】大阳启动与不破支撑 (权重最高: 40+) ---
+#     # 定义大阳线标准：涨幅 > 5%
+#     BIG_UP_THRESHOLD = 5.0
+#     is_big_up = P[:, 1:9] >= BIG_UP_THRESHOLD  # 过去8天的大阳线位置
+    
+#     big_up_bonus = np.zeros(N)
+#     for i in range(1, 8):  # 回溯 1-7 天
+#         # 条件 A: i天前是大阳线
+#         has_big_up = is_big_up[:, i-1]
+        
+#         # 条件 B: 从今天到大阳线之后，所有收盘价 >= 大阳线收盘价 (不破收盘)
+#         # support_price 是 i 天前的收盘价
+#         support_price = C[:, i:i+1] 
+#         is_stable = np.all(C[:, 0:i] >= support_price, axis=1)
+        
+#         # 条件 C: 今日站上 Upper 线 (代表启动强度)
+#         above_upper = C[:, 0] > U[:, 0]
+        
+#         # 基础分：只要有大阳支撑且不破，给 25 分
+#         # 增强分：如果同时站上 Upper，再加 20 分
+#         # 衰减：距离越近，权重略高 (1.0 -> 0.8)
+#         decay = (1.0 - (i * 0.03))
+#         round_score = np.where(has_big_up & is_stable, 25 * decay, 0)
+#         round_score += np.where(has_big_up & is_stable & above_upper, 20, 0)
+        
+#         # 取回溯周期内最强的一次信号
+#         big_up_bonus = np.maximum(big_up_bonus, round_score)
+
+#     scores += big_up_bonus
+
+#     # --- 3. 维度二：前期强势基因 (权重: 15) ---
+#     # 之前 30 分过高，现降低以突出大阳启动
+#     early_strong = np.any(C[:, 6:9] > U[:, 6:9], axis=1)
+#     scores += np.where(early_strong, 15, 0)
+
+#     # --- 4. 维度三：回踩均线企稳 (权重: 15) ---
+#     near_ma = (np.abs(C[:, 0:2] - M10[:, 0:2]) / M10[:, 0:2] < 0.015) | \
+#               (np.abs(C[:, 0:2] - M5[:, 0:2]) / M5[:, 0:2] < 0.015)
+#     scores += np.where(np.any(near_ma, axis=1), 15, 0)
+
+#     # --- 5. 维度四：形态细节突破 ---
+#     # (1) Open == Low 且收阳 (权重: 15)
+#     open_eq_low = (O[:, 0] == L[:, 0]) & (C[:, 0] > O[:, 0])
+#     scores += np.where(open_eq_low, 15, 0)
+
+#     # (2) High4 突破奖励 (基础10 + 溢出)
+#     break_ratio = (C[:, 0] - H4[:, 0]) / H4[:, 0]
+#     breaking_out = (C[:, 0] >= H4[:, 0])
+#     break_bonus = np.clip(break_ratio * 100 * 0.5, 0, 5)
+#     scores += np.where(breaking_out, 10 + break_bonus, 0)
+
+#     # (3) 最近两日重心 (Micro-Rhythm)
+#     rhythm_score = np.where(C[:, 0] > C[:, 1], 2, 0) + \
+#                    np.where(L[:, 0] > L[:, 1], 1, 0)
+#     scores += rhythm_score
+
+#     # --- 6. 异常风险扣分 (大幅扣分确保排队顺序) ---
+#     # 3日累计跌幅过大
+#     three_day_ret = np.sum(P[:, 0:3], axis=1)
+#     scores += np.where(three_day_ret < -15, -60, 0)
+    
+#     # 破位扣分：如果今日收盘跌破 5日线 且 跌幅 > 3%
+#     drop_below_ma5 = (C[:, 0] < M5[:, 0]) & (P[:, 0] < -3)
+#     scores += np.where(drop_below_ma5, -30, 0)
+
+#     # --- 7. 结果输出 ---
+#     res = df.copy()
+#     res['gem_score'] = np.round(scores, 2)
+#     # 按高分排队，确保大阳启动且站稳 Upper 的排在最前面
+#     return res.sort_values(by='gem_score', ascending=False)
+
+
+
+def scoring_momentum_pullback_system_base_realtime(df: pd.DataFrame, max_days: int = 9):
+    N = len(df)
+    if N == 0: return df
+
+    # --- 0. 升级 get_mat 以支持 0d 数据 ---
+    def get_mat(prefix):
+        # 实时数据注入后，potential_cols 包含 0d/0
+        if prefix in ['upper', 'high4', 'ma5', 'ma10']:
+            cols = [f"{prefix}{i}" for i in range(0, max_days + 1)]
+        else:
+            cols = [f"{prefix}{i}d" for i in range(0, max_days + 1)]
+        
+        mat = np.zeros((N, max_days + 1))
+        for idx, col in enumerate(cols):
+            if col in df.columns:
+                mat[:, idx] = df[col].values
+        return mat
+
+    # --- 1. 构建基础矩阵 (索引 0 为今日实时) ---
+    C = get_mat('lastp')   # Close
+    O = get_mat('lasto')   # Open
+    L = get_mat('lastl')   # Low
+    H = get_mat('lasth')   # High
+    U = get_mat('upper')   # Upper Band
+    M5 = get_mat('ma5')
+    M10 = get_mat('ma10')
+    H4 = get_mat('high4')
+    P = get_mat('per')     # 涨跌幅
+
+    scores = np.zeros(N)
+
+    # --- 2. 维度一：前期强势基因 (逻辑保持不变，回溯 6-9 日) ---
+    early_strong = np.any(C[:, 6:9] > U[:, 6:9], axis=1)
+    scores += np.where(early_strong, 30, 0)
+
+    # --- 3. 维度二：回踩企稳判定 (逻辑保持不变，覆盖今日 0d 和昨日 1d) ---
+    # 使用 0:2 包含今日实时和昨日数据
+    near_ma = (np.abs(C[:, 0:2] - M10[:, 0:2]) / M10[:, 0:2] < 0.015) | \
+              (np.abs(C[:, 0:2] - M5[:, 0:2]) / M5[:, 0:2] < 0.015)
+    scores += np.where(np.any(near_ma, axis=1), 20, 0)
+
+    # --- 4. 维度三：K线形态与突破细化 (逻辑保持不变) ---
+    # (1) Open == Low 信号 (今日 0d)
+    open_eq_low = (O[:, 0] == L[:, 0]) & (C[:, 0] > O[:, 0])
+    scores += np.where(open_eq_low, 25, 0)
+
+    # (2) High4 突破精度优化 (今日 0d)
+    break_ratio = (C[:, 0] - H4[:, 0]) / H4[:, 0]
+    breaking_out = (C[:, 0] >= H4[:, 0])
+    break_bonus = np.clip(break_ratio * 100 * 0.5, 0, 3)
+    scores += np.where(breaking_out, 15 + break_bonus, 0)
+
+    # (3) 最近两日走势节奏 (今日 0d vs 昨日 1d)
+    rhythm_score = np.where(C[:, 0] > C[:, 1], 1.2, 0) + \
+                   np.where(L[:, 0] > L[:, 1], 0.8, 0)
+    scores += rhythm_score
+
+    # (4) 十字星企稳 (今日 0d)
+    body_pct = np.abs(C[:, 0] - O[:, 0]) / O[:, 0]
+    doji = (body_pct < 0.005) & (H[:, 0] > L[:, 0])
+    scores += np.where(doji, 10, 0)
+
+    # --- 5. 维度四：异常风险扣分 (包含今日 0d 在内的 3 日累计) ---
+    three_day_ret = np.sum(P[:, 0:3], axis=1)
+    scores += np.where(three_day_ret < -15, -50, 0)
+
+    # --- 6. 结果输出 ---
+    res = df.copy()
+    res['gem_score'] = np.round(scores, 2)
+    return res.sort_values(by='gem_score', ascending=False)
+
+def scoring_momentum_pullback_system_base(df: pd.DataFrame, max_days: int = 9):
     N = len(df)
     if N == 0: return df
 
@@ -714,70 +964,70 @@ def scoring_momentum_pullback_system(df: pd.DataFrame, max_days: int = 9):
 
 
 
-def scoring_momentum_pullback_system_first(df: pd.DataFrame, max_days: int = 9):
-    N = len(df)
-    if N == 0: return df
+# def scoring_momentum_pullback_system_first(df: pd.DataFrame, max_days: int = 9):
+#     N = len(df)
+#     if N == 0: return df
 
-    def get_mat(prefix, suffix='d'):
-        # 兼容不同列名格式
-        if prefix in ['upper', 'high4']:
-            cols = [f"{prefix}{i}" for i in range(1, max_days + 1)]
-        else:
-            cols = [f"{prefix}{i}{suffix}" for i in range(1, max_days + 1)]
-        valid = [c for c in cols if c in df.columns]
-        mat = np.zeros((N, max_days))
-        if valid:
-            mat[:, :len(valid)] = df[valid].values
-        return mat
+#     def get_mat(prefix, suffix='d'):
+#         # 兼容不同列名格式
+#         if prefix in ['upper', 'high4']:
+#             cols = [f"{prefix}{i}" for i in range(1, max_days + 1)]
+#         else:
+#             cols = [f"{prefix}{i}{suffix}" for i in range(1, max_days + 1)]
+#         valid = [c for c in cols if c in df.columns]
+#         mat = np.zeros((N, max_days))
+#         if valid:
+#             mat[:, :len(valid)] = df[valid].values
+#         return mat
 
-    # --- 1. 构建基础矩阵 (0=1d, 1=2d, ..., 8=9d) ---
-    C = get_mat('lastp')   # Close
-    O = get_mat('lasto')   # Open
-    L = get_mat('lastl')   # Low
-    H = get_mat('lasth')   # High
-    U = get_mat('upper')   # Upper Band
-    M5 = get_mat('ma5')
-    M10 = get_mat('ma10')
-    H4 = get_mat('high4')
-    P = get_mat('per')     # 涨跌幅
+#     # --- 1. 构建基础矩阵 (0=1d, 1=2d, ..., 8=9d) ---
+#     C = get_mat('lastp')   # Close
+#     O = get_mat('lasto')   # Open
+#     L = get_mat('lastl')   # Low
+#     H = get_mat('lasth')   # High
+#     U = get_mat('upper')   # Upper Band
+#     M5 = get_mat('ma5')
+#     M10 = get_mat('ma10')
+#     H4 = get_mat('high4')
+#     P = get_mat('per')     # 涨跌幅
 
-    scores = np.zeros(N)
+#     scores = np.zeros(N)
 
-    # --- 2. 维度一：前期强势基因 (7-9日前上过轨) ---
-    # 检查 7d, 8d, 9d 是否有 P > U
-    early_strong = np.any(C[:, 6:9] > U[:, 6:9], axis=1)
-    scores += np.where(early_strong, 30, 0)
+#     # --- 2. 维度一：前期强势基因 (7-9日前上过轨) ---
+#     # 检查 7d, 8d, 9d 是否有 P > U
+#     early_strong = np.any(C[:, 6:9] > U[:, 6:9], axis=1)
+#     scores += np.where(early_strong, 30, 0)
 
-    # --- 3. 维度二：回踩企稳判定 (最近1-3天) ---
-    # 最近 1-2 天收盘价在 MA5 或 MA10 附近 (波动率 < 1.5%)
-    near_ma = (np.abs(C[:, 0:2] - M10[:, 0:2]) / M10[:, 0:2] < 0.015) | \
-              (np.abs(C[:, 0:2] - M5[:, 0:2]) / M5[:, 0:2] < 0.015)
-    scores += np.where(np.any(near_ma, axis=1), 20, 0)
+#     # --- 3. 维度二：回踩企稳判定 (最近1-3天) ---
+#     # 最近 1-2 天收盘价在 MA5 或 MA10 附近 (波动率 < 1.5%)
+#     near_ma = (np.abs(C[:, 0:2] - M10[:, 0:2]) / M10[:, 0:2] < 0.015) | \
+#               (np.abs(C[:, 0:2] - M5[:, 0:2]) / M5[:, 0:2] < 0.015)
+#     scores += np.where(np.any(near_ma, axis=1), 20, 0)
 
-    # --- 4. 维度三：K线形态打分 (1d/今天) ---
-    # (1) Open == Low 信号
-    open_eq_low = (O[:, 0] == L[:, 0]) & (C[:, 0] > O[:, 0])
-    scores += np.where(open_eq_low, 25, 0)
+#     # --- 4. 维度三：K线形态打分 (1d/今天) ---
+#     # (1) Open == Low 信号
+#     open_eq_low = (O[:, 0] == L[:, 0]) & (C[:, 0] > O[:, 0])
+#     scores += np.where(open_eq_low, 25, 0)
 
-    # (2) Close > High4 蓄势信号
-    breaking_out = (C[:, 0] >= H4[:, 0])
-    scores += np.where(breaking_out, 15, 0)
+#     # (2) Close > High4 蓄势信号
+#     breaking_out = (C[:, 0] >= H4[:, 0])
+#     scores += np.where(breaking_out, 15, 0)
 
-    # (3) 十字星企稳 (实体长度 < 0.5% 且 有上下影线)
-    body_pct = np.abs(C[:, 0] - O[:, 0]) / O[:, 0]
-    doji = (body_pct < 0.005) & (H[:, 0] > L[:, 0])
-    scores += np.where(doji, 10, 0)
+#     # (3) 十字星企稳 (实体长度 < 0.5% 且 有上下影线)
+#     body_pct = np.abs(C[:, 0] - O[:, 0]) / O[:, 0]
+#     doji = (body_pct < 0.005) & (H[:, 0] > L[:, 0])
+#     scores += np.where(doji, 10, 0)
 
-    # --- 5. 维度四：涨跌幅扣分/加分 (防止阴跌) ---
-    # 如果最近3天跌幅过大 (<-15%)，判定为走坏，大幅扣分
-    three_day_ret = np.sum(P[:, 0:3], axis=1)
-    scores += np.where(three_day_ret < -15, -50, 0)
+#     # --- 5. 维度四：涨跌幅扣分/加分 (防止阴跌) ---
+#     # 如果最近3天跌幅过大 (<-15%)，判定为走坏，大幅扣分
+#     three_day_ret = np.sum(P[:, 0:3], axis=1)
+#     scores += np.where(three_day_ret < -15, -50, 0)
 
-    # --- 6. 结果输出 ---
-    res = df.copy()
-    res['gem_score'] = scores
-    # 过滤出有基本得分的个股并排序
-    return res.sort_values(by='gem_score', ascending=False)
+#     # --- 6. 结果输出 ---
+#     res = df.copy()
+#     res['gem_score'] = scores
+#     # 过滤出有基本得分的个股并排序
+#     return res.sort_values(by='gem_score', ascending=False)
 
 # 调用示例
 # top_potential = scoring_momentum_pullback_system(top_all)
@@ -819,7 +1069,6 @@ def strong_momentum_large_cycle_vect_consecutive_above(
         valid = [c for c in potential_cols if c in df.columns]
         
         if valid:
-            import re
             def extra_num(s):
                 m = re.search(r'\d+', s)
                 return int(m.group()) if m else 99
@@ -916,7 +1165,6 @@ def strong_momentum_large_cycle_vect_consecutive_above_m5(
         
         valid = [c for c in potential_cols if c in df.columns]
         if valid:
-            import re
             def extra_num(s):
                 m = re.search(r'\d+', s)
                 return int(m.group()) if m else 99
@@ -1008,7 +1256,6 @@ def strong_momentum_large_cycle_vect_consecutive_above_single(
         if not valid_cols:
             return None, 0
             
-        import re
         def extra_num(s):
             m = re.search(r'\d+', s)
             return int(m.group()) if m else 99
@@ -2092,12 +2339,17 @@ def fetch_and_process(
                 top_all = strong_momentum_large_cycle_vect_consecutive_above_single(top_all, price_col='lastp', upper_col='upper',max_days=cct.compute_lastdays)
             with timed_ctx("consecutive_above_wm5_upper", warn_ms=1000):
                 top_all = strong_momentum_large_cycle_vect_consecutive_above_m5(top_all, price_col='lastp', upper_col='upper',max_days=cct.compute_lastdays)
-            with timed_ctx("scoring_momentum_pullback_system", warn_ms=1000):
-                top_all = scoring_momentum_pullback_system(top_all,max_days=cct.compute_lastdays)
+            with timed_ctx("scoring_momentum_pullback_system_base", warn_ms=1000):
+                top_all = scoring_momentum_pullback_system_base(top_all,max_days=cct.compute_lastdays)
+            # with timed_ctx("scoring_momentum_pullback_system_base_realtime", warn_ms=1000):
+                # top_all = scoring_momentum_pullback_system_base_realtime(top_all,max_days=cct.compute_lastdays)
+            with timed_ctx("scoring_momentum_pullback_system_top", warn_ms=1000):
+                top_all = scoring_momentum_pullback_system_top(top_all,max_days=cct.compute_lastdays)
             # print(top_all.loc['920427', get_vect_col(upper='upper',max_days=cct.compute_lastdays)].T.to_string())
             # cct.print_timing_summary()
-            logger.debug(f"{top_all.loc['920427',['win_upper','win_upper1','win_upper2','w_upper','wm5_upper','gem_score']]}")
-            logger.debug(f"{top_all.sort_values(by='gem_score', ascending=False).gem_score[:10].T}")
+            logger.debug(f"code: 920427 : {top_all.loc['920427',['win_upper','win_upper1','win_upper2','w_upper','wm5_upper','gem_score','gem_tops']]}")
+            logger.info(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['gem_tops','gem_score']][:5]}")
+            logger.info(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['gem_tops','gem_score']][:5]}")
             logger.info(f'clean_sum: {time.time() - time_sum:.2f}')
             with timed_ctx("build_hma_and_trendscore", warn_ms=1000):
                 top_all = build_hma_and_trendscore(top_all,status_callback=status_callback)
@@ -2212,6 +2464,8 @@ def fetch_and_process(
                 logger.info(f'resample: {resample} top_temp :  {df_show.to_string()} shape : {top_temp.shape} detect_calc_support:{detect_val}')
                 logger.info(f'process now: {cct.get_now_time_int()} resample Main:{len(df_all)} looptime: {loop_sleep_time / sleep_step} keep_all:{keep_all}  sleep_time:{duration_sleep_time}  用时: {round(time.time() - time_s,1)/(len(df_all)+1):.2f} elapsed time: {round(time.time() - time_s,1)}s  START_INIT : {cct.get_now_time()} {START_INIT} fetch_and_process sleep:{duration_sleep_time} resample:{resample}')
             else:
+                print(f"gem_score: {top_all.sort_values(by='gem_score', ascending=False).loc[:,['gem_tops','gem_score']][:5]}")
+                print(f"gem_tops: {top_all.sort_values(by='gem_tops', ascending=False).loc[:,['gem_tops','gem_score']][:5]}")
                 print(f'sort_cols : {sort_cols[:3]} sort_keys : {sort_keys[:3]}  st_key_sort : {st_key_sort[:3]}')
                 # print(f'resample: {resample} top_temp :  {top_temp.loc[:,["name"] + sort_cols[:7]][:10]} shape : {top_temp.shape} detect_calc_support:{detect_val}')
                 print(
