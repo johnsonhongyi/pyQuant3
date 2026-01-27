@@ -117,7 +117,9 @@ class HotlistPanel(QWidget):
         self._voice_paused = False  # 语音播报状态
         self._is_refreshing = False # 刷新状态标识，防止信号干扰
         self._last_follow_fingerprint = ""
+        self._last_follow_fingerprint = ""
         self.follow_count = 0  # [NEW] Track follow queue count
+        self._connection_warning_logged = False  # [NEW] Log throttle flag
         
         # 设置为浮动工具窗口（可调整大小）
         self.setWindowFlags(
@@ -772,10 +774,16 @@ class HotlistPanel(QWidget):
             # [NEW] 刷新跟单队列
             self._update_follow_queue()
             
+            # Reset warning flag if connection is good
+            self._connection_warning_logged = False
+            
         else:
             # 如果没有主窗口数据，也尝试刷新跟单队列（至少显示列表）
             self._update_follow_queue()
-            logger.warning("⚠️ 无法获取主窗口数据，仅刷新跟单列表")
+            
+            if not self._connection_warning_logged:
+                logger.warning("⚠️ 无法获取主窗口数据，仅刷新跟单列表 (Log once)")
+                self._connection_warning_logged = True
 
     def update_prices(self, price_map: Dict[str, float], phase_map: Dict[str, str] = None):
         """
@@ -1077,8 +1085,10 @@ class HotlistPanel(QWidget):
 
         menu.addSeparator()
 
-        # 动作：强制移除 (Physical Delete - Optional, currently use CANCELLED as soft delete)
-        # action_delete = QAction("🗑️ 彻底删除", self)
+        # 动作：强制移除 (Physical Delete)
+        action_delete = QAction("🗑️ 彻底删除 (Delete)", self)
+        action_delete.triggered.connect(lambda: self._delete_follow_item(code))
+        menu.addAction(action_delete)
         
         menu.exec(self.follow_table.mapToGlobal(pos))
 
@@ -1089,11 +1099,30 @@ class HotlistPanel(QWidget):
             hub = get_trading_hub()
             if hub.update_follow_status(code, new_status, notes="Manual update"):
                 logger.info(f"Updated follow status for {code} -> {new_status}")
-                self._update_follow_queue() # 立即刷新界面
+                
+                # [FIX] Force immediate reload from DB to refresh UI
+                new_df = hub.get_follow_queue_df()
+                self._update_follow_queue(new_df)
+                
             else:
                 logger.error(f"Failed to update status for {code}")
         except Exception as e:
             logger.error(f"Update follow status error: {e}")
+
+    def _delete_follow_item(self, code: str):
+        """彻底删除跟单项"""
+        try:
+            from trading_hub import get_trading_hub
+            hub = get_trading_hub()
+            if hub.delete_from_follow_queue(code):
+                logger.info(f"Deleted follow item: {code}")
+                # Force immediate refresh
+                new_df = hub.get_follow_queue_df()
+                self._update_follow_queue(new_df)
+            else:
+                logger.warning(f"Failed to delete {code}")
+        except Exception as e:
+            logger.error(f"Delete follow item error: {e}")
     
     def _clear_exited(self):
         """清空已退出的记录"""

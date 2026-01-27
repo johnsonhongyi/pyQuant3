@@ -7000,7 +7000,7 @@ class MainWindow(QMainWindow, WindowMixin):
         # --- Ghost Candle (实时占位) ---
         logger.debug(f'is_realtime_active: {is_realtime_active} tick_df keys:{tick_df.keys() if tick_df is not None and not tick_df.empty else "None"}')
         if is_realtime_active:
-             # [FIX] Safe column choice
+            # [FIX] Safe column choice
             price_col = 'close' if 'close' in tick_df.columns else ('trade' if 'trade' in tick_df.columns else 'price')
             
             if price_col not in tick_df.columns:
@@ -7008,13 +7008,57 @@ class MainWindow(QMainWindow, WindowMixin):
                 return # Abort drawing ghost candle if no data
                 
             current_price = float(tick_df[price_col].iloc[-1])
+
             last_hist_date = str(day_df.index[-1]).split()[0]
             today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
-
+            last_trade_date = cct.get_last_trade_date()
             # [FIX] strict check for trading day
             # If not a trading day, do not draw ghost candle
+            # is_trade_day = cct.get_trade_date_status()
+
+            # 是否需要画“幽灵K线”（今日尚未入库）
+            # last_hist_dt = pd.to_datetime(day_df.index[-1]).date()
+            # last_trade_dt= pd.to_datetime(cct.get_last_trade_date()).date()
+            # need_ghost_bar = last_hist_dt < last_trade_dt
+
+
+            now = pd.Timestamp.now()
+            today = now.date()
+            last_hist_dt = pd.to_datetime(day_df.index[-1]).date()
             is_trade_day = cct.get_trade_date_status()
-            if not is_trade_day:
+            # 是否在交易时段
+            t = now.time()
+            in_session = (
+                (t >= pd.to_datetime("09:30").time() and t <= pd.to_datetime("11:30").time()) or
+                (t >= pd.to_datetime("13:00").time() and t <= pd.to_datetime("15:00").time())
+            )
+
+
+            # ===============================
+            # ① 历史数据是否缺失最近交易日
+            # ===============================
+            missing_last_trade_bar = last_hist_date < last_trade_date
+            if missing_last_trade_bar:
+                logger.error(
+                    f"[KLINE DATA MISSING] Last hist date {last_hist_date} "
+                    f"< last trade date {last_trade_date} — 日线缺失最近交易日数据"
+                )
+
+            # need_ghost_bar = is_trade_day and in_session and last_hist_dt < today
+            # ===============================
+            # ② 是否需要画“临时K线”
+            # ===============================
+            # 两种情况要画：
+            # A. 正常盘中今日K
+            # B. 历史数据断档，需要补偿K
+
+            need_ghost_bar = (
+                (is_trade_day and in_session and last_hist_dt < today)  # 正常今日实时K
+                or
+                missing_last_trade_bar  # 数据缺失补偿K
+            )
+            # if not is_trade_day or last_trade_date == last_hist_date:
+            if not need_ghost_bar:
                 if hasattr(self, 'ghost_candle'):
                     self.kline_plot.removeItem(self.ghost_candle)
                     delattr(self, 'ghost_candle')
