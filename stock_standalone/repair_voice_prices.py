@@ -55,8 +55,17 @@ def repair():
         name = data.get('name', '')
         
         # 如果已有或者没有时间，跳过
-        if create_price > 0:
+        # Check for Hot Concept tag which might have invalid price (percentage)
+        is_hot_concept = (data.get('rule_type_tag') == 'hot_concept') or ('Hot:' in data.get('tags', ''))
+
+        # 如果已有且不是热点误报，跳过
+        if create_price > 0 and not is_hot_concept:
             continue
+        
+        if is_hot_concept and create_price > 0:
+             # 如果价格看起来正常(比如 > 30%? 或者 > 20且不像涨幅)，也可以跳过?
+             # 简单起见，热点股强制重新获取历史收盘价作为参考
+             logger.info(f"Force repairing Hot Concept price for {code}: current={create_price}")
             
         if not created_time_str:
             logger.warning(f"Skipping {code} ({name}): No created_time found")
