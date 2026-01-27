@@ -2600,11 +2600,32 @@ class MainWindow(QMainWindow, WindowMixin):
         """切换信号日志面板显示"""
         if not hasattr(self, 'signal_log_panel'):
             return
+        
+        # [MODIFIED] Check if visible, if so, bring to front instead of hiding
+        # User Feedback: "clicked again, the panel should be brought to the foreground"
         if self.signal_log_panel.isVisible():
-            self.signal_log_panel.hide()
+            self.signal_log_panel.show()
+            self.signal_log_panel.raise_()
+            self.signal_log_panel.activateWindow()
         else:
             self.signal_log_panel.show()
             self.signal_log_panel.raise_()
+            self.signal_log_panel.activateWindow()
+
+    def _toggle_hotlist_panel(self):
+        """显示/隐藏热点自选面板 (Global)"""
+        if not hasattr(self, 'hotlist_panel'):
+            return
+            
+        # [MODIFIED] Check if visible, if so, bring to front instead of hiding
+        if self.hotlist_panel.isVisible():
+            self.hotlist_panel.show()
+            self.hotlist_panel.raise_()
+            self.hotlist_panel.activateWindow()
+        else:
+            self.hotlist_panel.show()
+            self.hotlist_panel.raise_()
+            self.hotlist_panel.activateWindow()
     
     def _add_to_hotlist(self):
         """添加当前股票到热点自选"""
@@ -2922,8 +2943,8 @@ class MainWindow(QMainWindow, WindowMixin):
             keyboard.add_hotkey('alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
             
             # 兼容性补充 (Ctrl+Alt+H 等)
-            keyboard.add_hotkey('ctrl+alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
-            keyboard.add_hotkey('ctrl+alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
+            # keyboard.add_hotkey('ctrl+alt+h', lambda: QTimer.singleShot(0, self._toggle_hotlist_panel))
+            # keyboard.add_hotkey('ctrl+alt+l', lambda: QTimer.singleShot(0, self._toggle_signal_log))
             
             self.system_hotkeys_registered = True
             logger.info("✅ 系统级全局快捷键已注册 (Alt+T, Alt+H, Alt+L, Ctrl+/)")
@@ -7925,20 +7946,60 @@ class MainWindow(QMainWindow, WindowMixin):
 
 
     def open_history_manager(self):
-
         try:
             import history_manager
-            # 使用 multiprocessing 启动独立进程，避免 frozen exe 中找不到 python 解释器的问题
-            p = Process(target=history_manager.run_manager_process)
-            p.daemon = False # 允许子进程在主进程退出后继续运行？或者设为 True 跟随退出？
-            # 这里的逻辑是单独窗口，通常用户希望它能独立存在，但作为工具窗口，随主程序退出也是合理的。
-            # 不过 multiprocessing 默认 daemon=False，主进程退出会等待子进程。
-            # 这里我们还是让它独立一点吧，但要注意如果不 join，引用会被 GC 吗？Process 对象会被 GC，但进程不一定死。
-            p.start()
-            logger.info(f"History Manager launched (PID: {p.pid})")
+            import multiprocessing
+            import win32gui
+            import win32con
+            
+            # --- 1. 优先尝试查找并置顶现有窗口 ---
+            found_hwnd = None
+            def check_window(hwnd, extra):
+                nonlocal found_hwnd
+                if win32gui.IsWindowVisible(hwnd):
+                    title = win32gui.GetWindowText(hwnd)
+                    if "Query History Manager" in title:
+                        found_hwnd = hwnd
+                        return False # Stop enumerating
+                return True
+                
+            try:
+                win32gui.EnumWindows(check_window, None)
+            except Exception as e:
+                logger.warning(f"Error enumerating windows: {e}")
+
+            if found_hwnd:
+                logger.info("History Manager window found, bringing to front.")
+                try:
+                    # 恢复最小化窗口
+                    if win32gui.IsIconic(found_hwnd):
+                        win32gui.ShowWindow(found_hwnd, win32con.SW_RESTORE)
+                    else:
+                        win32gui.ShowWindow(found_hwnd, win32con.SW_SHOW)
+                    
+                    # 尝试置顶
+                    win32gui.SetForegroundWindow(found_hwnd)
+                except Exception as e:
+                    logger.warning(f"Failed to bring window to front: {e}")
+                    # 有时 SetForegroundWindow 会因权限问题失败，尝试 AttachThreadInput 方法 (虽然有点复杂，先试简单的)
+                    pass
+                return
+
+            # --- 2. 窗口未找到，检查进程状态 ---
+            # 如果进程活着但没窗口，说明正在启动中，不要重复启动
+            if hasattr(self, 'history_manager_process') and self.history_manager_process and self.history_manager_process.is_alive():
+                logger.info("History Manager process is running (startup phase), please wait...")
+                return
+
+            # --- 3. 启动新进程 ---
+            logger.info("Launching History Manager...")
+            self.history_manager_process = multiprocessing.Process(target=history_manager.run_manager_process)
+            self.history_manager_process.daemon = False 
+            self.history_manager_process.start()
+            logger.info(f"History Manager launched (PID: {self.history_manager_process.pid})")
             
         except ImportError:
-             QMessageBox.warning(self, "Error", f"Failed to import history_manager module.")
+             QMessageBox.warning(self, "Error", f"Failed to import history_manager module or win32gui.")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to launch manager: {e}")
 
@@ -8855,6 +8916,15 @@ class MainWindow(QMainWindow, WindowMixin):
     def closeEvent(self, event):
         """窗口关闭统一退出清理"""
         self._closing = True
+        # [User Request] 退出时清理 History Manager
+        if hasattr(self, 'history_manager_process') and self.history_manager_process and self.history_manager_process.is_alive():
+            try:
+                self.history_manager_process.terminate()
+                self.history_manager_process.join(timeout=1)
+                logger.info("History Manager process terminated on exit.")
+            except Exception as e:
+                logger.error(f"Error closing History Manager: {e}")
+                
         """窗口关闭事件"""
         # 保存分割器状态
         self.save_splitter_state()
@@ -8919,17 +8989,17 @@ class MainWindow(QMainWindow, WindowMixin):
         # 6️⃣ 调用父类 closeEvent
         super().closeEvent(event)
 
-    # ================== 热点自选面板回调 ==================
-    def _toggle_hotlist_panel(self):
-        """Alt+H: 切换热点面板显示/隐藏"""
-        if hasattr(self, 'hotlist_panel'):
-            if self.hotlist_panel.isVisible():
-                self.hotlist_panel.hide()
-                logger.info("隐藏热点面板")
-            else:
-                self.hotlist_panel.show()
-                self.hotlist_panel.raise_()  # 确保在最前面
-                logger.info("显示热点面板")
+    # # ================== 热点自选面板回调 ==================
+    # def _toggle_hotlist_panel(self):
+    #     """Alt+H: 切换热点面板显示/隐藏"""
+    #     if hasattr(self, 'hotlist_panel'):
+    #         if self.hotlist_panel.isVisible():
+    #             self.hotlist_panel.hide()
+    #             logger.info("隐藏热点面板")
+    #         else:
+    #             self.hotlist_panel.show()
+    #             self.hotlist_panel.raise_()  # 确保在最前面
+    #             logger.info("显示热点面板")
 
     def _add_to_hotlist(self):
         """快捷键H: 添加当前股票到热点列表"""
