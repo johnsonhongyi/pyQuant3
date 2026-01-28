@@ -5830,7 +5830,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 if not QtWidgets.QApplication.instance():
                     self._qt_app = QtWidgets.QApplication(sys.argv) if hasattr(sys, 'argv') else QtWidgets.QApplication([])
                 
-                self._trading_gui_qt6 = TradingGUI(sender=self.sender,on_tree_scroll_to_code=self.tree_scroll_to_code)
+                self._trading_gui_qt6 = TradingGUI(
+                    sender=self.sender,
+                    on_tree_scroll_to_code=self.tree_scroll_to_code,
+                    selector=getattr(self, 'selector', None),
+                    live_strategy=getattr(self, 'live_strategy', None)
+                )
                 
             self._trading_gui_qt6.show()
             self._trading_gui_qt6.raise_()

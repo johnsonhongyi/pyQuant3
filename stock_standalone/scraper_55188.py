@@ -196,7 +196,7 @@ class Scraper55188:
             "pz": page_size,
             "pn": "1",
             "np": "1",
-            "fields": "f2,f3,f12,f14,f100,f184,f225",
+            "fields": "f2,f3,f5,f6,f12,f14,f100,f184,f225",
             # 标准全 A 股过滤字符串 (包含创业板 t:80 和科创板 t:23)
             "fs": "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23" 
         }
@@ -217,7 +217,9 @@ class Scraper55188:
                 "f225": "zhuli_rank", # 主力排名
                 "f3": "change_pct",   # 涨跌幅 (%)
                 "f2": "price",        # 现价
-                "f100": "sector"      # 所属板块
+                "f100": "sector",     # 所属板块
+                "f5": "volume",
+                "f6": "amount"
             }
             df = df.rename(columns=rename_map)
             df = df[df['code'].str.isnumeric()]
@@ -226,8 +228,13 @@ class Scraper55188:
             for col in ['price', 'change_pct', 'net_ratio']:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0) / 100.0
+            
+            # volume/amount 直接转数值
+            for col in ['volume', 'amount']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
                 
-            return df[['code', 'name', 'price', 'change_pct', 'net_ratio', 'zhuli_rank', 'sector']]
+            return df[['code', 'name', 'price', 'change_pct', 'net_ratio', 'zhuli_rank', 'sector', 'volume', 'amount']]
         except Exception as e:
             status = getattr(resp, "status_code", "N/A")
             text = ""

@@ -6,6 +6,7 @@ import sys
 import datetime
 import logging
 import sqlite3
+import re
 from typing import List, Dict, Any, Optional
 
 # 添加项目根目录到路径
@@ -49,6 +50,7 @@ class StockSelector:
 
         # 初始化决策引擎（可选，用于辅助判断）
         self.decision_engine = IntradayDecisionEngine() if IntradayDecisionEngine else None
+        self._last_hotspots: List[tuple] = []
 
     def _setup_logger(self):
         self.logger = LoggerFactory.getLogger()
@@ -86,9 +88,19 @@ class StockSelector:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
+        # [FIX] 如果缺少核心列（如 volume），跳过复杂的计算链，避免 KeyError
+        if 'volume' not in df.columns:
+            # 尝试从 scraper 字段映射
+            if 'change_pct' in df.columns:
+                df['percent'] = df['change_pct']
+            return df
+
         # 调用 data_utils 中的标准计算链 (包含量能扩缩逻辑)
         # resample 使用实例化时传入的参数
-        df = data_utils.calc_indicators(df, self.logger, resample=self.resample)
+        try:
+            df = data_utils.calc_indicators(df, self.logger, resample=self.resample)
+        except Exception as e:
+            self.logger.warning(f"data_utils.calc_indicators skipped: {e}")
         
         return df
 
@@ -120,9 +132,16 @@ class StockSelector:
             today = datetime.datetime.now().strftime("%Y-%m-%d")
 
         # 1. 基础过滤 (非停牌，成交额需大于 8000万 提高流动性门槛)
-        df_active = df[(df['volume'] > 0) & (df['amount'] > 80000000)].copy()
+        mask = pd.Series(True, index=df.index)
+        if 'volume' in df.columns:
+            mask &= (df['volume'] > 0)
+        if 'amount' in df.columns:
+            # 如果是 scraper 数据，amount 可能是 0，这里做一个兼容
+            mask &= (df['amount'] >= 0) 
+            
+        df_active = df[mask].copy()
         if df_active.empty:
-            self.logger.info("无满足基础流动性要求的股票 (amount > 80M)")
+            self.logger.info("无满足基础流动性要求的股票")
             return pd.DataFrame()
         
         # 获取历史选股频次
@@ -131,10 +150,14 @@ class StockSelector:
         # --- Pre-calculate Market Hot Concepts ---
         concept_dict = {}
         for _, row in df_active.iterrows():
-            raw_c = row.get('category', '')
+            raw_c = row.get('category', row.get('sector', '')) # 兼容 scraper 的 sector 字段
             if pd.isna(raw_c) or str(raw_c).lower() == 'nan': continue
             cats = [c.strip() for c in str(raw_c).split(';') if c.strip() and c.strip() != '0']
-            pct = float(row.get('percent', 0))
+            if not cats and isinstance(raw_c, str):
+                # 兼容逗号或空格分隔
+                cats = [c.strip() for c in re.split('[;, ]', raw_c) if c.strip() and c.strip() != '0']
+            
+            pct = float(row.get('percent', row.get('change_pct', 0))) # 兼容 scraper 的 change_pct
             for c in cats:
                 concept_dict.setdefault(c, []).append(pct)
         
@@ -147,6 +170,7 @@ class StockSelector:
         concept_scores.sort(key=lambda x: x[1], reverse=True)
         top_concepts = set([x[0] for x in concept_scores[:15]]) # 缩小到 Top 15
         self.logger.info(f"Top 5 Concepts: {[x[0] for x in concept_scores[:5]]}")
+        self._last_hotspots = concept_scores # 缓存供外部查询
 
         selected_records = []
 
@@ -304,6 +328,8 @@ class StockSelector:
                     'score': score,
                     'price': price,
                     'percent': pct,
+                    'change_pct': pct, # 兼容别名
+                    'zhuli_rank': data.get('zhuli_rank', '-'), # 增加主力排名
                     'ratio': ratio,
                     'volume': float(data.get('volume', 0)),
                     'amount': amount,
@@ -327,6 +353,17 @@ class StockSelector:
             self.save_selection_log(df_selected)
             
         return df_selected
+
+    def get_market_hotspots(self) -> List[tuple]:
+        """获取当前市场热点板块及其平均涨幅"""
+        if not hasattr(self, '_last_hotspots') or not self._last_hotspots:
+            # 运行筛选逻辑以初始化热点
+            df = self.load_data()
+            if df.empty: return []
+            df = self.calculate_indicators(df)
+            self.filter_strong_stocks(df)
+        
+        return getattr(self, '_last_hotspots', [])
 
     def save_selection_log(self, df_selected: pd.DataFrame):
         """保存筛选结果到数据库"""

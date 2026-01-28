@@ -20,6 +20,8 @@ from trading_logger import TradingLogger
 from trading_analyzer import TradingAnalyzer
 from JohnsonUtil.stock_sender import StockSender
 from scraper_55188 import load_cache
+from stock_selector import StockSelector
+# [REMOVED] from stock_selection_window import StockSelectionWindow (Tkinter dependency causing instability in PyQt)
 
 class NumericTableWidgetItem(QTableWidgetItem):
     """自定义 TableWidgetItem，支持正确的数值排序"""
@@ -44,9 +46,10 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
     板块热点分析工具
     读取 concept_pg_data.db 统计热点，并关联个股
     """
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, selector=None):
         try:
             super().__init__(parent)
+            self.selector = selector
             self.setWindowTitle("板块热点分析")
             self.scale_factor = get_windows_dpi_scale_factor()
             self.resize(1000, 600)
@@ -79,8 +82,8 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
             left_widget.setLayout(left_layout)
             left_layout.addWidget(QLabel("热门板块排行 (基于持续性与强度)"))
             self.sector_table = QTableWidget()
-            self.sector_table.setColumnCount(5)
-            self.sector_table.setHorizontalHeaderLabels(["排名", "板块名称", "出现频次", "平均强度", "最新强度"])
+            self.sector_table.setColumnCount(6)
+            self.sector_table.setHorizontalHeaderLabels(["排名", "板块名称", "频次", "平均强度", "最新强度", "最新日期"])
             self.sector_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
             self.sector_table.cellClicked.connect(self.on_sector_clicked)
             left_layout.addWidget(self.sector_table)
@@ -93,9 +96,9 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
             self.stock_label = QLabel("龙头股分析 (点击左侧板块查看)")
             right_layout.addWidget(self.stock_label)
             self.stock_table = QTableWidget()
-            self.stock_table.setColumnCount(6)
-            self.stock_table.setHorizontalHeaderLabels(["代码", "名称", "现价", "涨幅%", "主力排名", "逻辑/原因"])
-            self.stock_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+            self.stock_table.setColumnCount(8)
+            self.stock_table.setHorizontalHeaderLabels(["代码", "名称", "现价", "涨幅%", "主力排名", "来源", "日期/评分", "逻辑描述"])
+            self.stock_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)
             # 支持点击股票发送代码
             self.stock_table.cellClicked.connect(self.on_stock_clicked)
             # [NEW] 支持键盘上下键联动
@@ -163,21 +166,46 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
                 except Exception as e:
                     print(f"Error parsing row {name}: {e}")
                     
-            # Convert to list and sort
+                
+            # [NEW] 合并选股器中的热点数据 (通过 try-except 保护避免冷启动卡死或崩溃)
+            if self.selector:
+                try:
+                    selector_hotspots = self.selector.get_market_hotspots()
+                    for name, score in selector_hotspots:
+                        if name in sector_stats:
+                            # 如果已有，适当调高分数
+                            sector_stats[name]['total_score'] += score
+                            sector_stats[name]['count'] += 1
+                            sector_stats[name]['latest_score'] = max(sector_stats[name]['latest_score'], score)
+                        else:
+                            # 如果没有，添加新热点
+                            sector_stats[name] = {
+                                'count': 1, 
+                                'total_score': score, 
+                                'total_pct': 0, 
+                                'latest_score': score, 
+                                'latest_date': datetime.now().strftime('%Y%m%d')
+                            }
+                except Exception as e:
+                    print(f"Error integrating selector hotspots: {e}")
+            
+            # Re-convert to list and sort after merge
             result = []
             for name, stats in sector_stats.items():
                 count = stats['count']
-                avg_score = stats['total_score'] / count if count > 0 else 0
+                total_score = stats.get('total_score', 0)
+                avg_score = float(total_score) / count if count > 0 else 0.0
                 result.append({
                     'name': name,
                     'count': count,
-                    'avg_score': avg_score,
-                    'latest_score': stats['latest_score']
+                    'avg_score': round(avg_score, 2),
+                    'latest_score': round(float(stats.get('latest_score', 0)), 2),
+                    'latest_date': stats.get('latest_date', '')
                 })
-            
+
             # Sort by count desc, then avg_score desc
             result.sort(key=lambda x: (x['count'], x['avg_score']), reverse=True)
-            
+
             self.sector_table.setRowCount(0)
             self.sector_table.setSortingEnabled(False)
             self.sector_table.setRowCount(len(result))
@@ -187,11 +215,12 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
                 self.sector_table.setItem(i, 2, NumericTableWidgetItem(item['count']))
                 self.sector_table.setItem(i, 3, NumericTableWidgetItem(round(item['avg_score'], 2)))
                 self.sector_table.setItem(i, 4, NumericTableWidgetItem(round(item['latest_score'], 2)))
-                
+                self.sector_table.setItem(i, 5, QTableWidgetItem(item['latest_date']))
+
             self.sector_table.setSortingEnabled(True)
             self.sector_table.resizeColumnsToContents()
             self.stock_label.setText(f"分析完成: 找到 {len(result)} 个热点板块 (近 {days} 天)")
-                
+            
         except Exception as e:
             self.stock_label.setText(f"数据库查询失败: {e}")
             
@@ -206,77 +235,132 @@ class HotSectorAnalysisDialog(QDialog, WindowMixin):
         
     def find_leading_stocks(self, sector_name):
         try:
-            # Check cache first from parent if possible to share memory, else load
+            # 1. 加载 55188 缓存数据
             if self.parent() and hasattr(self.parent(), 'df_all') and not self.parent().df_all.empty:
                 df = self.parent().df_all
             else:
                 df = load_cache()
                 
-            if df.empty:
-                self.stock_label.setText(f"板块 {sector_name}: 无缓存数据，请先运行 55188 抓取")
-                return
-                
-            # Filter
-            # Compatible with loose matching
-            mask = (
-                df['theme_name'].astype(str).str.contains(sector_name, na=False) | 
-                df['hot_tag'].astype(str).str.contains(sector_name, na=False) |
-                df['sector'].astype(str).str.contains(sector_name, na=False)
-            )
-            filtered = df[mask].copy()
+            scraper_list = pd.DataFrame() # Initialize as empty DataFrame
+            if not df.empty:
+                # 模糊匹配板块名称
+                mask = (
+                    df['theme_name'].astype(str).str.contains(sector_name, na=False) | 
+                    df['hot_tag'].astype(str).str.contains(sector_name, na=False) |
+                    df['sector'].astype(str).str.contains(sector_name, na=False)
+                )
+                scraper_list = df[mask].copy()
+                if not scraper_list.empty:
+                    scraper_list['source'] = "55188抓取"
+                    # 整理理由信息
+                    if 'theme_logic' in scraper_list.columns and 'hot_reason' in scraper_list.columns:
+                        scraper_list['display_logic'] = scraper_list['theme_logic'].fillna('') + " / " + scraper_list['hot_reason'].fillna('')
+                    elif 'theme_logic' in scraper_list.columns:
+                        scraper_list['display_logic'] = scraper_list['theme_logic']
+                    else:
+                        scraper_list['display_logic'] = ""
             
-            if filtered.empty:
-                 self.stock_label.setText(f"板块 {sector_name}: 未找到关联个股 (缓存中无匹配)")
+            # 2. 从选股器候选池中抓取更精准的强势股 (实现互补)
+            selector_list = pd.DataFrame()
+            if self.selector:
+                try:
+                    candidates = self.selector.get_candidates_df()
+                    if candidates is not None and not candidates.empty:
+                        # 在候选池中查找关联板块的股票
+                        # 优先查找 category 匹配的
+                        c_mask = candidates['category'].astype(str).str.contains(sector_name, na=False) | \
+                                 candidates['name'].astype(str).str.contains(sector_name, na=False)
+                        selector_list = candidates[c_mask].copy()
+                        
+                        if not selector_list.empty:
+                            selector_list['source'] = "选股系统"
+                            # 选股器通常有更实时的 score
+                            selector_list['display_logic'] = selector_list['reason'] if 'reason' in selector_list.columns else "强势推荐"
+                            # 按照 score 排序，取前 5 只作为优选
+                            if 'score' in selector_list.columns:
+                                selector_list = selector_list.sort_values('score', ascending=False)
+                except Exception as e:
+                    print(f"Error fetching candidates from selector: {e}")
+                        
+            # 3. 合并与去重 (互补逻辑)
+            # 策略：保留 55188 的广度，同时突出显示选股器的 3-5 只精选股
+            top_selector = selector_list.head(5) if not selector_list.empty else pd.DataFrame()
+            
+            final_df = pd.DataFrame()
+            if not top_selector.empty and not scraper_list.empty:
+                # 合并，并确保 top_selector 在前
+                codes_in_selector = top_selector['code'].tolist()
+                scraper_remains = scraper_list[~scraper_list['code'].isin(codes_in_selector)]
+                final_df = pd.concat([top_selector, scraper_remains], ignore_index=True)
+            elif not top_selector.empty:
+                final_df = top_selector
+            elif not scraper_list.empty:
+                final_df = scraper_list
+                
+            if final_df.empty:
+                 self.stock_label.setText(f"板块 {sector_name}: 未找到关联个股 (互补搜索无结果)")
                  self.stock_table.setRowCount(0)
                  return
-                 
-            # Sort by strength (Change Pct or Zhuli Rank)
-            # Prioritize Change Pct for "Leading"
-            if 'change_pct' in filtered.columns:
-                filtered = filtered.sort_values('change_pct', ascending=False)
             
+            # 4. 填充 UI
             self.stock_table.setRowCount(0)
             self.stock_table.setSortingEnabled(False)
-            self.stock_table.setRowCount(len(filtered))
+            self.stock_table.setRowCount(len(final_df))
             
-            cols = ['code', 'name', 'price', 'change_pct', 'zhuli_rank', 'theme_logic']
-            
-            for i, (_, row) in enumerate(filtered.iterrows()):
+            for i, (_, row) in enumerate(final_df.iterrows()):
                 code_val = str(row.get('code',''))
                 self.stock_table.setItem(i, 0, QTableWidgetItem(code_val))
                 
-                name_val = str(row.get('name',''))
-                # Fallback to code if name is missing
-                if not name_val or name_val == 'nan': 
-                    # Try lookup in parent df_all again (though filtered comes from it, sometimes logic differs)
-                    # Or just use code as fallback
-                    name_val = code_val
-                    
+                name_val = str(row.get('name', code_val))
                 self.stock_table.setItem(i, 1, QTableWidgetItem(name_val))
-                self.stock_table.setItem(i, 2, NumericTableWidgetItem(row.get('price', 0)))
                 
-                pct = row.get('change_pct', 0)
-                # Handle potential format issues (e.g. 10.5 vs 0.105) - Assuming scraper returns normalized or raw
-                # Scraper code: "df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0) / 100.0" -> so 0.1 is 10%
-                pct_display = pct * 100
-                pct_item = NumericTableWidgetItem(pct_display) 
-                if pct > 0: pct_item.setForeground(Qt.GlobalColor.red)
-                elif pct < 0: pct_item.setForeground(Qt.GlobalColor.darkGreen)
-                self.stock_table.setItem(i, 3, pct_item)
+                price = row.get('price', 0)
+                self.stock_table.setItem(i, 2, NumericTableWidgetItem(price))
                 
-                self.stock_table.setItem(i, 4, NumericTableWidgetItem(row.get('zhuli_rank', 9999)))
+                pct = row.get('change_pct', row.get('percent', 0))
+                try:
+                    # 兼容不同来源的涨幅格式 (55188 vs Selector)
+                    if pct is None or (isinstance(pct, float) and np.isnan(pct)):
+                        f_pct = 0.0
+                    else:
+                        f_pct = float(pct)
+                        
+                    if f_pct > 1 or f_pct < -1: # 可能是 10.5 格式
+                        pct_val = f_pct
+                    else: # 可能是 0.105 格式 (scraper 默认 0.1 为 10%)
+                        pct_val = f_pct * 100
+                    self.stock_table.setItem(i, 3, NumericTableWidgetItem(round(pct_val, 2)))
+                except:
+                    self.stock_table.setItem(i, 3, QTableWidgetItem(str(pct)))
                 
-                logic = str(row.get('theme_logic', '')) or str(row.get('hot_reason', ''))
-                # Truncate logic for display
-                logic_short = (logic[:50] + '..') if len(logic) > 50 else logic
+                # 55188 特有指标 或 Selector 继承的指标
+                zhuli = row.get('zhuli_rank', row.get('net_ratio', '-'))
+                if zhuli is None or (isinstance(zhuli, float) and np.isnan(zhuli)) or str(zhuli).lower() == 'nan':
+                     zhuli = "-"
+                self.stock_table.setItem(i, 4, QTableWidgetItem(str(zhuli)))
                 
-                logic_item = QTableWidgetItem(logic_short)
-                logic_item.setToolTip(logic) # Full logic in tooltip
-                self.stock_table.setItem(i, 5, logic_item)
+                # 来源
+                src = row.get('source', '未知')
+                self.stock_table.setItem(i, 5, QTableWidgetItem(src))
                 
+                # 日期/评分 (互补信息展示)
+                # 如果是 55188，尝试拿 last_update；如果是 selector，拿 score
+                date_score = ""
+                if src == "选股系统":
+                    score = row.get('score', 0)
+                    date_score = f"评分:{score:.1f}"
+                else:
+                    # 尝试从 row 或全局 search 中获取该板块的时间
+                    date_score = row.get('date', datetime.now().strftime('%m-%d'))
+                self.stock_table.setItem(i, 6, QTableWidgetItem(str(date_score)))
+                
+                # 逻辑描述
+                logic = row.get('display_logic', '')
+                self.stock_table.setItem(i, 7, QTableWidgetItem(str(logic)))
+            
             self.stock_table.setSortingEnabled(True)
             self.stock_table.resizeColumnsToContents()
-            self.stock_label.setText(f"板块 {sector_name}: 找到 {len(filtered)} 只关联个股")
+            self.stock_label.setText(f"板块 {sector_name}: 找到 {len(final_df)} 只追踪个股 (含 {len(top_selector)} 只精选)")
 
         except Exception as e:
             self.stock_label.setText(f"分析个股失败: {e}")
@@ -321,7 +405,7 @@ class TradingGUI(QWidget, WindowMixin):
     # 声明信号
     scroll_to_code_signal = pyqtSignal(str)
     send_status_signal = pyqtSignal(object)  # 可以接收任意对象，包括 dict
-    def __init__(self, logger_path="./trading_signals.db", sender=None,on_tree_scroll_to_code =None, on_open_visualizer=None):
+    def __init__(self, logger_path="./trading_signals.db", sender=None,on_tree_scroll_to_code =None, on_open_visualizer=None, selector=None, live_strategy=None):
         super().__init__()
         self.scale_factor = get_windows_dpi_scale_factor()
         self.setWindowTitle("策略交易分析工具")
@@ -336,6 +420,11 @@ class TradingGUI(QWidget, WindowMixin):
         except Exception as e:
             print(f"Failed to load initial cache: {e}")
             self.df_all = pd.DataFrame()
+
+        self.selector = selector
+        if self.selector is None:
+            self.selector = StockSelector(df=self.df_all)
+        self.live_strategy = live_strategy
 
         self.main_layout = QVBoxLayout()
         self.setLayout(self.main_layout)
@@ -395,6 +484,12 @@ class TradingGUI(QWidget, WindowMixin):
         self.hotspot_btn = QPushButton("板块热点")
         self.hotspot_btn.clicked.connect(self.show_hot_sectors)
         self.top_layout.addWidget(self.hotspot_btn)
+
+        # [DISABLED] 选股建议按钮因稳定性原因暂时移除，功能整合进板块热点。
+        # self.selection_btn = QPushButton("选股建议")
+        # self.selection_btn.setToolTip("打开策略选股器确认窗口 (人工复核)")
+        # self.selection_btn.clicked.connect(self.show_stock_selection)
+        # self.top_layout.addWidget(self.selection_btn)
 
         self.stock_input = QComboBox()
         self.stock_input.setEditable(True)
@@ -920,8 +1015,12 @@ class TradingGUI(QWidget, WindowMixin):
     def show_hot_sectors(self):
         """显示板块热点分析工具"""
         # 使用非模态对话框，方便与主界面交互
-        self._hot_dlg = HotSectorAnalysisDialog(self)
+        self._hot_dlg = HotSectorAnalysisDialog(self, selector=self.selector)
         self._hot_dlg.show()
+    
+    def show_stock_selection(self):
+        """[DISABLED] 此功能涉及 Tk/Qt 混用不佳，暂时关闭"""
+        print("Stock selection window is currently disabled for stability.")
     
     def _safe_send_stock(self, code):
         """Send stock code via sender using dispatch queue (Queue Mode)"""
