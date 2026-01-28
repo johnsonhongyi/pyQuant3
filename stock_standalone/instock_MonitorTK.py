@@ -1006,6 +1006,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     except Exception:
                         pass
                 self.active_alerts.clear()
+            
+            # 保存 UI 状态
+            self.save_ui_states()
+
             if hasattr(self, 'code_to_alert_win'):
                 self.code_to_alert_win.clear()
             
@@ -2301,6 +2305,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             command=self.open_strategy_scan
         ).pack(side=tk.LEFT, padx=1)
 
+        # Initialize persisted variables that are not bound to main UI buttons immediately
+        self.force_d_cycle_var = tk.BooleanVar(value=True)
+
+        # Load persisted states
+        self.load_ui_states()
+        
+        # Apply strict linkage immediately
+        self.after(100, self.update_linkage_status)
+
 
 
     def open_strategy_scan(self):
@@ -2320,6 +2333,88 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
              
              # 提示用户
              # toast_message(self, "已触发策略扫描，请查看可视化窗口", duration=2000)
+
+    def load_ui_states(self):
+        """加载UI状态"""
+        try:
+            if not os.path.exists(WINDOW_CONFIG_FILE):
+                return
+            
+            with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            
+            ui_state = config.get('ui_persistence', {})
+            if not ui_state:
+                return
+
+            # Variable Name -> (Attribute Name, Type Converter)
+            vars_config = {
+                'win_var': ('win_var', bool),
+                'tdx_var': ('tdx_var', bool),
+                'ths_var': ('ths_var', bool),
+                'dfcf_var': ('dfcf_var', bool),
+                'tip_var': ('tip_var', bool),
+                'voice_var': ('voice_var', bool),
+                'realtime_var': ('realtime_var', bool),
+                'vis_var': ('vis_var', bool),
+                'force_d_cycle_var': ('force_d_cycle_var', bool),
+                'search_var1': ('search_var1', str),
+                'search_var2': ('search_var2', str),
+                'st_key_sort_value': ('st_key_sort_value', str)
+            }
+            
+            for key, (attr_name, type_func) in vars_config.items():
+                if key in ui_state:
+                    var = getattr(self, attr_name, None)
+                    if var:
+                        try:
+                            val = type_func(ui_state[key])
+                            var.set(val)
+                        except Exception as e:
+                            logger.warning(f"Failed to load {key}: {e}")
+
+            logger.info(f"UI states loaded: {len(ui_state)} items")
+
+        except Exception as e:
+            logger.error(f"Error loading UI states: {e}")
+
+    def save_ui_states(self):
+        """保存UI状态"""
+        try:
+            config = {}
+            if os.path.exists(WINDOW_CONFIG_FILE):
+                try:
+                    with open(WINDOW_CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        config = json.load(f)
+                except:
+                    pass
+            
+            if 'ui_persistence' not in config:
+                config['ui_persistence'] = {}
+            
+            # Variables to save
+            save_list = [
+                'win_var', 'tdx_var', 'ths_var', 'dfcf_var', 
+                'tip_var', 'voice_var', 'realtime_var', 'vis_var',
+                'force_d_cycle_var', 'search_var1', 'search_var2',
+                'st_key_sort_value'
+            ]
+            
+            for name in save_list:
+                var = getattr(self, name, None)
+                if var:
+                    try:
+                        config['ui_persistence'][name] = var.get()
+                    except:
+                        pass
+
+            with open(WINDOW_CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+            
+            logger.info("UI states saved.")
+
+        except Exception as e:
+            logger.error(f"Error saving UI states: {e}")
 
     def open_visualizer(self, code):
 
@@ -5859,7 +5954,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             # --- [NEW] Cycle Toggle ---
             if not hasattr(self, 'force_d_cycle_var'):
-                self.force_d_cycle_var = tk.BooleanVar(value=True) # Default to True
+                # Should have been initialized in init_checkbuttons, but safety fallback
+                self.force_d_cycle_var = tk.BooleanVar(value=True) 
 
             tk.Checkbutton(
                 top_frame,
