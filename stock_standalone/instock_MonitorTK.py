@@ -2064,12 +2064,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         if self._live_strategy_first_run:
                             # 第一次：延迟执行
                             self._live_strategy_first_run = False
-                            res = self.global_values.getkey("resample")
-                            self.after(15 * 1000,lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=res))
+                            # res = self.global_values.getkey("resample")
+                            # [FIX] Voice Alert Management cycle is 'd'. Ensure we check 'd' alerts even if UI is '3d'.
+                            target_res = 'd'
+                            # If toggle exists and is unchecked, use actual current resample
+                            if hasattr(self, 'force_d_cycle_var') and not self.force_d_cycle_var.get():
+                                target_res = self.global_values.getkey("resample")
+
+                            self.after(15 * 1000,lambda: self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res))
                         else:
                             # 后续：立即执行
-                            res = self.global_values.getkey("resample")
-                            self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=res)
+                            # res = self.global_values.getkey("resample")
+                            target_res = 'd'
+                            # If toggle exists and is unchecked, use actual current resample
+                            if hasattr(self, 'force_d_cycle_var') and not self.force_d_cycle_var.get():
+                                target_res = self.global_values.getkey("resample")
+
+                            self.live_strategy.process_data(self.df_all, concept_top5=getattr(self, 'concept_top5', None), resample=target_res)
                     
                 if has_update:
                     if self._last_resample != self.global_values.getkey("resample"):
@@ -5845,6 +5856,20 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 font=("微软雅黑", 9)
             )
             total_label.pack(side="left")
+
+            # --- [NEW] Cycle Toggle ---
+            if not hasattr(self, 'force_d_cycle_var'):
+                self.force_d_cycle_var = tk.BooleanVar(value=True) # Default to True
+
+            tk.Checkbutton(
+                top_frame,
+                text="强制(d)周期",
+                variable=self.force_d_cycle_var,
+                indicatoron=0,           # Toggle button style
+                width=12,                # Wider click target
+                selectcolor="#b2dfdb",   # Light green when checked
+                command=lambda: logger.info(f"Cycle Toggle Changed: {self.force_d_cycle_var.get()}")
+            ).pack(side="left", padx=10)
             
             tk.Button(top_frame, text="开启自动交易", command=lambda: self.live_strategy.start_auto_trading_loop(force=True, concept_top5=getattr(self, 'concept_top5', None)), bg="#fff9c4").pack(side="right", padx=5)
             tk.Button(top_frame, text="清理恢复持仓", command=lambda: batch_clear_recovered(), bg="#ffcdd2").pack(side="right", padx=5)
