@@ -249,7 +249,8 @@ class Scraper55188:
     def fetch_ths_hotlist_full(self) -> pd.DataFrame:
         """
         获取同花顺人气热榜及其深度分析，并保留原始原始 item 数据
-        """
+        """
+
         resp = None
         try:
             resp = self.session.get(self.THS_URL, timeout=10)
@@ -319,7 +320,8 @@ class Scraper55188:
         获取同花顺人气热榜及其深度分析
         hot_reason 包含 analyse_title、analyse、topic、tag 中文信息
         HTML/URL/无用内容全部过滤
-        """
+        """
+
         resp = None
         try:
             resp = self.session.get(self.THS_URL, timeout=10)
@@ -633,7 +635,10 @@ class Scraper55188:
                     'theme_logic_blocks': blocks
                 })
 
+            safe_name = sub['name'].dropna().iloc[0] if not sub['name'].dropna().empty else None
+
             return pd.Series({
+                "name": safe_name,
                 "theme_name": theme_name_final,
                 "theme_logic": "\n\n".join(blocks),
                 "theme_date": sub['theme_date'].max()
@@ -768,11 +773,21 @@ class Scraper55188:
             if 'name' not in result.columns:
                 result['name'] = df_hot_idx['name']
             else:
-                result['name'] = result['name'].fillna('').combine_first(df_hot_idx['name'])
+                # Change: Don't fillna('') before combine_first, or it blocks the fallback
+                # result['name'] = result['name'].fillna('').combine_first(df_hot_idx['name'])
+                result['name'] = result['name'].combine_first(df_hot_idx['name'])
+            
             result = result.join(df_hot_idx[['hot_rank', 'hot_tag', 'hot_reason']], how='left', rsuffix='_hot')
 
         # 注入题材
         if not df_theme_unique.empty:
+            # Also fallback name from themes
+            if 'name' in df_theme_unique.columns:
+                if 'name' not in result.columns:
+                     result['name'] = df_theme_unique['name']
+                else:
+                     result['name'] = result['name'].combine_first(df_theme_unique['name'])
+
             result = result.join(df_theme_unique[['theme_name', 'theme_logic', 'theme_date']], how='left')
 
         # 8. 清洗默认值

@@ -1290,11 +1290,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         # except Exception as e:
         #     logger.error(f"Failed to update required columns: {e}")
 
-    def tree_scroll_to_code(self, code):
-        """外部调用：定位特定代码"""
-        if hasattr(self, 'search_var1'):
-            self.search_var1.set(code)
-            self.apply_search()
+    # def tree_scroll_to_code(self, code):
+    #     """外部调用：定位特定代码"""
+    #     if hasattr(self, 'search_var1'):
+    #         self.search_var1.set(code)
+    #         self.apply_search()
 
     def get_stock_code_none(self, code=None):
         df_all = self.df_all.copy()
@@ -2097,9 +2097,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                                 self.viz_command_queue = None
                             self._df_first_send_done = False
                             # self.vis_var.set(True)
-                # -------------------------
+                    # -------------------------
+                    self.status_var2.set(f'queue update: {self.format_next_time()}')
 
-                self.status_var2.set(f'queue update: {self.format_next_time()}')
         except Exception as e:
             logger.error(f"Error updating tree: {e}", exc_info=True)
         finally:
@@ -6944,34 +6944,42 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # logger.info(f"[Tree Reset] applied cols={list(tree['columns'])}")
 
+    def tree_scroll_to_code(self, code, select_win=False, vis=False):
+        """外部调用：定位特定代码 (Thread-Safe via Queue)"""
+        if not code:
+            return True
 
-    def tree_scroll_to_code(self, code,select_win=False):
-        """在 Treeview 中自动定位到指定 code 行"""
-        if not code or not (code.isdigit() and len(code) == 6):
-            return
+        def _ui_action():
+            try:
+                if vis and hasattr(self, 'vis_var') and self.vis_var.get():
+                    self.open_visualizer(code)
+                
+                found = False
+                for iid in self.tree.get_children():
+                    values = self.tree.item(iid, "values")
+                    if values and str(values[0]) == str(code):
+                        self.tree.selection_set(iid)
+                        self.tree.focus(iid)
+                        self.tree.see(iid)
+                        found = True
+                        break
+                
+                if not found:
+                    pass
+                    # toast_message(self, f"{code} not in list")
+                
+                if select_win:
+                    self.original_push_logic(code)
 
-        try:
-            # --- 2. 清空原有选择（可选） ---
-            # self.tree.selection_remove(self.tree.selection())
+            except Exception as e:
+                logger.error(f"tree_scroll_to_code error: {e}")
 
-            for iid in self.tree.get_children():
-                values = self.tree.item(iid, "values")
-                # values[0] 通常是 code，如果你的 code 列不是第一列可以传入 index 参数
-                if values and str(values[0]) == str(code):
-                    self.tree.selection_set(iid)   # 设置选中
-                    self.tree.focus(iid)           # 键盘焦点
-                    self.tree.see(iid)             # 自动滚动，使其可见
-                    return True
-            toast_message(self, f"{code} is not Found Main")
-            if select_win:
-                self.original_push_logic(code)
-        except Exception as e:
-            logger.info(f"[tree_scroll_to_code] Error: {e}")
-            return False
-
-        return False  # 未找到
-
-
+        if hasattr(self, "tk_dispatch_queue"):
+             self.tk_dispatch_queue.put(_ui_action)
+        else:
+             self.after(0, _ui_action)
+        
+        return True
     def on_tree_click_for_tooltip(self, event,stock_code=None,stock_name=None,is_manual=False):
         """处理树视图点击事件，延迟显示提示框"""
         logger.debug(f"[Tooltip] 点击事件触发: x={event.x}, y={event.y}")
