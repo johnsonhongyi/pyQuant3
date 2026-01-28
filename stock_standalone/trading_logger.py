@@ -465,7 +465,7 @@ class TradingLogger:
         conn.close()
         return res # (总利润, 平均收益率, 总笔数)
 
-    def get_signals(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None) -> list[dict[str, Any]]:
+    def get_signals(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None, code: Optional[str] = None) -> list[dict[str, Any]]:
         """获取记录的信号"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
@@ -480,6 +480,9 @@ class TradingLogger:
         if resample:
             query += " AND resample = ?"
             params.append(resample)
+        if code:
+            query += " AND code = ?"
+            params.append(code)
         
         query += " ORDER BY date DESC"
         cur.execute(query, params)
@@ -489,7 +492,7 @@ class TradingLogger:
         conn.close()
         return results
 
-    def get_signal_history_df(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None):
+    def get_signal_history_df(self, start_date: Optional[str] = None, end_date: Optional[str] = None, resample: Optional[str] = None, code: Optional[str] = None):
         """获取信号历史并作为 DataFrame 返回"""
         try:
             import pandas as pd
@@ -508,6 +511,9 @@ class TradingLogger:
         if resample:
             query += " AND resample = ?"
             params.append(resample)
+        if code:
+            query += " AND code = ?"
+            params.append(code)
             
         query += " ORDER BY date DESC"
         

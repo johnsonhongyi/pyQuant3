@@ -1,16 +1,25 @@
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTableWidget,
-    QTableWidgetItem, QLabel, QComboBox, QMenu, QTextEdit, QHeaderView
+    QTableWidgetItem, QLabel, QComboBox, QMenu, QTextEdit, QHeaderView, QDialog,
+    QSpinBox, QSplitter, QCheckBox, QMainWindow
 )
 from PyQt6.QtCore import pyqtSignal, Qt, QTimer, QPoint
 from PyQt6.QtGui import QAction
 import sys
 import pandas as pd
+import numpy as np
+from tk_gui_modules.window_mixin import WindowMixin
+from dpi_utils import get_windows_dpi_scale_factor
+import sqlite3
+import json
+import queue # ✅ Import queue
+from datetime import datetime, timedelta
 
 # 假设 TradingAnalyzer 已经在同一目录
 from trading_logger import TradingLogger
 from trading_analyzer import TradingAnalyzer
 from JohnsonUtil.stock_sender import StockSender
+from scraper_55188 import load_cache
 
 class NumericTableWidgetItem(QTableWidgetItem):
     """自定义 TableWidgetItem，支持正确的数值排序"""
@@ -30,17 +39,303 @@ class NumericTableWidgetItem(QTableWidgetItem):
                 return self.sort_value < other.sort_value
         return super().__lt__(other)
 
-class TradingGUI(QWidget):
+class HotSectorAnalysisDialog(QDialog, WindowMixin):
+    """
+    板块热点分析工具
+    读取 concept_pg_data.db 统计热点，并关联个股
+    """
+    def __init__(self, parent=None):
+        try:
+            super().__init__(parent)
+            self.setWindowTitle("板块热点分析")
+            self.scale_factor = get_windows_dpi_scale_factor()
+            self.resize(1000, 600)
+            
+            layout = QVBoxLayout()
+            self.setLayout(layout)
+            
+            # 顶部控制
+            top_layout = QHBoxLayout()
+            layout.addLayout(top_layout)
+            
+            top_layout.addWidget(QLabel("回溯天数:"))
+            self.days_spin = QSpinBox()
+            self.days_spin.setRange(1, 30)
+            self.days_spin.setValue(5)
+            top_layout.addWidget(self.days_spin)
+            
+            self.analyze_btn = QPushButton("开始分析")
+            self.analyze_btn.clicked.connect(self.load_data)
+            top_layout.addWidget(self.analyze_btn)
+            top_layout.addStretch()
+            
+            # 主要内容区域 (左右分栏)
+            splitter = QSplitter(Qt.Orientation.Horizontal)
+            layout.addWidget(splitter)
+            
+            # 左侧：热门板块列表
+            left_widget = QWidget()
+            left_layout = QVBoxLayout()
+            left_widget.setLayout(left_layout)
+            left_layout.addWidget(QLabel("热门板块排行 (基于持续性与强度)"))
+            self.sector_table = QTableWidget()
+            self.sector_table.setColumnCount(5)
+            self.sector_table.setHorizontalHeaderLabels(["排名", "板块名称", "出现频次", "平均强度", "最新强度"])
+            self.sector_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            self.sector_table.cellClicked.connect(self.on_sector_clicked)
+            left_layout.addWidget(self.sector_table)
+            splitter.addWidget(left_widget)
+            
+            # 右侧：龙头股列表
+            right_widget = QWidget()
+            right_layout = QVBoxLayout()
+            right_widget.setLayout(right_layout)
+            self.stock_label = QLabel("龙头股分析 (点击左侧板块查看)")
+            right_layout.addWidget(self.stock_label)
+            self.stock_table = QTableWidget()
+            self.stock_table.setColumnCount(6)
+            self.stock_table.setHorizontalHeaderLabels(["代码", "名称", "现价", "涨幅%", "主力排名", "逻辑/原因"])
+            self.stock_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
+            # 支持点击股票发送代码
+            self.stock_table.cellClicked.connect(self.on_stock_clicked)
+            # [NEW] 支持键盘上下键联动
+            self.stock_table.currentCellChanged.connect(self.on_stock_cell_changed)
+            right_layout.addWidget(self.stock_table)
+            splitter.addWidget(right_widget)
+            
+            # 设置分栏比例
+            splitter.setSizes([450, 750])
+            
+            self.db_path = "./concept_pg_data.db"
+            
+            # 延时加载以免卡顿启动
+            QTimer.singleShot(500, self.load_data)
+            
+            # 加载窗口位置
+            self.load_window_position_qt(self, "HotSectorDialog_Geometry", default_width=1000, default_height=600)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"HotSectorAnalysisDialog init error: {e}")
+
+    def closeEvent(self, event):
+        self.save_window_position_qt(self, "HotSectorDialog_Geometry")
+        super().closeEvent(event)
+
+    def load_data(self):
+        days = self.days_spin.value()
+        # 计算N天前的日期字符串 (YYYYMMDD)
+        try:
+            # 兼容可能的 diverse date format in DB, but DB creates with %Y%m%d
+            start_date = (datetime.now() - timedelta(days=days)).strftime('%Y%m%d')
+            
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            query = f"SELECT concept_name, date, init_data FROM concept_data WHERE date >= '{start_date}'"
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            conn.close()
+            
+            # Aggregate
+            sector_stats = {}
+            for row in rows:
+                name, date, json_str = row
+                try:
+                    data = json.loads(json_str) if json_str else {}
+                    
+                    scores = data.get('scores', [])
+                    score = float(scores[0]) if isinstance(scores, list) and scores else 0
+                    
+                    pcts = data.get('avg_percents', [])
+                    avg_pct = float(pcts[0]) if isinstance(pcts, list) and pcts else 0
+                    
+                    if name not in sector_stats:
+                        sector_stats[name] = {'count': 0, 'total_score': 0, 'total_pct': 0, 'latest_score': 0, 'latest_date': ''}
+                    
+                    stats = sector_stats[name]
+                    stats['count'] += 1
+                    stats['total_score'] += score
+                    stats['total_pct'] += avg_pct
+                    if date > stats['latest_date']:
+                        stats['latest_date'] = date
+                        stats['latest_score'] = score
+                        
+                except Exception as e:
+                    print(f"Error parsing row {name}: {e}")
+                    
+            # Convert to list and sort
+            result = []
+            for name, stats in sector_stats.items():
+                count = stats['count']
+                avg_score = stats['total_score'] / count if count > 0 else 0
+                result.append({
+                    'name': name,
+                    'count': count,
+                    'avg_score': avg_score,
+                    'latest_score': stats['latest_score']
+                })
+            
+            # Sort by count desc, then avg_score desc
+            result.sort(key=lambda x: (x['count'], x['avg_score']), reverse=True)
+            
+            self.sector_table.setRowCount(0)
+            self.sector_table.setSortingEnabled(False)
+            self.sector_table.setRowCount(len(result))
+            for i, item in enumerate(result):
+                self.sector_table.setItem(i, 0, NumericTableWidgetItem(i+1))
+                self.sector_table.setItem(i, 1, QTableWidgetItem(item['name']))
+                self.sector_table.setItem(i, 2, NumericTableWidgetItem(item['count']))
+                self.sector_table.setItem(i, 3, NumericTableWidgetItem(round(item['avg_score'], 2)))
+                self.sector_table.setItem(i, 4, NumericTableWidgetItem(round(item['latest_score'], 2)))
+                
+            self.sector_table.setSortingEnabled(True)
+            self.sector_table.resizeColumnsToContents()
+            self.stock_label.setText(f"分析完成: 找到 {len(result)} 个热点板块 (近 {days} 天)")
+                
+        except Exception as e:
+            self.stock_label.setText(f"数据库查询失败: {e}")
+            
+    def on_sector_clicked(self, row, col):
+        name_item = self.sector_table.item(row, 1)
+        if not name_item: return
+        sector_name = name_item.text()
+        self.stock_label.setText(f"正在分析板块: {sector_name} ...")
+        QApplication.processEvents()
+        
+        self.find_leading_stocks(sector_name)
+        
+    def find_leading_stocks(self, sector_name):
+        try:
+            # Check cache first from parent if possible to share memory, else load
+            if self.parent() and hasattr(self.parent(), 'df_all') and not self.parent().df_all.empty:
+                df = self.parent().df_all
+            else:
+                df = load_cache()
+                
+            if df.empty:
+                self.stock_label.setText(f"板块 {sector_name}: 无缓存数据，请先运行 55188 抓取")
+                return
+                
+            # Filter
+            # Compatible with loose matching
+            mask = (
+                df['theme_name'].astype(str).str.contains(sector_name, na=False) | 
+                df['hot_tag'].astype(str).str.contains(sector_name, na=False) |
+                df['sector'].astype(str).str.contains(sector_name, na=False)
+            )
+            filtered = df[mask].copy()
+            
+            if filtered.empty:
+                 self.stock_label.setText(f"板块 {sector_name}: 未找到关联个股 (缓存中无匹配)")
+                 self.stock_table.setRowCount(0)
+                 return
+                 
+            # Sort by strength (Change Pct or Zhuli Rank)
+            # Prioritize Change Pct for "Leading"
+            if 'change_pct' in filtered.columns:
+                filtered = filtered.sort_values('change_pct', ascending=False)
+            
+            self.stock_table.setRowCount(0)
+            self.stock_table.setSortingEnabled(False)
+            self.stock_table.setRowCount(len(filtered))
+            
+            cols = ['code', 'name', 'price', 'change_pct', 'zhuli_rank', 'theme_logic']
+            
+            for i, (_, row) in enumerate(filtered.iterrows()):
+                code_val = str(row.get('code',''))
+                self.stock_table.setItem(i, 0, QTableWidgetItem(code_val))
+                
+                name_val = str(row.get('name',''))
+                # Fallback to code if name is missing
+                if not name_val or name_val == 'nan': 
+                    # Try lookup in parent df_all again (though filtered comes from it, sometimes logic differs)
+                    # Or just use code as fallback
+                    name_val = code_val
+                    
+                self.stock_table.setItem(i, 1, QTableWidgetItem(name_val))
+                self.stock_table.setItem(i, 2, NumericTableWidgetItem(row.get('price', 0)))
+                
+                pct = row.get('change_pct', 0)
+                # Handle potential format issues (e.g. 10.5 vs 0.105) - Assuming scraper returns normalized or raw
+                # Scraper code: "df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0) / 100.0" -> so 0.1 is 10%
+                pct_display = pct * 100
+                pct_item = NumericTableWidgetItem(pct_display) 
+                if pct > 0: pct_item.setForeground(Qt.GlobalColor.red)
+                elif pct < 0: pct_item.setForeground(Qt.GlobalColor.darkGreen)
+                self.stock_table.setItem(i, 3, pct_item)
+                
+                self.stock_table.setItem(i, 4, NumericTableWidgetItem(row.get('zhuli_rank', 9999)))
+                
+                logic = str(row.get('theme_logic', '')) or str(row.get('hot_reason', ''))
+                # Truncate logic for display
+                logic_short = (logic[:50] + '..') if len(logic) > 50 else logic
+                
+                logic_item = QTableWidgetItem(logic_short)
+                logic_item.setToolTip(logic) # Full logic in tooltip
+                self.stock_table.setItem(i, 5, logic_item)
+                
+            self.stock_table.setSortingEnabled(True)
+            self.stock_table.resizeColumnsToContents()
+            self.stock_label.setText(f"板块 {sector_name}: 找到 {len(filtered)} 只关联个股")
+
+        except Exception as e:
+            self.stock_label.setText(f"分析个股失败: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def on_stock_clicked(self, row, col):
+        # 仅当点击 code(0) 或 name(1) 列时才联动
+        if col > 1: return
+        
+        code_item = self.stock_table.item(row, 0)
+        if code_item and self.parent():
+             code = code_item.text()
+             try:
+                 # Try to call parent's sender if available
+                 if hasattr(self.parent(), '_safe_send_stock'):
+                     self.parent()._safe_send_stock(code)
+                     if hasattr(self.parent(), 'update_send_status'):
+                         self.parent().update_send_status(f"已发送 {code}")
+                     
+                     # 尝试联动主界面的 scroll 信号
+                     if hasattr(self.parent(), 'scroll_to_code_signal'):
+                         self.parent().scroll_to_code_signal.emit(code)
+            
+                 elif hasattr(self.parent(), 'sender') and self.parent().sender:
+                      # Fallback
+                      self.parent().sender.send(code)
+                      
+             except Exception as e:
+                 print(f"Error sending/linking code: {e}")
+
+    def on_stock_cell_changed(self, row, col, prev_row, prev_col):
+        """
+        键盘上下键切换行时触发联动
+        """
+        if row < 0 or row == prev_row:
+            return
+        # 复用点击逻辑
+        self.on_stock_clicked(row, col)
+
+class TradingGUI(QWidget, WindowMixin):
     # 声明信号
     scroll_to_code_signal = pyqtSignal(str)
     send_status_signal = pyqtSignal(object)  # 可以接收任意对象，包括 dict
-    def __init__(self, logger_path="./trading_signals.db", sender=None,on_tree_scroll_to_code =None):
+    def __init__(self, logger_path="./trading_signals.db", sender=None,on_tree_scroll_to_code =None, on_open_visualizer=None):
         super().__init__()
+        self.scale_factor = get_windows_dpi_scale_factor()
         self.setWindowTitle("策略交易分析工具")
-        self.setGeometry(100, 100, 1000, 600)
-        self.center()  # 调用居中方法
+        # self.setGeometry(100, 100, 1000, 600)
+        # self.center()  # 调用居中方法
         self.logger = TradingLogger(logger_path)
         self.analyzer = TradingAnalyzer(self.logger)
+        
+        # Load comprehensive stock list for name lookups
+        try:
+            self.df_all = load_cache()
+        except Exception as e:
+            print(f"Failed to load initial cache: {e}")
+            self.df_all = pd.DataFrame()
 
         self.main_layout = QVBoxLayout()
         self.setLayout(self.main_layout)
@@ -53,6 +348,12 @@ class TradingGUI(QWidget):
         self.top_layout = QHBoxLayout()
         self.main_layout.addLayout(self.top_layout)
 
+        # 独立启动K线开关
+        self.vis_checkbox = QCheckBox("独立启动K线")
+        self.vis_checkbox.setChecked(False) # 默认不选中，依赖主程序联动
+        self.vis_checkbox.setToolTip("选中后，点击股票代码将启动新的 K 线可视化窗口。\n未选中时，仅发消息给主程序（如果已联动）。")
+        self.top_layout.addWidget(self.vis_checkbox)
+
         # 数据源选择
         self.source_combo = QComboBox()
         self.source_combo.addItems(["交易/选股数据库", "实时策略信号库"])
@@ -64,6 +365,13 @@ class TradingGUI(QWidget):
         self.view_combo.addItems([
             "实时指标详情","股票汇总", "单只股票明细", "每日策略统计", "Top 盈利交易", "Top 亏损交易", "股票表现概览", "信号探测历史", "策略胜率排行", "绩效分析看板"
         ])
+        
+        # ✅ UI 线程任务调度队列 (解决 Qt -> Tkinter 跨线程/GIL 问题)
+        self.tk_dispatch_queue = queue.Queue()
+        self.dispatch_timer = QTimer(self)
+        self.dispatch_timer.timeout.connect(self._process_dispatch_queue)
+        self.dispatch_timer.start(100) # Check every 100ms
+        
         self.view_combo.currentTextChanged.connect(self.refresh_table)
         self.top_layout.addWidget(QLabel("视图选择:"))
         self.top_layout.addWidget(self.view_combo)
@@ -83,6 +391,10 @@ class TradingGUI(QWidget):
         self.refresh_btn = QPushButton("刷新")
         self.refresh_btn.clicked.connect(self.refresh_table)
         self.top_layout.addWidget(self.refresh_btn)
+
+        self.hotspot_btn = QPushButton("板块热点")
+        self.hotspot_btn.clicked.connect(self.show_hot_sectors)
+        self.top_layout.addWidget(self.hotspot_btn)
 
         self.stock_input = QComboBox()
         self.stock_input.setEditable(True)
@@ -117,7 +429,7 @@ class TradingGUI(QWidget):
                         original_cb(status_dict)
                 self.sender.callback = safe_callback
         else:
-            self.sender = StockSender(callback=self.update_send_status)
+            self.sender = StockSender(callback=None)
 
         # 表格点击与切换信号
         _ = self.table.cellClicked.connect(self.on_table_row_clicked)
@@ -126,6 +438,9 @@ class TradingGUI(QWidget):
         # 添加右键菜单策略
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         _ = self.table.customContextMenuRequested.connect(self.show_context_menu)
+        
+        # Load window position
+        self.load_window_position_qt(self, "TradingGUI_Geometry", default_width=1000, default_height=600)
 
         # 初始化数据源相关
         from trading_logger import SignalStrategyLogger
@@ -136,6 +451,10 @@ class TradingGUI(QWidget):
         
         # 初始刷新
         self.refresh_table()
+
+    def closeEvent(self, event):
+        self.save_window_position_qt(self, "TradingGUI_Geometry")
+        super().closeEvent(event)
 
     def _on_source_changed(self, text):
         """数据源切换处理"""
@@ -241,12 +560,14 @@ class TradingGUI(QWidget):
             elif view == "股票表现概览":
                 df = self.analyzer.stock_performance()
             elif view == "信号探测历史":
-                df = self.analyzer.get_signal_history_df()
-                if code and not df.empty:
+                # 优化：如果有 code，直接传给后端筛选，避免全量加载
+                df = self.analyzer.get_signal_history_df(code=code if code else None)
+                if code and not df.empty: # This line becomes redundant if backend filtering is perfect, but kept for safety.
                     df = df[df['code'] == code]
             elif view == "实时指标详情":
-                df = self.analyzer.get_signal_history_df()
-                if code and not df.empty:
+                # 优化：如果有 code，直接传给后端筛选，避免全量加载
+                df = self.analyzer.get_signal_history_df(code=code if code else None)
+                if code and not df.empty: # This line becomes redundant if backend filtering is perfect, but kept for safety.
                     df = df[df['code'] == code]
                 # 指标列筛选
                 indicator_cols = ['date', 'code', 'name', 'price', 'action', 'reason',
@@ -530,11 +851,11 @@ class TradingGUI(QWidget):
 
         # 获取当前行的股票代码
         stock_code = self._get_stock_code_from_row(row)
-        if stock_code and self.sender:
-            try:
-                self.sender.send(stock_code)
-            except Exception as e:
-                print(f"Error sending stock code: {e}")
+        if stock_code:
+            # use safe send via queue
+            if hasattr(self, 'sender') and self.sender:
+                self._safe_send_stock(stock_code)
+
 
     def _get_stock_code_from_row(self, row: int) -> str:
         """从表格行中精确检索股票代码"""
@@ -584,7 +905,8 @@ class TradingGUI(QWidget):
         """Qt 主线程执行"""
         if self.on_tree_scroll_to_code and callable(self.on_tree_scroll_to_code):
             try:
-                self.on_tree_scroll_to_code(stock_code)
+                self.stock_input.setCurrentText(stock_code)
+                self.on_tree_scroll_to_code(stock_code,vis=True)
             except Exception as e:
                 print(f"on_tree_scroll_to_code error: {e}")
         else:
@@ -594,6 +916,68 @@ class TradingGUI(QWidget):
     def _safe_update_send_status(self, msg):
         """Qt 主线程安全更新状态"""
         self.label_summary.setText(f"发送状态: {msg}")
+
+    def show_hot_sectors(self):
+        """显示板块热点分析工具"""
+        # 使用非模态对话框，方便与主界面交互
+        self._hot_dlg = HotSectorAnalysisDialog(self)
+        self._hot_dlg.show()
+    
+    def _safe_send_stock(self, code):
+        """Send stock code via sender using dispatch queue (Queue Mode)"""
+        if hasattr(self, 'sender') and self.sender:
+            # We wrap the send call in a lambda or pass the method directly
+            # Since sender.send(code) spawns a thread, calling it from Main Thread (via queue) is safe
+            # IF StockSender thread-safety fix is applied.
+            # But "Queue Mode" implies we execute it via the queue consumer.
+            self.tk_dispatch_queue.put(lambda: self.sender.send(code))
+    
+    def _process_dispatch_queue(self):
+        """
+        [FIX] 专门处理从 Qt 回调或其他非主线程发来的 Tkinter 任务。
+        避免直接在 Qt 线程调用 Tkinter (self.after 也不行)。
+        """
+        try:
+            while True:
+                # 非阻塞获取任务
+                task = self.tk_dispatch_queue.get_nowait()
+                if callable(task):
+                    try:
+                        task()
+                    except Exception as e:
+                        print(f"Error executing dispatched task: {e}")
+        except queue.Empty:
+            pass
+        except Exception as e:
+            print(f"Dispatch Error: {e}")
+
+    def _launch_visualizer_process(self, code):
+        """Actual subprocess launch logic, runs safely from main thread via timer"""
+        import subprocess
+        import sys
+        import os
+        try:
+            # Assuming trade_visualizer_qt6.py is in the same directory
+            script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_visualizer_qt6.py")
+            if os.path.exists(script_path):
+                # Use the same python interpreter
+                # FIX: Must use -code argument for argparse
+                subprocess.Popen([sys.executable, script_path, "-code", code])
+                print(f"Launched visualizer for {code}")
+            else:
+                print(f"Visualizer script not found at {script_path}")
+        except Exception as e:
+            print(f"Failed to launch visualizer: {e}")
+
+    def open_visualizer(self, code):
+        """Open the visualizer for the given stock code (via dispatch queue)"""
+        # check if visualizer is enabled
+        if hasattr(self, 'vis_checkbox') and not self.vis_checkbox.isChecked():
+            return
+            
+        # Put the task into the queue for safe execution
+        self.tk_dispatch_queue.put(lambda: self._launch_visualizer_process(code))
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

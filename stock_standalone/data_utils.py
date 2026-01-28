@@ -2186,6 +2186,7 @@ def fetch_and_process(
                     continue
                 else:
                     logger.debug(f"{today} 清理已完成，进入init_tdx")
+                    time.sleep(5)
                     
                 if (
                     g_values.getkey("tdx.init.done") is True

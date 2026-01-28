@@ -28,9 +28,9 @@ class TradingAnalyzer:
             df['sell_date'] = pd.to_datetime(df['sell_date'])
         return df
 
-    def get_signal_history_df(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
+    def get_signal_history_df(self, start_date: Optional[str] = None, end_date: Optional[str] = None, code: Optional[str] = None) -> pd.DataFrame:
         """获取信号历史数据的 DataFrame，并展开 indicators 列"""
-        signals: list[dict[str, Any]] = self.logger.get_signals(start_date, end_date)
+        signals: list[dict[str, Any]] = self.logger.get_signals(start_date, end_date, code=code)
         df: pd.DataFrame = pd.DataFrame(signals)
         if df.empty:
             return df
