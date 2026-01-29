@@ -358,6 +358,7 @@ cxg_limit_days = 20
 newdays_limit_days = 30
 big_H5_Size_limit = 50
 sina_limit_time = 30
+sina_MultiIndex_startTime = 920
 green_cout = 5
 # sina_limit_time = 20
 h5_time_l_count = 6

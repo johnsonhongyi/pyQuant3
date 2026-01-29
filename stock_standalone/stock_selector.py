@@ -232,14 +232,17 @@ class StockSelector:
                             break
                 
                 if consecutive_rise >= 3:
-                    score += consecutive_rise * 5 
-                    reason.append(f"{consecutive_rise}连涨")
+                    score += consecutive_rise * 6 # 提升权重 from 5 to 6
+                    reason.append(f"{consecutive_rise}连阳")
+                    if consecutive_rise >= 5:
+                        score += 15 # 大主升波 bonus
+                        reason.append("主升波段")
                 
                 # 4. 回调买点 (缩量企稳)
                 is_pullback = False
-                if ma5 > 0 and 0 < (price - ma5) / ma5 < 0.012: 
+                if ma5 > 0 and 0 < (price - ma5) / ma5 < 0.015: # 稍微放宽回调幅度
                     ratio = float(data.get('ratio', 1.0))
-                    if ratio < 1.0 and price >= ma5: # 缩量且守住 MA5
+                    if ratio < 1.1 and price >= ma5: # 缩量且守住 MA5
                         score += 20
                         reason.append("缩量企稳")
                         is_pullback = True
@@ -247,10 +250,10 @@ class StockSelector:
                 # 5. 资金强度 (成交额权重)
                 amount = float(data.get('amount', 0))
                 if amount > 500000000: # 5亿以上大资金
-                    score += 15
+                    score += 20 # 提升权重 from 15 to 20
                     reason.append("主力活跃")
                 elif amount > 200000000:
-                    score += 5
+                    score += 10 # from 5 to 10
 
             except Exception as e:
                 self.logger.error(f"Error filtering {code}: {e}")
@@ -264,10 +267,10 @@ class StockSelector:
                 score += 15
                 if ratio > 1.2: score += 10 # 量价齐升
             elif pct > 9.5:
-                score += 10
+                score += 15 # 冲击涨停权重提升
                 reason.append("冲击涨停")
             elif -2.0 <= pct < 2.0 and is_pullback:
-                score += 10 # 强势回调震荡
+                score += 15 # 提升权重 from 10 to 15
             
             # C. 放量情况 (量比)
             if 1.5 < ratio < 4.0: # 健康放量
@@ -285,8 +288,12 @@ class StockSelector:
             
             strong_sector_hit = [c for c in stock_cats if c in top_concepts]
             if strong_sector_hit:
-                score += 10 
+                score += 15 # 提升权重 from 10 to 15
                 reason.append(f"热点:{strong_sector_hit[0]}")
+                # [新增] 如果是 Top 5 核心热点板块的龙头 (前三名)
+                if any(c in [x[0] for x in concept_scores[:5]] for c in stock_cats):
+                    score += 10
+                    reason.append("核心热点")
 
             # E. 历史对比：标签化
             hist_cnt = hist_counts.get(code_str, 0)

@@ -47,7 +47,9 @@ from JohnsonUtil.commonTips import timed_ctx
 from JohnsonUtil import johnson_cons as ct
 from JSONData import tdx_data_Day as tdd
 from JSONData import stockFilter as stf
+from JSONData import stockFilter as stf
 from logger_utils import LoggerFactory, init_logging, with_log_level
+from JohnsonUtil.LoggerFactory import stopLogger # fix logging BrokenPipeError on exit
 from stock_live_strategy import StockLiveStrategy
 from realtime_data_service import DataPublisher
 # DataPublisher is now handled locally in the Main process for resource efficiency
@@ -598,11 +600,26 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         self.tree.bind("<Button-3>", self.on_tree_right_click)
 
         self.bind("<Alt-c>", lambda e:self.open_column_manager())
+
+        # [NEW] 每日复盘入口按钮
+        try:
+             from market_pulse_viewer import MarketPulseViewer
+             self._pulse_viewer_class = MarketPulseViewer
+             pulse_btn = tk.Button(ctrl_frame, text="📊 每日复盘/机会", 
+                                 bg="purple", fg="white", 
+                                 font=("Microsoft YaHei", 9, "bold"),
+                                 command=self.open_market_pulse)
+             pulse_btn.pack(side="left", padx=5)
+        except ImportError as e:
+             logger.error(f"Failed to import MarketPulseViewer: {e}")
+             self._pulse_viewer_class = None
+
         self.bind("<Alt-d>", lambda event: self.open_handbook_overview())
         self.bind("<Alt-e>", lambda event: self.open_voice_monitor_manager())
         self.bind("<Alt-g>", lambda event: self.open_trade_report_window())
         self.bind("<Alt-b>", lambda event: self.close_all_alerts())
         self.bind("<Alt-s>", lambda event: self.open_strategy_manager())
+        self.bind("<Alt-k>", lambda event: self.open_market_pulse())
         # 启动周期检测 RDP DPI 变化
         self.after(3000, self._check_dpi_change)
         self.auto_adjust_column = self.dfcf_var.get()
@@ -613,6 +630,24 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         logger.info(f"🚀 程序初始化完成 (总耗时: {init_elapsed:.2f}s)")
         if logger.level == LoggerFactory.DEBUG:
             cct.print_timing_summary(top_n=6)
+
+    def open_market_pulse(self):
+        """Open the Daily Market Pulse Dashboard."""
+        if not self._pulse_viewer_class:
+            messagebox.showerror("Error", "Market Pulse module missing.")
+            return
+            
+        # Ensure we have strategy loaded
+        if not self.live_strategy:
+             messagebox.showwarning("Wait", "Strategy initializing... please wait.")
+             return
+             
+        # Check if already open
+        if hasattr(self, '_pulse_win') and self._pulse_win and self._pulse_win.winfo_exists():
+            self._pulse_win.lift()
+            return
+            
+        self._pulse_win = self._pulse_viewer_class(self, self) # Pass self as master and monitor_app
 
     def _process_dispatch_queue(self):
         """
@@ -680,12 +715,15 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         def _on_hotkey_trategy_manager():
             # 必须通过 Tkinter 的 after 调用，保证在主线程执行
             self.after(0, self.open_strategy_manager)
-
+        def _on_hotkey_open_market_pulser():
+            # 必须通过 Tkinter 的 after 调用，保证在主线程执行
+            self.after(0, self.open_market_pulse)
+            
         # 注册系统全局快捷键
         keyboard.add_hotkey('alt+b', _on_hotkey_close_all_alerts)
         keyboard.add_hotkey('alt+e', _on_hotkey_voice_monitor_manager)
-
         keyboard.add_hotkey('alt+s', _on_hotkey_trategy_manager)
+        keyboard.add_hotkey('alt+k', _on_hotkey_open_market_pulser)
         # [NEW] Alt+H to toggle Hotlist
         keyboard.add_hotkey('alt+h', lambda: self.after(0, lambda: self.send_command_to_visualizer("TOGGLE_HOTLIST")))
 
@@ -1193,8 +1231,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     logger.debug(f"SyncManager shutdown suppressed exception: {e}")
 
             # 11. 最后销毁主窗口
+            try:
+                stopLogger() # 显式停止日志监听线程，防止 BrokenPipeError
+            except: 
+                pass
             self.destroy()
-            logger.info("程序正常退出完成")
+            logger.info("程序正常退出完成") # 此条可能不会显示，因为 Listener 已停止
             
         except Exception as e:
             logger.error(f"退出过程发生严重异常: {e}\n{traceback.format_exc()}")
@@ -1791,7 +1833,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             elif action == "GUI工具":
                 self.open_kline_viewer_qt()
             elif action == "复盘数据":
-                self.open_strategy_backtest_view()
+                self.open_market_pulse()
+                # self.open_strategy_backtest_view()
 
 
         def on_select(event=None):
@@ -2037,6 +2080,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                         self.df_all = df.copy()
                         _last_df = df.copy()
                         has_update = True
+                        
+                        # ✅ Sync data to selector if exists (for MarketPulse / SelectionWindow)
+                        if hasattr(self, 'selector') and self.selector:
+                            self.selector.df_all_realtime = self.df_all
+                            self.selector.resample = cur_res
+
                         logger.info(f'detect_signals duration time:{time.time()-time_s:.2f}')
                         # logger.info(f"self.queue [Debug] df_all_hash={df_hash(self.df_all)} len={len(self.df_all)} time={datetime.now():%H:%M:%S}")
                         
@@ -2777,15 +2826,18 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             # self.after(50, self.adjust_column_widths)
             self._setup_tree_columns(self.tree,self.current_cols, sort_callback=self.sort_by_column, other={})
             self.reload_cfg_value()
-            self.live_strategy.set_alert_cooldown(alert_cooldown)
-        if self.realtime_var.get():
-            if not self.live_strategy.scan_hot_concepts_status:
-                self.live_strategy.set_scan_hot_concepts(status=True)
-                logger.info(f'self.live_strategy.scan_hot_concepts_status is False will be open')
-        else:
-            if self.live_strategy.scan_hot_concepts_status:
-                self.live_strategy.set_scan_hot_concepts(status=False)
-                logger.info(f'self.live_strategy.scan_hot_concepts_status  will be close')
+            if self.live_strategy:
+                self.live_strategy.set_alert_cooldown(alert_cooldown)
+
+        if self.live_strategy:
+            if self.realtime_var.get():
+                if not self.live_strategy.scan_hot_concepts_status:
+                    self.live_strategy.set_scan_hot_concepts(status=True)
+                    logger.info(f'self.live_strategy.scan_hot_concepts_status is False will be open')
+            else:
+                if self.live_strategy.scan_hot_concepts_status:
+                    self.live_strategy.set_scan_hot_concepts(status=False)
+                    logger.info(f'self.live_strategy.scan_hot_concepts_status  will be close')
         if (not self.vis_var.get()) and getattr(self, "_df_first_send_done", False):
             # logger.debug(f'change _df_first_send_done:{self._df_first_send_done}')
             logger.debug(f"[send_df] force full send: deleting df_ui_prev, _df_first_send_done={self._df_first_send_done}")
@@ -5914,6 +5966,83 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             logger.error(f"Failed to open StrategyManager: {e}")
             messagebox.showerror("错误", f"启动策略管理器失败: {e}")
 
+    def add_voice_monitor_dialog(self, code, name):
+        """
+        弹出对话框添加语音监控 (由外部调用，如 MarketPulseViewer)
+        校验唯一性：如果已存在则提示合并或拒绝
+        """
+        if not hasattr(self, 'live_strategy') or self.live_strategy is None:
+            messagebox.showwarning("提示", "实时监控模块尚未启动")
+            return
+
+        # 1. 唯一性检查
+        monitors = self.live_strategy.get_monitors()
+        # 兼容 key 为 code 或 code_resample 的情况
+        existing_key = None
+        if code in monitors:
+            existing_key = code
+        else:
+            # 检查是否有带后缀的 key
+            for k in monitors.keys():
+                if k.split('_')[0] == code:
+                    existing_key = k
+                    break
+        
+        if existing_key:
+            if not messagebox.askyesno("重复提示", f"{name}({code}) 已在监控列表中！\n\n是否继续添加新规则？\n(选'否'则取消)"):
+                return
+            # 选'是'则继续弹出添加规则框，视为追加规则
+
+        # 2. 弹出简易规则输入框
+        dlg = tk.Toplevel(self)
+        dlg.title(f"添加监控: {name}")
+        dlg.geometry("300x220")
+        self.load_window_position(dlg, "AddVoiceMonitorDlg", default_width=300, default_height=220)
+        
+        tk.Label(dlg, text=f"代码: {code}   名称: {name}", font=("Arial", 10, "bold")).pack(pady=10)
+        
+        tk.Label(dlg, text="预警规则:").pack(anchor="w", padx=20)
+        
+        # 规则类型
+        type_var = tk.StringVar(value="price_up")
+        # price_up, price_down, change_up
+        f_type = tk.Frame(dlg)
+        f_type.pack(fill="x", padx=20, pady=5)
+        ttk.Combobox(f_type, textvariable=type_var, values=["price_up", "price_down", "change_up"], state="readonly", width=15).pack(side="left")
+        
+        # 阈值
+        tk.Label(dlg, text="阈值 (价格/涨幅%):").pack(anchor="w", padx=20)
+        e_val = tk.Entry(dlg)
+        e_val.pack(fill="x", padx=20, pady=5)
+        
+        # 默认填入当前价 * 1.01 (方便演示)
+        curr_price = 0
+        if hasattr(self, 'df_all') and code in self.df_all.index:
+             curr_price = float(self.df_all.loc[code].get('trade', 0))
+        if curr_price > 0:
+            e_val.insert(0, f"{curr_price * 1.01:.2f}")
+
+        def on_confirm():
+            val_str = e_val.get().strip()
+            if not val_str:
+                return
+            try:
+                val = float(val_str)
+                # 调用 Strategy 添加
+                res = self.live_strategy.add_monitor(code, name, type_var.get(), val, tags="manual")
+                toast_message(self, f"已添加监控: {name}")
+                dlg.destroy()
+                
+                # 如果管理窗口开着，刷新它
+                if hasattr(self, '_voice_monitor_win') and self._voice_monitor_win and self._voice_monitor_win.winfo_exists():
+                    if hasattr(self._voice_monitor_win, 'refresh_list'):
+                        self._voice_monitor_win.refresh_list()
+                        
+            except ValueError:
+                messagebox.showerror("错误", "阈值必须是数字")
+
+        tk.Button(dlg, text="确定添加", command=on_confirm, bg="#ccffcc").pack(pady=15)
+
     def open_voice_monitor_manager(self):
         """语音预警管理窗口 (支持窗口复用)"""
 
@@ -6680,33 +6809,39 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
     def open_stock_selection_window(self):
         """打开策略选股与人工复核窗口 (支持窗口复用)"""
-        # ✅ 确保策略模块已尝试初始化
-        if not hasattr(self, 'live_strategy') or self.live_strategy is None:
-            # 尝试提前初始化 selector
-            if not hasattr(self, 'selector'):
-                try:
-                    self.selector = StockSelector(df=getattr(self, 'df_all', None))
-                except Exception as e:
-                    logger.error(f"StockSelector 初始化失败: {e}")
-                    self.selector = None
-        
-        # ✅ 窗口复用逻辑
+        # 1. 确保 selector存在且数据最新
+        try:
+            if not hasattr(self, 'selector') or self.selector is None:
+                self.selector = StockSelector(df=getattr(self, 'df_all', None))
+            else:
+                # ✅ 关键：更新已有 selector 的数据引用，确保 MarketPulse 也能看到最新数据
+                if hasattr(self, 'df_all') and not self.df_all.empty:
+                    self.selector.df_all_realtime = self.df_all
+                    self.selector.resample = self.global_values.getkey("resample") or 'd'
+        except Exception as e:
+            logger.error(f"StockSelector 初始化/更新失败: {e}")
+            self.selector = None
+
+        # 2. 窗口复用逻辑
         if self._stock_selection_win and self._stock_selection_win.winfo_exists():
             try:
+                # ✅ 更新窗口内部引用 (防止 strategy 重启后引用失效)
+                self._stock_selection_win.live_strategy = getattr(self, 'live_strategy', None)
+                self._stock_selection_win.selector = self.selector
+                
+                # ✅ 强制刷新数据 (force=True 重新跑筛选)
+                self._stock_selection_win.load_data(force=True)
+                
                 self._stock_selection_win.deiconify()
                 self._stock_selection_win.lift()
                 self._stock_selection_win.focus_force()
                 return
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"复用选股窗口异常: {e}")
 
+        # 3. 新建窗口
         try:
-            # 实例化选择器 (如果还没有)
-            if not hasattr(self, 'selector') or self.selector is None:
-                self.selector = StockSelector(df=getattr(self, 'df_all', None))
-            
-            # 打开窗口
-            self._stock_selection_win = StockSelectionWindow(self, self.live_strategy, self.selector)
+            self._stock_selection_win = StockSelectionWindow(self, getattr(self, 'live_strategy', None), self.selector)
             
         except Exception as e:
             logger.error(f"打开选股窗口失败: {e}")

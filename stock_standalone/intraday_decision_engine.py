@@ -996,6 +996,23 @@ class IntradayDecisionEngine:
                 result["bonus"] += 0.2
                 result["reason"] += " | 上轨偏离加速" if result["reason"] else "上轨偏离加速"
         
+        # 模式3: 极致力度(成交量爆炸)加速 (Quantified Volume Acceleration)
+        # 逻辑：量比 > 2.0 (倍量) + 涨幅 > 3% + 站稳均价线 + 位于5日线上方
+        pct = (price - float(snapshot.get('last_close', 0))) / float(snapshot.get('last_close', 1))
+        if volume > 2.0 and pct > 0.03 and price > nclose and price > ma5:
+             result["is_acc"] = True
+             result["bonus"] += 0.25
+             result["reason"] += " | 倍量暴力加速" if result["reason"] else "倍量暴力加速"
+
+        # 模式4: 主升浪结构加速 (Main Wave Acceleration)
+        # 逻辑: 股价 > Upper线 (站上上轨) 且昨日涨幅 > 0 (连阳延续)
+        # User defined: "站上upper开始都是加速结构"
+        upper = float(snapshot.get('upper', 0)) # 今日布林上轨
+        if upper > 0 and price > upper and pct > 0.0:
+             result["is_acc"] = True
+             result["bonus"] += 0.30
+             result["reason"] += " | 站上Upper加速" if result["reason"] else "站上Upper加速"
+        
         return result
 
     def _vwap_trend_check(self, row: dict[str, Any], snapshot: dict[str, Any], debug: dict[str, Any]) -> float:
@@ -1203,9 +1220,36 @@ class IntradayDecisionEngine:
                 buy_reasons.append(f"超跌反弹({oversold_reason})")
 
             # 条件8: 大阳变盘点/惜售爆发检测 (Consolidation & Momentum Breakout)
+            # Move definitions up to support Cond 9
             win = int(snapshot.get("win", 0))
             sum_perc = float(snapshot.get("sum_perc", 0))
             red = int(snapshot.get("red", 0))
+
+            # [新增] 条件9: 主升浪加速启动 (Opening Low-High Acceleration)
+            # 用户痛点：开盘5分钟最低走高，随后加速封板，容易丢失
+            # 特征：低开或平开(gap<1%) -> 开盘即最低 -> 快速拉升 -> 量能配合
+            is_main_wave_candidate = (win >= 2 or red >= 5)
+            open_near_low = (low > 0 and (open_p - low)/open_p < 0.005) # 开盘即最低
+            rapid_pull_up = (price > open_p * 1.025) # 快速拉升 > 2.5%
+            
+            if is_main_wave_candidate and open_near_low and rapid_pull_up:
+                # 进一步检查量能：必须有量才能确认是加速
+                # 1. 换手率达标(>1.0% in early) OR 2. 量比放大(>1.5)
+                vol_confirmed = (ratio > 0.8) or (volume > 1.5)
+                
+                if vol_confirmed and price > nclose:
+                    acc_score = 0.35
+                    acc_msg = "主升加速(开盘最低走高)"
+                    
+                    # 如果是低开拉起，含金量更高 (洗盘结束)
+                    if open_p < last_close:
+                        acc_score += 0.1
+                        acc_msg += "[低开金身]"
+                    
+                    buy_score += acc_score
+                    buy_reasons.append(acc_msg)
+
+            # (Conditions for Cond 8 continue below using already defined win/red/sum_perc)
             
             # [New] 中轴线趋势加成
             mid_rising = snapshot.get('midline_rising', False)
@@ -1337,32 +1381,42 @@ class IntradayDecisionEngine:
                 already_broken = snapshot.get("sell_triggered_today", False)
                 prefix = "[破位持续] " if already_broken else ""
                 
-                # 【优化逻辑】只有高开下杀带量且没返回均线的是核心卖点
-                # 判断是否为“高开下杀放量”场景
+                # 【新热点板块龙头保护】识别 连阳、主升、核心 标签
+                reason_str = str(snapshot.get('reason', '')).lower()
+                is_main_wave = any(tag in reason_str for tag in ["连阳", "主升", "核心", "热门", "龙头"])
+                momentum_floor = 0.5 if "核心" in reason_str or "龙头" in reason_str else (0.4 if is_main_wave else 0.2)
+                
+                # 判断场景
                 is_high_open = open_p > last_close * 1.02 # 高开 2%+
                 is_heavy_vol = ratio > 5.0 or (snapshot.get('lastv1d', 0) > 0 and volume > snapshot['lastv1d'] * 0.8) # 换手大或成交量接近昨日 80%
 
-                if is_high_open and is_heavy_vol:
-                    # 这就是用户强调的：高开下杀放量且跌破均线 (致命信号)
-                    sell_pos = 0.0 # 建议全清
-                    return {
-                        "triggered": True,
-                        "action": "卖出",
-                        "position": sell_pos,
-                        "reason": f"高开下杀带量破位(泵高{pump_height:.1%}, 偏离{deviation:.1%})",
-                        "debug": debug
-                    }
+                # [User Request] 不跌破前日收盘价，或者实时盘中大幅回撤跌破前日收盘价都不清仓
+                # 除非是那种极端见顶放量下杀
+                is_breaking_last_close = price < last_close
 
-                # 普通破位逻辑
-                if morning_pump:
-                    sell_multiplier = 1.0 + (pump_height * 10.0)
-                    urgency = min(deviation / 0.02 * sell_multiplier, 1.0)
-                    sell_pos = 1.0 - (1.0 - urgency) * 0.5
-                    reason = f"{prefix}诱多后破位(泵高{pump_height:.1%}, 偏离{deviation:.1%})"
-                else:
+                if is_high_open and is_heavy_vol and is_breaking_last_close:
+                    # 高开下杀放量且跌破前收 (这是致命信号，主升浪也得先撤)
+                    sell_pos = 0.1 if is_main_wave else 0.0 # 主升浪优选留一点观察位
+                    reason = f"高开下杀放量且破前收(核心卖点), 偏离{deviation:.1%}"
+                elif not is_breaking_last_close:
+                    # 虽然跌破均线，但还在前收之上，主升浪保护
                     urgency = min(deviation / 0.03, 1.0)
-                    sell_pos = 1.0 - urgency * 0.5
-                    reason = f"{prefix}跌破均线 {deviation:.1%} (阈值{threshold:.1%})"
+                    min_pos = max(0.5 if is_main_wave else 0.3, momentum_floor)
+                    sell_pos = max(min_pos, 1.0 - urgency * 0.5)
+                    reason = f"{prefix}跌破均线但守在前收之上(主升浪保护:{min_pos:.1f})" if is_main_wave else f"{prefix}跌破均线但守在前收之上(偏离{deviation:.1%})"
+                else:
+                    # 普通破位且跌破前收
+                    if morning_pump:
+                        sell_multiplier = 1.0 + (pump_height * 10.0)
+                        urgency = min(deviation / 0.02 * sell_multiplier, 1.0)
+                        min_pos = momentum_floor
+                        sell_pos = max(min_pos, 1.0 - (1.0 - urgency) * 0.5)
+                        reason = f"{prefix}诱多后破位前收(主升浪保护:{min_pos:.1f})" if is_main_wave else f"{prefix}诱多后破位前收(偏离{deviation:.1%})"
+                    else:
+                        urgency = min(deviation / 0.03, 1.0)
+                        min_pos = momentum_floor
+                        sell_pos = max(min_pos, 1.0 - urgency * 0.5)
+                        reason = f"{prefix}跌破均线与前收(主升浪保护:{min_pos:.1f})" if is_main_wave else f"{prefix}跌破均线与前收 {deviation:.1%}"
                 
                 return {
                     "triggered": True,
@@ -1405,15 +1459,15 @@ class IntradayDecisionEngine:
             debug["volume_emotion"] = "换手率无效"
             return 0.0
         
-        if 2 <= ratio <= 8:
-            score += 0.05
-            reasons.append("换手健康")
-        elif ratio > 15:
+        if 2 <= ratio <= 12:
+            score += 0.15 # 增加健康换手权重
+            reasons.append("换手健康放量")
+        elif ratio > 20:
             score -= 0.1
-            reasons.append("换手过高")
-        elif ratio < 0.5:
-            score -= 0.15 # 加大惩罚
-            reasons.append("极低换手")
+            reasons.append("换手过高风险")
+        elif ratio < 0.3:
+            score -= 0.2 # 加大惩罚
+            reasons.append("极低无量")
         
         # 量能放大检查（与前几日对比）
         avg_prev_vol = 0.0
@@ -1865,6 +1919,33 @@ class IntradayDecisionEngine:
             elif net_strength <= 0 and red > 0:
                 score -= 0.1
                 reasons.append("趋势震荡不稳")
+        
+        # ---------- 8. 主升浪结构完整性 (Structural Integrity) ----------
+        # User Defined: "每个周期的这样的结构是都各自的主升浪模式 (有新高没有新低)"
+        # 检查日线级别结构：Today High > Prev High AND Today Low >= Prev Low (if possible to check)
+        # 检查最近3日结构：Highs Increasing AND Lows Increasing
+        if len(highs) >= 2 and len(lows) >= 2:
+            # 昨高 > 前高, 昨低 > 前低
+            struct_ok_1 = highs[0] > highs[1] and lows[0] >= lows[1]
+            # 今高 > 昨高, 今低 > 昨低 (需要实时数据)
+            today_high = float(source_data.get("high", 0))
+            today_low = float(source_data.get("low", 0))
+            last_high = highs[0]
+            last_low = lows[0]
+            
+            struct_ok_realtime = False
+            if today_high > 0 and last_high > 0:
+                # 容忍盘中震荡，只要 Low 不破昨天 Low 太多 (比如 -1%)，且 High 摸过新高
+                struct_ok_realtime = (today_high >= last_high) or (today_low >= last_low)
+                
+                # 严格主升结构定义：Today High > Last High AND Today Low > Last Low
+                if today_high > last_high and today_low > last_low:
+                     score += 0.25
+                     reasons.append("主升结构(新高无新低)")
+                elif not struct_ok_realtime:
+                     # 结构破坏风险
+                     score -= 0.1
+                     reasons.append("结构承压")
         
         # 限制得分范围
         score = max(-1.0, min(1.0, score))

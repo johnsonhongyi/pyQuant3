@@ -998,7 +998,7 @@ class Sina:
             limit_time_int: int = int(self.sina_limit_time) if self.sina_limit_time is not None else 60
             h5_mi_table = 'all_' + str(limit_time_int)
             # 仅在交易时间内记录
-            if cct.get_work_time() and cct.get_now_time_int() > 925:
+            if cct.get_work_time() and cct.get_now_time_int() > ct.sina_MultiIndex_startTime:
                 # 构造 MultiIndex 精简格式轨迹: [code, ticktime, close, high, low, llastp, volume, lastbuy]
                 # 这必须与 format_response_data 中的 mi_cols 保持绝对一致以避免 ValueError
                 mi_cols = ['code', 'ticktime', 'close', 'high', 'low', 'llastp', 'volume', 'lastbuy']
