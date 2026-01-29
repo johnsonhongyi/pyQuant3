@@ -6690,8 +6690,10 @@ class MainWindow(QMainWindow, WindowMixin):
         # --- MA5 / MA10 / MA20 / MA60 ---
         ma5  = day_df['close'].rolling(5).mean().values
         ma10 = day_df['close'].rolling(10).mean().values
-        ma20 = day_df['close'].rolling(20).mean().values
-        ma60 = day_df['close'].rolling(60).mean().values
+        # ma20 = day_df['close'].rolling(20).mean().values
+        # ma60 = day_df['close'].rolling(60).mean().values
+        ma20 = day_df['close'].ewm(span=26, adjust=False).mean().values
+        ma60 = day_df['close'].ewm(span=60, adjust=False).mean().values
 
         # MA60 颜色：亮蓝色（深浅主题都清晰）
         # ma60_color = QColor(0, 180, 255)
