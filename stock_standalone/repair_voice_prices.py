@@ -54,12 +54,11 @@ def repair():
         created_time_str = data.get('created_time', '')
         name = data.get('name', '')
         
-        # 如果已有或者没有时间，跳过
-        # Check for Hot Concept tag which might have invalid price (percentage)
         is_hot_concept = (data.get('rule_type_tag') == 'hot_concept') or ('Hot:' in data.get('tags', ''))
 
-        # 如果已有且不是热点误报，跳过
-        if create_price > 0 and not is_hot_concept:
+        # [REFINED] Skip ONLY if price is clearly a real price (e.g. > 35) AND not a hot concept.
+        # This allows us to re-verify any low-priced items that might be percentage errors.
+        if create_price > 35 and not is_hot_concept:
             continue
         
         if is_hot_concept and create_price > 0:
@@ -116,8 +115,17 @@ def repair():
                     found_price = float(df_hist.iloc[0].get('open', 0))
 
             if found_price > 0:
-                print(f"✅ Found price for {code} ({name}): {found_price:.2f} on {target_date}")
-                logger.info(f"Successfully repaired {code}: {found_price:.2f} (Date: {target_date})")
+                # --- [CORE REPAIR LOGIC] ---
+                # 1. If original price was 0 -> Must repair
+                # 2. If deviation > 10% (e.g. original was 5% increase instead of 20.0 price) -> Must repair
+                deviation = abs(create_price - found_price) / found_price if create_price > 0 else 1.0
+                
+                if create_price > 0 and deviation < 0.1 and not is_hot_concept:
+                     # Looks okay, skip
+                     continue
+
+                logger.info(f"Repairing {code} ({name}): {create_price} -> {found_price:.2f} (Dev: {deviation:.2%})")
+                print(f"✅ Found price for {code} ({name}): {found_price:.2f} on {target_date} (Original: {create_price})")
                 
                 # 更新内存中的 JSON 数据
                 data['create_price'] = found_price
