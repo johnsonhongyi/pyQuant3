@@ -109,15 +109,25 @@ logger = init_logging(log_file='instock_tk.log',redirect_print=False)
 LOGPIXELSX = 88
 DEFAULT_DPI = 96.0
 
-if sys.platform.startswith('win'):
-    set_process_dpi_awareness()  # 假设设置为 Per-Monitor V2
-    # 1. 获取缩放因子
-    scale_factor = get_windows_dpi_scale_factor()
-    # 2. 设置环境变量（在导入 Qt 之前）
-    # 禁用 Qt 自动缩放，改为显式设置缩放因子
-    # 打印检查
-    logger.info(f"Windows 系统 DPI 缩放因子: {scale_factor}")
-    # logger.info(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
+# 概念分析查看器独立进程管理器
+try:
+    from concept_viewer_ipc import ConceptViewerManager
+    CONCEPT_VIEWER_AVAILABLE = True
+except ImportError:
+    ConceptViewerManager = None
+    CONCEPT_VIEWER_AVAILABLE = False
+    logger.warning("⚠️ ConceptViewerManager 未找到，将使用内嵌 Qt 模式")
+
+
+# if sys.platform.startswith('win'):
+#     set_process_dpi_awareness()  # 假设设置为 Per-Monitor V2
+#     # 1. 获取缩放因子
+#     scale_factor = get_windows_dpi_scale_factor()
+#     # 2. 设置环境变量（在导入 Qt 之前）
+#     # 禁用 Qt 自动缩放，改为显式设置缩放因子
+#     # 打印检查
+#     logger.info(f"Windows 系统 DPI 缩放因子: {scale_factor}")
+#     # logger.info(f"已设置 QT_SCALE_FACTOR = {os.environ['QT_SCALE_FACTOR']}")
 
 from PyQt6 import QtWidgets, QtCore, QtGui
 from trading_analyzerQt6 import TradingGUI
@@ -573,6 +583,23 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             self._use_incremental_update = False
             logger.info("ℹ️ 使用传统刷新模式")
         
+        # ✅ 概念分析独立进程查看器初始化
+        if CONCEPT_VIEWER_AVAILABLE:
+            try:
+                self._concept_viewer_manager = ConceptViewerManager(
+                    callback_handler=self._on_concept_viewer_callback
+                )
+                self._use_concept_viewer_process = True
+                logger.info("✅ 概念分析查看器管理器已初始化 (独立进程模式)")
+            except Exception as e:
+                logger.warning(f"⚠️ 概念分析查看器管理器初始化失败: {e}")
+                self._concept_viewer_manager = None
+                self._use_concept_viewer_process = False
+        else:
+            self._concept_viewer_manager = None
+            self._use_concept_viewer_process = False
+        
+
         # 启动后台进程
         self._start_process()
 
@@ -1145,6 +1172,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self._pg_windows.clear()
                 except Exception as e:
                     logger.warning(f"关闭 Qt 监控窗口异常: {e}")
+
+            # 8.5 关闭独立进程概念分析查看器
+            if hasattr(self, "_concept_viewer_manager") and self._concept_viewer_manager:
+                try:
+                    self._concept_viewer_manager.shutdown()
+                    logger.info("✅ 概念分析查看器管理器已关闭")
+                except Exception as e:
+                    logger.warning(f"关闭概念分析查看器管理器异常: {e}")
 
             # 9. 保存主窗口位置与搜索记录
             self.save_window_position(self, "main_window")
@@ -9513,11 +9548,12 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     
 
     def plot_following_concepts_pg(self, code=None, top_n=10):
-
-        if not hasattr(self, "_pg_windows"):
-            self._pg_windows = {}
-            self._pg_data_hash = {}
-
+        """
+        显示概念分析图表
+        
+        优先使用独立进程模式（解决 TK-Qt DPI 冲突），
+        如果不可用则回退到内嵌 Qt 模式。
+        """
         # --- 获取股票数据 ---
         if code is None or code == "总览":
             tcode, _ = self.get_stock_code_none()
@@ -9525,22 +9561,107 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             code = "总览"
             name = "All"
             unique_code = f"{code or ''}_{top_n or ''}"
-            logger.info(f'concepts_pg concepts : {top_concepts[0]} unique_code: {unique_code} ')
+            if top_concepts:
+                logger.info(f'concepts_pg concepts : {top_concepts[0]} unique_code: {unique_code} ')
         else:
             top_concepts = self.get_following_concepts_by_correlation(code, top_n=top_n)
             name = self.df_all.loc[code]['name'] if code in self.df_all.index else code
             unique_code = f"{code or ''}_{top_n or ''}"
-            concepts = [c[0] for c in top_concepts]
-            logger.info(f'concepts_pg concepts : {top_concepts} unique_code: {unique_code} ')
+            if top_concepts:
+                concepts = [c[0] for c in top_concepts]
+                logger.info(f'concepts_pg concepts : {top_concepts} unique_code: {unique_code} ')
+        
         if not top_concepts:
             logger.info("未找到相关概念")
             return
 
         unique_code = f"{code or ''}_{top_n or ''}"
-
+        
+        # ✅ 独立进程模式 - 解决 TK-Qt DPI 冲突
+        if self._use_concept_viewer_process and self._concept_viewer_manager:
+            concepts = [c[0] for c in top_concepts]
+            scores = [c[1] for c in top_concepts]
+            avg_percents = [c[2] for c in top_concepts]
+            follow_ratios = [c[3] for c in top_concepts]
+            
+            # 检查是否已有窗口运行
+            if self._concept_viewer_manager.is_viewer_running(code, top_n):
+                # 发送更新数据
+                self._concept_viewer_manager.update_viewer(code, top_n, {
+                    'concepts': concepts,
+                    'scores': scores,
+                    'avg_percents': avg_percents,
+                    'follow_ratios': follow_ratios
+                })
+                logger.info(f"[ConceptViewer] 已更新独立进程窗口: {unique_code}")
+            else:
+                # 启动新窗口
+                initial_data = {
+                    'concepts': concepts,
+                    'scores': scores,
+                    'avg_percents': avg_percents,
+                    'follow_ratios': follow_ratios
+                }
+                if self._concept_viewer_manager.launch_viewer(code, top_n, initial_data):
+                    logger.info(f"[ConceptViewer] 已启动独立进程窗口: {unique_code}")
+                else:
+                    logger.warning(f"[ConceptViewer] 启动独立进程窗口失败: {unique_code}")
+                    # 回退到内嵌模式
+                    self._plot_following_concepts_pg_embedded(code, top_n, top_concepts, unique_code)
+            return
+        
+        # ✅ 回退：内嵌 Qt 模式（原有逻辑）
+        self._plot_following_concepts_pg_embedded(code, top_n, top_concepts, unique_code)
+    
+    def _on_concept_viewer_callback(self, data: dict):
+        """
+        处理独立进程概念查看器的回调
+        
+        Args:
+            data: 回调数据，包含 cmd, code, concept_name 等
+        """
+        try:
+            cmd = data.get('cmd', '')
+            code = data.get('code', '')
+            concept_name = data.get('concept_name', '')
+            click_type = data.get('click_type', 'left')
+            unique_code = data.get('unique_code', '')
+            
+            if cmd == 'CONCEPT_CLICK':
+                # 概念被点击 - 触发 Top10 窗口
+                def _action():
+                    self._call_concept_top10_win_no_focus(code, concept_name)
+                self.tk_dispatch_queue.put(_action)
+                logger.info(f"[ConceptViewer] 回调: {cmd} concept={concept_name}")
+                
+            elif cmd == 'REQUEST_REFRESH':
+                # 请求刷新数据
+                top_n = data.get('top_n', 10)
+                self.tk_dispatch_queue.put(lambda: self.plot_following_concepts_pg(code, top_n))
+                
+            elif cmd == 'VIEWER_CLOSED':
+                # 查看器已关闭
+                logger.info(f"[ConceptViewer] 窗口已关闭: {unique_code}")
+                
+        except Exception as e:
+            logger.error(f"[ConceptViewer] 处理回调失败: {e}")
+    
+    def _plot_following_concepts_pg_embedded(self, code, top_n, top_concepts, unique_code):
+        """
+        内嵌 Qt 模式的概念分析图表（原有实现）
+        
+        注意：此模式可能导致 TK DPI 缩放失效！
+        仅在独立进程模式不可用时使用。
+        """
+        if not hasattr(self, "_pg_windows"):
+            self._pg_windows = {}
+            self._pg_data_hash = {}
+        
+        name = "All" if code == "总览" else (self.df_all.loc[code]['name'] if code in self.df_all.index else code)
 
         # --- 检查是否已有相同 code 的窗口 ---
         for k, v in self._pg_windows.items():
+
             win = v.get("win")
             try:
                 if v.get("code") == unique_code and v.get("win") is not None:
