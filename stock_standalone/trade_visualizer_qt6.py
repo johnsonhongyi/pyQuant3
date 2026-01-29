@@ -607,21 +607,24 @@ class CommandListenerThread(QThread):
         self.server_socket = server_socket
         self.running = True
 
-    # def stop(self):
-    #     self.running = False
-    #     try:
-    #         self.server_socket.close()
-    #     except Exception:
-    #         pass
-    #     self.wait(1000)
     def stop(self):
+        """退出监听线程"""
         self.running = False
         try:
-            self.server_socket.close()
-        except Exception:
-            pass
+            # ⭐ 关键：强制关闭连接以解除 accept() 阻塞
+            if self.server_socket:
+                try:
+                    self.server_socket.shutdown(socket.SHUT_RDWR)
+                except Exception:
+                    pass
+                self.server_socket.close()
+        except Exception as e:
+            logger.debug(f"[IPC] Error closing server socket: {e}")
+        
         self.quit()
-        self.wait(500)
+        # 等待线程自然退出
+        if not self.wait(1000):
+            self.terminate()
 
     def run(self):
         # ⭐ 关键：避免 accept 无限阻塞
@@ -742,16 +745,12 @@ class DataLoaderThread(QThread):
         self._search_code = None
         self._resample = None
 
-    def __del__(self):
-        """当 Python 准备销毁这个对象时触发"""
-        if hasattr(self, 'isRunning') and self.isRunning():
-            import traceback
-            logger.error("\n" + "="*50)
-            logger.error(f"[CRITICAL DEBUG] QThread object (DataLoaderThread) is being GC'd while STILL RUNNING! ID: {id(self)}")
-            # 打印当前谁在执行删除操作 (即触发 GC 的堆栈)
-            err_stack = "".join(traceback.format_stack())
-            logger.error(f"Traceback of who triggered this deletion:\n{err_stack}")
-            logger.error("="*50 + "\n")
+    def stop(self):
+        """退出数据加载线程"""
+        if self.isRunning():
+            self.quit()
+            if not self.wait(1000):
+                self.terminate()
 
     def run(self) -> None:
         try:
@@ -934,7 +933,8 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
                 except Empty:
                     pass
                 time.sleep(1)
-    # print(f'stop_flag: {stop_flag.value}')
+
+    print("[IPC] realtime_worker_process exited cleanly")
 
 def _normalize_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -1911,6 +1911,10 @@ class MainWindow(QMainWindow, WindowMixin):
         self.realtime_task_queue = Queue() # ⭐ 新增：任务队列 (1.3)
         self.realtime_process = None
         self._tick_cache = {}  # ⭐ 新增：实时数据缓存 (code -> {tick_df, today_bar, ts}) (1.3)
+
+        # ⭐ [FIX] 线程持有引用，确保 closeEvent 可停
+        self.loader: Optional[DataLoaderThread] = None
+        self.command_listener_thread: Optional[CommandListenerThread] = None
 
         # 定时检查队列 - 使用配置的数据更新频率
         refresh_interval_ms = int(cct.CFG.duration_sleep_time * 1000)  # 秒转毫秒
@@ -3688,7 +3692,7 @@ class MainWindow(QMainWindow, WindowMixin):
         self.realtime_task_queue.put(code)
         
         # ⭐ 4. 立即触发一次 UI 轮询，尝试捕捉随后产生的第一笔数据
-        QTimer.singleShot(1000, self._poll_realtime_queue)
+        # QTimer.singleShot(1000, self._poll_realtime_queue)
         QTimer.singleShot(3000, self._poll_realtime_queue)  # 双重保险，由于 network 可能有延迟
 
 
@@ -8971,6 +8975,7 @@ class MainWindow(QMainWindow, WindowMixin):
 
     def closeEvent(self, event):
         """窗口关闭统一退出清理"""
+
         self._closing = True
         # [User Request] 退出时清理 History Manager
         if hasattr(self, 'history_manager_process') and self.history_manager_process and self.history_manager_process.is_alive():
@@ -8994,6 +8999,37 @@ class MainWindow(QMainWindow, WindowMixin):
         if hasattr(self, 'stop_flag'):
             self.stop_flag.value = False
         logger.info(f'stop_flag.value: {self.stop_flag.value}')
+
+        # 0️⃣ 停止并关闭独立面板 (关键：防止 QThread Destroyed)
+        if hasattr(self, 'hotlist_panel') and self.hotlist_panel:
+            logger.debug("Closing HotlistPanel...")
+            try:
+                self.hotlist_panel.close() # 触发 HotlistPanel.closeEvent -> stops worker
+            except Exception as e:
+                logger.warning(f"Error closing hotlist_panel: {e}")
+
+        if hasattr(self, 'signal_log_panel') and self.signal_log_panel:
+            logger.debug("Closing SignalLogPanel...")
+            try:
+                self.signal_log_panel.close()
+            except Exception as e:
+                logger.warning(f"Error closing signal_log_panel: {e}")
+        
+        # 0.1️⃣ 停止语音线程
+        if hasattr(self, 'voice_thread') and self.voice_thread:
+            logger.debug("Stopping VoiceThread...")
+            try:
+                self.voice_thread.stop()
+                if hasattr(self.voice_thread, 'wait'):
+                    self.voice_thread.wait(1000)
+            except Exception as e:
+                logger.warning(f"Error stopping voice_thread: {e}")
+
+        # 0.2️⃣ 停止所有定时器
+        if hasattr(self, 'realtime_timer') and self.realtime_timer:
+            self.realtime_timer.stop()
+        if hasattr(self, 'command_timer') and self.command_timer:
+            self.command_timer.stop()
 
         # [FIX] 通知 Monitor 进程已退出，以便重置句柄
         try:
@@ -9019,12 +9055,19 @@ class MainWindow(QMainWindow, WindowMixin):
 
         # 3️⃣ 停止 DataLoaderThread (避免 QThread Destroyed 崩溃)
         if hasattr(self, 'loader') and self.loader:
-            if self.loader.isRunning():
-                logger.debug("Stopping main DataLoaderThread...")
-                self.loader.quit()
-                if not self.loader.wait(500):
-                    self.loader.terminate()
+            logger.debug("Stopping main DataLoaderThread...")
+            self.loader.stop()          # 通知线程退出
+            self.loader.wait()          # ⬅️ 阻塞直到 run() 结束（关键）
+            self.loader.deleteLater()   # 交给 Qt 事件循环安全释放
             self.loader = None
+        
+        # 3.4️⃣ 停止 CommandListenerThread (1110)
+        if hasattr(self, 'command_listener_thread') and self.command_listener_thread:
+            logger.debug("Stopping CommandListenerThread...")
+            self.command_listener_thread.stop()
+            self.command_listener_thread.wait()   # ⬅️ 同样必须等待
+            self.command_listener_thread.deleteLater()
+            self.command_listener_thread = None
             
         # 3.5️⃣ 清理回收站中的线程
         if hasattr(self, 'garbage_threads'):
@@ -9032,15 +9075,26 @@ class MainWindow(QMainWindow, WindowMixin):
                 t = self.garbage_threads.pop()
                 if t.isRunning():
                     logger.debug(f"Stopping scavenger thread: {id(t)}")
-                    t.quit()
-                    t.wait(500)
+                    try:
+                        if hasattr(t, 'stop'):
+                            t.stop()
+                        else:
+                            t.quit()
+                        t.wait()   # ⬅️ 必须等待线程结束
+                    except Exception as e:
+                        logger.warning(f"Error stopping thread {id(t)}: {e}")
+                t.deleteLater()
+        # 3.6️⃣ 停止日志，防止 BrokenPipeError
+        try:
+            from JohnsonUtil.LoggerFactory import stopLogger
+            stopLogger()
+        except:
+            pass
         # 当 GUI 关闭时，触发 stop_event
         stop_event.set()
 
         print(f'closeEvent: OK')
         # Accept the event to close
-        if hasattr(self, 'voice_thread'):
-            self.voice_thread.stop()
         event.accept()
         # 6️⃣ 调用父类 closeEvent
         super().closeEvent(event)
@@ -9215,16 +9269,14 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
     # ------------------ 4. Primary: 启动 GUI ------------------
     app = QApplication(sys.argv)
     window = MainWindow(stop_flag, log_level, debug_realtime, command_queue=command_queue)
+    
+    # ⭐ [Refactor] 将 ListenerThread 移入 window 内部管理，确保统一清理
+    window.command_listener_thread = CommandListenerThread(server_socket)
+    window.command_listener_thread.command_received.connect(window.load_stock_by_code)
+    window.command_listener_thread.dataframe_received.connect(window.on_dataframe_received)
+    window.command_listener_thread.start()
+
     start_code = initial_code
-
-    # 启动 ListenerThread
-    listener = CommandListenerThread(server_socket)
-    listener.command_received.connect(window.load_stock_by_code)
-    listener.dataframe_received.connect(window.on_dataframe_received)
-    listener.start()
-
-    # 确保 listener 已经准备好接收连接
-    time.sleep(0.05)
 
     # ------------------ 5. 显示 GUI ------------------
     window.show()
@@ -9238,11 +9290,8 @@ def main(initial_code='000002', stop_flag=None, log_level=None, debug_realtime=F
     ret = app.exec()  # 阻塞 Qt 主循环
 
     # ------------------ 6. 清理 ------------------
-    stop_flag.value = False
-    try:
-        listener.stop()
-    except Exception:
-        pass
+    if stop_flag:
+        stop_flag.value = False
     window.close()
     sys.exit(ret)
 

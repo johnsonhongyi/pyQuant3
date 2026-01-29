@@ -385,6 +385,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
         # 刷新开关标志
         self.refresh_enabled = True
+        self._app_exiting = threading.Event()  # ⭐ [FIX] 用于控制后台线程退出
         
         self.visualizer_process = None # Track visualizer process
         self.qt_process = None         # [FIX] 初始化 qt_process 避免 send_df AttributeError
@@ -707,7 +708,6 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         """弹出确认框，询问是否退出"""
         if messagebox.askyesno("确认退出", "你确定要退出 StockApp 吗？"):
             self.on_close()
-            sys.exit(0)
     # 在初始化 UI 或后台线程里
     def setup_global_hotkey(self):
         """
@@ -1039,6 +1039,8 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
     def on_close(self):
         try:
             # 设置退出标志，阻止后台线程调用 Tkinter 方法
+            if hasattr(self, '_app_exiting'):
+                self._app_exiting.set()  # ⭐ [FIX] 立即通知所有监听线程退出
             self._is_closing = True
             self.close_all_alerts()
             # 0.1 立即关闭所有报警弹窗（停止震动/闪烁循环）
@@ -1222,6 +1224,14 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                 else:
                     logger.info("后台进程已安全退出")
 
+            # 11. 停止日志与销毁
+            try:
+                # 显式停止日志监听线程，防止 BrokenPipeError
+                # 放在 manager.shutdown 之前更安全，防止 manager 关闭管道导致 listener 崩溃
+                stopLogger() 
+            except Exception: 
+                pass
+
             if hasattr(self, "manager"):
                 try:
                     # 10.5 退出前强制保存 K 线记录，确保数据清洗成果持久化
@@ -1233,16 +1243,10 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                     self.realtime_service = None
                     self.global_dict = None
                     self.manager.shutdown()
-                    logger.info("SyncManager 已安全关闭")
-                except Exception as e:
-                    # Windows 下退出时常有管道异常，此处捕获不抛出
-                    logger.debug(f"SyncManager shutdown suppressed exception: {e}")
+                    # logger.info("SyncManager 已安全关闭") # Logger 已停，此处不再写日志
+                except Exception:
+                    pass
 
-            # 11. 最后销毁主窗口
-            try:
-                stopLogger() # 显式停止日志监听线程，防止 BrokenPipeError
-            except: 
-                pass
             self.destroy()
             logger.info("程序正常退出完成") # 此条可能不会显示，因为 Listener 已停止
             
@@ -6037,7 +6041,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
             try:
                 val = float(val_str)
                 # 调用 Strategy 添加
-                res = self.live_strategy.add_monitor(code, name, type_var.get(), val, tags="manual")
+                res = self.live_strategy.add_monitor(code, name, type_var.get(), val, tags="manual", create_price=curr_price)
                 toast_message(self, f"已添加监控: {name}")
                 dlg.destroy()
                 
@@ -6207,7 +6211,7 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
 
             def show_tags_detail(values):
                 code, name = values[0], values[1]
-                tags_info = values[6]
+                tags_info = values[len(values) -2]
 
                 top = tk.Toplevel(win)
                 top.title(f"{name}:{code} 详情")

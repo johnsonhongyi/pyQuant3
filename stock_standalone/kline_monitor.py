@@ -57,7 +57,7 @@ class KLineMonitor(tk.Toplevel):
         for sig in self.signal_types:
             lbl = tk.Label(self.status_frame, text=f"{sig}: 0", bg="#eee", cursor="hand2")
             lbl.pack(side="left", padx=5)
-            lbl.bind("<Button-1>", lambda e, s=sig: self.filter_by_signal(s))
+            lbl.bind("<Button-1>", lambda e=None, s=sig: self.filter_by_signal(s))
             self.signal_labels[sig] = lbl
 
         # 情绪标签保持不变
@@ -65,7 +65,7 @@ class KLineMonitor(tk.Toplevel):
         for emo, color in [("乐观", "green"), ("悲观", "red"), ("中性", "gray")]:
             lbl = tk.Label(self.status_frame, text=f"{emo}: 0", fg=color, cursor="hand2", bg="#eee")
             lbl.pack(side="left", padx=5)
-            lbl.bind("<Button-1>", lambda e, em=emo: self.filter_by_emotion(em))
+            lbl.bind("<Button-1>", lambda e=None, em=emo: self.filter_by_emotion(em))
             self.emotion_labels[emo] = lbl
 
         # 全局显示按钮
@@ -155,9 +155,9 @@ class KLineMonitor(tk.Toplevel):
         h3_values = self.history3() if callable(self.history3) else (self.history3 or [])
         self.search_combo3 = ttk.Combobox(self.status_frame, textvariable=self.search_var, values=h3_values, width=20)
         self.search_combo3.pack(side="left", padx=5, fill="x", expand=True)
-        self.search_combo3.bind("<Return>", lambda e: self.search_code_status(onclick=True))
+        self.search_combo3.bind("<Return>", lambda e=None: self.search_code_status(onclick=True))
         self.search_combo3.bind("<Button-3>", self.on_kline_monitor_right_click)
-        self.search_combo3.bind("<<ComboboxSelected>>", lambda e: self.search_code_status(onclick=True))
+        self.search_combo3.bind("<<ComboboxSelected>>", lambda e=None: self.search_code_status(onclick=True))
 
         self.search_btn = tk.Button(
             self.status_frame, text="查询", cursor="hand2", command=lambda: self.search_code_status(onclick=True)

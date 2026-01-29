@@ -2622,7 +2622,12 @@ class StockLiveStrategy:
                 created_time_str = data.get('created_time', '')
 
                 # 1. 尝试修复价格
-                if (not create_price or create_price <= 0) and created_time_str:
+                is_hot_concept = (data.get('rule_type_tag') == 'hot_concept') or ('Hot:' in data.get('tags', ''))
+                
+                # 策略：如果价格缺失、过低(可能为涨幅)或者是热点股，强制验证
+                needs_check = (not create_price or create_price <= 0) or (create_price < 35) or is_hot_concept
+                
+                if needs_check and created_time_str:
                     try:
                         dt_obj = None
                         date_formats = ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d %H:%M', '%Y-%m-%d %H', '%Y-%m-%d']
@@ -2652,10 +2657,14 @@ class StockLiveStrategy:
                                         found_price = float(df_hist.iloc[0].get('open', 0))
                                 
                                 if found_price > 0:
-                                    data['create_price'] = found_price
-                                    create_price = found_price
-                                    repair_count += 1
-                                    logger.info(f"Fixed price for {code}: {found_price}")
+                                    # 检测偏差：如果已有价格与历史价格偏差 > 10%，判定为错误并修复
+                                    deviation = abs(create_price - found_price) / found_price if create_price > 0 else 1.0
+                                    
+                                    if create_price <= 0 or deviation > 0.1 or is_hot_concept:
+                                        data['create_price'] = found_price
+                                        create_price = found_price
+                                        repair_count += 1
+                                        logger.debug(f"Fixed price for {code}: {create_price} (Original: {data.get('create_price', 0)}, Dev: {deviation:.2%})")
                     except Exception as e:
                         errors.append(f"{code} repair error: {e}")
 
