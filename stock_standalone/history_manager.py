@@ -179,13 +179,30 @@ class QueryHistoryManager:
         tv.heading(col, command=lambda: self.treeview_sort_column(tv, col, not reverse))
 
     def open_editor(self):
+        # 每次打开时对数据重新读取一次存档,保持最新的数据
+        will_show = True
+        if hasattr(self, "editor_frame") and self.editor_frame.winfo_ismapped():
+            will_show = False
+
+        if will_show:
+            try:
+                self.history1, self.history2, self.history3, self.history4 = self.load_search_history()
+                if self.current_key == "history1": self.current_history = self.history1
+                elif self.current_key == "history2": self.current_history = self.history2
+                elif self.current_key == "history3": self.current_history = self.history3
+                elif self.current_key == "history4": self.current_history = self.history4
+                logger.info("[open_editor] History reloaded from disk.")
+            except Exception as e:
+                logger.error(f"[open_editor] Failed to reload history: {e}")
+
         if not hasattr(self, "editor_frame"):
             self._build_ui()
             self.editor_frame.pack(fill="both", expand=True)
         else:
-            if self.editor_frame.winfo_ismapped():
+            if not will_show:
                 self.editor_frame.pack_forget()
             else:
+                self.refresh_tree()
                 self.editor_frame.pack(fill="both", expand=True)
 
     def save_search_history(self, confirm_threshold=10):
