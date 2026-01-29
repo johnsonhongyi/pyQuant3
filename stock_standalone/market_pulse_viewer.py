@@ -42,8 +42,7 @@ class MarketPulseViewer(tk.Toplevel, WindowMixin):
         
         self.monitor_app = monitor_app
         if getattr(monitor_app, 'selector', None) is None:
-            if getattr(monitor_app, 'selector', None):
-                self.monitor_app.open_stock_selection_window()
+            self.monitor_app.open_stock_selection_window()
         self.engine = DailyPulseEngine(getattr(monitor_app, 'selector', None))
         self.logger = logging.getLogger("MarketPulseViewer")
         
