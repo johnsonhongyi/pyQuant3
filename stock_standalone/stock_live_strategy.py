@@ -293,6 +293,7 @@ class StockLiveStrategy:
         self.shadow_engine: IntradayDecisionEngine
         self._sina_data = sina_data.Sina()
         self._voice = VoiceAnnouncer()
+        self.voice_announcer = self._voice # Alias for backward compatibility
         self.voice_enabled = voice_enabled
         self._monitored_stocks = {} 
         self._last_process_time = 0.0
@@ -519,7 +520,40 @@ class StockLiveStrategy:
             import json
             if os.path.exists(self.config_file):
                 with open(self.config_file, 'r', encoding='utf-8') as f:
-                    self._monitored_stocks = json.load(f)
+                    raw_data = json.load(f)
+                
+                # [Fix] Enforce Unique Code: Merge duplicates into single entry keyed by pure code
+                for key, data in raw_data.items():
+                    # Extract pure code
+                    pure_code = data.get('code') or key.split('_')[0]
+                    # Canonical Key is pure code
+                    c_key = pure_code
+                    
+                    if c_key not in self._monitored_stocks:
+                        self._monitored_stocks[c_key] = data
+                        self._monitored_stocks[c_key]['code'] = pure_code # Ensure code field
+                    else:
+                        # Merge into existing
+                        target = self._monitored_stocks[c_key]
+                        
+                        # 1. Merge Rules (Avoid duplicates)
+                        existing_rules = set()
+                        for r in target.get('rules', []):
+                            # (type, value) tuple for hashing
+                            r_val = float(r['value']) if isinstance(r['value'], (int, float, str)) else 0
+                            existing_rules.add((r['type'], f"{r_val:.4f}"))
+                            
+                        metrics_added = 0
+                        for r in data.get('rules', []):
+                            r_val = float(r['value']) if isinstance(r['value'], (int, float, str)) else 0
+                            sig = (r['type'], f"{r_val:.4f}")
+                            if sig not in existing_rules:
+                                target['rules'].append(r)
+                                existing_rules.add(sig)
+                                metrics_added += 1
+                        
+                        if metrics_added > 0:
+                            logger.info(f"Merged {metrics_added} rules from duplicate key '{key}' into '{c_key}'")
 
             # --- [新增] 从 voice_alerts 数据表加载备补数据 ---
             if hasattr(self, 'trading_logger'):
@@ -1118,10 +1152,27 @@ class StockLiveStrategy:
                     elif vol < 0.8:
                         score -= 0.1 # 地量减分
                     
-                    # 3. 趋势强度 (0 - 0.3)
+                    # 3. 趋势强度 (0 - 0.5)
                     win_count = int(row.get('win', 0)) # type: ignore
                     if win_count >= 3:
                         score += 0.2
+                    
+                    # [新增] 连阳趋势加分
+                    try:
+                        consecutive_positive = 0
+                        curr_price = float(row.get('close', 0))
+                        for i in range(1, 6):
+                            prev_p = float(row.get(f'lastp{i}d', 0))
+                            if prev_p > 0 and curr_price > prev_p:
+                                consecutive_positive += 1
+                                curr_price = prev_p
+                            else:
+                                break
+                        if consecutive_positive >= 3:
+                            score += 0.1
+                            if consecutive_positive >= 5:
+                                score += 0.1
+                    except: pass
                     
                     # 4. 价格稳定性 (0 - 0.2)
                     hmax = float(row.get('hmax', 0.0)) # type: ignore
@@ -3046,7 +3097,9 @@ class StockLiveStrategy:
         """触发报警"""
         logger.debug(f"🔔 ALERT [{resample}]: {message}")
 
-        # --- [NEW] 1. 推送到信号队列 (供可视化信号日志使用) ---
+        # --- [NEW] 1. 优先级与信号识别 (优先级逻辑增强) ---
+        is_priority = any(kw in message for kw in ["连阳", "主升", "突破", "热点", "核心"])
+        
         try:
             from signal_message_queue import SignalMessageQueue, SignalMessage
             now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -3056,9 +3109,11 @@ class StockLiveStrategy:
                 sig_type = "BREAKOUT_STAR"
             elif "形态" in message or "PATTERN" in message:
                 sig_type = "PATTERN"
+            elif is_priority:
+                sig_type = "MOMENTUM"
             
             SignalMessageQueue().push(SignalMessage(
-                priority=30 if sig_type == "BREAKOUT_STAR" else 50,
+                priority=10 if is_priority else (30 if sig_type == "BREAKOUT_STAR" else 50),
                 timestamp=now_str,
                 code=code,
                 name=name,
@@ -3099,10 +3154,17 @@ class StockLiveStrategy:
             
             # 3. 限制播报长度：最多 3 个关键要素
             concise_msg = "，".join(unique_parts[:3])
-            # 4. 组装最终文本：注意[买入]，[名称]，[核心内容]
-            speak_text = f"注意{action}，{name}，{concise_msg}"
+
+            # 4. [新增] 强势标签引导
+            leading_tag = ""
+            if "连阳" in message: leading_tag = "强势连阳，"
+            elif "热点" in message: leading_tag = "热点龙头，"
+            elif "主升" in message: leading_tag = "主升启动，"
+
+            # 组装最终文本
+            speak_text = f"注意{action}，{leading_tag}{name}，{concise_msg}"
             
-            self._voice.say(speak_text, code=code)
+            self._voice.announce(speak_text, code=code) # 使用 announce 支持优先级
 
         # 4. 记录交易执行 (用于回测优化和收益计算)
         if action in ("买入", "卖出", "ADD", "加仓") or "止" in action:
@@ -3356,30 +3418,45 @@ class StockLiveStrategy:
                 name = row['name']
                 current_price = float(row.get('price', 0))
                 
-                if code in self._monitored_stocks:
-                    stock_data = self._monitored_stocks[code]
-                    # 如果已有条目 价格缺失，则补齐（不算新增，算修补）
-                    if stock_data.get('create_price', 0) <= 0:
-                        stock_data['create_price'] = current_price
-                        repaired_names.append(name)
-                    else:
-                        skipped_names.append(name)
-                        continue # 严格跳过，不修改任何其他内容
+            if code in self._monitored_stocks:
+                stock_data = self._monitored_stocks[code]
+                # [Fix]: 如果已有条目，必须更新标签以确认为今日热点，防止"跟丢"
+                was_updated = False
+                if stock_data.get('create_price', 0) <= 0:
+                    stock_data['create_price'] = current_price
+                    was_updated = True
+                
+                # 更新标签为最新热点标签 (除非是手动股，不覆盖手动标)
+                # 这样依然保留原来的 rules，但刷新了身份
+                current_tag = str(stock_data.get('tags', ''))
+                if 'manual' not in current_tag and tag not in current_tag:
+                     stock_data['tags'] = tag  # 更新为最新的 auto_hotspot_loop
+                     was_updated = True
+                
+                # 更新 snapshot 中的 reason (最新的热点理由)
+                if 'snapshot' in stock_data:
+                    stock_data['snapshot']['reason'] = row.get('reason', '')
+                    stock_data['snapshot']['score'] = row.get('score', 0)
+                     
+                if was_updated:
+                    repaired_names.append(name)
                 else:
-                    added_names.append(name)
-                    self._monitored_stocks[code] = {
-                        "name": name,
-                        "rules": [{'type': 'price_up', 'value': current_price}], 
-                        "last_alert": 0,
-                        "created_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        "create_price": current_price,
-                        "tags": tag,
-                        "snapshot": {
-                            "score": row.get('score', 0),
-                            "reason": row.get('reason', ''),
-                            "category": row.get('category', '')
-                        }
+                    skipped_names.append(name)
+            else:
+                added_names.append(name)
+                self._monitored_stocks[code] = {
+                    "name": name,
+                    "rules": [{'type': 'price_up', 'value': current_price}], 
+                    "last_alert": 0,
+                    "created_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "create_price": current_price,
+                    "tags": tag,
+                    "snapshot": {
+                        "score": row.get('score', 0),
+                        "reason": row.get('reason', ''),
+                        "category": row.get('category', '')
                     }
+                }
                 
                 # 同步到数据库
                 if hasattr(self, 'trading_logger'):

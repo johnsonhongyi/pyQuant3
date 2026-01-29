@@ -902,7 +902,7 @@ def realtime_worker_process(task_queue, queue, stop_flag, log_level=None, debug_
         try:
             code = current_code
             # ⭐ 核心逻辑：如果是切股后的第一笔，或者处于交易时间，则执行抓取
-            is_work_time = (cct.get_work_time() and cct.get_now_time_int() > 923)
+            is_work_time = (cct.get_work_time() and cct.get_now_time_int() > 920)
             if is_work_time or debug_realtime or force_fetch:
                 with timed_ctx("realtime_worker_process", warn_ms=800):
                     tick_df = s.get_real_time_tick(code)
@@ -3231,6 +3231,7 @@ class MainWindow(QMainWindow, WindowMixin):
         if not code_input:
             return
         
+        self._search_code = code_input
         # 补齐 6 位代码
         code = code_input.zfill(6)
         
@@ -3252,12 +3253,12 @@ class MainWindow(QMainWindow, WindowMixin):
             self.load_stock_by_code(code)
             self.show_status_message(f"✅ 跳转到: {code}", 3000)
             # 清空输入框
-            self.code_search_input.clear()
+            # self.code_search_input.clear()
         else:
             # 未找到 - 尝试直接加载
             self.load_stock_by_code(code)
             self.show_status_message(f"⚠️ 表中未找到 {code}，尝试直接加载", 3000)
-            self.code_search_input.clear()
+            # self.code_search_input.clear()
 
     def _on_search_input_right_click(self, pos):
         """搜索框右键菜单：自动粘贴并提取6位数字"""
@@ -4366,6 +4367,48 @@ class MainWindow(QMainWindow, WindowMixin):
         
         # [FIX] 首次加载完成后，必须重置视野到最新的 K 线，否则可能仍停留在初始范围导致黑屏
         # self._reset_kline_view(self.day_df)
+
+    def _need_ghost_bar(self,day_df):
+
+        last_hist_date = str(day_df.index[-1]).split()[0]
+        today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
+        last_trade_date = cct.get_last_trade_date()
+
+        now = pd.Timestamp.now()
+        today = now.date()
+        last_hist_dt = pd.to_datetime(day_df.index[-1]).date()
+        is_trade_day = cct.get_trade_date_status()
+        # 是否在交易时段
+        t = now.time()
+        in_session = (
+            (t >= pd.to_datetime("09:30").time() and t <= pd.to_datetime("11:30").time()) or
+            (t >= pd.to_datetime("13:00").time() and t <= pd.to_datetime("15:00").time())
+        )
+        # ===============================
+        # ① 历史数据是否缺失最近交易日
+        # ===============================
+        missing_last_trade_bar = last_hist_date < last_trade_date
+        if missing_last_trade_bar:
+            logger.error(
+                f"[KLINE DATA MISSING] Last hist date {last_hist_date} "
+                f"< last trade date {last_trade_date} — 日线缺失最近交易日数据"
+            )
+
+        # ===============================
+        # ② 是否需要画“临时K线”
+        # ===============================
+        # 两种情况要画：
+        # A. 正常盘中今日K
+        # B. 历史数据断档，需要补偿K
+
+        need_ghost_bar = (
+            (is_trade_day and in_session and last_hist_dt < today)  # 正常今日实时K
+            or
+            missing_last_trade_bar  # 数据缺失补偿K
+        )
+
+        # free_time_resample = cct.get_work_time() and self.resample not in ['d']
+        return need_ghost_bar 
 
     def on_realtime_update(self, code, tick_df, today_bar):
         """处理实时分时与幽灵 K 线更新"""
@@ -7012,6 +7055,7 @@ class MainWindow(QMainWindow, WindowMixin):
             last_hist_date = str(day_df.index[-1]).split()[0]
             today_str = pd.Timestamp.now().strftime('%Y-%m-%d')
             last_trade_date = cct.get_last_trade_date()
+
             # [FIX] strict check for trading day
             # If not a trading day, do not draw ghost candle
             # is_trade_day = cct.get_trade_date_status()
@@ -7021,43 +7065,7 @@ class MainWindow(QMainWindow, WindowMixin):
             # last_trade_dt= pd.to_datetime(cct.get_last_trade_date()).date()
             # need_ghost_bar = last_hist_dt < last_trade_dt
 
-
-            now = pd.Timestamp.now()
-            today = now.date()
-            last_hist_dt = pd.to_datetime(day_df.index[-1]).date()
-            is_trade_day = cct.get_trade_date_status()
-            # 是否在交易时段
-            t = now.time()
-            in_session = (
-                (t >= pd.to_datetime("09:30").time() and t <= pd.to_datetime("11:30").time()) or
-                (t >= pd.to_datetime("13:00").time() and t <= pd.to_datetime("15:00").time())
-            )
-
-
-            # ===============================
-            # ① 历史数据是否缺失最近交易日
-            # ===============================
-            missing_last_trade_bar = last_hist_date < last_trade_date
-            if missing_last_trade_bar:
-                logger.error(
-                    f"[KLINE DATA MISSING] Last hist date {last_hist_date} "
-                    f"< last trade date {last_trade_date} — 日线缺失最近交易日数据"
-                )
-
-            # need_ghost_bar = is_trade_day and in_session and last_hist_dt < today
-            # ===============================
-            # ② 是否需要画“临时K线”
-            # ===============================
-            # 两种情况要画：
-            # A. 正常盘中今日K
-            # B. 历史数据断档，需要补偿K
-
-            need_ghost_bar = (
-                (is_trade_day and in_session and last_hist_dt < today)  # 正常今日实时K
-                or
-                missing_last_trade_bar  # 数据缺失补偿K
-            )
-            # if not is_trade_day or last_trade_date == last_hist_date:
+            need_ghost_bar = self._need_ghost_bar(day_df)
             if not need_ghost_bar:
                 if hasattr(self, 'ghost_candle'):
                     self.kline_plot.removeItem(self.ghost_candle)
@@ -7726,6 +7734,8 @@ class MainWindow(QMainWindow, WindowMixin):
 
         except Exception as e:
             logger.error(f"Realtime strategy evaluation failed: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     def _run_strategy_simulation_new50(self, code, day_df, n_rows=50) -> list[SignalPoint]:
