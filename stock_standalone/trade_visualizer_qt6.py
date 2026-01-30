@@ -5607,8 +5607,15 @@ class MainWindow(QMainWindow, WindowMixin):
                         item.pnl_percent = (curr_price - item.add_price) / item.add_price * 100
                 
                 # 检查 last_action 列 (策略信号)
-                action = row.get('last_action', '')
-                if action and ('买' in str(action) or '卖' in str(action)):
+                try:
+                    action_val = row.get('last_action', '')
+                    if isinstance(action_val, pd.Series):
+                        action_val = action_val.iloc[0] if len(action_val) > 0 else ''
+                    action = str(action_val) if pd.notnull(action_val) else ''
+                except (TypeError, ValueError, IndexError):
+                    action = ''
+                
+                if action and ('买' in action or '卖' in action):
                     # 检查是否是新信号
                     last_val = self._alerted_signals.get(item.code, '')
                     if str(action) != last_val:

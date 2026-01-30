@@ -4980,6 +4980,11 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
         if not target_code or not getattr(self, 'live_strategy', None):
             return
 
+        # ✅ [新增] 如果是已经显式删除的监控，则不再执行后续的 snooze 等逻辑
+        if getattr(win, '_is_deleted', False):
+            logger.debug(f"Monitor for {target_code} was explicitly deleted, skipping snooze/cleanup.")
+            return
+
         # 💥 联动核心 1：只要窗口关闭，就试强制停止播报。
         # 如果是手动点击(is_manual)，则执行全局停止 (key=None)，彻底斩断声音；
         # 如果是自动超时关闭，由于用户未干预，仅尝试停止匹配该代码的播报。
@@ -5513,7 +5518,9 @@ class StockMonitorApp(DPIMixin, WindowMixin, TreeviewMixin, tk.Tk):
                             pass
 
                         btn_del.config(text="🗑️已删除", state="disabled")
-                        win.after(50, lambda: self._close_alert(win, is_manual=True))
+                        # ✅ [新增] 标记为已删除，防止 _close_alert 中的 snooze 逻辑生效
+                        win._is_deleted = True 
+                        win.after(1000, lambda: self._close_alert(win, is_manual=True))
                     except Exception as e:
                         logger.error(f"Remove monitor error: {e}")
             

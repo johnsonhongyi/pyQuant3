@@ -651,15 +651,19 @@ class TradingLogger:
         conn.close()
         return rows
 
-    def remove_voice_alert_config(self, code: str, resample: str = 'd'):
+    def remove_voice_alert_config(self, code: str, resample: Optional[str] = None):
         """从数据库物理删除语音预警配置"""
         try:
             conn = sqlite3.connect(self.db_path)
             cur = conn.cursor()
-            cur.execute("DELETE FROM voice_alerts WHERE code = ? AND resample = ?", (code, resample))
+            if resample is None:
+                cur.execute("DELETE FROM voice_alerts WHERE code = ?", (code,))
+                logger.info(f"DB: Removed ALL voice alert configs for {code}")
+            else:
+                cur.execute("DELETE FROM voice_alerts WHERE code = ? AND resample = ?", (code, resample))
+                logger.info(f"DB: Removed voice alert config for {code}_{resample}")
             conn.commit()
             conn.close()
-            logger.info(f"DB: Removed voice alert config for {code}_{resample}")
         except Exception as e:
             logger.error(f"Failed to remove voice alert config: {e}")
 

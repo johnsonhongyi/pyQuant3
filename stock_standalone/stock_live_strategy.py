@@ -2751,9 +2751,10 @@ class StockLiveStrategy:
                                 code=pure_code, 
                                 sell_price=0, 
                                 sell_reason="手动移除监控(不再跟踪)",
-                                sell_amount=0 # 0 表示仅修改状态
+                                sell_amount=0, # 0 表示仅修改状态
+                                resample=trade.get('resample', 'd') # 👈 注入正确的周期，确保数据库更新生效
                             )
-                        logger.info(f"Closed trade record for {pure_code} to prevent auto-recovery")
+                        logger.info(f"Closed {len(open_trades)} trade records for {pure_code} to prevent auto-recovery")
                 except Exception as e:
                     logger.error(f"Failed to close trade for {pure_code}: {e}")
             
@@ -2787,10 +2788,12 @@ class StockLiveStrategy:
             open_trades = [t for t in trades if str(t['code']).zfill(6) == str(code).zfill(6) and t['status'] == 'OPEN' and t.get('buy_amount', 0) > 0]
             
             if open_trades:
-                stock_name = name or open_trades[0].get('name', 'Unknown')
-                # 执行卖出记录
-                self.trading_logger.record_trade(code, stock_name, "卖出", price, 0, reason="Manual/Auto Close")
-                logger.info(f"Auto-closed position for {code} ({stock_name}) at {price}")
+                for t in open_trades:
+                    t_resample = t.get('resample', 'd')
+                    stock_name = name or t.get('name', 'Unknown')
+                    # 执行卖出记录，使用对应的周期
+                    self.trading_logger.record_trade(code, stock_name, "卖出", price, 0, reason="Manual/Auto Close", resample=t_resample)
+                    logger.info(f"Auto-closed position for {code} ({stock_name}) at {price} [Resample: {t_resample}]")
                 return True
         except Exception as e:
             logger.error(f"Error in close_position_if_any for {code}: {e}")
